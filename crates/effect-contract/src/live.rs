@@ -1958,10 +1958,11 @@ impl BypassShunt {
     ///
     /// So at zero latency a non-bypassed block's capture is provably dead work — two whole-block
     /// `copy_from_slice`s whose result no reader can observe — and a caller that knows it is not
-    /// bypassed may skip it. At nonzero latency it may not: the staging buffer *is* the line's
-    /// input, so skipping the copy would starve the line and the first bypassed block would emit
-    /// stale samples. This predicate is the exact boundary between those two cases, and it is
-    /// fixed at preparation rather than per block.
+    /// bypassed may skip it. At nonzero latency the line must still be fed, or the first bypassed
+    /// block would emit stale samples; such a block feeds it with [`feed_line`](Self::feed_line),
+    /// which stores the line's input without the dry staging (issue #1763). This predicate is the
+    /// exact boundary between those two cases, and it is fixed at preparation rather than per
+    /// block.
     #[must_use]
     pub const fn feeds_line(&self) -> bool {
         !self.line_left.is_empty()
@@ -1982,9 +1983,11 @@ impl BypassShunt {
     ///
     /// Called on every block whenever [`feeds_line`](Self::feeds_line) is true, bypassed or not:
     /// the line has to stay fed so that enabling bypass mid-stream produces the correctly delayed
-    /// dry signal on its very first block rather than `latency` samples of stale zeros. When
-    /// `feeds_line` is false there is no line, and a caller that is not bypassed this block may
-    /// skip the call entirely (#163 phase 4 item 4).
+    /// dry signal on its very first block rather than `latency` samples of stale zeros. A caller
+    /// that is not bypassed this block may feed the line with [`feed_line`](Self::feed_line)
+    /// instead, which leaves the line and its cursor exactly as this does (issue #1763). When
+    /// `feeds_line` is false there is no line, and such a caller may skip the call entirely (#163
+    /// phase 4 item 4).
     pub fn capture(&mut self, left: &[f32], right: &[f32]) {
         let frames = left.len().min(self.dry_left.len()).min(right.len());
         self.dry_left[..frames].copy_from_slice(&left[..frames]);
@@ -2016,6 +2019,42 @@ impl BypassShunt {
     }
 
     // REALTIME_POLICY_BEGIN
+    /// Advance the latency line by this block's input without staging the dry block: the line
+    /// half of [`capture`](Self::capture), for a block no lane reads dry (issue #1763).
+    ///
+    /// The exchange in `capture` is a swap, so the words it leaves in the line are the input
+    /// words and nothing else: input word `j` lands at `(cursor + j) % length`, and a block longer
+    /// than the line writes a position more than once, so the newest `length` words survive. This
+    /// stores exactly those words at exactly those positions and leaves the cursor where
+    /// `capture` leaves it, so the line and the cursor equal `capture`'s bit for bit. It does not
+    /// fill `dry_*` with the line's old words, and nothing reads them: `dry_*` is per-block
+    /// scratch, read only by [`apply`](Self::apply), [`dry`](Self::dry) and the crossfades later in
+    /// the same block, and only for a lane that is bypassed or ramping; a block with such a lane
+    /// calls `capture`. A shunt without a line has nothing to feed.
+    pub fn feed_line(&mut self, left: &[f32], right: &[f32]) {
+        let length = self.line_left.len();
+        if length == 0 {
+            return;
+        }
+        let frames = left.len().min(self.dry_left.len()).min(right.len());
+        let skipped = frames.saturating_sub(length);
+        let words = frames - skipped;
+        let start = (self.cursor + skipped) % length;
+        let first = core::cmp::min(words, length - start);
+        let (left, right) = (&left[skipped..frames], &right[skipped..frames]);
+        self.line_left[start..start + first].copy_from_slice(&left[..first]);
+        self.line_right[start..start + first].copy_from_slice(&right[..first]);
+        let rest = words - first;
+        self.line_left[..rest].copy_from_slice(&left[first..]);
+        self.line_right[..rest].copy_from_slice(&right[first..]);
+        let advanced = start + words;
+        self.cursor = if advanced >= length {
+            advanced - length
+        } else {
+            advanced
+        };
+    }
+
     /// Copy lane `predecessor_lane` of `predecessor`'s interleaved latency line into lane `lane`
     /// of this one, at a plan swap (#1280 D5). Both shunts are the lines of an AoSoA bank, of
     /// `predecessor_lanes` and `lanes` lanes, and one lane's samples are every `lanes`-th word of

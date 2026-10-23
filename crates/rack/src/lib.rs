@@ -1372,6 +1372,14 @@ pub struct LiveControlEffectBankStage {
     /// [`LiveControlEffectBankStage::drain`], read by the process body that follows it in the same
     /// block.
     staged_spans: usize,
+    /// What this block's drain found over the lanes, read by the process body that follows it in
+    /// the same block (issue #1763).
+    walk: LaneWalk,
+    /// The snapshot publication of the last drain that read every lane and found the bank quiet
+    /// ([`LaneWalk::quiet`]), or `None`. A drain under the same publication skips the lane walk:
+    /// see [`LiveControlEffectBankStage::drain`]. Every method that changes a lane outside the
+    /// drain clears it.
+    quiet_at: Option<u64>,
     /// `Observe` records this slot had no capacity to apply. Zero by construction.
     unbound: u64,
     /// One bit per lane, set when the lane's last restored payload had left and right sections that
@@ -1510,6 +1518,8 @@ impl LiveControlEffectBankStage {
             observations: observed.then(|| observations.into_boxed_slice()),
             samples,
             staged_spans: 0,
+            walk: LaneWalk::default(),
+            quiet_at: None,
             unbound: 0,
             unrestored: 0,
             layout,
@@ -1618,6 +1628,7 @@ impl LiveControlEffectBankStage {
             self.carry_refused = self.carry_refused.saturating_add(1);
             return false;
         };
+        self.quiet_at = None;
         if let (Some(into), Some(from)) = (
             self.lanes.get_mut(lane).and_then(Option::as_mut),
             predecessor
@@ -1729,6 +1740,7 @@ impl LiveControlEffectBankStage {
             self.carry_refused = self.carry_refused.saturating_add(1);
             return false;
         };
+        self.quiet_at = None;
         if let Some(into) = self.lanes.get_mut(lane).and_then(Option::as_mut) {
             let carried = into.carry_from(from.control);
             debug_assert!(carried, "a checked control lane carries");
@@ -1809,6 +1821,7 @@ impl LiveControlEffectBankStage {
     /// Allocate the carried slots of lane `lane`, the successor lane of a plan swap's move. Off the
     /// render thread; a lane that is absent or has no cells takes none (#1633 D1).
     pub fn install_carry_slots(&mut self, lane: usize) {
+        self.quiet_at = None;
         if let Some(control) = self.lanes.get_mut(lane).and_then(Option::as_mut) {
             control.install_carry_slots();
         }
@@ -1871,6 +1884,26 @@ impl LiveControlEffectBankStage {
                 observation.disarm_all();
             }
         }
+    }
+}
+
+/// What one drain's cell walk found over a bank's lanes, after each lane staged (issue #1763): the
+/// process body that follows it in the same block reads it instead of walking the lanes again.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct LaneWalk {
+    /// Some lane staged a prepared target.
+    targets: bool,
+    /// Some lane reads the dry block: it is bypassed or its crossfade is running.
+    needs_dry: bool,
+    /// Some lane's bypass crossfade is running.
+    ramping: bool,
+}
+
+impl LaneWalk {
+    /// No target to apply and no crossfade to advance: a second walk under the same snapshot
+    /// would find the same lanes and leave them as they are.
+    const fn quiet(self) -> bool {
+        !self.targets && !self.ramping
     }
 }
 
@@ -2005,6 +2038,8 @@ impl BankStage for LiveControlEffectBankStage {
         }
         let (version, sizes) = (self.layout.state_layout_version, self.layout.state_sizes);
         let lanes = self.width.lanes() as usize;
+        // A moved lane brings the state its own bank's drain left: the next drain reads it.
+        self.quiet_at = None;
         match peer {
             LanePeerMut::Same(other_lane) => {
                 if lane == other_lane {
@@ -2067,6 +2102,7 @@ impl BankStage for LiveControlEffectBankStage {
                     return false;
                 }
                 core::mem::swap(&mut self.lanes[lane], &mut other.lanes[other_lane]);
+                other.quiet_at = None;
                 if let (Some(own), Some(theirs)) = (
                     self.observe_queue_position(lane),
                     other.observe_queue_position(other_lane),
@@ -2169,21 +2205,24 @@ impl LiveControlEffectBankStage {
     /// the loop that holds it, and hands each record to the slot's observation lanes by the lane's
     /// index. The loop that stages and the loop that pops are not one loop because a queue drain
     /// inside a loop that also calls a method of the lane would need the lane named in the drain.
+    ///
+    /// # The quiet bank (issue #1763)
+    ///
+    /// The first loop is skipped when the last drain that ran it found the bank quiet under the
+    /// same snapshot publication, `S`. That skip is exact, by the gate's own guarantee: every write
+    /// of a publication at or below `S` is stored and marked before that publication, so the
+    /// drain that read under `S` applied it, and no later write can carry a publication at or
+    /// below `S`. So a second read under `S` applies nothing, and a write above `S` waits in its
+    /// dirty word, or in the deferred mask the earlier read left, for the first drain under a newer
+    /// snapshot, which runs the loop. A block's watermark covers `S` either way. Quiet means the
+    /// last loop staged no span and no target and left no lane's bypass crossfade running, so the
+    /// skipped loop would have left exactly what is there: an empty partition, empty target
+    /// prefixes, and the same [`LaneWalk`]. [`LiveSnapshot::ALL`] is not a publication and never
+    /// skips. The observation queues are FIFOs outside the gate, so the second loop always runs.
     fn drain(&mut self, first_sample: u64, snapshot: LiveSnapshot) -> Result<(), RenderError> {
-        let mut packed = 0_usize;
-        self.offsets[0] = 0;
-        for (lane, channel) in self.lanes.iter_mut().enumerate() {
-            if let Some(channel) = channel.as_mut() {
-                let staged = channel.stage(&mut self.staging, first_sample, snapshot);
-                // Packed at this lane's own offset, immediately: that offset is what makes the
-                // window reusable and what gives the lane its private partition of `packed`.
-                self.packed[packed..packed + staged.staged]
-                    .copy_from_slice(&self.staging[..staged.staged]);
-                packed += staged.staged;
-            }
-            self.offsets[lane + 1] = packed as u32;
+        if snapshot == LiveSnapshot::ALL || self.quiet_at != Some(snapshot.publication()) {
+            self.read_cells(first_sample, snapshot);
         }
-        self.staged_spans = packed;
         let mut observations = self.observations.as_deref_mut();
         let mut unbound = 0_u64;
         for (index, queue) in self.observe_queues.iter_mut() {
@@ -2206,6 +2245,31 @@ impl LiveControlEffectBankStage {
         }
         self.unbound = self.unbound.saturating_add(unbound);
         Ok(())
+    }
+
+    /// The drain's first loop: every lane's cells read under `snapshot`, its spans packed at its
+    /// own offset, and the bank's [`LaneWalk`] taken after each lane staged.
+    fn read_cells(&mut self, first_sample: u64, snapshot: LiveSnapshot) {
+        let mut packed = 0_usize;
+        let mut walk = LaneWalk::default();
+        self.offsets[0] = 0;
+        for (lane, channel) in self.lanes.iter_mut().enumerate() {
+            if let Some(channel) = channel.as_mut() {
+                let staged = channel.stage(&mut self.staging, first_sample, snapshot);
+                // Packed at this lane's own offset, immediately: that offset is what makes the
+                // window reusable and what gives the lane its private partition of `packed`.
+                self.packed[packed..packed + staged.staged]
+                    .copy_from_slice(&self.staging[..staged.staged]);
+                packed += staged.staged;
+                walk.targets |= staged.staged_targets != 0;
+                walk.needs_dry |= channel.needs_dry();
+                walk.ramping |= channel.bypass_ramping();
+            }
+            self.offsets[lane + 1] = packed as u32;
+        }
+        self.staged_spans = packed;
+        self.walk = walk;
+        self.quiet_at = (packed == 0 && walk.quiet()).then_some(snapshot.publication());
     }
 
     /// The parts of lane `lane`'s pending-`Observe` drain a plan swap's carry needs (#1280 D3):
@@ -2320,15 +2384,18 @@ impl LiveControlEffectBankStage {
         // The chain has already performed any collapsed-to-dual state restoration before it
         // dispatches this stage. Apply each lane's staged target prefix at that boundary;
         // applying in `begin_block` would let desymmetrization copy the old right state over a new
-        // right-lane target.
-        for lane in 0..lane_count {
-            let Some(channel) = self.lanes[lane].as_ref() else {
-                continue;
-            };
-            for target in channel.prepared_targets() {
-                self.processor
-                    .apply_prepared_target_lane(lane, target)
-                    .map_err(|_| RenderError::InvalidEnvelope)?;
+        // right-lane target. A drain that staged no target leaves every lane's prefix empty
+        // (issue #1763).
+        if self.walk.targets {
+            for lane in 0..lane_count {
+                let Some(channel) = self.lanes[lane].as_ref() else {
+                    continue;
+                };
+                for target in channel.prepared_targets() {
+                    self.processor
+                        .apply_prepared_target_lane(lane, target)
+                        .map_err(|_| RenderError::InvalidEnvelope)?;
+                }
             }
         }
         // Issue #163 phase 4 item 4: which lanes, if any, are bypassed this block. Decided here
@@ -2340,9 +2407,10 @@ impl LiveControlEffectBankStage {
         // lane is bypassed. An eight-lane cohort with one live-control-driven lane and nothing
         // bypassed was paying a `quantum * lanes` two-plane copy every block for a dry block no
         // reader could observe.
-        let any_bypassed = self.lanes[..lane_count]
-            .iter()
-            .any(|lane| lane.as_ref().is_some_and(EffectControlLane::needs_dry));
+        //
+        // The drain took the disjunction after each lane staged, and nothing changes a lane
+        // between the drain and this body (issue #1763).
+        let any_bypassed = self.walk.needs_dry;
         // 2. Capture the dry block before the bank touches it. Skippable exactly when no lane
         //    will read it back and there is no latency line to keep fed; `dry_*` never crosses a
         //    block boundary, so the skip moves no rendered bit.
@@ -2367,15 +2435,15 @@ impl LiveControlEffectBankStage {
         // the disengage boundary would still be wrong; and it would leave a read of `block.right`
         // alive on the collapsed path, which is the exact class of defect this design excludes by
         // construction rather than by argument. **A collapsed block reads no right plane at all.**
-        if let Some(shunt) = self
-            .shunt
-            .as_mut()
-            .filter(|shunt| any_bypassed || shunt.feeds_line())
-        {
-            if MONO {
-                shunt.capture(block.left, block.left);
+        //
+        // A block no lane reads dry feeds the line without the dry staging (issue #1763): the line
+        // and its cursor end as `capture` leaves them, and the staging has no reader.
+        if let Some(shunt) = self.shunt.as_mut() {
+            let right = if MONO { &*block.left } else { &*block.right };
+            if any_bypassed {
+                shunt.capture(block.left, right);
             } else {
-                shunt.capture(block.left, block.right);
+                shunt.feed_line(block.left, right);
             }
         }
         let frames = block.frames;
@@ -2481,8 +2549,11 @@ impl LiveControlEffectBankStage {
                 shunt.crossfade_bank::<L>(block.left, block.right, frames, &self.crossfade);
             });
         }
-        for channel in self.lanes[..lane_count].iter_mut().flatten() {
-            channel.advance_bypass_mix(block.frames);
+        // A lane whose crossfade is settled does not advance (issue #1763).
+        if self.walk.ramping {
+            for channel in self.lanes[..lane_count].iter_mut().flatten() {
+                channel.advance_bypass_mix(block.frames);
+            }
         }
         Ok(())
     }

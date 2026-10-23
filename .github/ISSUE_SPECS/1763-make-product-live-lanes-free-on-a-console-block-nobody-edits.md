@@ -76,3 +76,52 @@ A test is owed only for a new mechanism: it turns red when the skipped work was 
      and the same for the strip input, fader and matrix banks if their walk is measurable.
   Reading the delayed dry from the limiter's own history would need an effect-contract addition and
   a root ruling; it is not in scope.
+
+## Step 2, attempt 1 (2026-10-23)
+
+- Mechanism 1: `BypassShunt::feed_line` (`crates/effect-contract/src/live.rs`) stores a block's
+  input in the latency line, with no dry staging, at the positions and cursor the exchange in
+  `capture` leaves (the newest `length` words when the block is longer than the line). The live
+  effect bank stage calls it on a block no lane reads dry, and `capture` otherwise; a collapsed
+  block feeds `block.left` into both lines. The per-node path still calls `capture`.
+- Mechanism 2: the live effect bank stage's drain (`crates/rack/src/lib.rs`) skips its per-lane
+  cell walk when the last walk ran under the same snapshot publication and found the bank quiet
+  (no span, no prepared target, no running crossfade). Exact by the gate's guarantee: every write
+  of a publication at or below `S` is stored and marked before that publication, so the walk under
+  `S` applied it, and a write above `S` waits in its dirty word or the deferred mask for the first
+  drain under a newer snapshot. `LiveSnapshot::ALL` never skips. The walk records three verdicts
+  (`LaneWalk`: targets, needs_dry, ramping) and the process body reads them instead of walking
+  the lanes again. A lane swap and the carry paths clear the quiet mark. The observation queues are
+  still drained every block: the push is the acknowledgement (#1584 D6a), and no publication
+  follows it, so a skipped queue drain could hold an acknowledged subscription indefinitely.
+- The strip input, fader and matrix banks (`crates/builtins-compiler`) are not changed.
+- Class A: the 52 digests of the console benchmark (every session row, every product-lane arm,
+  both fader-ride arms, the automation, hoist, meter, observation, placement and mono arms) are
+  equal to the base 2724b2f58 in both measured rounds.
+- Descriptive run (`run-console-benchmark.sh --step opt5-1763` at 45864d7a7, one warmup and two
+  rounds, exclusive lock, `MISO_ENGINE_BENCH_ALLOW_UNCONTROLLED=1`, loadavg 3.56 at the start):
+  `artifacts/steps/opt5-1763/`. All 74 records validated.
+
+| Arm (p50 per block, us) | Round 1 | delta | Round 2 | delta |
+|---|---|---|---|---|
+| `sixty_four_track_console` (no lanes) | 102.25 | | 102.97 | |
+| fader/matrix | 103.70 | +1.45 | 103.05 | +0.08 |
+| fader/matrix + strip input | 103.58 | +1.33 | 103.83 | +0.86 |
+| effects only | 104.01 | +1.76 | 103.87 | +0.90 |
+| product set (all three) | 105.30 | +3.06 (+2.99 %) | 104.78 | +1.81 (+1.76 %) |
+| `sixty_four_track_app_shape` (no lanes) | 80.62 | | 80.19 | |
+| app shape, product set | 82.99 | +2.36 (+2.93 %) | 81.95 | +1.75 (+2.19 %) |
+
+- Gate 4 is not met in round 1 for either row, and in round 2 for the app shape. The effect-lane
+  cost fell from +7.6 / +8.0 us to +1.8 / +0.9 us; the app shape did not move (+2.1 / +1.9 us
+  before). Remaining gap, named reasons, not split by measurement (no profile is possible on this
+  host): (1) the strip input, fader and matrix banks' per-lane dirty-word walk, untouched, which
+  step 1 measured at +0.75 / +0.93 us; (2) the observation-queue drain, one producer-cursor load
+  per lane per block, which cannot skip (above); (3) noise: the no-lane console row moved 0.72 us
+  between the two rounds on a loaded host. The next candidate is (1), in
+  `crates/builtins-compiler/src/lib.rs`, shared with #1765 and not started without root.
+- The app shape did not move: +2.36 / +1.75 us after, against +2.11 / +1.89 us before. So step 1's
+  estimate of about 1.2 us for its EQ and compressor lanes was not the cell walk, and the reasons
+  above are plausible for the app shape but not measured.
+- Verifier follow-up: the quiet-slot test (`rack/tests/lane_swap.rs`) gains a prepared-target step;
+  the quiet mark without its `targets` term turns it red on the first quiet block after the target.
