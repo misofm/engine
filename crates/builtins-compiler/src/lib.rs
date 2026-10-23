@@ -4361,6 +4361,44 @@ const fn lane_selected(lanes: u8, lane: usize) -> bool {
     debug_assert!(lane < MAXIMUM_BANK_LANES);
     (lanes >> (lane % MAXIMUM_BANK_LANES)) & 1 != 0
 }
+
+/// Whether [`exchange_lane_slots`] would exchange slot `lane` of `own` with slot `peer_lane` of
+/// `peer` (`None`: of `own`): both are in range.
+fn lane_slots_fit<T>(own: &[T], lane: usize, peer: Option<&[T]>, peer_lane: usize) -> bool {
+    lane < own.len() && peer_lane < peer.unwrap_or(own).len()
+}
+
+/// Exchange slot `lane` of `own` with slot `peer_lane` of `peer` (`None`: of `own`), issue
+/// #1765. Returns `false`, changing nothing, when [`lane_slots_fit`] does not hold. Moves the two
+/// values; allocation-free.
+fn exchange_lane_slots<T>(
+    own: &mut [T],
+    lane: usize,
+    peer: Option<&mut [T]>,
+    peer_lane: usize,
+) -> bool {
+    match peer {
+        None if lane == peer_lane => lane < own.len(),
+        None => {
+            let (low, high) = (lane.min(peer_lane), lane.max(peer_lane));
+            let Some((head, tail)) = own.split_at_mut_checked(high) else {
+                return false;
+            };
+            let (Some(first), Some(second)) = (head.get_mut(low), tail.first_mut()) else {
+                return false;
+            };
+            core::mem::swap(first, second);
+            true
+        }
+        Some(peer) => match (own.get_mut(lane), peer.get_mut(peer_lane)) {
+            (Some(first), Some(second)) => {
+                core::mem::swap(first, second);
+                true
+            }
+            _ => false,
+        },
+    }
+}
 // REALTIME_POLICY_END
 
 /// The mask [`GraphPreparedBuiltinBankProcessor::live_lanes`] reports: bit `n` is set when lane
@@ -4445,6 +4483,21 @@ impl BuiltinBankProcessor {
             first_error = first_error.and(drained);
         }
         first_error.map(|()| refused)
+    }
+
+    /// Whether [`GraphPreparedBuiltinBankProcessor::swap_builtin_lanes`] would exchange lane
+    /// `lane` with `peer`'s lane `peer_lane` (`None`: this bank's), issue #1765: the banks' own
+    /// check, and both lanes hold a reader slot and a symmetry term.
+    fn can_swap_with(&self, lane: usize, peer: Option<&Self>, peer_lane: usize) -> bool {
+        self.bank
+            .can_swap_lanes(lane, peer.map(|peer| &peer.bank), peer_lane)
+            && lane_slots_fit(
+                &self.controls,
+                lane,
+                peer.map(|peer| &*peer.controls),
+                peer_lane,
+            )
+            && lane_slots_fit(&self.live, lane, peer.map(|peer| &peer.live[..]), peer_lane)
     }
     // REALTIME_POLICY_END
 }
@@ -4554,6 +4607,64 @@ impl GraphPreparedBuiltinBankProcessor for BuiltinBankProcessor {
         // produced; were it, it is reported as one refused value, never as none.
         self.drain_controls(LiveSnapshot::ALL, lanes, true)
             .unwrap_or(1)
+    }
+
+    fn can_swap_builtin_lanes(
+        &self,
+        lane: usize,
+        peer: Option<&dyn GraphPreparedBuiltinBankProcessor>,
+        peer_lane: usize,
+    ) -> bool {
+        match peer {
+            None => self.can_swap_with(lane, None, peer_lane),
+            Some(peer) => peer
+                .as_any()
+                .downcast_ref::<Self>()
+                .is_some_and(|peer| self.can_swap_with(lane, Some(peer), peer_lane)),
+        }
+    }
+
+    /// Issue #1765: the lane's input-section state and prepared endpoint
+    /// ([`BuiltinInputBank::swap_lanes`]), its cell reader (cells, dirty bits, carry marks and
+    /// superseded counter: the strip's live controls move with the strip) and its live symmetry
+    /// terms. The block counters are the bank's and stay.
+    fn swap_builtin_lanes(
+        &mut self,
+        lane: usize,
+        peer: Option<&mut dyn GraphPreparedBuiltinBankProcessor>,
+        peer_lane: usize,
+    ) -> bool {
+        let other = match peer {
+            None => None,
+            Some(peer) => match peer.as_any_mut().and_then(|any| any.downcast_mut::<Self>()) {
+                Some(other) => Some(other),
+                None => return false,
+            },
+        };
+        if !self.can_swap_with(lane, other.as_deref(), peer_lane) {
+            return false;
+        }
+        let swapped = match other {
+            None => {
+                self.bank.swap_lanes(lane, None, peer_lane).is_ok()
+                    && exchange_lane_slots(&mut self.controls, lane, None, peer_lane)
+                    && exchange_lane_slots(&mut self.live, lane, None, peer_lane)
+            }
+            Some(other) => {
+                self.bank
+                    .swap_lanes(lane, Some(&mut other.bank), peer_lane)
+                    .is_ok()
+                    && exchange_lane_slots(
+                        &mut self.controls,
+                        lane,
+                        Some(&mut other.controls),
+                        peer_lane,
+                    )
+                    && exchange_lane_slots(&mut self.live, lane, Some(&mut other.live), peer_lane)
+            }
+        };
+        debug_assert!(swapped, "a checked input lane swaps");
+        swapped
     }
     // REALTIME_POLICY_END
 
@@ -4863,6 +4974,45 @@ impl FaderBankProcessor {
         }
         adopted
     }
+
+    /// Whether [`GraphPreparedBuiltinBankProcessor::swap_builtin_lanes`] would exchange lane
+    /// `lane` with `peer`'s lane `peer_lane` (`None`: this bank's), issue #1765: the banks' own
+    /// check, both lanes hold a reader slot, and the stored automation fits
+    /// ([`Self::automation_swap_fits`]).
+    fn can_swap_with(&self, lane: usize, peer: Option<&Self>, peer_lane: usize) -> bool {
+        self.bank
+            .can_swap_lanes(lane, peer.map(|peer| &peer.bank), peer_lane)
+            && lane_slots_fit(
+                &self.controls,
+                lane,
+                peer.map(|peer| &*peer.controls),
+                peer_lane,
+            )
+            && Self::automation_swap_fits(
+                &self.automation,
+                lane,
+                peer.map_or(&self.automation, |peer| &peer.automation),
+                peer_lane,
+            )
+    }
+
+    /// Whether two lanes' stored automation slots can trade places. A bank none of whose members
+    /// is automated holds no slots at all (`automation` is empty, #1646 D1), so a lane can move
+    /// into it only when it carries no automation: the automated lane would have no slot to land
+    /// in. Two banks that both hold slots, or neither, always fit.
+    fn automation_swap_fits(
+        own: &[Option<LaneFaderAutomation>],
+        lane: usize,
+        theirs: &[Option<LaneFaderAutomation>],
+        peer_lane: usize,
+    ) -> bool {
+        match (own.is_empty(), theirs.is_empty()) {
+            (false, false) => lane < own.len() && peer_lane < theirs.len(),
+            (true, true) => true,
+            (false, true) => own.get(lane).is_some_and(Option::is_none),
+            (true, false) => theirs.get(peer_lane).is_some_and(Option::is_none),
+        }
+    }
     // REALTIME_POLICY_END
 }
 
@@ -4946,6 +5096,75 @@ impl GraphPreparedBuiltinBankProcessor for FaderBankProcessor {
     /// rest still apply. A lane that restarts is not read, so its replaced writes are not counted.
     fn drain_strip_for_carry(&mut self, owner: BuiltinStripOwner, lanes: u8) -> usize {
         usize::from(owner == BuiltinStripOwner::Fader && self.apply_pending(lanes).is_err())
+    }
+
+    fn can_swap_builtin_lanes(
+        &self,
+        lane: usize,
+        peer: Option<&dyn GraphPreparedBuiltinBankProcessor>,
+        peer_lane: usize,
+    ) -> bool {
+        match peer {
+            None => self.can_swap_with(lane, None, peer_lane),
+            Some(peer) => peer
+                .as_any()
+                .downcast_ref::<Self>()
+                .is_some_and(|peer| self.can_swap_with(lane, Some(peer), peer_lane)),
+        }
+    }
+
+    /// Issue #1765: the lane's fader and mute state, ramps in flight included
+    /// ([`BuiltinFaderBank::swap_lanes`]), its cell reader (cells, dirty bits, carry marks,
+    /// superseded counter) and its stored automation (event cursors, held-ramp obligations, offsets
+    /// cells and `a(n)`; the block's node time is set again by the next block). The block counters
+    /// are the bank's and stay.
+    fn swap_builtin_lanes(
+        &mut self,
+        lane: usize,
+        peer: Option<&mut dyn GraphPreparedBuiltinBankProcessor>,
+        peer_lane: usize,
+    ) -> bool {
+        let other = match peer {
+            None => None,
+            Some(peer) => match peer.as_any_mut().and_then(|any| any.downcast_mut::<Self>()) {
+                Some(other) => Some(other),
+                None => return false,
+            },
+        };
+        if !self.can_swap_with(lane, other.as_deref(), peer_lane) {
+            return false;
+        }
+        let swapped = match other {
+            None => {
+                self.bank.swap_lanes(lane, None, peer_lane).is_ok()
+                    && exchange_lane_slots(&mut self.controls, lane, None, peer_lane)
+                    && (self.automation.is_empty()
+                        || exchange_lane_slots(&mut self.automation, lane, None, peer_lane))
+            }
+            Some(other) => {
+                self.bank
+                    .swap_lanes(lane, Some(&mut other.bank), peer_lane)
+                    .is_ok()
+                    && exchange_lane_slots(
+                        &mut self.controls,
+                        lane,
+                        Some(&mut other.controls),
+                        peer_lane,
+                    )
+                    // A bank without slots trades only a lane without automation
+                    // (`automation_swap_fits`): both lanes' slots are `None`, nothing moves.
+                    && (self.automation.is_empty()
+                        || other.automation.is_empty()
+                        || exchange_lane_slots(
+                            &mut self.automation,
+                            lane,
+                            Some(&mut other.automation),
+                            peer_lane,
+                        ))
+            }
+        };
+        debug_assert!(swapped, "a checked fader lane swaps");
+        swapped
     }
     // REALTIME_POLICY_END
     /// The fader and mute cells' drain, before any lane of the block is dispatched (#1312 D12).
@@ -5117,6 +5336,19 @@ impl MatrixBankProcessor {
         }
         adopted
     }
+
+    /// The matrix bank's counterpart of [`FaderBankProcessor::can_swap_with`], without stored
+    /// automation.
+    fn can_swap_with(&self, lane: usize, peer: Option<&Self>, peer_lane: usize) -> bool {
+        self.bank
+            .can_swap_lanes(lane, peer.map(|peer| &peer.bank), peer_lane)
+            && lane_slots_fit(
+                &self.controls,
+                lane,
+                peer.map(|peer| &*peer.controls),
+                peer_lane,
+            )
+    }
     // REALTIME_POLICY_END
 }
 
@@ -5169,6 +5401,60 @@ impl GraphPreparedBuiltinBankProcessor for MatrixBankProcessor {
     /// Issue #1277 D8: the fader bank's counterpart, on the matrix cell.
     fn drain_strip_for_carry(&mut self, owner: BuiltinStripOwner, lanes: u8) -> usize {
         usize::from(owner == BuiltinStripOwner::Matrix && self.apply_pending(lanes).is_err())
+    }
+
+    fn can_swap_builtin_lanes(
+        &self,
+        lane: usize,
+        peer: Option<&dyn GraphPreparedBuiltinBankProcessor>,
+        peer_lane: usize,
+    ) -> bool {
+        match peer {
+            None => self.can_swap_with(lane, None, peer_lane),
+            Some(peer) => peer
+                .as_any()
+                .downcast_ref::<Self>()
+                .is_some_and(|peer| self.can_swap_with(lane, Some(peer), peer_lane)),
+        }
+    }
+
+    /// Issue #1765: the lane's matrix state, ramp in flight included
+    /// ([`BuiltinMatrixBank::swap_lanes`]), and its cell reader. The block counters stay.
+    fn swap_builtin_lanes(
+        &mut self,
+        lane: usize,
+        peer: Option<&mut dyn GraphPreparedBuiltinBankProcessor>,
+        peer_lane: usize,
+    ) -> bool {
+        let other = match peer {
+            None => None,
+            Some(peer) => match peer.as_any_mut().and_then(|any| any.downcast_mut::<Self>()) {
+                Some(other) => Some(other),
+                None => return false,
+            },
+        };
+        if !self.can_swap_with(lane, other.as_deref(), peer_lane) {
+            return false;
+        }
+        let swapped = match other {
+            None => {
+                self.bank.swap_lanes(lane, None, peer_lane).is_ok()
+                    && exchange_lane_slots(&mut self.controls, lane, None, peer_lane)
+            }
+            Some(other) => {
+                self.bank
+                    .swap_lanes(lane, Some(&mut other.bank), peer_lane)
+                    .is_ok()
+                    && exchange_lane_slots(
+                        &mut self.controls,
+                        lane,
+                        Some(&mut other.controls),
+                        peer_lane,
+                    )
+            }
+        };
+        debug_assert!(swapped, "a checked matrix lane swaps");
+        swapped
     }
     // REALTIME_POLICY_END
     /// The matrix cell's drain, before any lane of the block is dispatched (#1312 D12).
@@ -6836,6 +7122,34 @@ impl PreparedBuiltinsSession {
         let resource = self
             .strip_bank_resource(&plan, width)
             .expect("preflighted builtin-bank resource");
+        let (graph_banks, selected) = self.lower_strip_banks(plan, dispatch, width);
+        let mut processors = core::mem::take(&mut self.processors);
+        processors.retain(|binding| !selected.contains(&binding.node));
+        processors.append(&mut self.unbanked_strip_bindings());
+
+        let graph = graph
+            .with_builtin_banks(graph_banks, resource)
+            .expect("validated fixed builtin member shape");
+        PreparedBuiltinsGraphArtifact {
+            graph,
+            builtin_processors: processors,
+            builtin_observers: self.observers,
+            report,
+            track_controls: self.track_controls,
+            meter_consumers: self.meter_consumers,
+        }
+    }
+
+    /// Lower `plan`'s strip groups into the builtin bank processors that render them (issue #212),
+    /// moving each member's prepared input, live readers and stored fader automation into its
+    /// bank lane: the body of [`Self::into_graph_artifact_with_banks`]. Returns the banks and the
+    /// member nodes they claim; a strip whose three stages were all claimed leaves `self.strips`.
+    fn lower_strip_banks(
+        &mut self,
+        plan: [(TrackStage, Vec<Box<[GraphNodeId]>>); 3],
+        dispatch: Backend,
+        width: BankWidth,
+    ) -> (Vec<GraphPreparedBuiltinBank>, BTreeSet<GraphNodeId>) {
         // Borrowed: a strip no bank claims keeps its automation for the scalar oracle's bindings.
         let fader_automation = &self.fader_automation;
 
@@ -6996,21 +7310,7 @@ impl PreparedBuiltinsSession {
                 && claimed_matrix.contains(track))
         });
         self.strips = strips.into_values().collect();
-        let mut processors = core::mem::take(&mut self.processors);
-        processors.retain(|binding| !selected.contains(&binding.node));
-        processors.append(&mut self.unbanked_strip_bindings());
-
-        let graph = graph
-            .with_builtin_banks(graph_banks, resource)
-            .expect("validated fixed builtin member shape");
-        PreparedBuiltinsGraphArtifact {
-            graph,
-            builtin_processors: processors,
-            builtin_observers: self.observers,
-            report,
-            track_controls: self.track_controls,
-            meter_consumers: self.meter_consumers,
-        }
+        (graph_banks, selected)
     }
 
     #[cfg(feature = "test-support")]

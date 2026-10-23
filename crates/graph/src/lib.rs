@@ -12,7 +12,8 @@ mod runtime;
 pub use runtime::{
     TestOnlyBankChainConstructionFacts, TestOnlyBankChainInputs, TestOnlyBankChainOwnership,
     test_only_bank_chain_construction_facts, test_only_bank_chain_ownership,
-    test_only_prepare_bank_chain_inputs, test_only_reset_bank_chain_construction_facts,
+    test_only_builtin_processor_mut, test_only_builtin_stage, test_only_prepare_bank_chain_inputs,
+    test_only_reset_bank_chain_construction_facts,
 };
 
 #[cfg(any(test, feature = "test-support"))]
@@ -2146,6 +2147,35 @@ pub trait GraphPreparedBuiltinBankProcessor: Send + Any {
         continued_cells: u8,
     ) -> bool {
         let _ = (owner, lane, predecessor, predecessor_lane, continued_cells);
+        false
+    }
+    /// Whether [`Self::swap_builtin_lanes`] would exchange lane `lane`'s whole per-lane state with
+    /// `peer`'s lane `peer_lane` (`None`: a lane of this bank): both lanes are populated, and a
+    /// `peer` is a bank of this concrete type and width (issue #1765). Decided without mutation,
+    /// allocation-free and bounded. The default `false` is a bank that has no swap: it never
+    /// claims one, so a chain holding it refuses the swap.
+    fn can_swap_builtin_lanes(
+        &self,
+        lane: usize,
+        peer: Option<&dyn GraphPreparedBuiltinBankProcessor>,
+        peer_lane: usize,
+    ) -> bool {
+        let _ = (lane, peer, peer_lane);
+        false
+    }
+    /// Exchange lane `lane`'s whole per-lane state -- stage state, ramps in flight, prepared
+    /// endpoints, live cell readers with their dirty bits and carry marks, live symmetry terms and
+    /// stored automation -- with `peer`'s lane `peer_lane` (`None`: a lane of this bank), at a
+    /// block boundary on the render thread (issue #1765), for `rack::BankStage::swap_lanes`. All
+    /// or nothing: returns `false` and changes nothing unless [`Self::can_swap_builtin_lanes`]
+    /// holds. Allocation-free and bounded. The default `false` swaps nothing.
+    fn swap_builtin_lanes(
+        &mut self,
+        lane: usize,
+        peer: Option<&mut dyn GraphPreparedBuiltinBankProcessor>,
+        peer_lane: usize,
+    ) -> bool {
+        let _ = (lane, peer, peer_lane);
         false
     }
     /// The lanes (bit `n` is lane `n`) whose [`Self::begin_block`] drains a live lane, or `0` for
