@@ -1065,6 +1065,12 @@ macro_rules! bank_impl {
             // REALTIME_POLICY_END
 
             fn advance_clocks(&mut self, lanes_mask: u32, frames: u32) {
+                let lanes = u32::MAX >> (32 - <$lane>::WIDTH);
+                debug_assert_eq!(
+                    lanes_mask & lanes & !self.lanes_at_rest(),
+                    0,
+                    "a lane not at rest"
+                );
                 self.advance_skipped_clocks(lanes_mask, frames);
             }
 
