@@ -73,8 +73,9 @@ None. It can run beside the predicate slices.
   `BankChain::swap_lanes` checks every slot first (active lanes only, so a padded lane never
   swaps; equal slot count, per-slot activity, fold and aux bits; each slot `can_swap_lanes`),
   disengages a collapsed chain, ANDs the two chains' channel agreement, then swaps slot by slot.
-  A slot that is an identity on both lanes is skipped (it holds neither strip's state). The
-  resident output block is stale for the two lanes until the next run.
+  Every slot swaps (attempt 2): a slot that is an identity on both lanes and cannot swap refuses
+  with `Shape`, one that runs on the lanes and refuses gives `Slot`. The resident output block is
+  stale for the two lanes until the next run.
 - **`advance_clocks(lanes_mask, frames)`** (lib.rs, default no-op; a caller skips a lane only when
   `lanes_at_rest` reports it). Clocks: EQ per-lane `silence` (and the bank's
   `silent_fixed_point` on a whole-bank mask); limiter per-bank `Cursors` and per-lane `phase`
