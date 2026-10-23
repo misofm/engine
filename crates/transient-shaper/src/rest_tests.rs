@@ -214,10 +214,11 @@ impl<L: Lane, const W: usize> rest_probe::Probe for Bank<L, W> {
 /// Plants one envelope word (or both) of one channel of `lane`, as a state restore at a block
 /// boundary may (`restore_track_state_payload` accepts any normal positive envelope pair).
 ///
-/// The driver's signal levels never leave a woken **fast** follower beside a snapped slow one:
+/// The driver's signal levels rarely leave a woken **fast** follower beside a snapped slow one:
 /// that needs inputs between about `2.4e-11` (the fast attack's `k * u` clears the
-/// [`FOLLOWER_REST`] snap) and `4.8e-10` (the slow attack's does), and every level the driver
-/// draws is outside that band.
+/// [`FOLLOWER_REST`] snap) and `4.8e-10` (the slow attack's does). The driver's levels are not
+/// outside that band (`rest_probe` draws `unit() * 1e-9`, which crosses it), but nothing makes it
+/// reach that state, so the plant puts it there.
 /// Without the plant, dropping either fast word from the predicate stays green. A slow-only word is
 /// what every decay reaches (the fast follower releases five times faster); it is planted too.
 fn plant<L: Lane, const W: usize>(shaper: &mut Shaper<L, W>, lane: usize, draw: &mut Draw) {
@@ -455,6 +456,11 @@ fn follower_bound(envelope: f32, c: f32) -> u64 {
 /// against bounds of 128,653 to 128,668, set by the 100 ms slow release.
 #[test]
 fn a_lane_that_followed_a_tone_lands_at_rest_within_its_release_bound() {
+    assert_eq!(
+        FOLLOWER_REST.to_bits(),
+        1.0e-12_f32.to_bits(),
+        "owner ruling B2, 2026-10-23"
+    );
     const TONE_BLOCKS: usize = 40;
     lane::each_vector_lane!(|L, N| {
         let rate = 48_000;

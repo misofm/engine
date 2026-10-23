@@ -46,7 +46,7 @@ These are the base (pre-D5) laws.
 
 | Effect | Word that holds rest back | Why | Time to rest (base) |
 |---|---|---|---|
-| Compressor | `gain_reduction_db` (dB) | The release `fma(c, 0 - g, g)` (`kernel.rs`, `ballistic`; `effect-runtime/src/envelope.rs:173`) is an exact geometric decay. It does not stall: no `-0.0`, no fixed point above the floor. It landed on `+0.0` only at `FLUSH_EPS = 1e-20` dB (`lane/src/lib.rs:177`): `ln(7.84 / 1e-20) * 4800 = 230,930` | defaults (-18 dB, 100 ms): 230,928; -40 dB: 236,352; 5 ms release: 11,424 |
+| Compressor | `gain_reduction_db` (dB) | The release `fma(c, 0 - g, g)` (`kernel.rs`, `ballistic`; `effect-runtime/src/envelope.rs:173`) is an exact geometric decay. It does not stall: no `-0.0`, no fixed point above the floor. It landed on `+0.0` only at `FLUSH_EPS = 1e-20` dB (`lane/src/lib.rs:177`): `ln(7.84 / 1e-20) * 4800 = 230,930` | defaults (-18 dB, 100 ms): 230,928 with the committed test's tone, 230,976 with the diagnostic driver's; -40 dB: 236,352; 5 ms release: 11,424 |
 | Transient shaper | the slow follower `slow` (linear) | The release `c * e + k * 0` (`envelope.rs:160`) at the 100 ms retention is geometric down to `1e-20`. While the input is silent, the output is the dry word once both followers are below `FLOOR = 1e-8` (`lib.rs`): from 84,480 samples | 217,088; 96 kHz: 433,408 |
 | Gate/expander | `gain_db` | The release `flush(fma(c, t - g, g))` toward `t = -range` (`kernel.rs:369`) stops at its own float fixed point, where `c (t - g)` is below half an ulp of `g`: -79.98 dB for a -80 dB range. `channel_at_rest` (`kernel.rs:195`) accepts that word. Time: the hold, then about `ln(2 c range / ulp) / c` | defaults: 44,544 (100 ms hold, then the release); 96 kHz: 82,304; 0 dB range: 4,864 |
 | Soft clip | the `e` history | No recursion. `X` and dry clear in 32 pushes. The last non-zero `e` is pushed on silent frame 29 and leaves 32 pushes later | 62 (bound 62) |
@@ -64,7 +64,9 @@ release takes minutes. A long release therefore keeps a bank from skipping for t
 A class-A landing needs a state that leaves every later output bit unchanged, for every later
 input. No state other than the existing flush has that property.
 
-- **Compressor:** `fast_gain_from_db(g)` is exactly `1.0` only for `g == +0.0`. For every
+- **Compressor:** among the words the engine holds (`+0.0`, or `|g|` at or above `FLUSH_EPS`; a
+  subnormal word is never held, because the flush and now the snap clear it),
+  `fast_gain_from_db(g)` is exactly `1.0` only for `g == +0.0`. For every
   `0 < |g| <= 5.38e-7` dB (`0x3510_7e90`) it is the plateau value `0x3f7f_fffe`, which is
   `1 - 2` ulps. The plateau is contiguous: an exhaustive release-build sweep found no return to
   it up to `1e-3` dB. Every non-zero word therefore still scales the signal, and a snap moves bits.
@@ -148,35 +150,44 @@ each bound is rounded up to a block end.
 **When bits move.** Only after a snap, on the next non-silent input. Above the snap, every word is
 bit-identical to the shared step.
 
-**How much.** Method: one onset after a silence that ends after the snap but before the base rest,
-rendered on this branch and on the merged base (`de91d45c5`, a scratch worktree), and compared
-word by word. Release build, 48 kHz.
+**How much: ceilings.** Each value below is the largest change seen over every corner that two
+harnesses measured: mine and the final verifier's. Both were scratchpad harnesses, and neither is
+committed. Each harness rendered the same input on this branch and on the merged base
+(`de91d45c5`), compared the output word by word, and took the largest change in ulps and in dB.
+Release build, 48 kHz, one scalar instance, 128-frame blocks, DualMono. My harness:
 
-Compressor, defaults (silence 120,000 samples, then a sine with a `-0.0` every 97 samples):
+- **Compressor:** default parameters, with mix and makeup at (1, 0 dB), (0.5, 0 dB), (1, +6 dB)
+  and (0.5, -3 dB). A 0.5 sine for 4,800 samples, then 120,000 samples of `+0.0`. This silence
+  ends after the snap and before the base rest. Then 9,600 samples of an onset sine at 1e-6,
+  1e-4, 1e-2, 0.1 and 0.5, with a `-0.0` every 97th sample.
+- **Transient shaper:** the amount corners (attack, sustain, mix) = (+1, -1, 1), (-1, +1, 1) and
+  (+1, +1, 0.5). A 0.5 sine for 4,800 samples, then 129,000 samples of `+0.0`, which ends just
+  after the snap, where the base followers are at their largest. A second run uses 160,000
+  samples. Then 9,600 samples of an onset sine at 1e-7 to 0.5, stepping between full level and
+  0.1 of it every 2,000 samples.
 
-| mix, makeup | Onset 1e-6 to 1e-2 (-120 to -40 dBFS) | Onset 0.1 and 0.5 |
-|---|---|---|
-| 1, 0 dB | at most 2 ulps, `1.38e-6` dB | 0 |
-| 0.5, 0 dB | at most 1 ulp, `1.04e-6` dB; a `-0.0` input now leaves as `-0.0` (the dry identity), not `+0.0`; 99 words | 0 |
-| 1, +6 dB / 0.5, -3 dB | 0 | 0 |
+The verifier's harness reached larger values in some cells. The ceilings are:
 
-Transient shaper, three amount corners (+1/-1, -1/+1, mix 0.5). The silence of 129,000 samples
-ends just after the snap, so the base followers are at their largest:
+- **Compressor:** at most 2 ulps, `1.4e-6` dB, at every corner and every onset level, including
+  0.1 and 0.5 and both makeup cases. At mix 0.5, a `-0.0` input now leaves as `-0.0` (the dry
+  identity) where the base wrote `+0.0`.
+- **Transient shaper, onset just after the snap:**
 
-| Onset level | Maximum change |
+| Onset level | Ceiling |
 |---|---|
 | 1e-7 (-140 dBFS) | 1,282 ulps, `7.0e-4` dB |
-| 1e-6 (-120 dBFS) | 136 ulps, `7.3e-5` dB |
-| 1e-5 (-100 dBFS) | 24 ulps, `1.3e-5` dB |
-| 1e-4 (-80 dBFS) to 0.5 | 0 |
+| 1e-6 (-120 dBFS) | 408 ulps, `2.25e-4` dB |
+| 1e-5 (-100 dBFS) | `2.5e-5` dB |
+| 1e-4 (-80 dBFS) | 8 ulps, `4.8e-6` dB |
+| 1e-3 (-60 dBFS) | `3.4e-6` dB |
+| 0.5 | 0 |
 
-After 160,000 samples of silence, the change is at most 8 ulps (`4.6e-6` dB), and only at
--140 dBFS.
+- **Transient shaper, onset after 160,000 silent samples:** up to 8 ulps (`4.6e-6` dB) at
+  -140 dBFS, and 2 to 6 ulps at -120 and -100 dBFS.
 
 **Correction to the expectation given with the ruling.** The expectation was at most `3.1e-5` dB
-on onsets below -40 dBFS. That bound does not hold right after the snap: onsets at -120 dBFS and
-below change by up to `7.3e-5` dB (-120) and `7.0e-4` dB (-140). From -100 dBFS up, the change is
-at most `1.3e-5` dB, and from -80 dBFS up it is 0.
+on onsets below -40 dBFS. That does not hold right after the snap: at -120 dBFS the ceiling is
+`2.25e-4` dB, and at -140 dBFS it is `7.0e-4` dB. From -100 dBFS up, the ceiling is `2.5e-5` dB.
 
 **Committed digests and fixtures:** none moved, so nothing was re-baselined. The four crates' cross-target,
 conformance, oracle and digest tests pass unchanged, and so does the workspace suite (the gates in
@@ -196,3 +207,8 @@ the hand-back). Their corpora have no silence long enough to reach a snap.
 **`scripts/check-web-audioworklet.sh`** now runs, because kernel source changed: it passes. The
 roster rows are compressor dual (vector 949, scalar 0), compressor collapsed (524, 0) and
 transient-shaper (522, 0).
+
+**Recorded note, not fixed:** a state restore accepts a reduction word in
+`(0, REDUCTION_REST_DB]` dB, a word the engine never holds after B1 (`state.rs`,
+`validate_channel`, accepts any normal word in `[-100, 0]`). Such a lane is not at rest, and its
+next rendered sample snaps the word to `+0.0`.

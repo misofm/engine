@@ -74,8 +74,10 @@ fn a_nonfinite_block_is_zeroed_and_the_envelopes_are_reset() {
 #[test]
 fn a_subnormal_input_renders_and_flushes_the_envelope() {
     let mut effect = prepare(&values_of(1.0, -1.0, 1.0));
-    let mut left = [f32::from_bits(1); 16];
-    let mut right = [-f32::from_bits(3); 16];
+    // Large enough that `k * u` stays a non-zero subnormal without the snap: the smallest
+    // subnormals would underflow to `+0.0` by themselves and prove nothing.
+    let mut left = [f32::from_bits(0x400); 16];
+    let mut right = [-f32::from_bits(0x300); 16];
     let original_left = left.map(f32::to_bits);
     let original_right = right.map(f32::to_bits);
     effect.process(

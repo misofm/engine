@@ -34,7 +34,7 @@ cargo test --locked -p effect-runtime --test <test binary>
 | 15 | the lower knee edge is compared against `+W/2`: `d.le(half_knee_db)` instead of `d.le(-(W/2))` | `src/dynamics.rs` | `dynamics` | RED |
 | 16 | `ar_one_pole_step` switches on `u.ge(e)` instead of `u.gt(e)` | `src/envelope.rs` | `envelope` | RED |
 | 17 | `ar_one_pole_step` uses the one-rounding release `c.fma(e - u, u)` instead of the two-product `c * e + k * u` | `src/envelope.rs` | `envelope` | RED |
-| 18 | `ar_one_pole_step` drops `lane::flush` on the recurrence | `src/envelope.rs` | `envelope` | RED |
+| 18 | `ar_one_pole_step` drops the snap on the recurrence (`lane::flush` before #1784; since then the rest-floor snap, which is that flush at `FLUSH_EPS`) | `src/envelope.rs` | `envelope` | RED |
 
 ## Recorded failures
 
