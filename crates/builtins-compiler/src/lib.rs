@@ -14703,12 +14703,13 @@ mod tests {
 
     /// `tracks` strips with live controls and stored fader and mute automation on `t01`, `t05` and
     /// `t09`, each with an event after the swaps below. `mono`: one source channel and equal
-    /// input sections on every track.
+    /// input sections on every track. `quantum`: the session's render quantum.
     #[cfg(feature = "test-support")]
-    fn lane_swap_session(tracks: usize, mono: bool) -> CompiledSession {
+    fn lane_swap_session(tracks: usize, mono: bool, quantum: u32) -> CompiledSession {
         let mut model = n_track_session_with_symmetry(tracks, mono)
             .normalized_model()
             .clone();
+        model.quantum_frames = quantum;
         if mono {
             for track in &mut model.tracks {
                 track.right_source_channel = track.left_source_channel;
@@ -15179,10 +15180,14 @@ mod tests {
     /// term, so that strip's new chain must render dual and its old one collapse again. Before block
     /// 10, where a chain has no automated strip (`t12` alone at four lanes), an automated lane is
     /// refused a move into its slotless fader bank (`Slot`), and the twin check proves nothing
-    /// moved. At both widths this host builds.
+    /// moved. At both widths this host builds, at a 128-frame quantum and at a 32-frame one: before
+    /// each swap every fourth strip from `t01` retargets both filter sections (#1777), and at 32
+    /// frames that 64-sample filter ramp is half done at the swap, while the strip it trades with
+    /// has none in flight.
     ///
     /// Red if a swap leaves behind any per-lane field the next blocks read: the stage state or a
-    /// ramp, a cell reader (with its dirty bits), the live symmetry term, the stored automation,
+    /// ramp (the input filter's countdown among them), a cell reader (with its dirty bits), the
+    /// live symmetry term, the stored automation,
     /// or the disengage before an in-chain swap of a collapsed chain (through the input stage's
     /// debug assertion); or if a builtin stage refuses the swap. Not covered: the input stage's
     /// prepared filter endpoint (`filter_initial`), which only a `FullToPrepared` reset reads and
@@ -15201,18 +15206,22 @@ mod tests {
         const QUIET: usize = 2;
         let mut swaps = 0;
         let mut refusals = 0;
+        let pair = |hpf, lpf| {
+            builtins::prepare_input_filter_pair(48_000, hpf, lpf)
+                .expect("a filter pair")
+                .targets
+        };
         let filters = [(40.0, 16_000.0), (120.0, 8_000.0), (300.0, 12_000.0)]
             .into_iter()
-            .flat_map(|(hpf, lpf)| {
-                builtins::prepare_input_filter_pair(48_000, hpf, lpf)
-                    .expect("a filter pair")
-                    .targets
-            })
+            .flat_map(|(hpf, lpf)| pair(hpf, lpf))
             .collect::<Vec<_>>();
+        // The swaps' filter retargets: pairs no random write and no prepared strip holds, one
+        // per swap, so each starts a ramp.
+        let swap_filters = [pair(60.0, 10_000.0), pair(70.0, 9_000.0)];
         for backend in input_test_backends() {
-            for mono in [false, true] {
-                let what = format!("{backend:?}, mono {mono}");
-                let compiled = lane_swap_session(TRACKS, mono);
+            for (quantum, mono) in [(128, false), (128, true), (32, false), (32, true)] {
+                let what = format!("{backend:?}, quantum {quantum}, mono {mono}");
+                let compiled = lane_swap_session(TRACKS, mono, quantum);
                 let mut rig = lane_swap_rig(&compiled, backend, mono);
                 let mut twin = lane_swap_rig(&compiled, backend, mono);
                 assert!(rig.chains.len() >= 2, "{what}: two chains");
@@ -15254,6 +15263,19 @@ mod tests {
                     }
                     if mono && block == OTHER_AT - 1 {
                         writes.push((QUIET, quiet_trim(BuiltinLaneSelector::Left)));
+                    }
+                    if ramp_all {
+                        let targets = swap_filters[usize::from(block == OTHER_AT - 1)];
+                        for strip in (1..TRACKS).step_by(4) {
+                            for target in targets {
+                                writes.push((
+                                    strip,
+                                    LaneSwapWrite::Input(TrackInputRecord::PreparedFilter {
+                                        target,
+                                    }),
+                                ));
+                            }
+                        }
                     }
                     rig.write(&writes);
                     twin.write(&writes);
@@ -15332,8 +15354,8 @@ mod tests {
             }
         }
         assert!(
-            !input_test_backends().contains(&Backend::Simd4) || refusals == 2,
-            "the slotless refusal ran in both Simd4 passes"
+            !input_test_backends().contains(&Backend::Simd4) || refusals == 4,
+            "the slotless refusal ran in all four Simd4 passes"
         );
         swaps
     }
