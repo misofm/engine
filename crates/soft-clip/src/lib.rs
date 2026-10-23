@@ -1075,9 +1075,10 @@ impl<L: Lane> PreparedSoftClipBank<L> {
     ///
     /// The position is per bank, so it moves whatever `lanes_mask` holds: the caller skips a bank
     /// whole and passes every lane, and a lane in the mask that was not at rest is a caller defect
-    /// (its rows would rotate under it). Every bank of one slot renders the same block lengths, so
-    /// their positions stay equal; that is what lets a lane swap between two banks restore relative
-    /// to the destination's position. Constant time: `frames` is reduced modulo the ring first.
+    /// (its rows would rotate under it). Two banks of one slot need not hold equal positions: a
+    /// lane swap between them stays exact because a restore places each row by its age relative
+    /// to the receiving bank's own position (`apply_lane_words`). Constant time: `frames` is
+    /// reduced modulo the ring first.
     fn advance_skipped_clocks(&mut self, lanes_mask: u32, frames: u32) {
         let _ = lanes_mask;
         let step = frames as usize & POS_MASK;

@@ -1082,10 +1082,13 @@ macro_rules! bank_impl {
 // REALTIME_POLICY_BEGIN: #1747, the clock advance of a skipped block.
 impl<L: Lane> PreparedGate<L, false> {
     /// [`PreparedNativeEffectBank::advance_clocks`]: the gate's one clock is the bank-wide
-    /// `ramp_frames_left`, which a block of any input lowers by its length, down to zero. It only
-    /// chooses where `run_block` splits a block, so no output bit reads it, but it is a state word
-    /// and a skipped block leaves it as a rendered one would. The gate has no per-lane clock:
-    /// `hold` is a countdown whose value is the detector's, and a lane at rest holds it at zero.
+    /// `ramp_frames_left`, a schedule word. It only chooses where `run_block` splits a block, and
+    /// no output bit reads it: the `RAMPING = true` body run over settled ramps selects their
+    /// words back unchanged, so a split anywhere renders the same samples. It keeps the invariant
+    /// `ramp_frames_left >= every lane's remaining`, and a block of any input lowers it by its
+    /// length, down to zero; the skip lowers it as a rendered block would, which keeps that
+    /// invariant tight. The gate has no per-lane clock: the `hold` countdown is detector state
+    /// carried in the payload, not a clock.
     fn advance_skipped_clocks(&mut self, lanes_mask: u32, frames: u32) {
         let _ = lanes_mask;
         self.ramp_frames_left = self.ramp_frames_left.saturating_sub(frames);

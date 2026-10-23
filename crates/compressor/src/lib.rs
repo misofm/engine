@@ -737,10 +737,6 @@ impl<L: Lane> Instance<L> {
         input: StatePayloadInput<'_>,
         lane: usize,
     ) -> Result<(), StatePayloadError> {
-        // A restore writes the recursive word and coefficients from a payload this instance never
-        // rendered, so any standing claim is void. Withdraw it before the version check so a
-        // rejected restore cannot leave a half-trusted claim either.
-        self.silent_fixed_point = false;
         if state_layout_version != COMPRESSOR_DESCRIPTOR.state_layout_version {
             return Err(StatePayloadError {
                 code: "effect.state.version",
@@ -757,6 +753,11 @@ impl<L: Lane> Instance<L> {
         let rate = self.sample_rate;
         state::commit_channel(input.left, &mut self.left, lane, rate);
         state::commit_channel(input.right, &mut self.right, lane, rate);
+        // A restore writes the recursive word and coefficients from a payload this instance never
+        // rendered, so any standing claim is void. Withdrawn only here, after the commit: a
+        // refused restore returns above without writing a word, so the claim it leaves is as
+        // true as it was (a write-free refusal, #1747).
+        self.silent_fixed_point = false;
         Ok(())
     }
 
@@ -1216,6 +1217,29 @@ impl<L: Lane> PreparedNativeEffectBank for PreparedCompressorBank<L> {
     /// Issue #1745: `kernel::Channel::rest_lanes` on both channels, padded lanes included.
     fn lanes_at_rest(&self) -> u32 {
         self.instance.lanes_at_rest()
+    }
+
+    /// The compressor has no clocks (issue #1747; see `kernel::Channel::rest_lanes`), so a
+    /// skipped block moves no state word or payload word. It overrides the default only for the
+    /// bank flag `silent_fixed_point`: a rendered `+0.0` block after which every lane, padded
+    /// lanes included, is at rest earns it (the bank always detects on the main input, and the
+    /// prepared bypass is the one the claim records), so a mask that covers the whole bank sets
+    /// it too, as the EQ's does. The contract's caller skips a bank whole; a partial mask leaves
+    /// the flag to the render of the other lanes. No output bit and no payload word reads the
+    /// flag: it only lets a later `+0.0` block take the fast path, which renders the same bits as
+    /// the kernel would, so no test reads it either.
+    fn advance_clocks(&mut self, lanes_mask: u32, frames: u32) {
+        let bank = all_lanes::<L>();
+        debug_assert_eq!(lanes_mask & !bank, 0, "a lane past the bank");
+        debug_assert!(frames <= self.quantum, "a block longer than the quantum");
+        debug_assert_eq!(
+            lanes_mask & !self.instance.lanes_at_rest(),
+            0,
+            "a lane not at rest"
+        );
+        if lanes_mask & bank == bank {
+            self.instance.silent_fixed_point = true;
+        }
     }
 
     /// One `store` per channel fills every lane: the bank's reduction is one vector.

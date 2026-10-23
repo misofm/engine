@@ -4040,8 +4040,10 @@ impl<L: Lane, const W: usize> PreparedNativeEffectBank for PreparedParametricEq<
     ///
     /// A prepared bypass renders nothing and advances nothing, so it advances nothing here. A
     /// rendered block after which every lane, padded lanes included, is at rest sets
-    /// `silent_fixed_point`, so a mask that covers the whole bank sets it too; a partial mask
-    /// leaves it to the render of the other lanes. A collapsed bank's render advances only the
+    /// `silent_fixed_point`, so a mask that covers the whole bank sets it too. The contract's
+    /// caller skips a bank whole and always passes that mask; a partial mask, which it never
+    /// passes, still advances exactly its own lanes and leaves the flag to the render of the
+    /// other lanes. A collapsed bank's render advances only the
     /// left counter; its right channel is dead until the disengage copies the left one over it
     /// ([`desymmetrize`](PreparedParametricEq::desymmetrize)), so advancing it too moves no word
     /// that is read.
@@ -4098,7 +4100,9 @@ impl<L: Lane, const W: usize> PreparedNativeEffectBank for PreparedParametricEq<
     ) -> Result<(), StatePayloadError> {
         // Issue #1089: a padded lane carries no track, and a restore is the one write that could
         // move its integrators off the `+0.0` rest the padding contract holds it at. A snapshot
-        // only reads, so it stays open on every lane.
+        // only reads, so it stays open on every lane: a padded lane is refused here, at restore,
+        // not at snapshot. A render-time lane swap (#1747) never names one, because the rack's
+        // active-lane check refuses such a swap before it snapshots anything.
         let track = bank_track_index(track_index, W)?;
         if !self.active[track] {
             return Err(StatePayloadError {

@@ -2594,7 +2594,9 @@ pub trait PreparedNativeEffectBank: Send {
     /// van Herk `phase`, and the soft clip's shared history position `pos`. Each implementation
     /// names its clocks. A caller that skips a resting lane's block must still advance that lane's
     /// clocks as a rendered zero block would, through [`advance_clocks`](Self::advance_clocks)
-    /// (#1747).
+    /// (#1747). Banks of one slot need not hold equal per-bank clocks (a whole-bank D7 reset moves
+    /// one bank's limiter cursors); a lane swap between two banks stays exact because a restore
+    /// re-ages the lane's rings relative to the receiving bank's own cursor.
     ///
     /// # How it is answered
     ///
@@ -2630,16 +2632,22 @@ pub trait PreparedNativeEffectBank: Send {
     ///
     /// # The contract
     ///
-    /// A caller may skip a lane's block only when [`lanes_at_rest`](Self::lanes_at_rest) reports
-    /// that lane, and it calls this once for each block it skips, with `frames` the block's
-    /// length (at most the prepared quantum). After the call every state word and every state
-    /// payload word of the bank is bit-identical to what that rendered zero block would have left:
-    /// a lane in the mask advances its per-lane clocks, and the bank advances its shared per-bank
-    /// clocks (the limiter's cursors, the soft clip's `pos`), which every bank of one slot keeps
-    /// equal so that a lane swapped between two banks lands on the same cursor. A bank whose
-    /// block is skipped is skipped whole, so its caller passes every lane, padded lanes included:
-    /// the padding contract feeds a padded lane `+0.0`, so a rendered block would have advanced
-    /// its clocks too. A bit for a lane that is not at rest is a caller defect.
+    /// A caller may skip a block only when the block holds no automation span, no prepared
+    /// target and no live write for the skipped lanes, its every input to them is exact `+0.0`,
+    /// and [`lanes_at_rest`](Self::lanes_at_rest) reports each of them at the block boundary. It
+    /// calls this once for each block it skips, with `frames` the block's length (at most the
+    /// prepared quantum). After the call every state word and every state payload word of the
+    /// bank is bit-identical to what that rendered zero block would have left: a lane in the mask
+    /// advances its per-lane clocks, and the bank advances its shared per-bank clocks (the
+    /// limiter's cursors, the soft clip's `pos`). Banks of one slot need not hold equal per-bank
+    /// clocks: a whole-bank D7 reset moves one bank's limiter cursors and not another's. A lane
+    /// swapped between two banks still lands exactly, because the restore re-ages the lane's
+    /// rings relative to the receiving bank's own cursor (the limiter's `commit_lane`, the soft
+    /// clip's age-placed rows). A bank whose block is skipped is skipped whole, so its caller
+    /// passes every lane, padded lanes included: the padding contract feeds a padded lane `+0.0`,
+    /// so a rendered block would have advanced its clocks too. A bit for a lane that
+    /// `lanes_at_rest` does not report is a caller defect, and an implementation may
+    /// `debug_assert` against it.
     ///
     /// # The default
     ///

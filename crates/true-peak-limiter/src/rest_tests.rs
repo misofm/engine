@@ -482,16 +482,15 @@ fn render_plain<L: Lane>(
 }
 
 /// **`advance_clocks` leaves a resting bank exactly as the `+0.0` blocks it skips would**
-/// (issue #1747), and **every bank of one slot keeps equal cursors**, whatever its input.
+/// (issue #1747).
 ///
-/// Three banks of one shape: `rendered` and `skipped` are brought to rest by the same blocks,
+/// Two banks of one shape: `rendered` and `skipped` are brought to rest by the same blocks,
 /// then `rendered` renders `+0.0` blocks of a schedule that includes blocks shorter than the
 /// quantum and wraps both rings, while `skipped` calls `advance_clocks` with every lane, padded
 /// lanes included, for each of them. Every state word of the two, clocks and flags included,
 /// must agree after every block. Half the cases first restore lane 0 from its own payload on both,
 /// which withdraws the silent claim, so the skipped block must also mirror the body's flag
-/// updates rather than only the fast path's. `loud` renders random signal over the same blocks,
-/// and its cursors must equal the resting banks' after each one.
+/// updates rather than only the fast path's.
 #[test]
 fn advance_clocks_is_a_skipped_zero_block() {
     lane::each_vector_lane!(|L| {
@@ -514,13 +513,13 @@ fn advance_clocks_is_a_skipped_zero_block() {
                 })
                 .collect();
             let build = || limiter_bank::<L>(params.clone(), params.clone(), bypass, link_mode).0;
-            let (mut rendered, mut skipped, mut loud) = (build(), build(), build());
+            let (mut rendered, mut skipped) = (build(), build());
             let quantum = QUANTUM as usize;
             let words = quantum * L::WIDTH;
             let mut left = vec![0.0_f32; words];
             let mut right = vec![0.0_f32; words];
             let mut first_sample = 0_u64;
-            // Loud blocks, then `+0.0` until every lane rests: the same blocks to all three.
+            // Loud blocks, then `+0.0` until every lane rests: the same blocks to both.
             let mut signal = Draw(draw.next());
             for block in 0..400 {
                 let at_rest = rendered.lanes_at_rest() == every_lane(L::WIDTH);
@@ -535,10 +534,8 @@ fn advance_clocks_is_a_skipped_zero_block() {
                     };
                 }
                 let (mut l2, mut r2) = (left.clone(), right.clone());
-                let (mut l3, mut r3) = (left.clone(), right.clone());
                 render_plain(&mut rendered, &mut left, &mut right, quantum, first_sample);
                 render_plain(&mut skipped, &mut l2, &mut r2, quantum, first_sample);
-                render_plain(&mut loud, &mut l3, &mut r3, quantum, first_sample);
                 first_sample += quantum as u64;
             }
             assert_eq!(
@@ -592,10 +589,6 @@ fn advance_clocks_is_a_skipped_zero_block() {
                     every_lane(L::WIDTH),
                     frames as u32,
                 );
-                for word in left.iter_mut().chain(right.iter_mut()) {
-                    *word = signal.within(-2.0, 2.0);
-                }
-                render_plain(&mut loud, &mut left, &mut right, frames, first_sample);
                 first_sample += frames as u64;
                 assert_eq!(
                     bank_state_words(&rendered.core),
@@ -603,7 +596,6 @@ fn advance_clocks_is_a_skipped_zero_block() {
                     "W{} seed {seed}: a skipped block of {frames} frames",
                     L::WIDTH
                 );
-                assert_eq!(loud.core.cursors, rendered.core.cursors);
             }
         }
     });

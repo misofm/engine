@@ -4430,11 +4430,6 @@ impl<L: Lane> LimiterCore<L> {
         state_layout_version: u32,
         input: &StatePayloadInput<'_>,
     ) -> Result<(), StatePayloadError> {
-        // #182 S2: a restore writes rings, the recursive word, the phase and the coefficients of
-        // one lane from a payload this instance never rendered, so any standing claim is void.
-        // Withdrawn before the version check, so a rejected restore cannot leave a half-trusted
-        // claim behind either.
-        self.silent_fixed_point = false;
         if state_layout_version != STATE_LAYOUT_VERSION {
             return Err(state_error("effect.state.version"));
         }
@@ -4464,6 +4459,11 @@ impl<L: Lane> LimiterCore<L> {
             self.cursors,
             &self.shape,
         );
+        // #182 S2: a restore writes rings, the recursive word, the phase and the coefficients of
+        // one lane from a payload this instance never rendered, so any standing claim is void.
+        // Withdrawn only here, after the commit: a refused restore returns above without writing
+        // a word, so the claim it leaves is as true as it was (a write-free refusal, #1747).
+        self.silent_fixed_point = false;
         // #990: a payload's two sections are arbitrary, so the record is re-derived from the words
         // themselves, every lane of the bank, on this payload call (bounded by the prepared
         // state, and allocation-free: the plan-swap carry makes it in the swap block, #1278). A rejected restore returns
@@ -4744,6 +4744,11 @@ impl<L: Lane> PreparedNativeEffectBank for PreparedTruePeakLimiterBank<L> {
     /// Issue #1747: see [`LimiterCore::advance_clocks`].
     fn advance_clocks(&mut self, lanes_mask: u32, frames: u32) {
         debug_assert!(frames <= self.core.quantum);
+        debug_assert_eq!(
+            lanes_mask & every_lane(L::WIDTH) & !self.core.lanes_at_rest(),
+            0,
+            "a lane not at rest"
+        );
         self.core.advance_clocks(lanes_mask, frames as usize);
     }
 
