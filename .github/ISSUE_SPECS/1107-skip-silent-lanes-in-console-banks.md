@@ -39,7 +39,7 @@ active lane per bank), split that row into a qualification issue first.
 
 ## Dependencies
 
-- #1744, #1745, #1746, #1747 (see D3), and #1694 or a wasm32 run for the Simd4 leg. *Measure the console strip against its baseline* (S4, #1099) is closed as completed.
+- #1744, #1745, #1746, #1747 (see D3), #1765 and #1763 (see D4), and #1694 or a wasm32 run for the Simd4 leg. *Measure the console strip against its baseline* (S4, #1099) is closed as completed.
 - Note (root-authorized, 2026-10-06; #1329 Amendment 3 addendum, A2): a lane's state is at the
   kernel's exact fixed point no later than the node's exact-rest bound, `RestSamples` (#1329 D2),
   which holds for every input up to its stated peak. Silence skipping uses `RestSamples`, not
@@ -124,3 +124,43 @@ on the bank contract, effect by effect; (d) the chain compaction with gates 1-3.
     gate/transient shaper/soft clip;
   - #1747 the allocation-free per-lane swap (item 2);
   - for gate 1's Simd4 leg (item 4): #1694, or a wasm32 run of the differential.
+
+### D4 State at the start of attempt 2, and root's added constraints (2026-10-23)
+
+Delivered since D3 (all merged): #1744 (the V8 sparse row: silent lanes save nothing in the
+browser today, 242/247 against 247/251 us), #1745 and #1746 (`lanes_at_rest` on all six
+console effects, each with its bank-wide fast path), #1747 (`swap_bank_lanes`,
+`advance_clocks`, rack `BankStage::swap_lanes` and `BankChain::swap_lanes`), #1765 (builtin
+input, fader and matrix stage swaps through `BuiltinStage`), #1763 (`BypassShunt::feed_line`
+and the live effect stage's quiet-publication skip), #1767 (the fused fader+matrix stage is
+gone; every builtin bank is a separate stage).
+
+Corrections to D1:
+- Banks of one slot do NOT keep equal cursors (a whole-bank D7 reset moves one bank's cursors);
+  a swap is still exact because each payload is written and restored relative to its own
+  bank's cursor (#1747 D1).
+- A skipped lane's clocks advance through `advance_clocks(lanes_mask, frames)`, which a caller
+  may call only for lanes `lanes_at_rest` reports, on a block with no automation span, prepared
+  target or live write for those lanes, with exact `+0.0` input.
+- The bypass shunt's latency line: a skipped lane must leave its line words as a rendered
+  `+0.0` block would (feed `+0.0` through `feed_line`, or prove the words are already `+0.0`
+  and advance the cursor only).
+
+Constraints from the reviews of 2026-10-23 (Fable design review S5; #1747, #1765 verifiers):
+1. **Swap budget and hysteresis.** A lane whose activity toggles block to block must not swap
+   every block, and one block must not move every lane. Bound the swaps per block per chain (a
+   preallocated constant, recorded with its reason) and keep a newly silent lane in place for a
+   minimum residency before it may be packed out. Record the toggle case's cost in gate 3.
+2. **Equal collapse arming.** `BankChain::swap_lanes` refuses a cross-chain swap when the two
+   chains' collapse arming differs (#1747), so packing crosses only chains of equal arming.
+3. **Stored automation.** A lane with stored fader automation cannot move into a fader bank with
+   no automation slots (#1765); the packer must plan around the refusal, never hit it at render.
+4. **Graph-level lane maps.** A chain swap does not update the graph's lane maps (bank members,
+   gather/scatter, meter and observer lanes, response-snapshot lanes, the later plan-carry
+   pairing, #1765 verifier); the lane map of D1 must feed every one of them, or the slice must
+   prove that each reads through the chain.
+5. **Plan-level test.** #1765's swap test builds chains from the real stages by hand; this issue
+   owes one swap test on a graph-compiled plan, and its gate 1 differential runs on compiled
+   plans.
+6. **R7.** With real stages, a stale right channel restored after an in-chain swap on a collapsed
+   chain is guarded only by a debug assertion (#1747, #1765); gate 1 runs collapsed chains.
