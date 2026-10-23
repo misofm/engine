@@ -18,21 +18,16 @@ pub use runtime::{
 #[cfg(any(test, feature = "test-support"))]
 #[doc(hidden)]
 pub use runtime::{
-    TestOnlyFailedBufferCapture, TestOnlySelectedSplitFader, TestOnlySplitPairTableWitness,
-    test_only_arm_failed_buffer_capture, test_only_bank_meter_passes,
-    test_only_bank_sample_peak_passes, test_only_carry_payload_bytes,
-    test_only_completion_disabled, test_only_failed_buffer_capture, test_only_meter_input_counts,
-    test_only_meter_input_reset, test_only_observation_dispatch_counts,
-    test_only_observation_dispatch_reset, test_only_reset_carry_payload_bytes,
-    test_only_reset_selected_split_fader, test_only_reset_split_pair_table_witness,
-    test_only_resident_input_counts, test_only_resident_input_reset,
-    test_only_route_activity_built, test_only_route_drain_calls, test_only_route_drain_snapshots,
-    test_only_route_drained_counts, test_only_route_mix_counts, test_only_route_mix_reset,
-    test_only_selected_split_fader, test_only_set_bank_meter_declined,
-    test_only_set_bank_sample_peak_declined, test_only_set_completion_disabled,
-    test_only_set_route_fold_declined, test_only_set_scatter_redirect_declined,
-    test_only_set_source_in_place_declined, test_only_source_plane_counts,
-    test_only_source_plane_reset, test_only_split_pair_table_witness,
+    test_only_bank_meter_passes, test_only_bank_sample_peak_passes, test_only_carry_payload_bytes,
+    test_only_meter_input_counts, test_only_meter_input_reset,
+    test_only_observation_dispatch_counts, test_only_observation_dispatch_reset,
+    test_only_reset_carry_payload_bytes, test_only_resident_input_counts,
+    test_only_resident_input_reset, test_only_route_activity_built, test_only_route_drain_calls,
+    test_only_route_drain_snapshots, test_only_route_drained_counts, test_only_route_mix_counts,
+    test_only_route_mix_reset, test_only_set_bank_meter_declined,
+    test_only_set_bank_sample_peak_declined, test_only_set_route_fold_declined,
+    test_only_set_scatter_redirect_declined, test_only_set_source_in_place_declined,
+    test_only_source_plane_counts, test_only_source_plane_reset,
 };
 
 use core::cell::Cell;
@@ -236,28 +231,12 @@ pub struct GraphBuiltinBankResourceEstimate {
 pub struct GraphScalarOwnerResourceEstimate {
     pub total_bytes: u64,
     pub largest_allocation_bytes: u64,
-    /// The bounded boxed table reserved for possible serialized split owners. This is a separate
-    /// retained allocation from the two concrete fader/matrix owner boxes.
-    pub split_pair_table_bytes: u64,
-}
-
-/// Checked retained storage for the eligible bounded serialized split-owner table.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub struct GraphScalarSplitRuntimeResourceEstimate {
-    /// Number of split-owner entries the preparation bound reserves for possible selection.
-    pub possible_pair_count: u64,
-    /// Bytes in the boxed `[Box<dyn GraphRuntimeSplitPairProcessor>]` table allocation.
-    pub split_pair_table_bytes: u64,
-    pub total_bytes: u64,
-    pub largest_allocation_bytes: u64,
 }
 
 /// Checked runtime metadata retained by every graph executor. The semantic graph estimate does
-/// not include the lowered runtime layouts. A plain op stores its split slot inside `RuntimeUnit`;
-/// a bank stores it inside each `RuntimeOp` member. The larger derived delta is therefore the
-/// single safe per-emitted-op charge for mixed graphs. The corresponding containing allocation is
-/// bounded by the larger current `RuntimeUnit`/`RuntimeOp` layout multiplied by the same
-/// emitted-op bound. The inline slot is charged once, never once as an op and again as a unit.
+/// not include the lowered runtime layouts. The largest `RuntimeUnit`/`RuntimeOp` allocation is
+/// bounded by the larger of the two layouts multiplied by the emitted-op bound, and the executor
+/// owner by its own layout; both are reported for the largest-allocation cap only.
 ///
 /// The executor also retains two boxed tables it sizes at bind (issue #936): the indices of the
 /// units its render loop dispatches, and the `(claim, arena buffer)` rows of the source claims
@@ -268,16 +247,9 @@ pub struct GraphScalarSplitRuntimeResourceEstimate {
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct GraphRuntimeMetadataResourceEstimate {
     pub emitted_op_count: u64,
-    /// `Runtime`'s inline split-owner table field delta; this is the retained owner term charged.
-    pub runtime_field_bytes: u64,
-    pub runtime_op_layout_delta_bytes: u64,
-    pub runtime_unit_layout_delta_bytes: u64,
-    pub emitted_op_layout_delta_bytes: u64,
     pub runtime_op_containing_bytes: u64,
     pub runtime_unit_containing_bytes: u64,
-    /// The same table field measured in its containing `GraphExecutor` owner layout. It is
-    /// reported for the largest-allocation proof, but is not added a second time to `total_bytes`.
-    pub runtime_owner_field_bytes: u64,
+    /// The `GraphExecutor` owner layout, reported for the largest-allocation proof.
     pub runtime_owner_allocation_bytes: u64,
     /// Boxed response-owner binding table retained by the prepared runtime.
     pub response_binding_table_bytes: u64,
@@ -314,18 +286,12 @@ impl GraphRuntimeMetadataResourceEstimate {
         response_binding_string_bytes: u64,
         largest_response_binding_string_bytes: u64,
     ) -> Option<Self> {
-        let (_, runtime_field_bytes) = runtime::scalar_split_runtime_layout();
-        let (op_layout_delta_bytes, runtime_unit_layout_delta_bytes) =
-            runtime::scalar_split_op_layout();
-        let (runtime_owner_field_bytes, runtime_owner_allocation_bytes) =
-            scalar_split_runtime_owner_layout();
+        let runtime_owner_allocation_bytes = u64::try_from(core::mem::size_of::<GraphExecutor>())
+            .expect("runtime owner allocation fits u64");
         let runtime_op_bytes = u64::try_from(core::mem::size_of::<runtime::RuntimeOp>())
             .expect("runtime op layout fits u64");
         let runtime_unit_bytes = u64::try_from(core::mem::size_of::<runtime::RuntimeUnit>())
             .expect("runtime unit layout fits u64");
-        let emitted_op_layout_delta_bytes =
-            op_layout_delta_bytes.max(runtime_unit_layout_delta_bytes);
-        let emitted_op_delta_bytes = emitted_op_layout_delta_bytes.checked_mul(emitted_op_count)?;
         let runtime_op_containing_bytes = runtime_op_bytes.checked_mul(emitted_op_count)?;
         let runtime_unit_containing_bytes = runtime_unit_bytes.checked_mul(emitted_op_count)?;
         let response_binding_entry_bytes =
@@ -339,23 +305,16 @@ impl GraphRuntimeMetadataResourceEstimate {
         let block_end_unit_table_bytes = u64::try_from(core::mem::size_of::<u32>())
             .expect("block-end unit entry fits u64")
             .checked_mul(emitted_op_count)?;
-        let total_bytes = runtime_field_bytes.checked_add(emitted_op_delta_bytes)?;
-        let total_bytes = total_bytes
-            .checked_add(response_binding_table_bytes)?
-            .checked_add(response_binding_string_bytes)?;
+        let total_bytes =
+            response_binding_table_bytes.checked_add(response_binding_string_bytes)?;
         let total_bytes = total_bytes
             .checked_add(active_unit_table_bytes)?
             .checked_add(source_input_table_bytes)?
             .checked_add(block_end_unit_table_bytes)?;
         Some(Self {
             emitted_op_count,
-            runtime_field_bytes,
-            runtime_op_layout_delta_bytes: op_layout_delta_bytes,
-            runtime_unit_layout_delta_bytes,
-            emitted_op_layout_delta_bytes,
             runtime_op_containing_bytes,
             runtime_unit_containing_bytes,
-            runtime_owner_field_bytes,
             runtime_owner_allocation_bytes,
             response_binding_table_bytes,
             response_binding_string_bytes,
@@ -372,22 +331,6 @@ impl GraphRuntimeMetadataResourceEstimate {
                 .max(active_unit_table_bytes)
                 .max(source_input_table_bytes)
                 .max(block_end_unit_table_bytes),
-        })
-    }
-}
-
-impl GraphScalarSplitRuntimeResourceEstimate {
-    /// Computes only the checked split-table charge. Runtime and op/unit layout deltas are charged
-    /// by [`GraphRuntimeMetadataResourceEstimate`] for every graph.
-    pub fn checked_for(possible_pair_count: u64) -> Option<Self> {
-        let (table_entry_bytes, _) = runtime::scalar_split_runtime_layout();
-        let split_pair_table_bytes = table_entry_bytes.checked_mul(possible_pair_count)?;
-        let total_bytes = split_pair_table_bytes;
-        Some(Self {
-            possible_pair_count,
-            split_pair_table_bytes,
-            total_bytes,
-            largest_allocation_bytes: split_pair_table_bytes,
         })
     }
 }
@@ -2064,7 +2007,6 @@ pub struct GraphPreparedBuiltinBankInfo<'a> {
     pub backend: Backend,
     pub width: effect_contract::BankWidth,
     pub members: &'a [GraphNodeId],
-    pub control_delivery: BuiltinControlDelivery,
 }
 
 /// A strip stage whose state a plan swap carries (issue #1277 D1): the owner of a fader and mute
@@ -2077,17 +2019,14 @@ pub enum BuiltinStripOwner {
     Matrix,
 }
 
-/// What a builtin strip bank is (issue #1277 D1, D9): the split fader bank, the split matrix
-/// bank, or the fused stage that holds both owners' lanes in one slot, in the form a plan
-/// prepared between render calls takes. Two banks pair for a carry only when they are the same.
+/// What a builtin strip bank is (issue #1277 D1, D9): the fader bank or the matrix bank. Two
+/// banks pair for a carry only when they are the same.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub enum BuiltinStripStage {
     /// A fader and mute bank.
     Fader,
     /// A matrix and pan bank.
     Matrix,
-    /// The fused fader and matrix stage.
-    FaderMatrix,
 }
 
 impl BuiltinStripStage {
@@ -2096,25 +2035,13 @@ impl BuiltinStripStage {
     pub const fn holds(self, owner: BuiltinStripOwner) -> bool {
         matches!(
             (self, owner),
-            (Self::Fader | Self::FaderMatrix, BuiltinStripOwner::Fader)
-                | (Self::Matrix | Self::FaderMatrix, BuiltinStripOwner::Matrix)
+            (Self::Fader, BuiltinStripOwner::Fader) | (Self::Matrix, BuiltinStripOwner::Matrix)
         )
     }
 }
 
-/// How prepared builtin control producers are owned relative to render calls.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Default)]
-pub enum BuiltinControlDelivery {
-    #[default]
-    Concurrent,
-    BetweenRenderCalls,
-}
 /// Render contract for an already-prepared builtin bank.
 pub type BuiltinProcessor = Box<dyn GraphPreparedBuiltinBankProcessor>;
-pub type BuiltinPairFactory = fn(
-    BuiltinProcessor,
-    BuiltinProcessor,
-) -> Result<BuiltinProcessor, (BuiltinProcessor, BuiltinProcessor)>;
 
 pub trait GraphPreparedBuiltinBankProcessor: Send + Any {
     fn as_any(&self) -> &dyn Any;
@@ -2177,9 +2104,8 @@ pub trait GraphPreparedBuiltinBankProcessor: Send + Any {
         0
     }
     /// [`Self::drain_for_carry`] for the strip stage `owner`: apply every pending fader, mute or
-    /// matrix value of the lanes in `lanes` to lane state (issue #1277 D8). Only the cells of
-    /// `owner`'s half are read: in a fused bank the other owner's half is another call. The
-    /// default drains nothing and returns zero.
+    /// matrix value of the lanes in `lanes` to lane state (issue #1277 D8). The default drains
+    /// nothing and returns zero.
     fn drain_strip_for_carry(&mut self, owner: BuiltinStripOwner, lanes: u8) -> usize {
         let _ = (owner, lanes);
         0
@@ -2228,14 +2154,6 @@ pub trait GraphPreparedBuiltinBankProcessor: Send + Any {
     /// thread (#1504 D3). The default `0` is a bank that holds no live lane.
     fn live_lanes(&self) -> u8 {
         0
-    }
-    /// Preparation metadata only; render never reads this policy.
-    fn control_delivery(&self) -> BuiltinControlDelivery {
-        BuiltinControlDelivery::Concurrent
-    }
-    /// Preparation-only pairing hook. Render never queries or uses this metadata.
-    fn pair_factory(&self) -> Option<BuiltinPairFactory> {
-        None
     }
     /// Take the floored input arrival `a(n)` of each member, in lane order (#1647a, R17-2):
     /// `arrivals[l]` is lane `l`'s, and a lane past the slice is padding. The graph compiler calls
@@ -2526,7 +2444,6 @@ impl PreparedGraphPlan {
                 backend: bank.backend,
                 width: bank.scratch.width(),
                 members: &bank.members,
-                control_delivery: bank.processor.control_delivery(),
             })
     }
     /// Give each builtin bank its members' floored input arrivals `a(n)` (#1647a, R17-2), through
@@ -3453,63 +3370,6 @@ pub struct GraphBindingBlock<'a> {
     /// the snapshot it means; [`LiveSnapshot::ALL`] applies every value written.
     pub live_snapshot: LiveSnapshot,
 }
-/// Preparation-only constructor of a serialized scalar fader/matrix pair.
-///
-/// Only the whole-plan scalar oracle's per-node strip owners offer one, so the pairing surface
-/// exists only for tests and `test-support` (issue #1059).
-#[cfg(any(test, feature = "test-support"))]
-pub type ScalarPairFactory = fn(
-    Box<dyn GraphRuntimeProcessor>,
-    Box<dyn GraphRuntimeProcessor>,
-) -> Result<
-    Box<dyn GraphRuntimeProcessor>,
-    (
-        Box<dyn GraphRuntimeProcessor>,
-        Box<dyn GraphRuntimeProcessor>,
-    ),
->;
-
-/// A prepared owner for a serialized scalar fader/matrix interval whose two graph operations
-/// remain at their original schedule positions.
-///
-/// The fader half begins at the fader operation, while the matrix half finishes at the matrix
-/// operation. A settled fader may leave its private in-place output unmaterialized between those
-/// positions; [`complete_pending`](Self::complete_pending) is the infallible completion path used
-/// before an intervening execution or observer error escapes the render call.
-pub trait GraphRuntimeSplitPairProcessor: Send + Any {
-    /// Runs the original fader boundary, possibly recording a settled fader for later completion.
-    fn begin_fader(&mut self, block: GraphBindingBlock<'_>) -> Result<(), RenderError>;
-
-    /// Runs the original matrix boundary and settles any pending fader before returning.
-    fn finish_matrix(&mut self, block: GraphBindingBlock<'_>) -> Result<(), RenderError>;
-
-    /// Materializes a pending settled fader in its original output buffer.
-    ///
-    /// The graph executor supplies a block shape validated by the prepared render quantum, so
-    /// this operation cannot fail and never drains the matrix owner.
-    fn complete_pending(&mut self, block: GraphBindingBlock<'_>);
-
-    /// Take this block's node-time context before [`Self::begin_fader`] (#1647b), as
-    /// [`GraphRuntimeProcessor::set_block_time`] does for a bound node. The default keeps nothing.
-    fn set_block_time(&mut self, time: &GraphBlockTime<'_>) {
-        let _ = time;
-    }
-}
-
-/// Preparation-only constructor of a split scalar fader/matrix owner; test-only like
-/// [`ScalarPairFactory`] (issue #1059).
-#[cfg(any(test, feature = "test-support"))]
-pub type ScalarSplitPairFactory = fn(
-    Box<dyn GraphRuntimeProcessor>,
-    Box<dyn GraphRuntimeProcessor>,
-) -> Result<
-    Box<dyn GraphRuntimeSplitPairProcessor>,
-    (
-        Box<dyn GraphRuntimeProcessor>,
-        Box<dyn GraphRuntimeProcessor>,
-    ),
->;
-
 pub trait GraphRuntimeProcessor: Send + Any {
     /// Process one block in place.
     ///
@@ -3567,20 +3427,6 @@ pub trait GraphRuntimeProcessor: Send + Any {
     /// therefore declines: nothing has compared its two channels' words.
     fn channel_symmetry(&self) -> ChannelSymmetryWitness {
         ChannelSymmetryWitness::DECLINED
-    }
-
-    /// Preparation-only hook for the serialized scalar fader/matrix pair.
-    /// Render never queries this metadata. Test-only with the scalar oracle it pairs (#1059).
-    #[cfg(any(test, feature = "test-support"))]
-    fn scalar_pair_factory(&self) -> Option<ScalarPairFactory> {
-        None
-    }
-
-    /// Preparation-only factory for a split-owner serialized fader/matrix interval.
-    /// Render never queries this metadata. Test-only with the scalar oracle it pairs (#1059).
-    #[cfg(any(test, feature = "test-support"))]
-    fn scalar_split_pair_factory(&self) -> Option<ScalarSplitPairFactory> {
-        None
     }
 }
 /// Immutable post-node observation input. Observers cannot alter graph audio.
@@ -4120,17 +3966,17 @@ pub struct GraphStripMove {
 pub struct GraphStripLane {
     /// Whose lane it is.
     pub owner: BuiltinStripOwner,
-    /// What kind of bank holds it. A fused bank holds both owners' lanes at one location.
+    /// What kind of bank holds it.
     pub stage: BuiltinStripStage,
     /// Where it sits.
     pub location: GraphLaneLocation,
 }
 
 /// Every strip stage lane of a bound graph plan, as `(strip ID, lane)` pairs in program order
-/// (issue #1277 D1); `None` for any other plan. A split plan lists a strip's fader and matrix
-/// lanes separately; a fused plan lists both owners at the one location. Read off the render
-/// thread, before publication: a successor's preparation joins its own lanes with its
-/// predecessor's (recorded when that plan was prepared) by strip ID, never by location.
+/// (issue #1277 D1); `None` for any other plan. A strip's fader and matrix lanes are listed
+/// separately. Read off the render thread, before publication: a successor's preparation joins
+/// its own lanes with its predecessor's (recorded when that plan was prepared) by strip ID, never
+/// by location.
 pub fn builtin_strip_lanes(
     plan: &mut PreparedRenderPlan,
 ) -> Option<Vec<(Box<str>, GraphStripLane)>> {
@@ -5276,47 +5122,6 @@ pub fn test_only_executor_table_bytes() -> [u64; 2] {
     EXECUTOR_TABLE_BYTES.with(Cell::get)
 }
 
-/// Same retained executor owner with the split-table field removed from its embedded runtime.
-/// This layout witness lets resource accounting charge the field delta while using the complete
-/// `GraphExecutor` allocation for the largest-allocation cap.
-#[allow(dead_code)]
-struct GraphExecutorWithoutSplitPairTable {
-    runtime: runtime::RuntimeWithoutSplitPairTable,
-    sample_rate_hz: u32,
-    source_set: Option<GraphPreparedSourceSet>,
-    source_input_buffers: Box<[(usize, u32)]>,
-    active_units: Box<[u32]>,
-    identity: u64,
-    carry: Option<GraphCarryProgram>,
-    carry_inputs: Box<[GraphLaneMove]>,
-    carry_strips: Box<[GraphStripMove]>,
-    carry_effects: Box<[GraphEffectMove]>,
-    carry_scratch: Box<[u8]>,
-    next_block_sample: u64,
-    source_read_offset: u64,
-    node_carry_refused: u64,
-    observer_carry: Option<Box<ObserverCarryProgram>>,
-    carry_delays: Box<[GraphDelayMove]>,
-    compensation_lines: Vec<GraphDelayLine>,
-    carry_strip_delays: Box<[GraphStripDelayMove]>,
-    carry_routes: Box<[runtime::RouteCarryStep]>,
-    route_checks: Option<Box<RouteCarryChecks>>,
-    bind_identities: runtime::BindIdentities,
-    live_snapshot: Option<LiveSnapshot>,
-    jump_lengths: Option<Box<JumpLengthReader>>,
-}
-
-fn scalar_split_runtime_owner_layout() -> (u64, u64) {
-    let field_delta = core::mem::size_of::<GraphExecutor>()
-        .checked_sub(core::mem::size_of::<GraphExecutorWithoutSplitPairTable>())
-        .expect("split runtime owner field layout is retained");
-    (
-        u64::try_from(field_delta).expect("split runtime owner field layout fits u64"),
-        u64::try_from(core::mem::size_of::<GraphExecutor>())
-            .expect("split runtime owner allocation fits u64"),
-    )
-}
-
 impl GraphExecutor {
     fn new(
         plan: PreparedGraphPlan,
@@ -5804,14 +5609,6 @@ impl PreparedPlanExecutor for GraphExecutor {
             ) {
                 runtime.invalidate_observers_after_failure(time.absolute_sample);
                 host.silence();
-                #[cfg(any(test, feature = "test-support"))]
-                if !runtime::test_only_completion_disabled() {
-                    runtime.complete_pending(time.absolute_sample, live);
-                }
-                #[cfg(any(test, feature = "test-support"))]
-                runtime.test_only_capture_failed_buffer();
-                #[cfg(not(any(test, feature = "test-support")))]
-                runtime.complete_pending(time.absolute_sample, live);
                 return Err(error);
             }
             if let Err(error) =
@@ -5819,14 +5616,6 @@ impl PreparedPlanExecutor for GraphExecutor {
             {
                 runtime.invalidate_observers_after_failure(time.absolute_sample);
                 host.silence();
-                #[cfg(any(test, feature = "test-support"))]
-                if !runtime::test_only_completion_disabled() {
-                    runtime.complete_pending(time.absolute_sample, live);
-                }
-                #[cfg(any(test, feature = "test-support"))]
-                runtime.test_only_capture_failed_buffer();
-                #[cfg(not(any(test, feature = "test-support")))]
-                runtime.complete_pending(time.absolute_sample, live);
                 return Err(error);
             }
         }
@@ -6231,7 +6020,6 @@ mod tests {
             estimate.checked_add_scalar_owners(GraphScalarOwnerResourceEstimate {
                 total_bytes: u64::MAX,
                 largest_allocation_bytes: 64,
-                split_pair_table_bytes: 0,
             }),
             None
         );
@@ -6242,21 +6030,10 @@ mod tests {
     }
 
     #[test]
-    fn runtime_metadata_charge_covers_mixed_ops_once_and_refuses_overflow() {
+    fn runtime_metadata_charge_scales_with_emitted_ops_and_refuses_overflow() {
         let emitted = 3_u64;
         let resource = GraphRuntimeMetadataResourceEstimate::checked_for(emitted)
             .expect("checked runtime metadata");
-        let (op_delta, unit_delta) = runtime::scalar_split_op_layout();
-        let (_, runtime_field) = runtime::scalar_split_runtime_layout();
-        let (executor_field, _) = scalar_split_runtime_owner_layout();
-        assert_eq!(resource.runtime_field_bytes, runtime_field);
-        assert_eq!(resource.runtime_op_layout_delta_bytes, op_delta);
-        assert_eq!(resource.runtime_unit_layout_delta_bytes, unit_delta);
-        assert_eq!(resource.runtime_owner_field_bytes, executor_field);
-        assert_eq!(
-            resource.emitted_op_layout_delta_bytes,
-            op_delta.max(unit_delta)
-        );
         // Issue #936 and #1609: the executor's two bind-sized tables and the block-end unit table
         // each hold one entry per emitted op, so they scale with the op count.
         let doubled = GraphRuntimeMetadataResourceEstimate::checked_for(2 * emitted)
@@ -6278,13 +6055,6 @@ mod tests {
             assert!(table > 0, "a table is charged for emitted ops");
             assert_eq!(twice, 2 * table, "one entry per emitted op");
         }
-        // The executor's layout witness mirrors every field but the one it removes, the two #936
-        // tables included: the owner-level delta is then exactly the runtime-level one, and a
-        // table added to `GraphExecutor` alone would inflate it by its box.
-        assert_eq!(
-            executor_field, runtime_field,
-            "the split owner delta is the runtime field's alone"
-        );
 
         let mut estimate = empty_estimate();
         estimate
@@ -6309,23 +6079,6 @@ mod tests {
         assert!(estimate.checked_add_runtime_metadata(resource).is_none());
         assert_eq!(estimate, overflow_before);
         assert_ne!(overflow_before, before);
-    }
-
-    #[test]
-    fn split_table_resource_is_zero_when_declined_and_one_entry_when_eligible() {
-        let zero =
-            GraphScalarSplitRuntimeResourceEstimate::checked_for(0).expect("zero split table");
-        assert_eq!(zero, GraphScalarSplitRuntimeResourceEstimate::default());
-        let one =
-            GraphScalarSplitRuntimeResourceEstimate::checked_for(1).expect("one split table entry");
-        assert_eq!(one.possible_pair_count, 1);
-        assert!(one.split_pair_table_bytes > 0, "one entry is charged");
-        assert_eq!(one.total_bytes, one.split_pair_table_bytes);
-        assert_eq!(one.largest_allocation_bytes, one.split_pair_table_bytes);
-        assert_eq!(
-            GraphScalarSplitRuntimeResourceEstimate::checked_for(u64::MAX),
-            None
-        );
     }
 
     fn binding_plan() -> (PreparedGraphPlan, GraphRuntimeBindings, GraphNodeId) {

@@ -5943,14 +5943,6 @@ pub struct PreparedBuiltinsGraphBound {
     pub track_controls: Vec<TrackControlProducer>,
     pub plan: PreparedRenderPlan,
     pub meter_consumers: Vec<MeterConsumer>,
-    /// The selected fixture's private post-fader buffer, expressed as a lowered-program offset.
-    /// This is available only to the failed-render qualification seam.
-    #[cfg(feature = "test-support")]
-    #[doc(hidden)]
-    pub test_only_post_fader_buffer: Option<u32>,
-    #[cfg(feature = "test-support")]
-    #[doc(hidden)]
-    pub test_only_post_fader_node: Option<GraphNodeId>,
     /// The plan's gate handle, taken by the first [`Self::test_only_write`].
     #[cfg(any(test, feature = "test-support"))]
     test_gate: Option<engine::realtime::PlanRevisionGate>,
@@ -6779,8 +6771,6 @@ impl PreparedBuiltinsSession {
             } else {
                 fader.max(matrix).max(automation_largest)
             },
-            // No scalar owner forms a split pair any more; #1767 tranche 2b removes the field.
-            split_pair_table_bytes: 0,
         })
     }
 
@@ -7416,18 +7406,10 @@ impl<R> PreparedBuiltinsGraphArtifact<R> {
         track_controls: Vec<TrackControlProducer>,
         meter_consumers: Vec<MeterConsumer>,
     ) -> PreparedBuiltinsGraphBound {
-        #[cfg(feature = "test-support")]
-        let selected_split_fader = graph::test_only_selected_split_fader();
         PreparedBuiltinsGraphBound {
             track_controls,
             plan,
             meter_consumers,
-            #[cfg(feature = "test-support")]
-            test_only_post_fader_buffer: selected_split_fader
-                .as_ref()
-                .map(|selected| selected.buffer),
-            #[cfg(feature = "test-support")]
-            test_only_post_fader_node: selected_split_fader.map(|selected| selected.node),
             #[cfg(any(test, feature = "test-support"))]
             test_gate: None,
         }
@@ -11175,7 +11157,7 @@ mod tests {
     /// A drain applies only what its block's snapshot covers: a value written for a later
     /// revision stays pending and is applied by the block whose snapshot reaches it, and not
     /// before (#1312 D1, D12). Forty `Both` writes of one cell count `39` replaced writes per
-    /// channel cell (D2), and the fused stage applies the pair once.
+    /// channel cell (D2), and the fader bank applies the two equal cells once.
     #[test]
     fn a_drain_applies_the_newest_value_its_snapshot_covers_and_counts_the_rest() {
         let _guard = PAIR_WITNESS_LOCK

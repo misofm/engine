@@ -902,8 +902,7 @@ pub(crate) struct StripStageInventoryRow {
     pub(crate) id: Box<str>,
     /// Whose state the row holds.
     pub(crate) owner: graph::BuiltinStripOwner,
-    /// The kind of bank the lane sits in. A fused bank holds both owners at one location; a
-    /// split one holds each owner in a bank of its own.
+    /// The kind of bank the lane sits in: each owner has a bank of its own.
     pub(crate) stage: graph::BuiltinStripStage,
     /// Where the lane sits in this plan. Meaningful only to this plan's successor's carry
     /// program, which names it as the lane to copy from.

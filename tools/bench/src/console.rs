@@ -244,11 +244,9 @@ const GAIN_PAN_FEED_PAIR: [Workload; 2] = [
 ];
 
 /// The standing console row and its metered twin (issue #881): one session, prepared once through
-/// the `Concurrent` entry with no meter and once as the default web boot prepares it, with its
-/// meter set and its between-render-calls delivery, which fuses each cohort's fader and matrix
-/// into one stage. A meter observes and never changes signal flow, and the fused stage renders the
-/// split pair's bits, so their digests must agree, and the run asserts it before it emits either
-/// record. Their timings differ by the meters and the fusion together.
+/// the `Concurrent` entry with no meter and once with its meter set. A meter observes and never
+/// changes signal flow, so their digests must agree, and the run asserts it before it emits either
+/// record. Their timings differ by the meters.
 const METERED_PAIR: [Workload; 2] = [
     Workload::SixtyFourTrackConsole,
     Workload::SixtyFourTrackConsoleMetered,
