@@ -36,3 +36,12 @@ Measure first, change nothing in the engine.
 ## Dependencies
 
 #1750 merged (it adds `SessionRuntime::build_with_product_lanes`).
+
+## Evidence and decisions
+
+- Attempt 1 (2026-10-23). The row is a record shape of its own, `console_product_lanes` (workload kind `sixty_four_track_console_product_lanes`), not a new `Workload` variant: a variant would have to enter `tools/bench/src/floor.rs`'s exhaustive floor table, which is outside this spec's paths. It is timed by the session rows' own loop (`SessionMeasurement::run_prepared`, split out of `run_for` so both rows run one loop), measured straight after the session rows, emitted last. The in-run assertion and the aggregate validator hold its digest equal to `sixty_four_track_console`'s over the same window (blocks 0..1000).
+- The record count is 66, not 65: the runner counts records of both rounds, so one row adds two (64 -> 66 in `run-console-benchmark.sh` and `preflight-console-benchmark.sh`).
+- Gate 1: `scripts/operator/preflight-console-benchmark.sh --step opt3-1758` PASS, workload launches 0, `records_required: 66`.
+- Gate 3, descriptive (`run-console-benchmark.sh --step opt3-1758` at ddbdb68ab, one warmup and two rounds, exclusive lock, `MISO_ENGINE_BENCH_ALLOW_UNCONTROLLED=1` for load above the ceiling, loadavg about 7, cpu 31): `artifacts/steps/opt3-1758/`. All 66 records validated. Rounds 1 / 2, p50 per block: product-lane row 110.69 / 111.07 us, `sixty_four_track_console` 102.91 / 102.97 us, fader-ride quiet arm 112.07 / 111.70 us. Gap: +7.79 / +8.11 us per block, 7.6 % / 7.9 % of the standing row (min per block: 107.17 / 107.68 against 99.61 / 99.91 us). Digests equal (6bae1dd0...), 0 forbidden operations, 0 transactions published.
+- Reading: cause 1 holds. Rendered back to back with no alternation, the lanes still cost about 7.7 % of the standing console's block; the ride row's alternation explains at most about 1 us of #1750's 10 us. The gap is at least 2 %, so a successor is due (root files it). No per-stage split: the bench has no stage timer for a lane plan, and `perf record` does not run on this host (`kernel.perf_event_paranoid` 4).
+- #1750's note that the quiet arm's digest differs from the standing row's is a block-window difference (the ride row times blocks after its pre-roll); over the same window the bits are equal.
