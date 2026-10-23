@@ -102,14 +102,6 @@ pub enum Known {
     ///
     /// Owned by #1070.
     BindDeclinesBeforeValidating,
-    /// A lane's rendered bits depend on where its in-flight ramps are cut: by another lane's
-    /// retarget in the same bank (so the bank is not its scalar instances), and by a block
-    /// boundary (so the render is not partition-invariant, master plan P1). Narrowing: a scenario
-    /// either carries automation, on one lane only, or renders chunked blocks, never both; and a
-    /// restore carries the lane's own untouched snapshot, so it starts no ramp elsewhere.
-    ///
-    /// Owned by #1069.
-    RampCutsMoveBits,
 }
 
 /// One effect's randomized differential.
@@ -445,10 +437,6 @@ struct Shape {
     mono: bool,
     /// Hostile input words and hostile payload words are drawn.
     hostile: bool,
-    /// Under [`Known::RampCutsMoveBits`]: the scenario carries automation (on one lane) rather
-    /// than chunked blocks. Indexed by the seed like the quantum, so every ten consecutive seeds
-    /// pair every quantum with both, at every width (seed 3 automates at quantum 32).
-    automate: bool,
 }
 
 fn scenario(
@@ -475,7 +463,6 @@ fn scenario(
         capacity: draw.pick(&[1_u32, 2, 4, 8, 16]),
         mono,
         hostile: !mono && draw.chance(1, 2),
-        automate: (seed / QUANTA.len() as u64).is_multiple_of(2),
     };
     let bound = coverage.banks.iter().sum::<u64>();
     for &width in BankWidth::ALL {
@@ -984,15 +971,6 @@ fn run_width(
     // NaNs and infinities included. The track input stage sanitises non-finite words before any
     // effect sees them, so this is the contract's own D7 case rather than an engine input; and a
     // block that trips it resets the whole bank, so the scenario ends there (see below).
-    // `Some(lane)`: only that lane carries automation; `Some(lanes)`: none does.
-    let ramp_cuts = spec.known.contains(&Known::RampCutsMoveBits);
-    let automated = ramp_cuts.then(|| {
-        if shape.automate {
-            draw.below(lanes)
-        } else {
-            lanes
-        }
-    });
     let hostile_block = shape.hostile.then(|| {
         let half = spec.blocks / 2;
         (half + draw.below(spec.blocks - half), draw.below(lanes))
@@ -1123,33 +1101,31 @@ fn run_width(
         if let Some(preparation) = preparation
             && draw.chance(1, 3)
         {
-            let lane = automated.unwrap_or_else(|| draw.below(lanes));
-            if lane < lanes {
-                if let Some(arm) = arm.as_mut() {
-                    disengage(arm, bank.as_ref(), sizes, audited_calls, &context, coverage);
-                }
-                let twin = continuation
-                    .as_mut()
-                    .filter(|continuation| continuation.lane == lane)
-                    .map(|continuation| continuation.twin.as_mut());
-                if targets.apply(
-                    preparation,
-                    draw,
-                    descriptor,
-                    shape,
-                    lane,
-                    Receivers {
-                        scalar: scalars[lane].as_mut(),
-                        bank: bank.as_mut(),
-                        arm: arm.as_mut().map(|arm| arm.bank.as_mut()),
-                        twin,
-                    },
-                    audited_calls,
-                    &context,
-                    coverage,
-                ) {
-                    in_flight_until[lane] = in_flight_until[lane].max(first + IN_FLIGHT_SAMPLES);
-                }
+            let lane = draw.below(lanes);
+            if let Some(arm) = arm.as_mut() {
+                disengage(arm, bank.as_ref(), sizes, audited_calls, &context, coverage);
+            }
+            let twin = continuation
+                .as_mut()
+                .filter(|continuation| continuation.lane == lane)
+                .map(|continuation| continuation.twin.as_mut());
+            if targets.apply(
+                preparation,
+                draw,
+                descriptor,
+                shape,
+                lane,
+                Receivers {
+                    scalar: scalars[lane].as_mut(),
+                    bank: bank.as_mut(),
+                    arm: arm.as_mut().map(|arm| arm.bank.as_mut()),
+                    twin,
+                },
+                audited_calls,
+                &context,
+                coverage,
+            ) {
+                in_flight_until[lane] = in_flight_until[lane].max(first + IN_FLIGHT_SAMPLES);
             }
         }
 
@@ -1224,11 +1200,6 @@ fn run_width(
         let mut lane_spans = Vec::with_capacity(lanes);
         for lane in 0..lanes {
             let lane_invalid = invalid && draw.chance(1, 2);
-            if automated.is_some_and(|only| only != lane) {
-                offsets[lane + 1] = spans.len() as u32;
-                lane_spans.push(Vec::new());
-                continue;
-            }
             let drawn = draw_spans(
                 draw,
                 descriptor,
@@ -1266,14 +1237,8 @@ fn run_width(
         // --- Scalar oracle -----------------------------------------------------------------------
         // Only where no block-granular recovery can run: D7 zeroes a whole block whose output is
         // not finite, so a poisoned state is legitimately partition-dependent.
-        let chunkable = !(ramp_cuts && automated.is_some_and(|only| only < lanes));
-        let chunk = (chunkable
-            && frames > 1
-            && finite_input
-            && !shape.hostile
-            && !invalid
-            && draw.chance(1, 3))
-        .then(|| 1 + draw.below(frames - 1));
+        let chunk = (frames > 1 && finite_input && !shape.hostile && !invalid && draw.chance(1, 3))
+            .then(|| 1 + draw.below(frames - 1));
         let mut scalar_left = vec![0.0_f32; words];
         let mut scalar_right = vec![0.0_f32; words];
         let mut scalar_reports = Vec::with_capacity(lanes);
@@ -2174,10 +2139,7 @@ fn restore(
 ) -> Restored {
     let lanes = scalars.len();
     let lane = draw.below(lanes);
-    // Under `RampCutsMoveBits` a restore may not start a ramp on a lane the scenario keeps free
-    // of them, so it restores the lane's own untouched snapshot only.
-    let untouched = spec.known.contains(&Known::RampCutsMoveBits);
-    let source = if !untouched && draw.chance(1, 4) {
+    let source = if draw.chance(1, 4) {
         draw.below(lanes)
     } else {
         lane
@@ -2185,7 +2147,7 @@ fn restore(
     let mut payload = snapshot_scalar(scalars[source].as_ref(), sizes, armed);
     let mut claim = None;
     let mut rewritten = true;
-    match if untouched { 3 } else { draw.below(4) } {
+    match draw.below(4) {
         0 if spec.craft.is_some() => {
             claim = spec.craft.expect("checked")(draw, metadata, &mut payload);
             coverage.crafted_restores += 1;
@@ -2557,7 +2519,6 @@ pub fn d7_report_violations(factory: Box<dyn NativeEffectFactory>) -> Vec<String
         capacity: 1,
         mono: false,
         hostile: false,
-        automate: false,
     };
     let values: Vec<InitialParameterValue> = default_initial_values(descriptor).collect();
     let frames = QUANTUM as usize;
@@ -2830,7 +2791,6 @@ fn edge_ramp_restore_violations(factory: Box<dyn NativeEffectFactory>) -> Vec<St
             capacity: 2,
             mono: false,
             hostile: false,
-            automate: false,
         };
         let sizes = quality.maximum_state;
         for (index, parameter) in descriptor.parameters.iter().enumerate() {

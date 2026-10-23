@@ -30,3 +30,15 @@ No new test: the change is exact, and the existing differential and partition te
 ## Dependencies
 
 #1069 merged.
+
+## Evidence and decisions (attempt 1, 2026-10-23)
+
+- D1. `run_segment` takes `COEF`; `SegmentPlan::coefficients` comes from the same scan as `ramping`. At `RAMPING && !COEF` the step loop skips every coefficient-path slot (a compile-time `continue`, so the ratio slots 1 and 6 are skipped too, not only 10-13) and `frame_coefficients` runs once per segment. `FORCE_RAMPING` forces `COEF`, so the split test also compares the new arm with full stepping. Debug builds assert `Instance::coefficients_at_rest`.
+- D2. The coefficient path includes the attack and release parameter ramps (slots 2, 3, 7, 8): nothing in the kernel reads them, so a `!COEF` segment steps only threshold and makeup (slots 0, 4, 5, 9). This is exact only because the predicate covers them: a time parameter ramp can move while its coefficient ramp rests (`ramp_endpoint` reaches that case; a mutant that leaves them out of the predicate only is red there in release).
+- D3. `conformance::Known::RampCutsMoveBits` and its `Shape::automate` narrowing are deleted. No draw is consumed differently for any other effect.
+- Bench (frozen bench1069 workload, scratch, one run per binary): ThresholdAll -4.8 % at W8 and W4 (D1); D2 adds about -3 % at W4 and nothing at W8, on a noisy run. W8 None is +3.5 % against main, although the flat loop's source is unchanged: LLVM schedules that loop differently (llvm-mca znver3: 220 against 205 cycles per frame). Aligning loops to 64 bytes does not remove the difference, so it is not code placement. Not tuned (brief).
+- Correction (root ruling, one bounded try, 890518e01): the ramped arms out of line (`run_ramped_segment`, `#[inline(never)]`). Merge gate fixed before timing: both None rows within 1 % of main in both rounds, no row above +2 %. One run against main: W8 None +1.06 % / +1.71 % (fail); W4 None -0.16 % / +0.27 %; ThresholdAll -7.2 % (W8), -8.3 % (W4); RatioAll +1.3 % (W8), +0.2 % (W4); RatioLane0 +1.0 % (W8), +0.2 % (W4). **The gate fails on W8 None; not merged, not iterated.** Records: scratchpad bench1069/main-1773-c.txt, fix-1773-c.txt.
+
+## Root ruling (2026-10-23): closed as measured, not worth it
+
+The pre-set merge gate (W8 and W4 "None" within 1 % of main in both rounds; no row more than 2 % above main) failed after the one bounded correction: W8 None +1.06 % / +1.71 %. The change makes the common, unautomated path slower to make threshold automation faster (-7 % to -8 %), and it adds six `run_segment` instantiations. Not merged; the code is kept on the pushed branch codex/batch-opt7-1773 (head ce1ee668c; the correction is 890518e01). Only the dead `conformance::Known::RampCutsMoveBits` variant and its no-op narrowing are removed (this PR).

@@ -87,6 +87,10 @@ fn the_input_lpf_at_the_cutoff_maximum_reaches_exact_rest() {
 /// rendered nothing, and both banks render to past the arming frame. Asserted: the state is in the band before the arming
 /// frame and `+0.0` from it on, and the carried bank's output and state are the continuing bank's,
 /// bit for bit, on every block. A carry that dropped or reset the counter arms 1,024 frames late.
+///
+/// A third pass renders 32-frame blocks and retargets the high-pass to 10.5 Hz before block 7, so
+/// the 64-sample filter ramp is half done at the carry (#1777): a carry that dropped the ramp's
+/// countdown stops the carried lane's ramp there, and its bits part from the continuing lane's.
 #[test]
 fn a_carried_lane_arms_its_joint_flush_on_the_frame_the_exported_lane_would() {
     use builtins::BuiltinInputBank;
@@ -107,32 +111,42 @@ fn a_carried_lane_arms_its_joint_flush_on_the_frame_the_exported_lane_would() {
         || BuiltinInputBank::new(Backend::Simd4, BankWidth::Four, vec![input()]).expect("a bank");
     // The impulse on the block's first frame arms the counter on the first frame of a block; on
     // its last frame, on the last frame of a block, where a late armability test would skip it.
-    for impulse in [0, FRAMES - 1] {
+    // The 32-frame pass carries a filter ramp in flight.
+    const SHORT: usize = 32;
+    let retarget = builtins::prepare_input_filter_pair(48_000, 10.5, 0.0)
+        .expect("a 10.5 Hz high-pass")
+        .targets[0];
+    for (frames, impulse) in [(FRAMES, 0), (FRAMES, FRAMES - 1), (SHORT, 0)] {
         let armed_at = impulse + 1 + 4_096;
         let mut continuing = bank();
         let mut carried = bank();
-        let blocks = armed_at / FRAMES + 8;
+        let blocks = armed_at / frames + 8;
         for block in 0..blocks {
-            let mut left = vec![0.0_f32; FRAMES * LANES];
+            let mut left = vec![0.0_f32; frames * LANES];
             if block == 0 {
                 left[impulse * LANES] = 1.0e-11;
             }
             let mut right = left.clone();
             let (mut carried_left, mut carried_right) = (left.clone(), right.clone());
+            if frames == SHORT && block == 7 {
+                continuing
+                    .apply_prepared_filter(0, retarget)
+                    .expect("a member lane");
+            }
             if block == 8 {
                 let state = continuing.export_lane(0).expect("a member lane");
                 carried.import_lane(0, &state).expect("a member lane");
                 assert_eq!(
                     bank_lane_silence_words(&carried, 0),
-                    [((8 * FRAMES - 1 - impulse) as f32).to_bits(); 2],
+                    [((8 * frames - 1 - impulse) as f32).to_bits(); 2],
                     "the carried counter"
                 );
             }
-            continuing.process(&mut left, &mut right, FRAMES as u32);
+            continuing.process(&mut left, &mut right, frames as u32);
             // The carried bank renders nothing before the import: everything it holds then is
             // what the import wrote.
             if block >= 8 {
-                carried.process(&mut carried_left, &mut carried_right, FRAMES as u32);
+                carried.process(&mut carried_left, &mut carried_right, frames as u32);
             }
             if block >= 8 {
                 for (plane, (a, b)) in [(&left, &carried_left), (&right, &carried_right)]
@@ -152,8 +166,8 @@ fn a_carried_lane_arms_its_joint_flush_on_the_frame_the_exported_lane_would() {
                 );
             }
             let words = bank_lane_state_words(&continuing, 0);
-            let end = (block + 1) * FRAMES;
-            if end + FRAMES > armed_at && end < armed_at {
+            let end = (block + 1) * frames;
+            if end + frames > armed_at && end < armed_at {
                 let magnitudes = [words[0], words[1]].map(|bits| f32::from_bits(bits).abs());
                 assert!(
                     magnitudes.iter().all(|m| *m < lane::REST_EPS)
