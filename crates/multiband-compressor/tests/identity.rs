@@ -645,6 +645,9 @@ fn bank_full_reset_restores_different_crossover_defaults() {
     }
 }
 
+/// A state payload's three sections.
+type Sections = (Vec<u8>, Vec<u8>, Vec<u8>);
+
 /// One scalar render of `TOTAL` frames of [`partition_invariance`]'s signal in blocks of
 /// `partition`, with `spans` at frame 0 and `later` at frame 3,584: both channels' output and the
 /// closing state.
@@ -653,7 +656,7 @@ fn partition_render(
     partition: usize,
     spans: &[PreparedAutomationSpan],
     later: &[PreparedAutomationSpan],
-) -> (Vec<f32>, Vec<f32>, (Vec<u8>, Vec<u8>, Vec<u8>)) {
+) -> (Vec<f32>, Vec<f32>, Sections) {
     const TOTAL: usize = 4_096;
     let prepared = MultibandCompressorFactory
         .prepare(request_with(values, LinkMode::Maximum, 512, false))
