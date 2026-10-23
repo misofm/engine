@@ -7059,6 +7059,11 @@ impl PreparedBuiltinsSession {
     /// Lowering is infallible after `graph_builtin_bank_resource`: `with_builtin_banks` consumes
     /// the plan on error, so the read-only preflight is what makes the attach transactional and
     /// the `expect`s here are this crate's own planner invariants.
+    ///
+    /// Kept out of line: `scripts/check-scalar-oracle-absent.py` reads this symbol in the shipped
+    /// wasm and C ABI artifacts as its positive control (#1765 moved its body into
+    /// `lower_strip_banks`, which let the optimizer inline it).
+    #[inline(never)]
     pub fn into_graph_artifact_with_banks<R>(
         mut self,
         graph: PreparedGraphPlan,
