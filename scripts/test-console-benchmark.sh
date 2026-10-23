@@ -1281,6 +1281,7 @@ expect_accept "$product_lanes" 'the product-lane row'
 lanes_mutation() { expect_reject "$(printf '%s' "$product_lanes" | jq -c "$1")" "$2"; }
 lanes_mutation '.workload_kind = "sixty_four_track_console_effect_lanes" | .live_lanes = "fader_matrix+effects"' \
     'an effect-lanes arm that also attached strip channels'
+lanes_mutation '.standing_row = "sixty_four_track_app_shape"' 'a console product-lane arm read against the app-shape row'
 lanes_mutation '.transactions_published = 1' 'a product-lane row that wrote a lane'
 lanes_mutation '.p95_ns_per_block = 1' 'product-lane percentiles out of order'
 lanes_mutation '.render_total_forbidden_operations = 1' 'a product-lane row with a forbidden operation on render'
