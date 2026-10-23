@@ -79,12 +79,25 @@ None. It can run beside the predicate slices.
   `lanes_at_rest` reports it). Clocks: EQ per-lane `silence` (and the bank's
   `silent_fixed_point` on a whole-bank mask); limiter per-bank `Cursors` and per-lane `phase`
   (and its three bank flags as a rendered zero block leaves them); soft clip per-bank history
-  `pos`; gate bank-wide `ramp_frames_left` (block-split schedule only). Compressor and transient
-  shaper: none. Bounded by lanes, never by `frames`.
-- **Shared per-bank cursors never swap.** All banks of one slot keep equal cursors (limiter
-  `Cursors`, soft clip `pos`, shunt line cursor): asserted in the limiter and soft clip clock
-  tests and in the limiter gate-1 test. Payloads and shunt lines are walked relative to each
-  bank's own cursor, so a swap is exact either way.
+  `pos`; gate bank-wide `ramp_frames_left` (a schedule word no output bit reads; it keeps
+  `ramp_frames_left >= every lane's remaining`); compressor: no clock, but a whole-bank skip sets
+  `silent_fixed_point` as a rendered quiet block would (no output or payload word reads it).
+  Transient shaper: none. Bounded by lanes, never by `frames`. A caller may skip only a block
+  with no automation span, prepared target or live write for those lanes, and only lanes that
+  `lanes_at_rest` reports (stated in the trait doc; debug-asserted in the overrides).
+- **Shared per-bank cursors never swap**, and banks of one slot need not keep equal cursors (a
+  whole-bank D7 reset moves one limiter bank's cursors). The swap is exact anyway: each payload
+  is written and restored relative to its own bank's cursor (the limiter's `commit_lane` re-ages
+  the rings; the soft clip places ages relative to `pos`), and shunt lines are walked from each
+  line's own cursor.
+- **Chain swap and collapse (attempt 2).** A cross-chain swap is refused when the two chains'
+  `collapse_source` arming differs. Chosen over a per-lane source mask because the arming join
+  needs track identity and lives in `graph` (`arm_mono_collapse`); the refusal keeps every swap
+  exact without moving that join. Note for #1107: packing then crosses only chains of equal
+  arming. The channel-agreement flag after a cross swap is the AND of the two chains'
+  `carried_channel_agreement()`, taken before anything changes. Every slot must swap (an identity
+  slot is not skipped; a stage that cannot swap refuses the chain swap), and both stages must hold
+  the same full `EffectProgramKey`.
 
 ### D2 Per-lane field classes
 
@@ -103,8 +116,9 @@ bank-wide, not per lane; **X** per-block scratch; **A** padding mask (padded lan
 | compressor | `gain_reduction_db`, `ramps`, `rate_ramps` (both channels) | P |
 | compressor | `defaults[lane]` (both channels) | D |
 | compressor | `words` (designed coefficients) | R (`commit_channel`) |
-| compressor | `sample_rate`, `bypass`, `link_mode`, `automation_capacity`, `state_sizes`, `silent_bypass` | U (`same_program` to bind) |
-| compressor | `silent_fixed_point` / `active` | B / A |
+| compressor | `sample_rate`, `bypass`, `link_mode`, `automation_capacity`, `state_sizes` | U (`same_program` to bind) |
+| compressor | `width`, `quantum` | U |
+| compressor | `silent_fixed_point`, `silent_bypass` / `active` | B / A |
 | gate-expander | `gain_db`, `hysteresis.open/hold`, `timing`, `ramps` | P |
 | gate-expander | `defaults[lane]` | D |
 | gate-expander | `coef.attack/release/hold_samples` | R (`rederive_lane`) |
@@ -115,16 +129,19 @@ bank-wide, not per lane; **X** per-block scratch; **A** padding mask (padded lan
 | soft-clip | `ramps[..].current` | R (same word as the state value) |
 | soft-clip | older history rows | never read before overwritten; restore zeroes them |
 | soft-clip | `bypass`, `automation_capacity`, `width`, `quantum` | U |
-| soft-clip | `pos` / `nonfinite` / `active` | B (clock) / X / A |
+| soft-clip | `pos` / `active` | B (clock) / A |
+| soft-clip | `nonfinite` (`NonFiniteReport`: block count, last failed lane mask) | B (see note) |
 | transient-shaper | `env.fast/slow`, `ramps` | P |
 | transient-shaper | `Ramps.defaults[lane]` | D |
 | transient-shaper | `coefficients`, `bypass`, `link_mode`, `automation_capacity`, `state_sizes`, `width`, `quantum` | U (rate row, program key) |
-| transient-shaper | `nonfinite` / `active` | X / A |
+| transient-shaper | `nonfinite` | B (see note) |
+| transient-shaper | `active` | A |
 | true-peak-limiter | `history`, `main_ring`, `required_ring`, `box_ring`, `reduction`, `prefix`, `box_sum`, `phase`, `limit`/`release` ramps, `lookahead_ms` | P (rings relative to the cursors) |
 | true-peak-limiter | `left_defaults/right_defaults[lane]` | D |
 | true-peak-limiter | `lane` (`LaneShape`), `gain_linked` | R (`commit_lane`, `gain_state_agrees`) |
 | true-peak-limiter | `width`, `sample_rate`, `automation_capacity`, `quantum`, `shape`, `coefficients`, `silent_bypass` | U |
-| true-peak-limiter | `cursors`, `silent_fixed_point` / `report` / `active` | B / X / A |
+| true-peak-limiter | `cursors`, `silent_fixed_point` / `active` | B / A |
+| true-peak-limiter | `report` (`NonFiniteReport`) | B (see note) |
 | `EffectBankStage` | effect state | P + D (`swap_bank_lanes`) |
 | `EffectBankStage` | `witness[lane]` | S |
 | `EffectBankStage` | `bypassed`, `width`, `quantum`, `offsets`, `layout`, `carry_refused` | U / B |
@@ -133,6 +150,13 @@ bank-wide, not per lane; **X** per-block scratch; **A** padding mask (padded lan
 | `LiveControlEffectBankStage` | dry shunt latency-line words | S (`BypassShunt::swap_line_lanes`, each from its own cursor) |
 | `LiveControlEffectBankStage` | `offsets`, `staging`, `packed`, `staged_spans`, `crossfade`, `samples`, shunt `dry_*` | X |
 | `LiveControlEffectBankStage` | `width`, `quantum`, `layout`, shunt cursor, `unbound`, `carry_refused` | U / B |
+
+Note on `NonFiniteReport` (soft clip, transient shaper, limiter): a lasting record of the bank's
+D7 events (rejected-block count, lane mask of the most recent rejected block). Not swapped: it is
+an event log of the bank's lane positions at that block, the render path only writes it, and
+nothing reads it to decide a later bit (crate tests read it). The per-lane D7 counts a caller
+attributes to a strip come from each block's `BankProcessReport`, which the caller already
+routes by the lane map.
 
 ### D3 Evidence (attempt 1)
 
@@ -143,7 +167,8 @@ bank-wide, not per lane; **X** per-block scratch; **A** padding mask (padded lan
   `FullToDefaults` reset still equal. The EQ case swaps lanes whose band kinds differ.
 - Gate 2: every swap call is measured with `bench_support::alloc` thread counters after warm-up:
   0 allocations.
-- Clock tests: EQ, limiter, soft clip and gate render N zero blocks against a twin that calls
-  `advance_clocks`; every state and payload word is equal after each block.
+- Clock tests: EQ, limiter and soft clip render N zero blocks against a twin that calls
+  `advance_clocks`; every state and payload word is equal after each block. The gate's clock is a
+  schedule word no output bit reads; it has no test (attempt 2 deleted the one that read it).
 - Not covered: the `designed`/`unrestored` bits and the agreement AND reach only the collapse
   witness, and the rack mock does not collapse.
