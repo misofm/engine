@@ -168,7 +168,8 @@ fn swap(
 /// channels of a lane and a restore must carry both.
 ///
 /// Red if a restore leaves a lane field behind (an envelope word, a ramp's step or countdown), if
-/// it writes one channel's words into the other, or if the swap allocates.
+/// it writes one channel's words into the other, if the swap allocates, or if a strip's prepared
+/// defaults stay behind on its old lane (the last block, after a full reset of every bank).
 #[test]
 fn a_swapped_strip_renders_its_unmoved_twins_bits() {
     for width in WIDTHS.iter().copied() {
@@ -177,7 +178,6 @@ fn a_swapped_strip_renders_its_unmoved_twins_bits() {
         let sizes = scalar(request(&default_values(), SWAP_RATE, LinkMode::DualMono))
             .metadata
             .state_sizes;
-        let mut scratch = vec![0_u8; 2 * sizes.total().expect("a state total") as usize];
         for seed in 0..6_u64 {
             let link = LINKS[seed as usize % LINKS.len()];
             let mut draw = Draw::new(0x1747_5000 + seed);
@@ -194,6 +194,9 @@ fn a_swapped_strip_renders_its_unmoved_twins_bits() {
             };
             let mut banks: Pair = [make(0), make(1)];
             let mut twins: Pair = [make(0), make(1)];
+            let total = effect_contract::swap_bank_lanes_scratch_bytes(banks[0].as_ref(), sizes)
+                .expect("a bank that declares its defaults");
+            let mut scratch = vec![0_u8; total];
             let home: Vec<(usize, usize)> = (0..strips).map(|s| (s / lanes, s % lanes)).collect();
             let mut place = home.clone();
             let within = {
@@ -285,6 +288,30 @@ fn a_swapped_strip_renders_its_unmoved_twins_bits() {
                     bank_payload(banks[bank].as_ref(), lane, sizes),
                     bank_payload(twins[twin_bank].as_ref(), twin_lane, sizes),
                     "{width:?} seed {seed}: strip {strip}'s payload at the end"
+                );
+            }
+            // A full reset re-seeds each lane from its prepared defaults, which moved with it.
+            for bank in banks.iter_mut().chain(twins.iter_mut()) {
+                bank.reset(ResetKind::FullToDefaults);
+            }
+            let frames = 1 + draw.below(QUANTUM as usize);
+            let input: Vec<[Vec<f32>; 2]> = (0..strips)
+                .map(|_| [loud(&mut draw, frames), loud(&mut draw, frames)])
+                .collect();
+            let none: Vec<Vec<PreparedAutomationSpan>> = vec![Vec::new(); strips];
+            let moved = render_pair(&mut banks, width, &place, first_sample, &input, &none);
+            let still = render_pair(&mut twins, width, &home, first_sample, &input, &none);
+            for strip in 0..strips {
+                let (bank, lane) = place[strip];
+                let (twin_bank, twin_lane) = home[strip];
+                assert_eq!(
+                    moved[strip], still[strip],
+                    "{width:?} {link:?} seed {seed}: strip {strip}'s block after a full reset"
+                );
+                assert_eq!(
+                    bank_payload(banks[bank].as_ref(), lane, sizes),
+                    bank_payload(twins[twin_bank].as_ref(), twin_lane, sizes),
+                    "{width:?} {link:?} seed {seed}: strip {strip}'s payload after a full reset"
                 );
             }
         }

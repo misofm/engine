@@ -1067,6 +1067,14 @@ macro_rules! bank_impl {
             fn advance_clocks(&mut self, lanes_mask: u32, frames: u32) {
                 self.advance_skipped_clocks(lanes_mask, frames);
             }
+
+            fn lane_default_bytes(&self) -> Option<usize> {
+                Some(LANE_DEFAULT_BYTES)
+            }
+
+            fn exchange_lane_defaults(&mut self, lane: usize, bytes: &mut [u8]) -> bool {
+                self.exchange_defaults(lane, bytes)
+            }
         }
     };
 }
@@ -1081,6 +1089,31 @@ impl<L: Lane> PreparedGate<L, false> {
     fn advance_skipped_clocks(&mut self, lanes_mask: u32, frames: u32) {
         let _ = lanes_mask;
         self.ramp_frames_left = self.ramp_frames_left.saturating_sub(frames);
+    }
+}
+// REALTIME_POLICY_END
+
+/// One lane's prepared defaults in bytes: every parameter of both channels, one `f32` each.
+const LANE_DEFAULT_BYTES: usize = 2 * PARAMETER_COUNT * 4;
+
+// REALTIME_POLICY_BEGIN: #1747, the prepared defaults move with a render-time lane swap.
+impl<L: Lane> PreparedGate<L, false> {
+    /// [`PreparedNativeEffectBank::exchange_lane_defaults`]: lane `lane`'s `defaults` row, left
+    /// then right, each parameter in descriptor order as little-endian `f32` bits. The row is the
+    /// gate's only prepared per-lane value: `reset_lane_full` (a full reset and the D7 recovery)
+    /// re-seeds the lane from it, and every other per-lane word is payload or derived from it.
+    fn exchange_defaults(&mut self, lane: usize, bytes: &mut [u8]) -> bool {
+        if lane >= L::WIDTH || bytes.len() != LANE_DEFAULT_BYTES {
+            return false;
+        }
+        let words = self.defaults[lane].iter_mut().flatten();
+        for (value, chunk) in words.zip(bytes.chunks_exact_mut(4)) {
+            let mut incoming = [0_u8; 4];
+            incoming.copy_from_slice(chunk);
+            chunk.copy_from_slice(&value.to_bits().to_le_bytes());
+            *value = f32::from_bits(u32::from_le_bytes(incoming));
+        }
+        true
     }
 }
 // REALTIME_POLICY_END

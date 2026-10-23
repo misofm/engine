@@ -11,7 +11,9 @@
 
 use super::*;
 use dsp_reference::randomized::{Draw, Profile};
-use effect_contract::{PrepareEffectLimits, PreparedPorts, swap_bank_lanes};
+use effect_contract::{
+    PrepareEffectLimits, PreparedPorts, swap_bank_lanes, swap_bank_lanes_scratch_bytes,
+};
 
 const QUANTUM: u32 = 128;
 const RATES: [u32; 4] = [44_100, 48_000, 88_200, 96_000];
@@ -26,6 +28,9 @@ const BEFORE: usize = 10;
 const BETWEEN: usize = 6;
 /// Blocks after the second swap.
 const AFTER: usize = 20;
+/// The last block: every bank is first reset to its prepared defaults, so a strip renders from
+/// the defaults of the lane it now sits on.
+const RESET: usize = BEFORE + BETWEEN + AFTER;
 
 /// A request as the session compiler prepares a console slot: unkeyed, unbypassed.
 fn request(
@@ -185,7 +190,9 @@ fn swap(
 /// first swap automates every parameter of every strip, so every ramp is in flight across it. The
 /// two blocks before the second swap automate only one of its two strips, every parameter, and the
 /// block after it automates nothing, so a ramping lane moves into a bank that has settled and must
-/// keep ramping there with no new target to restart it.
+/// keep ramping there with no new target to restart it. The last block resets all four banks
+/// to their defaults and automates nothing, so a moved strip whose prepared defaults stayed
+/// behind re-seeds from another strip's values.
 fn run(rig: &mut Rig, seed: u64) {
     let lanes = rig.lanes;
     let strips = 2 * lanes;
@@ -202,10 +209,16 @@ fn run(rig: &mut Rig, seed: u64) {
     } else {
         (1, across.1)
     };
-    let total = rig.sizes.total().expect("a payload size") as usize;
-    let mut scratch = vec![0_u8; 2 * total];
+    let total = swap_bank_lanes_scratch_bytes(rig.banks[0].as_ref(), rig.sizes)
+        .expect("a bank that declares its defaults");
+    let mut scratch = vec![0_u8; total];
     let mut first_sample = 0_u64;
-    for block in 0..BEFORE + BETWEEN + AFTER {
+    for block in 0..=RESET {
+        if block == RESET {
+            for bank in &mut rig.banks {
+                bank.reset(ResetKind::FullToDefaults);
+            }
+        }
         if block == BEFORE {
             swap(rig, &mut place, inside, 0, inside_other, &mut scratch);
         }
@@ -214,7 +227,7 @@ fn run(rig: &mut Rig, seed: u64) {
         }
         let everyone = block + 1 == BEFORE;
         let only_mover = (BEFORE + BETWEEN - 2..BEFORE + BETWEEN).contains(&block);
-        let nobody = block == BEFORE + BETWEEN;
+        let nobody = block == BEFORE + BETWEEN || block == RESET;
         let mut left = vec![vec![0.0_f32; FRAMES * lanes]; 4];
         let mut right = left.clone();
         let mut spans: Vec<Vec<Vec<PreparedAutomationSpan>>> = vec![vec![Vec::new(); lanes]; 4];
@@ -329,8 +342,9 @@ fn case(width: BankWidth, seed: u64) {
 }
 
 /// **Gate 1: a strip whose lane is swapped, inside one bank and across two, with its ramps in
-/// flight, renders bit for bit as its twin that never moved, and ends on the twin's payload; the
-/// swap allocates nothing. At every bank width the build has.**
+/// flight, renders bit for bit as its twin that never moved, still does after a full reset to its
+/// prepared defaults, and ends on the twin's payload; the swap allocates nothing. At every bank
+/// width the build has.**
 #[test]
 fn a_swapped_lane_renders_as_its_unswapped_twin() {
     bench_support::alloc::assert_installed();
