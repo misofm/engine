@@ -2185,6 +2185,36 @@ pub trait GraphPreparedBuiltinBankProcessor: Send + Any {
     fn live_lanes(&self) -> u8 {
         0
     }
+    /// The lanes of this bank at **exact rest**, bit `n` for lane `n`, padded lanes included
+    /// (issue #1781, #1107 D3): one block of exact `+0.0` on both planes would leave every state
+    /// word of the lane bit-identical and write exact `+0.0` on both of its output planes. A
+    /// **clock** -- a word a `+0.0` block advances by the block's length alone -- is not a state
+    /// word for the claim; [`Self::advance_builtin_clocks`] advances it.
+    ///
+    /// `BuiltinStage` forwards it to `rack::BankStage::lanes_at_rest`, so it carries that
+    /// method's contract: it is asked after this block's [`Self::begin_block`] (the drain) and
+    /// [`Self::set_block_time`], before [`Self::process`], and it answers for the block those two
+    /// prepared. A lane with work of its own in the block (stored automation, a timed operation)
+    /// is not at rest. From state only: allocation-free, lock-free and bounded by the lane count.
+    ///
+    /// The default `0` declines every lane: a bank that has not written the predicate is never
+    /// skipped, and a wrong set bit is the only answer that could be unsound.
+    fn builtin_lanes_at_rest(&self) -> u32 {
+        0
+    }
+    /// Advance the clocks of the lanes in `lanes_mask` (bit `n` is lane `n`) by `frames`, exactly
+    /// as one rendered block of `frames` frames of exact `+0.0` would, for a block the caller skips
+    /// (issue #1781). The caller's contract is `rack::BankStage::advance_clocks`': every input
+    /// word of the block is `+0.0`, the mask is every lane of the bank (a bank is skipped whole),
+    /// and each lane in it is one [`Self::builtin_lanes_at_rest`] reported for the block. After the
+    /// call every state word is bit-identical to what that rendered block would leave.
+    ///
+    /// The default is a no-op: exact for a bank with no clocks, and sound for any bank whose
+    /// predicate declines, because a declined lane is never skipped. Allocation-free and bounded
+    /// by the lane count, never by `frames`.
+    fn advance_builtin_clocks(&mut self, lanes_mask: u32, frames: u32) {
+        let _ = (lanes_mask, frames);
+    }
     /// Take the floored input arrival `a(n)` of each member, in lane order (#1647a, R17-2):
     /// `arrivals[l]` is lane `l`'s, and a lane past the slice is padding. The graph compiler calls
     /// it once, off the render thread, at the end of `compile_with_builtins`, from

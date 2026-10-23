@@ -25,6 +25,9 @@ math.workspace = true
 
 [dev-dependencies]
 bench-support.workspace = true
+# Issue #1781: the shared rest-probe driver (`conformance::rest_probe`) for the input, fader and
+# matrix stages' rest claims.
+conformance.workspace = true
 dsp-reference.workspace = true
 sha2.workspace = true
 # Issue #1059: a test pins that the scalar backend is refused, and `Backend::Scalar` exists

@@ -4537,6 +4537,20 @@ impl GraphPreparedBuiltinBankProcessor for BuiltinBankProcessor {
     }
 
     // REALTIME_POLICY_BEGIN
+    /// The input bank's own rest mask (issue #1781, [`BuiltinInputBank::lanes_at_rest`]). The
+    /// drain applies every value readable under the block's snapshot to lane state before this
+    /// is asked, so the bank's words are the block's; a write the snapshot does not cover waits
+    /// in its cell for a later block's drain, which runs whether or not that block is skipped,
+    /// and has nothing to do in this one. So no reader term is needed.
+    fn builtin_lanes_at_rest(&self) -> u32 {
+        self.bank.lanes_at_rest()
+    }
+
+    /// The input's silence counters ([`BuiltinInputBank::advance_clocks`]).
+    fn advance_builtin_clocks(&mut self, lanes_mask: u32, frames: u32) {
+        self.bank.advance_clocks(lanes_mask, frames);
+    }
+
     fn carried_input_lanes(&self) -> Option<usize> {
         Some(self.bank.active_lanes())
     }
@@ -5162,6 +5176,27 @@ impl GraphPreparedBuiltinBankProcessor for FaderBankProcessor {
     fn live_lanes(&self) -> u8 {
         live_lane_mask(self.controls.iter().map(Option::is_some))
     }
+    // REALTIME_POLICY_BEGIN
+    /// The fader bank's own rest mask ([`BuiltinFaderBank::lanes_at_rest`]) minus every lane
+    /// that holds stored automation (issue #1781). The drain applies every live value readable
+    /// under the block's snapshot first, so the bank's words are the block's, and a write the
+    /// snapshot does not cover waits for a later block's drain. An automated lane is declined
+    /// whatever its curve: its block runs the timed path ([`FaderEventDriver`]), which may land an
+    /// operation inside the block and advances the lane's event cursors and held-ramp obligations
+    /// by the block's node time on every rendered block (`FaderEventDriver::finish`), and no clock
+    /// advance here reproduces that. The bank has no clock of its own, so the default no-op
+    /// `advance_builtin_clocks` is exact for every lane this reports.
+    fn builtin_lanes_at_rest(&self) -> u32 {
+        let automated = self
+            .automation
+            .iter()
+            .enumerate()
+            .fold(0_u32, |mask, (lane, slot)| {
+                mask | (u32::from(slot.is_some()) << lane)
+            });
+        self.bank.lanes_at_rest() & !automated
+    }
+    // REALTIME_POLICY_END
     fn process(
         &mut self,
         left: &mut [f32],
@@ -5442,6 +5477,15 @@ impl GraphPreparedBuiltinBankProcessor for MatrixBankProcessor {
     fn live_lanes(&self) -> u8 {
         live_lane_mask(self.controls.iter().map(Option::is_some))
     }
+    // REALTIME_POLICY_BEGIN
+    /// The matrix bank's own rest mask ([`BuiltinMatrixBank::lanes_at_rest`], issue #1781). The
+    /// drain applies every value readable under the block's snapshot first, so the bank's words
+    /// are the block's; the bank has no clock, so the default no-op `advance_builtin_clocks` is
+    /// exact.
+    fn builtin_lanes_at_rest(&self) -> u32 {
+        self.bank.lanes_at_rest()
+    }
+    // REALTIME_POLICY_END
     fn process(
         &mut self,
         left: &mut [f32],
@@ -14203,9 +14247,16 @@ mod tests {
                     .flatten()
                     .all(|cell| cell.cell.is_none() && cell.vca.len() == 1)
             );
-            let (fixed, _) = fixed.run(40, 128);
+            let (fixed_blocks, _) = fixed.run(40, 128);
+            // #1781: the fader processor's rest mask keeps the settled unautomated lane (`t00`)
+            // and declines the automated one (`t01`), whatever its curve does.
+            assert_eq!(
+                fixed.processor.builtin_lanes_at_rest() & 0b11,
+                0b01,
+                "an automated fader lane is never at rest: {backend:?}"
+            );
             let (ridden, events) = ridden.run(40, 128);
-            assert_eq!(fixed, ridden, "{backend:?}");
+            assert_eq!(fixed_blocks, ridden, "{backend:?}");
             assert!(
                 events
                     .iter()

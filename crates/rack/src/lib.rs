@@ -518,6 +518,64 @@ pub trait BankStage: Send {
         0
     }
 
+    /// The lanes of this stage at their **exact rest** for the coming block, as a bitmask: bit
+    /// `l` set means lane `l` is at rest (issue #1781; the consumer is #1107's whole-bank skip).
+    ///
+    /// # The claim (#1107 D3)
+    ///
+    /// Lane `l` is at rest when one block of exact `+0.0` on both planes of the lane, processed
+    /// as [`process`](Self::process) would process it, would leave every state word of the lane
+    /// bit-identical and write exact `+0.0` to both of its output planes. Raw bits: `-0.0` is not
+    /// `+0.0`. A **clock** -- a word a `+0.0` block advances by the block's length alone, never by
+    /// the signal -- is not a state word for the claim, as in
+    /// `PreparedNativeEffectBank::lanes_at_rest`; [`advance_clocks`](Self::advance_clocks)
+    /// advances it for a skipped block. Work the block itself brings -- a staged span or target,
+    /// a timed operation, a crossfade to advance, a tap to accumulate -- clears the bit.
+    ///
+    /// # When it is asked
+    ///
+    /// At the block boundary on the render thread, after this block's
+    /// [`begin_block`](Self::begin_block) (the drain) and, for a builtin stage, after the graph's
+    /// `set_block_time`, and before [`process`](Self::process): the answer is for the block the
+    /// drain prepared. From state only: `&self`, allocation-free, lock-free and bounded by the
+    /// lane count and the prepared state size.
+    ///
+    /// A padded lane is answered on its own state; the padding contract feeds it `+0.0`.
+    ///
+    /// The default `0` declines every lane: a stage that has not written the predicate is never
+    /// skipped, and a wrong set bit is the only answer that could be unsound.
+    fn lanes_at_rest(&self) -> u32 {
+        0
+    }
+
+    /// Advance the clocks of the lanes in `lanes_mask` exactly as [`process`](Self::process) on
+    /// `block` would, for a block the caller skips (issue #1781; the consumer is #1107).
+    ///
+    /// # The caller's contract
+    ///
+    /// `block`'s planes hold exact `+0.0` on every lane (`frames * lanes` words each);
+    /// `lanes_mask` is every lane of the bank, padded lanes included, because a bank is skipped
+    /// whole; and every bit is one [`lanes_at_rest`](Self::lanes_at_rest) reported for this block,
+    /// after its drain. The caller calls this once for each block it skips, in place of
+    /// `process` or `process_mono`.
+    ///
+    /// # What it owes
+    ///
+    /// After the call the stage's state is bit-identical to what `process(block)` on that zero
+    /// block would leave: the effect's clocks advanced, and anything the stage stages for a later
+    /// block fed (a live stage's dry shunt line takes the `+0.0` block). It takes the block, not
+    /// only `frames`, so a stage that stages its input for a later block feeds those words rather
+    /// than synthesising them. The planes are not written: the caller already holds the `+0.0`
+    /// output.
+    ///
+    /// The default is a no-op: exact for a stage with no clock and no staged line, and sound for
+    /// any stage whose predicate declines, because a declined lane is never skipped. On the render
+    /// thread at a block boundary: allocation-free, lock-free and bounded by the lane count and
+    /// the staged line's length.
+    fn advance_clocks(&mut self, lanes_mask: u32, block: BankBlock<'_>) {
+        let _ = (lanes_mask, block);
+    }
+
     /// Which side of the fader/matrix seam this stage sits on.
     ///
     /// The default is [`SeamSide::UpstreamOfSeam`], which is the **conservative** answer here and
@@ -1096,6 +1154,24 @@ impl BankStage for EffectBankStage {
     fn seam_side(&self) -> SeamSide {
         SeamSide::UpstreamOfSeam
     }
+
+    // REALTIME_POLICY_BEGIN
+    /// The effect's own mask, forwarded (issue #1781). This stage hands the bank no span, no
+    /// target and no sidechain on any block, so its block is exactly the one
+    /// `PreparedNativeEffectBank::lanes_at_rest` answers for. The prepared `bypass` this stage
+    /// keeps is the bank's own, from its program key, and is read here only by the response
+    /// snapshot: the bank's `process_bank` runs its prepared bypass path itself, so the effect's
+    /// predicate already answers for it, and no lane needs declining here.
+    fn lanes_at_rest(&self) -> u32 {
+        self.processor.lanes_at_rest()
+    }
+
+    /// The effect's clocks, forwarded with the block's length (issue #1781). The stage stages
+    /// nothing for a later block.
+    fn advance_clocks(&mut self, lanes_mask: u32, block: BankBlock<'_>) {
+        self.processor.advance_clocks(lanes_mask, block.frames);
+    }
+    // REALTIME_POLICY_END
 
     fn supports_mono_collapse(&self) -> bool {
         self.processor.supports_mono_collapse()
@@ -2154,6 +2230,61 @@ impl BankStage for LiveControlEffectBankStage {
                 mask | (u8::from(channel.is_some()) << lane)
             })
     }
+
+    // REALTIME_POLICY_BEGIN
+    /// The effect's own mask minus every lane that has work of its own in this block, read after
+    /// this block's drain (issue #1781):
+    ///
+    /// * a **staged span** (`offsets[l + 1] > offsets[l]`): the bank would apply it;
+    /// * a **staged prepared target**: the process body would apply it before the bank runs;
+    /// * a lane that **reads the dry block** -- bypassed, settled or crossfading -- whose output
+    ///   is the shunt's latency-matched dry signal, not the wet `+0.0`, and a **running bypass
+    ///   crossfade**, which the block advances;
+    /// * an **armed observation tap**, which the block accumulates into.
+    ///
+    /// The effect's mask answers for a block with no span and no target, which is what is left.
+    /// The quiet skip of #1763 is covered: a drain that skips the cell walk keeps the last walk's
+    /// partition and `LaneWalk`, and a walk is skipped only after one that staged no span, no
+    /// target and left no crossfade running, so every `offsets` window is empty and no target
+    /// prefix is read (`walk.targets` is false). The shunt's latency line is not a term: a
+    /// skipped block feeds it in [`Self::advance_clocks`], as a rendered one does.
+    fn lanes_at_rest(&self) -> u32 {
+        let mut rest = self.processor.lanes_at_rest();
+        let observations = self.observations.as_deref();
+        for (lane, control) in self.lanes.iter().enumerate() {
+            let spans = self.offsets[lane + 1] > self.offsets[lane];
+            let targets = self.walk.targets
+                && control
+                    .as_ref()
+                    .is_some_and(|control| !control.prepared_targets().is_empty());
+            let dry = control
+                .as_ref()
+                .is_some_and(|control| control.needs_dry() || control.bypass_ramping());
+            let tap = observations
+                .and_then(|lanes| lanes.get(lane))
+                .and_then(Option::as_ref)
+                .is_some_and(ObservationLane::any_armed);
+            if spans || targets || dry || tap {
+                rest &= !(1 << lane);
+            }
+        }
+        rest
+    }
+
+    /// The effect's clocks, forwarded with the block's length, and the shunt's latency line fed
+    /// the `+0.0` block exactly as the process body feeds it on a block no lane reads dry
+    /// ([`BypassShunt::feed_line`], issue #1781): a later bypass edge then reads the line words a
+    /// never-skipped run holds. Every lane is at rest, so no lane reads dry and the process body
+    /// would have fed the line and not captured. A collapsed process body feeds the left plane
+    /// twice; this feeds both planes of the skipped block, which are both `+0.0`, so the line takes
+    /// the same words either way and this method has no collapsed form.
+    fn advance_clocks(&mut self, lanes_mask: u32, block: BankBlock<'_>) {
+        self.processor.advance_clocks(lanes_mask, block.frames);
+        if let Some(shunt) = self.shunt.as_mut() {
+            shunt.feed_line(block.left, block.right);
+        }
+    }
+    // REALTIME_POLICY_END
 
     // REALTIME_POLICY_BEGIN
     /// [`LiveControlEffectBankStage::process`] with the bank call collapsed onto the left plane.
@@ -4468,6 +4599,31 @@ impl BankChain {
     pub fn active(&self) -> &[bool] {
         &self.active
     }
+
+    // REALTIME_POLICY_BEGIN
+    /// The lanes of this chain at exact rest for the coming block, bit `l` for lane `l`, within
+    /// the chain's lanes (issue #1781; the consumer is #1107's whole-bank skip): the AND of
+    /// [`BankStage::lanes_at_rest`] over every slot that has an active lane. Asked after this
+    /// block's drains (`begin_block` on every slot), as each stage's answer is.
+    ///
+    /// A slot with no active lane never runs, so it contributes every lane. A slot active on some
+    /// lanes still runs over the whole resident block, so it answers its inactive (identity)
+    /// lanes from its own state, as it answers a padded lane: such a lane is fed `+0.0` by the
+    /// chain whenever the chain is skipped, and the stage's predicate holds or clears its bit on
+    /// what the stage would do to it. Allocation-free; one call per slot.
+    #[must_use]
+    pub fn lanes_at_rest(&self) -> u32 {
+        let lanes = if self.lanes >= 32 {
+            u32::MAX
+        } else {
+            (1_u32 << self.lanes) - 1
+        };
+        self.slots
+            .iter()
+            .filter(|slot| slot.has_active_lanes())
+            .fold(lanes, |rest, slot| rest & slot.stage.lanes_at_rest())
+    }
+    // REALTIME_POLICY_END
     /// Completed planar/AoSoA round-trips: exactly one per rendered block per chain.
     #[must_use]
     pub const fn transposes(&self) -> u64 {
@@ -7119,6 +7275,47 @@ mod tests {
         chain
             .run(&mut planes, frames, 0, LiveSnapshot::ALL)
             .expect("run");
+    }
+
+    /// #1781: a chain's rest mask is the AND of its running slots' masks, within its lanes. A
+    /// slot with no active lane never runs and contributes every lane; a slot active on some
+    /// lanes answers all of them from its own state.
+    ///
+    /// Test value: a chain that ANDs in a slot that never runs (declining a bank it could skip),
+    /// skips a running slot's answer on its identity lanes, or reports a lane past its own.
+    #[test]
+    fn a_chain_rests_a_lane_every_running_slot_rests() {
+        struct Rest(u32);
+        impl BankStage for Rest {
+            fn process(&mut self, _block: BankBlock<'_>) -> Result<(), RenderError> {
+                Ok(())
+            }
+            fn lanes_at_rest(&self) -> u32 {
+                self.0
+            }
+        }
+        let chain = |slots: Vec<BankSlot>| {
+            BankChain::new(
+                AoSoaScratch::new(BankWidth::Four, 8).expect("scratch"),
+                vec![true; 4].into_boxed_slice(),
+                slots,
+            )
+            .expect("chain")
+        };
+        let rested = chain(vec![
+            slot(vec![true; 4], Box::new(Rest(u32::MAX))),
+            // Active on lanes 0 and 1 only, and it still answers lane 3.
+            slot(vec![true, true, false, false], Box::new(Rest(0b0111))),
+            // Never runs: its declining answer does not count.
+            slot(vec![false; 4], Box::new(Rest(0))),
+        ]);
+        assert_eq!(rested.lanes_at_rest(), 0b0111);
+        assert_eq!(chain(vec![]).lanes_at_rest(), 0b1111);
+        assert_eq!(
+            chain(vec![slot(vec![true; 4], Box::new(PassThrough))]).lanes_at_rest(),
+            0,
+            "a stage that has not written the predicate declines"
+        );
     }
 
     /// #1504 D3: `run` skips a slot with no active lane, so a slot that holds a live lane while it

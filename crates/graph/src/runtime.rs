@@ -5451,6 +5451,19 @@ impl BankStage for BuiltinStage {
     fn live_lanes(&self) -> u8 {
         self.0.live_lanes()
     }
+    // REALTIME_POLICY_BEGIN
+    /// The bank's rest mask, forwarded
+    /// ([`GraphPreparedBuiltinBankProcessor::builtin_lanes_at_rest`], issue #1781).
+    fn lanes_at_rest(&self) -> u32 {
+        self.0.builtin_lanes_at_rest()
+    }
+    /// The bank's clock advance, forwarded with the block's length
+    /// ([`GraphPreparedBuiltinBankProcessor::advance_builtin_clocks`], issue #1781). A builtin
+    /// bank has no line fed by its input, so the `+0.0` planes are not read.
+    fn advance_clocks(&mut self, lanes_mask: u32, block: BankBlock<'_>) {
+        self.0.advance_builtin_clocks(lanes_mask, block.frames);
+    }
+    // REALTIME_POLICY_END
     fn qualification_counters(&self) -> [u64; 2] {
         self.0.qualification_counters()
     }
