@@ -50,7 +50,7 @@ edition = "2024"
 rust-version = "1.97.1"
 publish = false
 version = "0.1.0"
-license = "Apache-2.0"
+license = "FSL-1.1-ALv2"
 
 [workspace.dependencies]
 engine = { path = "crates/engine", version = "0.1.0" }
