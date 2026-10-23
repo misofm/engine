@@ -656,13 +656,29 @@ impl LanePeerMut<'_> {
     }
 }
 
-/// The scratch a lane swap of `layout` needs: two payloads (`effect_contract::swap_bank_lanes`),
-/// or `usize::MAX`, which no scratch holds, on overflow.
-fn lane_swap_scratch(layout: &EffectLaneLayout) -> usize {
-    usize::try_from(layout.payload_bytes())
-        .ok()
-        .and_then(|payload| payload.checked_mul(2))
-        .unwrap_or(usize::MAX)
+/// The scratch a lane swap of `processor`'s lanes under `layout` needs
+/// ([`effect_contract::swap_bank_lanes_scratch_bytes`]: two payloads and one lane's prepared
+/// defaults), or `None` -- the stage cannot swap -- when the bank has not declared its defaults or
+/// the size overflows.
+fn lane_swap_scratch(
+    processor: &dyn PreparedNativeEffectBank,
+    layout: &EffectLaneLayout,
+) -> Option<usize> {
+    effect_contract::swap_bank_lanes_scratch_bytes(processor, layout.state_sizes)
+}
+
+/// Whether `processor` can swap a lane with `peer`'s with a scratch of `scratch_bytes`: it
+/// declares its defaults, `peer` declares the same size, and the scratch holds
+/// [`lane_swap_scratch`]. The check [`effect_contract::swap_bank_lanes`] would refuse
+/// ([`effect_contract::LaneSwapRefusal::Defaults`] or `Scratch`), made before any write.
+fn lane_swap_scratch_fits(
+    processor: &dyn PreparedNativeEffectBank,
+    peer: &dyn PreparedNativeEffectBank,
+    layout: &EffectLaneLayout,
+    scratch_bytes: usize,
+) -> bool {
+    processor.lane_default_bytes() == peer.lane_default_bytes()
+        && lane_swap_scratch(processor, layout).is_some_and(|needed| scratch_bytes >= needed)
 }
 
 // REALTIME_POLICY_BEGIN
@@ -1097,21 +1113,38 @@ impl BankStage for EffectBankStage {
     }
 
     fn lane_swap_scratch_bytes(&self) -> usize {
-        lane_swap_scratch(&self.layout)
+        lane_swap_scratch(&*self.processor, &self.layout).unwrap_or(0)
     }
 
     // REALTIME_POLICY_BEGIN
-    /// Both lanes exist, the peer is an [`EffectBankStage`] of this layout, and the scratch holds
-    /// two payloads.
+    /// Both lanes exist, the peer is an [`EffectBankStage`] of this layout, both banks declare
+    /// prepared defaults of one size, and the scratch holds
+    /// [`effect_contract::swap_bank_lanes_scratch_bytes`].
     fn can_swap_lanes(&self, lane: usize, peer: LanePeer<'_>, scratch_bytes: usize) -> bool {
         lane < self.lanes()
-            && scratch_bytes >= lane_swap_scratch(&self.layout)
             && match peer {
-                LanePeer::Same(other_lane) => other_lane < self.lanes(),
+                LanePeer::Same(other_lane) => {
+                    other_lane < self.lanes()
+                        && lane_swap_scratch_fits(
+                            &*self.processor,
+                            &*self.processor,
+                            &self.layout,
+                            scratch_bytes,
+                        )
+                }
                 LanePeer::Other(stage, other_lane) => stage
                     .as_any()
                     .and_then(|any| any.downcast_ref::<Self>())
-                    .is_some_and(|other| other_lane < other.lanes() && other.layout == self.layout),
+                    .is_some_and(|other| {
+                        other_lane < other.lanes()
+                            && other.layout == self.layout
+                            && lane_swap_scratch_fits(
+                                &*self.processor,
+                                &*other.processor,
+                                &self.layout,
+                                scratch_bytes,
+                            )
+                    }),
             }
     }
 
@@ -1915,22 +1948,30 @@ impl BankStage for LiveControlEffectBankStage {
     }
 
     fn lane_swap_scratch_bytes(&self) -> usize {
-        lane_swap_scratch(&self.layout)
+        lane_swap_scratch(&*self.processor, &self.layout).unwrap_or(0)
     }
 
     // REALTIME_POLICY_BEGIN
-    /// Both lanes exist, the peer is a [`LiveControlEffectBankStage`] of this layout, the scratch
-    /// holds two payloads, and every per-lane part of the two lanes has the same shape: see
-    /// [`LiveControlEffectBankStage::lane_swap_fits`].
+    /// Both lanes exist, the peer is a [`LiveControlEffectBankStage`] of this layout, both banks
+    /// declare prepared defaults of one size, the scratch holds
+    /// [`effect_contract::swap_bank_lanes_scratch_bytes`], and every per-lane part of the two
+    /// lanes has the same shape: see [`LiveControlEffectBankStage::lane_swap_fits`].
     fn can_swap_lanes(&self, lane: usize, peer: LanePeer<'_>, scratch_bytes: usize) -> bool {
-        scratch_bytes >= lane_swap_scratch(&self.layout)
-            && match peer {
-                LanePeer::Same(other_lane) => self.lane_swap_fits(lane, self, other_lane),
-                LanePeer::Other(stage, other_lane) => stage
-                    .as_any()
-                    .and_then(|any| any.downcast_ref::<Self>())
-                    .is_some_and(|other| self.lane_swap_fits(lane, other, other_lane)),
-            }
+        let fits = |other: &Self, other_lane: usize| {
+            lane_swap_scratch_fits(
+                &*self.processor,
+                &*other.processor,
+                &self.layout,
+                scratch_bytes,
+            ) && self.lane_swap_fits(lane, other, other_lane)
+        };
+        match peer {
+            LanePeer::Same(other_lane) => fits(self, other_lane),
+            LanePeer::Other(stage, other_lane) => stage
+                .as_any()
+                .and_then(|any| any.downcast_ref::<Self>())
+                .is_some_and(|other| fits(other, other_lane)),
+        }
     }
 
     /// Every per-lane field moves with the strip, in this order: the effect's state payload

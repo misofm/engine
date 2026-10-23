@@ -2493,14 +2493,14 @@ fn swap_payload_input(
 fn rotate_lane_defaults<'one, 'two>(
     first: &mut (dyn PreparedNativeEffectBank + 'one),
     first_lane: usize,
-    mut second: Option<&mut (dyn PreparedNativeEffectBank + 'two)>,
+    second: Option<&mut (dyn PreparedNativeEffectBank + 'two)>,
     second_lane: usize,
     spare: &mut [u8],
 ) -> bool {
     // first = X, spare = A.
     let mut taken = first.exchange_lane_defaults(first_lane, spare);
     // second = A, spare = B.
-    taken &= match second.as_deref_mut() {
+    taken &= match second {
         Some(bank) => bank.exchange_lane_defaults(second_lane, spare),
         None => first.exchange_lane_defaults(second_lane, spare),
     };
@@ -2641,8 +2641,7 @@ pub fn swap_bank_lanes(
         None => first.restore_track_state_payload(second_track, state_layout_version, from_first),
     };
     if restored.is_err() {
-        let undone =
-            rotate_lane_defaults(first, first_lane, second.as_deref_mut(), second_lane, spare);
+        let undone = rotate_lane_defaults(first, first_lane, second, second_lane, spare);
         debug_assert!(undone, "a checked lane's defaults exchange");
         // Precondition: the first lane's own payload, under its own defaults again.
         let own = swap_payload_input(first_payload, sizes);
@@ -2778,7 +2777,7 @@ mod carry_tests {
 
 #[cfg(test)]
 mod lane_swap_tests {
-    use super::{LaneSwapRefusal, swap_bank_lanes};
+    use super::{LaneSwapRefusal, swap_bank_lanes, swap_bank_lanes_scratch_bytes};
     use crate::{
         BankProcessReport, BankWidth, EffectBankProcessBlock, PreparedNativeEffectBank, ResetKind,
         StatePayloadError, StatePayloadInput, StatePayloadOutput, StatePayloadSizes,
@@ -2789,21 +2788,35 @@ mod lane_swap_tests {
         left_bytes: 4,
         right_bytes: 4,
     };
-    const SCRATCH: usize = 24;
+    /// The prepared defaults bytes per lane of [`words`].
+    const DEFAULTS: usize = 3;
 
-    /// Four lanes of three words (common, left, right). `refuse_restore_call` names the restore
-    /// call (counted from 1) that refuses; every other restore commits.
+    /// Four lanes of three words (common, left, right), and per lane `defaults` prepared default
+    /// bytes, distinct per lane and per seed (`None`: undeclared). `refuse_restore_call` names
+    /// the restore call (counted from 1) that refuses; every other restore commits.
     struct Words {
         lanes: [[u32; 3]; 4],
+        defaults: Option<[Vec<u8>; 4]>,
         restores: u32,
         refuse_restore_call: Option<u32>,
     }
 
     fn words(seed: u32, refuse_restore_call: Option<u32>) -> Words {
+        with_defaults(seed, refuse_restore_call, Some(DEFAULTS))
+    }
+
+    fn with_defaults(seed: u32, refuse_restore_call: Option<u32>, bytes: Option<usize>) -> Words {
         Words {
             lanes: core::array::from_fn(|lane| {
                 let base = seed + 10 * lane as u32;
                 [base, base + 1, base + 2]
+            }),
+            defaults: bytes.map(|bytes| {
+                core::array::from_fn(|lane| {
+                    (0..bytes)
+                        .map(|byte| (seed as u8).wrapping_add((16 * lane + 5 * byte + 200) as u8))
+                        .collect()
+                })
             }),
             restores: 0,
             refuse_restore_call,
@@ -2856,24 +2869,88 @@ mod lane_swap_tests {
             *lane = [word(input.common), word(input.left), word(input.right)];
             Ok(())
         }
+
+        fn lane_default_bytes(&self) -> Option<usize> {
+            self.defaults.as_ref().map(|defaults| defaults[0].len())
+        }
+
+        fn exchange_lane_defaults(&mut self, lane: usize, bytes: &mut [u8]) -> bool {
+            let Some(own) = self.defaults.as_mut().and_then(|all| all.get_mut(lane)) else {
+                return false;
+            };
+            if own.len() != bytes.len() {
+                return false;
+            }
+            own.swap_with_slice(bytes);
+            true
+        }
     }
 
-    /// #1747: every refusal of [`swap_bank_lanes`] leaves both lanes' payloads as they were,
-    /// including the one where the second restore refuses after the first committed, which the
-    /// undo must put back; and an accepted swap exchanges the payloads exactly.
+    /// One bank's lanes: payload words and defaults bytes.
+    type Lanes = ([[u32; 3]; 4], Option<[Vec<u8>; 4]>);
+
+    fn lanes(bank: &Words) -> Lanes {
+        (bank.lanes, bank.defaults.clone())
+    }
+
+    /// #1747: every refusal of [`swap_bank_lanes`] leaves both lanes' payloads and prepared
+    /// defaults as they were, including the restore refusals after the defaults rotated, which
+    /// the undo must put back; and an accepted swap exchanges the payloads and defaults exactly.
     ///
-    /// Test value: a swap that restores before it has both snapshots, skips the undo after a
-    /// second-restore refusal, or names the wrong refusal.
+    /// Test value: a swap that restores before it has both snapshots, accepts a bank with
+    /// undeclared or mismatched defaults, sizes its scratch without the defaults, skips the
+    /// payload or rotation undo after a restore refusal, leaves the defaults behind on an
+    /// accepted swap, or names the wrong refusal.
     #[test]
     fn every_lane_swap_refusal_leaves_both_lanes_unchanged() {
+        let scratch_bytes =
+            swap_bank_lanes_scratch_bytes(&words(1, None), SIZES).expect("declared defaults");
+        assert_eq!(scratch_bytes, 24 + DEFAULTS);
+        assert_eq!(
+            swap_bank_lanes_scratch_bytes(&with_defaults(1, None, None), SIZES),
+            None
+        );
         type Case = (Words, Option<Words>, usize, usize, usize, LaneSwapRefusal);
-        let cases: [Case; 6] = [
+        let cases: [Case; 10] = [
+            // The defaults are checked before the scratch, so a short scratch does not mask them.
+            (
+                with_defaults(1, None, None),
+                Some(words(100, None)),
+                1,
+                2,
+                0,
+                LaneSwapRefusal::Defaults,
+            ),
+            (
+                words(1, None),
+                Some(with_defaults(100, None, None)),
+                1,
+                2,
+                scratch_bytes,
+                LaneSwapRefusal::Defaults,
+            ),
+            (
+                with_defaults(1, None, None),
+                None,
+                1,
+                2,
+                scratch_bytes,
+                LaneSwapRefusal::Defaults,
+            ),
+            (
+                words(1, None),
+                Some(with_defaults(100, None, Some(DEFAULTS + 1))),
+                1,
+                2,
+                64,
+                LaneSwapRefusal::Defaults,
+            ),
             (
                 words(1, None),
                 Some(words(100, None)),
                 1,
                 2,
-                SCRATCH - 1,
+                scratch_bytes - 1,
                 LaneSwapRefusal::Scratch,
             ),
             (
@@ -2881,7 +2958,7 @@ mod lane_swap_tests {
                 Some(words(100, None)),
                 usize::MAX,
                 2,
-                SCRATCH,
+                scratch_bytes,
                 LaneSwapRefusal::Lane,
             ),
             (
@@ -2889,24 +2966,25 @@ mod lane_swap_tests {
                 Some(words(100, None)),
                 1,
                 4,
-                SCRATCH,
+                scratch_bytes,
                 LaneSwapRefusal::Snapshot,
             ),
+            // Step 2 refuses after the rotation: the rotation is undone.
             (
                 words(1, Some(1)),
                 Some(words(100, None)),
                 1,
                 2,
-                SCRATCH,
+                scratch_bytes,
                 LaneSwapRefusal::Restore,
             ),
-            // The second bank refuses the second restore: the first bank's lane is undone.
+            // Step 3 refuses: the first bank's lane and the rotation are undone.
             (
                 words(1, None),
                 Some(words(100, Some(1))),
                 1,
                 2,
-                SCRATCH,
+                scratch_bytes,
                 LaneSwapRefusal::Restore,
             ),
             // One bank whose second restore (of three: two plus the undo) refuses.
@@ -2915,15 +2993,14 @@ mod lane_swap_tests {
                 None,
                 1,
                 2,
-                SCRATCH,
+                scratch_bytes,
                 LaneSwapRefusal::Restore,
             ),
         ];
         for (index, (mut first, mut second, first_lane, second_lane, scratch, refusal)) in
             cases.into_iter().enumerate()
         {
-            let (first_before, second_before) =
-                (first.lanes, second.as_ref().map(|bank| bank.lanes));
+            let (first_before, second_before) = (lanes(&first), second.as_ref().map(lanes));
             let mut scratch = vec![0_u8; scratch];
             let result = swap_bank_lanes(
                 &mut first,
@@ -2937,22 +3014,45 @@ mod lane_swap_tests {
                 &mut scratch,
             );
             assert_eq!(result, Err(refusal), "case {index}");
-            assert_eq!(first.lanes, first_before, "case {index}: first bank");
+            assert_eq!(lanes(&first), first_before, "case {index}: first bank");
             assert_eq!(
-                second.map(|bank| bank.lanes),
+                second.as_ref().map(lanes),
                 second_before,
                 "case {index}: second bank"
             );
         }
+        // Accepted, across two banks and within one: payloads and defaults trade exactly, and
+        // nothing else moves.
         let (mut first, mut second) = (words(1, None), words(100, None));
-        let mut scratch = [0_u8; SCRATCH];
+        let mut scratch = vec![0_u8; scratch_bytes];
         assert_eq!(
             swap_bank_lanes(&mut first, 1, Some(&mut second), 2, 1, SIZES, &mut scratch),
             Ok(())
         );
+        let (mut expected_first, mut expected_second) =
+            (lanes(&words(1, None)), lanes(&words(100, None)));
+        let (from_first, from_second) = (expected_first.clone(), expected_second.clone());
+        let (Some(first_defaults), Some(second_defaults)) =
+            (expected_first.1.as_mut(), expected_second.1.as_mut())
+        else {
+            unreachable!("declared defaults");
+        };
+        expected_first.0[1] = from_second.0[2];
+        expected_second.0[2] = from_first.0[1];
+        first_defaults[1].clone_from(&from_second.1.as_ref().expect("declared")[2]);
+        second_defaults[2].clone_from(&from_first.1.as_ref().expect("declared")[1]);
         assert_eq!(
-            (first.lanes[1], second.lanes[2]),
-            (words(100, None).lanes[2], words(1, None).lanes[1])
+            (lanes(&first), lanes(&second)),
+            (expected_first, expected_second)
         );
+        let mut one = words(1, None);
+        assert_eq!(
+            swap_bank_lanes(&mut one, 0, None, 3, 1, SIZES, &mut scratch),
+            Ok(())
+        );
+        let mut expected = lanes(&words(1, None));
+        expected.0.swap(0, 3);
+        expected.1.as_mut().expect("declared").swap(0, 3);
+        assert_eq!(lanes(&one), expected);
     }
 }

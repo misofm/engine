@@ -4,10 +4,14 @@
 //! The bank under test is a stand-in effect with real per-lane state: a one-pole accumulator and a
 //! gain ramp per channel, both in its state payload, so every rendered sample depends on the lane's
 //! history. Its gain is the live parameter, and its two observation taps read the accumulator and
-//! the gain. What is gated is the rack's swap: that every per-lane field -- payload, control lane,
-//! observation queue, taps, dry shunt history -- follows the strip.
+//! the gain. Each lane also keeps eight bytes of prepared per-lane defaults outside its payload.
+//! What is gated is the rack's swap: that every per-lane field -- payload, prepared defaults,
+//! control lane, observation queue, taps, dry shunt history -- follows the strip.
 //!
 //! This file has its own test binary so that `bench_support`'s audited allocator serves it.
+
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use bench_support::alloc::{assert_installed, current_thread_counters, current_thread_delta_since};
 use effect_contract::{
@@ -121,10 +125,12 @@ impl Channel {
 }
 
 /// A bank of `lanes` lanes, each `[left, right]`, that starts with a gain ramp in flight on every
-/// lane, so a live-control-free slot is mid-ramp too.
+/// lane, so a live-control-free slot is mid-ramp too. Each lane's prepared defaults are one
+/// random word, shared with the test so it can read them where the bank sits in a chain.
 struct StripBank {
     width: BankWidth,
     lanes: Vec<[Channel; 2]>,
+    defaults: Arc<[AtomicU64]>,
 }
 
 impl StripBank {
@@ -145,7 +151,14 @@ impl StripBank {
                 })
             })
             .collect();
-        Self { width, lanes }
+        let defaults = (0..width.lanes())
+            .map(|_| AtomicU64::new(rng.next()))
+            .collect();
+        Self {
+            width,
+            lanes,
+            defaults,
+        }
     }
 
     fn bound(self) -> PreparedEffectBank {
@@ -255,6 +268,19 @@ impl PreparedNativeEffectBank for StripBank {
         *lane = [Channel::read(input.left), Channel::read(input.right)];
         Ok(())
     }
+
+    fn lane_default_bytes(&self) -> Option<usize> {
+        Some(8)
+    }
+
+    fn exchange_lane_defaults(&mut self, lane: usize, bytes: &mut [u8]) -> bool {
+        let (Some(own), Ok(word)) = (self.defaults.get(lane), <[u8; 8]>::try_from(&*bytes)) else {
+            return false;
+        };
+        let old = own.swap(u64::from_le_bytes(word), Ordering::Relaxed);
+        bytes.copy_from_slice(&old.to_le_bytes());
+        true
+    }
 }
 
 const fn tap(id: u32) -> ObservationDescriptor {
@@ -311,6 +337,8 @@ struct World {
     readers: Vec<[ObservationReader; 2]>,
     position: Vec<(usize, usize)>,
     first_sample: u64,
+    /// Per chain, per slot: the bank's prepared defaults, per lane.
+    defaults: [[Arc<[AtomicU64]>; 3]; 2],
 }
 
 impl World {
@@ -321,6 +349,7 @@ impl World {
         let superseded = LiveValuesSuperseded::new();
         let mut writers = Vec::new();
         let mut readers = Vec::new();
+        let mut defaults = Vec::new();
         let chains = core::array::from_fn(|chain| {
             let mut controls: Vec<Option<EffectControlLane>> = Vec::new();
             let mut observations = Vec::new();
@@ -358,14 +387,18 @@ impl World {
             if chain == 1 && shape.slot_gap {
                 gapped[0] = false;
             }
-            let effect = |rng: &mut Rng| {
-                Box::new(
-                    EffectBankStage::new(StripBank::new(width, rng).bound(), width, QUANTUM)
-                        .expect("stage"),
-                ) as Box<dyn BankStage>
+            let mut chain_defaults = Vec::new();
+            let effect = |rng: &mut Rng, defaults: &mut Vec<Arc<[AtomicU64]>>| {
+                let bank = StripBank::new(width, rng);
+                defaults.push(Arc::clone(&bank.defaults));
+                Box::new(EffectBankStage::new(bank.bound(), width, QUANTUM).expect("stage"))
+                    as Box<dyn BankStage>
             };
+            let first = effect(&mut rng, &mut chain_defaults);
+            let bank = StripBank::new(width, &mut rng);
+            chain_defaults.push(Arc::clone(&bank.defaults));
             let live = LiveControlEffectBankStage::new(
-                StripBank::new(width, &mut rng).bound(),
+                bank.bound(),
                 width,
                 QUANTUM,
                 controls,
@@ -373,9 +406,11 @@ impl World {
                 LATENCY,
             )
             .expect("stage");
+            let third = effect(&mut rng, &mut chain_defaults);
+            defaults.push(chain_defaults);
             let slots = vec![
                 BankSlot {
-                    stage: effect(&mut rng),
+                    stage: first,
                     active_lanes: active.clone().into_boxed_slice(),
                 },
                 BankSlot {
@@ -383,7 +418,7 @@ impl World {
                     active_lanes: active.clone().into_boxed_slice(),
                 },
                 BankSlot {
-                    stage: effect(&mut rng),
+                    stage: third,
                     active_lanes: gapped.into_boxed_slice(),
                 },
             ];
@@ -403,7 +438,25 @@ impl World {
             readers,
             position: (0..2 * lanes).map(|s| (s / lanes, s % lanes)).collect(),
             first_sample: 0,
+            defaults: defaults
+                .into_iter()
+                .map(|chain| chain.try_into().expect("three slots"))
+                .collect::<Vec<_>>()
+                .try_into()
+                .expect("two chains"),
         }
+    }
+
+    /// Every strip's prepared defaults, per slot, read where the strip now sits.
+    fn strip_defaults(&self) -> Vec<[u64; 3]> {
+        self.position
+            .iter()
+            .map(|&(chain, lane)| {
+                core::array::from_fn(|slot| {
+                    self.defaults[chain][slot][lane].load(Ordering::Relaxed)
+                })
+            })
+            .collect()
     }
 
     fn strips(&self) -> usize {
@@ -575,11 +628,12 @@ fn step(swapped: &mut World, twin: &mut World, rng: &mut Rng, block: usize) {
 /// of each chain swaps with the other, each mid-ramp (gain ramps on every lane, a bypass crossfade
 /// over a latency-3 dry shunt on a swapped strip, a tap armed and a subscription queued after the
 /// swap), and every strip, fed and written as it moves, renders and publishes exactly what its
-/// never-swapped twin does. Simd4 and, where built, Simd8.
+/// never-swapped twin does, and holds its twin's prepared defaults in every slot. Simd4 and, where
+/// built, Simd8.
 ///
-/// Test value: a swap that leaves any per-lane part behind -- the payload, the control lane, the
-/// observation queue's consumer, the taps or the shunt's line words -- or swaps a shared cursor;
-/// no other test performs a render-time swap.
+/// Test value: a swap that leaves any per-lane part behind -- the payload, the prepared defaults,
+/// the control lane, the observation queue's consumer, the taps or the shunt's line words -- or
+/// swaps a shared cursor; no other test performs a render-time swap.
 #[test]
 fn a_swapped_strip_renders_and_publishes_what_its_twin_does() {
     assert_installed();
@@ -651,6 +705,11 @@ fn a_swapped_strip_renders_and_publishes_what_its_twin_does() {
                 step(&mut swapped, &mut twin, &mut rng, block);
                 block += 1;
             }
+            assert_eq!(
+                swapped.strip_defaults(),
+                twin.strip_defaults(),
+                "{width:?} seed {seed}: a strip's prepared defaults stayed behind"
+            );
         }
     }
 }
