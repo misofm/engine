@@ -38,3 +38,22 @@ A test is owed only for a new mechanism: it turns red when the skipped work was 
 
 - #1758 (the row).
 - #1747 merged first (it edits `crates/rack/src/lib.rs` and `crates/effect-contract/src/live.rs`).
+
+## Evidence and decisions
+
+- Step 1, attempt 1 (2026-10-23). The #1758 row gains four arms of the same `console_product_lanes` shape, each timed by `SessionMeasurement::run_prepared` straight after the session rows, 0 transactions, and asserted in-run to render its `standing_row`'s bits over blocks 0..1000: `sixty_four_track_console_fader_matrix_lanes` (strip channels, no input lane), `..._strip_input_lanes` (strip channels with the input lane), `..._effect_lanes` (effect channels, no strip channel), and `sixty_four_track_app_shape_product_lanes` (the app shape's own product set). `SessionRuntime::build_with_lane_group` builds them, and the record's `live_lanes` is read from the attached channels. The record lib pins each kind to its lane set and standing row, and the aggregate holds the digest rule per standing row. Records 66 -> 74.
+- The verifier's caveat: the app shape (EQ -> compressor, no limiter, 21 of 64 tracks bypassed at preparation) has no console slot with latency. It got one arm, its full product set, not a full split: its total is small (below).
+- Descriptive run (`run-console-benchmark.sh --step opt4-1763` at d7854800b, one warmup and two rounds, exclusive lock, `MISO_ENGINE_BENCH_ALLOW_UNCONTROLLED=1` because the load was 17 at build time; loadavg at the start of the run 1.96, cpu 31): `artifacts/steps/opt4-1763/`. All 74 records validated. Digests equal per standing row (console 6bae1dd0..., app shape 3ce17e3e...).
+
+| Arm (p50 per block, us) | Round 1 | delta | Round 2 | delta |
+|---|---|---|---|---|
+| `sixty_four_track_console` (no lanes) | 102.45 | | 102.24 | |
+| fader/matrix | 102.77 | +0.32 | 102.61 | +0.37 |
+| fader/matrix + strip input | 103.20 | +0.75 | 103.17 | +0.93 |
+| effects only | 110.08 | +7.63 | 110.24 | +8.00 |
+| product set (all three) | 111.35 | +8.91 | 112.09 | +9.86 |
+| `sixty_four_track_app_shape` (no lanes) | 82.58 | | 82.96 | |
+| app shape, product set | 84.69 | +2.11 | 84.85 | +1.89 |
+
+- Reading: the effect lanes carry the gap (+7.6 / +8.0 us of +8.9 / +9.9). Fader/matrix and strip input together cost +0.75 / +0.93 us (under 1 %). The groups add up to within about 0.5 / 0.9 us of the whole set. On the app shape, which has no latency, the whole product set costs +2.1 / +1.9 us (2.6 % / 2.3 %), so the EQ and compressor effect lanes there cost at most about 1.2 us. Inference, not measured: most of the console's effect-lane cost belongs to the true-peak limiter's banks, which is consistent with the bypass shunt's per-block `capture` (only a slot with latency feeds the line when no lane is bypassed). No per-stage profile: `perf record` does not run on this host.
+- Proposed mechanism for step 2 (no projected saving): when no lane of the bank needs dry (`any_bypassed` false, `crates/rack/src/lib.rs` near 1917), `dry_*` has no reader in that block (the mix at near 2043 is skipped), so `capture` can feed the latency line write-only: store the input words at the cursor and advance it, with no copy into `dry_*` and no read of the old words. The line then holds exactly the words the exchange leaves, so a later bypass edge reads the same delayed dry and no bit moves. This needs no change to the bypass semantics. Alternative, which needs an effect-contract addition and so a root ruling: read the delayed dry from the limiter's own input history. If the remaining gap after step 2 is still above 2 %, the next candidate is a per-bank "nothing dirty" skip of the effect bank's per-lane control walk.
