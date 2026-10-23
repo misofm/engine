@@ -1610,4 +1610,58 @@ fn a_moving_ramp_word_past_its_domain_is_refused() {
                 .expect("own snapshot");
         }
     }
+
+    // Issue #1069: the four coefficient ramps after the silence counter (word 48 on). The
+    // effect's own mid-walk payload restores and snapshots back word for word; a word outside
+    // `(0, 1]`, or a settled ramp away from its target, is refused and changes nothing.
+    const COEFFICIENT_WORD: usize = 48;
+    restore(effect.as_mut(), 1, &saved, sizes).expect("own snapshot");
+    assert_eq!(
+        snapshot(effect.as_ref(), sizes),
+        saved,
+        "own mid-walk snapshot"
+    );
+    let set = |sections: &mut (Vec<u8>, Vec<u8>, Vec<u8>), at: usize, bits: u32| {
+        sections.1[at * 4..at * 4 + 4].copy_from_slice(&bits.to_le_bytes());
+    };
+    for rate in 0..4 {
+        let at = COEFFICIENT_WORD + rate * 4;
+        assert_ne!(word(&saved.1, at + 3), 0, "coefficient {rate} walks");
+        let walking = [1.5f32, 0.0, -0.5, f32::NAN].map(|current| {
+            let mut sections = saved.clone();
+            set(&mut sections, at, current.to_bits());
+            (format!("coefficient {rate}: current {current:e}"), sections)
+        });
+        let mut off_target = saved.clone();
+        set(&mut off_target, at, 0.9f32.to_bits());
+        set(&mut off_target, at + 1, 0.95f32.to_bits());
+        set(&mut off_target, at + 2, 0);
+        set(&mut off_target, at + 3, 0);
+        let settled = (
+            format!("coefficient {rate}: settled off target"),
+            off_target,
+        );
+        for (case, sections) in walking.into_iter().chain([settled]) {
+            assert_eq!(
+                restore(effect.as_mut(), 1, &sections, sizes)
+                    .expect_err(&case)
+                    .code,
+                "effect.state.parameter",
+                "{case}"
+            );
+            assert_eq!(snapshot(effect.as_ref(), sizes), saved, "{case}");
+            assert_eq!(
+                bank.restore_track_state_payload(0, 1, input(&sections, sizes))
+                    .expect_err(&case)
+                    .code,
+                "effect.state.parameter",
+                "bank {case}"
+            );
+            assert_eq!(
+                support::snapshot_track(bank.as_ref(), 0, sizes),
+                bank_saved,
+                "bank {case}"
+            );
+        }
+    }
 }

@@ -692,20 +692,24 @@ fn partition_render(
 ///
 /// Before #1069 a ratio, attack or release word reached the kernel once per segment, so where a
 /// block began moved the output and only threshold and makeup were partition-exact. Since #1069
-/// the ratio is designed every frame and the two times walk coefficient ramps, so the frame-32
-/// output of the ratio and attack retargets differs both from the old value held (no span) and
-/// from the target jumped to (prepared at the target): red if a ramp is held to its arrival (the
-/// pre-#1069 lone instance) or if a coefficient reads its target instead of its walk.
+/// the ratio is designed every frame and the two times walk coefficient ramps, so a mid-ramp
+/// output of the ratio, attack and release retargets differs both from the old value held (no
+/// span) and from the target jumped to (prepared at the target): red if a ramp is held to its
+/// arrival (the pre-#1069 lone instance) or if a coefficient reads its target instead of its walk.
+/// A Point at the time in force returns a walking coefficient to its exact design: red if the
+/// segment planner stops scanning or snapping the coefficient slots.
 #[test]
 fn partition_invariance() {
     let sets = (0..TRACKS).map(varied_values).collect::<Vec<_>>();
     let ratio = point(2, ParameterChannel::Left, 0, 8.0);
     let attack = point(3, ParameterChannel::Left, 0, 25.0);
+    let release = point(4, ParameterChannel::Left, 0, 7.0);
     let spans = [
         point(1, ParameterChannel::Left, 0, -30.0),
         point(1, ParameterChannel::Right, 0, -30.0),
         ratio,
         attack,
+        release,
         point(5, ParameterChannel::Left, 0, 3.0),
     ];
     let later = [point(6, ParameterChannel::Right, 3_584, -12.0)];
@@ -730,8 +734,10 @@ fn partition_invariance() {
         assert_eq!(state, reference.2, "partition={partition} state");
     }
 
-    const MID_RAMP: usize = 32;
-    for moved in [ratio, attack] {
+    // The walk's frames before the snap: some frame of each differs from the held and the jumped
+    // render (one frame alone can sit on the smoother's other branch).
+    let walk = 1..63;
+    for moved in [ratio, attack, release] {
         let held = spans
             .iter()
             .copied()
@@ -741,24 +747,80 @@ fn partition_invariance() {
         jumped_values[moved.parameter_index as usize * 2].value = moved.value;
         let old = partition_render(&sets[3], 512, &held, &later);
         let jumped = partition_render(&jumped_values, 512, &held, &later);
-        let ramped = reference.0[MID_RAMP].to_bits();
-        assert_ne!(
-            ramped,
-            old.0[MID_RAMP].to_bits(),
+        let differs = |other: &[f32]| {
+            walk.clone()
+                .any(|frame| reference.0[frame].to_bits() != other[frame].to_bits())
+        };
+        assert!(
+            differs(&old.0),
             "parameter {} held its old value mid-ramp",
             moved.parameter_index
         );
-        assert_ne!(
-            ramped,
-            jumped.0[MID_RAMP].to_bits(),
+        assert!(
+            differs(&jumped.0),
             "parameter {} jumped to its target mid-ramp",
             moved.parameter_index
         );
     }
+
+    // The compressor's Point-cancels rule: a Point at the attack time in force, sent while the
+    // attack coefficient walks, settles the time at once and returns the coefficient (slot word
+    // 48 of the left channel) to that time's exact design within the window.
+    let prepared = MultibandCompressorFactory
+        .prepare(request_with(&sets[3], LinkMode::Maximum, 512, false))
+        .expect("scalar");
+    let sizes = prepared.metadata.state_sizes;
+    let mut effect = prepared.processor;
+    let mut left = support::signal(160, 0xFEED_0003);
+    let mut right = support::signal(160, 0xFEED_0004);
+    let word = |section: &[u8], at: usize| {
+        u32::from_le_bytes(section[at * 4..at * 4 + 4].try_into().expect("word"))
+    };
+    const ATTACK_WORD: usize = 3 + 2 * 4;
+    const COEFFICIENT_WORD: usize = 48;
+    process(
+        effect.as_mut(),
+        &mut left[..32],
+        &mut right[..32],
+        0,
+        &[attack],
+        512,
+    );
+    let walking = snapshot(effect.as_ref(), sizes);
+    assert_eq!(
+        word(&walking.1, COEFFICIENT_WORD + 3),
+        32,
+        "the coefficient walks"
+    );
+    let held_time = f32::from_bits(word(&walking.1, ATTACK_WORD));
+    process(
+        effect.as_mut(),
+        &mut left[32..],
+        &mut right[32..],
+        32,
+        &[point(3, ParameterChannel::Left, 32, held_time)],
+        512,
+    );
+    let settled = snapshot(effect.as_ref(), sizes);
+    let design = effect_runtime::envelope::retention_coefficient(held_time, 48_000).to_bits();
+    assert_eq!(word(&settled.1, ATTACK_WORD + 3), 0, "the time settles");
+    assert_eq!(
+        word(&settled.1, COEFFICIENT_WORD + 3),
+        0,
+        "the coefficient arrives"
+    );
+    assert_eq!(
+        word(&settled.1, COEFFICIENT_WORD),
+        design,
+        "at the exact design"
+    );
+    assert_eq!(word(&settled.1, COEFFICIENT_WORD + 1), design);
 }
 
 /// Both resets bring a bank and the scalar product to the same state, from the same history, at
-/// the build's own bank width (issue #1112).
+/// the build's own bank width (issue #1112). The history ends with track 0's attack coefficient
+/// walking (issue #1069): a full reset returns every word to a fresh preparation's, and a
+/// discontinuity reset leaves that coefficient settled at its target.
 #[test]
 fn resets_agree_across_widths() {
     let width = BankWidth::for_backend(lane::Backend::current()).expect("a vector backend");
@@ -818,6 +880,61 @@ fn resets_agree_across_widths() {
             )
             .expect("bank block"),
         );
+        // Twenty more frames with an attack point on track 0, so its coefficient walks at the
+        // reset.
+        const TAIL: usize = 20;
+        let attack = [point(3, ParameterChannel::Left, FRAMES as u64, 25.0)];
+        let mut tail_left = vec![0.0f32; TAIL * tracks];
+        let mut tail_right = vec![0.0f32; TAIL * tracks];
+        for track in 0..tracks {
+            let (left, right) = track_signal(track);
+            for frame in 0..TAIL {
+                tail_left[frame * tracks + track] = left[FRAMES + frame];
+                tail_right[frame * tracks + track] = right[FRAMES + frame];
+            }
+        }
+        let mut offsets = vec![1u32; tracks + 1];
+        offsets[0] = 0;
+        bank.process_bank(
+            EffectBankProcessBlock::new(
+                &mut tail_left,
+                &mut tail_right,
+                None,
+                TAIL as u32,
+                width,
+                FRAMES as u64,
+                &attack,
+                &offsets,
+                FRAMES as u32,
+            )
+            .expect("bank block"),
+        );
+        for (track, scalar) in scalars.iter_mut().enumerate() {
+            let (left, right) = track_signal(track);
+            let mut scalar_left = left[FRAMES..FRAMES + TAIL].to_vec();
+            let mut scalar_right = right[FRAMES..FRAMES + TAIL].to_vec();
+            let spans: &[PreparedAutomationSpan] = if track == 0 { &attack } else { &[] };
+            process(
+                scalar.as_mut(),
+                &mut scalar_left,
+                &mut scalar_right,
+                FRAMES as u64,
+                spans,
+                FRAMES as u32,
+            );
+        }
+        const COEFFICIENT_WORD: usize = 48;
+        let word = |section: &[u8], at: usize| {
+            u32::from_le_bytes(section[at * 4..at * 4 + 4].try_into().expect("word"))
+        };
+        assert_ne!(
+            word(
+                &snapshot(scalars[0].as_ref(), sizes).1,
+                COEFFICIENT_WORD + 3
+            ),
+            0,
+            "the attack coefficient walks before the reset"
+        );
         bank.reset(kind);
         for scalar in &mut scalars {
             scalar.reset(kind);
@@ -828,6 +945,28 @@ fn resets_agree_across_widths() {
                 snapshot(scalar.as_ref(), sizes),
                 "{kind:?} track={track}"
             );
+        }
+        let reset = snapshot(scalars[0].as_ref(), sizes);
+        match kind {
+            ResetKind::FullToDefaults => {
+                let fresh = MultibandCompressorFactory
+                    .prepare(requests[0])
+                    .expect("scalar")
+                    .processor;
+                assert_eq!(reset, snapshot(fresh.as_ref(), sizes), "full reset");
+            }
+            ResetKind::DiscontinuityKeepParameters => {
+                assert_eq!(
+                    word(&reset.1, COEFFICIENT_WORD + 3),
+                    0,
+                    "discontinuity reset"
+                );
+                assert_eq!(
+                    word(&reset.1, COEFFICIENT_WORD),
+                    word(&reset.1, COEFFICIENT_WORD + 1),
+                    "discontinuity reset"
+                );
+            }
         }
     }
 }

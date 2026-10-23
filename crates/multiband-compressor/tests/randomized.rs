@@ -11,10 +11,11 @@
 //! where its in-flight ratio, attack or release ramp was cut: by a neighbour lane's (or the other
 //! channel's) ramp arrival, or by a block boundary. Each segment sampled those three ramps once,
 //! at its first frame, and segment boundaries are shared by the whole bank and by the host's
-//! blocks. Since #1069 such a ramp in flight caps the segment at one frame
-//! (`Instance::plan_segment`), and this test runs at full strength: automation on any lane, chunked
-//! blocks, and restores that start a ramp on any lane. It was the ignored reproducer until then,
-//! and is red on that fix's revert.
+//! blocks. Since #1069 the kernel derives each lane's coefficients every frame from that frame's
+//! ramp words: the ratio's `1/R - 1` lane-wide, and attack and release from coefficient ramps that
+//! walk to the exact design (the compressor's rule). This test runs at full strength: automation
+//! on any lane, chunked blocks, and restores that start a ramp on any lane. It was the ignored
+//! reproducer until then, and is red on that fix's revert.
 
 conformance::randomized_effect_test!(
     the_bank_renders_its_scalar_instances_under_random_state,
