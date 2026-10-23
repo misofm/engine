@@ -61,3 +61,7 @@ Keep, with the reason:
 - `chains_into` and the bank-chain merge: they merge every bank chain (effects, input, fader, matrix). Only the builtin pair branch after the merge is the fused stage's.
 - The drains `drain_fader_controls` / `drain_matrix_controls` and the witness counters the split stages also increment (`fader_values_applied`, `matrix_values_applied`, the output bits).
 - `scripts/check-scalar-oracle-absent.py` (outside this spec's paths): its `FORBIDDEN` entries for the deleted scalar pair still hold (absent stays absent); its doc line on the split-pair slot becomes stale. Reported to root.
+
+### Estimate fixture (root-approved path, regenerated with `graph_fixture -- --write`, no hand edits)
+
+`fixtures/graph/v1/direct-route.resources.json`, the only resources fixture: `graph_metadata_bytes` 6476 -> 6316 (-160: each emitted op no longer carries the split-pair slot, and the executor no longer holds the split-pair table field); `builtin_bank_bytes` 7239 -> 7191 (-48: the fader bank no longer charges `FaderMatrixBankProcessor`'s size, and the bank owners lose their `control_delivery` field); `incremental_plan_bytes` and `session_plus_plan_bytes` 48535 -> 48327 (-208, the sum). `largest_allocation_bytes` stays 5336. These are estimate changes only. No rendered bit moved (see the class-A comparison).
