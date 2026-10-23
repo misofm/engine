@@ -2479,6 +2479,8 @@ pub fn assert_reached(coverage: &DifferentialCoverage) {
 /// * a lane whose input was clean counts a block;
 /// * a lane counts more than one block on one channel over the run: its recovery resets it, so
 ///   nothing is left to fail again;
+/// * the poisoned lane's left channel does not count exactly one block over the run: the poison
+///   must trip the check once, whether it trips early or behind the latency;
 /// * in `DualMono`, where the poison cannot reach it, the right channel counts a block: a counter
 ///   is per channel, so a right block zeroed only beside its failed left one is not nonfinite;
 /// * the failing lane's output is zeroed on the block the poison reaches, and that block counts
@@ -2533,6 +2535,8 @@ pub fn d7_report_violations(factory: Box<dyn NativeEffectFactory>) -> Vec<String
         (step as f32 - 48.25) / 194.0
     };
     let mut violations = Vec::new();
+    // The poisoned lane's run totals, checked once its run ends; `check` holds `violations`.
+    let mut run_totals = Vec::new();
     // The scalar instance: one lane, the poisoned one. Its prepared latency says which block the
     // poison first reaches the output on.
     let prepared = factory
@@ -2621,6 +2625,11 @@ pub fn d7_report_violations(factory: Box<dyn NativeEffectFactory>) -> Vec<String
             &mut total,
         );
     }
+    if total[0] != 1 {
+        run_totals.push(format!(
+            "scalar lane 0: counts {total:?} over the run, not one left block"
+        ));
+    }
 
     for &width in BankWidth::ALL {
         let backend = width.backend();
@@ -2685,7 +2694,14 @@ pub fn d7_report_violations(factory: Box<dyn NativeEffectFactory>) -> Vec<String
                 );
             }
         }
+        if totals[failing][0] != 1 {
+            run_totals.push(format!(
+                "{who} lane {failing}: counts {:?} over the run, not one left block",
+                totals[failing]
+            ));
+        }
     }
+    violations.append(&mut run_totals);
     violations
 }
 
