@@ -36,7 +36,7 @@ use effect_contract::{
     ResetKind, SmoothingRule, StatePayloadError, StatePayloadInput, StatePayloadOutput,
     StatePayloadSizes, TailSamples, expected_prepared_metadata,
 };
-use effect_runtime::bank::{check_block, nonfinite_lane_mask};
+use effect_runtime::bank::{block_is_positive_zero, check_block, nonfinite_lane_mask};
 use effect_runtime::envelope::attack_release_coefficient;
 use effect_runtime::params::{
     ParameterSpec, is_negative_zero, normalize_zero, parameter_value_valid,
@@ -57,6 +57,21 @@ const RAMP_SAMPLES: u32 = 64;
 
 /// The lane word that encodes an open gate. A closed one is `+0.0`.
 const OPEN_WORD: f32 = 1.0;
+
+#[cfg(test)]
+thread_local! {
+    /// Blocks the silent fast path skipped (issue #1746), counted once per skipped block.
+    static SILENT_ADMISSIONS: core::cell::Cell<usize> = const { core::cell::Cell::new(0) };
+    /// While set, the silent fast path is never taken: the control arm of the fast-path
+    /// differential and the rest gate's fork render the whole kernel.
+    static SILENT_FORBIDDEN: core::cell::Cell<bool> = const { core::cell::Cell::new(false) };
+}
+
+/// Counts one silent admission. Test builds only: production has no counter.
+#[cfg(test)]
+fn admitted_silent() {
+    SILENT_ADMISSIONS.with(|blocks| blocks.set(blocks.get() + 1));
+}
 
 const fn effect_id(value: &'static str) -> effect_contract::EffectId {
     match effect_contract::EffectId::new(value) {
@@ -657,6 +672,17 @@ impl<L: Lane, const CONNECTED: bool> PreparedGate<L, CONNECTED> {
     ) {
         let width = L::WIDTH;
         let smoothed = (self.ramp_frames_left as usize).min(frames);
+        if self.silent_block(left, right, sidechain) {
+            // Every lane of both channels is at its exact rest and every input word is `+0.0`,
+            // so the kernel would leave every state word as it is and write the `+0.0` the
+            // buffers already hold, and `finish_block` would recover and report nothing. The
+            // one word the rendered block moves regardless is the bank's `ramp_frames_left`
+            // clock, which it advances here exactly as below.
+            #[cfg(test)]
+            admitted_silent();
+            self.ramp_frames_left -= smoothed as u32;
+            return;
+        }
         if smoothed > 0 {
             let split = smoothed * width;
             let side = sidechain.map(|(l, r)| (&l[..split], &r[..split]));
@@ -674,6 +700,59 @@ impl<L: Lane, const CONNECTED: bool> PreparedGate<L, CONNECTED> {
         }
         self.ramp_frames_left -= smoothed as u32;
         self.finish_block(left, right, frames, reports);
+    }
+
+    /// Whether this block may skip the kernel (issue #1746): every input plane is exact `+0.0`
+    /// (the connected sidechain's too, so the scalar instance with a sidechain takes the path
+    /// only when its detector is silent as well) and every lane is at rest
+    /// ([`rest_lanes`](Self::rest_lanes)), padded lanes included. Decided on demand from state
+    /// after this block's automation was applied, never cached. The cheap input scan runs first,
+    /// so a block with signal never evaluates the predicate.
+    ///
+    /// `#[inline(never)]`: it carries no vector arithmetic, and out of line it cannot change how
+    /// the kernel inlines into `process_bank`, the one `f32x4` function the wasm kernel roster
+    /// requires for this effect.
+    #[inline(never)]
+    fn silent_block(
+        &self,
+        left: &[f32],
+        right: &[f32],
+        sidechain: Option<(&[f32], &[f32])>,
+    ) -> bool {
+        #[cfg(test)]
+        if SILENT_FORBIDDEN.with(core::cell::Cell::get) {
+            return false;
+        }
+        block_is_positive_zero(left)
+            && block_is_positive_zero(right)
+            && sidechain.is_none_or(|(side_left, side_right)| {
+                block_is_positive_zero(side_left) && block_is_positive_zero(side_right)
+            })
+            && self.rest_lanes() == all_lanes(L::WIDTH)
+    }
+
+    /// The lanes at exact rest on both channels (`PreparedNativeEffectBank::lanes_at_rest`, issue
+    /// #1746): bit `l` is set when [`kernel::channel_at_rest`] holds for lane `l` of both
+    /// channels, so one block of exact `+0.0` on every input of the lane leaves every one of its
+    /// state words bit-identical and writes `+0.0` on both output planes. See that function for
+    /// the words pinned and why the list is complete. A padded lane is answered by the same rule.
+    ///
+    /// The gate has one clock, and it is bank-level: `ramp_frames_left`, the countdown that
+    /// selects the ramping segment, advances by the block length alone once every ramp is
+    /// settled. It has no per-lane clock. From state only, no allocation, bounded by the width.
+    fn rest_lanes(&self) -> u32 {
+        let width = L::WIDTH;
+        let mut mask = all_lanes(width);
+        for channel in 0..2 {
+            let coef = self.coef[channel].lanes();
+            let state = self.state[channel].lanes();
+            for lane in 0..width {
+                if !kernel::channel_at_rest(&coef[lane], &state[lane]) {
+                    mask &= !(1 << lane);
+                }
+            }
+        }
+        mask
     }
 
     fn run_segment<const RAMPING: bool>(
@@ -1012,6 +1091,11 @@ macro_rules! bank_impl {
                 PreparedGate::reset(self, kind);
             }
 
+            /// Issue #1746: `PreparedGate::rest_lanes`, both channels, padded lanes included.
+            fn lanes_at_rest(&self) -> u32 {
+                self.rest_lanes()
+            }
+
             fn process_bank(&mut self, block: EffectBankProcessBlock<'_>) -> BankProcessReport {
                 let width = self.bank_width.expect("a bank is prepared with a width");
                 let mut report = BankProcessReport::empty(width);
@@ -1278,6 +1362,8 @@ fn bind_bank<const NATIVE_ONLY: bool>(
 
 #[cfg(test)]
 mod padding_tests;
+#[cfg(test)]
+mod rest_tests;
 #[cfg(test)]
 mod swap_tests;
 

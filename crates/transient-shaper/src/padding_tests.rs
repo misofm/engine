@@ -24,12 +24,12 @@ use super::*;
 use effect_contract::BankWidth;
 use effect_contract::{PrepareEffectLimits, PreparedPorts, PreparedSidechainPort};
 
-const QUANTUM: u32 = 128;
+pub(super) const QUANTUM: u32 = 128;
 const WIDTHS: &[BankWidth] = BankWidth::ALL;
-const RATES: [u32; 4] = [44_100, 48_000, 88_200, 96_000];
-const LINKS: [LinkMode; 3] = [LinkMode::DualMono, LinkMode::Maximum, LinkMode::Average];
+pub(super) const RATES: [u32; 4] = [44_100, 48_000, 88_200, 96_000];
+pub(super) const LINKS: [LinkMode; 3] = [LinkMode::DualMono, LinkMode::Maximum, LinkMode::Average];
 
-type Values = Vec<InitialParameterValue>;
+pub(super) type Values = Vec<InitialParameterValue>;
 
 /// Whether a padded lane's state stays exactly at its prepared value when fed `+0.0`. It does for this effect: fed `+0.0` every recursion it runs holds `+0.0`.
 const PADDED_STATE_IS_CONSTANT: bool = true;
@@ -38,7 +38,7 @@ const PADDED_STATE_IS_CONSTANT: bool = true;
 // The effect under test
 // ---------------------------------------------------------------------------------------------
 
-fn request(
+pub(super) fn request(
     values: &[InitialParameterValue],
     rate: u32,
     link: LinkMode,
@@ -75,7 +75,7 @@ fn native(width: BankWidth) -> bool {
     BankWidth::for_backend(Backend::current()) == Some(width)
 }
 
-fn backend(width: BankWidth) -> Backend {
+pub(super) fn backend(width: BankWidth) -> Backend {
     width.backend()
 }
 
@@ -131,7 +131,7 @@ fn default_values() -> Values {
 
 /// The crate's audible fixture sets (`tests/common`'s `values_of`): full attack boost with full
 /// sustain cut, the reverse at a part mix, and a boost alone, lane-distinct per member.
-fn fixture_values(member: usize) -> Values {
+pub(super) fn fixture_values(member: usize) -> Values {
     let trim = 0.1 * (member % 4) as f32;
     match member % 3 {
         0 => values_from([(1.0, 1.0 - trim), (-1.0, -1.0 + trim), (1.0, 1.0)]),
@@ -149,10 +149,10 @@ const TRIPPING_WORDS: [f32; 3] = [2.0e29, f32::INFINITY, f32::NAN];
 // Draws
 // ---------------------------------------------------------------------------------------------
 
-struct Draw(u64);
+pub(super) struct Draw(u64);
 
 impl Draw {
-    fn new(seed: u64) -> Self {
+    pub(super) fn new(seed: u64) -> Self {
         Self(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1)
     }
 
@@ -163,16 +163,16 @@ impl Draw {
         self.0
     }
 
-    fn below(&mut self, bound: usize) -> usize {
+    pub(super) fn below(&mut self, bound: usize) -> usize {
         (self.next() % bound as u64) as usize
     }
 
-    fn chance(&mut self, numerator: usize, denominator: usize) -> bool {
+    pub(super) fn chance(&mut self, numerator: usize, denominator: usize) -> bool {
         self.below(denominator) < numerator
     }
 
     /// Uniform in `[0, 1)`.
-    fn unit(&mut self) -> f32 {
+    pub(super) fn unit(&mut self) -> f32 {
         (self.next() >> 40) as f32 / (1_u64 << 24) as f32
     }
 
@@ -194,7 +194,7 @@ impl Draw {
         }
     }
 
-    fn values(&mut self) -> Values {
+    pub(super) fn values(&mut self) -> Values {
         let pairs = core::array::from_fn(|index| {
             let parameter = &TRANSIENT_SHAPER_PARAMETERS[index];
             (self.value(parameter), self.value(parameter))
@@ -204,7 +204,7 @@ impl Draw {
 
     /// One block's automation for one track: a point span per automatable parameter and channel,
     /// each with probability one in four, in ascending `(parameter, channel)` order.
-    fn spans(&mut self, first_sample: u64) -> Vec<PreparedAutomationSpan> {
+    pub(super) fn spans(&mut self, first_sample: u64) -> Vec<PreparedAutomationSpan> {
         let mut spans = Vec::new();
         for (index, parameter) in TRANSIENT_SHAPER_PARAMETERS.iter().enumerate() {
             if !parameter.automatable {
@@ -259,7 +259,7 @@ fn fold(word: f32) -> u32 {
 }
 
 /// The mask with lanes `0..members` active: the planner's members-first layout.
-fn prefix_mask(width: BankWidth, members: usize) -> Vec<bool> {
+pub(super) fn prefix_mask(width: BankWidth, members: usize) -> Vec<bool> {
     (0..width.lanes() as usize)
         .map(|lane| lane < members)
         .collect()

@@ -48,7 +48,9 @@ use effect_contract::{
     ResetKind, SmoothingRule, StatePayloadError, StatePayloadInput, StatePayloadOutput,
     StatePayloadSizes, TailSamples, expected_prepared_metadata,
 };
-use effect_runtime::bank::{NonFiniteReport, check_block, nonfinite_lane_mask};
+use effect_runtime::bank::{
+    NonFiniteReport, block_is_positive_zero, check_block, nonfinite_lane_mask, positive_zero_lanes,
+};
 use effect_runtime::envelope::{ArCoef, ar_one_pole_step};
 use effect_runtime::params::{
     ParameterSpec, normalize_zero, parameter_value_valid as spec_value_valid,
@@ -231,6 +233,28 @@ const CONTRAST_LIMIT_DB: f32 = 24.0;
 
 /// Shape is clamped to ±18 dB before the gain conversion.
 const SHAPE_LIMIT_DB: f32 = 18.0;
+
+#[cfg(test)]
+thread_local! {
+    /// Blocks the silent fast path skipped (issue #1746), counted once per skipped block.
+    static SILENT_ADMISSIONS: core::cell::Cell<usize> = const { core::cell::Cell::new(0) };
+    /// While set, the silent fast path is refused and every block runs the kernel: the control
+    /// arm of the fast-path differential and the rest probe's fork.
+    static SILENT_FORBIDDEN: core::cell::Cell<bool> = const { core::cell::Cell::new(false) };
+}
+
+/// Whether the silent fast path may skip this block. Production has no switch: always `true`.
+#[inline(always)]
+fn silent_allowed() -> bool {
+    #[cfg(test)]
+    {
+        !SILENT_FORBIDDEN.with(core::cell::Cell::get)
+    }
+    #[cfg(not(test))]
+    {
+        true
+    }
+}
 
 const LINK_DUAL_MONO: u8 = 0;
 const LINK_MAXIMUM: u8 = 1;
@@ -518,8 +542,30 @@ impl<L: Lane, const W: usize> Shaper<L, W> {
     }
 
     /// Renders one block in place and applies the master plan §4.4 boundary check.
+    ///
+    /// # The silent fast path (issue #1746)
+    ///
+    /// Called after the block's automation was applied. When both input planes are exact `+0.0`
+    /// and [`lanes_at_rest`](Self::lanes_at_rest) has every lane set (padded lanes included), the
+    /// kernel is skipped: by the rest claim it would leave every state word bit-identical and write
+    /// the `+0.0` the buffers already hold, so the boundary check would pass and the D7 record is
+    /// untouched. The shaper has no clocks and no bank-level counter a clean block moves, so there
+    /// is nothing to advance. The claim is decided from state at every quiet block; nothing is
+    /// cached, so no state change can leave a stale claim behind. The quiet input is tested first,
+    /// so a block with signal pays one early-exiting bit scan. Bit tests and integer compares
+    /// only: the predicate adds no `f32` arithmetic to the kernel. The scalar instance (`W = 1`)
+    /// renders through here as well and takes the same path.
     fn process_block(&mut self, left: &mut [f32], right: &mut [f32], frames: usize) {
         debug_assert_eq!(W, L::WIDTH);
+        if block_is_positive_zero(left)
+            && block_is_positive_zero(right)
+            && silent_allowed()
+            && self.lanes_at_rest() == all_lanes::<W>()
+        {
+            #[cfg(test)]
+            SILENT_ADMISSIONS.with(|blocks| blocks.set(blocks.get() + 1));
+            return;
+        }
         match self.link_mode {
             LinkMode::DualMono => self.run::<LINK_DUAL_MONO>(left, right, frames),
             LinkMode::Maximum => self.run::<LINK_MAXIMUM>(left, right, frames),
@@ -530,6 +576,51 @@ impl<L: Lane, const W: usize> Shaper<L, W> {
         }
         let failed = nonfinite_lane_mask::<L>(left) | nonfinite_lane_mask::<L>(right);
         self.recover_lanes(left, right, failed);
+    }
+
+    /// The lanes at their **exact rest** on both channels (`PreparedNativeEffectBank::lanes_at_rest`,
+    /// issue #1746), as a bitmask over `W` lanes: from this state, one block of exact `+0.0` input
+    /// leaves every state word of the lane bit-identical and writes `+0.0` on both planes.
+    ///
+    /// A lane's state words are, per channel, the two envelope words `fast` and `slow` and the
+    /// four fields of each of the three parameter ramps: the fourteen-word payload. `Ramps::defaults`
+    /// is a reset value the kernel never reads, and the coefficients, bypass and link mode are
+    /// prepared constants. Pinned, per lane and per channel:
+    ///
+    /// * `fast` and `slow` to `+0.0` by raw bits. Fed `+0.0`, every link mode's detector is `+0.0`
+    ///   (`abs`, `max` of two `+0.0`, `0.5 * +0 + 0.5 * +0`); the follower is not rising
+    ///   (`+0 > +0` is false), takes the release pair, and `c * +0 + k * +0` with positive `c`, `k`
+    ///   is `+0.0`, which `flush` keeps. So `+0.0` is a fixed point. A follower decaying to a
+    ///   non-zero word is refused, even one no `+0.0` block would move.
+    /// * every ramp settled (`remaining == 0`): `next_value` then returns `current` and changes no
+    ///   field, and `current` is a read, so all four fields stay put whatever the bank's prefix is.
+    ///   A ramp in flight moves its `current` and `remaining`, so it is refused.
+    ///
+    /// The output is then `+0.0`: both followers floor, `ratio = FLOOR / FLOOR` is exactly `1`,
+    /// `fast_level_db(1.0)` is exactly `+0.0` (`math::fast_db`), so the contrast is `+0.0`, the
+    /// shape `attack * +0 + sustain * +0` is a signed zero for every legal amount, the clamps keep
+    /// it a zero, and `shape == 0` selects the input word, `+0.0`. Bypass and `mix == 0` select the
+    /// same input word, and the followers run under bypass too, so neither changes the answer.
+    /// That holds for every rate's coefficients and every parameter value in the domain.
+    ///
+    /// The list is complete: [`run`](Self::run) writes `left_env`, `right_env` and the ramps and
+    /// nothing else; the boundary check passes on a `+0.0` block, so [`recover_lanes`](Self::recover_lanes) and the D7
+    /// record are not reached. The shaper has **no clocks**.
+    ///
+    /// No allocation, bounded time, `&self`: four bit masks and `6 * W` integer compares.
+    fn lanes_at_rest(&self) -> u32 {
+        let mut mask = positive_zero_lanes(self.left_env.fast)
+            & positive_zero_lanes(self.left_env.slow)
+            & positive_zero_lanes(self.right_env.fast)
+            & positive_zero_lanes(self.right_env.slow);
+        for channel in [&self.left, &self.right] {
+            for (lane, ramps) in channel.ramps.iter().enumerate() {
+                if ramps.iter().any(|ramp| ramp.remaining != 0) {
+                    mask &= !(1 << lane);
+                }
+            }
+        }
+        mask
     }
 
     /// The D7 recovery, one lane at a time (issue #1092; decision 12's coupling rule).
@@ -843,6 +934,11 @@ fn checked_track(track_index: u32, width: usize) -> Result<usize, StatePayloadEr
     Ok(track)
 }
 
+/// The mask with every one of `W` lanes set: the bank-wide fast path's requirement.
+const fn all_lanes<const W: usize>() -> u32 {
+    (1 << W) - 1
+}
+
 /// Replaces one lane of a packed word, leaving the others bit-exact.
 fn replace_lane<L: Lane>(value: L, lane: usize, replacement: f32) -> L {
     let mut words = [0.0_f32; 8];
@@ -1067,6 +1163,10 @@ impl<L: Lane, const W: usize> PreparedNativeEffectBank for PreparedTransientShap
         report
     }
 
+    fn lanes_at_rest(&self) -> u32 {
+        self.shaper.lanes_at_rest()
+    }
+
     // REALTIME_POLICY_BEGIN: #1278 D3, the payload calls run in the plan-swap block.
     fn snapshot_track_state_payload(
         &self,
@@ -1126,3 +1226,5 @@ impl<L: Lane, const W: usize> PreparedTransientShaperBank<L, W> {
 
 #[cfg(test)]
 mod padding_tests;
+#[cfg(test)]
+mod rest_tests;

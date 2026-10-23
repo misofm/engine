@@ -4,6 +4,7 @@
 //! written. There is no audio history in this module: a prepared gate has zero added latency.
 //! `Lane` keeps the scalar, four-lane and eight-lane paths on one arithmetic body.
 
+use effect_runtime::bank::check_block;
 use effect_runtime::envelope::HysteresisState;
 use lane::kernels::ramp_toward;
 use lane::{Lane, flush};
@@ -86,6 +87,122 @@ impl<L: Lane> Default for GateState<L> {
             ramps: [GateRamp::fixed(L::zero()); RAMP_COUNT],
         }
     }
+}
+
+/// The words of every lane of `value`, lane `l` at index `l`; past `L::WIDTH` the words are `+0.0`.
+fn lane_words<L: Lane>(value: L) -> [f32; MAX_WIDTH] {
+    let mut words = [0.0_f32; MAX_WIDTH];
+    value.store(&mut words[..L::WIDTH]);
+    words
+}
+
+impl<L: Lane> GateCoef<L> {
+    /// This channel's coefficients split into one scalar coefficient set per lane (issue #1746).
+    /// Stores only: no arithmetic.
+    #[must_use]
+    pub fn lanes(&self) -> [GateCoef<f32>; MAX_WIDTH] {
+        let attack = lane_words(self.attack);
+        let release = lane_words(self.release);
+        let hold_samples = lane_words(self.hold_samples);
+        let bypass = lane_words(self.bypass);
+        let link_max = lane_words(self.link_max);
+        let link_avg = lane_words(self.link_avg);
+        core::array::from_fn(|lane| GateCoef {
+            attack: attack[lane],
+            release: release[lane],
+            hold_samples: hold_samples[lane],
+            bypass: bypass[lane],
+            link_max: link_max[lane],
+            link_avg: link_avg[lane],
+        })
+    }
+}
+
+impl<L: Lane> GateState<L> {
+    /// This channel's state split into one scalar state per lane (issue #1746). Stores only: no
+    /// arithmetic.
+    #[must_use]
+    pub fn lanes(&self) -> [GateState<f32>; MAX_WIDTH] {
+        let gain_db = lane_words(self.gain_db);
+        let open = lane_words(self.hysteresis.open);
+        let hold = lane_words(self.hysteresis.hold);
+        let ramps = self.ramps.map(|ramp| {
+            [
+                lane_words(ramp.current),
+                lane_words(ramp.target),
+                lane_words(ramp.step),
+                lane_words(ramp.remaining),
+            ]
+        });
+        core::array::from_fn(|lane| GateState {
+            gain_db: gain_db[lane],
+            hysteresis: HysteresisState {
+                open: open[lane],
+                hold: hold[lane],
+            },
+            ramps: ramps.map(|[current, target, step, remaining]| GateRamp {
+                current: current[lane],
+                target: target[lane],
+                step: step[lane],
+                remaining: remaining[lane],
+            }),
+        })
+    }
+}
+
+/// Whether one lane of one channel is at its exact rest (issue #1746): a block of exact `+0.0`
+/// on every input of the lane leaves every one of its state words bit-identical and writes exact
+/// `+0.0`.
+///
+/// # The words, and why the list is complete
+///
+/// A channel's state is [`GateState`]: `gain_db`, the hysteresis `open` flag and `hold` countdown,
+/// and the four ramps' `current`, `target`, `step` and `remaining`. [`GateCoef`] is written only by
+/// the control plane (preparation, restore, D7 recovery), never by [`gate_block`]. Nothing else
+/// crosses a block: the gate keeps no audio history.
+///
+/// * **Every ramp settled** (`remaining == 0`). A settled ramp is an exact no-op under both
+///   `RAMPING` variants (`moving` and `final_sample` are false, so every field is selected back),
+///   so its four fields are pinned and the frame map does not depend on where `run_block` splits
+///   the block. A ramp in flight refuses the lane.
+/// * **`gain_db`, `open`, `hold`: a one-frame fixed point.** They are not a closed form: with a
+///   `+0.0` detector the level is the clamped floor, the gate may stay closed (hold untouched) or
+///   stay open with `hold` reloaded, and `gain_db` stalls at a bit-stable value that need not equal
+///   the curve target. So the kernel's own `channel_step` runs one frame on a copy, with own,
+///   partner and dry all `+0.0` (every link mode's detector is then `+0.0`), and the three words
+///   must come out bit-identical and the output `+0.0` by bits. With settled ramps and constant
+///   input a block is `frames` applications of that same frame map to the same state, so by
+///   induction a one-frame fixed point is a whole-block fixed point, output included.
+/// * **`gain_db` inside the D7 bound.** `finish_block` resets a lane whose gain word fails
+///   `check_block` (non-finite, or at least `BLOCK_LIMIT`), which would move state; such a lane
+///   is refused. The output word `+0.0` always passes it.
+///
+/// The output leg (`+0.0` by bits) is implied by the others in every reachable state: the dry
+/// word is `+0.0` and, for a finite gain word, the applied gain is finite and non-negative. It is
+/// kept so the claim's output clause is checked rather than argued.
+///
+/// The scalar `f32` lane is the bit oracle of every vector backend (one arithmetic body; `fma` is
+/// two roundings everywhere), so the answer evaluated here is the vector kernel's.
+///
+/// # Why `#[inline(never)]` and not generic
+///
+/// The wasm kernel roster (`scripts/check-web-audioworklet-callgraph.py`) requires exactly one
+/// `gate_expander` function carrying `f32x4` arithmetic, `process_bank`, under a scalar budget it
+/// nearly fills. This function takes plain `f32` values, so its name carries no `f32x4`, and kept
+/// out of line its scalar step is never folded into `process_bank`.
+#[inline(never)]
+#[must_use]
+pub fn channel_at_rest(coef: &GateCoef<f32>, state: &GateState<f32>) -> bool {
+    if state.ramps.iter().any(|ramp| ramp.remaining != 0.0) {
+        return false;
+    }
+    let mut next = *state;
+    let out = channel_step::<f32, false>(coef, &mut next, 0.0, 0.0, 0.0);
+    out.to_bits() == 0
+        && next.gain_db.to_bits() == state.gain_db.to_bits()
+        && next.hysteresis.open.to_bits() == state.hysteresis.open.to_bits()
+        && next.hysteresis.hold.to_bits() == state.hysteresis.hold.to_bits()
+        && check_block::<f32>(&[next.gain_db])
 }
 
 /// Arguments borrowed by one causal render block.

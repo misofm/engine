@@ -24,13 +24,13 @@ use super::*;
 use effect_contract::{LinkMode, PrepareEffectLimits, PreparedPorts, PreparedSidechainPort};
 use lane::Backend;
 
-const QUANTUM: u32 = 128;
+pub(super) const QUANTUM: u32 = 128;
 const WIDTHS: &[BankWidth] = BankWidth::ALL;
-const RATES: [u32; 4] = [44_100, 48_000, 88_200, 96_000];
+pub(super) const RATES: [u32; 4] = [44_100, 48_000, 88_200, 96_000];
 /// The soft clip is dual-mono only (`LinkModeSet::DUAL_MONO`), so each shape runs three seeds.
-const LINKS: [LinkMode; 3] = [LinkMode::DualMono; 3];
+pub(super) const LINKS: [LinkMode; 3] = [LinkMode::DualMono; 3];
 
-type Values = Vec<InitialParameterValue>;
+pub(super) type Values = Vec<InitialParameterValue>;
 
 /// Whether a padded lane's state stays exactly at its prepared value when fed `+0.0`. It does for this effect: fed `+0.0` every recursion it runs holds `+0.0`.
 const PADDED_STATE_IS_CONSTANT: bool = true;
@@ -39,7 +39,7 @@ const PADDED_STATE_IS_CONSTANT: bool = true;
 // The effect under test
 // ---------------------------------------------------------------------------------------------
 
-fn request(
+pub(super) fn request(
     values: &[InitialParameterValue],
     rate: u32,
     link: LinkMode,
@@ -76,7 +76,7 @@ fn native(width: BankWidth) -> bool {
     BankWidth::for_backend(Backend::current()) == Some(width)
 }
 
-fn backend(width: BankWidth) -> Backend {
+pub(super) fn backend(width: BankWidth) -> Backend {
     width.backend()
 }
 
@@ -107,7 +107,7 @@ fn scalar(request: PrepareEffectRequest<'_>) -> PreparedEffect {
 }
 
 /// Initial values from one `(left, right)` pair per parameter.
-fn values_from(pairs: [(f32, f32); PARAMETER_COUNT]) -> Values {
+pub(super) fn values_from(pairs: [(f32, f32); PARAMETER_COUNT]) -> Values {
     (0..PARAMETER_COUNT * 2)
         .map(|index| InitialParameterValue {
             parameter_index: (index / 2) as u32,
@@ -151,10 +151,10 @@ const TRIPPING_WORDS: [f32; 3] = [1.0e29, f32::INFINITY, f32::NAN];
 // Draws
 // ---------------------------------------------------------------------------------------------
 
-struct Draw(u64);
+pub(super) struct Draw(u64);
 
 impl Draw {
-    fn new(seed: u64) -> Self {
+    pub(super) fn new(seed: u64) -> Self {
         Self(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1)
     }
 
@@ -165,11 +165,11 @@ impl Draw {
         self.0
     }
 
-    fn below(&mut self, bound: usize) -> usize {
+    pub(super) fn below(&mut self, bound: usize) -> usize {
         (self.next() % bound as u64) as usize
     }
 
-    fn chance(&mut self, numerator: usize, denominator: usize) -> bool {
+    pub(super) fn chance(&mut self, numerator: usize, denominator: usize) -> bool {
         self.below(denominator) < numerator
     }
 
@@ -196,7 +196,7 @@ impl Draw {
         }
     }
 
-    fn values(&mut self) -> Values {
+    pub(super) fn values(&mut self) -> Values {
         let pairs = core::array::from_fn(|index| {
             let parameter = &SOFT_CLIP_PARAMETERS[index];
             (self.value(parameter), self.value(parameter))
@@ -206,7 +206,7 @@ impl Draw {
 
     /// One block's automation for one track: a point span per automatable parameter and channel,
     /// each with probability one in four, in ascending `(parameter, channel)` order.
-    fn spans(&mut self, first_sample: u64) -> Vec<PreparedAutomationSpan> {
+    pub(super) fn spans(&mut self, first_sample: u64) -> Vec<PreparedAutomationSpan> {
         let mut spans = Vec::new();
         for (index, parameter) in SOFT_CLIP_PARAMETERS.iter().enumerate() {
             if !parameter.automatable {
@@ -261,7 +261,7 @@ fn fold(word: f32) -> u32 {
 }
 
 /// The mask with lanes `0..members` active: the planner's members-first layout.
-fn prefix_mask(width: BankWidth, members: usize) -> Vec<bool> {
+pub(super) fn prefix_mask(width: BankWidth, members: usize) -> Vec<bool> {
     (0..width.lanes() as usize)
         .map(|lane| lane < members)
         .collect()

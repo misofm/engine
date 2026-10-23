@@ -22,12 +22,12 @@ create_valid_fixture() {
     printf '%s\n' 'fixture third-party license' >"$fixture_root/crates/math/LICENSE-libm.txt"
     printf '%s\n' \
         '[workspace.package]' \
-        'license = "Apache-2.0"' \
+        'license = "FSL-1.1-ALv2"' \
         >"$fixture_root/Cargo.toml"
     printf '%s\n' \
         '[package]' \
         'name = "session-fuzz"' \
-        'license = "Apache-2.0"' \
+        'license = "FSL-1.1-ALv2"' \
         >"$fixture_root/fuzz/Cargo.toml"
     # A minimal, cargo-free lockfile so the retired-delivery-codec lockfile scan has a fixed
     # target; its exact contents do not matter, only that it exists and names no retired crate.
@@ -694,7 +694,7 @@ mutate_missing_license() {
 
 mutate_workspace_license() {
     local root="$1"
-    sed -i 's/license = "Apache-2.0"/license = "MIT"/' "$root/Cargo.toml"
+    sed -i 's/license = "FSL-1.1-ALv2"/license = "MIT"/' "$root/Cargo.toml"
 }
 
 mutate_package_license_inheritance() {
@@ -796,8 +796,8 @@ assert_fault_rejected() {
     }
     [[ "$name" != npm-* ]] || {
         mkdir -p "$root/sdk"
-        printf '%s\n' '{"name":"fixture","license":"Apache-2.0"}' >"$root/sdk/package.json"
-        printf '%s\n' '{"packages":{"":{"license":"Apache-2.0"}}}' >"$root/sdk/package-lock.json"
+        printf '%s\n' '{"name":"fixture","license":"FSL-1.1-ALv2"}' >"$root/sdk/package.json"
+        printf '%s\n' '{"packages":{"":{"license":"FSL-1.1-ALv2"}}}' >"$root/sdk/package-lock.json"
     }
     case "$name" in
         git-list*|git-classify-valid)
@@ -845,10 +845,10 @@ fault_cases=(
  'npm-jq-empty|jq|.license ==|1|empty|jq ./sdk/package.json failed'
  'npm-lock-jq|jq|.packages[""].license|1|complete|jq ./sdk/package-lock.json failed'
  'npm-lock-jq-empty|jq|.packages[""].license|1|empty|jq ./sdk/package-lock.json failed'
- 'workspace-search|rg|license = "Apache-2.0" Cargo.toml|1|complete|rg workspace-license failed'
- 'workspace-search-empty|rg|license = "Apache-2.0" Cargo.toml|1|empty|rg workspace-license failed'
- 'fuzz-search|rg|license = "Apache-2.0" fuzz/Cargo.toml|1|complete|rg fuzz-license failed'
- 'fuzz-search-empty|rg|license = "Apache-2.0" fuzz/Cargo.toml|1|empty|rg fuzz-license failed'
+ 'workspace-search|rg|license = "FSL-1.1-ALv2" Cargo.toml|1|complete|rg workspace-license failed'
+ 'workspace-search-empty|rg|license = "FSL-1.1-ALv2" Cargo.toml|1|empty|rg workspace-license failed'
+ 'fuzz-search|rg|license = "FSL-1.1-ALv2" fuzz/Cargo.toml|1|complete|rg fuzz-license failed'
+ 'fuzz-search-empty|rg|license = "FSL-1.1-ALv2" fuzz/Cargo.toml|1|empty|rg fuzz-license failed'
  'inventory-search|rg|LICENSE-libm|1|complete|rg libm-inventory failed'
  'inventory-search-empty|rg|LICENSE-libm|1|empty|rg libm-inventory failed'
  'package-search-late|rg|hosts/binary/Cargo.toml|1|complete|rg package-license-'
@@ -956,18 +956,18 @@ done
 
 # Required-search status 1 is the policy predicate diagnostic, distinct from the paired status-73
 # execution rows above (which include otherwise-matching output).
-mutate_workspace_search_missing() { sed -i '/license = "Apache-2.0"/d' "$1/Cargo.toml"; }
-mutate_fuzz_search_missing() { sed -i '/license = "Apache-2.0"/d' "$1/fuzz/Cargo.toml"; }
+mutate_workspace_search_missing() { sed -i '/license = "FSL-1.1-ALv2"/d' "$1/Cargo.toml"; }
+mutate_fuzz_search_missing() { sed -i '/license = "FSL-1.1-ALv2"/d' "$1/fuzz/Cargo.toml"; }
 mutate_inventory_search_missing() { sed -i 's|crates/math/LICENSE-libm.txt|crates/math/other.txt|' "$1/THIRD_PARTY_LICENSES.md"; }
 mutate_late_package_search_missing() { sed -i '/license\.workspace = true/d' "$1/hosts/binary/Cargo.toml"; }
 mutate_isa_target_search_missing() {
     mkdir -p "$1/.cargo"
     printf '%s\n' 'rustflags = ["-C", "target-feature=+avx2,+fma"]' >"$1/.cargo/config.toml"
 }
-expect_failure_with_message workspace-search-status1 'Cargo.toml workspace package license must be Apache-2.0' mutate_workspace_search_missing
-expect_failure_with_message fuzz-search-status1 'fuzz/Cargo.toml license must be Apache-2.0' mutate_fuzz_search_missing
+expect_failure_with_message workspace-search-status1 'Cargo.toml workspace package license must be FSL-1.1-ALv2' mutate_workspace_search_missing
+expect_failure_with_message fuzz-search-status1 'fuzz/Cargo.toml license must be FSL-1.1-ALv2' mutate_fuzz_search_missing
 expect_failure_with_message inventory-search-status1 'third-party inventory must retain the vendored libm license record' mutate_inventory_search_missing
-expect_failure_with_message package-search-status1 'hosts/binary/Cargo.toml must inherit the Apache-2.0 workspace license' mutate_late_package_search_missing
+expect_failure_with_message package-search-status1 'hosts/binary/Cargo.toml must inherit the FSL-1.1-ALv2 workspace license' mutate_late_package_search_missing
 expect_failure_with_message isa-target-search-status1 'approved ISA pin must stay scoped' mutate_isa_target_search_missing
 
 # jq false/null (status 1) retains each license-policy diagnostic. Actual malformed JSON proves a
@@ -979,16 +979,16 @@ write_npm_case() {
     printf '%s\n' "$package_json" >"$root/sdk/package.json"
     printf '%s\n' "$lock_json" >"$root/sdk/package-lock.json"
 }
-mutate_npm_false() { write_npm_case "$1" '{"license":"MIT"}' '{"packages":{"":{"license":"Apache-2.0"}}}'; }
-mutate_npm_null() { write_npm_case "$1" '{"license":null}' '{"packages":{"":{"license":"Apache-2.0"}}}'; }
-mutate_lock_false() { write_npm_case "$1" '{"license":"Apache-2.0"}' '{"packages":{"":{"license":"MIT"}}}'; }
-mutate_lock_null() { write_npm_case "$1" '{"license":"Apache-2.0"}' '{"packages":{"":{"license":null}}}'; }
-mutate_npm_malformed() { write_npm_case "$1" '{broken' '{"packages":{"":{"license":"Apache-2.0"}}}'; }
-mutate_lock_malformed() { write_npm_case "$1" '{"license":"Apache-2.0"}' '{broken'; }
-expect_failure_with_message npm-false-status1 'sdk/package.json license must be Apache-2.0' mutate_npm_false
-expect_failure_with_message npm-null-status1 'sdk/package.json license must be Apache-2.0' mutate_npm_null
-expect_failure_with_message lock-false-status1 'sdk/package-lock.json root package license must be Apache-2.0' mutate_lock_false
-expect_failure_with_message lock-null-status1 'sdk/package-lock.json root package license must be Apache-2.0' mutate_lock_null
+mutate_npm_false() { write_npm_case "$1" '{"license":"MIT"}' '{"packages":{"":{"license":"FSL-1.1-ALv2"}}}'; }
+mutate_npm_null() { write_npm_case "$1" '{"license":null}' '{"packages":{"":{"license":"FSL-1.1-ALv2"}}}'; }
+mutate_lock_false() { write_npm_case "$1" '{"license":"FSL-1.1-ALv2"}' '{"packages":{"":{"license":"MIT"}}}'; }
+mutate_lock_null() { write_npm_case "$1" '{"license":"FSL-1.1-ALv2"}' '{"packages":{"":{"license":null}}}'; }
+mutate_npm_malformed() { write_npm_case "$1" '{broken' '{"packages":{"":{"license":"FSL-1.1-ALv2"}}}'; }
+mutate_lock_malformed() { write_npm_case "$1" '{"license":"FSL-1.1-ALv2"}' '{broken'; }
+expect_failure_with_message npm-false-status1 'sdk/package.json license must be FSL-1.1-ALv2' mutate_npm_false
+expect_failure_with_message npm-null-status1 'sdk/package.json license must be FSL-1.1-ALv2' mutate_npm_null
+expect_failure_with_message lock-false-status1 'sdk/package-lock.json root package license must be FSL-1.1-ALv2' mutate_lock_false
+expect_failure_with_message lock-null-status1 'sdk/package-lock.json root package license must be FSL-1.1-ALv2' mutate_lock_null
 expect_failure_with_message npm-parser-error 'jq ./sdk/package.json failed (status 5)' mutate_npm_malformed
 expect_failure_with_message lock-parser-error 'jq ./sdk/package-lock.json failed (status 5)' mutate_lock_malformed
 
