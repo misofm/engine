@@ -28,7 +28,8 @@
 //! compressor with a 0 dB threshold, which this material never reaches.
 //!
 //! The route matrices make a silent fold's master carry both signed zeros: every left row is
-//! negative, and the right row is negative on the first four tracks only. Each track's input
+//! negative, and gate 1 renders two layouts of negative right rows (see its doc; gate 2 uses the
+//! first four tracks). Each track's input
 //! follows its own schedule of signal runs (levels down to `1e-30`), `-0.0` blocks and exact
 //! `+0.0` runs, with windows where the first bank, every bank, or the padded bank is silent long
 //! enough to reach rest.
@@ -79,7 +80,27 @@ fn stereo(track: usize) -> bool {
     track >= 8
 }
 
-fn session() -> SessionModel {
+/// Which tracks' routes carry a negative right row (every left row is negative).
+type RightNegative = fn(usize) -> bool;
+
+/// The first four tracks only: the shape gate 2 renders.
+fn first_four(index: usize) -> bool {
+    index < 4
+}
+
+/// Layout A: tracks `0..16`, so a skipped padded bank adds `+0.0` onto a right master that the
+/// store bank and the second bank leave at `-0.0` (the `+= +0.0` pass of the silent fold).
+fn first_sixteen(index: usize) -> bool {
+    index < 16
+}
+
+/// Layout B: every track except `4..8`, so the store bank's first lane routes to `-0.0` and a
+/// later lane of it to `+0.0` (the store sign judged over every lane, not lane 0).
+fn all_but_four_to_eight(index: usize) -> bool {
+    !(4..8).contains(&index)
+}
+
+fn session(right_negative: RightNegative) -> SessionModel {
     let mut model = parse_session_json(MONO).expect("the mono desk parses");
     model.tracks.truncate(TRACKS);
     let kept: Vec<StableId> = model.tracks.iter().map(|track| track.id.clone()).collect();
@@ -112,7 +133,7 @@ fn session() -> SessionModel {
         let index: usize = track_id.as_str()[2..].parse().expect("chNN");
         route.channel_matrix.ll = -1.0;
         route.channel_matrix.lr = -0.25;
-        if index < 4 {
+        if right_negative(index) {
             route.channel_matrix.rl = -0.25;
             route.channel_matrix.rr = -1.0;
         }
@@ -457,11 +478,31 @@ fn fold_nan(word: u32) -> u32 {
 /// processed block would -- a clock not advanced, a resident scratch not zeroed, a silent fold's
 /// signed zero wrong, an input test that misses a non-zero word, or a skip taken while a lane is
 /// not at rest -- on a compiled plan, which no rack-level test reaches.
+///
+/// It renders two route-sign layouts (left rows negative on every track in both): with right rows
+/// negative on tracks `0..16` ([`first_sixteen`]), a skipped bank's `+0.0` add lands on a `-0.0`
+/// right master; with right rows negative on every track but `4..8`
+/// ([`all_but_four_to_eight`]), the store bank mixes a `-0.0` first lane with `+0.0` later lanes.
+/// A `-0.0` master block is asserted on the left plane only, the one plane where every
+/// contributor can route to `-0.0` in both layouts.
 #[test]
 fn a_skipped_bank_renders_the_bits_of_a_processed_one() {
+    for (name, layout) in [
+        (
+            "right rows negative on 0..16",
+            first_sixteen as RightNegative,
+        ),
+        ("right rows negative except on 4..8", all_but_four_to_eight),
+    ] {
+        eprintln!("layout: {name}");
+        gate_one(layout);
+    }
+}
+
+fn gate_one(layout: RightNegative) {
     let blocks = 560;
     let schedules = schedules(blocks, 0x1107);
-    let model = session();
+    let model = session(layout);
     let mut skip = bind(&model, &schedules, true);
     let mut twin = bind(&model, &schedules, true);
     let frames = skip.frames;
@@ -568,7 +609,7 @@ fn a_skipping_block_allocates_nothing() {
                 .into()
         })
         .collect();
-    let mut bound = bind(&session(), &schedules, false);
+    let mut bound = bind(&session(first_four), &schedules, false);
     let mut pcm = vec![0.0_f32; bound.frames * 2];
     assert_installed();
     let mut measured = 0;

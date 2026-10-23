@@ -603,3 +603,44 @@ Reading:
 - **Sparse row.** -3.7 % / -5.5 % against #1744. That is mostly the general drift since #1744:
   the all-active row moved by a similar amount. No bank of the sparse row is wholly silent.
 - **No idle row.** The V8 harness has no idle document.
+
+### D10 Verifier follow-ups and root rulings (2026-10-23)
+
+**F2, test reach (fixed).** Gate 1 never reached two branches of `fold_silent`'s signed-zero rule.
+The reason: bank 1 (`ch08..ch15`) holds a fader ride and runs a reducing compressor, so it never
+skips. The two missed branches, as the verifier's mutants:
+- **M1:** a skipped `+0.0` add onto a `-0.0` master. Mutant: `AddPositiveZero` does nothing.
+- **M6:** a store bank whose first lane routes to `-0.0` and a later lane to `+0.0`. Mutant: the
+  store sign is judged by lane 0 only.
+
+Gate 1 now renders two route-sign layouts in the same test. Every left row is negative in both.
+- **Layout A:** right rows negative on tracks `0..16`.
+- **Layout B:** right rows negative on every track except `4..8`.
+
+A `-0.0` master block is asserted on the left plane only, the one plane where every contributor
+can route to `-0.0` in both layouts. The left plane reached 84 `-0.0` master blocks in each
+layout.
+
+Results:
+- M1 is red in layout A (block 282, right master word 128: `-0.0` skipping, `+0.0` processed).
+- M6 is red in layout B (block 281, word 249).
+- Both mutants were restored and checked with `git diff`.
+- Test value of the added layouts: red when the silent fold drops the `+= +0.0` pass, or judges
+  the store sign from one lane.
+
+**F1, root ruling on gate 3.**
+- The literal gate, "within 2 % of S4", is missed: the all-active row is +2.54 % / +1.65 %
+  (+2.09 % on the mean).
+- The change itself adds +0.0 % against opt5-1763: the mean is 102.61 against 102.61 us. The
+  excess is drift that predates #1107; opt5 was already +2.08 % on S4.
+- Root therefore re-bases the gate on opt5-1763 for this change and records the older drift. This
+  is not a pass of the S4 number. Nothing was rerun.
+
+**Recorded info items.**
+- `BankChain::set_silent_skip` is a public setter with no feature gate, because rack has no
+  test-support feature. In shipped builds it is dead code, and the scalar-oracle check passes.
+- "A chain with a sidechain slot never skips" holds because a connected sidechain blocks banking
+  (`EffectProgramKey::blocks_banking`). No bank stage has a sidechain.
+- Verifier mutant M4 (dropping the limiter claim's ramp legs) is equivalent: the flag is earned
+  only with stationary ramps, and every path that opens a ramp also clears the flag or blocks
+  re-earning it. The legs are defensive.
