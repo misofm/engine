@@ -579,6 +579,12 @@ pub struct SessionState<A: ControlAdapter> {
     /// prepares. Render adds to it; the control plane copies it into the provider's counters in
     /// the service step (D8).
     pub(crate) live_values_superseded: host_core::LiveValuesSuperseded,
+    /// The session's `strips_restarted` count (#1768): for every plan render adopted, the strips
+    /// that plan started at rest ([`PlanStateInventory::restarted_strips`]). It grows only where
+    /// a pending provider is promoted, which happens only once render has adopted its plan, so a
+    /// withdrawn candidate adds nothing; the control plane copies it into the provider's counters
+    /// with `live_values_superseded`. Render does not touch it.
+    pub(crate) strips_restarted: u64,
     /// `u16` scratch the protocol decoder writes field offsets into. It is exactly
     /// `max_frame_bytes / 2` entries; the odd trailing byte of an odd frame limit used to buy a
     /// one-byte box that nothing ever read (audit F7).
@@ -1976,6 +1982,10 @@ where
         }
         for row in parked.into_iter().take(index + 1) {
             let next = self.pending_providers.remove(0);
+            // #1768: render adopted `next`'s plan, so the strips it starts at rest restarted.
+            let restarted =
+                u64::try_from(next.inventory.restarted_strips().len()).unwrap_or(u64::MAX);
+            self.strips_restarted = self.strips_restarted.saturating_add(restarted);
             let mut previous = core::mem::replace(&mut self.providers, next);
             // #1310 D3: render no longer runs the previous plan, so no successor is prepared
             // against its kept base again; the base drops here, on the control thread.
@@ -2021,15 +2031,17 @@ where
     }
 
     /// Sets every counter the provider serves from a source outside it (#1348 D8): the
-    /// controller's telemetry counters and the session's `live_values_superseded` count (#1312
-    /// D8). A counter added later joins this refresh, never a single
-    /// control call.
+    /// controller's telemetry counters, the session's `live_values_superseded` count (#1312
+    /// D8) and its `strips_restarted` count (#1768). A counter added later joins this refresh,
+    /// never a single control call.
     fn refresh_provider_counters(&mut self) {
         let telemetry_counters = self.controller.queues().telemetry_counters();
         let superseded = self.live_values_superseded.get();
+        let restarted = self.strips_restarted;
         let provider = self.controller.provider_mut();
         provider.set_telemetry_counters(telemetry_counters);
         provider.set_live_values_superseded(superseded);
+        provider.set_strips_restarted(restarted);
     }
 
     /// Runs one control command frame. A success returns the response's length in the response

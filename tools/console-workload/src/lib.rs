@@ -967,6 +967,45 @@ pub struct PlanConfig {
     pub observation: ObservationArm,
 }
 
+/// Which of the product's live lanes an arm attaches (issue #1763), each group a subset of
+/// `controls::live_lanes` of the session.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LaneGroup {
+    /// The whole product set: every strip's fader/mute and matrix/pan lanes, and the input and
+    /// effect lanes `controls::live_lanes` selects.
+    Product,
+    /// Every strip's fader/mute and matrix/pan lanes only.
+    FaderMatrix,
+    /// Every strip's fader/mute, matrix/pan and input lanes.
+    StripInput,
+    /// One lane per effect instance and no strip channel.
+    Effects,
+}
+
+impl LaneGroup {
+    /// Whether the arm passes strip live-control requests (fader/mute and matrix/pan lanes).
+    fn strip_requests(self) -> bool {
+        self != Self::Effects
+    }
+
+    /// The optional lanes the group attaches, given the session's product set.
+    fn lanes(self, product: controls::LiveLanes) -> controls::LiveLanes {
+        let none = controls::LiveLanes::default();
+        match self {
+            Self::Product => product,
+            Self::FaderMatrix => none,
+            Self::StripInput => controls::LiveLanes {
+                strip_input: true,
+                ..none
+            },
+            Self::Effects => controls::LiveLanes {
+                effects: true,
+                ..none
+            },
+        }
+    }
+}
+
 /// The three points of the issue #143 two-level zero, as benchmark arms.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum ObservationArm {
@@ -1144,15 +1183,16 @@ const _: () = assert!((QUANTUM * core::mem::size_of::<f32>()).is_multiple_of(64)
 /// driver may do inside a clock is [`SessionRuntime::render`]; every other method on this type is
 /// evidence collection and belongs outside it.
 pub struct SessionRuntime {
-    /// Issue #1750: each track's fader/mute and matrix/pan cell writers, for the arm prepared by
-    /// [`SessionRuntime::build_with_product_lanes`], and empty on every other arm. Declared before
-    /// `plan`, the drop order `PreparedBuiltinsGraphBound` states: producers before the plan that
-    /// owns their readers. Never touched inside the clock.
+    /// Issue #1750: each track's fader/mute and matrix/pan cell writers, for an arm prepared by
+    /// [`SessionRuntime::build_with_lane_group`] with strip lanes, and empty on every other arm.
+    /// Declared before `plan`, the drop order `PreparedBuiltinsGraphBound` states: producers
+    /// before the plan that owns their readers. Never touched inside the clock.
     strip_controls: Vec<TrackControlProducer>,
     /// The session's one `live_values_superseded` count, shared by every live-control channel this
     /// arm attached (decision 15, D15-2).
     superseded: LiveValuesSuperseded,
-    /// The product lane set of an arm prepared by [`SessionRuntime::build_with_product_lanes`].
+    /// The optional lanes an arm prepared by [`SessionRuntime::build_with_lane_group`] attached,
+    /// read from its channels, and `None` on every other arm.
     live_lanes: Option<controls::LiveLanes>,
     plan: PreparedRenderPlan,
     /// The plan's gate handle: every live value is a latest-target cell, written under a stamp
@@ -1328,7 +1368,7 @@ impl SessionRuntime {
         dispatch: Backend,
         source: SourceSignal,
     ) -> Self {
-        Self::build_inner(workload, config, dispatch, source, false)
+        Self::build_inner(workload, config, dispatch, source, None)
     }
 
     /// Compiles, prepares and binds one console arm with the live-control lanes a product host
@@ -1348,20 +1388,51 @@ impl SessionRuntime {
     /// As [`SessionRuntime::build`], and if the session asks for route lanes, which this harness
     /// does not attach: only a route into a submix has one.
     pub fn build_with_product_lanes(workload: Workload) -> Self {
+        Self::build_with_lane_group(workload, LaneGroup::Product)
+    }
+
+    /// Compiles, prepares and binds one console arm with one group of the product's live lanes
+    /// (issue #1763), as [`SessionRuntime::build_with_product_lanes`] does for the whole set.
+    ///
+    /// # Panics
+    ///
+    /// As [`SessionRuntime::build_with_product_lanes`], and if `group` attaches a lane the
+    /// product set of the session does not carry.
+    pub fn build_with_lane_group(workload: Workload, group: LaneGroup) -> Self {
         Self::build_inner(
             workload,
             PlanConfig::BASELINE,
             Backend::current(),
             SourceSignal::Local,
-            true,
+            Some(group),
         )
     }
 
-    /// The product lane set this arm was prepared with ([`SessionRuntime::build_with_product_lanes`]),
-    /// or `None` for every other arm.
+    /// The optional lanes this arm attached, read from its channels
+    /// ([`SessionRuntime::build_with_lane_group`]), or `None` for every other arm. A strip's
+    /// fader/mute and matrix/pan lanes have no flag: [`SessionRuntime::lane_set_name`] says
+    /// whether they were attached.
     #[must_use]
     pub fn live_lanes(&self) -> Option<controls::LiveLanes> {
         self.live_lanes
+    }
+
+    /// The lane groups this arm attached, read from its channels and joined by `+` in the order
+    /// `fader_matrix`, `strip_input`, `effects`, `routes`, or `None` for an arm with no lane
+    /// group. `fader_matrix` is present only when a strip channel was attached.
+    #[must_use]
+    pub fn lane_set_name(&self) -> Option<String> {
+        let lanes = self.live_lanes?;
+        let groups: Vec<&str> = [
+            (!self.strip_controls.is_empty(), "fader_matrix"),
+            (lanes.strip_input, "strip_input"),
+            (lanes.effects, "effects"),
+            (lanes.routes, "routes"),
+        ]
+        .into_iter()
+        .filter_map(|(attached, group)| attached.then_some(group))
+        .collect();
+        Some(groups.join("+"))
     }
 
     fn build_inner(
@@ -1369,11 +1440,12 @@ impl SessionRuntime {
         config: PlanConfig,
         dispatch: Backend,
         source: SourceSignal,
-        strip_controls_requested: bool,
+        lane_group: Option<LaneGroup>,
     ) -> Self {
+        let strip_controls_requested = lane_group.is_some_and(LaneGroup::strip_requests);
         let mut model = console_model(workload);
         assert!(
-            !strip_controls_requested || config == PlanConfig::BASELINE,
+            lane_group.is_none() || config == PlanConfig::BASELINE,
             "{}: the product lane set is the arm's whole live configuration",
             workload.kind()
         );
@@ -1412,9 +1484,19 @@ impl SessionRuntime {
         // paired delta between the arms is the observation lane and not the cell reads.
         let superseded = LiveValuesSuperseded::new();
         // Issue #1750: the lanes a product host attaches for this session, chosen from its live
-        // rows exactly as `control-plane` chooses them.
-        let live_lanes =
-            strip_controls_requested.then(|| controls::live_lanes(session.normalized_model()));
+        // rows exactly as `control-plane` chooses them; issue #1763: or one group of them.
+        let live_lanes = lane_group.map(|group| {
+            let product = controls::live_lanes(session.normalized_model());
+            let lanes = group.lanes(product);
+            assert!(
+                (!lanes.strip_input || product.strip_input)
+                    && (!lanes.effects || product.effects)
+                    && (!lanes.routes || product.routes),
+                "{}: {group:?} attaches a lane the product set does not carry",
+                workload.kind()
+            );
+            lanes
+        });
         if let Some(lanes) = live_lanes {
             assert!(
                 !lanes.routes || model.submixes.is_empty(),
@@ -1581,6 +1663,18 @@ impl SessionRuntime {
             workload.kind()
         );
 
+        // Issue #1763: the record names what the channels carry, not what the arm asked for.
+        let attached = live_lanes.map(|_| controls::LiveLanes {
+            strip_input: strip_controls.iter().any(|channel| channel.input.is_some()),
+            effects: !controls.is_empty(),
+            routes: false,
+        });
+        assert_eq!(
+            attached,
+            live_lanes,
+            "{}: the attached lanes are the requested ones",
+            workload.kind()
+        );
         let mut plan = plan;
         // The collapse's structural join, performed exactly where the M1 plumbing said it would
         // be: `session_structural_symmetry` is keyed by track id, the plan's rows are keyed by
@@ -1601,7 +1695,7 @@ impl SessionRuntime {
         let mut runtime = Self {
             strip_controls,
             superseded,
-            live_lanes,
+            live_lanes: attached,
             plan,
             gate,
             output: Box::new(OutputPlanes([0.0; QUANTUM * 2])),

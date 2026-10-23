@@ -12,7 +12,7 @@
 # the shapes a real host pushes them; and `console_fader_ride` (#1750) is the standing console
 # riding one fader and one pan per bank on the product's delivery; and `console_product_lanes`
 # (#1758) is the standing console prepared with the product's live lanes, never written, rendered
-# back to back.
+# back to back, with #1763's lane-group arms and its app-shape arm.
 # `console_benchmark_record_valid_lib` dispatches on `.record`, so a record that claims one shape
 # and carries another's keys fails rather than being validated against the wrong table.
 def sha256: type == "string" and test("^[0-9a-f]{64}$");
@@ -938,9 +938,25 @@ def fader_ride_record_valid:
 # equal to the standing row's, which refuses any other session. Pinned: the lane set (it is derived
 # from the session's live rows, so a session or selection change moves it), no write, and a render
 # path with no error or forbidden operation.
+# #1763: each product-lane arm's record kind, the lane groups its plan attached and the session row
+# it renders against. A mislabelled arm, or one that attached another group, matches no entry.
+def product_lane_arms: {
+  "sixty_four_track_console_product_lanes":
+    {live_lanes: "fader_matrix+strip_input+effects", standing_row: "sixty_four_track_console"},
+  "sixty_four_track_console_fader_matrix_lanes":
+    {live_lanes: "fader_matrix", standing_row: "sixty_four_track_console"},
+  "sixty_four_track_console_strip_input_lanes":
+    {live_lanes: "fader_matrix+strip_input", standing_row: "sixty_four_track_console"},
+  "sixty_four_track_console_effect_lanes":
+    {live_lanes: "effects", standing_row: "sixty_four_track_console"},
+  "sixty_four_track_app_shape_product_lanes":
+    {live_lanes: "fader_matrix+strip_input+effects", standing_row: "sixty_four_track_app_shape"}
+};
+
 def product_lanes_record_valid:
   (keys | sort) == product_lanes_keys and common_shape and
-  .live_lanes == "fader_matrix+strip_input+effects" and
+  (.workload_kind | type == "string") and
+  product_lane_arms[.workload_kind] == {live_lanes, standing_row} and
   .transactions_published == 0 and
   ordered_percentiles([.min_ns_per_block,.p50_ns_per_block,.p95_ns_per_block,.p99_ns_per_block,.max_ns_per_block]) and
   .render_errors == 0 and .render_total_forbidden_operations == 0;

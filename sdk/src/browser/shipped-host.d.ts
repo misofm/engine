@@ -769,7 +769,10 @@ export interface MisoStatus {
   readonly renderedQuanta: bigint;
   /// The session's count of live values that a later committed value replaced before a block
   /// applied them (decision 15, D15-2), in the C ABI's unit (`COUNTERS_GET`). Every value reaches
-  /// the engine through `control()` (issue #1565), the one path the C ABI takes.
+  /// the engine through `control()` (issue #1565), the one path the C ABI takes. A value on a strip
+  /// that a plan swap starts at rest is not counted here: a `COUNTERS_GET` sent with `control()`
+  /// reports each such strip, once per adopted plan, as `STRIPS_RESTARTED` (protocol counter 18,
+  /// issue 1768).
   readonly liveValuesSuperseded: bigint;
   /// The applied-revision watermark's revision (issue 1349): the highest committed revision in
   /// effect together with every revision before it, copied from the engine's render report.

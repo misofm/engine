@@ -725,11 +725,20 @@ impl PreparedHost {
     /// *Duck-swap a strip whose state cannot continue across a plan swap* (#1324) consumes it.
     #[must_use]
     pub fn restarted_strips(&self) -> &[Box<str>] {
-        &self.inventory.restarted
+        self.inventory.restarted_strips()
     }
 }
 
 impl PlanStateInventory {
+    /// The strips this plan starts at rest when it displaces the plan it was prepared against:
+    /// [`PreparedHost::restarted_strips`], kept with the inventory so the control plane can count
+    /// them when render adopts the plan (#1768). Each strip is listed once, whichever carries
+    /// restart it. Control-side plain data.
+    #[must_use]
+    pub fn restarted_strips(&self) -> &[Box<str>] {
+        &self.restarted
+    }
+
     /// Whether this plan's send join carries a route that follows an automated source mute in
     /// the plan it was prepared to displace into a route that follows none in this plan (a
     /// seven-word route into a six-word one, #1652 D3). The join flags every such carry by the

@@ -68,11 +68,18 @@ extern "C" {
  * because a later write to the same cell exists. An edit that moves both channels of a per-lane
  * parameter or of a parametric EQ target writes two cells and counts in each; an edit of a shared
  * parameter writes its one cell. A write to a candidate that is withdrawn, and a value on a lane
- * that a swap restarts, are not counted; no value is lost either way. An effect's bypass, its
- * parameters (one cell per channel for a per-lane parameter, one for a shared one) and a
- * parametric EQ's prepared targets are cells of that effect's lane; a block applies the bypass
- * first, then the parameters in parameter order, then the targets, all under the one snapshot
- * that covers the fader values. An acknowledged live edit is never dropped. A live edit commits
+ * that a swap restarts, are not counted; no value is lost either way. The restart itself is
+ * counted: STRIPS_RESTARTED (protocol counter 18, read with COUNTERS_GET) adds, for each
+ * replacement plan that render adopts, the strips present in both plans of which the swap starts a
+ * part at rest: a fader, mute or matrix stage, a console slot, an insert or a strip delay line
+ * that cannot carry its state, or an effect chain that changed. Each such strip counts once per
+ * adopted plan, however many of its parts restart. A candidate that is withdrawn adds nothing, and
+ * an added strip is not a restart. COUNTERS_GET reports it once the render call of the adopting
+ * block has returned. An effect's bypass, its parameters (one cell per channel for a per-lane
+ * parameter, one for a shared one) and a parametric EQ's prepared targets are cells of that
+ * effect's lane; a block applies the bypass first, then the parameters in parameter order, then
+ * the targets, all under the one snapshot that covers the fader values. An acknowledged live edit
+ * is never dropped. A live edit commits
  * the same reliable events as a replacement, so the host drains the reliable event lane after
  * each edit either way. The success response of every SESSION_TRANSACTION_APPLY names how the
  * engine applied the transaction in its required field 2, edit-path (a U8), known when the

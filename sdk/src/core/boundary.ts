@@ -286,7 +286,9 @@ export interface EngineStatus {
   /**
    * The session's count of live values a later write replaced before render read them
    * (`live_values_superseded`, decision 15 D15-2). It only grows, and one session counts across
-   * its plans.
+   * its plans. A value on a strip that a plan swap starts at rest is not counted here: a
+   * `COUNTERS_GET` sent with `controlFrame()` reports each such strip, once per adopted plan, as
+   * `STRIPS_RESTARTED` (protocol counter 18, issue 1768).
    */
   readonly liveValuesSuperseded: bigint;
   readonly memoryBytes: number;
