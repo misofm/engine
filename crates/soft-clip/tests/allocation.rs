@@ -113,6 +113,7 @@ fn the_bank_render_path_never_allocates() {
         &offsets,
     );
 
+    let mut rested = 0;
     let events = count(|| {
         let mut first_sample = 128_u64;
         for _ in 0..1_000 {
@@ -128,9 +129,32 @@ fn the_bank_render_path_never_allocates() {
             );
             first_sample += 128;
         }
+        // Issue #1746: a silent stretch, so the bank comes to rest and the bank-wide silent fast
+        // path takes the blocks after that. The block renders in place, so each one is refilled.
+        for _ in 0..64 {
+            left.fill(0.0);
+            right.fill(0.0);
+            process_bank(
+                bank.as_mut(),
+                width,
+                &mut left,
+                &mut right,
+                128,
+                first_sample,
+                &[],
+                &offsets,
+            );
+            first_sample += 128;
+        }
+        rested = bank.lanes_at_rest();
         bank.reset(ResetKind::DiscontinuityKeepParameters);
     });
     assert_eq!(events, (0, 0), "bank render allocated or freed");
+    assert_eq!(
+        rested,
+        (1 << lanes) - 1,
+        "the silent stretch did not bring every lane to rest, so it never took the fast path"
+    );
 }
 
 /// Preparation's bounded allocation and drop prove both counters can observe allocator events.

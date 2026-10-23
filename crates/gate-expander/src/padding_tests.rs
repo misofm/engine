@@ -24,18 +24,18 @@
 use super::*;
 use effect_contract::{PrepareEffectLimits, PreparedPorts};
 
-const QUANTUM: u32 = 128;
+pub(super) const QUANTUM: u32 = 128;
 const WIDTHS: &[BankWidth] = BankWidth::ALL;
-const RATES: [u32; 4] = [44_100, 48_000, 88_200, 96_000];
-const LINKS: [LinkMode; 3] = [LinkMode::DualMono, LinkMode::Maximum, LinkMode::Average];
+pub(super) const RATES: [u32; 4] = [44_100, 48_000, 88_200, 96_000];
+pub(super) const LINKS: [LinkMode; 3] = [LinkMode::DualMono, LinkMode::Maximum, LinkMode::Average];
 
-type Values = Vec<InitialParameterValue>;
+pub(super) type Values = Vec<InitialParameterValue>;
 
 // ---------------------------------------------------------------------------------------------
 // The effect under test
 // ---------------------------------------------------------------------------------------------
 
-fn request(
+pub(super) fn request(
     values: &[InitialParameterValue],
     rate: u32,
     link: LinkMode,
@@ -110,7 +110,7 @@ fn scalar(request: PrepareEffectRequest<'_>) -> Box<dyn PreparedNativeEffect> {
 }
 
 /// Initial values from one `(left, right)` pair per parameter.
-fn values_from(pairs: [(f32, f32); PARAMETER_COUNT]) -> Values {
+pub(super) fn values_from(pairs: [(f32, f32); PARAMETER_COUNT]) -> Values {
     (0..PARAMETER_COUNT * 2)
         .map(|index| InitialParameterValue {
             parameter_index: (index / 2) as u32,
@@ -157,10 +157,10 @@ const TRIPPING_WORDS: [f32; 3] = [1.0e30, f32::INFINITY, f32::NAN];
 // Draws
 // ---------------------------------------------------------------------------------------------
 
-struct Draw(u64);
+pub(super) struct Draw(u64);
 
 impl Draw {
-    fn new(seed: u64) -> Self {
+    pub(super) fn new(seed: u64) -> Self {
         Self(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1)
     }
 
@@ -171,16 +171,16 @@ impl Draw {
         self.0
     }
 
-    fn below(&mut self, bound: usize) -> usize {
+    pub(super) fn below(&mut self, bound: usize) -> usize {
         (self.next() % bound as u64) as usize
     }
 
-    fn chance(&mut self, numerator: usize, denominator: usize) -> bool {
+    pub(super) fn chance(&mut self, numerator: usize, denominator: usize) -> bool {
         self.below(denominator) < numerator
     }
 
     /// Uniform in `[0, 1)`.
-    fn unit(&mut self) -> f32 {
+    pub(super) fn unit(&mut self) -> f32 {
         (self.next() >> 40) as f32 / (1_u64 << 24) as f32
     }
 
@@ -202,7 +202,7 @@ impl Draw {
         }
     }
 
-    fn values(&mut self) -> Values {
+    pub(super) fn values(&mut self) -> Values {
         let pairs = core::array::from_fn(|index| {
             let parameter = &GATE_EXPANDER_PARAMETERS[index];
             (self.value(parameter), self.value(parameter))
@@ -212,7 +212,7 @@ impl Draw {
 
     /// One block's automation for one track: a point span per automatable parameter and channel,
     /// each with probability one in four, in ascending `(parameter, channel)` order.
-    fn spans(&mut self, first_sample: u64) -> Vec<PreparedAutomationSpan> {
+    pub(super) fn spans(&mut self, first_sample: u64) -> Vec<PreparedAutomationSpan> {
         let mut spans = Vec::new();
         for (index, parameter) in GATE_EXPANDER_PARAMETERS.iter().enumerate() {
             if !parameter.automatable {
@@ -267,7 +267,7 @@ fn fold(word: f32) -> u32 {
 }
 
 /// The mask with lanes `0..members` active: the planner's members-first layout.
-fn prefix_mask(width: BankWidth, members: usize) -> Vec<bool> {
+pub(super) fn prefix_mask(width: BankWidth, members: usize) -> Vec<bool> {
     (0..width.lanes() as usize)
         .map(|lane| lane < members)
         .collect()
