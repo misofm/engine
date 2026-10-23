@@ -88,7 +88,8 @@ use std::sync::Arc;
 use crate::{
     AutomationRate, ChannelSymmetryWitness, EffectDescriptor, ObservationDescriptor,
     ObservationFold, ObservationSample, PREPARED_EFFECT_TARGET_WORDS, ParameterChannel,
-    ParameterChannelPolicy, PreparedAutomationSpan, PreparedEffectTarget,
+    ParameterChannelPolicy, PreparedAutomationSpan, PreparedEffectTarget, PreparedNativeEffectBank,
+    StatePayloadInput, StatePayloadOutput, StatePayloadSizes,
 };
 
 /// One admitted live control event for one prepared effect instance.
@@ -2346,6 +2347,155 @@ fn crossfade_tail(
         let (dry, wet) = (*dry_right, *right);
         *right = <f32 as Lane>::add(dry, <f32 as Lane>::mul(<f32 as Lane>::sub(wet, dry), mix));
     }
+}
+// REALTIME_POLICY_END
+
+/// Why [`swap_bank_lanes`] exchanged nothing. Every refusal leaves both lanes as they were.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum LaneSwapRefusal {
+    /// The scratch is shorter than two payloads of the layout.
+    Scratch,
+    /// A lane index does not fit the payload calls' `u32` track index.
+    Lane,
+    /// A bank refused to snapshot its lane (an unsupported effect, or a lane out of range).
+    Snapshot,
+    /// A bank refused a restore. Nothing was left half-swapped: a refused restore changes
+    /// nothing, and the one restore that had already committed was undone from its own payload.
+    Restore,
+}
+
+// REALTIME_POLICY_BEGIN
+/// The scratch bytes [`swap_bank_lanes`] needs for a layout of `sizes`: two whole payloads, or
+/// `None` on overflow.
+fn swap_bank_lanes_scratch_bytes(sizes: StatePayloadSizes) -> Option<usize> {
+    usize::try_from(sizes.total()?.checked_mul(2)?).ok()
+}
+
+/// One payload's three sections in `scratch`, cut at `sizes`.
+fn swap_payload_sections(
+    scratch: &mut [u8],
+    sizes: StatePayloadSizes,
+) -> (&mut [u8], &mut [u8], &mut [u8]) {
+    let (common, rest) = scratch.split_at_mut(sizes.common_bytes as usize);
+    let (left, right) = rest.split_at_mut(sizes.left_bytes as usize);
+    (common, left, &mut right[..sizes.right_bytes as usize])
+}
+
+/// One payload of `scratch` as a restore input, cut at `sizes`.
+fn swap_payload_input(
+    payload: &[u8],
+    sizes: StatePayloadSizes,
+) -> Result<StatePayloadInput<'_>, crate::StatePayloadError> {
+    let (common, rest) = payload.split_at(sizes.common_bytes as usize);
+    let (left, right) = rest.split_at(sizes.left_bytes as usize);
+    StatePayloadInput::new(common, left, &right[..sizes.right_bytes as usize], sizes)
+}
+
+/// Exchange the whole state of lane `first_lane` of `first` with lane `second_lane` of `second`,
+/// or of `first` itself when `second` is `None` (issue #1747): a render-time lane swap.
+///
+/// # What moves
+///
+/// The lane's state payload, the plan-swap carry's one complete record of a lane (#1279 D3):
+/// running state, designed coefficients and every ramp in flight. Anything a bank keeps per
+/// *bank* rather than per lane -- a shared cursor -- stays: the payload is written relative to it
+/// and restored relative to the destination's, so a swap between two banks of one slot, whose
+/// cursors are equal, is a pure exchange. Control lanes, taps and dry shunt lines are not effect
+/// state; the stage that owns them swaps them (`rack`).
+///
+/// # All or nothing
+///
+/// Both lanes are snapshotted first; a snapshot mutates nothing. The first lane is then restored
+/// from the second's payload, and a refused restore changes nothing (a restore validates the whole
+/// payload before it commits). The second lane is restored from the first's payload last; if that
+/// is refused, the first lane is restored from its own payload, which a bank never refuses (the
+/// plan-swap carry's own-payload rule, #1279 D6), so the call returns with both lanes as they
+/// were. Both banks must run one layout (`state_layout_version` and `sizes`), and a caller swaps
+/// only populated lanes: a padded lane never swaps.
+///
+/// A collapsed bank holds a stale right channel; the caller disengages its chain first, as the
+/// plan-swap carry does.
+///
+/// # Cost
+///
+/// Two snapshots and two restores: each lane's state is read twice and written twice, plus two
+/// payloads of `scratch`. Allocation-free, lock-free and bounded by the prepared state size.
+///
+/// # Errors
+///
+/// [`LaneSwapRefusal`], with both lanes unchanged.
+pub fn swap_bank_lanes(
+    first: &mut dyn PreparedNativeEffectBank,
+    first_lane: usize,
+    second: Option<&mut dyn PreparedNativeEffectBank>,
+    second_lane: usize,
+    state_layout_version: u32,
+    sizes: StatePayloadSizes,
+    scratch: &mut [u8],
+) -> Result<(), LaneSwapRefusal> {
+    let Some(needed) = swap_bank_lanes_scratch_bytes(sizes) else {
+        return Err(LaneSwapRefusal::Scratch);
+    };
+    if scratch.len() < needed {
+        return Err(LaneSwapRefusal::Scratch);
+    }
+    let (Ok(first_track), Ok(second_track)) =
+        (u32::try_from(first_lane), u32::try_from(second_lane))
+    else {
+        return Err(LaneSwapRefusal::Lane);
+    };
+    if second.is_none() && first_lane == second_lane {
+        return Ok(());
+    }
+    let (first_payload, rest) = scratch.split_at_mut(needed / 2);
+    let second_payload = &mut rest[..needed / 2];
+    {
+        let (common, left, right) = swap_payload_sections(first_payload, sizes);
+        let output = StatePayloadOutput::new(common, left, right, sizes)
+            .map_err(|_| LaneSwapRefusal::Scratch)?;
+        first
+            .snapshot_track_state_payload(first_track, output)
+            .map_err(|_| LaneSwapRefusal::Snapshot)?;
+    }
+    {
+        let (common, left, right) = swap_payload_sections(second_payload, sizes);
+        let output = StatePayloadOutput::new(common, left, right, sizes)
+            .map_err(|_| LaneSwapRefusal::Scratch)?;
+        match second.as_deref() {
+            Some(bank) => bank.snapshot_track_state_payload(second_track, output),
+            None => first.snapshot_track_state_payload(second_track, output),
+        }
+        .map_err(|_| LaneSwapRefusal::Snapshot)?;
+    }
+    let first_payload: &[u8] = first_payload;
+    let second_payload: &[u8] = second_payload;
+    let (Ok(from_first), Ok(from_second)) = (
+        swap_payload_input(first_payload, sizes),
+        swap_payload_input(second_payload, sizes),
+    ) else {
+        return Err(LaneSwapRefusal::Scratch);
+    };
+    first
+        .restore_track_state_payload(first_track, state_layout_version, from_second)
+        .map_err(|_| LaneSwapRefusal::Restore)?;
+    let restored = match second {
+        Some(bank) => {
+            bank.restore_track_state_payload(second_track, state_layout_version, from_first)
+        }
+        None => first.restore_track_state_payload(second_track, state_layout_version, from_first),
+    };
+    if restored.is_err() {
+        let Ok(own) = swap_payload_input(first_payload, sizes) else {
+            return Err(LaneSwapRefusal::Restore);
+        };
+        let undone = first.restore_track_state_payload(first_track, state_layout_version, own);
+        debug_assert!(
+            undone.is_ok(),
+            "a bank never refuses its own lane's payload"
+        );
+        return Err(LaneSwapRefusal::Restore);
+    }
+    Ok(())
 }
 // REALTIME_POLICY_END
 

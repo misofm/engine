@@ -13,8 +13,8 @@ mod symmetry;
 pub use live::{
     BANK_CROSSFADE_LANES, BankCrossfade, BankCrossfadeLane, BypassShunt, BypassSwitch,
     EffectCellWriter, EffectControlLane, EffectControlRecord, EffectLaneResources, EffectLaneShape,
-    EffectLaneSpec, EffectWriteRefusal, ObservationLane, ObservePushError, Staged, apply_observe,
-    effect_control_lane,
+    EffectLaneSpec, EffectWriteRefusal, LaneSwapRefusal, ObservationLane, ObservePushError, Staged,
+    apply_observe, effect_control_lane, swap_bank_lanes,
 };
 pub use prepared_target::{
     EffectTargetError, EffectTargetRequest, NativeEffectTargetPreparation,
@@ -2591,11 +2591,10 @@ pub trait PreparedNativeEffectBank: Send {
     /// A **clock** is not a state word for this claim: a word that a block of `+0.0` input
     /// advances by a function of the block's length (and the lane's prepared shape) alone, never
     /// of the signal: the EQ's silence counters, the limiter's per-bank cursors and its per-lane
-    /// van Herk `phase`. Each implementation names its clocks. A caller that skips a resting
-    /// lane's block must still advance that lane's clocks as a rendered zero block would; this
-    /// trait has no entry point for that yet. It is owed by #1747 (`advance_clocks`, or folded
-    /// into the swap entry), and until it lands only the bank's own silent fast path, which
-    /// advances every clock of a skipped bank, may skip a block.
+    /// van Herk `phase`, and the soft clip's shared history position `pos`. Each implementation
+    /// names its clocks. A caller that skips a resting lane's block must still advance that lane's
+    /// clocks as a rendered zero block would, through [`advance_clocks`](Self::advance_clocks)
+    /// (#1747).
     ///
     /// # How it is answered
     ///
@@ -2623,6 +2622,36 @@ pub trait PreparedNativeEffectBank: Send {
     /// and a wrong set bit is the only answer that could ever be unsound.
     fn lanes_at_rest(&self) -> u32 {
         0
+    }
+
+    /// Advance the clocks of the lanes in `lanes_mask` (bit `l` is lane `l`) and of the bank by
+    /// `frames`, exactly as one rendered block of `frames` frames of exact `+0.0` input would,
+    /// for a bank whose block the caller skips (issue #1747; the consumer is #1107).
+    ///
+    /// # The contract
+    ///
+    /// A caller may skip a lane's block only when [`lanes_at_rest`](Self::lanes_at_rest) reports
+    /// that lane, and it calls this once for each block it skips, with `frames` the block's
+    /// length (at most the prepared quantum). After the call every state word and every state
+    /// payload word of the bank is bit-identical to what that rendered zero block would have left:
+    /// a lane in the mask advances its per-lane clocks, and the bank advances its shared per-bank
+    /// clocks (the limiter's cursors, the soft clip's `pos`), which every bank of one slot keeps
+    /// equal so that a lane swapped between two banks lands on the same cursor. A bank whose
+    /// block is skipped is skipped whole, so its caller passes every lane, padded lanes included:
+    /// the padding contract feeds a padded lane `+0.0`, so a rendered block would have advanced
+    /// its clocks too. A bit for a lane that is not at rest is a caller defect.
+    ///
+    /// # The default
+    ///
+    /// A no-op. That is exact for a bank with no clocks, and it is sound for every other bank
+    /// whose [`lanes_at_rest`](Self::lanes_at_rest) declines, because a declined lane is never
+    /// skipped. An implementation that sets a bit in `lanes_at_rest` and holds a clock overrides
+    /// this.
+    ///
+    /// On the render thread at a block boundary: allocation-free, lock-free and bounded by the
+    /// lane count and the clock count, never by `frames`.
+    fn advance_clocks(&mut self, lanes_mask: u32, frames: u32) {
+        let _ = (lanes_mask, frames);
     }
 }
 /// One entry of a [`NativeEffectRegistry`]'s tail-bound table: the [`NodeTailBound`] an effect's
