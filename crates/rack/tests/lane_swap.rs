@@ -968,7 +968,7 @@ fn collapse_case(width: BankWidth, lanes: usize, seed: u64, case: OddStrip) {
             block += 1;
             // Both directions, by seed parity, so each chain's half of the disengage and of the
             // agreement write is the receiving side on some seed.
-            let (from, to) = if seed % 2 == 0 {
+            let (from, to) = if seed.is_multiple_of(2) {
                 ((1, across), (0, odd))
             } else {
                 ((0, odd), (1, across))
