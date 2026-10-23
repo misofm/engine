@@ -2487,8 +2487,10 @@ fn swap_payload_input(
 }
 
 /// Exchange two lanes' prepared defaults through `spare`: three in-place exchanges, which swap
-/// the two lanes' bytes whatever `spare` held, and leave `spare` as it was. Calling it twice is
-/// the identity. Returns whether every exchange took; the caller has checked the lanes and the
+/// the two lanes' bytes whatever `spare` held. `spare` comes back holding what it held as the
+/// first lane's exchange hands it back, which a bank may canonicalise, so it is not promised to
+/// be byte-for-byte as it was; nothing reads it afterwards. Calling it twice is the identity on
+/// the two lanes. Returns whether every exchange took; the caller has checked the lanes and the
 /// length, so each exchange takes.
 fn rotate_lane_defaults<'one, 'two>(
     first: &mut (dyn PreparedNativeEffectBank + 'one),
@@ -2521,10 +2523,12 @@ fn rotate_lane_defaults<'one, 'two>(
 ///   ([`PreparedNativeEffectBank::exchange_lane_defaults`]), which a reset, a D7 recovery or a
 ///   restore's validation reads and which the carry deliberately leaves with the successor.
 ///
-/// Anything a bank keeps per *bank* rather than per lane -- a shared cursor -- stays: the payload
-/// is written relative to it and restored relative to the destination's, so a swap between two
-/// banks of one slot, whose cursors are equal, is a pure exchange. Control lanes, taps and dry
-/// shunt lines are not effect state; the stage that owns them swaps them (`rack`).
+/// Anything a bank keeps per *bank* rather than per lane -- a shared cursor -- stays. Two banks
+/// of one slot need not hold equal cursors (a whole-bank D7 reset moves one bank's limiter
+/// cursors and not its neighbour's), and the swap does not need them to: each payload is written
+/// relative to its own bank's cursor and restored relative to the destination bank's (the
+/// restore re-ages the lane's rings to it), so the exchange is exact either way. Control lanes,
+/// taps and dry shunt lines are not effect state; the stage that owns them swaps them (`rack`).
 ///
 /// # All or nothing
 ///
@@ -2719,12 +2723,13 @@ mod carry_tests {
         words
     }
 
-    /// #1747: a swap of two lanes' latency words, across two lines of other widths and cursors
-    /// and within one line, hands each lane the other's delayed samples in age order and leaves
-    /// every other lane and the cursors alone; a shape mismatch exchanges nothing.
+    /// #1747: a swap of two lanes' latency words, across two lines of other cursors and within
+    /// one line, hands each lane the other's delayed samples in age order and leaves every other
+    /// lane and the cursors alone; a shape mismatch exchanges nothing. The rack swaps only
+    /// between banks of one width, so no case crosses widths.
     ///
-    /// Test value: a swap that walks one line from the other's cursor, steps by the wrong width,
-    /// moves a cursor, or half-exchanges on a refusal.
+    /// Test value: a swap that walks one line from the other's cursor, moves a cursor, or
+    /// half-exchanges on a refusal.
     #[test]
     fn swapped_line_lanes_trade_their_delayed_samples() {
         const LATENCY: usize = 3;
@@ -2736,18 +2741,18 @@ mod carry_tests {
             }
             shunt
         };
-        // Five frames into a four-lane line (cursor 8) and six into an eight-lane one (cursor 0).
-        let (mut a, mut b) = (fill(4, 5, 0), fill(8, 6, 20));
+        // Five frames into one four-lane line (cursor 8) and six into another (cursor 0).
+        let (mut a, mut b) = (fill(4, 5, 0), fill(4, 6, 20));
         let (before_a, before_b) = (
             drain(&mut fill(4, 5, 0), 4, LATENCY),
-            drain(&mut fill(8, 6, 20), 8, LATENCY),
+            drain(&mut fill(4, 6, 20), 4, LATENCY),
         );
-        assert!(a.swap_line_lanes(2, 4, Some(&mut b), 5, 8));
-        let (after_a, after_b) = (drain(&mut a, 4, LATENCY), drain(&mut b, 8, LATENCY));
+        assert!(a.swap_line_lanes(2, 4, Some(&mut b), 1, 4));
+        let (after_a, after_b) = (drain(&mut a, 4, LATENCY), drain(&mut b, 4, LATENCY));
         let mut expected_a = before_a.clone();
         let mut expected_b = before_b.clone();
-        expected_a[2].clone_from(&before_b[5]);
-        expected_b[5].clone_from(&before_a[2]);
+        expected_a[2].clone_from(&before_b[1]);
+        expected_b[1].clone_from(&before_a[2]);
         assert_eq!((after_a, after_b), (expected_a, expected_b));
         // Within one line.
         let mut a = fill(4, 5, 0);
@@ -2757,8 +2762,8 @@ mod carry_tests {
         assert_eq!(drain(&mut a, 4, LATENCY), expected);
         // Refusals change nothing.
         let mut a = fill(4, 5, 0);
-        let mut longer = BypassShunt::new(8, (LATENCY + 1) * 8);
-        assert!(!a.swap_line_lanes(0, 4, Some(&mut longer), 0, 8), "latency");
+        let mut longer = BypassShunt::new(4, (LATENCY + 1) * 4);
+        assert!(!a.swap_line_lanes(0, 4, Some(&mut longer), 0, 4), "latency");
         assert!(!a.swap_line_lanes(4, 4, None, 0, 4), "lane index");
         assert!(
             !a.swap_line_lanes(0, 4, None, 1, 8),
@@ -2768,9 +2773,9 @@ mod carry_tests {
         assert!(BypassShunt::new(4, 0).swap_line_lanes(
             0,
             4,
-            Some(&mut BypassShunt::new(8, 0)),
+            Some(&mut BypassShunt::new(4, 0)),
             0,
-            8
+            4
         ));
     }
 }

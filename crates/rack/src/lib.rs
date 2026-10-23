@@ -930,6 +930,10 @@ pub struct EffectBankStage {
     witness: Box<[ChannelSymmetryWitness]>,
     /// The layout a plan swap checks before it moves a lane in or out.
     layout: EffectLaneLayout,
+    /// The bank's whole program key, which a lane swap requires to be equal in both stages
+    /// (issue #1747): the layout alone misses the link mode, quality, ports and automation
+    /// capacity, any of which makes one lane's state mean something else in the other bank.
+    program_key: EffectProgramKey,
     /// Restores a plan swap's carry refused on this stage: each left its lane as prepared, at rest
     /// (#1279 D6). Saturating; read after render.
     carry_refused: u64,
@@ -963,6 +967,7 @@ impl EffectBankStage {
             offsets: vec![0_u32; width.lanes() as usize + 1].into_boxed_slice(),
             witness,
             layout: EffectLaneLayout::of(&metadata.program_key),
+            program_key: metadata.program_key,
             carry_refused: 0,
         })
     }
@@ -1117,7 +1122,8 @@ impl BankStage for EffectBankStage {
     }
 
     // REALTIME_POLICY_BEGIN
-    /// Both lanes exist, the peer is an [`EffectBankStage`] of this layout, both banks declare
+    /// Both lanes exist, the peer is an [`EffectBankStage`] of this program key (not only this
+    /// layout: link mode, quality, ports and automation capacity too), both banks declare
     /// prepared defaults of one size, and the scratch holds
     /// [`effect_contract::swap_bank_lanes_scratch_bytes`].
     fn can_swap_lanes(&self, lane: usize, peer: LanePeer<'_>, scratch_bytes: usize) -> bool {
@@ -1137,7 +1143,7 @@ impl BankStage for EffectBankStage {
                     .and_then(|any| any.downcast_ref::<Self>())
                     .is_some_and(|other| {
                         other_lane < other.lanes()
-                            && other.layout == self.layout
+                            && other.program_key == self.program_key
                             && lane_swap_scratch_fits(
                                 &*self.processor,
                                 &*other.processor,
@@ -1151,8 +1157,8 @@ impl BankStage for EffectBankStage {
     /// The lane's whole state payload (running state, designed words, every ramp in flight)
     /// through [`effect_contract::swap_bank_lanes`], then the witness this stage caches for each
     /// lane, which describes that state and so moves with it. Every other field is per bank:
-    /// the processor's shared words, the width, quantum, zero offsets, prepared bypass, layout and
-    /// the carry counter.
+    /// the processor's shared words, the width, quantum, zero offsets, prepared bypass, layout,
+    /// program key and the carry counter.
     fn swap_lanes(&mut self, lane: usize, peer: LanePeerMut<'_>, scratch: &mut [u8]) -> bool {
         if !self.can_swap_lanes(lane, peer.as_peer(), scratch.len()) {
             return false;
@@ -1375,6 +1381,9 @@ pub struct LiveControlEffectBankStage {
     unrestored: u8,
     /// The layout a plan swap checks before it moves a lane in or out (#1280).
     layout: EffectLaneLayout,
+    /// The bank's whole program key, which a lane swap requires to be equal in both stages
+    /// (issue #1747; see [`EffectBankStage`]'s field of the same name).
+    program_key: EffectProgramKey,
     /// Restores a plan swap's carry refused on this stage: each left its lane as prepared, at rest
     /// (#1279 D6). Saturating; read after render.
     carry_refused: u64,
@@ -1504,6 +1513,7 @@ impl LiveControlEffectBankStage {
             unbound: 0,
             unrestored: 0,
             layout,
+            program_key: metadata.program_key,
             carry_refused: 0,
         })
     }
@@ -1952,8 +1962,8 @@ impl BankStage for LiveControlEffectBankStage {
     }
 
     // REALTIME_POLICY_BEGIN
-    /// Both lanes exist, the peer is a [`LiveControlEffectBankStage`] of this layout, both banks
-    /// declare prepared defaults of one size, the scratch holds
+    /// Both lanes exist, the peer is a [`LiveControlEffectBankStage`] of this program key, both
+    /// banks declare prepared defaults of one size, the scratch holds
     /// [`effect_contract::swap_bank_lanes_scratch_bytes`], and every per-lane part of the two
     /// lanes has the same shape: see [`LiveControlEffectBankStage::lane_swap_fits`].
     fn can_swap_lanes(&self, lane: usize, peer: LanePeer<'_>, scratch_bytes: usize) -> bool {
@@ -2249,8 +2259,8 @@ impl LiveControlEffectBankStage {
 
     /// Whether lane `lane` of this stage and lane `other_lane` of `other` (which may be this
     /// stage) can trade every per-lane part (issue #1747): both lanes exist; both stages run one
-    /// layout; the lanes are of one kind and, with two control lanes, of one cell shape; both or
-    /// neither has an observation queue; both or neither has taps, and two lanes' taps are the
+    /// program key; the lanes are of one kind and, with two control lanes, of one cell shape;
+    /// both or neither has an observation queue; both or neither has taps, and two lanes' taps are the
     /// same menu; and each lane that can read a dry shunt finds one in the other stage, with two
     /// shunts of one shape. Allocation-free and bounded by the lane and tap counts.
     #[must_use]
@@ -2276,7 +2286,7 @@ impl LiveControlEffectBankStage {
         };
         lane < self.lanes()
             && other_lane < other.lanes()
-            && self.layout == other.layout
+            && self.program_key == other.program_key
             && self.lane_kind(lane) == other.lane_kind(other_lane)
             && controls
             && self.observe_queue_position(lane).is_some()
@@ -2971,10 +2981,13 @@ pub enum ChainLanePeer<'a> {
 pub enum ChainLaneSwapRefusal {
     /// A lane is out of range or not active: a padded lane never swaps.
     Lane,
-    /// The two chains have different slot counts, or the two lanes differ in a slot's activity
-    /// or in the fold or auxiliary bit.
+    /// The two chains have different slot counts or different mono-collapse arming
+    /// ([`BankChain::arm_mono_collapse`]), the two lanes differ in a slot's activity or in the
+    /// fold or auxiliary bit, or a slot that is an identity on both lanes has stages that cannot
+    /// swap them.
     Shape,
-    /// A slot's stages refused the two lanes (kind, layout, taps, shunt or scratch).
+    /// A slot that runs on the two lanes has stages that refused them (kind, program key, taps,
+    /// shunt or scratch).
     Slot,
     /// A slot refused after its check passed, a defect: the slots already swapped were swapped
     /// back.
@@ -3893,30 +3906,34 @@ impl BankChain {
         if !Self::mask_bit(&self.active, lane) || !Self::mask_bit(&peer.active, other_lane) {
             return Err(ChainLaneSwapRefusal::Lane);
         }
+        let swaps = |own: &PreparedSlot, theirs: &PreparedSlot| {
+            let peer = match other {
+                Some(_) => LanePeer::Other(&*theirs.stage, other_lane),
+                None => LanePeer::Same(other_lane),
+            };
+            own.stage.can_swap_lanes(lane, peer, scratch_bytes)
+        };
         if self.slots.len() != peer.slots.len()
+            || self.collapse_source != peer.collapse_source
             || Self::mask_bit(&self.fold, lane) != Self::mask_bit(&peer.fold, other_lane)
             || Self::mask_bit(&self.aux, lane) != Self::mask_bit(&peer.aux, other_lane)
             || self
                 .slots
                 .iter()
                 .zip(peer.slots.iter())
-                .any(|(own, theirs)| own.lane_active(lane) != theirs.lane_active(other_lane))
+                .any(|(own, theirs)| {
+                    own.lane_active(lane) != theirs.lane_active(other_lane)
+                        || (!own.lane_active(lane) && !swaps(own, theirs))
+                })
         {
             return Err(ChainLaneSwapRefusal::Shape);
         }
-        let fits = self
+        if self
             .slots
             .iter()
             .zip(peer.slots.iter())
-            .filter(|(own, _)| own.lane_active(lane))
-            .all(|(own, theirs)| {
-                let peer = match other {
-                    Some(_) => LanePeer::Other(&*theirs.stage, other_lane),
-                    None => LanePeer::Same(other_lane),
-                };
-                own.stage.can_swap_lanes(lane, peer, scratch_bytes)
-            });
-        if fits {
+            .all(|(own, theirs)| swaps(own, theirs))
+        {
             Ok(())
         } else {
             Err(ChainLaneSwapRefusal::Slot)
@@ -3928,18 +3945,29 @@ impl BankChain {
     /// trades an active strip into a silent strip's position.
     ///
     /// Every refusal is decided before the first write and leaves both chains as they were: a lane
-    /// that is not active (a padded lane never swaps), two chains of different slot counts, slot
-    /// activity, fold or auxiliary bits that differ between the two lanes, or a slot whose stages
-    /// refuse ([`BankStage::can_swap_lanes`]; `scratch` must hold
-    /// [`Self::lane_swap_scratch_bytes`]). A slot that is an identity on both lanes holds no state
-    /// of either strip and is not asked.
+    /// that is not active (a padded lane never swaps), two chains of different slot counts or of
+    /// different mono-collapse arming, slot activity, fold or auxiliary bits that differ between
+    /// the two lanes, or any slot whose stages refuse ([`BankStage::can_swap_lanes`]; `scratch`
+    /// must hold [`Self::lane_swap_scratch_bytes`]). Every slot is asked and every slot swaps,
+    /// one that is an identity on both lanes too: a stage that cannot swap is refused, never
+    /// skipped, so no lane's state in any slot stays behind.
     ///
-    /// Then a chain that rendered its last block collapsed takes the disengage boundary
+    /// The arming refusal is what keeps a cross-chain swap exact. The `SOURCE` half of the
+    /// witness is joined per chain, at bind, by the graph (`arm_mono_collapse`, which knows the
+    /// tracks a chain renders and a chain does not); a stereo-source strip moved into a chain
+    /// armed for mono sources would have its right channel replaced by its left. Refusing the
+    /// swap keeps that join where the track identity is. An in-chain swap has one arming.
+    ///
+    /// Then the two chains' channel agreement is taken -- each chain's
+    /// [`carried_channel_agreement`](Self::carried_channel_agreement), so an unarmed chain hands
+    /// over `false`, as at a plan swap (#1276 D5) -- before anything changes; a chain that
+    /// rendered its last block collapsed takes the disengage boundary
     /// ([`Self::disengage_for_carry`]), so both channels of its prefix stages hold real state
-    /// before any lane's right channel moves; the two chains' channel agreement is ANDed into
-    /// both, since each now holds a lane of the other; and the slots swap in order. A slot that
-    /// refuses after its check passed is a defect: the slots already swapped are swapped back and
-    /// the call returns [`ChainLaneSwapRefusal::Defect`].
+    /// before any lane's right channel moves (the disengage changes no agreement: it runs only on
+    /// a collapsed chain, whose flag is already `true`); the AND goes into both chains, since each
+    /// now holds a lane of the other; and the slots swap in order. A slot that refuses after its
+    /// check passed is a defect: the slots already swapped are swapped back and the call returns
+    /// [`ChainLaneSwapRefusal::Defect`].
     ///
     /// The resident scratch -- the final output [`Self::final_output_lane`] and
     /// [`Self::final_output_block`] lend -- is not swapped: for the two lanes it is stale until the
@@ -3964,24 +3992,17 @@ impl BankChain {
                 self.disengage_for_carry();
                 let slots = self.slots.len();
                 for index in 0..slots {
-                    let slot = &mut self.slots[index];
-                    if !slot.lane_active(lane) {
-                        continue;
-                    }
-                    if !slot
-                        .stage
-                        .swap_lanes(lane, LanePeerMut::Same(other_lane), scratch)
-                    {
+                    if !self.slots[index].stage.swap_lanes(
+                        lane,
+                        LanePeerMut::Same(other_lane),
+                        scratch,
+                    ) {
                         debug_assert!(false, "a checked slot swaps its lanes");
                         for undo in self.slots[..index].iter_mut().rev() {
-                            if undo.lane_active(lane) {
-                                let undone = undo.stage.swap_lanes(
-                                    lane,
-                                    LanePeerMut::Same(other_lane),
-                                    scratch,
-                                );
-                                debug_assert!(undone, "a swapped slot swaps back");
-                            }
+                            let undone =
+                                undo.stage
+                                    .swap_lanes(lane, LanePeerMut::Same(other_lane), scratch);
+                            debug_assert!(undone, "a swapped slot swaps back");
                         }
                         return Err(ChainLaneSwapRefusal::Defect);
                     }
@@ -3989,17 +4010,14 @@ impl BankChain {
             }
             ChainLanePeer::Other(other, other_lane) => {
                 self.lane_swap_check(lane, Some(other), other_lane, scratch.len())?;
+                let agree = self.carried_channel_agreement() && other.carried_channel_agreement();
                 self.disengage_for_carry();
                 other.disengage_for_carry();
-                let agree = self.collapse_channels_agree && other.collapse_channels_agree;
                 self.collapse_channels_agree = agree;
                 other.collapse_channels_agree = agree;
                 let slots = self.slots.len();
                 for index in 0..slots {
                     let (own, theirs) = (&mut self.slots[index], &mut other.slots[index]);
-                    if !own.lane_active(lane) {
-                        continue;
-                    }
                     if !own.stage.swap_lanes(
                         lane,
                         LanePeerMut::Other(&mut *theirs.stage, other_lane),
@@ -4011,14 +4029,12 @@ impl BankChain {
                             .zip(other.slots[..index].iter_mut())
                             .rev()
                         {
-                            if own.lane_active(lane) {
-                                let undone = own.stage.swap_lanes(
-                                    lane,
-                                    LanePeerMut::Other(&mut *theirs.stage, other_lane),
-                                    scratch,
-                                );
-                                debug_assert!(undone, "a swapped slot swaps back");
-                            }
+                            let undone = own.stage.swap_lanes(
+                                lane,
+                                LanePeerMut::Other(&mut *theirs.stage, other_lane),
+                                scratch,
+                            );
+                            debug_assert!(undone, "a swapped slot swaps back");
                         }
                         return Err(ChainLaneSwapRefusal::Defect);
                     }

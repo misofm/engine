@@ -5,8 +5,10 @@
 //! gain ramp per channel, both in its state payload, so every rendered sample depends on the lane's
 //! history. Its gain is the live parameter, and its two observation taps read the accumulator and
 //! the gain. Each lane also keeps eight bytes of prepared per-lane defaults outside its payload.
-//! What is gated is the rack's swap: that every per-lane field -- payload, prepared defaults,
-//! control lane, observation queue, taps, dry shunt history -- follows the strip.
+//! A collapsing variant of the same bank declares the mono-collapse trio, so a chain armed for
+//! mono sources renders it one-plane. What is gated is the rack's swap: that every per-lane field
+//! -- payload, prepared defaults, control lane, observation queue, taps, dry shunt history, the
+//! witness terms each stage caches and the chains' channel agreement -- follows the strip.
 //!
 //! This file has its own test binary so that `bench_support`'s audited allocator serves it.
 
@@ -38,8 +40,12 @@ const LATENCY: usize = 3;
 const GAIN_RAMP: u32 = 11;
 /// Frames a bypass switch crossfades over.
 const BYPASS_RAMP: u32 = 20;
-/// Words per channel of one lane's payload: accumulator, gain, target, step, remaining.
-const CHANNEL_WORDS: usize = 5;
+/// Words per channel of one lane's payload: accumulator, gain, target, step, remaining, pole.
+const CHANNEL_WORDS: usize = 6;
+/// Every channel's accumulator pole, unless skewed.
+const POLE: f32 = 0.875;
+/// The right channel's pole of a skewed lane: a designed word the two channels do not share.
+const SKEWED_POLE: f32 = 0.5;
 const SIZES: StatePayloadSizes = StatePayloadSizes {
     common_bytes: 0,
     left_bytes: (CHANNEL_WORDS * 4) as u32,
@@ -76,9 +82,36 @@ struct Channel {
     target: f32,
     step: f32,
     remaining: u32,
+    pole: f32,
 }
 
 impl Channel {
+    /// A channel at a random accumulator, mid-way through a random gain ramp.
+    fn fresh(rng: &mut Rng) -> Self {
+        let mut channel = Self {
+            acc: rng.signed(),
+            gain: 1.0,
+            target: 1.0,
+            step: 0.0,
+            remaining: 0,
+            pole: POLE,
+        };
+        channel.retarget(rng.signed() * 2.0);
+        channel.remaining += rng.below(40) as u32;
+        channel
+    }
+
+    /// The words the kernel reads that are not running state: the `DESIGNED` term compares them.
+    fn designed(&self) -> [u32; 5] {
+        [
+            self.gain.to_bits(),
+            self.target.to_bits(),
+            self.step.to_bits(),
+            self.remaining,
+            self.pole.to_bits(),
+        ]
+    }
+
     fn retarget(&mut self, target: f32) {
         self.target = target;
         self.step = (target - self.gain) / GAIN_RAMP as f32;
@@ -93,7 +126,7 @@ impl Channel {
                 self.gain = self.target;
             }
         }
-        self.acc = self.acc * 0.75 + input;
+        self.acc = self.acc * self.pole + input;
         self.acc * self.gain
     }
 
@@ -104,6 +137,7 @@ impl Channel {
             self.target.to_bits(),
             self.step.to_bits(),
             self.remaining,
+            self.pole.to_bits(),
         ];
         for (chunk, word) in out.chunks_exact_mut(4).zip(words) {
             chunk.copy_from_slice(&word.to_le_bytes());
@@ -120,35 +154,32 @@ impl Channel {
             target: f32::from_bits(word(2)),
             step: f32::from_bits(word(3)),
             remaining: word(4),
+            pole: f32::from_bits(word(5)),
         }
     }
 }
 
 /// A bank of `lanes` lanes, each `[left, right]`, that starts with a gain ramp in flight on every
 /// lane, so a live-control-free slot is mid-ramp too. Each lane's prepared defaults are one
-/// random word, shared with the test so it can read them where the bank sits in a chain.
+/// random word, shared with the test so it can read them where the bank sits in a chain. A
+/// `collapsing` bank starts each lane with two equal channels and declares the mono-collapse trio.
 struct StripBank {
     width: BankWidth,
     lanes: Vec<[Channel; 2]>,
     defaults: Arc<[AtomicU64]>,
+    collapsing: bool,
 }
 
 impl StripBank {
-    fn new(width: BankWidth, rng: &mut Rng) -> Self {
+    fn new(width: BankWidth, rng: &mut Rng, collapsing: bool) -> Self {
         let lanes = (0..width.lanes())
             .map(|_| {
-                core::array::from_fn(|_| {
-                    let mut channel = Channel {
-                        acc: rng.signed(),
-                        gain: 1.0,
-                        target: 1.0,
-                        step: 0.0,
-                        remaining: 0,
-                    };
-                    channel.retarget(rng.signed() * 2.0);
-                    channel.remaining += rng.below(40) as u32;
-                    channel
-                })
+                if collapsing {
+                    let channel = Channel::fresh(rng);
+                    [channel, channel]
+                } else {
+                    core::array::from_fn(|_| Channel::fresh(rng))
+                }
             })
             .collect();
         let defaults = (0..width.lanes())
@@ -158,6 +189,7 @@ impl StripBank {
             width,
             lanes,
             defaults,
+            collapsing,
         }
     }
 
@@ -218,6 +250,42 @@ impl PreparedNativeEffectBank for StripBank {
             }
         }
         BankProcessReport::empty(self.width)
+    }
+
+    fn supports_mono_collapse(&self) -> bool {
+        self.collapsing
+    }
+
+    /// The left channel alone, as the dual body runs it; a collapsed block admits no right-only
+    /// write (it clears `LIVE`), so `Right` spans never reach it.
+    fn process_bank_mono(&mut self, block: EffectBankProcessBlock<'_>) -> BankProcessReport {
+        let lanes = self.lanes.len();
+        for (lane, channels) in self.lanes.iter_mut().enumerate() {
+            let spans = &block.automation[block.automation_offsets[lane] as usize
+                ..block.automation_offsets[lane + 1] as usize];
+            for span in spans.iter().filter(|span| span.parameter_index == 0) {
+                if span.channel != ParameterChannel::Right {
+                    channels[0].retarget(span.value);
+                }
+            }
+            for frame in 0..block.frames as usize {
+                let index = frame * lanes + lane;
+                block.left[index] = channels[0].tick(block.left[index]);
+            }
+        }
+        BankProcessReport::empty(self.width)
+    }
+
+    fn desymmetrize_channels(&mut self) {
+        for channels in &mut self.lanes {
+            channels[1] = channels[0];
+        }
+    }
+
+    fn lane_channel_symmetry(&self, lane: usize) -> bool {
+        self.lanes
+            .get(lane)
+            .is_some_and(|[left, right]| left.designed() == right.designed())
     }
 
     fn observe_resident_bank(&self, tap_index: u32, out: &mut [ObservationSample]) -> bool {
@@ -321,6 +389,18 @@ struct Shape {
     padded: bool,
     /// Lane 0 of chain 1 is an identity in slot 2.
     slot_gap: bool,
+    /// Collapsing banks, mono inputs and both-channel writes, armed as given.
+    collapse: Option<Collapse>,
+}
+
+/// A [`World`] whose banks can collapse.
+#[derive(Clone, Copy)]
+struct Collapse {
+    /// Per chain: armed for mono sources ([`BankChain::arm_mono_collapse`]).
+    armed: [bool; 2],
+    /// `(slot, lane)` of chain 0 whose bank has the right pole [`SKEWED_POLE`]: a lane whose
+    /// designed words differ between the channels.
+    skew: Option<(usize, usize)>,
 }
 
 /// Two chains of three slots -- an `EffectBankStage`, a `LiveControlEffectBankStage` with a live
@@ -339,6 +419,8 @@ struct World {
     first_sample: u64,
     /// Per chain, per slot: the bank's prepared defaults, per lane.
     defaults: [[Arc<[AtomicU64]>; 3]; 2],
+    /// Mono inputs and both-channel writes ([`Shape::collapse`]).
+    collapsing: bool,
 }
 
 impl World {
@@ -350,6 +432,7 @@ impl World {
         let mut writers = Vec::new();
         let mut readers = Vec::new();
         let mut defaults = Vec::new();
+        let collapsing = shape.collapse.is_some();
         let chains = core::array::from_fn(|chain| {
             let mut controls: Vec<Option<EffectControlLane>> = Vec::new();
             let mut observations = Vec::new();
@@ -366,6 +449,11 @@ impl World {
                     &superseded,
                 )
                 .expect("lane");
+                let mut control = control;
+                // A collapsing world carries lanes in, so its lanes hold the carried slots.
+                if collapsing {
+                    control.install_carry_slots();
+                }
                 writers.push(writer);
                 controls.push(Some(control));
                 let (first, first_reader) = observation_slot();
@@ -388,17 +476,26 @@ impl World {
                 gapped[0] = false;
             }
             let mut chain_defaults = Vec::new();
-            let effect = |rng: &mut Rng, defaults: &mut Vec<Arc<[AtomicU64]>>| {
-                let bank = StripBank::new(width, rng);
-                defaults.push(Arc::clone(&bank.defaults));
+            let skew = shape.collapse.and_then(|collapse| collapse.skew);
+            let mut bank = |slot: usize, rng: &mut Rng| {
+                let mut bank = StripBank::new(width, rng, collapsing);
+                if let Some((skewed, lane)) = skew
+                    && chain == 0
+                    && skewed == slot
+                {
+                    bank.lanes[lane][1].pole = SKEWED_POLE;
+                }
+                chain_defaults.push(Arc::clone(&bank.defaults));
+                bank
+            };
+            let effect = |bank: StripBank| {
                 Box::new(EffectBankStage::new(bank.bound(), width, QUANTUM).expect("stage"))
                     as Box<dyn BankStage>
             };
-            let first = effect(&mut rng, &mut chain_defaults);
-            let bank = StripBank::new(width, &mut rng);
-            chain_defaults.push(Arc::clone(&bank.defaults));
+            let first = effect(bank(0, &mut rng));
+            let live_bank = bank(1, &mut rng);
             let live = LiveControlEffectBankStage::new(
-                bank.bound(),
+                live_bank.bound(),
                 width,
                 QUANTUM,
                 controls,
@@ -406,7 +503,7 @@ impl World {
                 LATENCY,
             )
             .expect("stage");
-            let third = effect(&mut rng, &mut chain_defaults);
+            let third = effect(bank(2, &mut rng));
             defaults.push(chain_defaults);
             let slots = vec![
                 BankSlot {
@@ -422,12 +519,16 @@ impl World {
                     active_lanes: gapped.into_boxed_slice(),
                 },
             ];
-            BankChain::new(
+            let mut built = BankChain::new(
                 AoSoaScratch::new(width, QUANTUM).expect("scratch"),
                 active.into_boxed_slice(),
                 slots,
             )
-            .expect("chain")
+            .expect("chain");
+            if let Some(collapse) = shape.collapse {
+                built.arm_mono_collapse(collapse.armed[chain]);
+            }
+            built
         });
         Self {
             lanes,
@@ -444,6 +545,7 @@ impl World {
                 .collect::<Vec<_>>()
                 .try_into()
                 .expect("two chains"),
+            collapsing,
         }
     }
 
@@ -561,6 +663,34 @@ impl World {
         result
     }
 
+    /// [`Self::swap`], gated (#1747 gate 2): the swap allocates and frees nothing on the calling
+    /// thread. The world has been built, so every process static is warm.
+    fn swap_counted(
+        &mut self,
+        at: (usize, usize),
+        other: (usize, usize),
+        scratch: &mut [u8],
+    ) -> Result<(), ChainLaneSwapRefusal> {
+        let mark = current_thread_counters();
+        let result = self.swap(at, other, scratch);
+        let delta = current_thread_delta_since(mark);
+        assert_eq!(
+            (delta.allocations, delta.deallocations),
+            (0, 0),
+            "a lane swap allocated or freed"
+        );
+        result
+    }
+
+    /// The stage of slot `slot` of chain `chain`, as its type.
+    fn stage_mut<T: 'static>(&mut self, chain: usize, slot: usize) -> &mut T {
+        self.chains[chain]
+            .slot_stage_mut(slot)
+            .and_then(BankStage::as_any_mut)
+            .and_then(|any| any.downcast_mut::<T>())
+            .expect("a stage of that type")
+    }
+
     fn scratch(&self) -> Vec<u8> {
         let bytes = self.chains[0]
             .lane_swap_scratch_bytes()
@@ -581,6 +711,24 @@ fn gain(rng: &mut Rng) -> EffectControlRecord {
     }
 }
 
+/// `record` on its own channel, and in a collapsing world its bit-equal twin on the other one
+/// too: the pair the drain stages as one both-channel write.
+fn writes(record: EffectControlRecord, collapsing: bool) -> Vec<EffectControlRecord> {
+    let EffectControlRecord::Parameter { value, .. } = record else {
+        return vec![record];
+    };
+    if !collapsing {
+        return vec![record];
+    }
+    [ParameterChannel::Left, ParameterChannel::Right]
+        .map(|channel| EffectControlRecord::Parameter {
+            parameter_index: 0,
+            channel,
+            value,
+        })
+        .to_vec()
+}
+
 const fn bypass(bypassed: bool) -> EffectControlRecord {
     EffectControlRecord::Bypass(BypassSwitch {
         bypassed,
@@ -588,13 +736,17 @@ const fn bypass(bypassed: bool) -> EffectControlRecord {
     })
 }
 
-fn inputs(rng: &mut Rng, strips: usize) -> Vec<(Vec<f32>, Vec<f32>)> {
+/// Random planes per strip; `mono`: the right plane is the left one (a mono source).
+fn inputs(rng: &mut Rng, strips: usize, mono: bool) -> Vec<(Vec<f32>, Vec<f32>)> {
     (0..strips)
         .map(|_| {
-            (
-                (0..QUANTUM).map(|_| rng.signed()).collect(),
-                (0..QUANTUM).map(|_| rng.signed()).collect(),
-            )
+            let left: Vec<f32> = (0..QUANTUM).map(|_| rng.signed()).collect();
+            let right = if mono {
+                left.clone()
+            } else {
+                (0..QUANTUM).map(|_| rng.signed()).collect()
+            };
+            (left, right)
         })
         .collect()
 }
@@ -605,12 +757,13 @@ fn step(swapped: &mut World, twin: &mut World, rng: &mut Rng, block: usize) {
     let strips = twin.strips();
     for strip in 0..strips {
         if rng.below(3) == 0 {
-            let record = gain(rng);
-            swapped.push(strip, record);
-            twin.push(strip, record);
+            for record in writes(gain(rng), twin.collapsing) {
+                swapped.push(strip, record);
+                twin.push(strip, record);
+            }
         }
     }
-    let inputs = inputs(rng, strips);
+    let inputs = inputs(rng, strips, twin.collapsing);
     let (got, expected) = (swapped.render(&inputs), twin.render(&inputs));
     for strip in 0..strips {
         assert!(
@@ -628,18 +781,29 @@ fn step(swapped: &mut World, twin: &mut World, rng: &mut Rng, block: usize) {
 /// of each chain swaps with the other, each mid-ramp (gain ramps on every lane, a bypass crossfade
 /// over a latency-3 dry shunt on a swapped strip, a tap armed and a subscription queued after the
 /// swap), and every strip, fed and written as it moves, renders and publishes exactly what its
-/// never-swapped twin does, and holds its twin's prepared defaults in every slot. Simd4 and, where
-/// built, Simd8.
+/// never-swapped twin does, and holds its twin's prepared defaults in every slot. Every swap
+/// allocates and frees nothing (gate 2). Simd4 and, where built, Simd8.
+///
+/// Then the collapse case: both chains armed for mono sources, one odd strip in chain 0 -- a
+/// designed word skewed in the live slot or in an effect slot, or an asymmetric payload carried
+/// into the live slot -- that must keep its chain dual. Swapped before the first block, in the
+/// chain and then across, the odd strip takes its witness term with it: chain 1 then renders it
+/// dual and chain 0 collapses. And an odd strip skewed, driven apart and repaired by a carry
+/// keeps chain 0's lost agreement with it when it crosses into chain 1 (the swap called from
+/// chain 1). A cross-chain swap between an armed and an unarmed chain refuses (`Shape`).
 ///
 /// Test value: a swap that leaves any per-lane part behind -- the payload, the prepared defaults,
-/// the control lane, the observation queue's consumer, the taps or the shunt's line words -- or
-/// swaps a shared cursor; no other test performs a render-time swap.
+/// the control lane, the observation queue's consumer, the taps, the shunt's line words, a
+/// stage's cached `DESIGNED` or `RESTORED` term, or the chains' channel agreement -- swaps a
+/// shared cursor, allocates, or moves a stereo strip into a mono-armed chain; no other test
+/// performs a render-time swap.
 #[test]
 fn a_swapped_strip_renders_and_publishes_what_its_twin_does() {
     assert_installed();
     let shape = Shape {
         padded: false,
         slot_gap: false,
+        collapse: None,
     };
     for &width in BankWidth::ALL {
         let lanes = width.lanes() as usize;
@@ -664,7 +828,7 @@ fn a_swapped_strip_renders_and_publishes_what_its_twin_does() {
             step(&mut swapped, &mut twin, &mut rng, block);
             block += 1;
             swapped
-                .swap((0, first), (0, second), &mut scratch)
+                .swap_counted((0, first), (0, second), &mut scratch)
                 .expect("an in-chain swap");
             for strip in (0..swapped.strips()).filter(|strip| !strip.is_multiple_of(2)) {
                 swapped.writers[strip]
@@ -684,7 +848,7 @@ fn a_swapped_strip_renders_and_publishes_what_its_twin_does() {
             step(&mut swapped, &mut twin, &mut rng, block);
             block += 1;
             swapped
-                .swap((0, across.0), (1, across.1), &mut scratch)
+                .swap_counted((0, across.0), (1, across.1), &mut scratch)
                 .expect("a cross-chain swap");
             for strip in (0..swapped.strips()).filter(|strip| strip.is_multiple_of(2)) {
                 swapped.writers[strip]
@@ -712,6 +876,156 @@ fn a_swapped_strip_renders_and_publishes_what_its_twin_does() {
             );
         }
     }
+    for &width in BankWidth::ALL {
+        let lanes = width.lanes() as usize;
+        for seed in 0..4_u64 {
+            for case in OddStrip::ALL {
+                collapse_case(width, lanes, seed, case);
+            }
+        }
+    }
+}
+
+/// What makes chain 0's odd strip keep its chain dual, in [`collapse_case`].
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum OddStrip {
+    /// A designed word skewed in the live slot (`LiveControlEffectBankStage::designed`).
+    LiveDesigned,
+    /// A designed word skewed in an effect slot (`EffectBankStage`'s cached witness).
+    StageDesigned,
+    /// An asymmetric payload carried into the live slot (its `unrestored` bit).
+    Unrestored,
+    /// Skewed in an effect slot, rendered apart, then repaired by a symmetric carry: its witness
+    /// holds again but chain 0's agreement stays lost.
+    Apart,
+    /// No odd strip; chain 1 is not armed.
+    Unarmed,
+}
+
+impl OddStrip {
+    const ALL: [Self; 5] = [
+        Self::LiveDesigned,
+        Self::StageDesigned,
+        Self::Unrestored,
+        Self::Apart,
+        Self::Unarmed,
+    ];
+}
+
+/// A collapsing [`StripBank`] (`apart`: every lane's right accumulator off its left).
+fn source_bank(width: BankWidth, seed: u64, apart: bool) -> StripBank {
+    let mut bank = StripBank::new(width, &mut Rng(seed ^ 0x50_75), true);
+    if apart {
+        for channels in &mut bank.lanes {
+            channels[1].acc = channels[0].acc + 0.5;
+        }
+    }
+    bank
+}
+
+/// One collapse case of gate 1; see its documentation.
+fn collapse_case(width: BankWidth, lanes: usize, seed: u64, case: OddStrip) {
+    let mut rng = Rng(seed ^ 0x0c01);
+    let odd = rng.below(lanes);
+    let moved = (odd + 1 + rng.below(lanes - 1)) % lanes;
+    let across = rng.below(lanes);
+    let shape = Shape {
+        padded: false,
+        slot_gap: false,
+        collapse: Some(Collapse {
+            armed: [true, case != OddStrip::Unarmed],
+            skew: match case {
+                OddStrip::LiveDesigned => Some((1, odd)),
+                OddStrip::StageDesigned | OddStrip::Apart => Some((0, odd)),
+                OddStrip::Unrestored | OddStrip::Unarmed => None,
+            },
+        }),
+    };
+    let what = format!("{width:?} seed {seed} {case:?}");
+    let mut swapped = World::new(width, seed, shape);
+    let mut twin = World::new(width, seed, shape);
+    let mut scratch = swapped.scratch();
+    let mut block = 0;
+    match case {
+        OddStrip::Unarmed => assert_eq!(
+            swapped.swap_counted((0, odd), (1, across), &mut scratch),
+            Err(ChainLaneSwapRefusal::Shape),
+            "{what}: a swap between an armed and an unarmed chain"
+        ),
+        OddStrip::Apart => {
+            for _ in 0..3 {
+                step(&mut swapped, &mut twin, &mut rng, block);
+                block += 1;
+            }
+            let source =
+                EffectBankStage::new(source_bank(width, seed, false).bound(), width, QUANTUM)
+                    .expect("stage");
+            for world in [&mut swapped, &mut twin] {
+                let stage = world.stage_mut::<EffectBankStage>(0, 0);
+                assert!(stage.carry_lane_from(odd, &source, odd, &mut scratch));
+            }
+            step(&mut swapped, &mut twin, &mut rng, block);
+            block += 1;
+            swapped
+                .swap_counted((1, across), (0, odd), &mut scratch)
+                .expect("a cross-chain swap");
+        }
+        _ => {
+            if case == OddStrip::Unrestored {
+                let superseded = LiveValuesSuperseded::new();
+                let controls = (0..lanes)
+                    .map(|_| {
+                        let (_writer, control) = effect_control_lane(
+                            EffectLaneSpec {
+                                shape: EffectLaneShape::from_live_parameters(
+                                    [(0, ParameterChannelPolicy::PerLane)],
+                                    0,
+                                ),
+                                bypass: false,
+                                observation_depth: 2,
+                            },
+                            &superseded,
+                        )
+                        .expect("lane");
+                        Some(control)
+                    })
+                    .collect();
+                let source = LiveControlEffectBankStage::new(
+                    source_bank(width, seed, true).bound(),
+                    width,
+                    QUANTUM,
+                    controls,
+                    (0..lanes).map(|_| None).collect(),
+                    LATENCY,
+                )
+                .expect("stage");
+                for world in [&mut swapped, &mut twin] {
+                    let stage = world.stage_mut::<LiveControlEffectBankStage>(0, 1);
+                    assert!(stage.carry_lane_from(odd, &source, odd, &mut scratch));
+                }
+            }
+            swapped
+                .swap_counted((0, odd), (0, moved), &mut scratch)
+                .expect("an in-chain swap");
+            swapped
+                .swap_counted((0, moved), (1, across), &mut scratch)
+                .expect("a cross-chain swap");
+        }
+    }
+    for _ in 0..6 {
+        step(&mut swapped, &mut twin, &mut rng, block);
+        block += 1;
+    }
+    // The case is live: the twin's armed chain without the odd strip rendered collapsed.
+    let clean = if case == OddStrip::Unarmed { 0 } else { 1 };
+    assert!(
+        twin.chains[clean].collapses() > 0,
+        "{what}: the twin's clean chain never collapsed"
+    );
+    assert!(
+        twin.chains[0].collapses() == 0 || case == OddStrip::Unarmed,
+        "{what}: the twin's odd chain collapsed"
+    );
 }
 
 /// Every strip's output over a few blocks, and every publication, at the strips' current
@@ -740,6 +1054,7 @@ fn a_refused_swap_leaves_both_chains_as_they_were() {
             Shape {
                 padded: true,
                 slot_gap: false,
+                collapse: None,
             },
             (0, 1),
             (1, lanes - 1),
@@ -750,6 +1065,7 @@ fn a_refused_swap_leaves_both_chains_as_they_were() {
             Shape {
                 padded: false,
                 slot_gap: true,
+                collapse: None,
             },
             (0, 2),
             (1, 0),
@@ -760,6 +1076,7 @@ fn a_refused_swap_leaves_both_chains_as_they_were() {
             Shape {
                 padded: false,
                 slot_gap: false,
+                collapse: None,
             },
             (0, 1),
             (1, 2),
@@ -770,6 +1087,7 @@ fn a_refused_swap_leaves_both_chains_as_they_were() {
             Shape {
                 padded: false,
                 slot_gap: false,
+                collapse: None,
             },
             (0, 1),
             (0, 2),
@@ -792,39 +1110,5 @@ fn a_refused_swap_leaves_both_chains_as_they_were() {
             "case {index}"
         );
         assert_unchanged(&mut world, &mut twin, &format!("case {index}"));
-    }
-}
-
-/// Gate 2 (#1747): after warm-up, an in-chain swap and a cross-chain swap allocate nothing on the
-/// calling thread.
-///
-/// Test value: a swap that allocates (a boxed temporary, a collected index list or a formatted
-/// refusal) on the render thread.
-#[test]
-fn a_lane_swap_allocates_nothing() {
-    assert_installed();
-    for &width in BankWidth::ALL {
-        let shape = Shape {
-            padded: false,
-            slot_gap: false,
-        };
-        let mut world = World::new(width, 5, shape);
-        let mut twin = World::new(width, 5, shape);
-        let mut rng = Rng(13);
-        for block in 0..2 {
-            step(&mut world, &mut twin, &mut rng, block);
-        }
-        let mut scratch = world.scratch();
-        world.swap((0, 0), (0, 1), &mut scratch).expect("warm-up");
-        world.swap((0, 0), (1, 1), &mut scratch).expect("warm-up");
-        let chains = &mut world.chains;
-        let mark = current_thread_counters();
-        let within = chains[0].swap_lanes(1, ChainLanePeer::Same(2), &mut scratch);
-        let [first, second] = chains;
-        let across = first.swap_lanes(2, ChainLanePeer::Other(second, 3), &mut scratch);
-        let delta = current_thread_delta_since(mark);
-        assert_eq!((within, across), (Ok(()), Ok(())));
-        assert_eq!(delta.allocations, 0, "{width:?}: the swap allocated");
-        assert_eq!(delta.deallocations, 0, "{width:?}: the swap freed");
     }
 }
