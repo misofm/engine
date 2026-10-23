@@ -124,6 +124,24 @@ const fn rate_slot(rate: usize) -> usize {
     RAMP_COUNT + rate
 }
 
+/// Whether ramp slot `index` feeds [`frame_coefficients`]: each band's ratio ramp (slots 1 and 6)
+/// and the four coefficient ramps (slots 10-13). A segment over which none of them moves steps
+/// none of them and derives its coefficients once (issue #1773, `COEF` in [`run_segment`]).
+const fn feeds_coefficients(index: usize) -> bool {
+    index == LOW_BAND * 5 + 1 || index == HIGH_BAND * 5 + 1 || index >= RAMP_COUNT
+}
+
+/// Whether one frame's `ramp_toward` is the identity on `ramp`'s word: at rest, a `+0.0` step,
+/// and a finite word that is not `-0.0` (the two exclusions of `LinearRamp::stationary_at`).
+#[cfg(any(debug_assertions, test))]
+fn ramp_step_is_identity(ramp: &LinearRamp) -> bool {
+    const NEGATIVE_ZERO: u32 = 0x8000_0000;
+    ramp.remaining == 0
+        && ramp.step.to_bits() == 0
+        && ramp.current.is_finite()
+        && ramp.current.to_bits() != NEGATIVE_ZERO
+}
+
 /// The parameter index whose time coefficient ramp `rate` walks: low attack 3, low release 4,
 /// high attack 8, high release 9.
 const fn rate_parameter(rate: usize) -> usize {
@@ -740,6 +758,9 @@ struct SegmentPlan {
     frames: usize,
     /// `true` while any ramp in the bank still has samples to produce.
     ramping: bool,
+    /// `true` while any ramp that feeds the coefficients ([`feeds_coefficients`]) still has
+    /// samples to produce. Implies `ramping`.
+    coefficients: bool,
 }
 
 /// Everything one channel of one bank owns.
@@ -1001,7 +1022,17 @@ fn band_target<L: Lane>(level: L, threshold: L, inv_ratio_minus_one: L, knee: (f
 /// an addition. `Instance::flat_path_is_identity` asserts the precondition in debug builds rather
 /// than leaving it as a comment.
 ///
-/// `ARMABLE` is the fourth (issue #1455), chosen per segment by [`process_block`]. At `true` the
+/// `COEF` (issue #1773) refines `RAMPING`: it says whether any ramp that feeds the coefficients
+/// ([`feeds_coefficients`]: both ratios and the four coefficient ramps) moves over the segment, and
+/// [`Instance::plan_segment`] decides it uniformly per segment by the same whole-bank scan. At
+/// `RAMPING && !COEF` only a threshold, makeup or time-parameter ramp moves: the frame loop steps
+/// the other slots alone and derives the coefficients once, as the flat path does. That is
+/// bit-identical by the flat path's argument, slot for slot: every skipped slot is at rest with a
+/// `+0.0` step and a finite, non-`-0.0` word, so its `ramp_toward` is the identity and the
+/// coefficients derived from it are the same every frame. `Instance::coefficients_at_rest` asserts
+/// that in debug builds. `COEF` is meaningful only at `RAMPING`; the flat path passes `false`.
+///
+/// `ARMABLE` is the fifth (issue #1455), chosen per segment by [`process_block`]. At `true` the
 /// crossover is the armed form: each side's silence counter advances frame by frame
 /// ([`silence_step`]) and both stages run the joint flush on its rest threshold. At `false` the
 /// frame loop runs no counter, and both stages run the per-word flush ([`lr4_step_when`]); the
@@ -1019,6 +1050,7 @@ fn run_segment<
     const LINK: u8,
     const BYPASS: bool,
     const RAMPING: bool,
+    const COEF: bool,
     const ARMABLE: bool,
 >(
     sides: &mut [Side<L, W>; 2],
@@ -1037,8 +1069,9 @@ fn run_segment<
     let mut silence_far = far.silence;
     let mut gain_near = near.gain_db;
     let mut gain_far = far.gain_db;
-    // On a flat segment no word moves, so the coefficients are derived once, here; on a ramped
-    // one they are derived again every frame from the frame's own advanced words below.
+    // On a flat segment, or a ramped one whose coefficient words do not move, the coefficients
+    // are derived once, here; otherwise they are derived again every frame from the frame's own
+    // advanced words below.
     let mut coefficients = [
         frame_coefficients(&segments[0]),
         frame_coefficients(&segments[1]),
@@ -1046,6 +1079,11 @@ fn run_segment<
     for frame in 0..frames {
         if RAMPING {
             for index in 0..RAMP_SLOTS {
+                // Issue #1773: a coefficient-feeding slot at rest is not stepped (a compile-time
+                // skip; the step would be the identity).
+                if !COEF && feeds_coefficients(index) {
+                    continue;
+                }
                 // Issue #1409: the step added, held inside `[min(current, target),
                 // max(current, target)]`, so no word passes its target.
                 for segment in segments.iter_mut() {
@@ -1058,10 +1096,12 @@ fn run_segment<
             }
             // Issue #1069: the ratio and the two time coefficients take the value of this frame,
             // after its step, the same convention as threshold and makeup.
-            coefficients = [
-                frame_coefficients(&segments[0]),
-                frame_coefficients(&segments[1]),
-            ];
+            if COEF {
+                coefficients = [
+                    frame_coefficients(&segments[0]),
+                    frame_coefficients(&segments[1]),
+                ];
+            }
         }
         let input_near = L::load(&left[frame * W..]);
         let input_far = L::load(&right[frame * W..]);
@@ -1189,8 +1229,8 @@ fn process_block<
             );
         }
         macro_rules! segment {
-            ($ramping:literal, $armable:literal) => {
-                run_segment::<L, W, LINK, BYPASS, $ramping, $armable>(
+            ($ramping:literal, $coef:literal, $armable:literal) => {
+                run_segment::<L, W, LINK, BYPASS, $ramping, $coef, $armable>(
                     &mut instance.sides,
                     &mut left[position * W..(position + length) * W],
                     &mut right[position * W..(position + length) * W],
@@ -1201,10 +1241,20 @@ fn process_block<
             };
         }
         if plan.ramping || FORCE_RAMPING {
-            if armable {
-                segment!(true, true);
+            if plan.coefficients || FORCE_RAMPING {
+                if armable {
+                    segment!(true, true, true);
+                } else {
+                    segment!(true, true, false);
+                }
             } else {
-                segment!(true, false);
+                #[cfg(debug_assertions)]
+                assert!(instance.coefficients_at_rest());
+                if armable {
+                    segment!(true, false, true);
+                } else {
+                    segment!(true, false, false);
+                }
             }
             let advanced = length as u32;
             instance.sides[0].store_segment(&segments[0], advanced);
@@ -1213,9 +1263,9 @@ fn process_block<
             #[cfg(debug_assertions)]
             assert!(instance.flat_path_is_identity());
             if armable {
-                segment!(false, true);
+                segment!(false, false, true);
             } else {
-                segment!(false, false);
+                segment!(false, false, false);
             }
             // The write-back is skipped rather than performed and discarded, and that is sound
             // for the same reason the additions are: `store_segment` would write `current` back
@@ -1348,11 +1398,13 @@ impl<L: Lane, const W: usize> Instance<L, W> {
         }
         let mut length = budget;
         let mut ramping = false;
+        let mut coefficients = false;
         for side in &self.sides {
             for track in 0..W {
-                for ramp in &side.ramps[track] {
+                for (index, ramp) in side.ramps[track].iter().enumerate() {
                     if ramp.remaining > 0 {
                         ramping = true;
+                        coefficients |= feeds_coefficients(index);
                         length = length.min(ramp.remaining as usize - 1);
                     }
                 }
@@ -1361,6 +1413,7 @@ impl<L: Lane, const W: usize> Instance<L, W> {
         SegmentPlan {
             frames: length.max(1),
             ramping,
+            coefficients,
         }
     }
 
@@ -1375,13 +1428,25 @@ impl<L: Lane, const W: usize> Instance<L, W> {
     /// same reason.
     #[cfg(any(debug_assertions, test))]
     fn flat_path_is_identity(&self) -> bool {
-        const NEGATIVE_ZERO: u32 = 0x8000_0000;
         self.sides.iter().all(|side| {
-            side.ramps[..W].iter().flatten().all(|ramp| {
-                ramp.remaining == 0
-                    && ramp.step.to_bits() == 0
-                    && ramp.current.is_finite()
-                    && ramp.current.to_bits() != NEGATIVE_ZERO
+            side.ramps[..W]
+                .iter()
+                .flatten()
+                .all(|ramp| ramp_step_is_identity(ramp))
+        })
+    }
+
+    /// The precondition that makes a `RAMPING && !COEF` segment bit-identical to a fully stepped
+    /// one (issue #1773): [`Instance::flat_path_is_identity`]'s condition, on the slots that feed
+    /// the coefficients ([`feeds_coefficients`]) alone.
+    #[cfg(debug_assertions)]
+    fn coefficients_at_rest(&self) -> bool {
+        self.sides.iter().all(|side| {
+            side.ramps[..W].iter().all(|ramps| {
+                ramps
+                    .iter()
+                    .enumerate()
+                    .all(|(index, ramp)| !feeds_coefficients(index) || ramp_step_is_identity(ramp))
             })
         })
     }
