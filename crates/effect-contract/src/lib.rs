@@ -14,7 +14,7 @@ pub use live::{
     BANK_CROSSFADE_LANES, BankCrossfade, BankCrossfadeLane, BypassShunt, BypassSwitch,
     EffectCellWriter, EffectControlLane, EffectControlRecord, EffectLaneResources, EffectLaneShape,
     EffectLaneSpec, EffectWriteRefusal, LaneSwapRefusal, ObservationLane, ObservePushError, Staged,
-    apply_observe, effect_control_lane, swap_bank_lanes,
+    apply_observe, effect_control_lane, swap_bank_lanes, swap_bank_lanes_scratch_bytes,
 };
 pub use prepared_target::{
     EffectTargetError, EffectTargetRequest, NativeEffectTargetPreparation,
@@ -2652,6 +2652,42 @@ pub trait PreparedNativeEffectBank: Send {
     /// lane count and the clock count, never by `frames`.
     fn advance_clocks(&mut self, lanes_mask: u32, frames: u32) {
         let _ = (lanes_mask, frames);
+    }
+
+    /// The bytes of **prepared per-lane defaults** each lane of this bank holds, or `None` when
+    /// the bank has not declared them (issue #1747).
+    ///
+    /// Prepared defaults are the per-lane values a bank was prepared with and keeps outside its
+    /// state payload: the initial parameter values (and any prepared per-lane shape derived from
+    /// them) that `reset(ResetKind::FullToDefaults)` and the D7 non-finite recovery re-seed a lane
+    /// from, or that a restore validates a payload against. The plan-swap carry does not move
+    /// them, because it moves a strip into the same strip's successor lane, which keeps its own
+    /// prepared defaults. A render-time lane swap moves a strip into another strip's lane, so it
+    /// exchanges them through [`exchange_lane_defaults`](Self::exchange_lane_defaults) beside the
+    /// payload. `Some(0)` is a bank that keeps no per-lane defaults.
+    ///
+    /// The default `None` declines: `swap_bank_lanes` refuses a bank that has not declared its
+    /// defaults, because a swap that left them behind would re-seed a moved strip from another
+    /// strip's values. Off the render thread, or at a block boundary; constant time.
+    fn lane_default_bytes(&self) -> Option<usize> {
+        None
+    }
+
+    /// Exchange lane `lane`'s prepared per-lane defaults with `bytes`, in place: on `true`,
+    /// `bytes` holds the lane's old defaults and the lane holds what `bytes` held (issue #1747).
+    ///
+    /// `bytes` is exactly [`lane_default_bytes`](Self::lane_default_bytes) long, in the bank's own
+    /// little-endian encoding. A caller only ever writes back another lane's (or this lane's) own
+    /// defaults of a bank of one layout, or rotates arbitrary words through a lane and back out
+    /// again before anything reads it, so nothing is validated and no word may be refused.
+    /// Returns `false`, changing nothing, for a lane out of range or a wrong length. It changes no
+    /// state word and no payload word.
+    ///
+    /// The default refuses. On the render thread at a block boundary: allocation-free,
+    /// lock-free and bounded by the defaults size.
+    fn exchange_lane_defaults(&mut self, lane: usize, bytes: &mut [u8]) -> bool {
+        let _ = (lane, bytes);
+        false
     }
 }
 /// One entry of a [`NativeEffectRegistry`]'s tail-bound table: the [`NodeTailBound`] an effect's

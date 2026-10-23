@@ -2436,22 +2436,34 @@ fn crossfade_tail(
 /// Why [`swap_bank_lanes`] exchanged nothing. Every refusal leaves both lanes as they were.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum LaneSwapRefusal {
-    /// The scratch is shorter than two payloads of the layout.
+    /// The scratch is shorter than [`swap_bank_lanes_scratch_bytes`].
     Scratch,
     /// A lane index does not fit the payload calls' `u32` track index.
     Lane,
+    /// A bank has not declared its prepared per-lane defaults
+    /// ([`PreparedNativeEffectBank::lane_default_bytes`]), or the two banks declare different
+    /// sizes.
+    Defaults,
     /// A bank refused to snapshot its lane (an unsupported effect, or a lane out of range).
     Snapshot,
-    /// A bank refused a restore. Nothing was left half-swapped: a refused restore changes
-    /// nothing, and the one restore that had already committed was undone from its own payload.
+    /// A bank refused a restore after the checks passed: a defect, since both payloads are the
+    /// banks' own, of one layout, under the lanes' own defaults. Nothing was left half-swapped:
+    /// the swap was undone (see [`swap_bank_lanes`]).
     Restore,
 }
 
 // REALTIME_POLICY_BEGIN
-/// The scratch bytes [`swap_bank_lanes`] needs for a layout of `sizes`: two whole payloads, or
-/// `None` on overflow.
-fn swap_bank_lanes_scratch_bytes(sizes: StatePayloadSizes) -> Option<usize> {
-    usize::try_from(sizes.total()?.checked_mul(2)?).ok()
+/// The scratch bytes [`swap_bank_lanes`] needs to swap two lanes of `bank` (or of `bank` and
+/// another bank of its layout) whose payloads have `sizes`: two whole payloads and one lane's
+/// prepared defaults. `None` when the bank has not declared its defaults, or on overflow. The
+/// caller allocates it once, at preparation.
+#[must_use]
+pub fn swap_bank_lanes_scratch_bytes(
+    bank: &dyn PreparedNativeEffectBank,
+    sizes: StatePayloadSizes,
+) -> Option<usize> {
+    let payloads = usize::try_from(sizes.total()?.checked_mul(2)?).ok()?;
+    payloads.checked_add(bank.lane_default_bytes()?)
 }
 
 /// One payload's three sections in `scratch`, cut at `sizes`.
@@ -2474,27 +2486,65 @@ fn swap_payload_input(
     StatePayloadInput::new(common, left, &right[..sizes.right_bytes as usize], sizes)
 }
 
+/// Exchange two lanes' prepared defaults through `spare`: three in-place exchanges, which swap
+/// the two lanes' bytes whatever `spare` held, and leave `spare` as it was. Calling it twice is
+/// the identity. Returns whether every exchange took; the caller has checked the lanes and the
+/// length, so each exchange takes.
+fn rotate_lane_defaults<'one, 'two>(
+    first: &mut (dyn PreparedNativeEffectBank + 'one),
+    first_lane: usize,
+    mut second: Option<&mut (dyn PreparedNativeEffectBank + 'two)>,
+    second_lane: usize,
+    spare: &mut [u8],
+) -> bool {
+    // first = X, spare = A.
+    let mut taken = first.exchange_lane_defaults(first_lane, spare);
+    // second = A, spare = B.
+    taken &= match second.as_deref_mut() {
+        Some(bank) => bank.exchange_lane_defaults(second_lane, spare),
+        None => first.exchange_lane_defaults(second_lane, spare),
+    };
+    // first = B, spare = X.
+    taken &= first.exchange_lane_defaults(first_lane, spare);
+    taken
+}
+
 /// Exchange the whole state of lane `first_lane` of `first` with lane `second_lane` of `second`,
 /// or of `first` itself when `second` is `None` (issue #1747): a render-time lane swap.
 ///
 /// # What moves
 ///
-/// The lane's state payload, the plan-swap carry's one complete record of a lane (#1279 D3):
-/// running state, designed coefficients and every ramp in flight. Anything a bank keeps per
-/// *bank* rather than per lane -- a shared cursor -- stays: the payload is written relative to it
-/// and restored relative to the destination's, so a swap between two banks of one slot, whose
-/// cursors are equal, is a pure exchange. Control lanes, taps and dry shunt lines are not effect
-/// state; the stage that owns them swaps them (`rack`).
+/// * The lane's state payload, the plan-swap carry's one complete record of a lane's running
+///   state (#1279 D3): filter and envelope state, designed coefficients, every ramp in flight
+///   and the lane's clocks.
+/// * The lane's prepared per-lane defaults
+///   ([`PreparedNativeEffectBank::exchange_lane_defaults`]), which a reset, a D7 recovery or a
+///   restore's validation reads and which the carry deliberately leaves with the successor.
+///
+/// Anything a bank keeps per *bank* rather than per lane -- a shared cursor -- stays: the payload
+/// is written relative to it and restored relative to the destination's, so a swap between two
+/// banks of one slot, whose cursors are equal, is a pure exchange. Control lanes, taps and dry
+/// shunt lines are not effect state; the stage that owns them swaps them (`rack`).
 ///
 /// # All or nothing
 ///
-/// Both lanes are snapshotted first; a snapshot mutates nothing. The first lane is then restored
-/// from the second's payload, and a refused restore changes nothing (a restore validates the whole
-/// payload before it commits). The second lane is restored from the first's payload last; if that
-/// is refused, the first lane is restored from its own payload, which a bank never refuses (the
-/// plan-swap carry's own-payload rule, #1279 D6), so the call returns with both lanes as they
-/// were. Both banks must run one layout (`state_layout_version` and `sizes`), and a caller swaps
-/// only populated lanes: a padded lane never swaps.
+/// Every refusal is decided before the first write to either lane: the scratch size, the lane
+/// indices, the declared defaults sizes ([`LaneSwapRefusal::Defaults`]) and both snapshots, which
+/// write only `scratch`. Then:
+///
+/// 1. The defaults rotate. Precondition: both lanes exist (their snapshots took) and `spare` is
+///    exactly the declared length (checked), the only two reasons an exchange refuses.
+/// 2. The first lane restores the second's payload, now under the second lane's defaults. A
+///    refused restore changes nothing (a restore validates the whole payload before it commits).
+/// 3. The second lane restores the first's payload, under the first lane's defaults.
+///
+/// Steps 2 and 3 restore a bank's own payload of one layout under the defaults it was written
+/// with, which a bank never refuses (the carry's own-payload rule, #1279 D6), so a refusal there
+/// is a defect, and it is still undone: a refused step 3 restores the first lane from its own
+/// payload (step 2's precondition again, after the rotation is undone), and the rotation undoes
+/// itself (step 1's precondition is unchanged). Both lanes are then as they were, and the call
+/// returns [`LaneSwapRefusal::Restore`]. Both banks must run one layout (`state_layout_version`
+/// and `sizes`), and a caller swaps only populated lanes: a padded lane never swaps.
 ///
 /// A collapsed bank holds a stale right channel; the caller disengages its chain first, as the
 /// plan-swap carry does.
@@ -2502,7 +2552,8 @@ fn swap_payload_input(
 /// # Cost
 ///
 /// Two snapshots and two restores: each lane's state is read twice and written twice, plus two
-/// payloads of `scratch`. Allocation-free, lock-free and bounded by the prepared state size.
+/// payloads of `scratch`, plus three passes over one lane's defaults. Allocation-free, lock-free
+/// and bounded by the prepared state size.
 ///
 /// # Errors
 ///
@@ -2510,13 +2561,21 @@ fn swap_payload_input(
 pub fn swap_bank_lanes(
     first: &mut dyn PreparedNativeEffectBank,
     first_lane: usize,
-    second: Option<&mut dyn PreparedNativeEffectBank>,
+    mut second: Option<&mut dyn PreparedNativeEffectBank>,
     second_lane: usize,
     state_layout_version: u32,
     sizes: StatePayloadSizes,
     scratch: &mut [u8],
 ) -> Result<(), LaneSwapRefusal> {
-    let Some(needed) = swap_bank_lanes_scratch_bytes(sizes) else {
+    let defaults = first.lane_default_bytes();
+    if defaults.is_none()
+        || second
+            .as_deref()
+            .is_some_and(|bank| bank.lane_default_bytes() != defaults)
+    {
+        return Err(LaneSwapRefusal::Defaults);
+    }
+    let Some(needed) = swap_bank_lanes_scratch_bytes(&*first, sizes) else {
         return Err(LaneSwapRefusal::Scratch);
     };
     if scratch.len() < needed {
@@ -2530,8 +2589,10 @@ pub fn swap_bank_lanes(
     if second.is_none() && first_lane == second_lane {
         return Ok(());
     }
-    let (first_payload, rest) = scratch.split_at_mut(needed / 2);
-    let second_payload = &mut rest[..needed / 2];
+    let payload = usize::try_from(sizes.total().unwrap_or(0)).unwrap_or(0);
+    let (first_payload, rest) = scratch.split_at_mut(payload);
+    let (second_payload, rest) = rest.split_at_mut(payload);
+    let spare = &mut rest[..needed - 2 * payload];
     {
         let (common, left, right) = swap_payload_sections(first_payload, sizes);
         let output = StatePayloadOutput::new(common, left, right, sizes)
@@ -2558,24 +2619,39 @@ pub fn swap_bank_lanes(
     ) else {
         return Err(LaneSwapRefusal::Scratch);
     };
-    first
+    // Step 1. Precondition: both lanes snapshotted, so both exist; `spare` has the declared length.
+    let rotated =
+        rotate_lane_defaults(first, first_lane, second.as_deref_mut(), second_lane, spare);
+    debug_assert!(rotated, "a checked lane's defaults exchange");
+    // Step 2. Precondition: the second lane's own payload, under the second lane's defaults.
+    if first
         .restore_track_state_payload(first_track, state_layout_version, from_second)
-        .map_err(|_| LaneSwapRefusal::Restore)?;
-    let restored = match second {
+        .is_err()
+    {
+        let undone =
+            rotate_lane_defaults(first, first_lane, second.as_deref_mut(), second_lane, spare);
+        debug_assert!(undone, "a checked lane's defaults exchange");
+        return Err(LaneSwapRefusal::Restore);
+    }
+    // Step 3. Precondition: the first lane's own payload, under the first lane's defaults.
+    let restored = match second.as_deref_mut() {
         Some(bank) => {
             bank.restore_track_state_payload(second_track, state_layout_version, from_first)
         }
         None => first.restore_track_state_payload(second_track, state_layout_version, from_first),
     };
     if restored.is_err() {
-        let Ok(own) = swap_payload_input(first_payload, sizes) else {
-            return Err(LaneSwapRefusal::Restore);
-        };
-        let undone = first.restore_track_state_payload(first_track, state_layout_version, own);
-        debug_assert!(
-            undone.is_ok(),
-            "a bank never refuses its own lane's payload"
-        );
+        let undone =
+            rotate_lane_defaults(first, first_lane, second.as_deref_mut(), second_lane, spare);
+        debug_assert!(undone, "a checked lane's defaults exchange");
+        // Precondition: the first lane's own payload, under its own defaults again.
+        let own = swap_payload_input(first_payload, sizes);
+        let reverted = own.is_ok_and(|own| {
+            first
+                .restore_track_state_payload(first_track, state_layout_version, own)
+                .is_ok()
+        });
+        debug_assert!(reverted, "a bank never refuses its own lane's payload");
         return Err(LaneSwapRefusal::Restore);
     }
     Ok(())
