@@ -645,223 +645,74 @@ fn bank_full_reset_restores_different_crossover_defaults() {
     }
 }
 
-fn ramp_words(state: &(Vec<u8>, Vec<u8>, Vec<u8>)) -> Vec<u32> {
-    state
-        .1
-        .chunks_exact(4)
-        .enumerate()
-        .filter(|(word, _)| (3..43).contains(word))
-        .map(|(_, bytes)| u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
-        .chain(
-            state
-                .2
-                .chunks_exact(4)
-                .enumerate()
-                .filter(|(word, _)| (3..43).contains(word))
-                .map(|(_, bytes)| u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]])),
-        )
-        .collect()
-}
-
-fn filter_words(state: &(Vec<u8>, Vec<u8>, Vec<u8>)) -> Vec<u32> {
-    [state.1.as_slice(), state.2.as_slice()]
-        .into_iter()
-        .flat_map(|section| section.chunks_exact(4).skip(43).take(4))
-        .map(|bytes| u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
-        .collect()
-}
-
-/// Causal coefficient-changing automation keeps its ramp records and crossover state independent
-/// of caller partitioning. The segment-start coefficient cache remains the frozen update law, so
-/// this fixture intentionally compares those records rather than gain histories.
-#[test]
-fn partition_control_trajectory_preserves_ramp_positions() {
+/// One scalar render of `TOTAL` frames of [`partition_invariance`]'s signal in blocks of
+/// `partition`, with `spans` at frame 0 and `later` at frame 3,584: both channels' output and the
+/// closing state.
+fn partition_render(
+    values: &[effect_contract::InitialParameterValue; PARAMETER_COUNT * 2],
+    partition: usize,
+    spans: &[PreparedAutomationSpan],
+    later: &[PreparedAutomationSpan],
+) -> (Vec<f32>, Vec<f32>, (Vec<u8>, Vec<u8>, Vec<u8>)) {
     const TOTAL: usize = 4_096;
-    let sets = (0..TRACKS).map(varied_values).collect::<Vec<_>>();
-    let spans = [
-        point(1, ParameterChannel::Left, 0, -30.0),
-        point(1, ParameterChannel::Right, 0, -30.0),
-        point(2, ParameterChannel::Left, 0, 8.0),
-        point(5, ParameterChannel::Left, 0, 3.0),
-    ];
-    let later = [
-        point(3, ParameterChannel::Left, 3_584, 25.0),
-        point(6, ParameterChannel::Right, 3_584, -12.0),
-    ];
-    let mut reference_ramps = None;
-    let mut reference_filters = None;
-    for partition in [1usize, 7, 64, 128, 512] {
-        let prepared = MultibandCompressorFactory
-            .prepare(request_with(&sets[3], LinkMode::Maximum, 512, false))
-            .expect("scalar");
-        let sizes = prepared.metadata.state_sizes;
-        let mut effect = prepared.processor;
-        let mut left = support::signal(TOTAL, 0xFEED_0001);
-        let mut right = support::signal(TOTAL, 0xFEED_0002);
-        let mut position = 0;
-        let mut checkpoints = Vec::new();
-        while position < TOTAL {
-            let frames = core::cmp::min(partition, TOTAL - position);
-            let block_spans: &[PreparedAutomationSpan] = match position {
-                0 => &spans,
-                3_584 => &later,
-                _ => &[],
-            };
-            process(
-                effect.as_mut(),
-                &mut left[position..position + frames],
-                &mut right[position..position + frames],
-                position as u64,
-                block_spans,
-                512,
-            );
-            position += frames;
-            if partition == 1 && matches!(position, 8 | 63 | 64 | 3_584 | 3_585 | 3_648) {
-                checkpoints.push((position, snapshot(effect.as_ref(), sizes)));
-            }
-        }
-        assert!(left.iter().any(|sample| *sample != 0.0));
-        assert!(right.iter().any(|sample| *sample != 0.0));
-        let state = snapshot(effect.as_ref(), sizes);
-        if let Some(reference) = &reference_ramps {
-            assert_eq!(
-                &ramp_words(&state),
-                reference,
-                "partition={partition} ramp records"
-            );
-        } else {
-            reference_ramps = Some(ramp_words(&state));
-            reference_filters = Some(filter_words(&state));
-        }
-        assert_eq!(&filter_words(&state), reference_filters.as_ref().unwrap());
-        if partition == 1 {
-            let low_gain = f32::from_bits(u32::from_le_bytes([
-                state.1[4], state.1[5], state.1[6], state.1[7],
-            ]));
-            let high_gain = f32::from_bits(u32::from_le_bytes([
-                state.1[8],
-                state.1[9],
-                state.1[10],
-                state.1[11],
-            ]));
-            assert!(
-                low_gain < -0.001 || high_gain < -0.001,
-                "automation trajectory never engaged a gain reduction: low={low_gain} high={high_gain}"
-            );
-            for (position, state) in checkpoints {
-                let ramps = ramp_words(&state);
-                let ratio = &ramps[4..8];
-                let attack = &ramps[8..12];
-                match position {
-                    8 => {
-                        assert_eq!(f32::from_bits(ratio[1]), 8.0);
-                        assert_eq!(ratio[3], 56);
-                        assert!(f32::from_bits(ratio[0]) > 8.0);
-                    }
-                    63 => {
-                        assert_eq!(f32::from_bits(ratio[1]), 8.0);
-                        assert_eq!(ratio[3], 1);
-                        assert!(f32::from_bits(ratio[0]) > 8.0);
-                    }
-                    64 => {
-                        assert_eq!(f32::from_bits(ratio[0]), 8.0);
-                        assert_eq!(f32::from_bits(ratio[1]), 8.0);
-                        assert_eq!(ratio[3], 0);
-                    }
-                    3_585 => {
-                        assert_eq!(f32::from_bits(attack[1]), 25.0);
-                        assert_eq!(attack[3], 63);
-                        assert!(f32::from_bits(attack[0]) > 0.2);
-                        assert!(f32::from_bits(attack[0]) < 25.0);
-                    }
-                    3_648 => {
-                        assert_eq!(f32::from_bits(attack[0]), 25.0);
-                        assert_eq!(f32::from_bits(attack[1]), 25.0);
-                        assert_eq!(attack[3], 0);
-                    }
-                    _ => {}
-                }
-            }
-            let final_ramps = ramp_words(&state);
-            assert_eq!(f32::from_bits(final_ramps[4]), 8.0);
-            assert_eq!(f32::from_bits(final_ramps[5]), 8.0);
-            assert_eq!(final_ramps[7], 0);
-            assert_eq!(f32::from_bits(final_ramps[8]), 25.0);
-            assert_eq!(f32::from_bits(final_ramps[9]), 25.0);
-            assert_eq!(final_ramps[11], 0);
-        }
+    let prepared = MultibandCompressorFactory
+        .prepare(request_with(values, LinkMode::Maximum, 512, false))
+        .expect("scalar");
+    let sizes = prepared.metadata.state_sizes;
+    let mut effect = prepared.processor;
+    let mut left = support::signal(TOTAL, 0xFEED_0001);
+    let mut right = support::signal(TOTAL, 0xFEED_0002);
+    let mut position = 0;
+    while position < TOTAL {
+        let frames = core::cmp::min(partition, TOTAL - position);
+        let block_spans: &[PreparedAutomationSpan] = match position {
+            0 => spans,
+            3_584 => later,
+            _ => &[],
+        };
+        process(
+            effect.as_mut(),
+            &mut left[position..position + frames],
+            &mut right[position..position + frames],
+            position as u64,
+            block_spans,
+            512,
+        );
+        position += frames;
     }
+    let state = snapshot(effect.as_ref(), sizes);
+    (left, right, state)
 }
 
-/// E4. Threshold and makeup automation leaves full PCM and state bit-identical at every partition.
+/// E4. Automation of every ramped kind -- threshold, ratio, attack and makeup -- leaves full PCM
+/// and state bit-identical at every partition, and a ratio or attack retarget really ramps.
+///
+/// Before #1069 a ratio, attack or release word reached the kernel once per segment, so where a
+/// block began moved the output and only threshold and makeup were partition-exact. Since #1069
+/// the ratio is designed every frame and the two times walk coefficient ramps, so the frame-32
+/// output of the ratio and attack retargets differs both from the old value held (no span) and
+/// from the target jumped to (prepared at the target): red if a ramp is held to its arrival (the
+/// pre-#1069 lone instance) or if a coefficient reads its target instead of its walk.
 #[test]
 fn partition_invariance() {
-    const TOTAL: usize = 4_096;
     let sets = (0..TRACKS).map(varied_values).collect::<Vec<_>>();
+    let ratio = point(2, ParameterChannel::Left, 0, 8.0);
+    let attack = point(3, ParameterChannel::Left, 0, 25.0);
     let spans = [
         point(1, ParameterChannel::Left, 0, -30.0),
         point(1, ParameterChannel::Right, 0, -30.0),
+        ratio,
+        attack,
         point(5, ParameterChannel::Left, 0, 3.0),
     ];
     let later = [point(6, ParameterChannel::Right, 3_584, -12.0)];
-    let reference = {
-        let prepared = MultibandCompressorFactory
-            .prepare(request_with(&sets[3], LinkMode::Maximum, 512, false))
-            .expect("scalar");
-        let sizes = prepared.metadata.state_sizes;
-        let mut effect = prepared.processor;
-        let mut left = support::signal(TOTAL, 0xFEED_0001);
-        let mut right = support::signal(TOTAL, 0xFEED_0002);
-        let mut position = 0;
-        while position < TOTAL {
-            let frames = core::cmp::min(512, TOTAL - position);
-            let block_spans: &[PreparedAutomationSpan] = match position {
-                0 => &spans,
-                3_584 => &later,
-                _ => &[],
-            };
-            process(
-                effect.as_mut(),
-                &mut left[position..position + frames],
-                &mut right[position..position + frames],
-                position as u64,
-                block_spans,
-                512,
-            );
-            position += frames;
-        }
-        (left, right, snapshot(effect.as_ref(), sizes))
-    };
+    let reference = partition_render(&sets[3], 512, &spans, &later);
+    assert!(reference.0.iter().any(|sample| *sample != 0.0));
+    assert!(reference.1.iter().any(|sample| *sample != 0.0));
 
-    for partition in [1usize, 7, 64, 128, 512] {
-        let prepared = MultibandCompressorFactory
-            .prepare(request_with(&sets[3], LinkMode::Maximum, 512, false))
-            .expect("scalar");
-        let sizes = prepared.metadata.state_sizes;
-        let mut effect = prepared.processor;
-        let mut left = support::signal(TOTAL, 0xFEED_0001);
-        let mut right = support::signal(TOTAL, 0xFEED_0002);
-        let mut position = 0;
-        while position < TOTAL {
-            let frames = core::cmp::min(partition, TOTAL - position);
-            let block_spans: &[PreparedAutomationSpan] = match position {
-                0 => &spans,
-                3_584 => &later,
-                _ => &[],
-            };
-            process(
-                effect.as_mut(),
-                &mut left[position..position + frames],
-                &mut right[position..position + frames],
-                position as u64,
-                block_spans,
-                512,
-            );
-            position += frames;
-        }
-        assert!(left.iter().any(|sample| *sample != 0.0));
-        assert!(right.iter().any(|sample| *sample != 0.0));
-        for frame in 0..TOTAL {
+    for partition in [1usize, 7, 64, 128] {
+        let (left, right, state) = partition_render(&sets[3], partition, &spans, &later);
+        for frame in 0..left.len() {
             assert_eq!(
                 left[frame].to_bits(),
                 reference.0[frame].to_bits(),
@@ -873,10 +724,32 @@ fn partition_invariance() {
                 "partition={partition} frame={frame}"
             );
         }
-        assert_eq!(
-            snapshot(effect.as_ref(), sizes),
-            reference.2,
-            "partition={partition} state"
+        assert_eq!(state, reference.2, "partition={partition} state");
+    }
+
+    const MID_RAMP: usize = 32;
+    for moved in [ratio, attack] {
+        let held = spans
+            .iter()
+            .copied()
+            .filter(|span| *span != moved)
+            .collect::<Vec<_>>();
+        let mut jumped_values = sets[3];
+        jumped_values[moved.parameter_index as usize * 2].value = moved.value;
+        let old = partition_render(&sets[3], 512, &held, &later);
+        let jumped = partition_render(&jumped_values, 512, &held, &later);
+        let ramped = reference.0[MID_RAMP].to_bits();
+        assert_ne!(
+            ramped,
+            old.0[MID_RAMP].to_bits(),
+            "parameter {} held its old value mid-ramp",
+            moved.parameter_index
+        );
+        assert_ne!(
+            ramped,
+            jumped.0[MID_RAMP].to_bits(),
+            "parameter {} jumped to its target mid-ramp",
+            moved.parameter_index
         );
     }
 }
