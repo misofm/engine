@@ -896,7 +896,13 @@ fn a_swapped_strip_renders_and_publishes_what_its_twin_does() {
 
 /// Render `blocks` blocks with no write in both worlds and assert every strip's output and
 /// publications agree.
-fn quiet(skipping: &mut World, reading: &mut World, rng: &mut Rng, block: &mut usize, blocks: usize) {
+fn quiet(
+    skipping: &mut World,
+    reading: &mut World,
+    rng: &mut Rng,
+    block: &mut usize,
+    blocks: usize,
+) {
     for _ in 0..blocks {
         let inputs = inputs(rng, reading.strips(), false);
         let (got, expected) = (skipping.render(&inputs), reading.render(&inputs));
