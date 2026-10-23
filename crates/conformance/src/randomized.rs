@@ -2470,17 +2470,22 @@ pub fn assert_reached(coverage: &DifferentialCoverage) {
 ///
 /// D7 (`docs/EFFECT_CONTRACT_V1.md`) checks output finiteness once per block, zeroes a failing
 /// block, resets state, and increments a **block** counter: "the contract's report counts blocks,
-/// never samples". A scalar instance, and a bank at every width this build binds, render four
-/// blocks of a clean signal at the effect's defaults, unbypassed; on the second block the left
-/// plane of the last lane is NaN throughout. Returns every place the reports break the rule:
+/// never samples". A scalar instance, and a bank at every width this build binds, render a clean
+/// signal at the effect's defaults, unbypassed; on the second block the left plane of the last
+/// lane is NaN throughout. The run lasts until two blocks after the poison reaches the output
+/// through the prepared latency. Returns every place the reports break the rule:
 ///
 /// * a lane counts more than one block on one channel for one block (samples, not blocks);
 /// * a lane whose input was clean counts a block;
-/// * the failing lane's output is zeroed on the poisoned block, and that block counts nothing.
+/// * a lane counts more than one block on one channel over the run: its recovery resets it, so
+///   nothing is left to fail again;
+/// * in `DualMono`, where the poison cannot reach it, the right channel counts a block: a counter
+///   is per channel, so a right block zeroed only beside its failed left one is not nonfinite;
+/// * the failing lane's output is zeroed on the block the poison reaches, and that block counts
+///   nothing.
 #[must_use]
 pub fn d7_report_violations(factory: Box<dyn NativeEffectFactory>) -> Vec<String> {
     const QUANTUM: u32 = 64;
-    const BLOCKS: usize = 4;
     const POISONED: usize = 1;
     let descriptor = factory.descriptor();
     let (registry, _) = admit(factory);
@@ -2528,13 +2533,36 @@ pub fn d7_report_violations(factory: Box<dyn NativeEffectFactory>) -> Vec<String
         (step as f32 - 48.25) / 194.0
     };
     let mut violations = Vec::new();
+    // The scalar instance: one lane, the poisoned one. Its prepared latency says which block the
+    // poison first reaches the output on.
+    let prepared = factory
+        .prepare(request(shape, &values))
+        .expect("the defaults prepare");
+    let latency = usize::try_from(prepared.metadata.latency.0).expect("a latency that fits");
+    let reached = (POISONED * frames + latency) / frames;
+    let blocks = reached + 2;
+    let mut scalar = prepared.processor;
     let mut check = |who: &str,
                      block: usize,
                      lane: usize,
                      poisoned: bool,
                      report: ProcessReport,
-                     zeroed: bool| {
+                     zeroed: bool,
+                     total: &mut [u64; 2]| {
         let counts = [report.nonfinite_left_blocks, report.nonfinite_right_blocks];
+        let before = *total;
+        total[0] = total[0].saturating_add(counts[0]);
+        total[1] = total[1].saturating_add(counts[1]);
+        if before
+            .iter()
+            .zip(total.iter())
+            .any(|(was, is)| *was == 1 && *is > 1)
+        {
+            violations.push(format!(
+                "{who} block {block} lane {lane}: counts {counts:?} after its recovery, a second \
+                 block on one channel over the run"
+            ));
+        }
         if counts.iter().any(|count| *count > 1) {
             violations.push(format!(
                 "{who} block {block} lane {lane}: counts {counts:?} for one block (samples, not \
@@ -2546,9 +2574,16 @@ pub fn d7_report_violations(factory: Box<dyn NativeEffectFactory>) -> Vec<String
                 "{who} block {block} lane {lane}: counts {counts:?} though its input was clean"
             ));
         }
-        // Only on the poisoned block itself: after a reset an effect with latency renders its
-        // cleared delay line, which is zero without any recovery.
-        if poisoned && block == POISONED && zeroed && counts == [0, 0] {
+        if link == LinkMode::DualMono && counts[1] > 0 {
+            violations.push(format!(
+                "{who} block {block} lane {lane}: counts {counts:?}, a right block though only \
+                 the left plane was poisoned and the channels are unlinked"
+            ));
+        }
+        // Only on the block the poison reaches: after a reset an effect with latency renders its
+        // cleared delay line, which is zero without any recovery, and before it the prepared
+        // delay line is zero as well.
+        if poisoned && block == reached && zeroed && counts == [0, 0] {
             violations.push(format!(
                 "{who} block {block} lane {lane}: its output was zeroed and the report counts \
                  nothing"
@@ -2556,12 +2591,8 @@ pub fn d7_report_violations(factory: Box<dyn NativeEffectFactory>) -> Vec<String
         }
     };
 
-    // The scalar instance: one lane, the poisoned one.
-    let mut scalar = factory
-        .prepare(request(shape, &values))
-        .expect("the defaults prepare")
-        .processor;
-    for block in 0..BLOCKS {
+    let mut total = [0_u64; 2];
+    for block in 0..blocks {
         let first = (block * frames) as u64;
         let mut left: Vec<f32> = (0..frames).map(|f| signal(block, 0, 0, f)).collect();
         let mut right: Vec<f32> = (0..frames).map(|f| signal(block, 0, 1, f)).collect();
@@ -2580,7 +2611,15 @@ pub fn d7_report_violations(factory: Box<dyn NativeEffectFactory>) -> Vec<String
             false,
         );
         let zeroed = left.iter().all(|word| word.to_bits() == 0);
-        check("scalar", block, 0, block >= POISONED, report, zeroed);
+        check(
+            "scalar",
+            block,
+            0,
+            block >= POISONED,
+            report,
+            zeroed,
+            &mut total,
+        );
     }
 
     for &width in BankWidth::ALL {
@@ -2603,7 +2642,8 @@ pub fn d7_report_violations(factory: Box<dyn NativeEffectFactory>) -> Vec<String
         let who = format!("{width:?} bank");
         let failing = lanes - 1;
         let offsets = vec![0_u32; lanes + 1];
-        for block in 0..BLOCKS {
+        let mut totals = vec![[0_u64; 2]; lanes];
+        for block in 0..blocks {
             let first = (block * frames) as u64;
             let plane = |channel: usize| -> Vec<f32> {
                 (0..frames * lanes)
@@ -2634,7 +2674,15 @@ pub fn d7_report_violations(factory: Box<dyn NativeEffectFactory>) -> Vec<String
             for lane in 0..lanes {
                 let zeroed = (0..frames).all(|frame| left[frame * lanes + lane].to_bits() == 0);
                 let poisoned = lane == failing && block >= POISONED;
-                check(&who, block, lane, poisoned, report.reports[lane], zeroed);
+                check(
+                    &who,
+                    block,
+                    lane,
+                    poisoned,
+                    report.reports[lane],
+                    zeroed,
+                    &mut totals[lane],
+                );
             }
         }
     }

@@ -824,12 +824,11 @@ fn bank_mates_unchanged(
     }
 }
 
-/// What a charged lane's report holds for one failing block of `frames`: the frames on both
-/// channels, as its scalar instance charges itself (#1073 owns that unit).
-fn charged(frames: usize) -> ProcessReport {
+/// What a charged lane's report holds for one failing block whose left input was hostile: one
+/// block on the left channel, as its scalar instance charges itself (#1073).
+fn charged() -> ProcessReport {
     ProcessReport {
-        nonfinite_left_blocks: frames as u64,
-        nonfinite_right_blocks: frames as u64,
+        nonfinite_left_blocks: 1,
         ..ProcessReport::default()
     }
 }
@@ -919,7 +918,7 @@ fn planted_nonfinite_state<L: Lane>(width: BankWidth) {
                     "{context}: both of its channels are zeroed"
                 );
                 if !is_padded {
-                    assert_eq!(report.reports[target], charged(D7_FRAMES), "{context}");
+                    assert_eq!(report.reports[target], charged(), "{context}");
                 }
                 // Recovered to rest: every history row of the lane is zero and every ramp has
                 // snapped to its target, the in-flight drive ramp included.
@@ -1017,11 +1016,7 @@ fn a_tripping_lane_leaves_every_bank_mates_bits() {
                                 && right[frame * lanes + hot].to_bits() == 0),
                             "{context}: the hot lane tripped and was zeroed"
                         );
-                        assert_eq!(
-                            report.reports[hot],
-                            charged(frames),
-                            "{context}: its report"
-                        );
+                        assert_eq!(report.reports[hot], charged(), "{context}: its report");
                     }
                 }
                 assert_eq!(

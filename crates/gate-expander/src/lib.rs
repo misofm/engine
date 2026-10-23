@@ -819,7 +819,7 @@ impl<L: Lane, const CONNECTED: bool> PreparedGate<L, CONNECTED> {
                 } else {
                     &mut report.nonfinite_right_blocks
                 };
-                *counter = counter.saturating_add(frames as u64);
+                *counter = counter.saturating_add(1);
             }
         }
     }
@@ -1588,7 +1588,7 @@ mod tests {
                 "W{lanes} report {track}"
             );
             if track == 3 {
-                assert_eq!(bank_reports[track].nonfinite_left_blocks, FRAMES as u64);
+                assert_eq!(bank_reports[track].nonfinite_left_blocks, 1);
                 assert_eq!(bank_reports[track].nonfinite_right_blocks, 0);
                 for frame in 0..FRAMES {
                     assert_eq!(bank_left[frame * lanes + track].to_bits(), 0);

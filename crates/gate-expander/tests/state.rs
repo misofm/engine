@@ -379,7 +379,7 @@ fn scalar_and_bank_recovery_is_channel_and_lane_local() {
     let mut right = vec![0.2; 128];
     left[0] = f32::NAN;
     let report = render_scalar_sidechain(&mut scalar, &mut left, &mut right, None, 128, &[], 17);
-    assert_eq!(report.nonfinite_left_blocks, 128);
+    assert_eq!(report.nonfinite_left_blocks, 1);
     assert!(left.iter().all(|sample| sample.to_bits() == 0));
     assert!(right.iter().all(|sample| sample.is_finite()));
     let mut control_left = vec![0.2; 128];
@@ -507,7 +507,7 @@ fn scalar_and_bank_recovery_is_channel_and_lane_local() {
         )
         .unwrap(),
     );
-    assert_eq!(report.reports[3].nonfinite_left_blocks, 128);
+    assert_eq!(report.reports[3].nonfinite_left_blocks, 1);
     for track in 0..NATIVE_LANES {
         if track != 3 {
             assert_bits_eq(

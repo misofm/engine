@@ -923,7 +923,7 @@ where
                 let hit = block == 3 && lane == target;
                 let expected = if hit && !is_padded {
                     ProcessReport {
-                        nonfinite_left_blocks: frames as u64,
+                        nonfinite_left_blocks: 1,
                         ..ProcessReport::default()
                     }
                 } else {
@@ -1022,7 +1022,7 @@ fn a_tripping_lane_leaves_every_bank_mates_bits() {
                             "{width:?}: lane {hot} fed {word:e}: its left block is zeroed"
                         );
                         assert_eq!(
-                            report.reports[hot].nonfinite_left_blocks, frames as u64,
+                            report.reports[hot].nonfinite_left_blocks, 1,
                             "{width:?}: lane {hot} fed {word:e} tripped D7 and is reported"
                         );
                     }
