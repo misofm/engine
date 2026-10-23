@@ -5867,7 +5867,7 @@ mod tests {
                 console: true,
                 homogeneous: 10,
                 latency: Some(486),
-                tail: Some(TailSamples::Infinite),
+                tail: Some(TailSamples::Finite(0)),
                 keyless: false,
                 input: true_peak_limiter_input_binding,
                 blocks: 16,

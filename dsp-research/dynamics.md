@@ -23,6 +23,14 @@ Times must be finite and nonnegative; ratio, threshold, knee, and range use boun
 The V1 gate/expander reports exact zero added samples in enabled and bypassed modes. Envelope/hold
 state creates a declared finite tail policy and reset clears it deterministically.
 
+The compressor (#1375) has zero latency and states a zero tail: its output is the current input
+times a finite gain (or that mixed with the input), so it is exactly `±0.0` from the first silent
+sample. Its exact rest is the gain-reduction word's release from at most 100 dB to the #1784 rest
+snap at the slowest release (5,000 ms), which `effect_runtime::tail::rate_follower_rest_samples`
+counts on the word's `f32` grid: 4,569,940 samples at 48 kHz (about 95 s), within a sample of the
+real recurrence. The composition gain is 2,401 mB (+24 dB makeup, the fast tier's `1e-5` dB gain
+error and four roundings); the flush stall is four underflows, -74,655 mB.
+
 ## Units, mappings, automation and smoothing
 
 Threshold/makeup/range use dB, times use ms, ratio is dimensionless, detector mode and curve family are enums. Every automated parameter names its smoothing and update rate.

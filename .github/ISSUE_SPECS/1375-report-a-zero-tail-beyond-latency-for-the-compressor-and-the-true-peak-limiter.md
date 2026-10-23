@@ -146,3 +146,49 @@ rest. Today both declare `Infinite`, which makes every plan that holds one repor
   `main` only in the same batch as *Define how node tails compose through gain in the graph extent*
   (#1379), never before it: before #1379 a finite effect tail would be composed without the
   compressor's makeup gain, and `main` must never report a plan tail that is not certified.
+
+## Evidence and decision record (attempt 1, 2026-10-23, on `main` 87b818f17)
+
+- **Anchors re-derived after #1784.** Compressor: `tail_and_rest` and the rest helpers in
+  `crates/compressor/src/lib.rs`; the word is `ballistic`'s `snap_reduction(rms_follow(t, g, c))`
+  (`kernel.rs`), snapped at `REDUCTION_REST_DB` (`|g| <=`), not at `FLUSH_EPS`. Limiter: the word
+  is `channel_frame`'s `flush(max(1 - s, fma(c, (1 - s) - d, d)))`. Both are the rate form
+  `e + c (t - e)`, not the two-product pole form D2 assumed, so the shared helper is
+  `effect_runtime::tail::rate_follower_rest_samples(rate_min, distance_max, snap)`, not
+  `one_pole_rest_samples(c_max, e_max)`. The two-product form (#1373, #1374, #1376) needs its own
+  helper when those slices land.
+- **D1 confirmed by reading.** Compressor output arms: `x`, `x g`, `fma(mix, x g - x, x)` of the
+  current main input; zero latency. Limiter: `select(bypass, z, z g)` of the main-ring sample.
+  No other term. Tail `Finite(0)`, decay `0`.
+- **D2/gate 4: the closed form fails gate 4.** `ln(E / floor) / (-ln(1 - c (1 - u)) - u)` overstates
+  by about `u / c`: 2.9 % at the compressor's 5,000 ms at 96 kHz, 1.2 % at the limiter's 2,000 ms at
+  96 kHz, both above gate 4's 1 %. The helper instead bounds the word by `round_ties_up(e - c' e)`,
+  `c' = c (1 - u)`, on the word's own grid, evaluated exactly in integers in runs of constant
+  decrement (a few thousand steps); monotonicity of the real step in `e` (for `c <= 1/5`) and in `c`
+  makes it a bound for every start `<= E` and every coefficient `>= c_min`. Measured against the
+  real `f32` recurrence: equal or one sample above at every coefficient tried.
+- **Start distances.** Compressor `E = 100` dB plus one ulp (the curve clamp; an attack step can
+  round one ulp past it). Limiter `E = 1` (shown not exceeded). `c_min` is the longest release's
+  design one `f32` below it. D3 holds: `c_min >= 2.08e-6 > 2^-24` everywhere.
+- **Limiter ring drain.** From the first silent sample `M`: history rests after `M + 11`, the box
+  target `1 - s` is `+0.0` from `S0 = M + N + Wb + 10`, every ring and `prefix` rest by
+  `M + 2N + 11`, `d` after `S0 + K - 1`. With latency `N + 6`, `R = N + K + 5`. At the worst start
+  (peak `1e29`, `d = 1`, lookahead maximum) the real kernel rested in the last block before the
+  bound, so the drain term is tight.
+- **No rendered bit moved.** The limiter reaches exact rest through its existing `FLUSH_EPS` flush;
+  no snap was added. A plateau snap like #1784's would shorten its rest (about 92 s at 48 kHz) and
+  is class B.
+- **D4 values.** Compressor `G_p = G_t = 2,401` mB: `10^((24 + 1e-5) / 20) (1 + u)^4`, where
+  `1e-5` dB is the fast tier's proven gain error (`math` F1, `GAIN_MAX_DB`), which D4 omitted, and
+  four roundings (mul, sub, mul, add); `sigma = 4 * 2^-126 (1 + u)^3` = -74,655 mB. Limiter
+  `G = 1` mB (`1 + u`), `sigma = 2^-126` = -75,859 mB.
+- **Stated values, 48 kHz.** Compressor `R = 4,569,940` (brute force 4,569,940). Limiter
+  `R = 4,421,447 = 485 + 4,420,962` (brute force 4,420,962). `tail_every_peak = Finite(R)`.
+- **Tests.** `crates/compressor/tests/tail_contract.rs` and
+  `crates/true-peak-limiter/tests/tail_contract.rs` (gates 1-4; debug runs 48 kHz and the slowest
+  release only at the worst start; release runs every rate and case), helper tests in
+  `crates/effect-runtime/src/tail.rs`. The limiter unit test's `Infinite` assertion is deleted
+  (gate 1 states it); the graph-compiler limiter fixture row now expects `Finite(0)` (the fixture
+  is at `crates/graph-compiler/src/lib.rs:5870`, not `:12321`).
+- **Open for root.** (a) The landing constraint above stands: #1379 slice C is open. (b) The
+  release-scale run has no CI step; `builtins`' `tail_contract` has one in `qualification.yml`.

@@ -20,6 +20,14 @@ Ceiling and detector values must be finite; clamp gain to a finite safe interval
 
 Limiter lookahead plus interpolation group delay is a fixed integer latency reported to PDC. Bypass preserves it; release/history have a documented finite reset/tail policy.
 
+The limiter (#1375) states a zero tail beyond its latency: the output is the delayed input times
+`g <= 1` and nothing else. Its exact rest is the ring drain (`N + 5` samples beyond the latency,
+`N = Fs / 100`) plus the reduction word's release from `d = 1` to the `FLUSH_EPS` flush at the
+slowest release (2,000 ms), counted on the word's `f32` grid: 4,421,447 samples at 48 kHz (about
+92 s), tight at the worst start (`d = 1` exactly). The composition gain is 1 mB (0 dB and one
+rounding) and the flush stall one underflow, -75,859 mB. A rest snap like the compressor's would
+shorten the rest but moves rendered bits (class B), so it is not part of #1375.
+
 ## Units, mappings, automation and smoothing
 
 Ceiling and measured output use dBTP; threshold/makeup use dB; attack/release use ms; quality/factor are discrete enums. Metadata names all smoothing rules.
