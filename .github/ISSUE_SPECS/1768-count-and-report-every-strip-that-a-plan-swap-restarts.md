@@ -60,10 +60,23 @@ None. Edit order: #1767 (the fused-stage removal) edits `resolve_strip_carry` in
   discontinuity successor lists none (its base carries no strip state; the jump is declared, not a
   fallback). A candidate withdrawn unadopted adds nothing; its replacement is prepared against the
   running plan, so its list holds the withdrawn edit's strips too.
-- **Known limit.** A hand-over that render refuses whole (`CarryOutcome::PredecessorMismatch`, an
-  invariant failure already counted by `carry_mismatch_count`) starts more strips at rest than the
-  list names; the counter reports the prepared list.
+- **Known limits.** (1) A hand-over that render refuses whole (`CarryOutcome::PredecessorMismatch`)
+  or a refused console restore (`carry_refusal_count`, `crates/graph/src/lib.rs` near 4323) starts
+  lanes at rest that the list does not name. Both counts are internal (not on the C ABI), and the
+  paths are unreachable by construction (#1269 P11); an app-visible defect counter belongs on the
+  #1521 model, not here. (2) A refused input-section join (`prepare.rs` near 2481-2503) starts the
+  input section at rest, and a send whose record `join_routes` refuses starts at its prepared
+  value; neither is listed, and neither is reachable in product today (one session's live lanes
+  agree, and a rate change does not come through a successor). (3) The SDK has no typed counter
+  read for any counter; #1571 owns it. Per-revision attribution of restarts belongs with #1288 or
+  #1324 (watermark outcome).
 - **Path extension (root ruling 2026-10-23).** `docs/CONTROL_PROTOCOL_REGISTRY.md` (IDs run 1 to
   18, the `STRIPS_RESTARTED` entry) and `docs/C_ABI_V1_QUALIFICATION.md` (the served-counter
   paragraph now names the five counters `SERVED_COUNTERS` serves; canceled automation, ID 12, was
   stale: retired by #1629, absent from `CounterId`).
+
+## Verifier (attempt 1, 2026-10-23)
+
+PASS. Root corrected the known-limit wording from its findings 2 and 3, and recorded that the SDK
+counter read is #1571's and per-revision attribution is #1288's or #1324's. Note for #1521: its
+counter now takes the next free ID, 19.
