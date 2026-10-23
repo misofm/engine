@@ -72,7 +72,9 @@ Gate 1 turns red when a builtin swap leaves one per-lane field behind, such as a
   automated strip only into a fader bank that holds slots. Lifting it would give every fader bank
   of an automated plan its slots and its event-driver path; not done here.
 - **Test hooks** (root-approved, `test-support` only): `graph::test_only_builtin_stage` and
-  `graph::test_only_builtin_processor_mut`. The gate-1 chain is built from the real `BuiltinStage`
+  `graph::test_only_builtin_processor_mut` (re-exported in graph's `lib.rs`), and
+  `builtins_compiler::test_only_builtin_lane_swap`, which runs the scenario and its bit checks
+  and hands each swap call to a caller's measure. The gate-1 chain is built from the real `BuiltinStage`
   adapter and the real bank processors (lowered by the real `lower_strip_banks`), not from a
   graph-compiled plan, because no plan exposes its chains yet. #1107 owes one plan-level swap test.
 
@@ -106,3 +108,24 @@ swap).
 | matrix processor | `controls[lane]` (`MatrixReader`) | S |
 | every processor | `process_calls`, `frames_processed` | B (counters) |
 | `BuiltinStage` | (holds only the processor) | - |
+
+### D3 Evidence (attempt 1)
+
+- Gate 1 and 2: one test, `a_builtin_lane_swap_moves_the_whole_strip_without_allocating`
+  (`builtins-compiler/tests/allocation_tracker.rs`, which has the crate's counting allocator; the
+  scenario is `test_only_builtin_lane_swap` in `lib.rs`). 13 strips with live controls on every
+  strip and stored fader and mute automation on three, two preparations (test and twin), random
+  inputs and identical random live writes (trim, polarity, filter target, fader, mute, matrix,
+  offsets; ramps up to 600 samples, block 128). Before block 5 an in-chain swap (automated with
+  plain strip; swap, inverse, swap), before block 8 a cross-chain swap (automated lane of chain 1),
+  both with dirty cells, ramps in flight and stored events ahead. Every strip's output equals the
+  twin's by `to_bits` on all 14 blocks. Simd8 and Simd4, stereo and mono. The mono pass arms
+  collapse: both swaps land on a chain that rendered collapsed (R7), and a strip whose live
+  symmetry term was cleared moves its chain to dual. Each swap call: 0 allocations, 0 frees.
+- Mutants red: `controls` exchange dropped (input, fader, matrix, each), `live` exchange dropped,
+  `automation` exchange dropped (each arm), fader bank one-way import, `BuiltinStage` refusing,
+  one allocation in the fader swap. Rack's in-chain `disengage_for_carry` removed: red only
+  through the input stage's debug assertion; with that assertion also removed the bits stay equal
+  (the next disengage copies left onto right), so R7 is guarded by the assertion, not by bits.
+- Not covered (stated limit): the `filter_initial` exchange. Only a `FullToPrepared` reset reads
+  it, and no chain path resets a builtin bank. The mutant stays green.
