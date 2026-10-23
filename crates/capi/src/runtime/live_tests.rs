@@ -6563,7 +6563,16 @@ mod set_control {
         /// `f64`, and render's composition of the curve with it (canonical, on the render
         /// thread) reaches another fader dB and another gain.
         fn assert_the_hostile_word_rounds_the_offsets_sum() {
-            let sum = || session::vca_offsets_sum([HAND_DB, VCA_DB, 0.0]).expect("three offsets");
+            // `black_box` on the inputs and outputs: under `--release` LLVM otherwise folds the
+            // constant sum at compile time, whatever the thread's word (#1775).
+            let sum = || {
+                core::hint::black_box(session::vca_offsets_sum([
+                    core::hint::black_box(HAND_DB),
+                    core::hint::black_box(VCA_DB),
+                    core::hint::black_box(0.0),
+                ]))
+                .expect("three offsets")
+            };
             let canonical = sum();
             let rounded = under_hostile_fp_env(sum);
             assert_eq!(canonical.to_bits(), f64::from(VCA_DB).to_bits());
@@ -6734,7 +6743,14 @@ mod set_control {
         /// environment: remove its `CanonicalFpEnv` guard.
         #[test]
         fn a_session_booted_under_a_hostile_caller_word_is_the_canonical_session() {
-            let parse = || "0.1".parse::<f32>().expect("a number");
+            // Opaque, so no profile folds the parse at compile time (#1775).
+            let parse = || {
+                core::hint::black_box(
+                    core::hint::black_box("0.1")
+                        .parse::<f32>()
+                        .expect("a number"),
+                )
+            };
             assert_ne!(
                 parse().to_bits(),
                 under_hostile_fp_env(parse).to_bits(),
