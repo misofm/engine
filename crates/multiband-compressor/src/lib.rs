@@ -1184,6 +1184,39 @@ fn run_segment<
     far.gain_db = gain_far;
 }
 
+/// A ramped segment ([`run_segment`] at `RAMPING`), kept out of line.
+///
+/// Issue #1773: inlined, the four ramped arms of each link mode share [`process_block`]'s body with
+/// the flat arms, and LLVM then schedules the unchanged flat frame loop worse (measured +3.5 % per
+/// block at eight lanes with no automation; llvm-mca agrees, and loop alignment is not the cause).
+/// Out of line, the flat path keeps the body it had. The call costs once per ramped segment.
+#[inline(never)]
+#[allow(clippy::too_many_arguments)]
+fn run_ramped_segment<
+    L: Lane,
+    const W: usize,
+    const LINK: u8,
+    const BYPASS: bool,
+    const COEF: bool,
+    const ARMABLE: bool,
+>(
+    sides: &mut [Side<L, W>; 2],
+    left: &mut [f32],
+    right: &mut [f32],
+    frames: usize,
+    segments: &mut [Segment<L>; 2],
+    armed_after: L,
+) {
+    run_segment::<L, W, LINK, BYPASS, true, COEF, ARMABLE>(
+        sides,
+        left,
+        right,
+        frames,
+        segments,
+        armed_after,
+    );
+}
+
 /// Splits the block at ramp arrivals and runs each segment, ramped or flat.
 ///
 /// `FORCE_RAMPING` is the split's A/B switch. It is `false` on every production path; the crate's
@@ -1232,8 +1265,18 @@ fn process_block<
             );
         }
         macro_rules! segment {
-            ($ramping:literal, $coef:literal, $armable:literal) => {
-                run_segment::<L, W, LINK, BYPASS, $ramping, $coef, $armable>(
+            (true, $coef:literal, $armable:literal) => {
+                run_ramped_segment::<L, W, LINK, BYPASS, $coef, $armable>(
+                    &mut instance.sides,
+                    &mut left[position * W..(position + length) * W],
+                    &mut right[position * W..(position + length) * W],
+                    length,
+                    &mut segments,
+                    armed_after,
+                )
+            };
+            (false, $coef:literal, $armable:literal) => {
+                run_segment::<L, W, LINK, BYPASS, false, $coef, $armable>(
                     &mut instance.sides,
                     &mut left[position * W..(position + length) * W],
                     &mut right[position * W..(position + length) * W],
