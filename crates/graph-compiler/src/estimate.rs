@@ -360,7 +360,6 @@ pub(crate) fn effect_control_resource(
     Some(GraphScalarOwnerResourceEstimate {
         total_bytes: total,
         largest_allocation_bytes: largest,
-        split_pair_table_bytes: 0,
     })
 }
 

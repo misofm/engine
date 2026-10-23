@@ -18,9 +18,6 @@
 //!   dual. The collapse is a bit-exact optimisation, so the two must agree -- the class #970 was
 //!   (the collapse armed on a chain that does not gather the track input). The armed collapse must
 //!   fire on some seed, or the comparison proves nothing.
-//! * **serialized against concurrent lowering.** `prepare_host_runtime_between_render_calls`
-//!   lowers the builtins for a host that admits records only between render calls; it renders the
-//!   same bits.
 //!
 //! And the invariant a differential cannot see: legal input never leaves the D7 block bound.
 //!
@@ -44,8 +41,8 @@ use host_core::{
     ResponseParameterOverride, ResponsePreviewError, ResponsePreviewGrid, ResponsePreviewLimits,
     ResponsePreviewOutput, ResponsePreviewRequest, ResponsePreviewTarget,
     ResponseSnapshotCollector, ResponseSnapshotOutput, ResponseSnapshotQueryError,
-    SourceSubmission, compile_host_session, prepare_host_runtime_between_render_calls,
-    prepare_host_runtime_with_live_controls, query_response_snapshot_into,
+    SourceSubmission, compile_host_session, prepare_host_runtime_with_live_controls,
+    query_response_snapshot_into,
 };
 use session::{
     ChannelMatrix, ConsoleEntry, ConsoleSlot, Effect, EffectIdentity, EffectParam, LinkMode,
@@ -58,9 +55,9 @@ use session::{
 const BANK: &str = include_str!("../../../fixtures/session/v1/parametric-eq-bank-console.json");
 const QUANTUM: usize = 128;
 const BLOCKS: usize = 8;
-const TEST: &str = "randomized_consoles_render_the_same_bits_armed_dual_and_serialized";
+const TEST: &str = "randomized_consoles_render_the_same_bits_armed_and_dual";
 const REPLAY: &str = "cargo test -p host-core --features host-core/test-support --test randomized \
-                      -- --exact randomized_consoles_render_the_same_bits_armed_dual_and_serialized";
+                      -- --exact randomized_consoles_render_the_same_bits_armed_and_dual";
 
 const KINDS: [&str; 8] = [
     "miso.parametric-eq",
@@ -790,40 +787,33 @@ fn probe(seed: u64, registry: &NativeEffectRegistry, reach: &mut Reach) {
             return;
         }
     };
-    let prepared = |serialized: bool| {
-        let result = if serialized {
-            prepare_host_runtime_between_render_calls(&compiled, &caps, &request)
-        } else {
-            prepare_host_runtime_with_live_controls(&compiled, &caps, &request)
-        };
-        result.unwrap_or_else(|failure| {
-            panic!(
-                "seed {seed}: prepare refused a compiled console: {}",
-                String::from_utf8_lossy(failure.as_bytes())
-            )
-        })
+    let prepared = || {
+        prepare_host_runtime_with_live_controls(&compiled, &caps, &request).unwrap_or_else(
+            |failure| {
+                panic!(
+                    "seed {seed}: prepare refused a compiled console: {}",
+                    String::from_utf8_lossy(failure.as_bytes())
+                )
+            },
+        )
     };
-    let mut arms: Vec<Arm> = [
-        ("armed", false, false),
-        ("dual", false, true),
-        ("serialized", true, false),
-    ]
-    .into_iter()
-    .map(|(label, serialized, forced)| {
-        let (mut host, handles) = prepared(serialized);
-        host.plan.force_mono_collapse_off(forced);
-        let gate = host
-            .plan
-            .take_revision_gate()
-            .expect("the plan's gate handle");
-        Arm {
-            label,
-            host,
-            handles,
-            gate,
-        }
-    })
-    .collect();
+    let mut arms: Vec<Arm> = [("armed", false), ("dual", true)]
+        .into_iter()
+        .map(|(label, forced)| {
+            let (mut host, handles) = prepared();
+            host.plan.force_mono_collapse_off(forced);
+            let gate = host
+                .plan
+                .take_revision_gate()
+                .expect("the plan's gate handle");
+            Arm {
+                label,
+                host,
+                handles,
+                gate,
+            }
+        })
+        .collect();
     reach.consoles += 1;
     reach.bus_console_entries += model
         .submixes
@@ -928,7 +918,7 @@ fn probe(seed: u64, registry: &NativeEffectRegistry, reach: &mut Reach) {
 }
 
 #[test]
-fn randomized_consoles_render_the_same_bits_armed_dual_and_serialized() {
+fn randomized_consoles_render_the_same_bits_armed_and_dual() {
     let registry = launch_native_effect_registry().expect("the launch registry");
     let mut reach = Reach::default();
     let seeds = run_seeds(TEST, REPLAY, 12, |seed| probe(seed, registry, &mut reach));

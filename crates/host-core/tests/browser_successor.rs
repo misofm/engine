@@ -11,8 +11,6 @@
 //!   the reference, and the swap block reports `Carried`. The same run with a fresh successor
 //!   differs at the swap block, so the oracle can fail.
 //! * **Gate 2, the successor's capture works.**
-//! * **Gate 3, concurrent and the same bits.** The new selected-meter boot entry forms no fused
-//!   fader and matrix bank and renders what the `_between_render_calls` entry renders.
 //! * **Gate 4, refusal.** A successor without its spectrum target is refused with
 //!   `host.spectrum.target`, and the predecessor's producers still feed the predecessor.
 //! * **Gate 5, realtime.** The swap block of a spectrum plan allocates and frees nothing.
@@ -29,23 +27,19 @@ mod successor;
 use core::num::{NonZeroU32, NonZeroUsize};
 
 use builtins::{MeterMetricSet, MeterTap};
-use builtins_compiler::{test_only_fader_matrix_witness, test_only_reset_fader_matrix_witness};
-use dsp_reference::randomized::Draw;
-use engine::realtime::{CarryOutcome, PlanarBufferMut, RenderIo, RenderTime, SwapOutcome};
+use engine::realtime::{CarryOutcome, SwapOutcome};
 use host_core::{
     HostLiveControlHandles, HostLiveControlRequest, HostLiveLanes, HostMeterRequest,
     LiveValuesSuperseded, PlanStateInventory, PrepareDiagnostics, PreparedHost,
     SPECTRUM_WINDOW_FRAMES, SourceSubmission, SpectrumCapture, SpectrumCaptureCollection,
     SpectrumCaptureCollectionEntry, SpectrumCaptureCollectionRequest, SpectrumCaptureRequest,
-    SpectrumChannels, SpectrumPair, SpectrumTarget, SuccessorBase, compile_host_session,
+    SpectrumChannels, SpectrumPair, SpectrumTarget, SuccessorBase,
     prepare_host_runtime_with_live_controls_and_spectrum,
     prepare_host_runtime_with_live_controls_and_spectrum_collection,
     prepare_host_runtime_with_live_controls_and_spectrum_collection_successor,
     prepare_host_runtime_with_live_controls_and_spectrum_successor,
-    prepare_host_runtime_with_selected_meters,
-    prepare_host_runtime_with_selected_meters_between_render_calls,
-    prepare_host_runtime_with_selected_meters_successor, spectrum_capture_collection_resources,
-    spectrum_capture_resources_for,
+    prepare_host_runtime_with_selected_meters, prepare_host_runtime_with_selected_meters_successor,
+    spectrum_capture_collection_resources, spectrum_capture_resources_for,
 };
 use session::{EditRamps, RouteSource, SessionModel, StableId, parse_session_json};
 use successor::{
@@ -392,110 +386,6 @@ fn the_successors_capture_completes_a_window() {
     assert_eq!(window.channels, SpectrumChannels::Stereo);
     assert!(window.left.iter().any(|value| *value != 0.0));
     assert!(window.right.iter().any(|value| *value != 0.0));
-}
-
-fn feed(frames: usize) -> [Vec<f32>; 2] {
-    let mut draw = Draw::new(0x1401);
-    let mut plane = || -> Vec<f32> { (0..frames).map(|_| draw.noise(0.5)).collect() };
-    [plane(), plane()]
-}
-
-/// `BLOCKS_GATE_3` blocks from sample 0, feeding `planes`, as output bits.
-fn render_bits(host: &mut PreparedHost, planes: &[Vec<f32>; 2]) -> Vec<u32> {
-    let quantum = host.report.quantum_frames as usize;
-    let rate = host.report.sample_rate_hz;
-    let mut bits = Vec::new();
-    for block in 0..BLOCKS_GATE_3 {
-        let range = block * quantum..(block + 1) * quantum;
-        host.sources
-            .submit(
-                SOURCE.as_bytes(),
-                SourceSubmission {
-                    generation: 1,
-                    start_frame: range.start as u64,
-                    sample_rate_hz: rate,
-                    planes: &[&planes[0][range.clone()], &planes[1][range.clone()]],
-                    frames: quantum as u32,
-                    end_of_region: false,
-                },
-            )
-            .expect("source block");
-        let mut samples = vec![0.0_f32; quantum * 2];
-        let output = PlanarBufferMut::try_new(&mut samples, 2, quantum, quantum).expect("planes");
-        host.plan
-            .render(
-                RenderIo { output },
-                RenderTime {
-                    absolute_sample: range.start as u64,
-                },
-            )
-            .expect("render");
-        bits.extend(samples.iter().map(|sample| sample.to_bits()));
-    }
-    bits
-}
-
-const BLOCKS_GATE_3: usize = 64;
-
-/// Gate 3. Red if the selected-meter path stays `BetweenRenderCalls` (a Worker would then push
-/// records while the worklet renders under a contract that forbids it), or if dropping the fusion
-/// moves a bit.
-#[test]
-fn the_concurrent_selected_meter_entry_forms_no_fused_bank_and_renders_the_same_bits() {
-    let compiled = compile_host_session(FIXTURE, &caps()).expect("compiled fixture");
-    let strips: Vec<HostMeterRequest> = compiled
-        .normalized_model()
-        .tracks
-        .iter()
-        .map(|track| HostMeterRequest {
-            strip_id: track.id.as_str().into(),
-            tap: MeterTap::PostMatrix,
-            metrics: MeterMetricSet::SAMPLE_PEAK,
-        })
-        .collect();
-    let request = live_controls(Branch::Meters);
-    let superseded = LiveValuesSuperseded::default();
-    let planes = feed(QUANTUM * BLOCKS_GATE_3);
-
-    test_only_reset_fader_matrix_witness();
-    let (mut serialized, _handles) =
-        prepare_host_runtime_with_selected_meters_between_render_calls(
-            &compiled,
-            &caps(),
-            &request,
-            &strips,
-            HostLiveLanes::ALL,
-            &superseded,
-        )
-        .unwrap_or_else(|failure| panic!("serialized: {failure:?}"));
-    assert!(
-        test_only_fader_matrix_witness().factory_calls > 0,
-        "the serialized entry fuses banks, so the witness can see a fusion"
-    );
-
-    test_only_reset_fader_matrix_witness();
-    let (mut concurrent, _handles) = prepare_host_runtime_with_selected_meters(
-        &compiled,
-        &caps(),
-        &request,
-        &strips,
-        HostLiveLanes::ALL,
-        &superseded,
-    )
-    .unwrap_or_else(|failure| panic!("concurrent: {failure:?}"));
-    assert_eq!(
-        test_only_fader_matrix_witness().factory_calls,
-        0,
-        "Concurrent delivery forms no fused fader-matrix bank"
-    );
-
-    let serialized_bits = render_bits(&mut serialized, &planes);
-    let concurrent_bits = render_bits(&mut concurrent, &planes);
-    assert!(serialized_bits.iter().any(|bits| *bits != 0));
-    assert!(
-        serialized_bits == concurrent_bits,
-        "dropping the fusion moved a bit"
-    );
 }
 
 /// Gate 5. Red if the swap block of a spectrum plan allocates or frees on render.

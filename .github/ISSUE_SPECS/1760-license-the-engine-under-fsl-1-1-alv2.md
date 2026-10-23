@@ -11,7 +11,7 @@ Issue #314 licensed the original project work under Apache-2.0. The workspace po
 - D1. LICENSE is the official template `FSL-1.1-ALv2.template.md` from https://github.com/getsentry/fsl.software (main), copied byte for byte, with only the notice line filled in: `Copyright 2026 Miso Labs, Inc.` (the first commit is 2026-08-20).
 - D2. The SPDX identifier is `FSL-1.1-ALv2` in every Cargo and npm manifest that names the project's own license.
 - D3. Material that is not original project work keeps its own license: the vendored libm material (`crates/math/LICENSE-libm.txt`) and every external dependency. Their notices do not change.
-- D4. Copies that were published under Apache-2.0 before this change stay available under Apache-2.0 to those who received them. This change licenses the work from this commit on. NOTICE keeps its lineage lines for the adapted misofm sources (misofm/engine-web-adapter, misofm/app). Root assumes that Miso Labs, Inc. owns them; the owner must confirm.
+- D4. Copies that were published under Apache-2.0 before this change stay available under Apache-2.0 to those who received them. This change licenses the work from this commit on. NOTICE keeps its lineage lines for the adapted misofm sources (misofm/engine-web-adapter, misofm/app). The owner confirmed (2026-10-23) that Miso Labs, Inc. owns all the code, these sources included.
 - D5. The policy keeps its shape: it pins the new LICENSE digest and checks the new identifier. No new check.
 
 ## Smallest closable slice

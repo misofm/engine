@@ -5546,8 +5546,8 @@ fn boot_refusal(failure: &CompileFailure, record: &Mutex<BootRecord>) -> BootFai
 /// (no spectrum, one spectrum capture, a spectrum collection) and the host-core entry each one
 /// calls, at boot (`successor` is `None`) and as a successor of a running plan.
 ///
-/// Every branch delivers controls concurrently and none calls a `_between_render_calls` entry, so
-/// the same function serves a control plane that prepares while another thread renders. A
+/// Every branch delivers controls concurrently (the only delivery since #1767), so the same
+/// function serves a control plane that prepares while another thread renders. A
 /// successor prepares every source it leaves unchanged vacant, to carry the displaced plan's ring.
 /// Issue #1209 D3: one `PostMatrix` sample-peak meter per strip, the tracks then the submixes, in
 /// the strip order host-core's addressing authority uses, so `meters[i]` is strip `i`'s peak pair;

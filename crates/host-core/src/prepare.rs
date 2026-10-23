@@ -15,10 +15,8 @@ use builtins_compiler::{
     BuiltinCompileCaps, FaderOffsetsRecord, LiveValuesSuperseded, MeterConsumer, MeterRequest,
     SelectedMeterRequest, TrackControlProducer, TrackControlRecord, TrackControlRequest,
     TrackFaderRecord, TrackInputRecord, lower_matrix_or_pan,
-    prepare_selected_session_builtins_between_render_calls,
     prepare_selected_session_builtins_with_live_controls,
-    prepare_session_builtins_between_render_calls, prepare_session_builtins_with_live_controls,
-    session_structural_symmetry,
+    prepare_session_builtins_with_live_controls, session_structural_symmetry,
 };
 use effect_compiler::{
     EffectCompileCaps, EffectControlProducer, EffectControlResources, EffectObservationHandle,
@@ -913,8 +911,7 @@ pub(crate) struct StripStageInventoryRow {
     pub(crate) id: Box<str>,
     /// Whose state the row holds.
     pub(crate) owner: graph::BuiltinStripOwner,
-    /// The kind of bank the lane sits in. A fused bank holds both owners at one location; a
-    /// split one holds each owner in a bank of its own.
+    /// The kind of bank the lane sits in: each owner has a bank of its own.
     pub(crate) stage: graph::BuiltinStripStage,
     /// Where the lane sits in this plan. Meaningful only to this plan's successor's carry
     /// program, which names it as the lane to copy from.
@@ -1613,7 +1610,6 @@ pub fn prepare_host_runtime(
         compiled,
         caps,
         None,
-        false,
         Backend::current(),
         None,
     )?;
@@ -1637,7 +1633,6 @@ pub fn prepare_host_runtime_with_live_controls(
         compiled,
         caps,
         Some(live_controls),
-        false,
         Backend::current(),
         None,
     )
@@ -1672,7 +1667,6 @@ pub fn prepare_host_runtime_with_live_lanes(
         caps,
         Some(live_controls),
         None,
-        false,
         Backend::current(),
         None,
         None,
@@ -1699,7 +1693,6 @@ pub fn prepare_host_runtime_with_live_lanes_successor(
         caps,
         Some(live_controls),
         None,
-        false,
         Backend::current(),
         None,
         Some(base),
@@ -1729,7 +1722,6 @@ pub fn prepare_host_runtime_with_live_controls_and_spectrum(
         caps,
         Some(live_controls),
         None,
-        false,
         Backend::current(),
         Some(SpectrumPreparationRequest::Single(spectrum)),
         None,
@@ -1769,7 +1761,6 @@ pub fn prepare_host_runtime_with_live_controls_and_spectrum_collection(
         caps,
         Some(live_controls),
         None,
-        false,
         Backend::current(),
         Some(SpectrumPreparationRequest::Collection(spectrum)),
         None,
@@ -1804,7 +1795,6 @@ pub fn prepare_host_runtime_with_live_controls_and_spectrum_successor(
         caps,
         Some(live_controls),
         None,
-        false,
         Backend::current(),
         Some(SpectrumPreparationRequest::Single(spectrum)),
         Some(base),
@@ -1843,7 +1833,6 @@ pub fn prepare_host_runtime_with_live_controls_and_spectrum_collection_successor
         caps,
         Some(live_controls),
         None,
-        false,
         Backend::current(),
         Some(SpectrumPreparationRequest::Collection(spectrum)),
         Some(base),
@@ -1874,7 +1863,6 @@ pub fn prepare_host_runtime_successor(
         compiled,
         caps,
         None,
-        false,
         Backend::current(),
         Some(base),
     )?;
@@ -1894,7 +1882,6 @@ pub fn prepare_host_runtime_with_live_controls_successor(
         compiled,
         caps,
         Some(live_controls),
-        false,
         Backend::current(),
         Some(base),
     )
@@ -1915,7 +1902,6 @@ pub fn test_only_prepare_host_runtime_with_live_controls_on(
         compiled,
         caps,
         Some(live_controls),
-        false,
         backend,
         None,
     )
@@ -1936,7 +1922,6 @@ pub fn test_only_prepare_host_runtime_with_live_controls_successor_on(
         compiled,
         caps,
         Some(live_controls),
-        false,
         backend,
         Some(base),
     )
@@ -1959,7 +1944,6 @@ pub fn test_only_prepare_host_runtime_with_selected_meters_on(
         caps,
         Some(live_controls),
         Some(meters),
-        false,
         backend,
         None,
         base,
@@ -1978,7 +1962,7 @@ pub fn test_only_prepare_host_runtime_on(
     caps: &HostPrepareCaps,
     backend: Backend,
 ) -> Result<PreparedHost, PrepareDiagnostics> {
-    prepare_host_runtime_with_live_controls_policy(compiled, caps, None, false, backend, None)
+    prepare_host_runtime_with_live_controls_policy(compiled, caps, None, backend, None)
         .map(|(prepared, _)| prepared)
 }
 
@@ -1992,50 +1976,8 @@ pub fn test_only_prepare_host_runtime_successor_on(
     base: SuccessorBase<'_>,
     backend: Backend,
 ) -> Result<PreparedHost, PrepareDiagnostics> {
-    prepare_host_runtime_with_live_controls_policy(compiled, caps, None, false, backend, Some(base))
+    prepare_host_runtime_with_live_controls_policy(compiled, caps, None, backend, Some(base))
         .map(|(prepared, _)| prepared)
-}
-
-/// Test-support width seam (issue #1277 gate 3): [`prepare_host_runtime_between_render_calls`] on
-/// an explicit bank width, the browser's form, whose fader and matrix banks fuse into one stage.
-#[cfg(feature = "test-support")]
-#[doc(hidden)]
-pub fn test_only_prepare_host_runtime_between_render_calls_on(
-    compiled: &CompiledSession,
-    caps: &HostPrepareCaps,
-    live_controls: &HostLiveControlRequest,
-    backend: Backend,
-) -> Result<(PreparedHost, HostLiveControlHandles), PrepareDiagnostics> {
-    prepare_host_runtime_with_live_controls_policy(
-        compiled,
-        caps,
-        Some(live_controls),
-        true,
-        backend,
-        None,
-    )
-}
-
-/// Test-support width seam (issue #1277 gate 3): the successor of a running plan, prepared between
-/// render calls. No host prepares a successor in that form today; the seam proves the fused stage
-/// carries (D8, D9).
-#[cfg(feature = "test-support")]
-#[doc(hidden)]
-pub fn test_only_prepare_host_runtime_between_render_calls_successor_on(
-    compiled: &CompiledSession,
-    caps: &HostPrepareCaps,
-    live_controls: &HostLiveControlRequest,
-    base: SuccessorBase<'_>,
-    backend: Backend,
-) -> Result<(PreparedHost, HostLiveControlHandles), PrepareDiagnostics> {
-    prepare_host_runtime_with_live_controls_policy(
-        compiled,
-        caps,
-        Some(live_controls),
-        true,
-        backend,
-        Some(base),
-    )
 }
 
 /// Test-only preparation seam for exercising the scalar lowering against the native bank.
@@ -2051,87 +1993,13 @@ pub(crate) fn prepare_host_runtime_with_live_controls_backend(
         compiled,
         caps,
         Some(live_controls),
-        false,
         backend,
         None,
     )
 }
 
-/// Prepare a host whose caller retains every returned producer endpoint and admits records only
-/// between exclusive render calls, with no concurrent enqueue while render is running.
-///
-/// Selecting this entry is the caller's declaration of that ownership and scheduling contract; it
-/// does not add synchronization or enforce the contract at runtime.
-#[allow(clippy::too_many_lines)]
-pub fn prepare_host_runtime_between_render_calls(
-    compiled: &CompiledSession,
-    caps: &HostPrepareCaps,
-    live_controls: &HostLiveControlRequest,
-) -> Result<(PreparedHost, HostLiveControlHandles), PrepareDiagnostics> {
-    prepare_host_runtime_between_render_calls_with_backend(
-        compiled,
-        caps,
-        live_controls,
-        Backend::current(),
-    )
-}
-
-/// Prepare the serialized builtin lowering on an explicit backend.
-///
-/// The only caller is [`prepare_host_runtime_between_render_calls`], with [`Backend::current`].
-/// Its other caller, #587's builtin batch endpoint, was deleted as unused with the rest of #140's
-/// unwired delivery stack (#1056). Folding this back into its caller is left for a change that
-/// may move the shipped artifact: panic locations below this line would shift.
-pub(crate) fn prepare_host_runtime_between_render_calls_with_backend(
-    compiled: &CompiledSession,
-    caps: &HostPrepareCaps,
-    live_controls: &HostLiveControlRequest,
-    backend: Backend,
-) -> Result<(PreparedHost, HostLiveControlHandles), PrepareDiagnostics> {
-    prepare_host_runtime_with_live_controls_policy(
-        compiled,
-        caps,
-        Some(live_controls),
-        true,
-        backend,
-        None,
-    )
-}
-
-/// Prepare a serialized host with exactly the caller-selected meter observers.
-///
-/// `superseded` is the session's `live_values_superseded` count, as in
-/// [`prepare_host_runtime_with_live_lanes`].
-#[allow(clippy::too_many_lines)]
-pub fn prepare_host_runtime_with_selected_meters_between_render_calls(
-    compiled: &CompiledSession,
-    caps: &HostPrepareCaps,
-    live_controls: &HostLiveControlRequest,
-    meters: &[HostMeterRequest],
-    lanes: HostLiveLanes,
-    superseded: &LiveValuesSuperseded,
-) -> Result<(PreparedHost, HostLiveControlHandles), PrepareDiagnostics> {
-    let (prepared, handles, _) = prepare_host_runtime_with_live_controls_policy_and_spectrum(
-        compiled,
-        caps,
-        Some(live_controls),
-        Some(meters),
-        true,
-        Backend::current(),
-        None,
-        None,
-        lanes,
-        Some(superseded),
-    )?;
-    Ok((prepared, handles))
-}
-
-/// Prepare a host with exactly the caller-selected meter observers and `Concurrent` control
-/// delivery (issue #1401 D2): the form a control plane uses while another thread renders.
-///
-/// Same session and feed as [`prepare_host_runtime_with_selected_meters_between_render_calls`],
-/// the same rendered bits, but no fused fader and matrix bank is formed, because a producer may
-/// push a record while render runs.
+/// Prepare a host with exactly the caller-selected meter observers (issue #1401 D2): a producer
+/// may push a record while another thread renders.
 ///
 /// `superseded` is the session's `live_values_superseded` count, as in
 /// [`prepare_host_runtime_with_live_lanes`].
@@ -2148,7 +2016,6 @@ pub fn prepare_host_runtime_with_selected_meters(
         caps,
         Some(live_controls),
         Some(meters),
-        false,
         Backend::current(),
         None,
         None,
@@ -2174,7 +2041,6 @@ pub fn prepare_host_runtime_with_selected_meters_successor(
         caps,
         Some(live_controls),
         Some(meters),
-        false,
         Backend::current(),
         None,
         Some(base),
@@ -2189,7 +2055,6 @@ fn prepare_host_runtime_with_live_controls_policy(
     compiled: &CompiledSession,
     caps: &HostPrepareCaps,
     live_controls: Option<&HostLiveControlRequest>,
-    between_render_calls: bool,
     backend: Backend,
     successor: Option<SuccessorBase<'_>>,
 ) -> Result<(PreparedHost, HostLiveControlHandles), PrepareDiagnostics> {
@@ -2198,7 +2063,6 @@ fn prepare_host_runtime_with_live_controls_policy(
         caps,
         live_controls,
         None,
-        between_render_calls,
         backend,
         None,
         successor,
@@ -2219,7 +2083,6 @@ pub fn prepare_host_runtime_with_spectrum(
         caps,
         None,
         None,
-        false,
         Backend::current(),
         Some(SpectrumPreparationRequest::Single(request)),
         None,
@@ -2248,7 +2111,6 @@ pub fn prepare_host_runtime_with_spectrum_collection(
             caps,
             None,
             None,
-            false,
             Backend::current(),
             Some(SpectrumPreparationRequest::Collection(request)),
             None,
@@ -2268,7 +2130,6 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
     caps: &HostPrepareCaps,
     live_controls: Option<&HostLiveControlRequest>,
     selected_meters: Option<&[HostMeterRequest]>,
-    between_render_calls: bool,
     backend: Backend,
     spectrum_request: Option<SpectrumPreparationRequest<'_>>,
     successor: Option<SuccessorBase<'_>>,
@@ -2894,33 +2755,10 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
         controls::effective(compiled.normalized_model(), overlay)
     };
     let builtins = if selected_meters.is_some() {
-        // #1401 D2: a selected-meter request follows the caller's delivery contract, like every
-        // other request. The serialized form keeps its fused fader and matrix banks.
-        if between_render_calls {
-            prepare_selected_session_builtins_between_render_calls(
-                compiled,
-                &effective,
-                &meter_requests,
-                &control_requests,
-                builtin_caps,
-            )
-        } else {
-            prepare_selected_session_builtins_with_live_controls(
-                compiled,
-                &effective,
-                &meter_requests,
-                &control_requests,
-                builtin_caps,
-            )
-        }
-    } else if between_render_calls {
-        prepare_session_builtins_between_render_calls(
+        prepare_selected_session_builtins_with_live_controls(
             compiled,
             &effective,
-            &meter_requests
-                .iter()
-                .map(|item| item.request.clone())
-                .collect::<Vec<_>>(),
+            &meter_requests,
             &control_requests,
             builtin_caps,
         )
@@ -6254,9 +6092,8 @@ struct StripCarry<'a> {
 /// strips restart, and which carried strips retarget.
 ///
 /// A stage carries when both plans have its lane in a bank of one kind, attach the same control
-/// kind, and no prepared value of it differs. A fused bank holds both owners in one stage, so it
-/// carries both or neither. A strip with a stage that does not carry starts that stage at rest
-/// and is listed in `restarted`.
+/// kind, and no prepared value of it differs. A strip with a stage that does not carry starts that
+/// stage at rest and is listed in `restarted`.
 fn resolve_strip_carry<'a>(
     predecessor: &PlanStateInventory,
     joins: &[StripJoin<'a>],
@@ -6272,15 +6109,7 @@ fn resolve_strip_carry<'a>(
             (own.stage == before.stage && before.live == live).then_some((own, before))
         });
         let families = [!join.fader.is_prepared(), !join.matrix.is_prepared()];
-        let mut carries = [0, 1].map(|owner| rows[owner].is_some() && families[owner]);
-        if rows
-            .iter()
-            .flatten()
-            .any(|(row, _)| row.stage == graph::BuiltinStripStage::FaderMatrix)
-        {
-            let both = carries[0] && carries[1];
-            carries = [both, both];
-        }
+        let carries = [0, 1].map(|owner| rows[owner].is_some() && families[owner]);
         for ((owner, row), carries) in [Fader, Matrix].into_iter().zip(rows).zip(carries) {
             if let (true, Some((own, before))) = (carries, row) {
                 carry.moves.push(graph::GraphStripMove {

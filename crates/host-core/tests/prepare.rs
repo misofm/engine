@@ -11,8 +11,7 @@ use host_core::{
     SOURCE_STALL_TOLERANCE_MS, SourceControlError, SourceSubmission, compile_host_session,
     control_table_bytes, default_source_ring_frames, diagnostic_lines, prepare_host_runtime,
     prepare_host_runtime_with_live_controls, prepare_host_runtime_with_live_lanes,
-    prepare_host_runtime_with_selected_meters_between_render_calls, prepare_host_session,
-    source_id_arena_bytes,
+    prepare_host_runtime_with_selected_meters, prepare_host_session, source_id_arena_bytes,
 };
 use source::{HostChunkError, SourceSeekError};
 
@@ -76,7 +75,7 @@ fn selected_meter_observers_preserve_caller_order_taps_and_metric_identity() {
     limits.maximum_meter_streams = 2;
     limits.maximum_meter_items = u64::MAX;
     limits.maximum_meter_bytes = u64::MAX;
-    let (_host, handles) = prepare_host_runtime_with_selected_meters_between_render_calls(
+    let (_host, handles) = prepare_host_runtime_with_selected_meters(
         &compiled,
         &limits,
         &live_controls,
@@ -96,7 +95,7 @@ fn selected_meter_observers_preserve_caller_order_taps_and_metric_identity() {
         tap: MeterTap::PostFader,
         metrics: MeterMetricSet::from_bits_retain(0x80),
     }];
-    let Err(error) = prepare_host_runtime_with_selected_meters_between_render_calls(
+    let Err(error) = prepare_host_runtime_with_selected_meters(
         &compiled,
         &limits,
         &live_controls,
@@ -392,7 +391,7 @@ fn retained_bytes_projection_matches_the_live_set() {
 fn effect_control_report_charges_the_producers_the_host_hands_out() {
     let compiled = compile_host_session(SESSION, &caps()).expect("compiled fixture");
     let live_controls = HostLiveControlRequest::default();
-    let (prepared, handles) = prepare_host_runtime_with_selected_meters_between_render_calls(
+    let (prepared, handles) = prepare_host_runtime_with_selected_meters(
         &compiled,
         &caps(),
         &live_controls,
@@ -432,7 +431,7 @@ fn effect_control_report_charges_the_producers_the_host_hands_out() {
 fn effect_control_bytes_join_the_graph_session_cap() {
     let compiled = compile_host_session(SESSION, &caps()).expect("compiled fixture");
     let live_controls = HostLiveControlRequest::default();
-    let (prepared, _handles) = prepare_host_runtime_with_selected_meters_between_render_calls(
+    let (prepared, _handles) = prepare_host_runtime_with_selected_meters(
         &compiled,
         &caps(),
         &live_controls,
@@ -457,7 +456,7 @@ fn effect_control_bytes_join_the_graph_session_cap() {
         .expect("graph admission sum");
     let mut equal = caps();
     equal.maximum_graph_session_plus_plan_bytes = admitted;
-    prepare_host_runtime_with_selected_meters_between_render_calls(
+    prepare_host_runtime_with_selected_meters(
         &compiled,
         &equal,
         &live_controls,
@@ -468,7 +467,7 @@ fn effect_control_bytes_join_the_graph_session_cap() {
     .expect("exact graph plus effect budget must admit");
     let mut below = caps();
     below.maximum_graph_session_plus_plan_bytes = admitted - 1;
-    let failure = match prepare_host_runtime_with_selected_meters_between_render_calls(
+    let failure = match prepare_host_runtime_with_selected_meters(
         &compiled,
         &below,
         &live_controls,

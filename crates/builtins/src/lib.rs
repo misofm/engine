@@ -60,15 +60,14 @@ use lane::{
     kernels::{
         SvfCoef,
         builtins::{
-            FaderMatrixArm, GainMuteRamp, InputChainCoef, InputChainPlan, InputChainState,
-            InputTrimRamp, Matrix2x2Coef, Matrix2x2Ramp, fader_matrix_block,
-            fader_matrix_block_without_identity, fader_matrix_ramp_block, gain_mute_block,
-            gain_mute_ramp_block, input_chain_block_elided, input_chain_block_mono_elided,
-            input_chain_plan, input_chain_ramp_block_elided, input_chain_ramp_block_filter,
-            input_chain_ramp_block_filter_mono, input_chain_ramp_block_mono_elided, lanes_below,
-            mask_from_flags, matrix2x2_block, matrix2x2_block_without_identity,
-            matrix2x2_ramp_block, no_lanes, plan_is_channel_symmetric, section_is_identity,
-            zero_lanes_block,
+            GainMuteRamp, InputChainCoef, InputChainPlan, InputChainState, InputTrimRamp,
+            Matrix2x2Coef, Matrix2x2Ramp, fader_matrix_block, fader_matrix_block_without_identity,
+            gain_mute_block, gain_mute_ramp_block, input_chain_block_elided,
+            input_chain_block_mono_elided, input_chain_plan, input_chain_ramp_block_elided,
+            input_chain_ramp_block_filter, input_chain_ramp_block_filter_mono,
+            input_chain_ramp_block_mono_elided, lanes_below, mask_from_flags, matrix2x2_block,
+            matrix2x2_block_without_identity, matrix2x2_ramp_block, no_lanes,
+            plan_is_channel_symmetric, section_is_identity, zero_lanes_block,
         },
     },
 };
@@ -3064,16 +3063,6 @@ impl<L: Lane> FaderRampStage<L> {
         self.ramp[channel].mute = mask_from_flags::<L>(&flags[..L::WIDTH]);
     }
 
-    #[inline(always)]
-    fn is_settled(&self) -> bool {
-        self.remaining.iter().all(|channel| {
-            channel
-                .iter()
-                .take(L::WIDTH)
-                .all(|&remaining| remaining == 0)
-        })
-    }
-
     /// Retargets one lane of one channel. D11: one division per event, never per sample.
     fn retarget(&mut self, lane: usize, channel: usize, target: f32, smoothing_samples: u32) {
         let current = lane_read::<L>(self.ramp[channel].current);
@@ -3661,118 +3650,6 @@ impl<L: Lane> MatrixStage<L> {
         self.coef.rl = self.ramp.current[2];
         self.coef.rr = self.ramp.current[3];
         self.coef.identity = mask_from_flags::<L>(&identity[..L::WIDTH]);
-    }
-
-    /// Renders one block of `fader` and this matrix while either has a lane ramping, in fused
-    /// passes (issue #890).
-    ///
-    /// The bits -- output, lane words and bookkeeping -- are those of [`FaderRampStage::process`]
-    /// followed by [`Self::process`]: each section keeps its own ramp window, `min(max remaining,
-    /// frames)`, and its settled tail, and each fused pass runs the frames where the sections'
-    /// kernels are the ones the split path runs there.
-    ///
-    /// 1. `[0, matrix window)`: [`fader_matrix_ramp_block`] with the matrix ramp; then the
-    ///    matrix's window ends, which re-derives its identity mask.
-    /// 2. `[matrix window, fader window)`, when the fader's is longer: the same kernel with the
-    ///    settled matrix, with or without the identity select as [`Self::settled_block`] chooses.
-    /// 3. `[longer window, frames)`: [`Self::fused_settled_block`], after the fader's window ends.
-    ///
-    /// The fader runs its ramp step over the longer of its two channels' windows on both channels,
-    /// which gives the split path's bits on each frame where a channel's own kernel is
-    /// [`gain_mute_block`]. Past a ramping channel's window every lane is done, so the step
-    /// assigns `target` -- the value the window's end assigns `current` -- and clears muted lanes,
-    /// exactly as the settled kernel does; the one word that differs, the kernel's leftover
-    /// countdown, is restored to what the window alone leaves (`countdown - window`, which is
-    /// exact: every word involved is an integer at most `2^24`). A channel with no lane ramping
-    /// runs the step on a copy whose target is its current gain and whose countdown is zero, so it
-    /// assigns `current` to itself, and none of its words is written back.
-    fn fused_ramp_block(
-        &mut self,
-        fader: &mut FaderRampStage<L>,
-        left: &mut [f32],
-        right: &mut [f32],
-        frames: usize,
-    ) {
-        // One pass over the lanes: every section's window and the countdown words it reads.
-        let mut fader_maximum = [0_u32; 2];
-        let mut fader_countdown = [[0.0_f32; MAX_BANK_LANES]; 2];
-        let mut matrix_maximum = 0_u32;
-        let mut matrix_countdown = [0.0_f32; MAX_BANK_LANES];
-        for lane in 0..L::WIDTH {
-            for (channel, maximum) in fader_maximum.iter_mut().enumerate() {
-                let remaining = fader.remaining[channel][lane];
-                *maximum = (*maximum).max(remaining);
-                fader_countdown[channel][lane] = remaining.min(FADER_RAMP_COUNTDOWN_MAXIMUM) as f32;
-            }
-            let remaining = self.remaining[lane];
-            matrix_maximum = matrix_maximum.max(remaining);
-            matrix_countdown[lane] = remaining.min(MATRIX_RAMP_COUNTDOWN_MAXIMUM) as f32;
-        }
-        let fader_windows = fader_maximum.map(|maximum| (maximum as usize).min(frames));
-        let fader_window = fader_windows[0].max(fader_windows[1]);
-        let matrix_window = (matrix_maximum as usize).min(frames);
-        let mut ramp = fader.ramp;
-        for (channel, words) in ramp.iter_mut().enumerate() {
-            if fader_windows[channel] == 0 {
-                // An equivalent mutant while "a settled lane has current == target" holds; kept
-                // so a settled channel renders what `gain_mute_block` renders without relying on it.
-                words.target = words.current;
-                words.remaining = L::zero();
-            } else {
-                words.remaining = lane_words::<L>(&fader_countdown[channel]);
-            }
-        }
-
-        let mut position = 0;
-        if matrix_window > 0 {
-            self.ramp.remaining = lane_words::<L>(&matrix_countdown);
-            let end = matrix_window * L::WIDTH;
-            fader_matrix_ramp_block::<L>(
-                &mut left[..end],
-                &mut right[..end],
-                matrix_window,
-                &mut ramp,
-                FaderMatrixArm::Ramp(&mut self.ramp),
-            );
-            self.end_ramp_window(matrix_window);
-            position = matrix_window;
-        }
-        if fader_window > position {
-            let (from, to) = (position * L::WIDTH, fader_window * L::WIDTH);
-            let arm = if L::mask_any(self.coef.identity) {
-                FaderMatrixArm::Settled(&self.coef)
-            } else {
-                FaderMatrixArm::SettledWithoutIdentity(&self.coef)
-            };
-            fader_matrix_ramp_block::<L>(
-                &mut left[from..to],
-                &mut right[from..to],
-                fader_window - position,
-                &mut ramp,
-                arm,
-            );
-            position = fader_window;
-        }
-        for (channel, &window) in fader_windows.iter().enumerate() {
-            if window > 0 {
-                fader.ramp[channel].current = ramp[channel].current;
-                fader.ramp[channel].remaining =
-                    lane_words::<L>(&fader_countdown[channel]).sub(L::splat(window as f32));
-            }
-        }
-        fader.end_ramp_windows(fader_windows);
-        if position < frames {
-            let from = position * L::WIDTH;
-            self.fused_settled_block(
-                &mut left[from..],
-                &mut right[from..],
-                frames - position,
-                fader.ramp[0].current,
-                fader.ramp[0].mute,
-                fader.ramp[1].current,
-                fader.ramp[1].mute,
-            );
-        }
     }
 
     /// Renders one block of both channels.
@@ -4825,104 +4702,6 @@ impl BuiltinFaderBank {
         )
     }
 
-    /// [`Self::try_process_settled_with_matrix`] for a block that may carry timed operations
-    /// (issue #1638 D5): declines, touching nothing, when the source has an operation inside the
-    /// block, so the caller renders it with [`Self::process_with`].
-    pub fn try_process_settled_with_matrix_and_operations<S: FaderOperationSource + ?Sized>(
-        &mut self,
-        matrix: &mut BuiltinMatrixBank,
-        left: &mut [f32],
-        right: &mut [f32],
-        frames: u32,
-        operations: &mut S,
-    ) -> bool {
-        if operations
-            .next_offset()
-            .is_some_and(|offset| offset < frames)
-        {
-            return false;
-        }
-        self.try_process_settled_with_matrix(matrix, left, right, frames)
-    }
-
-    /// Runs the settled fader and matrix stages in one traversal when their shapes and ramps
-    /// agree. Returns false without touching either stage when a ramp is still active.
-    pub fn try_process_settled_with_matrix(
-        &mut self,
-        matrix: &mut BuiltinMatrixBank,
-        left: &mut [f32],
-        right: &mut [f32],
-        frames: u32,
-    ) -> bool {
-        if self.backend != matrix.backend
-            || self.width != matrix.width
-            || self.members != matrix.members
-            || self.remaining_nonzero()
-            || matrix.remaining_nonzero()
-        {
-            return false;
-        }
-        let stages = (&self.stage, &matrix.stage);
-        per_width!((FaderStageKernel(fader), MatrixStageKernel(matrix)) in stages => {
-            matrix.fused_settled_block(
-                left,
-                right,
-                frames as usize,
-                fader.ramp[0].current,
-                fader.ramp[0].mute,
-                fader.ramp[1].current,
-                fader.ramp[1].mute,
-            );
-        }, else return false);
-        true
-    }
-
-    /// [`Self::try_process_ramping_with_matrix`] for a block that may carry timed operations:
-    /// declines, touching nothing, when the source has an operation inside the block, so the
-    /// caller renders it with [`Self::process_with`].
-    pub fn try_process_ramping_with_matrix_and_operations<S: FaderOperationSource + ?Sized>(
-        &mut self,
-        matrix: &mut BuiltinMatrixBank,
-        left: &mut [f32],
-        right: &mut [f32],
-        frames: u32,
-        operations: &mut S,
-    ) -> bool {
-        if operations
-            .next_offset()
-            .is_some_and(|offset| offset < frames)
-        {
-            return false;
-        }
-        self.try_process_ramping_with_matrix(matrix, left, right, frames)
-    }
-
-    /// Runs the fader and matrix stages in fused passes while either has a ramp in flight
-    /// (issue #890), rendering the bits [`Self::process`] followed by
-    /// [`BuiltinMatrixBank::process`] renders. Returns false without touching either stage when
-    /// their shapes disagree or both are settled; a settled pair belongs to
-    /// [`Self::try_process_settled_with_matrix`].
-    pub fn try_process_ramping_with_matrix(
-        &mut self,
-        matrix: &mut BuiltinMatrixBank,
-        left: &mut [f32],
-        right: &mut [f32],
-        frames: u32,
-    ) -> bool {
-        if self.backend != matrix.backend
-            || self.width != matrix.width
-            || self.members != matrix.members
-            || !(self.remaining_nonzero() || matrix.remaining_nonzero())
-        {
-            return false;
-        }
-        let stages = (&mut self.stage, &mut matrix.stage);
-        per_width!((FaderStageKernel(fader), MatrixStageKernel(matrix)) in stages => {
-            matrix.fused_ramp_block(fader, left, right, frames as usize);
-        }, else return false);
-        true
-    }
-
     // REALTIME_POLICY_BEGIN
     /// Populated lane `lane`'s whole state (issue #1277 D7), or `None` for a padding lane or one
     /// past the bank. Allocation-free; bounded by the lane's fixed word count.
@@ -4953,12 +4732,6 @@ impl BuiltinFaderBank {
         Ok(())
     }
     // REALTIME_POLICY_END
-
-    fn remaining_nonzero(&self) -> bool {
-        per_width!(FaderStageKernel(stage) in &self.stage => {
-            stage.remaining.iter().flatten().any(|v| *v != 0)
-        })
-    }
 
     /// Snaps every lane to its target and cancels any ramp in flight.
     pub fn reset(&mut self) {
@@ -5112,12 +4885,6 @@ impl BuiltinMatrixBank {
         Ok(())
     }
     // REALTIME_POLICY_END
-
-    fn remaining_nonzero(&self) -> bool {
-        per_width!(MatrixStageKernel(stage) in &self.stage => {
-            stage.remaining.iter().any(|v| *v != 0)
-        })
-    }
 
     /// Snaps every lane to its target and cancels any ramp in flight.
     pub fn reset(&mut self) {
@@ -5468,52 +5235,6 @@ impl FaderMuteRampBuiltins {
             return None;
         }
         Some(self.stage.ramp_remaining(0, lane))
-    }
-
-    /// Completes a settled fader over a graph block whose shape was validated by preparation.
-    ///
-    /// This narrow raw-slice entry point is used only by the graph split-owner completion path;
-    /// it avoids a fallible render-time wrapper while retaining the same fader kernel and state.
-    pub fn process_pending(&mut self, left: &mut [f32], right: &mut [f32]) {
-        let frames = left.len();
-        self.stage.process(left, right, frames);
-    }
-
-    /// Completes a pending fader using an already shape-validated builtin block.
-    pub fn process_pending_block(&mut self, block: &mut DualMonoBlock<'_>) {
-        let frames = block.left.len();
-        self.stage.process(block.left, block.right, frames);
-    }
-
-    /// Whether both dual-mono lanes are settled and can use the stateless fader arithmetic.
-    #[must_use]
-    pub fn is_settled(&self) -> bool {
-        self.stage.is_settled()
-    }
-
-    /// Runs the settled fader and matrix stages with the established fused scalar kernel.
-    /// Returns `false` when either stage is ramping; callers must then run the original two-stage
-    /// arithmetic for the whole block.
-    pub fn process_fader_matrix(
-        &mut self,
-        matrix: &mut MatrixBuiltins,
-        block: &mut DualMonoBlock<'_>,
-    ) -> bool {
-        if !self.stage.is_settled() || !matrix.stage.is_settled() {
-            return false;
-        }
-        let DualMonoBlock { left, right, .. } = block;
-        let frames = left.len();
-        matrix.stage.fused_settled_block(
-            left,
-            right,
-            frames,
-            self.stage.ramp[0].current,
-            self.stage.ramp[0].mute,
-            self.stage.ramp[1].current,
-            self.stage.ramp[1].mute,
-        );
-        true
     }
 
     /// Snaps both lanes to their targets and cancels any ramp in flight.

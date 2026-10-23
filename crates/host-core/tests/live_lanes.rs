@@ -10,18 +10,14 @@
 
 use builtins::{BuiltinLaneSelector, Matrix2x2};
 use builtins_compiler::TestOnlyWriteGate;
-use builtins_compiler::{
-    TrackControlRecord, TrackFaderRecord, test_only_fader_matrix_witness,
-    test_only_reset_fader_matrix_witness,
-};
+use builtins_compiler::{TrackControlRecord, TrackFaderRecord};
 use dsp_reference::randomized::Draw;
 use effect_contract::TailSamples;
 use engine::realtime::{PlanarBufferMut, RenderIo, RenderTime};
 use host_core::{
     HostLiveControlHandles, HostLiveControlRequest, HostLiveLanes, HostPrepareCaps,
     HostShapePolicy, LiveValuesSuperseded, PreparedHost, SourceSubmission, compile_host_session,
-    prepare_host_runtime, prepare_host_runtime_between_render_calls,
-    prepare_host_runtime_with_live_lanes,
+    prepare_host_runtime, prepare_host_runtime_with_live_lanes,
 };
 use session::{
     Console, MatrixOrPan, RouteDestination, RouteSource, SendTap, SessionModel, StableId, Submix,
@@ -196,9 +192,7 @@ fn render(host: &mut PreparedHost, planes: &[Vec<f32>; 2]) -> Vec<u32> {
 }
 
 /// Gate 1(a). Red if a fader-and-matrix request still attaches the input lane (the plain
-/// session's tail becomes infinite), attaches effect or route lanes, changes a rendered bit, or
-/// prepares with `BetweenRenderCalls` delivery (a fused fader-matrix bank forms), which a
-/// concurrent C ABI producer cannot declare (#1053 D5).
+/// session's tail becomes infinite), attaches effect or route lanes, or changes a rendered bit.
 #[test]
 fn fader_and_matrix_lanes_attach_nothing_else_and_render_the_lanes_free_bits() {
     // The precondition the tail half rests on: the plain session's lanes-free tail is finite,
@@ -215,23 +209,7 @@ fn fader_and_matrix_lanes_attach_nothing_else_and_render_the_lanes_free_bits() {
         let strips = model.tracks.len() + model.submixes.len();
         let planes = feed(4_096);
         let mut reference = lanes_free(&model);
-        // Delivery: the same request under `BetweenRenderCalls` fuses fader and matrix banks, so
-        // the witness can see a fusion; the live-lanes entry must form none.
-        test_only_reset_fader_matrix_witness();
-        drop(
-            prepare_host_runtime_between_render_calls(&compile(&model), &caps(), &request())
-                .unwrap_or_else(|failure| {
-                    panic!("prepare: {}", String::from_utf8_lossy(failure.as_bytes()))
-                }),
-        );
-        assert!(test_only_fader_matrix_witness().factory_calls > 0);
-        test_only_reset_fader_matrix_witness();
         let (mut live, handles) = with_lanes(&model, HostLiveLanes::FADER_AND_MATRIX);
-        assert_eq!(
-            test_only_fader_matrix_witness().factory_calls,
-            0,
-            "Concurrent delivery forms no fused fader-matrix bank"
-        );
         assert_eq!(handles.strip_controls.len(), strips);
         assert!(
             handles

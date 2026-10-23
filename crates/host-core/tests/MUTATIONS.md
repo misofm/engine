@@ -361,7 +361,7 @@ restored between rows. Delivery host: x86_64 AVX2+FMA.
 | --- | --- | --- |
 | 1211-M5 | build the control requests from `live_control_tracks` (the track prefix) again | `a_bus_fader_record_renders_as_the_session_with_that_fader` (three producers) and `handles_list_tracks_then_submixes_and_file_bus_effects` (`left: ["t0", "t1", "t2"]`) |
 | 1211-M6 | sort `strip_controls` by ID instead of by `canonical_index` | `a_bus_fader_record_renders_as_the_session_with_that_fader` (the bus producer is no longer at strip index 3) |
-| 1211-M7 | `live_records` draws over `handles.track_count` instead of `strip_controls.len()` | `randomized_consoles_render_the_same_bits_armed_dual_and_serialized` (`bus_live_records: 0`) |
+| 1211-M7 | `live_records` draws over `handles.track_count` instead of `strip_controls.len()` | `randomized_consoles_render_the_same_bits_armed_and_dual` (`bus_live_records: 0`) |
 
 `a_bus_fader_record_renders_as_the_session_with_that_fader` also goes red when its own push is
 moved to `strip_controls[2]` (a track's lane): the fader reaches `t2` alone and the output

@@ -205,110 +205,6 @@ pub fn test_only_resident_input_counts() -> [u64; 2] {
     TEST_ONLY_RESIDENT_COUNTS.with(std::cell::Cell::get)
 }
 
-/// A bounded, render-local witness for the private post-fader buffer at a failed render boundary.
-///
-/// This exists only for the split-owner qualification fixture. The capture is copied into fixed
-/// storage on the render thread and read after the call returns; it is not a production diagnostic
-/// or an observer path.
-#[cfg(any(test, feature = "test-support"))]
-const TEST_ONLY_FAILED_BUFFER_CAPACITY: usize = 128;
-
-#[cfg(any(test, feature = "test-support"))]
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct TestOnlyFailedBufferCapture {
-    pub captured: bool,
-    pub overflow: bool,
-    pub frames: usize,
-    pub left: [u32; TEST_ONLY_FAILED_BUFFER_CAPACITY],
-    pub right: [u32; TEST_ONLY_FAILED_BUFFER_CAPACITY],
-}
-
-#[cfg(any(test, feature = "test-support"))]
-impl Default for TestOnlyFailedBufferCapture {
-    fn default() -> Self {
-        Self {
-            captured: false,
-            overflow: false,
-            frames: 0,
-            left: [0; TEST_ONLY_FAILED_BUFFER_CAPACITY],
-            right: [0; TEST_ONLY_FAILED_BUFFER_CAPACITY],
-        }
-    }
-}
-
-#[cfg(any(test, feature = "test-support"))]
-thread_local! {
-    static TEST_ONLY_FAILED_BUFFER_TARGET: std::cell::Cell<Option<u32>> = const { std::cell::Cell::new(None) };
-    static TEST_ONLY_FAILED_BUFFER: std::cell::Cell<TestOnlyFailedBufferCapture> =
-        const { std::cell::Cell::new(TestOnlyFailedBufferCapture {
-            captured: false,
-            overflow: false,
-            frames: 0,
-            left: [0; TEST_ONLY_FAILED_BUFFER_CAPACITY],
-            right: [0; TEST_ONLY_FAILED_BUFFER_CAPACITY],
-        }) };
-    static TEST_ONLY_COMPLETION_DISABLED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
-}
-
-#[cfg(any(test, feature = "test-support"))]
-#[doc(hidden)]
-pub fn test_only_arm_failed_buffer_capture(buffer: u32) {
-    TEST_ONLY_FAILED_BUFFER_TARGET.with(|target| target.set(Some(buffer)));
-    TEST_ONLY_FAILED_BUFFER.with(|capture| capture.set(TestOnlyFailedBufferCapture::default()));
-}
-
-#[cfg(any(test, feature = "test-support"))]
-#[must_use]
-#[doc(hidden)]
-pub fn test_only_failed_buffer_capture() -> TestOnlyFailedBufferCapture {
-    TEST_ONLY_FAILED_BUFFER.with(std::cell::Cell::get)
-}
-
-#[cfg(any(test, feature = "test-support"))]
-#[doc(hidden)]
-pub fn test_only_set_completion_disabled(disabled: bool) {
-    TEST_ONLY_COMPLETION_DISABLED.with(|value| value.set(disabled));
-}
-
-#[cfg(any(test, feature = "test-support"))]
-#[must_use]
-#[doc(hidden)]
-pub fn test_only_completion_disabled() -> bool {
-    TEST_ONLY_COMPLETION_DISABLED.with(std::cell::Cell::get)
-}
-
-#[cfg(any(test, feature = "test-support"))]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct TestOnlySelectedSplitFader {
-    pub node: GraphNodeId,
-    pub buffer: u32,
-}
-
-#[cfg(any(test, feature = "test-support"))]
-thread_local! {
-    static TEST_ONLY_SELECTED_SPLIT_FADER:
-        std::cell::RefCell<Option<TestOnlySelectedSplitFader>> = const { std::cell::RefCell::new(None) };
-}
-
-#[cfg(any(test, feature = "test-support"))]
-#[doc(hidden)]
-pub fn test_only_reset_selected_split_fader() {
-    TEST_ONLY_SELECTED_SPLIT_FADER.with(|selected| *selected.borrow_mut() = None);
-}
-
-#[cfg(any(test, feature = "test-support"))]
-#[must_use]
-#[doc(hidden)]
-pub fn test_only_selected_split_fader() -> Option<TestOnlySelectedSplitFader> {
-    TEST_ONLY_SELECTED_SPLIT_FADER.with(|selected| selected.borrow().clone())
-}
-
-#[cfg(any(test, feature = "test-support"))]
-fn test_only_record_selected_split_fader(node: GraphNodeId, buffer: u32) {
-    TEST_ONLY_SELECTED_SPLIT_FADER.with(|selected| {
-        *selected.borrow_mut() = Some(TestOnlySelectedSplitFader { node, buffer });
-    });
-}
 use effect_contract::{
     BypassShunt, ChannelSymmetryWitness, EffectControlLane, EffectProcessBlock, ObservationLane,
     ObservationSample, PreparedAutomationSpan, PreparedNativeEffect, ResponseAnalysisError,
@@ -321,12 +217,9 @@ use lane::kernels::{
 };
 use rack::{BankChain, BankMembers, BankPlaneViews, FoldCohort, ResidentFoldCohort};
 
-// Read only by the scalar pairing passes, which are test-only (issue #1059).
-#[cfg(any(test, feature = "test-support"))]
-use crate::GraphEdgeId;
 use crate::{
     GraphBindingBlock, GraphNodeObserverBinding, GraphObservationBlock, GraphObservationValidity,
-    GraphPreparedEffect, GraphRuntimeProcessor, GraphRuntimeSplitPairProcessor,
+    GraphPreparedEffect, GraphRuntimeProcessor,
 };
 
 /// Lane type the block kernels are instantiated at to vectorise **over frames**.
@@ -2694,31 +2587,6 @@ pub(crate) enum NodeKind {
     BankMember,
 }
 
-/// Which half of a split scalar pair an op runs.
-///
-/// Only the test-only scalar pairing passes build a [`SplitPairSlot`] (issue #1059). The slot, the
-/// runtime's split-pair table and their never-taken dispatch stay in every build because
-/// `scalar_split_op_layout` and `scalar_split_runtime_layout` charge them to every plan's
-/// resource estimate, and a feature must not move an estimate.
-#[derive(Clone, Copy)]
-#[cfg_attr(
-    not(any(test, feature = "test-support")),
-    allow(
-        dead_code,
-        reason = "constructed only by the test-only scalar pairing passes (#1059)"
-    )
-)]
-pub(crate) enum SplitPairRole {
-    Fader,
-    Matrix,
-}
-
-#[derive(Clone, Copy)]
-pub(crate) struct SplitPairSlot {
-    pub(crate) pair: usize,
-    pub(crate) role: SplitPairRole,
-}
-
 /// A per-node prepared native effect as the render node table holds it: exactly the fields
 /// render reads, and nothing else.
 ///
@@ -2968,22 +2836,8 @@ pub(crate) struct RuntimeOp {
     pub(crate) sidechain: Option<u32>,
     pub(crate) output: u32,
     pub(crate) kind: NodeKind,
-    pub(crate) split_pair: Option<SplitPairSlot>,
     /// This node's observers, by handle, followed by the observers of every alias that resolves
     /// to this op's output buffer, in schedule order (`program::Tap`).
-    pub(crate) observers: Box<[GraphNodeObserverBinding]>,
-}
-
-/// Old-layout witness for one executable op before the split-pair slot was added. The graph
-/// estimate derives the inline delta from this mirror and charges the larger op/unit delta once
-/// for the bounded emitted-op population.
-#[allow(dead_code)]
-pub(crate) struct RuntimeOpWithoutSplitPairSlot {
-    pub(crate) inputs: Box<[u32]>,
-    pub(crate) staged: Box<[StagedInput]>,
-    pub(crate) sidechain: Option<u32>,
-    pub(crate) output: u32,
-    pub(crate) kind: NodeKind,
     pub(crate) observers: Box<[GraphNodeObserverBinding]>,
 }
 
@@ -3022,18 +2876,6 @@ pub(crate) enum FoldTarget {
     Arena(u32),
     /// The master op is the session Output op, so the master is the host's planes.
     Output,
-}
-
-#[allow(dead_code)]
-pub(crate) enum RuntimeUnitWithoutSplitPairSlot {
-    Op(RuntimeOpWithoutSplitPairSlot),
-    Bank {
-        members: Box<[RuntimeOpWithoutSplitPairSlot]>,
-        lanes: usize,
-        chain: BankChain,
-        fold: Box<[FoldLane]>,
-        master: FoldTarget,
-    },
 }
 
 fn response_snapshot_error(error: ResponseAnalysisError) -> ResponseSnapshotError {
@@ -3273,23 +3115,6 @@ impl RuntimeUnit {
             }
         }
     }
-}
-
-pub(crate) fn scalar_split_op_layout() -> (u64, u64) {
-    (
-        u64::try_from(
-            core::mem::size_of::<RuntimeOp>()
-                .checked_sub(core::mem::size_of::<RuntimeOpWithoutSplitPairSlot>())
-                .expect("split op slot layout is retained"),
-        )
-        .expect("split op slot layout fits u64"),
-        u64::try_from(
-            core::mem::size_of::<RuntimeUnit>()
-                .checked_sub(core::mem::size_of::<RuntimeUnitWithoutSplitPairSlot>())
-                .expect("split op containing-unit layout is retained"),
-        )
-        .expect("split op containing-unit layout fits u64"),
-    )
 }
 
 impl RuntimeUnit {
@@ -4199,7 +4024,6 @@ pub(crate) struct Runtime {
     /// the bytes and the program it had before this feature existed.
     pub(crate) track_delays: Box<[TrackDelayLine]>,
     pub(crate) units: Box<[RuntimeUnit]>,
-    split_pairs: Box<[Box<dyn GraphRuntimeSplitPairProcessor>]>,
     /// One row per unit, in `units` order: the bind-time half of the collapse-eligibility query.
     pub(crate) identity: Box<[UnitIdentity]>,
     response_bindings: Box<[ResponseOwnerBinding]>,
@@ -4230,71 +4054,6 @@ pub(crate) struct Runtime {
     /// Issue #1609: the units that hold an observer which accepts `block_end`, in unit order.
     /// Built at bind by [`block_end_units`]; empty (no allocation) when no observer accepts it.
     block_end_units: Box<[u32]>,
-}
-
-#[cfg(any(test, feature = "test-support"))]
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct TestOnlySplitPairTableWitness {
-    pub allocations: u64,
-    pub entries: u64,
-    pub bytes: u64,
-}
-
-#[cfg(any(test, feature = "test-support"))]
-thread_local! {
-    static TEST_ONLY_SPLIT_PAIR_TABLE: std::cell::Cell<TestOnlySplitPairTableWitness> =
-        const { std::cell::Cell::new(TestOnlySplitPairTableWitness { allocations: 0, entries: 0, bytes: 0 }) };
-}
-
-#[cfg(any(test, feature = "test-support"))]
-pub fn test_only_reset_split_pair_table_witness() {
-    TEST_ONLY_SPLIT_PAIR_TABLE.with(|value| {
-        value.set(TestOnlySplitPairTableWitness {
-            allocations: 0,
-            entries: 0,
-            bytes: 0,
-        })
-    });
-}
-
-#[cfg(any(test, feature = "test-support"))]
-#[must_use]
-pub fn test_only_split_pair_table_witness() -> TestOnlySplitPairTableWitness {
-    TEST_ONLY_SPLIT_PAIR_TABLE.with(std::cell::Cell::get)
-}
-
-/// Layout witness for the retained [`Runtime`] owner without its split-owner table field. The
-/// runtime resource report charges the difference between this same-field layout and `Runtime`;
-/// the split table itself remains a separate boxed allocation.
-#[allow(dead_code)]
-pub(crate) struct RuntimeWithoutSplitPairTable {
-    arena: DisjointArena,
-    delays: Box<[CompensationDelay]>,
-    track_delays: Box<[TrackDelayLine]>,
-    units: Box<[RuntimeUnit]>,
-    identity: Box<[UnitIdentity]>,
-    response_bindings: Box<[ResponseOwnerBinding]>,
-    bank_inputs: Box<[u32]>,
-    bank_outputs: Box<[u32]>,
-    redirects: u64,
-    folds: u64,
-    output_unit: Option<usize>,
-    source_plane_of_buffer: Box<[u32]>,
-    route_activity: Option<Box<RouteActivity>>,
-    block_end_units: Box<[u32]>,
-}
-
-pub(crate) fn scalar_split_runtime_layout() -> (u64, u64) {
-    (
-        u64::try_from(core::mem::size_of::<Box<dyn GraphRuntimeSplitPairProcessor>>())
-            .expect("split table entry fits u64"),
-        u64::try_from(
-            core::mem::size_of::<Runtime>()
-                .checked_sub(core::mem::size_of::<RuntimeWithoutSplitPairTable>())
-                .expect("split runtime field layout is retained"),
-        )
-        .expect("split runtime field layout fits u64"),
-    )
 }
 
 impl Runtime {
@@ -4386,7 +4145,6 @@ impl Runtime {
         delays: Vec<CompensationDelay>,
         track_delays: Vec<TrackDelayLine>,
         units: Vec<RuntimeUnit>,
-        split_pairs: Vec<Box<dyn GraphRuntimeSplitPairProcessor>>,
         identity: Vec<UnitIdentity>,
         response_bindings: Vec<ResponseOwnerBinding>,
         redirects: u64,
@@ -4397,7 +4155,6 @@ impl Runtime {
             delays,
             track_delays,
             units,
-            split_pairs,
             identity,
             response_bindings,
             redirects,
@@ -4415,7 +4172,6 @@ impl Runtime {
         delays: Vec<CompensationDelay>,
         track_delays: Vec<TrackDelayLine>,
         units: Vec<RuntimeUnit>,
-        split_pairs: Vec<Box<dyn GraphRuntimeSplitPairProcessor>>,
         mut identity: Vec<UnitIdentity>,
         response_bindings: Vec<ResponseOwnerBinding>,
         redirects: u64,
@@ -4434,22 +4190,6 @@ impl Runtime {
                 unit.accepts_banked_meter(),
             );
         }
-        #[cfg(any(test, feature = "test-support"))]
-        if !split_pairs.is_empty() {
-            TEST_ONLY_SPLIT_PAIR_TABLE.with(|value| {
-                let mut witness = value.get();
-                witness.allocations = witness.allocations.saturating_add(1);
-                witness.entries = witness
-                    .entries
-                    .saturating_add(u64::try_from(split_pairs.len()).expect("table length"));
-                witness.bytes = witness.bytes.saturating_add(
-                    u64::try_from(core::mem::size_of::<Box<dyn GraphRuntimeSplitPairProcessor>>())
-                        .expect("table entry size")
-                        .saturating_mul(u64::try_from(split_pairs.len()).expect("table length")),
-                );
-                value.set(witness);
-            });
-        }
         let widest = units
             .iter()
             .map(|unit| match unit {
@@ -4464,7 +4204,6 @@ impl Runtime {
             delays: delays.into_boxed_slice(),
             track_delays: track_delays.into_boxed_slice(),
             units: units.into_boxed_slice(),
-            split_pairs: split_pairs.into_boxed_slice(),
             identity: identity.into_boxed_slice(),
             response_bindings: response_bindings.into_boxed_slice(),
             bank_inputs: vec![0; widest].into_boxed_slice(),
@@ -4526,8 +4265,8 @@ impl Runtime {
     /// or a bank's gather reads its claim in place, or nothing reads it, so
     /// `execute_op` returns before it touches memory and `observe_unit` returns on `observed ==
     /// false`. Everything else is active: a delayed claim
-    /// (`NodeKind::TrackDelay`, whose line runs in place over the input), every bank, split pair
-    /// and other kind. Read once, at bind, by `GraphExecutor::new`; an index past the units is
+    /// (`NodeKind::TrackDelay`, whose line runs in place over the input), every bank and every
+    /// other kind. Read once, at bind, by `GraphExecutor::new`; an index past the units is
     /// active.
     pub(crate) fn unit_inert(&self, index: usize) -> bool {
         self.output_unit != Some(index)
@@ -4550,33 +4289,9 @@ impl Runtime {
 
     /// The audio of one buffer, shared. Since issue #916 no production path reads a buffer back
     /// out of the arena: the session output is the host's planes, not an arena buffer.
-    #[cfg(any(test, feature = "test-support"))]
+    #[cfg(test)]
     pub(crate) fn buffer(&self, buffer: u32) -> (&[f32], &[f32]) {
         self.arena.read_stereo(buffer)
-    }
-
-    #[cfg(any(test, feature = "test-support"))]
-    pub(crate) fn test_only_capture_failed_buffer(&self) {
-        let Some(buffer) = TEST_ONLY_FAILED_BUFFER_TARGET.with(std::cell::Cell::get) else {
-            return;
-        };
-        let (left, right) = self.buffer(ARENA_BASE + buffer);
-        let mut capture = TestOnlyFailedBufferCapture {
-            captured: true,
-            frames: left.len(),
-            overflow: left.len() > TEST_ONLY_FAILED_BUFFER_CAPACITY,
-            left: [0; TEST_ONLY_FAILED_BUFFER_CAPACITY],
-            right: [0; TEST_ONLY_FAILED_BUFFER_CAPACITY],
-        };
-        for (index, sample) in left
-            .iter()
-            .take(TEST_ONLY_FAILED_BUFFER_CAPACITY)
-            .enumerate()
-        {
-            capture.left[index] = sample.to_bits();
-            capture.right[index] = right[index].to_bits();
-        }
-        TEST_ONLY_FAILED_BUFFER.with(|value| value.set(capture));
     }
 
     /// Runs unit `index`. Every producer this unit reads precedes it in `units`, or was written
@@ -4607,7 +4322,6 @@ impl Runtime {
             delays,
             track_delays,
             units,
-            split_pairs,
             identity,
             bank_inputs,
             bank_outputs,
@@ -4640,7 +4354,6 @@ impl Runtime {
                     arena,
                     delays,
                     track_delays,
-                    split_pairs,
                     first_sample,
                     snapshot,
                     host,
@@ -4680,7 +4393,6 @@ impl Runtime {
                             arena,
                             delays,
                             track_delays,
-                            split_pairs,
                             first_sample,
                             snapshot,
                             None,
@@ -4730,36 +4442,6 @@ impl Runtime {
                     chain.run(&mut planes, frames, first_sample, snapshot)
                 }
             }
-        }
-    }
-
-    /// Materializes every pending split fader in original schedule order before a render error
-    /// escapes. The first product slice admits at most one interval, but the walk keeps this
-    /// owner-side contract explicit for later disjoint intervals.
-    pub(crate) fn complete_pending(&mut self, first_sample: u64, snapshot: LiveSnapshot) {
-        let Self {
-            arena,
-            units,
-            split_pairs,
-            ..
-        } = self;
-        for unit in units.iter_mut() {
-            let RuntimeUnit::Op(op) = unit else {
-                continue;
-            };
-            let Some(slot) = op.split_pair else {
-                continue;
-            };
-            if !matches!(slot.role, SplitPairRole::Fader) {
-                continue;
-            }
-            let (left, right) = arena.write_stereo(op.output);
-            split_pairs[slot.pair].complete_pending(GraphBindingBlock {
-                left,
-                right,
-                first_sample,
-                live_snapshot: snapshot,
-            });
         }
     }
 
@@ -5056,7 +4738,6 @@ fn execute_op(
     arena: &mut DisjointArena,
     delays: &mut [CompensationDelay],
     track_delays: &mut [TrackDelayLine],
-    split_pairs: &mut [Box<dyn GraphRuntimeSplitPairProcessor>],
     first_sample: u64,
     snapshot: LiveSnapshot,
     mut host: Option<HostMaster<'_>>,
@@ -5175,25 +4856,7 @@ fn execute_op(
             let (out_left, out_right) = output_planes(arena, &mut host, output);
             track_delays[*line as usize].process(out_left, out_right);
         }
-        NodeKind::Identity => {
-            if let Some(slot) = op.split_pair {
-                let (out_left, out_right) = output_planes(arena, &mut host, output);
-                let block = GraphBindingBlock {
-                    left: out_left,
-                    right: out_right,
-                    first_sample,
-                    live_snapshot: snapshot,
-                };
-                return match slot.role {
-                    SplitPairRole::Fader => {
-                        // #1647b: the pair's fader half takes the block's node time first.
-                        split_pairs[slot.pair].set_block_time(block_time);
-                        split_pairs[slot.pair].begin_fader(block)
-                    }
-                    SplitPairRole::Matrix => split_pairs[slot.pair].finish_matrix(block),
-                };
-            }
-        }
+        NodeKind::Identity => {}
         NodeKind::Route(coefficients) => {
             #[cfg(any(test, feature = "test-support"))]
             if let Some(route) = route {
@@ -6444,8 +6107,7 @@ impl crate::runtime::Runtime {
     }
 
     /// Every strip stage lane of this runtime: `(strip ID, lane)`, in program order (issue #1277
-    /// D1). A fused bank lists both owners at its one location. Read off the render thread, after
-    /// bind.
+    /// D1). Read off the render thread, after bind.
     pub(crate) fn builtin_strip_lanes(&mut self) -> Vec<(Box<str>, crate::GraphStripLane)> {
         let mut lanes = Vec::new();
         for (unit, row) in self.identity.iter().enumerate() {
@@ -7591,7 +7253,6 @@ pub(crate) struct RuntimeParts {
         ),
     >,
     pub(crate) bindings: BTreeMap<GraphNodeId, Option<Box<dyn GraphRuntimeProcessor>>>,
-    pub(crate) split_pairs: BTreeMap<GraphNodeId, SplitPairSlot>,
     pub(crate) observers: BTreeMap<GraphNodeId, Vec<GraphNodeObserverBinding>>,
     pub(crate) source_inputs: std::collections::BTreeSet<GraphNodeId>,
     /// Issue #210 phase 2: declared per-lane input delay, by strip input node. Only strips that
@@ -7717,7 +7378,6 @@ impl RuntimeParts {
                 .into_iter()
                 .map(|binding| (binding.node, binding.processor))
                 .collect(),
-            split_pairs: BTreeMap::new(),
             observers: by_node,
             source_inputs,
             track_delays: track_delays
@@ -7869,77 +7529,6 @@ impl RuntimeParts {
         let mut stages = Vec::with_capacity(run.len());
         let mut index = 0;
         while index < run.len() {
-            let pair = if index + 1 < run.len() {
-                match (run[index], run[index + 1]) {
-                    (Membership::Builtin(a), Membership::Builtin(b)) => {
-                        let left = self.builtin_banks[a].as_ref().expect("builtin owner");
-                        let right = self.builtin_banks[b].as_ref().expect("builtin owner");
-                        let same_tracks = left.members.len() == right.members.len()
-                            && left.members.iter().zip(right.members.iter()).all(|(left, right)| {
-                                matches!((left, right),
-                                    (GraphNodeId::TrackStage { track_id: left_id, stage: TrackStage::PostFader },
-                                     GraphNodeId::TrackStage { track_id: right_id, stage: TrackStage::PostMatrix })
-                                    if left_id == right_id)
-                            });
-                        same_tracks
-                            && left.backend == right.backend
-                            && left.scratch.width() == right.scratch.width()
-                            && left.scratch.quantum() == right.scratch.quantum()
-                    }
-                    _ => false,
-                }
-            } else {
-                false
-            };
-            if pair {
-                let a = match run[index] {
-                    Membership::Builtin(i) => self.builtin_banks[i].take().expect("builtin owner"),
-                    _ => unreachable!(),
-                };
-                let b = match run[index + 1] {
-                    Membership::Builtin(i) => self.builtin_banks[i].take().expect("builtin owner"),
-                    _ => unreachable!(),
-                };
-                let scratch_a = a.scratch;
-                let active_a = trailing_active_mask(members, scratch_a.width());
-                let factory = a.processor.pair_factory();
-                let (slot_scratch, slot_active, stage) = match factory {
-                    Some(factory) => match factory(a.processor, b.processor) {
-                        Ok(processor) => (
-                            scratch_a,
-                            active_a,
-                            Box::new(BuiltinStage(processor)) as Box<dyn BankStage>,
-                        ),
-                        Err((left, right)) => {
-                            if scratch.is_none() {
-                                scratch = Some(scratch_a);
-                                active = Some(active_a);
-                            }
-                            stages.push(Box::new(BuiltinStage(left)) as Box<dyn BankStage>);
-                            stages.push(Box::new(BuiltinStage(right)) as Box<dyn BankStage>);
-                            index += 2;
-                            continue;
-                        }
-                    },
-                    None => {
-                        if scratch.is_none() {
-                            scratch = Some(scratch_a);
-                            active = Some(active_a);
-                        }
-                        stages.push(Box::new(BuiltinStage(a.processor)) as Box<dyn BankStage>);
-                        stages.push(Box::new(BuiltinStage(b.processor)) as Box<dyn BankStage>);
-                        index += 2;
-                        continue;
-                    }
-                };
-                if scratch.is_none() {
-                    scratch = Some(slot_scratch);
-                    active = Some(slot_active);
-                }
-                stages.push(stage);
-                index += 2;
-                continue;
-            }
             let (slot_scratch, slot_active, stage) = self.stage_for(run[index], members);
             if scratch.is_none() {
                 scratch = Some(slot_scratch);
@@ -8051,111 +7640,6 @@ fn observer_nodes<'a>(
     aliases: &'a [GraphNodeId],
 ) -> impl Iterator<Item = GraphNodeId> + 'a {
     core::iter::once(node).chain(aliases.iter().cloned())
-}
-
-/// The buffer-identity half of serialized scalar fader/matrix admission.
-///
-/// The composite receives one in-place block at the fader slot. It can preserve the later matrix
-/// op only when that op's reduction was already a self-copy: one undelayed input, the same input
-/// and output buffer as the fader, and the lowering's own `in_place` witness.
-#[cfg(any(test, feature = "test-support"))]
-fn scalar_pair_is_in_place(program: &ExecutionProgram, fader: usize, matrix: usize) -> bool {
-    let fader = &program.ops[fader];
-    let matrix = &program.ops[matrix];
-    let inputs = program.inputs_of(matrix);
-    matches!(inputs, [input] if input.delay.is_none()
-        && input.buffer == fader.output
-        && matrix.output == fader.output
-        && matrix.in_place)
-}
-
-/// The deferred fader's physical buffer must stay private until its original matrix operation.
-/// Any intervening read, write, delayed staging slot or observer-visible alias declines the split
-/// pair, leaving both original owners in the ordinary scalar path.
-///
-/// The fader's buffer is no longer compared with `program.output` (issue #916). The host reads
-/// no arena buffer, and the Output op, being dedicated, never shares a live buffer with the
-/// fader. A matching slot only means the colouring gave the Output that slot after the pair
-/// retired it: see [`chains_into`]'s session-output bullet.
-///
-/// `crossing_sources` and `naming` are [`crossing_sources`] and [`ops_naming_buffers`] of this
-/// program, built once by the caller: this is asked once per scalar fader, and scanning every edge
-/// and every op between the pair for each one made bind quadratic in the track count (issue #962).
-#[cfg(any(test, feature = "test-support"))]
-#[allow(clippy::too_many_arguments)]
-fn scalar_split_interval_is_clear(
-    program: &ExecutionProgram,
-    spec: &GraphSpec,
-    parts: &RuntimeParts,
-    taps: &BTreeMap<u32, Vec<GraphNodeId>>,
-    crossing_sources: &std::collections::BTreeSet<&GraphNodeId>,
-    naming: &BTreeMap<crate::program::BufferRef, Vec<usize>>,
-    fader: usize,
-    matrix: usize,
-) -> bool {
-    let buffer = program.ops[fader].output;
-    let fader_node = &spec.nodes[program.ops[fader].node as usize].id;
-    if parts.observers.contains_key(fader_node)
-        || taps
-            .get(&u32::try_from(fader).expect("op index"))
-            .is_some_and(|aliases| {
-                aliases
-                    .iter()
-                    .any(|alias| parts.observers.contains_key(alias))
-            })
-    {
-        return false;
-    }
-    if crossing_sources.contains(fader_node) {
-        return false;
-    }
-    // No op strictly between the pair may name the buffer: as its output, a main input, a
-    // sidechain, or a delayed input's staging slot. `naming` lists the ops that do, in op order,
-    // so the first one after the fader decides it.
-    let naming = naming.get(&buffer).map_or(&[][..], Vec::as_slice);
-    naming
-        .get(naming.partition_point(|op| *op <= fader))
-        .is_none_or(|op| *op >= matrix)
-}
-
-/// The nodes a route or a sidechain reads out of, from anywhere in the graph: a node in this set
-/// has a reader the lowered program's scalar pairing cannot see.
-#[cfg(any(test, feature = "test-support"))]
-fn crossing_sources(spec: &GraphSpec) -> std::collections::BTreeSet<&GraphNodeId> {
-    spec.edges
-        .iter()
-        .filter(|edge| {
-            matches!(
-                edge.id,
-                GraphEdgeId::RouteSource { .. } | GraphEdgeId::EffectSidechain { .. }
-            )
-        })
-        .map(|edge| &edge.source.node)
-        .collect()
-}
-
-/// Every op that names each physical buffer, in op order: [`op_names_buffer`], inverted once.
-#[cfg(any(test, feature = "test-support"))]
-fn ops_naming_buffers(
-    program: &ExecutionProgram,
-) -> BTreeMap<crate::program::BufferRef, Vec<usize>> {
-    let mut naming: BTreeMap<crate::program::BufferRef, Vec<usize>> = BTreeMap::new();
-    let mut name = |buffer: crate::program::BufferRef, index: usize| {
-        let ops = naming.entry(buffer).or_default();
-        if ops.last() != Some(&index) {
-            ops.push(index);
-        }
-    };
-    for (index, op) in program.ops.iter().enumerate() {
-        name(op.output, index);
-        for input in program.inputs_of(op).iter().chain(op.sidechain.as_ref()) {
-            name(input.buffer, index);
-            if let Some(delay) = input.delay {
-                name(delay.staging, index);
-            }
-        }
-    }
-    naming
 }
 
 /// Groups the program's ops into units: a bank's members become one unit at the first member's
@@ -8646,239 +8130,6 @@ fn validate_fold_installation(
     })
 }
 
-/// The serialized scalar fader/matrix pairing passes, over the bindings of one sequential bind.
-///
-/// Serialized scalar fader/matrix pairing is decided while both original owners and the lowered
-/// graph are still available.  The schedule is intentionally left untouched: the matrix binding
-/// becomes an identity at its original slot, while the composite runs from the fader slot and the
-/// existing reduction/observer boundaries remain in place.
-///
-/// Only the whole-plan scalar oracle binds a per-node fader and matrix that offer a pair factory,
-/// so these passes compile only for tests and `test-support` (issue #1059).
-#[cfg(any(test, feature = "test-support"))]
-#[allow(clippy::too_many_arguments)]
-fn select_scalar_pairs(
-    program: &ExecutionProgram,
-    spec: &GraphSpec,
-    parts: &mut RuntimeParts,
-    run_units: &[(Vec<Membership>, Vec<usize>)],
-    retired: &std::collections::BTreeSet<usize>,
-    redirects: &[ScatterRedirect],
-    readers: &[Vec<usize>],
-    first_producer: &[Option<usize>],
-    taps: &BTreeMap<u32, Vec<GraphNodeId>>,
-) -> Vec<Box<dyn GraphRuntimeSplitPairProcessor>> {
-    let mut split_pairs: Vec<Box<dyn GraphRuntimeSplitPairProcessor>> = Vec::new();
-    let crossing_sources = crossing_sources(spec);
-    let naming = ops_naming_buffers(program);
-    for pair in run_units.windows(2) {
-        let (first_membership, first_ops) = &pair[0];
-        let (second_membership, second_ops) = &pair[1];
-        if !first_membership.is_empty()
-            || !second_membership.is_empty()
-            || first_ops.len() != 1
-            || second_ops.len() != 1
-        {
-            continue;
-        }
-        let first = first_ops[0];
-        let second = second_ops[0];
-        if retired.contains(&first)
-            || retired.contains(&second)
-            || second != first.saturating_add(1)
-            || program.inputs_of(&program.ops[first]).is_empty()
-            || !scalar_pair_is_in_place(program, first, second)
-        {
-            continue;
-        }
-        let first_node = &spec.nodes[program.ops[first].node as usize].id;
-        let second_node = &spec.nodes[program.ops[second].node as usize].id;
-        let (
-            GraphNodeId::TrackStage {
-                track_id: first_track,
-                stage: TrackStage::PostFader,
-            },
-            GraphNodeId::TrackStage {
-                track_id: second_track,
-                stage: TrackStage::PostMatrix,
-            },
-        ) = (first_node, second_node)
-        else {
-            continue;
-        };
-        if crossing_sources.contains(first_node)
-            || first_track != second_track
-            || !chains_into(
-                program,
-                spec,
-                parts,
-                readers,
-                first_producer,
-                taps,
-                &[first],
-                &[second],
-            )
-        {
-            continue;
-        }
-        let Some(Some(fader)) = parts.bindings.remove(first_node) else {
-            continue;
-        };
-        let Some(Some(matrix)) = parts.bindings.remove(second_node) else {
-            parts.bindings.insert(first_node.clone(), Some(fader));
-            continue;
-        };
-        let Some(factory) = fader.scalar_pair_factory() else {
-            parts.bindings.insert(first_node.clone(), Some(fader));
-            parts.bindings.insert(second_node.clone(), Some(matrix));
-            continue;
-        };
-        match factory(fader, matrix) {
-            Ok(composite) => {
-                parts.bindings.insert(first_node.clone(), Some(composite));
-                parts.bindings.insert(second_node.clone(), None);
-            }
-            Err((fader, matrix)) => {
-                parts.bindings.insert(first_node.clone(), Some(fader));
-                parts.bindings.insert(second_node.clone(), Some(matrix));
-            }
-        }
-    }
-
-    // `chains_into(&[fader], &[matrix])` below admits `matrix` only as `fader`'s sole reader, so the
-    // run holding that reader is the one candidate a scan over every later run could ever admit.
-    // Looking it up instead of scanning keeps the split pass linear in the track count, where the
-    // scan made bind quadratic (issue #962). Every condition, and the order they are tested in, is
-    // unchanged.
-    let mut plain_run_of_op: Vec<Option<usize>> = vec![None; program.ops.len()];
-    for (run, (membership, ops)) in run_units.iter().enumerate() {
-        if let ([op], true) = (ops.as_slice(), membership.is_empty()) {
-            plain_run_of_op[*op] = Some(run);
-        }
-    }
-
-    // Keep the nonadjacent pair at both original schedule positions. A settled fader defers only
-    // its private in-place arithmetic; the owner completes it at the matrix slot or before an
-    // intervening execution/observer error escapes the render call. The first slice admits one
-    // deterministic interval; all later candidates remain on the original separate path.
-    'split: for fader_run in 0..run_units.len() {
-        let (fader_membership, fader_ops) = &run_units[fader_run];
-        if !fader_membership.is_empty() || fader_ops.len() != 1 {
-            continue;
-        }
-        let fader = fader_ops[0];
-        // Only the run holding `fader`'s sole reader can be admitted (see `plain_run_of_op`).
-        let candidate = match readers[fader].as_slice() {
-            [reader] => plain_run_of_op[*reader].filter(|run| *run >= fader_run + 2),
-            _ => None,
-        };
-        for (matrix_membership, matrix_ops) in candidate
-            .map(|run| &run_units[run..=run])
-            .unwrap_or_default()
-        {
-            if !matrix_membership.is_empty() || matrix_ops.len() != 1 {
-                continue;
-            }
-            let matrix = matrix_ops[0];
-            if retired.contains(&fader)
-                || retired.contains(&matrix)
-                || program.inputs_of(&program.ops[fader]).is_empty()
-                || !scalar_pair_is_in_place(program, fader, matrix)
-                || redirects
-                    .iter()
-                    .any(|(_, _, consumer)| *consumer == fader || *consumer == matrix)
-                || !chains_into(
-                    program,
-                    spec,
-                    parts,
-                    readers,
-                    first_producer,
-                    taps,
-                    &[fader],
-                    &[matrix],
-                )
-                || !scalar_split_interval_is_clear(
-                    program,
-                    spec,
-                    parts,
-                    taps,
-                    &crossing_sources,
-                    &naming,
-                    fader,
-                    matrix,
-                )
-            {
-                continue;
-            }
-            let fader_node = &spec.nodes[program.ops[fader].node as usize].id;
-            let matrix_node = &spec.nodes[program.ops[matrix].node as usize].id;
-            let (
-                GraphNodeId::TrackStage {
-                    track_id: fader_track,
-                    stage: TrackStage::PostFader,
-                },
-                GraphNodeId::TrackStage {
-                    track_id: matrix_track,
-                    stage: TrackStage::PostMatrix,
-                },
-            ) = (fader_node, matrix_node)
-            else {
-                continue;
-            };
-            if fader_track != matrix_track {
-                continue;
-            }
-            let Some(Some(fader_owner)) = parts.bindings.remove(fader_node) else {
-                continue;
-            };
-            let Some(Some(matrix_owner)) = parts.bindings.remove(matrix_node) else {
-                parts.bindings.insert(fader_node.clone(), Some(fader_owner));
-                continue;
-            };
-            let Some(factory) = fader_owner.scalar_split_pair_factory() else {
-                parts.bindings.insert(fader_node.clone(), Some(fader_owner));
-                parts
-                    .bindings
-                    .insert(matrix_node.clone(), Some(matrix_owner));
-                continue;
-            };
-            match factory(fader_owner, matrix_owner) {
-                Ok(owner) => {
-                    #[cfg(any(test, feature = "test-support"))]
-                    test_only_record_selected_split_fader(
-                        fader_node.clone(),
-                        program.ops[fader].output.0,
-                    );
-                    let pair = split_pairs.len();
-                    split_pairs.push(owner);
-                    parts.split_pairs.insert(
-                        fader_node.clone(),
-                        SplitPairSlot {
-                            pair,
-                            role: SplitPairRole::Fader,
-                        },
-                    );
-                    parts.split_pairs.insert(
-                        matrix_node.clone(),
-                        SplitPairSlot {
-                            pair,
-                            role: SplitPairRole::Matrix,
-                        },
-                    );
-                    break 'split;
-                }
-                Err((fader_owner, matrix_owner)) => {
-                    parts.bindings.insert(fader_node.clone(), Some(fader_owner));
-                    parts
-                        .bindings
-                        .insert(matrix_node.clone(), Some(matrix_owner));
-                }
-            }
-        }
-    }
-    split_pairs
-}
-
 /// Builds the sequential executor's runtime: one coloured arena, producers read in place.
 ///
 /// `source_claims` are the source set's claim nodes in claim order when its driver lends its played
@@ -8892,8 +8143,6 @@ pub(crate) fn build_sequential(
     planning: SequentialPlan,
     source_claims: &[GraphNodeId],
 ) -> (Runtime, BindIdentities) {
-    #[cfg(any(test, feature = "test-support"))]
-    test_only_reset_selected_split_fader();
     let mut parts = parts;
     // Issue #1217 D5: the prepared routes and their gates in canonical route-ID order, taken
     // before `node_kind` consumes them, and only when some gate silences or (issue #1220 D4) some
@@ -8937,8 +8186,7 @@ pub(crate) fn build_sequential(
     let retired: std::collections::BTreeSet<usize> = fold
         .as_ref()
         .map_or_else(Default::default, |fold| fold.retired.clone());
-    // Issue #202 rec 3: decided here, before the scalar pairing passes below, which leave every
-    // redirect consumer alone. Since issue #886 no clause asks about observers: an observer of the
+    // Issue #202 rec 3. Since issue #886 no clause asks about observers: an observer of the
     // last slot reads the redirected buffer (see `scatter_target`).
     //
     // A folded chain is excluded: the redirect points a lane's scatter at its consumer's buffer,
@@ -8966,23 +8214,6 @@ pub(crate) fn build_sequential(
         redirects
     };
     let (readers, first_producer) = op_dataflow(program);
-    // The scalar fader/matrix pairing passes (issue #1059): only the whole-plan scalar oracle binds
-    // the per-node strip owners they pair, so they compile only for tests and `test-support`. A
-    // shipped build binds every strip into a bank and has no pair to select.
-    #[cfg(any(test, feature = "test-support"))]
-    let split_pairs = select_scalar_pairs(
-        program,
-        spec,
-        &mut parts,
-        &run_units,
-        &retired,
-        &redirects,
-        &readers,
-        &first_producer,
-        &taps,
-    );
-    #[cfg(not(any(test, feature = "test-support")))]
-    let split_pairs: Vec<Box<dyn GraphRuntimeSplitPairProcessor>> = Vec::new();
     let mut units = Vec::with_capacity(run_units.len());
     // The bind-time half of the collapse-eligibility query, one row per emitted unit. Built here
     // rather than by a later walk because this is the only place the unit's ops and the spec's
@@ -9152,7 +8383,6 @@ pub(crate) fn build_sequential(
         // ops carry and this vector's order are the same walk.
         core::mem::take(&mut parts.track_delay_lines),
         units,
-        split_pairs,
         identity,
         response_bindings,
         redirects.len() as u64,
@@ -9895,8 +9125,7 @@ type ScatterRedirect = (usize, usize, usize);
 ///   issue #916 this is a slot comparison and nothing more. The Output is dedicated storage and
 ///   never in place, so no producer shares its *live* buffer. The clause can still fire when the
 ///   colouring hands the Output a producer's slot after that producer retired. That declines a
-///   redirect that would have been sound. [`chains_into`] and `scalar_split_interval_is_clear`
-///   dropped the same comparison in #916. This one is kept because the program-level model
+///   redirect that would have been sound. [`chains_into`] dropped the same comparison in #916. This one is kept because the program-level model
 ///   mirrors it and the corpus drives the two against each other through
 ///   [`scatter_redirects_over_program`], so restating it is a change of its own. The consumer side
 ///   -- a redirect *into* the Output op, whose storage is the host's planes -- is declined in
@@ -10039,10 +9268,7 @@ fn scatter_redirects(
 /// `a_redirected_metered_plan_is_the_unredirected_plans_master_and_meters_bit_for_bit` holds it to
 /// that (and, with the production meter, graph-compiler's
 /// `a_meter_on_a_bank_member_keeps_that_lanes_scatter_redirect`), and restoring either clause
-/// reddens `an_observer_of_the_scattered_lane_keeps_the_direct_scatter_armed`. A redirect consumer
-/// stays out of the scalar split fader/matrix pair, so a metered plan now takes the redirect where
-/// it took the split pair before -- the unmetered plan's shape, with the same bits
-/// (`a_metered_redirect_consumer_stays_out_of_the_split_pair_and_keeps_the_bits`). A stage boundary
+/// reddens `an_observer_of_the_scattered_lane_keeps_the_direct_scatter_armed`. A stage boundary
 /// *inside* a chain is not this function's question: `chains_into` still declines the merge across
 /// an observed one, unchanged.
 ///
@@ -10750,7 +9976,6 @@ fn build_op(
     aliases: Option<&[GraphNodeId]>,
 ) -> RuntimeOp {
     let node = spec.nodes[op.node as usize].id.clone();
-    let split_pair = parts.split_pairs.remove(&node);
     let kind = parts.node_kind(&node, op.node);
     let observers = take_observers(
         &mut parts.observers,
@@ -10762,7 +9987,6 @@ fn build_op(
         sidechain,
         output,
         kind,
-        split_pair,
         observers,
     }
 }
@@ -11115,7 +10339,8 @@ pub(crate) fn route_folds_over_program(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::program::{BufferRef, DelayRef, InputRef};
+    use crate::GraphEdgeId;
+    use crate::program::{BufferRef, InputRef};
     use core::any::Any;
     use std::sync::{
         Arc,
@@ -11204,10 +10429,8 @@ mod tests {
                 sidechain: None,
                 output: ARENA_BASE,
                 kind: NodeKind::Bound(Box::new(Owner)),
-                split_pair: None,
                 observers: Box::new([]),
             })],
-            Vec::new(),
             vec![UnitIdentity {
                 banking: UnitBanking::Plain,
                 resident_input: false,
@@ -11296,10 +10519,8 @@ mod tests {
                 sidechain: None,
                 output: ARENA_BASE,
                 kind: NodeKind::Bound(Box::new(DecliningOwner)),
-                split_pair: None,
                 observers: Box::new([]),
             })],
-            Vec::new(),
             vec![UnitIdentity {
                 banking: UnitBanking::Plain,
                 resident_input: false,
@@ -11419,7 +10640,6 @@ mod tests {
                 sidechain: None,
                 output: 1,
                 kind: NodeKind::BankMember,
-                split_pair: None,
                 observers,
             };
             test_only_meter_input_reset(false);
@@ -11466,7 +10686,6 @@ mod tests {
             sidechain: None,
             output,
             kind: NodeKind::BankMember,
-            split_pair: None,
             observers: Box::new([]),
         };
         let bank = |population, width, predecessor: bool| {
@@ -11663,7 +10882,6 @@ mod tests {
             sidechain: None,
             output: ARENA_BASE,
             kind: NodeKind::BankMember,
-            split_pair: None,
             observers,
         };
         let bank = |observed_member: Option<usize>| RuntimeUnit::Bank {
@@ -11699,7 +10917,6 @@ mod tests {
                 bank(Some(3)),
                 bank(None),
             ],
-            Vec::new(),
             vec![row(true), row(false), row(false), row(true)],
             Vec::new(),
             0,
@@ -11751,244 +10968,13 @@ mod tests {
         test_only_observe_calls_reset(false);
     }
 
-    #[test]
-    fn synthetic_distinct_matrix_destination_is_the_scalar_pair_identity_decline() {
-        // This is a deliberately synthetic lowered program. It isolates the defensive identity
-        // gate; #476 owns the separate question of whether production lowering can emit it.
-        let mut program = ExecutionProgram {
-            ops: vec![
-                Op {
-                    node: 0,
-                    level: 0,
-                    inputs: (0, 1),
-                    sidechain: None,
-                    output: BufferRef(1),
-                    in_place: true,
-                },
-                Op {
-                    node: 1,
-                    level: 1,
-                    inputs: (1, 2),
-                    sidechain: None,
-                    output: BufferRef(2),
-                    in_place: false,
-                },
-            ]
-            .into_boxed_slice(),
-            inputs: vec![
-                InputRef {
-                    buffer: BufferRef(1),
-                    delay: None,
-                },
-                InputRef {
-                    buffer: BufferRef(1),
-                    delay: None,
-                },
-            ]
-            .into_boxed_slice(),
-            delays: Box::new([]),
-            node_buffer: vec![BufferRef(1), BufferRef(2)].into_boxed_slice(),
-            node_op: vec![Some(0), Some(1)].into_boxed_slice(),
-            taps: Box::new([]),
-            buffers: 3,
-            output: BufferRef(2),
-        };
-        assert!(
-            !scalar_pair_is_in_place(&program, 0, 1),
-            "an otherwise valid single undelayed edge declines on its distinct destination"
-        );
-
-        program.ops[1].output = BufferRef(1);
-        program.ops[1].in_place = true;
-        program.node_buffer[1] = BufferRef(1);
-        assert!(
-            scalar_pair_is_in_place(&program, 0, 1),
-            "the same fixture admits only after the exact identity facts are restored"
-        );
-        program.inputs[1].delay = Some(DelayRef {
-            line: 0,
-            staging: BufferRef(2),
-        });
-        assert!(
-            !scalar_pair_is_in_place(&program, 0, 1),
-            "the explicit undelayed-input guard remains independent"
-        );
-
-        struct FaderOwner(Arc<AtomicUsize>);
-        impl GraphRuntimeProcessor for FaderOwner {
-            fn process(&mut self, block: GraphBindingBlock<'_>) -> Result<(), RenderError> {
-                self.0.fetch_add(1, Ordering::Relaxed);
-                for sample in block.left.iter_mut().chain(block.right.iter_mut()) {
-                    *sample *= 2.0;
-                }
-                Ok(())
-            }
-        }
-        struct FailingMatrixOwner {
-            calls: Arc<AtomicUsize>,
-            queued: Arc<AtomicUsize>,
-        }
-        impl GraphRuntimeProcessor for FailingMatrixOwner {
-            fn process(&mut self, _: GraphBindingBlock<'_>) -> Result<(), RenderError> {
-                self.calls.fetch_add(1, Ordering::Relaxed);
-                self.queued.fetch_sub(1, Ordering::Relaxed);
-                Err(RenderError::InvalidEnvelope)
-            }
-        }
-
-        // Execute the original declined shape. The later reduction copies into its distinct
-        // destination before its owner reports the first error; the fader source remains the
-        // completed earlier state. This is the boundary a one-buffer early composite cannot own.
-        let fader_calls = Arc::new(AtomicUsize::new(0));
-        let matrix_calls = Arc::new(AtomicUsize::new(0));
-        let queued = Arc::new(AtomicUsize::new(2));
-        let mut fader = RuntimeOp {
-            inputs: vec![ARENA_BASE].into_boxed_slice(),
-            staged: Box::new([]),
-            sidechain: None,
-            output: ARENA_BASE,
-            kind: NodeKind::Bound(Box::new(FaderOwner(Arc::clone(&fader_calls)))),
-            split_pair: None,
-            observers: Box::new([]),
-        };
-        let mut matrix = RuntimeOp {
-            inputs: vec![ARENA_BASE].into_boxed_slice(),
-            staged: Box::new([]),
-            sidechain: None,
-            output: ARENA_BASE + 1,
-            kind: NodeKind::Bound(Box::new(FailingMatrixOwner {
-                calls: Arc::clone(&matrix_calls),
-                queued: Arc::clone(&queued),
-            })),
-            split_pair: None,
-            observers: Box::new([]),
-        };
-        let mut arena = stereo_arena(2, 2);
-        arena
-            .write_stereo(ARENA_BASE)
-            .0
-            .copy_from_slice(&[0.25, -0.5]);
-        arena
-            .write_stereo(ARENA_BASE)
-            .1
-            .copy_from_slice(&[-0.75, 1.0]);
-        arena.write_stereo(ARENA_BASE + 1).0.fill(91.0);
-        arena.write_stereo(ARENA_BASE + 1).1.fill(-91.0);
-        execute_op(
-            &mut fader,
-            &mut arena,
-            &mut [],
-            &mut [],
-            &mut [],
-            0,
-            LiveSnapshot::ALL,
-            None,
-            None,
-            &crate::GraphBlockTime::new(None, 0, None, None),
-        )
-        .expect("earlier fader");
-        assert_eq!(
-            execute_op(
-                &mut matrix,
-                &mut arena,
-                &mut [],
-                &mut [],
-                &mut [],
-                0,
-                LiveSnapshot::ALL,
-                None,
-                None,
-                &crate::GraphBlockTime::new(None, 0, None, None),
-            ),
-            Err(RenderError::InvalidEnvelope)
-        );
-        assert_eq!(arena.read_stereo(ARENA_BASE).0, &[0.5, -1.0]);
-        assert_eq!(arena.read_stereo(ARENA_BASE).1, &[-1.5, 2.0]);
-        assert_eq!(arena.read_stereo(ARENA_BASE + 1).0, &[0.5, -1.0]);
-        assert_eq!(arena.read_stereo(ARENA_BASE + 1).1, &[-1.5, 2.0]);
-        assert_eq!(fader_calls.load(Ordering::Relaxed), 1);
-        assert_eq!(matrix_calls.load(Ordering::Relaxed), 1);
-        assert_eq!(
-            queued.load(Ordering::Relaxed),
-            1,
-            "later failure retains its next record"
-        );
-    }
-
-    #[test]
-    fn split_pair_completion_walks_pending_faders_before_error_return() {
-        struct Probe {
-            completions: Arc<AtomicUsize>,
-        }
-        impl GraphRuntimeSplitPairProcessor for Probe {
-            fn begin_fader(&mut self, _: GraphBindingBlock<'_>) -> Result<(), RenderError> {
-                Ok(())
-            }
-            fn finish_matrix(&mut self, _: GraphBindingBlock<'_>) -> Result<(), RenderError> {
-                Ok(())
-            }
-            fn complete_pending(&mut self, block: GraphBindingBlock<'_>) {
-                self.completions.fetch_add(1, Ordering::Relaxed);
-                block.left.fill(0.75);
-                block.right.fill(-0.25);
-            }
-        }
-
-        let completions = Arc::new(AtomicUsize::new(0));
-        let mut runtime = Runtime::new(
-            stereo_arena(2, 2),
-            Vec::new(),
-            Vec::new(),
-            vec![RuntimeUnit::Op(RuntimeOp {
-                inputs: Box::new([]),
-                staged: Box::new([]),
-                sidechain: None,
-                output: ARENA_BASE,
-                kind: NodeKind::Identity,
-                split_pair: Some(SplitPairSlot {
-                    pair: 0,
-                    role: SplitPairRole::Fader,
-                }),
-                observers: Box::new([]),
-            })],
-            vec![Box::new(Probe {
-                completions: Arc::clone(&completions),
-            })],
-            vec![UnitIdentity {
-                banking: UnitBanking::Plain,
-                resident_input: false,
-                observation: UnitObservation::Unobserved,
-                source_lanes: 0,
-                stages: 1,
-                upstream_of_seam_stages: 0,
-                lane_tracks: Box::new([]),
-            }],
-            Vec::new(),
-            0,
-            0,
-        );
-        runtime.complete_pending(11, LiveSnapshot::ALL);
-        assert_eq!(completions.load(Ordering::Relaxed), 1);
-        assert_eq!(runtime.buffer(ARENA_BASE).0, &[0.75, 0.75]);
-        assert_eq!(runtime.buffer(ARENA_BASE).1, &[-0.25, -0.25]);
-    }
-
-    struct DecliningPairOwner(Arc<AtomicUsize>, bool);
-    fn decline_pair(
-        left: crate::BuiltinProcessor,
-        right: crate::BuiltinProcessor,
-    ) -> Result<crate::BuiltinProcessor, (crate::BuiltinProcessor, crate::BuiltinProcessor)> {
-        Err((left, right))
-    }
-    impl GraphPreparedBuiltinBankProcessor for DecliningPairOwner {
+    struct AddingOwner(Arc<AtomicUsize>);
+    impl GraphPreparedBuiltinBankProcessor for AddingOwner {
         fn as_any(&self) -> &dyn Any {
             self
         }
         fn into_any(self: Box<Self>) -> Box<dyn Any> {
             self
-        }
-        fn pair_factory(&self) -> Option<crate::BuiltinPairFactory> {
-            Some(if self.1 { accept_pair } else { decline_pair })
         }
         fn process(
             &mut self,
@@ -12004,33 +10990,8 @@ mod tests {
             Ok(())
         }
     }
-    struct AcceptedPair(crate::BuiltinProcessor, crate::BuiltinProcessor);
-    fn accept_pair(
-        left: crate::BuiltinProcessor,
-        right: crate::BuiltinProcessor,
-    ) -> Result<crate::BuiltinProcessor, (crate::BuiltinProcessor, crate::BuiltinProcessor)> {
-        Ok(Box::new(AcceptedPair(left, right)))
-    }
-    impl GraphPreparedBuiltinBankProcessor for AcceptedPair {
-        fn as_any(&self) -> &dyn Any {
-            self
-        }
-        fn into_any(self: Box<Self>) -> Box<dyn Any> {
-            self
-        }
-        fn process(
-            &mut self,
-            left: &mut [f32],
-            right: &mut [f32],
-            frames: u32,
-            sample: u64,
-        ) -> Result<(), RenderError> {
-            self.0.process(left, right, frames, sample)?;
-            self.1.process(left, right, frames, sample)
-        }
-    }
-    struct PlainPairOwner(Arc<AtomicUsize>);
-    impl GraphPreparedBuiltinBankProcessor for PlainPairOwner {
+    struct DoublingOwner(Arc<AtomicUsize>);
+    impl GraphPreparedBuiltinBankProcessor for DoublingOwner {
         fn as_any(&self) -> &dyn Any {
             self
         }
@@ -12090,123 +11051,118 @@ mod tests {
     }
 
     #[test]
-    fn prepared_fold_retains_first_slots_scratch_through_pair_success_and_decline() {
-        for accepted in [false, true] {
-            for folded in [false, true] {
-                let track = crate::StableGraphId::parse("decline").expect("id");
-                let fader = GraphNodeId::TrackStage {
-                    track_id: track.clone(),
-                    stage: TrackStage::PostFader,
-                };
-                let matrix = GraphNodeId::TrackStage {
-                    track_id: track,
-                    stage: TrackStage::PostMatrix,
-                };
-                let spec = GraphSpec {
-                    nodes: vec![
-                        crate::GraphNode {
-                            id: fader.clone(),
-                            latency: effect_contract::LatencySamples(0),
-                            tail: effect_contract::TailSamples::Finite(0),
-                        },
-                        crate::GraphNode {
-                            id: matrix.clone(),
-                            latency: effect_contract::LatencySamples(0),
-                            tail: effect_contract::TailSamples::Finite(0),
-                        },
-                    ],
-                    ports: Vec::new(),
-                    edges: Vec::new(),
-                };
-                let bank = |member, processor: Box<dyn GraphPreparedBuiltinBankProcessor>| {
-                    GraphPreparedBuiltinBank {
-                        backend: lane::Backend::Simd4,
-                        members: vec![member].into_boxed_slice(),
-                        processor,
-                        scratch: AoSoaScratch::new(effect_contract::BankWidth::Four, 8)
-                            .expect("scratch"),
-                    }
-                };
-                let first_calls = Arc::new(AtomicUsize::new(0));
-                let second_calls = Arc::new(AtomicUsize::new(0));
-                let mut parts = RuntimeParts::new(
-                    &spec,
-                    Vec::new(),
-                    Vec::new(),
-                    Vec::new(),
-                    Vec::new(),
-                    Vec::new(),
-                    vec![
-                        bank(
-                            fader,
-                            Box::new(DecliningPairOwner(Arc::clone(&first_calls), accepted)),
-                        ),
-                        bank(matrix, Box::new(PlainPairOwner(Arc::clone(&second_calls)))),
-                    ],
-                    Vec::new(),
-                    Vec::new(),
-                    Default::default(),
-                    Vec::new(),
-                    8,
-                );
-                let configuration = folded.then(|| {
-                    rack::PreparedFoldConfiguration::new(
-                        BankWidth::Four,
-                        vec![true, false, false, false].into_boxed_slice(),
-                        vec![true, false, false, false].into_boxed_slice(),
-                    )
-                    .expect("borrowed shape configuration")
-                });
-                let mut chain = parts.chain_for_with_fold(
-                    &[Membership::Builtin(0), Membership::Builtin(1)],
-                    1,
-                    configuration,
-                );
-                assert_eq!(chain.width(), BankWidth::Four);
-                assert_eq!(
-                    chain.fold_lanes(),
-                    if folded {
-                        &[true, false, false, false][..]
-                    } else {
-                        &[]
-                    }
-                );
-                assert!(
-                    parts.builtin_banks.iter().all(Option::is_none),
-                    "both original owners moved once"
-                );
-                const FRAMES: usize = 2;
-                let mut arena = stereo_arena(FRAMES, 3);
-                arena.write_stereo(1).0.copy_from_slice(&[1.0, 2.0]);
-                arena.write_stereo(1).1.copy_from_slice(&[-1.0, -2.0]);
-                let fold = [FoldLane {
-                    coefficients: [1.0, 0.0, 0.0, 1.0],
-                    store: true,
-                }];
-                let mut members = ArenaMembers {
-                    arena: &mut arena,
-                    inputs: &[1],
-                    outputs: &[2],
-                    fold: if folded { &fold } else { &[] },
-                    master: MasterPlanes::Arena(2),
-                    sources: SourceGather::NONE,
-                };
-                chain
-                    .run(&mut members, FRAMES as u32, 0, LiveSnapshot::ALL)
-                    .expect("declined chain render");
-                assert_eq!(
-                    first_calls.load(Ordering::Relaxed),
-                    1,
-                    "first returned owner executes"
-                );
-                assert_eq!(
-                    second_calls.load(Ordering::Relaxed),
-                    1,
-                    "second returned owner executes"
-                );
-                assert_eq!(members.arena.read_stereo(2).0, &[4.0, 6.0]);
-                assert_eq!(members.arena.read_stereo(2).1, &[0.0, -2.0]);
-            }
+    fn prepared_fold_retains_first_slots_scratch_across_two_builtin_slots() {
+        for folded in [false, true] {
+            let track = crate::StableGraphId::parse("decline").expect("id");
+            let fader = GraphNodeId::TrackStage {
+                track_id: track.clone(),
+                stage: TrackStage::PostFader,
+            };
+            let matrix = GraphNodeId::TrackStage {
+                track_id: track,
+                stage: TrackStage::PostMatrix,
+            };
+            let spec = GraphSpec {
+                nodes: vec![
+                    crate::GraphNode {
+                        id: fader.clone(),
+                        latency: effect_contract::LatencySamples(0),
+                        tail: effect_contract::TailSamples::Finite(0),
+                    },
+                    crate::GraphNode {
+                        id: matrix.clone(),
+                        latency: effect_contract::LatencySamples(0),
+                        tail: effect_contract::TailSamples::Finite(0),
+                    },
+                ],
+                ports: Vec::new(),
+                edges: Vec::new(),
+            };
+            let bank = |member, processor: Box<dyn GraphPreparedBuiltinBankProcessor>| {
+                GraphPreparedBuiltinBank {
+                    backend: lane::Backend::Simd4,
+                    members: vec![member].into_boxed_slice(),
+                    processor,
+                    scratch: AoSoaScratch::new(effect_contract::BankWidth::Four, 8)
+                        .expect("scratch"),
+                }
+            };
+            let first_calls = Arc::new(AtomicUsize::new(0));
+            let second_calls = Arc::new(AtomicUsize::new(0));
+            let mut parts = RuntimeParts::new(
+                &spec,
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                vec![
+                    bank(fader, Box::new(AddingOwner(Arc::clone(&first_calls)))),
+                    bank(matrix, Box::new(DoublingOwner(Arc::clone(&second_calls)))),
+                ],
+                Vec::new(),
+                Vec::new(),
+                Default::default(),
+                Vec::new(),
+                8,
+            );
+            let configuration = folded.then(|| {
+                rack::PreparedFoldConfiguration::new(
+                    BankWidth::Four,
+                    vec![true, false, false, false].into_boxed_slice(),
+                    vec![true, false, false, false].into_boxed_slice(),
+                )
+                .expect("borrowed shape configuration")
+            });
+            let mut chain = parts.chain_for_with_fold(
+                &[Membership::Builtin(0), Membership::Builtin(1)],
+                1,
+                configuration,
+            );
+            assert_eq!(chain.width(), BankWidth::Four);
+            assert_eq!(
+                chain.fold_lanes(),
+                if folded {
+                    &[true, false, false, false][..]
+                } else {
+                    &[]
+                }
+            );
+            assert!(
+                parts.builtin_banks.iter().all(Option::is_none),
+                "both original owners moved once"
+            );
+            const FRAMES: usize = 2;
+            let mut arena = stereo_arena(FRAMES, 3);
+            arena.write_stereo(1).0.copy_from_slice(&[1.0, 2.0]);
+            arena.write_stereo(1).1.copy_from_slice(&[-1.0, -2.0]);
+            let fold = [FoldLane {
+                coefficients: [1.0, 0.0, 0.0, 1.0],
+                store: true,
+            }];
+            let mut members = ArenaMembers {
+                arena: &mut arena,
+                inputs: &[1],
+                outputs: &[2],
+                fold: if folded { &fold } else { &[] },
+                master: MasterPlanes::Arena(2),
+                sources: SourceGather::NONE,
+            };
+            chain
+                .run(&mut members, FRAMES as u32, 0, LiveSnapshot::ALL)
+                .expect("chain render");
+            assert_eq!(
+                first_calls.load(Ordering::Relaxed),
+                1,
+                "first returned owner executes"
+            );
+            assert_eq!(
+                second_calls.load(Ordering::Relaxed),
+                1,
+                "second returned owner executes"
+            );
+            assert_eq!(members.arena.read_stereo(2).0, &[4.0, 6.0]);
+            assert_eq!(members.arena.read_stereo(2).1, &[0.0, -2.0]);
         }
     }
 
@@ -13450,13 +12406,11 @@ mod tests {
                 sidechain: None,
                 output: ARENA_BASE,
                 kind,
-                split_pair: None,
                 observers: Box::new([]),
             };
             execute_op(
                 &mut op,
                 &mut arena,
-                &mut [],
                 &mut [],
                 &mut [],
                 0,
@@ -13499,7 +12453,6 @@ mod tests {
                 sidechain,
                 output,
                 kind,
-                split_pair: None,
                 observers: Box::new([]),
             }
         }
@@ -14016,9 +12969,6 @@ mod tests {
         /// Bind with every scatter redirect declined: the path a metered last slot took before
         /// issue #886.
         scatter_declined: bool,
-        /// Issue #886: a bound scalar `PostMatrix` after each fader, and a fader owner that offers
-        /// the scalar split fader/matrix pair. Needs `fader`.
-        split_pair: bool,
         /// Issue #916: two meters on the session Output node, bound after every track meter.
         output_meters: bool,
         /// Issue #916: this cohort's bank processor fails from the second block on.
@@ -14039,7 +12989,6 @@ mod tests {
                 fader: false,
                 meter_at: &[],
                 scatter_declined: false,
-                split_pair: false,
                 output_meters: false,
                 failing_cohort: None,
             }
@@ -14061,79 +13010,9 @@ mod tests {
         }
     }
 
-    /// [`ScalarTilt`]'s arithmetic, from an owner that also offers the scalar split fader/matrix
-    /// pair (issue #886's split-pair arm).
-    struct SplitFader;
-
-    impl GraphRuntimeProcessor for SplitFader {
-        fn process(&mut self, block: GraphBindingBlock<'_>) -> Result<(), RenderError> {
-            ScalarTilt.process(block)
-        }
-
-        fn scalar_split_pair_factory(&self) -> Option<crate::ScalarSplitPairFactory> {
-            Some(|fader, matrix| {
-                Ok(Box::new(DeferredSplit {
-                    fader,
-                    matrix,
-                    pending: false,
-                }))
-            })
-        }
-    }
-
-    /// A bound scalar matrix that is not an identity and mixes its planes.
-    struct MatrixTilt;
-
-    impl GraphRuntimeProcessor for MatrixTilt {
-        fn process(&mut self, block: GraphBindingBlock<'_>) -> Result<(), RenderError> {
-            for (left, right) in block.left.iter_mut().zip(block.right.iter_mut()) {
-                let (a, b) = (*left, *right);
-                *left = a * 1.125 - b * 0.25;
-                *right = b * 0.75 + a * 0.3125;
-            }
-            Ok(())
-        }
-    }
-
-    /// A split pair that defers the fader's in-place arithmetic to the matrix slot, as the
-    /// production owner may: the fader's buffer holds the fader's *input* in between, which the
-    /// split pair's admission proves nothing reads.
-    struct DeferredSplit {
-        fader: Box<dyn GraphRuntimeProcessor>,
-        matrix: Box<dyn GraphRuntimeProcessor>,
-        pending: bool,
-    }
-
-    impl GraphRuntimeSplitPairProcessor for DeferredSplit {
-        fn begin_fader(&mut self, _: GraphBindingBlock<'_>) -> Result<(), RenderError> {
-            self.pending = true;
-            Ok(())
-        }
-
-        fn finish_matrix(&mut self, block: GraphBindingBlock<'_>) -> Result<(), RenderError> {
-            if core::mem::take(&mut self.pending) {
-                self.fader.process(GraphBindingBlock {
-                    left: &mut *block.left,
-                    right: &mut *block.right,
-                    first_sample: block.first_sample,
-                    live_snapshot: block.live_snapshot,
-                })?;
-            }
-            self.matrix.process(block)
-        }
-
-        fn complete_pending(&mut self, block: GraphBindingBlock<'_>) {
-            if core::mem::take(&mut self.pending) {
-                self.fader
-                    .process(block)
-                    .expect("the test fader cannot fail");
-            }
-        }
-    }
-
     /// `Input -> <stage> (one builtin bank per cohort of width) -> Route -> Output`, per track,
-    /// with issue #886's optional elided boundary, bound fader and bound matrix between the member
-    /// and the route.
+    /// with issue #886's optional elided boundary and bound fader between the member and the
+    /// route.
     ///
     /// Every route has its own non-trivial 2x2, so the master's association order is visible in
     /// its bits. Cohorts are the tracks in order, so the chains' render order is the reduction's
@@ -14183,10 +13062,6 @@ mod tests {
             .filter(|_| fixture.fader)
             .map(|track| stage_node(track, TrackStage::PostFader))
             .collect();
-        let matrices: Vec<_> = (0..tracks)
-            .filter(|_| fixture.split_pair)
-            .map(|track| stage_node(track, TrackStage::PostMatrix))
-            .collect();
         let routes: Vec<_> = (0..tracks)
             .map(|track| GraphNodeId::Route {
                 route_id: id(format!("route{track:02}")),
@@ -14217,7 +13092,7 @@ mod tests {
                 &members[track],
             ));
             let mut upstream = &members[track];
-            for boundary in [aliases.get(track), faders.get(track), matrices.get(track)]
+            for boundary in [aliases.get(track), faders.get(track)]
                 .into_iter()
                 .flatten()
             {
@@ -14245,12 +13120,11 @@ mod tests {
         }
         edges.sort_by(|left, right| left.id.cmp(&right.id));
         let outputs = vec![output.clone()];
-        let levels: Vec<&Vec<GraphNodeId>> = [
-            &inputs, &members, &aliases, &faders, &matrices, &routes, &outputs,
-        ]
-        .into_iter()
-        .filter(|level| !level.is_empty())
-        .collect();
+        let levels: Vec<&Vec<GraphNodeId>> =
+            [&inputs, &members, &aliases, &faders, &routes, &outputs]
+                .into_iter()
+                .filter(|level| !level.is_empty())
+                .collect();
         let schedule: Vec<_> = levels
             .iter()
             .flat_map(|level| level.iter().cloned())
@@ -14294,7 +13168,6 @@ mod tests {
         let mut required_bindings = inputs.clone();
         required_bindings.extend(members.iter().cloned());
         required_bindings.extend(faders.iter().cloned());
-        required_bindings.extend(matrices.iter().cloned());
         required_bindings.push(output.clone());
         let plan = crate::PreparedGraphPlan::new(crate::PreparedGraphPlanParts {
             plan_id: 885,
@@ -14372,18 +13245,10 @@ mod tests {
                 GraphNodeBinding::new(node.clone(), Box::new(NoiseInput(track as u32)))
             })
             .collect();
-        nodes.extend(faders.iter().map(|node| {
-            let fader: Box<dyn GraphRuntimeProcessor> = if fixture.split_pair {
-                Box::new(SplitFader)
-            } else {
-                Box::new(ScalarTilt)
-            };
-            GraphNodeBinding::new(node.clone(), fader)
-        }));
         nodes.extend(
-            matrices
+            faders
                 .iter()
-                .map(|node| GraphNodeBinding::new(node.clone(), Box::new(MatrixTilt))),
+                .map(|node| GraphNodeBinding::new(node.clone(), Box::new(ScalarTilt))),
         );
         nodes.push(GraphNodeBinding::identity(output.clone()));
         let meter_at = if fixture.meter_at.is_empty() {
@@ -16338,37 +15203,26 @@ mod tests {
                 ),
             ] {
                 let shape = format!("{width:?}/{tracks}/{consumer}");
-                assert_redirected_meters_are_the_declined_plans(metered, None, &shape);
+                assert_redirected_meters_are_the_declined_plans(metered, &shape);
             }
         }
     }
 
-    /// The fader node `test_only_selected_split_fader` reports for the bind just made, if any.
-    fn selected_split_fader() -> Option<GraphNodeId> {
-        test_only_selected_split_fader().map(|selected| selected.node)
-    }
-
     /// Gate 2's comparison for one metered shape: the declined oracle, then the five redirected
-    /// arms, each against it bit for bit. `control_split` is the fader the oracle's bind hands the
-    /// scalar split pair; every redirected arm must hand it none.
-    fn assert_redirected_meters_are_the_declined_plans(
-        metered: FoldFixture,
-        control_split: Option<GraphNodeId>,
-        shape: &str,
-    ) {
+    /// arms, each against it bit for bit.
+    fn assert_redirected_meters_are_the_declined_plans(metered: FoldFixture, shape: &str) {
         const BLOCKS: u64 = 6;
         let (tracks, frames) = (metered.tracks, metered.frames);
         let run = |fixture: FoldFixture, resident_disabled: bool| {
             let published = Published::default();
             let mut plan = fold_fixture(fixture, &published);
             let bound = [plan.bank_scatter_redirects(), plan.bank_route_folds()];
-            let split = selected_split_fader();
             test_only_meter_input_reset(resident_disabled);
             let master = render_fold_fixture(&mut plan, frames as usize, BLOCKS);
             let counts = test_only_meter_input_counts();
             test_only_meter_input_reset(false);
             let frames = published.lock().unwrap().clone();
-            (bound, split, master, frames, counts)
+            (bound, master, frames, counts)
         };
         let redirected = scatter_shape(FoldFixture {
             metered: false,
@@ -16379,7 +15233,7 @@ mod tests {
         let meters = (tracks * metered.meter_at.len()) as u64;
         let offers = meters * BLOCKS;
         let planar = tracks as u64 * BLOCKS;
-        let (control_bound, split, control_master, control_frames, control_counts) = run(
+        let (control_bound, control_master, control_frames, control_counts) = run(
             FoldFixture {
                 scatter_declined: true,
                 accepts_resident: false,
@@ -16392,7 +15246,6 @@ mod tests {
             [0, 0],
             "{shape}: the control neither redirects nor folds"
         );
-        assert_eq!(split, control_split, "{shape}: the control's split pair");
         assert_eq!(
             control_counts,
             [planar, offers, 0],
@@ -16412,7 +15265,7 @@ mod tests {
             "{shape}: every meter frame carries audio"
         );
         assert!(control_master.iter().any(|word| *word != 0));
-        let (_, _, resident_master, resident_frames, resident_counts) = run(
+        let (_, resident_master, resident_frames, resident_counts) = run(
             FoldFixture {
                 scatter_declined: true,
                 ..metered
@@ -16435,13 +15288,12 @@ mod tests {
             ),
             ("resident offer withdrawn", metered, true, [planar, 0, 0]),
         ] {
-            let (bound, split, master, frames, counts) = run(fixture, resident_disabled);
+            let (bound, master, frames, counts) = run(fixture, resident_disabled);
             assert_eq!(
                 bound,
                 [redirected, 0],
                 "{shape}/{name}: the unmetered plan's redirects, and no fold"
             );
-            assert_eq!(split, None, "{shape}/{name}: no split pair");
             assert_eq!(
                 counts, expected_counts,
                 "{shape}/{name}: [planar, offered, accepted]"
@@ -16453,72 +15305,6 @@ mod tests {
             assert_eq!(
                 frames, control_frames,
                 "{shape}/{name}: every meter frame is the unredirected plan's"
-            );
-        }
-    }
-
-    /// A fader that is a redirect consumer is kept out of the scalar split fader/matrix pair
-    /// (`build_sequential` skips a pair whose fader or matrix consumes a redirect). Before issue
-    /// #886 a meter on the last slot declined the redirect and so freed the fader for the pair: a
-    /// metered plan took the split pair where the same plan unmetered took the redirect. Now both
-    /// take the redirect, and the metered plan has the unmetered plan's shape.
-    ///
-    /// The shape adds a bound scalar `PostMatrix` after each fader, and a fader owner that offers
-    /// the split pair (a deferring owner: the fader's arithmetic runs at the matrix slot). Faders
-    /// are consecutive in the schedule, so track 0's fader and matrix are not adjacent, which is
-    /// the only interval the split pair admits. Asserted on the bound plan:
-    ///
-    /// * unmetered: every lane redirected, no split pair;
-    /// * metered at the last slot and its later tap: the same -- the redirect, not the split pair;
-    /// * the declined oracle (the path a fully metered plan took before #886): no redirect, and
-    ///   track 0's fader is the selected split fader.
-    ///
-    /// Then gate 2's comparison: every redirected, metered arm renders the master and every meter
-    /// frame bit for bit as the declined oracle, which renders through the split pair.
-    ///
-    /// Red mutation: drop the redirect-consumer exclusion from the split pass -- the metered and
-    /// unmetered arms select a split fader.
-    #[test]
-    fn a_metered_redirect_consumer_stays_out_of_the_split_pair_and_keeps_the_bits() {
-        for &width in BankWidth::ALL {
-            let tracks = width.lanes() as usize;
-            let frames = 13;
-            let shape = format!("{width:?}/{tracks}/split pair");
-            let metered = FoldFixture {
-                split_pair: true,
-                ..FoldFixture::scattered(width, tracks, frames)
-            };
-            let track_zero_fader = GraphNodeId::TrackStage {
-                track_id: crate::StableGraphId::parse("track00").expect("stable id"),
-                stage: TrackStage::PostFader,
-            };
-            let lanes = tracks as u64;
-            let path = |fixture: FoldFixture| (scatter_shape(fixture), selected_split_fader());
-            assert_eq!(
-                path(FoldFixture {
-                    metered: false,
-                    ..metered
-                }),
-                ([lanes, 0], None),
-                "{shape}: unmetered, every lane redirects and no fader is split"
-            );
-            assert_eq!(
-                path(metered),
-                ([lanes, 0], None),
-                "{shape}: metered, the same shape as unmetered -- the redirect, not the split pair"
-            );
-            assert_eq!(
-                path(FoldFixture {
-                    scatter_declined: true,
-                    ..metered
-                }),
-                ([0, 0], Some(track_zero_fader.clone())),
-                "{shape}: with the redirect declined, track 0's fader takes the split pair"
-            );
-            assert_redirected_meters_are_the_declined_plans(
-                metered,
-                Some(track_zero_fader),
-                &shape,
             );
         }
     }
@@ -18538,9 +17324,8 @@ mod follow_route_op_tests {
         /// per-column ramps (R18-5: MAJOR-2, MINOR-1) and the carried record's order (MAJOR-3).
         mod fold {
             use super::super::super::{
-                CompensationDelay, DisjointArena, GraphRuntimeSplitPairProcessor, HostMaster,
-                NodeKind, ROUTE_DESTINATION, RouteActivity, RouteInput, RuntimeOp, TrackDelayLine,
-                execute_op,
+                CompensationDelay, DisjointArena, HostMaster, NodeKind, ROUTE_DESTINATION,
+                RouteActivity, RouteInput, RuntimeOp, TrackDelayLine, execute_op,
             };
             use super::super::{LENGTHS, Timeline};
             use super::{
@@ -18587,7 +17372,6 @@ mod follow_route_op_tests {
                         sidechain: None,
                         output,
                         kind,
-                        split_pair: None,
                         observers: Box::default(),
                     };
                     Self {
@@ -18640,11 +17424,8 @@ mod follow_route_op_tests {
                     // The host's planes start as stale words: the Output op writes every one.
                     let (mut host_left, mut host_right) = (vec![9.0; frames], vec![9.0; frames]);
                     for (op, unit) in [(&mut self.route, 0), (&mut self.destination, 1)] {
-                        let (delays, lines, pairs): (
-                            &mut [CompensationDelay],
-                            &mut [TrackDelayLine],
-                            &mut [Box<dyn GraphRuntimeSplitPairProcessor>],
-                        ) = (&mut [], &mut [], &mut []);
+                        let (delays, lines): (&mut [CompensationDelay], &mut [TrackDelayLine]) =
+                            (&mut [], &mut []);
                         let host = (self.host && unit == 1).then(|| {
                             HostMaster::new(&mut host_left, &mut host_right, frames)
                                 .expect("host planes")
@@ -18654,7 +17435,6 @@ mod follow_route_op_tests {
                             &mut arena,
                             delays,
                             lines,
-                            pairs,
                             0,
                             snapshot,
                             host,

@@ -38,9 +38,13 @@ nothing would otherwise pass by finding nothing at all.
 What is not matched
 -------------------
 The per-effect one-lane leg (`W = 1`, `FrameLane`) is live production code at every width and is
-not the whole-plan scalar path. The executor's split-pair slot and table stay in every build
-because every plan's resource estimate charges their layout; with no factory compiled in they are
-never filled, and they own no function of their own to find.
+not the whole-plan scalar path.
+
+The scalar pair entries (`ScalarPairProcessor`, `ScalarSplitPairProcessor`, `make_scalar_pair`,
+`make_scalar_split_pair`, `select_scalar_pairs`, `scalar_pair_is_in_place`,
+`scalar_split_interval_is_clear`, `scalar_pair_factory`, `scalar_split_pair_factory`) name code
+that issue #1767 deleted from every build, with the executor's split-pair slot and table. They stay
+in `FORBIDDEN` so that the pair cannot come back into a shipped artifact.
 """
 from __future__ import annotations
 

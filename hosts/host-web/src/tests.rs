@@ -1,8 +1,6 @@
 use core::mem::{offset_of, size_of, size_of_val};
 
-use host_core::{
-    SpectrumSmoothingConfig, prepare_host_runtime_with_selected_meters_between_render_calls,
-};
+use host_core::{SpectrumSmoothingConfig, prepare_host_runtime_with_selected_meters};
 use session::{canonical_session_json, parse_session_json};
 
 use super::*;
@@ -861,7 +859,7 @@ fn observation_staging_resource_is_exact_for_the_taps_off_and_on_modes() {
         let caps = prepare_caps(&compiled, options, source_ring_frames, u64::MAX);
         let live_controls =
             live_control_request(options, shape.quantum_frames).expect("live-control request");
-        let (engine, _) = prepare_host_runtime_with_selected_meters_between_render_calls(
+        let (engine, _) = prepare_host_runtime_with_selected_meters(
             &compiled,
             &caps,
             &live_controls,
