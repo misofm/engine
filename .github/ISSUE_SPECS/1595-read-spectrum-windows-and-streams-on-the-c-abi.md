@@ -366,7 +366,8 @@ Gates (attempt 1), test value:
 - Gate 1 `message_wire::tests::spectrum_stream_round_trips_and_refuses_malformed_frames_both_ways`:
   red if the codec admits a contradictory stream request or a reply of the wrong shape (planes
   against `channels`, a 1,024-bin plane, a smoothing of 10,001 or NaN, a status outside the
-  table, a selection without its identity), or the stream measure drifts from the encoder.
+  table, a selection without its identity, a ready window count that is not `sequence + 1`), or
+  the stream measure drifts from the encoder.
 - Bit 16 invariants, assertions added to
   `message_wire::tests::capability_id_views_reject_order_allocation_and_session_family_identically`:
   red if a record that lists only some of the three, or lists them without bit 16, or sets bit 16
@@ -394,3 +395,11 @@ the frame limit before the session runs and the reply is recorded for replay in 
 writes it. The consume-then-fail paths are the analyzer's `WindowInvalid` of a popped window (as
 for a capture) and the core's own `Exhausted` refusal of `read_stream` (an analysis epoch or
 window count at `u64::MAX`), which the core records as `failed`.
+
+Mutants (each red on its gate, restored by `git checkout` + `touch`): no stream read preflight
+(gate 3), R6 without the stream measure (R6 row), no boot R6 (R6 row), stream left bins from the
+right plane (gate 4), a reset reply with a stale analysis epoch (gate 4), a ready status kept on a
+reset reply (gate 4), select through `select_stream` (gate 4), the reply's smoothing unchecked
+(gate 1), the `0x0011` together rule dropped (invariants), bit 16 never set (controller row),
+capi `SPECTRUM` false (capi row). One survived and was folded: the ready `windows = sequence + 1`
+rule unchecked; gate 1 now refuses it.
