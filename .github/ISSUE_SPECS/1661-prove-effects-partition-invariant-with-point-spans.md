@@ -156,3 +156,30 @@ Checked against `12d4a4f9d`.
   (`crates/controls/src/effect_rows.rs:146-160`). The probe covers the descriptor's `Block` cells,
   as written. Re-count them at filing (#1336 and #1337 are still open).
 - **Dependencies.** #1069 is still open.
+
+## Decision and evidence record (attempt 1, 2026-10-24)
+
+- **Deliverable 3 is done.** #1069 closed (PR #1774); the multiband differential runs with no
+  `known` list. Nothing to edit there.
+- **The bypass-crossfade schedule** of the amendment goes to #1662 (root): the crossfade is a
+  rack/graph stage step that the conformance harness does not drive.
+- **D1.** `partition_with_points_probe` runs for every unbypassed prepared configuration, over
+  `latency + 3q` samples. Continuous cells alternate between their two bounds (the one farther
+  from the default first), Boolean cells between 1 and 0, enumerations between their first two
+  choices. The probe raises the prepared span capacity to the schedule's spans per sample.
+- **D1, the EQ form.** The EQ declares `Block` cells but refuses every raw span, so the rule is
+  "an effect with `target_preparation` takes the schedule as targets", not "an effect with no
+  `Block` cell". Only continuous `Block` cells move (#1337); every Boolean cell is prepared on so
+  the moved sections are in the signal path.
+- **D2.** A chunked block draws its chunk before its spans, and each span lands at `first` or
+  `first + cut`. The bank and the mono arm render the same two pieces; their summed reports now
+  equal the scalar oracle's on every block, chunked or not. `run_scalar` keeps block-start spans:
+  its oracle renders whole. `chunked_blocks_with_point` is per width; `assert_reached` requires it
+  nonzero at every width that bound a bank.
+- **Result.** All eight launch effects pass D1 and D2; no effect defect found.
+- **PR evidence.** A compressor mutant that renders a block's first frame before it applies the
+  block's spans (a `Point` one sample late in a multi-frame block) turns
+  `passes_effect_contract_conformance` red with exactly `process.partition_invariance_points`.
+  A harness mutant that skips the EQ's targets in forms (b) and (c) turns the EQ red, so the
+  targets move its output. A harness mutant that packs the bank pieces' spans in reversed lane
+  order turns the compressor differential red. All reverted.
