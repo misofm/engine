@@ -164,4 +164,19 @@ and H #1530; the later slice rebases. It needs no named exception.
 
 ## Attempt record
 
-*(empty: to be filled by the implementer)*
+**Attempt 1 (2026-10-24, on `main` at `1eedbf419`).** Scope note `scope/1533.md` accepted by root
+(R1): the anchors moved (`qualifyBrowser`, `validate`, `MUTATIONS`, `mutate` re-verified); D1-D5
+implemented as written. One refinement of D2/D4: the read's evaluate error is caught too, and a
+timeout or read failure is raised after the `browser-execution` gate, so a dead page names its own
+error first; `result.pageErrors` is set only when the read answered, so `page-errors-missing`
+models a dropped read.
+
+- Gate 1 (one unloaded run per browser, R1; not three): green in Chromium 151.0.7922.34, Firefox
+  153.0, WebKit 26.5 (Playwright 1.62.1), with `--sdk-root --check-matrix
+  --self-test-mutations` and the locally built artifact. No page error on the unmutated tree (D5).
+- Gate 2: the three result mutations are red in all three legs (`<browser>: page-errors:`).
+- Gate 3: P3 red in all three browsers (WebKit also without `--sdk-root`). Both channels caught
+  it in every browser: Playwright 1.62.1 reports an unhandled rejection as `pageerror` in Chromium
+  and Firefox too (WebKit prefixes `Unhandled Promise Rejection:`). P1 and P2 move to #1605.
+- Gate 4 (5 loaded WebKit runs) moves to #1605 (sprint mode, root R1).
+- Gate 5: `bash scripts/check-workspace-policy.sh` passes.

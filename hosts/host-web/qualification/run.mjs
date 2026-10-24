@@ -60,6 +60,9 @@ const MUTATIONS = [
   "sdk-observation-wait-unbounded", "sdk-observation-wait-late", "sdk-observation-wait-early",
   "sdk-observation-wait-untyped", "sdk-observation-wait-rendered",
   "sdk-observation-wait-after-render", "sdk-observation-wait-resend",
+  // Issue #1533: a Playwright page error, a page-side unhandled rejection, and a result that
+  // `qualifyBrowser` never gave its page-error lists.
+  "page-errors", "page-errors-window", "page-errors-missing",
 ];
 
 // The total time the page may take, from the first evaluate to the result, clicks included. A page
@@ -187,6 +190,13 @@ async function buildSdkBundle(sdkRoot) {
 function validate(browserName, result) {
   gate(browserName, "result-schema", result?.schema === "miso.web.qualification.result.v1",
     "unexpected browser result");
+  // Issue #1533 D3/D4: any page error or unhandled rejection is red, before every result gate and
+  // before the attestation early return. No allow-list (D5).
+  const pageErrors = result.pageErrors;
+  gate(browserName, "page-errors", pageErrors !== null && typeof pageErrors === "object"
+    && Array.isArray(pageErrors.playwright) && Array.isArray(pageErrors.window)
+    && pageErrors.playwright.length === 0 && pageErrors.window.length === 0,
+  JSON.stringify(pageErrors ?? null));
   gate(browserName, "secure-context", result.secureContext === true,
     "qualification did not run in a secure context");
   const supported = result.attestation?.probe === true;
@@ -1011,6 +1021,9 @@ function mutate(result, mutation) {
   }
   if (mutation === "sdk-render-allocations") copy.sdkResponse.renderAllocations[0].count = 1;
   if (mutation === "sdk-render-allocations-missing") copy.sdkResponse.renderAllocations.splice(1, 1);
+  if (mutation === "page-errors") copy.pageErrors.playwright.push("pageerror: Error: planted");
+  if (mutation === "page-errors-window") copy.pageErrors.window.push("unhandledrejection: Error: planted");
+  if (mutation === "page-errors-missing") delete copy.pageErrors;
   return copy;
 }
 
@@ -1139,11 +1152,31 @@ async function qualifyBrowser(browserName, engine, origin, proveMutations, sdkEn
     const page = await browser.newPage();
     const diagnostics = [];
     page.on("console", (message) => diagnostics.push(`console ${message.type()}: ${message.text()}`));
-    page.on("pageerror", (error) => diagnostics.push(`pageerror: ${error.message}`));
+    // Issue #1533 D1: two channels, one gate. Playwright's `pageerror` (uncaught main-thread
+    // exceptions), and page-side `error`/`unhandledrejection` listeners installed before any page
+    // script runs.
+    const pageErrors = [];
+    page.on("pageerror", (error) => {
+      diagnostics.push(`pageerror: ${error.message}`);
+      pageErrors.push(`pageerror: ${error.name}: ${error.message}`);
+    });
     page.on("response", (response) => {
       if (!response.ok()) diagnostics.push(`HTTP ${response.status()}: ${response.url()}`);
     });
     page.setDefaultTimeout(120000);
+    await page.addInitScript(() => {
+      const list = [];
+      Object.defineProperty(window, "__qualificationPageErrors", {
+        value: list, writable: false, configurable: false, enumerable: false,
+      });
+      window.addEventListener("unhandledrejection", (event) => {
+        const reason = event.reason;
+        list.push(`unhandledrejection: ${reason?.name ?? typeof reason}: ${reason?.message ?? String(reason)}`);
+      });
+      window.addEventListener("error", (event) => {
+        list.push(`error: ${event.message} at ${event.filename}:${event.lineno}`);
+      });
+    });
     await page.goto(`${origin}/qualification/index.html`);
     const plan = await page.evaluate(
       async (enabled) => (await import(`/qualification/qualification.js${enabled ? "?sdk=1" : ""}`))
@@ -1203,12 +1236,35 @@ async function qualifyBrowser(browserName, engine, origin, proveMutations, sdkEn
       clearTimeout(deadlineTimer);
     }
     const result = await execution;
+    // Issue #1533 D2: read the page list once, after two task turns so a rejection the last
+    // microtask checkpoint left unhandled has reached its event. A page that does not answer fails
+    // by name at the 10 s timer (or with the evaluate's error); no retry. The failure is raised
+    // after the `browser-execution` gate, which names a dead page's own error first (D4).
+    let errorReadTimer;
+    const errorRead = await Promise.race([
+      page.evaluate(async () => {
+        for (let turn = 0; turn < 2; turn += 1) await new Promise((resolve) => setTimeout(resolve, 0));
+        return [...window.__qualificationPageErrors];
+      }).then((list) => ({ kind: "read", list }), (error) => ({ kind: "error", error })),
+      new Promise((resolve) => {
+        errorReadTimer = setTimeout(() => resolve({ kind: "timeout" }), 10_000);
+      }),
+    ]).finally(() => clearTimeout(errorReadTimer));
+    if (errorRead.kind === "read") {
+      result.pageErrors = { playwright: [...pageErrors], window: [...errorRead.list] };
+    }
     if (result.resumes !== undefined) {
       result.resumes.planned = plan.length;
       result.resumes.clicksPerformed = clicksPerformed;
     }
     gate(browserName, "browser-execution", result.qualificationError === undefined,
       `${JSON.stringify(result.qualificationError, (_key, value) => (typeof value === "bigint" ? `${value}n` : value))}${diagnostics.length === 0 ? "" : `; ${diagnostics.join("; ")}`}`);
+    if (errorRead.kind === "timeout") {
+      throw new Error(`${browserName}: page-errors: the page did not answer the error read within 10 s; page diagnostics: ${diagnostics.join("; ")}`);
+    }
+    if (errorRead.kind === "error") {
+      throw new Error(`${browserName}: page-errors: the error read failed: ${errorRead.error?.message ?? String(errorRead.error)}; page diagnostics: ${diagnostics.join("; ")}`);
+    }
     const outcome = validate(browserName, result);
     if (proveMutations) mutationProofs(browserName, result);
     if (Array.isArray(result.renderAllocations)) {
