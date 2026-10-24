@@ -58,3 +58,5 @@ V8 spill gate, Node v22.23.2, on named twins from `scripts/build-web-audioworkle
 | mono armed depth-2 pair, masked (c 0) | 103/6; 0 | 100/5; 0 | FAIL `[rbp-0xe0]` | 97/4; 0 |
 
 Both branch builds: gate exit 0. Class A: the 51 `*output_sha256` fields (42 distinct) of one untimed `bench console` warmup are identical on base `82024d367` and the branch. `g2_kernel_identity` (10 tests), `parametric-eq --release`, `run-wasm-gates.sh`, `check-web-audioworklet.sh` (1.97.1) and `check-browser-expected-resources.py` pass. Mutants: section 1 reading the newest frame, and the short-block fallback skipped, both turn `g2_kernel_identity` red.
+
+The dual armed depth-1 tail's "lower its ceiling" note stays (root): the row carries 0 slots on 1.97.1 but 1 on 1.99.1, so its ceiling of 1 cannot drop before #877 moves the toolchain.
