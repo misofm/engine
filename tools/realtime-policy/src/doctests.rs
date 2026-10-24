@@ -328,6 +328,20 @@ fn blocks(doc: &[DocLine]) -> Vec<Block> {
             previous_blank = true;
             continue;
         }
+        // A list item that opens with four or more spaces past its content indent opens with an
+        // indented code block.
+        if let Container::List(width) = container
+            && indent_width(rest) >= 4
+        {
+            list = Some(width);
+            let code = hidden_stripped(strip_width(rest, 4));
+            let block = Block {
+                code: vec![(code, line.line)],
+                line: line.line,
+            };
+            indented = Some((block, 0, width + 4));
+            continue;
+        }
         let in_list = depth == 0 && (list.is_some() || matches!(container, Container::List(_)));
         if let Some((marker, length, info)) = opening(rest, in_list) {
             fence = Some(Fence {
@@ -412,8 +426,9 @@ fn quote_marker(text: &str) -> Option<&str> {
     Some(after.strip_prefix(' ').unwrap_or(after))
 }
 
-/// The byte width of a list marker and the spaces after it (one to four), if `text` opens a list
-/// item.
+/// The byte width of a list marker and the spaces after it, if `text` opens a list item: one to
+/// four spaces, or one when five or more follow (the item then opens with an indented code block,
+/// CommonMark example 273).
 fn list_marker(text: &str) -> Option<usize> {
     let indent = text.len() - text.trim_start_matches(' ').len();
     if indent > 3 {
@@ -431,10 +446,11 @@ fn list_marker(text: &str) -> Option<usize> {
     };
     let after = &body[marker..];
     let spaces = after.len() - after.trim_start_matches(' ').len();
-    if !(1..=4).contains(&spaces) {
-        return None;
+    match spaces {
+        0 => None,
+        1..=4 => Some(indent + marker + spaces),
+        _ => Some(indent + marker + 1),
     }
-    Some(indent + marker + spaces)
 }
 
 /// The rest of a line inside an open fence's container, or `None` when the line ends it.
@@ -494,16 +510,26 @@ fn is_closing(text: &str, marker: char, length: usize, in_list: bool) -> bool {
 /// `Ennnn` error code) counts only when no other word came before it, `rust` always counts, an
 /// `editionNNNN` is neutral, and any other word makes the block not Rust when no Rust tag stands.
 /// A Rust block is compiled unless it is `ignore`. An `ignore-<target>` ignores the block on one
-/// target only, so the block is compiled on the others and here counts as compiled.
+/// target only, so the block is compiled on the others and here counts as compiled. A `{..}`
+/// attribute block is skipped, as rustdoc's tag iterator does.
+///
+/// Where the reading would have to copy pulldown-cmark or rustdoc exactly, the block counts as
+/// compiled (fail closed): an info string that holds `&` or `\` (an entity, numeric or escape
+/// reference that the markdown parser decodes first), and a `{` or `}` that does not form a
+/// plain attribute block (rustdoc rejects it). `E0123,text` counts as compiled on purpose:
+/// stable rustdoc does not compile it, nightly does, and the over-refusal is safe.
 fn compiled(info: &str) -> bool {
+    if info.contains(['&', '\\']) {
+        return true;
+    }
+    let Some(words) = words(info) else {
+        return true;
+    };
     let mut rust = true;
     let mut ignore = false;
     let mut seen_rust_tags = false;
     let mut seen_other_tags = false;
-    for token in info
-        .split([',', ' ', '\t'])
-        .filter(|token| !token.is_empty())
-    {
+    for token in words {
         match token {
             "should_panic" | "no_run" => seen_rust_tags = !seen_other_tags,
             "ignore" => {
@@ -530,6 +556,35 @@ fn compiled(info: &str) -> bool {
     }
     rust &= !seen_other_tags || seen_rust_tags;
     rust && !ignore
+}
+
+/// The words of an info string, split on `,`, space and tab, with each `{..}` attribute block
+/// skipped; `None` when a brace or a quote inside braces makes the string one this reading does not
+/// copy.
+fn words(info: &str) -> Option<Vec<&str>> {
+    let mut words = Vec::new();
+    let mut rest = info;
+    loop {
+        rest = rest.trim_start_matches([',', ' ', '\t']);
+        if rest.is_empty() {
+            return Some(words);
+        }
+        if let Some(inside) = rest.strip_prefix('{') {
+            let close = inside.find('}')?;
+            if inside[..close].contains(['{', '"']) {
+                return None;
+            }
+            rest = &inside[close + 1..];
+            continue;
+        }
+        let end = rest.find([',', ' ', '\t']).unwrap_or(rest.len());
+        let word = &rest[..end];
+        if word.contains(['{', '}']) {
+            return None;
+        }
+        words.push(word);
+        rest = &rest[end..];
+    }
 }
 
 /// A code line with rustdoc's hidden-line prefix removed: `#` alone or `# `/`#\t` before the rest

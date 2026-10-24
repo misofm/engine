@@ -109,6 +109,11 @@ fn an_unsafe_block_in_a_compiled_doctest_is_a_finding() {
             2,
         ),
         (
+            "tools/bench/src/d_list_indented.rs",
+            format!("/// -     {code}\npub fn item() {{}}\n"),
+            1,
+        ),
+        (
             "tools/bench/src/d_indented.rs",
             format!("/// Text.\n///\n///     {code}\npub fn item() {{}}\n"),
             3,
@@ -141,18 +146,27 @@ fn an_include_in_a_compiled_doctest_is_a_finding() {
     assert_rows("doctest-include", Class::IncludeInDoctest, &rows);
 }
 
-/// A block that rustdoc does not compile, prose, inline code and the attribute that only names the
-/// word are not findings.
+/// A block that rustdoc does not compile, prose, an indented line that continues a paragraph,
+/// inline code and the attribute that only names the word are not findings.
 #[test]
 fn a_block_that_rustdoc_does_not_compile_is_accepted() {
     let code = format!("{UNSAFE} {{ f() }} include!(\"x.rs\"); \"unbalanced");
     let mut text = String::new();
-    for info in ["text", "toml", "sh", "ignore", "rust,ignore", "text,no_run"] {
+    for info in [
+        "text",
+        "toml",
+        "sh",
+        "ignore",
+        "rust,ignore",
+        "text,no_run",
+        "text,{.rust}",
+    ] {
         text.push_str(&fenced(info, &code));
     }
     text.push_str(&format!(
         "/// Prose: {UNSAFE} {{ f() }} and include!(\"x.rs\"), with `{UNSAFE} {{ f() }}` inline.\n\
-         /// ```\n/// #![forbid({UNSAFE}_code)]\n/// ```\npub fn last() {{}}\n"
+         /// ```\n/// #![forbid({UNSAFE}_code)]\n/// ```\npub fn last() {{}}\n\
+         /// Para\n///     {UNSAFE} {{ f() }}\npub fn para() {{}}\n"
     ));
     expect_valid(
         "doctest-not-compiled",

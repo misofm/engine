@@ -102,3 +102,21 @@ block holds unsafe or include!, report to root before refusing it.
 - Mutants (each restored by `git checkout`): the rule switched off (the parent's behaviour) turns the
   unsafe, include and unlexable tests red (gate 2: every refused row is accepted without the rule); the
   allowlist ignored turns the allowlisted test red; the `>` marker unrecognized turns the unsafe test red.
+
+## Attempt 2 (2026-10-24, after the attempt-1 verdict)
+
+- Root rule: where copying pulldown-cmark exactly is fragile, the block counts as compiled (fail closed),
+  while the real tree stays at 0 findings.
+- Info string: a `{..}` attribute block is skipped, as rustdoc's tag iterator does (`{.rust}` and `{.text}`
+  are compiled, `text,{.rust}` is not). A malformed brace (`{.rust`, `rust,{`) and an info string that holds
+  `&` or `\` (entity, numeric or escape references) count as compiled. rustdoc does not compile a malformed
+  brace or `te\xt`, so both are safe over-refusals. `E0123,text` counts as compiled on purpose (nightly
+  compiles it).
+- A list marker followed by 5 or more spaces opens the item with an indented code block (CommonMark
+  example 273: the content starts one space after the marker).
+- New rows: refused `no_run,text`, `{.rust}`, `{.text}`, `r&#117;st`, `-     unsafe {..}`; accepted
+  `text,{.rust}`, `Para` followed by a 4-space line.
+- rustdoc 1.97.1 probe (`rustdoc --test` on each new row, scratchpad script, not committed): `no_run,text`,
+  `{.rust}`, `{.text}`, `r&#117;st` and the list row are compiled; `text,{.rust}`, the paragraph continuation
+  and `E0123,text` are not tests. Each matches the tool's row (the last one is the stated over-refusal).
+- Real tree: still 38 compiled blocks, 4 allowlisted with unsafe, 0 refusals.
