@@ -3102,7 +3102,11 @@ where
         // not yet in the window, which folds them only after the commit), or a move of the
         // window (read here, before the reservation; a watermark read that gives up counts as
         // "may"). A declared discontinuity carries nothing. Conservative, it over-reports.
-        let transaction = matches!(kind, Rebuild::Transaction(_));
+        // #1594 (attempt 2): a monitor rebuild that supersedes a withdrawn candidate A carries A's
+        // edits against the plan A succeeds, so its join can carry a following route as a
+        // transaction that supersedes A would: it takes the same outcome terms. A monitor rebuild
+        // on the newest plan has an equal model and carries no route change.
+        let transaction = matches!(kind, Rebuild::Transaction(_)) || (monitor && superseding);
         let send_fallback = transaction
             && follow_into_following
             && (follow_retarget_ramp > 0
@@ -3125,6 +3129,13 @@ where
                 follow_retarget_ramp.max(send_landing_ramp(next))
             }
             Rebuild::Transaction(_) => follow_retarget_ramp,
+            Rebuild::Monitor { model, .. } if superseding => {
+                if follow_loses_a_curve || send_fallback {
+                    follow_retarget_ramp.max(send_landing_ramp(model.normalized_model()))
+                } else {
+                    follow_retarget_ramp
+                }
+            }
             Rebuild::Discontinuity(_) | Rebuild::Monitor { .. } => 0,
         };
         let outcome = if transaction && (follow_into_six_word || send_fallback) {

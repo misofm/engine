@@ -1245,6 +1245,34 @@ fn an_equal_or_hop_only_configure_publishes_no_plan() {
         restarted.iter().all(|spacing| *spacing == 1_024),
         "{restarted:?}"
     );
+
+    // A hop-only configure while a structural candidate is pending: the candidate carries the
+    // new configuration, so its promotion adopts the configured epoch and the next stream starts
+    // with the new hop.
+    rig.rebuild(&add_muted_track());
+    let pending = rig
+        .configure(&collection_as_request(Some(512)))
+        .expect("hop only while pending");
+    assert!(!pending.rebuild);
+    rig.until_promoted();
+    let monitor = rig.session.test_spectrum();
+    assert_eq!(monitor.adopted_epoch(), monitor.configured_epoch());
+    assert_eq!(monitor.configured_epoch(), pending.configured_epoch);
+    let (service, analysis) = rig
+        .session
+        .test_spectrum_mut()
+        .service_and_analysis_mut()
+        .expect("a service");
+    service.stop_stream(Some(analysis));
+    rig.start_stream();
+    let mut last = Vec::new();
+    for _ in 0..40 {
+        rig.block();
+        last.push(rig.read_stream());
+    }
+    let tuned = spacings(&windows(&last));
+    assert!(tuned.len() >= 4);
+    assert!(tuned.iter().all(|spacing| *spacing == 512), "{tuned:?}");
 }
 
 /// #1594 gate 5 (scope gate 6), with the render allocation check of every block. Turns red if a
@@ -1363,7 +1391,14 @@ fn a_refused_configure_changes_nothing_and_a_pending_edit_is_superseded() {
         assert_eq!(rig.watermark(), watermark, "{code}");
     }
 
-    rig.rebuild(&add_muted_track());
+    // The pending edit adds a track (a rebuild) and moves `eq1`'s fader, which the successor
+    // carries from the running plan as a retarget: the superseding configure is prepared against
+    // the running plan's base, whose model lacks the edit, and stamps that retarget.
+    let mut moved = fixture().tracks[1].clone();
+    moved.fader.left_db = -6.0;
+    let mut pending = add_muted_track().to_vec();
+    pending.push(SessionEdit::UpsertTrack { track: moved });
+    rig.rebuild(&pending);
     let revision = rig.session.test_controller().session().revision().0;
     assert_eq!(
         rig.session.test_pending_providers().len(),
@@ -1470,4 +1505,93 @@ fn alternating_configures_against_a_rendering_thread_allocate_nothing_on_render(
         done.store(true, Ordering::Release);
         assert!(render.join().expect("render thread") > 0);
     });
+}
+
+/// The fixture with a submix `b` fed by `eq0`'s pre-fader send `eq0-b`, which follows `eq0`'s mute,
+/// and `eq0`'s mute lane driven by a stored entry `eq0-mute` held open: a following route whose
+/// source automates a mute lane.
+fn follow_document() -> String {
+    use session::{
+        Automation, AutomationOffset, AutomationSegment, AutomationShape, ControlAddress, Owner,
+        ParameterUnit, Section, SendTap,
+    };
+    let mut model = fixture();
+    let mut send = model.routes[0].clone();
+    send.id = id("eq0-b");
+    send.source = RouteSource::Track {
+        track_id: id("eq0"),
+        tap: SendTap::PreFader,
+    };
+    send.destination = RouteDestination::SubmixInput { submix_id: id("b") };
+    send.follows_mute = true;
+    let mut out = model.routes[0].clone();
+    out.id = id("b-main");
+    out.source = RouteSource::Submix {
+        submix_id: id("b"),
+        tap: SendTap::PostPan,
+    };
+    model.routes.push(send);
+    model.routes.push(out);
+    let console = model.console.clone();
+    model.submixes.push(Submix::unity(id("b"), &console));
+    model.automation.push(Automation {
+        id: id("eq0-mute"),
+        target: ControlAddress {
+            owner: Owner::Strip(id("eq0")),
+            section: Section::Builtins,
+            control: 6,
+            lane: session::ParameterChannel::Both,
+        },
+        segments: vec![AutomationSegment {
+            shape: AutomationShape::Step,
+            start_sample: 0,
+            end_sample: 1 << 30,
+            start_value: 0.0,
+            end_value: 0.0,
+            unit: ParameterUnit::Linear,
+        }],
+        offset: AutomationOffset::default(),
+    });
+    canonical_session_json(&model).expect("canonical follow document")
+}
+
+/// #1594 attempt 2 (the verifier's first MAJOR). Turns red if a monitor rebuild that supersedes a
+/// pending transaction drops the transaction's fallback: removing `eq0`'s last mute entry carries
+/// the following send `eq0-b` into a six-word route, so that transaction completes as the
+/// transition fallback (shown on a twin); superseded by a configure before render adopts it, the
+/// successor carries the same edit against the same base and completes the revision as the
+/// fallback too.
+#[test]
+fn a_configure_that_supersedes_a_fallback_edit_reports_the_fallback() {
+    let document = follow_document();
+    let remove = [SessionEdit::RemoveAutomation {
+        automation_id: id("eq0-mute"),
+    }];
+    let mut twin = Rig::of(&document, None);
+    let mut rig = Rig::of(&document, None);
+    for _ in 0..3 {
+        twin.block();
+        rig.block();
+    }
+    twin.rebuild(&remove);
+    twin.until_promoted();
+    twin.block();
+    assert_eq!(
+        twin.watermark().transition_fallback,
+        1,
+        "the edit alone is the fallback"
+    );
+
+    rig.rebuild(&remove);
+    let reply = rig.configure(&single_request()).expect("supersede");
+    assert!(reply.rebuild);
+    rig.until_promoted();
+    rig.block();
+    let after = rig.watermark();
+    assert_eq!(after.revision, twin.watermark().revision);
+    assert_eq!(
+        after.transition_fallback, 1,
+        "the superseding configure keeps the fallback"
+    );
+    assert_eq!(after.outcome_flags, twin.watermark().outcome_flags);
 }
