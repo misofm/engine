@@ -1506,10 +1506,8 @@ pub fn pdc_delay_block(ring: &mut [f32], cursor: &mut usize, io: &mut [f32]) {
 /// Each segment reads the ring into `out` before it writes `source` into the ring. No
 /// floating-point operation, so this kernel is exact by construction and needs no width.
 ///
-/// # Panics
-///
-/// Panics if `source` and `out` differ in length, if they are longer than `ring`, or if `cursor`
-/// is not a position inside `ring`.
+/// Debug builds assert that `source` and `out` have the same length, that they are no longer
+/// than `ring`, and that `cursor` is a position inside `ring`; callers keep these invariants.
 #[inline(always)]
 pub fn pdc_delay_move_block(ring: &mut [f32], cursor: &mut usize, source: &[f32], out: &mut [f32]) {
     debug_assert_eq!(source.len(), out.len());

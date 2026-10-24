@@ -2364,6 +2364,8 @@ impl CompensationDelay {
         debug_assert_eq!(source_left.len(), left.len());
         debug_assert_eq!(source_right.len(), right.len());
         let samples = self.left.len();
+        // Defensive: graph-compiler emits a compensation line only when its delay is positive
+        // (pdc.rs), so no compiled plan reaches this branch.
         if samples == 0 {
             left.copy_from_slice(source_left);
             right.copy_from_slice(source_right);
