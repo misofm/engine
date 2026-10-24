@@ -270,6 +270,19 @@ impl Rig {
     }
 }
 
+/// An edit that adds an EQ insert named `name` to `eq0`, last.
+fn add_insert(name: &str, position: u32) -> SessionEdit {
+    SessionEdit::PutTrackEffect {
+        track_id: id("eq0"),
+        rack_name: RackName::Inserts,
+        final_position: position,
+        effect: eq(
+            &session::parse_session_json(SESSION).expect("fixture"),
+            name,
+        ),
+    }
+}
+
 fn response(ready: ResponseReady) -> TrackResponse {
     ready.result.expect("a track response")
 }
@@ -287,6 +300,7 @@ fn response(ready: ResponseReady) -> TrackResponse {
 /// request leaves a tag or a pending state behind.
 #[test]
 fn capture_follows_newest_plan() {
+    bench_support::alloc::assert_installed();
     let mut rig = Rig::new(None);
     assert_eq!(rig.arm("nope"), Err(ResponseCaptureRefusal::UnknownStrip));
     assert_eq!(
@@ -303,6 +317,11 @@ fn capture_follows_newest_plan() {
     );
     assert_eq!(rig.arm("eq0"), Ok(1));
     assert_eq!(rig.arm("eq1"), Err(ResponseCaptureRefusal::Pending));
+    assert_eq!(
+        rig.arm("nope"),
+        Err(ResponseCaptureRefusal::UnknownStrip),
+        "an unknown strip is refused before a pending capture"
+    );
     assert_eq!(rig.service(), None, "nothing is captured before a block");
 
     // Gate 1: one block, one capture, equal to the test's own after the same block.
@@ -322,19 +341,31 @@ fn capture_follows_newest_plan() {
     assert_eq!(response(ready), expected);
     assert_eq!(rig.service(), None, "a result is delivered once");
 
-    // Gate 3: armed before a structural edit, answered from the plan that holds the edit.
+    // Gate 3, the keep branch: a rebuild that adds an insert, due 4 blocks later; a capture armed
+    // after its commit waits for the adoption, and no block allocates or frees, the swap block
+    // included.
+    let due = rig.at + 4 * QUANTUM as u64;
+    rig.session
+        .test_set_next_adoption(engine::realtime::PlanAdoption::NoEarlierThan(due));
+    assert_eq!(
+        rig.transact(&[add_insert("eq-added", 1)]),
+        EditPath::Rebuild
+    );
     assert_eq!(rig.arm("eq0"), Ok(2));
-    let path = rig.transact(&[SessionEdit::PutTrackEffect {
-        track_id: id("eq0"),
-        rack_name: RackName::Inserts,
-        final_position: 1,
-        effect: eq(
-            &session::parse_session_json(SESSION).expect("fixture"),
-            "eq-added",
-        ),
-    }]);
-    assert_eq!(path, EditPath::Rebuild);
-    let ready = rig.deliver(4);
+    let ready = loop {
+        let start = rig.at;
+        let used = rig.block();
+        assert_eq!(
+            (used.allocations, used.deallocations),
+            (0, 0),
+            "the block at {start} allocated or freed"
+        );
+        if let Some(ready) = rig.service() {
+            assert_eq!(start, due, "delivered from the adoption block, not before");
+            break ready;
+        }
+        assert!(start < due, "no capture after the adoption block");
+    };
     assert_eq!(ready.tag, 2);
     let members = response(ready).members;
     assert!(
@@ -349,8 +380,19 @@ fn capture_follows_newest_plan() {
         "input filters, the console slot, two inserts"
     );
 
+    // Gate 3, the stale branch: armed before a structural edit, answered from the plan that holds
+    // the edit.
+    assert_eq!(rig.arm("eq0"), Ok(3));
+    assert_eq!(
+        rig.transact(&[add_insert("eq-later", 2)]),
+        EditPath::Rebuild
+    );
+    let ready = rig.deliver(4);
+    assert_eq!(ready.tag, 3);
+    assert_eq!(response(ready).members.len(), 5, "three inserts");
+
     // Gate 3: armed on a strip an edit then removes.
-    assert_eq!(rig.arm("eq1"), Ok(3));
+    assert_eq!(rig.arm("eq1"), Ok(4));
     let path = rig.transact(&[
         SessionEdit::RemoveRoute {
             route_id: id("eq1-main"),
@@ -363,7 +405,7 @@ fn capture_follows_newest_plan() {
     let ready = rig.deliver(4);
     assert_eq!(
         (ready.tag, &*ready.strip_id, ready.result),
-        (3, "eq1", Err(ResponseCaptureFailure::StripRemoved))
+        (4, "eq1", Err(ResponseCaptureFailure::StripRemoved))
     );
 }
 
@@ -433,6 +475,10 @@ fn render_step_allocates_nothing() {
         if block % 4 == 0 {
             rig.arm(if block % 8 == 0 { "eq0" } else { "eq1" })
                 .expect("idle at every fourth block");
+        }
+        if block == 100 {
+            // A structural push between arm and render: the job turns stale and is armed again.
+            assert_eq!(rig.transact(&[add_insert("eq-late", 1)]), EditPath::Rebuild);
         }
         let used = rig.block();
         assert_eq!(
