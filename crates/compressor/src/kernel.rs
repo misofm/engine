@@ -3483,7 +3483,8 @@ mod settled_body_tests {
 mod glide_law_tests {
     //! Issue #1370 gate 1, the law's exact half: from the frame a glide arrives on, the lane's
     //! detector words are its target mode's `link_frame` words bit for bit, and a lane that rests
-    //! beside a glide takes its own mode's words on every frame. The blend's values against the
+    //! beside a glide takes its own mode's words on every frame, non-finite partner words
+    //! included. The blend's values against the
     //! `f64` reference are `glide_tests::a_glide_tracks_the_f64_blend_into_the_target_law`.
 
     use super::{Channel, DetectLaw, Detector, Glide, Invariants, Links, link_frame};
@@ -3529,7 +3530,21 @@ mod glide_law_tests {
                                 scale * (hash as f32 / 1_000.0 - 1.0)
                             })
                         };
-                        let (l, r) = (L::load(&words(0.9, 1)), L::load(&words(0.09, 7)));
+                        let mut right = words(0.09, 7);
+                        // Hostile partner words on every third frame, the arrival frame
+                        // included: a blend at rest weights equals the `select` form on finite
+                        // words, but `0 * inf` and `inf - inf` are NaN, so only the `select`
+                        // keeps a dual-mono lane clear of its partner's non-finite word.
+                        if frame % 3 == SAMPLES % 3 {
+                            for (lane, word) in right.iter_mut().enumerate() {
+                                *word = if (frame as usize + lane) % 2 == 0 {
+                                    f32::INFINITY
+                                } else {
+                                    f32::NAN
+                                };
+                            }
+                        }
+                        let (l, r) = (L::load(&words(0.9, 1)), L::load(&right));
                         let (law_left, law_right) =
                             link_frame(Detector::Main, 0, l, r, &invariants);
                         let (left_words, right_words) = glide.detect(l, r, &invariants);
