@@ -176,3 +176,53 @@ qualification (`npm run qualify -- --artifacts ... --sdk-root ... --browser <b> 
   D4 (the committed-document exports) is withdrawn.
 - Shrinks *Send a session transaction to the browser control plane* (#1294): its D1
   `miso.document.v1` message and its D6 `committedDocument()` wrapper method are withdrawn.
+
+## Decision record (root, 2026-10-24) and tranche a evidence
+
+**Split.** Tranche a: the codec (`sdk/src/core/protocol-messages.ts`), the Rust fixture, the
+`OfflineEngine` calls and the headless evals. Tranche b: the same calls on `BrowserEngine` over
+`host.control`/`host.onControlEvent`, and the browser qualification rows of gates 2, 3 and 5 (three
+browsers, both page modes). The issue closes only after b (decision 17, C13).
+
+**Spec corrections (facts on `main` `abbaee34d`).**
+- Events are `SESSION_COMMITTED 0x8001`, `TRANSPORT_STATE 0x8010`, `OBSERVATION_ENDED 0x8011`,
+  `METER_BATCH 0x8020`, `COUNTER_SNAPSHOT 0x8021`, `DIAGNOSTIC 0x8030`; `automationCanceled` is
+  retired with `AUTOMATION_ENQUEUE` (#1627, #1628). `onEvent` kinds: `sessionCommitted`,
+  `transportState`, `observationEnded` (through the one decoder in `observation-ended.ts`),
+  `meterBatch`, `counterSnapshot`, `diagnostic`.
+- `Capabilities` has 23 wire fields (9, 12, 19, 20 retired), 21 SDK fields (two versions).
+- The transport position is retired (#1635): `setTransport({ state })` and
+  `{ state, effectiveSample }`; a `position` key is a `MisoUsageError`, never dropped. No wire
+  change was needed.
+- `TRANSPORT_SET` and `TELEMETRY_CONFIGURE` expect the core's committed revision
+  (`controlRevision()`), which equals the queue's and also sees a commit by another sender.
+- Counter names: the Rust fixture lists every `CounterId` the codec accepts (found by decoding, with
+  an exhaustive name match), and the eval holds the SDK's `COUNTER_IDS` equal to it. No codegen
+  asset exists for the protocol registry, and adding one needs a Rust tool outside this issue's
+  paths, so `generate.mjs` is not changed. Root ratified this replacement of D3's generated names
+  (fixture list plus eval equality) on 2026-10-24, after attempt 1's verification.
+- `committedDocument()` pages at `min(65,536, maximumFrameBytes - 104)` bytes, rounded down to 8:
+  the browser host's frame limit is 16 KiB, so 65,536-byte pages cannot fit in one reply.
+- The headless engine reads events after every `render()` too (D4): the lossy lane holds one event,
+  so without that read a block's telemetry was replaced before the next control frame. The read
+  runs the core's service step first, so no separate service call is needed.
+- The bless variable is `MISO_ENGINE_BLESS_FIXTURES=1`, as for the `SET_CONTROL` fixture.
+- The headless evals are in a new `sdk/test/protocol-messages-evals.mjs`;
+  `headless-path-evals.mjs` tests the gate script's paths, not the engine.
+
+**Facts measured (headless).** One fader edit, `setTransport` playing and four blocks after
+`configureTelemetry` (meter 1, `liveValuesSuperseded`, diagnostics at info) give, in order:
+`sessionCommitted` (the edit's revision), `transportState`, then per block `diagnostic`
+(`capi.render.activity`), `meterBatch` and `counterSnapshot`. `diagnostics({ limit: 0 })` is
+refused by the core with status `malformed_frame` and code `protocol.failure`. `counters()` (all)
+returns the eight counters the core serves, not all sixteen IDs.
+
+**Tranche b note (root, 2026-10-24).** The browser drains events once per message, and its lossy
+lane holds one event, so a block's lossy telemetry can be replaced before it is read. b's browser
+row asserts that the reliable events arrive in order and decode correctly; it must not assert that
+every block's lossy events arrive. The headless engine's extra per-block service call (about 1.5 µs
+offline) is a weekly-pass item, not changed here.
+
+**One diagnostic decoder.** `decodeProtocolDiagnostic` in `control-frame.ts` is the SDK's one decoder
+of the `Diagnostic` message; `decodeRefusalFields` decodes each refusal diagnostic once, and the
+control refusal's `decodeRefusalBody` maps those values.

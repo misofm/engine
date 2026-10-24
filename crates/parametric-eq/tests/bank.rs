@@ -22,7 +22,7 @@ use lane::Backend;
 use parametric_eq::{EqBandKind, PARAMETRIC_EQ_DESCRIPTOR, ParametricEqFactory, design_svf};
 use support::{
     COMMON_BYTES, LANE_BYTES, Payload, apply_prepared_targets, apply_prepared_targets_lane,
-    request, set_initial, snapshot, values,
+    prepare_targets, request, set_initial, snapshot, values,
 };
 
 /// The bank width and backend this build actually executes, or `None` on a scalar-only target.
@@ -2804,5 +2804,304 @@ fn admitted_blocks_over_the_block_limit_match_scalar_and_padded_banks() {
             [&leg(&legs, "bank").0, &leg(&legs, "bank-mono").0],
             |width, backend, members, mono| limit_bank_transcript(width, backend, members, mono).0,
         );
+    }
+}
+
+/// Frames per block of the live enable and family scenarios (#1337).
+const LIVE_FRAMES: usize = 128;
+
+/// Deterministic noise in `[-0.8, 0.8)`, distinct per block, frame, lane and channel.
+fn live_noise(block: usize, frame: usize, lane: usize, channel: usize) -> f32 {
+    let mut x =
+        ((block as u64) << 40) ^ ((frame as u64) << 16) ^ ((lane as u64) << 4) ^ channel as u64;
+    x = x
+        .wrapping_add(0x9E37_79B9_7F4A_7C15)
+        .wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    x ^= x >> 31;
+    x = x.wrapping_mul(0x94D0_49BB_1331_11EB);
+    x ^= x >> 29;
+    (x >> 40) as f32 / (1_u64 << 24) as f32 * 1.6 - 0.8
+}
+
+/// `base` with each listed parameter set on both channels, and the matching `changed` flags.
+fn live_edit(
+    base: &[effect_contract::InitialParameterValue],
+    fields: &[(usize, f32)],
+) -> (Vec<effect_contract::InitialParameterValue>, Vec<bool>) {
+    let mut values = base.to_vec();
+    let mut changed = vec![false; values.len()];
+    for &(parameter, value) in fields {
+        for (offset, channel) in [(0, ParameterChannel::Left), (1, ParameterChannel::Right)] {
+            set_initial(&mut values, parameter, channel, value);
+            changed[parameter * 2 + offset] = true;
+        }
+    }
+    (values, changed)
+}
+
+/// A scripted live edit: before block `block`, lane `lane` is sent `values` (`changed` marks
+/// the edited fields).
+struct LiveEdit {
+    block: usize,
+    lane: usize,
+    values: Vec<effect_contract::InitialParameterValue>,
+    changed: Vec<bool>,
+}
+
+/// Each lane's output bits, block by block (left then right), rendered through one scalar
+/// instance per lane (`W = 1`). Lane `l` is fed noise stream `source(l)`.
+fn live_scalar_lanes(
+    prepared: &[Vec<effect_contract::InitialParameterValue>],
+    edits: &[LiveEdit],
+    blocks: usize,
+    source: fn(usize) -> usize,
+) -> Vec<Vec<Vec<u32>>> {
+    bench_support::alloc::assert_installed();
+    prepared
+        .iter()
+        .enumerate()
+        .map(|(lane, values)| {
+            let mut effect = ParametricEqFactory
+                .prepare(request(values, false))
+                .expect("prepare");
+            (0..blocks)
+                .map(|block| {
+                    let targets: Vec<_> = edits
+                        .iter()
+                        .filter(|e| e.block == block && e.lane == lane)
+                        .flat_map(|edit| {
+                            let (targets, count) =
+                                prepare_targets(48_000, &edit.values, &edit.changed);
+                            targets[..count].to_vec()
+                        })
+                        .collect();
+                    let mut left: Vec<f32> = (0..LIVE_FRAMES)
+                        .map(|f| live_noise(block, f, source(lane), 0))
+                        .collect();
+                    let mut right: Vec<f32> = (0..LIVE_FRAMES)
+                        .map(|f| live_noise(block, f, source(lane), 1))
+                        .collect();
+                    // Gate 8: applying the targets (an enable, a disable, a family change, a D4
+                    // re-enable) and rendering the block reach the allocator zero times. Block 0
+                    // warms the process statics.
+                    let mark = bench_support::alloc::current_thread_counters();
+                    for target in &targets {
+                        effect
+                            .processor
+                            .apply_prepared_target(target)
+                            .expect("a live target applies");
+                    }
+                    effect.processor.process(
+                        EffectProcessBlock::new(
+                            &mut left,
+                            &mut right,
+                            None,
+                            (block * LIVE_FRAMES) as u64,
+                            &[],
+                            LIVE_FRAMES as u32,
+                        )
+                        .expect("block"),
+                    );
+                    let heap = bench_support::alloc::current_thread_delta_since(mark);
+                    if block > 0 {
+                        assert_eq!(
+                            heap.allocations + heap.deallocations + heap.reallocations,
+                            0,
+                            "lane {lane} block {block}: {heap:?}"
+                        );
+                    }
+                    left.iter().chain(&right).map(|s| s.to_bits()).collect()
+                })
+                .collect()
+        })
+        .collect()
+}
+
+/// [`live_scalar_lanes`] through one full bank of the native width.
+fn live_bank_lanes(
+    width: BankWidth,
+    backend: Backend,
+    prepared: &[Vec<effect_contract::InitialParameterValue>],
+    edits: &[LiveEdit],
+    blocks: usize,
+    source: fn(usize) -> usize,
+) -> Vec<Vec<Vec<u32>>> {
+    let lanes = width.lanes() as usize;
+    let requests: Vec<_> = prepared.iter().map(|v| request(v, false)).collect();
+    let mut bank = ParametricEqFactory
+        .bind_homogeneous_bank(PrepareEffectBankRequest {
+            backend,
+            width,
+            requests: &requests,
+            active_mask: width.full_mask(),
+        })
+        .expect("request")
+        .expect("native width binds");
+    let offsets = vec![0_u32; lanes + 1];
+    let mut out = vec![Vec::new(); lanes];
+    for block in 0..blocks {
+        for edit in edits.iter().filter(|e| e.block == block) {
+            apply_prepared_targets_lane(
+                &mut *bank.processor,
+                edit.lane,
+                48_000,
+                &edit.values,
+                &edit.changed,
+            );
+        }
+        let mut left = vec![0.0_f32; LIVE_FRAMES * lanes];
+        let mut right = vec![0.0_f32; LIVE_FRAMES * lanes];
+        for frame in 0..LIVE_FRAMES {
+            for lane in 0..lanes {
+                left[frame * lanes + lane] = live_noise(block, frame, source(lane), 0);
+                right[frame * lanes + lane] = live_noise(block, frame, source(lane), 1);
+            }
+        }
+        bank.processor.process_bank(
+            EffectBankProcessBlock::new(
+                &mut left,
+                &mut right,
+                None,
+                LIVE_FRAMES as u32,
+                width,
+                (block * LIVE_FRAMES) as u64,
+                &[],
+                &offsets,
+                LIVE_FRAMES as u32,
+            )
+            .expect("bank block"),
+        );
+        for (lane, lane_out) in out.iter_mut().enumerate() {
+            let column = |plane: &[f32]| {
+                (0..LIVE_FRAMES)
+                    .map(|frame| plane[frame * lanes + lane].to_bits())
+                    .collect::<Vec<_>>()
+            };
+            let mut bits = column(&left);
+            bits.extend(column(&right));
+            lane_out.push(bits);
+        }
+    }
+    out
+}
+
+/// Gate 4 (#1337, D4): a re-enable starts from rest. A lane enabled (band 2 a +9 dB bell, and the
+/// HPF), fed noise, disabled live, fed noise for 200 blocks and re-enabled renders, from the
+/// re-enable block on, the same bits as a lane prepared disabled and enabled at that block: the
+/// frozen integrators of the old signal are cleared, not resumed. At `W = 1` and the native bank
+/// width, where each history lane sits beside a fresh one.
+#[test]
+fn a_live_re_enable_starts_from_rest() {
+    const DISABLE: usize = 1;
+    const REENABLE: usize = DISABLE + 201;
+    const BLOCKS: usize = REENABLE + 6;
+    let on = [
+        (6, 1.0),
+        (7, EqBandKind::Bell as u32 as f32),
+        (8, 1_000.0),
+        (9, 9.0),
+        (HPF_PARAMETERS, 1.0),
+    ];
+    let off = [(6, 0.0), (HPF_PARAMETERS, 0.0)];
+    let (enabled, _) = live_edit(&values(), &on);
+    let (disabled, disable_changed) = live_edit(&enabled, &off);
+    let (_, enable_changed) = live_edit(&disabled, &on);
+    let script = |lanes: usize| -> (Vec<Vec<_>>, Vec<LiveEdit>) {
+        let mut prepared = Vec::new();
+        let mut edits = Vec::new();
+        for lane in 0..lanes {
+            let history = lane % 2 == 0;
+            prepared.push(if history {
+                enabled.clone()
+            } else {
+                disabled.clone()
+            });
+            if history {
+                edits.push(LiveEdit {
+                    block: DISABLE,
+                    lane,
+                    values: disabled.clone(),
+                    changed: disable_changed.clone(),
+                });
+            }
+            edits.push(LiveEdit {
+                block: REENABLE,
+                lane,
+                values: enabled.clone(),
+                changed: enable_changed.clone(),
+            });
+        }
+        (prepared, edits)
+    };
+    let check = |rendered: &[Vec<Vec<u32>>], leg: &str| {
+        for pair in rendered.chunks_exact(2) {
+            assert_ne!(pair[0][0], pair[1][0], "{leg}: the history lane filtered");
+            assert_eq!(
+                pair[0][REENABLE..],
+                pair[1][REENABLE..],
+                "{leg}: a re-enabled lane renders as one prepared disabled"
+            );
+        }
+    };
+    let (prepared, edits) = script(2);
+    let pairs: fn(usize) -> usize = |lane| lane / 2;
+    let scalar = live_scalar_lanes(&prepared, &edits, BLOCKS, pairs);
+    check(&scalar, "W = 1");
+    if let Some((width, backend)) = native_bank() {
+        let (prepared, edits) = script(width.lanes() as usize);
+        let banked = live_bank_lanes(width, backend, &prepared, &edits, BLOCKS, pairs);
+        check(&banked, "native bank");
+        assert_eq!(
+            banked[..2],
+            scalar[..],
+            "the bank renders its per-node instances"
+        );
+    }
+}
+
+/// Gate 5 (#1337, D6): live enable and family edits stay on their lane. In a full bank of the
+/// native width, lane 1 switches band 2 off and on again and lane 3 changes band 3's family twice,
+/// at different blocks. Each lane renders its scalar instance's bits, and every other lane renders
+/// exactly what it renders in an unedited bank.
+#[test]
+fn live_enable_and_family_edits_stay_on_their_lane() {
+    const BLOCKS: usize = 16;
+    let Some((width, backend)) = native_bank() else {
+        return;
+    };
+    let lanes = width.lanes() as usize;
+    let prepared: Vec<_> = (0..lanes).map(configured_values).collect();
+    let edit = |block: usize, lane: usize, fields: &[(usize, f32)]| {
+        let (values, changed) = live_edit(&prepared[lane], fields);
+        LiveEdit {
+            block,
+            lane,
+            values,
+            changed,
+        }
+    };
+    let edits = [
+        edit(3, 1, &[(6, 0.0)]),
+        edit(9, 1, &[(6, 1.0)]),
+        edit(5, 3, &[(13, EqBandKind::Notch as u32 as f32)]),
+        edit(12, 3, &[(13, EqBandKind::LowShelf as u32 as f32)]),
+    ];
+    let own: fn(usize) -> usize = |lane| lane;
+    let banked = live_bank_lanes(width, backend, &prepared, &edits, BLOCKS, own);
+    let plain = live_bank_lanes(width, backend, &prepared, &[], BLOCKS, own);
+    let scalar = live_scalar_lanes(&prepared, &edits, BLOCKS, own);
+    for lane in 0..lanes {
+        assert_eq!(
+            banked[lane], scalar[lane],
+            "lane {lane}: bank against scalar"
+        );
+        if lane == 1 || lane == 3 {
+            assert_ne!(banked[lane], plain[lane], "lane {lane}: the edits rendered");
+        } else {
+            assert_eq!(
+                banked[lane], plain[lane],
+                "lane {lane}: untouched by a neighbour's edit"
+            );
+        }
     }
 }

@@ -560,3 +560,96 @@ fn an_earned_agreement_proof_re_engages_a_chain_the_witness_could_not() {
         "a chain that re-engaged on a proven agreement renders the never-collapsed bits"
     );
 }
+
+/// An upstream slot with no one-plane body, and channel words that differ: [`Recursive`]'s
+/// dual body and witness, without `process_mono` or `supports_mono_collapse`.
+struct DualOnly(Recursive);
+impl BankStage for DualOnly {
+    fn process(&mut self, block: BankBlock<'_>) -> Result<(), RenderError> {
+        self.0.process(block)
+    }
+    fn lane_symmetry(&self, lane: usize) -> ChannelSymmetryWitness {
+        self.0.lane_symmetry(lane)
+    }
+    /// Forwarded, as the builtins input bank has a real one without a one-plane body: a disengage
+    /// that copied this slot's left state over its right would move its output.
+    fn desymmetrize(&mut self) {
+        self.0.desymmetrize();
+    }
+}
+
+/// A collapsible prefix ahead of an incompatible, asymmetric upstream slot collapses (issue
+/// #974), and renders the never-collapsed bits across a disengage and a re-engage.
+///
+/// The second slot's coefficients differ per channel and its witness has `DESIGNED` down, so the
+/// seam must sit between the two upstream slots: the copy hands it the dual run's planes and it
+/// runs its dual body. The forced-off window in the middle is a dual stretch whose agreement
+/// maintenance must read only the prefix's witness, or the chain never comes back.
+///
+/// # Red mutations
+///
+/// Conjoin the decision's witness over every slot again (`lane_symmetry_bank(self.slots.len())`
+/// in `run_with_input`'s dispatch) and the triple is `[0, 0, 0]`: it never collapses. Do the same
+/// in the maintenance step only and the window clears the invariant, so the re-engage needs an
+/// agreement proof: the triple is `[1, 1, 1]`. Make `disengage_collapse` desymmetrize every slot
+/// and the bit comparison fails: the dual-only slot's right state becomes its left one.
+#[test]
+fn a_collapsible_prefix_before_an_incompatible_slot_collapses_exactly() {
+    let build = || {
+        let prefix = Recursive::new([0.5, 0.5]);
+        let later = Recursive::new([0.5, 0.25]);
+        later.core().witness =
+            ChannelSymmetryWitness::symmetric_except(ChannelSymmetryWitness::DESIGNED);
+        let mut chain = mono_chain(
+            4,
+            8,
+            vec![
+                Box::new(prefix),
+                Box::new(DualOnly(later)),
+                Box::new(Matrix {
+                    coefficients: [1.0, 0.0, 0.0, 1.0],
+                }),
+            ],
+        );
+        chain.arm_mono_collapse(true);
+        chain
+    };
+    let mut chain = build();
+    let mut oracle = build();
+    oracle.force_mono_collapse_off(true);
+    assert_eq!(chain.collapse_prefix(), 1);
+
+    let mut observed = Vec::new();
+    let mut expected = Vec::new();
+    for block in 0..64_u64 {
+        chain.force_mono_collapse_off((24..40).contains(&block));
+        let mut planes = finite_planes(4, 8, block);
+        let mut oracle_planes = finite_planes(4, 8, block);
+        chain
+            .run(&mut planes, 8, block * 8, LiveSnapshot::ALL)
+            .expect("render");
+        oracle
+            .run(&mut oracle_planes, 8, block * 8, LiveSnapshot::ALL)
+            .expect("render");
+        for lane in 0..4 {
+            for frame in 0..8 {
+                observed.push((
+                    planes.left[lane][frame].to_bits(),
+                    planes.right[lane][frame].to_bits(),
+                ));
+                expected.push((
+                    oracle_planes.left[lane][frame].to_bits(),
+                    oracle_planes.right[lane][frame].to_bits(),
+                ));
+            }
+        }
+    }
+
+    assert_eq!(chain.collapse_transitions(), [1, 1, 0]);
+    assert_eq!(chain.collapses(), 48, "every armed block collapsed");
+    assert_eq!(oracle.collapses(), 0);
+    assert_eq!(
+        observed, expected,
+        "a partially collapsed chain renders the dual chain's bits"
+    );
+}

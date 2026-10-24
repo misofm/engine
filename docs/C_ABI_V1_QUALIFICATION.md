@@ -583,16 +583,20 @@ nine-track EQ reference session) and, for the producers' table, in `capi_retaine
 
 ## Live sends: gain, mute and matrix (#1557)
 
-A route into a submix has `gain_db`, `mute` and the four `matrix_*` coefficients as live rows of
-the control list (decision 17, S6). `miso_engine_v1_submit_command` commits a change of them as a
-live revision through `SET_CONTROL`; no plan is prepared and the plan
-epoch does not move. A route into the output is unchanged: its gain, mute and matrix stay rebuilds
-for decision 14's fold reason, at any tap. **A
-route into a submix carries a lane and does not fold**: the core chooses the lanes from the rows
-(`controls::live_lanes`), so a C ABI plan with a route into a submix attaches one latest-target
-cell per such route (`graph::route_control_resources`, charged in `capi_retained_bytes` and
-admitted against the graph cap) and the route's constants are no longer folded into the epilogue.
-A plan with no route into a submix attaches none and renders as before.
+A route into a submix, and since #1391 a route into the output whose source tap precedes its
+strip's fader (`input`, `post_input`, `insert_send`, `insert_return`, `pre_fader`), has `gain_db`,
+`mute` and the four `matrix_*` coefficients as live rows of the control list (decision 17, S6;
+`controls::route_rows_live` is the one rule). `miso_engine_v1_submit_command` commits a change of
+them as a live revision through `SET_CONTROL`; no plan is prepared and the plan epoch does not
+move. A `post_fader` or `post_pan` route into the output is unchanged: its gain, mute and matrix
+stay rebuilds for decision 14's fold reason. `follows_mute` never applies to a route into the
+output (#1218), at any tap. **A live route carries a lane and does not fold**: the core chooses
+the lanes from the rows (`controls::live_lanes`), so a C ABI plan with a live route attaches one
+latest-target cell per such route (`graph::route_control_resources`, charged in
+`capi_retained_bytes` and admitted against the graph cap) and the route's constants are no longer
+folded into the epilogue. A plan with no live route attaches none and renders as before; a
+`post_fader` or `post_pan` route into the output keeps its fold. With no record, a live route
+renders the bits of its prepared constant.
 
 - **Record.** One per changed route, in canonical route-ID order: the four coefficients
   `graph_compiler::route_coefficients(gain_db, matrix, mute, source_lane_muted)` returns, and

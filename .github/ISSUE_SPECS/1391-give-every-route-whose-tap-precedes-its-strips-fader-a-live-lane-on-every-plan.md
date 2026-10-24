@@ -167,3 +167,43 @@ its master already does not fold.
   *Remove a strip in two phases: ramp out, then a scheduled swap* (#1325).
 
 **Decision 17 amendment (2026-10-13).** The live-edit half becomes a class rule: this issue flips the rows of an output route whose tap precedes the fader from `RebuildOnly(Optimisation)` to `Live` in `controls`, and #1557's route lowering serves them. Its D2 becomes "the lane is attached when the route's rows are live" (`controls::live_lanes`, #1555; `control_queue_depth` is deleted). Its render lane work (the per-route attach and the kept fold) stays here.
+
+## Evidence and decision record (attempt 1, 2026-10-24)
+
+- **One predicate.** `SendTap::precedes_fader` (session) and `controls::route_rows_live` (into a
+  submix, or a tap before the fader) decide the rows; the graph attach keys on the `RouteSource`
+  edge leaving `TrackStage < PostFader`. `follows_mute` stays inactive on every output route;
+  `post_fader`/`post_pan` output routes keep `OUTPUT_FOLD`. `lower_routes` and `join_routes`
+  filter on `route_rows_live` (scope note D2: a swap carries the ramp).
+- **D4 and gate 5 moot** (scope note): host-web takes lanes from the rows and commands through
+  `SET_CONTROL`; no host-web code. Gate 4 (C ABI) is served by host-core's classifier; no capi row.
+- **A submix source counts too.** A bus route into the output from the bus's `input` or
+  `pre_fader` tap is live. Test sessions that use `bus_to_output` (input tap) gained lanes:
+  counts and the route-ID order in `graph-compiler/tests/live_routes.rs`,
+  `host-core/tests/live_routes.rs` restated. Gate 1's set is
+  `["aa-send","bus-a-main","bus-b-main","mm-send","t1-direct","t2-pf","zz-send"]`.
+- **Class A.** No browser fixture holds a pre-fader output route; `expected.json` is unchanged.
+  Gate 3: a pre-fader output lane with no record renders the prepared constant's bits from
+  sample 0, and a pushed record settles on a fresh plan.
+- **Tail bound (root-authorized).** `StripGains::route_bound` states the route domain bound for
+  every route whose rows are live; `GainLiveness::routes_into_submixes` is renamed `routes`.
+  `a_live_fader_states_its_domain_maximum...` asserts it (red on the destination-only bound).
+- **Metadata (root-authorized).** The route table carries `into_output_before_fader`; the
+  parameter metadata emits `intoOutputBeforeFader` (live) beside `intoOutput` (`post_fader`,
+  `post_pan`: rebuildOnly); SDK assets regenerated. Pre-fader output rows are automatable
+  (decision 14 rule 4).
+- **Swap carry.** `a_pre_fader_output_ramp_crosses_the_swap_on_every_width` (successor_swap) is red
+  on a `join_routes` that keeps only routes into a submix (first difference at block 6).
+- **Lane set tied to the rows.** Preparation refuses with `host.route_control.attach` when the
+  six-word producers are not exactly the routes with `route_rows_live` that do not follow, in
+  route-ID order (scope note decision 1). Control thread only; it allocates one ID list.
+- **Paths outside the scope note, all root-authorized (2026-10-24):**
+  `crates/controls/src/tables.rs`, `crates/controls/src/live_lanes.rs`,
+  `crates/controls/tests/tables.rs`, `crates/graph-compiler/src/compile.rs`,
+  `crates/graph-compiler/src/lib.rs`, `crates/graph-compiler/tests/live_routes.rs`,
+  `crates/graph-compiler/tests/tail_composition.rs`, `crates/host-core/tests/live_lanes.rs`,
+  `crates/host-core/tests/tail_composition.rs`, `crates/host-core/tests/successor_swap.rs`,
+  `tools/console-workload/src/lib.rs`, `tools/parameter-metadata/src/lib.rs`,
+  `tools/parameter-metadata/tests/round_trip.rs`,
+  `sdk/assets/miso-engine-v1-parameter-metadata.json`, `sdk/src/generated/controls.ts`,
+  `sdk/codegen/generate.mjs`, `sdk/test/control-builders-evals.mjs`.

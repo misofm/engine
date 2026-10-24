@@ -1,6 +1,7 @@
 import { CONTROLS } from "../generated/controls.ts";
 import type { ControlLane, ControlOwner, ControlSection } from "../generated/controls.ts";
 import { MisoEngineError, MisoUsageError, parseDiagnostics, resultName } from "./errors.ts";
+import type { DiagnosticPathSegment, ProtocolDiagnostic } from "./protocol-messages.ts";
 
 /**
  * The SDK's one encoder of `SESSION_TRANSACTION_APPLY` frames of `SET_CONTROL` edits, and its one
@@ -57,6 +58,10 @@ export const WIRE_UTF8 = 9;
 export const WIRE_BYTES = 10;
 /** @internal */
 export const WIRE_MESSAGE = 11;
+/** @internal */
+export const WIRE_PACKED_U16 = 12;
+/** @internal */
+export const WIRE_PACKED_U32 = 13;
 /** @internal */
 export const WIRE_PACKED_F32 = 15;
 
@@ -581,19 +586,65 @@ export function scalar(fields: readonly RawField[], id: number, wire: number, wi
   return new DataView(row.value.buffer, row.value.byteOffset, row.value.byteLength);
 }
 
-function decodeDiagnostic(value: Uint8Array): ControlDiagnostic {
-  const fields = nestedFields(value);
-  const codeField = fields.find((row) => row.id === 1);
-  if (codeField === undefined || codeField.wire !== WIRE_UTF8) throw malformed("a diagnostic has no code");
+function textOf(row: RawField): string {
+  if (row.wire !== WIRE_UTF8) throw malformed(`field ${row.id} is not text`);
+  try {
+    return DECODER.decode(row.value);
+  } catch {
+    throw malformed(`field ${row.id} is not UTF-8`);
+  }
+}
+
+function oneText(fields: readonly RawField[], id: number): string | undefined {
+  const found = fields.filter((row) => row.id === id);
+  if (found.length > 1) throw malformed(`field ${id} repeats`);
+  return found[0] === undefined ? undefined : textOf(found[0]);
+}
+
+function decodePathSegment(row: RawField): DiagnosticPathSegment {
+  if (row.wire !== WIRE_MESSAGE) throw malformed("a diagnostic path segment is not a message");
+  const fields = nestedFields(row.value);
+  const tag = scalar(fields, 1, WIRE_U8, 1)?.getUint8(0);
+  const name = oneText(fields, 2);
+  const index = scalar(fields, 3, WIRE_U64, 8);
+  const stable = oneText(fields, 4);
+  if (tag === 1 && name !== undefined && index === undefined && stable === undefined) {
+    return Object.freeze({ kind: "field", field: name });
+  }
+  if (tag === 2 && name === undefined && index !== undefined && stable === undefined) {
+    return Object.freeze({ kind: "index", index: index.getBigUint64(0, true) });
+  }
+  if (tag === 3 && name === undefined && index === undefined && stable !== undefined) {
+    return Object.freeze({ kind: "stableId", stableId: stable });
+  }
+  throw malformed("a diagnostic path segment is invalid");
+}
+
+/**
+ * The SDK's one decoder of the protocol's `Diagnostic` message, every field it carries; an absent
+ * optional field is an absent key. A refusal of any command and the diagnostics replies and events
+ * all read it here. @internal
+ */
+export function decodeProtocolDiagnostic(row: RawField): ProtocolDiagnostic {
+  if (row.wire !== WIRE_MESSAGE) throw malformed("a diagnostic is not a message");
+  const fields = nestedFields(row.value);
+  const code = oneText(fields, 1);
+  if (code === undefined) throw malformed("a diagnostic has no code");
   const severity = scalar(fields, 2, WIRE_U8, 1)?.getUint8(0);
   const named = severity === undefined ? undefined : SEVERITY_NAMES[severity];
   if (named === undefined || named === "") throw malformed("a diagnostic has no severity");
-  const detailField = fields.find((row) => row.id === 4);
+  const detail = oneText(fields, 4);
+  const operationIndex = scalar(fields, 5, WIRE_U32, 4);
+  const sampleTime = scalar(fields, 6, WIRE_U64, 8);
+  const providerSequence = scalar(fields, 7, WIRE_U64, 8);
   return Object.freeze({
-    code: DECODER.decode(codeField.value),
+    code,
     severity: named,
-    operationIndex: scalar(fields, 5, WIRE_U32, 4)?.getUint32(0, true),
-    detail: detailField === undefined ? undefined : DECODER.decode(detailField.value),
+    path: Object.freeze(fields.filter((candidate) => candidate.id === 3).map(decodePathSegment)),
+    ...(detail === undefined ? {} : { detail }),
+    ...(operationIndex === undefined ? {} : { operationIndex: operationIndex.getUint32(0, true) }),
+    ...(sampleTime === undefined ? {} : { sampleTime: sampleTime.getBigUint64(0, true) }),
+    ...(providerSequence === undefined ? {} : { providerSequence: providerSequence.getBigUint64(0, true) }),
   });
 }
 
@@ -642,14 +693,16 @@ export interface ControlRefusalBody {
   readonly backpressure: ControlBackpressure | undefined;
 }
 
-/** Read the non-`ok` body every command shares. @internal */
-export function decodeRefusalBody(fields: readonly RawField[]): ControlRefusalBody {
-  const diagnostics = fields
-    .filter((row) => row.id === 1)
-    .map((row) => {
-      if (row.wire !== WIRE_MESSAGE) throw malformed("a diagnostic is not a message");
-      return decodeDiagnostic(row.value);
-    });
+/** The non-`ok` body every command shares, with every diagnostic field. @internal */
+export interface ProtocolRefusalFields {
+  readonly diagnostics: readonly ProtocolDiagnostic[];
+  readonly omittedDiagnostics: number;
+  readonly backpressure: ControlBackpressure | undefined;
+}
+
+/** Read the non-`ok` body every command shares, each diagnostic decoded once. @internal */
+export function decodeRefusalFields(fields: readonly RawField[]): ProtocolRefusalFields {
+  const diagnostics = fields.filter((row) => row.id === 1).map(decodeProtocolDiagnostic);
   const omittedDiagnostics = scalar(fields, 2, WIRE_U32, 4)?.getUint32(0, true);
   if (omittedDiagnostics === undefined) throw malformed("a refusal has no omitted-diagnostics count");
   const backpressureField = fields.find((row) => row.id === 3);
@@ -666,6 +719,21 @@ export function decodeRefusalBody(fields: readonly RawField[]): ControlRefusalBo
     backpressure = Object.freeze({ queueKind, capacity, occupancy });
   }
   return { diagnostics: Object.freeze(diagnostics), omittedDiagnostics, backpressure };
+}
+
+/** Read the non-`ok` body every command shares, as a control refusal reports it. @internal */
+export function decodeRefusalBody(fields: readonly RawField[]): ControlRefusalBody {
+  const { diagnostics, omittedDiagnostics, backpressure } = decodeRefusalFields(fields);
+  return {
+    diagnostics: Object.freeze(diagnostics.map((row) => Object.freeze({
+      code: row.code,
+      severity: row.severity,
+      operationIndex: row.operationIndex,
+      detail: row.detail,
+    }))),
+    omittedDiagnostics,
+    backpressure,
+  };
 }
 
 /**
