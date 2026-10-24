@@ -2526,6 +2526,8 @@ impl PreparedGraphPlan {
 
     /// Record the source-claim lines the compiler folded into this plan's `track_delays`
     /// (#1287 D1). A report only: the lowering reads `track_delays`, so this changes no program.
+    /// Bind refuses a plan whose lines are out of node order, name a node that is not a track-stage
+    /// `Input` of the graph, or are longer than either lane of that node's track-delay entry.
     #[must_use]
     pub fn with_source_claim_lines(mut self, lines: Vec<SourceClaimLine>) -> Self {
         self.source_claim_lines = lines;
@@ -2636,7 +2638,30 @@ impl PreparedGraphPlan {
                 return false;
             }
         }
-        true
+        // #1287 D1: every source-claim line, in node order, names a track-stage `Input` node of
+        // the graph whose track-delay entry holds at least the line on both lanes. The lowering
+        // reads `track_delays`, so a row it does not hold would report a line that never runs.
+        let track_delays: BTreeMap<_, _> = self
+            .track_delays
+            .iter()
+            .map(|delay| (&delay.node, [delay.left_samples, delay.right_samples]))
+            .collect();
+        self.source_claim_lines
+            .windows(2)
+            .all(|pair| pair[0].node < pair[1].node)
+            && self.source_claim_lines.iter().all(|line| {
+                matches!(
+                    line.node,
+                    GraphNodeId::TrackStage {
+                        stage: TrackStage::Input,
+                        ..
+                    }
+                ) && line.samples.0 > 0
+                    && graph_nodes.contains(&line.node)
+                    && track_delays.get(&line.node).is_some_and(|lanes| {
+                        lanes.iter().all(|&lane| u64::from(lane) >= line.samples.0)
+                    })
+            })
     }
 
     /// Number of prepared homogeneous banks retained for off-render-selected execution.
@@ -8072,8 +8097,12 @@ mod tests {
 
     #[test]
     fn structural_layout_rejects_node_level_edge_and_bank_corruptions() {
-        for corruption in 0..6 {
-            let (mut graph, bindings, _) = binding_plan();
+        for corruption in 0..9 {
+            let (mut graph, bindings, input) = binding_plan();
+            let line = |node: &GraphNodeId| SourceClaimLine {
+                node: node.clone(),
+                samples: LatencySamples(4),
+            };
             match corruption {
                 0 => {
                     let duplicate = graph.dependency_levels[0].nodes[0].clone();
@@ -8089,6 +8118,22 @@ mod tests {
                 // unsorted spec is a malformed plan: bind refuses it with the same code rather
                 // than lowering against a binary search that cannot find its nodes.
                 5 => graph.spec.nodes.reverse(),
+                // #1287 D1: a source-claim line the track delays do not hold.
+                6 => graph = graph.with_source_claim_lines(vec![line(&input)]),
+                7 => {
+                    graph.track_delays.push(PreparedTrackDelay {
+                        node: input.clone(),
+                        left_samples: 4,
+                        right_samples: 3,
+                    });
+                    graph = graph.with_source_claim_lines(vec![line(&input)]);
+                }
+                8 => {
+                    let output = GraphNodeId::Output {
+                        output_id: StableGraphId::parse("main").expect("ID"),
+                    };
+                    graph = graph.with_source_claim_lines(vec![line(&output)]);
+                }
                 _ => unreachable!(),
             }
             let failure = match graph.bind(bindings) {

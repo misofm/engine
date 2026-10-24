@@ -5,8 +5,8 @@
 //!   exactly its predecessor arrival plus `P`, keeps every carried edge's compensation, gives every
 //!   carried track a `P`-sample claim line and gives a restarted or added track none.
 //! * Gate 2: a plan floored at its own arrivals plus `P` renders the unfloored plan's output
-//!   delayed by exactly `P`, bit for bit, after `P` samples of `+0.0`, and its tail extent and PDC
-//!   total grow by the line.
+//!   delayed by exactly `P`, bit for bit, after `P` samples of `+0.0`, its tail extent and PDC
+//!   total grow by the line, and a track's line adds to its declared delay.
 //!
 //! Gate 3 (no change without floors) is the existing suites and the graph fixture corpus.
 
@@ -490,9 +490,19 @@ fn render(artifact: PreparedGraphBuiltinsArtifact, blocks: usize) -> [Vec<f32>; 
 fn a_plan_floored_by_p_renders_its_output_delayed_by_exactly_p() {
     const P: usize = 2 * QUANTUM;
     const BLOCKS: usize = 8;
-    let model = session(&[("one", None), ("two", None)], &[]);
+    // Track `two` also declares a delay, which its line must add to on each lane.
+    const DECLARED: [u32; 2] = [3, 5];
+    let mut model = session(&[("one", None), ("two", None)], &[]);
+    let two = &mut model.tracks[1];
+    two.builtins.left.delay_samples = DECLARED[0];
+    two.builtins.right.delay_samples = DECLARED[1];
     for &dispatch in Backend::VECTOR {
         let a = compile(&model, &Floors::new(), dispatch);
+        assert_eq!(
+            a.envelope().sample_rate.0,
+            48_000,
+            "R3: gate 2 runs at 48 kHz"
+        );
         let floors: Floors = a
             .graph()
             .spec
@@ -506,6 +516,20 @@ fn a_plan_floored_by_p_renders_its_output_delayed_by_exactly_p() {
             })
             .collect();
         let w = compile(&model, &floors, dispatch);
+        let lanes = |artifact: &PreparedGraphBuiltinsArtifact| {
+            artifact
+                .graph()
+                .track_delays()
+                .iter()
+                .find(|delay| delay.node == stage("two", TrackStage::Input))
+                .map(|delay| [delay.left_samples, delay.right_samples])
+        };
+        assert_eq!(lanes(&a), Some(DECLARED));
+        assert_eq!(
+            lanes(&w),
+            Some(DECLARED.map(|declared| declared + P as u32)),
+            "{dispatch:?}: the line adds to the declared delay"
+        );
         let grown = |tail: TailSamples| match tail {
             TailSamples::Finite(samples) => TailSamples::Finite(samples + P as u64),
             TailSamples::Infinite => panic!("{dispatch:?}: the predecessor's tail is finite"),

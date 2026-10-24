@@ -235,7 +235,11 @@ host-core join are *Carry source-claim lines across a plan swap and fill a grown
   `PreparedTrackDelay` (the entry is created when the session declared no delay), so it runs on
   `runtime::TrackDelayLine` and `pdc_delay_block` with no new node kind and no runtime change.
   The rows reach the plan through `PreparedGraphPlan::with_source_claim_lines`, not a
-  `PreparedGraphPlanParts` field, so the 26 hand-built plans in other crates need no edit.
+  `PreparedGraphPlanParts` field, so the 26 hand-built plans in other crates need no edit (a plan
+  built from Parts has no lines). Bind refuses, as `graph.scheduler.layout`, a plan whose lines are
+  out of node order, name a node that is not a track-stage `Input` of the graph, or are longer than
+  either lane of that node's track-delay entry. #1402, which reads the lines for its fill rule, may
+  move them into Parts.
 - **R2 (root).** Claim samples count in `total_delay_samples` (so their bytes are charged once,
   through `total_delay * 8`, and `track_delay_bytes` stays the declared delay's) and are checked
   against `maximum_delay_samples_per_edge` (per line) and `maximum_total_delay_samples`. They are
