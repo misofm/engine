@@ -118,3 +118,16 @@ the producer submits already-decoded PCM, as a browser or mobile host does.
 ## Console benchmark rows
 
 Adds `sixty_four_track_gain_pan_live`. No existing row may move a bit.
+
+## Verification (root, 2026-10-24)
+
+- The adversarial verifier gave PASS (no blockers, no majors). Root accepts the edits outside the
+  scope note's list: `scripts/check-bench-preconditions.sh`, `tools/bench/src/floor.rs`, and the
+  `scripts/check-conformance-boundaries.sh` / `scripts/test-conformance-boundaries.sh` pair.
+- Fact: the 64-block digest listing of every session row at origin/main 38324eb3e and at this
+  branch merged with it agree on all 22 existing rows; the live row reads `01e465a7...`, the ring
+  row's (PR evidence, one run each; no committed pin).
+- Open evidence for the first timed run (not verified by the implementer or the verifier): real
+  thread pinning on the EPYC host (the bench's `sched_getcpu` assertions and the recorded
+  `producer_cpu` 30 beside `cpu_affinity` 31), and the sysfs placement classifier in
+  `tools/bench/src/console.rs`, which has no unit test (the runner's picker has its self-test).

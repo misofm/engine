@@ -38,8 +38,9 @@ graph="1"
 graph-compiler="1"
 lane="1"
 [target.'cfg(unix)'.dependencies]
-rustix="1"
 sha2="1"
+[target.'cfg(target_os = "linux")'.dependencies]
+rustix="1"
 EOF
 printf 'fn main() {}\n' >"$base/tools/bench/src/main.rs"
 for crate in engine session protocol capi target-smoke effect-contract effect-compiler lane math; do

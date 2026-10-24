@@ -3077,9 +3077,9 @@ mod affinity {
         pub(crate) fn refusal(&self, controlled: bool) -> Option<String> {
             (controlled && self.name != "same_ccd").then(|| {
                 format!(
-                    "refusing the live-producer row: producer placement {} (a controlled run \
-                     needs the process mask to hold the render core and one core that shares its \
-                     L3 and is not its SMT sibling)",
+                    "refusing the run (live-producer row placement): producer placement {} (a \
+                     controlled run needs the process mask to hold the render core and one core \
+                     that shares its L3 and is not its SMT sibling)",
                     self.name
                 )
             })
@@ -3548,9 +3548,9 @@ mod tests {
     }
 
     /// Issue #938: the live-producer row, run short through the real subject with its producer
-    /// started and joined by `SessionMeasurement`, renders the ring row's bits with no forbidden
-    /// operation and no underrun, prints its producer group once, and the record validator accepts
-    /// it at the frozen count.
+    /// started and joined by `SessionMeasurement`, renders with no forbidden operation and no
+    /// underrun, prints its producer group once, and the record validator accepts it at the frozen
+    /// count. Its bits against the ring row's are `console-workload`'s claim, not this test's.
     ///
     /// The producer is unpinned here (a test has no runner core), so the record states
     /// `unpinned` and no core, which the validator accepts only off a controlled run. The
@@ -3559,22 +3559,14 @@ mod tests {
     /// Red mutations: drop `{live}` from the format string -- the group assertions fail; skip
     /// `start_live_producer` in `run_placed` -- the producer is not running and the run panics.
     #[test]
-    fn the_live_producer_row_prints_its_producer_and_renders_the_ring_bits() {
+    fn the_live_producer_row_prints_its_producer_group() {
         let live = Workload::SixtyFourTrackGainPanLive;
         let measured = SessionMeasurement::run_for(live, SHORT_RUN_OBSERVATIONS);
-        let ring = SessionMeasurement::run_for(
-            Workload::SixtyFourTrackGainPanRing,
-            SHORT_RUN_OBSERVATIONS,
-        );
         assert_eq!(measured.render_errors, 0);
         assert_eq!(
             measured.audit.total(),
             0,
             "a forbidden operation on the render path"
-        );
-        assert_eq!(
-            measured.output_sha256, ring.output_sha256,
-            "the live row rendered other bits than the ring row"
         );
         let record = measured.record(live, 1, Backend::current(), Metadata::gather(), None, None);
         println!("{record}");

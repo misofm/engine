@@ -199,7 +199,7 @@ if [[ -n "$bench_cpu" ]]; then
         note_affinity="$note_affinity producer cpu $producer_cpu"
     else
         failure_reason=precondition_producer_cpu_unavailable
-        printf 'refusing the live-producer row: no core shares cpu %s'"'"'s L3 outside its SMT siblings\n' \
+        printf 'refusing the run (live-producer row placement): no core shares cpu %s'"'"'s L3 outside its SMT siblings\n' \
             "$bench_cpu" >&2
         exit 1
     fi
