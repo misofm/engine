@@ -65,3 +65,7 @@ None.
 - `cargo test -p graph` all pass; rt9 alloc test (release) pass; lane policy ok; realtime policy
   ok (192 regions); fmt, clippy `-p lane -p graph --all-targets --all-features`, aarch64
   `--tests` check and `-D warnings` doc pass. The kernel is not in the wasm `KERNEL_ROSTER`.
+- Descriptive benchmark: one `scripts/operator/run-console-benchmark.sh --step b11-899` invocation
+  under the exclusive lock refused before the workload (`precondition_loadavg_above_ceiling`,
+  loadavg 2.95/6.74/8.72 from other streams; 0 launches, 0 rounds). Not retried and not forced
+  uncontrolled; no number is quoted.
