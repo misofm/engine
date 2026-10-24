@@ -327,3 +327,94 @@ settled rows, the in-flight terms add nothing measurable but carry 67 % of `Z*`.
 window part binds, with a margin of only 0.1 % (96 kHz) to 0.6 % (44.1 kHz) over the time-resolved
 settled sup. (4) The LPF at the top has `l1` 2.43, not about 1. The largest settled cascade is the
 HPF at 200 Hz into the top LPF.
+
+### Root decision on the diagnosis (2026-10-24)
+
+Root accepted the recommendation. **`G_p` closes with #1485's value under T-D6**: no bounded
+tightening has a proof (C3's soundness is not shown, C4 is research, C5 is at most 1.2 dB), so
+`G_p` stays 12,224 / 12,215 / 12,224 / 12,215 mB with `F_P = 22.75`, and no gate changes for it.
+`G_t` takes slice #1487-B (C1).
+
+### #1487-B attempt 1 (2026-10-24): the time-resolved settled phase of `G_t`
+
+**Change.** `LiveBound::tail_gain`'s settled part per pair `(k, l)` is now `settled_pair_peak`
+(`crates/math/src/tail.rs`). It walks the majorant recursion from `(E*_k, S*_l)` frame by frame,
+rounded up, and its tail bound `T_H` covers every later frame. #1485's sum of three separate
+suprema is gone. The proof is in the derivation note, "Settled, from `M + R`". Gate L3''s oracle
+recomputes the settled part in closed form (`settled_pair_sup`: the recursion's solution is
+`K0 + K1 r_k^s + K2 r_l^s`, and its derivative has at most one zero). The window part, the
+first-section row, `G_p`, `D`, the stalls and the rests are unchanged (T-D5).
+
+**`G_t` per rate** (raw, with the trim; the window part now sets it at every rate):
+
+| rate | `W* g` | `Z* g` (oracle) | margin `W*/Z* - 1` | `G_t` raw | `G_t` mB (was) | `r_t` stated |
+|---|---|---|---|---|---|---|
+| 44.1 | 433.681 | 431.168 | 0.58 % | 433.681 | 5,275 (5,824) | 7.2138 |
+| 48 | 433.679 | 431.457 | 0.51 % | 433.679 | 5,275 (5,825) | 7.2128 |
+| 88.2 | 433.681 | 432.962 | 0.17 % | 433.681 | 5,275 (5,829) | 7.2190 |
+| 96 | 433.679 | 433.108 | 0.13 % | 433.679 | 5,275 (5,830) | 7.2190 |
+
+The margin is thin, but nothing depends on it. If the settled part ever exceeds the window part,
+`G_t` takes the settled part, and gate L3' recomputes both parts.
+
+**Re-pins (old -> new).**
+- `input_section_live_bound_table` `tail_gain`: 5,824 / 5,825 / 5,829 / 5,830 -> 5,275 at every rate.
+- `F_T` (gate 2t): 14.37 -> 7.58, that is `r_t,max` 7.2190 times `1 + 5 %`, rounded up (T-D4). It
+  waits for root's confirmation.
+- Gate 1 gains the T-D1 search's best five-event history (row +55). With it, `g_meas` is 5.9890e4 /
+  5.9542e4 / 5.9891e4 / 5.9542e4, +0.23 % over the old values, and `r_p` is 21.61 / 21.51 / 21.61 /
+  21.51, still within `F_P`.
+
+No #1379 digest and no asserted tail moved. The graph fixtures, `track_delay`'s digest, and
+host-core's `tail_composition` and `live_lanes` passed unchanged. So no other pin was restated.
+
+**Reported tails.** I measured with a scratch per-rate copy of host-core's `live_lanes` C8 (the
+nine-track live-controls fixture with its bus, every strip with an input lane, never committed).
+I ran it with the old table and with the new one:
+
+- `output_tail` and `output_tail_every_peak` are unchanged at every rate (44.1 kHz: 2,388,258 and
+  4,769,994 under `ALL`; 2,014,834 and 3,452,204 with the input lanes only).
+- Only the graph's flush floor `P*_graph` moved: 3,509 / 3,505 / 3,515 / 3,528 mB -> 2,960 / 2,955 /
+  2,961 / 2,973 mB under `ALL`, and -4,889 / -4,893 / -4,883 / -4,870 -> -5,431 / -5,436 / -5,430 /
+  -5,418 mB with the input lanes only. That is about -5.5 dB at every rate.
+- The EQ fixture's tail stays infinite (its EQ bound is unstated).
+
+The tails do not move because an input section's `G_t` enters only the `down` gain of the nodes
+upstream of it, and the extent rounds `A` up to whole decades (`k = ceil(A / 2000)`). On these
+fixtures, the 549 mB drop does not cross a decade.
+
+**Class A.** The change is to bound code only, and no render path is touched. Every render digest
+gate passed unchanged (gates below). Preparation cost is unchanged: preparation reads the table.
+
+**Red first and test value.**
+- With #1485's module (`git show e6cd552d9:crates/math/src/tail.rs`) and the new tests, three tests
+  are red at every rate:
+  - gate 2t: stated `g_t` 816.6 > `F_T s_scan` 456.0, ratio 13.57 at 44.1 kHz;
+  - gate L3': module 815.8 against the recomputed 433.68;
+  - the table test.
+- Test value: gate 2t and L3' turn red when the settled phase is not time-resolved (#1485's bound
+  left in place); no other test bounds `G_t` from above.
+- Gate 1's new row is red alone under a `g_p / 21.63` mutant (44.1 kHz: kernel peak 5.9890e4
+  against `g_p + sigma_p` 5.9829e4; the seven older rows pass). Test value: a `G_p` that covers the
+  three-event history but not the search's five-event one.
+- I restored each mutant with `git checkout` and `touch`.
+
+**Render digests.** `audit capi`'s `pcm_digest` is `bffc21e857b5e134` both on this branch and on
+the base (e6cd552d9, built in a scratch worktree). `check-builtins-fixtures.sh`, `run-wasm-gates.sh`
+(G5), `check-graph-determinism.sh` and `graph_fixture --check` pass unchanged.
+
+**Gates** (all pass):
+- `cargo fmt --check`;
+- the gate 4 DSP debug tests (`-p lane -p math -p builtins -p dsp-reference`);
+- release `tail_contract --include-ignored` (20 tests);
+- release host-core `tail_composition --include-ignored`;
+- the `test-debug-a` workspace command (on cd27acb60; the later commit changes only a test's
+  history list and the docs);
+- `audit capi`, `check-builtins-fixtures.sh`, `run-wasm-gates.sh`, `check-web-audioworklet.sh`,
+  `check-graph-determinism.sh` and `graph_fixture --check`;
+- `clippy -D warnings` on math, builtins, host-core, graph-compiler and builtins-compiler;
+- AArch64 `cargo check --tests` on math and builtins;
+- `cargo doc -D warnings` on math and builtins;
+- `check-workspace-policy.sh` and `lint-checks.sh`.
+
+325 tests passed in the gate run, and none failed. Release `tail_contract` takes about 11 s.
