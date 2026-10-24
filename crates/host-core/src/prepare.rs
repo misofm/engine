@@ -389,21 +389,6 @@ pub struct HostLiveControlRequest {
     /// can use other periods. Latest gain-reduction observations can be independently aged,
     /// so a browser frame's peak interval does not establish the gain-reduction interval.
     pub observation_taps: u32,
-    /// The strip whose gain reduction is reported as the master's, or `None` (issue #143 D6): an
-    /// index into [`HostLiveControlHandles::strips`], tracks first, then submixes (issue #1208
-    /// D3).
-    ///
-    /// The master reading is a *designation*, not a discovery: no strip is structurally the
-    /// master. Issue #1208 widens that stopgap from tracks to every strip without retiring it, so
-    /// a bus whose strip carries a limiter can now be designated. The field, its refusal code
-    /// `host.observation.master_track` and the browser and SDK spellings keep their track-era
-    /// names (DESIGN P17).
-    ///
-    /// It designates a first plan's master only (#1683): the designation is the strip's `master`
-    /// monitor row, which the boot seeds from this field and the app sets or changes after boot,
-    /// and a successor takes it from [`SuccessorBase::monitor`]. A successor's request that names
-    /// one refuses with `host.observation.master_track`.
-    pub master_track: Option<u32>,
 }
 
 impl Default for HostLiveControlRequest {
@@ -413,7 +398,6 @@ impl Default for HostLiveControlRequest {
             meter_queue_depth: NonZeroUsize::MIN,
             meter_tap: MeterTap::PostMatrix,
             observation_taps: 0,
-            master_track: None,
         }
     }
 }
@@ -541,9 +525,6 @@ pub struct HostLiveControlHandles {
     /// whatever the live options; such a route has no entry in [`Self::route_controls`]. Found
     /// with [`follow_route_producer_position`].
     pub follow_route_controls: Vec<graph::GraphFollowRouteControlProducer>,
-    /// The designated master strip index, echoed back after validation against `strips.len()`
-    /// (issue #1208 D3): tracks first, then submixes. Still a designation, not a discovery.
-    pub master_track: Option<u32>,
     /// The `live_values_superseded` count this plan's strip and route cell readers add to
     /// (#1312 D2): the session's own count when the host passed one to
     /// [`prepare_host_runtime_with_live_lanes`], else a fresh count this preparation made. Read
@@ -2187,38 +2168,10 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
     let route_count = u64::try_from(model.routes.len()).map_err(|_| platform("host.count"))?;
     let effect_count = count_effects(model)?;
     caps.validate_shape(compiled)?;
-    // Issue #143 D6, widened to strips by issue #1208 D3 and made a monitor row by #1683: a
-    // designated master must name a strip this session actually has, or the frame would report a
-    // master reading nobody can address. A first plan takes it from the request (the browser's
-    // boot word), by strip index; a successor takes it from the overlay it renders under, by strip
-    // ID, so a strip added or removed before the master never moves the designation. A successor
-    // request that names one is refused: the overlay is the one designation.
-    let strip_total = model.tracks.len() + model.submixes.len();
-    let master_track = match (successor, live_controls.master_track) {
-        (None, Some(index)) if (index as usize) < strip_total => Some(index),
-        (None, None) => None,
-        (None | Some(_), Some(_)) => return Err(shape("host.observation.master_track")),
-        (Some(base), None) => match base.monitor.next.master() {
-            Some(id) => Some(
-                controls::strip_index(model, id)
-                    .and_then(|index| u32::try_from(index).ok())
-                    .ok_or_else(|| shape("host.observation.master_track"))?,
-            ),
-            None => None,
-        },
-    };
-    // The overlay the plan renders and lists under (#1559 D9): a successor's own; a first plan's
-    // solos nothing and holds the request's master (#1683), so the boot catalog lists it.
-    let boot_overlay = match (successor, master_track) {
-        (None, Some(index)) => {
-            let mut overlay = controls::MonitorOverlay::new();
-            if let Some(strip) = model.strips().nth(index as usize) {
-                overlay.set_master(strip.id, true);
-            }
-            overlay
-        }
-        _ => controls::MonitorOverlay::new(),
-    };
+    // The overlay the plan renders and lists under (#1559 D9): a successor's own, which holds its
+    // master by strip ID (#1683); a first plan's solos nothing and designates no master (#1689 D3):
+    // the app writes the strip's `master` row after boot.
+    let boot_overlay = controls::MonitorOverlay::new();
     let overlay = successor.map_or(&boot_overlay, |base| base.monitor.next);
 
     let source_id_bytes = model.sources.iter().try_fold(0_usize, |total, source| {
@@ -3807,7 +3760,6 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
             effect_observations,
             route_controls,
             follow_route_controls,
-            master_track,
             live_values_superseded: live_superseded,
             jump_lengths: Some(jump_lengths),
         },

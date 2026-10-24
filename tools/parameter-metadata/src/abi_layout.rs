@@ -283,11 +283,7 @@ fn boot_options_fields() -> [Field; 11] {
             offset_of!(WebBootOptions, live_control_observation_taps),
             "u64",
         ),
-        (
-            "liveControlMasterTrackPlusOne",
-            offset_of!(WebBootOptions, live_control_master_track_plus_one),
-            "u64",
-        ),
+        ("reserved2", offset_of!(WebBootOptions, reserved2), "u64"),
     ]
 }
 

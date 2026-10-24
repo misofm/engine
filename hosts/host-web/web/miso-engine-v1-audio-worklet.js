@@ -78,7 +78,7 @@ const SPECTRUM_STREAM_STATUSES = new Set([0, 1, 2, 3, 4, 5, 6]);
 const INIT_FIELDS = ["module", "document", "options"];
 const OPTION_FIELDS = [
   "sourceRingFrames", "maximumMemoryBytes", "reserved1", "liveControlMeterBlocks",
-  "liveControlObservationTaps", "liveControlMasterTrackPlusOne", "spectrumHopFrames", "spectrum",
+  "liveControlObservationTaps", "reserved2", "spectrumHopFrames", "spectrum",
   "spectrumCollection",
 ];
 const SPECTRUM_OPTION_FIELDS = OPTION_FIELDS.filter((field) => field !== "spectrumHopFrames");
@@ -942,16 +942,14 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
     }
     const liveControlWords = [
       options.reserved1, options.liveControlMeterBlocks,
-      options.liveControlObservationTaps, options.liveControlMasterTrackPlusOne,
+      options.liveControlObservationTaps, options.reserved2,
     ];
     if (liveControlWords.some((value) => !validU64(value))) {
       throw new RangeError("Invalid live-control boot option");
     }
-    // Offset 32 is reserved and must be zero (issue #1565a D4); a master designation with no
-    // capacity would report a number nothing produces.
-    if (options.reserved1 !== 0n
-        || (options.liveControlMasterTrackPlusOne !== 0n
-          && options.liveControlObservationTaps === 0n)) {
+    // Offsets 32 and 56 are reserved and must be zero (issue #1565a D4, issue #1689 D2): a
+    // writer that still sets a retired word is refused, never ignored.
+    if (options.reserved1 !== 0n || options.reserved2 !== 0n) {
       throw new RangeError("Invalid observation boot option");
     }
     const view = new DataView(this.exports.memory.buffer, pointer, BOOT_OPTIONS_BYTES);
