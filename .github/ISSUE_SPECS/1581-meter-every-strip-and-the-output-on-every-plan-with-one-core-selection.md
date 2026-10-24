@@ -246,3 +246,12 @@ Commands: `cargo test --locked -p host-core --all-features`,
   diagnostics (`$.meter_requests` for streams, `$.builtin_compile_caps` for items and bytes). The
   same bytes are fixed control rows (`capi_resources`): a recorded conservative double charge, as
   #1256 D4's.
+- **T2 reader and worklet evidence.** The reader hands out its queue (`windows_mut`) and the
+  dropped count; it has no pop of its own, so each owner pops under its own drain bound
+  (`available_at_entry`, the realtime-policy rule). The worklet render closure is unchanged in
+  `call_indirect` sites and passes the kernel-shape and allocation gates, but
+  `OutputPeakObserver::observe` is a new trap owner: it inlines the engine SPSC producer's checked
+  slot index (`slots[local]`, unreachable by the cursor invariant), the same site
+  `RealtimePlanOwner::enter_block` is admitted for. Admitting it needs
+  `--trap-owner 18OutputPeakObserver7observe` in `scripts/check-web-audioworklet.sh`, outside
+  T2's paths; with that one argument (a scratch-worktree probe) the whole worklet check passes.
