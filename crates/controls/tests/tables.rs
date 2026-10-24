@@ -28,7 +28,13 @@ fn table_descriptor(model: &session::SessionModel, listed: &ControlRow) -> Contr
         (Owner::Route(id), _) => {
             let row = find(RowSource::RouteOwn);
             let route = model.routes.iter().find(|route| route.id == *id).unwrap();
-            match (route.destination.clone(), row.into_output) {
+            // #1391: a route into the output from before the fader has its own case.
+            let case = if controls::route_rows_live(route) {
+                row.into_output_before_fader
+            } else {
+                row.into_output
+            };
+            match (route.destination.clone(), case) {
                 (RouteDestination::SubmixInput { .. }, _) => row.descriptor,
                 (RouteDestination::OutputInput { .. }, Some(output)) => ControlDescriptor {
                     class: output.class,
