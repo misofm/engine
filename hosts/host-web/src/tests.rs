@@ -6285,14 +6285,14 @@ fn the_attachment_charge_is_checked_against_the_caps() {
     )
     .expect("nine-track compile");
     let caps = prepare_caps(&compiled, options, 512, u64::MAX);
-    let (host, _, _) = prepare_web_host(
+    let (host, _, _) = host_core::prepare_host_runtime_with_live_lanes_and_spectrum(
         &compiled,
         &caps,
         &live_control_request(options, 128).expect("request"),
-        None,
         controls::live_lanes(compiled.normalized_model()).into(),
-        &host_core::LiveValuesSuperseded::new(),
         None,
+        None,
+        &host_core::LiveValuesSuperseded::new(),
     )
     .expect("reference preparation");
     let base = host.report;
@@ -6376,8 +6376,8 @@ fn web_runtime_preparer_attaches_the_companions_on_every_branch() {
         CompanionCapture::Collection,
     ] {
         let record = Arc::new(Mutex::new(BootRecord::default()));
-        let preparer = WebRuntimePreparer::new(options, companion_request(capture))
-            .recording(Arc::clone(&record));
+        let request = companion_request(capture);
+        let preparer = WebRuntimePreparer::new(options).recording(Arc::clone(&record));
         let superseded = host_core::LiveValuesSuperseded::new();
         let check =
             |host: &mut PreparedHost, handles: &host_core::HostLiveControlHandles, at: &str| {
@@ -6410,20 +6410,20 @@ fn web_runtime_preparer_attaches_the_companions_on_every_branch() {
             };
 
         let (mut boot, boot_handles, _) = preparer
-            .prepare(&compiled, &caps, lanes, None, None, &superseded)
+            .prepare(&compiled, &caps, lanes, request.as_ref(), None, &superseded)
             .unwrap_or_else(|failure| panic!("{capture:?} boot: {failure:?}"));
         check(&mut boot, &boot_handles, "boot");
         // The attachment is charged in the plan's rows (the control plane builds its plan
         // resource row from this report): the same preparation without the attachment, plus the
         // attachment's own box and vector buffers, in both plan rows and in the largest allocation.
-        let (reference, _, _) = prepare_web_host(
+        let (reference, _, _) = host_core::prepare_host_runtime_with_live_lanes_and_spectrum(
             &compiled,
             &caps,
             &live_control_request(options, 128).expect("request"),
-            companion_request(capture).as_ref(),
             lanes,
-            &superseded,
+            request.as_ref(),
             None,
+            &superseded,
         )
         .unwrap_or_else(|failure| panic!("{capture:?} reference: {failure:?}"));
         let (retained, largest) = boot
@@ -6464,7 +6464,14 @@ fn web_runtime_preparer_attaches_the_companions_on_every_branch() {
             ..host_core::SuccessorBase::new(&boot.inventory, model, 1)
         };
         let (mut successor, successor_handles, _) = preparer
-            .prepare(&compiled, &caps, lanes, None, Some(base), &superseded)
+            .prepare(
+                &compiled,
+                &caps,
+                lanes,
+                request.as_ref(),
+                Some(base),
+                &superseded,
+            )
             .unwrap_or_else(|failure| panic!("{capture:?} successor: {failure:?}"));
         check(&mut successor, &successor_handles, "successor");
         // Every successor carries the timeline's command queue (#1641 D7), which is overhead
