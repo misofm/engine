@@ -2235,7 +2235,7 @@ fn observation_ended_round_trips_every_key_and_refuses_anything_else() {
     }
 }
 
-/// Issue #1351 gate 4: every registered counter ID, the newest `STRIPS_RESTARTED` (#1768)
+/// Issue #1351 gate 4: every registered counter ID, the newest `LIVE_BLOCK_ERRORS` (#1521)
 /// included, round-trips through the telemetry configuration; the next ID and the retired IDs
 /// 2 and 11 to 14 (#1629) are refused.
 ///
@@ -2258,8 +2258,9 @@ fn every_counter_id_round_trips_and_the_next_is_refused() {
         CounterId::LiveValuesSuperseded,
         CounterId::TransitionReprepareRefusals,
         CounterId::StripsRestarted,
+        CounterId::LiveBlockErrors,
     ];
-    let allocated = [1_u32, 3, 4, 5, 6, 7, 8, 9, 10, 15, 16, 17, 18];
+    let allocated = [1_u32, 3, 4, 5, 6, 7, 8, 9, 10, 15, 16, 17, 18, 19];
     assert_eq!(
         all.iter().map(|id| *id as u32).collect::<Vec<_>>(),
         allocated,
@@ -2283,7 +2284,7 @@ fn every_counter_id_round_trips_and_the_next_is_refused() {
     );
     // One ID per request, so a refusal cannot come from the sorted-unique rule.
     let single = TelemetryConfiguration {
-        counter_ids: vec![CounterId::StripsRestarted],
+        counter_ids: vec![CounterId::LiveBlockErrors],
         counter_period_blocks: 3,
         ..configuration
     };
@@ -2291,12 +2292,12 @@ fn every_counter_id_round_trips_and_the_next_is_refused() {
     let len = codec
         .encode_telemetry_configuration(&single, &mut bytes)
         .expect("single");
-    let id_bytes = 18_u32.to_le_bytes();
+    let id_bytes = 19_u32.to_le_bytes();
     let at = bytes[..len]
         .windows(4)
         .position(|window| window == id_bytes)
         .expect("counter ID");
-    for refused_id in [0_u32, 2, 11, 12, 13, 14, 19] {
+    for refused_id in [0_u32, 2, 11, 12, 13, 14, 20] {
         let mut refused = bytes;
         refused[at..at + 4].copy_from_slice(&refused_id.to_le_bytes());
         assert!(

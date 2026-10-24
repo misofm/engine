@@ -1552,6 +1552,13 @@ pub(crate) fn test_plan_carry_counts(plan: *mut Plan) -> (u64, u64) {
 }
 
 #[cfg(test)]
+pub(crate) fn test_store_live_block_errors(plan: *const Plan, count: u64) {
+    // SAFETY: Test callers retain the live plan; `queries` is the any-thread projection, read
+    // through a shared reference.
+    unsafe { &*plan_queries(plan) }.test_store_live_block_errors(count);
+}
+
+#[cfg(test)]
 pub(crate) fn test_session_seek(
     session: *mut Session,
     generation: u64,

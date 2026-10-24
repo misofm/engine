@@ -2032,16 +2032,18 @@ where
 
     /// Sets every counter the provider serves from a source outside it (#1348 D8): the
     /// controller's telemetry counters, the session's `live_values_superseded` count (#1312
-    /// D8) and its `strips_restarted` count (#1768). A counter added later joins this refresh,
-    /// never a single control call.
+    /// D8), its `strips_restarted` count (#1768) and the render-side `live_block_errors` mirror
+    /// (#1521 D3). A counter added later joins this refresh, never a single control call.
     fn refresh_provider_counters(&mut self) {
         let telemetry_counters = self.controller.queues().telemetry_counters();
         let superseded = self.live_values_superseded.get();
         let restarted = self.strips_restarted;
+        let errors = self.shared.live_block_errors.load(Ordering::Acquire);
         let provider = self.controller.provider_mut();
         provider.set_telemetry_counters(telemetry_counters);
         provider.set_live_values_superseded(superseded);
         provider.set_strips_restarted(restarted);
+        provider.set_live_block_errors(errors);
     }
 
     /// Runs one control command frame. A success returns the response's length in the response

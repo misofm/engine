@@ -104,6 +104,17 @@ impl<A: ControlAdapter> PlanQueries<A> {
         self.shared.live_block_errors.load(Ordering::Acquire)
     }
 
+    /// Test seam (#1521 D6): stores `count` into the session's `live_block_errors` mirror, as
+    /// render does on an error block. No valid plan reaches a counted error, so the adapters'
+    /// tests drive the mirror-to-wire link through this. The next error block overwrites it.
+    #[cfg(feature = "test-support")]
+    #[doc(hidden)]
+    pub fn test_store_live_block_errors(&self, count: u64) {
+        self.shared
+            .live_block_errors
+            .store(count, Ordering::Release);
+    }
+
     /// The applied-revision watermark (#1314): which committed revision is in effect, since which
     /// render sample, with its outcome flags and counters. Pure and bounded: a read that keeps
     /// landing inside render's publication gives up with [`WatermarkBusy`], and the caller
