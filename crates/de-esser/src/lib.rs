@@ -51,8 +51,8 @@ use effect_runtime::params::{
 use effect_runtime::ramp::LinearRamp;
 use effect_runtime::state_payload as payload;
 use effect_runtime::svf::{RAMP_PATH_NORM_TOLERANCE, transition_norm};
-use lane::kernels::silence_advance;
-use lane::{Backend, Lane, Simd4};
+use lane::kernels::{SvfState, silence_advance, silence_skip_block, svf_state_held};
+use lane::{Backend, Lane, Simd4, silence_armable_holding};
 
 use kernel::{Args, C1, Chan, Coef, MAX_WIDTH, RAMPS, segment};
 
@@ -762,23 +762,51 @@ impl<L: Lane, const CONNECTED: bool> DeEsser<L, CONNECTED> {
         let armed_after = L::splat(lane::silence_frames(self.sample_rate) as f32);
         let (first, rest) = self.state.split_at_mut(1);
         let mut run = |ramping: bool, range: core::ops::Range<usize>| {
+            let (left, right) = (&mut left[range.clone()], &mut right[..]);
             let right = if MONO {
                 &mut [][..]
             } else {
                 &mut right[range.clone()]
             };
+            let sidechain = sidechain.map(|(l, r)| (&l[range.clone()], &r[range.clone()]));
+            let states = [&mut first[0], &mut rest[0]];
+            let frames = range.len() / L::WIDTH;
+            // Issue #1328 A9: the armed form only where a lane can arm while holding state.
+            let arms = |run: L, svf: SvfState<L>| {
+                silence_armable_holding(run, frames, armed_after, svf_state_held([svf]))
+            };
+            let channels = if MONO { 1 } else { 2 };
+            let armable = states[..channels]
+                .iter()
+                .any(|s| arms(s.run, s.main) || (CONNECTED && arms(s.side_run, s.side)));
+            let [state_left, state_right] = states;
+            if !armable {
+                let planes: [&[f32]; 2] = [left, right];
+                let sides = sidechain.map_or([&[][..]; 2], |(l, r)| [l, r]);
+                for (channel, s) in [&mut *state_left, &mut *state_right]
+                    .into_iter()
+                    .enumerate()
+                    .take(channels)
+                {
+                    silence_skip_block(planes[channel], frames, &mut s.run);
+                    if CONNECTED {
+                        silence_skip_block(sides[channel], frames, &mut s.side_run);
+                    }
+                }
+            }
             let args = Args {
-                left: &mut left[range.clone()],
+                left,
                 right,
-                sidechain: sidechain.map(|(l, r)| (&l[range.clone()], &r[range])),
+                sidechain,
                 armed_after,
                 coef: (&self.coef[0], &self.coef[1]),
-                state: (&mut first[0], &mut rest[0]),
+                state: (state_left, state_right),
             };
-            if ramping {
-                segment::<L, CONNECTED, true, MONO>(args);
-            } else {
-                segment::<L, CONNECTED, false, MONO>(args);
+            match (ramping, armable) {
+                (true, true) => segment::<L, CONNECTED, true, MONO, true>(args),
+                (true, false) => segment::<L, CONNECTED, true, MONO, false>(args),
+                (false, true) => segment::<L, CONNECTED, false, MONO, true>(args),
+                (false, false) => segment::<L, CONNECTED, false, MONO, false>(args),
             }
         };
         if split > 0 {

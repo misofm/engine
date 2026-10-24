@@ -111,3 +111,79 @@ fn split_mode_cuts_the_band_and_leaves_an_out_of_band_tone() {
     assert!(low.abs() <= 0.1, "the 1 kHz tone moved {low} dB");
     assert!(high <= -3.0, "the 7 kHz burst moved only {high} dB");
 }
+
+/// With the sidechain connected, a steady -10 dBFS 1 kHz main tone (below the threshold through
+/// the band) is reduced only while the 8 kHz burst plays on the sidechain: the wideband output is
+/// `g x` with `g` the reference's change for the **sidechain** input, within `1e-5`.
+#[test]
+fn a_connected_sidechain_alone_drives_the_detector() {
+    use effect_contract::{
+        EffectProcessBlock, NativeEffectFactory, PortId, PreparedPorts, PreparedSidechainPort,
+    };
+    let mut values = defaults();
+    set(&mut values, 7, 1.0);
+    let mut request = support::request(&values, LinkMode::DualMono);
+    request.ports = PreparedPorts {
+        sidechain: PreparedSidechainPort::Connected {
+            id: PortId::new("sidechain-in").expect("port"),
+            required: false,
+        },
+    };
+    let mut effect = de_esser::DeEsserFactory
+        .prepare(request)
+        .expect("connected");
+    let main = |n: usize| tone(1_000.0, n, 0.316);
+    let side = |n: usize| input(n) - tone(1_000.0, n, 0.0316);
+    let mut left: Vec<f32> = (0..FRAMES).map(main).collect();
+    let mut right = left.clone();
+    let sidechain: Vec<f32> = (0..FRAMES).map(side).collect();
+    for start in (0..FRAMES).step_by(128) {
+        let end = (start + 128).min(FRAMES);
+        let block = EffectProcessBlock::new(
+            &mut left[start..end],
+            &mut right[start..end],
+            Some((&sidechain[start..end], &sidechain[start..end])),
+            start as u64,
+            &[],
+            128,
+        )
+        .expect("block");
+        effect.processor.process(block);
+    }
+    let law = ReferenceDynamicBandLaw {
+        threshold_db: -20.0,
+        ratio: 4.0,
+        knee_db: 0.0,
+        range_db: 20.0,
+        attack_ms: 1.0,
+        release_ms: 50.0,
+        upward: false,
+    };
+    let mut reference = ReferenceDeEsser::new(
+        f64::from(RATE),
+        6_500.0,
+        2.0,
+        ReferenceBandTap::BandPass,
+        law,
+        ReferenceDeEsserOutput::Wideband,
+    )
+    .expect("design");
+    let mut deepest = 0.0_f64;
+    for (n, &sample) in left.iter().enumerate() {
+        let (_, change) = reference.process(f64::from(side(n)));
+        deepest = deepest.min(change);
+        let expected = f64::from(main(n)) * 10.0_f64.powf(change / 20.0);
+        assert!(
+            (f64::from(sample) - expected).abs() <= 1.0e-5,
+            "sample {n} is {sample}, the reference {expected}"
+        );
+        if n < 2_400 {
+            assert_eq!(
+                sample.to_bits(),
+                main(n).to_bits(),
+                "no reduction before the burst"
+            );
+        }
+    }
+    assert!(deepest < -3.0, "the sidechain burst engages ({deepest} dB)");
+}

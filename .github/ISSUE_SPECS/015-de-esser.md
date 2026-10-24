@@ -107,4 +107,18 @@ Evidence (48 kHz, this worktree):
   green); lane 1+ reading lane 1's automation offsets (bank parity red); collapsed body with a
   zero partner (collapse red); `advance_clocks` advancing one channel (rest red); full reset a
   no-op (conformance red). Survived: SVF joint flush disarmed (rest stays green: this fixture's
-  SVF reaches `+0.0` by the per-word flush alone).
+  SVF reaches `+0.0` by the per-word flush alone, and the gain release settles last). That
+  mutant is owned by #1372's tail and rest-bound gate, part of the tail's reopening condition.
+
+## S1 attempt 2 (2026-10-24): verifier folds
+
+- Link modes: `effect-runtime/tests/dynamic_band.rs` gains two rows that feed the burst to the
+  partner channel only, Maximum and Average, against the oracle's level of `max(|a|, |b|)` and of
+  the mean, within 0.1 dB.
+- Sidechain wiring: `de-esser/tests/output_law.rs` gains a row with a steady -10 dBFS 1 kHz main
+  tone and the burst on the connected sidechain only; the wideband output is `g x` with the
+  reference's change for the sidechain input (within `1e-5`), and bit-exact before the burst.
+- `band_step` takes a block-constant `armable` and runs `svf_step_when`; the de-esser decides it
+  per segment with `silence_armable_holding` and advances an unarmable segment's silence clocks
+  with `silence_skip_block`, as the multiband does (#1328 A9).
+- `tests/rest.rs` doc corrected: this fixture rests through the gain release.

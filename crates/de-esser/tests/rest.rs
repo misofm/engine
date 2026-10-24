@@ -3,9 +3,10 @@
 //!
 //! The descriptor states no tail bound yet (the SVF ring-out's certified bound is the parametric
 //! EQ's #1372 derivation), so this is the rest claim the silent fast path and the per-lane skip
-//! depend on: the joint flush of the SVF (armed by the input's silence clock, #1328) and the gain
-//! word's flush bring every lane to exact `+0.0` state, after which a skipped block and a rendered
-//! one leave the same payload.
+//! depend on: every lane reaches exact `+0.0` state, after which a skipped block and a rendered one
+//! leave the same payload. In this fixture the gain word's release (to its rest snap) is the last
+//! word to settle; the SVF integrators reach `+0.0` earlier through their per-word flush, so the
+//! joint flush (#1328) is not what this test exercises: #1372's tail and rest-bound gate owns it.
 
 mod support;
 

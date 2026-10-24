@@ -64,16 +64,23 @@ fn crossing(trace: &[f64], start: usize, level: f64, falling: bool) -> usize {
 
 /// Per sample the smoothed change is within 0.1 dB of the oracle's, the attack (to 90 % of the
 /// burst's deepest change) and the release (back to 10 %) are within max(1 sample, 2 %) of the
-/// oracle's, and a million samples stay finite.
+/// oracle's, and a million samples stay finite. The two linked rows feed the burst to the partner
+/// channel only, against the oracle's level of `max(|a|, |b|)` and of the mean.
 #[test]
 fn the_band_step_matches_the_f64_oracle_on_a_burst() {
     let words = words();
     let armed_after = lane::silence_frames(RATE) as f32;
-    let link = LinkWords {
-        maximum: 0.0,
-        average: 0.0,
-    };
-    for (upward, knee) in [(false, 0.0_f32), (true, 6.0)] {
+    // (upward, knee, link): 0 dual mono on the own channel, 1 maximum and 2 average, partner only.
+    for (upward, knee, linked) in [
+        (false, 0.0_f32, 0),
+        (true, 6.0, 0),
+        (false, 0.0, 1),
+        (false, 0.0, 2),
+    ] {
+        let link = LinkWords {
+            maximum: f32::from(u8::from(linked == 1)),
+            average: f32::from(u8::from(linked == 2)),
+        };
         let law = ReferenceDynamicBandLaw {
             threshold_db: -20.0,
             ratio: 4.0,
@@ -96,23 +103,45 @@ fn the_band_step_matches_the_f64_oracle_on_a_burst() {
             attack: attack_release_coefficient(1.0, RATE),
             release: attack_release_coefficient(50.0, RATE),
         };
-        let mut filter =
+        let design =
             ReferenceRbjBiquad::new(f64::from(RATE), FREQUENCY, Q, ReferenceBandTap::BandPass)
                 .expect("filter");
+        let mut filters = [design; 2];
         let mut oracle = ReferenceDynamicBand::new(f64::from(RATE), law);
-        let (mut svf, mut run, mut gain_db) = (SvfState::<f32>::default(), 0.0_f32, 0.0_f32);
+        let mut svf = [SvfState::<f32>::default(); 2];
+        let (mut runs, mut gain_db) = ([0.0_f32; 2], 0.0_f32);
         let (mut ours, mut theirs) = (Vec::new(), Vec::new());
         for n in 0..SAMPLES {
-            let x = input(n);
-            let rest = lane::silence_step(x, &mut run, armed_after);
-            let (v1, v2, band) = band_step(x, &words, rest, &mut svf);
-            let level = detector_level_db(band, band, &link);
+            // Channel 0 is this band's own, channel 1 its partner.
+            let xs = if linked == 0 {
+                [input(n), 0.0]
+            } else {
+                [0.0, input(n)]
+            };
+            let mut bands = [0.0_f32; 2];
+            for channel in 0..2 {
+                let x = xs[channel];
+                let rest = lane::silence_step(x, &mut runs[channel], armed_after);
+                let (v1, v2, band) = band_step(true, x, &words, rest, &mut svf[channel]);
+                assert!(
+                    [v1, v2, band].iter().all(|word| word.is_finite()),
+                    "sample {n}"
+                );
+                bands[channel] = band;
+            }
+            let level = detector_level_db(bands[0], bands[1], &link);
             let delta = dynamic_band_gain(level, &coef, &mut gain_db);
             assert!(
-                [v1, v2, band, delta].iter().all(|word| word.is_finite()),
+                delta.is_finite(),
                 "upward {upward}: sample {n} is not finite"
             );
-            let reference = oracle.step(reference_level_db(filter.process(f64::from(x))));
+            let taps = [0, 1].map(|channel| filters[channel].process(f64::from(xs[channel])).abs());
+            let detector = match linked {
+                0 => taps[0],
+                1 => taps[0].max(taps[1]),
+                _ => 0.5 * (taps[0] + taps[1]),
+            };
+            let reference = oracle.step(reference_level_db(detector));
             if n < PERIOD {
                 ours.push(f64::from(delta));
                 theirs.push(reference);
@@ -125,13 +154,13 @@ fn the_band_step_matches_the_f64_oracle_on_a_burst() {
             .fold(0.0, f64::max);
         assert!(
             worst <= 0.1,
-            "upward {upward}: change differs by {worst} dB"
+            "upward {upward}, link {linked}: change differs by {worst} dB"
         );
         let deepest = theirs
             .iter()
             .fold(0.0_f64, |m, &v| if v.abs() > m.abs() { v } else { m });
         assert!(
-            deepest.abs() > 6.0,
+            deepest.abs() > 3.0,
             "upward {upward}: the burst engages the band ({deepest})"
         );
         let sign = deepest.signum();

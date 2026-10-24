@@ -145,30 +145,35 @@ fn advance<L: Lane>(ramps: &mut [WordRamp<L>; RAMPS]) {
 
 /// One SVF step on `x` and the selected tap: band `k v1` (0 dB at the centre) or high
 /// `x - k v1 - v2`, crossfaded by the detector word. The joint flush is armed by `x`'s own
-/// silence clock.
+/// silence clock; an unarmable segment (`ARMABLE = false`) had its clock advanced before the frame
+/// loop (`lane::kernels::silence_skip_block`) and reads no threshold.
 #[inline(always)]
-fn filter<L: Lane>(
+fn filter<L: Lane, const ARMABLE: bool>(
     x: L,
     s: &mut SvfState<L>,
     run: &mut L,
     words: &[WordRamp<L>; RAMPS],
     armed_after: L,
 ) -> L {
-    let rest = silence_step(x, run, armed_after);
+    let rest = if ARMABLE {
+        silence_step(x, run, armed_after)
+    } else {
+        L::zero()
+    };
     let band_words = BandWords {
         c1: words[C1].current,
         a2: words[C1 + 1].current,
         a3: words[C1 + 2].current,
         k: words[K].current,
     };
-    let (_, v2, band) = band_step(x, &band_words, rest, s);
+    let (_, v2, band) = band_step(ARMABLE, x, &band_words, rest, s);
     let high = x.sub(band).sub(v2);
     blend(band, high, words[DETECTOR].current)
 }
 
 /// One channel's front half: the ramps, the main tap and the detector tap.
 #[inline(always)]
-fn front<L: Lane, const RAMPING: bool, const CONNECTED: bool>(
+fn front<L: Lane, const RAMPING: bool, const CONNECTED: bool, const ARMABLE: bool>(
     s: &mut Chan<L>,
     x: L,
     side: L,
@@ -177,9 +182,9 @@ fn front<L: Lane, const RAMPING: bool, const CONNECTED: bool>(
     if RAMPING {
         advance(&mut s.ramps);
     }
-    let tap = filter(x, &mut s.main, &mut s.run, &s.ramps, armed_after);
+    let tap = filter::<L, ARMABLE>(x, &mut s.main, &mut s.run, &s.ramps, armed_after);
     let detector = if CONNECTED {
-        filter(side, &mut s.side, &mut s.side_run, &s.ramps, armed_after)
+        filter::<L, ARMABLE>(side, &mut s.side, &mut s.side_run, &s.ramps, armed_after)
     } else {
         tap
     };
@@ -228,7 +233,13 @@ fn back<L: Lane>(c: &Coef<L>, s: &mut Chan<L>, own: L, partner: L, x: L, tap: L)
 /// own partner, and only the left state moves, so the left plane and state are bit-identical to a
 /// dual segment whose right plane equals its left. A collapsed bank is never connected.
 #[inline(always)]
-pub fn segment<L: Lane, const CONNECTED: bool, const RAMPING: bool, const MONO: bool>(
+pub fn segment<
+    L: Lane,
+    const CONNECTED: bool,
+    const RAMPING: bool,
+    const MONO: bool,
+    const ARMABLE: bool,
+>(
     args: Args<'_, L>,
 ) {
     let Args {
@@ -250,7 +261,8 @@ pub fn segment<L: Lane, const CONNECTED: bool, const RAMPING: bool, const MONO: 
         let span = frame * width..frame * width + width;
         let x_left = L::load(&left[span.clone()]);
         if MONO {
-            let (tap, detector) = front::<L, RAMPING, false>(&mut l, x_left, x_left, armed_after);
+            let (tap, detector) =
+                front::<L, RAMPING, false, ARMABLE>(&mut l, x_left, x_left, armed_after);
             back(coef_left, &mut l, detector, detector, x_left, tap).store(&mut left[span]);
             continue;
         }
@@ -263,8 +275,10 @@ pub fn segment<L: Lane, const CONNECTED: bool, const RAMPING: bool, const MONO: 
         } else {
             (x_left, x_right)
         };
-        let (tap_l, det_l) = front::<L, RAMPING, CONNECTED>(&mut l, x_left, s_left, armed_after);
-        let (tap_r, det_r) = front::<L, RAMPING, CONNECTED>(&mut r, x_right, s_right, armed_after);
+        let (tap_l, det_l) =
+            front::<L, RAMPING, CONNECTED, ARMABLE>(&mut l, x_left, s_left, armed_after);
+        let (tap_r, det_r) =
+            front::<L, RAMPING, CONNECTED, ARMABLE>(&mut r, x_right, s_right, armed_after);
         let out_left = back(coef_left, &mut l, det_l, det_r, x_left, tap_l);
         let out_right = back(coef_right, &mut r, det_r, det_l, x_right, tap_r);
         out_left.store(&mut left[span.clone()]);

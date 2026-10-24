@@ -2,7 +2,7 @@
 //!
 //! Both effects are one TPT SVF band whose detector drives a gain change in dB:
 //!
-//! 1. [`band_step`]: one `lane::kernels::svf_step` (the workspace's only copy of the recurrence)
+//! 1. [`band_step`]: one `lane::kernels::svf_step_when` (the workspace's only copy of the recurrence)
 //!    and the unity-peak band-pass tap `b = k v1` (Simper's band output `v1` has peak gain `Q`, so
 //!    `k = 1/Q` normalises it to 0 dB at the centre frequency).
 //! 2. [`detector_level_db`]: `|d|` of the detector tap, linked across the channels (dual mono,
@@ -21,7 +21,7 @@
 
 use crate::dynamics::{GainComputerCoef, gain_delta_db};
 use lane::Lane;
-use lane::kernels::{SvfState, svf_step};
+use lane::kernels::{SvfState, svf_step_when};
 use math::fast_db::{fast_gain_from_db, fast_level_db};
 
 /// Detector level floor, below which the logarithm is not taken.
@@ -49,10 +49,18 @@ pub struct BandWords<L: Lane> {
 
 /// One SVF step of `x`: `(v1, v2, k v1)`, the band and low integrator outputs and the unity-peak
 /// band-pass tap. `rest` is the joint-flush threshold of the **effect input's** silence clock
-/// (`lane::silence_step`, issue #1328).
+/// (`lane::silence_step`, issue #1328). `armable` is block-constant: `false` for a block in which
+/// no lane can arm or every lane that can is at rest (`lane::silence_armable_holding`), where
+/// `svf_step_when(false, ..)` gives the same bits without reading `rest` (amendment A9).
 #[inline(always)]
-pub fn band_step<L: Lane>(x: L, w: &BandWords<L>, rest: L, s: &mut SvfState<L>) -> (L, L, L) {
-    let (v1, v2) = svf_step(x, w.c1.neg(), w.a2, w.a3, rest, s);
+pub fn band_step<L: Lane>(
+    armable: bool,
+    x: L,
+    w: &BandWords<L>,
+    rest: L,
+    s: &mut SvfState<L>,
+) -> (L, L, L) {
+    let (v1, v2) = svf_step_when(armable, x, w.c1.neg(), w.a2, w.a3, rest, s);
     (v1, v2, w.k.mul(v1))
 }
 
