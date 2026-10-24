@@ -43,8 +43,9 @@ fn active_values() -> [effect_contract::InitialParameterValue; support::PARAMETE
 
 /// The current byte rows, zero latency and exact-and-one-below resource caps.
 ///
-/// The compact causal payload has one crossover word, two gain words, ten four-word ramps and four
-/// filter words per channel. The common section stays empty: wave-2 decision W2-D2 on #83 defers
+/// The compact causal payload has one crossover word, two gain words, ten four-word ramps, four
+/// filter words, the silence counter, four four-word coefficient ramps and three four-word
+/// crossover word ramps per channel: 76 words. The common section stays empty: wave-2 decision W2-D2 on #83 defers
 /// the shared codec's versioned header to #95.
 #[test]
 fn descriptor_preparation_and_exact_four_rate_resources_are_frozen() {
@@ -60,10 +61,10 @@ fn descriptor_preparation_and_exact_four_rate_resources_are_frozen() {
     );
     assert_eq!(MULTIBAND_COMPRESSOR_DESCRIPTOR.state_layout_version, 1);
     for (rate, bytes) in [
-        (44_100u32, 256u32),
-        (48_000, 256),
-        (88_200, 256),
-        (96_000, 256),
+        (44_100u32, 304u32),
+        (48_000, 304),
+        (88_200, 304),
+        (96_000, 304),
     ] {
         let initial = values();
         let mut prepared = request(&initial);
@@ -73,7 +74,7 @@ fn descriptor_preparation_and_exact_four_rate_resources_are_frozen() {
             prepared.sample_rate,
             prepared.quality,
         );
-        prepared.limits.maximum_total_state_bytes = 512;
+        prepared.limits.maximum_total_state_bytes = 608;
         // The contract requires a positive capacity limit even when the prepared effect needs no
         // scratch; one byte is the smallest admissible declaration for the exact zero-byte row.
         prepared.limits.maximum_scratch_bytes = 1;
@@ -1173,9 +1174,9 @@ fn bank_requests_are_validated_before_any_fallback() {
         .expect("state bytes")
         .checked_add(quality.scratch_fixed_bytes)
         .expect("prepared bytes");
-    assert_eq!(per_track, 512);
-    assert_eq!(per_track * 4, 2_048);
-    assert_eq!(per_track * 8, 4_096);
+    assert_eq!(per_track, 608);
+    assert_eq!(per_track * 4, 2_432);
+    assert_eq!(per_track * 8, 4_864);
 }
 
 /// Issue #1088 (console strip P2a), gate 3: the multiband compressor has not opted into padding (it is not padded until #1069 closes), so

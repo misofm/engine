@@ -36,7 +36,6 @@
 //! path. Denormals are handled by `flush` on the six recursive state words, and non-finite output
 //! is caught once per block by `effect_runtime::bank` (D7).
 
-use effect_contract::control::{PreparedReason, RebuildReason};
 use effect_contract::{
     AutomationRate, BankProcessReport, BankWidth, EffectBankProcessBlock, EffectDescriptor,
     EffectPrepareError, EffectProcessBlock, EffectQuality, InitialParameterValue, LatencySamples,
@@ -59,6 +58,7 @@ use effect_runtime::state_payload::{
     STATE_LENGTH_CODE, STATE_VERSION_CODE, ramp_path_inside, read_f32, read_ramp, read_u32,
     write_f32, write_ramp, write_u32,
 };
+use effect_runtime::svf::{RAMP_PATH_NORM_TOLERANCE, transition_norm};
 use lane::kernels::{SvfState, ramp_toward, silence_skip_block, svf_state_held, svf_step_when};
 use lane::{Lane, flush};
 use lane::{silence_armable_holding, silence_step};
@@ -74,15 +74,17 @@ use shim::{LINK_AVERAGE, LINK_DUAL_MONO, LINK_MAXIMUM, branching_smooth, link_le
 /// Parameters in the frozen V1 order.
 const PARAMETER_COUNT: usize = 11;
 
-/// Ramped parameters: every parameter except the preparation-time crossover.
+/// Parameter ramps: every parameter except the crossover, which ramps its three designed words
+/// instead ([`CROSSOVER_WORDS`], issue #1338).
 const RAMP_COUNT: usize = 10;
 
 /// State-payload words each ramp occupies: current, target, step, remaining.
 const RAMP_WORDS: usize = 4;
 
-/// Fixed scalar words of one channel's state payload: 48 before the coefficient ramps, and four
-/// four-word coefficient ramps after them (issue #1069).
-const LANE_HEADER_WORDS: usize = RATE_WORD + RATE_COUNT * RAMP_WORDS;
+/// Fixed scalar words of one channel's state payload: 48 before the coefficient ramps, four
+/// four-word coefficient ramps after them (issue #1069), and three four-word crossover word ramps
+/// after those (issue #1338): 76.
+const LANE_HEADER_WORDS: usize = CROSSOVER_WORD + CROSSOVER_WORDS * RAMP_WORDS;
 
 /// State layout version. This is the sole prelaunch layout identity; the payload shape incorporates
 /// the audit's F1, F4 and D11 corrections.
@@ -116,12 +118,27 @@ const SMOOTHING_SAMPLES: u32 = 64;
 /// exponential runs per frame and the walk is a lane-wide `ramp_toward` like every other ramp.
 const RATE_COUNT: usize = 4;
 
-/// Ramp slots per channel and track: the ten parameter ramps, then the four coefficient ramps.
-const RAMP_SLOTS: usize = RAMP_COUNT + RATE_COUNT;
+/// Crossover word ramps per channel and track: `c1`, `a2`, `a3` of the split (issue #1338).
+///
+/// A crossover span designs the target triple once, at the event ([`Instance::apply_automation`],
+/// with [`design_lr4_words`]), and the three words walk linearly to it over the same 64 samples as
+/// every other ramp. The kernel reads them frame by frame on a ramped segment, so where a segment
+/// is cut cannot move them. Each point of the walk is a convex combination of two designs, which
+/// keeps it within `effect_runtime::svf::RAMP_PATH_NORM_TOLERANCE` (#1366 D5).
+const CROSSOVER_WORDS: usize = 3;
+
+/// Ramp slots per channel and track: the ten parameter ramps, the four coefficient ramps, then
+/// the three crossover word ramps.
+const RAMP_SLOTS: usize = RAMP_COUNT + RATE_COUNT + CROSSOVER_WORDS;
 
 /// The slot of coefficient ramp `rate` ([`RATE_COUNT`]).
 const fn rate_slot(rate: usize) -> usize {
     RAMP_COUNT + rate
+}
+
+/// The slot of crossover word `word` ([`CROSSOVER_WORDS`]: 0 is `c1`, 1 `a2`, 2 `a3`).
+const fn crossover_slot(word: usize) -> usize {
+    RAMP_COUNT + RATE_COUNT + word
 }
 
 /// The parameter index whose time coefficient ramp `rate` walks: low attack 3, low release 4,
@@ -213,32 +230,24 @@ const fn parameter(
     }
 }
 
-/// Why the crossover is prepared: decision 15 E2 makes it live and #1338 builds that, so the row
-/// is rebuild-only until then (decision 17, D1).
-const CROSSOVER_REASON: Option<PreparedReason> = Some(PreparedReason {
-    reason: RebuildReason::RuledLiveNotBuilt { issue: 1338 },
-    reopen: "#1338 makes the crossover live; its last step flips the row",
-});
-
 /// Frozen parameter order and stable numeric IDs for the V1 two-band product.
 pub const MULTIBAND_COMPRESSOR_PARAMETERS: [ParameterDescriptor; PARAMETER_COUNT] = [
-    ParameterDescriptor {
-        prepared_reason: CROSSOVER_REASON,
-        ..parameter(
-            1,
-            "crossover_hz",
-            "crossover",
-            "Hz",
-            ParameterUnit::Hz,
-            80.0,
-            8_000.0,
-            1_000.0,
-            ParameterMapping::Logarithmic,
-            AutomationRate::None,
-            SmoothingRule::None,
-            0,
-        )
-    },
+    // Issue #1338: the crossover is live. A span designs the target words once and the three
+    // word ramps walk to them over the same 64 samples as every other row.
+    parameter(
+        1,
+        "crossover_hz",
+        "crossover",
+        "Hz",
+        ParameterUnit::Hz,
+        80.0,
+        8_000.0,
+        1_000.0,
+        ParameterMapping::Logarithmic,
+        AutomationRate::Block,
+        SmoothingRule::Linear,
+        64,
+    ),
     parameter(
         3,
         "low_threshold_db",
@@ -698,7 +707,7 @@ struct BandCoef<L: Lane> {
     release: L,
 }
 
-/// The fourteen ramps of one channel ([`RAMP_SLOTS`]), as lanes, for the duration of one segment.
+/// The seventeen ramps of one channel ([`RAMP_SLOTS`]), as lanes, for the duration of one segment.
 ///
 /// `target` rides beside `step` so each frame's update holds the word inside its endpoints
 /// (issue #1409 D4); it is transient, never state.
@@ -722,12 +731,28 @@ fn frame_coefficients<L: Lane>(segment: &Segment<L>) -> [BandCoef<L>; 2] {
     })
 }
 
+/// The split's lane coefficients from one frame's crossover words (issue #1338): `-c1`, `a2` and
+/// `a3` as the three word ramps stand, and the constant all-pass tap.
+///
+/// On a flat segment the words are the settled designs, so this is the splat of the per-track
+/// designs bit for bit (the negation is exact); on a ramped one it is derived again every frame,
+/// after the frame's step, exactly as [`frame_coefficients`] is.
+#[inline(always)]
+fn crossover_coefficients<L: Lane>(segment: &Segment<L>) -> Lr4Coef<L> {
+    Lr4Coef {
+        nc1: segment.current[crossover_slot(0)].neg(),
+        a2: segment.current[crossover_slot(1)],
+        a3: segment.current[crossover_slot(2)],
+        nk2: L::splat(NEGATIVE_TWO_K),
+    }
+}
+
 /// How far the next segment reaches, and whether anything is ramping over it.
 ///
 /// The two answers are one decision because they come from the same scan of the same counters, so
 /// they are produced together rather than scanned for twice ([`Instance::plan_segment`]).
 ///
-/// `ramping` is a **whole-bank** predicate: every track of both channels, all ten parameters. The
+/// `ramping` is a **whole-bank** predicate: every track of both channels, all seventeen ramps. The
 /// segment kernel is lane-wide and a per-lane branch inside its frame loop is precisely what the
 /// bank contract forbids, so one moving track puts the whole bank on the ramped path for that
 /// segment. That is the granularity the rest of the library already settled on — the compressor's
@@ -744,8 +769,6 @@ struct SegmentPlan {
 
 /// Everything one channel of one bank owns.
 struct Side<L: Lane, const W: usize> {
-    coefficients: Lr4Coef<L>,
-    prepared_coefficients: Lr4Coef<L>,
     filter: Lr4State<L>,
     /// The run of exactly-zero input frames per lane: this channel's silence counter, which arms
     /// both crossover stages' joint flush (issue #1328, amendment A9). Kept where a frame-by-frame
@@ -755,20 +778,21 @@ struct Side<L: Lane, const W: usize> {
     silence: L,
     /// The branching smoother's state, in dB, per band.
     gain_db: [L; 2],
-    /// Per track: the ten parameter ramps, then the four coefficient ramps ([`RAMP_SLOTS`]).
+    /// Per track: the ten parameter ramps, the four coefficient ramps, then the three crossover
+    /// word ramps ([`RAMP_SLOTS`]). The crossover ramps' targets are the design of `crossover_hz`.
     ramps: [[LinearRamp; RAMP_SLOTS]; W],
     /// The coefficient words a full reset restores, designed once at preparation.
     prepared_rates: [[f32; RATE_COUNT]; W],
-    /// `(c1, a2, a3)` per track, kept so a reset does not have to redesign (#94 F9).
-    designed: [[f32; 3]; W],
-    prepared_designed: [[f32; 3]; W],
+    /// The prepared `(c1, a2, a3)` per track, kept so a reset does not have to redesign (#94 F9).
+    prepared_designed: [[f32; CROSSOVER_WORDS]; W],
+    /// The crossover the word ramps walk to, per track: the target of the last accepted span.
     crossover_hz: [f32; W],
     defaults: [[f32; PARAMETER_COUNT]; W],
 }
 
 impl<L: Lane, const W: usize> Side<L, W> {
     fn new(defaults: [[f32; PARAMETER_COUNT]; W], sample_rate: u32) -> Option<Self> {
-        let mut designed = [[0.0; 3]; W];
+        let mut designed = [[0.0; CROSSOVER_WORDS]; W];
         let mut crossover_hz = [0.0; W];
         let mut ramps = [[LinearRamp::fixed(0.0); RAMP_SLOTS]; W];
         let mut prepared_rates = [[0.0; RATE_COUNT]; W];
@@ -783,17 +807,16 @@ impl<L: Lane, const W: usize> Side<L, W> {
                     retention_coefficient(defaults[track][rate_parameter(rate)], sample_rate);
                 ramps[track][rate_slot(rate)] = LinearRamp::fixed(prepared_rates[track][rate]);
             }
+            for (word, value) in designed[track].into_iter().enumerate() {
+                ramps[track][crossover_slot(word)] = LinearRamp::fixed(value);
+            }
         }
-        let prepared_coefficients = lane_coefficients::<L, W>(&designed);
         Some(Self {
-            coefficients: prepared_coefficients,
-            prepared_coefficients,
             filter: Lr4State::default(),
             silence: L::zero(),
             gain_db: [L::zero(); 2],
             ramps,
             prepared_rates,
-            designed,
             prepared_designed: designed,
             crossover_hz,
             defaults,
@@ -832,8 +855,6 @@ impl<L: Lane, const W: usize> Side<L, W> {
     /// Returns to the prepared defaults without allocating or redesigning.
     fn full_reset(&mut self) {
         self.discontinuity_reset();
-        self.designed = self.prepared_designed;
-        self.coefficients = self.prepared_coefficients;
         for track in 0..W {
             self.crossover_hz[track] = self.defaults[track][0];
             for index in 0..RAMP_COUNT {
@@ -843,25 +864,11 @@ impl<L: Lane, const W: usize> Side<L, W> {
                 self.ramps[track][rate_slot(rate)] =
                     LinearRamp::fixed(self.prepared_rates[track][rate]);
             }
+            for word in 0..CROSSOVER_WORDS {
+                self.ramps[track][crossover_slot(word)] =
+                    LinearRamp::fixed(self.prepared_designed[track][word]);
+            }
         }
-    }
-}
-
-/// Splats the per-track designs into one lane coefficient set.
-fn lane_coefficients<L: Lane, const W: usize>(designed: &[[f32; 3]; W]) -> Lr4Coef<L> {
-    let mut c1 = [0.0f32; 8];
-    let mut a2 = [0.0f32; 8];
-    let mut a3 = [0.0f32; 8];
-    for track in 0..W {
-        c1[track] = designed[track][0];
-        a2[track] = designed[track][1];
-        a3[track] = designed[track][2];
-    }
-    Lr4Coef {
-        nc1: L::load(&c1[..W]).neg(),
-        a2: L::load(&a2[..W]),
-        a3: L::load(&a3[..W]),
-        nk2: L::splat(NEGATIVE_TWO_K),
     }
 }
 
@@ -984,9 +991,9 @@ fn band_target<L: Lane>(level: L, threshold: L, inv_ratio_minus_one: L, knee: (f
 /// `RAMPING` is the third compile-time switch, and it is the one that varies *within* a block.
 /// It says whether any ramp of any track of either channel still has samples to produce over this
 /// segment; [`Instance::plan_segment`] decides it from the ramp counters at the same moment it
-/// decides the segment's length. At `RAMPING == false` the twenty-eight per-frame lane additions
+/// decides the segment's length. At `RAMPING == false` the thirty-four per-frame lane additions
 /// below, and the per-frame coefficient derivation ([`frame_coefficients`], one division per band
-/// and channel), are not merely predicted away, they are not emitted: a settled bank derives its
+/// and channel, and [`crossover_coefficients`]), are not merely predicted away, they are not emitted: a settled bank derives its
 /// coefficients once per segment and pays no smoothing arithmetic at all.
 ///
 /// **Why that is bit-identical, not merely close.** `LinearRamp` keeps `remaining == 0` implying
@@ -1043,6 +1050,10 @@ fn run_segment<
         frame_coefficients(&segments[0]),
         frame_coefficients(&segments[1]),
     ];
+    let mut split = [
+        crossover_coefficients(&segments[0]),
+        crossover_coefficients(&segments[1]),
+    ];
     for frame in 0..frames {
         if RAMPING {
             for index in 0..RAMP_SLOTS {
@@ -1062,6 +1073,11 @@ fn run_segment<
                 frame_coefficients(&segments[0]),
                 frame_coefficients(&segments[1]),
             ];
+            // Issue #1338: the split's words likewise, never cached at the segment's start.
+            split = [
+                crossover_coefficients(&segments[0]),
+                crossover_coefficients(&segments[1]),
+            ];
         }
         let input_near = L::load(&left[frame * W..]);
         let input_far = L::load(&right[frame * W..]);
@@ -1078,20 +1094,10 @@ fn run_segment<
         } else {
             (L::zero(), L::zero())
         };
-        let (low_near, high_near) = lr4_step_when(
-            ARMABLE,
-            input_near,
-            rest_near,
-            &near.coefficients,
-            &mut filter_near,
-        );
-        let (low_far, high_far) = lr4_step_when(
-            ARMABLE,
-            input_far,
-            rest_far,
-            &far.coefficients,
-            &mut filter_far,
-        );
+        let (low_near, high_near) =
+            lr4_step_when(ARMABLE, input_near, rest_near, &split[0], &mut filter_near);
+        let (low_far, high_far) =
+            lr4_step_when(ARMABLE, input_far, rest_far, &split[1], &mut filter_far);
         let (linked_near_low, linked_far_low) = link_levels::<L, LINK>(low_near, low_far);
         let (linked_near_high, linked_far_high) = link_levels::<L, LINK>(high_near, high_far);
 
@@ -1264,7 +1270,7 @@ fn render<L: Lane, const W: usize, const FORCE_RAMPING: bool>(
 }
 
 impl<L: Lane, const W: usize> Side<L, W> {
-    /// The fourteen ramps of every track, as lanes, for one segment.
+    /// The seventeen ramps of every track, as lanes, for one segment.
     fn segment(&self) -> Segment<L> {
         let mut current = [L::zero(); RAMP_SLOTS];
         let mut step = [L::zero(); RAMP_SLOTS];
@@ -1324,8 +1330,8 @@ impl<L: Lane, const W: usize> Instance<L, W> {
     /// twenty-eight additions per frame with every step at `+0.0`, which is the cost the split
     /// removes.
     ///
-    /// The scan covers all fourteen slots of every track on both channels: the ten parameter
-    /// ramps and the four coefficient ramps. A coefficient ramp therefore snaps to its exact
+    /// The scan covers all seventeen slots of every track on both channels: the ten parameter
+    /// ramps, the four coefficient ramps and the three crossover word ramps (issue #1338). A coefficient ramp therefore snaps to its exact
     /// designed word here, and one still in flight keeps the segment on the ramped path even when
     /// its parameter ramp has already settled (a retarget to the value in force, which the hoist in
     /// `LinearRamp::set_target` settles at once while the coefficient returns from mid-walk). That
@@ -1432,7 +1438,7 @@ impl<L: Lane, const W: usize> Instance<L, W> {
         first_sample: u64,
         report: &mut ProcessReport,
     ) {
-        let mut pending = [[None; RAMP_COUNT]; 2];
+        let mut pending = [[None; PARAMETER_COUNT]; 2];
         let mut previous: Option<u32> = None;
         for (index, span) in spans.iter().enumerate() {
             let side = match span.channel {
@@ -1448,29 +1454,34 @@ impl<L: Lane, const W: usize> Instance<L, W> {
                 .parameter_index
                 .checked_mul(2)
                 .and_then(|value| value.checked_add(side as u32));
-            let ramp = parameter
-                .checked_sub(1)
-                .filter(|value| *value < RAMP_COUNT && parameter < PARAMETER_COUNT);
-            let valid = ramp.is_some()
+            let valid = parameter < PARAMETER_COUNT
                 && index < capacity as usize
                 && span.sample == first_sample
                 && parameter_value_valid(&SPECS[parameter], span.value)
                 && order.is_some_and(|value| previous.is_none_or(|earlier| value > earlier))
-                && ramp.is_some_and(|value| pending[side][value].is_none());
-            let Some(ramp) = ramp else {
-                report.invalid_spans = report.invalid_spans.saturating_add(1);
-                continue;
-            };
+                && pending[side][parameter].is_none();
             if !valid {
                 report.invalid_spans = report.invalid_spans.saturating_add(1);
                 continue;
             }
             previous = order;
-            pending[side][ramp] = Some(normalize_zero(span.value));
+            pending[side][parameter] = Some(normalize_zero(span.value));
         }
         let sample_rate = self.sample_rate;
         for (side, targets) in pending.iter().enumerate() {
-            for (index, target) in targets.iter().enumerate() {
+            // Issue #1338 D2: a crossover span designs its target words once, here, with the
+            // infallible designer (#1366 D3: total over the domain `parameter_value_valid` has
+            // just checked), and the three word ramps walk to them over the same window.
+            if let Some(value) = targets[0] {
+                let channel = &mut self.sides[side];
+                channel.crossover_hz[track] = value;
+                let words = design_lr4_words(sample_rate, value);
+                for (word, target) in words.into_iter().enumerate() {
+                    channel.ramps[track][crossover_slot(word)]
+                        .set_target(target, SMOOTHING_SAMPLES);
+                }
+            }
+            for (index, target) in targets[1..].iter().enumerate() {
                 if let Some(value) = *target {
                     let ramps = &mut self.sides[side].ramps[track];
                     ramps[index].set_target(value, SMOOTHING_SAMPLES);
@@ -1496,7 +1507,8 @@ impl<L: Lane, const W: usize> Instance<L, W> {
 // ---------------------------------------------------------------------------------------------
 //
 // Per channel: crossover, the two smoother words, ten four-word parameter ramps, the four filter
-// words, the silence counter, and the four four-word coefficient ramps (issue #1069).
+// words, the silence counter, the four four-word coefficient ramps (issue #1069), and the three
+// four-word crossover word ramps (issue #1338).
 
 /// Word offset of the first filter word.
 const FILTER_WORD: usize = 3 + RAMP_COUNT * RAMP_WORDS;
@@ -1504,6 +1516,8 @@ const FILTER_WORD: usize = 3 + RAMP_COUNT * RAMP_WORDS;
 const SILENCE_WORD: usize = FILTER_WORD + 4;
 /// Word offset of the first coefficient ramp, after the silence counter (issue #1069).
 const RATE_WORD: usize = SILENCE_WORD + 1;
+/// Word offset of the first crossover word ramp, after the coefficient ramps (issue #1338).
+const CROSSOVER_WORD: usize = RATE_WORD + RATE_COUNT * RAMP_WORDS;
 /// The silence counter's saturation, `2^24`.
 const SILENCE_SATURATION: f32 = 16_777_216.0;
 
@@ -1528,7 +1542,6 @@ fn set_lane_value<L: Lane>(value: L, track: usize, replacement: f32) -> L {
 /// One channel's validated state, staged so that a rejected restore changes nothing.
 struct StagedSide {
     crossover_hz: f32,
-    designed: [f32; 3],
     gains: [f32; 2],
     ramps: [LinearRamp; RAMP_SLOTS],
     filter: [f32; 4],
@@ -1562,6 +1575,13 @@ fn write_side<L: Lane, const W: usize>(bytes: &mut [u8], side: &Side<L, W>, trac
             bytes,
             RATE_WORD + rate * RAMP_WORDS,
             side.ramps[track][rate_slot(rate)],
+        );
+    }
+    for word in 0..CROSSOVER_WORDS {
+        write_ramp(
+            bytes,
+            CROSSOVER_WORD + word * RAMP_WORDS,
+            side.ramps[track][crossover_slot(word)],
         );
     }
 }
@@ -1653,9 +1673,33 @@ fn stage_side(bytes: &[u8], sample_rate: u32) -> Result<StagedSide, StatePayload
             ..read
         };
     }
+    // Issue #1338 D6: each crossover word ramp walks between two designs. Its target triple is the
+    // design of `crossover_hz` bit for bit, so a triple the engine would not design is refused and
+    // the target's stability is #1366's proof, not a runtime check. Every word is a positive normal
+    // below 1, a settled ramp is at its target, and the current triple, a point of a walk between
+    // two designs, is held within `RAMP_PATH_NORM_TOLERANCE`.
+    let mut current = [0.0f32; CROSSOVER_WORDS];
+    for (word, design) in designed.into_iter().enumerate() {
+        let read = read_ramp(bytes, CROSSOVER_WORD + word * RAMP_WORDS);
+        let positive = |value: f32| value.is_normal() && value > 0.0 && value < 1.0;
+        if !positive(read.current)
+            || read.target.to_bits() != design.to_bits()
+            || !ramp_path_inside(read, (0.0, 1.0), SMOOTHING_SAMPLES)
+            || (read.remaining == 0 && read.current.to_bits() != read.target.to_bits())
+        {
+            return Err(state_error("effect.state.coefficient"));
+        }
+        current[word] = read.current;
+        ramps[crossover_slot(word)] = LinearRamp {
+            step: normalize_zero(read.step),
+            ..read
+        };
+    }
+    if transition_norm(current[0], current[1], current[2]) > RAMP_PATH_NORM_TOLERANCE {
+        return Err(state_error("effect.state.coefficient"));
+    }
     Ok(StagedSide {
         crossover_hz,
-        designed,
         gains: [normalize_zero(gains[0]), normalize_zero(gains[1])],
         ramps,
         filter,
@@ -1666,8 +1710,6 @@ fn stage_side(bytes: &[u8], sample_rate: u32) -> Result<StagedSide, StatePayload
 /// Applies a staged channel. Never allocates.
 fn commit_side<L: Lane, const W: usize>(side: &mut Side<L, W>, staged: &StagedSide, track: usize) {
     side.crossover_hz[track] = staged.crossover_hz;
-    side.designed[track] = staged.designed;
-    side.coefficients = lane_coefficients::<L, W>(&side.designed);
     side.gain_db[LOW_BAND] = set_lane_value(side.gain_db[LOW_BAND], track, staged.gains[LOW_BAND]);
     side.gain_db[HIGH_BAND] =
         set_lane_value(side.gain_db[HIGH_BAND], track, staged.gains[HIGH_BAND]);
@@ -2105,8 +2147,17 @@ mod reset_tests {
         let mut receiver =
             Instance::<f32, 1>::new([left], [right], prepared_metadata).expect("receiver instance");
         let (common, mut restored_left, mut restored_right) = snapshot(&receiver, sizes);
-        write_f32(&mut restored_left, 0, 2_000.0);
-        write_f32(&mut restored_right, 0, 2_000.0);
+        // A settled 2 kHz crossover: the target and its designed words (issue #1338).
+        for bytes in [&mut restored_left, &mut restored_right] {
+            write_f32(bytes, 0, 2_000.0);
+            for (word, value) in design_lr4_words(48_000, 2_000.0).into_iter().enumerate() {
+                write_ramp(
+                    bytes,
+                    CROSSOVER_WORD + word * RAMP_WORDS,
+                    LinearRamp::fixed(value),
+                );
+            }
+        }
         receiver
             .restore(
                 0,
