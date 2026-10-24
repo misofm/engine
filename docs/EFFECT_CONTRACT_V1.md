@@ -47,8 +47,8 @@ three separate mechanisms, each where its hazard is:
   lane, on each channel whose own output failed. A channel zeroed only because its partner failed
   is not counted, and a collapsed mono block duplicates the left count into the right (#1073). In
   a bank, every launch effect recovers only the failing lane and reports it alone (#1089-#1092),
-  so a lane's fault never moves a bank-mate's bits. The one exception is the multiband, whose bank still zeroes and resets
-  every lane; it therefore keeps a prepared session bypass (#1100).
+  so a lane's fault never moves a bank-mate's bits. The one exception is the multiband, whose
+  bank still zeroes and resets every lane; it therefore keeps a prepared session bypass (#1100).
 * **Input sanitisation** — once per track per block at the track input stage, never inside an
   effect.
 
