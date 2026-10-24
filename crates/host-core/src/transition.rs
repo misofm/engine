@@ -466,7 +466,7 @@ pub fn plan_strip_transition(
 
 #[cfg(test)]
 mod tests {
-    use super::{DuckOverlay, plan_strip_transition};
+    use super::{DuckOverlay, StripTransition, plan_strip_transition};
     use crate::prepare::{HostPrepareCaps, HostShapePolicy, SuccessorBase, compile_host_model};
     use builtins_compiler::TrackFaderRecord;
     use session::{RouteDestination, RouteSource, SendTap, SessionModel, StableId};
@@ -665,6 +665,25 @@ mod tests {
         assert!(
             joined.retained_bytes() <= ceiling,
             "the overlay is within its charge"
+        );
+        // At the ceiling: an overlay that names every strip, route and source of the plan, built
+        // by `joined` as a rebuild builds it, retains exactly the charge.
+        let names = |ids: &mut dyn Iterator<Item = &StableId>| -> Vec<Box<str>> {
+            ids.map(|id| Box::from(id.as_str())).collect()
+        };
+        let full = StripTransition {
+            strips: names(&mut committed.strips().map(|strip| strip.id)),
+            routes: names(&mut committed.routes.iter().map(|route| &route.id)),
+            route_records: Vec::new(),
+            sources: names(&mut committed.sources.iter().map(|source| &source.id)),
+            strip_records: Vec::new(),
+            ramp: n,
+            compensation: 0,
+        };
+        assert_eq!(
+            DuckOverlay::new().joined(&full).retained_bytes(),
+            ceiling,
+            "a full overlay retains exactly its charge"
         );
         assert_eq!(
             joined.not_before(),

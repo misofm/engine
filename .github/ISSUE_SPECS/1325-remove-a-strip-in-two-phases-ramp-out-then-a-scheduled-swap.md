@@ -331,7 +331,8 @@ and gate 4. Checked against `origin/main` `068742aba`.
   not render has no consumer to prepare and is answered by the control plane's routing.
 - **The overlay's charge (attempt 2).** `DuckOverlay::retained_ceiling` bounds an overlay by its
   plan's strips, routes and sources (three `Box<str>` vectors at count capacity and the ID text);
-  `merged`/`sorted_ids` shrink to length after dedup. Each epoch's capi row carries `KEPT_BASES`
+  `merged`/`sorted_ids` shrink to length after dedup; the shrink is defensive (`merged`'s inputs
+  are disjoint and `joined` builds a new vector, so no mutant of it is red). Each epoch's capi row carries `KEPT_BASES`
   times that ceiling at its own model (`MonitorRows::duck`), an epoch row like the monitor
   overlay's: an overlay names only the plan it ducks, and a superseding commit never changes that
   plan. The second copy is the replacement a superseding rebuild builds while the stored one
@@ -372,8 +373,8 @@ and gate 4. Checked against `origin/main` `068742aba`.
   running epoch (#1310 D5 step 5).
 - `host_core::transition::tests::a_transition_ducks_the_removed_strips_outside_the_overlay`: red if
   the duck set includes an overlay strip, if `C` is not the route's compensation line or not the
-  sum of a route's two lines, if a route whose tap follows the fader is muted, or if an overlay
-  keeps spare capacity past its charge.
+  sum of a route's two lines, if a route whose tap follows the fader is muted, or if the ceiling
+  misses a term (a full overlay, every strip, route and source of the plan, retains exactly it).
 - The restore assertions in gate 1's test: red if a phase-1 restore commits (1325b boundary).
 - `capi/tests/resource_lifecycle.rs` capi epoch oracle: red if the duck row leaves the charge.
 - `host-web/tests/control_parity.rs::a_removed_source_seeks_and_feeds_until_its_adoption_alike_on_both_hosts`:
@@ -384,13 +385,15 @@ and gate 4. Checked against `origin/main` `068742aba`.
   inheritance; no overlay exclusion and no overlay applied (second write); #1310 D5 step 5 removed;
   an allocation in `PlanAdoption::admits` (the test process aborts); and, on the unit test, no
   overlay exclusion, `C` = 0, and post-fader routes muted. Attempt 2: no restore refusal (gate 1
-  red), `C` as the max of a route's lines (972 expected, 486 got), no shrink (over the charge), no
-  duck row (resource oracle red by 834 bytes), no adoption check in the source routing and the
+  red), `C` as the max of a route's lines (972 expected, 486 got), the ceiling without the
+  source ID text (the full overlay's bytes differ), no duck row (resource oracle red by 834 bytes), no adoption check in the source routing and the
   committed-index browser seek (parity test red on each).
 
 ### Stated limits (1325a)
 
 - A removed strip that is already silent (muted long before) still waits for `S`: the control plane
   cannot know that its route lines are empty.
+- A submit that runs concurrently with the render call that adopts the successor is treated as
+  coming before the adoption: it is accepted, and its PCM is discarded with P0.
 - The `StripTransition` built inside one rebuild is a transient control-thread value, as the
   classifier's own working sets are, and is not charged.
