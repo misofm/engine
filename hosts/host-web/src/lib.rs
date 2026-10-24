@@ -3757,6 +3757,17 @@ impl AudioWorkletEngineHost {
                     let carried_swaps = plan.owner().carried_count();
                     let swap_carried = carried_swaps != ready.carried_swaps_seen;
                     ready.carried_swaps_seen = carried_swaps;
+                    // #882: the host's carried-meter fact (`adopt_shape`'s `meters_carried`) is the
+                    // engine's, which chose this block's strip meter level.
+                    debug_assert_eq!(
+                        plan.active_attachment_mut::<RenderCompanions>()
+                            .is_some_and(|companions| companions
+                                .carried()
+                                .iter()
+                                .any(|reader| reader.kind == ObserverKind::Meter)),
+                        plan.owner().active_strip_meters_carried(),
+                        "the host and the engine disagree on whether the swap carried a meter"
+                    );
                     // #1381b: what the swap block's hook paired travels with the tables.
                     let carried = plan
                         .active_attachment_mut::<RenderCompanions>()
