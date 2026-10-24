@@ -2988,7 +2988,7 @@ impl RaceEdits {
         // record rides the compressor's observation queue. Sixteen edits apart, several blocks
         // drain the queue's one slot between two of them, so none waits for room.
         if index % 16 == 1 {
-            return (Kind::Monitor, vec![self.observe_edit()]);
+            return (Kind::Observe, vec![self.observe_edit()]);
         }
         let track = (index % self.tracks.len() as u64) as usize;
         let track_id = self.tracks[track].clone();
@@ -3033,6 +3033,9 @@ enum Kind {
     /// A solo: a write to the monitor overlay (#1559). It commits no model, so its response
     /// carries the committed revision.
     Monitor,
+    /// An `Observe` arm or disarm (#1584): a monitor edit too, counted apart so the run proves
+    /// every one of them committed and the arms and disarms alternate.
+    Observe,
 }
 
 /// What one race run counted.
@@ -3041,6 +3044,8 @@ struct RaceCounts {
     live: u64,
     /// Solo writes that committed (#1559).
     monitor: u64,
+    /// `Observe` edits that committed (#1584), also counted in `monitor`.
+    observe: u64,
     structural: u64,
     plan_backpressure: u64,
     event_backpressure: u64,
@@ -3127,7 +3132,7 @@ impl RaceControl<'_> {
         self.counts.overlapped += u64::from(overlapping && self.in_render.load(Ordering::SeqCst));
         let outcome = match (code, header) {
             (RESULT_OK, Some(header)) if header.status == StatusCode::Ok => {
-                if kind == Kind::Monitor {
+                if matches!(kind, Kind::Monitor | Kind::Observe) {
                     // A solo is no session change: the committed revision, unchanged.
                     if header.revision != SessionRevision(self.revision) {
                         return Err(format!(
@@ -3136,6 +3141,7 @@ impl RaceControl<'_> {
                         ));
                     }
                     self.counts.monitor += 1;
+                    self.counts.observe += u64::from(kind == Kind::Observe);
                 } else {
                     // The next revision, whatever number of solos came between: a solo spends no
                     // revision (#1603).
@@ -3535,6 +3541,13 @@ fn live_edits_racing_a_rendering_plan_and_its_swaps_stay_exact_and_allocation_fr
             "run {run}"
         );
         assert!(counts.monitor >= RACE_EDITS / 8, "run {run}");
+        // #1584: every `Observe` edit committed, so the race alternates arms and disarms (the edit
+        // flips its arm before the submit, and a refusal other than backpressure fails the run).
+        assert_eq!(
+            counts.observe,
+            (0..RACE_EDITS).filter(|index| index % 16 == 1).count() as u64,
+            "run {run}"
+        );
         // #1310: a structural edit behind a pending candidate supersedes it; nothing refuses it.
         assert_eq!(counts.plan_backpressure, 0, "run {run}");
         assert!(

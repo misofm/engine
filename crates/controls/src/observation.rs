@@ -42,6 +42,8 @@ pub enum ObserveError {
     /// `observation.not_subscribed`: a disarm of a tap that is not armed, or armed with another
     /// window.
     NotSubscribed,
+    /// `observation.subscribers`: an arm of a tap that already has `u32::MAX` subscribers.
+    Subscribers,
     /// `observation.unavailable`: the host does not serve the edit (its adapter's
     /// `OBSERVE_EDIT` is off: the browser until #1589), or the endpoint has no host to apply it.
     Unavailable,
@@ -58,6 +60,7 @@ impl ObserveError {
             Self::Window => "observation.window",
             Self::WindowConflict => "observation.window_conflict",
             Self::NotSubscribed => "observation.not_subscribed",
+            Self::Subscribers => "observation.subscribers",
             Self::Unavailable => "observation.unavailable",
         }
     }
@@ -304,7 +307,8 @@ impl ObservationBindings {
     ///
     /// # Errors
     ///
-    /// [`ObserveError::WindowConflict`] for an arm of a tap bound with another window, and
+    /// [`ObserveError::WindowConflict`] for an arm of a tap bound with another window,
+    /// [`ObserveError::Subscribers`] for an arm of a tap that has `u32::MAX` subscribers, and
     /// [`ObserveError::NotSubscribed`] for a disarm of a tap that is not bound or bound with another
     /// window. A refusal changes nothing.
     pub fn observe(
@@ -335,7 +339,10 @@ impl ObservationBindings {
             }
             (Ok(index), true) => {
                 let binding = &mut self.bindings[index];
-                binding.refs = binding.refs.saturating_add(1);
+                binding.refs = binding
+                    .refs
+                    .checked_add(1)
+                    .ok_or(ObserveError::Subscribers)?;
                 Ok(())
             }
             (Ok(index), false) => {

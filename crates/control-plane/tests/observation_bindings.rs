@@ -1883,3 +1883,66 @@ fn an_observe_in_a_structural_transaction_arms_the_new_effect_and_keeps_the_carr
         "the carried tap keeps its grid: no restart at the adoption block"
     );
 }
+
+/// #1584 gate 4, supersession (#1310 with T2): a structural transaction subscribes `comp3`'s
+/// carried tap, and a second structural transaction supersedes its candidate before render adopts
+/// it. The arm queued on the withdrawn candidate is forwarded to the replacement, so `comp3`
+/// publishes four-block windows once the replacement is adopted. When the second transaction itself
+/// re-arms `comp3` with window 8, the forward already carries the bound state (window 8) and the
+/// transaction's own record is not queued twice: one record, an eight-block window, no `INTERNAL`.
+///
+/// Red if an arm queued on a candidate that is superseded is lost (its slot not marked queued, so
+/// nothing forwards it), or if a forward and the transaction's own record both claim the tap's one
+/// queue slot.
+#[test]
+fn an_observe_on_a_superseded_candidate_reaches_its_replacement() {
+    for (rearm, window) in [(false, WINDOW_BLOCKS), (true, 8)] {
+        let mut rig = Rig::new();
+        rig.render();
+        assert_eq!(
+            rig.transact(&[
+                put_compressor("comp2", "comp-b"),
+                observe("comp3", true, WINDOW_BLOCKS),
+            ]),
+            Reply::Applied(protocol::EditPath::Rebuild)
+        );
+        let mut second = vec![put_compressor("comp4", "comp-c")];
+        if rearm {
+            second.push(observe("comp3", false, WINDOW_BLOCKS));
+            second.push(observe("comp3", true, 8));
+        }
+        assert_eq!(
+            rig.transact(&second),
+            Reply::Applied(protocol::EditPath::Rebuild),
+            "rearm {rearm}: the second rebuild supersedes the first candidate"
+        );
+        assert_eq!(
+            rig.session.test_pending_providers().len(),
+            1,
+            "rearm {rearm}: one candidate, the replacement"
+        );
+        assert_eq!(
+            rig.session.observation_bindings().window_of(&key("comp3")),
+            Some(window)
+        );
+        let adopted_at = rig.block * 128;
+        rig.render_blocks(u64::from(window));
+        let published = rig
+            .session
+            .test_providers()
+            .test_observations()
+            .iter()
+            .find(|handle| {
+                &*handle.track_id == "comp3" && handle.address == LiveEffectAddress::insert(0)
+            })
+            .expect("comp3's reader")
+            .readers[0]
+            .read()
+            .unwrap_or_else(|| panic!("rearm {rearm}: comp3 publishes after the adoption"));
+        assert_eq!(
+            (published.sequence, published.first_sample, published.blocks),
+            (1, adopted_at, window),
+            "rearm {rearm}"
+        );
+    }
+}
