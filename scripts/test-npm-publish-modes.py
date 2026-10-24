@@ -53,7 +53,7 @@ STEP_HEADERS = (
     "      - name: Guard release identity, accepted ancestry, and rejected commits",
     "      - name: Require a successful qualification dispatch before publication or recovery",
     "      - name: Pin npm 11.19.0 for packing, trusted-publisher checks, and provenance verification",
-    "      - name: Install Rust 1.97.1 and the Wasm target",
+    "      - name: Install Rust 1.99.1 and the Wasm target",
     "      - name: Install locked SDK dependencies",
     "      - name: Build the shipped Engine AudioWorklet closure once and prove its Linux pin",
     "      - name: Run generated, deletion, type, headless, and package preparation gates",

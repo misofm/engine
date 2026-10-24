@@ -2519,7 +2519,7 @@ fn continuous_publish(
         if state
             .shared
             .drops
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |value| {
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |value| {
                 value.checked_add(1)
             })
             .is_err()
@@ -2694,7 +2694,7 @@ fn continuous_fail(state: &mut SpectrumContinuousState) {
     if state
         .shared
         .failures
-        .fetch_update(Ordering::AcqRel, Ordering::Acquire, |value| {
+        .try_update(Ordering::AcqRel, Ordering::Acquire, |value| {
             value.checked_add(1)
         })
         .is_err()

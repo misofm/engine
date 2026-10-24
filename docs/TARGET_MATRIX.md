@@ -74,7 +74,7 @@ that the pinned set compiles; they are not deployment defaults.
 
 ## Reproducible checks
 
-The pinned `rust-toolchain.toml` installs Rust 1.97.1 with `clippy`, `rustfmt`, and the browser
+The pinned `rust-toolchain.toml` installs Rust 1.99.1 with `clippy`, `rustfmt`, and the browser
 Wasm standard library. The relevant commands are:
 
 ```bash
