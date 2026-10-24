@@ -217,4 +217,31 @@ Half a day.
 
 ## Decision record: #1694
 
-To be filled by the implementer. Gate 1's verdict goes first.
+**Gate 1 verdict: test-only mode** (implementer, attempt 1, on main 1e20fc1cb, AVX2 host).
+`grep -rn "Backend::Simd" hosts/ crates/capi/src crates/control-plane/src crates/host-core/src`
+hits only the `#[cfg(test)]` checks in `host-core/src/limiter_linked_session.rs`; every production
+caller passes the compile-time `Backend::current()`. The console-eligible factories bind only the
+build's width (the limiter binds any width up to it), and the effect contract names a width the
+build does not execute as a legal `Ok(None)`.
+
+**Correction to the proposed shape (scope note, root).** No up-front "console at a foreign width"
+refusal: the limiter binds four-lane banks on x86-64-v3, and
+`console_banking.rs` (`a_hot_padded_post_insert_limiter_renders_the_per_node_bits_at_both_widths`)
+needs a limiter-only console to compile at `Simd4` there. So the refusal is decided where a
+factory declines: `unbanked_console_slot` takes `dispatch` and, at `dispatch !=
+Backend::current()`, returns `console.slot.foreign_width` at
+`$.console.<section>[slot=<id>].bank[pool=<class>,level=<level>,width=<lanes>]`.
+`console.slot.unbanked` stays for the build's own width and for `uncollected_console_slot`. Keyed
+on `Backend::current()`; no new factory trait method. No new test: `FOREIGN_CONSOLE_REFUSAL` in
+`bank_levels.rs` is the gate. The `console-workload` and `limiter_linked_session` folds stay.
+
+**Probe re-run** (throwaway test, removed), production pipeline at each width:
+
+```
+nine-track:  Scalar ok, 0 bound slots | Simd4 refused console.slot.foreign_width
+             $.console.pre_insert[slot=eq].bank[pool=stereo,level=2,width=4] | Simd8 ok, 2 bound slots
+sixty-four:  Scalar ok, 0 | Simd4 refused (same code and path) | Simd8 ok, 24 bound slots
+```
+
+`sdk/README.md` and `.claude/skills/author-session/SKILL.md` do not list `console.slot.unbanked`,
+so they get no row.

@@ -3128,7 +3128,7 @@ fn a_strip_behind_an_effect_still_carries(backend: Backend) {
 }
 
 /// Eight lanes only: the fixture's console equalizer is not banked at four
-/// (`console.slot.unbanked`).
+/// (`console.slot.foreign_width`).
 #[cfg(target_feature = "avx2")]
 #[test]
 fn a_strip_behind_an_effect_still_carries_at_eight_lanes() {

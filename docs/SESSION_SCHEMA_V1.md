@@ -238,7 +238,10 @@ class (a submix is always `Stereo`) and level select, beside other buses and any
 a bus sits after every contributor's chain, so a bus at a level no track occupies forms its own
 padded group per slot. A console group that does not bind fails the compile with
 `console.slot.unbanked` at `$.console.<section>[slot=<id>].bank[pool=<class>,level=<level>]`;
-there is no per-node fallback. Inserts bank opportunistically: a full group banks and a remainder
+there is no per-node fallback. A compile at a vector width other than the build's own (a test or
+bench dispatch; a build's factories bind only the widths it executes) whose console a factory
+declines fails instead with `console.slot.foreign_width` at
+`$.console.<section>[slot=<id>].bank[pool=<class>,level=<level>,width=<lanes>]`. Inserts bank opportunistically: a full group banks and a remainder
 renders per node.
 
 **Class A by lowering.** Internally, `pre_insert` lowers to the graph's first rack
