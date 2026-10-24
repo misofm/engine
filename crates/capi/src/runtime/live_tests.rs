@@ -9418,3 +9418,50 @@ fn a_live_eq_band_enable_and_family_change_renders_the_prepared_plan_bits() {
     assert!(heard, "the edit changes the output");
     assert_eq!(rig.summary().2, epoch, "the first epoch still renders");
 }
+
+/// #1584 gate 7: the C ABI's parity row. One `Observe` arm of a compressor insert's gain-reduction
+/// tap through `miso_engine_v1_submit_command` replies `monitor` at the committed revision, and the
+/// reader the session keeps for the plan publishes four-block windows from the block after the
+/// commit: three windows after twelve blocks, the last opening at the ninth.
+///
+/// Red if the C ABI plan has no observation capacity or keeps no reader (the edit would be refused
+/// or acknowledged with nothing to read), or arms the tap at another window or block.
+#[test]
+fn an_observe_edit_arms_a_tap_through_the_c_abi() {
+    let document = effect_session(10, 48_000);
+    let mut rig = Rig::new(&document);
+    rig.step();
+    let revision = rig.summary().0;
+    let track = parse_session_json(&document).expect("model").tracks[0]
+        .id
+        .clone();
+    let bytes = rig.transaction(&[SessionEdit::Observe {
+        strip_id: track.clone(),
+        section: protocol::control_core::TapSection::Inserts(
+            StableId::parse("comp").expect("compressor"),
+        ),
+        tap_id: 1,
+        armed: true,
+        window_blocks: 4,
+    }]);
+    let (result, response) = rig.send(&bytes);
+    assert_eq!(result, crate::RESULT_OK, "{:?}", rig.last_error());
+    assert_eq!(edit_path_of(&response), protocol::EditPath::Monitor);
+    assert_eq!(rig.summary().0, revision, "a subscription is no revision");
+    let armed_at = rig.block;
+    for _ in 0..12 {
+        rig.step();
+    }
+    let snapshot = crate::ffi::test_transaction_snapshot(rig.session);
+    let window = snapshot
+        .observation_windows
+        .iter()
+        .find(|(epoch, strip, effect, _)| {
+            *epoch == snapshot.provider_epoch && **strip == *track.as_str() && &**effect == "comp"
+        })
+        .expect("the compressor's readers")
+        .3[0]
+        .expect("a published window");
+    let quantum = rig.quantum as u64;
+    assert_eq!(window, (3, (armed_at + 8) * quantum, 4));
+}

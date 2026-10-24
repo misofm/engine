@@ -98,15 +98,16 @@ pub struct ObservationSlot {
     consumed: AtomicU64,
 }
 
-/// Exact engine-owned retained payload of one observation slot.
+/// Exact engine-owned retained bytes of one observation slot: its whole shared allocation.
 ///
-/// The cell is one allocation shared by the two endpoints; the endpoints themselves are one
-/// pointer each and are counted by whatever owns them. 56 bytes since #1482: the seqlock's `u64`
-/// counter, five window words and the reader's `consumed` word (48 before, with a `u32` counter
-/// and seven narrower fields).
+/// The cell is one `Arc` allocation shared by the two endpoints, charged as every shared lane is
+/// (`SharedAllocation`: the two reference counts, then the slot, #1584). The endpoints themselves
+/// are one pointer each and are counted by whatever owns them. The slot is 56 bytes since #1482
+/// (the seqlock's `u64` counter, five window words and the reader's `consumed` word), so the
+/// allocation is 72; before #1584 the charge omitted the 16-byte header.
 #[must_use]
 pub const fn observation_slot_retained_bytes() -> usize {
-    core::mem::size_of::<ObservationSlot>()
+    core::alloc::Layout::new::<super::SharedAllocation<ObservationSlot>>().size()
 }
 
 /// The render-side half. Wait-free, single writer, never blocks and never allocates.

@@ -277,8 +277,8 @@ SCALAR_SLACK = 8
 # (vector = `f32x4.{mul,add,sub,div}`, scalar = `f32.{mul,add,sub,div}`):
 #
 #   (multiband-compressor f32x8 was 2560 / 20; #1110 removed eight lanes from the browser build)
-#   multiband-compressor f32x4   2527 /  0   ratio 0        (dual; 2527 / 20 before #1871, codegen)
-#   multiband-compressor f32x4   1389 /  0   ratio 0        (collapsed, #1871)
+#   multiband-compressor f32x4   3464 /  0   ratio 0        (dual; 2527 / 0 before #1367a's mixed arm)
+#   multiband-compressor f32x4   1862 /  0   ratio 0        (collapsed; 1389 / 0 before #1367a)
 #   transient-shaper     f32x4    700 /  0   ratio 0        (dual; 786 / 72 at M2, codegen)
 #   transient-shaper     f32x4    352 /  0   ratio 0        (collapsed, #1873)
 #   true-peak-limiter    f32x4    448 /  0   ratio 0        (dual)
@@ -334,7 +334,7 @@ SCALAR_SLACK = 8
 # vanished, not as a row that grew.
 #
 # Each collapsed body carries about **half** its dual sibling's vector arithmetic (138 against 267,
-# 224 against 448, 84 against 168, 82 against 162, 1389 against 2527, 352 against 700) and zero
+# 224 against 448, 84 against 168, 82 against 162, 1862 against 3464, 352 against 700) and zero
 # scalar arithmetic,
 # which is what a correct one-plane variant looks like from here.
 KERNEL_ROSTER: tuple[tuple[str, str, float], ...] = (

@@ -47,7 +47,7 @@ use effect_runtime::state_payload::write_f32;
 use lane::Lane;
 use lane::kernels::SvfState;
 
-use crate::shim::{LINK_AVERAGE, LINK_MAXIMUM, branching_smooth, link_levels};
+use crate::shim::{LINK_AVERAGE, LINK_MAXIMUM, LinkLanes, branching_smooth, link_levels};
 use crate::{
     BandCoef, FILTER_WORD, Instance, Lr4State, MULTIBAND_COMPRESSOR_DESCRIPTOR,
     MultibandCompressorFactory, PARAMETER_COUNT, SILENCE_WORD, STATE_LAYOUT_VERSION,
@@ -228,6 +228,12 @@ pub fn run_case<L: Lane>(case: usize, out: &mut [u32]) {
         },
         _ => {
             let average = case == 5;
+            let mode = if average {
+                LinkMode::Average
+            } else {
+                LinkMode::Maximum
+            };
+            let lanes = LinkLanes::<L>::new(&[mode; 8][..L::WIDTH]);
             map_case::<L, _, _>(
                 out,
                 |index| {
@@ -241,9 +247,9 @@ pub fn run_case<L: Lane>(case: usize, out: &mut [u32]) {
                 },
                 |values| {
                     let (near, far) = if average {
-                        link_levels::<L, LINK_AVERAGE>(values[0], values[1])
+                        link_levels::<L, LINK_AVERAGE>(values[0], values[1], &lanes)
                     } else {
-                        link_levels::<L, LINK_MAXIMUM>(values[0], values[1])
+                        link_levels::<L, LINK_MAXIMUM>(values[0], values[1], &lanes)
                     };
                     near.add(far.mul(L::splat(3.0)))
                 },

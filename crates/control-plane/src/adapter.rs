@@ -23,6 +23,13 @@ pub trait ControlAdapter {
     /// the default: the command is then unadvertised and refused `UNAVAILABLE`, never advertised
     /// and refused on every call. The browser turns it on with its transport (#1697).
     const DOCUMENT_TRANSPORT: bool = false;
+    /// Whether the session serves the `Observe` edit (#1584 D7a): a transaction's subscriptions are
+    /// checked against the session's binding table and queued on the effects' observation queues
+    /// by the core. An adapter that keeps the default refuses every `Observe` edit with
+    /// `observation.unavailable`: the browser until #1589, because its observe kinds 7 and 8 still
+    /// write the same queues, and one queue must never have two writers. Its plans must carry an
+    /// observation queue for every declared tap.
+    const OBSERVE_EDIT: bool = false;
 }
 
 /// Plain compile limits (#1309 D3): every numeric field of the C ABI's `CompileLimits`, with the

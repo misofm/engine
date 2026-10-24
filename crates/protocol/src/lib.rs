@@ -37,7 +37,8 @@ pub use message_wire::{
     TransportSetRequest, TransportSnapshot, TransportState, TransportStateEvent,
     response_result_encoded_len,
 };
-/// The control core's address types, to name the address of a [`SessionEdit::SetControl`].
+/// The control core's address types, to name the address of a [`SessionEdit::SetControl`] and of a
+/// [`SessionEdit::Observe`].
 pub mod control_core {
     /// Name-to-address lookup and the edit lists of a whole fader, builtins or matrix: tests and
     /// the audit tool write values by row name; no production caller does (the control list
@@ -45,16 +46,17 @@ pub mod control_core {
     #[cfg(any(test, feature = "test-support"))]
     pub use crate::control_rows::{builtins_edits, fader_edits, matrix_or_pan_edits, row_address};
     pub use controls::{
-        BYPASS_CONTROL, ControlAddress, ControlError, LINK_MODE_CONTROL, Lane, MonitorOverlay,
-        MonitorRow, MonitorWrite, Owner, Section,
+        BYPASS_CONTROL, ControlAddress, ControlError, LINK_MODE_CONTROL, Lane,
+        MAXIMUM_OBSERVATION_WINDOW_BLOCKS, MonitorOverlay, MonitorRow, MonitorWrite,
+        ObservationBindings, ObserveError, ObserveWrite, Owner, Section, TapKey, TapSection,
     };
 }
 pub use frame_table::{
     FrameCode, FrameCodeTable, FrameField, FrameMessage, ResponseFrameTable, response_frame_table,
 };
 pub use model::{
-    PreparedSessionTransaction, SessionCommit, SessionEdit, SessionEditError, SessionEditOpcode,
-    SessionStore, SessionStoreError, apply_session_edit,
+    ObserveContext, PreparedSessionTransaction, SessionCommit, SessionEdit, SessionEditError,
+    SessionEditOpcode, SessionStore, SessionStoreError, apply_session_edit,
 };
 pub use queue::{
     ControlCommandSlot, CounterTelemetryRecord, ProtocolQueueConfig, ProtocolQueueError,

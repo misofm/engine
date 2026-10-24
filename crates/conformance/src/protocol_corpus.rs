@@ -247,6 +247,14 @@ pub fn complete_all_opcode_fixture() -> Vec<SessionEdit> {
             ramp_samples: None,
             expected_effect: Some(id("miso.parametric-eq")),
         },
+        // #1584 D1: `edit.observe`, an arm of an insert's tap with a window of four blocks.
+        SessionEdit::Observe {
+            strip_id: track_id.clone(),
+            section: control_core::TapSection::Inserts(id("eq1")),
+            tap_id: 1,
+            armed: true,
+            window_blocks: 4,
+        },
     ]
 }
 
@@ -940,7 +948,11 @@ pub enum ConformanceDecoder {
 /// its plan epoch). The capability registry does not list `0x0010` until #1595. The 48 earlier
 /// frames are byte-equal: their hash is the old pin. Re-pinned from `c85b2a0dff5d2a92`; the frame
 /// count is 50.
-pub const COMPLETE_SCHEMA_HASH: u64 = 0x2657_9fcd_7f95_9310;
+/// #1584 adds the `Observe` edit (`0x0801`): the transaction appends `edit.observe`, an arm of an
+/// insert's tap with a window of four blocks (37 edits). Only `command.session_transaction_apply`
+/// moves; the 49 other frames are byte-equal. Re-pinned from `26579fcd7f959310`; the frame count
+/// stays 50.
+pub const COMPLETE_SCHEMA_HASH: u64 = 0xa3d6_a9dd_7219_5701;
 
 /// Build every command, successful response, registered non-OK status, event, and all-opcode
 /// session transaction using only public typed encoder entry points.
