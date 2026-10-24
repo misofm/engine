@@ -1017,6 +1017,21 @@ async function runConfiguredSpectrumHopQualification(): Promise<Record<string, u
     let resumeGesture = false;
     let resumeCall!: Promise<void>;
     let clickedAt = 0;
+    // #1522 Amendment 1: the context's clock and the worklet's status at the resume and at the end
+    // of the wait, so a failing record shows whether the context stalled (the stall signature).
+    // Not sampled at each `pump()`: a status round trip per poll would change the wait it records.
+    const sampleClock = async () => {
+      const contextState = context.state;
+      const currentTime = context.currentTime;
+      try {
+        const status = await browser.host.status();
+        return { contextState, currentTime, requestId: status.requestId,
+          renderedQuanta: String(status.renderedQuanta), lastResult: status.lastResult };
+      } catch {
+        return { contextState, currentTime, status: null };
+      }
+    };
+    let clockAtResume: Promise<Record<string, unknown>> = Promise.resolve({ resumed: false });
     try {
       await new Promise<void>((resolve, reject) => {
         resumeTimer = setTimeout(() => reject(new Error(
@@ -1028,6 +1043,7 @@ async function runConfiguredSpectrumHopQualification(): Promise<Record<string, u
           globalThis.setTimeout(openStreamStart, HOP_PROBE_START_DELAY_MS);
           resumeCall = context.resume();
           resumeCall.catch(reject);
+          clockAtResume = resumeCall.then(sampleClock, () => ({ resumed: false }));
           resolve();
         }, { once: true });
       });
@@ -1063,12 +1079,13 @@ async function runConfiguredSpectrumHopQualification(): Promise<Record<string, u
       if (resumeTimer !== undefined) clearTimeout(resumeTimer);
     }
     await subscribing;
+    const clock = { atResume: await clockAtResume, atEnd: await sampleClock() };
     const pairIndex = consecutive();
     if (pairIndex < 0) {
       throw new Error(`H1024 browser probe published ${publications.length} windows `
         + `[${publications.map(({ metadata }) => metadata.capturedSample).join(", ")}], none one hop apart, in ${waited.elapsedMs.toFixed(0)} ms `
         + `(deadline ${HOP_PROBE_DEADLINE_MS} ms, ${waited.polls} polls, audio start delayed ${HOP_PROBE_START_DELAY_MS} ms, `
-        + `${notifications.length} notifications, context ${context.state})`);
+        + `${notifications.length} notifications, clock ${JSON.stringify(clock)})`);
     }
     const neverPublishes = await waitForCount({
       read: () => 0,
@@ -1133,6 +1150,7 @@ async function runConfiguredSpectrumHopQualification(): Promise<Record<string, u
       resultHopFrames: first.metadata.hopFrames,
       resultSmoothingMs: first.metadata.smoothingMs,
       ownedArrays,
+      clock,
     };
   } catch (error) {
     throw sdkEngineFailed(browser, error);
