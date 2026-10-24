@@ -9941,7 +9941,6 @@ fn foldable_lane(
         return None;
     }
     let route = readers[producer][0];
-    let producer_op = &program.ops[producer];
     let route_op = &program.ops[route];
     if route_op.input_count() != 1
         || route_op.sidechain.is_some()
