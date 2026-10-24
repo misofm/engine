@@ -190,8 +190,8 @@ extern "C" {
  *
  * Spectrum taps (issue 1594). SPECTRUM_CONFIGURE (message ID 0x0010) through
  * miso_engine_v1_submit_command sets, changes or removes the session's spectrum taps while it
- * plays. No C symbol or struct is added, and until issue 1595 sets its capability bit no
- * capability report lists the command. The taps are monitor state: the command changes no
+ * plays. No C symbol or struct is added; the capability report lists it with the spectrum reads
+ * and capability flag bit 16 (issue 1595). The taps are monitor state: the command changes no
  * revision and no saved state and emits no SESSION_COMMITTED. The same configuration again
  * changes nothing; a change of only the hop or the byte budget prepares no plan; any other change
  * prepares a replacement plan at the unchanged committed revision, in which taps that stay keep
@@ -203,21 +203,26 @@ extern "C" {
  * spectrum.budget.retained, spectrum.budget, spectrum.target.id) and changes nothing. An exact
  * replay of the request returns the same bytes and prepares nothing.
  *
- * Spectrum reads (issue 1595). SPECTRUM_CAPTURE (message ID 0x0011) through
- * miso_engine_v1_submit_command arms, reads, cancels or selects the one-shot spectrum window. No C
- * symbol or struct is added, and until the issue's second slice sets capability bit 16 no
- * capability report lists the command. Arm, cancel and select answer done; a read answers pending
- * until 2048 frames have rendered since the arm, then ready with the window analyzed into 1025 dB
- * bins (and, when asked, the raw 2048-frame planes). The analysis runs on the thread that calls
- * miso_engine_v1_submit_command, never in render. A read never consumes a window it cannot
- * deliver: one whose reply exceeds the session's maximum_control_frame_bytes is refused
- * LIMIT_EXCEEDED (spectrum.frame) and leaves the window queued, and SPECTRUM_CONFIGURE refuses a
- * tap whose one-plane read the frame limit cannot carry (8496 bytes for an identity of up to 8
- * bytes; 12608 for both planes; 29008 with both raw planes). A refusal is a typed non-OK
- * response whose one error diagnostic carries the service's code (spectrum.unprepared,
+ * Spectrum reads (issue 1595). SPECTRUM_CAPTURE (message ID 0x0011) and SPECTRUM_STREAM (0x0012)
+ * through miso_engine_v1_submit_command read the one-shot window and the continuous stream. No C
+ * symbol or struct is added. The capability report lists 0x0010, 0x0011 and 0x0012 together and
+ * sets capability flag bit 16. A capture's arm, cancel and select answer done; a read answers
+ * pending until 2048 frames have rendered since the arm, then ready with the window analyzed into
+ * 1025 dB bins (and, when asked, the raw 2048-frame planes). A stream's start, select, reset and
+ * stop answer the stream's metadata; a read answers its status (inactive, warming, pending, gap
+ * with the count of dropped windows, failed, stopped, none of them a refusal) or ready with the
+ * held window analyzed with the stream's smoothing. The analysis runs on the thread that calls
+ * miso_engine_v1_submit_command, never in render. A read never consumes what it cannot deliver:
+ * one whose ready reply exceeds the session's maximum_control_frame_bytes is refused
+ * LIMIT_EXCEEDED (spectrum.frame) and leaves the window, and a stream's gap, queued; a stream
+ * read's size is fixed by the selected entry's channels. SPECTRUM_CONFIGURE refuses a tap whose
+ * one-plane read the frame limit cannot carry (8576 bytes for an identity of up to 8 bytes; 12688
+ * to stream or read both planes; 29008 for both raw planes). A refusal is a typed non-OK response
+ * whose one error diagnostic carries the service's code (spectrum.unprepared,
  * spectrum.entry.unknown, spectrum.busy, spectrum.capture.dropped, spectrum.not_armed,
- * spectrum.channels, spectrum.select.single and others) and changes nothing. An exact replay of a
- * read returns the same bytes and pops nothing; a host gives each read a new request ID.
+ * spectrum.channels, spectrum.select.single, spectrum.stream.active, spectrum.stream.inactive and
+ * others) and changes nothing. An exact replay of a read returns the same bytes and pops nothing;
+ * a host gives each read a new request ID.
  *
  * Completion (issue 1314). miso_engine_v1_submit_command is synchronous only for what can fail:
  * it validates and classifies the transaction, prepares a replacement plan and reserves its
@@ -248,10 +253,26 @@ extern "C" {
  * returns MISO_ENGINE_V1_BACKPRESSURE with out untouched, and the host retries. A host checks
  * MISO_ENGINE_V1_FEATURE_PLAN_WATERMARK before calling the symbol.
  *
+ * Meters (issue 1583). TELEMETRY_CONFIGURE takes a meter table: entry i (meter handle i + 1) names
+ * the output, or a track or submix by its stable ID, and a metric, so a structural commit never
+ * moves a handle. Its reply carries the session's meter window in blocks (meter_window_blocks,
+ * about 32 ms). A nonempty table turns the output meter on from the next rendered block, an empty
+ * one off; render applies the change before a block, with no allocation, lock or syscall. Each
+ * METER_BATCH reports meter_period_blocks / meter_window_blocks consecutive windows: first_sample
+ * to observed_sample (exclusive), window_sequence from 1 after each accepted configure, and for the
+ * output's peak entry a left and a right record, each the windows' maximum, VALID, and CLIPPED above
+ * 1.0. A configure is all or nothing: an unknown strip is NOT_FOUND (meter.strip.unknown), a period
+ * that is not a whole number of windows INVALID_FIELD (meter.period), and a strip or gain-reduction
+ * entry UNAVAILABLE until a later issue serves it. The output meter queues eight windows; a window
+ * that reaches no batch (dropped while the host did not call into the session, or in a partial
+ * batch a gap discarded) is counted by METER_WINDOWS_LOST (protocol counter 22), and the sequence
+ * never skips.
+ *
  * Control service (issue 1348). The engine owns no thread, so the host drives the control work
  * between edits. miso_engine_v1_service(session) runs one bounded step of it: it reclaims plans
  * render has retired, brings the session's view of the running plan up to render, refreshes the
- * session counters, and stages render telemetry. Every other session call (source submit, seek,
+ * session counters, and stages render telemetry: the counter snapshot, the diagnostics and one
+ * METER_BATCH per completed batch of meter windows. Every other session call (source submit, seek,
  * seek_at, seek_report, session_seek, session_seek_at, submit_command, dequeue_event) that passes
  * its argument checks runs the same step first; a call refused for its arguments returns before the
  * step. So a host that makes those calls anyway need not also call service. The step never waits

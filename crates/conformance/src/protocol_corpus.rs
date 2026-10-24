@@ -476,8 +476,9 @@ pub fn retired_code_rows() -> Vec<RetiredCodeRow> {
     for retired in RETIRED_COUNTER_IDS {
         let mut configure = counter_command_frame(CommandPayload::TelemetryConfigure(
             &TelemetryConfiguration {
-                meter_handles: Vec::new(),
+                meters: Vec::new(),
                 meter_period_blocks: 0,
+                meter_window_blocks: None,
                 counter_ids: vec![CounterId::TransitionReprepareRefusals],
                 counter_period_blocks: 3,
                 diagnostics_enabled: false,
@@ -957,7 +958,17 @@ pub enum ConformanceDecoder {
 /// capability registry does not list `0x0011` until #1595's second slice. The 50 earlier frames
 /// are byte-equal: their hash is the old pin. Re-pinned from `a3d6a9dd72195701`; the frame count
 /// is 52.
-pub const COMPLETE_SCHEMA_HASH: u64 = 0xc7e0_1036_2827_dab3;
+/// #1595's second slice adds `SPECTRUM_STREAM` (`0x0012`): the corpus gains
+/// `command.spectrum_stream` (a select with a smoothing) and `response.spectrum_streamed` (a ready
+/// one-plane read). The static capabilities frame lists none of the three spectrum commands, which
+/// the bit-16 invariant allows. The 52 earlier frames are byte-equal: their hash is the old pin.
+/// Re-pinned from `c7e010362827dab3`; the frame count is 54.
+/// #1583 replaces the positional meter handles with the meter table: `command.telemetry_configure`
+/// carries a table with both targets and both metrics (field 1 retired, field 7 repeated),
+/// `response.telemetry` the same table and the meter window (field 8), and `event.meter_batch` the
+/// window's span and sequence (fields 5 and 6). Only those three frames move; the 51 others are
+/// byte-equal. Re-pinned from `c146e8fad0b26299`; the frame count stays 54.
+pub const COMPLETE_SCHEMA_HASH: u64 = 0x480f_fcf5_46be_a7fb;
 
 /// Build every command, successful response, registered non-OK status, event, and all-opcode
 /// session transaction using only public typed encoder entry points.
@@ -1033,9 +1044,20 @@ pub fn complete_schema_corpus() -> Vec<ConformanceFrame> {
         maximum_capture_bytes: 1 << 18,
         hop_frames: Some(512),
     };
+    // #1583 D1/D2: a meter table with both targets and both metrics; the echo adds the window.
     let telemetry = TelemetryConfiguration {
-        meter_handles: Vec::new(),
-        meter_period_blocks: 0,
+        meters: vec![
+            MeterEntry {
+                target: MeterTarget::Output,
+                metric: MeterMetric::Peak,
+            },
+            MeterEntry {
+                target: MeterTarget::Strip("vocal".into()),
+                metric: MeterMetric::GainReduction,
+            },
+        ],
+        meter_period_blocks: 24,
+        meter_window_blocks: None,
         counter_ids: Vec::new(),
         counter_period_blocks: 0,
         diagnostics_enabled: false,
@@ -1062,6 +1084,7 @@ pub fn complete_schema_corpus() -> Vec<ConformanceFrame> {
                             | CommandPayload::ResponseGet(_)
                             | CommandPayload::SpectrumConfigure(_)
                             | CommandPayload::SpectrumCapture(_)
+                            | CommandPayload::SpectrumStream(_)
                             | CommandPayload::TransportGet
                             | CommandPayload::CountersGet(_)
                             | CommandPayload::DiagnosticsGet(_)
@@ -1140,6 +1163,16 @@ pub fn complete_schema_corpus() -> Vec<ConformanceFrame> {
         CommandPayload::SpectrumCapture(&SpectrumCaptureRequest::Read {
             channels: ParameterChannel::Both,
             include_window: true,
+        })
+    );
+    // #1595: a select with a smoothing, so every optional field is present.
+    command!(
+        "command.spectrum_stream",
+        CommandPayload::SpectrumStream(&SpectrumStreamRequest::Select {
+            target_kind: SpectrumTargetKind::TrackPostInput,
+            target_id: "vocal".to_owned(),
+            channels: ParameterChannel::Left,
+            smoothing_ms: Some(150.0),
         })
     );
 
@@ -1290,6 +1323,38 @@ pub fn complete_schema_corpus() -> Vec<ConformanceFrame> {
             }),
         })
     );
+    // #1595: a ready one-plane stream read, after one dropped window.
+    success!(
+        "response.spectrum_streamed",
+        SuccessResponsePayload::SpectrumStreamed(SpectrumStreamReply {
+            adopted_epoch: 3,
+            selection_epoch: 2,
+            status: SpectrumStreamStatus::Ready,
+            target: Some(SpectrumStreamTarget {
+                target_kind: SpectrumTargetKind::TrackPostInput,
+                target_id: "vocal".into(),
+                channels: ParameterChannel::Left,
+            }),
+            sample_rate_hz: 48_000,
+            quantum_frames: 128,
+            hop_frames: 1_024,
+            capture_epoch: 2,
+            sequence: 5,
+            dropped_captures: 1,
+            windows: 6,
+            captured_sample: 96_000,
+            end_sample: 98_048,
+            analysis_epoch: 4,
+            history_start_sample: 90_880,
+            smoothing_ms: 150.0,
+            source_underrun: false,
+            bins: Some(SpectrumStreamBins {
+                frequencies_hz: frequencies.as_slice().into(),
+                left_db: Some(left_db.as_slice().into()),
+                right_db: None,
+            }),
+        })
+    );
     success!(
         "response.transport_get",
         SuccessResponsePayload::TransportGetSnapshot(TransportSnapshot {
@@ -1306,7 +1371,10 @@ pub fn complete_schema_corpus() -> Vec<ConformanceFrame> {
     );
     success!(
         "response.telemetry",
-        SuccessResponsePayload::TelemetryConfiguration(telemetry.clone())
+        SuccessResponsePayload::TelemetryConfiguration(TelemetryConfiguration {
+            meter_window_blocks: core::num::NonZeroU32::new(12),
+            ..telemetry.clone()
+        })
     );
     success!(
         "response.counters",
@@ -1438,7 +1506,9 @@ pub fn complete_schema_corpus() -> Vec<ConformanceFrame> {
     event!(
         "event.meter_batch",
         EventPayload::MeterBatch(MeterBatch {
-            observed_sample: SampleTime(0),
+            observed_sample: SampleTime(3072),
+            first_sample: SampleTime(1536),
+            window_sequence: 1,
             records: &meter
         })
     );

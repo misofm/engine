@@ -362,19 +362,55 @@ fn capability_id_views_reject_order_allocation_and_session_family_identically() 
     assert_parity_rejects(&[1, 2, 6], &events);
     assert_parity_rejects(&commands, &[]);
     assert!(!IdSource::LittleEndian(&[1]).is_strict_allocated(false));
-    // #1386: `SESSION_REPLACE` (`0x0013`) is allocated and rides the session family;
-    // `SPECTRUM_CONFIGURE` (`0x0010`, #1594) and `SPECTRUM_CAPTURE` (`0x0011`, #1595 slice a)
-    // are allocated (their capability bit is slice b's); `0x000f` and `0x0012` are claimed by
-    // open specs, not allocated.
+    // #1386: `SESSION_REPLACE` (`0x0013`) is allocated and rides the session family; `0x000f` is
+    // claimed by an open spec, not allocated.
     assert!(
         check_capabilities_invariants(view(
-            IdSource::Native(&[1, 2, 3, 0x0010, 0x0011, 0x0013]),
+            IdSource::Native(&[1, 2, 3, 0x0013]),
             IdSource::Native(&events),
         ))
         .is_ok()
     );
-    for claimed in [0x000f, 0x0012] {
-        assert_parity_rejects(&[1, 2, 3, claimed], &events);
+    assert_parity_rejects(&[1, 2, 3, 0x000f], &events);
+    // #1595 D8a: the three spectrum commands are listed together, exactly when bit 16 is set.
+    let spectrum = |flags: u64| CapabilityInvariantView {
+        flags: CapabilityFlags(view(IdSource::Native(&[]), IdSource::Native(&[])).flags.0 | flags),
+        ..view(
+            IdSource::Native(&[1, 2, 3, 0x0010, 0x0011, 0x0012]),
+            IdSource::Native(&events),
+        )
+    };
+    assert!(check_capabilities_invariants(spectrum(CapabilityFlags::SPECTRUM.0)).is_ok());
+    assert_eq!(
+        check_capabilities_invariants(spectrum(0)),
+        Err(DecodeError::InvalidTlv),
+        "the three commands without bit 16"
+    );
+    let bit_16 = |commands: &'static [u16]| CapabilityInvariantView {
+        flags: CapabilityFlags(
+            view(IdSource::Native(&[]), IdSource::Native(&[])).flags.0
+                | CapabilityFlags::SPECTRUM.0,
+        ),
+        ..view(IdSource::Native(commands), IdSource::Native(&events))
+    };
+    for partial in [
+        &[1, 2, 3][..],
+        &[1, 2, 3, 0x0010, 0x0011],
+        &[1, 2, 3, 0x0010, 0x0012],
+        &[1, 2, 3, 0x0011, 0x0012],
+    ] {
+        assert_eq!(
+            check_capabilities_invariants(bit_16(partial)),
+            Err(DecodeError::InvalidTlv),
+            "bit 16 with {partial:x?}"
+        );
+    }
+    for partial in [
+        &[1, 2, 3, 0x0010][..],
+        &[1, 2, 3, 0x0011],
+        &[1, 2, 3, 0x0012],
+    ] {
+        assert_parity_rejects(partial, &events);
     }
     let without_session = |commands: &'static [u16]| CapabilityInvariantView {
         maximum_transaction_edits: 0,
@@ -1868,8 +1904,8 @@ fn control_code_tables_are_exact() {
 /// Gate 2: a retired message ID decodes to `UNSUPPORTED_MESSAGE`, no message variant uses a
 /// retired code, and a capability registry that lists one is refused.
 ///
-/// Red if `0x0004`, `0x0005`, `0x0006` or `0x8002` is reallocated to a new message or still served, or a
-/// peer can advertise one.
+/// Red if `0x0004`, `0x0005`, `0x0006` or `0x8002` is reallocated to a new message or still served,
+/// or a peer can advertise one.
 #[test]
 fn retired_message_ids_are_never_reused_or_advertised() {
     assert_eq!(crate::RETIRED_MESSAGE_IDS, [0x0004, 0x0005, 0x0006, 0x8002]);
@@ -2327,7 +2363,7 @@ fn observation_ended_round_trips_every_key_and_refuses_anything_else() {
     }
 }
 
-/// Issue #1351 gate 4: every registered counter ID, the newest `SOURCE_FRAMES_DISCARDED` (#1699)
+/// Issue #1351 gate 4: every registered counter ID, the newest `METER_WINDOWS_LOST` (#1583)
 /// included, round-trips through the telemetry configuration; the next ID and the retired IDs
 /// 2 and 11 to 14 (#1629) are refused.
 ///
@@ -2353,16 +2389,20 @@ fn every_counter_id_round_trips_and_the_next_is_refused() {
         CounterId::LiveBlockErrors,
         CounterId::SourceUnderrunBlocks,
         CounterId::SourceFramesDiscarded,
+        CounterId::MeterWindowsLost,
     ];
-    let allocated = [1_u32, 3, 4, 5, 6, 7, 8, 9, 10, 15, 16, 17, 18, 19, 20, 21];
+    let allocated = [
+        1_u32, 3, 4, 5, 6, 7, 8, 9, 10, 15, 16, 17, 18, 19, 20, 21, 22,
+    ];
     assert_eq!(
         all.iter().map(|id| *id as u32).collect::<Vec<_>>(),
         allocated,
         "IDs 2 and 11 to 14 are retired, never reallocated"
     );
     let configuration = TelemetryConfiguration {
-        meter_handles: Vec::new(),
+        meters: Vec::new(),
         meter_period_blocks: 0,
+        meter_window_blocks: None,
         counter_ids: all.to_vec(),
         counter_period_blocks: 1,
         diagnostics_enabled: false,
@@ -2373,12 +2413,12 @@ fn every_counter_id_round_trips_and_the_next_is_refused() {
         .encode_telemetry_configuration(&configuration, &mut bytes)
         .expect("configuration");
     assert_eq!(
-        codec.decode_telemetry_configuration(&bytes[..len], 6),
+        codec.decode_telemetry_configuration(&bytes[..len], 5),
         Ok(configuration.clone())
     );
     // One ID per request, so a refusal cannot come from the sorted-unique rule.
     let single = TelemetryConfiguration {
-        counter_ids: vec![CounterId::SourceFramesDiscarded],
+        counter_ids: vec![CounterId::MeterWindowsLost],
         counter_period_blocks: 3,
         ..configuration
     };
@@ -2386,19 +2426,276 @@ fn every_counter_id_round_trips_and_the_next_is_refused() {
     let len = codec
         .encode_telemetry_configuration(&single, &mut bytes)
         .expect("single");
-    let id_bytes = 21_u32.to_le_bytes();
+    let id_bytes = 22_u32.to_le_bytes();
     let at = bytes[..len]
         .windows(4)
         .position(|window| window == id_bytes)
         .expect("counter ID");
-    for refused_id in [0_u32, 2, 11, 12, 13, 14, 22] {
+    for refused_id in [0_u32, 2, 11, 12, 13, 14, 23] {
         let mut refused = bytes;
         refused[at..at + 4].copy_from_slice(&refused_id.to_le_bytes());
         assert!(
             codec
-                .decode_telemetry_configuration(&refused[..len], 6)
+                .decode_telemetry_configuration(&refused[..len], 5)
                 .is_err(),
             "counter ID {refused_id} must be refused"
+        );
+    }
+}
+
+/// Issue #1583 gate 1: a meter table with each target and metric round-trips as a command and,
+/// with its window, as an echo; a batch round-trips with its span; and every D2 rule refuses with
+/// `INVALID_FIELD` on encode and on decode alike, with the retired field 1 refused in either flag
+/// form and field 8 refused in a command.
+///
+/// Test value: red if the encoder, the decoder and the registry disagree on the table, the span or
+/// the retired field: a rule one side forgets (a duplicate, an output gain reduction, a 257th entry,
+/// a zero period, an empty span, a zero sequence, a command window) is a frame one side writes and
+/// the other refuses.
+#[test]
+fn the_meter_table_and_the_window_span_follow_one_rule_on_encode_and_decode() {
+    let codec = ProtocolCodec::new(ProtocolLimits {
+        max_frame_bytes: 1 << 16,
+        max_tlv_count: 4096,
+        max_string_bytes: 256,
+        max_nesting: 4,
+    });
+    let entry = |target: MeterTarget, metric| MeterEntry { target, metric };
+    let strip = |id: &str| MeterTarget::Strip(id.into());
+    let base = TelemetryConfiguration {
+        meters: vec![
+            entry(MeterTarget::Output, MeterMetric::Peak),
+            entry(strip("vocal"), MeterMetric::Peak),
+            entry(strip("vocal"), MeterMetric::GainReduction),
+        ],
+        meter_period_blocks: 24,
+        meter_window_blocks: None,
+        counter_ids: Vec::new(),
+        counter_period_blocks: 0,
+        diagnostics_enabled: false,
+        minimum_diagnostic_severity: DiagnosticSeverity::Info,
+    };
+    let encode = |value: &TelemetryConfiguration| {
+        let mut bytes = vec![0; codec.encoded_telemetry_configuration_len(value)?];
+        codec.encode_telemetry_configuration(value, &mut bytes)?;
+        Ok::<_, EncodeError>(bytes)
+    };
+    // A command is written without a window; the echo form carries one.
+    let command = |value: &TelemetryConfiguration| {
+        let mut sink = crate::btlv::CountSink::new(codec.limits());
+        write_telemetry_configuration(&mut sink, value, false)
+    };
+    let count = |value: &TelemetryConfiguration| {
+        u32::try_from(5 + value.meters.len() + usize::from(value.meter_window_blocks.is_some()))
+            .expect("count")
+    };
+    let bytes = encode(&base).expect("command bytes");
+    assert_eq!(command(&base), Ok(()));
+    assert_eq!(
+        codec.decode_telemetry_configuration(&bytes, count(&base)),
+        Ok(base.clone())
+    );
+    let echo = TelemetryConfiguration {
+        meter_window_blocks: core::num::NonZeroU32::new(12),
+        ..base.clone()
+    };
+    let echo_bytes = encode(&echo).expect("echo bytes");
+    assert_eq!(
+        codec.decode_telemetry_configuration_echo(&echo_bytes, count(&echo)),
+        Ok(echo.clone())
+    );
+    // Field 8 in a command.
+    assert_eq!(command(&echo), Err(EncodeError::InvalidField));
+    assert_eq!(
+        codec.decode_telemetry_configuration(&echo_bytes, count(&echo)),
+        Err(DecodeError::InvalidField)
+    );
+
+    // Each typed refusal, on encode, and on decode as the same table's bytes with one code moved
+    // (the encoder writes none of them).
+    let replace = |bytes: &[u8], from: &[u8], to: &[u8], nth: usize| {
+        let at = bytes
+            .windows(from.len())
+            .enumerate()
+            .filter(|(_, window)| *window == from)
+            .nth(nth)
+            .map(|(at, _)| at)
+            .expect("pattern");
+        let mut patched = bytes.to_vec();
+        patched[at..at + to.len()].copy_from_slice(to);
+        patched
+    };
+    // A required one-byte field: ID, `U8`, required, length 1, the value.
+    let u8_field = |id: u8, value: u8| [id, 0, 1, 1, 1, 0, 0, 0, value];
+    let refused_tables = [
+        // A duplicate entry.
+        TelemetryConfiguration {
+            meters: vec![
+                entry(strip("vocal"), MeterMetric::Peak),
+                entry(strip("vocal"), MeterMetric::Peak),
+            ],
+            ..base.clone()
+        },
+        // The output's gain reduction.
+        TelemetryConfiguration {
+            meters: vec![entry(MeterTarget::Output, MeterMetric::GainReduction)],
+            ..base.clone()
+        },
+        // A table with no period.
+        TelemetryConfiguration {
+            meter_period_blocks: 0,
+            ..base.clone()
+        },
+        // A strip ID that is no stable ID.
+        TelemetryConfiguration {
+            meters: vec![entry(strip("Vocal"), MeterMetric::Peak)],
+            ..base.clone()
+        },
+    ];
+    for refused in &refused_tables {
+        assert_eq!(
+            encode(refused),
+            Err(EncodeError::InvalidField),
+            "{refused:?}"
+        );
+    }
+    let one_strip = TelemetryConfiguration {
+        meters: vec![
+            entry(strip("vocal"), MeterMetric::Peak),
+            entry(strip("vocal"), MeterMetric::GainReduction),
+        ],
+        ..base.clone()
+    };
+    let one_strip_bytes = encode(&one_strip).expect("two entries");
+    let output_bytes = encode(&TelemetryConfiguration {
+        meters: vec![entry(MeterTarget::Output, MeterMetric::Peak)],
+        ..base.clone()
+    })
+    .expect("one entry");
+    let period = [2, 0, 3, 1, 4, 0, 0, 0, 24, 0, 0, 0];
+    let refused_frames = [
+        // The duplicate: the second entry's metric moved to the first's.
+        (
+            replace(&one_strip_bytes, &u8_field(3, 2), &u8_field(3, 1), 0),
+            7,
+        ),
+        // The output's gain reduction.
+        (
+            replace(&output_bytes, &u8_field(3, 1), &u8_field(3, 2), 0),
+            6,
+        ),
+        // No period.
+        (
+            replace(&bytes, &period, &[2, 0, 3, 1, 4, 0, 0, 0, 0, 0, 0, 0], 0),
+            8,
+        ),
+        // An unknown target and an unknown metric.
+        (
+            replace(&output_bytes, &u8_field(1, 1), &u8_field(1, 3), 0),
+            6,
+        ),
+        (
+            replace(&output_bytes, &u8_field(3, 1), &u8_field(3, 3), 0),
+            6,
+        ),
+        // A strip target with no strip ID, and the output with one.
+        (
+            replace(&output_bytes, &u8_field(1, 1), &u8_field(1, 2), 0),
+            6,
+        ),
+        (
+            replace(&one_strip_bytes, &u8_field(1, 2), &u8_field(1, 1), 0),
+            7,
+        ),
+    ];
+    for (frame, fields) in &refused_frames {
+        assert_eq!(
+            codec.decode_telemetry_configuration(frame, *fields),
+            Err(DecodeError::InvalidField)
+        );
+    }
+    // 256 entries are the most; a 257th is refused both ways.
+    let wide = |range: core::ops::Range<u32>| TelemetryConfiguration {
+        meters: range
+            .map(|index| entry(strip(&format!("s{index:03}")), MeterMetric::Peak))
+            .collect(),
+        ..base.clone()
+    };
+    let full = wide(0..256);
+    let full_bytes = encode(&full).expect("256 entries");
+    assert_eq!(
+        codec.decode_telemetry_configuration(&full_bytes, count(&full)),
+        Ok(full.clone())
+    );
+    assert_eq!(encode(&wide(0..257)), Err(EncodeError::InvalidField));
+    // Every entry encodes to the same length, so the last entry of `1..257` is the 257th.
+    let shifted = encode(&wide(1..257)).expect("256 entries");
+    let entry_bytes = shifted.len() - encode(&wide(1..256)).expect("255").len();
+    let mut overfull = full_bytes.clone();
+    overfull.extend_from_slice(&shifted[shifted.len() - entry_bytes..]);
+    assert_eq!(
+        codec.decode_telemetry_configuration(&overfull, count(&full) + 1),
+        Err(DecodeError::InvalidField)
+    );
+    // Field 1, the retired positional handles, in either flag form.
+    for flags in [0_u8, 1] {
+        let mut retired = vec![1, 0, 0x0d, flags, 4, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0];
+        retired.extend_from_slice(&bytes);
+        assert!(
+            codec
+                .decode_telemetry_configuration(&retired, count(&base) + 1)
+                .is_err(),
+            "field 1 with flags {flags}"
+        );
+    }
+
+    // The batch's span: a window `[first, end)` with `first < end` and a sequence from 1.
+    let records = [MeterRecord {
+        handle: 1,
+        component: MeterComponent::Left,
+        flags: 1,
+        value: 0.5,
+    }];
+    let batch = |first: u64, end: u64, sequence: u64| MeterBatch {
+        observed_sample: crate::SampleTime(end),
+        first_sample: crate::SampleTime(first),
+        window_sequence: sequence,
+        records: &records,
+    };
+    let mut batch_bytes = vec![
+        0;
+        codec
+            .encoded_meter_batch_len(batch(256, 512, 3))
+            .expect("len")
+    ];
+    codec
+        .encode_meter_batch(batch(256, 512, 3), &mut batch_bytes)
+        .expect("batch");
+    let decoded = codec.decode_meter_batch(&batch_bytes, 6).expect("decoded");
+    assert_eq!(
+        (
+            decoded.first_sample,
+            decoded.observed_sample,
+            decoded.window_sequence
+        ),
+        (crate::SampleTime(256), crate::SampleTime(512), 3)
+    );
+    let u64_field = |id: u8, value: u64| {
+        let mut field = vec![id, 0, 4, 1, 8, 0, 0, 0];
+        field.extend_from_slice(&value.to_le_bytes());
+        field
+    };
+    for (first, end, sequence) in [(512, 512, 3), (600, 512, 3), (256, 512, 0)] {
+        assert_eq!(
+            codec.encoded_meter_batch_len(batch(first, end, sequence)),
+            Err(EncodeError::InvalidField)
+        );
+        let frame = replace(&batch_bytes, &u64_field(5, 256), &u64_field(5, first), 0);
+        let frame = replace(&frame, &u64_field(6, 3), &u64_field(6, sequence), 0);
+        assert_eq!(
+            codec.decode_meter_batch(&frame, 6),
+            Err(DecodeError::InvalidField),
+            "[{first}, {end}) sequence {sequence}"
         );
     }
 }
@@ -2407,8 +2704,9 @@ fn every_counter_id_round_trips_and_the_next_is_refused() {
 fn b3b1_telemetry_and_counters_are_typed_canonical_and_bounded() {
     let codec = codec();
     let configuration = TelemetryConfiguration {
-        meter_handles: vec![1, 2],
+        meters: Vec::new(),
         meter_period_blocks: 4,
+        meter_window_blocks: None,
         counter_ids: vec![
             CounterId::ControlCommandBackpressure,
             CounterId::TelemetryCoalesced,
@@ -2417,14 +2715,13 @@ fn b3b1_telemetry_and_counters_are_typed_canonical_and_bounded() {
         diagnostics_enabled: true,
         minimum_diagnostic_severity: DiagnosticSeverity::Error,
     };
-    let mut config_bytes = [0_u8; 96];
+    let mut config_bytes = [0_u8; 80];
     codec
         .encode_telemetry_configuration(&configuration, &mut config_bytes)
         .expect("config");
     assert_eq!(
         hex(&config_bytes),
         concat!(
-            "01000d01080000000100000002000000",
             "02000301040000000400000000000000",
             "03000d01080000000100000005000000",
             "04000301040000000800000000000000",
@@ -2433,18 +2730,21 @@ fn b3b1_telemetry_and_counters_are_typed_canonical_and_bounded() {
         )
     );
     assert_eq!(
-        codec.decode_telemetry_configuration(&config_bytes, 6),
+        codec.decode_telemetry_configuration(&config_bytes, 5),
         Ok(configuration.clone())
     );
     for end in 0..config_bytes.len() {
         assert!(
             codec
-                .decode_telemetry_configuration(&config_bytes[..end], 6)
+                .decode_telemetry_configuration(&config_bytes[..end], 5)
                 .is_err()
         );
     }
     let bad_config = TelemetryConfiguration {
-        meter_handles: vec![2, 1],
+        counter_ids: vec![
+            CounterId::TelemetryCoalesced,
+            CounterId::ControlCommandBackpressure,
+        ],
         ..configuration.clone()
     };
     assert!(
@@ -2453,7 +2753,7 @@ fn b3b1_telemetry_and_counters_are_typed_canonical_and_bounded() {
             .is_err()
     );
     let bad_coupling = TelemetryConfiguration {
-        meter_period_blocks: 0,
+        counter_period_blocks: 0,
         ..configuration.clone()
     };
     assert!(
@@ -2707,9 +3007,11 @@ fn b4_event_payloads_are_typed_canonical_and_truncation_safe() {
     }];
     let batch = MeterBatch {
         observed_sample: crate::SampleTime(9),
+        first_sample: crate::SampleTime(3),
+        window_sequence: 2,
         records: &records,
     };
-    let mut meter_bytes = [0_u8; 72];
+    let mut meter_bytes = [0_u8; 104];
     codec
         .encode_meter_batch(batch, &mut meter_bytes)
         .expect("meter");
@@ -2719,26 +3021,28 @@ fn b4_event_payloads_are_typed_canonical_and_truncation_safe() {
             "01000401080000000900000000000000",
             "02000201020000000100000000000000",
             "03000201020000001000000000000000",
-            "04000a011000000001000000020003000000c03f00000000"
+            "04000a011000000001000000020003000000c03f00000000",
+            "05000401080000000300000000000000",
+            "06000401080000000200000000000000"
         )
     );
     let decoded = codec
-        .decode_meter_batch(&meter_bytes, 4)
+        .decode_meter_batch(&meter_bytes, 6)
         .expect("decoded meter");
     assert_eq!(decoded.observed_sample, crate::SampleTime(9));
     assert_eq!(decoded.record(0), Ok(records[0]));
     for end in 0..meter_bytes.len() {
-        assert!(codec.decode_meter_batch(&meter_bytes[..end], 4).is_err());
+        assert!(codec.decode_meter_batch(&meter_bytes[..end], 6).is_err());
     }
     let mut bad_meter = meter_bytes;
     bad_meter[40..42].copy_from_slice(&15_u16.to_le_bytes());
-    assert!(codec.decode_meter_batch(&bad_meter, 4).is_err());
+    assert!(codec.decode_meter_batch(&bad_meter, 6).is_err());
     bad_meter = meter_bytes;
     bad_meter[64..68].copy_from_slice(&f32::NAN.to_le_bytes());
-    assert!(codec.decode_meter_batch(&bad_meter, 4).is_err());
+    assert!(codec.decode_meter_batch(&bad_meter, 6).is_err());
     bad_meter = meter_bytes;
     bad_meter[68] = 1;
-    assert!(codec.decode_meter_batch(&bad_meter, 4).is_err());
+    assert!(codec.decode_meter_batch(&bad_meter, 6).is_err());
 
     let counters = CounterSnapshot {
         observed_sample: crate::SampleTime(9),
@@ -2844,13 +3148,14 @@ fn b4_event_payloads_are_typed_canonical_and_truncation_safe() {
     assert_event_frame(
         crate::MessageId::MeterBatch,
         &meter_bytes,
-        4,
+        6,
         concat!(
-            "4d49534f43544c00010000003000030020800000480000000000000000000000",
-            "07000000000000000400000000000000",
+            "4d49534f43544c00010000003000030020800000680000000000000000000000",
+            "07000000000000000600000000000000",
             "0100040108000000090000000000000002000201020000000100000000000000",
             "0300020102000000100000000000000004000a01100000000100000002000300",
-            "0000c03f00000000"
+            "0000c03f00000000",
+            "0500040108000000030000000000000006000401080000000200000000000000"
         ),
     );
     assert_event_frame(
@@ -4086,6 +4391,330 @@ fn spectrum_capture_round_trips_and_refuses_malformed_frames_both_ways() {
         let (wire, count) = edited(base, |fields| edit(fields));
         assert_eq!(
             codec.decode_spectrum_capture_reply(&wire, count),
+            Err(DecodeError::InvalidField),
+            "{name}"
+        );
+    }
+}
+
+/// A ready `SPECTRUM_STREAM` reply on `eq0` with `channels`' planes.
+fn stream_ready(channels: ParameterChannel) -> SpectrumStreamReply<'static> {
+    use std::borrow::Cow;
+    let bins = |level: f32| -> Option<Cow<'static, [f32]>> {
+        Some(Cow::Owned(
+            (0..SPECTRUM_CAPTURE_BIN_COUNT)
+                .map(|bin| level - bin as f32 / 100.0)
+                .collect(),
+        ))
+    };
+    let left = matches!(channels, ParameterChannel::Left | ParameterChannel::Both);
+    let right = matches!(channels, ParameterChannel::Right | ParameterChannel::Both);
+    SpectrumStreamReply {
+        adopted_epoch: 2,
+        selection_epoch: 3,
+        status: SpectrumStreamStatus::Ready,
+        target: Some(SpectrumStreamTarget {
+            target_kind: SpectrumTargetKind::TrackPostPan,
+            target_id: Cow::Borrowed("eq0"),
+            channels,
+        }),
+        sample_rate_hz: 48_000,
+        quantum_frames: 128,
+        hop_frames: 2_048,
+        capture_epoch: 1,
+        sequence: 2,
+        dropped_captures: 0,
+        windows: 3,
+        captured_sample: 4_096,
+        end_sample: 6_144,
+        analysis_epoch: 1,
+        history_start_sample: 0,
+        smoothing_ms: 100.0,
+        source_underrun: false,
+        bins: Some(SpectrumStreamBins {
+            frequencies_hz: Cow::Owned(
+                (0..SPECTRUM_CAPTURE_BIN_COUNT)
+                    .map(|bin| bin as f32 * 23.4375)
+                    .collect(),
+            ),
+            left_db: if left { bins(-3.0) } else { None },
+            right_db: if right { bins(-9.0) } else { None },
+        }),
+    }
+}
+
+/// #1595 gate 1 (the stream half): each `SPECTRUM_STREAM` operation and a reply of every status
+/// (with and without a selection; ready with each channel mask) round-trip exactly, and the
+/// frame-limit measure equals the encoded frame of each ready shape. Every presence rule of D3, an
+/// operation or a status outside its table, a smoothing of 10,001 ms or NaN, planes that disagree
+/// with `channels`, a 1,024-bin plane, a ready reply without a selection, a selection without its
+/// identity and a ready window count that is not `sequence + 1` are refused as `INVALID_FIELD`, on
+/// encode where the typed value can say it and on decode.
+///
+/// Red if the codec admits a contradictory stream request or a reply of the wrong shape in either
+/// direction, or the measure the session refuses stream reads by drifts from the encoder.
+#[test]
+fn spectrum_stream_round_trips_and_refuses_malformed_frames_both_ways() {
+    use std::borrow::Cow;
+    let codec = ProtocolCodec::default();
+    let select = SpectrumStreamRequest::Select {
+        target_kind: SpectrumTargetKind::TrackPostInput,
+        target_id: "eq1".to_owned(),
+        channels: ParameterChannel::Left,
+        smoothing_ms: Some(50.0),
+    };
+    let start = SpectrumStreamRequest::Start {
+        smoothing_ms: 100.0,
+    };
+    let encode_request = |value: &SpectrumStreamRequest| {
+        let mut bytes = vec![
+            0;
+            codec
+                .encoded_spectrum_stream_request_len(value)
+                .expect("length")
+        ];
+        codec
+            .encode_spectrum_stream_request(value, &mut bytes)
+            .expect("encode");
+        bytes
+    };
+    for request in [
+        start.clone(),
+        select.clone(),
+        SpectrumStreamRequest::Select {
+            target_kind: SpectrumTargetKind::Output,
+            target_id: "main".to_owned(),
+            channels: ParameterChannel::Both,
+            smoothing_ms: None,
+        },
+        SpectrumStreamRequest::Read,
+        SpectrumStreamRequest::Reset,
+        SpectrumStreamRequest::Stop,
+    ] {
+        let bytes = encode_request(&request);
+        assert_eq!(
+            codec.decode_spectrum_stream_request(&bytes, top_level_count(&bytes)),
+            Ok(request)
+        );
+    }
+    let start_bytes = encode_request(&start);
+    let select_bytes = encode_request(&select);
+    type Edit = Box<dyn Fn(&mut Vec<Tlv>)>;
+    let requests: [(&str, &Vec<u8>, Edit); 8] = [
+        ("op 0", &start_bytes, Box::new(|f| set(f, 1, &[0]))),
+        ("op 6", &start_bytes, Box::new(|f| set(f, 1, &[6]))),
+        (
+            "start without smoothing",
+            &start_bytes,
+            Box::new(|f| remove(f, 2)),
+        ),
+        (
+            "read with smoothing",
+            &start_bytes,
+            Box::new(|f| set(f, 1, &[3])),
+        ),
+        (
+            "start with a target",
+            &select_bytes,
+            Box::new(|f| set(f, 1, &[1])),
+        ),
+        (
+            "select without channels",
+            &select_bytes,
+            Box::new(|f| remove(f, 5)),
+        ),
+        (
+            "smoothing 10,001",
+            &start_bytes,
+            Box::new(|f| set(f, 2, &10_001.0_f64.to_le_bytes())),
+        ),
+        (
+            "smoothing NaN",
+            &select_bytes,
+            Box::new(|f| set(f, 2, &f64::NAN.to_le_bytes())),
+        ),
+    ];
+    for (name, base, edit) in requests {
+        let (wire, count) = edited(base, |fields| edit(fields));
+        assert_eq!(
+            codec.decode_spectrum_stream_request(&wire, count),
+            Err(DecodeError::InvalidField),
+            "{name}"
+        );
+    }
+    for refused in [
+        SpectrumStreamRequest::Start {
+            smoothing_ms: 10_001.0,
+        },
+        SpectrumStreamRequest::Start { smoothing_ms: -1.0 },
+        SpectrumStreamRequest::Select {
+            target_kind: SpectrumTargetKind::Output,
+            target_id: String::new(),
+            channels: ParameterChannel::Both,
+            smoothing_ms: None,
+        },
+    ] {
+        assert_eq!(
+            codec.encoded_spectrum_stream_request_len(&refused),
+            Err(EncodeError::InvalidField),
+            "{refused:?}"
+        );
+    }
+
+    // Replies: a reply of every status round-trips, and the measure is the encoded frame.
+    let inactive = SpectrumStreamReply {
+        status: SpectrumStreamStatus::Inactive,
+        target: None,
+        bins: None,
+        ..stream_ready(ParameterChannel::Left)
+    };
+    let mut replies = vec![inactive.clone()];
+    for status in [
+        SpectrumStreamStatus::Warming,
+        SpectrumStreamStatus::Pending,
+        SpectrumStreamStatus::Gap,
+        SpectrumStreamStatus::Failed,
+        SpectrumStreamStatus::Stopped,
+    ] {
+        replies.push(SpectrumStreamReply {
+            status,
+            dropped_captures: 2,
+            bins: None,
+            ..stream_ready(ParameterChannel::Both)
+        });
+    }
+    for channels in [
+        ParameterChannel::Left,
+        ParameterChannel::Right,
+        ParameterChannel::Both,
+    ] {
+        let reply = stream_ready(channels);
+        let frame = crate::TypedSuccessResponseFrame {
+            request_id: crate::RequestId::new(9).expect("nonzero"),
+            revision: crate::SessionRevision(3),
+            payload: crate::SuccessResponsePayload::SpectrumStreamed(reply.clone()),
+        };
+        let mut output = vec![0; 1 << 16];
+        let written = codec
+            .encode_success_response_frame_into(&frame, &mut output)
+            .expect("frame");
+        assert_eq!(
+            codec.spectrum_stream_ready_frame_len(channels, 3),
+            Ok(written),
+            "{channels:?}"
+        );
+        replies.push(reply);
+    }
+    let encode_reply = |value: &SpectrumStreamReply<'_>| {
+        let mut bytes = vec![
+            0;
+            codec
+                .encoded_spectrum_stream_reply_len(value)
+                .expect("length")
+        ];
+        codec
+            .encode_spectrum_stream_reply(value, &mut bytes)
+            .expect("encode");
+        bytes
+    };
+    for reply in &replies {
+        let bytes = encode_reply(reply);
+        assert_eq!(
+            codec.decode_spectrum_stream_reply(&bytes, top_level_count(&bytes)),
+            Ok(reply.clone())
+        );
+    }
+
+    // Typed refusals.
+    let mut wrong_plane = stream_ready(ParameterChannel::Both);
+    wrong_plane.bins.as_mut().expect("ready").right_db = None;
+    let mut short_plane = stream_ready(ParameterChannel::Left);
+    short_plane.bins.as_mut().expect("ready").left_db = Some(Cow::Owned(vec![0.0; 1024]));
+    let ready_without_bins = SpectrumStreamReply {
+        bins: None,
+        ..stream_ready(ParameterChannel::Left)
+    };
+    let pending_with_bins = SpectrumStreamReply {
+        status: SpectrumStreamStatus::Pending,
+        ..stream_ready(ParameterChannel::Left)
+    };
+    let ready_without_target = SpectrumStreamReply {
+        target: None,
+        ..stream_ready(ParameterChannel::Left)
+    };
+    let rough = SpectrumStreamReply {
+        smoothing_ms: 10_001.0,
+        ..inactive
+    };
+    for refused in [
+        &wrong_plane,
+        &short_plane,
+        &ready_without_bins,
+        &pending_with_bins,
+        &ready_without_target,
+        &rough,
+    ] {
+        assert_eq!(
+            codec.encoded_spectrum_stream_reply_len(refused),
+            Err(EncodeError::InvalidField)
+        );
+    }
+
+    // Wire refusals.
+    let both = encode_reply(&stream_ready(ParameterChannel::Both));
+    let left = encode_reply(&stream_ready(ParameterChannel::Left));
+    let rules: [(&str, &Vec<u8>, Edit); 10] = [
+        ("status 7", &left, Box::new(|f| set(f, 3, &[7]))),
+        (
+            "windows not sequence + 1",
+            &left,
+            Box::new(|f| set(f, 13, &4_u64.to_le_bytes())),
+        ),
+        (
+            "a pending reply with bins",
+            &left,
+            Box::new(|f| set(f, 3, &[2])),
+        ),
+        (
+            "planes that disagree with channels",
+            &both,
+            Box::new(|f| set(f, 6, &[1])),
+        ),
+        (
+            "a 1,024-bin plane",
+            &left,
+            Box::new(|f| set(f, 21, &[0; 4 * 1024])),
+        ),
+        (
+            "a plane without the axis",
+            &left,
+            Box::new(|f| remove(f, 20)),
+        ),
+        (
+            "a selection without its identity",
+            &left,
+            Box::new(|f| remove(f, 5)),
+        ),
+        (
+            "an identity without a selection",
+            &left,
+            Box::new(|f| set(f, 4, &[0])),
+        ),
+        (
+            "smoothing 10,001",
+            &left,
+            Box::new(|f| set(f, 18, &10_001.0_f64.to_le_bytes())),
+        ),
+        (
+            "end_sample one past",
+            &left,
+            Box::new(|f| set(f, 15, &6_145_u64.to_le_bytes())),
+        ),
+    ];
+    for (name, base, edit) in rules {
+        let (wire, count) = edited(base, |fields| edit(fields));
+        assert_eq!(
+            codec.decode_spectrum_stream_reply(&wire, count),
             Err(DecodeError::InvalidField),
             "{name}"
         );

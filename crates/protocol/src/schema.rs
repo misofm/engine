@@ -782,6 +782,85 @@ pub(crate) mod spectrum_capture_reply {
     };
 }
 
+/// `SPECTRUM_STREAM` (`0x0012`, #1595 D3): one operation on the continuous stream.
+pub(crate) mod spectrum_stream_request {
+    use super::*;
+    /// Start `1`, select `2`, read `3`, reset `4`, stop `5`.
+    pub(crate) const OP: FieldSpec = FieldSpec::req(1, Wire::U8);
+    /// Start (required) and select (optional; absent keeps the smoothing) only.
+    pub(crate) const SMOOTHING_MS: FieldSpec = FieldSpec::opt(2, Wire::F64);
+    /// Select only: #1594 D2's target kind codes.
+    pub(crate) const TARGET_KIND: FieldSpec = FieldSpec::opt(3, Wire::U8);
+    /// Select only.
+    pub(crate) const TARGET_ID: FieldSpec = FieldSpec::opt(4, Wire::Utf8);
+    /// Select only: left `1`, right `2`, both `3`.
+    pub(crate) const CHANNELS: FieldSpec = FieldSpec::opt(5, Wire::U8);
+    pub(crate) static SPEC: MessageSpec = MessageSpec {
+        name: "SpectrumStreamRequest",
+        fields: &[OP, SMOOTHING_MS, TARGET_KIND, TARGET_ID, CHANNELS],
+    };
+}
+
+/// The `SPECTRUM_STREAM` reply (#1595 D3): the epochs, the stream's metadata and, with `ready`,
+/// the smoothed bins.
+pub(crate) mod spectrum_stream_reply {
+    use super::*;
+    pub(crate) const ADOPTED_EPOCH: FieldSpec = FieldSpec::req(1, Wire::U64);
+    pub(crate) const SELECTION_EPOCH: FieldSpec = FieldSpec::req(2, Wire::U64);
+    /// #1592 D1's codes: inactive `0` through ready `6`.
+    pub(crate) const STATUS: FieldSpec = FieldSpec::req(3, Wire::U8);
+    /// `0` without a selection.
+    pub(crate) const TARGET_KIND: FieldSpec = FieldSpec::req(4, Wire::U8);
+    /// Present exactly with a selection.
+    pub(crate) const TARGET_ID: FieldSpec = FieldSpec::opt(5, Wire::Utf8);
+    /// `0` without a selection.
+    pub(crate) const CHANNELS: FieldSpec = FieldSpec::req(6, Wire::U8);
+    pub(crate) const SAMPLE_RATE_HZ: FieldSpec = FieldSpec::req(7, Wire::U32);
+    pub(crate) const QUANTUM_FRAMES: FieldSpec = FieldSpec::req(8, Wire::U32);
+    pub(crate) const HOP_FRAMES: FieldSpec = FieldSpec::req(9, Wire::U32);
+    pub(crate) const CAPTURE_EPOCH: FieldSpec = FieldSpec::req(10, Wire::U64);
+    pub(crate) const SEQUENCE: FieldSpec = FieldSpec::req(11, Wire::U64);
+    pub(crate) const DROPPED_CAPTURES: FieldSpec = FieldSpec::req(12, Wire::U64);
+    pub(crate) const WINDOWS: FieldSpec = FieldSpec::req(13, Wire::U64);
+    pub(crate) const CAPTURED_SAMPLE: FieldSpec = FieldSpec::req(14, Wire::U64);
+    pub(crate) const END_SAMPLE: FieldSpec = FieldSpec::req(15, Wire::U64);
+    pub(crate) const ANALYSIS_EPOCH: FieldSpec = FieldSpec::req(16, Wire::U64);
+    pub(crate) const HISTORY_START_SAMPLE: FieldSpec = FieldSpec::req(17, Wire::U64);
+    pub(crate) const SMOOTHING_MS: FieldSpec = FieldSpec::req(18, Wire::F64);
+    pub(crate) const SOURCE_UNDERRUN: FieldSpec = FieldSpec::req(19, Wire::Bool);
+    /// The ready reply's planes, as `SPECTRUM_CAPTURE`'s.
+    pub(crate) const FREQUENCIES_HZ: FieldSpec = FieldSpec::opt(20, Wire::PackedF32);
+    pub(crate) const LEFT_DB: FieldSpec = FieldSpec::opt(21, Wire::PackedF32);
+    pub(crate) const RIGHT_DB: FieldSpec = FieldSpec::opt(22, Wire::PackedF32);
+    pub(crate) static SPEC: MessageSpec = MessageSpec {
+        name: "SpectrumStreamReply",
+        fields: &[
+            ADOPTED_EPOCH,
+            SELECTION_EPOCH,
+            STATUS,
+            TARGET_KIND,
+            TARGET_ID,
+            CHANNELS,
+            SAMPLE_RATE_HZ,
+            QUANTUM_FRAMES,
+            HOP_FRAMES,
+            CAPTURE_EPOCH,
+            SEQUENCE,
+            DROPPED_CAPTURES,
+            WINDOWS,
+            CAPTURED_SAMPLE,
+            END_SAMPLE,
+            ANALYSIS_EPOCH,
+            HISTORY_START_SAMPLE,
+            SMOOTHING_MS,
+            SOURCE_UNDERRUN,
+            FREQUENCIES_HZ,
+            LEFT_DB,
+            RIGHT_DB,
+        ],
+    };
+}
+
 pub(crate) mod transport_get {
     use super::MessageSpec;
     pub(crate) static SPEC: MessageSpec = MessageSpec {
@@ -871,30 +950,69 @@ pub(crate) mod meter_batch {
     pub(crate) const COUNT: FieldSpec = FieldSpec::req(2, Wire::U16);
     pub(crate) const RECORD_BYTES: FieldSpec = FieldSpec::req(3, Wire::U16);
     pub(crate) const RECORDS: FieldSpec = FieldSpec::req(4, Wire::Bytes);
+    /// The first sample of the closed meter window; `observed_sample` is its exclusive end
+    /// (#1583 D2).
+    pub(crate) const FIRST_SAMPLE: FieldSpec = FieldSpec::req(5, Wire::U64);
+    /// The window's sequence since the accepted configuration, from `1` (#1583 D2).
+    pub(crate) const WINDOW_SEQUENCE: FieldSpec = FieldSpec::req(6, Wire::U64);
     pub(crate) static SPEC: MessageSpec = MessageSpec {
         name: "MeterBatch",
-        fields: &[OBSERVED_SAMPLE, COUNT, RECORD_BYTES, RECORDS],
+        fields: &[
+            OBSERVED_SAMPLE,
+            COUNT,
+            RECORD_BYTES,
+            RECORDS,
+            FIRST_SAMPLE,
+            WINDOW_SEQUENCE,
+        ],
+    };
+}
+
+/// One meter table entry of `TELEMETRY_CONFIGURE` (#1583 D1): its 1-based position is its handle.
+pub(crate) mod meter_entry {
+    use super::*;
+    /// Output `1`, strip `2`.
+    pub(crate) const TARGET: FieldSpec = FieldSpec::req(1, Wire::U8);
+    /// The strip's stable ID: present exactly when `target` is a strip.
+    pub(crate) const STRIP_ID: FieldSpec = FieldSpec::opt(2, Wire::Utf8);
+    /// Peak `1`, gain reduction `2`.
+    pub(crate) const METRIC: FieldSpec = FieldSpec::req(3, Wire::U8);
+    pub(crate) static SPEC: MessageSpec = MessageSpec {
+        name: "MeterEntry",
+        fields: &[TARGET, STRIP_ID, METRIC],
     };
 }
 
 pub(crate) mod telemetry_configuration {
     use super::*;
-    pub(crate) const METER_HANDLES: FieldSpec = FieldSpec::req(1, Wire::PackedU32);
+    // Field 1 (`meter_handles`) is retired by #1583 D2 and never reallocated; see `RETIRED`.
     pub(crate) const METER_PERIOD_BLOCKS: FieldSpec = FieldSpec::req(2, Wire::U32);
     pub(crate) const COUNTER_IDS: FieldSpec = FieldSpec::req(3, Wire::PackedU32);
     pub(crate) const COUNTER_PERIOD_BLOCKS: FieldSpec = FieldSpec::req(4, Wire::U32);
     pub(crate) const DIAGNOSTICS_ENABLED: FieldSpec = FieldSpec::req(5, Wire::Bool);
     pub(crate) const MINIMUM_DIAGNOSTIC_SEVERITY: FieldSpec = FieldSpec::req(6, Wire::U8);
+    /// The meter table, 0 to 256 entries, in handle order (#1583 D1).
+    pub(crate) const METER: FieldSpec = FieldSpec::msg(7, false, true, &meter_entry::SPEC);
+    /// The meter window in blocks: refused in a command, present in a success echo exactly when
+    /// the provider has a meter delivery (#1583 D4).
+    pub(crate) const METER_WINDOW_BLOCKS: FieldSpec = FieldSpec::opt(8, Wire::U32);
     pub(crate) static SPEC: MessageSpec = MessageSpec {
         name: "TelemetryConfiguration",
         fields: &[
-            METER_HANDLES,
             METER_PERIOD_BLOCKS,
             COUNTER_IDS,
             COUNTER_PERIOD_BLOCKS,
             DIAGNOSTICS_ENABLED,
             MINIMUM_DIAGNOSTIC_SEVERITY,
+            METER,
+            METER_WINDOW_BLOCKS,
         ],
+    };
+    /// The retired position (#1583 D2): field 1, the positional meter handles, is refused in
+    /// either flag form, never skipped as an unknown optional field and never reallocated.
+    pub(crate) static RETIRED: MessageSpec = MessageSpec {
+        name: "TelemetryConfigurationRetiredFields",
+        fields: &[FieldSpec::opt(1, Wire::PackedU32)],
     };
 }
 
@@ -2044,6 +2162,8 @@ mod tests {
             &spectrum_configured::SPEC,
             &spectrum_capture_request::SPEC,
             &spectrum_capture_reply::SPEC,
+            &spectrum_stream_request::SPEC,
+            &spectrum_stream_reply::SPEC,
             &transport_get::SPEC,
             &transport_set::SPEC,
             &transport_set::RETIRED,
@@ -2054,7 +2174,9 @@ mod tests {
             &observation_tap_key::SPEC,
             &observation_ended::SPEC,
             &meter_batch::SPEC,
+            &meter_entry::SPEC,
             &telemetry_configuration::SPEC,
+            &telemetry_configuration::RETIRED,
             &counters_request::SPEC,
             &counter_value::SPEC,
             &counter_snapshot::SPEC,

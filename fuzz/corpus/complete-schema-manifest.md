@@ -1,13 +1,13 @@
 # Issue-005 complete typed BTLV corpus
 
-The shared `complete_schema_corpus()` fixture has 52 canonical frames: all 14 commands (the
-session transaction contains all 36 allocated `SessionEditOpcode` values), all 16 successful
+The shared `complete_schema_corpus()` fixture has 54 canonical frames: all 15 commands (the
+session transaction contains all 36 allocated `SessionEditOpcode` values), all 17 successful
 responses, all 16 registered non-OK statuses (including typed `BACKPRESSURE`), and all six event
 schemas. Optional/boundary values are represented by the transaction's nested fixture, the optional
 transport-event origin, empty valid pages, and the typed backpressure variant.
 
 The canonical sequence is FNV-1a-64 over each stable frame label followed by its frame bytes:
-`c7e010362827dab3`, pinned once as `COMPLETE_SCHEMA_HASH`. Native mutation, each typed fuzz
+`c146e8fad0b26299`, pinned once as `COMPLETE_SCHEMA_HASH`. Native mutation, each typed fuzz
 decoder, and scalar/simd128 Wasm execution all consume this same public fixture source.
 
 Issue #787 re-pinned this value after the transaction's two same-length source-identity spellings
@@ -110,3 +110,15 @@ Issue #1595 re-pinned it from `a3d6a9dd72195701`: `SPECTRUM_CAPTURE` (`0x0011`) 
 `response.spectrum_captured` (a ready one-plane read). The capabilities response does not list
 `0x0011` until #1595's second slice. The 50 earlier frames are byte-equal (their hash is the old
 pin). The frame count is 52.
+
+Issue #1595's second slice re-pinned it from `c7e010362827dab3`: `SPECTRUM_STREAM` (`0x0012`)
+adds `command.spectrum_stream` (a select with a smoothing) and `response.spectrum_streamed` (a
+ready one-plane read). The capabilities response lists none of the three spectrum commands and
+leaves bit 16 clear, which the invariant allows. The 52 earlier frames are byte-equal (their hash
+is the old pin). The frame count is 54.
+
+Issue #1583 re-pinned it from `c146e8fad0b26299`: the meter table replaces the positional meter
+handles. `command.telemetry_configure` carries a table with both targets and both metrics (field 1
+retired, field 7 repeated), `response.telemetry` the same table and the meter window (field 8),
+and `event.meter_batch` the window's span and sequence (fields 5 and 6). Only those three frames
+move; the 51 others are byte-equal. The frame count stays 54.

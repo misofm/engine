@@ -21,8 +21,9 @@ use host_core::{
 pub(crate) const SPECTRUM_MONITOR_RETAINED_BYTES: u64 =
     SpectrumService::RETAINED_BYTES + core::mem::size_of::<OneShot>() as u64;
 
-/// The one-shot slot (#1595 D4): the last window a read popped and its analysis. Made once with
-/// the service, so a read allocates only its reply.
+/// The read slot (#1595 D4): the last window a one-shot read popped, and the analysis of the last
+/// ready read of either kind (a stream read analyzes the service's held window into `result`).
+/// Made once with the service, so a read allocates only its reply.
 pub(crate) struct OneShot {
     pub(crate) result: SpectrumAnalysisResult,
     pub(crate) snapshot: SpectrumSnapshot,
@@ -61,10 +62,11 @@ impl OneShot {
     }
 }
 
-/// The one-shot half of a monitor, as a `SPECTRUM_CAPTURE` read takes it.
-pub(crate) struct CaptureParts<'a> {
+/// A monitor's service, analysis and read slot, as a `SPECTRUM_CAPTURE` or a `SPECTRUM_STREAM`
+/// takes them.
+pub(crate) struct ReadParts<'a> {
     pub(crate) service: &'a mut SpectrumService,
-    pub(crate) analysis: &'a SpectrumAnalysis,
+    pub(crate) analysis: &'a mut SpectrumAnalysis,
     pub(crate) one_shot: &'a mut OneShot,
 }
 
@@ -291,14 +293,14 @@ impl SpectrumMonitor {
         self.service.as_mut().zip(self.analysis.as_mut())
     }
 
-    /// The service, the analysis and the one-shot result at once, or `None` with no service.
-    pub(crate) fn capture_parts(&mut self) -> Option<CaptureParts<'_>> {
+    /// The service, the analysis and the read slot at once, or `None` with no service.
+    pub(crate) fn read_parts(&mut self) -> Option<ReadParts<'_>> {
         match (
             self.service.as_mut(),
-            self.analysis.as_ref(),
+            self.analysis.as_mut(),
             self.one_shot.as_deref_mut(),
         ) {
-            (Some(service), Some(analysis), Some(one_shot)) => Some(CaptureParts {
+            (Some(service), Some(analysis), Some(one_shot)) => Some(ReadParts {
                 service,
                 analysis,
                 one_shot,
@@ -307,7 +309,8 @@ impl SpectrumMonitor {
         }
     }
 
-    /// The result the last ready one-shot read was analyzed into, or `None` with no service.
+    /// The result the last ready read (one-shot or stream) was analyzed into, or `None` with no
+    /// service.
     #[must_use]
     pub fn result(&self) -> Option<&SpectrumAnalysisResult> {
         self.one_shot.as_deref().map(|one_shot| &one_shot.result)
