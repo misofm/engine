@@ -367,15 +367,15 @@ response would exceed the endpoint's response bound (the page then is not the en
 `AUTOMATION_ENQUEUE` (`0x0006`) is retired (#1627): the C ABI refuses a frame under that ID at decode (`INVALID_ARGUMENT`, nothing written and no state moved), and `CAPABILITIES_GET` lists no command `0x0006`, clears flag bit 5 and has no capability fields 9, 12, 19 and 20 (23 fields). Sample-timed changes are stored automation edits. Current/effective sample reads the active
 plan's existing release/acquire next-sample publication, while transport remains endpoint-local.
 Protocol telemetry counters and the existing bounded CAPI render-diagnostic slots feed the
-provider's counter and diagnostic pages. The seven provider-owned counters (the two telemetry
+provider's counter and diagnostic pages. The eight provider-owned counters (the two telemetry
 counters `TELEMETRY_COALESCED` 5 and `TELEMETRY_DROPPED` 6, `LIVE_VALUES_SUPERSEDED` 16, #1312 D8,
 `TRANSITION_REPREPARE_REFUSALS` 17, #1351 D6, `STRIPS_RESTARTED` 18, #1768,
-`LIVE_BLOCK_ERRORS` 19, #1521, and `SOURCE_UNDERRUN_BLOCKS` 20, #1537) retain an independent
-seven-slot minimum even when the frame-derived telemetry configuration capacity is
+`LIVE_BLOCK_ERRORS` 19, #1521, `SOURCE_UNDERRUN_BLOCKS` 20, #1537, and `SOURCE_FRAMES_DISCARDED`
+21, #1699) retain an independent eight-slot minimum even when the frame-derived telemetry configuration capacity is
 smaller. Canceled automation (counter 12) retired with the automation queue (#1629).
 
-**Served counters and the counter snapshot (#1351).** The provider serves exactly those seven
-counters, each at 0 from construction, so `COUNTERS_GET` with `all` returns all seven and a read of
+**Served counters and the counter snapshot (#1351).** The provider serves exactly those eight
+counters, each at 0 from construction, so `COUNTERS_GET` with `all` returns all eight and a read of
 any of them is never `NOT_FOUND`. `STRIPS_RESTARTED` adds, for each replacement plan render
 adopted, the strips that plan started at rest, each once; the control plane adds it when it
 promotes the adopted plan, so a withdrawn candidate adds nothing (#1768). `LIVE_BLOCK_ERRORS`
@@ -383,7 +383,9 @@ counts the blocks render refused after the block took its live snapshot; the ser
 the render-side mirror in, and it stays 0 in a correct build (#1521). `SOURCE_UNDERRUN_BLOCKS`
 counts the rendered blocks in which a source played zeros because the host had not delivered PCM
 it owed (graph-wide; a held block and a block past the end of a region are not counted); the
-service step copies the render-side mirror in, on both hosts (#1537). `TELEMETRY_CONFIGURE` naming any other counter ID (for example
+service step copies the render-side mirror in, on both hosts (#1537). `SOURCE_FRAMES_DISCARDED`
+counts the accepted source frames render never read because the caller's transaction removed or
+redeclared the source; the service step adds them when it reclaims the displaced plan (#1699). `TELEMETRY_CONFIGURE` naming any other counter ID (for example
 `MALFORMED_FRAMES`) is `NOT_FOUND`, and the stored configuration does not change. `TRANSITION_REPREPARE_REFUSALS`
 is protocol counter 17; nothing writes a nonzero value until #1360. The periodic `COUNTER_SNAPSHOT`
 event (`0x8021`) reports, for each configured ID in order, the value after the service step's first

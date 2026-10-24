@@ -31,9 +31,9 @@ use crate::response::{
 
 /// The counters the provider serves, in ascending ID order (#1351 D1): the two telemetry
 /// counters, `live_values_superseded` (#1312 D8), `transition_reprepare_refusals` (D6),
-/// `strips_restarted` (#1768), `live_block_errors` (#1521) and `source_underrun_blocks` (#1537).
-/// Each reads 0 from construction.
-const SERVED_COUNTERS: [CounterId; 7] = [
+/// `strips_restarted` (#1768), `live_block_errors` (#1521), `source_underrun_blocks` (#1537) and
+/// `source_frames_discarded` (#1699). Each reads 0 from construction.
+const SERVED_COUNTERS: [CounterId; 8] = [
     CounterId::TelemetryCoalesced,
     CounterId::TelemetryDropped,
     CounterId::LiveValuesSuperseded,
@@ -41,6 +41,7 @@ const SERVED_COUNTERS: [CounterId; 7] = [
     CounterId::StripsRestarted,
     CounterId::LiveBlockErrors,
     CounterId::SourceUnderrunBlocks,
+    CounterId::SourceFramesDiscarded,
 ];
 
 /// The slots the provider's counter snapshot keeps even when the controller retains fewer IDs.
@@ -594,6 +595,17 @@ impl SessionControlProvider {
         set_counter(
             &mut self.counter_snapshot,
             CounterId::SourceUnderrunBlocks,
+            count,
+        );
+    }
+
+    /// Record the session's `source_frames_discarded` count (#1699 D1): the accepted source
+    /// frames render never read because the caller's own transaction removed or redeclared the
+    /// source, summed when the control plane reclaims each retired plan.
+    pub fn set_source_frames_discarded(&mut self, count: u64) {
+        set_counter(
+            &mut self.counter_snapshot,
+            CounterId::SourceFramesDiscarded,
             count,
         );
     }
@@ -3786,6 +3798,7 @@ mod tests {
         provider.set_strips_restarted(5);
         provider.set_live_block_errors(17);
         provider.set_source_underrun_blocks(19);
+        provider.set_source_frames_discarded(23);
         let counters = provider
             .counters(&CountersRequest {
                 all: true,
@@ -3808,7 +3821,9 @@ mod tests {
         assert_eq!(counters.values[5].value, 17);
         assert_eq!(counters.values[6].id, CounterId::SourceUnderrunBlocks);
         assert_eq!(counters.values[6].value, 19);
-        assert_eq!(counters.values.len(), 7);
+        assert_eq!(counters.values[7].id, CounterId::SourceFramesDiscarded);
+        assert_eq!(counters.values[7].value, 23);
+        assert_eq!(counters.values.len(), 8);
         assert_eq!(provider.retained_capacities().1, counter_capacity);
 
         provider.set_render_diagnostic(0, 256, 3, true);

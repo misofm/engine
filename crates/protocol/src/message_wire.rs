@@ -1043,6 +1043,7 @@ pub enum CounterId {
     StripsRestarted = 18,
     LiveBlockErrors = 19,
     SourceUnderrunBlocks = 20,
+    SourceFramesDiscarded = 21,
 }
 
 /// Complete endpoint-local telemetry configuration. It does not create meter production.
@@ -2322,6 +2323,7 @@ fn parse_counter_id(value: u32) -> Result<CounterId, DecodeError> {
         18 => Ok(CounterId::StripsRestarted),
         19 => Ok(CounterId::LiveBlockErrors),
         20 => Ok(CounterId::SourceUnderrunBlocks),
+        21 => Ok(CounterId::SourceFramesDiscarded),
         _ => Err(DecodeError::InvalidField),
     }
 }

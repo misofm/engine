@@ -3018,6 +3018,52 @@ fn finite_source_boundary_requires_only_the_actual_final_marker() {
     }
 }
 
+/// Answer one `COUNTERS_GET` frame for counter `id` through the browser's control entry, after a
+/// service step, and return its value.
+fn served_counter(host: &mut AudioWorkletEngineHost, request: u64, id: protocol::CounterId) -> u64 {
+    use protocol::{
+        CommandPayload, CountersRequest, DecodeScratch, DecodedSuccessResponsePayload,
+        DecodedTypedResponseFrame, ExpectedRevision, ProtocolCodec, RequestId, TypedCommandFrame,
+    };
+    assert_eq!(host.service(None), RESULT_OK);
+    let codec = ProtocolCodec::default();
+    let mut bytes = vec![0_u8; codec.limits().max_frame_bytes];
+    let length = codec
+        .encode_command_frame_into(
+            &TypedCommandFrame {
+                request_id: RequestId::new(request).expect("nonzero request"),
+                expected_revision: ExpectedRevision::Any,
+                payload: CommandPayload::CountersGet(&CountersRequest {
+                    all: false,
+                    ids: vec![id as u32],
+                }),
+            },
+            &mut bytes,
+        )
+        .expect("a counters frame");
+    let staged = u32::try_from(length).expect("frame length");
+    host.control_request_mut(staged)
+        .expect("the control request staging")[..length]
+        .copy_from_slice(&bytes[..length]);
+    assert_eq!(host.control_command(staged, None), RESULT_OK);
+    let mut fields = [0_u16; 64];
+    let DecodedTypedResponseFrame::Success {
+        payload: DecodedSuccessResponsePayload::CounterSnapshot(snapshot),
+        ..
+    } = codec
+        .decode_typed_response(
+            host.control_response(),
+            &mut DecodeScratch::new(&mut fields),
+        )
+        .expect("a counters response")
+    else {
+        panic!("expected a counter snapshot")
+    };
+    assert_eq!(snapshot.values.len(), 1);
+    assert_eq!(snapshot.values[0].id, id);
+    snapshot.values[0].value
+}
+
 /// Issue #1537 gate 1: `COUNTERS_GET` through the browser's control entry reports
 /// `SOURCE_UNDERRUN_BLOCKS`, the rendered blocks in which a source played zeros because the host
 /// had not delivered PCM it owed. Each case feeds blocks 0 and 1, then renders two blocks with
@@ -3030,48 +3076,8 @@ fn finite_source_boundary_requires_only_the_actual_final_marker() {
 /// test reads an underrun count from a host.
 #[test]
 fn the_counters_get_reply_counts_each_block_a_source_underran() {
-    use protocol::{
-        CommandPayload, CounterId, CountersRequest, DecodeScratch, DecodedSuccessResponsePayload,
-        DecodedTypedResponseFrame, ExpectedRevision, ProtocolCodec, RequestId, TypedCommandFrame,
-    };
     fn underrun_blocks(host: &mut AudioWorkletEngineHost, request: u64) -> u64 {
-        assert_eq!(host.service(None), RESULT_OK);
-        let codec = ProtocolCodec::default();
-        let mut bytes = vec![0_u8; codec.limits().max_frame_bytes];
-        let length = codec
-            .encode_command_frame_into(
-                &TypedCommandFrame {
-                    request_id: RequestId::new(request).expect("nonzero request"),
-                    expected_revision: ExpectedRevision::Any,
-                    payload: CommandPayload::CountersGet(&CountersRequest {
-                        all: false,
-                        ids: vec![CounterId::SourceUnderrunBlocks as u32],
-                    }),
-                },
-                &mut bytes,
-            )
-            .expect("a counters frame");
-        let staged = u32::try_from(length).expect("frame length");
-        host.control_request_mut(staged)
-            .expect("the control request staging")[..length]
-            .copy_from_slice(&bytes[..length]);
-        assert_eq!(host.control_command(staged, None), RESULT_OK);
-        let mut fields = [0_u16; 64];
-        let DecodedTypedResponseFrame::Success {
-            payload: DecodedSuccessResponsePayload::CounterSnapshot(snapshot),
-            ..
-        } = codec
-            .decode_typed_response(
-                host.control_response(),
-                &mut DecodeScratch::new(&mut fields),
-            )
-            .expect("a counters response")
-        else {
-            panic!("expected a counter snapshot")
-        };
-        assert_eq!(snapshot.values.len(), 1);
-        assert_eq!(snapshot.values[0].id, CounterId::SourceUnderrunBlocks);
-        snapshot.values[0].value
+        served_counter(host, request, protocol::CounterId::SourceUnderrunBlocks)
     }
     for (source_blocks, expected) in [(8_u64, [0_u64, 0, 1, 2]), (2, [0, 0, 0, 0])] {
         let mut host = meter_tail_host_for_blocks(48_000, 128, 32, source_blocks);
@@ -3090,6 +3096,137 @@ fn the_counters_get_reply_counts_each_block_a_source_underran() {
             *count = underrun_blocks(&mut host, block + 2);
         }
         assert_eq!(seen, expected, "{source_blocks}-block source");
+    }
+}
+
+/// Issue #1699 gates 1-3: `COUNTERS_GET` reports `SOURCE_FRAMES_DISCARDED`, the accepted
+/// frames render never read because the caller's own transaction removed their source. The one
+/// source is fed three blocks and render plays one, so two (256 frames) are unread when the
+/// removal commits; the block after the commit adopts the plan without the source and the service
+/// step after it counts them. Case "empty" plays every fed block first and counts 0. Case
+/// "supersede" commits an unrelated rebuild first, which carries the source unchanged and waits
+/// unrendered, then a removal that supersedes it: it counts the same as the direct removal.
+///
+/// Test value: red if the count never moves, counts a block render played, or misses the frames
+/// a superseding removal discards; no other test reads a discard count from a host.
+#[test]
+fn the_counters_get_reply_counts_the_frames_a_source_removal_discards() {
+    use protocol::{
+        CommandPayload, CounterId, ExpectedRevision, ProtocolCodec, RequestId, SessionEdit,
+        SessionRevision, TypedCommandFrame,
+    };
+    const QUANTUM: u32 = 128;
+    fn commit(host: &mut AudioWorkletEngineHost, request: u64, edits: &[SessionEdit]) {
+        let codec = ProtocolCodec::default();
+        let mut bytes = vec![0_u8; codec.limits().max_frame_bytes];
+        let length = codec
+            .encode_command_frame_into(
+                &TypedCommandFrame {
+                    request_id: RequestId::new(request).expect("nonzero request"),
+                    expected_revision: ExpectedRevision::Exact(SessionRevision(
+                        host.committed_revision(),
+                    )),
+                    payload: CommandPayload::SessionTransactionApply(edits),
+                },
+                &mut bytes,
+            )
+            .expect("a transaction frame");
+        let staged = u32::try_from(length).expect("frame length");
+        host.control_request_mut(staged)
+            .expect("the control request staging")[..length]
+            .copy_from_slice(&bytes[..length]);
+        assert_eq!(host.control_command(staged, None), RESULT_OK);
+        let mut fields = [0_u16; 64];
+        assert!(
+            matches!(
+                codec.decode_typed_response(
+                    host.control_response(),
+                    &mut protocol::DecodeScratch::new(&mut fields)
+                ),
+                Ok(protocol::DecodedTypedResponseFrame::Success { .. })
+            ),
+            "request {request} commits"
+        );
+    }
+    let mut model = parse_session_json(include_str!("../tests/browser-v1/session.json"))
+        .expect("accepted identity fixture");
+    model.sources[0].frames = u64::from(QUANTUM) * 8;
+    let removal = vec![
+        SessionEdit::RemoveRoute {
+            route_id: model.routes[0].id.clone(),
+        },
+        SessionEdit::RemoveTrack {
+            track_id: model.tracks[0].id.clone(),
+        },
+        SessionEdit::RemoveSource {
+            source_id: model.sources[0].id.clone(),
+        },
+    ];
+    let mut extra = model.tracks[0].clone();
+    extra.id = session::StableId::parse("track-extra").expect("track id");
+    extra.fader.left_mute = true;
+    extra.fader.right_mute = true;
+    let document = canonical_session_json(&model).expect("canonical fixture");
+    let options = WebBootOptions {
+        require_sample_rate_hz: 48_000,
+        require_quantum_frames: QUANTUM,
+        source_ring_frames: QUANTUM * 4,
+        ..WebBootOptions::explicit_defaults()
+    };
+    let samples = [0.25_f32; QUANTUM as usize];
+    let planes: [&[f32]; 2] = [&samples, &samples];
+    for (case, played, expected) in [
+        ("direct", 1_u64, 256_u64),
+        ("empty", 3, 0),
+        ("supersede", 1, 256),
+    ] {
+        let mut host =
+            AudioWorkletEngineHost::boot(document.as_bytes(), options.clone()).expect("boot");
+        for block in 0..3_u64 {
+            assert_eq!(
+                host.submit_source(
+                    b"fixture-source",
+                    1,
+                    block * u64::from(QUANTUM),
+                    48_000,
+                    &planes,
+                    QUANTUM,
+                    false,
+                ),
+                RESULT_OK,
+                "{case}: block {block}"
+            );
+        }
+        for _ in 0..played {
+            assert_eq!(host.render_next(), RESULT_OK);
+        }
+        assert_eq!(
+            served_counter(&mut host, 1, CounterId::SourceFramesDiscarded),
+            0,
+            "{case}: before the removal"
+        );
+        if case == "supersede" {
+            commit(
+                &mut host,
+                2,
+                &[SessionEdit::UpsertTrack {
+                    track: extra.clone(),
+                }],
+            );
+            let mut edits = vec![SessionEdit::RemoveTrack {
+                track_id: extra.id.clone(),
+            }];
+            edits.extend(removal.iter().cloned());
+            commit(&mut host, 3, &edits);
+        } else {
+            commit(&mut host, 2, &removal);
+        }
+        assert_eq!(host.render_next(), RESULT_OK, "{case}: the adoption block");
+        assert_eq!(
+            served_counter(&mut host, 4, CounterId::SourceFramesDiscarded),
+            expected,
+            "{case}"
+        );
     }
 }
 

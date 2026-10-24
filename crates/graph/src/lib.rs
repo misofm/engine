@@ -3217,6 +3217,13 @@ pub trait GraphPreparedSourceSetDriver: Send {
     fn copy_after_disarm_telemetry(&self, _output: &mut [u64]) -> usize {
         0
     }
+    /// The accepted source frames still in this driver's occupied rings that render never read
+    /// (#1699 D1). Control thread only, once the plan is retired: a source the successor carried
+    /// left a vacant entry here, so what remains is exactly the removed or redeclared sources'
+    /// discarded PCM. The default (no rings) is 0.
+    fn unread_source_frames(&self) -> u64 {
+        0
+    }
     /// Whether [`Self::played_planes`] lends this driver's played block (issue #918).
     ///
     /// Read once, at bind. Only a driver that answers `true` has any claim bound in place, so a
@@ -5874,6 +5881,12 @@ impl PreparedPlanExecutor for GraphExecutor {
         self.runtime.units.iter().fold(0_u64, |total, unit| {
             total.saturating_add(unit.observation_retained_bytes() as u64)
         })
+    }
+
+    fn unread_source_frames(&self) -> u64 {
+        self.source_set
+            .as_ref()
+            .map_or(0, |set| set.driver.unread_source_frames())
     }
 }
 
