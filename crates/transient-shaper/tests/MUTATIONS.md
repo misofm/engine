@@ -187,3 +187,15 @@ dropped.
   Bit-identical for the reason given under row 8. It is a performance regression — it puts three
   `LinearRamp::next_value` calls per lane per channel back into the steady-state loop, which is
   audit finding F6 — and is rejected on that ground, not on a numeric one.
+
+## Mono collapse (#1873)
+
+Applied in the issue's worktree on the attempt-1 commit `5ada4beee`, run with
+`cargo test --locked -p transient-shaper --all-features --test mono_collapse --test randomized`,
+and reverted with `git checkout` and `touch`.
+
+| mutation | file | result |
+|---|---|---|
+| `desymmetrize` copies `fast` only, not `slow` | `src/lib.rs` | RED: `a_collapsed_then_desymmetrized_bank_is_a_never_collapsed_bank` (`[DualMono]: after the copy`) |
+| `channels_bit_equal` omits `fast` | `src/lib.rs` | RED: `the_word_lists_are_complete_and_the_witness_declines_on_exactly_the_asymmetric_lane` (`word 0: channels_agree`) |
+| the collapsed `step` links `xl` with `L::zero()` instead of itself | `src/lib.rs` | RED: `a_collapsed_then_desymmetrized_bank_is_a_never_collapsed_bank` (`[Average] block 0 track 0: left state`) |

@@ -2604,13 +2604,14 @@ pub trait PreparedNativeEffectBank: Send {
     ///
     /// # Which shipped effects implement this, and why most do not
     ///
-    /// Three launch effects implement it. **`gate-expander`** (issue #973): its whole per-channel
+    /// Four launch effects implement it. **`gate-expander`** (issue #973): its whole per-channel
     /// state is 31 lane words (four coefficients, the envelope, two hysteresis words and 24 ramp
     /// words). **`multiband-compressor`** (issue #1871): seven lane words and 17 ramps per track.
     /// **`soft-clip`** (issue #1872): 195 lane words (three state words and three 64-row
-    /// histories), its cursor and its ramps. Each compares every word its disengage copy moves and
-    /// needs no fixed point. Every other launch effect takes the declining default, and that is a
-    /// decision rather than an omission. Within one plan the channel-symmetry witness can go from
+    /// histories), its cursor and its ramps. **`transient-shaper`** (issue #1873): fourteen words
+    /// per lane (two envelope words and three ramps). Each compares every word its disengage copy
+    /// moves and needs no fixed point. Every other launch effect takes the declining default, and
+    /// that is a decision rather than an omission. Within one plan the channel-symmetry witness can go from
     /// holding to not holding and back for exactly one term:
     /// [`UNBYPASSED`](crate::ChannelSymmetryWitness::UNBYPASSED), which
     /// `ChannelSymmetryWitness::admit` restores on `Bypass(false)`. `LIVE` has no restoring arm,
@@ -2621,10 +2622,10 @@ pub trait PreparedNativeEffectBank: Send {
     /// agreement and the answer would change anything: `rack::BankChain` recovers every reachable
     /// case through the disengage copy instead.
     ///
-    /// The gate's, the multiband's and the soft clip's answers are cheap and sound, not needed:
-    /// they change nothing in any session that can be built today. Reading each other crate's rest
-    /// state is what settles that it *would* be implementable, and the reading is worth recording
-    /// because it is not uniform:
+    /// The gate's, the multiband's, the soft clip's and the shaper's answers are cheap and sound,
+    /// not needed: they change nothing in any session that can be built today. Reading each other
+    /// crate's rest state is what settles that it *would* be implementable, and the reading is
+    /// worth recording because it is not uniform:
     ///
     /// * **`parametric-eq`** and the builtin input chain have no delay lines at all --
     ///   two integrator words per section -- so their whole per-channel state is a few hundred

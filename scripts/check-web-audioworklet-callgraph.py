@@ -78,9 +78,9 @@ Modes
     Assert the artifact still computes in the vector family, and in four lanes only. Four rules,
     none of which is a raw op-count minimum:
 
-    1. **Roster presence.** Each of the twelve named kernels in `KERNEL_ROSTER` -- the
+    1. **Roster presence.** Each of the thirteen named kernels in `KERNEL_ROSTER` -- the
        `process_bank`/`process_section`/`process_block` bodies of the shipped effect library and
-       the live route's indexed-ramp mix (#1220); the thirteenth, the collapsed limiter's, is held
+       the live route's indexed-ramp mix (#1220); the fourteenth, the collapsed limiter's, is held
        by the forwarding rule below -- must match exactly
        one arithmetic-carrying function. A kernel that vanished, that was renamed, or that
        de-vectorised so completely it stopped carrying `f32x4` arithmetic at all fails here.
@@ -246,7 +246,7 @@ EIGHT_LANE = re.compile(r"(?:f32|f64|u32|i32)x8|(?i:simd8)|transpose_tile_8")
 
 # The smallest scalar budget any kernel gets, in instructions.
 #
-# Eleven of the thirteen roster kernels -- the twelve `KERNEL_ROSTER` rows and the collapsed
+# Twelve of the fourteen roster kernels -- the thirteen `KERNEL_ROSTER` rows and the collapsed
 # limiter's kernel -- currently emit *zero* scalar `f32` arithmetic, so a ceiling
 # expressed purely as a multiple of `vector` would be exactly zero for them: a single scalar
 # coefficient load introduced by an ordinary refactor would fail the gate. Eight instructions is
@@ -269,7 +269,8 @@ SCALAR_SLACK = 8
 #   (multiband-compressor f32x8 was 2560 / 20; #1110 removed eight lanes from the browser build)
 #   multiband-compressor f32x4   2527 /  0   ratio 0        (dual; 2527 / 20 before #1871, codegen)
 #   multiband-compressor f32x4   1389 /  0   ratio 0        (collapsed, #1871)
-#   transient-shaper     f32x4    786 / 72   ratio 0.0916
+#   transient-shaper     f32x4    700 /  0   ratio 0        (dual; 786 / 72 at M2, codegen)
+#   transient-shaper     f32x4    352 /  0   ratio 0        (collapsed, #1873)
 #   true-peak-limiter    f32x4    448 /  0   ratio 0        (dual)
 #   compressor           f32x4    267 /  0   ratio 0        (dual)
 #   true-peak-limiter    f32x4    224 /  0   ratio 0        (collapsed)
@@ -296,8 +297,9 @@ SCALAR_SLACK = 8
 # ## What mono-collapse M2 did to this roster, and why the limiter has a forwarding rule
 #
 # The collapse gave the compressor, the true-peak limiter and the parametric EQ a **second** block
-# body each, #973 gave the gate/expander one and #1871 the multiband compressor one: a one-plane
-# variant a bank chain runs when every lane of its cohort is collapse-eligible. All five survive
+# body each, #973 gave the gate/expander one, #1871 the multiband compressor one and #1873 the
+# transient shaper one: a one-plane
+# variant a bank chain runs when every lane of its cohort is collapse-eligible. All six survive
 # monomorphisation as their own symbols, so `compressor.*4wide6f32x4` (and at #973
 # `gate_expander.*4wide6f32x4`; the multiband row was already pinned to its `process_bank` by #893)
 # went from one match to two and the roster failed exactly as
@@ -322,7 +324,8 @@ SCALAR_SLACK = 8
 # vanished, not as a row that grew.
 #
 # Each collapsed body carries about **half** its dual sibling's vector arithmetic (138 against 267,
-# 224 against 448, 84 against 168, 82 against 162, 1389 against 2527) and zero scalar arithmetic,
+# 224 against 448, 84 against 168, 82 against 162, 1389 against 2527, 352 against 700) and zero
+# scalar arithmetic,
 # which is what a correct one-plane variant looks like from here.
 KERNEL_ROSTER: tuple[tuple[str, str, float], ...] = (
     # #893: named by its `process_bank` body, as the EQ rows are, because the bank's
@@ -337,14 +340,22 @@ KERNEL_ROSTER: tuple[tuple[str, str, float], ...] = (
         r"multiband_compressor.*4wide6f32x4.*17process_bank_mono",
         0.10,
     ),
-    # #1368b: pinned to the block body. The per-lane link grew the bank's constructor
-    # (`Shaper::<f32x4>::new`), which LLVM now outlines with the follower coefficients' four
-    # control-side `f32x4.sub`; it is not a render kernel, and the generic shape rule still
-    # checks it. The body went 522 -> 700 vector operations, 0 scalar: the mixed-link arm.
+    # #1368b: the per-lane link grew the bank's constructor (`Shaper::<f32x4>::new`), which LLVM
+    # outlines with the follower coefficients' four control-side `f32x4.sub`; it is not a render
+    # kernel, and the generic shape rule still checks it. The body went 522 -> 700 vector
+    # operations, 0 scalar: the mixed-link arm. #1873: the block body is `#[inline(always)]` into
+    # the bank's `process_bank` and `process_bank_mono`, so the rows pin those (700 / 0 and
+    # 352 / 0); the ceiling is the derivation's floor, 4 x 0 floored at 0.10 (it was 0.38, four
+    # times the 786 / 72 body's ratio).
     (
-        "transient-shaper f32x4",
-        r"transient_shaper.*Shaper.*4wide6f32x4.*13process_block",
-        0.38,
+        "transient-shaper f32x4 dual",
+        r"transient_shaper.*27PreparedTransientShaperBank.*4wide6f32x4.*12process_bank",
+        0.10,
+    ),
+    (
+        "transient-shaper f32x4 collapsed",
+        r"transient_shaper.*27PreparedTransientShaperBank.*4wide6f32x4.*17process_bank_mono",
+        0.10,
     ),
     ("gate-expander f32x4 dual", r"gate_expander.*4wide6f32x4.*12process_bank", 0.10),
     (
