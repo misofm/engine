@@ -1174,7 +1174,7 @@ fn event_lanes_take_the_own_entry_and_every_reaching_vca_ride() {
     {
         use controls::{
             AutomationIndex, automated_fader_lanes, mute_automation, vca_mute_automation,
-            vca_offset_automation,
+            vca_mute_row, vca_offset_automation,
         };
         let mut mixed = model.clone();
         mixed.automation.push(one(
@@ -1215,7 +1215,10 @@ fn event_lanes_take_the_own_entry_and_every_reaching_vca_ride() {
                         automated_fader_lanes(table, &strip),
                         fader_event_lanes(table, &strip, reach),
                         mute_event_lanes(table, &strip, reach),
-                        true,
+                        table
+                            .automation
+                            .iter()
+                            .any(|entry| vca_mute_row(&entry.target)),
                     ),
                 );
             }

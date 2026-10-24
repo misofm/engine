@@ -1030,8 +1030,6 @@ fn lower_routes<'a>(
         edit: StripEditRamps::default(),
         diff: Some(diff),
     };
-    // #1844: a lowering of many sends looks their sources' mute entries up.
-    let automation = AutomationReads::lazy(next.structure(), STAGE_INDEX_OWNERS);
     for index in indices {
         if index >= next.structure().routes.len() {
             return Err(LiveRebuild::Structure);
@@ -1050,7 +1048,7 @@ fn lower_routes<'a>(
         // #1653: a route the plan gives the seven-word cell also holds its source lanes' effective
         // mute (`terms`), which can change while the gate does not (`follows_mute` off), so the
         // cell always holds the committed words.
-        let following = match following_route_lanes(automation.view(), after) {
+        let following = match following_route_lanes(diff.automation(), after) {
             Some(automated) => Some(Following {
                 terms: diff.terms(before, after).ok_or(LiveRebuild::Structure)?,
                 automated,
@@ -1107,6 +1105,9 @@ trait LevelDiff {
     /// The effective mute of the route's source strip per lane, in `[current, next]`: a following
     /// route's `terms` (#1652 D1, OQ1 = C), or `None` when the form does not hold the source.
     fn terms(&self, before: &Route, after: &Route) -> Option<[[bool; 2]; 2]>;
+    /// The post-change model, read for its automation entries (#1844): the diff's own reads, so
+    /// one lowering indexes the table at most once.
+    fn automation(&self) -> ModelView<'_>;
 }
 
 impl LevelDiff for EffectiveDiff<'_> {
@@ -1138,6 +1139,10 @@ impl LevelDiff for EffectiveDiff<'_> {
     fn terms(&self, before: &Route, after: &Route) -> Option<[[bool; 2]; 2]> {
         let source = self.source_strips(before, after)?;
         Some(self.strip_mutes(source.0, source.1))
+    }
+
+    fn automation(&self) -> ModelView<'_> {
+        EffectiveDiff::automation(self)
     }
 }
 
@@ -1379,6 +1384,10 @@ impl LevelDiff for LocalDiff<'_> {
     fn terms(&self, _before: &Route, after: &Route) -> Option<[[bool; 2]; 2]> {
         let source = self.strip(route_source_strip(self.rules.next.structure(), after)?)?;
         Some([source.before.mute, source.after.mute])
+    }
+
+    fn automation(&self) -> ModelView<'_> {
+        self.automation.view()
     }
 }
 

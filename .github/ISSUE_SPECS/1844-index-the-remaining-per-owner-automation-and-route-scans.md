@@ -66,10 +66,19 @@ No change to the automation grammar or to render. No new public API beyond what 
   | `ControlCatalog::build` | 2.66 / 2.67 | 2.56 / 2.46 | 13.3 / 13.5 | 10.1 / 10.2 |
   | `controls::live_lanes` | 1.59 / 1.57 | 0.74 / 0.75 | 18.0 / 18.3 | 3.19 / 3.19 |
 
-  The catalog build and `live_lanes` are now linear (4.0x and 4.3x for 4x strips). The same
-  session with no automation prepares in 23.0 / 22.9 ms and 100.4 / 99.4 ms (4.3x), so the
-  remaining superlinear part of a first plan (about 5 ms at 256, 54 ms at 1024) is
-  automation-specific but outside the readers this issue names; no profile was possible
-  (`perf_event_paranoid` 4, no valgrind). A successor still scans per strip in
-  `controls::continued_fader_lanes`/`continued_mute_lanes` (the strip join and each following
-  route) and in `LevelRules::vca_offset_moved` (per reaching VCA): successor candidates.
+  The catalog build and `live_lanes` are now linear (4.0x and 4.3x for 4x strips).
+- Successor (root files it as a weekly optimization-pass issue). Three control-thread costs stay
+  faster than linear after this issue, measured on the session above (release, one warmup, two
+  rounds):
+  1. First-plan preparation: 28.2 / 28.2 ms at 256 strips and 154.6 / 153.3 ms at 1024 (5.5x for
+     4x). The same session with its automation table cleared prepares in 23.0 / 22.9 ms and
+     100.4 / 99.4 ms (4.3x), so about 5 ms at 256 and about 54 ms at 1024 are automation-specific
+     and grow faster than linear. The cause was not found: every automation reader this issue
+     names is indexed, and no profiler was available (`perf_event_paranoid` 4, no valgrind).
+  2. `controls::continued_fader_lanes` and `continued_mute_lanes` scan both models' automation
+     tables per strip in a successor's strip join and per following route in its route loop.
+  3. `LevelRules::vca_offset_moved` scans the committed table per reaching VCA of every strip
+     whose level records are asked (a successor's strip join, the classifier's changed strips).
+  Items 2 and 3 are the measured successor gap: successor preparation is 32.6 / 32.7 ms at 256
+  and 224.0 / 222.8 ms at 1024 strips (6.8x), against 23.9 / 24.0 and 106.0 / 105.5 ms (4.4x)
+  without automation.

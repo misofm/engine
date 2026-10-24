@@ -607,7 +607,7 @@ enum RenderedRow {
 /// with no rendered entry.
 #[derive(Clone)]
 pub struct AutomationIndex<'a> {
-    /// The model the index was built from: a view checks it reads the same table, and the event
+    /// The model the index was built from: a view checks it reads the same model, and the event
     /// lanes read a VCA reach's IDs from its `vcas`.
     model: &'a SessionModel,
     lanes: BTreeMap<(RenderedRow, &'a StableId), [Option<&'a Automation>; 2]>,
@@ -647,12 +647,9 @@ impl<'a> AutomationIndex<'a> {
         }
     }
 
-    /// Whether the index was built from `model`'s table.
+    /// Whether the index was built from `model` (the same model, not only an equal table).
     pub(crate) fn is_of(&self, model: &SessionModel) -> bool {
-        core::ptr::eq(
-            self.model.automation.as_slice(),
-            model.automation.as_slice(),
-        )
+        core::ptr::eq(self.model, model)
     }
 
     fn get(&self, row: RenderedRow, owner: &StableId) -> [Option<&'a Automation>; 2] {
