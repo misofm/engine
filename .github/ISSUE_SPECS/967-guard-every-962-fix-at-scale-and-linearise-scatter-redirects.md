@@ -100,3 +100,6 @@ Mutant: the in-between check counts the run's own ops (`.any(|_| true)`). It tur
 - **Deviation from the one-invocation timing rule.** The timing above took two invocations. The
   first (compiled shapes) showed no difference before and after, so a frozen hand-built workload
   (the #1045 shape) was added and timed in a second invocation, once. Neither was retried.
+- **D6 (root review).** The hand-built phase's bound is 5 s, not 15 s. That is about 4.5x the
+  fixed bind (1.1 s) and about 3.3x below the old quadratic (16.7 s), so the guard still fails the
+  quadratic on a runner faster than this box.

@@ -706,14 +706,15 @@ fn lowers_65_537_tracks_of_builtin_banks() {
 /// session reaches neither at scale. It does not exercise `scatter_redirects`' in-between check:
 /// it binds in the same time with or without #967's linearisation (the spec's evidence). So the
 /// test then binds [`hand_built_bank_plan`] with one route per track, the shape that reaches that
-/// check, under a 15 s bound of its own. That fails the old quadratic walk, which took longer. #962's other two fixes (the `Backend::Scalar` interval scan and the
-/// fused-split crossing scan) guarded code that #1767 and owner ruling R8 removed.
+/// check, under a 5 s bound of its own, which the old quadratic walk exceeded. #962's other two
+/// fixes (the `Backend::Scalar` interval scan and the fused-split crossing scan) guarded code that
+/// #1767 and owner ruling R8 removed.
 ///
 /// Issue #1045: this runs nightly, in release with overflow checks on (`nightly.yml`,
 /// `release-budgets`), under a 60 s wall-clock bound on the whole path from the session compile to
-/// the rendered block; #962's and #967's quadratic scans each took longer than that. It is the
-/// only test that compiles without a cap and binds at this size, so a track ceiling or a narrowed
-/// index in bank attachment or bind is caught here, a day late at most.
+/// the rendered block; #962's quadratic scans took longer than that. It is the only test that
+/// compiles without a cap and binds at this size, so a track ceiling or a narrowed index in bank
+/// attachment or bind is caught here, a day late at most.
 #[test]
 #[ignore = "release-mode 65,537-track budget; runs nightly"]
 fn compiles_and_binds_65_537_tracks_with_builtins() {
@@ -815,7 +816,7 @@ fn compiles_and_binds_65_537_tracks_with_builtins() {
     bind_and_render_every_track(plan, inputs);
     let elapsed = started.elapsed();
     assert!(
-        elapsed < Duration::from_secs(15),
+        elapsed < Duration::from_secs(5),
         "65,537-track builtin banks with one route per track took {elapsed:?} to bind and render"
     );
 }
