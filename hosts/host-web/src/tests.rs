@@ -3180,8 +3180,7 @@ fn the_counters_get_reply_counts_the_frames_a_source_removal_discards() {
         ("empty", 3, 0),
         ("supersede", 1, 256),
     ] {
-        let mut host =
-            AudioWorkletEngineHost::boot(document.as_bytes(), options.clone()).expect("boot");
+        let mut host = AudioWorkletEngineHost::boot(document.as_bytes(), options).expect("boot");
         for block in 0..3_u64 {
             assert_eq!(
                 host.submit_source(
