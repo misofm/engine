@@ -3361,13 +3361,13 @@ fn a_live_bypass_flip_is_one_record_ahead_of_its_parameters() {
     );
 }
 
-/// #1266 gate 1, decision 14 F4. Red if a prepared bypass -- the delay's or the multiband
-/// compressor's -- is classified live in either direction: the record would be acked and never
-/// heard, because the running plan holds that bypass in its prepared state.
+/// #1266 gate 1, decision 14 F4. Red if a prepared bypass -- the multiband compressor's -- is
+/// classified live in either direction: the record would be acked and never heard, because the
+/// running plan holds that bypass in its prepared state. (The delay's is live since #1339.)
 #[test]
 fn a_prepared_bypass_change_needs_a_rebuild() {
-    // The delay (#1339) and the multiband compressor (#1340): the reason is the row's.
-    for (index, issue) in [(3, 1339), (4, 1340)] {
+    // The multiband compressor (#1340): the reason is the row's.
+    for (index, issue) in [(4, 1340)] {
         let enabled = with_bypassable();
         assert_eq!(
             classify_effects(&enabled, |next| {
