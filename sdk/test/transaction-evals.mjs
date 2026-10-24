@@ -132,7 +132,8 @@ describe("session transactions encode as the engine's codec does", () => {
 
   test("each snapshot after a transaction is the document a session builder declares directly", () => {
     // Red if a byte-valid encoder maps a spec field to the wrong model field (left and right
-    // builtins swapped, the fader's lanes crossed, a parameter on the wrong channel): the store's
+    // builtins swapped, the fader's or pan's lanes crossed, a parameter on the wrong channel, a
+    // reassigned track's source lanes swapped): the store's
     // snapshot then differs from the builder's document for the same session.
     const declare = (revision) => session({ id: "tx.semantics", sampleRateHz: 48_000, revision })
       .source("drums", stereo);
@@ -142,14 +143,18 @@ describe("session transactions encode as the engine's codec does", () => {
       builtins: { left: { trimDb: -4, lpfHz: 12_000 }, right: { polarityInvert: true, delaySamples: 7 } },
       inserts: [effect("miso.parametric-eq", { "band-1-gain": { left: 2, right: -3 } })],
       fader: { leftDb: -2, rightDb: -8, leftMute: true },
+      pan: { left: -0.75, right: 0.25 },
     };
     const base = declare(0).track("drums", drums);
     const add = transaction(base).upsertSource("vox", mono).upsertTrack("vocal", vocal);
     const afterAdd = declare(1).source("vox", mono).track("drums", drums).track("vocal", vocal);
-    const remove = transaction(afterAdd).removeTrack("drums");
+    const remove = transaction(afterAdd)
+      .removeTrack("drums")
+      .setTrackSourceAssignment("vocal", { id: "drums", left: 1, right: 0 });
     const [added, removed] = oracle(base, [add.build(), remove.build()]);
     assert.equal(added.ok, afterAdd.toJson());
-    assert.equal(removed.ok, declare(2).source("vox", mono).track("vocal", vocal).toJson());
+    const reassigned = { ...vocal, source: { id: "drums", left: 1, right: 0 } };
+    assert.equal(removed.ok, declare(2).source("vox", mono).track("vocal", reassigned).toJson());
   });
 });
 
