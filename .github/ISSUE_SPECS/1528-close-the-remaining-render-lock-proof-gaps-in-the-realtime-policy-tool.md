@@ -94,3 +94,21 @@ After: the J batch (J3 with #1496 attempt 2 and #1519 attempt 3, the `manifest_t
 
 Work from this body. A test that greps source is refused; each new test answers which plausible defect it turns red. Attempt budget: three, one adversarial verdict each. Size: one day.
 
+
+## Decision record (2026-10-24, attempt 1)
+
+- **D4 moves to #1527 (root decision).** #1527 owns `manifest_target_checker` and both policy scripts; this issue edits neither
+  script. Its paths are now `tools/realtime-policy/src/{web_host,render_wrap,report,lib}.rs`,
+  `tools/realtime-policy/tests/policy/{web_host,render_wrap}.rs` and the base `render_lock.rs.txt` fixture.
+- **D1(b):** the prefix test is gone; `ExportNameOnWebExport` now refuses an attribute that names `export_name` anywhere in
+  its path or argument tokens (so `unsafe(..)`, `cfg_attr(..)` at any depth). D1(c) reads `no_mangle` the same way.
+- **D2:** the allocator's absence is refused (fail closed); the base fixture gains the exact allocator item. Classes:
+  `ConditionalRenderLockItem` (top level), `ConditionalInRenderLockBody` (nested `cfg`/`cfg_attr`, and any macro whose path or
+  tokens name `cfg`/`cfg_attr`, which covers `cfg!` inside `debug_assert!` and `#[cfg]` inside `thread_local!`),
+  `RenderLockAllocatorForm`, `AllocatorOutsideRenderLock`, `RenderLockedNotUnique`. A `#[global_allocator]` in a file module
+  declared `#[cfg(test)] mod x;` elsewhere is refused (the per-file scan does not see the declaration; 0 today).
+- **Drift from the anchors in "Problem" (measured on `main` 2d9b2a5f3):** 52 listed exports (41 wrapped); `hosts/host-web/src`
+  holds 4 files (`ffi.rs lib.rs render_lock.rs tests.rs`); `count_if_locked` is now `count_call`; the allocator is at
+  `render_lock.rs:132-135`, `fn render_locked` at `:141`; the test allocator in `ffi.rs` is at `:4552` inside
+  `#[cfg(test)] mod live_response_ffi_tests`; `no_mangle`: 110 in `ffi.rs`, 0 elsewhere; `export_name`, `cfg_attr`: 0.
+  The real-tree run prints `realtime policy: ok (192 marked regions in 34 files)` before and after.

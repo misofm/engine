@@ -2478,6 +2478,20 @@ export async function applyMatrixThroughSdk(
 }
 
 /**
+ * Designate `stripId` the master with its `master` monitor row (#1689 D6): `strip.master(true)` as a
+ * `SET_CONTROL` transaction through `host.control()`, a monitor write that spends no revision. The
+ * observation row's master reading (`masterGrDb`) follows it.
+ */
+export async function designateMasterThroughSdk(
+  host: MisoAudioWorkletHost,
+  stripId: string,
+): Promise<{ ok: boolean; path: string }> {
+  const controls = await createBrowserLiveControls(host);
+  const report = await controls.submit(controls.edit.track(stripId).master(true));
+  return { ok: report.ok, path: report.path };
+}
+
+/**
  * One `delay_samples` edit of a track as a `SET_CONTROL` transaction (#1562b): the plan needs a new
  * latency, so the core classifies it as a rebuild, prepares a replacement plan and publishes it for
  * the render to adopt at a block boundary. Returns the core's report, with the committed revision.

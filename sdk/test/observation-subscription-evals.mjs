@@ -561,7 +561,7 @@ describe("issue 1345 -- the browser engine waits for a render, within a bound", 
         audioWorklet: { async addModule() {} }, async close() {},
       }),
       createHost: async () => rig.host,
-      policy: { liveControls: { meterBlocks: 0, observationTaps: 4, masterTrackPlusOne: 0 } },
+      policy: { liveControls: { meterBlocks: 0, observationTaps: 4 } },
       ...extra,
     });
   }
@@ -589,7 +589,7 @@ describe("issue 1345 -- the browser engine waits for a render, within a bound", 
     // boot word attaches them any more. Red if the browser engine sends the record anyway.
     const rig = slotHost();
     const engine = await browserEngine(rig, {
-      policy: { liveControls: { meterBlocks: 0, observationTaps: 0, masterTrackPlusOne: 0 } },
+      policy: { liveControls: { meterBlocks: 0, observationTaps: 0 } },
     });
     try {
       await assert.rejects(

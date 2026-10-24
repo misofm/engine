@@ -404,8 +404,8 @@ def check_limits_vocabulary(worklet: str, fixture: str) -> None:
     """The fixture's boot `options` object and the worklet's guard are one vocabulary.
 
     The same staleness class as the resource rows, on the other half of the fixture, and it had
-    already bitten: issue #143 carved `liveControlObservationTaps` and
-    `liveControlMasterTrackPlusOne` out of the configuration's last two reserved words and added
+    already bitten: issue #143 carved `liveControlObservationTaps` and the master word (now
+    `reserved2`, issue #1689) out of the configuration's last two reserved words and added
     both to the old guard, and the fixture's policy object was never extended. The field list is
     checked with `exactFields`, so the browser leg refused the fixture at boot with
     `RESULT_INVALID_ARGUMENT` from #143 until #217.
@@ -609,7 +609,7 @@ def self_test() -> int:
     def add_fixture_limit(name: str):
         def apply(pair: tuple) -> tuple:
             actual, expected, worklet, fixture = pair
-            anchor = "\n    liveControlMasterTrackPlusOne: 0n,"
+            anchor = "\n    reserved2: 0n,"
             require(anchor in fixture, "self-test mutation matched nothing")
             return actual, expected, worklet, fixture.replace(
                 anchor, f"{anchor}\n    {name}: 0n,", 1
@@ -620,7 +620,7 @@ def self_test() -> int:
     def add_worklet_limit(name: str):
         def apply(pair: tuple) -> tuple:
             actual, expected, worklet, fixture = pair
-            anchor = '"liveControlObservationTaps", "liveControlMasterTrackPlusOne",'
+            anchor = '"liveControlObservationTaps", "reserved2",'
             require(anchor in worklet, "self-test mutation matched nothing")
             return actual, expected, worklet.replace(
                 anchor, f'{anchor} "{name}",', 1
@@ -753,8 +753,8 @@ def self_test() -> int:
             None,
         ),
         (
-            "the fixture's bootOptions() drops the #143 master-designation word again",
-            drop_fixture_limit("liveControlMasterTrackPlusOne"),
+            "the fixture's bootOptions() drops the #1689 reserved2 word",
+            drop_fixture_limit("reserved2"),
             None,
         ),
         (

@@ -197,3 +197,23 @@ Half a day.
   reason in the PR. No other published browser byte moves. Gate 4's test value line reads the same.
 - **Dependencies.** #1381 is closed, so it is not an open stream to rebase after. The open browser streams are #1332 and #1588. #1683 is closed: the `master` row
   and `sync_master` are on `main`.
+
+## Evidence and decision record (attempt 1, 2026-10-24, base `9524346f7`)
+
+- **Scope.** Root accepted the scope note (`scope/1689.md`): D1-D6 in one PR, class A.
+- **Path beyond the scope note's list, inside this spec's list.** The raw-Wasm oracle
+  `hosts/host-web/tests/browser-v1/direct-oracle.mjs` wrote offset 56 as `1n` for its observation
+  leg. It now boots with `0n` and sends a committed `SET_CONTROL master` frame,
+  `tests/browser-v1/set-control-frames/master.bin`, which the native twin sends too and
+  `set_control_frames_are_the_committed_fixtures` pins to the encoder (`master_designation_frame`).
+- **Successor shapes.** `build_plan_shape` takes no master; `ReadyOwnership::sync_master` runs after
+  every committed control command, rebuilds included, so a successor's shape names the overlay's
+  master before the page reads it, and a boot (empty overlay) names none.
+- **Deleted.** `strip_meters.rs` gate 3 (both tests: the index validation and the successor echo of
+  `HostLiveControlHandles::master_track` exist only for the deleted fields), the
+  `effect_observation.rs` `master_track` asserts and refusal, the boot-word half of
+  `a_master_designated_after_an_empty_boot_...`, the out-of-range boot refusal in
+  `a_bus_limiter_can_be_the_designated_master`, the "master requires taps" cases in
+  `observation_configuration_words_are_validated` and in the worklet host's domain refusals.
+- **Gate 4.** `expected.json` and `control-list.json` are unchanged; `check-browser-expected-resources.py`
+  passes against the built module (digests and exact rows equal the committed ones).

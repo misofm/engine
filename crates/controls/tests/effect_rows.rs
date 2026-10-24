@@ -223,7 +223,6 @@ fn effect_rows_carry_the_ruled_class() {
             assert_eq!(row.descriptor.automatable(), parameter.automatable);
         }
         let bypass = match effect {
-            "miso.delay" => Some(RebuildReason::RuledLiveNotBuilt { issue: 1339 }),
             "miso.multiband-compressor" => Some(RebuildReason::RuledLiveNotBuilt { issue: 1340 }),
             _ => None,
         };

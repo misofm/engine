@@ -145,9 +145,8 @@ pub(crate) static ROWS: [StripRow; 6] = [
     //
     // The row is a core designation, valid on every host and with no observation tap: the C ABI
     // has no taps, and a browser booted with no observation taps takes the write too. Without a
-    // tap on the strip the master's reading (`masterGrDb`) is absent, never zero. The browser's
-    // boot word (`WebBootOptions::live_control_master_track_plus_one`) keeps its stricter boot
-    // rule, refused unless observation taps are configured, until its successor retires it.
+    // tap on the strip the master's reading (`masterGrDb`) is absent, never zero. It is the one
+    // way to designate the master on every host (#1689 retired the browser's boot word).
     StripRow {
         id: MASTER,
         on_submix: true,

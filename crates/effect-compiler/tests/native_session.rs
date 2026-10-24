@@ -453,19 +453,20 @@ fn entry<'a>(
 }
 
 /// Issue #1087: a session bypass lowers to an enabled effect plus a bypassed channel-less lane,
-/// for every effect that can bank, so a bypassed instance shares its enabled neighbours' program
-/// key. The delay never banks and keeps its prepared bypass, and since #1100 so does the
-/// multiband, whose bank recovery is still whole-bank.
+/// so a bypassed instance shares its enabled neighbours' program key. Since #1339 the delay, which
+/// never banks, lowers its bypass too and renders a per-node shunt. Since #1100 the multiband,
+/// whose bank recovery is still whole-bank, keeps its prepared bypass.
 ///
 /// Red mutations: prepare with `bypass: effect.bypass` again -> the bypassed EQ's program key
 /// differs from the enabled one's; drop the channel-less lane -> nothing carries the bypass to the
-/// rack's shunt; lower the delay or the multiband too -> its prepared bypass is gone.
+/// rack's shunt; key the lowering on `NEVER_BANKED_EFFECTS` again -> the delay's bypass is
+/// prepared; lower the multiband too -> its prepared bypass is gone.
 #[test]
 fn a_session_bypass_lowers_to_an_enabled_effect_and_a_bypassed_lane() {
     let registry = launch_native_effect_registry().expect("launch registry");
     let prepared =
         prepare_native_session_effects(&bypassed_console(), registry, caps()).expect("prepared");
-    for effect in ["eq", "limiter"] {
+    for effect in ["eq", "limiter", "delay"] {
         let bypassed = entry(&prepared, "ch00", effect);
         let enabled = entry(&prepared, "ch01", effect);
         assert!(bypassed.initial_bypass && !enabled.initial_bypass);
@@ -485,13 +486,6 @@ fn a_session_bypass_lowers_to_an_enabled_effect_and_a_bypassed_lane() {
             "an enabled instance holds no lane"
         );
     }
-    let delay = entry(&prepared, "ch00", "delay");
-    assert!(delay.initial_bypass && delay.metadata.bypass && delay.bank_preparation.bypass);
-    assert!(
-        delay.control.is_none(),
-        "the delay keeps its prepared bypass"
-    );
-    assert!(!entry(&prepared, "ch01", "delay").metadata.bypass);
     assert_eq!(effect_compiler::NEVER_BANKED_EFFECTS, ["miso.delay"]);
     let multiband = entry(&prepared, "ch00", "multiband");
     assert!(
@@ -516,13 +510,14 @@ fn a_session_bypass_lowers_to_an_enabled_effect_and_a_bypassed_lane() {
         lowered,
         [
             "miso.compressor",
+            "miso.delay",
             "miso.gate-expander",
             "miso.parametric-eq",
             "miso.soft-clip",
             "miso.transient-shaper",
             "miso.true-peak-limiter",
         ],
-        "every launch effect but the delay and the multiband lowers its session bypass"
+        "every launch effect but the multiband lowers its session bypass"
     );
 }
 

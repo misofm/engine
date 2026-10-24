@@ -11,6 +11,12 @@
 //! `render_locked` anywhere (a function, a macro, any item, a `use` of another path or a binding),
 //! or when the callee is written as the full path.
 //!
+//! The export's symbol is the listed function's own only if nothing else can take the name
+//! (#1528 D1): a listed export with a generic parameter, a `where` clause or an `impl Trait` in
+//! its signature emits no symbol and is refused, and so is a `no_mangle` function named like a
+//! listed export anywhere under `hosts/host-web/src` other than the top level of `ffi.rs`
+//! ([`scan_twins`]).
+//!
 //! The syntax tree of one file proves the wrap only if the build compiles that file as read.
 //! `web_host` refuses what could make it not (conditional compilation on the import, an export, a
 //! wrap call or a guarded module, `#[export_name]`, `#[path]` and glob `use`); a cfg-split twin
@@ -21,7 +27,7 @@ use syn::visit::{self, Visit};
 use crate::policy::Policy;
 use crate::report::{Class, Finding};
 use crate::source::Source;
-use crate::web_host::refuse_conditional;
+use crate::web_host::{Parsed, mentions, refuse_conditional};
 
 /// The file the rule reads, relative to the workspace root.
 pub(crate) const WEB_FFI: &str = "hosts/host-web/src/ffi.rs";
@@ -75,6 +81,18 @@ pub(crate) fn scan(
             .collect();
         for function in &found {
             refuse_conditional(source, &function.attrs, Some(&entry.name), findings);
+            if is_generic(&function.sig) {
+                let line = function.sig.ident.span().start().line;
+                findings.push(
+                    Finding::at_line(
+                        Class::GenericWebExport,
+                        &source.path,
+                        line,
+                        source.line_text(line),
+                    )
+                    .about(&entry.name),
+                );
+            }
         }
         let [function] = found.as_slice() else {
             let class = if found.is_empty() {
@@ -104,6 +122,110 @@ pub(crate) fn scan(
             Some(Callee::Bare | Callee::FullPath) => {}
             Some(Callee::Other) => findings.push(at(Class::RenderLockedBody).about(&entry.name)),
         }
+    }
+}
+
+/// D1(a): whether the signature has a generic parameter of any kind, a `where` clause, or an
+/// `impl Trait` anywhere in an argument or the return type. Such a listed export is refused
+/// fail-closed: a type or const parameter or an argument-position `impl Trait` emits no symbol, and
+/// the rule does not tell those apart from the forms that still do.
+fn is_generic(signature: &syn::Signature) -> bool {
+    struct ImplTrait(bool);
+    impl<'ast> Visit<'ast> for ImplTrait {
+        fn visit_type_impl_trait(&mut self, _: &'ast syn::TypeImplTrait) {
+            self.0 = true;
+        }
+    }
+    if !signature.generics.params.is_empty() || signature.generics.where_clause.is_some() {
+        return true;
+    }
+    let mut finder = ImplTrait(false);
+    finder.visit_signature(signature);
+    finder.0
+}
+
+/// D1(c): every function or static named like a listed export that carries `no_mangle` in any
+/// spelling (an attribute with the identifier `no_mangle` among its tokens: `#[no_mangle]`,
+/// `#[unsafe(no_mangle)]`, inside `cfg_attr`), in any module, `impl` or trait block or function
+/// body of `files`, except the top-level functions of `ffi.rs`, which [`scan`] judges.
+pub(crate) fn scan_twins(files: &[Parsed<'_>], policy: &Policy, findings: &mut Vec<Finding>) {
+    let names: Vec<&str> = policy
+        .render_thread_exports
+        .iter()
+        .map(|entry| entry.name.as_str())
+        .collect();
+    for (source, file) in files {
+        let mut twins = Twins {
+            source,
+            names: &names,
+            findings: &mut *findings,
+        };
+        if source.path == WEB_FFI {
+            for item in &file.items {
+                match item {
+                    // A top-level function of `ffi.rs` is the export itself; what it holds is not.
+                    syn::Item::Fn(function) => visit::visit_item_fn(&mut twins, function),
+                    other => twins.visit_item(other),
+                }
+            }
+        } else {
+            twins.visit_file(file);
+        }
+    }
+}
+
+struct Twins<'a> {
+    source: &'a Source,
+    names: &'a [&'a str],
+    findings: &'a mut Vec<Finding>,
+}
+
+impl Twins<'_> {
+    fn judge(&mut self, ident: &syn::Ident, attributes: &[syn::Attribute]) {
+        let listed = self.names.iter().any(|name| ident == name);
+        if listed
+            && attributes
+                .iter()
+                .any(|attribute| mentions(attribute, &["no_mangle"]))
+        {
+            let line = ident.span().start().line;
+            self.findings.push(
+                Finding::at_line(
+                    Class::ExportTwinOutsideFfi,
+                    &self.source.path,
+                    line,
+                    self.source.line_text(line),
+                )
+                .about(&ident.to_string()),
+            );
+        }
+    }
+}
+
+impl<'ast> Visit<'ast> for Twins<'_> {
+    fn visit_item_fn(&mut self, node: &'ast syn::ItemFn) {
+        self.judge(&node.sig.ident, &node.attrs);
+        visit::visit_item_fn(self, node);
+    }
+
+    fn visit_impl_item_fn(&mut self, node: &'ast syn::ImplItemFn) {
+        self.judge(&node.sig.ident, &node.attrs);
+        visit::visit_impl_item_fn(self, node);
+    }
+
+    fn visit_trait_item_fn(&mut self, node: &'ast syn::TraitItemFn) {
+        self.judge(&node.sig.ident, &node.attrs);
+        visit::visit_trait_item_fn(self, node);
+    }
+
+    fn visit_foreign_item_fn(&mut self, node: &'ast syn::ForeignItemFn) {
+        self.judge(&node.sig.ident, &node.attrs);
+        visit::visit_foreign_item_fn(self, node);
+    }
+
+    fn visit_item_static(&mut self, node: &'ast syn::ItemStatic) {
+        self.judge(&node.ident, &node.attrs);
+        visit::visit_item_static(self, node);
     }
 }
 
@@ -193,7 +315,10 @@ impl Resolution {
                 }
             }
         }
-        let mut finder = Shadows { lines: Vec::new() };
+        let mut finder = Shadows {
+            lines: Vec::new(),
+            members: false,
+        };
         finder.visit_file(file);
         finder.lines.sort_unstable();
         finder.lines.dedup();
@@ -254,9 +379,23 @@ fn flatten(tree: &syn::UseTree, prefix: &mut Vec<String>, names: &mut Vec<Import
     }
 }
 
+/// The line of every introduction of the name `render_locked` in `file` other than the real
+/// top-level import, `impl` and trait members included (#1528 D2), one entry per introduction.
+pub(crate) fn introductions(file: &syn::File) -> Vec<usize> {
+    let mut finder = Shadows {
+        lines: Vec::new(),
+        members: true,
+    };
+    finder.visit_file(file);
+    finder.lines
+}
+
 /// Every introduction of the name `render_locked` other than the real top-level import.
 struct Shadows {
     lines: Vec<usize>,
+    /// Whether `impl` and trait members count too. A method does not shadow a bare call, so the
+    /// wrap rule leaves them out; the uniqueness rule of `web_host` counts them.
+    members: bool,
 }
 
 impl Shadows {
@@ -338,5 +477,47 @@ impl<'ast> Visit<'ast> for Shadows {
     fn visit_pat_ident(&mut self, node: &'ast syn::PatIdent) {
         self.named(&node.ident);
         visit::visit_pat_ident(self, node);
+    }
+
+    fn visit_impl_item_fn(&mut self, node: &'ast syn::ImplItemFn) {
+        if self.members {
+            self.named(&node.sig.ident);
+        }
+        visit::visit_impl_item_fn(self, node);
+    }
+
+    fn visit_impl_item_const(&mut self, node: &'ast syn::ImplItemConst) {
+        if self.members {
+            self.named(&node.ident);
+        }
+        visit::visit_impl_item_const(self, node);
+    }
+
+    fn visit_impl_item_type(&mut self, node: &'ast syn::ImplItemType) {
+        if self.members {
+            self.named(&node.ident);
+        }
+        visit::visit_impl_item_type(self, node);
+    }
+
+    fn visit_trait_item_fn(&mut self, node: &'ast syn::TraitItemFn) {
+        if self.members {
+            self.named(&node.sig.ident);
+        }
+        visit::visit_trait_item_fn(self, node);
+    }
+
+    fn visit_trait_item_const(&mut self, node: &'ast syn::TraitItemConst) {
+        if self.members {
+            self.named(&node.ident);
+        }
+        visit::visit_trait_item_const(self, node);
+    }
+
+    fn visit_trait_item_type(&mut self, node: &'ast syn::TraitItemType) {
+        if self.members {
+            self.named(&node.ident);
+        }
+        visit::visit_trait_item_type(self, node);
     }
 }

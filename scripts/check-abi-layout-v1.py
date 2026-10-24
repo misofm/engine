@@ -259,14 +259,14 @@ STRUCTURES = {
 BOOT_OPTION_FIELDS = [
     "structSize", "abiVersion", "requireSampleRateHz", "requireQuantumFrames",
     "sourceRingFrames", "reserved0", "maximumMemoryBytes", "reserved1",
-    "liveControlMeterBlocks", "liveControlObservationTaps", "liveControlMasterTrackPlusOne",
+    "liveControlMeterBlocks", "liveControlObservationTaps", "reserved2",
 ]
 # The words the scratch and worklet boots must write identically (adopted ruling finding 3), and
 # the two whose values are role-defined. Kept here so the SDK's equality eval has a schema-level
 # statement of which words it masks.
 POLICY_WORDS = [
     "sourceRingFrames", "maximumMemoryBytes",
-    "liveControlMeterBlocks", "liveControlObservationTaps", "liveControlMasterTrackPlusOne",
+    "liveControlMeterBlocks", "liveControlObservationTaps",
 ]
 ROLE_DEFINED_WORDS = ["requireSampleRateHz", "requireQuantumFrames"]
 

@@ -42,7 +42,7 @@ extern "C" {
  * fader levels, mutes, and pan or matrix values; a changed value of a track effect parameter
  * whose automation rate is Block, on a console-slot entry or an insert, the parametric EQ's live
  * parameters included (applied through prepared targets); and a track effect's bypass, except the
- * delay's and the multiband compressor's, which rebuild. A transaction that changes only the
+ * multiband compressor's, which rebuilds. A transaction that changes only the
  * session ID, a profile's id or a stored automation entry on a row that does not render yet
  * commits with no replacement and no live value. A stored fader automation edit (an entry on a
  * strip's fader_db added, removed, retargeted or given other segments) rebuilds the plan, and

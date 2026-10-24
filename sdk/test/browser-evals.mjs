@@ -13,7 +13,7 @@ import { before, describe, test } from "node:test";
 
 import { MisoEngineAsset } from "../src/core/asset.ts";
 import { StructView } from "../src/core/abi.ts";
-import { MisoEngineError } from "../src/core/errors.ts";
+import { MisoEngineError, MisoUsageError } from "../src/core/errors.ts";
 import { ABI_LAYOUT } from "../src/generated/abi.ts";
 import {
   POLICY_WORDS,
@@ -35,7 +35,6 @@ const POLICY = Object.freeze({
   liveControls: Object.freeze({
     meterBlocks: 6,
     observationTaps: 2,
-    masterTrackPlusOne: 1,
   }),
 });
 
@@ -138,7 +137,6 @@ describe("finding 3 -- the scratch and worklet boots agree on every policy word"
       maximumMemoryBytes: 64n << 20n,
       liveControlMeterBlocks: 6n,
       liveControlObservationTaps: 2n,
-      liveControlMasterTrackPlusOne: 1n,
     };
     assert.deepEqual(
       [...POLICY_WORDS].sort(),
@@ -183,16 +181,29 @@ describe("finding 3 -- the scratch and worklet boots agree on every policy word"
       assert.equal(wordAt(block, "abiVersion"), ABI_LAYOUT.abiVersion);
       assert.equal(wordAt(block, "reserved0"), 0, "the reserved word must be zero or boot refuses");
       assert.equal(wordAt(block, "reserved1"), 0n, "reserved1 must be zero or boot refuses web.options.reserved1");
+      assert.equal(wordAt(block, "reserved2"), 0n, "reserved2 must be zero or boot refuses web.options.reserved2");
     }
     assert.equal(bootOptionsAgree({}, PHYSICAL).maskedEqual, true);
   });
 
-  test("reserved1 stays zero whatever live controls the caller sets", () => {
-    // It was the live-command queue size; the host now refuses a nonzero word. Red if the writer
-    // ever puts a policy value back into offset 32.
+  test("reserved1 and reserved2 stay zero whatever live controls the caller sets", () => {
+    // Offset 32 was the live-command queue size and offset 56 the master boot word (#1689); the
+    // host now refuses a nonzero word. Red if the writer ever puts a policy value back into either.
     const { scratch, worklet } = bootOptionsAgree(POLICY, PHYSICAL);
-    assert.equal(wordAt(scratch, "reserved1"), 0n);
-    assert.equal(wordAt(worklet, "reserved1"), 0n);
+    for (const word of ["reserved1", "reserved2"]) {
+      assert.equal(wordAt(scratch, word), 0n, `scratch ${word}`);
+      assert.equal(wordAt(worklet, word), 0n, `worklet ${word}`);
+    }
+  });
+
+  test("a caller's retired masterTrackPlusOne is refused and points to strip.master", () => {
+    // Issue #1689, root decision: refused, never ignored. Red if an untyped caller's leftover word
+    // is silently dropped (its app would boot with no master and never be told).
+    const stale = { ...POLICY, liveControls: { ...POLICY.liveControls, masterTrackPlusOne: 1 } };
+    assert.throws(
+      () => bootOptionsAgree(stale, PHYSICAL),
+      (error) => error instanceof MisoUsageError && /strip\.master\(true\)/.test(error.message),
+    );
   });
 });
 

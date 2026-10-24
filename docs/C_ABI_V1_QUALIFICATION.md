@@ -672,8 +672,8 @@ model's delta (`host_core::classify_live_delta`, #1053 D1), never by its opcodes
 - **Live effect parameters (#1264, #1265).** A track's console-slot entry or insert whose
   `params` change only in live parameters, parametric EQ values included, is live too; see
   "Value-only effect parameter edits" and "Value-only parametric EQ edits" below. So is a
-  bypass change on one, except the delay's and the multiband compressor's; see "Value-only effect
-  bypass edits" below.
+  bypass change on one, except the multiband compressor's; see "Value-only effect bypass edits"
+  below.
 - **Rebuild.** Everything else replaces the plan exactly as before: a fader dB outside
   `[-144, 24]` or a pan/matrix the setter refuses (reported as `COMPILE_REJECTED` with the
   preparation diagnostic a rebuild gives), and every other field.
@@ -918,10 +918,11 @@ the rack's latency-preserving bypass shunt (decision 14).
   the per-node path renders for that lane (#1341a2), so where the session places the effect never
   moves a rendered bit. The browser edits through the same core, so it crossfades alike
   (`hosts/host-web/tests/control_parity.rs`); #1393 is superseded.
-- **Prepared, so a rebuild.** A bypass change, in either direction, on the delay or the multiband
-  compressor: their session bypass is prepared into the effect, not lowered to the lane
+- **Prepared, so a rebuild.** A bypass change, in either direction, on the multiband
+  compressor: its session bypass is prepared into the effect, not lowered to the lane
   (`effect_compiler::lowers_session_bypass`), so a live record would be acked and never heard
-  (decision 14, F4). A submix strip's bypass stays a rebuild too, as every submix value does.
+  (decision 14, F4). The delay's bypass is live since #1339. A submix strip's bypass stays a
+  rebuild too, as every submix value does.
 - **No ack before a drop.** The bypass record passes its producer's preflight before the first
   cell write, and nothing after it can fail.
 - **Equal to a rebuild, on the gate fixture.** The wet path keeps running, so the switched
