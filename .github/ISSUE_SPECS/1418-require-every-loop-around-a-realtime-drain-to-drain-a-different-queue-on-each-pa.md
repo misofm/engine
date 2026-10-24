@@ -816,3 +816,18 @@ which D1 refuses; it now drains `self.controls[lane]` and keeps its claim.
 - Not added: separate rows for `controls[0]`, a struct `let`, a `match` arm, `while let`, `.rev()`
   and `chunks_mut(1)` over the queue, `mem::take`, and the `(&mut it).enumerate()` index (the
   finite check refuses it first).
+
+### Amendment 1, attempt 2 (implementer, 2026-10-24)
+
+Answers the attempt-1 verdict (one MAJOR, three MINOR).
+- MAJOR: `place.rs` refuses a method call on a place whose index steps are not the receiver's own
+  index spelled the same (`controls[..].swap(0, 1)`, `controls[0..2].swap(0, 1)` beside
+  `controls[lane]`). New refused row `outer-index-base-slice-swapped`; red with attempt 1's
+  `place.rs`. #1426's rows stay green.
+- MINOR-1: `outer-macro-call` now uses a `macro_rules!` in a method that names `self`, which no read
+  covers, so only `calls_a_macro` refuses it (mutant red). `outer-macro-mention` duplicated the place
+  rule and is deleted.
+- MINOR-2: the `declarations.rs` `over_slice` and `over_lanes` rows drain the slice's elements again
+  (`for control in lanes`, `lanes.iter()`). Red when the slice-parameter or collection-root read is
+  not noted. The 1418b doubly-refused item narrows to the ported and probe corpora.
+- MINOR-3: `select.rs` doc states that a call step in a base is taken at its word (#1426 R1).
