@@ -545,11 +545,15 @@ named_disassembly=$(wasm-objdump -d "$named")
 # `RealtimePlanOwner::enter_block`, which inlines the bounded SPSC endpoints' checked slot index
 # (the retirement queue's and the mailbox's), unreachable by their cursor invariant like the one
 # `meter_poll` admits below. It is named as the one owner, and nothing the block boundary calls
-# may trap.
+# may trap. Issue #1581 D4 admits `OutputPeakObserver::observe`, the core output meter, for the
+# same site only: it inlines the engine SPSC producer's checked `slots[local]` index when it
+# pushes a closed window, unreachable by the cursor invariant, the site `enter_block` is admitted
+# for. No other rule of the gate is loosened.
 printf '%s
 ' "$named_disassembly" |
   python3 -B "$callgraph" --callgraph miso_engine_web_v1_render \
-    --trap-owner 17RealtimePlanOwner11enter_block --render-thread || exit 1
+    --trap-owner 17RealtimePlanOwner11enter_block \
+    --trap-owner 18OutputPeakObserver7observe --render-thread || exit 1
 printf '%s
 ' "$named_disassembly" |
   python3 -B "$callgraph" --kernel-shape --kernel-pattern '4wide6f32x4' --kernel-min 13 ||
