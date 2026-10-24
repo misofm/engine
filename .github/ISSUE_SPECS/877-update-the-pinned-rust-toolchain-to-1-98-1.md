@@ -108,4 +108,7 @@ The scope note (`scope/877.md`) wins for paths and decisions; these changes over
   `b16116272` (Chromium 151.0.7922.34, Firefox 153.0, WebKit 26.5). The 37 console digests and the
   preflight digests of this branch (1.99.1) equal `origin/main`'s (1.97.1). Main's new
   `crates/de-esser` brought 9 more `chunks_exact` sites, rewritten the same way.
+- **Final pin after main moved to `7f4ef0d6f`.** `0043eb0bf9927cc6c36ddb1426369ab94f77bd223b104a9f57900f870b109bb1`
+  (pin, `EXPECTED_WORKLET_SHA256`, `release_pin`); V8 spill gate all rows ok; three browsers
+  re-recorded on candidate `a544e05f3` (Chromium 151.0.7922.34, Firefox 153.0, WebKit 26.5).
 
