@@ -117,3 +117,8 @@ Half a day.
   successor: `(0, 0, 1536)` at 48 kHz with the fix.
 - Mutants: passing `&[]` as the pairing in `promote_pending_provider` turns gate 1 red; swapping
   `successor`/`predecessor` in the meter rows of `observer_pairing` turns gate 2 red.
+- R1's charge moved one existing claim: `a_plan_with_spectrum_charges_the_service_once`
+  (`crates/control-plane/tests/spectrum_monitor.rs`, one line, root-authorized) expected the third
+  plan to cost the boot plan's bytes, but that plan carries nine meters, whose pairing rows R1
+  charges (216 bytes). It now expects the boot plan's bytes plus the size of
+  `observer_pairing()`, read from the accessor; the claim (the service is charged once) stands.

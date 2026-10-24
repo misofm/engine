@@ -1603,7 +1603,8 @@ fn a_configure_that_supersedes_a_fallback_edit_reports_the_fallback() {
 /// #1594 R6. Turns red if a plan with spectrum captures does not charge the session's spectrum
 /// service and analysis: the running plan's control-retained bytes grow by
 /// `SpectrumService::RETAINED_BYTES` plus the plan inventory's own spectrum row when a configure
-/// adds a tap, and fall back when a configure removes every tap. The row is 51 bytes here (one
+/// adds a tap, and fall back when a configure removes every tap, to the boot plan's bytes plus
+/// the pairing rows of the meters the plan carries (#1674 R1). The row is 51 bytes here (one
 /// `SpectrumInventoryRow`, 48 bytes on a 64-bit target, plus the 3 bytes of `eq0`, and no pairing
 /// row, since the predecessor had no capture); it is host-core's private layout, so the check is a
 /// 1 KiB ceiling over the service's bytes, which no inventory row of one tap approaches and which
@@ -1624,7 +1625,15 @@ fn a_plan_with_spectrum_charges_the_service_once() {
     rig.configure(&collection_request(Vec::new(), None))
         .expect("remove every tap");
     rig.until_promoted();
-    assert_eq!(bytes(&rig), before);
+    // #1674 R1: the third plan carries its predecessor's meters, and its inventory charges one
+    // pairing row per carried meter, which the boot plan has none of; the service is not charged.
+    let pairing = rig
+        .session
+        .test_providers()
+        .test_inventory()
+        .observer_pairing();
+    assert!(!pairing.is_empty(), "the third plan carries meters");
+    assert_eq!(bytes(&rig), before + core::mem::size_of_val(pairing) as u64);
 }
 
 /// #1594 attempt 2 (the verifier's fifth point). Turns red if a monitor rebuild on the running
