@@ -73,7 +73,7 @@ const MUTATIONS = [
   // of order, a lossy event that is not the headless engine's event of its block, and a refusal that
   // is not the core's.
   "sdk-protocol-answers", "sdk-protocol-reliable", "sdk-protocol-lossy", "sdk-protocol-lossy-none",
-  "sdk-protocol-refusal",
+  "sdk-protocol-lossy-first-block", "sdk-protocol-refusal",
 ];
 
 // The total time the page may take, from the first evaluate to the result, clicks included. A page
@@ -583,7 +583,8 @@ const PROTOCOL_LOSSY_KINDS = new Set(["meterBatch", "counterSnapshot", "diagnost
  * events once per message and its lossy lane holds one event (root's tranche-b note), so a block's
  * lossy telemetry may be replaced before it is read: each lossy event that arrived must be the
  * headless engine's event of the same block, in the headless order, and only the last block's
- * three (which no later block replaces) are required.
+ * three (which no later block replaces) are required: each kind's last received event carries the
+ * headless engine's last sample.
  */
 function validateSdkProtocol(browserName, protocol) {
   const json = (value) => JSON.stringify(value);
@@ -627,9 +628,18 @@ function validateSdkProtocol(browserName, protocol) {
     return true;
   });
   // The render's last block has no later block to replace its telemetry, so its diagnostic, meter
-  // batch and counter snapshot arrive: a run that lacks one of the three kinds lost a lane.
+  // batch and counter snapshot arrive: for each kind, the last one received is the headless
+  // engine's last (the last block's sample). A run that lacks a kind lost a lane, and one whose last
+  // is an earlier block's read a block's telemetry late or never.
+  const sampleOf = (event) => event.kind === "diagnostic" ? event.diagnostic?.sampleTime : event.observedSample;
+  const lastOf = (rows, kind) => rows.filter((event) => event.kind === kind).at(-1);
   gate(browserName, "sdk-protocol-lossy", ordered
-    && [...PROTOCOL_LOSSY_KINDS].every((kind) => lossy.some((event) => event.kind === kind))
+    && [...PROTOCOL_LOSSY_KINDS].every((kind) => {
+      const received = lastOf(lossy, kind);
+      const expected = lastOf(reference, kind);
+      return received !== undefined && expected !== undefined
+        && sampleOf(received) !== undefined && sampleOf(received) === sampleOf(expected);
+    })
     && reference.filter((event) => PROTOCOL_LOSSY_KINDS.has(event.kind)).length === 3 * protocol.blocks,
   `a lossy event is not the headless engine's event of its block, in order: ${json({ browser: lossy, headless: reference })}`);
 }
@@ -1137,6 +1147,15 @@ function mutate(result, mutation) {
   if (mutation === "sdk-protocol-lossy-none") {
     copy.sdkResponse.protocol.browser.events = copy.sdkResponse.protocol.browser.events
       .filter((event) => event.kind === "sessionCommitted" || event.kind === "transportState");
+  }
+  if (mutation === "sdk-protocol-lossy-first-block") {
+    // A host that delivered only the first block's telemetry: the headless engine's first three.
+    const protocol = copy.sdkResponse.protocol;
+    const first = protocol.headless.events.filter((event) =>
+      PROTOCOL_LOSSY_KINDS.has(event.kind)).slice(0, PROTOCOL_LOSSY_KINDS.size);
+    protocol.browser.events = [
+      ...protocol.browser.events.filter((event) => PROTOCOL_RELIABLE_KINDS.has(event.kind)), ...first,
+    ];
   }
   if (mutation === "sdk-protocol-refusal") copy.sdkResponse.protocol.browser.answers.refusal.code = "usage";
   if (mutation === "render-allocations") copy.renderAllocations[0].count = 1;

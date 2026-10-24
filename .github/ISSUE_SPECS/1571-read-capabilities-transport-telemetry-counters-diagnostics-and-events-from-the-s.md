@@ -254,3 +254,14 @@ control refusal's `decodeRefusalBody` maps those values.
   after the call that reads the render's events. Measured on all three browsers: the browser gets
   `sessionCommitted, transportState` and the last block's `diagnostic, meterBatch, counterSnapshot`;
   the headless engine gets all four blocks'.
+- **Runs.** Module `03619b8e0cf89d4ff69bc27abfb604f78e6c1709c9148e09271b5d61dd8d4495`. During
+  attempt 1 a process outside this stream deleted the worktree's `target/`; the Firefox run then failed
+  (`browser-execution`, the wasm answered 404) and the WebKit run failed (`ENOENT` on the wasm). Both
+  reds were the deletion, not the tree: the rebuilt module had the same digest, and the later runs
+  read a copy of it outside `target/`.
+- **Verifier fold.** `committedRevision` is the queue's own probe (`readCommittedRevision`), so the
+  browser has one probe. The lossy gate requires that each kind's last received event carries the
+  headless engine's last sample (self-test `sdk-protocol-lossy-first-block`).
+- **Later work.** A test of the `onEvent` listener-throw path (reported, later listeners still
+  called). Removing the probe's extra round trip before `TRANSPORT_SET` and `TELEMETRY_CONFIGURE`
+  (the worklet posts the committed revision, or these two commands take any revision).

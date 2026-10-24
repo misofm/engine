@@ -30,10 +30,9 @@ import type { EngineLiveControls } from "../core/live-controls.ts";
 import { scratchBootWithWorker } from "./scratch.ts";
 import type { ScratchWorkerFactory } from "./scratch.ts";
 import { createDefaultHost, BrowserBootError } from "./default-host.ts";
-import { createBrowserControlListTransport, createBrowserLiveControls, createBrowserStripOrders } from "./live-controls.ts";
+import { createBrowserControlListTransport, createBrowserControlQueue, createBrowserLiveControls, createBrowserStripOrders } from "./live-controls.ts";
 import { readControlList, readControlState } from "../core/control-list.ts";
 import type { ControlList, ControlListFilter, ControlState } from "../core/control-list.ts";
-import { controlCallFailure, encodeRevisionProbe } from "../core/control-frame.ts";
 import { ProtocolClient, decodeProtocolEvent } from "../core/protocol-messages.ts";
 import type {
   CommittedDocument,
@@ -269,13 +268,16 @@ export interface BrowserEngine<Context extends AudioContextLike = DefaultAudioCo
   transport(): Promise<TransportSnapshot>;
   /**
    * Start or stop the transport (`TRANSPORT_SET`) at the committed revision, which a revision probe
-   * reads from the core first; resolves to the new state.
+   * reads from the core first; resolves to the new state. A revision that went stale before the
+   * command arrived (another commit in between) is refused by the core with status
+   * `revision_conflict` (code `protocol.failure`) as a `MisoControlRefusal`; it is not retried.
    */
   setTransport(request: TransportRequest): Promise<TransportSnapshot>;
   /**
    * Replace the telemetry configuration (`TELEMETRY_CONFIGURE`) at the committed revision; resolves
    * to the configuration the core applied. The meters, counters and diagnostics it names arrive as
-   * `onEvent` events.
+   * `onEvent` events. A stale revision is refused with status `revision_conflict` (code
+   * `protocol.failure`), as for `setTransport`; it is not retried.
    */
   configureTelemetry(configuration: TelemetryConfiguration): Promise<TelemetryConfiguration>;
   /** The named counters, or every counter the core serves when `ids` is absent (`COUNTERS_GET`). */
@@ -1465,14 +1467,16 @@ export async function createEngine(options: CreateEngineOptions): Promise<Browse
     const protocolClient = (): Promise<ProtocolClient> => {
       if (protocol !== undefined) return protocol;
       const created = (async () => {
+        // The queue's own revision probe (`readCommittedRevision`): the browser has one probe.
+        const queue = await createBrowserControlQueue(host);
         const { send, requestIds } = await createBrowserControlListTransport(host);
         return new ProtocolClient({
           send,
           requestIds,
           committedRevision: async () => {
-            const reply = await host.control(encodeRevisionProbe(requestIds.next()));
-            if (reply.result !== 0) throw controlCallFailure(reply.result, reply.response);
-            return reply.revision;
+            const revision = await queue.readCommittedRevision();
+            if (revision === undefined) throw new MisoEngineError("the browser queue cannot read the committed revision", { phase: "lifecycle", code: "internal" });
+            return revision;
           },
         });
       })();
