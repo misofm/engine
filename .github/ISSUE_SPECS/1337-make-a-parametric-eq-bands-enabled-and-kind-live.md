@@ -200,3 +200,23 @@ Filters for Musical Applications", DAFx-14. **Latency:** 0. **Tail:** unchanged 
 - *Carry live-controlled effect lanes across a plan swap* (#1280)
 
 **Decision 17 amendment (2026-10-13).** Each band's `enabled` and `kind` carry `prepared_reason: RuledLiveNotBuilt { issue: 1337 }` (#1549). Last step of this issue: set their `automation_rate` to `Block`, remove the reason, and assert that their control rows are `Live`; no host or protocol code.
+
+## Evidence and decision record (attempt 1, 2026-10-24)
+
+- **Root decisions applied.** Scope note slice 1-6 and its deletions. D4 kept (clear only on a
+  re-enable from identity). A band enable word other than `0|1` or a family word outside `1..=6`
+  is refused with `effect.state.payload`. D5 words are `118 + 2b` (enable) and `119 + 2b`
+  (family), after the #1328 silence word: `STATE_LANE_WORDS = 125`, `LANE_BYTES` 468 -> 500,
+  `STATE_LAYOUT_VERSION` stays 1.
+- **Delivered as PR-a.** Items 1-6, gates 2 (`contract.rs`), 4, 5 and 8 (`bank.rs`; gate 8 counts
+  the scalar leg's apply-and-render blocks), 6 (the randomized draw now reaches every `Block` row)
+  and 7 (`carry.rs`). Gate 9: no digest moved (`audit`, `bench`, `console-workload` release tests,
+  `conformance_fixtures --check`). The Point-span partition probe (#1661 follow-up,
+  `crates/conformance/src/effect.rs`) moves Booleans and Enumerations and runs the EQ schedule from
+  the defaults as well as all-on.
+- **Host-core.** `prepared_parameter_changes_need_a_rebuild` is deleted: #1336 and #1337 left it
+  no prepared EQ subject, and the limiter-lookahead claim is already
+  `a_rebuild_only_row_is_a_rebuild_with_its_reason`. `an_automation_on_a_prepared_effect_parameter_needs_a_rebuild`
+  is re-subjected on the limiter lookahead.
+- **PR-b (successor, for root to file).** Gate 1 (capi `eq_session` end to end), the gate 3
+  kind-pair contractive-ramp grid, and the listening note.
