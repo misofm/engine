@@ -429,3 +429,184 @@ pub fn plan_strip_transition(
     }
     Ok(transition)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{DuckOverlay, plan_strip_transition};
+    use crate::prepare::{HostPrepareCaps, HostShapePolicy, SuccessorBase, compile_host_model};
+    use builtins_compiler::TrackFaderRecord;
+    use session::{RouteDestination, RouteSource, SendTap, SessionModel, StableId};
+
+    const FIXTURE: &str =
+        include_str!("../../../fixtures/session/v1/parametric-eq-nine-track.json");
+
+    fn id(text: &str) -> StableId {
+        StableId::parse(text).expect("stable ID")
+    }
+
+    fn caps() -> HostPrepareCaps {
+        HostPrepareCaps {
+            shape: HostShapePolicy::AnyLaunchRate,
+            source_ring_frames: 4_096,
+            maximum_automation_spans_per_block: 128,
+            maximum_tracks: 100,
+            maximum_submixes: 100,
+            maximum_vcas: 100,
+            maximum_vca_reach_pairs: u64::MAX,
+            maximum_sources: 100,
+            maximum_routes: 100,
+            maximum_effects: 100,
+            maximum_graph_session_plus_plan_bytes: 1_000_000_000,
+            maximum_source_total_bytes: 100_000_000,
+            maximum_source_overhead_bytes: 100_000_000,
+            maximum_effect_state_bytes: 1_000_000_000,
+            maximum_effect_scratch_bytes: 1_000_000_000,
+            maximum_builtin_retained_bytes: 1_000_000_000,
+            maximum_named_allocation_bytes: 1_000_000_000,
+            maximum_meter_streams: 64,
+            maximum_meter_items: 1 << 16,
+            maximum_meter_bytes: 1 << 24,
+        }
+    }
+
+    /// Tracks `a` (a true-peak limiter insert), `b` and `c` into the output; `b` and `c` each
+    /// have a `pre_fader` send into submix `r`; each track reads its own source.
+    fn model() -> SessionModel {
+        let fixture = session::parse_session_json(FIXTURE).expect("fixture");
+        let mut model = fixture.clone();
+        model.console.pre_insert.clear();
+        model.console.post_insert.clear();
+        model.vcas.clear();
+        model.automation.clear();
+        model.sources.clear();
+        model.tracks.clear();
+        model.routes.clear();
+        let out = fixture.routes[0].destination.clone();
+        for name in ["a", "b", "c"] {
+            let mut source = fixture.sources[0].clone();
+            source.id = id(&format!("src-{name}"));
+            model.sources.push(source);
+            let mut track = fixture.tracks[0].clone();
+            track.id = id(name);
+            track.source_id = id(&format!("src-{name}"));
+            track.console.clear();
+            track.inserts.effects.clear();
+            model.tracks.push(track);
+            let mut main = fixture.routes[0].clone();
+            main.id = id(&format!("{name}-main"));
+            main.source = RouteSource::Track {
+                track_id: id(name),
+                tap: SendTap::PostPan,
+            };
+            main.destination = out.clone();
+            model.routes.push(main.clone());
+            if name != "a" {
+                let mut send = main;
+                send.id = id(&format!("{name}-send"));
+                send.source = RouteSource::Track {
+                    track_id: id(name),
+                    tap: SendTap::PreFader,
+                };
+                send.destination = RouteDestination::SubmixInput { submix_id: id("r") };
+                model.routes.push(send);
+            }
+        }
+        model.tracks[0].inserts.effects.push(session::Effect {
+            id: id("lim"),
+            identity: session::EffectIdentity::Native {
+                effect_id: id("miso.true-peak-limiter"),
+            },
+            quality: session::EffectQuality::Normal,
+            bypass: false,
+            link_mode: session::LinkMode::Maximum,
+            params: Vec::new(),
+            sidechain: session::SidechainDeclaration::None,
+        });
+        model.submixes = vec![session::Submix::unity(id("r"), &model.console)];
+        let mut r_main = fixture.routes[0].clone();
+        r_main.id = id("r-main");
+        r_main.source = RouteSource::Submix {
+            submix_id: id("r"),
+            tap: SendTap::PostPan,
+        };
+        r_main.destination = out;
+        model.routes.push(r_main);
+        model
+    }
+
+    /// #1325 D1, D2, D3: the duck set of a removal of `b` and `c` while `c` is already in the
+    /// running plan's overlay is `b` alone, with its two mutes at `N` and its `pre_fader` send's
+    /// record and no other, its source listed, and `C` the compensation delay the limiter on `a`
+    /// gives `b`'s route into the output: the plan's output latency.
+    #[test]
+    fn a_transition_ducks_the_removed_strips_outside_the_overlay() {
+        let committed = model();
+        let compiled = compile_host_model(
+            &committed,
+            caps().compile_caps(committed.sources.len()).expect("caps"),
+        )
+        .expect("compiles");
+        let prepared = crate::prepare::prepare_host_runtime(&compiled, &caps()).expect("prepares");
+        let latency = prepared.report.latency_samples;
+        assert!(latency > 0, "the limiter delays b's route into the output");
+        let committed = compiled.normalized_model();
+
+        // `c` was ramped out by an earlier transaction of this phase 1.
+        let mut overlay = DuckOverlay::new();
+        let earlier = {
+            let mut next = committed.clone();
+            next.tracks.retain(|track| track.id.as_str() != "c");
+            next.routes
+                .retain(|route| !route.id.as_str().starts_with("c-"));
+            next.sources.retain(|source| source.id.as_str() != "src-c");
+            plan_strip_transition(
+                &SuccessorBase::new(&prepared.inventory, committed, 2),
+                &overlay,
+                &next,
+            )
+            .expect("c's transition")
+        };
+        overlay = overlay.joined(&earlier);
+        overlay.raise_not_before(4_096);
+
+        let mut next = committed.clone();
+        next.tracks.retain(|track| track.id.as_str() == "a");
+        next.routes
+            .retain(|route| matches!(route.id.as_str(), "a-main" | "r-main"));
+        next.sources.retain(|source| source.id.as_str() == "src-a");
+        let transition = plan_strip_transition(
+            &SuccessorBase::new(&prepared.inventory, committed, 3),
+            &overlay,
+            &next,
+        )
+        .expect("b's transition");
+
+        let n = crate::prepare::LiveRamps::for_session(&next).mute_samples;
+        assert_eq!(transition.ramp(), n);
+        assert_eq!(transition.strips(), [Box::<str>::from("b")]);
+        assert_eq!(transition.sources(), [Box::<str>::from("src-b")]);
+        assert_eq!(transition.routes(), [Box::<str>::from("b-send")]);
+        assert_eq!(transition.compensation(), latency);
+        let [strip] = transition.strip_records() else {
+            panic!("one strip record")
+        };
+        assert_eq!(&*strip.strip_id, "b");
+        let mutes: Vec<_> = strip.fader_records().collect();
+        assert_eq!(
+            mutes,
+            [TrackFaderRecord::Mute {
+                lanes: builtins::BuiltinLaneSelector::Both,
+                muted: true,
+                smoothing_samples: n,
+            }],
+            "both of b's channels mute over N"
+        );
+        let joined = overlay.joined(&transition);
+        assert_eq!(
+            joined.not_before(),
+            Some(4_096),
+            "S is kept until the caller raises it"
+        );
+        assert!(joined.has_strip("b") && joined.has_strip("c"));
+    }
+}
