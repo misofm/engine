@@ -157,10 +157,11 @@ jobs:
   release-link-proof:
     name: workspace release link proof (moved off the per-PR path)
     runs-on: ubuntu-24.04
-    # Timeout (issue #1511 D4): provisional. Root sets the final value after one dispatched run of
-    # this job under the env below: the slowest observed build x 1.5, rounded up to 5 min. The
-    # timeout guards against hangs; it is not the cost budget.
-    timeout-minutes: 60
+    # Timeout (issue #1511 D4): provisional 150 min. The first dispatched run under the env below
+    # (run 40065733904) hit the former 60 min on the 4-core runner, so it gave no build time. Root
+    # sets the final value from the next dispatched run: the slowest observed build x 1.5, rounded
+    # up to 5 min. The timeout guards against hangs; it is not the cost budget.
+    timeout-minutes: 150
     # Issue #1511 D2: this job builds with thin LTO, 16 codegen units and no debug info. The claim
     # it proves -- the panic-variant clobber of un-hashed `cdylib`/`staticlib` outputs, and release-
     # only `cfg(debug_assertions)` rot -- depends on the profile name `release`, its panic setting
@@ -186,15 +187,45 @@ jobs:
       # (metadata-only + check-only, no link) is not a substitute for actually linking every
       # test/bench/example target in release. This is that link proof, once a day
       # instead of on every PR and every main push.
+      # Issue #1511 D1: per-unit compile times that survive a timeout. Cargo writes its `--timings`
+      # HTML only when the build ends, and not on SIGINT or SIGTERM (checked on cargo 1.97.1), and
+      # `--timings=json` needs `-Z`. So a rustc wrapper appends one start line and one end line per
+      # rustc unit to a log as it runs. It is set through GITHUB_ENV for every later step, so the
+      # randomized step sees the same RUSTC_WRAPPER as the build it reuses.
+      - name: Install the per-unit rustc log
+        run: |
+          set -euo pipefail
+          wrapper="$RUNNER_TEMP/rustc-unit-log.sh"
+          cat > "$wrapper" <<'WRAPPER'
+          #!/usr/bin/env bash
+          name='' kind=lib prev=''
+          for a in "$@"; do
+            case "$prev" in --crate-name) name=$a ;; --crate-type) kind=$a ;; esac
+            [ "$a" = --test ] && kind=test
+            prev=$a
+          done
+          if [ -z "$name" ] || [ "$name" = ___ ]; then exec "$@"; fi
+          echo "S $(date +%s.%N) ${CARGO_PKG_NAME:-?} $name $kind" >> "$RUSTC_UNIT_LOG"
+          rc=0; "$@" || rc=$?
+          echo "E $(date +%s.%N) ${CARGO_PKG_NAME:-?} $name $kind $rc" >> "$RUSTC_UNIT_LOG"
+          exit "$rc"
+          WRAPPER
+          chmod +x "$wrapper"
+          mkdir -p target/ci
+          echo "RUSTC_WRAPPER=$wrapper" >> "$GITHUB_ENV"
+          echo "RUSTC_UNIT_LOG=$GITHUB_WORKSPACE/target/ci/rustc-units.log" >> "$GITHUB_ENV"
+      # The inner limit is the job's minus 5 min, so the build step fails on its own and the upload
+      # below still runs. `timeout` signals its whole process group (cargo and every rustc).
       - name: Workspace release build (single panic variant, --no-run)
-        run: bash scripts/run-release-workspace-tests.sh --no-run --timings
-      # Issue #1511 D1: per-unit compile and link times, read on a slow night.
+        run: timeout --kill-after=1m 145m bash scripts/run-release-workspace-tests.sh --no-run --timings
       - name: Upload the build timings
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: release-link-proof-timings
-          path: target/cargo-timings/*.html
+          path: |
+            target/cargo-timings/*.html
+            target/ci/rustc-units.log
           if-no-files-found: ignore
           overwrite: true
       # Issue #1051: every committed randomized differential at 100 times its per-PR seeds, on the

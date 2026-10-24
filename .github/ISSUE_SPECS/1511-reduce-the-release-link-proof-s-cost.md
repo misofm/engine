@@ -83,3 +83,17 @@ Scope note D1-D3 accepted by root. Root also authorized one paragraph of
 - Local proof (one run, exclusive lock, load 7.56 at start, AMD EPYC 7313P, 32 jobs): the job's
   build command under the job's env passed in 8 m 58 s wall (cargo timings 537.6 s, 724 units;
   slowest units `wasm-gates` bin 207 s, `capi` lib test 152 s). No old-settings local run (cost).
+
+### Dispatched run 1 (root, run 40065733904, job 120788477729)
+
+- Cancelled at the 60-min timeout during the build step. Runner: 4 cores, Intel Xeon Platinum
+  8573C (the local 8 m 58 s was 32 jobs, so it does not predict the runner). Last `Compiling audit`
+  at 05:33, a host-web `control_parity` warning at 05:35, then 43 min with no output until the
+  cancel at 06:18 (most likely the long thin-LTO links of the last test executables; not confirmed).
+- The `--timings` HTML was not written: cargo writes it only when the build ends. Checked on cargo
+  1.97.1: SIGINT and SIGTERM give no report either, and `--timings=json` needs `-Z`.
+- Correction: `timeout-minutes` is now a provisional 150. The build runs under
+  `timeout --kill-after=1m 145m`, so the step fails on its own and the upload still runs. A rustc
+  wrapper (installed in-job through GITHUB_ENV for every later step) appends start and end lines
+  per rustc unit to `target/ci/rustc-units.log`, uploaded with the HTML, so a timed-out run still
+  shows which units ran and for how long. Root sets the final timeout from the next dispatched run.
