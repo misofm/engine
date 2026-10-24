@@ -189,6 +189,6 @@ fn the_launch_registry_is_built_once_per_process() {
         .descriptors()
         .map(|descriptor| descriptor.qualities.len())
         .sum();
-    assert_eq!(rows, 32, "8 launch effects x 4 launch rates x Normal");
+    assert_eq!(rows, 36, "9 launch effects x 4 launch rates x Normal");
     assert_eq!(tail_bound_evaluations(), rows as u64, "one registry build");
 }

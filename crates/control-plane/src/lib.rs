@@ -91,10 +91,10 @@ pub use compile::{
 };
 #[cfg(feature = "test-support")]
 pub use control::{
-    EffectCellRow, ProviderEpoch, TestOwnerCounters, TestOwnerState, TestStructuralFaultPhase,
-    TestTransactionSnapshot, test_force_full_preparation, test_hold_reclamation,
-    test_lifecycle_counters, test_reset_lifecycle_observer, test_take_in_place_counts,
-    test_verify_catalog_stages,
+    EffectCellRow, ProviderEpoch, TestObservationWindows, TestOwnerCounters, TestOwnerState,
+    TestStructuralFaultPhase, TestTransactionSnapshot, test_force_full_preparation,
+    test_hold_reclamation, test_lifecycle_counters, test_reset_lifecycle_observer,
+    test_take_in_place_counts, test_verify_catalog_stages,
 };
 
 pub(crate) use compile::*;

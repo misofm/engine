@@ -55,10 +55,17 @@ pub struct ProviderEpoch {
     /// The consumers of this epoch's plan's strip meters (#1581 D6), one per strip in strip order
     /// (`host_core::meter_selection`). Nothing reads them until #1587; a full strip queue drops
     /// and counts on the render side. Their rings are `Arc`s shared with the plan's observers, as
-    /// the producers' cells are, so the epoch may drop after its plan. Only the adapters' tests
-    /// read them before #1587.
-    #[cfg_attr(not(feature = "test-support"), allow(dead_code))]
+    /// the producers' cells are, so the epoch may drop after its plan. At promotion a carried
+    /// meter's consumer moves from the displaced epoch to this one, at the entry the plan's
+    /// `meter_pairing` names (#1674 R1), so a consumer stays with the observer that renders on.
     pub(crate) meters: Box<[host_core::MeterConsumer]>,
+    /// The readers of this epoch's plan's effect observation taps (#1584 D7), one per observed
+    /// effect instance in `HostLiveControlHandles::effect_observations` order: the windows a tap an
+    /// `Observe` edit armed publishes. Empty for a host whose preparer keeps them itself (the
+    /// browser's). Their slots are `Arc`s shared with the plan's lanes, as the meters' rings are.
+    /// Only the adapters' tests read them before #1586.
+    #[cfg_attr(not(feature = "test-support"), allow(dead_code))]
+    pub(crate) observations: Box<[host_core::EffectObservationHandle]>,
     /// The capi resources this epoch's plan was prepared with (#1257 D4).
     pub(crate) capi: CapiResources,
     /// The handle of this epoch's plan's revision gate (#1502 D1). Control publishes every
@@ -322,6 +329,12 @@ impl ProviderEpoch {
         &self.meters
     }
 
+    /// This epoch's effect observation readers (#1584 D7).
+    #[cfg(feature = "test-support")]
+    pub fn test_observations(&self) -> &[host_core::EffectObservationHandle] {
+        &self.observations
+    }
+
     /// Whether this epoch's set holds source `id` vacant (`Some(true)`), holds its producer
     /// (`Some(false)`), or does not hold it (`None`) (#1310 gate 6). It probes with a submission
     /// at a sample rate of 1, which the set refuses before its ring sees it, so nothing changes.
@@ -361,6 +374,7 @@ impl ProviderEpoch {
             strips,
             effects,
             meters,
+            observations: Box::default(),
             capi,
             revision_gate,
             carried: CarriedSourceBytes::default(),
@@ -372,6 +386,15 @@ impl ProviderEpoch {
         #[cfg(feature = "test-support")]
         update_test_owners(|owners| owners.current_provider_constructed += 1);
         owner
+    }
+
+    /// This epoch with its plan's observation readers (#1584 D7).
+    pub(crate) fn with_observations(
+        mut self,
+        observations: Box<[host_core::EffectObservationHandle]>,
+    ) -> Self {
+        self.observations = observations;
+        self
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -392,6 +415,7 @@ impl ProviderEpoch {
             strips,
             effects,
             meters,
+            observations: Box::default(),
             capi,
             revision_gate,
             carried,
@@ -563,7 +587,16 @@ pub struct TestTransactionSnapshot<Row> {
     /// bits)`. The candidate is empty while the owner is idle: it exists only between `begin` and
     /// `commit` or `discard` (#1624).
     pub effect_owners: Vec<TestOwnerState>,
+    /// The newest window each observation reader the epochs keep holds (#1584 D7), current epoch
+    /// first, then each pending candidate: `(epoch, strip ID, effect instance ID, one window per
+    /// declared tap as (sequence, first sample, blocks))`. `None` for a tap that has published
+    /// nothing.
+    pub observation_windows: Vec<TestObservationWindows>,
 }
+
+/// One observed effect instance's newest windows in a [`TestTransactionSnapshot`].
+#[cfg(feature = "test-support")]
+pub type TestObservationWindows = (u64, Box<str>, Box<str>, Vec<Option<(u64, u64, u32)>>);
 
 /// One EQ owner's observable state in a [`TestTransactionSnapshot`].
 #[cfg(feature = "test-support")]
@@ -1120,6 +1153,20 @@ pub(crate) enum PendingArm {
     Disarm,
 }
 
+/// The borrowed form of `key` that [`SessionState::resolve_observation_key`] takes.
+fn observation_key_ref(key: &controls::TapKey) -> ObservationKeyRef<'_> {
+    let (rack, effect) = match &key.section {
+        controls::TapSection::Console(id) => (host_core::LiveEffectRack::Console, id),
+        controls::TapSection::Inserts(id) => (host_core::LiveEffectRack::Inserts, id),
+    };
+    ObservationKeyRef {
+        strip_id: key.strip.as_str().as_bytes(),
+        rack,
+        effect_id: effect.as_str().as_bytes(),
+        tap_id: key.tap_id,
+    }
+}
+
 /// The stable key of the tap `tap_index` of the effect `producer` addresses, or `None` for an index
 /// the effect does not declare.
 fn tap_key_of(
@@ -1232,6 +1279,75 @@ pub(crate) fn observation_forwards(
         }
     }
     Ok(forwards)
+}
+
+/// The records of a structural transaction's `Observe` edits on its successor's producers (#1584
+/// T2): each net record's tap resolved by its stable key among `successor`, skipping a tap with no
+/// queue slot there (the transaction removed its target) and a tap a forward in `forwards` already
+/// re-queues with its bound state.
+///
+/// # Errors
+///
+/// [`CommandError::Internal`] if a successor queue lacks the room, which cannot happen: its queue
+/// is fresh, holds one record per declared tap, and at most one record per tap is queued between
+/// the forwards and these. [`CommandError::CompileRejected`] if the list cannot be allocated.
+fn observe_successor_pushes(
+    writes: &[controls::ObserveWrite],
+    successor: &[host_core::EffectControlProducer],
+    forwards: &[ObservationForward],
+) -> Result<Vec<ObservationForward>, CommandError> {
+    let mut pushes = Vec::new();
+    pushes
+        .try_reserve_exact(writes.len())
+        .map_err(|_| CommandError::CompileRejected(failure(ResourceFault::Allocation)))?;
+    for write in writes {
+        let key = observation_key_ref(&write.key);
+        let target = successor
+            .iter()
+            .enumerate()
+            .find_map(|(position, producer)| {
+                if producer.address.rack != key.rack
+                    || producer.track_id.as_bytes() != key.strip_id
+                    || producer.effect_id.as_bytes() != key.effect_id
+                {
+                    return None;
+                }
+                let tap = producer
+                    .descriptor
+                    .observations
+                    .iter()
+                    .position(|declared| declared.id.0 == key.tap_id)
+                    .filter(|tap| *tap < producer.observe_capacity())?;
+                Some((position, u32::try_from(tap).ok()?))
+            });
+        let Some((position, tap_index)) = target else {
+            continue;
+        };
+        if forwards
+            .iter()
+            .any(|forward| forward.position == position && forward.tap_index == tap_index)
+        {
+            continue;
+        }
+        pushes.push(ObservationForward {
+            position,
+            tap_index,
+            armed: write.armed,
+            window_blocks: write.window_blocks,
+        });
+    }
+    for push in &pushes {
+        let needed = forwards
+            .iter()
+            .chain(&pushes)
+            .filter(|other| other.position == push.position)
+            .count();
+        if needed > successor[push.position].observe_available_capacity() {
+            debug_assert!(false, "a fresh observation queue holds one record per tap");
+            return Err(CommandError::Internal);
+        }
+    }
+    Ok(pushes)
 }
 
 /// The wire key of an ended binding.
@@ -1859,6 +1975,27 @@ where
                     })
                 })
                 .collect(),
+            observation_windows: core::iter::once(&self.providers)
+                .chain(&self.pending_providers)
+                .flat_map(|provider| {
+                    provider.observations.iter().map(|handle| {
+                        (
+                            provider.epoch,
+                            handle.track_id.clone(),
+                            handle.effect_id.clone(),
+                            handle
+                                .readers
+                                .iter()
+                                .map(|reader| {
+                                    reader.read().map(|window| {
+                                        (window.sequence, window.first_sample, window.blocks)
+                                    })
+                                })
+                                .collect(),
+                        )
+                    })
+                })
+                .collect(),
         }
     }
 
@@ -2198,6 +2335,15 @@ where
                 )),
                 other => other,
             };
+            // #1674 R1: likewise its strip meters. The swap block moved each carried meter's
+            // observer, producer included, into `next`'s plan, so the consumer the running epoch
+            // holds follows it, and the parked epoch keeps `next`'s fresh one, whose producer
+            // retires with the displaced plan.
+            host_core::pair_carried_meters(
+                &mut next.meters,
+                &mut self.providers.meters,
+                next.inventory.meter_pairing(),
+            );
             let mut previous = core::mem::replace(&mut self.providers, next);
             // Dropped with the parked epoch, when its plan is reclaimed.
             previous.spectrum = displaced;
@@ -2306,16 +2452,29 @@ where
         #[cfg(not(feature = "test-support"))]
         let in_place = true;
         let mut scratch = DecodeScratch::new(&mut self.decode_fields);
+        // #1584 D3, D7a: a transaction's `Observe` edits are checked against the binding table the
+        // service step just folded, which the session keeps; the adapter says whether it serves
+        // them at all.
+        let observe = protocol::ObserveContext {
+            bindings: &self.observation,
+            enabled: A::OBSERVE_EDIT,
+        };
         let prepared = if in_place {
-            self.controller.prepare_command_frame_in_place(
+            self.controller.prepare_command_frame_in_place_observed(
                 request,
                 document,
                 &mut scratch,
                 output_capacity,
+                observe,
             )
         } else {
-            self.controller
-                .prepare_command_frame(request, document, &mut scratch, output_capacity)
+            self.controller.prepare_command_frame_observed(
+                request,
+                document,
+                &mut scratch,
+                output_capacity,
+                observe,
+            )
         }
         .map_err(map_command_process_error)?;
         match prepared {
@@ -2405,8 +2564,14 @@ where
                 // backpressure and nothing has changed (the acked-batch rule: a subscription is
                 // never dropped without its event). An event over one control frame can never
                 // be sent, so it is a resource refusal, not backpressure.
-                let observation_change = self
-                    .observation
+                // #1584 T2: the table the transaction's `Observe` edits leave, when it holds any, so
+                // the successor's prepared arms are the post-transaction subscriptions and a target
+                // the same transaction removes is ended, not armed.
+                let observation_change = prepared
+                    .get()
+                    .prospective_session()
+                    .observe_bindings()
+                    .unwrap_or(&self.observation)
                     .after(
                         prepared
                             .get()
@@ -2975,6 +3140,7 @@ where
             strips,
             effects,
             meters,
+            observations,
             plan: candidate_plan,
             resources,
             carried,
@@ -3005,6 +3171,7 @@ where
             revision_gate,
         );
         candidate_provider.discontinuity = discontinuity;
+        candidate_provider.observations = observations;
         // The configuration epoch is set beside the push, after the commit.
         candidate_provider.spectrum = crate::spectrum::EpochSpectrum::Candidate {
             captures: candidate_captures,
@@ -3254,6 +3421,22 @@ where
             )?,
             _ => Vec::new(),
         };
+        // #1584 T2: the records of this transaction's `Observe` edits, queued on the successor's
+        // own fresh queues and never on the predecessor's, so a refused rebuild leaves no record
+        // anywhere. A tap the successor carries takes its predecessor's state at the swap and then
+        // drains the record (a new arm arms it, a disarm disarms it, a window change re-arms it); a
+        // tap it starts is armed from the bindings already, and the record arms it at the same
+        // block. A record a forward above already carries the bound state for is not queued twice,
+        // and one whose target the transaction removed has no successor tap and is skipped (its
+        // binding ended with the event).
+        let observe_pushes = match &kind {
+            Rebuild::Transaction(prepared) => observe_successor_pushes(
+                prepared.get().prospective_session().observe_writes(),
+                &candidate_provider.effects,
+                &forwards,
+            )?,
+            Rebuild::Discontinuity(_) | Rebuild::Monitor { .. } => Vec::new(),
+        };
         let epoch = reservation.epoch();
         candidate_provider.epoch = epoch;
         let mut reports = self
@@ -3456,6 +3639,16 @@ where
                 slot.queued = true;
             }
         }
+        // #1584 T2: the transaction's own records, likewise, their room checked before the commit.
+        for push in &observe_pushes {
+            candidate_provider.effects[push.position]
+                .try_push_observe(push.tap_index, push.armed, push.window_blocks)
+                .expect("the room for every observe record was checked before the commit");
+            let first = slots.0[push.position];
+            if let Some(slot) = slots.1.get_mut((first + push.tap_index) as usize) {
+                slot.queued = true;
+            }
+        }
         // A move: the list was built before the commit.
         self.observation_forwarded = forwards;
         // #1593 D4: the configuration the successor was prepared with is the session's from now
@@ -3587,6 +3780,20 @@ where
     /// in place is classified from its rows over the view of the committed model and its edited
     /// owners; if that cannot judge, the token is handed back as [`LiveCommit::NeedsFull`].
     fn commit_live_once(&mut self, prepared: ObservedPreparedToken) -> LiveCommit {
+        // #1584 D4: the records of the transaction's `Observe` edits, resolved by stable key on the
+        // newest plan and admitted whole (one naming per tap, the ended event's frame, the room)
+        // before any write; nothing is queued until after the protocol commit, the last fallible
+        // step, so no acknowledgement precedes a dropped record. Admission writes nothing, so its
+        // refusal is held until the classification below says the transaction is live: a rebuild
+        // queues its records on its successor instead (T2). The table the edits leave is cloned
+        // now, so the commit only moves it.
+        let observe_bindings = prepared
+            .get()
+            .prospective_session()
+            .observe_bindings()
+            .cloned();
+        let observe_changes =
+            self.admit_observe_writes(prepared.get().prospective_session().observe_writes());
         let transaction = prepared.get().prospective_session();
         let in_place = transaction.is_in_place();
         let committed = self.controller.session().compiled().normalized_model();
@@ -3653,6 +3860,12 @@ where
                     return LiveCommit::Rebuild(prepared);
                 }
             }
+        };
+        // #1584 D4: a live transaction's subscriptions are refused here, with nothing written, when
+        // their admission failed: a full observation queue is retryable backpressure.
+        let observe_changes = match observe_changes {
+            Ok(changes) => changes,
+            Err(error) => return LiveCommit::Done(Err(error)),
         };
         // Whether the commit publishes on the plan gate: every model transaction does (a delta
         // with no record is a revision render has nothing to do for), and a transaction of
@@ -4131,6 +4344,15 @@ where
                 kept.monitor_ramp = kept_monitor_ramp;
             }
         }
+        // #1584 D4: the subscriptions' records, admitted above with no observation record queued
+        // since, then the table the edits left, before the reply exists. A record cannot be refused
+        // here: the control thread is the queues' only producer.
+        if !observe_changes.is_empty() {
+            self.push_admitted_observation_batch(observe_changes.iter().copied());
+        }
+        if let Some(bindings) = observe_bindings {
+            self.observation = bindings;
+        }
         LiveCommit::Done(Ok(committed.write_into(&mut self.response_scratch).expect(
             "prepared response capacity was admitted before the live commit",
         )))
@@ -4524,6 +4746,19 @@ where
         &mut self,
         changes: impl Iterator<Item = ObservationChange> + Clone,
     ) -> Result<(), ObservationRefusal> {
+        self.admit_observation_batch(changes.clone())?;
+        self.push_admitted_observation_batch(changes);
+        Ok(())
+    }
+
+    /// The three checks of [`Self::admit_and_push_observation_batch`], with nothing queued: a
+    /// caller that must finish other checks before the first write (the core's `Observe` edit,
+    /// #1584 D4) admits first and pushes with [`Self::push_admitted_observation_batch`] after them,
+    /// with nothing pushed to any observation queue in between.
+    pub(crate) fn admit_observation_batch(
+        &mut self,
+        changes: impl Iterator<Item = ObservationChange> + Clone,
+    ) -> Result<(), ObservationRefusal> {
         let mark = self.next_observation_batch_mark();
         // Pass 1: a tap the producer has no slot for, the second naming of a tap, and each
         // producer's record count for pass 3. A position past the list is pass 3's `NoProducer`.
@@ -4567,6 +4802,15 @@ where
                 return Err(ObservationRefusal::Full { index });
             }
         }
+        Ok(())
+    }
+
+    /// Queues a batch [`Self::admit_observation_batch`] admitted, with no observation record queued
+    /// since: the room it checked is still there, so no push can be refused.
+    pub(crate) fn push_admitted_observation_batch(
+        &mut self,
+        changes: impl Iterator<Item = ObservationChange>,
+    ) {
         for change in changes {
             self.push_effect_observe(
                 change.position,
@@ -4583,7 +4827,6 @@ where
             self.observation_ended_bytes(),
             self.observation_frame_bytes()
         );
-        Ok(())
     }
 
     /// A fresh stamp for the batch about to be admitted. A stamp of `0` is what new scratch
@@ -4790,6 +5033,53 @@ where
     pub fn observation_bindings(&mut self) -> &controls::ObservationBindings {
         self.fold_observation_pending();
         &self.observation
+    }
+
+    /// The queue changes of a transaction's `Observe` records on the newest plan (#1584 D4): each
+    /// tap resolved by its stable key ([`Self::resolve_observation_key`]), then the batch admitted
+    /// whole ([`Self::admit_observation_batch`]), with nothing queued.
+    ///
+    /// # Errors
+    ///
+    /// [`CommandError::Backpressure`] when a queue lacks the room (retryable after a render
+    /// drains it); [`CommandError::CompileRejected`] with a resource limit when the armed taps'
+    /// ended event would outgrow one control frame, as the browser's record is refused; and
+    /// [`CommandError::Internal`] for a key the newest plan does not resolve or a tap with no
+    /// queue slot: the committed model is the plan's, and every plan of a host that serves the
+    /// edit binds a queue slot for every declared tap.
+    fn admit_observe_writes(
+        &mut self,
+        writes: &[controls::ObserveWrite],
+    ) -> Result<Vec<ObservationChange>, CommandError> {
+        if writes.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut changes = Vec::new();
+        changes
+            .try_reserve_exact(writes.len())
+            .map_err(|_| CommandError::CompileRejected(failure(ResourceFault::Allocation)))?;
+        for write in writes {
+            let resolved = self
+                .resolve_observation_key(&observation_key_ref(&write.key))
+                .map_err(|_| CommandError::Internal)?;
+            changes.push(ObservationChange {
+                position: resolved.producer,
+                tap_index: resolved.tap_index,
+                armed: write.armed,
+                window_blocks: write.window_blocks,
+            });
+        }
+        self.admit_observation_batch(changes.iter().copied())
+            .map_err(|refusal| match refusal {
+                ObservationRefusal::Full { .. } => CommandError::Backpressure,
+                ObservationRefusal::Limit(_) => {
+                    CommandError::CompileRejected(failure(ResourceFault::Limit))
+                }
+                ObservationRefusal::NoProducer { .. }
+                | ObservationRefusal::Duplicate { .. }
+                | ObservationRefusal::Unbound { .. } => CommandError::Internal,
+            })?;
+        Ok(changes)
     }
 
     /// Feeds a source of the newest committed session. A source that persists across a pending
