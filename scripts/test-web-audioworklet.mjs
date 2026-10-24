@@ -2638,7 +2638,7 @@ function createFakeExports(quantum, backend = 1, liveControlsAttached = true, su
       revision: 3n, sample: 0n, outcome: 1n, exactCount: 3n, transitionFallbackCount: 0n,
       supersededCount: 0n,
     },
-    watermarkResult: 0, watermarkReads: 0,
+    watermarkResult: 0, watermarkReads: 0, watermarkBytes: 96,
   };
   const watermarkPointer = 66000;
   // What `control_response_*` reads now: the last control command's response, or the event frame
@@ -2885,7 +2885,7 @@ function createFakeExports(quantum, backend = 1, liveControlsAttached = true, su
       if (calls.watermarkResult !== 0) return calls.watermarkResult;
       const record = new DataView(memory.buffer, watermarkPointer, 96);
       const words = calls.watermark;
-      record.setUint32(0, 96, true);
+      record.setUint32(0, calls.watermarkBytes, true);
       record.setUint32(4, 0, true);
       [
         words.revision, words.sample, words.outcome, words.exactCount,
@@ -3840,6 +3840,25 @@ async function testProcessor() {
       );
       assert.equal(watermarks().at(-1).revision, 6n, "the next read posts the newest record");
       assert.equal(watermarks().at(-1).sample, 192n);
+      // Two advances between two reads: the first a transition fallback, the second exact. The
+      // record's flags are the second's alone; the post's outcome carries both.
+      Object.assign(fake.calls.watermark, {
+        revision: 8n, sample: 320n, outcome: 1n, exactCount: 6n, transitionFallbackCount: 2n,
+      });
+      processor.port.onmessage({ data: { tag: "miso.service.v1" } });
+      assert.equal(watermarks().at(-1).outcome, 3n, "a count that rose since the last post names its flag");
+    }
+    for (const [what, mutate, result] of [
+      ["a refused read", (calls) => { calls.watermarkResult = 5; }, 5],
+      ["a record of the wrong size", (calls) => { calls.watermarkBytes = 88; }, 255],
+    ]) {
+      const { processor, fake } = makeProcessor();
+      mutate(fake.calls);
+      processor.port.onmessage({ data: { tag: "miso.service.v1" } });
+      assert.equal(processor.ready, false, `${what} is sticky`);
+      const failure = processor.port.posts.at(-1).message;
+      assert.equal(failure.tag, "miso.error.v1", `${what} posts the error`);
+      assert.equal(failure.result, result, `${what} carries its result`);
     }
 
     // Issue #1562a D1, gate 7's worklet half: a `miso.control.v1` message stages its frame,
