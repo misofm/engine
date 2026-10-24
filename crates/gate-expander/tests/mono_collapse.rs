@@ -30,13 +30,18 @@ const LOUD_END: usize = 600;
 /// the disengage. The lanes differ by their noise seed.
 fn sample(lane: usize, frame: usize, noise: &[f32]) -> f32 {
     let loud = frame < LOUD_END || (1100..1200).contains(&frame);
+    let quiet = if lane.is_multiple_of(2) {
+        1.0e-4
+    } else {
+        3.0e-3
+    };
     match frame % 9 {
         0 => f32::from_bits(1),
         1 => -0.0,
         2 => -f32::from_bits(0x007F_FFFF),
         3 => 0.0,
         _ if loud => noise[frame] * 0.8,
-        _ => noise[frame] * if lane % 2 == 0 { 1.0e-4 } else { 3.0e-3 },
+        _ => noise[frame] * quiet,
     }
 }
 

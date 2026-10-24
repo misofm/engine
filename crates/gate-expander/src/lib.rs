@@ -903,8 +903,8 @@ impl<L: Lane, const CONNECTED: bool> PreparedGate<L, CONNECTED> {
     /// so a block with signal never evaluates the predicate.
     ///
     /// `#[inline(never)]`: it carries no vector arithmetic, and out of line it cannot change how
-    /// the kernel inlines into `process_bank`, the one `f32x4` function the wasm kernel roster
-    /// requires for this effect.
+    /// the kernel inlines into `process_bank` and `process_bank_mono`, the `f32x4` functions the
+    /// wasm kernel roster names for this effect.
     ///
     /// `MONO` reads the left plane and the left channel's rest only (issue #973): the right plane
     /// is not gathered, and a collapsed bank's counterfactual right channel is its left one.
@@ -1549,7 +1549,7 @@ impl<L: Lane> PreparedGate<L, false> {
         }
         debug_assert_eq!(block.left.len(), block.frames as usize * L::WIDTH);
         let mut reports = [ProcessReport::default(); MAX_WIDTH];
-        for track in 0..L::WIDTH {
+        for (track, lane_report) in reports.iter_mut().enumerate().take(L::WIDTH) {
             // A padded lane carries no track, so no span is its to apply (issue #1092).
             if !self.is_active(track) {
                 continue;
@@ -1560,7 +1560,7 @@ impl<L: Lane> PreparedGate<L, false> {
                 &block.automation[start..end],
                 block.first_sample,
                 track,
-                &mut reports[track],
+                lane_report,
             );
         }
         let frames = block.frames as usize;

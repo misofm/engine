@@ -196,10 +196,10 @@ impl<L: Lane> GateState<L> {
 ///
 /// # Why `#[inline(never)]` and not generic
 ///
-/// The wasm kernel roster (`scripts/check-web-audioworklet-callgraph.py`) requires exactly one
-/// `gate_expander` function carrying `f32x4` arithmetic, `process_bank`, under a scalar budget it
-/// nearly fills. This function takes plain `f32` values, so its name carries no `f32x4`, and kept
-/// out of line its scalar step is never folded into `process_bank`.
+/// The wasm kernel roster (`scripts/check-web-audioworklet-callgraph.py`) names each
+/// `gate_expander` function carrying `f32x4` arithmetic, `process_bank` and (issue #973)
+/// `process_bank_mono`, under a scalar budget. This function takes plain `f32` values, so its name
+/// carries no `f32x4`, and kept out of line its scalar step is never folded into either.
 #[inline(never)]
 #[must_use]
 pub fn channel_at_rest(coef: &GateCoef<f32>, state: &GateState<f32>) -> bool {

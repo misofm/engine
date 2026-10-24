@@ -56,3 +56,30 @@ turns off the collapse for the whole chain, builtins included, and the track poo
 
 The sidechain-connected gate (never banks); the other three effects (sibling issues).
 
+
+## Decision and evidence record (attempt 1, 2026-10-24)
+
+* Scope note `scope/973.md` accepted by root. Paths: `src/lib.rs`, `src/kernel.rs`,
+  `tests/mono_collapse.rs` (new), `tests/MUTATIONS.md`, this spec. The spec's anchors are stale.
+* Also fixed: the scalar `channel_symmetry` was the default `false`, so the compile pooled a mono
+  track with a gate as Stereo. It now returns the same `DESIGNED` term as the bank, connected or
+  not (the term speaks for designed words only, as the compressor's; the randomized differential
+  with `witness: true` holds on its connected mono scenarios).
+* Kernel: one body, `gate_frames::<L, CONNECTED, RAMPING, MONO>`; `gate_block` is its dual
+  instantiation, so `corpus.rs` is unchanged. `MONO` reads and writes the left plane only and calls
+  the dual `channel_step` with the left word as own, partner and dry.
+* D7 in a collapsed block: the left plane decides, and a failed lane is re-seeded on both
+  channels, as the dual block on `L == R` does. The right `timing` is each channel's own committed
+  values and the disengage copy does not carry it, so a left-only re-seed left the right payload's
+  attack time stale (found red by the new test). Reports duplicate left onto right.
+* `desymmetrize_channels` copies `state[1] = state[0]` and `coef[1] = coef[0]`; `channels_agree`
+  compares those words bit for bit (32 lane words per channel, so no fixed point is needed).
+* Root decision: the spec's console-level gate is dropped (tests-overboard); the rack chain and the
+  randomized differential's collapsed arm already cover the bank surface.
+* Class A evidence (PR, not committed): a scratch digest of the dual scalar and native-bank output,
+  reports and payloads over three link modes, two holds, asymmetric channels and automation was
+  `77de805f037e2064` on base `3b5740cdd` and on this branch, debug and release.
+* Wasm: `process_bank` keeps 162 `f32x4` operations (base 162 vector / 8 scalar, branch 162 / 0);
+  `process_bank_mono` is 82 / 0. The roster row `gate_expander.*4wide6f32x4` now matches two
+  kernels, so it must split into dual (`12process_bank`) and collapsed (`17process_bank_mono`)
+  rows in `scripts/check-web-audioworklet-callgraph.py`, outside this issue's paths.
