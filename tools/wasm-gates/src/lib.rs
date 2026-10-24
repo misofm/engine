@@ -391,6 +391,21 @@ impl Guest {
         }
         Ok(digest)
     }
+
+    /// Requires the guest to trap on the boundary word 8 and on `0x4000_0000`, whose offset
+    /// `word * 4` wraps to 0 in 32-bit arithmetic: a guest that multiplies before it bounds the
+    /// word returns word 0 for it instead of trapping.
+    fn out_of_range_words_trap(&mut self) -> wasmtime::Result<()> {
+        for word in [8_u32, 0x4000_0000] {
+            if let Ok(value) = self.digest_word.call(&mut self.store, (0, 0, word)) {
+                wasmtime::bail!(
+                    "guest returned {value:#010x} for out-of-range digest word {word:#x} instead \
+                     of trapping"
+                );
+            }
+        }
+        Ok(())
+    }
 }
 
 /// Runs the corpus inside `path` under wasmtime and compares every digest against its pin.
@@ -398,8 +413,9 @@ impl Guest {
 /// # Errors
 ///
 /// Returns an error if the module fails to compile, validate or instantiate (which is what a guest
-/// that emits a relaxed-SIMD instruction does), if an export is missing, if the guest traps, or if
-/// the backend it reports, or the lane count of each width it digests at, is not `expected`'s.
+/// that emits a relaxed-SIMD instruction does), if an export is missing, if the guest traps on a
+/// valid read or fails to trap on an out-of-range digest word, or if the backend it reports, or the
+/// lane count of each width it digests at, is not `expected`'s.
 pub fn wasm_report(path: &Path, expected: ExpectedBackend) -> wasmtime::Result<Report> {
     let mut guest = Guest::load(path)?;
     if guest.backend != expected.code() {
@@ -442,6 +458,7 @@ pub fn wasm_report(path: &Path, expected: ExpectedBackend) -> wasmtime::Result<R
     let minmax_lowering_mismatches = guest.minmax_lowering_mismatches()?;
     let f64_lane_mismatches = guest.f64_lane_mismatches()?;
     let meter_block_mismatches = guest.meter_block_mismatches()?;
+    guest.out_of_range_words_trap()?;
 
     Ok(Report {
         leg: "wasm",
