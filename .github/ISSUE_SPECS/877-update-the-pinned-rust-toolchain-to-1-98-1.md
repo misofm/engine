@@ -95,3 +95,11 @@ The scope note (`scope/877.md`) wins for paths and decisions; these changes over
   longer breaks the identity. Its expected-failure row is deleted, as the judge requires.
 - **Release pin.** Any edit of the pin file is a release change to `web-audioworklet-identity.py`,
   so `EXPECTED_WORKLET_SHA256` must equal the pin (correcting the "Pins" bullet above).
+- **Blocked by #1905.** Under 1.99.1 the V8 spill gate (`scripts/check-web-audioworklet-v8-spill.py`)
+  fails three EQ rows: the mono armed depth-2 pair (select-free and masked) carries a stack slot
+  across iterations, and the dual armed depth-2 pair matches two loops and fails closed. The same
+  tree built by 1.97.1 passes every row. #877 waits for #1905, then repins once (pin,
+  `EXPECTED_WORKLET_SHA256`, `release_pin`) and re-records the three browsers once.
+- **For later toolchain bumps.** The V8 spill gate is its own `artifact-gates` step;
+  `scripts/check-web-audioworklet.sh` does not run it. Run it on the named twin with every bump.
+
