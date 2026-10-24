@@ -237,8 +237,8 @@ root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 messages="$(mktemp)"
 trap 'rm -f -- "$messages"' EXIT
 cargo rustc --locked --release --manifest-path "$root/Cargo.toml" -p capi --lib \
-    --crate-type "$crate_type" "${target_args[@]}" --message-format json-render-diagnostics \
-    "${emit_args[@]}" >"$messages" || fail "cargo rustc failed for $target $crate_type"
+    --crate-type "$crate_type" ${target_args[@]+"${target_args[@]}"} --message-format json-render-diagnostics \
+    ${emit_args[@]+"${emit_args[@]}"} >"$messages" || fail "cargo rustc failed for $target $crate_type"
 built="$(python3 -B - "$messages" "$artifact_name" <<'PY'
 import json, sys
 path, name = sys.argv[1:]
