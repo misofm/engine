@@ -2,7 +2,7 @@
 
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { mkdir, mkdtemp, readFile, readdir, rename, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -12,6 +12,16 @@ import { describe, test } from "node:test";
 const executable = resolve(process.env.ENGINECTL ?? "dist/enginectl.js");
 const REPO_ROOT = resolve(import.meta.dirname, "..", "..");
 const CONTENT = `blake3:${"0".repeat(64)}`;
+
+/** Issue #1435: runs `body` in a fresh temporary directory and removes it on every exit path. */
+async function withScratch(prefix, body) {
+  const directory = await mkdtemp(resolve(tmpdir(), prefix));
+  try {
+    return await body(directory);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+}
 
 function request(overrides = {}) {
   return {
@@ -200,21 +210,23 @@ describe("enginectl session build", () => {
   });
 
   test("retired --stems is unknown and publishes no output", async () => {
-    const directory = await mkdtemp(resolve(tmpdir(), "enginectl-retired-stems-"));
-    const output = resolve(directory, "must-not-exist.json");
-    const result = await run(["session", "build", "--stems", directory, "--output", output]);
-    failure(result, 2, "cli.usage");
-    await assert.rejects(readFile(output), (error) => error?.code === "ENOENT");
+    await withScratch("enginectl-retired-stems-", async (directory) => {
+      const output = resolve(directory, "must-not-exist.json");
+      const result = await run(["session", "build", "--stems", directory, "--output", output]);
+      failure(result, 2, "cli.usage");
+      await assert.rejects(readFile(output), (error) => error?.code === "ENOENT");
+    });
   });
 
   test("request input refusal precedes a retired stems-only output preflight", async () => {
-    const directory = await mkdtemp(resolve(tmpdir(), "enginectl-request-precedence-"));
-    const missing = resolve(directory, "missing.json");
-    const output = resolve(directory, "existing.json");
-    await writeFile(output, "sentinel");
-    const result = await run(["session", "build", "--request", missing, "--output", output]);
-    failure(result, 3, "request.read");
-    assert.equal(await readFile(output, "utf8"), "sentinel");
+    await withScratch("enginectl-request-precedence-", async (directory) => {
+      const missing = resolve(directory, "missing.json");
+      const output = resolve(directory, "existing.json");
+      await writeFile(output, "sentinel");
+      const result = await run(["session", "build", "--request", missing, "--output", output]);
+      failure(result, 3, "request.read");
+      assert.equal(await readFile(output, "utf8"), "sentinel");
+    });
   });
 
   test("rich mapping equals the direct builder and entity permutations are canonical", async () => {
@@ -280,13 +292,13 @@ describe("enginectl session build", () => {
   });
 
   test("file output is published before its matching receipt", async () => {
-    const directory = await mkdtemp(resolve(tmpdir(), "enginectl-eval-"));
-    const requestPath = resolve(directory, "request.json");
-    const outputPath = resolve(directory, "session.json");
-    const preloadPath = resolve(directory, "publication-order.mjs");
-    const auditPath = resolve(directory, "publication-order.json");
-    await writeFile(requestPath, JSON.stringify(request()));
-    await writeFile(preloadPath, `
+    await withScratch("enginectl-eval-", async (directory) => {
+      const requestPath = resolve(directory, "request.json");
+      const outputPath = resolve(directory, "session.json");
+      const preloadPath = resolve(directory, "publication-order.mjs");
+      const auditPath = resolve(directory, "publication-order.json");
+      await writeFile(requestPath, JSON.stringify(request()));
+      await writeFile(preloadPath, `
 import { existsSync, writeFileSync } from "node:fs";
 const original = process.stdout.write.bind(process.stdout);
 process.stdout.write = function (...args) {
@@ -294,74 +306,76 @@ process.stdout.write = function (...args) {
   return original(...args);
 };
 `);
-    const result = await run(
-      ["session", "build", "--request", requestPath, "--output", outputPath],
-      undefined,
-      {
-        nodeArgs: ["--import", preloadPath],
-        env: { ENGINECTL_AUDIT: auditPath, ENGINECTL_OUTPUT: outputPath },
-      },
-    );
-    assert.equal(result.status, 0, result.stderr.toString("utf8"));
-    assert.equal(result.stderr.byteLength, 0);
-    assert.deepEqual(JSON.parse(await readFile(auditPath, "utf8")), { published: true });
-    const receipt = JSON.parse(result.stdout.toString("utf8"));
-    const bytes = await readFile(outputPath);
-    assert.equal(receipt.output.path, outputPath);
-    assert.equal(receipt.output.bytes, bytes.byteLength);
-    assert.equal(receipt.output.sha256, createHash("sha256").update(bytes).digest("hex"));
-    assert.equal("resolvedPath" in receipt.output, false);
-    assert.equal(
-      result.stdout.toString("utf8"),
-      `${JSON.stringify({
-        schemaVersion: 1,
-        command: "session.build",
-        output: {
-          path: outputPath,
-          bytes: bytes.byteLength,
-          sha256: createHash("sha256").update(bytes).digest("hex"),
+      const result = await run(
+        ["session", "build", "--request", requestPath, "--output", outputPath],
+        undefined,
+        {
+          nodeArgs: ["--import", preloadPath],
+          env: { ENGINECTL_AUDIT: auditPath, ENGINECTL_OUTPUT: outputPath },
         },
-      })}\n`,
-    );
+      );
+      assert.equal(result.status, 0, result.stderr.toString("utf8"));
+      assert.equal(result.stderr.byteLength, 0);
+      assert.deepEqual(JSON.parse(await readFile(auditPath, "utf8")), { published: true });
+      const receipt = JSON.parse(result.stdout.toString("utf8"));
+      const bytes = await readFile(outputPath);
+      assert.equal(receipt.output.path, outputPath);
+      assert.equal(receipt.output.bytes, bytes.byteLength);
+      assert.equal(receipt.output.sha256, createHash("sha256").update(bytes).digest("hex"));
+      assert.equal("resolvedPath" in receipt.output, false);
+      assert.equal(
+        result.stdout.toString("utf8"),
+        `${JSON.stringify({
+          schemaVersion: 1,
+          command: "session.build",
+          output: {
+            path: outputPath,
+            bytes: bytes.byteLength,
+            sha256: createHash("sha256").update(bytes).digest("hex"),
+          },
+        })}\n`,
+      );
 
-    await writeFile(outputPath, "sentinel");
-    const refused = await run(["session", "build", "--request", requestPath, "--output", outputPath]);
-    failure(refused, 5, "output.publish");
-    assert.equal(await readFile(outputPath, "utf8"), "sentinel");
-    assert.equal((await readdir(directory)).some((name) => name.includes(".enginectl-") && name.endsWith(".tmp")), false);
+      await writeFile(outputPath, "sentinel");
+      const refused = await run(["session", "build", "--request", requestPath, "--output", outputPath]);
+      failure(refused, 5, "output.publish");
+      assert.equal(await readFile(outputPath, "utf8"), "sentinel");
+      assert.equal((await readdir(directory)).some((name) => name.includes(".enginectl-") && name.endsWith(".tmp")), false);
 
-    const replaced = await run(["session", "build", "--request", requestPath, "--output", outputPath, "--overwrite"]);
-    assert.equal(replaced.status, 0, replaced.stderr.toString("utf8"));
-    assert.match(await readFile(outputPath, "utf8"), /^\{\n  "schema_version": 1,/);
+      const replaced = await run(["session", "build", "--request", requestPath, "--output", outputPath, "--overwrite"]);
+      assert.equal(replaced.status, 0, replaced.stderr.toString("utf8"));
+      assert.match(await readFile(outputPath, "utf8"), /^\{\n  "schema_version": 1,/);
+    });
   });
 
   test("a post-publication stdout failure reports effect applied exactly once", async () => {
-    const directory = await mkdtemp(resolve(tmpdir(), "enginectl-report-eval-"));
-    const requestPath = resolve(directory, "request.json");
-    const outputPath = resolve(directory, "session.json");
-    const preloadPath = resolve(directory, "fail-stdout.mjs");
-    await writeFile(requestPath, JSON.stringify(request()));
-    await writeFile(preloadPath, `
+    await withScratch("enginectl-report-eval-", async (directory) => {
+      const requestPath = resolve(directory, "request.json");
+      const outputPath = resolve(directory, "session.json");
+      const preloadPath = resolve(directory, "fail-stdout.mjs");
+      await writeFile(requestPath, JSON.stringify(request()));
+      await writeFile(preloadPath, `
 process.stdout.write = function () {
   const error = Object.assign(new Error("forced stdout stream failure"), { code: "EIO" });
   queueMicrotask(() => process.stdout.emit("error", error));
   return false;
 };
 `);
-    const result = await run(
-      ["session", "build", "--request", requestPath, "--output", outputPath],
-      undefined,
-      { nodeArgs: ["--import", preloadPath] },
-    );
-    assert.equal(result.status, 70);
-    assert.equal(result.stdout.byteLength, 0);
-    assert.match(await readFile(outputPath, "utf8"), /^\{\n  "schema_version": 1,/);
-    const lines = result.stderr.toString("utf8").trimEnd().split("\n");
-    assert.equal(lines.length, 1);
-    const document = JSON.parse(lines[0]);
-    assert.equal(document.error.code, "output.report");
-    assert.equal(document.effect, "applied");
-    assert.doesNotMatch(result.stderr.toString("utf8"), /node:events|Unhandled|\x1b\[/);
+      const result = await run(
+        ["session", "build", "--request", requestPath, "--output", outputPath],
+        undefined,
+        { nodeArgs: ["--import", preloadPath] },
+      );
+      assert.equal(result.status, 70);
+      assert.equal(result.stdout.byteLength, 0);
+      assert.match(await readFile(outputPath, "utf8"), /^\{\n  "schema_version": 1,/);
+      const lines = result.stderr.toString("utf8").trimEnd().split("\n");
+      assert.equal(lines.length, 1);
+      const document = JSON.parse(lines[0]);
+      assert.equal(document.error.code, "output.report");
+      assert.equal(document.effect, "applied");
+      assert.doesNotMatch(result.stderr.toString("utf8"), /node:events|Unhandled|\x1b\[/);
+    });
   });
 
   test("usage and request refusals are structured and create no output", async () => {
@@ -436,45 +450,46 @@ process.stdout.write = function () {
     const built = await run(["session", "build", "--request", "-", "--output", "-"], JSON.stringify(request()));
     assert.equal(built.status, 0, built.stderr.toString("utf8"));
     const text = built.stdout.toString("utf8");
-    const directory = await mkdtemp(resolve(tmpdir(), "enginectl-submix-"));
-    const path = resolve(directory, "session.json");
-    await writeFile(path, text);
-    const canonical = execFileSync(
-      "cargo",
-      ["run", "--locked", "-q", "-p", "session-validator", "--", "validate", "--canonical", path],
-      { cwd: REPO_ROOT, encoding: "utf8", maxBuffer: 1 << 26, stdio: ["ignore", "pipe", "pipe"] },
-    );
-    assert.equal(canonical, text);
-    const model = JSON.parse(text);
-    const low = model.submixes.find((row) => row.id === "low");
-    assert.deepEqual([low.fader.left_db, low.fader.right_db], [-2, -2.5]);
-    assert.deepEqual(model.submixes.find((row) => row.id === "bus").console.map((row) => row.bypass), [true, true]);
-    assert.deepEqual(model.routes.find((row) => row.id === "low-bus").source, { kind: "submix", submix_id: "low", tap: "post_fader" });
+    await withScratch("enginectl-submix-", async (directory) => {
+      const path = resolve(directory, "session.json");
+      await writeFile(path, text);
+      const canonical = execFileSync(
+        "cargo",
+        ["run", "--locked", "-q", "-p", "session-validator", "--", "validate", "--canonical", path],
+        { cwd: REPO_ROOT, encoding: "utf8", maxBuffer: 1 << 26, stdio: ["ignore", "pipe", "pipe"] },
+      );
+      assert.equal(canonical, text);
+      const model = JSON.parse(text);
+      const low = model.submixes.find((row) => row.id === "low");
+      assert.deepEqual([low.fader.left_db, low.fader.right_db], [-2, -2.5]);
+      assert.deepEqual(model.submixes.find((row) => row.id === "bus").console.map((row) => row.bypass), [true, true]);
+      assert.deepEqual(model.routes.find((row) => row.id === "low-bus").source, { kind: "submix", submix_id: "low", tap: "post_fader" });
 
-    for (const [name, edit] of [
-      ["a route source", (body) => { body.routes[3].source = { kind: "submix_output", submixId: "bus" }; }],
-      ["a sidechain source", (body) => {
-        body.tracks[0].spec.inserts[0].options.sidechain.source = { kind: "submix_output", submixId: "bus" };
-      }],
-    ]) {
-      const body = request();
-      edit(body);
-      const result = await run(["session", "build", "--request", "-", "--output", "-"], JSON.stringify(body));
-      failure(result, 3, "request.shape");
-      const document = JSON.parse(result.stderr.toString("utf8"));
-      assert.match(document.error.message, /'submix_output' is retired; read a submix as \{ "kind": "submix", "submixId", "tap" \}/, name);
-      assert.deepEqual(document.diagnostics?.map((row) => row.code), ["schema.invalid_enum"], name);
-    }
+      for (const [name, edit] of [
+        ["a route source", (body) => { body.routes[3].source = { kind: "submix_output", submixId: "bus" }; }],
+        ["a sidechain source", (body) => {
+          body.tracks[0].spec.inserts[0].options.sidechain.source = { kind: "submix_output", submixId: "bus" };
+        }],
+      ]) {
+        const body = request();
+        edit(body);
+        const result = await run(["session", "build", "--request", "-", "--output", "-"], JSON.stringify(body));
+        failure(result, 3, "request.shape");
+        const document = JSON.parse(result.stderr.toString("utf8"));
+        assert.match(document.error.message, /'submix_output' is retired; read a submix as \{ "kind": "submix", "submixId", "tap" \}/, name);
+        assert.deepEqual(document.diagnostics?.map((row) => row.code), ["schema.invalid_enum"], name);
+      }
 
-    // #1205 verdict MINOR-1: a track key on a submix object is refused with the engine's code,
-    // never dropped. Red mutation: allow `source` in the submix object's key check.
-    const stray = request();
-    stray.submixes[1].source = { id: "di", left: 0, right: 0 };
-    const refused = await run(["session", "build", "--request", "-", "--output", "-"], JSON.stringify(stray));
-    failure(refused, 3, "request.shape");
-    const refusal = JSON.parse(refused.stderr.toString("utf8"));
-    assert.match(refusal.error.message, /submixes\[1\]\.source/);
-    assert.deepEqual(refusal.diagnostics?.map((row) => row.code), ["schema.unknown_field"]);
+      // #1205 verdict MINOR-1: a track key on a submix object is refused with the engine's code,
+      // never dropped. Red mutation: allow `source` in the submix object's key check.
+      const stray = request();
+      stray.submixes[1].source = { id: "di", left: 0, right: 0 };
+      const refused = await run(["session", "build", "--request", "-", "--output", "-"], JSON.stringify(stray));
+      failure(refused, 3, "request.shape");
+      const refusal = JSON.parse(refused.stderr.toString("utf8"));
+      assert.match(refusal.error.message, /submixes\[1\]\.source/);
+      assert.deepEqual(refusal.diagnostics?.map((row) => row.code), ["schema.unknown_field"]);
+    });
   });
 
   test("a route request's optional mute reaches the document, and a non-boolean mute is refused", async () => {
@@ -539,35 +554,36 @@ process.stdout.write = function () {
     const built = await run(["session", "build", "--request", "-", "--output", "-"], JSON.stringify(body));
     assert.equal(built.status, 0, built.stderr.toString("utf8"));
     const text = built.stdout.toString("utf8");
-    const directory = await mkdtemp(resolve(tmpdir(), "enginectl-vca-"));
-    const path = resolve(directory, "session.json");
-    await writeFile(path, text);
-    const canonical = execFileSync(
-      "cargo",
-      ["run", "--locked", "-q", "-p", "session-validator", "--", "validate", "--canonical", path],
-      { cwd: REPO_ROOT, encoding: "utf8", maxBuffer: 1 << 26, stdio: ["ignore", "pipe", "pipe"] },
-    );
-    assert.equal(canonical, text);
-    assert.deepEqual(
-      JSON.parse(text).vcas,
-      [
-        { id: "all", fader: { left_db: -1.5, right_db: 0, left_mute: false, right_mute: true }, members: ["drums", "low", "vocal"] },
-        { id: "drums", fader: { left_db: -6, right_db: -6, left_mute: false, right_mute: false }, members: ["bass", "bus"] },
-        { id: "spare", fader: { left_db: 0, right_db: 0, left_mute: false, right_mute: false }, members: [] },
-      ],
-    );
+    await withScratch("enginectl-vca-", async (directory) => {
+      const path = resolve(directory, "session.json");
+      await writeFile(path, text);
+      const canonical = execFileSync(
+        "cargo",
+        ["run", "--locked", "-q", "-p", "session-validator", "--", "validate", "--canonical", path],
+        { cwd: REPO_ROOT, encoding: "utf8", maxBuffer: 1 << 26, stdio: ["ignore", "pipe", "pipe"] },
+      );
+      assert.equal(canonical, text);
+      assert.deepEqual(
+        JSON.parse(text).vcas,
+        [
+          { id: "all", fader: { left_db: -1.5, right_db: 0, left_mute: false, right_mute: true }, members: ["drums", "low", "vocal"] },
+          { id: "drums", fader: { left_db: -6, right_db: -6, left_mute: false, right_mute: false }, members: ["bass", "bus"] },
+          { id: "spare", fader: { left_db: 0, right_db: 0, left_mute: false, right_mute: false }, members: [] },
+        ],
+      );
 
-    // A membership cycle in the request, a self-member included, is refused with the engine's
-    // own code, `vca.cycle`, never a hang and never a misleading missing-member refusal. Red
-    // mutation: `membersFirst` without its open-entry check -> `reference.missing_entity`.
-    for (const vcas of [
-      [{ id: "a", members: ["b"] }, { id: "b", members: ["a"] }],
-      [{ id: "a", members: ["a"] }],
-    ]) {
-      const refused = await run(["session", "build", "--request", "-", "--output", "-"], JSON.stringify(request({ vcas })));
-      failure(refused, 3, "request.shape");
-      assert.deepEqual(JSON.parse(refused.stderr.toString("utf8")).diagnostics?.map((row) => row.code), ["vca.cycle"]);
-    }
+      // A membership cycle in the request, a self-member included, is refused with the engine's
+      // own code, `vca.cycle`, never a hang and never a misleading missing-member refusal. Red
+      // mutation: `membersFirst` without its open-entry check -> `reference.missing_entity`.
+      for (const vcas of [
+        [{ id: "a", members: ["b"] }, { id: "b", members: ["a"] }],
+        [{ id: "a", members: ["a"] }],
+      ]) {
+        const refused = await run(["session", "build", "--request", "-", "--output", "-"], JSON.stringify(request({ vcas })));
+        failure(refused, 3, "request.shape");
+        assert.deepEqual(JSON.parse(refused.stderr.toString("utf8")).diagnostics?.map((row) => row.code), ["vca.cycle"]);
+      }
+    });
   });
 
   test("the request's own key refusals on the console and a track carry the engine's code", async () => {
