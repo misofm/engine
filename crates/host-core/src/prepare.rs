@@ -3039,19 +3039,25 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
         .and_then(NonZeroUsize::new)
         .ok_or_else(|| resource("host.resource.arithmetic"))?;
     let timeline = if timeline_carries {
-        // D3, D7: a vacant timeline owns only its history; the command queue its carry brings is
-        // counted with the carried source overhead, as a carried ring's is.
+        // D3, D7: a vacant timeline owns only its history; the command queue and the seek-report
+        // record (#1704 D4) its carry brings are counted with the carried source overhead, as a
+        // carried ring's are.
         let (consumer, report) =
             SourceTimeline::prepare_vacant(quantum, history_blocks, published_generation.clone())
                 .map_err(|_| resource("host.source.prepare"))?;
+        let carried_timeline = report
+            .command_queue_bytes
+            .checked_add(report.seek_report_bytes)
+            .ok_or_else(|| resource("host.resource.arithmetic"))?;
         carried_total_bytes = carried_total_bytes
-            .checked_add(report.command_queue_bytes)
+            .checked_add(carried_timeline)
             .ok_or_else(|| resource("host.resource.arithmetic"))?;
         carried_overhead_bytes = carried_overhead_bytes
-            .checked_add(report.command_queue_bytes)
+            .checked_add(carried_timeline)
             .ok_or_else(|| resource("host.resource.arithmetic"))?;
-        carried_largest_bytes =
-            carried_largest_bytes.max(report.command_queue_largest_allocation_bytes);
+        carried_largest_bytes = carried_largest_bytes
+            .max(report.command_queue_largest_allocation_bytes)
+            .max(report.seek_report_bytes);
         consumer
     } else {
         let (producer, consumer, _) =
