@@ -3040,10 +3040,9 @@ impl PreparedGraphPlan {
         let Some(program) = self.lowered() else {
             return Err((self, bindings, source_set, "graph.scheduler.layout"));
         };
-        if source_set
-            .as_ref()
-            .is_some_and(|set| source_claims_share_a_buffer(&self.spec, &program, set.claims()))
-        {
+        if source_set.as_ref().is_some_and(|set| {
+            source_claim_slot_written_earlier(&self.spec, &program, set.claims())
+        }) {
             return Err((self, bindings, source_set, "graph.scheduler.source_slot"));
         }
         let planning =
@@ -3080,25 +3079,47 @@ impl PreparedGraphPlan {
     }
 }
 
-/// Whether two source claims map to one arena buffer (issue #932).
+/// Whether some op scheduled before a source claim's input op writes the claim's buffer
+/// (issue #932).
 ///
-/// The colouring hands a freed slot to the next taker, so on a hand-built plan that schedules a
-/// reader-less input before a live one the live input can take the dead input's slot. The copy loop
-/// fills every claim's buffer at the top of the block in claim order, so the later claim's words
-/// would then overwrite the earlier claim's. Bind refuses that shape; no compiled Session V1 plan
-/// has it. `claims` are already validated, so each one names a node of `spec`.
-fn source_claims_share_a_buffer(
+/// The copy loop fills every claim's buffer at the top of the block, and the colouring hands a
+/// freed slot to the next taker. On a hand-built plan an earlier op -- another claim's input, any
+/// other node, or a compensation-delay staging copy -- can own the slot first, die, and leave it to
+/// the claim's input, so its write would overwrite the copied words. Bind refuses a claim unless its
+/// input op is the first op that writes its buffer, and a claim whose node has no op. `claims` are
+/// already validated, so each one names a node of `spec`. One pass over the ops, control plane only.
+fn source_claim_slot_written_earlier(
     spec: &GraphSpec,
     program: &program::ExecutionProgram,
     claims: &[GraphSourceInputClaim],
 ) -> bool {
-    let mut buffers = Vec::with_capacity(claims.len());
-    buffers.extend(claims.iter().map(|claim| {
-        let node = program::node_index(spec, &claim.node).expect("validated source claim");
-        program.node_buffer[node as usize].0
-    }));
-    buffers.sort_unstable();
-    buffers.windows(2).any(|pair| pair[0] == pair[1])
+    let mut first_writer = vec![u32::MAX; program.buffers as usize];
+    let mut record = |buffer: program::BufferRef, op: u32| {
+        if let Some(first) = first_writer.get_mut(buffer.0 as usize)
+            && *first == u32::MAX
+        {
+            *first = op;
+        }
+    };
+    for (op_index, op) in program.ops.iter().enumerate() {
+        let op_index = op_index as u32;
+        for input in program.inputs_of(op) {
+            if let Some(delay) = input.delay {
+                record(delay.staging, op_index);
+            }
+        }
+        if let Some(delay) = op.sidechain.and_then(|side| side.delay) {
+            record(delay.staging, op_index);
+        }
+        record(op.output, op_index);
+    }
+    claims.iter().any(|claim| {
+        let node = program::node_index(spec, &claim.node).expect("validated source claim") as usize;
+        match program.node_op[node] {
+            Some(op) => first_writer.get(program.node_buffer[node].0 as usize) != Some(&op),
+            None => true,
+        }
+    })
 }
 
 pub struct PreparedGraphPlanParts {
@@ -3301,9 +3322,9 @@ pub(crate) trait GraphSourcePlanes {
 /// Its claims, envelope, resource report, and driver ownership become immutable once prepared;
 /// callers can only move it into a transactional graph bind.
 ///
-/// After a successful bind no two claims share an arena buffer: bind refuses a plan whose
-/// colouring maps two claims to one buffer with `graph.scheduler.source_slot` (issue #932), so the
-/// block-top copy of one claim never overwrites another's.
+/// After a successful bind no op scheduled before a claim's input op writes its buffer: bind
+/// refuses any other plan with `graph.scheduler.source_slot` (issue #932), so nothing overwrites a
+/// claim's block-top copy before its input op. In particular no two claims share a buffer.
 pub struct GraphPreparedSourceSet {
     envelope: RenderEnvelope,
     claims: Box<[GraphSourceInputClaim]>,
@@ -7220,12 +7241,13 @@ mod tests {
         assert_eq!(failure.code, "graph.plan.binding");
     }
 
-    /// Issue #932: a hand-built plan that schedules a reader-less input (`b`) before a live one
-    /// (`a`) lets `a` take `b`'s freed slot, so two claims share one buffer and the block-top copy
-    /// of `b` (the later claim) would overwrite `a`'s planes. Bind refuses it; with both inputs in
-    /// level 0 in node order `a` takes its slot first and the plan binds.
+    /// Issue #932: a hand-built plan that schedules a reader-less input (`b`) before a live claimed
+    /// input (`a`) lets `a` take `b`'s freed slot, so `b`'s op writes `a`'s buffer before `a`'s
+    /// input op and would overwrite `a`'s block-top copy. Bind refuses it whether `b` is a second
+    /// claim or a processor-bound node; with both inputs in level 0 in node order `a` writes its
+    /// slot first and the plan binds.
     #[test]
-    fn bind_refuses_two_source_claims_mapped_to_one_buffer() {
+    fn bind_refuses_a_source_claim_whose_buffer_an_earlier_op_writes() {
         let track_input = |track: &str| GraphNodeId::TrackStage {
             track_id: StableGraphId::parse(track).expect("ID"),
             stage: TrackStage::Input,
@@ -7234,52 +7256,78 @@ mod tests {
         let output = GraphNodeId::Output {
             output_id: StableGraphId::parse("main").expect("ID"),
         };
-        let (mut plan, mut bindings, _) = binding_plan();
-        plan.spec.nodes = sorted_nodes(
-            [&live, &dead, &output]
-                .map(|id| GraphNode {
-                    id: id.clone(),
-                    latency: LatencySamples(0),
-                    tail: TailSamples::Finite(0),
-                })
-                .to_vec(),
-        );
-        plan.spec.edges[0].source.node = live.clone();
-        plan.required_bindings = vec![live.clone(), dead.clone(), output.clone()];
-        bindings.nodes = vec![GraphNodeBinding::new(output.clone(), Box::new(Noop))];
-        let levels = |levels: &[&[&GraphNodeId]]| {
-            levels
+        let set_levels = |plan: &mut PreparedGraphPlan, levels: &[&[&GraphNodeId]]| {
+            plan.dependency_levels = levels
                 .iter()
                 .enumerate()
                 .map(|(level, nodes)| DependencyLevel {
                     level: level as u64,
                     nodes: nodes.iter().map(|node| (*node).clone()).collect(),
                 })
-                .collect::<Vec<_>>()
-        };
-        let set_levels = |plan: &mut PreparedGraphPlan, shape: Vec<DependencyLevel>| {
-            plan.sequential_schedule = shape
+                .collect();
+            plan.sequential_schedule = plan
+                .dependency_levels
                 .iter()
                 .flat_map(|level| level.nodes.iter().cloned())
                 .collect();
-            plan.dependency_levels = shape;
         };
-        set_levels(&mut plan, levels(&[&[&dead], &[&live], &[&output]]));
-        let source_set = GraphPreparedSourceSet::new(
-            plan.envelope,
-            vec![
-                GraphSourceInputClaim { node: live.clone() },
-                GraphSourceInputClaim { node: dead.clone() },
-            ],
-            GraphSourceSetResourceReport {
-                pcm_payload_already_charged_bytes: 0,
-                overhead_bytes: 0,
-                total_engine_owned_bytes: 0,
-                largest_allocation_bytes: 0,
-            },
-            Box::new(SilentSourceSetDriver { claims: 2 }),
-        );
-        let failure = match plan.bind_with_source_set(bindings, source_set) {
+        // `dead` before `live`, in two levels: the only order that shares the slot.
+        let dead_first = |bound: &[&GraphNodeId]| {
+            let (mut plan, mut bindings, _) = binding_plan();
+            plan.spec.nodes = sorted_nodes(
+                [&live, &dead, &output]
+                    .map(|id| GraphNode {
+                        id: id.clone(),
+                        latency: LatencySamples(0),
+                        tail: TailSamples::Finite(0),
+                    })
+                    .to_vec(),
+            );
+            plan.spec.edges[0].source.node = live.clone();
+            plan.required_bindings = vec![live.clone(), dead.clone(), output.clone()];
+            bindings.nodes = bound
+                .iter()
+                .map(|node| GraphNodeBinding::new((*node).clone(), Box::new(Noop)))
+                .collect();
+            set_levels(&mut plan, &[&[&dead], &[&live], &[&output]]);
+            (plan, bindings)
+        };
+        let source_set = |claims: &[&GraphNodeId]| {
+            GraphPreparedSourceSet::new(
+                RenderEnvelope {
+                    sample_rate: engine::SampleRateHz(48_000),
+                    quantum: QuantumFrames(1),
+                    output_channels: core::num::NonZeroUsize::new(2).expect("two"),
+                },
+                claims
+                    .iter()
+                    .map(|node| GraphSourceInputClaim {
+                        node: (*node).clone(),
+                    })
+                    .collect(),
+                GraphSourceSetResourceReport {
+                    pcm_payload_already_charged_bytes: 0,
+                    overhead_bytes: 0,
+                    total_engine_owned_bytes: 0,
+                    largest_allocation_bytes: 0,
+                },
+                Box::new(SilentSourceSetDriver {
+                    claims: claims.len(),
+                }),
+            )
+        };
+
+        // An unclaimed, processor-bound `b` writes the slot `a`'s claim then takes.
+        let (plan, bindings) = dead_first(&[&dead, &output]);
+        let failure = match plan.bind_with_source_set(bindings, source_set(&[&live])) {
+            Ok(_) => panic!("claim on an earlier op's buffer accepted"),
+            Err(failure) => failure,
+        };
+        assert_eq!(failure.code, "graph.scheduler.source_slot");
+
+        // Two claims on one buffer.
+        let (plan, bindings) = dead_first(&[&output]);
+        let failure = match plan.bind_with_source_set(bindings, source_set(&[&live, &dead])) {
             Ok(_) => panic!("two claims on one buffer accepted"),
             Err(failure) => failure,
         };
@@ -7287,7 +7335,7 @@ mod tests {
         assert_eq!(failure.source_set.claims().len(), 2);
 
         let mut plan = *failure.plan;
-        set_levels(&mut plan, levels(&[&[&live, &dead], &[&output]]));
+        set_levels(&mut plan, &[&[&live, &dead], &[&output]]);
         plan.bind_with_source_set(failure.bindings, failure.source_set)
             .unwrap_or_else(|failure| panic!("disjoint source slots: {}", failure.code));
     }
