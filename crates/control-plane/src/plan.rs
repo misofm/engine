@@ -65,6 +65,10 @@ pub struct PlanState<A: ControlAdapter> {
     /// applies it before each block, so the gate moves only here, between blocks. `None` when the
     /// delivery shares this thread (the browser), whose gate the delivery moves between blocks.
     pub(crate) output_gate: Option<host_core::meters::OutputPeakGateRelay>,
+    /// The epoch of the plan the last rendered block ran (#1587a): a block whose report names
+    /// another adopted a successor, and [`Self::render`] restarts the relay's gate there when the
+    /// successor carried no strip meter.
+    pub(crate) rendered_epoch: u64,
 }
 
 impl<A: ControlAdapter> PlanState<A> {
@@ -82,6 +86,7 @@ impl<A: ControlAdapter> PlanState<A> {
             fp_env_attested: core::cell::Cell::new(false),
             output_meter,
             output_gate,
+            rendered_epoch: 0,
         }
     }
 }
@@ -374,6 +379,18 @@ impl<A: ControlAdapter> PlanState<A> {
                 return Err(error);
             }
         };
+        // #1587a: a block that adopted a successor whose strip meters were not carried restarted
+        // the strip meter grid at its first sample, so the output meter's gate restarts there
+        // too, before `observe_rendered_block` folds the block: the rule of the control thread's
+        // `MeterDelivery::adopt`, whose request then asks for the same value.
+        if report.active_epoch.0 != self.rendered_epoch {
+            self.rendered_epoch = report.active_epoch.0;
+            if !self.owner.active_strip_meters_carried()
+                && let Some(relay) = self.output_gate.as_mut()
+            {
+                relay.restart_at(absolute_sample);
+            }
+        }
         self.shared
             .active_epoch
             .store(report.active_epoch.0, Ordering::Release);

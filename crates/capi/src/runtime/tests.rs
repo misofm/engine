@@ -5420,13 +5420,6 @@ fn a_refused_meter_table_is_typed_and_changes_nothing() {
             "meter.gain_reduction.unavailable",
             path(1),
         ),
-        (
-            vec![strip("eq0", protocol::MeterMetric::Peak)],
-            window,
-            StatusCode::Unavailable,
-            "meter.strip.unavailable",
-            path(0),
-        ),
     ];
     for (request, (meters, period, status, code, at)) in (2..).zip(refusals) {
         assert_eq!(

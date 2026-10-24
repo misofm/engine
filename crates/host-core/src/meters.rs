@@ -202,6 +202,20 @@ impl OutputPeakGateRelay {
             self.gate.0.store(requested, Ordering::Release);
         }
     }
+
+    /// Restart the gate on a new grid at `adoption_sample`, the first sample of a block that
+    /// adopted a successor whose strip meters were not carried (#1587a). Call it on the render
+    /// thread after the swap and before the block's output fold. An active gate, open or waiting,
+    /// moves to `adoption_sample`, and an inactive one stays shut. This is the control thread's
+    /// rule too: [`MeterDelivery::adopt`] moves the grid's origin there, and its `align` at the
+    /// same sample asks for that same value. `applied` does not change, so an unchanged request
+    /// never undoes the move, and the request the control thread makes after it asks for the
+    /// value the gate already holds. One `Acquire` load and at most one `Release` store.
+    pub fn restart_at(&mut self, adoption_sample: u64) {
+        if self.gate.0.load(Ordering::Acquire) != INACTIVE {
+            self.gate.0.store(adoption_sample, Ordering::Release);
+        }
+    }
 }
 
 impl OutputPeakObserver {
@@ -626,6 +640,30 @@ impl MeterTables {
             carried_from: filled(meter_count, 0)?,
             frame: MeterFrame::new(strip_count)?,
         })
+    }
+
+    /// The tables of a plan that meters nothing and has no strip: they allocate nothing, so
+    /// they cannot fail.
+    #[must_use]
+    pub fn empty() -> Self {
+        Self {
+            pending: Box::default(),
+            remaining: Box::default(),
+            carried_from: Box::default(),
+            frame: MeterFrame {
+                first_sample: 0,
+                end_sample: 0,
+                windows: 0,
+                sequence: 0,
+                generation: 0,
+                validity: MeterValidity::NONE,
+                loss_count: 0,
+                strip_peaks: Box::default(),
+                output_peak: [0.0; 2],
+                strip_gain_reduction_db: Box::default(),
+                strip_gain_reduction_present: Box::default(),
+            },
+        }
     }
 
     /// The strip meters the tables serve.
@@ -1380,6 +1418,24 @@ pub struct MeterBatchWindow {
     pub output_valid: bool,
 }
 
+/// One meter table entry's strip peak over a batch's frames (#1587a), as
+/// [`MeterBatchFold::push_with_strips`] folds it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct StripPeakFold {
+    /// The strip's left and right peaks: the frames' maxima.
+    pub peak: [f32; 2],
+    /// Whether every frame of the batch was complete and had the strip.
+    pub present: bool,
+}
+
+impl StripPeakFold {
+    /// A fold before its batch's first frame.
+    pub const START: Self = Self {
+        peak: [0.0; 2],
+        present: true,
+    };
+}
+
 /// The fold of a meter delivery's published frames into meter batches (#1583 D5; shared with
 /// #1587 and #1588): `windows_per_batch` consecutive frames make one batch. The peaks are the
 /// maxima, the span is the first frame's start to the last frame's end, and a gap between two
@@ -1438,6 +1494,23 @@ impl MeterBatchFold {
 
     /// Fold one published `frame`. Returns the batch it completes, if any.
     pub fn push(&mut self, frame: &MeterFrame) -> Option<MeterBatchWindow> {
+        self.push_with_strips(frame, &[], &mut [])
+    }
+
+    /// Fold one published `frame`, and into `folds` the strip peaks the meter table's entries
+    /// read (#1587a). `strips[i]` is entry `i`'s strip in `frame` (its index in
+    /// [`MeterFrame::strip_peaks`]), or `None` when the plan that published `frame` has no such
+    /// strip or the entry reads no strip peak; `folds[i]` is that entry's fold, which the caller
+    /// reads when the call returns a batch. A batch's first frame resets every fold. An entry's
+    /// peaks are the maxima of its strip's peaks over the batch's frames, and it is present only
+    /// when every frame of the batch is complete ([`MeterValidity::COMPLETE`]) and has its strip.
+    /// Allocates nothing.
+    pub fn push_with_strips(
+        &mut self,
+        frame: &MeterFrame,
+        strips: &[Option<u32>],
+        folds: &mut [StripPeakFold],
+    ) -> Option<MeterBatchWindow> {
         if self.folded != 0
             && (frame.generation != self.generation || frame.first_sample != self.end_sample)
         {
@@ -1448,6 +1521,19 @@ impl MeterBatchFold {
             self.generation = frame.generation;
             self.output_peak = [0.0; 2];
             self.output_valid = true;
+            folds.fill(StripPeakFold::START);
+        }
+        let complete = frame.validity.contains(MeterValidity::COMPLETE);
+        for (strip, fold) in strips.iter().zip(folds.iter_mut()) {
+            let peak = strip
+                .and_then(|strip| usize::try_from(strip).ok())
+                .and_then(|strip| frame.strip_peaks.get(strip))
+                .filter(|_| complete);
+            if let Some(peak) = peak {
+                fold.peak = [fold.peak[0].max(peak[0]), fold.peak[1].max(peak[1])];
+            } else {
+                fold.present = false;
+            }
         }
         self.output_peak = [
             self.output_peak[0].max(frame.output_peak[0]),

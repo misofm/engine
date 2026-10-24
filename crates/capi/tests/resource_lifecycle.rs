@@ -708,7 +708,11 @@ impl HostHalf {
             + self.prepared.report.route_control_resources.total_bytes
             + self.prepared.report.inventory_retained_bytes
             // #1696 D3: the epoch's monitor overlay row, at its model's bounds.
-            + self.monitor_and_ramp_rows().0;
+            + self.monitor_and_ramp_rows().0
+            // #1587a R2: the epoch's meter tables, one entry per meter and per strip.
+            + host_core::MeterTables::new(self.meters.len(), self.strips.len())
+                .expect("the meter tables")
+                .heap_bytes() as u64;
         // The token also holds the commit's one `OBSERVATION_ENDED` event (#1584 D6a), which the
         // control plane bounds by the frame it must fit.
         let (_, ended_event) =
@@ -788,6 +792,10 @@ struct CompileObservation {
     /// `control_plane::monitor_and_ramp_bytes` over the compiled model: bounds, not allocations,
     /// since a boot solos nothing and keeps no ramp.
     monitor_and_ramps: u64,
+    /// The strip-ID text the two stored meter tables can own (#1587a, #1325a's rule), from
+    /// `control_plane::meter_text_reserve_bytes` at the compile's control frame: a bound, not an
+    /// allocation, since a boot configures no table.
+    meter_text_reserve: u64,
 }
 
 fn observe_compile(document: &str, compile_limits: &CompileLimits) -> CompileObservation {
@@ -842,6 +850,9 @@ fn observe_compile(document: &str, compile_limits: &CompileLimits) -> CompileObs
         control_plane::monitor_and_ramp_bytes(store.compiled().normalized_model())
             .expect("the monitor and ramp rows");
     let monitor_and_ramps = overlay_row + ramp_row;
+    let meter_text_reserve =
+        control_plane::meter_text_reserve_bytes(compile_limits.maximum_control_frame_bytes)
+            .expect("the meter text reserve");
     let host_core::PreparedHost {
         plan,
         sources,
@@ -887,6 +898,7 @@ fn observe_compile(document: &str, compile_limits: &CompileLimits) -> CompileObs
         strip_table_charge,
         observation_reserve,
         monitor_and_ramps,
+        meter_text_reserve,
     }
 }
 
@@ -933,13 +945,14 @@ impl CompileObservation {
                 + self.owners.observations
                 + self.observation_reserve
                 + self.monitor_and_ramps
+                + self.meter_text_reserve
                 + decode_field_rounding,
             self.report.capi_retained_bytes,
             "{label}: capi's own allocations + the effect producers + the strip producers + the \
              source producers + the parameter catalog + the plan state inventory + the \
              observation readers + the decode-field rounding, all observed (left; the send producers' row is the graph \
              function's total, and the observation reserve and the monitor and ramp rows are the control \
-             plane's bounds), against \
+             plane's bounds, as is the meter tables' text), against \
              `capi_retained_bytes` (right)"
         );
     }

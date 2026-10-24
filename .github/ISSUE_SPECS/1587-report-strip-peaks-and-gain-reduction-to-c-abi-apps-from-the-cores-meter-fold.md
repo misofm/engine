@@ -124,3 +124,35 @@ Commands: `cargo test --locked -p host-core --all-features`,
 
 - With #1581 and #1583, supersedes *Report each configured meter handle's own meter in the C ABI
   meter batch* (#1352); it closes when this slice merges.
+
+## Decision record (#1587a, 2026-10-24)
+
+- **Split.** #1587a is strip peaks only; gain reduction is #1587b (after #1585a). D1's "(new)
+  `MeterDelivery::adopt`" is read as "call the existing one" (scope R5).
+- **R1' (root, binding; replaces R1).** The adoption sample of epoch E is the retired
+  predecessor plan's `next_absolute_sample()`, taken on the reclaim path of
+  `synchronize_plan_epochs`, where `MeterDelivery::adopt` runs (`adopt_meters`). Reasons R1 (a
+  render-side `active_epoch_sample` atomic) was wrong: render retires the predecessor inside
+  `render_contiguous`, before `PlanState::render` could store a sample, so the reclaim path can
+  promote before the sample exists; two single-writer words read as a pair tear; and a second
+  adoption before the control thread promotes overwrites the first one's sample, which a carried
+  swap after an uncarried one needs. `synchronize_plan_epochs` loads `active_epoch` (Acquire)
+  before it drains, so outside the test hold every promotion is a reclaim's; with the hold on the
+  atomic still promotes and the delivery waits (`SessionMeters::epoch`; no poll until it is the
+  running epoch), catching up one epoch per reclaim. B-1's drain-first rule is unchanged.
+- **Gate.** At a block that adopts a successor whose strip meters were not carried,
+  `PlanState::render` calls `OutputPeakGateRelay::restart_at(block start)`: an active gate moves
+  there and `applied` is unchanged. That is the rule of the control thread's `align` at the
+  adoption sample, so its later request asks for the value the gate holds. The relay stays the
+  one writer.
+- **R2.** `ProviderEpoch::meter_tables`, built in `prepare_runtime` for a `METER_DELIVERY`
+  adapter, charged as an epoch row. The running epoch's tables live in the delivery; a parked
+  epoch gets its own back at the adoption that displaced it.
+- **R4.** `SessionMeters::{resolution, folds}`, reserved at boot for the most table entries,
+  rebuilt at each accepted configure and each meter adoption against the strip meters of the
+  epoch whose frames the delivery folds (not the committed model: a pending rebuild never
+  relabels a record).
+- **Records bound.** A batch carries at most 256 records, so the provider refuses the 129th peak
+  entry: `INVALID_FIELD`, `meter.records`, at that entry. The lossy lane is sized to 256 slots.
+- **Charge.** The strip-ID text of the two stored tables is charged at 256 entries x
+  `STABLE_ID_MAXIMUM_BYTES` x 2 (`meter_text_reserve_bytes`), with the resolution and fold vectors.
