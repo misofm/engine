@@ -201,11 +201,12 @@ fn fold_pcm(digest: &mut u64, left: &[f32], right: &[f32]) {
 fn assert_schedule_block(block: u64, left: &[f32; QUANTUM], right: &[f32; QUANTUM]) {
     let start = usize::try_from(block).expect("six blocks") * QUANTUM * 2 * 4;
     let expected = &EXPECTED_SCHEDULE_PCM[start..start + QUANTUM * 2 * 4];
-    for (sample, word) in left.iter().chain(right).zip(expected.chunks_exact(4)) {
-        assert_eq!(
-            sample.to_bits(),
-            u32::from_le_bytes(word.try_into().expect("word"))
-        );
+    for (sample, word) in left
+        .iter()
+        .chain(right)
+        .zip(expected.as_chunks::<4>().0.iter())
+    {
+        assert_eq!(sample.to_bits(), u32::from_le_bytes(*word));
     }
 }
 

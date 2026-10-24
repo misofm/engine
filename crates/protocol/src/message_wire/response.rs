@@ -313,7 +313,12 @@ fn read_packed(value: &[u8]) -> Result<Vec<f32>, DecodeError> {
     if !value.len().is_multiple_of(4) {
         return Err(DecodeError::InvalidValueLength);
     }
-    value.chunks_exact(4).map(read_f32).collect()
+    value
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|word| read_f32(word))
+        .collect()
 }
 
 pub(crate) fn write_response_request(

@@ -7364,7 +7364,9 @@ fn a_session_replace_is_unavailable_on_the_browser_and_refused_without_its_docum
             };
             capabilities
                 .supported_commands
-                .chunks_exact(2)
+                .as_chunks::<2>()
+                .0
+                .iter()
                 .any(|id| u16::from_le_bytes([id[0], id[1]]) == 0x0013)
         };
         let get = || CommandPayload::CapabilitiesGet;

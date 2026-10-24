@@ -70,7 +70,13 @@ impl GraphPreparedSourceSetDriver for Played {
         let block = first_sample / u64::from(frames);
         self.played = block % UNDERRUN_EVERY != UNDERRUN_EVERY - 1;
         if self.played {
-            for (channel, plane) in self.planes.chunks_exact_mut(FRAMES as usize).enumerate() {
+            for (channel, plane) in self
+                .planes
+                .as_chunks_mut::<{ FRAMES as usize }>()
+                .0
+                .iter_mut()
+                .enumerate()
+            {
                 for (frame, word) in plane.iter_mut().enumerate() {
                     let value = (block as usize * 31 + channel * 7 + frame) % 97;
                     *word = (value as f32 - 48.0) * 0.0625;

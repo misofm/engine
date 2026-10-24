@@ -3397,7 +3397,9 @@ fn provider_feature_matrix_derives_capabilities_and_refuses_disabled_dispatch() 
             assert!(
                 decoded
                     .supported_commands
-                    .chunks_exact(2)
+                    .as_chunks::<2>()
+                    .0
+                    .iter()
                     .any(|id| u16::from_le_bytes([id[0], id[1]]) == required_command)
             );
         }
@@ -3405,7 +3407,9 @@ fn provider_feature_matrix_derives_capabilities_and_refuses_disabled_dispatch() 
             assert!(
                 decoded
                     .supported_events
-                    .chunks_exact(2)
+                    .as_chunks::<2>()
+                    .0
+                    .iter()
                     .any(|id| u16::from_le_bytes([id[0], id[1]]) == required_event)
             );
         }
@@ -3455,13 +3459,17 @@ fn provider_feature_matrix_derives_capabilities_and_refuses_disabled_dispatch() 
     assert!(
         !decoded
             .supported_commands
-            .chunks_exact(2)
+            .as_chunks::<2>()
+            .0
+            .iter()
             .any(|value| u16::from_le_bytes([value[0], value[1]]) == 3)
     );
     assert!(
         !decoded
             .supported_events
-            .chunks_exact(2)
+            .as_chunks::<2>()
+            .0
+            .iter()
             .any(|value| { matches!(u16::from_le_bytes([value[0], value[1]]), 0x8001) })
     );
     assert_eq!(decoded.flags.0 & ((1 << 3) | (1 << 12)), 0);
@@ -4412,7 +4420,9 @@ fn the_capability_registry_lists_the_control_messages_and_not_the_retired_ones()
             .expect("capabilities");
         let commands = decoded
             .supported_commands
-            .chunks_exact(2)
+            .as_chunks::<2>()
+            .0
+            .iter()
             .map(|id| u16::from_le_bytes([id[0], id[1]]))
             .collect::<Vec<_>>();
         // Bit 14 tracks `RESPONSE_GET` whatever else is listed.
@@ -4507,7 +4517,9 @@ fn a_frame_under_the_retired_automation_id_is_refused_before_any_state_changes()
         .expect("a capabilities record that passes the wire validator");
     let commands = decoded
         .supported_commands
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .map(|id| u16::from_le_bytes([id[0], id[1]]))
         .collect::<Vec<_>>();
     assert!(!commands.contains(&6), "{commands:?}");
@@ -4648,12 +4660,16 @@ fn a_capability_frame_must_tie_bit_14_to_the_response_message() {
         .expect("registry");
     let commands = decoded
         .supported_commands
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .map(|id| u16::from_le_bytes([id[0], id[1]]))
         .collect::<Vec<_>>();
     let events = decoded
         .supported_events
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .map(|id| u16::from_le_bytes([id[0], id[1]]))
         .collect::<Vec<_>>();
     let rebuilt = |commands: &[u16], flags: u64| {

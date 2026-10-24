@@ -379,7 +379,9 @@ fn at_rest(state: &[u32]) -> bool {
     state[0] == 0
         && state[1..1 + COEF_COUNT].iter().all(|word| finite(*word))
         && ramps
-            .chunks_exact(4)
+            .as_chunks::<4>()
+            .0
+            .iter()
             .all(|ramp| finite(ramp[0]) && ramp[0] == ramp[1] && ramp[3] == 0)
 }
 

@@ -74,7 +74,7 @@ that the pinned set compiles; they are not deployment defaults.
 
 ## Reproducible checks
 
-The pinned `rust-toolchain.toml` installs Rust 1.97.1 with `clippy`, `rustfmt`, and the browser
+The pinned `rust-toolchain.toml` installs Rust 1.99.1 with `clippy`, `rustfmt`, and the browser
 Wasm standard library. The relevant commands are:
 
 ```bash
@@ -160,11 +160,11 @@ they were never part of the scheduler and are not affected by its removal.
 #378 kept this register while native AArch64 was unsupported. #1017 reopened each entry on the
 AArch64 legs. Each open entry is an expected failure, by name:
 
-- **LANE-3 (#1019).** On AArch64 release builds the D8 `max`/`min` fold into `fmaxnm`/`fminnm`,
-  which answer differently on NaN and signed-zero inputs. Gate G1's op-level pool passes on AArch64
-  (1.97.1). The fold shows in `math`'s M2 inside `exp2_lane` and `log2_lane`, scalar and vector
-  alike. Expected failures in `aarch64-release`: `math` `m2_lane_identity`
-  `m2_exp2_lane_identity` and `m2_log2_lane_identity`. Both pass in the debug leg.
+- **Resolved by #877: LANE-3 (#1019).** On AArch64 release builds the D8 `max`/`min` fold into
+  `fmaxnm`/`fminnm`, which answer differently on NaN and signed-zero inputs. Under Rust 1.97.1 the
+  fold showed in `math`'s M2 inside `exp2_lane` and `log2_lane`; `log2_lane` passed after #1451, and
+  under Rust 1.99.1 `m2_exp2_lane_identity` passes in `aarch64-release` too, so no expected-failure
+  row remains.
 - **Resolved by #1065: AArch64 NaN encodings.** Found by #1017. Not LANE-3: no code shape changes
   a CPU's NaN rule, and the wasm spec leaves the same bits unspecified in the browser. An
   arithmetic NaN on AArch64 is `0x7FC00000`, where x86 answers `0xFFC00000`, and a signalling

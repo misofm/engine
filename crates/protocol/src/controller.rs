@@ -333,7 +333,7 @@ impl ReplayCache {
     pub fn try_new(config: ReplayCacheConfig) -> Result<Self, ReplayCacheError> {
         Self::resource_report_for_config(config)?;
         let cache_id = NEXT_REPLAY_CACHE_ID
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |id| id.checked_add(1))
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |id| id.checked_add(1))
             .map_err(|_| ReplayCacheError::ResourceOverflow)?;
         let mut entries = Vec::new();
         entries

@@ -30,6 +30,7 @@ QUALIFICATION = ROOT / ".github/workflows/qualification.yml"
 PACKAGE = "@misofm/engine"
 VERSION = "0.4.3"
 EXPECTED_SHA = "a" * 40
+RUST_RELEASE = "1.99.1"
 
 # The workflow was read and hashed before the authorized release edits. Normalizing precisely the
 # current #865 version/pin and the standing mode edits back out makes the test an invariant audit
@@ -53,7 +54,7 @@ STEP_HEADERS = (
     "      - name: Guard release identity, accepted ancestry, and rejected commits",
     "      - name: Require a successful qualification dispatch before publication or recovery",
     "      - name: Pin npm 11.19.0 for packing, trusted-publisher checks, and provenance verification",
-    "      - name: Install Rust 1.97.1 and the Wasm target",
+    f"      - name: Install Rust {RUST_RELEASE} and the Wasm target",
     "      - name: Install locked SDK dependencies",
     "      - name: Build the shipped Engine AudioWorklet closure once and prove its Linux pin",
     "      - name: Run generated, deletion, type, headless, and package preparation gates",
@@ -192,13 +193,17 @@ def normalize_authorized_edits(text: str) -> str:
             "shared re-smoke step must export MODE exactly once")
     require(text.count(PUBLISH_GUARD) == 1,
             "shared re-smoke step must carry exactly one publish-only dry-run guard")
-    # #865 changes only five version literals and the accepted artifact pin.
+    # #865 changes only five version literals and the accepted artifact pin (re-pinned by #877).
     # Keep the historical baseline hash, so no other workflow edits are normalized away.
     require(text.count("0.4.3") == 5, "expected five exact #865 release-version guards")
-    release_pin = "e18acf9ca97af137a1917e52481c4bf962943d6d755369387969f84c3e381106"
+    release_pin = "47e9c6991cc23b3960d7d24bff1eef4590e13e89599a024e5df788f534ac6eb7"
     baseline_pin = "47d12d99c034a3209b9d142d51d5a1ea62c4bcbdbbb90dc074546b7a6f6d85ba"
     require(text.count(release_pin) == 1, "expected the exact accepted #865 artifact pin")
     text = text.replace("0.4.3", "0.2.4").replace(release_pin, baseline_pin, 1)
+    # #877 moves the pinned Rust release in exactly two places: `RUSTUP_TOOLCHAIN` and the
+    # toolchain step's name. The baseline hash was taken under 1.97.1.
+    require(text.count(RUST_RELEASE) == 2, "expected the pinned Rust release exactly twice")
+    text = text.replace(RUST_RELEASE, "1.97.1")
     return text.replace(MODE_ENV, "", 1).replace(PUBLISH_GUARD, PUBLISH_DRY_RUN, 1)
 
 
@@ -684,7 +689,7 @@ def test_invalid_shapes(workflow: str) -> None:
     expect_invalid("folded run block", lambda: extract_steps(unknown_run))
     for label, old, new in (
         ("wrong release version", 'PACKAGE_VERSION: "0.4.3"', 'PACKAGE_VERSION: "0.4.2"'),
-        ("wrong release pin", "e18acf9ca97af137a1917e52481c4bf962943d6d755369387969f84c3e381106", "0" * 64),
+        ("wrong release pin", "47e9c6991cc23b3960d7d24bff1eef4590e13e89599a024e5df788f534ac6eb7", "0" * 64),
     ):
         mutated = workflow.replace(old, new, 1)
         expect_invalid(label, lambda: check_static_contract(mutated, extract_steps(mutated)))

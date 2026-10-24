@@ -60,7 +60,7 @@ pub fn le_words(bytes: &[u8]) -> impl Iterator<Item = [u8; 4]> + '_ {
         "a stream of f32 words has a length divisible by four, not {}",
         bytes.len()
     );
-    bytes.chunks_exact(4).map(|chunk| {
+    bytes.as_chunks::<4>().0.iter().map(|chunk| {
         word(u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]])).to_le_bytes()
     })
 }
