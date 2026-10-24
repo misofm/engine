@@ -29,10 +29,9 @@
 //! # Red on the base, and the red mutation
 //!
 //! On the shipped rule (every bank chain whose lanes' tracks hold `SOURCE` is armed) each probe
-//! named `*_renders_the_dual_bits` failed on the right plane. Since #1899 the later chain of a strip
-//! split by a per-node effect insert is armed on that op, and
-//! `a_chain_behind_a_per_node_delay_stays_dual_after_an_asymmetric_episode` keeps its sticky
-//! state term honest. The two controls pass under both rules. The red
+//! named `*_renders_the_dual_bits` failed on the right plane; since #1899 the later chain of a strip
+//! split by a per-node effect insert is armed on that op, and the asymmetric-delay probe keeps its
+//! per-block term honest. The two controls pass under both rules. The red
 //! mutation is the shipped rule itself: replace `gathers_track_input() || on_input` in
 //! `Runtime::arm_mono_collapse` (`crates/graph/src/runtime.rs`) with `true`; since #987 the
 //! per-block input term in `Runtime::execute` has its own red mutations (graph `MUTATIONS.md`).
@@ -293,18 +292,6 @@ struct Rendered {
 }
 
 fn render(document: &str, tap: MeterTap, live: Option<&LiveWrite>, forced_off: bool) -> Rendered {
-    render_for(document, tap, live, forced_off, BLOCKS, BLOCKS)
-}
-
-/// [`render`] over `blocks` blocks, with the source silent (exact `+0.0`) from block `silent_from`.
-fn render_for(
-    document: &str,
-    tap: MeterTap,
-    live: Option<&LiveWrite>,
-    forced_off: bool,
-    blocks: usize,
-    silent_from: usize,
-) -> Rendered {
     let compiled = compile_host_session(document, &caps()).unwrap_or_else(|failure| {
         panic!("compile: {}", String::from_utf8_lossy(failure.as_bytes()))
     });
@@ -334,7 +321,7 @@ fn render_for(
         .take_revision_gate()
         .expect("the plan's gate handle");
     let mut planes = [Vec::new(), Vec::new()];
-    for block in 0..blocks {
+    for block in 0..BLOCKS {
         if let Some(write) = live.filter(|write| write.block == block) {
             let input = handles.strip_controls[write.track]
                 .input
@@ -343,15 +330,7 @@ fn render_for(
             gate.write_published(|stamp| input.write(stamp, write.record));
         }
         let base = block * QUANTUM;
-        let plane: Vec<f32> = (0..QUANTUM)
-            .map(|frame| {
-                if block < silent_from {
-                    signal(base + frame)
-                } else {
-                    0.0
-                }
-            })
-            .collect();
+        let plane: Vec<f32> = (0..QUANTUM).map(|frame| signal(base + frame)).collect();
         prepared
             .sources
             .submit(
@@ -553,57 +532,6 @@ fn both_chains_of_a_strip_split_by_a_per_node_delay_are_armed() {
             );
         }
     }
-}
-
-/// Issue #1899, the sticky term. A left-only live polarity write at block 4 drives every first
-/// chain of track 0's cohort dual for the rest of the plan, and the per-node delay (150 ms on both
-/// channels) behind track 0's takes planes that differ. From block 8 the source is silent, so that
-/// chain comes to rest and skips, and its planes are identical (`+0.0`) again; the delay's words
-/// stay symmetric throughout. But its line still holds the blocks that differed, and it plays them
-/// 150 ms later, from block 60 on. The later chain must stay dual: armed on the delay's input and
-/// words alone, it collapses once the first chain skips and copies the left echo over the right.
-#[test]
-fn a_chain_behind_a_per_node_delay_stays_dual_after_an_asymmetric_episode() {
-    const LONG: usize = 80;
-    const SILENT_FROM: usize = 8;
-    let document = canonical(&delay_model(150.0, 150.0));
-    let live = LiveWrite {
-        block: 4,
-        track: 0,
-        record: TrackInputRecord::PolarityInvert {
-            lanes: BuiltinLaneSelector::Left,
-            inverted: true,
-            smoothing_samples: 0,
-        },
-    };
-    let run = |forced_off| {
-        render_for(
-            &document,
-            MeterTap::PostMatrix,
-            Some(&live),
-            forced_off,
-            LONG,
-            SILENT_FROM,
-        )
-    };
-    let (armed, dual) = (run(false), run(true));
-    assert_eq!(dual.counters[0], 0, "the forced-off arm never collapses");
-    // The oracle plays the asymmetric echo after the first chain has come to rest.
-    let echo = 60 * QUANTUM..64 * QUANTUM;
-    assert!(
-        dual.planes[0][echo.clone()] != dual.planes[1][echo],
-        "the delay's echo of the asymmetric blocks must differ between the planes"
-    );
-    assert!(
-        armed.counters[0] > 0,
-        "the chains collapse before the write and away from track 0's cohort"
-    );
-    assert_eq!(
-        first_difference(&armed, &dual),
-        None,
-        "the armed render must equal the dual render bit for bit (armed collapse counters {:?})",
-        armed.counters
-    );
 }
 
 /// A send at `insert_send` taps the boundary after the asymmetric `pre_insert` EQ and splits the

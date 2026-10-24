@@ -1276,3 +1276,286 @@ fn a_later_mono_chain_arms_on_its_producers_and_renders_the_dual_bits() {
         "every mono chain, the later ones too, is armed and collapses on every block"
     );
 }
+
+/// What [`Double`] does to the launch factory it wraps (issue #1899).
+#[derive(Clone, Copy)]
+enum Role {
+    /// Nothing: the launch factory.
+    Forward,
+    /// Prepares an [`EpisodeEffect`] around the launch instance and binds no bank.
+    Episode,
+    /// Binds a [`PassBank`] in place of the launch bank.
+    PassBank,
+}
+
+/// A launch factory, as [`Role`] changes it.
+struct Double {
+    delegate: Arc<dyn NativeEffectFactory>,
+    role: Role,
+}
+impl NativeEffectFactory for Double {
+    fn descriptor(&self) -> &'static effect_contract::EffectDescriptor {
+        self.delegate.descriptor()
+    }
+    fn prepare(
+        &self,
+        request: PrepareEffectRequest<'_>,
+    ) -> Result<effect_contract::PreparedEffect, EffectPrepareError> {
+        let mut prepared = self.delegate.prepare(request)?;
+        if matches!(self.role, Role::Episode) {
+            prepared.processor = Box::new(EpisodeEffect {
+                inner: prepared.processor,
+                quantum: u64::from(prepared.metadata.quantum),
+                asymmetric: false,
+            });
+        }
+        Ok(prepared)
+    }
+    fn bind_homogeneous_bank(
+        &self,
+        request: PrepareEffectBankRequest<'_>,
+    ) -> Result<Option<effect_contract::PreparedEffectBank>, EffectPrepareError> {
+        match self.role {
+            Role::Forward => self.delegate.bind_homogeneous_bank(request),
+            Role::Episode => Ok(None),
+            Role::PassBank => Ok(self
+                .delegate
+                .bind_homogeneous_bank(request)?
+                .map(|bank| effect_contract::PreparedEffectBank {
+                    processor: Box::new(PassBank),
+                    metadata: bank.metadata,
+                })),
+        }
+    }
+}
+
+/// The blocks over which an [`EpisodeEffect`] treats its two channels differently.
+const EPISODE: core::ops::Range<u64> = 2..4;
+
+/// A per-node effect whose two channels part for [`EPISODE`] and then work alike again: over
+/// those blocks it inverts its left input before the wrapped instance runs, and its witness
+/// declines, as an effect's does while one channel's designed words differ; outside them it is the
+/// wrapped instance with the wrapped witness. What the episode left in the instance's state stays.
+struct EpisodeEffect {
+    inner: Box<dyn PreparedNativeEffect>,
+    quantum: u64,
+    /// Whether the last block was in the episode.
+    asymmetric: bool,
+}
+impl PreparedNativeEffect for EpisodeEffect {
+    fn retained_bytes(&self) -> u64 {
+        core::mem::size_of_val(&*self.inner) as u64 + self.inner.retained_bytes()
+    }
+    fn reset(&mut self, kind: effect_contract::ResetKind) {
+        self.inner.reset(kind);
+    }
+    fn process(&mut self, block: EffectProcessBlock<'_>) -> ProcessReport {
+        self.asymmetric = EPISODE.contains(&(block.first_sample / self.quantum));
+        if self.asymmetric {
+            for sample in block.left.iter_mut() {
+                *sample = -*sample;
+            }
+        }
+        self.inner.process(block)
+    }
+    fn snapshot_state_payload(
+        &self,
+        output: StatePayloadOutput<'_>,
+    ) -> Result<(), effect_contract::StatePayloadError> {
+        self.inner.snapshot_state_payload(output)
+    }
+    fn restore_state_payload(
+        &mut self,
+        state_layout_version: u32,
+        input: effect_contract::StatePayloadInput<'_>,
+    ) -> Result<(), effect_contract::StatePayloadError> {
+        self.inner.restore_state_payload(state_layout_version, input)
+    }
+    fn channel_symmetry(&self) -> bool {
+        !self.asymmetric && self.inner.channel_symmetry()
+    }
+}
+
+/// A stateless pass-through bank that collapses and, holding no state, proves its channels agree:
+/// the recovery proof (`BankStage::channels_agree`) no launch effect bank gives yet.
+struct PassBank;
+impl PreparedNativeEffectBank for PassBank {
+    fn retained_bytes(&self) -> u64 {
+        0
+    }
+    fn reset(&mut self, _kind: effect_contract::ResetKind) {}
+    fn process_bank(
+        &mut self,
+        block: effect_contract::EffectBankProcessBlock<'_>,
+    ) -> effect_contract::BankProcessReport {
+        effect_contract::BankProcessReport::empty(block.width)
+    }
+    fn snapshot_track_state_payload(
+        &self,
+        _track_index: u32,
+        _output: StatePayloadOutput<'_>,
+    ) -> Result<(), effect_contract::StatePayloadError> {
+        Ok(())
+    }
+    fn restore_track_state_payload(
+        &mut self,
+        _track_index: u32,
+        _state_layout_version: u32,
+        _input: effect_contract::StatePayloadInput<'_>,
+    ) -> Result<(), effect_contract::StatePayloadError> {
+        Ok(())
+    }
+    fn lane_channel_symmetry(&self, _lane: usize) -> bool {
+        true
+    }
+    fn supports_mono_collapse(&self) -> bool {
+        true
+    }
+    fn channels_agree(&self) -> bool {
+        true
+    }
+}
+
+/// The launch EQ, compressor and delay, and the gate as `role` makes it.
+fn double_registry(delay: Role) -> NativeEffectRegistry {
+    let launch = launch_native_effect_registry().expect("launch registry");
+    let double = |kind: Kind, role| {
+        Box::new(Double {
+            delegate: launch
+                .get_shared_ascii(kind.native_id())
+                .expect("launch factory"),
+            role,
+        }) as Box<dyn NativeEffectFactory>
+    };
+    NativeEffectRegistry::new([
+        double(Kind::Eq, Role::Forward),
+        double(Kind::Comp, Role::Forward),
+        double(Kind::Delay, delay),
+        double(Kind::Gate, Role::PassBank),
+    ])
+    .expect("double registry")
+}
+
+/// `count` mono tracks on the console `[EQ] / [gate]`, each with `insert` as its one insert, which
+/// renders per node between the two chains.
+fn split_strip_tracks(count: usize, insert: Kind) -> (Console, Vec<TrackShape>) {
+    let console = Console {
+        pre: vec![Kind::Eq],
+        post: vec![Kind::Gate],
+    };
+    let tracks = (0..count)
+        .map(|index| TrackShape {
+            feed: Feed {
+                gain: 0.5,
+                stereo: false,
+                poison: false,
+            },
+            inserts: vec![insert],
+            bypass: vec![false; console.slots()],
+            variant: index % VARIANTS.len(),
+        })
+        .collect();
+    (console, tracks)
+}
+
+/// Issue #1899, the sticky state term: a later chain behind a per-node effect whose channels
+/// parted once stays dual, though the effect's input and words are symmetric again.
+///
+/// Eight mono tracks, `[EQ] -> delay (5 ms, per node) -> [gate]`, where the delay is an
+/// [`EpisodeEffect`] and the gate a [`PassBank`], so the later chain can prove its own agreement
+/// back. Over [`EPISODE`] the delay inverts its left input and declines; after it, the first chain
+/// still collapses (identical planes) and the delay's words agree, but its line holds the episode
+/// and echoes it into the left plane only. Armed and forced off render the same bits.
+///
+/// Red if the delay's fact is this block's input and words alone (the sticky `&&` dropped in
+/// `Runtime::execute`): the later chain re-engages after the episode and copies the left echo over
+/// the right one. No launch effect bank proves `channels_agree`, so no host-core session can see
+/// that mutation: a later chain whose input term failed once never recovers there.
+#[test]
+fn a_chain_behind_a_per_node_effect_whose_channels_parted_stays_dual() {
+    let (console, tracks) = split_strip_tracks(8, Kind::Delay);
+    let mut model = console_session(&console, &tracks);
+    for track in &mut model.tracks {
+        track.inserts.effects[0].params = vec![EffectParam {
+            parameter_id: 1,
+            channel: ParameterChannel::Both,
+            unit: ParameterUnit::Milliseconds,
+            value: 5.0,
+        }];
+    }
+    let registry = double_registry(Role::Episode);
+    let compile = || {
+        try_compile_console_model_at(&model, 1_899, &[], host_dispatch(), &registry)
+            .unwrap_or_else(|diagnostics| panic!("compile: {diagnostics:?}"))
+    };
+    let armed = render_arm(compile(), &tracks, 16, false);
+    let dual = render_arm(compile(), &tracks, 16, true);
+    assert_eq!(dual.collapse[0], 0, "the forced-off arm never collapses");
+    let after = dual.tracks[0].len() / dual.blocks as usize * EPISODE.end as usize;
+    assert!(
+        dual.tracks[0][after..]
+            .chunks_exact(2)
+            .any(|pair| pair[0] != pair[1]),
+        "the delay echoes the episode into one plane after it ends"
+    );
+    assert!(
+        armed
+            .units
+            .iter()
+            .any(|unit| unit.banked && unit.armed_on_input),
+        "the chain behind the delay is armed on it"
+    );
+    assert!(armed.collapse[0] > 0, "the first chain collapses");
+    assert_renders_the_oracle(&armed, &dual, "a chain behind an episode, armed against dual");
+}
+
+/// Issue #1899, admission: a sidechained per-node effect is no producer, because its words and its
+/// main input say nothing about the key it reads.
+///
+/// `W` mono tracks, `[EQ] -> compressor (per node) -> [gate]`, each compressor keyed by the input of
+/// one stereo track. The compressor's main input is identical on both planes and its words agree,
+/// but the key is not, so it writes two different planes. Armed and forced off render the same
+/// bits, and no chain behind a keyed compressor is armed on its input.
+///
+/// Red if admission drops the sidechain clause (`input_producer_table`): the later chain collapses
+/// and copies the left plane over the right one.
+#[test]
+fn a_chain_behind_a_sidechained_per_node_effect_is_not_armed_on_it() {
+    let lanes = BankWidth::for_backend(host_dispatch())
+        .expect("a vector host")
+        .lanes() as usize;
+    let (console, mut tracks) = split_strip_tracks(lanes + 1, Kind::Comp);
+    let key = tracks.len() - 1;
+    tracks[key].feed.stereo = true;
+    tracks[key].inserts.clear();
+    let mut model = console_session(&console, &tracks);
+    for track in &mut model.tracks[..key] {
+        track.inserts.effects[0].sidechain = SidechainDeclaration::Routed(Sidechain {
+            source: RouteSource::Track {
+                track_id: StableId::parse(&format!("ch{key:02}")).expect("key track"),
+                tap: session::SendTap::Input,
+            },
+            port_id: StableId::parse("sidechain-in").expect("port id"),
+        });
+    }
+    let registry = double_registry(Role::Forward);
+    let compile = || {
+        try_compile_console_model_at(&model, 1_899, &[], host_dispatch(), &registry)
+            .unwrap_or_else(|diagnostics| panic!("compile: {diagnostics:?}"))
+    };
+    let armed = render_arm(compile(), &tracks, 12, false);
+    let dual = render_arm(compile(), &tracks, 12, true);
+    assert_eq!(dual.collapse[0], 0, "the forced-off arm never collapses");
+    assert!(
+        dual.tracks[0]
+            .chunks_exact(2)
+            .any(|pair| pair[0] != pair[1]),
+        "the keyed compressor writes two different planes"
+    );
+    assert!(
+        !armed.units.iter().any(|unit| unit.armed_on_input),
+        "no chain is armed on a keyed compressor"
+    );
+    assert!(armed.collapse[0] > 0, "the first chains collapse");
+    assert_renders_the_oracle(&armed, &dual, "a chain behind a keyed compressor, armed against dual");
+}
