@@ -9,7 +9,8 @@ use super::padding_tests::{Draw, LINKS, QUANTUM, Values, bind, request, values_f
 use super::*;
 use dsp_reference::{
     ReferenceGateExpanderParameters, ReferenceGateLink, ReferenceGateLinkGlide, ReferenceGatePhase,
-    ReferenceGateTiming, ReferenceLinkGlide, reference_gate_expander_process_with_link_glide,
+    ReferenceGateTiming, ReferenceGateTimingChange, ReferenceLinkGlide,
+    reference_gate_expander_process_with_link_glide,
 };
 use effect_contract::{EffectProcessBlock, link_glide_weights};
 
@@ -19,7 +20,7 @@ const BLOCK: usize = 48;
 /// it crosses a block boundary.
 const GLIDE_FRAME: usize = 2_400;
 const GLIDE_SAMPLES: u32 = 64;
-const FRAMES: usize = 4_800;
+const FRAMES: usize = 9_600;
 /// `tests/oracle.rs`'s bound on the rendered gain against the `f64` model, derived there; the
 /// blend adds a level error of a few `f32` ulps (its weights are exact multiples of `1/64`).
 const TOLERANCE_DB: f64 = 0.02;
@@ -41,6 +42,28 @@ impl Under {
             .expect("a bank binds")
             .expect("one program");
         Self::Bank(bank.processor, width)
+    }
+
+    /// Lane `lane`'s left-channel link weight words in its payload: `w_link` then `w_avg`, each
+    /// `current, target, step, remaining`.
+    fn link_words(&self, lane: usize) -> [u32; 8] {
+        let sizes = GATE_EXPANDER_DESCRIPTOR.qualities[0].maximum_state;
+        let (mut common, mut left, mut right) = (
+            vec![0; sizes.common_bytes as usize],
+            vec![0; sizes.left_bytes as usize],
+            vec![0; sizes.right_bytes as usize],
+        );
+        let output =
+            StatePayloadOutput::new(&mut common, &mut left, &mut right, sizes).expect("sizes");
+        match self {
+            Self::Scalar(effect) => effect.snapshot_state_payload(output),
+            Self::Bank(bank, _) => bank.snapshot_track_state_payload(lane as u32, output),
+        }
+        .expect("snapshot");
+        core::array::from_fn(|word| {
+            let at = (STATE_LINK_WORD + word) * 4;
+            u32::from_le_bytes(left[at..at + 4].try_into().expect("a word"))
+        })
     }
 
     fn retarget(&mut self, lane: usize, mode: LinkMode, samples: u32) -> bool {
@@ -176,11 +199,35 @@ fn reference_link(mode: LinkMode) -> ReferenceGateLink {
     }
 }
 
+/// One glide case of the oracle test: its length and, when given, the frame of a live attack
+/// change (1 to 20 ms) on every lane mid-glide.
+#[derive(Clone, Copy, Debug)]
+struct GlideCase {
+    samples: u32,
+    change: Option<usize>,
+}
+
+const CASES: [GlideCase; 2] = [
+    GlideCase {
+        samples: GLIDE_SAMPLES,
+        change: None,
+    },
+    // Longer than the 64-sample parameter ramp, and crossed by one: the bank's ramp clock must
+    // keep covering the glide when the change reloads it.
+    GlideCase {
+        samples: 4_800,
+        change: Some(4_800),
+    },
+];
+
+const CHANGED_ATTACK_MS: f32 = 20.0;
+
 /// The `f64` model of one lane: `from` until the glide, then the glide to `to` (a step glide to
-/// `from` itself for a lane that rests).
+/// `from` itself for a lane that rests), and the case's attack change.
 fn oracle_trace(
     from: LinkMode,
     to: LinkMode,
+    case: GlideCase,
     left: &[f32],
     right: &[f32],
 ) -> dsp_reference::ReferenceGateTrace {
@@ -196,11 +243,15 @@ fn oracle_trace(
         release_ms: 100.0,
     };
     let weights = |mode: LinkMode| link_glide_weights(mode).map(f64::from);
-    let samples = if from == to { 0 } else { GLIDE_SAMPLES };
+    let samples = if from == to { 0 } else { case.samples };
     let (left, right): (Vec<f64>, Vec<f64>) = (
         left.iter().map(|x| f64::from(*x)).collect(),
         right.iter().map(|x| f64::from(*x)).collect(),
     );
+    let changed = ReferenceGateTiming {
+        attack_ms: f64::from(CHANGED_ATTACK_MS),
+        ..timing
+    };
     reference_gate_expander_process_with_link_glide(
         (parameters, parameters),
         (f64::from(HYSTERESIS), f64::from(HYSTERESIS)),
@@ -211,6 +262,10 @@ fn oracle_trace(
             frame: GLIDE_FRAME,
             glide: ReferenceLinkGlide::new(weights(from), weights(to), samples),
         },
+        case.change.map(|frame| ReferenceGateTimingChange {
+            frame,
+            timing: (changed, changed),
+        }),
     )
     .expect("reference render")
 }
@@ -233,96 +288,146 @@ fn deviation(rendered: &[f32], gain_db: &[f64], dry: &[f64], phase: &[ReferenceG
     worst
 }
 
-/// **Gate 1.** Each glide direction over 64 samples, crossing a block boundary, on square waves
-/// 20 dB apart: every lane's gain stays within the oracle's `0.02 dB` of the `f64` gate whose
-/// level is the reference blend, and after it the target law, while the bank-mates rest at their
-/// own modes. No model level comes within `1e-3 dB` of a decision threshold, so the comparison
-/// measures the levels, not a flipped transition. At the scalar instance, `Simd4` and `Simd8`.
+/// The attack change's spans, both channels, on every lane at `first_sample`.
+fn change_spans(lanes: usize, first_sample: u64) -> Vec<Vec<PreparedAutomationSpan>> {
+    let span = |channel| PreparedAutomationSpan {
+        channel,
+        parameter_index: 4,
+        sample: first_sample,
+        value: CHANGED_ATTACK_MS,
+    };
+    vec![vec![span(ParameterChannel::Left), span(ParameterChannel::Right)]; lanes]
+}
+
+/// **Gate 1.** Each glide direction, over 64 samples and over 4,800 samples crossed by a live
+/// attack change on every lane (the gliding lane and its bank-mates), each glide crossing a block
+/// boundary, on square waves 20 dB apart: every lane's gain stays within the oracle's `0.02 dB`
+/// of the `f64` gate whose level is the reference blend, and after it the target law, while the
+/// bank-mates rest at their own modes; and the glide arrives exactly (its weights at the target,
+/// no countdown left). No model level comes within `1e-4 dB` of a decision threshold, so the
+/// comparison measures the levels, not a flipped transition. At the scalar instance, `Simd4` and
+/// `Simd8`.
 #[test]
 fn a_glide_tracks_the_f64_blend_into_the_target_law() {
     let (source_left, source_right) = oracle_signals();
     let values = oracle_values();
-    for width in widths() {
-        let lanes = lanes(width);
-        for from in LINKS {
-            for to in LINKS.into_iter().filter(|mode| *mode != from) {
-                let modes: Vec<LinkMode> = (0..lanes)
-                    .map(|lane| {
-                        if lane == 0 {
-                            from
-                        } else {
-                            LINKS[lane % LINKS.len()]
-                        }
-                    })
-                    .collect();
-                let requests: Vec<_> = modes
-                    .iter()
-                    .map(|mode| request(&values, RATE, *mode))
-                    .collect();
-                let mut under = Under::new(width, &requests);
-                let mut left = interleave(&vec![source_left.clone(); lanes]);
-                let mut right = interleave(&vec![source_right.clone(); lanes]);
-                let (flat, offsets) = flatten(&vec![Vec::new(); lanes], 0);
-                for block in 0..FRAMES / BLOCK {
-                    if block * BLOCK == GLIDE_FRAME {
-                        assert!(under.retarget(0, to, GLIDE_SAMPLES), "a supported glide");
-                    }
-                    let range = block * BLOCK * lanes..(block + 1) * BLOCK * lanes;
-                    under.process(
-                        &mut left[range.clone()],
-                        &mut right[range],
-                        (block * BLOCK) as u64,
-                        &flat,
-                        &offsets,
+    for case in CASES {
+        for width in widths() {
+            let lanes = lanes(width);
+            for from in LINKS {
+                for to in LINKS.into_iter().filter(|mode| *mode != from) {
+                    oracle_case(
+                        width,
+                        lanes,
+                        case,
+                        from,
+                        to,
+                        (&source_left, &source_right),
+                        &values,
                     );
                 }
-                for (lane, mode) in modes.iter().enumerate() {
-                    let target = if lane == 0 { to } else { *mode };
-                    let trace = oracle_trace(*mode, target, &source_left, &source_right);
-                    for level in trace.level_db_left.iter().chain(&trace.level_db_right) {
-                        let clear = (level - f64::from(THRESHOLD))
-                            .abs()
-                            .min((level - f64::from(THRESHOLD - HYSTERESIS)).abs());
-                        assert!(
-                            clear >= 1.0e-3,
-                            "{from:?} -> {to:?}: level {level} dB on a threshold"
-                        );
-                    }
-                    let lane_of = |planes: &[f32]| -> Vec<f32> {
-                        (0..FRAMES)
-                            .map(|frame| planes[frame * lanes + lane])
-                            .collect()
-                    };
-                    let worst = deviation(
-                        &lane_of(&left),
-                        &trace.gain_db_left,
-                        &trace.dry_left,
-                        &trace.phase_left,
-                    )
-                    .max(deviation(
-                        &lane_of(&right),
-                        &trace.gain_db_right,
-                        &trace.dry_right,
-                        &trace.phase_right,
-                    ));
-                    assert!(
-                        worst <= TOLERANCE_DB,
-                        "{width:?} {from:?} -> {to:?} lane {lane}: worst deviation {worst:e} dB"
-                    );
-                }
-                // Not vacuous: the quiet channel's model level moves with the glide.
-                let glided = oracle_trace(from, to, &source_left, &source_right);
-                let rested = oracle_trace(from, from, &source_left, &source_right);
-                assert!(
-                    glided.level_db_right[GLIDE_FRAME..]
-                        .iter()
-                        .zip(&rested.level_db_right[GLIDE_FRAME..])
-                        .any(|(a, b)| (a - b).abs() > 1.0),
-                    "{from:?} -> {to:?}: the glide changed nothing"
-                );
             }
         }
     }
+}
+
+fn oracle_case(
+    width: Option<BankWidth>,
+    lanes: usize,
+    case: GlideCase,
+    from: LinkMode,
+    to: LinkMode,
+    (source_left, source_right): (&[f32], &[f32]),
+    values: &Values,
+) {
+    let context = format!("{width:?} {case:?} {from:?} -> {to:?}");
+    let modes: Vec<LinkMode> = (0..lanes)
+        .map(|lane| {
+            if lane == 0 {
+                from
+            } else {
+                LINKS[lane % LINKS.len()]
+            }
+        })
+        .collect();
+    let requests: Vec<_> = modes
+        .iter()
+        .map(|mode| request(values, RATE, *mode))
+        .collect();
+    let mut under = Under::new(width, &requests);
+    let mut left = interleave(&vec![source_left.to_vec(); lanes]);
+    let mut right = interleave(&vec![source_right.to_vec(); lanes]);
+    for block in 0..FRAMES / BLOCK {
+        let first = block * BLOCK;
+        if first == GLIDE_FRAME {
+            assert!(under.retarget(0, to, case.samples), "a supported glide");
+        }
+        let spans = if case.change == Some(first) {
+            change_spans(lanes, first as u64)
+        } else {
+            vec![Vec::new(); lanes]
+        };
+        let (flat, offsets) = flatten(&spans, first as u64);
+        let range = first * lanes..(first + BLOCK) * lanes;
+        under.process(
+            &mut left[range.clone()],
+            &mut right[range],
+            first as u64,
+            &flat,
+            &offsets,
+        );
+    }
+    let one = 1.0_f32.to_bits();
+    let rest = link_glide_weights(to).map(f32::to_bits);
+    assert_eq!(
+        under.link_words(0),
+        [rest[0], rest[0], 0, 0, rest[1], rest[1], 0, 0],
+        "{context}: the glide did not arrive exactly ({one:#x} is 1.0)"
+    );
+    for (lane, mode) in modes.iter().enumerate() {
+        let target = if lane == 0 { to } else { *mode };
+        let trace = oracle_trace(*mode, target, case, source_left, source_right);
+        for level in trace.level_db_left.iter().chain(&trace.level_db_right) {
+            let clear = (level - f64::from(THRESHOLD))
+                .abs()
+                .min((level - f64::from(THRESHOLD - HYSTERESIS)).abs());
+            assert!(
+                clear >= 1.0e-4,
+                "{context}: level {level} dB on a threshold"
+            );
+        }
+        let lane_of = |planes: &[f32]| -> Vec<f32> {
+            (0..FRAMES)
+                .map(|frame| planes[frame * lanes + lane])
+                .collect()
+        };
+        let worst = deviation(
+            &lane_of(&left),
+            &trace.gain_db_left,
+            &trace.dry_left,
+            &trace.phase_left,
+        )
+        .max(deviation(
+            &lane_of(&right),
+            &trace.gain_db_right,
+            &trace.dry_right,
+            &trace.phase_right,
+        ));
+        assert!(
+            worst <= TOLERANCE_DB,
+            "{context} lane {lane}: worst deviation {worst:e} dB"
+        );
+    }
+    // Not vacuous: the quiet channel's model level moves with the glide.
+    let glided = oracle_trace(from, to, case, source_left, source_right);
+    let rested = oracle_trace(from, from, case, source_left, source_right);
+    assert!(
+        glided.level_db_right[GLIDE_FRAME..]
+            .iter()
+            .zip(&rested.level_db_right[GLIDE_FRAME..])
+            .any(|(a, b)| (a - b).abs() > 1.0),
+        "{context}: the glide changed nothing"
+    );
 }
 
 /// **Gates 2 and 6.** A full bank of distinct members at mixed modes, where lane 0 glides while

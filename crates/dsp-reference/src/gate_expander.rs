@@ -246,10 +246,13 @@ pub fn reference_gate_expander_process(
 /// As [`reference_gate_expander_process`] with no sidechain, with one detector link glide from
 /// `glide.frame` on (issue #1370 D3): each channel's level is
 /// `own + w_link * (max + w_avg * (avg - max) - own)` under the glide's weights of that frame.
+/// `change`, if given, is one live timing change as in
+/// [`reference_gate_expander_process_with_timing_change`], so a glide can cross a parameter ramp.
 ///
 /// # Errors
 ///
-/// As [`reference_gate_expander_process`], and also if the glide starts past the render.
+/// As [`reference_gate_expander_process`], and also if the glide or the change starts past the
+/// render, or the change's timing has another sample rate.
 pub fn reference_gate_expander_process_with_link_glide(
     params: (
         ReferenceGateExpanderParameters,
@@ -260,8 +263,15 @@ pub fn reference_gate_expander_process_with_link_glide(
     link: ReferenceGateLink,
     main: (&[f64], &[f64]),
     glide: ReferenceGateLinkGlide,
+    change: Option<ReferenceGateTimingChange>,
 ) -> Result<ReferenceGateTrace, ReferenceGateExpanderError> {
-    if glide.frame >= main.0.len() {
+    if glide.frame >= main.0.len()
+        || change.is_some_and(|change| {
+            change.frame >= main.0.len()
+                || change.timing.0.sample_rate != timing.0.sample_rate
+                || change.timing.1.sample_rate != timing.0.sample_rate
+        })
+    {
         return Err(ReferenceGateExpanderError::InvalidInput);
     }
     process(
@@ -271,7 +281,7 @@ pub fn reference_gate_expander_process_with_link_glide(
         link,
         main,
         None,
-        (None, Some(glide)),
+        (change, Some(glide)),
     )
 }
 
