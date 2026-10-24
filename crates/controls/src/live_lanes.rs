@@ -16,7 +16,8 @@ pub struct LiveLanes {
     pub strip_input: bool,
     /// One lane per prepared effect instance: some effect instance has a live row.
     pub effects: bool,
-    /// One lane per route into a submix: some route row is live.
+    /// One lane per route whose rows are live ([`crate::route_rows_live`]: into a submix, or from a
+    /// tap before its strip's fader, #1391): some route row is live.
     pub routes: bool,
 }
 

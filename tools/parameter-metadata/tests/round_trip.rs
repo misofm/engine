@@ -794,6 +794,24 @@ mod controls_object {
                 what,
             );
             assert_eq!(into_submix["active"], true, "{what} active into a submix");
+            let before_fader = row
+                .into_output_before_fader
+                .expect("a route row has a before-fader case");
+            let into_before = &json["intoOutputBeforeFader"];
+            let under_before = controls::ControlDescriptor {
+                class: before_fader.class,
+                ..*descriptor
+            };
+            assert_class(
+                into_before,
+                before_fader.class,
+                under_before.automatable(),
+                what,
+            );
+            assert_eq!(
+                into_before["active"], before_fader.active,
+                "{what} active into the output before the fader"
+            );
             let into_output = &json["intoOutput"];
             let under_output = controls::ControlDescriptor {
                 class: output.class,

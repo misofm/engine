@@ -314,7 +314,13 @@ SCALAR_SLACK = 8
 # 224 against 448, 84 against 168) and zero scalar arithmetic, which is what a correct one-plane
 # variant looks like from here.
 KERNEL_ROSTER: tuple[tuple[str, str, float], ...] = (
-    ("multiband-compressor f32x4", r"multiband_compressor.*4wide6f32x4", 0.10),
+    # #893: named by its `process_bank` body, as the EQ rows are, because the bank's
+    # `advance_clocks` now carries one vector add of its own (the silence counters' advance).
+    (
+        "multiband-compressor f32x4",
+        r"multiband_compressor.*4wide6f32x4.*12process_bank",
+        0.10,
+    ),
     ("transient-shaper f32x4", r"transient_shaper.*4wide6f32x4", 0.38),
     ("gate-expander f32x4", r"gate_expander.*4wide6f32x4", 0.19),
     ("compressor f32x4 dual", r"compressor6kernel13process_block.*4wide6f32x4", 0.10),
