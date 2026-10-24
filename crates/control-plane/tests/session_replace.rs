@@ -519,9 +519,10 @@ fn every_document_refusal_happens_before_anything_commits() {
     changed.tracks[0].fader.left_db = -6.0;
     let changed = json(&changed);
     let mut wrong_digest = changed.clone().into_bytes();
-    // Same length, other bytes: the frame's digest no longer matches.
-    let last = wrong_digest.len() - 1;
-    wrong_digest[last] = b' ';
+    // Same length, other bytes: the frame's digest no longer matches. The first byte is
+    // structural, so the document would not parse either: the digest refusal proves the digest
+    // is checked before any parse.
+    wrong_digest[0] = b'x';
     let invalid = BASE.replacen("\"sample_rate_hz\"", "\"sample_rate\"", 1);
     let not_utf8 = [0xff_u8; 8];
     let bound = u64::try_from(BASE.len() + 64).expect("small");
