@@ -26,10 +26,10 @@ use crate::{
     NonOkResponse, ObservationEnded, ObservationTapKey, PreparedSessionTransaction, ProtocolCodec,
     ProtocolQueues, QueueReport, ReliablePayload, ReliableSlot, RequestId, ResponseGetRequest,
     ResponseResult, SampleTime, SessionCommitted, SessionEdit, SessionReplaceRequest,
-    SessionRevision, SessionSnapshot, SessionStore, SessionStoreError, StatusCode,
-    SuccessResponsePayload, TelemetryConfiguration, TelemetryKey, TelemetryRecord,
-    TransactionApplied, TransportSetRequest, TransportSnapshot, TransportStateEvent,
-    TypedEventFrame, TypedNonOkResponseFrame, TypedSuccessResponseFrame,
+    SessionRevision, SessionSnapshot, SessionStore, SessionStoreError, SpectrumConfigureRequest,
+    SpectrumConfigured, StatusCode, SuccessResponsePayload, TelemetryConfiguration, TelemetryKey,
+    TelemetryRecord, TransactionApplied, TransportSetRequest, TransportSnapshot,
+    TransportStateEvent, TypedEventFrame, TypedNonOkResponseFrame, TypedSuccessResponseFrame,
 };
 #[cfg(any(test, feature = "test-support"))]
 use crate::{
@@ -1049,6 +1049,12 @@ pub enum ControlCommand<'a> {
     SessionReplace {
         request: SessionReplaceRequest,
     },
+    /// `SPECTRUM_CONFIGURE` (#1594). The session executes it: this path has no session to run it
+    /// on and refuses it as `UNAVAILABLE`. A host passes it through
+    /// [`ProtocolController::prepare_command_frame`], which returns [`PreparedCommandFrame::Session`].
+    SpectrumConfigure {
+        request: SpectrumConfigureRequest,
+    },
 }
 
 impl ControlCommand<'_> {
@@ -1076,6 +1082,7 @@ impl ControlCommand<'_> {
             Self::ControlStateGet { .. } => MessageId::ControlStateGet,
             Self::ResponseGet { .. } => MessageId::ResponseGet,
             Self::SessionReplace { .. } => MessageId::SessionReplace,
+            Self::SpectrumConfigure { .. } => MessageId::SpectrumConfigure,
         }
     }
 }
@@ -1127,6 +1134,7 @@ enum Body {
     ControlList(ControlListPage),
     ControlState(ControlStatePage),
     Response(ResponseResult),
+    SpectrumConfigured(SpectrumConfigured),
     Transport(TransportSnapshot),
     Telemetry(TelemetryConfiguration),
     Counters(CounterSnapshot),
@@ -1210,6 +1218,10 @@ pub enum PreparedCommandFrame {
     Immediate(PreparedImmediateCommandFrame),
     /// A valid structural replacement awaits external plan preparation and reservation.
     Structural(Box<PreparedStructuralCommand>),
+    /// A command the session executes (#1594 D9): the host runs it, then completes it with
+    /// [`ProtocolController::complete_session_command`] or
+    /// [`ProtocolController::complete_session_command_refused`].
+    Session(Box<PreparedSessionCommand>),
 }
 
 /// Exact canonical response bytes for a token-free immediate decision.
@@ -1221,6 +1233,65 @@ impl PreparedImmediateCommandFrame {
     /// Atomically copy the complete canonical response to caller output.
     pub fn write_into(&self, output: &mut [u8]) -> Result<usize, EncodeError> {
         copy_complete_frame(&self.bytes, output)
+    }
+}
+
+/// The decoded payload of a command the session executes (#1594 D9). One variant per such
+/// command; #1595 adds its reads here.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum SessionCommand {
+    /// `SPECTRUM_CONFIGURE`.
+    SpectrumConfigure(SpectrumConfigureRequest),
+}
+
+/// The success reply of a command the session executed.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SessionCommandReply {
+    /// The `SPECTRUM_CONFIGURE` reply.
+    SpectrumConfigured(SpectrumConfigured),
+}
+
+/// A command the session executes, decoded and checked, whose replay entry is planned against
+/// the committed cache (#1594 D9). Like [`PreparedStructuralCommand`] it is affine and bound to
+/// one controller generation: every other entry point refuses while it is outstanding, so the
+/// plan stays valid, and a token dropped without completion leaves the cache as it was (the
+/// request then has no reply and no replay entry).
+pub struct PreparedSessionCommand {
+    owner: Arc<AtomicU64>,
+    generation: u64,
+    message_id: MessageId,
+    request_id: RequestId,
+    replay_plan: ReplayPreflightPlan,
+    request: Box<[u8]>,
+    command: SessionCommand,
+    armed: bool,
+}
+
+impl PreparedSessionCommand {
+    /// The request's correlation identity.
+    #[must_use]
+    pub const fn request_id(&self) -> RequestId {
+        self.request_id
+    }
+
+    /// The decoded command the session executes.
+    #[must_use]
+    pub const fn command(&self) -> &SessionCommand {
+        &self.command
+    }
+}
+
+impl Drop for PreparedSessionCommand {
+    fn drop(&mut self) {
+        if self.armed {
+            let _ = self.owner.compare_exchange(
+                self.generation,
+                self.generation.saturating_add(1),
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            );
+            self.armed = false;
+        }
     }
 }
 
@@ -1732,6 +1803,9 @@ impl<P: ControlProvider> ProtocolController<P> {
             DecodedCommandPayload::SessionReplace(request) => {
                 ControlCommand::SessionReplace { request }
             }
+            DecodedCommandPayload::SpectrumConfigure(request) => {
+                ControlCommand::SpectrumConfigure { request }
+            }
         };
         Ok(self.process(ControllerRequest {
             request_id: header.request_id,
@@ -1885,6 +1959,9 @@ impl<P: ControlProvider> ProtocolController<P> {
         header: CommandHeader,
         preparation: Preparation,
     ) -> Result<PreparedCommandFrame, CommandFrameProcessError> {
+        if header.message_id == MessageId::SpectrumConfigure {
+            return self.prepare_session_command(input, scratch, output_capacity, header);
+        }
         match self.plan_structural_command(
             input,
             document,
@@ -1906,6 +1983,183 @@ impl<P: ControlProvider> ProtocolController<P> {
                 Box::new(self.prepare_structural_plan(input, header, plan)?),
             )),
         }
+    }
+
+    /// Prepare a command the session executes (#1594 D9): the replay preflight, the output
+    /// reservation, the decode and the revision check run here, exactly as for every other new
+    /// request, and a refusal among them completes as an immediate reply. A replayed request
+    /// answers its cached bytes and reaches the session no second time.
+    fn prepare_session_command(
+        &mut self,
+        input: &[u8],
+        scratch: &mut DecodeScratch<'_>,
+        output_capacity: usize,
+        header: CommandHeader,
+    ) -> Result<PreparedCommandFrame, CommandFrameProcessError> {
+        let is_new_request = self.replay.is_new_request(header.request_id);
+        if is_new_request && output_capacity < self.replay.config().max_response_bytes {
+            return Err(CommandFrameProcessError::OutputReservationTooSmall {
+                required: self.replay.config().max_response_bytes,
+            });
+        }
+        // A cached, reused, expired or backpressured request takes the one-call path, which
+        // answers it without executing anything.
+        if !is_new_request || self.replay.reservation.is_some() {
+            return self.process_immediate_command(input, scratch, output_capacity);
+        }
+        let Ok(replay_plan) = self.replay.plan_preflight(header.request_id, input) else {
+            return self.process_immediate_command(input, scratch, output_capacity);
+        };
+        #[cfg(test)]
+        TYPED_COMMAND_DECODES.with(|decodes| decodes.set(decodes.get().saturating_add(1)));
+        let refusal = |controller: &Self, status| controller.non_ok(status, None);
+        let command = match self.codec.decode_typed_command(input, scratch) {
+            Ok(decoded) => match decoded.payload {
+                DecodedCommandPayload::SpectrumConfigure(request) => {
+                    SessionCommand::SpectrumConfigure(request)
+                }
+                _ => {
+                    let outcome = refusal(self, StatusCode::Internal);
+                    return self.prepare_planned_immediate(
+                        input,
+                        header,
+                        replay_plan,
+                        outcome,
+                        output_capacity,
+                    );
+                }
+            },
+            Err(error) => {
+                let outcome = refusal(self, error.status());
+                return self.prepare_planned_immediate(
+                    input,
+                    header,
+                    replay_plan,
+                    outcome,
+                    output_capacity,
+                );
+            }
+        };
+        // D8: the command changes no model value and needs no revision; a stated one must match.
+        if let ExpectedRevision::Exact(expected) = header.expected_revision
+            && expected != self.session.revision()
+        {
+            let outcome = refusal(self, StatusCode::RevisionConflict);
+            return self.prepare_planned_immediate(
+                input,
+                header,
+                replay_plan,
+                outcome,
+                output_capacity,
+            );
+        }
+        let mut request = Vec::new();
+        request
+            .try_reserve_exact(input.len())
+            .map_err(|_| CommandFrameProcessError::Internal)?;
+        request.extend_from_slice(input);
+        let current = self.structural_generation.load(Ordering::Acquire);
+        let generation = current
+            .checked_add(1)
+            .filter(|generation| generation & 1 == 1)
+            .ok_or(CommandFrameProcessError::Internal)?;
+        self.structural_generation
+            .compare_exchange(current, generation, Ordering::AcqRel, Ordering::Acquire)
+            .map_err(|_| CommandFrameProcessError::PreparedCommandOutstanding)?;
+        Ok(PreparedCommandFrame::Session(Box::new(
+            PreparedSessionCommand {
+                owner: Arc::clone(&self.structural_generation),
+                generation,
+                message_id: header.message_id,
+                request_id: header.request_id,
+                replay_plan,
+                request: request.into_boxed_slice(),
+                command,
+                armed: true,
+            },
+        )))
+    }
+
+    /// Complete a command the session executed with its success reply (#1594 D9): encode the
+    /// reply at the committed revision into `output`, then record the replay entry with those
+    /// bytes, so an exact replay of the request returns them and reaches the session no second
+    /// time. The reply exists only after the entry does (the acked-batch rule).
+    ///
+    /// # Errors
+    ///
+    /// [`CommandFrameProcessError::Internal`] for a token another controller prepared or a stale
+    /// one; [`CommandFrameProcessError::Encode`] when `output` cannot hold the frame. Either error
+    /// writes nothing to the cache; the token is consumed.
+    pub fn complete_session_command(
+        &mut self,
+        prepared: PreparedSessionCommand,
+        reply: SessionCommandReply,
+        output: &mut [u8],
+    ) -> Result<usize, CommandFrameProcessError> {
+        let body = match reply {
+            SessionCommandReply::SpectrumConfigured(value) => {
+                debug_assert_eq!(value.revision, self.session.revision().0);
+                Body::SpectrumConfigured(value)
+            }
+        };
+        let outcome = self.ok(body);
+        self.complete_session_outcome(prepared, outcome, output)
+    }
+
+    /// Complete a command the session refused (#1594 D9) with `status` and the one diagnostic
+    /// `code`, recorded for replay exactly as [`Self::complete_session_command`] records a reply.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::complete_session_command`].
+    pub fn complete_session_command_refused(
+        &mut self,
+        prepared: PreparedSessionCommand,
+        status: StatusCode,
+        code: &str,
+        output: &mut [u8],
+    ) -> Result<usize, CommandFrameProcessError> {
+        debug_assert_ne!(status, StatusCode::Ok);
+        let mut outcome = self.non_ok(status, None);
+        if let Body::NonOk(payload) = &mut outcome.body
+            && let Some(diagnostic) = payload.diagnostics.first_mut()
+        {
+            code.clone_into(&mut diagnostic.code);
+        }
+        self.complete_session_outcome(prepared, outcome, output)
+    }
+
+    fn complete_session_outcome(
+        &mut self,
+        mut prepared: PreparedSessionCommand,
+        outcome: Outcome,
+        output: &mut [u8],
+    ) -> Result<usize, CommandFrameProcessError> {
+        if !Arc::ptr_eq(&self.structural_generation, &prepared.owner)
+            || self.structural_generation.load(Ordering::Acquire) != prepared.generation
+        {
+            return Err(CommandFrameProcessError::Internal);
+        }
+        let (written, _, _) = self
+            .encode_outcome_or_internal_into(
+                prepared.message_id,
+                prepared.request_id,
+                outcome,
+                output,
+            )
+            .map_err(CommandFrameProcessError::Encode)?;
+        self.replay.apply_preflight_plan(
+            prepared.request_id,
+            &prepared.request,
+            prepared.replay_plan,
+        );
+        self.replay
+            .complete(prepared.request_id, &prepared.request, &output[..written])
+            .expect("the plan reserved room for a reply of the endpoint's response bound");
+        self.structural_generation
+            .store(prepared.generation.saturating_add(1), Ordering::Release);
+        prepared.armed = false;
+        Ok(written)
     }
 
     fn prepare_structural_plan(
@@ -2683,6 +2937,9 @@ impl<P: ControlProvider> ProtocolController<P> {
             DecodedCommandPayload::SessionReplace(request) => {
                 ControlCommand::SessionReplace { request }
             }
+            DecodedCommandPayload::SpectrumConfigure(request) => {
+                ControlCommand::SpectrumConfigure { request }
+            }
         };
         self.execute(&ControllerRequest {
             request_id: header.request_id,
@@ -2784,6 +3041,9 @@ impl<P: ControlProvider> ProtocolController<P> {
             }
             (MessageId::ResponseGet, Body::Response(value)) => {
                 encode_success!(SuccessResponsePayload::ResponseResult(value))
+            }
+            (MessageId::SpectrumConfigure, Body::SpectrumConfigured(value)) => {
+                encode_success!(SuccessResponsePayload::SpectrumConfigured(value))
             }
             _ => Err(EncodeError::MessageKindMismatch),
         }
@@ -3455,6 +3715,8 @@ impl<P: ControlProvider> ProtocolController<P> {
                 Err(refusal) => self.document_refusal_outcome(refusal),
                 Ok(_) => self.non_ok(StatusCode::Internal, None),
             },
+            // The session executes it (#1594 D9); this path has none.
+            ControlCommand::SpectrumConfigure { .. } => self.non_ok(StatusCode::Unavailable, None),
             ControlCommand::ControlListGet { request } => {
                 match self.provider.control_list(request) {
                     Ok(page) => match self.fit_control_list(page) {
@@ -3858,7 +4120,9 @@ impl<P: ControlProvider> ProtocolController<P> {
             features.session_events && self.config.maximum_transaction_edits != 0;
         let mut commands = [0_u16; 13];
         let mut command_len = 0_usize;
-        // `0x000f`-`0x0012` are claimed by open specs and never advertised until they land.
+        // `0x000f`, `0x0011` and `0x0012` are claimed by open specs and never advertised until
+        // they land. `0x0010` is served by a host session and not advertised until #1595 sets
+        // its capability bit (#1594 R3).
         for id in (1_u16..=14).chain([0x0013]) {
             let enabled = match id {
                 // The retired IDs are never advertised.
