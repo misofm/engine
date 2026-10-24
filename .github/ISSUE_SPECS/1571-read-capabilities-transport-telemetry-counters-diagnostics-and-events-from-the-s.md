@@ -246,7 +246,10 @@ control refusal's `decodeRefusalBody` maps those values.
   `sdk-protocol-refusal` (gate 5), `sdk-protocol-reliable` and `sdk-protocol-lossy` (gate 3), each
   with a self-test mutation. Reliable events compare without `originRequestId` (the probe draws one
   ID the headless engine does not). Lossy events: each one that arrived must equal the headless
-  engine's event, in its order, and at least one must arrive (the last block's is not replaced).
+  engine's event, in its order, and the last block's `diagnostic`, `meterBatch` and
+  `counterSnapshot` must each arrive (no later block replaces them). A render diagnostic comes on the
+  worklet's lane 0 with the reliable events, and the telemetry on lane 1: a first gate that required
+  only one lossy event let a mutant that dropped lane 1 survive, so the gate names the three kinds.
 - **Fact.** The worklet posts a message's events after its reply, so the row makes one more call
   after the call that reads the render's events. Measured on all three browsers: the browser gets
   `sessionCommitted, transportState` and the last block's `diagnostic, meterBatch, counterSnapshot`;

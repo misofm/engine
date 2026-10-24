@@ -582,8 +582,8 @@ const PROTOCOL_LOSSY_KINDS = new Set(["meterBatch", "counterSnapshot", "diagnost
  * in its order (the edit's `sessionCommitted`, then `transportState` playing). The browser reads its
  * events once per message and its lossy lane holds one event (root's tranche-b note), so a block's
  * lossy telemetry may be replaced before it is read: each lossy event that arrived must be the
- * headless engine's event of the same block, in the headless order. Only one is required, since the
- * last block's telemetry is not replaced.
+ * headless engine's event of the same block, in the headless order, and only the last block's
+ * three (which no later block replaces) are required.
  */
 function validateSdkProtocol(browserName, protocol) {
   const json = (value) => JSON.stringify(value);
@@ -626,9 +626,10 @@ function validateSdkProtocol(browserName, protocol) {
     at += 1;
     return true;
   });
-  // The render's last block has no later block to replace its telemetry, so a run that received no
-  // lossy event at all read none: it proves nothing about their decoding.
-  gate(browserName, "sdk-protocol-lossy", ordered && lossy.length > 0
+  // The render's last block has no later block to replace its telemetry, so its diagnostic, meter
+  // batch and counter snapshot arrive: a run that lacks one of the three kinds lost a lane.
+  gate(browserName, "sdk-protocol-lossy", ordered
+    && [...PROTOCOL_LOSSY_KINDS].every((kind) => lossy.some((event) => event.kind === kind))
     && reference.filter((event) => PROTOCOL_LOSSY_KINDS.has(event.kind)).length === 3 * protocol.blocks,
   `a lossy event is not the headless engine's event of its block, in order: ${json({ browser: lossy, headless: reference })}`);
 }
