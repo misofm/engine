@@ -219,3 +219,17 @@ mutated file was restored byte for byte from a saved copy.
 | 994-M1 | `knee_coefficients` without its `is_finite` test (the pre-#994 design) | `effect-runtime/src/dynamics.rs` | `knee_tests::a_band_level_at_the_threshold_never_takes_a_nan_target` | RED: `W 0x00000002 T 0e0 R 1 x 0e0: -100 is a duck at the threshold` — at ratio 1, which compresses nothing, the NaN target still became a -100 dB target |
 | 994-M2 | `BAND_KNEE = knee_coefficients(2.0 * KNEE_DB)` | `src/lib.rs` | `knee_tests::the_fixed_knee_words_are_unchanged` | RED |
 | 994-M3 | the rule as a constant bound one ulp too low: `knee_db >= f32::from_bits(0x0010_0000)` | `effect-runtime/src/dynamics.rs` | `knee_tests::a_band_level_at_the_threshold_never_takes_a_nan_target` | RED |
+
+## Issue #1338 — the live crossover
+
+Debug profile, `CARGO_INCREMENTAL=0 cargo test --locked -p multiband-compressor --test <test>`;
+each mutant was applied to a committed tree and restored with `git checkout` and `touch`.
+
+| # | mutation | file | test | result |
+|---|---|---|---|---|
+| 1338-M1 | crossover words assigned at once: `set_target(target, 0)` in `apply_automation` | `src/lib.rs` | `crossover::a_crossover_glide_stays_the_all_pass_and_adds_no_click` | RED at (a): `200 -> 4000: sample 2000: -0.22298926 against the all-pass -0.4660612`; with (a) disabled, RED at (b): largest step `0.33476743` against `0.06538813` static (bound 2x) |
+| 1338-M2 | split coefficients not refreshed per frame on a ramped segment (cached at the segment's start) | `src/lib.rs` | `crossover::a_crossover_glide_…`, `randomized::the_bank_renders_its_scalar_instances_under_random_state` | RED, both (gate 3 by the differential's reach) |
+| 1338-M3 | restore's `transition_norm` check on the current triple disabled | `src/lib.rs` | `crossover::a_restore_refuses_crossover_words_the_engine_would_not_hold` | RED |
+| 1338-M4 | restore's target-equals-design check disabled | `src/lib.rs` | `crossover::a_restore_refuses_…` | RED |
+| 1338-M5 | `write_side` omits the three word ramps | `src/lib.rs` | `crossover::a_restore_refuses_…` | RED: `the snapshot is mid-glide` |
+| 1338-M6 | crossover word ramps on the unclamped law (`current + step`) | `src/lib.rs` | `ramp_endpoint::every_ramped_word_stays_inside_its_endpoints` | RED: `crossover a2 … not one clamped D11 sample` |
