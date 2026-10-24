@@ -9558,6 +9558,9 @@ fn response_owner_bindings(
         .collect()
 }
 
+/// [`Runtime`]'s `input_producers`: unit -> its producer units.
+type ProducerRows = Box<[Box<[u32]>]>;
+
 /// Issue #987: for each bank unit, the earlier units its gather reads, or an empty row; and
 /// (issue #1899) for each per-node effect op such a row reaches, its own producer, with the
 /// op's initial [`Runtime`] `channels_agree` facts.
@@ -9596,60 +9599,61 @@ fn input_producer_table(
     op_slot: &[Option<(usize, usize)>],
     units: &[RuntimeUnit],
     identity: &[UnitIdentity],
-) -> (Box<[Box<[u32]>]>, Box<[bool]>) {
+) -> (ProducerRows, Box<[bool]>) {
     let mut table: Vec<Box<[u32]>> = vec![Box::default(); units.len()];
     // The unit of an admissible producer of `track` for a consumer op whose copy reads `source`,
     // given the rows of every earlier unit.
-    let producer_of = |consumer: usize, source: u32, unit: usize, track: &str, table: &[Box<[u32]>]| {
-        let producer = first_producer[consumer]?;
-        let (before, member) = op_slot.get(producer).copied().flatten()?;
-        if before >= unit || track.is_empty() {
-            return None;
-        }
-        match &units[before] {
-            RuntimeUnit::Bank {
-                members: earlier,
-                lanes: earlier_lanes,
-                chain,
-                ..
-            } => {
-                let lane_of = earlier
-                    .len()
-                    .checked_sub(*earlier_lanes)
-                    .and_then(|last| member.checked_sub(last))?;
-                let producer_track = identity[before].lane_tracks.get(lane_of);
-                if lane_of >= *earlier_lanes
-                    || producer_track.map(|track| &**track) != Some(track)
-                {
-                    return None;
-                }
-                // `first_producer` is the colour's last writer, and `scatter_target` never
-                // redirects into a bank member, so the copy reads the producer's own output; a
-                // redirect into a plain consumer repoints both sides to the consumer's buffer.
-                debug_assert_eq!(
-                    earlier[member].output, source,
-                    "a consumer reads its bank producer"
-                );
-                // A folded lane's only reader is a retired route op, never a bank member or an
-                // effect op.
-                debug_assert_ne!(
-                    chain.fold_lanes().get(lane_of),
-                    Some(&true),
-                    "a folded lane feeds no consumer"
-                );
+    let producer_of =
+        |consumer: usize, source: u32, unit: usize, track: &str, table: &[Box<[u32]>]| {
+            let producer = first_producer[consumer]?;
+            let (before, member) = op_slot.get(producer).copied().flatten()?;
+            if before >= unit || track.is_empty() {
+                return None;
             }
-            RuntimeUnit::Op(op) => {
-                let producer_track = identity[before].lane_tracks.first();
-                if table[before].is_empty()
-                    || op.output != source
-                    || producer_track.map(|track| &**track) != Some(track)
-                {
-                    return None;
+            match &units[before] {
+                RuntimeUnit::Bank {
+                    members: earlier,
+                    lanes: earlier_lanes,
+                    chain,
+                    ..
+                } => {
+                    let lane_of = earlier
+                        .len()
+                        .checked_sub(*earlier_lanes)
+                        .and_then(|last| member.checked_sub(last))?;
+                    let producer_track = identity[before].lane_tracks.get(lane_of);
+                    if lane_of >= *earlier_lanes
+                        || producer_track.map(|track| &**track) != Some(track)
+                    {
+                        return None;
+                    }
+                    // `first_producer` is the colour's last writer, and `scatter_target` never
+                    // redirects into a bank member, so the copy reads the producer's own output; a
+                    // redirect into a plain consumer repoints both sides to the consumer's buffer.
+                    debug_assert_eq!(
+                        earlier[member].output, source,
+                        "a consumer reads its bank producer"
+                    );
+                    // A folded lane's only reader is a retired route op, never a bank member or an
+                    // effect op.
+                    debug_assert_ne!(
+                        chain.fold_lanes().get(lane_of),
+                        Some(&true),
+                        "a folded lane feeds no consumer"
+                    );
+                }
+                RuntimeUnit::Op(op) => {
+                    let producer_track = identity[before].lane_tracks.first();
+                    if table[before].is_empty()
+                        || op.output != source
+                        || producer_track.map(|track| &**track) != Some(track)
+                    {
+                        return None;
+                    }
                 }
             }
-        }
-        u32::try_from(before).ok()
-    };
+            u32::try_from(before).ok()
+        };
     for (run, (_, ops)) in run_units.iter().enumerate() {
         let Some(unit) = unit_of_run[run] else {
             continue;

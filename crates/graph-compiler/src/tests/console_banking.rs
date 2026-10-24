@@ -1318,13 +1318,12 @@ impl NativeEffectFactory for Double {
         match self.role {
             Role::Forward => self.delegate.bind_homogeneous_bank(request),
             Role::Episode => Ok(None),
-            Role::PassBank => Ok(self
-                .delegate
-                .bind_homogeneous_bank(request)?
-                .map(|bank| effect_contract::PreparedEffectBank {
+            Role::PassBank => Ok(self.delegate.bind_homogeneous_bank(request)?.map(|bank| {
+                effect_contract::PreparedEffectBank {
                     processor: Box::new(PassBank),
                     metadata: bank.metadata,
-                })),
+                }
+            })),
         }
     }
 }
@@ -1369,7 +1368,8 @@ impl PreparedNativeEffect for EpisodeEffect {
         state_layout_version: u32,
         input: effect_contract::StatePayloadInput<'_>,
     ) -> Result<(), effect_contract::StatePayloadError> {
-        self.inner.restore_state_payload(state_layout_version, input)
+        self.inner
+            .restore_state_payload(state_layout_version, input)
     }
     fn channel_symmetry(&self) -> bool {
         !self.asymmetric && self.inner.channel_symmetry()
@@ -1494,8 +1494,10 @@ fn a_chain_behind_a_per_node_effect_whose_channels_parted_stays_dual() {
     let after = dual.tracks[0].len() / dual.blocks as usize * EPISODE.end as usize;
     assert!(
         dual.tracks[0][after..]
-            .chunks_exact(2)
-            .any(|pair| pair[0] != pair[1]),
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .any(|[left, right]| left != right),
         "the delay echoes the episode into one plane after it ends"
     );
     assert!(
@@ -1506,7 +1508,11 @@ fn a_chain_behind_a_per_node_effect_whose_channels_parted_stays_dual() {
         "the chain behind the delay is armed on it"
     );
     assert!(armed.collapse[0] > 0, "the first chain collapses");
-    assert_renders_the_oracle(&armed, &dual, "a chain behind an episode, armed against dual");
+    assert_renders_the_oracle(
+        &armed,
+        &dual,
+        "a chain behind an episode, armed against dual",
+    );
 }
 
 /// Issue #1899, admission: a sidechained per-node effect is no producer, because its words and its
@@ -1548,8 +1554,10 @@ fn a_chain_behind_a_sidechained_per_node_effect_is_not_armed_on_it() {
     assert_eq!(dual.collapse[0], 0, "the forced-off arm never collapses");
     assert!(
         dual.tracks[0]
-            .chunks_exact(2)
-            .any(|pair| pair[0] != pair[1]),
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .any(|[left, right]| left != right),
         "the keyed compressor writes two different planes"
     );
     assert!(
@@ -1557,5 +1565,9 @@ fn a_chain_behind_a_sidechained_per_node_effect_is_not_armed_on_it() {
         "no chain is armed on a keyed compressor"
     );
     assert!(armed.collapse[0] > 0, "the first chains collapse");
-    assert_renders_the_oracle(&armed, &dual, "a chain behind a keyed compressor, armed against dual");
+    assert_renders_the_oracle(
+        &armed,
+        &dual,
+        "a chain behind a keyed compressor, armed against dual",
+    );
 }

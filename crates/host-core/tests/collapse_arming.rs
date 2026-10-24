@@ -506,7 +506,10 @@ fn both_chains_of_a_strip_split_by_a_per_node_delay_are_armed() {
         );
         for chain in &gathering {
             assert!(chain.banked, "{left}/{right} ms: only a bank gathers");
-            assert!(!chain.armed_on_input, "{left}/{right} ms: armed on the join");
+            assert!(
+                !chain.armed_on_input,
+                "{left}/{right} ms: armed on the join"
+            );
             let later = armed
                 .units
                 .iter()
