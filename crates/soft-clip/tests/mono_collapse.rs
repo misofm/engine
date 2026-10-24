@@ -213,7 +213,10 @@ fn a_collapsed_then_desymmetrized_bank_is_a_never_collapsed_bank() {
             }
         }
     }
-    assert_eq!(recovered, 1, "the planted NaN is recovered and counted once");
+    assert_eq!(
+        recovered, 1,
+        "the planted NaN is recovered and counted once"
+    );
 
     // One dual block with a Left-only drive span on lane 0: the channels disagree, and the copy
     // makes them agree again.
@@ -266,7 +269,12 @@ fn two_payloads() -> (Vec<u8>, Vec<u8>) {
     let mut offsets = vec![0_u32; lanes + 1];
     for step in 0..3 {
         let mut left: Vec<f32> = (0..FRAMES * lanes)
-            .map(|word| noise(0x7_1872 + (word % lanes) as u64, step * FRAMES + word / lanes))
+            .map(|word| {
+                noise(
+                    0x7_1872 + (word % lanes) as u64,
+                    step * FRAMES + word / lanes,
+                )
+            })
             .collect();
         let mut right = left.clone();
         let first = (step * FRAMES) as u64;
