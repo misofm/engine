@@ -162,3 +162,9 @@ order), so this slice rebases on their payload code instead of racing it.
 - **Forced edit outside the list.** `crates/conformance/src/randomized.rs`: its heterogeneous-cohort
   draw treated a member at another link mode as another program; for a `lane_link` effect it is now
   expected to bank.
+- **1368a cost (gate 4, descriptive).** One console run each on base `24a850abb` and on the
+  candidate (controlled, one warmup, two rounds, cpu 31). The host has no perf counters, so the
+  records carry no `isolated_cycles_per_lane_sample`; p50 per block instead:
+  `sixty_four_track_compressor_only` +0.30 %, `sixty_four_track_console` +0.30 %; the worst row
+  is untouched EQ-only, +1.6 %. No workload row runs the gate-expander. Every record's
+  `output_sha256` is equal to the base's (no bit moved).
