@@ -597,7 +597,7 @@ allow_build_flag_lookalikes() {
     printf '%s\n' 'RUSTFLAGS="-C target-feature=+simd128" cargo build  # a crate attribute is not set here' \
         >"$root/scripts/build.sh"
     printf '%s\n' 'env:' '  RUSTDOCFLAGS: -D warnings' >"$root/.github/workflows/docs.yml"
-    printf '%s\n' '[env]' 'MISO_NOTE = "an @ sign outside a flag key"' >"$root/crates/library/.cargo/config.toml"
+    printf '%s\n' '[env]' 'PLAIN_NOTE = "an @ sign outside a flag key"' >"$root/crates/library/.cargo/config.toml"
     bash "$policy_script" "$root" >/dev/null
 }
 
