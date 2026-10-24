@@ -121,6 +121,11 @@ browser session that boots with a spectrum capture now reports its submix peaks;
 - `hosts/host-web/src/{lib.rs,tests.rs}` (the meter list, the master ring, the boot-word comment).
 - `hosts/host-web/web/miso-engine-v1-audio-worklet-host.d.ts`, `sdk/src/browser/shipped-host.d.ts`
   (the `liveControlMeterBlocks === 0n` sentence only, byte-identical twins).
+- Added by the root meter-cap ruling (T1, 2026-10-24): `crates/capi/tests/*`,
+  `crates/capi/tests/c/abi_smoke.c`, `crates/capi/include/miso_engine_v1.h` (the meter-cap
+  comment), `crates/control-plane/tests/*`, `crates/host-core/src/limiter_linked_session.rs`,
+  `hosts/host-web/tests/control_parity.rs`, `hosts/host-web/tests/browser-v1/expected.json`,
+  `tools/audit/src/capi.rs` and `docs/C_ABI_V1_QUALIFICATION.md`.
 
 ## Non-goals
 
@@ -189,3 +194,37 @@ Commands: `cargo test --locked -p host-core --all-features`,
 - *Report each configured meter handle's own meter in the C ABI meter batch* (#1352): its D2 and
   D3 (per-plane, windowed output peaks) are this slice's output meter; the issue is superseded by
   #1583 and #1587, which deliver the rest, and closes when #1587 merges.
+
+## Decision record
+
+- **Tranches (root, 2026-10-24, from the scope note).** T1: D1, D2 and the request change with
+  every caller, gates 1, 2 and 5, and the D7 evidence. T2: D3, D4, D6 (the core
+  `OutputPeakObserver` in `PlanState`, the new `observe_rendered_block` arguments, the meter
+  consumers kept in `ProviderEpoch`), gates 3, 6 and 7 (C ABI). T3: D5 (the browser ring deleted,
+  the lease driving the gate), gates 4 and 7 (web). Each on its own branch.
+- **R1.** host-web's no-spectrum branch calls the plain live-lanes entries; its own list is gone.
+- **R2.** A request with no selection routes the core selection through the selected-builtins path;
+  the plain entry (no request) still prepares no meter.
+- **Meter caps (root ruling, 2026-10-24).** The caller's meter caps bound every meter stream, the
+  core's strip meters included: a host must admit one stream per strip plus the output. The C ABI
+  header and `docs/C_ABI_V1_QUALIFICATION.md` state it; a cap below that refuses the compile with
+  `builtin.resource.limit $.meter_requests` (capi `a_meter_cap_below_the_strip_count_is_refused`).
+  The test hosts' cap helpers admit 4,096 streams.
+- **Resources move (class A, no rendered bit).** A boot word of `0` now binds the browser's strip
+  meters (R5: the lease is still refused until T3), so the browser oracle's `builtinRetainedBytes`
+  is 6,095 (ceiling 4,288 -> 6,720) and the boot-word-0 test charges the strip meters' delivery
+  rows. The capi reference session: `builtin_meter_payload_bytes` 0 -> 10,458,
+  `builtin_retained_payload_bytes` 46,917 (ceilings 11,520 and 51,648). The meter-carry test's
+  window is 5 blocks (was 600 frames): a request's window is a whole number of blocks.
+- **Red on base (T1).** Gate 1 on `2179497cc`: `session_with_live_controls` gives
+  `[t0, t1, t2]`, not the five strips. Gate 2
+  (`a_spectrum_boot_meters_every_submix_like_the_plain_boot`): submix peak word 6 is `0`.
+- **D7 evidence (#882).** `console-sixty-four-track-intended.json` (64 strips, source fed for the
+  whole run), C ABI lanes, release x86-64 AVX2, 2,000 blocks a round, one warmup and two rounds,
+  arms alternated: no meters 96,883 / 97,275 ns per block, the 64 core strip meters 103,400 /
+  103,281 ns per block (about +6.3 us, +6.5 %). That is about 2-3x a pure scan floor (about
+  2.3 us, estimated); the likely cause is the single-accumulator `max` latency or the per-meter
+  window bookkeeping, not investigated. So #882 must not read +6.5 % as the kernel's floor. Retained: `builtin_meter_payload_bytes` 0 ->
+  74,752 and `builtin_retained_payload_bytes` 259,968 -> 334,720. An earlier invocation fed the
+  48,000-frame source past its end and so mostly timed silence (8.9 / 14.7 us per block); it is
+  discarded as a harness defect.

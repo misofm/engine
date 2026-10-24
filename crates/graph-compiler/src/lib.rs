@@ -5864,6 +5864,16 @@ mod tests {
     /// and, where it closes, a one-byte-below plan cap that rejects transactionally.
     #[test]
     fn launch_effect_fixtures_bank_render_and_bypass_as_frozen() {
+        // A row whose tail is the effect's own statement at the fixtures' 48 kHz (#1373: the
+        // multiband's pinned bound, which its own gate holds equal to the derivation).
+        let descriptor_tail = |id: &str| {
+            let factory = launch_native_effect_registry()
+                .expect("launch registry")
+                .get_shared_ascii(id)
+                .expect("registered launch effect");
+            (factory.descriptor().tail_and_rest)(48_000, effect_contract::EffectQuality::Normal)
+                .tail
+        };
         let rows = [
             LaunchFixture {
                 what: "parametric EQ",
@@ -5970,7 +5980,7 @@ mod tests {
                 console: false,
                 homogeneous: 10,
                 latency: Some(0),
-                tail: Some(TailSamples::Infinite),
+                tail: Some(descriptor_tail("miso.multiband-compressor")),
                 keyless: true,
                 input: multiband_compressor_input_binding,
                 blocks: 20,

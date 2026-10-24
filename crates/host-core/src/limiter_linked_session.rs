@@ -267,13 +267,14 @@ fn caps() -> HostPrepareCaps {
         maximum_effect_scratch_bytes: 1_000_000_000,
         maximum_builtin_retained_bytes: 1_000_000_000,
         maximum_named_allocation_bytes: 1_000_000_000,
-        maximum_meter_streams: 1,
-        maximum_meter_items: 1,
-        maximum_meter_bytes: 1,
+        maximum_meter_streams: 64,
+        maximum_meter_items: 1 << 16,
+        maximum_meter_bytes: 1 << 24,
     }
 }
 
-/// A live control channel per effect and one observation tap per effect; no meters.
+/// A live control channel per effect and one observation tap per effect, and the core's strip
+/// meters (#1581 D2).
 fn live_controls() -> HostLiveControlRequest {
     HostLiveControlRequest {
         observation_taps: 1,

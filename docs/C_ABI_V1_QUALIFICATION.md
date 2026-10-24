@@ -11,6 +11,16 @@ which no code read and which named checkers #319 had already deleted; the files 
 <https://github.com/misofm/engine/tree/5379e46ca3b349b9d277d642c008bb7a9643fb76/fixtures/capi-qualification/v1>.
 The C ABI's live gates are `scripts/check-capi-abi.sh`, the `capi` tests and `audit capi`.
 
+The shipped mobile libraries are the `aarch64-apple-ios` and `aarch64-linux-android` `capi`
+staticlibs, built by `scripts/build-capi-release.sh <target> staticlib <out-dir>` (#1499). It runs
+`cargo rustc --locked --release -p capi --lib --crate-type staticlib --target <target>`, because
+`cargo build -p capi` builds no LTO while `crates/capi/Cargo.toml` lists `rlib` (cargo passes
+`-C lto` only when every crate type can take it). The script copies the archive to `<out-dir>`
+and refuses it unless its Rust objects are one `capi` module plus `compiler_builtins`, the
+fat-LTO shape. `scripts/check-capi-abi.sh` links the x86_64 cdylib and staticlib it builds the
+same way; they are test forms, not shipped. Linking with the NDK or Xcode and packaging are
+successors.
+
 The source authority is clean-main commit `feb039765271ca62b0c905004689b88ad92df65b`, tree
 `e3e11c343c6f6a5b5b380abe03c0431c6fe81579`. Issue 116 is bound to commit/tree
 `45f8f5af8bdd578b5ccb27fdb787f7a663c39818` /
@@ -964,6 +974,19 @@ the rack's latency-preserving bypass shunt (decision 14).
   tracks at the four launch rates. A second stateful effect after the switched one (a compressor
   after a compressor) does not converge within that window; its difference decays.
 - **No resource movement.** The record rides the lanes #1263 attached; no readback row reads it.
+
+## Strip meters on every plan (#1581)
+
+Every C ABI plan carries the engine's meters: one post-matrix sample-peak meter stream per strip,
+the tracks then the submixes, at the default window (`default_meter_window_blocks`, about 32 ms:
+12 blocks at 48 kHz and 128 frames), and, from #1581's second slice, one output meter. The
+caller's `maximum_meter_streams`, `maximum_meter_items` and `maximum_meter_bytes` bound them like
+any other meter, so they must admit one meter stream per strip plus the output. A cap below that
+refuses the compile with `MISO_ENGINE_V1_COMPILE_REJECTED` and
+`builtin.resource.limit $.meter_requests`. On the nine-strip reference session the meters add
+10,458 bytes to `builtin_meter_payload_bytes` (it was 0); `builtin_retained_payload_bytes` is
+46,917 bytes on x86-64. No symbol, result code or event is added; nothing reads the meters through
+the C ABI until #1587.
 
 ## Input design bounds (#1602)
 

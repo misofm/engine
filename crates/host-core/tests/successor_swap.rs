@@ -6060,17 +6060,19 @@ fn pending_observe_swap(
         0,
         "{what}: the retiring predecessor holds the fresh taps"
     );
-    let carries = successor.prepared.plan.observer_carries().to_vec();
+    // The strip meters (#1581 D1) carry beside the taps; the record checked is the taps'.
+    let carries: Vec<_> = successor
+        .prepared
+        .plan
+        .observer_carries()
+        .iter()
+        .filter(|carry| carry.kind == engine::realtime::ObserverKind::Observation)
+        .copied()
+        .collect();
     assert_eq!(
         carries.len(),
         strips.len(),
         "{what}: one record per carried instance"
-    );
-    assert!(
-        carries
-            .iter()
-            .all(|carry| carry.kind == engine::realtime::ObserverKind::Observation),
-        "{what}"
     );
     host_core::pair_carried_observations(
         &mut successor.handles.effect_observations,
@@ -6902,7 +6904,7 @@ fn a_live_difference_on_a_moved_instance_is_retargeted_at_every_width() {
 // post-edit session prepared fresh and fed from frame 0, with the same meters.
 
 mod meter_carry {
-    use core::num::{NonZeroU32, NonZeroUsize};
+    use core::num::NonZeroUsize;
     use std::collections::BTreeMap;
 
     use builtins::{MeterMetricSet, MeterSnapshot, MeterTap};
@@ -6925,16 +6927,19 @@ mod meter_carry {
         MeterTap::PostFader,
         MeterTap::PostMatrix,
     ];
-    /// Not a multiple of the quantum, and longer than the swap block's start: the window opened at
-    /// sample 0 closes at 600 and the next one is open across the swap at sample 768.
-    const PERIOD: u32 = 600;
+    /// Longer than the swap block's start, in blocks (a request's window is a whole number of
+    /// blocks, #1581 D2): the window opened at sample 0 closes at 640 and the next one is open
+    /// across the swap at sample 768.
+    const PERIOD: u32 = 5;
+    /// Another window length: two blocks.
+    const SHORT_PERIOD: u32 = 2;
     const THIRD_TRACK: &str = "eq2";
 
     type Key = (String, MeterTap);
 
-    fn live(period: u32) -> HostLiveControlRequest {
+    fn live(blocks: u32) -> HostLiveControlRequest {
         HostLiveControlRequest {
-            meter_period_frames: NonZeroU32::new(period),
+            meter_window_blocks: blocks,
             meter_queue_depth: NonZeroUsize::new(16).expect("depth"),
             ..HostLiveControlRequest::default()
         }
@@ -7337,7 +7342,7 @@ mod meter_carry {
             &live(PERIOD),
             &meters,
             &a,
-            &live(PERIOD / 2),
+            &live(SHORT_PERIOD),
             &meters,
             Reader::Paired,
         );
@@ -7355,7 +7360,11 @@ mod meter_carry {
                 fresh[0].start_sample, SWAP_SAMPLE,
                 "{k:?}: opened at the adoption block"
             );
-            assert_eq!(fresh[0].frames, PERIOD / 2, "{k:?}: the new window length");
+            assert_eq!(
+                fresh[0].frames,
+                SHORT_PERIOD * QUANTUM as u32,
+                "{k:?}: the new window length"
+            );
         }
 
         // One meter keeps another metric set: that meter alone is not in the record.
@@ -7499,8 +7508,13 @@ mod observation_carry {
                 &mut predecessor.observations,
                 carries,
             );
-            // Within the capacity reserved at construction: no allocation.
-            self.carries.extend_from_slice(carries);
+            // Within the capacity reserved at construction: no allocation. The strip meters
+            // (#1581 D1) carry beside the taps; the record kept is the taps'.
+            self.carries.extend(
+                carries
+                    .iter()
+                    .filter(|carry| carry.kind == ObserverKind::Observation),
+            );
         }
     }
 

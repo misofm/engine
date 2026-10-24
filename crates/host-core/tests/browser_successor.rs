@@ -24,7 +24,7 @@
 #[path = "support/successor.rs"]
 mod successor;
 
-use core::num::{NonZeroU32, NonZeroUsize};
+use core::num::NonZeroUsize;
 
 use builtins::{MeterMetricSet, MeterTap};
 use engine::realtime::{CarryOutcome, SwapOutcome};
@@ -155,7 +155,7 @@ fn meter_requests(session: &Session) -> Vec<HostMeterRequest> {
 fn live_controls(branch: Branch) -> HostLiveControlRequest {
     match branch {
         Branch::Meters => HostLiveControlRequest {
-            meter_period_frames: NonZeroU32::new(256),
+            meter_window_blocks: 2,
             meter_queue_depth: NonZeroUsize::new(4).expect("depth"),
             ..HostLiveControlRequest::default()
         },

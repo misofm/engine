@@ -370,12 +370,16 @@ pub struct HostPrepareReport {
 /// [`HostLiveLanes::ALL`]. The C ABI's selection is [`controls::live_lanes`] (decision 17, C6).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct HostLiveControlRequest {
-    /// Meter window in frames for every meter (default or selected), or `None` for no meters.
-    pub meter_period_frames: Option<NonZeroU32>,
+    /// Meter window in blocks for every meter (default or selected), or `0` for the core default,
+    /// [`default_meter_window_blocks`] at the plan's rate and quantum (issue #1581 D2). There is
+    /// no "no meters" form: every entry that takes a request meters every strip
+    /// ([`meter_selection`]) unless the caller selects its own meters.
+    ///
+    /// [`default_meter_window_blocks`]: crate::meters::default_meter_window_blocks
+    /// [`meter_selection`]: crate::meters::meter_selection
+    pub meter_window_blocks: u32,
     /// Bounded per-meter snapshot queue depth.
     pub meter_queue_depth: NonZeroUsize,
-    /// Which chain boundary the default per-track meters observe.
-    pub meter_tap: MeterTap,
     /// Maximum declared observation taps to bind per effect instance, or `0` for **no observation
     /// capacity at all** (issue #143 D3, level 1).
     ///
@@ -385,7 +389,7 @@ pub struct HostLiveControlRequest {
     /// channel, because a subscription is a record in the effect's own observation queue, which only
     /// the effect's control lane drains.
     ///
-    /// The default observation period is derived from `meter_period_frames`; individual taps
+    /// The default observation period is the meter window; individual taps
     /// can use other periods. Latest gain-reduction observations can be independently aged,
     /// so a browser frame's peak interval does not establish the gain-reduction interval.
     pub observation_taps: u32,
@@ -394,9 +398,8 @@ pub struct HostLiveControlRequest {
 impl Default for HostLiveControlRequest {
     fn default() -> Self {
         Self {
-            meter_period_frames: None,
+            meter_window_blocks: 0,
             meter_queue_depth: NonZeroUsize::MIN,
-            meter_tap: MeterTap::PostMatrix,
             observation_taps: 0,
         }
     }
@@ -2169,6 +2172,15 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
     let route_count = u64::try_from(model.routes.len()).map_err(|_| platform("host.count"))?;
     let effect_count = count_effects(model)?;
     caps.validate_shape(compiled)?;
+    // Issue #1581 D1/D2: one window for every meter of the plan, and the core's strip selection
+    // unless the caller chose its own. The plain entry (no request) meters nothing.
+    let meter_config = requested_meter_config(live_controls, compiled)?;
+    let default_meters = if attach_live && selected_meters.is_none() {
+        crate::meters::meter_selection(model)
+    } else {
+        Vec::new()
+    };
+    let selected_meters = selected_meters.or(attach_live.then_some(default_meters.as_slice()));
     // The overlay the plan renders and lists under (#1559 D9): a successor's own, which holds its
     // master by strip ID (#1683); a first plan's solos nothing and designates no master (#1689 D3):
     // the app writes the strip's `master` row after boot.
@@ -2384,13 +2396,13 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
     // counts it; installed after bind.
     // Issue #1327 D1: a meter carries when its key and configuration are the predecessor's; the
     // joins that follow bind find the observers, this only decides that a program is needed.
-    let meters_may_carry = match (successor, requested_meter_config(live_controls)) {
-        (Some(base), Some(config)) => meters_may_carry(
+    let meters_may_carry = match successor {
+        Some(base) => meters_may_carry(
             &base.inventory.meters,
-            &requested_meter_owners(model, live_controls, selected_meters),
-            MeterConfigKey::of(&config),
+            &requested_meter_owners(selected_meters),
+            MeterConfigKey::of(&meter_config),
         ),
-        _ => false,
+        None => false,
     };
     // Issue #1395 D1: a spectrum capture carries when its target and channels are the
     // predecessor's and the two plans run at one rate and quantum; as for meters, this only decides
@@ -2574,11 +2586,7 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
     // queue, which only the effect's control lane drains, so "observe without live controls" has
     // no delivery path and is a rejection rather than a silent
     // half-attach. The published window is the meter window, derived rather than configured.
-    let observation_window_blocks = match (live_controls.meter_period_frames, compiled.quantum().0)
-    {
-        (Some(period), quantum) if quantum > 0 => (period.get() / quantum).max(1),
-        _ => 1,
-    };
+    let observation_window_blocks = meter_config.period_frames.get() / compiled.quantum().0.max(1);
     let effect_observations: Vec<EffectObservationHandle> = match live_controls.observation_taps {
         0 => Vec::new(),
         // Issue #1254 D2: without effect lanes there is no queue for a subscription to ride.
@@ -2608,7 +2616,7 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
     // Issue #137 D1/D2: the live-control requests are derived here, once, from the canonical strip
     // order, so `HostLiveControlHandles::strips` and the requested channels cannot disagree. The
     // strip list (issue #1207 D1) appends the submixes after the tracks. Every strip gets a control
-    // request (issue #1211 D1). Source semantics: tracks only for the default meters below, so
+    // request (issue #1211 D1), and the default meters are this list's order (#1581 D1);
     // `live_control_tracks` is exactly the strip list's track prefix.
     let live_control_strips: Vec<Box<str>> = model
         .tracks
@@ -2671,38 +2679,30 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
     } else {
         Vec::new()
     };
-    if selected_meters.is_some_and(|meters| !meters.is_empty())
-        && live_controls.meter_period_frames.is_none()
-    {
-        return Err(shape("host.meter.period"));
-    }
-    // A selected meter may name any strip (issue #1208 D1); the default set stays one per track.
-    let meter_tracks = requested_meter_owners(model, live_controls, selected_meters);
-    let meter_requests: Vec<SelectedMeterRequest> = match requested_meter_config(live_controls) {
-        None => Vec::new(),
-        Some(config) => meter_tracks
-            .iter()
-            .enumerate()
-            .map(|(index, (track, tap, metrics))| {
-                // Handles are `index + 1`: nonzero, stable in request order (canonical track order
-                // for the default set); nothing outside this function invents a meter handle.
-                let handle = u64::try_from(index)
-                    .ok()
-                    .and_then(|value| value.checked_add(1))
-                    .and_then(core::num::NonZeroU64::new)
-                    .ok_or_else(|| platform("host.count"))?;
-                Ok(SelectedMeterRequest {
-                    request: MeterRequest {
-                        handle: MeterHandle(handle),
-                        track_id: (*track).to_string(),
-                        tap: *tap,
-                        config,
-                    },
-                    metrics: *metrics,
-                })
+    // A selected meter may name any strip (issue #1208 D1); the default set is one per strip.
+    let meter_tracks = requested_meter_owners(selected_meters);
+    let meter_requests: Vec<SelectedMeterRequest> = meter_tracks
+        .iter()
+        .enumerate()
+        .map(|(index, (track, tap, metrics))| {
+            // Handles are `index + 1`: nonzero, stable in request order (canonical strip order
+            // for the default set); nothing outside this function invents a meter handle.
+            let handle = u64::try_from(index)
+                .ok()
+                .and_then(|value| value.checked_add(1))
+                .and_then(core::num::NonZeroU64::new)
+                .ok_or_else(|| platform("host.count"))?;
+            Ok(SelectedMeterRequest {
+                request: MeterRequest {
+                    handle: MeterHandle(handle),
+                    track_id: (*track).to_string(),
+                    tap: *tap,
+                    config: meter_config,
+                },
+                metrics: *metrics,
             })
-            .collect::<Result<Vec<_>, PrepareDiagnostics>>()?,
-    };
+        })
+        .collect::<Result<Vec<_>, PrepareDiagnostics>>()?;
     let builtin_caps = BuiltinCompileCaps {
         maximum_total_state_bytes: caps.maximum_builtin_retained_bytes,
         maximum_total_retained_payload_bytes: caps.maximum_builtin_retained_bytes,
@@ -3808,42 +3808,38 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
 }
 
 /// The meters a preparation builds, as `(strip ID, tap, metric set)` in reader order (#1327): the
-/// caller's selection, else one all-metric meter per track at the request's tap.
-fn requested_meter_owners<'a>(
-    model: &'a SessionModel,
-    live_controls: &HostLiveControlRequest,
-    selected_meters: Option<&'a [HostMeterRequest]>,
-) -> Vec<(&'a str, MeterTap, MeterMetricSet)> {
-    match selected_meters {
-        Some(meters) => meters
-            .iter()
-            .map(|meter| (meter.strip_id.as_ref(), meter.tap, meter.metrics))
-            .collect(),
-        None => model
-            .tracks
-            .iter()
-            .map(|track| {
-                (
-                    track.id.as_str(),
-                    live_controls.meter_tap,
-                    MeterMetricSet::ALL,
-                )
-            })
-            .collect(),
-    }
+/// caller's selection or the core's ([`crate::meters::meter_selection`]), and none for the plain
+/// entry.
+fn requested_meter_owners(
+    selected_meters: Option<&[HostMeterRequest]>,
+) -> Vec<(&str, MeterTap, MeterMetricSet)> {
+    selected_meters
+        .unwrap_or_default()
+        .iter()
+        .map(|meter| (meter.strip_id.as_ref(), meter.tap, meter.metrics))
+        .collect()
 }
 
-/// The configuration every meter of a preparation shares, or `None` when it builds no meter.
-fn requested_meter_config(live_controls: &HostLiveControlRequest) -> Option<MeterConfig> {
-    live_controls
-        .meter_period_frames
-        .map(|period_frames| MeterConfig {
-            period_frames,
-            peak_hold_frames: 0,
-            peak_decay_db_per_second: 0.0,
-            queue_capacity: live_controls.meter_queue_depth,
-            reset_generation: 0,
-        })
+/// The configuration every meter of a preparation shares (issue #1581 D2): the request's window,
+/// or the core default when it is `0`, in frames of the plan's quantum.
+fn requested_meter_config(
+    live_controls: &HostLiveControlRequest,
+    compiled: &CompiledSession,
+) -> Result<MeterConfig, PrepareDiagnostics> {
+    let quantum = compiled.quantum().0;
+    let blocks = NonZeroU32::new(live_controls.meter_window_blocks).unwrap_or_else(|| {
+        crate::meters::default_meter_window_blocks(compiled.sample_rate().0, quantum)
+    });
+    let period_frames = blocks
+        .checked_mul(NonZeroU32::new(quantum).ok_or_else(|| shape("host.meter.period"))?)
+        .ok_or_else(|| shape("host.meter.period"))?;
+    Ok(MeterConfig {
+        period_frames,
+        peak_hold_frames: 0,
+        peak_decay_db_per_second: 0.0,
+        queue_capacity: live_controls.meter_queue_depth,
+        reset_generation: 0,
+    })
 }
 
 /// Whether any of `owners` has a meter in `predecessor` with its key and `config` (#1327 D1).
