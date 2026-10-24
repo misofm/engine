@@ -367,7 +367,8 @@ Root rulings (2026-10-24), each amending the frozen text above:
   routes, the output), the nodes the compiler emits; the inventory holds no node list.
 
 Evidence (48 kHz, quantum 128, `Backend::current()`):
-`crates/host-core/tests/warm_successor.rs`, 9 tests, all green. Red first on mutants of
+`crates/host-core/tests/warm_successor.rs`, 10 tests, and one unit test in `prepare.rs`, all
+green. Red first on mutants of
 `prepare.rs`, one run each:
 
 | mutant | red tests |
@@ -385,9 +386,30 @@ Evidence (48 kHz, quantum 128, `Backend::current()`):
 | grown claim line restarts its strip (R-A) | gates 1, 2, 4, 7, 8, 9 |
 | whole strip's fader carries | gate 2 (R6) |
 | whole strip's effects carry | gate 2 (R6) |
-| no C1 re-check and no join re-check | `a_lead_of_another_edit_is_the_invariant_error` |
+| no C1 re-check | `a_lead_that_misses_c1_is_the_invariant_error` |
+| no join re-check | `a_join_outside_the_leads_restart_set_is_the_invariant_error` |
+| `drops_line` always false | `prepare::tests::the_whole_strip_filter_drops_only_the_pre_fader_lines` |
 
-Each re-check alone survives, because the forced mismatch fails both; together they turn it red.
+Verifier fold (attempt 1 PASS, minor findings):
+- The compensation-line part of the R3 filter is tested at the unit level
+  (`the_whole_strip_filter_drops_only_the_pre_fader_lines`: chain, effect, sidechain and
+  pre-fader route lines of a whole-restarted strip drop; its matrix and post-fader lines and other
+  strips' lines stay). **Known gap:** the preparation's call of the filter has no integration
+  count. `graph::test_only_carry_counts` exposes no delay-move count, and `crates/graph` is outside
+  this slice's paths. A follow-up that adds the count there can extend gate 2's R6 assertion.
+- The invariant test is split into one fixture per re-check, both reached through public API: a
+  lead too short for the edit (`P = 384` with gate 1's restart set) fails only C1; gate 1's lead
+  on an edit that also adds a latency-free insert to track 2 keeps C1 and fails only the join.
+- The #1272 D3 carry rule is one predicate (`source_carries`, with `source_ring_config`), read by
+  the preparation's source loop and by `warm_lead`'s ring check.
+
+Notes for later slices:
+- **1354b:** `warm_lead`'s pass bound is `strips + 1`, enough while each pass adds a strip to
+  `restart_whole`. When 1354b's M1 rule adds strips to R in a pass, the bound must grow to about
+  `2 · strips + 1` (D2: a strip can enter each set once).
+- **#1355:** `prime_bytes` counts every source-claim line of W, including an added track's line
+  whose source is not carried. #1355 must confirm which lines the fill writes and narrow D3's count
+  if the fill skips such lines.
 
 Test value (1354a):
 - Gate 1: a lead floor on every surviving node (round-4 B1) moves track 2 and the output off
@@ -405,5 +427,8 @@ Test value (1354a):
 - Gate 8: a walk that ignores sidechain edges never finds K or T6.
 - Gate 9: a walk that also follows a restarted submix's inputs that do not hold it late restarts
   T0 as well.
-- Invariant: a preparation that trusts a lead without re-checking C1 and the join prepares a
-  misaligned successor from a lead of another edit.
+- Invariant, C1: a preparation that trusts a lead's `P` prepares a successor whose output is late.
+- Invariant, join: a preparation that trusts a lead's restart set floors a restarted strip at
+  `a + P` and never reports it.
+- Filter unit test: a filter that keeps a whole-restarted strip's pre-fader lines carries their
+  pending audio into a strip that restarts at rest.
