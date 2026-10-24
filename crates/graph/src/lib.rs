@@ -702,6 +702,11 @@ pub struct GraphPreparedEffect {
 /// holds one, so `graph-compiler`'s resource estimate charges this size for it.
 pub const EFFECT_RENDER_NODE_BYTES: usize = core::mem::size_of::<runtime::EffectNode>();
 
+/// Bytes of a live-control-driven per-node effect's boxed owner (`runtime::LiveControlEffect`),
+/// padding included, which `graph-compiler`'s resource estimate charges for it. One size, so a
+/// new field of the owner is charged without a second edit (#1816).
+pub const LIVE_CONTROL_EFFECT_BYTES: usize = core::mem::size_of::<runtime::LiveControlEffect>();
+
 /// One prepared effect's live-control channel, carried **beside** the prepared effects
 /// rather than inside them (issue #140 A).
 ///

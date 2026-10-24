@@ -762,3 +762,5 @@ issue therefore changes:
 - D4's `array::from_fn` case over `controls[lane]` becomes a refused case (an expected failure expecting
   {drain}), in place of the valid-fixture case; the accepted-cases line for it follows;
 - `drain_lane_pairs` stays an expected failure (D4), and its base-tree text follows #1442 Amendment 3.
+
+**#1816 note (root R1, 2026-10-24).** #1444 D4's stated limit ("a helper two calls deep") has a second instance: `carry_effect_lanes` -> `carry_observes` (graph executor, `BankChain`, the `BankStage` hook) -> the owner's drain loop, `LiveControlEffectBankStage::drain_observe_queues` or `EffectControlLane::drain_observations` (the first is `BankChain::run` -> `begin_block` -> `drain`); the D1 walk must accept that shared loop, which `twin-carry-observe-lanes` holds.
