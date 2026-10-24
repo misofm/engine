@@ -1036,15 +1036,15 @@ describe("issue #278 -- the port table is enforced, not documented", () => {
     }
   });
 
-  test("every catalog port row is a launch descriptor row, and there are eighteen", () => {
+  test("every catalog port row is a launch descriptor row, and there are twenty-one", () => {
     // The catalog is the SDK's only authority on ports, so the shape it publishes is worth
-    // stating once here: eight effects, each with exactly one main input and one main output,
-    // and exactly two of them with an optional `sidechain-in`.
+    // stating once here: nine effects, each with exactly one main input and one main output,
+    // and exactly three of them with an optional `sidechain-in`.
     const rows = CATALOG.effects.flatMap((entry) => entry.ports);
-    assert.equal(rows.length, 18);
-    assert.equal(rows.filter((port) => port.roleName === "mainInput").length, 8);
-    assert.equal(rows.filter((port) => port.roleName === "mainOutput").length, 8);
-    assert.equal(rows.filter((port) => port.roleName === "sidechainInput").length, 2);
+    assert.equal(rows.length, 21);
+    assert.equal(rows.filter((port) => port.roleName === "mainInput").length, 9);
+    assert.equal(rows.filter((port) => port.roleName === "mainOutput").length, 9);
+    assert.equal(rows.filter((port) => port.roleName === "sidechainInput").length, 3);
     assert.ok(rows.every((port) => port.layoutName === "dualMonoPlanar"));
     assert.ok(rows.every((port) => port.required === (port.roleName !== "sidechainInput")));
   });
