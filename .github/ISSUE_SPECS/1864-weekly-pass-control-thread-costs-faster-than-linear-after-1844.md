@@ -56,6 +56,19 @@ Index items 2 and 3 through `AutomationIndex`/`ModelView` (the #1710/#1844 patte
   bases: #1844's mute/fader edit, a moved VCA ride (86 strips' cells 15 -> 12), a member leaving
   the VCA, a VCA hand offset (86 live `FaderOffsetsRecord`s with the VCA length, item 3's path) and
   a moved own ride; the VCA-mute variant has `continued_vca` false on the member that leaves.
+- The class A dumps cover only successors whose strips keep their position (committed position
+  == new index), and the reaches were not read by any host-core test: a mutant that gives
+  `EffectiveDiff::continued_lanes` empty reaches left every host-core test green (verifier MAJOR).
+  A row in `added_removed_and_changed_vca_mute_entries_carry_the_member_stage` closes both: the
+  member keeps its own flat mute entry, `va`'s mute entry changes and the successor adds a muted
+  track ahead of it (position 0, index 1). A stale continuation changes output only inside the
+  `VcaMute` ramp window (from the next block boundary after it the run equals a fresh plan), so
+  the row asserts every sample equal to the same swap without the own entry (a VCA-only lane,
+  which repositions whatever the reach), and from the settled boundary equal to a fresh plan. Red
+  under the empty-reach mutant. A mutant reading the committed reach at the new index stays green
+  here (the committed model has no strip there, so it reads an empty reach on one side only,
+  which also repositions). A following route reads the mute half alone
+  (`EffectiveDiff::continued_mute_lanes`).
 - Timing (release, one warmup, two rounds, `flock -x`, load average about 4-5 on 32 cores; the
   session as #1844's rows), ms, rounds 1 / 2:
 
