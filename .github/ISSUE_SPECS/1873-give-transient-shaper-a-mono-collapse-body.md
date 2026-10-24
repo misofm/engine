@@ -23,3 +23,35 @@ A mono track whose chain holds `miso.transient-shaper` can mono-collapse like th
 ## Owner rule
 
 Only mono source files get dual-mono processing; no content detection.
+
+## Decision and evidence record (attempt 1, 2026-10-24)
+
+* Scope note re-checked against main `9ac7d0d6b` (after #1368b, PR #1902): the per-lane link
+  (`LinkLanes`, `LINK_MIXED`, `set_lane_link`) is in, so the slice branches from it as planned.
+  Changed from the note: the wasm roster row already pinned `13process_block` (#1368b), so the
+  block body is now `#[inline(always)]` and the two rows pin the bank's `12process_bank` and
+  `17process_bank_mono`; `src/corpus.rs` calls `process_block::<false>`.
+* `step`/`run`/`process_block` take `const MONO: bool`. Collapsed: the left plane, envelopes and
+  ramps only; the ramp prefix is the left ramps' (partition-invariant, and the dual one on
+  `L == R`); the silent path reads the left plane and left rest; a D7 failure on the left plane
+  is recovered on both channels and charged on both. `process_bank_inner::<MONO>` is shared.
+* **A collapsed lane's link partner is its own word**: every arm computes `link(x, x, lanes)`,
+  the dual expression on `L == R` in the same order; the mixed arm selects per lane its own
+  mode's law of `(x, x)`. No mode declines. Proved bit for bit by the transition test on each
+  uniform mode and on a mixed bank (lanes cycle DualMono, Maximum, Average).
+* `desymmetrize_channels` copies `right_env = left_env` and `right.ramps = left.ramps`;
+  `channels_agree` compares the same 14 words per lane bit for bit. `DESIGNED` witness (bank and
+  scalar): the lane's three ramps, four fields each. Excluded: envelopes (running state),
+  `Ramps::defaults` (never read), links/coefficients/bypass (one word for both channels).
+* Tests: `tests/mono_collapse.rs` (transition against a never-collapsed bank with a D7 recovery
+  and ramps in flight at the disengage; the word lists and witness via restores); randomized
+  differential `witness: true`; paired_spans A3 rows for the three modes.
+* Class A (PR evidence, not committed): all 42 console `*output_sha256` fields of one untimed
+  `bench console` warmup are identical on base `9ac7d0d6b` and the branch (the console fixtures
+  hold no shaper, so this proves no other effect moved); the corpus digests (`tests/cross_target.rs`)
+  are unchanged and green.
+* Wasm: shipped module 4,627,981 B on base, 4,641,920 B on the branch (+13,939 B, the `MONO`
+  monomorph). Dual `process_bank` 700 / 0 (the base `process_block` was 700 / 0), collapsed
+  `process_bank_mono` 352 / 0; both ceilings 0.10 (the old 0.38 row was 4 x the M2 786 / 72
+  body). Expected-resources rows unchanged. `--kernel-min` stays 13 (29 kernels now), as #973,
+  #1871 and #1872 left it.
