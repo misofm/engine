@@ -9,3 +9,24 @@ Child of #377 (Part 2, finding 3, plus finding 8). **Deferred past launch** by t
 ## Not scheduled
 
 Do not claim before launch without an owner comment here.
+
+## Decision record (2026-10-24, backlog sprint)
+
+- Pulled forward by the backlog sprint (owner goal of 2026-10-24); the launch hold is discharged.
+- Root decisions: byte identity of every generated document, no re-pin; part 2 is one assertion
+  in an existing gate, not a generated constants prelude. No new test.
+- Emission: `Serialize` models (serde derive) written through `serde_json`. `preserve_order` is not
+  used: struct field order is the schema order, and the feature would unify into every workspace
+  `serde_json` user. `raw_value` carries each `f32` in `number()`'s spelling. A small block
+  formatter keeps the shipped whitespace (two-space blocks; a fixed list of continuation keys stays
+  on the line before it; `Inline`/`Tight` values are written on one line). New direct dependency
+  `serde =1.0.228` (already in `Cargo.lock`; one lock line).
+- Part 2: `scripts/check-web-audioworklet.sh` requires each shipped JS file to declare
+  `COMMAND_RECORD_BYTES` exactly once, equal to the shipped layout's `commandRecord.bytes`.
+
+## Evidence
+
+- Both generated documents byte-identical: generator, `scripts/check-sdk-generated.sh`, then
+  `git diff --exit-code sdk` clean; the built artifact's two JSON documents equal `sdk/assets`.
+- Red first: `COMMAND_RECORD_BYTES = 273` in the worklet JS (tree and artifact) passes the gate
+  before the assertion and fails it after; the same mutant in the host JS fails it too.
