@@ -128,3 +128,37 @@ Evidence (48 kHz, this worktree):
   two link modes and listen on alternate lanes, plus a scalar instance, 400 blocks with silences of
   10,240 frames (armed and unarmable segments both occur): 3,686,400 output bytes identical before
   (b75d18b6e) and after the `armable` change.
+
+## S2 attempt 1 (2026-10-24): registry and consumer wiring (insert only)
+
+- `miso.de-esser` is the ninth launch factory (`effect-compiler`, registry order last). Root
+  decision: insert only at launch; it is not on decision 12's console list until the owner rules
+  (S3). Wired: `check-effect-runtime-policy.sh` boundary, `SIDECHAIN_EFFECTS`, the SDK assets and
+  codegen, `EFFECT_LINK_MODES` (all three modes), `SESSION_SCHEMA_V1.md` (ports, eligibility),
+  the `qualification.yml` DSP job `-p` and workspace `--exclude` lists, and every test row that
+  enumerates the registry (counts 8 -> 9, ports 18 -> 21, taps 4 -> 5, quality rows 32 -> 36).
+- Defect found by `bypass_shunt_identity` (per-node leg, Extreme level): a prepared-bypass lane
+  whose wet state (SVF integrators) alone failed D7 zeroed its dry output, where the graph's
+  shunt passes it. `finish_block` now zeroes a bypassed lane only when its output fails; the state
+  is still recovered and counted. Red before the change, green after.
+- `parameter_lattice`'s geometric-step check now skips intrinsic points. The binding lattice law
+  (`crates/effect-contract/src/step.rs:7-12`, #239 ruling 5461507633 section B) allows the
+  endpoint and default detents one irregular adjacency; the de-esser's Q (0.5-8) ends
+  7.99821205 -> 8, gap 0.0018, below the first generated gap. Every geometric row of the nine
+  effects ends on a clamp; only this one exposed the old rule.
+- `observation_identity`: the de-esser was born with its tap, so its contract is 1.0 (no bump).
+- `console-workload` `paired_spans`: the de-esser is collapse-capable, so it joins the
+  collapse-capable set and carries an A3 row (every link mode, 10 live PerLane parameters, 97
+  twin pairs), as the gate and multiband do.
+- No new test: the de-esser rides the existing per-effect rows (`parameter-metadata` round trip
+  boots every registry effect as an insert and renders it on the web host; the SDK
+  `console-evals` boot each catalog effect at every link mode and hear its bypass lifted).
+- Browser budgets unmoved (`check-browser-expected-resources.py`, `check-web-audioworklet.sh`
+  boot high-water gate both green; no re-pin).
+- SVF chord fix (#1372a verifier finding): `retarget` skipped a ramp whose design bits did not
+  move, so a mid-ramp one-ulp frequency nudge that keeps `a2`'s bits left `a2` on its old schedule
+  while `c1` and `a3` restarted; off-chord triples are not contractive (spectral radius up to 1.36
+  at the extreme). When any SVF design word moves, the three words now restart together from
+  their current values, so every loaded triple is a convex combination of the current point and
+  the new design. `tests/svf_chord.rs` is red before the change (frame 33: fractions 1/64, 2/64,
+  1/64) and green after. Class A: the de-esser is not registered on main, so no shipped bit moves.

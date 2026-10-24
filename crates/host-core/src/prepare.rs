@@ -844,6 +844,8 @@ pub struct PlanStateInventory {
     spectrum_collection: bool,
     /// The captures this plan takes over from its predecessor (#1395 D3), built at preparation.
     spectrum_pairing: Box<[crate::spectrum::SpectrumPair]>,
+    /// The meters this plan takes over from its predecessor (#1674 R1), built at preparation.
+    meter_pairing: Box<[engine::realtime::ObserverCarry]>,
     /// One row per compensation line of the plan (#1283 D1), sorted by edge ID.
     delay_lines: Box<[graph::GraphDelayLine]>,
     /// One row per strip input alignment line of the plan (#1284 D1), sorted by strip ID.
@@ -1100,6 +1102,19 @@ impl PlanStateInventory {
         &self.spectrum_pairing
     }
 
+    /// The strip meter readers this plan takes over from the plan it was prepared to displace
+    /// (#1674 R1): the records the control side pairs its meter consumers by at promotion, with
+    /// [`pair_carried_meters`], when the adoption carried. Built at preparation from the meter
+    /// moves, so its rows equal the swap block's record's meter entries, in order: the observer
+    /// carry is all or nothing and runs every meter move. It holds no spectrum or tap row; a tap's
+    /// carry also depends on its effect's restore at the swap, so observation readers pair from the
+    /// record's tap entries, never from a preparation-time list. Empty for a plan prepared without
+    /// a predecessor or one that carries no meter.
+    #[must_use]
+    pub fn meter_pairing(&self) -> &[engine::realtime::ObserverCarry] {
+        &self.meter_pairing
+    }
+
     /// Compensation line rows, one per delayed edge of the plan (#1283).
     #[must_use]
     pub fn delay_line_count(&self) -> usize {
@@ -1167,6 +1182,7 @@ impl PlanStateInventory {
             spectrum: Box::default(),
             spectrum_collection: false,
             spectrum_pairing: Box::default(),
+            meter_pairing: Box::default(),
             delay_lines: Box::default(),
             strip_delays: Box::default(),
             live_routes: Box::default(),
@@ -1205,6 +1221,7 @@ impl PlanStateInventory {
             spectrum: Box::default(),
             spectrum_collection: false,
             spectrum_pairing: Box::default(),
+            meter_pairing: Box::default(),
             delay_lines: Box::default(),
             strip_delays: Box::default(),
             live_routes: Box::default(),
@@ -1220,6 +1237,19 @@ impl PlanStateInventory {
             source_read_offset: 0,
             // A fresh reference: a session of its own.
             published_generation: PublishedGeneration::new(SourceGeneration(1)),
+        }
+    }
+
+    /// [`Self::test_only_floors_only`] with `floors` as its input floors (#1402 D3): a successor
+    /// prepared against it is compiled with these floors and carries no state, so a gate can
+    /// prepare a plan with lead floors before #1354 computes them. `floors` is sorted by node ID,
+    /// one row per node, as [`Self::input_floors`] is.
+    #[cfg(feature = "test-support")]
+    #[must_use]
+    pub fn test_only_with_input_floors(&self, floors: &[(graph::GraphNodeId, u64)]) -> Self {
+        Self {
+            input_floors: floors.into(),
+            ..self.test_only_floors_only()
         }
     }
 
@@ -1315,6 +1345,7 @@ impl PlanStateInventory {
                 + core::mem::size_of_val::<[ObservationInventoryRow]>(&self.observations)
                 + core::mem::size_of_val::<[SpectrumInventoryRow]>(&self.spectrum)
                 + core::mem::size_of_val::<[crate::spectrum::SpectrumPair]>(&self.spectrum_pairing)
+                + core::mem::size_of_val::<[engine::realtime::ObserverCarry]>(&self.meter_pairing)
                 + core::mem::size_of_val::<[graph::GraphDelayLine]>(&self.delay_lines)
                 + core::mem::size_of_val::<[graph::GraphStripDelayLine]>(&self.strip_delays)
                 + core::mem::size_of_val::<[graph::GraphLiveRoute]>(&self.live_routes)
@@ -2307,7 +2338,14 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
     // this plan is bound.
     let delay_joins: Vec<StripDelayJoin<'_>> = match successor {
         None => Vec::new(),
-        Some(base) => join_strip_delays(base.committed, model),
+        // #1402 R-B: the sources whose rings carry under #1272 D3.
+        Some(base) => {
+            let carried: BTreeSet<&str> = carried_sources
+                .iter()
+                .map(|&(index, _)| model.sources[index as usize].id.as_str())
+                .collect();
+            join_strip_delays(base.committed, model, &carried)
+        }
     };
     let route_joins: Vec<RouteJoin<'_>> = match (successor, &level_diff) {
         (Some(base), Some(diff)) => join_routes(base.committed, model, base.edit_ramps, diff),
@@ -3534,6 +3572,17 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
         }
         fade_arm_rows.sort_unstable_by(|left, right| left.id.cmp(&right.id));
     }
+    // #1674 R1: the meter readers the control side pairs at promotion, in the swap block's record
+    // order, read before the moves go to the plan.
+    let meter_pairing: Box<[engine::realtime::ObserverCarry]> = meter_carry
+        .moves
+        .iter()
+        .map(|step| engine::realtime::ObserverCarry {
+            kind: step.kind,
+            successor: step.successor_entry,
+            predecessor: step.predecessor_entry,
+        })
+        .collect();
     if !effect_carry.moves.is_empty() {
         graph::install_effect_carry(&mut plan, effect_carry.moves, effect_carry_scratch_bytes)
             .map_err(|_| graph_failure("host.carry.install"))?;
@@ -3621,6 +3670,7 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
         spectrum: spectrum_rows.into_boxed_slice(),
         spectrum_collection,
         spectrum_pairing: spectrum_carry.pairing.into_boxed_slice(),
+        meter_pairing,
         delay_lines: delay_lines.into_boxed_slice(),
         strip_delays: strip_delays.into_boxed_slice(),
         live_routes: live_routes.into_boxed_slice(),
@@ -6095,18 +6145,24 @@ struct StripDelayJoin<'a> {
     id: &'a str,
     /// The lanes whose declared delay is the same in both models: [`graph::STRIP_DELAY_LEFT`] and
     /// [`graph::STRIP_DELAY_RIGHT`] bits. Each carries its pending samples when both plans hold the
-    /// strip's line.
+    /// strip's line, whose lane rings are equally long, and the strip reads the same source.
     equal: u8,
-    /// The two lanes' declared delays in the successor's model.
-    delays: [u32; 2],
+    /// Whether the strip reads the same input in both models (#1402 R-B): a track whose
+    /// `source_id` is unchanged and whose source's ring carries (#1272 D3), or a submix. A track's
+    /// line holds its source's raw frames (its declared delay and, since #1287 R1, its
+    /// source-claim line), so a track that reads another source, or a source redeclared under its
+    /// ID (a fresh ring from frame 0), carries no lane.
+    same_source: bool,
 }
 
 /// The model half of the strip delay join (#1284 D1): for every strip of `model` that `committed`
-/// also has as a strip of the same kind, which lanes declare the same `delay_samples`. A strip
-/// whose kind changed has no counterpart and is not listed: it is a new strip.
+/// also has as a strip of the same kind, which lanes declare the same `delay_samples`, and whether
+/// a track reads the same source, one of `carried`, the source IDs whose rings carry. A strip whose
+/// kind changed has no counterpart and is not listed: it is a new strip.
 fn join_strip_delays<'a>(
     committed: &'a SessionModel,
     model: &'a SessionModel,
+    carried: &BTreeSet<&str>,
 ) -> Vec<StripDelayJoin<'a>> {
     model
         .strips()
@@ -6121,13 +6177,20 @@ fn join_strip_delays<'a>(
                 .enumerate()
                 .filter(|(_, (before, after))| before.delay_samples == after.delay_samples)
                 .fold(0, |mask, (lane, _)| mask | (1_u8 << lane));
+            let same_source = match strip.kind {
+                session::StripKind::Track(track) => committed
+                    .tracks
+                    .binary_search_by(|before| before.id.as_str().cmp(track.id.as_str()))
+                    .is_ok_and(|index| {
+                        committed.tracks[index].source_id == track.source_id
+                            && carried.contains(track.source_id.as_str())
+                    }),
+                session::StripKind::Submix(_) => true,
+            };
             Some(StripDelayJoin {
                 id: strip.id.as_str(),
                 equal,
-                delays: [
-                    strip.builtins.left.delay_samples,
-                    strip.builtins.right.delay_samples,
-                ],
+                same_source,
             })
         })
         .collect()
@@ -6140,11 +6203,15 @@ struct StripDelayCarry {
     restarted: Vec<Box<str>>,
 }
 
-/// The line half of the strip delay join (#1284 D1): a lane carries when its `delay_samples` is the
-/// same in both models and both plans hold the strip's line, whose lane rings are then equally long.
-/// A strip with a lane whose delay changed starts that lane at rest and is listed in `restarted`
-/// (decision 15, D15-9): the duck-swap removes the click of the alignment that moves. Both slices
-/// are sorted by strip ID.
+/// The line half of the strip delay join (#1284 D1, #1402 D1): a lane carries when its
+/// `delay_samples` is the same in both models, the strip reads the same source, and both plans
+/// hold the strip's line with rings of one length on that lane. A lane is needed by its ring, not
+/// by its declared delay: since #1287 R1 a track's ring is its declared delay plus its source-claim
+/// line, so a lane that declares no delay can still hold `P` pending frames. A strip with a needed
+/// lane that cannot carry (its delay, its ring length or its source changed) starts that lane at
+/// rest and is listed in `restarted` (decision 15, D15-9): the duck-swap removes the click of the
+/// alignment that moves. A grown claim line, filled at adoption, is #1355's. Both slices are
+/// sorted by strip ID.
 fn resolve_strip_delay_carry(
     predecessor: &[graph::GraphStripDelayLine],
     own: &[graph::GraphStripDelayLine],
@@ -6159,15 +6226,21 @@ fn resolve_strip_delay_carry(
     for join in joins {
         let both = graph::STRIP_DELAY_LEFT | graph::STRIP_DELAY_RIGHT;
         let mut restarts = join.equal != both;
-        // A lane with no delay in the successor has nothing to take; a lane of a line the
-        // predecessor never had starts at rest.
-        let needed = [graph::STRIP_DELAY_LEFT, graph::STRIP_DELAY_RIGHT]
-            .into_iter()
-            .zip(join.delays)
-            .filter(|&(bit, samples)| join.equal & bit != 0 && samples != 0)
-            .fold(0, |mask, (bit, _)| mask | bit);
+        // A lane whose ring is empty in the successor has nothing to take; a lane of a line the
+        // predecessor never had, or of a strip that reads another source, starts at rest.
+        let after = row(own, join.id);
+        let needed = after.as_ref().map_or(0, |after| {
+            [graph::STRIP_DELAY_LEFT, graph::STRIP_DELAY_RIGHT]
+                .into_iter()
+                .zip(after.samples)
+                .filter(|&(bit, samples)| join.equal & bit != 0 && samples != 0)
+                .fold(0, |mask, (bit, _)| mask | bit)
+        });
         if needed != 0 {
-            match (row(predecessor, join.id), row(own, join.id)) {
+            match (
+                row(predecessor, join.id).filter(|_| join.same_source),
+                after,
+            ) {
                 (Some(before), Some(after)) => {
                     let lanes = [graph::STRIP_DELAY_LEFT, graph::STRIP_DELAY_RIGHT]
                         .into_iter()
@@ -7026,9 +7099,10 @@ mod tests {
         }
     }
 
-    /// #1284 D1: a lane carries when its delay is the same in both models and both plans hold the
-    /// strip's line; a strip with a lane that changed, or whose line one plan lacks, restarts. A
-    /// lane with no delay has nothing to take.
+    /// #1284 D1, #1402 D1: a lane carries when its delay is the same in both models, the strip
+    /// reads the same source and both plans hold the strip's line; a strip with a lane that
+    /// changed, whose line one plan lacks, or whose source changed, restarts. A lane with an empty
+    /// ring has nothing to take.
     #[test]
     fn strip_delay_lanes_join_by_strip_and_lane() {
         use super::{StripDelayJoin, resolve_strip_delay_carry};
@@ -7036,36 +7110,53 @@ mod tests {
         let before = [
             strip_delay("eq0", 0, [37, 53]),
             strip_delay("eq2", 1, [0, 19]),
+            strip_delay("eq4", 2, [8, 8]),
+            strip_delay("eq6", 3, [8, 8]),
         ];
         let own = [
             strip_delay("eq0", 1, [37, 60]),
             strip_delay("eq2", 0, [0, 19]),
+            strip_delay("eq4", 3, [8, 8]),
             strip_delay("eq5", 2, [4, 4]),
+            strip_delay("eq6", 4, [8, 10]),
         ];
         let joins = [
             // The right lane changed: the left carries and the strip restarts.
             StripDelayJoin {
                 id: "eq0",
                 equal: left,
-                delays: [37, 60],
+                same_source: true,
             },
             // Unchanged, with no delay on the left: only the right takes its ring.
             StripDelayJoin {
                 id: "eq2",
                 equal: left | right,
-                delays: [0, 19],
+                same_source: true,
             },
             // Unchanged and undelayed: no line on either side, nothing to do.
             StripDelayJoin {
                 id: "eq3",
                 equal: left | right,
-                delays: [0, 0],
+                same_source: true,
+            },
+            // Equal lines, but the track reads another source: it restarts and takes nothing.
+            StripDelayJoin {
+                id: "eq4",
+                equal: left | right,
+                same_source: false,
             },
             // Unchanged, but the predecessor has no line: it restarts.
             StripDelayJoin {
                 id: "eq5",
                 equal: left | right,
-                delays: [4, 4],
+                same_source: true,
+            },
+            // Equal declared delays, but the right ring grew (a claim line on one lane): the left
+            // carries and the strip restarts.
+            StripDelayJoin {
+                id: "eq6",
+                equal: left | right,
+                same_source: true,
             },
         ];
         let carry = resolve_strip_delay_carry(&before, &own, &joins);
@@ -7082,12 +7173,73 @@ mod tests {
                     predecessor: 1,
                     lanes: right,
                 },
+                graph::GraphStripDelayMove {
+                    successor: 4,
+                    predecessor: 3,
+                    lanes: left,
+                },
             ]
         );
         assert_eq!(
             carry.restarted,
-            vec![Box::<str>::from("eq0"), Box::<str>::from("eq5")]
+            vec![
+                Box::<str>::from("eq0"),
+                Box::<str>::from("eq4"),
+                Box::<str>::from("eq5"),
+                Box::<str>::from("eq6")
+            ]
         );
+    }
+
+    /// #1402 R-B: a track whose source keeps its ID but is redeclared (another `frames`) reads a
+    /// fresh ring from frame 0 (#1272 D3), so its line's pending frames are the old declaration's
+    /// and it is not the same source; a track on a carried source is.
+    #[test]
+    fn a_redeclared_source_is_not_the_same_source() {
+        use std::collections::BTreeSet;
+        let mut committed = parse_session_json(include_str!(
+            "../../../fixtures/session/v1/parametric-eq-nine-track.json"
+        ))
+        .expect("fixture");
+        // A second source, kept as declared, for the last track.
+        let mut kept = committed.sources[0].clone();
+        kept.id = session::StableId::parse("kept-source").expect("ID");
+        kept.content = kept.content.replace("7e94", "0a0a");
+        committed.sources.push(kept.clone());
+        committed.sources.sort_by(|a, b| a.id.cmp(&b.id));
+        committed.tracks.last_mut().expect("a track").source_id = kept.id;
+        let mut model = committed.clone();
+        let redeclared = model
+            .sources
+            .iter_mut()
+            .find(|source| source.id.as_str() == "fixture-source")
+            .expect("the fixture's source");
+        redeclared.frames += 1;
+        // The sources whose rings carry, as #1272 D3 decides: an unchanged declaration.
+        let carried: BTreeSet<&str> = model
+            .sources
+            .iter()
+            .filter(|source| committed.sources.contains(source))
+            .map(|source| source.id.as_str())
+            .collect();
+        let joins = super::join_strip_delays(&committed, &model, &carried);
+        let redeclared = "fixture-source";
+        let tracks: Vec<(&str, bool)> = model
+            .tracks
+            .iter()
+            .map(|track| {
+                let join = joins
+                    .iter()
+                    .find(|join| join.id == track.id.as_str())
+                    .expect("a joined track");
+                (track.source_id.as_str(), join.same_source)
+            })
+            .collect();
+        assert!(tracks.iter().any(|(source, _)| *source == redeclared));
+        assert!(tracks.iter().any(|(source, _)| *source != redeclared));
+        for (source, same_source) in tracks {
+            assert_eq!(same_source, source != redeclared, "a track on {source}");
+        }
     }
 
     /// #1284 D2: a send carries when both plans hold a live route of its ID, whatever unit it sits
@@ -7307,6 +7459,7 @@ mod tests {
             spectrum: Box::default(),
             spectrum_collection: false,
             spectrum_pairing: Box::default(),
+            meter_pairing: Box::default(),
             delay_lines: Box::default(),
             strip_delays: Box::default(),
             live_routes: Box::default(),

@@ -115,6 +115,12 @@ pub(crate) const DELAY: Insert = Insert {
     native: "miso.delay",
     position: 2,
 };
+pub(crate) const DE_ESSER: Insert = Insert {
+    track: T3,
+    id: "deess",
+    native: "miso.de-esser",
+    position: 3,
+};
 /// The two console slots of the session, one in each section (`pre_insert`, `post_insert`), and
 /// the effect each runs on every track. A slot's controls are addressed on a strip, in
 /// `Section::Console(slot)`.
@@ -123,8 +129,8 @@ pub(crate) const PRE_SLOT_NATIVE: &str = "miso.compressor";
 pub(crate) const POST_SLOT: &str = "post-clip";
 pub(crate) const POST_SLOT_NATIVE: &str = "miso.soft-clip";
 
-pub(crate) const INSERTS: [Insert; 8] = [
-    EQ, COMPRESSOR, GATE, CLIP, SHAPER, MULTIBAND, LIMITER, DELAY,
+pub(crate) const INSERTS: [Insert; 9] = [
+    EQ, COMPRESSOR, GATE, CLIP, SHAPER, MULTIBAND, LIMITER, DELAY, DE_ESSER,
 ];
 
 /// The session at `rate`: tracks `t1`..`t3` over their own sources, submix `b` routed to the

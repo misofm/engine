@@ -77,6 +77,10 @@ const SOFT_CLIP: &str = "miso.soft-clip";
 /// Collapse-capable since #1873, with the same evidence as [`GATE`]: Part 2's twin test and its
 /// crate's `tests/mono_collapse.rs`; not yet an [`Fx`] of the chained differential.
 const SHAPER: &str = "miso.transient-shaper";
+/// Collapse-capable since #15 S1, with the same evidence as [`GATE`]: Part 2's twin test and its
+/// crate's collapsed-against-scalar bank test (`de-esser`'s `tests/bank.rs`); not yet an [`Fx`] of
+/// the chained differential.
+const DE_ESSER: &str = "miso.de-esser";
 
 /// `band-1-gain`, `band-1-frequency` of the EQ; `threshold`, `ratio`, `attack` of the compressor;
 /// `ceiling`, `release` of the limiter. Descriptor indices, not wire ids.
@@ -1616,16 +1620,17 @@ fn permutations<T: Copy>(atoms: &[T]) -> Vec<Vec<T>> {
 }
 
 /// The set of effects that can sit in a collapse-eligible cohort is exactly [`Fx`], [`GATE`],
-/// [`MULTIBAND`], [`SOFT_CLIP`] and [`SHAPER`], and none of them declares a `Shared` automatable
-/// parameter.
+/// [`MULTIBAND`], [`SOFT_CLIP`], [`SHAPER`] and [`DE_ESSER`], and none of them declares a `Shared`
+/// automatable parameter.
 ///
 /// The first half keeps the differential's coverage honest: an effect that gains a one-plane body
 /// joins the collapse, and with it the pairing rule's obligation, so it has to join [`Fx`] and the
-/// scenarios above, or carry its A3 evidence as [`GATE`], [`MULTIBAND`], [`SOFT_CLIP`] and
-/// [`SHAPER`] do (Part 2's twin test pins them collapse-capable). The second half is why a `Shared`
-/// parameter needs no scenario on the collapsed path: none of the seven has one. (A `Shared` parameter's `Left` or
-/// `Right` span is refused on both channels by every launch effect, so a twin on one would move
-/// nothing either way; the drain-level suite covers the `Both` interleavings.)
+/// scenarios above, or carry its A3 evidence as [`GATE`], [`MULTIBAND`], [`SOFT_CLIP`], [`SHAPER`]
+/// and [`DE_ESSER`] do (Part 2's twin test pins them collapse-capable). The second half is why a
+/// `Shared` parameter needs no scenario on the collapsed path: none of the eight has one. (A
+/// `Shared` parameter's `Left` or `Right` span is refused on both channels by every launch effect,
+/// so a twin on one would move nothing either way; the drain-level suite covers the `Both`
+/// interleavings.)
 #[test]
 fn every_collapse_capable_launch_effect_is_one_of_these() {
     let width = BankWidth::for_backend(Backend::current()).expect("a SIMD backend");
@@ -1676,6 +1681,7 @@ fn every_collapse_capable_launch_effect_is_one_of_these() {
         MULTIBAND.to_owned(),
         SOFT_CLIP.to_owned(),
         SHAPER.to_owned(),
+        DE_ESSER.to_owned(),
     ];
     expected.sort();
     assert_eq!(capable, expected);
@@ -2003,6 +2009,14 @@ fn every_launch_effect_applies_a_twin_pair_with_channel_symmetric_validity() {
                     && line.contains("3 live PerLane parameters")
             }),
             "{SHAPER} {mode:?}: {covered:?}"
+        );
+        // #15 S2: the de-esser's, on the same terms.
+        assert!(
+            covered.iter().any(|line| {
+                line.starts_with(&format!("{DE_ESSER} (bank, collapse-capable, {mode:?})"))
+                    && line.contains("10 live PerLane parameters")
+            }),
+            "{DE_ESSER} {mode:?}: {covered:?}"
         );
     }
     // #1872: the soft clip's A3 obligation. It supports `DualMono` only.

@@ -3565,7 +3565,7 @@ fn every_native_insert_session() -> String {
     });
     let inserts: [&[&str]; 3] = [
         &["parametric-eq", "compressor", "gate-expander"],
-        &["delay", "multiband-compressor"],
+        &["delay", "multiband-compressor", "de-esser"],
         &["true-peak-limiter", "transient-shaper", "soft-clip"],
     ];
     for (track, effects) in model.tracks.iter_mut().zip(inserts) {

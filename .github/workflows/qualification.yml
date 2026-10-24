@@ -658,7 +658,7 @@ jobs:
         run: |
           cargo test --locked --workspace --all-targets \
             --exclude lane --exclude math --exclude effect-runtime --exclude delay \
-            --exclude compressor --exclude multiband-compressor --exclude gate-expander \
+            --exclude compressor --exclude multiband-compressor --exclude gate-expander --exclude de-esser \
             --exclude true-peak-limiter --exclude transient-shaper --exclude soft-clip \
             --exclude parametric-eq --exclude builtins --exclude dsp-reference \
             --exclude conformance --exclude audit --exclude bench --exclude console-workload \
@@ -671,7 +671,7 @@ jobs:
         run: |
           cargo test --locked --workspace --doc \
             --exclude lane --exclude math --exclude effect-runtime --exclude delay \
-            --exclude compressor --exclude multiband-compressor --exclude gate-expander \
+            --exclude compressor --exclude multiband-compressor --exclude gate-expander --exclude de-esser \
             --exclude true-peak-limiter --exclude transient-shaper --exclude soft-clip \
             --exclude parametric-eq --exclude builtins --exclude dsp-reference \
             --exclude conformance --exclude audit --exclude bench --exclude console-workload \
@@ -702,7 +702,7 @@ jobs:
         run: |
           cargo test --locked --all-targets \
             -p lane -p math -p effect-runtime -p delay -p compressor -p multiband-compressor \
-            -p gate-expander -p true-peak-limiter -p transient-shaper -p soft-clip \
+            -p gate-expander -p true-peak-limiter -p transient-shaper -p soft-clip -p de-esser \
             -p parametric-eq -p builtins -p dsp-reference -p conformance \
             --features math/lane,parametric-eq/test-support,builtins/test-support,lane/test-support
       # --all-targets runs no doctest (#1422). Same packages and features as the step above.
@@ -710,7 +710,7 @@ jobs:
         run: |
           cargo test --locked --doc \
             -p lane -p math -p effect-runtime -p delay -p compressor -p multiband-compressor \
-            -p gate-expander -p true-peak-limiter -p transient-shaper -p soft-clip \
+            -p gate-expander -p true-peak-limiter -p transient-shaper -p soft-clip -p de-esser \
             -p parametric-eq -p builtins -p dsp-reference -p conformance \
             --features math/lane,parametric-eq/test-support,builtins/test-support,lane/test-support
       - name: Conformance research-fixture completeness

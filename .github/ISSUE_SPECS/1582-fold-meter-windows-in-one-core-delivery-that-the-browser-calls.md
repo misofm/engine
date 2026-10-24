@@ -138,3 +138,31 @@ Commands: `cargo test --locked -p host-core --all-features`,
 ## Supersedes and shrinks
 
 - None.
+
+## Decision record
+
+- **2026-10-24, scope (root R1-R5 accepted).** The slice ships in two tranches. D1 is amended
+  (R1): `MeterDelivery` borrows the plan's meter consumers per poll and adopts preallocated
+  per-plan tables, because the consumers are the plan attachment's (`RenderCompanions`) and a
+  delivery that owned a `Vec<MeterConsumer>` could not survive a strip-count-changing swap without
+  allocating on the render thread. `designated` is a poll argument from the plan's `master_track`
+  (R2). R3 (one pinned trap owner) and R4 (one frame copy per published window) are T2's. R5: no
+  host-core twin of the browser's meter tests; they are this move's "bytes unchanged" gate.
+- **T1 record (attempt 1).** `host_core::meters` now holds `MeterFrame` (D2), `MeterValidity`
+  (`METER_VALID_*` alias its bits), `GainReductionTaps`/`TapView` (D3; `for_each_tap` takes
+  `&mut self` so a host can count its own visits, which keeps
+  `incomplete_master_periods_skip_all_track_pops_and_effect_scans`), `reduction_db` (was
+  `observed_decibels`), `strip_reduction_db` (was `strip_reduction_decibels`, #1918's
+  `GainChangeDb` rule unchanged), `window_since_arm` (#1534's one rule; the browser's selected read
+  calls it too) and `fold_gain_reduction`, inside a realtime region. The browser's poll writes the
+  core frame whole in its commit section (peaks, output peak, validity, gain reduction, span,
+  sequence, generation, loss) and copies it into `meter_frame`/`meter_header`; its
+  `WebGainReductionTaps` walks the shape's arrays and the companions' readers. `PlanShape::
+  observation_present` is gone (the frame's presence table replaces it), and the frame's three
+  per-strip tables are charged in the plan's meter row (the old presence table was uncharged), so
+  `observation_staging_resource_is_exact_for_the_taps_off_and_on_modes` adds their bytes.
+  Evidence: a scripted byte run (two taps on one strip: lease, 24 blocks, a re-subscribe, a lease
+  release and re-take, a withdrawal; a designated bus limiter master: 40 blocks; header and frame
+  words after every poll) gives byte-identical output on `97d1796ff` and on the branch (sha256
+  `b35cbfbe...a9c1`, 90 lines). No meter test was edited. The meter-poll export's call graph keeps
+  one trap owner, `poll_meters`.
