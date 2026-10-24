@@ -251,3 +251,120 @@ fn the_witness_declines_on_exactly_the_asymmetric_lane() {
     }
     assert!(prepare(request(&base)).processor.channel_symmetry());
 }
+
+/// Issue #1894: a collapsed bank whose left channel falls silent is at rest, and a skipped block
+/// is exact.
+///
+/// Dual signal first, so the collapse freezes a right channel that is **not** at rest; then
+/// collapsed signal, then collapsed `+0.0` until the left channel rests. The bank must then answer
+/// every lane at rest (a predicate that still ANDs the frozen right channel answers `0` and never
+/// gets there), `advance_clocks` stands in for three zero blocks the reference renders, and after
+/// the disengage the payloads and the next dual blocks are the never-collapsed bank's, bit for bit.
+#[test]
+fn a_collapsed_bank_that_falls_silent_is_at_rest_and_skips_exactly() {
+    const SIGNAL: usize = 16;
+    const SKIPPED: usize = 3;
+    const REST_BOUND: usize = 20_000;
+    let all = (1_u32 << NATIVE_LANES) - 1;
+    let signals: Vec<Vec<f32>> = (0..NATIVE_LANES)
+        .map(|lane| noise(0x1894 + lane as u64, FRAMES * BLOCKS, 1.0))
+        .collect();
+    let mut mixed = prepare_bank_native(&values(), LinkMode::DualMono).expect("bank");
+    let mut never = prepare_bank_native(&values(), LinkMode::DualMono).expect("bank");
+    let mut step = 0_usize;
+    // The first signal blocks carry the file's automation; every later block carries none, so a
+    // skip is admissible. `skip`: the reference renders the `+0.0` block, the collapsed bank
+    // advances its clocks.
+    let mut run = |mixed: &mut PreparedEffectBank,
+                   never: &mut PreparedEffectBank,
+                   signal: bool,
+                   mono: bool,
+                   skip: bool| {
+        let mut never_left = if signal {
+            block(step % BLOCKS, &signals)
+        } else {
+            vec![0.0; FRAMES * NATIVE_LANES]
+        };
+        let mut never_right = never_left.clone();
+        let mut mixed_left = never_left.clone();
+        let mut mixed_right = if mono {
+            vec![f32::from_bits(0x7F7F_FFFF); FRAMES * NATIVE_LANES]
+        } else {
+            never_left.clone()
+        };
+        let context = format!("block {step}");
+        if step < 2 * SIGNAL {
+            render(never, &mut never_left, &mut never_right, step, false);
+            render(mixed, &mut mixed_left, &mut mixed_right, step, mono);
+        } else {
+            let offsets = [0_u32; NATIVE_LANES + 1];
+            let first = (step * FRAMES) as u64;
+            for (bank, left, right, mono) in [
+                (&mut *never, &mut never_left, &mut never_right, false),
+                (&mut *mixed, &mut mixed_left, &mut mixed_right, mono),
+            ] {
+                if skip && mono {
+                    bank.processor.advance_clocks(all, FRAMES as u32);
+                    continue;
+                }
+                let block = EffectBankProcessBlock::new(
+                    left,
+                    right,
+                    None,
+                    FRAMES as u32,
+                    native_width(),
+                    first,
+                    &[],
+                    &offsets,
+                    128,
+                )
+                .expect("bank block");
+                if mono {
+                    bank.processor.process_bank_mono(block);
+                } else {
+                    bank.processor.process_bank(block);
+                }
+            }
+        }
+        step += 1;
+        if skip {
+            return;
+        }
+        assert_words(&mixed_left, &never_left, &format!("{context}: left plane"));
+        if !mono {
+            assert_words(&mixed_right, &never_right, &format!("{context}: right"));
+        }
+    };
+    for mono in [false, true] {
+        for _ in 0..SIGNAL {
+            run(&mut mixed, &mut never, true, mono, false);
+        }
+    }
+    let rested = (0..REST_BOUND).any(|_| {
+        run(&mut mixed, &mut never, false, true, false);
+        mixed.processor.lanes_at_rest() == all
+    });
+    assert!(
+        rested,
+        "the collapsed bank's left channel rests within the bound"
+    );
+    assert_eq!(
+        never.processor.lanes_at_rest(),
+        all,
+        "the reference rests too"
+    );
+    for _ in 0..SKIPPED {
+        run(&mut mixed, &mut never, false, true, true);
+    }
+    mixed.processor.desymmetrize_channels();
+    for track in 0..NATIVE_LANES as u32 {
+        assert_eq!(
+            snapshot_bank(&mixed, track),
+            snapshot_bank(&never, track),
+            "track {track}: the payload after the skip and the disengage"
+        );
+    }
+    for _ in 0..2 {
+        run(&mut mixed, &mut never, true, false, false);
+    }
+}
