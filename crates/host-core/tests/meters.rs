@@ -12,13 +12,10 @@ use host_core::{
     HostLiveControlHandles, HostLiveControlRequest, HostLiveLanes, HostPrepareCaps,
     HostShapePolicy, LiveValuesSuperseded, PrepareDiagnostics, PreparedHost,
     SpectrumCaptureCollectionEntry, SpectrumCaptureCollectionRequest, SpectrumCaptureRequest,
-    SpectrumChannels, SpectrumTarget, SuccessorBase, compile_host_session, meter_selection,
-    prepare_host_runtime, prepare_host_runtime_with_live_controls,
-    prepare_host_runtime_with_live_controls_and_spectrum,
-    prepare_host_runtime_with_live_controls_and_spectrum_collection,
-    prepare_host_runtime_with_live_controls_and_spectrum_collection_successor,
-    prepare_host_runtime_with_live_controls_and_spectrum_successor,
+    SpectrumChannels, SpectrumPreparation, SpectrumTarget, SuccessorBase, compile_host_session,
+    meter_selection, prepare_host_runtime, prepare_host_runtime_with_live_controls,
     prepare_host_runtime_with_live_controls_successor, prepare_host_runtime_with_live_lanes,
+    prepare_host_runtime_with_live_lanes_and_spectrum,
     prepare_host_runtime_with_live_lanes_successor, prepare_host_runtime_with_selected_meters,
     prepare_host_runtime_with_selected_meters_successor, prepare_host_session_with_live_controls,
     spectrum_capture_collection_resources, spectrum_capture_resources_for,
@@ -203,56 +200,30 @@ fn every_preparation_entry_meters_every_strip_with_the_core_selection() {
             &superseded,
         ),
     );
-    assert_core_meters(
-        "with_spectrum",
-        prepare_host_runtime_with_live_controls_and_spectrum(
-            &compiled,
-            &caps,
-            &live,
-            &single(),
-            lanes,
-            &superseded,
-        )
-        .map(|(prepared, handles, _)| (prepared, handles)),
-    );
-    assert_core_meters(
-        "with_spectrum_successor",
-        prepare_host_runtime_with_live_controls_and_spectrum_successor(
-            &compiled,
-            &caps,
-            &live,
-            &single(),
-            lanes,
-            &superseded,
-            base(),
-        )
-        .map(|(prepared, handles, _)| (prepared, handles)),
-    );
-    assert_core_meters(
-        "with_spectrum_collection",
-        prepare_host_runtime_with_live_controls_and_spectrum_collection(
-            &compiled,
-            &caps,
-            &live,
-            &collection(),
-            lanes,
-            &superseded,
-        )
-        .map(|(prepared, handles, _)| (prepared, handles)),
-    );
-    assert_core_meters(
-        "with_spectrum_collection_successor",
-        prepare_host_runtime_with_live_controls_and_spectrum_collection_successor(
-            &compiled,
-            &caps,
-            &live,
-            &collection(),
-            lanes,
-            &superseded,
-            base(),
-        )
-        .map(|(prepared, handles, _)| (prepared, handles)),
-    );
+    for (label, spectrum) in [
+        (
+            "with_live_lanes_and_spectrum(single)",
+            SpectrumPreparation::Single(single()),
+        ),
+        (
+            "with_live_lanes_and_spectrum(collection)",
+            SpectrumPreparation::Collection(collection()),
+        ),
+    ] {
+        assert_core_meters(
+            label,
+            prepare_host_runtime_with_live_lanes_and_spectrum(
+                &compiled,
+                &caps,
+                &live,
+                lanes,
+                Some(&spectrum),
+                None,
+                &superseded,
+            )
+            .map(|(prepared, handles, _)| (prepared, handles)),
+        );
+    }
     assert_core_meters(
         "with_selected_meters(meter_selection)",
         prepare_host_runtime_with_selected_meters(
