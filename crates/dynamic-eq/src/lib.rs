@@ -610,7 +610,7 @@ fn band_design(values: &[f32], sample_rate: u32) -> [f32; 9] {
 fn targets(values: &[f32; PARAMETER_COUNT], sample_rate: u32) -> [f32; RAMPS] {
     let on = |value: f32| if value == SECOND_CHOICE { 1.0 } else { 0.0 };
     let mut words = [0.0_f32; RAMPS];
-    for (band, out) in words.chunks_exact_mut(BAND_RAMPS).enumerate() {
+    for (band, out) in words.as_chunks_mut::<BAND_RAMPS>().0.iter_mut().enumerate() {
         let v = &values[band * BAND_PARAMETERS..(band + 1) * BAND_PARAMETERS];
         let design = band_design(v, sample_rate);
         out[kernel::THRESHOLD] = v[THRESHOLD];
@@ -666,7 +666,9 @@ fn lane_set<L: Lane>(value: &mut L, lane: usize, sample: f32) {
 fn chan_words<L: Lane>(s: &Chan<L>) -> [L; CHAN_WORDS] {
     let mut words = [L::zero(); CHAN_WORDS];
     for (chunk, band) in words[..BANDS * BAND_SIGNAL_WORDS]
-        .chunks_exact_mut(BAND_SIGNAL_WORDS)
+        .as_chunks_mut::<BAND_SIGNAL_WORDS>()
+        .0
+        .iter_mut()
         .zip(&s.bands)
     {
         chunk.copy_from_slice(&[
@@ -681,7 +683,12 @@ fn chan_words<L: Lane>(s: &Chan<L>) -> [L; CHAN_WORDS] {
     }
     words[SIGNAL_WORDS - 2] = s.run;
     words[SIGNAL_WORDS - 1] = s.side_run;
-    for (chunk, ramp) in words[SIGNAL_WORDS..].chunks_exact_mut(4).zip(&s.ramps) {
+    for (chunk, ramp) in words[SIGNAL_WORDS..]
+        .as_chunks_mut::<4>()
+        .0
+        .iter_mut()
+        .zip(&s.ramps)
+    {
         chunk.copy_from_slice(&[ramp.current, ramp.target, ramp.step, ramp.remaining]);
     }
     words
@@ -690,11 +697,12 @@ fn chan_words<L: Lane>(s: &Chan<L>) -> [L; CHAN_WORDS] {
 /// The inverse of [`chan_words`], with the derived knee words designed from the knee ramps.
 fn chan_from_words<L: Lane>(words: &[L; CHAN_WORDS]) -> Chan<L> {
     let mut s = Chan::default();
-    for (band, chunk) in s
-        .bands
-        .iter_mut()
-        .zip(words[..BANDS * BAND_SIGNAL_WORDS].chunks_exact(BAND_SIGNAL_WORDS))
-    {
+    for (band, chunk) in s.bands.iter_mut().zip(
+        words[..BANDS * BAND_SIGNAL_WORDS]
+            .as_chunks::<BAND_SIGNAL_WORDS>()
+            .0
+            .iter(),
+    ) {
         [band.main.ic1, band.main.ic2] = [chunk[0], chunk[1]];
         [band.detector.ic1, band.detector.ic2] = [chunk[2], chunk[3]];
         [band.side.ic1, band.side.ic2] = [chunk[4], chunk[5]];
@@ -704,7 +712,7 @@ fn chan_from_words<L: Lane>(words: &[L; CHAN_WORDS]) -> Chan<L> {
     for (ramp, chunk) in s
         .ramps
         .iter_mut()
-        .zip(words[SIGNAL_WORDS..].chunks_exact(4))
+        .zip(words[SIGNAL_WORDS..].as_chunks::<4>().0.iter())
     {
         [ramp.current, ramp.target, ramp.step, ramp.remaining] =
             [chunk[0], chunk[1], chunk[2], chunk[3]];
@@ -862,7 +870,12 @@ impl<L: Lane, const CONNECTED: bool> DynamicEq<L, CONNECTED> {
         self.values[lane][channel] = self.defaults[lane][channel];
         let mut words = [0.0_f32; CHAN_WORDS];
         let designs = targets(&self.values[lane][channel], self.sample_rate);
-        for (chunk, design) in words[SIGNAL_WORDS..].chunks_exact_mut(4).zip(designs) {
+        for (chunk, design) in words[SIGNAL_WORDS..]
+            .as_chunks_mut::<4>()
+            .0
+            .iter_mut()
+            .zip(designs)
+        {
             chunk[..2].copy_from_slice(&[design, design]);
         }
         set_lane_words(&mut self.state[channel], lane, &words);
@@ -873,7 +886,7 @@ impl<L: Lane, const CONNECTED: bool> DynamicEq<L, CONNECTED> {
     fn reset_lane_discontinuity(&mut self, channel: usize, lane: usize) {
         let mut words = lane_words(&self.state[channel], lane);
         words[..SIGNAL_WORDS].fill(0.0);
-        for chunk in words[SIGNAL_WORDS..].chunks_exact_mut(4) {
+        for chunk in words[SIGNAL_WORDS..].as_chunks_mut::<4>().0.iter_mut() {
             chunk[0] = chunk[1];
             chunk[2..].fill(0.0);
         }
@@ -977,7 +990,12 @@ impl<L: Lane, const CONNECTED: bool> DynamicEq<L, CONNECTED> {
     fn retarget(&mut self, channel: usize, lane: usize) {
         let designs = targets(&self.values[lane][channel], self.sample_rate);
         let mut words = lane_words(&self.state[channel], lane);
-        for (chunk, design) in words[SIGNAL_WORDS..].chunks_exact_mut(4).zip(designs) {
+        for (chunk, design) in words[SIGNAL_WORDS..]
+            .as_chunks_mut::<4>()
+            .0
+            .iter_mut()
+            .zip(designs)
+        {
             if chunk[1].to_bits() == design.to_bits() {
                 continue;
             }
@@ -1295,7 +1313,9 @@ impl<L: Lane, const CONNECTED: bool> DynamicEq<L, CONNECTED> {
             });
         }
         let signal_ok = words[..BANDS * BAND_SIGNAL_WORDS]
-            .chunks_exact(BAND_SIGNAL_WORDS)
+            .as_chunks::<BAND_SIGNAL_WORDS>()
+            .0
+            .iter()
             .all(|band| {
                 let gain = band[6];
                 check_block::<f32>(&band[..6])
@@ -1309,7 +1329,7 @@ impl<L: Lane, const CONNECTED: bool> DynamicEq<L, CONNECTED> {
             return Err(state_error("effect.state.signal"));
         }
         let designs = targets(&values, self.sample_rate);
-        for (index, chunk) in words[SIGNAL_WORDS..].chunks_exact(4).enumerate() {
+        for (index, chunk) in words[SIGNAL_WORDS..].as_chunks::<4>().0.iter().enumerate() {
             let ramp = LinearRamp {
                 current: chunk[0],
                 target: chunk[1],
@@ -1356,7 +1376,9 @@ impl<L: Lane, const CONNECTED: bool> DynamicEq<L, CONNECTED> {
             set_lane_words(&mut self.state[channel], lane, words);
             self.values[lane][channel] = *values;
             if words[SIGNAL_WORDS..]
-                .chunks_exact(4)
+                .as_chunks::<4>()
+                .0
+                .iter()
                 .any(|chunk| chunk[3] != 0.0)
             {
                 self.ramp_frames_left = self.ramp_frames_left.max(RAMP_SAMPLES);
@@ -1376,6 +1398,11 @@ impl<L: Lane, const CONNECTED: bool> DynamicEq<L, CONNECTED> {
 }
 
 impl<const CONNECTED: bool> PreparedNativeEffect for DynamicEq<f32, CONNECTED> {
+    /// Every field is inline: this instance owns no heap (#1074).
+    fn retained_bytes(&self) -> u64 {
+        0
+    }
+
     fn reset(&mut self, kind: ResetKind) {
         DynamicEq::reset(self, kind);
     }
@@ -1488,7 +1515,7 @@ impl<L: Lane> DynamicEq<L, false> {
         for (value, chunk) in self.defaults[lane]
             .iter_mut()
             .flatten()
-            .zip(values.chunks_exact_mut(4))
+            .zip(values.as_chunks_mut::<4>().0.iter_mut())
         {
             let incoming = f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
             chunk.copy_from_slice(&value.to_le_bytes());
@@ -1502,6 +1529,11 @@ impl<L: Lane> DynamicEq<L, false> {
 macro_rules! bank_impl {
     ($lane:ty) => {
         impl PreparedNativeEffectBank for DynamicEq<$lane, false> {
+            /// Every field is inline: this instance owns no heap (#1074).
+            fn retained_bytes(&self) -> u64 {
+                0
+            }
+
             fn observe_resident_bank(&self, tap_index: u32, out: &mut [ObservationSample]) -> bool {
                 let tap = tap_index as usize;
                 if tap >= BANDS || out.len() != <$lane as Lane>::WIDTH {
@@ -1606,7 +1638,7 @@ fn initial_defaults(
         return Err(invalid);
     }
     let mut defaults = [[0.0; PARAMETER_COUNT]; 2];
-    for (index, pair) in values.chunks_exact(2).enumerate() {
+    for (index, pair) in values.as_chunks::<2>().0.iter().enumerate() {
         for (channel, (value, expected)) in pair
             .iter()
             .zip([ParameterChannel::Left, ParameterChannel::Right])
