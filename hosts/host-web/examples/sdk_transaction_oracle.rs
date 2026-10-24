@@ -72,7 +72,9 @@ fn main() {
             .expect("a frame ends inside its payload");
         offset = end;
 
-        let line = match codec.decode_session_transaction(frame, &mut DecodeScratch::new(&mut field_ids)) {
+        let line = match codec
+            .decode_session_transaction(frame, &mut DecodeScratch::new(&mut field_ids))
+        {
             Err(error) => serde_json::json!({ "decode": format!("{error:?}") }),
             Ok(decoded) => {
                 let command = decoded
