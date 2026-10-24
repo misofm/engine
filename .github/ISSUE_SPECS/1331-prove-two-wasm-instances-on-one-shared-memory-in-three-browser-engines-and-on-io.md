@@ -171,7 +171,102 @@ checks.
 
 ## Decision record
 
-(Filled in by the spike.)
+### Rulings and scope (root, 2026-10-24)
+
+- **Slices.** #1331a splits in two: **#1331a-1** (this record: D2 builds, the harness, D3, D4 and D5
+  in Chromium, Firefox and WebKit; gates 1 and 7) and **#1331a-2** (D7 headroom, gate 3, gate 4 and
+  gate 5 on the nightly). #1331b (iPhone: D6, D5 and D7 on iOS, gate 2) is owner-gated and not in
+  this sprint.
+- **Gate 6 and D8's AArch64 clause are dropped.** The nightly builds only the Wasm module, so no
+  AArch64 artifact is built with it; #1334 gate 7 runs the stable AArch64 legs against the same pins.
+  **Gate 3 stays** (the one native check of the nightly's LLVM 23 against the committed lane pins).
+- **D9 is judged on the desktop record now.** A desktop pass lets #1334 start; #1380 and #1332 still
+  wait for #1331b.
+- Stale facts in Context, not fixed here: the stable pin is `1.99.1`; `hosts/host-web/src/ffi.rs`
+  now has eight `thread_local!`s, all `const`-initialised; the worklet's buffer-identity checks
+  became "re-bind in handlers, silence-and-count in `process()`" (#1381a).
+
+### #1331a-1 result (2026-10-24, base `56fbe4617`): desktop PASS
+
+Evidence: `/home/bl/misofm/engine-work-evidence/1331/` (README there has the one-line command per
+leg). Harness v2, each browser leg run once. Comparator: no frozen native pin exists for this
+session and transcript, so the spike computes one with a scratch native (x86-64-v3, stable `1.99.1`)
+crate on `host-web`'s public API: `44ecef3380b86e8de00d553ca8dc8ad70f7e15911d974c13128760173581781f`
+(sha256 over the first 350 output blocks, 256 LE `f32` words each, of the 64-track app session fed
+a fixed integer-ramp stereo source).
+
+**D2 builds.** `rustc 1.100.0-nightly (f7d782a3b 2026-08-19)`, LLVM 23.1.0, `rust-src`, installed
+with `rustup toolchain install nightly-2026-08-20 --profile minimal --component rust-src --target
+wasm32-unknown-unknown`. Command: `cargo +nightly-2026-08-20 build --locked --release --target
+wasm32-unknown-unknown -Zbuild-std=std,panic_abort -p host-web` (about 50 s each), with:
+
+- atomic (Worker shape): `RUSTFLAGS="-C target-feature=+simd128,+atomics,+bulk-memory,+mutable-globals
+  -C link-arg=--shared-memory -C link-arg=--import-memory -C link-arg=--max-memory=536870912
+  -C link-arg=--export=__stack_pointer -C link-arg=--export=__wasm_init_tls
+  -C link-arg=--export=__tls_size -C link-arg=--export=__tls_align -C link-arg=--export=__tls_base
+  -C strip=debuginfo <remap>"`. Shipped-shape (name section stripped) `b4bf75aa1843f83f13f9f64c25bcf9fe7b13c84fa026c730b9c0963e65b9040c`,
+  5,090,925 B; named twin `730413304ccabf6cd7e3e1e81ec8dbab70db218721a942b1360a9835aae865e3`. One
+  import, `env.memory` shared, 20..8192 pages; a start function `__wasm_init_memory`.
+- plain (the shape #1334 ships first): `RUSTFLAGS="-C target-feature=+simd128,+bulk-memory,+mutable-globals
+  -C strip=debuginfo <remap>"`. `0d32902855362282241053a901f7a552cb466334934aa42168c55217aad32e35`,
+  5,090,257 B; named twin `e074b641729444a892032f98bdcbb98d3de8565f6e5de17e28c50208a80468f7`. No import,
+  exports `memory`: today's ABI surface. Today's stable module is 5,093,283 B, so build-std costs no size.
+- `<remap>` = the shipped script's two remaps (`$CARGO_HOME=/cargo`, repo `=/repo`) **plus**
+  `--remap-path-prefix=$(rustc --print sysroot)/lib/rustlib/src/rust=/rust-src`. **RUSTUP_HOME
+  hazard, answered for #1334:** without the third remap the digest depends on the toolchain's path
+  (the same toolchain at two paths gave `c97fed27...` and `ae69c8c7...`); with it the copy at another
+  path gives the same bytes as above. A rebuild is bit-reproducible.
+
+**D3/D4/D5 per engine** (Playwright 1.62.1; `two` = isolated page, worklet + Worker on one shared
+memory; `single-plain` = D5; `single-iso` = the same module's single-instance reference):
+
+| Engine | D4.1 COI | D4.2 digest (two, single-iso, single-plain) | D4.3 Worker cycles: total / inside window | D4.3 glitches | D4.4 growth | D5 shared memory in worklet, non-isolated |
+|---|---|---|---|---|---|---|
+| Chromium 151.0.7922.34 | true | = native, all three | 32 / 31 | no trap, hang, render error, non-finite or render allocation; one 5-quantum skip at the 2nd `process()` call (before the window) and one 23 ms first rendered block: the same pair appears in both single legs | 2 explicit grows of 16 MiB inside the window plus allocator growth (6.5 -> 45.5 MiB); worklet saw 14 buffer changes | succeeds (`SharedArrayBuffer` undefined on page and in worklet), digest = native |
+| Firefox 153.0 | true | = native, all three | 20 / 5 (boot ~150 ms; the worklet kept rendering, 1197 blocks, until the 20th) | none of the above; 0 skipped quanta; about 44 % of calls read 3-5 ms by `Date.now()` (1 ms resolution) in `two` and 47-48 % in both single legs: the session's own cost, not the Worker's | as Chromium, 14 changes | succeeds, digest = native |
+| WebKit 26.5 | true | = native, all three | 57 / 56 | none; one 6 ms first rendered block (single legs: 5 ms + one 3 ms call, and 4 ms) | as Chromium, 13 changes | succeeds, digest = native |
+
+D4.4 in all three engines: `memory.buffer` changes identity on every growth, on the growing side and
+in the worklet; old views stay valid (an old `SharedArrayBuffer` keeps its length and reads the same
+bytes); the worklet re-derives its views and the digest holds. D4.5: the CI form of the render
+call-graph gate (`--trap-owner ...enter_block --trap-owner ...observe=1 --render-thread`) passes on
+both nightly twins, `atomic_waits=0`; the direct-call closure does not cover the plan executor's
+`call_indirect` targets, which the render-locked allocation count (0 in every leg) covers instead.
+
+**Recipe rules found (#1332 adopts them).**
+
+1. Instance order. lld's `__wasm_init_memory` (`--shared-memory`) initialises the data segments once
+   with a `cmpxchg` flag and `memory.atomic.wait32`s when another instance is initialising, and
+   std's allocator lock (`Mutex::lock_contended`), `Once::call` and `RwLock::read_contended` are the
+   module's other wait sites. Chromium traps a wait in a worklet (not exercised here), so the
+   worklet instantiates either first or after the other instance's instantiation returned, and
+   finishes its boot before the Worker loop starts; after boot it calls only render-locked exports,
+   which never take the lock.
+2. Second instance's stack and TLS. Its `__stack_pointer` starts at the first instance's stack top
+   (1 MiB) and its `__tls_base` at 0, so before any other export runs the Worker sets both: the
+   harness grows the memory by 17 pages from JS (dlmalloc never hands out pages it did not grow
+   itself), calls `__wasm_init_tls(base)` and sets `__stack_pointer` to the end. Without it (Node
+   negative control, `--skip-reserve`) the Worker's first boot traps `unreachable`. This replaces the
+   scope note's `document_ptr` idea: any export called before the stack is set runs on the
+   worklet's stack, concurrently with its render. No Rust code is added.
+3. `CONTROL_ALLOCATIONS` and `RENDER_ALLOCATIONS` (`hosts/host-web/src/render_lock.rs`) are plain
+   statics, so on shared memory both instances count into one copy (the Worker read 6-17 million
+   control allocations, its own plus the worklet's boot). Only the render flag is per instance. The
+   module doc's "one instance owns one copy" holds only on unshared memory; #1332 must report the
+   counters per instance or say they are shared.
+4. In every engine a non-isolated worklet can create a shared `WebAssembly.Memory` although
+   `SharedArrayBuffer` is not exposed, so D5's fallback runs the same atomic artifact.
+
+**Harness history (candid).** The first Chromium run (harness v1, kept as `results/harness-v1/`)
+passed every digest but started the Worker loop and its explicit growth before the worklet's window,
+so D4.4 was not exercised while rendering; v2 makes the Worker wait for the window, grow twice inside
+it and record glitches by phase, and all nine legs ran once on v2. The first v2 Chromium `two`
+launch died on `EADDRINUSE` in the runner's own server before a browser started; the runner now
+takes a kernel-chosen port and that leg ran once.
+
+**Outcome under D9 (desktop part).** Every desktop engine passes D4 1-5 and D5: #1334 may start.
+Open for #1331a-2: D7 headroom (Firefox's ~3 ms readings per 2.67 ms quantum on this 64-track
+session make it the engine to watch) and gates 3-5. #1380/#1332 still wait for #1331b.
 
 ## Amendment (decision 17, root 2026-10-13)
 
