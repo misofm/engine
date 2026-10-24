@@ -616,13 +616,47 @@ impl fmt::Display for FpEnvironmentRejection {
 
 impl core::error::Error for FpEnvironmentRejection {}
 
+/// Decide the attestation from the three words [`attest_fp_environment`] reads.
+///
+/// `observed` is the caller's word before the guard, `readback` the word read inside the guard and
+/// `restored` the word read after it dropped. The decision is pure so a test can hand it the words
+/// that conforming hardware never produces; [`attest_fp_environment`] only reads them and calls this.
+///
+/// # Errors
+///
+/// [`FpEnvironmentFailure::CanonicalWordRefused`] if `readback`'s control bits are not the canonical
+/// word's, checked first; otherwise [`FpEnvironmentFailure::RestoreRefused`] if `restored` is not
+/// bit-exactly `observed`, with `restored` reported as the rejection's `readback`.
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+pub fn judge_fp_environment(
+    observed: FpControlWord,
+    readback: FpControlWord,
+    restored: FpControlWord,
+) -> Result<(), FpEnvironmentRejection> {
+    if fp_control_bits(readback) != fp_control_bits(canonical_fp_control_word()) {
+        return Err(FpEnvironmentRejection {
+            observed,
+            readback,
+            failure: FpEnvironmentFailure::CanonicalWordRefused,
+        });
+    }
+    if restored != observed {
+        return Err(FpEnvironmentRejection {
+            observed,
+            readback: restored,
+            failure: FpEnvironmentFailure::RestoreRefused,
+        });
+    }
+    Ok(())
+}
+
 /// Attest, on the calling thread, that the canonical environment can be pinned and unpinned.
 ///
 /// This is the start-of-session half of issue #146: [`CanonicalFpEnv`] pins per block, and a host
 /// calls this once from the render thread it is about to render on, so that a thread whose control
 /// word cannot be written is refused before audio rather than silently rendering off-pin. It is a
 /// control-plane call -- it runs before the first block, not inside one -- but it allocates
-/// nothing and would be render-safe anyway.
+/// nothing and would be render-safe anyway. [`judge_fp_environment`] makes the decision.
 ///
 /// # Errors
 ///
@@ -635,22 +669,8 @@ pub fn attest_fp_environment() -> Result<(), FpEnvironmentRejection> {
         let _pinned = CanonicalFpEnv::enter();
         read_fp_control_word()
     };
-    if fp_control_bits(readback) != fp_control_bits(canonical_fp_control_word()) {
-        return Err(FpEnvironmentRejection {
-            observed,
-            readback,
-            failure: FpEnvironmentFailure::CanonicalWordRefused,
-        });
-    }
     let restored = read_fp_control_word();
-    if restored != observed {
-        return Err(FpEnvironmentRejection {
-            observed,
-            readback: restored,
-            failure: FpEnvironmentFailure::RestoreRefused,
-        });
-    }
-    Ok(())
+    judge_fp_environment(observed, readback, restored)
 }
 
 /// Attest, on the calling thread, that the canonical environment can be pinned and unpinned.

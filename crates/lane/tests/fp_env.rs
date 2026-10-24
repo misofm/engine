@@ -380,3 +380,56 @@ mod aarch64 {
         );
     }
 }
+
+/// The attestation's decision, fed the words conforming hardware never produces (issue #1729).
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+#[test]
+fn the_attestation_refuses_an_unpinned_readback_and_an_unrestored_word() {
+    use lane::fpenv::{
+        FpEnvironmentFailure, FpEnvironmentRejection, canonical_fp_control_word,
+        judge_fp_environment,
+    };
+    let canonical = canonical_fp_control_word();
+    // `!canonical` differs in control bits on both arches: x86 `!0x1F80 & 0xFFC0` is `0xE040`, and
+    // every FPCR bit is a control bit.
+    let other = !canonical;
+    assert_eq!(
+        judge_fp_environment(canonical, canonical, canonical),
+        Ok(())
+    );
+    assert_eq!(
+        judge_fp_environment(canonical, other, canonical),
+        Err(FpEnvironmentRejection {
+            observed: canonical,
+            readback: other,
+            failure: FpEnvironmentFailure::CanonicalWordRefused,
+        }),
+        "a readback without the canonical control bits must refuse the canonical half"
+    );
+    assert_eq!(
+        judge_fp_environment(canonical, canonical, other),
+        Err(FpEnvironmentRejection {
+            observed: canonical,
+            readback: other,
+            failure: FpEnvironmentFailure::RestoreRefused,
+        }),
+        "an unrestored caller word must refuse the restore half and report the restored word"
+    );
+    // The restore compares the whole word, sticky flags included. On x86 bit 0 is a status flag
+    // outside the control mask, so this refuses a restore check weakened to the control bits; on
+    // AArch64 the mask is the whole word and the case is the one above.
+    assert_eq!(
+        judge_fp_environment(canonical, canonical, canonical ^ 1),
+        Err(FpEnvironmentRejection {
+            observed: canonical,
+            readback: canonical ^ 1,
+            failure: FpEnvironmentFailure::RestoreRefused,
+        }),
+        "a restore must be bit-exact over the whole word"
+    );
+    assert_eq!(
+        judge_fp_environment(canonical, other, other).map_err(|rejection| rejection.failure),
+        Err(FpEnvironmentFailure::CanonicalWordRefused),
+        "the canonical check runs before the restore check"
+    );
+}
