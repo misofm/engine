@@ -9191,6 +9191,69 @@ mod structural_apply {
             Some(4 * quantum),
             "the first strip frame starts at the adoption block"
         );
+
+        // The strip meters tile from the adoption block now, so a lease taken again, and a
+        // producer reset, activate on that grid, not on the absolute `sample % period` one.
+        let published = |rig: &mut Rig, blocks: u64| {
+            let mut frames = Vec::new();
+            for _ in 0..blocks {
+                assert_eq!(rig.host.render_next(), RESULT_OK);
+                if rig.host.poll_meters() > 0 {
+                    frames.push(rig.host.meter_header().first_sample);
+                }
+            }
+            frames
+        };
+        assert_eq!(rig.host.set_meter_lease(false), RESULT_OK);
+        assert_eq!(rig.host.set_meter_lease(true), RESULT_OK);
+        let frames = published(&mut rig, 12 * WINDOW);
+        assert!(!frames.is_empty(), "a retaken lease publishes");
+        assert!(
+            frames
+                .iter()
+                .all(|start| (start / quantum - 4) % WINDOW == 0),
+            "on the adoption grid: {frames:?}"
+        );
+
+        // A producer reset: the strip's next window, rendered and not polled, names a new
+        // generation.
+        let queued = |rig: &mut Rig| {
+            rig.host
+                .plan
+                .as_mut()
+                .and_then(|plan| plan.active_attachment_mut::<RenderCompanions>())
+                .expect("companions")
+                .meters[0]
+                .consumer
+                .available_at_entry()
+        };
+        for _ in 0..WINDOW {
+            if queued(&mut rig) > 0 {
+                break;
+            }
+            assert_eq!(rig.host.render_next(), RESULT_OK);
+        }
+        let (Some(ready), Some(plan)) = (rig.host.ready.as_mut(), rig.host.plan.as_mut()) else {
+            panic!("a ready host");
+        };
+        let companions = plan
+            .active_attachment_mut::<RenderCompanions>()
+            .expect("companions");
+        let mut snapshot = companions.meters[0]
+            .consumer
+            .try_pop()
+            .expect("a closed strip window");
+        snapshot.reset_generation = snapshot.reset_generation.saturating_add(1);
+        ready.shape.meter_pending[0] = Some(snapshot);
+        assert_eq!(rig.host.poll_meters(), 0, "the reset group is refused");
+        let frames = published(&mut rig, 12 * WINDOW);
+        assert!(!frames.is_empty(), "a producer reset recovers");
+        assert!(
+            frames
+                .iter()
+                .all(|start| (start / quantum - 4) % WINDOW == 0),
+            "on the adoption grid: {frames:?}"
+        );
     }
 
     impl Rig {
