@@ -62,6 +62,14 @@ test-support = [
     "engine/test-support",
     "host-core/test-support",
 ]
+# Issue #1529: the render-lock probe export, the positive control of the render-allocation gates.
+# Off by default and never in a shipped build: `build-web-audioworklet.sh --render-lock-probe`
+# builds a separately named, never-delivered module with it, and the native leg below needs it.
+render-lock-probe = []
+
+[[test]]
+name = "render_locked_positive_control"
+required-features = ["render-lock-probe"]
 
 [lints]
 workspace = true
