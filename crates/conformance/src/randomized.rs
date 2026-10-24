@@ -2405,7 +2405,12 @@ fn bind_eligibility(
     let mut expect_decline = true;
     match draw.below(6) {
         0 => varied[member].bypass = !shape.bypass,
-        1 if !links.is_empty() => varied[member].link_mode = draw.pick(&links),
+        1 if !links.is_empty() => {
+            varied[member].link_mode = draw.pick(&links);
+            // Issue #1368: a lane-link effect's bank holds the mode per lane, so a member at
+            // another mode is the same program.
+            expect_decline = !descriptor.lane_link;
+        }
         2 if !rows.is_empty() => {
             let row = draw.pick(&rows);
             varied[member].sample_rate = row.sample_rate;

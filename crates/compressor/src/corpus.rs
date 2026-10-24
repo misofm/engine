@@ -35,7 +35,7 @@ use effect_contract::LinkMode;
 use lane::Lane;
 
 use crate::design::{MAX_WIDTH, PARAMETER_COUNT};
-use crate::kernel::{Channel, Detector, process_block};
+use crate::kernel::{Channel, Detector, Links, process_block};
 
 /// Independent single-track signals in a case. A multiple of the widest backend.
 pub const LANES: usize = 8;
@@ -206,7 +206,7 @@ pub fn run_case<L: Lane>(case: usize, out: &mut [u32]) {
                 &mut right[..frames * width],
                 Detector::Main,
                 frames,
-                link,
+                &Links::uniform(link),
                 false,
                 SAMPLE_RATE,
                 (&mut left_channel, &mut right_channel),

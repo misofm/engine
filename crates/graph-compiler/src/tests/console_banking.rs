@@ -1031,3 +1031,66 @@ fn a_console_track_is_never_pooled_as_stereo_to_fill_a_bank() {
         "and completes the stereo insert group: three banks per pool"
     );
 }
+
+/// Issue #1368 gate 2: inserts of the lane-link effects at mixed detector link modes share one
+/// bank per slot per group, and every track renders its per-node bits.
+///
+/// `2 W` stereo tracks carry the compressor and the gate/expander as console slots and again as
+/// inserts; track `i`'s two inserts take link mode `i mod 3`, so every group of `W` lanes mixes
+/// DualMono, Maximum and Average. The inserts form one stereo group per `W` tracks at one level,
+/// and each of its two slots binds as one bank, so no insert renders per node.
+///
+/// Red if the program key still carries the real link mode (the mixed cohort splits and inserts
+/// render per node), or if a bank applies one lane's mode to its bank-mates (the bits differ from
+/// the per-node oracle's).
+#[test]
+fn inserts_at_mixed_link_modes_share_one_bank_per_slot() {
+    const BLOCKS: u64 = 12;
+    use session::LinkMode;
+    const LINKS: [LinkMode; 3] = [LinkMode::DualMono, LinkMode::Maximum, LinkMode::Average];
+    let lanes = BankWidth::for_backend(host_dispatch())
+        .expect("a vector host")
+        .lanes() as usize;
+    let console = Console {
+        pre: vec![Kind::Comp, Kind::Gate],
+        post: Vec::new(),
+    };
+    let tracks: Vec<TrackShape> = (0..2 * lanes)
+        .map(|index| TrackShape {
+            feed: Feed {
+                gain: 2.0,
+                stereo: true,
+                poison: false,
+            },
+            inserts: vec![Kind::Comp, Kind::Gate],
+            bypass: vec![false; 2],
+            variant: index % VARIANTS.len(),
+        })
+        .collect();
+    let mut model = console_session(&console, &tracks);
+    for (index, track) in model.tracks.iter_mut().enumerate() {
+        for effect in &mut track.inserts.effects {
+            effect.link_mode = LINKS[index % LINKS.len()];
+        }
+    }
+    let artifact = compile_at(&model, host_dispatch()).expect("the session compiles");
+    let report = &artifact.report().rack_cohorts;
+    assert!(
+        report.scalar_in(RackLocation::Dynamic).is_empty(),
+        "an insert at a mixed link mode renders per node"
+    );
+    assert_eq!(
+        report.bound_slots_in(RackLocation::Dynamic).count(),
+        2 * 2,
+        "one bank per insert slot per group of {lanes} tracks"
+    );
+    assert_renders_the_oracle(
+        &render(artifact, &tracks, BLOCKS),
+        &render(
+            compile_at(&model, Backend::Scalar).expect("the Scalar oracle compiles"),
+            &tracks,
+            BLOCKS,
+        ),
+        "mixed-link inserts",
+    );
+}
