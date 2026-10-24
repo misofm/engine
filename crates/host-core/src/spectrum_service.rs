@@ -148,7 +148,8 @@ impl SpectrumPreparation {
     ///
     /// # Errors
     ///
-    /// The collection's [`SpectrumPrepareError`]: a duplicate entry or an overflowing size.
+    /// The collection's [`SpectrumPrepareError`](crate::spectrum::SpectrumPrepareError): a
+    /// duplicate entry or an overflowing size.
     pub fn retained_bytes(&self) -> Result<u64, crate::spectrum::SpectrumPrepareError> {
         match self {
             Self::Single(request) => {
