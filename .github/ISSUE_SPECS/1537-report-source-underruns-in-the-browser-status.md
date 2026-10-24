@@ -254,6 +254,15 @@ needs named exceptions for `crates/engine/src/realtime/plan.rs` and `crates/grap
   (`SourceUnderrunBlocks` left out of `SERVED_COUNTERS`): host-core's served-set test red, counter
   capacity 12 not 6. One path past the scope note: `crates/control-plane/src/compile.rs`, the
   `SharedPlanState` constructor's new field (one line; the struct cannot compile without it).
+- Attempt 1 CI fix (`3557fbf56`): the separate `last_block_source_underrun` trait call added a
+  render-thread `call_indirect` in `RealtimePlanOwner::render_active` (INDIRECT_SITES pins 0).
+  The flag now returns with the block: `PreparedPlanExecutor::render` returns
+  `ExecutorBlockReport { source_underrun }`, which `render_inner` copies into `RenderReport`; the
+  trait method is gone. Ripple: the test executors in `crates/engine/src/realtime/mod.rs` and
+  `crates/control-plane/src/plan.rs`, and one `.map(|_| ())` in `crates/graph/src/runtime.rs`'s test
+  helper. `check-web-audioworklet.sh` passes (render indirect sites as pinned). Mutants re-run: add
+  every block, remove the add and `copied_frames == 0` stay red; "read the flag before render" can
+  no longer be written, because the flag is the render call's own return.
 
 ## Root rulings (2026-10-13)
 
