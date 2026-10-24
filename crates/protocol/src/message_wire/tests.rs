@@ -1904,8 +1904,8 @@ fn control_code_tables_are_exact() {
 /// Gate 2: a retired message ID decodes to `UNSUPPORTED_MESSAGE`, no message variant uses a
 /// retired code, and a capability registry that lists one is refused.
 ///
-/// Red if `0x0004`, `0x0005`, `0x0006` or `0x8002` is reallocated to a new message or still served, or a
-/// peer can advertise one.
+/// Red if `0x0004`, `0x0005`, `0x0006` or `0x8002` is reallocated to a new message or still served,
+/// or a peer can advertise one.
 #[test]
 fn retired_message_ids_are_never_reused_or_advertised() {
     assert_eq!(crate::RETIRED_MESSAGE_IDS, [0x0004, 0x0005, 0x0006, 0x8002]);
@@ -4179,8 +4179,8 @@ fn stream_ready(channels: ParameterChannel) -> SpectrumStreamReply<'static> {
 /// frame-limit measure equals the encoded frame of each ready shape. Every presence rule of D3, an
 /// operation or a status outside its table, a smoothing of 10,001 ms or NaN, planes that disagree
 /// with `channels`, a 1,024-bin plane, a ready reply without a selection, a selection without its
-/// identity and a ready window count that is not `sequence + 1` are refused as `INVALID_FIELD`, on encode where the typed value can say it and on
-/// decode.
+/// identity and a ready window count that is not `sequence + 1` are refused as `INVALID_FIELD`, on
+/// encode where the typed value can say it and on decode.
 ///
 /// Red if the codec admits a contradictory stream request or a reply of the wrong shape in either
 /// direction, or the measure the session refuses stream reads by drifts from the encoder.

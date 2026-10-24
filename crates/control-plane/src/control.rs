@@ -345,26 +345,37 @@ fn stream_reply_fits(
         .is_ok_and(|bytes| u64::try_from(bytes).is_ok_and(|bytes| bytes <= limit))
 }
 
-/// #1595 R6: whether a session frame limit of `limit` bytes carries a one-plane read of a tap
-/// whose identity is `target_id_bytes` long, both a one-shot read without the window and a
-/// stream read (the larger: the stream reply carries more scalar fields). A tap that fails would
-/// answer `LIMIT_EXCEEDED` on every one-plane read.
-fn tap_fits(target_id_bytes: usize, limit: u64) -> bool {
-    let plane = protocol::ParameterChannel::Left;
-    reply_fits(plane, false, target_id_bytes, limit)
-        && stream_reply_fits(plane, target_id_bytes, limit)
+/// #1595 R6: whether a session frame limit of `limit` bytes carries the reads every accepted tap
+/// must have, for a tap of `channels` whose identity is `target_id_bytes` long: a one-plane
+/// one-shot read without the window, and a stream read of the tap's own channels (the entry fixes
+/// them; the stream reply also carries more scalar fields). A tap that fails would answer
+/// `LIMIT_EXCEEDED` on every one-plane read, or on every stream read.
+fn tap_fits(channels: protocol::ParameterChannel, target_id_bytes: usize, limit: u64) -> bool {
+    reply_fits(
+        protocol::ParameterChannel::Left,
+        false,
+        target_id_bytes,
+        limit,
+    ) && stream_reply_fits(channels, target_id_bytes, limit)
 }
 
 /// #1595 R6 on a boot configuration: whether every tap of `preparation` passes [`tap_fits`].
 pub(crate) fn preparation_fits(preparation: &host_core::SpectrumPreparation, limit: u64) -> bool {
     match preparation {
-        host_core::SpectrumPreparation::Single(request) => {
-            tap_fits(spectrum_target_id(&request.target).len(), limit)
+        host_core::SpectrumPreparation::Single(request) => tap_fits(
+            protocol_channels(request.channels),
+            spectrum_target_id(&request.target).len(),
+            limit,
+        ),
+        host_core::SpectrumPreparation::Collection(request) => {
+            request.entries.iter().all(|entry| {
+                tap_fits(
+                    protocol_channels(entry.channels),
+                    spectrum_target_id(&entry.target).len(),
+                    limit,
+                )
+            })
         }
-        host_core::SpectrumPreparation::Collection(request) => request
-            .entries
-            .iter()
-            .all(|entry| tap_fits(spectrum_target_id(&entry.target).len(), limit)),
     }
 }
 
@@ -3346,14 +3357,14 @@ where
                 ));
             }
         }
-        // #1595 R6: a tap whose one-plane read (a one-shot read without the window, or a stream
-        // read) the session's frame limit cannot carry would answer `LIMIT_EXCEEDED` on every
-        // read; it is refused here.
+        // #1595 R6: a tap whose one-plane one-shot read (without the window) or whose stream read
+        // (of the tap's channels) the session's frame limit cannot carry would answer
+        // `LIMIT_EXCEEDED` on every such read; it is refused here.
         let limit = self.limits.maximum_control_frame_bytes;
         if request
             .entries
             .iter()
-            .any(|entry| !tap_fits(entry.target_id.len(), limit))
+            .any(|entry| !tap_fits(entry.channels, entry.target_id.len(), limit))
         {
             return Err(SpectrumRefusal::reply(
                 StatusCode::LimitExceeded,

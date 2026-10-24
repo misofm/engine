@@ -46,8 +46,14 @@ struct Adapter;
 impl ControlAdapter for Adapter {
     type Row = PlanResources;
     const ADAPTER_ALLOCATIONS: &'static [u64] = &[];
-    /// As the C ABI's: the session advertises the spectrum reads (#1595 R2), so a boot
-    /// configuration passes R6.
+}
+
+/// [`Adapter`] advertising the spectrum reads, as the C ABI's does (#1595 R2): its boot runs R6.
+struct Advertised;
+
+impl ControlAdapter for Advertised {
+    type Row = PlanResources;
+    const ADAPTER_ALLOCATIONS: &'static [u64] = &[];
     const SPECTRUM: bool = true;
 }
 
@@ -1766,8 +1772,9 @@ fn a_configure_that_supersedes_a_fallback_edit_reports_the_fallback() {
 /// configure removes every tap, to the boot plan's bytes plus the pairing rows of the meters the
 /// plan carries (#1674 R1). The row is 51 bytes here (one `SpectrumInventoryRow`, 48 bytes on a
 /// 64-bit target, plus the 3 bytes of `eq0`, and no pairing row, since the predecessor had no
-/// capture); it is host-core's private layout, so the check is a 1 KiB ceiling over the service's bytes, which no inventory row of one tap approaches and which
-/// stays far below the service's own size, so a missing charge cannot pass.
+/// capture); it is host-core's private layout, so the check is a 1 KiB ceiling over the service's
+/// bytes, which no inventory row of one tap approaches and which stays far below the service's own
+/// size, so a missing charge cannot pass.
 #[test]
 fn a_plan_with_spectrum_charges_the_service_once() {
     let mut rig = Rig::new(None);
@@ -2041,20 +2048,19 @@ fn a_capture_read_returns_the_reference_analysis() {
     ));
 }
 
-/// #1595 gate 3 (one-shot) and R6. Turns red if a read pops a window it then fails to deliver,
-/// or a configure measures a tap's one-plane read wrongly: on a session whose frame limit is
-/// 12,288 bytes, a ready stereo read (12,608 bytes) and a `Left` read with its window (16,696
-/// bytes) each answer `LIMIT_EXCEEDED` `spectrum.frame`, and a `Left` read (8,496 bytes) then
-/// returns that same window (token 1, frame 0). A configure of the tap is accepted there (its
-/// one-plane read fits) and refused `LIMIT_EXCEEDED` `spectrum.frame` at 8,192 bytes, setting
-/// nothing.
+/// #1595 gate 3 (one-shot). Turns red if a read pops a window it then fails to deliver: on a
+/// session whose frame limit is 16,384 bytes, a ready stereo read with the window (29,008 bytes)
+/// and a `Left` read with its window (16,696 bytes) each answer `LIMIT_EXCEEDED`
+/// `spectrum.frame`, and a stereo read without it (12,608 bytes) then returns that same window
+/// (token 1, frame 0). A configure of the stereo tap is accepted there and refused
+/// `LIMIT_EXCEEDED` `spectrum.frame` at 8,192 bytes, setting nothing.
 #[test]
 fn a_read_the_frame_cannot_carry_consumes_nothing() {
     let mut rig = Rig::limited(
         SESSION,
         Some(configuration()),
         ControlLimits {
-            maximum_control_frame_bytes: 12_288,
+            maximum_control_frame_bytes: 16_384,
             ..limits()
         },
     );
@@ -2063,7 +2069,7 @@ fn a_read_the_frame_cannot_carry_consumes_nothing() {
         rig.block();
     }
     assert_eq!(
-        rig.capture(&read(ParameterChannel::Both, false)),
+        rig.capture(&read(ParameterChannel::Both, true)),
         Err((StatusCode::LimitExceeded, "spectrum.frame".to_owned()))
     );
     assert_eq!(
@@ -2072,14 +2078,14 @@ fn a_read_the_frame_cannot_carry_consumes_nothing() {
     );
     assert_eq!(
         status_of(
-            &rig.capture(&read(ParameterChannel::Left, false))
+            &rig.capture(&read(ParameterChannel::Both, false))
                 .expect("read")
         ),
         (SpectrumCaptureStatus::Ready, Some((1, 0)))
     );
     assert!(
         rig.configure(&single_request()).is_ok(),
-        "a tap whose one-plane read fits is accepted"
+        "a tap whose reads fit is accepted"
     );
 
     let mut small = Rig::limited(
@@ -2268,9 +2274,9 @@ fn core_facts(metadata: &host_core::SpectrumStreamMetadata) -> (u8, u64, u64, u6
 }
 
 /// #1595 gate 4. Turns red if a stream reply's status, epochs, drop count or bins differ from the
-/// core machine: on the collection `(eq0 post-input, Stereo)`, `(eq1 post-input, Left)` (post-input:
-/// a boundary the tone reaches at full level), `select` `eq0` answers `inactive` with selection
-/// epoch 1; `start` (100 ms smoothing) answers `warming`,
+/// core machine: on the collection `(eq0 post-input, Stereo)`, `(eq1 post-input, Left)`
+/// (post-input: a boundary the tone reaches at full level), `select` `eq0` answers `inactive`
+/// with selection epoch 1; `start` (100 ms smoothing) answers `warming`,
 /// and every read after each block equals, in status, sequence, window count, drops, samples and
 /// hop, the core's `read_stream` on the reference session fed the same PCM, with the bins of the
 /// first four ready windows equal word for word to `analyze_stream_into` there, and ready windows
@@ -2454,12 +2460,13 @@ fn a_stream_read_follows_the_core_machine() {
 }
 
 /// #1595 gate 3 (stream) and R6. Turns red if a stream read pops a window or consumes a `gap` it
-/// then fails to deliver, or R6 measures a tap's one-plane stream read wrongly: on a session
-/// whose frame limit is 12,288 bytes, a stereo `eq0` stream whose queue dropped two windows answers
-/// a read `LIMIT_EXCEEDED` `spectrum.frame` (its ready reply is larger), and the core's next read
-/// is still that `gap` with both drops. A tap is refused `spectrum.frame` by a configure and by a
-/// boot at the one-plane one-shot size (the stream's one-plane reply is larger), and accepted at
-/// the one-plane stream size.
+/// then fails to deliver, or R6 measures a tap's reads wrongly. On a session that does not
+/// advertise the spectrum reads (so its boot runs no R6) and whose frame limit is 12,288 bytes, a
+/// stereo `eq0` stream whose queue dropped two windows answers a read `LIMIT_EXCEEDED`
+/// `spectrum.frame` (its ready reply is 12,688 bytes), and the core's next read is still that
+/// `gap` with both drops. R6 refuses a `Left` tap one byte below its stream read (8,576 bytes,
+/// above the one-shot read's 8,496) and a stereo tap one byte below its two-plane stream read, by
+/// a configure and, on an advertising session, by a boot, and accepts each at its size.
 #[test]
 fn a_stream_read_the_frame_cannot_carry_consumes_nothing() {
     let codec = ProtocolCodec::default();
@@ -2497,15 +2504,23 @@ fn a_stream_read_the_frame_cannot_carry_consumes_nothing() {
     assert_eq!(rig.read_stream().status, SpectrumStreamStatus::Gap);
     assert_eq!(rig.service().stream_metadata().dropped_captures, 2);
 
-    let mut small = Rig::limited(SESSION, None, at(one_shot));
-    assert_eq!(
-        small.configure(&single_request()),
-        Err((StatusCode::LimitExceeded, "spectrum.frame".to_owned()))
-    );
-    let mut fits = Rig::limited(SESSION, None, at(one_plane));
-    assert!(fits.configure(&single_request()).is_ok());
+    let left = SpectrumConfigureRequest {
+        entries: vec![entry(
+            SpectrumTargetKind::TrackPostPan,
+            "eq0",
+            ParameterChannel::Left,
+        )],
+        ..single_request()
+    };
+    let refused = Err((StatusCode::LimitExceeded, "spectrum.frame".to_owned()));
+    for (request, fits) in [(&left, one_plane), (&single_request(), stereo)] {
+        let mut below = Rig::limited(SESSION, None, at(fits - 1));
+        assert_eq!(below.configure(request), refused, "{fits} - 1");
+        let mut exact = Rig::limited(SESSION, None, at(fits));
+        assert!(exact.configure(request).is_ok(), "{fits}");
+    }
     let boot = |limit| {
-        compile_children::<Adapter>(
+        compile_children::<Advertised>(
             SESSION,
             at(limit),
             Box::new(Preparer),
@@ -2514,6 +2529,6 @@ fn a_stream_read_the_frame_cannot_carry_consumes_nothing() {
         .map(|_| ())
         .map_err(|failure| failure.diagnostic().into_owned())
     };
-    assert_eq!(boot(one_shot), Err(b"spectrum.frame\t$\n".to_vec()));
-    assert_eq!(boot(one_plane), Ok(()));
+    assert_eq!(boot(stereo - 1), Err(b"spectrum.frame\t$\n".to_vec()));
+    assert_eq!(boot(stereo), Ok(()));
 }
