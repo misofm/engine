@@ -2505,11 +2505,12 @@ impl SourceTimeline {
     }
 
     /// Allocate a vacant timeline (#1641 D3): its own history of `history_blocks` entries and no
-    /// command queue and no seek-report record (#1704 D3), for a successor plan that carries its predecessor's timeline at the swap
-    /// block. Until a carry fills it, it advances from timeline sample 0 and observes no seek, so
-    /// render stays defined. Its report's command-queue and seek-report rows name the queue and
-    /// record the carry brings, which the successor does not allocate. `published` is the session's published generation
-    /// (#1642 B16-R2), the word of the timeline the carry brings. Control thread only.
+    /// command queue and no seek-report record (#1704 D3), for a successor plan that carries its
+    /// predecessor's timeline at the swap block. Until a carry fills it, it advances from timeline
+    /// sample 0 and observes no seek, so render stays defined. Its report's command-queue and
+    /// seek-report rows name the queue and record the carry brings, which the successor does not
+    /// allocate. `published` is the session's published generation (#1642 B16-R2), the word of
+    /// the timeline the carry brings. Control thread only.
     pub fn prepare_vacant(
         quantum_frames: QuantumFrames,
         history_blocks: NonZeroUsize,
@@ -3500,8 +3501,9 @@ impl SourceGraphSourceSetDriver {
 ///
 /// The timeline's fixed bytes join the set's overhead and largest allocation (#1641 D7): its
 /// history, and for an occupied timeline its command queue and its seek-report record (#1704 D4).
-/// A vacant timeline's queue and record arrive with its carry, so its host counts it with the carried source overhead. The consumer value is
-/// inline in the driver, whose own allocation already counts it.
+/// A vacant timeline's queue and record arrive with its carry, so its host counts them with the
+/// carried source overhead. The consumer value is inline in the driver, whose own allocation
+/// already counts it.
 pub fn prepare_session_graph_source_set(
     envelope: engine::realtime::RenderEnvelope,
     sources: Vec<SourceGraphSource>,
