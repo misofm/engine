@@ -97,3 +97,9 @@ Scope note D1-D3 accepted by root. Root also authorized one paragraph of
   wrapper (installed in-job through GITHUB_ENV for every later step) appends start and end lines
   per rustc unit to `target/ci/rustc-units.log`, uploaded with the HTML, so a timed-out run still
   shows which units ran and for how long. Root sets the final timeout from the next dispatched run.
+- Final timeout (root, 2026-10-24): dispatched run 40069960987 (head 06713f216) passed. The job
+  took 81 min (06:22:42 to 07:43:35): the build 75.6 min, the 100x randomized step 5.1 min. The
+  per-unit log shows 687 rustc units, 301 CPU-minutes on 4 cores, and no unit over 3.7 min (the
+  slowest: the `wasm-gates` bin 3.7, the `capi` test 2.8, the `audit` and `host-web` tests 2.5): the
+  cost is breadth (many LTO-linked test binaries), not one unit. `timeout-minutes` is 125
+  (81 x 1.5 = 121.5, rounded up to 5), and the build's own guard is `timeout 120m`.

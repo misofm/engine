@@ -157,11 +157,11 @@ jobs:
   release-link-proof:
     name: workspace release link proof (moved off the per-PR path)
     runs-on: ubuntu-24.04
-    # Timeout (issue #1511 D4): provisional 150 min. The first dispatched run under the env below
-    # (run 40065733904) hit the former 60 min on the 4-core runner, so it gave no build time. Root
-    # sets the final value from the next dispatched run: the slowest observed build x 1.5, rounded
-    # up to 5 min. The timeout guards against hangs; it is not the cost budget.
-    timeout-minutes: 150
+    # Timeout (issue #1511 D4): 125 min. Dispatched run 40069960987 on the 4-core runner took
+    # 81 min for the job (build 75.6 min, 301 rustc CPU-minutes over 687 units, no single unit over
+    # 3.7 min); 81 x 1.5 = 121.5, rounded up to 5 min. The timeout guards against hangs; it is not
+    # the cost budget.
+    timeout-minutes: 125
     # Issue #1511 D2: this job builds with thin LTO, 16 codegen units and no debug info. The claim
     # it proves -- the panic-variant clobber of un-hashed `cdylib`/`staticlib` outputs, and release-
     # only `cfg(debug_assertions)` rot -- depends on the profile name `release`, its panic setting
@@ -217,7 +217,7 @@ jobs:
       # The inner limit is the job's minus 5 min, so the build step fails on its own and the upload
       # below still runs. `timeout` signals its whole process group (cargo and every rustc).
       - name: Workspace release build (single panic variant, --no-run)
-        run: timeout --kill-after=1m 145m bash scripts/run-release-workspace-tests.sh --no-run --timings
+        run: timeout --kill-after=1m 120m bash scripts/run-release-workspace-tests.sh --no-run --timings
       - name: Upload the build timings
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
