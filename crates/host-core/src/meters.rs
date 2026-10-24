@@ -893,7 +893,10 @@ impl MeterDelivery {
     ///
     /// Allocation-free, no lock and no runtime-checked index of its own; bounded by
     /// `1 + sum of the entry counts` (#1448 D2) and the output queue's depth. The one checked
-    /// index is the SPSC ring's slot index, inlined here, which the ring keeps in range.
+    /// index is the SPSC ring's slot index, inlined here, which the ring keeps in range. Never
+    /// inlined into its caller, so a host's render-thread call-graph gate names this function as
+    /// that index's one admitted owner (#1582 R3), and a checked index the host adds is its own.
+    #[inline(never)]
     pub fn poll(
         &mut self,
         meters: &mut [MeterConsumer],
