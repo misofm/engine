@@ -4360,11 +4360,11 @@ mod tests {
 
     /// #1618 gate 2: a window held behind a stale record when the plan swaps, on a capture that
     /// does not carry. The held window died with its observer, so no block end will ever publish
-    /// it: the service settles the arm, the read answers `CaptureInvalid` (not `Pending` forever),
-    /// the generation carries over, and a new arm completes on the successor's observer, whose
-    /// window a record of the old generation cannot be mistaken for.
+    /// it: the service drops the arm, the read answers `Dropped` once (#1593 D6; not `Pending`
+    /// forever), the generation carries over, and a new arm completes on the successor's
+    /// observer, whose window a record of the old generation cannot be mistaken for.
     #[test]
-    fn a_window_held_behind_a_stale_record_settles_invalid_when_the_plan_swaps() {
+    fn a_window_held_behind_a_stale_record_is_dropped_when_the_plan_swaps() {
         use crate::{PreparedSpectrumCaptures, SpectrumService, SpectrumServiceError};
 
         let (mut observer, capture) = one_shot_pair(SpectrumChannels::Left);
@@ -4392,15 +4392,19 @@ mod tests {
         );
 
         // The plan swaps; the successor's capture is fresh and its observer is its own.
+        let (_, first) = one_shot_pair(SpectrumChannels::Left);
+        let first_displaced =
+            service.adopt_successor(PreparedSpectrumCaptures::Single(first), &[], true, None);
+        // A second swap that does not carry, before any read: the drop is still answered once.
         let (mut next_observer, next) = one_shot_pair(SpectrumChannels::Left);
         let displaced =
             service.adopt_successor(PreparedSpectrumCaptures::Single(next), &[], true, None);
         assert!(
             matches!(
                 service.read(SpectrumChannels::Left),
-                Err(SpectrumServiceError::CaptureInvalid)
+                Err(SpectrumServiceError::Dropped)
             ),
-            "settled, not pending forever"
+            "dropped, not pending forever"
         );
         // The refusal is read once; the generation is the old arm's, so the next arm is its
         // successor and completes on the new observer.
@@ -4418,7 +4422,30 @@ mod tests {
             .expect("read")
             .expect("the new arm completes on the successor");
         assert_eq!(snapshot.window.first_sample, 16_384);
-        drop(displaced);
+
+        // A cancel, or a new arm, after a drop supersedes it: the read is not `Dropped`.
+        for rearm in [false, true] {
+            service.arm().expect("arm");
+            let (_, swapped) = one_shot_pair(SpectrumChannels::Left);
+            drop(service.adopt_successor(
+                PreparedSpectrumCaptures::Single(swapped),
+                &[],
+                true,
+                None,
+            ));
+            if rearm {
+                service.arm().expect("arm after the drop");
+                assert!(matches!(service.read(SpectrumChannels::Left), Ok(None)));
+                service.cancel().expect("cancel");
+            } else {
+                service.cancel().expect("cancel after the drop");
+                assert!(matches!(
+                    service.read(SpectrumChannels::Left),
+                    Err(SpectrumServiceError::NotArmed)
+                ));
+            }
+        }
+        drop((first_displaced, displaced));
     }
 
     /// Gate 1 (issue #1609): a cancel races the completion of the window it cancels.

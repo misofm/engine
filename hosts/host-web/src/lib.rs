@@ -398,6 +398,7 @@ pub(crate) const fn spectrum_result(error: SpectrumServiceError) -> u32 {
         SpectrumServiceError::Unprepared | SpectrumServiceError::SelectSingle => RESULT_UNSUPPORTED,
         SpectrumServiceError::Busy => RESULT_BACKPRESSURE,
         SpectrumServiceError::NotArmed
+        | SpectrumServiceError::Dropped
         | SpectrumServiceError::StreamActive
         | SpectrumServiceError::StreamInactive => RESULT_WRONG_STATE,
         SpectrumServiceError::CaptureInvalid => RESULT_RENDER_REJECTED,
