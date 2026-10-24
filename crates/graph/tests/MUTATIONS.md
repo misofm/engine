@@ -20,8 +20,8 @@ cargo test --locked -p <package> --lib <test>
 | M1c | the same reversal, seen on the production 100-layout corpus | `src/runtime.rs` `reduce_plane` | graph-compiler `frozen_issue_037_seeded_builtin_bank_layouts_have_exact_membership_and_counters` | RED |
 | M2 | fan-in 1 zero-fills then accumulates (the `fold(0.0, +)` shape, which turns `-0.0` into `+0.0`) | `src/runtime.rs` `reduce_plane` | `reduction_is_left_to_right_bit_identical_to_scalar_reference` | RED |
 | M15 | fan-in 0 leaves the output buffer untouched instead of zeroing it | `src/runtime.rs` `reduce_plane` | `reduction_is_left_to_right_bit_identical_to_scalar_reference` | RED |
-| M3 | the slice PDC keeps the block's entry cursor instead of advancing it | `src/runtime.rs` `CompensationDelay::process` | `compensation_delay_is_partition_invariant_and_matches_per_sample_reference` | RED |
-| M12 | the slice PDC exchanges its two segments in the wrong order | `lane` `kernels::pdc_delay_block` | `compensation_delay_is_partition_invariant_and_matches_per_sample_reference` | RED |
+| M3 | the slice PDC keeps the block's entry cursor instead of advancing it | `src/runtime.rs` `CompensationDelay::process_from` | `compensation_delay_is_partition_invariant_and_matches_per_sample_reference` | RED |
+| M12 | the slice PDC moves its two segments in the wrong order | `lane` `kernels::pdc_delay_move_block` | `compensation_delay_is_partition_invariant_and_matches_per_sample_reference` | RED |
 | M4 | the route unfolds the gain and drops the fusion (`ll*l + lr*r`) | `lane` `kernels::mix2x2_block` | `route_applies_folded_gain_with_frozen_op_order` (deleted by TA5; no catcher recorded) | RED |
 | M9 | `mix2x2_block`'s scalar tail uses a different coefficient order than its vector body | `lane` `kernels::mix2x2_block` | `route_applies_folded_gain_with_frozen_op_order` (deleted by TA5; no catcher recorded) | RED |
 | M5 | the native executor stages an edge from the wrong producer | `src/runtime.rs` `build_native` | `fifty_random_dag_sessions_render_bit_identically_in_both_executors` | RED |

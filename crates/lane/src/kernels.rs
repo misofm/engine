@@ -1497,6 +1497,44 @@ pub fn pdc_delay_block(ring: &mut [f32], cursor: &mut usize, io: &mut [f32]) {
     };
 }
 
+/// Integer-sample plugin-delay compensation over one block, moving `source` through the line into
+/// `out`: the out-of-place form of [`pdc_delay_block`] (#899).
+///
+/// Per word, `out` takes the ring's pending word and the ring takes `source`'s word, in the same
+/// two contiguous segments and with the same cursor advance as [`pdc_delay_block`]: the result
+/// equals copying `source` into `out` and then exchanging `out` with the ring, without the copy.
+/// Each segment reads the ring into `out` before it writes `source` into the ring. No
+/// floating-point operation, so this kernel is exact by construction and needs no width.
+///
+/// # Panics
+///
+/// Panics if `source` and `out` differ in length, if they are longer than `ring`, or if `cursor`
+/// is not a position inside `ring`.
+#[inline(always)]
+pub fn pdc_delay_move_block(ring: &mut [f32], cursor: &mut usize, source: &[f32], out: &mut [f32]) {
+    debug_assert_eq!(source.len(), out.len());
+    debug_assert!(out.len() <= ring.len());
+    debug_assert!(*cursor < ring.len());
+    let length = ring.len();
+    let count = out.len();
+    let first = core::cmp::min(count, length - *cursor);
+    let head = &mut ring[*cursor..*cursor + first];
+    out[..first].copy_from_slice(head);
+    head.copy_from_slice(&source[..first]);
+    let rest = count - first;
+    if rest > 0 {
+        let wrapped = &mut ring[..rest];
+        out[first..count].copy_from_slice(wrapped);
+        wrapped.copy_from_slice(&source[first..count]);
+    }
+    let advanced = *cursor + count;
+    *cursor = if advanced >= length {
+        advanced - length
+    } else {
+        advanced
+    };
+}
+
 /// The 2x2 route/pan matrix over one planar stereo block, in place (D3).
 ///
 /// `c` is `[ll, lr, rl, rr]`, already carrying the route's linear gain: the compiler hands the

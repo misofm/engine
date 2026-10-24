@@ -22,8 +22,9 @@
 //! * Routes are D3: the linear gain is folded into the 2x2 coefficients **once, at bind**, and
 //!   render spends one multiply and one [`Lane::fma`](lane::Lane::fma) per output word
 //!   through [`mix2x2_block`].
-//! * Compensation delays are two-segment slice exchanges through [`pdc_delay_block`]; there is no
-//!   per-sample work and no `%` on the render path.
+//! * Compensation delays are two-segment slice moves and exchanges through
+//!   [`pdc_delay_move_block`] and [`pdc_delay_block`]; there is no per-sample work and no `%` on
+//!   the render path.
 //! * The graph performs **no** sanitisation (D7). Input sanitisation is the input stage's, output
 //!   finiteness is the bank boundary check.
 
@@ -223,7 +224,7 @@ use effect_contract::{
 };
 use lane::Lane;
 use lane::kernels::{
-    IndexedRamp, mix2x2_block, ordered_accumulate_block, pdc_delay_block,
+    IndexedRamp, mix2x2_block, ordered_accumulate_block, pdc_delay_block, pdc_delay_move_block,
     route_mix_column_ramps_block, route_mix_ramp_block, sum_into_block,
 };
 use rack::{BankChain, BankMembers, BankPlaneViews, FoldCohort, ResidentFoldCohort};
@@ -2320,9 +2321,10 @@ pub(crate) const fn live_follow_route_owner_bytes() -> usize {
 
 /// Integer-sample plugin-delay compensation for one stereo edge.
 ///
-/// The line is `samples` words per channel and the block is exchanged with it in at most two
-/// contiguous segments per channel ([`pdc_delay_block`], #98 F3). A block longer than the line is
-/// walked in `samples`-word segments, which is still slice-only: no per-sample loop and no `%`.
+/// The line is `samples` words per channel and the block is moved through it in at most two
+/// contiguous segments per channel ([`pdc_delay_move_block`], #98 F3, #899). A block longer than
+/// the line is walked in `samples`-word segments, which is still slice-only: no per-sample loop
+/// and no `%`.
 pub(crate) struct CompensationDelay {
     left: Box<[f32]>,
     right: Box<[f32]>,
@@ -2353,9 +2355,18 @@ impl CompensationDelay {
 
 // REALTIME_POLICY_BEGIN
 impl CompensationDelay {
-    pub(crate) fn process(&mut self, left: &mut [f32], right: &mut [f32]) {
+    /// Write `source` delayed by the line into `out`, one stereo block (#899): `out` takes the
+    /// line's pending words and the line takes `source`'s, with no intermediate copy. A zero-length
+    /// line copies `source` through.
+    pub(crate) fn process_from(&mut self, source: (&[f32], &[f32]), out: (&mut [f32], &mut [f32])) {
+        let (source_left, source_right) = source;
+        let (left, right) = out;
+        debug_assert_eq!(source_left.len(), left.len());
+        debug_assert_eq!(source_right.len(), right.len());
         let samples = self.left.len();
         if samples == 0 {
+            left.copy_from_slice(source_left);
+            right.copy_from_slice(source_right);
             return;
         }
         let mut offset = 0;
@@ -2363,15 +2374,17 @@ impl CompensationDelay {
             let take = core::cmp::min(samples, left.len() - offset);
             let cursor = self.cursor;
             let mut left_cursor = cursor;
-            pdc_delay_block(
+            pdc_delay_move_block(
                 &mut self.left,
                 &mut left_cursor,
+                &source_left[offset..offset + take],
                 &mut left[offset..offset + take],
             );
             let mut right_cursor = cursor;
-            pdc_delay_block(
+            pdc_delay_move_block(
                 &mut self.right,
                 &mut right_cursor,
+                &source_right[offset..offset + take],
                 &mut right[offset..offset + take],
             );
             debug_assert_eq!(left_cursor, right_cursor);
@@ -2511,9 +2524,10 @@ impl TrackDelayLine {
     }
 }
 
-/// One lane of a track delay: the same two-segment swap `CompensationDelay::process` runs, over one
-/// ring with its own cursor. No `%`, no per-sample loop, and a block longer than the ring is walked
-/// in ring-sized takes exactly as the PDC caller loop walks it.
+/// One lane of a track delay: the in-place two-segment swap ([`pdc_delay_block`]) over one ring
+/// with its own cursor, the exchange form of `CompensationDelay::process_from`'s move. No `%`, no
+/// per-sample loop, and a block longer than the ring is walked in ring-sized takes exactly as the
+/// PDC caller loop walks it.
 fn delay_lane(ring: &mut [f32], cursor: &mut usize, block: &mut [f32]) {
     let samples = ring.len();
     if samples == 0 {
@@ -2841,8 +2855,8 @@ pub(crate) struct RuntimeOp {
     /// Buffers to reduce, in stable edge-ID order (D9). These are the *effective* reads: a
     /// delayed input names its staging buffer, not the producer's.
     pub(crate) inputs: Box<[u32]>,
-    /// Delayed inputs this op stages itself. Empty in the native executor, whose coordinator
-    /// stages every edge between partitions.
+    /// Delayed inputs this op moves through their compensation lines into their staging buffers
+    /// before it reduces them.
     pub(crate) staged: Box<[StagedInput]>,
     pub(crate) sidechain: Option<u32>,
     pub(crate) output: u32,
@@ -4931,16 +4945,8 @@ fn execute_op(
     }
     // A delayed edge stages its producer's words before the consuming op reduces them.
     for staged in &op.staged {
-        {
-            let (destination, input) = arena.write_read(0, staged.staging, staged.source);
-            destination.copy_from_slice(input);
-        }
-        {
-            let (destination, input) = arena.write_read(1, staged.staging, staged.source);
-            destination.copy_from_slice(input);
-        }
-        let (staged_left, staged_right) = arena.write_stereo(staged.staging);
-        delays[staged.line as usize].process(staged_left, staged_right);
+        let (out, source) = arena.write_read_stereo(staged.staging, staged.source);
+        delays[staged.line as usize].process_from(source, out);
     }
     // The fan-in-zero fill is dead under a bound source (issue #218). `reduce_plane`'s `[]` arm
     // fills the buffer with `0.0` so that a node with no contributors renders silence; a bound
@@ -12885,9 +12891,13 @@ mod tests {
     /// E7. The two-segment slice PDC is bit-for-bit a per-sample ring delay, and the result does
     /// not depend on how the stream is partitioned into blocks (master plan #83 D5).
     ///
+    /// It drives the production entry, `process_from`, from a separate source into a separate
+    /// output, as the staging loop does (#899).
+    ///
     /// Red mutations (`tests/MUTATIONS.md`): drop the cursor advance between segments; swap the
-    /// two `pdc_delay_block` segments; carry one cursor across both channels instead of restarting
-    /// the right channel at the block's cursor.
+    /// two `pdc_delay_move_block` segments; write the source into the ring before reading the
+    /// ring's pending word; carry one cursor across both channels instead of restarting the right
+    /// channel at the block's cursor.
     #[test]
     fn compensation_delay_is_partition_invariant_and_matches_per_sample_reference() {
         const SAMPLES: usize = 4_096;
@@ -12913,15 +12923,14 @@ mod tests {
             for block in [1usize, 7, 64, 128, 512] {
                 let mut delay = CompensationDelay::new(delay_samples);
                 assert_eq!(delay.samples(), delay_samples);
-                let mut left = signal.clone();
-                let mut right = negated.clone();
+                let mut left = vec![f32::NAN; SAMPLES];
+                let mut right = vec![f32::NAN; SAMPLES];
                 for offset in (0..SAMPLES).step_by(block) {
                     let end = (offset + block).min(SAMPLES);
-                    let (head, tail) = left.split_at_mut(end);
-                    let _ = tail;
-                    let (right_head, right_tail) = right.split_at_mut(end);
-                    let _ = right_tail;
-                    delay.process(&mut head[offset..], &mut right_head[offset..]);
+                    delay.process_from(
+                        (&signal[offset..end], &negated[offset..end]),
+                        (&mut left[offset..end], &mut right[offset..end]),
+                    );
                 }
                 for (index, sample) in left.iter().enumerate() {
                     assert_eq!(
@@ -12937,9 +12946,10 @@ mod tests {
                     Some(first) => assert_eq!(&bits, first, "partition invariance at {block}"),
                 }
                 delay.reset();
-                let mut zero = vec![0.0f32; delay_samples];
-                let mut zero_right = vec![0.0f32; delay_samples];
-                delay.process(&mut zero, &mut zero_right);
+                let silence = vec![0.0f32; delay_samples];
+                let mut zero = vec![f32::NAN; delay_samples];
+                let mut zero_right = vec![f32::NAN; delay_samples];
+                delay.process_from((&silence, &silence), (&mut zero, &mut zero_right));
                 assert!(
                     zero.iter().all(|sample| *sample == 0.0),
                     "reset clears the line"
@@ -12969,18 +12979,20 @@ mod tests {
                 let mut time = 0;
                 while time < taken {
                     let take = BLOCK.min(taken - time);
-                    let mut left: Vec<f32> = (time..time + take).map(|t| sample(t, 0)).collect();
-                    let mut right: Vec<f32> = (time..time + take).map(|t| sample(t, 1)).collect();
-                    before.process(&mut left, &mut right);
+                    let left: Vec<f32> = (time..time + take).map(|t| sample(t, 0)).collect();
+                    let right: Vec<f32> = (time..time + take).map(|t| sample(t, 1)).collect();
+                    let (mut out_left, mut out_right) = (vec![0.0; take], vec![0.0; take]);
+                    before.process_from((&left, &right), (&mut out_left, &mut out_right));
                     time += take;
                 }
                 let mut after = CompensationDelay::new(successor);
                 after.adopt(&mut before);
                 // `successor` frames of silence in, so the output is the line's whole content in
                 // age order, and then the input.
-                let mut left = vec![0.0f32; successor + 3];
-                let mut right = vec![0.0f32; successor + 3];
-                after.process(&mut left, &mut right);
+                let silence = vec![0.0f32; successor + 3];
+                let mut left = vec![f32::NAN; successor + 3];
+                let mut right = vec![f32::NAN; successor + 3];
+                after.process_from((&silence, &silence), (&mut left, &mut right));
                 for (channel, plane) in [left, right].into_iter().enumerate() {
                     for (index, word) in plane.iter().enumerate() {
                         let expected = if index >= successor || index >= predecessor {
