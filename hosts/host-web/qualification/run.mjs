@@ -804,8 +804,7 @@ function validateSdkResponse(browserName, response) {
   "SDK observation endpoint did not preserve exact owned data and channel projection");
   gate(browserName, "sdk-observation", Array.isArray(observations.windows)
     && observations.windows.length === 1
-    && observations.windows[0]?.endSample > observations.windows[0]?.firstSample
-    && observations.windows[0]?.blocks === 2,
+    && validResidentWindow(observations.windows[0]),
   "SDK observation endpoint did not return an actual resident window");
   const resident = observations?.resident;
   gate(browserName, "sdk-observation-subscription", Array.isArray(resident?.mapBindings)
@@ -1019,7 +1018,8 @@ function validateSdkResponse(browserName, response) {
         && publication.metadata.smoothingMs === 37.5
         && publication.metadata.sampleRateHz === 48_000
         && publication.metadata.quantumFrames === 128
-        && publication.metadata.endSample > publication.metadata.capturedSample
+        && canonicalU64(publication.metadata.capturedSample) !== undefined
+        && canonicalU64(publication.metadata.endSample) > canonicalU64(publication.metadata.capturedSample)
         && publication.result?.windowFrames === 2_048
         && publication.result?.binCount === 1_025
         && publication.result?.capturedSample === publication.metadata.capturedSample
@@ -1305,6 +1305,20 @@ function mutationProofs(browserName, result) {
     );
   }
   if (result.sdkResponse === null) return;
+  // #1522: the hop record's sample fields are decimal strings; a pair whose end has one more digit
+  // than its start (here 98304 to 100352, about 2.05 s at 48 kHz) is a valid pair.
+  const hopWidth = structuredClone(result);
+  const hopPublications = hopWidth.sdkResponse.spectrum?.configuredHop?.publications;
+  if (Array.isArray(hopPublications) && hopPublications.length === 2) {
+    [["98304", "100352"], ["99328", "101376"]].forEach(([capturedSample, endSample], index) => {
+      Object.assign(hopPublications[index].metadata, { capturedSample, endSample });
+      Object.assign(hopPublications[index].result, { capturedSample, endSample });
+    });
+    assert.doesNotThrow(
+      () => validate(browserName, hopWidth),
+      `${browserName}: sdk-spectrum-hop-width: valid decimal-width-crossing hop pair was refused`,
+    );
+  }
   const resident = result.sdkResponse.observations?.resident;
   const original = resident?.windows?.[0];
   if (original === undefined) return;
