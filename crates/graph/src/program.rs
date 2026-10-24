@@ -210,7 +210,7 @@ const fn is_alias_candidate(node: &GraphNodeId) -> bool {
 ///
 /// It is **not** what makes a homogeneous bank safe, despite predating banks and looking like it
 /// should be. A bank's hazard is a *window*, not a node; the window is handled by
-/// [`bank_windows`], and [`lower`] records why extending this predicate to bank members was
+/// [`render_bounds`], and [`lower`] records why extending this predicate to bank members was
 /// measured and rejected (issue #169).
 ///
 /// The session output is dedicated too (issue #916). Its storage for a block is the host's
@@ -269,7 +269,7 @@ fn first_main_producer(
 ///
 /// A merged run renders as **one unit at its first slot's op position** (`runtime::cohort_runs`),
 /// so the op range the schedule is permuted over is the union of every slot's ops -- not each
-/// slot's own range. `bank_windows` needs that union, and this is where it is formed.
+/// slot's own range. `render_bounds` needs that union, and this is where it is formed.
 ///
 /// The pairing condition is exactly `runtime::chains_into`'s first clause, restated on the
 /// semantic graph: two banks may fuse only when they cover the same number of lanes and, for
@@ -356,64 +356,67 @@ fn chainable_bank_groups(
     grouped.into_values().collect()
 }
 
-/// The op ranges over which a bank reorders the schedule, merged into disjoint spans.
+/// Bounds on where each op renders, in op positions: `(earliest, latest)`, both indexed by op.
 ///
-/// A bank's window runs from its first member's op to its last: `runtime::units_of` emits the
-/// whole bank at the first position, so every op in between executes in some other order than the
-/// one colouring saw. A bank with fewer than two ops reorders nothing and contributes no window.
+/// The executor renders in *runs* (`runtime::cohort_runs`): a bank is one unit at its first
+/// member's op (`runtime::units_of`), a merged cohort chain is one run at its first unit's
+/// position, and runs execute one after another, each to completion, in order of that position.
+/// A non-member op is a run of one at its own index. So an op's render position is the first op
+/// of the run that contains it, and colouring does not know which merges the runtime will take,
+/// only bounds on them:
 ///
-/// Overlapping windows are merged, because two banks that interleave at one level reorder each
-/// other's ops as well as their own; the merged span is the range over which no slot may be
-/// recycled. Returns `(defer_release, closes_here)`, both indexed by op:
+/// * `latest[o]` is the first op of `o`'s **own bank** (its own index if it is in none). A bank
+///   always renders whole, at that position or -- when a chain merges it into an earlier bank's
+///   run -- earlier, never later.
+/// * `earliest[o]` is the first op of `o`'s **chainable group** (`groups`, from
+///   [`chainable_bank_groups`]; its own index if it is in none). Every run the runtime forms lies
+///   inside one group, because the groups are a superset of the merges `chains_into` can prove,
+///   so the run containing `o` starts no earlier than its group's first op.
 ///
-/// * `defer_release[o]` -- a slot whose last reader is op `o` must be *held*, not freed, because
-///   some op in the same span still executes after `o` does;
-/// * `closes_here[o]` -- op `o` is the last op of a span, so everything held may be released once
-///   `o` is behind us.
-fn bank_windows(
+/// Pass 2 recycles a slot to an op `p` only when the `latest` of every op that touched the slot's
+/// previous value -- its writer, its readers, a staging fill -- is below `p`'s `earliest`: `p`'s
+/// run then starts strictly after every such op's run starts, so it is a later run, and the
+/// earlier run has finished every read, write and tap of the old value before `p` writes (issue
+/// #931). A merge the runtime takes or declines moves a run's start only within
+/// `[earliest, latest]`, so neither can bring a read past a write this rule admitted.
+///
+/// One tie is admitted as well: the release position equals `p`'s `earliest` and `p` is **not**
+/// in the bank that opens its group (`latest[p] > earliest[p]`). Every op released there belongs
+/// to that opening bank (a release position is a bank's first op or a lone op's own index, and
+/// `earliest[p]` is a member op of the opening bank). If `p`'s bank renders in a later run, the
+/// strict case applies. If it is chained into the opening bank's run, `p` is a later slot of that
+/// run: a later slot is never executed and reaches the arena only through the run's final
+/// scatter (`runtime::chains_into` admits no sidechain and no compensation staging there), and
+/// that scatter follows every gather of the run's first slot, which is the only place the run
+/// reads the arena. On the 64-track console this is the tie that lets a cohort's later slots reuse
+/// the input slots its own post-input gather frees.
+fn render_bounds(
     node_op: &[Option<OpIndex>],
     banks: &[Vec<GraphNodeId>],
+    groups: &[Vec<GraphNodeId>],
     spec: &GraphSpec,
     op_count: usize,
-) -> (Vec<bool>, Vec<bool>) {
-    let mut spans: Vec<(usize, usize)> = Vec::with_capacity(banks.len());
-    for bank in banks {
-        let (mut first, mut last) = (usize::MAX, 0usize);
-        let mut seen = 0usize;
-        for id in bank {
-            let Some(index) = node_index(spec, id) else {
+) -> (Vec<usize>, Vec<usize>) {
+    // Each list's member ops, and the first of them stamped onto every one.
+    let stamp = |lists: &[Vec<GraphNodeId>]| {
+        let mut bound: Vec<usize> = (0..op_count).collect();
+        for list in lists {
+            let ops: Vec<usize> = list
+                .iter()
+                .filter_map(|id| node_index(spec, id))
+                .filter_map(|index| node_op[index as usize])
+                .map(|op| op as usize)
+                .collect();
+            let Some(first) = ops.iter().min().copied() else {
                 continue;
             };
-            let Some(op) = node_op[index as usize] else {
-                continue;
-            };
-            first = first.min(op as usize);
-            last = last.max(op as usize);
-            seen += 1;
+            for op in ops {
+                bound[op] = bound[op].min(first);
+            }
         }
-        if seen > 1 && first < last {
-            spans.push((first, last));
-        }
-    }
-    spans.sort_unstable();
-    let mut defer_release = vec![false; op_count];
-    let mut closes_here = vec![false; op_count];
-    let mut merged: Vec<(usize, usize)> = Vec::with_capacity(spans.len());
-    for (first, last) in spans {
-        match merged.last_mut() {
-            Some(open) if first <= open.1 => open.1 = open.1.max(last),
-            _ => merged.push((first, last)),
-        }
-    }
-    for (first, last) in merged {
-        // The releasing op is the span's *reader*: a slot whose last reader is `last` is safe to
-        // reuse afterwards, because the span is over by then. Hence the half-open range.
-        for slot in defer_release.iter_mut().take(last).skip(first) {
-            *slot = true;
-        }
-        closes_here[last] = true;
-    }
-    (defer_release, closes_here)
+        bound
+    };
+    (stamp(groups), stamp(banks))
 }
 
 /// One logical buffer's lifetime, in op indices.
@@ -448,7 +451,8 @@ struct Lifetime {
 /// Its inputs are live entering the window and its output is dead until the window ends, so the
 /// whole soundness condition collapses to one sentence:
 ///
-/// > **No physical slot may be recycled inside a bank window.**
+/// > **No physical slot may be recycled inside a bank window**, except to an op proven to render
+/// > after the run that last touched it (the exception is issue #931's, below).
 ///
 /// ## A cohort chain's window spans levels, and the sentence still holds (issues #181, #202)
 ///
@@ -472,22 +476,33 @@ struct Lifetime {
 /// builtin bank -- and none of the argument above depends on where a slot sat. What it does change
 /// is how far a window reaches: a chain that runs `builtins -> EQ -> compressor -> limiter` for one
 /// cohort executes that whole strip at the cohort's *first* op position, so its window spans every
-/// dependency level the strip crosses. The obligation is unchanged -- no physical slot may be
-/// recycled inside it -- and it is simply held over a longer range, which costs arena buffers and
-/// buys the round-trips.
+/// dependency level the strip crosses. The obligation is unchanged -- no slot may be recycled to
+/// an op the window lets render before the slot's last reader -- over a longer range.
 ///
 /// `chainable_bank_groups` is what makes the window the merged one. It is handed one entry per
 /// bound bank and unions the pairs that could fuse, using the same lane-wise producer/consumer
-/// relation `chains_into` proves, so the span this function holds is a superset of the span the
+/// relation `chains_into` proves, so the span this function bounds is a superset of the span the
 /// runtime actually permutes. A window wider than the permutation is always safe; one narrower is
 /// the defect this machinery exists to prevent.
 ///
-/// `bank_windows` computes those ranges and pass 2 *holds* every slot freed inside one until
-/// the window closes, instead of returning it to the free list where an op the bank hoists past
-/// its releaser could take it. `a_bank_window_never_recycles_a_physical_slot` constructs the
-/// smallest graph that reaches the defect and
-/// `bank_window_hoisting_preserves_dataflow_on_random_graphs` interprets seeded graphs in the
-/// order the executor actually runs them.
+/// ## Recycling by render position (issue #931)
+///
+/// Until #931 pass 2 *held* every slot freed inside a merged window until the window closed. That
+/// is sound but over-wide: the eight cohorts of `fixtures/session/v1/console-sixty-four-track.json`
+/// merge into one span, so the 64 input slots the post-input gathers free were never reused, and
+/// the plan every host renders took 256 buffers where the bank-unaware colouring takes 193.
+///
+/// Pass 2 now keys release on render position instead. `render_bounds` gives every op the
+/// earliest and the latest op position its run can start at, and a freed slot goes to an op only
+/// if that op's run is proven to start after the run of every op that touched the slot's
+/// previous value (see `render_bounds` for the rule, its one admitted tie and why a merge the
+/// runtime takes or declines cannot break it). Without banks both bounds are an op's own index,
+/// and the colouring is the one-op-late free list it always was.
+/// `a_bank_window_never_recycles_a_physical_slot` constructs the smallest graph that reaches the
+/// #169 defect, `bank_window_hoisting_preserves_dataflow_on_random_graphs` and
+/// `cohort_chain_merging_preserves_dataflow_on_random_graphs` interpret seeded graphs in the order
+/// the executor actually runs them, and graph-compiler's
+/// `the_banked_console_arena_equals_the_bank_unaware_arena` pins the console at parity.
 ///
 /// ## The rejected alternative: dedication by bank membership
 ///
@@ -499,23 +514,14 @@ struct Lifetime {
 ///   what colouring *takes*. `take` draws from the free list with no notion of a window, so a
 ///   slot released inside one still reaches a member hoisted past its releaser. Over the corpus
 ///   `bank_window_hoisting_preserves_dataflow_on_random_graphs` draws from, 285 of 3617 graphs
-///   diverge today and the window hold takes that to zero.
+///   diverge without any window rule, and the window rule takes that to zero.
 /// * **On its own it makes matters worse** -- 528 divergences, up from 285. A dedicated member
 ///   cannot fold into its producer in place, so it allocates, and the slot it allocates may be
 ///   one a hoisted op still needs.
-/// * **It is redundant once windows hold**, and it is not free: on the builtins-less compile of
+/// * **It is redundant under the window rule**, and it is not free: on the builtins-less compile of
 ///   `fixtures/session/v1/console-sixty-four-track.json`, measured before issue #925, it cost 64
 ///   arena buffers (193 -> 257) and 64 stereo block copies per render block, one per dynamic
 ///   member whose consumer can no longer consume it in place.
-///
-/// The window hold itself is not free either, and this doc used to say it was. The "costs
-/// nothing" measurement (193 banked, 193 per node) was taken on that builtins-less plan, where an
-/// identity post-input op level retired every input slot outside any window; #925 elided that
-/// level on that plan, and with builtins it never existed as a copy. A merged cohort span holds
-/// the input slots its first slot's ops free, and `the_merged_span_hold_costs_the_input_slots`
-/// pins what that costs on the plan every host renders: 256 banked against 193 per node (it also
-/// pinned 192 against 129 on the builtins-less compile until #964 removed that arm). Narrowing
-/// the hold is issue #931.
 ///
 /// The invariant the doc on `is_dedicated` used to claim for bank members -- "no op may consume
 /// a member's buffer in place" -- is not needed and is not held. A member's consumer sits at a
@@ -792,54 +798,110 @@ fn lower_with(
     } else {
         banks.to_vec()
     };
-    let (defer_release, closes_here) = bank_windows(&node_op, &chained, spec, ops.len());
+    let (earliest, latest) = render_bounds(&node_op, banks, &chained, spec, ops.len());
+    // The latest render position of any op that touches each logical buffer: its writer, every
+    // reader, and an in-place successor (which shares it). The buffer's slot is free for an op
+    // that renders strictly after that (#931).
+    let mut release_after = vec![0usize; lifetimes.len()];
+    for (op_index, op) in ops.iter().enumerate() {
+        let touched = inputs[op.inputs.0 as usize..op.inputs.1 as usize]
+            .iter()
+            .chain(op.sidechain.iter())
+            .map(|input| input.buffer.0)
+            .chain(core::iter::once(op.output.0));
+        for buffer in touched {
+            let release = &mut release_after[buffer as usize];
+            *release = (*release).max(latest[op_index]);
+        }
+    }
+    // `floor[i]` is the earliest render position of any op from `i` on: a slot whose release
+    // position is below it is free for every op still to be coloured.
+    let mut floor = vec![usize::MAX; ops.len() + 1];
+    for op_index in (0..ops.len()).rev() {
+        floor[op_index] = floor[op_index + 1].min(earliest[op_index]);
+    }
     let mut physical = vec![u32::MAX; lifetimes.len()];
+    // Slots every remaining op may take.
     let mut free: std::collections::BTreeSet<u32> = std::collections::BTreeSet::new();
-    // Slots freed inside a bank window, released together once the window closes (#169).
-    let mut held: Vec<u32> = Vec::new();
+    // Slots only an op rendering after their release position may take, keyed by that position.
+    // Without banks every op's bounds are its own index and nothing ever waits here.
+    let mut pending: std::collections::BTreeSet<(usize, u32)> = std::collections::BTreeSet::new();
     let mut next_physical = 0u32;
     let mut staging_release: Vec<u32> = Vec::new();
-    let take = |free: &mut std::collections::BTreeSet<u32>, next: &mut u32| -> u32 {
-        if let Some(buffer) = free.pop_first() {
-            buffer
+    // The smallest slot an op may take: the lowest free slot, or a lower pending one the op may
+    // have (see `render_bounds`): one released before the op's run can start, or -- for an op
+    // outside its group's first bank -- released at exactly that start.
+    let take = |free: &mut std::collections::BTreeSet<u32>,
+                pending: &mut std::collections::BTreeSet<(usize, u32)>,
+                next: &mut u32,
+                (renders_from, behind_head): (usize, bool)|
+     -> u32 {
+        let bound = if behind_head {
+            core::ops::Bound::Included((renders_from, u32::MAX))
         } else {
-            let buffer = *next;
-            *next += 1;
-            buffer
+            core::ops::Bound::Excluded((renders_from, 0))
+        };
+        let waiting = pending
+            .range((core::ops::Bound::Unbounded, bound))
+            .min_by_key(|(_, slot)| *slot)
+            .copied();
+        match (free.first().copied(), waiting) {
+            (Some(slot), Some((_, other))) if slot < other => {
+                free.remove(&slot);
+                slot
+            }
+            (_, Some(entry)) => {
+                pending.remove(&entry);
+                entry.1
+            }
+            (Some(slot), None) => {
+                free.remove(&slot);
+                slot
+            }
+            (None, None) => {
+                let buffer = *next;
+                *next += 1;
+                buffer
+            }
         }
     };
     for op_index in 0..ops.len() {
         // Slots retire one op late: a buffer whose last reader is `op_index - 1` is only free
         // once that read has happened.
         if op_index > 0 {
-            // The window that op `op_index - 1` sat in (if any) is behind us now, so the slots it
-            // held are safe to hand out again.
-            if closes_here[op_index - 1] {
-                free.extend(held.drain(..));
-            }
             // What op `op_index - 1` gave up. A dedicated buffer gives up nothing -- that is what
             // dedication is. A staging scratch belongs to the op that filled it, so it retires
-            // with that op's outputs.
+            // with that op's outputs and is released after that op's run.
             //
-            // Inside a bank window those slots are *held* rather than freed (#169): the bank
-            // hoists some of the window's ops past op `op_index - 1`, so a slot it no longer
-            // needs may be one they still do.
+            // A slot whose previous value a bank or a merged chain may still touch after some
+            // op still to be coloured has already rendered waits in `pending` (#169, #931).
+            let staged = latest[op_index - 1];
             let retired = expire[op_index - 1]
                 .drain(..)
                 .filter(|buffer| !lifetimes[*buffer as usize].dedicated)
-                .map(|buffer| physical[buffer as usize])
-                .chain(staging_release.drain(..));
-            if defer_release[op_index - 1] {
-                held.extend(retired);
-            } else {
-                free.extend(retired);
+                .map(|buffer| (release_after[buffer as usize], physical[buffer as usize]))
+                .chain(staging_release.drain(..).map(|slot| (staged, slot)));
+            for (release, slot) in retired {
+                if release < floor[op_index] {
+                    free.insert(slot);
+                } else {
+                    pending.insert((release, slot));
+                }
+            }
+            while let Some(&(release, slot)) = pending.first() {
+                if release >= floor[op_index] {
+                    break;
+                }
+                pending.pop_first();
+                free.insert(slot);
             }
         }
+        let renders_from = (earliest[op_index], latest[op_index] > earliest[op_index]);
         // A delayed input stages into a scratch buffer that lives only for this op.
         let (first, last) = ops[op_index].inputs;
         for input in &mut inputs[first as usize..last as usize] {
             if let Some(delay) = &mut input.delay {
-                let buffer = take(&mut free, &mut next_physical);
+                let buffer = take(&mut free, &mut pending, &mut next_physical, renders_from);
                 delay.staging = BufferRef(buffer);
                 staging_release.push(buffer);
             }
@@ -849,13 +911,14 @@ fn lower_with(
             .as_mut()
             .and_then(|side| side.delay.as_mut())
         {
-            let buffer = take(&mut free, &mut next_physical);
+            let buffer = take(&mut free, &mut pending, &mut next_physical, renders_from);
             delay.staging = BufferRef(buffer);
             staging_release.push(buffer);
         }
         let output = ops[op_index].output.0;
         if lifetimes[output as usize].def_op == op_index && physical[output as usize] == u32::MAX {
-            physical[output as usize] = take(&mut free, &mut next_physical);
+            physical[output as usize] =
+                take(&mut free, &mut pending, &mut next_physical, renders_from);
         }
         ops[op_index].output = BufferRef(physical[output as usize]);
     }
