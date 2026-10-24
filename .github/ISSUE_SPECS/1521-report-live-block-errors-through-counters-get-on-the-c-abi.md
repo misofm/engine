@@ -48,8 +48,8 @@ All anchors are on `main` at `8c0deee2c`.
   and so does the plan's `PlanState` (`compile.rs:914`) and the capi `Plan`'s `queries` field
   (`crates/capi/src/abi.rs:472-488`).
 - **Nothing reads it today.** No code outside `crates/control-plane/src/plan.rs` and the engine
-  tests calls either accessor (`grep -rn live_block_errors crates hosts`). host-web does not reach `control-plane` today, so
-  the larger `PROVIDER_COUNTER_SLOTS` changes only capi's retained bytes; those are ceilings, and
+  tests calls either accessor (`grep -rn live_block_errors crates hosts`). The
+  larger `PROVIDER_COUNTER_SLOTS` changes only retained bytes; those are ceilings, and
   there are no exact pins (#1312's growth from 3 to 4 slots touched only the files this draft
   lists). The C ABI maps the
   error to `RESULT_RENDER_REJECTED` with the plan diagnostic `PLAN_REJECTED`
@@ -76,20 +76,16 @@ All anchors are on `main` at `8c0deee2c`.
   used by `capi_controller_dispatches_every_advertised_command_family`, `:2264`) is the
   `COUNTERS_GET` `all` response. A new served counter changes its bytes; #1312 re-pinned it the
   same way.
-- **The browser (not in this slice).** The browser renders through `PreparedRenderPlan::render`
-  (`hosts/host-web/src/lib.rs:3264`), which drops `after_snapshot` (`crates/engine/src/realtime/plan.rs:996-997`),
-  so it never counts. Any render error makes the instance `STATE_FAILED` (`lib.rs:3331`,
-  `:3866-3867`). `WebStatus` (`lib.rs:1288-1311`) has four reserved words; #1399 takes offset 48
-  and #1349 takes 56, 64 and 72, so no status word is left. *Swap and retire browser plans through
-  the Worker's service loop* (#1381) moves browser render to `RealtimePlanOwner` and gives the
-  Worker the control plane's `SessionState`, so after #1381 the refresh this slice adds also runs
-  in the browser. See the browser non-goal.
+- **The browser (updated 2026-10-24).** #1381 closed: host-web renders through
+  `PlanState::render` (`WebPlan = PlanState<WebAdapter>`) and its session is
+  `control_plane::SessionState`, so the mirror and the refresh this slice adds already run in the
+  browser; see the browser non-goal.
 
 ## Decisions frozen for this slice
 
 - **D1. Registry.** `CounterId::LiveBlockErrors` joins the frozen registry and `parse_counter_id`
-  at the next free value when this merges (18 if #1351's `TransitionReprepareRefusals = 17` has
-  landed), never a reused one. Its wire name is `LIVE_BLOCK_ERRORS`. Tests use the name, never the
+  at the next free value, 19 (#1768 took 18 for `STRIPS_RESTARTED`; root, 2026-10-24), never a
+  reused one. Its wire name is `LIVE_BLOCK_ERRORS`. Tests use the name, never the
   number. It is a non-resetting, saturating `u64`, like every registered counter.
 - **D2. Served from construction.** The provider serves it at 0 from construction, in #1351 D1's
   fixed served set. `PROVIDER_COUNTER_SLOTS` grows by one. Add
@@ -159,15 +155,12 @@ All anchors are on `main` at `8c0deee2c`.
 
 ## Non-goals
 
-- **Browser: no counter.** A browser render error is terminal. host-web maps every render `Err` to
-  `fail` (`hosts/host-web/src/lib.rs:3331`), which sets `STATE_FAILED` and zeroes the output. Only
-  construction sets `STATE_READY`, every entry point refuses unless the state is `STATE_READY`, and
-  only `dispose` leaves `STATE_FAILED`. The instance renders no later block. Its status and the
-  diagnostic `web.render.rejected` already report the one failed block, so a counter could never
-  exceed 1 and adds nothing. #1381 D4 sends render through `RealtimePlanOwner` and keeps this
-  mapping. **Reopening condition:** any change that lets a browser instance render after a render
-  error must, in the same issue, give the browser this counter. No change to `WebStatus`,
-  `WebPlanWatermark` or any JS or `.d.ts` mirror.
+- **Browser: no browser code.** #1381 closed: host-web renders through `PlanState::render` and its
+  session is `control_plane::SessionState`, so the mirror store and the service-step refresh run in
+  the browser too, and both hosts serve the counter from the one host-core served set (one control
+  abstraction). A browser render error is still terminal (`STATE_FAILED`), so its value is 0 or 1.
+  No browser parity row: the value is 0 on both hosts in a correct build and gate 1 proves
+  mirror-to-wire. No change to `WebStatus`, `WebPlanWatermark`, any JS, `.d.ts` or SDK mirror.
 - A watermark outcome flag (D5) or a word in `miso_engine_v1_watermark` (D9).
 - Any change to what is counted, to the render path or to the engine crate.
 - Fault injection in the engine to drive a real after-snapshot failure through
@@ -240,4 +233,13 @@ All anchors are on `main` at `8c0deee2c`.
 
 ## Attempt record
 
-- Attempt 1: not started.
+- Attempt 1 (2026-10-24, on `main` `82f987296`): implemented as the scope note's slice. ID 19;
+  `SERVED_COUNTERS` is 6 long with `LiveBlockErrors` last; `set_live_block_errors`; one refresh line;
+  D6 seam; gate 1 is `the_live_block_error_mirror_reaches_counters_get_and_the_snapshot`
+  (`crates/capi/src/runtime/live_tests.rs`); gate 2 extends
+  `clock_transport_counters_and_diagnostics_are_session_backed`; the protocol round-trip test takes
+  ID 19 and refuses 20. Gate 3: `ALL_COMMAND_RESPONSE_VECTORS[9]` length 0x100 -> 0x130 (a 40-byte
+  value message plus its 8-byte TLV header), TLV count 6 -> 7. Mutants (PR evidence): the refresh
+  line deleted -> gate 1 reads 0, not 3 (red); `LiveBlockErrors` left out of `SERVED_COUNTERS` ->
+  gate 1's configure is refused (red) and gate 2's capacity grows 5 -> 10 (red). Reads alone do not
+  catch the second mutant: `set_counter` inserts an unserved ID.

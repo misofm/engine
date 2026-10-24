@@ -1444,7 +1444,18 @@ fn the_live_block_error_mirror_reaches_counters_get_and_the_snapshot() {
         vec![protocol::CounterId::LiveBlockErrors],
         1,
     );
-    assert_eq!(rig.send(&configure).0, crate::RESULT_OK);
+    let (result, response) = rig.send(&configure);
+    assert_eq!(result, crate::RESULT_OK);
+    let mut fields = [0_u16; 64];
+    assert!(
+        matches!(
+            ProtocolCodec::default()
+                .decode_typed_response(&response, &mut DecodeScratch::new(&mut fields))
+                .expect("configure response"),
+            protocol::DecodedTypedResponseFrame::Success { .. }
+        ),
+        "the configuration naming LIVE_BLOCK_ERRORS is accepted, not NOT_FOUND"
+    );
     rig.step();
     let [left, right] = source_chunk(rig.fed, rig.quantum);
     submit_c(
