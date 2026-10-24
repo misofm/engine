@@ -503,19 +503,26 @@ fi
 #   * **Weaker.** It no longer asserts any absolute instruction count. That is the point: phases 1
 #     to 4 of #163 exist to lower those counts.
 #
-# Re-measured on the shipped artifact at mono-collapse M2, for the record (vector / scalar). These
-# are the derivation's *input* and are deliberately not asserted. (The eight-lane multiband body,
-# 2560/20, left the browser build with #1110.)
+# Re-measured on the named twin at issue #1970 (built from `019194414`), for the record (vector /
+# scalar; the M2-era count in brackets where it moved). These are the derivation's *input* and are
+# deliberately not asserted. (The eight-lane multiband body, 2560/20, left the browser build with
+# #1110.)
 #
-#   multiband f32x4         1280/20
-#   transient-shaper f32x4   786/72    gate-expander f32x4       180/8
-#   true-peak-limiter dual   448/0     true-peak-limiter mono    224/0
-#   compressor dual          267/0     compressor mono           138/0
-#   parametric-eq dual       168/0     parametric-eq mono         84/0
-#   soft-clip f32x4           25/0
+#   multiband dual          3464/0     multiband mono           1862/0
+#   transient-shaper dual    700/0     transient-shaper mono     352/0   [786/72 at M2]
+#   gate-expander dual       162/0     gate-expander mono         82/0   [180/8 at M2]
+#   true-peak-limiter dual   913/0     true-peak-limiter mono    424/0   [448/0, 224/0]
+#   compressor dual          949/0     compressor mono           524/0   [267/0, 138/0]
+#   parametric-eq dual      1352/1     parametric-eq mono        748/1   [168/0, 84/0]
+#   dynamic-eq dual          626/0     dynamic-eq mono           316/0
+#   de-esser dual            561/0     de-esser mono             283/0
+#   soft-clip f32x4           55/0     route-mix-ramp f32x4       22/0   [25/0 soft-clip]
 #
-# Each collapsed body sits at about half its dual sibling's vector count with zero scalar
-# arithmetic, which is what a correct one-plane variant looks like from here.
+# The parametric EQ's one scalar operation per body is a once-per-block `f32.sub` of two splats in
+# `lane::silence_armable_holding`, inside the 0.10 ceiling's budget; the derivation table in the
+# analyser names it. Each collapsed body sits at about half its dual sibling's vector count with
+# no more scalar arithmetic than its sibling, which is what a correct one-plane variant looks like
+# from here.
 #
 # The `--kernel-min` half of the ratchet -- the part that actually counts kernels -- rises from 8
 # to 11, by the three this wave added. It never drops. The artifact carried thirteen then; since
