@@ -662,7 +662,7 @@ fn a_mono_track_whose_witness_declines_pools_as_stereo() {
 }
 
 /// Seeds the randomized differential renders per PR; `PROBE_1098_SEEDS` widens a manual sweep.
-const SEEDS: u64 = 24;
+const SEEDS: u64 = 48;
 
 /// xorshift64*: deterministic, dependency-free, and the same on every target.
 struct Rng(u64);
@@ -695,9 +695,10 @@ impl Rng {
 /// bypass on each console slot, its own parameter values ([`VARIANTS`]), a mono or stereo feed, a
 /// gain that is silent, quiet, or hot (+6 to +18 dBFS peak, so every limiter and compressor works
 /// its gain path), and now and then a NaN input sample, which the input section's bank sanitizes on
-/// its lane alone. Then most tracks take one shared two-slot insert chain, cycling through
-/// [`INSERT_KINDS`] by seed, so partial insert cohorts at and above the padding threshold form and
-/// bind padded for every kind that can pad one (#888).
+/// its lane alone. Every third seed then gives most tracks one shared two-slot insert chain,
+/// cycling through [`INSERT_KINDS`] by seed, so partial insert cohorts at and above the padding
+/// threshold form and bind padded for every kind that can pad one (#888). Those draws come last,
+/// so every other seed's session is unchanged.
 fn generate(seed: u64) -> (Console, Vec<TrackShape>) {
     let mut rng = Rng::new(seed);
     let n = TRACK_COUNTS[rng.below(TRACK_COUNTS.len() as u64) as usize];
@@ -729,11 +730,16 @@ fn generate(seed: u64) -> (Console, Vec<TrackShape>) {
             variant: rng.below(VARIANTS.len() as u64) as usize,
         })
         .collect();
-    let kind = |offset: u64| INSERT_KINDS[((seed + offset) % INSERT_KINDS.len() as u64) as usize];
-    let shared = [kind(0), kind(3)];
-    for track in &mut tracks {
-        if rng.chance(800) {
-            track.inserts = shared.to_vec();
+    // Every third seed only, and drawn last, so every other seed is the session main generates.
+    if seed.is_multiple_of(3) {
+        let cycle = seed / 3;
+        let kind =
+            |offset: u64| INSERT_KINDS[((cycle + offset) % INSERT_KINDS.len() as u64) as usize];
+        let shared = [kind(0), kind(3)];
+        for track in &mut tracks {
+            if rng.chance(800) {
+                track.inserts = shared.to_vec();
+            }
         }
     }
     (console, tracks)

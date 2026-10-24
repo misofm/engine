@@ -114,11 +114,13 @@ Narrowed to the planner policy, one PR for #888 and #889 (root scope note).
     the claim is the bank count. Ten tracks leave a remainder of 2, which pads at W=4 and stays
     per node at W=8; the expected banks, the per-node count and the zero-plane bytes are derived
     from the threshold.
-  - The randomized per-node-bits oracle: most tracks of every seed take a shared two-slot
-    insert chain that cycles through every kind that can pad an insert cohort (the console
-    eligibility list and the de-esser, registered by #1922). The sweep asserts at least one
-    padded insert bank per kind (24 seeds: [7, 4, 8, 8, 3, 6, 5, 6] for EQ, compressor, gate,
-    soft clip, transient, limiter, multiband, de-esser). The dynamic EQ joins when #17 S2
+  - The randomized per-node-bits oracle: the ordinary seeds' distribution is unchanged from
+    main. Every third seed (drawn last, so the other seeds are main's sessions) gives most tracks
+    a shared two-slot insert chain that cycles by seed through every kind that can pad an insert
+    cohort: the console eligibility list and the de-esser, registered by #1922. The seed count
+    rose from 24 to 48 so that every kind is reached. The sweep asserts at least one padded insert
+    bank per kind; at 48 seeds the counts are [2, 6, 4, 3, 4, 2, 4, 3] for EQ, compressor, gate,
+    soft clip, transient, limiter, multiband and de-esser. The dynamic EQ joins when #17 S2
     registers it.
   - `tests/bypass_resources.rs` `a_mixed_session_bypass_renders_without_allocating`: the insert
     legs use nine tracks, a one-track remainder at either width, so a bypassed instance still
