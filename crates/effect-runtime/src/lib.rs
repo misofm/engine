@@ -45,6 +45,7 @@
 extern crate alloc;
 
 pub mod bank;
+pub mod dynamic_band;
 pub mod dynamics;
 pub mod envelope;
 pub mod params;
