@@ -52,4 +52,6 @@ After #1871 (same file). Check #887's tiled staging covers the multiband's state
   one left block); pad-lane automation skip removed -> the per-node test red (`invalid_spans` on a
   pad lane); `checked_track` active check removed -> the per-node test red (pad payload served).
 - Class A: no existing session has a multiband console slot, and a full bank's `active` is every
-  lane, so no full-bank path changes. `tests/cross_target_digest.rs` passes unchanged.
+  lane, so no full-bank path changes. `tests/cross_target_digest.rs` passes unchanged, and a
+  one-time digest of all 23 `console_workload::native_session_rows()` (16 blocks each, release)
+  is identical at base `ebbaf906f` and at the branch head (scratch test, not committed).
