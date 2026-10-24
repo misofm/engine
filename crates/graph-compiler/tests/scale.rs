@@ -1,9 +1,14 @@
 //! Generated graph scale gates above the former 65,536 boundary.
 
 use builtins_compiler::{BuiltinCompileCaps, prepare_session_builtins};
-use effect_compiler::EffectPreparedSession;
+use effect_compiler::{
+    EffectCompileCaps, EffectPreparedSession, attach_effect_live_controls,
+    launch_native_effect_registry, prepare_native_session_effects,
+};
 use effect_contract::{BankWidth, LatencySamples};
-use engine::realtime::{PlanarBufferMut, RenderEnvelope, RenderError, RenderIo, RenderTime};
+use engine::realtime::{
+    LiveValuesSuperseded, PlanarBufferMut, RenderEnvelope, RenderError, RenderIo, RenderTime,
+};
 use graph::{
     DependencyLevel, GraphBindingBlock, GraphBuiltinBankResourceEstimate, GraphCompileCaps,
     GraphEdge, GraphEdgeId, GraphNode, GraphNodeBinding, GraphNodeId, GraphPortId, GraphPortKind,
@@ -20,10 +25,15 @@ use session::{
 
 const SESSION: &str = include_str!("../../../fixtures/session/v1/canonical.json");
 
+/// The standing console, for its `eq` console slot (issue #967).
+const CONSOLE: &str =
+    include_str!("../../../fixtures/session/v1/console-sixty-four-track-intended.json");
+
 /// One past the former 65,536 boundary.
 const TRACKS: u32 = 65_537;
 
-/// The graph [`scale_session`] lowers to: seven stage nodes per track, the route and the output.
+/// The graph [`scale_session`] lowers [`PLAIN`] to: seven stage nodes per track, the route and
+/// the output.
 const NODES: u64 = 7 * TRACKS as u64 + 2;
 
 fn graph_caps() -> GraphCompileCaps {
@@ -42,13 +52,44 @@ fn graph_caps() -> GraphCompileCaps {
     }
 }
 
+/// What [`scale_session`] adds to its effect-less, one-route strip (issue #967).
+#[derive(Clone, Copy)]
+struct Shape {
+    /// One route per track to the output, instead of one route out of track zero.
+    routes: bool,
+    /// The standing console's `eq` as a console slot on every track.
+    console: bool,
+}
+
+/// The shape the per-PR gates compile: no effects and one route.
+const PLAIN: Shape = Shape {
+    routes: false,
+    console: false,
+};
+
 /// The fixture's first track, stripped of its effects, [`TRACKS`] times, with one route out of
-/// track zero.
-fn scale_session() -> CompiledSession {
+/// track zero, or the larger [`Shape`] `shape` asks for.
+fn scale_session(shape: Shape) -> CompiledSession {
     let mut model = parse_session_json(SESSION).expect("fixture");
     let mut template = model.tracks[0].clone();
     template.console.clear();
     template.inserts.effects.clear();
+    if shape.console {
+        let console = parse_session_json(CONSOLE).expect("console fixture");
+        model.console.pre_insert = console
+            .console
+            .pre_insert
+            .iter()
+            .filter(|declared| declared.slot.as_str() == "eq")
+            .cloned()
+            .collect();
+        template.console = console.tracks[0]
+            .console
+            .iter()
+            .filter(|entry| entry.slot.as_str() == "eq")
+            .cloned()
+            .collect();
+    }
     model.automation.clear();
     model.tracks.clear();
     model.tracks.reserve(TRACKS as usize);
@@ -57,10 +98,23 @@ fn scale_session() -> CompiledSession {
         track.id = StableId::parse(&format!("track-{index}")).expect("generated ID");
         model.tracks.push(track);
     }
-    model.routes[0].source = RouteSource::Track {
-        track_id: StableId::parse("track-0").expect("route track"),
+    let source = |index: u32| RouteSource::Track {
+        track_id: StableId::parse(&format!("track-{index}")).expect("route track"),
         tap: SendTap::PostPan,
     };
+    if shape.routes {
+        let template = model.routes[0].clone();
+        model.routes = (0..TRACKS)
+            .map(|index| {
+                let mut route = template.clone();
+                route.id = StableId::parse(&format!("route-{index}")).expect("generated ID");
+                route.source = source(index);
+                route
+            })
+            .collect();
+    } else {
+        model.routes[0].source = source(0);
+    }
     compile_session(
         &model,
         CompileCaps {
@@ -107,7 +161,7 @@ fn builtin_caps() -> BuiltinCompileCaps {
 /// [`compiles_and_binds_65_537_tracks_with_builtins`].
 #[test]
 fn compiles_65_537_tracks_or_rejects_only_a_configured_resource() {
-    let session = scale_session();
+    let session = scale_session(PLAIN);
     let builtins = prepare_session_builtins(&session, &[], builtin_caps())
         .expect("constrained scale builtins");
 
@@ -445,18 +499,11 @@ fn a_hand_built_65_537_input_plan_binds_and_renders_every_track() {
     bind_and_render_every_track(plan, inputs);
 }
 
-/// Issue #1045: builtin bank attachment above 65,536 tracks, per PR, at the bank width this build
-/// renders at.
-///
-/// Every track's input feeds its post-input builtin stage, and every stage sums straight into the
-/// output. The stages are attached as builtin banks through the public
-/// [`PreparedGraphPlan::with_builtin_banks`], in lane order of the sorted tracks, then the plan
-/// binds and renders through [`bind_and_render_every_track`]. A ceiling in bank attachment
-/// refuses, and one in the runtime's bank gather or scatter drops lanes from the count. No
-/// per-track route: banks and one route per track bind super-linearly (#967), and that is not
-/// this test's claim.
-#[test]
-fn a_hand_built_65_537_track_plan_attaches_builtin_banks_binds_and_renders() {
+/// [`TRACKS`] track inputs, each feeding its post-input builtin stage, attached as builtin banks
+/// through the public [`PreparedGraphPlan::with_builtin_banks`] in lane order of the sorted tracks.
+/// Every stage sums straight into the output, or, with `routes`, through a unity route of its own
+/// (issue #967). Returns the plan and the track inputs to bind.
+fn hand_built_bank_plan(routes: bool) -> (PreparedGraphPlan, Vec<GraphNodeId>) {
     let backend = Backend::current();
     let width = BankWidth::for_backend(backend).expect("native builds render in banks");
     let inputs = track_stages(TrackStage::Input);
@@ -464,7 +511,8 @@ fn a_hand_built_65_537_track_plan_attaches_builtin_banks_binds_and_renders() {
     let output = GraphNodeId::Output {
         output_id: stable("main".to_owned()),
     };
-    let mut edges = Vec::with_capacity(2 * TRACKS as usize);
+    let mut edges = Vec::with_capacity(3 * TRACKS as usize);
+    let mut route_nodes = Vec::new();
     for (input, member) in inputs.iter().zip(&members) {
         let GraphNodeId::TrackStage { track_id, .. } = member else {
             unreachable!("track stages")
@@ -476,17 +524,46 @@ fn a_hand_built_65_537_track_plan_attaches_builtin_banks_binds_and_renders() {
             input,
             member,
         ));
-        edges.push(edge(
-            GraphEdgeId::RouteSource {
-                route_id: stable(format!("route-{}", track_id.as_str())),
-            },
-            member,
-            &output,
-        ));
+        let route_id = stable(format!("route-{}", track_id.as_str()));
+        if routes {
+            let route = GraphNodeId::Route {
+                route_id: route_id.clone(),
+            };
+            edges.push(edge(
+                GraphEdgeId::RouteSource {
+                    route_id: route_id.clone(),
+                },
+                member,
+                &route,
+            ));
+            edges.push(edge(
+                GraphEdgeId::RouteDestination { route_id },
+                &route,
+                &output,
+            ));
+            route_nodes.push(route);
+        } else {
+            edges.push(edge(GraphEdgeId::RouteSource { route_id }, member, &output));
+        }
     }
+    route_nodes.sort();
     let mut required = inputs.clone();
     required.extend(members.iter().cloned());
     required.push(output.clone());
+    let transforms = route_nodes
+        .iter()
+        .map(|node| PreparedRoute {
+            node: node.clone(),
+            transform: RouteTransform {
+                gain: 1.0,
+                ll: 1.0,
+                lr: 0.0,
+                rl: 0.0,
+                rr: 1.0,
+            },
+            gate: RouteGate::OPEN,
+        })
+        .collect();
     let banks: Vec<_> = members
         .chunks(width.lanes() as usize)
         .map(|lanes| GraphPreparedBuiltinBank {
@@ -497,21 +574,36 @@ fn a_hand_built_65_537_track_plan_attaches_builtin_banks_binds_and_renders() {
         })
         .collect();
     let bank_count = banks.len() as u64;
-    let plan = hand_built_plan(
-        vec![inputs.clone(), members, vec![output]],
-        edges,
-        required,
-        Vec::new(),
-    )
-    .with_builtin_banks(
-        banks,
-        GraphBuiltinBankResourceEstimate {
-            bank_count,
-            ..GraphBuiltinBankResourceEstimate::default()
-        },
-    )
-    .unwrap_or_else(|error| panic!("65,537-track bank attachment: {error:?}"));
+    let mut levels = vec![inputs.clone(), members];
+    if routes {
+        levels.push(route_nodes);
+    }
+    levels.push(vec![output]);
+    let plan = hand_built_plan(levels, edges, required, transforms)
+        .with_builtin_banks(
+            banks,
+            GraphBuiltinBankResourceEstimate {
+                bank_count,
+                ..GraphBuiltinBankResourceEstimate::default()
+            },
+        )
+        .unwrap_or_else(|error| panic!("65,537-track bank attachment: {error:?}"));
     assert_eq!(plan.builtin_bank_members().count(), TRACKS as usize);
+    let expected_routes = if routes { TRACKS as usize } else { 0 };
+    assert_eq!(plan.routes().len(), expected_routes);
+    (plan, inputs)
+}
+
+/// Issue #1045: builtin bank attachment above 65,536 tracks, per PR, at the bank width this build
+/// renders at.
+///
+/// [`hand_built_bank_plan`] without routes binds and renders through
+/// [`bind_and_render_every_track`]. A ceiling in bank attachment refuses, and one in the runtime's
+/// bank gather or scatter drops lanes from the count. The route-per-track shape binds in the
+/// nightly [`compiles_and_binds_65_537_tracks_with_builtins`] instead, under a time bound.
+#[test]
+fn a_hand_built_65_537_track_plan_attaches_builtin_banks_binds_and_renders() {
+    let (plan, inputs) = hand_built_bank_plan(false);
     bind_and_render_every_track(plan, inputs);
 }
 
@@ -528,7 +620,7 @@ fn a_hand_built_65_537_track_plan_attaches_builtin_banks_binds_and_renders() {
 /// compile above; bind and render at this size are the other hand-built tests'.
 #[test]
 fn lowers_65_537_tracks_of_builtin_banks() {
-    let session = scale_session();
+    let session = scale_session(PLAIN);
     let builtins = prepare_session_builtins(&session, &[], builtin_caps()).expect("scale builtins");
     let classes = builtins_compiler::SessionPoolClasses::from_session(&session);
     let backend = Backend::current();
@@ -597,51 +689,79 @@ fn lowers_65_537_tracks_of_builtin_banks() {
     );
 }
 
-/// Issue #962: the same session through the production entry, at the width this build renders at,
-/// then bound and rendered for one block.
+/// Issue #962: a session through the production entry, at the width this build renders at, then
+/// bound and rendered for one block.
 ///
 /// Until #964 the gate above compiled without builtins at `Backend::Scalar`, where no bank
 /// attaches, and that is how a bank-membership scan quadratic in the track count stayed hidden on
 /// every host's compile path (`PreparedGraphPlan::with_builtin_banks`, about 160 s in release
 /// before the fix). This one attaches the builtin banks every host renders and then binds the
-/// plan, because bind had quadratic scans of its own. The bank-membership scan and the bind scans
-/// this session reaches are exercised by the track count alone, so a regression in them shows up
-/// as this test's time, which the bound below turns into a failure. This session has no effects
-/// and one route, so #962's effect-control, `Backend::Scalar` interval and route-fold metadata
-/// fixes are not exercised here at scale (#967 adds sessions that reach them).
+/// plan, because bind had quadratic scans of its own. A regression in any scan this session
+/// reaches shows up as this test's time, which the bound below turns into a failure.
+///
+/// Issue #967: the session is the per-PR gates' strip with one route per track and the standing
+/// console's `eq` as a console slot carrying a live control lane on every track. The routes put
+/// every track's post-pan route into the bind's route-fold metadata, and the controls put every
+/// track's lane through #962's `effect_control_resource`. The per-PR gates' effect-less, one-route
+/// session reaches neither at scale. It does not exercise `scatter_redirects`' in-between check:
+/// it binds in the same time with or without #967's linearisation (the spec's evidence). So the
+/// test then binds [`hand_built_bank_plan`] with one route per track, the shape that reaches that
+/// check, under a 5 s bound of its own, which the old quadratic walk exceeded. #962's other two
+/// fixes (the `Backend::Scalar` interval scan and the fused-split crossing scan) guarded code that
+/// #1767 and owner ruling R8 removed.
 ///
 /// Issue #1045: this runs nightly, in release with overflow checks on (`nightly.yml`,
 /// `release-budgets`), under a 60 s wall-clock bound on the whole path from the session compile to
-/// the rendered block. The linear code takes about a third of that; #962's quadratic scans took
-/// minutes. It is the only test that compiles without a cap and binds at this size, so a track
-/// ceiling or a narrowed index in bank attachment or bind is caught here, a day late at most.
+/// the rendered block; #962's quadratic scans took longer than that. It is the only test that
+/// compiles without a cap and binds at this size, so a track ceiling or a narrowed index in bank
+/// attachment or bind is caught here, a day late at most.
 #[test]
 #[ignore = "release-mode 65,537-track budget; runs nightly"]
 fn compiles_and_binds_65_537_tracks_with_builtins() {
     use std::time::{Duration, Instant};
 
     let started = Instant::now();
-    let session = scale_session();
-    let builtins = prepare_session_builtins(&session, &[], builtin_caps()).expect("scale builtins");
+    let session = scale_session(Shape {
+        routes: true,
+        console: true,
+    });
+    let registry = launch_native_effect_registry().expect("launch registry");
+    let mut effects = prepare_native_session_effects(
+        &session,
+        registry,
+        EffectCompileCaps {
+            maximum_total_state_bytes: u64::MAX,
+            maximum_scratch_bytes: u64::MAX,
+            maximum_automation_spans_per_block: 32,
+        },
+    )
+    .expect("scale effects");
+    let superseded = LiveValuesSuperseded::new();
+    let producers =
+        attach_effect_live_controls(&mut effects, &superseded, 0).expect("scale live controls");
+    assert_eq!(producers.len(), TRACKS as usize, "one control per track");
+    let builtins =
+        prepare_session_builtins(&effects.session, &[], builtin_caps()).expect("scale builtins");
     let dispatch = Backend::current();
     let artifact = GraphCompiler::compile_with_builtins(GraphBuiltinsCompileRequest {
         input_floors: Default::default(),
         dispatch,
         plan_id: 3,
-        effects: EffectPreparedSession {
-            session,
-            entries: Vec::new(),
-        },
+        effects,
         builtins,
         caps: graph_caps(),
         gain_liveness: graph_compiler::GainLiveness::FIXED,
     })
     .unwrap_or_else(|failure| panic!("with-builtins scale diagnostics: {:?}", failure.diagnostics));
-    assert_eq!(artifact.report().estimate.logical_nodes, NODES);
-    assert_eq!(artifact.report().estimate.edges, 6 * u64::from(TRACKS) + 2);
-    assert_eq!(artifact.report().estimate.routes, 1);
-    assert_eq!(artifact.report().estimate.effects, 0);
-    assert_eq!(artifact.graph().sequential_schedule.len() as u64, NODES);
+    let estimate = &artifact.report().estimate;
+    // Per track: the seven stage nodes, the `eq` slot and the route, in one chain of nine edges,
+    // the last into the output.
+    let nodes = 9 * u64::from(TRACKS) + 1;
+    assert_eq!(estimate.logical_nodes, nodes);
+    assert_eq!(estimate.edges, 9 * u64::from(TRACKS));
+    assert_eq!(estimate.routes, u64::from(TRACKS));
+    assert_eq!(estimate.effects, u64::from(TRACKS));
+    assert_eq!(artifact.graph().sequential_schedule.len() as u64, nodes);
     // Every track's three bankable builtin stages -- post-input, fader, matrix -- are bank members
     // at a SIMD width; at scalar width no bank attaches at all.
     let members = if dispatch.width() > 1 {
@@ -682,6 +802,21 @@ fn compiles_and_binds_65_537_tracks_with_builtins() {
     let elapsed = started.elapsed();
     assert!(
         elapsed < Duration::from_secs(60),
-        "65,537-track session compile, builtins, graph compile, bind and one block took {elapsed:?}"
+        "65,537-track session compile, effects, builtins, graph compile, bind and one block took \
+         {elapsed:?}"
+    );
+
+    // Issue #967: the shape that reaches `scatter_redirects`' in-between check, which the
+    // compiled session above does not. Every lane of a builtin bank has a route as its sole
+    // reader, scheduled a track count of ops after the bank's first op, so the old per-lane
+    // walk was quadratic: about 16.7 s for this bind and render in release before the fix and
+    // about 1.1 s after (the spec's evidence).
+    let (plan, inputs) = hand_built_bank_plan(true);
+    let started = Instant::now();
+    bind_and_render_every_track(plan, inputs);
+    let elapsed = started.elapsed();
+    assert!(
+        elapsed < Duration::from_secs(5),
+        "65,537-track builtin banks with one route per track took {elapsed:?} to bind and render"
     );
 }
