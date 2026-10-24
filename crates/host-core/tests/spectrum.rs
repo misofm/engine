@@ -1,15 +1,16 @@
 //! Native graph-to-window spectrum capture gates for issue #781.
 
 use host_core::{
-    HostLiveControlRequest, HostLiveLanes, HostPrepareCaps, HostShapePolicy, SPECTRUM_BIN_COUNT,
-    SPECTRUM_WINDOW_FRAMES, SourceSubmission, SpectrumAnalysisError, SpectrumAnalyzer,
-    SpectrumCaptureCollectionEntry, SpectrumCaptureCollectionReadError,
-    SpectrumCaptureCollectionRequest, SpectrumCaptureCollectionSelectionError,
-    SpectrumCaptureReadError, SpectrumCaptureRequest, SpectrumChannels, SpectrumTarget,
-    compile_host_session, prepare_host_runtime,
-    prepare_host_runtime_with_live_controls_and_spectrum, prepare_host_runtime_with_spectrum,
-    prepare_host_runtime_with_spectrum_collection, spectrum_capture_collection_resources,
-    spectrum_capture_resources, spectrum_capture_resources_for,
+    HostLiveControlRequest, HostLiveLanes, HostPrepareCaps, HostShapePolicy,
+    PreparedSpectrumCaptures, SPECTRUM_BIN_COUNT, SPECTRUM_WINDOW_FRAMES, SourceSubmission,
+    SpectrumAnalysisError, SpectrumAnalyzer, SpectrumCaptureCollectionEntry,
+    SpectrumCaptureCollectionReadError, SpectrumCaptureCollectionRequest,
+    SpectrumCaptureCollectionSelectionError, SpectrumCaptureReadError, SpectrumCaptureRequest,
+    SpectrumChannels, SpectrumPreparation, SpectrumTarget, compile_host_session,
+    prepare_host_runtime, prepare_host_runtime_with_live_lanes_and_spectrum,
+    prepare_host_runtime_with_spectrum, prepare_host_runtime_with_spectrum_collection,
+    spectrum_capture_collection_resources, spectrum_capture_resources,
+    spectrum_capture_resources_for,
 };
 
 const SESSION: &str = include_str!("../../../fixtures/session/v1/parametric-eq-nine-track.json");
@@ -336,19 +337,23 @@ fn live_control_and_meter_preparation_keeps_spectrum_in_one_transaction() {
     };
     let target = SpectrumTarget::Output("main-out".into());
     let resources = spectrum_capture_resources_for(&target);
-    let (host, handles, capture) = prepare_host_runtime_with_live_controls_and_spectrum(
+    let (host, handles, captures) = prepare_host_runtime_with_live_lanes_and_spectrum(
         &compiled,
         &limits,
         &live_controls,
-        &SpectrumCaptureRequest {
+        HostLiveLanes::ALL,
+        Some(&SpectrumPreparation::Single(SpectrumCaptureRequest {
             target,
             channels: SpectrumChannels::Left,
             maximum_capture_bytes: resources.retained_bytes,
-        },
-        HostLiveLanes::ALL,
+        })),
+        None,
         &host_core::LiveValuesSuperseded::default(),
     )
     .expect("live controls, meters and spectrum prepare together");
+    let Some(PreparedSpectrumCaptures::Single(capture)) = captures else {
+        panic!("a single capture");
+    };
     assert_eq!(handles.strip_controls.len(), 9);
     assert_eq!(handles.meters.len(), 9);
     assert_eq!(

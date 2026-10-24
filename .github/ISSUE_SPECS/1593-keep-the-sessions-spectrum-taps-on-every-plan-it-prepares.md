@@ -274,3 +274,22 @@ through `test_spectrum_mut()`.
   was prepared with, and a service that a promotion makes takes it (not the newest committed
   configuration's). That path is unreachable until #1594 (a configuration only shrinks), so it has
   no test here.
+- T3: `compile_ready` passes the boot request and hop to `compile_children` as the session's
+  `SpectrumConfiguration`; `WebRuntimePreparer` holds no request and prepares every plan with the
+  configuration the session passes, through the one entry (`prepare_web_host` is deleted, it had
+  become a forwarder). It still returns no captures: the browser's own service reads them until
+  #1596. `promote_spectrum` removes the browser's service, ending its stream and analysis, when an
+  adopted plan has no captures (D6). The four `*_with_live_controls_and_spectrum*` entries are
+  deleted.
+- T3, `adopted_epoch` (the T2a note): with the browser's preparer the monitor holds a
+  configuration and no service; `adopted_epoch` follows the promoted candidate's configuration
+  epoch as for any preparer, so it already reads right when #1596 makes the preparer return the
+  captures. No change in control-plane.
+- T3 paths, root: `crates/host-core/tests/{meters.rs,successor_swap.rs}` are added (they called
+  the deleted entries). `meters.rs` keeps two rows on the one entry (single and collection, first
+  plan); its two successor rows are dropped, because the `with_live_lanes_successor` row already
+  holds that claim. `successor_swap.rs` `spectrum_carry` changes its two calls only.
+  `browser_successor.rs` and `spectrum.rs` call the one entry in place of the deleted ones.
+- T3 gate 8: `structural_apply::removing_the_spectrum_target_strip_is_accepted_and_drops_the_service`
+  in `hosts/host-web/src/tests.rs`, committed red (the edit answered 255, the preparation refusal),
+  then green.

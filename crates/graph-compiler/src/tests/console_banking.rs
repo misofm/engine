@@ -448,8 +448,11 @@ fn node_levels(artifact: &PreparedGraphBuiltinsArtifact) -> BTreeMap<GraphNodeId
 /// * each console rack forms one group per (pool class, level of its first slot), `ceil(n / W)` of
 ///   them for `n` tracks there, and binds every slot of every group;
 /// * `post_insert` splits into one level per insert count;
-/// * each track pools as its own class (nothing is demoted, #971 under padding), and bypassed
-///   lanes share banks with unbypassed ones.
+/// * each track pools as its own class, mono-symmetric exactly when its feed is mono (nothing is
+///   demoted, #971 under padding), and bypassed lanes share banks with unbypassed ones. Since
+///   #1873 every console-eligible effect carries a channel-symmetry witness, so this holds on both
+///   consoles; a declining witness is
+///   [`a_mono_track_whose_witness_declines_pools_as_stereo`]'s.
 ///
 /// Red if console groups stop padding (a remainder renders per node), if a padded group is bound
 /// for fewer slots than it plans, if the planner merged groups across a level or a class, or if a
@@ -474,7 +477,7 @@ fn every_console_slot_binds_banked_at_every_track_count() {
         post: vec![Kind::Limiter],
     };
     let mut pools = BTreeSet::new();
-    for (console, collapsible) in [(every_effect, false), (strip, true)] {
+    for console in [every_effect, strip] {
         for n in TRACK_COUNTS {
             let tracks: Vec<TrackShape> = (0..n)
                 .map(|index| TrackShape {
@@ -516,7 +519,7 @@ fn every_console_slot_binds_banked_at_every_track_count() {
                         .find(|group| group.members.contains(&Some(chain.clone())))
                         .unwrap_or_else(|| panic!("{n} tracks: {chain:?} is in a group"));
                     let index: usize = chain.track_id[2..].parse().expect("chNN");
-                    let expected_class = if collapsible && !tracks[index].feed.stereo {
+                    let expected_class = if !tracks[index].feed.stereo {
                         CohortPoolClass::MonoSymmetricAtPrepare
                     } else {
                         CohortPoolClass::Stereo
@@ -580,6 +583,57 @@ fn every_console_slot_binds_banked_at_every_track_count() {
         }
     }
     assert_eq!(pools.len(), 2, "both pool classes bind console banks");
+}
+
+/// A mono-fed track whose console EQ has different left and right gains pools as stereo, beside a
+/// symmetric mono track that pools mono-symmetric: the pool class reads each prepared effect's
+/// `DESIGNED` witness, not the feed alone. Red if the class ignored the effects' witnesses.
+#[test]
+fn a_mono_track_whose_witness_declines_pools_as_stereo() {
+    let console = Console {
+        pre: vec![Kind::Eq],
+        post: vec![],
+    };
+    let tracks: Vec<TrackShape> = (0..2)
+        .map(|_| TrackShape {
+            feed: Feed {
+                gain: 0.5,
+                stereo: false,
+                poison: false,
+            },
+            inserts: vec![],
+            bypass: vec![false],
+            variant: 0,
+        })
+        .collect();
+    let mut model = console_session(&console, &tracks);
+    for param in model.tracks[0].console[0]
+        .params
+        .iter_mut()
+        .filter(|param| param.parameter_id == 4 && param.channel == ParameterChannel::Right)
+    {
+        param.value += 1.0;
+    }
+    let artifact = compile_at(&model, host_dispatch()).expect("compile");
+    let report = &artifact.report().rack_cohorts;
+    for (track, expected) in [
+        ("ch00", CohortPoolClass::Stereo),
+        ("ch01", CohortPoolClass::MonoSymmetricAtPrepare),
+    ] {
+        let group = report
+            .plan
+            .groups
+            .iter()
+            .find(|group| {
+                group
+                    .members
+                    .iter()
+                    .flatten()
+                    .any(|chain| chain.track_id == track)
+            })
+            .unwrap_or_else(|| panic!("{track} is in a group"));
+        assert_eq!(group.class, expected, "{track}");
+    }
 }
 
 /// Seeds the randomized differential renders per PR; `PROBE_1098_SEEDS` widens a manual sweep.

@@ -12,7 +12,7 @@ conformance::randomized_effect_test!(
     blocks: 24,
     craft: None,
     banks_natively: true,
-    witness: false,
+    witness: true,
 );
 
 /// The D7 recovery's report against the contract, on fixed input (no seed): one block, on the

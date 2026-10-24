@@ -577,9 +577,16 @@ fn frame<L: Lane>(x: L, u: L, c: &Coef<L>, e: &mut Env<L>, p: &Params<L>, bypass
 }
 
 /// One frame of both channels: link, then [`frame`] per channel.
+///
+/// `MONO` (issue #1873) is the collapsed track: only `fl` is loaded, linked with **itself** and
+/// rendered on the left channel's words; `fr`, `er` and `pr` are not read or written. A
+/// collapsed lane's link partner is therefore its own word: every arm computes
+/// `link(x, x, lanes)`, the dual arm's expression on `L == R` in the same operation order, and
+/// the mixed arm selects per lane the law of that lane's own mode over the same pair. So each
+/// lane's detector, and with it every bit of the left channel, is the dual block's on `L == R`.
 #[inline(always)]
 #[allow(clippy::too_many_arguments)]
-fn step<L: Lane, const LINK: u8>(
+fn step<L: Lane, const LINK: u8, const MONO: bool>(
     fl: &mut [f32],
     fr: &mut [f32],
     c: &Coef<L>,
@@ -590,6 +597,12 @@ fn step<L: Lane, const LINK: u8>(
     bypass: L::Mask,
     lanes: &LinkLanes<L>,
 ) {
+    if MONO {
+        let xl = L::load(fl);
+        let (ul, _) = link::<L, LINK>(xl, xl, lanes);
+        frame(xl, ul, c, el, pl, bypass).store(fl);
+        return;
+    }
     let (xl, xr) = (L::load(fl), L::load(fr));
     let (ul, ur) = link::<L, LINK>(xl, xr, lanes);
     frame(xl, ul, c, el, pl, bypass).store(fl);
@@ -771,26 +784,59 @@ impl<L: Lane, const W: usize> Shaper<L, W> {
     ///
     /// Returns, per channel (`[left, right]`), the bitmask of the active lanes whose own output on
     /// that channel failed the D7 check: each is one nonfinite **block** on that channel (#1073).
-    fn process_block(&mut self, left: &mut [f32], right: &mut [f32], frames: usize) -> [u32; 2] {
+    ///
+    /// # The collapsed body (issue #1873)
+    ///
+    /// `MONO` renders the left channel alone, on the left plane alone: `right` is never read or
+    /// written (a collapsed block passes it empty), and the right channel's envelopes and ramps
+    /// are left exactly as they were, for [`desymmetrize`](Self::desymmetrize) to replace. The
+    /// silent fast path reads the left plane and the left channel's rest only, because a
+    /// collapsed bank's counterfactual right channel is its left one. A lane that fails the D7
+    /// check on the left plane is recovered on **both** channels and reported on both, as the
+    /// dual block on `L == R` fails both planes in the same lanes.
+    ///
+    /// `#[inline(always)]`, so the dual and the collapsed body stay two symbols, `process_bank`
+    /// and `process_bank_mono`, each with the kernel inlined (the wasm kernel roster names them).
+    #[inline(always)]
+    fn process_block<const MONO: bool>(
+        &mut self,
+        left: &mut [f32],
+        right: &mut [f32],
+        frames: usize,
+    ) -> [u32; 2] {
         debug_assert_eq!(W, L::WIDTH);
-        if block_is_positive_zero(left)
-            && block_is_positive_zero(right)
-            && silent_allowed()
-            && self.lanes_at_rest() == all_lanes::<W>()
-        {
+        let silent = if MONO {
+            block_is_positive_zero(left)
+                && silent_allowed()
+                && channel_rest_lanes(&self.left_env, &self.left) == all_lanes::<W>()
+        } else {
+            block_is_positive_zero(left)
+                && block_is_positive_zero(right)
+                && silent_allowed()
+                && self.lanes_at_rest() == all_lanes::<W>()
+        };
+        if silent {
             #[cfg(test)]
             SILENT_ADMISSIONS.with(|blocks| blocks.set(blocks.get() + 1));
             return [0, 0];
         }
         match self.link_lanes.arm {
-            LINK_DUAL_MONO => self.run::<LINK_DUAL_MONO>(left, right, frames),
-            LINK_MAXIMUM => self.run::<LINK_MAXIMUM>(left, right, frames),
-            LINK_AVERAGE => self.run::<LINK_AVERAGE>(left, right, frames),
+            LINK_DUAL_MONO => self.run::<LINK_DUAL_MONO, MONO>(left, right, frames),
+            LINK_MAXIMUM => self.run::<LINK_MAXIMUM, MONO>(left, right, frames),
+            LINK_AVERAGE => self.run::<LINK_AVERAGE, MONO>(left, right, frames),
             _ => {
                 #[cfg(test)]
                 MIXED_LINK_BLOCKS.with(|blocks| blocks.set(blocks.get() + 1));
-                self.run::<LINK_MIXED>(left, right, frames);
+                self.run::<LINK_MIXED, MONO>(left, right, frames);
             }
+        }
+        if MONO {
+            if check_block::<L>(left) {
+                return [0, 0];
+            }
+            let failed = nonfinite_lane_mask::<L>(left);
+            let charged = self.recover_lanes(left, &mut [], failed);
+            return [failed & charged; 2];
         }
         if check_block::<L>(left) && check_block::<L>(right) {
             return [0, 0];
@@ -834,18 +880,8 @@ impl<L: Lane, const W: usize> Shaper<L, W> {
     ///
     /// No allocation, bounded time, `&self`: four bit masks and `6 * W` integer compares.
     fn lanes_at_rest(&self) -> u32 {
-        let mut mask = positive_zero_lanes(self.left_env.fast)
-            & positive_zero_lanes(self.left_env.slow)
-            & positive_zero_lanes(self.right_env.fast)
-            & positive_zero_lanes(self.right_env.slow);
-        for channel in [&self.left, &self.right] {
-            for (lane, ramps) in channel.ramps.iter().enumerate() {
-                if ramps.iter().any(|ramp| ramp.remaining != 0) {
-                    mask &= !(1 << lane);
-                }
-            }
-        }
-        mask
+        channel_rest_lanes(&self.left_env, &self.left)
+            & channel_rest_lanes(&self.right_env, &self.right)
     }
 
     /// The D7 recovery, one lane at a time (issue #1092; decision 12's coupling rule).
@@ -858,7 +894,8 @@ impl<L: Lane, const W: usize> Shaper<L, W> {
     /// reset clears history, not automation.
     ///
     /// A padded lane is recovered like any other, so it stays at rest, but only active lanes are
-    /// charged to `nonfinite`. Returns the charged lanes.
+    /// charged to `nonfinite`. Returns the charged lanes. A collapsed block passes `right` empty;
+    /// both channels' envelopes are still reset.
     fn recover_lanes(&mut self, left: &mut [f32], right: &mut [f32], failed: u32) -> u32 {
         for lane in 0..W {
             if failed & (1 << lane) == 0 {
@@ -883,23 +920,67 @@ impl<L: Lane, const W: usize> Shaper<L, W> {
         charged
     }
 
+    /// The frame loop. `MONO` (issue #1873) walks the left plane, the left envelopes and the left
+    /// ramps only, with the ramp prefix of the left ramps: the split is partition-invariant (a
+    /// settled ramp's `advance` returns its `current`), and on `L == R` it is the dual one.
     #[inline(always)]
-    fn run<const LINK: u8>(&mut self, left: &mut [f32], right: &mut [f32], frames: usize) {
+    fn run<const LINK: u8, const MONO: bool>(
+        &mut self,
+        left: &mut [f32],
+        right: &mut [f32],
+        frames: usize,
+    ) {
         let bypass = L::splat(if self.bypass { 1.0 } else { 0.0 }).gt(L::zero());
         let lanes = self.link_lanes;
-        let prefix = frames.min(self.left.prefix().max(self.right.prefix()));
+        let prefix = if MONO {
+            frames.min(self.left.prefix())
+        } else {
+            frames.min(self.left.prefix().max(self.right.prefix()))
+        };
         let split = prefix * L::WIDTH;
         let (head_left, tail_left) = left.split_at_mut(split);
-        let (head_right, tail_right) = right.split_at_mut(split);
         // The envelopes live in locals across the whole block, not behind a `&mut` per frame.
         let (mut el, mut er) = (self.left_env, self.right_env);
+        if MONO {
+            for fl in head_left.chunks_exact_mut(L::WIDTH) {
+                let pl = self.left.advance::<L>();
+                step::<L, LINK, true>(
+                    fl,
+                    &mut [],
+                    &self.coefficients,
+                    &mut el,
+                    &mut er,
+                    &pl,
+                    &pl,
+                    bypass,
+                    &lanes,
+                );
+            }
+            let pl = self.left.current::<L>();
+            for fl in tail_left.chunks_exact_mut(L::WIDTH) {
+                step::<L, LINK, true>(
+                    fl,
+                    &mut [],
+                    &self.coefficients,
+                    &mut el,
+                    &mut er,
+                    &pl,
+                    &pl,
+                    bypass,
+                    &lanes,
+                );
+            }
+            self.left_env = el;
+            return;
+        }
+        let (head_right, tail_right) = right.split_at_mut(split);
         for (fl, fr) in head_left
             .chunks_exact_mut(L::WIDTH)
             .zip(head_right.chunks_exact_mut(L::WIDTH))
         {
             let pl = self.left.advance::<L>();
             let pr = self.right.advance::<L>();
-            step::<L, LINK>(
+            step::<L, LINK, false>(
                 fl,
                 fr,
                 &self.coefficients,
@@ -917,7 +998,7 @@ impl<L: Lane, const W: usize> Shaper<L, W> {
             .chunks_exact_mut(L::WIDTH)
             .zip(tail_right.chunks_exact_mut(L::WIDTH))
         {
-            step::<L, LINK>(
+            step::<L, LINK, false>(
                 fl,
                 fr,
                 &self.coefficients,
@@ -931,6 +1012,60 @@ impl<L: Lane, const W: usize> Shaper<L, W> {
         }
         self.left_env = el;
         self.right_env = er;
+    }
+
+    /// The collapse's disengage copy (issue #1873): the left channel's whole render state onto
+    /// the right, every lane. That is every per-channel word [`run`](Self::run) reads: the two
+    /// envelope words (`fast`, `slow`) and the three ramps, every field. Both are `Copy` values,
+    /// so the copy allocates nothing.
+    ///
+    /// `Ramps::defaults` is not copied: each channel's own prepared values, which the kernel never
+    /// reads (a full reset, preparation-side, re-seeds from them, and a lane swap exchanges them
+    /// per channel). The link modes and masks, the coefficients and the bypass are whole-lane or
+    /// whole-instance: one word serves both channels.
+    fn desymmetrize(&mut self) {
+        self.right_env = self.left_env;
+        self.right.ramps = self.left.ramps;
+    }
+
+    /// `PreparedNativeEffectBank::channels_agree` (issue #1873): every word
+    /// [`desymmetrize`](Self::desymmetrize) copies compares bit-equal between the channels, on
+    /// every lane: the two envelope words and the twelve ramp words, fourteen per lane, compared
+    /// outright.
+    fn channels_bit_equal(&self) -> bool {
+        same_lane_bits(self.left_env.fast, self.right_env.fast, W)
+            && same_lane_bits(self.left_env.slow, self.right_env.slow, W)
+            && self
+                .left
+                .ramps
+                .iter()
+                .flatten()
+                .zip(self.right.ramps.iter().flatten())
+                .all(|(a, b)| same_ramp_bits(a, b))
+    }
+
+    /// The `DESIGNED` term of the channel-symmetry witness for `lane` (issue #1873): whether every
+    /// per-channel word [`run`](Self::run) reads that is not running state compares bit-equal
+    /// between the two channels.
+    ///
+    /// # The word list, and why it is exactly this
+    ///
+    /// Per channel the kernel reads the lane's three ramps (`ramps[lane]`, all four fields each:
+    /// `remaining` decides the ramp prefix and whether a ramp moves, and `current`, `target` and
+    /// `step` are what it moves) and the two envelope words. Deliberately excluded:
+    ///
+    /// * `fast` and `slow`: running state, which the induction the witness states carries.
+    /// * `Ramps::defaults`: prepared values the kernel never loads.
+    /// * `links` and `link_lanes`: the lane's link mode is one word for both channels, so it
+    ///   cannot differ between them; `coefficients` and `bypass` are whole-instance.
+    ///
+    /// Raw bits, so `+0.0` against `-0.0` declines. A lane past the width declines.
+    fn designed_channel_symmetry(&self, lane: usize) -> bool {
+        lane < W
+            && self.left.ramps[lane]
+                .iter()
+                .zip(&self.right.ramps[lane])
+                .all(|(a, b)| same_ramp_bits(a, b))
     }
 
     // REALTIME_POLICY_BEGIN: #1278 D3, the payload codec runs in the plan-swap block.
@@ -975,6 +1110,37 @@ impl<L: Lane, const W: usize> Shaper<L, W> {
         self.right.ramps[lane] = right.ramps;
         Ok(())
     }
+}
+
+/// The lanes of one channel at exact rest (issue #1746): both envelope words `+0.0` by raw bits
+/// and every ramp settled. See [`Shaper::lanes_at_rest`] for why this is the claim.
+fn channel_rest_lanes<L: Lane, const W: usize>(env: &Env<L>, ramps: &Ramps<W>) -> u32 {
+    let mut mask = positive_zero_lanes(env.fast) & positive_zero_lanes(env.slow);
+    for (lane, ramps) in ramps.ramps.iter().enumerate() {
+        if ramps.iter().any(|ramp| ramp.remaining != 0) {
+            mask &= !(1 << lane);
+        }
+    }
+    mask
+}
+
+/// Whether the first `lanes` lanes of two packed words hold the same raw bits (issue #1873).
+fn same_lane_bits<L: Lane>(a: L, b: L, lanes: usize) -> bool {
+    let (mut left, mut right) = ([0.0_f32; 8], [0.0_f32; 8]);
+    a.store(&mut left);
+    b.store(&mut right);
+    left[..lanes]
+        .iter()
+        .zip(&right[..lanes])
+        .all(|(a, b)| a.to_bits() == b.to_bits())
+}
+
+/// Whether two ramps hold the same four words, raw bits (issue #1873).
+fn same_ramp_bits(a: &LinearRamp, b: &LinearRamp) -> bool {
+    a.current.to_bits() == b.current.to_bits()
+        && a.target.to_bits() == b.target.to_bits()
+        && a.step.to_bits() == b.step.to_bits()
+        && a.remaining == b.remaining
 }
 
 /// Writes one lane's fourteen state words into a payload section.
@@ -1352,7 +1518,9 @@ impl PreparedNativeEffect for PreparedTransientShaper {
             &mut report,
         );
         let frames = block.frames();
-        let [left, right] = self.0.process_block(block.left, block.right, frames);
+        let [left, right] = self
+            .0
+            .process_block::<false>(block.left, block.right, frames);
         report.nonfinite_left_blocks = u64::from(left & 1);
         report.nonfinite_right_blocks = u64::from(right & 1);
         report
@@ -1374,6 +1542,11 @@ impl PreparedNativeEffect for PreparedTransientShaper {
         self.0.restore(0, state_layout_version, input)
     }
     // REALTIME_POLICY_END
+
+    /// Issue #1873: [`Shaper::designed_channel_symmetry`] on lane 0.
+    fn channel_symmetry(&self) -> bool {
+        self.0.designed_channel_symmetry(0)
+    }
 }
 
 impl<L: Lane, const W: usize> PreparedNativeEffectBank for PreparedTransientShaperBank<L, W> {
@@ -1387,35 +1560,28 @@ impl<L: Lane, const W: usize> PreparedNativeEffectBank for PreparedTransientShap
     }
 
     fn process_bank(&mut self, block: EffectBankProcessBlock<'_>) -> BankProcessReport {
-        let mut report = BankProcessReport::empty(self.width);
-        if block.width != self.width || block.frames > self.quantum || block.sidechain.is_some() {
-            return report;
-        }
-        for track in 0..W {
-            // A padded lane carries no track, so no span is its to apply (issue #1092).
-            if self.shaper.active & (1 << track) == 0 {
-                continue;
-            }
-            let start = block.automation_offsets[track] as usize;
-            let end = block.automation_offsets[track + 1] as usize;
-            apply_automation(
-                &block.automation[start..end],
-                self.shaper.automation_capacity,
-                block.first_sample,
-                track,
-                &mut self.shaper.left,
-                &mut self.shaper.right,
-                &mut report.reports[track],
-            );
-        }
-        let [left, right] =
-            self.shaper
-                .process_block(block.left, block.right, block.frames as usize);
-        for (track, entry) in report.reports.iter_mut().enumerate().take(W) {
-            entry.nonfinite_left_blocks = u64::from((left >> track) & 1);
-            entry.nonfinite_right_blocks = u64::from((right >> track) & 1);
-        }
-        report
+        self.process_bank_inner::<false>(block)
+    }
+
+    /// Issue #1873: [`Shaper::designed_channel_symmetry`].
+    fn lane_channel_symmetry(&self, lane: usize) -> bool {
+        self.shaper.designed_channel_symmetry(lane)
+    }
+
+    fn supports_mono_collapse(&self) -> bool {
+        true
+    }
+
+    fn process_bank_mono(&mut self, block: EffectBankProcessBlock<'_>) -> BankProcessReport {
+        self.process_bank_inner::<true>(block)
+    }
+
+    fn desymmetrize_channels(&mut self) {
+        self.shaper.desymmetrize();
+    }
+
+    fn channels_agree(&self) -> bool {
+        self.shaper.channels_bit_equal()
     }
 
     fn lanes_at_rest(&self) -> u32 {
@@ -1448,6 +1614,52 @@ impl<L: Lane, const W: usize> PreparedNativeEffectBank for PreparedTransientShap
 
     fn exchange_lane_defaults(&mut self, lane: usize, bytes: &mut [u8]) -> bool {
         self.exchange_defaults(lane, bytes)
+    }
+}
+
+impl<L: Lane, const W: usize> PreparedTransientShaperBank<L, W> {
+    /// The one bank body, dual or collapsed (issue #1873).
+    ///
+    /// `MONO` chooses the render body and nothing else: the guards, the automation drain (both
+    /// channels' spans, as a dual block takes them) and the report are the same statements in the
+    /// same order. A collapsed block hands the kernel no right plane, so the right plane is never
+    /// read or written. Inlined into `process_bank` and `process_bank_mono`, each with the kernel
+    /// inlined.
+    #[inline(always)]
+    fn process_bank_inner<const MONO: bool>(
+        &mut self,
+        block: EffectBankProcessBlock<'_>,
+    ) -> BankProcessReport {
+        let mut report = BankProcessReport::empty(self.width);
+        if block.width != self.width || block.frames > self.quantum || block.sidechain.is_some() {
+            return report;
+        }
+        for track in 0..W {
+            // A padded lane carries no track, so no span is its to apply (issue #1092).
+            if self.shaper.active & (1 << track) == 0 {
+                continue;
+            }
+            let start = block.automation_offsets[track] as usize;
+            let end = block.automation_offsets[track + 1] as usize;
+            apply_automation(
+                &block.automation[start..end],
+                self.shaper.automation_capacity,
+                block.first_sample,
+                track,
+                &mut self.shaper.left,
+                &mut self.shaper.right,
+                &mut report.reports[track],
+            );
+        }
+        let right = if MONO { &mut [][..] } else { block.right };
+        let [left, right] =
+            self.shaper
+                .process_block::<MONO>(block.left, right, block.frames as usize);
+        for (track, entry) in report.reports.iter_mut().enumerate().take(W) {
+            entry.nonfinite_left_blocks = u64::from((left >> track) & 1);
+            entry.nonfinite_right_blocks = u64::from((right >> track) & 1);
+        }
+        report
     }
 }
 
