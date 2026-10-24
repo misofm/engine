@@ -2939,6 +2939,8 @@ where
             "the revision stamped is the revision committed (#1312 D7)"
         );
         candidate_provider.revision_gate.publish(revision);
+        // #1482 R1: the same revision on the payload, for the watermark's claim settle.
+        reservation.set_revision(revision);
         // #1310 D5 step 3, D6: B's `superseded` word, written before B is published.
         reservation.set_superseded(superseded_revisions);
         // #1310 (root ruling B15-Q4): A's queued observation records, on B's queues before B is

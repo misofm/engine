@@ -13,8 +13,9 @@
 //! a reservation or an [`UnadoptedCandidate`]. So a claimed candidate always finds retirement room,
 //! and render never defers a swap.
 //!
-//! Every candidate also carries its `superseded` count and its outcome (#1314 D1). Its revisions
-//! live on the candidate's own revision gate (#1502 D1), which travels inside the plan: the
+//! Every candidate also carries its structural revision (#1482 R1), its `superseded` count and
+//! its outcome (#1314 D1) in its payload. Its revisions live on the candidate's own revision gate
+//! (#1502 D1), which travels inside the plan: the
 //! control thread publishes each committed revision on the gate of the plan that carries its
 //! content (`PlanRevisionGate::publish`), and render takes each block's live snapshot from the
 //! gate of the plan it runs and advances the applied-revision watermark (`watermark.rs`) to it
@@ -154,12 +155,15 @@ impl Drop for RetirementCredit {
     }
 }
 
-/// A published candidate's payload. `superseded` and `outcome` are written only before
-/// publication, so they travel in the payload; its revisions are on the plan's own gate.
+/// A published candidate's payload. `revision`, `superseded` and `outcome` are written only before
+/// publication, so they travel in the payload; its revisions are on the plan's own gate, and
+/// `revision` is the structural one control stamped there, which the watermark's claim settle
+/// reads (#1482 R1).
 struct PublishedPlan {
     epoch: PlanEpoch,
     plan: PreparedRenderPlan,
     credit: RetirementCredit,
+    revision: u64,
     superseded: u64,
     outcome: CandidateOutcome,
 }
@@ -268,6 +272,7 @@ pub struct PlanReplacementReservation<'a> {
     epoch: PlanEpoch,
     plan: PreparedRenderPlan,
     credit: RetirementCredit,
+    revision: u64,
     superseded: u64,
     outcome: CandidateOutcome,
     adoption: PlanAdoption,
@@ -281,6 +286,7 @@ pub struct UnadoptedCandidate {
     epoch: PlanEpoch,
     plan: PreparedRenderPlan,
     credit: RetirementCredit,
+    revision: u64,
     superseded: u64,
     outcome: CandidateOutcome,
     adoption: PlanAdoption,
@@ -571,6 +577,7 @@ impl PlanPublisher {
             epoch,
             plan,
             credit,
+            revision: 0,
             superseded: 0,
             outcome: CandidateOutcome::Exact,
             adoption,
@@ -611,6 +618,7 @@ impl PlanPublisher {
                     epoch,
                     plan,
                     credit,
+                    revision,
                     superseded,
                     outcome,
                 },
@@ -619,6 +627,7 @@ impl PlanPublisher {
                 epoch,
                 plan,
                 credit,
+                revision,
                 superseded,
                 outcome,
                 adoption,
@@ -658,6 +667,7 @@ impl PlanPublisher {
                 epoch,
                 plan: candidate.plan,
                 credit: candidate.credit,
+                revision: candidate.revision,
                 superseded: candidate.superseded,
                 outcome: candidate.outcome,
             },
@@ -706,6 +716,13 @@ impl PlanReplacementReservation<'_> {
         &mut self.plan
     }
 
+    /// Set the candidate's own structural revision, the one control stamps on its gate (#1482
+    /// R1). When render claims a newer candidate before the watermark advances past this one,
+    /// the revisions up to it complete with this candidate's outcome. `0` until set.
+    pub fn set_revision(&mut self, revision: u64) {
+        self.revision = revision;
+    }
+
     /// Set how many revisions the candidate folds in from candidates it replaced (#1314 D1,
     /// #1310): its adoption completes them as `superseded`.
     pub fn set_superseded(&mut self, superseded: u64) {
@@ -728,6 +745,7 @@ impl PlanReplacementReservation<'_> {
             epoch,
             plan,
             credit,
+            revision,
             superseded,
             outcome,
             adoption,
@@ -739,6 +757,7 @@ impl PlanReplacementReservation<'_> {
                 epoch,
                 plan,
                 credit,
+                revision,
                 superseded,
                 outcome,
             },
@@ -841,13 +860,14 @@ impl RealtimePlanOwner {
             epoch,
             plan,
             credit,
+            revision,
             superseded,
             outcome,
         }) = self.publication.claim(observed)
         else {
             return (SwapOutcome::None, CarryOutcome::NotRequested);
         };
-        self.watermark.note_claim(superseded, outcome);
+        self.watermark.note_claim(revision, superseded, outcome);
         let old_epoch = self.active.0;
         let continuing = self.active.1.next_absolute_sample();
         let mut old = core::mem::replace(&mut self.active, (epoch, plan));

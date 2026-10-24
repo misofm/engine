@@ -199,6 +199,14 @@ impl<'a> ObservedReservation<'a> {
         self.inner.as_mut().expect("reservation is live").plan_mut()
     }
 
+    /// The candidate's own structural revision, the one stamped on its gate (#1482 R1).
+    pub(crate) fn set_revision(&mut self, revision: u64) {
+        self.inner
+            .as_mut()
+            .expect("reservation is live")
+            .set_revision(revision);
+    }
+
     /// The revisions the candidate completes as `superseded` when render adopts it (#1310 D6).
     pub(crate) fn set_superseded(&mut self, superseded: u64) {
         self.inner

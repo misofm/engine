@@ -124,12 +124,22 @@ pub(crate) fn watermark_retained_bytes() -> usize {
 #[derive(Debug)]
 pub(crate) struct WatermarkWriter {
     record: PublishedWordsWriter<WATERMARK_WORDS>,
-    /// What the record holds; render is its only writer, so it never loads it back.
+    /// What the record holds, plus the spans of claims settled since the last advance (#1482
+    /// D1); render is its only writer, so it never loads it back.
     current: PlanWatermark,
-    /// `superseded` of the candidates claimed since the last advance (#1314 D5).
-    pending_superseded: u64,
-    /// `outcome` of the candidates claimed since the last advance (#1314 D5).
-    pending_outcome: CandidateOutcome,
+    /// The newest candidate claimed since the last advance, not yet settled (#1314 D5).
+    pending: Option<Claim>,
+    /// The `OUTCOME_*` flags of the claims settled since the last advance (#1482 D1).
+    pending_flags: u64,
+}
+
+/// One claimed candidate, as render holds it until its revisions complete.
+#[derive(Clone, Copy, Debug)]
+struct Claim {
+    /// The candidate's own structural revision (#1482 R1).
+    revision: u64,
+    superseded: u64,
+    outcome: CandidateOutcome,
 }
 
 /// Any-thread reader handle. Cloning it shares the one record.
@@ -154,8 +164,8 @@ pub(crate) fn plan_watermark(initial_revision: u64) -> (WatermarkWriter, PlanWat
         WatermarkWriter {
             record,
             current,
-            pending_superseded: 0,
-            pending_outcome: CandidateOutcome::Exact,
+            pending: None,
+            pending_flags: 0,
         },
         reader,
     )
@@ -163,14 +173,26 @@ pub(crate) fn plan_watermark(initial_revision: u64) -> (WatermarkWriter, PlanWat
 
 // REALTIME_POLICY_BEGIN
 impl WatermarkWriter {
-    /// Render claimed a candidate: keep its `superseded` count and its `outcome` for the first
-    /// advance after the claim (#1314 D5). Claims between two advances accumulate, so no
-    /// revision's outcome is lost to a block that published nothing.
+    /// Render claimed the candidate of structural revision `revision`: hold its `superseded`
+    /// count and its `outcome` for the first advance after the claim (#1314 D5).
+    ///
+    /// If an earlier claim is still held (two claims between two advances), it is settled first
+    /// (#1482 D1): the revisions above the record's revision up to the earlier candidate's own
+    /// revision complete with that candidate's `superseded` count and outcome, the local revision
+    /// moves up to it, and its flags wait for the next advance. A settle stores nothing to the
+    /// shared record. So each claim's revisions complete with that claim's own outcome, and none
+    /// is lost to a block that published nothing.
     #[inline]
-    pub(crate) fn note_claim(&mut self, superseded: u64, outcome: CandidateOutcome) {
-        self.pending_superseded = self.pending_superseded.saturating_add(superseded);
-        if outcome == CandidateOutcome::TransitionFallback {
-            self.pending_outcome = CandidateOutcome::TransitionFallback;
+    pub(crate) fn note_claim(&mut self, revision: u64, superseded: u64, outcome: CandidateOutcome) {
+        let claim = Claim {
+            revision,
+            superseded,
+            outcome,
+        };
+        if let Some(earlier) = self.pending.replace(claim) {
+            let covered = earlier.revision.saturating_sub(self.current.revision);
+            self.pending_flags |= self.complete(covered, earlier);
+            self.current.revision = self.current.revision.max(earlier.revision);
         }
     }
 
@@ -178,26 +200,43 @@ impl WatermarkWriter {
     /// otherwise write nothing. Returns the whole watermark it just published, or `None` when it
     /// wrote nothing (#1349 D1).
     ///
-    /// An advance from `a` to `b` completes `b - a` revisions. The first advance after a claim
-    /// adds the claimed `superseded` count to its counter and sets [`OUTCOME_SUPERSEDED`]; the
-    /// rest goes to `exact`, or to `transition_fallback` if the claimed outcome was the fallback,
-    /// with its flag. Later advances on the same plan are [`OUTCOME_EXACT`].
+    /// An advance from `a` to `b` completes the `b - a` revisions that no settled claim already
+    /// completed (#1482 D1). The held claim's `superseded` count goes to its counter with
+    /// [`OUTCOME_SUPERSEDED`]; the rest goes to `exact`, or to `transition_fallback` if the held
+    /// claim's outcome was the fallback, with its flag. With no claim held they are
+    /// [`OUTCOME_EXACT`]. The published `outcome_flags` are the union of the advance's flags and
+    /// every settled claim's.
     #[inline]
     pub(crate) fn advance(&mut self, revision: u64, first_sample: u64) -> Option<PlanWatermark> {
         if revision <= self.current.revision {
             return None;
         }
         let covered = revision - self.current.revision;
-        let superseded = core::mem::take(&mut self.pending_superseded);
-        let outcome = core::mem::take(&mut self.pending_outcome);
-        let rest = covered.saturating_sub(superseded);
+        let claim = self.pending.take().unwrap_or(Claim {
+            revision,
+            superseded: 0,
+            outcome: CandidateOutcome::Exact,
+        });
+        let flags = core::mem::take(&mut self.pending_flags) | self.complete(covered, claim);
+        self.current.revision = revision;
+        self.current.first_sample = first_sample;
+        self.current.outcome_flags = flags;
+        self.store(self.current);
+        Some(self.current)
+    }
+
+    /// Count `covered` revisions completed by `claim` into the local counters: its `superseded`
+    /// count as superseded, the rest with its outcome. Returns the flags they set.
+    #[inline]
+    fn complete(&mut self, covered: u64, claim: Claim) -> u64 {
+        let rest = covered.saturating_sub(claim.superseded);
         let mut flags = 0;
-        if superseded != 0 {
+        if claim.superseded != 0 {
             flags |= OUTCOME_SUPERSEDED;
-            self.current.superseded = self.current.superseded.saturating_add(superseded);
+            self.current.superseded = self.current.superseded.saturating_add(claim.superseded);
         }
         if rest != 0 {
-            match outcome {
+            match claim.outcome {
                 CandidateOutcome::Exact => {
                     flags |= OUTCOME_EXACT;
                     self.current.exact = self.current.exact.saturating_add(rest);
@@ -209,11 +248,7 @@ impl WatermarkWriter {
                 }
             }
         }
-        self.current.revision = revision;
-        self.current.first_sample = first_sample;
-        self.current.outcome_flags = flags;
-        self.store(self.current);
-        Some(self.current)
+        flags
     }
 
     /// Overwrite the record with `watermark`. Wait-free: two counter stores and six word stores.
@@ -233,5 +268,59 @@ impl PlanWatermarkReader {
             .read()
             .map(PlanWatermark::from_words)
             .map_err(|_| WatermarkBusy)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        CandidateOutcome, OUTCOME_EXACT, OUTCOME_SUPERSEDED, OUTCOME_TRANSITION_FALLBACK,
+        plan_watermark,
+    };
+
+    /// #1482 gate 1: two claims between two advances. Each claim's revisions complete with that
+    /// claim's own outcome and `superseded` count, and the one advance publishes the union of
+    /// their flags.
+    #[test]
+    fn two_claims_between_advances_complete_each_span_with_its_own_outcome() {
+        let r = 7;
+        let s = 4096;
+        let (mut writer, reader) = plan_watermark(r);
+        writer.note_claim(r + 2, 0, CandidateOutcome::Exact);
+        writer.note_claim(r + 5, 0, CandidateOutcome::TransitionFallback);
+        let published = writer.advance(r + 5, s).expect("an advance");
+        assert_eq!(reader.read(), Ok(published));
+        assert_eq!((published.revision, published.first_sample), (r + 5, s));
+        assert_eq!(
+            published.outcome_flags,
+            OUTCOME_EXACT | OUTCOME_TRANSITION_FALLBACK
+        );
+        assert_eq!(
+            (
+                published.exact,
+                published.transition_fallback,
+                published.superseded
+            ),
+            (2, 3, 0)
+        );
+
+        // With `superseded` on both claims, each count lands on its own span.
+        let (mut writer, reader) = plan_watermark(r);
+        writer.note_claim(r + 3, 1, CandidateOutcome::TransitionFallback);
+        writer.note_claim(r + 7, 2, CandidateOutcome::Exact);
+        let published = writer.advance(r + 8, s).expect("an advance");
+        assert_eq!(reader.read(), Ok(published));
+        assert_eq!(
+            published.outcome_flags,
+            OUTCOME_EXACT | OUTCOME_TRANSITION_FALLBACK | OUTCOME_SUPERSEDED
+        );
+        assert_eq!(
+            (
+                published.superseded,
+                published.transition_fallback,
+                published.exact
+            ),
+            (3, 2, 3)
+        );
     }
 }
