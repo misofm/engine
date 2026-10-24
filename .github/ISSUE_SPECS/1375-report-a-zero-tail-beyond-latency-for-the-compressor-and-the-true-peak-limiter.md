@@ -166,7 +166,7 @@ rest. Today both declare `Infinite`, which makes every plan that holds one repor
   `c' = c (1 - u)`, on the word's own grid, evaluated exactly in integers in runs of constant
   decrement (a few thousand steps); monotonicity of the real step in `e` (for `c <= 1/5`) and in `c`
   makes it a bound for every start `<= E` and every coefficient `>= c_min`. Measured against the
-  real `f32` recurrence: equal or one sample above at every coefficient tried.
+  real `f32` recurrence: equal or at most two samples above (the verifier's random probe found +2).
 - **Start distances.** Compressor `E = 100` dB plus one ulp (the curve clamp; an attack step can
   round one ulp past it). Limiter `E = 1` (shown not exceeded). `c_min` is the longest release's
   design one `f32` below it. D3 holds: `c_min >= 2.08e-6 > 2^-24` everywhere.
@@ -175,7 +175,9 @@ rest. Today both declare `Infinite`, which makes every plan that holds one repor
   `M + 2N + 11`, `d` after `S0 + K - 1`. With latency `N + 6`, `R = N + K + 5`. At the worst start
   (peak `1e29`, lookahead maximum) the real kernel, checked sample by sample near the end, rests
   221-482 samples before `latency + R` (about `Wb / 2`: `d` has already released a little during
-  the box ramp), so gate 2 does not see a one-sample error in the drain term; gate 4 recomputes it.
+  the box ramp). Gate 2 therefore cannot see a drain error smaller than about `(R_ring - 1) / 2`.
+  Gate 4 recomputes the drain term `N + 5` with the same expression as the crate, so that term is
+  pinned by formula identity, not measured; only the follower part of gate 4 is measured.
 - **No rendered bit moved.** The limiter reaches exact rest through its existing `FLUSH_EPS` flush;
   no snap was added. A plateau snap like #1784's would shorten its rest (about 92 s at 48 kHz) and
   is class B.
@@ -192,8 +194,14 @@ rest. Today both declare `Infinite`, which makes every plan that holds one repor
 - **Tests.** `crates/compressor/tests/tail_contract.rs` and
   `crates/true-peak-limiter/tests/tail_contract.rs` (gates 1-4; debug runs 48 kHz and the slowest
   release only at the worst start; release runs every rate and case), helper tests in
-  `crates/effect-runtime/src/tail.rs`. The limiter unit test's `Infinite` assertion is deleted
-  (gate 1 states it); the graph-compiler limiter fixture row now expects `Finite(0)` (the fixture
+  `crates/effect-runtime/src/tail.rs` (faster coefficients only; the slowest are the effects' gate 4).
+  The limiter unit test's `Infinite` assertion is deleted: gate 1 supersedes it; the graph-compiler limiter fixture row now expects `Finite(0)` (the fixture
   is at `crates/graph-compiler/src/lib.rs:5870`, not `:12321`).
 - **Open for root.** (a) The landing constraint above stands: #1379 slice C is open. (b) The
   release-scale run has no CI step; `builtins`' `tail_contract` has one in `qualification.yml`.
+- **Quantifier (verifier M2).** `R` holds when every input port is exactly zero from `M`, the
+  compressor's sidechain included (connected without a buffer or unconnected reads as zero). The
+  tail and the five composition values hold for every sidechain input.
+- **Shared arithmetic (verifier M3).** `ceil_millibels`, its `Rounding` and `UNDERFLOW` live once,
+  in `math::tail`; `builtins`, the compressor and the limiter call it. No value moved.
+- **Release-scale CI step.** Root adds it (M1).
