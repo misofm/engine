@@ -244,11 +244,12 @@ pub(crate) const REPORT_ROWS: usize = 4;
 /// until the former is dropped (#1310 D5).
 pub(crate) const PENDING_PROVIDERS: usize = 2;
 
-/// The kept bases that can be live at once (#1696 root ruling): a kept base sits on the epoch a
-/// pending successor succeeds (`SessionState::kept_holder`), one per pending epoch, so at most
-/// [`PENDING_PROVIDERS`]. A ceiling: between commands at most one is live, since a rebuild that
-/// finds nothing withdrawn runs after promotion dropped every older base.
-pub(crate) const KEPT_BASES: usize = PENDING_PROVIDERS;
+/// The kept-base ramp tables that can be live at once (#1696 root ruling): two, and not derived
+/// from [`PENDING_PROVIDERS`]. At most one kept base is stored: a rebuild creates it only when
+/// nothing else is pending, and promotion drops it. The second table is its replacement, which a
+/// commit builds (`merged_ramps`, then `keep_within`) while the stored one still lives, and moves
+/// in once the commit cannot fail. Both are pruned to the newest committed model.
+pub(crate) const KEPT_BASES: usize = 2;
 
 /// The provider epochs parked until render's displaced plan is reclaimed (#1398 D1): one per
 /// retirement credit, because each parked epoch's plan holds one until the service step reclaims

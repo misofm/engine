@@ -202,5 +202,13 @@ Attempt 1 (implementer, 2026-10-24, on `main` a97b522be; stopped for a root ruli
      replacement admission adds the candidate's row beyond the newest's.
   3. A live commit follows it (`follow_edit_ramps`, beside `follow_catalog`), and the live
      admission adds its growth (`LiveCatalogAdmission::ramp_growth_bytes`).
+  4. `KEPT_BASES` is 2 for its own reason (verifier fold): one stored kept base (created only
+     with nothing pending, dropped by promotion) and the replacement table a commit builds while
+     the stored one still lives.
+  5. A commit holds a third table, the transaction's own `EditRamps` (its `cleared` is
+     transaction-sized). It is no retained row and the capi row does not charge it: it lives and
+     dies with the prepared transaction, a peak term bounded by the request it comes from (a
+     control frame, `maximum_control_frame_bytes`, or a `SESSION_REPLACE` document,
+     `maximum_document_bytes`), whose edits bound its keys and ID text.
 - `capi_retained_bytes` on the reference session: 168,818 -> 192,972 (+24,154), over 175,296;
   ceiling 212,288 (+10 %, rounded to 64).

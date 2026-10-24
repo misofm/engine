@@ -297,8 +297,11 @@ const fn align_up(bytes: usize, align: usize) -> usize {
 }
 
 /// One std B-tree internal node of `K` keys and `V` values, a ceiling of every node of the tree:
-/// the `#[repr(C)]` leaf (the parent pointer, the parent index and the length, then eleven keys and
-/// eleven values) and the twelve child edges after it.
+/// a leaf laid out in declaration order (the parent pointer, the parent index and the length, then
+/// eleven keys and eleven values) and the twelve child edges after it. std's internal node is
+/// `#[repr(C)]` over its leaf; its leaf has the default representation, which rustc may reorder.
+/// rustc reorders only to cut padding, so the leaf is never larger than this declaration-order
+/// model, and the model bounds both; the allocator tests below check the ceiling.
 const fn b_tree_node_ceiling<K, V>() -> usize {
     let word = size_of::<usize>();
     let header = word + 2 * size_of::<u16>();

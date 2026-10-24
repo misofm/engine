@@ -144,6 +144,12 @@ impl ProviderEpoch {
         (self.carried.total, self.carried.overhead)
     }
 
+    /// The edit ramps this epoch's kept base holds, or `None` while it keeps no base (#1696).
+    #[cfg(feature = "test-support")]
+    pub fn test_kept_ramps(&self) -> Option<&session::EditRamps> {
+        self.kept.as_ref().map(|kept| &kept.edit_ramps)
+    }
+
     /// What this epoch's plan holds, for preparing its successor (#1323's gates read its floors).
     #[cfg(feature = "test-support")]
     pub fn test_inventory(&self) -> &PlanStateInventory {
