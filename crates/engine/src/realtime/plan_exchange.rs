@@ -938,6 +938,27 @@ impl RealtimePlanOwner {
             })
         })
     }
+    /// [`PreparedRenderPlan::copy_response_snapshot`] on the active plan, naming that plan.
+    ///
+    /// Valid between blocks, on the thread that renders (#1577 calls it after a block): it
+    /// allocates nothing itself (the sink owns all storage) and neither renders, advances the
+    /// clock nor adopts a successor. The
+    /// returned `active_epoch` is the epoch of the plan whose retained values were copied.
+    ///
+    /// # Errors
+    ///
+    /// The active plan's typed refusal.
+    pub fn copy_response_snapshot(
+        &mut self,
+        request: super::ResponseSnapshotRequest<'_>,
+    ) -> Result<RealtimeResponseSnapshot, super::ResponseSnapshotError> {
+        let capture = self.active.1.copy_response_snapshot(request)?;
+        Ok(RealtimeResponseSnapshot {
+            active_epoch: self.active.0,
+            captured_sample: capture.captured_sample,
+            owners: capture.owners,
+        })
+    }
     /// Attempt one block-boundary publication and render through exactly one complete plan.
     pub fn render(
         &mut self,
@@ -984,14 +1005,6 @@ impl RealtimePlanOwner {
         self.active
             .1
             .prepare_source_seek(source_index, generation, frame)
-    }
-
-    /// [`PreparedRenderPlan::copy_response_snapshot`] on the active plan.
-    pub fn copy_response_snapshot(
-        &mut self,
-        request: super::ResponseSnapshotRequest<'_>,
-    ) -> Result<super::ResponseSnapshotCapture, super::ResponseSnapshotError> {
-        self.active.1.copy_response_snapshot(request)
     }
 }
 impl PlanRetirer {

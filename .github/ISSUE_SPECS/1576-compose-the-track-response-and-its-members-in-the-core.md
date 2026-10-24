@@ -77,6 +77,8 @@ the browser onto it.
 - `crates/host-core/src/{response.rs,lib.rs}`, new `crates/host-core/tests/track_response.rs`.
 - `crates/engine/src/realtime/{plan_exchange.rs,mod.rs}`.
 - `hosts/host-web/src/ffi.rs` (`live_response_rack` and `run_live_response_analysis` only).
+- `crates/control-plane/src/plan.rs` (the `copy_response_snapshot` forwarder only; added by the
+  scope note, 2026-10-24).
 
 ## Non-goals
 
@@ -127,3 +129,19 @@ Commands: `cargo test --locked -p host-core`, `cargo test --locked -p engine`,
 ## Supersedes and shrinks
 
 - None.
+
+## Decision and evidence record
+
+- 2026-10-24 (scope note, root): D3 widens the existing `RealtimePlanOwner::copy_response_snapshot`
+  (it already existed outside the `REALTIME_POLICY` region and returned no epoch) instead of adding
+  a sibling, and moves it into the region. `PlanState::copy_response_snapshot` maps the record back
+  to `ResponseSnapshotCapture`, so `hosts/host-web/src/lib.rs` does not change. `Console(slot)`
+  carries no pre/post flag: slot IDs are unique across both console sections.
+- The browser analysis now refuses a staged track ID that is empty or not UTF-8, and a capture
+  whose owners name another strip, with `RESULT_INVALID_ARGUMENT` (the SDK already refused the
+  second after analysis). The ffi import list changed with it.
+- Gate 3 is one assertion in `the_non_contiguous_render_reports_the_hand_over` (every block, before
+  and after the swap); the failed-render refusal is the plan's own (`mod.rs` response tests), not
+  repeated at the owner.
+
+- Root note (2026-10-24, verifier MINOR): a foreign-strip `querySnapshot` now fails inside the analysis with `invalidArgument` (`responseError(RESULT_INVALID_ARGUMENT)`) instead of `abiMismatch` (`invalidPayload`) from `#withCaptureMetadata`; that SDK check (`sdk/src/core/live-response.ts`) cannot fire on this path until #1579/#1580 delete it. The realtime-policy region now covers `copy_response_snapshot`'s wrapper only, not its callees; #1577 must count allocations on the real browser sink before it calls it on the render thread.

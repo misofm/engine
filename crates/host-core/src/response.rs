@@ -1200,6 +1200,163 @@ pub fn query_response_snapshot_into(
     })
 }
 
+/// Where one track-response member sits in its strip's signal chain.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ResponseMemberSection {
+    /// The strip's builtin input section (polarity, trim, HPF, LPF).
+    Builtins,
+    /// A console slot, named by its session slot ID. Slot IDs are unique across both console
+    /// sections, so the session resolves whether it is a pre-insert or post-insert slot.
+    Console(Box<str>),
+    /// A strip insert, named by its session insert ID.
+    Inserts(Box<str>),
+}
+
+/// The response provider of one track-response member.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub enum ResponseMemberKind {
+    /// A native parametric EQ.
+    ParametricEq = 1,
+    /// The builtin input filters.
+    InputFilters = 2,
+    /// A declared owner without a linear response provider, excluded from the curves.
+    Unavailable = 3,
+}
+
+/// One owner that a track response names, in declared signal order.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ResponseMember {
+    /// Where the owner sits in the strip.
+    pub section: ResponseMemberSection,
+    /// The owner's native provider identity.
+    pub native_id: Box<str>,
+    /// The owner's response provider.
+    pub kind: ResponseMemberKind,
+    /// Bypass state captured at the same boundary as the curves.
+    pub bypassed: bool,
+    /// The owner's left section count.
+    pub section_count: u8,
+    /// Bit `i` is set when left section `i` is enabled.
+    pub enabled_left: u32,
+    /// Bit `i` is set when right section `i` is enabled.
+    pub enabled_right: u32,
+}
+
+/// The composed response of one strip at one captured boundary, with the owners that make it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct TrackResponse {
+    /// The strip the response belongs to.
+    pub strip_id: Box<str>,
+    /// The boundary sample of the captured values.
+    pub captured_sample: u64,
+    /// The plan's sample rate.
+    pub sample_rate_hz: u32,
+    /// The floor every curve value is clamped to: `-120.0` dB.
+    pub floor_db: f32,
+    /// The generated frequency axis.
+    pub frequencies_hz: Vec<f32>,
+    /// The left curve in dB, when the query asked for the left side.
+    pub left_db: Option<Vec<f32>>,
+    /// The right curve in dB, when the query asked for the right side.
+    pub right_db: Option<Vec<f32>>,
+    /// The number of members without a linear response provider.
+    pub excluded_count: u32,
+    /// Every captured owner, in declared signal order.
+    pub members: Vec<ResponseMember>,
+}
+
+/// Compose one strip's captured snapshot into its response and its members.
+///
+/// Refuses a point count outside `2..=RESPONSE_MAXIMUM_POINTS` ([`InvalidGrid`]), and an owner of
+/// another strip or with a rack it cannot name ([`MalformedSnapshot`]); then composes the curves
+/// through [`query_response_snapshot_into`], so the curve values are that function's own.
+///
+/// [`InvalidGrid`]: ResponseSnapshotQueryError::InvalidGrid
+/// [`MalformedSnapshot`]: ResponseSnapshotQueryError::MalformedSnapshot
+pub fn compose_track_response(
+    strip_id: &str,
+    snapshot: &ResponseSnapshot,
+    grid: ResponsePreviewGrid,
+    channels: ResponseChannels,
+) -> Result<TrackResponse, ResponseSnapshotQueryError> {
+    let points = grid.points();
+    if !(2..=RESPONSE_MAXIMUM_POINTS).contains(&points) {
+        return Err(ResponseSnapshotQueryError::InvalidGrid);
+    }
+    let members = snapshot
+        .owners
+        .iter()
+        .map(|owner| response_member(strip_id, owner))
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut frequencies_hz = vec![0.0_f32; points];
+    let mut left = vec![0.0_f32; points];
+    let mut right = vec![0.0_f32; points];
+    let summary = query_response_snapshot_into(
+        snapshot,
+        grid,
+        ResponseSnapshotOutput {
+            frequencies_hz: &mut frequencies_hz,
+            total_left_db: &mut left,
+            total_right_db: &mut right,
+        },
+    )?;
+    Ok(TrackResponse {
+        strip_id: strip_id.into(),
+        captured_sample: summary.captured_sample,
+        sample_rate_hz: summary.sample_rate_hz,
+        floor_db: -120.0,
+        frequencies_hz,
+        left_db: channels.left().then_some(left),
+        right_db: channels.right().then_some(right),
+        excluded_count: summary.excluded_owners,
+        members,
+    })
+}
+
+fn response_member(
+    strip_id: &str,
+    owner: &ResponseSnapshotOwner,
+) -> Result<ResponseMember, ResponseSnapshotQueryError> {
+    if *owner.track_id != *strip_id {
+        return Err(ResponseSnapshotQueryError::MalformedSnapshot);
+    }
+    let section = match owner.rack {
+        0 => ResponseMemberSection::Builtins,
+        1 | 3 => ResponseMemberSection::Console(owner.stable_id.clone()),
+        2 => ResponseMemberSection::Inserts(owner.stable_id.clone()),
+        _ => return Err(ResponseSnapshotQueryError::MalformedSnapshot),
+    };
+    let kind = match (owner.availability, owner.kind) {
+        (ResponseSnapshotAvailability::DeclaredUnavailable, _) => ResponseMemberKind::Unavailable,
+        (_, 1) => ResponseMemberKind::ParametricEq,
+        (_, 2) => ResponseMemberKind::InputFilters,
+        _ => return Err(ResponseSnapshotQueryError::MalformedSnapshot),
+    };
+    let section_count = u8::try_from(owner.left.len())
+        .map_err(|_| ResponseSnapshotQueryError::MalformedSnapshot)?;
+    Ok(ResponseMember {
+        section,
+        native_id: owner.native_id.clone(),
+        kind,
+        bypassed: owner.bypassed,
+        section_count,
+        enabled_left: enabled_mask(&owner.left)?,
+        enabled_right: enabled_mask(&owner.right)?,
+    })
+}
+
+fn enabled_mask(sections: &[ResponseSnapshotSection]) -> Result<u32, ResponseSnapshotQueryError> {
+    if sections.len() > 32 {
+        return Err(ResponseSnapshotQueryError::MalformedSnapshot);
+    }
+    Ok(sections
+        .iter()
+        .enumerate()
+        .filter(|(_, section)| section.enabled)
+        .fold(0, |mask, (index, _)| mask | 1 << index))
+}
+
 fn map_eq_snapshot_error(error: effect_compiler::EqResponseError) -> ResponseSnapshotQueryError {
     match error {
         effect_compiler::EqResponseError::InvalidFrequencyGrid => {

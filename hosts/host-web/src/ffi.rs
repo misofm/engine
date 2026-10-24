@@ -83,12 +83,12 @@ use engine::realtime::{
     ResponseSnapshotError, ResponseSnapshotOwnerInfo, ResponseSnapshotSection, ResponseSnapshotSink,
 };
 use host_core::{
-    ResponsePreviewGrid, ResponseSnapshot, ResponseSnapshotAvailability, ResponseSnapshotOutput,
+    ResponseChannels, ResponsePreviewGrid, ResponseSnapshot, ResponseSnapshotAvailability,
     ResponseSnapshotOwner, ResponseSnapshotQueryError, SpectrumAnalysis, SpectrumAnalysisHistory,
     SpectrumAnalysisResult, SpectrumChannels, SpectrumContinuousWindow, SpectrumHop,
     SpectrumPreparation, SpectrumRequestError, SpectrumSmoothingConfig, SpectrumSnapshot,
     SpectrumStreamMetadata, SpectrumStreamStatus, SpectrumTargetRef, SpectrumWindow,
-    query_response_snapshot_into, spectrum_channels_from_raw, spectrum_smoothing,
+    compose_track_response, spectrum_channels_from_raw, spectrum_smoothing,
 };
 
 #[cfg(test)]
@@ -778,14 +778,14 @@ const fn live_response_rack_raw(native: u8) -> Option<u32> {
     }
 }
 
-/// Validate a live-response owner record's `rack`. The retired `1` and `3` are refused.
+/// The engine rack of a live-response owner record's `rack`, the inverse of
+/// [`live_response_rack_raw`]: the console's `4` reads back as `1`, since the composer names a
+/// console slot by its slot ID and not by its section. The retired `1` and `3` are refused.
 fn live_response_rack(raw: u32) -> Result<u8, u32> {
     match raw {
-        crate::LIVE_RESPONSE_RACK_INPUT_FILTERS
-        | crate::LIVE_RESPONSE_RACK_INSERTS
-        | crate::LIVE_RESPONSE_RACK_CONSOLE => {
-            u8::try_from(raw).map_err(|_| RESULT_INVALID_ARGUMENT)
-        }
+        crate::LIVE_RESPONSE_RACK_INPUT_FILTERS => Ok(0),
+        crate::LIVE_RESPONSE_RACK_INSERTS => Ok(2),
+        crate::LIVE_RESPONSE_RACK_CONSOLE => Ok(1),
         _ => Err(RESULT_INVALID_ARGUMENT),
     }
 }
@@ -1826,9 +1826,9 @@ fn parse_live_snapshot(staging: &ResponseStaging) -> Result<(ResponseSnapshot, u
             track_id,
             native_id,
             stable_id,
-            // The worker-side copy keeps the record's own code: both console sections share one
-            // code by design, so the engine's native rack is not recoverable here, and the query
-            // does not read it. A retired or unknown code refuses the whole snapshot.
+            // Both console sections share one record code by design, so a console owner reads
+            // back as rack `1`; the composer names it by its slot ID. A retired or unknown code
+            // refuses the whole snapshot.
             rack: live_response_rack(raw.rack)?,
             slot: raw.slot,
             kind: raw.kind,
@@ -1910,47 +1910,57 @@ fn run_live_response_analysis(staging: &mut ResponseStaging) -> u32 {
     if required_result_bytes > maximum_result_bytes {
         return live_response_failure(staging, RESULT_REFUSED_BUDGET);
     }
+    let Some(channels) = ResponseChannels::from_raw(request.channels) else {
+        return live_response_failure(staging, RESULT_INVALID_ARGUMENT);
+    };
     let (snapshot, snapshot_token) = match parse_live_snapshot(staging) {
         Ok(value) => value,
         Err(result) => return live_response_failure(staging, result),
     };
-    let mut frequencies = vec![0.0_f32; points];
-    let mut left = vec![0.0_f32; points];
-    let mut right = vec![0.0_f32; points];
-    let summary = match query_response_snapshot_into(
-        &snapshot,
-        grid,
-        ResponseSnapshotOutput {
-            frequencies_hz: &mut frequencies,
-            total_left_db: &mut left,
-            total_right_db: &mut right,
-        },
-    ) {
+    let response = {
+        let Some(track_id) = staging
+            .live_track_id
+            .get(..request.track_id_bytes as usize)
+            .filter(|bytes| !bytes.is_empty())
+            .and_then(|bytes| core::str::from_utf8(bytes).ok())
+        else {
+            return live_response_failure(staging, RESULT_INVALID_ARGUMENT);
+        };
+        compose_track_response(track_id, &snapshot, grid, channels)
+    };
+    let response = match response {
         Ok(value) => value,
         Err(error) => return live_response_failure(staging, live_response_error_code(error)),
     };
     let maximum = request.maximum_result_bytes as usize;
     let mut cursor = size_of::<WebLiveResponseResult>();
-    let frequencies_offset =
-        match append_live_f32(&mut staging.live_result, &mut cursor, &frequencies, maximum) {
-            Ok(value) => value,
-            Err(result) => return live_response_failure(staging, result),
-        };
-    let left_offset = if request.channels & crate::RESPONSE_CHANNEL_LEFT != 0 {
-        match append_live_f32(&mut staging.live_result, &mut cursor, &left, maximum) {
-            Ok(value) => value,
-            Err(result) => return live_response_failure(staging, result),
-        }
-    } else {
-        0
+    let frequencies_offset = match append_live_f32(
+        &mut staging.live_result,
+        &mut cursor,
+        &response.frequencies_hz,
+        maximum,
+    ) {
+        Ok(value) => value,
+        Err(result) => return live_response_failure(staging, result),
     };
-    let right_offset = if request.channels & crate::RESPONSE_CHANNEL_RIGHT != 0 {
-        match append_live_f32(&mut staging.live_result, &mut cursor, &right, maximum) {
+    let left_offset = match &response.left_db {
+        Some(left) => match append_live_f32(&mut staging.live_result, &mut cursor, left, maximum) {
             Ok(value) => value,
             Err(result) => return live_response_failure(staging, result),
+        },
+        None => 0,
+    };
+    let right_offset = match &response.right_db {
+        Some(right) => {
+            match append_live_f32(&mut staging.live_result, &mut cursor, right, maximum) {
+                Ok(value) => value,
+                Err(result) => return live_response_failure(staging, result),
+            }
         }
-    } else {
-        0
+        None => 0,
+    };
+    let Ok(owner_count) = u32::try_from(response.members.len()) else {
+        return live_response_failure(staging, RESULT_REFUSED_BUDGET);
     };
     staging.live_result_header = WebLiveResponseResult {
         struct_size: LIVE_RESPONSE_RESULT_BYTES,
@@ -1960,12 +1970,12 @@ fn run_live_response_analysis(staging: &mut ResponseStaging) -> u32 {
         meaning: LIVE_RESPONSE_MEANING_EQ_FILTER_SUBTOTAL,
         channels: request.channels,
         points: u32::try_from(points).unwrap_or(0),
-        owner_count: summary.owners,
-        excluded_count: summary.excluded_owners,
-        sample_rate_hz: summary.sample_rate_hz,
+        owner_count,
+        excluded_count: response.excluded_count,
+        sample_rate_hz: response.sample_rate_hz,
         reserved0: 0,
         reserved1: 0,
-        captured_sample: summary.captured_sample,
+        captured_sample: response.captured_sample,
         snapshot_token,
         result_bytes: u64::try_from(cursor).unwrap_or(u64::MAX),
         frequencies_offset,
