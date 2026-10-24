@@ -283,6 +283,9 @@ jobs:
           scratch="$(mktemp -d "$RUNNER_TEMP/sdk-qualify-tmp.XXXXXX")"
           trap 'rm -rf -- "$scratch"' EXIT
           export TMPDIR="$scratch"
+          # The TMPDIR is private and deleted on exit, so a compile cache in it has no reuse value; tsc
+          # (typescript's tsc.js) and npm 10's cli.js would write node-compile-cache into it.
+          export NODE_DISABLE_COMPILE_CACHE=1
           bash scripts/check-sdk-generated.sh target/ci/qualification-artifacts
           python3 -B scripts/check-sdk-deletions.py
           bash scripts/check-sdk-types.sh

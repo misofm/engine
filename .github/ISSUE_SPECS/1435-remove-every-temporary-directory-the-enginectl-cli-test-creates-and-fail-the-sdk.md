@@ -144,6 +144,9 @@ literals keep their bytes.
   `lib/cli.js:1-7` enables it). The other three commands leave nothing. Neither creator is in this
   issue's authorized paths. Setting `NODE_DISABLE_COMPILE_CACHE=1` stops both from writing it (one
   local probe). Root decides; there is no exemption list.
+- **Root ruling on D3 (2026-10-24):** the step block exports `NODE_DISABLE_COMPILE_CACHE=1` next to
+  `TMPDIR`, because a compile cache in a private TMPDIR that is deleted on exit has no reuse value.
+  The emptiness check has no exemption, and the two scripts are not edited. Gate 2 re-run: green.
 
 ## Dependencies
 
