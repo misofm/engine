@@ -216,3 +216,12 @@ order), so this slice rebases on their payload code instead of racing it.
 - **Roster reason (root accepted).** One row pinned to the block body rather than two rows: a row
   pinned to the outlined constructor would fail as a false de-vectorisation the day LLVM inlines it
   again, and the constructor runs on the control side only.
+- **1368b review fold (verifier PASS, two minors).** D5 now holds after a render-time lane swap
+  too: in both effects `set_lane_link` gives every padded lane the first active lane's mode again
+  (allocation-free), so a bank whose members became uniform leaves the shaper's mixed arm and gets
+  the limiter's #990 linked pair back. Padded output is discarded, so no member's bit moves. The
+  limiter's `lane_identity_holds_across_widths` now checks the linked pair on a padded uniform
+  all-`Maximum` bank, and on the same bank after a swap made its members uniform. Mutants: padded
+  lanes forced to `DualMono` at bind, red; the post-swap re-derive removed, red.
+- **Status.** With 1368a, this tranche delivers D1-D5 for all four effects, so it completes
+  #1368. The cost row (gate 4) waits for an unloaded run and does not gate the issue (root).
