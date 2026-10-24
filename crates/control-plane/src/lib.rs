@@ -66,7 +66,7 @@ pub use control::{
     CommandError, EventError, EventLane, ObservationChange, ObservationForward,
     ObservationKeyError, ObservationKeyRef, ObservationLimit, ObservationRefusal,
     REPREPARE_REQUIRED, ResolvedObservationTap, SessionSeekFailure, SessionState, SourceFailure,
-    resolve_observation_tap,
+    SourceRefusalKind, resolve_observation_tap,
 };
 pub use error::{CompileFailure, ResourceFault};
 /// One planar chunk a host submits to a source of the session ([`SessionState::submit`]).
