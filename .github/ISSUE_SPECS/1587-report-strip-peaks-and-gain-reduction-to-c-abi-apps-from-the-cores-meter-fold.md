@@ -153,6 +153,21 @@ Commands: `cargo test --locked -p host-core --all-features`,
   epoch whose frames the delivery folds (not the committed model: a pending rebuild never
   relabels a record).
 - **Records bound.** A batch carries at most 256 records, so the provider refuses the 129th peak
-  entry: `INVALID_FIELD`, `meter.records`, at that entry. The lossy lane is sized to 256 slots.
+  entry: `INVALID_FIELD`, `meter.records`, at that entry.
+- **Root ruling 1 (lane).** The meter lane holds one whole batch, 256 slots. The protocol queue
+  config sizes the counter-snapshot lane apart with no wire change (`ProtocolQueueConfig::
+  counter_telemetry_slots`, kept at 2), and `telemetry_slots` reports the meter lane. So the two
+  counter tests that relied on a two-slot lane are unchanged. The C ABI capability and event
+  vectors are re-pinned (field 15: 256, was 2); the conformance corpus passes, so
+  `COMPLETE_SCHEMA_HASH` did not move. `reference_session_retained_rows`: `capi_retained_bytes`
+  measured 293,324, ceiling 322,688 (+10 %, to 64), for the 65,024 B strip-ID reserve and the
+  meter lane.
+- **Root ruling 2 (depth).** The C ABI's strip meter queues are as deep as the output meter's,
+  `METER_QUEUE_DEPTH` (8, was 1): at depth 1 every frame after a service lag of more than one
+  window was lost. Caps now charge 8 meter items per strip, so a session near
+  `maximum_meter_items` is refused earlier; a host can raise the cap. This moved the reference
+  session's `builtin_meter_payload_bytes` (20,538) and `builtin_retained_payload_bytes` (56,997)
+  past their ceilings, which are raised by the same rule (22,592 and 62,720); the ruling's "no
+  other budget" did not foresee these two, so they are flagged for root.
 - **Charge.** The strip-ID text of the two stored tables is charged at 256 entries x
   `STABLE_ID_MAXIMUM_BYTES` x 2 (`meter_text_reserve_bytes`), with the resolution and fold vectors.

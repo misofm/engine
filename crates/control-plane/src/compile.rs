@@ -245,6 +245,8 @@ pub(crate) fn protocol_queue_config(
         reliable_response_slots: one,
         reliable_event_slots: NonZeroUsize::new(RELIABLE_EVENT_SLOTS).expect("two is nonzero"),
         telemetry_slots: NonZeroUsize::new(TELEMETRY_SLOTS).expect("256 is nonzero"),
+        counter_telemetry_slots: NonZeroUsize::new(COUNTER_TELEMETRY_SLOTS)
+            .expect("two is nonzero"),
     })
 }
 
@@ -252,6 +254,10 @@ pub(crate) fn protocol_queue_config(
 /// caller split or half dropped. An accepted meter table needs at most
 /// [`host_core::MAXIMUM_METER_BATCH_RECORDS`] records, the wire's bound on one batch.
 const TELEMETRY_SLOTS: usize = host_core::MAXIMUM_METER_BATCH_RECORDS;
+
+/// The counter-snapshot lane's slots (#1351, #1587a): two, as before the meter lane grew. A
+/// snapshot that does not fit coalesces or drops with a count.
+const COUNTER_TELEMETRY_SLOTS: usize = 2;
 
 /// The reliable event queue's slots: the transaction's `SESSION_COMMITTED` and its one
 /// `OBSERVATION_ENDED` (#1584 D6a).

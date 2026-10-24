@@ -616,7 +616,10 @@ fn host_half_counting(
     let (prepared, handles) = host_core::prepare_host_runtime_with_live_lanes(
         store.compiled(),
         &caps,
+        // As capi asks: #1584 D7's observation taps and #1587a's strip meter queue depth.
         &host_core::HostLiveControlRequest {
+            meter_queue_depth: core::num::NonZeroUsize::new(host_core::METER_QUEUE_DEPTH)
+                .expect("the meter queue depth"),
             observation_taps: host_core::launch_maximum_observation_taps(),
             ..host_core::HostLiveControlRequest::default()
         },
@@ -1365,6 +1368,16 @@ impl Budget {
 /// 10 %, rounded up to 64: 82,790.4 -> 82,816; the effect runtime row gains 512 (12,800, within
 /// 13,568); and the graph ceilings rise by the +38,912 delta plus 10 %: 324,352 + 42,803.2 ->
 /// 367,168 and 324,224 + 42,803.2 -> 367,040, until the next `aarch64-debug` print tightens them.
+///
+/// #1587a serves strip peaks on the C ABI. `capi_retained_bytes` measured 293,324 (x86-64; the row
+/// does not depend on the lane width), above the 212,288 ceiling: the strip-ID text of the two
+/// stored meter tables, charged at 256 entries x 127 B x 2 = 65,024 B (#1325a's rule), the meter
+/// lane at 256 slots (one whole batch; the counter lane stays at 2), each epoch's meter tables and
+/// the entry resolution and fold vectors. So the ceiling is 293,324 plus 10 %, rounded up to 64:
+/// 322,656.4 -> 322,688. The C ABI's strip meter queues are now as deep as the output meter's
+/// (8, was 1; root ruling 2), so `builtin_meter_payload_bytes` measured 20,538 and
+/// `builtin_retained_payload_bytes` 56,997, above 11,520 and 51,648: 22,591.8 -> 22,592 and
+/// 62,696.7 -> 62,720.
 const REFERENCE_BUDGETS: [Budget; 19] = [
     Budget {
         row: "graph_session_plus_plan_bytes",
@@ -1459,20 +1472,20 @@ const REFERENCE_BUDGETS: [Budget; 19] = [
     Budget {
         row: "builtin_meter_payload_bytes",
         value: |report| report.builtin_meter_payload_bytes,
-        eight_lanes: 11_520,
-        four_lanes: 11_520,
+        eight_lanes: 22_592,
+        four_lanes: 22_592,
     },
     Budget {
         row: "builtin_retained_payload_bytes",
         value: |report| report.builtin_retained_payload_bytes,
-        eight_lanes: 51_648,
-        four_lanes: 51_648,
+        eight_lanes: 62_720,
+        four_lanes: 62_720,
     },
     Budget {
         row: "capi_retained_bytes",
         value: |report| report.capi_retained_bytes,
-        eight_lanes: 212_288,
-        four_lanes: 212_288,
+        eight_lanes: 322_688,
+        four_lanes: 322_688,
     },
     Budget {
         row: "largest_named_allocation_bytes",
@@ -1911,7 +1924,11 @@ fn double_live_oracle_drives_exact_and_one_below_c_caps() {
     let successor = host_core::prepare_host_runtime_with_live_lanes_successor(
         prospective_host.store.compiled(),
         &host_caps(&limits()),
-        &host_core::HostLiveControlRequest::default(),
+        &host_core::HostLiveControlRequest {
+            meter_queue_depth: core::num::NonZeroUsize::new(host_core::METER_QUEUE_DEPTH)
+                .expect("the meter queue depth"),
+            ..host_core::HostLiveControlRequest::default()
+        },
         host_core::HostLiveLanes {
             strip_input: true,
             effects: true,
