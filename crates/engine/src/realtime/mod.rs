@@ -34,7 +34,7 @@ pub use plan::{
     PreparedProgram, PreparedRenderPlan, RenderEnvelope, RenderError, RenderIo, RenderReport,
     RenderTime, ResponseSnapshotAvailability, ResponseSnapshotCapture, ResponseSnapshotError,
     ResponseSnapshotOwnerInfo, ResponseSnapshotRequest, ResponseSnapshotSection,
-    ResponseSnapshotSink, plan_revision_gate_retained_bytes,
+    ResponseSnapshotSink, plan_revision_gate_retained_bytes, retained,
 };
 pub use plan_exchange::{
     PlanEpoch, PlanExchangeConfig, PlanExchangeError, PlanExchangeResourceReport, PlanPublisher,
@@ -67,6 +67,9 @@ mod tests {
     struct SnapshotExecutor;
 
     impl PreparedPlanExecutor for SnapshotExecutor {
+        fn retained_bytes(&self) -> u64 {
+            0
+        }
         fn copy_response_snapshot(
             &self,
             _track_id: &str,
@@ -230,6 +233,9 @@ mod tests {
     }
 
     impl PreparedPlanExecutor for OffsetExecutor {
+        fn retained_bytes(&self) -> u64 {
+            crate::realtime::retained::arc::<std::sync::atomic::AtomicU64>()
+        }
         fn set_source_read_offset(&mut self, offset: u64) {
             self.offset
                 .store(offset, std::sync::atomic::Ordering::Relaxed);
@@ -932,6 +938,10 @@ mod tests {
         struct Snapshotting(SnapshotProbe);
 
         impl PreparedPlanExecutor for Snapshotting {
+            fn retained_bytes(&self) -> u64 {
+                2 * crate::realtime::retained::arc::<AtomicU64>()
+                    + crate::realtime::retained::arc::<AtomicBool>()
+            }
             fn begin_live_block(&mut self, snapshot: LiveSnapshot) {
                 self.0.last.store(snapshot.revision(), Ordering::Relaxed);
                 self.0.calls.fetch_add(1, Ordering::Relaxed);
@@ -1052,6 +1062,11 @@ mod tests {
         }
 
         impl PreparedPlanExecutor for CellProbe {
+            fn retained_bytes(&self) -> u64 {
+                crate::realtime::retained::arc::<LatestCell<2>>()
+                    + crate::realtime::retained::arc::<DirtyWord>()
+                    + crate::realtime::retained::arc::<AtomicU64>()
+            }
             fn begin_live_block(&mut self, snapshot: LiveSnapshot) {
                 let pending = self.stage.pending(&self.dirty);
                 if pending & 1 == 0 {
@@ -1518,6 +1533,12 @@ mod tests {
         struct Gated(Probe);
 
         impl PreparedPlanExecutor for Gated {
+            fn retained_bytes(&self) -> u64 {
+                crate::realtime::retained::arc::<AtomicBool>()
+                    + crate::realtime::retained::arc::<AtomicUsize>()
+                    + crate::realtime::retained::arc::<AtomicU64>()
+                    + crate::realtime::retained::arc::<AtomicU32>()
+            }
             fn prime_ready(&self, block_start: u64, lead_blocks: u32) -> bool {
                 self.0.calls.fetch_add(1, Ordering::Relaxed);
                 self.0.block_start.store(block_start, Ordering::Relaxed);
@@ -1540,6 +1561,9 @@ mod tests {
         struct Unchecked;
 
         impl PreparedPlanExecutor for Unchecked {
+            fn retained_bytes(&self) -> u64 {
+                0
+            }
             fn render(
                 &mut self,
                 _arena: &mut BufferArena,
@@ -2001,6 +2025,9 @@ mod tests {
         }
 
         impl PreparedPlanExecutor for Oscillator {
+            fn retained_bytes(&self) -> u64 {
+                crate::realtime::retained::arc::<AtomicUsize>()
+            }
             fn as_any_mut(&mut self) -> Option<&mut dyn core::any::Any> {
                 Some(self)
             }
@@ -2058,6 +2085,9 @@ mod tests {
         struct Stranger;
 
         impl PreparedPlanExecutor for Stranger {
+            fn retained_bytes(&self) -> u64 {
+                0
+            }
             fn render(
                 &mut self,
                 _arena: &mut BufferArena,

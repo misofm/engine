@@ -227,6 +227,10 @@ impl StripBank {
 }
 
 impl PreparedNativeEffectBank for StripBank {
+    fn retained_bytes(&self) -> u64 {
+        engine::realtime::retained::vec(&self.lanes)
+            + engine::realtime::retained::arc_slice::<AtomicU64>(self.defaults.len())
+    }
     fn reset(&mut self, _kind: ResetKind) {}
 
     fn process_bank(&mut self, block: EffectBankProcessBlock<'_>) -> BankProcessReport {

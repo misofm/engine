@@ -3197,6 +3197,13 @@ struct PreparedParametricEq<L: Lane, const W: usize> {
     rest: [Box<[f32]>; 2],
 }
 
+impl<L: Lane, const W: usize> PreparedParametricEq<L, W> {
+    /// The heap this instance owns (#1074): the two rest planes. Every other field is inline.
+    fn heap_bytes(&self) -> u64 {
+        self.rest.iter().map(|plane| effect_contract::retained::slice(plane)).sum()
+    }
+}
+
 impl<L: Lane, const W: usize> Channel<L, W> {
     /// `true` when this channel needs the joint rule's arithmetic on a block of `frames` (issue
     /// #1328): some lane whose silence counter can arm within the block holds a non-zero integrator
@@ -3968,6 +3975,10 @@ impl<L: Lane, const W: usize> PreparedParametricEq<L, W> {
 }
 
 impl PreparedNativeEffect for PreparedParametricEq<f32, 1> {
+    fn retained_bytes(&self) -> u64 {
+        self.heap_bytes()
+    }
+
     fn copy_response_snapshot(
         &self,
         request: ResponseSnapshotRequest<'_>,
@@ -4042,6 +4053,10 @@ impl PreparedNativeEffect for PreparedParametricEq<f32, 1> {
 }
 
 impl<L: Lane, const W: usize> PreparedNativeEffectBank for PreparedParametricEq<L, W> {
+    fn retained_bytes(&self) -> u64 {
+        self.heap_bytes()
+    }
+
     fn copy_response_snapshot_lane(
         &self,
         lane: usize,

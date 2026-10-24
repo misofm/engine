@@ -1387,6 +1387,11 @@ struct LaneRestore {
 }
 
 impl<const CONNECTED: bool> PreparedNativeEffect for PreparedGate<f32, CONNECTED> {
+    /// Every field is inline: this instance owns no heap (#1074).
+    fn retained_bytes(&self) -> u64 {
+        0
+    }
+
     fn reset(&mut self, kind: ResetKind) {
         PreparedGate::reset(self, kind);
     }
@@ -1465,6 +1470,11 @@ fn checked_track(track_index: u32, width: usize) -> Result<usize, StatePayloadEr
 macro_rules! bank_impl {
     ($lane:ty) => {
         impl PreparedNativeEffectBank for PreparedGate<$lane, false> {
+            /// Every field is inline: this instance owns no heap (#1074).
+            fn retained_bytes(&self) -> u64 {
+                0
+            }
+
             fn observe_resident_bank(&self, tap_index: u32, out: &mut [ObservationSample]) -> bool {
                 let lanes = <$lane as Lane>::WIDTH;
                 if tap_index != 0 || out.len() != lanes {

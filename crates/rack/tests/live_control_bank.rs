@@ -87,6 +87,9 @@ impl MockGainBank {
 }
 
 impl PreparedNativeEffectBank for MockGainBank {
+    fn retained_bytes(&self) -> u64 {
+        engine::realtime::retained::vec(&self.line)
+    }
     fn reset(&mut self, _kind: ResetKind) {}
     fn process_bank(&mut self, block: EffectBankProcessBlock<'_>) -> BankProcessReport {
         let report = BankProcessReport::empty(BankWidth::Four);
@@ -509,6 +512,9 @@ fn run_hands_the_blocks_snapshot_to_every_active_slot_in_every_block() {
         drains: Drains,
     }
     impl BankStage for Recording {
+        fn retained_bytes(&self) -> u64 {
+            engine::realtime::retained::arc::<Mutex<Vec<(usize, u64, u64)>>>()
+        }
         fn process(&mut self, _block: BankBlock<'_>) -> Result<(), RenderError> {
             Ok(())
         }

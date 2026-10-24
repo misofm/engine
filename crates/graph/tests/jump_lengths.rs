@@ -27,6 +27,9 @@ const PREPARED: GraphJumpLengths = GraphJumpLengths {
 /// A source of a constant, nonzero block.
 struct Source;
 impl GraphRuntimeProcessor for Source {
+    fn retained_bytes(&self) -> u64 {
+        0
+    }
     fn process(&mut self, block: GraphBindingBlock<'_>) -> Result<(), RenderError> {
         block.left.fill(0.25);
         block.right.fill(-0.25);

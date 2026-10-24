@@ -73,6 +73,15 @@ pub struct PublishedWordsWriter<const N: usize> {
     record: Arc<PublishedWords<N>>,
 }
 
+impl<const N: usize> PublishedWordsWriter<N> {
+    /// The heap bytes the writer retains (#1074): the shared record's whole allocation, whoever
+    /// else holds it. Control thread only.
+    #[must_use]
+    pub fn retained_bytes(&self) -> u64 {
+        u64::try_from(published_words_retained_bytes::<N>()).unwrap_or(u64::MAX)
+    }
+}
+
 /// Any-thread reader handle. Cloning it shares the one record.
 #[derive(Clone, Debug)]
 pub struct PublishedWordsReader<const N: usize> {

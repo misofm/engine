@@ -4501,6 +4501,10 @@ impl BuiltinBankProcessor {
 }
 
 impl GraphPreparedBuiltinBankProcessor for BuiltinBankProcessor {
+    fn retained_bytes(&self) -> u64 {
+        reader_table_bytes(&self.controls, InputReader::retained_bytes)
+    }
+
     fn as_any(&self) -> &dyn std::any::Any {
         self
     }
@@ -5082,6 +5086,11 @@ impl FaderBankProcessor {
 }
 
 impl GraphPreparedBuiltinBankProcessor for FaderBankProcessor {
+    fn retained_bytes(&self) -> u64 {
+        reader_table_bytes(&self.controls, FaderReader::retained_bytes)
+            + reader_table_bytes(&self.automation, LaneFaderAutomation::retained_bytes)
+    }
+
     fn as_any(&self) -> &dyn std::any::Any {
         self
     }
@@ -5431,6 +5440,10 @@ impl MatrixBankProcessor {
 }
 
 impl GraphPreparedBuiltinBankProcessor for MatrixBankProcessor {
+    fn retained_bytes(&self) -> u64 {
+        reader_table_bytes(&self.controls, MatrixReader::retained_bytes)
+    }
+
     fn as_any(&self) -> &dyn std::any::Any {
         self
     }
@@ -6283,6 +6296,9 @@ pub struct PreparedBuiltinsGraphArtifact<R> {
     /// them to the caller together with the plan that owns their consumers.
     track_controls: Vec<TrackControlProducer>,
     meter_consumers: Vec<MeterConsumer>,
+    /// The session's one fader and mute automation program, `None` without one. Bind hands it
+    /// to the plan's graph executor, which charges it once in the plan's retained bytes (#1074).
+    automation_program: Option<Arc<automation::Program>>,
 }
 
 /// The one-way result of consuming and binding a sealed builtin graph artifact.
@@ -6649,6 +6665,13 @@ impl PreparedBuiltinsSession {
         Some((Arc::clone(&plan.program), cells))
     }
 
+    /// The session's one automation program, cloned for the bound plan (#1074). Control side.
+    fn automation_program(&self) -> Option<Arc<automation::Program>> {
+        self.fader_automation
+            .as_ref()
+            .map(|plan| Arc::clone(&plan.program))
+    }
+
     /// Every route's effective follow gate, `[left, right]` per source lane, in `model.routes`
     /// order, as it was prepared with (decision 17, C7): `follows_mute` on a muted lane of the
     /// route's source strip, composed once by `controls::effective`. Control-side data like
@@ -6792,6 +6815,7 @@ impl PreparedBuiltinsSession {
         // #1646 D2: the scalar oracle rebuilds the ramped fader from the prepared parameters here.
         // Defensive for direct oracle callers; `into_graph_artifact_with_banks` already holds it.
         let _canonical = lane::CanonicalFpEnv::enter();
+        let automation_program = self.automation_program();
         let mut processors = core::mem::take(&mut self.processors);
         processors.append(&mut self.strip_bindings());
         PreparedBuiltinsGraphArtifact {
@@ -6801,6 +6825,7 @@ impl PreparedBuiltinsSession {
             report,
             track_controls: self.track_controls,
             meter_consumers: self.meter_consumers,
+            automation_program,
         }
     }
 
@@ -7197,6 +7222,7 @@ impl PreparedBuiltinsSession {
                  (#1059)"
             );
         };
+        let automation_program = self.automation_program();
         let plan = planned_strip_banks(&self.seal.tracks, dispatch, levels, classes);
         if plan.iter().all(|(_, groups)| groups.is_empty()) {
             let mut processors = core::mem::take(&mut self.processors);
@@ -7208,6 +7234,7 @@ impl PreparedBuiltinsSession {
                 report,
                 track_controls: self.track_controls,
                 meter_consumers: self.meter_consumers,
+                automation_program,
             };
         }
         let resource = self
@@ -7228,6 +7255,7 @@ impl PreparedBuiltinsSession {
             report,
             track_controls: self.track_controls,
             meter_consumers: self.meter_consumers,
+            automation_program,
         }
     }
 
@@ -7546,6 +7574,7 @@ fn restore_graph_bind_failure<R>(
     report: R,
     track_controls: Vec<TrackControlProducer>,
     meter_consumers: Vec<MeterConsumer>,
+    automation_program: Option<Arc<automation::Program>>,
 ) -> (PreparedBuiltinsGraphArtifact<R>, GraphRuntimeBindings) {
     let envelope = bindings.envelope;
     let mut builtin_processors = Vec::new();
@@ -7577,6 +7606,7 @@ fn restore_graph_bind_failure<R>(
             report,
             track_controls,
             meter_consumers,
+            automation_program,
         },
         GraphRuntimeBindings {
             envelope,
@@ -7771,10 +7801,15 @@ impl<R> PreparedBuiltinsGraphArtifact<R> {
     }
 
     fn bound_from_plan(
-        plan: PreparedRenderPlan,
+        mut plan: PreparedRenderPlan,
         track_controls: Vec<TrackControlProducer>,
         meter_consumers: Vec<MeterConsumer>,
+        automation_program: Option<Arc<automation::Program>>,
     ) -> PreparedBuiltinsGraphBound {
+        if let Some(program) = automation_program {
+            graph::attach_automation_program(&mut plan, program)
+                .expect("a freshly bound graph plan takes its one automation program");
+        }
         PreparedBuiltinsGraphBound {
             track_controls,
             plan,
@@ -7808,9 +7843,15 @@ impl<R> PreparedBuiltinsGraphArtifact<R> {
             report,
             track_controls,
             meter_consumers,
+            automation_program,
         } = self;
         match graph.bind(bindings) {
-            Ok(plan) => Ok(Self::bound_from_plan(plan, track_controls, meter_consumers)),
+            Ok(plan) => Ok(Self::bound_from_plan(
+                plan,
+                track_controls,
+                meter_consumers,
+                automation_program,
+            )),
             Err(failure) => {
                 let (artifact, bindings) = restore_graph_bind_failure(
                     failure.plan,
@@ -7819,6 +7860,7 @@ impl<R> PreparedBuiltinsGraphArtifact<R> {
                     report,
                     track_controls,
                     meter_consumers,
+                    automation_program,
                 );
                 Err(PreparedBuiltinsGraphBindFailure {
                     artifact,
@@ -7860,9 +7902,15 @@ impl<R> PreparedBuiltinsGraphArtifact<R> {
             report,
             track_controls,
             meter_consumers,
+            automation_program,
         } = self;
         match graph.bind_with_source_set(bindings, source_set) {
-            Ok(plan) => Ok(Self::bound_from_plan(plan, track_controls, meter_consumers)),
+            Ok(plan) => Ok(Self::bound_from_plan(
+                plan,
+                track_controls,
+                meter_consumers,
+                automation_program,
+            )),
             Err(failure) => {
                 let (artifact, bindings) = restore_graph_bind_failure(
                     failure.plan,
@@ -7871,6 +7919,7 @@ impl<R> PreparedBuiltinsGraphArtifact<R> {
                     report,
                     track_controls,
                     meter_consumers,
+                    automation_program,
                 );
                 Err(PreparedBuiltinsGraphSourceBindFailure {
                     artifact,
@@ -8901,6 +8950,73 @@ impl SessionPoolClasses {
     }
 }
 
+// #1074: the heap each builtins plan owner retains, exclusive of itself. A lane's cell `Arc` is
+// charged in full (its writer is control-side and drops before the plan). Two things are never
+// charged here: the host-owned `LiveValuesSuperseded` counter, which outlives the plan, and the
+// session's one `Arc<automation::Program>`, which the graph executor charges once for the plan.
+impl InputReader {
+    fn retained_bytes(&self) -> u64 {
+        effect_contract::retained::arc(&self.lane)
+    }
+}
+
+impl FaderReader {
+    fn retained_bytes(&self) -> u64 {
+        effect_contract::retained::arc(&self.lane)
+    }
+}
+
+impl MatrixReader {
+    fn retained_bytes(&self) -> u64 {
+        effect_contract::retained::arc(&self.lane)
+    }
+}
+
+impl AutomatedFaderCell {
+    fn retained_bytes(&self) -> u64 {
+        let curve = match &self.curve {
+            FaderCurve::Cell { .. } => 0,
+            FaderCurve::Composed(composite) => {
+                effect_contract::retained::boxed(&**composite) + composite.walk.retained_bytes()
+            }
+        };
+        effect_contract::retained::arc(&self.offsets) + curve
+    }
+}
+
+impl AutomatedMuteCell {
+    fn retained_bytes(&self) -> u64 {
+        match &self.curve {
+            MuteCurve::Cell { .. } => 0,
+            MuteCurve::Composed(composite) => {
+                effect_contract::retained::boxed(&**composite) + composite.walk.retained_bytes()
+            }
+        }
+    }
+}
+
+impl LaneFaderAutomation {
+    /// Its cells' heap; the graph executor charges the shared program once (see above).
+    fn retained_bytes(&self) -> u64 {
+        self.channels
+            .iter()
+            .flatten()
+            .map(AutomatedFaderCell::retained_bytes)
+            .chain(self.mute.iter().flatten().map(AutomatedMuteCell::retained_bytes))
+            .sum()
+    }
+}
+
+/// A boxed lane automation: the box and its own heap.
+fn boxed_automation_bytes(automation: &LaneFaderAutomation) -> u64 {
+    effect_contract::retained::boxed(automation) + automation.retained_bytes()
+}
+
+/// A per-lane control table: the table and each present reader's heap.
+fn reader_table_bytes<T>(table: &[Option<T>], reader: impl Fn(&T) -> u64) -> u64 {
+    effect_contract::retained::slice(table) + table.iter().flatten().map(reader).sum::<u64>()
+}
+
 // The whole-plan scalar path (issue #1059). A track's strip renders through the per-node owners
 // below only when its plan was compiled at `Backend::Scalar`, which binds no strip bank; at every
 // vector width the planner banks every strip (`planned_builtin_bank_members`). The scalar backend
@@ -8912,6 +9028,10 @@ impl SessionPoolClasses {
 struct InputProcessor(InputBuiltins);
 #[cfg(any(test, feature = "test-support"))]
 impl GraphRuntimeProcessor for InputProcessor {
+    fn retained_bytes(&self) -> u64 {
+        0
+    }
+
     fn process(&mut self, block: GraphBindingBlock<'_>) -> Result<(), RenderError> {
         let block = DualMonoBlock::new(block.left, block.right, block.first_sample)
             .map_err(render_error)?;
@@ -8939,6 +9059,10 @@ impl GraphRuntimeProcessor for InputProcessor {
 struct FaderProcessor(FaderMuteBuiltins);
 #[cfg(any(test, feature = "test-support"))]
 impl GraphRuntimeProcessor for FaderProcessor {
+    fn retained_bytes(&self) -> u64 {
+        0
+    }
+
     fn process(&mut self, block: GraphBindingBlock<'_>) -> Result<(), RenderError> {
         let block = DualMonoBlock::new(block.left, block.right, block.first_sample)
             .map_err(render_error)?;
@@ -8962,6 +9086,10 @@ struct AutomatedFaderProcessor {
 }
 #[cfg(any(test, feature = "test-support"))]
 impl GraphRuntimeProcessor for AutomatedFaderProcessor {
+    fn retained_bytes(&self) -> u64 {
+        boxed_automation_bytes(&self.automation)
+    }
+
     fn process(&mut self, block: GraphBindingBlock<'_>) -> Result<(), RenderError> {
         render_oracle_fader(
             &mut self.fader,
@@ -9026,6 +9154,10 @@ fn render_oracle_fader(
 struct MatrixProcessor(MatrixBuiltins);
 #[cfg(any(test, feature = "test-support"))]
 impl GraphRuntimeProcessor for MatrixProcessor {
+    fn retained_bytes(&self) -> u64 {
+        0
+    }
+
     fn process(&mut self, block: GraphBindingBlock<'_>) -> Result<(), RenderError> {
         let block = DualMonoBlock::new(block.left, block.right, block.first_sample)
             .map_err(render_error)?;
@@ -9064,6 +9196,10 @@ struct LiveControlInputProcessor {
 }
 #[cfg(any(test, feature = "test-support"))]
 impl GraphRuntimeProcessor for LiveControlInputProcessor {
+    fn retained_bytes(&self) -> u64 {
+        self.control.retained_bytes()
+    }
+
     fn process(&mut self, block: GraphBindingBlock<'_>) -> Result<(), RenderError> {
         self.drain_controls(block.live_snapshot)?;
         let block = DualMonoBlock::new(block.left, block.right, block.first_sample)
@@ -9133,6 +9269,10 @@ struct LiveControlMatrixProcessor {
 }
 #[cfg(any(test, feature = "test-support"))]
 impl GraphRuntimeProcessor for LiveControlMatrixProcessor {
+    fn retained_bytes(&self) -> u64 {
+        self.control.retained_bytes()
+    }
+
     fn process(&mut self, block: GraphBindingBlock<'_>) -> Result<(), RenderError> {
         self.drain_controls(block.live_snapshot)?;
         let block = DualMonoBlock::new(block.left, block.right, block.first_sample)
@@ -9182,6 +9322,11 @@ struct LiveControlFaderProcessor {
 }
 #[cfg(any(test, feature = "test-support"))]
 impl GraphRuntimeProcessor for LiveControlFaderProcessor {
+    fn retained_bytes(&self) -> u64 {
+        self.control.retained_bytes()
+            + self.automation.as_deref().map_or(0, boxed_automation_bytes)
+    }
+
     fn process(&mut self, block: GraphBindingBlock<'_>) -> Result<(), RenderError> {
         self.drain_controls(block.live_snapshot)?;
         render_oracle_fader(
@@ -9256,6 +9401,10 @@ impl LiveControlFaderProcessor {
 
 struct MeterObserver(MeterAccumulator);
 impl GraphRuntimeObserver for MeterObserver {
+    fn retained_bytes(&self) -> u64 {
+        self.0.retained_bytes()
+    }
+
     /// Issue #943: a meter that selects exactly `SAMPLE_PEAK` merges the bank's block peak instead
     /// of reading its samples, so it asks the bank to compute one. Any other selection still needs
     /// the samples and never makes a bank run the pass.
@@ -9655,6 +9804,10 @@ mod tests {
     }
 
     impl GraphPreparedSourceSetDriver for SourceSetDriver {
+        fn retained_bytes(&self) -> u64 {
+            effect_contract::retained::arc(&self.drops)
+        }
+
         fn claim_count(&self) -> usize {
             self.claim_count
         }
@@ -9693,6 +9846,10 @@ mod tests {
     }
 
     impl GraphRuntimeProcessor for DropProcessor {
+        fn retained_bytes(&self) -> u64 {
+            effect_contract::retained::arc(&self.0)
+        }
+
         fn process(&mut self, _block: GraphBindingBlock<'_>) -> Result<(), RenderError> {
             Ok(())
         }
@@ -9701,6 +9858,10 @@ mod tests {
     struct NoopObserver;
 
     impl GraphRuntimeObserver for NoopObserver {
+        fn retained_bytes(&self) -> u64 {
+            0
+        }
+
         fn observe(&mut self, _block: GraphObservationBlock<'_>) -> Result<(), RenderError> {
             Ok(())
         }
@@ -9862,6 +10023,7 @@ mod tests {
             report: 0x22_73,
             track_controls: Vec::new(),
             meter_consumers: Vec::new(),
+            automation_program: None,
         };
         let bindings = GraphRuntimeBindings {
             envelope,
@@ -10384,6 +10546,10 @@ mod tests {
     }
     struct AliasObserver;
     impl GraphRuntimeObserver for AliasObserver {
+        fn retained_bytes(&self) -> u64 {
+            0
+        }
+
         fn observe(&mut self, block: GraphObservationBlock<'_>) -> Result<(), RenderError> {
             ALIAS_OBSERVATIONS.with(|count| count.set(count.get() + 1));
             ALIAS_CAPTURE.with(|capture| {
@@ -10396,6 +10562,10 @@ mod tests {
     }
 
     impl GraphRuntimeProcessor for SeededInput {
+        fn retained_bytes(&self) -> u64 {
+            0
+        }
+
         fn process(&mut self, block: GraphBindingBlock<'_>) -> Result<(), RenderError> {
             let mut state = self.seed ^ block.first_sample.wrapping_mul(0x9e37_79b9_7f4a_7c15);
             let mut next = || {
@@ -10427,6 +10597,10 @@ mod tests {
     struct Capture(Arc<std::sync::Mutex<Vec<u32>>>);
 
     impl GraphRuntimeObserver for Capture {
+        fn retained_bytes(&self) -> u64 {
+            effect_contract::retained::arc(&self.0) + self.0.lock().map_or(0, |v| effect_contract::retained::vec(&v))
+        }
+
         fn observe(&mut self, block: GraphObservationBlock<'_>) -> Result<(), RenderError> {
             let mut sink = self.0.lock().expect("harness capture");
             sink.extend(block.left.iter().map(|sample| sample.to_bits()));
@@ -11773,6 +11947,10 @@ mod tests {
     struct HarnessSink;
 
     impl GraphRuntimeProcessor for HarnessSink {
+        fn retained_bytes(&self) -> u64 {
+            0
+        }
+
         fn process(&mut self, _block: GraphBindingBlock<'_>) -> Result<(), RenderError> {
             Ok(())
         }
@@ -11783,6 +11961,10 @@ mod tests {
     fn resident_meter_prepared_plans_match_planar_with_aliases_mixed_observers_and_delayed_sends() {
         struct FailingObserver;
         impl GraphRuntimeObserver for FailingObserver {
+            fn retained_bytes(&self) -> u64 {
+                0
+            }
+
             fn observe(&mut self, _block: GraphObservationBlock<'_>) -> Result<(), RenderError> {
                 Err(RenderError::InvalidEnvelope)
             }
@@ -11795,6 +11977,10 @@ mod tests {
         }
         struct CountSink(Arc<AtomicUsize>);
         impl GraphRuntimeProcessor for CountSink {
+            fn retained_bytes(&self) -> u64 {
+                effect_contract::retained::arc(&self.0)
+            }
+
             fn process(&mut self, _block: GraphBindingBlock<'_>) -> Result<(), RenderError> {
                 self.0.fetch_add(1, Ordering::Relaxed);
                 Ok(())

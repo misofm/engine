@@ -732,15 +732,19 @@ fn freed_by_drop<T>(value: T) -> u64 {
 
 /// What each owner the host-core half hands capi retains, observed by dropping it.
 ///
-/// The drop order is the attribution: the effect, strip and source producers go first, so a ring
-/// the producers share with the plan is freed -- and counted -- with the plan that renders from
-/// it, and the producers' own bytes are their tables, IDs and (an EQ's) owners alone.
+/// The drop order is the attribution: the effect, strip, source and meter consumers go first, so
+/// a ring or cell the producers share with the plan is freed -- and counted -- with the plan that
+/// renders from it, and the producers' own bytes are their tables, IDs and (an EQ's) owners alone.
+/// The plan drops after every owner that shares an allocation it walks; the inventory drops after
+/// the plan because it, not the plan, charges the fade-arm flags the two share.
 struct HostOwners {
     routes: u64,
     effects: u64,
     strips: u64,
     sources: u64,
     catalog: u64,
+    /// The meter consumers' vector and IDs: their rings are the plan's.
+    meters: u64,
     plan: u64,
     store: u64,
     /// The plan's state inventory (#1272 D1), which capi keeps with the plan's source producers
@@ -758,6 +762,8 @@ struct CompileObservation {
     /// Bytes the replayed host-core half left live, and the same bytes owner by owner.
     host_live: u64,
     owners: HostOwners,
+    /// `PreparedRenderPlan::retained_bytes`, walked before any owner dropped (#1074).
+    plan_walk: u64,
     /// `strip_control_table_bytes` at the compiled session's strip count and strip ID bytes.
     strip_table_charge: u64,
     /// The observation rows that are bounds, not allocations (#1584 D6a): the cells' event heap,
@@ -824,14 +830,15 @@ fn observe_compile(document: &str, compile_limits: &CompileLimits) -> CompileObs
         inventory,
         control_catalog,
     } = prepared;
+    let plan_walk = plan.retained_bytes();
     let owners = HostOwners {
         routes: freed_by_drop(routes),
         effects: freed_by_drop(effects),
         strips: freed_by_drop(strips),
         sources: freed_by_drop(sources),
         catalog: freed_by_drop(control_catalog),
-        // The meter consumers' vector, IDs and rings are builtins' rows, as the plan's are.
-        plan: freed_by_drop((meters, plan)),
+        meters: freed_by_drop(meters),
+        plan: freed_by_drop(plan),
         store: freed_by_drop(store),
         inventory: freed_by_drop(inventory),
     };
@@ -841,11 +848,12 @@ fn observe_compile(document: &str, compile_limits: &CompileLimits) -> CompileObs
             + owners.strips
             + owners.sources
             + owners.catalog
+            + owners.meters
             + owners.plan
             + owners.store
             + owners.inventory,
         host_live,
-        "the eight owners hold every byte the host-core half retains"
+        "the nine owners hold every byte the host-core half retains"
     );
     CompileObservation {
         report,
@@ -854,6 +862,7 @@ fn observe_compile(document: &str, compile_limits: &CompileLimits) -> CompileObs
         compile_live,
         host_live,
         owners,
+        plan_walk,
         strip_table_charge,
         observation_reserve,
         monitor_and_ramps,
@@ -923,18 +932,13 @@ impl CompileObservation {
     ///   the EQ fixture, 2 on the browser identity fixture). The canonical JSON's spare capacity
     ///   (16,056 bytes on the EQ fixture before #1060 attempt 2 shrank it) was invisible to the
     ///   charge and is red here.
-    /// * The prepared plan is bounded by its engine rows. Those rows are the graph compiler's
-    ///   admission estimate, which charges the preparation, not only what the bound plan keeps:
-    ///   the compile-time graph metadata, bank scratch per slot where a merged chain keeps one
-    ///   slot's, and #511's and #936's reservations at their bound. The slack, eight lanes / four,
-    ///   is 128,317 / 128,405 bytes on the EQ fixture and 12,233 / 8,109 on the browser identity
-    ///   fixture, so an uncharged plan allocation smaller than that is not seen here: an uncharged
-    ///   16-word-per-unit table in the graph runtime (1,808 bytes on the EQ fixture) stays green,
-    ///   and the same table at 2,048 words per unit is red. Seeing the small one needs per-owner
-    ///   attribution inside the prepared plan -- a retained-bytes walk over the bound runtime, as
-    ///   `observation_retained_bytes` already is for its lanes -- which no public API exposes.
-    ///   That is a successor to #1060 (root files it; the spec's attempt-2 evidence names it).
-    ///   Builtins have their own allocator oracle (`builtins-compiler/tests/allocation_tracker.rs`).
+    /// * The prepared plan is exact by its walk (#1074): `PreparedRenderPlan::retained_bytes`,
+    ///   read before any owner dropped, equals the bytes dropping the plan frees. The walk names
+    ///   every heap owner the plan holds, at capacity, and charges each shared allocation it
+    ///   renders from (rings, cells) once, in full; the producers drop first, so those free with
+    ///   the plan. An owner the walk misses, or spare capacity it under-reports, is red. The walk
+    ///   and the meter consumers' vector and IDs together stay within the engine rows, the graph
+    ///   compiler's admission estimate, which charges the preparation and so may exceed them.
     fn assert_host_owners_are_charged(&self, label: &str) {
         let owners = &self.owners;
         assert_eq!(
@@ -982,20 +986,28 @@ impl CompileObservation {
             + report.effect_scalar_state_bytes
             + report.effect_scalar_scratch_bytes
             + report.builtin_retained_payload_bytes;
+        assert_eq!(
+            owners.plan, self.plan_walk,
+            "{label}: dropping the prepared plan freed {} bytes; its retained-bytes walk names {}",
+            owners.plan, self.plan_walk
+        );
         assert!(
-            owners.plan <= engine_rows,
-            "{label}: the prepared plan retains {} bytes, above its charged engine rows \
-             {engine_rows}",
-            owners.plan
+            self.plan_walk + owners.meters <= engine_rows,
+            "{label}: the prepared plan ({} walked) and the meter consumers ({}) retain more than \
+             their charged engine rows {engine_rows}",
+            self.plan_walk,
+            owners.meters
         );
         println!(
-            "{label}: capi {} observed; store {} of {}; plan {} of {} (slack {})",
+            "{label}: capi {} observed; store {} of {}; plan {} walked, {} freed; meters {}; \
+             engine rows {}",
             self.report.capi_retained_bytes,
             owners.store,
             self.model.compiled_model_bytes,
+            self.plan_walk,
             owners.plan,
-            engine_rows,
-            engine_rows - owners.plan
+            owners.meters,
+            engine_rows
         );
     }
 }

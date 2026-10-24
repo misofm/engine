@@ -639,6 +639,48 @@ macro_rules! match_bank_width {
     };
 }
 
+/// Byte arithmetic for `retained_bytes` walks (#1074): the heap bytes one owner allocates,
+/// computed from lengths and capacities only, never from content.
+///
+/// Each function charges the owner's own allocation; the caller adds the retained bytes of each
+/// element that itself owns heap.
+pub mod retained {
+    use core::alloc::Layout;
+    use std::sync::Arc;
+
+    /// A `Box<[T]>` (or any slice that is exactly its owner's allocation): `len * size_of::<T>()`.
+    #[must_use]
+    pub const fn slice<T>(values: &[T]) -> u64 {
+        core::mem::size_of_val(values) as u64
+    }
+
+    /// A `Vec<T>` at its capacity: spare capacity is allocated, so it counts.
+    #[must_use]
+    pub fn vec<T>(values: &Vec<T>) -> u64 {
+        (values.capacity() * core::mem::size_of::<T>()) as u64
+    }
+
+    /// A `Box<T>` of a sized `T`: `size_of::<T>()` (zero for a zero-sized `T`).
+    #[must_use]
+    pub const fn boxed<T>(_value: &T) -> u64 {
+        core::mem::size_of::<T>() as u64
+    }
+
+    /// An `Arc<T>`'s whole allocation (two counts, then `T`), charged in full whatever its
+    /// strong count.
+    ///
+    /// # Panics
+    ///
+    /// Never for a `T` the program could allocate in an `Arc`.
+    #[must_use]
+    pub fn arc<T: ?Sized>(value: &Arc<T>) -> u64 {
+        let (layout, _) = Layout::new::<[usize; 2]>()
+            .extend(Layout::for_value::<T>(&**value))
+            .expect("an Arc layout the program already allocated");
+        layout.pad_to_align().size() as u64
+    }
+}
+
 /// Not public API: the lane types [`match_bank_width!`] names, so that its callers need not.
 #[doc(hidden)]
 pub mod __private {
@@ -2176,6 +2218,12 @@ pub enum ParameterAccessError {
 pub trait PreparedNativeEffect: Send {
     fn reset(&mut self, kind: ResetKind);
     fn process(&mut self, block: EffectProcessBlock<'_>) -> ProcessReport;
+    /// The heap bytes this value retains (#1074), exclusive of the value itself: every `Box`,
+    /// `Vec`, `String` and `Arc` allocation reachable through its fields, a `Vec` or `String` at
+    /// its capacity, an `Arc`'s allocation in full whoever else holds it. Whoever boxes the value
+    /// adds `size_of_val` for the box. Computed from capacities on the control thread, never on
+    /// the render path. Required, so a new owner cannot under-report by default.
+    fn retained_bytes(&self) -> u64;
 
     /// Read one declared [`ObservationCost::Resident`] tap into `out` (issue #143 D2).
     ///
@@ -2348,6 +2396,12 @@ pub trait PreparedNativeEffect: Send {
 pub trait PreparedNativeEffectBank: Send {
     fn reset(&mut self, kind: ResetKind);
     fn process_bank(&mut self, block: EffectBankProcessBlock<'_>) -> BankProcessReport;
+    /// The heap bytes this value retains (#1074), exclusive of the value itself: every `Box`,
+    /// `Vec`, `String` and `Arc` allocation reachable through its fields, a `Vec` or `String` at
+    /// its capacity, an `Arc`'s allocation in full whoever else holds it. Whoever boxes the value
+    /// adds `size_of_val` for the box. Computed from capacities on the control thread, never on
+    /// the render path. Required, so a new owner cannot under-report by default.
+    fn retained_bytes(&self) -> u64;
 
     /// Applies one already-prepared target to one bank lane at a block boundary.
     ///

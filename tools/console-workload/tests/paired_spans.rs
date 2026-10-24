@@ -305,6 +305,10 @@ impl SharedBank {
 }
 
 impl PreparedNativeEffectBank for SharedBank {
+    fn retained_bytes(&self) -> u64 {
+        effect_contract::retained::arc(&self.0) + self.0.lock().map_or(0, |s| core::mem::size_of_val(&*s.bank) as u64 + s.bank.retained_bytes())
+    }
+
     fn reset(&mut self, kind: ResetKind) {
         self.lock().bank.reset(kind);
     }
@@ -375,6 +379,10 @@ impl PreparedNativeEffectBank for SharedBank {
 struct Fader;
 
 impl BankStage for Fader {
+    fn retained_bytes(&self) -> u64 {
+        0
+    }
+
     fn process(&mut self, block: BankBlock<'_>) -> Result<(), RenderError> {
         for sample in block.left.iter_mut() {
             *sample *= 0.707_945_8;

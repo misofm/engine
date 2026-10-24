@@ -4737,6 +4737,36 @@ fn checked_track(track_index: u32, width: usize) -> Result<usize, StatePayloadEr
     Ok(track)
 }
 
+impl ChannelState {
+    /// The heap this channel owns (#1074): every ring and per-lane array, from its length.
+    fn heap_bytes(&self) -> u64 {
+        use effect_contract::retained::slice;
+        slice(&self.history)
+            + slice(&self.main_ring)
+            + slice(&self.required_ring)
+            + slice(&self.box_ring)
+            + slice(&self.reduction)
+            + slice(&self.prefix)
+            + slice(&self.box_sum)
+            + slice(&self.phase)
+            + slice(&self.limit)
+            + slice(&self.release)
+            + slice(&self.lookahead_ms)
+            + slice(&self.lane)
+    }
+}
+
+impl<L: Lane> LimiterCore<L> {
+    /// The heap this core owns (#1074): both default tables and both channels. Every other field
+    /// is inline.
+    fn heap_bytes(&self) -> u64 {
+        effect_contract::retained::slice(&self.left_defaults)
+            + effect_contract::retained::slice(&self.right_defaults)
+            + self.left.heap_bytes()
+            + self.right.heap_bytes()
+    }
+}
+
 /// A prepared scalar limiter instance: the block kernel at `L = f32`, `WIDTH = 1`.
 ///
 /// There is no separate scalar code path any more (#90 F9). A planar block is a `W = 1` AoSoA
@@ -4903,6 +4933,10 @@ impl<L: Lane> LimiterCore<L> {
 }
 
 impl PreparedNativeEffect for PreparedTruePeakLimiter {
+    fn retained_bytes(&self) -> u64 {
+        self.core.heap_bytes()
+    }
+
     fn channel_symmetry(&self) -> bool {
         self.core.designed_channel_symmetry(0)
     }
@@ -4967,6 +5001,10 @@ impl PreparedNativeEffect for PreparedTruePeakLimiter {
 }
 
 impl<L: Lane> PreparedNativeEffectBank for PreparedTruePeakLimiterBank<L> {
+    fn retained_bytes(&self) -> u64 {
+        self.core.heap_bytes()
+    }
+
     fn lane_channel_symmetry(&self, lane: usize) -> bool {
         self.core.designed_channel_symmetry(lane)
     }
