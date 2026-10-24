@@ -87,23 +87,6 @@ pub struct Payload {
 /// matter to it -- for the compressor, in-flight ramps whose channels differ in exactly one field.
 pub type Craft = fn(&mut Draw, &PreparedEffectMetadata, &mut Payload) -> Option<bool>;
 
-/// A defect this differential found, carried by name until the issue that owns it lands.
-///
-/// Each one narrows the generator exactly where the defect lives and nowhere else, so the rest of
-/// the gate keeps running per pull request; the owning crate keeps an `#[ignore]`d twin of its
-/// test without the narrowing as the defect's reproducer.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum Known {
-    /// `bind_homogeneous_bank` declines (`Ok(None)`) at a width this build does not execute, or on
-    /// a heterogeneous member, before it has validated every member -- where the three-outcome
-    /// rule says an invalid member refuses first. Narrowing: the illegal-member probe accepts the
-    /// decline only at a width this build does not execute, and only when `prepare` refuses the
-    /// member with `effect.parameter.initial`.
-    ///
-    /// Owned by #1070.
-    BindDeclinesBeforeValidating,
-}
-
 /// One effect's randomized differential.
 pub struct EffectDifferential<'a> {
     /// The registry that admitted the factory under test ([`admit`]): every request the
@@ -121,8 +104,6 @@ pub struct EffectDifferential<'a> {
     pub blocks: usize,
     /// The effect's payload crafting, if it has one.
     pub craft: Option<Craft>,
-    /// The known defects this run narrows around; empty for the full-strength gate.
-    pub known: &'a [Known],
     /// Whether the effect banks at the width this build executes (every launch effect but the
     /// delay, which renders per node everywhere). A bank that stops binding natively is then red
     /// rather than a quiet fall back to scalar instances.
@@ -887,9 +868,7 @@ fn run_width(
     };
 
     // Bind eligibility first: it needs no rendering.
-    bind_eligibility(
-        spec, draw, shape, &values, backend, width, spec.known, coverage,
-    );
+    bind_eligibility(spec, draw, shape, &values, backend, width, coverage);
 
     // Bind first: a declined width prepares nothing more, which matters for a large state.
     let PreparedEffectBank {
@@ -2256,7 +2235,6 @@ struct Restored {
 }
 
 /// The three-outcome rule on `bind_homogeneous_bank`, on cohorts built to break it.
-#[allow(clippy::too_many_arguments)]
 fn bind_eligibility(
     spec: &EffectDifferential<'_>,
     draw: &mut Draw,
@@ -2264,7 +2242,6 @@ fn bind_eligibility(
     values: &[Vec<InitialParameterValue>],
     backend: Backend,
     width: BankWidth,
-    known: &[Known],
     coverage: &mut DifferentialCoverage,
 ) {
     let factory = spec.factory();
@@ -2377,12 +2354,6 @@ fn bind_eligibility(
             bank_error.code, member_error.code,
             "{width:?}: bind refused an illegal member with another code than prepare"
         ),
-        // #1070's allowance: the decline at a width this build does not execute, which answers
-        // before any member is validated, and only for the illegal initial value this probe plants.
-        (Err(member_error), Ok(None))
-            if known.contains(&Known::BindDeclinesBeforeValidating)
-                && width.lanes() as usize != Backend::current().width()
-                && member_error.code == "effect.parameter.initial" => {}
         (Err(member_error), Ok(bank)) => panic!(
             "{width:?}: bind {} a cohort with a member prepare refuses ({}), where the \
              three-outcome rule refuses it first",
@@ -2731,14 +2702,14 @@ pub fn assert_d7_reports(factory: Box<dyn NativeEffectFactory>) {
 #[macro_export]
 macro_rules! randomized_effect_test {
     ($name:ident, $factory:expr, seeds: $seeds:expr, blocks: $blocks:expr, craft: $craft:expr,
-     known: $known:expr, banks_natively: $banks:expr, witness: $witness:expr $(,)?) => {
+     banks_natively: $banks:expr, witness: $witness:expr $(,)?) => {
         $crate::randomized_effect_test!(
-            $name, $factory, seeds: $seeds, blocks: $blocks, craft: $craft, known: $known,
+            $name, $factory, seeds: $seeds, blocks: $blocks, craft: $craft,
             banks_natively: $banks, witness: $witness, in_flight: None,
         );
     };
     ($name:ident, $factory:expr, seeds: $seeds:expr, blocks: $blocks:expr, craft: $craft:expr,
-     known: $known:expr, banks_natively: $banks:expr, witness: $witness:expr,
+     banks_natively: $banks:expr, witness: $witness:expr,
      in_flight: $in_flight:expr $(,)?) => {
         #[test]
         fn $name() {
@@ -2758,7 +2729,6 @@ macro_rules! randomized_effect_test {
                 seeds: $seeds,
                 blocks: $blocks,
                 craft: $craft,
-                known: $known,
                 banks_natively: $banks,
                 witness: $witness,
                 in_flight: $in_flight,

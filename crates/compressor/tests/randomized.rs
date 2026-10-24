@@ -140,7 +140,6 @@ conformance::randomized_effect_test!(
     seeds: 32,
     blocks: 24,
     craft: Some(craft),
-    known: &[],
     banks_natively: true,
     witness: true,
 );

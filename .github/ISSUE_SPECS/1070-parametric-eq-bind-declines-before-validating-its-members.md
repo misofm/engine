@@ -15,3 +15,46 @@ Validate every member first, then decide bind or decline. Un-ignore the reproduc
 1. The reproducer passes; an invalid member is refused with its typed diagnostic whether or not the bank would otherwise decline.
 2. A planted reordering (decline first) turns it red.
 3. Valid sessions bind or decline exactly as before; console digests unchanged.
+
+## Decision and evidence record (attempt 1, 2026-10-23)
+
+- **Shape of the defect.** `bind_bank` (`crates/parametric-eq/src/lib.rs`) returned `Ok(None)` at a
+  width this build does not execute before it looked at any member, and returned `Ok(None)` at the
+  first heterogeneous member before it validated the members after it. Those two early returns are
+  the defect. Its member loop also ran only `expected_prepared_metadata`, not the EQ's own
+  initial-section checks (`physical_targets`), which `prepare` runs; that half cannot fail today on
+  a request `expected_prepared_metadata` accepts: the band kind is checked by exact choice bits, the
+  frequency domain tops out at 20 kHz, below Nyquist at every launch rate, and the verifier's sweep
+  of 17,280 in-domain corners gave 0 `design_svf` errors. A mutant that deletes it survives, and no
+  test gates it (none is added: no input reaches it). `validate_member` keeps it as parity with
+  `prepare`, so a later, stricter coefficient validator cannot reopen #1070.
+- **The foreign width is a refusal, not a legitimate decline, when a member is invalid.** The
+  contract on `NativeEffectFactory::bind_homogeneous_bank` lists the foreign width as an `Ok(None)`
+  case, and also says every implementation validates every member before it decides the shape, so
+  an absent capability can never hide a malformed member. A malformed member is a malformed request
+  at every width: `prepare` would refuse it on the scalar fallback the decline sends it to. So the
+  decline stays legal only for a cohort whose members all validate.
+- **Fix.** `validate_member` runs `prepare`'s checks in `prepare`'s order (contract metadata, then
+  `physical_targets` for both channels), so the bank refuses with `prepare`'s code. `bind_bank`
+  validates every member, then declines on a foreign width or a heterogeneous cohort. Valid cohorts
+  bind or decline as before; `prepare_width` and every render path are unchanged.
+- **Other effects.** The compressor, delay, gate, multiband, soft clip, shaper and limiter binds
+  validate every member before they decline (read, and their differentials run with no narrowing).
+  Only the EQ had the defect.
+- **Harness.** `Known::BindDeclinesBeforeValidating` and its allowance in
+  `crates/conformance/src/randomized.rs` are removed, and with it the dead `Known` scaffolding: the
+  enum, the `known` field of `EffectDifferential`, the macro's `known:` argument and the
+  `known: &[],` line of every effect crate's `tests/randomized.rs`. The EQ's per-PR differential
+  runs unnarrowed, and its ignored full-strength twin is deleted (it is now the same test).
+- **Red on the pre-fix code.** With the allowance removed and the old `bind_bank`:
+  `cargo test -p parametric-eq --test randomized` fails at seed 4, `Four` (the width an AVX2 build
+  does not execute): "bind declined a cohort with a member prepare refuses
+  (effect.parameter.initial)". Green after the fix.
+- **Mutants.** (1) The width decline moved back ahead of validation: the differential is red
+  (seed 4). (2) `return Ok(None)` at the first heterogeneous member: the differential stays green
+  (its illegal probe never adds a heterogeneous member), so `a_padded_request_binds_after_every_lane_is_validated`
+  (`crates/parametric-eq/tests/bank.rs`) now also asserts the refusal with lane 1 foreign, and is red
+  on that mutant.
+- **Console digests (PR evidence, one run each, untimed use).** `bench console` with
+  `MISO_ENGINE_BENCH_ROUND=warmup` on this AVX2 host, at the fix and with base 87b818f17's
+  `crates/parametric-eq/src/lib.rs`: all 51 `*output_sha256` fields are identical.
