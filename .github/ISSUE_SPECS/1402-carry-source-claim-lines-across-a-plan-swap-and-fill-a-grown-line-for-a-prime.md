@@ -158,3 +158,14 @@ Attempt 1 (2026-10-24), on `main` at `c6e295947`, from the scope note's reduced 
   pending slices swapped and with a push that does not advance the cursor. The existing join unit
   test gained a changed-source row. Realtime policy, workspace policy, cross-targets, clippy, fmt,
   aarch64 check and the lint scripts pass.
+
+Attempt 2 (2026-10-24), after the verifier's FAIL (one MAJOR, one MINOR):
+
+- **MAJOR fixed.** R-B compared `source_id` only, so a source redeclared under the same ID (a fresh
+  ring at generation 1, frame 0, #1272 D3) still counted as the same source, and the carried line
+  would play the old declaration's pending frames ahead of the new feed. `same_source` now also
+  requires the track's source to be one of the successor's carried sources (#1272 D3's
+  `carried_sources`, passed into `join_strip_delays`). Unit test
+  `a_redeclared_source_is_not_the_same_source` (same ID, changed `frames`) was red before the fix.
+- **MINOR fixed.** The join unit test gained row `eq6` (equal declared delays, rings `[8, 8]` to
+  `[8, 10]`): the left lane moves and the strip restarts. Red with the ring-length check removed.
