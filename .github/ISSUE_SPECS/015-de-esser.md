@@ -144,6 +144,9 @@ Evidence (48 kHz, this worktree):
 - `parameter_lattice`'s geometric-step check now skips intrinsic points: the de-esser's Q
   (0.5-8) ends 7.9987, 8, a gap below the first generated one.
 - `observation_identity`: the de-esser was born with its tap, so its contract is 1.0 (no bump).
+- `console-workload` `paired_spans`: the de-esser is collapse-capable, so it joins the
+  collapse-capable set and carries an A3 row (every link mode, 10 live PerLane parameters, 97
+  twin pairs), as the gate and multiband do.
 - No new test: the de-esser rides the existing per-effect rows (`parameter-metadata` round trip
   boots every registry effect as an insert and renders it on the web host; the SDK
   `console-evals` boot each catalog effect at every link mode and hear its bypass lifted).
