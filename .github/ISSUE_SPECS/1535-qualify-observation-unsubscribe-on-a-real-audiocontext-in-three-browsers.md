@@ -366,7 +366,33 @@ the named exceptions of #1345 Amendments 5 and 6 again.
 
 ## Attempt record
 
-- Attempt 1: not started.
+- **Attempt 1 (2026-10-24, base `40e3b61e9`).** Written against today's API, not applied from the
+  saved patch (it does not apply: `qualification.js` and `run.mjs` moved; its subscription used
+  `trackIndex`/`effectIndex`, #1677 addresses taps by `stripId`/`rack`/`effectId`; its session
+  lacked `control_smoothing`). Unmutated tree, one unloaded run each, Playwright 1.62.1,
+  `--sdk-root --check-matrix --self-test-mutations`: green in Chromium 151.0.7922.34, Firefox 153.0
+  and WebKit 26.5 (`resume-clicks` 3); without the SDK green in Firefox and WebKit
+  (`resume-clicks` 1). Per browser (`observation-unsubscribe:` line): signal frames after the
+  acknowledgement 48 / 49 / 49, frames after it 48 / 63 / 55, low-peak frames 0, minimum peak
+  0.0815, `maximumSourcesInFlight` 32. `render-allocations`: all fourteen rows 0 in every browser,
+  `observation-unsubscribe=0`; `sdk-render-allocations` rows all 0.
+
+## Decision record (root, 2026-10-24)
+
+- **Scope reduction accepted** (owner rulings "tests overboard" and feature sprint). Kept: the
+  run (D2, D3.1-2, D3.4-6, D4), `unsubscribeFailures` (D5), the gate and its fourteenth
+  `render-allocations` row, `resume-clicks` `1 : 3`, D9, `unsubscribe-session.json` from today's
+  observation grammar, the matrix sentence, one `MUTATIONS.md` section.
+- **One node proof replaces** gate 2's seven result mutations and gate 4's
+  `requestFailureProofs()`: a table over `unsubscribeFailures` (one row per D5 name at its bound,
+  one R1 row expecting `[]`), the constant relation 48 > 40, and the `requestFailure` form.
+  `classifyStallSignature` and `stallSignatureProofs()` are restored (D4 needs stall vs shortfall).
+- **Moved to #1605** with gate 8: page mutations (d) and (e) (gate 3) and source mutations M1-M3
+  (gate 6). `runUnsubscribePageMutation` and `unsubscribeVerdict` are not added: nothing calls them.
+- **D3.3 dropped**: the host shares one in-flight status read (S2 landed), so the page needs no
+  `statusRead`.
+- The reduction is checked on every frame received after the acknowledgement up to the dispose;
+  the signal and low-peak counts on the frames of the D4 wait, while the feed runs.
 
 ## Root rulings (2026-10-13)
 
