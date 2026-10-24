@@ -79,6 +79,9 @@ pub const FEATURE_SOURCE_SEEK_REPORT: u64 = 1 << 9;
 /// Session-seek capability: `miso_engine_v1_session_seek` and `miso_engine_v1_session_seek_at`
 /// (#1642), an in-place V1 amendment. A host checks this bit before calling either symbol.
 pub const FEATURE_SESSION_SEEK: u64 = 1 << 10;
+/// Session-replace capability: `miso_engine_v1_submit_document_command` (#1386), an in-place V1
+/// amendment. A host checks this bit before calling the symbol.
+pub const FEATURE_SESSION_REPLACE: u64 = 1 << 11;
 /// All ABI V1 feature capability bits.
 pub const FEATURE_MASK: u64 = FEATURE_IMMUTABLE_SESSION
     | FEATURE_HOST_PLANAR_SOURCE
@@ -90,7 +93,8 @@ pub const FEATURE_MASK: u64 = FEATURE_IMMUTABLE_SESSION
     | FEATURE_SERVICE
     | FEATURE_DECLARE_DISCONTINUITY
     | FEATURE_SOURCE_SEEK_REPORT
-    | FEATURE_SESSION_SEEK;
+    | FEATURE_SESSION_SEEK
+    | FEATURE_SESSION_REPLACE;
 
 /// Watermark outcome flag: the covered revisions completed exactly as committed.
 pub const OUTCOME_EXACT: u64 = 1;
@@ -619,6 +623,7 @@ mod tests {
             FEATURE_DECLARE_DISCONTINUITY,
             FEATURE_SOURCE_SEEK_REPORT,
             FEATURE_SESSION_SEEK,
+            FEATURE_SESSION_REPLACE,
         ];
         assert!(features.iter().all(|feature| feature.count_ones() == 1));
         assert_eq!(
@@ -641,6 +646,9 @@ mod tests {
         // #1642 D4: the next free bit, never a reused one.
         assert_eq!(FEATURE_SESSION_SEEK, 1 << 10);
         assert_eq!(FEATURE_MASK & FEATURE_SESSION_SEEK, FEATURE_SESSION_SEEK);
+        // #1386: the next free bit.
+        assert_eq!(FEATURE_SESSION_REPLACE, 1 << 11);
+        assert_eq!(FEATURE_MASK, 4095);
         assert_eq!(
             [
                 OUTCOME_EXACT,

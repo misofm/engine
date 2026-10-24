@@ -179,7 +179,7 @@ impl Policy {
     pub fn workspace() -> Self {
         // The unsafe-ownership files. `docs/REALTIME_DEPENDENCY_POLICY.md`, "Unsafe-code ownership",
         // carries the justification of each.
-        const UNSAFE_ALLOWLIST: [&str; 24] = [
+        const UNSAFE_ALLOWLIST: [&str; 25] = [
             "crates/engine/src/realtime/spsc.rs",
             "crates/engine/src/realtime/disjoint.rs",
             "crates/lane/src/softfma.rs",
@@ -196,6 +196,7 @@ impl Policy {
             "crates/capi/tests/input_design_bounds.rs",
             "crates/capi/tests/plan_swap_race.rs",
             "crates/capi/tests/response_get.rs",
+            "crates/capi/tests/session_replace.rs",
             "crates/capi/tests/empty_boot.rs",
             "hosts/host-web/src/ffi.rs",
             "hosts/host-web/src/render_lock.rs",

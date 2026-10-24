@@ -18,7 +18,8 @@ extern "C" {
  *   session      Control thread. At most one thread at a time calls
  *                miso_engine_v1_source_submit_planar_f32, miso_engine_v1_source_seek,
  *                miso_engine_v1_source_seek_at, miso_engine_v1_source_seek_report,
- *                miso_engine_v1_submit_command, miso_engine_v1_dequeue_event,
+ *                miso_engine_v1_submit_command, miso_engine_v1_submit_document_command,
+ *                miso_engine_v1_dequeue_event,
  *                miso_engine_v1_service, miso_engine_v1_declare_discontinuity,
  *                miso_engine_v1_session_seek, miso_engine_v1_session_seek_at, or
  *                miso_engine_v1_last_error on the session; they are serialized with each other.
@@ -359,6 +360,25 @@ extern "C" {
  * source made with per-source seeks is still the host's own call, and the host declares before
  * it. A host checks MISO_ENGINE_V1_FEATURE_SESSION_SEEK before calling either symbol.
  *
+ * Session replace (#1386). miso_engine_v1_submit_document_command is
+ * miso_engine_v1_submit_command plus a session document borrowed beside the frame for this call
+ * only, under miso_engine_v1_compile_session's pointer-plus-length rule: document may be null
+ * only when document_bytes is 0, else MISO_ENGINE_V1_INVALID_ARGUMENT. The library keeps nothing
+ * of it. A SESSION_REPLACE (0x0013) frame names the document by its exact length and its
+ * SHA-256; the engine checks both, bounds the document by the compile limits'
+ * maximum_document_bytes (not by the control frame), parses and validates it as a boot would,
+ * diffs it against the committed session and applies the diff as the one transaction it is: the
+ * same revision, edit path, SESSION_COMMITTED event and rendered blocks as that
+ * SESSION_TRANSACTION_APPLY. A document equal to the committed session replies edit path 5,
+ * unchanged, and commits nothing. A document refusal is a non-OK reply frame
+ * (session.replace.document_length, session.replace.document_too_large,
+ * session.replace.document_digest, session.replace.document_utf8, or VALIDATION_FAILED with the
+ * session's diagnostics) and changes nothing; a SESSION_REPLACE through
+ * miso_engine_v1_submit_command is the document_length refusal. Every other frame behaves as it
+ * does through miso_engine_v1_submit_command. A replayed request answers its cached reply without
+ * reading the document. A host checks MISO_ENGINE_V1_FEATURE_SESSION_REPLACE before calling the
+ * symbol.
+ *
  * Choosing the anchor. To start a stem that a transaction added, after the command returns OK:
  * pick A, a quantum multiple past the last rendered block by enough quanta to cover the time the
  * host needs to decode generation g from F and submit it (a few quanta); call
@@ -488,7 +508,8 @@ extern "C" {
 #define MISO_ENGINE_V1_FEATURE_DECLARE_DISCONTINUITY UINT64_C(256)
 #define MISO_ENGINE_V1_FEATURE_SOURCE_SEEK_REPORT UINT64_C(512)
 #define MISO_ENGINE_V1_FEATURE_SESSION_SEEK UINT64_C(1024)
-#define MISO_ENGINE_V1_FEATURE_MASK UINT64_C(2047)
+#define MISO_ENGINE_V1_FEATURE_SESSION_REPLACE UINT64_C(2048)
+#define MISO_ENGINE_V1_FEATURE_MASK UINT64_C(4095)
 
 #define MISO_ENGINE_V1_OUTCOME_EXACT UINT64_C(1)
 #define MISO_ENGINE_V1_OUTCOME_TRANSITION_FALLBACK UINT64_C(2)
@@ -715,6 +736,12 @@ uint32_t miso_engine_v1_submit_command(miso_engine_v1_session *session,
                                        const uint8_t *request,
                                        uint64_t request_bytes,
                                        miso_engine_v1_bytes_out *response);
+uint32_t miso_engine_v1_submit_document_command(miso_engine_v1_session *session,
+                                                const uint8_t *request,
+                                                uint64_t request_bytes,
+                                                const uint8_t *document,
+                                                uint64_t document_bytes,
+                                                miso_engine_v1_bytes_out *response);
 uint32_t miso_engine_v1_dequeue_event(miso_engine_v1_session *session,
                                       uint32_t lane,
                                       miso_engine_v1_bytes_out *event);

@@ -314,6 +314,24 @@ async function runBackend(modulePath, expectedBackend, sessionDocument, source) 
 /// gain and one refused out-of-domain value), each sent through
 /// `control_request_ptr`/`control_command` before block N. The digest is a statement about *when*
 /// each took effect, not merely that it did.
+/// Send one committed control frame through `control_request_ptr`/`control_command`, then drain
+/// both reliable-event lanes the way the worklet does.
+function sendControlFrame(exports, handle, frame) {
+  const pointer = exports.miso_engine_web_v1_control_request_ptr(handle, frame.byteLength);
+  assert.notEqual(pointer, 0);
+  new Uint8Array(exports.memory.buffer, pointer, frame.byteLength).set(frame);
+  const result = exports.miso_engine_web_v1_control_command(handle, frame.byteLength);
+  const responseBytes = exports.miso_engine_web_v1_control_response_bytes(handle);
+  // A commit queues its reliable events; drain both lanes the way the worklet does.
+  for (const lane of [0, 1]) {
+    for (let guard = 0; guard < 16; guard += 1) {
+      assert.equal(exports.miso_engine_web_v1_control_event(handle, lane), 0);
+      if (exports.miso_engine_web_v1_control_response_bytes(handle) === 0) break;
+    }
+  }
+  return { result, responseBytes };
+}
+
 async function runSetControlTimeline(modulePath, sessionDocument, sourceId, frames) {
   const { instance } = await WebAssembly.instantiate(await readFile(modulePath), {});
   const exports = instance.exports;
@@ -338,21 +356,7 @@ async function runSetControlTimeline(modulePath, sessionDocument, sourceId, fram
     assert.equal(feed(block), 0);
     blocks.push(render(exports, handle));
   };
-  const send = (frame) => {
-    const pointer = exports.miso_engine_web_v1_control_request_ptr(handle, frame.byteLength);
-    assert.notEqual(pointer, 0);
-    new Uint8Array(exports.memory.buffer, pointer, frame.byteLength).set(frame);
-    const result = exports.miso_engine_web_v1_control_command(handle, frame.byteLength);
-    const responseBytes = exports.miso_engine_web_v1_control_response_bytes(handle);
-    // A commit queues its reliable events; drain both lanes the way the worklet does.
-    for (const lane of [0, 1]) {
-      for (let guard = 0; guard < 16; guard += 1) {
-        assert.equal(exports.miso_engine_web_v1_control_event(handle, lane), 0);
-        if (exports.miso_engine_web_v1_control_response_bytes(handle) === 0) break;
-      }
-    }
-    return { result, responseBytes };
-  };
+  const send = (frame) => sendControlFrame(exports, handle, frame);
 
   const reports = [];
   step(0);
@@ -378,12 +382,15 @@ async function runSetControlTimeline(modulePath, sessionDocument, sourceId, fram
 /// `taps` of `0n` is the level-1 zero leg: no lane, no accumulator, no conflating cell, and
 /// `observationRetainedBytes` is `0`. The subscription it still sends is refused with the typed
 /// `unsupportedKind` reason rather than silently ignored (a boot without taps has no command staging).
-async function runObservationTimeline(modulePath, sessionDocument, sourceId, taps) {
+async function runObservationTimeline(modulePath, sessionDocument, sourceId, taps, masterFrame) {
   const { instance } = await WebAssembly.instantiate(await readFile(modulePath), {});
   const exports = instance.exports;
-  const handle = boot(exports, sessionDocument, [
-    0n, BigInt(OBSERVATION_WINDOW_BLOCKS), taps, taps === 0n ? 0n : 1n,
-  ]);
+  const handle = boot(exports, sessionDocument, [0n, BigInt(OBSERVATION_WINDOW_BLOCKS), taps, 0n]);
+  // Issue #1689 D6: the master is the track's `master` row, the committed `master.bin` frame the
+  // native twin sends too, written after boot (offset 56 is reserved). The capable leg designates.
+  if (taps !== 0n) {
+    assert.equal(sendControlFrame(exports, handle, masterFrame).result, 0);
+  }
   const resourceReport = resources(exports, handle);
   assert.equal(
     resourceReport.observationRetainedBytes === "0",
@@ -594,9 +601,12 @@ async function main() {
     path.join(fixtureDirectory, "observation-session.json"),
   );
   const artifact = path.join(artifactDirectory, "miso-engine-v1-audio-worklet.simd128.wasm");
-  const observed = await runObservationTimeline(artifact, observationSession, source.sourceId, 4n);
+  const masterFrame = await readFile(path.join(fixtureDirectory, "set-control-frames", "master.bin"));
+  const observed = await runObservationTimeline(
+    artifact, observationSession, source.sourceId, 4n, masterFrame,
+  );
   const unobserved = await runObservationTimeline(
-    artifact, observationSession, source.sourceId, 0n,
+    artifact, observationSession, source.sourceId, 0n, masterFrame,
   );
   assert.equal(
     observed.pcmF32leSha256,

@@ -2062,6 +2062,24 @@ where
     /// preparation's) saves and restores the canonical word. Render never calls this: it pins its
     /// own environment.
     pub fn command(&mut self, request: &[u8], output_capacity: u64) -> Result<usize, CommandError> {
+        self.command_with_document(request, &[], output_capacity)
+    }
+
+    /// [`Self::command`] with the document a `SESSION_REPLACE` frame names (#1386 D3), borrowed for
+    /// this call only: nothing here or in the controller keeps it. Every command reaches this one
+    /// path; `document` is read only by a `SESSION_REPLACE`, after its replay preflight, its
+    /// exact-revision check and its output reservation. The controller's document hook checks its
+    /// length (against the frame and against `maximum_document_bytes`), its SHA-256, parses it
+    /// and diffs it against the committed model ([`crate::replace_document`]); the edits then
+    /// take this function's transaction path exactly: the live commit or the rebuild, the rate and quantum
+    /// refusal, the plan admission and the `SESSION_COMMITTED` event. A document equal to the
+    /// committed model answers `EditPath::Unchanged` and commits nothing.
+    pub fn command_with_document(
+        &mut self,
+        request: &[u8],
+        document: &[u8],
+        output_capacity: u64,
+    ) -> Result<usize, CommandError> {
         let _canonical = lane::CanonicalFpEnv::enter();
         self.service()?;
         let output_capacity = usize::try_from(output_capacity).unwrap_or(usize::MAX);
@@ -2073,11 +2091,15 @@ where
         let in_place = true;
         let mut scratch = DecodeScratch::new(&mut self.decode_fields);
         let prepared = if in_place {
-            self.controller
-                .prepare_command_frame_in_place(request, &mut scratch, output_capacity)
+            self.controller.prepare_command_frame_in_place(
+                request,
+                document,
+                &mut scratch,
+                output_capacity,
+            )
         } else {
             self.controller
-                .prepare_command_frame(request, &mut scratch, output_capacity)
+                .prepare_command_frame(request, document, &mut scratch, output_capacity)
         }
         .map_err(map_command_process_error)?;
         match prepared {
@@ -2517,7 +2539,6 @@ where
             control_catalog: candidate_catalog,
             capi: prospective_capi,
             revision_gate,
-            master_track: _,
         } = prepared_runtime;
         // #1652 U2a fold 2 (MAJOR-A; #1713 deletes it): read before the inventory moves into the
         // candidate's provider epoch.
@@ -4217,8 +4238,8 @@ where
     }
 
     /// The designated master strip of the newest commit (#1683): the strip whose `master`
-    /// monitor row is on, or `None`. Host-local, never saved; the boot word seeds it and a
-    /// `SET_CONTROL` of the row sets or changes it. A host that reports a master reading resolves
+    /// monitor row is on, or `None`. Host-local, never saved; a boot designates no master (#1689),
+    /// and a `SET_CONTROL` of the row sets or changes it. A host that reports a master reading resolves
     /// it by ID in each plan it holds.
     #[must_use]
     pub fn master_strip(&self) -> Option<&session::StableId> {
