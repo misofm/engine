@@ -231,3 +231,33 @@ the `continue-on-error` census above, re-run at the PR head.
 **Dependencies (added).** The `realtime_policy` owner entry in `DEDUPLICATED_OWNERS` and the
 `tools/realtime-policy` crate land with the J3 batch (#1446). This issue therefore lands after the J3
 batch is on `main`, and the re-measurement of the line numbers above is part of the implementation.
+
+## Decision record (implementation, attempt 1, 2026-10-24)
+
+Root accepted the scope note's recommendations; anchors re-measured at `7255ebc37`.
+- D1 matches the pinned lines as an ordered subsequence of the step's comment-stripped `run:` lines
+  (`GUARDED_OWNER_STEPS`), not whole-body equality: the `printf` message and `fi` carry no claim.
+  Pinned (artifact-gates, "Hermetic browser host and worklet tests"): `set -o pipefail`, the `mktemp -d`
+  line, the `trap` line, `export TMPDIR="$scratch"`, `exit 1` and the `find` and `if [[ -n "$leftover" ]]`
+  lines (#1429), with the owner command (#1044) between them.
+- D2 scans comment-stripped lines (`FAILURE_MASKS`); `exit 0` (or a bare `exit`) is refused only before
+  the step's last owner command. A2-D1 is a presence test (any value) at step and job level, on all four
+  owner jobs; the same helper holds the doctest twins (A1-D1).
+- A1-D1/A1-D2: `DOCTEST_TWINS`; the doctest command, apart from its `--exclude`, `-p` and `--features`
+  sets, must be exactly `cargo test --locked --doc` (`--workspace` iff its twin has it).
+- A2-D2: `test-debug-a` must run an unconditional `cargo test --all-targets` that is `--workspace` with
+  no `-p` and no `--exclude realtime-policy`, or names `-p realtime-policy`.
+- Masking census outside scope: the one `set +e` in `qualification.yml` is in `audit-native`'s non-owner
+  step "Issue-544 C ABI runtime caller audit" (it captures `PIPESTATUS` and re-raises). Not touched.
+  The `continue-on-error` census is unchanged: only the two `verdict` telemetry steps.
+- No owner step masks a failure today; the Non-goal stop did not trigger.
+
+## Evidence (attempt 1)
+
+- 37 mutation cases and 1 green control in `test_generated_once_mutations`. With the parent
+  commit's checker every case is accepted; with the change every case is refused; the control
+  (`--exclude foo` on both twins) passes with both.
+- Rule removal, each in turn: D1 -> the 8 #1429 cases accepted; D2 masks -> the 7 mask cases;
+  D2 `exit 0` -> 1; A2-D1 step -> 5; A2-D1 job -> 5; A1-D1 step presence -> 2 deletions; A1-D1
+  unmasked -> `if: false`; A1-D1 command shape -> `--lib`; A1-D2 -> 4 narrowing cases; A2-D2 ->
+  the both-twins `--exclude realtime-policy` case. No rule's cases overlap another's.

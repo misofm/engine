@@ -831,7 +831,7 @@ def check_unmasked_step(where: str, step: str, commands: tuple[str, ...], issue:
                     f"qualification.yml: {where} must not mask a failure with `{label}` "
                     f"(`{line}`, {issue})")
     last = max((index for index, line in enumerate(lines) if line in commands), default=-1)
-    for line in lines[:last]:
+    for line in lines[:max(last, 0)]:
         require(EXIT_ZERO.search(line) is None,
                 f"qualification.yml: {where} must not `exit 0` before its last command (`{line}`, "
                 f"{issue})")
@@ -872,6 +872,109 @@ def check_qualification_deduplicated_owners(text: str) -> None:
             "qualification.yml: test-release must run M3 (`cargo test --release -p math`, "
             f"`{M3_TEST}` not deselected) unconditionally with no RUSTFLAGS in front of it, on "
             "the x86-64-v3 flags .cargo/config.toml pins (#1044)")
+
+
+# Issue #1434 A1-D1 (#1422): `--all-targets` runs no doctest, so each whole-package test step has a
+# doctest twin in the same job, and after #1422 the twins are the only CI run of the workspace's
+# compile_fail fences. (job, whole-package step name, doctest step name).
+DOCTEST_TWINS = (
+    ("test-debug-a",
+     "Workspace debug tests (excluding DSP crates, audit, and wasm evidence tools)",
+     "Workspace doctests (same packages and features as the debug tests)"),
+    ("test-debug-b",
+     "DSP crates debug tests (lane feature unification pinned explicitly)",
+     "DSP crates doctests (same packages and features as the debug tests)"),
+)
+# Issue #1434 A2-D2 (#1446): tools/realtime-policy's own suite runs only in this job.
+REALTIME_POLICY_JOB = "test-debug-a"
+REALTIME_POLICY_PACKAGE = "realtime-policy"
+
+
+def cargo_test_shape(command: str) -> tuple[list[str], dict[str, set[str]]] | None:
+    """A `cargo test` command split into its other words and its value sets: `--exclude`,
+    `-p`/`--package` and `--features`/`-F` (split on commas). None for any other command."""
+    try:
+        words = shlex.split(command)
+    except ValueError:
+        return None
+    if words[:2] != ["cargo", "test"]:
+        return None
+    values: dict[str, set[str]] = {"--exclude": set(), "-p": set(), "--features": set()}
+    rest: list[str] = []
+    index = 0
+    while index < len(words):
+        word = words[index]
+        key = {"--package": "-p", "-F": "--features"}.get(word, word)
+        if key in values and index + 1 < len(words):
+            values[key].update(words[index + 1].split(",") if key == "--features"
+                               else (words[index + 1],))
+            index += 2
+            continue
+        if word.startswith("--features="):
+            values["--features"].update(word[len("--features="):].split(","))
+        elif word.startswith(("--exclude=", "--package=")):
+            key = "--exclude" if word.startswith("--exclude=") else "-p"
+            values[key].add(word.split("=", 1)[1])
+        else:
+            rest.append(word)
+        index += 1
+    values["--features"].discard("")
+    return rest, values
+
+
+def check_qualification_doctest_twins(text: str) -> None:
+    for job_name, twin_name, doctest_name in DOCTEST_TWINS:
+        block = job(text, job_name)
+        shapes = []
+        for name in (twin_name, doctest_name):
+            step = named_step(block, name)
+            require(step is not None,
+                    f"qualification.yml: {job_name} must keep its step \"{name}\" (#1422 doctest "
+                    "twins; an edit to it updates DOCTEST_TWINS in "
+                    "scripts/check-ci-path-routing.py)")
+            tests = [(line, shape) for line in run_lines(step)
+                     if (shape := cargo_test_shape(line))]
+            require(len(tests) == 1,
+                    f"qualification.yml: {job_name}'s step \"{name}\" must run exactly one "
+                    "`cargo test` (#1422)")
+            shapes.append((step, tests[0]))
+        (_, (_, (twin_rest, twin_values))), (doctest_step, (line, (rest, values))) = shapes
+        check_unmasked_step(f"{job_name}'s doctest step \"{doctest_name}\"", doctest_step,
+                            (line,), "#1422, #1434")
+        expected = ["cargo", "test", "--locked", "--doc"]
+        if "--workspace" in twin_rest:
+            expected.append("--workspace")
+        require(sorted(rest) == sorted(expected),
+                f"qualification.yml: {job_name}'s doctest step \"{doctest_name}\" must be "
+                f"`{' '.join(expected)}` plus its twin's packages and features, not "
+                f"`{' '.join(rest)}` (#1422)")
+        for key in ("--exclude", "-p", "--features"):
+            missing, extra = twin_values[key] - values[key], values[key] - twin_values[key]
+            require(not missing and not extra,
+                    f"qualification.yml: {job_name}'s doctest step \"{doctest_name}\" must name "
+                    f"the same {key} set as \"{twin_name}\"; missing {sorted(missing)}, extra "
+                    f"{sorted(extra)} (#1422)")
+
+
+def runs_realtime_policy_tests(command: str) -> bool:
+    shape = cargo_test_shape(command)
+    if shape is None:
+        return False
+    rest, values = shape
+    if ("--all-targets" not in rest or "--" in rest
+            or any(word in NON_INTEGRATION_TARGET_SELECTORS for word in rest)):
+        return False
+    return (REALTIME_POLICY_PACKAGE in values["-p"]
+            or ("--workspace" in rest and not values["-p"]
+                and REALTIME_POLICY_PACKAGE not in values["--exclude"]))
+
+
+def check_qualification_realtime_policy_tests(text: str) -> None:
+    require(any(runs_realtime_policy_tests(command)
+                for command in unconditional_step_commands(job(text, REALTIME_POLICY_JOB))),
+            f"qualification.yml: {REALTIME_POLICY_JOB} must run `cargo test --all-targets` over "
+            f"{REALTIME_POLICY_PACKAGE} unconditionally (`--workspace` without excluding it, or "
+            f"`-p {REALTIME_POLICY_PACKAGE}`); it is the tool's only test run (#1446)")
 
 
 def check_qualification_v8_spill(text: str) -> None:
@@ -1210,6 +1313,8 @@ def check_qualification_workflow(root: pathlib.Path) -> None:
     check_qualification_artifact_identity(text)
     check_qualification_metadata_generated_once(text, names)
     check_qualification_deduplicated_owners(text)
+    check_qualification_doctest_twins(text)
+    check_qualification_realtime_policy_tests(text)
     check_qualification_v8_spill(text)
     check_qualification_aarch64(text)
     check_qualification_native_g5(text)

@@ -730,9 +730,10 @@ def test_generated_once_mutations(checker) -> None:
             workflow_path.write_text(original, encoding="utf-8")
         return False
 
-    def replaced_after(anchor: str, old: str, new: str) -> str:
-        """qualification.yml with `old`'s first occurrence after `anchor` replaced by `new`."""
-        text = workflow_path.read_text(encoding="utf-8")
+    def replaced_after(anchor: str, old: str, new: str, text: str | None = None) -> str:
+        """qualification.yml (or `text`) with `old`'s first occurrence after `anchor` replaced by
+        `new`."""
+        text = workflow_path.read_text(encoding="utf-8") if text is None else text
         at = text.index(old, text.index(anchor))
         return text[:at] + new + text[at + len(old):]
 
@@ -743,6 +744,14 @@ def test_generated_once_mutations(checker) -> None:
         start = text.index(f"\n  {job_name}:\n")
         at = text.rindex("\n        run:", start, text.index(command, start)) + 1
         return text[:at] + f"        {key}\n" + text[at:]
+
+    def step_deleted(name: str) -> str:
+        """qualification.yml without the step named `name` (up to the next step or job)."""
+        text = workflow_path.read_text(encoding="utf-8")
+        start = text.index(f"      - name: {name}\n")
+        end = min(at for at in (text.find("\n      - ", start), text.find("\n\n  ", start))
+                  if at >= 0)
+        return text[:start] + text[end + 1:]
 
     def key_on_job(job_name: str, key: str) -> str:
         return replaced_after(f"\n  {job_name}:\n", "    runs-on: ", f"    {key}\n    runs-on: ")
@@ -893,6 +902,49 @@ def test_generated_once_mutations(checker) -> None:
                            f"continue-on-error: false on {name}'s owner step")
             mutation_fails(key_on_job(name, "continue-on-error: false"),
                            f"continue-on-error: false on the {name} job")
+        # Issue #1434 A1-D1/A1-D2 (#1422): each case leaves the whole-package step as it is and
+        # drops or narrows its doctest twin; red when the compile_fail fences of a package (or
+        # those a feature gates) stop running, which no other check sees.
+        debug_a = ("      - name: Workspace debug tests (excluding DSP crates, audit, and wasm "
+                   "evidence tools)\n")
+        doc_a = "      - name: Workspace doctests (same packages and features as the debug tests)\n"
+        doc_b = "      - name: DSP crates doctests (same packages and features as the debug tests)\n"
+        for mutated, what in (
+            (step_deleted("Workspace doctests (same packages and features as the debug tests)"),
+             "test-debug-a's doctest step deleted"),
+            (step_deleted("DSP crates doctests (same packages and features as the debug tests)"),
+             "test-debug-b's doctest step deleted"),
+            (replaced_after(doc_a, " --exclude delay", ""),
+             "an --exclude dropped from test-debug-a's doctest step"),
+            (replaced_after(doc_a, "host-core/test-support,", ""),
+             "a feature dropped from test-debug-a's doctest step"),
+            (replaced_after(doc_b, "-p delay ", ""),
+             "a -p package dropped from test-debug-b's doctest step"),
+            (replaced_after(doc_b, ",lane/test-support", ""),
+             "a feature dropped from test-debug-b's doctest step"),
+            (replaced_after(doc_b, "cargo test --locked --doc", "cargo test --locked --lib"),
+             "test-debug-b's doctest step runs --lib instead of --doc"),
+            (replaced_after(doc_a, doc_a, doc_a + "        if: false\n"),
+             "test-debug-a's doctest step made conditional"),
+        ):
+            mutation_fails(mutated, what)
+        # The pairing, not the values, is the claim: the same package excluded from both twins
+        # passes.
+        corpus = "--exclude wasm-gate-corpus \\\n"
+        both = replaced_after(debug_a, corpus, "--exclude wasm-gate-corpus --exclude foo \\\n")
+        workflow_mutation_passes(
+            replaced_after(doc_a, corpus, "--exclude wasm-gate-corpus --exclude foo \\\n", both),
+            "--exclude foo on both twins")
+        # Issue #1434 A2-D2 (#1446): red when tools/realtime-policy's own suite leaves its only
+        # run, including the edit to both twins that A1-D2 passes by design.
+        excluded = "--exclude wasm-gate-corpus --exclude realtime-policy \\\n"
+        alone = replaced_after(debug_a, corpus, excluded)
+        mutation_fails(alone, "realtime-policy excluded from test-debug-a's debug tests")
+        mutation_fails(replaced_after(doc_a, corpus, excluded, alone),
+                       "realtime-policy excluded from both test-debug-a twins")
+        mutation_fails(replaced_after(debug_a, "cargo test --locked --workspace --all-targets",
+                                      "cargo test --locked -p engine --all-targets"),
+                       "test-debug-a's debug tests narrowed to -p engine")
         m3 = "        run: cargo test --locked --release -p lane -p math -p wasm-gates --features math/lane\n"
         for new in (
             m3.replace("run: cargo", "run: RUSTFLAGS='-C target-feature=+fma' cargo"),  # config replaced
