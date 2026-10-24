@@ -25,7 +25,7 @@ Verdict: no shipped effect restarts some words and not others; no rendered bit m
 | De-esser | `crates/de-esser/src/lib.rs` `retarget` restarts c1, a2, a3 together (PR #1922). | `crates/de-esser/tests/svf_chord.rs` |
 | Dynamic EQ | `crates/dynamic-eq/src/lib.rs` restarts all nine design words of a band together (#17 S2). | `crates/dynamic-eq/tests/svf_chord.rs` |
 | Parametric EQ | `start_ramp` rewrites all six words' targets and steps from the words in force under one shared `remaining`; the stationary hoist settles only when all six already match. | existing, see below |
-| Builtins HPF/LPF | `apply_input_filter_target` skips only when the whole six-word in-flight target equals the new one; otherwise every step is recomputed from the current word under one shared `filter_remaining`. | existing, see below |
+| Builtins HPF/LPF | `apply_prepared_filter` (`crates/builtins/src/lib.rs`) skips only when the whole six-word in-flight target equals the new one; otherwise every step is recomputed from the current word under one shared `filter_remaining`. | existing, see below |
 | Multiband crossover | An accepted crossover span calls `LinearRamp::set_target` on all three LR4 words unconditionally; `set_target` restarts from `current`. | new leg (c) of gate 2, `crates/multiband-compressor/tests/crossover.rs` |
 
 Mutant runs (each applied to the committed tree, run, then restored with `git checkout` and `touch`):
