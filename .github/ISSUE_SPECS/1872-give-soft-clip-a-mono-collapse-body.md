@@ -50,5 +50,13 @@ Add the gate-expander to console-workload `paired_spans.rs` Part 1 chained diffe
   instance's dual output planes, reports and payloads over 40 blocks of asymmetric noise with
   signed zeros, subnormals, a NaN, an infinity and one-channel spans was `bda66352726e74de` on base
   `e68454874` and on this branch, debug and release. The committed corpus digests are unchanged
-  (`corpus_digests.in` untouched, its tests green). The console fixture holds no soft clip, so the
-  console's `output_sha256` cannot move; no timed console run was made.
+  (`corpus_digests.in` untouched, its tests green). That probe digest is this issue's class A
+  evidence. The console benchmark's fixtures hold no soft clip: `grep -rl miso.soft-clip` over
+  `fixtures/session/v1/console-*.json`, `fixtures/session/v1/parametric-eq-bank-console.json`,
+  `tools/console-workload/src` and `tools/bench/src` finds nothing (the console strip is EQ +
+  compressor, `scripts/check-console-benchmark-fixture.sh`). So the console `output_sha256`
+  renders no soft clip and is not evidence for this effect; no timed console run was made.
+* Verifier fold: the transition test keeps only what the randomized collapsed-against-dual oracle
+  (`witness: true`) does not check: the right plane untouched while collapsed, agreement after the
+  disengage copy, the Left-only span and the cursor-only difference. It is renamed
+  `a_collapsed_bank_spares_the_right_plane_and_its_copy_makes_the_channels_agree`.

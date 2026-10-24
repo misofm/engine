@@ -17,9 +17,8 @@ use support::{QUANTUM, as_input, point, prepare, prepare_bank, snapshot, snapsho
 /// Not a divisor of the 32-row ring, so the cursor lands somewhere new every block and a copy that
 /// skipped `pos` would hand the right channel a rotated window.
 const FRAMES: usize = 37;
-const BLOCKS: usize = 48;
-/// The first dual block of the mixed arm: the disengage lands here.
-const DISENGAGE: usize = BLOCKS / 2;
+/// The collapsed blocks before the disengage.
+const DISENGAGE: usize = 24;
 /// The payload words of one lane and channel; the first twelve are the ramps (state word, target,
 /// step, remaining per parameter), the rest the `x`, `e` and dry histories by age.
 const LANE_WORDS: usize = 104;
@@ -71,8 +70,7 @@ fn sample(lane: usize, frame: usize) -> f32 {
     }
 }
 
-/// Packed AoSoA words of block `step`. One non-finite word while collapsed: D7 recovers lane 1,
-/// and the report counts both channels on both arms.
+/// Packed AoSoA words of block `step`. One non-finite word while collapsed: D7 recovers lane 1.
 fn block(step: usize) -> Vec<f32> {
     let lanes = lanes();
     let mut words = vec![0.0; FRAMES * lanes];
@@ -143,88 +141,43 @@ fn assert_words(actual: &[f32], expected: &[f32], context: &str) {
     }
 }
 
-/// A bank that runs collapsed and then disengages renders, block for block, the left plane, the
-/// left state, the reports and (after the disengage) the right plane and right state of a
-/// never-collapsed bank on `L == R` input, with drive, output and mix ramps in flight at the
-/// disengage; the collapsed body never touches the right plane. Then `channels_agree` is false
-/// after one dual block with a Left-only span and true after the copy, and false when the two
-/// channels differ in the cursor alone.
+/// The checks the randomized collapsed-against-dual oracle (`tests/randomized.rs`, `witness:
+/// true`) does not make; that oracle owns the left plane, the reports and the state. A collapsed
+/// block never writes the right plane, a D7 recovery included. After collapsed blocks with drive,
+/// output and mix ramps in flight, the disengage copy leaves the channels agreeing (red on a copy
+/// that skips `pos` or a ring's mirror rows). `channels_agree` is false after one dual block with a
+/// Left-only span and true after the copy, and false when the channels differ in the cursor alone.
 #[test]
-fn a_collapsed_then_desymmetrized_bank_is_a_never_collapsed_bank() {
+fn a_collapsed_bank_spares_the_right_plane_and_its_copy_makes_the_channels_agree() {
     let lanes = lanes();
     let mut mixed = bank();
-    let mut never = bank();
     assert!(mixed.supports_mono_collapse());
-    let mut recovered = 0;
-    for step in 0..BLOCKS {
-        let collapsed = step < DISENGAGE;
-        if step == DISENGAGE {
-            mixed.desymmetrize_channels();
-            assert!(mixed.channels_agree(), "after the copy");
-        }
-        let context = format!("block {step}");
+    for step in 0..DISENGAGE {
         let (spans, offsets) = automation(step);
-        let first = (step * FRAMES) as u64;
-        let mut never_left = block(step);
-        let mut never_right = never_left.clone();
-        let mut mixed_left = never_left.clone();
+        let mut left = block(step);
         let stale = vec![f32::from_bits(0x7F7F_FFFF); FRAMES * lanes];
-        let mut mixed_right = if collapsed {
-            stale.clone()
-        } else {
-            never_left.clone()
-        };
-        let never_report = render(
-            never.as_mut(),
-            &mut never_left,
-            &mut never_right,
-            FRAMES,
-            first,
-            (&spans, &offsets),
-            false,
-        );
-        let mixed_report = render(
+        let mut right = stale.clone();
+        render(
             mixed.as_mut(),
-            &mut mixed_left,
-            &mut mixed_right,
+            &mut left,
+            &mut right,
             FRAMES,
-            first,
+            (step * FRAMES) as u64,
             (&spans, &offsets),
-            collapsed,
+            true,
         );
-        assert_eq!(mixed_report, never_report, "{context}: reports");
-        recovered += mixed_report.reports[1].nonfinite_right_blocks;
-        assert_words(&mixed_left, &never_left, &format!("{context}: left plane"));
-        if collapsed {
-            assert_words(&mixed_right, &stale, &format!("{context}: untouched right"));
-        } else {
-            assert_words(
-                &mixed_right,
-                &never_right,
-                &format!("{context}: right plane"),
-            );
-        }
-        for track in 0..lanes as u32 {
-            let (_, mixed_l, mixed_r) = snapshot_bank(mixed.as_ref(), track);
-            let (_, never_l, never_r) = snapshot_bank(never.as_ref(), track);
-            assert_eq!(mixed_l, never_l, "{context} track {track}: left state");
-            if !collapsed {
-                assert_eq!(mixed_r, never_r, "{context} track {track}: right state");
-            }
-        }
+        assert_words(&right, &stale, &format!("block {step}: untouched right"));
     }
-    assert_eq!(
-        recovered, 1,
-        "the planted NaN is recovered and counted once"
-    );
+    mixed.desymmetrize_channels();
+    assert!(mixed.channels_agree(), "after the copy");
 
     // One dual block with a Left-only drive span on lane 0: the channels disagree, and the copy
     // makes them agree again.
-    let first = (BLOCKS * FRAMES) as u64;
+    let first = (DISENGAGE * FRAMES) as u64;
     let spans = [point(0, ParameterChannel::Left, 12.0, first)];
     let mut offsets = vec![spans.len() as u32; lanes + 1];
     offsets[0] = 0;
-    let mut left = block(BLOCKS);
+    let mut left = block(DISENGAGE);
     let mut right = left.clone();
     render(
         mixed.as_mut(),

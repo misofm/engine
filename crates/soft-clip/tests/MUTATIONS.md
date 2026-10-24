@@ -117,6 +117,6 @@ Applied in the issue's worktree on the attempt-1 commit, run with
 
 | mutation | file | result |
 |---|---|---|
-| `desymmetrize` skips `history.pos` | `src/lib.rs` | RED: `a_collapsed_then_desymmetrized_bank_is_a_never_collapsed_bank` (`after the copy`) |
-| `desymmetrize` copies the first 32 rows of `x`, `e` and `dry` only, not their mirrors | `src/lib.rs` | RED: `a_collapsed_then_desymmetrized_bank_is_a_never_collapsed_bank` (`after the copy`) |
+| `desymmetrize` skips `history.pos` | `src/lib.rs` | RED: `a_collapsed_bank_spares_the_right_plane_and_its_copy_makes_the_channels_agree` (`after the copy`) |
+| `desymmetrize` copies the first 32 rows of `x`, `e` and `dry` only, not their mirrors | `src/lib.rs` | RED: `a_collapsed_bank_spares_the_right_plane_and_its_copy_makes_the_channels_agree` (`after the copy`) |
 | `channels_bit_equal` omits the `e` ring | `src/lib.rs` | RED: `the_word_lists_are_complete_and_the_witness_declines_on_exactly_the_asymmetric_lane` (`word {e age}: channels_agree`) |

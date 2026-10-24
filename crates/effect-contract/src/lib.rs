@@ -2606,22 +2606,24 @@ pub trait PreparedNativeEffectBank: Send {
     ///
     /// Two launch effects implement it: **`gate-expander`** (issue #973), whose whole per-channel
     /// state is 31 lane words (four coefficients, the envelope, two hysteresis words and 24 ramp
-    /// words), and **`soft-clip`** (issue #1872), whose is 195 lane words (three ramp words and
+    /// words), and **`soft-clip`** (issue #1872), whose is 195 lane words (three state words and
     /// three 64-row histories), its cursor and its ramps; each compares every word its disengage
-    /// copy moves and needs no fixed point. Every other launch effect takes the declining default, and that is a decision rather than an
-    /// omission. Within one plan the channel-symmetry witness can go from holding to not holding
-    /// and back for exactly one term: [`UNBYPASSED`](crate::ChannelSymmetryWitness::UNBYPASSED),
-    /// which `ChannelSymmetryWitness::admit` restores on `Bypass(false)`. `LIVE` has no restoring
-    /// arm, `DESIGNED` is cached at bind on a bound bank, and `SOURCE` and `RESTORED` are decided
-    /// off the render thread. And a bypass window is precisely the window that does **not** move
-    /// the two channels apart, so it never clears the chain's agreement invariant in the first
-    /// place. There is therefore no session this engine can build in which a bank is asked to
-    /// prove agreement and the answer would change anything: `rack::BankChain` recovers
-    /// every reachable case through the disengage copy instead.
+    /// copy moves and needs no fixed point. Every other launch effect takes the declining default,
+    /// and that is a decision rather than an omission. Within one plan the channel-symmetry witness
+    /// can go from holding to not holding and back for exactly one term:
+    /// [`UNBYPASSED`](crate::ChannelSymmetryWitness::UNBYPASSED), which
+    /// `ChannelSymmetryWitness::admit` restores on `Bypass(false)`. `LIVE` has no restoring arm,
+    /// `DESIGNED` is cached at bind on a bound bank, and `SOURCE` and `RESTORED` are decided off
+    /// the render thread. And a bypass window is precisely the window that does **not** move the
+    /// two channels apart, so it never clears the chain's agreement invariant in the first place.
+    /// There is therefore no session this engine can build in which a bank is asked to prove
+    /// agreement and the answer would change anything: `rack::BankChain` recovers every reachable
+    /// case through the disengage copy instead.
     ///
-    /// The gate's and the soft clip's answers are cheap and sound, not needed: it changes nothing in any session that
-    /// can be built today. Reading each other crate's rest state is what settles that it *would*
-    /// be implementable, and the reading is worth recording because it is not uniform:
+    /// The gate's and the soft clip's answers are cheap and sound, not needed: they change nothing
+    /// in any session that can be built today. Reading each other crate's rest state is what
+    /// settles that it *would* be implementable, and the reading is worth recording because it is
+    /// not uniform:
     ///
     /// * **`parametric-eq`** and the builtin input chain have no delay lines at all --
     ///   two integrator words per section -- so their whole per-channel state is a few hundred
