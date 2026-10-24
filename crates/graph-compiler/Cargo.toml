@@ -23,10 +23,11 @@ builtins-compiler.workspace = true
 rack.workspace = true
 rack-compiler.workspace = true
 sha2.workspace = true
+# #1379 Amendment 1 H3: the tail composition reads each strip's effective fader and mute and which
+# of them stored automation drives.
+controls.workspace = true
 
 [dev-dependencies]
-# Decision 17 C7: the tests pass the preparation entries the `controls::Effective` they bake.
-controls.workspace = true
 # Issue #1100: `tests/bypass_resources.rs` measures what a session bypass retains and what its
 # render allocates with the workspace's one audited allocator. Test-only, as the bench policy allows.
 bench-support.workspace = true

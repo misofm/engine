@@ -2836,7 +2836,7 @@ impl AudioWorkletEngineHost {
             return RESULT_WRONG_STATE;
         };
         let resources = ready.queries.resources();
-        let (tail_kind, tail_samples) = control_plane::tail_words(resources.output_tail);
+        let (tail_kind, tail_samples) = control_plane::tail_words(resources.output_tail_every_peak);
         self.plan_latency = WebPlanLatency {
             struct_size: PLAN_LATENCY_BYTES,
             reserved0: 0,

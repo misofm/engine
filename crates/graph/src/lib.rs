@@ -36,10 +36,11 @@ use core::cell::Cell;
 use std::any::Any;
 use std::collections::{BTreeMap, BTreeSet};
 
+use effect_contract::NodeTailBound;
 use effect_contract::{
     BankWidth, ChannelSymmetryWitness, EffectControlLane, LatencySamples, ObservationLane,
     PreparedEffectMetadata, PreparedNativeEffect, ResponseAnalysisError, ResponseSnapshotRequest,
-    ResponseSnapshotSummary, SeamSide, TailSamples,
+    ResponseSnapshotSummary, SeamSide,
 };
 use engine::realtime::{
     BufferArena, CarryOutcome, LiveSnapshot, ObserverCarry, ObserverKind, PlanUnitEligibility,
@@ -138,7 +139,10 @@ pub enum GraphEdgeId {
 pub struct GraphNode {
     pub id: GraphNodeId,
     pub latency: LatencySamples,
-    pub tail: TailSamples,
+    /// The node's whole tail bound (#1379 Amendment 1 H2): `T_decay`, `T_rest`, the exact-rest
+    /// bound and the composition values the graph extent composes through gain. Control-side
+    /// plan data: no render-owned structure holds a `GraphNode`.
+    pub bound: NodeTailBound,
 }
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct GraphEdge {
@@ -6235,12 +6239,12 @@ mod tests {
             GraphNode {
                 id: input.clone(),
                 latency: LatencySamples(0),
-                tail: TailSamples::Finite(0),
+                bound: NodeTailBound::ZERO,
             },
             GraphNode {
                 id: output.clone(),
                 latency: LatencySamples(0),
-                tail: TailSamples::Finite(0),
+                bound: NodeTailBound::ZERO,
             },
         ];
         let edge = GraphEdge {
@@ -6448,7 +6452,7 @@ mod tests {
             .map(|id| GraphNode {
                 id,
                 latency: LatencySamples(0),
-                tail: TailSamples::Finite(0),
+                bound: NodeTailBound::ZERO,
             })
             .collect();
         let mut edges = Vec::new();
@@ -6629,7 +6633,7 @@ mod tests {
             .extend(routes.iter().cloned().map(|id| GraphNode {
                 id,
                 latency: LatencySamples(0),
-                tail: TailSamples::Finite(0),
+                bound: NodeTailBound::ZERO,
             }));
         plan.spec.nodes.sort_by(|a, b| a.id.cmp(&b.id));
         plan.sequential_schedule.extend(routes.iter().cloned());
@@ -7281,7 +7285,7 @@ mod tests {
                     .map(|id| GraphNode {
                         id: id.clone(),
                         latency: LatencySamples(0),
-                        tail: TailSamples::Finite(0),
+                        bound: NodeTailBound::ZERO,
                     })
                     .to_vec(),
             );
@@ -7638,8 +7642,8 @@ mod tests {
                 },
             },
             latency: LatencySamples(0),
-            tail: TailSamples::Finite(0),
-            tail_every_peak: TailSamples::Infinite,
+            tail: effect_contract::TailSamples::Finite(0),
+            tail_every_peak: effect_contract::TailSamples::Infinite,
             rest: effect_contract::RestBound::Unstated,
             composition: effect_contract::CompositionBound::Unstated,
             state_sizes: StatePayloadSizes {
@@ -7983,7 +7987,7 @@ mod tests {
                         .map(|id| GraphNode {
                             id,
                             latency: LatencySamples(0),
-                            tail: TailSamples::Finite(0),
+                            bound: NodeTailBound::ZERO,
                         })
                         .collect(),
                 ),
@@ -8167,7 +8171,7 @@ mod tests {
                             .map(|id| GraphNode {
                                 id,
                                 latency: LatencySamples(0),
-                                tail: TailSamples::Finite(0),
+                                bound: NodeTailBound::ZERO,
                             })
                             .collect(),
                     ),
@@ -8482,7 +8486,7 @@ mod tests {
                         .map(|id| GraphNode {
                             id,
                             latency: LatencySamples(0),
-                            tail: TailSamples::Finite(0),
+                            bound: NodeTailBound::ZERO,
                         })
                         .collect(),
                 ),
@@ -8985,8 +8989,8 @@ mod tests {
                 sidechain: PreparedSidechainPort::None,
             },
             latency: LatencySamples(latency),
-            tail: TailSamples::Finite(0),
-            tail_every_peak: TailSamples::Infinite,
+            tail: effect_contract::TailSamples::Finite(0),
+            tail_every_peak: effect_contract::TailSamples::Infinite,
             rest: effect_contract::RestBound::Unstated,
             composition: effect_contract::CompositionBound::Unstated,
             state_sizes: StatePayloadSizes {
@@ -9070,7 +9074,7 @@ mod tests {
                         .map(|id| GraphNode {
                             id,
                             latency: LatencySamples(0),
-                            tail: TailSamples::Finite(0),
+                            bound: NodeTailBound::ZERO,
                         })
                         .collect(),
                 ),
@@ -9570,8 +9574,8 @@ mod tests {
                 },
             },
             latency: LatencySamples(0),
-            tail: TailSamples::Finite(0),
-            tail_every_peak: TailSamples::Infinite,
+            tail: effect_contract::TailSamples::Finite(0),
+            tail_every_peak: effect_contract::TailSamples::Infinite,
             rest: effect_contract::RestBound::Unstated,
             composition: effect_contract::CompositionBound::Unstated,
             state_sizes: StatePayloadSizes {
@@ -9597,7 +9601,7 @@ mod tests {
                         .map(|id| GraphNode {
                             id,
                             latency: LatencySamples(0),
-                            tail: TailSamples::Finite(0),
+                            bound: NodeTailBound::ZERO,
                         })
                         .collect(),
                 ),
@@ -9874,10 +9878,15 @@ mod tests {
                 } else {
                     LatencySamples(0)
                 },
-                tail: if id == effect_node {
-                    metadata.tail
+                bound: if id == effect_node {
+                    NodeTailBound {
+                        tail: metadata.tail,
+                        tail_every_peak: metadata.tail_every_peak,
+                        rest: metadata.rest,
+                        composition: metadata.composition,
+                    }
                 } else {
-                    TailSamples::Finite(0)
+                    NodeTailBound::ZERO
                 },
                 id,
             })

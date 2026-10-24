@@ -4910,7 +4910,7 @@ mod tests {
     mod carry {
         use super::*;
         use core::num::NonZeroUsize;
-        use effect_contract::{LatencySamples, TailSamples};
+        use effect_contract::LatencySamples;
         use engine::{
             QuantumFrames,
             realtime::{
@@ -5028,7 +5028,7 @@ mod tests {
                         .map(|id| GraphNode {
                             id,
                             latency: LatencySamples(0),
-                            tail: TailSamples::Finite(0),
+                            bound: effect_contract::NodeTailBound::ZERO,
                         })
                         .collect(),
                     ports: Vec::new(),

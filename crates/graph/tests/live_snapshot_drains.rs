@@ -184,7 +184,7 @@ fn prepared(
         .map(|id| GraphNode {
             id,
             latency: LatencySamples(0),
-            tail: TailSamples::Finite(0),
+            bound: effect_contract::NodeTailBound::ZERO,
         })
         .collect();
     nodes.sort_by(|a, b| a.id.cmp(&b.id));
@@ -622,7 +622,7 @@ mod effect_bank {
             .map(|id| GraphNode {
                 id,
                 latency: LatencySamples(0),
-                tail: TailSamples::Finite(0),
+                bound: effect_contract::NodeTailBound::ZERO,
             })
             .collect();
         nodes.sort_by(|a, b| a.id.cmp(&b.id));

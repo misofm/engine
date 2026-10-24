@@ -9736,7 +9736,7 @@ mod tests {
                         .map(|id| GraphNode {
                             id,
                             latency: effect_contract::LatencySamples(0),
-                            tail: effect_contract::TailSamples::Finite(0),
+                            bound: effect_contract::NodeTailBound::ZERO,
                         })
                         .collect(),
                 ),
@@ -10579,7 +10579,7 @@ mod tests {
                         .map(|id| GraphNode {
                             id,
                             latency: effect_contract::LatencySamples(0),
-                            tail: effect_contract::TailSamples::Finite(0),
+                            bound: effect_contract::NodeTailBound::ZERO,
                         })
                         .collect(),
                 ),

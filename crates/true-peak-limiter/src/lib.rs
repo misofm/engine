@@ -273,15 +273,91 @@ const fn quality(rate: u32) -> effect_contract::QualityDescriptor {
     }
 }
 
-/// This effect's tail, tail over every peak and exact-rest bound, the one place they are stated
-/// (decision 15 D15-4(b), #1377 D1). Today's declared tail, with no exact-rest bound yet and so no
-/// finite tail over every peak (#1377 D4); #1375 derives the bounds from the designer.
-fn tail_and_rest(_sample_rate: u32, _quality: EffectQuality) -> effect_contract::NodeTailBound {
+/// The slowest release rate coefficient over the parameter domain at `sample_rate`: the design of
+/// the longest release, one `f32` below it so that a non-monotone last bit of the `f64`
+/// exponential cannot put a shorter release's coefficient under it. The release ramp interpolates
+/// between two designed coefficients, so a ramp in flight never goes below either.
+fn slowest_release_rate(sample_rate: u32) -> f32 {
+    let longest = TRUE_PEAK_LIMITER_PARAMETERS[1].maximum.unwrap_or(0.0);
+    let c = release_coefficient(longest, sample_rate);
+    f32::from_bits(c.to_bits() - 1)
+}
+
+/// The exact-rest bound `R`, in samples, at `sample_rate` (#1375 D2), or `None` when it does not
+/// exist (D3).
+///
+/// Counted from the first zero input sample `M`, with `N = Fs / 100`, `R_ring = N + 1` and
+/// `Wb <= R_ring`, the frame that leaves each signal-state word at its rest value `Z` (the words
+/// [`ChannelState::clear_runtime`] writes; `phase` and the ring cursors are cursors):
+///
+/// * `history` holds `x[n - 11 ..= n]`: `+0.0` after frame `M + 11`, so `P = 0` and `r = 1` from
+///   `F = M + 11` on. `main_ring` holds the last `B = N + 6` inputs: `+0.0` after `M + N + 5`.
+/// * `required_ring`: each slot holds the minimum of `r` over samples written at or after the
+///   slot's own write, so after `R_ring` frames from `F` on every slot is `1.0` (`M + N + 11`), and
+///   `prefix`, reset to the newest window sample at each phase `0`, is `1.0` by `M + N + 11` too.
+/// * `m[n] = min(r[n - N ..= n - N + Wb - 1]) = 1` from `F + N` on, so `box_ring` is all `1.0`
+///   after `F + N + R_ring - 1 = M + 2N + 11`, and `box_sum`, an exact running sum on the `2^-14`
+///   grid, is exactly `Wb` from `S0 = F + N + Wb - 1` on, where `s = 1` and the target `1 - s` is
+///   `+0.0`.
+/// * The reduction word `d <= 1` steps `flush(max(+0, fma(c, 0 - d, d)))` from `S0`, the rate form
+///   [`effect_runtime::tail::rate_follower_rest_samples`] bounds with the flush at `FLUSH_EPS`
+///   (`K` steps, `c >= slowest_release_rate`; D3 holds: the slowest coefficient, `1 / 192,000` at
+///   96 kHz, is far above `2^-24`). It is `+0.0` after frame `S0 + K - 1 <= M + 2N + K + 10`.
+///   `d <= 1` holds throughout: `1 - s` is in `[0, 1]`, and a step toward a target `t >= d` gives
+///   at most `t + u (t - d) <= 1 + u`, which rounds to `1`.
+///
+/// The latest of these is `d`'s. The contract counts `R` from `M + latency`, `latency = N + 6`,
+/// so `R = N + K + 5` (the state after frame `M + latency + R - 1` is `Z`). Every word's
+/// distance is bounded independently of the input peak (`r`, `m` and `s` are in `[0, 1]`), so `R`
+/// holds for both peak cases.
+fn rest_samples(sample_rate: u32) -> Option<u64> {
+    let follower = effect_runtime::tail::rate_follower_rest_samples(
+        slowest_release_rate(sample_rate),
+        1.0,
+        effect_runtime::tail::RestSnap::Below(lane::FLUSH_EPS),
+    )?;
+    follower.checked_add(u64::from(sample_rate / 100) + 5)
+}
+
+/// This effect's tail, tail over every peak, exact-rest bound and composition values, the one place
+/// they are stated (decision 15 D15-4(b), #1377 D1, #1375).
+///
+/// * **Tail `Finite(0)`, decay `0`** (#1375 D1): the output is `select(bypass, z, z * g)` with `z`
+///   the main-ring sample `latency` frames old, and no other term; so it is exactly `±0.0` from
+///   `latency` after the first zero input sample, whatever `g` holds.
+/// * **Rest** [`rest_samples`], for both peak cases; **tail over every peak** the same `R`, an
+///   upper bound of `max(0, R(P*))`.
+/// * **Composition** (#1375 D4): `0 <= g = fl(1 - d) <= 1` (`0 <= d <= 1`), so `G_p = G_t` is
+///   0 dB times `(1 + u)` for the one rounded product, rounded up to millibels; `sigma_p = sigma_t`
+///   is one [`math::tail::UNDERFLOW`]. The limiter has no sidechain.
+///
+/// A rate the follower bound cannot cover states no bound.
+fn tail_and_rest(sample_rate: u32, _quality: EffectQuality) -> effect_contract::NodeTailBound {
+    let Some(rest) = rest_samples(sample_rate) else {
+        return effect_contract::NodeTailBound::UNBOUNDED;
+    };
+    let gain = effect_contract::PeakGain::Millibels(math::tail::ceil_millibels(
+        1.0 + effect_runtime::tail::ROUNDOFF,
+        math::tail::Rounding::Computed,
+    ));
+    let stall = effect_contract::FlushStall::Level(math::tail::ceil_millibels(
+        math::tail::UNDERFLOW,
+        math::tail::Rounding::Exact,
+    ));
     effect_contract::NodeTailBound {
-        tail: TailSamples::Infinite,
-        tail_every_peak: TailSamples::Infinite,
-        rest: effect_contract::RestBound::Unstated,
-        composition: effect_contract::CompositionBound::Unstated,
+        tail: TailSamples::Finite(0),
+        tail_every_peak: TailSamples::Finite(rest),
+        rest: effect_contract::RestBound::Bounded(effect_contract::RestSamples {
+            peak_plus_24_dbfs: rest,
+            any_sanitized_input: rest,
+        }),
+        composition: effect_contract::CompositionBound::Stated {
+            decay: effect_contract::TailDecay(0),
+            peak_gain: gain,
+            tail_gain: gain,
+            peak_stall: stall,
+            tail_stall: stall,
+        },
     }
 }
 
@@ -5488,16 +5564,6 @@ mod tests {
             assert_eq!(quality.maximum_state.total(), Some(expected.3));
             assert_eq!(quality.scratch_fixed_bytes, 24);
             assert_eq!(quality.scratch_bytes_per_frame, 0);
-            assert_eq!(
-                conformance::tail_bound_of(
-                    Box::new(crate::TruePeakLimiterFactory),
-                    quality.sample_rate,
-                    quality.quality
-                )
-                .bound()
-                .tail,
-                TailSamples::Infinite
-            );
         }
     }
 

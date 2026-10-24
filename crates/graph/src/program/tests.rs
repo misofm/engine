@@ -1,6 +1,6 @@
 use super::*;
 use crate::{GraphEdge, GraphNode, GraphPortId, StableGraphId};
-use effect_contract::{LatencySamples, TailSamples};
+use effect_contract::LatencySamples;
 
 fn gid(value: &str) -> StableGraphId {
     StableGraphId::parse(value).expect("static id")
@@ -15,7 +15,7 @@ fn node(id: GraphNodeId) -> GraphNode {
     GraphNode {
         id,
         latency: LatencySamples(0),
-        tail: TailSamples::Finite(0),
+        bound: effect_contract::NodeTailBound::ZERO,
     }
 }
 fn port(node: GraphNodeId, kind: GraphPortKind) -> GraphPortId {

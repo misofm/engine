@@ -51,5 +51,6 @@ pub mod params;
 pub mod ramp;
 pub mod state_payload;
 pub mod svf;
+pub mod tail;
 
 pub mod corpus;

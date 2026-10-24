@@ -176,6 +176,7 @@ fn compile(session: CompiledSession, caps: GraphCompileCaps) -> Result<Compiled,
         effects,
         builtins,
         caps,
+        gain_liveness: graph_compiler::GainLiveness::FIXED,
     })
     .map_err(|failure| {
         failure

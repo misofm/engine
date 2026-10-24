@@ -120,8 +120,9 @@ pub struct PlanResources {
     pub track_count: u64,
     /// Output latency in samples.
     pub latency_samples: u64,
-    /// Output tail.
-    pub output_tail: TailSamples,
+    /// The reported output tail, the graph's every-peak extent (#1379 H10): what the C ABI's
+    /// `tail_samples` and the browser's plan-latency record carry.
+    pub output_tail_every_peak: TailSamples,
     /// Graph, session and plan bytes, the carry program included.
     pub graph_session_plus_plan_bytes: u64,
     /// The plan's incremental graph bytes.

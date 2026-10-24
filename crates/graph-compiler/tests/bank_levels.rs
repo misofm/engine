@@ -284,6 +284,7 @@ pub fn compile_bind_render(
         builtins,
         caps: graph_caps(),
         dispatch,
+        gain_liveness: graph_compiler::GainLiveness::FIXED,
     }) {
         Ok(artifact) => artifact,
         Err(failure) => {

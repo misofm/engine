@@ -471,7 +471,9 @@ reference session the
 two rows move 17,451 -> 28,521 and 256,812 -> 258,135 bytes. A caller whose
 `maximum_builtin_retained_bytes` and `maximum_capi_retained_bytes` were exact before this change
 must raise both. #1256 attached no input, effect or route lane, so rendering, `latency_samples`,
-`tail_kind` and `tail_samples` did not change; the effect lanes follow (#1263), and the input lane
+`tail_kind` and `tail_samples` did not change (since #1379 the fader and matrix lanes do move
+`tail_samples`: a live gain states its domain maximum in the tail composition, section "Tail on
+every strip"); the effect lanes follow (#1263), and the input lane
 (#1556, section "Live strip input" below) and the route lane (#1557, section "Live sends" below)
 are attached later. #1257
 delivers fader, mute and pan edits through them (next section).
@@ -509,8 +511,9 @@ nine-track EQ reference session) and, for the producers' table, in `capi_retaine
 - **Tail on every strip.** Every C ABI plan carries an input lane per strip, so every strip reports
   the rate's live input bound even with both filters off (before #1556 such a strip reported its
   prepared design's bound, zero without a filter). The bound is a function of the rate alone
-  (`builtins::input_section_live_bound_table`); `tail_samples` of a plan with no infinite-tail
-  effect is that figure, and measured so on the bare parity sessions at one and ten tracks:
+  (`builtins::input_section_live_bound_table`); before #1379 `tail_samples` of a plan with no
+  infinite-tail effect was that figure, measured so on the bare parity sessions at one and ten
+  tracks:
 
   | Rate | `tail_samples` (`T`) | Seconds | Exact rest, peak up to +24 dBFS | Exact rest, any sanitized input |
   | --- | --- | --- | --- | --- |
@@ -519,14 +522,23 @@ nine-track EQ reference session) and, for the producers' table, in `capi_retaine
   | 88.2 kHz | 704,018 | 7.98 | 1,071,057 | 2,388,800 |
   | 96 kHz | 699,960 | 7.29 | 1,065,688 | 2,376,147 |
 
-  A strip's figures add along a path as PDC composes tails (`graph-compiler/src/pdc.rs`: a node's
-  tail is added to the largest tail that reaches it), so a track routed through a submix reports
-  the sum of both strips' and the effects' tails on its path. The graph tail cap is not limited by
-  host preparation (`u64::MAX`), so no session is refused for it. **Host impact:** a host that waits
+  **Since #1379 (decision 15 D15-4(b) as amended by #1379 H10)** `tail_samples` is the graph's
+  `output_tail_every_peak` (`graph-compiler/src/pdc.rs`, `compose`): the strips' figures compose
+  through every gain between the nodes, each live gain at its domain maximum (every C ABI plan's
+  fader and matrix lanes are live, +24 dB and a row sum of 2; a live send +24 dB with ones), so a
+  node's decay part grows by one `D` per 20 dB of gain on its paths; and below the graph's flush
+  floor `P*_graph` the value is the exact-rest extent (the exact-rest figures above, added along
+  the path), from which the output is exactly `+-0.0`. A live graph's floor can sit near or above
+  full scale, so the reported value is usually the rest branch: C6's one-track 48 kHz session
+  (`crates/host-core/tests/tail_composition.rs`, the 1 kHz input LPF, every gain at 0 dB) reports
+  1,061,497, the 48 kHz `peak_plus_24_dbfs` rest; a plan without a control queue states its fixed
+  gains and reports less. The graph tail cap is not limited by host preparation (`u64::MAX`), so
+  no session is refused for it. **Host impact:** a host that waits
   `tail_samples` after its last source ends before it stops rendering, to let the output ring
-  out, now waits that long on every plan, about 7 to 16 seconds, where a plan whose filters were
-  all off waited none. The bound is an upper bound: `T` is the time after which the output is below
-  -144 dB of the input peak for every history of live values, not a prediction for the session at
+  out, now waits that long on every plan, many seconds, where a plan whose filters were
+  all off waited none. The bound is an upper bound: `tail_samples` is the time after which the
+  output is below -144 dB of the input peak (exactly zero below the floor) for every history of
+  live values, not a prediction for the session at
   hand, so a host that wants to stop sooner ends on its own silence test. The reason is browser
   parity (decision 17, C6): the core attaches the live lanes to every plan on both hosts, so the
   browser and the C ABI report the same tail for the same session, and the live bound is the one

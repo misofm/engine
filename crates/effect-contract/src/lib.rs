@@ -172,7 +172,8 @@ pub enum TailSamples {
 /// same parameters and settled ramps reaches after `R` zero input samples, and it is a fixed point
 /// of the node's zero-input step. `Z` need not be zero: a gate rests closed, and the true-peak
 /// limiter's rings rest at `1.0`. For the builtin input section `Z` is the reset state, every SVF
-/// integrator `+0.0`.
+/// integrator `+0.0`. A node whose rest state depends on its history states its `R` as
+/// [`RestBound::FixedPoint`], which replaces the equality with `Z` by a zero-input fixed point.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct RestSamples {
     /// `R` for an input peak at most +24 dBFS.
@@ -192,7 +193,15 @@ impl RestSamples {
 /// A native effect's exact-rest bound, as its [`EffectDescriptor::tail_and_rest`] states it
 /// (decision 15 D15-4(b), #1377 D2).
 ///
-/// `Bounded(R)` states the [`RestSamples`] contract. `Unstated` states no bound: it is the
+/// `Bounded(R)` states the [`RestSamples`] contract: by `R` every signal-state word equals the rest
+/// state `Z`'s. `FixedPoint(R)` states the same contract with one amendment, for a node whose rest
+/// state depends on its history (#1376 root option (a), 2026-10-24): by `N + latency + R` every
+/// output sample is `+-0.0` and every signal-state word is at **a** zero-input fixed point, a state
+/// that one further zero sample leaves bit-identical, which need not be the fresh instance's `Z`.
+/// The gate/expander declares it: a parameter edit before `N` can leave its gain word on a stall
+/// word other than the one a reset reaches. Skipping a silent block needs only a fixed point
+/// (`PreparedNativeEffectBank::lanes_at_rest` checks one), so both variants bound it alike; only
+/// a claim of equality with a fresh instance needs `Bounded`. `Unstated` states no bound: it is the
 /// effect-side counterpart of [`TailSamples::Infinite`], and it exists only while the per-effect
 /// slices (#1372-#1376) land one at a time. *Retire the Infinite tail* (#1378) depends on every one
 /// of them and removes `Unstated` together with `Infinite` in both tail fields
@@ -201,7 +210,19 @@ impl RestSamples {
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub enum RestBound {
     Bounded(RestSamples),
+    FixedPoint(RestSamples),
     Unstated,
+}
+
+impl RestBound {
+    /// The stated samples of `Bounded` or `FixedPoint`; `None` for `Unstated`.
+    #[must_use]
+    pub const fn samples(self) -> Option<RestSamples> {
+        match self {
+            Self::Bounded(samples) | Self::FixedPoint(samples) => Some(samples),
+            Self::Unstated => None,
+        }
+    }
 }
 
 /// Every node's tail bound, one struct for a native effect and a builtin input section alike
@@ -254,7 +275,7 @@ impl NodeTailBound {
     /// channels).
     ///
     /// A tail is `Infinite` if either side's is; a rest is `Unstated` if either side's is, and
-    /// otherwise each peak's bound is the larger; the composition is `Unstated` if either side's
+    /// otherwise each peak's bound is the larger, `FixedPoint` if either side's is; the composition is `Unstated` if either side's
     /// is, and otherwise each of its five values is the larger, each stall by its own maximum and
     /// never from the other stall ([`PeakGain::Zero`] and [`FlushStall::Zero`] below every level).
     #[must_use]
@@ -268,14 +289,20 @@ impl NodeTailBound {
         Self {
             tail: tail(self.tail, other.tail),
             tail_every_peak: tail(self.tail_every_peak, other.tail_every_peak),
-            rest: match (self.rest, other.rest) {
-                (RestBound::Bounded(left), RestBound::Bounded(right)) => {
-                    RestBound::Bounded(RestSamples {
+            rest: match (self.rest.samples(), other.rest.samples()) {
+                (Some(left), Some(right)) => {
+                    let samples = RestSamples {
                         peak_plus_24_dbfs: left.peak_plus_24_dbfs.max(right.peak_plus_24_dbfs),
                         any_sanitized_input: left
                             .any_sanitized_input
                             .max(right.any_sanitized_input),
-                    })
+                    };
+                    match (self.rest, other.rest) {
+                        (RestBound::Bounded(_), RestBound::Bounded(_)) => {
+                            RestBound::Bounded(samples)
+                        }
+                        _ => RestBound::FixedPoint(samples),
+                    }
                 }
                 _ => RestBound::Unstated,
             },
@@ -2745,14 +2772,14 @@ impl RegisteredTailBound {
 ///   (`T_rest = max(T_decay, R(P*))` cannot be shorter than `T_decay`);
 /// * (b) [`RestBound::Unstated`] only with an infinite `tail_every_peak` (no `R(P*)` is derived,
 ///   so no `T_rest` is);
-/// * (c) [`RestBound::Bounded`] only with a finite `tail_every_peak` (a derived `R(P*)` gives a
-///   finite `T_rest`);
-/// * (d) in a [`RestBound::Bounded`], `peak_plus_24_dbfs <= any_sanitized_input` (the bound for
-///   every sanitized input covers the inputs whose peak is at most +24 dBFS, so it cannot be the
-///   smaller of the two).
+/// * (c) [`RestBound::Bounded`] or [`RestBound::FixedPoint`] only with a finite `tail_every_peak`
+///   (a derived `R(P*)` gives a finite `T_rest`);
+/// * (d) in either, `peak_plus_24_dbfs <= any_sanitized_input` (the bound for every sanitized
+///   input covers the inputs whose peak is at most +24 dBFS, so it cannot be the smaller of the
+///   two).
 ///
-/// `RestBound` and `TailSamples` each have exactly two variants, so "`rest` is `Unstated` if and
-/// only if `tail_every_peak` is `Infinite`" and "`rest` is `Bounded` if and only if
+/// `TailSamples` has two variants and `RestBound` one unstated and two stated ones, so "`rest` is
+/// `Unstated` if and only if `tail_every_peak` is `Infinite`" and "`rest` is stated if and only if
 /// `tail_every_peak` is finite" are one statement. (b) and (c) are its two directions, the two
 /// ways it can fail independently, and together they are the whole equivalence.
 ///
@@ -2773,11 +2800,11 @@ const fn tail_bound_consistent(bound: NodeTailBound) -> bool {
     };
     let unstated_is_infinite = !matches!(bound.rest, RestBound::Unstated)
         || matches!(bound.tail_every_peak, TailSamples::Infinite);
-    let bounded_is_finite = !matches!(bound.rest, RestBound::Bounded(_))
+    let bounded_is_finite = matches!(bound.rest, RestBound::Unstated)
         || matches!(bound.tail_every_peak, TailSamples::Finite(_));
-    let rest_ordered = match bound.rest {
-        RestBound::Bounded(rest) => rest.peak_plus_24_dbfs <= rest.any_sanitized_input,
-        RestBound::Unstated => true,
+    let rest_ordered = match bound.rest.samples() {
+        Some(rest) => rest.peak_plus_24_dbfs <= rest.any_sanitized_input,
+        None => true,
     };
     let composition_consistent = match bound.composition {
         CompositionBound::Stated {

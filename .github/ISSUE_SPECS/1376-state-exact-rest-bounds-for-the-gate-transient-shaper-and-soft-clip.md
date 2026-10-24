@@ -115,3 +115,93 @@ three.
   (#1379), never before it: `main` must never report a plan tail that is not certified.
 - *Report a zero tail beyond latency for the compressor and the true-peak limiter* (#1375), for the
   helper
+
+## Evidence and decision record (attempt 1, 2026-10-24, on #1375's f20fd389b)
+
+- **Scope note decisions taken (root).** Two tranches; the shared run-grouped walker in
+  `effect_runtime::tail` serves three entry points; `FAST_GAIN_ERROR_DB = 1e-5` re-declared per
+  crate with the F1 citation; the soft clip's D4 includes the drive; the soft clip's `R` counts the
+  32-row ring; the gate's `Z` is the stall word (D2 amendment below). Paths beyond the spec list,
+  from the scope note: `crates/effect-runtime/src/tail.rs`, `crates/transient-shaper/src/corpus.rs`
+  (the metadata literal now reads `tail_and_rest`), `.github/workflows/qualification.yml` (one line).
+- **Helper.** #1375 shipped `rate_follower_rest_samples`, not D2's `one_pole_rest_samples`. The
+  walker is factored into `magnitude_walk` over an exact weight `P / 2^Q`; the rate form passes
+  `c (1 - u)`, the new `pole_follower_rest_samples` passes `1 - c` (exact, Sterbenz). No value of
+  the compressor or limiter moved.
+- **Transient shaper (D1, D2, D4).** Tail `Finite(0)` confirmed by reading (`select(identity, x,
+  gain_mix_step(x, g, mix))` of the current input). With a zero detector each follower is
+  `snap(fl(c e))` at its release retention, snapped `Below(FOLLOWER_REST = 1e-12)`; `Z` is the reset
+  state. Distance: the input peak `U` inflated to `U (1 + 3 u / k_min)` (a convex-step invariant
+  proved in the doc comment). D3: slowest retention `1 - 1.04e-4`. Stated `R` (+24 dBFS / any
+  sanitized input) at 44.1 / 48 / 88.2 / 96 kHz: 134,039 / 426,481; 145,892 / 464,191;
+  268,101 / 853,016; 291,723 / 928,173, each equal to the brute force of the slow word. Gate 2 in
+  release, three link modes and a ramp in flight: rest at most 904,192 against 928,173 (96 kHz).
+  `G_p = G_t = 1,801` mB (`10^((18 + 1e-5)/20) (1 + u)^4`: the scope note's `(1 + u)^3` undercounts
+  `gain_mix_step`'s four roundings); `sigma = 4 UNDERFLOW (1 + u)^3 = -74,655` mB. Measured largest
+  `|y| / max|x|` 7.9411 against 7.9433.
+- **Soft clip (D1, D2, D4).** `T = max(2 * 30, 31) - 31 = 29` stands. `R = 30 + 32 - 31 = 31`: the
+  last non-zero `e` push is 30 samples after the input stops and the 32-row ring clears 32 pushes
+  later; gate 2 judges it with `lanes_at_rest` on a bank and the payload against `Z`
+  (`tail_every_peak = 31`). `G_p = G_t = 7,025` mB: `g_out max(1, 2 g_drive (l1e^2 + 1/4))
+  (1 + u)^129` at the +36 dB drive and +24 dB output words (the spec's D4 omitted the drive; the
+  centre tap is carried exactly instead of folding it into `l1(h)^2`); `sigma = 129 UNDERFLOW g_out
+  (l1e + 1/2)^2 (1 + u)^129 = -68,344` mB. Measured largest `|y| / max|x|` 16.99 against 3,254.
+- **Gate D2 amendment (root, scope note).** The spec's premise that the gain smoother reaches
+  `-range` is false: `flush(fma(c, t - e, e))` stops at the first word whose step rounds away, the
+  stall word `w*` (measured 0.74 dB short of a 96 dB range at 96 kHz). `Z = (gain = w*, open = +0.0,
+  hold = +0.0)`. `w*` is the same for every start in `[w*, 0]` (every history with fixed
+  parameters): near the end each step moves one word and no step from farther away lands past the
+  first stall (derivation in `rate_follower_stall_samples`; gate 2's three histories and the helper
+  test's three starts per target). **Recorded limit:** an edit (range, ratio, threshold, a ramp in
+  flight) that leaves the word below `w*` rests on its own fixed point, which `lanes_at_rest`
+  accepts but which is not word-equal to `Z`. **Owner question (not blocking, class B):** snap the
+  gain word to its target within a stated epsilon, so `Z` is unique for every history and the gate
+  lands on `-range`.
+- **Gate bound.** `rate_follower_stall_samples` bounds the walk from `+0.0` for every target and
+  every release coefficient: majorant integer walks per target class (B: a target just above a
+  power of two, whose walk ends on the finer grid; M: mid; A: high in its binade), coefficient
+  brackets of 2 % above the slowest, and a coarse bound above them. `c_min` is the 2,000 ms design
+  less `2^-24` (`expf` is within one ulp, and every release coefficient is a multiple of `2^-24`).
+  `R = H_max + K` (`H_max` = 1,000 ms, above the 64-sample ramp): 44.1 / 48 / 88.2 / 96 kHz:
+  562,206 (walk 518,106, longest brute force 516,751), 602,859 (554,859 / 553,347), 1,006,672
+  (918,472 / 914,783), 1,082,844 (986,844 / 982,616): within 0.43 %. The class B target is the
+  maximum: its stall word is `-32.0` exactly in gate 2. Cost: 1.6-3.3 ms per rate in release.
+  `G_p = G_t = 1` mB (`10^(1e-5/20) (1 + u)`), `sigma = UNDERFLOW = -75,859` mB, for every
+  sidechain input.
+- **No rendered bit moved.** No kernel, coefficient or latency changed; the corpus metadata reads
+  `tail_and_rest`.
+- **Tests.** One `tests/tail_contract.rs` per effect (gates 1+3, 2, 4; the soft clip folds the tail
+  and rest recompute into gate 1); helper tests in `effect_runtime::tail` (pole bound, pole stall,
+  stall bound and uniqueness at faster coefficients). #1784's `rest_tests.rs` stay. The three crates
+  join #1375's release `tail_contract` step in `qualification.yml`.
+
+## Attempt 2 (2026-10-24): root option (a), the fixed-point rest contract
+
+- **Verifier MAJOR (attempt 1).** Under the contract's quantifier (a ramp in flight at `N`), a
+  closed gate whose target an edit makes shallower than its word (range, ratio or threshold
+  automated) rises toward `t` from below and stalls on the far side: it never equals the fresh
+  instance's `Z`, so `Bounded(R)` was false for a reachable history.
+- **Root option (a), contract amendment** (`crates/effect-contract/src/lib.rs`, authorized by
+  root): `RestBound::FixedPoint(RestSamples)` declares a history-dependent rest state. It states
+  that by `N + latency + R` the output is `+-0.0` and every signal-state word is at a zero-input
+  fixed point (one more zero sample leaves it bit-identical), not necessarily `Z`. `Bounded` keeps
+  `Z` equality. `NodeTailBound::max` gives `FixedPoint` when either side is one; the consistency
+  rules (c) and (d) cover both stated variants. `RestBound::samples()` reads either.
+- **Consumers checked** (this branch and `codex/batch-b9-1379`): no production code relies on `Z`
+  equality. The readers are plumbing (prepared metadata, the program key, the channel `max`, the
+  registry consistency check), the graph extent reads `tail_every_peak` only, silence skipping uses
+  `lanes_at_rest` (a fixed-point check), and conformance builds `Unstated`. Exhaustive matches
+  that need the new arm: `crates/effect-compiler/src/prepare.rs` (a test mutation table) and
+  `crates/builtins/tests/tail_contract.rs` here, both one arm; on #1379's branch,
+  `crates/graph-compiler/src/canonical.rs` `bound_text` needs a token for `FixedPoint` at merge.
+- **Gate.** States `FixedPoint`. From below the word rises at the attack rate:
+  `effect_runtime::tail::rate_follower_approach_samples` bounds it (an affine contraction to
+  `u tau / g` and a word count; the worst target is at the flush threshold). `R = max(H_max, 64) +
+  max(from above, from below)`; from below is 135,764 / 147,571 / 268,531 / 291,881 at
+  44.1 / 48 / 88.2 / 96 kHz, under the walk from above, so no stated `R` moved. Gate 4 brute-forces
+  the walk from below at the slowest attack from -96 dB (48 kHz: 143,401 steps toward
+  `-1.000001e-20`, 121,497 toward `-1e-25`, which flushes to `+0.0`); gate 2 adds the edited
+  history (range automated to 3 dB, ramping at the silence): at a fixed point by `R`, -3.0000005 dB,
+  not `Z`.
+- **Class B arm (MINOR).** Recorded in the helper doc as a proof obligation the brute force cannot
+  check (it is within a sample or two of M's lowest range). The target snap stays an owner question.

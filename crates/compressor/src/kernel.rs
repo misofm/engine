@@ -22,7 +22,9 @@ use crate::design::{
 const LEVEL_FLOOR: f32 = 1.0e-8;
 const LEVEL_MIN_DB: f32 = -160.0;
 const LEVEL_MAX_DB: f32 = 24.0;
-const GAIN_REDUCTION_MIN_DB: f32 = -100.0;
+/// The deepest gain reduction the curve target can ask for, in dB; it bounds the recursive word
+/// (`tail_and_rest`).
+pub(crate) const GAIN_REDUCTION_MIN_DB: f32 = -100.0;
 
 /// Frames per chunk of the settled body's two passes (issue #983). 16, 64 and 128 measured the
 /// same to within 3 %; 32 keeps the stack scratch smallest.
