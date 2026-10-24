@@ -5157,6 +5157,7 @@ fn a_computed_tap_is_refused_with_unsupported_kind() {
         contract_minor: 1,
         state_layout_version: 1,
         supported_link_modes: LinkModeSet::ALL,
+        lane_link: false,
         parameters: &[],
         ports: &[],
         qualities: &[],

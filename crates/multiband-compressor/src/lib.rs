@@ -46,7 +46,7 @@ use effect_contract::{
     PortLayout, PortRole, PrepareEffectBankRequest, PrepareEffectRequest, PreparedAutomationSpan,
     PreparedBankMetadata, PreparedEffect, PreparedEffectBank, PreparedEffectMetadata,
     PreparedNativeEffect, PreparedNativeEffectBank, ProcessReport, ResetKind, SmoothingRule,
-    StatePayloadError, StatePayloadInput, StatePayloadOutput, StatePayloadSizes, TailSamples,
+    StatePayloadError, StatePayloadInput, StatePayloadOutput, StatePayloadSizes,
     expected_prepared_metadata,
 };
 use effect_runtime::bank::{self, NonFiniteReport, block_is_positive_zero, positive_zero_lanes};
@@ -72,6 +72,7 @@ mod rest_tests;
 mod shim;
 #[cfg(test)]
 mod split;
+pub mod tail;
 
 use shim::{LINK_AVERAGE, LINK_DUAL_MONO, LINK_MAXIMUM, branching_smooth, link_levels};
 
@@ -437,16 +438,13 @@ const fn quality(sample_rate: u32) -> effect_contract::QualityDescriptor {
     }
 }
 
-/// This effect's tail, tail over every peak and exact-rest bound, the one place they are stated
-/// (decision 15 D15-4(b), #1377 D1). Today's declared tail, with no exact-rest bound yet and so no
-/// finite tail over every peak (#1377 D4); #1373 derives the bounds from the designer.
-fn tail_and_rest(_sample_rate: u32, _quality: EffectQuality) -> effect_contract::NodeTailBound {
-    effect_contract::NodeTailBound {
-        tail: TailSamples::Infinite,
-        tail_every_peak: TailSamples::Infinite,
-        rest: effect_contract::RestBound::Unstated,
-        composition: effect_contract::CompositionBound::Unstated,
-    }
+/// This effect's tail, tail over every peak, exact-rest bound and composition values, the one place
+/// they are stated (decision 15 D15-4(b), #1377 D1, #1373): the pinned per-rate bound of
+/// [`tail::multiband_live_bound_table`], over every crossover, curve, makeup and ramp history.
+/// The quality is `Normal` alone. Off the launch rates nothing is stated.
+fn tail_and_rest(sample_rate: u32, _quality: EffectQuality) -> effect_contract::NodeTailBound {
+    tail::multiband_live_bound_table(sample_rate)
+        .unwrap_or(effect_contract::NodeTailBound::UNBOUNDED)
 }
 
 const QUALITIES: [effect_contract::QualityDescriptor; 4] = [
@@ -487,6 +485,7 @@ pub const MULTIBAND_COMPRESSOR_DESCRIPTOR: EffectDescriptor = EffectDescriptor {
     contract_minor: 1,
     state_layout_version: STATE_LAYOUT_VERSION,
     supported_link_modes: LinkModeSet::ALL,
+    lane_link: false,
     parameters: &MULTIBAND_COMPRESSOR_PARAMETERS,
     ports: &PORTS,
     qualities: &QUALITIES,

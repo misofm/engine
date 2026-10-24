@@ -226,3 +226,42 @@ offline) is a weekly-pass item, not changed here.
 **One diagnostic decoder.** `decodeProtocolDiagnostic` in `control-frame.ts` is the SDK's one decoder
 of the `Diagnostic` message; `decodeRefusalFields` decodes each refusal diagnostic once, and the
 control refusal's `decodeRefusalBody` maps those values.
+
+## Tranche b evidence (attempt 1, 2026-10-24)
+
+- `BrowserEngine` has the eight calls, through tranche a's `ProtocolClient` and
+  `decodeProtocolEvent` (no second codec): `host.control` with the host's one request-ID allocator
+  (`createBrowserControlListTransport`), and `host.onControlEvent`. The host shows the committed
+  revision only in a reply, so `setTransport` and `configureTelemetry` read it with a revision probe
+  first (one extra request ID). A listener that throws, or a frame that does not decode, is reported
+  with `reportError` and does not stop the host's later listeners. The browser barrel exports the
+  protocol API as the headless one does.
+- **Page modes.** The qualification server sends no cross-origin-isolation headers, so the harness
+  has one page mode (non-isolated). The row runs in it on all three browsers; there is no second mode
+  to run.
+- **The row.** One call sequence (`hosts/host-web/qualification/protocol-calls.mjs`) runs on the
+  browser engine in the page (OfflineAudioContext, 4 quanta) and on the headless engine in Node
+  (`run.mjs`), booted from the page's document and the served module: the headless engine imports
+  `node:fs`, so it cannot be bundled into the page. Gates `sdk-protocol-answers` (gate 2),
+  `sdk-protocol-refusal` (gate 5), `sdk-protocol-reliable` and `sdk-protocol-lossy` (gate 3), each
+  with a self-test mutation. Reliable events compare without `originRequestId` (the probe draws one
+  ID the headless engine does not). Lossy events: each one that arrived must equal the headless
+  engine's event, in its order, and the last block's `diagnostic`, `meterBatch` and
+  `counterSnapshot` must each arrive (no later block replaces them). A render diagnostic comes on the
+  worklet's lane 0 with the reliable events, and the telemetry on lane 1: a first gate that required
+  only one lossy event let a mutant that dropped lane 1 survive, so the gate names the three kinds.
+- **Fact.** The worklet posts a message's events after its reply, so the row makes one more call
+  after the call that reads the render's events. Measured on all three browsers: the browser gets
+  `sessionCommitted, transportState` and the last block's `diagnostic, meterBatch, counterSnapshot`;
+  the headless engine gets all four blocks'.
+- **Runs.** Module `03619b8e0cf89d4ff69bc27abfb604f78e6c1709c9148e09271b5d61dd8d4495`. During
+  attempt 1 a process outside this stream deleted the worktree's `target/`; the Firefox run then failed
+  (`browser-execution`, the wasm answered 404) and the WebKit run failed (`ENOENT` on the wasm). Both
+  reds were the deletion, not the tree: the rebuilt module had the same digest, and the later runs
+  read a copy of it outside `target/`.
+- **Verifier fold.** `committedRevision` is the queue's own probe (`readCommittedRevision`), so the
+  browser has one probe. The lossy gate requires that each kind's last received event carries the
+  headless engine's last sample (self-test `sdk-protocol-lossy-first-block`).
+- **Later work.** A test of the `onEvent` listener-throw path (reported, later listeners still
+  called). Removing the probe's extra round trip before `TRANSPORT_SET` and `TELEMETRY_CONFIGURE`
+  (the worklet posts the committed revision, or these two commands take any revision).

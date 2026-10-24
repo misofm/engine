@@ -13,7 +13,7 @@ use std::sync::{
 };
 
 use engine::realtime::{
-    Consumer, ObserverKind, Producer, QueueGeneration, RenderError, bounded_spsc,
+    Consumer, InPlaceProducer, ObserverKind, QueueGeneration, RenderError, bounded_spsc_prefilled,
     bounded_spsc_retained_payload,
 };
 use graph::{
@@ -500,6 +500,22 @@ pub(crate) struct SpectrumCapturedRecord {
 }
 
 impl SpectrumCapturedRecord {
+    /// The record every queue slot holds before its first write: both planes zero, so a plane a
+    /// capture does not select reads `0.0` (#897). Each publication writes every other field.
+    const EMPTY: Self = Self {
+        window: SpectrumWindow {
+            left: [0.0; SPECTRUM_WINDOW_FRAMES],
+            right: [0.0; SPECTRUM_WINDOW_FRAMES],
+            first_sample: 0,
+            channels: SpectrumChannels::Stereo,
+            source_underrun: false,
+        },
+        stream_epoch: 0,
+        sequence: 0,
+        dropped_captures: 0,
+        arm_generation: 0,
+    };
+
     /// Project this record through the one-shot public window shape.
     #[must_use]
     pub(crate) const fn window(&self) -> SpectrumWindow {
@@ -1689,8 +1705,9 @@ fn prepare_capture_with_handle(
 ) -> Result<(GraphNodeObserverBinding, SpectrumCapture), SpectrumPrepareError> {
     let (node, _resources) =
         validate_capture_request(request, graph_nodes, maximum_named_allocation_bytes)?;
-    let (producer, consumer) = bounded_spsc(
+    let (producer, consumer) = bounded_spsc_prefilled(
         NonZeroUsize::new(SPECTRUM_RESULT_SLOTS).ok_or(SpectrumPrepareError::QueueCapacity)?,
+        SpectrumCapturedRecord::EMPTY,
         QueueGeneration(0x5350_4543),
     )
     .map_err(|_| SpectrumPrepareError::QueueCapacity)?;
@@ -1779,7 +1796,7 @@ pub(crate) fn prepare_capture_collection(
 }
 
 struct SpectrumCaptureObserver {
-    producer: Producer<SpectrumCapturedRecord>,
+    producer: InPlaceProducer<SpectrumCapturedRecord>,
     left: [f32; SPECTRUM_WINDOW_FRAMES],
     right: [f32; SPECTRUM_WINDOW_FRAMES],
     channels: SpectrumChannels,
@@ -1789,7 +1806,7 @@ struct SpectrumCaptureObserver {
 }
 
 struct SpectrumCaptureBuffers<'a> {
-    producer: &'a mut Producer<SpectrumCapturedRecord>,
+    producer: &'a mut InPlaceProducer<SpectrumCapturedRecord>,
     left: &'a mut [f32; SPECTRUM_WINDOW_FRAMES],
     right: &'a mut [f32; SPECTRUM_WINDOW_FRAMES],
     channels: SpectrumChannels,
@@ -1798,7 +1815,7 @@ struct SpectrumCaptureBuffers<'a> {
 impl SpectrumCaptureObserver {
     #[cfg(test)]
     fn new_one_shot_for_test(
-        producer: Producer<SpectrumCapturedRecord>,
+        producer: InPlaceProducer<SpectrumCapturedRecord>,
         state: Arc<StateWord>,
         channels: SpectrumChannels,
     ) -> Self {
@@ -1812,7 +1829,7 @@ impl SpectrumCaptureObserver {
     }
 
     fn new(
-        producer: Producer<SpectrumCapturedRecord>,
+        producer: InPlaceProducer<SpectrumCapturedRecord>,
         state: Arc<StateWord>,
         mode: Arc<AtomicU8>,
         shared: Arc<SpectrumContinuousShared>,
@@ -2200,7 +2217,6 @@ fn one_shot_invalidate(state: &mut SpectrumOneShotState) {
 fn one_shot_invalidate_after_failure(state: &mut SpectrumOneShotState) {
     one_shot_invalidate(state);
 }
-// REALTIME_POLICY_END
 
 fn continuous_begin(
     state: &mut SpectrumContinuousState,
@@ -2266,66 +2282,154 @@ fn continuous_begin(
     true
 }
 
-/// Append one selected sample to the private circular history and publish every window whose end
-/// is reached by that sample. The loop is driven by sample time rather than render-block shape,
-/// so nonaligned and multiple-in-block completions follow the same path.
-fn continuous_append_sample(
+/// One selected source plane of a block: planar words, or one lane of an AoSoA bank plane whose
+/// word for frame `f` is `f * lanes + lane` (`lane < lanes`, `frames * lanes` words).
+#[derive(Clone, Copy)]
+enum ContinuousPlane<'a> {
+    Planar(&'a [f32]),
+    Lane {
+        words: &'a [f32],
+        lanes: usize,
+        lane: usize,
+    },
+}
+
+impl ContinuousPlane<'_> {
+    /// Copy frames `from..from + destination.len()` into `destination`.
+    fn copy_into(self, destination: &mut [f32], from: usize) {
+        match self {
+            Self::Planar(values) => {
+                destination.copy_from_slice(&values[from..from + destination.len()]);
+            }
+            // One lane of `lanes` is data movement, not arithmetic: a strided copy reads only the
+            // words this tap needs (#896 R1).
+            Self::Lane { words, lanes, lane } => {
+                for (slot, frame) in destination
+                    .iter_mut()
+                    .zip(words[from * lanes..].chunks_exact(lanes))
+                {
+                    *slot = frame[lane];
+                }
+            }
+        }
+    }
+
+    /// Whether every frame of this plane is finite. A neighbour lane's words are never read.
+    fn is_finite(self, frames: usize) -> bool {
+        probe_add(PROBE_VALIDATION_SAMPLES, frames);
+        match self {
+            Self::Planar(values) => all_finite(values),
+            Self::Lane { words, lanes, lane } => words
+                .chunks_exact(lanes)
+                .fold(true, |finite, frame| finite & frame[lane].is_finite()),
+        }
+    }
+}
+
+/// Append `frames` frames of the block, starting at frame `from` (absolute sample `sample`), to
+/// the private circular history: at most two contiguous runs per selected plane (the ring wrap)
+/// and one validity fill. The caller bounds the span by the next window end, so it is at most
+/// [`SPECTRUM_WINDOW_FRAMES`] frames and the history matches a per-sample append of them.
+#[allow(clippy::too_many_arguments)]
+fn continuous_append_span(
     state: &mut SpectrumContinuousState,
-    buffers: &mut SpectrumCaptureBuffers<'_>,
-    left: f32,
-    right: f32,
+    channels: SpectrumChannels,
+    left: ContinuousPlane<'_>,
+    right: ContinuousPlane<'_>,
+    from: usize,
+    frames: usize,
     sample: u64,
     source_underrun: bool,
 ) -> bool {
-    let write_index = state.history_write_index;
-    if state.history_filled == 0 {
+    let filled = state.history_filled;
+    if filled == 0 {
         state.history_first_sample = sample;
-    } else if state.history_filled == SPECTRUM_WINDOW_FRAMES {
-        let Some(next_first_sample) = state.history_first_sample.checked_add(1) else {
-            continuous_fail(state);
-            return false;
-        };
-        state.history_first_sample = next_first_sample;
     }
-    if buffers.channels.includes_left() {
-        state.history_left[write_index] = left;
-        probe_add(PROBE_STORAGE_WRITES, 1);
-    }
-    if buffers.channels.includes_right() {
-        state.history_right[write_index] = right;
-        probe_add(PROBE_STORAGE_WRITES, 1);
-    }
-    state.history_validity[write_index] = u8::from(source_underrun);
-    state.history_write_index = if write_index + 1 == SPECTRUM_WINDOW_FRAMES {
-        0
-    } else {
-        write_index + 1
+    // Every frame appended to a full ring evicts the oldest one.
+    let evicted = (filled + frames).saturating_sub(SPECTRUM_WINDOW_FRAMES);
+    let Some(first_sample) = u64::try_from(evicted)
+        .ok()
+        .and_then(|evicted| state.history_first_sample.checked_add(evicted))
+    else {
+        continuous_fail(state);
+        return false;
     };
-    if state.history_filled < SPECTRUM_WINDOW_FRAMES {
-        state.history_filled += 1;
+    state.history_first_sample = first_sample;
+    // A span ends at or before the next window end, which is at most one hop (<= N) past the
+    // previous one, so a span never exceeds the ring.
+    debug_assert!(
+        frames <= SPECTRUM_WINDOW_FRAMES,
+        "span longer than the ring"
+    );
+    let start = state.history_write_index;
+    let head = frames.min(SPECTRUM_WINDOW_FRAMES - start);
+    let tail = frames - head;
+    for (selected, plane, history) in [
+        (channels.includes_left(), left, &mut state.history_left),
+        (channels.includes_right(), right, &mut state.history_right),
+    ] {
+        if selected {
+            plane.copy_into(&mut history[start..start + head], from);
+            plane.copy_into(&mut history[..tail], from + head);
+            probe_add(PROBE_STORAGE_WRITES, frames);
+        }
     }
+    let validity = u8::from(source_underrun);
+    state.history_validity[start..start + head].fill(validity);
+    state.history_validity[..tail].fill(validity);
+    state.history_write_index = (state.history_write_index + frames) % SPECTRUM_WINDOW_FRAMES;
+    state.history_filled = (filled + frames).min(SPECTRUM_WINDOW_FRAMES);
+    true
+}
 
-    let Some(sample_end) = sample.checked_add(1) else {
-        continuous_fail(state);
-        return false;
-    };
-    let Some(window_start) = state.next_window_start else {
-        continuous_fail(state);
-        return false;
-    };
-    let Some(window_end) = window_start.checked_add(SPECTRUM_WINDOW_FRAMES as u64) else {
-        continuous_fail(state);
-        return false;
-    };
-    if sample_end == window_end {
-        continuous_publish(state, buffers, window_start)
-    } else if sample_end > window_end {
+/// Append one validated block to the history span by span and publish every window whose end a
+/// span reaches. The loop is driven by sample time rather than render-block shape, so nonaligned
+/// and multiple-in-block completions follow the same path.
+fn continuous_append_block(
+    state: &mut SpectrumContinuousState,
+    buffers: &mut SpectrumCaptureBuffers<'_>,
+    left: ContinuousPlane<'_>,
+    right: ContinuousPlane<'_>,
+    frames: usize,
+    first_sample: u64,
+    source_underrun: bool,
+) {
+    // `continuous_begin` checked `first_sample + frames`, so no sample below overflows.
+    let mut from = 0;
+    while from < frames {
+        let sample = first_sample + from as u64;
+        let Some(window_start) = state.next_window_start else {
+            continuous_fail(state);
+            return;
+        };
+        let Some(window_end) = window_start.checked_add(SPECTRUM_WINDOW_FRAMES as u64) else {
+            continuous_fail(state);
+            return;
+        };
         // A contiguous render stream can only pass a completion boundary if the producer missed
         // samples. Treat that as a discontinuity and fence the partial history.
-        continuous_fail(state);
-        false
-    } else {
-        true
+        let Some(until_end) = window_end.checked_sub(sample).filter(|&until| until > 0) else {
+            continuous_fail(state);
+            return;
+        };
+        let span =
+            usize::try_from(until_end).map_or(frames - from, |until| until.min(frames - from));
+        if !continuous_append_span(
+            state,
+            buffers.channels,
+            left,
+            right,
+            from,
+            span,
+            sample,
+            source_underrun,
+        ) {
+            return;
+        }
+        from += span;
+        if span as u64 == until_end && !continuous_publish(state, buffers, window_start) {
+            return;
+        }
     }
 }
 
@@ -2368,44 +2472,50 @@ fn continuous_publish(
     // Once full, the next write slot is the oldest sample. The checked offset permits a future
     // contiguous window only when all N of its samples still reside in the ring.
     let start_index = (state.history_write_index + offset) % SPECTRUM_WINDOW_FRAMES;
-    let mut source_underrun = false;
-    for frame in 0..SPECTRUM_WINDOW_FRAMES {
-        let index = if start_index + frame >= SPECTRUM_WINDOW_FRAMES {
-            start_index + frame - SPECTRUM_WINDOW_FRAMES
-        } else {
-            start_index + frame
-        };
-        if buffers.channels.includes_left() {
-            buffers.left[frame] = state.history_left[index];
-            probe_add(PROBE_RECONSTRUCTION_WRITES, 1);
-        }
-        if buffers.channels.includes_right() {
-            buffers.right[frame] = state.history_right[index];
-            probe_add(PROBE_RECONSTRUCTION_WRITES, 1);
-        }
-        source_underrun |= state.history_validity[index] != 0;
-    }
-    probe_add(PROBE_PAYLOAD_CONSTRUCTIONS, 1);
-    probe_add(PROBE_OWNED_RECORD_SAMPLE_COPIES, 2 * SPECTRUM_WINDOW_FRAMES);
-    let record = SpectrumCapturedRecord {
-        window: SpectrumWindow {
-            left: *buffers.left,
-            right: *buffers.right,
-            first_sample: window_start,
-            channels: buffers.channels,
-            source_underrun,
-        },
-        stream_epoch,
-        sequence,
-        dropped_captures: state.shared.drops.load(Ordering::Acquire),
-        arm_generation: 0,
-    };
+    let head = SPECTRUM_WINDOW_FRAMES - start_index;
+    // A full ring holds exactly the window's N samples, so the window's validity is the whole
+    // ring's. It is folded before the push, so a full queue changes no slot.
+    let source_underrun = state
+        .history_validity
+        .iter()
+        .fold(0, |underrun, &validity| underrun | validity)
+        != 0;
+    let channels = buffers.channels;
+    let dropped_captures = state.shared.drops.load(Ordering::Acquire);
+    let (history_left, history_right) = (&state.history_left, &state.history_right);
     probe_add(PROBE_PUBLICATION_ATTEMPTS, 1);
-    probe_add(
-        PROBE_QUEUE_PAYLOAD_TRANSFER_SAMPLES,
-        2 * SPECTRUM_WINDOW_FRAMES,
-    );
-    if buffers.producer.try_push(record).is_err() {
+    // The window goes from the ring straight into the reserved queue slot: two copies per
+    // selected plane (the wrap), no staging buffer and no record on the stack (#897). An
+    // unselected plane is never written, so it keeps the prefilled zeros.
+    let pushed = buffers.producer.try_push_in_place(|record| {
+        for (selected, history, window) in [
+            (
+                channels.includes_left(),
+                history_left,
+                &mut record.window.left,
+            ),
+            (
+                channels.includes_right(),
+                history_right,
+                &mut record.window.right,
+            ),
+        ] {
+            if selected {
+                window[..head].copy_from_slice(&history[start_index..]);
+                window[head..].copy_from_slice(&history[..start_index]);
+                probe_add(PROBE_RECONSTRUCTION_WRITES, SPECTRUM_WINDOW_FRAMES);
+            }
+        }
+        record.window.first_sample = window_start;
+        record.window.channels = channels;
+        record.window.source_underrun = source_underrun;
+        record.stream_epoch = stream_epoch;
+        record.sequence = sequence;
+        record.dropped_captures = dropped_captures;
+        record.arm_generation = 0;
+        probe_add(PROBE_PAYLOAD_CONSTRUCTIONS, 1);
+    });
+    if pushed.is_err() {
         if state
             .shared
             .drops
@@ -2448,32 +2558,15 @@ fn continuous_capture(
         continuous_fail(state);
         return;
     }
-    if (buffers.channels.includes_left() && !selected_is_finite(left))
-        || (buffers.channels.includes_right() && !selected_is_finite(right))
-    {
-        continuous_fail(state);
-        return;
-    }
-    if !continuous_begin(state, first_sample, left.len(), validity) {
-        return;
-    }
-    for (offset, (&left, &right)) in left.iter().zip(right).enumerate() {
-        let Some(sample) = first_sample.checked_add(u64::try_from(offset).unwrap_or(u64::MAX))
-        else {
-            continuous_fail(state);
-            return;
-        };
-        if !continuous_append_sample(
-            state,
-            buffers,
-            left,
-            right,
-            sample,
-            validity.source_underrun,
-        ) {
-            return;
-        }
-    }
+    continuous_capture_planes(
+        state,
+        buffers,
+        ContinuousPlane::Planar(left),
+        ContinuousPlane::Planar(right),
+        left.len(),
+        first_sample,
+        validity,
+    );
 }
 
 fn continuous_capture_resident(
@@ -2481,109 +2574,111 @@ fn continuous_capture_resident(
     buffers: &mut SpectrumCaptureBuffers<'_>,
     block: GraphResidentObservationBlock<'_>,
 ) {
-    if state.shared.active.load(Ordering::Acquire) == 0 {
-        return;
-    }
-    let lanes = block.lane.width().lanes() as usize;
-    let lane = block.lane.lane();
-    let Some(frames) = usize::try_from(block.lane.frames()).ok() else {
+    let Ok(frames) = usize::try_from(block.lane.frames()) else {
         continuous_fail(state);
         return;
     };
-    let Some(words) = frames.checked_mul(lanes) else {
-        continuous_fail(state);
-        return;
-    };
-    let Some(left) = block.lane.left().get(..words) else {
-        continuous_fail(state);
-        return;
-    };
-    let Some(right) = block.lane.right().get(..words) else {
-        continuous_fail(state);
-        return;
-    };
-    if !resident_selected_is_finite(left, right, frames, lanes, lane, buffers.channels) {
-        continuous_fail(state);
-        return;
-    }
-    if !continuous_begin(state, block.first_sample, frames, block.validity) {
-        return;
-    }
-    for frame in 0..frames {
-        let Some(index) = frame
-            .checked_mul(lanes)
-            .and_then(|value| value.checked_add(lane))
-        else {
-            continuous_fail(state);
-            return;
-        };
-        let Some(left_value) = left.get(index).copied() else {
-            continuous_fail(state);
-            return;
-        };
-        let Some(right_value) = right.get(index).copied() else {
-            continuous_fail(state);
-            return;
-        };
-        let Some(sample) = block
-            .first_sample
-            .checked_add(u64::try_from(frame).unwrap_or(u64::MAX))
-        else {
-            continuous_fail(state);
-            return;
-        };
-        if !continuous_append_sample(
-            state,
-            buffers,
-            left_value,
-            right_value,
-            sample,
-            block.validity.source_underrun,
-        ) {
-            return;
-        }
-    }
+    continuous_capture_lane(
+        state,
+        buffers,
+        block.lane.left(),
+        block.lane.right(),
+        frames,
+        block.lane.width().lanes() as usize,
+        block.lane.lane(),
+        block.first_sample,
+        block.validity,
+    );
 }
 
-fn selected_is_finite(values: &[f32]) -> bool {
-    for value in values {
-        probe_add(PROBE_VALIDATION_SAMPLES, 1);
-        if !value.is_finite() {
-            return false;
-        }
-    }
-    true
-}
-
-fn resident_selected_is_finite(
+/// The resident entry over plain words: lane `lane` of `lanes`, `frames * lanes` words per plane.
+#[allow(clippy::too_many_arguments)]
+fn continuous_capture_lane(
+    state: &mut SpectrumContinuousState,
+    buffers: &mut SpectrumCaptureBuffers<'_>,
     left: &[f32],
     right: &[f32],
     frames: usize,
     lanes: usize,
     lane: usize,
-    channels: SpectrumChannels,
-) -> bool {
-    for frame in 0..frames {
-        let Some(index) = frame
-            .checked_mul(lanes)
-            .and_then(|value| value.checked_add(lane))
-        else {
-            return false;
-        };
-        if channels.includes_left() {
-            probe_add(PROBE_VALIDATION_SAMPLES, 1);
-            if left.get(index).is_none_or(|value| !value.is_finite()) {
-                return false;
-            }
-        }
-        if channels.includes_right() {
-            probe_add(PROBE_VALIDATION_SAMPLES, 1);
-            if right.get(index).is_none_or(|value| !value.is_finite()) {
-                return false;
-            }
-        }
+    first_sample: u64,
+    validity: GraphObservationValidity,
+) {
+    if state.shared.active.load(Ordering::Acquire) == 0 {
+        return;
     }
-    true
+    let words = frames.checked_mul(lanes);
+    let (Some(left), Some(right)) = (
+        words.and_then(|words| left.get(..words)),
+        words.and_then(|words| right.get(..words)),
+    ) else {
+        continuous_fail(state);
+        return;
+    };
+    if lane >= lanes {
+        continuous_fail(state);
+        return;
+    }
+    continuous_capture_planes(
+        state,
+        buffers,
+        ContinuousPlane::Lane {
+            words: left,
+            lanes,
+            lane,
+        },
+        ContinuousPlane::Lane {
+            words: right,
+            lanes,
+            lane,
+        },
+        frames,
+        first_sample,
+        validity,
+    );
+}
+
+/// Validate the selected planes, open the block, then append it. A non-finite selected word fails
+/// the block before any of its frames is appended or any window it completes is published.
+fn continuous_capture_planes(
+    state: &mut SpectrumContinuousState,
+    buffers: &mut SpectrumCaptureBuffers<'_>,
+    left: ContinuousPlane<'_>,
+    right: ContinuousPlane<'_>,
+    frames: usize,
+    first_sample: u64,
+    validity: GraphObservationValidity,
+) {
+    if (buffers.channels.includes_left() && !left.is_finite(frames))
+        || (buffers.channels.includes_right() && !right.is_finite(frames))
+    {
+        continuous_fail(state);
+        return;
+    }
+    if !continuous_begin(state, first_sample, frames, validity) {
+        return;
+    }
+    continuous_append_block(
+        state,
+        buffers,
+        left,
+        right,
+        frames,
+        first_sample,
+        validity.source_underrun,
+    );
+}
+
+/// Whether every value is finite: a branch-free fold the compiler vectorises.
+fn all_finite(values: &[f32]) -> bool {
+    values
+        .iter()
+        .fold(true, |finite, value| finite & value.is_finite())
+}
+
+fn selected_is_finite(values: &[f32]) -> bool {
+    probe_add(PROBE_VALIDATION_SAMPLES, values.len());
+    all_finite(values)
 }
 
 fn continuous_fail(state: &mut SpectrumContinuousState) {
@@ -2627,6 +2722,7 @@ fn continuous_fail(state: &mut SpectrumContinuousState) {
         .phase
         .store(CONTINUOUS_WARMING, Ordering::Release);
 }
+// REALTIME_POLICY_END
 
 impl GraphRuntimeObserver for SpectrumCaptureObserver {
     fn observe(&mut self, block: GraphObservationBlock<'_>) -> Result<(), RenderError> {
@@ -3212,7 +3308,7 @@ mod tests {
         SpectrumSmoothingConfigError, SpectrumTarget, SpectrumWindow,
     };
     use dsp_reference::{Complex64, direct_dft_bin, magnitude_db};
-    use engine::realtime::{QueueGeneration, bounded_spsc};
+    use engine::realtime::{QueueGeneration, bounded_spsc, bounded_spsc_prefilled};
     use graph::GraphRuntimeObserver;
 
     fn window(fill: f32) -> SpectrumWindow {
@@ -3245,8 +3341,9 @@ mod tests {
     }
 
     fn continuous_pair(channels: SpectrumChannels) -> (SpectrumCaptureObserver, SpectrumCapture) {
-        let (producer, consumer) = bounded_spsc(
+        let (producer, consumer) = bounded_spsc_prefilled(
             core::num::NonZeroUsize::new(1).expect("one capture slot"),
+            super::SpectrumCapturedRecord::EMPTY,
             QueueGeneration(0x4353_5045),
         )
         .expect("capture queue");
@@ -3647,8 +3744,9 @@ mod tests {
 
     #[test]
     fn capture_preserves_a_large_absolute_sample_without_allocating() {
-        let (producer, mut consumer) = bounded_spsc(
+        let (producer, mut consumer) = bounded_spsc_prefilled(
             core::num::NonZeroUsize::new(1).expect("one capture slot"),
+            super::SpectrumCapturedRecord::EMPTY,
             QueueGeneration(0x5350_4543),
         )
         .expect("capture queue");
@@ -4058,8 +4156,9 @@ mod tests {
     fn spectrum_operation_probes_match_a_large_planar_quantum() {
         super::test_only_reset_spectrum_operation_counts();
         let (producer, state) = {
-            let (producer, _consumer) = bounded_spsc(
+            let (producer, _consumer) = bounded_spsc_prefilled(
                 core::num::NonZeroUsize::new(1).expect("one capture slot"),
+                super::SpectrumCapturedRecord::EMPTY,
                 QueueGeneration(0x5350_4543),
             )
             .expect("capture queue");
@@ -4261,11 +4360,11 @@ mod tests {
 
     /// #1618 gate 2: a window held behind a stale record when the plan swaps, on a capture that
     /// does not carry. The held window died with its observer, so no block end will ever publish
-    /// it: the service settles the arm, the read answers `CaptureInvalid` (not `Pending` forever),
-    /// the generation carries over, and a new arm completes on the successor's observer, whose
-    /// window a record of the old generation cannot be mistaken for.
+    /// it: the service drops the arm, the read answers `Dropped` once (#1593 D6; not `Pending`
+    /// forever), the generation carries over, and a new arm completes on the successor's
+    /// observer, whose window a record of the old generation cannot be mistaken for.
     #[test]
-    fn a_window_held_behind_a_stale_record_settles_invalid_when_the_plan_swaps() {
+    fn a_window_held_behind_a_stale_record_is_dropped_when_the_plan_swaps() {
         use crate::{PreparedSpectrumCaptures, SpectrumService, SpectrumServiceError};
 
         let (mut observer, capture) = one_shot_pair(SpectrumChannels::Left);
@@ -4293,15 +4392,19 @@ mod tests {
         );
 
         // The plan swaps; the successor's capture is fresh and its observer is its own.
+        let (_, first) = one_shot_pair(SpectrumChannels::Left);
+        let first_displaced =
+            service.adopt_successor(PreparedSpectrumCaptures::Single(first), &[], true, None);
+        // A second swap that does not carry, before any read: the drop is still answered once.
         let (mut next_observer, next) = one_shot_pair(SpectrumChannels::Left);
         let displaced =
             service.adopt_successor(PreparedSpectrumCaptures::Single(next), &[], true, None);
         assert!(
             matches!(
                 service.read(SpectrumChannels::Left),
-                Err(SpectrumServiceError::CaptureInvalid)
+                Err(SpectrumServiceError::Dropped)
             ),
-            "settled, not pending forever"
+            "dropped, not pending forever"
         );
         // The refusal is read once; the generation is the old arm's, so the next arm is its
         // successor and completes on the new observer.
@@ -4319,7 +4422,30 @@ mod tests {
             .expect("read")
             .expect("the new arm completes on the successor");
         assert_eq!(snapshot.window.first_sample, 16_384);
-        drop(displaced);
+
+        // A cancel, or a new arm, after a drop supersedes it: the read is not `Dropped`.
+        for rearm in [false, true] {
+            service.arm().expect("arm");
+            let (_, swapped) = one_shot_pair(SpectrumChannels::Left);
+            drop(service.adopt_successor(
+                PreparedSpectrumCaptures::Single(swapped),
+                &[],
+                true,
+                None,
+            ));
+            if rearm {
+                service.arm().expect("arm after the drop");
+                assert!(matches!(service.read(SpectrumChannels::Left), Ok(None)));
+                service.cancel().expect("cancel");
+            } else {
+                service.cancel().expect("cancel after the drop");
+                assert!(matches!(
+                    service.read(SpectrumChannels::Left),
+                    Err(SpectrumServiceError::NotArmed)
+                ));
+            }
+        }
+        drop((first_displaced, displaced));
     }
 
     /// Gate 1 (issue #1609): a cancel races the completion of the window it cancels.
@@ -4758,11 +4884,57 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![0, 512]
         );
-        for window in windows {
+        for window in &windows {
             for offset in 0..SPECTRUM_WINDOW_FRAMES {
                 let sample = (window.first_sample as usize + offset) as f32;
                 assert_eq!(window.left[offset], sample);
                 assert_eq!(window.right[offset], -sample);
+            }
+        }
+        // A resident bank lane (not lane 0) publishes the planar arm's windows, though a
+        // neighbour lane carries non-finite words in every frame.
+        for lanes in [4_usize, 8] {
+            let lane = lanes - 1;
+            let (mut observer, mut capture) = continuous_pair(SpectrumChannels::Stereo);
+            let cadence = SpectrumCadence::with_hop(48_000, 192, 512).expect("q192 cadence");
+            capture
+                .begin_continuous(cadence, false)
+                .expect("continuous test activation");
+            let mut resident = Vec::new();
+            for first_sample in (0..15 * 192).step_by(192) {
+                let (left, right) = ramp_block(first_sample, 192);
+                let mut left_words = vec![f32::NAN; 192 * lanes];
+                let mut right_words = vec![f32::INFINITY; 192 * lanes];
+                for frame in 0..192 {
+                    left_words[frame * lanes + lane] = left[frame];
+                    right_words[frame * lanes + lane] = right[frame];
+                }
+                let mut buffers = super::SpectrumCaptureBuffers {
+                    producer: &mut observer.producer,
+                    left: &mut observer.left,
+                    right: &mut observer.right,
+                    channels: observer.channels,
+                };
+                super::continuous_capture_lane(
+                    &mut observer.continuous,
+                    &mut buffers,
+                    &left_words,
+                    &right_words,
+                    192,
+                    lanes,
+                    lane,
+                    first_sample as u64,
+                    super::GraphObservationValidity::CLEAR,
+                );
+                if let Ok(window) = capture.try_read_continuous() {
+                    resident.push(window);
+                }
+            }
+            assert_eq!(resident.len(), windows.len(), "{lanes} lanes");
+            for (resident, planar) in resident.iter().zip(&windows) {
+                assert_eq!(resident.first_sample, planar.first_sample, "{lanes} lanes");
+                assert_eq!(resident.left, planar.left, "{lanes} lanes, lane {lane}");
+                assert_eq!(resident.right, planar.right, "{lanes} lanes, lane {lane}");
             }
         }
     }
@@ -4798,19 +4970,14 @@ mod tests {
             let counts = super::test_only_spectrum_operation_counts();
             assert_eq!(counts.validation_samples, (2 * quantum) as u64);
             assert_eq!(counts.selected_storage_writes, (2 * quantum) as u64);
+            // Only the first attempt finds a free slot; a full queue writes no window (#897).
             assert_eq!(
                 counts.chronological_reconstruction_writes,
-                expected_attempts * (2 * SPECTRUM_WINDOW_FRAMES) as u64
+                (2 * SPECTRUM_WINDOW_FRAMES) as u64
             );
-            assert_eq!(
-                counts.owned_record_sample_copies,
-                expected_attempts * (2 * SPECTRUM_WINDOW_FRAMES) as u64
-            );
-            assert_eq!(
-                counts.queue_payload_transfer_samples,
-                expected_attempts * (2 * SPECTRUM_WINDOW_FRAMES) as u64
-            );
-            assert_eq!(counts.payload_constructions, expected_attempts);
+            assert_eq!(counts.owned_record_sample_copies, 0);
+            assert_eq!(counts.queue_payload_transfer_samples, 0);
+            assert_eq!(counts.payload_constructions, 1);
             assert_eq!(counts.publication_attempts, expected_attempts);
             assert_eq!(
                 capture
@@ -4871,14 +5038,9 @@ mod tests {
             counts.chronological_reconstruction_writes,
             (2 * SPECTRUM_WINDOW_FRAMES) as u64
         );
-        assert_eq!(
-            counts.owned_record_sample_copies,
-            (2 * SPECTRUM_WINDOW_FRAMES) as u64
-        );
-        assert_eq!(
-            counts.queue_payload_transfer_samples,
-            (2 * SPECTRUM_WINDOW_FRAMES) as u64
-        );
+        // The window is written once, from the ring into the queue slot (#897).
+        assert_eq!(counts.owned_record_sample_copies, 0);
+        assert_eq!(counts.queue_payload_transfer_samples, 0);
         assert_eq!(counts.payload_constructions, 1);
         assert_eq!(counts.publication_attempts, 1);
         assert_eq!(
@@ -4886,7 +5048,7 @@ mod tests {
                 + counts.chronological_reconstruction_writes
                 + counts.owned_record_sample_copies
                 + counts.queue_payload_transfer_samples,
-            12_544
+            4_352
         );
     }
 

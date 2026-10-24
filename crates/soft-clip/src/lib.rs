@@ -399,6 +399,7 @@ pub const SOFT_CLIP_DESCRIPTOR: EffectDescriptor = EffectDescriptor {
     contract_minor: 0,
     state_layout_version: STATE_LAYOUT.version,
     supported_link_modes: LinkModeSet::DUAL_MONO,
+    lane_link: false,
     parameters: &SOFT_CLIP_PARAMETERS,
     ports: &PORTS,
     qualities: &QUALITIES,
