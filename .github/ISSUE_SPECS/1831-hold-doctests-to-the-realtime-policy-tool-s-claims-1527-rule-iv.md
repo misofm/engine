@@ -120,3 +120,6 @@ block holds unsafe or include!, report to root before refusing it.
   `{.rust}`, `{.text}`, `r&#117;st` and the list row are compiled; `text,{.rust}`, the paragraph continuation
   and `E0123,text` are not tests. Each matches the tool's row (the last one is the stated over-refusal).
 - Real tree: still 38 compiled blocks, 4 allowlisted with unsafe, 0 refusals.
+- Mutants (attempt 2, each restored by `git checkout`): `rust &= !seen_other_tags` (order rule dropped) turns
+  the unsafe test red on the `no_run,text` row; `if starts_block` to `if true` turns the accepted test red on
+  the paragraph-continuation row.
