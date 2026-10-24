@@ -3,8 +3,8 @@
 //! Per channel and frame: the live words step one sample along their ramps, then the four bands
 //! run in index order, each on the previous band's output. A band is the shared dynamic band step
 //! (`effect_runtime::dynamic_band`, also the de-esser's): one TPT SVF whose pole words are the
-//! parametric EQ's bell design at the band's **static** gain, its unity-peak band-pass tap
-//! `k v1` as the detector (or a second SVF with the same words on a connected sidechain), the
+//! parametric EQ's bell design at the band's **static** gain, a detector SVF at the band's own
+//! quality `Q` (its unity-peak band-pass, on the band's input or on a connected sidechain), the
 //! gain law smoothed in dB, and this module's output law, the bell with a modulated band mix:
 //!
 //! ```text
@@ -14,12 +14,13 @@
 //! With `g = 1` the mix word is the EQ's own `m1` word exactly, so an idle band is #87's bell.
 //! `Lane` keeps the scalar, four-lane and eight-lane paths on this one body.
 
+pub use effect_runtime::dynamic_band::WordRamp;
 use effect_runtime::dynamic_band::{
-    BandWords, DynamicBandCoef, LinkWords, applied_gain, band_step, detector_level_db,
-    dynamic_band_gain,
+    BandWords, DynamicBandCoef, LinkWords, advance_word_ramps, applied_gain, band_step, blend,
+    detector_level_db, dynamic_band_gain,
 };
 use effect_runtime::dynamics::GainComputerCoef;
-use lane::kernels::{SvfState, ramp_toward};
+use lane::kernels::SvfState;
 use lane::{Lane, silence_step};
 
 /// The widest backend and the length of lane scratch arrays owned by this effect.
@@ -29,7 +30,7 @@ pub const MAX_WIDTH: usize = 8;
 pub const BANDS: usize = 4;
 
 /// Live words per band, each a 64-sample ramp ([`WordRamp`]), in this order.
-pub const BAND_RAMPS: usize = 14;
+pub const BAND_RAMPS: usize = 17;
 /// Threshold in dB.
 pub const THRESHOLD: usize = 0;
 /// The gain computer's slope `1/R - 1`.
@@ -44,34 +45,25 @@ pub const ATTACK: usize = 4;
 pub const RELEASE: usize = 5;
 /// SVF word `c1`; `a2` and `a3` follow it.
 pub const C1: usize = 6;
-/// The damping word `k = 1/(Q A)`, the detector tap's scale.
-pub const K: usize = 9;
-/// The static band mix word `m1 = k (A^2 - 1)`, the parametric EQ's bell word.
-pub const M1: usize = 10;
+/// The static band mix word `m1 = k (A^2 - 1)` (`k = 1/(Q A)`), the parametric EQ's bell word.
+pub const M1: usize = 9;
 /// `k A^2 = A / Q`, the mix word's slope in the linear dynamic gain.
-pub const KA2: usize = 11;
+pub const KA2: usize = 10;
 /// `1.0` for an upward band (a boost above the threshold), `+0.0` for downward.
-pub const UPWARD: usize = 12;
-/// `1.0` for the external (sidechain) detector, `+0.0` for the band's own tap.
-pub const EXTERNAL: usize = 13;
-/// The six words a disabled band holds at `+0.0` (the parametric EQ's identity section).
-pub const DESIGN_WORDS: [usize; 6] = [C1, C1 + 1, C1 + 2, K, M1, KA2];
+pub const UPWARD: usize = 11;
+/// `1.0` for the external (sidechain) detector, `+0.0` for the band's own input.
+pub const EXTERNAL: usize = 12;
+/// The detector SVF's word `c1` at the band's quality `Q` (`k = 1/Q`, any static gain); `a2` and
+/// `a3` follow it.
+pub const DC1: usize = 13;
+/// The detector SVF's damping `1/Q`, its band-pass tap's scale.
+pub const DK: usize = 16;
+/// The nine words a disabled band holds at `+0.0` (the parametric EQ's identity section, and a
+/// detector that integrates nothing).
+pub const DESIGN_WORDS: [usize; 9] = [C1, C1 + 1, C1 + 2, M1, KA2, DC1, DC1 + 1, DC1 + 2, DK];
 
 /// Live words per channel.
 pub const RAMPS: usize = BANDS * BAND_RAMPS;
-
-/// One live word in the precomputed-step form of `effect_runtime::ramp` (D11).
-#[derive(Clone, Copy, Debug)]
-pub struct WordRamp<L: Lane> {
-    /// Value used for the current sample.
-    pub current: L,
-    /// Target assigned exactly on the final ramp sample.
-    pub target: L,
-    /// Precomputed per-sample increment.
-    pub step: L,
-    /// Samples remaining, an exact integer-valued lane word.
-    pub remaining: L,
-}
 
 /// Per-channel words written only by the control plane.
 #[derive(Clone, Copy, Debug)]
@@ -89,6 +81,8 @@ pub struct Coef<L: Lane> {
 pub struct Band<L: Lane> {
     /// The band's SVF integrators on the cascade signal.
     pub main: SvfState<L>,
+    /// The internal detector SVF's integrators, on the same cascade signal at quality `Q`.
+    pub detector: SvfState<L>,
     /// The sidechain detector SVF's integrators; `+0.0` while the sidechain is unconnected.
     pub side: SvfState<L>,
     /// Smoothed gain change in dB: `<= 0` downward, `>= 0` upward.
@@ -115,14 +109,9 @@ pub struct Chan<L: Lane> {
 impl<L: Lane> Default for Chan<L> {
     fn default() -> Self {
         let zero = L::zero();
-        let ramp = WordRamp {
-            current: zero,
-            target: zero,
-            step: zero,
-            remaining: zero,
-        };
         let band = Band {
             main: SvfState::default(),
+            detector: SvfState::default(),
             side: SvfState::default(),
             gain_db: zero,
             half_knee: zero,
@@ -132,7 +121,7 @@ impl<L: Lane> Default for Chan<L> {
             bands: [band; BANDS],
             run: zero,
             side_run: zero,
-            ramps: [ramp; RAMPS],
+            ramps: [WordRamp::zero(); RAMPS],
         }
     }
 }
@@ -181,30 +170,6 @@ pub fn refresh_knees<L: Lane>(s: &mut Chan<L>) {
     }
 }
 
-/// `a` at `w == 0`, `b` at `w == 1`, `a + w (b - a)` between: a live switch's crossfade. The
-/// endpoints are selected, so a settled switch renders its arm's own bits.
-#[inline(always)]
-fn blend<L: Lane>(a: L, b: L, w: L) -> L {
-    let mixed = w.fma(b.sub(a), a);
-    L::select(w.eq(L::zero()), a, L::select(w.eq(L::splat(1.0)), b, mixed))
-}
-
-/// Advances every ramp one sample: `ramp_toward` (never past the target, #1409), the target on
-/// the final sample. A settled ramp selects every field back, an exact no-op.
-#[inline(always)]
-fn advance<L: Lane>(ramps: &mut [WordRamp<L>; RAMPS]) {
-    let zero = L::zero();
-    let one = L::splat(1.0);
-    for ramp in ramps {
-        let moving = ramp.remaining.gt(zero);
-        let last = ramp.remaining.eq(one);
-        let stepped = ramp_toward(ramp.current, ramp.step, ramp.target);
-        ramp.current = L::select(moving, L::select(last, ramp.target, stepped), ramp.current);
-        ramp.step = L::select(last, zero, ramp.step);
-        ramp.remaining = L::select(moving, ramp.remaining.sub(one), ramp.remaining);
-    }
-}
-
 /// The ramps of a frame and the frame's rest thresholds: the effect input's for every main SVF
 /// and the sidechain's for every detector SVF. An unarmable segment (`ARMABLE = false`) had its
 /// clocks advanced before the frame loop (`lane::kernels::silence_skip_block`) and reads none.
@@ -216,7 +181,7 @@ fn open<L: Lane, const RAMPING: bool, const CONNECTED: bool, const ARMABLE: bool
     armed_after: L,
 ) -> (L, L) {
     if RAMPING {
-        advance(&mut s.ramps);
+        advance_word_ramps(&mut s.ramps);
         refresh_knees(s);
     }
     if !ARMABLE {
@@ -231,9 +196,9 @@ fn open<L: Lane, const RAMPING: bool, const CONNECTED: bool, const ARMABLE: bool
     (rest, side_rest)
 }
 
-/// One band's front half on one channel: its SVF on the cascade word `u` and its detector tap,
-/// the band's own unity-peak band-pass `k v1` or, when connected, crossfaded by the detector word
-/// toward the same filter on the sidechain word. Returns `(v1, detector)`.
+/// One band's front half on one channel: its bell SVF on the cascade word `u`, and its detector
+/// tap, the unity-peak band-pass at quality `Q` of `u` or, when connected, crossfaded by the
+/// detector word toward the same filter on the sidechain word. Returns `(v1, detector)`.
 #[inline(always)]
 fn band_front<L: Lane, const CONNECTED: bool, const ARMABLE: bool>(
     band: usize,
@@ -247,13 +212,21 @@ fn band_front<L: Lane, const CONNECTED: bool, const ARMABLE: bool>(
         c1: r[C1].current,
         a2: r[C1 + 1].current,
         a3: r[C1 + 2].current,
-        k: r[K].current,
+        // The bell's own band-pass tap is not read: the detector has its own SVF.
+        k: L::zero(),
+    };
+    let detector_words = BandWords {
+        c1: r[DC1].current,
+        a2: r[DC1 + 1].current,
+        a3: r[DC1 + 2].current,
+        k: r[DK].current,
     };
     let external = r[EXTERNAL].current;
     let state = &mut s.bands[band];
-    let (v1, _, tap) = band_step(ARMABLE, u, &words, rest.0, &mut state.main);
+    let (v1, _, _) = band_step(ARMABLE, u, &words, rest.0, &mut state.main);
+    let (_, _, tap) = band_step(ARMABLE, u, &detector_words, rest.0, &mut state.detector);
     let detector = if CONNECTED {
-        let (_, _, side_tap) = band_step(ARMABLE, side, &words, rest.1, &mut state.side);
+        let (_, _, side_tap) = band_step(ARMABLE, side, &detector_words, rest.1, &mut state.side);
         blend(tap, side_tap, external)
     } else {
         tap

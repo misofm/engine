@@ -63,7 +63,8 @@ use lane::kernels::{SvfState, silence_advance, silence_skip_block, svf_state_hel
 use lane::{Backend, Lane, Simd4, silence_armable_holding};
 
 use kernel::{
-    Args, BAND_RAMPS, BANDS, C1, Chan, Coef, DESIGN_WORDS, MAX_WIDTH, RAMPS, refresh_knees, segment,
+    Args, BAND_RAMPS, BANDS, C1, Chan, Coef, DC1, DESIGN_WORDS, MAX_WIDTH, RAMPS, refresh_knees,
+    segment,
 };
 
 /// Parameters per band.
@@ -74,8 +75,9 @@ const PARAMETER_COUNT: usize = BANDS * BAND_PARAMETERS;
 /// Samples every live word takes to reach a new target (decision 15: every live value ramps).
 const RAMP_SAMPLES: u32 = 64;
 
-/// Signal words per band in the payload: main and sidechain SVF integrators, the gain word.
-const BAND_SIGNAL_WORDS: usize = 5;
+/// Signal words per band in the payload: the bell, detector and sidechain SVF integrators, the gain
+/// word.
+const BAND_SIGNAL_WORDS: usize = 7;
 
 /// Signal words per channel: every band's, then the two silence clocks.
 const SIGNAL_WORDS: usize = BANDS * BAND_SIGNAL_WORDS + 2;
@@ -529,10 +531,10 @@ pub const DYNAMIC_EQ_DESCRIPTOR: EffectDescriptor = EffectDescriptor {
 /// The interval each band word stays inside, for a restore's path check, in
 /// [`kernel`]'s ramp order: the threshold's domain, the slope's, the knee's and the range's, every
 /// rate design over the time domains at every launch rate (the 2 s release at 96 kHz, `5.2e-6`,
-/// to the 0.1 ms attack at 44.1 kHz, `0.2029`), the SVF words' `(0, 1)`, `k = 1/(Q A)` and
-/// `k A^2 = A/Q` inside `[0, 40)` and `m1 = k (A^2 - 1)` inside `(-40, 40)` over the Q and gain
-/// domains (`A = 10^(g/40)` in `[0.251, 3.99]`, `Q` in `[0.1, 16]`; `0` is the disabled band), and
-/// the switches' `[0, 1]`.
+/// to the 0.1 ms attack at 44.1 kHz, `0.2029`), the SVF words' `(0, 1)`, `k A^2 = A/Q` inside
+/// `[0, 40)` and `m1 = k (A^2 - 1)` inside `(-40, 40)` over the Q and gain domains (`A = 10^(g/40)`
+/// in `[0.251, 3.99]`, `Q` in `[0.1, 16]`; `0` is the disabled band), the switches' `[0, 1]`, and
+/// the detector's SVF words in `(0, 1)` and `1/Q` in `[0, 10]`.
 const WORD_BOUNDS: [(f32, f32); BAND_RAMPS] = [
     (-60.0, 0.0),
     (1.0 / 20.0 - 1.0, 0.0),
@@ -543,20 +545,26 @@ const WORD_BOUNDS: [(f32, f32); BAND_RAMPS] = [
     (0.0, 1.0),
     (0.0, 1.0),
     (0.0, 1.0),
-    (0.0, 40.0),
     (-40.0, 40.0),
     (0.0, 40.0),
     (0.0, 1.0),
     (0.0, 1.0),
+    (0.0, 1.0),
+    (0.0, 1.0),
+    (0.0, 1.0),
+    (0.0, 10.0),
 ];
 
-/// The six filter words of one band: the parametric EQ's bell design at the static gain
-/// (`c1, a2, a3, m1` exactly as `design_svf` rounds them) and, in `f64` from the same amplitude
-/// and rounded once, `k = 1/(Q A)` and `k A^2 = A/Q`. A disabled band is the EQ's identity section
-/// with `k = k A^2 = 0`.
-fn band_design(values: &[f32], sample_rate: u32) -> [f32; 6] {
+/// The nine filter words of one band, in [`DESIGN_WORDS`] order: the parametric EQ's bell design
+/// at the static gain (`c1, a2, a3, m1` exactly as `design_svf` rounds them) and `k A^2 = A/Q` in
+/// `f64` from the same amplitude, rounded once; then the detector SVF at the band's own quality
+/// `Q` whatever the static gain (`parametric_eq::design_svf_words_f64`'s 0 dB high-pass row, whose
+/// `c1, a2, a3` depend on `g = tan(pi f / fs)` and `k = 1/Q` only, and `k` its negated band mix),
+/// rounded once. At a static 0 dB the detector words are the bell's own, bit for bit. A disabled
+/// band is the EQ's identity section and a detector of zero words.
+fn band_design(values: &[f32], sample_rate: u32) -> [f32; 9] {
     if values[ENABLED] == 0.0 {
-        return [0.0; 6];
+        return [0.0; 9];
     }
     let (frequency, gain, q) = (values[FREQUENCY], values[GAIN], values[Q]);
     // Every committed value is inside its descriptor domain, which is inside the EQ's own
@@ -572,17 +580,27 @@ fn band_design(values: &[f32], sample_rate: u32) -> [f32; 6] {
     );
     debug_assert!(words.is_ok(), "an in-domain bell design");
     let Ok(words) = words else {
-        return [0.0; 6];
+        return [0.0; 9];
     };
+    let detector = parametric_eq::design_svf_words_f64(
+        parametric_eq::EqBandKind::HighPass,
+        f64::from(frequency),
+        0.0,
+        f64::from(q),
+        1.0,
+        f64::from(sample_rate),
+    );
     let amplitude = math::pow(10.0, f64::from(gain) / 40.0);
-    let q = f64::from(q);
     [
         words.c1,
         words.a2,
         words.a3,
-        (1.0 / (q * amplitude)) as f32,
         words.m1,
-        (amplitude / q) as f32,
+        (amplitude / f64::from(q)) as f32,
+        detector[0] as f32,
+        detector[1] as f32,
+        detector[2] as f32,
+        (-detector[4]) as f32,
     ]
 }
 
@@ -654,6 +672,8 @@ fn chan_words<L: Lane>(s: &Chan<L>) -> [L; CHAN_WORDS] {
         chunk.copy_from_slice(&[
             band.main.ic1,
             band.main.ic2,
+            band.detector.ic1,
+            band.detector.ic2,
             band.side.ic1,
             band.side.ic2,
             band.gain_db,
@@ -675,9 +695,10 @@ fn chan_from_words<L: Lane>(words: &[L; CHAN_WORDS]) -> Chan<L> {
         .iter_mut()
         .zip(words[..BANDS * BAND_SIGNAL_WORDS].chunks_exact(BAND_SIGNAL_WORDS))
     {
-        [band.main.ic1, band.main.ic2, band.side.ic1, band.side.ic2] =
-            [chunk[0], chunk[1], chunk[2], chunk[3]];
-        band.gain_db = chunk[4];
+        [band.main.ic1, band.main.ic2] = [chunk[0], chunk[1]];
+        [band.detector.ic1, band.detector.ic2] = [chunk[2], chunk[3]];
+        [band.side.ic1, band.side.ic2] = [chunk[4], chunk[5]];
+        band.gain_db = chunk[6];
     }
     [s.run, s.side_run] = [words[SIGNAL_WORDS - 2], words[SIGNAL_WORDS - 1]];
     for (ramp, chunk) in s
@@ -735,14 +756,22 @@ fn identity_lanes<L: Lane>(s: &Chan<L>, band: usize) -> u32 {
         })
 }
 
-/// The lanes on which band `band`'s two SVFs and gain word are `+0.0`.
+/// The lanes on which band `band`'s three SVFs and gain word are `+0.0`.
 fn band_rest_lanes<L: Lane>(s: &Chan<L>, band: usize) -> u32 {
     let b = &s.bands[band];
-    [b.main.ic1, b.main.ic2, b.side.ic1, b.side.ic2, b.gain_db]
-        .into_iter()
-        .fold(all_lanes(L::WIDTH), |mask, word| {
-            mask & positive_zero_lanes(word)
-        })
+    [
+        b.main.ic1,
+        b.main.ic2,
+        b.detector.ic1,
+        b.detector.ic2,
+        b.side.ic1,
+        b.side.ic2,
+        b.gain_db,
+    ]
+    .into_iter()
+    .fold(all_lanes(L::WIDTH), |mask, word| {
+        mask & positive_zero_lanes(word)
+    })
 }
 
 impl<L: Lane, const CONNECTED: bool> DynamicEq<L, CONNECTED> {
@@ -884,6 +913,8 @@ impl<L: Lane, const CONNECTED: bool> DynamicEq<L, CONNECTED> {
                     for word in [
                         &mut b.main.ic1,
                         &mut b.main.ic2,
+                        &mut b.detector.ic1,
+                        &mut b.detector.ic2,
                         &mut b.side.ic1,
                         &mut b.side.ic2,
                     ] {
@@ -965,7 +996,7 @@ impl<L: Lane, const CONNECTED: bool> DynamicEq<L, CONNECTED> {
 
     /// The bands a segment must run on the first `channels` channels: a band is skipped only
     /// when, on every lane, it is a settled identity section whose SVFs and gain word are `+0.0`.
-    /// Running such a band is an exact no-op (its `+0.0` integrators stay `+0.0` through zero
+    /// Running such a band is an exact no-op for finite inputs (its `+0.0` integrators stay `+0.0` through zero
     /// words, its tap is `+0.0`, so the level floors at -160 dB below every threshold and knee and
     /// the gain word stays `+0.0`, and its zero mix word selects the input), so skipping it moves
     /// no bit, whichever lanes a bank or a scalar instance decides on.
@@ -1016,12 +1047,24 @@ impl<L: Lane, const CONNECTED: bool> DynamicEq<L, CONNECTED> {
             let states = [&mut first[0], &mut rest[0]];
             let frames = range.len() / L::WIDTH;
             // Issue #1328 A9: the armed form only where a lane can arm while holding state.
-            let arms = |run: L, svfs: [SvfState<L>; BANDS]| {
-                silence_armable_holding(run, frames, armed_after, svf_state_held(svfs))
+            let arms = |run: L, svfs: &[SvfState<L>]| {
+                silence_armable_holding(
+                    run,
+                    frames,
+                    armed_after,
+                    svf_state_held(svfs.iter().copied()),
+                )
             };
             let armable = states[..channels].iter().any(|s| {
-                arms(s.run, s.bands.map(|b| b.main))
-                    || (CONNECTED && arms(s.side_run, s.bands.map(|b| b.side)))
+                let main: [SvfState<L>; 2 * BANDS] = core::array::from_fn(|index| {
+                    let band = &s.bands[index / 2];
+                    if index % 2 == 0 {
+                        band.main
+                    } else {
+                        band.detector
+                    }
+                });
+                arms(s.run, &main) || (CONNECTED && arms(s.side_run, &s.bands.map(|b| b.side)))
             });
             let [state_left, state_right] = states;
             if !armable {
@@ -1254,8 +1297,8 @@ impl<L: Lane, const CONNECTED: bool> DynamicEq<L, CONNECTED> {
         let signal_ok = words[..BANDS * BAND_SIGNAL_WORDS]
             .chunks_exact(BAND_SIGNAL_WORDS)
             .all(|band| {
-                let gain = band[4];
-                check_block::<f32>(&band[..4])
+                let gain = band[6];
+                check_block::<f32>(&band[..6])
                     && gain.is_finite()
                     && (-RANGE_MAX_DB..=RANGE_MAX_DB).contains(&gain)
                     && !is_negative_zero(gain)
@@ -1283,9 +1326,11 @@ impl<L: Lane, const CONNECTED: bool> DynamicEq<L, CONNECTED> {
         }
         let current = |index: usize| words[SIGNAL_WORDS + index * 4];
         let contractive = (0..BANDS).all(|band| {
-            let c1 = band * BAND_RAMPS + C1;
-            transition_norm(current(c1), current(c1 + 1), current(c1 + 2))
-                <= RAMP_PATH_NORM_TOLERANCE
+            [C1, DC1].into_iter().all(|first| {
+                let c1 = band * BAND_RAMPS + first;
+                transition_norm(current(c1), current(c1 + 1), current(c1 + 2))
+                    <= RAMP_PATH_NORM_TOLERANCE
+            })
         });
         if !contractive {
             return Err(state_error("effect.state.parameter"));
