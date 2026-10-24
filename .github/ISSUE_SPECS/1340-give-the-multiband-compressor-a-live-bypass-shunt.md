@@ -263,8 +263,9 @@ Scope note `scope/1340.md` (Fable) and root's decisions govern where they differ
   silence clock go to `+0.0`, and its ramps snap. `LinearRamp::snap` writes `step = 0.0` (`+0.0`),
   so #893's `rest_lanes` lets a recovered lane rest.
 - **Bit move.** Only on a D7-tripped bank block: neighbours are no longer zeroed and a bypassed
-  lane passes dry (decision 12, decision 15 E4). `crates/graph-compiler/tests/corpus_digests`
-  is unchanged: no corpus fixture trips a multiband bank.
+  lane passes dry (decision 12, decision 15 E4). `crates/multiband-compressor/src/corpus_digests.in`
+  is unchanged and `wasm-gates`' `g5_native_digests_match_pins` is green: no corpus case trips a
+  multiband bank.
 - **Response snapshot (root (c)).** A lone multiband insert renders per node as a
   `LiveControlEffect`, whose snapshot reads `live.control.bypassed()`; the test is kept as
   `a_per_node_effect_snapshot_reports_its_session_bypass`.
