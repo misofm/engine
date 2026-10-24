@@ -1631,7 +1631,7 @@ fn a_plan_with_spectrum_charges_the_service_once() {
         .session
         .test_providers()
         .test_inventory()
-        .observer_pairing();
+        .meter_pairing();
     assert!(!pairing.is_empty(), "the third plan carries meters");
     assert_eq!(bytes(&rig), before + core::mem::size_of_val(pairing) as u64);
 }

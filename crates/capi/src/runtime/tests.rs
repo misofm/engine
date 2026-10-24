@@ -914,6 +914,15 @@ fn a_carried_strip_meter_keeps_its_reader_across_a_c_abi_rebuild() {
         [(0, 0, window * 128)],
         "the reader the epoch held receives the carried window 0, opened before the swap"
     );
+    let snapshot = meter.consumer.peek(0).expect("window 0");
+    assert_eq!(
+        (
+            snapshot.cumulative_dropped_snapshots,
+            snapshot.cumulative_discontinuities
+        ),
+        (0, 0),
+        "no loss is counted across the swap"
+    );
 }
 
 #[test]

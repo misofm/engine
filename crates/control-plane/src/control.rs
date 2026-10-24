@@ -57,7 +57,7 @@ pub struct ProviderEpoch {
     /// and counts on the render side. Their rings are `Arc`s shared with the plan's observers, as
     /// the producers' cells are, so the epoch may drop after its plan. At promotion a carried
     /// meter's consumer moves from the displaced epoch to this one, at the entry the plan's
-    /// `observer_pairing` names (#1674 R1), so a consumer stays with the observer that renders on.
+    /// `meter_pairing` names (#1674 R1), so a consumer stays with the observer that renders on.
     pub(crate) meters: Box<[host_core::MeterConsumer]>,
     /// The capi resources this epoch's plan was prepared with (#1257 D4).
     pub(crate) capi: CapiResources,
@@ -2205,7 +2205,7 @@ where
             host_core::pair_carried_meters(
                 &mut next.meters,
                 &mut self.providers.meters,
-                next.inventory.observer_pairing(),
+                next.inventory.meter_pairing(),
             );
             let mut previous = core::mem::replace(&mut self.providers, next);
             // Dropped with the parked epoch, when its plan is reclaimed.

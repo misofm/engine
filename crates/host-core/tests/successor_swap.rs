@@ -7901,7 +7901,7 @@ mod meter_carry {
             blocks,
             streams,
             carries,
-            pairing: b_inventory.observer_pairing().to_vec(),
+            pairing: b_inventory.meter_pairing().to_vec(),
         }
     }
 
@@ -8052,9 +8052,15 @@ mod meter_carry {
                 a_meters.len(),
                 "one record per carried meter"
             );
+            let meter_entries: Vec<ObserverCarry> = run
+                .carries
+                .iter()
+                .filter(|carry| carry.kind == ObserverKind::Meter)
+                .copied()
+                .collect();
             assert_eq!(
-                run.pairing, run.carries,
-                "#1674 R1: the preparation-time list names the swap block's record"
+                run.pairing, meter_entries,
+                "#1674 R1: the meter rows equal the swap block's record's meter entries"
             );
             for carry in &run.carries {
                 assert_eq!(carry.kind, ObserverKind::Meter);
