@@ -262,19 +262,20 @@ fn build_launch_native_effect_registry() -> Result<NativeEffectRegistry, Registr
 /// The native effects a session console slot may name (owner decision 12, Sol's L2).
 ///
 /// A console slot always banks, so it must be an effect whose homogeneous bank kernel the console
-/// can rely on: the parametric EQ, compressor, gate/expander, soft-clip, transient shaper and
-/// true-peak limiter. The delay never banks. The multiband compressor is excluded until #1069
-/// closes, and the de-esser until the owner rules on its eligibility (#1920). Anything else is
-/// refused with `console.slot.ineligible_effect` where native identities resolve, in
-/// [`prepare_native_session_effects`]; the session schema refuses a third-party slot before this
-/// runs.
-pub const CONSOLE_ELIGIBLE_EFFECTS: [&str; 6] = [
+/// can rely on: the parametric EQ, compressor, gate/expander, soft-clip, transient shaper,
+/// true-peak limiter and multiband compressor (admitted by #1893 once #1069 closed). The delay
+/// never banks, and the de-esser is excluded until the owner rules on its eligibility (#1920).
+/// Anything else is refused with `console.slot.ineligible_effect` where native identities resolve,
+/// in [`prepare_native_session_effects`]; the session schema refuses a third-party slot before
+/// this runs.
+pub const CONSOLE_ELIGIBLE_EFFECTS: [&str; 7] = [
     "miso.parametric-eq",
     "miso.compressor",
     "miso.gate-expander",
     "miso.soft-clip",
     "miso.transient-shaper",
     "miso.true-peak-limiter",
+    "miso.multiband-compressor",
 ];
 
 /// Launch effects whose factory binds no homogeneous bank at any width (issue #1087).

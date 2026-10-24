@@ -8,6 +8,7 @@ use crate::descriptor::{BASE, ControlDescriptor, Lanes, Motion};
 use crate::error::ControlError;
 use crate::lane::{Side, is_on, toggle};
 use crate::registry::{ControlRow, Resolved, push_control_automated};
+use crate::view::ModelView;
 use crate::{ControlKind, Family, LiveRampRow, Taper};
 use session::{Owner, Section};
 
@@ -120,11 +121,12 @@ pub(crate) fn push_rows(out: &mut Vec<ControlRow>, vca: &Vca, entries: VcaEntrie
 
 /// Find one row of VCA `id` by its control ID, as [`push_rows`] would list it.
 pub(crate) fn resolve(
-    model: &SessionModel,
+    view: ModelView<'_>,
     id: &StableId,
     control: u32,
 ) -> Result<Resolved, ControlError> {
-    let vca = model
+    let vca = view
+        .structure()
         .vcas
         .iter()
         .find(|vca| vca.id == *id)
@@ -133,8 +135,8 @@ pub(crate) fn resolve(
         .iter()
         .find(|row| row.id == control)
         .ok_or(ControlError::AddressUnknown)?;
-    let offset = if control == OFFSET_DB && !model.automation.is_empty() {
-        crate::automation::vca_offset_automation(model, id)
+    let offset = if control == OFFSET_DB {
+        view.vca_automation(id)
     } else {
         [None; 2]
     };

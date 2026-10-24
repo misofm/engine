@@ -28,15 +28,17 @@ enum Kind {
     SoftClip,
     Transient,
     Limiter,
+    Multiband,
 }
 
-const ELIGIBLE: [Kind; 6] = [
+const ELIGIBLE: [Kind; 7] = [
     Kind::Eq,
     Kind::Comp,
     Kind::Gate,
     Kind::SoftClip,
     Kind::Transient,
     Kind::Limiter,
+    Kind::Multiband,
 ];
 
 impl Kind {
@@ -48,6 +50,7 @@ impl Kind {
             Self::SoftClip => "miso.soft-clip",
             Self::Transient => "miso.transient-shaper",
             Self::Limiter => "miso.true-peak-limiter",
+            Self::Multiband => "miso.multiband-compressor",
         }
     }
     const fn name(self) -> &'static str {
@@ -58,6 +61,7 @@ impl Kind {
             Self::SoftClip => "soft-clip",
             Self::Transient => "transient",
             Self::Limiter => "limiter",
+            Self::Multiband => "multiband",
         }
     }
 }
@@ -464,8 +468,13 @@ fn every_console_slot_binds_banked_at_every_track_count() {
         .lanes() as usize;
     let every_effect = Console {
         pre: vec![Kind::Eq, Kind::Comp, Kind::Gate, Kind::Transient],
-        post: vec![Kind::SoftClip, Kind::Limiter],
+        post: vec![Kind::SoftClip, Kind::Multiband, Kind::Limiter],
     };
+    assert_eq!(
+        ELIGIBLE.map(Kind::native_id),
+        effect_compiler::CONSOLE_ELIGIBLE_EFFECTS,
+        "the kinds are the console eligibility list"
+    );
     assert!(
         ELIGIBLE
             .iter()

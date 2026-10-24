@@ -27,6 +27,17 @@
 //! The tail extent is the one place the delay line counts (#1379 D2a): after the input stops the
 //! delayed strip keeps playing for `delay_samples`, so the strip's `Input` node states that delay
 //! as its tail (exact rest after it, no gain, no stall), and both extents add it.
+//!
+//! # The source-claim line (#1287 D1)
+//!
+//! A floor (#1285 D1) is the other way a track's `Input` node can arrive late, and it *is*
+//! compensation: the node reads its source through a claim, not a graph edge, so there is no
+//! incoming edge to delay. `timings` therefore emits a [`SourceClaimLine`] of `max - latest`
+//! samples (`latest` is 0: a source-reading node has no incoming edge) for every source-reading
+//! node a floor raises, checks it against `maximum_delay_samples_per_edge` and counts it in
+//! `total_delay` like a compensation edge. It adds no node, edge or schedule item, so it stays out
+//! of `delay_count`. The compiler lowers it onto the track-delay line, and the node's tail bound
+//! adds it, as it adds a declared delay.
 
 use super::*;
 use crate::compile::inflate;
@@ -46,6 +57,8 @@ pub(crate) struct TimingResult {
     /// Every node whose floor raised its input arrival, with its latest incoming arrival, sorted
     /// by node ID (#1323 D3).
     pub(crate) raised_arrivals: Vec<(GraphNodeId, LatencySamples)>,
+    /// One line per source-reading node a floor raised, sorted by node ID (#1287 D1).
+    pub(crate) claim_lines: Vec<SourceClaimLine>,
 }
 
 /// Arrivals, compensation and tails for `schedule`, which is dense indices of `table` (#1384 D2).
@@ -55,10 +68,14 @@ pub(crate) struct TimingResult {
 /// `max`. A floor that names no node of `schedule` is ignored. With no floors the result is the
 /// natural one. Each node's latency and tail bound are the ones its `GraphNode` declares; the two
 /// tail extents and the floor are [`compose`]'s.
+///
+/// `sources` are the nodes that read a source through a claim (every track's `Input`): a floor
+/// that raises one becomes a [`SourceClaimLine`] (#1287 D1). Such a node has no incoming edge.
 pub(crate) fn timings(
     table: &NodeTable<'_>,
     schedule: &[usize],
     floors: &BTreeMap<GraphNodeId, LatencySamples>,
+    sources: &BTreeSet<GraphNodeId>,
     caps: &GraphCompileCaps,
 ) -> Result<TimingResult, GraphDiagnostic> {
     let count = table.len();
@@ -84,6 +101,12 @@ pub(crate) fn timings(
             floor_of[dense] = floor.0;
         }
     }
+    let mut reads_source = vec![false; count];
+    for node in sources {
+        if let Some(dense) = table.dense_of(node) {
+            reads_source[dense] = true;
+        }
+    }
     let mut arrivals = vec![None::<u64>; count];
     // `comp(u -> v)` of every edge: the compensation delay PDC inserts on it.
     let mut compensation = vec![0_u64; edges.len()];
@@ -93,6 +116,7 @@ pub(crate) fn timings(
     let mut delays = Vec::new();
     let mut input_arrivals = Vec::<(usize, LatencySamples)>::new();
     let mut raised_arrivals = Vec::<(usize, LatencySamples)>::new();
+    let mut claim_lines = Vec::<(usize, LatencySamples)>::new();
     for &node in schedule {
         let incoming = &incoming_by_node[node];
         let latest = incoming
@@ -106,6 +130,23 @@ pub(crate) fn timings(
         }
         if max > 0 {
             input_arrivals.push((node, LatencySamples(max)));
+        }
+        if reads_source[node] && max > latest {
+            // A claim has no incoming edge to compensate, so the raise is a line on the claim.
+            if !incoming.is_empty() {
+                return Err(diag("graph.internal.invariant", "$.graph.input_floors"));
+            }
+            let line = max - latest;
+            if line > caps.maximum_delay_samples_per_edge {
+                return Err(diag("graph.pdc.edge_limit", "$.graph.input_floors"));
+            }
+            total_delay = total_delay
+                .checked_add(line)
+                .ok_or_else(|| diag("graph.pdc.arithmetic_overflow", "$.graph.input_floors"))?;
+            if total_delay > caps.maximum_total_delay_samples {
+                return Err(diag("graph.pdc.total_limit", "$.graph.input_floors"));
+            }
+            claim_lines.push((node, LatencySamples(line)));
         }
         for &index in incoming {
             let edge = &edges[index];
@@ -154,6 +195,7 @@ pub(crate) fn timings(
     // Dense order is ID order, so these are the ID sorts.
     input_arrivals.sort_unstable_by_key(|entry| entry.0);
     raised_arrivals.sort_unstable_by_key(|entry| entry.0);
+    claim_lines.sort_unstable_by_key(|entry| entry.0);
     let output = *schedule
         .iter()
         .find(|&&node| matches!(table.id(node), GraphNodeId::Output { .. }))
@@ -184,6 +226,13 @@ pub(crate) fn timings(
         output_flush_floor: composed.output_flush_floor,
         input_arrivals: named(input_arrivals),
         raised_arrivals: named(raised_arrivals),
+        claim_lines: claim_lines
+            .into_iter()
+            .map(|(dense, samples)| SourceClaimLine {
+                node: table.id(dense).clone(),
+                samples,
+            })
+            .collect(),
     })
 }
 

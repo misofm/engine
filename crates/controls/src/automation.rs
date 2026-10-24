@@ -14,7 +14,7 @@ use crate::descriptor::{ControlDescriptor, Lanes, check};
 use crate::effect_rows::{has_rows, session_unit};
 use crate::error::ControlError;
 use crate::lane::Side;
-use crate::registry::resolve;
+use crate::registry::resolve_in;
 use crate::vca::{VCA_MUTE, VCA_OFFSET_DB};
 use crate::view::ModelView;
 use session::Lane;
@@ -137,6 +137,10 @@ pub fn automation_diagnostics(model: &SessionModel, sample_rate: u32) -> Vec<Con
     let mut diagnostics = Vec::new();
     // Whether each entry has a fault of its own, so the order rule reads only sound curves.
     let mut faulted = vec![false; model.automation.len()];
+    // One pass over the table for every entry's target (#1914): a strip's `fader_db` and a VCA's
+    // `offset_db` read their driving entries from the index, not a scan per entry.
+    let drivers = AutomationIndex::of(model);
+    let view = ModelView::whole(model).indexed(&drivers);
     for (index, automation) in model.automation.iter().enumerate() {
         let target = &automation.target;
         let at = |suffix: &str| format!("$.automation[id={}]{suffix}", automation.id.as_str());
@@ -145,7 +149,7 @@ pub fn automation_diagnostics(model: &SessionModel, sample_rate: u32) -> Vec<Con
             path,
         };
         let before = diagnostics.len();
-        let descriptor = match resolve(model, target, sample_rate) {
+        let descriptor = match resolve_in(view, target, sample_rate) {
             Ok(resolved) => resolved.descriptor,
             // An effect that carries no rows is refused by effect preparation with its own code
             // (`effect.native.unavailable`, `effect.third_party.unavailable_at_launch`); one fault is

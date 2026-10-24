@@ -56,7 +56,8 @@ pub use descriptor::{
     AutomationRule, Choice, ControlDescriptor, ControlScope, DomainRule, Lanes, Motion, check,
 };
 pub use diff::{
-    ChangedControl, activity_changed, changed_controls, changed_rows, writes_only_its_row,
+    ChangedControl, activity_changed, changed_controls, changed_rows, changed_rows_in,
+    writes_only_its_row,
 };
 pub use effect_contract::control::{
     ControlClass, ControlKind, Family, LiveRampRow, RebuildReason, Taper,
