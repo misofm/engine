@@ -85,7 +85,10 @@ induction. Two existing derivations already state it:
   that starts at excess `E` stays below `1 + E` whenever `E >= 2^-22 + 65 * 4 * 2^-25`, through
   any chain of retargets.
 
-Both assume a lockstep ramp of at most 64 samples with a power-of-two step. A caller whose kernel
+Both assume a lockstep ramp of at most 64 samples with a power-of-two step. The half-ulp box
+`h = (u/2, u/4, u/2)` of an `f32` design also holds only when `c1, a3 < 1` and `a2 < 1/2` (the
+multiband's `crossover_envelope` checks this, `crates/multiband-compressor/src/tail.rs:216`); a
+caller outside that range states its own `h`. A caller whose kernel
 meets those premises can use the per-word box `E + h` as `margin`. The state rounding
 (`HullNorm::state_rounding`) increases in each word's magnitude, so it must be evaluated at word
 magnitudes that are suprema over hull + box, not at the vertices alone. The scope note
@@ -198,8 +201,8 @@ Which callers qualify (read at `main` 6172dc4e6 and PR #1919's head 5316681de):
   `UNBOUNDED`.
 * **Parametric EQ**: a live kind or enable change ramps toward `EqSvfWords::IDENTITY` (#1337 D3).
   It does not qualify. It keeps its declaration until the owner rules. Its ramp-path tolerance
-  (`effect_runtime::svf::RAMP_PATH_NORM_TOLERANCE`) makes the same lockstep assumption. Root
-  files an issue to check it against the EQ's per-word ramp.
+  (`effect_runtime::svf::RAMP_PATH_NORM_TOLERANCE`) makes the same lockstep assumption; #1928
+  checks it against the EQ's per-word ramp.
 
 ## Gates (part 1)
 

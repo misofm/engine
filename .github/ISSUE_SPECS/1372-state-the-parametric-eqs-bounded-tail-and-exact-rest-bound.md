@@ -199,7 +199,7 @@ decision R4: the identity-vertex argument does not close, so no uniform hull bou
   is the caller's attestation, and each caller crate tests its own claim.
 - The de-esser qualifies only with the joint retarget of all three SVF words. At 6172dc4e6,
   `lib.rs:723` skipped a word whose target bits were unchanged; root's fix is in PR #1922.
-  `effect_runtime::svf::RAMP_PATH_NORM_TOLERANCE` makes the same lockstep assumption, and root
-  files an issue for the parametric EQ.
+  `effect_runtime::svf::RAMP_PATH_NORM_TOLERANCE` makes the same lockstep assumption; #1928
+  checks it for the parametric EQ.
 - The margin box for `f32` ramp walks and retarget restarts cites the bounded-excess inductions
   of `multiband-compressor/src/tail.rs` and `RAMP_PATH_NORM_TOLERANCE`.
