@@ -66,6 +66,27 @@ Op table (slice item 1), verified on main `c6e295947`:
   (`program::is_alias_candidate`), and `lower` elides each one that has one undelayed main input
   and no sidechain; one that keeps its op has a PDC-delayed input, which admission excludes.
 
-## Evidence
+- Gate change (root's gate list named a host-core sticky probe): the sticky term is moved to a
+  graph-compiler rig. Measured: with the sticky `&&` dropped, no host-core probe goes red, because
+  a later chain whose input term failed once clears its own agreement and re-engages only on a
+  `channels_agree` proof, which no launch effect bank gives (`PreparedNativeEffectBank` default
+  `false`). The rig's later chain holds a stateless pass-through bank that proves it, so the
+  mutation is visible there. The bit is still owed: it is what keeps a future proving bank sound.
 
-(filled in below as gates run)
+## Evidence (attempt 1, AVX2 host, debug unless named)
+
+- Red first: on main's `runtime.rs`, graph-compiler
+  `a_later_mono_chain_arms_on_its_producers_and_renders_the_dual_bits` (odd tracks now carry a
+  per-node delay) and host-core `both_chains_of_a_strip_split_by_a_per_node_delay_are_armed`
+  fail; both pass on the branch.
+- New graph-compiler rigs: `a_chain_behind_a_per_node_effect_whose_channels_parted_stays_dual`
+  (sticky term), `a_chain_behind_a_sidechained_per_node_effect_is_not_armed_on_it` (admission).
+- Mutations: `crates/graph/tests/MUTATIONS.md` rows 1899-1..3, all red.
+- `cargo test --locked -p graph -p graph-compiler -p host-core -p rack`: pass.
+  `cargo test --locked --release -p console-workload`: 55 pass (`chain_shape` 22, counts
+  unchanged). `scripts/check-graph-determinism.sh`: PASS (100/100). `realtime_policy`: ok
+  (212 regions). fmt, clippy `-D warnings`, aarch64 `--tests` check, `cargo doc -D warnings`, the
+  lint-checks script: pass.
+- PR evidence (one-time, not committed): every `native_session_rows()` row rendered 64 blocks armed
+  and forced off gives equal digests; no standing row has a chain armed on input across a per-node
+  op (`armed_on_input` 0 everywhere), so no standing row's bits or counters move.
