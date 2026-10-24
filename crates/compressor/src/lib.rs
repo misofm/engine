@@ -483,6 +483,7 @@ pub const COMPRESSOR_DESCRIPTOR: EffectDescriptor = EffectDescriptor {
     // (`state::STATE_LAYOUT_VERSION`); the payload is not persisted (R6b).
     state_layout_version: state::STATE_LAYOUT_VERSION,
     supported_link_modes: LinkModeSet::ALL,
+    lane_link: true,
     parameters: &COMPRESSOR_PARAMETERS,
     ports: &PORTS,
     qualities: &QUALITIES,
@@ -640,8 +641,8 @@ struct Instance<L: Lane> {
     sample_rate: u32,
     /// The prepared bypass flag, which selects the kernel's dry path.
     bypass: bool,
-    /// The prepared detector link mode.
-    link_mode: LinkMode,
+    /// Every lane's prepared detector link law (issue #1368 D3).
+    links: kernel::Links<L>,
     /// The prepared automation capacity: a span at or past it is invalid.
     automation_capacity: u32,
     /// The prepared state payload sizes a snapshot or restore must match.
@@ -660,16 +661,18 @@ struct Instance<L: Lane> {
 }
 
 impl<L: Lane> Instance<L> {
-    /// Allocates both channels from per-lane preparation values.
+    /// Allocates both channels from per-lane preparation values. `links[lane]` is lane `lane`'s
+    /// detector link mode; only `[..L::WIDTH]` is read.
     fn new(
         metadata: &PreparedEffectMetadata,
+        links: &[LinkMode; MAX_WIDTH],
         left_defaults: &[[f32; PARAMETER_COUNT]; MAX_WIDTH],
         right_defaults: &[[f32; PARAMETER_COUNT]; MAX_WIDTH],
     ) -> Self {
         Self {
             sample_rate: metadata.sample_rate,
             bypass: metadata.bypass,
-            link_mode: metadata.link_mode,
+            links: kernel::Links::per_lane(&links[..L::WIDTH]),
             automation_capacity: metadata.automation_capacity,
             state_sizes: metadata.state_sizes,
             left: Channel::new(left_defaults, metadata.sample_rate),
@@ -737,7 +740,7 @@ impl<L: Lane> Instance<L> {
             right,
             detector,
             frames,
-            self.link_mode,
+            &self.links,
             self.bypass,
             self.sample_rate,
             (&mut self.left, &mut self.right),
@@ -788,7 +791,7 @@ impl<L: Lane> Instance<L> {
             left,
             detector,
             frames,
-            self.link_mode,
+            &self.links,
             self.bypass,
             self.sample_rate,
             &mut self.left,
@@ -920,9 +923,9 @@ const LANE_DEFAULT_BYTES: usize = 2 * PARAMETER_COUNT * 4;
 /// * `defaults[l][p]` -- the control-plane reset values. They are not read by the kernel; a
 ///   `FullToDefaults` reset that made the channels disagree would show up in `words` and `ramps`
 ///   immediately, which is where the witness sees it.
-/// * `link_mode`, `bypass`, `sample_rate`, `silent_fixed_point`,
-///   `silent_bypass` -- whole-instance or per-channel-shared, so they cannot be
-///   asymmetric. The link is the reason the seam sits where it does, not a thing that breaks it:
+/// * `links`, `bypass`, `sample_rate`, `silent_fixed_point`,
+///   `silent_bypass` -- whole-instance or per-channel-shared (a lane's link law is the same on
+///   both channels), so they cannot be asymmetric. The link is the reason the seam sits where it does, not a thing that breaks it:
 ///   on identical planes the collapsed kernel computes the link on the one plane read twice, in
 ///   the original operation order.
 impl<L: Lane> Instance<L> {
@@ -977,6 +980,7 @@ impl PreparedCompressor {
         Self {
             instance: Instance::new(
                 metadata,
+                &[metadata.link_mode; MAX_WIDTH],
                 &[left_defaults; MAX_WIDTH],
                 &[right_defaults; MAX_WIDTH],
             ),
@@ -1023,7 +1027,9 @@ impl PreparedCompressor {
 ///   flight renders the same bits through the ramping body as through the settled one;
 /// * the **all-wet arm** is taken when every lane has `mix == 1`, and differs from the general law
 ///   only in a quieted signalling NaN, which fails that lane's own D7 check either way;
-/// * the **link** combines the two channels of one lane, lane-wise, never two lanes.
+/// * the **link** combines the two channels of one lane, lane-wise, never two lanes. Each lane
+///   takes its own member's mode (issue #1368); the all-DualMono `abs` arm is chosen once per
+///   bank from those modes and has the general law's bits on a DualMono lane.
 struct PreparedCompressorBank<L: Lane> {
     /// The bound width, which the block shape guard checks.
     width: BankWidth,
@@ -1042,6 +1048,9 @@ struct BankParts {
     metadata: PreparedEffectMetadata,
     left_defaults: [[f32; PARAMETER_COUNT]; MAX_WIDTH],
     right_defaults: [[f32; PARAMETER_COUNT]; MAX_WIDTH],
+    /// Each lane's detector link mode (issue #1368): a member's own, and for a padded lane the
+    /// first member's (D5), so padding never takes a bank off the all-DualMono arm.
+    links: [LinkMode; MAX_WIDTH],
     /// Every lane's request, padded ones included, prepares the same program key.
     same_program: bool,
     /// [`PreparedCompressorBank::active`].
@@ -1065,6 +1074,7 @@ impl BankParts {
             metadata,
             left_defaults: [first_left; MAX_WIDTH],
             right_defaults: [first_right; MAX_WIDTH],
+            links: [metadata.link_mode; MAX_WIDTH],
             same_program: true,
             active: 0,
         };
@@ -1078,6 +1088,7 @@ impl BankParts {
             parts.right_defaults[lane] = right;
             if request.active_mask[lane] {
                 parts.active |= 1 << lane;
+                parts.links[lane] = candidate.link_mode;
             }
         }
         Ok(parts)
@@ -1089,7 +1100,12 @@ impl BankParts {
         PreparedCompressorBank {
             width: self.width,
             quantum: self.metadata.quantum,
-            instance: Instance::new(&self.metadata, &self.left_defaults, &self.right_defaults),
+            instance: Instance::new(
+                &self.metadata,
+                &self.links,
+                &self.left_defaults,
+                &self.right_defaults,
+            ),
             active: self.active,
         }
     }
@@ -1577,7 +1593,7 @@ mod width_state_tests {
             &mut right,
             Detector::Main,
             FRAMES,
-            LinkMode::DualMono,
+            &kernel::Links::uniform(LinkMode::DualMono),
             false,
             SAMPLE_RATE,
             (&mut wide_left, &mut wide_right),
@@ -1597,7 +1613,7 @@ mod width_state_tests {
                 &mut scalar_input_right,
                 Detector::Main,
                 FRAMES,
-                LinkMode::DualMono,
+                &kernel::Links::uniform(LinkMode::DualMono),
                 false,
                 SAMPLE_RATE,
                 (&mut scalar_left, &mut scalar_right),
@@ -1674,7 +1690,12 @@ mod witness_tests {
             expected_prepared_metadata(&COMPRESSOR_DESCRIPTOR, request).expect("a legal request");
         let defaults: [[f32; PARAMETER_COUNT]; MAX_WIDTH] =
             [core::array::from_fn(|index| PARAMETER_SPECS[index].default); MAX_WIDTH];
-        Instance::new(&metadata, &defaults, &defaults)
+        Instance::new(
+            &metadata,
+            &[metadata.link_mode; MAX_WIDTH],
+            &defaults,
+            &defaults,
+        )
     }
 
     fn ramp(draw: &mut Draw) -> LinearRamp {

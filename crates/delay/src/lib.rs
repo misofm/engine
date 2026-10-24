@@ -307,6 +307,7 @@ pub const DELAY_DESCRIPTOR: EffectDescriptor = EffectDescriptor {
     contract_minor: 0,
     state_layout_version: 1,
     supported_link_modes: LinkModeSet::DUAL_MONO,
+    lane_link: false,
     parameters: &DELAY_PARAMETERS,
     ports: &PORTS,
     qualities: &QUALITIES,

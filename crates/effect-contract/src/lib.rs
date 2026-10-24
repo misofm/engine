@@ -837,6 +837,13 @@ pub struct EffectDescriptor {
     pub contract_minor: u16,
     pub state_layout_version: u32,
     pub supported_link_modes: LinkModeSet,
+    /// Whether the effect's bank holds the detector link mode per lane (issue #1368 D1).
+    ///
+    /// When set, [`PreparedEffectMetadata::program_key`] writes [`LinkMode::DualMono`] into the
+    /// key, so instances that differ only by link mode share one bank, and the effect's bank
+    /// factory builds each lane's link law from that member's own mode. The metadata keeps the
+    /// instance's real mode. Only an effect whose bank kernel reads the link per lane may set it.
+    pub lane_link: bool,
     pub parameters: &'static [ParameterDescriptor],
     pub ports: &'static [PortDescriptor],
     pub qualities: &'static [QualityDescriptor],
@@ -1521,7 +1528,13 @@ impl PreparedEffectMetadata {
             quantum: self.quantum,
             quality: self.quality,
             bypass: self.bypass,
-            link_mode: self.link_mode,
+            // Issue #1368 D2: a lane-link effect's bank holds the mode per lane, so the mode
+            // does not split a cohort.
+            link_mode: if self.descriptor.lane_link {
+                LinkMode::DualMono
+            } else {
+                self.link_mode
+            },
             ports: self.ports,
             latency: self.latency,
             tail: self.tail,
@@ -3467,6 +3480,7 @@ mod continuous_mapping_validity_tests {
             contract_minor: 0,
             state_layout_version: 1,
             supported_link_modes: LinkModeSet::DUAL_MONO,
+            lane_link: false,
             parameters,
             ports: &PORTS,
             qualities: &QUALITIES,

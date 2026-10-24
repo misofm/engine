@@ -458,6 +458,7 @@ pub const GATE_EXPANDER_DESCRIPTOR: EffectDescriptor = EffectDescriptor {
     contract_minor: 1,
     state_layout_version: STATE_LAYOUT_VERSION,
     supported_link_modes: LinkModeSet::ALL,
+    lane_link: true,
     parameters: &GATE_EXPANDER_PARAMETERS,
     ports: &PORTS,
     qualities: &QUALITIES,
@@ -609,6 +610,27 @@ impl<L: Lane, const CONNECTED: bool> PreparedGate<L, CONNECTED> {
             }
         }
         Some(gate)
+    }
+
+    /// Sets each lane's detector link words from that lane's own prepared mode (issue #1368 D3):
+    /// `links[lane]` is the mode of the request bound to `lane`. The kernel selects the link per
+    /// lane, so a lane renders its own mode's bits whatever its bank-mates' modes are.
+    fn with_lane_links(mut self, links: &[LinkMode]) -> Self {
+        for (lane, &link) in links.iter().enumerate().take(L::WIDTH) {
+            for coef in &mut self.coef {
+                lane_set(
+                    &mut coef.link_max,
+                    lane,
+                    f32::from(u8::from(link == LinkMode::Maximum)),
+                );
+                lane_set(
+                    &mut coef.link_avg,
+                    lane,
+                    f32::from(u8::from(link == LinkMode::Average)),
+                );
+            }
+        }
+        self
     }
 
     /// Marks the lanes of `active` as the bank's members and every other lane as padded.
@@ -1074,8 +1096,9 @@ impl<L: Lane, const CONNECTED: bool> PreparedGate<L, CONNECTED> {
     /// [`gate_frames`] reads per channel a [`GateCoef`] and a [`GateState`], and nothing else:
     ///
     /// * `GateCoef`: `hold_samples` (the reload value), `bypass`, `link_max` and `link_avg`. The
-    ///   bypass and link words are prepared from whole-instance values, so they cannot differ
-    ///   today; they are compared because the kernel loads them per channel.
+    ///   bypass word is prepared from a whole-instance value and the link words from the lane's
+    ///   own mode (issue #1368), the same on both channels, so they cannot differ today; they
+    ///   are compared because the kernel loads them per channel.
     /// * the four parameter ramps (`GateState::ramps`) and the two rate ramps
     ///   (`GateState::rates`), all four fields each: `remaining` decides whether a ramp moves and
     ///   when it snaps, and `current`, `target` and `step` are what it moves.
@@ -1758,6 +1781,9 @@ fn bind_bank<const NATIVE_ONLY: bool>(
     let first = request.requests[0];
     let metadata = expected_prepared_metadata(&GATE_EXPANDER_DESCRIPTOR, first)?;
     let mut defaults = [initial_defaults(first.initial_values)?; MAX_WIDTH];
+    // Issue #1368: the key carries no link mode (`lane_link`), so each lane takes its own
+    // member's mode, and a padded lane takes the first member's (D5).
+    let mut links = [metadata.link_mode; MAX_WIDTH];
     let mut same_program = true;
     for (track, item) in request.requests.iter().copied().enumerate().skip(1) {
         let candidate = expected_prepared_metadata(&GATE_EXPANDER_DESCRIPTOR, item)?;
@@ -1765,6 +1791,9 @@ fn bind_bank<const NATIVE_ONLY: bool>(
             same_program = false;
         }
         defaults[track] = initial_defaults(item.initial_values)?;
+        if request.active_mask[track] {
+            links[track] = candidate.link_mode;
+        }
     }
     // Every request is validated before the shape is decided, so a malformed member is an
     // error and an unbankable-but-valid cohort is a legal `Ok(None)` fallback.
@@ -1795,6 +1824,7 @@ fn bind_bank<const NATIVE_ONLY: bool>(
         Box::new(
             PreparedGate::<L, false>::new(&metadata, width, defaults)
                 .ok_or(invalid)?
+                .with_lane_links(&links[..request.requests.len()])
                 .with_active_lanes(active),
         ) as Box<dyn PreparedNativeEffectBank>
     });

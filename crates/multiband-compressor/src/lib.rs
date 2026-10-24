@@ -487,6 +487,7 @@ pub const MULTIBAND_COMPRESSOR_DESCRIPTOR: EffectDescriptor = EffectDescriptor {
     contract_minor: 1,
     state_layout_version: STATE_LAYOUT_VERSION,
     supported_link_modes: LinkModeSet::ALL,
+    lane_link: false,
     parameters: &MULTIBAND_COMPRESSOR_PARAMETERS,
     ports: &PORTS,
     qualities: &QUALITIES,
