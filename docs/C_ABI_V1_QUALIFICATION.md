@@ -155,7 +155,19 @@ keeps it waiting), and a declared
 discontinuity arms nothing. Strips the transaction did not add are untouched. A later structural
 transaction adopted before the fade has run keeps it (#1392): while the strip's fader lane carries,
 a waiting fade keeps waiting, a scheduled one keeps its render sample, and a fired one never runs
-again (`host-core`'s `a_pending_fade_survives_a_second_swap_on_every_width`). The frozen exported set is now 15
+again (`host-core`'s `a_pending_fade_survives_a_second_swap_on_every_width`). A route the
+transaction adds fades in the same way (#1363): a route between two strips that keep playing (a
+send, or a strip's path to the output) holds an exact `+0.0` until the first block at or after
+adoption plus the samples of any compensation line before its own op (none for a plain route;
+its destination-edge line sits after the op, so the fade enters it and is heard as the line
+delivers), and a send of an added strip from a tap before its fader fires with that fader. Both
+unmute over the session mute ramp, bit-identical to the fresh session with the route muted and
+given a live unmute at that block (`an_added_route_fades_in_after_its_line_fills_on_every_width`,
+`an_added_strips_pre_fader_send_fades_with_it_on_every_width`). An added `post_fader` or `post_pan`
+route into the output, which has no lane, binds live for that plan only so it can ramp, and loses
+the fold there. A muted route, a route whose destination strip is added, a following route with
+an automated source mute and a declared discontinuity arm nothing; a removed or re-pointed route
+still steps (#1953). The frozen exported set is now 15
 `miso_engine_v1_*` definitions (`scripts/check-capi-abi.sh`, whose self-test refuses a library
 where the new symbol is only an undefined reference: its `nm` wrapper drops the symbol from a
 defined-only listing and shows it as `U` otherwise, so the case also fails if the checker stops
