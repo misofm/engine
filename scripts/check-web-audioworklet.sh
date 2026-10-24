@@ -548,12 +548,13 @@ named_disassembly=$(wasm-objdump -d "$named")
 # may trap. Issue #1581 D4 admits `OutputPeakObserver::observe`, the core output meter, for the
 # same site only: it inlines the engine SPSC producer's checked `slots[local]` index when it
 # pushes a closed window, unreachable by the cursor invariant, the site `enter_block` is admitted
-# for. No other rule of the gate is loosened.
+# for. It is pinned to that one site (`=1`), so another checked index inlined into the fold is
+# red. No other rule of the gate is loosened.
 printf '%s
 ' "$named_disassembly" |
   python3 -B "$callgraph" --callgraph miso_engine_web_v1_render \
     --trap-owner 17RealtimePlanOwner11enter_block \
-    --trap-owner 18OutputPeakObserver7observe --render-thread || exit 1
+    --trap-owner 18OutputPeakObserver7observe=1 --render-thread || exit 1
 printf '%s
 ' "$named_disassembly" |
   python3 -B "$callgraph" --kernel-shape --kernel-pattern '4wide6f32x4' --kernel-min 13 ||

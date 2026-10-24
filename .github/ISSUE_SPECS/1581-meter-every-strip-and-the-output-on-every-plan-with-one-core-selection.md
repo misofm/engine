@@ -255,3 +255,8 @@ Commands: `cargo test --locked -p host-core --all-features`,
   `RealtimePlanOwner::enter_block` is admitted for. Admitting it needs
   `--trap-owner 18OutputPeakObserver7observe` in `scripts/check-web-audioworklet.sh`, outside
   T2's paths; with that one argument (a scratch-worktree probe) the whole worklet check passes.
+- **Successor obligations (T2 verdict).** T3: the browser overrides
+  `RuntimePreparer::meter_window_blocks` with its boot word, so its output windows tile its strip
+  meters' grid. #1583: the C ABI exposes `OutputPeakReader::dropped_windows()` beside the windows.
+  The worklet gate pins `OutputPeakObserver::observe` to its one trap site
+  (`--trap-owner 18OutputPeakObserver7observe=1`).
