@@ -43,6 +43,12 @@ pub enum Class {
     RefusedSkippedModule,
     /// Unsafe code outside the allowlisted ownership files.
     UnsafeOutsideOwnership,
+    /// Unsafe code in a compiled doctest block of a file outside the allowlisted ownership files.
+    UnsafeInDoctest,
+    /// An identifier `include`, `include_str` or `include_bytes` in a compiled doctest block.
+    IncludeInDoctest,
+    /// A compiled doctest block that does not lex, so no rule can read it.
+    DoctestNotLexable,
     /// A line mentions a region marker but is not a valid marker line.
     MalformedMarker,
     /// A file has a different number of begin and end markers.
@@ -172,6 +178,13 @@ impl fmt::Display for Class {
             Self::UnsafeOutsideOwnership => {
                 out.write_str("unsafe code exists outside the issue-approved ownership/audit files")
             }
+            Self::UnsafeInDoctest => out.write_str(
+                "unsafe code in a compiled doctest block outside the issue-approved ownership/audit files",
+            ),
+            Self::IncludeInDoctest => out.write_str(
+                "include, include_str or include_bytes in a compiled doctest block (rustdoc reads the file relative to the source)",
+            ),
+            Self::DoctestNotLexable => out.write_str("compiled doctest block does not lex"),
             Self::MalformedMarker => out.write_str("malformed realtime policy marker"),
             Self::UnmatchedMarkers => out.write_str("unmatched realtime policy markers"),
             Self::MisorderedMarkers => out.write_str("misordered realtime policy markers"),
