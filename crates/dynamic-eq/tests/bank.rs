@@ -322,7 +322,11 @@ fn a_collapsed_bank_that_falls_silent_is_at_rest_and_skips_exactly() {
         process_bank(mixed, l, r, first, &[], &offsets, mono);
         assert_eq!(bits(&mixed_left), bits(&never_left), "block {step}: left");
         if !mono {
-            assert_eq!(bits(&mixed_right), bits(&never_right), "block {step}: right");
+            assert_eq!(
+                bits(&mixed_right),
+                bits(&never_right),
+                "block {step}: right"
+            );
         }
     };
     for mono in [false, true] {

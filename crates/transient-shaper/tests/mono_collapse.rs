@@ -417,7 +417,14 @@ fn a_collapsed_bank_that_falls_silent_is_at_rest_and_skips_exactly() {
         };
         let first = (step * FRAMES) as u64;
         let spans = (&[][..], &offsets[..]);
-        render(never, &mut never_left, &mut never_right, first, spans, false);
+        render(
+            never,
+            &mut never_left,
+            &mut never_right,
+            first,
+            spans,
+            false,
+        );
         step += 1;
         if skip {
             mixed.advance_clocks(all, FRAMES as u32);
