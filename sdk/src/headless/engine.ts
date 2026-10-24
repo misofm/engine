@@ -44,6 +44,19 @@ import type {
 } from "../core/control-list.ts";
 import { EngineLiveControls, sessionDescribesStrips } from "../core/live-controls.ts";
 import { decodeObservationEnded } from "../core/observation-ended.ts";
+import { ProtocolClient, decodeProtocolEvent } from "../core/protocol-messages.ts";
+import type {
+  CommittedDocument,
+  CounterName,
+  CounterSnapshot,
+  DiagnosticsPage,
+  DiagnosticsQuery,
+  EngineCapabilities,
+  ProtocolEvent,
+  TelemetryConfiguration,
+  TransportRequest,
+  TransportSnapshot,
+} from "../core/protocol-messages.ts";
 import { SessionBuilder } from "../core/session.ts";
 import { MisoEngineError, MisoUsageError } from "../core/errors.ts";
 import type { ErrorPhase, MisoDiagnostic, MisoErrorCode } from "../core/errors.ts";
@@ -132,6 +145,8 @@ export class OfflineEngine {
   #observationSubscriptions: ObservationSubscriptionOwner | undefined;
   /** The engine's one transaction queue (#1563 D4), made on first use. */
   #controlQueue: ControlTransactionQueue | undefined;
+  /** The engine's protocol calls (#1571 D2), made on first use. */
+  #protocol: ProtocolClient | undefined;
   readonly #responseLimits: TrackResponseSubscriptionLimits | undefined;
   readonly #spectrumLimits: SpectrumSubscriptionLimits | undefined;
   /**
@@ -393,6 +408,73 @@ export class OfflineEngine {
    */
   onControlEvent(listener: (event: ControlEvent) => void): () => void {
     return this.#boundary.onControlEvent(listener);
+  }
+
+  /** The core's capabilities (`CAPABILITIES_GET`, #1571 D3). `supportedCommands` differs per host. */
+  capabilities(): Promise<EngineCapabilities> {
+    return this.#protocolClient().capabilities();
+  }
+
+  /**
+   * The canonical committed session document and its revision (`SESSION_SNAPSHOT_GET` pages,
+   * #1571 D3). A session that changes between pages starts the read again, at most three times.
+   */
+  committedDocument(): Promise<CommittedDocument> {
+    return this.#protocolClient().committedDocument();
+  }
+
+  /** The transport's state and the sample it is effective at (`TRANSPORT_GET`). */
+  transport(): Promise<TransportSnapshot> {
+    return this.#protocolClient().transport();
+  }
+
+  /** Start or stop the transport (`TRANSPORT_SET`) at the committed revision; resolves to the new state. */
+  setTransport(request: TransportRequest): Promise<TransportSnapshot> {
+    return this.#protocolClient().setTransport(request);
+  }
+
+  /**
+   * Replace the telemetry configuration (`TELEMETRY_CONFIGURE`) at the committed revision; resolves
+   * to the configuration the core applied. The meters, counters and diagnostics it names arrive as
+   * `onEvent` events after the renders that produce them.
+   */
+  configureTelemetry(configuration: TelemetryConfiguration): Promise<TelemetryConfiguration> {
+    return this.#protocolClient().configureTelemetry(configuration);
+  }
+
+  /** The named counters, or every counter when `ids` is absent (`COUNTERS_GET`). */
+  counters(ids?: readonly CounterName[]): Promise<CounterSnapshot> {
+    return this.#protocolClient().counters(ids);
+  }
+
+  /** One page of the core's retained diagnostics (`DIAGNOSTICS_GET`); defaults `0n`, 64 and `"info"`. */
+  diagnostics(query?: DiagnosticsQuery): Promise<DiagnosticsPage> {
+    return this.#protocolClient().diagnostics(query);
+  }
+
+  /**
+   * Subscribe to the protocol events, decoded (#1571 D4): `sessionCommitted`, `transportState`,
+   * `observationEnded`, `meterBatch`, `counterSnapshot` and `diagnostic`, in engine order. The engine
+   * reads its events after every control frame and every `render()`; it decodes the frames
+   * `onControlEvent` delivers, so an event that arrives with no listener at all is dropped and
+   * counted in `discardedControlEvents`, and a listener that throws (or a frame that does not
+   * decode) is counted in `controlListenerFailures`. Returns the unsubscribe function.
+   */
+  onEvent(listener: (event: ProtocolEvent) => void): () => void {
+    if (typeof listener !== "function") {
+      throw new MisoUsageError("an event listener must be a function");
+    }
+    return this.#boundary.onControlEvent((event) => listener(decodeProtocolEvent(event.frame)));
+  }
+
+  #protocolClient(): ProtocolClient {
+    return this.#protocol ??= new ProtocolClient({
+      send: (frame) => this.#boundary.controlFrame(frame),
+      // The one allocator of this endpoint, which the transaction queue and the control list share.
+      requestIds: this.#boundary.controlRequestIds,
+      // The core's own committed revision: the queue's, and also a commit another sender made.
+      committedRevision: () => this.#boundary.controlRevision(),
+    });
   }
 
   /** The number of control events dropped because no listener was subscribed. */

@@ -1340,10 +1340,16 @@ export class WasmBoundary {
     const { pointer } = this.#buffer("outputPcm");
     const quantum = this.#status().u32("quantumFrames");
     const contiguous = new Float32Array(this.#exports.memory.buffer, pointer, quantum * 2);
-    return Object.freeze({
+    const output = Object.freeze({
       left: contiguous.slice(0, actualFrames),
       right: contiguous.slice(quantum, quantum + actualFrames),
     });
+    // A block produces events (telemetry, render diagnostics, a transport change it applied), and
+    // the lossy lane holds one: they are read here, after each block, or a later block's would
+    // replace them before the next control frame read them (#1571 D4). The read runs the core's
+    // service step first, so the headless engine needs no other service call.
+    this.#drainControlEvents(handle);
+    return output;
   }
 
   /**

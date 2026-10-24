@@ -58,6 +58,10 @@ export const WIRE_BYTES = 10;
 /** @internal */
 export const WIRE_MESSAGE = 11;
 /** @internal */
+export const WIRE_PACKED_U16 = 12;
+/** @internal */
+export const WIRE_PACKED_U32 = 13;
+/** @internal */
 export const WIRE_PACKED_F32 = 15;
 
 /** The stable address of one lane of one control, by the row's numeric ID. */
