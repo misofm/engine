@@ -2565,9 +2565,12 @@ pub trait PreparedNativeEffectBank: Send {
     /// reset, that would have to speak to that half; the witness already does, and this method
     /// covers what it cannot see.
     ///
-    /// # Why no shipped effect implements this yet
+    /// # Which shipped effects implement this, and why most do not
     ///
-    /// Every launch effect takes the declining default, and that is a decision rather than an
+    /// One launch effect implements it: **`gate-expander`** (issue #973), whose whole per-channel
+    /// state is 31 lane words (four coefficients, the envelope, two hysteresis words and 24 ramp
+    /// words), so it compares every word its disengage copy moves and needs no fixed point. Every
+    /// other launch effect takes the declining default, and that is a decision rather than an
     /// omission. Within one plan the channel-symmetry witness can go from holding to not holding
     /// and back for exactly one term: [`UNBYPASSED`](crate::ChannelSymmetryWitness::UNBYPASSED),
     /// which `ChannelSymmetryWitness::admit` restores on `Bypass(false)`. `LIVE` has no restoring
@@ -2578,8 +2581,9 @@ pub trait PreparedNativeEffectBank: Send {
     /// prove agreement and the answer would change anything: `rack::BankChain` recovers
     /// every reachable case through the disengage copy instead.
     ///
-    /// Reading each crate's rest state is what settles that it *would* be implementable, and the
-    /// reading is worth recording because it is not uniform:
+    /// The gate's answer is cheap and sound, not needed: it changes nothing in any session that
+    /// can be built today. Reading each other crate's rest state is what settles that it *would*
+    /// be implementable, and the reading is worth recording because it is not uniform:
     ///
     /// * **`parametric-eq`** and the builtin input chain have no delay lines at all --
     ///   two integrator words per section -- so their whole per-channel state is a few hundred

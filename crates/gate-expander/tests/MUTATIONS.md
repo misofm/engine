@@ -288,3 +288,20 @@ the public causal and signed-zero/advancing-state gates. The weak finite-sidecha
 by the current/delayed-detector and NaN-policy gates; the W4 binding smoke is covered by the padded
 public-native/internal-other-width PCM, report and state differential. Renamed native-bank oracle
 and identity tests retain their arithmetic, inputs and comparisons.
+
+## Mono collapse (#973)
+
+Applied in the issue's worktree on the attempt-1 commit, run with
+`cargo test --locked -p gate-expander --all-features --test mono_collapse`, and reverted.
+
+| mutation | file | result |
+|---|---|---|
+| `desymmetrize` keeps the right `hysteresis` (copies every other `GateState` word) | `src/lib.rs` | RED: `channels_agree` false after the copy; with that assert removed, `DualMono block 24 track 0: right state` (the hold countdown word, mid-hold) |
+| the collapsed step passes `L::zero()` as the partner detector instead of the left word | `src/kernel.rs` | RED: `Average block 4 track 3: left state` |
+| the `DESIGNED` witness omits the two rate ramps | `src/lib.rs` | RED: `the_witness_declines_on_exactly_the_asymmetric_lane` (parameter 4, attack) |
+| `channels_bit_equal` compares `gain_db` in place of `hysteresis.hold` (review fold) | `src/lib.rs` | RED: `DualMono: after different L and R words` (the channels differ in the hold countdown alone) |
+
+Not run, and equivalent by construction: the collapsed link computed as `|p|`. `0.5|p| + 0.5|p|`
+differs from `|p|` only where `0.5|p|` rounds, a subnormal `|p|`, and the detector clamps every
+level below `LEVEL_FLOOR = 1e-8` before the curve, so no output or state word can tell them apart.
+The compressor records the same mutation GREEN for the same reason.
