@@ -2054,6 +2054,8 @@ fn bind_bank<const NATIVE_ONLY: bool>(
 }
 
 #[cfg(test)]
+mod glide_tests;
+#[cfg(test)]
 mod padding_tests;
 #[cfg(test)]
 mod rest_tests;

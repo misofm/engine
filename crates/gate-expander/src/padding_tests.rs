@@ -80,7 +80,7 @@ fn backend(width: BankWidth) -> Backend {
 }
 
 /// Binds through the public factory at the native width, and through `bind_bank` otherwise.
-fn bind(
+pub(super) fn bind(
     width: BankWidth,
     requests: &[PrepareEffectRequest<'_>],
     mask: &[bool],

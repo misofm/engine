@@ -47,8 +47,9 @@ pub use dynamic_band::{
 pub use dynamic_eq::ReferenceDynamicEqBand;
 pub use gate_expander::{
     ReferenceGateExpanderError, ReferenceGateExpanderParameters, ReferenceGateLink,
-    ReferenceGatePhase, ReferenceGateTiming, ReferenceGateTimingChange, ReferenceGateTrace,
-    reference_gate_expander_gain_reduction_db, reference_gate_expander_process,
+    ReferenceGateLinkGlide, ReferenceGatePhase, ReferenceGateTiming, ReferenceGateTimingChange,
+    ReferenceGateTrace, reference_gate_expander_gain_reduction_db, reference_gate_expander_process,
+    reference_gate_expander_process_with_link_glide,
     reference_gate_expander_process_with_timing_change,
 };
 pub use link_glide::{ReferenceLinkGlide, reference_link_blend};
