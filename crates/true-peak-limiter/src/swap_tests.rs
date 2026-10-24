@@ -16,13 +16,14 @@ use effect_contract::BankWidth;
 struct LimiterProbe<L: Lane> {
     /// `[ceiling dB, release ms, lookahead ms]` per strip, left and right.
     parameters: Vec<[[f32; PARAMETER_COUNT]; 2]>,
-    link_mode: LinkMode,
+    /// Each strip's link mode (issue #1368): a swapped lane must take its mode with it.
+    links: Vec<LinkMode>,
     draw: Draw,
     _lane: core::marker::PhantomData<L>,
 }
 
 impl<L: Lane> LimiterProbe<L> {
-    fn new(seed: u64, link_mode: LinkMode) -> Self {
+    fn new(seed: u64) -> Self {
         let mut draw = Draw(seed);
         let parameters = (0..2 * L::WIDTH)
             .map(|_| {
@@ -35,9 +36,18 @@ impl<L: Lane> LimiterProbe<L> {
                 })
             })
             .collect();
+        let links = (0..2 * L::WIDTH)
+            .map(|_| {
+                if draw.below(2) == 0 {
+                    LinkMode::Maximum
+                } else {
+                    LinkMode::DualMono
+                }
+            })
+            .collect();
         Self {
             parameters,
-            link_mode,
+            links,
             draw,
             _lane: core::marker::PhantomData,
         }
@@ -68,7 +78,13 @@ impl<L: Lane + 'static> Probe for LimiterProbe<L> {
     fn bind(&mut self, which: usize) -> Box<dyn PreparedNativeEffectBank> {
         let strips = &self.parameters[which * L::WIDTH..(which + 1) * L::WIDTH];
         let side = |channel: usize| strips.iter().map(|strip| strip[channel]).collect();
-        Box::new(limiter_bank::<L>(side(0), side(1), false, self.link_mode).0)
+        let links = &self.links[which * L::WIDTH..(which + 1) * L::WIDTH];
+        let (PreparedTruePeakLimiterBank { width, core }, _) =
+            limiter_bank::<L>(side(0), side(1), false, links[0]);
+        Box::new(PreparedTruePeakLimiterBank {
+            width,
+            core: core.with_lane_links(links),
+        })
     }
 
     /// Loud, so gain reduction and the rings are non-trivial.
@@ -131,6 +147,8 @@ impl<L: Lane + 'static> Probe for LimiterProbe<L> {
 
 /// **A swapped strip renders and holds exactly the bits it would have unswapped** (issue #1747),
 /// re-seeds from its own defaults on a full reset, and the swap reaches the allocator zero times.
+/// Each strip draws its own link mode (issue #1368): a swap that left the mode in place would
+/// render the strip at its new neighbour's law.
 #[test]
 fn a_swapped_strip_keeps_its_twins_bits() {
     bench_support::alloc::assert_installed();
@@ -138,12 +156,7 @@ fn a_swapped_strip_keeps_its_twins_bits() {
         let width = L::WIDTH;
         for seed in 0..3_u64 {
             let seed = 0x1747_5000 ^ seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ width as u64;
-            let link_mode = if seed.is_multiple_of(2) {
-                LinkMode::Maximum
-            } else {
-                LinkMode::DualMono
-            };
-            swap_probe::check(&mut LimiterProbe::<L>::new(seed, link_mode), seed);
+            swap_probe::check(&mut LimiterProbe::<L>::new(seed), seed);
         }
     });
 }

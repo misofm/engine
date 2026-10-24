@@ -243,7 +243,14 @@ pub fn run_case<L: Lane>(case: usize, out: &mut [u32]) {
     }
 
     let shape = Shape::new(RATE).expect("launch rate");
-    let coefficients = LimiterCoef::<L>::new(case == 1, false);
+    let coefficients = LimiterCoef::<L>::new(
+        if case == 1 {
+            LinkMode::Maximum
+        } else {
+            LinkMode::DualMono
+        },
+        false,
+    );
     let mut left_lanes = vec![0.0_f32; LANES * FRAMES];
     let mut right_lanes = vec![0.0_f32; LANES * FRAMES];
     for lane in 0..LANES {

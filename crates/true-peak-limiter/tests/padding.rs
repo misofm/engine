@@ -155,7 +155,8 @@ fn bank_widths() -> Vec<(BankWidth, Backend)> {
 /// What the members of one run carry, block by block.
 struct Scenario {
     label: String,
-    link: LinkMode,
+    /// Each member's link mode (issue #1368): the members of one bank may differ.
+    links: Vec<LinkMode>,
     /// Collapsed: the bank runs `process_bank_mono` and both channels of every member carry one
     /// signal. The per-node oracle stays dual.
     mono: bool,
@@ -270,7 +271,7 @@ fn random_scenario(seed: u64, link: LinkMode, members: usize) -> Scenario {
     }
     Scenario {
         label: format!("random {seed:#x} {link:?}"),
-        link,
+        links: vec![link; members],
         mono: false,
         members: tracks,
         left,
@@ -278,6 +279,19 @@ fn random_scenario(seed: u64, link: LinkMode, members: usize) -> Scenario {
         spans,
         blocks: BLOCKS,
     }
+}
+
+/// The members alternate `DualMono` and `Maximum` (issue #1368), member 0 at `first_link`.
+fn mixed(mut scenario: Scenario, first_link: LinkMode) -> Scenario {
+    let other = match first_link {
+        LinkMode::Maximum => LinkMode::DualMono,
+        _ => LinkMode::Maximum,
+    };
+    for (member, link) in scenario.links.iter_mut().enumerate() {
+        *link = if member % 2 == 0 { first_link } else { other };
+    }
+    scenario.label = format!("{} links {:?}", scenario.label, scenario.links);
+    scenario
 }
 
 /// The console fixture's limiter, `link_mode: maximum`, on tracks `first..first + members`: quiet
@@ -310,7 +324,7 @@ fn fixture_scenario(first: usize, members: usize, mono: bool) -> Scenario {
     }
     Scenario {
         label: format!("fixture tracks {first}.. mono {mono}"),
-        link: LinkMode::Maximum,
+        links: vec![LinkMode::Maximum; members],
         mono,
         members: (first..first + members).map(fixture_track).collect(),
         left,
@@ -328,7 +342,7 @@ fn per_node(scenario: &Scenario) -> Planes {
         .enumerate()
         .map(|(member, values)| {
             let mut effect = TruePeakLimiterFactory
-                .prepare(request(values, scenario.link))
+                .prepare(request(values, scenario.links[member]))
                 .expect("prepare")
                 .processor;
             let mut left = scenario.left[member].clone();
@@ -368,9 +382,13 @@ fn banked(
     let requests: Vec<PrepareEffectRequest<'_>> = layout
         .iter()
         .zip(padding)
-        .map(|(member, padding)| {
+        .enumerate()
+        .map(|(lane, (member, padding))| {
+            // A padded lane's request carries some member's mode; the bank gives the lane the
+            // first member's (issue #1368 D5), so which one cannot move a member's bit.
+            let members = scenario.members.len();
             let values = member.map_or(padding, |member| &scenario.members[member]);
-            request(values, scenario.link)
+            request(values, scenario.links[member.unwrap_or(lane % members)])
         })
         .collect();
     let mask: Vec<bool> = layout.iter().map(Option::is_some).collect();
@@ -504,23 +522,37 @@ fn clones_of(scenario: &Scenario, lanes: usize, member: usize) -> Vec<Values> {
     vec![scenario.members[member]; lanes]
 }
 
-/// **Gate 1: a padded bank's members render their per-node bits**, for every active count `1..W`
+/// **Gate 1: a padded bank's members render their per-node bits**, for every active count `1..=W`
 /// at every width this build binds.
 ///
 /// Red if a member's bits move with its bank, from the first block on: a binding that seeds a
 /// member from the wrong request (a clone's), a padded lane fed back into a member, a whole-bank
 /// decision that is not bit-neutral per lane, or a padded lane that stops answering `+0.0` with
-/// `+0.0` (the assertion inside [`banked`]).
+/// `+0.0` (the assertion inside [`banked`]). Members also mix link modes (issue #1368), on the
+/// per-lane body (random lookaheads) and on the uniform body (the fixture's one window), dual and
+/// collapsed: red if a lane takes another lane's mode or a mixed bank links a pair.
 #[test]
 fn a_padded_bank_renders_its_members_per_node_bits() {
     for (width, backend) in bank_widths() {
         let lanes = width.lanes() as usize;
-        for members in 1..lanes {
+        for members in 1..=lanes {
             let mut scenarios = vec![
                 random_scenario(0x1091_0100 + members as u64, LinkMode::DualMono, members),
                 random_scenario(0x1091_0200 + members as u64, LinkMode::Maximum, members),
+                mixed(
+                    random_scenario(0x1091_0400 + members as u64, LinkMode::Maximum, members),
+                    LinkMode::DualMono,
+                ),
                 fixture_scenario(64 - members, members, false),
                 fixture_scenario(64 - members, members, true),
+                mixed(
+                    fixture_scenario(64 - members, members, false),
+                    LinkMode::Maximum,
+                ),
+                mixed(
+                    fixture_scenario(64 - members, members, true),
+                    LinkMode::DualMono,
+                ),
             ];
             for scenario in &mut scenarios {
                 scenario.label = format!("{} {width:?} {members}/{lanes}", scenario.label);
