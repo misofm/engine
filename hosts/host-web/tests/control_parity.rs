@@ -4133,9 +4133,13 @@ fn removing_a_limited_track_keeps_the_plan_latency_alike_on_both_hosts() {
             "{rate} Hz: pending"
         );
         assert_eq!(c_abi.plan_latency(), boot, "{rate} Hz: pending");
-        for block in 4..8 {
+        // The removed strip ramps out, then the rebuild is adopted at `S` (#1325 D3).
+        let mut block = 4;
+        while c_abi.watermark().0 < c_abi.revision {
+            assert!(block < 64, "{rate} Hz: the rebuild is adopted");
             browser.step(block);
             c_abi.step(block);
+            block += 1;
         }
         let (watermark, _, _) = c_abi.watermark();
         assert_eq!(
