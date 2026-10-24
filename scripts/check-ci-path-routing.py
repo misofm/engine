@@ -774,16 +774,99 @@ def runs_m3_on_config_flags(command: str) -> bool:
             and not any(word in NON_INTEGRATION_TARGET_SELECTORS for word in words))
 
 
+# Issue #1434 D1: an owner step that is a `run: |` block is a guard only with the lines around its
+# owner command. Each block-form owner step that carries such lines is named here with them, in
+# order, each with the issue that owns it. They must appear in the step's comment-stripped lines
+# as an ordered subsequence: other lines (a message, a `fi`) carry no claim and stay free. An edit
+# to one of these steps must update this table in the same change.
+GUARDED_OWNER_STEPS = {
+    "artifact-gates": ("Hermetic browser host and worklet tests", (
+        ("set -o pipefail", "#1429"),
+        ('scratch="$(mktemp -d "$RUNNER_TEMP/test-web-audioworklet-tmp.XXXXXX")"', "#1429"),
+        ("trap 'rm -rf -- \"$scratch\"' EXIT", "#1429"),
+        ('export TMPDIR="$scratch"', "#1429"),
+        ("bash scripts/test-web-audioworklet.sh", "#1044"),
+        ("leftover=\"$(find \"$scratch\" -mindepth 1 -maxdepth 1 -printf '%f\\n' | LC_ALL=C sort)\"",
+         "#1429"),
+        ('if [[ -n "$leftover" ]]; then', "#1429"),
+        ("exit 1", "#1429"),
+    )),
+}
+# Issue #1434 D2: shell lines that disable or swallow a failure. None may appear in an owner step
+# (or a doctest twin, A1-D1); `exit 0` is held separately, before the step's last owner command.
+FAILURE_MASKS = (
+    ("set +e", re.compile(r"\bset\s+(?:[-+]\S*\s+)*\+[A-Za-z]*e")),
+    ("set +o errexit", re.compile(r"\bset\s+.*\+o\s+errexit\b")),
+    ("set +o pipefail", re.compile(r"\bset\s+.*\+o\s+pipefail\b")),
+    ("|| true", re.compile(r"\|\|\s*true\b")),
+    ("|| :", re.compile(r"\|\|\s*:(?:\s|;|$)")),
+    ("a trailing &", re.compile(r"(?<!&)&\s*$")),
+)
+EXIT_ZERO = re.compile(r"\bexit(?:\s+0)?\s*(?:$|[;&|)}])")
+CONTINUE_ON_ERROR_STEP = re.compile(r"['\"]?continue-on-error['\"]?\s*:")
+CONTINUE_ON_ERROR_JOB = re.compile(r"^    ['\"]?continue-on-error['\"]?\s*:", re.MULTILINE)
+
+
+def named_step(job_text: str, name: str) -> str | None:
+    """The job's step whose `name:` is `name` (comment lines removed, as `job_steps` gives it)."""
+    for step in job_steps(job_text):
+        if re.search(rf"^      (?:- |  )name: {re.escape(name)}$", step, re.MULTILINE):
+            return step
+    return None
+
+
+def check_unmasked_step(where: str, step: str, commands: tuple[str, ...], issue: str) -> None:
+    """D2 and A2-D1: `step` (comment lines removed) runs `commands` with nothing that could make a
+    failure of one of them pass: no step-level `if:`, no `continue-on-error` key with any value, no
+    `FAILURE_MASKS` line, and no `exit 0` before the last of `commands`."""
+    require(re.search(r"^      (?:- |  )if:", step, re.MULTILINE) is None,
+            f"qualification.yml: {where} must carry no step-level if: ({issue})")
+    require(CONTINUE_ON_ERROR_STEP.search(step) is None,
+            f"qualification.yml: {where} must carry no continue-on-error key, whatever its value "
+            f"({issue}); it would let a failure pass")
+    lines = run_lines(step)
+    for line in lines:
+        for label, pattern in FAILURE_MASKS:
+            require(pattern.search(line) is None,
+                    f"qualification.yml: {where} must not mask a failure with `{label}` "
+                    f"(`{line}`, {issue})")
+    last = max((index for index, line in enumerate(lines) if line in commands), default=-1)
+    for line in lines[:last]:
+        require(EXIT_ZERO.search(line) is None,
+                f"qualification.yml: {where} must not `exit 0` before its last command (`{line}`, "
+                f"{issue})")
+
+
 def check_qualification_deduplicated_owners(text: str) -> None:
     for name, commands in DEDUPLICATED_OWNERS.items():
         block = job(text, name)
         require(job_if(block) == FULL_ROUTE_IF,
                 f"qualification.yml: {name} must run on exactly the full route (#1044 owner)")
+        require(CONTINUE_ON_ERROR_JOB.search(block) is None,
+                f"qualification.yml: {name} is a #1044 owner job and must carry no job-level "
+                "continue-on-error key, whatever its value (#1434)")
         unconditional = unconditional_step_commands(block)
         for command in commands:
             require(command in unconditional,
                     f"qualification.yml: {name} must run `{command}` unconditionally; it is the "
                     "one run left of a claim #1044 deduplicated")
+        for step in job_steps(block):
+            owned = tuple(command for command in commands if command in run_lines(step))
+            if owned:
+                check_unmasked_step(f"{name}'s owner step running `{owned[0]}`", step, owned,
+                                    "#1044, #1434")
+        if name in GUARDED_OWNER_STEPS:
+            step_name, guard = GUARDED_OWNER_STEPS[name]
+            step = named_step(block, step_name)
+            require(step is not None,
+                    f"qualification.yml: {name} must keep its step \"{step_name}\" (#1434: an edit "
+                    "to it updates GUARDED_OWNER_STEPS in scripts/check-ci-path-routing.py)")
+            remaining = iter(run_lines(step))
+            for line, issue in guard:
+                require(any(candidate == line for candidate in remaining),
+                        f"qualification.yml: {name}'s step \"{step_name}\" must run `{line}` "
+                        f"({issue}), after the guard lines before it in GUARDED_OWNER_STEPS; an "
+                        "edit to this step updates that table in the same change (#1434)")
     require(any(runs_m3_on_config_flags(command)
                 for command in unconditional_step_commands(job(text, "test-release"))),
             "qualification.yml: test-release must run M3 (`cargo test --release -p math`, "
@@ -901,18 +984,30 @@ def step_commands(job_text: str, conditional: bool = True) -> list[str]:
         lines = step.splitlines()
         if not conditional and any(line.strip().startswith("if:") for line in lines):
             continue
-        for index, line in enumerate(lines):
-            stripped = line.strip()
-            if stripped in ("run: |", "run: >"):
-                body: list[str] = []
-                for following in lines[index + 1:]:
-                    if following.startswith("          "):
-                        body.append(following.strip())
-                    elif following.strip():
-                        break
-                commands.extend("\n".join(body).replace("\\\n", " ").splitlines())
-            elif stripped.startswith("run: "):
-                commands.append(stripped[len("run: "):])
+        commands.extend(run_lines(step))
+    return commands
+
+
+def run_lines(step: str) -> list[str]:
+    """The shell command lines of one step's `run:` (a `run: |` block or a single line), with
+    `\\` continuations joined. `step` may start with its `- ` item marker (as `job_steps` keeps
+    it) or without it (as `step_commands` splits it)."""
+    commands: list[str] = []
+    lines = step.splitlines()
+    for index, line in enumerate(lines):
+        stripped = line.strip()
+        if index == 0 and stripped.startswith("- "):
+            stripped = stripped[2:]
+        if stripped in ("run: |", "run: >"):
+            body: list[str] = []
+            for following in lines[index + 1:]:
+                if following.startswith("          "):
+                    body.append(following.strip())
+                elif following.strip():
+                    break
+            commands.extend("\n".join(body).replace("\\\n", " ").splitlines())
+        elif stripped.startswith("run: "):
+            commands.append(stripped[len("run: "):])
     return commands
 
 
