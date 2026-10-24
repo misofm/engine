@@ -1418,6 +1418,38 @@ fn retained(
     (live_bytes, producers)
 }
 
+/// [`retained`] with no lane attached and `route` bound as a transition route (#1363 D2), and the
+/// attach's transition charge.
+fn retained_transition(
+    model: &SessionModel,
+    feeds: &Feeds,
+    route: &str,
+) -> (u64, graph::GraphTransitionRoutes) {
+    assert_installed();
+    launch_native_effect_registry().expect("the launch registry builds");
+    let mark = current_thread_counters();
+    let mut artifact = compile(model);
+    let (_, _, transition) = artifact
+        .attach_route_live_controls_following(
+            &LiveValuesSuperseded::new(),
+            false,
+            &[graph::StableGraphId::parse(route).expect("route ID")],
+            |_| None,
+        )
+        .expect("attach");
+    let bindings = bindings(&artifact, feeds);
+    let bound = artifact
+        .into_bound(bindings)
+        .unwrap_or_else(|failure| panic!("bind: {}", failure.code));
+    let window = current_thread_delta_since(mark);
+    drop(bound);
+    let live_bytes = window
+        .requested_bytes
+        .checked_sub(window.released_bytes)
+        .expect("the window frees nothing it did not allocate");
+    (live_bytes, transition)
+}
+
 /// Gate 8 (VERIFY-2 MINOR 5). `route_control_resources` counts the routes, both copies of each
 /// route ID and the route-activity table, and covers what the attach and the bind retain beyond the
 /// same plan without route controls. Once for a plan with no silencing gate,
@@ -1425,7 +1457,8 @@ fn retained(
 /// compile-time estimate already charged.
 ///
 /// Test value: red if a cell, a lane or owner box, a route ID or an uncharged route-activity table
-/// is left out of the charge the next slice admits against the host's caps.
+/// is left out of the charge the next slice admits against the host's caps, or if a transition
+/// route (#1363 D2) is not charged.
 #[test]
 fn route_control_resources_cover_the_allocation() {
     let feeds = two_feeds(QUANTUM);
@@ -1464,6 +1497,18 @@ fn route_control_resources_cover_the_allocation() {
         eprintln!(
             "live_routes gate 8, muted {muted}: charged {}, retained {added}",
             resources.total_bytes
+        );
+        // #1363 D2: a transition route (bound live with no lane) is covered by its charge.
+        let (transition_with, transition) = retained_transition(&model, &feeds, "r0");
+        let charge = graph::RouteControlResources::default().with_transition_routes(&transition);
+        let added = transition_with
+            .checked_sub(without)
+            .filter(|bytes| *bytes > 0)
+            .unwrap_or_else(|| panic!("a transition route retains more: {transition_with}"));
+        assert!(
+            charge.total_bytes >= added,
+            "muted {muted}: the transition charge {} covers the {added} bytes it retains",
+            charge.total_bytes
         );
     }
 }

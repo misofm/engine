@@ -929,8 +929,10 @@ pub struct RouteControlLane {
 pub struct GraphRouteControlBinding {
     /// The route node this lane drives.
     pub node: GraphNodeId,
-    /// Reader half of the latest-target cell; the writer stays on the control plane.
-    pub control: Box<RouteControlLane>,
+    /// Reader half of the latest-target cell; the writer stays on the control plane. `None` for a
+    /// transition route (#1363 D2): a route a swap adds with no lane in this plan, which binds
+    /// live (it never folds) only so its fade-in can ramp it.
+    pub control: Option<Box<RouteControlLane>>,
 }
 
 /// The control-plane half of one live route's latest-target cell (issue #1220 D7, #1347 D2).
@@ -1479,6 +1481,25 @@ pub enum GraphRouteControlError {
     /// A following route's cursor tables were refused (#1654 T3: an allocation failure; a
     /// source's cells are always its program's).
     CursorTable(automation::ComposeError),
+    /// A transition route (#1363 D2) is not a route the plan prepares.
+    UnknownTransitionRoute,
+}
+
+/// The transition routes one [`PreparedGraphPlan::attach_route_controls_following`] call bound
+/// (#1363 D2): routes a plan swap adds that bind live with no lane, so a fade arm can ramp them.
+/// What they add to the plan is [`RouteControlResources::with_transition_routes`].
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct GraphTransitionRoutes {
+    /// How many routes bind as transition routes.
+    pub routes: u64,
+    /// Their route IDs' bytes, once (the charge counts them twice: the binding's node ID, held
+    /// until bind, and the bind row's copy).
+    pub route_id_bytes: u64,
+    /// The route-activity table bind builds for them when no lane-ful route charges it: `0` when
+    /// the call returned a producer, or a prepared gate silences (the compile charged it then).
+    pub activity_bytes: u64,
+    /// The largest single allocation of that table; `0` as `activity_bytes` is.
+    pub activity_largest: u64,
 }
 
 /// The bytes bind allocates for one live route's render-side owner, its boxed state (issue #1220
@@ -1523,6 +1544,46 @@ pub struct RouteControlResources {
     pub activity_bytes: u64,
     pub total_bytes: u64,
     pub largest_allocation_bytes: u64,
+}
+
+impl RouteControlResources {
+    /// These resources with the transition routes of the same attach added (#1363 D2): each
+    /// route's binding entry (held until bind), boxed render-side owner and bind row
+    /// ([`GraphLiveRoute`], held until taken), its route ID's bytes twice (the binding's node ID
+    /// and the row's copy), and the route-activity table when no producer charged it. Saturating.
+    #[must_use]
+    pub fn with_transition_routes(self, transition: &GraphTransitionRoutes) -> Self {
+        if transition.routes == 0 {
+            return self;
+        }
+        let count = |value: usize| u64::try_from(value).unwrap_or(u64::MAX);
+        let binding = count(core::mem::size_of::<GraphRouteControlBinding>());
+        let owner = count(LIVE_ROUTE_OWNER_BYTES);
+        let row = count(core::mem::size_of::<GraphLiveRoute>());
+        let owner_bytes = transition
+            .routes
+            .saturating_mul(binding.saturating_add(owner).saturating_add(row));
+        let id_bytes = transition.route_id_bytes.saturating_mul(2);
+        let added = owner_bytes
+            .saturating_add(id_bytes)
+            .saturating_add(transition.activity_bytes);
+        Self {
+            routes: self.routes.saturating_add(transition.routes),
+            owner_bytes: self.owner_bytes.saturating_add(owner_bytes),
+            route_id_bytes: self.route_id_bytes.saturating_add(id_bytes),
+            activity_bytes: self
+                .activity_bytes
+                .saturating_add(transition.activity_bytes),
+            total_bytes: self.total_bytes.saturating_add(added),
+            largest_allocation_bytes: self
+                .largest_allocation_bytes
+                .max(owner)
+                .max(transition.routes.saturating_mul(binding))
+                .max(transition.routes.saturating_mul(row))
+                .max(transition.activity_largest),
+            ..self
+        }
+    }
 }
 
 /// The resources of one [`PreparedGraphPlan::attach_route_controls`] call's `producers` and
@@ -1990,8 +2051,8 @@ pub struct GraphPreparedEffectBank {
     /// `false` on every padded lane after them (issue #1088). It is the mask the effect's factory
     /// was bound with (`effect_contract::PrepareEffectBankRequest::active_mask`) and the mask the
     /// rack chain gathers and scatters by, so a padded lane is never read from or written to a
-    /// track. A full bank is all `true`, and every shipped plan binds only full banks until a group
-    /// asks for padding (`graph_compiler`'s padding policy).
+    /// track. A full bank is all `true`. `graph_compiler`'s padding policy pads every partial
+    /// console group and every partial insert group from a per-width member threshold (#888).
     pub active_mask: Box<[bool]>,
     pub processor: Box<dyn effect_contract::PreparedNativeEffectBank>,
     /// The bank's width and shared program key, from its bind result (issue #1461).
@@ -2808,8 +2869,8 @@ impl PreparedGraphPlan {
         &mut self,
         superseded: &engine::realtime::LiveValuesSuperseded,
     ) -> Result<Vec<GraphRouteControlProducer>, GraphRouteControlError> {
-        self.attach_route_controls_following(superseded, true, |_| None)
-            .map(|(producers, _)| producers)
+        self.attach_route_controls_following(superseded, true, &[], |_| None)
+            .map(|(producers, _, _)| producers)
     }
 
     /// [`Self::attach_route_controls`] with following routes (#1652 D1, #1652c): every route into
@@ -2820,18 +2881,28 @@ impl PreparedGraphPlan {
     /// is asked once per route into a submix, in that order, so a route into an output never
     /// follows (decision 13 P11).
     ///
-    /// Refused as [`Self::attach_route_controls`] is, and with
+    /// Each route of `transition` that gets no lane here becomes a transition route (#1363 D2):
+    /// it binds live with no lane, so it never folds and a fade arm
+    /// ([`GraphFadeTarget::Route`]) can ramp it, and the third value charges it. A route of
+    /// `transition` that gets a lane anyway is live already and takes nothing more.
+    ///
+    /// Refused as [`Self::attach_route_controls`] is, with
     /// [`GraphRouteControlError::CursorTable`] when a following route's cursor tables cannot be
-    /// allocated (nothing is attached then).
+    /// allocated (nothing is attached then), and with
+    /// [`GraphRouteControlError::UnknownTransitionRoute`] when `transition` names a route the plan
+    /// does not prepare.
+    #[allow(clippy::type_complexity)]
     pub fn attach_route_controls_following(
         &mut self,
         superseded: &engine::realtime::LiveValuesSuperseded,
         six_word: bool,
+        transition: &[StableGraphId],
         mut following: impl FnMut(&StableGraphId) -> Option<GraphFollowRouteSource>,
     ) -> Result<
         (
             Vec<GraphRouteControlProducer>,
             Vec<GraphFollowRouteControlProducer>,
+            GraphTransitionRoutes,
         ),
         GraphRouteControlError,
     > {
@@ -2886,6 +2957,20 @@ impl PreparedGraphPlan {
         if live.iter().any(|node| required.contains(node)) {
             return Err(GraphRouteControlError::BoundRoute);
         }
+        // #1363 D2: the transition routes, each a prepared route that gets no lane below.
+        let mut transition_nodes: Vec<GraphNodeId> = Vec::with_capacity(transition.len());
+        for route_id in transition {
+            let node = GraphNodeId::Route {
+                route_id: route_id.clone(),
+            };
+            if !self.routes.iter().any(|route| route.node == node) {
+                return Err(GraphRouteControlError::UnknownTransitionRoute);
+            }
+            if required.contains(&node) {
+                return Err(GraphRouteControlError::BoundRoute);
+            }
+            transition_nodes.push(node);
+        }
         // Which kind of lane each route gets: a following route its source, a six-word route
         // nothing, a route with no lane is left out.
         let mut kinds: Vec<(&StableGraphId, Option<GraphFollowRouteSource>)> =
@@ -2907,20 +2992,29 @@ impl PreparedGraphPlan {
                 None => {}
             }
         }
+        // A transition route that gets a lane is live already.
+        transition_nodes.retain(|node| {
+            !matches!(node, GraphNodeId::Route { route_id }
+                if kinds.iter().any(|(kind, _)| *kind == route_id))
+        });
+        transition_nodes.sort_unstable();
+        transition_nodes.dedup();
         // D8: bind builds the route-activity table for a plan with a live route. The compile-time
         // estimate charged it already when some prepared gate silences; otherwise it is this
         // attach's to state.
-        let (activity_bytes, activity_largest) =
-            if kinds.is_empty() || self.routes.iter().any(|route| route.gate.silences()) {
-                (0, 0)
-            } else {
-                let routes = u64::try_from(self.routes.len()).unwrap_or(u64::MAX);
-                let nodes = u64::try_from(self.spec.nodes.len()).unwrap_or(u64::MAX);
-                (
-                    runtime::route_activity_bound_bytes(routes, nodes).unwrap_or(u64::MAX),
-                    runtime::route_activity_largest_bytes(routes, nodes).unwrap_or(u64::MAX),
-                )
-            };
+        let (activity_bytes, activity_largest) = if (kinds.is_empty()
+            && transition_nodes.is_empty())
+            || self.routes.iter().any(|route| route.gate.silences())
+        {
+            (0, 0)
+        } else {
+            let routes = u64::try_from(self.routes.len()).unwrap_or(u64::MAX);
+            let nodes = u64::try_from(self.spec.nodes.len()).unwrap_or(u64::MAX);
+            (
+                runtime::route_activity_bound_bytes(routes, nodes).unwrap_or(u64::MAX),
+                runtime::route_activity_largest_bytes(routes, nodes).unwrap_or(u64::MAX),
+            )
+        };
         let follow_count = kinds.iter().filter(|(_, source)| source.is_some()).count();
         let mut bindings = Vec::with_capacity(kinds.len() - follow_count);
         let mut producers = Vec::with_capacity(kinds.len() - follow_count);
@@ -2946,12 +3040,12 @@ impl PreparedGraphPlan {
                 node: GraphNodeId::Route {
                     route_id: route_id.clone(),
                 },
-                control: Box::new(RouteControlLane {
+                control: Some(Box::new(RouteControlLane {
                     lane: std::sync::Arc::clone(&lane),
                     reader: engine::realtime::CellReader::new(),
                     dirty: engine::realtime::DirtyReader::new(),
                     superseded: superseded.clone(),
-                }),
+                })),
             });
             producers.push(GraphRouteControlProducer {
                 route_id: route_id.as_str().into(),
@@ -2961,9 +3055,37 @@ impl PreparedGraphPlan {
                 activity_largest,
             });
         }
+        // #1363 D2: the activity table is charged once: through the producers when there are any.
+        let transition_routes = GraphTransitionRoutes {
+            routes: u64::try_from(transition_nodes.len()).unwrap_or(u64::MAX),
+            route_id_bytes: transition_nodes.iter().fold(0_u64, |sum, node| {
+                let GraphNodeId::Route { route_id } = node else {
+                    return sum;
+                };
+                sum.saturating_add(u64::try_from(route_id.as_str().len()).unwrap_or(u64::MAX))
+            }),
+            activity_bytes: if producers.is_empty() && follow_producers.is_empty() {
+                activity_bytes
+            } else {
+                0
+            },
+            activity_largest: if producers.is_empty() && follow_producers.is_empty() {
+                activity_largest
+            } else {
+                0
+            },
+        };
+        bindings.extend(
+            transition_nodes
+                .into_iter()
+                .map(|node| GraphRouteControlBinding {
+                    node,
+                    control: None,
+                }),
+        );
         self.route_controls = Some(bindings);
         self.follow_route_controls = follow_bindings;
-        Ok((producers, follow_producers))
+        Ok((producers, follow_producers, transition_routes))
     }
     /// The lowered executable program, or `None` when the plan's schedule, levels and spec
     /// disagree (which bind-time structural validation rejects).
@@ -4408,19 +4530,32 @@ pub fn install_builtin_strip_carry(
 }
 
 /// One strip a plan swap adds during playback, whose fader lane fades in from its first played
-/// block (issue #1288 D1-D5).
+/// block (issue #1288 D1-D5), or one route a swap adds, which fades in the same way (#1363 D3).
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct GraphFadeArm {
-    /// The strip's fader lane in the plan the arm is installed in.
-    pub fader: GraphLaneLocation,
+    /// What fades in: the strip's fader lane, or the route's live route op, in the plan the arm is
+    /// installed in.
+    pub target: GraphFadeTarget,
     /// The strip's input node when it is a track that reads a source claim; `None` for a submix
-    /// (or a track the source set does not claim), whose fade waits for no source.
+    /// (or a track the source set does not claim), whose fade waits for no source. A route's is
+    /// its source strip's when that strip is added too (#1363 D1 (c)), else `None`.
     pub source: Option<GraphNodeId>,
-    /// `D`: the samples from the strip's input to its fader that start at rest (latent nodes and
-    /// compensation lines), which emit zeros once the source plays.
+    /// `D`: the samples from the strip's input to its fader (for a route: to the route's own op)
+    /// that start at rest (latent nodes and compensation lines), which emit zeros once the source
+    /// plays.
     pub delay_samples: u32,
     /// The fade's length: the session mute ramp.
     pub ramp_samples: u32,
+}
+
+/// What one fade arm fades in (issues #1288 D2, #1363 D3).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum GraphFadeTarget {
+    /// A strip's fader lane, a populated lane of a fader bank.
+    Fader(GraphLaneLocation),
+    /// A route's op, the runtime unit of a six-word live route (with a lane or a transition route,
+    /// #1363 D2), as [`GraphLiveRoute::unit`] names it.
+    Route(u32),
 }
 
 /// Where one installed fade arm is (issue #1288 D3).
@@ -4437,7 +4572,7 @@ enum FadeArmState {
 /// One installed fade arm (issue #1288 D3): plain data, sized at installation.
 #[derive(Clone, Copy, Debug)]
 struct FadeArm {
-    fader: GraphLaneLocation,
+    target: GraphFadeTarget,
     /// The source-set claim index the fade waits for; `None` fires on the first block.
     claim: Option<usize>,
     delay_samples: u32,
@@ -4474,8 +4609,13 @@ pub fn fade_arm_table_bytes(arms: usize, pairs: usize) -> Option<u64> {
 /// A source node that is not one of the source set's claims, and every source of a driver that
 /// does not lend its played planes, waits for nothing: that fade fires at the first block.
 ///
+/// A route target (#1363 D3) arms its six-word live route op: it waits settled at `[+0.0; 4]`,
+/// muted, and fires to its prepared target over `ramp_samples`; a record it reads before the
+/// fire retargets the fire only. A route the session mutes arms nothing.
+///
 /// Refused, arming nothing, when the plan is not a graph plan, a fader location is not a
-/// populated lane of a fader bank, or a location repeats.
+/// populated lane of a fader bank, a route unit is not a six-word live route's, or a target
+/// repeats.
 pub fn install_fade_arms(
     plan: &mut PreparedRenderPlan,
     arms: Vec<GraphFadeArm>,
@@ -4493,15 +4633,18 @@ impl GraphExecutor {
         arms: Vec<GraphFadeArm>,
     ) -> Result<(Vec<Option<u32>>, GraphFadeArmWatch), GraphCarryInstallError> {
         for (index, arm) in arms.iter().enumerate() {
-            if !self
-                .runtime
-                .has_strip_lane(BuiltinStripOwner::Fader, arm.fader)
-            {
+            let exists = match arm.target {
+                GraphFadeTarget::Fader(fader) => {
+                    self.runtime.has_strip_lane(BuiltinStripOwner::Fader, fader)
+                }
+                GraphFadeTarget::Route(unit) => self.runtime.has_six_word_route(unit),
+            };
+            if !exists {
                 return Err(GraphCarryInstallError::StripLaneOutOfRange);
             }
             if arms[..index]
                 .iter()
-                .any(|earlier| earlier.fader == arm.fader)
+                .any(|earlier| earlier.target == arm.target)
             {
                 return Err(GraphCarryInstallError::DuplicateStripLane);
             }
@@ -4513,15 +4656,20 @@ impl GraphExecutor {
         let mut table = Vec::with_capacity(arms.len());
         let mut entries = Vec::with_capacity(arms.len());
         for arm in arms {
-            let armed = runtime::strip_lane_mut(
-                &mut self.runtime.units,
-                BuiltinStripOwner::Fader,
-                arm.fader,
-            )
-            .and_then(|(chain, slot, lane)| {
-                runtime::builtin_processor_mut(chain, slot).map(|processor| (processor, lane))
-            })
-            .is_some_and(|(processor, lane)| processor.arm_fade_in(lane));
+            let armed = match arm.target {
+                GraphFadeTarget::Fader(fader) => runtime::strip_lane_mut(
+                    &mut self.runtime.units,
+                    BuiltinStripOwner::Fader,
+                    fader,
+                )
+                .and_then(|(chain, slot, lane)| {
+                    runtime::builtin_processor_mut(chain, slot).map(|processor| (processor, lane))
+                })
+                .is_some_and(|(processor, lane)| processor.arm_fade_in(lane)),
+                GraphFadeTarget::Route(unit) => {
+                    self.runtime.arm_route_fade_in(unit, arm.ramp_samples)
+                }
+            };
             if !armed {
                 entries.push(None);
                 continue;
@@ -4537,7 +4685,7 @@ impl GraphExecutor {
                         .and_then(|set| set.claims().iter().position(|claim| claim.node == *node))
                 });
             table.push(FadeArm {
-                fader: arm.fader,
+                target: arm.target,
                 claim,
                 delay_samples: arm.delay_samples,
                 ramp_samples: arm.ramp_samples,
@@ -4712,11 +4860,17 @@ fn step_fade_arms(
         if let FadeArmState::FireAt(at) = arm.state
             && at <= block_start
         {
-            if let Some((chain, slot, lane)) =
-                runtime::strip_lane_mut(&mut runtime.units, BuiltinStripOwner::Fader, arm.fader)
-                && let Some(processor) = runtime::builtin_processor_mut(chain, slot)
-            {
-                processor.fire_fade_in(lane, arm.ramp_samples);
+            match arm.target {
+                GraphFadeTarget::Fader(fader) => {
+                    if let Some((chain, slot, lane)) =
+                        runtime::strip_lane_mut(&mut runtime.units, BuiltinStripOwner::Fader, fader)
+                        && let Some(processor) = runtime::builtin_processor_mut(chain, slot)
+                    {
+                        processor.fire_fade_in(lane, arm.ramp_samples);
+                    }
+                }
+                // #1363 D3: before the route's op runs, so this block's live value drains after.
+                GraphFadeTarget::Route(unit) => runtime.fire_route_fade_in(unit),
             }
             arm.state = FadeArmState::Done;
             *pending = pending.saturating_sub(1);

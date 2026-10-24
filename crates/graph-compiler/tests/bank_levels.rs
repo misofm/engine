@@ -1293,11 +1293,17 @@ fn the_mono_console_less_one_eq_binds_and_collapses_at_every_width() {
     );
 }
 
-/// Effect banks the reduced mono console binds at four lanes: one compressor bank, for the full
-/// group `t13, t14, t18, t6`, whose compressor every lane runs at rank 0. #1093 derived it from
-/// the four-lane plan on `x86-64-v3` (where the factories decline four lanes); the AArch64 leg
-/// runs it. At eight lanes no group is full and nothing banks.
-const REDUCED_MONO_SIMD4_BANKS: usize = 1;
+/// Effect banks the reduced mono console binds at four lanes, derived from the plan (#888): the
+/// mono group `t11, t13` pads (two members, the four-lane insert threshold) and binds its
+/// compressor and its soft clip; the stereo group `t7, t9` pads and binds its compressor; the
+/// full stereo group `t0, t14, t18, t6` binds neither slot (only `t0` runs the EQ, and its
+/// compressor is misaligned). No mono track is stranded, so #971's move never runs and the plan
+/// does not depend on what a factory binds: three banks. The AArch64 leg runs it.
+const REDUCED_MONO_SIMD4_BANKS: usize = 3;
+/// At eight lanes `t11` and `t13` are the mono pool's only members, a partial group of two below
+/// the eight-lane threshold, so they strand and #971 moves them to the stereo pool, where `t11`
+/// leads a seven-member group that pads and binds its compressor: one bank (#888).
+const REDUCED_MONO_SIMD8_BANKS: usize = 1;
 
 /// The #970 verification probe's reduced mono console, refused on the base tree as well: `t0`
 /// runs `[eq, comp]` and the seven others `[comp]`, `t11` and `t13` with a soft-clip after it,
@@ -1311,23 +1317,23 @@ const REDUCED_MONO_SIMD4_BANKS: usize = 1;
 /// regression over the reduced mono desk.
 ///
 /// Since #1872 the soft clip's witness holds, so `t11` and `t13` (symmetric inputs) are
-/// mono-class, and the session has no console, so #971's demotion decides their pool: it moves
-/// them to the stereo pool only when the re-plan **binds** more banks, a count of the banks this
-/// build's factories bind. At the build's own width that is the plan above, where the move binds
-/// the compressor bank. At a width the build does not execute nothing binds, the move is not kept,
-/// and the stereo group `t0, t14, t18, t6` has a misaligned compressor (`t0` runs the EQ first).
-/// So here, unlike the console tests, the misaligned count is asserted at the native width only.
+/// mono-class, and the session has no console. Since #888 a partial insert group pads from the
+/// width's threshold, so the plan follows from the width alone: at four lanes the mono pair pads,
+/// nothing strands, and the stereo group `t0, t14, t18, t6` keeps one misaligned compressor (`t0`
+/// runs the EQ first); at eight lanes the pair strands, #971 moves it (the move binds one padded
+/// compressor bank and loses none), and `t0` leads a cohort of its own, so nothing is misaligned.
+/// Both widths' misaligned counts are asserted wherever they compile.
 #[test]
 fn the_reduced_mono_console_from_the_970_probe_binds_at_every_width() {
     let name = "reduced mono console from the #970 probe";
     let (outcomes, _) = assert_binds_and_renders_the_scalar_bits(name, &reduced_mono_console());
-    assert_eq!(
-        outcomes[native_index() + 1].misaligned_slots,
-        0,
-        "{name}: misaligned planned slots at {:?}",
-        Backend::current()
+    misaligned_slots(name, &outcomes, [1, 0]);
+    native_bank_count(
+        name,
+        &outcomes,
+        REDUCED_MONO_SIMD4_BANKS,
+        REDUCED_MONO_SIMD8_BANKS,
     );
-    native_bank_count(name, &outcomes, REDUCED_MONO_SIMD4_BANKS, 0);
 }
 
 /// The fix must not over-reach: lanes that all skip the same slot reach the next one together.
