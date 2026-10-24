@@ -6847,8 +6847,8 @@ fn pending_observe_swap(
 /// The acknowledged Observe records in the retired queues -- one subscribe, and every queue full --
 /// at the build's own width, `Backend::current()`, on a full bank of insert lanes: a console effect
 /// bank binds only at the width its build executes (#1017). Then the same records of per-node
-/// instances that carry to per-node instances (#1816): a group one lane short of a bank on both
-/// sides of the swap.
+/// instances that carry to per-node instances (#1816): a group one member below the insert padding
+/// threshold (#888) on both sides of the swap.
 #[test]
 fn pending_observe_records_are_applied_at_the_carry_at_the_build_width() {
     let backend = Backend::current();
@@ -6868,9 +6868,10 @@ fn pending_observe_records_are_applied_at_the_carry_at_the_build_width() {
 // ---------------------------------------------------------------------------------------------
 // #1281: an insert lane that moves between a bank and a per-node instance.
 //
-// An insert group banks only when it is full, so adding the eighth insert of a kind (the fourth at
-// four lanes) turns seven per-node instances into one bank of eight lanes, and removing one turns
-// the bank back. Every lane keeps its exact state, live state included, in both directions.
+// A partial insert group banks, padded, from the insert padding threshold (#888: three members at
+// eight lanes, two at four), so adding the insert that reaches it turns the per-node instances
+// below it into one padded bank, and removing one turns the bank back. Every lane keeps its exact
+// state, live state included, in both directions.
 
 /// Which insert the form-change gates run.
 #[derive(Clone, Copy, Debug)]
@@ -6893,6 +6894,30 @@ fn bank_width(backend: Backend) -> usize {
     backend.width()
 }
 
+/// The fewest members of a partial insert group the planner pads into a bank at `backend`'s width
+/// (#888: `graph_compiler`'s `min_padded_insert_members`, the H5 arithmetic): below it the group
+/// renders per node.
+fn insert_pad_threshold(backend: Backend) -> usize {
+    match backend.width() {
+        4 => 2,
+        8 => 3,
+        other => panic!("no insert padding threshold recorded for {other} lanes"),
+    }
+}
+
+/// `model` with [`MUTED_TRACK`], a muted copy of `eq0` whose compressor insert follows an EQ: its
+/// longer program leads the cohort, the other tracks' compressors join it as a subsequence one
+/// dependency level early, and a bank may not cross a level, so every compressor of the group and
+/// the lone EQ render per node however many members it has (#888: no remainder size decides it).
+fn with_misaligned_muted_track(model: SessionModel) -> SessionModel {
+    let mut model = with_muted_track(model);
+    track_mut(&mut model, MUTED_TRACK).inserts.effects.insert(
+        0,
+        native_insert("eq", "miso.parametric-eq", console_params("eq", 0, false)),
+    );
+    model
+}
+
 /// Whether each insert of `session` is a per-node instance (`true`) or a lane of a bank (`false`),
 /// in strip order.
 fn insert_forms(session: &Session, backend: Backend) -> Vec<bool> {
@@ -6912,10 +6937,10 @@ fn insert_forms(session: &Session, backend: Backend) -> Vec<bool> {
     forms.into_iter().map(|(_, per_node)| per_node).collect()
 }
 
-/// A group one lane short of a bank (per-node instances) and the full bank it becomes when
-/// [`MUTED_TRACK`], a muted copy of `eq0` with the same insert, joins it.
+/// A group one member below the insert padding threshold (per-node instances) and the padded bank
+/// it becomes when [`MUTED_TRACK`], a muted copy of `eq0` with the same insert, joins it (#888).
 fn short_and_full(insert: Insert, backend: Backend) -> (SessionModel, SessionModel) {
-    let short = insert.session(bank_width(backend) - 1);
+    let short = insert.session(insert_pad_threshold(backend) - 1);
     let full = with_muted_track(short.clone());
     (short, full)
 }
@@ -6958,12 +6983,8 @@ fn form_pair(insert: Insert, backend: Backend, forward: bool) -> (Session, Sessi
         (full, short)
     };
     let (a, b) = (Session::compile(a), Session::compile(b));
-    let width = bank_width(backend);
-    let (a_tracks, b_tracks) = if forward {
-        (width - 1, width)
-    } else {
-        (width, width - 1)
-    };
+    let k = insert_pad_threshold(backend);
+    let (a_tracks, b_tracks) = if forward { (k - 1, k) } else { (k, k - 1) };
     assert_eq!(
         insert_forms(&a, backend),
         vec![forward; a_tracks],
@@ -7037,8 +7058,14 @@ fn a_bank_of_inserts_falls_apart_at_the_build_width() {
 
 /// The compressor's `threshold` as a session parameter ID.
 const THRESHOLD_PARAMETER_ID: u32 = 1;
-/// The insert strips gate 3 writes to and retargets; every one is in both sessions of a pair.
-const LIVE_STRIPS: [&str; 2] = ["eq1", "eq2"];
+/// The insert strips gate 3 writes to and retargets, every one in both sessions of a pair and
+/// changing form: the per-node side's members, at most two (one at four lanes, where the per-node
+/// side is one member below the padding threshold of two; #888).
+fn live_strips(backend: Backend) -> Vec<&'static str> {
+    let mut strips = vec!["eq0", "eq1"];
+    strips.truncate(insert_pad_threshold(backend) - 1);
+    strips
+}
 
 /// Gate 3, first case: a threshold is rendered in A, and another is written to A's cells just
 /// before the swap and not rendered. Every block equals B rendered from frame 0 and fed the same
@@ -7049,7 +7076,7 @@ fn an_unread_value_crosses_the_form_change(backend: Backend, forward: bool) {
     let feed = bursty_feed(SOURCE, 5);
     let writes = |unread_too: bool| {
         let mut writes = Vec::new();
-        for strip in LIVE_STRIPS {
+        for strip in live_strips(backend) {
             let threshold = |block, value| EffectWrite {
                 block,
                 strip,
@@ -7084,7 +7111,8 @@ fn an_unread_value_crosses_the_form_change(backend: Backend, forward: bool) {
     );
 }
 
-/// Gate 3, second case: B also changes the threshold of two lanes that change form. Run 1 is the
+/// Gate 3, second case: B also changes the threshold of the lanes that change form
+/// ([`live_strips`]). Run 1 is the
 /// structural swap, where the successor retargets the carried lanes. Run 2 writes the same edit
 /// to A just before the swap and prepares B from a base that holds it ("live edit, then
 /// structural edit"). The two are bit-identical in every block and no strip restarts.
@@ -7093,13 +7121,15 @@ fn a_live_difference_crosses_the_form_change(backend: Backend, forward: bool) {
     let (a, b) = form_pair(Insert::Compressor, backend, forward);
     let feed = bursty_feed(SOURCE, 5);
     let edit_all = |model: &SessionModel| {
-        LIVE_STRIPS.into_iter().fold(model.clone(), |model, strip| {
-            with_insert_param_all(model, strip, "comp", THRESHOLD_PARAMETER_ID, -40.0)
-        })
+        live_strips(backend)
+            .into_iter()
+            .fold(model.clone(), |model, strip| {
+                with_insert_param_all(model, strip, "comp", THRESHOLD_PARAMETER_ID, -40.0)
+            })
     };
     let b_edited = Session::compile(edit_all(&b.model));
     let a_edited = edit_all(&a.model);
-    let writes: Vec<EffectWrite> = LIVE_STRIPS
+    let writes: Vec<EffectWrite> = live_strips(backend)
         .into_iter()
         .map(|strip| EffectWrite {
             block: SWAP_BLOCK,
@@ -8606,13 +8636,17 @@ mod observation_carry {
         let width = bank_width(backend);
         match form {
             Form::NodeToNode => {
-                let short = compressor_insert_session(width - 2);
+                // Per node on both sides (#888): A's group is one member below the insert padding
+                // threshold, and B's added track misaligns the group it reaches (its EQ and
+                // compressor are B's two extra per-node instances).
+                let k = insert_pad_threshold(backend);
+                let short = compressor_insert_session(k - 1);
                 let (a, b) = (
                     Session::compile(short.clone()),
-                    Session::compile(with_muted_track(short)),
+                    Session::compile(with_misaligned_muted_track(short)),
                 );
-                assert_eq!(insert_forms(&a, backend), vec![true; width - 2]);
-                assert_eq!(insert_forms(&b, backend), vec![true; width - 1]);
+                assert_eq!(insert_forms(&a, backend), vec![true; k - 1]);
+                assert_eq!(insert_forms(&b, backend), vec![true; k + 1]);
                 (a, b)
             }
             Form::BankToBank => {

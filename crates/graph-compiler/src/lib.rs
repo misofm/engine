@@ -6203,10 +6203,18 @@ mod tests {
             let cohorts = &artifact.report().rack_cohorts;
             let width = BankWidth::for_backend(cohorts.dispatch);
             let lanes = width.map_or(1, |width| width.lanes() as usize);
+            // An insert remainder pads from the insert padding threshold (#888): at four lanes the
+            // multiband's ten tracks leave two, which pad; at eight lanes no row's remainder does.
             let expected_banks = match width {
                 None => 0,
                 Some(_) if row.console => n.div_ceil(lanes),
-                Some(_) => row.homogeneous / lanes,
+                Some(width) => {
+                    row.homogeneous / lanes
+                        + usize::from(
+                            row.homogeneous % lanes
+                                >= crate::banks::min_padded_insert_members(width),
+                        )
+                }
             };
             assert_eq!(
                 artifact.graph().prepared_bank_count(),
@@ -6218,12 +6226,13 @@ mod tests {
                 expected_banks,
                 "{what}"
             );
-            if !row.console {
+            if let (false, Some(width)) = (row.console, width) {
                 assert!(
-                    cohorts
-                        .bound_groups_in(location)
-                        .all(|bank| bank.active_count() == lanes),
-                    "{what}: an insert binds full banks only"
+                    cohorts.bound_groups_in(location).all(|bank| {
+                        bank.active_count() == lanes
+                            || bank.active_count() >= crate::banks::min_padded_insert_members(width)
+                    }),
+                    "{what}: an insert binds full banks, and padded ones only from the threshold"
                 );
             }
             assert_eq!(

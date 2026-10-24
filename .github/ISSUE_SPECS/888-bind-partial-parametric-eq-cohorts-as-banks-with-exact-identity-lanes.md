@@ -135,6 +135,24 @@ Narrowed to the planner policy, one PR for #888 and #889 (root scope note).
     #971 moves it, and a seven-member padded compressor binds: one bank, nothing misaligned. The
     misaligned counts [1, 0] are asserted at every width that compiles (both on x86). The AArch64
     leg runs the W=4 bank pin (3); this host cannot run it.
+- **After the first qualification run (run 40118146165):**
+  - `crates/host-core/tests/successor_swap.rs`: the form-change sessions now sit at the
+    threshold, not at the bank width. The per-node side is `k - 1` tracks and the banked side is
+    `k`, a padded bank (`short_and_full`, `form_pair`). Gate 3's `live_strips` are the per-node
+    side's members: `eq0, eq1` at W=8 and `eq0` at W=4.
+  - `NodeToNode` is per node on both sides. A has `k - 1` tracks. B's added muted track carries
+    `[eq, comp]`: it leads the group, and the other compressors join it one dependency level
+    early. A bank may not cross a level, so no slot binds at any member count. A muted track
+    that pools as mono does not work: #971 moves it into the stereo group, which then pads.
+  - The tests this covers are `pending_observe_*`, `taps_follow_*`,
+    `a_carried_tap_is_not_restarted_*` and `the_tap_swap_block_*`.
+  - `launch_effect_fixtures_bank_render_and_bypass_as_frozen`: an insert row's expected banks
+    are now `h / W + (h % W >= k)`, so a remainder at or above k counts as one padded bank.
+    The full-banks-only check admits padded banks from k. Only the multiband row (h = 10)
+    changes: at W=4 its remainder of 2 pads, so 3 banks (derived, not run here; the AArch64 leg
+    runs it). At W=8 its remainder of 2 stays per node: 1 bank. The multiband's estimate pin
+    is `Reference`, and its bytes include a padded bank's `+0.0` plane, the same path the
+    soft-clip console row already checks with a padded bank at W=8.
 - **Gates (attempt 1):** graph-compiler lib and all its integration tests; graph,
   console-workload, host-core, host-web, audit and bench tests; determinism 100/100;
   effect-runtime policy; realtime-policy; fmt; clippy -D warnings; aarch64 check; doc
