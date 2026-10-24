@@ -120,3 +120,31 @@ The link-record slice (#1371) brings *Lower the link mode to per-lane state in t
 banks* (#1368) and *Ramp a lane's detector link between modes* (#1370) with it.
 
 **Decision 17 amendment (2026-10-13).** An insert's link mode is a control row, `LINK_MODE_CONTROL` (`0x8000_0000`) in its insert section, written by `SET_CONTROL` (#1549, #1553; `SetEffectLinkMode` is retired by #1561). For `miso.multiband-compressor` the row is `RebuildOnly(RuledLiveNotBuilt { issue: 1367 })`. Last step of this issue: flip that row's class to `Live` and give the classifier's effect family the link record; no protocol or host code.
+
+## 1367a record (D1 + D2, attempt 1, 2026-10-24)
+
+- **Slice.** 1367a is D1 and D2 only (scope note `1369-chain`): the descriptor's `lane_link = true`,
+  per-lane `linked`/`averaged` masks (`shim::LinkLanes`) built at bind from each active member's
+  mode (a padded lane takes the first member's), and a `LINK_MIXED` select arm in `link_levels`
+  that `render_body` takes when the lanes' modes differ. The uniform arms are unchanged and do not
+  read the masks. 1367b (D3-D5 ramp, payload, the row flip from `RuledLiveNotBuilt{1367}`) follows
+  #1371. Why now: #1893 made the multiband a console slot, so #1369's per-strip override would
+  have split its bank (decision 12).
+- **Collapse.** The collapsed body (#1871) reads the near word twice, so a collapsed lane's link
+  partner is its own `L == R` pair at its own mode; the mono-collapse probe now also runs a bank
+  whose lanes mix the three modes.
+- **Lane swap.** The multiband declares no prepared lane defaults (`lane_default_bytes` is the
+  default `None`), so `swap_bank_lanes` refuses it and no link word has to travel. The template's
+  `exchange_lane_defaults` link word therefore does not apply here; a multiband lane swap is its
+  own capability, outside this slice.
+- **Tests (extended, none new).** `padding_tests::every_padded_bank_renders_its_members_per_node_bits`
+  gives each member its own link mode (random arm drawn, fixture arm rotated, blocks of 128/37/1,
+  every width): red when a mixed bank links a DualMono lane, or when bind ignores the members'
+  modes. `shim::the_shims_are_width_independent` adds two mixed banks: red on the same link
+  mutant. `product.rs` now declines a bank on a differing bypass and binds one that differs only by
+  link mode.
+- **Class A.** Committed corpus digests pass. One untimed `bench console` warmup at base
+  `c6e295947` and at this branch: all 52 digest fields over 37 records identical.
+- **Web roster.** The rows stay pinned to `process_bank` / `process_bank_mono` and pass at their
+  0.10 ceilings: dual 3464 / 0 (was 2527 / 0), collapsed 1862 / 0 (was 1389 / 0), the mixed arm's
+  body. No row changed.
