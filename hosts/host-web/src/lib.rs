@@ -3601,31 +3601,27 @@ impl AudioWorkletEngineHost {
         let (Some(ready), Some(plan)) = (self.ready.as_mut(), self.plan.as_mut()) else {
             return self.fail(RESULT_INTERNAL, b"web.internal.ready\t$\n");
         };
-        let Ok(source_index) = ready
-            .session()
-            .normalized_model()
-            .sources
-            .binary_search_by(|source| source.id.as_str().as_bytes().cmp(source_id))
-        else {
-            // The core's refusal for an ID that names no source, as the C ABI reports it.
-            let failure = SourceFailure::Control(SourceControlError::unmatched_id(source_id));
-            let code = self.refuse_source(failure);
-            return self.record(code);
-        };
-        if !plan.can_prepare_source_seek(source_index) {
+        // #1325: the consumer to prepare is the plan that renders, by its own source rows. Through
+        // a strip removal's phase 1 that plan still renders a source the newest committed session
+        // removed, and its source indices are not the newest session's. A source it does not
+        // render (one a waiting successor adds, or one removed and adopted) has no consumer here
+        // to prepare; the control plane's routing answers it.
+        let rendering = ready
+            .control
+            .rendering_source_index(plan.owner().active_epoch().0, source_id);
+        if rendering.is_some_and(|index| !plan.can_prepare_source_seek(index)) {
             return self.record(RESULT_WRONG_STATE);
         }
         let code = match ready
             .control
             .seek_unserviced(source_id, generation, source_frame)
         {
-            Ok(()) => {
-                if plan.prepare_source_seek(source_index, generation, source_frame) {
-                    RESULT_OK
-                } else {
+            Ok(()) => match rendering {
+                Some(index) if !plan.prepare_source_seek(index, generation, source_frame) => {
                     RESULT_INTERNAL
                 }
-            }
+                _ => RESULT_OK,
+            },
             Err(failure) => self.refuse_source(failure),
         };
         self.record(code)

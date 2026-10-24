@@ -5069,6 +5069,23 @@ where
                 .any(|provider| provider.epoch == epoch)
     }
 
+    /// The index of source `id` in the graph source set of the plan of epoch `epoch`, as that
+    /// plan's state inventory records it, or `None` when the plan has no such source or the
+    /// control plane holds no epoch `epoch` (#1325). A host that owns the render plan on its own
+    /// thread resolves a source against the plan that renders with it: while a successor waits,
+    /// and through a strip removal's phase 1, that plan's source set is not the newest committed
+    /// session's.
+    pub fn rendering_source_index(&self, epoch: u64, id: &[u8]) -> Option<usize> {
+        let id = core::str::from_utf8(id).ok()?;
+        core::iter::once(&self.providers)
+            .chain(&self.pending_providers)
+            .chain(&self.retired_providers)
+            .find(|provider| provider.epoch == epoch)?
+            .inventory
+            .source(id)
+            .map(|row| row.index as usize)
+    }
+
     /// Sets the replacement peak ceiling ([`ControlLimits::maximum_replacement_peak_bytes`]) once
     /// the adapter knows its own fixed bytes exactly (#1290a D3): they are known only after the
     /// first plan is prepared, and the limits the session was built with are a plain value.
@@ -5093,10 +5110,18 @@ where
     /// successor, the service step promotes it and the overlay drops with the old epoch's kept
     /// base, so the call is refused as an unknown source, as before.
     fn source_providers_mut(&mut self, id: &[u8]) -> &mut ProviderEpoch {
-        let ducked = self
-            .kept_holder()
-            .and_then(|holder| holder.kept.as_ref())
-            .is_some_and(|kept| kept.duck.has_source(id));
+        // The overlay ends when render adopts the successor: from then on the running epoch's
+        // plan no longer renders, even before the service step promotes the successor (the
+        // browser's unserviced feed), so a removed source is refused as unknown (D4). One
+        // `Acquire` load of the epoch render published, no lock.
+        let rendered = self.shared.active_epoch.load(Ordering::Acquire);
+        let ducked = self.kept_holder().is_some_and(|holder| {
+            rendered <= holder.epoch
+                && holder
+                    .kept
+                    .as_ref()
+                    .is_some_and(|kept| kept.duck.has_source(id))
+        });
         if ducked {
             return self.kept_holder_mut().expect("a kept base has a holder");
         }

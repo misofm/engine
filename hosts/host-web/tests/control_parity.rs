@@ -7388,3 +7388,179 @@ fn a_session_replace_is_unavailable_on_the_browser_and_refused_without_its_docum
         same_blocks(&mut browser, &mut c_abi, 2..6, "after the refusal");
     }
 }
+
+// ---------------------------------------------------------------------------------------------
+// A removed source through a strip removal's phase 1 (#1325 D4)
+// ---------------------------------------------------------------------------------------------
+
+impl CAbi {
+    /// One plain seek's result code, refusals included.
+    fn seek_code(&self, name: &str, generation: u64, source_frame: u64) -> u32 {
+        // SAFETY: The session is live and used by this thread alone; the name outlives the call.
+        unsafe {
+            capi::miso_engine_v1_source_seek(
+                self.session,
+                name.as_ptr(),
+                name.len() as u64,
+                generation,
+                source_frame,
+            )
+        }
+    }
+
+    /// One submit's result code, refusals included.
+    fn submit_code(&self, name: &str, generation: u64, block: u64) -> u32 {
+        let [left, right] = planes(0, block);
+        let pointers = [left.as_ptr(), right.as_ptr()];
+        let chunk = SourceChunk {
+            struct_size: SOURCE_CHUNK_SIZE,
+            sample_rate_hz: self.rate,
+            generation,
+            start_frame: block * u64::from(QUANTUM),
+            planes: pointers.as_ptr(),
+            plane_count: 2,
+            frames: QUANTUM,
+            end_of_region: 0,
+            reserved0: 0,
+        };
+        let mut report = SubmitReport {
+            struct_size: SUBMIT_REPORT_SIZE,
+            reserved0: 0,
+            accepted_frames: 0,
+            cumulative_written_frames: 0,
+            active_generation: 0,
+        };
+        // SAFETY: As `seek_code`; the chunk's planes and the report outlive the call.
+        unsafe {
+            capi::miso_engine_v1_source_submit_planar_f32(
+                self.session,
+                name.as_ptr(),
+                name.len() as u64,
+                &chunk,
+                &mut report,
+            )
+        }
+    }
+}
+
+/// #1325 D4 on both hosts: `t1` and its source are removed while `t1`, `t2` and `t3` play. Through
+/// phase 1 a plain seek of the kept `src-t2` and of the removed `src-t1` is accepted on both hosts
+/// (the browser resolves the consumer it prepares in the plan that renders, whose source rows are
+/// not the committed session's), both sources keep feeding, and every block is alike. From the
+/// adoption on, the browser's unserviced submit and both hosts' seek of `src-t1` are refused as
+/// `source.id.unknown`.
+///
+/// Test value: red if the browser resolves a seek by the committed session's source index (the
+/// removed source is unknown there, or the kept one names another consumer), if the browser's
+/// unserviced feed still routes a removed source to the retiring plan after the adoption, or if
+/// the two hosts route either call differently.
+#[test]
+fn a_removed_source_seeks_and_feeds_until_its_adoption_alike_on_both_hosts() {
+    let q = u64::from(QUANTUM);
+    let model = model_at(48_000);
+    let removed = id(T1.id);
+    let mut removal: Vec<SessionEdit> = model
+        .routes
+        .iter()
+        .filter(|route| {
+            matches!(&route.source, session::RouteSource::Track { track_id, .. } if *track_id == removed)
+        })
+        .map(|route| SessionEdit::RemoveRoute {
+            route_id: route.id.clone(),
+        })
+        .collect();
+    removal.push(SessionEdit::RemoveTrack { track_id: removed });
+    removal.push(SessionEdit::RemoveSource {
+        source_id: id("src-t1"),
+    });
+    let mut browser = Rig::new(&model);
+    let mut c_abi = CAbi::new(&model);
+    for block in 0..4 {
+        assert_eq!(browser.step(block), c_abi.step(block), "block {block}");
+    }
+    let (b, c) = (browser.transaction(&removal), c_abi.transaction(&removal).0);
+    assert_eq!(b, c, "one verdict");
+    assert!(
+        matches!(
+            c,
+            Verdict::Applied {
+                path: EditPath::Rebuild,
+                ..
+            }
+        ),
+        "{c:?}"
+    );
+
+    // Phase 1: both seeks are accepted on both hosts.
+    for name in ["src-t2", "src-t1"] {
+        assert_eq!(
+            browser.host.seek_source(name.as_bytes(), 2, 4 * q),
+            host_web::RESULT_OK,
+            "browser seek of {name} in phase 1: {}",
+            String::from_utf8_lossy(browser.host.diagnostic())
+        );
+        assert_eq!(
+            c_abi.seek_code(name, 2, 4 * q),
+            C_RESULT_OK,
+            "C ABI seek of {name}"
+        );
+    }
+    let mut block = 4;
+    loop {
+        for (feed, name, generation) in [(0, "src-t1", 2), (1, "src-t2", 2), (2, "src-t3", 1)] {
+            let [left, right] = planes(feed, block);
+            assert_eq!(
+                browser.host.submit_source(
+                    name.as_bytes(),
+                    generation,
+                    block * q,
+                    browser.rate,
+                    &[&left, &right],
+                    QUANTUM,
+                    false,
+                ),
+                host_web::RESULT_OK,
+                "browser {name} at block {block}"
+            );
+            c_abi.submit_from(name, feed, block, block, generation);
+        }
+        assert_eq!(browser.host.render_next(), host_web::RESULT_OK);
+        let b = bits(browser.host.output_pcm().expect("browser output"));
+        assert_eq!(b, c_abi.render(block), "block {block} bits");
+        block += 1;
+        if c_abi.watermark().0 >= c_abi.revision {
+            break;
+        }
+        assert!(block < 64, "the removal is adopted");
+    }
+
+    // From the adoption on: the browser's unserviced feed first, before any service step.
+    assert_eq!(
+        browser.host.submit_source(
+            b"src-t1",
+            2,
+            block * q,
+            browser.rate,
+            &[&planes(0, block)[0], &planes(0, block)[1]],
+            QUANTUM,
+            false,
+        ),
+        host_web::RESULT_INVALID_ARGUMENT,
+        "the browser's feed of the removed source after the adoption"
+    );
+    assert_eq!(browser.host.diagnostic(), b"source.id.unknown");
+    assert_eq!(
+        c_abi.submit_code("src-t1", 2, block),
+        capi::RESULT_INVALID_ARGUMENT
+    );
+    assert_eq!(
+        browser.host.seek_source(b"src-t1", 3, 0),
+        host_web::RESULT_INVALID_ARGUMENT
+    );
+    assert_eq!(browser.host.diagnostic(), b"source.id.unknown");
+    assert_eq!(
+        c_abi.seek_code("src-t1", 3, 0),
+        capi::RESULT_INVALID_ARGUMENT
+    );
+    assert_eq!(c_abi.last_error(), b"source.id.unknown");
+}
