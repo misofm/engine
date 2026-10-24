@@ -43,9 +43,11 @@ All 111 failures were this assertion, at `:572`. In the same iterations, the `ca
 
 ## Decisions (for the brief to confirm)
 
-- **D1. Do not weaken the guard.** It defends the #1042 F1 coverage: a control call that falls
-  inside a plan-swapping render call. Deleting it, or skipping it below two CPUs, would let the
-  race go vacuous silently.
+- **D1. Do not weaken the guard.** It defends a dequeue inside some render call of the race:
+  one of the swaps' renders, the render that adopts the last swap, or one of the few renders after
+  it. It does not prove a dequeue inside a plan-swapping render (#1042 F1's window), and main never
+  proved that either (verifier finding, 2026-10-24). Deleting the guard, or skipping it below two
+  CPUs, would let the race go vacuous silently.
 - **D2. Candidate shapes, to be decided in the brief:**
   - (a) After the planned swaps, keep racing (more blocks, more control steps, and further swaps
     if needed) until `overlapped > 0`, within a stated bound. Fail only at that bound.
@@ -190,3 +192,15 @@ because a single CPU was not preempted at the right moment.
   - `scripts/check-workspace-policy.sh` and `scripts/test-workspace-policy.sh`.
   - `cargo check --locked --target aarch64-unknown-linux-gnu --tests -p capi`.
   - `cargo test --locked -p capi --test plan_swap_race`: 4 passed.
+
+## Review fold (attempt 3 verifier MINORs, 2026-10-24)
+
+- D1 and the assertion comment now state what the guard defends: a dequeue inside some render
+  call of the race, not necessarily a plan-swapping one.
+- The verifier's diagnostic (18 pinned runs, `scratchpad/opt/g1405/verify/diag.txt`) tracked
+  which renders adopted a swap. In 8 of the 18 runs, no counted overlap fell in an adopting
+  render: 4 of 6 for 24 swaps, 2 of 6 for 200 swaps and 2 of 6 back to back.
+- The admission bound is kept. No transaction is offered once `swaps * (WEDGE_BLOCKS + 2)` blocks
+  have rendered: the race then ends, and "every swap admitted within the block bound" fails. The
+  paced mode runs `race_unpaced` only when every swap is admitted. So the extension never admits
+  a late swap.
