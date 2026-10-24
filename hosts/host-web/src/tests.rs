@@ -5157,6 +5157,7 @@ fn a_computed_tap_is_refused_with_unsupported_kind() {
         contract_minor: 1,
         state_layout_version: 1,
         supported_link_modes: LinkModeSet::ALL,
+        lane_link: false,
         parameters: &[],
         ports: &[],
         qualities: &[],
@@ -6393,8 +6394,8 @@ fn web_runtime_preparer_attaches_the_companions_on_every_branch() {
                 assert_eq!(shape, capture, "{capture:?} {at}: the branch's capture");
             };
 
-        let (mut boot, boot_handles) = preparer
-            .prepare(&compiled, &caps, lanes, None, &superseded)
+        let (mut boot, boot_handles, _) = preparer
+            .prepare(&compiled, &caps, lanes, None, None, &superseded)
             .unwrap_or_else(|failure| panic!("{capture:?} boot: {failure:?}"));
         check(&mut boot, &boot_handles, "boot");
         // The attachment is charged in the plan's rows (the control plane builds its plan
@@ -6447,8 +6448,8 @@ fn web_runtime_preparer_attaches_the_companions_on_every_branch() {
             edit_ramps: &edit_ramps,
             ..host_core::SuccessorBase::new(&boot.inventory, model, 1)
         };
-        let (mut successor, successor_handles) = preparer
-            .prepare(&compiled, &caps, lanes, Some(base), &superseded)
+        let (mut successor, successor_handles, _) = preparer
+            .prepare(&compiled, &caps, lanes, None, Some(base), &superseded)
             .unwrap_or_else(|failure| panic!("{capture:?} successor: {failure:?}"));
         check(&mut successor, &successor_handles, "successor");
         // Every successor carries the timeline's command queue (#1641 D7), which is overhead

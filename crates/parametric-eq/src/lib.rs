@@ -765,6 +765,7 @@ pub static PARAMETRIC_EQ_DESCRIPTOR: EffectDescriptor = EffectDescriptor {
     contract_minor: 0,
     state_layout_version: STATE_LAYOUT_VERSION,
     supported_link_modes: LinkModeSet::DUAL_MONO,
+    lane_link: false,
     parameters: &EQ_PARAMETERS,
     ports: &PORTS,
     qualities: &QUALITIES,

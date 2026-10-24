@@ -311,6 +311,7 @@ pub const TRANSIENT_SHAPER_DESCRIPTOR: EffectDescriptor = EffectDescriptor {
     // identity (AGENTS.md), and nothing persists a payload (R6b).
     state_layout_version: 1,
     supported_link_modes: LinkModeSet::ALL,
+    lane_link: false,
     parameters: &TRANSIENT_SHAPER_PARAMETERS,
     ports: &PORTS,
     qualities: &QUALITIES,

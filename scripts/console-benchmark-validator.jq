@@ -1,6 +1,7 @@
-# Aggregate validator: twenty-three session workloads (fifteen bound-feed rows, the driver-fed
-# gain/pan row, #928 and #956, the metered console row, #881, the bus-and-send row, #1227, and the
-# five console-strip rows, #1085), two hoist workloads, one meters arm, one observation arm, one
+# Aggregate validator: twenty-two session workloads (fourteen standing rows, the gain/pan row,
+# #928 and #956, the metered console row, #881, the bus-and-send row, #1227, and the five
+# console-strip rows, #1085, every one fed through a prepared source set since #965), two hoist
+# workloads, one meters arm, one observation arm, one
 # placement row-pair, one automation-active row, one mono row-pair, one mixing-automation row
 # (#1003), one fader-ride row (#1750) and five product-lane arms (#1758, #1763), each in rounds
 # one and two -- seventy-four records. #956 retired the builtins-less plumbing
@@ -9,15 +10,16 @@
 # sixty, and #1227's bus-and-send row, emitted between the metered row and the console-strip rows,
 # to sixty-two. #1750's fader-ride row, emitted last, takes it to sixty-four, and #1758's
 # product-lane row, emitted after it, to sixty-six, and #1763's four more product-lane arms,
-# emitted after that, to seventy-four.
+# emitted after that, to seventy-four. #965 fed every row through a source set and retired the
+# bound-feed `gain_pan_only` twin, two records fewer: seventy-two.
 include "console-benchmark-record-lib";
 . as $records |
-(type == "array") and length == 74 and
+(type == "array") and length == 72 and
 all(.[]; console_benchmark_record_valid_lib) and
 ([.[] | select(.record == "console_session") | .workload_kind] | unique | sort) == session_kinds and
 ([.[] | select(.record == "console_hoist") | .workload_kind] | unique | sort)
   == ["nine_track_ragged_strip","sixty_four_track_console"] and
-([.[] | select(.record == "console_session")] | length) == 46 and
+([.[] | select(.record == "console_session")] | length) == 44 and
 ([.[] | select(.record == "console_hoist")] | length) == 4 and
 ([.[] | select(.record == "console_meters")] | length) == 2 and
 ([.[] | select(.record == "console_observation")] | length) == 2 and
@@ -35,7 +37,7 @@ all(.[]; console_benchmark_record_valid_lib) and
 ([.[] | select(.record == "console_fader_ride") | .workload_kind] | unique)
   == ["sixty_four_track_console_fader_ride"] and
 ([.[] | .round] | unique | sort) == [1,2] and
-([.[] | [.record,.workload_kind,.round] | join(":")] | unique | length) == 74 and
+([.[] | [.record,.workload_kind,.round] | join(":")] | unique | length) == 72 and
 (group_by([.record,.workload_kind]) | all(map(.round) | sort == [1,2])) and
 # Round one and round two are two measurements of one frozen workload, so the rendered output must
 # be identical across them. A drifting digest means the rounds are not measuring the same thing.
@@ -46,14 +48,6 @@ all(.[]; console_benchmark_record_valid_lib) and
       | [.automated_output_sha256, .preflight_output_sha256, .quiet_bank_collapse_counters,
          .restated_bank_collapse_counters, .automated_bank_collapse_counters,
          .preflight_bank_collapse_counters]] | unique | length == 1) and
-# #928, re-based by #956: the driver-fed gain/pan row is the bound-feed gain/pan row fed through a
-# prepared source set. The two feeds deliver the same frozen words, so the two rows render the same
-# bits in both rounds; a difference is a harness defect, never a finding, and the run is refused
-# rather than published with two numbers for two different computations.
-([.[] | select(.record == "console_session" and
-               (.workload_kind == "sixty_four_track_gain_pan_only" or
-                .workload_kind == "sixty_four_track_gain_pan_ring"))
-      | .output_sha256] | length == 4 and (unique | length) == 1) and
 # #881: the metered console row is the standing console session prepared as the default web boot
 # prepares it -- a meter on every track. A meter observes, so the two rows render the same bits in
 # both rounds, and a difference is refused rather than published as the price of metering.

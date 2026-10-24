@@ -1031,7 +1031,10 @@ pub struct EffectBankStage {
     layout: EffectLaneLayout,
     /// The bank's whole program key, which a lane swap requires to be equal in both stages
     /// (issue #1747): the layout alone misses the link mode, quality, ports and automation
-    /// capacity, any of which makes one lane's state mean something else in the other bank.
+    /// capacity, any of which makes one lane's state mean something else in the other bank. A
+    /// [`lane_link`](effect_contract::EffectDescriptor::lane_link) effect's key carries no link
+    /// mode (issue #1368): its banks hold the mode per lane, as one of the lane's prepared
+    /// defaults, so the swap moves it with the lane rather than requiring it equal.
     program_key: EffectProgramKey,
     /// Restores a plan swap's carry refused on this stage: each left its lane as prepared, at rest
     /// (#1279 D6). Saturating; read after render.
@@ -1240,7 +1243,8 @@ impl BankStage for EffectBankStage {
 
     // REALTIME_POLICY_BEGIN
     /// Both lanes exist, the peer is an [`EffectBankStage`] of this program key (not only this
-    /// layout: link mode, quality, ports and automation capacity too), both banks declare
+    /// layout: link mode, quality, ports and automation capacity too; a `lane_link` effect's
+    /// mode is per lane and moves with the lane's defaults, issue #1368), both banks declare
     /// prepared defaults of one size, and the scratch holds
     /// [`effect_contract::swap_bank_lanes_scratch_bytes`].
     fn can_swap_lanes(&self, lane: usize, peer: LanePeer<'_>, scratch_bytes: usize) -> bool {

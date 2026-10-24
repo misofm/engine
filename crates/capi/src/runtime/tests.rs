@@ -689,10 +689,12 @@ fn render_parity_shape(track_count: usize, sample_rate_hz: u32) {
     }
 }
 
-/// The caller's meter caps bound the core's strip meters (#1581 D2): one stream per strip. A cap
-/// of one stream refuses a session of more strips, with the builtin compiler's own diagnostic.
+/// The caller's meter caps bound every meter stream (#1581, root caps ruling): one per strip plus
+/// the output. A cap of one stream per strip refuses the session, with the builtin compiler's own
+/// diagnostic, and one more stream admits it.
 ///
-/// Test value: red if the core's meters escape the caller's caps, or if the refusal loses its code.
+/// Test value: red if the core's strip meters or its output meter escape the caller's caps, or if
+/// the refusal loses its code.
 #[test]
 fn a_meter_cap_below_the_strip_count_is_refused() {
     let strips = parse_session_json(SESSION)
@@ -701,15 +703,125 @@ fn a_meter_cap_below_the_strip_count_is_refused() {
         .count();
     assert!(strips > 1, "the reference session has several strips");
     let mut small = limits();
-    small.maximum_meter_streams = 1;
+    small.maximum_meter_streams = strips as u64;
     let failure = compile_children(SESSION, small)
         .err()
-        .expect("one meter stream cannot meter every strip");
+        .expect("one meter stream per strip leaves none for the output");
     let diagnostics = String::from_utf8_lossy(&failure.diagnostics);
     assert!(
         diagnostics.contains("builtin.resource.limit\t$.meter_requests"),
         "{diagnostics}"
     );
+    small.maximum_meter_streams += 1;
+    assert!(
+        compile_children(SESSION, small).is_ok(),
+        "strips plus the output fit"
+    );
+}
+
+/// #1581 gates 6 and 7 on the C ABI: a two-strip plan's provider epoch keeps one post-matrix meter
+/// consumer per strip, in strip order, and its resource row counts their bytes; and with the
+/// session's output gate active, the C ABI render call meters the output without one allocation
+/// or free, in windows that tile from the activation sample and peak as a scalar fold of the
+/// rendered planes.
+///
+/// Test value: red if the C ABI still drops its meter handles, if its render call passes the output
+/// meter the wrong planes or samples, or if the output meter allocates on render.
+#[test]
+fn a_c_abi_plan_keeps_its_strip_meters_and_meters_its_output_without_allocating() {
+    bench_support::alloc::assert_installed();
+    let mut model = stateless_session(48_000);
+    model.tracks.truncate(2);
+    model.routes.truncate(2);
+    assert!(model.submixes.is_empty());
+    let document = session::canonical_session_json(&model).expect("two-strip session");
+    let mut children = compile_children(&document, limits()).expect("children");
+    let meters: Vec<(String, builtins::MeterTap)> = children
+        .session
+        .test_providers()
+        .test_meters()
+        .iter()
+        .map(|meter| (meter.track_id.to_string(), meter.tap))
+        .collect();
+    let strips: Vec<(String, builtins::MeterTap)> = model
+        .strips()
+        .map(|strip| (strip.id.as_str().to_owned(), builtins::MeterTap::PostMatrix))
+        .collect();
+    assert_eq!(meters, strips, "one post-matrix meter per strip");
+    assert!(children.plan.resources().builtin_meter_payload_bytes > 0);
+
+    let (mut reader, gate) = children
+        .session
+        .take_output_meter()
+        .expect("the output meter");
+    assert!(
+        children.session.take_output_meter().is_none(),
+        "handed out once"
+    );
+    let window = u64::from(host_core::default_meter_window_blocks(48_000, 128).get()) * 128;
+    let session = Box::into_raw(Box::new(crate::Session::new(
+        children.session,
+        children.session_error,
+    )));
+    let plan = Box::into_raw(Box::new(crate::Plan::new(children.plan)));
+    // A warm-up block before the activation, so process statics are warm and nothing is metered.
+    let (left, right) = continuity_block(0, 0);
+    submit_c(session, 1, 0, 48_000, &left, &right, false);
+    render_c(plan, 0);
+    gate.activate(128);
+    let blocks = 2 * window / 128 + 1;
+    let mut rendered = Vec::new();
+    for block in 1..=blocks {
+        let (left, right) = continuity_block(block, 0);
+        submit_c(session, 1, block * 128, 48_000, &left, &right, false);
+        let mut pcm = vec![f32::NAN; 256];
+        let output = crate::PlanarOutput {
+            struct_size: crate::PLANAR_OUTPUT_SIZE,
+            channels: 2,
+            samples: pcm.as_mut_ptr(),
+            sample_capacity: pcm.len() as u64,
+            frames: 128,
+            plane_stride_samples: 128,
+            reserved: [0; 2],
+        };
+        let mark = bench_support::alloc::current_thread_counters();
+        let result = crate::ffi::test_render(plan, block * 128, &output);
+        let used = bench_support::alloc::current_thread_delta_since(mark);
+        assert_eq!(result, crate::RESULT_OK);
+        assert_eq!(
+            (used.allocations, used.deallocations),
+            (0, 0),
+            "block {block} allocated or freed"
+        );
+        rendered.push(pcm);
+    }
+    let fold = |plane: usize, start: u64, end: u64| {
+        (start..end).fold(0.0_f32, |peak, sample| {
+            let pcm = &rendered[(sample / 128 - 1) as usize];
+            let magnitude = pcm[plane * 128 + (sample % 128) as usize].abs();
+            let magnitude = if (f32::MIN_POSITIVE..f32::INFINITY).contains(&magnitude) {
+                magnitude
+            } else {
+                0.0
+            };
+            if magnitude > peak { magnitude } else { peak }
+        })
+    };
+    let mut start = 128;
+    for _ in 0..2 {
+        let measured = reader.windows_mut().try_pop().expect("a closed window");
+        assert_eq!(
+            (measured.start_sample, measured.end_sample),
+            (start, start + window)
+        );
+        let peak = [0, 1].map(|plane| fold(plane, start, start + window));
+        assert!(peak[0] > 0.0 && peak[1] > 0.0, "the source plays");
+        assert_eq!(measured.peak.map(f32::to_bits), peak.map(f32::to_bits));
+        start += window;
+    }
+    assert!(reader.windows_mut().try_pop().is_err());
+    crate::ffi::test_plan_destroy(plan);
+    crate::ffi::test_session_destroy(session);
 }
 
 #[test]
@@ -1277,6 +1389,8 @@ fn an_added_source_starts_at_its_anchor_at(sample_rate_hz: u32, source_frame: u6
     crate::ffi::test_plan_destroy(c_plan);
     crate::ffi::test_session_destroy(c_session);
 
+    // #1288: `t2` fades in at its first played block, the anchor (no latency before its fader).
+    let (committed, revision, unmute) = with_added_track_muted(&committed, "t2");
     let (r_session, r_plan) = boxed_c_children(&committed);
     let feed_reference = |block: u64| {
         let (left, right) = continuity_block(block, 0);
@@ -1309,6 +1423,9 @@ fn an_added_source_starts_at_its_anchor_at(sample_rate_hz: u32, source_frame: u6
     let reference = (0..16)
         .map(|block| {
             feed_reference(block + 1);
+            if block == ANCHOR_BLOCK {
+                unmute_c(r_session, revision, &unmute);
+            }
             render_c(r_plan, block)
         })
         .collect::<Vec<_>>();
@@ -1434,8 +1551,13 @@ fn a_scrubbed_stem_and_a_stem_started_from_its_report_stay_aligned() {
     crate::ffi::test_plan_destroy(plan);
     crate::ffi::test_session_destroy(session);
 
-    // The reference reads both stems from the aligned frames, from its own block 0.
+    // The reference reads both stems from the aligned frames, from its own block 0, which is the
+    // anchor: `t2` fades in there (#1288).
+    let (committed, revision, unmute) = with_added_track_muted(&committed, "t2");
     let reference = render_fresh_reference(&committed, BLOCKS - ANCHOR_BLOCK, &|session, block| {
+        if block == 0 {
+            unmute_c(session, revision, &unmute);
+        }
         submit_c_to_block(session, X, x_block(ANCHOR_BLOCK + block), block, 0);
         submit_c_to_block(session, Y, x_block(ANCHOR_BLOCK + block), block, 1);
     });
@@ -1650,6 +1772,36 @@ fn put_compressor(model: &session::SessionModel, track: usize) -> protocol::Sess
 
 /// The reference of the held-seek tests: a fresh session of `committed`, fed by `feed(session,
 /// block)` one block ahead of each rendered block, rendering `blocks` blocks.
+/// Issue #1288: a track a transaction adds fades in from its first played block, so the fresh
+/// reference of `committed` holds the added `track` muted and unmutes it live at that block. Returns
+/// the muted document, its revision, and the edit whose transaction is that unmute: a live record
+/// over the session mute ramp, the ramp the fade runs over.
+fn with_added_track_muted(committed: &str, track: &str) -> (String, u64, protocol::SessionEdit) {
+    let mut model = session::parse_session_json(committed).expect("committed document");
+    let strip = model
+        .tracks
+        .iter_mut()
+        .find(|candidate| candidate.id.as_str() == track)
+        .expect("the added track");
+    let unmuted = strip.clone();
+    strip.fader.left_mute = true;
+    strip.fader.right_mute = true;
+    (
+        session::canonical_session_json(&model).expect("canonical"),
+        model.revision,
+        protocol::SessionEdit::UpsertTrack { track: unmuted },
+    )
+}
+
+/// The reference's live unmute of [`with_added_track_muted`].
+fn unmute_c(session: *mut crate::Session, base: u64, edit: &protocol::SessionEdit) {
+    assert_eq!(
+        transact_c(session, 900, base, core::slice::from_ref(edit)),
+        protocol::EditPath::Live,
+        "the unmute is a live record"
+    );
+}
+
 fn render_fresh_reference(
     committed: &str,
     blocks: u64,
@@ -1915,7 +2067,14 @@ fn a_held_seek_carries_from_a_taken_candidate() {
     crate::ffi::test_plan_destroy(plan);
     crate::ffi::test_session_destroy(session);
 
+    // `t2`, which A added, fades in at its first played block, the anchor (#1288), and B carries
+    // its waiting fade (#1392).
+    let (committed, revision, unmute) = with_added_track_muted(&committed, "t2");
     let reference = render_fresh_reference(&committed, 12, &|session, block| {
+        // `feed` runs for block `n + 1` just before block `n` renders.
+        if block == ANCHOR_BLOCK + 1 {
+            unmute_c(session, revision, &unmute);
+        }
         submit_block_c(session, FIXTURE_ID, 1, block, 0, RATE);
         let (left, right) = if block < ANCHOR_BLOCK {
             (vec![0.0; 128], vec![0.0; 128])

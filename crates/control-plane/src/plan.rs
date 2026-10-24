@@ -73,16 +73,24 @@ pub struct PlanState<A: ControlAdapter> {
     /// block after it takes an untaken branch. A plan is render-thread-exclusive, so a plain `Cell`
     /// is the whole synchronisation this needs.
     pub(crate) fp_env_attested: core::cell::Cell<bool>,
+    /// The output meter's render half (#1581 D4): made with the session's first plan and part of
+    /// no plan, so a plan swap does not touch it. The session hands out its reader and gate.
+    pub(crate) output_meter: host_core::OutputPeakObserver,
 }
 
 impl<A: ControlAdapter> PlanState<A> {
-    pub(crate) fn new(owner: RealtimePlanOwner, shared: Arc<SharedPlanState<A::Row>>) -> Self {
+    pub(crate) fn new(
+        owner: RealtimePlanOwner,
+        shared: Arc<SharedPlanState<A::Row>>,
+        output_meter: host_core::OutputPeakObserver,
+    ) -> Self {
         #[cfg(feature = "test-support")]
         update_test_owners(|owners| owners.current_plan_constructed += 1);
         Self {
             owner,
             shared,
             fp_env_attested: core::cell::Cell::new(false),
+            output_meter,
         }
     }
 }
@@ -383,7 +391,11 @@ impl<A: ControlAdapter> PlanState<A> {
         self.shared.render_peak_observed.load(Ordering::Relaxed)
     }
 
-    /// Publish the activity of one successfully rendered block from its two output planes.
+    /// Publish the activity of one successfully rendered block, `[first_sample, next_sample)`,
+    /// from its two output planes.
+    ///
+    /// The output meter observes the block first (#1581 D4): one gate load while it is inactive,
+    /// otherwise a vector fold of each plane's sanitized peak ([`host_core::OutputPeakObserver`]).
     ///
     /// Issue #163 phase 4 item 2: the scan runs only for an armed observer. When
     /// [`Self::render_peak_observed`] is true the peak starts at `0.0` and folds
@@ -391,7 +403,14 @@ impl<A: ControlAdapter> PlanState<A> {
     /// publishes `NaN`, which the consumer reads as "not measured", so an unarmed block never
     /// fabricates a peak of `0.0`. It costs at most one load per output sample and allocates
     /// nothing, so it is render-safe.
-    pub fn observe_rendered_block(&self, planes: [&[f32]; 2]) {
+    pub fn observe_rendered_block(
+        &mut self,
+        planes: [&[f32]; 2],
+        first_sample: u64,
+        next_sample: u64,
+    ) {
+        self.output_meter
+            .observe(planes[0], planes[1], first_sample, next_sample);
         let peak = if self.render_peak_observed() {
             let mut peak = 0.0_f32;
             for plane in planes {
@@ -489,7 +508,9 @@ mod tests {
             source_underrun_blocks: AtomicU64::new(0),
             watermark: publisher.watermark_reader(),
         });
-        PlanState::<TestAdapter>::new(owner, shared)
+        let (output_meter, _reader, _gate) =
+            host_core::output_peak_meter(core::num::NonZeroU32::MIN).expect("output meter");
+        PlanState::<TestAdapter>::new(owner, shared, output_meter)
     }
 
     /// #1570a D3: an armed observer publishes the largest absolute sample over both planes, and an
@@ -497,11 +518,11 @@ mod tests {
     /// the render sequence advances once.
     #[test]
     fn a_rendered_block_publishes_the_peak_over_both_planes_only_when_armed() {
-        let state = test_state();
+        let mut state = test_state();
         let left = [0.25_f32, -0.5];
         let right = [0.75_f32, -1.5];
 
-        state.observe_rendered_block([&left, &right]);
+        state.observe_rendered_block([&left, &right], 0, 2);
         assert!(f32::from_bits(state.shared.render_peak_bits.load(Ordering::Acquire)).is_nan());
         assert_eq!(state.shared.render_sequence.load(Ordering::Acquire), 1);
 
@@ -509,14 +530,14 @@ mod tests {
             .shared
             .render_peak_observed
             .store(true, Ordering::Relaxed);
-        state.observe_rendered_block([&left, &right]);
+        state.observe_rendered_block([&left, &right], 0, 2);
         assert_eq!(
             f32::from_bits(state.shared.render_peak_bits.load(Ordering::Acquire)),
             1.5
         );
         assert_eq!(state.shared.render_sequence.load(Ordering::Acquire), 2);
 
-        state.observe_rendered_block([&[0.0; 2], &[0.0; 2]]);
+        state.observe_rendered_block([&[0.0; 2], &[0.0; 2]], 0, 2);
         assert_eq!(
             f32::from_bits(state.shared.render_peak_bits.load(Ordering::Acquire)),
             0.0

@@ -134,7 +134,7 @@ fn owned_target(target: SpectrumTargetRef<'_>) -> SpectrumTarget {
 ///
 /// The single form is the compatibility path. The collection form prepares every exact
 /// target/mask before the host is published and lets one control-side owner select among them.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum SpectrumPreparation {
     /// Prepare one fixed spectrum observer.
     Single(SpectrumCaptureRequest),
@@ -208,6 +208,67 @@ impl SpectrumPreparation {
             entries: prepared,
             maximum_capture_bytes,
         })))
+    }
+}
+
+/// A session's spectrum monitor state (#1593 D1): the observers every plan the session prepares
+/// carries, and the stream hop the service starts with. It is monitor state (ruling C9): it is
+/// not in the session model, is never saved and never advances the revision.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SpectrumConfiguration {
+    /// The observers each plan prepares.
+    pub preparation: SpectrumPreparation,
+    /// The explicit stream hop, or `None` for the session shape's default cadence. It is not a
+    /// preparation input: the service takes it.
+    pub hop: Option<SpectrumHop>,
+}
+
+impl SpectrumConfiguration {
+    /// The configuration a successor of `model` is prepared with (#1593 D4): every entry whose
+    /// target `model` still has, in its order, with the budget, the form and the hop unchanged.
+    ///
+    /// A track tap (`TrackPostInputBuiltins` or `TrackPostMatrix`) stays when its ID names a track
+    /// or a submix of `model`; an `Output` entry stays when its ID names an output. A
+    /// configuration with no entry left is `None`. Allocates the kept entries' copy.
+    #[must_use]
+    pub fn retain_present(&self, model: &session::SessionModel) -> Option<Self> {
+        let present = |target: &SpectrumTarget| match target {
+            SpectrumTarget::TrackPostInputBuiltins(id) | SpectrumTarget::TrackPostMatrix(id) => {
+                model.tracks.iter().any(|track| track.id.as_str() == &**id)
+                    || model
+                        .submixes
+                        .iter()
+                        .any(|submix| submix.id.as_str() == &**id)
+            }
+            SpectrumTarget::Output(id) => model
+                .outputs
+                .iter()
+                .any(|output| output.id.as_str() == &**id),
+        };
+        let preparation = match &self.preparation {
+            SpectrumPreparation::Single(request) => {
+                present(&request.target).then(|| SpectrumPreparation::Single(request.clone()))?
+            }
+            SpectrumPreparation::Collection(request) => {
+                let entries: Vec<_> = request
+                    .entries
+                    .iter()
+                    .filter(|entry| present(&entry.target))
+                    .cloned()
+                    .collect();
+                if entries.is_empty() {
+                    return None;
+                }
+                SpectrumPreparation::Collection(SpectrumCaptureCollectionRequest {
+                    entries,
+                    maximum_capture_bytes: request.maximum_capture_bytes,
+                })
+            }
+        };
+        Some(Self {
+            preparation,
+            hop: self.hop,
+        })
     }
 }
 
@@ -371,6 +432,9 @@ pub enum SpectrumServiceError {
     Smoothing,
     /// The imported stream metadata fails its semantic checks.
     MetadataInvalid,
+    /// A plan swap dropped the entry the caller had armed (#1593 D6): it did not carry into the
+    /// successor. The next one-shot read answers this once.
+    Dropped,
 }
 
 impl SpectrumServiceError {
@@ -393,6 +457,7 @@ impl SpectrumServiceError {
             Self::CadenceShape => "spectrum.cadence.shape",
             Self::Smoothing => "spectrum.smoothing",
             Self::MetadataInvalid => "spectrum.metadata.invalid",
+            Self::Dropped => "spectrum.capture.dropped",
         }
     }
 }
@@ -573,7 +638,8 @@ impl SpectrumSnapshot {
 ///
 /// Every method is allocation-free. See the module documentation and decision 17 D7: an arm that
 /// the caller made with [`Self::arm`] belongs to the caller until a read returns its window or
-/// [`SpectrumServiceError::CaptureInvalid`], or until [`Self::cancel`]. A stream start refuses
+/// [`SpectrumServiceError::CaptureInvalid`], until [`Self::cancel`], or until a swap that does not
+/// carry it ([`SpectrumServiceError::Dropped`]). A stream start refuses
 /// `Busy` while that arm stands (D4 of issue #1592); an arm that [`Self::select`] made is not the
 /// caller's and the start replaces it.
 ///
@@ -589,6 +655,8 @@ pub struct SpectrumService {
     quantum_frames: u32,
     hop: Option<SpectrumHop>,
     caller_armed: bool,
+    /// A swap dropped the caller's arm: the next one-shot read answers `Dropped` (#1593 D6).
+    arm_dropped: bool,
     stream_active: bool,
     stream_cadence: Option<SpectrumCadence>,
     stream_smoothing: Option<SpectrumSmoothingConfig>,
@@ -616,6 +684,7 @@ impl SpectrumService {
             quantum_frames,
             hop,
             caller_armed: false,
+            arm_dropped: false,
             stream_active: false,
             stream_cadence: None,
             stream_smoothing: None,
@@ -677,14 +746,14 @@ impl SpectrumService {
     /// caller had on the old one is settled here (#1618), so nothing waits on an observer that no
     /// longer renders:
     ///
-    /// - A one-shot arm, capturing or held (with or without a result queued), settles to
-    ///   [`SpectrumServiceError::CaptureInvalid`] with its arm generation: the successor's capture
-    ///   starts `INVALID` at the predecessor's generation ([`SpectrumCapture::settle_unpaired`]),
-    ///   the caller's next [`Self::read`] returns the refusal once, and a new arm then completes on
-    ///   the successor. The arm stays the caller's until that read.
-    /// - A collection whose selected entry did not carry has no selection (see above), so an arm
-    ///   on it ends with the selection: the caller's arm is released and a read answers
-    ///   [`SpectrumServiceError::NotArmed`]; the selection epoch tells the caller to select again.
+    /// - The caller's one-shot arm, capturing or held (with or without a result queued), is
+    ///   dropped (#1593 D6): the caller's next [`Self::read`] answers
+    ///   [`SpectrumServiceError::Dropped`] once (unless the caller cancels or arms anew first), and
+    ///   the arm is released, so a new arm completes on the successor. A single capture's generation carries over
+    ///   ([`SpectrumCapture::settle_unpaired`]), so the new arm is a later generation than the
+    ///   dropped one.
+    /// - A collection whose selected entry did not carry has no selection (see above); the
+    ///   selection epoch tells the caller to select again before it arms.
     /// - A running stream ends: [`Self::stream_active`] is `false`, the cadence, the smoothing and
     ///   the window at hand are gone, the metadata is `Stopped`, and `analysis` (the history's
     ///   owner, when the caller has one) ends with it. The caller starts a stream anew with
@@ -705,13 +774,17 @@ impl SpectrumService {
         analysis: Option<&mut SpectrumAnalysis>,
     ) -> PreparedSpectrumCaptures {
         // `kept`: the capture the caller used carried, so its arm and stream run on.
-        // `settled`: the arm stands as an `INVALID` result for the caller's read.
-        let (kept, settled) = match (&mut successor, &mut self.captures) {
+        let kept = match (&mut successor, &mut self.captures) {
             (PreparedSpectrumCaptures::Single(next), PreparedSpectrumCaptures::Single(before)) => {
                 if carried && next.pair_carried(before, pairing) {
-                    (true, false)
+                    true
                 } else {
-                    (false, next.settle_unpaired(before))
+                    // Carry the arm generation over, then park the fresh capture idle at it: the
+                    // dropped arm's answer is the service's `Dropped`, not a capture state.
+                    if next.settle_unpaired(before) {
+                        let _ = next.try_read();
+                    }
+                    false
                 }
             }
             // A collection also runs without a carry: the selection the service held is gone with
@@ -721,12 +794,13 @@ impl SpectrumService {
                 PreparedSpectrumCaptures::Collection(before),
             ) => {
                 next.pair_carried(before, if carried { pairing } else { &[] });
-                (next.selected_index().is_some(), false)
+                next.selected_index().is_some()
             }
-            _ => (false, false),
+            _ => false,
         };
         if !kept {
-            self.caller_armed &= settled;
+            self.arm_dropped |= self.caller_armed;
+            self.caller_armed = false;
             if self.stream_active {
                 self.end_stream_state(analysis);
             }
@@ -745,6 +819,8 @@ impl SpectrumService {
     pub fn arm(&mut self) -> Result<(), SpectrumServiceError> {
         self.captures.arm()?;
         self.caller_armed = true;
+        // A new arm supersedes the dropped one: its read is this arm's (#1593 D6).
+        self.arm_dropped = false;
         Ok(())
     }
 
@@ -757,12 +833,18 @@ impl SpectrumService {
     ///
     /// # Errors
     ///
-    /// [`SpectrumServiceError::NotArmed`], [`SpectrumServiceError::Channels`],
-    /// [`SpectrumServiceError::Exhausted`] or [`SpectrumServiceError::CaptureInvalid`].
+    /// [`SpectrumServiceError::Dropped`] once, first, after a swap dropped the caller's arm
+    /// ([`Self::adopt_successor`]); then [`SpectrumServiceError::NotArmed`],
+    /// [`SpectrumServiceError::Channels`], [`SpectrumServiceError::Exhausted`] or
+    /// [`SpectrumServiceError::CaptureInvalid`].
     pub fn read(
         &mut self,
         requested: SpectrumChannels,
     ) -> Result<Option<SpectrumSnapshot>, SpectrumServiceError> {
+        if self.arm_dropped {
+            self.arm_dropped = false;
+            return Err(SpectrumServiceError::Dropped);
+        }
         let Some(selected) = self.captures.channels() else {
             return Err(SpectrumServiceError::NotArmed);
         };
@@ -811,6 +893,8 @@ impl SpectrumService {
         }
         self.captures.cancel();
         self.caller_armed = false;
+        // The caller gave up its arm, the dropped one included (#1593 D6).
+        self.arm_dropped = false;
         Ok(())
     }
 

@@ -407,6 +407,7 @@ pub const TRUE_PEAK_LIMITER_DESCRIPTOR: EffectDescriptor = EffectDescriptor {
         Some(value) => value,
         None => panic!("frozen link bits"),
     },
+    lane_link: false,
     parameters: &TRUE_PEAK_LIMITER_PARAMETERS,
     ports: &PORTS,
     qualities: &QUALITIES,

@@ -10,11 +10,13 @@ section and nothing else: `check-web-audioworklet.sh` runs that check before thi
 
 Modes
 -----
-`--callgraph EXPORT [--trap-owner SUBSTRING ...]`
+`--callgraph EXPORT [--trap-owner SUBSTRING[=SITES] ...]`
     Walk the direct-call closure of `EXPORT` and fail if any member's name matches `FORBIDDEN`
     (allocator, deallocator or drop glue). Then list the closure members that contain an
     `unreachable` instruction and fail unless that set equals `TRAP_ALLOW_LIST` plus any
-    `--trap-owner` substrings the caller named.
+    `--trap-owner` substrings the caller named. An owner given as `SUBSTRING=SITES` is pinned:
+    its matching members together must hold exactly `SITES` `unreachable` instructions, so a new
+    checked index inlined into it is red rather than admitted with the old one (issue #1581).
 
     A C allocator name (any name containing `free`, `alloc`, `memalign` or `sbrk`) fails anywhere
     in an *unmangled* member name and never in a mangled Rust name (issues #1234 and #1417). A
@@ -455,7 +457,14 @@ def check_callgraph(
     trap_owners: tuple[str, ...] = (),
     allocation_only: bool = False,
 ) -> int:
-    allowed_owners = frozenset(TRAP_ALLOW_LIST | set(trap_owners))
+    pinned: dict[str, int] = {}
+    names: set[str] = set()
+    for owner in trap_owners:
+        name, separator, sites = owner.partition("=")
+        names.add(name)
+        if separator:
+            pinned[name] = int(sites)
+    allowed_owners = frozenset(TRAP_ALLOW_LIST | names)
     members = closure(functions, export)
     failures = 0
     forbidden = [function.name for function in members if FORBIDDEN.search(function.name)]
@@ -481,6 +490,18 @@ def check_callgraph(
         print(f"FAIL {export}: unexpected trap owner in the render closure:", file=sys.stderr)
         for name in sorted(unexpected):
             print(f"  {name}", file=sys.stderr)
+    for name, sites in sorted(pinned.items()):
+        found = sum(
+            function.opcodes.count("unreachable")
+            for function in trap_owners
+            if name in function.name
+        )
+        if found != sites and not allocation_only:
+            failures += 1
+            print(
+                f"FAIL {export}: trap owner {name} holds {found} trap sites, pinned at {sites}",
+                file=sys.stderr,
+            )
     traps = sum(function.opcodes.count("unreachable") for function in members)
     entries = sorted({function.name for function in members if PANIC_ENTRY.search(function.name)})
     print(
@@ -942,6 +963,20 @@ def self_test() -> int:
     expect(
         "(b1) trap-owner does not admit a different owner",
         check_callgraph(parse(trapping), "miso_engine_web_v1_render", ("some_other_name",)) == 1,
+    )
+    # (b1a) issue #1581: a pinned owner admits exactly its pinned number of trap sites.
+    expect(
+        "(b1a) pinned trap-owner admits its one site",
+        check_callgraph(parse(trapping), "miso_engine_web_v1_render", ("render_next=1",)) == 0,
+    )
+    twice = trapping.replace(
+        " 000024: 00                         | unreachable\n",
+        " 000024: 00                         | unreachable\n"
+        " 000024: 00                         | unreachable\n",
+    )
+    expect(
+        "(b1a) pinned trap-owner refuses a second site",
+        check_callgraph(parse(twice), "miso_engine_web_v1_render", ("render_next=1",)) == 1,
     )
     expect(
         "(b1) trap-owner never admits a free",
