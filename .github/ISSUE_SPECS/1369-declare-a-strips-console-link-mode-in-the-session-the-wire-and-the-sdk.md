@@ -169,3 +169,56 @@ still binds one bank (#1368).
 - *Lower the link mode to per-lane state in the linked effects' banks* (#1368).
 
 **Decision 17 amendment (2026-10-13).** Its SDK half becomes a generated builder over the link-mode control row (#1564 D4); the SDK writes no hand-written link-mode edit. The session grammar and wire work stay this issue's.
+
+## Evidence and decision record: slice #1369a (2026-10-24)
+
+Scope: the chain note's "First slice: #1369a" (root decisions R1-R6). Deliverables 5 and 6, the
+console link row, `crates/controls` logic, `AGENTS.md`, rulings, SKILL.md and DESIGN.md are #1369b.
+
+- **D1 as built.** `session::ConsoleLinkMode` is a closed token table (`slot`, `dual_mono`,
+  `maximum`, `average`) with `resolve(declared)`; the model field is required, and the visitor's
+  entry field 4 is written after `bypass` (canonical key order `slot`, `bypass`, `link_mode`,
+  `params`).
+- **D4 amended.** Wire codes are `slot` 1, `dual_mono` 2, `maximum` 3, `average` 4, not "slot as
+  0": zero is never a token code in this protocol (`token_tables.rs`), and the codes equal the
+  model's `wire()`. Field 4 is required.
+- **D2 as built.** An entry that overrides refuses `effect.link_mode.unsupported` at
+  `<strip>.console[slot=<slot>].link_mode`; an entry on `slot` whose slot's own mode is unsupported
+  keeps the lowered effect's path, as before.
+- **R3 as built.** `console.link_mode.override_unbanked` at the entry path when the resolved mode
+  differs from the slot's and the effect is not `lane_link`. No console-eligible launch effect
+  reaches it today (#1367a made the multiband `lane_link`; the EQ and soft clip support only
+  `dual_mono`), so its test uses a descriptor double.
+- **D5 as built.** The SDK writer's key order is the generated `session-keys.ts` (#1564), not a
+  hand list; `ConsoleEntrySpec.linkMode` defaults to `"slot"`, written explicitly; the transaction
+  encoder writes field 4.
+- **Migration (D3, gate 4).** Commit "migrate every checked-in session document" adds only
+  `"link_mode": "slot"` lines (838 insertions; the two changed lines are the canonical writer
+  corpus's escaped documents, equal to the old ones with the key removed). Blessed with the same
+  one key: `hosts/host-web/tests/fixtures/control-list.json` (rows unchanged) and
+  `structural-frames.json`; the C ABI snapshot length re-pin is 279 bytes (nine entries).
+  `scripts/derive-intended-console-fixture.py` writes the key (needed by `check-console-fixtures.sh`).
+- **Hash.** `COMPLETE_SCHEMA_HASH` re-pinned from `480ffcf546bea7fb` (after #1583) to
+  `06bb3b6f65f39eec`; only `command.session_transaction_apply` carries a console entry.
+
+Test value:
+- Gate 1 (`console_schema.rs::console_entry_link_mode_is_a_required_closed_override`, rewritten
+  from the superseded `link_mode` refusal): a writer that drops or reorders the key, a parser that
+  defaults it, or a lowering that ignores it turns red.
+- Gate 2 (`native_session.rs::a_console_link_override_is_checked_as_resolved_at_the_entry`): a
+  check that reads the slot's mode instead of the resolved one, or reports the effect path, turns red.
+- Gate 3 (`native_session.rs::an_override_on_an_unbanked_link_effect_refuses`): without the R3
+  guard a differing override on a non-`lane_link` effect prepares and splits the slot's bank.
+- Gate 4 (`session_wire/tests.rs`, extended): a decoder that defaults a missing field 4 to `slot`
+  turns red; the random submix generator now draws all four tokens.
+- Gate 5 (`graph-compiler/tests/console_link_override.rs`): a lowering that ignores the override,
+  applies it to every strip, or a program key that splits the bank on it turns red.
+- Gate 6 (`console-evals.mjs`, one test and two refusal rows): a builder that drops `linkMode` or
+  writes no key turns red; builder and engine name the same code for a bad or unsupported token.
+
+Red first (mutants, each restored): lowering uses the slot's mode -> gates 1, 2, 5 red; visitor
+writes `link_mode` after `params` -> gate 1 red; prepare reports the effect path -> gate 2 red;
+prepare checks the declared mode -> gate 2 red; R3 guard off -> gate 3 red; decoder defaults a
+missing field -> gate 4 red; comp slot forced to `maximum` on every strip -> gate 5 red;
+`program_key` keeps the link mode for `lane_link` -> gate 5 red (two comp banks); SDK writes
+`"slot"` always or omits the key -> gate 6 red.
