@@ -628,19 +628,27 @@ fn a_structural_transaction_adds_the_first_stem_to_an_empty_session() {
             panic!("{rate} Hz: removing the last strip is refused")
         };
         assert_eq!(header.status, StatusCode::Ok);
-        for block in 11..14 {
+        // The strip ramps out, then its removal is adopted at `S` (#1325 D3): from the block after
+        // that, the mixer is silent.
+        let mut block = 11;
+        let mut adopted = None;
+        while adopted.is_none_or(|first: u64| block < first + 3) {
             let (bits, allocations, deallocations) = host.render_counted(block);
             assert_eq!(
                 (allocations, deallocations),
                 (0, 0),
                 "{rate} Hz: block {block}"
             );
-            if block > 11 {
+            if adopted.is_some() {
                 assert!(
                     bits.iter().all(|word| *word == 0),
                     "{rate} Hz: block {block} is silent again"
                 );
+            } else if host.watermark().revision == model.revision + 2 {
+                adopted = Some(block);
             }
+            block += 1;
+            assert!(block < 64, "{rate} Hz: the removal is adopted");
         }
         let resources = host.resources();
         assert_eq!((resources.source_count, resources.track_count), (0, 0));
