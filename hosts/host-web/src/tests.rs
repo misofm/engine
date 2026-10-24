@@ -9210,12 +9210,9 @@ mod structural_apply {
             Some(ADOPTION * quantum),
             "the first strip frame starts at the adoption block"
         );
-        // Exact: the queued window [3, 6), discarded unread by the swap, and the gap from block 3
-        // to the adoption block.
-        assert_eq!(
-            rig.host.meter_header().reserved[1] >> METER_LOSS_SHIFT,
-            1 + 1
-        );
+        // Exact: the queued window [3, 6), discarded unread by the swap. The swap opened a new
+        // delivery epoch, so the gap to the adoption block is not a second loss.
+        assert_eq!(rig.host.meter_header().reserved[1] >> METER_LOSS_SHIFT, 1);
 
         // The strip meters tile from the adoption block now, so a lease taken again, and a
         // producer reset, activate on that grid, not on the absolute `sample % period` one.
