@@ -197,13 +197,16 @@ fn the_boundary_is_the_shared_limit() {
 /// One lane's failure in a bank is recovered on that lane alone (issue #1340, D1).
 ///
 /// Lane 3 gets a `NaN` at frame 5 of block 0, then exact zeros on both channels for the rest of
-/// the block (so its silence clock has run), and a threshold point that is still ramping when
-/// the block fails. Its block is `+0.0` on both channels and charged once; right after it, its
+/// the block (so its silence clock has run), and a threshold point whose 64-sample ramp is still
+/// running when the 32-frame block fails. Its block is `+0.0` on both channels and charged once; right after it, its
 /// state is exactly a fresh scalar instance's at the ramp's target, and its later blocks are
 /// that instance's render. Every other lane is bit-identical to the same bank without the `NaN`.
 #[test]
 fn a_failing_bank_lane_recovers_alone() {
     const BLOCKS: usize = 6;
+    // Blocks shorter than the 64-sample parameter ramp, so the point is still ramping when its
+    // block fails.
+    const BLOCK: usize = 32;
     const FAILING: usize = 3;
     const THRESHOLD: f32 = -30.0;
     // The bank runs at the build's own bank width (issue #1112).
@@ -214,9 +217,9 @@ fn a_failing_bank_lane_recovers_alone() {
         .iter()
         .map(|set| request_with(set, LinkMode::DualMono, FRAMES as u32, false))
         .collect::<Vec<_>>();
-    let mut clean_left = support::signal(FRAMES * lanes * BLOCKS, 0x1111_2222);
-    let mut clean_right = support::signal(FRAMES * lanes * BLOCKS, 0x3333_4444);
-    for frame in 6..FRAMES {
+    let mut clean_left = support::signal(BLOCK * lanes * BLOCKS, 0x1111_2222);
+    let mut clean_right = support::signal(BLOCK * lanes * BLOCKS, 0x3333_4444);
+    for frame in 6..BLOCK {
         clean_left[frame * lanes + FAILING] = 0.0;
         clean_right[frame * lanes + FAILING] = 0.0;
     }
@@ -249,8 +252,8 @@ fn a_failing_bank_lane_recovers_alone() {
     let mut faulted = support::bank(width, &requests).processor;
     let mut clean = support::bank(width, &requests).processor;
     for block in 0..BLOCKS {
-        let start = block * FRAMES * lanes;
-        let range = start..start + FRAMES * lanes;
+        let start = block * BLOCK * lanes;
+        let range = start..start + BLOCK * lanes;
         let block_spans: &[_] = if block == 0 { &spans } else { &[] };
         let block_offsets = if block == 0 {
             offsets.clone()
@@ -262,9 +265,9 @@ fn a_failing_bank_lane_recovers_alone() {
                 &mut left[range.clone()],
                 &mut right[range.clone()],
                 None,
-                FRAMES as u32,
+                BLOCK as u32,
                 width,
-                (block * FRAMES) as u64,
+                (block * BLOCK) as u64,
                 block_spans,
                 &block_offsets,
                 FRAMES as u32,
@@ -276,9 +279,9 @@ fn a_failing_bank_lane_recovers_alone() {
                 &mut clean_left[range.clone()],
                 &mut clean_right[range],
                 None,
-                FRAMES as u32,
+                BLOCK as u32,
                 width,
-                (block * FRAMES) as u64,
+                (block * BLOCK) as u64,
                 block_spans,
                 &block_offsets,
                 FRAMES as u32,
@@ -316,7 +319,7 @@ fn a_failing_bank_lane_recovers_alone() {
         }
     }
     let lane_of = |pcm: &[f32], block: usize| {
-        (block * FRAMES..(block + 1) * FRAMES)
+        (block * BLOCK..(block + 1) * BLOCK)
             .map(|frame| pcm[frame * lanes + FAILING])
             .collect::<Vec<_>>()
     };
@@ -329,8 +332,8 @@ fn a_failing_bank_lane_recovers_alone() {
     );
 
     let (input_left, input_right) = (
-        support::signal(FRAMES * lanes * BLOCKS, 0x1111_2222),
-        support::signal(FRAMES * lanes * BLOCKS, 0x3333_4444),
+        support::signal(BLOCK * lanes * BLOCKS, 0x1111_2222),
+        support::signal(BLOCK * lanes * BLOCKS, 0x3333_4444),
     );
     for block in 1..BLOCKS {
         let mut fresh_left = lane_of(&input_left, block);
@@ -339,7 +342,7 @@ fn a_failing_bank_lane_recovers_alone() {
             fresh.as_mut(),
             &mut fresh_left,
             &mut fresh_right,
-            (block * FRAMES) as u64,
+            (block * BLOCK) as u64,
             &[],
             FRAMES as u32,
         );
