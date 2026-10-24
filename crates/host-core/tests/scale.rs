@@ -1,10 +1,14 @@
-//! Issue #1079: host preparation, the facade the C ABI's prepare calls, holds a session above the
-//! former 65,536-track boundary.
+//! Issue #1079: host preparation, as the C ABI's preparer runs it (live controls attached), holds a
+//! session above the former 65,536-track boundary.
 //!
-//! Release-only nightly row: the document is about 94 MB and the prepare compiles, lays out and
-//! binds 65,537 strips.
+//! Release-only nightly row: the prepare compiles, lays out, binds and attaches live controls to
+//! 65,537 strips.
 
-use host_core::{HostPrepareCaps, HostShapePolicy, PrepareRejection, prepare_host_session};
+use host_core::{
+    HostLiveControlRequest, HostLiveLanes, HostPrepareCaps, HostShapePolicy, LiveEffectAddress,
+    LiveValuesSuperseded, compile_host_session, launch_maximum_observation_taps,
+    prepare_host_runtime_with_live_lanes_and_spectrum, strip_position,
+};
 use session::{SessionModel, StableId, canonical_session_json, parse_session_json};
 
 const EXAMPLE: &str = include_str!("../../../fixtures/session/v1/parametric-eq-nine-track.json");
@@ -62,19 +66,54 @@ fn scale_document() -> String {
     canonical_session_json(&model).expect("the scale model is canonical")
 }
 
-/// With every cap open, preparation accepts the session, or refuses it only as a resource.
+/// With every cap open, the preparation `capi`'s `CapiPreparer::prepare` runs (an observation
+/// slot for every declared tap, the control plane's lanes with the effect lanes on, no spectrum,
+/// no successor) accepts the session and attaches one strip producer per track; the strip at
+/// index 65,536 (the last: tracks are in ID order, so it is `track-9999`) is addressable, and so
+/// is its console EQ's producer.
 #[test]
 #[ignore = "release-mode scale gate; runs nightly"]
-fn prepares_65_537_tracks_or_refuses_only_a_resource() {
-    match prepare_host_session(&scale_document(), &caps()) {
-        Ok((compiled, _prepared)) => {
-            assert_eq!(compiled.normalized_model().tracks.len(), TRACKS as usize);
-        }
-        Err(failure) => assert_eq!(
-            failure.kind(),
-            PrepareRejection::Resource,
-            "{}",
-            String::from_utf8_lossy(failure.as_bytes())
+fn prepares_65_537_live_attached_tracks_as_capi_does() {
+    let compiled = compile_host_session(&scale_document(), &caps())
+        .unwrap_or_else(|failure| panic!("{}", String::from_utf8_lossy(failure.as_bytes())));
+    let live = HostLiveControlRequest {
+        observation_taps: launch_maximum_observation_taps(),
+        ..HostLiveControlRequest::default()
+    };
+    let lanes: HostLiveLanes = controls::live_lanes(compiled.normalized_model()).into();
+    let lanes = HostLiveLanes {
+        effects: true,
+        ..lanes
+    };
+    let (_prepared, mut handles, spectrum) = prepare_host_runtime_with_live_lanes_and_spectrum(
+        &compiled,
+        &caps(),
+        &live,
+        lanes,
+        None,
+        None,
+        &LiveValuesSuperseded::new(),
+    )
+    .unwrap_or_else(|failure| panic!("{}", String::from_utf8_lossy(failure.as_bytes())));
+    assert!(spectrum.is_none());
+    assert_eq!(handles.track_count, TRACKS as usize);
+    assert_eq!(handles.strip_controls.len(), TRACKS as usize);
+    let last = TRACKS as usize - 1;
+    assert_eq!(
+        strip_position(
+            handles.strips.len(),
+            handles.track_count,
+            |index| &*handles.strips[index],
+            "track-9999",
         ),
-    }
+        Some(last),
+        "the last track in ID order is at index 65,536"
+    );
+    assert_eq!(&*handles.strip_controls[last].track_id, "track-9999");
+    assert!(
+        handles
+            .effect_control_mut("track-9999", LiveEffectAddress::console(0))
+            .is_some(),
+        "the console EQ's producer on the strip at index 65,536 resolves"
+    );
 }
