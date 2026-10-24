@@ -301,3 +301,141 @@ Fold after the PASS verdict (root, 2026-10-24):
   frame 2,048.
 - Follow-ups recorded by root: a spectrum-arm backpressure queue kind (NIT 5); R6 runs only in
   `SPECTRUM_CONFIGURE`, the browser's boot path is unadvertised (NIT 7, for 1595b).
+
+## Decision and evidence record: slice 1595b (attempt 1)
+
+Scope (root, 2026-10-24; scope note `1595.md`, R1-R7 accepted): 1595b is `SPECTRUM_STREAM`
+(`0x0012`), capability bit 16 with `CapabilityFlags::KNOWN`, `ProviderFeatures::spectrum`, the
+two decode invariants (bit 16 is set exactly when `0x0010`, `0x0011` and `0x0012` are listed; the
+three are listed together or not at all) and R2's per-host switch. It follows 1595a's shapes: the
+`Cow` reply encoded in `complete_session_command` (now one `complete_session_borrowed` for both
+reads), the codec's frame-limit measure (`ProtocolCodec::spectrum_stream_ready_frame_len`), the
+monitor's one preallocated read slot (a ready stream read analyzes into the same result) and the
+`WindowInvalid` exception.
+
+- **R2.** `ControlAdapter::SPECTRUM` (default false; capi true) builds
+  `ProviderFeatures { spectrum: A::SPECTRUM, ..ALL }`. Every session serves the three commands;
+  only the C ABI advertises them. `ProviderFeatures::ALL` includes `spectrum`.
+- **NIT 7 of the 1595a verifier (R6 on the boot path), addressed.** An adapter with `SPECTRUM`
+  runs R6 on a boot configuration in `compile_children` (`spectrum.frame\t$\n`), so advertising
+  and R6 move together; #1596 turns it on for the browser by setting the const. The C ABI passes
+  no boot configuration today.
+
+Decisions made while building (implementer, for review):
+
+- **R6 grows to the stream read.** A stream reply carries five more scalar fields, so its
+  one-plane ready frame (8,576 bytes, identity up to 8 bytes) is larger than the one-shot's
+  (8,496). R6 (configure and advertised boot) now refuses a tap unless both one-plane reads fit,
+  so every accepted tap has a readable one-plane capture and, on a one-plane entry, a readable
+  stream. A two-plane entry still streams only under a frame limit of 12,688 bytes; below it, each
+  stream read is refused `LIMIT_EXCEEDED` `spectrum.frame` before it reads (the entry fixes the
+  channels). The alternative, refusing a stereo tap below 12,688, would reverse 1595a's accepted
+  12,288-byte stereo case; it is not taken.
+- `smoothing_ms` is required on `start` and optional on `select` (absent keeps it). `select`
+  runs `SpectrumService::select_target`: the plain selection without a stream (a smoothing then
+  is `spectrum.stream.inactive`), the restarting selection with one, as the browser's select does.
+- The reply's selection is `Option<SpectrumStreamTarget>`: kind and channels `0` and no identity
+  without a selection, and a ready reply needs one. The reply's target is the service's
+  committed selection.
+- Only a read answers `ready`. After a ready read, a `reset` discards the window at hand, so its
+  reply (and that of any non-read op whose metadata still says ready) answers `pending`.
+- Every reply's `analysis_epoch` and `history_start_sample` are the analysis's own (a reset
+  changes only the analysis); a ready read's metadata is the one `analyze_stream_into` wrote.
+- `SessionCommand` loses `Eq` (the stream request holds an `f64`). `read_f64` joins the BTLV
+  readers.
+- Paths outside the scope note, needed by R2's advertisement and recorded for root:
+  `crates/capi/src/runtime/tests.rs` (two pinned C ABI capability vectors re-pinned: field 25
+  length `0x1e` with two padding bytes, payload `0x190`, flags `0x17fdf`) and
+  `hosts/host-web/tests/protocol_cross_host.rs` (the C ABI's capabilities are the browser's plus
+  `0x0010`-`0x0013` and bit 16; #1596 removes the spectrum part of that exception).
+- #1944 (the `BACKPRESSURE` record's queue kind for spectrum refusals) stays open; a stream
+  `Busy` answers as a capture `Busy` does.
+
+Corpus re-pin (the four approved paths): the corpus gains `command.spectrum_stream` (a select
+with a smoothing) and `response.spectrum_streamed` (a ready one-plane read); 54 frames.
+`COMPLETE_SCHEMA_HASH` moves from `c7e010362827dab3` to `c146e8fad0b26299`. The FNV hash of the
+corpus with those two frames left out, in order, is `c7e010362827dab3`, the old pin: the 52
+earlier frames are byte-equal. The static capabilities frame lists no spectrum command and leaves
+bit 16 clear, which the invariant allows.
+
+Frame sizes (measured against the encoder): a ready stream reply is 8,576 bytes for one plane and
+12,688 for both (identity up to 8 bytes; 8,696 and 12,808 at 127 bytes).
+
+Gates (attempt 1), test value:
+
+- Gate 1 `message_wire::tests::spectrum_stream_round_trips_and_refuses_malformed_frames_both_ways`:
+  red if the codec admits a contradictory stream request or a reply of the wrong shape (planes
+  against `channels`, a 1,024-bin plane, a smoothing of 10,001 or NaN, a status outside the
+  table, a selection without its identity, a ready window count that is not `sequence + 1`), or
+  the stream measure drifts from the encoder.
+- Bit 16 invariants, assertions added to
+  `message_wire::tests::capability_id_views_reject_order_allocation_and_session_family_identically`:
+  red if a record that lists only some of the three, or lists them without bit 16, or sets bit 16
+  without them, decodes.
+- R2 at the controller, assertions added to
+  `controller::tests::the_capability_registry_lists_the_control_messages_and_not_the_retired_ones`:
+  red if `ProviderFeatures::spectrum` does not switch the three IDs and bit 16 together.
+- Gate 4 `a_stream_read_follows_the_core_machine`: red if a reply's status, sequence, window
+  count, drops, samples, hop or epochs differ from the core machine (the reference session's
+  `read_stream`, fed the same PCM), or the first four ready windows' bins differ word for word
+  from `analyze_stream_into` there; it also walks select (epochs advance), gap (two drops), reset
+  (`pending`, analysis epoch one more), the one-shot cancel refusal (`spectrum.stream.active`)
+  and stop.
+- Gate 3 and R6 `a_stream_read_the_frame_cannot_carry_consumes_nothing`: red if a size-refused
+  stream read consumes its `gap` or drops (the core's next read is that gap, two drops), or R6
+  ignores the stream's larger one-plane size (a configure and an advertised boot at 8,496 bytes
+  are refused, at 8,576 accepted).
+- Gate 9, the capi row `spectrum_commands_cross_the_c_abi_to_the_session` (amended): red if a C
+  ABI client cannot discover the three commands and bit 16, or a stream read cannot reach ready.
+
+Acked-batch question for a stream: can a reply acknowledge a window it did not deliver, or lose a
+drop count? No. The size refusal runs before `read_stream`, so it pops nothing and consumes no
+`gap` or `failed` status; a `gap` reply carries `dropped_captures`; the output is reserved for
+the frame limit before the session runs and the reply is recorded for replay in the call that
+writes it. The consume-then-fail paths are the analyzer's `WindowInvalid` of a popped window (as
+for a capture) and the core's own `Exhausted` refusal of `read_stream` (an analysis epoch or
+window count at `u64::MAX`), which the core records as `failed`.
+
+Mutants (each red on its gate, restored by `git checkout` + `touch`): no stream read preflight
+(gate 3), R6 without the stream measure (R6 row), no boot R6 (R6 row), stream left bins from the
+right plane (gate 4), a reset reply with a stale analysis epoch (gate 4), a ready status kept on a
+reset reply (gate 4), select through `select_stream` (gate 4), the reply's smoothing unchecked
+(gate 1), the `0x0011` together rule dropped (invariants), bit 16 never set (controller row),
+capi `SPECTRUM` false (capi row). One survived and was folded: the ready `windows = sequence + 1`
+rule unchecked; gate 1 now refuses it.
+
+Attempt 2 (root rulings on the verifier's FAIL, 2026-10-24):
+
+- **R6 (MINOR, done).** R6 refuses a tap unless its one-plane one-shot read (without the window)
+  and its stream read of the tap's own channels fit: 8,576 bytes for a one-plane tap, 12,688 for
+  a stereo tap (identity up to 8 bytes), at configure and at an advertising host's boot. No
+  accepted tap is refused on every read. The 1595a decision above ("the alternative ... is not
+  taken") is reversed. Gate 3 (one-shot) now runs at 16,384 bytes and keeps a stereo refusal
+  through the window (29,008 bytes); gate 3 (stream) keeps its size-refused `gap` on a session
+  that does not advertise (its boot runs no R6) and checks R6 at each tap's exact size and one
+  byte below, by configure and by an advertising boot (test adapter `Advertised`).
+- **Superseded by the next bullet.** **iOS memset (MAJOR), blocked on one reader.** With the ruled host-core change (dead floor fills
+  to zero; `analyze_into` and `analyze_stream_into` write straight into `out`; the unrequested
+  plane is unspecified) the shipped capi iOS library has 0 `memset_pattern16` calls charged to
+  host-core (the ratchet asks to delete the row). The C ABI encoder and the browser read only
+  requested planes, but `crates/host-core/tests/spectrum_service.rs:527-532` reads the unrequested
+  plane and asserts it is the floor (the old contract), so the ruling's stop rule applies: the
+  change is not committed, and the `host-core` row stays at 10.
+- **iOS memset, done (root authorized, 2026-10-24).** The plane contract of
+  `SpectrumAnalysisResult` changes: a plane outside `channels` is not read and its contents are
+  unspecified (it held the floor). The floor fills of `SpectrumAnalyzer::analyze` and
+  `analyze_continuous` were dead stores and are zero fills; `analyze_into` and
+  `analyze_stream_into` write straight into `out` (no staging arrays or copies; a refusal still
+  leaves `out` unchanged, since the analyzer writes only after its last `Err`). Requested planes'
+  bits do not move (gates 2 and 4 compare them word for word). The assertion that an unrequested
+  plane holds the floor (`crates/host-core/tests/spectrum_service.rs`) is deleted, because the
+  ruling removes that claim; the test's other assertions stay. The host-core iOS
+  `memset_pattern16` count is 0 (main's row was 5, measured 4 before this slice; 10 in attempt
+  1), so its row is deleted. #1018 deleted the `builtins` and `lane` rows, so the iOS memset table
+  is empty.
+- **Fold after the attempt-2 PASS (root).** R6 runs at every boot, not only an advertising
+  adapter's: every session serves the three commands. The browser's 16 KiB limit never fails it.
+  The stream read's own size preflight is defence in depth (R6 admits no entry it would refuse);
+  gate 3 (stream) is now `a_stream_read_at_the_frame_limit_delivers_its_gap`: at exactly the
+  stereo stream size a `gap` read delivers both drops, and R6 is checked at each tap's size and one
+  byte below, by configure and by boot.

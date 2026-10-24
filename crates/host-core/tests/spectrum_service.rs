@@ -4,15 +4,14 @@
 use bench_support::alloc as bench_alloc;
 use host_core::{
     HostLiveControlRequest, HostLiveLanes, HostPrepareCaps, HostShapePolicy, LiveValuesSuperseded,
-    PreparedHost, PreparedSpectrumCaptures, SPECTRUM_BIN_COUNT, SPECTRUM_FLOOR_DB,
-    SPECTRUM_MAXIMUM_CAPTURE_BYTES, SPECTRUM_MAXIMUM_ID_BYTES, SPECTRUM_TARGET_OUTPUT,
-    SPECTRUM_WINDOW_FRAMES, SourceControlSet, SourceSubmission, SpectrumAnalysis,
-    SpectrumAnalysisResult, SpectrumAnalyzer, SpectrumCaptureCollectionEntry,
-    SpectrumCaptureCollectionRequest, SpectrumCaptureRequest, SpectrumChannels,
-    SpectrumConfiguration, SpectrumHop, SpectrumOutput, SpectrumPreparation, SpectrumRequestError,
-    SpectrumService, SpectrumServiceError, SpectrumSnapshot, SpectrumStreamMetadata,
-    SpectrumStreamStatus, SpectrumTarget, SpectrumTargetRef, StartedRenderSession,
-    compile_host_session, prepare_host_runtime_with_live_lanes_and_spectrum,
+    PreparedHost, PreparedSpectrumCaptures, SPECTRUM_BIN_COUNT, SPECTRUM_MAXIMUM_CAPTURE_BYTES,
+    SPECTRUM_MAXIMUM_ID_BYTES, SPECTRUM_TARGET_OUTPUT, SPECTRUM_WINDOW_FRAMES, SourceControlSet,
+    SourceSubmission, SpectrumAnalysis, SpectrumAnalysisResult, SpectrumAnalyzer,
+    SpectrumCaptureCollectionEntry, SpectrumCaptureCollectionRequest, SpectrumCaptureRequest,
+    SpectrumChannels, SpectrumConfiguration, SpectrumHop, SpectrumOutput, SpectrumPreparation,
+    SpectrumRequestError, SpectrumService, SpectrumServiceError, SpectrumSnapshot,
+    SpectrumStreamMetadata, SpectrumStreamStatus, SpectrumTarget, SpectrumTargetRef,
+    StartedRenderSession, compile_host_session, prepare_host_runtime_with_live_lanes_and_spectrum,
     prepare_host_runtime_with_spectrum, prepare_host_runtime_with_spectrum_collection,
     spectrum_capture_collection_resources, spectrum_capture_resources_for,
     spectrum_channels_from_raw, spectrum_smoothing, spectrum_target_kind, spectrum_target_ref,
@@ -524,12 +523,10 @@ fn analysis_matches_the_analyzer_and_refuses_without_writing() {
         "997 Hz at 48 kHz sits in bin 42 or 43, got {bin}"
     );
 
-    // A plane outside the mask holds the floor.
+    // A one-plane window analyzes as that plane (the other plane is unspecified, #1595).
     let (left_only, _service, _rig) = window_snapshot(SpectrumChannels::Left);
     let mut left_out = SpectrumAnalysisResult::new();
-    left_out.right_dbfs = [1.0; SPECTRUM_BIN_COUNT];
     analysis.analyze_into(&left_only, &mut left_out).unwrap();
-    assert!(left_out.right_dbfs.iter().all(|v| *v == SPECTRUM_FLOOR_DB));
     assert_eq!(left_out.channels, SpectrumChannels::Left);
 
     let refusals: [(&str, SpectrumSnapshot); 5] = [
