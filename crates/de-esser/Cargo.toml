@@ -1,0 +1,29 @@
+[package]
+name = "de-esser"
+version.workspace = true
+license.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[lib]
+name = "de_esser"
+
+[dependencies]
+effect-contract.workspace = true
+effect-runtime.workspace = true
+lane.workspace = true
+math = { workspace = true, features = ["lane"] }
+# The band filter's words are the EQ's own `f64` SVF design, rounded once (issue #15 S1).
+parametric-eq.workspace = true
+
+[dev-dependencies]
+# The workspace's one audited global allocator: it makes the conformance harness's
+# `process.allocation` gate a real measurement; the harness refuses to run without it.
+bench-support.workspace = true
+conformance = { workspace = true, features = ["realtime-audit"] }
+# The independent f64 oracle is test-only and never reachable from production code.
+dsp-reference.workspace = true
+
+[lints]
+workspace = true

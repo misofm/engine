@@ -20,6 +20,8 @@ math = { workspace = true, features = ["lane"] }
 # boundary that stops them being one function. Dev-only: no production edge is created.
 effect-contract.workspace = true
 engine.workspace = true
+# Issue #15 S1: the independent f64 oracle of the shared dynamic band step (`tests/dynamic_band.rs`).
+dsp-reference.workspace = true
 
 [lints]
 workspace = true
