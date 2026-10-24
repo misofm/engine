@@ -784,7 +784,10 @@ describe("validation refusals name the offending path", () => {
       .source("stem", { channels: 2, bitDepth: 24, frames: 480, content: CONTENT_A })
       .track("t", {
         source: "stem",
-        inserts: [effect("miso.parametric-eq", { "band-1-enabled": true, "band-1-gain": -2 }, { slotId: "eq" })],
+        inserts: [
+          effect("miso.parametric-eq", { "band-1-enabled": true, "band-1-gain": -2 }, { slotId: "eq" }),
+          effect("miso.true-peak-limiter", {}, { slotId: "limiter" }),
+        ],
       })
       .output("out")
       .route({
@@ -812,9 +815,9 @@ describe("validation refusals name the offending path", () => {
       control,
       lane,
     });
-    const insertRow = (control, lane) => ({
+    const insertRow = (control, lane, slot = "eq") => ({
       owner: { kind: "strip", id: "t" },
-      section: { kind: "inserts", effect: "eq" },
+      section: { kind: "inserts", effect: slot },
       control,
       lane,
     });
@@ -839,7 +842,7 @@ describe("validation refusals name the offending path", () => {
     };
     const refusedByTheEngine = [
       ["delay", builtinRow("delay_samples", "left"), 0, 1, "control.automation.target"],
-      ["enabled", insertRow("band_1_enabled", "both"), 1, 1, "control.automation.target"],
+      ["lookahead", insertRow("lookahead_ms", "both", "limiter"), 1, 1, "control.automation.target"],
       ["matrix-lane", builtinRow("matrix_ll", "left"), 0, 1, "control.inactive"],
     ];
     for (const [id, target, startValue, endValue, expected] of refusedByTheEngine) {

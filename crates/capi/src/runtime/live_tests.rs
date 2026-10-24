@@ -3401,28 +3401,35 @@ fn bypass_crossfade_documents(
 /// bypassed; frames before the commit equal the booted state (W, or D for a lift) and frames from
 /// the ramp's end equal the target (D, or W for a lift), bit for bit.
 /// The ramp blocks render without one allocation (statics warmed). A zero-latency effect (the
-/// compressor) and one with latency (the soft clip, 31 samples) run, and the delay, whose bypass is
-/// live since #1339 (an insert only, as it never banks and is not console-eligible); a session
+/// compressor) and one with latency (the soft clip, 31 samples) run, and the delay and the
+/// multiband compressor, whose bypasses are live since #1339 and #1340 (inserts only, as neither
+/// is console-eligible); a session
 /// whose `mute_ms` is 0 steps at the commit's first block.
 ///
 /// Test value: red if the C ABI producer forgets the session ramp (the toggle steps, so the first
 /// block is already D), if the record's ramp is another row's (the fader's or pan's length), if a
 /// ramp block allocates, or if a lift ramps from the wrong end or lands off W (the zero-latency lift
-/// is the one the review of #1341a1 found uncovered through the real runtime). The delay's row is
-/// red if its bypass is still prepared: the lift is refused or rebuilds a plan, or is acked and
-/// renders the prepared bypass (#1339 gate 4).
+/// is the one the review of #1341a1 found uncovered through the real runtime). The delay's and the
+/// multiband's rows are red if the bypass is still prepared: the lift is refused or rebuilds a
+/// plan, or is acked and renders the prepared bypass (#1339 gate 4, #1340 gate 5).
 #[test]
 fn a_live_bypass_crossfades_over_the_session_mute_ramp_and_lands_on_the_bypassed_control() {
     bench_support::alloc::assert_installed();
-    for effect_id in ["miso.compressor", "miso.soft-clip", "miso.delay"] {
+    for effect_id in [
+        "miso.compressor",
+        "miso.soft-clip",
+        "miso.delay",
+        "miso.multiband-compressor",
+    ] {
         for hard in [false, true] {
             for lift in [false, true] {
-                // The delay is not console-eligible: it runs as an insert only.
-                let consoles: &[bool] = if effect_id == "miso.delay" {
-                    &[false]
-                } else {
-                    &[false, true]
-                };
+                // The delay and the multiband are not console-eligible: inserts only.
+                let consoles: &[bool] =
+                    if matches!(effect_id, "miso.delay" | "miso.multiband-compressor") {
+                        &[false]
+                    } else {
+                        &[false, true]
+                    };
                 for &console in consoles {
                     let (document, bypassed_document) = bypass_crossfade_documents(
                         effect_id,
@@ -4002,13 +4009,50 @@ fn eq_automation_edit(
     channel: session::ParameterChannel,
     unit: session::ParameterUnit,
 ) -> SessionEdit {
+    strip_automation_edit(
+        session::Section::Console(StableId::parse("eq").expect("stable ID")),
+        parameter_id,
+        channel,
+        unit,
+    )
+}
+
+/// `eq_session` with a true-peak limiter insert (`limiter`) on track `eq0`.
+fn limiter_session(sample_rate_hz: u32) -> String {
+    let mut model = parse_session_json(&eq_session(sample_rate_hz)).expect("EQ session");
+    let mut limiter = model.lower_track(&model.tracks[0]).pre_insert[0].clone();
+    limiter.id = StableId::parse("limiter").expect("limiter insert");
+    limiter.identity = session::EffectIdentity::Native {
+        effect_id: StableId::parse("miso.true-peak-limiter").expect("limiter ID"),
+    };
+    limiter.bypass = false;
+    limiter.params = Vec::new();
+    model
+        .tracks
+        .iter_mut()
+        .find(|track| track.id.as_str() == "eq0")
+        .expect("eq0")
+        .inserts
+        .effects
+        .push(limiter);
+    session::canonical_session_json(&model).expect("canonical limiter session")
+}
+
+/// An `UpsertAutomation` of one step on track `eq0`'s `section`, on the row `parameter_id` at
+/// `channel`.
+fn strip_automation_edit(
+    section: session::Section,
+    parameter_id: u32,
+    channel: session::ParameterChannel,
+    unit: session::ParameterUnit,
+) -> SessionEdit {
     let id = |text: &str| StableId::parse(text).expect("stable ID");
     SessionEdit::UpsertAutomation {
         automation: session::Automation {
             id: id("eq-ride"),
             target: session::ControlAddress {
                 owner: session::Owner::Strip(id("eq0")),
-                section: session::Section::Console(id("eq")),
+                section,
                 control: parameter_id,
                 lane: channel,
             },
@@ -4025,8 +4069,9 @@ fn eq_automation_edit(
     }
 }
 
-/// #1335 gate 3. On a playing engine, a transaction that only adds an automation on the console
-/// EQ's `band-1-enabled` (`automation_rate` `None`) is refused with the compile rejection a
+/// #1335 gate 3. On a playing engine, a transaction that only adds an automation on a true-peak
+/// limiter insert's `lookahead` (`automation_rate` `None`; the console EQ's `band-1-enabled` was
+/// the subject until #1337 made it live) is refused with the compile rejection a
 /// rebuild's preparation gives (`control.automation.target`): the revision, the committed model and
 /// the reliable lane do not move, no candidate is prepared, and the following blocks are
 /// bit-identical to an engine that never received it. The same transaction on the block-rate
@@ -4037,14 +4082,19 @@ fn eq_automation_edit(
 #[test]
 fn an_automation_on_a_prepared_effect_parameter_is_refused_before_any_ack() {
     use session::{ParameterChannel, ParameterUnit};
-    let document = eq_session(48_000);
+    let document = limiter_session(48_000);
     let mut rig = Rig::new(&document);
     let mut untouched = Rig::new(&document);
     for _ in 0..window(rig.latency(), 0, rig.quantum) {
         assert_eq!(bits(&rig.step()), bits(&untouched.step()), "warm-up");
     }
 
-    let refused = eq_automation_edit(1, ParameterChannel::Both, ParameterUnit::Linear);
+    let refused = strip_automation_edit(
+        session::Section::Inserts(StableId::parse("limiter").expect("limiter")),
+        3,
+        ParameterChannel::Both,
+        ParameterUnit::Milliseconds,
+    );
     let before = (refusal_state(&rig), rig.summary());
     assert_eq!(
         rig.apply(core::slice::from_ref(&refused)),
@@ -4054,7 +4104,7 @@ fn an_automation_on_a_prepared_effect_parameter_is_refused_before_any_ack() {
     protocol::apply_session_edit(&mut rejected, &refused).expect("the edit applies to the model");
     let rejected = session::canonical_session_json(&rejected).expect("canonical rejected");
     let Err(failure) = compile_children(&rejected, limits()) else {
-        panic!("an automation on band-1-enabled does not prepare")
+        panic!("an automation on the lookahead does not prepare")
     };
     assert_eq!(
         rig.last_error(),
@@ -5871,7 +5921,20 @@ mod set_control {
             .resources()
             .retained_bytes
         };
-        let growth = catalog_bytes(&grown) - catalog_bytes(&document);
+        // #1696: the added VCAs also raise the kept bases' edit-ramp row, which follows the
+        // committed model as the catalog does.
+        let ramp_bytes = |document: &str| {
+            let model = parse_session_json(document).expect("model");
+            control_plane::monitor_and_ramp_bytes(&model)
+                .expect("the ramp row")
+                .1
+        };
+        assert!(
+            ramp_bytes(&grown) > ramp_bytes(&document),
+            "the VCAs add ramp rows"
+        );
+        let growth = catalog_bytes(&grown) - catalog_bytes(&document) + ramp_bytes(&grown)
+            - ramp_bytes(&document);
         assert!(growth > 0, "the added VCAs add catalog bytes");
 
         // Whether the edits commit under `ceiling`; a refusal changes nothing.
@@ -7247,8 +7310,8 @@ mod set_control {
                     (SOURCE_FRAMES - 2_000, -6.0),
                 ),
             ];
-            // A table-only rebuild with no live move completes exactly too (bits are not
-            // compared: the split table's values differ from the ride's in `f32` rounding).
+            // A table-only rebuild with no live move completes exactly too (outcome only: its bits
+            // are `a_table_only_rebuild_with_no_move_is_bit_equal`, red until #1716's fix).
             let mut still = Rig::new(&document);
             for _ in 0..4 {
                 still.step();
@@ -7320,6 +7383,56 @@ mod set_control {
                     }
                 }
             }
+        }
+
+        /// #1716 step 0 (red until the fix). Two table-only rebuilds of the riding fader with no
+        /// live move, 5 blocks apart: the ride split in two at sample 10,000 exactly on its line
+        /// (every split-table value equals the ride's in `f32` bits), then the single ride again.
+        /// Every block of the rebuilt rig is bit-equal to the uninterrupted engine's over 44
+        /// blocks, as a plan prepared with either table renders.
+        ///
+        /// Test value: red when a table-only rebuild of an unchanged curve opens with an adoption
+        /// jump that a plan prepared with the new table never makes. At a block's first sample the
+        /// last grid ramp has completed (`G` divides the 128-sample block), so `settle_adoption`
+        /// compares the new curve at `span.start` with the stage's target, which is the old curve
+        /// at `span.start - 1`; on a ride they always differ, and the block opens with a jump over
+        /// `J` = 960 (measured: first difference at block 4, sample 0; at most 1.7e-4, block 7;
+        /// equal again from block 12). No other row compares bits with no move.
+        #[test]
+        #[ignore = "#1716: red until the fix; see spec step 0"]
+        fn a_table_only_rebuild_with_no_move_is_bit_equal() {
+            bench_support::alloc::assert_installed();
+            let document = riding();
+            let track = first_track(&document);
+            let mut rigs = warm(&document);
+            let offset = rigs[0].model().automation[0].offset;
+            send(
+                &mut rigs[0],
+                &[split_ride(&track, (10_000, -12.0), offset)],
+                protocol::EditPath::Rebuild,
+                "split",
+            );
+            let (first, _) = lockstep(&mut rigs, 5);
+            assert_eq!(rigs[0].summary().3, 0, "split: the successor is adopted");
+            assert_eq!(first, None, "split: first difference (block, sample)");
+            let mut whole = entry(
+                &track,
+                vec![segment(
+                    session::AutomationShape::Linear,
+                    (0, SOURCE_FRAMES),
+                    (0.0, -12.0),
+                )],
+            );
+            whole.offset = offset;
+            send(
+                &mut rigs[0],
+                &[SessionEdit::UpsertAutomation { automation: whole }],
+                protocol::EditPath::Rebuild,
+                "whole",
+            );
+            let (first, _) = lockstep(&mut rigs, 39);
+            assert_eq!(rigs[0].summary().3, 0, "whole: the successor is adopted");
+            assert_eq!(first, None, "whole: first difference (block, sample)");
         }
 
         /// [`riding`]'s ride kept up to `at`, then a step to `db` from `at` to the source's end,

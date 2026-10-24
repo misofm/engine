@@ -165,13 +165,10 @@ fn an_unknown_or_third_party_effect_has_no_rows() {
 }
 
 /// The classes the rulings give, written out per row: decision 14's limiter lookahead and decision
-/// 15 E2's EQ and crossover rows, E4's two bypass shunts and #1367's link mode.
+/// 15 E2's crossover rows, E4's two bypass shunts and #1367's link mode.
 fn expected_prepared(effect: &str, parameter: u32) -> Option<RebuildReason> {
     match (effect, parameter) {
         ("miso.true-peak-limiter", 3) => Some(RebuildReason::Glitch),
-        ("miso.parametric-eq", 1 | 2 | 17 | 18 | 33 | 34 | 49 | 50) => {
-            Some(RebuildReason::RuledLiveNotBuilt { issue: 1337 })
-        }
         _ => None,
     }
 }
@@ -221,13 +218,9 @@ fn effect_rows_carry_the_ruled_class() {
             }
             assert_eq!(row.descriptor.automatable(), parameter.automatable);
         }
-        let bypass = match effect {
-            "miso.multiband-compressor" => Some(RebuildReason::RuledLiveNotBuilt { issue: 1340 }),
-            _ => None,
-        };
         assert_eq!(
             rebuild_reason(of(BYPASS_CONTROL).descriptor.class),
-            bypass,
+            None,
             "{effect} bypass"
         );
         let link = all.iter().find(|row| {

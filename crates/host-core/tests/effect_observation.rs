@@ -6,9 +6,8 @@
 //! instances in one program key (so they still bank) while giving each lane a different reduction
 //! that an independently prepared scalar instance can reproduce to the bit.
 
-use core::num::{NonZeroU32, NonZeroUsize};
+use core::num::NonZeroUsize;
 
-use builtins::MeterTap;
 use effect_contract::{
     EffectControlRecord, EffectProcessBlock, EffectQuality, InitialParameterValue, LinkMode,
     NativeEffectFactory, ObservationSample, ParameterChannel, PrepareEffectLimits,
@@ -77,15 +76,9 @@ enum Leg {
 }
 
 fn live_controls(leg: Leg) -> HostLiveControlRequest {
-    let attached = matches!(
-        leg,
-        Leg::LiveControlsNoCapacity | Leg::CapacityUnarmed | Leg::AllArmed
-    );
     HostLiveControlRequest {
-        meter_period_frames: attached
-            .then(|| NonZeroU32::new(QUANTUM as u32 * WINDOW_BLOCKS).expect("period")),
+        meter_window_blocks: WINDOW_BLOCKS,
         meter_queue_depth: NonZeroUsize::new(16).expect("meter depth"),
-        meter_tap: MeterTap::PostMatrix,
         observation_taps: match leg {
             Leg::NoLiveControls | Leg::LiveControlsNoCapacity => 0,
             Leg::CapacityUnarmed | Leg::AllArmed => 4,
@@ -837,9 +830,8 @@ fn scalar_reference_windows(
 #[test]
 fn the_per_node_scalar_path_publishes_its_own_block() {
     let request = HostLiveControlRequest {
-        meter_period_frames: Some(NonZeroU32::new(QUANTUM as u32 * WINDOW_BLOCKS).expect("period")),
+        meter_window_blocks: WINDOW_BLOCKS,
         meter_queue_depth: NonZeroUsize::new(16).expect("meter depth"),
-        meter_tap: MeterTap::PostMatrix,
         observation_taps: 4,
     };
     let (_session, mut prepared, handles) =
@@ -938,9 +930,8 @@ fn the_per_node_scalar_path_publishes_its_own_block() {
 #[test]
 fn observation_without_effect_lanes_is_refused() {
     let request = HostLiveControlRequest {
-        meter_period_frames: Some(NonZeroU32::new(QUANTUM as u32 * WINDOW_BLOCKS).expect("period")),
+        meter_window_blocks: WINDOW_BLOCKS,
         meter_queue_depth: NonZeroUsize::new(16).expect("meter depth"),
-        meter_tap: MeterTap::PostMatrix,
         observation_taps: 4,
     };
     let compiled = compile_host_session(SESSION, &caps()).expect("compiles");

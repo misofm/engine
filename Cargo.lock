@@ -1939,6 +1939,7 @@ name = "session"
 version = "0.1.0"
 dependencies = [
  "automation",
+ "bench-support",
  "engine",
  "json-syntax",
  "jsonschema",

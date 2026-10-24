@@ -21,8 +21,8 @@ use builtins_compiler::{
 use effect_compiler::{
     EffectCompileCaps, EffectControlProducer, EffectControlResources, EffectObservationHandle,
     LiveEffectAddress, LiveEffectRack, attach_effect_live_controls, attach_effect_observation,
-    effect_control_resources, launch_native_effect_registry, lowers_session_bypass,
-    prepare_native_session_effects, resolve_initial_values,
+    effect_control_resources, launch_native_effect_registry, prepare_native_session_effects,
+    resolve_initial_values,
 };
 use effect_contract::{
     AutomationRate, BypassSwitch, EffectControlRecord, NativeEffectFactory,
@@ -370,12 +370,16 @@ pub struct HostPrepareReport {
 /// [`HostLiveLanes::ALL`]. The C ABI's selection is [`controls::live_lanes`] (decision 17, C6).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct HostLiveControlRequest {
-    /// Meter window in frames for every meter (default or selected), or `None` for no meters.
-    pub meter_period_frames: Option<NonZeroU32>,
+    /// Meter window in blocks for every meter (default or selected), or `0` for the core default,
+    /// [`default_meter_window_blocks`] at the plan's rate and quantum (issue #1581 D2). There is
+    /// no "no meters" form: every entry that takes a request meters every strip
+    /// ([`meter_selection`]) unless the caller selects its own meters.
+    ///
+    /// [`default_meter_window_blocks`]: crate::meters::default_meter_window_blocks
+    /// [`meter_selection`]: crate::meters::meter_selection
+    pub meter_window_blocks: u32,
     /// Bounded per-meter snapshot queue depth.
     pub meter_queue_depth: NonZeroUsize,
-    /// Which chain boundary the default per-track meters observe.
-    pub meter_tap: MeterTap,
     /// Maximum declared observation taps to bind per effect instance, or `0` for **no observation
     /// capacity at all** (issue #143 D3, level 1).
     ///
@@ -385,7 +389,7 @@ pub struct HostLiveControlRequest {
     /// channel, because a subscription is a record in the effect's own observation queue, which only
     /// the effect's control lane drains.
     ///
-    /// The default observation period is derived from `meter_period_frames`; individual taps
+    /// The default observation period is the meter window; individual taps
     /// can use other periods. Latest gain-reduction observations can be independently aged,
     /// so a browser frame's peak interval does not establish the gain-reduction interval.
     pub observation_taps: u32,
@@ -394,9 +398,8 @@ pub struct HostLiveControlRequest {
 impl Default for HostLiveControlRequest {
     fn default() -> Self {
         Self {
-            meter_period_frames: None,
+            meter_window_blocks: 0,
             meter_queue_depth: NonZeroUsize::MIN,
-            meter_tap: MeterTap::PostMatrix,
             observation_taps: 0,
         }
     }
@@ -2193,6 +2196,15 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
     let route_count = u64::try_from(model.routes.len()).map_err(|_| platform("host.count"))?;
     let effect_count = count_effects(model)?;
     caps.validate_shape(compiled)?;
+    // Issue #1581 D1/D2: one window for every meter of the plan, and the core's strip selection
+    // unless the caller chose its own. The plain entry (no request) meters nothing.
+    let meter_config = requested_meter_config(live_controls, compiled)?;
+    let default_meters = if attach_live && selected_meters.is_none() {
+        crate::meters::meter_selection(model)
+    } else {
+        Vec::new()
+    };
+    let selected_meters = selected_meters.or(attach_live.then_some(default_meters.as_slice()));
     // The overlay the plan renders and lists under (#1559 D9): a successor's own, which holds its
     // master by strip ID (#1683); a first plan's solos nothing and designates no master (#1689 D3):
     // the app writes the strip's `master` row after boot.
@@ -2358,17 +2370,28 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
     // predecessor's base and this model: the join's model half, resolved against the plans' rows
     // once this plan is bound.
     let live_strips = attach_live;
+    // #1844: the automation table of each model is walked once, here, and the strip join, the
+    // send join, the following routes and their count look each owner up.
+    let model_automation = controls::AutomationIndex::of(model);
+    let view = controls::ModelView::whole(model).indexed(&model_automation);
+    let committed_automation = successor.map(|base| controls::AutomationIndex::of(base.committed));
     // The effective values of both models, computed once: the strip join and the send join read
     // the same rules (#1558 D1).
-    let effective = successor.map(|base| {
-        EffectiveDiff::new(
-            base.committed,
-            model,
-            LiveRamps::for_session(model),
-            base.edit_ramps,
-            base.monitor,
-        )
-    });
+    let effective = successor
+        .zip(committed_automation.as_ref())
+        .map(|(base, committed)| {
+            EffectiveDiff::new(
+                base.committed,
+                model,
+                LiveRamps::for_session(model),
+                base.edit_ramps,
+                base.monitor,
+                [
+                    AutomationReads::indexed(base.committed, committed),
+                    AutomationReads::indexed(model, &model_automation),
+                ],
+            )
+        });
     let strip_joins: Vec<StripJoin<'_>> = match (successor, &effective) {
         (Some(base), Some(diff)) => {
             join_strips(base.committed, model, live_strips, base.edit_ramps, diff)
@@ -2397,13 +2420,13 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
     // counts it; installed after bind.
     // Issue #1327 D1: a meter carries when its key and configuration are the predecessor's; the
     // joins that follow bind find the observers, this only decides that a program is needed.
-    let meters_may_carry = match (successor, requested_meter_config(live_controls)) {
-        (Some(base), Some(config)) => meters_may_carry(
+    let meters_may_carry = match successor {
+        Some(base) => meters_may_carry(
             &base.inventory.meters,
-            &requested_meter_owners(model, live_controls, selected_meters),
-            MeterConfigKey::of(&config),
+            &requested_meter_owners(selected_meters),
+            MeterConfigKey::of(&meter_config),
         ),
-        _ => false,
+        None => false,
     };
     // Issue #1395 D1: a spectrum capture carries when its target and channels are the
     // predecessor's and the two plans run at one rate and quantum; as for meters, this only decides
@@ -2587,11 +2610,7 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
     // queue, which only the effect's control lane drains, so "observe without live controls" has
     // no delivery path and is a rejection rather than a silent
     // half-attach. The published window is the meter window, derived rather than configured.
-    let observation_window_blocks = match (live_controls.meter_period_frames, compiled.quantum().0)
-    {
-        (Some(period), quantum) if quantum > 0 => (period.get() / quantum).max(1),
-        _ => 1,
-    };
+    let observation_window_blocks = meter_config.period_frames.get() / compiled.quantum().0.max(1);
     let effect_observations: Vec<EffectObservationHandle> = match live_controls.observation_taps {
         0 => Vec::new(),
         // Issue #1254 D2: without effect lanes there is no queue for a subscription to ride.
@@ -2621,7 +2640,7 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
     // Issue #137 D1/D2: the live-control requests are derived here, once, from the canonical strip
     // order, so `HostLiveControlHandles::strips` and the requested channels cannot disagree. The
     // strip list (issue #1207 D1) appends the submixes after the tracks. Every strip gets a control
-    // request (issue #1211 D1). Source semantics: tracks only for the default meters below, so
+    // request (issue #1211 D1), and the default meters are this list's order (#1581 D1);
     // `live_control_tracks` is exactly the strip list's track prefix.
     let live_control_strips: Vec<Box<str>> = model
         .tracks
@@ -2684,38 +2703,30 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
     } else {
         Vec::new()
     };
-    if selected_meters.is_some_and(|meters| !meters.is_empty())
-        && live_controls.meter_period_frames.is_none()
-    {
-        return Err(shape("host.meter.period"));
-    }
-    // A selected meter may name any strip (issue #1208 D1); the default set stays one per track.
-    let meter_tracks = requested_meter_owners(model, live_controls, selected_meters);
-    let meter_requests: Vec<SelectedMeterRequest> = match requested_meter_config(live_controls) {
-        None => Vec::new(),
-        Some(config) => meter_tracks
-            .iter()
-            .enumerate()
-            .map(|(index, (track, tap, metrics))| {
-                // Handles are `index + 1`: nonzero, stable in request order (canonical track order
-                // for the default set); nothing outside this function invents a meter handle.
-                let handle = u64::try_from(index)
-                    .ok()
-                    .and_then(|value| value.checked_add(1))
-                    .and_then(core::num::NonZeroU64::new)
-                    .ok_or_else(|| platform("host.count"))?;
-                Ok(SelectedMeterRequest {
-                    request: MeterRequest {
-                        handle: MeterHandle(handle),
-                        track_id: (*track).to_string(),
-                        tap: *tap,
-                        config,
-                    },
-                    metrics: *metrics,
-                })
+    // A selected meter may name any strip (issue #1208 D1); the default set is one per strip.
+    let meter_tracks = requested_meter_owners(selected_meters);
+    let meter_requests: Vec<SelectedMeterRequest> = meter_tracks
+        .iter()
+        .enumerate()
+        .map(|(index, (track, tap, metrics))| {
+            // Handles are `index + 1`: nonzero, stable in request order (canonical strip order
+            // for the default set); nothing outside this function invents a meter handle.
+            let handle = u64::try_from(index)
+                .ok()
+                .and_then(|value| value.checked_add(1))
+                .and_then(core::num::NonZeroU64::new)
+                .ok_or_else(|| platform("host.count"))?;
+            Ok(SelectedMeterRequest {
+                request: MeterRequest {
+                    handle: MeterHandle(handle),
+                    track_id: (*track).to_string(),
+                    tap: *tap,
+                    config: meter_config,
+                },
+                metrics: *metrics,
             })
-            .collect::<Result<Vec<_>, PrepareDiagnostics>>()?,
-    };
+        })
+        .collect::<Result<Vec<_>, PrepareDiagnostics>>()?;
     let builtin_caps = BuiltinCompileCaps {
         maximum_total_state_bytes: caps.maximum_builtin_retained_bytes,
         maximum_total_retained_payload_bytes: caps.maximum_builtin_retained_bytes,
@@ -2774,7 +2785,7 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
     // `automated` is the plan's. The arrival `a(tap)` is the compile report's, below.
     let mut follow_cells = Vec::new();
     for route in &model.routes {
-        let Some(automated) = following_route_lanes(model, route) else {
+        let Some(automated) = following_route_lanes(view, route) else {
             continue;
         };
         let Some(source) = route_source_strip(model, route) else {
@@ -2795,6 +2806,7 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
         let vca_mutes = follow_vca_mute_cells(
             |vca| builtins.vca_cells(vca),
             model,
+            &model_automation,
             route_source_id(route),
             &mut program,
         )
@@ -2914,7 +2926,7 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
         != model
             .routes
             .iter()
-            .filter(|route| follows_automated_mute(model, route))
+            .filter(|route| follows_automated_mute(view, route))
             .count()
     {
         return Err(graph_failure("host.route_control.attach"));
@@ -2927,7 +2939,7 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
             .routes
             .iter()
             .filter(|route| {
-                controls::route_rows_live(route) && !follows_automated_mute(model, route)
+                controls::route_rows_live(route) && !follows_automated_mute(view, route)
             })
             .map(|route| route.id.as_str())
             .collect();
@@ -3899,42 +3911,38 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
 }
 
 /// The meters a preparation builds, as `(strip ID, tap, metric set)` in reader order (#1327): the
-/// caller's selection, else one all-metric meter per track at the request's tap.
-fn requested_meter_owners<'a>(
-    model: &'a SessionModel,
-    live_controls: &HostLiveControlRequest,
-    selected_meters: Option<&'a [HostMeterRequest]>,
-) -> Vec<(&'a str, MeterTap, MeterMetricSet)> {
-    match selected_meters {
-        Some(meters) => meters
-            .iter()
-            .map(|meter| (meter.strip_id.as_ref(), meter.tap, meter.metrics))
-            .collect(),
-        None => model
-            .tracks
-            .iter()
-            .map(|track| {
-                (
-                    track.id.as_str(),
-                    live_controls.meter_tap,
-                    MeterMetricSet::ALL,
-                )
-            })
-            .collect(),
-    }
+/// caller's selection or the core's ([`crate::meters::meter_selection`]), and none for the plain
+/// entry.
+fn requested_meter_owners(
+    selected_meters: Option<&[HostMeterRequest]>,
+) -> Vec<(&str, MeterTap, MeterMetricSet)> {
+    selected_meters
+        .unwrap_or_default()
+        .iter()
+        .map(|meter| (meter.strip_id.as_ref(), meter.tap, meter.metrics))
+        .collect()
 }
 
-/// The configuration every meter of a preparation shares, or `None` when it builds no meter.
-fn requested_meter_config(live_controls: &HostLiveControlRequest) -> Option<MeterConfig> {
-    live_controls
-        .meter_period_frames
-        .map(|period_frames| MeterConfig {
-            period_frames,
-            peak_hold_frames: 0,
-            peak_decay_db_per_second: 0.0,
-            queue_capacity: live_controls.meter_queue_depth,
-            reset_generation: 0,
-        })
+/// The configuration every meter of a preparation shares (issue #1581 D2): the request's window,
+/// or the core default when it is `0`, in frames of the plan's quantum.
+fn requested_meter_config(
+    live_controls: &HostLiveControlRequest,
+    compiled: &CompiledSession,
+) -> Result<MeterConfig, PrepareDiagnostics> {
+    let quantum = compiled.quantum().0;
+    let blocks = NonZeroU32::new(live_controls.meter_window_blocks).unwrap_or_else(|| {
+        crate::meters::default_meter_window_blocks(compiled.sample_rate().0, quantum)
+    });
+    let period_frames = blocks
+        .checked_mul(NonZeroU32::new(quantum).ok_or_else(|| shape("host.meter.period"))?)
+        .ok_or_else(|| shape("host.meter.period"))?;
+    Ok(MeterConfig {
+        period_frames,
+        peak_hold_frames: 0,
+        peak_decay_db_per_second: 0.0,
+        queue_capacity: live_controls.meter_queue_depth,
+        reset_generation: 0,
+    })
 }
 
 /// Whether any of `owners` has a meter in `predecessor` with its key and `config` (#1327 D1).
@@ -4405,24 +4413,22 @@ impl SendRecord {
 /// `vca_cells` is the plan's `PreparedBuiltinsSession::vca_cells`. Empty lanes when no entry drives
 /// a VCA `mute` row. `program` is the plan's one automation program when the caller holds it (else
 /// it takes the VCA cells' own). `None` when a reaching VCA's entry has no cell in that program: a
-/// plan that disagrees with its model. Control side; it allocates the two lists.
+/// plan that disagrees with its model. `automation` is the index of `model`'s automation table
+/// (#1844). Control side; it allocates the two lists.
 pub(crate) fn follow_vca_mute_cells<P>(
     vca_cells: impl Fn(&str) -> Option<(std::sync::Arc<P>, builtins_compiler::VcaCells)>,
     model: &SessionModel,
+    automation: &controls::AutomationIndex<'_>,
     source: &session::StableId,
     program: &mut Option<std::sync::Arc<P>>,
 ) -> Option<[Vec<u32>; 2]> {
     let mut lanes = [Vec::new(), Vec::new()];
-    if !model
-        .automation
-        .iter()
-        .any(|entry| controls::vca_mute_row(&entry.target))
-    {
+    if !automation.any_vca_mute() {
         return Some(lanes);
     }
     for index in model.vca_reach_of(source) {
         let vca = &model.vcas.get(index)?.id;
-        let driven = controls::vca_mute_automation(model, vca);
+        let driven = automation.vca_mute(vca);
         if driven.iter().all(Option::is_none) {
             continue;
         }
@@ -4660,12 +4666,17 @@ pub(crate) struct FaderEventLanes {
 }
 
 impl FaderEventLanes {
-    /// The event lanes of strip `strip` in `model`, `reach` its VCA reach there (indices into
-    /// `model.vcas`, [`SessionModel::vca_reach`]).
-    pub(crate) fn of(model: &SessionModel, strip: &session::StableId, reach: &[usize]) -> Self {
+    /// The event lanes of strip `strip` in the committed model of `model`, `reach` its VCA reach
+    /// there (indices into its `vcas`, [`SessionModel::vca_reach`]). Lookups when `model` is
+    /// indexed (#1844).
+    pub(crate) fn of(
+        model: controls::ModelView<'_>,
+        strip: &session::StableId,
+        reach: &[usize],
+    ) -> Self {
         Self {
-            events: controls::fader_event_lanes(model, strip, reach),
-            own: controls::automated_fader_lanes(model, strip),
+            events: model.fader_event_lanes(strip, reach),
+            own: model.automated_fader_lanes(strip),
         }
     }
 
@@ -4976,6 +4987,68 @@ pub(crate) struct EffectiveDiff<'a> {
     /// Per strip of each model, whether the solo term of its mute holds ([`controls::solo_term`]).
     solo_before: Vec<bool>,
     solo_after: Vec<bool>,
+    /// Where the event lanes of `current` and of `next` are read from (#1844).
+    automation: [AutomationReads<'a>; 2],
+}
+
+/// Where a diff reads the automation entries of one model's rendered rows from (#1844): the
+/// [`controls::AutomationIndex`] its caller built once, or the model's table, scanned per read
+/// until more than `threshold` reads, then indexed once. A preparation reads every strip and
+/// following route, so it builds the index up front; the live classifier reads the few owners an
+/// edit reaches, where the scan is cheaper than the index (#1710's one-owner measurement).
+pub(crate) struct AutomationReads<'a> {
+    model: &'a SessionModel,
+    built: Option<&'a controls::AutomationIndex<'a>>,
+    threshold: usize,
+    reads: core::cell::Cell<usize>,
+    lazy: core::cell::OnceCell<controls::AutomationIndex<'a>>,
+}
+
+impl<'a> AutomationReads<'a> {
+    /// The reads of `model` through `index`, its index.
+    pub(crate) fn indexed(
+        model: &'a SessionModel,
+        index: &'a controls::AutomationIndex<'a>,
+    ) -> Self {
+        Self {
+            model,
+            built: Some(index),
+            threshold: 0,
+            reads: core::cell::Cell::new(0),
+            lazy: core::cell::OnceCell::new(),
+        }
+    }
+
+    /// The reads of `model`, indexed once past `threshold` reads.
+    #[cfg(feature = "control-provider")]
+    pub(crate) fn lazy(model: &'a SessionModel, threshold: usize) -> Self {
+        Self {
+            model,
+            built: None,
+            threshold,
+            reads: core::cell::Cell::new(0),
+            lazy: core::cell::OnceCell::new(),
+        }
+    }
+
+    /// The model, read whole, for one read: indexed when the caller built the index or once the
+    /// reads pass the threshold.
+    pub(crate) fn view(&self) -> controls::ModelView<'_> {
+        let whole = controls::ModelView::whole(self.model);
+        if let Some(index) = self.built {
+            return whole.indexed(index);
+        }
+        let reads = self.reads.get().saturating_add(1);
+        self.reads.set(reads);
+        if reads > self.threshold {
+            whole.indexed(
+                self.lazy
+                    .get_or_init(|| controls::AutomationIndex::of(self.model)),
+            )
+        } else {
+            whole
+        }
+    }
 }
 
 /// The solo term of every strip of `model` under `overlay`, in [`SessionModel::strips`] order.
@@ -4990,13 +5063,15 @@ fn solo_terms(model: &SessionModel, overlay: &controls::MonitorOverlay) -> Vec<b
 
 impl<'a> EffectiveDiff<'a> {
     /// The effective values of `current` under `monitor.committed` and of `next` under
-    /// `monitor.next` (decision 17, C7; #1559 D6).
+    /// `monitor.next` (decision 17, C7; #1559 D6). `automation` reads the event lanes of
+    /// `[current, next]`.
     pub(crate) fn new(
         current: &'a SessionModel,
         next: &'a SessionModel,
         ramps: LiveRamps,
         edit_ramps: &'a EditRamps,
         monitor: MonitorBase<'_>,
+        automation: [AutomationReads<'a>; 2],
     ) -> Self {
         Self {
             rules: LevelRules {
@@ -5012,7 +5087,13 @@ impl<'a> EffectiveDiff<'a> {
             reach_before: current.vca_reach(),
             solo_before: solo_terms(current, monitor.committed),
             solo_after: solo_terms(next, monitor.next),
+            automation,
         }
+    }
+
+    /// The post-change model, read for its automation entries (#1844).
+    pub(crate) fn automation(&self) -> controls::ModelView<'_> {
+        self.automation[1].view()
     }
 
     /// What the ramp rules read about the strip at `before` in `current` and `after` in `next`.
@@ -5060,7 +5141,7 @@ impl<'a> EffectiveDiff<'a> {
             &self.after.strips[after],
             [change.own_before, change.own_after],
             self.rules.lengths(&change),
-            || FaderEventLanes::of(self.rules.next.structure(), change.id, change.reach),
+            || FaderEventLanes::of(self.automation(), change.id, change.reach),
         )
     }
 
@@ -5095,19 +5176,23 @@ impl<'a> EffectiveDiff<'a> {
         let mut level = self.strip_level_records(before, after)?;
         let records = &mut level.fader;
         let change = self.change(before, after);
-        let next = self.rules.next.structure();
+        let [before_reads, next_reads] = &self.automation;
         let lost =
             |lanes: [bool; 2], kept: [bool; 2]| [0, 1].map(|lane| lanes[lane] && !kept[lane]);
         // #1655 D6: an event lane (an own curve, or a reaching automated VCA's) that the change
         // makes a plain lane is released; a lane that stays an event lane keeps its composed
         // stage, which the carry repositions.
         let fader_released = lost(
-            controls::fader_event_lanes(self.rules.current, change.id, change.reach_before),
-            controls::fader_event_lanes(next, change.id, change.reach),
+            before_reads
+                .view()
+                .fader_event_lanes(change.id, change.reach_before),
+            next_reads.view().fader_event_lanes(change.id, change.reach),
         );
         let mute_released = lost(
-            controls::mute_event_lanes(self.rules.current, change.id, change.reach_before),
-            controls::mute_event_lanes(next, change.id, change.reach),
+            before_reads
+                .view()
+                .mute_event_lanes(change.id, change.reach_before),
+            next_reads.view().mute_event_lanes(change.id, change.reach),
         );
         if fader_released == [false; 2] && mute_released == [false; 2] {
             return Ok(level);
@@ -5233,7 +5318,10 @@ fn route_source_id(route: &session::Route) -> &session::StableId {
 /// compiles mute cells from, or an automated VCA `mute` lane reaches it). Every other route keeps
 /// the six-word cell. A route into the output never follows.
 #[must_use]
-pub(crate) fn follows_automated_mute(model: &SessionModel, route: &session::Route) -> bool {
+pub(crate) fn follows_automated_mute(
+    model: controls::ModelView<'_>,
+    route: &session::Route,
+) -> bool {
     following_route_lanes(model, route).is_some()
 }
 
@@ -5241,30 +5329,27 @@ pub(crate) fn follows_automated_mute(model: &SessionModel, route: &session::Rout
 /// automated VCA's), when that plan gives `route` the seven-word cell of a following route
 /// ([`follows_automated_mute`]), else `None`: the `automated` bits of the route's records (#1652
 /// D1, #1653 D1, #1655 D4). The source's VCA reach is read only when an entry drives a VCA `mute`
-/// row and an own mute lane is not automated.
+/// row and an own mute lane is not automated. `model`'s committed model is read; lookups when it
+/// is indexed (#1844).
 #[must_use]
 pub(crate) fn following_route_lanes(
-    model: &SessionModel,
+    model: controls::ModelView<'_>,
     route: &session::Route,
 ) -> Option<[bool; 2]> {
     if !matches!(
         route.destination,
         session::RouteDestination::SubmixInput { .. }
-    ) || model.automation.is_empty()
+    ) || model.structure().automation.is_empty()
     {
         return None;
     }
     let source = route_source_id(route);
-    let own = controls::mute_automation(model, source).map(|entry| entry.is_some());
-    let lanes = if own == [true; 2]
-        || !model
-            .automation
-            .iter()
-            .any(|entry| controls::vca_mute_row(&entry.target))
-    {
+    // The own mute lanes: the event lanes with no reach.
+    let own = model.mute_event_lanes(source, &[]);
+    let lanes = if own == [true; 2] || !model.any_vca_mute() {
         own
     } else {
-        controls::mute_event_lanes(model, source, &model.vca_reach_of(source))
+        model.mute_event_lanes(source, &model.structure().vca_reach_of(source))
     };
     lanes.contains(&true).then_some(lanes)
 }
@@ -5576,15 +5661,6 @@ pub(crate) fn effect_instance_records(
         return Err(LiveRebuild::Structure);
     }
     let bypass = (before.bypass != after.bypass).then_some(after.bypass);
-    if bypass.is_some() {
-        // The session bypass of an effect that does not lower it stays a prepared bypass.
-        let EffectIdentity::Native { effect_id } = &after.identity else {
-            return Err(LiveRebuild::Structure);
-        };
-        if !lowers_session_bypass(effect_id.as_str()) {
-            return Err(LiveRebuild::RebuildOnly(RebuildReason::Correctness));
-        }
-    }
     let (mut records, targets) = if same_params(&before.params, &after.params) {
         (Vec::new(), None)
     } else {
@@ -6135,7 +6211,7 @@ fn join_routes<'a>(
         // #1652 D3 (#1652c): a route the successor gives the seven-word cell takes the
         // seven-word record, written only when a word the models hold changes; any other route
         // keeps today's record.
-        let retarget = if let Some(automated) = following_route_lanes(model, after) {
+        let retarget = if let Some(automated) = following_route_lanes(diff.automation(), after) {
             let Some(source) = diff.source_strips(before, after) else {
                 continue;
             };

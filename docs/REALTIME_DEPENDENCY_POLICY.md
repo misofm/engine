@@ -517,6 +517,15 @@ release build cannot silently rot again. That gates exactly what rotted: the clo
 failure that happens while compiling the test targets, so building them is enough to catch it, and
 doing so is deterministic.
 
+That job overrides three codegen settings at job level (issue #1511 D2): `lto = "thin"`,
+`codegen-units = 16` and `debug = 0`. The clobber is a property of the profile name `release`, its
+panic setting (which makes Cargo build two variants) and the `cdylib`/`staticlib` crate-types (which
+give un-hashed filenames); none of the three settings changes the variant count or a filename, and
+`thin` is still a Cargo-level LTO setting, so the unit graph keeps its shape. The
+`cfg(debug_assertions)` residual depends on `debug-assertions`, which is not overridden. Shipped
+artifacts and every per-package `-p` release leg keep D12's full `[profile.release]`; the one loss
+is that the nightly 100x randomized differentials run under thin, not fat, LTO.
+
 Design #359 §12 stage 4 moved this off the per-PR path: the old `release-build.yml` ran the script
 unconditionally on every push to `main`, and on a pull request only when the diff touched a Cargo
 manifest, `rust-toolchain.toml`, the script, or the workflow itself. That workflow is retired.

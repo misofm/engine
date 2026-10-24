@@ -105,6 +105,23 @@ impl MonitorOverlay {
         }
     }
 
+    /// The bytes an overlay [`Self::after`] returns can retain on a session of `strips` strips
+    /// whose IDs total `strip_id_bytes` and whose longest ID is `longest_strip_id` bytes (#1696
+    /// D1): the solo vector at its reserve, one copy of each soloed strip's ID text (a solo names
+    /// a distinct strip) and the master's copy of one ID. A ceiling of the session's shape, not of
+    /// its edits.
+    #[must_use]
+    pub fn retained_ceiling(
+        strips: usize,
+        strip_id_bytes: usize,
+        longest_strip_id: usize,
+    ) -> Option<usize> {
+        strips
+            .checked_mul(size_of::<StableId>())?
+            .checked_add(strip_id_bytes)?
+            .checked_add(longest_strip_id)
+    }
+
     /// Whether the two overlays solo the same strips: a change of the master alone moves no
     /// effective value.
     #[must_use]
@@ -133,12 +150,34 @@ impl MonitorOverlay {
     /// result, and `None` (the session's `mute_ms`) when no solo write changed anything or the last
     /// such write gave no ramp; a master write has no ramp, since it moves no render value. A strip
     /// `next` no longer has is dropped from the result.
+    ///
+    /// The result's solo vector is reserved to `next`'s strip count (#1696 D2), or holds nothing
+    /// when no strip is or becomes soloed, and a solo names a strip of `next`, so its capacity is
+    /// at most that count and no solo write reallocates it: the charge
+    /// [`Self::retained_ceiling`] is a layout, not a growth estimate.
     #[must_use]
     pub fn after(&self, writes: &[MonitorWrite], next: &SessionModel) -> MonitorChange {
-        let mut overlay = self.clone();
+        let in_next = |id: &StableId| crate::registry::strip_index(next, id).is_some();
+        // An overlay that solos nothing and gets no solo keeps no vector, so a value edit
+        // allocates nothing here; any other reserves the whole strip count at once.
+        let solos = !self.soloed.is_empty()
+            || writes
+                .iter()
+                .any(|write| write.row == MonitorRow::Solo && write.on);
+        let mut soloed = Vec::with_capacity(if solos { next.strips().count() } else { 0 });
+        soloed.extend(self.soloed.iter().filter(|id| in_next(id)).cloned());
+        let mut overlay = Self {
+            soloed,
+            master: self.master.clone(),
+        };
         for write in writes {
             match write.row {
-                MonitorRow::Solo => overlay.set_soloed(&write.strip, write.on),
+                // A solo of a strip `next` does not have is dropped below anyway; skipping it here
+                // keeps the vector within its reserve. Solo writes to distinct IDs commute.
+                MonitorRow::Solo if in_next(&write.strip) => {
+                    overlay.set_soloed(&write.strip, write.on);
+                }
+                MonitorRow::Solo => {}
                 MonitorRow::Master => overlay.set_master(&write.strip, write.on),
             }
         }
@@ -487,11 +526,7 @@ impl<'a> ModelInputs<'a> {
             .routes
             .iter()
             .map(|route| {
-                let id = source_id(route);
-                model
-                    .strips()
-                    .position(|strip| strip.id == id)
-                    .unwrap_or(strip_count)
+                crate::registry::strip_index(model, source_id(route)).unwrap_or(strip_count)
             })
             .collect();
         Self {

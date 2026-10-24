@@ -2345,7 +2345,8 @@ pub trait GraphPreparedBuiltinBankProcessor: Send + Any {
     ///
     /// The default is [`SeamSide::UpstreamOfSeam`] for the reason
     /// `rack::BankStage::seam_side` gives: it is the conservative answer, because an
-    /// upstream stage that has not written a one-plane body declines the whole chain.
+    /// upstream stage that has not written a one-plane body ends the collapsible prefix, and
+    /// declines the whole chain when it is the first slot.
     fn seam_side(&self) -> SeamSide {
         SeamSide::UpstreamOfSeam
     }

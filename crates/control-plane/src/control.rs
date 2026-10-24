@@ -96,6 +96,9 @@ pub(crate) struct KeptBase {
     pub(crate) monitor: controls::MonitorOverlay,
     /// The ramp length of every row an edit committed after the epoch's last revision gave one,
     /// the latest edit winning on every row it wrote (#1394 D2's rule across transactions).
+    /// Pruned to the newest committed model's owners, with no rewritten targets, whenever it is
+    /// stored (`EditRamps::keep_within`, #1696 root ruling): its bound is that model's, not this
+    /// epoch's, and `CapiResources::edit_ramps` charges it so, `KEPT_BASES` times.
     pub(crate) edit_ramps: session::EditRamps,
     /// The ramp of the latest overlay change committed after the epoch's last revision, or `None`
     /// while no commit since wrote a monitor row: a replacement that writes none renders the
@@ -139,6 +142,12 @@ impl ProviderEpoch {
     #[cfg(feature = "test-support")]
     pub fn test_carried(&self) -> (u64, u64) {
         (self.carried.total, self.carried.overhead)
+    }
+
+    /// The edit ramps this epoch's kept base holds, or `None` while it keeps no base (#1696).
+    #[cfg(feature = "test-support")]
+    pub fn test_kept_ramps(&self) -> Option<&session::EditRamps> {
+        self.kept.as_ref().map(|kept| &kept.edit_ramps)
     }
 
     /// What this epoch's plan holds, for preparing its successor (#1323's gates read its floors).
@@ -2455,7 +2464,7 @@ where
         };
         // The ramp lengths the epoch B succeeds keeps from now on: B's own, or, across a
         // withdrawn candidate, the kept base's with B's laid over them (B wins on a shared row).
-        let kept_ramps = if superseding {
+        let mut kept_ramps = if superseding {
             let kept = self
                 .kept_holder()
                 .and_then(|holder| holder.kept.as_ref())
@@ -2472,6 +2481,9 @@ where
                 .ok_or(CommandError::Internal)?,
             Rebuild::Discontinuity(model) => &**model,
         };
+        // #1696 root ruling: a kept base holds only the rows of owners B's model has, and no
+        // rewritten targets, so the ramp row of B's model bounds it.
+        kept_ramps.keep_within(prospective.normalized_model());
         // #1698 (amending #1310 D2 and #1344 D1): across a withdrawn candidate A, P0's own
         // inventory, with only the source rows A carries from P0, and P0's kept base. An owner B
         // keeps unchanged from P0 carries from P0 as a direct P0 -> B swap carries it; a source A
@@ -3128,6 +3140,10 @@ where
             ),
         };
         let next = view.structure();
+        // #1696: only a transaction compiled whole can add or remove an owner (an in-place or an
+        // edited view reads the committed model's structure); every other keeps the owner set,
+        // and with it the ramp row's bound and a kept base's pruning, as they are.
+        let owners_change = matches!((transaction.edited_owners(), in_place), (None, false));
         // #1559 D6, D7: the overlay the transaction leaves, and the classifier's view of both.
         let monitor_change = self.monitor.after(prepared.get().monitor_edits(), next);
         let monitor_only = prepared.get().is_monitor_only();
@@ -3194,10 +3210,15 @@ where
                     .is_untouched()
             })
             .map(|kept| {
-                merged_ramps(
+                let mut ramps = merged_ramps(
                     &kept.edit_ramps,
                     prepared.get().prospective_session().edit_ramps(),
-                )
+                );
+                // #1696 root ruling: pruned to the committed model, as a rebuild stores them.
+                if owners_change {
+                    ramps.keep_within(next);
+                }
+                ramps
             });
         // And the ramp of the overlay change, when the edit writes a monitor row: a replacement
         // that writes none renders the solo with it (#1310, kept monitor overlay).
@@ -3207,7 +3228,28 @@ where
         // 1. Admission (#1053 D8), with the catalog of the committed model built first, so that
         // its growth is charged and the commit's last steps cannot fail for room (#1552 D3,
         // #1558 D6). Its refusal is the compile diagnostic a rebuild would give, before any write.
-        let catalog = match self.live_admission(&prepared, &monitor_change.overlay, view, &delta) {
+        // #1696 root ruling: the committed model's edit-ramp row, which the newest epoch's follows.
+        let committed_ramps = if owners_change {
+            match monitor_rows(next) {
+                Ok(rows) => rows.edit_ramps,
+                Err(failure) => {
+                    return LiveCommit::Done(Err(CommandError::CompileRejected(failure)));
+                }
+            }
+        } else {
+            self.pending_providers
+                .last()
+                .unwrap_or(&self.providers)
+                .capi
+                .edit_ramps
+        };
+        let catalog = match self.live_admission(
+            &prepared,
+            &monitor_change.overlay,
+            view,
+            &delta,
+            committed_ramps,
+        ) {
             Ok(catalog) => catalog,
             Err(error) => return LiveCommit::Done(Err(error)),
         };
@@ -3579,6 +3621,10 @@ where
         // admissions charge, and `plan_resources` reports the retained bytes. An older epoch's row
         // keeps the catalog it was prepared with until its plan is gone. Nothing here fails.
         newest_capi.follow_catalog(previous_catalog, committed_catalog);
+        // #1696 root ruling: and the committed model's edit-ramp row, so a VCA added live is
+        // charged at once, in the admissions and in the report.
+        let previous_ramps = newest_capi.edit_ramps;
+        newest_capi.follow_edit_ramps(committed_ramps);
         {
             let mut reports = self
                 .shared
@@ -3590,7 +3636,9 @@ where
                 resources.control_retained_bytes = resources
                     .control_retained_bytes
                     .saturating_sub(previous_catalog.retained_bytes)
-                    .saturating_add(committed_catalog.retained_bytes);
+                    .saturating_add(committed_catalog.retained_bytes)
+                    .saturating_sub(previous_ramps)
+                    .saturating_add(committed_ramps);
                 resources.largest_named_allocation_bytes = resources
                     .largest_named_allocation_bytes
                     .max(committed_catalog.largest_allocation_bytes);
@@ -3633,6 +3681,7 @@ where
         overlay: &controls::MonitorOverlay,
         view: controls::ModelView<'_>,
         delta: &host_core::LiveDelta<'_>,
+        committed_ramps: u64,
     ) -> Result<host_core::StagedCatalog, CommandError> {
         let transaction = prepared.get().prospective_session();
         let committed = self.controller.session().compiled();
@@ -3672,13 +3721,17 @@ where
         // A values-only stage holds no table: the catalog stays as large as it is, and only a
         // full catalog is held beside the current one until the commit publishes it.
         let current_catalog = self.controller.provider().catalog_resources();
-        let catalog_admission = LiveCatalogAdmission::between(
+        let mut catalog_admission = LiveCatalogAdmission::between(
             current_catalog,
             match &catalog {
                 host_core::StagedCatalog::Values(_) => current_catalog,
                 host_core::StagedCatalog::Full(full) => full.resources(),
             },
         );
+        // #1696 root ruling: a VCA added live raises the bound of the ramps a kept base holds.
+        let newest = self.pending_providers.last().unwrap_or(&self.providers);
+        catalog_admission.ramp_growth_bytes =
+            committed_ramps.saturating_sub(newest.capi.edit_ramps);
         validate_live_peak(
             self.held_epochs()?.as_slice(),
             models,
@@ -4583,9 +4636,10 @@ mod tests {
                 maximum_builtin_retained_bytes: 100_000_000,
                 maximum_control_retained_bytes: 10_000_000,
                 maximum_named_allocation_bytes: 100_000_000,
-                maximum_meter_streams: 1,
-                maximum_meter_items: 1,
-                maximum_meter_bytes: 1,
+                // One meter stream per strip (#1581 D2): generous for every test session.
+                maximum_meter_streams: 4_096,
+                maximum_meter_items: 1 << 20,
+                maximum_meter_bytes: 1 << 26,
                 maximum_control_frame_bytes: 4_096,
                 maximum_replay_bytes: 8_192,
                 maximum_replay_entries: 16,

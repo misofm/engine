@@ -598,18 +598,39 @@ fn effect_preparation_matches_engine_and_cli_refuses_without_canonical_output() 
     }
 }
 
-/// Decision 14's probe (F1), closed by decision 15 E1 (#1335 gate 2): an automation on the
-/// observation fixture's EQ `band-1-enabled` passes stages 1-4 and fails `prepare-effects` with
-/// `control.automation.target` at the automation; the same automation on the block-rate
-/// `band-1-gain` passes every stage.
+/// Decision 14's probe (F1), closed by decision 15 E1 (#1335 gate 2): an automation on a
+/// prepared parameter -- a true-peak limiter's `lookahead`, added to the observation fixture's
+/// track (the EQ's `band-1-enabled` was the subject until #1337 made it live) -- passes stages 1-4
+/// and fails `prepare-effects` with `control.automation.target` at the automation; the same
+/// automation on the EQ's block-rate `band-1-gain` passes every stage.
 ///
 /// Red mutation: refuse the target anywhere `session-validator` does not run (a host-only check)
 /// -> the probe passes all five stages, as it did on 2026-10-04.
 #[test]
 fn an_automation_on_a_prepared_effect_parameter_fails_effect_preparation() {
-    let base: serde_json::Value =
+    let mut base: serde_json::Value =
         serde_json::from_str(&fixture("observation-frame-shape.json")).unwrap();
-    for (parameter_id, unit, expected) in [(1, "linear", true), (4, "db", false)] {
+    let track = base["tracks"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .find(|track| track["id"] == "t1")
+        .expect("track t1");
+    track["inserts"]["effects"]
+        .as_array_mut()
+        .unwrap()
+        .push(serde_json::json!({
+            "id": "limiter",
+            "identity": { "kind": "native", "effect_id": "miso.true-peak-limiter" },
+            "quality": "normal",
+            "bypass": false,
+            "link_mode": "dual_mono",
+            "params": [],
+            "sidechain": { "kind": "none" }
+        }));
+    for (slot, parameter_id, unit, expected) in
+        [("limiter", 3, "milliseconds", true), ("eq", 4, "db", false)]
+    {
         let mut value = base.clone();
         value["automation"] = serde_json::json!([{
             "id": "probe",
@@ -617,7 +638,7 @@ fn an_automation_on_a_prepared_effect_parameter_fails_effect_preparation() {
                 "owner": "strip",
                 "owner_id": "t1",
                 "section": "inserts",
-                "slot_id": "eq",
+                "slot_id": slot,
                 "control": parameter_id,
                 "lane": "both"
             },

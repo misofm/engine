@@ -605,8 +605,9 @@ pub trait BankStage: Send {
     /// not the permissive one: an upstream stage is one a collapsed chain would have to run
     /// one-plane, so a stage that has not spoken is one the collapse must be able to run through --
     /// and it cannot, because [`supports_mono_collapse`](Self::supports_mono_collapse) defaults to
-    /// `false`. An unclassified stage therefore declines the whole chain rather than being silently
-    /// treated as seam-side and left to read a plane nobody gathered.
+    /// `false`. An unclassified stage therefore ends the collapsible prefix (issue #974) -- and
+    /// declines the whole chain when it is the first slot -- rather than being silently treated as
+    /// seam-side and left to read a plane nobody gathered.
     fn seam_side(&self) -> SeamSide {
         SeamSide::UpstreamOfSeam
     }
@@ -614,8 +615,9 @@ pub trait BankStage: Send {
     /// Whether this stage implements [`process_mono`](Self::process_mono) and
     /// [`desymmetrize`](Self::desymmetrize).
     ///
-    /// Decided off the render thread, at bind, and cached by [`BankChain::new`]: a chain whose
-    /// upstream prefix contains one stage that answers `false` can never collapse.
+    /// Decided off the render thread, at bind, and cached by [`BankChain::new`]: the first upstream
+    /// stage that answers `false` ends the collapsible prefix, and runs dual with every slot after
+    /// it (issue #974). A chain whose first slot answers `false` can never collapse.
     fn supports_mono_collapse(&self) -> bool {
         false
     }
@@ -1403,8 +1405,7 @@ const fn lane_witness(designed: bool, restored: bool) -> ChannelSymmetryWitness 
 ///
 /// # A session bypass is a lane of this stage (issue #1087)
 ///
-/// A session's `bypass`, on every effect but the multiband (which keeps a prepared bypass, issue
-/// #1100), is lowered to a prepared `bypass = false` plus a lane
+/// A session's `bypass`, on every effect (the multiband's since #1340), is lowered to a prepared `bypass = false` plus a lane
 /// ([`EffectControlLane::without_channel`] when no live controls are attached) whose bypass is set,
 /// so a bypassed track keeps its bank. Its lane runs the wet path with the others and step 4
 /// mixes in its latency-matched dry signal: once settled, the same words the effect's own
@@ -3136,22 +3137,31 @@ impl<'a> ResidentOutputLane<'a> {
 /// # The mono collapse
 ///
 /// A chain that gathers its tracks' inputs (issue #970) and whose every active lane renders a track
-/// doing bit-identical work on both channels runs
-/// its **upstream** slots over one plane and duplicates that plane into its seam-side slots. The
-/// whole mechanism is four decisions and one copy:
+/// doing bit-identical work on both channels in its **collapsible prefix** runs that prefix over
+/// one plane and duplicates the plane into every later slot. The prefix is the leading run of
+/// upstream slots with a one-plane body (issue #974): an upstream slot without one, and every slot
+/// after it, runs its dual body on the duplicated planes. The whole mechanism is four decisions
+/// and one copy:
 ///
 /// 1. **Bind time.** `BankChain::collapse_prefix_of` works out how many
 ///    leading slots a collapsed block would run one-plane, and answers `0` -- never collapse --
-///    unless the seam-side slots are a suffix, the prefix is non-empty, every prefix slot has
-///    written a one-plane body, and every slot runs on exactly this chain's lanes.
+///    unless the seam-side slots are a suffix, the first slot has a one-plane body, and every slot
+///    runs on exactly this chain's lanes.
 /// 2. **Bind time, again.** [`arm_mono_collapse`](BankChain::arm_mono_collapse) records the
 ///    *structural* half of the witness, which a chain cannot see for itself. Unarmed is declining.
 /// 3. **Per block, before a sample moves.** Every slot's live cells are read and its queues drained
-///    ([`BankStage::begin_block`]) and *then* the witness is read, in that order and for the
-///    reason `begin_block` documents.
+///    ([`BankStage::begin_block`]) and *then* the prefix slots' witness is read, in that order and
+///    for the reason `begin_block` documents. A slot after the prefix has no say: it runs dual on
+///    the duplicated planes, so its own L/R words -- equal or not -- are the dual run's words.
 /// 4. **The seam.** After the prefix, one copy of the resident block's left plane into its right.
-///    Everything downstream -- the fader, the matrix, the scatter, the route fold, the master
-///    accumulation -- then runs the arithmetic it runs on a dual block, in its own operation order.
+///    Everything downstream -- a later upstream slot, the fader, the matrix, the scatter, the route
+///    fold, the master accumulation -- then runs the arithmetic it runs on a dual block, in its own
+///    operation order.
+///
+/// Why a partial prefix is exact: the prefix slots see bit-identical planes and symmetric words,
+/// so their one-plane body is exact by the [`BankStage::process_mono`] contract; the seam copy
+/// makes every later slot's input bit-identical to the dual run's, and that slot runs its dual
+/// body, so every later word is the dual run's.
 ///
 /// Leaving the collapsed mode costs one whole-state copy per prefix slot
 /// ([`BankStage::desymmetrize`]) on the block that stops, which is what makes the first dual block
@@ -3176,10 +3186,12 @@ impl<'a> ResidentOutputLane<'a> {
 ///   counterfactual dual run's right state but literally that state
 ///   (`Self::disengage_collapse`);
 /// * it is **preserved by any dual block whose witness preserves agreement**
-///   ([`ChannelSymmetryWitness::AGREEING`]) -- equal inputs over equal state with equal words
-///   leave equal state, which is the same induction the engage direction has always rested on;
-/// * it is **cleared by any dual block that does not**, and after that only a proof brings it
-///   back ([`BankStage::channels_agree`]);
+///   ([`ChannelSymmetryWitness::AGREEING`]) over symmetric inputs
+///   ([`set_input_symmetric`](Self::set_input_symmetric), issue #987) -- equal inputs over equal
+///   state with equal words leave equal state, which is the same induction the engage direction
+///   has always rested on;
+/// * it is **cleared by any dual block that does not**, or whose input term is down, and after
+///   that only a proof brings it back ([`BankStage::channels_agree`]);
 /// * at a plan swap it is **ANDed with what each carried lane's predecessor chain hands over**
 ///   ([`inherit_channel_agreement`](Self::inherit_channel_agreement), issue #1276 D5), and a
 ///   predecessor hands over [`carried_channel_agreement`](Self::carried_channel_agreement): its
@@ -3258,6 +3270,17 @@ pub struct BankChain {
     /// holds both halves -- `PreparedRenderPlan::arm_mono_collapse`, which has the session's
     /// structural witnesses and the plan's per-lane track names -- is the only one that can arm it.
     collapse_source: bool,
+    /// The **per-block** input term (issue #987): this block's input planes carry the same samples
+    /// on every active lane, as far as the caller can prove it without reading them.
+    ///
+    /// `true` from construction, which leaves a chain that gathers its tracks' inputs exactly as
+    /// it was: there [`collapse_source`](Self::collapse_source) already says it. A chain that reads
+    /// planes an earlier chain produced has its caller set it from that producer's
+    /// [`planes_identical`](Self::planes_identical) -- a fact about how the producer rendered, not
+    /// a left/right comparison. The value is sticky: it holds until the next call, so the caller
+    /// sets it before every block. Unlike `SOURCE` it can be an episode, so a
+    /// dual block with it down clears [`collapse_channels_agree`](Self::collapse_channels_agree).
+    input_symmetric: bool,
     /// Blocks this chain rendered collapsed. Evidence only, read after render is disarmed.
     collapses: u64,
     /// Collapsed blocks whose seam still copied the left plane into the right one: the first
@@ -3411,6 +3434,7 @@ impl BankChain {
             // witness compares and declines on.
             collapse_channels_agree: true,
             collapse_source: false,
+            input_symmetric: true,
             collapses: 0,
             seam_copies: 0,
             transitions: [0; 3],
@@ -3451,29 +3475,33 @@ impl BankChain {
     ///    `SYMMETRIC`), so collapsing on its witness would be collapsing on an unconditional
     ///    `true`. This is `PlanUnitEligibility::witness_is_vacuous` enforced rather than
     ///    reported.
-    /// 3. **Every prefix slot has a one-plane body.** A dual body handed the ungathered right
-    ///    plane would not merely write garbage into a plane the seam overwrites -- a linked
-    ///    detector reads *both* planes to compute the level it applies to the left one, so the
-    ///    left output would be wrong too.
+    /// 3. **The prefix ends at the first upstream slot without a one-plane body** (issue #974).
+    ///    A dual body handed the ungathered right plane would not merely write garbage into a
+    ///    plane the seam overwrites -- a linked detector reads *both* planes to compute the level
+    ///    it applies to the left one, so the left output would be wrong too. So the seam sits
+    ///    before that slot: it and every later slot run dual on the duplicated planes, which are
+    ///    the dual run's inputs bit for bit. A chain whose first slot has no one-plane body has
+    ///    an empty prefix and clause 2 declines it.
     /// 4. **Every slot runs on exactly this chain's active lanes.** The collapse is
     ///    all-lanes-or-nothing and the witness is conjoined over the slots a lane runs; a slot that
     ///    is an identity on some lanes would make "every active lane is eligible" and "every slot
     ///    agreed for every active lane" two different statements.
     fn collapse_prefix_of(slots: &[BankSlot], active: &[bool]) -> usize {
-        let prefix = slots
+        let upstream = slots
             .iter()
             .take_while(|slot| slot.stage.seam_side() == SeamSide::UpstreamOfSeam)
             .count();
-        let seam_side_is_a_suffix = slots[prefix..]
+        let seam_side_is_a_suffix = slots[upstream..]
             .iter()
             .all(|slot| slot.stage.seam_side() == SeamSide::SeamSide);
-        let prefix_is_collapsible = slots[..prefix]
+        let prefix = slots[..upstream]
             .iter()
-            .all(|slot| slot.stage.supports_mono_collapse());
+            .take_while(|slot| slot.stage.supports_mono_collapse())
+            .count();
         let lanes_agree = slots
             .iter()
             .all(|slot| slot.active_lanes.as_ref() == active);
-        if prefix > 0 && seam_side_is_a_suffix && prefix_is_collapsible && lanes_agree {
+        if prefix > 0 && seam_side_is_a_suffix && lanes_agree {
             prefix
         } else {
             0
@@ -3519,6 +3547,12 @@ impl BankChain {
 
     /// This cohort lane's channel-symmetry witness: the conjunction over every slot of the chain.
     ///
+    /// Whole-chain evidence, and so stricter than the collapse decision, which conjoins only the
+    /// collapsible prefix's slots (issue #974). The same holds for
+    /// [`all_lanes_symmetric`](Self::all_lanes_symmetric),
+    /// [`active_lane_eligibility`](Self::active_lane_eligibility) and
+    /// [`symmetry_counters`](Self::symmetry_counters).
+    ///
     /// Stages maintain designed and live terms at preparation or event-drain boundaries. This
     /// single-lane evidence helper pulls only the requested lane. Render and the bank-wide
     /// helpers publish all lanes once per active stage through `lane_symmetry_bank` instead.
@@ -3542,15 +3576,17 @@ impl BankChain {
     }
 
     // REALTIME_POLICY_BEGIN
-    /// One publication per active stage; slot identities contribute no terms.
-    fn lane_symmetry_bank(&self) -> [ChannelSymmetryWitness; 8] {
+    /// One publication per active stage of the leading `slots` slots; slot identities contribute
+    /// no terms. The collapse decision passes its prefix (issue #974); the evidence helpers pass
+    /// the whole chain.
+    fn lane_symmetry_bank(&self, slots: usize) -> [ChannelSymmetryWitness; 8] {
         let mut witnesses = [ChannelSymmetryWitness::DECLINED; 8];
         for (witness, active) in witnesses.iter_mut().zip(self.active.iter()) {
             if *active {
                 *witness = ChannelSymmetryWitness::SYMMETRIC;
             }
         }
-        for slot in &self.slots {
+        for slot in &self.slots[..slots] {
             if slot.has_active_lanes() {
                 let stage = slot
                     .stage
@@ -3586,7 +3622,7 @@ impl BankChain {
     /// member list does.
     #[must_use]
     pub fn active_lane_eligibility(&self) -> Vec<bool> {
-        let witnesses = self.lane_symmetry_bank();
+        let witnesses = self.lane_symmetry_bank(self.slots.len());
         (0..self.lanes)
             .filter(|lane| self.active[*lane])
             .map(|lane| witnesses[lane].eligible())
@@ -3602,7 +3638,7 @@ impl BankChain {
     #[must_use]
     pub fn all_lanes_symmetric(&self) -> bool {
         self.all_active_witnesses_hold(
-            &self.lane_symmetry_bank(),
+            &self.lane_symmetry_bank(self.slots.len()),
             ChannelSymmetryWitness::SYMMETRIC.terms(),
         )
     }
@@ -3614,6 +3650,9 @@ impl BankChain {
     /// `UNBYPASSED` term: see [`ChannelSymmetryWitness::AGREEING`] for why a bypass window is the
     /// one way to lose the witness without moving the two channels apart.
     ///
+    /// The witnesses are the collapsible prefix's (issue #974): the invariant is over prefix
+    /// state, and a later slot's words cannot move the prefix's channels apart.
+    ///
     /// Reuses the eligibility publication when armed. The forced-off path publishes only if
     /// this maintenance step is reached, after any disengage has restored channel state.
     fn all_lanes_preserve_agreement(&self, witnesses: &[ChannelSymmetryWitness; 8]) -> bool {
@@ -3623,7 +3662,7 @@ impl BankChain {
     /// `[eligible active lanes, active lanes]` for this chain. Evidence and gates only.
     #[must_use]
     pub fn symmetry_counters(&self) -> [u64; 2] {
-        let witnesses = self.lane_symmetry_bank();
+        let witnesses = self.lane_symmetry_bank(self.slots.len());
         let mut counters = [0_u64; 2];
         for (lane, witness) in witnesses.iter().enumerate().take(self.lanes) {
             if !self.active[lane] {
@@ -3840,10 +3879,14 @@ impl BankChain {
         // Publish after every drain. The armed decision combines each stage's lane bank once,
         // then reuses it if declining eligibility requires agreement maintenance below. Stages
         // outside rack may still forward nested processor queries; only this boundary is bulk.
-        let armed = self.collapse_prefix > 0 && self.collapse_source && !self.collapse_forced_off;
+        let armed = self.collapse_prefix > 0
+            && self.collapse_source
+            && self.input_symmetric
+            && !self.collapse_forced_off;
         // Keep the #235 short-circuit: a chain that cannot collapse publishes nothing. Forced-off
         // chains publish lazily at the maintenance step, after any disengage, in the original order.
-        let witnesses = armed.then(|| self.lane_symmetry_bank());
+        // The witness is the prefix's (issue #974): a later slot runs dual on duplicated planes.
+        let witnesses = armed.then(|| self.lane_symmetry_bank(self.collapse_prefix));
         let witness = witnesses.as_ref().is_some_and(|bank| {
             self.all_active_witnesses_hold(bank, ChannelSymmetryWitness::SYMMETRIC.terms())
         });
@@ -3891,20 +3934,24 @@ impl BankChain {
         // witness that is not eligible, with agreement still to lose. That is a bypass window, or
         // it is the episode after which the chain must not come back.
         //
-        // `SOURCE` is deliberately not a clause here, and it is the one term that would have to be
-        // argued about. It is decided at bind from the compiled session and never moves within a
-        // plan, so it cannot be an *episode*: either it holds for every block, and the two planes
-        // carry the same samples on all of them, or it does not, and `can_collapse` is false and
-        // this chain never collapses at all. A term that cannot change cannot break an invariant
-        // whose whole job is to survive change. `arm_mono_collapse` carries the obligation that
-        // makes that reading true.
+        // `SOURCE` is deliberately not a clause here. It is decided at bind from the compiled
+        // session and never moves within a plan, so it cannot be an *episode*: either it holds for
+        // every block, or `can_collapse` is false and this chain never collapses at all.
+        // `arm_mono_collapse` carries the obligation that makes that reading true.
+        //
+        // The per-block input term (issue #987) is a clause, because it *can* be an episode: a
+        // chain that reads an earlier chain's planes sees them differ on any block that producer
+        // rendered dual, and a dual block over unequal inputs drives the prefix's channels apart
+        // whatever its words say. Such a block clears the flag without reading a witness, and
+        // only a proof brings it back.
         if !collapse
             && self.can_collapse()
             && self.collapse_channels_agree
-            && !witness
-            && !self.all_lanes_preserve_agreement(
-                &witnesses.unwrap_or_else(|| self.lane_symmetry_bank()),
-            )
+            && (!self.input_symmetric
+                || (!witness
+                    && !self.all_lanes_preserve_agreement(
+                        &witnesses.unwrap_or_else(|| self.lane_symmetry_bank(self.collapse_prefix)),
+                    )))
         {
             self.collapse_channels_agree = false;
         }
@@ -3964,10 +4011,11 @@ impl BankChain {
             // *not* rewritten as `(ll + lr) * l` on the strength of `l == r`: the two round
             // differently, and the second is not what a dual run computes.
             //
-            // The first seam-side slot that runs takes the seam (issue #975): it reads the left
-            // plane as its right input and writes the right plane itself, or copies first. No
-            // reader needs the right plane before it. When no seam-side slot runs, the chain copies
-            // before the scatter.
+            // The first slot after the prefix that runs takes the seam (issue #975): it reads the
+            // left plane as its right input and writes the right plane itself, or copies first. No
+            // reader needs the right plane before it. That slot may be an upstream slot with no
+            // one-plane body (issue #974); it and every later slot run dual. When no slot after the
+            // prefix runs, the chain copies before the scatter.
             let mut seam = true;
             for slot in &mut self.slots[self.collapse_prefix..] {
                 if slot.has_active_lanes() {
@@ -4107,9 +4155,9 @@ impl BankChain {
     /// the dual run, it **is** the dual run's state, and the first dual block after this renders
     /// exactly what a never-collapsed run would have.
     ///
-    /// Only the prefix stages are copied, because only they ran one-plane: a seam-side slot ran
-    /// dual on every block, collapsed or not, and its two channels are already whatever the strip
-    /// asked for.
+    /// Only the prefix stages are copied, because only they ran one-plane: a seam-side slot, and
+    /// every slot after the prefix, ran dual on every block, collapsed or not, and its two channels
+    /// are already whatever the strip asked for.
     ///
     /// This is a one-off bounded copy of the prefix state per cohort on the block that stops
     /// collapsing, and it happens at most once per chain per plan. The amount follows each
@@ -4231,6 +4279,32 @@ impl BankChain {
     /// nothing in the engine does it -- the join runs once, from the compiled session, at bind.
     pub const fn arm_mono_collapse(&mut self, structural: bool) {
         self.collapse_source = structural;
+    }
+
+    /// Set this block's input term (issue #987): whether every active lane's input planes carry
+    /// the same samples on this block. `true` from construction. It holds until the next call:
+    /// set it before every block.
+    ///
+    /// The caller decides it from what it knows structurally -- the producing chain's
+    /// [`planes_identical`](Self::planes_identical) for the block it just rendered -- and never by
+    /// comparing the left plane with the right one. `false` declines this block's collapse and, on a chain that
+    /// [`can_collapse`](Self::can_collapse), clears the channel agreement it would otherwise keep.
+    /// Allocation-free; callable on the render thread between blocks.
+    pub const fn set_input_symmetric(&mut self, symmetric: bool) {
+        self.input_symmetric = symmetric;
+    }
+
+    /// Whether the resident block this chain's last [`run`](Self::run) left carries bit-identical
+    /// left and right planes on every lane, by construction (issue #987): the block collapsed and
+    /// every slot is in the collapsible prefix, so no slot ran dual after the seam copy; or the
+    /// block was skipped silent, so both planes are `+0.0`. `false` otherwise, including whenever a
+    /// seam-side slot ran: its words may differ per channel. A structural fact about the block's
+    /// rendering, with no left/right comparison (the silent skip's zero test reads the input
+    /// words, but it never compares the two planes). Undefined after a `run` that returned an
+    /// error.
+    #[must_use]
+    pub fn planes_identical(&self) -> bool {
+        self.resident_zero || (self.collapsed && self.collapse_prefix == self.slots.len())
     }
 
     /// Whether this chain can collapse at all: it has an upstream prefix and the join was armed.
@@ -6226,8 +6300,8 @@ mod tests {
         );
         assert_eq!(
             prepared_activity_observation(),
-            10,
-            "ordinary, prefix-mono and seam-dual guards plus two stage publications"
+            9,
+            "ordinary, prefix-mono and seam-dual guards plus the prefix stage's publication"
         );
     }
 
@@ -8283,7 +8357,7 @@ mod tests {
                     a.and(b)
                 });
                 reset_witness_calls();
-                assert_eq!(chain.lane_symmetry_bank(), expected);
+                assert_eq!(chain.lane_symmetry_bank(3), expected);
                 let calls = WITNESS_CALLS.with(std::cell::Cell::get);
                 assert_eq!(calls.bulk, [1, 1, 0]);
                 assert_eq!(calls.direct, [0; 3]);
@@ -8555,7 +8629,8 @@ mod tests {
         }
     }
 
-    /// A chain whose seam-side slots are not a suffix declines, and so does one with no prefix.
+    /// A chain whose seam-side slots are not a suffix declines, and so does one with no prefix;
+    /// the prefix is the leading run of one-plane upstream slots.
     #[test]
     fn only_a_seam_suffix_over_a_collapsible_prefix_can_collapse() {
         let seam = || -> Box<dyn BankStage> {
@@ -8571,10 +8646,19 @@ mod tests {
             mono_chain(4, 8, vec![upstream(), seam(), upstream()]).collapse_prefix(),
             0
         );
-        // An upstream slot with no one-plane body declines the whole chain.
+        // A first upstream slot with no one-plane body leaves the prefix empty.
         assert_eq!(
             mono_chain(4, 8, vec![Box::new(PassThrough), seam()]).collapse_prefix(),
             0
+        );
+        assert_eq!(
+            mono_chain(4, 8, vec![Box::new(PassThrough), upstream(), seam()]).collapse_prefix(),
+            0
+        );
+        // A later one ends the prefix instead (issue #974): the seam moves before it.
+        assert_eq!(
+            mono_chain(4, 8, vec![upstream(), Box::new(PassThrough), seam()]).collapse_prefix(),
+            1
         );
         // The strip's own shape.
         assert_eq!(

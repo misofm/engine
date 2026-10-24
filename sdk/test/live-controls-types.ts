@@ -132,7 +132,6 @@ track.insert("delay", "miso.delay").bypass(true);
 track.insert(0, "miso.delay").parameter("cross feedback", 0.5);
 // @ts-expect-error a console slot is addressed by its stable ID, not an index
 track.console(0, "miso.parametric-eq");
-// @ts-expect-error the enumeration is prepared-only, not a live-control parameter
 eq.parameter("band-1-kind", "bell");
 eq.parameter("hpf-enabled", true);
 eq.parameter("lpf-enabled", false);

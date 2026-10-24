@@ -9,7 +9,7 @@
 //!   caller's order; an ID that is neither refuses with `builtin.meter.unknown_track`.
 //! * **Gate 4, render allocates nothing** with seven bus meters attached.
 
-use core::num::{NonZeroU32, NonZeroUsize};
+use core::num::NonZeroUsize;
 
 use bench_support::alloc as bench_alloc;
 use builtins::{MeterLaneSnapshot, MeterMetricSet, MeterSnapshot, MeterTap};
@@ -76,7 +76,7 @@ fn caps() -> HostPrepareCaps {
 /// Meters every block, with room for every block's window.
 fn meter_controls() -> HostLiveControlRequest {
     HostLiveControlRequest {
-        meter_period_frames: NonZeroU32::new(QUANTUM as u32),
+        meter_window_blocks: 1,
         meter_queue_depth: NonZeroUsize::new(BLOCKS + 1).expect("meter depth"),
         ..HostLiveControlRequest::default()
     }

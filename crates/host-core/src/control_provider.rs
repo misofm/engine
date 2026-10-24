@@ -1324,8 +1324,9 @@ impl ControlProvider for SessionControlProvider {
 /// The most owners a staged live commit reads before it builds a
 /// [`controls::AutomationIndex`] (#1710). Each owner's rows scan the automation table a few
 /// times; the index is one pass plus its map, so it pays only past a few owners. A
-/// 1024-strip, one-owner fader stage measured about 4 % slower with the index built.
-const STAGE_INDEX_OWNERS: usize = 4;
+/// 1024-strip, one-owner fader stage measured about 4 % slower with the index built. The live
+/// classifier's diffs index past the same count of reads (#1844).
+pub(crate) const STAGE_INDEX_OWNERS: usize = 4;
 
 impl ControlCatalog {
     /// Build the catalog of `model` at `sample_rate`: one `controls::list` pass with the owner and

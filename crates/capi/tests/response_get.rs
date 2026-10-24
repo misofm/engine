@@ -59,9 +59,10 @@ fn limits(frame_bytes: u64) -> CompileLimits {
         maximum_builtin_retained_bytes: 100_000_000,
         maximum_capi_retained_bytes: 1 << 30,
         maximum_named_allocation_bytes: 1 << 30,
-        maximum_meter_streams: 1,
-        maximum_meter_items: 1,
-        maximum_meter_bytes: 1,
+        // One meter stream per strip (#1581 D2): generous for every test session.
+        maximum_meter_streams: 4_096,
+        maximum_meter_items: 1 << 20,
+        maximum_meter_bytes: 1 << 26,
         maximum_control_frame_bytes: frame_bytes,
         maximum_replay_bytes: frame_bytes.max(8_192) * 16,
         maximum_replay_entries: 64,

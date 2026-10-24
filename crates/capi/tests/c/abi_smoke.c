@@ -211,9 +211,10 @@ static int check_plan_watermark(miso_engine_v1_engine *engine) {
     limits.maximum_builtin_retained_bytes = 100000000;
     limits.maximum_capi_retained_bytes = 10000000;
     limits.maximum_named_allocation_bytes = 100000000;
-    limits.maximum_meter_streams = 1;
-    limits.maximum_meter_items = 1;
-    limits.maximum_meter_bytes = 1;
+    /* One meter stream per strip, plus the output (#1581 D2). */
+    limits.maximum_meter_streams = 4096;
+    limits.maximum_meter_items = 1u << 20;
+    limits.maximum_meter_bytes = 1u << 26;
     limits.maximum_control_frame_bytes = 4096;
     limits.maximum_replay_bytes = 8192;
     limits.maximum_replay_entries = 16;

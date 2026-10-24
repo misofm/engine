@@ -202,6 +202,52 @@ impl<'a> ModelView<'a> {
         }
     }
 
+    /// Whether the committed model automates strip `strip`'s fader, per lane
+    /// ([`crate::automated_fader_lanes`]). A lookup when the view is [`Self::indexed`] (#1844).
+    #[must_use]
+    pub fn automated_fader_lanes(&self, strip: &StableId) -> [bool; 2] {
+        match self.automation {
+            Some(index) => index.automated_fader_lanes(strip),
+            None => crate::automation::automated_fader_lanes(self.structure, strip),
+        }
+    }
+
+    /// The fader event lanes of strip `strip` in the committed model
+    /// ([`crate::fader_event_lanes`]), `reach` its VCA reach there (indices into the committed
+    /// `vcas`). Lookups when the view is [`Self::indexed`] (#1844).
+    #[must_use]
+    pub fn fader_event_lanes(&self, strip: &StableId, reach: &[usize]) -> [bool; 2] {
+        match self.automation {
+            Some(index) => index.fader_event_lanes(strip, reach),
+            None => crate::automation::fader_event_lanes(self.structure, strip, reach),
+        }
+    }
+
+    /// The mute event lanes of strip `strip` in the committed model
+    /// ([`crate::mute_event_lanes`]), `reach` as for [`Self::fader_event_lanes`].
+    #[must_use]
+    pub fn mute_event_lanes(&self, strip: &StableId, reach: &[usize]) -> [bool; 2] {
+        match self.automation {
+            Some(index) => index.mute_event_lanes(strip, reach),
+            None => crate::automation::mute_event_lanes(self.structure, strip, reach),
+        }
+    }
+
+    /// Whether some entry of the committed table is on a VCA `mute` row
+    /// ([`crate::vca_mute_row`]): read from the index when the view is [`Self::indexed`], else
+    /// linear in the table (#1844).
+    #[must_use]
+    pub fn any_vca_mute(&self) -> bool {
+        match self.automation {
+            Some(index) => index.any_vca_mute(),
+            None => self
+                .structure
+                .automation
+                .iter()
+                .any(|entry| crate::automation::vca_mute_row(&entry.target)),
+        }
+    }
+
     /// The dense model the view stands for: a clone of the committed model with the edited owners
     /// in place. Linear in the session; for tests and for a caller that has no view-shaped code.
     #[must_use]

@@ -14,8 +14,8 @@
 //! the same `live_values_superseded` and `STRIPS_RESTARTED` counts (#1768), and every page of `CONTROL_LIST_GET` and
 //! `CONTROL_STATE_GET` and the `SESSION_SNAPSHOT_GET` bytes are byte-identical. The whole run
 //! repeats at 44.1, 48, 88.2 and 96 kHz. The script holds the edits that take the rebuild arm (a
-//! route into the output, the prepared bypass of the multiband compressor, and `delay_samples`;
-//! the delay's bypass is live since #1339): the browser prepares and publishes the successor like
+//! route into the output and `delay_samples`; the delay's and the multiband compressor's bypasses
+//! are live since #1339 and #1340): the browser prepares and publishes the successor like
 //! the C ABI does, and the two hosts answer the same bytes and render the same bits across the swap
 //! (#1562b). No launch effect declares an audio-rate parameter, so that row of the batch 7
 //! amendment has no edit to script.
@@ -724,8 +724,8 @@ fn script() -> Vec<Step> {
         ),
         unchanged(39, Edit::SendMute { muted: false }, 480),
         // The rebuild arm (#1562b): a route into the output has no live lane, so its gain and
-        // mute rebuild the plan; so does the prepared bypass of the multiband compressor, and a
-        // strip's `delay_samples`, which moves the plan's latency. Each is a
+        // mute rebuild the plan; so does a strip's `delay_samples`, which moves the plan's
+        // latency. Each is a
         // swap at the next block on both hosts, with the watermark advancing at that block.
         rebuilt(11, Edit::OutputGain { db: -3.0 }),
         rebuilt(17, Edit::OutputMute { muted: true }),
@@ -737,14 +737,15 @@ fn script() -> Vec<Step> {
                 samples: 64.0,
             },
         ),
-        rebuilt(
+        // The multiband's and the delay's bypasses are live shunts since #1340 and #1339: a
+        // crossfade on both hosts, no swap.
+        live(
             34,
             Edit::Bypass {
                 insert: MULTIBAND,
                 bypassed: true,
             },
         ),
-        // The delay's bypass is a live shunt since #1339: a crossfade on both hosts, no swap.
         live(
             43,
             Edit::Bypass {
@@ -885,9 +886,10 @@ fn limits() -> CompileLimits {
         maximum_builtin_retained_bytes: 100_000_000,
         maximum_capi_retained_bytes: 10_000_000,
         maximum_named_allocation_bytes: 100_000_000,
-        maximum_meter_streams: 1,
-        maximum_meter_items: 1,
-        maximum_meter_bytes: 1,
+        // One meter stream per strip (#1581 D2): generous for every test session.
+        maximum_meter_streams: 4_096,
+        maximum_meter_items: 1 << 20,
+        maximum_meter_bytes: 1 << 26,
         maximum_control_frame_bytes: 4_096,
         maximum_replay_bytes: 8_192,
         maximum_replay_entries: 16,

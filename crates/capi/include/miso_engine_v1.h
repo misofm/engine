@@ -42,8 +42,8 @@ extern "C" {
  * position continue, so the host goes on submitting with no seek. The live changes are a track's
  * fader levels, mutes, and pan or matrix values; a changed value of a track effect parameter
  * whose automation rate is Block, on a console-slot entry or an insert, the parametric EQ's live
- * parameters included (applied through prepared targets); and a track effect's bypass, except the
- * multiband compressor's, which rebuilds. A transaction that changes only the
+ * parameters included (applied through prepared targets); and a track effect's bypass. A
+ * transaction that changes only the
  * session ID, a profile's id or a stored automation entry on a row that does not render yet
  * commits with no replacement and no live value. A stored fader automation edit (an entry on a
  * strip's fader_db added, removed, retargeted or given other segments) rebuilds the plan, and
@@ -583,6 +583,12 @@ typedef struct miso_engine_v1_compile_limits {
     uint64_t maximum_builtin_retained_bytes;
     uint64_t maximum_capi_retained_bytes;
     uint64_t maximum_named_allocation_bytes;
+    /* Every plan carries the engine's meters (#1581): one post-matrix sample-peak meter stream
+       per strip (tracks and submixes) and, from #1581's second slice, one for the output. These
+       three caps bound them like any other meter, so they must admit one meter stream per strip
+       plus the output, at the default window of about 32 ms; a cap below that refuses the
+       compile with MISO_ENGINE_V1_COMPILE_REJECTED and the diagnostic builtin.resource.limit
+       $.meter_requests. */
     uint64_t maximum_meter_streams;
     uint64_t maximum_meter_items;
     uint64_t maximum_meter_bytes;

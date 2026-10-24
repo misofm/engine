@@ -306,3 +306,28 @@ the graph suites of `graph/tests/MUTATIONS.md` issue #915, and console-workload
 
 Row 915-R1 is the reason the rack half of gate 1 exists. Whether the staging block is written is
 invisible to every digest, so it is pinned where it can be seen.
+
+## Issue #974 — a collapsible prefix before an incompatible slot
+
+Applied one at a time to the working tree at `961d2d011`, restored with `git checkout` and
+`touch`. Host: `x86_64`, AVX2 pin, debug profile. Suite: `cargo test --locked -p rack`. "The
+prefix test" is `mono_reengage.rs` `a_collapsible_prefix_before_an_incompatible_slot_collapses_exactly`.
+
+| # | mutation | file | test | result |
+|---|---|---|---|---|
+| 974-R1 | the dispatch's witness is conjoined over every slot again (`lane_symmetry_bank(self.slots.len())` in `run_with_input`) | `rack/src/lib.rs` | the prefix test | RED (transitions `[0, 0, 0]`, expected `[1, 1, 0]`: never collapses) |
+| 974-R2 | the agreement maintenance reads every slot's witness (`lane_symmetry_bank(self.slots.len())` in the forced-off fallback) | `rack/src/lib.rs` | the prefix test | RED (transitions `[1, 1, 1]`: the forced-off window cleared the invariant and the re-engage needed a proof) |
+| 974-R3 | `collapse_prefix_of` keeps the whole-prefix conjunction (`prefix` is `0` unless every upstream slot has a one-plane body) | `rack/src/lib.rs` | `only_a_seam_suffix_over_a_collapsible_prefix_can_collapse` | RED (`left: 0, right: 1`) |
+| 974-R4 | `disengage_collapse` desymmetrizes every slot (`self.slots[..]`), not only the prefix (at `beda00117`) | `rack/src/lib.rs` | the prefix test | RED (the bit comparison: the dual-only slot's forwarded `desymmetrize` overwrites its right state) |
+
+## Issue #987a — the per-block input term
+
+Applied one at a time to the working tree at `753e2bc2b`, restored with `git checkout` and `touch`.
+Host: `x86_64`, AVX2 pin, debug profile. Suite: `cargo test --locked -p rack`. "The window test" is
+`mono_reengage.rs` `an_asymmetric_input_window_declines_and_waits_for_a_proof`.
+
+| # | mutation | file | test | result |
+|---|---|---|---|---|
+| 987-R1 | the dispatch arms on the structural term alone (`&& self.input_symmetric` removed from `armed`) | `rack/src/lib.rs` | the window test | RED (`left: 9, right: 4`: the window collapsed over unequal planes) |
+| 987-R2 | the agreement maintenance keeps agreement across a block with the input term down (`!self.input_symmetric ||` becomes `false ||`) | `rack/src/lib.rs` | the window test | RED (`left: 5, right: 4`: block 8 re-engaged on separated states) |
+| 987-R3 | `planes_identical` drops its seam clause (`self.resident_zero \|\| self.collapsed`) | `rack/src/lib.rs` | the window test | RED (the per-block `!planes_identical()` assertion, block 0) |

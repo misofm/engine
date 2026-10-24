@@ -235,3 +235,16 @@ each mutant was applied to a committed tree and restored with `git checkout` and
 | 1338-M6 | crossover word ramps on the unclamped law (`current + step`) | `src/lib.rs` | `ramp_endpoint::every_ramped_word_stays_inside_its_endpoints` | RED: `crossover a2 … not one clamped D11 sample` |
 | 1338-M7 | restore checks the current point only, not the remaining walk (`if true \|\| walk…` breaks after the first point) | `src/lib.rs` | `crossover::a_restore_refuses_…` | RED: `off-line step`, `Ok(())` against `Err("effect.state.coefficient")` |
 | 1338-M8 | restore's settled check `remaining == 0 && current != target` removed | `src/lib.rs` | `crossover::a_restore_refuses_…` | RED: `settled off target`, `Ok(())` against `Err("effect.state.coefficient")` |
+
+## Issue #1340 — per-lane D7 recovery in a bank
+
+Debug profile, `CARGO_INCREMENTAL=0 cargo test --locked -p multiband-compressor --features
+math/lane,lane/test-support --test nonfinite` (and, for 1340-M1, `-p graph-compiler --test
+bypass_cohorts multiband`); each mutant was applied to a committed tree and restored with
+`git checkout` and `touch`.
+
+| # | mutation | file | test | result |
+|---|---|---|---|---|
+| 1340-M1 | `finish` zeroes both channels of the whole bank and runs `discontinuity_reset` on both sides (the pre-#1340 recovery) | `src/lib.rs` | `nonfinite::a_failing_bank_lane_recovers_alone`, `bypass_cohorts::a_hot_bypassed_multiband_lane_leaves_its_bank_mates_bits_unchanged` | RED, both: `word 0: a neighbour of the failing lane moved`; `("ch01", "PostSimd2PreFader"): a bank-mate of the hot bypassed lane moved` |
+| 1340-M2 | `discontinuity_reset_lane` does not snap the lane's ramps | `src/lib.rs` | `nonfinite::a_failing_bank_lane_recovers_alone` | RED: `the recovered lane is exactly a fresh instance` (green on 128-frame blocks, where the 64-sample ramp had settled; the test now runs 32-frame blocks) |
+| 1340-M3 | `discontinuity_reset_lane` does not reset the lane's silence clock | `src/lib.rs` | `nonfinite::a_failing_bank_lane_recovers_alone` | RED: `the recovered lane is exactly a fresh instance` |
