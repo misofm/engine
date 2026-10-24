@@ -129,12 +129,14 @@ seqlock is still guarded by both modules' existing torn-read tests.
 
 ## Amendment (scope note and root rulings R1-R4, 2026-10-24)
 
-- D1 premise corrected: since #1502 the mailbox carries no revision. R1: control stamps the
-  candidate's structural revision on the candidate payload (`PlanReplacementReservation::
-  set_revision`, called in `control.rs` beside the gate's `publish(revision)`, through
-  `control-plane/src/plan.rs`'s reservation wrapper); `enter_block` passes it to `note_claim`.
-  Nothing reads the outgoing plan's gate at displacement. An unset payload revision is `0`; a
-  settle then covers no span and still counts its `superseded`, as an advance does.
+- D1 premise corrected: since #1502 the mailbox carries no revision. R1: the candidate's
+  structural revision is a required argument of `PlanReplacementReservation::commit(revision)`
+  (and of `PlanPublisher::publish(plan, revision)`), so the compiler enforces it; there is no
+  setter and no default. `control.rs` passes the revision it published on the candidate's gate,
+  through `control-plane/src/plan.rs`'s reservation wrapper; `enter_block` passes it to
+  `note_claim`. Nothing reads the outgoing plan's gate at displacement. Test callers pass their
+  candidate gate's revision, or `0` for a plan whose gate numbers no revisions (verifier MINOR 1
+  and 2: no unset revision, so no settle over an empty span).
 - R2: `seqlock.rs` publishes and reads on `PublishedWords<N>` itself; `ObservationSlot` is
   `{ words: PublishedWords<5>, consumed }`, still one `Arc` allocation. `observe.rs`'s own
   counter, publish, read loop and `MAXIMUM_READ_ATTEMPTS` are gone; the E11 reason for 64

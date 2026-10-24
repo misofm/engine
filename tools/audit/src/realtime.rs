@@ -83,7 +83,7 @@ fn run_round(blocks: u64, trace_markers: bool) -> RoundEvidence {
     )
     .expect("valid plan exchange");
     publisher
-        .publish(prepared_plan(2))
+        .publish(prepared_plan(2), 0)
         .unwrap_or_else(|_| panic!("first audit plan must publish"));
     let mut third_plan = Some(prepared_plan(3));
     let mut output = [1.0_f32];
@@ -127,7 +127,7 @@ fn run_round(blocks: u64, trace_markers: bool) -> RoundEvidence {
 
     let first_retired = retirer.try_reclaim().ok();
     let epoch = publisher
-        .publish(third_plan.take().expect("third plan is control-owned"))
+        .publish(third_plan.take().expect("third plan is control-owned"), 0)
         .unwrap_or_else(|_| panic!("third audit plan must publish after reclamation"));
     assert_eq!(epoch, PlanEpoch(2));
     let candidate = match publisher.withdraw() {

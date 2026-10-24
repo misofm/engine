@@ -272,7 +272,6 @@ pub struct PlanReplacementReservation<'a> {
     epoch: PlanEpoch,
     plan: PreparedRenderPlan,
     credit: RetirementCredit,
-    revision: u64,
     superseded: u64,
     outcome: CandidateOutcome,
     adoption: PlanAdoption,
@@ -527,11 +526,16 @@ fn publish_into(
 impl PlanPublisher {
     /// Reserve, then commit, an exact-envelope candidate for adoption at the next block
     /// ([`PlanAdoption::Next`]); the epoch is consumed only on success. It fails `Full` while a
-    /// published candidate is unclaimed or no retirement credit is free.
+    /// published candidate is unclaimed or no retirement credit is free. `revision` is the
+    /// candidate's own structural revision, as [`PlanReplacementReservation::commit`] takes it.
     #[allow(clippy::result_large_err)] // Ownership-preserving backpressure is the public contract.
-    pub fn publish(&mut self, plan: PreparedRenderPlan) -> Result<PlanEpoch, PublishError> {
+    pub fn publish(
+        &mut self,
+        plan: PreparedRenderPlan,
+        revision: u64,
+    ) -> Result<PlanEpoch, PublishError> {
         match self.reserve_replacement(plan, PlanAdoption::Next) {
-            Ok(reservation) => Ok(reservation.commit()),
+            Ok(reservation) => Ok(reservation.commit(revision)),
             Err(
                 PlanReplacementReservationError::PublicationFull(plan)
                 | PlanReplacementReservationError::RetirementFull(plan),
@@ -577,7 +581,6 @@ impl PlanPublisher {
             epoch,
             plan,
             credit,
-            revision: 0,
             superseded: 0,
             outcome: CandidateOutcome::Exact,
             adoption,
@@ -716,13 +719,6 @@ impl PlanReplacementReservation<'_> {
         &mut self.plan
     }
 
-    /// Set the candidate's own structural revision, the one control stamps on its gate (#1482
-    /// R1). When render claims a newer candidate before the watermark advances past this one,
-    /// the revisions up to it complete with this candidate's outcome. `0` until set.
-    pub fn set_revision(&mut self, revision: u64) {
-        self.revision = revision;
-    }
-
     /// Set how many revisions the candidate folds in from candidates it replaced (#1314 D1,
     /// #1310): its adoption completes them as `superseded`.
     pub fn set_superseded(&mut self, superseded: u64) {
@@ -738,14 +734,18 @@ impl PlanReplacementReservation<'_> {
     /// Publish the bound complete candidate. All fallible checks and the credit were taken by the
     /// reservation, so this is a bounded move into the `Empty` cell plus one `Release`
     /// compare-and-swap that cannot fail.
-    pub fn commit(self) -> PlanEpoch {
+    ///
+    /// `revision` is the candidate's own structural revision, the one the control plane
+    /// publishes on its gate (#1482 R1). It travels in the payload: when render claims a newer
+    /// candidate before the watermark advances past this one, the revisions up to it complete
+    /// with this candidate's outcome.
+    pub fn commit(self, revision: u64) -> PlanEpoch {
         let Self {
             publication,
             next_epoch,
             epoch,
             plan,
             credit,
-            revision,
             superseded,
             outcome,
             adoption,

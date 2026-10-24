@@ -319,7 +319,7 @@ pub(crate) fn swapped_run_with(
     publisher
         .reserve_replacement(plan, engine::realtime::PlanAdoption::Next)
         .unwrap_or_else(|_| panic!("reserve the successor"))
-        .commit();
+        .commit(SUCCESSOR_REVISION);
     for block in SWAP_BLOCK..BLOCKS {
         if successor == Successor::Carry && block + 1 < BLOCKS {
             for feed in after {

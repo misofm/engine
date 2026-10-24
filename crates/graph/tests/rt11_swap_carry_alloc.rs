@@ -254,7 +254,7 @@ fn the_swap_block_carry_allocates_and_frees_nothing() {
     publisher
         .reserve_replacement(successor, engine::realtime::PlanAdoption::Next)
         .expect("reserve")
-        .commit();
+        .commit(0);
     let mark = current_thread_counters();
     let (output, report) = block(&mut owner);
     let after = current_thread_counters();

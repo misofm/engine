@@ -1800,7 +1800,7 @@ mod follow {
         publisher
             .reserve_replacement(plan, engine::realtime::PlanAdoption::Next)
             .unwrap_or_else(|_| panic!("reserve the successor"))
-            .commit();
+            .commit(revision);
         for block in SWAP_BLOCK..BLOCKS {
             if block + 1 < BLOCKS {
                 pcm.submit(&mut b_sources, rate, block + 1);
@@ -2227,7 +2227,7 @@ fn a_successor_of_a_plan_that_never_rendered_takes_its_pending_comparison() {
             publisher
                 .reserve_replacement(plan, PlanAdoption::Next)
                 .unwrap_or_else(|_| panic!("{what}: reserve the successor"))
-                .commit();
+                .commit(revision);
             (sources, inventory)
         };
         let revision = gate.last_published() + 1;
