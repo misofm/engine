@@ -1942,6 +1942,93 @@ fn set_control_refuses_an_address_that_breaks_its_rules() {
     }
 }
 
+/// #1584 D1, gate 5: `Observe` round-trips with a console slot and an insert, armed and disarmed,
+/// window `0` and the maximum; its address is the control list's address message with a strip
+/// owner, a console or inserts section and its slot ID, and each other shape is refused at decode.
+///
+/// Red if the codec accepts an address the op cannot use (a `control` or `lane` field, a route,
+/// VCA or session owner, a builtins or own section, a missing ID), or if a field is dropped or
+/// swapped on the way through.
+#[test]
+fn observe_round_trips_and_refuses_an_address_it_cannot_use() {
+    let edits = vec![
+        SessionEdit::Observe {
+            strip_id: id("vocal"),
+            section: controls::TapSection::Console(id("glue")),
+            tap_id: 1,
+            armed: true,
+            window_blocks: 0,
+        },
+        SessionEdit::Observe {
+            strip_id: id("drums"),
+            section: controls::TapSection::Inserts(id("comp")),
+            tap_id: 7,
+            armed: false,
+            window_blocks: controls::MAXIMUM_OBSERVATION_WINDOW_BLOCKS,
+        },
+    ];
+    let bytes = encode(&edits);
+    let decoded = ProtocolCodec::default()
+        .decode_session_transaction(&bytes, &mut DecodeScratch::new(&mut [0_u16; 128]))
+        .expect("Observe decodes");
+    assert_eq!(decoded.edits, edits);
+
+    use schema::control_address as a;
+    let field =
+        |spec: FieldSpec, value: &[u8]| (spec.id, spec.wire.raw(), spec.mandatory, value.to_vec());
+    let parse = |kind: u8,
+                 owner: Option<&str>,
+                 section: u8,
+                 slot: Option<&str>,
+                 control: Option<u32>,
+                 lane: Option<u8>| {
+        let mut fields = vec![field(a::OWNER_KIND, &[kind])];
+        if let Some(owner) = owner {
+            fields.push(field(a::OWNER_ID, owner.as_bytes()));
+        }
+        fields.push(field(a::SECTION, &[section]));
+        if let Some(slot) = slot {
+            fields.push(field(a::SLOT_ID, slot.as_bytes()));
+        }
+        if let Some(control) = control {
+            fields.push(field(a::CONTROL, &control.to_le_bytes()));
+        }
+        if let Some(lane) = lane {
+            fields.push(field(a::LANE, &[lane]));
+        }
+        parse_observe_address(Message::nested(&raw_message(fields)).expect("nested"))
+    };
+    assert_eq!(
+        parse(2, Some("vocal"), 2, Some("comp"), None, None),
+        Ok((id("vocal"), controls::TapSection::Inserts(id("comp"))))
+    );
+    for (name, result) in [
+        (
+            "a control",
+            parse(2, Some("vocal"), 2, Some("comp"), Some(1), None),
+        ),
+        (
+            "a lane",
+            parse(2, Some("vocal"), 2, Some("comp"), None, Some(3)),
+        ),
+        (
+            "a route owner",
+            parse(3, Some("send"), 2, Some("comp"), None, None),
+        ),
+        (
+            "a VCA owner",
+            parse(4, Some("grp"), 2, Some("comp"), None, None),
+        ),
+        ("the session", parse(1, None, 2, Some("comp"), None, None)),
+        ("builtins", parse(2, Some("vocal"), 4, None, None, None)),
+        ("own", parse(2, Some("vocal"), 6, None, None, None)),
+        ("no strip ID", parse(2, None, 2, Some("comp"), None, None)),
+        ("no slot ID", parse(2, Some("vocal"), 5, None, None, None)),
+    ] {
+        assert_eq!(result, Err(DecodeError::InvalidField), "{name}");
+    }
+}
+
 /// #1678: the expected effect of a `SET_CONTROL` edit is the seventh field of its address message,
 /// accepted only in an `inserts` or `console` section and only as a stable ID; the encoder refuses
 /// the same shapes. (A stored automation target refuses the field in every section:

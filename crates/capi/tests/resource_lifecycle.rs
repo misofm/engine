@@ -577,6 +577,9 @@ struct HostHalf {
     /// vector, its IDs and the rings in `builtin_retained_payload_bytes`, so the oracle counts
     /// them with the plan.
     meters: Box<[host_core::MeterConsumer]>,
+    /// One reader set per observed effect instance, kept as capi keeps them (#1584 D7). Their
+    /// slots are the plan's (`observation_retained_bytes`).
+    observations: Box<[host_core::EffectObservationHandle]>,
 }
 
 fn host_half(document: &str, compile_limits: &CompileLimits) -> HostHalf {
@@ -609,10 +612,14 @@ fn host_half_counting(
     // window the same disposal (D2): the strip ID list and the vectors this selection leaves empty
     // drop here, so only the producers survive, as two boxed slices. Keeping the ID list would
     // count bytes capi does not keep.
+    // #1584 D7: and an observation queue slot for every declared tap.
     let (prepared, handles) = host_core::prepare_host_runtime_with_live_lanes(
         store.compiled(),
         &caps,
-        &host_core::HostLiveControlRequest::default(),
+        &host_core::HostLiveControlRequest {
+            observation_taps: host_core::launch_maximum_observation_taps(),
+            ..host_core::HostLiveControlRequest::default()
+        },
         host_core::HostLiveLanes {
             strip_input: true,
             effects: true,
@@ -626,6 +633,7 @@ fn host_half_counting(
         effect_controls,
         route_controls,
         meters,
+        effect_observations,
         ..
     } = handles;
     HostHalf {
@@ -635,6 +643,7 @@ fn host_half_counting(
         effects: effect_controls.into_boxed_slice(),
         routes: route_controls.into_boxed_slice(),
         meters: meters.into_boxed_slice(),
+        observations: effect_observations.into_boxed_slice(),
     }
 }
 
@@ -745,6 +754,9 @@ struct HostOwners {
     catalog: u64,
     /// The meter consumers' vector and IDs: their rings are the plan's.
     meters: u64,
+    /// The observation reader handles' slice, IDs and reader boxes (#1584 D7): their slots are
+    /// the plan's.
+    observations: u64,
     plan: u64,
     store: u64,
     /// The plan's state inventory (#1272 D1), which capi keeps with the plan's source producers
@@ -802,6 +814,7 @@ fn observe_compile(document: &str, compile_limits: &CompileLimits) -> CompileObs
         effects,
         routes,
         meters,
+        observations,
     } = host;
     let (strip_count, strip_id_bytes) = store
         .compiled()
@@ -844,6 +857,7 @@ fn observe_compile(document: &str, compile_limits: &CompileLimits) -> CompileObs
         sources: freed_by_drop(sources),
         catalog: freed_by_drop(control_catalog),
         meters: freed_by_drop(meters),
+        observations: freed_by_drop(observations),
         plan: freed_by_drop(plan),
         store: freed_by_drop(store),
         inventory: freed_by_drop(inventory),
@@ -855,11 +869,12 @@ fn observe_compile(document: &str, compile_limits: &CompileLimits) -> CompileObs
             + owners.sources
             + owners.catalog
             + owners.meters
+            + owners.observations
             + owners.plan
             + owners.store
             + owners.inventory,
         host_live,
-        "the nine owners hold every byte the host-core half retains"
+        "the ten owners hold every byte the host-core half retains"
     );
     CompileObservation {
         report,
@@ -915,13 +930,14 @@ impl CompileObservation {
                 + self.owners.sources
                 + self.owners.catalog
                 + self.owners.inventory
+                + self.owners.observations
                 + self.observation_reserve
                 + self.monitor_and_ramps
                 + decode_field_rounding,
             self.report.capi_retained_bytes,
             "{label}: capi's own allocations + the effect producers + the strip producers + the \
              source producers + the parameter catalog + the plan state inventory + the \
-             decode-field rounding, all observed (left; the send producers' row is the graph \
+             observation readers + the decode-field rounding, all observed (left; the send producers' row is the graph \
              function's total, and the observation reserve and the monitor and ramp rows are the control \
              plane's bounds), against \
              `capi_retained_bytes` (right)"
@@ -2772,8 +2788,25 @@ fn race_session() -> String {
         tap: session::SendTap::PostPan,
     };
     model.routes.push(out);
+    // #1584 gate 8: a bypassed compressor on the first track, whose gain-reduction tap the race's
+    // `Observe` edits arm and disarm. Bypassed, so the final block still equals a fresh plan's: the
+    // compressor's envelope history, which a fresh plan does not have, never reaches the output.
+    model.tracks[0].inserts.effects.push(session::Effect {
+        id: StableId::parse(RACE_COMPRESSOR).expect("stable id"),
+        identity: session::EffectIdentity::Native {
+            effect_id: StableId::parse("miso.compressor").expect("stable id"),
+        },
+        quality: session::EffectQuality::Normal,
+        bypass: true,
+        link_mode: session::LinkMode::DualMono,
+        params: Vec::new(),
+        sidechain: session::SidechainDeclaration::None,
+    });
     session::canonical_session_json(&model).expect("canonical race session")
 }
+
+/// The race session's one effect, an insert of its first track (#1584 gate 8).
+const RACE_COMPRESSOR: &str = "race-comp";
 
 /// The largest pan smoothing the race edits use: one quantum (D1).
 const RACE_MAX_SMOOTHING: u32 = QUANTUM as u32;
@@ -2807,6 +2840,8 @@ struct RaceEdits {
     extra: bool,
     /// The track that is soloed, by index (#1559).
     soloed: Option<usize>,
+    /// Whether the race compressor's gain-reduction tap is subscribed (#1584).
+    observed: bool,
 }
 
 impl RaceEdits {
@@ -2824,6 +2859,22 @@ impl RaceEdits {
             follows: true,
             extra: false,
             soloed: None,
+            observed: false,
+        }
+    }
+
+    /// An `Observe` of the race compressor's gain-reduction tap: an arm with a four-block window,
+    /// then its disarm (#1584 gate 8).
+    fn observe_edit(&mut self) -> SessionEdit {
+        self.observed = !self.observed;
+        SessionEdit::Observe {
+            strip_id: self.tracks[0].clone(),
+            section: protocol::control_core::TapSection::Inserts(
+                StableId::parse(RACE_COMPRESSOR).expect("stable id"),
+            ),
+            tap_id: 1,
+            armed: self.observed,
+            window_blocks: 4,
         }
     }
 
@@ -2945,6 +2996,12 @@ impl RaceEdits {
         if index % 8 == 5 {
             return (Kind::Monitor, vec![self.solo_edit(index / 8)]);
         }
+        // And every sixteenth, an `Observe` arm or disarm (#1584 gate 8): a monitor edit whose
+        // record rides the compressor's observation queue. Sixteen edits apart, several blocks
+        // drain the queue's one slot between two of them, so none waits for room.
+        if index % 16 == 1 {
+            return (Kind::Observe, vec![self.observe_edit()]);
+        }
         let track = (index % self.tracks.len() as u64) as usize;
         let track_id = self.tracks[track].clone();
         let step = index / self.tracks.len() as u64;
@@ -2988,6 +3045,9 @@ enum Kind {
     /// A solo: a write to the monitor overlay (#1559). It commits no model, so its response
     /// carries the committed revision.
     Monitor,
+    /// An `Observe` arm or disarm (#1584): a monitor edit too, counted apart so the run proves
+    /// every one of them committed and the arms and disarms alternate.
+    Observe,
 }
 
 /// What one race run counted.
@@ -2996,6 +3056,8 @@ struct RaceCounts {
     live: u64,
     /// Solo writes that committed (#1559).
     monitor: u64,
+    /// `Observe` edits that committed (#1584), also counted in `monitor`.
+    observe: u64,
     structural: u64,
     plan_backpressure: u64,
     event_backpressure: u64,
@@ -3082,7 +3144,7 @@ impl RaceControl<'_> {
         self.counts.overlapped += u64::from(overlapping && self.in_render.load(Ordering::SeqCst));
         let outcome = match (code, header) {
             (RESULT_OK, Some(header)) if header.status == StatusCode::Ok => {
-                if kind == Kind::Monitor {
+                if matches!(kind, Kind::Monitor | Kind::Observe) {
                     // A solo is no session change: the committed revision, unchanged.
                     if header.revision != SessionRevision(self.revision) {
                         return Err(format!(
@@ -3091,6 +3153,7 @@ impl RaceControl<'_> {
                         ));
                     }
                     self.counts.monitor += 1;
+                    self.counts.observe += u64::from(kind == Kind::Observe);
                 } else {
                     // The next revision, whatever number of solos came between: a solo spends no
                     // revision (#1603).
@@ -3490,6 +3553,13 @@ fn live_edits_racing_a_rendering_plan_and_its_swaps_stay_exact_and_allocation_fr
             "run {run}"
         );
         assert!(counts.monitor >= RACE_EDITS / 8, "run {run}");
+        // #1584: every `Observe` edit committed, so the race alternates arms and disarms (the edit
+        // flips its arm before the submit, and a refusal other than backpressure fails the run).
+        assert_eq!(
+            counts.observe,
+            (0..RACE_EDITS).filter(|index| index % 16 == 1).count() as u64,
+            "run {run}"
+        );
         // #1310: a structural edit behind a pending candidate supersedes it; nothing refuses it.
         assert_eq!(counts.plan_backpressure, 0, "run {run}");
         assert!(

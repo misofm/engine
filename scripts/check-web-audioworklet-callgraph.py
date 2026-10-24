@@ -75,7 +75,7 @@ Modes
        so new dynamic dispatch on the render path is reviewed, with its reason, in this table.
 
 `--kernel-shape --kernel-pattern REGEX --kernel-min K`
-    Assert the artifact still computes in the vector family, and in four lanes only. Four rules,
+    Assert the artifact still computes in the vector family, and in four lanes only. Five rules,
     none of which is a raw op-count minimum:
 
     1. **Roster presence.** Each of the thirteen named kernels in `KERNEL_ROSTER` -- the
@@ -101,6 +101,16 @@ Modes
        instantiation (`EIGHT_LANE`). The browser runs four lanes only, and since #1110 the wasm
        build has no eight-lane type, so a name that carries one means eight lanes came back to
        `wasm32` -- code no browser can execute, which is what #1110 removed.
+    5. **Pinned render kernels (issue #1889).** Rule 3 skips a function with no `f32x4`
+       arithmetic as a helper, so a counted kernel that a compiler or source change scalarises in
+       full would leave the count silently while `K` still holds. `RENDER_KERNELS` names every
+       render kernel rule 3 counts, by its name without the mangling hash and with the stage it
+       renders. Each entry must resolve to exactly one function over the whole module (pattern
+       or not, so a rename away from the pattern cannot hide it) and that function must carry
+       `f32x4` arithmetic; zero matches, more than one, or `vector == 0` fails. A counted kernel
+       in neither this table nor `CONTROL_THREAD_EXEMPT` fails too. A vanished entry
+       is answered by a reviewed table edit with evidence that its arithmetic moved into a kernel
+       the table or roster still holds, never by deleting the row silently.
 
     The collapsed true-peak limiter is a forwarding entry plus a distinct arithmetic kernel. The
     roster therefore requires exactly one `PreparedTruePeakLimiterBank<f32x4>::process_bank_mono`
@@ -267,8 +277,8 @@ SCALAR_SLACK = 8
 # (vector = `f32x4.{mul,add,sub,div}`, scalar = `f32.{mul,add,sub,div}`):
 #
 #   (multiband-compressor f32x8 was 2560 / 20; #1110 removed eight lanes from the browser build)
-#   multiband-compressor f32x4   2527 /  0   ratio 0        (dual; 2527 / 20 before #1871, codegen)
-#   multiband-compressor f32x4   1389 /  0   ratio 0        (collapsed, #1871)
+#   multiband-compressor f32x4   3464 /  0   ratio 0        (dual; 2527 / 0 before #1367a's mixed arm)
+#   multiband-compressor f32x4   1862 /  0   ratio 0        (collapsed; 1389 / 0 before #1367a)
 #   transient-shaper     f32x4    700 /  0   ratio 0        (dual; 786 / 72 at M2, codegen)
 #   transient-shaper     f32x4    352 /  0   ratio 0        (collapsed, #1873)
 #   true-peak-limiter    f32x4    448 /  0   ratio 0        (dual)
@@ -324,7 +334,7 @@ SCALAR_SLACK = 8
 # vanished, not as a row that grew.
 #
 # Each collapsed body carries about **half** its dual sibling's vector arithmetic (138 against 267,
-# 224 against 448, 84 against 168, 82 against 162, 1389 against 2527, 352 against 700) and zero
+# 224 against 448, 84 against 168, 82 against 162, 1862 against 3464, 352 against 700) and zero
 # scalar arithmetic,
 # which is what a correct one-plane variant looks like from here.
 KERNEL_ROSTER: tuple[tuple[str, str, float], ...] = (
@@ -542,6 +552,70 @@ def unhashed(name: str) -> str:
     return V0_CRATE_HASH.sub("Cs_", LEGACY_HASH.sub("E", name))
 
 
+BASE62_INDEX = re.compile(r"[0-9A-Za-z]*_")
+CONST_DATA = re.compile(r"n?[0-9a-f]*_")
+BASIC_TYPE = frozenset("abcdefhijlmnostuvxyz")
+
+
+def kernel_key(name: str) -> str:
+    """`unhashed(name)` without the indices that move when unrelated code moves (#1889).
+
+    A v0 symbol's impl disambiguator (`Ms4_`, `Xs9_`) numbers the impl blocks of its crate, and a
+    back-reference (`B5_`) is a byte offset into the symbol, so both change when an unrelated impl
+    block is added. The walk copies each length-prefixed identifier and each const's hex data
+    verbatim (so a tag-like byte inside them is never touched), drops the disambiguator after
+    `M`/`X`, and writes every back-reference as `B_`. A name that is not v0, or that the walk
+    cannot follow, is returned as `unhashed` gives it. The key is less specific than the name, so
+    a table entry must still resolve to exactly one function; a collision fails and names both.
+    """
+    name = unhashed(name)
+    if not name.startswith("_R"):
+        return name
+    out = ["_R"]
+    i = 2
+    try:
+        while i < len(name):
+            c = name[i]
+            if c.isdigit() or (c == "u" and i + 1 < len(name) and name[i + 1].isdigit()):
+                start = i
+                if c == "u":
+                    i += 1
+                j = i
+                while name[j].isdigit():
+                    j += 1
+                length = int(name[i:j])
+                if name[j] == "_":
+                    j += 1
+                if j + length > len(name):
+                    return name
+                out.append(name[start : j + length])
+                i = j + length
+            elif c in "MX" and name[i + 1] == "s":
+                index = BASE62_INDEX.match(name, i + 2)
+                if index is None:
+                    return name
+                out.append(c)
+                i = index.end()
+            elif c == "B":
+                index = BASE62_INDEX.match(name, i + 1)
+                if index is None:
+                    return name
+                out.append("B_")
+                i = index.end()
+            elif c == "K" and name[i + 1] in BASIC_TYPE:
+                data = CONST_DATA.match(name, i + 2)
+                if data is None:
+                    return name
+                out.append(name[i : data.end()])
+                i = data.end()
+            else:
+                out.append(c)
+                i += 1
+    except IndexError:
+        return name
+    return "".join(out)
+
+
 def indirect_sites(members: list[Function]) -> dict[str, int]:
     """Each member that contains `call_indirect`, by unhashed name, with its total count."""
     sites: dict[str, int] = {}
@@ -611,10 +685,93 @@ def check_render_thread(
 # name without the mangling hash (`unhashed`), with the reason each is not a render kernel. A new
 # entry is a review that no render path calls the function; an entry that matches nothing fails.
 CONTROL_THREAD_EXEMPT: dict[str, str] = {
-    "_RNvMs2_Cs_13parametric_eqINtB5_7ChannelNtNtCs_4wide6f32x4_5f32x4Kj4_E12decode_trackB5_": (
+    "_RNvMCs_13parametric_eqINtB_7ChannelNtNtCs_4wide6f32x4_5f32x4Kj4_E12decode_trackB_": (
         "control-thread state decode; LLVM 22 partly vectorizes its ramp check (#877); no render "
         "path calls it"
     ),
+    "_RNvMCs_16transient_shaperINtB_6ShaperNtNtCs_4wide6f32x4_5f32x4Kj4_E3newB_": (
+        "transient shaper constructor, called only from `prepare` and the bank factory (#1889); "
+        "its four coefficient products run once per plan, on the control thread"
+    ),
+}
+
+
+# Issue #1889: the render kernels the f32x4 build must keep, by name without the mangling hash
+# (`unhashed`), with the stage each renders. `kernel_arithmetic` skips a function with no `f32x4`
+# arithmetic as a helper, so a kernel that LLVM or a source change scalarises in full would leave
+# the K count with nothing red; rule 5 holds each entry present (exactly one function) and
+# vector-carrying. Measured on the 1.99.1 named twin of shipped module 8e0e4e79 (main after
+# #1922 and #1925): these are all the kernels rule 3 counts. A vanished entry is answered by a reviewed edit, with evidence
+# that its arithmetic moved into a kernel this table or the roster still holds, never by
+# deleting the row silently (the INDIRECT_SITES policy). A counted kernel that is neither here
+# nor in `CONTROL_THREAD_EXEMPT` fails, so a change that adds a kernel adds its row.
+RENDER_KERNELS: dict[str, str] = {
+    "_RNvMCs_8builtinsINtB_10InputStageNtNtCs_4wide6f32x4_5f32x4E7processB_":
+        "builtins input section (polarity/trim/HPF/LPF), stereo body",
+    "_RNvMCs_8builtinsINtB_10InputStageNtNtCs_4wide6f32x4_5f32x4E12process_monoB_":
+        "builtins input section, mono-collapsed body",
+    "_RNvMCs_8builtinsINtB_14FaderRampStageNtNtCs_4wide6f32x4_5f32x4E13process_planeB_":
+        "builtins fader/mute ramp plane, the builtins instance",
+    "_RNvMCs_8builtinsINtB_14FaderRampStageNtNtCs_4wide6f32x4_5f32x4E13process_planeCs_17builtins_compiler":
+        "builtins fader/mute ramp plane, the builtins_compiler instance",
+    "_RINvNtCs_4lane7kernels19silence_skip_settleNtNtCs_4wide6f32x4_5f32x4ECs_8builtins":
+        "silence-skip settle step, the builtins instance",
+    "_RINvNtCs_4lane7kernels19silence_skip_settleNtNtCs_4wide6f32x4_5f32x4ECs_13parametric_eq":
+        "silence-skip settle step, the parametric_eq instance",
+    "_RINvNtCs_4lane7kernels19silence_skip_settleNtNtCs_4wide6f32x4_5f32x4ECs_20multiband_compressor":
+        "silence-skip settle step, the multiband_compressor instance",
+    "_RINvNtCs_4lane7kernels20route_mix_ramp_blockNtNtCs_4wide6f32x4_5f32x4ECs_5graph":
+        "live route mix, one ramped route (#1220)",
+    "_RINvNtCs_4lane7kernels28route_mix_column_ramps_blockNtNtCs_4wide6f32x4_5f32x4ECs_5graph":
+        "live route mix, the indexed-ramp column body",
+    "_RINvMNtCs_15effect_contract4liveNtB_11BypassShunt9crossfadeNtNtCs_4wide6f32x4_5f32x4ECs_5graph":
+        "live bypass crossfade of a per-node insert",
+    "_RINvMNtCs_15effect_contract4liveNtB_11BypassShunt14crossfade_bankNtNtCs_4wide6f32x4_5f32x4ECs_4rack":
+        "live bypass crossfade of a banked console slot or insert",
+    "_RNvXCs_13parametric_eqINtB_20PreparedParametricEqNtNtCs_4wide6f32x4_5f32x4Kj4_ENtCs_15effect_contract24PreparedNativeEffectBank12process_bankB_":
+        "parametric EQ bank, stereo body",
+    "_RNvXCs_13parametric_eqINtB_20PreparedParametricEqNtNtCs_4wide6f32x4_5f32x4Kj4_ENtCs_15effect_contract24PreparedNativeEffectBank17process_bank_monoB_":
+        "parametric EQ bank, mono-collapsed body",
+    "_RNvXCs_13parametric_eqINtB_20PreparedParametricEqNtNtCs_4wide6f32x4_5f32x4Kj4_ENtCs_15effect_contract24PreparedNativeEffectBank14advance_clocksB_":
+        "parametric EQ ramp clocks on a skipped silent block",
+    "_RNvMCs_13parametric_eqINtB_7ChannelNtNtCs_4wide6f32x4_5f32x4Kj4_E10rest_lanesB_":
+        "parametric EQ rest test of the silence skip",
+    "_RINvNtCs_10compressor6kernel13process_blockNtNtCs_4wide6f32x4_5f32x4EB_":
+        "compressor kernel, stereo body",
+    "_RINvNtCs_10compressor6kernel18process_block_monoNtNtCs_4wide6f32x4_5f32x4EB_":
+        "compressor kernel, mono-collapsed body",
+    "_RINvNtCs_10compressor6kernel17settled_sidechainNtNtCs_4wide6f32x4_5f32x4EB_":
+        "compressor settled-sidechain block",
+    "_RNvXCs_13gate_expanderINtB_12PreparedGateNtNtCs_4wide6f32x4_5f32x4Kb0_ENtCs_15effect_contract24PreparedNativeEffectBank12process_bank":
+        "gate/expander bank, stereo body",
+    "_RNvXCs_13gate_expanderINtB_12PreparedGateNtNtCs_4wide6f32x4_5f32x4Kb0_ENtCs_15effect_contract24PreparedNativeEffectBank17process_bank_mono":
+        "gate/expander bank, mono-collapsed body",
+    "_RNvMCs_17true_peak_limiterINtB_11LimiterCoreNtNtCs_4wide6f32x4_5f32x4E13process_blockB_":
+        "true-peak limiter core, stereo body",
+    "_RNvMCs_17true_peak_limiterINtB_11LimiterCoreNtNtCs_4wide6f32x4_5f32x4E18process_block_monoB_":
+        "true-peak limiter core, mono-collapsed body (also held by check_limiter_forwarding)",
+    "_RNvXCs_20multiband_compressorINtB_31PreparedMultibandCompressorBankNtNtCs_4wide6f32x4_5f32x4Kj4_ENtCs_15effect_contract24PreparedNativeEffectBank12process_bankB_":
+        "multiband compressor bank, stereo body",
+    "_RNvXCs_20multiband_compressorINtB_31PreparedMultibandCompressorBankNtNtCs_4wide6f32x4_5f32x4Kj4_ENtCs_15effect_contract24PreparedNativeEffectBank17process_bank_monoB_":
+        "multiband compressor bank, mono-collapsed body",
+    "_RNvXCs_20multiband_compressorINtB_31PreparedMultibandCompressorBankNtNtCs_4wide6f32x4_5f32x4Kj4_ENtCs_15effect_contract24PreparedNativeEffectBank14advance_clocksB_":
+        "multiband compressor ramp clocks on a skipped silent block",
+    "_RNvMCs_9soft_clipINtB_7ChannelNtNtCs_4wide6f32x4_5f32x4E7processB_":
+        "saturator/clipper channel body",
+    "_RNvXCs_16transient_shaperINtB_27PreparedTransientShaperBankNtNtCs_4wide6f32x4_5f32x4Kj4_ENtCs_15effect_contract24PreparedNativeEffectBank12process_bankB_":
+        "transient shaper bank, stereo body",
+    "_RNvXCs_16transient_shaperINtB_27PreparedTransientShaperBankNtNtCs_4wide6f32x4_5f32x4Kj4_ENtCs_15effect_contract24PreparedNativeEffectBank17process_bank_monoB_":
+        "transient shaper bank, mono-collapsed body",
+    "_RNCINvMCs_8de_esserINtB_7DeEsserNtNtCs_4wide6f32x4_5f32x4Kb0_E9run_blockKB_E0B_":
+        "de-esser block body, stereo (`run_block::<false>`'s inner closure)",
+    "_RNCINvMCs_8de_esserINtB_7DeEsserNtNtCs_4wide6f32x4_5f32x4Kb0_E9run_blockKb1_E0B_":
+        "de-esser block body, mono-collapsed (`run_block::<true>`'s inner closure)",
+    "_RNvXCs_8de_esserINtB_7DeEsserNtNtCs_4wide6f32x4_5f32x4Kb0_ENtCs_15effect_contract24PreparedNativeEffectBank12process_bank":
+        "de-esser bank, stereo entry",
+    "_RNvXCs_8de_esserINtB_7DeEsserNtNtCs_4wide6f32x4_5f32x4Kb0_ENtCs_15effect_contract24PreparedNativeEffectBank17process_bank_mono":
+        "de-esser bank, mono-collapsed entry",
+    "_RNvXCs_8de_esserINtB_7DeEsserNtNtCs_4wide6f32x4_5f32x4Kb0_ENtCs_15effect_contract24PreparedNativeEffectBank14advance_clocks":
+        "de-esser ramp clocks on a skipped silent block",
 }
 
 
@@ -641,27 +798,65 @@ def check_kernel_shape(
     minimum: int,
     roster: tuple[tuple[str, str, float], ...] = KERNEL_ROSTER,
     exempt: dict[str, str] | None = None,
+    pinned: dict[str, str] | None = None,
 ) -> int:
     """The per-kernel shape gate that replaced the raw `--simd-floor` total (#163 phase 0e).
 
     `exempt` is a `CONTROL_THREAD_EXEMPT`-shaped table (#877); `None` exempts nothing.
+    `pinned` is a `RENDER_KERNELS`-shaped table (#1889, rule 5); `None` pins nothing.
     """
     failures = 0
-    exempt = exempt or {}
-    names = {unhashed(function.name) for function in functions.values()}
-    for name, reason in exempt.items():
-        if name not in names:
+    for name, reason in (pinned or {}).items():
+        matched = [function for function in functions.values() if kernel_key(function.name) == name]
+        if len(matched) != 1:
             failures += 1
             print(
-                f"FAIL kernel exemption {name}: matches no function in the module. Delete the "
-                f"stale entry ({reason}).",
+                f"FAIL render kernel {name}: {len(matched)} functions in the module carry this "
+                f"key (expected exactly one; {reason}). A vanished or renamed kernel is a "
+                "reviewed table edit with evidence of where its arithmetic went, never a silent "
+                "row deletion; a collision needs a more specific key.",
                 file=sys.stderr,
             )
+            for function in matched:
+                print(f"  {function.name}", file=sys.stderr)
+            continue
+        vector = sum(1 for opcode in matched[0].opcodes if KERNEL_VECTOR.match(opcode))
+        scalar = sum(1 for opcode in matched[0].opcodes if KERNEL_SCALAR.match(opcode))
+        if vector == 0:
+            failures += 1
+            print(
+                f"FAIL render kernel {name}: vector=0 scalar={scalar} (a listed render kernel is "
+                f"fully scalar; {reason})",
+                file=sys.stderr,
+            )
+            continue
+        print(f"  pinned ok   vector={vector} scalar={scalar} {reason}")
+    exempt = exempt or {}
+    for name, reason in exempt.items():
+        matched = [function for function in functions.values() if kernel_key(function.name) == name]
+        if len(matched) != 1:
+            failures += 1
+            print(
+                f"FAIL kernel exemption {name}: {len(matched)} functions in the module carry this "
+                f"key (expected exactly one). Delete a stale entry, or make a colliding key more "
+                f"specific ({reason}).",
+                file=sys.stderr,
+            )
+            for function in matched:
+                print(f"  {function.name}", file=sys.stderr)
     kernels = []
     for function, vector, scalar in kernel_arithmetic(functions, pattern):
-        if unhashed(function.name) in exempt:
+        if kernel_key(function.name) in exempt:
             print(f"  exempt control-thread vector={vector} scalar={scalar} {function.name}")
             continue
+        if pinned is not None and kernel_key(function.name) not in pinned:
+            failures += 1
+            print(
+                f"FAIL kernel {function.name}: vector={vector} scalar={scalar} is counted but "
+                "is in neither RENDER_KERNELS nor CONTROL_THREAD_EXEMPT. Add its row with the "
+                "stage it renders (or its control-thread reason).",
+                file=sys.stderr,
+            )
         kernels.append((function, vector, scalar))
     for function, vector, scalar in kernels:
         if vector <= scalar:
@@ -1184,7 +1379,7 @@ def self_test() -> int:
         "Kj4_E12decode_trackB5_"
     )
     control = VALID_SHAPE + synthetic_kernel(decode, vector=1, scalar=4, index=2)
-    pinned = {unhashed(decode): "control-thread state decode"}
+    pinned = {kernel_key(decode): "control-thread state decode"}
     expect(
         "(d4) exempted control-thread function passes",
         check_kernel_shape(parse(control), "render_next|decode_track", 1, SELF_TEST_ROSTER,
@@ -1209,7 +1404,62 @@ def self_test() -> int:
     )
     expect(
         "(d6) the shipped table's entries are hash-free",
-        all(unhashed(name) == name for name in CONTROL_THREAD_EXEMPT),
+        all(kernel_key(name) == name for name in CONTROL_THREAD_EXEMPT),
+    )
+
+    # (e1) issue #1889: a pinned render kernel that the build scalarises in full fails, though
+    # `kernel_arithmetic` drops it as a helper and K still holds; with vector arithmetic it passes.
+    route = (
+        "_RINvNtCsaB1_4lane7kernels28route_mix_column_ramps_blockNtNtCsgmSSuZlKkZ2_4wide6f32x4_"
+        "5f32x4ECsQ9_5graph"
+    )
+    kernel_table = {"render_next": "synthetic render", kernel_key(route): "live route mix"}
+    for vector, verdict in ((0, 1), (1, 0)):
+        module = VALID_SHAPE + synthetic_kernel(route, vector=vector, scalar=0, index=2)
+        expect(
+            f"(e1) pinned render kernel at vector={vector}",
+            check_kernel_shape(parse(module), "render_next", 1, SELF_TEST_ROSTER,
+                               pinned=kernel_table) == verdict,
+        )
+    # (e2) an entry that names no function in the module fails.
+    expect(
+        "(e2) stale render-kernel entry fails",
+        check_kernel_shape(parse(VALID_SHAPE), "render_next", 1, SELF_TEST_ROSTER,
+                           pinned={"render_next": "synthetic render",
+                                   "no_such_kernel": "stale"}) == 1,
+    )
+    # (e4) a counted kernel that the table does not name fails, so the table cannot go stale.
+    expect(
+        "(e4) unpinned counted kernel fails",
+        check_kernel_shape(parse(VALID_SHAPE), "render_next", 1, SELF_TEST_ROSTER,
+                           pinned={}) == 1,
+    )
+    # (e5) a key survives an impl-index move (`Xs9_` -> `Xsa_`, and a back-reference offset
+    # shift with it), and a key that two functions share after normalising fails.
+    eq_bank = (
+        "_RNvXs{}_Csb6SUMLvW3Nv_13parametric_eqINtB{}_20PreparedParametricEqNtNtCsgmSSuZlKkZ2_"
+        "4wide6f32x4_5f32x4Kj4_ENtCs4yi8P0M01YE_15effect_contract24PreparedNativeEffectBank"
+        "12process_bankB{}_"
+    )
+    before, after = eq_bank.format("9", "5", "5"), eq_bank.format("10", "6", "6")
+    eq_table = {"render_next": "synthetic render", kernel_key(before): "parametric EQ bank"}
+    moved = VALID_SHAPE + synthetic_kernel(after, vector=4, scalar=0, index=2)
+    expect(
+        "(e5) a pinned key matches its kernel after an impl-index move",
+        check_kernel_shape(parse(moved), "render_next", 1, SELF_TEST_ROSTER,
+                           pinned=eq_table) == 0,
+    )
+    both = moved + synthetic_kernel(before, vector=4, scalar=0, index=3)
+    expect(
+        "(e5) a key that two functions share fails",
+        check_kernel_shape(parse(both), "render_next", 1, SELF_TEST_ROSTER,
+                           pinned=eq_table) == 1,
+    )
+    # (e3) the shipped table survives a rebuild and never pins an exempted function.
+    expect(
+        "(e3) the shipped render-kernel table is hash-free and disjoint from the exemptions",
+        all(kernel_key(name) == name for name in RENDER_KERNELS)
+        and not set(RENDER_KERNELS) & set(CONTROL_THREAD_EXEMPT),
     )
 
     # (d3) a vector-typed helper with no arithmetic is not counted as a kernel.
@@ -1375,7 +1625,11 @@ def main() -> int:
         if args.kernel_pattern is None or args.kernel_min is None:
             parser.error("--kernel-shape requires --kernel-pattern and --kernel-min")
         failures += check_kernel_shape(
-            functions, args.kernel_pattern, args.kernel_min, exempt=CONTROL_THREAD_EXEMPT
+            functions,
+            args.kernel_pattern,
+            args.kernel_min,
+            exempt=CONTROL_THREAD_EXEMPT,
+            pinned=RENDER_KERNELS,
         )
         failures += check_limiter_forwarding(functions)
         failures += check_no_eight_lanes(functions)
