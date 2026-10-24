@@ -268,14 +268,18 @@ Scoped against `f89dc1d60`. Single mode (decision 17); the Worker routing is #13
   exactCount, transitionFallbackCount, supersededCount }` (bigints) only when `(revision,
   first_sample)` changed. The boot read is the baseline and is not posted. `BACKPRESSURE` skips the
   message and is not sticky; any other refusal, or a record of the wrong size, is sticky. Gate 2's
-  "OR of both" holds without page-side coalescing: the record's `outcome_flags` is the OR over every
-  revision the last advance covered and the counts are cumulative, so the newest post loses no flag.
+  "OR of both": the record's `outcome_flags` covers only the engine's last advance, so the worklet
+  keeps the counts it last posted and ORs in the flag of each count that rose since (exact 1,
+  transition fallback 2, superseded 4); two advances between two reads post both flags.
   The wrapper's `onWatermark(listener) -> unsubscribe` (`@internal`) delivers one frozen record per
   post; a malformed post fails the host with 255. No change to `process()` or its two pinned posts.
 - **Test value (1294a).** The worklet test (`scripts/test-web-audioworklet.mjs`, "Issue #1294a
   (D3)") turns red if the handler posts on every message, never posts, posts a stale or repeated
   pair, treats `BACKPRESSURE` as sticky, or skips the push after a request; the host test turns red
-  if a listener is not called or a malformed post is accepted. Mutants M1-M8 (every message, never,
+  if a listener is not called or a malformed post is accepted. Verifier fold: two advances between
+  two reads (fallback, then exact) post outcome 3, red without the count OR (MB); a refused read
+  (result 5) and a record of the wrong size are sticky with their results, red on MC (refusal
+  ignored) and MD (size unchecked). Mutants M1-M8 (every message, never,
   stale pair, sticky backpressure, no boot seed, host accepts malformed, host calls no listener,
   handler skips the push) were each red.
 - **Companion row (1294a).** The worklet calls `watermark_read` after construction, so the hermetic
