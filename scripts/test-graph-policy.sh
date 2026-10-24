@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
+source "$(dirname "${BASH_SOURCE[0]}")/lib/gate.sh"
 root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 scratch=$(mktemp -d); trap 'rm -rf -- "$scratch"' EXIT
 base="$scratch/base"; work="$scratch/work"

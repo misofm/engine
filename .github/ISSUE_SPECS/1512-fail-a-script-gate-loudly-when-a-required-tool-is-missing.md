@@ -33,3 +33,25 @@ A CI or local gate whose command needs a tool that is absent (for example `rg`) 
 ## Authorized paths
 
 `scripts/` (the helper and the converted scripts), this spec.
+
+## Evidence and decision record
+
+- Counts on `main` 82f987296 (2026-10-24): 33 shell files call `rg` (32 scripts plus `scripts/lib/gate.sh`);
+  5 negated `! rg` sites survive (`check-parametric-eq-render-contract.sh:35,40,46,47`,
+  `check-builtins-listening.sh:15`). Every CI job that runs one of these scripts installs ripgrep, so
+  there is no live hole; the preflight is what makes a dropped install loud.
+- D1 as built (root, 2026-10-24, option B): `require_tools` lives in `scripts/lib/gate.sh`, which calls
+  `require_tools rg` at load. There is no separate `require-tools.sh`: several tests copy or link
+  `gate.sh` alone into a scratch tree, so a sibling file would break them. `gate.sh` defines only
+  functions plus that call (no `set`, trap or global).
+- D2 scope (root): `rg` only. Other tools (jq, python3, cargo, node, wabt, llvm) are called positively,
+  so a missing one already fails nonzero; listing them per script is a follow-up.
+- Converted: the 20 scripts that called `rg` without `gate.sh`, plus `test-session-policy.sh`,
+  `test-dsp-research.sh` and `test-lane-policy.sh`, which called `rg` (or a child gate) before sourcing
+  `gate.sh`. Each has `source "$(dirname "${BASH_SOURCE[0]}")/lib/gate.sh"` right after `set -euo pipefail`.
+  `check-unfused-seal.sh` links `gate.sh` beside its self-test mutant copy.
+- G1: `scripts/test-gate-lib.sh` finds every `scripts/*.sh` with an `rg` call, runs it with no
+  arguments under a PATH without `rg`, and requires exit 2 and exactly "<script> requires rg" (27
+  scripts). Exclusions: itself (recursion) and `test-workspace-policy.sh`, which sources `gate.sh` after
+  its first `rg`; moving that line belongs to #1527/#1528.
+- Attempt 1 (2026-10-24): G1 and G2 pass locally (see the attempt report).

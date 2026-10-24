@@ -6,6 +6,7 @@
 # scripts/check-cross-targets.sh; #1027 retired that wrapper. Its header, in git history (last
 # present at ed0556a9), has the full history of what issue #87's audit removed from this crate.
 set -euo pipefail
+source "$(dirname "${BASH_SOURCE[0]}")/lib/gate.sh"
 
 root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 cd "$root"

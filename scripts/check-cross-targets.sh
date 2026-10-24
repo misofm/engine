@@ -25,6 +25,7 @@
 # #1037 (owner ruling R6) also removed the interchange qualification precondition and the
 # effect-package cdylib object row; effect-compiler keeps its wasm `check --all-targets` row below.
 set -euo pipefail
+source "$(dirname "${BASH_SOURCE[0]}")/lib/gate.sh"
 
 [[ $# -eq 0 ]] || { printf 'usage: check-cross-targets.sh\n' >&2; exit 2; }
 

@@ -12,6 +12,7 @@
 # already produced (`target/release/libcapi.so`/`.a`, overridable via `MISO_ENGINE_CAPI_LIBRARY`
 # / `MISO_ENGINE_CAPI_STATIC_LIBRARY` exactly as before).
 set -euo pipefail
+source "$(dirname "${BASH_SOURCE[0]}")/lib/gate.sh"
 
 
 # ---------------------------------------------------------------------------------------------

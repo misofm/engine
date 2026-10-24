@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
+source "$(dirname "${BASH_SOURCE[0]}")/lib/gate.sh"
 
 if [[ "$#" -ne 4 ]]; then
   printf 'usage: validate-realtime-trace.sh TRACE_DIRECTORY BEGIN_MARKER END_MARKER EXPECTED_INTERVALS\n' >&2

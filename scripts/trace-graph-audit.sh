@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Usage: trace-graph-audit.sh [path/to/audit] [blocks]
 set -euo pipefail
+source "$(dirname "${BASH_SOURCE[0]}")/lib/gate.sh"
 
 workspace_dir=$(cd "$(dirname "$0")/.." && pwd)
 blocks="${2:-1000000}"

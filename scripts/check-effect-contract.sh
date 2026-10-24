@@ -8,6 +8,7 @@
 # script's first positional argument, falling back to `cargo run --locked --release -p bench` when
 # none is given.
 set -euo pipefail
+source "$(dirname "${BASH_SOURCE[0]}")/lib/gate.sh"
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 # S3: resolve a relative bench path against the caller's cwd BEFORE `cd "$root"` below.

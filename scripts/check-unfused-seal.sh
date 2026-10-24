@@ -24,6 +24,7 @@
 # unregistered call fails, and a registered exemption that no longer exists *also* fails, so the
 # roster cannot quietly describe a tree that has moved on.
 set -euo pipefail
+source "$(dirname "${BASH_SOURCE[0]}")/lib/gate.sh"
 
 # ---------------------------------------------------------------------------------------------
 # --self-test: every rule in this file gets a mutation that must turn it red, and the structural
@@ -386,6 +387,8 @@ expect_producer_failure recount-late 'fused-call search failed for tools/wasm-ga
 prove_status_mutant() {
     local label=$1 kind=$2 diagnostic=$3 edit=$4 mutant output rc before after diff
     tree=$(create_fixture); mutant="$scratch_root/mutant-$label.sh"; cp "$root/scripts/check-unfused-seal.sh" "$mutant"
+    # The mutant sources lib/gate.sh beside itself.
+    mkdir -p "$scratch_root/lib"; ln -sf "$root/scripts/lib/gate.sh" "$scratch_root/lib/gate.sh"
     before=$(cksum <"$mutant")
     sed -i "$edit" "$mutant"
     after=$(cksum <"$mutant")

@@ -289,6 +289,45 @@ assert_mutant_red unique 'ASSERT unique accepted failed filter' env PATH="$scrat
 assert_mutant_red join 'ASSERT join accepted failed aggregation' env PATH="$scratch/paste-fail:$PATH" bash -c 'source "$1"; if gate_join_lines x "|" "$2" >/dev/null; then echo "ASSERT join accepted failed aggregation"; exit 1; fi' _ "$new_counter/join.sh" $'engine\nlane'
 assert_mutant_red target 'ASSERT target mode lost target dependency' bash -c 'source "$1"; [[ "$(gate_toml_dependencies "$2" plain-target)" == $'"'"'alpha\ntarget_only\nzeta'"'"' ]] || { echo "ASSERT target mode lost target dependency"; exit 1; }' _ "$new_counter/target.sh" "$plain_manifest"
 
+# #1512: every script that calls rg refuses loudly when rg is missing. The scripts are found by
+# scanning for an rg call, so a new script that forgets the preflight turns this red. Each runs
+# with no arguments under a PATH that holds every other tool, and must exit 2 printing only
+# "<script> requires rg".
+nobin="$scratch/no-rg-bin"; mkdir -p "$nobin"
+IFS=: read -ra path_dirs <<<"$PATH"
+for dir in "${path_dirs[@]}"; do
+    [[ -d "$dir" ]] || continue
+    for tool in "$dir"/*; do
+        name=${tool##*/}
+        [[ "$name" != rg && -x "$tool" && ! -d "$tool" && ! -e "$nobin/$name" ]] || continue
+        ln -s "$tool" "$nobin/$name"
+    done
+done
+[[ ! -e "$nobin/rg" ]] && ! PATH="$nobin" command -v rg >/dev/null || { echo 'no-rg PATH still resolves rg' >&2; exit 1; }
+converted=0
+for script in "$root"/scripts/*.sh; do
+    name=${script##*/}
+    case "$name" in
+        # This script: running it here would recurse.
+        test-gate-lib.sh) continue ;;
+        # sources gate.sh after its first rg (line ~848); moving that line belongs to #1527/#1528,
+        # which own the file this round. It also runs this script, so it would recurse.
+        test-workspace-policy.sh) continue ;;
+    esac
+    grep -qE '^([^#]*[^[:alnum:]_.#-])?rg( |$)' "$script" || continue
+    output=$(cd "$scratch" && timeout 60 env PATH="$nobin" "$BASH" "$script" </dev/null 2>&1 >/dev/null) && rc=0 || rc=$?
+    [[ "$rc" == 2 && "$output" == "$name requires rg" ]] || {
+        printf 'missing rg not refused by %s (rc=%s): %s\n' "$name" "$rc" "$output" >&2; exit 1;
+    }
+    converted=$((converted + 1))
+done
+(( converted > 0 )) || { echo 'no rg-calling script found' >&2; exit 1; }
+present_output=$(require_tools bash rg 2>&1) && present_rc=0 || present_rc=$?
+[[ "$present_rc" == 0 && -z "$present_output" ]] || {
+    printf 'require_tools refused present tools (rc=%s): %s\n' "$present_rc" "$present_output" >&2; exit 1;
+}
+printf 'missing-rg preflight refused by %s scripts\n' "$converted"
+
 [[ "$PWD" == "$before_pwd" ]] || { echo 'gate changed caller cwd' >&2; exit 1; }
 [[ "$(set -o)" == "$before_opts" ]] || { echo 'gate changed caller shell options' >&2; exit 1; }
 (cd "$scratch" && bash "$root/scripts/check-rack-policy.sh" "$root" >/dev/null)
