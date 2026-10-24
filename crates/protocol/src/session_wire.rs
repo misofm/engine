@@ -550,6 +550,20 @@ fn tx_edit_payload(sink: &mut dyn Sink, edit: &SessionEdit) -> Result<(), Encode
             })?;
             tx_f32(sink, fields[1], *value)
         }
+        SessionEdit::Observe {
+            strip_id,
+            section,
+            tap_id,
+            armed,
+            window_blocks,
+        } => {
+            tx_message(sink, fields[0], |v| {
+                tx_observe_address(v, strip_id, section)
+            })?;
+            tx_u32(sink, fields[1], *tap_id)?;
+            tx_bool(sink, fields[2], *armed)?;
+            tx_u32(sink, fields[3], *window_blocks)
+        }
     }?;
     match (ramp_field, edit.ramp_samples()) {
         (Some(ramp_field), Some(samples)) => tx_u32(sink, ramp_field, samples),
@@ -1299,7 +1313,81 @@ fn parse_edit(message: Message<'_>) -> Result<SessionEdit, DecodeError> {
                 expected_effect,
             })
         }
+        crate::SessionEditOpcode::Observe => {
+            let (strip_id, section) =
+                parse_observe_address(payload.nested_value(one_spec!(payload, fields[0])?)?)?;
+            Ok(SessionEdit::Observe {
+                strip_id,
+                section,
+                tap_id: read_u32_exact(one_spec!(payload, fields[1])?)?,
+                armed: parse_bool(one_spec!(payload, fields[2])?)?,
+                // Not bounded here: the core refuses a window above the maximum, naming the edit.
+                window_blocks: read_u32_exact(one_spec!(payload, fields[3])?)?,
+            })
+        }
     }
+}
+
+/// The address of an `Observe` edit (#1584 D1): the control list's address message with the owner
+/// kind `strip` and its ID, the section `console` or `inserts` and its slot ID, and neither
+/// `control` nor `lane`. The typed edit has no spelling for any other shape.
+fn tx_observe_address(
+    sink: &mut dyn Sink,
+    strip_id: &StableId,
+    section: &controls::TapSection,
+) -> Result<(), EncodeError> {
+    use schema::control_address as a;
+    let section_code = match section {
+        controls::TapSection::Console(_) => crate::ControlSection::Console,
+        controls::TapSection::Inserts(_) => crate::ControlSection::Inserts,
+    };
+    tx_start_message(
+        sink,
+        a::SPEC.field_count(&[
+            (a::OWNER_ID, 1),
+            (a::SLOT_ID, 1),
+            (a::CONTROL, 0),
+            (a::LANE, 0),
+        ])?,
+    )?;
+    tx_u8(sink, a::OWNER_KIND, crate::ControlOwnerKind::Strip.code())?;
+    tx_id(sink, a::OWNER_ID, strip_id)?;
+    tx_u8(sink, a::SECTION, section_code.code())?;
+    tx_id(sink, a::SLOT_ID, section.id())
+}
+
+/// The decoder of [`tx_observe_address`]'s message: a route, VCA or session owner, an `own` or
+/// `builtins` section, a missing ID, or a `control` or `lane` field is `INVALID_FIELD`.
+fn parse_observe_address(
+    message: Message<'_>,
+) -> Result<(StableId, controls::TapSection), DecodeError> {
+    use schema::control_address as a;
+    let message = message.schema_spec(&a::SPEC)?;
+    let optional = |spec: FieldSpec| message.optional_one(spec.id, spec.wire.raw());
+    if optional(a::CONTROL)?.is_some() || optional(a::LANE)?.is_some() {
+        return Err(DecodeError::InvalidField);
+    }
+    let owner =
+        crate::ControlOwnerKind::from_code(read_u8_exact(one_spec!(message, a::OWNER_KIND)?)?)?;
+    if owner != crate::ControlOwnerKind::Strip {
+        return Err(DecodeError::InvalidField);
+    }
+    let section =
+        crate::ControlSection::from_code(read_u8_exact(one_spec!(message, a::SECTION)?)?)?;
+    let id = |spec: FieldSpec| -> Result<StableId, DecodeError> {
+        let value = optional(spec)?.ok_or(DecodeError::InvalidField)?;
+        let text = core::str::from_utf8(value).map_err(|_| DecodeError::InvalidUtf8)?;
+        StableId::parse(text).ok_or(DecodeError::InvalidField)
+    };
+    let strip_id = id(a::OWNER_ID)?;
+    let section = match section {
+        crate::ControlSection::Console => controls::TapSection::Console(id(a::SLOT_ID)?),
+        crate::ControlSection::Inserts => controls::TapSection::Inserts(id(a::SLOT_ID)?),
+        crate::ControlSection::Builtins | crate::ControlSection::Own => {
+            return Err(DecodeError::InvalidField);
+        }
+    };
+    Ok((strip_id, section))
 }
 
 /// The control address of a `SetControl` edit: the control list's address fields, in which a set

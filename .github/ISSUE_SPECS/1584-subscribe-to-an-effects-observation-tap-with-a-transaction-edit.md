@@ -594,3 +594,47 @@ shipped module sha256 is `179a933a...c3c1ae`; no export, layout or JS file chang
   then the room, whole or nothing), both in `crates/control-plane/src/control.rs`. The browser's
   record calls the same two, so the cap and the stable key hold alike on both hosts. The edit adds
   no admission or key lookup of its own.
+
+## Decision record: #1584 remainder (batch 13, attempt 1)
+
+Root decisions R1-R4 (scope note `1584.md`) as recommended. Built on `main` `97d1796ff` (after #1924).
+
+- **D1, wire.** `SessionEdit::Observe { strip_id, section: controls::TapSection, tap_id, armed, window_blocks }`,
+  opcode `0x0801`, schema `observe` (1 `address` = `control_address` with a strip owner, a console or inserts section
+  and its slot ID, no `control`/`lane`; 2 `tap_id`; 3 `armed`; 4 `window_blocks`). Departure: the frozen
+  `ObserveSection` is `controls::TapSection` (the D6a type, the same two arms). Any other address shape is
+  `INVALID_FIELD` at decode; the typed edit cannot spell one. `ramp_samples()` `None`; never in a snapshot.
+- **D2.** `controls::observe_target(model, key, window)` and `controls::observe_tap(menu, tap_id)`; codes
+  `observation.address.unknown`, `observation.tap.unknown`, `observation.tap.unsupported`, `observation.window`
+  (`MAXIMUM_OBSERVATION_WINDOW_BLOCKS` 4096, checked for arm and disarm).
+- **D3 (R1, R3).** `SessionStore::prepare_transaction_observed` / `_in_place_observed` take
+  `ObserveContext { bindings, enabled }`; the controller's `prepare_command_frame[_in_place]_observed` thread it.
+  `Observe` is a monitor edit (`is_monitor_row_edit`), never prepared in place, never reaches
+  `apply_session_edit` (which refuses it `observation.unavailable`). The store applies the edits in order to a copy
+  of the borrowed table (`ObservationBindings::observe`, refs; the window compared is the one asked for) and keeps
+  the copy and the net records (`ObservationBindings::writes_to`, at most one per tap) on the token. Refusals are
+  `SessionEditError::Observe` -> `VALIDATION_FAILED` at `edits[i]`. `ObservationBinding` gains `refs`; `set` keeps
+  an existing binding's refs.
+- **D4/D5.** `commit_live_once` resolves each net record by stable key on the newest plan and admits the batch
+  (`admit_observation_batch`, split from `admit_and_push_observation_batch`) before any write; `Full` ->
+  `CommandError::Backpressure` (diagnostic `control.plan.backpressure`, not a new `observation.backpressure`: a new
+  `CommandError` variant would break the browser's exhaustive mapping, outside this slice), `Limit` ->
+  `CompileRejected(Limit)`, the rest `Internal`. The push and the table install follow the protocol commit and
+  precede the reply, so no acknowledgement precedes a dropped record.
+- **D7 (R2).** `host_core::launch_maximum_observation_taps()`; `CapiPreparer` asks for it and forces the effect lanes
+  observation rides (as the browser does). `PreparedRuntime` and `ProviderEpoch` keep `observations`; the epoch row
+  charges their heap exactly (`observation_handle_bytes`: the slice, each handle's ID text and its reader box).
+  `ControlAdapter::OBSERVE_EDIT` (default `false`; capi `true`). `TestTransactionSnapshot::observation_windows`
+  (test-support) exposes the readers to the C ABI's tests.
+
+Departures in the gates: gate 1 checks the windows' framing (sequence, first sample, blocks) and not their values:
+the control-plane rig renders no source, and the values are host-core's claim (`effect_observation.rs`). The codec
+test lives in `crates/protocol/src/session_wire/tests.rs` (the `session_wire` module's own tests file). A D7a test
+(`an_observe_edit_is_refused_where_no_host_serves_it`, protocol `model.rs`) covers `observation.unavailable`.
+
+**Engine defect found (outside the authorized paths, not fixed):** `engine::realtime::observation_slot_retained_bytes()`
+returns `size_of::<ObservationSlot>()` and omits the 16-byte `Arc` header of each tap's shared slot, so a plan with
+observation capacity under-reports its walk by 16 bytes per tap. The C ABI plans now carry observation slots, so
+`capi_retained_bytes_charge_every_byte_the_compile_retains` fails at the #1074 plan-walk equality ("routed submix":
+freed 140,553, walked 140,537; one compressor tap). The fix is one line in `crates/engine/src/realtime/observe.rs`
+(charge the `Arc` allocation, as `engine::realtime::retained::arc` does); the browser under-reports the same bytes today.

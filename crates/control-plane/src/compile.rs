@@ -17,6 +17,10 @@ pub(crate) struct PreparedRuntime {
     pub(crate) effects: Box<[host_core::EffectControlProducer]>,
     /// The plan's meter consumers (#1581 D6), one per strip in strip order: kept, not dropped.
     pub(crate) meters: Box<[host_core::MeterConsumer]>,
+    /// The plan's effect observation readers (#1584 D7), one per observed effect instance in
+    /// `HostLiveControlHandles::effect_observations` order: kept, not dropped. Empty for a host
+    /// whose preparer takes them for itself (the browser's).
+    pub(crate) observations: Box<[host_core::EffectObservationHandle]>,
     pub(crate) plan: PreparedRenderPlan,
     /// The plan's one revision-gate handle, taken before the plan is published (#1502 D6).
     pub(crate) revision_gate: PlanRevisionGate,
@@ -356,6 +360,10 @@ pub(crate) fn capi_resources<A: ControlAdapter>(
         strip_table_bytes,
         effect_row,
         route_row,
+        // #1584 D7: the epoch's observation reader handles: the boxed slice, each handle's ID text
+        // and its boxed readers. The readers' slots and the lanes they read are the plan's own
+        // rows (`observation_retained_bytes`).
+        observation.handle_bytes,
         // #1696 D3: the monitor overlay, at this epoch's model bounds. The newest epoch's row
         // covers the committed overlay; an older epoch's covers the overlay its kept base holds
         // (`KeptBase::monitor`, the overlay committed on that epoch's model: no live commit
@@ -631,11 +639,35 @@ pub(crate) struct ObservationResources {
     pub(crate) reserve_slots: usize,
     /// Effect producers of the plan.
     pub(crate) producers: usize,
+    /// The heap of the observation reader handles the plan's epoch keeps (#1584 D7):
+    /// [`observation_handle_bytes`].
+    pub(crate) handle_bytes: u64,
 }
 
-/// The observation rows of `effects`, the newest plan's producers.
+/// The heap `handles` own (#1584 D7): the boxed slice, and each handle's strip and effect ID text
+/// and its boxed readers. The readers' slots are `Arc`s shared with the plan's lanes, whose bytes
+/// are the plan's `observation_retained_bytes`.
+pub(crate) fn observation_handle_bytes(
+    handles: &[host_core::EffectObservationHandle],
+) -> Result<u64, CompileFailure> {
+    let arithmetic = || failure(ResourceFault::Arithmetic);
+    handles
+        .iter()
+        .try_fold(size_of_val(handles), |total, handle| {
+            total
+                .checked_add(handle.track_id.len())?
+                .checked_add(handle.effect_id.len())?
+                .checked_add(size_of_val(&*handle.readers))
+        })
+        .ok_or_else(arithmetic)
+        .and_then(|bytes| u64::try_from(bytes).map_err(|_| failure(ResourceFault::Platform)))
+}
+
+/// The observation rows of `effects`, the newest plan's producers, and the `handle_bytes` of the
+/// reader handles its epoch keeps.
 pub(crate) fn observation_resources(
     effects: &[host_core::EffectControlProducer],
+    handle_bytes: u64,
     slots_high_water: usize,
 ) -> Result<ObservationResources, CompileFailure> {
     let mut slots = 0_usize;
@@ -646,6 +678,7 @@ pub(crate) fn observation_resources(
     }
     Ok(ObservationResources {
         producers: effects.len(),
+        handle_bytes,
         slots,
         reserve_slots: slots.max(slots_high_water),
     })
@@ -1400,6 +1433,7 @@ pub(crate) fn prepare_runtime<A: ControlAdapter>(
         follow_route_controls,
         jump_lengths,
         meters,
+        effect_observations,
         ..
     } = handles;
     // #1639 D1: every prepared plan has a jump-length cell, so a handle set without its writer is
@@ -1428,13 +1462,20 @@ pub(crate) fn prepare_runtime<A: ControlAdapter>(
     // exactly one entry per request and charges it in `builtin_meter_payload_bytes`, with each
     // consumer's ring, so the boxed slice does not reallocate and is not charged again here.
     let meters = meters.into_boxed_slice();
+    // #1584 D7: the observation readers stay with the plan's epoch, the reader of every tap an
+    // `Observe` edit arms. Shrunk to their length first, so the charge below is the allocation.
+    let observations = effect_observations.into_boxed_slice();
     let mut capi = prepared_capi_resources::<A>(
         compiled,
         &prepared.control_catalog,
         &prepared.inventory,
         prepared.report.effect_control_resources,
         prepared.report.route_control_resources,
-        observation_resources(&effects, observation_slots_high_water)?,
+        observation_resources(
+            &effects,
+            observation_handle_bytes(&observations)?,
+            observation_slots_high_water,
+        )?,
         limits,
     )?;
     // #1594 R6: a plan with spectrum captures has a session spectrum service and analysis beside
@@ -1479,6 +1520,7 @@ pub(crate) fn prepare_runtime<A: ControlAdapter>(
         strips,
         effects,
         meters,
+        observations,
         plan,
         revision_gate,
         resources: PlanResources {
@@ -1604,6 +1646,7 @@ where
         strips,
         effects,
         meters,
+        observations,
         plan,
         mut revision_gate,
         resources,
@@ -1711,7 +1754,8 @@ where
             meters,
             capi,
             revision_gate,
-        ),
+        )
+        .with_observations(observations),
         pending_providers,
         retired_providers,
         publisher,

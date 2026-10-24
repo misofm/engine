@@ -38,6 +38,9 @@ struct Adapter;
 impl ControlAdapter for Adapter {
     type Row = PlanResources;
     const ADAPTER_ALLOCATIONS: &'static [u64] = &[];
+    // #1584: the core's `Observe` edit, as the C ABI serves it. The browser-path tests here push
+    // through `admit_and_push_observation_batch` and never send the edit.
+    const OBSERVE_EDIT: bool = true;
 }
 
 /// A preparer that asks for observation capacity, as a host with subscriptions does.
@@ -1465,4 +1468,299 @@ fn the_binding_table_charge_covers_its_kept_capacity_and_a_later_sets_text() {
         highest <= charge,
         "the table held {highest} bytes over a charge of {charge}"
     );
+}
+
+/// An `Observe` of tap 1 (gain reduction) of `strip`'s `comp` insert.
+fn observe(strip: &str, armed: bool, window_blocks: u32) -> SessionEdit {
+    observe_tap(strip, "comp", 1, armed, window_blocks)
+}
+
+fn observe_tap(
+    strip: &str,
+    insert: &str,
+    tap_id: u32,
+    armed: bool,
+    window_blocks: u32,
+) -> SessionEdit {
+    SessionEdit::Observe {
+        strip_id: StableId::parse(strip).expect("strip"),
+        section: TapSection::Inserts(StableId::parse(insert).expect("insert")),
+        tap_id,
+        armed,
+        window_blocks,
+    }
+}
+
+/// How the session answered a transaction: the path it took, or the refusal's status, its first
+/// diagnostic's code and that diagnostic's edit index.
+#[derive(Debug, PartialEq)]
+enum Reply {
+    Applied(protocol::EditPath),
+    Refused(protocol::StatusCode, String, Option<u32>),
+}
+
+impl Rig {
+    /// Submit `edits` as a new request and decode the reply.
+    fn transact(&mut self, edits: &[SessionEdit]) -> Reply {
+        let length = self
+            .apply(edits)
+            .unwrap_or_else(|error| panic!("no reply: {error:?}"));
+        self.reply(length)
+    }
+
+    fn reply(&self, length: usize) -> Reply {
+        let mut fields = vec![0_u16; 4_096];
+        match ProtocolCodec::default()
+            .decode_typed_response(
+                self.session.command_response(length),
+                &mut DecodeScratch::new(&mut fields),
+            )
+            .expect("a transaction reply")
+        {
+            protocol::DecodedTypedResponseFrame::Success {
+                payload: protocol::DecodedSuccessResponsePayload::SessionTransactionApplied(applied),
+                ..
+            } => Reply::Applied(applied.edit_path),
+            protocol::DecodedTypedResponseFrame::NonOk { header, payload } => Reply::Refused(
+                header.status,
+                payload.diagnostics[0].code.clone(),
+                payload.diagnostics[0].operation_index,
+            ),
+            protocol::DecodedTypedResponseFrame::Success { .. } => panic!("another reply"),
+        }
+    }
+
+    /// The records queued so far on `strip`'s `comp` insert's observation queue.
+    fn queued(&self, strip: &str) -> u64 {
+        self.session.effect_producers()[self.position(strip)].observe_success_count()
+    }
+
+    /// The newest window `strip`'s `comp` insert's gain-reduction reader holds.
+    fn window(&self, strip: &str) -> Option<engine::realtime::ObservationWindow> {
+        self.session
+            .test_pending_providers()
+            .last()
+            .unwrap_or(self.session.test_providers())
+            .test_observations()
+            .iter()
+            .find(|handle| {
+                &*handle.track_id == strip && handle.address == LiveEffectAddress::insert(0)
+            })
+            .expect("the insert's readers")
+            .readers[0]
+            .read()
+    }
+
+    fn render_blocks(&mut self, blocks: u64) {
+        for _ in 0..blocks {
+            self.render();
+        }
+    }
+}
+
+fn refused(code: &str, index: u32) -> Reply {
+    Reply::Refused(
+        protocol::StatusCode::ValidationFailed,
+        code.to_owned(),
+        Some(index),
+    )
+}
+
+/// #1584 gates 1 and 2: an `Observe` arm of `comp1`'s gain-reduction tap with window 4 is a monitor
+/// edit (reply `monitor`, revision unchanged) whose one record arms the tap at the next block, and
+/// the tap's reader then publishes four-block windows from that block; an exact replay answers the
+/// same bytes and queues nothing. Subscribers share the arm: a second arm with window 4 queues
+/// nothing, an arm with window 8 is `observation.window_conflict` and changes nothing, the first
+/// disarm queues nothing and the tap keeps publishing, a disarm and an arm with window 8 in one
+/// transaction are one re-arm that restarts the window with eight blocks, and the last disarm
+/// queues the disarm.
+///
+/// Red if two subscribers do not share one arm, one subscriber's disarm silences the other, a
+/// window change is not a re-arm, or a replayed subscription queues again.
+#[test]
+fn an_observe_transaction_arms_shares_and_disarms_the_tap() {
+    use protocol::EditPath::Monitor;
+    let mut rig = Rig::new();
+    let revision = rig.revision();
+    let request = rig.next_request;
+    let first = rig.frame(request, &[observe("comp1", true, WINDOW_BLOCKS)]);
+    rig.next_request += 1;
+    let length = rig.session.command(&first, 65_536).expect("an arm");
+    let reply = rig.session.command_response(length).to_vec();
+    assert_eq!(rig.reply(length), Reply::Applied(Monitor));
+    assert_eq!(rig.revision(), revision, "a subscription is no revision");
+    assert_eq!(rig.queued("comp1"), 1, "one arm record");
+    assert_eq!(
+        rig.session.observation_bindings().window_of(&key("comp1")),
+        Some(WINDOW_BLOCKS)
+    );
+    // The replay answers the cached bytes and queues nothing.
+    let length = rig.session.command(&first, 65_536).expect("a replay");
+    assert_eq!(rig.session.command_response(length), &reply[..]);
+    assert_eq!(rig.queued("comp1"), 1, "a replay queues nothing");
+    assert!(rig.window("comp1").is_none(), "nothing published yet");
+    rig.render_blocks(u64::from(WINDOW_BLOCKS));
+    let window = rig.window("comp1").expect("the first window");
+    assert_eq!(
+        (window.sequence, window.first_sample, window.blocks),
+        (1, 0, WINDOW_BLOCKS),
+        "armed at the first block, four blocks a window"
+    );
+
+    // A second subscriber with the same window shares the arm.
+    assert_eq!(
+        rig.transact(&[observe("comp1", true, WINDOW_BLOCKS)]),
+        Reply::Applied(Monitor)
+    );
+    assert_eq!(rig.queued("comp1"), 1, "a shared arm queues nothing");
+    // Another window while the arm is held conflicts, and changes nothing.
+    let bindings = rig.session.observation_bindings().clone();
+    assert_eq!(
+        rig.transact(&[observe("comp1", true, 8)]),
+        refused("observation.window_conflict", 0)
+    );
+    assert_eq!(rig.session.observation_bindings(), &bindings);
+    assert_eq!(rig.queued("comp1"), 1);
+    // One subscriber leaves: the other keeps the tap publishing.
+    assert_eq!(
+        rig.transact(&[observe("comp1", false, WINDOW_BLOCKS)]),
+        Reply::Applied(Monitor)
+    );
+    assert_eq!(rig.queued("comp1"), 1, "the first disarm queues nothing");
+    rig.render_blocks(u64::from(WINDOW_BLOCKS));
+    assert_eq!(rig.window("comp1").expect("still armed").sequence, 2);
+
+    // The last subscriber moves to window 8 in one transaction: one re-arm.
+    assert_eq!(
+        rig.transact(&[
+            observe("comp1", false, WINDOW_BLOCKS),
+            observe("comp1", true, 8),
+        ]),
+        Reply::Applied(Monitor)
+    );
+    assert_eq!(rig.queued("comp1"), 2, "one re-arm record");
+    let rearmed_at = rig.block * 128;
+    rig.render_blocks(8);
+    let window = rig.window("comp1").expect("the re-armed window");
+    assert_eq!(
+        (window.first_sample, window.blocks),
+        (rearmed_at, 8),
+        "the re-arm restarts the window with eight blocks"
+    );
+    // The last disarm queues the disarm, and nothing is published after it.
+    assert_eq!(
+        rig.transact(&[observe("comp1", false, 8)]),
+        Reply::Applied(Monitor)
+    );
+    assert_eq!(rig.queued("comp1"), 3, "the disarm record");
+    assert!(rig.session.observation_bindings().is_empty());
+    let last = rig.window("comp1").expect("a window").sequence;
+    rig.render_blocks(16);
+    assert_eq!(rig.window("comp1").expect("a window").sequence, last);
+    assert_eq!(
+        rig.revision(),
+        revision,
+        "no subscription moved the revision"
+    );
+}
+
+/// #1584 gate 2 (D2, D3): each malformed subscription is refused `VALIDATION_FAILED` with its code
+/// at its own `edits[i]`, after a valid arm of another strip in the same transaction, and the
+/// model, the revision, the binding table and both queues are as they were.
+///
+/// Red if a malformed subscription is accepted, or the valid edit before it is half applied.
+#[test]
+fn refusals_change_nothing() {
+    let mut rig = Rig::new();
+    assert_eq!(
+        rig.transact(&[observe("comp3", true, WINDOW_BLOCKS)]),
+        Reply::Applied(protocol::EditPath::Monitor)
+    );
+    let cases = [
+        (
+            observe_tap("nope", "comp", 1, true, 4),
+            "observation.address.unknown",
+        ),
+        (
+            observe_tap("comp1", "nope", 1, true, 4),
+            "observation.address.unknown",
+        ),
+        (
+            observe_tap("comp1", "comp", 0, true, 4),
+            "observation.tap.unknown",
+        ),
+        (
+            observe_tap("comp1", "comp", 99, true, 4),
+            "observation.tap.unknown",
+        ),
+        (observe("comp1", true, 4_097), "observation.window"),
+        (observe("comp1", false, 4), "observation.not_subscribed"),
+        (observe("comp3", false, 8), "observation.not_subscribed"),
+    ];
+    for (edit, code) in cases {
+        let revision = rig.revision();
+        let canonical = rig.session.test_transaction_snapshot().canonical;
+        let bindings = rig.session.observation_bindings().clone();
+        let queued = (
+            rig.queued("comp1"),
+            rig.queued("comp2"),
+            rig.queued("comp3"),
+        );
+        assert_eq!(
+            rig.transact(&[observe("comp2", true, WINDOW_BLOCKS), edit]),
+            refused(code, 1),
+            "{code}"
+        );
+        assert_eq!(rig.revision(), revision, "{code}");
+        assert_eq!(rig.session.test_transaction_snapshot().canonical, canonical);
+        assert_eq!(rig.session.observation_bindings(), &bindings, "{code}");
+        assert_eq!(
+            (
+                rig.queued("comp1"),
+                rig.queued("comp2"),
+                rig.queued("comp3")
+            ),
+            queued,
+            "{code}: nothing queued"
+        );
+    }
+}
+
+/// #1584 gate 3 (D4, the acked-batch question): an arm then a disarm before any render needs a
+/// second record in a queue with one slot per tap, so the disarm is refused as retryable
+/// backpressure before anything is written, and the binding table, the revision and the queue are
+/// as they were; after one render drains the queue the same request is accepted.
+///
+/// Red if an acknowledgement precedes a dropped record: the disarm acknowledged while its record
+/// found no room.
+#[test]
+fn a_full_queue_refuses_the_disarm_with_backpressure_and_changes_nothing() {
+    let mut rig = Rig::new();
+    assert_eq!(
+        rig.transact(&[observe("comp1", true, WINDOW_BLOCKS)]),
+        Reply::Applied(protocol::EditPath::Monitor)
+    );
+    let revision = rig.revision();
+    let bindings = rig.session.observation_bindings().clone();
+    let request = rig.next_request;
+    rig.next_request += 1;
+    let bytes = rig.frame(request, &[observe("comp1", false, WINDOW_BLOCKS)]);
+    assert!(matches!(
+        rig.session.command(&bytes, 65_536),
+        Err(CommandError::Backpressure)
+    ));
+    assert_eq!(rig.revision(), revision);
+    assert_eq!(rig.session.observation_bindings(), &bindings);
+    assert_eq!(rig.queued("comp1"), 1, "only the arm");
+    rig.render();
+    let length = rig
+        .session
+        .command(&bytes, 65_536)
+        .expect("the same request after a render");
+    assert_eq!(
+        rig.reply(length),
+        Reply::Applied(protocol::EditPath::Monitor)
+    );
+    assert_eq!(rig.queued("comp1"), 2);
+    assert!(rig.session.observation_bindings().is_empty());
 }

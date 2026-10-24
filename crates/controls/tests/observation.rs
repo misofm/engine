@@ -152,3 +152,32 @@ fn a_binding_ends_when_its_target_goes() {
     );
     assert!(unknown.after(&model).expect("room").bindings.is_empty());
 }
+
+/// #1584 D2: a declared tap whose cost is not resident has no lane, so an `Observe` of it is refused
+/// `observation.tap.unsupported`; the same tap declared resident is accepted. No launch effect
+/// declares a computed tap, so the menu is the compressor's gain-reduction tap with its cost changed.
+///
+/// Red if the tap check accepts a computed tap: the subscription would be acknowledged and its tap
+/// would never publish a window.
+#[test]
+fn a_computed_tap_is_refused_as_unsupported() {
+    let registry = effect_compiler::launch_native_effect_registry().expect("registry");
+    let resident = registry
+        .get_ascii("miso.compressor")
+        .expect("the compressor")
+        .descriptor()
+        .observations[0];
+    let computed = effect_contract::ObservationDescriptor {
+        cost: effect_contract::ObservationCost::Computed,
+        ..resident
+    };
+    assert_eq!(controls::observe_tap(&[resident], resident.id.0), Ok(()));
+    assert_eq!(
+        controls::observe_tap(&[computed], computed.id.0),
+        Err(controls::ObserveError::TapUnsupported)
+    );
+    assert_eq!(
+        controls::ObserveError::TapUnsupported.code(),
+        "observation.tap.unsupported"
+    );
+}

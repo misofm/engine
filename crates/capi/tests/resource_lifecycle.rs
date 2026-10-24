@@ -577,6 +577,9 @@ struct HostHalf {
     /// vector, its IDs and the rings in `builtin_retained_payload_bytes`, so the oracle counts
     /// them with the plan.
     meters: Box<[host_core::MeterConsumer]>,
+    /// One reader set per observed effect instance, kept as capi keeps them (#1584 D7). Their
+    /// slots are the plan's (`observation_retained_bytes`).
+    observations: Box<[host_core::EffectObservationHandle]>,
 }
 
 fn host_half(document: &str, compile_limits: &CompileLimits) -> HostHalf {
@@ -609,10 +612,14 @@ fn host_half_counting(
     // window the same disposal (D2): the strip ID list and the vectors this selection leaves empty
     // drop here, so only the producers survive, as two boxed slices. Keeping the ID list would
     // count bytes capi does not keep.
+    // #1584 D7: and an observation queue slot for every declared tap.
     let (prepared, handles) = host_core::prepare_host_runtime_with_live_lanes(
         store.compiled(),
         &caps,
-        &host_core::HostLiveControlRequest::default(),
+        &host_core::HostLiveControlRequest {
+            observation_taps: host_core::launch_maximum_observation_taps(),
+            ..host_core::HostLiveControlRequest::default()
+        },
         host_core::HostLiveLanes {
             strip_input: true,
             effects: true,
@@ -626,6 +633,7 @@ fn host_half_counting(
         effect_controls,
         route_controls,
         meters,
+        effect_observations,
         ..
     } = handles;
     HostHalf {
@@ -635,6 +643,7 @@ fn host_half_counting(
         effects: effect_controls.into_boxed_slice(),
         routes: route_controls.into_boxed_slice(),
         meters: meters.into_boxed_slice(),
+        observations: effect_observations.into_boxed_slice(),
     }
 }
 
@@ -745,6 +754,9 @@ struct HostOwners {
     catalog: u64,
     /// The meter consumers' vector and IDs: their rings are the plan's.
     meters: u64,
+    /// The observation reader handles' slice, IDs and reader boxes (#1584 D7): their slots are
+    /// the plan's.
+    observations: u64,
     plan: u64,
     store: u64,
     /// The plan's state inventory (#1272 D1), which capi keeps with the plan's source producers
@@ -801,6 +813,7 @@ fn observe_compile(document: &str, compile_limits: &CompileLimits) -> CompileObs
         effects,
         routes,
         meters,
+        observations,
     } = host;
     let (strip_count, strip_id_bytes) = store
         .compiled()
@@ -838,6 +851,7 @@ fn observe_compile(document: &str, compile_limits: &CompileLimits) -> CompileObs
         sources: freed_by_drop(sources),
         catalog: freed_by_drop(control_catalog),
         meters: freed_by_drop(meters),
+        observations: freed_by_drop(observations),
         plan: freed_by_drop(plan),
         store: freed_by_drop(store),
         inventory: freed_by_drop(inventory),
@@ -849,11 +863,12 @@ fn observe_compile(document: &str, compile_limits: &CompileLimits) -> CompileObs
             + owners.sources
             + owners.catalog
             + owners.meters
+            + owners.observations
             + owners.plan
             + owners.store
             + owners.inventory,
         host_live,
-        "the nine owners hold every byte the host-core half retains"
+        "the ten owners hold every byte the host-core half retains"
     );
     CompileObservation {
         report,
@@ -909,13 +924,14 @@ impl CompileObservation {
                 + self.owners.sources
                 + self.owners.catalog
                 + self.owners.inventory
+                + self.owners.observations
                 + self.observation_reserve
                 + self.monitor_and_ramps
                 + decode_field_rounding,
             self.report.capi_retained_bytes,
             "{label}: capi's own allocations + the effect producers + the strip producers + the \
              source producers + the parameter catalog + the plan state inventory + the \
-             decode-field rounding, all observed (left; the send producers' row is the graph \
+             observation readers + the decode-field rounding, all observed (left; the send producers' row is the graph \
              function's total, and the observation reserve and the monitor and ramp rows are the control \
              plane's bounds), against \
              `capi_retained_bytes` (right)"
@@ -2760,8 +2776,25 @@ fn race_session() -> String {
         tap: session::SendTap::PostPan,
     };
     model.routes.push(out);
+    // #1584 gate 8: a bypassed compressor on the first track, whose gain-reduction tap the race's
+    // `Observe` edits arm and disarm. Bypassed, so the final block still equals a fresh plan's: the
+    // compressor's envelope history, which a fresh plan does not have, never reaches the output.
+    model.tracks[0].inserts.effects.push(session::Effect {
+        id: StableId::parse(RACE_COMPRESSOR).expect("stable id"),
+        identity: session::EffectIdentity::Native {
+            effect_id: StableId::parse("miso.compressor").expect("stable id"),
+        },
+        quality: session::EffectQuality::Normal,
+        bypass: true,
+        link_mode: session::LinkMode::DualMono,
+        params: Vec::new(),
+        sidechain: session::SidechainDeclaration::None,
+    });
     session::canonical_session_json(&model).expect("canonical race session")
 }
+
+/// The race session's one effect, an insert of its first track (#1584 gate 8).
+const RACE_COMPRESSOR: &str = "race-comp";
 
 /// The largest pan smoothing the race edits use: one quantum (D1).
 const RACE_MAX_SMOOTHING: u32 = QUANTUM as u32;
@@ -2795,6 +2828,8 @@ struct RaceEdits {
     extra: bool,
     /// The track that is soloed, by index (#1559).
     soloed: Option<usize>,
+    /// Whether the race compressor's gain-reduction tap is subscribed (#1584).
+    observed: bool,
 }
 
 impl RaceEdits {
@@ -2812,6 +2847,22 @@ impl RaceEdits {
             follows: true,
             extra: false,
             soloed: None,
+            observed: false,
+        }
+    }
+
+    /// An `Observe` of the race compressor's gain-reduction tap: an arm with a four-block window,
+    /// then its disarm (#1584 gate 8).
+    fn observe_edit(&mut self) -> SessionEdit {
+        self.observed = !self.observed;
+        SessionEdit::Observe {
+            strip_id: self.tracks[0].clone(),
+            section: protocol::control_core::TapSection::Inserts(
+                StableId::parse(RACE_COMPRESSOR).expect("stable id"),
+            ),
+            tap_id: 1,
+            armed: self.observed,
+            window_blocks: 4,
         }
     }
 
@@ -2932,6 +2983,12 @@ impl RaceEdits {
         // And every eighth, between them, a solo or an unsolo (#1559).
         if index % 8 == 5 {
             return (Kind::Monitor, vec![self.solo_edit(index / 8)]);
+        }
+        // And every sixteenth, an `Observe` arm or disarm (#1584 gate 8): a monitor edit whose
+        // record rides the compressor's observation queue. Sixteen edits apart, several blocks
+        // drain the queue's one slot between two of them, so none waits for room.
+        if index % 16 == 1 {
+            return (Kind::Monitor, vec![self.observe_edit()]);
         }
         let track = (index % self.tracks.len() as u64) as usize;
         let track_id = self.tracks[track].clone();
