@@ -62,6 +62,9 @@ impl Played {
 }
 
 impl GraphPreparedSourceSetDriver for Played {
+    fn retained_bytes(&self) -> u64 {
+        engine::realtime::retained::vec(&self.planes) + engine::realtime::retained::arc(&self.calls)
+    }
     fn claim_count(&self) -> usize {
         LANES
     }
@@ -122,6 +125,9 @@ impl GraphPreparedSourceSetDriver for Played {
 /// A builtin bank that mixes its two planes, so a swapped or misread plane shows in the bits.
 struct Tilt;
 impl GraphPreparedBuiltinBankProcessor for Tilt {
+    fn retained_bytes(&self) -> u64 {
+        0
+    }
     fn as_any(&self) -> &dyn std::any::Any {
         self
     }

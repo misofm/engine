@@ -1314,6 +1314,12 @@ impl PreparedDelay {
 }
 
 impl PreparedNativeEffect for PreparedDelay {
+    /// The two lanes' rings (#1074); every other field is inline.
+    fn retained_bytes(&self) -> u64 {
+        effect_contract::retained::slice(&self.left.ring)
+            + effect_contract::retained::slice(&self.right.ring)
+    }
+
     fn channel_symmetry(&self) -> bool {
         self.designed_channel_symmetry()
     }
