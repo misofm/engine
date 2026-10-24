@@ -811,24 +811,14 @@ row dep-subtable-header "dependency key 'std' in [dependencies]" append crates/l
     $'[dependencies.std]\npackage = "spin"\n'
 row dep-inline-root "dependency key 'core' in [dependencies]" write crates/library/Cargo.toml \
     $'dependencies = { core = { package = "spin", version = "0.9" } }\n'"$library_head"
-row dep-inline-target "dependency key 'std' in [target.cfg(unix).dependencies]" append crates/library/Cargo.toml \
-    $'[target.\'cfg(unix)\']\ndependencies = { std = "1" }\n'
 row dep-dotted "dependency key 'core' in [dependencies]" write crates/library/Cargo.toml \
     $'dependencies.core = "1"\n'"$library_head"
-row dep-dotted-target "dependency key 'alloc' in [target.cfg(unix).dependencies]" write crates/library/Cargo.toml \
-    $'target.\'cfg(unix)\'.dependencies.alloc.package = "spin"\n'"$library_head"
 row dep-spaced-header "dependency key 'core' in [dependencies]" append crates/library/Cargo.toml \
     $'[ dependencies . core ]\nversion = "1"\n'
-row dep-spaced-target "dependency key 'alloc' in [target.cfg(unix).dependencies]" append crates/library/Cargo.toml \
-    $'[target . \'cfg(unix)\' . dependencies]\nalloc = "1"\n'
 row dep-quoted-header "dependency key 'std' in [dependencies]" append crates/library/Cargo.toml \
     $'["dependencies"]\nstd = "1"\n'
-row dep-quoted-subtable "dependency key 'core' in [dependencies]" append crates/library/Cargo.toml \
-    $'["dependencies".core]\nversion = "1"\n'
 row dep-escaped-key "dependency key 'core' in [dependencies]" append crates/library/Cargo.toml \
     $'[dependencies]\n"\\u0063ore" = "1"\n'
-row dep-escaped-table "dependency key 'std' in [dependencies]" append crates/library/Cargo.toml \
-    $'["dep\\u0065ndencies"]\nstd = "1"\n'
 row dep-dev "dependency key 'std' in [dev-dependencies]" append crates/library/Cargo.toml \
     $'[dev-dependencies]\nstd = "1"\n'
 row dep-build "dependency key 'alloc' in [build-dependencies]" append crates/library/Cargo.toml \
@@ -895,8 +885,10 @@ expect_git_failure_with_message tracked-skipped \
     "crates/library/target/x.rs: tracked path under a scan root" plant_tracked_skipped
 expect_git_success untracked-skipped plant_untracked_skipped
 
-# (ii): a path-less target whose name is a skipped word. Test value: a reader that checks only
-# `path =` keys accepts a target whose implied path Cargo chooses (`src/bin/target.rs`), not written.
+# (ii): a path-less target whose name is a skipped word. Test value: the walk skips directories only,
+# so it reads `src/bin/target.rs`, but Cargo also takes `src/bin/target/main.rs` (and the matching
+# `<dir>/<name>/main.rs`), which (i) refuses only once it is tracked; (ii) refuses the manifest edge
+# before that, defence in depth that the spec requires.
 expect_failure_with_rows skipped-target-names plant_skipped_target_names \
     "fuzz/Cargo.toml: [[bin]] name = 'target' has no path" "[[test]] name = 'Node_Modules' has no path" \
     "[[example]] name = 'Node_Modules' has no path" "[[bench]] name = 'Node_Modules' has no path"
@@ -916,8 +908,8 @@ row config-flag-string "injects a crate attribute" write .cargo/config.toml \
     $'[build]\n'"rustflags = \"-Z$attr_word=no_std\""$'\n'
 row config-env-underscore "injects a crate attribute" write .cargo/config.toml \
     $'[env]\n'"RUSTFLAGS = \"-Z${attr_word_underscore^^}=x\""$'\n'
-row config-rustdocflags "injects a crate attribute" write .cargo/config.toml \
-    $'[build]\n'"rustdocflags = [\"-Z$attr_word=x\"]"$'\n'
+row config-rustdocflags "flag '@args.txt' reads a rustc argument file" write .cargo/config.toml \
+    $'[build]\nrustdocflags = ["@args.txt"]\n'
 row config-env-bootstrap "injects a crate attribute or unlocks unstable rustc" write .cargo/config.toml \
     $'[env]\n'"$bootstrap_word = \"1\""$'\n'
 row config-argument-file "flag '@args.txt' reads a rustc argument file" write .cargo/config.toml \

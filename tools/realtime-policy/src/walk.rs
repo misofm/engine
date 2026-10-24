@@ -11,9 +11,10 @@ use crate::report::{Class, Finding};
 /// The directories the walk visits under the workspace root. The manifest rules of
 /// `scripts/check-workspace-policy.sh` read this constant: every root-workspace member and every
 /// dependency `path` of every tracked manifest must resolve under one of these directories (#1527).
-/// Those rules judge written forms only: a word assembled at run time, a flag file a script
-/// generates, and a `$CARGO_HOME` configuration or `RUSTFLAGS` set outside the repository are not
-/// read (#1527 D7).
+/// Those rules judge written forms only. These are stated limits (#1527 D7): a word assembled at
+/// run time, a flag file a script generates, a `$CARGO_HOME` configuration or `RUSTFLAGS` set
+/// outside the repository, a rustc wrapper (`[build] rustc-wrapper`, `rustc-workspace-wrapper` or
+/// `[env] RUSTC_WRAPPER`, which can inject flags at run time) and the strings of an `[alias]`.
 pub(crate) const SCAN_ROOTS: [&str; 3] = ["crates", "hosts", "tools"];
 
 /// The only directories the walk skips, at any depth. The walk reads no .rs file under these
