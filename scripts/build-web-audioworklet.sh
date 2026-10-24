@@ -30,8 +30,14 @@ set -euo pipefail
 # With any mode, `--named-twin DIR` also writes the named twin,
 # `miso-engine-v1-audio-worklet.simd128.named.wasm`, into DIR: an existing, empty, non-symlink
 # directory other than the output.
+#   --render-lock-probe  issue #1529: not the shipped module. The module's cargo line below plus
+#                  `--features host-web/render-lock-probe`, built in its own target directory below
+#                  the output directory (removed on exit), written as
+#                  `miso-engine-v1-render-lock-probe.wasm` and nothing else: never pinned, never a
+#                  twin, never delivered. `scripts/test-render-lock-probe.mjs` reads it.
 mode=delivery
 named_dir=
+features=()
 while (($# > 1)); do
   case $1 in
     --module-only | --check-pin)
@@ -39,8 +45,14 @@ while (($# > 1)); do
       [[ $1 == --module-only ]] && mode=module || mode=pinned
       shift
       ;;
+    --render-lock-probe)
+      [[ $mode == delivery && -z $named_dir ]] || break
+      mode=probe
+      features=(--features host-web/render-lock-probe)
+      shift
+      ;;
     --named-twin)
-      [[ -z $named_dir && -n ${2-} ]] || break
+      [[ -z $named_dir && -n ${2-} && $mode != probe ]] || break
       named_dir=$2
       shift 2
       ;;
@@ -49,6 +61,7 @@ while (($# > 1)); do
 done
 if (($# != 1)) || [[ $1 == -* ]]; then
   echo "usage: $0 [--module-only | --check-pin] [--named-twin EMPTY_DIRECTORY] EMPTY_OUTPUT_DIRECTORY" >&2
+  echo "       $0 --render-lock-probe EMPTY_OUTPUT_DIRECTORY" >&2
   exit 2
 fi
 
@@ -69,7 +82,12 @@ if [[ -n $named_dir && "$(cd "$named_dir" && pwd -P)" == "$(cd "$output_dir" && 
   exit 2
 fi
 
-simd_target=$(mktemp -d)
+if [[ $mode == probe ]]; then
+  simd_target="$(cd "$output_dir" && pwd -P)/target"
+  mkdir -- "$simd_target"
+else
+  simd_target=$(mktemp -d)
+fi
 cleanup() {
   rm -rf -- "$simd_target"
 }
@@ -111,8 +129,16 @@ remap="--remap-path-prefix=$cargo_home=/cargo --remap-path-prefix=$repo_root=/re
 (
   cd "$repo_root"
   CARGO_TARGET_DIR="$simd_target" RUSTFLAGS="-C target-feature=+simd128 $strip_flag $remap" \
-    cargo build --locked --release --target wasm32-unknown-unknown -p host-web
+    cargo build --locked --release ${features[@]+"${features[@]}"} --target wasm32-unknown-unknown -p host-web
 )
+
+if [[ $mode == probe ]]; then
+  cp "$simd_target/wasm32-unknown-unknown/release/host_web.wasm" \
+    "$output_dir/miso-engine-v1-render-lock-probe.wasm"
+  printf 'render-lock probe module %s (not the shipped module)\n' \
+    "$(sha256sum "$output_dir/miso-engine-v1-render-lock-probe.wasm" | awk '{print $1}')"
+  exit 0
+fi
 
 named="$simd_target/wasm32-unknown-unknown/release/host_web.wasm"
 artifact="$simd_target/miso-engine-v1-audio-worklet.simd128.wasm"

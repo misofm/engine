@@ -972,6 +972,15 @@ closed_tokens! {
     }
 }
 
+impl SendTap {
+    /// Whether the tap lies before the strip's fader: every tap but `post_fader` and `post_pan`.
+    /// A route into the output from such a tap has live rows and a live lane (#1391).
+    #[must_use]
+    pub const fn precedes_fader(self) -> bool {
+        !matches!(self, Self::PostFader | Self::PostPan)
+    }
+}
+
 /// A target and ordered piecewise automation declaration.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Automation {

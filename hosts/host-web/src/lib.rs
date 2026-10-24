@@ -6981,6 +6981,8 @@ mod render_lock;
 
 pub use ffi::*;
 pub use render_lock::RenderLockedAllocator;
+#[cfg(feature = "render-lock-probe")]
+pub use render_lock::miso_engine_web_v1_render_lock_probe;
 
 #[cfg(test)]
 mod tests;

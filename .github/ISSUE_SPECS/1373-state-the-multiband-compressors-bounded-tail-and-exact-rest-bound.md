@@ -95,3 +95,32 @@ its crossover and detector state reach exact rest. Today it declares `Infinite`.
 - *Report a zero tail beyond latency for the compressor and the true-peak limiter* (#1375), for the
   one-pole helper
 - *Make the multiband compressor's crossover live* (#1338): the glide this slice bounds
+
+## Decision record
+
+- **Split (root, 2026-10-24).** Two tranches: **1373a** (math: `math::tail`'s first-section row
+  bound, its brute-force gate, derivation part 1) before **1373b** (the effect, its pinned table,
+  its three tests, derivation part 2), which follows #893 and #1340. The scope note
+  (`scratchpad/opt/scope/1373.md`) is the authority for 1373b's paths: they add
+  `crates/multiband-compressor/src/tail.rs` (new) to the list above.
+- **Decision (a) (root).** The output bound decomposes as `|y| <= G_max (2 |lp2| + |ap1|)`:
+  `lp2` from `live_cascade`, `ap1 = x - 2k v1` (a first-stage tap) from a new first-section row
+  bound in `math::tail`, which reuses `LiveBound` and `live_zones`. Composition is part of b:
+  `pdc.rs` step 8 makes an `Unstated` composition `Infinite`, so b states all five H1 values.
+- **1373a, attempt 1 (2026-10-24).** `math::tail::FirstSectionRow`, `live_first_section` (tail,
+  `T_rest`, rests, `P*`) and `live_first_section_composition` (`D`, `G_p`, `G_t`, both stalls);
+  `TailBoundError::Invalid` for a row constant that is not finite and non-negative. The zone
+  constants bound `ap1` within the window (the scope's hazard did not fire; no constant tuned).
+  Class A: `tail_gain`'s ramp paths, `settled_start`'s `H_0` and `group_rests`'s first-stage rest
+  moved into shared helpers with the same arithmetic; `builtins`' pinned live table still equals
+  its recompute (`live_bound_table_is_the_computed_live_bound_at_every_launch_rate`, release).
+  Gate: `crates/math/tests/live_first_section.rs`. Derivation part 1:
+  `docs/derivations/1373-multiband-compressor-tail-and-rest.md`.
+- **1373a verdict fold (2026-10-24).** The gate also asserts that the stated values follow the
+  row (a doubled `mix_row` states a larger tail and `G_p`); red when `with_first_row` ignores the
+  row. Stated limit of the brute-force gate: an under-statement within its slack (about 18 dB, or
+  279 frames of the tail at 80 Hz, 48 kHz; for example a tail 64 frames early) stays green.
+  Untested: the composition branch where `T` lies in the window (`anchor = tail.max(ramp_frames
+  + 1)`); this envelope's `T` is past it, and 1373b's per-rate T1 reaches other envelopes.
+  For 1373b: at 96 kHz `1 - r` is about half its 48 kHz value, so the certificate may return
+  `None` or the horizon may be hit; T1 at every launch rate must cover it.
