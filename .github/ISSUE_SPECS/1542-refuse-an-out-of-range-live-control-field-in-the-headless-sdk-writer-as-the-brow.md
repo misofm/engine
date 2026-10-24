@@ -86,3 +86,19 @@ an edit to a different track, lane or parameter than the caller named.
   `main` after stream E2 merges (`requireU32`, the internal-module pattern).
 
 **Decision 17 amendment (2026-10-13).** Superseded by #1563. The SDK no longer writes 48-byte value records and checks no value domain of its own: every value edit is a `SET_CONTROL` addressed by stable ID, and the core refuses an out-of-range value with `control.domain` on the browser and on the headless engine alike (#1563 gate 2). The SDK keeps only encodability checks (a `u32` ramp, a lane token, a string ID).
+
+**Scope narrowing (2026-10-24, scope note accepted by root, R1 = B).** Of the five original fields,
+`trackIndex`, `channel`, `effectIndex` and `parameterId` no longer exist on a `LaneEdit`: #1563
+superseded them (see the amendment above). The one field left unchecked was `rack`, written by
+`setUint8` so `257` landed as inserts and `1.5` as `1`. Fixed here: `checkLaneEdit`
+(`sdk/src/core/writer.ts`) accepts only the rack codes the SDK spells (inserts `1`, console `3`,
+from the generated `racks` table through `requireRack` in the new internal `sdk/src/internal/rack.ts`,
+which now also owns `RACKS`); `encodeLaneEdits` checks every edit before it allocates; `stage` and
+`browserCommand` call the same check. No wire change. Gate: the #1677 eval in
+`sdk/test/writer-evals.mjs` refuses `rack` `257`, `1.5` and `0` through `encodeLaneEdits` and `257`
+through `stage`.
+
+**Open (attempt 1).** The `unknownRack` row of `sdk/test/structure-evals.mjs` ("a key the plan does
+not have is refused with its typed reason") submits `rack: 0` through the SDK to reach the core's
+`unknownRack`; the SDK now refuses it first with `MisoUsageError`, so that row is red. It is the only
+test of the core's `unknownRack` reason; the file is outside the scope note's paths. Root decides.

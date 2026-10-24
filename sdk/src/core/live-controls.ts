@@ -26,6 +26,7 @@ import { MisoEngineError, MisoUsageError } from "./errors.ts";
 import { constantValue } from "./abi.ts";
 import { writeCanonicalSessionDocument } from "../internal/session-json.ts";
 import type { SessionLike, SessionModel } from "./session.ts";
+import { RACKS } from "../internal/rack.ts";
 import { requireU32 } from "../internal/ramp.ts";
 import { LiveControlWriter } from "./writer.ts";
 import type { ControlWriterOptions, LaneEdit } from "./writer.ts";
@@ -82,21 +83,6 @@ export type LiveControlBeforeSubmit = (
   edits: readonly LaneEdit[],
   managed?: boolean,
 ) => void | Promise<void>;
-
-function rackCode(name: string): number {
-  const row = ABI_LAYOUT.constants.racks.find((candidate) => candidate.name === name);
-  if (row === undefined) throw new MisoUsageError(`the generated ABI layout has no rack ${name}`);
-  return row.value;
-}
-
-/**
- * The observation record's rack byte, from the generated layout's `racks` table (S1c): `1` inserts,
- * `3` console and `255` not applicable. The retired `0` and `2` are never written.
- */
-const RACKS: Readonly<Record<LiveControlRack, number>> = Object.freeze({
-  console: rackCode("console"),
-  inserts: rackCode("inserts"),
-});
 
 function modelOf(session: SessionLike): SessionModel {
   const candidate = session as { readonly toJSON?: unknown; readonly schema_version?: unknown };

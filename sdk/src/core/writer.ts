@@ -10,6 +10,7 @@ import {
 import type { ControlFrameEdit } from "./control-frame.ts";
 import type { ControlAppliedReport } from "./control-queue.ts";
 import { MisoControlRefusal, MisoEngineError, MisoUsageError } from "./errors.ts";
+import { requireRack } from "../internal/rack.ts";
 import { requireU32 } from "../internal/ramp.ts";
 
 /**
@@ -59,8 +60,8 @@ import { requireU32 } from "../internal/ramp.ts";
 export interface LaneEdit {
   readonly kind: "observeSubscribe" | "observeUnsubscribe";
   /**
-   * The record's rack byte: `1` inserts, `3` console (S1c). The retired `0` and `2` are refused by
-   * the engine with `unknownRack`.
+   * The record's rack byte: `1` inserts, `3` console (S1c). The SDK refuses any other code with a
+   * `MisoUsageError` before the record is written, as the browser host does.
    */
   readonly rack: number;
   /** The strip's ID, a track's or a submix's. */
@@ -206,8 +207,12 @@ function recordId(id: string, what: string): Uint8Array {
   return bytes;
 }
 
-/** Check that an observation edit can be encoded; the core judges what it names. */
-function checkLaneEdit(edit: LaneEdit): void {
+/**
+ * Check that an observation edit can be encoded and names a rack the record may carry; the core
+ * judges what it names. Both SDK transports call it before the host sees the edit.
+ */
+export function checkLaneEdit(edit: LaneEdit): void {
+  requireRack(edit.rack);
   recordId(edit.stripId, "an observation record's strip ID");
   recordId(edit.effectId, "an observation record's effect ID");
   requireU32(edit.tapId, "tapId");
@@ -215,18 +220,20 @@ function checkLaneEdit(edit: LaneEdit): void {
 }
 
 export function encodeLaneEdits(edits: readonly LaneEdit[]): Uint8Array {
+  // Every edit is checked before the buffer exists: a batch with one bad edit writes nothing.
+  edits.forEach(checkLaneEdit);
   const records = new Uint8Array(edits.length * RECORD_BYTES);
   const view = new DataView(records.buffer);
   edits.forEach((edit, index) => {
     const base = index * RECORD_BYTES;
-    const strip = recordId(edit.stripId, "an observation record's strip ID");
-    const effect = recordId(edit.effectId, "an observation record's effect ID");
+    const strip = ID_ENCODER.encode(edit.stripId);
+    const effect = ID_ENCODER.encode(edit.effectId);
     view.setUint8(base + offsetOf("kind"), kindValue(edit.kind));
     view.setUint8(base + offsetOf("rack"), edit.rack);
     view.setUint8(base + offsetOf("stripIdBytes"), strip.length);
     view.setUint8(base + offsetOf("effectIdBytes"), effect.length);
-    view.setUint32(base + offsetOf("tapId"), requireU32(edit.tapId, "tapId"), true);
-    view.setUint32(base + offsetOf("windowBlocks"), requireU32(edit.windowBlocks, "windowBlocks"), true);
+    view.setUint32(base + offsetOf("tapId"), edit.tapId, true);
+    view.setUint32(base + offsetOf("windowBlocks"), edit.windowBlocks, true);
     records.set(strip, base + offsetOf("stripId"));
     records.set(effect, base + offsetOf("effectId"));
   });
