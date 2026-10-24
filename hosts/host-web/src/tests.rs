@@ -9144,8 +9144,10 @@ mod structural_apply {
     /// them, so the frames after the swap publish.
     ///
     /// Test value: red if the output meter keeps the predecessor's window grid across a swap that
-    /// restarts the strip meters: no master window would match a strip window again, and every
-    /// frame after the swap would be dropped as a loss.
+    /// restarts the strip meters (no master window would match a strip window again, and every
+    /// frame after the swap would be dropped as a loss), if a retaken lease or a producer reset
+    /// activates on the absolute grid rather than the adoption block's, or if the output window
+    /// the swap left queued is read by the next poll instead of being discarded unread.
     #[test]
     fn an_uncarried_swap_restarts_the_output_meter_at_its_adoption_block() {
         const WINDOW: u64 = 3;
@@ -9171,6 +9173,11 @@ mod structural_apply {
         }
         let quantum = u64::from(QUANTUM);
         assert_eq!(rig.host.meter_header().end_sample, WINDOW * quantum);
+        // Three blocks unpolled: the window [3, 6) waits in the queue when the swap comes.
+        for _ in 0..WINDOW {
+            assert_eq!(rig.host.render_next(), RESULT_OK);
+        }
+        const ADOPTION: u64 = 4 + WINDOW;
         let edits = [
             SessionEdit::UpsertSource {
                 source: full.sources[0].clone(),
@@ -9189,7 +9196,7 @@ mod structural_apply {
                 ..
             }
         ));
-        // The adoption block, 4, is off the grid of three-block windows.
+        // The adoption block, 7, is off the grid of three-block windows.
         let mut first = None;
         for _ in 0..3 * WINDOW {
             assert_eq!(rig.host.render_next(), RESULT_OK);
@@ -9200,8 +9207,14 @@ mod structural_apply {
         }
         assert_eq!(
             first,
-            Some(4 * quantum),
+            Some(ADOPTION * quantum),
             "the first strip frame starts at the adoption block"
+        );
+        // Exact: the queued window [3, 6), discarded unread by the swap, and the gap from block 3
+        // to the adoption block.
+        assert_eq!(
+            rig.host.meter_header().reserved[1] >> METER_LOSS_SHIFT,
+            1 + 1
         );
 
         // The strip meters tile from the adoption block now, so a lease taken again, and a
@@ -9223,7 +9236,7 @@ mod structural_apply {
         assert!(
             frames
                 .iter()
-                .all(|start| (start / quantum - 4) % WINDOW == 0),
+                .all(|start| (start / quantum - ADOPTION) % WINDOW == 0),
             "on the adoption grid: {frames:?}"
         );
 
@@ -9263,7 +9276,7 @@ mod structural_apply {
         assert!(
             frames
                 .iter()
-                .all(|start| (start / quantum - 4) % WINDOW == 0),
+                .all(|start| (start / quantum - ADOPTION) % WINDOW == 0),
             "on the adoption grid: {frames:?}"
         );
     }
