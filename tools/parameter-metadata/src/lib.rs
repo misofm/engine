@@ -64,9 +64,10 @@
 //!
 //! Each effect carries its declared `"ports"` -- id, role, `required` and lane layout -- for the
 //! same reason it carries its parameters: the descriptor is the only thing that knows them, and a
-//! consumer that kept its own table would go stale. Exactly three launch effects declare a
-//! `sidechainInput` (`miso.compressor`, `miso.de-esser` and `miso.gate-expander`, each
-//! `"sidechain-in"`, each optional); the other six declare only their main pair, and every effect gets the key.
+//! consumer that kept its own table would go stale. Exactly four launch effects declare a
+//! `sidechainInput` (`miso.compressor`, `miso.de-esser`, `miso.dynamic-eq` and
+//! `miso.gate-expander`, each `"sidechain-in"`, each optional); the other six declare only their
+//! main pair, and every effect gets the key.
 //!
 //! This is an ADDITIVE extension of the v1 surface, handled exactly as #143's `observations` was:
 //! the schema tag and `abiVersion` are unmoved, and the new key is *never absent*, so there is no
