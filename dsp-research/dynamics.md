@@ -31,6 +31,16 @@ counts on the word's `f32` grid: 4,569,940 samples at 48 kHz (about 95 s), withi
 real recurrence. The composition gain is 2,401 mB (+24 dB makeup, the fast tier's `1e-5` dB gain
 error and four roundings); the flush stall is four underflows, -74,655 mB.
 
+The transient shaper (#1376) has zero latency and states a zero tail: its output is the current
+input, or `gain_mix_step` of it with a finite gain. With a zero detector both followers release in
+the two-product pole form `e' = snap(fl(c e))`, `1 - c` exact, which
+`effect_runtime::tail::pole_follower_rest_samples` counts on the word's `f32` grid from the largest
+envelope value, the input peak inflated by `3 u / k_min` (the follower's rounding cannot push it
+further). The slow 100 ms release dominates: 145,892 samples at 48 kHz for a +24 dBFS peak and
+464,191 for any sanitized input (`< 1e30`), equal to the real recurrence at every launch rate. The
+composition gain is 1,801 mB (the +18 dB shape clamp, the fast tier's `1e-5` dB and four
+roundings); the flush stall is four underflows, -74,655 mB.
+
 ## Units, mappings, automation and smoothing
 
 Threshold/makeup/range use dB, times use ms, ratio is dimensionless, detector mode and curve family are enums. Every automated parameter names its smoothing and update rate.
