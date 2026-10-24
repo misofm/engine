@@ -38,6 +38,7 @@ graph="1"
 graph-compiler="1"
 lane="1"
 [target.'cfg(unix)'.dependencies]
+rustix="1"
 sha2="1"
 EOF
 printf 'fn main() {}\n' >"$base/tools/bench/src/main.rs"
