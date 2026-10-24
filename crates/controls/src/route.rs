@@ -1,13 +1,14 @@
 //! A route's rows (decision 17, C3).
 //!
 //! The class of a route's value depends on the route's shape, by a rule in the row: a send into a
-//! submix is live (#1557) and carries a lane, and a route into the output is rebuild-only for
-//! decision 14's fold reason.
+//! submix is live (#1557) and carries a lane, a route into the output whose tap precedes the
+//! fader is live too (#1391), and a `post_fader` or `post_pan` route into the output is
+//! rebuild-only for decision 14's fold reason.
 
 use effect_contract::{ParameterLattice, ParameterUnit};
 use session::{
     ROUTE_COEFFICIENT_MAGNITUDE_MAXIMUM, ROUTE_GAIN_DB_MAXIMUM, ROUTE_GAIN_DB_MINIMUM, Route,
-    RouteDestination, SessionModel, StableId,
+    RouteDestination, RouteSource, SessionModel, StableId,
 };
 
 use crate::descriptor::{
@@ -217,13 +218,33 @@ pub(crate) static ROWS: [RouteRow; 8] = [
     },
 ];
 
+/// Whether a route's value rows are live (#1391): the route goes into a submix, or its source tap
+/// precedes the fader. The one model-side authority; the graph's lane attach keys on the same
+/// boundary (`TrackStage` before `PostFader`). A `post_fader` or `post_pan` route into the output
+/// keeps the fold.
+#[must_use]
+pub fn route_rows_live(route: &Route) -> bool {
+    match route.destination {
+        RouteDestination::SubmixInput { .. } => true,
+        RouteDestination::OutputInput { .. } => match &route.source {
+            RouteSource::Track { tap, .. } | RouteSource::Submix { tap, .. } => {
+                tap.precedes_fader()
+            }
+        },
+    }
+}
+
 /// The descriptor of one row on one route: the class and applicability depend on the route's
-/// destination.
+/// destination and tap. `follows_mute` never applies to a route into the output (#1218).
 fn descriptor(row: &RouteRow, route: &Route) -> ControlDescriptor {
     match route.destination {
         RouteDestination::SubmixInput { .. } => row.descriptor,
         RouteDestination::OutputInput { .. } => ControlDescriptor {
-            class: row.output_class,
+            class: if row.output_active && route_rows_live(route) {
+                row.descriptor.class
+            } else {
+                row.output_class
+            },
             active: row.output_active,
             ..row.descriptor
         },

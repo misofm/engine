@@ -29,7 +29,9 @@ pub enum RowSource {
     SessionOwn,
 }
 
-/// What a route row is on a route into the output.
+/// What a route row is on a route into the output. `class` is the class on a `post_fader` or
+/// `post_pan` route; on a route into the output from a tap before the fader
+/// ([`crate::route_rows_live`], #1391) an active row keeps the submix case's class.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct OutputCase {
     /// The row's class on a route into the output.

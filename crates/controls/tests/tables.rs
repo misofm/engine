@@ -30,6 +30,15 @@ fn table_descriptor(model: &session::SessionModel, listed: &ControlRow) -> Contr
             let route = model.routes.iter().find(|route| route.id == *id).unwrap();
             match (route.destination.clone(), row.into_output) {
                 (RouteDestination::SubmixInput { .. }, _) => row.descriptor,
+                // #1391: a route into the output from before the fader keeps its live class.
+                (RouteDestination::OutputInput { .. }, Some(output))
+                    if output.active && controls::route_rows_live(route) =>
+                {
+                    ControlDescriptor {
+                        active: output.active,
+                        ..row.descriptor
+                    }
+                }
                 (RouteDestination::OutputInput { .. }, Some(output)) => ControlDescriptor {
                     class: output.class,
                     active: output.active,

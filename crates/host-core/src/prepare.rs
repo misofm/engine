@@ -432,7 +432,8 @@ pub struct HostLiveLanes {
     pub strip_input: bool,
     /// One lane per prepared strip effect instance; observation taps ride these.
     pub effects: bool,
-    /// One lane per route into a submix; a live route loses the route fold.
+    /// One lane per route with live rows (`controls::route_rows_live`: into a submix, or from a
+    /// tap before its strip's fader); a live route loses the route fold.
     pub routes: bool,
 }
 
@@ -5905,17 +5906,18 @@ fn resolve_strip_delay_carry(
 }
 
 /// One send present in both models whose source and destination are the same and whose values the
-/// plans can continue from (#1284 D2, D3): the route into a submix, and the record that brings the
-/// carried send from the predecessor's live values to the successor's, when they differ.
+/// plans can continue from (#1284 D2, D3): the route with a live lane, and the record that brings
+/// the carried send from the predecessor's live values to the successor's, when they differ.
 struct RouteJoin<'a> {
     id: &'a str,
     retarget: Option<SendRecord>,
 }
 
-/// The model half of the send join (#1284 D2, D3): for every route of `model` into a submix that
-/// `committed` also has with the same source (strip and tap) and the same destination, the record
-/// of the difference of their live values. A re-pointed route is not listed: it is a route removed
-/// and a route added, which #1363 ramps at route level, and its source strip is not restarted.
+/// The model half of the send join (#1284 D2, D3): for every route of `model` with a live lane
+/// (`controls::route_rows_live`) that `committed` also has with the same source (strip and tap)
+/// and the same destination, the record of the difference of their live values. A re-pointed
+/// route is not listed: it is a route removed and a route added, which #1363 ramps at route
+/// level, and its source strip is not restarted.
 ///
 /// The difference is judged on the effective values of both models ([`EffectiveDiff`]; the route's
 /// gate follows its source strip's effective mute, #1558 D1) by [`route_record_between`], the
@@ -5937,10 +5939,8 @@ fn join_routes<'a>(
         .collect();
     let mut joins = Vec::new();
     for (after_index, after) in model.routes.iter().enumerate() {
-        if !matches!(
-            after.destination,
-            session::RouteDestination::SubmixInput { .. }
-        ) {
+        // #1391: every route with a live lane, into a submix or from before its strip's fader.
+        if !controls::route_rows_live(after) {
             continue;
         }
         let Some(&before_index) = before_at.get(after.id.as_str()) else {

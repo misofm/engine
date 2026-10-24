@@ -496,9 +496,8 @@ fn the_live_target_is_the_prepared_constant() {
     let initial = values(&mut draw, false);
     let u = values(&mut draw, false);
     let base = follow_session(initial, false, [false; 2], u);
-    let live = Live::new(&base, &Vec::new(), true);
-    let producer = &live.handles.route_controls[0];
-    assert_eq!(producer.route_id(), "t-b");
+    let mut live = Live::new(&base, &Vec::new(), true);
+    let producer = &*live.producer("t-b");
     for _ in 0..2_000 {
         let mute = draw.chance(1, 5);
         let drawn = values(&mut draw, mute);
@@ -546,6 +545,44 @@ fn the_live_target_is_the_prepared_constant() {
         );
         assert!(actual[0][settled..].iter().any(|sample| *sample != 0.0));
     }
+
+    // #1391 gate 3: a `pre_fader` route into the output has a lane. With no record it renders
+    // the prepared constant's bits from sample 0, and a pushed record settles on a fresh plan.
+    for trial in 0..6 {
+        let initial = values(&mut draw, false);
+        let drawn = values(&mut draw, trial % 3 == 2);
+        let length: u32 = draw.pick(&[0, 37, 480]);
+        let push_block = 2;
+        let settled = push_block * QUANTUM + length as usize;
+        let blocks = settled.div_ceil(QUANTUM) + 3;
+        let feeds = feeds(&mut draw, &["t", "u"], blocks * QUANTUM);
+        let what = format!("pre-fader output trial {trial}: {drawn:?} length {length}");
+        let mut live = Live::new(&pre_fader_out(initial), &feeds, true);
+        live.producer("t-out");
+        let mut actual = live.render(push_block);
+        let prepared = Live::new(&pre_fader_out(initial), &feeds, false).render(push_block);
+        assert_planes(&actual, &prepared, 0, &format!("{what}, no record"));
+        live.set_route("t-out", drawn, [false; 2], length)
+            .expect("written");
+        live.render_into(blocks - push_block, &mut actual);
+        let fresh = Live::new(&pre_fader_out(drawn), &feeds, false).render(blocks);
+        assert_planes(&actual, &fresh, settled, &what);
+    }
+}
+
+/// Track `t` routes `t-out` from its `pre_fader` tap into the output with `values`; track `u`
+/// routes `u-main` from `post_pan` into the output at unity.
+fn pre_fader_out(values: Values) -> SessionModel {
+    let (mut model, source, track) = empty_session(48_000);
+    add_track(&mut model, &source, &track, "t");
+    add_track(&mut model, &source, &track, "u");
+    let mut t_out = to_output("t-out", tap("t", SendTap::PreFader));
+    t_out.gain_db = values.gain_db;
+    t_out.mute = values.mute;
+    let [ll, lr, rl, rr] = values.matrix;
+    t_out.channel_matrix = ChannelMatrix { ll, lr, rl, rr };
+    model.routes = vec![t_out, to_output("u-main", tap("u", SendTap::PostPan))];
+    model
 }
 
 // ---- Gate 2 -------------------------------------------------------------------------------------
@@ -610,10 +647,15 @@ fn a_settled_live_edit_through_host_core_equals_a_fresh_plan() {
             let feeds = feeds(&mut draw, &feed_ids, blocks * QUANTUM);
             let mut live = Live::new(&model, &feeds, true);
             let mut actual = live.render(push_block);
-            // A host addresses a live send by its index in `route_controls`, which is canonical
-            // route-ID order: `a-b`, `c-b`, `e-x`, `f-x`, the same order `sends` is in.
-            for (index, length) in [(1, lengths[0]), (2, lengths[1])] {
-                live.set(index, sends[index].1, [false; 2], length)
+            // A host addresses a live route by its index in `route_controls`, which is canonical
+            // route-ID order: `a-b`, `b-main`, `c-b`, `e-x`, `f-x`, `x-main` (the bus routes into
+            // the output leave the buses' `input` tap, before the fader, so they are live, #1391).
+            for (index, position, length) in [(1, 2, lengths[0]), (2, 3, lengths[1])] {
+                assert_eq!(
+                    live.handles.route_controls[position].route_id(),
+                    sends[index].0
+                );
+                live.set(position, sends[index].1, [false; 2], length)
                     .expect("written");
             }
             live.render_into(blocks - push_block, &mut actual);
@@ -845,7 +887,8 @@ fn live_controls_cost_the_standing_sessions_no_fold() {
 // ---- Gate 5 -------------------------------------------------------------------------------------
 
 /// Three tracks and two buses; the sends into the buses are declared `zz-send`, `mm-send`,
-/// `aa-send`, the routes into the output between and after them.
+/// `aa-send`, the routes into the output between and after them: `t0-main` from `post_pan`,
+/// `t2-pf` from `pre_fader`, `t1-direct` from `input` and each bus's `input` tap.
 fn out_of_order() -> SessionModel {
     let (mut model, source, track) = empty_session(48_000);
     for id in ["t0", "t1", "t2"] {
@@ -857,18 +900,22 @@ fn out_of_order() -> SessionModel {
         send("mm-send", "t1", SendTap::PostPan, "bus-b", Values::UNITY),
         send("aa-send", "t2", SendTap::PostPan, "bus-a", Values::UNITY),
         bus_to_output("bus-b"),
+        to_output("t2-pf", tap("t2", SendTap::PreFader)),
         bus_to_output("bus-a"),
+        to_output("t1-direct", tap("t1", SendTap::Input)),
     ];
     add_buses(&mut model, &["bus-b", "bus-a"]);
     model
 }
 
-/// Gate 5. `route_controls` lists exactly the routes into submixes, in canonical route-ID order,
+/// Gate 5 (#1391 gate 1). `route_controls` lists exactly the routes whose rows are live (into a
+/// submix, or from a tap before the fader), in canonical route-ID order,
 /// each with its `route_id`, for a session that declares them out of that order; each producer
 /// drives the lane at its own route's index; and the list is empty without a depth.
 ///
 /// Test value: red if host-core orders producers by declaration rather than by the order the
-/// render plane's lanes were attached in.
+/// render plane's lanes were attached in, or if the graph's lane set (keyed on the stage before
+/// the fader) and the model's live rows (`controls::route_rows_live`) disagree.
 #[test]
 fn live_send_handles_are_in_canonical_route_order() {
     let model = out_of_order();
@@ -879,8 +926,21 @@ fn live_send_handles_are_in_canonical_route_order() {
         .iter()
         .map(RouteControlProducer::route_id)
         .collect();
-    assert_eq!(ids, ["aa-send", "mm-send", "zz-send"]);
-    for position in 0..3 {
+    // #1391: the routes into the output from before the fader (`bus-*-main` from the buses'
+    // `input` tap, `t1-direct`, `t2-pf`) have lanes too; `t0-main` (`post_pan`) never has one.
+    assert_eq!(
+        ids,
+        [
+            "aa-send",
+            "bus-a-main",
+            "bus-b-main",
+            "mm-send",
+            "t1-direct",
+            "t2-pf",
+            "zz-send"
+        ]
+    );
+    for position in 0..ids.len() {
         let id = live.handles.route_controls[position].route_id().to_owned();
         live.set(
             position,
@@ -1015,7 +1075,8 @@ fn live_send_lanes_are_charged_against_the_graph_cap() {
     let live = Live::from_document(&document, &Vec::new(), true);
     let charged = live.host.report.route_control_resources;
     assert_eq!(charged, graph_route_resources(&document));
-    assert_eq!(charged.routes, 2);
+    // `r0`, `r1` and `b-main`, which leaves the bus's `input` tap (#1391).
+    assert_eq!(charged.routes, 3);
     assert!(charged.cell_bytes > 0 && charged.owner_bytes > 0 && charged.activity_bytes > 0);
     let total = admitted(&live.host);
     drop(live);
@@ -1078,7 +1139,9 @@ fn live_sends_render_without_allocating() {
     let feeds = feeds(&mut draw, &["a", "c", "e", "f"], blocks * QUANTUM);
     let mut live = Live::new(&two_buses(48_000, &sends), &feeds, true);
     let producers = core::mem::take(&mut live.handles.route_controls);
-    assert_eq!(producers.len(), 4);
+    // The four sends and, since #1391, `b-main` and `x-main`: routes into the output from the
+    // buses' `input` tap, which precedes the fader.
+    assert_eq!(producers.len(), 6);
     let gate = live.gate.take().expect("the gate");
     let edits: Vec<(Values, [bool; 2], u32)> = (0..32)
         .map(|index| {

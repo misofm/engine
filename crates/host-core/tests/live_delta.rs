@@ -4053,29 +4053,44 @@ fn send_values_outside_the_route_domain_need_a_rebuild() {
     );
 }
 
-/// Gate 2. Red if a route into the output loses its fold through a live edit: its gain, mute and
-/// matrix are rebuilds for the optimisation reason, at any tap.
+/// Gate 2 (#1391). Red if the classifier admits every route into the output or none: a
+/// `pre_fader` route into the output takes its gain, mute and matrix edits live, while a
+/// `post_fader` or `post_pan` one keeps its fold and rebuilds for the optimisation reason.
 #[test]
-fn output_route_values_stay_rebuilds() {
-    let mut model = two_tracks();
-    model.routes[0].source = RouteSource::Track {
-        track_id: model.tracks[0].id.clone(),
-        tap: SendTap::PreFader,
-    };
-    let current = normalized(&model);
-    assert!(matches!(
-        current.routes[0].destination,
-        RouteDestination::OutputInput { .. }
-    ));
-    for edit in [
-        (|next: &mut SessionModel| next.routes[0].gain_db = -6.0) as fn(&mut SessionModel),
-        |next| next.routes[0].mute = true,
-        |next| next.routes[0].channel_matrix.lr = 0.5,
+fn output_route_values_are_live_only_before_the_fader() {
+    for (tap, live) in [
+        (SendTap::PreFader, true),
+        (SendTap::PostFader, false),
+        (SendTap::PostPan, false),
     ] {
-        assert_eq!(
-            classify_routes(&current, edit),
-            Err(LiveRebuild::RebuildOnly(RebuildReason::Optimisation))
-        );
+        let mut model = two_tracks();
+        model.routes[0].source = RouteSource::Track {
+            track_id: model.tracks[0].id.clone(),
+            tap,
+        };
+        let current = normalized(&model);
+        assert!(matches!(
+            current.routes[0].destination,
+            RouteDestination::OutputInput { .. }
+        ));
+        for edit in [
+            (|next: &mut SessionModel| next.routes[0].gain_db = -6.0) as fn(&mut SessionModel),
+            |next| next.routes[0].mute = true,
+            |next| next.routes[0].channel_matrix.lr = 0.5,
+        ] {
+            let classified = classify_routes(&current, edit);
+            if live {
+                let rows = classified.expect("a pre-fader output route edit is live");
+                assert_eq!(rows.len(), 1, "{tap:?}");
+                assert_eq!(rows[0].0, current.routes[0].id.as_str());
+            } else {
+                assert_eq!(
+                    classified,
+                    Err(LiveRebuild::RebuildOnly(RebuildReason::Optimisation)),
+                    "{tap:?}"
+                );
+            }
+        }
     }
 }
 

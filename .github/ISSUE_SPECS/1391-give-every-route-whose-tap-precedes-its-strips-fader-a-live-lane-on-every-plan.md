@@ -167,3 +167,26 @@ its master already does not fold.
   *Remove a strip in two phases: ramp out, then a scheduled swap* (#1325).
 
 **Decision 17 amendment (2026-10-13).** The live-edit half becomes a class rule: this issue flips the rows of an output route whose tap precedes the fader from `RebuildOnly(Optimisation)` to `Live` in `controls`, and #1557's route lowering serves them. Its D2 becomes "the lane is attached when the route's rows are live" (`controls::live_lanes`, #1555; `control_queue_depth` is deleted). Its render lane work (the per-route attach and the kept fold) stays here.
+
+## Evidence and decision record (attempt 1, 2026-10-24)
+
+- **One predicate.** `SendTap::precedes_fader` (session) and `controls::route_rows_live` (into a
+  submix, or a tap before the fader) decide the rows; the graph attach keys on the `RouteSource`
+  edge leaving `TrackStage < PostFader`. `follows_mute` stays inactive on every output route;
+  `post_fader`/`post_pan` output routes keep `OUTPUT_FOLD`. `lower_routes` and `join_routes`
+  filter on `route_rows_live` (scope note D2: a swap carries the ramp).
+- **D4 and gate 5 moot** (scope note): host-web takes lanes from the rows and commands through
+  `SET_CONTROL`; no host-web code. Gate 4 (C ABI) is served by host-core's classifier; no capi row.
+- **A submix source counts too.** A bus route into the output from the bus's `input` or
+  `pre_fader` tap is live. Test sessions that use `bus_to_output` (input tap) gained lanes:
+  counts and the route-ID order in `graph-compiler/tests/live_routes.rs`,
+  `host-core/tests/live_routes.rs` restated. Gate 1's set is
+  `["aa-send","bus-a-main","bus-b-main","mm-send","t1-direct","t2-pf","zz-send"]`.
+- **Class A.** No browser fixture holds a pre-fader output route; `expected.json` is unchanged.
+  Gate 3: a pre-fader output lane with no record renders the prepared constant's bits from
+  sample 0, and a pushed record settles on a fresh plan.
+- **Open (outside the authorized paths, reported to root).** `graph-compiler/src/compile.rs`
+  `StripGains::route_bound` states a live route's domain bound only for routes into a submix, so
+  the reported `tail_samples` of a plan with a pre-fader output route is computed from its
+  prepared constant, not every live history. The parameter-metadata `intoOutput` case
+  (`controls::OutputCase`, sdk assets) describes the `post_fader`/`post_pan` case only.

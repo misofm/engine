@@ -81,6 +81,7 @@ pub use registry::{
     owner_index, owner_rows_in, owner_rows_with, row_descriptor, row_motion, row_scope, set,
     strip_index,
 };
+pub use route::route_rows_live;
 pub use session::{ControlAddress, Lane, Owner, OwnerKind, Section, SectionKind};
 pub use tables::{EffectTableRows, OutputCase, RowSource, TableRow, effect_table_rows, table_rows};
 pub use view::ModelView;
