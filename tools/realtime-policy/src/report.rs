@@ -161,7 +161,7 @@ impl fmt::Display for Class {
                 "marked realtime unbounded try_pop drain (bound it with available_at_entry)",
             ),
             Self::PoppingCall => out.write_str(
-                "marked realtime call to a popping function inside a loop or closure (move the pop out of the loop, or into the loop's own counted drain)",
+                "marked realtime call to a popping function inside a loop or closure, or anywhere in a macro token tree (move the pop out of the loop, or into the loop's own counted drain)",
             ),
             Self::PoppingPathValue => out.write_str(
                 "marked realtime path value that names a popping function (a function value can be called from a loop the walk does not see)",

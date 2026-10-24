@@ -112,20 +112,38 @@ fn the_iterator_expression_of_a_for_is_outside_its_loop() {
 }
 
 #[test]
-fn a_call_in_a_macro_token_tree_is_refused_in_a_loop() {
-    let body =
-        "        for _ in 0..4 {\n            log!(\"{:?}\", self.next_record());\n        }\n";
-    refuses(
-        "calls-macro",
-        &marked(&format!("{HELPER}{}", caller(body))),
-        &[CALL],
-    );
-    // Outside a loop and a closure the same call is accepted.
-    let once = "        log!(\"{:?}\", self.next_record());\n";
-    accepts(
-        "calls-macro-once",
-        &marked(&format!("{HELPER}{}", caller(once))),
-    );
+fn a_name_of_the_set_in_a_macro_token_tree_is_refused_anywhere_in_a_region() {
+    // #1544 D3: a loop, a closure or a path value written in the tokens, with no `syn` loop
+    // around the macro, and a call in a `syn` loop around it.
+    let rows = [
+        (
+            "calls-macro",
+            "        for _ in 0..4 {\n            log!(\"{:?}\", self.next_record());\n        }\n",
+            CALL,
+        ),
+        (
+            "calls-macro-loop",
+            "        assert!({ while self.next_record().is_some() {} true });\n",
+            CALL,
+        ),
+        (
+            "calls-macro-closure",
+            "        assert!((0..4).all(|_| self.next_record().is_some()));\n",
+            CALL,
+        ),
+        (
+            "calls-macro-value",
+            "        for _ in 0..4 {\n            let n = count!(Self::next_record);\n        }\n",
+            VALUE,
+        ),
+    ];
+    for (name, body, class) in rows {
+        refuses(
+            name,
+            &marked(&format!("{HELPER}{}", caller(body))),
+            &[class],
+        );
+    }
 }
 
 #[test]
@@ -203,6 +221,68 @@ fn a_hoisted_value_taken_above_the_region_is_refused_when_called() {
         &format!("{}{}", marked(HELPER), caller(&body)),
         &[CALL],
     );
+}
+
+#[test]
+fn a_function_value_hoisted_without_a_let_initializer_is_refused_when_called() {
+    // #1544 D1: an assignment, a deferred `let` and an assignment in a macro token tree, above
+    // BEGIN; and a call that stands before its assignment in one region loop.
+    let assigned = |above: &str| {
+        let body = format!(
+            "{above}// {BEGIN}\n        while let Some(record) = next(self) {{\n            apply(record);\n        }}\n// {END}\n"
+        );
+        format!("{}{}", marked(HELPER), caller(&body))
+    };
+    refuses(
+        "calls-hoisted-assign",
+        &assigned(
+            "        let mut next: fn(&mut Lane) -> Option<u32> = Lane::quiet;\n        next = Lane::next_record;\n",
+        ),
+        &[CALL],
+    );
+    refuses(
+        "calls-hoisted-deferred",
+        &assigned("        let next;\n        next = Lane::next_record;\n"),
+        &[CALL],
+    );
+    refuses(
+        "calls-hoisted-macro-assign",
+        &assigned(
+            "        let mut next = Lane::quiet;\n        assert!({ next = Lane::next_record; true });\n",
+        ),
+        &[CALL],
+    );
+    let before = "        let mut next = Lane::quiet;\n        loop {\n            let _ = next(self);\n            next = Lane::next_record;\n        }\n";
+    refuses(
+        "calls-hoisted-before",
+        &marked(&format!("{HELPER}{}", caller(before))),
+        &[CALL, VALUE],
+    );
+    // #1544 D2: a `const`, a `static` and a `use` rename outside every region.
+    let looped = |callee: &str| {
+        caller(&format!(
+            "        while let Some(record) = {callee}(self) {{\n            apply(record);\n        }}\n"
+        ))
+    };
+    for (name, item) in [
+        ("calls-hoisted-const", "const"),
+        ("calls-hoisted-static", "static"),
+    ] {
+        let text = format!(
+            "{item} NEXT: fn(&mut Lane) -> Option<u32> = Lane::next_record;\n{}{}",
+            marked(HELPER),
+            marked(&looped("NEXT"))
+        );
+        refuses(name, &text, &[CALL]);
+    }
+    let free =
+        "fn next_record(lane: &mut Lane) -> Option<Record> {\n    lane.control.try_pop().ok()\n}\n";
+    let text = format!(
+        "use crate::next_record as quiet;\n{}{}",
+        marked(free),
+        marked(&looped("quiet"))
+    );
+    refuses("calls-hoisted-use-rename", &text, &[CALL]);
 }
 
 #[test]
