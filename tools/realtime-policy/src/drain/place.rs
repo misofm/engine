@@ -30,7 +30,8 @@
 //! (`self.next_queue().try_pop()`, counted as `self.next_queue().available_at_entry()`) is
 //! compared by spelling only: the method can return another queue on each call, which this rule
 //! does not read either. Neither does it read a place reached through an
-//! alias taken before the count. #1418 reuses this rule for the base of a selecting loop.
+//! alias taken before the count. #1418 holds the roots of every selecting outer loop to this rule
+//! over the loop's body ([`super::select`]).
 
 use super::Ctx;
 use super::facts::UseKind;
@@ -47,7 +48,23 @@ pub(super) fn untouched<'f>(
     from: Pos,
     to: Pos,
 ) -> bool {
+    untouched_except(ctx, root, binding, from, to, &[])
+}
+
+/// [`untouched`], with the uses at `own` left out: the reads of the rule that asks (#1418: the
+/// root of a selecting loop's rebinding initializer, or of its collection).
+pub(super) fn untouched_except<'f>(
+    ctx: &Ctx<'f>,
+    root: &Root,
+    binding: &Binding<'f>,
+    from: Pos,
+    to: Pos,
+    own: &[Pos],
+) -> bool {
     ctx.facts.uses_in(&root.name, from, to).iter().all(|used| {
+        if used.kind == UseKind::Path && own.contains(&used.pos) {
+            return true;
+        }
         // A mention in a macro's token tree can be anything the macro makes of it.
         if used.kind != UseKind::Path {
             return false;
@@ -146,7 +163,8 @@ fn leaves(place: &[Seg], receiver: &[Seg]) -> bool {
         .any(|pair| matches!(pair, (Seg::Field(a), Seg::Field(b)) if a != b))
 }
 
-fn is_assign_op(op: &syn::BinOp) -> bool {
+/// Whether `op` is a compound assignment (`+=`, `-=`, ..), which replaces its left operand.
+pub(super) fn is_assign_op(op: &syn::BinOp) -> bool {
     matches!(
         op,
         syn::BinOp::AddAssign(_)
