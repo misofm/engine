@@ -233,3 +233,5 @@ each mutant was applied to a committed tree and restored with `git checkout` and
 | 1338-M4 | restore's target-equals-design check disabled | `src/lib.rs` | `crossover::a_restore_refuses_…` | RED |
 | 1338-M5 | `write_side` omits the three word ramps | `src/lib.rs` | `crossover::a_restore_refuses_…` | RED: `the snapshot is mid-glide` |
 | 1338-M6 | crossover word ramps on the unclamped law (`current + step`) | `src/lib.rs` | `ramp_endpoint::every_ramped_word_stays_inside_its_endpoints` | RED: `crossover a2 … not one clamped D11 sample` |
+| 1338-M7 | restore checks the current point only, not the remaining walk (`if true \|\| walk…` breaks after the first point) | `src/lib.rs` | `crossover::a_restore_refuses_…` | RED: `off-line step`, `Ok(())` against `Err("effect.state.coefficient")` |
+| 1338-M8 | restore's settled check `remaining == 0 && current != target` removed | `src/lib.rs` | `crossover::a_restore_refuses_…` | RED: `settled off target`, `Ok(())` against `Err("effect.state.coefficient")` |

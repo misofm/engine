@@ -45,8 +45,8 @@ fn active_values() -> [effect_contract::InitialParameterValue; support::PARAMETE
 ///
 /// The compact causal payload has one crossover word, two gain words, ten four-word ramps, four
 /// filter words, the silence counter, four four-word coefficient ramps and three four-word
-/// crossover word ramps per channel: 76 words. The common section stays empty: wave-2 decision W2-D2 on #83 defers
-/// the shared codec's versioned header to #95.
+/// crossover word ramps per channel: 76 words. The common section stays empty: wave-2 decision
+/// W2-D2 on #83 defers the shared codec's versioned header to #95.
 #[test]
 fn descriptor_preparation_and_exact_four_rate_resources_are_frozen() {
     effect_contract::validate_descriptor(&MULTIBAND_COMPRESSOR_DESCRIPTOR).expect("descriptor");

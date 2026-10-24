@@ -988,25 +988,26 @@ fn band_target<L: Lane>(level: L, threshold: L, inv_ratio_minus_one: L, knee: (f
 /// crossover nor the dynamics, and it still advances its ramps so that its parameter state does
 /// not depend on whether it was bypassed.
 ///
-/// `RAMPING` is the third compile-time switch, and it is the one that varies *within* a block.
-/// It says whether any ramp of any track of either channel still has samples to produce over this
+/// `RAMPING` is the third compile-time switch, and it is the one that varies *within* a block. It
+/// says whether any ramp of any track of either channel still has samples to produce over this
 /// segment; [`Instance::plan_segment`] decides it from the ramp counters at the same moment it
 /// decides the segment's length. At `RAMPING == false` the thirty-four per-frame lane additions
 /// below, and the per-frame coefficient derivation ([`frame_coefficients`], one division per band
-/// and channel, and [`crossover_coefficients`]), are not merely predicted away, they are not emitted: a settled bank derives its
-/// coefficients once per segment and pays no smoothing arithmetic at all.
+/// and channel, and [`crossover_coefficients`]), are not merely predicted away, they are not
+/// emitted: a settled bank derives its coefficients once per segment and pays no smoothing
+/// arithmetic at all.
 ///
 /// **Why that is bit-identical, not merely close.** `LinearRamp` keeps `remaining == 0` implying
 /// `step == +0.0`, and this crate admits parameter words through exactly four doors — prepared
 /// defaults, `apply_automation`, `snap`, and a restored payload — every one of which runs
-/// `normalize_zero` over a `parameter_value_valid` word; a coefficient word enters through the
-/// same four, as `retention_coefficient` of a legal time or a restored word, both in `(0, 1]`. So on the skipped path every lane of
-/// every `step` is `+0.0` and every lane of every `current` is finite and is not `-0.0`, which
-/// makes `ramp_toward(current, step, target)` (whose add is the identity there, and whose clamp
-/// keeps an in-range word's bits) the identity on all of them. The two exclusions matter and are
-/// the same two `LinearRamp::stationary_at` names: `-0.0 + 0.0` is `+0.0`, and a NaN is quieted by
-/// an addition. `Instance::flat_path_is_identity` asserts the precondition in debug builds rather
-/// than leaving it as a comment.
+/// `normalize_zero` over a `parameter_value_valid` word; a coefficient word enters through the same
+/// four, as `retention_coefficient` of a legal time or a restored word, both in `(0, 1]`. So on the
+/// skipped path every lane of every `step` is `+0.0` and every lane of every `current` is finite
+/// and is not `-0.0`, which makes `ramp_toward(current, step, target)` (whose add is the identity
+/// there, and whose clamp keeps an in-range word's bits) the identity on all of them. The two
+/// exclusions matter and are the same two `LinearRamp::stationary_at` names: `-0.0 + 0.0` is
+/// `+0.0`, and a NaN is quieted by an addition. `Instance::flat_path_is_identity` asserts the
+/// precondition in debug builds rather than leaving it as a comment.
 ///
 /// `ARMABLE` is the fourth (issue #1455), chosen per segment by [`process_block`]. At `true` the
 /// crossover is the armed form: each side's silence counter advances frame by frame
@@ -1327,16 +1328,16 @@ impl<L: Lane, const W: usize> Instance<L, W> {
     /// ramp stop costing anything. A ramp arriving on this segment's first sample is snapped here,
     /// leaves `remaining == 0` behind it, and so does not report itself as in flight; the rest of
     /// the block is then one flat segment. Without the split that segment still ran the
-    /// twenty-eight additions per frame with every step at `+0.0`, which is the cost the split
+    /// thirty-four additions per frame with every step at `+0.0`, which is the cost the split
     /// removes.
     ///
     /// The scan covers all seventeen slots of every track on both channels: the ten parameter
-    /// ramps, the four coefficient ramps and the three crossover word ramps (issue #1338). A coefficient ramp therefore snaps to its exact
-    /// designed word here, and one still in flight keeps the segment on the ramped path even when
-    /// its parameter ramp has already settled (a retarget to the value in force, which the hoist in
-    /// `LinearRamp::set_target` settles at once while the coefficient returns from mid-walk). That
-    /// is the compressor's "a Point that cancels a time ramp" rule, kept by the scan rather than by
-    /// re-arming the parameter ramp.
+    /// ramps, the four coefficient ramps and the three crossover word ramps (issue #1338). A
+    /// coefficient ramp therefore snaps to its exact designed word here, and one still in flight
+    /// keeps the segment on the ramped path even when its parameter ramp has already settled (a
+    /// retarget to the value in force, which the hoist in `LinearRamp::set_target` settles at once
+    /// while the coefficient returns from mid-walk). That is the compressor's "a Point that cancels
+    /// a time ramp" rule, kept by the scan rather than by re-arming the parameter ramp.
     ///
     /// Where a segment ends does not move a lane's bits (issue #1069): every word the kernel reads
     /// on a ramped segment, coefficients included, is advanced and read frame by frame, so a
@@ -1677,8 +1678,7 @@ fn stage_side(bytes: &[u8], sample_rate: u32) -> Result<StagedSide, StatePayload
     // design of `crossover_hz` bit for bit, so a triple the engine would not design is refused and
     // the target's stability is #1366's proof, not a runtime check. Every word is a positive normal
     // below 1, a settled ramp is at its target, and the current triple, a point of a walk between
-    // two designs, is held within `RAMP_PATH_NORM_TOLERANCE`.
-    let mut current = [0.0f32; CROSSOVER_WORDS];
+    // two designs, is held within `RAMP_PATH_NORM_TOLERANCE` at every point of its remaining walk.
     for (word, design) in designed.into_iter().enumerate() {
         let read = read_ramp(bytes, CROSSOVER_WORD + word * RAMP_WORDS);
         let positive = |value: f32| value.is_normal() && value > 0.0 && value < 1.0;
@@ -1689,14 +1689,26 @@ fn stage_side(bytes: &[u8], sample_rate: u32) -> Result<StagedSide, StatePayload
         {
             return Err(state_error("effect.state.coefficient"));
         }
-        current[word] = read.current;
         ramps[crossover_slot(word)] = LinearRamp {
             step: normalize_zero(read.step),
             ..read
         };
     }
-    if transition_norm(current[0], current[1], current[2]) > RAMP_PATH_NORM_TOLERANCE {
-        return Err(state_error("effect.state.coefficient"));
+    // The walk the render takes, point by point (`LinearRamp::next_value` is the kernel's clamped
+    // law and its snap): a forged step keeps each word inside its endpoints but can leave the
+    // straight line between the designs, so the current point alone proves nothing about the path
+    // (the parametric EQ's restore walks its words for the same reason). At most 64 points.
+    let mut walk: [LinearRamp; CROSSOVER_WORDS] =
+        core::array::from_fn(|word| ramps[crossover_slot(word)]);
+    let mut point = walk.map(|ramp| ramp.current);
+    loop {
+        if transition_norm(point[0], point[1], point[2]) > RAMP_PATH_NORM_TOLERANCE {
+            return Err(state_error("effect.state.coefficient"));
+        }
+        if walk.iter().all(|ramp| ramp.remaining == 0) {
+            break;
+        }
+        point = walk.each_mut().map(LinearRamp::next_value);
     }
     Ok(StagedSide {
         crossover_hz,

@@ -245,3 +245,13 @@ before any workload launch, `precondition_loadavg_above_ceiling` (loadavg 0.52 o
 machine). The run was not retried, as root directed. No timing exists. The console workload does
 not contain the multiband compressor; the 55 console-workload tests and the wasm-gate native
 corpus (`g5_native_corpus`, 7 tests) pass, and `corpus_digests.in` did not move.
+
+**Verifier follow-ups (PASS with two minors, folded in).** Restore now walks the three word ramps
+point by point with `LinearRamp::next_value` (the kernel's clamped law and its snap, at most 64
+points) and holds `transition_norm <= RAMP_PATH_NORM_TOLERANCE` at every point, as the parametric
+EQ's restore does: a forged step keeps each word inside its endpoints but can leave the line
+between the designs (the verifier measured a path norm of 1.149). Gate 4 gains two forged cases,
+an off-line a2 step (next point norm about 1.022 at 40/64 into a 200 Hz to 4 kHz glide) and a
+settled word one ulp off its target; mutants 1338-M7 and M8 are red without the walk and without
+the settled check. `effect_runtime::svf`'s module doc names the multiband as a user of
+`RAMP_PATH_NORM_TOLERANCE` (root authorized that one doc edit).

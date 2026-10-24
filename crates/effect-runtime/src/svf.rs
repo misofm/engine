@@ -5,9 +5,10 @@
 //! [`transition_norm`] and [`NORM_TOLERANCE`] need only `c1, a2, a3 < 1`, which both effects'
 //! words satisfy. [`RAMP_PATH_NORM_TOLERANCE`] needs two more, which its derivation uses: a ramp of
 //! at most 64 samples, and a step that is the remaining distance times an exact power of two, so
-//! the scaled step lands within one rounding of the target. The parametric EQ, its only user today,
-//! ramps over 64 samples with a `2^-6` step; a consumer with a longer ramp or another step scale
-//! re-derives the bound before it uses the constant.
+//! the scaled step lands within one rounding of the target. Its users, the parametric EQ and the
+//! multiband compressor's crossover word ramps (#1338), both ramp over 64 samples with a `2^-6`
+//! step; a consumer with a longer ramp or another step scale re-derives the bound before it uses
+//! the constant.
 //!
 //! Zavalishin, *The Art of VA Filter Design*, rev. 2.1.2, ch. 3-4 (the TPT SVF); Wishnick,
 //! DAFx-14, and Laroche, JAES 55(6), 2007 (a contractive transition matrix bounds the state under

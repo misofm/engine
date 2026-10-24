@@ -245,8 +245,9 @@ fn set_word(bytes: &mut [u8], index: usize, value: [u8; 4]) {
 /// leaves the instance as it was.
 ///
 /// The honest mid-glide snapshot restores (the randomized differential's restore leg proves that it
-/// renders on bit for bit); a target triple one ulp off the design of the payload's crossover, and
-/// a current triple outside `RAMP_PATH_NORM_TOLERANCE`, are refused.
+/// renders on bit for bit); a target triple one ulp off the design of the payload's crossover, a
+/// current triple outside `RAMP_PATH_NORM_TOLERANCE`, a forged step whose walk leaves that bound,
+/// and a settled word off its target are refused.
 ///
 /// Test value: a restore that accepts forged unstable or undesigned words, or that omits the word
 /// ramps, turns it red.
@@ -294,12 +295,30 @@ fn a_restore_refuses_crossover_words_the_engine_would_not_hold() {
         );
     }
 
+    // A forged a2 step that reaches its target in one clamped step while c1 and a3 keep walking:
+    // every word stays inside its endpoints and the current point is the honest one, but the next
+    // point is off the line between the designs, norm about 1.022.
+    let mut off_line = honest.clone();
+    let a2 = c1 + RAMP_WORDS;
+    let jump =
+        f32::from_le_bytes(word(&off_line.1, a2 + 1)) - f32::from_le_bytes(word(&off_line.1, a2));
+    set_word(&mut off_line.1, a2 + 2, jump.to_le_bytes());
+
+    // A settled c1 one ulp off its target, step 0.
+    let mut unsettled = honest.clone();
+    let target = f32::from_le_bytes(word(&unsettled.1, c1 + 1));
+    set_word(&mut unsettled.1, c1, target.next_down().to_le_bytes());
+    set_word(&mut unsettled.1, c1 + 2, 0.0f32.to_le_bytes());
+    set_word(&mut unsettled.1, c1 + 3, 0u32.to_le_bytes());
+
     let (expected, _) = unity(200.0);
     let mut expected = expected;
     restore(expected.as_mut(), 1, &honest, sizes).expect("restore");
     for (name, forged) in [
         ("undesigned target", &undesigned),
         ("unstable current", &unstable),
+        ("off-line step", &off_line),
+        ("settled off target", &unsettled),
     ] {
         let refused = restore(effect.as_mut(), 1, forged, sizes);
         assert_eq!(
