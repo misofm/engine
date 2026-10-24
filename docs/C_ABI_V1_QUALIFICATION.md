@@ -965,6 +965,19 @@ the rack's latency-preserving bypass shunt (decision 14).
   after a compressor) does not converge within that window; its difference decays.
 - **No resource movement.** The record rides the lanes #1263 attached; no readback row reads it.
 
+## Strip meters on every plan (#1581)
+
+Every C ABI plan carries the engine's meters: one post-matrix sample-peak meter stream per strip,
+the tracks then the submixes, at the default window (`default_meter_window_blocks`, about 32 ms:
+12 blocks at 48 kHz and 128 frames), and, from #1581's second slice, one output meter. The
+caller's `maximum_meter_streams`, `maximum_meter_items` and `maximum_meter_bytes` bound them like
+any other meter, so they must admit one meter stream per strip plus the output. A cap below that
+refuses the compile with `MISO_ENGINE_V1_COMPILE_REJECTED` and
+`builtin.resource.limit $.meter_requests`. On the nine-strip reference session the meters add
+10,458 bytes to `builtin_meter_payload_bytes` (it was 0); `builtin_retained_payload_bytes` is
+46,917 bytes on x86-64. No symbol, result code or event is added; nothing reads the meters through
+the C ABI until #1587.
+
 ## Input design bounds (#1602)
 
 The engine keeps no cache of input-section design bounds. Every C ABI strip carries the live input

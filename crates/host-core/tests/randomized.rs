@@ -23,9 +23,9 @@
 //!
 //! A failing seed prints the command that replays it (`dsp_reference::randomized`).
 
-use core::num::{NonZeroU32, NonZeroUsize};
+use core::num::NonZeroUsize;
 
-use builtins::{BuiltinLaneSelector, Matrix2x2, MeterTap};
+use builtins::{BuiltinLaneSelector, Matrix2x2, MeterMetricSet, MeterTap};
 use builtins_compiler::{
     TestOnlyWriteGate, TrackControlRecord, TrackFaderRecord, TrackInputRecord,
 };
@@ -37,11 +37,12 @@ use effect_contract::{
 };
 use engine::realtime::{PlanRevisionGate, PlanarBufferMut, RenderIo, RenderTime};
 use host_core::{
-    HostLiveControlHandles, HostLiveControlRequest, HostPrepareCaps, HostShapePolicy, PreparedHost,
+    HostLiveControlHandles, HostLiveControlRequest, HostLiveLanes, HostMeterRequest,
+    HostPrepareCaps, HostShapePolicy, LiveValuesSuperseded, PreparedHost,
     ResponseParameterOverride, ResponsePreviewError, ResponsePreviewGrid, ResponsePreviewLimits,
     ResponsePreviewOutput, ResponsePreviewRequest, ResponsePreviewTarget,
     ResponseSnapshotCollector, ResponseSnapshotOutput, ResponseSnapshotQueryError,
-    SourceSubmission, compile_host_session, prepare_host_runtime_with_live_controls,
+    SourceSubmission, compile_host_session, prepare_host_runtime_with_selected_meters,
     query_response_snapshot_into,
 };
 use session::{
@@ -110,13 +111,25 @@ fn caps() -> HostPrepareCaps {
     }
 }
 
-fn live_controls(tap: MeterTap) -> HostLiveControlRequest {
+fn live_controls() -> HostLiveControlRequest {
     HostLiveControlRequest {
-        meter_period_frames: Some(NonZeroU32::new(QUANTUM as u32).expect("period")),
+        meter_window_blocks: 1,
         meter_queue_depth: NonZeroUsize::new(16).expect("meter depth"),
-        meter_tap: tap,
         observation_taps: 0,
     }
+}
+
+/// One all-metric meter per track at `tap`.
+fn track_meters(model: &SessionModel, tap: MeterTap) -> Vec<HostMeterRequest> {
+    model
+        .tracks
+        .iter()
+        .map(|track| HostMeterRequest {
+            strip_id: track.id.as_str().into(),
+            tap,
+            metrics: MeterMetricSet::ALL,
+        })
+        .collect()
 }
 
 fn sid(text: &str) -> StableId {
@@ -772,7 +785,7 @@ fn probe(seed: u64, registry: &NativeEffectRegistry, reach: &mut Reach) {
             MeterTap::PostInputBuiltins,
         ])
     };
-    let request = live_controls(tap);
+    let request = live_controls();
     let compiled = match compile_host_session(&document, &caps) {
         Ok(compiled) => compiled,
         Err(failure) => {
@@ -787,14 +800,20 @@ fn probe(seed: u64, registry: &NativeEffectRegistry, reach: &mut Reach) {
         }
     };
     let prepared = || {
-        prepare_host_runtime_with_live_controls(&compiled, &caps, &request).unwrap_or_else(
-            |failure| {
-                panic!(
-                    "seed {seed}: prepare refused a compiled console: {}",
-                    String::from_utf8_lossy(failure.as_bytes())
-                )
-            },
+        prepare_host_runtime_with_selected_meters(
+            &compiled,
+            &caps,
+            &request,
+            &track_meters(compiled.normalized_model(), tap),
+            HostLiveLanes::ALL,
+            &LiveValuesSuperseded::default(),
         )
+        .unwrap_or_else(|failure| {
+            panic!(
+                "seed {seed}: prepare refused a compiled console: {}",
+                String::from_utf8_lossy(failure.as_bytes())
+            )
+        })
     };
     let mut arms: Vec<Arm> = [("armed", false), ("dual", true)]
         .into_iter()

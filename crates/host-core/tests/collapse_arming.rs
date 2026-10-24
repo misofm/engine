@@ -29,14 +29,15 @@
 //! mutation is the shipped rule itself: drop `gathers_track_input()` from the conjunction in
 //! `Runtime::arm_mono_collapse` (`crates/graph/src/runtime.rs`).
 
-use core::num::{NonZeroU32, NonZeroUsize};
+use core::num::NonZeroUsize;
 
-use builtins::{BuiltinLaneSelector, MeterTap};
+use builtins::{BuiltinLaneSelector, MeterMetricSet, MeterTap};
 use builtins_compiler::{TestOnlyWriteGate, TrackInputRecord};
 use engine::realtime::{PlanUnitEligibility, PlanarBufferMut, RenderIo, RenderTime};
 use host_core::{
-    HostLiveControlRequest, HostPrepareCaps, HostShapePolicy, SourceSubmission,
-    prepare_host_session_with_live_controls,
+    HostLiveControlRequest, HostLiveLanes, HostMeterRequest, HostPrepareCaps, HostShapePolicy,
+    LiveValuesSuperseded, SourceSubmission, compile_host_session,
+    prepare_host_runtime_with_selected_meters,
 };
 use session::{
     ChannelMatrix, EffectIdentity, EffectParam, ParameterChannel, ParameterUnit, Route,
@@ -76,11 +77,10 @@ fn caps() -> HostPrepareCaps {
     }
 }
 
-fn live_controls(tap: MeterTap) -> HostLiveControlRequest {
+fn live_controls() -> HostLiveControlRequest {
     HostLiveControlRequest {
-        meter_period_frames: Some(NonZeroU32::new(QUANTUM as u32).expect("period")),
+        meter_window_blocks: 1,
         meter_queue_depth: NonZeroUsize::new(16).expect("meter depth"),
-        meter_tap: tap,
         observation_taps: 0,
     }
 }
@@ -285,11 +285,29 @@ struct Rendered {
 }
 
 fn render(document: &str, tap: MeterTap, live: Option<&LiveWrite>, forced_off: bool) -> Rendered {
-    let (_, mut prepared, mut handles) =
-        prepare_host_session_with_live_controls(document, &caps(), &live_controls(tap))
-            .unwrap_or_else(|failure| {
-                panic!("prepare: {}", String::from_utf8_lossy(failure.as_bytes()))
-            });
+    let compiled = compile_host_session(document, &caps()).unwrap_or_else(|failure| {
+        panic!("compile: {}", String::from_utf8_lossy(failure.as_bytes()))
+    });
+    // One all-metric meter per track at `tap`.
+    let meters: Vec<HostMeterRequest> = compiled
+        .normalized_model()
+        .tracks
+        .iter()
+        .map(|track| HostMeterRequest {
+            strip_id: track.id.as_str().into(),
+            tap,
+            metrics: MeterMetricSet::ALL,
+        })
+        .collect();
+    let (mut prepared, mut handles) = prepare_host_runtime_with_selected_meters(
+        &compiled,
+        &caps(),
+        &live_controls(),
+        &meters,
+        HostLiveLanes::ALL,
+        &LiveValuesSuperseded::default(),
+    )
+    .unwrap_or_else(|failure| panic!("prepare: {}", String::from_utf8_lossy(failure.as_bytes())));
     prepared.plan.force_mono_collapse_off(forced_off);
     let mut gate = prepared
         .plan
