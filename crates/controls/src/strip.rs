@@ -17,6 +17,7 @@ use crate::error::ControlError;
 use crate::lane::Side;
 use crate::lane::{is_on, toggle};
 use crate::registry::{ControlRow, Resolved, Source, push_control, push_control_automated};
+use crate::view::ModelView;
 use crate::{ControlClass, ControlKind, ControlScope, Family, LiveRampRow, Taper};
 use session::{Owner, Section};
 
@@ -395,12 +396,13 @@ pub(crate) fn monitor_value(overlay: &MonitorOverlay, row: MonitorRow, id: &Stab
 /// Find one row of strip `id` (a track or a submix) by section and control, as [`push_rows`] would
 /// list it, without building the strip's other rows.
 pub(crate) fn resolve(
-    model: &SessionModel,
+    view: ModelView<'_>,
     id: &StableId,
     section: &Section,
     control: u32,
     sample_rate: u32,
 ) -> Result<Resolved, ControlError> {
+    let model = view.structure();
     // A binary search on a compiled session's model, a scan on any other (`strip_index`).
     let strip = crate::registry::strip_index(model, id)
         .map(|index| crate::registry::strip_at(model, index))
@@ -432,7 +434,7 @@ pub(crate) fn resolve(
             let descriptor = builtin_rows::descriptor(row, sample_rate, strip.matrix_or_pan);
             // Only the fader row has model scope (#1650 D3): the entries are read for it alone.
             let offsets = if control == builtin_rows::FADER_DB {
-                builtin_rows::model_fader_offsets(model, id)
+                builtin_rows::fader_offsets(view.fader_automation(id))
             } else {
                 [None; 2]
             };

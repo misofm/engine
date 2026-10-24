@@ -403,18 +403,33 @@ impl Resolved {
     }
 }
 
-/// Find the row at `address` (its owner, section and control, on any lane).
+/// Find the row at `address` (its owner, section and control, on any lane): [`resolve_in`] on the
+/// whole model, so a strip's `fader_db` or a VCA's `offset_db` scans the automation table once.
 pub(crate) fn resolve(
     model: &SessionModel,
     address: &ControlAddress,
     sample_rate: u32,
 ) -> Result<Resolved, ControlError> {
+    resolve_in(ModelView::whole(model), address, sample_rate)
+}
+
+/// Find the row at `address` (its owner, section and control, on any lane) in the whole model
+/// `view` reads. The driving entries of a strip's `fader_db` and a VCA's `offset_db` are read
+/// through the view: a lookup when it is [`ModelView::indexed`] (a caller that resolves many
+/// addresses, #1914), else one scan of the table.
+pub(crate) fn resolve_in(
+    view: ModelView<'_>,
+    address: &ControlAddress,
+    sample_rate: u32,
+) -> Result<Resolved, ControlError> {
+    debug_assert!(view.is_whole(), "resolve reads a whole model");
+    let model = view.structure();
     let control = address.control;
     match (&address.owner, &address.section) {
         (Owner::Session, Section::Own) => session_rows::resolve(model, control),
-        (Owner::Strip(id), section) => strip::resolve(model, id, section, control, sample_rate),
+        (Owner::Strip(id), section) => strip::resolve(view, id, section, control, sample_rate),
         (Owner::Route(id), Section::Own) => route::resolve(model, id, control),
-        (Owner::Vca(id), Section::Own) => vca::resolve(model, id, control),
+        (Owner::Vca(id), Section::Own) => vca::resolve(view, id, control),
         _ => Err(ControlError::AddressUnknown),
     }
 }
