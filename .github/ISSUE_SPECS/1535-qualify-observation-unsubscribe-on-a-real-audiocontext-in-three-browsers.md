@@ -408,6 +408,12 @@ the named exceptions of #1345 Amendments 5 and 6 again.
   (gate 6). `runUnsubscribePageMutation` and `unsubscribeVerdict` are not added: nothing calls them.
 - **D3.3 dropped**: the host shares one in-flight status read (S2 landed), so the page needs no
   `statusRead`.
+- **The gate keeps its one trusted-click resume** (root ruling, 2026-10-24, option (a)). The
+  attempt-1 Firefox reds came from a test setup with no sink: `main` failed the same way under the
+  long socket path and passed under a short one. With a real sink the gate was green in all five
+  Firefox runs (attempt 1: three with the SDK and two without; attempt 2: one with the SDK, on the final tree; numbers
+  above). A future resume timeout on the required Firefox row is a new finding, with its own issue.
+  It is not #1522, whose symptom differs.
 - The reduction is checked on every frame received after the acknowledgement up to the dispose;
   the signal and low-peak counts on the frames of the D4 wait, while the feed runs.
 
