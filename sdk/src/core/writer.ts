@@ -10,8 +10,7 @@ import {
 import type { ControlFrameEdit } from "./control-frame.ts";
 import type { ControlAppliedReport } from "./control-queue.ts";
 import { MisoControlRefusal, MisoEngineError, MisoUsageError } from "./errors.ts";
-import { requireRack } from "../internal/rack.ts";
-import { requireU32 } from "../internal/ramp.ts";
+import { checkLaneEdit } from "../internal/lane-edit.ts";
 
 /**
  * The live-control writer (issue #243, adopted ruling 5462139867 finding 5).
@@ -195,29 +194,6 @@ function coalescingKey(edit: ControlFrameEdit | LaneEdit): string {
 }
 
 const ID_ENCODER = new TextEncoder();
-const ID_FIELD_BYTES = 128;
-
-/** One record ID's UTF-8 bytes; the field holds 127 of them and a zero after the last. */
-function recordId(id: string, what: string): Uint8Array {
-  if (typeof id !== "string") throw new MisoUsageError(`${what} must be a string`);
-  const bytes = ID_ENCODER.encode(id);
-  if (bytes.length >= ID_FIELD_BYTES) {
-    throw new MisoUsageError(`${what} is ${bytes.length} bytes; a record holds at most ${ID_FIELD_BYTES - 1}`);
-  }
-  return bytes;
-}
-
-/**
- * Check that an observation edit can be encoded and names a rack the record may carry; the core
- * judges what it names. Both SDK transports call it before the host sees the edit.
- */
-export function checkLaneEdit(edit: LaneEdit): void {
-  requireRack(edit.rack);
-  recordId(edit.stripId, "an observation record's strip ID");
-  recordId(edit.effectId, "an observation record's effect ID");
-  requireU32(edit.tapId, "tapId");
-  requireU32(edit.windowBlocks, "windowBlocks");
-}
 
 export function encodeLaneEdits(edits: readonly LaneEdit[]): Uint8Array {
   // Every edit is checked before the buffer exists: a batch with one bad edit writes nothing.

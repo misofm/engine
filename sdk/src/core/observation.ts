@@ -2,6 +2,7 @@ import { ABI_LAYOUT } from "../generated/abi.ts";
 import { CATALOG } from "../generated/catalog.ts";
 import type { EffectDescriptor } from "../generated/catalog.ts";
 import { MisoEngineError, MisoUsageError } from "./errors.ts";
+import { RACKS } from "../internal/rack.ts";
 
 /**
  * Where an observed effect lives: a session console slot or one of the track's inserts.
@@ -104,20 +105,8 @@ export interface RawObservationBinding {
   readonly tapIds: readonly number[];
 }
 
-function rackValue(name: ObservationRack): number {
-  const row = ABI_LAYOUT.constants.racks.find((candidate) => candidate.name === name);
-  if (row === undefined) throw new Error(`the generated ABI layout has no rack ${name}`);
-  return row.value;
-}
-
-/**
- * The observation rack codes, from the generated layout's `racks` table: `1` inserts and
- * `3` console (S1c). The retired `0` and `2` decode to nothing.
- */
-const RACK_VALUES: Readonly<Record<ObservationRack, number>> = Object.freeze({
-  console: rackValue("console"),
-  inserts: rackValue("inserts"),
-});
+/** The observation rack codes, from the generated layout's `racks` table (`internal/rack.ts`). */
+const RACK_VALUES: Readonly<Record<ObservationRack, number>> = RACKS;
 
 const RACK_NAMES: readonly ObservationRack[] = ["console", "inserts"];
 const CHANNEL_VALUES: Readonly<Record<ObservationChannels, number>> = Object.freeze({

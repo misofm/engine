@@ -9,7 +9,7 @@ import { EngineLiveControls } from "../core/live-controls.ts";
 import type { LiveControlBeforeSubmit } from "../core/live-controls.ts";
 import { resultName } from "../core/errors.ts";
 import type { SessionLike } from "../core/session.ts";
-import { checkLaneEdit } from "../core/writer.ts";
+import { checkLaneEdit } from "../internal/lane-edit.ts";
 import type { LaneEdit } from "../core/writer.ts";
 import type {
   MisoAudioWorkletHost,

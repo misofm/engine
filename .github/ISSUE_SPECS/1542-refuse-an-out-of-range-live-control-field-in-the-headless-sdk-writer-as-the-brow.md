@@ -102,3 +102,9 @@ through `stage`.
 so the core's refusal stays covered: the `unknownRack` row of `sdk/test/structure-evals.mjs` ("a key
 the plan does not have is refused with its typed reason") now sends a raw record with rack byte `0`
 through `engine.submitCommands`, past the SDK encoder, and still expects the core's `unknownRack`.
+
+**Attempt 2 (2026-10-24).** `checkLaneEdit` moved to the internal `sdk/src/internal/lane-edit.ts`
+(absent from every export map and barrel), so the root package exports nothing new; `writer.ts` and
+`browser/live-controls.ts` import it from there. The writer eval also refuses rack `255`
+(`notApplicable`), which the browser host refuses. `core/observation.ts` now takes its rack codes
+from `internal/rack.ts` instead of its own lookup of the same table (no behaviour change).
