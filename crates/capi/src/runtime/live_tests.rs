@@ -1415,6 +1415,58 @@ fn the_first_refresh_puts_a_render_changed_counter_in_the_next_snapshot() {
     assert_eq!(rig.counter(protocol::CounterId::LiveValuesSuperseded), 4);
 }
 
+/// Issue #1521 gate 1: the session's `live_block_errors` mirror reaches `COUNTERS_GET` and a
+/// configured `COUNTER_SNAPSHOT`. A fresh session serves `LIVE_BLOCK_ERRORS` at 0 (not
+/// `NOT_FOUND`); after five blocks, a store of 3 through the plan's own `queries` (D6's seam) is
+/// what the session reads, so the plan and the session share one mirror and the service step copies
+/// it. No valid plan reaches a counted error block, so the seam stands in for render's store.
+///
+/// Test value: red if the service step never copies the mirror into the provider, copies another
+/// source (the render sequence 5 or the carry count 0 instead of 3), or the counter is missing
+/// from the served set, so the read or the configuration is refused; no other test reads the
+/// mirror outside `control-plane`'s `plan.rs`.
+#[test]
+#[allow(unsafe_code)]
+fn the_live_block_error_mirror_reaches_counters_get_and_the_snapshot() {
+    let mut rig = Rig::new(&long_session(10, 48_000));
+    assert_eq!(rig.counter(protocol::CounterId::LiveBlockErrors), 0);
+    for _ in 0..5 {
+        rig.step();
+    }
+    // SAFETY: the rig owns the live plan handle and no render call is in flight; `queries` is the
+    // plan's any-thread projection, read through a shared reference.
+    unsafe { &(*rig.plan).queries }.test_store_live_block_errors(3);
+    assert_eq!(rig.counter(protocol::CounterId::LiveBlockErrors), 3);
+    let request = rig.next_request();
+    let configure = counter_telemetry_for(
+        request,
+        SessionRevision(rig.summary().0),
+        vec![protocol::CounterId::LiveBlockErrors],
+        1,
+    );
+    assert_eq!(rig.send(&configure).0, crate::RESULT_OK);
+    rig.step();
+    let [left, right] = source_chunk(rig.fed, rig.quantum);
+    submit_c(
+        rig.session,
+        rig.generation,
+        rig.fed,
+        rig.rate,
+        &left,
+        &right,
+        false,
+    );
+    let snapshots = lossy_counter_snapshots(rig.session);
+    assert_eq!(snapshots.len(), 1);
+    assert_eq!(
+        snapshots[0].values,
+        vec![protocol::CounterValue {
+            id: protocol::CounterId::LiveBlockErrors,
+            value: 3,
+        }]
+    );
+}
+
 /// Gate 3 (c): an exact replay of a live edit returns the cached response and writes nothing.
 #[test]
 fn a_replayed_live_edit_writes_nothing() {

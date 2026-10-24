@@ -233,7 +233,12 @@ extern "C" {
  * call, one string per rule -- "render.output.unaligned", "render.output.platform",
  * "render.output.layout", "render.output.shape", "render.time.discontinuity",
  * "render.time.overflow", "render.plan.rejected" -- and is empty after a successful render; on a
- * session or engine it returns the most recent control-thread diagnostic. A rejected source
+ * session or engine it returns the most recent control-thread diagnostic. The counter
+ * LIVE_BLOCK_ERRORS (protocol counter 19, read with COUNTERS_GET) counts the render calls that
+ * returned MISO_ENGINE_V1_RENDER_REJECTED with "render.plan.rejected": blocks the plan refused
+ * after the block took its live snapshot. Such a block may have applied live values, its output
+ * is not a rendered block, and the watermark does not advance on it. No valid plan reaches this
+ * path, so a nonzero value is an engine defect. A rejected source
  * submission or seek likewise names the rule it broke ("source.region.outside",
  * "source.generation.stale", "source.channels.mismatch", ...).
  * MISO_ENGINE_V1_UNSUPPORTED is returned by exactly one entry point: miso_engine_v1_engine_create

@@ -1041,6 +1041,7 @@ pub enum CounterId {
     LiveValuesSuperseded = 16,
     TransitionReprepareRefusals = 17,
     StripsRestarted = 18,
+    LiveBlockErrors = 19,
 }
 
 /// Complete endpoint-local telemetry configuration. It does not create meter production.
@@ -2318,6 +2319,7 @@ fn parse_counter_id(value: u32) -> Result<CounterId, DecodeError> {
         16 => Ok(CounterId::LiveValuesSuperseded),
         17 => Ok(CounterId::TransitionReprepareRefusals),
         18 => Ok(CounterId::StripsRestarted),
+        19 => Ok(CounterId::LiveBlockErrors),
         _ => Err(DecodeError::InvalidField),
     }
 }
