@@ -716,12 +716,14 @@ fn the_browser_and_the_c_abi_give_the_same_bytes_for_one_script() {
     legs.drain("after 4");
 
     // 5. TELEMETRY_CONFIGURE: no meter, LIVE_VALUES_SUPERSEDED at period 1, diagnostics on at
-    // Info.
-    legs.command(
-        "5 telemetry",
+    // Info. #1583 D4: the C ABI's echo carries its meter window (field 8) and the browser's none,
+    // until #1588 gives the browser a meter delivery; every other field and the header agree.
+    let request = legs.next();
+    let configure = frame(
+        request,
+        ExpectedRevision::Exact(SessionRevision(legs.revision)),
         CommandPayload::TelemetryConfigure(&TelemetryConfiguration {
-            // #1583: an empty meter table; the browser has no meter delivery until #1588, which
-            // puts a meter entry back.
+            // #1583: an empty meter table; #1588 puts a meter entry back.
             meters: Vec::new(),
             meter_period_blocks: 0,
             meter_window_blocks: None,
@@ -730,6 +732,39 @@ fn the_browser_and_the_c_abi_give_the_same_bytes_for_one_script() {
             diagnostics_enabled: true,
             minimum_diagnostic_severity: DiagnosticSeverity::Info,
         }),
+    );
+    let (browser_result, browser_echo) = legs.browser.send(&configure);
+    let (c_result, c_echo) = legs.c.send(&configure);
+    assert_eq!(browser_result, c_result, "5 telemetry: the result codes");
+    let echo = |reply: &[u8]| {
+        let mut fields = [0_u16; 64];
+        match ProtocolCodec::default()
+            .decode_typed_response(reply, &mut protocol::DecodeScratch::new(&mut fields))
+            .expect("5 telemetry: a reply")
+        {
+            protocol::DecodedTypedResponseFrame::Success {
+                header,
+                payload: protocol::DecodedSuccessResponsePayload::TelemetryConfiguration(value),
+            } => ((header.request_id, header.revision, header.status), value),
+            _ => panic!("5 telemetry: a telemetry echo"),
+        }
+    };
+    let (browser_header, browser_value) = echo(&browser_echo);
+    let (c_header, c_value) = echo(&c_echo);
+    assert_eq!(browser_header, c_header, "5 telemetry: the reply headers");
+    assert_eq!(browser_value.meter_window_blocks, None);
+    assert_eq!(
+        c_value.meter_window_blocks,
+        core::num::NonZeroU32::new(12),
+        "the C ABI's window at 48 kHz and 128 frames"
+    );
+    assert_eq!(
+        TelemetryConfiguration {
+            meter_window_blocks: None,
+            ..c_value
+        },
+        browser_value,
+        "5 telemetry: every other field"
     );
     legs.drain("after 5");
 

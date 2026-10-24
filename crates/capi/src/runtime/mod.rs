@@ -86,6 +86,8 @@ impl ControlAdapter for CapiAdapter {
     /// The C ABI subscribes through the `Observe` edit (#1584 D7a): its plans bind an observation
     /// queue slot for every declared tap ([`CapiPreparer`]), and nothing else writes those queues.
     const OBSERVE_EDIT: bool = true;
+    /// The control plane serves the C ABI's meter batches from its own delivery (#1583 R2).
+    const METER_DELIVERY: bool = true;
 }
 
 /// capi's preparation (issue #1400 D3): the live request with observation capacity for every

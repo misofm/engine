@@ -3260,6 +3260,37 @@ fn race_live_edits(run: usize) -> RaceCounts {
     let document = race_session();
     // SAFETY: The returned handles are uniquely owned until the matching destroy calls below.
     let (session, plan) = unsafe { compile_c(&document, &limits()) };
+    // #1583 gate 7: the output's meter table, one batch per window, so every render below folds
+    // the output meter through the requested gate, and the control thread stages the batches.
+    let window = 12_u32;
+    let meters = protocol::TelemetryConfiguration {
+        meters: vec![protocol::MeterEntry {
+            target: protocol::MeterTarget::Output,
+            metric: protocol::MeterMetric::Peak,
+        }],
+        meter_period_blocks: window,
+        meter_window_blocks: None,
+        counter_ids: Vec::new(),
+        counter_period_blocks: 0,
+        diagnostics_enabled: false,
+        minimum_diagnostic_severity: protocol::DiagnosticSeverity::Info,
+    };
+    let mut configure = vec![0_u8; 4_096];
+    let configure_len = ProtocolCodec::default()
+        .encode_command_frame_into(
+            &TypedCommandFrame {
+                request_id: RequestId::new(1).expect("request ID"),
+                expected_revision: ExpectedRevision::Exact(SessionRevision(42)),
+                payload: CommandPayload::TelemetryConfigure(&meters),
+            },
+            &mut configure,
+        )
+        .expect("meter table");
+    let mut response = [0_u8; 4_096];
+    // SAFETY: The session and the caller-owned buffers are live; no other thread uses it yet.
+    let configured = unsafe { submit(session, &configure[..configure_len], &mut response) };
+    assert_eq!(configured, RESULT_OK);
+    assert_eq!(&response[18..20], &[0, 0], "the meter table is accepted");
     let mut feed = ConstantFeed::new();
     // Warm-up on this thread: the first blocks, fed, before the race starts.
     for block in 0..2 {
@@ -3324,7 +3355,7 @@ fn race_live_edits(run: usize) -> RaceCounts {
             feed,
             counts: RaceCounts::default(),
             revision: 42,
-            request_id: 1,
+            request_id: 2,
         };
         let mut run_edits = || -> Result<(), String> {
             for index in 0..RACE_EDITS {

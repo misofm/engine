@@ -240,9 +240,14 @@ pub(crate) fn protocol_queue_config(
         .ok_or_else(|| failure(ResourceFault::Limit))?,
         reliable_response_slots: one,
         reliable_event_slots: NonZeroUsize::new(RELIABLE_EVENT_SLOTS).expect("two is nonzero"),
-        telemetry_slots: one,
+        telemetry_slots: NonZeroUsize::new(TELEMETRY_SLOTS).expect("two is nonzero"),
     })
 }
+
+/// The lossy lane's slots (#1583 D5): one meter batch whole, the output peak entry's left and
+/// right records, so a batch never reaches the caller split or half dropped. The table serves no
+/// other entry until #1587, which sizes the lane for strip entries.
+const TELEMETRY_SLOTS: usize = 2;
 
 /// The reliable event queue's slots: the transaction's `SESSION_COMMITTED` and its one
 /// `OBSERVATION_ENDED` (#1584 D6a).
@@ -400,6 +405,10 @@ pub(crate) fn capi_resources<A: ControlAdapter>(
         output_meter[0],
         output_meter[1],
         output_meter[2],
+        // #1583: the requested gate word of an adapter whose control plane serves the meter
+        // batches (`output_peak_gate_relay`), one `Arc<AtomicU64>`; none otherwise. The delivery's
+        // output-only tables allocate nothing.
+        checked_layout::<SharedArcAllocation<AtomicU64>>(usize::from(A::METER_DELIVERY))?,
         checked_layout::<RetainedDiagnosticSlotMirror>(2)?,
         // #1584 D6a: the observation-ended cells, one more than the reliable queue's slots (an
         // event popped for egress keeps its cell until its frame is delivered), and the heap the
@@ -1700,19 +1709,17 @@ where
         reports: Mutex::new(reports),
         render_sequence: AtomicU64::new(0),
         render_sample: AtomicU64::new(0),
-        render_peak_bits: AtomicU32::new(0),
-        // No endpoint has configured telemetry yet, so nothing can read a peak.
-        render_peak_observed: AtomicBool::new(false),
         live_block_errors: AtomicU64::new(0),
         source_underrun_blocks: AtomicU64::new(0),
         watermark: publisher.watermark_reader(),
     });
     // #1581 D4: the session's one output meter, made with its first plan and part of no plan. Its
     // windows are as long as the strip meters'.
-    let (output_observer, output_reader, output_gate) = host_core::output_peak_meter(
-        output_meter_window_frames(store.compiled(), preparer.meter_window_blocks())?,
-    )
-    .map_err(|_| failure(ResourceFault::Allocation))?;
+    let window_blocks =
+        output_meter_window_blocks(store.compiled(), preparer.meter_window_blocks());
+    let window_frames = output_meter_window_frames(store.compiled(), window_blocks)?;
+    let (output_observer, output_reader, output_gate) = host_core::output_peak_meter(window_frames)
+        .map_err(|_| failure(ResourceFault::Allocation))?;
     let sample_source: Arc<dyn host_core::PlanSampleSource> = Arc::clone(&shared) as Arc<_>;
     let provider = SessionControlProvider::try_new(
         control_catalog,
@@ -1725,6 +1732,29 @@ where
         control_bytes,
     )
     .map_err(|_| failure(ResourceFault::Allocation))?;
+    // #1583 R2: an adapter whose control plane serves the meter batches owns the delivery here,
+    // over a requested gate the plan's relay applies on the render thread; its provider learns the
+    // window. Any other adapter takes the reader and the live gate (`take_output_meter`).
+    let mut provider = provider;
+    let (output_meter, session_meters, output_gate) = if A::METER_DELIVERY {
+        let (requested, relay) = host_core::meters::output_peak_gate_relay(output_gate);
+        let tables =
+            host_core::MeterTables::new(0, 0).map_err(|_| failure(ResourceFault::Allocation))?;
+        let delivery = host_core::MeterDelivery::new(
+            output_reader,
+            requested,
+            u64::from(window_frames.get()),
+            tables,
+        );
+        provider.set_meter_window_blocks(Some(window_blocks));
+        (
+            None,
+            Some(crate::control::SessionMeters::new(delivery, window_blocks)),
+            Some(relay),
+        )
+    } else {
+        (Some((output_reader, output_gate)), None, None)
+    };
     let controller = ProtocolController::try_with_config_and_retained_capacity(
         store,
         queues,
@@ -1803,7 +1833,8 @@ where
         observation_forwarded: Vec::new(),
         send_moves: None,
         spectrum,
-        output_meter: Some((output_reader, output_gate)),
+        output_meter,
+        meters: session_meters,
     };
     let (offsets, pending, counts, armed, armed_bytes) = crate::control::observation_slots(
         &session.providers.effects,
@@ -1819,23 +1850,29 @@ where
     session.observation_slots_high_water = session.observation_pending.len();
     Ok(CompiledChildren {
         session,
-        plan: PlanState::new(owner, shared, output_observer),
+        plan: PlanState::new(owner, shared, output_observer, output_gate),
     })
 }
 
-/// The output meter's window in frames (#1581 D4): `window_blocks` blocks of the session's quantum,
-/// `0` meaning host-core's default, as the strip meters' window is.
-fn output_meter_window_frames(
+/// The output meter's window in blocks (#1581 D2): `window_blocks`, `0` meaning host-core's
+/// default for the session's rate and quantum, as the strip meters' window is.
+fn output_meter_window_blocks(
     compiled: &CompiledSession,
     window_blocks: u32,
+) -> core::num::NonZeroU32 {
+    core::num::NonZeroU32::new(window_blocks).unwrap_or_else(|| {
+        host_core::default_meter_window_blocks(compiled.sample_rate().0, compiled.quantum().0)
+    })
+}
+
+/// The output meter's window in frames (#1581 D4): `blocks` blocks of the session's quantum.
+fn output_meter_window_frames(
+    compiled: &CompiledSession,
+    blocks: core::num::NonZeroU32,
 ) -> Result<core::num::NonZeroU32, CompileFailure> {
-    let quantum = compiled.quantum().0;
-    let blocks = core::num::NonZeroU32::new(window_blocks).unwrap_or_else(|| {
-        host_core::default_meter_window_blocks(compiled.sample_rate().0, quantum)
-    });
     blocks
         .get()
-        .checked_mul(quantum)
+        .checked_mul(compiled.quantum().0)
         .and_then(core::num::NonZeroU32::new)
         .ok_or_else(|| failure(ResourceFault::Arithmetic))
 }

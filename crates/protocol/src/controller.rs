@@ -1616,6 +1616,9 @@ pub struct ProtocolController<P: ControlProvider> {
     config: ProtocolControllerConfig,
     next_reliable_event_sequence: u64,
     telemetry_configuration: TelemetryConfiguration,
+    /// How many `TELEMETRY_CONFIGURE` commands this endpoint accepted (#1583 D5): a host that
+    /// serves meter batches restarts their sequence when it moves.
+    telemetry_generation: u64,
     diagnostic_event_slots: Box<[RetainedDiagnosticSlot]>,
     /// Prepared storage for the keys of queued `OBSERVATION_ENDED` events (#1584 D6a): one cell
     /// more than the reliable queue has slots, because one popped event stays pending in
@@ -1663,6 +1666,7 @@ impl<P: ControlProvider> ProtocolController<P> {
             config,
             next_reliable_event_sequence: 1,
             telemetry_configuration: retained_telemetry_configuration(capacity)?,
+            telemetry_generation: 0,
             diagnostic_event_slots: diagnostics.into_boxed_slice(),
             observation_ended_cells: observation_ended_cells.into_boxed_slice(),
             pending_reliable_event: None,
@@ -3410,6 +3414,13 @@ impl<P: ControlProvider> ProtocolController<P> {
         &self.telemetry_configuration
     }
 
+    /// How many `TELEMETRY_CONFIGURE` commands the endpoint accepted (#1583 D5). An exact replay
+    /// answers from the cache and does not move it.
+    #[must_use]
+    pub const fn telemetry_configuration_generation(&self) -> u64 {
+        self.telemetry_generation
+    }
+
     /// Stage the meter batch of one closed meter window for configured lossy event egress
     /// (#1583 D2). Every record's handle is at most the meter table's length.
     pub fn stage_meter_batch_event(
@@ -4015,6 +4026,7 @@ impl<P: ControlProvider> ProtocolController<P> {
                     .meters
                     .clone_from(&configured.meters);
                 self.telemetry_configuration.meter_window_blocks = configured.meter_window_blocks;
+                self.telemetry_generation = self.telemetry_generation.saturating_add(1);
                 self.telemetry_configuration.counter_ids.clear();
                 self.telemetry_configuration
                     .counter_ids
