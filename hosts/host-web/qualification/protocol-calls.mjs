@@ -5,10 +5,13 @@
 /** The quanta rendered after the telemetry, the fader edit and the transport start. */
 export const PROTOCOL_BLOCKS = 4;
 
-/** Meter handle 1, `liveValuesSuperseded` and the diagnostics at `"info"`, each every block. */
+/**
+ * No meter (the browser has no meter delivery until #1588, #1583 D3), `liveValuesSuperseded` and
+ * the diagnostics at `"info"`, each every block.
+ */
 export const PROTOCOL_TELEMETRY = Object.freeze({
-  meterHandles: [1],
-  meterPeriodBlocks: 1,
+  meters: [],
+  meterPeriodBlocks: 0,
   counterIds: ["liveValuesSuperseded"],
   counterPeriodBlocks: 1,
   diagnosticsEnabled: true,

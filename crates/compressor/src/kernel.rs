@@ -73,6 +73,11 @@ pub(crate) struct Channel<L: Lane> {
     /// ramps remain the public current/target state; these ramps interpolate the exact coefficient
     /// endpoints without evaluating an exponential in the sample loop.
     pub(crate) rate_ramps: [[LinearRamp; MAX_WIDTH]; 2],
+    /// The detector link glide weights (issue #1370 D2), indexed `w_link` then `w_avg`, per
+    /// lane: at rest each is exactly `effect_contract::link_glide_weights` of the lane's mode,
+    /// and only a ramp in flight is read (the blend, `Glide`). Seeded at rest by the owner
+    /// (`rest_link`); `Channel::new` seats dual mono's.
+    pub(crate) link_ramps: [[LinearRamp; MAX_WIDTH]; 2],
     /// The recursive gain-reduction envelope, in dB.
     pub(crate) gain_reduction_db: L,
 }
@@ -85,6 +90,7 @@ impl<L: Lane> Channel<L> {
             words: [[0.0; MAX_WIDTH]; crate::design::COEF_COUNT],
             ramps: [[LinearRamp::fixed(0.0); MAX_WIDTH]; RAMP_COUNT],
             rate_ramps: [[LinearRamp::fixed(0.0); MAX_WIDTH]; 2],
+            link_ramps: [[LinearRamp::fixed(0.0); MAX_WIDTH]; 2],
             gain_reduction_db: L::zero(),
         };
         channel.seed_from_defaults(sample_rate);
@@ -96,7 +102,37 @@ impl<L: Lane> Channel<L> {
         self.words = source.words;
         self.ramps = source.ramps;
         self.rate_ramps = source.rate_ramps;
+        self.link_ramps = source.link_ramps;
         self.gain_reduction_db = source.gain_reduction_db;
+    }
+
+    /// Seats lane `lane`'s link weights at rest at `mode` (issue #1370 D2): preparation, a full
+    /// reset, and a lane whose mode a lane swap replaced.
+    pub(crate) fn rest_link(&mut self, lane: usize, mode: LinkMode) {
+        let weights = effect_contract::link_glide_weights(mode);
+        for (ramps, weight) in self.link_ramps.iter_mut().zip(weights) {
+            ramps[lane] = LinearRamp::fixed(weight);
+        }
+    }
+
+    /// Points lane `lane`'s link weights at `mode` over `samples` samples, from the words in
+    /// force (issue #1370 D2); `samples == 0` steps them.
+    pub(crate) fn retarget_link(&mut self, lane: usize, mode: LinkMode, samples: u32) {
+        let weights = effect_contract::link_glide_weights(mode);
+        for (ramps, weight) in self.link_ramps.iter_mut().zip(weights) {
+            ramps[lane].set_target(weight, samples);
+        }
+    }
+
+    /// The longest link glide still in flight on any lane, in samples.
+    pub(crate) fn link_remaining(&self) -> u32 {
+        let mut most = 0;
+        for weight in &self.link_ramps {
+            for ramp in weight.iter().take(L::WIDTH) {
+                most = most.max(ramp.remaining);
+            }
+        }
+        most
     }
 
     fn seed_from_defaults(&mut self, sample_rate: u32) {
@@ -127,6 +163,10 @@ impl<L: Lane> Channel<L> {
             }
             design_lane(&values, sample_rate, ALL_PARAMETERS, &mut self.words, lane);
             self.seed_rate_ramps(lane);
+            // A glide in flight arrives at once: its target is the lane's mode (issue #1370).
+            for weight in &mut self.link_ramps {
+                weight[lane].snap();
+            }
         }
     }
 
@@ -188,7 +228,8 @@ impl<L: Lane> Channel<L> {
     ///   knee start is `-80 - 12` dB), `rms_follow(+0, +0, c)` is `c * +0 + +0 = +0` and
     ///   `snap_reduction` keeps it, so `+0.0` is the one fixed point the predicate accepts. A release stalled at
     ///   a non-zero value is refused even if no bit would move.
-    /// * every parameter ramp and both coefficient ramps settled (`remaining == 0`): a settled
+    /// * every parameter ramp, both coefficient ramps and both link weights settled
+    ///   (`remaining == 0`, issue #1370 for the weights): a settled
     ///   ramp is never advanced, and `words` move only when a ramp advances, so the coefficient
     ///   words and all ramp fields stay put.
     ///
@@ -198,7 +239,12 @@ impl<L: Lane> Channel<L> {
     /// answer. The compressor has no clocks.
     pub(crate) fn rest_lanes(&self) -> u32 {
         let mut mask = positive_zero_lanes(self.gain_reduction_db);
-        for parameter in self.ramps.iter().chain(self.rate_ramps.iter()) {
+        for parameter in self
+            .ramps
+            .iter()
+            .chain(self.rate_ramps.iter())
+            .chain(self.link_ramps.iter())
+        {
             for (lane, ramp) in parameter.iter().take(L::WIDTH).enumerate() {
                 if ramp.remaining != 0 {
                     mask &= !(1 << lane);
@@ -547,6 +593,179 @@ fn settled_detect<L: Lane, const DUAL_MONO: bool>(
     }
 }
 
+/// How a body reads one frame's detector words from its source words (issue #1370).
+///
+/// [`Prepared`] is the lanes' prepared law: `settled_detect`, unchanged, so every body that took
+/// it before renders the same instructions on the same words. [`Glide`] is the blend of a link
+/// glide in flight (D3), taken only by a ramping prefix that has a glide to advance.
+trait DetectLaw<L: Lane> {
+    /// Both channels' detector words, from both channels' source words.
+    fn detect(&mut self, left: L, right: L, invariants: &Invariants<L>) -> (L, L);
+    /// The left channel's detector word alone, for a collapsed body, which moves no right state.
+    fn detect_left(&mut self, left: L, right: L, invariants: &Invariants<L>) -> L;
+}
+
+/// The lanes' prepared link law: `settled_detect`, with its DualMono arm (#984) when `DUAL_MONO`.
+struct Prepared<const DUAL_MONO: bool>;
+
+impl<L: Lane, const DUAL_MONO: bool> DetectLaw<L> for Prepared<DUAL_MONO> {
+    #[inline(always)]
+    fn detect(&mut self, left: L, right: L, invariants: &Invariants<L>) -> (L, L) {
+        settled_detect::<L, DUAL_MONO>(left, right, invariants)
+    }
+
+    #[inline(always)]
+    fn detect_left(&mut self, left: L, right: L, invariants: &Invariants<L>) -> L {
+        settled_detect::<L, DUAL_MONO>(left, right, invariants).0
+    }
+}
+
+/// One channel's two link weights (issue #1370 D2) as lane vectors, for one ramping prefix:
+/// `link` is `w_link`, `avg` is `w_avg`.
+#[derive(Clone, Copy)]
+struct LinkWeights<L: Lane> {
+    link: RampVec<L>,
+    avg: RampVec<L>,
+}
+
+impl<L: Lane> LinkWeights<L> {
+    #[inline(always)]
+    fn gather(channel: &Channel<L>) -> Self {
+        Self {
+            link: RampVec::gather(&channel.link_ramps[0]),
+            avg: RampVec::gather(&channel.link_ramps[1]),
+        }
+    }
+
+    #[inline(always)]
+    fn scatter(self, channel: &mut Channel<L>) {
+        self.link.scatter(&mut channel.link_ramps[0]);
+        self.avg.scatter(&mut channel.link_ramps[1]);
+    }
+
+    /// Advances both weights one frame (`LinearRamp::next_value`, lane-wide) and returns the
+    /// lanes still in flight after it. A lane whose glide arrives on this frame holds its target
+    /// exactly and is not in the mask, so from that frame it takes the prepared law.
+    #[inline(always)]
+    fn advance(&mut self) -> L::Mask {
+        let zero = L::zero();
+        let all = zero.eq(zero);
+        self.link.advance_where(all);
+        self.avg.advance_where(all);
+        L::mask_or(self.link.remaining.gt(zero), self.avg.remaining.gt(zero))
+    }
+
+    /// The D3 blend of one channel: `combined = max + w_avg * (avg - max)`,
+    /// `d = own + w_link * (combined - own)`, each a separate `mul` and `add` (base Wasm SIMD has
+    /// no fused multiply-add, and the scalar and vector lanes must agree).
+    #[inline(always)]
+    fn blend(&self, own: L, maximum: L, average: L) -> L {
+        let combined = maximum.add(self.avg.current.mul(average.sub(maximum)));
+        own.add(self.link.current.mul(combined.sub(own)))
+    }
+}
+
+/// A link glide in flight (issue #1370 D3): each frame advances the weights, and a lane still in
+/// flight takes the blend of its own, maximum and average words, computed in `link_frame`'s
+/// order, while every other lane takes `link_frame`'s `select` form from the prepared masks, so a
+/// resting bank-mate's words are bit for bit the prepared law's. The masks already hold every
+/// lane's target mode (`Instance::retarget_link`), so an arriving lane lands on its target law.
+struct Glide<L: Lane> {
+    left: LinkWeights<L>,
+    right: LinkWeights<L>,
+}
+
+impl<L: Lane> Glide<L> {
+    #[inline(always)]
+    fn gather(left: &Channel<L>, right: &Channel<L>) -> Self {
+        Self {
+            left: LinkWeights::gather(left),
+            right: LinkWeights::gather(right),
+        }
+    }
+
+    /// The collapsed form: the left channel's weights alone are read and written back.
+    #[inline(always)]
+    fn gather_left(left: &Channel<L>) -> Self {
+        let weights = LinkWeights::gather(left);
+        Self {
+            left: weights,
+            right: weights,
+        }
+    }
+
+    #[inline(always)]
+    fn scatter(self, left: &mut Channel<L>, right: &mut Channel<L>) {
+        self.left.scatter(left);
+        self.right.scatter(right);
+    }
+
+    #[inline(always)]
+    fn scatter_left(self, left: &mut Channel<L>) {
+        self.left.scatter(left);
+    }
+}
+
+/// The three magnitudes of one frame in `link_frame`'s operation order: own (left, right),
+/// maximum and average.
+#[inline(always)]
+fn magnitudes<L: Lane>(left: L, right: L, invariants: &Invariants<L>) -> (L, L, L, L) {
+    let own_left = left.abs();
+    let own_right = right.abs();
+    let maximum = own_left.max(own_right);
+    let average = own_left
+        .mul(invariants.half)
+        .add(own_right.mul(invariants.half));
+    (own_left, own_right, maximum, average)
+}
+
+impl<L: Lane> DetectLaw<L> for Glide<L> {
+    #[inline(always)]
+    fn detect(&mut self, left: L, right: L, invariants: &Invariants<L>) -> (L, L) {
+        let moving_left = self.left.advance();
+        let moving_right = self.right.advance();
+        let (law_left, law_right) = link_frame(Detector::Main, 0, left, right, invariants);
+        let (own_left, own_right, maximum, average) = magnitudes(left, right, invariants);
+        (
+            L::select(
+                moving_left,
+                self.left.blend(own_left, maximum, average),
+                law_left,
+            ),
+            L::select(
+                moving_right,
+                self.right.blend(own_right, maximum, average),
+                law_right,
+            ),
+        )
+    }
+
+    #[inline(always)]
+    fn detect_left(&mut self, left: L, right: L, invariants: &Invariants<L>) -> L {
+        let moving = self.left.advance();
+        let (law, _) = link_frame(Detector::Main, 0, left, right, invariants);
+        let (own, _, maximum, average) = magnitudes(left, right, invariants);
+        L::select(moving, self.left.blend(own, maximum, average), law)
+    }
+}
+
+/// The source words of frame `slot`: the main words, a connected sidechain's, or `+0.0` for an
+/// absent one; `link_frame`'s first step.
+#[inline(always)]
+fn source_words<L: Lane>(
+    detector: Detector<'_>,
+    slot: usize,
+    main_left: L,
+    main_right: L,
+    invariants: &Invariants<L>,
+) -> (L, L) {
+    match detector {
+        Detector::Main => (main_left, main_right),
+        Detector::Silent => (invariants.zero, invariants.zero),
+        Detector::Sidechain(left, right) => (L::load(&left[slot..]), L::load(&right[slot..])),
+    }
+}
+
 #[inline(always)]
 fn one_frame<L: Lane>(
     input: L,
@@ -582,11 +801,17 @@ pub(crate) fn process_block<L: Lane>(
     debug_assert_eq!(left.len(), frames * L::WIDTH);
     debug_assert_eq!(right.len(), frames * L::WIDTH);
     let (channel_left, channel_right) = channels;
+    // A link glide (issue #1370) rides the ramping prefix: the prefix covers it, and only a
+    // prefix with one in flight runs the blend.
+    let gliding = channel_left
+        .link_remaining()
+        .max(channel_right.link_remaining()) as usize;
     let remaining = channel_left
         .max_remaining()
         .max(channel_right.max_remaining()) as usize;
-    let ramping = remaining.min(frames);
+    let ramping = remaining.max(gliding).min(frames);
     if ramping > 0 {
+        let mut glide = (gliding > 0).then(|| Glide::gather(channel_left, channel_right));
         if let Detector::Main = detector {
             if L::WIDTH == 1 {
                 ramping_main_scalar::<L>(
@@ -595,6 +820,7 @@ pub(crate) fn process_block<L: Lane>(
                     ramping,
                     links,
                     bypass,
+                    glide.as_mut(),
                     channel_left,
                     channel_right,
                 );
@@ -605,12 +831,13 @@ pub(crate) fn process_block<L: Lane>(
                     ramping,
                     links,
                     bypass,
+                    glide.as_mut(),
                     channel_left,
                     channel_right,
                 );
             }
-        } else {
-            frames_loop::<L, true>(
+        } else if let Some(glide) = glide.as_mut() {
+            frames_loop::<L, Glide<L>, true>(
                 left,
                 right,
                 detector,
@@ -619,9 +846,27 @@ pub(crate) fn process_block<L: Lane>(
                 links,
                 bypass,
                 sample_rate,
+                glide,
                 channel_left,
                 channel_right,
             );
+        } else {
+            frames_loop::<L, Prepared<false>, true>(
+                left,
+                right,
+                detector,
+                0,
+                ramping,
+                links,
+                bypass,
+                sample_rate,
+                &mut Prepared,
+                channel_left,
+                channel_right,
+            );
+        }
+        if let Some(glide) = glide {
+            glide.scatter(channel_left, channel_right);
         }
     }
     if ramping < frames {
@@ -948,7 +1193,7 @@ fn settled_frames<L: Lane, const DUAL_MONO: bool, const WET: bool>(
 /// included, rather than rewritten around a constant.
 #[allow(clippy::too_many_arguments)]
 #[inline(always)]
-fn frames_loop<L: Lane, const RAMPING: bool>(
+fn frames_loop<L: Lane, D: DetectLaw<L>, const RAMPING: bool>(
     left: &mut [f32],
     right: &mut [f32],
     detector: Detector<'_>,
@@ -957,6 +1202,7 @@ fn frames_loop<L: Lane, const RAMPING: bool>(
     links: &Links<L>,
     bypass: bool,
     sample_rate: u32,
+    law: &mut D,
     channel_left: &mut Channel<L>,
     channel_right: &mut Channel<L>,
 ) {
@@ -974,8 +1220,9 @@ fn frames_loop<L: Lane, const RAMPING: bool>(
         let slot = frame * width;
         let main_left = L::load(&left[slot..]);
         let main_right = L::load(&right[slot..]);
-        let (detected_left, detected_right) =
-            link_frame(detector, slot, main_left, main_right, &invariants);
+        let (source_left, source_right) =
+            source_words(detector, slot, main_left, main_right, &invariants);
+        let (detected_left, detected_right) = law.detect(source_left, source_right, &invariants);
         one_frame(
             main_left,
             detected_left,
@@ -1257,6 +1504,7 @@ fn ramping_main<L: Lane>(
     end: usize,
     links: &Links<L>,
     bypass: bool,
+    glide: Option<&mut Glide<L>>,
     channel_left: &mut Channel<L>,
     channel_right: &mut Channel<L>,
 ) {
@@ -1280,18 +1528,31 @@ fn ramping_main<L: Lane>(
         }
     }
     let ramps = (&mut ramps_left, &mut ramps_right);
-    match (dual_mono, wet) {
-        (true, true) => {
-            ramping_frames::<L, true, true>(left, right, ramps, &mut gains, &invariants);
+    let gains_mut = &mut gains;
+    match (glide, dual_mono, wet) {
+        // A glide in flight (issue #1370) takes the blend; its masks are never all-DualMono's
+        // arm, since a gliding lane's words are not `abs` alone.
+        (Some(glide), _, true) => {
+            ramping_frames::<L, _, true>(left, right, ramps, gains_mut, glide, &invariants);
         }
-        (true, false) => {
-            ramping_frames::<L, true, false>(left, right, ramps, &mut gains, &invariants);
+        (Some(glide), _, false) => {
+            ramping_frames::<L, _, false>(left, right, ramps, gains_mut, glide, &invariants);
         }
-        (false, true) => {
-            ramping_frames::<L, false, true>(left, right, ramps, &mut gains, &invariants);
+        (None, true, true) => {
+            let law = &mut Prepared::<true>;
+            ramping_frames::<L, _, true>(left, right, ramps, gains_mut, law, &invariants);
         }
-        (false, false) => {
-            ramping_frames::<L, false, false>(left, right, ramps, &mut gains, &invariants);
+        (None, true, false) => {
+            let law = &mut Prepared::<true>;
+            ramping_frames::<L, _, false>(left, right, ramps, gains_mut, law, &invariants);
+        }
+        (None, false, true) => {
+            let law = &mut Prepared::<false>;
+            ramping_frames::<L, _, true>(left, right, ramps, gains_mut, law, &invariants);
+        }
+        (None, false, false) => {
+            let law = &mut Prepared::<false>;
+            ramping_frames::<L, _, false>(left, right, ramps, gains_mut, law, &invariants);
         }
     }
     channel_left.gain_reduction_db = gains.0;
@@ -1316,20 +1577,31 @@ fn ramping_main_scalar<L: Lane>(
     end: usize,
     links: &Links<L>,
     bypass: bool,
+    glide: Option<&mut Glide<L>>,
     channel_left: &mut Channel<L>,
     channel_right: &mut Channel<L>,
 ) {
-    ramping_main::<L>(left, right, end, links, bypass, channel_left, channel_right);
+    ramping_main::<L>(
+        left,
+        right,
+        end,
+        links,
+        bypass,
+        glide,
+        channel_left,
+        channel_right,
+    );
 }
 
 /// The ramping prefix's two passes over chunks of [`SETTLED_CHUNK`] frames, both channels. The
 /// chunking, the scratch and the in-place argument are `settled_frames`'.
 #[inline(always)]
-fn ramping_frames<L: Lane, const DUAL_MONO: bool, const WET: bool>(
+fn ramping_frames<L: Lane, D: DetectLaw<L>, const WET: bool>(
     left: &mut [f32],
     right: &mut [f32],
     ramps: (&mut ChannelRamps<L>, &mut ChannelRamps<L>),
     gains: &mut (L, L),
+    law: &mut D,
     invariants: &Invariants<L>,
 ) {
     let width = L::WIDTH;
@@ -1348,11 +1620,8 @@ fn ramping_frames<L: Lane, const DUAL_MONO: bool, const WET: bool>(
         {
             ramps_left.advance_curve();
             ramps_right.advance_curve();
-            let (detected_left, detected_right) = settled_detect::<L, DUAL_MONO>(
-                L::load(frame_left),
-                L::load(frame_right),
-                invariants,
-            );
+            let (detected_left, detected_right) =
+                law.detect(L::load(frame_left), L::load(frame_right), invariants);
             *target = (
                 curve_target(detected_left, &ramps_left.curve(), invariants),
                 curve_target(detected_right, &ramps_right.curve(), invariants),
@@ -1390,6 +1659,7 @@ fn ramping_main_mono<L: Lane>(
     end: usize,
     links: &Links<L>,
     bypass: bool,
+    glide: Option<&mut Glide<L>>,
     channel_left: &mut Channel<L>,
 ) {
     let width = L::WIDTH;
@@ -1406,18 +1676,29 @@ fn ramping_main_mono<L: Lane>(
             witness(&RAMPING_WET_BLOCKS);
         }
     }
-    match (dual_mono, wet) {
-        (true, true) => {
-            ramping_frames_mono::<L, true, true>(left, &mut ramps, &mut gain, &invariants);
+    let (ramps, gain_mut) = (&mut ramps, &mut gain);
+    match (glide, dual_mono, wet) {
+        (Some(glide), _, true) => {
+            ramping_frames_mono::<L, _, true>(left, ramps, gain_mut, glide, &invariants);
         }
-        (true, false) => {
-            ramping_frames_mono::<L, true, false>(left, &mut ramps, &mut gain, &invariants);
+        (Some(glide), _, false) => {
+            ramping_frames_mono::<L, _, false>(left, ramps, gain_mut, glide, &invariants);
         }
-        (false, true) => {
-            ramping_frames_mono::<L, false, true>(left, &mut ramps, &mut gain, &invariants);
+        (None, true, true) => {
+            let law = &mut Prepared::<true>;
+            ramping_frames_mono::<L, _, true>(left, ramps, gain_mut, law, &invariants);
         }
-        (false, false) => {
-            ramping_frames_mono::<L, false, false>(left, &mut ramps, &mut gain, &invariants);
+        (None, true, false) => {
+            let law = &mut Prepared::<true>;
+            ramping_frames_mono::<L, _, false>(left, ramps, gain_mut, law, &invariants);
+        }
+        (None, false, true) => {
+            let law = &mut Prepared::<false>;
+            ramping_frames_mono::<L, _, true>(left, ramps, gain_mut, law, &invariants);
+        }
+        (None, false, false) => {
+            let law = &mut Prepared::<false>;
+            ramping_frames_mono::<L, _, false>(left, ramps, gain_mut, law, &invariants);
         }
     }
     channel_left.gain_reduction_db = gain;
@@ -1426,10 +1707,11 @@ fn ramping_main_mono<L: Lane>(
 
 /// `ramping_frames` on the one plane.
 #[inline(always)]
-fn ramping_frames_mono<L: Lane, const DUAL_MONO: bool, const WET: bool>(
+fn ramping_frames_mono<L: Lane, D: DetectLaw<L>, const WET: bool>(
     left: &mut [f32],
     ramps: &mut ChannelRamps<L>,
     gain: &mut L,
+    law: &mut D,
     invariants: &Invariants<L>,
 ) {
     let width = L::WIDTH;
@@ -1440,7 +1722,7 @@ fn ramping_frames_mono<L: Lane, const DUAL_MONO: bool, const WET: bool>(
         for (frame, target) in chunk.chunks_exact(width).zip(targets.iter_mut()) {
             ramps.advance_curve();
             let main = L::load(frame);
-            let (detected, _) = settled_detect::<L, DUAL_MONO>(main, main, invariants);
+            let detected = law.detect_left(main, main, invariants);
             *target = curve_target(detected, &ramps.curve(), invariants);
         }
         // Pass 2: the output ramps, then the recurrence and the output.
@@ -1473,13 +1755,16 @@ pub(crate) fn process_block_mono<L: Lane>(
     channel_left: &mut Channel<L>,
 ) {
     debug_assert_eq!(left.len(), frames * L::WIDTH);
+    // A link glide rides the prefix, as in `process_block` (issue #1370).
+    let gliding = channel_left.link_remaining() as usize;
     let remaining = channel_left.max_remaining() as usize;
-    let ramping = remaining.min(frames);
+    let ramping = remaining.max(gliding).min(frames);
     if ramping > 0 {
+        let mut glide = (gliding > 0).then(|| Glide::gather_left(channel_left));
         if let Detector::Main = detector {
-            ramping_main_mono::<L>(left, ramping, links, bypass, channel_left);
-        } else {
-            frames_loop_mono::<L, true>(
+            ramping_main_mono::<L>(left, ramping, links, bypass, glide.as_mut(), channel_left);
+        } else if let Some(glide) = glide.as_mut() {
+            frames_loop_mono::<L, Glide<L>, true>(
                 left,
                 detector,
                 0,
@@ -1487,8 +1772,24 @@ pub(crate) fn process_block_mono<L: Lane>(
                 links,
                 bypass,
                 sample_rate,
+                glide,
                 channel_left,
             );
+        } else {
+            frames_loop_mono::<L, Prepared<false>, true>(
+                left,
+                detector,
+                0,
+                ramping,
+                links,
+                bypass,
+                sample_rate,
+                &mut Prepared,
+                channel_left,
+            );
+        }
+        if let Some(glide) = glide {
+            glide.scatter_left(channel_left);
         }
     }
     if ramping < frames {
@@ -1496,7 +1797,7 @@ pub(crate) fn process_block_mono<L: Lane>(
             Detector::Main => {
                 settled_main_mono::<L>(left, ramping, frames, links, bypass, channel_left);
             }
-            Detector::Silent | Detector::Sidechain(..) => frames_loop_mono::<L, false>(
+            Detector::Silent | Detector::Sidechain(..) => frames_loop_mono::<L, _, false>(
                 left,
                 detector,
                 ramping,
@@ -1504,6 +1805,7 @@ pub(crate) fn process_block_mono<L: Lane>(
                 links,
                 bypass,
                 sample_rate,
+                &mut Prepared::<false>,
                 channel_left,
             ),
         }
@@ -1589,7 +1891,7 @@ fn settled_frames_mono<L: Lane, const DUAL_MONO: bool, const WET: bool>(
 
 #[allow(clippy::too_many_arguments)]
 #[inline(always)]
-fn frames_loop_mono<L: Lane, const RAMPING: bool>(
+fn frames_loop_mono<L: Lane, D: DetectLaw<L>, const RAMPING: bool>(
     left: &mut [f32],
     detector: Detector<'_>,
     start: usize,
@@ -1597,6 +1899,7 @@ fn frames_loop_mono<L: Lane, const RAMPING: bool>(
     links: &Links<L>,
     bypass: bool,
     sample_rate: u32,
+    law: &mut D,
     channel_left: &mut Channel<L>,
 ) {
     let width = L::WIDTH;
@@ -1609,7 +1912,8 @@ fn frames_loop_mono<L: Lane, const RAMPING: bool>(
         }
         let slot = frame * width;
         let main = L::load(&left[slot..]);
-        let (detected, _) = link_frame(detector, slot, main, main, &invariants);
+        let (source_left, source_right) = source_words(detector, slot, main, main, &invariants);
+        let detected = law.detect_left(source_left, source_right, &invariants);
         one_frame(
             main,
             detected,
@@ -1771,7 +2075,7 @@ mod coefficient_ramp_tests {
         validate_channel(&bytes).expect("valid source payload");
 
         let mut restored = Channel::<f32>::new(&defaults(), SAMPLE_RATE);
-        commit_channel(&bytes, &mut restored, 0, SAMPLE_RATE);
+        commit_channel(&bytes, &mut restored, 0, SAMPLE_RATE, true);
         let remaining = source.ramps[4][0].remaining;
         assert!(remaining > 0, "the fixture restores mid-ramp");
         for update in 0..=remaining {
@@ -2385,7 +2689,7 @@ mod settled_body_tests {
         bytes[word + 8..word + 12].copy_from_slice(&step.to_le_bytes());
         bytes[word + 12..word + 16].copy_from_slice(&remaining.to_le_bytes());
         validate_channel(&bytes).expect("a legal payload");
-        commit_channel(&bytes, channel, lane, sample_rate);
+        commit_channel(&bytes, channel, lane, sample_rate, true);
     }
 
     /// Two identically prepared channel pairs: the oracle's and the candidate's.
@@ -3173,4 +3477,111 @@ mod settled_body_tests {
         [-15.0, 6.0, 4.5, 11.0, 130.0, 3.0, 1.0],
         [-16.5, 6.75, 6.0, 12.5, 145.0, 0.0, 1.0],
     ];
+}
+
+#[cfg(test)]
+mod glide_law_tests {
+    //! Issue #1370 gate 1, the law's exact half: from the frame a glide arrives on, the lane's
+    //! detector words are its target mode's `link_frame` words bit for bit, and a lane that rests
+    //! beside a glide takes its own mode's words on every frame, non-finite partner words
+    //! included. The blend's values against the
+    //! `f64` reference are `glide_tests::a_glide_tracks_the_f64_blend_into_the_target_law`.
+
+    use super::{Channel, DetectLaw, Detector, Glide, Invariants, Links, link_frame};
+    use crate::design::{MAX_WIDTH, PARAMETER_COUNT, PARAMETER_SPECS};
+    use effect_contract::LinkMode;
+    use lane::Lane;
+
+    const MODES: [LinkMode; 3] = [LinkMode::DualMono, LinkMode::Maximum, LinkMode::Average];
+    /// The glide, and three blocks that it crosses: it arrives inside the second.
+    const SAMPLES: u32 = 64;
+    const BLOCKS: [usize; 3] = [23, 45, 30];
+
+    fn check<L: Lane>() {
+        let defaults: [[f32; PARAMETER_COUNT]; MAX_WIDTH] =
+            [core::array::from_fn(|index| PARAMETER_SPECS[index].default); MAX_WIDTH];
+        for from in MODES {
+            for to in MODES.into_iter().filter(|mode| *mode != from) {
+                let mut modes: [LinkMode; MAX_WIDTH] =
+                    core::array::from_fn(|lane| MODES[lane % MODES.len()]);
+                modes[0] = from;
+                let mut left = Channel::<L>::new(&defaults, 48_000);
+                let mut right = Channel::<L>::new(&defaults, 48_000);
+                for (lane, mode) in modes.iter().enumerate() {
+                    left.rest_link(lane, *mode);
+                    right.rest_link(lane, *mode);
+                }
+                // `Instance::retarget_link`'s order: the masks take the target at once.
+                modes[0] = to;
+                left.retarget_link(0, to, SAMPLES);
+                right.retarget_link(0, to, SAMPLES);
+                let invariants = Invariants::new(&Links::<L>::per_lane(&modes), false);
+                let mut frame = 0_u32;
+                for block in BLOCKS {
+                    let mut glide = Glide::gather(&left, &right);
+                    for _ in 0..block {
+                        frame += 1;
+                        // Channels 20 dB apart, signs and phases varied per lane.
+                        let words = |scale: f32, salt: u32| -> [f32; MAX_WIDTH] {
+                            core::array::from_fn(|lane| {
+                                let hash = (frame.wrapping_mul(2_654_435_761)
+                                    ^ (lane as u32 + salt).wrapping_mul(40_503))
+                                    % 2_001;
+                                scale * (hash as f32 / 1_000.0 - 1.0)
+                            })
+                        };
+                        let mut right = words(0.09, 7);
+                        // Hostile partner words on every third frame, the arrival frame
+                        // included: a blend at rest weights equals the `select` form on finite
+                        // words, but `0 * inf` and `inf - inf` are NaN, so only the `select`
+                        // keeps a dual-mono lane clear of its partner's non-finite word.
+                        if frame % 3 == SAMPLES % 3 {
+                            for (lane, word) in right.iter_mut().enumerate() {
+                                *word = if (frame as usize + lane).is_multiple_of(2) {
+                                    f32::INFINITY
+                                } else {
+                                    f32::NAN
+                                };
+                            }
+                        }
+                        let (l, r) = (L::load(&words(0.9, 1)), L::load(&right));
+                        let (law_left, law_right) =
+                            link_frame(Detector::Main, 0, l, r, &invariants);
+                        let (left_words, right_words) = glide.detect(l, r, &invariants);
+                        let bits = |value: L| {
+                            let mut out = [0_u32; MAX_WIDTH];
+                            value.store_bits(&mut out[..L::WIDTH]);
+                            out
+                        };
+                        let (got, law) = (
+                            [bits(left_words), bits(right_words)],
+                            [bits(law_left), bits(law_right)],
+                        );
+                        for lane in 0..L::WIDTH {
+                            // Lane 0 from its arrival frame on; every other lane always.
+                            if lane == 0 && frame < SAMPLES {
+                                continue;
+                            }
+                            for channel in 0..2 {
+                                assert_eq!(
+                                    got[channel][lane],
+                                    law[channel][lane],
+                                    "W{} {from:?} -> {to:?} frame {frame} lane {lane} channel \
+                                     {channel}: not the prepared law's word",
+                                    L::WIDTH
+                                );
+                            }
+                        }
+                    }
+                    glide.scatter(&mut left, &mut right);
+                }
+                assert_eq!(left.link_remaining() + right.link_remaining(), 0);
+            }
+        }
+    }
+
+    #[test]
+    fn a_glide_lands_on_its_target_law_and_a_resting_lane_never_leaves_its_own() {
+        lane::each_lane!(|L| check::<L>());
+    }
 }

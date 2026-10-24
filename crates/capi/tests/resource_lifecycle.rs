@@ -659,7 +659,7 @@ impl HostHalf {
         host_core::SessionControlProvider::resource_report(
             &self.prepared.control_catalog,
             protocol::ControllerRetainedCapacity {
-                meter_handles: 0,
+                meters: 0,
                 counter_ids: 0,
             },
             0,
@@ -708,7 +708,10 @@ impl HostHalf {
             + self.prepared.report.route_control_resources.total_bytes
             + self.prepared.report.inventory_retained_bytes
             // #1696 D3: the epoch's monitor overlay row, at its model's bounds.
-            + self.monitor_and_ramp_rows().0;
+            + self.monitor_and_ramp_rows().0
+            // #1325 D6: the duck overlay a kept base of the epoch holds, at its model's bounds.
+            + control_plane::duck_overlay_bytes(self.store.compiled().normalized_model())
+                .expect("the duck overlay row");
         // The token also holds the commit's one `OBSERVATION_ENDED` event (#1584 D6a), which the
         // control plane bounds by the frame it must fit.
         let (_, ended_event) =
@@ -785,8 +788,9 @@ struct CompileObservation {
     /// a tap, so they are on the observed side as the send producers' upper bound is.
     observation_reserve: u64,
     /// The monitor overlay's and the edit-ramp table's rows (#1696), from
-    /// `control_plane::monitor_and_ramp_bytes` over the compiled model: bounds, not allocations,
-    /// since a boot solos nothing and keeps no ramp.
+    /// `control_plane::monitor_and_ramp_bytes` over the compiled model, and the duck overlay's
+    /// (#1325, `control_plane::duck_overlay_bytes`): bounds, not allocations, since a boot solos
+    /// nothing, keeps no ramp and ducks nothing.
     monitor_and_ramps: u64,
 }
 
@@ -841,7 +845,11 @@ fn observe_compile(document: &str, compile_limits: &CompileLimits) -> CompileObs
     let (overlay_row, ramp_row) =
         control_plane::monitor_and_ramp_bytes(store.compiled().normalized_model())
             .expect("the monitor and ramp rows");
-    let monitor_and_ramps = overlay_row + ramp_row;
+    // #1325 D6: and the duck overlay a kept base holds, a bound like the overlay's.
+    let monitor_and_ramps = overlay_row
+        + ramp_row
+        + control_plane::duck_overlay_bytes(store.compiled().normalized_model())
+            .expect("the duck overlay row");
     let host_core::PreparedHost {
         plan,
         sources,
@@ -1764,8 +1772,9 @@ fn render_diagnostic_egress_reuses_eager_capi_storage_without_allocation() {
         required_bytes: 0,
     };
     let configuration = protocol::TelemetryConfiguration {
-        meter_handles: Vec::new(),
+        meters: Vec::new(),
         meter_period_blocks: 0,
+        meter_window_blocks: None,
         counter_ids: Vec::new(),
         counter_period_blocks: 0,
         diagnostics_enabled: true,
@@ -3265,6 +3274,38 @@ fn race_live_edits(run: usize) -> RaceCounts {
         // SAFETY: No other thread uses either handle yet.
         unsafe { fed_render_c(session, plan, &mut feed, block) };
     }
+    // #1583 gate 7: the output's meter table, one batch per window, configured after the warm-up
+    // so the race's first block applies the requested gate, every block folds the output meter,
+    // and the control thread stages the batches.
+    let window = 12_u32;
+    let meters = protocol::TelemetryConfiguration {
+        meters: vec![protocol::MeterEntry {
+            target: protocol::MeterTarget::Output,
+            metric: protocol::MeterMetric::Peak,
+        }],
+        meter_period_blocks: window,
+        meter_window_blocks: None,
+        counter_ids: Vec::new(),
+        counter_period_blocks: 0,
+        diagnostics_enabled: false,
+        minimum_diagnostic_severity: protocol::DiagnosticSeverity::Info,
+    };
+    let mut configure = vec![0_u8; 4_096];
+    let configure_len = ProtocolCodec::default()
+        .encode_command_frame_into(
+            &TypedCommandFrame {
+                request_id: RequestId::new(1).expect("request ID"),
+                expected_revision: ExpectedRevision::Exact(SessionRevision(42)),
+                payload: CommandPayload::TelemetryConfigure(&meters),
+            },
+            &mut configure,
+        )
+        .expect("meter table");
+    let mut response = [0_u8; 4_096];
+    // SAFETY: The session and the caller-owned buffers are live; no other thread uses it yet.
+    let configured = unsafe { submit(session, &configure[..configure_len], &mut response) };
+    assert_eq!(configured, RESULT_OK);
+    assert_eq!(&response[18..20], &[0, 0], "the meter table is accepted");
     let first_race_block = 2_u64;
     let plan_address = plan as usize;
     let stop = AtomicBool::new(false);
@@ -3323,7 +3364,7 @@ fn race_live_edits(run: usize) -> RaceCounts {
             feed,
             counts: RaceCounts::default(),
             revision: 42,
-            request_id: 1,
+            request_id: 2,
         };
         let mut run_edits = || -> Result<(), String> {
             for index in 0..RACE_EDITS {

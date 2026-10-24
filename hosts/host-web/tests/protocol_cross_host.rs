@@ -723,18 +723,56 @@ fn the_browser_and_the_c_abi_give_the_same_bytes_for_one_script() {
     );
     legs.drain("after 4");
 
-    // 5. TELEMETRY_CONFIGURE: meter handle 1 and LIVE_VALUES_SUPERSEDED at period 1, diagnostics
-    // on at Info.
-    legs.command(
-        "5 telemetry",
+    // 5. TELEMETRY_CONFIGURE: no meter, LIVE_VALUES_SUPERSEDED at period 1, diagnostics on at
+    // Info. #1583 D4: the C ABI's echo carries its meter window (field 8) and the browser's none,
+    // until #1588 gives the browser a meter delivery; every other field and the header agree.
+    let request = legs.next();
+    let configure = frame(
+        request,
+        ExpectedRevision::Exact(SessionRevision(legs.revision)),
         CommandPayload::TelemetryConfigure(&TelemetryConfiguration {
-            meter_handles: vec![1],
-            meter_period_blocks: 1,
+            // #1583: an empty meter table; #1588 puts a meter entry back.
+            meters: Vec::new(),
+            meter_period_blocks: 0,
+            meter_window_blocks: None,
             counter_ids: vec![CounterId::LiveValuesSuperseded],
             counter_period_blocks: 1,
             diagnostics_enabled: true,
             minimum_diagnostic_severity: DiagnosticSeverity::Info,
         }),
+    );
+    let (browser_result, browser_echo) = legs.browser.send(&configure);
+    let (c_result, c_echo) = legs.c.send(&configure);
+    assert_eq!(browser_result, c_result, "5 telemetry: the result codes");
+    let echo = |reply: &[u8]| {
+        let mut fields = [0_u16; 64];
+        match ProtocolCodec::default()
+            .decode_typed_response(reply, &mut protocol::DecodeScratch::new(&mut fields))
+            .expect("5 telemetry: a reply")
+        {
+            protocol::DecodedTypedResponseFrame::Success {
+                header,
+                payload: protocol::DecodedSuccessResponsePayload::TelemetryConfiguration(value),
+            } => ((header.request_id, header.revision, header.status), value),
+            _ => panic!("5 telemetry: a telemetry echo"),
+        }
+    };
+    let (browser_header, browser_value) = echo(&browser_echo);
+    let (c_header, c_value) = echo(&c_echo);
+    assert_eq!(browser_header, c_header, "5 telemetry: the reply headers");
+    assert_eq!(browser_value.meter_window_blocks, None);
+    assert_eq!(
+        c_value.meter_window_blocks,
+        core::num::NonZeroU32::new(12),
+        "the C ABI's window at 48 kHz and 128 frames"
+    );
+    assert_eq!(
+        TelemetryConfiguration {
+            meter_window_blocks: None,
+            ..c_value
+        },
+        browser_value,
+        "5 telemetry: every other field"
     );
     legs.drain("after 5");
 
@@ -833,8 +871,9 @@ fn the_browser_and_the_c_abi_give_the_same_bytes_for_one_script() {
 
     legs.drain("at the end");
 
-    // The browser leg published every kind of protocol event, and the C ABI leg's equal sequence
-    // says the same.
+    // The browser leg published every kind of protocol event it serves, and the C ABI leg's equal
+    // sequence says the same. `METER_BATCH` is not one until #1588 gives the browser a meter
+    // delivery (#1583, step 5).
     let kinds: Vec<u16> = legs.events[0]
         .iter()
         .map(|(_, event)| event_message(event))
@@ -842,12 +881,15 @@ fn the_browser_and_the_c_abi_give_the_same_bytes_for_one_script() {
     for (name, message) in [
         ("SESSION_COMMITTED", MESSAGE_SESSION_COMMITTED),
         ("TRANSPORT_STATE", MESSAGE_TRANSPORT_STATE),
-        ("METER_BATCH", MESSAGE_METER_BATCH),
         ("COUNTER_SNAPSHOT", MESSAGE_COUNTER_SNAPSHOT),
         ("DIAGNOSTIC", MESSAGE_DIAGNOSTIC),
     ] {
         assert!(kinds.contains(&message), "no {name} event in {kinds:04x?}");
     }
+    assert!(
+        !kinds.contains(&MESSAGE_METER_BATCH),
+        "a METER_BATCH with no meter table in {kinds:04x?}"
+    );
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -931,8 +973,11 @@ fn telemetry_frame(request: u64, revision: u64) -> Vec<u8> {
         request,
         ExpectedRevision::Exact(SessionRevision(revision)),
         CommandPayload::TelemetryConfigure(&TelemetryConfiguration {
-            meter_handles: vec![1],
-            meter_period_blocks: 1,
+            // #1583: an empty meter table; the browser has no meter delivery until #1588, which
+            // puts a meter entry back.
+            meters: Vec::new(),
+            meter_period_blocks: 0,
+            meter_window_blocks: None,
             counter_ids: vec![CounterId::LiveValuesSuperseded],
             counter_period_blocks: 1,
             diagnostics_enabled: true,

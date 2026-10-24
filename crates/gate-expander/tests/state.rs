@@ -200,7 +200,7 @@ fn old_lengths_and_one_byte_short_payloads_reject_scalar_and_bank() {
                     .is_err(),
                 "old raw bank payload at {rate} Hz"
             );
-            assert_eq!(sizes.left_bytes, 120);
+            assert_eq!(sizes.left_bytes, 152);
         }
         let mut short_left = vec![0; sizes.left_bytes as usize - 1];
         let mut short_right = vec![0; sizes.right_bytes as usize];

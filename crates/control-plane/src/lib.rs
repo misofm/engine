@@ -31,7 +31,7 @@
 pub(crate) use core::{alloc::Layout, mem::size_of, num::NonZeroUsize};
 pub(crate) use std::sync::{
     Arc, Mutex,
-    atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering},
+    atomic::{AtomicBool, AtomicU64, Ordering},
 };
 
 pub(crate) use effect_contract::TailSamples;
@@ -86,8 +86,8 @@ pub use spectrum::SpectrumMonitor;
 #[cfg(feature = "test-support")]
 pub use compile::{
     CapiResources, CarriedSourceBytes, CompiledModelAdmission, LiveCatalogAdmission,
-    LiveEpochResources, monitor_and_ramp_bytes, observation_binding_table_bytes,
-    observation_reserve_bytes, prepare_caps, validate_live_peak,
+    LiveEpochResources, duck_overlay_bytes, monitor_and_ramp_bytes,
+    observation_binding_table_bytes, observation_reserve_bytes, prepare_caps, validate_live_peak,
 };
 #[cfg(feature = "test-support")]
 pub use control::{

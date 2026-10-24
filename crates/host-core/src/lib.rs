@@ -117,6 +117,8 @@ pub mod shape;
 pub mod source;
 pub mod spectrum;
 pub mod spectrum_service;
+#[cfg(feature = "control-provider")]
+pub mod transition;
 // Issues #996 and #997: the true-peak limiter's linked-pair session test. It predates the
 // `test-support` width seam (`test_only_prepare_host_runtime_with_live_controls_on`) that
 // `tests/` files now use, and stays a unit test on the `#[cfg(test)]` backend seam in `prepare`.
@@ -226,6 +228,11 @@ pub use spectrum_service::{
     SpectrumService, SpectrumServiceError, SpectrumSnapshot, SpectrumStreamMetadata,
     SpectrumStreamStatus, spectrum_channels_from_raw, spectrum_smoothing, spectrum_target_kind,
     spectrum_target_ref,
+};
+#[cfg(feature = "control-provider")]
+pub use transition::{
+    DuckOverlay, DuckRouteRecord, DuckStripRecords, StripTransition, StripTransitionError,
+    plan_strip_transition,
 };
 
 /// The control-side half of one prepared effect's live-control channel (issue #140 A).

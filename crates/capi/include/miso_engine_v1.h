@@ -253,10 +253,26 @@ extern "C" {
  * returns MISO_ENGINE_V1_BACKPRESSURE with out untouched, and the host retries. A host checks
  * MISO_ENGINE_V1_FEATURE_PLAN_WATERMARK before calling the symbol.
  *
+ * Meters (issue 1583). TELEMETRY_CONFIGURE takes a meter table: entry i (meter handle i + 1) names
+ * the output, or a track or submix by its stable ID, and a metric, so a structural commit never
+ * moves a handle. Its reply carries the session's meter window in blocks (meter_window_blocks,
+ * about 32 ms). A nonempty table turns the output meter on from the next rendered block, an empty
+ * one off; render applies the change before a block, with no allocation, lock or syscall. Each
+ * METER_BATCH reports meter_period_blocks / meter_window_blocks consecutive windows: first_sample
+ * to observed_sample (exclusive), window_sequence from 1 after each accepted configure, and for the
+ * output's peak entry a left and a right record, each the windows' maximum, VALID, and CLIPPED above
+ * 1.0. A configure is all or nothing: an unknown strip is NOT_FOUND (meter.strip.unknown), a period
+ * that is not a whole number of windows INVALID_FIELD (meter.period), and a strip or gain-reduction
+ * entry UNAVAILABLE until a later issue serves it. The output meter queues eight windows; a window
+ * that reaches no batch (dropped while the host did not call into the session, or in a partial
+ * batch a gap discarded) is counted by METER_WINDOWS_LOST (protocol counter 22), and the sequence
+ * never skips.
+ *
  * Control service (issue 1348). The engine owns no thread, so the host drives the control work
  * between edits. miso_engine_v1_service(session) runs one bounded step of it: it reclaims plans
  * render has retired, brings the session's view of the running plan up to render, refreshes the
- * session counters, and stages render telemetry. Every other session call (source submit, seek,
+ * session counters, and stages render telemetry: the counter snapshot, the diagnostics and one
+ * METER_BATCH per completed batch of meter windows. Every other session call (source submit, seek,
  * seek_at, seek_report, session_seek, session_seek_at, submit_command, dequeue_event) that passes
  * its argument checks runs the same step first; a call refused for its arguments returns before the
  * step. So a host that makes those calls anyway need not also call service. The step never waits
@@ -320,9 +336,23 @@ extern "C" {
  * the plan keeps every source it leaves unchanged playing: the source keeps its ring, its
  * generation and its read position, so the host neither seeks nor refills it, and must not reseek
  * it. From the moment the command returns OK, source submissions and seeks address the newest
- * committed session, whether or not its plan has been swapped in yet. A source the transaction
- * removed is refused as "source.id.unknown"; PCM already accepted for it is discarded with its
- * plan. A source the transaction added starts at generation 1, frame 0, until the host seeks it.
+ * committed session, whether or not its plan has been swapped in yet, with one exception: a source
+ * the transaction removed (issue 1325).
+ *
+ * Removing a strip in two phases (issue 1325). A transaction that removes a track or a submix
+ * does not cut it at the swap. Phase 1: before the command returns OK, the strip's fader is muted
+ * on both channels on the running plan with the session's mute_ms ramp N, and so is each of its
+ * routes whose tap precedes the fader. Phase 2: the replacement plan is adopted no earlier than
+ * S = ceil_q(p + q + N + C), where p is the render clock after the mutes were written, q the
+ * render quantum and C the longest compensation delay of a route out of a removed strip. The
+ * watermark reports the transaction's revision first at S. Until then a source the transaction
+ * removed still feeds the running plan: its submissions and seeks are accepted and its PCM plays
+ * the fade, so the host keeps feeding it. From the adoption on it is refused as
+ * "source.id.unknown", and PCM accepted for it that render has not read is discarded with the
+ * running plan. A later transaction before S writes no second fade for a strip already fading,
+ * and its replacement is adopted no earlier than the same S. A transaction before S that restores
+ * a removed strip or source is refused as BACKPRESSURE; retry it once the watermark reports the
+ * removal. A source the transaction added starts at generation 1, frame 0, until the host seeks it.
  * A source whose declaration the transaction changed restarts like an added one: in a new ring at
  * generation 1, frame 0, with the PCM accepted for it before the command discarded with its plan;
  * the host restarts its feed.
@@ -486,7 +516,8 @@ extern "C" {
  * replacement. A source that the transaction added or changed restarts in a new ring at
  * generation 1, frame 0, with its seek report at generation 0: a seek held or queued on the old
  * ring is discarded with it, and the host seeks the new one after the command returns OK. A seek
- * on a source that the transaction removed is refused as "source.id.unknown".
+ * on a source that the transaction removed is accepted until the replacement is adopted and
+ * refused as "source.id.unknown" from then on (issue 1325).
  *
  * Far past anchors. An anchor that render has already passed is not refused. The seek applies no
  * later than the first block that begins after the call returns, at source frame F plus the
