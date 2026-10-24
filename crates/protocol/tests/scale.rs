@@ -47,16 +47,21 @@ fn scale_model() -> SessionModel {
     model
 }
 
-/// A fader `SET_CONTROL` addressed to the last track, `track-65536`, commits and its value is the
-/// one the snapshot carries for that track and no other.
+/// A fader `SET_CONTROL` addressed to the strip the store holds at index 65,536 (the last one: the
+/// compiled model orders tracks by ID, so it is `track-9999`, not `track-65536`) commits, and its
+/// value is the one the snapshot carries for that track and no other.
 #[test]
 #[ignore = "release-mode scale gate; runs nightly"]
-fn a_fader_edit_on_track_65536_commits_and_snapshots() {
+fn a_fader_edit_on_the_strip_at_index_65536_commits_and_snapshots() {
     let mut store = SessionStore::new(scale_model(), caps()).expect("adequate caps compile");
+    let last = store.compiled().normalized_model().tracks[TRACKS as usize - 1]
+        .id
+        .clone();
+    assert_eq!(last.as_str(), "track-9999", "the compiled order is by ID");
     let revision = store.revision();
     let edit = SessionEdit::set_control(
         row_address(
-            Owner::Strip(id("track-65536")),
+            Owner::Strip(last.clone()),
             Section::Builtins,
             "fader_db",
             Lane::Left,
@@ -80,6 +85,6 @@ fn a_fader_edit_on_track_65536_commits_and_snapshots() {
         .filter(|track| track.fader != template.fader)
         .collect();
     assert_eq!(edited.len(), 1, "only the addressed track moved");
-    assert_eq!(edited[0].id.as_str(), "track-65536");
+    assert_eq!(edited[0].id, last);
     assert_eq!(edited[0].fader.left_db.to_bits(), (-7.5_f32).to_bits());
 }
