@@ -24,6 +24,7 @@
 //! | `plan` | render-thread plan ownership and the any-thread query projection |
 //! | `control` | the control-protocol session: commands, events, sources, plan replacement |
 //! | `document` | `SESSION_REPLACE`: the check, parse and diff of a replacement document |
+//! | `spectrum` | the session's spectrum monitor state: [`SpectrumMonitor`] |
 //!
 //! The compile *pipeline* is not here at all: it is `host-core`, shared with every host.
 
@@ -59,6 +60,7 @@ mod control;
 mod document;
 mod error;
 mod plan;
+mod spectrum;
 
 pub use adapter::{
     ControlAdapter, ControlLimits, PlanResources, TAIL_FINITE, TAIL_INFINITE, tail_words,
@@ -79,6 +81,7 @@ pub use error::{CompileFailure, ResourceFault};
 pub use host_core::SourceSubmission;
 pub use plan::{PlanQueries, PlanState};
 pub use source::SourceSeekReport;
+pub use spectrum::SpectrumMonitor;
 
 #[cfg(feature = "test-support")]
 pub use compile::{
