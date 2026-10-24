@@ -804,8 +804,7 @@ function validateSdkResponse(browserName, response) {
   "SDK observation endpoint did not preserve exact owned data and channel projection");
   gate(browserName, "sdk-observation", Array.isArray(observations.windows)
     && observations.windows.length === 1
-    && observations.windows[0]?.endSample > observations.windows[0]?.firstSample
-    && observations.windows[0]?.blocks === 2,
+    && validResidentWindow(observations.windows[0]),
   "SDK observation endpoint did not return an actual resident window");
   const resident = observations?.resident;
   gate(browserName, "sdk-observation-subscription", Array.isArray(resident?.mapBindings)
@@ -993,42 +992,56 @@ function validateSdkResponse(browserName, response) {
   const configuredHop = spectrum?.configuredHop;
   const configuredPublications = Array.isArray(configuredHop?.publications)
     ? configuredHop.publications : [];
-  gate(browserName, "sdk-spectrum-hop", configuredHop?.requestHopFrames === 1_024
-    && configuredHop?.boundsHopFrames === 1_024
-    && configuredHop?.nativeStart?.hopFrames === 1_024
-    && configuredHop?.nativeStart?.sampleRateHz === 48_000
-    && configuredHop?.nativeStart?.quantumFrames === 128
-    && configuredHop?.nativeStart?.smoothingMs === 37.5
-    && Array.isArray(configuredHop?.nativeRead)
-    && configuredHop.nativeRead.length > 0
-    && configuredHop.nativeRead.every((metadata) => metadata?.hopFrames === 1_024
-      && metadata?.smoothingMs === 37.5)
-    && configuredHop?.publicationCount >= 2
-    && Array.isArray(configuredHop?.notificationHops)
-    && configuredHop.notificationHops.length >= 2
-    && configuredHop.notificationHops.every((hop) => hop === 1_024)
-    && Array.isArray(configuredHop?.notificationSmoothingMs)
-    && configuredHop.notificationSmoothingMs.length >= 2
-    && configuredHop.notificationSmoothingMs.every((smoothing) => smoothing === 37.5)
-    && configuredPublications.length === 2
-    && configuredPublications.every((publication) => publication?.metadata?.hopFrames === 1_024
-      && publication.metadata.smoothingMs === 37.5
-      && publication.metadata.sampleRateHz === 48_000
-      && publication.metadata.quantumFrames === 128
-      && publication.metadata.endSample > publication.metadata.capturedSample
-      && publication.result?.windowFrames === 2_048
-      && publication.result?.binCount === 1_025
-      && publication.result?.capturedSample === publication.metadata.capturedSample
-      && publication.result?.endSample === publication.metadata.endSample
-      && publication.result?.finite === true
-      && publication.result?.ownedArrays === true)
-    && configuredHop?.startDelta === "1024"
-    && configuredHop?.firstSpan === "2048"
-    && configuredHop?.secondSpan === "2048"
-    && configuredHop?.resultHopFrames === 1_024
-    && configuredHop?.resultSmoothingMs === 37.5
-    && configuredHop?.ownedArrays === true,
-  "actual browser H1024 did not preserve Worklet metadata, Worker results, overlap, smoothing, and ownership");
+  // Issue #1522 D2: each condition is named, and a failure prints the names that failed with the
+  // record, so a red log says which condition failed. The record already carries scalars only (no
+  // bin arrays); the per-notification lists are reduced to their length and distinct values.
+  const hopConditions = {
+    requestHop: configuredHop?.requestHopFrames === 1_024,
+    boundsHop: configuredHop?.boundsHopFrames === 1_024,
+    nativeStart: configuredHop?.nativeStart?.hopFrames === 1_024
+      && configuredHop?.nativeStart?.sampleRateHz === 48_000
+      && configuredHop?.nativeStart?.quantumFrames === 128
+      && configuredHop?.nativeStart?.smoothingMs === 37.5,
+    nativeRead: Array.isArray(configuredHop?.nativeRead)
+      && configuredHop.nativeRead.length > 0
+      && configuredHop.nativeRead.every((metadata) => metadata?.hopFrames === 1_024
+        && metadata?.smoothingMs === 37.5),
+    publicationCount: configuredHop?.publicationCount >= 2,
+    notificationHops: Array.isArray(configuredHop?.notificationHops)
+      && configuredHop.notificationHops.length >= 2
+      && configuredHop.notificationHops.every((hop) => hop === 1_024),
+    notificationSmoothing: Array.isArray(configuredHop?.notificationSmoothingMs)
+      && configuredHop.notificationSmoothingMs.length >= 2
+      && configuredHop.notificationSmoothingMs.every((smoothing) => smoothing === 37.5),
+    publications: configuredPublications.length === 2
+      && configuredPublications.every((publication) => publication?.metadata?.hopFrames === 1_024
+        && publication.metadata.smoothingMs === 37.5
+        && publication.metadata.sampleRateHz === 48_000
+        && publication.metadata.quantumFrames === 128
+        && canonicalU64(publication.metadata.capturedSample) !== undefined
+        && canonicalU64(publication.metadata.endSample) > canonicalU64(publication.metadata.capturedSample)
+        && publication.result?.windowFrames === 2_048
+        && publication.result?.binCount === 1_025
+        && publication.result?.capturedSample === publication.metadata.capturedSample
+        && publication.result?.endSample === publication.metadata.endSample
+        && publication.result?.finite === true
+        && publication.result?.ownedArrays === true),
+    startDelta: configuredHop?.startDelta === "1024",
+    spans: configuredHop?.firstSpan === "2048" && configuredHop?.secondSpan === "2048",
+    resultMetadata: configuredHop?.resultHopFrames === 1_024
+      && configuredHop?.resultSmoothingMs === 37.5,
+    ownedArrays: configuredHop?.ownedArrays === true,
+  };
+  const failedHopConditions = Object.keys(hopConditions).filter((name) => !hopConditions[name]);
+  const listSummary = (list) => (Array.isArray(list)
+    ? { length: list.length, distinct: [...new Set(list)] } : list);
+  gate(browserName, "sdk-spectrum-hop", failedHopConditions.length === 0,
+    "actual browser H1024 did not preserve Worklet metadata, Worker results, overlap, smoothing, and ownership: "
+      + `failed ${JSON.stringify(failedHopConditions)} in ${JSON.stringify(configuredHop === undefined ? undefined : {
+        ...configuredHop,
+        notificationHops: listSummary(configuredHop?.notificationHops),
+        notificationSmoothingMs: listSummary(configuredHop?.notificationSmoothingMs),
+      })}`);
   // Issue #1106: the probe waits on its deadline, not a poll count. Its audio starts late by a
   // planted delay, so both windows arrive only after the audio start (a publication
   // before that means the delay was not in effect); a wait that can never be satisfied ends at
@@ -1292,6 +1305,20 @@ function mutationProofs(browserName, result) {
     );
   }
   if (result.sdkResponse === null) return;
+  // #1522: the hop record's sample fields are decimal strings; a pair whose end has one more digit
+  // than its start (here 98304 to 100352, about 2.05 s at 48 kHz) is a valid pair.
+  const hopWidth = structuredClone(result);
+  const hopPublications = hopWidth.sdkResponse.spectrum?.configuredHop?.publications;
+  if (Array.isArray(hopPublications) && hopPublications.length === 2) {
+    [["98304", "100352"], ["99328", "101376"]].forEach(([capturedSample, endSample], index) => {
+      Object.assign(hopPublications[index].metadata, { capturedSample, endSample });
+      Object.assign(hopPublications[index].result, { capturedSample, endSample });
+    });
+    assert.doesNotThrow(
+      () => validate(browserName, hopWidth),
+      `${browserName}: sdk-spectrum-hop-width: valid decimal-width-crossing hop pair was refused`,
+    );
+  }
   const resident = result.sdkResponse.observations?.resident;
   const original = resident?.windows?.[0];
   if (original === undefined) return;
