@@ -2075,12 +2075,16 @@ where
             // observers its swap block moved and settles the others. A superseded candidate never
             // reaches here: it is dropped unpaired.
             let displaced = match core::mem::take(&mut next.spectrum) {
-                crate::spectrum::EpochSpectrum::Candidate { captures, epoch } => {
-                    crate::spectrum::EpochSpectrum::Displaced(self.spectrum.adopt(
-                        captures,
-                        next.inventory.spectrum_pairing(),
-                        epoch,
-                    ))
+                crate::spectrum::EpochSpectrum::Candidate {
+                    captures,
+                    hop,
+                    epoch,
+                } => crate::spectrum::EpochSpectrum::Displaced(self.spectrum.adopt(
+                    captures,
+                    next.inventory.spectrum_pairing(),
+                    hop,
+                    epoch,
+                )),
                 }
                 other => other,
             };
@@ -2679,6 +2683,9 @@ where
         // The configuration epoch is set beside the push, after the commit.
         candidate_provider.spectrum = crate::spectrum::EpochSpectrum::Candidate {
             captures: candidate_captures,
+            hop: spectrum_configuration
+                .as_ref()
+                .and_then(|configuration| configuration.hop),
             epoch: 0,
         };
         let candidate_plan = ObservedCandidatePlan::new(candidate_plan);

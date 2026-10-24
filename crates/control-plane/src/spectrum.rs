@@ -6,7 +6,7 @@
 //! analysis that smooths its stream.
 
 use host_core::{
-    PreparedSpectrumCaptures, SpectrumAnalysis, SpectrumConfiguration, SpectrumPair,
+    PreparedSpectrumCaptures, SpectrumAnalysis, SpectrumConfiguration, SpectrumHop, SpectrumPair,
     SpectrumService,
 };
 
@@ -40,12 +40,13 @@ pub(crate) enum EpochSpectrum {
     /// Nothing: the boot epoch, or an epoch whose promotion displaced nothing.
     #[default]
     None,
-    /// A candidate's captures (`None` when it was prepared with no configuration) and the
-    /// configuration epoch they were prepared for. Its promotion installs them in the service,
+    /// A candidate's captures (`None` when it was prepared with no configuration), the stream hop
+    /// of the configuration it was prepared with, and that configuration's epoch. Its promotion installs them in the service,
     /// paired by the candidate's own pairing list
     /// ([`host_core::PlanStateInventory::spectrum_pairing`]).
     Candidate {
         captures: Option<PreparedSpectrumCaptures>,
+        hop: Option<SpectrumHop>,
         epoch: u64,
     },
     /// What the promotion of this epoch's successor displaced: dropped with the parked epoch,
@@ -117,7 +118,8 @@ impl SpectrumMonitor {
 
     /// Install a promoted candidate's captures (#1593 D5, D6), on the control thread after render
     /// adopted its plan: the service pairs every capture `pairing` names (the observers the swap
-    /// block moved) and settles the others; with no captures the service is removed, so every
+    /// block moved) and settles the others; a service it makes takes `hop`, the stream hop of the
+    /// configuration the candidate was prepared with; with no captures the service is removed, so every
     /// read answers `Unprepared`. `adopted_epoch` becomes `epoch`. Returns what it displaced, for
     /// the caller to drop off the audio thread.
     ///
@@ -127,6 +129,7 @@ impl SpectrumMonitor {
         &mut self,
         captures: Option<PreparedSpectrumCaptures>,
         pairing: &[SpectrumPair],
+        hop: Option<SpectrumHop>,
         epoch: u64,
     ) -> SpectrumDisplaced {
         self.adopted_epoch = epoch;
@@ -141,14 +144,13 @@ impl SpectrumMonitor {
             };
         };
         let Some(service) = self.service.as_mut() else {
-            // A configuration made after boot (#1594): the first captures make the service.
+            // A configuration made after boot: the first captures make the service, with the
+            // candidate's own hop. Unreachable until #1594 (a configuration only shrinks today).
             self.service = Some(SpectrumService::new(
                 captures,
                 self.sample_rate_hz,
                 self.quantum_frames,
-                self.configuration
-                    .as_ref()
-                    .and_then(|configuration| configuration.hop),
+                hop,
             ));
             self.analysis = Some(SpectrumAnalysis::new());
             return SpectrumDisplaced {

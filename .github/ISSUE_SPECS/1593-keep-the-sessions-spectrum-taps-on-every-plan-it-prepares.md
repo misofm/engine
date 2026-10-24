@@ -269,3 +269,8 @@ through `test_spectrum_mut()`.
   when `same_strip_kind` finds its target's ID a track in both the base model and the successor's,
   or a submix in both; a kind change does not carry, so T1's `Dropped` answers its arm. The
   reproducer is un-ignored (red before, green after).
+- T2b verdict fold, root: PASS. The meter and route-delay carries have the same kind-reuse hole;
+  #1891 owns them. `EpochSpectrum::Candidate` carries the hop of the configuration the candidate
+  was prepared with, and a service that a promotion makes takes it (not the newest committed
+  configuration's). That path is unreachable until #1594 (a configuration only shrinks), so it has
+  no test here.

@@ -627,13 +627,16 @@ fn same_window(got: &SpectrumContinuousWindow, want: &SpectrumContinuousWindow) 
             .all(|(got, want)| got.to_bits() == want.to_bits())
 }
 
-/// Gate 2, with gates 5 and 6 over its transaction and renders. Turns red if a successor is
-/// prepared without the taps, if the readers are not carried onto the successor's observers, or
-/// if service state resets at a swap: a stream on `eq0` (selected in a collection with `eq1`)
-/// started at 100 ms reads on across a structural edit that adds a muted track, with no `Failed`,
-/// `Gap` or `Warming` read, unchanged epochs, no sequence gap, and every read equal to that of a
-/// session that had the track from the start; the promoted service reads the configuration's
-/// epoch. The transaction advances the revision by one and the snapshot equals a plain session's.
+/// Gate 2, with gates 5 and 6 over its transaction and renders. A stream on `eq0` (selected in a
+/// collection with `eq1`) starts at 100 ms; a structural edit adds a muted track. Two claims:
+///
+/// - an edit that keeps every target leaves the configuration unchanged, so `configured_epoch`
+///   (and `adopted_epoch`) stay at 1;
+/// - the carried stream reads on with no `Failed`, `Gap` or `Warming` read, unchanged epochs and
+///   no sequence gap, and every window is bit-equal to that of a session that had the track from
+///   the start.
+///
+/// The transaction advances the revision by one and the snapshot equals a plain session's.
 #[test]
 fn a_structural_edit_carries_the_stream() {
     bench_support::alloc::assert_installed();
