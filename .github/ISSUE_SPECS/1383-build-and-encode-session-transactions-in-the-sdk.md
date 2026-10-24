@@ -172,3 +172,38 @@ transaction format.
   undeclared source. The `rampSamples` refusal is 1383b's.
 - **Open owner-level note (not blocking).** After #1386 an "edit the builder, `replaceSession`"
   shape could supersede this encoder; the typed builder stays as ruled (D15-11).
+
+## Tranche 1383b decision record (2026-10-24)
+
+- **Methods.** `setTrackRack(trackId, inserts)`, `putTrackEffect(trackId, finalPosition, effect)`,
+  `removeTrackEffect(trackId, slotId)`, `setTrackEffectOrder(trackId, slotIds)`,
+  `setEffectIdentity(trackId, slotId, effectId)`, `setEffectQuality(trackId, slotId, "normal")`,
+  `setEffectSidechain(trackId, slotId, sidechain | null)`,
+  `setTrackConsole(trackId, entries, { rampSamples? })`. No other new export.
+- **Strip and rack.** The strip is a track or a base submix (the engine's `strip_mut`, #1204). The
+  methods take no rack name and write `inserts` (code 2): the engine refuses `builtins`
+  (`NotFound`) and `console` (`ConsoleSlotFixed`) for every one of these edits. An insert is named
+  by its stable ID (`effect()`'s `slotId`). The builder keeps each strip's working insert records
+  (from `base.toJSON()`, then each edit), so a later edit sees an earlier one.
+- **Validators.** `normalizeInserts`, a new shared `normalizeInsert`, `normalizeConsoleEntries`,
+  `quality` and a new shared `normalizeSidechain` (now also used by `effect()`) are exported
+  `@internal` from `session.ts`. `putTrackEffect` requires `slotId`: a position-derived ID could
+  name, and so replace, another insert. `setEffectIdentity` uses a new `retargetInsert`, which
+  checks the insert's link mode, sidechain port and every `params` row (parameter ID, unit, lane,
+  value) against the new descriptor with `effect()`'s own validators, as the engine's preparation
+  refuses a mismatch.
+- **`setTrackConsole`.** The engine refuses it unless an earlier `SetConsole` of the transaction
+  changed the console (`session.edit.value_op_retired`, #1561 D3). This builder has no
+  `setConsole` (#1385), so it validates the strip, the entries against the slots and `rampSamples`
+  (`requireU32`), then refuses with that code. The encoder (track ID, repeated entries, optional
+  field 3 `ramp_samples` written only when given) is in place, but its bytes and its ramp rows
+  (omitted, 0, 960) cannot be tested yet: the public builder cannot make the frame until #1385's
+  `setConsole` opens it; those rows belong to #1385's gate 1.
+- **Evals.** Gate 1 gained one frame of all seven rack and effect edits on a track and a submix
+  (racks and orders at 0, 1 and 3); gate 2 one snapshot of put, reorder, retarget, reroute, remove
+  and a submix rack; gate 3 one test of their refusals and of `setTrackConsole` (no console change;
+  `rampSamples` -1, 1.5, 2^32, "960").
+- **Cross-entity references (root, 2026-10-24).** The builder, like `SessionBuilder`, checks the
+  shape of each edit only; the engine's store refuses a reference between entities (a sidechain
+  source, a removed sidechain source, automation on a removed insert) with a typed
+  `MissingEntityReference`, so nothing is lost silently.
