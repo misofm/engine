@@ -9313,3 +9313,108 @@ fn a_second_rebuild_inside_a_flagged_rebuilds_landing_is_flagged_on_the_c_abi() 
         );
     }
 }
+
+/// #1859 gate 1: one transaction that enables band 2 of eq4's console EQ (at -6 dB, so it is
+/// heard) and switches band 1 of the last track's EQ insert from a bell to a notch commits one
+/// revision with no plan, and, with the source `-0.0` until the 64-sample ramp has passed, renders
+/// from then on the bits of a plan prepared from the committed session.
+///
+/// Red if a host path classifies a band's enable or family row as prepared (a rebuild), refuses
+/// its target, or designs it from the wrong seeds, so the live ramp settles on words or state a
+/// fresh plan of the committed model does not have.
+#[test]
+fn a_live_eq_band_enable_and_family_change_renders_the_prepared_plan_bits() {
+    use session::{EffectParam, ParameterChannel, ParameterUnit, RackName};
+    /// The notch family's choice value (`EqBandKind::Notch`).
+    const NOTCH: f32 = 6.0;
+    let document = eq_session(48_000);
+    let mut model = parse_session_json(&document).expect("model");
+    let last = model.tracks.len() - 1;
+    let last_id = model.tracks[last].id.as_str().to_owned();
+    let edits = [
+        upsert(
+            "eq4",
+            RackName::Console,
+            "eq",
+            17,
+            ParameterChannel::Both,
+            ParameterUnit::Linear,
+            1.0,
+        ),
+        upsert(
+            "eq4",
+            RackName::Console,
+            "eq",
+            20,
+            ParameterChannel::Both,
+            ParameterUnit::Db,
+            -6.0,
+        ),
+        upsert(
+            &last_id,
+            RackName::Inserts,
+            "eq-insert",
+            2,
+            ParameterChannel::Both,
+            ParameterUnit::Linear,
+            NOTCH,
+        ),
+    ];
+    let both = |parameter_id, unit, value| EffectParam {
+        parameter_id,
+        channel: ParameterChannel::Both,
+        unit,
+        value,
+    };
+    let eq4 = model
+        .tracks
+        .iter_mut()
+        .find(|track| track.id.as_str() == "eq4")
+        .expect("eq4");
+    eq4.console[0].params.extend([
+        both(17, ParameterUnit::Linear, 1.0),
+        both(20, ParameterUnit::Db, -6.0),
+    ]);
+    let insert = model.tracks[last]
+        .inserts
+        .effects
+        .iter_mut()
+        .find(|effect| effect.id.as_str() == "eq-insert")
+        .expect("eq-insert");
+    insert.params.push(both(2, ParameterUnit::Linear, NOTCH));
+    let committed = session::canonical_session_json(&model).expect("committed session");
+
+    let mut rig = Rig::new(&document);
+    let edit_block = 4;
+    let settled = edit_block + window(rig.latency(), 64, rig.quantum) + 1;
+    let feed = Feed::quiet_until(settled * rig.quantum as u64);
+    let total = settled + 4;
+    let mut live = Vec::new();
+    for _ in 0..edit_block {
+        live.push(rig.step_feed(&feed).0);
+    }
+    let (revision, _, epoch, _) = rig.summary();
+    assert_eq!(rig.apply(&edits), crate::RESULT_OK);
+    let (after, _, after_epoch, pending) = rig.summary();
+    assert_eq!(
+        (after, after_epoch, pending),
+        (revision + 1, epoch, 0),
+        "the edit commits one revision and prepares no plan"
+    );
+    for _ in edit_block..total {
+        live.push(rig.step_feed(&feed).0);
+    }
+    let reference = Reference::run_feed(&committed, total, &feed);
+    let unedited = Reference::run_feed(&document, total, &feed);
+    let mut heard = false;
+    for block in settled as usize..total as usize {
+        assert!(
+            reference[block].iter().any(|sample| *sample != 0.0),
+            "block {block} carries signal"
+        );
+        assert_eq!(bits(&live[block]), bits(&reference[block]), "block {block}");
+        heard |= bits(&live[block]) != bits(&unedited[block]);
+    }
+    assert!(heard, "the edit changes the output");
+    assert_eq!(rig.summary().2, epoch, "the first epoch still renders");
+}
