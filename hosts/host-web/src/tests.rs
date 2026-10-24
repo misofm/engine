@@ -944,11 +944,11 @@ fn observation_staging_resource_is_exact_for_the_taps_off_and_on_modes() {
         let model = compiled.normalized_model();
         let frame_bytes = (3 * (model.tracks.len() + model.submixes.len()) as u64 + 3) * 4;
         // The strip meters' delivery rows, bound with the boot word `0` too (#1581 D2): per strip
-        // a pending snapshot, a remaining count and a carried-from handle, and the master ring.
+        // a pending snapshot, a remaining count and a carried-from handle. The master windows are
+        // the control plane's output meter, in its retained row (#1581 D5).
         let strips = (model.tracks.len() + model.submixes.len()) as u64;
         let meter_delivery_bytes = strips
-            * (size_of::<Option<MeterSnapshot>>() + size_of::<usize>() + size_of::<u64>()) as u64
-            + (METER_QUEUE_DEPTH * size_of::<Option<MasterMeasurement>>()) as u64;
+            * (size_of::<Option<MeterSnapshot>>() + size_of::<usize>() + size_of::<u64>()) as u64;
         let frame_bytes = frame_bytes + meter_delivery_bytes;
         let expected_bridge_metadata = projection
             .report
@@ -3385,7 +3385,10 @@ fn meter_invalid_master_rejects_transactionally_then_recovers_with_loss() {
         host.ready
             .as_mut()
             .expect("ready")
-            .pop_master_window()
+            .output_reader
+            .windows_mut()
+            .try_pop()
+            .ok()
             .is_some()
     );
     assert_eq!(host.poll_meters(), 0);
@@ -3452,6 +3455,9 @@ fn meter_queue_saturation_recovers_with_explicit_loss() {
     for block in 0..8 {
         assert_eq!(host.poll_meters(), 1);
         assert_eq!(host.meter_header().first_sample, block * 128);
+        // #1581 D5: the four output windows the full queue dropped (blocks 8 to 11) are counted
+        // from the first frame on; the strip's own drops reach the count with its next snapshot.
+        assert_eq!(host.meter_header().reserved[1] >> METER_LOSS_SHIFT, 4);
     }
     assert_eq!(host.poll_meters(), 0);
     feed_and_render(&mut host, 1, 12, 0.3);
@@ -3459,7 +3465,11 @@ fn meter_queue_saturation_recovers_with_explicit_loss() {
     assert_eq!(host.meter_header().first_sample, 12 * 128);
     assert_eq!(&host.meter_frame()[..4], &[0.3, 0.3, 0.3, 0.3]);
     assert_ne!(host.meter_header().reserved[1] & METER_VALID_LOSS, 0);
-    assert!(host.meter_header().reserved[1] >> METER_LOSS_SHIFT > 0);
+    // Exact: the four output drops, the strip's four, and the gap from block 8 to block 12.
+    assert_eq!(
+        host.meter_header().reserved[1] >> METER_LOSS_SHIFT,
+        4 + 4 + 1
+    );
 }
 
 #[test]
@@ -4113,6 +4123,11 @@ fn bus_meters_render_and_poll_without_allocating() {
             false,
         ),
         RESULT_OK
+    );
+    // #1581 gate 7: the measured block folds the core output meter, whose gate the lease opened.
+    assert!(
+        host.ready.as_ref().expect("ready").output_gate_from <= host.status.next_absolute_sample,
+        "the output meter's gate is open for the measured block"
     );
     let ((render, windows), allocations, deallocations) =
         crate::ffi::live_response_ffi_tests::measured(|| {
@@ -8575,7 +8590,12 @@ mod structural_apply {
         for _ in 0..4 {
             rig.step();
         }
-        let waiting = rig.host.ready.as_ref().expect("ready").master_count as u64;
+        let waiting = rig
+            .host
+            .ready
+            .as_mut()
+            .expect("ready")
+            .output_windows_queued() as u64;
         assert!(waiting > 0, "the render side closed windows nobody polled");
         let ready = rig.host.ready.as_mut().expect("ready");
         ready.meter_loss_count = 5;
@@ -8612,10 +8632,15 @@ mod structural_apply {
             "a window from the adoption block on, not one of the predecessor's"
         );
         assert!(header.reserved[1] & METER_VALID_LOSS != 0);
-        assert!(
-            header.reserved[1] >> 32 >= 5 + waiting,
-            "the windows left behind are counted ({} for {waiting} waiting and 5 before)",
-            header.reserved[1] >> 32
+        // Exact: the 5 counted before; per strip of the predecessor, its two windows the
+        // successor's group cannot pair (each strip's older head dropped twice); the `waiting`
+        // output windows they span, stale against the successor's first window; and one gap, since
+        // the published stream ends at block 6 and the next frame starts at block 10.
+        let predecessor_strips = (model.tracks.len() + model.submixes.len()) as u64;
+        assert_eq!(
+            header.reserved[1] >> 32,
+            5 + 2 * predecessor_strips + waiting + 1,
+            "the windows left behind are counted ({waiting} waiting and 5 before)",
         );
         assert_eq!(header.sequence, published.sequence + 1);
     }
@@ -9112,6 +9137,177 @@ mod structural_apply {
         let (word, master) = master_reading(&rig.host, 1);
         assert!(word > 0.0);
         assert_eq!(master, None, "no designation reads absent");
+    }
+
+    /// #1581 D5: a swap that carries no strip meter (here the first strip of an empty boot)
+    /// restarts the strip meters at its adoption block, and the output meter restarts there with
+    /// them, so the frames after the swap publish.
+    ///
+    /// Test value: red if the output meter keeps the predecessor's window grid across a swap that
+    /// restarts the strip meters (no master window would match a strip window again, and every
+    /// frame after the swap would be dropped as a loss), if a retaken lease or a producer reset
+    /// activates on the absolute grid rather than the adoption block's, or if the output window
+    /// the swap left queued is read by the next poll instead of being discarded unread.
+    #[test]
+    fn an_uncarried_swap_restarts_the_output_meter_at_its_adoption_block() {
+        const WINDOW: u64 = 3;
+        let full = parse_session_json(include_str!(
+            "../../../fixtures/session/v1/observation-frame-shape.json"
+        ))
+        .expect("the observation fixture parses");
+        let mut empty = full.clone();
+        empty.sources.clear();
+        empty.tracks.clear();
+        empty.routes.clear();
+        let options = WebBootOptions {
+            source_ring_frames: QUANTUM * 4,
+            live_control_meter_blocks: WINDOW,
+            ..boot_options(QUANTUM)
+        };
+        let mut rig = Rig::boot(&empty, options, None);
+        assert_eq!(rig.host.set_meter_lease(true), RESULT_OK);
+        // Four blocks: the master's window [0, 3) publishes and the next opens at block 3.
+        for _ in 0..4 {
+            assert_eq!(rig.host.render_next(), RESULT_OK);
+            rig.host.poll_meters();
+        }
+        let quantum = u64::from(QUANTUM);
+        assert_eq!(rig.host.meter_header().end_sample, WINDOW * quantum);
+        // Three blocks unpolled: the window [3, 6) waits in the queue when the swap comes.
+        for _ in 0..WINDOW {
+            assert_eq!(rig.host.render_next(), RESULT_OK);
+        }
+        const ADOPTION: u64 = 4 + WINDOW;
+        let edits = [
+            SessionEdit::UpsertSource {
+                source: full.sources[0].clone(),
+            },
+            SessionEdit::UpsertTrack {
+                track: full.tracks[0].clone(),
+            },
+            SessionEdit::UpsertRoute {
+                route: full.routes[0].clone(),
+            },
+        ];
+        assert!(matches!(
+            rig.apply(&edits, 1),
+            Outcome::Applied {
+                path: EditPath::Rebuild,
+                ..
+            }
+        ));
+        // The adoption block, 7, is off the grid of three-block windows.
+        let mut first = None;
+        for _ in 0..3 * WINDOW {
+            assert_eq!(rig.host.render_next(), RESULT_OK);
+            if rig.host.poll_meters() > 0 && rig.host.meter_header().track_count == 1 {
+                first = Some(rig.host.meter_header().first_sample);
+                break;
+            }
+        }
+        assert_eq!(
+            first,
+            Some(ADOPTION * quantum),
+            "the first strip frame starts at the adoption block"
+        );
+        // Exact: the queued window [3, 6), discarded unread by the swap. The swap opened a new
+        // delivery epoch, so the gap to the adoption block is not a second loss.
+        assert_eq!(rig.host.meter_header().reserved[1] >> METER_LOSS_SHIFT, 1);
+
+        // The strip meters tile from the adoption block now, so a lease taken again, and a
+        // producer reset, activate on that grid, not on the absolute `sample % period` one.
+        let published = |rig: &mut Rig, blocks: u64| {
+            let mut frames = Vec::new();
+            for _ in 0..blocks {
+                assert_eq!(rig.host.render_next(), RESULT_OK);
+                if rig.host.poll_meters() > 0 {
+                    frames.push(rig.host.meter_header().first_sample);
+                }
+            }
+            frames
+        };
+        assert_eq!(rig.host.set_meter_lease(false), RESULT_OK);
+        assert_eq!(rig.host.set_meter_lease(true), RESULT_OK);
+        let frames = published(&mut rig, 12 * WINDOW);
+        assert!(!frames.is_empty(), "a retaken lease publishes");
+        assert!(
+            frames
+                .iter()
+                .all(|start| (start / quantum - ADOPTION).is_multiple_of(WINDOW)),
+            "on the adoption grid: {frames:?}"
+        );
+
+        // A producer reset: the strip's next window, rendered and not polled, names a new
+        // generation.
+        let queued = |rig: &mut Rig| {
+            rig.host
+                .plan
+                .as_mut()
+                .and_then(|plan| plan.active_attachment_mut::<RenderCompanions>())
+                .expect("companions")
+                .meters[0]
+                .consumer
+                .available_at_entry()
+        };
+        for _ in 0..WINDOW {
+            if queued(&mut rig) > 0 {
+                break;
+            }
+            assert_eq!(rig.host.render_next(), RESULT_OK);
+        }
+        let (Some(ready), Some(plan)) = (rig.host.ready.as_mut(), rig.host.plan.as_mut()) else {
+            panic!("a ready host");
+        };
+        let companions = plan
+            .active_attachment_mut::<RenderCompanions>()
+            .expect("companions");
+        let mut snapshot = companions.meters[0]
+            .consumer
+            .try_pop()
+            .expect("a closed strip window");
+        snapshot.reset_generation = snapshot.reset_generation.saturating_add(1);
+        ready.shape.meter_pending[0] = Some(snapshot);
+        assert_eq!(rig.host.poll_meters(), 0, "the reset group is refused");
+        let frames = published(&mut rig, 12 * WINDOW);
+        assert!(!frames.is_empty(), "a producer reset recovers");
+        assert!(
+            frames
+                .iter()
+                .all(|start| (start / quantum - ADOPTION).is_multiple_of(WINDOW)),
+            "on the adoption grid: {frames:?}"
+        );
+
+        // A lease still waiting for its activation when the swap adopts: taken at block 1 (its
+        // activation, block 3, on the boot grid), and the first track adopted at block 1. The
+        // activation moves to the new grid's origin, so the first frame, strips and master paired,
+        // is [1, 4).
+        let mut rig = Rig::boot(&empty, options, None);
+        assert_eq!(rig.host.render_next(), RESULT_OK);
+        assert_eq!(rig.host.set_meter_lease(true), RESULT_OK);
+        assert!(matches!(
+            rig.apply(&edits, 1),
+            Outcome::Applied {
+                path: EditPath::Rebuild,
+                ..
+            }
+        ));
+        let frames = published(&mut rig, 12 * WINDOW);
+        assert_eq!(
+            frames.first().copied(),
+            Some(quantum),
+            "a pending lease publishes from the new grid's first boundary: {frames:?}"
+        );
+        assert_eq!(
+            rig.host.meter_header().track_count,
+            1,
+            "the frames pair the strip with the master"
+        );
+        assert!(
+            frames
+                .iter()
+                .all(|start| (start / quantum - 1).is_multiple_of(WINDOW)),
+            "on the adoption grid: {frames:?}"
+        );
     }
 
     impl Rig {
