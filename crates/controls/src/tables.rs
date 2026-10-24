@@ -141,7 +141,7 @@ pub fn effect_table_rows(effect_id: &str) -> Option<EffectTableRows> {
     Some(EffectTableRows {
         bypass: TableRow::plain(
             effect_rows::BYPASS_CONTROL,
-            effect_rows::bypass_descriptor(effect_id),
+            effect_rows::bypass_descriptor(),
         ),
         parameters: descriptor
             .parameters

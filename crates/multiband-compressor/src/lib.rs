@@ -890,6 +890,24 @@ impl<L: Lane, const W: usize> Side<L, W> {
         self.ramps.iter().flatten().all(|ramp| ramp.remaining == 0)
     }
 
+    /// [`discontinuity_reset`](Self::discontinuity_reset) on lane `track` alone (issue #1340, D1):
+    /// that lane's four crossover words, both smoother words and its silence clock go to `+0.0`
+    /// and its track's ramps snap, which leaves every ramp's step `+0.0`, so the lane can rest
+    /// ([`rest_lanes`](Self::rest_lanes)). Every other lane's words are unchanged.
+    fn discontinuity_reset_lane(&mut self, track: usize) {
+        for stage in [&mut self.filter.a, &mut self.filter.b] {
+            stage.ic1 = set_lane_value(stage.ic1, track, 0.0);
+            stage.ic2 = set_lane_value(stage.ic2, track, 0.0);
+        }
+        self.silence = set_lane_value(self.silence, track, 0.0);
+        for gain in &mut self.gain_db {
+            *gain = set_lane_value(*gain, track, 0.0);
+        }
+        for ramp in &mut self.ramps[track] {
+            ramp.snap();
+        }
+    }
+
     /// Clears history. Coefficients and parameters are deliberately untouched.
     fn discontinuity_reset(&mut self) {
         self.filter = Lr4State::default();
@@ -1444,13 +1462,17 @@ impl<L: Lane, const W: usize> Instance<L, W> {
         })
     }
 
-    /// The once-per-block output boundary check of master plan §4.4.
+    /// The once-per-block output boundary check of master plan §4.4, recovered one lane at a time
+    /// (issue #1340, D1; decision 12's coupling rule).
     ///
-    /// The scan, the policy and the counters are `effect-runtime`'s; the only thing
-    /// added here is attributing a rejected block to the contract's per-track reports. A bank's
-    /// two channels share a reset, so a failing lane zeroes both channels of the whole bank, but
-    /// the report counts **one block** on each channel whose own output failed (D7, #1073): a
-    /// channel that was only zeroed alongside it is not a nonfinite block.
+    /// The scan and the counters are `effect-runtime`'s. A lane that failed on either channel has
+    /// both of its channels zeroed for the whole block and its history cleared on both
+    /// [`Side`]s ([`Side::discontinuity_reset_lane`]), which is exactly what the scalar instance
+    /// does to its one lane; every other lane is left bit-unchanged. The shared
+    /// `bank::finish_block` zeroes and resets the whole bank instead, so one hot track -- a
+    /// bypassed one whose wet path still runs under a lowered bypass -- would silence its
+    /// bank-mates. The report counts **one block** on each channel whose own output failed (D7,
+    /// #1073): a channel that was only zeroed alongside it is not a nonfinite block.
     fn finish(&mut self, left: &mut [f32], right: &mut [f32], reports: &mut [ProcessReport]) {
         if bank::check_block::<L>(left) && bank::check_block::<L>(right) {
             return;
@@ -1460,13 +1482,23 @@ impl<L: Lane, const W: usize> Instance<L, W> {
             bank::nonfinite_lane_mask::<L>(left),
             bank::nonfinite_lane_mask::<L>(right),
         ];
-        let sides = &mut self.sides;
-        let accepted = bank::finish_block::<L>(left, right, &mut self.nonfinite, || {
-            for side in sides.iter_mut() {
-                side.discontinuity_reset();
+        let lanes = failed[0] | failed[1];
+        for track in 0..W {
+            if lanes & (1 << track) == 0 {
+                continue;
             }
-        });
-        debug_assert!(!accepted, "the block was checked out of bounds above");
+            for word in left.iter_mut().skip(track).step_by(W) {
+                *word = 0.0;
+            }
+            for word in right.iter_mut().skip(track).step_by(W) {
+                *word = 0.0;
+            }
+            for side in &mut self.sides {
+                side.discontinuity_reset_lane(track);
+            }
+        }
+        self.nonfinite.nonfinite_lanes = lanes;
+        self.nonfinite.nonfinite_blocks = self.nonfinite.nonfinite_blocks.saturating_add(1);
         for (track, report) in reports.iter_mut().enumerate().take(W) {
             report.nonfinite_left_blocks = report
                 .nonfinite_left_blocks

@@ -221,13 +221,9 @@ fn effect_rows_carry_the_ruled_class() {
             }
             assert_eq!(row.descriptor.automatable(), parameter.automatable);
         }
-        let bypass = match effect {
-            "miso.multiband-compressor" => Some(RebuildReason::RuledLiveNotBuilt { issue: 1340 }),
-            _ => None,
-        };
         assert_eq!(
             rebuild_reason(of(BYPASS_CONTROL).descriptor.class),
-            bypass,
+            None,
             "{effect} bypass"
         );
         let link = all.iter().find(|row| {

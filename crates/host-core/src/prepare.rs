@@ -21,8 +21,8 @@ use builtins_compiler::{
 use effect_compiler::{
     EffectCompileCaps, EffectControlProducer, EffectControlResources, EffectObservationHandle,
     LiveEffectAddress, LiveEffectRack, attach_effect_live_controls, attach_effect_observation,
-    effect_control_resources, launch_native_effect_registry, lowers_session_bypass,
-    prepare_native_session_effects, resolve_initial_values,
+    effect_control_resources, launch_native_effect_registry, prepare_native_session_effects,
+    resolve_initial_values,
 };
 use effect_contract::{
     AutomationRate, BypassSwitch, EffectControlRecord, NativeEffectFactory,
@@ -5451,15 +5451,6 @@ pub(crate) fn effect_instance_records(
         return Err(LiveRebuild::Structure);
     }
     let bypass = (before.bypass != after.bypass).then_some(after.bypass);
-    if bypass.is_some() {
-        // The session bypass of an effect that does not lower it stays a prepared bypass.
-        let EffectIdentity::Native { effect_id } = &after.identity else {
-            return Err(LiveRebuild::Structure);
-        };
-        if !lowers_session_bypass(effect_id.as_str()) {
-            return Err(LiveRebuild::RebuildOnly(RebuildReason::Correctness));
-        }
-    }
     let (mut records, targets) = if same_params(&before.params, &after.params) {
         (Vec::new(), None)
     } else {

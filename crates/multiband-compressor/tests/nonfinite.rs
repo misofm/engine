@@ -15,7 +15,7 @@ use effect_contract::{
     PreparedEffect,
 };
 use multiband_compressor::MultibandCompressorFactory;
-use support::{request_with, snapshot, varied_values};
+use support::{request_with, snapshot, snapshot_track, varied_values};
 
 const FRAMES: usize = 128;
 /// A freshly prepared effect: its processor and the metadata its preparation returned.
@@ -167,9 +167,9 @@ fn recovery_restores_a_fresh_instance() {
     }
 }
 
-/// A level below the shared limit is accepted; one lane's failure zeroes the whole bank block.
+/// A level below the shared limit is accepted.
 #[test]
-fn the_boundary_is_the_shared_limit_and_a_bank_shares_its_reset() {
+fn the_boundary_is_the_shared_limit() {
     const BLOCKS: usize = 12;
     let mut effect = prepared().processor;
     let mut left = vec![1.0e29f32; BLOCKS * FRAMES];
@@ -192,8 +192,21 @@ fn the_boundary_is_the_shared_limit_and_a_bank_shares_its_reset() {
             "1e29 is below the 1e30 limit and must pass (block {block})"
         );
     }
+}
 
-    // The bank half runs at the build's own bank width (issue #1112).
+/// One lane's failure in a bank is recovered on that lane alone (issue #1340, D1).
+///
+/// Lane 3 gets a `NaN` at frame 5 of block 0, then exact zeros on both channels for the rest of
+/// the block (so its silence clock has run), and a threshold point that is still ramping when
+/// the block fails. Its block is `+0.0` on both channels and charged once; right after it, its
+/// state is exactly a fresh scalar instance's at the ramp's target, and its later blocks are
+/// that instance's render. Every other lane is bit-identical to the same bank without the `NaN`.
+#[test]
+fn a_failing_bank_lane_recovers_alone() {
+    const BLOCKS: usize = 6;
+    const FAILING: usize = 3;
+    const THRESHOLD: f32 = -30.0;
+    // The bank runs at the build's own bank width (issue #1112).
     let width = BankWidth::for_backend(lane::Backend::current()).expect("a vector backend");
     let lanes = width.lanes() as usize;
     let sets = (0..lanes).map(varied_values).collect::<Vec<_>>();
@@ -201,53 +214,146 @@ fn the_boundary_is_the_shared_limit_and_a_bank_shares_its_reset() {
         .iter()
         .map(|set| request_with(set, LinkMode::DualMono, FRAMES as u32, false))
         .collect::<Vec<_>>();
-    let mut bank = support::bank(width, &requests).processor;
-    let mut left = support::signal(FRAMES * lanes * BLOCKS, 0x1111_2222);
-    let mut right = support::signal(FRAMES * lanes * BLOCKS, 0x3333_4444);
-    let offsets = vec![0u32; lanes + 1];
-    left[5 * lanes + 3] = f32::NAN;
-    let failing = 5 / FRAMES;
+    let mut clean_left = support::signal(FRAMES * lanes * BLOCKS, 0x1111_2222);
+    let mut clean_right = support::signal(FRAMES * lanes * BLOCKS, 0x3333_4444);
+    for frame in 6..FRAMES {
+        clean_left[frame * lanes + FAILING] = 0.0;
+        clean_right[frame * lanes + FAILING] = 0.0;
+    }
+    let mut left = clean_left.clone();
+    let mut right = clean_right.clone();
+    left[5 * lanes + FAILING] = f32::NAN;
+    // One point on the failing track's left low-band threshold, landing on block 0.
+    let spans = [support::point(
+        1,
+        effect_contract::ParameterChannel::Left,
+        0,
+        THRESHOLD,
+    )];
+    let offsets = (0..=lanes)
+        .map(|track| u32::from(track > FAILING))
+        .collect::<Vec<_>>();
+    // The reference: a fresh scalar instance of the failing track at the ramp's target.
+    let mut target = sets[FAILING];
+    target[2].value = THRESHOLD;
+    let fresh = MultibandCompressorFactory
+        .prepare(request_with(
+            &target,
+            LinkMode::DualMono,
+            FRAMES as u32,
+            false,
+        ))
+        .expect("prepare");
+    let sizes = fresh.metadata.state_sizes;
+    let mut fresh = fresh.processor;
+    let mut faulted = support::bank(width, &requests).processor;
+    let mut clean = support::bank(width, &requests).processor;
     for block in 0..BLOCKS {
         let start = block * FRAMES * lanes;
-        let report = bank.process_bank(
+        let range = start..start + FRAMES * lanes;
+        let block_spans: &[_] = if block == 0 { &spans } else { &[] };
+        let block_offsets = if block == 0 {
+            offsets.clone()
+        } else {
+            vec![0u32; lanes + 1]
+        };
+        let report = faulted.process_bank(
             EffectBankProcessBlock::new(
-                &mut left[start..start + FRAMES * lanes],
-                &mut right[start..start + FRAMES * lanes],
+                &mut left[range.clone()],
+                &mut right[range.clone()],
                 None,
                 FRAMES as u32,
                 width,
                 (block * FRAMES) as u64,
-                &[],
-                &offsets,
+                block_spans,
+                &block_offsets,
                 FRAMES as u32,
             )
             .expect("bank block"),
         );
-        if block != failing {
-            assert!(
-                report
-                    .reports
-                    .iter()
-                    .all(|track| track.nonfinite_left_blocks == 0),
-                "block {block} should be clean"
-            );
-            continue;
-        }
-        assert!(
-            left[start..start + FRAMES * lanes]
-                .iter()
-                .chain(right[start..start + FRAMES * lanes].iter())
-                .all(|sample| *sample == 0.0),
-            "a bank shares its reset, so a failing lane zeroes the whole block"
+        clean.process_bank(
+            EffectBankProcessBlock::new(
+                &mut clean_left[range.clone()],
+                &mut clean_right[range],
+                None,
+                FRAMES as u32,
+                width,
+                (block * FRAMES) as u64,
+                block_spans,
+                &block_offsets,
+                FRAMES as u32,
+            )
+            .expect("bank block"),
         );
-        assert_eq!(report.reports[3].nonfinite_left_blocks, 1);
         for (track, item) in report.reports.iter().enumerate() {
-            if track != 3 {
-                assert_eq!(
-                    item.nonfinite_left_blocks, 0,
-                    "track {track} was not the failing lane"
-                );
-            }
+            let charged = u64::from(block == 0 && track == FAILING);
+            assert_eq!(
+                (item.nonfinite_left_blocks, item.nonfinite_right_blocks),
+                (charged, 0),
+                "block {block}, track {track}"
+            );
+        }
+        if block == 0 {
+            assert_eq!(
+                snapshot_track(faulted.as_ref(), FAILING as u32, sizes),
+                snapshot(fresh.as_ref(), sizes),
+                "the recovered lane is exactly a fresh instance: filter, smoother, clock, ramps"
+            );
+        }
+    }
+    for (index, (sample, clean)) in left
+        .iter()
+        .zip(&clean_left)
+        .chain(right.iter().zip(&clean_right))
+        .enumerate()
+    {
+        if index % lanes != FAILING {
+            assert_eq!(
+                sample.to_bits(),
+                clean.to_bits(),
+                "word {index}: a neighbour of the failing lane moved"
+            );
+        }
+    }
+    let lane_of = |pcm: &[f32], block: usize| {
+        (block * FRAMES..(block + 1) * FRAMES)
+            .map(|frame| pcm[frame * lanes + FAILING])
+            .collect::<Vec<_>>()
+    };
+    assert!(
+        lane_of(&left, 0)
+            .iter()
+            .chain(&lane_of(&right, 0))
+            .all(|sample| sample.to_bits() == 0),
+        "the failing lane's block is +0.0 on both channels"
+    );
+
+    let (input_left, input_right) = (
+        support::signal(FRAMES * lanes * BLOCKS, 0x1111_2222),
+        support::signal(FRAMES * lanes * BLOCKS, 0x3333_4444),
+    );
+    for block in 1..BLOCKS {
+        let mut fresh_left = lane_of(&input_left, block);
+        let mut fresh_right = lane_of(&input_right, block);
+        support::process(
+            fresh.as_mut(),
+            &mut fresh_left,
+            &mut fresh_right,
+            (block * FRAMES) as u64,
+            &[],
+            FRAMES as u32,
+        );
+        for (frame, (bank, alone)) in lane_of(&left, block)
+            .iter()
+            .zip(&fresh_left)
+            .chain(lane_of(&right, block).iter().zip(&fresh_right))
+            .enumerate()
+        {
+            assert_eq!(
+                bank.to_bits(),
+                alone.to_bits(),
+                "block {block}, word {frame}: the recovered lane is not the fresh instance"
+            );
         }
     }
 }
