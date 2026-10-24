@@ -54,6 +54,12 @@ fn one_race_at_a_time() -> MutexGuard<'static, ()> {
 /// the blocks the race renders.
 const WEDGE_BLOCKS: u64 = 256;
 
+/// Render blocks the plan-swap race keeps running after its last admission while no control call
+/// has yet overlapped a render call (#1405): on one CPU the two threads alternate, so an overlap
+/// needs a preemption inside a render call, and the swaps alone render too few blocks to be sure
+/// of one.
+const OVERLAP_BLOCKS: u64 = 4_096;
+
 fn limits() -> CompileLimits {
     CompileLimits {
         struct_size: COMPILE_LIMITS_SIZE,
@@ -293,6 +299,8 @@ struct Control<'a> {
     request: Vec<u8>,
     admitted: u64,
     overlapped: u64,
+    /// The rendered-block count when a control call first overlapped a render call.
+    first_overlap: Option<u64>,
     failure: Option<String>,
     admission_block: u64,
     next_frame: u64,
@@ -308,8 +316,20 @@ struct Control<'a> {
 }
 
 impl Control<'_> {
+    /// Whether every swap is admitted (or the race failed). The race goes on after this.
     fn is_done(&self) -> bool {
         self.admitted == self.swaps || self.failure.is_some()
+    }
+
+    /// Whether the race is over (#1405): every swap is admitted and either a control call has
+    /// overlapped a render call or [`OVERLAP_BLOCKS`] blocks have rendered since the last
+    /// admission, or the race failed.
+    fn race_over(&self) -> bool {
+        self.failure.is_some()
+            || (self.is_done()
+                && (self.overlapped > 0
+                    || self.rendered.load(Ordering::Acquire)
+                        >= self.admission_block + OVERLAP_BLOCKS))
     }
 
     fn fail(&mut self, failure: String) {
@@ -361,7 +381,7 @@ impl Control<'_> {
     }
 
     fn step_feeding(&mut self, feed: bool) {
-        if self.is_done() {
+        if self.done.load(Ordering::Acquire) {
             return;
         }
         let admitted = self.admitted;
@@ -379,11 +399,22 @@ impl Control<'_> {
                     "dequeue lane {lane} after {admitted} swaps: {code}"
                 ));
             }
-            self.overlapped += u64::from(overlapping && self.in_render.load(Ordering::SeqCst));
+            if overlapping && self.in_render.load(Ordering::SeqCst) {
+                self.overlapped += 1;
+                self.first_overlap
+                    .get_or_insert_with(|| self.rendered.load(Ordering::Acquire));
+            }
         }
         let code = query(self.plan_address);
         if code != RESULT_OK {
             return self.fail(format!("plan resources after {admitted} swaps: {code}"));
+        }
+        // Every swap is admitted: keep feeding, dequeuing and querying until the race is over.
+        if self.is_done() {
+            if self.race_over() {
+                self.done.store(true, Ordering::Release);
+            }
+            return;
         }
         // The block in flight at admission may predate the publication; the next one swaps.
         let blocks = self.rendered.load(Ordering::Acquire);
@@ -444,7 +475,7 @@ impl Control<'_> {
                     counters.candidate_taken,
                     counters.candidate_superseded,
                 );
-                if self.is_done() {
+                if self.race_over() {
                     self.done.store(true, Ordering::Release);
                 }
             }
@@ -536,6 +567,7 @@ fn race_plan_swaps(swaps: u64, readers: usize, back_to_back: bool) {
         request,
         admitted: 0,
         overlapped: 0,
+        first_overlap: None,
         failure: None,
         admission_block: 0,
         next_frame: 0,
@@ -556,7 +588,8 @@ fn race_plan_swaps(swaps: u64, readers: usize, back_to_back: bool) {
         reserved: [0; 2],
     };
     // Every swap needs two blocks, and a healthy one is never backpressured for longer than
-    // `WEDGE_BLOCKS`; blocks after the race ends render nothing.
+    // `WEDGE_BLOCKS`; blocks after the race ends render nothing. The bound also holds the
+    // `OVERLAP_BLOCKS` after a healthy run's last admission (24 swaps: 6192 > 48 + 4096).
     let block_bound = usize::try_from(swaps * (WEDGE_BLOCKS + 2)).expect("block bound");
     let polled = std::thread::scope(|scope| {
         let pollers = (0..readers)
@@ -606,8 +639,9 @@ fn race_plan_swaps(swaps: u64, readers: usize, back_to_back: bool) {
             // (`Taken`), or not before it (`Withdrawn`).
             let control = &mut control;
             let stop = &stop;
+            let done = &done;
             let producer = scope.spawn(move || {
-                while !stop.load(Ordering::Acquire) && !control.is_done() {
+                while !stop.load(Ordering::Acquire) && !done.load(Ordering::Acquire) {
                     control.step();
                     std::thread::yield_now();
                 }
@@ -775,6 +809,18 @@ fn race_plan_swaps(swaps: u64, readers: usize, back_to_back: bool) {
         "vacuous: {} source blocks fed across {swaps} swaps",
         control.fed_blocks
     );
+    println!(
+        "{swaps} swaps: {} overlaps, the first at block {:?}; last admission at block {}, \
+         {blocks} blocks",
+        control.overlapped, control.first_overlap, control.admission_block
+    );
+    // #1405: after the last admission the race keeps rendering, feeding and dequeuing until a
+    // control call overlaps a render call or `OVERLAP_BLOCKS` blocks have rendered. On correct
+    // code this fails only if the scheduler never preempts the render thread inside any of 4096
+    // consecutive render calls while the control thread is runnable and yields between steps. On
+    // one loaded CPU the swaps alone (about 55 blocks) went vacuous in 83 of 200 runs, a per-block
+    // overlap chance of about 0.016; 4096 blocks put the vacuous chance near e^-65, and still near
+    // e^-6.5 at a tenth of that rate.
     assert!(
         control.overlapped > 0,
         "vacuous: no control call overlapped a render call"

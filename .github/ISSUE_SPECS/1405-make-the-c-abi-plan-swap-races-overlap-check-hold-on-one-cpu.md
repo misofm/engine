@@ -86,3 +86,36 @@ because a single CPU was not preempted at the right moment.
 ## Dependencies
 
 - None. It may land before or after #1404.
+
+## Decision and evidence record (attempt 1, 2026-10-24)
+
+- **D2 = (a)** (root, from the scope note). Separate "swaps admitted" (`Control::is_done`) from
+  "race over" (`Control::race_over`). `done` is stored only when every swap is admitted and either
+  `overlapped > 0` or `OVERLAP_BLOCKS = 4096` blocks have rendered since the last admission (or the
+  race failed). Feeding, both dequeues and the query go on after the last swap. The change covers
+  all three callers: `race_plan_swaps(24, 0, false)`, `(200, 2, false)` and `(64, 0, true)`.
+- **Gate 1 count (root decision):** 50 invocations per test, not 200.
+- **Gate 1 result: FAIL.** Debug binary, 150 invocations (50 per test), 6 lanes on CPUs 26-31,
+  each pinned with `taskset` to one CPU shared with one busy loop.
+  - 24 swaps: 31/50 pass.
+  - 200 swaps, 2 readers: 50/50 pass.
+  - 64 back to back: 3/50 pass.
+  - Failures: 57 at the overlap assertion, after exactly 4096 more blocks with 0 overlaps. 9 at
+    #1310's `withdrawn > 0 && taken > 0` assertion, a separate scheduler-dependent guard.
+  - Passing runs: median 2 overlaps (24 swaps), 12 (200 swaps), 2 (back to back). The first
+    overlap came at most 1336 blocks after the last admission.
+- **Finding: the probability argument does not hold.** A vacuous run stays vacuous for 4096 more
+  blocks, so the overlap chance is a property of the whole run, not an independent chance per
+  block. A likely cause, not proven: under EEVDF (kernel 6.8) each `yield_now` pushes the yielding
+  thread's virtual deadline forward. In the paced mode the control thread yields after every step,
+  and the render thread renders back to back while PCM is queued. When a tick preempts the render
+  thread inside a render call, the busy loop or the render thread is picked before the control
+  thread. The control thread then runs only when the render thread yields, which is never inside
+  a render call.
+- **Diagnostic, not committed:** in the back-to-back loop, a 50 us `sleep` replaced `yield_now`
+  after the last admission. Of 22 pinned runs, every run that reached the overlap assertion passed
+  it (2 overlaps each). The failing runs failed #1310's `taken > 0` assertion instead. The paced
+  mode's yield is in `bench_support::producer`, which is outside this issue's paths.
+- **Gate 2 (PR evidence): PASS.** With `in_render.store(true, ..)` commented out, each test failed
+  with "vacuous: no control call overlapped a render call" after 4096 blocks past its last
+  admission (4146, 4510 and 4160 blocks, in 5.2 s, 9.0 s and 2.8 s). The line is restored.
