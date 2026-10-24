@@ -6285,14 +6285,14 @@ fn the_attachment_charge_is_checked_against_the_caps() {
     )
     .expect("nine-track compile");
     let caps = prepare_caps(&compiled, options, 512, u64::MAX);
-    let (host, _, _) = prepare_web_host(
+    let (host, _, _) = host_core::prepare_host_runtime_with_live_lanes_and_spectrum(
         &compiled,
         &caps,
         &live_control_request(options, 128).expect("request"),
-        None,
         controls::live_lanes(compiled.normalized_model()).into(),
-        &host_core::LiveValuesSuperseded::new(),
         None,
+        None,
+        &host_core::LiveValuesSuperseded::new(),
     )
     .expect("reference preparation");
     let base = host.report;
@@ -6376,8 +6376,8 @@ fn web_runtime_preparer_attaches_the_companions_on_every_branch() {
         CompanionCapture::Collection,
     ] {
         let record = Arc::new(Mutex::new(BootRecord::default()));
-        let preparer = WebRuntimePreparer::new(options, companion_request(capture))
-            .recording(Arc::clone(&record));
+        let request = companion_request(capture);
+        let preparer = WebRuntimePreparer::new(options).recording(Arc::clone(&record));
         let superseded = host_core::LiveValuesSuperseded::new();
         let check =
             |host: &mut PreparedHost, handles: &host_core::HostLiveControlHandles, at: &str| {
@@ -6410,20 +6410,20 @@ fn web_runtime_preparer_attaches_the_companions_on_every_branch() {
             };
 
         let (mut boot, boot_handles, _) = preparer
-            .prepare(&compiled, &caps, lanes, None, None, &superseded)
+            .prepare(&compiled, &caps, lanes, request.as_ref(), None, &superseded)
             .unwrap_or_else(|failure| panic!("{capture:?} boot: {failure:?}"));
         check(&mut boot, &boot_handles, "boot");
         // The attachment is charged in the plan's rows (the control plane builds its plan
         // resource row from this report): the same preparation without the attachment, plus the
         // attachment's own box and vector buffers, in both plan rows and in the largest allocation.
-        let (reference, _, _) = prepare_web_host(
+        let (reference, _, _) = host_core::prepare_host_runtime_with_live_lanes_and_spectrum(
             &compiled,
             &caps,
             &live_control_request(options, 128).expect("request"),
-            companion_request(capture).as_ref(),
             lanes,
-            &superseded,
+            request.as_ref(),
             None,
+            &superseded,
         )
         .unwrap_or_else(|failure| panic!("{capture:?} reference: {failure:?}"));
         let (retained, largest) = boot
@@ -6464,7 +6464,14 @@ fn web_runtime_preparer_attaches_the_companions_on_every_branch() {
             ..host_core::SuccessorBase::new(&boot.inventory, model, 1)
         };
         let (mut successor, successor_handles, _) = preparer
-            .prepare(&compiled, &caps, lanes, None, Some(base), &superseded)
+            .prepare(
+                &compiled,
+                &caps,
+                lanes,
+                request.as_ref(),
+                Some(base),
+                &superseded,
+            )
             .unwrap_or_else(|failure| panic!("{capture:?} successor: {failure:?}"));
         check(&mut successor, &successor_handles, "successor");
         // Every successor carries the timeline's command queue (#1641 D7), which is overhead
@@ -7079,6 +7086,70 @@ mod structural_apply {
     fn a_running_spectrum_stream_continues_across_a_rebuild() {
         stream_continues(single_capture, start_stream, SPECTRUM_APPLY_BEFORE);
         stream_continues(single_capture, start_stream, SPECTRUM_BLOCKS - 3);
+    }
+
+    /// Issue #1593 gate 8. Test value: red if the browser preparer prepares a successor with its
+    /// own copy of the boot request instead of the session's configuration (the removed target is
+    /// then refused `host.spectrum.target`), or if the promotion of a successor prepared with no
+    /// configuration leaves the boot plan's service reading.
+    #[test]
+    fn removing_the_spectrum_target_strip_is_accepted_and_drops_the_service() {
+        let model = gate_model();
+        let target = model.tracks[3].id.clone();
+        let route = model
+            .routes
+            .iter()
+            .find(|route| {
+                matches!(&route.source, RouteSource::Track { track_id, .. } if *track_id == target)
+            })
+            .expect("the target's route")
+            .id
+            .clone();
+        let mut rig = Rig::boot(&model, options(), single_capture());
+        start_stream(&mut rig);
+        while rig.block < SPECTRUM_APPLY_BEFORE {
+            rig.step();
+        }
+        assert_eq!(
+            rig.read_stream().metadata.status,
+            SpectrumStreamStatus::Ready,
+            "the boot plan's stream reads a window"
+        );
+        let base = rig.host.committed_revision();
+        let edits = [
+            SessionEdit::RemoveRoute { route_id: route },
+            SessionEdit::RemoveTrack { track_id: target },
+        ];
+        assert_eq!(
+            rig.apply(&edits, 1),
+            Outcome::Applied {
+                path: EditPath::Rebuild,
+                revision: base + 1
+            },
+            "the edit is never refused for a spectrum entry"
+        );
+        // D7: until render adopts the successor, a service step keeps the running plan's service.
+        assert_eq!(rig.host.service(None), RESULT_OK);
+        assert_eq!(
+            rig.host
+                .spectrum_stream_metadata()
+                .expect("the running plan's service reads until adoption")
+                .status,
+            SpectrumStreamStatus::Ready
+        );
+        rig.step();
+        assert_eq!(rig.epoch(), 1, "render adopted the successor");
+        assert_eq!(rig.host.service(None), RESULT_OK);
+        assert_eq!(rig.spectrum_promotions_waiting(), 0);
+        assert!(
+            rig.host.spectrum_stream_metadata().is_none(),
+            "the successor has no spectrum observer, so the browser holds no service"
+        );
+        assert_eq!(
+            rig.host.arm_spectrum(),
+            spectrum_result(SpectrumServiceError::Unprepared)
+        );
+        rig.step();
     }
 
     /// Everything a refusal must leave as it was.
