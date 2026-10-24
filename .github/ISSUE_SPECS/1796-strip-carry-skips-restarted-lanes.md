@@ -1,4 +1,4 @@
-# #1796 Test that the strip carry does not drain the lanes a swap restarts
+# Test that the strip carry does not drain the lanes a swap restarts
 
 Found by the #1538 verifier (2026-10-24, mutant M2).
 
