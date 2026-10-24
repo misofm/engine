@@ -7460,7 +7460,7 @@ mod tests {
         );
         let mut single = inventory_with(lane_row(1, layout()));
         single.spectrum = Box::new([spectrum_row(t(), SpectrumChannels::Stereo, 0, 10)]);
-        let none = super::resolve_spectrum_carry(&single, &own, true, 48_000, 128);
+        let none = super::resolve_spectrum_carry(&single, &own, true, 48_000, 128, |_| true);
         assert!(
             none.moves.is_empty() && none.pairing.is_empty(),
             "a single capture does not carry into a collection"
