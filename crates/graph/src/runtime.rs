@@ -18556,6 +18556,34 @@ mod follow_route_op_tests {
             );
         }
 
+        /// #1363: a route whose armed fade-in has not fired when a later swap displaces its plan
+        /// fires at that swap: the successor takes the fade's ramp from rest, so it never holds a
+        /// route that waits silent for a fire its own table does not hold.
+        ///
+        /// Test value: red if the carry copies the waiting route's silence into the successor,
+        /// which then stays silent for good (no successor entry fires it).
+        #[test]
+        fn an_armed_route_a_swap_displaces_fires_at_the_swap() {
+            let mut from = Six::new(gated(OPEN, [false; 2]), false);
+            assert!(from.route.arm_fade_in(RECORD_RAMP));
+            let mut into = Six::new(gated(OPEN, [false; 2]), false);
+            carry_route(
+                CarriedRoute::Six(&mut into.route),
+                CarriedRoute::Six(&mut from.route),
+                None,
+            );
+            let (mut left, mut right) = input(AFTER);
+            assert!(into.block(&mut left, &mut right), "the successor mixes");
+            let (mut want_left, mut want_right) = input(AFTER);
+            route_mix_ramp_block::<FrameLane>(
+                &mut want_left,
+                &mut want_right,
+                &IndexedRamp::new([0.0; 4], gated(OPEN, [false; 2]), RECORD_RAMP),
+                0,
+            );
+            assert_eq!(bits((&left, &right)), bits((&want_left, &want_right)));
+        }
+
         /// Gate 4 (six -> seven, the rebuild adds an automated mute to the source). (a) With the
         /// curve open at the swap, the successor's composed target has the adopted ramp's bits:
         /// it keeps the ramp, its position and its mute by route ID and its swap block equals the
