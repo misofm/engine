@@ -1198,23 +1198,27 @@ fn event_lanes_take_the_own_entry_and_every_reaching_vca_ride() {
             assert_eq!(index.vca_offset(vca), vca_offset_automation(&mixed, vca));
             assert_eq!(index.vca_mute(vca), vca_mute_automation(&mixed, vca));
         }
-        // #1844: the event lanes through the VCA reach, and the VCA-mute flag, as the scans give.
-        let reach = mixed.vca_reach();
-        for (strip, reach) in mixed.strips().map(|strip| strip.id.clone()).zip(&reach) {
-            assert_eq!(
-                (
-                    index.automated_fader_lanes(&strip),
-                    index.fader_event_lanes(&strip, reach),
-                    index.mute_event_lanes(&strip, reach),
-                    index.any_vca_mute(),
-                ),
-                (
-                    automated_fader_lanes(&mixed, &strip),
-                    fader_event_lanes(&mixed, &strip, reach),
-                    mute_event_lanes(&mixed, &strip, reach),
-                    true,
-                ),
-            );
+        // #1844: the event lanes through the VCA reach, and the VCA-mute flag, as the scans give,
+        // also on the table before the second ride (where a VCA lane decides a fader event lane).
+        for table in [&model, &mixed] {
+            let index = AutomationIndex::of(table);
+            let reach = table.vca_reach();
+            for (strip, reach) in table.strips().map(|strip| strip.id.clone()).zip(&reach) {
+                assert_eq!(
+                    (
+                        index.automated_fader_lanes(&strip),
+                        index.fader_event_lanes(&strip, reach),
+                        index.mute_event_lanes(&strip, reach),
+                        index.any_vca_mute(),
+                    ),
+                    (
+                        automated_fader_lanes(table, &strip),
+                        fader_event_lanes(table, &strip, reach),
+                        mute_event_lanes(table, &strip, reach),
+                        true,
+                    ),
+                );
+            }
         }
     }
 
