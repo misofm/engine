@@ -530,9 +530,9 @@ record, on the one coefficient) ramps over the polarity record's length; with th
 
 ### 9.4 The bypass crossfade (question 5): `muteMs`, 10 ms
 
-**Method.** For each launch effect with a shunt (every native effect but the delay and the
-multiband compressor, `effect_compiler::lowers_session_bypass`), the effect's own scalar instance
-renders the material from its first frame (wet), and the engine's `BypassShunt` gives the
+**Method.** For each launch effect (every one has a shunt: the delay since #1339 and the multiband
+compressor since #1340, `effect_compiler::EffectPreparedEntry::initial_bypass`; both measured by
+#1830), the effect's own scalar instance renders the material from its first frame (wet), and the engine's `BypassShunt` gives the
 latency-matched dry signal. The switch lands at the materials' event blocks and is emulated with
 #1341's law: `out = dry + (wet - dry) * m(k)`, `m` word 0 of an `IndexedRamp`, frame `f` of the
 applying block at `k = f + 1`, one `f32` subtract, multiply and add, both ends exact copies; 0 ms is
@@ -553,7 +553,13 @@ set for 6.0 dB peak gain reduction (about -20.8, -12.8 and -19.4 dBFS on bass, k
 output level-matched to the dry RMS (-9.4, -6.2 and -9.9 dB); transient shaper attack +50 % (kick
 and mix); gate closing on the kick (threshold -6 dBFS, ratio 20, range 80 dB, no hysteresis,
 attack 1 ms, hold 20 ms, release 50 ms; it opens on each hit and closes in the body, where the
-switches fall).
+switches fall); delay at its shipped defaults (250 ms, an eighth note at the materials' 120 BPM,
+feedback 0.35, damping 0.25, mix 0.35, dual mono), whose echoes keep building while it is bypassed
+as in the engine; multiband compressor at its defaults (crossover 1 kHz, ratio 4, attack 10 ms,
+release 100 ms, no makeup), one threshold for both bands set so that the peak of its own `Gain
+Reduction` observation, read after each block, is 6.0 dB (-20.8, -12.8 and -20.1 dBFS). The
+multiband is not calibrated on the per-sample ratio the compressor uses: its unprocessed output is
+the crossover's second-order all-pass of the input, whose phase the ratio would count as reduction.
 
 **Results**, 48 kHz (`bypass_crossfade.csv`; 2 and 5 ms in the CSV; bypass and unbypass agree to
 0.00 dB; across the launch rates OOB within 2.4 dB, CTR and the mix's HF splatter within 6 dB):
@@ -568,16 +574,34 @@ switches fall).
 | saturator | -13.7 / -11.2 / -13.5 | -50.9 / +50.1, -46.8 / +52.3, -36.3 | -90.5 / +9.4, -83.8 / +12.4, -65.2 | -96.2 / +2.3, -89.3 / +7.1, -72.0 |
 | transient shaper | - / -62.5 / -15.0 | -, -105.7 / -6.1, -39.1 | -, -116.7 / -22.9, -72.4 | -, -117.3 / -22.9, -73.3 |
 | gate | - / -0.8 / - | -, -34.7 / +63.2, - | -, -72.4 / +23.1, - | -, -78.5 / +17.1, - |
+| delay | -5.0 / -9.2 / -5.9 | -40.6 / +58.4, -44.5 / +53.5, -28.2 | -82.0 / +14.5, -82.3 / +12.9, -61.3 | -88.2 / +8.4, -88.6 / +7.5, -67.6 |
+| multiband | -5.7 / -9.2 / -6.8 | -42.0 / +56.8, -43.5 / +55.7, -27.2 | -82.8 / +12.9, -81.4 / +15.1, -55.1 | -88.8 / +7.5, -87.6 / +8.8, -60.8 |
 
 `step` is the energy of `wet - dry` around the switch relative to the dry programme. The crossfade's
 click is the mute's at the same length scaled by that step: on the bass and kick, wherever the step
-is above -40 dB, the click's OOB is the mute reference's plus the step within -1.1 to +1.8 dB, at
+is above -40 dB, the click's OOB is the mute reference's plus the step within -1.4 to +1.8 dB, at
 every length from 2 ms and every rate. No effect's click exceeds the mute reference's at the same
-length, rate, material and transition on any measure. The largest excess on each measure is below
-zero, and every one is the gate on the kick, which switches between a closed gate and the open kick,
-which is a mute: -0.01 dB on worst OOB (44.1 kHz at 2 and 10 ms, 48 kHz at 0 and 10 ms), -0.04 dB on
-CTR (48 kHz, 20 ms), -0.14 dB on HF splatter, -0.15 dB on OOB and -0.69 dB on total splatter. The
-saturator's own harmonics
+length, rate, material and transition on any measure, with one exception: the multiband on the mix,
+in HF splatter. Without it the largest excess on each measure is below zero, and every one is the
+gate on the kick, which switches between a closed gate and the open kick, which is a mute: -0.01 dB
+on worst OOB (44.1 kHz at 2 and 10 ms, 48 kHz at 0 and 10 ms), -0.04 dB on CTR (48 kHz, 20 ms),
+-0.14 dB on HF splatter, -0.15 dB on OOB and -0.69 dB on total splatter. The delay stays at least
+2.6 dB under the mute reference on every measure.
+
+The multiband's HF splatter on the mix is +0.8 to +2.3 dB above the mute reference's at every length
+from 2 ms and every rate (48 kHz: +1.8, +1.3, +1.7 and +1.7 dB at 2, 5, 10 and 20 ms; at 0 ms it is
+4.6 to 6.3 dB under). The reason is the crossover, not the compression. Its unprocessed output is the
+second-order Butterworth all-pass of the input, which is in antiphase with the input at the 1 kHz
+crossover (`H(j) = -1`), so near 1 kHz `wet - dry` is up to twice the programme, 6 dB more than a
+mute's difference, and the crossfade spreads that energy above the 1.5 kHz edge of the HF measure.
+The bass (every partial at or below 1 kHz) and the kick have little energy there, so their rows are
+3.3 dB or more under. A one-off run at 48 kHz with both ratios at 1, so that the multiband is the
+all-pass alone, confirms it: step -9.1 dB on the mix and HF splatter +2.3, +1.9, +2.2 and +2.2 dB
+above the mute reference at 2, 5, 10 and 20 ms, at least the calibrated setting's excess at 48 kHz
+(PR evidence, not in the CSV). At 10 ms the multiband's mix click (-54.3 to -55.8 dB over the rates)
+is still 2.7 to 3.6 dB under the 5 ms mute's. The excess comes from the effect's phase response,
+which no crossfade length removes.
+The saturator's own harmonics
 fill the out-of-band region 30 dB above its 10 ms click (`wet_oob_db` -58.9 dB on the bass). The
 transient shaper's kick switches fall in the body, after its attack boost has decayed (step
 -62 dB); its mix row, whose switches fall at random times, carries its transients.
@@ -586,14 +610,16 @@ transient shaper's kick switches fall in the body, after its attack boost has de
 between two latency-matched versions of one programme, and its crossfade clicks like a mute of the
 same length scaled by the size of the change; every representative setting changes the programme
 by at most a mute's step (steps of -0.8 to -15 dB), so at 10 ms its click is at most a 10 ms mute's,
-the criterion that set `muteMs` (section 1). Over the four rates the 10 ms crossfade's click is
-36.8-41.2 dB below today's step out of band on the bass and kick and 26.2-40.8 dB below it in the
-mix's HF splatter (48 kHz: 37.0-41.1 and 28.9-40.8 dB; the lowest, 26.2 dB, is the transient shaper
-on the mix at 44.1 kHz). The transient shaper on the kick is apart: its switches fall in the body,
+the criterion that set `muteMs` (section 1). The one exception is the multiband on the mix, 1.5 to
+2.2 dB above the 10 ms mute's in HF splatter from its crossover all-pass and still under the 5 ms
+mute's (above); no ramp length removes a phase difference, so it does not move the key or the
+value. Over the four rates the 10 ms crossfade's click is 36.8-41.4 dB below today's step out of
+band on the bass and kick and 26.2-40.8 dB below it in the mix's HF splatter (48 kHz: 37.0-41.4 and
+27.9-40.8 dB; the lowest, 26.2 dB, is the transient shaper on the mix at 44.1 kHz). The transient shaper on the kick is apart: its switches fall in the body,
 where its step is -60.3 to -62.5 dB and today's click is already -105.7 to -107.3 dB out of band, so
 the crossfade lowers it by only 10.2-11.2 dB. A setting that changes the level by more than a mute
 does (an EQ boost above +6 dB, or large makeup gain) clicks more in proportion to its step, as a
-hand-switched bypass would, and the crossfade still removes the same 36.8-41.2 dB of today's step out
+hand-switched bypass would, and the crossfade still removes the same 36.8-41.4 dB of today's step out
 of band.
 
 ### 9.5 The detector link glide (question 6): `faderMs`, 20 ms
@@ -680,7 +706,8 @@ Amendment 1 (block P, 36 trials, made before any trial); no other contrast is ad
   out-of-band click (the change split at the measures' 1.5 kHz edge), and records the answer as a
   finding for root (Amendment 1, 9.7).
 - **Bypass crossfade.** Its click is at most the mute's at the same length for every representative
-  setting (9.4): the M block bounds it.
+  setting but the multiband on the mix, whose HF splatter is up to 2.3 dB above it from the
+  crossover's all-pass and at 10 ms still under the 5 ms mute's (9.4): the M block bounds the rest.
 - **Link glide.** At the defaults its bound sits 16.8 dB or more under the 10 ms mute's on every
   measure (the smallest margin is CTR at 44.1 and 88.2 kHz; 9.5): there is nothing for a listener to
   find that the M block does not bound. This covers the compressor only (9.5, 9.7).
@@ -706,6 +733,19 @@ rows reproduce `mute_click.csv` within 0.20 dB (9.4); every effect block rendere
 (no invalid span, no sanitised or non-finite sample); `summarise.py` prints the tables and ranges
 of 9.2-9.5 from the committed CSVs.
 
+#1830 (2026-10-24, on `38324eb3e`) repaired the harness build for today's effect contract (each
+request carries the registry's tail bound; `prepare` returns the processor and its metadata) and
+reran both commands at all four rates. The repair moves nothing: `bypass_crossfade.csv`,
+`link_glide.csv`, `polarity_click.csv` and five of the seven section 5-6 files are byte for byte the
+committed ones, and the six older effects' bypass rows are unchanged beside the two new ones. Three
+files have moved since they were committed, and are not refolded here: `fader_drag.csv` (45 of 432
+rows), `pan_drag.csv` (21 of 144) and `law_transfer.csv` (31 of 484, both drag cases). Every moved
+row is a 30 or 60 Hz drag with a ramp of 10 ms or more, where the hand retargets a running ramp;
+the largest change is 1.0 dB on one HF splatter cell (96 kHz kick, 800 ms at 30 Hz, 50 ms: -76.10
+to -77.10 dB), every other dB cell moves 0.14 dB or less and `law_transfer.csv`'s largest
+coefficient difference by 1.4e-5. A figure quoted from these files may differ in its last digit;
+no conclusion of sections 5 or 9.3 rests on a change that small. The new `live` output reproduces byte for byte over two four-rate runs.
+
 Not verified:
 
 - the real #1341 crossfade and #1370 glide (both are emulated; their issues' gates test the
@@ -714,9 +754,6 @@ Not verified:
 - the link glide of the gate-expander, the transient shaper and the true-peak limiter: only the
   compressor was measured and bounded, and the bound does not carry to the gate's steep curve and
   threshold crossing as it stands (9.5); #1370's listening item is the only check on them;
-- the bypass crossfade of the delay and the multiband compressor: they have no shunt yet (*Give the
-  delay a live bypass shunt*, #1339; *Give the multiband compressor a live bypass shunt*, #1340), so
-  nothing was measured; #1341 says its law covers them with no further edit once they land;
 - whether a polarity flip's dip through zero (at the default 20 ms: 10 ms below -6 dB, 2 ms below
   -20 dB, silent at the midpoint; 9.2) is heard as a dip on an exposed sustained note. The click
   measures do not assess it. Amendment 1's block P now asks it in #1388's session (preregistered
