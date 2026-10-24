@@ -276,7 +276,9 @@ Acked-batch question for a read: can a reply acknowledge a window it did not ret
 refusal (the D5 measure, `Channels`, `NotArmed`, `Exhausted`) runs before the pop, the output is
 reserved for the frame limit before the session runs, and the reply is recorded for replay in the
 call that writes it. The one consume-then-fail path is an analyzer refusal of a popped window
-(`WindowInvalid`), which no window the service produces reaches.
+(`WindowInvalid`: the analyzer's numerical refusal, which huge finite samples can cause); it
+answers `UNAVAILABLE` `spectrum.window.invalid`, has consumed the window and ended the arm, and
+the semantics doc states the exception.
 
 Mutants (each red on its gate, restored by `git checkout` + `touch`): no read preflight (gate 3),
 no configure R6 check (gate 3), `Busy` to `VALIDATION_FAILED` (gate 6), left bins from the right
@@ -284,3 +286,18 @@ plane (gate 2), no replay record for a capture reply (gate 7), the R6 charge wit
 (R7 row), a plane length not checked (gate 1), a read accepting target fields (gate 1). One
 mutant was equivalent (re-planning a cached request: the preflight refuses it anyway) and is not
 counted.
+
+Fold after the PASS verdict (root, 2026-10-24):
+
+- The read preflight's `include_window` is tested: a `Left` read with its window (16,696 bytes)
+  at the 12,288-byte limit is refused and the window stays (the `*include_window -> false`
+  mutant, which survived, is now red).
+- R6's lower bound is tested: a configure of the tap is accepted at 12,288 bytes (the
+  `Left -> Both` mutant is now red).
+- The monitor's one-shot slot (`OneShot`: the result and the popped snapshot) is boxed once with
+  the service, so a ready read no longer boxes its snapshot; `SPECTRUM_MONITOR_RETAINED_BYTES`
+  charges the whole slot and the R7 row adds `size_of::<SpectrumSnapshot>()`.
+- Gate 7 renders a second window before the replay; the next new read is ready with token 2 at
+  frame 2,048.
+- Follow-ups recorded by root: a spectrum-arm backpressure queue kind (NIT 5); R6 runs only in
+  `SPECTRUM_CONFIGURE`, the browser's boot path is unadvertised (NIT 7, for 1595b).
