@@ -265,9 +265,10 @@ SCALAR_SLACK = 8
 #   true-peak-limiter    f32x4    448 /  0   ratio 0        (dual)
 #   compressor           f32x4    267 /  0   ratio 0        (dual)
 #   true-peak-limiter    f32x4    224 /  0   ratio 0        (collapsed)
-#   gate-expander        f32x4    180 /  8   ratio 0.0444
+#   gate-expander        f32x4    162 /  0   ratio 0        (dual; 180 / 8 before #973)
 #   parametric-eq        f32x4    168 /  0   ratio 0        (dual)
 #   compressor           f32x4    138 /  0   ratio 0        (collapsed)
+#   gate-expander        f32x4     82 /  0   ratio 0        (collapsed, #973)
 #   parametric-eq        f32x4     84 /  0   ratio 0        (collapsed)
 #   soft-clip            f32x4     25 /  0   ratio 0
 #   route-mix-ramp       f32x4     22 /  0   ratio 0        (#1220; row added by its verdict NIT-1)
@@ -316,7 +317,12 @@ SCALAR_SLACK = 8
 KERNEL_ROSTER: tuple[tuple[str, str, float], ...] = (
     ("multiband-compressor f32x4", r"multiband_compressor.*4wide6f32x4", 0.10),
     ("transient-shaper f32x4", r"transient_shaper.*4wide6f32x4", 0.38),
-    ("gate-expander f32x4", r"gate_expander.*4wide6f32x4", 0.19),
+    ("gate-expander f32x4 dual", r"gate_expander.*4wide6f32x4.*12process_bank", 0.19),
+    (
+        "gate-expander f32x4 collapsed",
+        r"gate_expander.*4wide6f32x4.*17process_bank_mono",
+        0.10,
+    ),
     ("compressor f32x4 dual", r"compressor6kernel13process_block.*4wide6f32x4", 0.10),
     (
         "compressor f32x4 collapsed",
