@@ -2026,21 +2026,42 @@ fn carried_rings<'b>(
         .sources
         .iter()
         .filter_map(|source| {
-            let ring = PcmSourceRingConfig {
-                channel_count: u32::from(source.channels),
-                quantum_frames: compiled.quantum(),
-                frame_capacity: u64::from(caps.source_ring_frames),
-                initial_generation: SourceGeneration(1),
-            };
+            let ring = source_ring_config(compiled, caps, source);
             let row = base.inventory.source(source.id.as_str())?;
             let committed = base
                 .committed
                 .sources
                 .iter()
                 .find(|committed| committed.id == source.id)?;
-            (*committed == *source && row.ring == ring).then_some((row, ring.channel_count))
+            source_carries(row, committed, source, ring).then_some((row, ring.channel_count))
         })
         .collect()
+}
+
+/// The ring a preparation at `caps` allocates for `source`.
+fn source_ring_config(
+    compiled: &CompiledSession,
+    caps: &HostPrepareCaps,
+    source: &session::Source,
+) -> PcmSourceRingConfig {
+    PcmSourceRingConfig {
+        channel_count: u32::from(source.channels),
+        quantum_frames: compiled.quantum(),
+        frame_capacity: u64::from(caps.source_ring_frames),
+        initial_generation: SourceGeneration(1),
+    }
+}
+
+/// The #1272 D3 carry rule for a source present in both models: its declaration is unchanged
+/// (`committed` against `source`) and `ring`, the ring the successor would allocate, is the one
+/// the predecessor's `row` renders from.
+fn source_carries(
+    row: &SourceInventoryRow,
+    committed: &session::Source,
+    source: &session::Source,
+    ring: PcmSourceRingConfig,
+) -> bool {
+    *committed == *source && row.ring == ring
 }
 
 /// D3's prime byte count: `4 · (lead · channels + Σ 2 · λ')` over `lines`, `None` on overflow.
@@ -2957,18 +2978,13 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
     let mut carried_largest_bytes = 0_u64;
     for (index, source) in model.sources.iter().enumerate() {
         let index = u32::try_from(index).map_err(|_| platform("host.count"))?;
-        let ring = PcmSourceRingConfig {
-            channel_count: u32::from(source.channels),
-            quantum_frames: compiled.quantum(),
-            frame_capacity: u64::from(caps.source_ring_frames),
-            initial_generation: SourceGeneration(1),
-        };
+        let ring = source_ring_config(compiled, caps, source);
         // Issue #1272 D3: carry when the ID is in both models, the declaration is unchanged and
         // the ring the successor would allocate is the one the predecessor renders from.
         let carried_from = successor.and_then(|base| {
             let row = base.inventory.source(source.id.as_str())?;
             let committed = committed_sources.get(source.id.as_str())?;
-            (**committed == *source && row.ring == ring).then_some(row.index)
+            source_carries(row, committed, source, ring).then_some(row.index)
         });
         if let Some(predecessor_index) = carried_from {
             // D4: no ring here; the single-plan caps below count the carried one.
@@ -8096,6 +8112,91 @@ mod tests {
     use super::{effect_diagnostics, session_diagnostics};
     use effect_compiler::{EffectDiagnostic, EffectDiagnosticSet};
     use session::{DiagnosticCode, parse_session_json};
+
+    /// #1354a decision 2: the whole-strip restart filter drops exactly a restarted strip's
+    /// compensation lines before its matrix (its chain, its effects' sidechains, its routes from a
+    /// tap before the fader), and keeps its matrix and post-fader lines and every other strip's.
+    #[test]
+    fn the_whole_strip_filter_drops_only_the_pre_fader_lines() {
+        let mut model = parse_session_json(include_str!(
+            "../../../fixtures/session/v1/parametric-eq-nine-track.json"
+        ))
+        .expect("fixture parses");
+        let mut pre = model.routes[0].clone();
+        pre.id = session::StableId::parse("eq0-pre").expect("ID");
+        pre.source = session::RouteSource::Track {
+            track_id: session::StableId::parse("eq0").expect("ID"),
+            tap: session::SendTap::PreFader,
+        };
+        model.routes.push(pre);
+        let restart = super::WarmRestart::new(&model, [], ["eq0"]);
+        let gid = |text: &str| graph::StableGraphId::parse(text).expect("graph ID");
+        let stage = |strip: &str, stage| graph::GraphNodeId::TrackStage {
+            track_id: gid(strip),
+            stage,
+        };
+        let line = |edge| graph::GraphDelayLine {
+            edge,
+            source: stage("eq0", graph::TrackStage::Input),
+            destination: stage("eq0", graph::TrackStage::Input),
+            line: 0,
+            samples: 1,
+        };
+        let main = |strip: &str, at| graph::GraphEdgeId::TrackMain {
+            target: stage(strip, at),
+        };
+        let effect = |strip: &str| graph::EffectNodeId {
+            track_id: gid(strip),
+            rack: graph::RackId::Simd1,
+            effect_id: gid("eq"),
+        };
+        let cases = [
+            (main("eq0", graph::TrackStage::PostFader), true),
+            (
+                graph::GraphEdgeId::TrackMain {
+                    target: graph::GraphNodeId::Effect(effect("eq0")),
+                },
+                true,
+            ),
+            (
+                graph::GraphEdgeId::EffectSidechain {
+                    effect: effect("eq0"),
+                    port: "sidechain-in".into(),
+                },
+                true,
+            ),
+            (
+                graph::GraphEdgeId::RouteDestination {
+                    route_id: gid("eq0-pre"),
+                },
+                true,
+            ),
+            (
+                graph::GraphEdgeId::RouteSource {
+                    route_id: gid("eq0-pre"),
+                },
+                true,
+            ),
+            (main("eq0", graph::TrackStage::PostMatrix), false),
+            (
+                graph::GraphEdgeId::RouteDestination {
+                    route_id: gid("eq0-main"),
+                },
+                false,
+            ),
+            (main("eq1", graph::TrackStage::PostFader), false),
+            (
+                graph::GraphEdgeId::EffectSidechain {
+                    effect: effect("eq1"),
+                    port: "sidechain-in".into(),
+                },
+                false,
+            ),
+        ];
+        for (edge, drops) in cases {
+            assert_eq!(restart.drops_line(&line(edge.clone())), drops, "{edge:?}");
+        }
+    }
 
     const SLOT: &str = "comp";
 

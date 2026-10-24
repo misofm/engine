@@ -732,25 +732,49 @@ fn a_parallel_bus_restarts_only_the_feeder_holding_it_late() {
     edit.assert_leads(&w, &carried, LEAD);
 }
 
-/// D4's re-check: a lead prepared against an edit it was not computed for (the join restarts a
-/// strip outside the lead's `R`, and a carried path arrives late) is the invariant error.
+/// The invariant error a warm preparation returns.
+fn invariant() -> PrepareDiagnostics {
+    PrepareDiagnostics::fixed(
+        host_core::PrepareRejection::Graph,
+        "host.successor.warm_invariant",
+    )
+}
+
+/// D4's C1 re-check: a lead too short for the edit (gate 1's restart set, `P = 384` instead of
+/// 512) leaves the output late, and the preparation returns the invariant error.
 #[test]
-fn a_lead_of_another_edit_is_the_invariant_error() {
+fn a_lead_that_misses_c1_is_the_invariant_error() {
+    let edit = limiter_on_t1();
+    let mut lead = warm(edit.decide(&CONFIG));
+    lead.lead_samples = 3 * QUANTUM;
+    let refused = edit
+        .prepare(SuccessorBase {
+            warm: Some(&lead),
+            ..edit.base()
+        })
+        .expect_err("a lead that misses C1");
+    assert_eq!(refused, invariant());
+}
+
+/// D4's join re-check (#1354a ruling 2): gate 1's lead on an edit that also restarts track 2
+/// (a latency-free insert changes its chain) keeps C1 but the join restarts a strip outside the
+/// lead's `R`, and the preparation returns the invariant error.
+#[test]
+fn a_join_outside_the_leads_restart_set_is_the_invariant_error() {
     let lead = warm(limiter_on_t1().decide(&CONFIG));
     let mut b = two_tracks();
-    *inserts(&mut b, "t2") = vec![limiter()];
+    *inserts(&mut b, "t1") = vec![limiter()];
+    *inserts(&mut b, "t2") = vec![effect(
+        "comp",
+        "miso.compressor",
+        SidechainDeclaration::None,
+    )];
     let other = Edit::new(two_tracks(), b);
     let refused = other
         .prepare(SuccessorBase {
             warm: Some(&lead),
             ..other.base()
         })
-        .expect_err("a lead of another edit");
-    assert_eq!(
-        refused,
-        PrepareDiagnostics::fixed(
-            host_core::PrepareRejection::Graph,
-            "host.successor.warm_invariant"
-        )
-    );
+        .expect_err("a join outside R");
+    assert_eq!(refused, invariant());
 }
