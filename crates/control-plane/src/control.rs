@@ -2032,18 +2032,21 @@ where
 
     /// Sets every counter the provider serves from a source outside it (#1348 D8): the
     /// controller's telemetry counters, the session's `live_values_superseded` count (#1312
-    /// D8), its `strips_restarted` count (#1768) and the render-side `live_block_errors` mirror
-    /// (#1521 D3). A counter added later joins this refresh, never a single control call.
+    /// D8), its `strips_restarted` count (#1768) and the render-side `live_block_errors` (#1521
+    /// D3) and `source_underrun_blocks` (#1537) mirrors. A counter added later joins this refresh,
+    /// never a single control call.
     fn refresh_provider_counters(&mut self) {
         let telemetry_counters = self.controller.queues().telemetry_counters();
         let superseded = self.live_values_superseded.get();
         let restarted = self.strips_restarted;
         let errors = self.shared.live_block_errors.load(Ordering::Acquire);
+        let underruns = self.shared.source_underrun_blocks.load(Ordering::Acquire);
         let provider = self.controller.provider_mut();
         provider.set_telemetry_counters(telemetry_counters);
         provider.set_live_values_superseded(superseded);
         provider.set_strips_restarted(restarted);
         provider.set_live_block_errors(errors);
+        provider.set_source_underrun_blocks(underruns);
     }
 
     /// Runs one control command frame. A success returns the response's length in the response
@@ -2514,7 +2517,6 @@ where
             control_catalog: candidate_catalog,
             capi: prospective_capi,
             revision_gate,
-            master_track: _,
         } = prepared_runtime;
         // #1652 U2a fold 2 (MAJOR-A; #1713 deletes it): read before the inventory moves into the
         // candidate's provider epoch.
@@ -4214,8 +4216,8 @@ where
     }
 
     /// The designated master strip of the newest commit (#1683): the strip whose `master`
-    /// monitor row is on, or `None`. Host-local, never saved; the boot word seeds it and a
-    /// `SET_CONTROL` of the row sets or changes it. A host that reports a master reading resolves
+    /// monitor row is on, or `None`. Host-local, never saved; a boot designates no master (#1689),
+    /// and a `SET_CONTROL` of the row sets or changes it. A host that reports a master reading resolves
     /// it by ID in each plan it holds.
     #[must_use]
     pub fn master_strip(&self) -> Option<&session::StableId> {
@@ -4404,6 +4406,41 @@ pub enum SourceFailure {
     Control(SourceControlError),
     /// The control plane could not synchronise its plan epochs.
     Internal,
+}
+
+/// The kind of result a refused source call reports (#1706 D1): each host maps the three kinds to
+/// its own result codes, and neither holds the rule that classifies a [`SourceFailure`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SourceRefusalKind {
+    /// A caller mistake: the call is refused and retrying it unchanged is refused again.
+    InvalidArgument,
+    /// Bounded backpressure: the host retries.
+    Backpressure,
+    /// An engine invariant or the control plane's epoch synchronisation failed.
+    Internal,
+}
+
+impl SourceFailure {
+    /// The kind of result this refusal reports on every host.
+    #[must_use]
+    pub const fn kind(self) -> SourceRefusalKind {
+        match self {
+            Self::Internal => SourceRefusalKind::Internal,
+            Self::Control(error) if error.is_backpressure() => SourceRefusalKind::Backpressure,
+            Self::Control(error) if error.is_internal() => SourceRefusalKind::Internal,
+            Self::Control(_) => SourceRefusalKind::InvalidArgument,
+        }
+    }
+
+    /// The diagnostic text this refusal reports on every host: the facade's text for a typed
+    /// rejection, and `source.epoch` when the plan epochs could not synchronise.
+    #[must_use]
+    pub const fn diagnostic(self) -> &'static str {
+        match self {
+            Self::Internal => "source.epoch",
+            Self::Control(error) => error.diagnostic(),
+        }
+    }
 }
 
 /// Why a session seek was refused (root ruling B16-R9): the seek's own refusal, or, for the

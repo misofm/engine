@@ -51,10 +51,14 @@ Jury check and cutoff-response gate are gone: the public cutoff domain is the fr
 table, enforced before preparation, and preparation now rejects only a coefficient that is not
 representable in `f32`. Enabled filters declare a certified finite tail, computed once on the
 control thread from the designed `f32` words, by the compiler at preparation for each distinct
-design (issue #1329, decision 15 D15-4(b)): `T_decay` (`tail`, the value PDC and every tail report
-use), the tail over every peak `T_rest` (`tail_every_peak`) and the exact-rest bound (`rest`,
-`RestSamples`), three of the fields of `effect_contract::NodeTailBound`, whose `composition` is
-`Unstated` until #1465 and #1467 derive it. The prepared session keeps every
+design (issue #1329, decision 15 D15-4(b)): `T_decay` (`tail`), the tail over every peak `T_rest`
+(`tail_every_peak`), the exact-rest bound (`rest`, `RestSamples`) and the composition values
+(`composition`, #1465, #1467), the fields of `effect_contract::NodeTailBound`. The graph extent
+composes them through every builtin gain after the section (#1379): a fader, matrix or send states
+its prepared gain when no live lane or stored automation can change it, and its domain maximum
+(+24 dB; a matrix row sum of 2) when one can; a settled fixed mute states exact zero (the fader
+kernel clears the lane); a strip's `delay_samples` counts its length. The plan reports
+`output_tail_every_peak` (`docs/EFFECT_CONTRACT_V1.md`, "Tail and exact rest"). The prepared session keeps every
 strip's bounds beside its tail, control-side (`PreparedBuiltinsSession::input_bounds`; silence
 skipping, #1107, reads them there); the render-owned input section carries none of them. A strip
 whose input lane is live reports `builtins::input_section_live_bound`, which covers every live

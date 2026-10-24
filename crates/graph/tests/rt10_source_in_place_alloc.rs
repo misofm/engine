@@ -3,7 +3,7 @@
 //! same plan renders when its driver does not lend its planes (every claim copied).
 
 use bench_support::alloc::{Mode, assert_installed, mode, set_mode};
-use effect_contract::{BankWidth, LatencySamples, TailSamples};
+use effect_contract::{BankWidth, LatencySamples};
 use engine::{
     QuantumFrames,
     realtime::{self, PlanarBufferMut, RenderEnvelope, RenderError},
@@ -239,7 +239,7 @@ fn prepared_plan(lend: bool, calls: &Arc<Calls>) -> engine::realtime::PreparedRe
         .map(|id| GraphNode {
             id,
             latency: LatencySamples(0),
-            tail: TailSamples::Finite(0),
+            bound: effect_contract::NodeTailBound::ZERO,
         })
         .collect();
     nodes.sort_by(|left, right| left.id.cmp(&right.id));

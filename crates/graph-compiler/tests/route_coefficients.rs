@@ -85,6 +85,7 @@ fn compile(model: &SessionModel) -> Result<PreparedGraphBuiltinsArtifact, Vec<(S
             maximum_single_allocation_bytes: u64::MAX,
             maximum_finite_tail_samples: u64::MAX,
         },
+        gain_liveness: graph_compiler::GainLiveness::FIXED,
     })
     .map_err(|failure| {
         failure

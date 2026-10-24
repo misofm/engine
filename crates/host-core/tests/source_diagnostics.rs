@@ -172,6 +172,12 @@ const TABLE: &[(SourceControlError, &str, bool, bool)] = &[
         false,
         false,
     ),
+    (
+        SourceControlError::InvalidId,
+        "source.id.invalid",
+        false,
+        false,
+    ),
 ];
 
 /// The two codes a host must see from more than one variant, and why. Anything else sharing a
@@ -208,6 +214,7 @@ const fn variant_index(error: SourceControlError) -> usize {
         SourceControlError::Seek(SourceSeekError::AnchorUnaligned) => 18,
         SourceControlError::ReportBusy => 19,
         SourceControlError::Seek(SourceSeekError::FrameOutOfRange) => 20,
+        SourceControlError::InvalidId => 21,
     }
 }
 

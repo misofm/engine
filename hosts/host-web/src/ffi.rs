@@ -516,7 +516,7 @@ const ZERO_BOOT_OPTIONS: WebBootOptions = WebBootOptions {
     reserved1: 0,
     live_control_meter_blocks: 0,
     live_control_observation_taps: 0,
-    live_control_master_track_plus_one: 0,
+    reserved2: 0,
 };
 
 impl BootStaging {
@@ -3206,12 +3206,12 @@ pub extern "C" fn miso_engine_web_v1_source_submit(
             let Some((pcm, plane_slots, ids)) = host.ffi_source_staging_mut() else {
                 return host.record_boundary_result(RESULT_INTERNAL);
             };
-            if channel_count == 0
-                || channel_count > plane_slots.len()
-                || frame_count > quantum
-                || id_count > ids.len()
-            {
+            if channel_count == 0 || channel_count > plane_slots.len() || frame_count > quantum {
                 return host.record_boundary_result(RESULT_INVALID_ARGUMENT);
+            }
+            if id_count > ids.len() {
+                let code = host.refuse_source_id();
+                return host.record_boundary_result(code);
             }
             let Some(required_samples) = channel_count.checked_mul(quantum) else {
                 return host.record_boundary_result(RESULT_INVALID_ARGUMENT);
@@ -3274,7 +3274,8 @@ pub extern "C" fn miso_engine_web_v1_source_seek(
                 return host.record_boundary_result(RESULT_INTERNAL);
             };
             let Some(source_id) = ids.get(..id_count) else {
-                return host.record_boundary_result(RESULT_INVALID_ARGUMENT);
+                let code = host.refuse_source_id();
+                return host.record_boundary_result(code);
             };
             let source_id_pointer = source_id.as_ptr();
             // SAFETY: The checked ID prefix lies in stable staging and is only read during the
@@ -3286,10 +3287,10 @@ pub extern "C" fn miso_engine_web_v1_source_seek(
 }
 
 /// Run `operation` on the first `id_count` bytes of the source ID staging and return its result,
-/// or refuse with `Err(`[`RESULT_INVALID_ARGUMENT`]`)` for a count past the staging
-/// (`Err(`[`RESULT_INTERNAL`]`)` with no staging). A refusal is not recorded: the caller records
-/// it exactly when its operation would record its own results. The prefix is only read during
-/// the synchronous call.
+/// or refuse a count past the staging with the core's malformed-ID refusal (`source.id.invalid`,
+/// `Err(`[`RESULT_INVALID_ARGUMENT`]`)`; `Err(`[`RESULT_INTERNAL`]`)` with no staging). A refusal
+/// is not recorded: the caller records it exactly when its operation would record its own
+/// results. The prefix is only read during the synchronous call.
 fn with_staged_source_id(
     host: &mut AudioWorkletEngineHost,
     id_count: usize,
@@ -3299,7 +3300,7 @@ fn with_staged_source_id(
         return Err(RESULT_INTERNAL);
     };
     let Some(source_id) = ids.get(..id_count) else {
-        return Err(RESULT_INVALID_ARGUMENT);
+        return Err(host.refuse_source_id());
     };
     let source_id_pointer = source_id.as_ptr();
     // SAFETY: The checked ID prefix lies in stable staging and is only read during the synchronous
@@ -4441,6 +4442,12 @@ pub(crate) fn test_seek_report_addresses(handle: u32) -> (usize, usize) {
             ptr::from_ref(host.seek_report()).addr(),
         )
     })
+}
+
+/// The bytes `miso_engine_web_v1_control_response_ptr/_bytes` name, read before the `u32` cast.
+#[cfg(test)]
+pub(crate) fn test_control_response(handle: u32) -> Vec<u8> {
+    with_host(handle, Vec::new(), |host| host.control_response().to_vec())
 }
 
 #[cfg(test)]

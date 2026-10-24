@@ -25,9 +25,6 @@ pub(crate) struct PreparedRuntime {
     pub(crate) inventory: PlanStateInventory,
     pub(crate) control_catalog: ControlCatalog,
     pub(crate) capi: CapiResources,
-    /// The designated master strip the plan was prepared with, as a strip index (#1683): a first
-    /// plan's seeds the session's monitor overlay; a successor's is its overlay's own.
-    pub(crate) master_track: Option<u32>,
 }
 
 /// A zeroed byte buffer of exactly `bytes` bytes, allocated fallibly.
@@ -1182,7 +1179,6 @@ pub(crate) fn prepare_runtime<A: ControlAdapter>(
         route_controls,
         follow_route_controls,
         jump_lengths,
-        master_track,
         ..
     } = handles;
     // #1639 D1: every prepared plan has a jump-length cell, so a handle set without its writer is
@@ -1255,7 +1251,7 @@ pub(crate) fn prepare_runtime<A: ControlAdapter>(
             source_count: host.source_count,
             track_count: host.track_count,
             latency_samples: host.latency_samples,
-            output_tail: host.output_tail,
+            output_tail_every_peak: host.output_tail_every_peak,
             // The carry program's bytes are the plan's own allocation that the host-core row does
             // not count. The plan's revision gate is in the host-core row (#1502 D1), shared with
             // the browser.
@@ -1286,7 +1282,6 @@ pub(crate) fn prepare_runtime<A: ControlAdapter>(
         inventory: prepared.inventory,
         control_catalog: prepared.control_catalog,
         capi,
-        master_track,
     })
 }
 
@@ -1334,18 +1329,8 @@ where
         &live_values_superseded,
         0,
     )?;
-    // #1683: the boot plan's designated master (the browser's boot word) seeds the overlay, so the
-    // control list, a later write of the row and every successor start from the same designation.
-    let mut monitor = controls::MonitorOverlay::new();
-    if let Some(strip) = runtime.master_track.and_then(|index| {
-        store
-            .compiled()
-            .normalized_model()
-            .strips()
-            .nth(index as usize)
-    }) {
-        monitor.set_master(strip.id, true);
-    }
+    // #1689 D3: a boot designates no master; the app writes the strip's `master` row after boot.
+    let monitor = controls::MonitorOverlay::new();
 
     let control_bytes = usize::try_from(limits.maximum_control_frame_bytes)
         .map_err(|_| failure(ResourceFault::Platform))?;
@@ -1380,7 +1365,6 @@ where
         inventory,
         control_catalog,
         capi,
-        master_track: _,
     } = runtime;
     // #1314 D1, #1502 D5: the initial plan carries the store's initial revision, published on its
     // own gate, and the watermark starts there.
@@ -1408,6 +1392,7 @@ where
         // No endpoint has configured telemetry yet, so nothing can read a peak.
         render_peak_observed: AtomicBool::new(false),
         live_block_errors: AtomicU64::new(0),
+        source_underrun_blocks: AtomicU64::new(0),
         watermark: publisher.watermark_reader(),
     });
     let sample_source: Arc<dyn host_core::PlanSampleSource> = Arc::clone(&shared) as Arc<_>;
@@ -1530,7 +1515,7 @@ mod admission_tests {
                 source_count: 1,
                 track_count: 1,
                 latency_samples: 0,
-                output_tail: TailSamples::Finite(0),
+                output_tail_every_peak: TailSamples::Finite(0),
                 graph_session_plus_plan_bytes: base,
                 graph_incremental_plan_bytes: 0,
                 graph_metadata_bytes: 0,

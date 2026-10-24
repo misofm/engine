@@ -3,8 +3,9 @@
 //! A session's `bypass` used to become the effect's prepared bypass, which is part of its
 //! `EffectProgramKey`, so a bypassed track left its cohort. It now lowers to a prepared
 //! `bypass = false` plus a bypassed lane on the rack's latency-preserving shunt, so a cohort binds
-//! one bank per slot whatever mix of its tracks is bypassed. The delay, which never banks, and the
-//! multiband (issue #1100, gate 3 below) keep their prepared bypass.
+//! one bank per slot whatever mix of its tracks is bypassed. The delay, which never banks, lowers
+//! its bypass too and renders a per-node shunt (issue #1339, its gate 1 below); the multiband
+//! (issue #1100, gate 3 below) keeps its prepared bypass.
 //!
 //! "Today's render" is reconstructed here exactly: every lowered entry is prepared again with the
 //! session's bypass as its prepared flag and without a lane, which is what
@@ -23,7 +24,10 @@ use effect_compiler::{
     EffectCompileCaps, EffectPreparedSession, PREPARED_BYPASS_EFFECTS,
     launch_native_effect_registry, prepare_native_session_effects,
 };
-use effect_contract::{BankWidth, EffectControlLane};
+use effect_contract::{
+    BankWidth, EffectControlLane, EffectProcessBlock, PreparedNativeEffect, ProcessReport,
+    ResetKind, StatePayloadError, StatePayloadInput, StatePayloadOutput,
+};
 use engine::realtime::{PlanarBufferMut, RenderError, RenderIo, RenderTime};
 use graph::{
     GraphBindingBlock, GraphCompileCaps, GraphNodeBinding, GraphNodeId, GraphNodeObserverBinding,
@@ -35,6 +39,7 @@ use session::{
     CompileCaps, EffectIdentity, SessionModel, StableId, compile_session, parse_session_json,
 };
 use std::collections::BTreeMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 const INTENDED: &str =
@@ -152,6 +157,10 @@ enum Feed {
     /// block-boundary check trips at its defaults (#1087 M2). A constant `6e29` does not trip it:
     /// its crossover passes DC without the overshoot a step makes.
     Hot,
+    /// A constant `9e29` on both channels for the first four blocks, then deterministic noise near
+    /// -20 dBFS that is never an exact zero. `9e29` is legal, and a 1 ms delay at `0.95` feedback
+    /// fed it builds its ring past `1e30` and trips its block-boundary check (issue #1339).
+    Trip,
 }
 
 struct TrackSource {
@@ -160,6 +169,7 @@ struct TrackSource {
 }
 impl GraphRuntimeProcessor for TrackSource {
     fn process(&mut self, block: GraphBindingBlock<'_>) -> Result<(), RenderError> {
+        let frames = block.left.len().max(1) as u64;
         for (index, (left, right)) in block
             .left
             .iter_mut()
@@ -187,6 +197,21 @@ impl GraphRuntimeProcessor for TrackSource {
                 };
                 *left = hot;
                 *right = hot;
+            }
+            if self.feed == Feed::Trip {
+                if sample < 4 * frames {
+                    *left = 9.0e29;
+                    *right = 9.0e29;
+                } else {
+                    let noise = |salt: u64| {
+                        let mut state = (sample ^ salt).wrapping_mul(0x9e37_79b9_7f4a_7c15);
+                        state ^= state >> 29;
+                        let unit = (state >> 40) as f32 / (1_u64 << 24) as f32;
+                        0.1 * (unit - 0.5) + if unit < 0.5 { -0.01 } else { 0.01 }
+                    };
+                    *left = noise(0x1339);
+                    *right = noise(0x9331);
+                }
             }
             if self.feed == Feed::NonFinite {
                 match sample % 97 {
@@ -281,6 +306,21 @@ fn render_with(
     lowering: Lowering,
     feed: &dyn Fn(u32) -> Feed,
 ) -> Rendered {
+    render_prepared(model, dispatch, feed, &mut |effects| match lowering {
+        Lowering::Session => {}
+        Lowering::Today => todays_lowering(effects),
+        Lowering::P1 => p1_lowering(effects),
+    })
+}
+
+/// Compile `model` at `dispatch`, let `edit` change its prepared effects, and render it with
+/// `feed(track)` on each track.
+fn render_prepared(
+    model: &SessionModel,
+    dispatch: Backend,
+    feed: &dyn Fn(u32) -> Feed,
+    edit: &mut dyn FnMut(&mut EffectPreparedSession),
+) -> Rendered {
     let session = compile_session(model, compile_caps()).expect("compiled session");
     let registry = launch_native_effect_registry().expect("launch registry");
     let mut effects = prepare_native_session_effects(
@@ -293,11 +333,7 @@ fn render_with(
         },
     )
     .expect("prepared effects");
-    match lowering {
-        Lowering::Session => {}
-        Lowering::Today => todays_lowering(&mut effects),
-        Lowering::P1 => p1_lowering(&mut effects),
-    }
+    edit(&mut effects);
     let builtins = prepare_session_builtins(&session, &[], builtin_caps()).expect("builtins");
     let artifact = GraphCompiler::compile_with_builtins(GraphBuiltinsCompileRequest {
         input_floors: Default::default(),
@@ -306,6 +342,7 @@ fn render_with(
         builtins,
         caps: graph_caps(),
         dispatch,
+        gain_liveness: graph_compiler::GainLiveness::FIXED,
     })
     .unwrap_or_else(|failure| panic!("graph: {:?}", failure.diagnostics));
     let banks = artifact
@@ -498,6 +535,7 @@ fn a_mixed_bypass_cohort_binds_one_bank_per_slot() {
             builtins,
             caps: graph_caps(),
             dispatch: Backend::current(),
+            gain_liveness: graph_compiler::GainLiveness::FIXED,
         })
         .unwrap_or_else(|failure| panic!("graph: {:?}", failure.diagnostics));
         let banks: Vec<Vec<String>> = artifact
@@ -781,4 +819,138 @@ fn a_mixed_bypass_multiband_cohort_keeps_its_prepared_bypass() {
         kept.output.iter().any(|word| f32::from_bits(*word) != 0.0),
         "the render is audible"
     );
+}
+
+/// Wraps a prepared effect and adds up the blocks its block-boundary check (D7) recovered.
+struct CountRecoveries {
+    inner: Box<dyn PreparedNativeEffect>,
+    recovered: Arc<AtomicU64>,
+}
+impl PreparedNativeEffect for CountRecoveries {
+    fn reset(&mut self, kind: ResetKind) {
+        self.inner.reset(kind);
+    }
+    fn process(&mut self, block: EffectProcessBlock<'_>) -> ProcessReport {
+        let report = self.inner.process(block);
+        self.recovered.fetch_add(
+            report.nonfinite_left_blocks + report.nonfinite_right_blocks,
+            Ordering::Relaxed,
+        );
+        report
+    }
+    fn snapshot_state_payload(
+        &self,
+        output: StatePayloadOutput<'_>,
+    ) -> Result<(), StatePayloadError> {
+        self.inner.snapshot_state_payload(output)
+    }
+    fn restore_state_payload(
+        &mut self,
+        state_layout_version: u32,
+        input: StatePayloadInput<'_>,
+    ) -> Result<(), StatePayloadError> {
+        self.inner
+            .restore_state_payload(state_layout_version, input)
+    }
+    fn channel_symmetry(&self) -> bool {
+        self.inner.channel_symmetry()
+    }
+}
+
+/// Issue #1339, gate 1: a session-bypassed delay passes its dry block bit for bit, also on the
+/// blocks where its own feedback ring trips its block-boundary check.
+///
+/// One track with one bypassed `miso.delay` insert (1 ms, feedback `0.95`, damping `0`, mix `1`),
+/// fed [`Feed::Trip`]: `9e29` builds the ring past `1e30`, D7 recovers the wet path and zeroes it,
+/// and the per-node shunt copies the dry block over it. Every track stage and the session output
+/// must equal the same session with the insert removed, at the host's width and at `Scalar`.
+///
+/// Red mutations: keep the delay's prepared bypass (`lowers_session_bypass` false for it) -> the
+/// lowering precondition (`!entry.metadata.bypass`) fails, and with that precondition removed the
+/// bit assertion fails, because its D7 zeroes the tripped dry blocks; build no per-node shunt for
+/// a never-banked effect -> the wet runaway reaches the output.
+#[test]
+fn a_bypassed_delay_passes_its_dry_block_when_its_ring_trips() {
+    use session::{EffectParam, EffectQuality, LinkMode, ParameterChannel, ParameterUnit};
+    let mut bare = console(1, [0, 0, 0]);
+    identity_inputs(&mut bare);
+    bare.console.pre_insert.clear();
+    bare.console.post_insert.clear();
+    for track in &mut bare.tracks {
+        track.console.clear();
+        track.inserts.effects.clear();
+    }
+    let param = |parameter_id, unit, value| EffectParam {
+        parameter_id,
+        channel: ParameterChannel::Both,
+        unit,
+        value,
+    };
+    let mut delayed = bare.clone();
+    delayed.tracks[0].inserts.effects = vec![session::Effect {
+        id: StableId::parse("dly").expect("effect id"),
+        identity: EffectIdentity::Native {
+            effect_id: StableId::parse("miso.delay").expect("delay id"),
+        },
+        quality: EffectQuality::Normal,
+        bypass: true,
+        link_mode: LinkMode::DualMono,
+        params: vec![
+            param(1, ParameterUnit::Milliseconds, 1.0),
+            param(2, ParameterUnit::Linear, 0.95),
+            param(3, ParameterUnit::Linear, 0.0),
+            param(4, ParameterUnit::Linear, 1.0),
+        ],
+        sidechain: session::SidechainDeclaration::None,
+    }];
+    for dispatch in [Backend::current(), Backend::Scalar] {
+        let what = format!("{dispatch:?}");
+        let expected = render_with(&bare, dispatch, Lowering::Session, &|_| Feed::Trip);
+        let recovered = Arc::new(AtomicU64::new(0));
+        let actual = render_prepared(&delayed, dispatch, &|_| Feed::Trip, &mut |effects| {
+            let [entry] = effects.entries.as_mut_slice() else {
+                panic!("{what}: one delay entry");
+            };
+            assert!(entry.initial_bypass && !entry.metadata.bypass);
+            let inner = std::mem::replace(&mut entry.processor, Box::new(Inert));
+            entry.processor = Box::new(CountRecoveries {
+                inner,
+                recovered: Arc::clone(&recovered),
+            });
+        });
+        assert_same_bits(&format!("{what} bypassed delay"), &actual, &expected);
+        assert!(
+            recovered.load(Ordering::Relaxed) >= 1,
+            "{what}: the delay's ring never tripped, so the case proves nothing"
+        );
+        let frames = expected.output.len() / BLOCKS as usize;
+        assert!(
+            expected.output[..4 * frames]
+                .iter()
+                .any(|word| f32::from_bits(*word) != 0.0),
+            "{what}: the tripped blocks carry an audible dry signal"
+        );
+    }
+}
+
+/// A placeholder processor that lives only while [`CountRecoveries`] takes the real one.
+struct Inert;
+impl PreparedNativeEffect for Inert {
+    fn reset(&mut self, _kind: ResetKind) {}
+    fn process(&mut self, _block: EffectProcessBlock<'_>) -> ProcessReport {
+        ProcessReport::default()
+    }
+    fn snapshot_state_payload(
+        &self,
+        _output: StatePayloadOutput<'_>,
+    ) -> Result<(), StatePayloadError> {
+        Ok(())
+    }
+    fn restore_state_payload(
+        &mut self,
+        _state_layout_version: u32,
+        _input: StatePayloadInput<'_>,
+    ) -> Result<(), StatePayloadError> {
+        Ok(())
+    }
 }

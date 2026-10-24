@@ -303,16 +303,13 @@ fn frozen_layouts_and_values_are_exact() {
     assert_eq!(offset_of!(WebBootOptions, reserved1), 32);
     assert_eq!(offset_of!(WebBootOptions, live_control_meter_blocks), 40);
     // Issue #143 D3/D6: the configuration's remaining two reserved words, carved exactly as #137
-    // carved the first two. The structure is still 192 bytes and every existing offset is where it
-    // was, so a V1 writer that zeroes them gets "no observation capacity, no master designation".
+    // carved the first two. Since #1689 the second is `reserved2` (it was the master boot word)
+    // and must be zero; every offset is where it was.
     assert_eq!(
         offset_of!(WebBootOptions, live_control_observation_taps),
         48
     );
-    assert_eq!(
-        offset_of!(WebBootOptions, live_control_master_track_plus_one),
-        56
-    );
+    assert_eq!(offset_of!(WebBootOptions, reserved2), 56);
     assert_eq!(MAXIMUM_OBSERVATION_TAPS, 16);
     // The meter header is a new fixed structure, not a change to an existing one.
     // Issue #1209 D2 appended `submix_count` and its pad: 64 bytes became 72, nothing moved.
@@ -1289,7 +1286,8 @@ fn the_anchored_seek_exports_play_at_the_anchor_and_report_where_it_landed() {
 /// Test value: red if either export runs on a host with no control half (it would reach for
 /// control state the instance does not hold) or overwrites the record on a refusal, if the
 /// pointer export names anything but the record while ready or anything at all once not ready,
-/// or if the report export records a staged-ID refusal as the last result (it records none).
+/// or if the report export records a staged-ID refusal as the last result (it records none) or
+/// refuses it without the core's `source.id.invalid` text (#1706).
 #[test]
 fn the_seek_exports_refuse_a_host_with_no_control_half_and_change_nothing() {
     let rig = SeekExports::boot();
@@ -1326,6 +1324,19 @@ fn the_seek_exports_refuse_a_host_with_no_control_half_and_change_nothing() {
     assert_eq!(
         miso_engine_web_v1_source_seek_report(rig.handle, u32::MAX),
         RESULT_INVALID_ARGUMENT
+    );
+    // #1706 D4: an ID count past the staging (`STABLE_ID_MAXIMUM_BYTES`) is the core's
+    // malformed-ID refusal, text included, on the export the page calls.
+    assert_eq!(
+        miso_engine_web_v1_source_seek_report(
+            rig.handle,
+            session::STABLE_ID_MAXIMUM_BYTES as u32 + 1
+        ),
+        RESULT_INVALID_ARGUMENT
+    );
+    assert_eq!(
+        crate::ffi::test_control_response(rig.handle),
+        b"source.id.invalid"
     );
     assert_eq!(
         crate::ffi::test_status(rig.handle)
@@ -1798,7 +1809,68 @@ fn set_control_timeline_frames() -> Vec<Vec<u8>> {
         .collect()
 }
 
-/// The committed frame fixtures are exactly what [`set_control_timeline_frames`] encodes.
+/// A `SET_CONTROL` frame that turns strip `strip`'s `master` monitor row (#1683) on, request
+/// `request` at revision `revision`: since #1689 the one way to designate the master on the
+/// browser, as on the C ABI. A monitor write spends no revision. `master_designation_frame("track",
+/// 1, 1)` is committed as `tests/browser-v1/set-control-frames/master.bin`, the frame the raw-Wasm
+/// oracle's observation timeline sends after boot.
+fn master_designation_frame(strip: &str, request: u64, revision: u64) -> Vec<u8> {
+    use protocol::{
+        CommandPayload, ExpectedRevision, ProtocolCodec, RequestId, SessionEdit, SessionRevision,
+        TypedCommandFrame,
+    };
+    let edits = [SessionEdit::SetControl {
+        expected_effect: None,
+        address: controls::ControlAddress {
+            owner: controls::Owner::Strip(session::StableId::parse(strip).expect("strip ID")),
+            section: controls::Section::Own,
+            control: 4,
+            lane: session::ParameterChannel::Both,
+        },
+        value: 1.0,
+        ramp_samples: None,
+    }];
+    let mut bytes = vec![0_u8; 4_096];
+    let length = ProtocolCodec::default()
+        .encode_command_frame_into(
+            &TypedCommandFrame {
+                request_id: RequestId::new(request).expect("nonzero request"),
+                expected_revision: ExpectedRevision::Exact(SessionRevision(revision)),
+                payload: CommandPayload::SessionTransactionApply(&edits),
+            },
+            &mut bytes,
+        )
+        .expect("a transaction frame");
+    bytes.truncate(length);
+    bytes
+}
+
+/// Designate strip `strip` the master through the production control entry (#1689 D6): the
+/// header names it at once.
+fn designate_master(host: &mut AudioWorkletEngineHost, strip: &str) {
+    use core::sync::atomic::{AtomicU64, Ordering};
+    static REQUEST: AtomicU64 = AtomicU64::new(1 << 40);
+    let frame = master_designation_frame(
+        strip,
+        REQUEST.fetch_add(1, Ordering::Relaxed),
+        host.committed_revision(),
+    );
+    host.control_request_mut(frame.len() as u32)
+        .expect("the control staging")[..frame.len()]
+        .copy_from_slice(&frame);
+    assert_eq!(host.control_command(frame.len() as u32, None), RESULT_OK);
+    let index = host
+        .live_control_tracks()
+        .iter()
+        .position(|id| &**id == strip);
+    assert!(
+        index.is_none_or(|index| host.meter_header().master_track_plus_one == index as u32 + 1),
+        "the header names the designated track"
+    );
+}
+
+/// The committed frame fixtures are exactly what [`set_control_timeline_frames`] and
+/// [`master_designation_frame`] encode.
 ///
 /// Test value: red if the encoder or the protocol changes a byte of a frame without the fixtures
 /// the raw-Wasm oracle sends moving with it, so the native leg and the shipped artifact would
@@ -1816,12 +1888,24 @@ fn set_control_frames_are_the_committed_fixtures() {
             std::fs::write(format!("{directory}/frame-{}.bin", index + 1), frame)
                 .expect("fixture file");
         }
+        std::fs::write(
+            format!("{directory}/master.bin"),
+            master_designation_frame("track", 1, 1),
+        )
+        .expect("fixture file");
     }
     for (index, frame) in frames.iter().enumerate() {
         let committed = std::fs::read(format!("{directory}/frame-{}.bin", index + 1))
             .expect("the committed frame fixture");
         assert_eq!(&committed, frame, "frame {}", index + 1);
     }
+    let committed =
+        std::fs::read(format!("{directory}/master.bin")).expect("the committed master frame");
+    assert_eq!(
+        committed,
+        master_designation_frame("track", 1, 1),
+        "master.bin"
+    );
 }
 
 /// The `SET_CONTROL` timeline's native digest: the same session, source feed and control frames
@@ -2756,29 +2840,53 @@ fn every_deleted_kind_is_refused_malformed_at_its_index_and_changes_no_cell() {
     );
 }
 
-/// #1565A gate 2: the boot word at offset 32 is reserved. A nonzero value is refused
-/// `web.options.reserved1` (the word was the command-queue size until the browser's own value
-/// commands were deleted); a boot with observation taps accepts the observation kinds; a boot
-/// without taps has no command staging and refuses them `UNSUPPORTED` with
-/// `COMMAND_REASON_UNSUPPORTED_KIND`.
+/// #1565A gate 2, #1689 gate 2: the boot words at offsets 32 and 56 are reserved. A nonzero
+/// value is refused `web.options.reserved1` (the word was the command-queue size until the
+/// browser's own value commands were deleted) or `web.options.reserved2` (the word was the master
+/// boot word until the `master` row replaced it); a boot with observation taps accepts the
+/// observation kinds; a boot without taps has no command staging and refuses them `UNSUPPORTED`
+/// with `COMMAND_REASON_UNSUPPORTED_KIND`.
 ///
-/// Test value: red if the deleted word still changes behaviour, if observation loses its staging,
-/// or if a host with no taps accepts a record.
+/// Test value: red if a deleted word still changes behaviour (a writer that still sets it is
+/// accepted and ignored), if observation loses its staging, or if a host with no taps accepts a
+/// record.
 #[test]
-fn the_boot_word_is_reserved_and_observation_staging_follows_the_taps() {
+fn the_boot_words_are_reserved_and_observation_staging_follows_the_taps() {
     const QUANTUM: u32 = 128;
     let document = include_str!("../tests/browser-v1/command-session.json");
-    let refused = AudioWorkletEngineHost::boot(
-        document.as_bytes(),
-        WebBootOptions {
-            reserved1: 64,
-            ..boot_options(QUANTUM)
-        },
-    )
-    .err()
-    .expect("a nonzero reserved1 must not boot");
-    assert_eq!(refused.result(), RESULT_REFUSED_OPTIONS);
-    assert_eq!(refused.diagnostic(), b"web.options.reserved1\t$\n");
+    let refusal = |options: WebBootOptions| {
+        AudioWorkletEngineHost::boot(document.as_bytes(), options)
+            .err()
+            .expect("a nonzero reserved word must not boot")
+    };
+    for (options, code) in [
+        (
+            WebBootOptions {
+                reserved1: 64,
+                ..boot_options(QUANTUM)
+            },
+            &b"web.options.reserved1\t$\n"[..],
+        ),
+        (
+            WebBootOptions {
+                reserved2: 1,
+                live_control_observation_taps: 4,
+                ..boot_options(QUANTUM)
+            },
+            &b"web.options.reserved2\t$\n"[..],
+        ),
+        (
+            WebBootOptions {
+                reserved2: u64::MAX,
+                ..boot_options(QUANTUM)
+            },
+            &b"web.options.reserved2\t$\n"[..],
+        ),
+    ] {
+        let refused = refusal(options);
+        assert_eq!(refused.result(), RESULT_REFUSED_OPTIONS);
+        assert_eq!(refused.diagnostic(), code);
+    }
 
     let mut observed = observed_effect_live_control_host(QUANTUM);
     assert!(observed.live_controls_attached());
@@ -3001,6 +3109,81 @@ fn finite_source_boundary_requires_only_the_actual_final_marker() {
         );
         // Rendering each accepted chunk drains the one-quantum ring before the next admission.
         feed_and_render_finite_source(&mut host, block, SOURCE_BLOCKS, 0.25);
+    }
+}
+
+/// Issue #1537 gate 1: `COUNTERS_GET` through the browser's control entry reports
+/// `SOURCE_UNDERRUN_BLOCKS`, the rendered blocks in which a source played zeros because the host
+/// had not delivered PCM it owed. Each case feeds blocks 0 and 1, then renders two blocks with
+/// nothing submitted, and reads the counter at boot and after each render's service step. With an
+/// eight-block source the two starved blocks count (`[0, 0, 1, 2]`); with a two-block source
+/// block 1 ends the region, so the next two blocks are past its end and count nothing.
+///
+/// Test value: red if the count never moves, counts every block, counts the previous block's
+/// flag or a stale plan's, or counts silence past the end of a region as starvation; no other
+/// test reads an underrun count from a host.
+#[test]
+fn the_counters_get_reply_counts_each_block_a_source_underran() {
+    use protocol::{
+        CommandPayload, CounterId, CountersRequest, DecodeScratch, DecodedSuccessResponsePayload,
+        DecodedTypedResponseFrame, ExpectedRevision, ProtocolCodec, RequestId, TypedCommandFrame,
+    };
+    fn underrun_blocks(host: &mut AudioWorkletEngineHost, request: u64) -> u64 {
+        assert_eq!(host.service(None), RESULT_OK);
+        let codec = ProtocolCodec::default();
+        let mut bytes = vec![0_u8; codec.limits().max_frame_bytes];
+        let length = codec
+            .encode_command_frame_into(
+                &TypedCommandFrame {
+                    request_id: RequestId::new(request).expect("nonzero request"),
+                    expected_revision: ExpectedRevision::Any,
+                    payload: CommandPayload::CountersGet(&CountersRequest {
+                        all: false,
+                        ids: vec![CounterId::SourceUnderrunBlocks as u32],
+                    }),
+                },
+                &mut bytes,
+            )
+            .expect("a counters frame");
+        let staged = u32::try_from(length).expect("frame length");
+        host.control_request_mut(staged)
+            .expect("the control request staging")[..length]
+            .copy_from_slice(&bytes[..length]);
+        assert_eq!(host.control_command(staged, None), RESULT_OK);
+        let mut fields = [0_u16; 64];
+        let DecodedTypedResponseFrame::Success {
+            payload: DecodedSuccessResponsePayload::CounterSnapshot(snapshot),
+            ..
+        } = codec
+            .decode_typed_response(
+                host.control_response(),
+                &mut DecodeScratch::new(&mut fields),
+            )
+            .expect("a counters response")
+        else {
+            panic!("expected a counter snapshot")
+        };
+        assert_eq!(snapshot.values.len(), 1);
+        assert_eq!(snapshot.values[0].id, CounterId::SourceUnderrunBlocks);
+        snapshot.values[0].value
+    }
+    for (source_blocks, expected) in [(8_u64, [0_u64, 0, 1, 2]), (2, [0, 0, 0, 0])] {
+        let mut host = meter_tail_host_for_blocks(48_000, 128, 32, source_blocks);
+        assert_eq!(
+            underrun_blocks(&mut host, 1),
+            0,
+            "{source_blocks} blocks: boot"
+        );
+        let mut seen = [0_u64; 4];
+        for (block, count) in (0_u64..).zip(seen.iter_mut()) {
+            if block < 2 {
+                feed_and_render_finite_source(&mut host, block, source_blocks, 0.25);
+            } else {
+                assert_eq!(host.render_next(), RESULT_OK);
+            }
+            *count = underrun_blocks(&mut host, block + 2);
+        }
+        assert_eq!(seen, expected, "{source_blocks}-block source");
     }
 }
 
@@ -3258,10 +3441,15 @@ fn observation_host(
         source_ring_frames: quantum * 4,
         live_control_meter_blocks: meter_blocks,
         live_control_observation_taps: 4,
-        live_control_master_track_plus_one: master.map_or(0, |track| u64::from(track) + 1),
         ..boot_options(quantum)
     };
-    AudioWorkletEngineHost::boot(document.as_bytes(), options).expect("observation boot")
+    let mut host =
+        AudioWorkletEngineHost::boot(document.as_bytes(), options).expect("observation boot");
+    if let Some(track) = master {
+        let strip = host.live_control_tracks()[track as usize].to_string();
+        designate_master(&mut host, &strip);
+    }
+    host
 }
 
 /// One owner track with two resident effects. The gate is copied from the existing three-track
@@ -4547,18 +4735,14 @@ fn a_submission_names_each_observation_tap_once() {
     assert_eq!(host.submit_commands(1), RESULT_OK);
 }
 
-/// The observation words are validated at configuration time: more taps than the cap, a master
-/// designation with no taps to designate it from, and the reserved word are all refused.
+/// The observation words are validated at configuration time: more taps than the cap and the
+/// reserved word are refused.
 #[test]
 fn observation_configuration_words_are_validated() {
     let document = one_track_session(128);
     for options in [
         WebBootOptions {
             live_control_observation_taps: u64::from(MAXIMUM_OBSERVATION_TAPS) + 1,
-            ..boot_options(128)
-        },
-        WebBootOptions {
-            live_control_master_track_plus_one: 1,
             ..boot_options(128)
         },
         WebBootOptions {
@@ -4602,10 +4786,18 @@ fn native_observation_timeline_digest_pins_the_wasm_parity() {
             source_ring_frames: QUANTUM,
             live_control_meter_blocks: u64::from(WINDOW_BLOCKS),
             live_control_observation_taps: taps,
-            live_control_master_track_plus_one: if taps == 0 { 0 } else { 1 },
             ..boot_options(QUANTUM)
         };
         let mut host = AudioWorkletEngineHost::boot(document.as_bytes(), options).expect("boot");
+        // The oracle designates the master by the committed `master.bin` frame when it asked for
+        // taps (#1689 D6); this leg sends the same frame.
+        if taps != 0 {
+            let frame = master_designation_frame("track", 1, 1);
+            host.control_request_mut(frame.len() as u32)
+                .expect("the control staging")[..frame.len()]
+                .copy_from_slice(&frame);
+            assert_eq!(host.control_command(frame.len() as u32, None), RESULT_OK);
+        }
         assert_eq!(host.live_control_tracks().len(), 1);
         assert_eq!(
             host.resources().observation_retained_bytes == 0,
@@ -5358,12 +5550,11 @@ fn strip_boot(document: &str, options: WebBootOptions) -> AudioWorkletEngineHost
     })
 }
 
-fn strip_options(meter_blocks: u64, master_plus_one: u64) -> WebBootOptions {
+fn strip_options(meter_blocks: u64) -> WebBootOptions {
     WebBootOptions {
         source_ring_frames: STRIP_QUANTUM * 4,
         live_control_meter_blocks: meter_blocks,
         live_control_observation_taps: 1,
-        live_control_master_track_plus_one: master_plus_one,
         ..boot_options(STRIP_QUANTUM)
     }
 }
@@ -5375,8 +5566,8 @@ fn strip_pair(
 ) -> (AudioWorkletEngineHost, AudioWorkletEngineHost) {
     let (bus, reference) = strip_pair_documents(insert);
     (
-        strip_boot(&bus, strip_options(meter_blocks, 0)),
-        strip_boot(&reference, strip_options(meter_blocks, 0)),
+        strip_boot(&bus, strip_options(meter_blocks)),
+        strip_boot(&reference, strip_options(meter_blocks)),
     )
 }
 
@@ -5645,13 +5836,13 @@ fn a_withdrawn_tap_leaves_the_first_polled_frame_and_only_its_own_reading() {
     );
 }
 
-/// Issue #1213 gate 6 (VERIFY-2 M6, #1208's condition): booting with the master word `T + 0 + 1`
-/// designates the bus, whose true-peak limiter insert is driven over its -6 dB ceiling; with the
-/// limiter's tap armed at the bus's index, the header reports a master reading and the master word
-/// equals the bus's word, nonzero. `T + S + 1` refuses at boot.
+/// Issue #1213 gate 6 (VERIFY-2 M6, #1208's condition): the bus's `master` row designates it
+/// (#1689: the boot word is gone), and its true-peak limiter insert is driven over its -6 dB
+/// ceiling; with the limiter's tap armed at the bus's index, the header reports a master reading
+/// and the master word equals the bus's word, nonzero.
 ///
-/// Test value: red if the boot word still indexes tracks only, or the master reading is taken
-/// from another strip's word or never folded for a bus.
+/// Test value: red if the master resolves to tracks only, or the master reading is taken from
+/// another strip's word or never folded for a bus.
 #[test]
 fn a_bus_limiter_can_be_the_designated_master() {
     const WINDOW: u64 = 2;
@@ -5667,7 +5858,8 @@ fn a_bus_limiter_can_be_the_designated_master() {
         value: -6.0,
     }];
     let (bus, _) = strip_pair_documents(Some(limiter));
-    let mut host = strip_boot(&bus, strip_options(WINDOW, u64::from(STRIP_BUS) + 1));
+    let mut host = strip_boot(&bus, strip_options(WINDOW));
+    designate_master(&mut host, "bus");
     assert_eq!(host.meter_header().master_track_plus_one, STRIP_BUS + 1);
     assert_eq!(host.set_meter_lease(true), RESULT_OK);
     assert_eq!(
@@ -5703,21 +5895,6 @@ fn a_bus_limiter_can_be_the_designated_master() {
         master_word.to_bits(),
         bus_word.to_bits(),
         "master word is the bus's"
-    );
-
-    let failure = AudioWorkletEngineHost::boot(
-        bus.as_bytes(),
-        strip_options(WINDOW, u64::from(STRIP_BUS) + 2),
-    )
-    .err()
-    .expect("one past the last strip refuses");
-    assert_eq!(failure.result(), RESULT_REFUSED_DOCUMENT);
-    assert!(
-        failure
-            .diagnostic()
-            .starts_with(b"host.observation.master_track\t"),
-        "{}",
-        String::from_utf8_lossy(failure.diagnostic())
     );
 }
 
@@ -5798,11 +5975,11 @@ fn a_subnormal_route_renders_as_a_zero_coefficient() {
     let tiny = 1.0e-35_f32;
     let mut subnormal = strip_boot(
         &subnormal_route_document([tiny, -tiny, 0.5, -tiny]),
-        strip_options(0, 0),
+        strip_options(0),
     );
     let mut zero = strip_boot(
         &subnormal_route_document([0.0, 0.0, 0.5, 0.0]),
-        strip_options(0, 0),
+        strip_options(0),
     );
     let mut nonzero = 0;
     for block in 0..4 {
@@ -8598,20 +8775,19 @@ mod structural_apply {
         (frame[base + strip], master)
     }
 
-    /// #1683 gate 1: a session that boots empty (the boot word cannot name a strip it does not
-    /// have) gets its master through the core after boot. A track with a compressor arrives by a
-    /// rebuild; one `SET_CONTROL` of its `master` row designates it, a monitor write that spends no
-    /// revision; the meter header names it and the master reading is that strip's own word, as a
-    /// boot-time designation reads (`the_meter_frame_carries_the_app_shaped_gain_reduction`). A
-    /// track added before it by a later rebuild moves its index and the designation follows it by
-    /// ID; a strip the session does not have is refused before commit; clearing the row makes the
-    /// reading absent, never zero.
+    /// #1683 gate 1, #1689 gate 1: a session that boots empty gets its master through the core
+    /// after boot, the one way to designate it (#1689 retired the boot word). A track with a
+    /// compressor arrives by a rebuild; one `SET_CONTROL` of its `master` row designates it, a
+    /// monitor write that spends no revision; the meter header names it and the master reading is
+    /// that strip's own word, bit for bit. A track added before it by a later rebuild moves its
+    /// index and the designation follows it by ID; a strip the session does not have is refused
+    /// before commit; clearing the row makes the reading absent, never zero.
     ///
     /// Test value: red if the designation cannot be set after boot, is held by index (the reading
     /// would move to the added track), is not carried into a successor plan, reaches the meter
     /// header late or never, spends a revision, or a designation of an unknown strip is admitted.
     #[test]
-    fn a_master_designated_after_an_empty_boot_reads_as_a_boot_designation() {
+    fn a_master_designated_after_an_empty_boot_reads_as_its_strips_own_word() {
         const WINDOW: u64 = 2;
         let full = parse_session_json(include_str!(
             "../../../fixtures/session/v1/observation-frame-shape.json"
@@ -8627,22 +8803,6 @@ mod structural_apply {
             live_control_observation_taps: 4,
             ..boot_options(QUANTUM)
         };
-        let document = canonical_session_json(&empty).expect("canonical empty session");
-        let failure = AudioWorkletEngineHost::boot(
-            document.as_bytes(),
-            WebBootOptions {
-                live_control_master_track_plus_one: 1,
-                ..options
-            },
-        )
-        .err()
-        .expect("the boot word cannot name a strip an empty session lacks");
-        assert!(
-            failure
-                .diagnostic()
-                .starts_with(b"host.observation.master_track\t")
-        );
-
         let mut rig = Rig::boot(&empty, options, None);
         assert_eq!(rig.host.meter_header().master_track_plus_one, 0);
         let track = |index: usize, id: &str| {
@@ -8811,9 +8971,9 @@ mod structural_apply {
         }
     }
 
-    /// The observation fixture's three tracks (`t0`, `t1`, `t2`), booted with the boot word
-    /// designating track `master` (#1683).
-    fn boot_designated(master: u64) -> (SessionModel, Rig) {
+    /// The observation fixture's three tracks (`t0`, `t1`, `t2`), booted with no master and then
+    /// designating track `master` by its `master` row (#1689 D6), a monitor write.
+    fn row_designated(master: usize) -> (SessionModel, Rig) {
         let model = parse_session_json(include_str!(
             "../../../fixtures/session/v1/observation-frame-shape.json"
         ))
@@ -8822,24 +8982,33 @@ mod structural_apply {
             source_ring_frames: QUANTUM * 4,
             live_control_meter_blocks: 2,
             live_control_observation_taps: 4,
-            live_control_master_track_plus_one: master + 1,
             ..boot_options(QUANTUM)
         };
-        let rig = Rig::boot(&model, options, None);
+        let mut rig = Rig::boot(&model, options, None);
+        assert_eq!(rig.host.meter_header().master_track_plus_one, 0);
+        let revision = rig.host.committed_revision();
+        assert_eq!(
+            rig.apply(&[master_edit(model.tracks[master].id.as_str(), true)], 1),
+            Outcome::Applied {
+                path: EditPath::Monitor,
+                revision,
+            }
+        );
         (model, rig)
     }
 
-    /// #1683 review fold: a master the boot word designates is the core's `master` row of that
-    /// strip, held by ID from boot on. A live `SET_CONTROL` of another row and then a rebuild that
-    /// adds a track whose ID sorts first leave the row on `t1` and move the header's index with it.
+    /// #1683 review fold: the master is the core's `master` row of its strip. A live `SET_CONTROL`
+    /// of another row leaves the row on `t1`, listed in the control list, and the header's index
+    /// unmoved. (A rebuild that moves the strip's index is
+    /// `a_master_designated_after_an_empty_boot_reads_as_its_strips_own_word`'s.)
     ///
-    /// Test value: red if the boot word seeds the overlay by index only (a live write or the
-    /// rebuild would then leave the reading on strip 1, now `t0`), or if a live write re-seeds it.
+    /// Test value: red if a live write of another row moves or clears the designation, or if the
+    /// control list stops listing the master's row.
     #[test]
-    fn a_boot_designated_master_follows_its_strip_through_a_live_write_and_a_rebuild() {
-        let (model, mut rig) = boot_designated(1);
+    fn a_row_designated_master_survives_a_live_write_of_another_row() {
+        let (_, mut rig) = row_designated(1);
         assert_eq!(rig.host.meter_header().master_track_plus_one, 2);
-        assert_eq!(rig.listed_masters(1), ["t1"]);
+        assert_eq!(rig.listed_masters(2), ["t1"]);
 
         let fader = SessionEdit::SetControl {
             expected_effect: None,
@@ -8866,35 +9035,6 @@ mod structural_apply {
         assert_eq!(rig.host.render_next(), RESULT_OK);
         assert_eq!(rig.host.meter_header().master_track_plus_one, 2);
         assert_eq!(rig.listed_masters(1_001), ["t1"]);
-
-        let mut track = model.tracks[0].clone();
-        let mut route = model.routes[0].clone();
-        track.id = StableId::parse("a0").expect("a track ID");
-        route.id = StableId::parse("a0-main").expect("a route ID");
-        let RouteSource::Track { track_id, .. } = &mut route.source else {
-            panic!("the fixture routes a track")
-        };
-        *track_id = track.id.clone();
-        assert!(matches!(
-            rig.apply(
-                &[
-                    SessionEdit::UpsertTrack { track },
-                    SessionEdit::UpsertRoute { route },
-                ],
-                2_000
-            ),
-            Outcome::Applied {
-                path: EditPath::Rebuild,
-                ..
-            }
-        ));
-        assert_eq!(rig.host.render_next(), RESULT_OK, "the rebuild is adopted");
-        assert_eq!(
-            rig.host.meter_header().master_track_plus_one,
-            3,
-            "t1 is strip 2 now, and still the master"
-        );
-        assert_eq!(rig.listed_masters(2_001), ["t1"]);
     }
 
     /// #1683 review fold: a rebuild that removes the master strip ends the designation in the
@@ -8906,7 +9046,7 @@ mod structural_apply {
     /// master the session no longer has.
     #[test]
     fn a_rebuild_that_removes_the_master_keeps_the_rendering_plans_master_until_adoption() {
-        let (_, mut rig) = boot_designated(0);
+        let (_, mut rig) = row_designated(0);
         assert_eq!(rig.host.meter_header().master_track_plus_one, 1);
         assert!(matches!(
             rig.apply(
@@ -8918,7 +9058,7 @@ mod structural_apply {
                         track_id: StableId::parse("t0").expect("a track ID"),
                     },
                 ],
-                1
+                2
             ),
             Outcome::Applied {
                 path: EditPath::Rebuild,
@@ -8931,7 +9071,7 @@ mod structural_apply {
             1,
             "the rendering plan keeps its master until adoption"
         );
-        assert_eq!(rig.listed_masters(2), Vec::<String>::new());
+        assert_eq!(rig.listed_masters(3), Vec::<String>::new());
         assert_eq!(rig.host.render_next(), RESULT_OK, "the rebuild is adopted");
         assert!(!rig.pending());
         assert_eq!(
@@ -8980,7 +9120,7 @@ mod structural_apply {
         assert_eq!(boot.latency_samples, row.latency_samples);
         assert_eq!(
             (boot.tail_kind, boot.tail_samples),
-            control_plane::tail_words(row.output_tail)
+            control_plane::tail_words(row.output_tail_every_peak)
         );
 
         for _ in 0..APPLY_BEFORE {
@@ -9110,10 +9250,11 @@ fn every_insert_of_a_sixty_four_track_session_subscribes() {
     let document = serde_json::to_string_pretty(&document).expect("document");
     let options = WebBootOptions {
         live_control_observation_taps: 1,
-        live_control_master_track_plus_one: 1,
         ..boot_options(QUANTUM)
     };
     let mut host = AudioWorkletEngineHost::boot(document.as_bytes(), options).expect("boot");
+    let first = host.live_control_tracks()[0].to_string();
+    designate_master(&mut host, &first);
     for track in 0..TRACKS {
         stage_command(
             &mut host,
@@ -9191,10 +9332,11 @@ fn a_subscription_past_the_frame_is_refused_and_an_unsubscribe_makes_room() {
     let document = serde_json::to_string_pretty(&document).expect("document");
     let options = WebBootOptions {
         live_control_observation_taps: 1,
-        live_control_master_track_plus_one: 1,
         ..boot_options(QUANTUM)
     };
     let mut host = AudioWorkletEngineHost::boot(document.as_bytes(), options).expect("boot");
+    let first = host.live_control_tracks()[0].to_string();
+    designate_master(&mut host, &first);
     let submit = |host: &mut AudioWorkletEngineHost, kind: u32, effect: u32| {
         stage_command(host, 0, kind, 1, 0, effect, 1, 2);
         host.submit_commands(1);

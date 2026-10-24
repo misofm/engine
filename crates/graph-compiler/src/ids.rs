@@ -119,9 +119,9 @@ pub(crate) fn add_node(
     nodes: &mut Vec<GraphNode>,
     id: GraphNodeId,
     latency: LatencySamples,
-    tail: TailSamples,
+    bound: NodeTailBound,
 ) {
-    nodes.push(GraphNode { id, latency, tail });
+    nodes.push(GraphNode { id, latency, bound });
 }
 
 /// An edge's two ends as dense node indices (#1384 D1).

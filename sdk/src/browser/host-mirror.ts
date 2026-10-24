@@ -41,22 +41,18 @@ export function toWebBootOptions(options: BootOptions): MisoWebBootOptions {
     BigInt(nonNegative(name, value ?? 0));
 
   const liveControls = options.liveControls;
-  const observationTaps = word("liveControls.observationTaps", liveControls?.observationTaps);
-  const masterTrackPlusOne = word(
-    "liveControls.masterTrackPlusOne",
-    liveControls?.masterTrackPlusOne,
-  );
-  const spectrumHopFrames = validateBrowserSpectrumHopFrames(options.spectrumHopFrames) ?? 0;
-
-  // The engine refuses these combinations at boot with `web.options.live_controls`. Catching them
-  // here turns a boot-time refusal into a caller-time message that says which pair is inconsistent,
-  // without duplicating the engine's authority: the engine still refuses if this check is wrong.
-  if (masterTrackPlusOne !== 0n && observationTaps === 0n) {
+  // Issue #1689: the retired master boot word is refused, never ignored, for an untyped caller.
+  if ((liveControls as { masterTrackPlusOne?: unknown } | undefined)?.masterTrackPlusOne !== undefined) {
     throw new MisoUsageError(
-      "a designated master strip is a designation over observed effects, so "
-      + "liveControlMasterTrackPlusOne requires liveControlObservationTaps",
+      "liveControls.masterTrackPlusOne was retired (issue #1689): designate the master after boot with strip.master(true)",
     );
   }
+  const observationTaps = word("liveControls.observationTaps", liveControls?.observationTaps);
+  const spectrumHopFrames = validateBrowserSpectrumHopFrames(options.spectrumHopFrames) ?? 0;
+
+  // The engine refuses this at boot with `web.options.live_controls`. Catching it here turns a
+  // boot-time refusal into a caller-time message, without duplicating the engine's authority: the
+  // engine still refuses if this check is wrong.
   if (observationTaps > BigInt(ABI_LAYOUT.constants.maximumObservationTaps)) {
     throw new MisoUsageError(
       `liveControlObservationTaps is capped at ${ABI_LAYOUT.constants.maximumObservationTaps}`,
@@ -78,7 +74,7 @@ export function toWebBootOptions(options: BootOptions): MisoWebBootOptions {
     reserved1: 0n,
     liveControlMeterBlocks: word("liveControls.meterBlocks", liveControls?.meterBlocks),
     liveControlObservationTaps: observationTaps,
-    liveControlMasterTrackPlusOne: masterTrackPlusOne,
+    reserved2: 0n,
     spectrumHopFrames,
     spectrum,
     spectrumCollection,

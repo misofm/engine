@@ -138,3 +138,72 @@ transaction format.
 ## Amendment (decision 17, root 2026-10-13)
 
 **Order (root Q7).** This slice lands after #1563.
+
+## Scope split and decisions (root, 2026-10-24; supersedes D1-D5 where they differ)
+
+- **Split.** 1383a (this branch): the BTLV primitives, every entity encoder a track nests, the
+  oracle, the source and track methods and their evals. 1383b (later stream): `setTrackRack`,
+  `putTrackEffect`, `removeTrackEffect`, `setTrackEffectOrder`, `setEffectIdentity`,
+  `setEffectQuality`, `setEffectSidechain`, `setTrackConsole` (with `rampSamples`), on the same
+  encoders and oracle.
+- **Decision-17 drift.** D2's `setTrackBuiltins`, `setTrackFader`, `setTrackMatrixOrPan`,
+  `setEffectBypass`, `setEffectLinkMode`, `upsertEffectParam` and `removeEffectParam` are gone: a
+  value is one `SET_CONTROL` (#1561). 14 methods remain; only `setTrackConsole` keeps `rampSamples`.
+- **D2 builder.** `transaction(base: SessionBuilder)`, not `transaction(expectedRevision)`: a track
+  is validated against the base's rate, sources and console slots. The builder keeps a working
+  source and track list, so a later edit sees an earlier one of the same transaction. It is
+  immutable, as `SessionBuilder` is.
+- **D1/D3 frame.** `SessionTransaction = { edits, payload, fieldCount }`. The request ID and the
+  expected revision are stamped at send by `encodeSessionTransaction(tx, { requestId,
+  expectedRevision })` (`@internal`, for #1296) through `control-frame.ts`'s `commandFrame`, as
+  #1563's queue does. No baked `bytes`, no request ID rewritten in place. The module is
+  `sdk/src/core/session-transaction.ts`.
+- **One validator.** Edits encode the normalized record of `session.ts`'s own normalizers
+  (`normalizeSource`, extracted from `SessionBuilder.source`; `normalizeTrack`, which now also
+  refuses unknown track keys; `trackSourceRef`; `resolveLanes`; `builderContext`), exported
+  `@internal`. The root barrel now names `core/session.ts`'s public exports instead of
+  `export *`, so those internals stay off it; `barrel-surface.ts` pins both.
+- **D4 oracle.** Frames on stdin back to back, applied in order to one store; one JSON line per
+  frame: `{"bytes", "ok"}`, `{"bytes", "refused"}` or `{"decode"}`. `protocol` was already a
+  dev-dependency; no `Cargo.toml` change.
+- **D5.** `transaction`, `TransactionBuilder`, `SessionTransaction`, `SessionEditSpec` on the root,
+  browser and headless entries (headless exports `session()` too).
+- **Gate 3 in 1383a.** Empty, unknown effect, undeclared source, fader out of domain, removing an
+  undeclared source. The `rampSamples` refusal is 1383b's.
+- **Open owner-level note (not blocking).** After #1386 an "edit the builder, `replaceSession`"
+  shape could supersede this encoder; the typed builder stays as ruled (D15-11).
+
+## Tranche 1383b decision record (2026-10-24)
+
+- **Methods.** `setTrackRack(trackId, inserts)`, `putTrackEffect(trackId, finalPosition, effect)`,
+  `removeTrackEffect(trackId, slotId)`, `setTrackEffectOrder(trackId, slotIds)`,
+  `setEffectIdentity(trackId, slotId, effectId)`, `setEffectQuality(trackId, slotId, "normal")`,
+  `setEffectSidechain(trackId, slotId, sidechain | null)`,
+  `setTrackConsole(trackId, entries, { rampSamples? })`. No other new export.
+- **Strip and rack.** The strip is a track or a base submix (the engine's `strip_mut`, #1204). The
+  methods take no rack name and write `inserts` (code 2): the engine refuses `builtins`
+  (`NotFound`) and `console` (`ConsoleSlotFixed`) for every one of these edits. An insert is named
+  by its stable ID (`effect()`'s `slotId`). The builder keeps each strip's working insert records
+  (from `base.toJSON()`, then each edit), so a later edit sees an earlier one.
+- **Validators.** `normalizeInserts`, a new shared `normalizeInsert`, `normalizeConsoleEntries`,
+  `quality` and a new shared `normalizeSidechain` (now also used by `effect()`) are exported
+  `@internal` from `session.ts`. `putTrackEffect` requires `slotId`: a position-derived ID could
+  name, and so replace, another insert. `setEffectIdentity` uses a new `retargetInsert`, which
+  checks the insert's link mode, sidechain port and every `params` row (parameter ID, unit, lane,
+  value) against the new descriptor with `effect()`'s own validators, as the engine's preparation
+  refuses a mismatch.
+- **`setTrackConsole`.** The engine refuses it unless an earlier `SetConsole` of the transaction
+  changed the console (`session.edit.value_op_retired`, #1561 D3). This builder has no
+  `setConsole` (#1385), so it validates the strip, the entries against the slots and `rampSamples`
+  (`requireU32`), then refuses with that code. The encoder (track ID, repeated entries, optional
+  field 3 `ramp_samples` written only when given) is in place, but its bytes and its ramp rows
+  (omitted, 0, 960) cannot be tested yet: the public builder cannot make the frame until #1385's
+  `setConsole` opens it; those rows belong to #1385's gate 1.
+- **Evals.** Gate 1 gained one frame of all seven rack and effect edits on a track and a submix
+  (racks and orders at 0, 1 and 3); gate 2 one snapshot of put, reorder, retarget, reroute, remove
+  and a submix rack; gate 3 one test of their refusals and of `setTrackConsole` (no console change;
+  `rampSamples` -1, 1.5, 2^32, "960").
+- **Cross-entity references (root, 2026-10-24).** The builder, like `SessionBuilder`, checks the
+  shape of each edit only; the engine's store refuses a reference between entities (a sidechain
+  source, a removed sidechain source, automation on a removed insert) with a typed
+  `MissingEntityReference`, so nothing is lost silently.

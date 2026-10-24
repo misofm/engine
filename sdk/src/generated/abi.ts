@@ -197,7 +197,7 @@ export const ABI_LAYOUT = deepFreeze(
           "type": "u64"
         },
         {
-          "name": "liveControlMasterTrackPlusOne",
+          "name": "reserved2",
           "offset": 56,
           "type": "u64"
         }

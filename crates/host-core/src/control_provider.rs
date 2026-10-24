@@ -31,14 +31,16 @@ use crate::response::{
 
 /// The counters the provider serves, in ascending ID order (#1351 D1): the two telemetry
 /// counters, `live_values_superseded` (#1312 D8), `transition_reprepare_refusals` (D6),
-/// `strips_restarted` (#1768) and `live_block_errors` (#1521). Each reads 0 from construction.
-const SERVED_COUNTERS: [CounterId; 6] = [
+/// `strips_restarted` (#1768), `live_block_errors` (#1521) and `source_underrun_blocks` (#1537).
+/// Each reads 0 from construction.
+const SERVED_COUNTERS: [CounterId; 7] = [
     CounterId::TelemetryCoalesced,
     CounterId::TelemetryDropped,
     CounterId::LiveValuesSuperseded,
     CounterId::TransitionReprepareRefusals,
     CounterId::StripsRestarted,
     CounterId::LiveBlockErrors,
+    CounterId::SourceUnderrunBlocks,
 ];
 
 /// The slots the provider's counter snapshot keeps even when the controller retains fewer IDs.
@@ -580,6 +582,18 @@ impl SessionControlProvider {
         set_counter(
             &mut self.counter_snapshot,
             CounterId::LiveBlockErrors,
+            count,
+        );
+    }
+
+    /// Record the session's `source_underrun_blocks` count (#1537 D1): the blocks render rendered
+    /// in which a source played zeros because the host had not delivered PCM it owed (graph-wide,
+    /// not per source), over every plan the session adopted. The control plane copies the
+    /// render-side mirror in beside `live_block_errors`.
+    pub fn set_source_underrun_blocks(&mut self, count: u64) {
+        set_counter(
+            &mut self.counter_snapshot,
+            CounterId::SourceUnderrunBlocks,
             count,
         );
     }
@@ -3771,6 +3785,7 @@ mod tests {
         provider.set_live_values_superseded(13);
         provider.set_strips_restarted(5);
         provider.set_live_block_errors(17);
+        provider.set_source_underrun_blocks(19);
         let counters = provider
             .counters(&CountersRequest {
                 all: true,
@@ -3791,7 +3806,9 @@ mod tests {
         assert_eq!(counters.values[4].value, 5);
         assert_eq!(counters.values[5].id, CounterId::LiveBlockErrors);
         assert_eq!(counters.values[5].value, 17);
-        assert_eq!(counters.values.len(), 6);
+        assert_eq!(counters.values[6].id, CounterId::SourceUnderrunBlocks);
+        assert_eq!(counters.values[6].value, 19);
+        assert_eq!(counters.values.len(), 7);
         assert_eq!(provider.retained_capacities().1, counter_capacity);
 
         provider.set_render_diagnostic(0, 256, 3, true);

@@ -134,7 +134,16 @@ when a dependency forces the order, and then sequence the correct solution.
   report 0 beyond their latency.
   Each node states two tail values (root, 2026-10-06; #1329 Amendment 3). `T_decay` is the bound
   above for every peak at or above the node's flush floor `P*` (below it the `f32` output near the
-  1e-20 per-word flush is no longer relative to `P`); tail reporting uses it (#1261, #1262, PDC).
+  1e-20 per-word flush is no longer relative to `P`); the graph extent composes it, with each
+  node's decay, peak and tail gains and flush stall (#1379). The graph states two values (root,
+  2026-10-06; #1379 Amendment 1): `output_tail`, valid only for graph input peaks at or above the
+  graph's flush floor `P*_graph`, and `output_tail_every_peak >= output_tail`, from which the
+  output is below `P·10^(−144/20)` for `P ≥ P*_graph` and exactly zero for `P < P*_graph`. Tail
+  reporting uses `output_tail_every_peak`, the only value that holds for every input: `P*_graph`
+  can sit near or above full scale for a live graph with a submix (estimated up to about +23 dBFS
+  with every gain at its maximum), so a reported `output_tail` would certify nothing for real
+  signals there. A host may report the decay value beside it where a consumer needs it, named as
+  the decay value with its floor, never in its place.
   `T_rest = max(T_decay, R(P*))`, at least `N_SILENCE` for an enabled filter section, is the bound
   over every peak: from it on the output is below `P·10^(−144/20)` for `P ≥ P*` and exactly zero
   for `P < P*`. Silence skipping (#1107) uses the exact-rest bound (`RestSamples`), which holds for
@@ -149,7 +158,9 @@ when a dependency forces the order, and then sequence the correct solution.
   size (with the `f32` state rounding, the certified margin is 3.673e-5 at 44.1 and 88.2 kHz and
   3.701e-5 at 48 and 96 kHz; #1329 Amendment 3); a collapsed strip decides every record over
   channel 0's state and renders the bits of the same strip rendered dual. (Root, 2026-10-05; #1407 Amendment 1.)
-- (c) #1261 and #1262 then report the bounded tail, never `Infinite`.
+- (c) #1261 and #1262 then report `output_tail_every_peak`, through host-core's prepared report and
+  the C ABI's `tail_samples` (no field changes); it is finite for every graph once *Retire the
+  Infinite tail* (#1378) lands.
 - *Rationale:* exact zero was provably never reached at the top of the cutoff domain, and the EQ
   had a second trap (round 1, B4.3; round 2, "Bits moved"). With the fix, exact rest is reached
   within a stated bound, so silence skipping can rely on it. For the input section with a live

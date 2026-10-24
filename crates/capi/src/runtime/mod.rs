@@ -220,7 +220,7 @@ impl From<CompileLimits> for ControlLimits {
 /// The ABI report row the control plane stores, built once when a row is inserted (#1309 D4).
 impl From<PlanResources> for PlanResourceReport {
     fn from(resources: PlanResources) -> Self {
-        let (tail_kind, tail_samples) = control_plane::tail_words(resources.output_tail);
+        let (tail_kind, tail_samples) = control_plane::tail_words(resources.output_tail_every_peak);
         Self {
             struct_size: crate::PLAN_RESOURCE_REPORT_SIZE,
             abi_version: ABI_VERSION,
@@ -266,7 +266,7 @@ impl From<PlanResourceReport> for PlanResources {
             source_count: report.source_count,
             track_count: report.track_count,
             latency_samples: report.latency_samples,
-            output_tail: if report.tail_kind == TAIL_FINITE {
+            output_tail_every_peak: if report.tail_kind == TAIL_FINITE {
                 TailSamples::Finite(report.tail_samples)
             } else {
                 TailSamples::Infinite
@@ -303,14 +303,14 @@ mod report_row_tests {
 
     /// Every field distinct and nonzero, so a dropped, swapped or mis-mapped field changes the
     /// round trip.
-    fn distinct(output_tail: TailSamples) -> PlanResources {
+    fn distinct(output_tail_every_peak: TailSamples) -> PlanResources {
         PlanResources {
             sample_rate_hz: 1,
             quantum_frames: 2,
             source_count: 3,
             track_count: 4,
             latency_samples: 5,
-            output_tail,
+            output_tail_every_peak,
             graph_session_plus_plan_bytes: 7,
             graph_incremental_plan_bytes: 8,
             graph_metadata_bytes: 9,

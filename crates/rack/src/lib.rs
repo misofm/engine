@@ -508,6 +508,19 @@ pub trait BankStage: Send {
         Ok(())
     }
 
+    /// Apply the pending `Observe` records of the lanes a plan swap's carry marked, as this
+    /// stage's next block would have at `first_sample` (#1280 D3, #1816). The predecessor plan
+    /// never renders again, so a record admitted after its last block would otherwise be lost
+    /// with the retired queue.
+    ///
+    /// [`BankChain::carry_observes`] calls it once on every slot, after the carry moved every
+    /// state. It is the carry's entry into the stage's own drain loop, the one the block path
+    /// runs: a stage that marks no lane drains nothing. The default is a stage with no
+    /// observation queue. Allocation-, lock- and syscall-free.
+    fn carry_observes(&mut self, first_sample: u64) {
+        let _ = first_sample;
+    }
+
     /// The lanes (bit `n` is lane `n`) whose [`begin_block`](Self::begin_block) drains a live
     /// lane, or `0` for a stage with none.
     ///
@@ -1363,17 +1376,6 @@ const fn lane_witness(designed: bool, restored: bool) -> ChannelSymmetryWitness 
     }
 }
 
-/// One lane's pending-`Observe` drain, split into the parts a caller needs to pop and apply (#1280
-/// D3): see [`LiveControlEffectBankStage::observe_target_mut`].
-pub struct ObserveTarget<'a> {
-    /// The lane's observation queue.
-    pub queue: &'a mut Consumer<EffectControlRecord>,
-    /// The lane's observation tap, if its plan declares observation capacity.
-    pub tap: Option<&'a mut ObservationLane>,
-    /// Where a record the lane has no tap for is counted, when the owner keeps such a count.
-    pub unbound: Option<&'a mut u64>,
-}
-
 /// The live-control twin of [`EffectBankStage`] (issue #140 A), and the stage of every bank slot
 /// with a lane bypassed at preparation (issue #1087).
 ///
@@ -1385,8 +1387,8 @@ pub struct ObserveTarget<'a> {
 ///
 /// # A session bypass is a lane of this stage (issue #1087)
 ///
-/// A session's `bypass`, on every effect but the delay and the multiband (which keep a prepared
-/// bypass, issue #1100), is lowered to a prepared `bypass = false` plus a lane
+/// A session's `bypass`, on every effect but the multiband (which keeps a prepared bypass, issue
+/// #1100), is lowered to a prepared `bypass = false` plus a lane
 /// ([`EffectControlLane::without_channel`] when no live controls are attached) whose bypass is set,
 /// so a bypassed track keeps its bank. Its lane runs the wet path with the others and step 4
 /// mixes in its latency-matched dry signal: once settled, the same words the effect's own
@@ -1425,6 +1427,9 @@ pub struct LiveControlEffectBankStage {
     /// The observation queue of each lane that has one, with the lane's index, taken out of the
     /// lane at bind so that the drain loop holds each pop in its own body (decision 15, #1345 D8).
     observe_queues: Box<[(usize, Consumer<EffectControlRecord>)]>,
+    /// The lanes (bit `n` is lane `n`) a plan swap's carry marked for its pending-`Observe` drain
+    /// (#1816), taken by [`BankStage::carry_observes`]. Always `0` while the plan renders.
+    carry_lanes: u8,
     /// One lane's staging window: the widest lane's live parameter cell count (at most the bank's
     /// `automation_capacity`), or none when no lane has a parameter cell (issue #1087; #1611 D3).
     ///
@@ -1597,6 +1602,7 @@ impl LiveControlEffectBankStage {
             offsets: vec![0_u32; lane_count + 1].into_boxed_slice(),
             lanes: lanes.into_boxed_slice(),
             observe_queues,
+            carry_lanes: 0,
             staging,
             packed: vec![IDLE_SPAN; total].into_boxed_slice(),
             shunt,
@@ -2232,6 +2238,11 @@ impl BankStage for LiveControlEffectBankStage {
         self.drain(first_sample, snapshot)
     }
 
+    fn carry_observes(&mut self, first_sample: u64) {
+        let lanes = core::mem::take(&mut self.carry_lanes);
+        self.drain_observe_queues(first_sample, lanes);
+    }
+
     fn live_lanes(&self) -> u8 {
         self.lanes
             .iter()
@@ -2374,9 +2385,22 @@ impl LiveControlEffectBankStage {
         if snapshot == LiveSnapshot::ALL || self.quiet_at != Some(snapshot.publication()) {
             self.read_cells(first_sample, snapshot);
         }
+        self.drain_observe_queues(first_sample, u8::MAX);
+        Ok(())
+    }
+
+    /// The drain's second loop: the observation queue of every lane in `lanes` (bit `n` is lane
+    /// `n`) popped as many times as its count at entry, each record applied to the lane's tap at
+    /// `first_sample` and one the lane has no tap for counted in [`Self::unbound`]. The block path
+    /// passes every lane; a plan swap's carry passes the lanes it marked (#1816), so the carry
+    /// and the block run one loop.
+    fn drain_observe_queues(&mut self, first_sample: u64, lanes: u8) {
         let mut observations = self.observations.as_deref_mut();
         let mut unbound = 0_u64;
         for (index, queue) in self.observe_queues.iter_mut() {
+            if lanes & (1 << *index) == 0 {
+                continue;
+            }
             let mut available = queue.available_at_entry();
             while available != 0 {
                 available -= 1;
@@ -2395,7 +2419,6 @@ impl LiveControlEffectBankStage {
             }
         }
         self.unbound = self.unbound.saturating_add(unbound);
-        Ok(())
     }
 
     /// The drain's first loop: every lane's cells read under `snapshot`, its spans packed at its
@@ -2423,29 +2446,14 @@ impl LiveControlEffectBankStage {
         self.quiet_at = (packed == 0 && walk.quiet()).then_some(snapshot.publication());
     }
 
-    /// The parts of lane `lane`'s pending-`Observe` drain a plan swap's carry needs (#1280 D3):
-    /// the lane's queue, its observation tap and this stage's unbound counter. The sample its next
-    /// block would have started at is the executor's, which the carry already holds. `None` when
-    /// the lane has no queue.
-    ///
-    /// The predecessor never renders again, so an acknowledged subscribe admitted after its last
-    /// block would be lost with the retired queue unless the carry applies it. The carry pops the
-    /// queue itself, in a loop of its own that states the bound at the loop (the queue's count at
-    /// entry): this accessor pops nothing. Allocation-, lock- and syscall-free.
-    pub fn observe_target_mut(&mut self, lane: usize) -> Option<ObserveTarget<'_>> {
-        let position = self
-            .observe_queues
-            .iter()
-            .position(|(index, _)| *index == lane)?;
-        Some(ObserveTarget {
-            queue: &mut self.observe_queues[position].1,
-            tap: self
-                .observations
-                .as_deref_mut()
-                .and_then(|lanes| lanes.get_mut(lane))
-                .and_then(Option::as_mut),
-            unbound: Some(&mut self.unbound),
-        })
+    /// Mark lane `lane` for a plan swap's pending-`Observe` drain (#1280 D3, #1816), which
+    /// [`BankStage::carry_observes`] runs once the carry moved every state. The predecessor never
+    /// renders again, so a record admitted after its last block is applied then, as its next
+    /// block would have. A lane past the bank, or with no queue, selects nothing. Pops nothing.
+    pub fn mark_observe_carry(&mut self, lane: usize) {
+        if lane < 8 {
+            self.carry_lanes |= 1 << lane;
+        }
     }
 
     /// The index into [`Self::observe_queues`] of lane `lane`'s queue, if it has one.
@@ -4259,6 +4267,17 @@ impl BankChain {
     /// stage type through [`BankStage::as_any_mut`]. Never called by [`run`](Self::run).
     pub fn slot_stage_mut(&mut self, slot: usize) -> Option<&mut dyn BankStage> {
         Some(self.slots.get_mut(slot)?.stage.as_mut())
+    }
+
+    /// Apply the pending `Observe` records of every lane a plan swap's carry marked, on every
+    /// slot (#1280 D3, #1816): [`BankStage::carry_observes`] once per slot, after the carry moved
+    /// every state. The marks select, so no slot is skipped for being inactive. The chain renders
+    /// no more. Allocation-, lock- and syscall-free; bounded by the slots and each marked queue's
+    /// count at entry.
+    pub fn carry_observes(&mut self, first_sample: u64) {
+        for slot in &mut self.slots {
+            slot.stage.carry_observes(first_sample);
+        }
     }
 
     /// Prepare this chain to hand lane state to a successor plan (issue #1276 D5): when it

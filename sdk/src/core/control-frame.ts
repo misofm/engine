@@ -29,7 +29,8 @@ const PROTOCOL_MINOR = 0;
 const KIND_COMMAND = 1;
 const KIND_RESPONSE = 2;
 const MESSAGE_CAPABILITIES_GET = 0x0001;
-const MESSAGE_SESSION_TRANSACTION_APPLY = 0x0003;
+/** @internal */
+export const MESSAGE_SESSION_TRANSACTION_APPLY = 0x0003;
 /** Header flag byte: the command takes any session revision (`CAPABILITIES_GET` requires it). */
 /** @internal */
 export const FLAG_REVISION_ANY = 1;
@@ -146,14 +147,15 @@ export function concat(parts: readonly Uint8Array[]): Uint8Array {
   return out;
 }
 
-/** A nested message body: `count:u32, reserved:u32`, then its fields. */
-function messageBody(fields: readonly Uint8Array[]): Uint8Array {
+/** A nested message body: `count:u32, reserved:u32`, then its fields. @internal */
+export function messageBody(fields: readonly Uint8Array[]): Uint8Array {
   const header = new Uint8Array(8);
   new DataView(header.buffer).setUint32(0, fields.length, true);
   return concat([header, ...fields]);
 }
 
-function nested(id: number, mandatory: boolean, fields: readonly Uint8Array[]): Uint8Array {
+/** @internal */
+export function nested(id: number, mandatory: boolean, fields: readonly Uint8Array[]): Uint8Array {
   return field(id, WIRE_MESSAGE, mandatory, messageBody(fields));
 }
 
@@ -162,7 +164,8 @@ export function u8(value: number): Uint8Array {
   return Uint8Array.of(value);
 }
 
-function u16(value: number): Uint8Array {
+/** @internal */
+export function u16(value: number): Uint8Array {
   const out = new Uint8Array(2);
   new DataView(out.buffer).setUint16(0, value, true);
   return out;
@@ -175,7 +178,8 @@ export function u32(value: number): Uint8Array {
   return out;
 }
 
-function f32(value: number): Uint8Array {
+/** @internal */
+export function f32(value: number): Uint8Array {
   const out = new Uint8Array(4);
   new DataView(out.buffer).setFloat32(0, value, true);
   return out;

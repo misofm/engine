@@ -2,7 +2,7 @@
 
 use builtins_compiler::{BuiltinCompileCaps, prepare_session_builtins};
 use effect_compiler::EffectPreparedSession;
-use effect_contract::{BankWidth, LatencySamples, TailSamples};
+use effect_contract::{BankWidth, LatencySamples};
 use engine::realtime::{PlanarBufferMut, RenderEnvelope, RenderError, RenderIo, RenderTime};
 use graph::{
     DependencyLevel, GraphBindingBlock, GraphBuiltinBankResourceEstimate, GraphCompileCaps,
@@ -157,6 +157,7 @@ fn compiles_65_537_tracks_or_rejects_only_a_configured_resource() {
         },
         builtins,
         caps: constrained,
+        gain_liveness: graph_compiler::GainLiveness::FIXED,
     })
     .err()
     .expect("a node cap one below the session's graph rejects");
@@ -272,7 +273,7 @@ fn hand_built_plan(
         .map(|node| GraphNode {
             id: node.clone(),
             latency: LatencySamples(0),
-            tail: TailSamples::Finite(0),
+            bound: effect_contract::NodeTailBound::ZERO,
         })
         .collect();
     nodes.sort_by(|left, right| left.id.cmp(&right.id));
@@ -625,6 +626,7 @@ fn compiles_and_binds_65_537_tracks_with_builtins() {
         },
         builtins,
         caps: graph_caps(),
+        gain_liveness: graph_compiler::GainLiveness::FIXED,
     })
     .unwrap_or_else(|failure| panic!("with-builtins scale diagnostics: {:?}", failure.diagnostics));
     assert_eq!(artifact.report().estimate.logical_nodes, NODES);

@@ -136,6 +136,7 @@ fn compile(
         effects,
         builtins,
         caps: graph_caps(),
+        gain_liveness: graph_compiler::GainLiveness::FIXED,
     })
     .unwrap_or_else(|failure| panic!("graph compile: {:?}", failure.diagnostics))
 }
@@ -615,6 +616,7 @@ fn a_loop_through_a_bus_tap_is_a_graph_cycle() {
         effects,
         builtins,
         caps: graph_caps(),
+        gain_liveness: graph_compiler::GainLiveness::FIXED,
     })
     .err()
     .expect("a loop through a tap refuses");
@@ -698,6 +700,7 @@ fn a_bus_insert_keyed_from_its_own_fader_names_its_sidechain() {
         effects,
         builtins,
         caps: graph_caps(),
+        gain_liveness: graph_compiler::GainLiveness::FIXED,
     })
     .err()
     .expect("a self-keyed loop refuses");

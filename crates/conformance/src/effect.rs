@@ -9,13 +9,15 @@ use std::{
 use crate::prng::SplitMix64;
 
 use effect_contract::{
-    BankProcessReport, BankWidth, CompositionBound, EffectDescriptor, EffectId, EffectPrepareError,
-    EffectProcessBlock, EffectQuality, LatencySamples, LinkMode, LinkModeSet, NativeEffectFactory,
-    NativeEffectRegistry, NodeTailBound, ParameterChannel, ParameterChannelPolicy,
-    ParameterDescriptor, ParameterDomain, ParameterId, ParameterMapping, ParameterUnit,
-    PortDescriptor, PortId, PortLayout, PortRole, PrepareEffectBankRequest, PrepareEffectLimits,
-    PrepareEffectRequest, PreparedAutomationSpan, PreparedBankMetadata, PreparedEffect,
-    PreparedEffectBank, PreparedEffectMetadata, PreparedNativeEffect, PreparedNativeEffectBank,
+    AutomationRate, BankProcessReport, BankWidth, CompositionBound, EffectDescriptor, EffectId,
+    EffectPrepareError, EffectProcessBlock, EffectQuality, EffectTargetRequest,
+    InitialParameterValue, LatencySamples, LinkMode, LinkModeSet, NativeEffectFactory,
+    NativeEffectRegistry, NativeEffectTargetPreparation, NodeTailBound,
+    PREPARED_EFFECT_TARGET_WORDS, ParameterChannel, ParameterChannelPolicy, ParameterDescriptor,
+    ParameterDomain, ParameterId, ParameterMapping, ParameterUnit, PortDescriptor, PortId,
+    PortLayout, PortRole, PrepareEffectBankRequest, PrepareEffectLimits, PrepareEffectRequest,
+    PreparedAutomationSpan, PreparedBankMetadata, PreparedEffect, PreparedEffectBank,
+    PreparedEffectMetadata, PreparedEffectTarget, PreparedNativeEffect, PreparedNativeEffectBank,
     PreparedPorts, PreparedSidechainPort, ProcessReport, QualityDescriptor, ResetKind, RestBound,
     SmoothingRule, StatePayloadError, StatePayloadInput, StatePayloadOutput, StatePayloadSizes,
     TailSamples, default_initial_values, expected_prepared_metadata, valid_runtime_span,
@@ -839,6 +841,322 @@ fn latency_and_partition_probe(
     }
 }
 
+/// The samples of the Point schedule (issue #1661 D1): all but `128` are mid-quantum at `q = 128`,
+/// so a mid-quantum Point is compared with a quantum-aligned one; they are
+/// they are spaced closer than the launch effects' smoothing, so each Point cuts the ramp before it
+/// in flight.
+const POINT_SAMPLES: [usize; 9] = [1, 37, 63, 64, 100, 127, 128, 129, 191];
+
+/// The two legal values a scheduled cell alternates between, the first one away from the default.
+fn point_values(parameter: &ParameterDescriptor) -> Option<[f32; 2]> {
+    let default = parameter.default_value;
+    let [a, b] = match parameter.domain {
+        ParameterDomain::Continuous => {
+            let (low, high) = parameter.minimum.zip(parameter.maximum)?;
+            if default - low >= high - default {
+                [low, high]
+            } else {
+                [high, low]
+            }
+        }
+        ParameterDomain::Boolean => [1.0, 0.0],
+        ParameterDomain::Enumeration => {
+            let [first, second, ..] = parameter.enum_choices else {
+                return None;
+            };
+            [first.value, second.value]
+        }
+    };
+    // Start with the value that moves the cell; both orders alternate the same pair.
+    let pair = if a.to_bits() == default.to_bits() {
+        [b, a]
+    } else {
+        [a, b]
+    };
+    Some(pair.map(effect_contract::normalize_zero))
+}
+
+/// The block starts of one partition of `total` samples: `0` and every cut below `total`, sorted.
+fn block_starts(total: usize, cuts: impl IntoIterator<Item = usize>) -> Vec<usize> {
+    let mut starts: Vec<usize> = cuts.into_iter().filter(|&cut| cut < total).collect();
+    starts.push(0);
+    starts.sort_unstable();
+    starts.dedup();
+    starts
+}
+
+/// One partitioned render of the Point schedule: the output planes and the final state payload.
+struct PointRender {
+    left: Vec<f32>,
+    right: Vec<f32>,
+    payload: Option<(Vec<u8>, Vec<u8>, Vec<u8>)>,
+}
+
+/// How the schedule reaches the effect: as `Point` spans, or as prepared targets.
+enum PointSchedule {
+    /// Every span of the schedule, in the contract's canonical order.
+    Spans(Vec<PreparedAutomationSpan>),
+    /// Per scheduled sample, the targets the effect's own `prepare_targets` designed for it.
+    Targets(Vec<(usize, Vec<PreparedEffectTarget>)>),
+}
+
+/// Render the reference input in blocks that start at `starts`, delivering the schedule at its
+/// samples: a span in the block of its sample (every scheduled sample is a block start, so every
+/// span is at its block's first sample), a target immediately before the block that starts at its
+/// sample.
+fn render_points(
+    factory: &dyn NativeEffectFactory,
+    request: PrepareEffectRequest<'_>,
+    starts: &[usize],
+    schedule: &PointSchedule,
+    input: (&[f32], &[f32]),
+    tier: &mut EffectConformanceTierReport,
+) -> Option<PointRender> {
+    let Ok(PreparedEffect {
+        processor: mut effect,
+        metadata,
+    }) = factory.prepare(request)
+    else {
+        tier.failures.push("prepare.factory");
+        return None;
+    };
+    let total = input.0.len();
+    let mut left = input.0.to_vec();
+    let mut right = input.1.to_vec();
+    for (index, &start) in starts.iter().enumerate() {
+        let end = starts.get(index + 1).copied().unwrap_or(total);
+        let spans: &[PreparedAutomationSpan] = match schedule {
+            PointSchedule::Spans(spans) => {
+                let from = spans.partition_point(|span| span.sample < start as u64);
+                let to = spans.partition_point(|span| span.sample < end as u64);
+                &spans[from..to]
+            }
+            PointSchedule::Targets(events) => {
+                for (_, targets) in events.iter().filter(|(sample, _)| *sample == start) {
+                    for target in targets {
+                        if effect.apply_prepared_target(target).is_err() {
+                            tier.failures.push("process.partition_invariance_points");
+                            return None;
+                        }
+                    }
+                }
+                &[]
+            }
+        };
+        let Ok(block) = EffectProcessBlock::new(
+            &mut left[start..end],
+            &mut right[start..end],
+            None,
+            start as u64,
+            spans,
+            request.quantum,
+        ) else {
+            tier.failures.push("process.partition_invariance_points");
+            return None;
+        };
+        let report = armed_process(
+            effect.as_mut(),
+            block,
+            &mut tier.process_calls,
+            &mut tier.failures,
+        )?;
+        if report.invalid_spans != 0 {
+            tier.failures.push("process.partition_invariance_points");
+        }
+    }
+    let payload = snapshot_payload(effect.as_ref(), metadata);
+    Some(PointRender {
+        left,
+        right,
+        payload,
+    })
+}
+
+/// The schedule's prepared targets: per scheduled sample, the targets `prepare_targets` designs
+/// for the candidate whose continuous `Block` cells all take that event's value. `None` when a
+/// moved cell has no two legal values or a legal candidate does not prepare.
+fn point_targets(
+    preparation: &dyn NativeEffectTargetPreparation,
+    descriptor: &'static EffectDescriptor,
+    sample_rate: u32,
+    initial: &[InitialParameterValue],
+    samples: &[usize],
+) -> Option<PointSchedule> {
+    let moved: Vec<bool> = initial
+        .iter()
+        .map(|value| {
+            let parameter = &descriptor.parameters[value.parameter_index as usize];
+            parameter.automation_rate != AutomationRate::None
+                && parameter.domain == ParameterDomain::Continuous
+        })
+        .collect();
+    let mut candidate = initial.to_vec();
+    let mut out = vec![
+        PreparedEffectTarget {
+            slot: 0,
+            channel: ParameterChannel::Left,
+            words: [0; PREPARED_EFFECT_TARGET_WORDS],
+        };
+        preparation.maximum_targets()
+    ];
+    let mut events = Vec::with_capacity(samples.len());
+    for (event, &sample) in samples.iter().enumerate() {
+        for (value, &moves) in candidate.iter_mut().zip(&moved) {
+            let parameter = &descriptor.parameters[value.parameter_index as usize];
+            if moves {
+                value.value = point_values(parameter)?[event % 2];
+            }
+        }
+        let count = preparation
+            .prepare_targets(
+                EffectTargetRequest {
+                    sample_rate,
+                    values: &candidate,
+                    changed: &moved,
+                },
+                &mut out,
+            )
+            .ok()?;
+        events.push((sample, out[..count].to_vec()));
+    }
+    Some(PointSchedule::Targets(events))
+}
+
+/// The schedule's spans: at every scheduled sample, one `Point` per channel of every `Block` cell.
+/// `None` when a `Block` cell has no two legal values to alternate between.
+fn point_spans(descriptor: &'static EffectDescriptor, samples: &[usize]) -> Option<PointSchedule> {
+    let mut spans = Vec::new();
+    for (event, &sample) in samples.iter().enumerate() {
+        for (index, parameter) in descriptor.parameters.iter().enumerate() {
+            if parameter.automation_rate == AutomationRate::None {
+                continue;
+            }
+            let pair = point_values(parameter)?;
+            let channels: &[ParameterChannel] = match parameter.channel_policy {
+                ParameterChannelPolicy::Shared => &[ParameterChannel::Both],
+                ParameterChannelPolicy::PerLane => {
+                    &[ParameterChannel::Left, ParameterChannel::Right]
+                }
+            };
+            for &channel in channels {
+                spans.push(PreparedAutomationSpan {
+                    channel,
+                    parameter_index: index as u32,
+                    sample: sample as u64,
+                    value: pair[event % 2],
+                });
+            }
+        }
+    }
+    spans.sort_by_key(|span| (span.sample, span.parameter_index, span.channel));
+    Some(PointSchedule::Spans(spans))
+}
+
+/// Partition invariance with `Point`s at mid-quantum samples (issue #1661 D1).
+///
+/// A fixed schedule moves every `Block` cell of the descriptor at [`POINT_SAMPLES`], alternating
+/// between two legal values of its domain ([`point_values`]); a per-lane cell takes a `Left` and a
+/// `Right` twin, a shared one `Both`. Three partitions render it: (a) one-frame blocks, (b) blocks
+/// cut exactly at the scheduled samples and quantum blocks otherwise, and (c) (b) with a further
+/// cut at every multiple of `q - 1`. The three outputs must equal bit for bit and the three final
+/// state payloads byte for byte, and no report may count an invalid span. Stored automation
+/// renders an effect node in pieces that start at event samples (#1662); this is what makes the
+/// pieces inaudible.
+///
+/// An effect that takes prepared targets (the parametric EQ refuses every raw span) takes the
+/// schedule as targets from its own `prepare_targets`, applied immediately before the block that
+/// starts at the scheduled sample. Only continuous cells move there, because the EQ refuses a
+/// target whose `enabled` or `kind` differs from the prepared one until #1337; every Boolean cell
+/// is prepared on, so the sections whose values move are in the signal path.
+fn partition_with_points_probe(
+    factory: &dyn NativeEffectFactory,
+    request: PrepareEffectRequest<'_>,
+    expected: PreparedEffectMetadata,
+    config: ConformanceConfig,
+    tier: &mut EffectConformanceTierReport,
+) {
+    let descriptor = factory.descriptor();
+    let quantum = config.quantum as usize;
+    let Some(total) = usize::try_from(expected.latency.0)
+        .ok()
+        .and_then(|latency| latency.checked_add(3 * quantum))
+    else {
+        tier.failures.push("latency.declared");
+        return;
+    };
+    let samples: Vec<usize> = POINT_SAMPLES
+        .into_iter()
+        .filter(|&sample| sample < total)
+        .collect();
+    let mut initial: Vec<InitialParameterValue> = default_initial_values(descriptor).collect();
+    let schedule = if let Some(preparation) = factory.target_preparation() {
+        for value in &mut initial {
+            if descriptor.parameters[value.parameter_index as usize].domain
+                == ParameterDomain::Boolean
+            {
+                value.value = 1.0;
+            }
+        }
+        point_targets(
+            preparation,
+            descriptor,
+            request.sample_rate,
+            &initial,
+            &samples,
+        )
+    } else {
+        point_spans(descriptor, &samples)
+    };
+    let Some(schedule) = schedule else {
+        tier.failures.push("process.partition_invariance_points");
+        return;
+    };
+    let mut request = request;
+    request.initial_values = &initial;
+    if let PointSchedule::Spans(spans) = &schedule {
+        let per_sample = spans.len().div_ceil(samples.len().max(1));
+        request.limits.maximum_automation_spans_per_block = request
+            .limits
+            .maximum_automation_spans_per_block
+            .max(u32::try_from(per_sample).unwrap_or(u32::MAX));
+    }
+
+    let (input_left, input_right) = reference_input(total);
+    let input = (input_left.as_slice(), input_right.as_slice());
+    let cut_at_points = block_starts(
+        total,
+        (0..total).step_by(quantum).chain(samples.iter().copied()),
+    );
+    let forms = [
+        block_starts(total, 0..total),
+        cut_at_points.clone(),
+        block_starts(
+            total,
+            cut_at_points
+                .iter()
+                .copied()
+                .chain((0..total).step_by(quantum - 1)),
+        ),
+    ];
+    let mut rendered = Vec::with_capacity(forms.len());
+    for starts in &forms {
+        let Some(render) = render_points(factory, request, starts, &schedule, input, tier) else {
+            return;
+        };
+        rendered.push(render);
+    }
+    let reference = &rendered[0];
+    if reference.payload.is_none()
+        || rendered[1..].iter().any(|render| {
+            !bits_equal(&render.left, &reference.left)
+                || !bits_equal(&render.right, &reference.right)
+                || render.payload != reference.payload
+        })
+    {
+        tier.failures.push("process.partition_invariance_points");
+    }
+}
+
 /// One effect crate's whole conformance test: run the shared harness against its factory.
 ///
 /// Issue #105 F1. The harness had validated nothing but its own reference mock, and a contract
@@ -1133,6 +1451,9 @@ pub fn run_effect_conformance(
                     tier.failures.push("automation.malformed");
                 }
                 latency_and_partition_probe(factory, request, expected, config, tier);
+                if !bypass {
+                    partition_with_points_probe(factory, request, expected, config, tier);
+                }
                 if !sanitization_probe(factory, request, tier) {
                     tier.failures.push("process.input_sanitization");
                 }

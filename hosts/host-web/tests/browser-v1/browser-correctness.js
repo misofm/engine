@@ -12,13 +12,13 @@ function bootOptions() {
     // against.
     reserved1: 0n,
     liveControlMeterBlocks: 0n,
-    // Issue #143 D3/D6: the remaining two policy words. The worklet's exact-field guard means
+    // Issue #143 D3, issue #1689: the remaining two words. The worklet's exact-field guard means
     // these are not optional -- an `options` object missing them is refused with
-    // `RESULT_INVALID_ARGUMENT` before the module is instantiated. Zero in both is the same
-    // "no observation capacity, no master designation" every pre-#143 writer already meant, and
-    // is what this fixture's digests were pinned against.
+    // `RESULT_INVALID_ARGUMENT` before the module is instantiated. Zero taps is "no observation
+    // capacity", what this fixture's digests were pinned against; `reserved2` (the retired master
+    // boot word) must be zero.
     liveControlObservationTaps: 0n,
-    liveControlMasterTrackPlusOne: 0n,
+    reserved2: 0n,
     // Zero selects the rate/quantum-derived spectrum hop default.
     spectrumHopFrames: 0,
     spectrum: undefined,

@@ -29,10 +29,10 @@ pub use observe::{
     observation_slot_retained_bytes,
 };
 pub use plan::{
-    CarryOutcome, HostAttachment, ObserverCarry, ObserverKind, PlanRevisionGate,
-    PlanUnitEligibility, PrepareRenderPlan, PreparedPlanExecutor, PreparedProgram,
-    PreparedRenderPlan, RenderEnvelope, RenderError, RenderIo, RenderReport, RenderTime,
-    ResponseSnapshotAvailability, ResponseSnapshotCapture, ResponseSnapshotError,
+    CarryOutcome, ExecutorBlockReport, HostAttachment, ObserverCarry, ObserverKind,
+    PlanRevisionGate, PlanUnitEligibility, PrepareRenderPlan, PreparedPlanExecutor,
+    PreparedProgram, PreparedRenderPlan, RenderEnvelope, RenderError, RenderIo, RenderReport,
+    RenderTime, ResponseSnapshotAvailability, ResponseSnapshotCapture, ResponseSnapshotError,
     ResponseSnapshotOwnerInfo, ResponseSnapshotRequest, ResponseSnapshotSection,
     ResponseSnapshotSink, plan_revision_gate_retained_bytes,
 };
@@ -101,10 +101,10 @@ mod tests {
             _arena: &mut BufferArena,
             mut output: PlanarBufferMut<'_>,
             _time: RenderTime,
-        ) -> Result<(), RenderError> {
+        ) -> Result<ExecutorBlockReport, RenderError> {
             output.plane_mut(0)?.fill(0.0);
             output.plane_mut(1)?.fill(0.0);
-            Ok(())
+            Ok(ExecutorBlockReport::default())
         }
     }
 
@@ -239,9 +239,9 @@ mod tests {
             _arena: &mut BufferArena,
             mut output: PlanarBufferMut<'_>,
             _time: RenderTime,
-        ) -> Result<(), RenderError> {
+        ) -> Result<ExecutorBlockReport, RenderError> {
             output.plane_mut(0)?.fill(0.0);
-            Ok(())
+            Ok(ExecutorBlockReport::default())
         }
     }
 
@@ -941,12 +941,12 @@ mod tests {
                 _arena: &mut BufferArena,
                 mut output: PlanarBufferMut<'_>,
                 _time: RenderTime,
-            ) -> Result<(), RenderError> {
+            ) -> Result<ExecutorBlockReport, RenderError> {
                 if self.0.fail.load(Ordering::Relaxed) {
                     return Err(RenderError::InvalidEnvelope);
                 }
                 output.plane_mut(0)?.fill(0.0);
-                Ok(())
+                Ok(ExecutorBlockReport::default())
             }
         }
 
@@ -1071,9 +1071,9 @@ mod tests {
                 _arena: &mut BufferArena,
                 mut output: PlanarBufferMut<'_>,
                 _time: RenderTime,
-            ) -> Result<(), RenderError> {
+            ) -> Result<ExecutorBlockReport, RenderError> {
                 output.plane_mut(0)?.fill(0.0);
-                Ok(())
+                Ok(ExecutorBlockReport::default())
             }
         }
 
@@ -1529,9 +1529,9 @@ mod tests {
                 _arena: &mut BufferArena,
                 mut output: PlanarBufferMut<'_>,
                 _time: RenderTime,
-            ) -> Result<(), RenderError> {
+            ) -> Result<ExecutorBlockReport, RenderError> {
                 output.plane_mut(0)?.fill(0.0);
-                Ok(())
+                Ok(ExecutorBlockReport::default())
             }
         }
 
@@ -1544,9 +1544,9 @@ mod tests {
                 _arena: &mut BufferArena,
                 mut output: PlanarBufferMut<'_>,
                 _time: RenderTime,
-            ) -> Result<(), RenderError> {
+            ) -> Result<ExecutorBlockReport, RenderError> {
                 output.plane_mut(0)?.fill(0.0);
-                Ok(())
+                Ok(ExecutorBlockReport::default())
             }
         }
 
@@ -2039,7 +2039,7 @@ mod tests {
                 _arena: &mut BufferArena,
                 mut output: PlanarBufferMut<'_>,
                 _time: RenderTime,
-            ) -> Result<(), RenderError> {
+            ) -> Result<ExecutorBlockReport, RenderError> {
                 for sample in output.plane_mut(0)? {
                     // Offset so the test signal has no exact-zero sample.
                     *sample = (0.5 + 0.25 * self.phase.1) as f32;
@@ -2049,7 +2049,7 @@ mod tests {
                         sin * ROTATION.0 + cos * ROTATION.1,
                     );
                 }
-                Ok(())
+                Ok(ExecutorBlockReport::default())
             }
         }
 
@@ -2062,9 +2062,9 @@ mod tests {
                 _arena: &mut BufferArena,
                 mut output: PlanarBufferMut<'_>,
                 _time: RenderTime,
-            ) -> Result<(), RenderError> {
+            ) -> Result<ExecutorBlockReport, RenderError> {
                 output.plane_mut(0)?.fill(0.0);
-                Ok(())
+                Ok(ExecutorBlockReport::default())
             }
         }
 

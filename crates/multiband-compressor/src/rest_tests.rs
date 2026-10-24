@@ -125,8 +125,8 @@ fn process<L: Lane, const W: usize>(
 }
 
 /// Every word of lane `track` that a block carries forward, both channels, but the silence
-/// counter (a clock): the crossover words, both smoother words, every field of every ramp, and the
-/// lane's coefficient and design words.
+/// counter (a clock): the crossover state words, both smoother words, every field of every ramp
+/// (the crossover's three word ramps included, issue #1338), and the crossover target.
 fn lane_state<L: Lane, const W: usize>(
     instance: &Instance<L, W>,
     track: usize,
@@ -140,9 +140,6 @@ fn lane_state<L: Lane, const W: usize>(
             side.filter.b.ic2,
             side.gain_db[LOW_BAND],
             side.gain_db[HIGH_BAND],
-            side.coefficients.nc1,
-            side.coefficients.a2,
-            side.coefficients.a3,
         ];
         out.extend(words.iter().map(|word| lane_value(*word, track).to_bits()));
         for ramp in &side.ramps[track] {
@@ -153,7 +150,6 @@ fn lane_state<L: Lane, const W: usize>(
                 ramp.remaining,
             ]);
         }
-        out.extend(side.designed[track].map(f32::to_bits));
         out.push(side.crossover_hz[track].to_bits());
     }
 }
@@ -183,7 +179,8 @@ impl<L: Lane, const W: usize> rest_probe::Probe for Probe<L, W> {
             if let Some(draw) = self.automation.as_mut()
                 && draw.chance(1, 64)
             {
-                let parameter = 1 + draw.below(RAMP_COUNT);
+                // Every parameter, the crossover included (live since #1338).
+                let parameter = draw.below(PARAMETER_COUNT);
                 let descriptor = &MULTIBAND_COMPRESSOR_PARAMETERS[parameter];
                 spans.push(PreparedAutomationSpan {
                     channel: draw.pick(&[ParameterChannel::Left, ParameterChannel::Right]),

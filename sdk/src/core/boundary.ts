@@ -198,15 +198,16 @@ function snapshotBootOptions(options: BootOptions): BootSnapshot {
     throw new MisoUsageError("spectrum and spectrumCollection are mutually exclusive");
   }
   const liveControlOptions = options.liveControls === undefined ? undefined : (() => {
-    const {
-      meterBlocks,
-      observationTaps,
-      masterTrackPlusOne,
-    } = options.liveControls!;
+    // Issue #1689: the retired master boot word is refused, never ignored, for an untyped caller.
+    if ((options.liveControls as { masterTrackPlusOne?: unknown }).masterTrackPlusOne !== undefined) {
+      throw new MisoUsageError(
+        "liveControls.masterTrackPlusOne was retired (issue #1689): designate the master after boot with strip.master(true)",
+      );
+    }
+    const { meterBlocks, observationTaps } = options.liveControls!;
     return Object.freeze({
       ...(meterBlocks === undefined ? {} : { meterBlocks }),
       ...(observationTaps === undefined ? {} : { observationTaps }),
-      ...(masterTrackPlusOne === undefined ? {} : { masterTrackPlusOne }),
     });
   })();
   const bootOptions: BootOptions = Object.freeze({

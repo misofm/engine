@@ -18,7 +18,6 @@ const LIVE_CONTROL_METER_BLOCKS = 2n;
 const OBSERVATION_BLOCKS = 16;
 const OBSERVATION_FRAMES = OBSERVATION_BLOCKS * QUANTUM_FRAMES;
 const OBSERVATION_TAPS = 4n;
-const OBSERVATION_MASTER_TRACK_PLUS_ONE = 1n;
 const OBSERVATION_TAP_ID = 1;
 const OBSERVATION_LEVEL = 0.5;
 const MINIMUM_STALL_MS = 100;
@@ -55,7 +54,6 @@ function bootOptions(
   sourceRingFrames,
   liveControlMeterBlocks = 0n,
   liveControlObservationTaps = 0n,
-  liveControlMasterTrackPlusOne = 0n,
 ) {
   return {
     sourceRingFrames,
@@ -65,10 +63,12 @@ function bootOptions(
     // Issue #1565: offset 32 is reserved and must be zero.
     reserved1: 0n,
     liveControlMeterBlocks,
-    // Issue #143 D3/D6: the frozen configuration's remaining two reserved words. Zero in both is
-    // the pre-#143 shape, which is what every row but the observation one keeps using.
+    // Issue #143 D3: zero is the pre-#143 shape, which is what every row but the observation
+    // ones keeps using.
     liveControlObservationTaps,
-    liveControlMasterTrackPlusOne,
+    // Issue #1689: offset 56 was the master boot word; it is reserved and must be zero. The
+    // observation row designates its master with the strip's `master` row after boot.
+    reserved2: 0n,
   };
 }
 
@@ -289,6 +289,13 @@ async function diagnoseGlobals() {
 async function applyMatrix(host, matrix) {
   const { applyMatrixThroughSdk } = await import("/sdk/sdk-response-client.js");
   return applyMatrixThroughSdk(host, "track", matrix);
+}
+
+/// Designate the qualification track the master with its `master` row (#1689 D6), the one way an
+/// app designates it, through the SDK's `strip.master(true)` and `host.control()`.
+async function designateMaster(host) {
+  const { designateMasterThroughSdk } = await import("/sdk/sdk-response-client.js");
+  return designateMasterThroughSdk(host, "track");
 }
 
 /// The track IDs of the running session, in the core's order, read by the SDK from the control list.
@@ -660,12 +667,13 @@ async function runObservationRun(createHost, sessionDocument, armed) {
       OBSERVATION_FRAMES,
       LIVE_CONTROL_METER_BLOCKS,
       OBSERVATION_TAPS,
-      OBSERVATION_MASTER_TRACK_PLUS_ONE,
     ),
     simd128ModuleUrl: ARTIFACT_URL,
     workletModuleUrl: WORKLET_URL,
   });
   host.node.connect(context.destination);
+  const master = await designateMaster(host);
+  if (!master.ok || master.path !== "monitor") throw new Error("observation master designation refused");
 
   const frames = [];
   for (let block = 0; block < OBSERVATION_BLOCKS; block += 1) {
@@ -881,9 +889,8 @@ async function runStagingReadRun(createHost, sessionDocument, streaming) {
     options: {
       ...bootOptions(
         STAGING_READ_FRAMES,
-          LIVE_CONTROL_METER_BLOCKS,
+        LIVE_CONTROL_METER_BLOCKS,
         OBSERVATION_TAPS,
-        OBSERVATION_MASTER_TRACK_PLUS_ONE,
       ),
       spectrum: null,
       spectrumCollection: {

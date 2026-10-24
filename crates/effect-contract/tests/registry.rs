@@ -114,6 +114,23 @@ fn bounded_rest_with_infinite_peak(sample_rate: u32, _: EffectQuality) -> NodeTa
     )
 }
 
+/// Breaks only (c), with #1376's fixed-point rest: a `FixedPoint` rest beside an infinite
+/// `tail_every_peak`.
+fn fixed_point_rest_with_infinite_peak(sample_rate: u32, _: EffectQuality) -> NodeTailBound {
+    at_broken_rate(
+        sample_rate,
+        NodeTailBound {
+            tail: TailSamples::Finite(5),
+            tail_every_peak: TailSamples::Infinite,
+            rest: RestBound::FixedPoint(RestSamples {
+                peak_plus_24_dbfs: 20,
+                any_sanitized_input: 40,
+            }),
+            composition: CompositionBound::Unstated,
+        },
+    )
+}
+
 /// Breaks only (d): a bounded rest whose bound for a +24 dBFS peak exceeds its bound for every
 /// sanitized input.
 fn peak_rest_above_any_input_rest(sample_rate: u32, _: EffectQuality) -> NodeTailBound {
@@ -300,6 +317,7 @@ static RULE_A: EffectDescriptor = descriptor(1, finite_peak_below_tail);
 static RULE_A_INFINITE: EffectDescriptor = descriptor(1, finite_peak_below_infinite_tail);
 static RULE_B: EffectDescriptor = descriptor(1, unstated_rest_with_finite_peak);
 static RULE_C: EffectDescriptor = descriptor(1, bounded_rest_with_infinite_peak);
+static RULE_C_FIXED_POINT: EffectDescriptor = descriptor(1, fixed_point_rest_with_infinite_peak);
 static RULE_D: EffectDescriptor = descriptor(1, peak_rest_above_any_input_rest);
 
 /// `descriptor` is refused with the D2 code, while its consistent twin (every row as at the
@@ -335,12 +353,15 @@ fn an_unstated_rest_with_a_finite_tail_over_every_peak_is_refused() {
     assert_refused_as_inconsistent(&RULE_B);
 }
 
-/// Issue #1462 D2 (c): `rest` is `Bounded` only with a finite `tail_every_peak`.
+/// Issue #1462 D2 (c): `rest` is `Bounded` or `FixedPoint` (#1376) only with a finite
+/// `tail_every_peak`.
 ///
-/// Red mutation: the registry drops rule (c), or checks only the first quality row.
+/// Red mutation: the registry drops rule (c), checks only the first quality row, or exempts
+/// `FixedPoint`.
 #[test]
 fn a_bounded_rest_with_an_infinite_tail_over_every_peak_is_refused() {
     assert_refused_as_inconsistent(&RULE_C);
+    assert_refused_as_inconsistent(&RULE_C_FIXED_POINT);
 }
 
 /// Issue #1462 D2 (d): in a bounded rest, `peak_plus_24_dbfs <= any_sanitized_input`.

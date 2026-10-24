@@ -33,7 +33,9 @@ pub const EVENT_LANE_RELIABLE: u32 = 0;
 /// Explicitly lossy/coalescing telemetry event-egress lane.
 pub const EVENT_LANE_LOSSY: u32 = 1;
 
-/// A plan tail terminates after `tail_samples`.
+/// A plan tail terminates after `tail_samples`: from `tail_samples` samples after the inputs stop,
+/// the output is below `P * 10^(-144/20)` for an input peak `P` at or above the graph's flush
+/// floor and exactly `+-0.0` below it, for every input (#1379 H10).
 pub const TAIL_FINITE: u64 = control_plane::TAIL_FINITE;
 /// A plan tail is unbounded and reports zero `tail_samples`.
 pub const TAIL_INFINITE: u64 = control_plane::TAIL_INFINITE;
@@ -298,7 +300,8 @@ pub struct PlanResourceReport {
     pub latency_samples: u64,
     /// [`TAIL_FINITE`] or [`TAIL_INFINITE`].
     pub tail_kind: u64,
-    /// Finite tail samples, or zero for an infinite tail.
+    /// The plan's output tail over every input peak, the graph's `output_tail_every_peak` (#1379
+    /// H10; it includes the plan latency), or zero for an infinite tail.
     pub tail_samples: u64,
     /// Graph session-plus-plan bytes.
     pub graph_session_plus_plan_bytes: u64,

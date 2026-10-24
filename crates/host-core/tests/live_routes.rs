@@ -326,7 +326,6 @@ impl Live {
                 effect_observations: Vec::new(),
                 route_controls: Vec::new(),
                 follow_route_controls: Vec::new(),
-                master_track: None,
                 live_values_superseded: host_core::LiveValuesSuperseded::default(),
                 jump_lengths: None,
             };
@@ -978,6 +977,7 @@ fn graph_route_resources(document: &str) -> RouteControlResources {
             maximum_single_allocation_bytes: u64::MAX,
             maximum_finite_tail_samples: u64::MAX,
         },
+        gain_liveness: graph_compiler::GainLiveness::FIXED,
     })
     .unwrap_or_else(|failure| panic!("graph: {:?}", failure.diagnostics));
     let producers = artifact

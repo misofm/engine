@@ -43,7 +43,7 @@ const FACTORY_FIELDS = [
 ];
 const BOOT_OPTION_FIELDS = [
   "sourceRingFrames", "maximumMemoryBytes", "reserved1", "liveControlMeterBlocks",
-  "liveControlObservationTaps", "liveControlMasterTrackPlusOne",
+  "liveControlObservationTaps", "reserved2",
 ];
 const execFileAsync = promisify(execFile);
 
@@ -424,7 +424,7 @@ async function runSuspendedFixture(urls) {
   ];
   const BOOT_OPTION_FIELDS_IN_ORDER = [
     "sourceRingFrames", "maximumMemoryBytes", "reserved1", "liveControlMeterBlocks",
-    "liveControlObservationTaps", "liveControlMasterTrackPlusOne",
+    "liveControlObservationTaps", "reserved2",
   ];
   const STAGE_TIMEOUT = 15_000;
   const stages = [];
@@ -576,7 +576,7 @@ async function runSuspendedFixture(urls) {
     reserved1: 0n,
     liveControlMeterBlocks: 0n,
     liveControlObservationTaps: 0n,
-    liveControlMasterTrackPlusOne: 0n,
+    reserved2: 0n,
   });
   const makeFactoryOptions = () => ({
     context,
@@ -736,7 +736,7 @@ async function runSuspendedFixture(urls) {
       reserved1: "0",
       liveControlMeterBlocks: "0",
       liveControlObservationTaps: "0",
-      liveControlMasterTrackPlusOne: "0",
+      reserved2: "0",
       preparedModule: false,
       spectrumPreparation: false,
     },

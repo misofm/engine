@@ -173,7 +173,6 @@ fn expected_prepared(effect: &str, parameter: u32) -> Option<RebuildReason> {
         ("miso.parametric-eq", 1 | 2 | 17 | 18 | 33 | 34 | 49 | 50) => {
             Some(RebuildReason::RuledLiveNotBuilt { issue: 1337 })
         }
-        ("miso.multiband-compressor", 1) => Some(RebuildReason::RuledLiveNotBuilt { issue: 1338 }),
         _ => None,
     }
 }
@@ -224,7 +223,6 @@ fn effect_rows_carry_the_ruled_class() {
             assert_eq!(row.descriptor.automatable(), parameter.automatable);
         }
         let bypass = match effect {
-            "miso.delay" => Some(RebuildReason::RuledLiveNotBuilt { issue: 1339 }),
             "miso.multiband-compressor" => Some(RebuildReason::RuledLiveNotBuilt { issue: 1340 }),
             _ => None,
         };

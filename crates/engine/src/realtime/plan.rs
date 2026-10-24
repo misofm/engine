@@ -389,13 +389,14 @@ pub trait PreparedPlanExecutor: Send {
     /// default ignores the snapshot, which is right for an executor whose live drains still pop
     /// queues at their nodes (#1504 hands `S` to the drains).
     fn begin_live_block(&mut self, _snapshot: LiveSnapshot) {}
-    /// Render one already-validated block using only preallocated state.
+    /// Render one already-validated block using only preallocated state, and report the
+    /// block's source facts ([`ExecutorBlockReport`]) in the same call.
     fn render(
         &mut self,
         arena: &mut BufferArena,
         output: PlanarBufferMut<'_>,
         time: RenderTime,
-    ) -> Result<(), RenderError>;
+    ) -> Result<ExecutorBlockReport, RenderError>;
     /// Bounded implementation-owned qualification counters, read only after rendering is
     /// disarmed. Production executors that do not expose counters retain the zero default.
     #[doc(hidden)]
@@ -627,6 +628,16 @@ impl From<BufferArenaError> for RenderError {
         Self::Buffer(value)
     }
 }
+/// What an executor reports about a block it rendered successfully (#1537 D3), returned by
+/// [`PreparedPlanExecutor::render`] itself, so the render path asks the executor nothing more.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct ExecutorBlockReport {
+    /// Whether a source played zeros in this block because the host had not delivered PCM it
+    /// owed (graph-wide, not per source). A held block and a block past the end of a region are
+    /// not underruns. `false` for an executor without sources.
+    pub source_underrun: bool,
+}
+
 /// Fixed report returned after every invocation.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct RenderReport {
@@ -639,6 +650,9 @@ pub struct RenderReport {
     /// The block's live snapshot `S`, taken from the plan's own revision gate (#1502 D2): the
     /// newest committed revision whose live values the block applied.
     pub live_snapshot: LiveSnapshot,
+    /// Whether a source underran in this block ([`ExecutorBlockReport::source_underrun`]);
+    /// `false` for a plan without an executor.
+    pub source_underrun: bool,
 }
 
 /// Why a block failed, and whether it failed after the live snapshot.
@@ -1335,7 +1349,8 @@ impl PreparedRenderPlan {
             .checked_add(u64::from(envelope.quantum.0))
             .ok_or_else(|| before(RenderError::TimeOverflow))?;
         let live_snapshot = self.gate.snapshot();
-        self.render_block(io, time, live_snapshot)
+        let block = self
+            .render_block(io, time, live_snapshot)
             .map_err(|error| BlockFailure {
                 error,
                 after_snapshot: true,
@@ -1348,6 +1363,7 @@ impl PreparedRenderPlan {
             next_absolute_sample: next,
             frames: envelope.quantum.0,
             live_snapshot,
+            source_underrun: block.source_underrun,
         })
     }
 
@@ -1357,18 +1373,19 @@ impl PreparedRenderPlan {
         mut io: RenderIo<'_>,
         time: RenderTime,
         live_snapshot: LiveSnapshot,
-    ) -> Result<(), RenderError> {
+    ) -> Result<ExecutorBlockReport, RenderError> {
         if let Some(executor) = &mut self.executor {
             executor.begin_live_block(live_snapshot);
-            executor.render(&mut self.arena, io.output, time)?;
-        } else {
+            return executor.render(&mut self.arena, io.output, time);
+        }
+        {
             let mut channel = 0;
             while channel < self.program.envelope.output_channels.get() {
                 io.output.plane_mut(channel)?.fill(0.0);
                 channel += 1;
             }
         }
-        Ok(())
+        Ok(ExecutorBlockReport::default())
     }
     // REALTIME_POLICY_END
 }

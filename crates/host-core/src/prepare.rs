@@ -273,8 +273,11 @@ pub struct HostPrepareReport {
     pub effect_count: u64,
     /// Compiled output latency in samples.
     pub latency_samples: u64,
-    /// Compiled output tail.
-    pub output_tail: TailSamples,
+    /// The plan's reported output tail: the graph's `output_tail_every_peak` (#1379 Amendment 1
+    /// H4, H10), from which the output is below `P * 10^(-144/20)` for every graph input peak `P`
+    /// at or above the graph's flush floor and exactly `+-0.0` below it. It is never the graph's
+    /// decay value `output_tail`, which holds only at or above that floor.
+    pub output_tail_every_peak: TailSamples,
     /// Graph plus plan bytes, excluding the compiled session model.
     pub graph_session_plus_plan_bytes: u64,
     /// Incremental plan bytes.
@@ -386,21 +389,6 @@ pub struct HostLiveControlRequest {
     /// can use other periods. Latest gain-reduction observations can be independently aged,
     /// so a browser frame's peak interval does not establish the gain-reduction interval.
     pub observation_taps: u32,
-    /// The strip whose gain reduction is reported as the master's, or `None` (issue #143 D6): an
-    /// index into [`HostLiveControlHandles::strips`], tracks first, then submixes (issue #1208
-    /// D3).
-    ///
-    /// The master reading is a *designation*, not a discovery: no strip is structurally the
-    /// master. Issue #1208 widens that stopgap from tracks to every strip without retiring it, so
-    /// a bus whose strip carries a limiter can now be designated. The field, its refusal code
-    /// `host.observation.master_track` and the browser and SDK spellings keep their track-era
-    /// names (DESIGN P17).
-    ///
-    /// It designates a first plan's master only (#1683): the designation is the strip's `master`
-    /// monitor row, which the boot seeds from this field and the app sets or changes after boot,
-    /// and a successor takes it from [`SuccessorBase::monitor`]. A successor's request that names
-    /// one refuses with `host.observation.master_track`.
-    pub master_track: Option<u32>,
 }
 
 impl Default for HostLiveControlRequest {
@@ -410,7 +398,6 @@ impl Default for HostLiveControlRequest {
             meter_queue_depth: NonZeroUsize::MIN,
             meter_tap: MeterTap::PostMatrix,
             observation_taps: 0,
-            master_track: None,
         }
     }
 }
@@ -538,9 +525,6 @@ pub struct HostLiveControlHandles {
     /// whatever the live options; such a route has no entry in [`Self::route_controls`]. Found
     /// with [`follow_route_producer_position`].
     pub follow_route_controls: Vec<graph::GraphFollowRouteControlProducer>,
-    /// The designated master strip index, echoed back after validation against `strips.len()`
-    /// (issue #1208 D3): tracks first, then submixes. Still a designation, not a discovery.
-    pub master_track: Option<u32>,
     /// The `live_values_superseded` count this plan's strip and route cell readers add to
     /// (#1312 D2): the session's own count when the host passed one to
     /// [`prepare_host_runtime_with_live_lanes`], else a fresh count this preparation made. Read
@@ -2184,38 +2168,10 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
     let route_count = u64::try_from(model.routes.len()).map_err(|_| platform("host.count"))?;
     let effect_count = count_effects(model)?;
     caps.validate_shape(compiled)?;
-    // Issue #143 D6, widened to strips by issue #1208 D3 and made a monitor row by #1683: a
-    // designated master must name a strip this session actually has, or the frame would report a
-    // master reading nobody can address. A first plan takes it from the request (the browser's
-    // boot word), by strip index; a successor takes it from the overlay it renders under, by strip
-    // ID, so a strip added or removed before the master never moves the designation. A successor
-    // request that names one is refused: the overlay is the one designation.
-    let strip_total = model.tracks.len() + model.submixes.len();
-    let master_track = match (successor, live_controls.master_track) {
-        (None, Some(index)) if (index as usize) < strip_total => Some(index),
-        (None, None) => None,
-        (None | Some(_), Some(_)) => return Err(shape("host.observation.master_track")),
-        (Some(base), None) => match base.monitor.next.master() {
-            Some(id) => Some(
-                controls::strip_index(model, id)
-                    .and_then(|index| u32::try_from(index).ok())
-                    .ok_or_else(|| shape("host.observation.master_track"))?,
-            ),
-            None => None,
-        },
-    };
-    // The overlay the plan renders and lists under (#1559 D9): a successor's own; a first plan's
-    // solos nothing and holds the request's master (#1683), so the boot catalog lists it.
-    let boot_overlay = match (successor, master_track) {
-        (None, Some(index)) => {
-            let mut overlay = controls::MonitorOverlay::new();
-            if let Some(strip) = model.strips().nth(index as usize) {
-                overlay.set_master(strip.id, true);
-            }
-            overlay
-        }
-        _ => controls::MonitorOverlay::new(),
-    };
+    // The overlay the plan renders and lists under (#1559 D9): a successor's own, which holds its
+    // master by strip ID (#1683); a first plan's solos nothing and designates no master (#1689 D3):
+    // the app writes the strip's `master` row after boot.
+    let boot_overlay = controls::MonitorOverlay::new();
     let overlay = successor.map_or(&boot_overlay, |base| base.monitor.next);
 
     let source_id_bytes = model.sources.iter().try_fold(0_usize, |total, source| {
@@ -2865,6 +2821,12 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
             maximum_single_allocation_bytes: caps.maximum_named_allocation_bytes,
             maximum_finite_tail_samples: u64::MAX,
         },
+        // #1379 Amendment 1 H3: with a control queue every strip's fader, mute and matrix lanes
+        // are attached; a route into a submix gets its lane after the compile, when asked.
+        gain_liveness: graph_compiler::GainLiveness {
+            strip_fader_matrix: attach_live,
+            routes_into_submixes: attach_live && lanes.routes,
+        },
     })
     .map_err(|failure| {
         PrepareDiagnostics::new(
@@ -2942,7 +2904,7 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
     let mut follow_route_controls = follow_route_controls;
     // #1285 D4: the floored output arrival, the one the plan renders.
     let output_latency = artifact.report().output_latency;
-    let output_tail = artifact.report().output_tail;
+    let output_tail_every_peak = artifact.report().output_tail_every_peak;
     let input_floors: Box<[(graph::GraphNodeId, u64)]> = artifact
         .report()
         .input_arrivals
@@ -3627,7 +3589,7 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
         route_count,
         effect_count,
         latency_samples: output_latency.0,
-        output_tail,
+        output_tail_every_peak,
         graph_session_plus_plan_bytes: graph_resources.session_plus_plan_bytes,
         graph_incremental_plan_bytes: graph_resources.incremental_plan_bytes,
         graph_metadata_bytes: graph_resources.graph_metadata_bytes,
@@ -3798,7 +3760,6 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
             effect_observations,
             route_controls,
             follow_route_controls,
-            master_track,
             live_values_superseded: live_superseded,
             jump_lengths: Some(jump_lengths),
         },
@@ -5437,7 +5398,7 @@ pub enum LiveRebuild {
     /// A control whose row is rebuild-only changes, for the reason its row states (decision 17,
     /// C3). This replaces the former `Prepared` and `PreparedBypass`: an effect parameter the plan
     /// keeps prepared (an EQ band's `enabled` and `kind` among them, decision 14 F2), the bypass
-    /// of the delay and the multiband compressor (decision 14 F4), an input value, a route value.
+    /// of the multiband compressor (decision 14 F4), an input value, a route value.
     RebuildOnly(RebuildReason),
     /// The stored automation changes and one of `next`'s automations names a row that its rule
     /// refuses ([`controls::automation_diagnostics`] is not empty, #1566 D6, decision 15 E1). The
@@ -5461,9 +5422,9 @@ pub enum LiveRebuild {
 /// `Ok(None)` is no difference in any value the plan keeps. `Ok(Some(_))` is a live difference:
 /// the bypass of an effect that lowers it to a lane shunt, and each `Block`-rate parameter whose
 /// resolved value bits change. `Err` is a prepared difference: another structure (identity,
-/// quality, sidechain or link mode), a rebuild-only row (the delay and the multiband compressor
-/// bypass, a parameter that is not `Block`-rate), a parameter that does not resolve, or a ramp
-/// that the indexed law refuses.
+/// quality, sidechain or link mode), a rebuild-only row (the multiband compressor bypass, a
+/// parameter that is not `Block`-rate), a parameter that does not resolve, or a ramp that the
+/// indexed law refuses.
 pub(crate) fn effect_instance_records(
     before: &Effect,
     after: &Effect,
