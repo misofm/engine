@@ -3260,8 +3260,15 @@ fn race_live_edits(run: usize) -> RaceCounts {
     let document = race_session();
     // SAFETY: The returned handles are uniquely owned until the matching destroy calls below.
     let (session, plan) = unsafe { compile_c(&document, &limits()) };
-    // #1583 gate 7: the output's meter table, one batch per window, so every render below folds
-    // the output meter through the requested gate, and the control thread stages the batches.
+    let mut feed = ConstantFeed::new();
+    // Warm-up on this thread: the first blocks, fed, before the race starts.
+    for block in 0..2 {
+        // SAFETY: No other thread uses either handle yet.
+        unsafe { fed_render_c(session, plan, &mut feed, block) };
+    }
+    // #1583 gate 7: the output's meter table, one batch per window, configured after the warm-up
+    // so the race's first block applies the requested gate, every block folds the output meter,
+    // and the control thread stages the batches.
     let window = 12_u32;
     let meters = protocol::TelemetryConfiguration {
         meters: vec![protocol::MeterEntry {
@@ -3291,12 +3298,6 @@ fn race_live_edits(run: usize) -> RaceCounts {
     let configured = unsafe { submit(session, &configure[..configure_len], &mut response) };
     assert_eq!(configured, RESULT_OK);
     assert_eq!(&response[18..20], &[0, 0], "the meter table is accepted");
-    let mut feed = ConstantFeed::new();
-    // Warm-up on this thread: the first blocks, fed, before the race starts.
-    for block in 0..2 {
-        // SAFETY: No other thread uses either handle yet.
-        unsafe { fed_render_c(session, plan, &mut feed, block) };
-    }
     let first_race_block = 2_u64;
     let plan_address = plan as usize;
     let stop = AtomicBool::new(false);
