@@ -32,8 +32,8 @@ The test file that holds #1268's gate-1 test (named in #1268's decision record),
 
 ## Gates
 
-- G1. The new case passes on `main`. Mutation (PR evidence): skip the state clear for section 1 only on
-  disable; the new case turns red and #1268's existing gate stays green. Test value: a disable path that
+- G1. The scenario's LPF leg passes on `main`. Mutation (PR evidence): skip the state clear for section 1 only on
+  disable; the LPF leg turns red and #1268's existing gate stays green. Test value: a disable path that
   keeps the LPF's stale state, which changes the sign of an exact zero at the strip output and which no
   current output-level test sees.
 
