@@ -314,7 +314,13 @@ fn output_sample(plane: usize, index: u64) -> f32 {
     match mixed % 61 {
         0..=4 => special[(mixed % 61) as usize],
         // A kept sample larger than the rest, rarely, so windows differ.
-        5 => (if index % 2 == 0 { 0.75_f32 } else { -0.875 }) * (1.0 + plane as f32 / 8.0),
+        5 => {
+            (if index.is_multiple_of(2) {
+                0.75_f32
+            } else {
+                -0.875
+            }) * (1.0 + plane as f32 / 8.0)
+        }
         _ => ((mixed >> 11) as f32 / (1_u64 << 53) as f32 - 0.5) * 0.9,
     }
 }
