@@ -688,6 +688,8 @@ impl ResponseSnapshotCollector {
     }
 }
 
+// REALTIME_POLICY_BEGIN
+// The collector's copy runs on the thread that renders, after a block (#1577).
 impl ResponseSnapshotSink for ResponseSnapshotCollector {
     fn copy_owner(
         &mut self,
@@ -726,6 +728,7 @@ impl ResponseSnapshotSink for ResponseSnapshotCollector {
         Ok(())
     }
 }
+// REALTIME_POLICY_END
 
 /// Caller-owned output for a composed live track subtotal.
 #[derive(Debug)]

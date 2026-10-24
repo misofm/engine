@@ -1710,6 +1710,10 @@ where
     )
     .map_err(|_| failure(ResourceFault::Allocation))?;
     let sample_source: Arc<dyn host_core::PlanSampleSource> = Arc::clone(&shared) as Arc<_>;
+    // #1577 D5: the session's one response capture channel, its server beside the plan.
+    let (mut capture_client, capture_server) =
+        host_core::response_capture_channel().map_err(|_| failure(ResourceFault::Allocation))?;
+    capture_client.set_newest_plan_epoch(owner.active_epoch().0);
     let provider = SessionControlProvider::try_new(
         control_catalog,
         store.revision().0,
@@ -1719,6 +1723,7 @@ where
         // A reply must fit the endpoint's frame and the replay cache's response bound, both the
         // host's control frame limit.
         control_bytes,
+        capture_client,
     )
     .map_err(|_| failure(ResourceFault::Allocation))?;
     let controller = ProtocolController::try_with_config_and_retained_capacity(
@@ -1800,6 +1805,7 @@ where
         send_moves: None,
         spectrum,
         output_meter: Some((output_reader, output_gate)),
+        response_ready: None,
     };
     let (offsets, pending, counts, armed, armed_bytes) = crate::control::observation_slots(
         &session.providers.effects,
@@ -1815,7 +1821,7 @@ where
     session.observation_slots_high_water = session.observation_pending.len();
     Ok(CompiledChildren {
         session,
-        plan: PlanState::new(owner, shared, output_observer),
+        plan: PlanState::new(owner, shared, output_observer, capture_server),
     })
 }
 

@@ -975,6 +975,9 @@ pub struct SessionState<A: ControlAdapter> {
     /// The output meter's reader and gate (#1581 D4) until the adapter takes them: the browser's
     /// render half does; the C ABI's control half keeps them here for #1583.
     pub(crate) output_meter: Option<(host_core::OutputPeakReader, host_core::OutputPeakGate)>,
+    /// The response capture's delivered result (#1577 D5), kept by `service` until a host takes
+    /// it; #1578 turns it into an event.
+    pub(crate) response_ready: Option<host_core::ResponseReady>,
 }
 
 /// Every live send move (a following route's record with a ramp, written by a live commit or by a
@@ -2501,10 +2504,50 @@ where
     pub fn service(&mut self) -> Result<(), CommandError> {
         self.fold_observation_pending();
         self.synchronize_plan_epochs()?;
+        self.poll_response_capture();
         self.refresh_provider_counters();
         self.collect_render_activity();
         self.refresh_provider_counters();
         Ok(())
+    }
+
+    /// Takes the response capture's reply, if one is there and no result is waiting (#1577 D5).
+    fn poll_response_capture(&mut self) {
+        if self.response_ready.is_some() {
+            return;
+        }
+        let (provider, store) = self.controller.provider_and_session_mut();
+        self.response_ready = provider.poll_response_capture(store.compiled().normalized_model());
+    }
+
+    /// Test seam (#1577 D5): arm one capture of `strip_id`'s response owners from the newest plan.
+    ///
+    /// # Errors
+    ///
+    /// The capture's refusal; a refusal changes nothing.
+    #[cfg(feature = "test-support")]
+    pub fn test_arm_track_response(
+        &mut self,
+        strip_id: &str,
+        grid: host_core::ResponsePreviewGrid,
+        channels: host_core::ResponseChannels,
+    ) -> Result<u64, host_core::ResponseCaptureRefusal> {
+        let (provider, store) = self.controller.provider_and_session_mut();
+        provider.arm_response_capture(
+            store.compiled().normalized_model(),
+            strip_id,
+            grid,
+            channels,
+        )
+    }
+
+    /// Test seam (#1577 D5): take the delivered capture result and release the capture, as #1578
+    /// does when the host dequeues its event.
+    #[cfg(feature = "test-support")]
+    pub fn test_take_track_response(&mut self) -> Option<host_core::ResponseReady> {
+        let ready = self.response_ready.take()?;
+        self.controller.provider_mut().release_response_capture();
+        Some(ready)
     }
 
     /// Sets every counter the provider serves from a source outside it (#1348 D8): the
@@ -3949,7 +3992,12 @@ where
         {
             *epoch = configured_epoch;
         }
+        let candidate_epoch = candidate_provider.epoch;
         self.pending_providers.push(candidate_provider);
+        // #1577 D4: a capture armed from here on waits for the candidate.
+        self.controller
+            .provider_mut()
+            .set_newest_plan_epoch(candidate_epoch);
         // #1584 D6a: the newest plan's slots, built above. The fold ran when this command was
         // serviced and nothing has been pushed since (one thread), so none is lost.
         (
