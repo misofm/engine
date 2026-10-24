@@ -91,8 +91,23 @@ the producer submits already-decoded PCM, as a browser or mobile host does.
   order is the same (right after the ring row). Its plan is the ring row's.
 - **No new env name**: the producer core is the process mask less the render core, so 938b's
   runner hands it over by widening `taskset`. A controlled run whose mask holds no second core is
-  refused by the bench before timing (`no_producer_cpu`). Until 938b lands, every controlled runner
-  invocation refuses: the timed run waits for 938b.
+  refused by the bench before timing (`no_producer_cpu`, tested through `Placement::refusal`).
+- **938a and 938b land in one PR** (root, 2026-10-24): 938a alone would make every controlled
+  runner invocation refuse.
+
+## Decision record (938b attempt 1, 2026-10-24)
+
+- `bench_read_producer_cpu` / `bench_producer_cpu` in `scripts/check-bench-preconditions.sh` (pure
+  predicate plus a sysfs reader, both in its self-test): the highest CPU of `bench_cpu`'s level-3
+  `shared_cpu_list` that is not in its `thread_siblings_list`. On this host (EPYC 7313P) `bench_cpu`
+  31 gives producer 30. The file is outside the scope note's list; the runner's predicates live
+  there so the self-test can drive them.
+- The runner widens `taskset` to `bench_cpu,producer_cpu`; `cpu_affinity` stays `bench_cpu`. No
+  eligible core is `precondition_producer_cpu_unavailable`, a refusal the uncontrolled escape hatch
+  does not waive (only a run with no core pinned at all can run unpinned). The preflight computes
+  the same pair, fails without one, and prints `bench_cpu`, `producer_cpu` and `taskset_mask`.
+- `perf stat` now counts both threads; the producer mostly sleeps, and the drift check against the
+  measured rounds is unchanged.
 - **Floor**: the live row states the ring row's identity floor and names no control (the two rows
   share one floor). `tools/bench/src/floor.rs` was edited for this (exhaustive match).
 - **Ring depth**: `LIVE_RING_FRAMES` mirrors `host_core::default_source_ring_frames(48_000, 128)`;

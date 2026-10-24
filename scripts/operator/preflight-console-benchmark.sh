@@ -40,6 +40,15 @@ bash scripts/test-console-benchmark.sh >/dev/null || fail 'validator mutation su
 # The admissibility predicates the run is about to be refused by. A precondition whose own
 # self-test is red would refuse or admit for the wrong reason, and the run is one-shot.
 bash scripts/check-bench-preconditions.sh >/dev/null || fail 'bench precondition self-test failed'
+# #938: the cores the run will pin, chosen as the runner chooses them: the benchmark core and the
+# live-producer row's core, one of its L3 that is not its SMT sibling. A host with none refuses
+# here rather than after the build.
+# shellcheck source=scripts/check-bench-preconditions.sh
+source scripts/check-bench-preconditions.sh
+bench_cpu=$(bench_highest_cpu "$(< /sys/devices/system/cpu/online)") ||
+    fail 'the online CPU list is unreadable'
+producer_cpu=$(bench_read_producer_cpu "$bench_cpu") ||
+    fail "no live-producer core shares cpu $bench_cpu's L3 outside its SMT siblings"
 
 cargo test --locked -p bench >/dev/null || fail 'bench crate tests failed'
 # The workspace/all-features form is what CI runs, and it is the form that matters: Cargo unifies
@@ -82,8 +91,11 @@ jq -n -S \
     --arg aggregate_validator_sha256 "$(sha256sum scripts/console-benchmark-validator.jq | awk '{print $1}')" \
     --arg library_sha256 "$(sha256sum scripts/console-benchmark-record-lib.jq | awk '{print $1}')" \
     --arg preconditions_sha256 "$(sha256sum scripts/check-bench-preconditions.sh | awk '{print $1}')" \
+    --arg bench_cpu "$bench_cpu" --arg producer_cpu "$producer_cpu" \
     '{schema_version: 1, issue: 149, kind: "console_benchmark_preflight",
       workload_launches: 0, warmup_rounds: 1, measured_rounds: 2, records_required: 74,
+      bench_cpu: $bench_cpu, producer_cpu: $producer_cpu,
+      taskset_mask: ($bench_cpu + "," + $producer_cpu),
       candidate_commit: $commit, candidate_commit_sha256: $commit_sha256,
       binary_sha256: $binary_sha256, benchmark_source_sha256: $subject_sha256,
       floor_table_sha256: $floor_table_sha256,

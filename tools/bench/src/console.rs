@@ -3054,24 +3054,35 @@ mod affinity {
         }
 
         /// Refuses, before anything is timed, a controlled run whose producer is not on a core of
-        /// the render core's L3 other than its SMT sibling. A controlled number for a producer on
-        /// the render core itself, or on its sibling, would measure another placement under the
-        /// row's name; an uncontrolled run states its placement and the validator reads it.
+        /// the render core's L3 other than its SMT sibling ([`Placement::refusal`]).
         ///
         /// # Panics
         ///
-        /// Panics with the observed placement when the run is controlled and it is not `same_ccd`.
+        /// Panics with the refusal when the run is controlled and the placement is not `same_ccd`.
         pub(crate) fn refuse_unplaced_producer(&self, metadata: &Metadata) {
             let controlled = metadata
                 .var("MISO_ENGINE_BENCH_MEASUREMENT_CONTROL")
                 .is_ok_and(|control| control == "controlled");
-            assert!(
-                !controlled || self.name == "same_ccd",
-                "refusing the live-producer row: producer placement {} (a controlled run needs \
-                 the process mask to hold the render core and one core that shares its L3 and is \
-                 not its SMT sibling)",
-                self.name
-            );
+            if let Some(refusal) = self.refusal(controlled) {
+                panic!("{refusal}");
+            }
+        }
+
+        /// The refusal of a run whose producer placement it cannot publish, or `None`.
+        ///
+        /// A controlled number for a producer on the render core itself, or on its sibling, or
+        /// with no core of its own, would measure another placement under the row's name, so a
+        /// controlled run admits `same_ccd` alone. An uncontrolled run states its placement and the
+        /// validator reads it.
+        pub(crate) fn refusal(&self, controlled: bool) -> Option<String> {
+            (controlled && self.name != "same_ccd").then(|| {
+                format!(
+                    "refusing the live-producer row: producer placement {} (a controlled run \
+                     needs the process mask to hold the render core and one core that shares its \
+                     L3 and is not its SMT sibling)",
+                    self.name
+                )
+            })
         }
     }
 
@@ -3579,6 +3590,33 @@ mod tests {
             record_validator_accepts(&record, ".observations = 1000"),
             "the record at the frozen count"
         );
+    }
+
+    /// Issue #938: a controlled run admits a producer on another core of the render core's L3
+    /// alone; every other placement the bench can name is refused before timing, by name, and an
+    /// uncontrolled run is never refused for its placement.
+    #[test]
+    fn a_controlled_run_refuses_every_producer_placement_but_same_ccd() {
+        let placed = |name| affinity::Placement {
+            producer_cpu: None,
+            name,
+        };
+        assert_eq!(placed("same_ccd").refusal(true), None);
+        for name in [
+            "smt_sibling",
+            "other_l3",
+            "same_cpu",
+            "topology_unavailable",
+            "no_producer_cpu",
+            "unpinned",
+            "unsupported_platform",
+        ] {
+            let refusal = placed(name)
+                .refusal(true)
+                .expect("a controlled run refuses");
+            assert!(refusal.contains(name), "{refusal}");
+            assert_eq!(placed(name).refusal(false), None, "{name}");
+        }
     }
 
     /// Issue #938: the bench reads the kernel's CPU lists, ranges and single cores alike, and
