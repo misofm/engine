@@ -3,14 +3,16 @@
 
 use bench_support::alloc as bench_alloc;
 use host_core::{
-    HostPrepareCaps, HostShapePolicy, PreparedHost, PreparedSpectrumCaptures, SPECTRUM_BIN_COUNT,
-    SPECTRUM_FLOOR_DB, SPECTRUM_MAXIMUM_CAPTURE_BYTES, SPECTRUM_MAXIMUM_ID_BYTES,
-    SPECTRUM_TARGET_OUTPUT, SPECTRUM_WINDOW_FRAMES, SourceControlSet, SourceSubmission,
-    SpectrumAnalysis, SpectrumAnalysisResult, SpectrumAnalyzer, SpectrumCaptureCollectionEntry,
-    SpectrumCaptureCollectionRequest, SpectrumCaptureRequest, SpectrumChannels, SpectrumHop,
-    SpectrumOutput, SpectrumPreparation, SpectrumRequestError, SpectrumService,
-    SpectrumServiceError, SpectrumSnapshot, SpectrumStreamMetadata, SpectrumStreamStatus,
-    SpectrumTarget, SpectrumTargetRef, StartedRenderSession, compile_host_session,
+    HostLiveControlRequest, HostLiveLanes, HostPrepareCaps, HostShapePolicy, LiveValuesSuperseded,
+    PreparedHost, PreparedSpectrumCaptures, SPECTRUM_BIN_COUNT, SPECTRUM_FLOOR_DB,
+    SPECTRUM_MAXIMUM_CAPTURE_BYTES, SPECTRUM_MAXIMUM_ID_BYTES, SPECTRUM_TARGET_OUTPUT,
+    SPECTRUM_WINDOW_FRAMES, SourceControlSet, SourceSubmission, SpectrumAnalysis,
+    SpectrumAnalysisResult, SpectrumAnalyzer, SpectrumCaptureCollectionEntry,
+    SpectrumCaptureCollectionRequest, SpectrumCaptureRequest, SpectrumChannels,
+    SpectrumConfiguration, SpectrumHop, SpectrumOutput, SpectrumPreparation, SpectrumRequestError,
+    SpectrumService, SpectrumServiceError, SpectrumSnapshot, SpectrumStreamMetadata,
+    SpectrumStreamStatus, SpectrumTarget, SpectrumTargetRef, StartedRenderSession,
+    compile_host_session, prepare_host_runtime_with_live_lanes_and_spectrum,
     prepare_host_runtime_with_spectrum, prepare_host_runtime_with_spectrum_collection,
     spectrum_capture_collection_resources, spectrum_capture_resources_for,
     spectrum_channels_from_raw, spectrum_smoothing, spectrum_target_kind, spectrum_target_ref,
@@ -1214,4 +1216,183 @@ fn adoption_follows_the_metadata_status() {
         SpectrumAnalysis::adoption_needed(analysis.as_ref(), &with(SpectrumStreamStatus::Pending)),
         Ok(false)
     );
+}
+
+fn entry(target: SpectrumTarget, channels: SpectrumChannels) -> SpectrumCaptureCollectionEntry {
+    SpectrumCaptureCollectionEntry { target, channels }
+}
+
+/// #1593 D4. Turns red if a successor is prepared with an entry whose target the edit removed
+/// (which `host.spectrum.target` refuses), if a kept entry moves, changes its mask or loses the
+/// budget or the hop, or if a configuration with nothing left is not `None`.
+#[test]
+fn retain_present_keeps_present_entries_in_order() {
+    let mut model = session::parse_session_json(include_str!(
+        "../../../fixtures/session/v1/builtins-automation.json"
+    ))
+    .expect("fixture parses");
+    let hop = Some(SpectrumHop::new(512).expect("hop"));
+    let collection = |entries| SpectrumConfiguration {
+        preparation: SpectrumPreparation::Collection(SpectrumCaptureCollectionRequest {
+            entries,
+            maximum_capture_bytes: 1_234_567,
+        }),
+        hop,
+    };
+    let output = entry(
+        SpectrumTarget::Output("main-out".into()),
+        SpectrumChannels::Stereo,
+    );
+    let submix = entry(
+        SpectrumTarget::TrackPostMatrix("bus".into()),
+        SpectrumChannels::Left,
+    );
+    let track = entry(
+        SpectrumTarget::TrackPostInputBuiltins("vocal".into()),
+        SpectrumChannels::Right,
+    );
+    let configuration = collection(vec![
+        output.clone(),
+        entry(
+            SpectrumTarget::TrackPostMatrix("gone".into()),
+            SpectrumChannels::Left,
+        ),
+        submix.clone(),
+        entry(
+            SpectrumTarget::Output("alt-out".into()),
+            SpectrumChannels::Left,
+        ),
+        track.clone(),
+        // A track tap never names an output, and an output entry never names a strip.
+        entry(
+            SpectrumTarget::TrackPostMatrix("main-out".into()),
+            SpectrumChannels::Left,
+        ),
+        entry(
+            SpectrumTarget::Output("vocal".into()),
+            SpectrumChannels::Left,
+        ),
+    ]);
+    assert_eq!(
+        configuration.retain_present(&model),
+        Some(collection(vec![output, submix.clone(), track.clone()]))
+    );
+
+    let single = |target: &str| SpectrumConfiguration {
+        preparation: SpectrumPreparation::Single(SpectrumCaptureRequest {
+            target: SpectrumTarget::TrackPostMatrix(target.into()),
+            channels: SpectrumChannels::Stereo,
+            maximum_capture_bytes: 99_999,
+        }),
+        hop,
+    };
+    assert_eq!(
+        single("vocal").retain_present(&model),
+        Some(single("vocal"))
+    );
+    assert_eq!(single("gone").retain_present(&model), None);
+
+    model.tracks.clear();
+    model.outputs.clear();
+    assert_eq!(
+        configuration.retain_present(&model),
+        Some(collection(vec![submix]))
+    );
+    model.submixes.clear();
+    assert_eq!(configuration.retain_present(&model), None);
+    assert_eq!(collection(vec![track]).retain_present(&model), None);
+}
+
+/// #1593 D3. Turns red if the one session entry prepares its spectrum observer differently from
+/// the reference path (a second preparation path drifting): the same document fed the same PCM
+/// gives the same window, field by field; and with `None` it returns no captures.
+#[test]
+fn the_one_entry_prepares_the_reference_window() {
+    // Live controls attach every strip's meter.
+    let caps = HostPrepareCaps {
+        maximum_meter_streams: 1_000,
+        maximum_meter_items: 1_000_000,
+        maximum_meter_bytes: 100_000_000,
+        ..caps()
+    };
+    let compiled = compile_host_session(SESSION, &caps).expect("compiled fixture");
+    let target = SpectrumTarget::Output("main-out".into());
+    let request = SpectrumCaptureRequest {
+        maximum_capture_bytes: spectrum_capture_resources_for(&target).retained_bytes,
+        target,
+        channels: SpectrumChannels::Stereo,
+    };
+    let superseded = LiveValuesSuperseded::default();
+    let live = HostLiveControlRequest::default();
+    let (_, _, none) = prepare_host_runtime_with_live_lanes_and_spectrum(
+        &compiled,
+        &caps,
+        &live,
+        HostLiveLanes::ALL,
+        None,
+        None,
+        &superseded,
+    )
+    .expect("prepares without spectrum");
+    assert!(none.is_none());
+
+    let (host, _handles, captures) = prepare_host_runtime_with_live_lanes_and_spectrum(
+        &compiled,
+        &caps,
+        &live,
+        HostLiveLanes::ALL,
+        Some(&SpectrumPreparation::Single(request.clone())),
+        None,
+        &superseded,
+    )
+    .expect("prepares with spectrum");
+    let (reference_host, reference_capture) =
+        prepare_host_runtime_with_spectrum(&compiled, &caps, &request).expect("reference");
+    let mut services = [
+        (
+            Rig::new(host),
+            SpectrumService::new(
+                captures.expect("captures"),
+                SAMPLE_RATE_HZ,
+                QUANTUM as u32,
+                None,
+            ),
+        ),
+        (
+            Rig::new(reference_host),
+            SpectrumService::new(
+                PreparedSpectrumCaptures::from(reference_capture),
+                SAMPLE_RATE_HZ,
+                QUANTUM as u32,
+                None,
+            ),
+        ),
+    ];
+    let [got, want] = services.each_mut().map(|(rig, service)| {
+        rig.window();
+        service.arm().expect("arm");
+        rig.window();
+        read(service, SpectrumChannels::Stereo)
+    });
+    assert_eq!(got.target_kind, want.target_kind);
+    assert_eq!(got.sample_rate_hz, want.sample_rate_hz);
+    assert_eq!(got.token, want.token);
+    assert_eq!(got.window.first_sample, want.window.first_sample);
+    assert_eq!(got.window.channels, want.window.channels);
+    assert_eq!(got.window.source_underrun, want.window.source_underrun);
+    for (got, want) in [
+        (&got.window.left, &want.window.left),
+        (&got.window.right, &want.window.right),
+    ] {
+        assert!(
+            got.iter().any(|sample| *sample != 0.0),
+            "a window of signal"
+        );
+        assert!(
+            got.iter()
+                .zip(want)
+                .all(|(got, want)| got.to_bits() == want.to_bits()),
+            "the planes equal the reference's bit for bit"
+        );
+    }
 }

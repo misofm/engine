@@ -67,6 +67,7 @@ use crate::spectrum::{
     SpectrumCaptureRequest, SpectrumCaptureResources, SpectrumPrepareError,
     prepare_capture_collection, spectrum_capture_collection_resources,
 };
+use crate::spectrum_service::{PreparedSpectrumCaptures, SpectrumPreparation};
 
 /// The jump lengths a plan's cell holds for `model` (#1639 D1): its `control_smoothing` keys in
 /// samples, the values of [`LiveRamps::for_session`]. Preparation seeds every plan's cell with
@@ -80,17 +81,6 @@ pub fn session_jump_lengths(model: &SessionModel) -> GraphJumpLengths {
         mute_samples: ramps.mute_samples,
         pan_samples: ramps.pan_samples,
     }
-}
-
-#[derive(Clone, Copy)]
-enum SpectrumPreparationRequest<'a> {
-    Single(&'a SpectrumCaptureRequest),
-    Collection(&'a SpectrumCaptureCollectionRequest),
-}
-
-enum PreparedSpectrumCapture {
-    Single(SpectrumCapture),
-    Collection(SpectrumCaptureCollection),
 }
 
 /// The longest producer-thread stall the default source ring hides without an underrun.
@@ -1691,6 +1681,46 @@ pub fn prepare_host_runtime_with_live_lanes_successor(
     Ok((prepared, handles))
 }
 
+/// Prepare a host with the selected live lanes and the session's spectrum observers (#1593 D3):
+/// the one entry a session's preparer calls for its first plan (`successor` `None`) and for every
+/// successor (`Some`), with or without spectrum.
+///
+/// `spectrum` `None` prepares exactly [`prepare_host_runtime_with_live_lanes`] or
+/// [`prepare_host_runtime_with_live_lanes_successor`] and returns no captures. `Some` prepares
+/// its observers into the same transaction, sized, validated and allocated here, on the control
+/// thread, and returns their captures; a successor's capture whose key `successor` has carries
+/// its observer across the swap (#1395). A target the plan does not have is refused
+/// `host.spectrum.target`. `superseded` is the session's `live_values_superseded` count, as in
+/// [`prepare_host_runtime_with_live_lanes`].
+pub fn prepare_host_runtime_with_live_lanes_and_spectrum(
+    compiled: &CompiledSession,
+    caps: &HostPrepareCaps,
+    live_controls: &HostLiveControlRequest,
+    lanes: HostLiveLanes,
+    spectrum: Option<&SpectrumPreparation>,
+    successor: Option<SuccessorBase<'_>>,
+    superseded: &LiveValuesSuperseded,
+) -> Result<
+    (
+        PreparedHost,
+        HostLiveControlHandles,
+        Option<PreparedSpectrumCaptures>,
+    ),
+    PrepareDiagnostics,
+> {
+    prepare_host_runtime_with_live_controls_policy_and_spectrum(
+        compiled,
+        caps,
+        Some(live_controls),
+        None,
+        Backend::current(),
+        spectrum,
+        successor,
+        lanes,
+        Some(superseded),
+    )
+}
+
 /// Prepare a host with live-control handles and one selected, fixed-size spectrum observer.
 ///
 /// Meter configuration remains part of [`HostLiveControlRequest`], so this entry keeps the
@@ -1712,14 +1742,14 @@ pub fn prepare_host_runtime_with_live_controls_and_spectrum(
         Some(live_controls),
         None,
         Backend::current(),
-        Some(SpectrumPreparationRequest::Single(spectrum)),
+        Some(&SpectrumPreparation::Single(spectrum.clone())),
         None,
         lanes,
         Some(superseded),
     )?;
     let capture = match capture.ok_or_else(|| resource("host.spectrum.capture"))? {
-        PreparedSpectrumCapture::Single(capture) => capture,
-        PreparedSpectrumCapture::Collection(_) => {
+        PreparedSpectrumCaptures::Single(capture) => capture,
+        PreparedSpectrumCaptures::Collection(_) => {
             return Err(resource("host.spectrum.capture"));
         }
     };
@@ -1751,14 +1781,14 @@ pub fn prepare_host_runtime_with_live_controls_and_spectrum_collection(
         Some(live_controls),
         None,
         Backend::current(),
-        Some(SpectrumPreparationRequest::Collection(spectrum)),
+        Some(&SpectrumPreparation::Collection(spectrum.clone())),
         None,
         lanes,
         Some(superseded),
     )?;
     let capture = match capture.ok_or_else(|| resource("host.spectrum.capture"))? {
-        PreparedSpectrumCapture::Collection(capture) => capture,
-        PreparedSpectrumCapture::Single(_) => return Err(resource("host.spectrum.capture")),
+        PreparedSpectrumCaptures::Collection(capture) => capture,
+        PreparedSpectrumCaptures::Single(_) => return Err(resource("host.spectrum.capture")),
     };
     Ok((prepared, handles, capture))
 }
@@ -1785,14 +1815,14 @@ pub fn prepare_host_runtime_with_live_controls_and_spectrum_successor(
         Some(live_controls),
         None,
         Backend::current(),
-        Some(SpectrumPreparationRequest::Single(spectrum)),
+        Some(&SpectrumPreparation::Single(spectrum.clone())),
         Some(base),
         lanes,
         Some(superseded),
     )?;
     let capture = match capture.ok_or_else(|| resource("host.spectrum.capture"))? {
-        PreparedSpectrumCapture::Single(capture) => capture,
-        PreparedSpectrumCapture::Collection(_) => {
+        PreparedSpectrumCaptures::Single(capture) => capture,
+        PreparedSpectrumCaptures::Collection(_) => {
             return Err(resource("host.spectrum.capture"));
         }
     };
@@ -1823,14 +1853,14 @@ pub fn prepare_host_runtime_with_live_controls_and_spectrum_collection_successor
         Some(live_controls),
         None,
         Backend::current(),
-        Some(SpectrumPreparationRequest::Collection(spectrum)),
+        Some(&SpectrumPreparation::Collection(spectrum.clone())),
         Some(base),
         lanes,
         Some(superseded),
     )?;
     let capture = match capture.ok_or_else(|| resource("host.spectrum.capture"))? {
-        PreparedSpectrumCapture::Collection(capture) => capture,
-        PreparedSpectrumCapture::Single(_) => return Err(resource("host.spectrum.capture")),
+        PreparedSpectrumCaptures::Collection(capture) => capture,
+        PreparedSpectrumCaptures::Single(_) => return Err(resource("host.spectrum.capture")),
     };
     Ok((prepared, handles, capture))
 }
@@ -2073,15 +2103,15 @@ pub fn prepare_host_runtime_with_spectrum(
         None,
         None,
         Backend::current(),
-        Some(SpectrumPreparationRequest::Single(request)),
+        Some(&SpectrumPreparation::Single(request.clone())),
         None,
         HostLiveLanes::ALL,
         None,
     )?;
     debug_assert!(handles.strip_controls.is_empty() && handles.meters.is_empty());
     let capture = match capture.ok_or_else(|| resource("host.spectrum.capture"))? {
-        PreparedSpectrumCapture::Single(capture) => capture,
-        PreparedSpectrumCapture::Collection(_) => {
+        PreparedSpectrumCaptures::Single(capture) => capture,
+        PreparedSpectrumCaptures::Collection(_) => {
             return Err(resource("host.spectrum.capture"));
         }
     };
@@ -2101,14 +2131,14 @@ pub fn prepare_host_runtime_with_spectrum_collection(
             None,
             None,
             Backend::current(),
-            Some(SpectrumPreparationRequest::Collection(request)),
+            Some(&SpectrumPreparation::Collection(request.clone())),
             None,
             HostLiveLanes::ALL,
             None,
         )?;
     let capture = match capture.ok_or_else(|| resource("host.spectrum.capture"))? {
-        PreparedSpectrumCapture::Collection(capture) => capture,
-        PreparedSpectrumCapture::Single(_) => return Err(resource("host.spectrum.capture")),
+        PreparedSpectrumCaptures::Collection(capture) => capture,
+        PreparedSpectrumCaptures::Single(_) => return Err(resource("host.spectrum.capture")),
     };
     Ok((prepared, capture))
 }
@@ -2120,7 +2150,7 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
     live_controls: Option<&HostLiveControlRequest>,
     selected_meters: Option<&[HostMeterRequest]>,
     backend: Backend,
-    spectrum_request: Option<SpectrumPreparationRequest<'_>>,
+    spectrum_request: Option<&SpectrumPreparation>,
     successor: Option<SuccessorBase<'_>>,
     lanes: HostLiveLanes,
     superseded: Option<&LiveValuesSuperseded>,
@@ -2128,7 +2158,7 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
     (
         PreparedHost,
         HostLiveControlHandles,
-        Option<PreparedSpectrumCapture>,
+        Option<PreparedSpectrumCaptures>,
     ),
     PrepareDiagnostics,
 > {
@@ -2408,7 +2438,7 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
     // predecessor's and the two plans run at one rate and quantum; as for meters, this only decides
     // that a program is needed.
     let spectrum_may_carry = match (successor, &spectrum_request) {
-        (Some(base), Some(SpectrumPreparationRequest::Single(request))) => {
+        (Some(base), Some(SpectrumPreparation::Single(request))) => {
             base.inventory.sample_rate_hz == compiled.sample_rate().0
                 && base.inventory.quantum_frames == compiled.quantum().0
                 && !base.inventory.spectrum_collection
@@ -2418,7 +2448,7 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
                     .iter()
                     .any(|row| row.target == request.target && row.channels == request.channels)
         }
-        (Some(base), Some(SpectrumPreparationRequest::Collection(request))) => {
+        (Some(base), Some(SpectrumPreparation::Collection(request))) => {
             base.inventory.sample_rate_hz == compiled.sample_rate().0
                 && base.inventory.quantum_frames == compiled.quantum().0
                 && base.inventory.spectrum_collection
@@ -2973,10 +3003,10 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
     let session_resources = compiled.resource_estimate();
     let spectrum_resources: Option<SpectrumCaptureResources> = match spectrum_request {
         None => None,
-        Some(SpectrumPreparationRequest::Single(request)) => Some(
+        Some(SpectrumPreparation::Single(request)) => Some(
             crate::spectrum::spectrum_capture_resources_for(&request.target),
         ),
-        Some(SpectrumPreparationRequest::Collection(request)) => Some(
+        Some(SpectrumPreparation::Collection(request)) => Some(
             spectrum_capture_collection_resources(&request.entries)
                 .map_err(spectrum_diagnostics)?,
         ),
@@ -3103,7 +3133,7 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
     });
     let (spectrum_observers, spectrum_capture) = match spectrum_request {
         None => (Vec::new(), None),
-        Some(SpectrumPreparationRequest::Single(request)) => {
+        Some(SpectrumPreparation::Single(request)) => {
             let (observer, capture) = crate::spectrum::prepare_capture(
                 request,
                 graph_nodes.as_deref().expect("spectrum graph nodes"),
@@ -3112,10 +3142,10 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
             .map_err(spectrum_diagnostics)?;
             (
                 vec![observer],
-                Some(PreparedSpectrumCapture::Single(capture)),
+                Some(PreparedSpectrumCaptures::Single(capture)),
             )
         }
-        Some(SpectrumPreparationRequest::Collection(request)) => {
+        Some(SpectrumPreparation::Collection(request)) => {
             let (observers, capture) = prepare_capture_collection(
                 request,
                 graph_nodes.as_deref().expect("spectrum graph nodes"),
@@ -3124,7 +3154,7 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
             .map_err(spectrum_diagnostics)?;
             (
                 observers,
-                Some(PreparedSpectrumCapture::Collection(capture)),
+                Some(PreparedSpectrumCaptures::Collection(capture)),
             )
         }
     };
@@ -3310,10 +3340,10 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
         })
     };
     let spectrum_rows: Vec<SpectrumInventoryRow> = match &spectrum_capture {
-        Some(PreparedSpectrumCapture::Single(capture)) => {
+        Some(PreparedSpectrumCaptures::Single(capture)) => {
             vec![spectrum_row(0, capture.target(), capture.channels())?]
         }
-        Some(PreparedSpectrumCapture::Collection(collection)) => (0..collection.len())
+        Some(PreparedSpectrumCaptures::Collection(collection)) => (0..collection.len())
             .map(|entry| {
                 let (target, channels) = collection
                     .entry(entry)
@@ -3325,7 +3355,7 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
     };
     let spectrum_collection = matches!(
         &spectrum_capture,
-        Some(PreparedSpectrumCapture::Collection(_))
+        Some(PreparedSpectrumCaptures::Collection(_))
     );
     let spectrum_carry = match successor {
         Some(base) => resolve_spectrum_carry(

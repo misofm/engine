@@ -9491,8 +9491,8 @@ mod spectrum_carry {
         Stream,
         /// A one-shot armed before the given block and read after every block from there on.
         OneShot(usize),
-        /// As `OneShot`, but a refused read is recorded, and after `CaptureInvalid` the host arms
-        /// again at once (#1618).
+        /// As `OneShot`, but a refused read is recorded, and after `Dropped` on a capture that can
+        /// arm the host arms again at once (#1618, #1593 D6).
         OneShotRearm(usize),
     }
 
@@ -9587,7 +9587,9 @@ mod spectrum_carry {
                         Ok(None) => {}
                         Err(error) => {
                             self.refused.push((block, error));
-                            if error == SpectrumServiceError::CaptureInvalid {
+                            if error == SpectrumServiceError::Dropped
+                                && self.service.channels().is_some()
+                            {
                                 self.service.arm().expect("arm again after the refusal");
                             }
                         }
@@ -9964,11 +9966,11 @@ mod spectrum_carry {
     }
 
     /// #1618 gate 1: a one-shot armed on a capture that does not carry (its channel mask changed)
-    /// would wait for an observer that no longer renders. The service settles it: the read after
-    /// the promotion answers `CaptureInvalid` once, and the arm that follows completes on the
+    /// would wait for an observer that no longer renders. The service drops it: the read after
+    /// the promotion answers `Dropped` once (#1593 D6), and the arm that follows completes on the
     /// successor with the window a fresh arm there gives.
     #[test]
-    fn a_one_shot_that_does_not_carry_settles_invalid_and_a_new_arm_completes() {
+    fn a_one_shot_that_does_not_carry_is_dropped_and_a_new_arm_completes() {
         let (a, b) = sessions();
         let a_request = stereo_post_matrix();
         let b_request = request(
@@ -9986,7 +9988,7 @@ mod spectrum_carry {
         assert!(run.pairing.is_empty(), "the changed key carries nothing");
         assert_eq!(
             run.driver.refused,
-            vec![(SWAP, SpectrumServiceError::CaptureInvalid)],
+            vec![(SWAP, SpectrumServiceError::Dropped)],
             "pending until the promotion, one refusal at it, none after"
         );
         let got = run
@@ -10015,10 +10017,10 @@ mod spectrum_carry {
     }
 
     /// #1618 gate 1, refused hand-over: the list names a pair but the adoption did not carry, so
-    /// the capture is settled the same way. (The engine did carry the observer here, so the
+    /// the arm is dropped the same way. (The engine did carry the observer here, so the
     /// re-armed fresh capture has no producer and stays pending: the point is the refusal.)
     #[test]
-    fn a_one_shot_after_a_refused_hand_over_settles_invalid() {
+    fn a_one_shot_after_a_refused_hand_over_is_dropped() {
         let (a, b) = sessions();
         let request = stereo_post_matrix();
         let run = swapped(
@@ -10031,7 +10033,7 @@ mod spectrum_carry {
         );
         assert_eq!(
             run.driver.refused,
-            vec![(SWAP, SpectrumServiceError::CaptureInvalid)]
+            vec![(SWAP, SpectrumServiceError::Dropped)]
         );
         assert!(run.driver.shot.is_none());
     }
@@ -10388,8 +10390,9 @@ mod spectrum_carry {
     }
 
     /// #1618: a one-shot armed on the selected entry of a collection whose selection did not carry
-    /// ends with the selection. The read answers `NotArmed`, the caller's arm is released (a
-    /// select and a stream start are not `Busy`), and the epoch says the selection was lost.
+    /// ends with the selection. The read answers `Dropped` once (#1593 D6), the caller's arm is
+    /// released (a select and a stream start are not `Busy`), and the epoch says the selection was
+    /// lost.
     #[test]
     fn a_one_shot_on_a_lost_selection_is_released() {
         let (a, b) = sessions();
@@ -10405,7 +10408,7 @@ mod spectrum_carry {
         );
         assert_eq!(
             run.driver.refused.first(),
-            Some(&(SWAP, SpectrumServiceError::NotArmed))
+            Some(&(SWAP, SpectrumServiceError::Dropped))
         );
         assert!(run.driver.shot.is_none());
         let service = &mut run.driver.service;
