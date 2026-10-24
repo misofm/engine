@@ -238,3 +238,10 @@ is cut by a block boundary; unity gain asserted bit for bit before the span):
 Assigning the words at once instead (mutant 1338-M1) measures 0.335 against 0.065 static
 (ratio 5.1), red at (b) alone, and red at (a) first. Mutants 1338-M1..M6 are in
 `crates/multiband-compressor/tests/MUTATIONS.md`; all red.
+
+**Console benchmark (descriptive).** `scripts/operator/run-console-benchmark.sh --step b12-1338` at
+f3a473449, one invocation under the exclusive machine lock, after a passing preflight: refused
+before any workload launch, `precondition_loadavg_above_ceiling` (loadavg 0.52 on a shared
+machine). The run was not retried, as root directed. No timing exists. The console workload does
+not contain the multiband compressor; the 55 console-workload tests and the wasm-gate native
+corpus (`g5_native_corpus`, 7 tests) pass, and `corpus_digests.in` did not move.
