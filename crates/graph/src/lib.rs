@@ -7153,6 +7153,11 @@ mod tests {
     }
 
     fn binding_plan() -> (PreparedGraphPlan, GraphRuntimeBindings, GraphNodeId) {
+        let (parts, bindings, input) = binding_plan_parts();
+        (PreparedGraphPlan::new(parts), bindings, input)
+    }
+
+    fn binding_plan_parts() -> (PreparedGraphPlanParts, GraphRuntimeBindings, GraphNodeId) {
         let input = GraphNodeId::TrackStage {
             track_id: StableGraphId::parse("track").expect("ID"),
             stage: TrackStage::Input,
@@ -7195,7 +7200,7 @@ mod tests {
             path: "$.test".to_owned(),
         };
         (
-            PreparedGraphPlan::new(PreparedGraphPlanParts {
+            PreparedGraphPlanParts {
                 plan_id: 42,
                 spec: GraphSpec {
                     nodes: sorted_nodes(graph_nodes),
@@ -7227,7 +7232,7 @@ mod tests {
                 banks: Vec::new(),
                 builtin_banks: Vec::new(),
                 observers: Vec::new(),
-            }),
+            },
             GraphRuntimeBindings {
                 envelope,
                 nodes: required
@@ -7797,6 +7802,49 @@ mod tests {
             },
             Box::new(SilentSourceSetDriver { claims: 1 }),
         )
+    }
+
+    /// #1749: a lowering hint is checked against the ID it stands for, so a hint that names the
+    /// wrong nodes, or no node at all, lowers and binds exactly as no hint does.
+    #[test]
+    fn a_wrong_lowering_hint_changes_no_program_and_no_bind() {
+        let bind_code = |plan: PreparedGraphPlan, bindings| {
+            plan.bind(bindings)
+                .map(|_| ())
+                .map_err(|failure| failure.code)
+        };
+        let (parts, bindings, _) = binding_plan_parts();
+        let plain = PreparedGraphPlan::new(parts);
+        assert!(plain.program().is_some(), "the unhinted plan lowers");
+        let position = |id: &GraphNodeId| program::node_index(&plain.spec, id).expect("node");
+        let schedule: Vec<u32> = plain.sequential_schedule.iter().map(position).collect();
+        let ends: Vec<(u32, u32)> = plain
+            .spec
+            .edges
+            .iter()
+            .map(|edge| {
+                (
+                    position(&edge.source.node),
+                    position(&edge.destination.node),
+                )
+            })
+            .collect();
+        let permuted = program::LoweringHint::new(
+            schedule.iter().rev().copied().collect(),
+            ends.iter()
+                .map(|&(source, destination)| (destination, source))
+                .collect(),
+        );
+        let out_of_range = program::LoweringHint::new(vec![7, u32::MAX], vec![(9, u32::MAX)]);
+        let plain_program = plain.program().cloned();
+        let plain_bind = bind_code(plain, bindings);
+        assert_eq!(plain_bind, Ok(()));
+        for hint in [permuted, out_of_range] {
+            let (parts, bindings, _) = binding_plan_parts();
+            let hinted = PreparedGraphPlan::new_hinted(parts, hint.clone());
+            assert_eq!(hinted.program(), plain_program.as_ref(), "{hint:?}");
+            assert_eq!(bind_code(hinted, bindings), plain_bind, "{hint:?}");
+        }
     }
 
     #[test]
