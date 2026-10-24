@@ -13,7 +13,7 @@ Filed by root as #17's slice S3 (backlog sprint, 2026-10-24). The web kernel row
 
 ## Decision record (2026-10-24, attempt 1)
 
-- Scope note wins for paths: `scripts/run-aarch64-tests.sh` (where the AArch64 rows live), `tools/audit/Cargo.toml` and `Cargo.lock` (the dep edge) are added. Root authorized one audit-native step in `qualification.yml`. Lands after #1920 on the same branch.
+- Scope note wins for paths: `scripts/run-aarch64-tests.sh` (where the AArch64 rows live), `tools/audit/Cargo.toml` and `Cargo.lock` (the dep edge) are added. Root authorized one audit-native step in `qualification.yml`. Root also authorized `docs/ENGINE_ENV_VOCABULARY.md` (its rows for the new strace markers, which `check-env-vocabulary.sh` requires). Lands after #1920 on the same branch.
 - One subject, both shapes: the native-width bank (internal detectors; the bank binds only unconnected) and a connected scalar (external detectors). No test for the SUBJECTS table. Console eligibility is untouched.
 
 ## Evidence (2026-10-24, attempt 1)

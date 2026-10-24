@@ -14,7 +14,7 @@ Filed by root as #15's slice S3 (backlog sprint, 2026-10-24).
 
 ## Decision record (2026-10-24, attempt 1)
 
-- Scope note wins for paths: `scripts/run-aarch64-tests.sh` (where the AArch64 rows live), `tools/audit/Cargo.toml` and `Cargo.lock` (the dep edge) are added. Root authorized one audit-native step in `qualification.yml`.
+- Scope note wins for paths: `scripts/run-aarch64-tests.sh` (where the AArch64 rows live), `tools/audit/Cargo.toml` and `Cargo.lock` (the dep edge) are added. Root authorized one audit-native step in `qualification.yml`. Root also authorized `docs/ENGINE_ENV_VOCABULARY.md` (its rows for the new strace markers, which `check-env-vocabulary.sh` requires).
 - The exact-symbol table (#1889) already pins the de-esser's five symbols; this issue adds only the two `KERNEL_ROSTER` rows (`run_block` closures `KB` / `Kb1_`, the dynamic EQ's shape), ceiling 0.10 (measured scalar 0, the table rule's floor).
 - One connected scalar plus the native-width bank (the bank binds only unconnected). Console eligibility is untouched (owner question on root's list).
 
