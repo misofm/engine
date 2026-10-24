@@ -70,11 +70,36 @@ pub(crate) const fn is_console_rack(rack: RackLocation) -> bool {
 /// eligibility list accepts padded requests (P2b-P2e, #1089-#1092), so for a valid session every
 /// console group binds, and [`unbanked_console_slot`] refuses a compile in which one does not.
 ///
-/// **An insert group is never padded:** inserts bank opportunistically, as they did before
-/// decision 12, so a full insert group banks and an insert remainder renders per node (decision 12,
-/// "Inserts bank opportunistically, as today").
-pub(crate) const fn pads(group: &BankGroup<RackChainId>) -> bool {
-    is_console_rack(group.rack)
+/// **An insert group is padded from [`min_padded_insert_members`] members** (issues #888 and #889):
+/// inserts still bank opportunistically -- a full insert group banks, an effect whose factory
+/// declines padding renders per node, and no insert diagnostic exists -- but an insert remainder
+/// of at least that many members binds as one padded bank per slot instead of rendering per node
+/// (decision 12, "Banking", as refined by #888). Below it the remainder renders per node, where it
+/// is cheaper. Padding never moves an active lane's bits (the coupling rule), so the threshold
+/// decides cost only.
+pub(crate) fn pads(group: &BankGroup<RackChainId>, width: BankWidth) -> bool {
+    is_console_rack(group.rack) || group.active_count() >= min_padded_insert_members(width)
+}
+
+/// The fewest members an insert remainder needs before the planner pads it (issues #888 and #889).
+///
+/// A padded bank costs about what a full bank of the same slots costs, whatever its member count,
+/// while per node costs one track's worth per member. H5 measured both at eight lanes
+/// (`docs/handoffs/console-strip-2026-09-29/VERIFY.md`, "H5", arithmetic on the `final-0400`
+/// record): about 9.3 µs per padded eight-lane bank of three slots against about 4.2 µs per
+/// per-node track, so per node wins at one member, is about even at two, and padding wins from
+/// three. At four lanes the padded bank is about half as wide, so the break-even falls near one
+/// member and padding wins from two (H5's "break-even probably near one member"; unmeasured, a
+/// planner decision recorded in #888's spec).
+///
+/// Reopen when a measured per-node row exists at either width: the constant is that row's
+/// break-even, and a new measurement replaces the H5 arithmetic here.
+pub(crate) const fn min_padded_insert_members(width: BankWidth) -> usize {
+    match width {
+        BankWidth::Four => 2,
+        #[cfg(target_feature = "avx2")]
+        BankWidth::Eight => 3,
+    }
 }
 
 /// Plan the SIMD-rack cohorts over whole rack chains, and bind every slot that can be bound.
@@ -91,8 +116,8 @@ pub(crate) const fn pads(group: &BankGroup<RackChainId>) -> bool {
 /// A slot is bound when the group is full, or padded under [`pads`], and **every** member runs
 /// that slot. A slot some member skips would need a per-lane identity slot in the effect contract,
 /// which does not exist (#96 F7; #888's identity half); those members render on the per-node
-/// scalar path exactly as before. A partial group that is not padded -- an insert remainder -- is
-/// likewise unbound, unchanged from #96.
+/// scalar path exactly as before. A partial group that is not padded -- an insert remainder below
+/// [`min_padded_insert_members`] -- is likewise unbound, unchanged from #96.
 ///
 /// **Console slots always bank** (S2, #1098; decision 12). Every console group is padded, and on a
 /// vector backend a console slot that is not bound fails the compile with `console.slot.unbanked`
@@ -284,7 +309,7 @@ pub(crate) fn bind_rack_banks_indexed(
         bind_group_banks(
             index,
             group,
-            pads(group),
+            pads(group, width),
             &chains,
             &level_by_node,
             effects,
@@ -318,7 +343,7 @@ pub(crate) fn bind_rack_banks_indexed(
     // for the whole move set, not one per stranded track (a follow-up recorded in #971's spec).
     // Either way the map is updated **before** the builtin-stage planner reads it, so both
     // planners still see one class per track.
-    let stranded = stranded_mono_tracks(&plan);
+    let stranded = stranded_mono_tracks(&plan, width);
     if !stranded.is_empty() {
         let mut demoted = classes.clone();
         for track in &stranded {
@@ -465,21 +490,24 @@ pub(crate) fn bind_rack_banks_indexed(
 ///   leaves one padded bank per slot and the stereo pool gains at most one -- so their count never
 ///   rises, and a merge that saves a padded bank scores as a loss. The count rises only when the
 ///   move also fills an insert group, and that trades the track's collapse on every console slot
-///   for an insert remainder, which decision 12 leaves per node by choice.
+///   for an insert remainder, which renders per node below [`min_padded_insert_members`] by choice
+///   and is padded from it (#888).
 /// * **The mono pool is the larger win.** A padded mono bank collapses to one plane, and the pool
 ///   is worth about 36 % on the standing console row (M3). A restated objective (planes x banks)
 ///   would move a mono remainder only when it fits in the stereo pool's padding at every slot and
 ///   builtin stage, to save one one-plane padded bank per stage; weighing that against an insert
 ///   remainder the move might fill needs a per-node cost that nothing has measured at four lanes.
 ///
-/// A session with no console keeps #971's rule unchanged: its insert remainders still render per
-/// node, so a stranded mono track still banks nowhere, and moving it can still gain a bank.
-fn stranded_mono_tracks(plan: &BankPlan<RackChainId>) -> Vec<String> {
+/// A session with no console keeps #971's rule for an insert remainder below
+/// [`min_padded_insert_members`]: it still renders per node, so a stranded mono track still banks
+/// nowhere, and moving it can still gain a bank. A remainder at or above the threshold is padded
+/// (#888), binds, and strands nobody.
+fn stranded_mono_tracks(plan: &BankPlan<RackChainId>, width: BankWidth) -> Vec<String> {
     let mut stranded: BTreeMap<&str, bool> = BTreeMap::new();
     for group in &plan.groups {
         let binds_nothing = group.class == CohortPoolClass::MonoSymmetricAtPrepare
             && !group.is_full()
-            && !pads(group);
+            && !pads(group, width);
         for id in group.members.iter().flatten() {
             let entry = stranded.entry(id.track_id.as_str()).or_insert(true);
             *entry = *entry && binds_nothing;

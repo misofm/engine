@@ -1025,14 +1025,27 @@ pub(crate) struct LiveRoute {
     delayed: bool,
     /// The route's index in the plan's [`RouteActivity`]: canonical route-ID order.
     route: u32,
-    control: Box<crate::RouteControlLane>,
+    /// The route's live lane; `None` for a transition route (#1363 D2): a route a plan swap adds
+    /// that has no lane in this plan, bound live only so its fade-in can ramp it.
+    control: Option<Box<crate::RouteControlLane>>,
+    /// The fade-in a plan swap armed (#1363 D3), until it fires: the route then waits silent.
+    armed: Option<RouteArm>,
+}
+
+/// An armed route's fade-in (#1363 D3): the target and mute it fires to, and the fade's length.
+/// A record that arrives before the fire replaces the target and mute only.
+#[derive(Clone, Copy, Debug)]
+struct RouteArm {
+    target: [f32; 4],
+    mute: bool,
+    ramp_samples: u32,
 }
 
 impl LiveRoute {
     pub(crate) fn new(
         prepared: [f32; 4],
         mute: bool,
-        control: Box<crate::RouteControlLane>,
+        control: Option<Box<crate::RouteControlLane>>,
     ) -> Self {
         Self {
             ramp: IndexedRamp::settled(prepared),
@@ -1041,7 +1054,27 @@ impl LiveRoute {
             delayed: false,
             route: u32::MAX,
             control,
+            armed: None,
         }
+    }
+
+    /// Arm the fade-in of a route a plan swap adds during playback (#1363 D3), off the render
+    /// thread, before the plan is published: the route keeps its prepared target and mute to
+    /// fire to and waits settled at `[+0.0; 4]`, muted. A route the session mutes arms nothing.
+    /// Returns whether it armed.
+    pub(crate) fn arm_fade_in(&mut self, ramp_samples: u32) -> bool {
+        if self.mute || self.armed.is_some() {
+            return false;
+        }
+        self.armed = Some(RouteArm {
+            target: self.ramp.target,
+            mute: false,
+            ramp_samples,
+        });
+        self.ramp = IndexedRamp::settled([0.0; 4]);
+        self.position = 0;
+        self.mute = true;
+        true
     }
 
     /// #1347 D3: read the route's cell under the block's snapshot `S` and, if it holds a value not
@@ -1057,6 +1090,15 @@ impl LiveRoute {
     fn apply_pending(&mut self, snapshot: LiveSnapshot) -> usize {
         let mut applied = 0;
         if let Some(record) = self.read_record(snapshot) {
+            applied = 1;
+            // #1363 D3: an armed route keeps waiting silent; the record retargets its fire.
+            if let Some(arm) = self.armed.as_mut() {
+                arm.target = record.target();
+                arm.mute = record.mute();
+                #[cfg(any(test, feature = "test-support"))]
+                test_only_count_route_drained(self.route as usize, applied, snapshot);
+                return applied;
+            }
             self.ramp = IndexedRamp::new(
                 self.ramp.coefficients_at(self.position),
                 record.target(),
@@ -1064,18 +1106,34 @@ impl LiveRoute {
             );
             self.mute = record.mute();
             self.position = 0;
-            applied = 1;
         }
         #[cfg(any(test, feature = "test-support"))]
         test_only_count_route_drained(self.route as usize, applied, snapshot);
         applied
     }
 
+    /// Fire the armed fade-in at this block boundary (#1363 D3): from the coefficients the route
+    /// is at (`[+0.0; 4]`) to the armed target over the armed length, exactly the retarget a
+    /// live unmute record runs. The executor calls it before the route's op runs, so the block's
+    /// own live value drains after it. A route not armed is left alone. Render-thread code:
+    /// allocation-, lock- and syscall-free.
+    pub(crate) fn fire_fade_in(&mut self) {
+        if let Some(arm) = self.armed.take() {
+            self.ramp = IndexedRamp::new(
+                self.ramp.coefficients_at(self.position),
+                arm.target,
+                arm.ramp_samples,
+            );
+            self.mute = arm.mute;
+            self.position = 0;
+        }
+    }
+
     /// The cell's newest value not applied before, under `snapshot` (#1347 D3, #1312 D1, D2), the
     /// one read [`Self::apply_pending`] and [`Self::apply_pending_heard`] share.
     #[inline]
     fn read_record(&mut self, snapshot: LiveSnapshot) -> Option<crate::RouteControlRecord> {
-        let control = &mut *self.control;
+        let control = &mut **self.control.as_mut()?;
         if control.dirty.pending(&control.lane.dirty) & 1 == 0 {
             return None;
         }
@@ -3261,6 +3319,18 @@ impl RuntimeUnit {
         self.final_slot_accepts(|observer| observer.accepts_sample_peak())
     }
 
+    /// Whether every observer binding of this unit is a strip meter (#882), so a block whose
+    /// strip meter level is off dispatches none of them. Bind-time only; a unit without observers
+    /// answers `true`, which [`UnitObservation::of`] ignores.
+    fn meters_only(&self) -> bool {
+        match self {
+            Self::Op(op) => op.observers.iter().all(|observer| observer.meter),
+            Self::Bank { members, .. } => members
+                .iter()
+                .all(|member| member.observers.iter().all(|observer| observer.meter)),
+        }
+    }
+
     /// Whether `observe_unit` runs this unit's banked full meter pass (issue #950): a bank some
     /// final-slot member of which holds an observer that accepts it. Bind-time only, on the same
     /// terms as [`Self::accepts_sample_peak`].
@@ -4129,64 +4199,70 @@ impl UnitBanking {
 }
 
 /// What `Runtime::observe_unit` dispatches for one unit, fixed at bind: nothing, its observers,
-/// or its observers after one of the bank's meter passes (issues #900, #943 and #950).
+/// or its observers after one of the bank's meter passes (issues #900, #943 and #950), and whether
+/// every one of them is a strip meter (#882).
 ///
-/// One byte for three facts, because the second and third each imply the first -- a final-slot
-/// observer that accepts a pass is an observer -- and because a second `bool` beside `observed`
-/// did not fit `UnitIdentity`'s padding on 32-bit targets: there the row's four flag bytes already
-/// fill the only slack, and a fifth grew the row from 20 to 24 bytes on wasm32.
+/// One byte of bits, because the pass bits each imply `OBSERVED` -- a final-slot observer that
+/// accepts a pass is an observer -- and because a second field beside it did not fit
+/// `UnitIdentity`'s padding on 32-bit targets: there the row's four flag bytes already fill the
+/// only slack, and a fifth grew the row from 20 to 24 bytes on wasm32.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub(crate) enum UnitObservation {
-    /// No op of the unit holds an observer: `observe_unit` returns at once.
-    #[default]
-    Unobserved,
-    /// Some op holds an observer, and no final-slot observer accepts a bank pass.
-    Observed,
-    /// A bank some final-slot member of which holds an observer that accepts the sample peak, and
-    /// none of whose final-slot observers accepts the full meter pass.
-    ObservedWithPeak,
-    /// A bank some final-slot member of which holds an observer that accepts the full meter pass,
-    /// and none of whose final-slot observers accepts the sample peak.
-    ObservedWithMeter,
-    /// A bank whose final slot has an observer that accepts the full meter pass and one that
-    /// accepts the sample peak: the full pass runs when it can, and the sample-peak pass otherwise.
-    ObservedWithPeakAndMeter,
-}
+pub(crate) struct UnitObservation(u8);
 
 impl UnitObservation {
-    /// The row for a unit that holds observers (`observed`) and whose final slot accepts the peak
-    /// (`sample_peak`) and the full meter pass (`banked_meter`); a pass alone, which no real unit
-    /// has, is still unobserved.
-    const fn of(observed: bool, sample_peak: bool, banked_meter: bool) -> Self {
-        match (observed, sample_peak, banked_meter) {
-            (false, _, _) => Self::Unobserved,
-            (true, false, false) => Self::Observed,
-            (true, true, false) => Self::ObservedWithPeak,
-            (true, false, true) => Self::ObservedWithMeter,
-            (true, true, true) => Self::ObservedWithPeakAndMeter,
+    /// No op of the unit holds an observer: `observe_unit` returns at once.
+    pub(crate) const UNOBSERVED: Self = Self(0);
+    /// Some op holds an observer.
+    const OBSERVED: u8 = 1;
+    /// A bank some final-slot member of which holds an observer that accepts the sample peak.
+    const PEAK: u8 = 1 << 1;
+    /// A bank some final-slot member of which holds an observer that accepts the full meter pass;
+    /// with `PEAK` too, the full pass runs when it can, and the sample-peak pass otherwise.
+    const METER: u8 = 1 << 2;
+    /// Every observer of the unit is a strip meter binding (#882): with the strip meter level
+    /// off, `observe_unit` returns at once.
+    const METERS_ONLY: u8 = 1 << 3;
+
+    /// The row for a unit that holds observers (`observed`), whose final slot accepts the peak
+    /// (`sample_peak`) and the full meter pass (`banked_meter`), and all of whose observers are
+    /// strip meters (`meters_only`); a pass or `meters_only` alone, which no real unit has, is
+    /// still unobserved.
+    const fn of(observed: bool, sample_peak: bool, banked_meter: bool, meters_only: bool) -> Self {
+        if !observed {
+            return Self::UNOBSERVED;
         }
+        let mut bits = Self::OBSERVED;
+        if sample_peak {
+            bits |= Self::PEAK;
+        }
+        if banked_meter {
+            bits |= Self::METER;
+        }
+        if meters_only {
+            bits |= Self::METERS_ONLY;
+        }
+        Self(bits)
     }
 
     /// Whether `observe_unit` dispatches this unit's observers at all.
     const fn observed(self) -> bool {
-        !matches!(self, Self::Unobserved)
+        self.0 & Self::OBSERVED != 0
     }
 
     /// Whether this unit runs the banked sample-peak pass before its observers, when its full
     /// meter pass does not run.
     const fn sample_peak(self) -> bool {
-        matches!(
-            self,
-            Self::ObservedWithPeak | Self::ObservedWithPeakAndMeter
-        )
+        self.0 & Self::PEAK != 0
     }
 
     /// Whether this unit runs the banked full meter pass before its observers.
     const fn banked_meter(self) -> bool {
-        matches!(
-            self,
-            Self::ObservedWithMeter | Self::ObservedWithPeakAndMeter
-        )
+        self.0 & Self::METER != 0
+    }
+
+    /// Whether every observer of this unit is a strip meter binding (#882).
+    const fn meters_only(self) -> bool {
+        self.0 & Self::METERS_ONLY != 0
     }
 }
 
@@ -4528,9 +4604,12 @@ impl NodeKind {
             }
             // The control lane's `superseded` counter is the host's, shared by every lane and
             // outliving the plan: not charged here (#1074).
-            Self::LiveRoute(route) => boxed(&**route)
-                .saturating_add(boxed(&*route.control))
-                .saturating_add(arc(&route.control.lane)),
+            // A transition route (#1363 D2) holds no lane.
+            Self::LiveRoute(route) => {
+                boxed(&**route).saturating_add(route.control.as_deref().map_or(0, |control| {
+                    boxed(control).saturating_add(arc(&control.lane))
+                }))
+            }
             Self::LiveFollowRoute(route) => boxed(&**route)
                 .saturating_add(boxed(&*route.control))
                 .saturating_add(arc(&route.control.lane))
@@ -4715,6 +4794,7 @@ impl Runtime {
                 unit.has_observers(),
                 unit.accepts_sample_peak(),
                 unit.accepts_banked_meter(),
+                unit.meters_only(),
             );
         }
         let widest = units
@@ -5014,12 +5094,18 @@ impl Runtime {
     /// GraphExecutor calls this only after this unit successfully executes in this block.
     ///
     /// `host` is the block's [`HostMaster`], which the Output op's observers read (issue #916).
+    ///
+    /// `strip_meters` is the block's strip meter level (#882). With it off, no strip meter
+    /// binding observes: a unit whose every observer is one returns at once, the bank's meter
+    /// passes do not run (only meters accept them; any other observer that did would read its
+    /// samples instead, so it stays correct), and every other observer runs unchanged.
     pub(crate) fn observe_unit(
         &mut self,
         index: usize,
         first_sample: u64,
         validity: GraphObservationValidity,
         host: &HostMaster<'_>,
+        strip_meters: bool,
     ) -> Result<(), RenderError> {
         // Issue #900: a unit bound without any observer has nothing to dispatch and the walk
         // below has no other production effect, so one bind-time flag answers it. `execute` has
@@ -5028,14 +5114,14 @@ impl Runtime {
         let observed = observation.observed();
         #[cfg(test)]
         let observed = observed || TEST_ONLY_OBSERVER_SKIP_DISABLED.with(std::cell::Cell::get);
-        if !observed {
+        if !observed || (!strip_meters && observation.meters_only()) {
             return Ok(());
         }
-        let sample_peak = observation.sample_peak();
+        let sample_peak = strip_meters && observation.sample_peak();
         #[cfg(any(test, feature = "test-support"))]
         let sample_peak =
             sample_peak && !TEST_ONLY_BANK_SAMPLE_PEAK_DECLINED.with(std::cell::Cell::get);
-        let banked_meter = observation.banked_meter();
+        let banked_meter = strip_meters && observation.banked_meter();
         #[cfg(any(test, feature = "test-support"))]
         let banked_meter =
             banked_meter && !TEST_ONLY_BANK_METER_DECLINED.with(std::cell::Cell::get);
@@ -5043,11 +5129,19 @@ impl Runtime {
         let Self { arena, units, .. } = self;
         match &mut units[index] {
             RuntimeUnit::Op(op) if output => {
-                observe_output(op, host.planes(), first_sample, validity)
+                observe_output(op, host.planes(), first_sample, validity, strip_meters)
             }
-            RuntimeUnit::Op(op) => {
-                observe(op, arena, first_sample, None, false, validity, None, None)
-            }
+            RuntimeUnit::Op(op) => observe(
+                op,
+                arena,
+                first_sample,
+                None,
+                false,
+                validity,
+                None,
+                None,
+                strip_meters,
+            ),
             RuntimeUnit::Bank {
                 members,
                 lanes,
@@ -5148,6 +5242,7 @@ impl Runtime {
                         validity,
                         peak,
                         meter,
+                        strip_meters,
                     )?;
                 }
                 Ok(())
@@ -5774,9 +5869,11 @@ fn bank_meter_pass(
 ///
 /// `sample_peak` and `meter` are this member's lane of the bank's meter passes (issues #943 and
 /// #950), `None` for every member but a final one whose unit ran a pass this block.
+/// `strip_meters` off skips every strip meter binding (#882).
 #[expect(
     clippy::too_many_arguments,
-    reason = "issue #950 adds the banked meter lane beside issue #943's banked peak"
+    reason = "issue #950 adds the banked meter lane beside issue #943's banked peak, #882 the \
+              block's strip meter level"
 )]
 fn observe(
     op: &mut RuntimeOp,
@@ -5787,6 +5884,7 @@ fn observe(
     validity: GraphObservationValidity,
     sample_peak: Option<[f32; 2]>,
     meter: Option<crate::GraphBankedMeterLane>,
+    strip_meters: bool,
 ) -> Result<(), RenderError> {
     #[cfg(test)]
     TEST_ONLY_OBSERVE_CALLS.with(|calls| calls.set(calls.get() + 1));
@@ -5796,6 +5894,9 @@ fn observe(
         resident.filter(|_| !TEST_ONLY_METER_RESIDENT_DISABLED.with(std::cell::Cell::get));
     let mut planar = false;
     for observer in op.observers.iter_mut() {
+        if observer.meter && !strip_meters {
+            continue;
+        }
         #[cfg(any(test, feature = "test-support"))]
         test_only_observation_dispatch_observer_access();
         if let Some(lane) = resident {
@@ -5867,11 +5968,15 @@ fn observe_output(
     planes: (&[f32], &[f32]),
     first_sample: u64,
     validity: GraphObservationValidity,
+    strip_meters: bool,
 ) -> Result<(), RenderError> {
     #[cfg(test)]
     TEST_ONLY_OBSERVE_CALLS.with(|calls| calls.set(calls.get() + 1));
     let mut planar = false;
     for observer in op.observers.iter_mut() {
+        if observer.meter && !strip_meters {
+            continue;
+        }
         #[cfg(any(test, feature = "test-support"))]
         test_only_observation_dispatch_observer_access();
         observe_output_one(observer, planes, first_sample, validity, &mut planar)?;
@@ -6576,6 +6681,10 @@ fn carry_route(
     let (ramps, mute, follow) = match from {
         CarriedRoute::Six(from) => {
             from.apply_pending(LiveSnapshot::ALL);
+            // #1363: a fade-in armed in the displaced plan and not fired yet fires at the swap,
+            // so the successor never takes a route that waits for a fire it does not hold (the
+            // arm itself carries with #1877).
+            from.fire_fade_in();
             if let CarriedRoute::Six(into) = into {
                 into.adopt(from);
                 return false;
@@ -7162,6 +7271,29 @@ impl crate::runtime::Runtime {
                     || !is_follow_route_unit(&predecessor.units, step.predecessor)
                     || is_follow_route_unit(&self.units, step.successor))
         }) && slots.next().is_none()
+    }
+
+    /// Whether runtime unit `unit` holds a six-word live route's op (#1363 D3), the one kind a
+    /// route fade arm targets. Allocation-free.
+    pub(crate) fn has_six_word_route(&self, unit: u32) -> bool {
+        matches!(
+            self.units.get(unit as usize),
+            Some(RuntimeUnit::Op(op)) if matches!(op.kind, NodeKind::LiveRoute(_))
+        )
+    }
+
+    /// Arm the fade-in of the six-word live route in unit `unit` (#1363 D3,
+    /// [`LiveRoute::arm_fade_in`]), off the render thread. Returns whether it armed.
+    pub(crate) fn arm_route_fade_in(&mut self, unit: u32, ramp_samples: u32) -> bool {
+        live_route_mut(&mut self.units, unit).is_some_and(|live| live.arm_fade_in(ramp_samples))
+    }
+
+    /// Fire the armed fade-in of the six-word live route in unit `unit` (#1363 D3,
+    /// [`LiveRoute::fire_fade_in`]). Render-thread code: allocation-, lock- and syscall-free.
+    pub(crate) fn fire_route_fade_in(&mut self, unit: u32) {
+        if let Some(live) = live_route_mut(&mut self.units, unit) {
+            live.fire_fade_in();
+        }
     }
 
     /// Run the live-send section of a carry program at the swap block (#1284 D2, #1652 D3): for
@@ -7879,8 +8011,9 @@ pub(crate) struct RuntimeParts {
     /// node. Empty for a plan with no observation capacity, so `node_kind` hands out `None`.
     effect_observations: BTreeMap<crate::EffectNodeId, Box<ObservationLane>>,
     /// Issue #1220 D6: live-route lanes by route node, taken by `node_kind` for that route's op.
-    /// Empty for a plan without route controls, so every route binds `NodeKind::Route`.
-    route_controls: BTreeMap<GraphNodeId, Box<crate::RouteControlLane>>,
+    /// Empty for a plan without route controls, so every route binds `NodeKind::Route`. A
+    /// transition route (#1363 D2) has an entry with no lane: it binds live all the same.
+    route_controls: BTreeMap<GraphNodeId, Option<Box<crate::RouteControlLane>>>,
     /// #1652b: following-route lanes and their sources by route node, taken by `node_kind` for
     /// that route's op. Empty for a plan with no following route.
     follow_route_controls: BTreeMap<
@@ -8118,6 +8251,8 @@ impl RuntimeParts {
                 )))
             } else {
                 match self.route_controls.remove(node) {
+                    // #1363 D2: a transition route's entry holds no lane; it binds live all
+                    // the same, so its fade-in can ramp it, and it never folds.
                     None => NodeKind::Route(prepared),
                     Some(control) => NodeKind::LiveRoute(Box::new(LiveRoute::new(
                         prepared,
@@ -8896,7 +9031,7 @@ pub(crate) fn build_sequential(
                 banking: UnitBanking::of(!membership.is_empty(), gathers_track_input),
                 resident_input: false,
                 // Derived from the finished unit by the runtime constructor.
-                observation: UnitObservation::Unobserved,
+                observation: UnitObservation::UNOBSERVED,
                 source_lanes: 0,
                 stages: u32::try_from(stages).unwrap_or(u32::MAX),
                 upstream_of_seam_stages: u32::try_from(
@@ -9092,7 +9227,7 @@ fn live_route_rows(
     units: &[RuntimeUnit],
     route_gates: &[(GraphNodeId, RouteGate)],
 ) -> Vec<crate::GraphLiveRoute> {
-    units
+    let mut rows = units
         .iter()
         .enumerate()
         .filter_map(|(unit, owner)| {
@@ -9116,7 +9251,10 @@ fn live_route_rows(
                 automated,
             })
         })
-        .collect()
+        .collect::<Vec<_>>();
+    // Exact length, so a plan's charge can name it (#1363 D2: one row per transition route).
+    rows.shrink_to_fit();
+    rows
 }
 
 /// Issue #1217 D5: the executor's [`RouteActivity`], or `None` when no route gate silences.
@@ -11336,7 +11474,7 @@ mod tests {
             vec![UnitIdentity {
                 banking: UnitBanking::Plain,
                 resident_input: false,
-                observation: UnitObservation::Unobserved,
+                observation: UnitObservation::UNOBSERVED,
                 source_lanes: 0,
                 stages: 1,
                 upstream_of_seam_stages: 1,
@@ -11429,7 +11567,7 @@ mod tests {
             vec![UnitIdentity {
                 banking: UnitBanking::Plain,
                 resident_input: false,
-                observation: UnitObservation::Unobserved,
+                observation: UnitObservation::UNOBSERVED,
                 source_lanes: 0,
                 stages: 1,
                 upstream_of_seam_stages: 1,
@@ -11560,6 +11698,7 @@ mod tests {
                 GraphObservationValidity::CLEAR,
                 None,
                 None,
+                true,
             );
             let take = accepts
                 .iter()
@@ -11621,7 +11760,7 @@ mod tests {
         let identity = |population| UnitIdentity {
             banking: UnitBanking::Bank,
             resident_input: false,
-            observation: UnitObservation::Unobserved,
+            observation: UnitObservation::UNOBSERVED,
             source_lanes: 0,
             stages: 1,
             upstream_of_seam_stages: 1,
@@ -11812,7 +11951,7 @@ mod tests {
         let row = |observed| UnitIdentity {
             banking: UnitBanking::Plain,
             resident_input: false,
-            observation: UnitObservation::of(observed, false, false),
+            observation: UnitObservation::of(observed, false, false, false),
             source_lanes: 0,
             stages: 1,
             upstream_of_seam_stages: 0,
@@ -11860,7 +11999,7 @@ mod tests {
                 test_only_observation_dispatch_reset();
                 visits.store(0, Ordering::Relaxed);
                 assert_eq!(
-                    runtime.observe_unit(unit, 5, GraphObservationValidity::CLEAR, &host),
+                    runtime.observe_unit(unit, 5, GraphObservationValidity::CLEAR, &host, true),
                     Ok(())
                 );
                 let [observers, members] = test_only_observation_dispatch_counts();
@@ -11877,6 +12016,137 @@ mod tests {
             }
         }
         test_only_observe_calls_reset(false);
+    }
+
+    /// #882: with the strip meter level off, no strip meter binding observes and every other
+    /// observer still does. A unit whose every observer is a meter is skipped before its walk (no
+    /// `observe` call); a unit that also holds a tap walks, visits the tap and skips the meter,
+    /// and a bank that does runs no sample-peak pass for the meter; with the level on, every
+    /// observer observes.
+    ///
+    /// Test value: red if the level skips a tap beside a meter, if a meters-only unit still walks
+    /// its members with the level off, if a meter observes with it off, or if a bank runs a meter
+    /// pass with it off.
+    #[test]
+    fn strip_meter_level_off_skips_meter_bindings_and_keeps_every_other_observer() {
+        struct Visit(Arc<AtomicUsize>, bool);
+        impl crate::GraphRuntimeObserver for Visit {
+            fn retained_bytes(&self) -> u64 {
+                engine::realtime::retained::arc(&self.0)
+            }
+            fn observe(&mut self, _block: GraphObservationBlock<'_>) -> Result<(), RenderError> {
+                self.0.fetch_add(1, Ordering::Relaxed);
+                Ok(())
+            }
+            fn carry_kind(&self) -> Option<engine::realtime::ObserverKind> {
+                self.1.then_some(engine::realtime::ObserverKind::Meter)
+            }
+            // A meter asks its bank for the sample-peak pass, as a strip meter does.
+            fn accepts_sample_peak(&self) -> bool {
+                self.1
+            }
+        }
+        let meters = Arc::new(AtomicUsize::new(0));
+        let taps = Arc::new(AtomicUsize::new(0));
+        // `kinds[i]` is whether observer `i` is a meter.
+        let observers = |kinds: &[bool]| -> Box<[GraphNodeObserverBinding]> {
+            kinds
+                .iter()
+                .enumerate()
+                .map(|(handle, &meter)| {
+                    let count = if meter { &meters } else { &taps };
+                    GraphNodeObserverBinding::new(
+                        GraphNodeId::Output {
+                            output_id: crate::StableGraphId::parse("out").expect("id"),
+                        },
+                        handle as u64,
+                        Box::new(Visit(Arc::clone(count), meter)),
+                    )
+                })
+                .collect()
+        };
+        let op = |observers| RuntimeOp {
+            inputs: Box::new([]),
+            staged: Box::new([]),
+            sidechain: None,
+            output: ARENA_BASE,
+            kind: NodeKind::BankMember,
+            observers,
+        };
+        // A bank whose last member holds the observers `last`.
+        let bank = |last: &[bool]| RuntimeUnit::Bank {
+            members: (0..4)
+                .map(|member| op(observers(if member == 3 { last } else { &[] })))
+                .collect(),
+            lanes: 4,
+            chain: BankChain::new(
+                AoSoaScratch::new(effect_contract::BankWidth::Four, 2).expect("scratch"),
+                Box::new([true; 4]),
+                vec![],
+            )
+            .expect("chain"),
+            fold: Box::new([]),
+            master: FoldTarget::Arena(0),
+        };
+        let row = || UnitIdentity {
+            banking: UnitBanking::Plain,
+            resident_input: false,
+            observation: UnitObservation::UNOBSERVED,
+            source_lanes: 0,
+            stages: 1,
+            upstream_of_seam_stages: 0,
+            lane_tracks: Box::new([]),
+        };
+        let mut runtime = Runtime::new(
+            stereo_arena(2, 1),
+            Vec::new(),
+            Vec::new(),
+            vec![
+                RuntimeUnit::Op(op(observers(&[true, false, true]))),
+                RuntimeUnit::Op(op(observers(&[true, true]))),
+                bank(&[true]),
+                bank(&[true, false]),
+            ],
+            vec![row(), row(), row(), row()],
+            Vec::new(),
+            0,
+            0,
+        );
+        // Per unit: [observe calls, meter visits, tap visits, bank sample-peak passes]. The mixed
+        // bank (unit 3) walks with the level off, so only the level keeps its meter's pass off.
+        for (level, expected) in [
+            (
+                false,
+                [[1, 0, 1, 0], [0, 0, 0, 0], [0, 0, 0, 0], [4, 0, 1, 0]],
+            ),
+            (
+                true,
+                [[1, 2, 1, 0], [1, 2, 0, 0], [4, 1, 0, 1], [4, 1, 1, 1]],
+            ),
+        ] {
+            let (mut left, mut right) = ([0.0_f32; 2], [0.0_f32; 2]);
+            let host = HostMaster::new(&mut left, &mut right, 2).expect("host planes");
+            for (unit, expected) in expected.into_iter().enumerate() {
+                test_only_observe_calls_reset(false);
+                test_only_set_bank_sample_peak_declined(false);
+                meters.store(0, Ordering::Relaxed);
+                taps.store(0, Ordering::Relaxed);
+                assert_eq!(
+                    runtime.observe_unit(unit, 5, GraphObservationValidity::CLEAR, &host, level),
+                    Ok(())
+                );
+                assert_eq!(
+                    [
+                        test_only_observe_calls(),
+                        meters.load(Ordering::Relaxed) as u64,
+                        taps.load(Ordering::Relaxed) as u64,
+                        test_only_bank_sample_peak_passes(),
+                    ],
+                    expected,
+                    "unit {unit}, level {level}"
+                );
+            }
+        }
     }
 
     struct AddingOwner(Arc<AtomicUsize>);
@@ -15292,7 +15562,7 @@ mod tests {
                 )
                 .expect("oracle unit");
             runtime
-                .observe_unit(unit, first_sample, validity, &host)
+                .observe_unit(unit, first_sample, validity, &host, true)
                 .expect("oracle observer");
         }
         // The executor's end-of-block copy, exactly as it stood before issue #916.
@@ -17195,13 +17465,13 @@ mod tests {
         let installed = executor
             .install_fade_arms(vec![
                 crate::GraphFadeArm {
-                    fader: fader("track00"),
+                    target: crate::GraphFadeTarget::Fader(fader("track00")),
                     source: Some(input),
                     delay_samples: 200,
                     ramp_samples: 64,
                 },
                 crate::GraphFadeArm {
-                    fader: fader("track01"),
+                    target: crate::GraphFadeTarget::Fader(fader("track01")),
                     source: None,
                     delay_samples: 0,
                     ramp_samples: 64,
@@ -18371,7 +18641,7 @@ mod follow_route_op_tests {
                 };
                 let (gate, pin) = RevisionGate::pair(0);
                 Self {
-                    route: Box::new(LiveRoute::new(prepared, mute, control)),
+                    route: Box::new(LiveRoute::new(prepared, mute, Some(control))),
                     producer,
                     gate,
                     pin,
@@ -18422,6 +18692,97 @@ mod follow_route_op_tests {
             let (mut left, mut right) = input(AFTER);
             route_mix_ramp_block::<FrameLane>(&mut left, &mut right, &ramp, BEFORE as u32);
             bits((&left, &right))
+        }
+
+        /// #1363 D3, the arm law: a record that an armed route reads before its fire replaces only
+        /// the target the fire goes to. The route stays silent (inactive, its ramp settled at
+        /// `[+0.0; 4]`) until the fire, which ramps from `[+0.0; 4]` to the record's target over the
+        /// armed length, not the record's own; its block is that ramp's, bit for bit.
+        ///
+        /// Test value: red if a live edit lifts the arm early (the record retargets the ramp and
+        /// the route mixes before its fire), if the fire forgets the record (it ramps to the
+        /// prepared target), or if it forgets a muting record's mute (the route mixes on).
+        #[test]
+        fn a_record_before_an_armed_routes_fire_retargets_the_fire_only() {
+            const ARMED: u32 = 64;
+            let mut route = Six::new(gated(OPEN, [false; 2]), false);
+            assert!(route.route.arm_fade_in(ARMED), "an open route arms");
+            let moved = gated(MOVED, [false; 2]);
+            route.write(moved, RECORD_RAMP);
+            let (mut left, mut right) = input(AFTER);
+            assert!(
+                !route.block(&mut left, &mut right),
+                "an armed route that read a record still waits silent"
+            );
+            assert_eq!(
+                route.route.ramp.coefficients_at(route.route.position),
+                [0.0; 4]
+            );
+            route.route.fire_fade_in();
+            let (mut left, mut right) = input(AFTER);
+            assert!(route.block(&mut left, &mut right), "the fired route mixes");
+            let (mut want_left, mut want_right) = input(AFTER);
+            route_mix_ramp_block::<FrameLane>(
+                &mut want_left,
+                &mut want_right,
+                &IndexedRamp::new([0.0; 4], moved, ARMED),
+                0,
+            );
+            assert_eq!(
+                bits((&left, &right)),
+                bits((&want_left, &want_right)),
+                "the fire ramps from rest to the record's target over the armed length"
+            );
+            // A muting record before the fire: the fire keeps the route muted, so once its ramp
+            // has run the route is inactive (it is never unmuted).
+            let mut muted = Six::new(gated(OPEN, [false; 2]), false);
+            assert!(muted.route.arm_fade_in(ARMED));
+            muted.revision += 1;
+            let record = RouteControlRecord::new([0.0; 4], true, RECORD_RAMP).expect("record");
+            muted
+                .producer
+                .write(muted.pin.stamp(muted.revision).expect("stamp"), record);
+            muted.pin.publish(&muted.gate, muted.revision);
+            let (mut left, mut right) = input(AFTER);
+            assert!(!muted.block(&mut left, &mut right), "it waits silent");
+            muted.route.fire_fade_in();
+            for _ in 0..2 {
+                let (mut left, mut right) = input(AFTER);
+                muted.block(&mut left, &mut right);
+            }
+            let (mut left, mut right) = input(AFTER);
+            assert!(
+                !muted.block(&mut left, &mut right),
+                "a route muted before its fire stays muted after it"
+            );
+        }
+
+        /// #1363: a route whose armed fade-in has not fired when a later swap displaces its plan
+        /// fires at that swap: the successor takes the fade's ramp from rest, so it never holds a
+        /// route that waits silent for a fire its own table does not hold.
+        ///
+        /// Test value: red if the carry copies the waiting route's silence into the successor,
+        /// which then stays silent for good (no successor entry fires it).
+        #[test]
+        fn an_armed_route_a_swap_displaces_fires_at_the_swap() {
+            let mut from = Six::new(gated(OPEN, [false; 2]), false);
+            assert!(from.route.arm_fade_in(RECORD_RAMP));
+            let mut into = Six::new(gated(OPEN, [false; 2]), false);
+            carry_route(
+                CarriedRoute::Six(&mut into.route),
+                CarriedRoute::Six(&mut from.route),
+                None,
+            );
+            let (mut left, mut right) = input(AFTER);
+            assert!(into.block(&mut left, &mut right), "the successor mixes");
+            let (mut want_left, mut want_right) = input(AFTER);
+            route_mix_ramp_block::<FrameLane>(
+                &mut want_left,
+                &mut want_right,
+                &IndexedRamp::new([0.0; 4], gated(OPEN, [false; 2]), RECORD_RAMP),
+                0,
+            );
+            assert_eq!(bits((&left, &right)), bits((&want_left, &want_right)));
         }
 
         /// Gate 4 (six -> seven, the rebuild adds an automated mute to the source). (a) With the

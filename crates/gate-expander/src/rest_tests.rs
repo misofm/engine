@@ -69,6 +69,7 @@ fn copy<L: Lane>(gate: &PreparedGate<L, false>) -> PreparedGate<L, false> {
         state: gate.state,
         timing: gate.timing,
         ramp_frames_left: gate.ramp_frames_left,
+        collapsed: gate.collapsed,
         active: gate.active,
     }
 }

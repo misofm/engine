@@ -607,22 +607,26 @@ impl Drop for RestoreMode {
 /// Gate 4: mixed session bypass renders without a single allocator call after warm-up, banked
 /// and per node, at `Simd8`, `Simd4` and `Scalar`, and in padded console banks.
 ///
-/// Thirteen tracks with the strip as inserts: at eight lanes one bank per slot plus a five-track
-/// per-node remainder, at four lanes the limiter's three banks plus a per-node remainder (and every
-/// EQ and compressor per node on hosts that bind no four-lane bank for them), and at `Scalar` every
-/// instance per node. Then the same thirteen tracks with the strip as the console, at the host's
-/// width, where every slot binds and the remainder is a padded bank (#1098): no instance renders
-/// per node, and the padded banks carry bypassed lanes. Each slot bypasses a different mix of
-/// tracks, so every leg that binds a bank has bypassed lanes in it, and every inserts leg has
-/// bypassed instances per node. The counters are this thread's, so another test's allocations
-/// cannot reach them; the audited allocator counts in `Count` mode, so an allocation inside the
-/// render scope is reported here rather than aborting the process.
+/// Nine tracks with the strip as inserts: at eight lanes one bank per slot plus a one-track
+/// per-node remainder, at four lanes two banks per slot plus a one-track per-node remainder (and
+/// every instance per node on hosts that bind no four-lane bank), and at `Scalar` every instance
+/// per node. One track is below the insert padding threshold at either width (#888: two at four
+/// lanes, three at eight), so the remainder stays per node; with thirteen tracks, eight lanes would
+/// pad its five-track remainder and leave no bypassed instance per node. Then thirteen tracks with
+/// the strip as the console, at the host's width, where every slot binds and the remainder is a
+/// padded bank (#1098): no instance renders per node, and the padded banks carry bypassed lanes.
+/// Each slot bypasses a different mix of tracks, so every leg that binds a bank has bypassed lanes
+/// in it, and every inserts leg has bypassed instances per node. The counters are this thread's, so
+/// another test's allocations cannot reach them; the audited allocator counts in `Count` mode, so
+/// an allocation inside the render scope is reported here rather than aborting the process.
 ///
 /// Red mutation: `black_box(Vec::<u8>::with_capacity(1))` in `BypassShunt::capture` -> every leg
 /// counts allocations.
 #[test]
 fn a_mixed_session_bypass_renders_without_allocating() {
     const TRACKS: usize = 13;
+    // A one-track insert remainder at either width: below the insert padding threshold (#888).
+    const INSERT_TRACKS: usize = 9;
     const WARM_UP: u64 = 16;
     const BLOCKS: u64 = 256;
     assert_installed();
@@ -643,7 +647,7 @@ fn a_mixed_session_bypass_renders_without_allocating() {
         let model = if console_leg {
             console(TRACKS, MASKS)
         } else {
-            inserts(TRACKS, MASKS)
+            inserts(INSERT_TRACKS, MASKS)
         };
         let mut bound = bind(&model, dispatch, 32, None);
         let shape = &bound.shape;
