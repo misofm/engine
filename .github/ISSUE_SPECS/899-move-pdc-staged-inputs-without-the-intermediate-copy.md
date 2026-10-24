@@ -33,3 +33,39 @@ None.
 - Run `cargo fmt --all --check`, `cargo clippy --locked --workspace --all-targets --all-features -- -D warnings`, and the focused tests named below before every checkpoint. Commit on a `codex/<issue>-<slug>` branch from synchronized `main`; do not touch paths outside the authorized list.
 - Do not quote a projected saving. If a benchmark row is listed, run it exactly once, one warmup and two measured rounds, and attach the record as descriptive evidence.
 - Source of these findings: `docs/audits/render-path-cost-audit-2026-09-24.md` (PR #879) and tracker #349.
+
+## Decision record (attempt 1, 2026-10-24)
+
+- Scope note wins over this body for paths and decisions. Root accepted it: R1 keep the staging
+  buffer and move into it; R2 one stereo arena borrow so one cursor covers both planes; R3 `source`
+  is read-only, the kernel documents and `debug_assert`s non-aliasing.
+- `lane::kernels::pdc_delay_move_block(ring, cursor, source, out)`: per segment `out <- ring`, then
+  `ring <- source`; same two segments and cursor advance as `pdc_delay_block`, which stays for
+  `TrackDelayLine`.
+- `DisjointArena::write_read_stereo` already existed (#1201 sidechain reads), so
+  `crates/engine/src/realtime/disjoint.rs` is not changed.
+- `CompensationDelay::process_from(source, out)` replaces the in-place `process`; a zero-length
+  line copies `source` through (the old path left the staged copy in place). The `execute_op`
+  staging loop is one borrow and one call.
+- Gate 1 (new lane differential) is dropped by the scope note: the restated
+  `compensation_delay_is_partition_invariant_and_matches_per_sample_reference` drives
+  `process_from` against its independent per-sample oracle and owns MUTATIONS rows M3/M12. The
+  #1283 successor-line test's two call sites move to `process_from` mechanically.
+
+## Evidence (attempt 1)
+
+- Mutants, each RED in the restated test and restored: kernel writes `source` into the ring before
+  reading its pending word; kernel's first segment has the wrong length (segments misordered);
+  `process_from` keeps the entry cursor (M3).
+- No bit moved (one-time PR evidence, not a committed test): the 50-session random DAG corpus
+  (`fifty_random_dag_sessions_render_deterministic_nonsilent_pcm`, 411 compensation lines over 49
+  sessions) renders the same bits on base `ff862018c` and on this change (sha256 of the printed
+  bits `99be5099...dabb` on both). `scripts/check-graph-determinism.sh`: PASS 100/100, digest
+  identical to base (it covers the compiled graph, not rendered PCM).
+- `cargo test -p graph` all pass; rt9 alloc test (release) pass; lane policy ok; realtime policy
+  ok (192 regions); fmt, clippy `-p lane -p graph --all-targets --all-features`, aarch64
+  `--tests` check and `-D warnings` doc pass. The kernel is not in the wasm `KERNEL_ROSTER`.
+- Descriptive benchmark: one `scripts/operator/run-console-benchmark.sh --step b11-899` invocation
+  under the exclusive lock refused before the workload (`precondition_loadavg_above_ceiling`,
+  loadavg 2.95/6.74/8.72 from other streams; 0 launches, 0 rounds). Not retried and not forced
+  uncontrolled; no number is quoted.
