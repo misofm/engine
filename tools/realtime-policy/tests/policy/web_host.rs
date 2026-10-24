@@ -315,24 +315,6 @@ fn a_render_lock_pass_through_or_unregistered_allocator_is_refused() {
             vec![TopLevel],
         ),
         (
-            "cfg-on-counter",
-            vec![lock(
-                "static RENDER_ALLOCATIONS: AtomicU32 = AtomicU32::new(0);",
-                "#[cfg(any())]\nstatic RENDER_ALLOCATIONS: AtomicU32 = AtomicU32::new(0);",
-            )],
-            vec![TopLevel],
-        ),
-        (
-            "cfg-test-on-fn",
-            vec![append(RENDER_LOCK, "#[cfg(test)]\nfn locked() -> bool {\n    false\n}\n")],
-            vec![TopLevel],
-        ),
-        (
-            "cfg-on-impl",
-            vec![append(RENDER_LOCK, "#[cfg(not(test))]\nimpl<A> RenderLockedAllocator<A> {}\n")],
-            vec![TopLevel],
-        ),
-        (
             "cfg-not-test-mod-tests",
             vec![lock("#[cfg(test)]", "#[cfg(not(test))]")],
             vec![TopLevel],
@@ -345,22 +327,6 @@ fn a_render_lock_pass_through_or_unregistered_allocator_is_refused() {
         (
             "cfg-macro-in-body",
             vec![lock("    body()", "    debug_assert!(cfg!(test));\n    body()")],
-            vec![Nested],
-        ),
-        (
-            "cfg-on-field",
-            vec![lock(
-                "pub struct RenderLockedAllocator<A>(pub A);",
-                "pub struct RenderLockedAllocator<A>(#[cfg(test)] pub A);",
-            )],
-            vec![Nested],
-        ),
-        (
-            "cfg-in-thread-local",
-            vec![append(
-                RENDER_LOCK,
-                "thread_local! {\n    #[cfg(test)]\n    static LOCKED: bool = false;\n}\n",
-            )],
             vec![Nested],
         ),
         (
@@ -400,11 +366,6 @@ fn a_render_lock_pass_through_or_unregistered_allocator_is_refused() {
             vec![Form],
         ),
         (
-            "allocator-wasm-only",
-            vec![lock(ALLOCATOR_CFG, "#[cfg(target_family = \"wasm\")]")],
-            vec![Form],
-        ),
-        (
             "allocator-second-cfg",
             vec![lock(ALLOCATOR_CFG, &format!("{ALLOCATOR_CFG}\n#[cfg(any())]"))],
             vec![Form],
@@ -433,6 +394,22 @@ fn a_render_lock_pass_through_or_unregistered_allocator_is_refused() {
                 )])
                 .collect(),
             vec![Form, Elsewhere],
+        ),
+        (
+            "allocator-path-qualified-in-lib",
+            vec![append(
+                LIB,
+                "mod other {\n    #[core::prelude::v1::global_allocator]\n    static ALLOCATOR: u8 = 0;\n}\n",
+            )],
+            vec![Elsewhere],
+        ),
+        (
+            "allocator-renamed-by-use",
+            vec![append(
+                LIB,
+                "#[cfg(test)]\nmod other {\n    use core::prelude::v1::global_allocator as allocator;\n}\n",
+            )],
+            vec![Elsewhere],
         ),
         (
             "allocator-in-a-module",

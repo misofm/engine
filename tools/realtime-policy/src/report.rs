@@ -102,8 +102,8 @@ pub enum Class {
     /// than the code the wrap rule read (rule (a)).
     ConditionalWrapPath,
     /// A listed export with a generic parameter, a `where` clause or an `impl Trait` in its
-    /// signature: rustc emits no symbol for it, so another function could take its name (#1528
-    /// D1(a)).
+    /// signature, refused fail-closed: some of these forms emit no symbol, so another function
+    /// could take the name (#1528 D1(a)).
     GenericWebExport,
     /// An `export_name` attribute under `hosts/host-web/src`, whatever its value or spelling: every
     /// exported name there comes from a function's own identifier (rule (b), #1528 D1(b)).
@@ -233,7 +233,7 @@ impl fmt::Display for Class {
                 "#[cfg] or #[cfg_attr] on the render_locked import, a render-thread export, its wrap call or a guarded module (hosts/host-web/src/ffi.rs, render_lock.rs)",
             ),
             Self::GenericWebExport => out.write_str(
-                "a render-thread export with a generic parameter, a where clause or impl Trait in its signature, which emits no symbol of its own",
+                "a render-thread export with a generic parameter, a where clause or impl Trait in its signature, refused fail-closed (some of these forms emit no symbol of their own)",
             ),
             Self::ExportNameOnWebExport => out.write_str(
                 "export_name under hosts/host-web/src (in any spelling and with any value): an exported name there must be a function's own identifier",

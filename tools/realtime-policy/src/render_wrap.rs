@@ -126,8 +126,9 @@ pub(crate) fn scan(
 }
 
 /// D1(a): whether the signature has a generic parameter of any kind, a `where` clause, or an
-/// `impl Trait` anywhere in an argument or the return type. rustc emits no symbol for such a
-/// function, `#[no_mangle]` or not.
+/// `impl Trait` anywhere in an argument or the return type. Such a listed export is refused
+/// fail-closed: a type or const parameter or an argument-position `impl Trait` emits no symbol, and
+/// the rule does not tell those apart from the forms that still do.
 fn is_generic(signature: &syn::Signature) -> bool {
     struct ImplTrait(bool);
     impl<'ast> Visit<'ast> for ImplTrait {

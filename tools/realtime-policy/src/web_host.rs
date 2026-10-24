@@ -170,12 +170,16 @@ impl<'ast> Visit<'ast> for ExportNames<'_> {
     }
 }
 
-/// Whether `attribute`'s path, or any token of its argument list at any depth, is one of
-/// `names`: the attribute itself, and the same inside `unsafe(..)`, `cfg_attr(.., ..)` or any
-/// other list, whatever its value. A `name = value` attribute is judged by its path alone.
+/// Whether the last segment of `attribute`'s path, or any token of its argument list at any
+/// depth, is one of `names`: the attribute itself, a path-qualified spelling such as
+/// `#[core::prelude::v1::global_allocator]`, and the same inside `unsafe(..)`, `cfg_attr(.., ..)`
+/// or any other list, whatever its value. A `name = value` attribute is judged by its path alone.
 pub(crate) fn mentions(attribute: &syn::Attribute, names: &[&str]) -> bool {
-    let path = attribute.path();
-    if names.iter().any(|name| path.is_ident(name)) {
+    let last = attribute.path().segments.last();
+    if names
+        .iter()
+        .any(|name| last.is_some_and(|segment| segment.ident == name))
+    {
         return true;
     }
     match &attribute.meta {
@@ -434,12 +438,16 @@ pub(crate) fn scan_render_lock(files: &[Parsed<'_>], findings: &mut Vec<Finding>
             })
             .collect();
         let mut others = crate::render_wrap::introductions(file);
-        if let [line] = defined.as_slice() {
-            if let Some(index) = others.iter().position(|other| other == line) {
-                others.remove(index);
+        // A second top-level definition is reported at its own line below; only a missing one
+        // needs a finding of its own.
+        match defined.as_slice() {
+            [] => findings.push(Finding::at_path(Class::RenderLockedNotUnique, &source.path)),
+            [line] => {
+                if let Some(index) = others.iter().position(|other| other == line) {
+                    others.remove(index);
+                }
             }
-        } else {
-            findings.push(Finding::at_path(Class::RenderLockedNotUnique, &source.path));
+            _ => {}
         }
         for line in others {
             findings.push(at(Class::RenderLockedNotUnique, line));
@@ -542,6 +550,39 @@ impl<'ast> Visit<'ast> for Allocators<'_> {
         self.in_test += usize::from(test);
         visit::visit_item_mod(self, module);
         self.in_test -= usize::from(test);
+    }
+
+    /// `global_allocator` is a builtin attribute macro, so a `use` can rename it (`use
+    /// core::prelude::v1::global_allocator as ga;` then `#[ga]`). A `use` whose leaf is the name,
+    /// renamed or not, is refused in every module.
+    fn visit_item_use(&mut self, node: &'ast syn::ItemUse) {
+        fn leaves(tree: &syn::UseTree, lines: &mut Vec<usize>) {
+            match tree {
+                syn::UseTree::Path(path) => leaves(&path.tree, lines),
+                syn::UseTree::Name(name) if name.ident == "global_allocator" => {
+                    lines.push(name.ident.span().start().line);
+                }
+                syn::UseTree::Rename(rename) if rename.ident == "global_allocator" => {
+                    lines.push(rename.ident.span().start().line);
+                }
+                syn::UseTree::Group(group) => {
+                    for tree in &group.items {
+                        leaves(tree, lines);
+                    }
+                }
+                syn::UseTree::Name(_) | syn::UseTree::Rename(_) | syn::UseTree::Glob(_) => {}
+            }
+        }
+        let mut lines = Vec::new();
+        leaves(&node.tree, &mut lines);
+        for line in lines {
+            self.findings.push(Finding::at_line(
+                Class::AllocatorOutsideRenderLock,
+                &self.source.path,
+                line,
+                self.source.line_text(line),
+            ));
+        }
     }
 
     fn visit_attribute(&mut self, attribute: &'ast syn::Attribute) {
