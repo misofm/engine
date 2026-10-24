@@ -157,11 +157,20 @@ jobs:
   release-link-proof:
     name: workspace release link proof (moved off the per-PR path)
     runs-on: ubuntu-24.04
-    # Timeout derivation (issue #1513). The same commit built in 39.6 min on one night and 26.2 min
-    # on the next, a slow/fast factor of about 1.5. The current fast total is 30.8 min, so a slow
-    # runner needs about 46.5 min; 60 min leaves about 29% headroom. The timeout guards against
-    # hangs. It is not the cost budget: reducing the cost is owned by #1511.
+    # Timeout (issue #1511 D4): provisional. Root sets the final value after one dispatched run of
+    # this job under the env below: the slowest observed build x 1.5, rounded up to 5 min. The
+    # timeout guards against hangs; it is not the cost budget.
     timeout-minutes: 60
+    # Issue #1511 D2: this job builds with thin LTO, 16 codegen units and no debug info. The claim
+    # it proves -- the panic-variant clobber of un-hashed `cdylib`/`staticlib` outputs, and release-
+    # only `cfg(debug_assertions)` rot -- depends on the profile name `release`, its panic setting
+    # and the crate-types, not on codegen (docs/REALTIME_DEPENDENCY_POLICY.md, "Panic behaviour by
+    # profile"). Job-level, so the randomized step reuses the build. Shipped artifacts and every
+    # per-package `-p` release leg keep D12's full `[profile.release]`.
+    env:
+      CARGO_PROFILE_RELEASE_LTO: thin
+      CARGO_PROFILE_RELEASE_CODEGEN_UNITS: '16'
+      CARGO_PROFILE_RELEASE_DEBUG: '0'
     steps:
       # Runner hardware, recorded first so a slow night can be read against the CPU it ran on.
       - name: Record runner hardware
@@ -175,13 +184,25 @@ jobs:
       # release-build.yml was retired once qualification.yml carried the required context, and
       # qualification.yml's release-shape job's cargo check --release --workspace --all-targets
       # (metadata-only + check-only, no link) is not a substitute for actually linking every
-      # test/bench/example target in release. This is that link proof, at its measured 25-40 minute cost,
-      # once a day instead of on every PR and every main push.
+      # test/bench/example target in release. This is that link proof, once a day
+      # instead of on every PR and every main push.
       - name: Workspace release build (single panic variant, --no-run)
-        run: bash scripts/run-release-workspace-tests.sh --no-run
+        run: bash scripts/run-release-workspace-tests.sh --no-run --timings
+      # Issue #1511 D1: per-unit compile and link times, read on a slow night.
+      - name: Upload the build timings
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: release-link-proof-timings
+          path: target/cargo-timings/*.html
+          if-no-files-found: ignore
+          overwrite: true
       # Issue #1051: every committed randomized differential at 100 times its per-PR seeds, on the
-      # build above -- the same panic override and `--workspace` feature set, so it shares that build
-      # except a measured 2-3.5 min recompile, owned by #1511.
+      # build above -- the same panic override and `--workspace` feature set. It still recompiles
+      # about 70 dependency units (#1511 D3): Cargo picks each unit's LTO mode from the targets in
+      # the invocation, so these test-only roots get bitcode-only rlibs where the `--all-targets`
+      # build made object rlibs (same features, different profile hash). No one-line fix; measured
+      # 36 s locally under this job's env, 2-3.5 min in CI under fat LTO before D2.
       # A failing seed prints the one command that replays it; PROBE_966_COUNT is graph-compiler's
       # #966 probe's own seed count (64 per PR).
       - name: Randomized differentials at 100x the per-PR seeds
