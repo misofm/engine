@@ -3478,3 +3478,95 @@ mod settled_body_tests {
         [-16.5, 6.75, 6.0, 12.5, 145.0, 0.0, 1.0],
     ];
 }
+
+#[cfg(test)]
+mod glide_law_tests {
+    //! Issue #1370 gate 1, the law's exact half: from the frame a glide arrives on, the lane's
+    //! detector words are its target mode's `link_frame` words bit for bit, and a lane that rests
+    //! beside a glide takes its own mode's words on every frame. The blend's values against the
+    //! `f64` reference are `glide_tests::a_glide_tracks_the_f64_blend_into_the_target_law`.
+
+    use super::{Channel, DetectLaw, Detector, Glide, Invariants, Links, link_frame};
+    use crate::design::{MAX_WIDTH, PARAMETER_COUNT, PARAMETER_SPECS};
+    use effect_contract::LinkMode;
+    use lane::Lane;
+
+    const MODES: [LinkMode; 3] = [LinkMode::DualMono, LinkMode::Maximum, LinkMode::Average];
+    /// The glide, and three blocks that it crosses: it arrives inside the second.
+    const SAMPLES: u32 = 64;
+    const BLOCKS: [usize; 3] = [23, 45, 30];
+
+    fn check<L: Lane>() {
+        let defaults: [[f32; PARAMETER_COUNT]; MAX_WIDTH] =
+            [core::array::from_fn(|index| PARAMETER_SPECS[index].default); MAX_WIDTH];
+        for from in MODES {
+            for to in MODES.into_iter().filter(|mode| *mode != from) {
+                let mut modes: [LinkMode; MAX_WIDTH] =
+                    core::array::from_fn(|lane| MODES[lane % MODES.len()]);
+                modes[0] = from;
+                let mut left = Channel::<L>::new(&defaults, 48_000);
+                let mut right = Channel::<L>::new(&defaults, 48_000);
+                for (lane, mode) in modes.iter().enumerate() {
+                    left.rest_link(lane, *mode);
+                    right.rest_link(lane, *mode);
+                }
+                // `Instance::retarget_link`'s order: the masks take the target at once.
+                modes[0] = to;
+                left.retarget_link(0, to, SAMPLES);
+                right.retarget_link(0, to, SAMPLES);
+                let invariants = Invariants::new(&Links::<L>::per_lane(&modes), false);
+                let mut frame = 0_u32;
+                for block in BLOCKS {
+                    let mut glide = Glide::gather(&left, &right);
+                    for _ in 0..block {
+                        frame += 1;
+                        // Channels 20 dB apart, signs and phases varied per lane.
+                        let words = |scale: f32, salt: u32| -> [f32; MAX_WIDTH] {
+                            core::array::from_fn(|lane| {
+                                let hash = (frame.wrapping_mul(2_654_435_761)
+                                    ^ (lane as u32 + salt).wrapping_mul(40_503))
+                                    % 2_001;
+                                scale * (hash as f32 / 1_000.0 - 1.0)
+                            })
+                        };
+                        let (l, r) = (L::load(&words(0.9, 1)), L::load(&words(0.09, 7)));
+                        let (law_left, law_right) =
+                            link_frame(Detector::Main, 0, l, r, &invariants);
+                        let (left_words, right_words) = glide.detect(l, r, &invariants);
+                        let bits = |value: L| {
+                            let mut out = [0_u32; MAX_WIDTH];
+                            value.store_bits(&mut out[..L::WIDTH]);
+                            out
+                        };
+                        let (got, law) = (
+                            [bits(left_words), bits(right_words)],
+                            [bits(law_left), bits(law_right)],
+                        );
+                        for lane in 0..L::WIDTH {
+                            // Lane 0 from its arrival frame on; every other lane always.
+                            if lane == 0 && frame < SAMPLES {
+                                continue;
+                            }
+                            for channel in 0..2 {
+                                assert_eq!(
+                                    got[channel][lane],
+                                    law[channel][lane],
+                                    "W{} {from:?} -> {to:?} frame {frame} lane {lane} channel \
+                                     {channel}: not the prepared law's word",
+                                    L::WIDTH
+                                );
+                            }
+                        }
+                    }
+                    glide.scatter(&mut left, &mut right);
+                }
+                assert_eq!(left.link_remaining() + right.link_remaining(), 0);
+            }
+        }
+    }
+
+    #[test]
+    fn a_glide_lands_on_its_target_law_and_a_resting_lane_never_leaves_its_own() {
+        lane::each_lane!(|L| check::<L>());
+    }
+}

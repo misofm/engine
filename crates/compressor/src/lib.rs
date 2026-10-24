@@ -31,6 +31,8 @@
 #![allow(missing_docs)]
 
 mod design;
+#[cfg(test)]
+mod glide_tests;
 mod kernel;
 #[cfg(test)]
 mod padding_tests;
