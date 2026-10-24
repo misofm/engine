@@ -560,6 +560,166 @@ fn a_live_enable_or_family_change_settles_on_the_new_design() {
     }
 }
 
+/// Gate 3 (#1859): every live enable or family ramp walks contractive words, with a bounded mix.
+///
+/// For every ordered pair of the seven band states at each launch rate, over frequencies
+/// {20, 1000, 18000} Hz, gains {-24, 0, 24} dB and Q {0.1, 0.707, 18} (slope 1), band 1 is
+/// prepared at the first state and sent the second. The test walks the kernel's `f32` ramp
+/// (`step = (to - from) / 64`, one add per sample) and pins that walk to the real lane after 17
+/// frames, then retargets to the next state of the seven-cycle and walks the rest from the lane's
+/// words. Every word set of both walks that is not the identity must pass the production ramp
+/// predicate (`validate_svf_within` at `RAMP_PATH_NORM_TOLERANCE`): each is a convex mix of two
+/// admitted designs (#1337 D3). Across the 128 noise frames that carry both ramps, every output is
+/// finite and at most `OUTPUT_MIX_BOUND` times the input peak.
+#[cfg(feature = "test-support")]
+#[test]
+fn every_live_enable_or_family_ramp_is_contractive_and_bounded() {
+    use parametric_eq::{TEST_ONLY_OUTPUT_MIX_BOUND, test_only_ramp_word_is_admissible};
+    const FRAMES: usize = 128;
+    const RETARGET_AT: usize = 17;
+    let states: Vec<(bool, EqBandKind)> = core::iter::once((false, EqBandKind::Bell))
+        .chain(support::FROZEN_KINDS.into_iter().map(|kind| (true, kind)))
+        .collect();
+    let identity = EqSvfWords::IDENTITY.to_array().map(f32::to_bits);
+    // Walks 64 samples from `from` towards `to` as the kernel does; returns the word sets used.
+    let walk = |from: [f32; 6], to: [f32; 6]| -> Vec<[f32; 6]> {
+        let step: [f32; 6] = core::array::from_fn(|index| (to[index] - from[index]) * (1.0 / 64.0));
+        let mut cursor = from;
+        let mut path = Vec::with_capacity(64);
+        for _ in 0..64 {
+            path.push(cursor);
+            cursor = core::array::from_fn(|index| cursor[index] + step[index]);
+        }
+        path
+    };
+    let base = WORDS_PER_BAND;
+    let mut seed = 0x1859_u64;
+    let mut checked = 0_usize;
+    for rate in support::LAUNCH_RATES {
+        for frequency in [20.0_f32, 1_000.0, 18_000.0] {
+            for gain in [-24.0_f32, 0.0, 24.0] {
+                for q in [0.1_f32, core::f32::consts::FRAC_1_SQRT_2, 18.0] {
+                    let slope = 1.0_f32;
+                    let design = |(enabled, kind): (bool, EqBandKind)| {
+                        if enabled {
+                            design_svf(kind, frequency, gain, q, slope, SampleRateHz(rate))
+                                .expect("design")
+                                .to_array()
+                        } else {
+                            EqSvfWords::IDENTITY.to_array()
+                        }
+                    };
+                    let target = |(enabled, kind): (bool, EqBandKind)| {
+                        let mut target = prepared_target(
+                            1,
+                            ParameterChannel::Both,
+                            enabled,
+                            kind,
+                            frequency,
+                            gain,
+                            q,
+                            slope,
+                        );
+                        for (destination, source) in
+                            target.words[6..12].iter_mut().zip(design((enabled, kind)))
+                        {
+                            *destination = source.to_bits();
+                        }
+                        target
+                    };
+                    for (from_index, &from) in states.iter().enumerate() {
+                        let mut configured =
+                            single_section_values(from.1, frequency, gain, q, slope);
+                        for channel in [ParameterChannel::Left, ParameterChannel::Right] {
+                            set_initial(&mut configured, 0, channel, f32::from(u8::from(from.0)));
+                        }
+                        for (to_index, &to) in states.iter().enumerate() {
+                            let next = states[(to_index + 1) % states.len()];
+                            let point = format!(
+                                "{rate} Hz {frequency} Hz {gain} dB Q {q}: \
+                                 {from_index} -> {to_index} -> next"
+                            );
+                            let mut effect = ParametricEqFactory
+                                .prepare(support::request_at_rate(&configured, false, rate))
+                                .expect("prepare");
+                            let first = walk(design(from), design(to));
+                            let mut left: Vec<f32> = (0..FRAMES)
+                                .map(|_| support::deterministic_noise(&mut seed))
+                                .collect();
+                            let mut right: Vec<f32> = (0..FRAMES)
+                                .map(|_| support::deterministic_noise(&mut seed))
+                                .collect();
+                            let peaks = [&left, &right]
+                                .map(|input| input.iter().fold(0.0_f32, |m, x| m.max(x.abs())));
+                            effect
+                                .processor
+                                .apply_prepared_target(&target(to))
+                                .expect("live target");
+                            effect.processor.process(
+                                EffectProcessBlock::new(
+                                    &mut left[..RETARGET_AT],
+                                    &mut right[..RETARGET_AT],
+                                    None,
+                                    0,
+                                    &[],
+                                    128,
+                                )
+                                .expect("first segment"),
+                            );
+                            let pinned = snapshot(&effect);
+                            let cursor = first[RETARGET_AT];
+                            let lane_words: [f32; 6] = core::array::from_fn(|index| {
+                                f32::from_bits(word(&pinned.1, base + 2 + index))
+                            });
+                            assert_eq!(
+                                lane_words.map(f32::to_bits),
+                                cursor.map(f32::to_bits),
+                                "{point}: the in-test walk is the lane's walk"
+                            );
+                            effect
+                                .processor
+                                .apply_prepared_target(&target(next))
+                                .expect("mid-ramp retarget");
+                            for words in first.iter().chain(&walk(lane_words, design(next))) {
+                                if words.map(f32::to_bits) != identity {
+                                    assert!(
+                                        test_only_ramp_word_is_admissible(EqSvfWords::from_array(
+                                            *words
+                                        )),
+                                        "{point}: ramp word set {words:?} is not admissible"
+                                    );
+                                    checked += 1;
+                                }
+                            }
+                            effect.processor.process(
+                                EffectProcessBlock::new(
+                                    &mut left[RETARGET_AT..],
+                                    &mut right[RETARGET_AT..],
+                                    None,
+                                    RETARGET_AT as u64,
+                                    &[],
+                                    128,
+                                )
+                                .expect("second segment"),
+                            );
+                            for (output, peak) in [&left, &right].into_iter().zip(peaks) {
+                                for sample in output {
+                                    assert!(
+                                        sample.is_finite()
+                                            && sample.abs() <= TEST_ONLY_OUTPUT_MIX_BOUND * peak,
+                                        "{point}: output {sample} exceeds the mix bound"
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    assert!(checked > 0);
+}
+
 /// A payload claiming an invalid prelaunch version is rejected, never silently migrated.
 #[test]
 fn an_invalid_version_payload_is_rejected() {
