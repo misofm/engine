@@ -4505,12 +4505,7 @@ impl AudioWorkletEngineHost {
                 let Some(tap) = observed.descriptor.observations.get(tap_index) else {
                     continue;
                 };
-                let magnitude = if window.left > window.right {
-                    window.left
-                } else {
-                    window.right
-                };
-                let value = observed_decibels(*tap, magnitude);
+                let value = strip_reduction_decibels(*tap, window.left, window.right);
                 // Several armed taps on one track fold max-magnitude into the one positional slot
                 // the frame carries for that track, on the control plane.
                 if let Some(slot) = ready.shape.meter_frame.get_mut(gain_base + track as usize)
@@ -5105,7 +5100,41 @@ fn read_observation_values(
     })
 }
 
-/// One published observation magnitude, as the **decibels of reduction** the frame carries.
+/// One closed window's contribution to its strip's gain-reduction frame slot (`trackGrDb`,
+/// `submixGrDb`): non-negative decibels of reduction, the deeper of the two lanes.
+///
+/// A `GainReductionDb` tap contributes its reduction as published. A `GainChangeDb` tap
+/// (issue #1918) publishes a signed change, positive for a boost; only a cut is a reduction, so it
+/// contributes the cut's depth `max(0, -x)` and a boost or a non-finite lane contributes `0`. The
+/// signed value itself reaches a consumer through the selected read, never through this slot.
+fn strip_reduction_decibels(
+    tap: effect_contract::ObservationDescriptor,
+    left: f32,
+    right: f32,
+) -> f32 {
+    use effect_contract::ObservationKind;
+    match tap.kind {
+        ObservationKind::GainReductionDb => {
+            observed_decibels(tap, if left > right { left } else { right })
+        }
+        // A non-finite lane is no reading: the clamp in `observed_decibels` would turn `+inf` into
+        // the declared minimum, a full-depth cut the effect never made.
+        ObservationKind::GainChangeDb => {
+            let cut = |change: f32| {
+                if !change.is_finite() {
+                    return 0.0;
+                }
+                let change = observed_decibels(tap, change);
+                if change < 0.0 { -change } else { 0.0 }
+            };
+            let (left, right) = (cut(left), cut(right));
+            if left > right { left } else { right }
+        }
+    }
+}
+
+/// One published observation value in decibels: a reduction for a `GainReductionDb` tap, a signed
+/// change for a `GainChangeDb` tap.
 ///
 /// The tap declares what crosses the transport (`unit`) and what a consumer reads (`display_unit`,
 /// `minimum`, `maximum`); this is the one place the two are reconciled, and it runs once per closed
@@ -5118,7 +5147,8 @@ fn read_observation_values(
 fn observed_decibels(tap: effect_contract::ObservationDescriptor, magnitude: f32) -> f32 {
     use effect_contract::ParameterUnit;
     let decibels = match tap.unit {
-        // Already a decibel magnitude: the declared `PeakMagnitude` fold made it non-negative.
+        // Already decibels: a `PeakMagnitude` fold made it non-negative, a `PeakSigned` fold kept
+        // its sign, and the clamp below honours either declared range.
         ParameterUnit::Db => magnitude,
         // `gain = 1 - d`, so the reduction in decibels is `-20 log10(1 - d)`. `d == 1` is total
         // reduction and has no finite decibel value; the declared maximum is what a meter draws.

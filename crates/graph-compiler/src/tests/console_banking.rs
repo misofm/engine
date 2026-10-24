@@ -234,6 +234,10 @@ struct NoiseSource {
     feed: Feed,
 }
 impl GraphRuntimeProcessor for NoiseSource {
+    fn retained_bytes(&self) -> u64 {
+        0
+    }
+
     fn process(
         &mut self,
         block: GraphBindingBlock<'_>,

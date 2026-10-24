@@ -545,6 +545,8 @@ export interface MisoMeterFrame {
   /// Non-negative because the tap declares a `peakMagnitude` fold, not because the app clamps it:
   /// an effect holds its reduction as negative decibels internally, and the fold is `max(|x|)` over
   /// the window. An app's `Math.max(0, x ?? 0)` is therefore a no-op rather than a silent zeroing.
+  /// A `gainChangeDb` tap (`peakSigned`, issue 1918) is signed, positive for a boost: it adds only
+  /// a cut's depth here and a boost adds `0`; its signed value is read with `readObservations`.
   ///
   /// Every entry is finite. `0` deliberately conflates "not reducing" with "no observed effect on
   /// this track", because the array is positional and read without null checks; the distinction

@@ -217,7 +217,10 @@ pub fn render() -> String {
     let vocabularies: [(&str, &[(u32, &str)]); 5] = [
         (
             "kinds",
-            &[(ObservationKind::GainReductionDb as u32, "gainReductionDb")],
+            &[
+                (ObservationKind::GainReductionDb as u32, "gainReductionDb"),
+                (ObservationKind::GainChangeDb as u32, "gainChangeDb"),
+            ],
         ),
         (
             "costs",
@@ -238,6 +241,7 @@ pub fn render() -> String {
             &[
                 (ObservationFold::Latest as u32, "latest"),
                 (ObservationFold::PeakMagnitude as u32, "peakMagnitude"),
+                (ObservationFold::PeakSigned as u32, "peakSigned"),
             ],
         ),
         (
@@ -816,6 +820,7 @@ fn effect_observation(out: &mut String, observation: &ObservationDescriptor) {
 const fn observation_kind_name(kind: ObservationKind) -> &'static str {
     match kind {
         ObservationKind::GainReductionDb => "gainReductionDb",
+        ObservationKind::GainChangeDb => "gainChangeDb",
     }
 }
 
@@ -837,6 +842,7 @@ const fn observation_fold_name(fold: ObservationFold) -> &'static str {
     match fold {
         ObservationFold::Latest => "latest",
         ObservationFold::PeakMagnitude => "peakMagnitude",
+        ObservationFold::PeakSigned => "peakSigned",
     }
 }
 

@@ -169,6 +169,21 @@ extern "C" {
  * the same bytes and computes nothing. The address and strip targets are refused
  * response.target.unavailable until their slices.
  *
+ * Spectrum taps (issue 1594). SPECTRUM_CONFIGURE (message ID 0x0010) through
+ * miso_engine_v1_submit_command sets, changes or removes the session's spectrum taps while it
+ * plays. No C symbol or struct is added, and until issue 1595 sets its capability bit no
+ * capability report lists the command. The taps are monitor state: the command changes no
+ * revision and no saved state and emits no SESSION_COMMITTED. The same configuration again
+ * changes nothing; a change of only the hop or the byte budget prepares no plan; any other change
+ * prepares a replacement plan at the unchanged committed revision, in which taps that stay keep
+ * their window and history, and the plan watermark does not move when it is adopted. The reply
+ * carries the committed revision, the configured and adopted configuration epochs, whether a plan
+ * was prepared and, if one was, its plan epoch; the configuration is in effect when a later
+ * reply's adopted epoch equals its configured epoch. A refusal is a typed non-OK response whose
+ * one error diagnostic carries the code (spectrum.target.unknown, spectrum.duplicate,
+ * spectrum.budget.retained, spectrum.budget, spectrum.target.id) and changes nothing. An exact
+ * replay of the request returns the same bytes and prepares nothing.
+ *
  * Completion (issue 1314). miso_engine_v1_submit_command is synchronous only for what can fail:
  * it validates and classifies the transaction, prepares a replacement plan and reserves its
  * publication and retirement credit, commits, and returns; it never waits for a render call or a

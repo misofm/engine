@@ -2286,6 +2286,11 @@ fn band_aggregate_db<L: Lane, const W: usize>(side: &Side<L, W>, lane: usize) ->
 }
 
 impl PreparedNativeEffect for PreparedMultibandCompressor {
+    /// Every field is inline: this instance owns no heap (#1074).
+    fn retained_bytes(&self) -> u64 {
+        0
+    }
+
     /// Issue #143 D2 / R3: the deeper of the two bands' smoother words, read for lane 0.
     fn observe_resident(&self, tap_index: u32, out: &mut ObservationSample) -> bool {
         if tap_index != 0 {
@@ -2348,6 +2353,11 @@ impl PreparedNativeEffect for PreparedMultibandCompressor {
 }
 
 impl<L: Lane, const W: usize> PreparedNativeEffectBank for PreparedMultibandCompressorBank<L, W> {
+    /// Every field is inline: this instance owns no heap (#1074).
+    fn retained_bytes(&self) -> u64 {
+        0
+    }
+
     fn observe_resident_bank(&self, tap_index: u32, out: &mut [ObservationSample]) -> bool {
         if tap_index != 0 || out.len() != W || W != L::WIDTH {
             return false;
