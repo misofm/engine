@@ -75,7 +75,8 @@ fn envelope() -> (LiveCascade, FirstSectionRow) {
     // Every word magnitude is largest at the top design (`g < 1` on the whole domain).
     let largest = exact(g_max);
     // The pole radius `sqrt(1 + g^4) / (1 + sqrt(2) g + g^2)` falls on `g < 1`: largest at 80 Hz.
-    let radius = math::sqrt(1.0 + g_min.powi(4)) / (1.0 + sqrt2 * g_min + g_min * g_min);
+    let radius =
+        math::sqrt(1.0 + g_min * g_min * g_min * g_min) / (1.0 + sqrt2 * g_min + g_min * g_min);
     let beta = 2.0 * g_max / math::sqrt(1.0 + g_max * (g_max + sqrt2));
     let rounding = |extra: [f64; 3], q: f64| {
         state_rounding(core::array::from_fn(|i| largest[i] + extra[i]), q, 2.0)
@@ -278,16 +279,16 @@ fn run(
     // chord point `(1 - j/64) from + (j/64) target`; without a glide `from` is the target.
     let check_word = |kernel: &Kernel| {
         let alpha = f64::from(kernel.produced) / f64::from(RAMP);
-        for i in 0..3 {
+        for (i, allowed) in chord.iter().enumerate() {
             let line =
                 (1.0 - alpha) * f64::from(kernel.from[i]) + alpha * f64::from(kernel.target[i]);
             let off = (f64::from(kernel.words[i]) - line).abs();
-            assert!(off <= chord[i], "word {i} is {off:e} off its chord");
+            assert!(off <= *allowed, "word {i} is {off:e} off its chord");
         }
     };
     for n in 0..LOUD {
-        if target.is_some() && n + lead == LOUD {
-            kernel.glide(target.expect("a target"));
+        if let Some(target) = target.filter(|_| n + lead == LOUD) {
+            kernel.glide(target);
         }
         let sign = if signs[LOUD - 1 - n] < 0.0 { -1.0 } else { 1.0 };
         let y = kernel.frame(sign * peak);
@@ -335,7 +336,7 @@ fn the_first_section_row_bound_holds_on_the_kernel_all_pass_tap() {
             "{words:?} in the domain"
         );
     }
-    let peaks = [10.0_f64.powf(24.0 / 20.0), 1.0e29];
+    let peaks = [math::pow(10.0, 24.0 / 20.0), 1.0e29];
     let bound = live_first_section(&live, &row, 1.0, &law, u64::from(RAMP), peaks)
         .expect("the tap is bounded");
     let composition = live_first_section_composition(&live, &row, 1.0, &law, u64::from(RAMP))
@@ -362,7 +363,7 @@ fn the_first_section_row_bound_holds_on_the_kernel_all_pass_tap() {
             );
             for k in 1..=3_usize {
                 let line =
-                    p * TAIL_FLOOR / 2.0 * 10.0_f64.powi(-(k as i32)) + composition.tail_stall;
+                    p * TAIL_FLOOR / 2.0 * math::pow(10.0, -(k as f64)) + composition.tail_stall;
                 let from = tail + composition.crossing(k as u64) as usize;
                 assert!(from <= tail + k * decay, "the crossing lies within T + k D");
                 let late = result.after[from..]

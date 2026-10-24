@@ -1738,7 +1738,7 @@ impl<'a> LiveBound<'a> {
         let (outputs, energy, _) = self.first_window(g, 0.0);
         let mut tail = outputs
             .iter()
-            .rposition(|value| !(*value < limit))
+            .rposition(|value| value.partial_cmp(&limit) != Some(core::cmp::Ordering::Less))
             .map_or(0, |frame| frame as u64 + 1);
         for terms in &self.terms {
             let start = (terms.output * self.settled_energy(terms, energy, g, 0.0)) * SLACK;
@@ -1843,7 +1843,10 @@ impl<'a> LiveBound<'a> {
         let mut groups = Vec::with_capacity(self.terms.len());
         for terms in &self.terms {
             let start = self.settled_energy(terms, energy, gain, 0.0);
-            if !(start <= LIVE_STATE_LIMIT) {
+            // A NaN start is refused with the rest.
+            if start.partial_cmp(&LIVE_STATE_LIMIT) == Some(core::cmp::Ordering::Greater)
+                || start.is_nan()
+            {
                 return None;
             }
             let step = SquareMatrix {
