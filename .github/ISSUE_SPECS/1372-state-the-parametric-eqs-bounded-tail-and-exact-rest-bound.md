@@ -158,3 +158,32 @@ decision R4: the identity-vertex argument does not close, so no uniform hull bou
   frequency and Q live section, if neither ramps to the identity) are not affected. There the
   uniform `q < 1` over the design hull is the whole argument, and a slice limited to
   `identity_reachable = false` closes on the scope note's plan.
+
+### Root ruling after the stop (2026-10-24)
+
+- #1372a takes option (b), which moves no bit. The norm constants are parametrised, and
+  `common_lyapunov` and `hull_cascade` (`crates/math/src/tail/hull.rs`) cover design hulls only.
+  `HullSection::identity_reachable = true` is refused with `TailBoundError::IdentityReachable`.
+  A hull with an identity vertex cannot certify `q < 1`, so `common_lyapunov` refuses it as
+  `NotContracting`.
+- Options (a), a class-B kernel snap, and (c), a ramp-law and minimum-block lemma, go to the
+  owner. #1372b (the EQ's own bound) needs the identity case, so the parametric EQ keeps its
+  current `Infinite`/`Unstated` declaration until the owner rules.
+- Which callers qualify (read on `main` 6172dc4e6 and PR #1919 head 5316681de):
+  - **De-esser qualifies.** Its SVF words are always the EQ's 0 dB high-pass design (`targets`).
+    They ramp only between designs on frequency or Q changes. The mode, detector and listen
+    switches crossfade the output arms, not the SVF words, and there is no enable or kind ramp.
+  - **Dynamic EQ does not qualify.** A disabled band's design is `[0.0; 9]` (`band_design`), and
+    its words ramp to the identity section. It stays `UNBOUNDED` for now.
+
+### 1372a evidence (option b, attempt 1)
+
+- Derivation: `docs/derivations/1372-parametric-eq-tail-and-rest.md`, part 1.
+- Gates: a1 (`contraction_bounds_every_hull_word` and `cascade_bound_covers_every_hull_member`),
+  a2 (`one_vertex_tail_is_tight`), the composition check (`composition_covers_crossings`), and
+  a3 (the builtins' and the multiband's `tail_contract` tables, unchanged).
+- Tightness (a2): with a one-vertex hull at the extreme (bell 10 Hz, Q 18, +24 dB, 48 kHz),
+  `T = 2,262,795` and `T_b = 2,212,870`, a ratio of 1.0226.
+- Evidence, not a gate: a 25 x 25 `(g, k)` grid hull over the whole EQ domain certifies
+  `q = 0.99999095` at 48 kHz, with `l12 ~ k_min / 2`. The extreme's `T / T_b` under that hull is
+  1.032 at 44.1 and 48 kHz, far inside R3's factor of 2.
