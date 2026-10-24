@@ -663,11 +663,12 @@ fn lowers_65_537_tracks_of_builtin_banks() {
 ///
 /// Issue #967: the session is the per-PR gates' strip with one route per track and the standing
 /// console's `eq` as a console slot carrying a live control lane on every track. The routes put
-/// every track's post-pan route into the bind's route-fold metadata and between each bank's first
-/// op and its consumer, the span `scatter_redirects` checks; the controls put every track's lane
-/// through #962's `effect_control_resource`. The per-PR gates' effect-less, one-route session
-/// reaches none of these at scale. #962's other two fixes (the `Backend::Scalar` interval scan
-/// and the fused-split crossing scan) guard code #1767 and owner ruling R8 removed.
+/// every track's post-pan route into the bind's route-fold metadata, and the controls put every
+/// track's lane through #962's `effect_control_resource`. The per-PR gates' effect-less, one-route
+/// session reaches neither at scale. This session does not exercise `scatter_redirects`' in-between
+/// check at scale: it binds in the same time with or without #967's linearisation (the spec's
+/// evidence), so a quadratic there would not fail this bound. #962's other two fixes (the `Backend::Scalar` interval scan and the
+/// fused-split crossing scan) guarded code that #1767 and owner ruling R8 removed.
 ///
 /// Issue #1045: this runs nightly, in release with overflow checks on (`nightly.yml`,
 /// `release-budgets`), under a 60 s wall-clock bound on the whole path from the session compile to
