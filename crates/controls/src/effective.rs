@@ -151,13 +151,20 @@ impl MonitorOverlay {
     /// such write gave no ramp; a master write has no ramp, since it moves no render value. A strip
     /// `next` no longer has is dropped from the result.
     ///
-    /// The result's solo vector is reserved to `next`'s strip count (#1696 D2) and a solo names a
-    /// strip of `next`, so its capacity is exactly that count and no solo write reallocates it: the
-    /// charge [`Self::retained_ceiling`] is a layout, not a growth estimate.
+    /// The result's solo vector is reserved to `next`'s strip count (#1696 D2), or holds nothing
+    /// when no strip is or becomes soloed, and a solo names a strip of `next`, so its capacity is
+    /// at most that count and no solo write reallocates it: the charge
+    /// [`Self::retained_ceiling`] is a layout, not a growth estimate.
     #[must_use]
     pub fn after(&self, writes: &[MonitorWrite], next: &SessionModel) -> MonitorChange {
         let in_next = |id: &StableId| crate::registry::strip_index(next, id).is_some();
-        let mut soloed = Vec::with_capacity(next.strips().count());
+        // An overlay that solos nothing and gets no solo keeps no vector, so a value edit
+        // allocates nothing here; any other reserves the whole strip count at once.
+        let solos = !self.soloed.is_empty()
+            || writes
+                .iter()
+                .any(|write| write.row == MonitorRow::Solo && write.on);
+        let mut soloed = Vec::with_capacity(if solos { next.strips().count() } else { 0 });
         soloed.extend(self.soloed.iter().filter(|id| in_next(id)).cloned());
         let mut overlay = Self {
             soloed,

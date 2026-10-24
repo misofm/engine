@@ -3140,6 +3140,10 @@ where
             ),
         };
         let next = view.structure();
+        // #1696: only a transaction compiled whole can add or remove an owner (an in-place or an
+        // edited view reads the committed model's structure); every other keeps the owner set,
+        // and with it the ramp row's bound and a kept base's pruning, as they are.
+        let owners_change = matches!((transaction.edited_owners(), in_place), (None, false));
         // #1559 D6, D7: the overlay the transaction leaves, and the classifier's view of both.
         let monitor_change = self.monitor.after(prepared.get().monitor_edits(), next);
         let monitor_only = prepared.get().is_monitor_only();
@@ -3211,7 +3215,9 @@ where
                     prepared.get().prospective_session().edit_ramps(),
                 );
                 // #1696 root ruling: pruned to the committed model, as a rebuild stores them.
-                ramps.keep_within(next);
+                if owners_change {
+                    ramps.keep_within(next);
+                }
                 ramps
             });
         // And the ramp of the overlay change, when the edit writes a monitor row: a replacement
@@ -3223,9 +3229,19 @@ where
         // its growth is charged and the commit's last steps cannot fail for room (#1552 D3,
         // #1558 D6). Its refusal is the compile diagnostic a rebuild would give, before any write.
         // #1696 root ruling: the committed model's edit-ramp row, which the newest epoch's follows.
-        let committed_ramps = match monitor_rows(next) {
-            Ok(rows) => rows.edit_ramps,
-            Err(failure) => return LiveCommit::Done(Err(CommandError::CompileRejected(failure))),
+        let committed_ramps = if owners_change {
+            match monitor_rows(next) {
+                Ok(rows) => rows.edit_ramps,
+                Err(failure) => {
+                    return LiveCommit::Done(Err(CommandError::CompileRejected(failure)));
+                }
+            }
+        } else {
+            self.pending_providers
+                .last()
+                .unwrap_or(&self.providers)
+                .capi
+                .edit_ramps
         };
         let catalog = match self.live_admission(
             &prepared,
