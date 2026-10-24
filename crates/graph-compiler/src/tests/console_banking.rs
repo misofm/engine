@@ -732,9 +732,8 @@ fn randomized_console_sessions_render_the_per_node_bits_on_every_track() {
 /// to +18 dBFS peak, far above the limiter's ceiling, and the gain path is shown to run: the
 /// limiter moves every unbypassed track's bits against the same session with every lane bypassed.
 ///
-/// Both widths run on every host whose limiter factory binds them: an `x86-64-v3` build binds the
-/// limiter at four lanes as well as eight. On a four-lane build the limiter declines eight lanes,
-/// and the compile must then be refused with `console.slot.unbanked` -- never rendered per node.
+/// Every vector width of the build runs: an `x86-64-v3` build binds the limiter at four lanes as
+/// well as eight, and a four-lane build has no wider width to name.
 ///
 /// Red if a limiter bank's whole-bank decision (its uniform-body gate, its bank-wide silence and
 /// screen tests, the rack's shunt selection) moves a lane's bits with its bank-mates, padded lanes
@@ -743,9 +742,6 @@ fn randomized_console_sessions_render_the_per_node_bits_on_every_track() {
 #[test]
 fn a_hot_padded_post_insert_limiter_renders_the_per_node_bits_at_both_widths() {
     const BLOCKS: u64 = 12;
-    let host_lanes = BankWidth::for_backend(host_dispatch())
-        .expect("a vector host")
-        .lanes();
     let console = Console {
         pre: Vec::new(),
         post: vec![Kind::Limiter],
@@ -790,21 +786,8 @@ fn a_hot_padded_post_insert_limiter_renders_the_per_node_bits_at_both_widths() {
         for &dispatch in Backend::VECTOR.iter().rev() {
             let width = BankWidth::for_backend(dispatch).expect("a vector width");
             let what = format!("{n} tracks at {dispatch:?}");
-            let compiled = compile_at(&model, dispatch);
-            if width.lanes() > host_lanes {
-                let Err(diagnostics) = compiled else {
-                    panic!("{what}: a limiter this build cannot bank rendered per node");
-                };
-                assert!(
-                    diagnostics
-                        .diagnostics()
-                        .iter()
-                        .all(|diagnostic| diagnostic.code == "console.slot.unbanked"),
-                    "{what}: {diagnostics:?}"
-                );
-                continue;
-            }
-            let banked = compiled.unwrap_or_else(|diagnostics| panic!("{what}: {diagnostics:?}"));
+            let banked = compile_at(&model, dispatch)
+                .unwrap_or_else(|diagnostics| panic!("{what}: {diagnostics:?}"));
             let report = &banked.report().rack_cohorts;
             assert!(
                 report.scalar_in(RackLocation::Simd2).is_empty(),

@@ -97,9 +97,13 @@ pub(crate) const fn pads(group: &BankGroup<RackChainId>) -> bool {
 /// **Console slots always bank** (S2, #1098; decision 12). Every console group is padded, and on a
 /// vector backend a console slot that is not bound fails the compile with `console.slot.unbanked`
 /// ([`unbanked_console_slot`]) rather than rendering per node. There is no silent fallback. For a
-/// valid session that is unreachable: every strip -- every track and, since #1202, every submix --
-/// carries every slot in one order, so a console rack's chains share one program, a console slot
-/// has no sidechain, and every effect on the console eligibility list binds padded requests. A
+/// valid session at the build's own width (`Backend::current()`) that is unreachable: every strip
+/// -- every track and, since #1202, every submix -- carries every slot in one order, so a console
+/// rack's chains share one program, a console slot has no sidechain, and every effect on the
+/// console eligibility list binds padded requests at that width. At a foreign vector width (a
+/// test or bench dispatch; no production caller passes one) a factory may legally decline the
+/// width, since a build's factories bind only the widths it executes (D4), and the compile is then
+/// refused with `console.slot.foreign_width` instead (#1694). A
 /// console group is formed per (rack, pool class, dependency level of the chain's first slot), so
 /// each console slot binds `sum over (pool class, level) of ceil(n / W)` banks. Differing insert
 /// counts put `post_insert` at several levels, one group per level, and a cohort whose
@@ -413,7 +417,8 @@ pub(crate) fn bind_rack_banks_indexed(
     let (banks, bound_slots): (Vec<_>, Vec<_>) = bound.into_iter().flatten().unzip();
     // S2 (#1098): the guarantee. This is a vector backend (the test-only `Scalar` oracle returned
     // with no banks above), so every console slot renders banked or the compile fails.
-    if let Some(diagnostic) = unbanked_console_slot(&chains, &bound_slots, &level_by_node, classes)
+    if let Some(diagnostic) =
+        unbanked_console_slot(dispatch, &chains, &bound_slots, &level_by_node, classes)
     {
         return Err(diagnostic);
     }
@@ -496,13 +501,20 @@ fn stranded_mono_tracks(plan: &BankPlan<RackChainId>) -> Vec<String> {
 /// its group, or the group did not form -- the compile fails with `console.slot.unbanked` at
 /// `$.console.<section>[slot=<id>].bank[pool=<class>,level=<level>]`, naming the slot, its track's
 /// pool class and the slot's dependency level: the group that did not bind. For a valid session
-/// this is unreachable ([`bind_rack_banks_indexed`] says why); it guards a regression in the
-/// planner, the binder or a factory, which would otherwise surface only as a slower render.
+/// at the build's own width this is unreachable ([`bind_rack_banks_indexed`] says why); it guards a
+/// regression in the planner, the binder or a factory, which would otherwise surface only as a
+/// slower render.
+///
+/// At a `dispatch` other than `Backend::current()` a factory may legally decline the width (D4),
+/// so the same slot is refused with `console.slot.foreign_width` at
+/// `$.console.<section>[slot=<id>].bank[pool=<class>,level=<level>,width=<lanes>]` instead: the
+/// condition is the width, not a lost slot (#1694).
 ///
 /// Only a vector backend reaches this. A plan compiled at the test-only `Scalar` oracle (#1059)
 /// binds no bank at all, and it is exempt by construction: it is the per-node reference that the
 /// banked render is compared with.
 fn unbanked_console_slot(
+    dispatch: Backend,
     chains: &BTreeMap<RackChainId, Vec<EffectNodeId>>,
     bound_slots: &[GraphRackBoundSlot],
     level_by_node: &BTreeMap<&EffectNodeId, u64>,
@@ -528,12 +540,22 @@ fn unbanked_console_slot(
     let Some(level) = level_by_node.get(node) else {
         return Some(diag("graph.internal.invariant", "$.effects"));
     };
+    let slot = node.effect_id.as_str();
+    if dispatch != Backend::current() {
+        let Some(width) = BankWidth::for_backend(dispatch) else {
+            return Some(diag("graph.internal.invariant", "$.dispatch"));
+        };
+        return Some(diag(
+            "console.slot.foreign_width",
+            &format!(
+                "$.console.{section}[slot={slot}].bank[pool={pool},level={level},width={}]",
+                width.lanes()
+            ),
+        ));
+    }
     Some(diag(
         "console.slot.unbanked",
-        &format!(
-            "$.console.{section}[slot={}].bank[pool={pool},level={level}]",
-            node.effect_id.as_str()
-        ),
+        &format!("$.console.{section}[slot={slot}].bank[pool={pool},level={level}]"),
     ))
 }
 

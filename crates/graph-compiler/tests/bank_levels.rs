@@ -26,8 +26,9 @@
 //! bind only the widths it executes (D4): an 8-lane (AVX2) build binds four-lane banks for the
 //! limiter and the multiband only, and a 4-lane (NEON/simd128) build has no eight-lane width at all
 //! (#1112). So a session
-//! whose console this build cannot bank at a width is refused there with `console.slot.unbanked`,
-//! and that width's plan is asserted by the build that runs it: [`compiled_at`].
+//! whose console this build cannot bank at a foreign width is refused there with
+//! `console.slot.foreign_width` (#1694), and that width's plan is asserted by the build that runs
+//! it: [`compiled_at`].
 //!
 //! Scope: the claim is that bind never refuses a compiled plan for a cross-level *effect* bank.
 //! Builtin banks are pooled by each node's own level, so they cannot form one.
@@ -1074,8 +1075,9 @@ pub fn reduced_mono_console() -> SessionModel {
 
 /// The refusal a compile at `dispatch` may give when this build cannot bank a console slot there:
 /// a width other than the build's own, whose factories decline it (D4), and since #1098 a console
-/// slot never renders per node on a vector backend.
-const FOREIGN_CONSOLE_REFUSAL: &str = "graph console.slot.unbanked";
+/// slot never renders per node on a vector backend. It is never `console.slot.unbanked`, which is
+/// the build's own width's regression guard (#1694).
+const FOREIGN_CONSOLE_REFUSAL: &str = "graph console.slot.foreign_width";
 
 /// Whether `outcome` holds a plan: its compile at `dispatch` was accepted. The Scalar oracle and the
 /// build's own width must always compile; a foreign width may be refused with
