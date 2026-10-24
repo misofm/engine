@@ -829,6 +829,21 @@ export interface MisoControlEvent {
   readonly frame: Uint8Array;
 }
 
+/// @internal The applied-revision watermark (issue 1294a), posted each time its
+/// `(revision, sample)` pair changes. `revision` is the highest committed revision in effect
+/// together with every revision before it, `sample` the absolute render sample of the first block
+/// in which it was in effect, `outcome` the OR of the outcome flags over the revisions the advance
+/// covered (`EXACT` 1, `TRANSITION_FALLBACK` 2, `SUPERSEDED` 4), and the three counts the
+/// saturating, cumulative counts of revisions completed with each outcome.
+export interface MisoWatermark {
+  readonly revision: bigint;
+  readonly sample: bigint;
+  readonly outcome: bigint;
+  readonly exactCount: bigint;
+  readonly transitionFallbackCount: bigint;
+  readonly supersededCount: bigint;
+}
+
 export interface MisoAck {
   readonly tag: "miso.ack.v1";
   readonly requestId: number;
@@ -950,6 +965,10 @@ export interface MisoAudioWorkletHost {
   /// lossy) in arrival order. Returns the unsubscribe
   /// function. An event is not the ack of a command: the command's reply is.
   onControlEvent(listener: (event: MisoControlEvent) => void): () => void;
+  /// @internal Subscribe to the applied-revision watermark (issue 1294a): the listener gets each
+  /// change of the watermark's `(revision, sample)` pair, the newest record only. Returns the
+  /// unsubscribe function. The SDK's `engine.apply` is the public surface.
+  onWatermark(listener: (watermark: MisoWatermark) => void): () => void;
   /// @internal The count of engine events that arrived while no listener was subscribed (issue
   /// 1570b D5). Such an event is dropped here, which changes no engine state.
   readonly discardedControlEvents: number;

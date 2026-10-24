@@ -530,7 +530,7 @@ impl ProtocolCodec {
                 self.decode_transport_snapshot(decoded.payload, header.tlv_count)?,
             ),
             MessageId::TelemetryConfigure => DecodedSuccessResponsePayload::TelemetryConfiguration(
-                self.decode_telemetry_configuration(decoded.payload, header.tlv_count)?,
+                self.decode_telemetry_configuration_echo(decoded.payload, header.tlv_count)?,
             ),
             MessageId::CountersGet => DecodedSuccessResponsePayload::CounterSnapshot(
                 self.decode_counter_snapshot(decoded.payload, header.tlv_count)?,
@@ -711,7 +711,7 @@ fn write_command_payload(
             crate::message_wire::write_transport_set(sink, *value)
         }
         CommandPayload::TelemetryConfigure(value) => {
-            crate::message_wire::write_telemetry_configuration(sink, value)
+            crate::message_wire::write_telemetry_configuration(sink, value, false)
         }
         CommandPayload::CountersGet(value) => {
             crate::message_wire::write_counters_request(sink, value)
@@ -761,7 +761,7 @@ fn write_success_payload(
             crate::message_wire::write_transport_snapshot(sink, *value)
         }
         SuccessResponsePayload::TelemetryConfiguration(value) => {
-            crate::message_wire::write_telemetry_configuration(sink, value)
+            crate::message_wire::write_telemetry_configuration(sink, value, true)
         }
         SuccessResponsePayload::CounterSnapshot(value) => {
             crate::message_wire::write_counter_snapshot(
@@ -1019,8 +1019,9 @@ mod tests {
             hop_frames: Some(1024),
         };
         let telemetry = TelemetryConfiguration {
-            meter_handles: Vec::new(),
+            meters: Vec::new(),
             meter_period_blocks: 0,
+            meter_window_blocks: None,
             counter_ids: Vec::new(),
             counter_period_blocks: 0,
             diagnostics_enabled: false,
@@ -1251,8 +1252,9 @@ mod tests {
                     revision: SessionRevision(7),
                     payload: SuccessResponsePayload::TelemetryConfiguration(
                         TelemetryConfiguration {
-                            meter_handles: Vec::new(),
+                            meters: Vec::new(),
                             meter_period_blocks: 0,
+                            meter_window_blocks: core::num::NonZeroU32::new(12),
                             counter_ids: Vec::new(),
                             counter_period_blocks: 0,
                             diagnostics_enabled: false,
@@ -1537,7 +1539,9 @@ mod tests {
                 TypedEventFrame {
                     revision: SessionRevision(7),
                     payload: EventPayload::MeterBatch(MeterBatch {
-                        observed_sample: crate::SampleTime(0),
+                        observed_sample: crate::SampleTime(1536),
+                        first_sample: crate::SampleTime(0),
+                        window_sequence: 1,
                         records: &meter_records,
                     }),
                 },

@@ -1016,11 +1016,15 @@ pub struct MeterRecord {
     pub value: f32,
 }
 
-/// Borrowed typed `METER_BATCH` telemetry payload.
+/// Borrowed typed `METER_BATCH` telemetry payload: one closed meter window (#1583 D2).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct MeterBatch<'a> {
-    /// Absolute engine sample at which all records were observed.
+    /// One past the window's last sample: the window is `[first_sample, observed_sample)`.
     pub observed_sample: crate::SampleTime,
+    /// The window's first sample, below `observed_sample`.
+    pub first_sample: crate::SampleTime,
+    /// The window's sequence since the accepted configuration, from `1`.
+    pub window_sequence: u64,
     /// One through 256 validated fixed meter records.
     pub records: &'a [MeterRecord],
 }
@@ -1028,8 +1032,12 @@ pub struct MeterBatch<'a> {
 /// Borrowed strict decoded fixed-record `METER_BATCH` payload.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct DecodedMeterBatch<'a> {
-    /// Absolute engine sample at which all records were observed.
+    /// One past the window's last sample.
     pub observed_sample: crate::SampleTime,
+    /// The window's first sample, below `observed_sample`.
+    pub first_sample: crate::SampleTime,
+    /// The window's sequence since the accepted configuration, from `1`.
+    pub window_sequence: u64,
     /// Exact fixed record count.
     pub count: u16,
     record_bytes: &'a [u8],
@@ -1079,17 +1087,83 @@ pub enum CounterId {
     LiveBlockErrors = 19,
     SourceUnderrunBlocks = 20,
     SourceFramesDiscarded = 21,
+    /// Meter windows that never reached a `METER_BATCH` (#1583 D5).
+    MeterWindowsLost = 22,
 }
+
+/// What a meter table entry measures (#1583 D1): the session output, or a strip by its stable ID.
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+pub enum MeterTarget {
+    /// The session output.
+    Output,
+    /// The track or submix of this stable ID. The entry stays in the table while no plan has the
+    /// strip; its records carry no valid bit until a commit brings the ID back.
+    Strip(Box<str>),
+}
+
+impl MeterTarget {
+    /// The wire code: output `1`, strip `2`.
+    #[must_use]
+    pub const fn code(&self) -> u8 {
+        match self {
+            Self::Output => 1,
+            Self::Strip(_) => 2,
+        }
+    }
+}
+
+/// The metric a meter table entry reports (#1583 D1).
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+#[repr(u8)]
+pub enum MeterMetric {
+    /// The left and right sample peak.
+    Peak = 1,
+    /// The strip's gain reduction (a strip entry only).
+    GainReduction = 2,
+}
+
+impl MeterMetric {
+    /// The metric of a wire code, or `None` for an unlisted one.
+    #[must_use]
+    pub const fn from_code(code: u8) -> Option<Self> {
+        match code {
+            1 => Some(Self::Peak),
+            2 => Some(Self::GainReduction),
+            _ => None,
+        }
+    }
+}
+
+/// One meter table entry (#1583 D1). Its handle is its 1-based position in the table.
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+pub struct MeterEntry {
+    /// What it measures.
+    pub target: MeterTarget,
+    /// What it reports.
+    pub metric: MeterMetric,
+}
+
+/// The most entries a meter table holds (#1583 D2).
+pub const MAXIMUM_METER_ENTRIES: usize = 256;
 
 /// Complete endpoint-local telemetry configuration. It does not create meter production.
 #[derive(Clone, Debug, Eq, PartialEq)]
-#[allow(missing_docs)]
 pub struct TelemetryConfiguration {
-    pub meter_handles: Vec<u32>,
+    /// The meter table (#1583 D1): entry `i` is handle `i + 1`, 0 to 256 entries, no duplicate,
+    /// no gain reduction of the output.
+    pub meters: Vec<MeterEntry>,
+    /// Blocks per meter batch; nonzero when the table is not empty.
     pub meter_period_blocks: u32,
+    /// The meter window in blocks (#1583 D4): `None` in a command; in a success echo, the
+    /// window of the provider's meter delivery, `None` when it has none.
+    pub meter_window_blocks: Option<core::num::NonZeroU32>,
+    /// The counters a snapshot reports, ascending.
     pub counter_ids: Vec<CounterId>,
+    /// Blocks per counter snapshot; nonzero when a counter is configured.
     pub counter_period_blocks: u32,
+    /// Whether diagnostics are sent as events.
     pub diagnostics_enabled: bool,
+    /// The least severity sent.
     pub minimum_diagnostic_severity: DiagnosticSeverity,
 }
 
@@ -1946,9 +2020,21 @@ impl ProtocolCodec {
                 message,
                 schema::meter_batch::OBSERVED_SAMPLE
             )?)?),
+            first_sample: crate::SampleTime(read_u64(one_spec!(
+                message,
+                schema::meter_batch::FIRST_SAMPLE
+            )?)?),
+            window_sequence: read_u64(one_spec!(message, schema::meter_batch::WINDOW_SEQUENCE)?)?,
             count: read_u16(one_spec!(message, schema::meter_batch::COUNT)?)?,
             record_bytes: one_spec!(message, schema::meter_batch::RECORDS)?,
         };
+        if !meter_window_is_valid(
+            result.first_sample,
+            result.observed_sample,
+            result.window_sequence,
+        ) {
+            return Err(DecodeError::InvalidField);
+        }
         if result.count == 0
             || result.count > 256
             || read_u16(one_spec!(message, schema::meter_batch::RECORD_BYTES)?)? != 16
@@ -2053,11 +2139,12 @@ impl ProtocolCodec {
         value: &TelemetryConfiguration,
     ) -> Result<usize, EncodeError> {
         let mut sink = CountSink::new(self.limits());
-        write_telemetry_configuration(&mut sink, value)?;
+        write_telemetry_configuration(&mut sink, value, true)?;
         checked_sink_len(self, &mut sink)
     }
 
-    /// Encode a canonical telemetry configuration or success echo without allocation.
+    /// Encode a canonical telemetry configuration success echo without allocation (a command is an
+    /// echo without a meter window).
     pub fn encode_telemetry_configuration(
         &self,
         value: &TelemetryConfiguration,
@@ -2068,27 +2155,84 @@ impl ProtocolCodec {
             return Err(EncodeError::OutputTooSmall { required });
         }
         let mut writer = SliceSink::new(output, self.limits());
-        write_telemetry_configuration(&mut writer, value)?;
+        write_telemetry_configuration(&mut writer, value, true)?;
         checked_writer_len(&writer, required)
     }
 
-    /// Strictly decode a telemetry configuration command or canonical success echo.
+    /// Strictly decode a telemetry configuration command, which carries no meter window.
     pub fn decode_telemetry_configuration(
         &self,
         payload: &[u8],
         count: u32,
     ) -> Result<TelemetryConfiguration, DecodeError> {
-        let message = Message::top_level(payload, count, self.limits())?;
-        let message = message.schema_spec(&schema::telemetry_configuration::SPEC)?;
+        self.decode_telemetry_configuration_as(payload, count, false)
+    }
+
+    /// Strictly decode a canonical telemetry configuration success echo, which may carry the
+    /// provider's meter window (#1583 D4).
+    pub fn decode_telemetry_configuration_echo(
+        &self,
+        payload: &[u8],
+        count: u32,
+    ) -> Result<TelemetryConfiguration, DecodeError> {
+        self.decode_telemetry_configuration_as(payload, count, true)
+    }
+
+    fn decode_telemetry_configuration_as(
+        &self,
+        payload: &[u8],
+        count: u32,
+        echo: bool,
+    ) -> Result<TelemetryConfiguration, DecodeError> {
+        // Field 1, the positional meter handles, is retired (#1583 D2): refused in either flag
+        // form.
+        let message = Message::top_level(payload, count, self.limits())?.schema_spec_retiring(
+            &schema::telemetry_configuration::SPEC,
+            &schema::telemetry_configuration::RETIRED,
+        )?;
+        let mut meters = Vec::new();
+        for raw in values_spec!(message, schema::telemetry_configuration::METER)? {
+            if meters.len() == MAXIMUM_METER_ENTRIES {
+                return Err(DecodeError::InvalidField);
+            }
+            let entry = Message::nested_at_depth(raw, self.limits(), 1)?
+                .schema_spec(&schema::meter_entry::SPEC)?;
+            let strip_id = optional_spec!(entry, schema::meter_entry::STRIP_ID)?
+                .map(|text| read_string(self, text))
+                .transpose()?;
+            let target = match (
+                read_u8(one_spec!(entry, schema::meter_entry::TARGET)?)?,
+                strip_id,
+            ) {
+                (1, None) => MeterTarget::Output,
+                (2, Some(id)) => MeterTarget::Strip(id.into()),
+                _ => return Err(DecodeError::InvalidField),
+            };
+            let metric =
+                MeterMetric::from_code(read_u8(one_spec!(entry, schema::meter_entry::METRIC)?)?)
+                    .ok_or(DecodeError::InvalidField)?;
+            meters.push(MeterEntry { target, metric });
+        }
+        let meter_window_blocks = optional_spec!(
+            message,
+            schema::telemetry_configuration::METER_WINDOW_BLOCKS
+        )?
+        .map(|bytes| {
+            read_u32(bytes).and_then(|blocks| {
+                core::num::NonZeroU32::new(blocks).ok_or(DecodeError::InvalidField)
+            })
+        })
+        .transpose()?;
+        if meter_window_blocks.is_some() && !echo {
+            return Err(DecodeError::InvalidField);
+        }
         let result = TelemetryConfiguration {
-            meter_handles: decode_nonzero_u32s(
-                one_spec!(message, schema::telemetry_configuration::METER_HANDLES)?,
-                true,
-            )?,
+            meters,
             meter_period_blocks: read_u32(one_spec!(
                 message,
                 schema::telemetry_configuration::METER_PERIOD_BLOCKS
             )?)?,
+            meter_window_blocks,
             counter_ids: decode_counter_ids(one_spec!(
                 message,
                 schema::telemetry_configuration::COUNTER_IDS
@@ -2106,6 +2250,9 @@ impl ProtocolCodec {
                 schema::telemetry_configuration::MINIMUM_DIAGNOSTIC_SEVERITY
             )?)?)?,
         };
+        if !meter_table_is_valid(&result) {
+            return Err(DecodeError::InvalidField);
+        }
         validate_telemetry_configuration(&result).map_err(|_| DecodeError::InvalidTlv)?;
         Ok(result)
     }
@@ -2405,6 +2552,7 @@ fn parse_counter_id(value: u32) -> Result<CounterId, DecodeError> {
         19 => Ok(CounterId::LiveBlockErrors),
         20 => Ok(CounterId::SourceUnderrunBlocks),
         21 => Ok(CounterId::SourceFramesDiscarded),
+        22 => Ok(CounterId::MeterWindowsLost),
         _ => Err(DecodeError::InvalidField),
     }
 }
@@ -2444,16 +2592,36 @@ fn check_counter_ids(ids: &[CounterId], allow_empty: bool) -> Result<(), DecodeE
     Ok(())
 }
 
+/// The meter table rules (#1583 D2), `INVALID_FIELD` on encode and on decode: at most 256
+/// entries, a strip ID that is a stable ID, no gain reduction of the output, no duplicate entry,
+/// and a nonzero period when the table is not empty.
+fn meter_table_is_valid(value: &TelemetryConfiguration) -> bool {
+    let meters = &value.meters;
+    meters.len() <= MAXIMUM_METER_ENTRIES
+        && (meters.is_empty() || value.meter_period_blocks != 0)
+        && meters.iter().enumerate().all(|(index, entry)| {
+            let target = match &entry.target {
+                MeterTarget::Output => entry.metric != MeterMetric::GainReduction,
+                MeterTarget::Strip(id) => valid_stable_id(id),
+            };
+            target
+                && meters
+                    .get(..index)
+                    .is_some_and(|before| !before.contains(entry))
+        })
+}
+
+/// The span rule of a `METER_BATCH` (#1583 D2): a nonempty window and a sequence from `1`.
+fn meter_window_is_valid(
+    first_sample: crate::SampleTime,
+    end_sample: crate::SampleTime,
+    window_sequence: u64,
+) -> bool {
+    first_sample.0 < end_sample.0 && window_sequence != 0
+}
+
 fn validate_telemetry_configuration(value: &TelemetryConfiguration) -> Result<(), DecodeError> {
-    if value.meter_handles.len() > 256
-        || value.meter_handles.contains(&0)
-        || value
-            .meter_handles
-            .windows(2)
-            .any(|pair| pair[0] >= pair[1])
-        || (!value.meter_handles.is_empty() && value.meter_period_blocks == 0)
-        || (!value.counter_ids.is_empty() && value.counter_period_blocks == 0)
-    {
+    if !value.counter_ids.is_empty() && value.counter_period_blocks == 0 {
         return Err(DecodeError::InvalidTlv);
     }
     check_counter_ids(&value.counter_ids, true)
@@ -2770,6 +2938,13 @@ pub(crate) fn write_meter_batch(
     sink: &mut dyn Sink,
     value: MeterBatch<'_>,
 ) -> Result<(), EncodeError> {
+    if !meter_window_is_valid(
+        value.first_sample,
+        value.observed_sample,
+        value.window_sequence,
+    ) {
+        return Err(EncodeError::InvalidField);
+    }
     validate_meter_records(value.records)?;
     sink.check_field_count(schema::meter_batch::SPEC.field_count(&[])?)?;
     let count = u16::try_from(value.records.len()).map_err(|_| EncodeError::LimitExceeded)?;
@@ -2796,20 +2971,37 @@ pub(crate) fn write_meter_batch(
             sink.raw(&bytes)?;
         }
         Ok(())
-    })
+    })?;
+    write_spec!(
+        sink,
+        schema::meter_batch::FIRST_SAMPLE,
+        &value.first_sample.0.to_le_bytes()
+    )?;
+    write_spec!(
+        sink,
+        schema::meter_batch::WINDOW_SEQUENCE,
+        &value.window_sequence.to_le_bytes()
+    )
 }
 
+/// Write a telemetry configuration: a command when `echo` is false (no meter window), a success
+/// echo when it is true.
 pub(crate) fn write_telemetry_configuration(
     sink: &mut dyn Sink,
     value: &TelemetryConfiguration,
+    echo: bool,
 ) -> Result<(), EncodeError> {
+    if !meter_table_is_valid(value) || (value.meter_window_blocks.is_some() && !echo) {
+        return Err(EncodeError::InvalidField);
+    }
     validate_telemetry_configuration(value).map_err(|_| EncodeError::LimitExceeded)?;
-    sink.check_field_count(schema::telemetry_configuration::SPEC.field_count(&[])?)?;
-    write_u32s(
-        sink,
-        schema::telemetry_configuration::METER_HANDLES,
-        &value.meter_handles,
-    )?;
+    sink.check_field_count(schema::telemetry_configuration::SPEC.field_count(&[
+        (schema::telemetry_configuration::METER, value.meters.len()),
+        (
+            schema::telemetry_configuration::METER_WINDOW_BLOCKS,
+            usize::from(value.meter_window_blocks.is_some()),
+        ),
+    ])?)?;
     write_spec!(
         sink,
         schema::telemetry_configuration::METER_PERIOD_BLOCKS,
@@ -2834,7 +3026,34 @@ pub(crate) fn write_telemetry_configuration(
         sink,
         schema::telemetry_configuration::MINIMUM_DIAGNOSTIC_SEVERITY,
         &[value.minimum_diagnostic_severity as u8]
-    )
+    )?;
+    for entry in &value.meters {
+        sink.nested_spec(schema::telemetry_configuration::METER, &mut |sink| {
+            let strip = match &entry.target {
+                MeterTarget::Output => None,
+                MeterTarget::Strip(id) => Some(id),
+            };
+            sink.message_header(
+                schema::meter_entry::SPEC.field_count(&[(
+                    schema::meter_entry::STRIP_ID,
+                    usize::from(strip.is_some()),
+                )])?,
+            )?;
+            write_spec!(sink, schema::meter_entry::TARGET, &[entry.target.code()])?;
+            if let Some(id) = strip {
+                write_spec!(sink, schema::meter_entry::STRIP_ID, id.as_bytes())?;
+            }
+            write_spec!(sink, schema::meter_entry::METRIC, &[entry.metric as u8])
+        })?;
+    }
+    if let Some(blocks) = value.meter_window_blocks {
+        write_spec!(
+            sink,
+            schema::telemetry_configuration::METER_WINDOW_BLOCKS,
+            &blocks.get().to_le_bytes()
+        )?;
+    }
+    Ok(())
 }
 
 pub(crate) fn write_counters_request(
