@@ -251,6 +251,13 @@ async function wedgedDemoteDeleteIsBounded() {
   assert.notEqual(outcome, "timed-out", "a demote awaited a wedged delete without a deadline")
   assert.equal(outcome.value, false)
   assert.equal(indexStems(backend)[stem.identity], undefined, "a demoted stem stayed indexed")
+
+  // The wedged delete left the corrupt final, so a second verify demotes
+  // again; now the index write under the index lock hangs too.
+  backend.closeBlocker = ({ fileName }) => (fileName === "index.json" ? never() : undefined)
+  const wedgedWrite = await settledWithin(opfs.verify(stem.identity), 500)
+  assert.notEqual(wedgedWrite, "timed-out", "an index write under the index lock had no deadline")
+  assert.equal(wedgedWrite.error?.code, "storage.write_stalled")
 }
 
 async function unwritableStoreRefusesBeforeNetwork() {
