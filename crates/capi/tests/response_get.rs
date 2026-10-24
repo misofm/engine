@@ -855,23 +855,13 @@ fn the_sessionless_frame_entry_answers_the_payload_of_a_session() {
 
 /// #1575, the C ABI parity row: after a live `SET_CONTROL` of one band gain of `eq0`'s console
 /// entry, the address of that entry is answered with the curves of the configuration request that
-/// gives the committed values with that gain, at the committed revision, with no plan rebuild; and
-/// 100 address requests leave the plan's resources as they were.
+/// gives the committed values with that gain, at the committed revision, with no plan rebuild, on
+/// every one of 100 requests.
 ///
-/// Red if the host answers from a stale prepared copy instead of the committed model, or if an
-/// address request leaves a prepared owner behind.
+/// Red if the host answers from a stale prepared copy instead of the committed model.
 #[test]
 fn an_address_follows_a_live_edit_and_keeps_nothing() {
     let mut endpoint = Endpoint::new(1 << 20);
-    let plan = endpoint.plan;
-    // SAFETY: The plan is live for the endpoint's lifetime and the report is a complete location.
-    let resources = || unsafe {
-        let mut report: PlanResourceReport = core::mem::zeroed();
-        report.struct_size = PLAN_RESOURCE_REPORT_SIZE;
-        assert_eq!(miso_engine_v1_plan_resources(plan, &mut report), RESULT_OK);
-        report
-    };
-    let before = resources();
     let (_, revision) = endpoint.state();
     let edit = protocol::SessionEdit::SetControl {
         expected_effect: None,
@@ -981,5 +971,4 @@ fn an_address_follows_a_live_edit_and_keeps_nothing() {
             assert_eq!(actual.as_deref().map(bits), wanted.as_deref().map(bits));
         }
     }
-    assert_eq!(resources(), before, "nothing is kept");
 }

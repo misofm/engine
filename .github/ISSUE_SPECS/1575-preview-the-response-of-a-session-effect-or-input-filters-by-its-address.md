@@ -166,6 +166,10 @@ Scope note `scope/1575.md` (root-accepted) amends the spec:
   code; unreachable on a validated model).
 - **Tests.** Gates 1, 3 and 4 are host-core unit tests in `control_provider.rs` (a model built in
   the test); gates 2 and 5 are one C ABI row in `crates/capi/tests/response_get.rs`
-  (`EditPath::Live`, revision + 1, `miso_engine_v1_plan_resources` equal after 100 requests),
-  not a new `response_address.rs`. The capi refusal case "the address target" is deleted: it is
+  (`EditPath::Live`, revision + 1, the same curves on each of 100 requests), not a new
+  `response_address.rs`. Verifier MINOR: `miso_engine_v1_plan_resources` counts render-plan bytes
+  only and cannot see a kept response owner, so gate 5 rests on the design (no field on
+  `SessionControlProvider`), not on a resource assertion.
+- **Console lookup.** Resolved through `SessionModel::lower_strip`, the plan lowering itself, not
+  a separate copy of its slot/entry split. The capi refusal case "the address target" is deleted: it is
   served now.

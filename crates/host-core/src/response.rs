@@ -195,52 +195,38 @@ pub fn resolve_response_target(
     let strip_id = StableId::parse(strip).ok_or(unknown)?;
     let strip_index = controls::strip_index(model, &strip_id).ok_or(unknown)?;
     let strip_ref = model.strips().nth(strip_index).ok_or(unknown)?;
-    // The effect the section names: its slot or insert ID, identity, quality, link mode, bypass and
-    // committed parameters. A console entry is matched to its slot by position, as lowering does.
+    // The effect the section names, as the plan lowering gives it: a console entry with its slot's
+    // identity, quality and link mode, or an insert.
+    let lowered = matches!(section, ResponseAddressSection::Console(_))
+        .then(|| model.lower_strip(&strip_ref));
     let effect = match section {
         ResponseAddressSection::Builtins => None,
-        ResponseAddressSection::Console(slot) => {
-            let (pre_entries, post_entries) = strip_ref
-                .console
-                .split_at(model.console.pre_insert.len().min(strip_ref.console.len()));
-            let (slot, entry) = [
-                (&model.console.pre_insert, pre_entries),
-                (&model.console.post_insert, post_entries),
-            ]
-            .into_iter()
-            .find_map(|(slots, entries)| {
-                slots
-                    .iter()
-                    .zip(entries)
-                    .find(|(candidate, _)| candidate.slot.as_str() == slot)
-            })
-            .ok_or(unknown)?;
-            Some((
-                &slot.slot,
-                &slot.identity,
-                slot.quality,
-                slot.link_mode,
-                entry.bypass,
-                &entry.params[..],
-            ))
-        }
-        ResponseAddressSection::Inserts(insert) => {
-            let effect = strip_ref
+        ResponseAddressSection::Console(slot) => Some(
+            lowered
+                .iter()
+                .flat_map(|racks| racks.pre_insert.iter().chain(&racks.post_insert))
+                .find(|candidate| candidate.id.as_str() == slot)
+                .ok_or(unknown)?,
+        ),
+        ResponseAddressSection::Inserts(insert) => Some(
+            strip_ref
                 .inserts
                 .effects
                 .iter()
                 .find(|candidate| candidate.id.as_str() == insert)
-                .ok_or(unknown)?;
-            Some((
-                &effect.id,
-                &effect.identity,
-                effect.quality,
-                effect.link_mode,
-                effect.bypass,
-                &effect.params[..],
-            ))
-        }
-    };
+                .ok_or(unknown)?,
+        ),
+    }
+    .map(|effect| {
+        (
+            &effect.id,
+            &effect.identity,
+            effect.quality,
+            effect.link_mode,
+            effect.bypass,
+            &effect.params[..],
+        )
+    });
     let effect_id = match effect {
         Some((_, EffectIdentity::ThirdPartyCid { .. }, ..)) => {
             return Err(ResponseQueryError::ThirdParty);
@@ -335,6 +321,8 @@ pub fn resolve_response_target(
                         controls::ControlError::Domain,
                     ))?;
             }
+            // A duplicate was refused by `check_response_overrides`, which saw every override;
+            // `apply_overrides` sees one row at a time and cannot.
             _ => apply_overrides(
                 descriptor,
                 &mut values,

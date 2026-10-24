@@ -2792,7 +2792,7 @@ mod tests {
 
     /// #1575: a nine-track session with asymmetric input filters on `eq0`, a parametric EQ insert
     /// `ins` with its own values, a compressor insert `comp` and a `cid` insert `pkg` on `eq1`, and
-    /// `eq2`'s own console entry of the session's EQ slot `eq`.
+    /// `eq2`'s own console entry of the session's EQ slot `eq`, and `eq3`'s bypassed entry.
     fn address_session() -> session::SessionModel {
         let mut model = nine_track();
         let builtins = &mut model.tracks[0].builtins;
@@ -2815,6 +2815,11 @@ mod tests {
             }
         }
         model.tracks[2].console[0].params = entry;
+        // `eq3` runs eq0's values with its entry bypassed.
+        model.tracks[3].console[0] = session::ConsoleEntry {
+            bypass: true,
+            ..model.tracks[0].console[0].clone()
+        };
         let mut eq = model.tracks[0].console[0].params.clone();
         eq.extend([
             param(
@@ -3047,6 +3052,27 @@ mod tests {
             ),
             "`both` is `left` and `right`"
         );
+        let bypassed = &model.tracks[3].console[0];
+        let eq3 = || strip_address("eq3", ControlSection::Console, Some("eq"));
+        assert_eq!(
+            served(&model, &address_request(eq3(), Vec::new())),
+            served(
+                &model,
+                &configuration_request(true, entry_rows(&bypassed.params, true))
+            ),
+            "the committed bypass"
+        );
+        assert_eq!(
+            served(
+                &model,
+                &address_request(eq3(), vec![row(0, ParameterChannel::Both, 0.0)])
+            ),
+            served(
+                &model,
+                &configuration_request(true, entry_rows(&bypassed.params, false))
+            ),
+            "a bypass override over the committed bypass"
+        );
         let mut cutoffs = cutoff_rows(&model.tracks[0].builtins);
         cutoffs[0].value = 200.0;
         assert_eq!(
@@ -3077,6 +3103,26 @@ mod tests {
                 "no such parameter",
                 ins(),
                 vec![row(9_999, ParameterChannel::Both, 1.0)],
+                "control.address.unknown",
+            ),
+            (
+                "a link mode the compressor does not have",
+                strip_address("eq1", ControlSection::Inserts, Some("comp")),
+                vec![row(
+                    controls::LINK_MODE_CONTROL,
+                    ParameterChannel::Both,
+                    9.0,
+                )],
+                "control.domain",
+            ),
+            (
+                "a link-mode row on the EQ, which has one link mode",
+                ins(),
+                vec![row(
+                    controls::LINK_MODE_CONTROL,
+                    ParameterChannel::Both,
+                    1.0,
+                )],
                 "control.address.unknown",
             ),
             (
