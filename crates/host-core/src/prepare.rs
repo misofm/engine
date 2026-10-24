@@ -2320,7 +2320,14 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
     // this plan is bound.
     let delay_joins: Vec<StripDelayJoin<'_>> = match successor {
         None => Vec::new(),
-        Some(base) => join_strip_delays(base.committed, model),
+        // #1402 R-B: the sources whose rings carry under #1272 D3.
+        Some(base) => {
+            let carried: BTreeSet<&str> = carried_sources
+                .iter()
+                .map(|&(index, _)| model.sources[index as usize].id.as_str())
+                .collect();
+            join_strip_delays(base.committed, model, &carried)
+        }
     };
     let route_joins: Vec<RouteJoin<'_>> = match (successor, &level_diff) {
         (Some(base), Some(diff)) => join_routes(base.committed, model, base.edit_ramps, diff),
@@ -6111,19 +6118,21 @@ struct StripDelayJoin<'a> {
     /// strip's line, whose lane rings are equally long, and the strip reads the same source.
     equal: u8,
     /// Whether the strip reads the same input in both models (#1402 R-B): a track whose
-    /// `source_id` is unchanged, or a submix. A track's line holds its source's raw frames (its
-    /// declared delay and, since #1287 R1, its source-claim line), so a track that reads another
-    /// source carries no lane.
+    /// `source_id` is unchanged and whose source's ring carries (#1272 D3), or a submix. A track's
+    /// line holds its source's raw frames (its declared delay and, since #1287 R1, its
+    /// source-claim line), so a track that reads another source, or a source redeclared under its
+    /// ID (a fresh ring from frame 0), carries no lane.
     same_source: bool,
 }
 
 /// The model half of the strip delay join (#1284 D1): for every strip of `model` that `committed`
 /// also has as a strip of the same kind, which lanes declare the same `delay_samples`, and whether
-/// a track reads the same source. A strip whose kind changed has no counterpart and is not listed:
-/// it is a new strip.
+/// a track reads the same source, one of `carried`, the source IDs whose rings carry. A strip whose
+/// kind changed has no counterpart and is not listed: it is a new strip.
 fn join_strip_delays<'a>(
     committed: &'a SessionModel,
     model: &'a SessionModel,
+    carried: &BTreeSet<&str>,
 ) -> Vec<StripDelayJoin<'a>> {
     model
         .strips()
@@ -6142,7 +6151,10 @@ fn join_strip_delays<'a>(
                 session::StripKind::Track(track) => committed
                     .tracks
                     .binary_search_by(|before| before.id.as_str().cmp(track.id.as_str()))
-                    .is_ok_and(|index| committed.tracks[index].source_id == track.source_id),
+                    .is_ok_and(|index| {
+                        committed.tracks[index].source_id == track.source_id
+                            && carried.contains(track.source_id.as_str())
+                    }),
                 session::StripKind::Submix(_) => true,
             };
             Some(StripDelayJoin {
@@ -7069,12 +7081,14 @@ mod tests {
             strip_delay("eq0", 0, [37, 53]),
             strip_delay("eq2", 1, [0, 19]),
             strip_delay("eq4", 2, [8, 8]),
+            strip_delay("eq6", 3, [8, 8]),
         ];
         let own = [
             strip_delay("eq0", 1, [37, 60]),
             strip_delay("eq2", 0, [0, 19]),
             strip_delay("eq4", 3, [8, 8]),
             strip_delay("eq5", 2, [4, 4]),
+            strip_delay("eq6", 4, [8, 10]),
         ];
         let joins = [
             // The right lane changed: the left carries and the strip restarts.
@@ -7107,6 +7121,13 @@ mod tests {
                 equal: left | right,
                 same_source: true,
             },
+            // Equal declared delays, but the right ring grew (a claim line on one lane): the left
+            // carries and the strip restarts.
+            StripDelayJoin {
+                id: "eq6",
+                equal: left | right,
+                same_source: true,
+            },
         ];
         let carry = resolve_strip_delay_carry(&before, &own, &joins);
         assert_eq!(
@@ -7122,6 +7143,11 @@ mod tests {
                     predecessor: 1,
                     lanes: right,
                 },
+                graph::GraphStripDelayMove {
+                    successor: 4,
+                    predecessor: 3,
+                    lanes: left,
+                },
             ]
         );
         assert_eq!(
@@ -7129,9 +7155,61 @@ mod tests {
             vec![
                 Box::<str>::from("eq0"),
                 Box::<str>::from("eq4"),
-                Box::<str>::from("eq5")
+                Box::<str>::from("eq5"),
+                Box::<str>::from("eq6")
             ]
         );
+    }
+
+    /// #1402 R-B: a track whose source keeps its ID but is redeclared (another `frames`) reads a
+    /// fresh ring from frame 0 (#1272 D3), so its line's pending frames are the old declaration's
+    /// and it is not the same source; a track on a carried source is.
+    #[test]
+    fn a_redeclared_source_is_not_the_same_source() {
+        use std::collections::BTreeSet;
+        let mut committed = parse_session_json(include_str!(
+            "../../../fixtures/session/v1/parametric-eq-nine-track.json"
+        ))
+        .expect("fixture");
+        // A second source, kept as declared, for the last track.
+        let mut kept = committed.sources[0].clone();
+        kept.id = session::StableId::parse("kept-source").expect("ID");
+        kept.content = kept.content.replace("7e94", "0a0a");
+        committed.sources.push(kept.clone());
+        committed.sources.sort_by(|a, b| a.id.cmp(&b.id));
+        committed.tracks.last_mut().expect("a track").source_id = kept.id;
+        let mut model = committed.clone();
+        let redeclared = model
+            .sources
+            .iter_mut()
+            .find(|source| source.id.as_str() == "fixture-source")
+            .expect("the fixture's source");
+        redeclared.frames += 1;
+        // The sources whose rings carry, as #1272 D3 decides: an unchanged declaration.
+        let carried: BTreeSet<&str> = model
+            .sources
+            .iter()
+            .filter(|source| committed.sources.contains(source))
+            .map(|source| source.id.as_str())
+            .collect();
+        let joins = super::join_strip_delays(&committed, &model, &carried);
+        let redeclared = "fixture-source";
+        let tracks: Vec<(&str, bool)> = model
+            .tracks
+            .iter()
+            .map(|track| {
+                let join = joins
+                    .iter()
+                    .find(|join| join.id == track.id.as_str())
+                    .expect("a joined track");
+                (track.source_id.as_str(), join.same_source)
+            })
+            .collect();
+        assert!(tracks.iter().any(|(source, _)| *source == redeclared));
+        assert!(tracks.iter().any(|(source, _)| *source != redeclared));
+        for (source, same_source) in tracks {
+            assert_eq!(same_source, source != redeclared, "a track on {source}");
+        }
     }
 
     /// #1284 D2: a send carries when both plans hold a live route of its ID, whatever unit it sits
