@@ -9127,6 +9127,72 @@ mod structural_apply {
         assert_eq!(master, None, "no designation reads absent");
     }
 
+    /// #1581 D5: a swap that carries no strip meter (here the first strip of an empty boot)
+    /// restarts the strip meters at its adoption block, and the output meter restarts there with
+    /// them, so the frames after the swap publish.
+    ///
+    /// Test value: red if the output meter keeps the predecessor's window grid across a swap that
+    /// restarts the strip meters: no master window would match a strip window again, and every
+    /// frame after the swap would be dropped as a loss.
+    #[test]
+    fn an_uncarried_swap_restarts_the_output_meter_at_its_adoption_block() {
+        const WINDOW: u64 = 3;
+        let full = parse_session_json(include_str!(
+            "../../../fixtures/session/v1/observation-frame-shape.json"
+        ))
+        .expect("the observation fixture parses");
+        let mut empty = full.clone();
+        empty.sources.clear();
+        empty.tracks.clear();
+        empty.routes.clear();
+        let options = WebBootOptions {
+            source_ring_frames: QUANTUM * 4,
+            live_control_meter_blocks: WINDOW,
+            ..boot_options(QUANTUM)
+        };
+        let mut rig = Rig::boot(&empty, options, None);
+        assert_eq!(rig.host.set_meter_lease(true), RESULT_OK);
+        // Four blocks: the master's window [0, 3) publishes and the next opens at block 3.
+        for _ in 0..4 {
+            assert_eq!(rig.host.render_next(), RESULT_OK);
+            rig.host.poll_meters();
+        }
+        let quantum = u64::from(QUANTUM);
+        assert_eq!(rig.host.meter_header().end_sample, WINDOW * quantum);
+        let edits = [
+            SessionEdit::UpsertSource {
+                source: full.sources[0].clone(),
+            },
+            SessionEdit::UpsertTrack {
+                track: full.tracks[0].clone(),
+            },
+            SessionEdit::UpsertRoute {
+                route: full.routes[0].clone(),
+            },
+        ];
+        assert!(matches!(
+            rig.apply(&edits, 1),
+            Outcome::Applied {
+                path: EditPath::Rebuild,
+                ..
+            }
+        ));
+        // The adoption block, 4, is off the grid of three-block windows.
+        let mut first = None;
+        for _ in 0..3 * WINDOW {
+            assert_eq!(rig.host.render_next(), RESULT_OK);
+            if rig.host.poll_meters() > 0 && rig.host.meter_header().track_count == 1 {
+                first = Some(rig.host.meter_header().first_sample);
+                break;
+            }
+        }
+        assert_eq!(
+            first,
+            Some(4 * quantum),
+            "the first strip frame starts at the adoption block"
+        );
+    }
+
     impl Rig {
         /// The strips whose `master` monitor row is on in the control list, read through the
         /// production control entry by the rows' typed fields.
