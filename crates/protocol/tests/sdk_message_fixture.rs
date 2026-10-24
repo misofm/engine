@@ -20,12 +20,13 @@ use protocol::{
     Capabilities, CapabilityFlags, CommandPayload, CounterId, CounterSnapshot, CounterSnapshotRef,
     CounterValue, CountersRequest, DecodeScratch, DecodedCommandPayload, Diagnostic,
     DiagnosticSeverity, DiagnosticsPage, DiagnosticsRequest, EventPayload, ExpectedRevision,
-    MessageId, MeterBatch, MeterComponent, MeterRecord, NonOkResponse, ObservationEnded,
-    ObservationSection, ObservationTapKey, PathSegment, ProtocolCodec, ProtocolVersion, RequestId,
-    SampleTime, SessionCommitted, SessionRevision, SessionSnapshot, SessionSnapshotRequest,
-    StatusCode, SuccessResponsePayload, TelemetryConfiguration, TransportSetRequest,
-    TransportSnapshot, TransportState, TransportStateEvent, TypedCommandFrame, TypedEventFrame,
-    TypedNonOkResponseFrame, TypedSuccessResponseFrame,
+    MessageId, MeterBatch, MeterComponent, MeterEntry, MeterMetric, MeterRecord, MeterTarget,
+    NonOkResponse, ObservationEnded, ObservationSection, ObservationTapKey, PathSegment,
+    ProtocolCodec, ProtocolVersion, RequestId, SampleTime, SessionCommitted, SessionRevision,
+    SessionSnapshot, SessionSnapshotRequest, StatusCode, SuccessResponsePayload,
+    TelemetryConfiguration, TransportSetRequest, TransportSnapshot, TransportState,
+    TransportStateEvent, TypedCommandFrame, TypedEventFrame, TypedNonOkResponseFrame,
+    TypedSuccessResponseFrame,
 };
 
 const FIXTURE: &str = "../../sdk/test/fixtures/protocol-messages.json";
@@ -125,6 +126,7 @@ fn counter_name(id: CounterId) -> &'static str {
         CounterId::LiveBlockErrors => "liveBlockErrors",
         CounterId::SourceUnderrunBlocks => "sourceUnderrunBlocks",
         CounterId::SourceFramesDiscarded => "sourceFramesDiscarded",
+        CounterId::MeterWindowsLost => "meterWindowsLost",
     }
 }
 
@@ -162,8 +164,9 @@ fn command_bytes(request: u64, revision: ExpectedRevision, payload: CommandPaylo
 /// counter ID is each `u32` code in turn: the codec, not this file, says which codes exist.
 fn counter_ids() -> Vec<CounterId> {
     let configuration = TelemetryConfiguration {
-        meter_handles: Vec::new(),
+        meters: Vec::new(),
         meter_period_blocks: 0,
+        meter_window_blocks: None,
         counter_ids: vec![CounterId::ControlCommandBackpressure],
         counter_period_blocks: 1,
         diagnostics_enabled: false,
@@ -199,22 +202,42 @@ fn counter_ids() -> Vec<CounterId> {
     found
 }
 
+/// A meter table entry as the SDK spells it (#1583 D1): the target, the strip ID of a strip target,
+/// and the metric.
+fn meter_entry_json(entry: &MeterEntry) -> J {
+    let mut fields = Vec::new();
+    match &entry.target {
+        MeterTarget::Output => fields.push(("target", text("output"))),
+        MeterTarget::Strip(id) => {
+            fields.push(("target", text("strip")));
+            fields.push(("stripId", text(id)));
+        }
+    }
+    fields.push((
+        "metric",
+        text(match entry.metric {
+            MeterMetric::Peak => "peak",
+            MeterMetric::GainReduction => "gainReduction",
+        }),
+    ));
+    obj(fields)
+}
+
 fn telemetry_json(value: &TelemetryConfiguration) -> J {
-    obj(vec![
+    let mut fields = vec![
         (
-            "meterHandles",
-            J::Arr(
-                value
-                    .meter_handles
-                    .iter()
-                    .map(|handle| J::Num(u64::from(*handle)))
-                    .collect(),
-            ),
+            "meters",
+            J::Arr(value.meters.iter().map(meter_entry_json).collect()),
         ),
         (
             "meterPeriodBlocks",
             J::Num(u64::from(value.meter_period_blocks)),
         ),
+    ];
+    if let Some(blocks) = value.meter_window_blocks {
+        fields.push(("meterWindowBlocks", J::Num(u64::from(blocks.get()))));
+    }
+    fields.extend([
         (
             "counterIds",
             J::Arr(
@@ -234,13 +257,28 @@ fn telemetry_json(value: &TelemetryConfiguration) -> J {
             "minimumSeverity",
             text(severity_name(value.minimum_diagnostic_severity)),
         ),
-    ])
+    ]);
+    obj(fields)
 }
 
 fn full_telemetry() -> TelemetryConfiguration {
     TelemetryConfiguration {
-        meter_handles: vec![1, 2, 300],
-        meter_period_blocks: 1,
+        meters: vec![
+            MeterEntry {
+                target: MeterTarget::Output,
+                metric: MeterMetric::Peak,
+            },
+            MeterEntry {
+                target: MeterTarget::Strip("vocal".into()),
+                metric: MeterMetric::Peak,
+            },
+            MeterEntry {
+                target: MeterTarget::Strip("vocal".into()),
+                metric: MeterMetric::GainReduction,
+            },
+        ],
+        meter_period_blocks: 24,
+        meter_window_blocks: None,
         counter_ids: vec![
             CounterId::ControlCommandBackpressure,
             CounterId::LiveValuesSuperseded,
@@ -254,8 +292,9 @@ fn full_telemetry() -> TelemetryConfiguration {
 
 fn empty_telemetry() -> TelemetryConfiguration {
     TelemetryConfiguration {
-        meter_handles: Vec::new(),
+        meters: Vec::new(),
         meter_period_blocks: 0,
+        meter_window_blocks: None,
         counter_ids: Vec::new(),
         counter_period_blocks: 0,
         diagnostics_enabled: false,
@@ -818,7 +857,11 @@ fn replies() -> Vec<Row> {
         state: TransportState::Playing,
         effective_sample: SampleTime((1 << 40) + 64),
     };
-    let telemetry = full_telemetry();
+    // The full echo carries the provider's meter window (#1583 D4); the empty one has none.
+    let telemetry = TelemetryConfiguration {
+        meter_window_blocks: core::num::NonZeroU32::new(12),
+        ..full_telemetry()
+    };
     let no_telemetry = empty_telemetry();
     let counters = some_counters();
     let no_counters = CounterSnapshot {
@@ -1135,6 +1178,8 @@ fn events() -> Vec<Row> {
             15,
             EventPayload::MeterBatch(MeterBatch {
                 observed_sample: SampleTime(4096),
+                first_sample: SampleTime(2560),
+                window_sequence: 7,
                 records: &records,
             }),
             with_kind(
@@ -1142,6 +1187,8 @@ fn events() -> Vec<Row> {
                 15,
                 vec![
                     ("observedSample", big(4096)),
+                    ("firstSample", big(2560)),
+                    ("windowSequence", big(7)),
                     ("records", J::Arr(records.iter().map(record_json).collect())),
                 ],
             ),
