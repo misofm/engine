@@ -574,7 +574,9 @@ function validateSdkRenderAllocations(browserName, response) {
 }
 
 const PROTOCOL_RELIABLE_KINDS = new Set(["sessionCommitted", "transportState", "observationEnded"]);
-const PROTOCOL_LOSSY_KINDS = new Set(["meterBatch", "counterSnapshot", "diagnostic"]);
+// #1583: no meterBatch until #1588 gives the browser a meter delivery (step 5 configures an
+// empty meter table).
+const PROTOCOL_LOSSY_KINDS = new Set(["counterSnapshot", "diagnostic"]);
 
 /**
  * Issue #1571 gates 2, 3 and 5 in the browser. The page made the same calls, in the same order, on
@@ -643,7 +645,7 @@ function validateSdkProtocol(browserName, protocol) {
       return received !== undefined && expected !== undefined
         && sampleOf(received) !== undefined && sampleOf(received) === sampleOf(expected);
     })
-    && reference.filter((event) => PROTOCOL_LOSSY_KINDS.has(event.kind)).length === 3 * protocol.blocks,
+    && reference.filter((event) => PROTOCOL_LOSSY_KINDS.has(event.kind)).length === 2 * protocol.blocks,
   `a lossy event is not the headless engine's event of its block, in order: ${json({ browser: lossy, headless: reference })}`);
 }
 

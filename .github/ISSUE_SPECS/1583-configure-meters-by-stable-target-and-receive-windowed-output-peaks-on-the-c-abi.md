@@ -239,9 +239,11 @@ Commands: `cargo test --locked -p protocol --all-features`, `cargo test --locked
   protocol-messages.json` (blessed by `sdk_message_fixture.rs`), `scripts/check-protocol-wasm-parity.sh`
   and `docs/CONTROL_PROTOCOL_CONFORMANCE.md` (the hash pin's other spellings, as every re-pin edits),
   and the `protocol_cross_host` kinds check (no `METER_BATCH` on the browser until #1588).
-- Not edited, needs root: `hosts/host-web/qualification/run.mjs` still expects a `meterBatch` per
-  block (`PROTOCOL_LOSSY_KINDS`, `3 * protocol.blocks`); with step 5's empty table it must drop
-  `meterBatch` and expect `2 * protocol.blocks`.
+- `hosts/host-web/qualification/run.mjs` (root authorized, 2026-10-24): `PROTOCOL_LOSSY_KINDS`
+  drops `meterBatch` and the headless reference expects `2 * protocol.blocks` lossy events, for
+  step 5's empty table. Run once locally in Chromium against an artifact built from this branch
+  (`scripts/build-web-audioworklet.sh`): all qualification gates passed; the SDK protocol evals
+  (all gates, same artifact) pass 41 of 41.
 - T2 facts. The gate: `host_core::meters::output_peak_gate_relay` gives the C ABI's delivery a
   requested-gate word and the plan an `OutputPeakGateRelay`, which `PlanState::render` applies
   once before each block (before `admits`). The relay is the gate's one writer and applies a
@@ -269,8 +271,7 @@ Commands: `cargo test --locked -p protocol --all-features`, `cargo test --locked
   change. The poll follows #1690a (merged before hand-back: no `designated` argument).
 - Limits: the race-allocation gate (7) applies one gate request under the counters (the configure
   before the race); the strip-ID text of a configured table (at most 256 x 127 bytes per copy) is
-  allocated at configure time and is not in the boot resource rows; an SDK eval gate 3 run needs a
-  built browser artifact.
+  allocated at configure time and is not in the boot resource rows.
 
 ## Evidence (attempt 1)
 
