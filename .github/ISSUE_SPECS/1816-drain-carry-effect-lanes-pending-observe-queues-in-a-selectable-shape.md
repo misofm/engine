@@ -46,14 +46,21 @@ Reach the pending Observe queues through one call outside any loop, into the own
   disjoint queues, one sample, saturating sums. A duplicated predecessor site drains once instead
   of once plus an empty pass. No audio arithmetic is touched.
 - **D4. Tests.** One tool twin, `twin-carry-observe-lanes` in
-  `tools/realtime-policy/tests/policy/drain/twins.rs`. No new production test: host-core
-  `successor_swap`'s `pending_observe_*` tests are red if a mark is missed or the hook is not
-  reached (mutant below).
+  `tools/realtime-policy/tests/policy/drain/twins.rs`. Host-core `successor_swap`'s
+  `pending_observe_*` tests cover the bank marks and the lane/node form changes. Attempt 1's
+  verifier found the `(Node, Node)` mark uncovered (mutant `let _ = &from;` survived), so attempt 2
+  (root-authorized) adds one `pending_observe_swap(.., Some((true, true)))` call, a per-node group
+  one lane short of a bank on both sides, to the build-width test: it is red if the per-node to
+  per-node carry loses an acknowledged Observe record.
+- **D5 (attempt 2, root).** The dead `EffectControlLane::observe_queue_mut` is deleted, and a
+  carry with no moves skips the unit walk (`if !moves.is_empty()`).
 
 ## Authorized paths
 
 `crates/rack/src/lib.rs`, `crates/graph/src/runtime.rs` (the named regions),
-`tools/realtime-policy/tests/policy/drain/twins.rs`, this spec, one line in #1418's spec.
+`tools/realtime-policy/tests/policy/drain/twins.rs`, this spec, one line in #1418's spec; attempt 2
+(root): one call in `crates/host-core/tests/successor_swap.rs`, and `observe_queue_mut` in
+`crates/effect-contract/src/live.rs`.
 
 ## Gates
 
@@ -64,9 +71,11 @@ Reach the pending Observe queues through one call outside any loop, into the own
    evidence), `scripts/test-builtins-fixtures.sh`, `scripts/check-console-fixtures.sh`.
 4. clippy `-D warnings`, fmt, aarch64 `--tests` check, rustdoc `-D warnings`.
 
-## Evidence (attempt 1)
+## Evidence (attempts 1-2)
 
 - realtime-policy: `ok (192 marked regions in 34 files)`, same as `main`; its tests 229/229.
 - Mutant: dropping the `(Lane, Lane)` mark turns
   `pending_observe_records_are_applied_at_the_carry_at_the_build_width` red.
 - `check-graph-determinism.sh` JSON byte-identical at `661c96a5e` and head (sha256 `01a11f0c...`).
+- Attempt 2: the `(Node, Node)` mutant `let _ = &from;` turns
+  `pending_observe_records_are_applied_at_the_carry_at_the_build_width` red.
