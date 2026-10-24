@@ -24,7 +24,12 @@
 //! **Stated limit (R1, the family of root's 2026-10-24 ruling on the call rule, #1544).** A method
 //! call through auto-ref on the receiver (`self.data_consumer.peek(0)`) or on a prefix of it
 //! (`self.settle_block(block)`) is allowed: the method can take `&mut self` and replace the field
-//! inside its body, which this rule does not read. Neither does it read a place reached through an
+//! inside its body, which this rule does not read. The one exception is a method call on the
+//! collection that the receiver indexes (`self.queues.swap(0, 1)` beside a counted
+//! `self.queues[0]`), which is refused. A zero-argument method call inside the receiver itself
+//! (`self.next_queue().try_pop()`, counted as `self.next_queue().available_at_entry()`) is
+//! compared by spelling only: the method can return another queue on each call, which this rule
+//! does not read either. Neither does it read a place reached through an
 //! alias taken before the count. #1418 reuses this rule for the base of a selecting loop.
 
 use super::Ctx;
@@ -116,11 +121,20 @@ fn allowed(steps: &[Step<'_>], at: Pos, root: &Root) -> bool {
         (Node::Expr(syn::Expr::RawAddr(raw)), _) => {
             !matches!(raw.mutability, syn::PointerMutability::Mut(_))
         }
-        // A method call through auto-ref: the stated limit.
-        (Node::Expr(syn::Expr::MethodCall(_)), Some(Via::Operand(0))) => true,
+        // A method call through auto-ref: the stated limit, except on the collection that the
+        // receiver indexes (`self.queues.swap(0, 1)` beside `self.queues[0]`), which reorders
+        // the queues under the index.
+        (Node::Expr(syn::Expr::MethodCall(_)), Some(Via::Operand(0))) => {
+            root.kind == RootKind::Index || !indexed_next(&fields, &root.path)
+        }
         // An index place may be read by value; the queue's root may not.
         _ => root.kind == RootKind::Index,
     }
+}
+
+/// Whether `place` is a prefix of the receiver's path that an index step of it directly follows.
+fn indexed_next(place: &[Seg], receiver: &[Seg]) -> bool {
+    receiver.get(place.len()) == Some(&Seg::Index) && receiver.starts_with(place)
 }
 
 /// Whether a place path differs from the receiver's at a named field that both have. An index

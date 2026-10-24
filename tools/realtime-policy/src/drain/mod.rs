@@ -361,7 +361,20 @@ fn pops_the_counted_queue<'f>(
     ) else {
         return false;
     };
-    let Some(end) = ctx.tree.extent(steps[at].node).map(|extent| extent.end) else {
+    let outermost = (0..=at)
+        .find(|&i| {
+            steps[i].node.is_loop()
+                && ctx
+                    .tree
+                    .extent(steps[i].node)
+                    .is_some_and(|extent| extent.core >= counted.start)
+        })
+        .unwrap_or(at);
+    let Some(end) = ctx
+        .tree
+        .extent(steps[outermost].node)
+        .map(|extent| extent.end)
+    else {
         return false;
     };
     counted_roots.len() == popped_roots.len()
