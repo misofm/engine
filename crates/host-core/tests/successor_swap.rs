@@ -3447,7 +3447,11 @@ const CARRIED: &str = "eq1";
 /// (#1558): its stage carries and is retargeted, so its writes are counted like [`CARRIED`]'s.
 /// Three fader writes sit unread in [`MOVED`]'s cells and
 /// three fader and three pan writes in [`CARRIED`]'s when the swap block hands over. The count of a
-/// stage that restarts instead (an input lane, `a_restarting_input_lane_...`) stays zero.
+/// stage that restarts instead (an input lane, `a_restarting_input_lane_...`) stays zero. A fourth
+/// run commits a base without [`MOVED`], so its stage has no join and restarts while [`CARRIED`],
+/// its bank-mate, carries: a bank that mixes a carried and a non-carried lane counts only the
+/// carried lane's writes. That run is red when the strip drain's lane mask covers the whole bank
+/// instead of the moves.
 fn a_carried_lane_counts_its_replaced_writes(backend: Backend) {
     let a = Session::compile(strip_state_session());
     let b = Session::compile(with_vca(
@@ -3456,7 +3460,8 @@ fn a_carried_lane_counts_its_replaced_writes(backend: Backend) {
         3.0,
     ));
     let feed = feed_for_strips();
-    let run = |strips: &[&'static str]| {
+    let without_moved = without_track(strip_state_session(), MOVED);
+    let run = |strips: &[&'static str], committed: &SessionModel| {
         let faders = |strip| {
             [-3.0, -4.0, -5.0].map(|db| CellWrite {
                 block: SWAP_BLOCK,
@@ -3479,7 +3484,7 @@ fn a_carried_lane_counts_its_replaced_writes(backend: Backend) {
             &a,
             Some(Swap {
                 to: &b,
-                committed: &a.model,
+                committed,
                 successor_writes: &[],
                 edit_ramps: &EditRamps::new(),
             }),
@@ -3488,6 +3493,10 @@ fn a_carried_lane_counts_its_replaced_writes(backend: Backend) {
             backend,
         );
         assert_eq!(run.carry, CarryOutcome::Carried, "{backend:?}");
+        run
+    };
+    let carried_run = |strips: &[&'static str]| {
+        let run = run(strips, &a.model);
         assert!(
             run.restarted.is_empty(),
             "{backend:?}: a VCA added over a strip restarts nothing: {:?}",
@@ -3495,9 +3504,10 @@ fn a_carried_lane_counts_its_replaced_writes(backend: Backend) {
         );
         run
     };
-    let moved = run(&[MOVED]);
-    let carried = run(&[CARRIED]);
-    let both = run(&[MOVED, CARRIED]);
+    let moved = carried_run(&[MOVED]);
+    let carried = carried_run(&[CARRIED]);
+    let both = carried_run(&[MOVED, CARRIED]);
+    let restarting = run(&[MOVED, CARRIED], &without_moved);
     // Three writes to a cell replace two; a Both fader write fills the left and the right cell,
     // and the pan write fills the one matrix cell: two cells of the fader and one of the pan.
     assert_eq!(
@@ -3514,6 +3524,10 @@ fn a_carried_lane_counts_its_replaced_writes(backend: Backend) {
         both.carry_superseded,
         moved.carry_superseded + carried.carry_superseded,
         "{backend:?}: the counts of two lanes of one bank add"
+    );
+    assert_eq!(
+        restarting.carry_superseded, carried.carry_superseded,
+        "{backend:?}: a lane the swap does not carry adds nothing to its bank-mate's count"
     );
 }
 
