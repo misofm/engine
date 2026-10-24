@@ -36,6 +36,8 @@ export class OpfsStemStore {
   #tabId
   #readDeadlineMs
   #ingestReadDeadlineMs
+  #maintenanceBudgetMs
+  #maintenanceFailures = 0
   #hooks
   #directory
   #staging
@@ -52,6 +54,7 @@ export class OpfsStemStore {
    *   tabId?: string,
    *   readDeadlineMs?: number,
    *   ingestReadDeadlineMs?: number,
+   *   maintenanceBudgetMs?: number,
    *   hooks?: Record<string, Function>,
    * }} [options]
    */
@@ -70,6 +73,10 @@ export class OpfsStemStore {
     this.#ingestReadDeadlineMs = positiveInteger(
       options.ingestReadDeadlineMs ?? 30_000,
       "ingestReadDeadlineMs"
+    )
+    this.#maintenanceBudgetMs = positiveInteger(
+      options.maintenanceBudgetMs ?? this.#readDeadlineMs,
+      "maintenanceBudgetMs"
     )
     this.#hooks = options.hooks ?? {}
   }
@@ -111,8 +118,17 @@ export class OpfsStemStore {
         const index = await this.#readIndex(true)
         const liveLocks = await this.#liveLockNames()
         const pinsChanged = this.#purgeDeadSessionPins(index, liveLocks)
-        await this.#sweepStaging(liveLocks)
-        await this.#removeUnindexedFinals(index, liveLocks)
+        // Debris sweeps are best-effort: one overall budget, every await
+        // deadlined, and a failure is reported and counted, never thrown, so a
+        // wedged or failing directory listing cannot make every mix unopenable.
+        // The next open retries whatever this one left.
+        const budgetEnd = monotonicNow() + this.#maintenanceBudgetMs
+        await this.#bestEffortSweep("staging", () =>
+          this.#sweepStaging(liveLocks, budgetEnd)
+        )
+        await this.#bestEffortSweep("finals", () =>
+          this.#removeUnindexedFinals(index, liveLocks, budgetEnd)
+        )
         if (pinsChanged) await this.#writeIndex(index)
       })
     } catch (error) {
@@ -318,48 +334,44 @@ export class OpfsStemStore {
     const handle = await this.#staging.getFileHandle(stagingName, { create: true })
     let leaveDebris = false
     try {
-      let resolved
-      try {
-        resolved = await withDeadline(
-          resolver.resolve(stem.identity, {
-            signal: options.signal,
-            onProgress: (event) =>
-              options.onProgress?.({ ...event, identity: stem.identity }),
-          }),
-          this.#ingestReadDeadlineMs,
-          "stem.resolve.stalled",
-          `Resolving ${stem.identity} made no progress`,
-          options.signal,
-          StemResolverError
-        )
-      } catch (error) {
-        if (error instanceof StemResolverError) throw error
-        throw new StemResolverError(
-          "stem.resolve.failed",
-          `Resolver failed for ${stem.identity}`,
-          { identity: stem.identity },
-          error
-        )
-      }
-      if (!(resolved?.stream instanceof ReadableStream)) {
-        throw new StemResolverError(
-          "stem.resolve.contract",
-          "Resolver did not return a canonical-PCM ReadableStream",
-          { identity: stem.identity }
-        )
-      }
-
-      const writable = await withDeadline(
-        handle.createWritable(),
-        this.#readDeadlineMs,
-        "storage.write_stalled",
-        `Opening staging for ${stem.identity} made no progress`,
-        options.signal
-      )
+      // Prove the device writable before any network: an unwritable store
+      // must refuse with a typed storage error, not after a full download.
+      const writable = await this.#openStagingWritable(handle, stem, options)
       const hash = new IncrementalBlake3()
-      const reader = resolved.stream.getReader()
+      let reader
       let bytes = 0
       try {
+        let resolved
+        try {
+          resolved = await withDeadline(
+            resolver.resolve(stem.identity, {
+              signal: options.signal,
+              onProgress: (event) =>
+                options.onProgress?.({ ...event, identity: stem.identity }),
+            }),
+            this.#ingestReadDeadlineMs,
+            "stem.resolve.stalled",
+            `Resolving ${stem.identity} made no progress`,
+            options.signal,
+            StemResolverError
+          )
+        } catch (error) {
+          if (error instanceof StemResolverError) throw error
+          throw new StemResolverError(
+            "stem.resolve.failed",
+            `Resolver failed for ${stem.identity}`,
+            { identity: stem.identity },
+            error
+          )
+        }
+        if (!(resolved?.stream instanceof ReadableStream)) {
+          throw new StemResolverError(
+            "stem.resolve.contract",
+            "Resolver did not return a canonical-PCM ReadableStream",
+            { identity: stem.identity }
+          )
+        }
+        reader = resolved.stream.getReader()
         while (true) {
           throwIfAborted(options.signal)
           const result = await withDeadline(
@@ -428,11 +440,11 @@ export class OpfsStemStore {
           "storage.write_stalled",
           `Aborting staging for ${stem.identity} made no progress`
         ).catch(() => {})
-        void reader.cancel(error).catch(() => {})
+        void reader?.cancel(error).catch(() => {})
         if (error?.leaveStaging === true) leaveDebris = true
         throw error
       } finally {
-        releaseReader(reader)
+        if (reader !== undefined) releaseReader(reader)
       }
 
       const streamedHex = hash.digestHex()
@@ -503,6 +515,32 @@ export class OpfsStemStore {
       throw error
     } finally {
       if (!leaveDebris) await removeEntry(this.#staging, stagingName)
+    }
+  }
+
+  async #openStagingWritable(handle, stem, options) {
+    try {
+      return await withDeadline(
+        handle.createWritable(),
+        this.#readDeadlineMs,
+        "storage.write_stalled",
+        `Opening staging for ${stem.identity} made no progress`,
+        options.signal
+      )
+    } catch (error) {
+      // Abort and quota errors keep their own handling; any other refusal is
+      // the device saying it cannot store this stem.
+      if (
+        error instanceof StemStoreError ||
+        isQuotaError(error) ||
+        options.signal?.aborted ||
+        error?.name === "AbortError"
+      ) {
+        throw error
+      }
+      throw classifyStorageError(error, `opening staging for ${stem.identity}`, {
+        identity: stem.identity,
+      })
     }
   }
 
@@ -618,7 +656,26 @@ export class OpfsStemStore {
       return false
     }
     try {
-      const observed = await this.#hashOpenFile(handle, stem, onProgress, signal)
+      const file = await withDeadline(
+        handle.getFile(),
+        this.#readDeadlineMs,
+        "storage.read_stalled",
+        `Opening ${stem.identity} made no progress`,
+        signal
+      )
+      // A wrong length is corruption without reading a byte: refuse before
+      // the full re-hash. The hash below still checks the bytes it read.
+      if (file.size !== stem.bytes) {
+        await this.#demote(stem.identity)
+        onProgress?.({
+          stage: "corrupt",
+          identity: stem.identity,
+          expectedBytes: stem.bytes,
+          observedBytes: file.size,
+        })
+        return false
+      }
+      const observed = await this.#hashOpenFile(file, stem, onProgress, signal)
       if (
         observed.bytes !== stem.bytes ||
         observed.hex !== stemDigest(stem.identity)
@@ -645,13 +702,15 @@ export class OpfsStemStore {
   }
 
   async #hashFile(handle, options) {
-    const file = await withDeadline(
-      handle.getFile(),
-      this.#readDeadlineMs,
-      "storage.read_stalled",
-      `Opening ${options.identity} made no progress`,
-      options.signal
-    )
+    const file =
+      options.file ??
+      (await withDeadline(
+        handle.getFile(),
+        this.#readDeadlineMs,
+        "storage.read_stalled",
+        `Opening ${options.identity} made no progress`,
+        options.signal
+      ))
     const reader = file.stream().getReader()
     const hash = new IncrementalBlake3()
     let bytes = 0
@@ -687,8 +746,9 @@ export class OpfsStemStore {
     return { bytes, hex: hash.digestHex() }
   }
 
-  async #hashOpenFile(handle, stem, onProgress, signal) {
-    return this.#hashFile(handle, {
+  async #hashOpenFile(file, stem, onProgress, signal) {
+    return this.#hashFile(undefined, {
+      file,
       signal,
       onChunk: onProgress,
       stage: "verified-open",
@@ -813,10 +873,19 @@ export class OpfsStemStore {
   }
 
   async #demote(identity) {
-    await removeEntry(this.#directory, stemFileName(identity))
+    // The row goes first, so a delete that hangs on a handle that already
+    // failed cannot keep the stem indexed. The delete is deadlined and
+    // best-effort: a final left behind is unindexed debris that the next
+    // open sweeps.
     await this.#mutateIndex((index) => {
       delete index.stems[identity]
     })
+    await withDeadline(
+      removeEntry(this.#directory, stemFileName(identity)),
+      this.#readDeadlineMs,
+      "storage.remove_stalled",
+      `Removing ${identity} made no progress`
+    ).catch(() => {})
   }
 
   async #readIndex(repair) {
@@ -892,32 +961,113 @@ export class OpfsStemStore {
     })
   }
 
+  // Runs inside the index lock, so every await is deadlined: one wedged
+  // write must not block every stem in the realm.
   async #writeIndex(index) {
-    const handle = await this.#directory.getFileHandle(INDEX_FILE, {
-      create: true,
-    })
-    const writable = await handle.createWritable()
+    const deadline = (operation, step) =>
+      withDeadline(
+        operation,
+        this.#readDeadlineMs,
+        "storage.write_stalled",
+        `${step} the stem index made no progress`
+      )
+    const handle = await deadline(
+      this.#directory.getFileHandle(INDEX_FILE, { create: true }),
+      "Opening"
+    )
+    const writable = await deadline(handle.createWritable(), "Opening")
     try {
-      await writable.write(`${JSON.stringify(index)}\n`)
-      await writable.close()
+      await deadline(writable.write(`${JSON.stringify(index)}\n`), "Writing")
+      await deadline(writable.close(), "Closing")
     } catch (error) {
-      await writable.abort(error).catch(() => {})
+      await deadline(writable.abort(error), "Aborting").catch(() => {})
       throw error
     }
   }
 
-  async #removeUnindexedFinals(index, liveLocks) {
-    for await (const [name, handle] of this.#directory.entries()) {
+  async #bestEffortSweep(sweep, work) {
+    try {
+      await work()
+    } catch (error) {
+      this.#reportMaintenanceFailure(sweep, error)
+    }
+  }
+
+  #reportMaintenanceFailure(sweep, error) {
+    this.#maintenanceFailures += 1
+    try {
+      this.#hooks.maintenanceFailure?.({
+        sweep,
+        error,
+        failures: this.#maintenanceFailures,
+      })
+    } catch {
+      // A reporting hook cannot make maintenance fatal.
+    }
+  }
+
+  /** Each step is deadlined by the per-step and the overall sweep budget. */
+  #sweepStep(operation, budgetEnd, what) {
+    const remaining = Math.max(
+      1,
+      Math.min(this.#readDeadlineMs, Math.ceil(budgetEnd - monotonicNow()))
+    )
+    return withDeadline(
+      operation,
+      remaining,
+      "storage.maintenance_stalled",
+      `${what} made no progress`
+    )
+  }
+
+  /** Iterate a directory with every step deadlined; the caller sees each entry. */
+  async #sweepEntries(sweep, directory, budgetEnd, visit) {
+    const iterator = directory.entries()
+    try {
+      while (true) {
+        if (monotonicNow() >= budgetEnd) {
+          throw new StemStoreError(
+            "storage.maintenance_stalled",
+            "Stem store maintenance ran out of its budget"
+          )
+        }
+        const step = await this.#sweepStep(
+          iterator.next(),
+          budgetEnd,
+          "Listing the stem store"
+        )
+        if (step.done) return
+        // One failing entry is reported and skipped; the rest still sweep.
+        try {
+          await visit(step.value[0], step.value[1])
+        } catch (error) {
+          this.#reportMaintenanceFailure(sweep, error)
+        }
+      }
+    } finally {
+      // A timed-out step may never settle; do not wait on the iterator.
+      void Promise.resolve()
+        .then(() => iterator.return?.())
+        .catch(() => {})
+    }
+  }
+
+  async #removeUnindexedFinals(index, liveLocks, budgetEnd) {
+    await this.#sweepEntries("finals", this.#directory, budgetEnd, async (name, handle) => {
       const match = FINAL_NAME.exec(name)
-      if (match === null || handle.kind !== "file") continue
+      if (match === null || handle.kind !== "file") return
       const identity = `blake3:${match[1]}`
       if (
         index.stems[identity] === undefined &&
         !liveLocks?.has(this.#stemLockName(identity))
       ) {
-        await removeEntry(this.#directory, name)
+        await this.#sweepStep(
+          removeEntry(this.#directory, name),
+          budgetEnd,
+          `Removing ${name}`
+        )
       }
-    }
+    })
   }
 
   async #liveLockNames() {
@@ -936,23 +1086,33 @@ export class OpfsStemStore {
     return null
   }
 
-  async #sweepStaging(liveLocks) {
-    for await (const [name, handle] of this.#staging.entries()) {
-      if (handle.kind !== "file") continue
+  async #sweepStaging(liveLocks, budgetEnd) {
+    await this.#sweepEntries("staging", this.#staging, budgetEnd, async (name, handle) => {
+      if (handle.kind !== "file") return
       const digest = name.slice(-64)
       const lockName = this.#stemLockName(`blake3:${digest}`)
-      if (liveLocks?.has(lockName)) continue
+      if (liveLocks?.has(lockName)) return
       let oldEnough = true
       if (liveLocks === null) {
         try {
-          const file = await handle.getFile()
+          const file = await this.#sweepStep(
+            handle.getFile(),
+            budgetEnd,
+            `Reading staged ${name}`
+          )
           oldEnough = this.#now() - file.lastModified >= 30_000
         } catch {
           oldEnough = true
         }
       }
-      if (oldEnough) await removeEntry(this.#staging, name)
-    }
+      if (oldEnough) {
+        await this.#sweepStep(
+          removeEntry(this.#staging, name),
+          budgetEnd,
+          `Removing staged ${name}`
+        )
+      }
+    })
   }
 
   #purgeDeadSessionPins(index, liveLocks) {
@@ -1283,6 +1443,10 @@ function throwIfAborted(signal) {
   if (signal?.aborted) {
     throw signal.reason ?? new DOMException("Stem operation aborted", "AbortError")
   }
+}
+
+function monotonicNow() {
+  return globalThis.performance?.now?.() ?? Date.now()
 }
 
 function forwardAbort(signal, controller) {

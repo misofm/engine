@@ -9,3 +9,16 @@ The #246 integration did the row-by-row comparison of the app's deleted `install
 App-side halves (persist(), Clear-Data lock registration, cross-tab progress, decode-stream cancel) are being fixed in the #246 branch. Full comparison table in that branch's verification record.
 
 🤖 Generated with [Claude Code](https://claude.com/claude-code)
+
+## Decision and evidence record (attempt 1, 2026-10-24)
+
+Scope (root, from the scope note): items 1, 2, 3 and 5 in `hosts/host-web/web/stem-store/opfs-store.js`; item 4 goes to a successor.
+
+- Item 1: `#demote` drops the index row first, then removes the final under `withDeadline(readDeadlineMs, "storage.remove_stalled")`, best-effort (a left final is unindexed debris that the next open sweeps). `#writeIndex` deadlines `getFileHandle`, `createWritable`, `write`, `close` and `abort` (`storage.write_stalled`).
+- Item 2: `#ingestAttempt` opens the staging writable (deadlined) before `resolver.resolve`; a non-quota, non-abort refusal becomes a typed `storage.*` error and no resolver call happens. `detectSharedReadOnlyMode` stays exported unchanged: removing a public export is an owner API decision, and it is a read-mode probe, not write refusal.
+- Item 3: the staging and unindexed-final sweeps iterate with every step deadlined against one overall budget (`maintenanceBudgetMs`, default `readDeadlineMs`, optional in `index.d.ts`). A failure is counted and reported through `hooks.maintenanceFailure({sweep, error, failures})` and never thrown; a failing entry is skipped, a failing listing ends that sweep. `#readIndex(true)` and the pin purge stay authoritative and fatal.
+- Item 5: `#verifyIndexed` takes one `getFile()` snapshot; `file.size !== stem.bytes` demotes and reports `corrupt` with `observedBytes: file.size` without hashing. The hash then reads that same snapshot.
+- Mutation ledger: the verify-on-open length row now drops both length arms (the pre-check and the post-hash comparison); the warm-filename row's search text follows the new `#hashOpenFile(file, ...)` call.
+- Tests (`hosts/host-web/tests/stem-store-core-v1.mjs`), each red on the pre-fix store: `wedgedDemoteDeleteIsBounded`, `unwritableStoreRefusesBeforeNetwork`, `openSurvivesFailingSweeps`, and one assertion in `corruptionSelfHeals` (no `verified-open` chunk for a truncated stem).
+
+Item 4 successor question for the owner (root records it): the store hashes every referenced stem on every session open (sealed by the 'trust warm filename without verify-on-open' mutation). Keep that, or allow a memo (`{bytes, lastModified, verifiedAt}`; re-hash only when size or `lastModified` changed) that gives up same-length silent-rot detection for open time (8 x 100 MB = 800 MB per open today)? Recommendation: keep full verification until an app measures open time as a product problem. Full verification stays meanwhile.

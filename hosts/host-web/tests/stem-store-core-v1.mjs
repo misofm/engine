@@ -64,6 +64,18 @@ function store(backend, locks, options = {}) {
   })
 }
 
+const never = () => new Promise(() => {})
+
+function settledWithin(promise, milliseconds) {
+  return Promise.race([
+    promise.then(
+      (value) => ({ value }),
+      (error) => ({ error })
+    ),
+    new Promise((resolve) => setTimeout(() => resolve("timed-out"), milliseconds)),
+  ])
+}
+
 async function twoMixNarrative() {
   const stems = Array.from({ length: 12 }, (_, index) => fixture(`stem-${index}`))
   const mixA = stems.slice(0, 8)
@@ -200,14 +212,110 @@ async function corruptionSelfHeals() {
   await second.close()
 
   backend.setBytes(path, stem.pcm.subarray(0, stem.bytes - 2))
+  const truncatedProgress = []
   const third = await opfs.openSession({
     sessionId: "truncated",
     stems: requirements([stem]),
     resolver,
+    onProgress(event) {
+      truncatedProgress.push(event)
+    },
   })
   assert.equal(resolver.requests.length, 4, "verify-on-open catches and heals truncation")
+  assert.deepEqual(
+    truncatedProgress.filter((event) => event.stage === "verified-open"),
+    [],
+    "a truncated stem was hashed before its size refused it"
+  )
   assert.equal(await opfs.verify(stem.identity), true)
   await third.close()
+}
+
+async function wedgedDemoteDeleteIsBounded() {
+  const stem = fixture("wedged-demote", 4096)
+  const backend = new FakeOpfsBackend()
+  const locks = new FakeLockManager()
+  const opfs = store(backend, locks, { tabId: "wedged-demote", readDeadlineMs: 10 })
+  const lease = await opfs.openSession({
+    sessionId: "seed",
+    stems: requirements([stem]),
+    resolver: new MemoryStemResolver(stemMap([stem])),
+  })
+  await lease.close()
+  const finalName = `blake3-${stem.identity.slice(7)}`
+  const corrupted = new Uint8Array(stem.pcm)
+  corrupted[5] ^= 1
+  backend.setBytes(`miso-stems-blake3-v1/${finalName}`, corrupted)
+  backend.removeEntryBlocker = ({ name }) => (name === finalName ? never() : undefined)
+  const outcome = await settledWithin(opfs.verify(stem.identity), 500)
+  assert.notEqual(outcome, "timed-out", "a demote awaited a wedged delete without a deadline")
+  assert.equal(outcome.value, false)
+  assert.equal(indexStems(backend)[stem.identity], undefined, "a demoted stem stayed indexed")
+}
+
+async function unwritableStoreRefusesBeforeNetwork() {
+  const stem = fixture("unwritable", 4096)
+  const stagingName = `unwritable-${stem.identity.slice(7)}`
+  const backend = new FakeOpfsBackend({
+    createWritableBlocker({ fileName }) {
+      if (fileName !== stagingName) return
+      const error = new Error("fake read-only device")
+      error.name = "NoModificationAllowedError"
+      throw error
+    },
+  })
+  const resolver = new MemoryStemResolver(stemMap([stem]))
+  await assert.rejects(
+    store(backend, new FakeLockManager(), { tabId: "unwritable" }).openSession({
+      sessionId: "unwritable",
+      stems: requirements([stem]),
+      resolver,
+    }),
+    (error) => {
+      assert.equal(error.code, "storage.unavailable")
+      return true
+    }
+  )
+  assert.equal(resolver.requests.length, 0, "a download started before staging was writable")
+}
+
+async function openSurvivesFailingSweeps() {
+  const stem = fixture("failing-sweeps", 4096)
+  const backend = new FakeOpfsBackend()
+  const locks = new FakeLockManager()
+  const seed = await store(backend, locks, { tabId: "sweep-seed" }).openSession({
+    sessionId: "seed",
+    stems: requirements([stem]),
+    resolver: new MemoryStemResolver(stemMap([stem])),
+  })
+  await seed.close()
+  const staging = backend.root.entries
+    .get("miso-stems-blake3-v1")
+    .entries.get("staging")
+  // The staging listing hangs; the final-name listing throws.
+  backend.entriesBlocker = ({ node }) => {
+    if (node === staging) return never()
+    throw new Error("fake listing failure")
+  }
+  const failures = []
+  const opfs = store(backend, locks, {
+    tabId: "sweep-open",
+    readDeadlineMs: 20,
+    hooks: { maintenanceFailure: (event) => failures.push(event.sweep) },
+  })
+  const opened = await settledWithin(opfs.open(), 500)
+  assert.notEqual(opened, "timed-out", "a wedged open-time sweep escaped its deadline")
+  assert.equal(opened.error, undefined, "a failing open-time sweep made the store unopenable")
+  assert.deepEqual(failures, ["staging", "finals"])
+  backend.entriesBlocker = undefined
+  const resolver = new MemoryStemResolver(stemMap([stem]))
+  const lease = await opfs.openSession({
+    sessionId: "after-failing-sweeps",
+    stems: requirements([stem]),
+    resolver,
+  })
+  assert.equal(resolver.requests.length, 0)
+  await lease.close()
 }
 
 async function indexRecoveryAdoptsSelfVerifyingFinals() {
@@ -974,7 +1082,9 @@ async function modeDetection() {
 
 await twoMixNarrative()
 await twoTabCollision()
-await corruptionSelfHeals()
+await wedgedDemoteDeleteIsBounded()
+await unwritableStoreRefusesBeforeNetwork()
+await openSurvivesFailingSweeps()
 await indexRecoveryAdoptsSelfVerifyingFinals()
 await promoteAtomicityAndCrashSweep()
 await fallbackWritesObeyAbortAndDeadline()
@@ -986,6 +1096,9 @@ await tabCloseMidStaging()
 await abortCleansStaging()
 await wedgedDecoderObeysAbortAndDeadline()
 await lyingDeclarationIsRefused()
+// After lyingDeclarationIsRefused: with both verify-on-open length arms
+// mutated away, the lying-declaration gate must be the one that goes red.
+await corruptionSelfHeals()
 await storageUnavailable()
 await latencyRows()
 await modeDetection()
