@@ -121,10 +121,13 @@ pub enum MessageId {
     /// `SPECTRUM_CONFIGURE` (#1594; decision 17, C9 and C13): set, change or remove the spectrum
     /// taps of a running session. It is monitor state: no revision, no saved state.
     SpectrumConfigure = 0x0010,
+    /// `SPECTRUM_CAPTURE` (#1595; decision 17, C13): arm, read, cancel or select the one-shot
+    /// spectrum window of a running session. A ready read carries the analyzed bins.
+    SpectrumCapture = 0x0011,
     /// `SESSION_REPLACE` (#1386): replace the session with a document the host passes beside the
     /// frame, applied as the one transaction its diff against the committed model gives.
-    /// `0x000f`, `0x0011` and `0x0012` are claimed by open specs (#1586, #1595) and stay
-    /// unallocated until they land.
+    /// `0x000f` and `0x0012` are claimed by open specs (#1586, #1595) and stay unallocated until
+    /// they land.
     SessionReplace = 0x0013,
     /// `SESSION_COMMITTED`.
     SessionCommitted = 0x8001,
@@ -188,6 +191,7 @@ impl MessageId {
             0x000d => Self::ControlStateGet,
             0x000e => Self::ResponseGet,
             0x0010 => Self::SpectrumConfigure,
+            0x0011 => Self::SpectrumCapture,
             0x0013 => Self::SessionReplace,
             0x8001 => Self::SessionCommitted,
             0x8010 => Self::TransportState,

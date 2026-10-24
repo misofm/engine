@@ -6,9 +6,67 @@
 //! analysis that smooths its stream.
 
 use host_core::{
-    PreparedSpectrumCaptures, SpectrumAnalysis, SpectrumConfiguration, SpectrumHop, SpectrumPair,
-    SpectrumService,
+    PreparedSpectrumCaptures, SPECTRUM_BIN_COUNT, SPECTRUM_WINDOW_FRAMES, SpectrumAnalysis,
+    SpectrumAnalysisResult, SpectrumChannels, SpectrumConfiguration, SpectrumHop, SpectrumPair,
+    SpectrumService, SpectrumSnapshot, SpectrumWindow,
 };
+
+/// The bytes a session's spectrum monitor retains beside a plan's captures (#1594 R6, #1595 R7):
+/// the service's and the analysis's ([`SpectrumService::RETAINED_BYTES`]) and the one boxed
+/// one-shot slot a read pops its window into and analyzes it into.
+#[allow(
+    clippy::cast_possible_truncation,
+    reason = "a fixed type size, far below u64::MAX"
+)]
+pub(crate) const SPECTRUM_MONITOR_RETAINED_BYTES: u64 =
+    SpectrumService::RETAINED_BYTES + core::mem::size_of::<OneShot>() as u64;
+
+/// The one-shot slot (#1595 D4): the last window a read popped and its analysis. Made once with
+/// the service, so a read allocates only its reply.
+pub(crate) struct OneShot {
+    pub(crate) result: SpectrumAnalysisResult,
+    pub(crate) snapshot: SpectrumSnapshot,
+}
+
+impl OneShot {
+    /// All zero: the slot is read only after a read has written all of it, and a zero fill
+    /// lowers to a plain `memset`, not the iOS `memset_pattern16` call a floor fill makes (#1018).
+    fn boxed() -> Box<Self> {
+        Box::new(Self {
+            result: SpectrumAnalysisResult {
+                target_kind: 0,
+                channels: SpectrumChannels::Left,
+                sample_rate_hz: 0,
+                captured_sample: 0,
+                end_sample: 0,
+                token: 0,
+                source_underrun: false,
+                frequencies_hz: [0.0; SPECTRUM_BIN_COUNT],
+                left_dbfs: [0.0; SPECTRUM_BIN_COUNT],
+                right_dbfs: [0.0; SPECTRUM_BIN_COUNT],
+            },
+            snapshot: SpectrumSnapshot {
+                window: SpectrumWindow {
+                    left: [0.0; SPECTRUM_WINDOW_FRAMES],
+                    right: [0.0; SPECTRUM_WINDOW_FRAMES],
+                    first_sample: 0,
+                    channels: SpectrumChannels::Left,
+                    source_underrun: false,
+                },
+                target_kind: 0,
+                sample_rate_hz: 0,
+                token: 0,
+            },
+        })
+    }
+}
+
+/// The one-shot half of a monitor, as a `SPECTRUM_CAPTURE` read takes it.
+pub(crate) struct CaptureParts<'a> {
+    pub(crate) service: &'a mut SpectrumService,
+    pub(crate) analysis: &'a SpectrumAnalysis,
+    pub(crate) one_shot: &'a mut OneShot,
+}
 
 /// One session's spectrum monitor: its configuration, the epochs that tell a reader which
 /// configuration the captures it reads were prepared with, the service over the running plan's
@@ -25,6 +83,8 @@ pub struct SpectrumMonitor {
     service: Option<SpectrumService>,
     /// The stream's one analysis, made with the service.
     analysis: Option<SpectrumAnalysis>,
+    /// The one-shot slot a read pops into and analyzes into (#1595 D4), made with the service.
+    one_shot: Option<Box<OneShot>>,
     /// The session's rate and quantum, for a service a promotion makes.
     sample_rate_hz: u32,
     quantum_frames: u32,
@@ -62,7 +122,11 @@ pub(crate) struct SpectrumDisplaced {
     #[allow(dead_code, reason = "held only to be dropped with the parked epoch")]
     captures: Option<PreparedSpectrumCaptures>,
     #[allow(dead_code, reason = "held only to be dropped with the parked epoch")]
-    service: Option<(SpectrumService, Option<SpectrumAnalysis>)>,
+    service: Option<(
+        SpectrumService,
+        Option<SpectrumAnalysis>,
+        Option<Box<OneShot>>,
+    )>,
 }
 
 impl SpectrumMonitor {
@@ -82,12 +146,14 @@ impl SpectrumMonitor {
             })
         });
         let analysis = service.as_ref().map(|_| SpectrumAnalysis::new());
+        let one_shot = service.as_ref().map(|_| OneShot::boxed());
         Self {
             configuration,
             configured_epoch: epoch,
             adopted_epoch: epoch,
             service,
             analysis,
+            one_shot,
             sample_rate_hz,
             quantum_frames,
         }
@@ -137,7 +203,7 @@ impl SpectrumMonitor {
             let service = self
                 .service
                 .take()
-                .map(|service| (service, self.analysis.take()));
+                .map(|service| (service, self.analysis.take(), self.one_shot.take()));
             return SpectrumDisplaced {
                 captures: None,
                 service,
@@ -153,6 +219,7 @@ impl SpectrumMonitor {
                 hop,
             ));
             self.analysis = Some(SpectrumAnalysis::new());
+            self.one_shot = Some(OneShot::boxed());
             return SpectrumDisplaced {
                 captures: None,
                 service: None,
@@ -222,5 +289,32 @@ impl SpectrumMonitor {
         &mut self,
     ) -> Option<(&mut SpectrumService, &mut SpectrumAnalysis)> {
         self.service.as_mut().zip(self.analysis.as_mut())
+    }
+
+    /// The service, the analysis and the one-shot result at once, or `None` with no service.
+    pub(crate) fn capture_parts(&mut self) -> Option<CaptureParts<'_>> {
+        match (
+            self.service.as_mut(),
+            self.analysis.as_ref(),
+            self.one_shot.as_deref_mut(),
+        ) {
+            (Some(service), Some(analysis), Some(one_shot)) => Some(CaptureParts {
+                service,
+                analysis,
+                one_shot,
+            }),
+            _ => None,
+        }
+    }
+
+    /// The result the last ready one-shot read was analyzed into, or `None` with no service.
+    #[must_use]
+    pub fn result(&self) -> Option<&SpectrumAnalysisResult> {
+        self.one_shot.as_deref().map(|one_shot| &one_shot.result)
+    }
+
+    /// The window the last ready one-shot read popped, or `None` with no service.
+    pub(crate) fn snapshot(&self) -> Option<&SpectrumSnapshot> {
+        self.one_shot.as_deref().map(|one_shot| &one_shot.snapshot)
     }
 }

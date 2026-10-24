@@ -28,7 +28,7 @@ fn main() -> ExitCode {
 fn complete_schema_hash() -> u64 {
     let codec = ProtocolCodec::default();
     let corpus = complete_schema_corpus();
-    assert_eq!(corpus.len(), 50);
+    assert_eq!(corpus.len(), 52);
     let mut hash = 0xcbf2_9ce4_8422_2325_u64;
     for frame in &corpus {
         hash = hash_bytes(hash, frame.name.as_bytes());

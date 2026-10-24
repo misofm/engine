@@ -424,3 +424,24 @@ fn a_full_output_queue_drops_the_newest_window_and_counts_it() {
             .collect::<Vec<_>>()
     );
 }
+
+/// #1582 gate 3. Turning the meter level off shuts the output meter's gate.
+///
+/// Test value: red if a level-off leaves the output meter observing (the browser tests release
+/// the lease only to take it again, which reopens the gate and hides a gate left open).
+#[test]
+fn a_level_off_shuts_the_output_gate() {
+    const QUANTUM: u64 = 64;
+    let (mut observer, reader, gate) =
+        host_core::output_peak_meter(core::num::NonZeroU32::new(64).expect("window"))
+            .expect("output meter");
+    let tables = host_core::MeterTables::new(0, 0).expect("tables");
+    let mut delivery = host_core::MeterDelivery::new(reader, gate, QUANTUM, tables);
+    let block = vec![0.25_f32; QUANTUM as usize];
+    assert!(delivery.set_level(true, 0));
+    observer.observe(&block, &block, 0, QUANTUM);
+    assert_eq!(delivery.output_windows_queued(), 1, "the gate is open");
+    assert!(delivery.set_level(false, QUANTUM));
+    observer.observe(&block, &block, QUANTUM, 2 * QUANTUM);
+    assert_eq!(delivery.output_windows_queued(), 0, "the gate is shut");
+}

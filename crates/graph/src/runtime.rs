@@ -4341,13 +4341,22 @@ pub(crate) struct Runtime {
     /// Issue #1609: the units that hold an observer which accepts `block_end`, in unit order.
     /// Built at bind by [`block_end_units`]; empty (no allocation) when no observer accepts it.
     block_end_units: Box<[u32]>,
-    /// Issue #987: unit -> the earlier bank units whose planes this bank unit gathers, sorted and
-    /// distinct, when every lane of it reads a same-track bank producer's final lane through a
-    /// pure copy; empty otherwise, and for every plain unit. Built at bind by
-    /// [`input_producer_table`]. A unit with a row is the only `UnitBanking::Bank` unit
-    /// [`Self::arm_mono_collapse`] may arm, and `execute` sets its chain's per-block input term
-    /// from the row's producers on every block.
+    /// Issue #987: unit -> the earlier units whose planes this unit reads, sorted and distinct;
+    /// empty for every other unit. Built at bind by [`input_producer_table`]. A bank unit has a
+    /// row when every lane of it reads, through a pure copy, a same-track producer: a bank's
+    /// final lane, or (issue #1899) an admitted per-node effect op. A unit with a row is the only
+    /// `UnitBanking::Bank` unit [`Self::arm_mono_collapse`] may arm, and `execute` sets its
+    /// chain's per-block input term from the row's producers on every block. A plain unit has a
+    /// row (its one producer) only when it is such an admitted op some bank row reaches, and
+    /// `execute` then maintains its [`Self::channels_agree`] fact.
     input_producers: Box<[Box<[u32]>]>,
+    /// Issue #1899: unit -> whether the admitted per-node effect op in it has, on every block
+    /// since bind, read identical input planes under words that preserve channel agreement, so
+    /// its left and right state are bit-identical and so is the block it last wrote. Sticky: one
+    /// block that fails it clears the fact, and nothing in a plan sets it again (a swap's carry
+    /// hands it over with the state it describes). Meaningful only at a unit with an
+    /// `input_producers` row that is a plain op; empty (no allocation) when there is none.
+    channels_agree: Box<[bool]>,
 }
 
 // The plan's retained-bytes walk (#1074): control thread only, from lengths and capacities, never
@@ -4424,6 +4433,7 @@ impl Runtime {
             .saturating_add(route_activity)
             .saturating_add(slice(&self.block_end_units))
             .saturating_add(input_producers)
+            .saturating_add(slice(&self.channels_agree))
     }
 }
 
@@ -4602,9 +4612,10 @@ impl Runtime {
     /// and not of a plane an upstream live write can move.
     ///
     /// The one exception is a later chain with an [`input_producer_table`] row (issue #987): every
-    /// lane gathers a same-track bank producer's final lane through a pure copy. It is armed on
-    /// the same track join, and `execute` sets its per-block input term
-    /// (`BankChain::set_input_symmetric`) from its producers' `planes_identical` on every block, so
+    /// lane gathers, through a pure copy, a same-track bank producer's final lane or (issue #1899)
+    /// an admitted per-node effect op's output, whose sticky `channels_agree` fact then answers for
+    /// it. It is armed on the same track join, and `execute` sets its per-block input term
+    /// (`BankChain::set_input_symmetric`) from its producers' answers on every block, so
     /// it collapses only on a block whose input planes are bit-identical by how they were
     /// rendered. That term, unlike `SOURCE`, enters the agreement maintenance in the rack.
     pub(crate) fn arm_mono_collapse(&mut self, eligible: &dyn Fn(&str) -> bool) {
@@ -4614,8 +4625,9 @@ impl Runtime {
                 continue;
             };
             let tracks = &identity.lane_tracks;
-            // Issue #987: or a later chain every lane of which gathers a same-track bank
-            // producer's planes (`input_producers`); `execute` then proves its input per block.
+            // Issue #987: or a later chain every lane of which gathers a same-track producer's
+            // planes (`input_producers`); `execute` then proves its input per block. A plain
+            // unit's row (issue #1899) arms nothing: it is not a bank.
             let on_input = self
                 .input_producers
                 .get(index)
@@ -4730,6 +4742,7 @@ impl Runtime {
             route_activity: None,
             block_end_units,
             input_producers: Box::default(),
+            channels_agree: Box::default(),
         }
     }
 
@@ -4845,6 +4858,7 @@ impl Runtime {
             source_plane_of_buffer,
             route_activity,
             input_producers,
+            channels_agree,
             ..
         } = self;
         // GraphExecutor reaches this unit only after the previous execute and observe both
@@ -4864,15 +4878,20 @@ impl Runtime {
         // Issue #987: this block's input term, from the producers' own rendering of this block.
         // Every producer is an earlier unit, and GraphExecutor reaches this unit only after each
         // of them returned Ok in this block, so no `planes_identical` read here follows a failed
-        // `run`. Set on every block, armed or not, because the term is sticky.
+        // `run`. Set on every block, armed or not, because the term is sticky. A producer that is
+        // an admitted per-node op (issue #1899) answers with its `channels_agree` fact, which its
+        // own `execute` of this block left.
         let input_symmetric = input_producers.get(index).and_then(|producers| {
             (!producers.is_empty()).then(|| {
-                producers.iter().all(|&producer| {
-                    matches!(
-                        before.get(producer as usize),
-                        Some(RuntimeUnit::Bank { chain, .. }) if chain.planes_identical()
-                    )
-                })
+                producers
+                    .iter()
+                    .all(|&producer| match before.get(producer as usize) {
+                        Some(RuntimeUnit::Bank { chain, .. }) => chain.planes_identical(),
+                        Some(RuntimeUnit::Op(_)) => {
+                            channels_agree.get(producer as usize).copied() == Some(true)
+                        }
+                        None => false,
+                    })
             })
         });
         let delays: &mut [CompensationDelay] = delays;
@@ -4892,7 +4911,17 @@ impl Runtime {
                         .as_deref_mut()
                         .map(|activity| (activity, index)),
                     block_time,
-                )
+                )?;
+                // Issue #1899: an admitted per-node effect op, after its block. Its left and right
+                // state still agree, and so does the block it just wrote, only if they agreed
+                // before it, its input planes were identical, and its words -- as this block's
+                // drain left them -- preserve agreement. Sticky: a cleared fact asks nothing more.
+                if let (Some(input), Some(agree)) = (input_symmetric, channels_agree.get_mut(index))
+                    && *agree
+                {
+                    *agree = input && op.kind.channel_symmetry().preserves_channel_agreement();
+                }
+                Ok(())
             }
             RuntimeUnit::Bank {
                 members,
@@ -7278,8 +7307,10 @@ impl crate::runtime::Runtime {
     /// through `scratch` into the successor instance (step 2-3): lane to lane, per-node instance
     /// to lane, or lane to per-node instance. A successor stage recomputes the witness it holds
     /// for the lane (D5), and a successor lane of a bank chain inherits the predecessor chain's
-    /// channel agreement as the input carry does (#1276 D5); a per-node instance renders dual
-    /// always and has none. A lane whose restore refuses stays as prepared; a bank stage counts it
+    /// channel agreement as the input carry does (#1276 D5). A per-node instance renders dual
+    /// always; its `channels_agree` fact (issue #1899), which a later chain may read, comes with
+    /// the state from a per-node predecessor and is cleared when a bank lane's payload is the
+    /// source. A lane whose restore refuses stays as prepared; a bank stage counts it
     /// (D6), and this returns the count of per-node instances that refused, which have no stage to
     /// count them. A refused lane carries no agreement, being at rest.
     ///
@@ -7369,6 +7400,11 @@ impl crate::runtime::Runtime {
                     };
                     #[cfg(any(test, feature = "test-support"))]
                     test_only_note_carry_payload(node.layout.payload_bytes());
+                    // Issue #1899: a bank lane's payload has no per-instance agreement fact to
+                    // hand over, so the instance's fact is cleared, carried or refused.
+                    if let Some(agree) = self.channels_agree.get_mut(successor as usize) {
+                        *agree = false;
+                    }
                     if let EffectStageMut::Live(stage) = &from {
                         if stage.carry_lane_into_instance(
                             predecessor_lane,
@@ -7390,6 +7426,12 @@ impl crate::runtime::Runtime {
                         continue;
                     };
                     into.move_from(from);
+                    // Issue #1899: the fact travels with the state it describes. A predecessor
+                    // instance whose fact nothing maintained hands over `false`.
+                    let carried = predecessor.channels_agree.get(before as usize).copied();
+                    if let Some(agree) = self.channels_agree.get_mut(successor as usize) {
+                        *agree = carried == Some(true);
+                    }
                     mark_effect_move_taken(taps, &mut tap_cursor, index);
                 }
             }
@@ -8799,18 +8841,25 @@ pub(crate) fn build_sequential(
     // into the host's planes. That is one block copy, the one the end-of-block copy used to make on
     // the redirected path. No compiled session reaches this shape: a strip's last slot feeds its
     // fader, and a route stands between every track and the output.
-    let redirects: Vec<ScatterRedirect> = scatter_redirects(program, &parts.membership, &run_units)
-        .into_iter()
-        .filter(|(run, _, _)| !folded_runs.contains(run))
-        .filter(|(_, _, consumer)| Some(*consumer) != output_op)
-        .collect();
+    // One dataflow walk serves the redirect pass and every unit below (issue #967).
+    let (readers, first_producer) = op_dataflow(program);
+    let redirects: Vec<ScatterRedirect> = scatter_redirects(
+        program,
+        &parts.membership,
+        &run_units,
+        &readers,
+        &first_producer,
+    )
+    .into_iter()
+    .filter(|(run, _, _)| !folded_runs.contains(run))
+    .filter(|(_, _, consumer)| Some(*consumer) != output_op)
+    .collect();
     #[cfg(any(test, feature = "test-support"))]
     let redirects = if SCATTER_REDIRECT_DECLINED.with(std::cell::Cell::get) {
         Vec::new()
     } else {
         redirects
     };
-    let (readers, first_producer) = op_dataflow(program);
     let mut units = Vec::with_capacity(run_units.len());
     // The bind-time half of the collapse-eligibility query, one row per emitted unit. Built here
     // rather than by a later walk because this is the only place the unit's ops and the spec's
@@ -8988,7 +9037,7 @@ pub(crate) fn build_sequential(
     );
     runtime.source_plane_of_buffer = source_plane_of_buffer;
     runtime.route_activity = route_activity;
-    runtime.input_producers = input_producer_table(
+    (runtime.input_producers, runtime.channels_agree) = input_producer_table(
         &first_producer,
         &run_units,
         &unit_of_run,
@@ -9610,23 +9659,40 @@ fn response_owner_bindings(
         .collect()
 }
 
-/// Issue #987: for each bank unit, the earlier bank units its gather reads, or an empty row.
+/// [`Runtime`]'s `input_producers`: unit -> its producer units.
+type ProducerRows = Box<[Box<[u32]>]>;
+
+/// Issue #987: for each bank unit, the earlier units its gather reads, or an empty row; and
+/// (issue #1899) for each per-node effect op such a row reaches, its own producer, with the
+/// op's initial [`Runtime`] `channels_agree` facts.
 ///
 /// A `UnitBanking::Bank` unit gets a row only when **every** active lane's first-slot member
 ///
 /// * is a pure dedication copy of one undelayed, unsidechained input ([`bank_gather_source`]),
 /// * whose program producer (`first_producer`, the colour's last writer when the consumer is
-///   reached, so no op between rewrites the buffer) is a **final-slot** member of an earlier bank
-///   unit,
-/// * that renders the **same track** on that lane, with an unfolded scatter, and
+///   reached, so no op between rewrites the buffer) is an **admissible producer** of that lane's
+///   track, and
 /// * whose output buffer is the one the copy reads (no redirect repointed it).
 ///
-/// Then the planes this unit gathers on a block are exactly what those producers scattered on it,
-/// so "every producer's [`BankChain::planes_identical`]" is a proof that this block's input planes
-/// are bit-identical, from how the producers rendered and never from the samples. A per-node op
-/// between two chains (a delay, a sum, a sidechained stage) gets no row: that is a successor. A
-/// `BankGatheringTrackInput` unit gets none either, because the structural term already speaks
-/// for its input. Bind-time; allocates.
+/// An admissible producer of track `t` is either
+///
+/// * a **final-slot** member of an earlier bank unit that renders `t` on that lane, with an
+///   unfolded scatter; then "this block's planes are identical" is its chain's
+///   [`BankChain::planes_identical`]; or
+/// * (issue #1899) an earlier plain unit of `t` holding a per-node native effect
+///   ([`NodeKind::Effect`] or [`NodeKind::LiveControlEffect`]) with exactly one undelayed input,
+///   no sidechain and no staging, whose own input is in turn an admissible producer's output.
+///   Then the answer is the op's sticky `channels_agree` fact, which `execute` maintains: equal
+///   input planes over equal state with words that preserve agreement leave equal state and
+///   write equal planes, a dual block being a pure function of the three.
+///
+/// So "every producer's answer" is a proof that this block's input planes are bit-identical,
+/// from how the producers rendered and never from the samples. Every other per-node op between
+/// two chains gets no row: a `TrackDelay` is the track input itself and never sits between
+/// chains; a per-node pan or matrix exists only in test builds; and a route, sum or `SumDelay`
+/// feeds a bus, which is never collapse-eligible. A `BankGatheringTrackInput` unit gets none
+/// either, because the structural term already speaks for its input. An admitted op that no bank
+/// row reaches keeps no row, so nothing maintains a fact nothing reads. Bind-time; allocates.
 fn input_producer_table(
     first_producer: &[Option<usize>],
     run_units: &[(Vec<Membership>, Vec<usize>)],
@@ -9634,79 +9700,147 @@ fn input_producer_table(
     op_slot: &[Option<(usize, usize)>],
     units: &[RuntimeUnit],
     identity: &[UnitIdentity],
-) -> Box<[Box<[u32]>]> {
+) -> (ProducerRows, Box<[bool]>) {
     let mut table: Vec<Box<[u32]>> = vec![Box::default(); units.len()];
+    // The unit of an admissible producer of `track` for a consumer op whose copy reads `source`,
+    // given the rows of every earlier unit.
+    let producer_of =
+        |consumer: usize, source: u32, unit: usize, track: &str, table: &[Box<[u32]>]| {
+            let producer = first_producer[consumer]?;
+            let (before, member) = op_slot.get(producer).copied().flatten()?;
+            if before >= unit || track.is_empty() {
+                return None;
+            }
+            match &units[before] {
+                RuntimeUnit::Bank {
+                    members: earlier,
+                    lanes: earlier_lanes,
+                    chain,
+                    ..
+                } => {
+                    let lane_of = earlier
+                        .len()
+                        .checked_sub(*earlier_lanes)
+                        .and_then(|last| member.checked_sub(last))?;
+                    let producer_track = identity[before].lane_tracks.get(lane_of);
+                    if lane_of >= *earlier_lanes
+                        || producer_track.map(|track| &**track) != Some(track)
+                    {
+                        return None;
+                    }
+                    // `first_producer` is the colour's last writer, and `scatter_target` never
+                    // redirects into a bank member, so the copy reads the producer's own output; a
+                    // redirect into a plain consumer repoints both sides to the consumer's buffer.
+                    debug_assert_eq!(
+                        earlier[member].output, source,
+                        "a consumer reads its bank producer"
+                    );
+                    // A folded lane's only reader is a retired route op, never a bank member or an
+                    // effect op.
+                    debug_assert_ne!(
+                        chain.fold_lanes().get(lane_of),
+                        Some(&true),
+                        "a folded lane feeds no consumer"
+                    );
+                }
+                RuntimeUnit::Op(op) => {
+                    let producer_track = identity[before].lane_tracks.first();
+                    if table[before].is_empty()
+                        || op.output != source
+                        || producer_track.map(|track| &**track) != Some(track)
+                    {
+                        return None;
+                    }
+                }
+            }
+            u32::try_from(before).ok()
+        };
     for (run, (_, ops)) in run_units.iter().enumerate() {
         let Some(unit) = unit_of_run[run] else {
             continue;
         };
-        if identity[unit].banking != UnitBanking::Bank {
-            continue;
-        }
-        let RuntimeUnit::Bank { members, lanes, .. } = &units[unit] else {
-            continue;
-        };
-        let lanes = *lanes;
         let tracks = &identity[unit].lane_tracks;
-        if lanes == 0 || ops.len() < lanes || tracks.len() != lanes || members.len() < lanes {
-            continue;
-        }
-        let mut producers: Vec<u32> = Vec::with_capacity(lanes);
-        let every_lane = (0..lanes).all(|lane| {
-            let Some(source) = bank_gather_source(&members[lane]) else {
-                return false;
-            };
-            let Some(producer) = first_producer[ops[lane]] else {
-                return false;
-            };
-            let Some((before, member)) = op_slot.get(producer).copied().flatten() else {
-                return false;
-            };
-            let RuntimeUnit::Bank {
-                members: earlier,
-                lanes: earlier_lanes,
-                chain,
-                ..
-            } = &units[before]
-            else {
-                return false;
-            };
-            let Some(lane_of) = earlier
-                .len()
-                .checked_sub(*earlier_lanes)
-                .and_then(|last| member.checked_sub(last))
-            else {
-                return false;
-            };
-            let producer_track = identity[before].lane_tracks.get(lane_of);
-            let ok = before < unit
-                && lane_of < *earlier_lanes
-                && !tracks[lane].is_empty()
-                && producer_track == Some(&tracks[lane]);
-            if ok {
-                // `first_producer` is the colour's last writer, and `scatter_target` never
-                // redirects into a bank member, so the copy reads the producer's own output.
-                debug_assert_eq!(
-                    earlier[member].output, source,
-                    "a bank consumer reads its producer"
-                );
-                // A folded lane's only reader is a retired route op, never a bank member.
-                debug_assert_ne!(
-                    chain.fold_lanes().get(lane_of),
-                    Some(&true),
-                    "a folded lane feeds no bank"
-                );
-                producers.push(u32::try_from(before).unwrap_or(u32::MAX));
+        match &units[unit] {
+            // Issue #1899: a per-node effect op of one track, one undelayed input, no sidechain.
+            RuntimeUnit::Op(op) => {
+                let admissible = matches!(
+                    op.kind,
+                    NodeKind::Effect(_) | NodeKind::LiveControlEffect(_)
+                ) && op.sidechain.is_none()
+                    && op.staged.is_empty()
+                    && ops.len() == 1
+                    && tracks.len() == 1;
+                let [source] = &*op.inputs else {
+                    continue;
+                };
+                if let Some(producer) = admissible
+                    .then(|| producer_of(ops[0], *source, unit, &tracks[0], &table))
+                    .flatten()
+                {
+                    table[unit] = Box::new([producer]);
+                }
             }
-            ok
-        });
-        if every_lane {
-            producers.sort_unstable();
-            producers.dedup();
-            table[unit] = producers.into_boxed_slice();
+            RuntimeUnit::Bank { members, lanes, .. } => {
+                if identity[unit].banking != UnitBanking::Bank {
+                    continue;
+                }
+                let lanes = *lanes;
+                if lanes == 0 || ops.len() < lanes || tracks.len() != lanes || members.len() < lanes
+                {
+                    continue;
+                }
+                let producers: Option<Vec<u32>> = (0..lanes)
+                    .map(|lane| {
+                        let source = bank_gather_source(&members[lane])?;
+                        producer_of(ops[lane], source, unit, &tracks[lane], &table)
+                    })
+                    .collect();
+                if let Some(mut producers) = producers {
+                    producers.sort_unstable();
+                    producers.dedup();
+                    table[unit] = producers.into_boxed_slice();
+                }
+            }
         }
     }
-    table.into_boxed_slice()
+    // Keep only the op rows a bank row reaches: rows point strictly backwards, so one reverse walk
+    // marks every op on a path into some bank row.
+    let mut reached = vec![false; units.len()];
+    for unit in (0..units.len()).rev() {
+        let bank = matches!(units[unit], RuntimeUnit::Bank { .. });
+        if bank || reached[unit] {
+            for &producer in table[unit].iter() {
+                reached[producer as usize] = true;
+            }
+        }
+    }
+    let mut any_op = false;
+    for (unit, row) in table.iter_mut().enumerate() {
+        if matches!(units[unit], RuntimeUnit::Op(_)) && !row.is_empty() {
+            if reached[unit] {
+                any_op = true;
+            } else {
+                *row = Box::default();
+            }
+        }
+    }
+    // Each admitted op starts from its prepared words: a fresh instance's two channels hold the
+    // same state exactly when its words preserve agreement.
+    let channels_agree = if any_op {
+        units
+            .iter()
+            .zip(&table)
+            .map(|(unit, row)| match unit {
+                RuntimeUnit::Op(op) if !row.is_empty() => {
+                    op.kind.channel_symmetry().preserves_channel_agreement()
+                }
+                _ => false,
+            })
+            .collect()
+    } else {
+        Box::default()
+    };
+    (table.into_boxed_slice(), channels_agree)
 }
 
 /// The admission walk uses emitted adjacency: a retired run owns no execution boundary.
@@ -9846,6 +9980,13 @@ type ScatterRedirect = (usize, usize, usize);
 ///   slot -- declines. The chain's own ops are excluded because they all run *before* the scatter:
 ///   the first slot's reductions are the gather, and no later slot's op is executed at all.
 ///
+///   The check is one lookup per lane rather than a walk of the range (issue #967). The ops that
+///   name each buffer are indexed once per call, in schedule order, by [`ops_naming_each_buffer`];
+///   a lane binary-searches the consumer's buffer's list for `[chain's first op, consumer's op)`
+///   and declines if any op in that slice is not one of the chain's. That is the same set of ops
+///   the walk tested, so the answer is the same, and the bind stays linear when one route per
+///   track puts the consumer a track count of ops after the chain's first op.
+///
 ///   Ops outside that range cannot be a hazard. One before the chain's first op belongs to a unit
 ///   emitted at or before that op, so it has already run. One at or after the consumer's op that
 ///   names the buffer is a legitimate reader of the value the consumer produces, and a bank that
@@ -9854,8 +9995,10 @@ fn scatter_redirects(
     program: &ExecutionProgram,
     bank_membership: &BankMembership,
     run_units: &[(Vec<Membership>, Vec<usize>)],
+    readers: &[Vec<usize>],
+    first_producer: &[Option<usize>],
 ) -> Vec<ScatterRedirect> {
-    let (readers, first_producer) = op_dataflow(program);
+    let namers = ops_naming_each_buffer(program);
     let mut redirects = Vec::new();
     for (run, (membership, ops)) in run_units.iter().enumerate() {
         if membership.is_empty() || ops.is_empty() {
@@ -9866,6 +10009,9 @@ fn scatter_redirects(
         let Some(first_op) = ops.iter().min().copied() else {
             continue;
         };
+        // The chain's own ops, sorted, so the in-between clause asks membership in `O(log)`.
+        let mut sorted_run = ops.clone();
+        sorted_run.sort_unstable();
         let mut chain: Vec<(usize, Option<usize>)> = Vec::with_capacity(lanes);
         for lane in 0..lanes {
             let producer = ops[last + lane];
@@ -9874,9 +10020,10 @@ fn scatter_redirects(
                 scatter_target(
                     program,
                     bank_membership,
-                    &readers,
-                    &first_producer,
-                    ops,
+                    readers,
+                    first_producer,
+                    &namers,
+                    &sorted_run,
                     first_op,
                     producer,
                 ),
@@ -9980,12 +10127,17 @@ fn scatter_redirects(
 ///
 /// The consumer whose buffer one lane's scatter may land in, or `None`. See [`scatter_redirects`]
 /// for what each clause is defending.
+///
+/// `namers` is [`ops_naming_each_buffer`] of `program`, and `sorted_run` is the chain's ops in
+/// ascending order.
+#[allow(clippy::too_many_arguments)]
 fn scatter_target(
     program: &ExecutionProgram,
     membership: &BankMembership,
     readers: &[Vec<usize>],
     first_producer: &[Option<usize>],
-    run: &[usize],
+    namers: &[Vec<usize>],
+    sorted_run: &[usize],
     first_op: usize,
     producer: usize,
 ) -> Option<usize> {
@@ -10008,27 +10160,59 @@ fn scatter_target(
     if membership.contains_key(&consumer_op.node) {
         return None;
     }
-    let target = consumer_op.output;
-    for (index, op) in program.ops.iter().enumerate().take(consumer).skip(first_op) {
-        if run.contains(&index) {
-            continue;
-        }
-        if op_names_buffer(program, op, target) {
-            return None;
-        }
+    // Every op in `[first_op, consumer)` that names the consumer's buffer, in schedule order.
+    let named = namers
+        .get(consumer_op.output.0 as usize)
+        .map_or(&[][..], Vec::as_slice);
+    let from = named.partition_point(|&index| index < first_op);
+    let to = named.partition_point(|&index| index < consumer);
+    if named
+        .get(from..to)
+        .unwrap_or_default()
+        .iter()
+        .any(|index| sorted_run.binary_search(index).is_err())
+    {
+        return None;
     }
     Some(consumer)
+}
+
+/// Every buffer `op` mentions: its output, each main input, its sidechain, and the staging slot of
+/// each input that has one. A buffer may appear more than once.
+fn buffers_named_by<'a>(
+    program: &'a ExecutionProgram,
+    op: &'a Op,
+) -> impl Iterator<Item = crate::program::BufferRef> + 'a {
+    let inputs = program.inputs_of(op).iter().chain(op.sidechain.as_ref());
+    core::iter::once(op.output).chain(inputs.flat_map(|input| {
+        core::iter::once(input.buffer).chain(input.delay.map(|delay| delay.staging))
+    }))
 }
 
 /// Whether `op` mentions `buffer` at all: as its output, a main input, a sidechain, or the staging
 /// slot of either.
 fn op_names_buffer(program: &ExecutionProgram, op: &Op, buffer: crate::program::BufferRef) -> bool {
-    let staging_or_buffer = |input: &crate::program::InputRef| {
-        input.buffer == buffer || input.delay.is_some_and(|delay| delay.staging == buffer)
-    };
-    op.output == buffer
-        || program.inputs_of(op).iter().any(staging_or_buffer)
-        || op.sidechain.as_ref().is_some_and(staging_or_buffer)
+    buffers_named_by(program, op).any(|named| named == buffer)
+}
+
+/// For each buffer, the ops that name it in the sense of [`op_names_buffer`], ascending and each
+/// op once (issue #967). Built in one walk of the schedule, so its size is the program's total
+/// buffer mentions.
+fn ops_naming_each_buffer(program: &ExecutionProgram) -> Vec<Vec<usize>> {
+    let mut namers: Vec<Vec<usize>> = vec![Vec::new(); program.buffers as usize];
+    for (index, op) in program.ops.iter().enumerate() {
+        for buffer in buffers_named_by(program, op) {
+            let slot = buffer.0 as usize;
+            if slot >= namers.len() {
+                namers.resize_with(slot + 1, Vec::new);
+            }
+            // An op's mentions are visited together, so a repeat is always the list's last entry.
+            if namers[slot].last() != Some(&index) {
+                namers[slot].push(index);
+            }
+        }
+    }
+    namers
 }
 
 /// The **runtime's own** scatter-redirect decision, driven over a program that has no bindings.
@@ -10078,10 +10262,17 @@ pub(crate) fn scatter_redirects_over_program(
             (membership, run.iter().flatten().copied().collect())
         })
         .collect();
-    scatter_redirects(program, &bank_membership, &run_units)
-        .into_iter()
-        .map(|(run, member, consumer)| (run_units[run].1[member], consumer))
-        .collect()
+    let (readers, first_producer) = op_dataflow(program);
+    scatter_redirects(
+        program,
+        &bank_membership,
+        &run_units,
+        &readers,
+        &first_producer,
+    )
+    .into_iter()
+    .map(|(run, member, consumer)| (run_units[run].1[member], consumer))
+    .collect()
 }
 
 /// Point each admitted lane's scatter at its consumer's buffer and neutralise the consumer's

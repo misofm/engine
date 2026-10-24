@@ -81,6 +81,10 @@ const SHAPER: &str = "miso.transient-shaper";
 /// crate's collapsed-against-scalar bank test (`de-esser`'s `tests/bank.rs`); not yet an [`Fx`] of
 /// the chained differential.
 const DE_ESSER: &str = "miso.de-esser";
+/// Collapse-capable since #17 S1, with the same evidence as [`GATE`]: Part 2's twin test and its
+/// crate's collapsed-against-scalar bank test (`dynamic-eq`'s `tests/bank.rs`); not yet an [`Fx`]
+/// of the chained differential.
+const DYNAMIC_EQ: &str = "miso.dynamic-eq";
 
 /// `band-1-gain`, `band-1-frequency` of the EQ; `threshold`, `ratio`, `attack` of the compressor;
 /// `ceiling`, `release` of the limiter. Descriptor indices, not wire ids.
@@ -1620,14 +1624,15 @@ fn permutations<T: Copy>(atoms: &[T]) -> Vec<Vec<T>> {
 }
 
 /// The set of effects that can sit in a collapse-eligible cohort is exactly [`Fx`], [`GATE`],
-/// [`MULTIBAND`], [`SOFT_CLIP`], [`SHAPER`] and [`DE_ESSER`], and none of them declares a `Shared`
-/// automatable parameter.
+/// [`MULTIBAND`], [`SOFT_CLIP`], [`SHAPER`], [`DE_ESSER`] and [`DYNAMIC_EQ`], and none of them
+/// declares a `Shared` automatable parameter.
 ///
 /// The first half keeps the differential's coverage honest: an effect that gains a one-plane body
 /// joins the collapse, and with it the pairing rule's obligation, so it has to join [`Fx`] and the
-/// scenarios above, or carry its A3 evidence as [`GATE`], [`MULTIBAND`], [`SOFT_CLIP`], [`SHAPER`]
-/// and [`DE_ESSER`] do (Part 2's twin test pins them collapse-capable). The second half is why a
-/// `Shared` parameter needs no scenario on the collapsed path: none of the eight has one. (A
+/// scenarios above, or carry its A3 evidence as [`GATE`], [`MULTIBAND`], [`SOFT_CLIP`], [`SHAPER`],
+/// [`DE_ESSER`] and [`DYNAMIC_EQ`] do (Part 2's twin test pins them collapse-capable). The second
+/// half is why a `Shared` parameter needs no scenario on the collapsed path: none of the nine has
+/// one. (A
 /// `Shared` parameter's `Left` or `Right` span is refused on both channels by every launch effect,
 /// so a twin on one would move nothing either way; the drain-level suite covers the `Both`
 /// interleavings.)
@@ -1682,6 +1687,7 @@ fn every_collapse_capable_launch_effect_is_one_of_these() {
         SOFT_CLIP.to_owned(),
         SHAPER.to_owned(),
         DE_ESSER.to_owned(),
+        DYNAMIC_EQ.to_owned(),
     ];
     expected.sort();
     assert_eq!(capable, expected);
@@ -2017,6 +2023,14 @@ fn every_launch_effect_applies_a_twin_pair_with_channel_symmetric_validity() {
                     && line.contains("10 live PerLane parameters")
             }),
             "{DE_ESSER} {mode:?}: {covered:?}"
+        );
+        // #17 S2: the dynamic EQ's, on the same terms.
+        assert!(
+            covered.iter().any(|line| {
+                line.starts_with(&format!("{DYNAMIC_EQ} (bank, collapse-capable, {mode:?})"))
+                    && line.contains("48 live PerLane parameters")
+            }),
+            "{DYNAMIC_EQ} {mode:?}: {covered:?}"
         );
     }
     // #1872: the soft clip's A3 obligation. It supports `DualMono` only.

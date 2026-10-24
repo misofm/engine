@@ -30,6 +30,8 @@ enum Kind {
     Limiter,
     Multiband,
     DeEsser,
+    /// Not console-eligible: an insert that banks nowhere and so renders per node (issue #1899).
+    Delay,
 }
 
 const ELIGIBLE: [Kind; 7] = [
@@ -66,6 +68,7 @@ impl Kind {
             Self::Limiter => "miso.true-peak-limiter",
             Self::Multiband => "miso.multiband-compressor",
             Self::DeEsser => "miso.de-esser",
+            Self::Delay => "miso.delay",
         }
     }
     const fn name(self) -> &'static str {
@@ -78,6 +81,7 @@ impl Kind {
             Self::Limiter => "limiter",
             Self::Multiband => "multiband",
             Self::DeEsser => "de-esser",
+            Self::Delay => "delay",
         }
     }
 }
@@ -318,9 +322,53 @@ fn render_arm(
     blocks: u64,
     forced_off: bool,
 ) -> Rendered {
-    let envelope = artifact.envelope();
-    let frames = envelope.quantum.0 as usize;
+    let frames = artifact.envelope().quantum.0 as usize;
     let blocks = blocks.max(artifact.report().output_latency.0.div_ceil(frames as u64) + 4);
+    let (mut plan, sinks) = bind_arm(artifact, tracks, forced_off);
+    let mut output = Vec::new();
+    let mut pcm = vec![0.0_f32; frames * 2];
+    for block in 0..blocks {
+        plan.render(
+            RenderIo {
+                output: PlanarBufferMut::try_new(&mut pcm, 2, frames, frames).expect("output"),
+            },
+            RenderTime {
+                absolute_sample: block * frames as u64,
+            },
+        )
+        .expect("render");
+        output.extend(pcm.iter().map(|sample| folded(*sample)));
+    }
+    let collapse = plan.bank_collapse_counters();
+    let units = plan.unit_eligibility();
+    drop(plan);
+    Rendered {
+        collapse,
+        units,
+        blocks,
+        output,
+        tracks: sinks
+            .iter()
+            .map(|sink| {
+                sink.lock()
+                    .expect("recorder")
+                    .iter()
+                    .flat_map(|(left, right)| [left, right])
+                    .map(|bits| folded(f32::from_bits(*bits)))
+                    .collect()
+            })
+            .collect(),
+    }
+}
+
+/// Bind `artifact` as [`render_arm`] does, armed (or forced off) and not yet rendered: the plan and
+/// each track's post-matrix recorder.
+fn bind_arm(
+    artifact: PreparedGraphBuiltinsArtifact,
+    tracks: &[TrackShape],
+    forced_off: bool,
+) -> (PreparedRenderPlan, Vec<BitSink>) {
+    let envelope = artifact.envelope();
     let index_of = |track_id: &str| -> usize {
         track_id
             .strip_prefix("ch")
@@ -368,40 +416,7 @@ fn render_arm(
         .plan;
     plan.arm_mono_collapse(&|track: &str| !tracks[index_of(track)].feed.stereo);
     plan.force_mono_collapse_off(forced_off);
-    let mut output = Vec::new();
-    let mut pcm = vec![0.0_f32; frames * 2];
-    for block in 0..blocks {
-        plan.render(
-            RenderIo {
-                output: PlanarBufferMut::try_new(&mut pcm, 2, frames, frames).expect("output"),
-            },
-            RenderTime {
-                absolute_sample: block * frames as u64,
-            },
-        )
-        .expect("render");
-        output.extend(pcm.iter().map(|sample| folded(*sample)));
-    }
-    let collapse = plan.bank_collapse_counters();
-    let units = plan.unit_eligibility();
-    drop(plan);
-    Rendered {
-        collapse,
-        units,
-        blocks,
-        output,
-        tracks: sinks
-            .iter()
-            .map(|sink| {
-                sink.lock()
-                    .expect("recorder")
-                    .iter()
-                    .flat_map(|(left, right)| [left, right])
-                    .map(|bits| folded(f32::from_bits(*bits)))
-                    .collect()
-            })
-            .collect(),
-    }
+    (plan, sinks)
 }
 
 /// Every track's bits, and the output's, are the oracle's; `what` names the case.
@@ -1244,13 +1259,16 @@ fn inserts_at_mixed_link_modes_share_one_bank_per_slot() {
 ///
 /// Sixteen tracks on the collapse-capable console (EQ and compressor, then the limiter), every
 /// fourth one stereo; the even tracks carry a banked EQ insert, so their strip is three chains
-/// (the `pre_insert` chain, the insert chain and the `post_insert` chain) and every odd track's is
-/// one. Armed and forced off, every track's post-matrix bits and the session output agree, the
+/// (the `pre_insert` chain, the insert chain and the `post_insert` chain), and the odd tracks a
+/// delay insert, which banks nowhere, so theirs is two chains around a per-node op (issue #1899).
+/// Armed and forced off, every track's post-matrix bits and the session output agree, the
 /// forced-off arm never collapses, and every collapsible chain whose lanes are all mono -- the
-/// later ones included -- is armed and collapses on every block; no stereo chain is armed.
+/// later ones included, behind a bank or behind the symmetric delay -- is armed and collapses on
+/// every block; no stereo chain is armed.
 ///
 /// Red if a later chain stays unarmed (the #970 rule alone arms only the chains that gather the
-/// input), or if the producer table or the per-block term drops a lane whose producer collapsed.
+/// input; the #987 table alone gives the chain behind the delay no row), or if the producer table
+/// or the per-block term drops a lane whose producer collapsed.
 #[test]
 fn a_later_mono_chain_arms_on_its_producers_and_renders_the_dual_bits() {
     let console = Console {
@@ -1267,7 +1285,7 @@ fn a_later_mono_chain_arms_on_its_producers_and_renders_the_dual_bits() {
             inserts: if index % 2 == 0 {
                 vec![Kind::Eq]
             } else {
-                Vec::new()
+                vec![Kind::Delay]
             },
             bypass: vec![false; console.slots()],
             variant: index % VARIANTS.len(),
@@ -1275,6 +1293,15 @@ fn a_later_mono_chain_arms_on_its_producers_and_renders_the_dual_bits() {
         .collect();
     let model = console_session(&console, &tracks);
     let compile = || compile_at(&model, host_dispatch()).expect("compile");
+    assert_eq!(
+        compile()
+            .report()
+            .rack_cohorts
+            .scalar_in(RackLocation::Dynamic)
+            .len(),
+        8,
+        "every odd track's delay renders per node"
+    );
     let armed = render_arm(compile(), &tracks, 12, false);
     let dual = render_arm(compile(), &tracks, 12, true);
     assert_eq!(dual.collapse[0], 0, "the forced-off arm never collapses");
@@ -1315,5 +1342,500 @@ fn a_later_mono_chain_arms_on_its_producers_and_renders_the_dual_bits() {
         armed.collapse,
         [mono_chains * armed.blocks, mono_chains],
         "every mono chain, the later ones too, is armed and collapses on every block"
+    );
+}
+
+/// What [`Double`] does to the launch factory it wraps (issue #1899).
+#[derive(Clone, Copy)]
+enum Role {
+    /// Nothing: the launch factory.
+    Forward,
+    /// Prepares an [`EpisodeEffect`] around the launch instance and binds no bank.
+    Episode,
+    /// Binds a [`PassBank`] in place of the launch bank.
+    PassBank,
+}
+
+/// A launch factory, as [`Role`] changes it.
+struct Double {
+    delegate: Arc<dyn NativeEffectFactory>,
+    role: Role,
+}
+impl NativeEffectFactory for Double {
+    fn descriptor(&self) -> &'static effect_contract::EffectDescriptor {
+        self.delegate.descriptor()
+    }
+    fn prepare(
+        &self,
+        request: PrepareEffectRequest<'_>,
+    ) -> Result<effect_contract::PreparedEffect, EffectPrepareError> {
+        let mut prepared = self.delegate.prepare(request)?;
+        if matches!(self.role, Role::Episode) {
+            prepared.processor = Box::new(EpisodeEffect {
+                inner: prepared.processor,
+                quantum: u64::from(prepared.metadata.quantum),
+                asymmetric: false,
+            });
+        }
+        Ok(prepared)
+    }
+    fn bind_homogeneous_bank(
+        &self,
+        request: PrepareEffectBankRequest<'_>,
+    ) -> Result<Option<effect_contract::PreparedEffectBank>, EffectPrepareError> {
+        match self.role {
+            Role::Forward => self.delegate.bind_homogeneous_bank(request),
+            Role::Episode => Ok(None),
+            Role::PassBank => Ok(self.delegate.bind_homogeneous_bank(request)?.map(|bank| {
+                effect_contract::PreparedEffectBank {
+                    processor: Box::new(PassBank),
+                    metadata: bank.metadata,
+                }
+            })),
+        }
+    }
+}
+
+/// The blocks over which an [`EpisodeEffect`] treats its two channels differently.
+const EPISODE: core::ops::Range<u64> = 2..4;
+
+/// A per-node effect whose two channels part for [`EPISODE`] and then work alike again: over
+/// those blocks it inverts its left input before the wrapped instance runs, and its witness
+/// declines, as an effect's does while one channel's designed words differ; outside them it is the
+/// wrapped instance with the wrapped witness. What the episode left in the instance's state stays.
+struct EpisodeEffect {
+    inner: Box<dyn PreparedNativeEffect>,
+    quantum: u64,
+    /// Whether the last block was in the episode.
+    asymmetric: bool,
+}
+impl PreparedNativeEffect for EpisodeEffect {
+    fn retained_bytes(&self) -> u64 {
+        core::mem::size_of_val(&*self.inner) as u64 + self.inner.retained_bytes()
+    }
+    fn reset(&mut self, kind: effect_contract::ResetKind) {
+        self.inner.reset(kind);
+    }
+    fn process(&mut self, block: EffectProcessBlock<'_>) -> ProcessReport {
+        self.asymmetric = EPISODE.contains(&(block.first_sample / self.quantum));
+        if self.asymmetric {
+            for sample in block.left.iter_mut() {
+                *sample = -*sample;
+            }
+        }
+        self.inner.process(block)
+    }
+    fn snapshot_state_payload(
+        &self,
+        output: StatePayloadOutput<'_>,
+    ) -> Result<(), effect_contract::StatePayloadError> {
+        self.inner.snapshot_state_payload(output)
+    }
+    fn restore_state_payload(
+        &mut self,
+        state_layout_version: u32,
+        input: effect_contract::StatePayloadInput<'_>,
+    ) -> Result<(), effect_contract::StatePayloadError> {
+        self.inner
+            .restore_state_payload(state_layout_version, input)
+    }
+    fn channel_symmetry(&self) -> bool {
+        !self.asymmetric && self.inner.channel_symmetry()
+    }
+}
+
+/// A stateless pass-through bank that collapses and, holding no state, proves its channels agree
+/// (`BankStage::channels_agree`) on the first block its input agrees again. A stateful proving bank
+/// would have seen its own state differ while its input differed, and its proof would hide the
+/// op's.
+struct PassBank;
+impl PreparedNativeEffectBank for PassBank {
+    fn retained_bytes(&self) -> u64 {
+        0
+    }
+    fn reset(&mut self, _kind: effect_contract::ResetKind) {}
+    fn process_bank(
+        &mut self,
+        block: effect_contract::EffectBankProcessBlock<'_>,
+    ) -> effect_contract::BankProcessReport {
+        effect_contract::BankProcessReport::empty(block.width)
+    }
+    fn snapshot_track_state_payload(
+        &self,
+        _track_index: u32,
+        _output: StatePayloadOutput<'_>,
+    ) -> Result<(), effect_contract::StatePayloadError> {
+        Ok(())
+    }
+    fn restore_track_state_payload(
+        &mut self,
+        _track_index: u32,
+        _state_layout_version: u32,
+        _input: effect_contract::StatePayloadInput<'_>,
+    ) -> Result<(), effect_contract::StatePayloadError> {
+        Ok(())
+    }
+    fn lane_channel_symmetry(&self, _lane: usize) -> bool {
+        true
+    }
+    fn supports_mono_collapse(&self) -> bool {
+        true
+    }
+    fn channels_agree(&self) -> bool {
+        true
+    }
+}
+
+/// The launch EQ, compressor and delay, and the gate as `role` makes it.
+fn double_registry(delay: Role) -> NativeEffectRegistry {
+    let launch = launch_native_effect_registry().expect("launch registry");
+    let double = |kind: Kind, role| {
+        Box::new(Double {
+            delegate: launch
+                .get_shared_ascii(kind.native_id())
+                .expect("launch factory"),
+            role,
+        }) as Box<dyn NativeEffectFactory>
+    };
+    NativeEffectRegistry::new([
+        double(Kind::Eq, Role::Forward),
+        double(Kind::Comp, Role::Forward),
+        double(Kind::Delay, delay),
+        double(Kind::Gate, Role::PassBank),
+    ])
+    .expect("double registry")
+}
+
+/// `count` mono tracks on the console `[EQ] / [gate]`, each with `insert` as its one insert, which
+/// renders per node between the two chains.
+fn split_strip_tracks(count: usize, insert: Kind) -> (Console, Vec<TrackShape>) {
+    let console = Console {
+        pre: vec![Kind::Eq],
+        post: vec![Kind::Gate],
+    };
+    let tracks = (0..count)
+        .map(|index| TrackShape {
+            feed: Feed {
+                gain: 0.5,
+                stereo: false,
+                poison: false,
+            },
+            inserts: vec![insert],
+            bypass: vec![false; console.slots()],
+            variant: index % VARIANTS.len(),
+        })
+        .collect();
+    (console, tracks)
+}
+
+/// Issue #1899, the sticky state term: a later chain behind a per-node effect whose channels
+/// parted once stays dual, though the effect's input and words are symmetric again.
+///
+/// Eight mono tracks, `[EQ] -> delay (5 ms, per node) -> [gate]`, where the delay is an
+/// [`EpisodeEffect`] and the gate a [`PassBank`], so the later chain can prove its own agreement
+/// back. Over [`EPISODE`] the delay inverts its left input and declines; after it, the first chain
+/// still collapses (identical planes) and the delay's words agree, but its line holds the episode
+/// and echoes it into the left plane only. Armed and forced off render the same bits.
+///
+/// Red if the delay's fact is this block's input and words alone (the sticky `&&` dropped in
+/// `Runtime::execute`): the later chain re-engages after the episode and copies the left echo over
+/// the right one. No host-core probe sees that mutation: none has an episode followed by
+/// symmetric words, and a stateful proving bank behind the op still holds a state that differs.
+#[test]
+fn a_chain_behind_a_per_node_effect_whose_channels_parted_stays_dual() {
+    let (console, tracks) = split_strip_tracks(8, Kind::Delay);
+    let mut model = console_session(&console, &tracks);
+    for track in &mut model.tracks {
+        track.inserts.effects[0].params = vec![EffectParam {
+            parameter_id: 1,
+            channel: ParameterChannel::Both,
+            unit: ParameterUnit::Milliseconds,
+            value: 5.0,
+        }];
+    }
+    let registry = double_registry(Role::Episode);
+    let compile = || {
+        try_compile_console_model_at(&model, 1_899, &[], host_dispatch(), &registry)
+            .unwrap_or_else(|diagnostics| panic!("compile: {diagnostics:?}"))
+    };
+    let armed = render_arm(compile(), &tracks, 16, false);
+    let dual = render_arm(compile(), &tracks, 16, true);
+    assert_eq!(dual.collapse[0], 0, "the forced-off arm never collapses");
+    let after = dual.tracks[0].len() / dual.blocks as usize * EPISODE.end as usize;
+    assert!(
+        dual.tracks[0][after..]
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .any(|[left, right]| left != right),
+        "the delay echoes the episode into one plane after it ends"
+    );
+    assert!(
+        armed
+            .units
+            .iter()
+            .any(|unit| unit.banked && unit.armed_on_input),
+        "the chain behind the delay is armed on it"
+    );
+    assert!(armed.collapse[0] > 0, "the first chain collapses");
+    assert_renders_the_oracle(
+        &armed,
+        &dual,
+        "a chain behind an episode, armed against dual",
+    );
+}
+
+/// Issue #1899, admission: a sidechained per-node effect is no producer, because its words and its
+/// main input say nothing about the key it reads.
+///
+/// `W` mono tracks, `[EQ] -> compressor (per node) -> [gate]`, each compressor keyed by the input of
+/// one stereo track. The compressor's main input is identical on both planes and its words agree,
+/// but the key is not, so it writes two different planes. Armed and forced off render the same
+/// bits, and no chain behind a keyed compressor is armed on its input.
+///
+/// Red if admission drops the sidechain clause (`input_producer_table`): the later chain collapses
+/// and copies the left plane over the right one.
+#[test]
+fn a_chain_behind_a_sidechained_per_node_effect_is_not_armed_on_it() {
+    let lanes = BankWidth::for_backend(host_dispatch())
+        .expect("a vector host")
+        .lanes() as usize;
+    let (console, mut tracks) = split_strip_tracks(lanes + 1, Kind::Comp);
+    let key = tracks.len() - 1;
+    tracks[key].feed.stereo = true;
+    tracks[key].inserts.clear();
+    let mut model = console_session(&console, &tracks);
+    for track in &mut model.tracks[..key] {
+        track.inserts.effects[0].sidechain = SidechainDeclaration::Routed(Sidechain {
+            source: RouteSource::Track {
+                track_id: StableId::parse(&format!("ch{key:02}")).expect("key track"),
+                tap: session::SendTap::Input,
+            },
+            port_id: StableId::parse("sidechain-in").expect("port id"),
+        });
+    }
+    let registry = double_registry(Role::Forward);
+    let compile = || {
+        try_compile_console_model_at(&model, 1_899, &[], host_dispatch(), &registry)
+            .unwrap_or_else(|diagnostics| panic!("compile: {diagnostics:?}"))
+    };
+    let armed = render_arm(compile(), &tracks, 12, false);
+    let dual = render_arm(compile(), &tracks, 12, true);
+    assert_eq!(dual.collapse[0], 0, "the forced-off arm never collapses");
+    assert!(
+        dual.tracks[0]
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .any(|[left, right]| left != right),
+        "the keyed compressor writes two different planes"
+    );
+    assert!(
+        !armed.units.iter().any(|unit| unit.armed_on_input),
+        "no chain is armed on a keyed compressor"
+    );
+    assert!(armed.collapse[0] > 0, "the first chains collapse");
+    assert_renders_the_oracle(
+        &armed,
+        &dual,
+        "a chain behind a keyed compressor, armed against dual",
+    );
+}
+
+/// [`try_compile_console_model_at`] at the host's width, with every delay insert given a live
+/// control lane, so it binds as a live-controlled per-node instance a plan swap can move.
+fn compile_with_live_delays(
+    model: &session::SessionModel,
+    registry: &NativeEffectRegistry,
+) -> PreparedGraphBuiltinsArtifact {
+    let session = compile_session(
+        model,
+        CompileCaps {
+            max_compiled_model_bytes: u64::MAX,
+            max_requested_runtime_bytes: u64::MAX,
+            max_single_allocation_bytes: u64::MAX,
+            max_queue_items: u64::MAX,
+            max_source_ring_frames: u64::MAX,
+            max_source_ring_bytes: u64::MAX,
+        },
+    )
+    .expect("compiled console model");
+    let builtins = prepare_session_builtins(
+        &session,
+        &[],
+        BuiltinCompileCaps {
+            maximum_total_state_bytes: u64::MAX,
+            maximum_total_retained_payload_bytes: u64::MAX,
+            maximum_total_meter_items: u64::MAX,
+            maximum_total_meter_bytes: u64::MAX,
+            maximum_single_allocation_bytes: u64::MAX,
+            maximum_meter_streams: u64::MAX,
+            maximum_period_frames: u32::MAX,
+            maximum_peak_hold_frames: u32::MAX,
+            maximum_smoothing_samples: u32::MAX,
+        },
+    )
+    .expect("prepared console builtins");
+    let mut effects = prepare_native_session_effects(
+        &session,
+        registry,
+        EffectCompileCaps {
+            maximum_total_state_bytes: 1 << 22,
+            maximum_scratch_bytes: 1 << 20,
+            maximum_automation_spans_per_block: 32,
+        },
+    )
+    .expect("prepared console effects");
+    for entry in effects
+        .entries
+        .iter_mut()
+        .filter(|entry| entry.factory.descriptor().id.as_str() == Kind::Delay.native_id())
+    {
+        let (_writer, lane) = effect_contract::effect_control_lane(
+            effect_contract::EffectLaneSpec {
+                shape: effect_contract::EffectLaneShape::from_descriptor(
+                    entry.factory.descriptor(),
+                    0,
+                ),
+                bypass: entry.initial_bypass,
+                observation_depth: 0,
+            },
+            &engine::realtime::LiveValuesSuperseded::new(),
+        )
+        .expect("a lane");
+        entry.control = Some(Box::new(lane));
+    }
+    GraphCompiler::compile_with_builtins(GraphBuiltinsCompileRequest {
+        input_floors: Default::default(),
+        dispatch: host_dispatch(),
+        plan_id: 1_899,
+        effects,
+        builtins,
+        caps: integration_caps(),
+        gain_liveness: crate::GainLiveness::FIXED,
+    })
+    .unwrap_or_else(|failure| panic!("compile: {:?}", failure.diagnostics))
+}
+
+/// Issue #1899 R3, the swap carry: a per-node instance's agreement fact travels with its state.
+///
+/// The sticky rig's session (`[EQ] -> live-controlled delay (5 ms, per node) -> [gate]`, the delay
+/// an [`EpisodeEffect`], the gate a [`PassBank`]), rendered by a predecessor plan through
+/// [`EPISODE`] and two blocks past it, then by a successor that takes every delay instance by
+/// pointer (`LiveControlEffect::move_from`) and nothing else. The successor's later chains are
+/// fresh, so they agree and would collapse at once; the delay's line holds the episode's echo, so
+/// the successor must start from the predecessor's `false`. Armed and forced off render the same
+/// bits.
+///
+/// Red if the carry hands the successor `true` (node to node, or lane to node): the fresh later
+/// chain collapses on the swap block and copies the left echo over the right one.
+#[test]
+fn a_swap_carries_a_per_node_effects_agreement_with_its_state() {
+    const SWAP: u64 = 6;
+    const BLOCKS: u64 = 12;
+    let (console, tracks) = split_strip_tracks(8, Kind::Delay);
+    let mut model = console_session(&console, &tracks);
+    for track in &mut model.tracks {
+        track.inserts.effects[0].params = vec![EffectParam {
+            parameter_id: 1,
+            channel: ParameterChannel::Both,
+            unit: ParameterUnit::Milliseconds,
+            value: 5.0,
+        }];
+    }
+    let registry = double_registry(Role::Episode);
+    // Each track's post-matrix bits over the predecessor's blocks, then the successor's.
+    let run = |forced_off: bool| -> Vec<Vec<u32>> {
+        let (mut before, before_sinks) = bind_arm(
+            compile_with_live_delays(&model, &registry),
+            &tracks,
+            forced_off,
+        );
+        let (mut after, after_sinks) = bind_arm(
+            compile_with_live_delays(&model, &registry),
+            &tracks,
+            forced_off,
+        );
+        let lanes = |plan: &mut PreparedRenderPlan| {
+            graph::bank_effect_lanes(plan)
+                .expect("a graph plan")
+                .into_iter()
+                .filter(|(_, lane)| matches!(lane.location, graph::GraphEffectSite::Node(_)))
+                .collect::<BTreeMap<_, _>>()
+        };
+        let predecessor = lanes(&mut before);
+        let moves: Vec<_> = lanes(&mut after)
+            .into_iter()
+            .map(|(key, lane)| graph::GraphEffectMove {
+                successor: lane.location,
+                predecessor: predecessor[&key].location,
+            })
+            .collect();
+        assert_eq!(moves.len(), tracks.len(), "every delay instance moves");
+        graph::install_carry_program(
+            &mut after,
+            graph::GraphCarryProgram {
+                predecessor: graph::plan_identity(&mut before).expect("a graph plan"),
+                sources: Box::default(),
+                timeline: false,
+            },
+        )
+        .expect("carry program");
+        graph::install_effect_carry(&mut after, moves, 0).expect("effect carry");
+        let frames = after.envelope().quantum.0 as usize;
+        let mut pcm = vec![0.0_f32; frames * 2];
+        let mut block = |plan: &mut PreparedRenderPlan, index: u64| {
+            plan.render(
+                RenderIo {
+                    output: PlanarBufferMut::try_new(&mut pcm, 2, frames, frames).expect("output"),
+                },
+                RenderTime {
+                    absolute_sample: index * frames as u64,
+                },
+            )
+            .expect("render");
+        };
+        for index in 0..SWAP {
+            block(&mut before, index);
+        }
+        assert_eq!(
+            after.adopt_predecessor_plan(&mut before),
+            engine::realtime::CarryOutcome::Carried
+        );
+        for index in SWAP..BLOCKS {
+            block(&mut after, index);
+        }
+        drop((before, after));
+        before_sinks
+            .iter()
+            .zip(&after_sinks)
+            .map(|(before, after)| {
+                let mut bits: Vec<u32> = Vec::new();
+                for sink in [before, after] {
+                    bits.extend(
+                        sink.lock()
+                            .expect("recorder")
+                            .iter()
+                            .flat_map(|(left, right)| [*left, *right]),
+                    );
+                }
+                bits
+            })
+            .collect()
+    };
+    let (armed, dual) = (run(false), run(true));
+    let frames = armed[0].len() / BLOCKS as usize;
+    let swap = SWAP as usize * frames;
+    assert!(
+        dual[0][swap..swap + frames]
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .any(|[left, right]| left != right),
+        "the carried delay echoes the episode into one plane on the swap block"
+    );
+    assert!(
+        armed == dual,
+        "the swapped render, armed against forced off"
     );
 }

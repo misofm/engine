@@ -591,7 +591,8 @@ impl FaderReader {
     ///
     /// Every applied value is applied even if an earlier one is refused; the first refusal is
     /// returned after the last. Each applied read adds the writes it replaced to the session
-    /// counter (`read_counted`). It allocates nothing and takes no lock.
+    /// counter (`read_counted`). It allocates nothing and takes no lock. `Ok(true)`: no cell was
+    /// pending, so the read found nothing to do (issue #1778's quiet walk).
     fn apply_latest(
         &mut self,
         snapshot: LiveSnapshot,
@@ -600,11 +601,11 @@ impl FaderReader {
             BuiltinLaneSelector,
             [u32; FADER_CELL_WORDS],
         ) -> Result<(), BuiltinParameterError>,
-    ) -> Result<(), BuiltinParameterError> {
+    ) -> Result<bool, BuiltinParameterError> {
         let carried = self.marks.begin();
         let pending = self.dirty.pending(&self.lane.dirty);
         if pending == 0 {
-            return Ok(());
+            return Ok(true);
         }
         let mut applied = [None; FADER_CELLS];
         for (index, slot) in applied.iter_mut().enumerate() {
@@ -642,7 +643,7 @@ impl FaderReader {
                 }
             }
         }
-        first_error
+        first_error.map(|()| false)
     }
 }
 // REALTIME_POLICY_END
@@ -661,15 +662,16 @@ struct MatrixReader {
 impl MatrixReader {
     /// Read the stage's pending cell under `snapshot` and apply its newest value in range, if
     /// any. The first refusal is returned; the applied read adds the writes it replaced to the session counter.
+    /// `Ok(true)`: the cell was not pending (issue #1778's quiet walk).
     fn apply_latest(
         &mut self,
         snapshot: LiveSnapshot,
         mut apply: impl FnMut(Matrix2x2, u32) -> Result<(), BuiltinParameterError>,
-    ) -> Result<(), BuiltinParameterError> {
+    ) -> Result<bool, BuiltinParameterError> {
         let carried = self.marks.begin();
         let pending = self.dirty.pending(&self.lane.dirty);
         if pending == 0 {
-            return Ok(());
+            return Ok(true);
         }
         let CellRead::Applied { words, .. } = self.cell.read_counted(
             &self.lane.cell,
@@ -678,7 +680,7 @@ impl MatrixReader {
             0,
             &self.superseded,
         ) else {
-            return Ok(());
+            return Ok(false);
         };
         self.marks.applied(0, carried, &self.superseded);
         apply(
@@ -690,6 +692,7 @@ impl MatrixReader {
             },
             words[4],
         )
+        .map(|()| false)
     }
 }
 // REALTIME_POLICY_END
@@ -3983,17 +3986,18 @@ impl InputReader {
     ///
     /// Every applied value is applied even if an earlier one is refused; the first refusal is
     /// returned after the last. Each applied read adds the writes it replaced to the session
-    /// counter (`read_counted`). It allocates nothing and takes no lock.
+    /// counter (`read_counted`). It allocates nothing and takes no lock. `Ok(true)`: no cell was
+    /// pending, so the read found nothing to do (issue #1778's quiet walk).
     fn apply_latest(
         &mut self,
         snapshot: LiveSnapshot,
         witness: &mut ChannelSymmetryWitness,
         mut apply: impl FnMut(TrackInputRecord) -> Result<(), BuiltinParameterError>,
-    ) -> Result<(), BuiltinParameterError> {
+    ) -> Result<bool, BuiltinParameterError> {
         let carried = self.marks.begin();
         let pending = self.dirty.pending(&self.lane.dirty);
         if pending == 0 {
-            return Ok(());
+            return Ok(true);
         }
         let Self {
             lane,
@@ -4094,7 +4098,7 @@ impl InputReader {
                 });
             }
         }
-        first_error
+        first_error.map(|()| false)
     }
 }
 // REALTIME_POLICY_END
@@ -4351,6 +4355,10 @@ struct BuiltinBankProcessor {
     /// [`Self::lane_symmetry`] for why that is the conservative half of the M3 re-engage rule
     /// rather than a missing feature.
     live: [ChannelSymmetryWitness; MAXIMUM_BANK_LANES],
+    /// The snapshot publication of the last block drain that walked every lane and found no cell
+    /// pending, or `None` (issue #1778): see [`quiet_walk_skips`]. Every method that changes a
+    /// lane's reader outside the block drain clears it.
+    quiet_at: Option<u64>,
     process_calls: u64,
     frames_processed: u64,
 }
@@ -4372,6 +4380,48 @@ const _: () = {
 const EVERY_LANE: u8 = u8::MAX;
 
 // REALTIME_POLICY_BEGIN
+/// Whether a builtin bank's block drain under `snapshot` skips its lane walk (issue #1778): the
+/// last block drain walked every lane under the same publication and found no cell pending
+/// (`quiet_at`, set by [`quiet_mark`]).
+///
+/// The skip is exact, by the argument #1763 makes for the effect rack's quiet slot: every write of
+/// a publication at or below `S` is stored and marked before `S` is published, so the walk under
+/// `S` that set the mark would have seen its dirty bit; it saw none, and no later write can carry
+/// a publication at or below `S`. A write above `S` waits in its dirty word, or in the deferred
+/// mask, for the first drain under a newer publication, which walks. The skipped walk's
+/// `CarryMarks::begin` would change nothing: the marking walk already took `carried` and cleared
+/// `applied`, and applied nothing. [`LiveSnapshot::ALL`] is not a publication and never skips.
+fn quiet_walk_skips(quiet_at: Option<u64>, snapshot: LiveSnapshot) -> bool {
+    snapshot != LiveSnapshot::ALL && quiet_at == Some(snapshot.publication())
+}
+
+/// The quiet mark a block drain under `snapshot` leaves (issue #1778): `snapshot`'s publication
+/// when the drain walked every lane and each found no cell pending (`every_lane_quiet`), else
+/// `None`.
+fn quiet_mark(snapshot: LiveSnapshot, every_lane_quiet: bool) -> Option<u64> {
+    every_lane_quiet.then_some(snapshot.publication())
+}
+
+/// Test-only: which builtin bank skipped a lane walk (issue #1778).
+#[cfg(any(test, feature = "test-support"))]
+#[derive(Clone, Copy)]
+enum QuietBank {
+    Input,
+    Fader,
+    Matrix,
+}
+
+/// Test-only: count one skipped lane walk of `bank` on this thread. Allocation-free: a copy in
+/// and out of a fixed array. Not compiled into a release artifact.
+#[cfg(any(test, feature = "test-support"))]
+fn test_only_count_quiet_skip(bank: QuietBank) {
+    QUIET_WALK_SKIPS.with(|cell| {
+        let mut counts = cell.get();
+        counts[bank as usize] = counts[bank as usize].saturating_add(1);
+        cell.set(counts);
+    });
+}
+
 /// Whether bit `lane` of `lanes` is set. A bank has at most [`MAXIMUM_BANK_LANES`] lanes.
 const fn lane_selected(lanes: u8, lane: usize) -> bool {
     debug_assert!(lane < MAXIMUM_BANK_LANES);
@@ -4450,10 +4500,12 @@ impl BuiltinBankProcessor {
             bank,
             controls,
             live,
+            quiet_at,
             ..
         } = self;
         let mut refused = 0_usize;
         let mut first_error = Ok(());
+        let mut quiet = lanes == EVERY_LANE;
         for (lane, control) in controls.iter_mut().enumerate() {
             if !lane_selected(lanes, lane) {
                 continue;
@@ -4496,8 +4548,11 @@ impl BuiltinBankProcessor {
                     other => other,
                 }
             });
-            first_error = first_error.and(drained);
+            quiet &= matches!(drained, Ok(true));
+            first_error = first_error.and(drained.map(|_| ()));
         }
+        // A carry drain leaves no mark: it changed lanes outside the block drain.
+        *quiet_at = quiet_mark(snapshot, quiet && !carry);
         first_error.map(|()| refused)
     }
 
@@ -4546,6 +4601,11 @@ impl GraphPreparedBuiltinBankProcessor for BuiltinBankProcessor {
         snapshot: LiveSnapshot,
     ) -> Result<(), RenderError> {
         let _ = first_sample;
+        if quiet_walk_skips(self.quiet_at, snapshot) {
+            #[cfg(any(test, feature = "test-support"))]
+            test_only_count_quiet_skip(QuietBank::Input);
+            return Ok(());
+        }
         self.drain_controls(snapshot, EVERY_LANE, false)
             .map(|_| ())
             .map_err(render_error)
@@ -4622,6 +4682,7 @@ impl GraphPreparedBuiltinBankProcessor for BuiltinBankProcessor {
             return false;
         }
         *slot = live;
+        self.quiet_at = None;
         adopt_carry_marks(
             self.controls.get_mut(lane),
             predecessor.controls.get(predecessor_lane),
@@ -4680,13 +4741,17 @@ impl GraphPreparedBuiltinBankProcessor for BuiltinBankProcessor {
         }
         // One path for both peers: `None` names this bank's own field, so no field can be
         // exchanged for one kind of peer and left behind for the other.
+        self.quiet_at = None;
         let (bank, controls, live) = match other {
             None => (None, None, None),
-            Some(other) => (
-                Some(&mut other.bank),
-                Some(&mut *other.controls),
-                Some(&mut other.live[..]),
-            ),
+            Some(other) => {
+                other.quiet_at = None;
+                (
+                    Some(&mut other.bank),
+                    Some(&mut *other.controls),
+                    Some(&mut other.live[..]),
+                )
+            }
         };
         let swapped = self.bank.swap_lanes(lane, bank, peer_lane).is_ok()
             && exchange_lane_slots(&mut self.controls, lane, controls, peer_lane)
@@ -4823,6 +4888,10 @@ struct FaderBankProcessor {
     /// member's fader is automated, `None` on a lane that is not; empty (no allocation) when no
     /// member is.
     automation: Box<[Option<LaneFaderAutomation>]>,
+    /// The snapshot publication of the last block drain that walked every lane and found no cell
+    /// pending, or `None` (issue #1778): see [`quiet_walk_skips`]. Every method that changes a
+    /// lane's reader outside the block drain clears it.
+    quiet_at: Option<u64>,
     process_calls: u64,
     frames_processed: u64,
 }
@@ -4976,7 +5045,6 @@ impl FaderBankProcessor {
         self.frames_processed = self.frames_processed.saturating_add(u64::from(frames));
         took
     }
-    // REALTIME_POLICY_END
 
     /// The block drain under `snapshot`: the body of `begin_block`.
     fn drain(&mut self, snapshot: LiveSnapshot) -> Result<(), RenderError> {
@@ -4984,9 +5052,19 @@ impl FaderBankProcessor {
             bank,
             controls,
             automation,
+            quiet_at,
             ..
         } = self;
-        let result = drain_fader_controls(bank, controls, automation, snapshot, EVERY_LANE);
+        let result = if quiet_walk_skips(*quiet_at, snapshot) {
+            #[cfg(any(test, feature = "test-support"))]
+            test_only_count_quiet_skip(QuietBank::Fader);
+            Ok(())
+        } else {
+            let drained = drain_fader_controls(bank, controls, automation, snapshot, EVERY_LANE);
+            *quiet_at = quiet_mark(snapshot, matches!(drained, Ok(true)));
+            drained.map(|_| ())
+        };
+        // The offsets cells are not the walk's: they are read every block (automated lanes only).
         read_fader_offsets(bank, controls, automation, snapshot);
         result
     }
@@ -4995,7 +5073,6 @@ impl FaderBankProcessor {
     /// block drain with [`LiveSnapshot::ALL`], the same code (#1312 D6). The plan-swap carry calls
     /// it on a quiescent predecessor, for the lanes it exports (#1277); no production render path
     /// takes `ALL`.
-    // REALTIME_POLICY_BEGIN
     ///
     /// Each carried automated lane's offsets cells are read the same way (#1648 D2, U3 fold):
     /// the newest record is kept for the successor's first block, which applies it
@@ -5005,9 +5082,12 @@ impl FaderBankProcessor {
             bank,
             controls,
             automation,
+            quiet_at,
             ..
         } = self;
-        let result = drain_fader_controls(bank, controls, automation, LiveSnapshot::ALL, lanes);
+        *quiet_at = None;
+        let result =
+            drain_fader_controls(bank, controls, automation, LiveSnapshot::ALL, lanes).map(|_| ());
         for (lane, slot) in automated_lanes(automation) {
             if !lane_selected(lanes, lane) {
                 continue;
@@ -5043,6 +5123,7 @@ impl FaderBankProcessor {
             .export_lane(predecessor_lane)
             .is_some_and(|state| self.bank.import_lane(lane, &state).is_ok());
         if adopted {
+            self.quiet_at = None;
             adopt_carry_marks(
                 self.controls.get_mut(lane),
                 predecessor.controls.get(predecessor_lane),
@@ -5227,13 +5308,17 @@ impl GraphPreparedBuiltinBankProcessor for FaderBankProcessor {
             return false;
         }
         // One path for both peers, as the input bank's.
+        self.quiet_at = None;
         let (bank, controls, automation) = match other {
             None => (None, None, None),
-            Some(other) => (
-                Some(&mut other.bank),
-                Some(&mut *other.controls),
-                Some(&mut *other.automation),
-            ),
+            Some(other) => {
+                other.quiet_at = None;
+                (
+                    Some(&mut other.bank),
+                    Some(&mut *other.controls),
+                    Some(&mut *other.automation),
+                )
+            }
         };
         // A bank without slots trades only a lane without automation (`automation_swap_fits`):
         // both lanes' slots are `None`, and nothing moves.
@@ -5400,22 +5485,44 @@ struct MatrixBankProcessor {
     bank: BuiltinMatrixBank,
     /// One channel per bank lane; `None` for a lane no live control addresses.
     controls: Box<[Option<MatrixReader>]>,
+    /// The snapshot publication of the last block drain that walked every lane and found no cell
+    /// pending, or `None` (issue #1778): see [`quiet_walk_skips`]. Every method that changes a
+    /// lane's reader outside the block drain clears it.
+    quiet_at: Option<u64>,
     process_calls: u64,
     frames_processed: u64,
 }
 
 impl MatrixBankProcessor {
+    // REALTIME_POLICY_BEGIN
     /// The block drain under `snapshot`: the body of `begin_block`.
     fn drain(&mut self, snapshot: LiveSnapshot) -> Result<(), RenderError> {
-        let Self { bank, controls, .. } = self;
-        drain_matrix_controls(bank, controls, snapshot, EVERY_LANE)
+        if quiet_walk_skips(self.quiet_at, snapshot) {
+            #[cfg(any(test, feature = "test-support"))]
+            test_only_count_quiet_skip(QuietBank::Matrix);
+            return Ok(());
+        }
+        let Self {
+            bank,
+            controls,
+            quiet_at,
+            ..
+        } = self;
+        let drained = drain_matrix_controls(bank, controls, snapshot, EVERY_LANE);
+        *quiet_at = quiet_mark(snapshot, matches!(drained, Ok(true)));
+        drained.map(|_| ())
     }
 
     /// The matrix cells' counterpart of [`FaderBankProcessor::apply_pending`].
-    // REALTIME_POLICY_BEGIN
     fn apply_pending(&mut self, lanes: u8) -> Result<(), RenderError> {
-        let Self { bank, controls, .. } = self;
-        drain_matrix_controls(bank, controls, LiveSnapshot::ALL, lanes)
+        let Self {
+            bank,
+            controls,
+            quiet_at,
+            ..
+        } = self;
+        *quiet_at = None;
+        drain_matrix_controls(bank, controls, LiveSnapshot::ALL, lanes).map(|_| ())
     }
 
     /// The matrix bank's counterpart of [`FaderBankProcessor::can_adopt_lane`].
@@ -5432,6 +5539,7 @@ impl MatrixBankProcessor {
             .export_lane(predecessor_lane)
             .is_some_and(|state| self.bank.import_lane(lane, &state).is_ok());
         if adopted {
+            self.quiet_at = None;
             adopt_carry_marks(
                 self.controls.get_mut(lane),
                 predecessor.controls.get(predecessor_lane),
@@ -5546,9 +5654,13 @@ impl GraphPreparedBuiltinBankProcessor for MatrixBankProcessor {
             return false;
         }
         // One path for both peers, as the input bank's.
+        self.quiet_at = None;
         let (bank, controls) = match other {
             None => (None, None),
-            Some(other) => (Some(&mut other.bank), Some(&mut *other.controls)),
+            Some(other) => {
+                other.quiet_at = None;
+                (Some(&mut other.bank), Some(&mut *other.controls))
+            }
         };
         let swapped = self.bank.swap_lanes(lane, bank, peer_lane).is_ok()
             && exchange_lane_slots(&mut self.controls, lane, controls, peer_lane);
@@ -5679,6 +5791,17 @@ impl TestOnlyWriteGate for TestOnlyGate {
 #[cfg(any(test, feature = "test-support"))]
 thread_local! {
     static FADER_MATRIX_LIVE_WITNESS: std::cell::Cell<[u64; 2]> = const { std::cell::Cell::new([0; 2]) };
+    /// Issue #1778: the lane walks this thread's input, fader and matrix banks skipped.
+    static QUIET_WALK_SKIPS: std::cell::Cell<[u64; 3]> = const { std::cell::Cell::new([0; 3]) };
+}
+
+/// Test-only (#1778): take the lane walks this thread's input, fader and matrix banks skipped
+/// since the last take, in that order.
+#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
+#[must_use]
+pub fn test_only_take_quiet_walk_skips() -> [u64; 3] {
+    QUIET_WALK_SKIPS.with(|cell| cell.replace([0; 3]))
 }
 
 #[cfg(any(test, feature = "test-support"))]
@@ -5710,7 +5833,8 @@ pub fn test_only_fader_matrix_witness() -> TestOnlyFaderMatrixWitness {
 /// Drain the fader and mute cells of the lanes in `lanes` into `bank` under the block's `snapshot`
 /// (#1312 D4, D12): every lane for the block drain, the carried lanes for the plan-swap drain.
 /// Each lane reads and applies in the canonical order, an applied value is never lost to a
-/// refusal of another, and the first refusal is returned after the last lane.
+/// refusal of another, and the first refusal is returned after the last lane. `Ok(true)`: `lanes`
+/// is every lane and none had a cell pending ([`quiet_mark`], issue #1778).
 ///
 /// #1651 D1: a mute value of a channel whose mute the lane's stored automation drives is that
 /// lane's `terms` ([`LaneFaderAutomation::mute_terms`]), not the stage's mute.
@@ -5720,8 +5844,9 @@ fn drain_fader_controls(
     automation: &mut [Option<LaneFaderAutomation>],
     snapshot: LiveSnapshot,
     lanes: u8,
-) -> Result<(), RenderError> {
+) -> Result<bool, RenderError> {
     let mut result = Ok(());
+    let mut quiet = lanes == EVERY_LANE;
     for (lane, control) in controls.iter_mut().enumerate() {
         if !lane_selected(lanes, lane) {
             continue;
@@ -5758,9 +5883,10 @@ fn drain_fader_controls(
                 },
             }
         });
-        result = result.and(drained.map_err(render_error));
+        quiet &= matches!(drained, Ok(true));
+        result = result.and(drained.map(|_| ()).map_err(render_error));
     }
-    result
+    result.map(|()| quiet)
 }
 // REALTIME_POLICY_END
 
@@ -5798,8 +5924,9 @@ fn drain_matrix_controls(
     controls: &mut [Option<MatrixReader>],
     snapshot: LiveSnapshot,
     lanes: u8,
-) -> Result<(), RenderError> {
+) -> Result<bool, RenderError> {
     let mut result = Ok(());
+    let mut quiet = lanes == EVERY_LANE;
     for (lane, control) in controls.iter_mut().enumerate() {
         if !lane_selected(lanes, lane) {
             continue;
@@ -5816,9 +5943,10 @@ fn drain_matrix_controls(
             });
             bank.set_target_smoothed(lane, target, smoothing_samples)
         });
-        result = result.and(drained.map_err(render_error));
+        quiet &= matches!(drained, Ok(true));
+        result = result.and(drained.map(|_| ()).map_err(render_error));
     }
-    result
+    result.map(|()| quiet)
 }
 // REALTIME_POLICY_END
 
@@ -7338,6 +7466,7 @@ impl PreparedBuiltinsSession {
                             bank: build_input_bank(dispatch, width, inputs),
                             controls: controls.into_boxed_slice(),
                             live: [ChannelSymmetryWitness::SYMMETRIC; MAXIMUM_BANK_LANES],
+                            quiet_at: None,
                             process_calls: 0,
                             frames_processed: 0,
                         })
@@ -7381,6 +7510,7 @@ impl PreparedBuiltinsSession {
                                 .expect("planner emits 1..=W members at the selected width"),
                             controls: controls.into_boxed_slice(),
                             automation,
+                            quiet_at: None,
                             process_calls: 0,
                             frames_processed: 0,
                         })
@@ -7407,6 +7537,7 @@ impl PreparedBuiltinsSession {
                             bank: BuiltinMatrixBank::new(dispatch, width, targets)
                                 .expect("preparation validated every matrix coefficient"),
                             controls: controls.into_boxed_slice(),
+                            quiet_at: None,
                             process_calls: 0,
                             frames_processed: 0,
                         })
@@ -9273,6 +9404,7 @@ impl LiveControlInputProcessor {
                 }
                 TrackInputRecord::PreparedFilter { target } => input.apply_prepared_filter(target),
             })
+            .map(|_| ())
             .map_err(render_error)
     }
 }
@@ -9323,6 +9455,7 @@ impl LiveControlMatrixProcessor {
                 });
                 matrix.set_target_smoothed(target, smoothing_samples)
             })
+            .map(|_| ())
             .map_err(render_error)
     }
 
@@ -9409,6 +9542,7 @@ impl LiveControlFaderProcessor {
                     },
                 }
             })
+            .map(|_| ())
             .map_err(render_error);
         if let Some(automation) = self.automation.as_deref_mut() {
             // #1649 D3: the offsets cells, after the drain, as the fader bank reads them.
@@ -11538,6 +11672,7 @@ mod tests {
                         .chain((1..width.lanes()).map(|_| None))
                         .collect(),
                     automation: Box::default(),
+                    quiet_at: None,
                     process_calls: 0,
                     frames_processed: 0,
                 },
@@ -11551,6 +11686,7 @@ mod tests {
                     controls: core::iter::once(Some(matrix_rx))
                         .chain((1..width.lanes()).map(|_| None))
                         .collect(),
+                    quiet_at: None,
                     process_calls: 0,
                     frames_processed: 0,
                 },
@@ -11683,6 +11819,7 @@ mod tests {
                     .chain((1..4).map(|_| None))
                     .collect(),
                 automation: Box::default(),
+                quiet_at: None,
                 process_calls: 0,
                 frames_processed: 0,
             };
@@ -11739,6 +11876,7 @@ mod tests {
                 .chain((1..width.lanes()).map(|_| None))
                 .collect(),
             automation: Box::default(),
+            quiet_at: None,
             process_calls: 0,
             frames_processed: 0,
         };
@@ -11789,10 +11927,62 @@ mod tests {
         );
         // Nothing is pending now.
         let settled = builtins::test_support::fader_bank_lane_words(&processor.bank, 0);
+        let _ = test_only_take_quiet_walk_skips();
         processor.begin_block(0, gate.snapshot()).unwrap();
         assert_eq!(
             builtins::test_support::fader_bank_lane_words(&processor.bank, 0),
             settled
+        );
+        // Issue #1778: that walk found nothing pending, so a second block under the same
+        // publication skips it. A monitor write is a new publication under the same revision
+        // (#1603), and the first block under it applies it; a `LiveSnapshot::ALL` block (the
+        // carry's) never skips, so a write published between two of them is applied by the second.
+        // Red if the quiet mark is compared by revision, or honoured under `ALL`, or if the
+        // second block walks (the skip never fires).
+        processor.begin_block(0, gate.snapshot()).unwrap();
+        assert_eq!(
+            test_only_take_quiet_walk_skips(),
+            [0, 1, 0],
+            "the second block under one publication skipped the fader walk"
+        );
+        let revision = gate.snapshot().revision();
+        let key = {
+            let stamp = gate.pin.stamp_monitor(revision).expect("a monitor stamp");
+            cells.write(
+                stamp,
+                TrackFaderRecord::FaderDb {
+                    lanes: BuiltinLaneSelector::Both,
+                    db: -3.0,
+                    smoothing_samples: 0,
+                },
+            );
+            stamp.key()
+        };
+        gate.pin.publish_key(&gate.gate, key);
+        assert_eq!(gate.snapshot().revision(), revision);
+        processor.begin_block(0, gate.snapshot()).unwrap();
+        let monitored = builtins::test_support::fader_bank_lane_words(&processor.bank, 0);
+        processor.begin_block(0, LiveSnapshot::ALL).unwrap();
+        gate.write_published(|stamp| {
+            cells.write(
+                stamp,
+                TrackFaderRecord::FaderDb {
+                    lanes: BuiltinLaneSelector::Both,
+                    db: -9.0,
+                    smoothing_samples: 0,
+                },
+            );
+        });
+        processor.begin_block(0, LiveSnapshot::ALL).unwrap();
+        let after_all = builtins::test_support::fader_bank_lane_words(&processor.bank, 0);
+        assert!(
+            monitored != settled && after_all != monitored,
+            "the monitor write applied under its publication and the write under `ALL`"
+        );
+        assert_eq!(
+            test_only_take_quiet_walk_skips(),
+            [0, 0, 0],
+            "`ALL` never skips"
         );
     }
 
@@ -11814,6 +12004,7 @@ mod tests {
             controls: core::iter::once(Some(reader))
                 .chain((1..width.lanes()).map(|_| None))
                 .collect(),
+            quiet_at: None,
             process_calls: 0,
             frames_processed: 0,
         };
@@ -11847,6 +12038,12 @@ mod tests {
             after_thirty,
             "the later write applied in the block whose snapshot covers it"
         );
+        // Issue #1778: a block that finds nothing pending marks the publication, and the next
+        // block under it skips the walk.
+        let _ = test_only_take_quiet_walk_skips();
+        processor.begin_block(0, gate.snapshot()).unwrap();
+        processor.begin_block(0, gate.snapshot()).unwrap();
+        assert_eq!(test_only_take_quiet_walk_skips(), [0, 0, 1]);
     }
 
     /// #1651 D1: the mute cells follow every fader cell in the plan's one program, so the fader
@@ -13433,6 +13630,7 @@ mod tests {
             bank: BuiltinInputBank::new(backend, width, vec![input(), input()]).expect("bank"),
             controls: controls.into_boxed_slice(),
             live: [ChannelSymmetryWitness::SYMMETRIC; MAXIMUM_BANK_LANES],
+            quiet_at: None,
             process_calls: 0,
             frames_processed: 0,
         };
@@ -13481,6 +13679,7 @@ mod tests {
                 bank: BuiltinInputBank::new(backend, width, vec![input]).expect("bank"),
                 controls: controls.into_boxed_slice(),
                 live: [ChannelSymmetryWitness::SYMMETRIC; MAXIMUM_BANK_LANES],
+                quiet_at: None,
                 process_calls: 0,
                 frames_processed: 0,
             },
@@ -13765,6 +13964,12 @@ mod tests {
                 "{backend:?}: the second block applied revision 2"
             );
             assert_eq!(superseded.get(), 0, "no value was replaced unread");
+            // Issue #1778: a block that finds nothing pending marks the publication, and the
+            // next block under it skips the walk.
+            let _ = test_only_take_quiet_walk_skips();
+            processor.begin_block(128, second).expect("a quiet block");
+            processor.begin_block(192, second).expect("a skipped block");
+            assert_eq!(test_only_take_quiet_walk_skips(), [1, 0, 0], "{backend:?}");
         }
     }
 
@@ -13808,6 +14013,7 @@ mod tests {
                 .expect("input bank"),
                 controls,
                 live: [ChannelSymmetryWitness::SYMMETRIC; MAXIMUM_BANK_LANES],
+                quiet_at: None,
                 process_calls: 0,
                 frames_processed: 0,
             };
@@ -13816,6 +14022,7 @@ mod tests {
                     .expect("fader bank"),
                 controls,
                 automation: Box::default(),
+                quiet_at: None,
                 process_calls: 0,
                 frames_processed: 0,
             };
@@ -13827,6 +14034,7 @@ mod tests {
                 )
                 .expect("matrix bank"),
                 controls,
+                quiet_at: None,
                 process_calls: 0,
                 frames_processed: 0,
             };
@@ -14321,6 +14529,7 @@ mod tests {
                 } else {
                     Box::default()
                 },
+                quiet_at: None,
                 process_calls: 0,
                 frames_processed: 0,
             },

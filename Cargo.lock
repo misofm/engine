@@ -655,6 +655,7 @@ dependencies = [
  "compressor",
  "de-esser",
  "delay",
+ "dynamic-eq",
  "effect-contract",
  "engine",
  "gate-expander",

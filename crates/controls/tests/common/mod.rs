@@ -138,7 +138,7 @@ pub(crate) fn row_of(model: &SessionModel, address: &ControlAddress) -> ControlR
 }
 
 /// The launch effects, as the session spells their identity.
-pub(crate) const LAUNCH_EFFECTS: [&str; 9] = [
+pub(crate) const LAUNCH_EFFECTS: [&str; 10] = [
     "miso.parametric-eq",
     "miso.compressor",
     "miso.gate-expander",
@@ -148,6 +148,7 @@ pub(crate) const LAUNCH_EFFECTS: [&str; 9] = [
     "miso.transient-shaper",
     "miso.delay",
     "miso.de-esser",
+    "miso.dynamic-eq",
 ];
 
 /// The insert ID of a launch effect: `ins-` and the effect's name.

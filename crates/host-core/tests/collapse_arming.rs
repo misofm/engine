@@ -10,8 +10,9 @@
 //! produced, and whatever made them differ is in neither that chain's own witness nor the join.
 //! Armed on the join alone, it collapses and copies its left plane into its right one: wrong audio,
 //! silently. Since #987 such a chain is armed only when every lane reads a same-track bank
-//! producer, and it collapses only on a block whose producers rendered bit-identical planes
-//! (`BankChain::planes_identical`); these probes keep that per-block term honest.
+//! producer (or, since #1899, a same-track per-node effect op), and it collapses only on a block
+//! whose producers rendered bit-identical planes (`BankChain::planes_identical`, or the op's
+//! sticky agreement fact); these probes keep that per-block term honest.
 //!
 //! A strip splits into more than one chain when a stage meter or a send taps an internal boundary,
 //! when a per-node op sits between banked racks, or -- the commonest case -- when the builtin
@@ -28,8 +29,9 @@
 //! # Red on the base, and the red mutation
 //!
 //! On the shipped rule (every bank chain whose lanes' tracks hold `SOURCE` is armed) each probe
-//! named `*_renders_the_dual_bits` failed on the right plane, and the per-node-delay count probe
-//! read the shipped value rather than half of it. The two controls pass under both rules. The red
+//! named `*_renders_the_dual_bits` failed on the right plane; since #1899 the later chain of a strip
+//! split by a per-node effect insert is armed on that op, and the asymmetric-delay probe keeps its
+//! per-block term honest. The two controls pass under both rules. The red
 //! mutation is the shipped rule itself: replace `gathers_track_input() || on_input` in
 //! `Runtime::arm_mono_collapse` (`crates/graph/src/runtime.rs`) with `true`; since #987 the
 //! per-block input term in `Runtime::execute` has its own red mutations (graph `MUTATIONS.md`).
@@ -458,13 +460,13 @@ fn an_asymmetric_per_node_delay_between_chains_renders_the_dual_bits() {
     );
 }
 
-/// The count half of the delay probe. Each cohort's strip is two chains around the delay, and the
-/// shipped rule armed both: `2 * cohorts`, measured on the base as `[32, 2]` at eight lanes and
-/// `[64, 4]` at four. Only the chain that gathers the input may be armed (the later chain's
-/// producer is a per-node op, so #987 does not arm it either), so the count is **half the shipped
-/// value**, at either width.
+/// The count half of the delay probe. Each cohort's strip is two chains around the delay, and both
+/// are armed: the first on the track join, because it gathers the input, and the later one on its
+/// producer, the per-node delay (issue #1899), whatever the delay's words -- they are live, and the
+/// per-block term, not the arming, answers for them. Measured before #1899 as half the value: the
+/// first chain of each cohort only.
 #[test]
-fn only_the_input_gathering_chain_of_a_split_strip_is_armed() {
+fn both_chains_of_a_strip_split_by_a_per_node_delay_are_armed() {
     for (left, right) in [(5.0, 7.0), (5.0, 5.0)] {
         let armed = render(
             &canonical(&delay_model(left, right)),
@@ -474,37 +476,40 @@ fn only_the_input_gathering_chain_of_a_split_strip_is_armed() {
         );
         let tracks = mono_model().tracks.len();
         let cohorts = tracks / width(&armed.units);
-        let shipped = 2 * cohorts as u64;
-        // The strip really is two collapsible chains per cohort, both over mono tracks only, and
-        // the shipped rule armed every one of them.
+        // The strip really is two collapsible chains per cohort, both over mono tracks only.
         let collapsible = armed
             .units
             .iter()
             .filter(|unit| unit.banked && unit.upstream_of_seam_stages > 0)
             .count() as u64;
         assert_eq!(
-            collapsible, shipped,
+            collapsible,
+            2 * cohorts as u64,
             "{left}/{right} ms: two collapsible chains per cohort"
         );
         assert_eq!(
-            armed.counters[1],
-            shipped / 2,
-            "{left}/{right} ms: half the shipped value -- the first chain of each cohort only"
+            armed.counters[1], collapsible,
+            "{left}/{right} ms: every collapsible chain is armed"
         );
         // Issue #993: the rows report the same fact. Exactly one chain per cohort gathers its
-        // tracks' input, it is a bank, and it is the cohort's earlier chain.
+        // tracks' input, it is a bank, it is the cohort's earlier chain, and the other one is
+        // armed on its input.
         let gathering: Vec<_> = armed
             .units
             .iter()
             .filter(|unit| unit.gathers_track_input)
             .collect();
         assert_eq!(
-            gathering.len() as u64,
-            shipped / 2,
+            gathering.len(),
+            cohorts,
             "{left}/{right} ms: one input-gathering chain per cohort"
         );
         for chain in &gathering {
             assert!(chain.banked, "{left}/{right} ms: only a bank gathers");
+            assert!(
+                !chain.armed_on_input,
+                "{left}/{right} ms: armed on the join"
+            );
             let later = armed
                 .units
                 .iter()
@@ -523,6 +528,10 @@ fn only_the_input_gathering_chain_of_a_split_strip_is_armed() {
             assert!(
                 chain.unit < later[0].unit,
                 "{left}/{right} ms: the gathering chain runs first"
+            );
+            assert!(
+                later[0].armed_on_input,
+                "{left}/{right} ms: the later chain is armed on the delay"
             );
         }
     }
