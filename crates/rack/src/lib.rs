@@ -406,6 +406,12 @@ impl<'a> BankPlaneViews<'a> {
 /// validated once at prepare - so `Err` is the stage's own render failure.
 pub trait BankStage: Send {
     fn process(&mut self, block: BankBlock<'_>) -> Result<(), RenderError>;
+    /// The heap bytes this value retains (#1074), exclusive of the value itself: every `Box`,
+    /// `Vec`, `String` and `Arc` allocation reachable through its fields, a `Vec` or `String` at
+    /// its capacity, an `Arc`'s allocation in full whoever else holds it. Whoever boxes the value
+    /// adds `size_of_val` for the box. Computed from capacities on the control thread, never on
+    /// the render path. Required, so a new owner cannot under-report by default.
+    fn retained_bytes(&self) -> u64;
     /// Copy one prepared lane's response sections without advancing render state.
     fn copy_response_snapshot_lane(
         &self,
@@ -1164,6 +1170,13 @@ impl EffectBankStage {
 }
 
 impl BankStage for EffectBankStage {
+    /// The bank processor's box and heap, and the offset and witness tables (#1074).
+    fn retained_bytes(&self) -> u64 {
+        use engine::realtime::retained::slice;
+        boxed_dyn_bytes(&*self.processor, self.processor.retained_bytes())
+            .saturating_add(slice(&self.offsets))
+            .saturating_add(slice(&self.witness))
+    }
     fn copy_response_snapshot_lane(
         &self,
         lane: usize,
@@ -2032,6 +2045,40 @@ const IDLE_SPAN: PreparedAutomationSpan = PreparedAutomationSpan {
 };
 
 impl BankStage for LiveControlEffectBankStage {
+    /// The bank processor's box and heap, every table, each lane's control lane, each observe
+    /// queue's ring (in full: the host's producer drops first), the shunt and the observation
+    /// lanes (#1074).
+    fn retained_bytes(&self) -> u64 {
+        use engine::realtime::retained::slice;
+        let lanes = self
+            .lanes
+            .iter()
+            .flatten()
+            .fold(slice(&self.lanes), |total, lane| {
+                total.saturating_add(lane.retained_bytes())
+            });
+        let queues = self
+            .observe_queues
+            .iter()
+            .fold(slice(&self.observe_queues), |total, (_, queue)| {
+                total.saturating_add(queue.retained_bytes())
+            });
+        let observations = self.observations.as_deref().map_or(0, |lanes| {
+            lanes.iter().flatten().fold(slice(lanes), |total, lane| {
+                total.saturating_add(u64::try_from(lane.retained_bytes()).unwrap_or(u64::MAX))
+            })
+        });
+        boxed_dyn_bytes(&*self.processor, self.processor.retained_bytes())
+            .saturating_add(slice(&self.offsets))
+            .saturating_add(lanes)
+            .saturating_add(queues)
+            .saturating_add(slice(&self.staging))
+            .saturating_add(slice(&self.packed))
+            .saturating_add(self.shunt.as_ref().map_or(0, BypassShunt::retained_bytes))
+            .saturating_add(observations)
+            .saturating_add(slice(&self.samples))
+            .saturating_add(slice(&self.designed))
+    }
     fn copy_response_snapshot_lane(
         &self,
         lane: usize,
@@ -5061,6 +5108,33 @@ impl BankChain {
             .map(|slot| slot.stage.observation_retained_bytes())
             .sum()
     }
+
+    /// The heap bytes this chain retains (#1074), exclusive of the chain itself: its AoSoA
+    /// scratch, lane and mask tables, staging and zero planes, and each slot's stage box and the
+    /// stage's own heap ([`BankStage::retained_bytes`]). Control thread only.
+    #[must_use]
+    pub fn retained_bytes(&self) -> u64 {
+        use engine::realtime::retained::slice;
+        let slots = self.slots.iter().fold(slice(&self.slots), |total, slot| {
+            total.saturating_add(boxed_dyn_bytes(&*slot.stage, slot.stage.retained_bytes()))
+        });
+        slice(&self.scratch.left)
+            .saturating_add(slice(&self.scratch.right))
+            .saturating_add(slice(&self.active))
+            .saturating_add(slots)
+            .saturating_add(slice(&self.staging_left))
+            .saturating_add(slice(&self.staging_right))
+            .saturating_add(slice(&self.zero_plane))
+            .saturating_add(slice(&self.aux))
+            .saturating_add(slice(&self.fold))
+    }
+}
+
+/// A boxed trait object's allocation and the heap its value owns (#1074).
+fn boxed_dyn_bytes<T: ?Sized>(value: &T, own: u64) -> u64 {
+    u64::try_from(core::mem::size_of_val(value))
+        .unwrap_or(u64::MAX)
+        .saturating_add(own)
 }
 
 #[cfg(test)]
@@ -5441,6 +5515,9 @@ mod tests {
 
     struct PassThrough;
     impl BankStage for PassThrough {
+        fn retained_bytes(&self) -> u64 {
+            0
+        }
         fn process(&mut self, _block: BankBlock<'_>) -> Result<(), RenderError> {
             Ok(())
         }
@@ -5453,6 +5530,9 @@ mod tests {
         }
     }
     impl BankStage for DropWitness {
+        fn retained_bytes(&self) -> u64 {
+            0
+        }
         fn process(&mut self, _block: BankBlock<'_>) -> Result<(), RenderError> {
             Ok(())
         }
@@ -5710,6 +5790,9 @@ mod tests {
     }
 
     impl BankStage for PreparedTraceStage {
+        fn retained_bytes(&self) -> u64 {
+            0
+        }
         fn process(&mut self, block: BankBlock<'_>) -> Result<(), RenderError> {
             TEST_TRACE.with(|trace| {
                 trace.borrow_mut().record(
@@ -6566,6 +6649,9 @@ mod tests {
     fn tiled_transpose_matches_the_scalar_path_bit_for_bit() {
         struct IndexXor;
         impl BankStage for IndexXor {
+            fn retained_bytes(&self) -> u64 {
+                0
+            }
             fn process(&mut self, block: BankBlock<'_>) -> Result<(), RenderError> {
                 for (index, sample) in block.left.iter_mut().enumerate() {
                     *sample = f32::from_bits(sample.to_bits() ^ (index as u32 | 1));
@@ -6666,6 +6752,9 @@ mod tests {
     /// A stage that multiplies every lane by its lane index, so lanes are distinguishable.
     struct ScaleByLane;
     impl BankStage for ScaleByLane {
+        fn retained_bytes(&self) -> u64 {
+            0
+        }
         fn process(&mut self, block: BankBlock<'_>) -> Result<(), RenderError> {
             for frame in 0..block.frames as usize {
                 for lane in 0..block.lanes {
@@ -7655,6 +7744,14 @@ mod tests {
             expected: Vec<Vec<f32>>,
         }
         impl BankStage for Checker {
+            fn retained_bytes(&self) -> u64 {
+                engine::realtime::retained::vec(&self.expected)
+                    + self
+                        .expected
+                        .iter()
+                        .map(engine::realtime::retained::vec)
+                        .sum::<u64>()
+            }
             fn process(&mut self, block: BankBlock<'_>) -> Result<(), RenderError> {
                 for (lane, plane) in self.expected.iter().enumerate() {
                     for (frame, sample) in plane.iter().enumerate() {
@@ -7702,6 +7799,9 @@ mod tests {
     fn a_chain_rests_a_lane_every_running_slot_rests() {
         struct Rest(u32);
         impl BankStage for Rest {
+            fn retained_bytes(&self) -> u64 {
+                0
+            }
             fn process(&mut self, _block: BankBlock<'_>) -> Result<(), RenderError> {
                 Ok(())
             }
@@ -7749,6 +7849,9 @@ mod tests {
         /// The test reads the counts back through `as_any`.
         struct Resting([u32; 3]);
         impl BankStage for Resting {
+            fn retained_bytes(&self) -> u64 {
+                0
+            }
             fn as_any(&self) -> Option<&dyn core::any::Any> {
                 Some(self)
             }
@@ -7884,6 +7987,9 @@ mod tests {
     fn a_slot_with_a_live_lane_must_have_an_active_lane() {
         struct Live;
         impl BankStage for Live {
+            fn retained_bytes(&self) -> u64 {
+                0
+            }
             fn process(&mut self, _block: BankBlock<'_>) -> Result<(), RenderError> {
                 Ok(())
             }
@@ -7977,6 +8083,9 @@ mod tests {
             right: [f32; 8],
         }
         impl BankStage for RunningSum {
+            fn retained_bytes(&self) -> u64 {
+                0
+            }
             fn process(&mut self, block: BankBlock<'_>) -> Result<(), RenderError> {
                 for frame in 0..block.frames as usize {
                     for lane in 0..block.lanes {
@@ -8057,6 +8166,9 @@ mod tests {
     fn inactive_lanes_are_never_gathered_or_scattered() {
         struct FillOnes;
         impl BankStage for FillOnes {
+            fn retained_bytes(&self) -> u64 {
+                0
+            }
             fn process(&mut self, block: BankBlock<'_>) -> Result<(), RenderError> {
                 block.left.fill(1.0);
                 block.right.fill(1.0);
@@ -8117,6 +8229,9 @@ mod tests {
         }
     }
     impl BankStage for Scale {
+        fn retained_bytes(&self) -> u64 {
+            0
+        }
         fn process(&mut self, block: BankBlock<'_>) -> Result<(), RenderError> {
             for word in block.left.iter_mut() {
                 *word *= self.gain[0];
@@ -8158,6 +8273,9 @@ mod tests {
         coefficients: [f32; 4],
     }
     impl BankStage for Matrix {
+        fn retained_bytes(&self) -> u64 {
+            0
+        }
         fn process(&mut self, block: BankBlock<'_>) -> Result<(), RenderError> {
             let [ll, lr, rl, rr] = self.coefficients;
             for (left, right) in block.left.iter_mut().zip(block.right.iter_mut()) {
@@ -8237,6 +8355,9 @@ mod tests {
     }
 
     impl BankStage for DefaultWitnessStage {
+        fn retained_bytes(&self) -> u64 {
+            0
+        }
         fn process(&mut self, _block: BankBlock<'_>) -> Result<(), RenderError> {
             Ok(())
         }
@@ -8258,6 +8379,9 @@ mod tests {
     }
 
     impl BankStage for WitnessStage {
+        fn retained_bytes(&self) -> u64 {
+            0
+        }
         fn process(&mut self, _block: BankBlock<'_>) -> Result<(), RenderError> {
             Ok(())
         }
@@ -8958,6 +9082,9 @@ mod effect_lane_carry_tests {
     }
 
     impl PreparedNativeEffectBank for WordBank {
+        fn retained_bytes(&self) -> u64 {
+            0
+        }
         fn reset(&mut self, _kind: ResetKind) {}
 
         fn process_bank(&mut self, block: EffectBankProcessBlock<'_>) -> BankProcessReport {

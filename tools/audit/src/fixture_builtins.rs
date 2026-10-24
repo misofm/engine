@@ -517,6 +517,9 @@ fn generated() -> Vec<(String, Vec<u8>)> {
 
 struct FixtureSource;
 impl GraphRuntimeProcessor for FixtureSource {
+    fn retained_bytes(&self) -> u64 {
+        0
+    }
     fn process(&mut self, block: GraphBindingBlock<'_>) -> Result<(), RenderError> {
         for (index, (left, right)) in block
             .left
@@ -532,6 +535,9 @@ impl GraphRuntimeProcessor for FixtureSource {
 
 struct FixtureIdentity;
 impl GraphRuntimeProcessor for FixtureIdentity {
+    fn retained_bytes(&self) -> u64 {
+        0
+    }
     fn process(&mut self, _block: GraphBindingBlock<'_>) -> Result<(), RenderError> {
         Ok(())
     }

@@ -18,6 +18,9 @@ impl Drop for RestoreMode {
 
 struct Source(u32);
 impl GraphRuntimeProcessor for Source {
+    fn retained_bytes(&self) -> u64 {
+        0
+    }
     fn process(&mut self, block: GraphBindingBlock<'_>) -> Result<(), RenderError> {
         block.left.fill((self.0 + 1) as f32);
         block.right.fill(-((1_u32 << self.0) as f32));
@@ -28,6 +31,9 @@ impl GraphRuntimeProcessor for Source {
 #[derive(Default)]
 struct IdentityBank(u64);
 impl GraphPreparedBuiltinBankProcessor for IdentityBank {
+    fn retained_bytes(&self) -> u64 {
+        0
+    }
     fn as_any(&self) -> &dyn std::any::Any {
         self
     }

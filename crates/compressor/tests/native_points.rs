@@ -187,6 +187,10 @@ struct ForwardingWithoutParameterAccess {
 }
 
 impl PreparedNativeEffect for ForwardingWithoutParameterAccess {
+    fn retained_bytes(&self) -> u64 {
+        core::mem::size_of_val(&*self.inner) as u64 + self.inner.retained_bytes()
+    }
+
     fn reset(&mut self, kind: ResetKind) {
         self.inner.reset(kind);
     }

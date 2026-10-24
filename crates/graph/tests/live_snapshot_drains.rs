@@ -51,6 +51,9 @@ struct Source {
     silent: u32,
 }
 impl GraphRuntimeProcessor for Source {
+    fn retained_bytes(&self) -> u64 {
+        0
+    }
     fn process(&mut self, block: GraphBindingBlock<'_>) -> Result<(), RenderError> {
         let silent = self.silent & (1 << block_of(block.first_sample)) != 0;
         for (frame, (left, right)) in block
@@ -77,6 +80,9 @@ struct NodeProbe {
     recorder: Arc<Recorder>,
 }
 impl GraphRuntimeProcessor for NodeProbe {
+    fn retained_bytes(&self) -> u64 {
+        engine::realtime::retained::arc(&self.recorder)
+    }
     fn process(&mut self, block: GraphBindingBlock<'_>) -> Result<(), RenderError> {
         let at = block_of(block.first_sample);
         self.recorder.node_calls[self.lane][at].fetch_add(1, Relaxed);
@@ -88,6 +94,9 @@ impl GraphRuntimeProcessor for NodeProbe {
 /// The builtin bank probe; its audio pass is the identity.
 struct BankProbe(Arc<Recorder>);
 impl GraphPreparedBuiltinBankProcessor for BankProbe {
+    fn retained_bytes(&self) -> u64 {
+        engine::realtime::retained::arc(&self.0)
+    }
     fn as_any(&self) -> &dyn std::any::Any {
         self
     }
@@ -528,6 +537,9 @@ mod effect_bank {
     }
 
     impl PreparedNativeEffectBank for GainBank {
+        fn retained_bytes(&self) -> u64 {
+            engine::realtime::retained::vec(&self.line)
+        }
         fn reset(&mut self, _: ResetKind) {}
         fn process_bank(&mut self, block: EffectBankProcessBlock<'_>) -> BankProcessReport {
             for frame in 0..block.frames as usize {

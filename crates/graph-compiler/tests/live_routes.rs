@@ -280,6 +280,10 @@ fn positive_noise(seed: u64, frames: usize) -> Planes {
 /// A track's input: its own planes, from the block's first sample.
 struct Feed(Planes);
 impl GraphRuntimeProcessor for Feed {
+    fn retained_bytes(&self) -> u64 {
+        self.0.iter().map(effect_contract::retained::vec).sum()
+    }
+
     fn process(&mut self, block: GraphBindingBlock<'_>) -> Result<(), RenderError> {
         let start = usize::try_from(block.first_sample).expect("first sample");
         let frames = block.left.len();
@@ -295,6 +299,10 @@ impl GraphRuntimeProcessor for Feed {
 
 struct Identity;
 impl GraphRuntimeProcessor for Identity {
+    fn retained_bytes(&self) -> u64 {
+        0
+    }
+
     fn process(&mut self, _block: GraphBindingBlock<'_>) -> Result<(), RenderError> {
         Ok(())
     }

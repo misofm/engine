@@ -2725,6 +2725,16 @@ fn continuous_fail(state: &mut SpectrumContinuousState) {
 // REALTIME_POLICY_END
 
 impl GraphRuntimeObserver for SpectrumCaptureObserver {
+    /// The capture ring and the mode, one-shot state and continuous shared words, each in full
+    /// (#1074).
+    fn retained_bytes(&self) -> u64 {
+        use engine::realtime::retained::arc;
+        self.producer
+            .retained_bytes()
+            .saturating_add(arc(&self.mode))
+            .saturating_add(arc(&self.one_shot.state))
+            .saturating_add(arc(&self.continuous.shared))
+    }
     fn observe(&mut self, block: GraphObservationBlock<'_>) -> Result<(), RenderError> {
         self.capture(
             block.left,
