@@ -1598,10 +1598,11 @@ const IDENTITY_ZERO_BITS: u32 = 0x0000_0000;
 
 /// True when every lane of `value` carries exactly `pattern`.
 ///
-/// **Bit patterns, not `==`.** A float compare would call `-0.0` equal to `+0.0`, and the whole
-/// point of [`section_is_identity`] is that a `-0.0` retained word is *not* inert: it makes the
-/// section emit `-0.0` where the elided form emits `+0.0`. The comparison is therefore on
-/// [`Lane::store_bits`] words, and the answer is a control-plane `bool`.
+/// **Bit patterns, not `==`.** A float compare would call `-0.0` equal to `+0.0`, but
+/// [`section_is_identity`]'s derivation holds only for the exact words it names: a `-0.0` word is
+/// outside it (a `-0.0` integrator, for one, is rewritten by the full form and kept by the elided
+/// one). The comparison is therefore on [`Lane::store_bits`] words, and the answer is a
+/// control-plane `bool`.
 #[inline]
 fn every_lane_is<L: Lane>(value: L, pattern: u32) -> bool {
     let mut words = [0_u32; 64];
@@ -1625,9 +1626,17 @@ fn every_lane_is<L: Lane>(value: L, pattern: u32) -> bool {
 /// The conclusion survives it — `v1 = +0.0 + (-0.0) = +0.0` and `ic1' = flush(+0.0 + (-0.0)) =
 /// +0.0` — because `+0` absorbs `-0` under round-to-nearest.
 ///
-/// The state words are checked for the same reason they are checked *bitwise*: identity
-/// coefficients over a `-0.0` integrator emit `-0.0`, which the elided form would have washed to
-/// `+0.0`. That is an observable divergence, and `-0.0 == 0.0` would have admitted it.
+/// The state words are checked at all because a non-zero integrator under identity coefficients
+/// is *not* the identity: with both integrators negative, `v1` and `v2` keep them, the mix is
+/// `(v0 + -0.0) + -0.0`, and an exact `-0.0` input stays `-0.0` where the elided form emits `+0.0`.
+/// That is observable as the sign of an exact zero at the strip output when the section is the
+/// LPF (section 1); on the HPF (section 0) no stale state moved an output bit in #1268's probes.
+///
+/// They are checked *bitwise* because the derivation above covers `+0.0` integrators only. A
+/// `-0.0` integrator pair changes no output bit on either section (the mix still collapses to
+/// `v + 0.0`), but the full form rewrites it (`ic1' = flush(-0.0 + 2 * (+0.0)) = +0.0`) where the
+/// elided form writes no state, so the lane state words would diverge; `-0.0 == 0.0` would admit
+/// it. The check tests the derivation's precondition, not an audible difference.
 ///
 /// All lanes or none: the kernel is a vector body with no per-lane branch, so a bank elides a
 /// section only when every lane of it — padding lanes included — carries the identity.

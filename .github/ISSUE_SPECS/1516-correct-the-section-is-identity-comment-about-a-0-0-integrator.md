@@ -2,7 +2,7 @@
 
 ## Product outcome
 
-The doc comment of `section_is_identity` (`crates/lane/src/kernels/builtins.rs`, about lines 1583-1585)
+The doc comment of `section_is_identity` (`crates/lane/src/kernels/builtins.rs`, about lines 1623-1640 at 82f987296)
 states correctly where a `-0.0` integrator's sign can and cannot be observed, so no later change relies on
 a false "observable divergence" claim.
 
@@ -27,17 +27,29 @@ a false "observable divergence" claim.
   non-zero LPF integrator pair over an exact `-0.0` input, as the sign of an exact zero), say that a
   `-0.0` integrator is not observable on either section, and give the true reason for the bitwise
   state-word check.
-- D2. Keep the file's line count unchanged: line numbers in browser-compiled sources reach the shipped
-  AudioWorklet module, so a changed count moves its sha256.
+- D2. Dropped (root, 2026-10-24). Since #1061 the committed AudioWorklet sha256 is a release
+  fingerprint checked only under `scripts/build-web-audioworklet.sh --check-pin`; the CI job "shipped
+  AudioWorklet artifact identity" reports `ARTIFACT CHANGED`/`UNCHANGED` and fails only for a
+  non-reproducible build or a release change. A moved line may read `CHANGED`: a report, not a
+  failure. The comment is written at the length the truth needs (+11 lines).
+- D2a. The doc of `every_lane_is` (just above) repeated the false claim; it is corrected too (root).
 - D3. No code change. If D1 finds that the bitwise check is not needed, report it for a separate issue
   rather than changing the check here.
 
 ## Authorized paths
 
-`crates/lane/src/kernels/builtins.rs` (that doc comment only), this spec.
+`crates/lane/src/kernels/builtins.rs` (the doc comments of `every_lane_is` and `section_is_identity`
+only), this spec.
 
 ## Gates
 
-- G1. `cargo doc --locked -p lane --no-deps` and `cargo fmt --check -p lane` pass; the file's line count
-  is unchanged; the browser module's sha256 is unchanged (record both hashes).
+- G1. `cargo doc --locked -p lane --no-deps` and `cargo fmt --check -p lane` pass.
 - G2. The review checks the reworded claim against the evidence above (no committed prose test).
+
+## Evidence
+
+- Re-derived from `svf_step_when` (`crates/lane/src/kernels.rs`) and the section mix
+  `fma(m2, v2, fma(m1, v1, m0 * v0))`: a `(-0.0, -0.0)` integrator pair gives `v1 = +0.0`,
+  `v2 = +-0.0` and output `v0 + 0.0` (no bit moves); the full form writes `ic1' = +0.0`, the elided form
+  keeps `-0.0`, so only the state words diverge. A `(a, b)`, `a, b < 0` pair gives `(v0 + -0.0) + -0.0`,
+  `-0.0` for an exact `-0.0` input (probe A). So D3 holds: the bitwise check stays.
