@@ -283,8 +283,9 @@ Scoped against `f89dc1d60`. Single mode (decision 17); the Worker routing is #13
   (handler `pushWatermark`). Root authorized the path on 2026-10-24; the row is its own commit.
   The realtime-policy tool (`./target/release/realtime_policy`) also refuses an unwrapped table row
   that is not in its named exceptions, `UNWRAPPED_EXPORTS` in `tools/realtime-policy/src/policy.rs`
-  (a Rust list of 11); `watermark_read` must join it (array length 12, one doc paragraph). Not yet
-  authorized: the slice's rule is no Rust change.
+  (a Rust list of 11); `watermark_read` joins it (length 12, one doc paragraph), and the prose list
+  in `hosts/host-web/src/render_lock.rs`'s module doc names it. Root authorized both on 2026-10-24:
+  they change only the policy tool's data and a doc comment, so the engine still has no Rust change.
 - The shipped module is unchanged (JS-only change): the release pin
   (`miso-engine-v1-audio-worklet-artifact.sha256`) is the module's digest, so it does not move, and
   `check-web-audioworklet.sh`'s export list already has both watermark exports.
