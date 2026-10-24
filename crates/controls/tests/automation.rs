@@ -1231,17 +1231,22 @@ fn event_lanes_take_the_own_entry_and_every_reaching_vca_ride() {
             }
         }
         // #1864: the continued lanes through indexed views and `vca_reach` slices, as the scans
-        // give, on every pair of these tables, a moved VCA ride and a member leaving its VCA.
+        // give, on every pair of these tables, a moved VCA ride, a member leaving its VCA and a
+        // table whose only VCA rows are `offset_db` rides.
+        let mut ridden = model.clone();
+        ridden
+            .automation
+            .retain(|entry| !vca_mute_row(&entry.target));
         let mut moved = model.clone();
         moved.automation[0].segments[0].end_value = -9.0;
         let mut left = model.clone();
         left.vcas
             .iter_mut()
             .for_each(|vca| vca.members.retain(|m| m.as_str() != "vocal"));
-        let tables = [&model, &mixed, &moved, &left];
+        let tables = [&model, &mixed, &moved, &left, &ridden];
         let indices = tables.map(AutomationIndex::of);
         let reaches = tables.map(SessionModel::vca_reach);
-        for (a, b) in (0..4).flat_map(|a| (0..4).map(move |b| (a, b))) {
+        for (a, b) in (0..5).flat_map(|a| (0..5).map(move |b| (a, b))) {
             let view = |at: usize| ModelView::whole(tables[at]).indexed(&indices[at]);
             for (strip, at) in model.strips().map(|strip| strip.id.clone()).zip(0..) {
                 let (before, after) = (
