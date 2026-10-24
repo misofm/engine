@@ -272,12 +272,35 @@ pub(crate) fn bounded_spsc_internal<T: Send + 'static>(
     capacity: NonZeroUsize,
     generation: QueueGeneration,
 ) -> Result<(Producer<T>, Consumer<T>), SpscError> {
+    bounded_spsc_with_slots(capacity, generation, MaybeUninit::uninit)
+}
+/// Create a native queue whose every physical slot holds `fill` from construction on.
+///
+/// Slots of this queue are always initialized: `fill` is written once into each of the
+/// `capacity + 1` slots here, on the control plane, and a pop copies a `Copy` value out and leaves
+/// its bytes in place. So [`InPlaceProducer::try_push_in_place`] can hand its writer a `&mut T` to
+/// the reserved slot, and the writer changes only what it writes: a field it leaves alone keeps
+/// the slot's previous value, `fill` until the slot is first written (#897).
+pub fn bounded_spsc_prefilled<T: Copy + Send + 'static>(
+    capacity: NonZeroUsize,
+    fill: T,
+    generation: QueueGeneration,
+) -> Result<(InPlaceProducer<T>, Consumer<T>), SpscError> {
+    let (producer, consumer) =
+        bounded_spsc_with_slots(capacity, generation, || MaybeUninit::new(fill))?;
+    Ok((InPlaceProducer { producer }, consumer))
+}
+fn bounded_spsc_with_slots<T: Send + 'static>(
+    capacity: NonZeroUsize,
+    generation: QueueGeneration,
+    mut slot: impl FnMut() -> MaybeUninit<T>,
+) -> Result<(Producer<T>, Consumer<T>), SpscError> {
     let slots_len = capacity
         .get()
         .checked_add(1)
         .ok_or(SpscError::CapacityOverflow)?;
     let mut slots = Vec::with_capacity(slots_len);
-    slots.resize_with(slots_len, || UnsafeCell::new(MaybeUninit::uninit()));
+    slots.resize_with(slots_len, || UnsafeCell::new(slot()));
     #[allow(clippy::redundant_closure_for_method_calls)]
     let ring = Arc::new(Ring {
         slots: slots.into_boxed_slice(),
@@ -395,6 +418,80 @@ impl<T: Send + 'static> PushPermit<'_, T> {
         // SAFETY: `try_reserve` acquired free capacity and only the unique producer owns this slot.
         sync::with_mut(&self.producer.ring.slots[local], |slot| unsafe {
             (*slot).write(value);
+        });
+        self.producer
+            .ring
+            .producer
+            .0
+            .store(self.next, Ordering::Release);
+        self.producer.local = self.next;
+        self.producer.successes = self.producer.successes.saturating_add(1);
+    }
+}
+/// The producer of a [`bounded_spsc_prefilled`] queue, whose slots are always initialized.
+pub struct InPlaceProducer<T: Copy + Send + 'static> {
+    producer: Producer<T>,
+}
+impl<T: Copy + Send + 'static> InPlaceProducer<T> {
+    /// Exact usable queue capacity.
+    #[must_use]
+    pub fn capacity(&self) -> usize {
+        self.producer.capacity()
+    }
+    /// Immutable queue generation.
+    #[must_use]
+    pub fn generation(&self) -> QueueGeneration {
+        self.producer.generation()
+    }
+    /// Producer-local saturating successful-push count.
+    #[must_use]
+    pub const fn success_count(&self) -> u64 {
+        self.producer.success_count()
+    }
+    /// Producer-local saturating full/overflow count.
+    #[must_use]
+    pub const fn full_count(&self) -> u64 {
+        self.producer.full_count()
+    }
+    /// See [`Producer::available_capacity`].
+    #[must_use]
+    pub fn available_capacity(&self) -> usize {
+        self.producer.available_capacity()
+    }
+    /// Try one bounded push of a whole value; see [`Producer::try_push`].
+    pub fn try_push(&mut self, value: T) -> Result<(), QueueFull<T>> {
+        self.producer.try_push(value)
+    }
+    /// Try one bounded push written in place: reserve the next slot, let `write` change it
+    /// through `&mut T`, then publish it with the same `Release` store and counters as
+    /// [`Self::try_push`]. A full queue runs no `write`, changes no slot and returns the full
+    /// count. The slot holds the value it last held (`fill` or an earlier, already popped
+    /// record) until `write` changes it.
+    pub fn try_push_in_place(&mut self, write: impl FnOnce(&mut T)) -> Result<(), QueueFull<()>> {
+        match self.producer.try_reserve() {
+            Some(permit) => {
+                permit.commit_in_place(write);
+                Ok(())
+            }
+            None => Err(QueueFull {
+                value: (),
+                generation: self.producer.ring.generation,
+                full_count: self.producer.full,
+            }),
+        }
+    }
+}
+impl<T: Copy + Send + 'static> PushPermit<'_, T> {
+    /// Change the reserved, initialized slot in place, then publish it exactly once.
+    fn commit_in_place(self, write: impl FnOnce(&mut T)) {
+        let local = self.producer.local;
+        sync::with_mut(&self.producer.ring.slots[local], |slot| {
+            // SAFETY: `try_reserve` acquired free capacity and only the unique producer owns this
+            // slot. An `InPlaceProducer` exists only for a `bounded_spsc_prefilled` ring, whose
+            // every slot was initialized at construction; every later write stores a whole `T`
+            // and a pop of a `Copy` value leaves the bytes in place, so the slot is initialized.
+            let slot = unsafe { (*slot).assume_init_mut() };
+            write(slot);
         });
         self.producer
             .ring
@@ -1509,7 +1606,7 @@ mod loom_tests {
 
 #[cfg(test)]
 mod tests {
-    use super::{QueueGeneration, bounded_spsc, bounded_spsc_internal};
+    use super::{QueueGeneration, bounded_spsc, bounded_spsc_internal, bounded_spsc_prefilled};
     use core::num::NonZeroUsize;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -1640,6 +1737,51 @@ mod tests {
             }
         }
         assert!(next_pop > 8, "the cursors wrapped the four-slot ring");
+    }
+
+    #[test]
+    fn in_place_push_writes_the_initialized_slot_and_a_full_queue_runs_no_writer() {
+        let (mut producer, mut consumer) = bounded_spsc_prefilled(
+            NonZeroUsize::new(2).expect("capacity"),
+            [7_u32, 7],
+            QueueGeneration(29),
+        )
+        .expect("queue");
+        // A writer that sets only the first word sees the slot's previous value in the second:
+        // the prefill on a fresh slot.
+        producer
+            .try_push_in_place(|slot| {
+                assert_eq!(*slot, [7, 7]);
+                slot[0] = 1;
+            })
+            .expect("first");
+        producer.try_push([2, 2]).expect("second");
+        let refused = producer
+            .try_push_in_place(|_| panic!("a full queue ran the writer"))
+            .expect_err("full");
+        assert_eq!(
+            (refused.generation, refused.full_count),
+            (QueueGeneration(29), 1)
+        );
+        assert_eq!((producer.success_count(), producer.full_count()), (2, 1));
+        assert_eq!(producer.available_capacity(), 0);
+        // FIFO order holds and the refused push changed no queued value.
+        assert_eq!(consumer.try_pop(), Ok([1, 7]));
+        // Across the wrap, a reused slot holds the record a pop copied out.
+        producer
+            .try_push_in_place(|slot| slot[1] = 3)
+            .expect("third");
+        assert_eq!(consumer.try_pop(), Ok([2, 2]));
+        producer
+            .try_push_in_place(|slot| {
+                assert_eq!(*slot, [1, 7], "the first slot, reused after its pop");
+                slot[1] = 4;
+            })
+            .expect("fourth");
+        assert_eq!(consumer.try_pop(), Ok([7, 3]));
+        assert_eq!(consumer.try_pop(), Ok([1, 4]));
+        assert!(consumer.try_pop().is_err());
+        assert_eq!((producer.success_count(), producer.full_count()), (4, 1));
     }
 
     #[test]

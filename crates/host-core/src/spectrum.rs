@@ -13,7 +13,7 @@ use std::sync::{
 };
 
 use engine::realtime::{
-    Consumer, ObserverKind, Producer, QueueGeneration, RenderError, bounded_spsc,
+    Consumer, InPlaceProducer, ObserverKind, QueueGeneration, RenderError, bounded_spsc_prefilled,
     bounded_spsc_retained_payload,
 };
 use graph::{
@@ -500,6 +500,22 @@ pub(crate) struct SpectrumCapturedRecord {
 }
 
 impl SpectrumCapturedRecord {
+    /// The record every queue slot holds before its first write: both planes zero, so a plane a
+    /// capture does not select reads `0.0` (#897). Each publication writes every other field.
+    const EMPTY: Self = Self {
+        window: SpectrumWindow {
+            left: [0.0; SPECTRUM_WINDOW_FRAMES],
+            right: [0.0; SPECTRUM_WINDOW_FRAMES],
+            first_sample: 0,
+            channels: SpectrumChannels::Stereo,
+            source_underrun: false,
+        },
+        stream_epoch: 0,
+        sequence: 0,
+        dropped_captures: 0,
+        arm_generation: 0,
+    };
+
     /// Project this record through the one-shot public window shape.
     #[must_use]
     pub(crate) const fn window(&self) -> SpectrumWindow {
@@ -1689,8 +1705,9 @@ fn prepare_capture_with_handle(
 ) -> Result<(GraphNodeObserverBinding, SpectrumCapture), SpectrumPrepareError> {
     let (node, _resources) =
         validate_capture_request(request, graph_nodes, maximum_named_allocation_bytes)?;
-    let (producer, consumer) = bounded_spsc(
+    let (producer, consumer) = bounded_spsc_prefilled(
         NonZeroUsize::new(SPECTRUM_RESULT_SLOTS).ok_or(SpectrumPrepareError::QueueCapacity)?,
+        SpectrumCapturedRecord::EMPTY,
         QueueGeneration(0x5350_4543),
     )
     .map_err(|_| SpectrumPrepareError::QueueCapacity)?;
@@ -1779,7 +1796,7 @@ pub(crate) fn prepare_capture_collection(
 }
 
 struct SpectrumCaptureObserver {
-    producer: Producer<SpectrumCapturedRecord>,
+    producer: InPlaceProducer<SpectrumCapturedRecord>,
     left: [f32; SPECTRUM_WINDOW_FRAMES],
     right: [f32; SPECTRUM_WINDOW_FRAMES],
     channels: SpectrumChannels,
@@ -1789,7 +1806,7 @@ struct SpectrumCaptureObserver {
 }
 
 struct SpectrumCaptureBuffers<'a> {
-    producer: &'a mut Producer<SpectrumCapturedRecord>,
+    producer: &'a mut InPlaceProducer<SpectrumCapturedRecord>,
     left: &'a mut [f32; SPECTRUM_WINDOW_FRAMES],
     right: &'a mut [f32; SPECTRUM_WINDOW_FRAMES],
     channels: SpectrumChannels,
@@ -1798,7 +1815,7 @@ struct SpectrumCaptureBuffers<'a> {
 impl SpectrumCaptureObserver {
     #[cfg(test)]
     fn new_one_shot_for_test(
-        producer: Producer<SpectrumCapturedRecord>,
+        producer: InPlaceProducer<SpectrumCapturedRecord>,
         state: Arc<StateWord>,
         channels: SpectrumChannels,
     ) -> Self {
@@ -1812,7 +1829,7 @@ impl SpectrumCaptureObserver {
     }
 
     fn new(
-        producer: Producer<SpectrumCapturedRecord>,
+        producer: InPlaceProducer<SpectrumCapturedRecord>,
         state: Arc<StateWord>,
         mode: Arc<AtomicU8>,
         shared: Arc<SpectrumContinuousShared>,
@@ -2452,44 +2469,50 @@ fn continuous_publish(
     // Once full, the next write slot is the oldest sample. The checked offset permits a future
     // contiguous window only when all N of its samples still reside in the ring.
     let start_index = (state.history_write_index + offset) % SPECTRUM_WINDOW_FRAMES;
-    let mut source_underrun = false;
-    for frame in 0..SPECTRUM_WINDOW_FRAMES {
-        let index = if start_index + frame >= SPECTRUM_WINDOW_FRAMES {
-            start_index + frame - SPECTRUM_WINDOW_FRAMES
-        } else {
-            start_index + frame
-        };
-        if buffers.channels.includes_left() {
-            buffers.left[frame] = state.history_left[index];
-            probe_add(PROBE_RECONSTRUCTION_WRITES, 1);
-        }
-        if buffers.channels.includes_right() {
-            buffers.right[frame] = state.history_right[index];
-            probe_add(PROBE_RECONSTRUCTION_WRITES, 1);
-        }
-        source_underrun |= state.history_validity[index] != 0;
-    }
-    probe_add(PROBE_PAYLOAD_CONSTRUCTIONS, 1);
-    probe_add(PROBE_OWNED_RECORD_SAMPLE_COPIES, 2 * SPECTRUM_WINDOW_FRAMES);
-    let record = SpectrumCapturedRecord {
-        window: SpectrumWindow {
-            left: *buffers.left,
-            right: *buffers.right,
-            first_sample: window_start,
-            channels: buffers.channels,
-            source_underrun,
-        },
-        stream_epoch,
-        sequence,
-        dropped_captures: state.shared.drops.load(Ordering::Acquire),
-        arm_generation: 0,
-    };
+    let head = SPECTRUM_WINDOW_FRAMES - start_index;
+    // A full ring holds exactly the window's N samples, so the window's validity is the whole
+    // ring's. It is folded before the push, so a full queue changes no slot.
+    let source_underrun = state
+        .history_validity
+        .iter()
+        .fold(0, |underrun, &validity| underrun | validity)
+        != 0;
+    let channels = buffers.channels;
+    let dropped_captures = state.shared.drops.load(Ordering::Acquire);
+    let (history_left, history_right) = (&state.history_left, &state.history_right);
     probe_add(PROBE_PUBLICATION_ATTEMPTS, 1);
-    probe_add(
-        PROBE_QUEUE_PAYLOAD_TRANSFER_SAMPLES,
-        2 * SPECTRUM_WINDOW_FRAMES,
-    );
-    if buffers.producer.try_push(record).is_err() {
+    // The window goes from the ring straight into the reserved queue slot: two copies per
+    // selected plane (the wrap), no staging buffer and no record on the stack (#897). An
+    // unselected plane is never written, so it keeps the prefilled zeros.
+    let pushed = buffers.producer.try_push_in_place(|record| {
+        for (selected, history, window) in [
+            (
+                channels.includes_left(),
+                history_left,
+                &mut record.window.left,
+            ),
+            (
+                channels.includes_right(),
+                history_right,
+                &mut record.window.right,
+            ),
+        ] {
+            if selected {
+                window[..head].copy_from_slice(&history[start_index..]);
+                window[head..].copy_from_slice(&history[..start_index]);
+                probe_add(PROBE_RECONSTRUCTION_WRITES, SPECTRUM_WINDOW_FRAMES);
+            }
+        }
+        record.window.first_sample = window_start;
+        record.window.channels = channels;
+        record.window.source_underrun = source_underrun;
+        record.stream_epoch = stream_epoch;
+        record.sequence = sequence;
+        record.dropped_captures = dropped_captures;
+        record.arm_generation = 0;
+        probe_add(PROBE_PAYLOAD_CONSTRUCTIONS, 1);
+    });
+    if pushed.is_err() {
         if state
             .shared
             .drops
@@ -3282,7 +3305,7 @@ mod tests {
         SpectrumSmoothingConfigError, SpectrumTarget, SpectrumWindow,
     };
     use dsp_reference::{Complex64, direct_dft_bin, magnitude_db};
-    use engine::realtime::{QueueGeneration, bounded_spsc};
+    use engine::realtime::{QueueGeneration, bounded_spsc, bounded_spsc_prefilled};
     use graph::GraphRuntimeObserver;
 
     fn window(fill: f32) -> SpectrumWindow {
@@ -3315,8 +3338,9 @@ mod tests {
     }
 
     fn continuous_pair(channels: SpectrumChannels) -> (SpectrumCaptureObserver, SpectrumCapture) {
-        let (producer, consumer) = bounded_spsc(
+        let (producer, consumer) = bounded_spsc_prefilled(
             core::num::NonZeroUsize::new(1).expect("one capture slot"),
+            super::SpectrumCapturedRecord::EMPTY,
             QueueGeneration(0x4353_5045),
         )
         .expect("capture queue");
@@ -3717,8 +3741,9 @@ mod tests {
 
     #[test]
     fn capture_preserves_a_large_absolute_sample_without_allocating() {
-        let (producer, mut consumer) = bounded_spsc(
+        let (producer, mut consumer) = bounded_spsc_prefilled(
             core::num::NonZeroUsize::new(1).expect("one capture slot"),
+            super::SpectrumCapturedRecord::EMPTY,
             QueueGeneration(0x5350_4543),
         )
         .expect("capture queue");
@@ -4128,8 +4153,9 @@ mod tests {
     fn spectrum_operation_probes_match_a_large_planar_quantum() {
         super::test_only_reset_spectrum_operation_counts();
         let (producer, state) = {
-            let (producer, _consumer) = bounded_spsc(
+            let (producer, _consumer) = bounded_spsc_prefilled(
                 core::num::NonZeroUsize::new(1).expect("one capture slot"),
+                super::SpectrumCapturedRecord::EMPTY,
                 QueueGeneration(0x5350_4543),
             )
             .expect("capture queue");
@@ -4914,19 +4940,14 @@ mod tests {
             let counts = super::test_only_spectrum_operation_counts();
             assert_eq!(counts.validation_samples, (2 * quantum) as u64);
             assert_eq!(counts.selected_storage_writes, (2 * quantum) as u64);
+            // Only the first attempt finds a free slot; a full queue writes no window (#897).
             assert_eq!(
                 counts.chronological_reconstruction_writes,
-                expected_attempts * (2 * SPECTRUM_WINDOW_FRAMES) as u64
+                (2 * SPECTRUM_WINDOW_FRAMES) as u64
             );
-            assert_eq!(
-                counts.owned_record_sample_copies,
-                expected_attempts * (2 * SPECTRUM_WINDOW_FRAMES) as u64
-            );
-            assert_eq!(
-                counts.queue_payload_transfer_samples,
-                expected_attempts * (2 * SPECTRUM_WINDOW_FRAMES) as u64
-            );
-            assert_eq!(counts.payload_constructions, expected_attempts);
+            assert_eq!(counts.owned_record_sample_copies, 0);
+            assert_eq!(counts.queue_payload_transfer_samples, 0);
+            assert_eq!(counts.payload_constructions, 1);
             assert_eq!(counts.publication_attempts, expected_attempts);
             assert_eq!(
                 capture
@@ -4987,14 +5008,9 @@ mod tests {
             counts.chronological_reconstruction_writes,
             (2 * SPECTRUM_WINDOW_FRAMES) as u64
         );
-        assert_eq!(
-            counts.owned_record_sample_copies,
-            (2 * SPECTRUM_WINDOW_FRAMES) as u64
-        );
-        assert_eq!(
-            counts.queue_payload_transfer_samples,
-            (2 * SPECTRUM_WINDOW_FRAMES) as u64
-        );
+        // The window is written once, from the ring into the queue slot (#897).
+        assert_eq!(counts.owned_record_sample_copies, 0);
+        assert_eq!(counts.queue_payload_transfer_samples, 0);
         assert_eq!(counts.payload_constructions, 1);
         assert_eq!(counts.publication_attempts, 1);
         assert_eq!(
@@ -5002,7 +5018,7 @@ mod tests {
                 + counts.chronological_reconstruction_writes
                 + counts.owned_record_sample_copies
                 + counts.queue_payload_transfer_samples,
-            12_544
+            4_352
         );
     }
 
