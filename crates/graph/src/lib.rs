@@ -4276,7 +4276,7 @@ pub fn fade_arm_table_bytes(arms: usize, pairs: usize) -> Option<u64> {
             .and_then(|pair_bytes| bytes.checked_add(pair_bytes))
     })
     // The watch's `Arc` header (issue #1392).
-    .and_then(|bytes| bytes.checked_add(WATCH_HEADER_BYTES))
+    .and_then(|bytes| bytes.checked_add(if arms == 0 { 0 } else { WATCH_HEADER_BYTES }))
     .and_then(|bytes| u64::try_from(bytes).ok())
 }
 
