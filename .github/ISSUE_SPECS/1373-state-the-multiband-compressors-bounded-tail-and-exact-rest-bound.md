@@ -95,3 +95,24 @@ its crossover and detector state reach exact rest. Today it declares `Infinite`.
 - *Report a zero tail beyond latency for the compressor and the true-peak limiter* (#1375), for the
   one-pole helper
 - *Make the multiband compressor's crossover live* (#1338): the glide this slice bounds
+
+## Decision record
+
+- **Split (root, 2026-10-24).** Two tranches: **1373a** (math: `math::tail`'s first-section row
+  bound, its brute-force gate, derivation part 1) before **1373b** (the effect, its pinned table,
+  its three tests, derivation part 2), which follows #893 and #1340. The scope note
+  (`scratchpad/opt/scope/1373.md`) is the authority for 1373b's paths: they add
+  `crates/multiband-compressor/src/tail.rs` (new) to the list above.
+- **Decision (a) (root).** The output bound decomposes as `|y| <= G_max (2 |lp2| + |ap1|)`:
+  `lp2` from `live_cascade`, `ap1 = x - 2k v1` (a first-stage tap) from a new first-section row
+  bound in `math::tail`, which reuses `LiveBound` and `live_zones`. Composition is part of b:
+  `pdc.rs` step 8 makes an `Unstated` composition `Infinite`, so b states all five H1 values.
+- **1373a, attempt 1 (2026-10-24).** `math::tail::FirstSectionRow`, `live_first_section` (tail,
+  `T_rest`, rests, `P*`) and `live_first_section_composition` (`D`, `G_p`, `G_t`, both stalls);
+  `TailBoundError::Invalid` for a row constant that is not finite and non-negative. The zone
+  constants bound `ap1` within the window (the scope's hazard did not fire; no constant tuned).
+  Class A: `tail_gain`'s ramp paths, `settled_start`'s `H_0` and `group_rests`'s first-stage rest
+  moved into shared helpers with the same arithmetic; `builtins`' pinned live table still equals
+  its recompute (`live_bound_table_is_the_computed_live_bound_at_every_launch_rate`, release).
+  Gate: `crates/math/tests/live_first_section.rs`. Derivation part 1:
+  `docs/derivations/1373-multiband-compressor-tail-and-rest.md`.

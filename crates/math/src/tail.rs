@@ -489,6 +489,8 @@ pub enum TailBoundError {
     StallAboveRest,
     /// A bound would exceed the longest horizon this module evaluates.
     Horizon,
+    /// A caller's constant is not finite and non-negative ([`FirstSectionRow`]).
+    Invalid,
 }
 
 /// A certified tail and exact-rest bound, in samples beyond latency (#1329 D1, D2, Amendment 3).
@@ -1670,16 +1672,238 @@ impl<'a> LiveBound<'a> {
     /// The settled phase's state at `n0` for one zone: `tau <= sigma + |y|`, `H` the smaller of
     /// the window's state bound and the zone's `Phi`, `X = 2 c_y H`.
     fn settled_start(&self, terms: &SettledTerms, window: &LiveWindow, g: f64, f: f64) -> [f64; 4] {
-        let h = window
-            .energy
-            .min((terms.state[0] * g + terms.state[1] * f) * SLACK)
-            .min(self.cap);
+        let h = self.settled_energy(terms, window.energy, g, f);
         [
             (window.state + terms.output * h + f) * SLACK,
             h,
             2.0 * terms.output * h * SLACK,
             1.0,
         ]
+    }
+
+    /// `H_0`, the first section's state bound at `N + ramp_frames` for one zone group: the smaller
+    /// of the window's bound `energy` and the group's `Phi`, capped.
+    fn settled_energy(&self, terms: &SettledTerms, energy: f64, g: f64, f: f64) -> f64 {
+        energy
+            .min((terms.state[0] * g + terms.state[1] * f) * SLACK)
+            .min(self.cap)
+    }
+
+    /// The frame (from `N`) at which the first section is proven at rest for one zone group, from
+    /// its state bound `energy` at `N + ramp_frames`: its state below `REST_EPS` per word (it
+    /// decays freely by the group's settled contraction), then `N_SILENCE`.
+    fn first_rested(&self, terms: &SettledTerms, energy: f64) -> Result<u64, TailBoundError> {
+        let f = self.law.per_step();
+        let limit = self.law.rest_eps / R_INV_NORM;
+        let first = free_decay_frames(energy, terms.contraction, f, limit)
+            .ok_or(TailBoundError::StallAboveRest)?;
+        self.ramp_frames
+            .checked_add(first)
+            .and_then(|value| value.checked_add(self.law.silence_frames))
+            .filter(|value| *value < HORIZON_LIMIT)
+            .ok_or(TailBoundError::Horizon)
+    }
+
+    /// The first section's row ([`FirstSectionRow`]) through the window `N ..= N + ramp_frames`
+    /// with the input zero, for one input scale `g` and flush drive `f` (issue #1373): per frame
+    /// the row's bound `(1/2 |m| q_max + omega) E + F`, with `E` the first section's state bound
+    /// (`sup Phi` at `N`, then `E' = rho_ramp E + F`, capped at the `V`-norm of finite `f32`
+    /// words) and `q_max` the largest zone's `||I + A||_V`. Returns the outputs, `E` at
+    /// `N + ramp_frames`, and whether `E` took the cap (a NaN counts as capped).
+    fn first_window(&self, g: f64, f: f64) -> (Vec<f64>, f64, bool) {
+        let zones = self.zones;
+        let rho = self.live.envelope.rho_ramp;
+        let half_row = 0.5 * self.live.first_mix_row;
+        let omega = self.live.first_output_rounding;
+        let coefficient = (half_row * zones.largest_sum_norm + omega) * SLACK;
+        let mut energy = (zones.largest_state[0] * g + zones.largest_state[1] * f) * SLACK;
+        let mut capped = false;
+        let mut outputs = Vec::with_capacity(self.ramp_frames as usize + 1);
+        for frame in 0..=self.ramp_frames {
+            capped |= energy >= self.cap || energy.is_nan();
+            energy = energy.min(self.cap);
+            outputs.push((coefficient * energy + f) * SLACK);
+            if frame < self.ramp_frames {
+                energy = (rho * energy + f) * SLACK;
+            }
+        }
+        (outputs, energy, capped)
+    }
+
+    /// The first frame from which the first section's row bound (per unit of the peak, without
+    /// the flush) stays below `limit` (issue #1373): the window's outputs, then per zone group
+    /// the settled bound `c_y r^m H_0` at `N + ramp_frames + m`, which falls in `m`, so its
+    /// crossing is [`free_decay_frames`]'s closed form.
+    fn first_tail(&self, g: f64, limit: f64) -> Result<u64, TailBoundError> {
+        let (outputs, energy, _) = self.first_window(g, 0.0);
+        let mut tail = outputs
+            .iter()
+            .rposition(|value| !(*value < limit))
+            .map_or(0, |frame| frame as u64 + 1);
+        for terms in &self.terms {
+            let start = (terms.output * self.settled_energy(terms, energy, g, 0.0)) * SLACK;
+            let frames = free_decay_frames(start, terms.contraction, 0.0, limit)
+                .filter(|frames| *frames < HORIZON_LIMIT)
+                .ok_or(TailBoundError::Horizon)?;
+            if frames > 0 {
+                tail = tail.max(self.ramp_frames + frames);
+            }
+        }
+        if tail >= HORIZON_LIMIT {
+            return Err(TailBoundError::Horizon);
+        }
+        Ok(tail)
+    }
+
+    /// The flush's part of the first section's row bound from frame `tail` on (issue #1373): the
+    /// window's from there, and per zone group `c_y (r^m H_0 + F / (1 - r)) + F` at the first
+    /// settled frame `N + ramp_frames + m` at or after `tail` (`H' = r H + F`, so the bound falls
+    /// from there), `r^m H_0` carried by repeated squaring and rounded up.
+    fn first_stall(&self, tail: u64) -> f64 {
+        let f = self.law.per_step();
+        let (outputs, energy, _) = self.first_window(0.0, f);
+        let mut stall = outputs
+            .iter()
+            .skip(tail as usize)
+            .fold(0.0_f64, |sup, value| nan_max(sup, *value));
+        let steps = tail.max(self.ramp_frames + 1) - self.ramp_frames;
+        for terms in &self.terms {
+            let r = terms.contraction;
+            let step = SquareMatrix {
+                n: 1,
+                m: std::vec![r],
+            };
+            let start = self.settled_energy(terms, energy, 0.0, f);
+            let decayed = carry(&step, steps, &[start])[0];
+            let fixed = f / (1.0 - r) * SLACK;
+            stall = nan_max(
+                stall,
+                (terms.output * (decayed + fixed) * SLACK + f) * SLACK,
+            );
+        }
+        stall * SLACK
+    }
+
+    /// The frame (from `N`) at which the first section is proven at rest at the input scale `g`
+    /// (issue #1373), the largest over the zone groups: from then on its state is exactly zero,
+    /// so with the input zero every row on it is exactly zero too.
+    fn first_rest(&self, g: f64) -> Result<u64, TailBoundError> {
+        let f = self.law.per_step();
+        let (_, energy, _) = self.first_window(g, f);
+        let mut worst = 0_u64;
+        for terms in &self.terms {
+            let start = self.settled_energy(terms, energy, g, f);
+            worst = worst.max(self.first_rested(terms, start)?);
+        }
+        Ok(worst)
+    }
+
+    /// The composition values of the first section's row (issue #1373; #1379 Amendment 1 H1),
+    /// for the input scale `gain` and the row's `T_decay` `tail`:
+    ///
+    /// * `g_p`: the row at any frame of any admitted history is at most
+    ///   `max_k (1/2 |m| q_k + omega) Phi_k + delta` per unit of the input part (`Phi_k` bounds
+    ///   the state while the words are in zone `k`), and `sigma_p` the flush part from `N` on,
+    ///   which starts from `sup Phi` and so bounds every earlier frame too.
+    /// * `D`: one certificate per zone group on the one-term system `H' = r H`, row `c_y`,
+    ///   anchored at `T` or at the window's end.
+    /// * `g_t`: the late part along the in-flight ramp paths, then settled
+    ///   (`E <= max(E*_k, beta_k / (1 - r_k))`), as for the cascade's first section, with the
+    ///   row's own constants.
+    ///
+    /// `None` when a window state bound took the cap, a constant is not finite, a group's start
+    /// is outside the carry's rounding argument or has no verified certificate, or `D` is not
+    /// below [`HORIZON_LIMIT`].
+    fn first_composition(&self, feedthrough: f64, gain: f64, tail: u64) -> Option<LiveComposition> {
+        let (_, energy, relative_capped) = self.first_window(gain, 0.0);
+        let (_, _, flush_capped) = self.first_window(0.0, self.law.per_step());
+        if relative_capped || flush_capped {
+            return None;
+        }
+        let zones = &self.zones.zones;
+        let half_row = 0.5 * self.live.first_mix_row;
+        let omega = self.live.first_output_rounding;
+        let finite = zones
+            .iter()
+            .all(|zone| (zone.sum_norm + zone.state).is_finite())
+            && (half_row + omega + feedthrough).is_finite();
+        if !finite {
+            return None;
+        }
+        // (N1).
+        let output = zones.iter().fold(0.0_f64, |sup, zone| {
+            nan_max(sup, (half_row * zone.sum_norm + omega) * zone.state * SLACK)
+        });
+        let peak_gain = gain * ((output + feedthrough) * SLACK) * SLACK;
+        let peak_stall = self.first_stall(0);
+        let tail_stall = self.first_stall(tail).min(peak_stall);
+        // (N2): per group, anchored at `T` or at the window's end.
+        let anchor = tail.max(self.ramp_frames + 1);
+        let log_threshold = crate::log(TAIL_FLOOR / 2.0);
+        let mut groups = Vec::with_capacity(self.terms.len());
+        for terms in &self.terms {
+            let start = self.settled_energy(terms, energy, gain, 0.0);
+            if !(start <= LIVE_STATE_LIMIT) {
+                return None;
+            }
+            let step = SquareMatrix {
+                n: 1,
+                m: std::vec![terms.contraction],
+            };
+            let state = carry(&step, anchor - self.ramp_frames, &[start])[0].max(TAU);
+            let half = HalfSystem {
+                step: &step,
+                order: &[0],
+                state: &[state],
+                row: &[terms.output],
+                log_threshold,
+                offset: anchor - tail,
+            };
+            groups.push(half.certificate()?);
+        }
+        let decay = groups.iter().map(HalfCertificate::decay).max().unwrap_or(1);
+        if decay >= HORIZON_LIMIT {
+            return None;
+        }
+        let tail_gain = self.first_tail_gain(feedthrough, gain);
+        (peak_gain.is_finite() && tail_gain.is_finite() && peak_stall.is_finite()).then_some(
+            LiveComposition {
+                decay,
+                groups,
+                peak_gain,
+                tail_gain,
+                peak_stall,
+                tail_stall,
+            },
+        )
+    }
+
+    /// `g_t` of the first section's row at the input scale `g` (issue #1373): the late part
+    /// (zero state at `M`, input at most `g` from `M` on) along every in-flight ramp path through
+    /// the window ([`RampPaths::section`]), then per settled zone `k`
+    /// `c_k max(E*_k, beta_k / (1 - r_k)) + delta`. A NaN when a constant is not finite.
+    fn first_tail_gain(&self, feedthrough: f64, g: f64) -> f64 {
+        let half_row = 0.5 * self.live.first_mix_row;
+        let omega = self.live.first_output_rounding;
+        let Some(paths) = self.ramp_paths(half_row + omega + feedthrough) else {
+            return f64::NAN;
+        };
+        let unit = std::vec![1.0_f64; self.ramp_frames as usize];
+        let (output, end) = paths.section(half_row, omega, feedthrough, &unit);
+        let window = output
+            .iter()
+            .fold(0.0_f64, |sup, value| nan_max(sup, *value));
+        let mut settled_peak = 0.0_f64;
+        for (zone, end) in self.zones.zones.iter().zip(&end) {
+            let Some(settled) = zone.settled else {
+                continue;
+            };
+            let r_k = settled.contraction;
+            let c_k = (half_row * settled.sum_norm + omega) * SLACK;
+            let e_bar = zone.input / (1.0 - r_k) * SLACK;
+            settled_peak = nan_max(settled_peak, (c_k * end.max(e_bar) + feedthrough) * SLACK);
+        }
+        g * nan_max(window, settled_peak) * SLACK
     }
 
     /// The second section's exposure along its own path of zones (issue #1485; the derivation's
@@ -1848,124 +2072,19 @@ impl<'a> LiveBound<'a> {
     fn tail_gain(&self, g: f64) -> f64 {
         let live = self.live;
         let zones = &self.zones.zones;
-        let count = zones.len();
         let frames = self.ramp_frames as usize;
         let half_rows = [0.5 * live.first_mix_row, 0.5 * live.second_mix_row];
         let omegas = [live.first_output_rounding, live.second_output_rounding];
         let delta = live.envelope.output_input;
-        let (eta, _, _) = pole_shift(live.poles.ramp_box);
-        // The propagation below takes maxima that pass over a NaN, so every constant it reads is
-        // checked finite first.
-        let finite = zones.iter().all(|zone| {
-            let settled = zone.settled.map_or(0.0, |s| s.contraction + s.sum_norm);
-            (zone.contraction + zone.input + zone.sum_norm + settled).is_finite()
-        }) && (half_rows[0] + half_rows[1] + omegas[0] + omegas[1] + delta + eta)
-            .is_finite();
-        if !finite || frames == 0 {
+        let Some(paths) =
+            self.ramp_paths(half_rows[0] + half_rows[1] + omegas[0] + omegas[1] + delta)
+        else {
             return f64::NAN;
-        }
-        // A margin far above the rounding of the interval's ends (`|Re p| < 1`).
-        let pad = 1.0e-15;
-        // The largest ramp constants `(rho, beta, q)` over the zones `first..=last`.
-        let mut table = std::vec![[0.0_f64; 3]; count * count];
-        for first in 0..count {
-            let mut sup = [0.0_f64; 3];
-            for (last, zone) in zones.iter().enumerate().skip(first) {
-                sup = [
-                    sup[0].max(zone.contraction),
-                    sup[1].max(zone.input),
-                    sup[2].max(zone.sum_norm),
-                ];
-                table[first * count + last] = sup;
-            }
-        }
-        let over = |from: f64, to: f64| {
-            let first = zones
-                .partition_point(|zone| zone.high < from)
-                .min(count - 1);
-            let last = zones
-                .partition_point(|zone| zone.low <= to)
-                .saturating_sub(1)
-                .max(first);
-            table[first * count + last]
-        };
-        // One section over every path: per target zone `t` (settled) and start zone `s`, the
-        // constants at each ramp frame `i < R` and the design's after it; every path `r`
-        // (`0..=R` frames of the ramp left at `M`) starts from zero at ramp frame `R - r`. At an
-        // absolute frame `i` (`0 <= i < 2R`), path `r` is at window frame `f = i - R + r`, so
-        // the paths in flight form one contiguous run of `r` and of `f`. `drive[f]` is the input
-        // at window frame `f`; returns, per window frame, the largest output and, per target zone,
-        // the largest state at window frame `R`.
-        let section = |half_row: f64, omega: f64, drive: &[f64]| {
-            let mut output = std::vec![0.0_f64; frames];
-            let mut end = std::vec![0.0_f64; count];
-            let mut constants = std::vec![[0.0_f64; 3]; frames];
-            let mut state = std::vec![0.0_f64; frames + 1];
-            for (target, zone) in zones.iter().enumerate() {
-                let Some(settled) = zone.settled else {
-                    continue;
-                };
-                let fixed = [settled.contraction, zone.input, settled.sum_norm];
-                for start in zones {
-                    for (index, slot) in constants.iter_mut().enumerate() {
-                        let alpha = index as f64 / frames as f64;
-                        *slot = over(
-                            (1.0 - alpha) * start.low + alpha * zone.low - eta - pad,
-                            (1.0 - alpha) * start.high + alpha * zone.high + eta + pad,
-                        );
-                    }
-                    state.iter_mut().for_each(|value| *value = 0.0);
-                    for absolute in 0..2 * frames {
-                        let [rho, beta, q] = constants.get(absolute).copied().unwrap_or(fixed);
-                        let row = half_row * q + omega;
-                        // Paths `r` with `0 <= f = absolute - R + r < R`, `r <= R`.
-                        let low = frames.saturating_sub(absolute);
-                        let high = (2 * frames - 1 - absolute).min(frames);
-                        let first_frame = absolute + low - frames;
-                        let window = first_frame..first_frame + (high - low + 1);
-                        for ((value, out), input) in state[low..=high]
-                            .iter_mut()
-                            .zip(&mut output[window.clone()])
-                            .zip(&drive[window])
-                        {
-                            *out = out.max((row * *value + delta * input) * SLACK);
-                            *value = (rho * *value + beta * input) * SLACK;
-                        }
-                        // Path `r = 2R - 1 - absolute` has just reached window frame `R`.
-                        if let Some(done) = (2 * frames - 1)
-                            .checked_sub(absolute)
-                            .filter(|done| *done <= frames)
-                        {
-                            end[target] = end[target].max(state[done]);
-                        }
-                    }
-                }
-            }
-            // A disable in flight (#1407 rule 2) holds the recursion words at a reachable word in
-            // any zone `s` for `r <= R` frames, then replaces the state with zero and passes the
-            // input, which every path above already covers (`delta >= 1`).
-            for zone in zones {
-                let [rho, beta, q] = over(zone.low - eta - pad, zone.high + eta + pad);
-                let row = half_row * q + omega;
-                state.iter_mut().for_each(|value| *value = 0.0);
-                for absolute in 0..frames {
-                    let low = frames - absolute;
-                    let window = 0..absolute + 1;
-                    for ((value, out), input) in state[low..=frames]
-                        .iter_mut()
-                        .zip(&mut output[window.clone()])
-                        .zip(&drive[window])
-                    {
-                        *out = out.max((row * *value + delta * input) * SLACK);
-                        *value = (rho * *value + beta * input) * SLACK;
-                    }
-                }
-            }
-            (output, end)
         };
         let unit = std::vec![1.0_f64; frames];
-        let (first_output, first_end) = section(half_rows[0], omegas[0], &unit);
-        let (second_output, second_end) = section(half_rows[1], omegas[1], &first_output);
+        let (first_output, first_end) = paths.section(half_rows[0], omegas[0], delta, &unit);
+        let (second_output, second_end) =
+            paths.section(half_rows[1], omegas[1], delta, &first_output);
         let window = second_output
             .iter()
             .fold(0.0_f64, |sup, value| sup.max(*value));
@@ -1997,6 +2116,46 @@ impl<'a> LiveBound<'a> {
         g * window.max(settled_peak) * SLACK
     }
 
+    /// The paths through the ramp window that [`Self::tail_gain`] and the first-section tail gain
+    /// ([`Self::first_composition`]) propagate, after checking that every constant they read is
+    /// finite (`scalars`: the sum of the caller's own row constants). The propagation takes maxima
+    /// that pass over a NaN, so a constant that is not finite, or an empty window, gives `None`.
+    fn ramp_paths(&self, scalars: f64) -> Option<RampPaths<'_>> {
+        let zones = &self.zones.zones;
+        let count = zones.len();
+        let frames = self.ramp_frames as usize;
+        let (eta, _, _) = pole_shift(self.live.poles.ramp_box);
+        let finite = zones.iter().all(|zone| {
+            let settled = zone.settled.map_or(0.0, |s| s.contraction + s.sum_norm);
+            (zone.contraction + zone.input + zone.sum_norm + settled).is_finite()
+        }) && (scalars + eta).is_finite();
+        if !finite || frames == 0 {
+            return None;
+        }
+        // A margin far above the rounding of the interval's ends (`|Re p| < 1`).
+        let pad = 1.0e-15;
+        // The largest ramp constants `(rho, beta, q)` over the zones `first..=last`.
+        let mut table = std::vec![[0.0_f64; 3]; count * count];
+        for first in 0..count {
+            let mut sup = [0.0_f64; 3];
+            for (last, zone) in zones.iter().enumerate().skip(first) {
+                sup = [
+                    sup[0].max(zone.contraction),
+                    sup[1].max(zone.input),
+                    sup[2].max(zone.sum_norm),
+                ];
+                table[first * count + last] = sup;
+            }
+        }
+        Some(RampPaths {
+            zones,
+            table,
+            frames,
+            eta,
+            pad,
+        })
+    }
+
     /// `R` for one input scale `g = gain * peak`: the first section rests (its state bound below
     /// `REST_EPS` per word, plus `N_SILENCE`), then the second, from its bound at that frame.
     fn rest(&self, g: f64) -> Result<u64, TailBoundError> {
@@ -2017,14 +2176,7 @@ impl<'a> LiveBound<'a> {
         let mut groups = Vec::with_capacity(self.terms.len());
         for terms in &self.terms {
             let u0 = self.settled_start(terms, &window, g, f);
-            let first = free_decay_frames(u0[1], terms.contraction, f, limit)
-                .ok_or(TailBoundError::StallAboveRest)?;
-            let first_rested = self
-                .ramp_frames
-                .checked_add(first)
-                .and_then(|value| value.checked_add(self.law.silence_frames))
-                .filter(|value| *value < HORIZON_LIMIT)
-                .ok_or(TailBoundError::Horizon)?;
+            let first_rested = self.first_rested(terms, u0[1])?;
             let (system, state_row, _) = self.settled_system(terms, f);
             let at = Powers4::new(system).apply(first_rested - start, &u0);
             let sigma = dot4(&state_row, &at).min(self.cap);
@@ -2276,6 +2428,123 @@ impl<'a> LiveBound<'a> {
     }
 }
 
+/// The ramp-window paths of the live tail gain (issue #1485), one table of the largest ramp
+/// constants `(rho, beta, q)` over every run of zones, shared by the sections it propagates.
+struct RampPaths<'a> {
+    zones: &'a [PoleZone],
+    /// `table[first * count + last]`: the largest constants over the zones `first..=last`.
+    table: Vec<[f64; 3]>,
+    frames: usize,
+    /// The ramp box's image on `Re p`.
+    eta: f64,
+    /// A margin far above the rounding of an interval's ends (`|Re p| < 1`).
+    pad: f64,
+}
+
+impl RampPaths<'_> {
+    /// The largest ramp constants over the zones that meet `[from, to]`.
+    fn over(&self, from: f64, to: f64) -> [f64; 3] {
+        let zones = self.zones;
+        let count = zones.len();
+        let first = zones
+            .partition_point(|zone| zone.high < from)
+            .min(count - 1);
+        let last = zones
+            .partition_point(|zone| zone.low <= to)
+            .saturating_sub(1)
+            .max(first);
+        self.table[first * count + last]
+    }
+
+    /// One section over every path: per target zone `t` (settled) and start zone `s`, the
+    /// constants at each ramp frame `i < R` and the design's after it; every path `r`
+    /// (`0..=R` frames of the ramp left at `M`) starts from zero at ramp frame `R - r`. At an
+    /// absolute frame `i` (`0 <= i < 2R`), path `r` is at window frame `f = i - R + r`, so
+    /// the paths in flight form one contiguous run of `r` and of `f`. `drive[f]` is the input
+    /// at window frame `f`; returns, per window frame, the largest output and, per target zone,
+    /// the largest state at window frame `R`.
+    fn section(
+        &self,
+        half_row: f64,
+        omega: f64,
+        delta: f64,
+        drive: &[f64],
+    ) -> (Vec<f64>, Vec<f64>) {
+        let (zones, frames, count, eta, pad) = (
+            self.zones,
+            self.frames,
+            self.zones.len(),
+            self.eta,
+            self.pad,
+        );
+        let mut output = std::vec![0.0_f64; frames];
+        let mut end = std::vec![0.0_f64; count];
+        let mut constants = std::vec![[0.0_f64; 3]; frames];
+        let mut state = std::vec![0.0_f64; frames + 1];
+        for (target, zone) in zones.iter().enumerate() {
+            let Some(settled) = zone.settled else {
+                continue;
+            };
+            let fixed = [settled.contraction, zone.input, settled.sum_norm];
+            for start in zones {
+                for (index, slot) in constants.iter_mut().enumerate() {
+                    let alpha = index as f64 / frames as f64;
+                    *slot = self.over(
+                        (1.0 - alpha) * start.low + alpha * zone.low - eta - pad,
+                        (1.0 - alpha) * start.high + alpha * zone.high + eta + pad,
+                    );
+                }
+                state.iter_mut().for_each(|value| *value = 0.0);
+                for absolute in 0..2 * frames {
+                    let [rho, beta, q] = constants.get(absolute).copied().unwrap_or(fixed);
+                    let row = half_row * q + omega;
+                    // Paths `r` with `0 <= f = absolute - R + r < R`, `r <= R`.
+                    let low = frames.saturating_sub(absolute);
+                    let high = (2 * frames - 1 - absolute).min(frames);
+                    let first_frame = absolute + low - frames;
+                    let window = first_frame..first_frame + (high - low + 1);
+                    for ((value, out), input) in state[low..=high]
+                        .iter_mut()
+                        .zip(&mut output[window.clone()])
+                        .zip(&drive[window])
+                    {
+                        *out = out.max((row * *value + delta * input) * SLACK);
+                        *value = (rho * *value + beta * input) * SLACK;
+                    }
+                    // Path `r = 2R - 1 - absolute` has just reached window frame `R`.
+                    if let Some(done) = (2 * frames - 1)
+                        .checked_sub(absolute)
+                        .filter(|done| *done <= frames)
+                    {
+                        end[target] = end[target].max(state[done]);
+                    }
+                }
+            }
+        }
+        // A disable in flight (#1407 rule 2) holds the recursion words at a reachable word in
+        // any zone `s` for `r <= R` frames, then replaces the state with zero and passes the
+        // input, which every path above already covers (`delta >= 1`).
+        for zone in zones {
+            let [rho, beta, q] = self.over(zone.low - eta - pad, zone.high + eta + pad);
+            let row = half_row * q + omega;
+            state.iter_mut().for_each(|value| *value = 0.0);
+            for absolute in 0..frames {
+                let low = frames - absolute;
+                let window = 0..absolute + 1;
+                for ((value, out), input) in state[low..=frames]
+                    .iter_mut()
+                    .zip(&mut output[window.clone()])
+                    .zip(&drive[window])
+                {
+                    *out = out.max((row * *value + delta * input) * SLACK);
+                    *value = (rho * *value + beta * input) * SLACK;
+                }
+            }
+        }
+        (output, end)
+    }
+}
+
 /// One settled zone group of [`live_cascade`]'s rest at one input scale, with the quantities the
 /// rest reads (evidence for the derivation's independent recomputation; issue #1433).
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -2436,6 +2705,122 @@ pub fn live_cascade(
         tail_reference: tail,
         composition: None,
     })
+}
+
+/// A row on the first section's state of a live cascade (issue #1373): an output
+/// `y = c . s + d x` of the first section's state `s` and input `x` other than the section's own
+/// mix, such as the multiband crossover's all-pass tap `x - 2k v1`
+/// (`docs/derivations/1373-multiband-compressor-tail-and-rest.md`). Every row of a TPT SVF is
+/// `c = 1/2 (m1, m2) (I + A)`, `d = m0 + m1 a2 + m2 a3` for its mix words `(m0, m1, m2)` (the
+/// module's kernel note), so the row is given by suprema over every word the section can load,
+/// exactly as [`LiveCascade`]'s own first mix row. A section at the identity has zero state, so
+/// its row is `d x` alone.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct FirstSectionRow {
+    /// The supremum of `||(m1, m2)||_V*` ([`v_dual_norm`]) over the row's mix words.
+    pub mix_row: f64,
+    /// [`output_rounding`]'s `omega_state` for the row's mix over every word of the section: the
+    /// row's evaluation rounding relative to the state.
+    pub output_rounding: f64,
+    /// The supremum of `|d|` plus [`output_rounding`]'s `omega_input`: the row's bound on its
+    /// input part, per unit of the input.
+    pub feedthrough: f64,
+}
+
+/// The cascade `live` with its first section's output row replaced by `row`'s: every quantity
+/// the first section's own bound reads ([`LiveBound::first_window`] and its siblings) then reads
+/// the row. The second section's quantities of the result are not used.
+fn with_first_row(
+    live: &LiveCascade,
+    row: &FirstSectionRow,
+) -> Result<LiveCascade, TailBoundError> {
+    let valid = |value: f64| value.is_finite() && value >= 0.0;
+    if !(valid(row.mix_row) && valid(row.output_rounding) && valid(row.feedthrough)) {
+        return Err(TailBoundError::Invalid);
+    }
+    Ok(LiveCascade {
+        first_mix_row: row.mix_row,
+        first_output_rounding: row.output_rounding,
+        ..*live
+    })
+}
+
+/// The tail and rest bound of a row on the first section's state of a live cascade (issue
+/// #1373; `docs/derivations/1373-multiband-compressor-tail-and-rest.md`, part 1), for the same
+/// histories as [`live_cascade`] and with the same meaning of every field, for the row's output
+/// instead of the cascade's:
+///
+/// * **Bound.** With the input zero from `N`, the row is `1/2 (m1, m2) (I + A) s` up to rounding,
+///   so `|y| <= (1/2 |m| q_k + omega) ||s||_V`, `q_k` the `||I + A||_V` of the zone the words lie
+///   in ([`live_zones`]). Through the window `N ..= N + ramp_frames` the state is at most
+///   `sup Phi` contracted by `rho_ramp`, and `q_k` at most the largest zone's; from
+///   `N + ramp_frames` the words are a settled design in one zone group, whose state decays by
+///   its settled contraction `r` from the smaller of the window's bound and the group's `Phi`.
+/// * **Tail, stall, rest.** `T_decay` where the relative bound stays below `eps / 2`; `P*` from
+///   the flush's part from `T_decay` on; rest when the first section's state is proven below
+///   `REST_EPS` per word plus `N_SILENCE`: from then on the state is exactly zero, and so is the
+///   row (the input is zero). The second section plays no part.
+///
+/// # Errors
+///
+/// [`TailBoundError::Invalid`] when a constant of `row` is not finite and non-negative; otherwise
+/// as [`live_cascade`].
+pub fn live_first_section(
+    live: &LiveCascade,
+    row: &FirstSectionRow,
+    gain: f64,
+    law: &FlushLaw,
+    ramp_frames: u64,
+    peaks: [f64; 2],
+) -> Result<CascadeBound, TailBoundError> {
+    let live = with_first_row(live, row)?;
+    let zones = live_cascade_zones(&live)?;
+    let bound = LiveBound::new(&live, &zones, law, ramp_frames);
+    // As [`live_cascade`]: `gain` is the input word's magnitude, rounded up by one product.
+    let gain = gain * (1.0 + U);
+    let tail = bound.first_tail(gain, TAIL_FLOOR / 2.0)?;
+    let p_star = bound.first_stall(tail) / (TAIL_FLOOR / 2.0) * SLACK;
+    if !p_star.is_finite() {
+        return Err(TailBoundError::Horizon);
+    }
+    let rest_star = bound.first_rest(gain * p_star)?;
+    let rest_peak = bound.first_rest(gain * peaks[0])?;
+    let rest_any = bound.first_rest(gain * peaks[1])?;
+    Ok(CascadeBound {
+        tail,
+        tail_every_peak: tail.max(rest_star),
+        rest_peak,
+        rest_any,
+        flush_floor: p_star,
+        rest_at_flush_floor: rest_star,
+        tail_reference: tail,
+        composition: None,
+    })
+}
+
+/// The composition values of a row on the first section's state (issue #1373; #1379 Amendment 1
+/// H1): its decay `D`, linear peak and tail gains and linear peak and tail stalls, with the
+/// meaning of [`live_cascade_composition`]'s for the row's output, at the row's own `T_decay`
+/// ([`live_first_section`]). `Ok(None)` when the values are not certified (a capped window, a
+/// group outside the carry's rounding argument or with no verified certificate, a value that is
+/// not finite).
+///
+/// # Errors
+///
+/// As [`live_first_section`].
+pub fn live_first_section_composition(
+    live: &LiveCascade,
+    row: &FirstSectionRow,
+    gain: f64,
+    law: &FlushLaw,
+    ramp_frames: u64,
+) -> Result<Option<LiveComposition>, TailBoundError> {
+    let live = with_first_row(live, row)?;
+    let zones = live_cascade_zones(&live)?;
+    let bound = LiveBound::new(&live, &zones, law, ramp_frames);
+    let gain = gain * (1.0 + U);
+    let tail = bound.first_tail(gain, TAIL_FLOOR / 2.0)?;
+    Ok(bound.first_composition(row.feedthrough, gain, tail))
 }
 
 /// Impulse majorants of a fixed cascade, one frame at a time: the first section's exact state
