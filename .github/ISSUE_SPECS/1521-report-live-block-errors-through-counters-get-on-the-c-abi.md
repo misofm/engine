@@ -242,4 +242,6 @@ All anchors are on `main` at `8c0deee2c`.
   value message plus its 8-byte TLV header), TLV count 6 -> 7. Mutants (PR evidence): the refresh
   line deleted -> gate 1 reads 0, not 3 (red); `LiveBlockErrors` left out of `SERVED_COUNTERS` ->
   gate 1's configure is refused (red) and gate 2's capacity grows 5 -> 10 (red). Reads alone do not
-  catch the second mutant: `set_counter` inserts an unserved ID.
+  catch the second mutant: `set_counter` inserts an unserved ID. Gate 1 stores through a `#[cfg(test)]` helper in
+  `crates/capi/src/ffi.rs` (root authorized the path), because realtime-policy refuses `unsafe` in
+  `live_tests.rs`.

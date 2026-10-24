@@ -1426,16 +1426,13 @@ fn the_first_refresh_puts_a_render_changed_counter_in_the_next_snapshot() {
 /// from the served set, so the read or the configuration is refused; no other test reads the
 /// mirror outside `control-plane`'s `plan.rs`.
 #[test]
-#[allow(unsafe_code)]
 fn the_live_block_error_mirror_reaches_counters_get_and_the_snapshot() {
     let mut rig = Rig::new(&long_session(10, 48_000));
     assert_eq!(rig.counter(protocol::CounterId::LiveBlockErrors), 0);
     for _ in 0..5 {
         rig.step();
     }
-    // SAFETY: the rig owns the live plan handle and no render call is in flight; `queries` is the
-    // plan's any-thread projection, read through a shared reference.
-    unsafe { &(*rig.plan).queries }.test_store_live_block_errors(3);
+    crate::ffi::test_store_live_block_errors(rig.plan, 3);
     assert_eq!(rig.counter(protocol::CounterId::LiveBlockErrors), 3);
     let request = rig.next_request();
     let configure = counter_telemetry_for(
