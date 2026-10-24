@@ -57,14 +57,18 @@ fn snapshots(bank: &PreparedEffectBank, lanes: usize) -> Vec<LanePayload> {
 
 fn has_nonzero_word(bytes: &[u8]) -> bool {
     bytes
-        .chunks_exact(4)
-        .any(|word| u32::from_le_bytes(word.try_into().expect("four-byte word")) != 0)
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .any(|word| u32::from_le_bytes(*word) != 0)
 }
 
 fn has_non_one_word(bytes: &[u8]) -> bool {
-    bytes.chunks_exact(4).any(|word| {
-        u32::from_le_bytes(word.try_into().expect("four-byte word")) != 1.0_f32.to_bits()
-    })
+    bytes
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .any(|word| u32::from_le_bytes(*word) != 1.0_f32.to_bits())
 }
 
 /// The complete payload equality below is the state contract. These narrower checks only prove

@@ -592,7 +592,9 @@ fn capabilities_plus(reply: &[u8], added: &[u16]) -> Vec<u8> {
     };
     let ids = |bytes: &[u8]| {
         bytes
-            .chunks_exact(2)
+            .as_chunks::<2>()
+            .0
+            .iter()
             .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
             .collect::<Vec<_>>()
     };

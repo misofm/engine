@@ -149,7 +149,7 @@ pub extern "C" fn miso_gate_f64_lane_probe(seed: u32) -> u32 {
         *value = f32::from_bits(state & 0xBFFF_FFFF);
     }
     let mut energy = <Simd4 as Widen>::F64::load(&[0.5; 4]);
-    for frame in frames.chunks_exact(4) {
+    for frame in frames.as_chunks::<4>().0 {
         let w = Simd4::load(frame).widen();
         energy = energy.add(w.mul(w));
     }

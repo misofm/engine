@@ -42,15 +42,9 @@ TEST_ROWS: dict[str, list[tuple[str, str, str, str, str]]] = {
     # (owner decision 10), so its two pins fold NaN words through `dsp_reference::class_a` and
     # pass on both CPUs.
     "debug": [],
-    "release": [
-        # LANE-3 (#1019): in release the D8 `select(a > b, a, b)` folds into `fmaxnm`/`fminnm`
-        # inside `exp2_lane`, scalar and vector alike (`log2_lane` passes since #1451's
-        # splat change). Those instructions answer
-        # differently on NaN and signed-zero inputs. The same tests pass in the debug leg.
-        ("1019", "math", "test:m2_lane_identity", "m2_exp2_lane_identity",
-         "exp2_lane: scalar digest 69c5e8f5e4639e1438b6f38bce75a7267904f84501a3d89c2704146272c4942a"
-         " does not match the pin"),
-    ],
+    # LANE-3 (#1019) left this leg under Rust 1.99.1 (#877): `exp2_lane`'s identity now holds on
+    # AArch64 release, so its expected-failure row is deleted.
+    "release": [],
 }
 
 # Product crate -> (owning issue, ceiling): `bl _memset_pattern16` calls charged to the crate in

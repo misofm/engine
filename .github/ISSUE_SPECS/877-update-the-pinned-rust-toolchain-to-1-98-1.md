@@ -1,8 +1,8 @@
-# Update the pinned Rust toolchain to 1.98.1
+# Update the pinned Rust toolchain to 1.99.1
 
 ## Product outcome
 
-Move every live toolchain pin from Rust 1.97.1 to the current stable release, Rust 1.98.1 (2026-09-03; the only change over 1.98.0 is a vtable miscompilation fix, and the bundled LLVM is 22.1.8), so that the engine, hosts, tools, fuzz builds, npm publication, and browser qualification all build with one current compiler. Keep every DSP, realtime, protocol, session, and ABI contract unchanged: this issue moves no rendered bit by design and changes no product surface.
+Move every live toolchain pin from Rust 1.97.1 to the current stable release, Rust 1.99.1 (58cf8f9c3, 2026-10-13; retargeted from 1.98.1 on 2026-10-24, see the decision record), so that the engine, hosts, tools, fuzz builds, npm publication, and browser qualification all build with one current compiler. Keep every DSP, realtime, protocol, session, and ABI contract unchanged: this issue moves no rendered bit by design and changes no product surface.
 
 ## Trigger and root evidence
 
@@ -51,3 +51,63 @@ Single feature branch `codex/rust-1-98-1`, checkpoint-committed locally, pushed 
 - 1.98.1 host toolchain: `rustc 1.98.1 (48a229cea 2026-09-01)`, LLVM 22.1.8, installed with `clippy`, `rustfmt`, and `wasm32-unknown-unknown`.
 - Under 1.98.1 with only the pin edits: `cargo fmt --all --check` clean; simd128 Wasm build clean; clippy fails in `lane` with 36 `chunks_exact_mut` and 4 `chunks_exact` `chunks_exact_to_as_chunks` diagnostics (`crates/lane/src/kernels.rs`, `crates/lane/src/kernels/builtins.rs`).
 - REPIN digest under 1.98.1: `08ae541cf39dd1809840eb213a27d993054b8151538bcfcb73d340b6dba0a0bd`.
+
+## Decision record (2026-10-24, attempts 1-2, branch `codex/batch-b13-877`, base `eb792c949`)
+
+The scope note (`scope/877.md`) wins for paths and decisions; these changes over the body above follow it.
+
+- **Target 1.99.1**, not 1.98.1: 1.98.1 was stale. PR #878 is superseded; root closes it.
+- **Lints.** Workspace clippy under 1.99.1 fired only `chunks_exact_to_as_chunks` (58 const-sized sites in 18 crates, none in
+  `crates/lane`; by root ruling each is rewritten as `as_chunks::<N>()` with the remainder handled
+  as before, and no allow remains) and rustc's `deprecated` on `Atomic*::fetch_update` (renamed
+  `try_update`; three sites in `crates/protocol` and `crates/host-core`, the same method). The lint
+  groups carry `priority = -1`. No other allow.
+- **Pins.** Between releases (`docs/RELEASE.md`, "Between releases") only the pin file moves:
+  `EXPECTED_WORKLET_SHA256` and `test-npm-publish-modes.py`'s `release_pin` stay the 0.4.3
+  release's, and the release checks do not fire. `npm-publish.yml`'s `RUSTUP_TOOLCHAIN` and step
+  name move to 1.99.1; the npm audit normalizes exactly those two literals back to its 1.97.1 hash.
+- **Repin.** AudioWorklet module under 1.99.1 at base `eb792c949`: `81fa52ee…` (the same tree under
+  1.97.1 builds `cfd36a3e…`). After the `as_chunks` rewrite and the merge of `origin/main`:
+  `5c75d2df0ce3c0f2d4b1642ba803c87e900141ca3672eab5bb2e4bf898075fa6`, re-recorded on three browsers.
+- **No bit moved.** The 37 native console bench rows' `output_sha256` and the mixing-automation
+  preflight digests are equal under 1.97.1 and 1.99.1 (AVX2 host, PR evidence); release lane,
+  math, wasm-gates, console-workload, conformance and dsp-reference tests and the fixture gates pass.
+- **AArch64.** iOS memset counts unchanged (builtins 4, lane 1). CI's `aarch64-debug` and
+  `aarch64-release` legs on the arm64 runner decide the `scripts/lib/aarch64-known-defects.py` rows
+  (no local arm64 runner): a row that now passes is deleted in this PR; a rise or a new failure
+  blocks #877 and is filed, never registered.
+- **Rule 3 (kernel shape), root ruling.** On 1.99.1 `Channel<f32x4, 4>::decode_track` (state
+  decode, control thread) went from vector 0 / scalar 6 to vector 1 / scalar 4: LLVM 22
+  SLP-vectorizes part of its ramp-path check, and the `4wide6f32x4` name pattern matched it.
+  Attempt 1 scoped dominance to the render export's direct-call closure; verification refuted it,
+  because the export reaches its kernels through `call_indirect`, so 15 render kernels fell out.
+  Final shape: dominance stays on every pattern match, and `CONTROL_THREAD_EXEMPT` in
+  `scripts/check-web-audioworklet-callgraph.py` pins named control-thread functions by unhashed
+  symbol, with a reason each; an exempt function is not counted toward K, and an entry that
+  matches no function fails. The one entry is `decode_track`. Self-test rows d4-d6; a partly
+  scalarized `InputStage::process` (vector 504 / scalar 1008) in a disassembly copy fails.
+  The pre-existing gap this exposed -- a render kernel the wasm build fully scalarises (vector 0)
+  is skipped as an arithmetic-free helper, on `main` too -- is successor #1889.
+- **No bit moved after the rewrite.** The 37 console digests and the preflight digests equal the
+  1.99.1 pre-rewrite run; the release tests above pass again.
+- **AArch64 LANE-3 (#1019) fixed by 1.99.1.** CI's `aarch64-release` leg (run 40091997453) found
+  `math`'s `m2_exp2_lane_identity` now passes on AArch64 release: the `fmaxnm`/`fminnm` fold no
+  longer breaks the identity. Its expected-failure row is deleted, as the judge requires.
+- **Release pin.** Any edit of the pin file is a release change to `web-audioworklet-identity.py`,
+  so `EXPECTED_WORKLET_SHA256` must equal the pin (correcting the "Pins" bullet above).
+- **Blocked by #1905.** Under 1.99.1 the V8 spill gate (`scripts/check-web-audioworklet-v8-spill.py`)
+  fails three EQ rows: the mono armed depth-2 pair (select-free and masked) carries a stack slot
+  across iterations, and the dual armed depth-2 pair matches two loops and fails closed. The same
+  tree built by 1.97.1 passes every row. #877 waits for #1905, then repins once (pin,
+  `EXPECTED_WORKLET_SHA256`, `release_pin`) and re-records the three browsers once.
+- **For later toolchain bumps.** The V8 spill gate is its own `artifact-gates` step;
+  `scripts/check-web-audioworklet.sh` does not run it. Run it on the named twin with every bump.
+- **Resumed after #1905 (main `3f6c057e9`).** The V8 spill gate passes every row on the 1.99.1
+  named twin. Re-pinned once to `18340e81346ad82d41de6d3d7f7dd554c029a61f6ceca7222eccf74a6c40c93d`
+  (pin, `EXPECTED_WORKLET_SHA256`, `release_pin`); three browsers re-recorded once on candidate
+  `b16116272` (Chromium 151.0.7922.34, Firefox 153.0, WebKit 26.5). The 37 console digests and the
+  preflight digests of this branch (1.99.1) equal `origin/main`'s (1.97.1). Main's new
+  `crates/de-esser` brought 9 more `chunks_exact` sites, rewritten the same way.
+- **Final pin after main moved to `ebbaf906f` (#1912).** `47e9c6991cc23b3960d7d24bff1eef4590e13e89599a024e5df788f534ac6eb7`
+  (pin, `EXPECTED_WORKLET_SHA256`, `release_pin`); V8 spill gate all rows ok; three browsers
+  re-recorded on candidate `18e433581` (Chromium 151.0.7922.34, Firefox 153.0, WebKit 26.5).
