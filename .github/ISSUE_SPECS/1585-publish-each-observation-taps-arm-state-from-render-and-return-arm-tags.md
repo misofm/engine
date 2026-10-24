@@ -208,8 +208,10 @@ deletion; #1585b is the tags (D4, D5, D7, gate 2, the hash re-pin). Amendments, 
   `realtime-policy` ok.
 - Tests deleted: `the_browsers_armed_bits_are_the_mask_host_core_prepared` (#1679; the mask it
   compares is gone) and `a_tap_command_admitted_at_sample_zero_survives_the_hand_over` (it
-  defended `observation_commanded` in the deleted hand-over; the render-side order of a carried
-  arm and the successor's disarm is #1280's `pending_observe_records_are_applied_at_the_carry`).
+  defended `observation_commanded` in the deleted hand-over, the browser's only logic on that
+  path; what remains, the order of a carried arm against the successor's own disarm, is render
+  logic of `rack`/`host-core`, and whether a test there covers that exact pairing was not
+  checked).
 - capi nine-track reference budgets: the fixture's EQs declare no tap, so only
   `capi_retained_bytes` moves, 197,471 -> 197,447 (-24, the deleted forward `Vec`); every
   ceiling stands.
