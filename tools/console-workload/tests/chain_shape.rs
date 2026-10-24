@@ -738,6 +738,7 @@ fn mono_fixture_rows(chains: usize) -> Vec<PlanUnitEligibility> {
         unit: u32::try_from(unit).expect("unit index"),
         banked,
         gathers_track_input,
+        armed_on_input: false,
         stages,
         upstream_of_seam_stages,
         lane_tracks: lane_tracks.into(),

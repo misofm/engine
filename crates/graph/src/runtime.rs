@@ -3989,8 +3989,10 @@ pub(crate) struct UnitIdentity {
 /// the `Input` stage (the source, then the structurally symmetric input delay) and nothing else. A
 /// later chain of the same track -- after a split at a stage meter, a send tap, a per-node op, or a
 /// builtin/effect cohort misalignment -- gathers planes an earlier unit produced, and whatever made
-/// them differ is in neither its own witness nor the join. [`Runtime::arm_mono_collapse`] arms only
-/// [`Self::BankGatheringTrackInput`], so a later chain renders dual.
+/// them differ is in neither its own witness nor the join. [`Runtime::arm_mono_collapse`] arms
+/// [`Self::BankGatheringTrackInput`] on the join, and a [`Self::Bank`] only when its input is
+/// proven per block from its producers' rendering (issue #987, `Runtime::input_producers`);
+/// every other later chain renders dual.
 ///
 /// One byte for three states, rather than a second flag beside a `bool`, because the identity row's
 /// padding has no fifth flag byte on wasm32 (see the `const` assertion after
@@ -4024,7 +4026,9 @@ impl UnitBanking {
     }
 
     /// Whether this unit is a bank whose gathered planes are its tracks' input: the only unit the
-    /// structural `SOURCE` witness may arm.
+    /// structural `SOURCE` witness arms on its own. The one other armed unit is a `Bank` with an
+    /// `input_producers` row (issue #987), whose input term is proven per block from its
+    /// producers' rendering.
     pub(crate) const fn gathers_track_input(self) -> bool {
         matches!(self, Self::BankGatheringTrackInput)
     }
@@ -4243,6 +4247,13 @@ pub(crate) struct Runtime {
     /// Issue #1609: the units that hold an observer which accepts `block_end`, in unit order.
     /// Built at bind by [`block_end_units`]; empty (no allocation) when no observer accepts it.
     block_end_units: Box<[u32]>,
+    /// Issue #987: unit -> the earlier bank units whose planes this bank unit gathers, sorted and
+    /// distinct, when every lane of it reads a same-track bank producer's final lane through a
+    /// pure copy; empty otherwise, and for every plain unit. Built at bind by
+    /// [`input_producer_table`]. A unit with a row is the only `UnitBanking::Bank` unit
+    /// [`Self::arm_mono_collapse`] may arm, and `execute` sets its chain's per-block input term
+    /// from the row's producers on every block.
+    input_producers: Box<[Box<[u32]>]>,
 }
 
 impl Runtime {
@@ -4297,19 +4308,42 @@ impl Runtime {
     /// renders dual. That is also what keeps the rack's agreement invariant sound, which leaves
     /// `SOURCE` out on the ground that it cannot change within a plan: true of the track input,
     /// and not of a plane an upstream live write can move.
+    ///
+    /// The one exception is a later chain with an [`input_producer_table`] row (issue #987): every
+    /// lane gathers a same-track bank producer's final lane through a pure copy. It is armed on
+    /// the same track join, and `execute` sets its per-block input term
+    /// (`BankChain::set_input_symmetric`) from its producers' `planes_identical` on every block, so
+    /// it collapses only on a block whose input planes are bit-identical by how they were
+    /// rendered. That term, unlike `SOURCE`, enters the agreement maintenance in the rack.
     pub(crate) fn arm_mono_collapse(&mut self, eligible: &dyn Fn(&str) -> bool) {
-        for (unit, identity) in self.units.iter_mut().zip(self.identity.iter()) {
+        for (index, (unit, identity)) in self.units.iter_mut().zip(self.identity.iter()).enumerate()
+        {
             let RuntimeUnit::Bank { chain, .. } = unit else {
                 continue;
             };
             let tracks = &identity.lane_tracks;
-            let armed = identity.banking.gathers_track_input()
+            // Issue #987: or a later chain every lane of which gathers a same-track bank
+            // producer's planes (`input_producers`); `execute` then proves its input per block.
+            let on_input = self
+                .input_producers
+                .get(index)
+                .is_some_and(|producers| !producers.is_empty());
+            let armed = (identity.banking.gathers_track_input() || on_input)
                 && !tracks.is_empty()
                 && tracks
                     .iter()
                     .all(|track| !track.is_empty() && eligible(track));
             chain.arm_mono_collapse(armed);
         }
+    }
+
+    /// Whether `unit` is a later bank chain armed on its producers (issue #987): it has an
+    /// [`input_producer_table`] row and the join armed it. Evidence only, off the render thread.
+    pub(crate) fn armed_on_input(&self, unit: usize) -> bool {
+        self.input_producers
+            .get(unit)
+            .is_some_and(|producers| !producers.is_empty())
+            && matches!(self.units.get(unit), Some(RuntimeUnit::Bank { chain, .. }) if chain.can_collapse())
     }
 
     /// Force every chain's collapse off (or back on). Bind-time, off the render thread.
@@ -4403,6 +4437,7 @@ impl Runtime {
             source_plane_of_buffer: Box::default(),
             route_activity: None,
             block_end_units,
+            input_producers: Box::default(),
         }
     }
 
@@ -4517,6 +4552,7 @@ impl Runtime {
             output_unit,
             source_plane_of_buffer,
             route_activity,
+            input_producers,
             ..
         } = self;
         // GraphExecutor reaches this unit only after the previous execute and observe both
@@ -4533,6 +4569,20 @@ impl Runtime {
         } else {
             None
         };
+        // Issue #987: this block's input term, from the producers' own rendering of this block.
+        // Every producer is an earlier unit, and GraphExecutor reaches this unit only after each
+        // of them returned Ok in this block, so no `planes_identical` read here follows a failed
+        // `run`. Set on every block, armed or not, because the term is sticky.
+        let input_symmetric = input_producers.get(index).and_then(|producers| {
+            (!producers.is_empty()).then(|| {
+                producers.iter().all(|&producer| {
+                    matches!(
+                        before.get(producer as usize),
+                        Some(RuntimeUnit::Bank { chain, .. }) if chain.planes_identical()
+                    )
+                })
+            })
+        });
         let delays: &mut [CompensationDelay] = delays;
         let track_delays: &mut [TrackDelayLine] = track_delays;
         match &mut current[0] {
@@ -4614,6 +4664,9 @@ impl Runtime {
                 };
                 let frames = u32::try_from(frames).unwrap_or(u32::MAX);
                 set_block_time(chain, block_time);
+                if let Some(symmetric) = input_symmetric {
+                    chain.set_input_symmetric(symmetric);
+                }
                 #[cfg(any(test, feature = "test-support"))]
                 chain.set_silent_skip(!TEST_ONLY_BANK_SKIP_DISABLED.with(std::cell::Cell::get));
                 if let Some(predecessor) = predecessor {
@@ -8637,6 +8690,14 @@ pub(crate) fn build_sequential(
     );
     runtime.source_plane_of_buffer = source_plane_of_buffer;
     runtime.route_activity = route_activity;
+    runtime.input_producers = input_producer_table(
+        &first_producer,
+        &run_units,
+        &unit_of_run,
+        &op_slot,
+        &runtime.units,
+        &runtime.identity,
+    );
     (
         runtime,
         BindIdentities {
@@ -9249,6 +9310,105 @@ fn response_owner_bindings(
             })
         })
         .collect()
+}
+
+/// Issue #987: for each bank unit, the earlier bank units its gather reads, or an empty row.
+///
+/// A `UnitBanking::Bank` unit gets a row only when **every** active lane's first-slot member
+///
+/// * is a pure dedication copy of one undelayed, unsidechained input ([`bank_gather_source`]),
+/// * whose program producer (`first_producer`, the colour's last writer when the consumer is
+///   reached, so no op between rewrites the buffer) is a **final-slot** member of an earlier bank
+///   unit,
+/// * that renders the **same track** on that lane, with an unfolded scatter, and
+/// * whose output buffer is the one the copy reads (no redirect repointed it).
+///
+/// Then the planes this unit gathers on a block are exactly what those producers scattered on it,
+/// so "every producer's [`BankChain::planes_identical`]" is a proof that this block's input planes
+/// are bit-identical, from how the producers rendered and never from the samples. A per-node op
+/// between two chains (a delay, a sum, a sidechained stage) gets no row: that is a successor. A
+/// `BankGatheringTrackInput` unit gets none either, because the structural term already speaks
+/// for its input. Bind-time; allocates.
+fn input_producer_table(
+    first_producer: &[Option<usize>],
+    run_units: &[(Vec<Membership>, Vec<usize>)],
+    unit_of_run: &[Option<usize>],
+    op_slot: &[Option<(usize, usize)>],
+    units: &[RuntimeUnit],
+    identity: &[UnitIdentity],
+) -> Box<[Box<[u32]>]> {
+    let mut table: Vec<Box<[u32]>> = vec![Box::default(); units.len()];
+    for (run, (_, ops)) in run_units.iter().enumerate() {
+        let Some(unit) = unit_of_run[run] else {
+            continue;
+        };
+        if identity[unit].banking != UnitBanking::Bank {
+            continue;
+        }
+        let RuntimeUnit::Bank { members, lanes, .. } = &units[unit] else {
+            continue;
+        };
+        let lanes = *lanes;
+        let tracks = &identity[unit].lane_tracks;
+        if lanes == 0 || ops.len() < lanes || tracks.len() != lanes || members.len() < lanes {
+            continue;
+        }
+        let mut producers: Vec<u32> = Vec::with_capacity(lanes);
+        let every_lane = (0..lanes).all(|lane| {
+            let Some(source) = bank_gather_source(&members[lane]) else {
+                return false;
+            };
+            let Some(producer) = first_producer[ops[lane]] else {
+                return false;
+            };
+            let Some((before, member)) = op_slot.get(producer).copied().flatten() else {
+                return false;
+            };
+            let RuntimeUnit::Bank {
+                members: earlier,
+                lanes: earlier_lanes,
+                chain,
+                ..
+            } = &units[before]
+            else {
+                return false;
+            };
+            let Some(lane_of) = earlier
+                .len()
+                .checked_sub(*earlier_lanes)
+                .and_then(|last| member.checked_sub(last))
+            else {
+                return false;
+            };
+            let producer_track = identity[before].lane_tracks.get(lane_of);
+            let ok = before < unit
+                && lane_of < *earlier_lanes
+                && !tracks[lane].is_empty()
+                && producer_track == Some(&tracks[lane]);
+            if ok {
+                // `first_producer` is the colour's last writer, and `scatter_target` never
+                // redirects into a bank member, so the copy reads the producer's own output.
+                debug_assert_eq!(
+                    earlier[member].output, source,
+                    "a bank consumer reads its producer"
+                );
+                // A folded lane's only reader is a retired route op, never a bank member.
+                debug_assert_ne!(
+                    chain.fold_lanes().get(lane_of),
+                    Some(&true),
+                    "a folded lane feeds no bank"
+                );
+                producers.push(u32::try_from(before).unwrap_or(u32::MAX));
+            }
+            ok
+        });
+        if every_lane {
+            producers.sort_unstable();
+            producers.dedup();
+            table[unit] = producers.into_boxed_slice();
+        }
+    }
+    table.into_boxed_slice()
 }
 
 /// The admission walk uses emitted adjacency: a retired run owns no execution boundary.

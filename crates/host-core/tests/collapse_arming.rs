@@ -1,4 +1,5 @@
-//! Issue #970: the mono collapse is armed only on a chain that gathers the track input.
+//! Issue #970: the mono collapse is armed on the track join only for a chain that gathers the
+//! track input; since #987 a later chain is armed only with a per-block proof of its input.
 //!
 //! The collapse's structural term, `SOURCE`, says one thing: the track's **input** carries two
 //! identical planes (`left_source_channel == right_source_channel`). It is decided per track from
@@ -7,7 +8,10 @@
 //! `PostInputBuiltins` stage gathers that input, so the term speaks for its planes. A **later**
 //! chain of the same track does not: it reads planes that an earlier chain or a per-node op
 //! produced, and whatever made them differ is in neither that chain's own witness nor the join.
-//! Armed anyway, it collapses and copies its left plane into its right one: wrong audio, silently.
+//! Armed on the join alone, it collapses and copies its left plane into its right one: wrong audio,
+//! silently. Since #987 such a chain is armed only when every lane reads a same-track bank
+//! producer, and it collapses only on a block whose producers rendered bit-identical planes
+//! (`BankChain::planes_identical`); these probes keep that per-block term honest.
 //!
 //! A strip splits into more than one chain when a stage meter or a send taps an internal boundary,
 //! when a per-node op sits between banked racks, or -- the commonest case -- when the builtin
@@ -26,8 +30,9 @@
 //! On the shipped rule (every bank chain whose lanes' tracks hold `SOURCE` is armed) each probe
 //! named `*_renders_the_dual_bits` failed on the right plane, and the per-node-delay count probe
 //! read the shipped value rather than half of it. The two controls pass under both rules. The red
-//! mutation is the shipped rule itself: drop `gathers_track_input()` from the conjunction in
-//! `Runtime::arm_mono_collapse` (`crates/graph/src/runtime.rs`).
+//! mutation is the shipped rule itself: replace `gathers_track_input() || on_input` in
+//! `Runtime::arm_mono_collapse` (`crates/graph/src/runtime.rs`) with `true`; since #987 the
+//! per-block input term in `Runtime::execute` has its own red mutations (graph `MUTATIONS.md`).
 
 use core::num::NonZeroUsize;
 
@@ -455,8 +460,9 @@ fn an_asymmetric_per_node_delay_between_chains_renders_the_dual_bits() {
 
 /// The count half of the delay probe. Each cohort's strip is two chains around the delay, and the
 /// shipped rule armed both: `2 * cohorts`, measured on the base as `[32, 2]` at eight lanes and
-/// `[64, 4]` at four. Only the chain that gathers the input may be armed, so the count is **half
-/// the shipped value**, at either width.
+/// `[64, 4]` at four. Only the chain that gathers the input may be armed (the later chain's
+/// producer is a per-node op, so #987 does not arm it either), so the count is **half the shipped
+/// value**, at either width.
 #[test]
 fn only_the_input_gathering_chain_of_a_split_strip_is_armed() {
     for (left, right) in [(5.0, 7.0), (5.0, 5.0)] {
