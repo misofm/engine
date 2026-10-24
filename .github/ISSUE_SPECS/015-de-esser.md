@@ -122,3 +122,9 @@ Evidence (48 kHz, this worktree):
   per segment with `silence_armable_holding` and advances an unarmable segment's silence clocks
   with `silence_skip_block`, as the multiband does (#1328 A9).
 - `tests/rest.rs` doc corrected: this fixture rests through the gain release.
+- Evidence: the new link rows are red on Maximum or Average made a no-op in
+  `detector_level_db`; the sidechain row is red on the connected detector filtering the main input
+  (each restored). One-time A/B (PR evidence, not a committed test): a bank with mono collapse,
+  two link modes and listen on alternate lanes, plus a scalar instance, 400 blocks with silences of
+  10,240 frames (armed and unarmable segments both occur): 3,686,400 output bytes identical before
+  (b75d18b6e) and after the `armable` change.
