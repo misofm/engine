@@ -1237,6 +1237,20 @@ fn event_lanes_take_the_own_entry_and_every_reaching_vca_ride() {
         ridden
             .automation
             .retain(|entry| !vca_mute_row(&entry.target));
+        // #1914: a read of vocal's `fader_db` resolves its own left entry's hand offset; the right
+        // lane, which only a VCA ride reaches, reads the static fader.
+        {
+            let mut held = ridden.clone();
+            let own = held.automation.iter_mut().find(|e| e.id.as_str() == "own");
+            own.expect("own entry").offset.left_db = 1.5;
+            let vocal = held.tracks.iter_mut().find(|t| t.id.as_str() == "vocal");
+            vocal.expect("vocal").fader.right_db = -7.0;
+            let read = |lane| {
+                let at = strip_builtin("vocal", FADER_DB, lane);
+                controls::get(&held, &controls::MonitorOverlay::default(), &at, RATE)
+            };
+            assert_eq!((read(Lane::Left), read(Lane::Right)), (Ok(1.5), Ok(-7.0)));
+        }
         let mut moved = model.clone();
         moved.automation[0].segments[0].end_value = -9.0;
         let mut left = model.clone();
