@@ -51,6 +51,13 @@ After #1871 (same file). Check #887's tiled staging covers the multiband's state
 - Mutants (each red, then restored): charge mask removed -> the planted test red (pad lane charged
   one left block); pad-lane automation skip removed -> the per-node test red (`invalid_spans` on a
   pad lane); `checked_track` active check removed -> the per-node test red (pad payload served).
+- Attempt 2 (verifier MAJOR and MINOR): graph-compiler's `console_banking.rs` gains
+  `Kind::Multiband` in `ELIGIBLE` and in `every_effect.post`, pinned to
+  `CONSOLE_ELIGIBLE_EFFECTS` by an `assert_eq!`; the planted test gains a collapsed
+  (`process_bank_mono`) arm. Mutants: the `is_padded` decline restored -> red
+  `every_console_slot_binds_banked_at_every_track_count` (`console.slot.unbanked` at post-multiband)
+  and the randomized console class-A test; `finish_mono` charging with `active` forced to all lanes
+  -> red planted test (`padded true, mono true: block 2: the reports`).
 - Class A: no existing session has a multiband console slot, and a full bank's `active` is every
   lane, so no full-bank path changes. `tests/cross_target_digest.rs` passes unchanged, and a
   one-time digest of all 23 `console_workload::native_session_rows()` (16 blocks each, release)
