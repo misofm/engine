@@ -28,7 +28,7 @@ fn deterministic_mutations_cover_complete_schema_closed_dispatch(mutation_runs: 
     let seeds = complete_schema_corpus();
     assert_eq!(
         seeds.len(),
-        48,
+        50,
         "the complete-schema corpus: commands, successes, non-OK statuses and six events"
     );
     assert!(seeds.iter().any(|seed| {

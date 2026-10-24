@@ -2211,6 +2211,17 @@ where
             PreparedCommandFrame::Immediate(response) => response
                 .write_into(&mut self.response_scratch)
                 .map_err(map_encode_error),
+            // #1594 checkpoint 1: the protocol serves `SPECTRUM_CONFIGURE`; checkpoint 2 executes
+            // it here. Until then the session refuses it, recorded for replay like any reply.
+            PreparedCommandFrame::Session(prepared) => self
+                .controller
+                .complete_session_command_refused(
+                    *prepared,
+                    protocol::StatusCode::Unavailable,
+                    "spectrum.unavailable",
+                    &mut self.response_scratch,
+                )
+                .map_err(map_command_process_error),
             PreparedCommandFrame::Structural(prepared) => {
                 let prepared = ObservedPreparedToken::new(prepared);
                 #[cfg(feature = "test-support")]

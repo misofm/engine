@@ -197,3 +197,47 @@ through #1593's `test_spectrum_mut()`.
 ## Supersedes and shrinks
 
 - None.
+
+## Decision and evidence record (attempt 1)
+
+Root decisions of 2026-10-24 (scope note `1594.md`; they amend the frozen decisions above):
+
+- **R1 (amends D6).** No `publish_successor` extraction: the monitor rebuild is a third
+  `Rebuild::Monitor` kind run by the existing `rebuild()`. It carries like a transaction, commits
+  like a discontinuity, takes no stamp and publishes its revision only when it is above 0.
+  `SuccessorBase.unchanged_revision` relaxes host-core's successor revision check.
+- **R2 (amends D4).** A configure over a pending candidate supersedes it through `rebuild()`
+  (D4's `BACKPRESSURE` is stale since #1310). The command acks nothing new; a refusal republishes
+  the withdrawn candidate whole.
+- **R3 (moves D10).** D10 (capability bit 16, `ProviderFeatures::spectrum`, `KNOWN`, the decode
+  invariants) moves whole to #1595. For one batch `0x0010` is served and not advertised on both
+  hosts: it is in the allocated command set, so a capabilities record may list it, but no
+  registry does.
+- **R4.** Tests: the control-plane gates in `crates/control-plane/tests/spectrum_monitor.rs`, the
+  replay in `crates/protocol/src/controller/tests.rs`, one capi parity row.
+- **R5, R6.** `host-core/src/{spectrum_service.rs,spectrum.rs}` are authorized; the service and
+  analysis bytes of a promotion are charged to capi's ledger with one constant.
+- **Corpus paths (root, 2026-10-24).** The re-pin also edits `crates/conformance/src/main.rs`,
+  `crates/conformance/tests/mutation_million.rs`, `scripts/check-protocol-wasm-parity.sh` and
+  `docs/CONTROL_PROTOCOL_CONFORMANCE.md`, as #1386 did.
+
+Checkpoint 1 (protocol):
+
+- D1-D3: `MessageId::SpectrumConfigure = 0x0010`; `SpectrumConfigureRequest`, `SpectrumEntry`,
+  `SpectrumForm`, `SpectrumTargetKind`, `SpectrumConfigured` (`message_wire/spectrum.rs`). The codec
+  checks the tables, the identity length (1-127 bytes), the hop table and the single form's one
+  entry, both ways; a reply's `rebuild` must agree with its plan epoch. The budget rules stay the
+  core's (`spectrum.budget`).
+- D9: `PreparedCommandFrame::Session(Box<PreparedSessionCommand>)` with `SessionCommand` and
+  `SessionCommandReply`. The token is affine like the structural one (it holds the odd controller
+  generation, so every other entry point refuses while it is outstanding, and a dropped token
+  leaves the replay cache as it was). `complete_session_command` and
+  `complete_session_command_refused` encode the reply, then apply the replay plan and complete the
+  entry in the same call. A replay, reuse, expiry or replay backpressure takes the one-call path
+  and never reaches the session. The one-call path (`process*`) answers `UNAVAILABLE`.
+- Corpus: `command.spectrum_configure` and `response.spectrum_configured` are added (50 frames).
+  `COMPLETE_SCHEMA_HASH` moves from `c85b2a0dff5d2a92` to `26579fcd7f959310`. The FNV hash of the
+  48 earlier frames alone, in order, is `c85b2a0dff5d2a92`, the old pin: they are byte-equal.
+- `tools/audit/src/protocol.rs` is untouched: it enumerates no message IDs.
+- Checkpoint 1 leaves the control plane answering `UNAVAILABLE` (`spectrum.unavailable`) for the
+  new frame; checkpoint 2 replaces that arm with the executor.

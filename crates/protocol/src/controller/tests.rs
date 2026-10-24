@@ -1101,7 +1101,9 @@ fn structural_prepare_is_invisible_until_commit_and_byte_identical_to_one_call()
         .expect("prepare")
     {
         PreparedCommandFrame::Structural(prepared) => *prepared,
-        PreparedCommandFrame::Immediate(_) => panic!("valid transaction was immediate"),
+        PreparedCommandFrame::Immediate(_) | PreparedCommandFrame::Session(_) => {
+            panic!("valid transaction was immediate")
+        }
     };
     // The token holds a plan against the committed cache, not a clone of it (#1615).
     PROSPECTIVE_REPLAY_CLONES.with(|clones| assert_eq!(clones.get(), 0));
@@ -1216,7 +1218,9 @@ fn attached_observation_ends_follow_their_commit_in_one_event() {
         .expect("prepare")
     {
         PreparedCommandFrame::Structural(prepared) => *prepared,
-        PreparedCommandFrame::Immediate(_) => panic!("valid transaction was immediate"),
+        PreparedCommandFrame::Immediate(_) | PreparedCommandFrame::Session(_) => {
+            panic!("valid transaction was immediate")
+        }
     };
     let keys: Vec<_> = (0..20_u32).map(|tap| ended_key("a", tap)).collect();
     let frame_bytes = endpoint
@@ -1312,7 +1316,9 @@ fn the_end_needs_room_with_the_commit_and_a_dropped_token_releases_it() {
         .expect("prepare")
     {
         PreparedCommandFrame::Structural(prepared) => *prepared,
-        PreparedCommandFrame::Immediate(_) => panic!("valid transaction was immediate"),
+        PreparedCommandFrame::Immediate(_) | PreparedCommandFrame::Session(_) => {
+            panic!("valid transaction was immediate")
+        }
     };
     // Empty lane: any number of keys fits, in one event.
     let mut token = prepare(&mut endpoint);
@@ -1366,7 +1372,9 @@ fn the_end_needs_room_with_the_commit_and_a_dropped_token_releases_it() {
         .expect("prepare")
     {
         PreparedCommandFrame::Structural(prepared) => *prepared,
-        PreparedCommandFrame::Immediate(_) => panic!("valid transaction was immediate"),
+        PreparedCommandFrame::Immediate(_) | PreparedCommandFrame::Session(_) => {
+            panic!("valid transaction was immediate")
+        }
     };
     assert!(matches!(
         endpoint.attach_observation_ended(&mut token, vec![ended_key("a", 1)]),
@@ -1408,7 +1416,9 @@ fn prepare_at(
         .expect("prepare")
     {
         PreparedCommandFrame::Structural(prepared) => *prepared,
-        PreparedCommandFrame::Immediate(_) => panic!("valid transaction was immediate"),
+        PreparedCommandFrame::Immediate(_) | PreparedCommandFrame::Session(_) => {
+            panic!("valid transaction was immediate")
+        }
     }
 }
 
@@ -1464,7 +1474,9 @@ fn edit_path_is_written_at_commit_and_replayed_byte_for_byte() {
             .expect("prepare")
         {
             PreparedCommandFrame::Structural(prepared) => *prepared,
-            PreparedCommandFrame::Immediate(_) => panic!("valid transaction was immediate"),
+            PreparedCommandFrame::Immediate(_) | PreparedCommandFrame::Session(_) => {
+                panic!("valid transaction was immediate")
+            }
         };
         let prepared_len = prepared.response_len();
         let committed = endpoint
@@ -1521,7 +1533,9 @@ fn a_structural_commit_writes_its_replay_entry_and_evicts_at_the_commit() {
             .expect("prepare")
         {
             PreparedCommandFrame::Structural(prepared) => *prepared,
-            PreparedCommandFrame::Immediate(_) => panic!("expected structural token"),
+            PreparedCommandFrame::Immediate(_) | PreparedCommandFrame::Session(_) => {
+                panic!("expected structural token")
+            }
         }
     }
     fn replay(endpoint: &mut ProtocolController<MockProvider>, input: &[u8]) -> Vec<u8> {
@@ -1684,7 +1698,9 @@ fn a_transaction_of_monitor_writes_commits_no_model_revision_or_event() {
         .expect("prepare")
     {
         PreparedCommandFrame::Structural(prepared) => *prepared,
-        PreparedCommandFrame::Immediate(_) => panic!("expected a token"),
+        PreparedCommandFrame::Immediate(_) | PreparedCommandFrame::Session(_) => {
+            panic!("expected a token")
+        }
     };
 
     {
@@ -1847,7 +1863,9 @@ fn structural_token_cancel_owner_generation_and_serial_rules_are_affine() {
             .expect("prepare")
         {
             PreparedCommandFrame::Structural(prepared) => *prepared,
-            PreparedCommandFrame::Immediate(_) => panic!("expected structural token"),
+            PreparedCommandFrame::Immediate(_) | PreparedCommandFrame::Session(_) => {
+                panic!("expected structural token")
+            }
         }
     }
 
@@ -4682,4 +4700,142 @@ fn a_capability_frame_must_tie_bit_14_to_the_response_message() {
     assert!(rebuilt(&without_message, flags).is_err());
     assert!(rebuilt(&commands, flags & !(1 << 14)).is_err());
     assert!(rebuilt(&without_message, flags & !(1 << 14)).is_ok());
+}
+
+/// #1594 gate 2 (spec gate 7): a `SPECTRUM_CONFIGURE` frame is handed to the session as
+/// `PreparedCommandFrame::Session`, its completion writes the reply and the replay entry in one
+/// call, and an exact replay of the frame returns the same bytes as an immediate reply, so the
+/// session never executes it again. A dropped token records nothing, so the same request is new
+/// again; a refusal is recorded and replayed like a reply.
+///
+/// Red if a replayed configure reaches the session a second time, or a reply is written without its
+/// replay entry.
+#[test]
+fn a_session_command_completes_once_and_replays_its_exact_bytes() {
+    let request = crate::SpectrumConfigureRequest {
+        form: crate::SpectrumForm::Single,
+        entries: vec![crate::SpectrumEntry {
+            target_kind: crate::SpectrumTargetKind::TrackPostPan,
+            target_id: "t1".to_owned(),
+            channels: crate::ParameterChannel::Both,
+        }],
+        maximum_capture_bytes: 1 << 16,
+        hop_frames: None,
+    };
+    let frame = |request_id| {
+        full_command(
+            request_id,
+            ExpectedRevision::Any,
+            crate::CommandPayload::SpectrumConfigure(&request),
+        )
+    };
+    let prepare = |endpoint: &mut ProtocolController<MockProvider>, input: &[u8]| {
+        endpoint
+            .prepare_command_frame(
+                input,
+                &[],
+                &mut DecodeScratch::new(&mut [0_u16; 1024]),
+                2048,
+            )
+            .expect("prepare")
+    };
+    let mut endpoint = controller(8);
+    let input = frame(1);
+
+    // A dropped token writes nothing: the request is still new.
+    let PreparedCommandFrame::Session(dropped) = prepare(&mut endpoint, &input) else {
+        panic!("a configure is executed by the session");
+    };
+    assert_eq!(
+        dropped.command(),
+        &crate::SessionCommand::SpectrumConfigure(request.clone())
+    );
+    drop(dropped);
+
+    let PreparedCommandFrame::Session(prepared) = prepare(&mut endpoint, &input) else {
+        panic!("a dropped token left the request new");
+    };
+    // While the token is outstanding, every other entry point refuses.
+    assert!(matches!(
+        endpoint.prepare_command_frame(
+            &frame(2),
+            &[],
+            &mut DecodeScratch::new(&mut [0_u16; 1024]),
+            2048
+        ),
+        Err(CommandFrameProcessError::PreparedCommandOutstanding)
+    ));
+    let reply = crate::SpectrumConfigured {
+        revision: endpoint.session().revision().0,
+        configured_epoch: 1,
+        adopted_epoch: 0,
+        rebuild: true,
+        plan_epoch: Some(1),
+    };
+    let mut output = [0_u8; 2048];
+    let written = endpoint
+        .complete_session_command(
+            *prepared,
+            crate::SessionCommandReply::SpectrumConfigured(reply),
+            &mut output,
+        )
+        .expect("complete");
+    let first = output[..written].to_vec();
+    let codec = ProtocolCodec::default();
+    let decoded = codec
+        .decode_typed_response(&first, &mut DecodeScratch::new(&mut [0_u16; 64]))
+        .expect("reply");
+    let crate::DecodedTypedResponseFrame::Success {
+        header,
+        payload: crate::DecodedSuccessResponsePayload::SpectrumConfigured(decoded),
+    } = decoded
+    else {
+        panic!("a spectrum reply");
+    };
+    assert_eq!(header.message_id, MessageId::SpectrumConfigure);
+    assert_eq!(decoded, reply);
+
+    // The exact replay answers the same bytes and hands nothing to the session.
+    let PreparedCommandFrame::Immediate(replayed) = prepare(&mut endpoint, &input) else {
+        panic!("a replayed configure reached the session again");
+    };
+    let mut again = [0_u8; 2048];
+    let length = replayed.write_into(&mut again).expect("replayed bytes");
+    assert_eq!(&again[..length], first.as_slice());
+
+    // A refusal is recorded like a reply.
+    let refused_input = frame(3);
+    let PreparedCommandFrame::Session(refused) = prepare(&mut endpoint, &refused_input) else {
+        panic!("a new configure is executed by the session");
+    };
+    let written = endpoint
+        .complete_session_command_refused(
+            *refused,
+            StatusCode::NotFound,
+            "spectrum.target.unknown",
+            &mut output,
+        )
+        .expect("refuse");
+    let refusal = output[..written].to_vec();
+    let crate::DecodedTypedResponseFrame::NonOk { header, payload } = codec
+        .decode_typed_response(&refusal, &mut DecodeScratch::new(&mut [0_u16; 64]))
+        .expect("refusal")
+    else {
+        panic!("a non-OK reply");
+    };
+    assert_eq!(header.status, StatusCode::NotFound);
+    assert_eq!(payload.diagnostics[0].code, "spectrum.target.unknown");
+    let PreparedCommandFrame::Immediate(replayed) = prepare(&mut endpoint, &refused_input) else {
+        panic!("a replayed refusal reached the session again");
+    };
+    let length = replayed.write_into(&mut again).expect("replayed bytes");
+    assert_eq!(&again[..length], refusal.as_slice());
+
+    // The one-call path has no session to run it on.
+    let one_call = process_full_command(&mut endpoint, &frame(4));
+    let header = codec.decode_header(&one_call).expect("header");
+    assert_eq!(
+        header.header.response().expect("response").status,
+        StatusCode::Unavailable
+    );
 }

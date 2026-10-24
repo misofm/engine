@@ -1,13 +1,13 @@
 # Issue-005 complete typed BTLV corpus
 
-The shared `complete_schema_corpus()` fixture has 48 canonical frames: all 12 commands (the
-session transaction contains all 35 allocated `SessionEditOpcode` values), all 14 successful
+The shared `complete_schema_corpus()` fixture has 50 canonical frames: all 13 commands (the
+session transaction contains all 35 allocated `SessionEditOpcode` values), all 15 successful
 responses, all 16 registered non-OK statuses (including typed `BACKPRESSURE`), and all six event
 schemas. Optional/boundary values are represented by the transaction's nested fixture, the optional
 transport-event origin, empty valid pages, and the typed backpressure variant.
 
 The canonical sequence is FNV-1a-64 over each stable frame label followed by its frame bytes:
-`c85b2a0dff5d2a92`, pinned once as `COMPLETE_SCHEMA_HASH`. Native mutation, each typed fuzz
+`26579fcd7f959310`, pinned once as `COMPLETE_SCHEMA_HASH`. Native mutation, each typed fuzz
 decoder, and scalar/simd128 Wasm execution all consume this same public fixture source.
 
 Issue #787 re-pinned this value after the transaction's two same-length source-identity spellings
@@ -93,3 +93,9 @@ Issue #1386 re-pinned it from `5cab2cf3b4e4767f`: `SESSION_REPLACE` (`0x0013`) a
 `command.session_replace` (the document's length and 32-byte SHA-256, never the document) and
 `response.session_replace` (the transaction reply with `edit_path` `unchanged`, 5), and the
 capabilities response lists command `0x0013`. The frame count is 48.
+
+Issue #1594 re-pinned it from `c85b2a0dff5d2a92`: `SPECTRUM_CONFIGURE` (`0x0010`) adds
+`command.spectrum_configure` (a collection of two taps with the hop) and
+`response.spectrum_configured` (a monitor rebuild with its plan epoch). The capabilities response
+does not list `0x0010` until #1595. The 48 earlier frames are byte-equal (their hash is the old
+pin). The frame count is 50.
