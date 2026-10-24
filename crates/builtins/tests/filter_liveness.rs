@@ -1277,15 +1277,25 @@ fn assert_lanes_equal(
     }
 }
 
-/// Issue #1268: after a live disable settles it, a lane's HPF section is cleared and elided
-/// again, and its output is the never-enabled lane's; no other lane differs from the twin.
+/// Issues #1268 and #1517: after a live disable settles it, a lane's `section` (0 = HPF,
+/// 1 = LPF) is cleared and elided again, and its output is the twin's, where that section was
+/// never enabled; no other lane differs from the twin.
+///
+/// The LPF leg is the one where a skipped clear moves an output bit: a stale LPF keeps running
+/// as an identity section, which holds its integrators frozen, and a negative pair over an
+/// exact `-0.0` input gives `-0.0` where the twin gives `+0.0`. The 1 kHz LPF leaves pairs well
+/// clear of the denormal range, both negative after 7, 10 and 13 history blocks.
 ///
 /// `history_blocks` sets the sawtooth phase at the disable, so the integrators the ramp leaves
-/// differ. With `neighbour`, lane 3 also holds a settled HPF in both banks, so its integrators
-/// are live while lane 1 settles and a clear that reaches it would show.
-fn settled_disable_scenario(body: Body, neighbour: bool, history_blocks: usize) {
+/// differ. With `neighbour`, lane 3 also holds the settled section in both banks, so its
+/// integrators are live while lane 1 settles and a clear that reaches it would show.
+fn settled_disable_scenario(body: Body, neighbour: bool, history_blocks: usize, section: usize) {
     const FRAMES: usize = 24;
-    let prepared = prepare_input_filter_pair(48_000, 120.0, 0.0).expect("design");
+    let prepared = match section {
+        0 => prepare_input_filter_pair(48_000, 120.0, 0.0),
+        _ => prepare_input_filter_pair(48_000, 0.0, 1_000.0),
+    }
+    .expect("design");
     let off = prepare_input_filter_pair(48_000, 0.0, 0.0).expect("disabled");
     let lanes = match body {
         Body::Dual => BuiltinLaneSelector::Left,
@@ -1294,11 +1304,11 @@ fn settled_disable_scenario(body: Body, neighbour: bool, history_blocks: usize) 
     let aim = |target: PreparedInputFilterTarget| PreparedInputFilterTarget { lanes, ..target };
     let mut bank = bank_with_members(4);
     let mut twin = bank_with_members(4);
-    bank.apply_prepared_filter(1, aim(prepared.targets[0]))
+    bank.apply_prepared_filter(1, aim(prepared.targets[section]))
         .expect("enable");
     if neighbour {
         for each in [&mut bank, &mut twin] {
-            each.apply_prepared_filter(3, aim(prepared.targets[0]))
+            each.apply_prepared_filter(3, aim(prepared.targets[section]))
                 .expect("neighbour");
         }
     }
@@ -1315,25 +1325,44 @@ fn settled_disable_scenario(body: Body, neighbour: bool, history_blocks: usize) 
         assert_lanes_equal(&got, &reference, unaffected, "enabled history");
     }
     let live = builtins::test_support::bank_lane_state_words(&bank, 1);
-    assert_ne!(&live[..2], &[0, 0], "the enabled section holds a state");
+    assert_ne!(
+        &live[section * 2..section * 2 + 2],
+        &[0, 0],
+        "the enabled section holds a state"
+    );
     assert!(
-        !builtins::test_support::bank_elision_plan(&bank)[0][0],
+        !builtins::test_support::bank_elision_plan(&bank)[0][section],
         "the enabled section is not elided"
     );
     if neighbour {
         let held = builtins::test_support::bank_lane_state_words(&twin, 3);
-        assert_ne!(&held[..2], &[0, 0], "the neighbour holds a live state");
+        assert_ne!(
+            &held[section * 2..section * 2 + 2],
+            &[0, 0],
+            "the neighbour holds a live state"
+        );
     }
 
-    bank.apply_prepared_filter(1, aim(off.targets[0]))
+    bank.apply_prepared_filter(1, aim(off.targets[section]))
         .expect("disable");
+    if section == 1 {
+        // An elided or identity HPF adds `+0.0`, so it hides the LPF's input sign. A real HPF
+        // from zero state passes the exact -0.0 through and its integrators stay +0.0, so lane
+        // 1 enables one in both banks: the stale LPF pair then reaches the output.
+        let hpf = prepare_input_filter_pair(48_000, 120.0, 0.0).expect("hpf");
+        for each in [&mut bank, &mut twin] {
+            each.apply_prepared_filter(1, aim(hpf.targets[0]))
+                .expect("hpf");
+        }
+    }
     // 64 updates take three 24-frame blocks (the third completes it, mid-block). Every sample
     // after the disable is an exact -0.0, the never-enabled twin's own input.
     for block in 0..6 {
         let got = render_bank_block(&mut bank, body, FRAMES, |_, _| -0.0);
         let reference = render_bank_block(&mut twin, body, FRAMES, |_, _| -0.0);
         let context = format!(
-            "{} body, neighbour {neighbour}, {history_blocks} history blocks, block {block}",
+            "section {section}, {} body, neighbour {neighbour}, {history_blocks} history blocks, \
+             block {block}",
             match body {
                 Body::Dual => "dual",
                 Body::Mono => "mono",
@@ -1352,20 +1381,20 @@ fn settled_disable_scenario(body: Body, neighbour: bool, history_blocks: usize) 
             let plan = builtins::test_support::bank_elision_plan(&bank);
             if neighbour {
                 assert!(
-                    !plan[0][0],
-                    "the neighbour keeps the left HPF live, {context}"
+                    !plan[0][section],
+                    "the neighbour keeps the left section live, {context}"
                 );
-                // Lane 3 holds a left-addressed HPF under the dual body and a both-channel one
-                // under the one-plane body, so only the dual body leaves the right HPF elided.
+                // Lane 3 holds a left-addressed section under the dual body and a both-channel
+                // one under the one-plane body, so only the dual body leaves the right one elided.
                 assert_eq!(
-                    plan[1][0],
+                    plan[1][section],
                     matches!(body, Body::Dual),
-                    "the right HPF is elided only when no lane holds one, {context}"
+                    "the right section is elided only when no lane holds one, {context}"
                 );
             } else {
                 assert!(
-                    plan[0][0] && plan[1][0],
-                    "both HPF sections elided after {context}"
+                    plan[0][section] && plan[1][section],
+                    "both channels' sections elided after {context}"
                 );
             }
         }
@@ -1384,11 +1413,14 @@ fn settled_disable_scenario(body: Body, neighbour: bool, history_blocks: usize) 
 
 #[test]
 fn a_settled_live_disable_is_re_elided_and_bit_identical_to_never_enabled() {
-    for body in [Body::Dual, Body::Mono] {
-        // The history length moves the sawtooth's phase, and so the integrators, at the disable.
-        for history_blocks in 6..14 {
-            settled_disable_scenario(body, false, history_blocks);
-            settled_disable_scenario(body, true, history_blocks);
+    for section in 0..2 {
+        for body in [Body::Dual, Body::Mono] {
+            // The history length moves the sawtooth's phase, and so the integrators, at the
+            // disable.
+            for history_blocks in 6..14 {
+                settled_disable_scenario(body, false, history_blocks, section);
+                settled_disable_scenario(body, true, history_blocks, section);
+            }
         }
     }
 }

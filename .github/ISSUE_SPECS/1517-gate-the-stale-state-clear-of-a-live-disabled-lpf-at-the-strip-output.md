@@ -17,9 +17,12 @@ an exact zero at the strip output. Today no output-level test covers this case.
 
 ## Decisions
 
-- D1. Add one output-level case beside #1268's gate-1 test: drive a strip's live LPF into a negative
-  non-zero integrator state, live-disable the LPF, feed exact `-0.0` input, and assert the output words
-  bitwise against the elided twin (`+0.0`).
+- D1. Parametrize #1268's `settled_disable_scenario` (`crates/builtins/tests/filter_liveness.rs`) by
+  section; its one `#[test]` loops over both. No new test function, file or helper (scope note, root).
+  The LPF leg uses a 1 kHz LPF (root). A live-disabled identity LPF holds its integrators frozen, and
+  an elided or identity HPF in front adds `+0.0` and hides the input sign, so the LPF leg also enables
+  a real 120 Hz HPF on lane 1 in both banks at the disable (zero state, so it passes `-0.0` through and
+  its integrators stay `+0.0`). The frozen LPF pair is both negative after 7, 10 and 13 history blocks.
 - D2. Test only; no production change. If the test is red on `main`, stop and report: that is a live
   defect for a separate issue.
 
@@ -29,7 +32,16 @@ The test file that holds #1268's gate-1 test (named in #1268's decision record),
 
 ## Gates
 
-- G1. The new case passes on `main`. Mutation (PR evidence): skip the state clear for section 1 only on
-  disable; the new case turns red and #1268's existing gate stays green. Test value: a disable path that
+- G1. The scenario's LPF leg passes on `main`. Mutation (PR evidence): skip the state clear for section 1 only on
+  disable; the LPF leg turns red and #1268's existing gate stays green. Test value: a disable path that
   keeps the LPF's stale state, which changes the sign of an exact zero at the strip output and which no
   current output-level test sees.
+
+## Evidence (attempt 1)
+
+- The LPF leg passes on `main` (no live defect).
+- Mutant: the clear wrapped in `if section == 0` (dual and mono bodies, `crates/lane/src/kernels/builtins.rs`).
+  The HPF leg (run first) stays green. The LPF leg fails on `lane 1 integrators are +0.0` (left words
+  `[0, 0, 975151958, 966925478, ..]`). With the state and plan assertions turned off, it fails on the
+  output words: `left, lane 1, frame 0, section 1, dual body, neighbour false, 7 history blocks, block 3`,
+  `0x80000000` against `0x0`. Without the HPF in front, that output comparison stayed green.
