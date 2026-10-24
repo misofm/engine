@@ -88,14 +88,13 @@ Modes
        the vector count, so halving a kernel's op count leaves it exactly as compliant as it was,
        while moving arithmetic out of the vector family and into the scalar family fails it.
     3. **Kernel count.** At least `K` functions matching `REGEX` carry `f32x4.{mul,add,sub,div}`
-       arithmetic. Each of them that the render path can execute -- a member of
-       `miso_engine_web_v1_render`'s call closure, or a roster kernel -- must use strictly more
-       vector than scalar `f32` arithmetic. `K` is a **ratchet**: when a wave adds kernels, raise
-       it. It never drops. The dominance clause is scoped to the render path because it guards
-       render kernels, and a lane-generic name says nothing about the thread: under Rust 1.99.1
-       (LLVM 22, issue #877) `parametric_eq::Channel<f32x4, 4>::decode_track`, control-thread state
-       decode, gained one SLP-vectorised `f32x4.add` beside four scalar ones, which matched the
-       name pattern without being a de-vectorised kernel.
+       arithmetic, each using strictly more vector than scalar `f32` arithmetic. `K` is a
+       **ratchet**: when a wave adds kernels, raise it. It never drops. The one exception is a
+       control-thread function pinned in `CONTROL_THREAD_EXEMPT`, by its name without the mangling
+       hash and with its reason: it is neither held to dominance nor counted. An entry that names
+       no function in the module fails, so the table cannot outlive its function. The render
+       export reaches its kernels through `call_indirect`, so the direct-call closure cannot tell
+       a render kernel from control code; a reviewed table can (#877).
     4. **No eight lanes (issue #1110).** No function name in the module may spell an eight-lane
        instantiation (`EIGHT_LANE`). The browser runs four lanes only, and since #1110 the wasm
        build has no eight-lane type, so a name that carries one means eight lanes came back to
@@ -561,8 +560,15 @@ def check_render_thread(
     return failures
 
 
-# The export whose call closure is the render path rule 3's dominance clause covers (#877).
-RENDER_EXPORT = "miso_engine_web_v1_render"
+# Issue #877: control-thread functions whose lane-generic name matches the kernel pattern, by
+# name without the mangling hash (`unhashed`), with the reason each is not a render kernel. A new
+# entry is a review that no render path calls the function; an entry that matches nothing fails.
+CONTROL_THREAD_EXEMPT: dict[str, str] = {
+    "_RNvMs2_Cs_13parametric_eqINtB5_7ChannelNtNtCs_4wide6f32x4_5f32x4Kj4_E12decode_trackB5_": (
+        "control-thread state decode; LLVM 22 partly vectorizes its ramp check (#877); no render "
+        "path calls it"
+    ),
+}
 
 
 def kernel_arithmetic(
@@ -587,23 +593,31 @@ def check_kernel_shape(
     pattern: str,
     minimum: int,
     roster: tuple[tuple[str, str, float], ...] = KERNEL_ROSTER,
-    render_path: set[int] | None = None,
+    exempt: dict[str, str] | None = None,
 ) -> int:
     """The per-kernel shape gate that replaced the raw `--simd-floor` total (#163 phase 0e).
 
-    `render_path` is the set of function indices the render export reaches; rule 3's dominance
-    clause applies to those and to the roster kernels (#877). `None` applies it to every match.
+    `exempt` is a `CONTROL_THREAD_EXEMPT`-shaped table (#877); `None` exempts nothing.
     """
     failures = 0
-    kernels = kernel_arithmetic(functions, pattern)
-    roster_res = [re.compile(kernel_pattern) for _, kernel_pattern, _ in roster]
+    exempt = exempt or {}
+    names = {unhashed(function.name) for function in functions.values()}
+    for name, reason in exempt.items():
+        if name not in names:
+            failures += 1
+            print(
+                f"FAIL kernel exemption {name}: matches no function in the module. Delete the "
+                f"stale entry ({reason}).",
+                file=sys.stderr,
+            )
+    kernels = []
+    for function, vector, scalar in kernel_arithmetic(functions, pattern):
+        if unhashed(function.name) in exempt:
+            print(f"  exempt control-thread vector={vector} scalar={scalar} {function.name}")
+            continue
+        kernels.append((function, vector, scalar))
     for function, vector, scalar in kernels:
-        on_render_path = (
-            render_path is None
-            or function.index in render_path
-            or any(entry_re.search(function.name) for entry_re in roster_res)
-        )
-        if on_render_path and vector <= scalar:
+        if vector <= scalar:
             failures += 1
             print(
                 f"FAIL kernel {function.name}: vector={vector} scalar={scalar} "
@@ -1102,34 +1116,39 @@ def self_test() -> int:
         check_kernel_shape(parse(scalarized), "render_next", 1, SELF_TEST_ROSTER) == 1,
     )
 
-    # (d4) issue #877: a vector-instantiated function off the render path -- control-thread state
-    # decode that the compiler partly vectorised -- is not held to dominance, and still counts.
-    control = VALID_SHAPE + synthetic_kernel("decode_track", vector=1, scalar=4, index=2)
-    control_path = {function.index for function in closure(parse(control), RENDER_EXPORT)}
-    expect(
-        "(d4) control-thread function with vector <= scalar is excluded",
-        check_kernel_shape(
-            parse(control), "render_next|decode_track", 2, SELF_TEST_ROSTER,
-            render_path=control_path,
-        )
-        == 0,
+    # (d4) issue #877: a pinned control-thread function with vector <= scalar is exempt, and is
+    # not counted toward K.
+    decode = (
+        "_RNvMs2_Csb6SUMLvW3Nv_13parametric_eqINtB5_7ChannelNtNtCsgmSSuZlKkZ2_4wide6f32x4_5f32x4"
+        "Kj4_E12decode_trackB5_"
     )
-    # (d5) the same function called from the render export is on the render path and fails.
-    reached = control.replace(
-        " 000012: 0b                         | end",
-        " 000013: 10 02                      | call 2 <decode_track>\n"
-        " 000014: 0b                         | end",
-        1,
-    )
-    reached_path = {function.index for function in closure(parse(reached), RENDER_EXPORT)}
+    control = VALID_SHAPE + synthetic_kernel(decode, vector=1, scalar=4, index=2)
+    pinned = {unhashed(decode): "control-thread state decode"}
     expect(
-        "(d5) render-closure function with vector <= scalar fails",
-        2 in reached_path
-        and check_kernel_shape(
-            parse(reached), "render_next|decode_track", 2, SELF_TEST_ROSTER,
-            render_path=reached_path,
-        )
-        == 1,
+        "(d4) exempted control-thread function passes",
+        check_kernel_shape(parse(control), "render_next|decode_track", 1, SELF_TEST_ROSTER,
+                           exempt=pinned) == 0,
+    )
+    expect(
+        "(d4) an exempted function does not count toward K",
+        check_kernel_shape(parse(control), "render_next|decode_track", 2, SELF_TEST_ROSTER,
+                           exempt=pinned) == 1,
+    )
+    # (d5) the same scalar shape in a function the table does not name fails.
+    expect(
+        "(d5) non-exempt function with vector <= scalar fails",
+        check_kernel_shape(parse(control), "render_next|decode_track", 1, SELF_TEST_ROSTER,
+                           exempt={}) == 1,
+    )
+    # (d6) a stale entry, one that names no function in the module, fails on its own.
+    expect(
+        "(d6) stale exemption entry fails",
+        check_kernel_shape(parse(VALID_SHAPE), "render_next", 1, SELF_TEST_ROSTER,
+                           exempt={"no_such_function": "stale"}) == 1,
+    )
+    expect(
+        "(d6) the shipped table's entries are hash-free",
+        all(unhashed(name) == name for name in CONTROL_THREAD_EXEMPT),
     )
 
     # (d3) a vector-typed helper with no arithmetic is not counted as a kernel.
@@ -1294,9 +1313,8 @@ def main() -> int:
     if args.kernel_shape:
         if args.kernel_pattern is None or args.kernel_min is None:
             parser.error("--kernel-shape requires --kernel-pattern and --kernel-min")
-        render_path = {function.index for function in closure(functions, RENDER_EXPORT)}
         failures += check_kernel_shape(
-            functions, args.kernel_pattern, args.kernel_min, render_path=render_path
+            functions, args.kernel_pattern, args.kernel_min, exempt=CONTROL_THREAD_EXEMPT
         )
         failures += check_limiter_forwarding(functions)
         failures += check_no_eight_lanes(functions)
