@@ -4550,7 +4550,9 @@ type RefusalRow<'a> = (
 ///
 /// Test value: red when either host maps a refusal kind to another code, drops or rewords the
 /// core's text (the browser wrote none before #1706), or refuses a malformed or unknown ID before
-/// the core with a code or text of its own (the browser's own unknown-ID lookup in `seek_source`).
+/// the core with a code or text of its own (the browser's own unknown-ID lookup in `seek_source`),
+/// when the browser's control response (what the page reads) does not carry the text, or when a
+/// later successful source call leaves the refusal's text in it.
 #[test]
 fn a_refused_source_call_reports_the_same_result_and_diagnostic_on_both_hosts() {
     const RATE: u32 = 48_000;
@@ -4714,7 +4716,23 @@ fn a_refused_source_call_reports_the_same_result_and_diagnostic_on_both_hosts() 
             (*code, text.to_vec()),
             "{label}: the core's refusal"
         );
+        // The page reads the text through `miso_engine_web_v1_control_response_ptr/_bytes`.
+        assert_eq!(
+            browser.host.control_response(),
+            *text,
+            "{label}: the browser's control response"
+        );
     }
+    // A source call that succeeds after a refusal leaves no stale text in the response.
+    assert_eq!(
+        browser.host.read_seek_report(known),
+        host_web::RESULT_OK,
+        "the seek report of a declared source"
+    );
+    assert!(
+        browser.host.control_response().is_empty(),
+        "a successful source call clears the response"
+    );
 }
 
 // ---------------------------------------------------------------------------------------------

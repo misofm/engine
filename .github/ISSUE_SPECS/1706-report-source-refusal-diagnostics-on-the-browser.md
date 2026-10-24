@@ -54,6 +54,12 @@ a `SourceFailure` to its result kind and diagnostic; both hosts call it.
   (`SourceControlError::unmatched_id`, which the browser's own seek lookup also reports through).
   capi keeps only the pointer-level forms (null, over-long count) with the core's failure; the
   browser's over-staging count refuses with it too.
+  On the C ABI an empty or non-UTF-8 ID is now checked after the service step and the plane
+  pointer loop: only during an epoch fault does such a call get `INTERNAL`/`source.epoch`, and a
+  null plane with an empty ID is `INVALID_ARGUMENT` with no new last error (capi's existing
+  struct and pointer rule).
+- Attempt 2: every browser source call resets the control response first, so a success after a
+  refusal leaves no stale text (the diagnostic buffer itself is not cleared).
 
 ## Evidence (attempt 1)
 

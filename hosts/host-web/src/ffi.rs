@@ -4444,6 +4444,12 @@ pub(crate) fn test_seek_report_addresses(handle: u32) -> (usize, usize) {
     })
 }
 
+/// The bytes `miso_engine_web_v1_control_response_ptr/_bytes` name, read before the `u32` cast.
+#[cfg(test)]
+pub(crate) fn test_control_response(handle: u32) -> Vec<u8> {
+    with_host(handle, Vec::new(), |host| host.control_response().to_vec())
+}
+
 #[cfg(test)]
 pub(crate) fn test_status(handle: u32) -> Option<crate::WebStatus> {
     with_host(handle, None, |host| Some(*host.status()))

@@ -1289,7 +1289,8 @@ fn the_anchored_seek_exports_play_at_the_anchor_and_report_where_it_landed() {
 /// Test value: red if either export runs on a host with no control half (it would reach for
 /// control state the instance does not hold) or overwrites the record on a refusal, if the
 /// pointer export names anything but the record while ready or anything at all once not ready,
-/// or if the report export records a staged-ID refusal as the last result (it records none).
+/// or if the report export records a staged-ID refusal as the last result (it records none) or
+/// refuses it without the core's `source.id.invalid` text (#1706).
 #[test]
 fn the_seek_exports_refuse_a_host_with_no_control_half_and_change_nothing() {
     let rig = SeekExports::boot();
@@ -1326,6 +1327,19 @@ fn the_seek_exports_refuse_a_host_with_no_control_half_and_change_nothing() {
     assert_eq!(
         miso_engine_web_v1_source_seek_report(rig.handle, u32::MAX),
         RESULT_INVALID_ARGUMENT
+    );
+    // #1706 D4: an ID count past the staging (`STABLE_ID_MAXIMUM_BYTES`) is the core's
+    // malformed-ID refusal, text included, on the export the page calls.
+    assert_eq!(
+        miso_engine_web_v1_source_seek_report(
+            rig.handle,
+            session::STABLE_ID_MAXIMUM_BYTES as u32 + 1
+        ),
+        RESULT_INVALID_ARGUMENT
+    );
+    assert_eq!(
+        crate::ffi::test_control_response(rig.handle),
+        b"source.id.invalid"
     );
     assert_eq!(
         crate::ffi::test_status(rig.handle)

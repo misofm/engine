@@ -2890,6 +2890,7 @@ impl AudioWorkletEngineHost {
     /// again); a source the session does not declare is [`RESULT_INVALID_ARGUMENT`]. Every refusal
     /// leaves the record alone. Like [`Self::service`] it leaves the status's last result alone.
     pub fn read_seek_report(&mut self, source_id: &[u8]) -> u32 {
+        self.control_response = ControlResponse::None;
         if self.status.state != STATE_READY {
             return RESULT_REFUSED_LIFECYCLE;
         }
@@ -3659,6 +3660,7 @@ impl AudioWorkletEngineHost {
         frames: u32,
         end_of_region: bool,
     ) -> u32 {
+        self.control_response = ControlResponse::None;
         if self.status.state != STATE_READY {
             return self.record(RESULT_WRONG_STATE);
         }
@@ -3697,6 +3699,7 @@ impl AudioWorkletEngineHost {
     /// position while the absolute render clock stays continuous; it therefore neither resets
     /// meter accumulators nor advances the meter publication epoch.
     pub fn seek_source(&mut self, source_id: &[u8], generation: u64, source_frame: u64) -> u32 {
+        self.control_response = ControlResponse::None;
         if self.status.state != STATE_READY {
             return self.record(RESULT_WRONG_STATE);
         }
@@ -3751,6 +3754,7 @@ impl AudioWorkletEngineHost {
         source_frame: u64,
         anchor_sample: u64,
     ) -> u32 {
+        self.control_response = ControlResponse::None;
         if self.status.state != STATE_READY {
             return self.record(RESULT_REFUSED_LIFECYCLE);
         }
