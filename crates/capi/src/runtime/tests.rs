@@ -1251,6 +1251,8 @@ fn an_added_source_starts_at_its_anchor_at(sample_rate_hz: u32, source_frame: u6
     crate::ffi::test_plan_destroy(c_plan);
     crate::ffi::test_session_destroy(c_session);
 
+    // #1288: `t2` fades in at its first played block, the anchor (no latency before its fader).
+    let (committed, revision, unmute) = with_added_track_muted(&committed, "t2");
     let (r_session, r_plan) = boxed_c_children(&committed);
     let feed_reference = |block: u64| {
         let (left, right) = continuity_block(block, 0);
@@ -1283,6 +1285,9 @@ fn an_added_source_starts_at_its_anchor_at(sample_rate_hz: u32, source_frame: u6
     let reference = (0..16)
         .map(|block| {
             feed_reference(block + 1);
+            if block == ANCHOR_BLOCK {
+                unmute_c(r_session, revision, &unmute);
+            }
             render_c(r_plan, block)
         })
         .collect::<Vec<_>>();
@@ -1408,8 +1413,13 @@ fn a_scrubbed_stem_and_a_stem_started_from_its_report_stay_aligned() {
     crate::ffi::test_plan_destroy(plan);
     crate::ffi::test_session_destroy(session);
 
-    // The reference reads both stems from the aligned frames, from its own block 0.
+    // The reference reads both stems from the aligned frames, from its own block 0, which is the
+    // anchor: `t2` fades in there (#1288).
+    let (committed, revision, unmute) = with_added_track_muted(&committed, "t2");
     let reference = render_fresh_reference(&committed, BLOCKS - ANCHOR_BLOCK, &|session, block| {
+        if block == 0 {
+            unmute_c(session, revision, &unmute);
+        }
         submit_c_to_block(session, X, x_block(ANCHOR_BLOCK + block), block, 0);
         submit_c_to_block(session, Y, x_block(ANCHOR_BLOCK + block), block, 1);
     });
@@ -1624,6 +1634,36 @@ fn put_compressor(model: &session::SessionModel, track: usize) -> protocol::Sess
 
 /// The reference of the held-seek tests: a fresh session of `committed`, fed by `feed(session,
 /// block)` one block ahead of each rendered block, rendering `blocks` blocks.
+/// Issue #1288: a track a transaction adds fades in from its first played block, so the fresh
+/// reference of `committed` holds the added `track` muted and unmutes it live at that block. Returns
+/// the muted document, its revision, and the edit whose transaction is that unmute: a live record
+/// over the session mute ramp, the ramp the fade runs over.
+fn with_added_track_muted(committed: &str, track: &str) -> (String, u64, protocol::SessionEdit) {
+    let mut model = session::parse_session_json(committed).expect("committed document");
+    let strip = model
+        .tracks
+        .iter_mut()
+        .find(|candidate| candidate.id.as_str() == track)
+        .expect("the added track");
+    let unmuted = strip.clone();
+    strip.fader.left_mute = true;
+    strip.fader.right_mute = true;
+    (
+        session::canonical_session_json(&model).expect("canonical"),
+        model.revision,
+        protocol::SessionEdit::UpsertTrack { track: unmuted },
+    )
+}
+
+/// The reference's live unmute of [`with_added_track_muted`].
+fn unmute_c(session: *mut crate::Session, base: u64, edit: &protocol::SessionEdit) {
+    assert_eq!(
+        transact_c(session, 900, base, core::slice::from_ref(edit)),
+        protocol::EditPath::Live,
+        "the unmute is a live record"
+    );
+}
+
 fn render_fresh_reference(
     committed: &str,
     blocks: u64,
@@ -1889,7 +1929,14 @@ fn a_held_seek_carries_from_a_taken_candidate() {
     crate::ffi::test_plan_destroy(plan);
     crate::ffi::test_session_destroy(session);
 
+    // `t2`, which A added, fades in at its first played block, the anchor (#1288), and B carries
+    // its waiting fade (#1392).
+    let (committed, revision, unmute) = with_added_track_muted(&committed, "t2");
     let reference = render_fresh_reference(&committed, 12, &|session, block| {
+        // `feed` runs for block `n + 1` just before block `n` renders.
+        if block == ANCHOR_BLOCK + 1 {
+            unmute_c(session, revision, &unmute);
+        }
         submit_block_c(session, FIXTURE_ID, 1, block, 0, RATE);
         let (left, right) = if block < ANCHOR_BLOCK {
             (vec![0.0; 128], vec![0.0; 128])
