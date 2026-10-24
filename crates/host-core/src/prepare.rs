@@ -4209,25 +4209,26 @@ fn resolve_observation_carry(
 /// endpoints, so its line starts at rest and nothing about its strip changes. Lines of other
 /// lengths carry too: the swap block aligns their heads (D4).
 ///
-/// The graph names a submix's stage as it names a track's (`TrackStage`), and a submix's effect
-/// as a track's (`Effect`), so a route or a sidechain key whose strip changed kind under one ID
-/// keeps its endpoints: its line carries only if `same_strip` passes the strip ID of each
-/// `TrackStage` and `Effect` endpoint (#1891), and a strip of another kind starts its lines at
-/// rest, as an added strip does. Other endpoints pass.
+/// A line holds its source's audio, delayed. The graph names a submix's stage and effects as a
+/// track's (`TrackStage`, `Effect`), so a line whose source strip changed kind under one ID keeps
+/// its endpoints but holds the removed strip's audio: it carries only if `same_strip` passes its
+/// source's strip ID (#1891). The destination's kind does not matter: the content is the
+/// source's, so a key or route line from an unchanged source carries into a strip of another kind.
 fn resolve_delay_carry(
     predecessor: &[graph::GraphDelayLine],
     own: &[graph::GraphDelayLine],
     same_strip: impl Fn(&str) -> bool,
 ) -> Vec<graph::GraphDelayMove> {
-    let same_node = |node: &graph::GraphNodeId| match node {
+    let same_source = |node: &graph::GraphNodeId| match node {
         graph::GraphNodeId::TrackStage { track_id, .. } => same_strip(track_id.as_str()),
+        // A strip's main edge into an effect with a late key starts at the strip's own node.
         graph::GraphNodeId::Effect(effect) => same_strip(effect.track_id.as_str()),
         _ => true,
     };
     own.iter()
-        // A route's `TrackStage` destination is a submix's input on both sides (a route never
-        // targets a track), so a kind change cannot reach it today; it is checked for the rule.
-        .filter(|line| same_node(&line.source) && same_node(&line.destination))
+        // Not the destination: a route's `TrackStage` destination is a submix's input on both
+        // sides (a route never targets a track), and a line's content is its source's.
+        .filter(|line| same_source(&line.source))
         .filter_map(|line| {
             let index = predecessor
                 .binary_search_by(|earlier| earlier.edge.cmp(&line.edge))
