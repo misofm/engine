@@ -115,9 +115,9 @@ aarch64_row aarch64-linux-android
 # innermost function holding it that belongs to a product crate, so a fill inlined from `builtins`
 # into `builtins-compiler` stays `builtins`'. Any other reference to `_memset_pattern16` (a tail
 # call `b`, an address load) is refused, so a call cannot leave the count. #1018 deleted its own
-# rows at 0 (`builtins`' unit fills and `lane`'s `lanes_below`, all preparation code); the row
-# left is `host-core`'s control-thread spectrum fills (#1595; rows in
-# scripts/lib/aarch64-known-defects.py). The judge reads the counts: a row at zero, a count above
+# rows at 0 (`builtins`' unit fills and `lane`'s `lanes_below`, all preparation code), and #1595
+# deleted `host-core`'s (its control-thread spectrum fills): no row is left
+# (scripts/lib/aarch64-known-defects.py), so any call fails. The judge reads the counts: a row at zero, a count above
 # its ceiling, a crate with calls and no row, calls charged to a crate outside the product closure,
 # or a row for a crate outside it each fail here. Until #1472 the ratchet read each product crate's
 # pre-link rlib assembly; that form counted code that LTO removes (`host-core` 4, `soft-clip` 1)

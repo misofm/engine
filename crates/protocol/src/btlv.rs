@@ -555,6 +555,13 @@ pub(crate) fn read_f32(value: &[u8]) -> Result<f32, DecodeError> {
     Ok(f32::from_le_bytes(value))
 }
 
+pub(crate) fn read_f64(value: &[u8]) -> Result<f64, DecodeError> {
+    let value: [u8; 8] = value
+        .try_into()
+        .map_err(|_| DecodeError::InvalidValueLength)?;
+    Ok(f64::from_le_bytes(value))
+}
+
 pub(crate) fn read_u16_at(bytes: &[u8], offset: usize) -> Result<u16, DecodeError> {
     read_u16(
         bytes

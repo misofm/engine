@@ -1393,9 +1393,11 @@ pub struct SpectrumAnalysisResult {
     pub source_underrun: bool,
     /// The frequency axis in hertz, DC through Nyquist.
     pub frequencies_hz: [f32; SPECTRUM_BIN_COUNT],
-    /// Left amplitude in dBFS. A plane outside `channels` holds the floor and is not read.
+    /// Left amplitude in dBFS. A plane outside `channels` is not read; its contents are
+    /// unspecified.
     pub left_dbfs: [f32; SPECTRUM_BIN_COUNT],
-    /// Right amplitude in dBFS. A plane outside `channels` holds the floor and is not read.
+    /// Right amplitude in dBFS. A plane outside `channels` is not read; its contents are
+    /// unspecified.
     pub right_dbfs: [f32; SPECTRUM_BIN_COUNT],
 }
 
@@ -1675,14 +1677,13 @@ impl SpectrumAnalysis {
             window.channels,
             SpectrumChannels::Right | SpectrumChannels::Stereo
         );
-        let mut frequencies = [0.0; SPECTRUM_BIN_COUNT];
-        let mut left_dbfs = [SPECTRUM_FLOOR_DB; SPECTRUM_BIN_COUNT];
-        let mut right_dbfs = [SPECTRUM_FLOOR_DB; SPECTRUM_BIN_COUNT];
+        // The analyzer writes `out`'s planes only after its last `Err`, so a refusal leaves `out`
+        // unchanged.
         let analyzed = {
             let mut output = SpectrumOutput {
-                frequencies_hz: &mut frequencies,
-                left_dbfs: left.then_some(&mut left_dbfs),
-                right_dbfs: right.then_some(&mut right_dbfs),
+                frequencies_hz: &mut out.frequencies_hz,
+                left_dbfs: left.then_some(&mut out.left_dbfs),
+                right_dbfs: right.then_some(&mut out.right_dbfs),
             };
             self.analyzer
                 .analyze_continuous(window, cadence, smoothing, history, &mut output)
@@ -1695,9 +1696,6 @@ impl SpectrumAnalysis {
         out.end_sample = analyzed.fft_end_sample;
         out.token = token;
         out.source_underrun = analyzed.source_underrun;
-        out.frequencies_hz = frequencies;
-        out.left_dbfs = left_dbfs;
-        out.right_dbfs = right_dbfs;
         metadata.status = SpectrumStreamStatus::Ready;
         metadata.source_underrun = analyzed.source_underrun;
         metadata.capture_epoch = analyzed.stream_epoch;
@@ -1732,14 +1730,13 @@ impl SpectrumAnalysis {
             .window
             .end_sample()
             .ok_or(SpectrumServiceError::WindowInvalid)?;
-        let mut frequencies = [0.0; SPECTRUM_BIN_COUNT];
-        let mut left_dbfs = [SPECTRUM_FLOOR_DB; SPECTRUM_BIN_COUNT];
-        let mut right_dbfs = [SPECTRUM_FLOOR_DB; SPECTRUM_BIN_COUNT];
+        // The analyzer writes `out`'s planes only after its last `Err`, so a refusal leaves `out`
+        // unchanged.
         {
             let mut output = SpectrumOutput {
-                frequencies_hz: &mut frequencies,
-                left_dbfs: left.then_some(&mut left_dbfs),
-                right_dbfs: right.then_some(&mut right_dbfs),
+                frequencies_hz: &mut out.frequencies_hz,
+                left_dbfs: left.then_some(&mut out.left_dbfs),
+                right_dbfs: right.then_some(&mut out.right_dbfs),
             };
             self.analyzer
                 .analyze(&snapshot.window, snapshot.sample_rate_hz, &mut output)
@@ -1752,9 +1749,6 @@ impl SpectrumAnalysis {
         out.end_sample = end_sample;
         out.token = snapshot.token;
         out.source_underrun = snapshot.window.source_underrun;
-        out.frequencies_hz = frequencies;
-        out.left_dbfs = left_dbfs;
-        out.right_dbfs = right_dbfs;
         Ok(())
     }
 }
