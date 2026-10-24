@@ -49,6 +49,9 @@
 
 use core::mem::offset_of;
 
+use serde::Serialize;
+
+use crate::json::{self, Entries, Inline};
 use host_core::RESPONSE_MAXIMUM_POINTS;
 use host_web::{
     ABI_VERSION, BACKEND_SCALAR, BACKEND_SIMD128, BOOT_OPTIONS_BYTES, BUFFER_COMMAND,
@@ -1403,443 +1406,323 @@ pub fn render() -> String {
         (COMMAND_REASON_OBSERVATION_LIMIT, "observationLimit"),
     ];
 
-    let mut out = String::with_capacity(1 << 14);
-    out.push_str("{\n");
-    append!(&mut out, "  \"schema\": \"{SCHEMA}\",\n");
-    append!(&mut out, "  \"abiVersion\": {ABI_VERSION},\n");
-    out.push_str("  \"stagingSequence\": [");
-    for (index, export) in STAGING_SEQUENCE.iter().enumerate() {
-        append!(
-            &mut out,
-            "\"{export}\"{}",
-            if index + 1 == STAGING_SEQUENCE.len() {
-                ""
-            } else {
-                ", "
-            }
-        );
-    }
-    out.push_str("],\n");
-    out.push_str("  \"errorPhases\": [");
-    for (index, phase) in ERROR_PHASES.iter().enumerate() {
-        append!(
-            &mut out,
-            "\"{phase}\"{}",
-            if index + 1 == ERROR_PHASES.len() {
-                ""
-            } else {
-                ", "
-            }
-        );
-    }
-    out.push_str("],\n");
-    out.push_str("  \"exports\": [\n");
-    for (index, export) in EXPORTS.iter().enumerate() {
-        append!(
-            &mut out,
-            "    \"{export}\"{}\n",
-            comma(index, EXPORTS.len())
-        );
-    }
-    out.push_str("  ],\n");
-    out.push_str("  \"structures\": {\n");
-    render_structure(
-        &mut out,
-        "bootOptions",
-        BOOT_OPTIONS_BYTES,
-        &boot_options_fields(),
-        true,
-    );
-    render_structure(&mut out, "status", STATUS_BYTES, &status_fields(), true);
-    render_structure(
-        &mut out,
-        "resourceReport",
-        RESOURCE_REPORT_BYTES,
-        &resource_report_fields(),
-        true,
-    );
-    render_structure(
-        &mut out,
-        "meterHeader",
-        METER_HEADER_BYTES,
-        &meter_header_fields(),
-        true,
-    );
-    render_structure(
-        &mut out,
-        "commandReport",
-        COMMAND_REPORT_BYTES,
-        &command_report_fields(),
-        true,
-    );
-    render_structure(
-        &mut out,
-        "planWatermark",
-        WATERMARK_BYTES,
-        &plan_watermark_fields(),
-        true,
-    );
-    render_structure(
-        &mut out,
-        "planLatency",
-        PLAN_LATENCY_BYTES,
-        &plan_latency_fields(),
-        true,
-    );
-    render_structure(
-        &mut out,
-        "seekReport",
-        SEEK_REPORT_BYTES,
-        &seek_report_fields(),
-        true,
-    );
-    render_structure(
-        &mut out,
-        "observationSelection",
-        OBSERVATION_SELECTION_BYTES,
-        &observation_selection_fields(),
-        true,
-    );
-    render_structure(
-        &mut out,
-        "observationResult",
-        OBSERVATION_RESULT_BYTES,
-        &observation_result_fields(),
-        true,
-    );
-    render_structure(
-        &mut out,
-        "liveResponseRequest",
-        LIVE_RESPONSE_REQUEST_BYTES,
-        &live_response_request_fields(),
-        true,
-    );
-    render_structure(
-        &mut out,
-        "spectrumRequest",
-        SPECTRUM_REQUEST_BYTES,
-        &spectrum_request_fields(),
-        true,
-    );
-    render_structure(
-        &mut out,
-        "spectrumCollectionRequest",
-        SPECTRUM_COLLECTION_REQUEST_BYTES,
-        &spectrum_collection_request_fields(),
-        true,
-    );
-    render_structure(
-        &mut out,
-        "spectrumCollectionEntry",
-        SPECTRUM_COLLECTION_ENTRY_BYTES,
-        &spectrum_collection_entry_fields(),
-        true,
-    );
-    render_structure(
-        &mut out,
-        "spectrumWindow",
-        SPECTRUM_WINDOW_HEADER_BYTES,
-        &spectrum_window_fields(),
-        true,
-    );
-    render_structure(
-        &mut out,
-        "spectrumResult",
-        SPECTRUM_RESULT_HEADER_BYTES,
-        &spectrum_result_fields(),
-        true,
-    );
-    render_structure(
-        &mut out,
-        "spectrumStreamMetadata",
-        SPECTRUM_STREAM_METADATA_BYTES,
-        &spectrum_stream_metadata_fields(),
-        true,
-    );
-    render_structure(
-        &mut out,
-        "liveResponseOwner",
-        LIVE_RESPONSE_OWNER_BYTES,
-        &live_response_owner_fields(),
-        true,
-    );
-    render_structure(
-        &mut out,
-        "liveResponseSection",
-        LIVE_RESPONSE_SECTION_BYTES,
-        &live_response_section_fields(),
-        true,
-    );
-    render_structure(
-        &mut out,
-        "liveResponseResult",
-        LIVE_RESPONSE_RESULT_BYTES,
-        &live_response_result_fields(),
-        false,
-    );
-    out.push_str("  },\n");
-    out.push_str("  \"commandRecord\": {\n");
-    append!(&mut out, "    \"bytes\": {COMMAND_RECORD_BYTES},\n");
-    out.push_str("    \"endianness\": \"little\",\n");
-    render_fields(&mut out, &command_record_fields(), "    ");
-    out.push_str("  },\n");
-    out.push_str("  \"constants\": {\n");
-    render_named_constants(&mut out, "resultCodes", &results);
-    render_named_constants(&mut out, "bootResultAliases", &boot_aliases);
-    render_named_constants(&mut out, "states", &states);
-    render_named_constants(&mut out, "backends", &backends);
-    render_named_constants(&mut out, "bufferKinds", &buffers);
-    render_named_constants(&mut out, "wireCommandKinds", &wire_command_kinds);
-    render_named_constants(&mut out, "commandReasons", &command_reasons);
-    // Decision 12 (#1096): the `rack` of the command, observation, companion and configuration
-    // records. The retired `simd1` (0) and `simd2` (2) codes are absent, never reallocated.
-    render_named_constants(
-        &mut out,
-        "racks",
-        &[
-            (u32::from(RACK_INSERTS), "inserts"),
-            (u32::from(RACK_CONSOLE), "console"),
-            (u32::from(RACK_NOT_APPLICABLE), "notApplicable"),
-        ],
-    );
-    // The live-response owner record's `rack`; the retired `1` and `3` are absent.
-    render_named_constants(
-        &mut out,
-        "liveResponseRacks",
-        &[
-            (LIVE_RESPONSE_RACK_INPUT_FILTERS, "inputFilters"),
-            (LIVE_RESPONSE_RACK_INSERTS, "inserts"),
-            (LIVE_RESPONSE_RACK_CONSOLE, "console"),
-        ],
-    );
-    render_named_constants(
-        &mut out,
-        "observationChannels",
-        &[
-            (OBSERVATION_CHANNEL_LEFT, "left"),
-            (OBSERVATION_CHANNEL_RIGHT, "right"),
-            (OBSERVATION_CHANNEL_BOTH, "both"),
-        ],
-    );
-    render_named_constants(
-        &mut out,
-        "observationStatuses",
-        &[
-            (OBSERVATION_STATUS_PENDING, "pending"),
-            (OBSERVATION_STATUS_UNARMED, "unarmed"),
-            (OBSERVATION_STATUS_READY, "ready"),
-        ],
-    );
-    render_named_constants(
-        &mut out,
-        "responseGrids",
-        &[
-            (RESPONSE_GRID_LINEAR, "linear"),
-            (RESPONSE_GRID_LOGARITHMIC, "logarithmic"),
-        ],
-    );
-    render_named_constants(
-        &mut out,
-        "responseChannels",
-        &[
-            (RESPONSE_CHANNEL_LEFT, "left"),
-            (RESPONSE_CHANNEL_RIGHT, "right"),
-            (RESPONSE_CHANNEL_BOTH, "both"),
-        ],
-    );
-    render_named_constants(
-        &mut out,
-        "liveResponseModes",
-        &[(LIVE_RESPONSE_MODE_TARGET, "target")],
-    );
-    render_named_constants(
-        &mut out,
-        "liveResponseMeanings",
-        &[(LIVE_RESPONSE_MEANING_EQ_FILTER_SUBTOTAL, "eqFilterSubtotal")],
-    );
-    render_named_constants(
-        &mut out,
-        "spectrumTargets",
-        &[
-            (SPECTRUM_TARGET_TRACK_POST_INPUT, "trackPostInput"),
-            (SPECTRUM_TARGET_TRACK_POST_PAN, "trackPostPan"),
-            (SPECTRUM_TARGET_OUTPUT, "output"),
-        ],
-    );
-    render_named_constants(
-        &mut out,
-        "spectrumChannels",
-        &[
-            (SPECTRUM_CHANNEL_LEFT, "left"),
-            (SPECTRUM_CHANNEL_RIGHT, "right"),
-            (SPECTRUM_CHANNEL_BOTH, "both"),
-        ],
-    );
-    render_named_constants(
-        &mut out,
-        "spectrumStreamStatuses",
-        &[
-            (SPECTRUM_STREAM_STATUS_INACTIVE, "inactive"),
-            (SPECTRUM_STREAM_STATUS_WARMING, "warming"),
-            (SPECTRUM_STREAM_STATUS_PENDING, "pending"),
-            (SPECTRUM_STREAM_STATUS_GAP, "gap"),
-            (SPECTRUM_STREAM_STATUS_FAILED, "failed"),
-            (SPECTRUM_STREAM_STATUS_STOPPED, "stopped"),
-            (SPECTRUM_STREAM_STATUS_READY, "ready"),
-        ],
-    );
-    append!(
-        &mut out,
-        "    \"maximumCommandRecords\": {MAXIMUM_COMMAND_RECORDS},\n"
-    );
-    append!(
-        &mut out,
-        "    \"maximumDocumentBytes\": {MAXIMUM_DOCUMENT_BYTES},\n"
-    );
-    append!(
-        &mut out,
-        "    \"maximumSourceChannels\": {},\n",
-        session::SOURCE_CHANNELS_LAUNCH_MAXIMUM
-    );
-    append!(&mut out, "    \"diagnosticBytes\": {DIAGNOSTIC_BYTES},\n");
-    append!(
-        &mut out,
-        "    \"defaultMeterBlocks\": {DEFAULT_METER_BLOCKS},\n"
-    );
-    append!(
-        &mut out,
-        "    \"maximumObservationTaps\": {MAXIMUM_OBSERVATION_TAPS},\n"
-    );
-    append!(
-        &mut out,
-        "    \"maximumResponsePoints\": {RESPONSE_MAXIMUM_POINTS},\n"
-    );
-    append!(
-        &mut out,
-        "    \"maximumLiveResponseOwners\": {LIVE_RESPONSE_MAXIMUM_OWNERS},\n"
-    );
-    append!(
-        &mut out,
-        "    \"maximumLiveResponseSections\": {LIVE_RESPONSE_MAXIMUM_SECTIONS},\n"
-    );
-    append!(
-        &mut out,
-        "    \"maximumLiveResponseIdBytes\": {LIVE_RESPONSE_MAXIMUM_ID_BYTES},\n"
-    );
-    append!(
-        &mut out,
-        "    \"maximumLiveResponsePoints\": {LIVE_RESPONSE_MAXIMUM_POINTS},\n"
-    );
-    append!(
-        &mut out,
-        "    \"liveResponseCaptureBytes\": {LIVE_RESPONSE_CAPTURE_BYTES},\n"
-    );
-    append!(
-        &mut out,
-        "    \"spectrumCaptureBytes\": {SPECTRUM_CAPTURE_BYTES},\n"
-    );
-    append!(
-        &mut out,
-        "    \"maximumPreparedSpectrumTargets\": {SPECTRUM_MAXIMUM_PREPARED_TARGETS},\n"
-    );
-    append!(
-        &mut out,
-        "    \"spectrumCollectionRequestBytes\": {SPECTRUM_COLLECTION_REQUEST_BYTES},\n"
-    );
-    append!(
-        &mut out,
-        "    \"spectrumCollectionEntryBytes\": {SPECTRUM_COLLECTION_ENTRY_BYTES},\n"
-    );
-    append!(
-        &mut out,
-        "    \"spectrumCollectionEntryCapacity\": {SPECTRUM_COLLECTION_ENTRY_CAPACITY},\n"
-    );
-    append!(
-        &mut out,
-        "    \"spectrumCollectionTargetIdsBytes\": {SPECTRUM_COLLECTION_TARGET_IDS_BYTES},\n"
-    );
-    append!(
-        &mut out,
-        "    \"spectrumRequestBytes\": {SPECTRUM_REQUEST_BYTES},\n"
-    );
-    append!(
-        &mut out,
-        "    \"spectrumWindowHeaderBytes\": {SPECTRUM_WINDOW_HEADER_BYTES},\n"
-    );
-    append!(
-        &mut out,
-        "    \"spectrumResultHeaderBytes\": {SPECTRUM_RESULT_HEADER_BYTES},\n"
-    );
-    append!(
-        &mut out,
-        "    \"spectrumStreamMetadataBytes\": {SPECTRUM_STREAM_METADATA_BYTES},\n"
-    );
-    append!(
-        &mut out,
-        "    \"spectrumWindowFrames\": {SPECTRUM_WINDOW_FRAMES},\n"
-    );
-    append!(
-        &mut out,
-        "    \"spectrumBinCount\": {SPECTRUM_BIN_COUNT},\n"
-    );
-    append!(
-        &mut out,
-        "    \"maximumSpectrumIdBytes\": {SPECTRUM_MAXIMUM_ID_BYTES},\n"
-    );
-    append!(
-        &mut out,
-        "    \"defaultMaximumMemoryBytes\": {DEFAULT_MAXIMUM_MEMORY_BYTES},\n"
-    );
-    out.push_str("    \"sourceRing\": { ");
-    append!(
-        &mut out,
-        "\"stallToleranceMs\": {SOURCE_STALL_TOLERANCE_MS}, \
-         \"reserveQuanta\": {SOURCE_RING_RESERVE_QUANTA} }}\n"
-    );
-    out.push_str("  }\n}\n");
-    out
+    let named = |values: &[(u32, &'static str)]| {
+        Inline(
+            values
+                .iter()
+                .map(|&(value, name)| NamedValue { value, name })
+                .collect(),
+        )
+    };
+    let structure = |bytes: u32, fields: &[Field]| Structure {
+        bytes,
+        fields: field_rows(fields),
+    };
+    let document = Document {
+        schema: SCHEMA,
+        abi_version: ABI_VERSION,
+        staging_sequence: Inline(&STAGING_SEQUENCE),
+        error_phases: Inline(&ERROR_PHASES),
+        exports: &EXPORTS,
+        structures: Entries(
+            [
+                (
+                    "bootOptions",
+                    structure(BOOT_OPTIONS_BYTES, &boot_options_fields()),
+                ),
+                ("status", structure(STATUS_BYTES, &status_fields())),
+                (
+                    "resourceReport",
+                    structure(RESOURCE_REPORT_BYTES, &resource_report_fields()),
+                ),
+                (
+                    "meterHeader",
+                    structure(METER_HEADER_BYTES, &meter_header_fields()),
+                ),
+                (
+                    "commandReport",
+                    structure(COMMAND_REPORT_BYTES, &command_report_fields()),
+                ),
+                (
+                    "planWatermark",
+                    structure(WATERMARK_BYTES, &plan_watermark_fields()),
+                ),
+                (
+                    "planLatency",
+                    structure(PLAN_LATENCY_BYTES, &plan_latency_fields()),
+                ),
+                (
+                    "seekReport",
+                    structure(SEEK_REPORT_BYTES, &seek_report_fields()),
+                ),
+                (
+                    "observationSelection",
+                    structure(OBSERVATION_SELECTION_BYTES, &observation_selection_fields()),
+                ),
+                (
+                    "observationResult",
+                    structure(OBSERVATION_RESULT_BYTES, &observation_result_fields()),
+                ),
+                (
+                    "liveResponseRequest",
+                    structure(LIVE_RESPONSE_REQUEST_BYTES, &live_response_request_fields()),
+                ),
+                (
+                    "spectrumRequest",
+                    structure(SPECTRUM_REQUEST_BYTES, &spectrum_request_fields()),
+                ),
+                (
+                    "spectrumCollectionRequest",
+                    structure(
+                        SPECTRUM_COLLECTION_REQUEST_BYTES,
+                        &spectrum_collection_request_fields(),
+                    ),
+                ),
+                (
+                    "spectrumCollectionEntry",
+                    structure(
+                        SPECTRUM_COLLECTION_ENTRY_BYTES,
+                        &spectrum_collection_entry_fields(),
+                    ),
+                ),
+                (
+                    "spectrumWindow",
+                    structure(SPECTRUM_WINDOW_HEADER_BYTES, &spectrum_window_fields()),
+                ),
+                (
+                    "spectrumResult",
+                    structure(SPECTRUM_RESULT_HEADER_BYTES, &spectrum_result_fields()),
+                ),
+                (
+                    "spectrumStreamMetadata",
+                    structure(
+                        SPECTRUM_STREAM_METADATA_BYTES,
+                        &spectrum_stream_metadata_fields(),
+                    ),
+                ),
+                (
+                    "liveResponseOwner",
+                    structure(LIVE_RESPONSE_OWNER_BYTES, &live_response_owner_fields()),
+                ),
+                (
+                    "liveResponseSection",
+                    structure(LIVE_RESPONSE_SECTION_BYTES, &live_response_section_fields()),
+                ),
+                (
+                    "liveResponseResult",
+                    structure(LIVE_RESPONSE_RESULT_BYTES, &live_response_result_fields()),
+                ),
+            ]
+            .into_iter()
+            .map(|(name, structure)| (name.to_owned(), structure))
+            .collect(),
+        ),
+        command_record: CommandRecord {
+            bytes: COMMAND_RECORD_BYTES,
+            endianness: "little",
+            fields: field_rows(&command_record_fields()),
+        },
+        constants: Constants {
+            result_codes: named(&results),
+            boot_result_aliases: named(&boot_aliases),
+            states: named(&states),
+            backends: named(&backends),
+            buffer_kinds: named(&buffers),
+            wire_command_kinds: named(&wire_command_kinds),
+            command_reasons: named(&command_reasons),
+            // Decision 12 (#1096): the `rack` of the command, observation, companion and
+            // configuration records. The retired `simd1` (0) and `simd2` (2) codes are absent,
+            // never reallocated.
+            racks: named(&[
+                (u32::from(RACK_INSERTS), "inserts"),
+                (u32::from(RACK_CONSOLE), "console"),
+                (u32::from(RACK_NOT_APPLICABLE), "notApplicable"),
+            ]),
+            // The live-response owner record's `rack`; the retired `1` and `3` are absent.
+            live_response_racks: named(&[
+                (LIVE_RESPONSE_RACK_INPUT_FILTERS, "inputFilters"),
+                (LIVE_RESPONSE_RACK_INSERTS, "inserts"),
+                (LIVE_RESPONSE_RACK_CONSOLE, "console"),
+            ]),
+            observation_channels: named(&[
+                (OBSERVATION_CHANNEL_LEFT, "left"),
+                (OBSERVATION_CHANNEL_RIGHT, "right"),
+                (OBSERVATION_CHANNEL_BOTH, "both"),
+            ]),
+            observation_statuses: named(&[
+                (OBSERVATION_STATUS_PENDING, "pending"),
+                (OBSERVATION_STATUS_UNARMED, "unarmed"),
+                (OBSERVATION_STATUS_READY, "ready"),
+            ]),
+            response_grids: named(&[
+                (RESPONSE_GRID_LINEAR, "linear"),
+                (RESPONSE_GRID_LOGARITHMIC, "logarithmic"),
+            ]),
+            response_channels: named(&[
+                (RESPONSE_CHANNEL_LEFT, "left"),
+                (RESPONSE_CHANNEL_RIGHT, "right"),
+                (RESPONSE_CHANNEL_BOTH, "both"),
+            ]),
+            live_response_modes: named(&[(LIVE_RESPONSE_MODE_TARGET, "target")]),
+            live_response_meanings: named(&[(
+                LIVE_RESPONSE_MEANING_EQ_FILTER_SUBTOTAL,
+                "eqFilterSubtotal",
+            )]),
+            spectrum_targets: named(&[
+                (SPECTRUM_TARGET_TRACK_POST_INPUT, "trackPostInput"),
+                (SPECTRUM_TARGET_TRACK_POST_PAN, "trackPostPan"),
+                (SPECTRUM_TARGET_OUTPUT, "output"),
+            ]),
+            spectrum_channels: named(&[
+                (SPECTRUM_CHANNEL_LEFT, "left"),
+                (SPECTRUM_CHANNEL_RIGHT, "right"),
+                (SPECTRUM_CHANNEL_BOTH, "both"),
+            ]),
+            spectrum_stream_statuses: named(&[
+                (SPECTRUM_STREAM_STATUS_INACTIVE, "inactive"),
+                (SPECTRUM_STREAM_STATUS_WARMING, "warming"),
+                (SPECTRUM_STREAM_STATUS_PENDING, "pending"),
+                (SPECTRUM_STREAM_STATUS_GAP, "gap"),
+                (SPECTRUM_STREAM_STATUS_FAILED, "failed"),
+                (SPECTRUM_STREAM_STATUS_STOPPED, "stopped"),
+                (SPECTRUM_STREAM_STATUS_READY, "ready"),
+            ]),
+            maximum_command_records: MAXIMUM_COMMAND_RECORDS,
+            maximum_document_bytes: MAXIMUM_DOCUMENT_BYTES,
+            maximum_source_channels: session::SOURCE_CHANNELS_LAUNCH_MAXIMUM,
+            diagnostic_bytes: DIAGNOSTIC_BYTES,
+            default_meter_blocks: DEFAULT_METER_BLOCKS,
+            maximum_observation_taps: MAXIMUM_OBSERVATION_TAPS,
+            maximum_response_points: RESPONSE_MAXIMUM_POINTS,
+            maximum_live_response_owners: LIVE_RESPONSE_MAXIMUM_OWNERS,
+            maximum_live_response_sections: LIVE_RESPONSE_MAXIMUM_SECTIONS,
+            maximum_live_response_id_bytes: LIVE_RESPONSE_MAXIMUM_ID_BYTES,
+            maximum_live_response_points: LIVE_RESPONSE_MAXIMUM_POINTS,
+            live_response_capture_bytes: LIVE_RESPONSE_CAPTURE_BYTES,
+            spectrum_capture_bytes: SPECTRUM_CAPTURE_BYTES,
+            maximum_prepared_spectrum_targets: SPECTRUM_MAXIMUM_PREPARED_TARGETS,
+            spectrum_collection_request_bytes: SPECTRUM_COLLECTION_REQUEST_BYTES,
+            spectrum_collection_entry_bytes: SPECTRUM_COLLECTION_ENTRY_BYTES,
+            spectrum_collection_entry_capacity: SPECTRUM_COLLECTION_ENTRY_CAPACITY,
+            spectrum_collection_target_ids_bytes: SPECTRUM_COLLECTION_TARGET_IDS_BYTES,
+            spectrum_request_bytes: SPECTRUM_REQUEST_BYTES,
+            spectrum_window_header_bytes: SPECTRUM_WINDOW_HEADER_BYTES,
+            spectrum_result_header_bytes: SPECTRUM_RESULT_HEADER_BYTES,
+            spectrum_stream_metadata_bytes: SPECTRUM_STREAM_METADATA_BYTES,
+            spectrum_window_frames: SPECTRUM_WINDOW_FRAMES,
+            spectrum_bin_count: SPECTRUM_BIN_COUNT,
+            maximum_spectrum_id_bytes: SPECTRUM_MAXIMUM_ID_BYTES,
+            default_maximum_memory_bytes: DEFAULT_MAXIMUM_MEMORY_BYTES,
+            source_ring: Inline(SourceRing {
+                stall_tolerance_ms: SOURCE_STALL_TOLERANCE_MS,
+                reserve_quanta: SOURCE_RING_RESERVE_QUANTA,
+            }),
+        },
+    };
+    json::document(&document, &[])
 }
 
-fn render_structure(
-    out: &mut String,
-    name: &str,
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct Document<'a> {
+    schema: &'a str,
+    abi_version: u32,
+    staging_sequence: Inline<&'a [&'a str]>,
+    error_phases: Inline<&'a [&'a str]>,
+    exports: &'a [&'a str],
+    structures: Entries<Structure<'a>>,
+    command_record: CommandRecord<'a>,
+    constants: Constants<'a>,
+}
+
+#[derive(Serialize)]
+struct Structure<'a> {
     bytes: u32,
-    fields: &[Field],
-    trailing_comma: bool,
-) {
-    append!(out, "    \"{name}\": {{\n      \"bytes\": {bytes},\n");
-    render_fields(out, fields, "      ");
-    out.push_str(if trailing_comma {
-        "    },\n"
-    } else {
-        "    }\n"
-    });
+    fields: Vec<Inline<FieldRow<'a>>>,
 }
 
-fn render_fields(out: &mut String, fields: &[Field], indent: &str) {
-    append!(out, "{indent}\"fields\": [\n");
-    for (index, (name, offset, kind)) in fields.iter().enumerate() {
-        append!(
-            out,
-            "{indent}  {{ \"name\": \"{name}\", \"offset\": {offset}, \"type\": \"{kind}\" }}{}\n",
-            comma(index, fields.len())
-        );
-    }
-    append!(out, "{indent}]\n");
+#[derive(Serialize)]
+struct CommandRecord<'a> {
+    bytes: u32,
+    endianness: &'a str,
+    fields: Vec<Inline<FieldRow<'a>>>,
 }
 
-fn render_named_constants(out: &mut String, name: &str, values: &[(u32, &str)]) {
-    append!(out, "    \"{name}\": [");
-    for (index, (value, label)) in values.iter().enumerate() {
-        append!(
-            out,
-            "{{ \"value\": {value}, \"name\": \"{label}\" }}{}",
-            if index + 1 == values.len() { "" } else { ", " }
-        );
-    }
-    out.push_str("],\n");
+#[derive(Serialize)]
+struct FieldRow<'a> {
+    name: &'a str,
+    offset: usize,
+    #[serde(rename = "type")]
+    kind: &'a str,
 }
 
-fn comma(index: usize, total: usize) -> &'static str {
-    if index + 1 == total { "" } else { "," }
+#[derive(Serialize)]
+struct NamedValue<'a> {
+    value: u32,
+    name: &'a str,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SourceRing {
+    stall_tolerance_ms: u32,
+    reserve_quanta: u32,
+}
+
+/// The `constants` object: the named code tables, then the scalar bounds, then `sourceRing`.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct Constants<'a> {
+    result_codes: Inline<Vec<NamedValue<'a>>>,
+    boot_result_aliases: Inline<Vec<NamedValue<'a>>>,
+    states: Inline<Vec<NamedValue<'a>>>,
+    backends: Inline<Vec<NamedValue<'a>>>,
+    buffer_kinds: Inline<Vec<NamedValue<'a>>>,
+    wire_command_kinds: Inline<Vec<NamedValue<'a>>>,
+    command_reasons: Inline<Vec<NamedValue<'a>>>,
+    racks: Inline<Vec<NamedValue<'a>>>,
+    live_response_racks: Inline<Vec<NamedValue<'a>>>,
+    observation_channels: Inline<Vec<NamedValue<'a>>>,
+    observation_statuses: Inline<Vec<NamedValue<'a>>>,
+    response_grids: Inline<Vec<NamedValue<'a>>>,
+    response_channels: Inline<Vec<NamedValue<'a>>>,
+    live_response_modes: Inline<Vec<NamedValue<'a>>>,
+    live_response_meanings: Inline<Vec<NamedValue<'a>>>,
+    spectrum_targets: Inline<Vec<NamedValue<'a>>>,
+    spectrum_channels: Inline<Vec<NamedValue<'a>>>,
+    spectrum_stream_statuses: Inline<Vec<NamedValue<'a>>>,
+    maximum_command_records: u32,
+    maximum_document_bytes: u32,
+    maximum_source_channels: u32,
+    diagnostic_bytes: u32,
+    default_meter_blocks: u32,
+    maximum_observation_taps: u32,
+    maximum_response_points: usize,
+    maximum_live_response_owners: usize,
+    maximum_live_response_sections: usize,
+    maximum_live_response_id_bytes: usize,
+    maximum_live_response_points: usize,
+    live_response_capture_bytes: usize,
+    spectrum_capture_bytes: usize,
+    maximum_prepared_spectrum_targets: u32,
+    spectrum_collection_request_bytes: u32,
+    spectrum_collection_entry_bytes: u32,
+    spectrum_collection_entry_capacity: u32,
+    spectrum_collection_target_ids_bytes: u32,
+    spectrum_request_bytes: u32,
+    spectrum_window_header_bytes: u32,
+    spectrum_result_header_bytes: u32,
+    spectrum_stream_metadata_bytes: u32,
+    spectrum_window_frames: u32,
+    spectrum_bin_count: u32,
+    maximum_spectrum_id_bytes: usize,
+    default_maximum_memory_bytes: u64,
+    source_ring: Inline<SourceRing>,
+}
+
+fn field_rows(fields: &[Field]) -> Vec<Inline<FieldRow<'static>>> {
+    fields
+        .iter()
+        .map(|&(name, offset, kind)| Inline(FieldRow { name, offset, kind }))
+        .collect()
 }
