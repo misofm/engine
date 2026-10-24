@@ -43,9 +43,10 @@
 //! and are indexed there -- move up by one. The original layout ends with the compressor family of issue #88.
 //! Issue #213 appends two builtin cases after that family, preserving the original eight-case
 //! builtin block and every later index. Issue #1637 appends the scalar [`automation::corpus`]
-//! block after those two builtin cases, the last block, so no earlier index moves.
+//! block after those two builtin cases, and issue #952 appends the [`graph::corpus`] resident-fold
+//! block after that, the last block, so no earlier index moves.
 //! `tools/wasm-gates/tests/g5_native_corpus.rs` checks the preserved layout, the two builtin cases
-//! after it and the automation block at the end.
+//! after it, the automation block and the graph block at the end.
 
 use automation::corpus as automation_corpus;
 use builtins::corpus as builtins_corpus;
@@ -53,6 +54,7 @@ use compressor::corpus as compressor_corpus;
 use delay::corpus as delay_corpus;
 use effect_runtime::corpus as runtime_corpus;
 use gate_expander::corpus as gate_expander_corpus;
+use graph::corpus as graph_corpus;
 use lane::kernels::{
     OnePoleCoef, OnePoleState, RampSegment, SvfCoef, SvfCoefStep, SvfState, gain_block,
     gain_mix_block, mix2x2_block, one_pole_block, ramp_block, silence_block, sum_into_block,
@@ -252,6 +254,15 @@ pub const COMPRESSOR_CASE_COUNT: usize = compressor_corpus::CASE_COUNT;
 /// arithmetic of the events; their pins live in that crate.
 pub const AUTOMATION_CASE_COUNT: usize = automation_corpus::CASE_COUNT;
 
+/// Cases delegated to [`graph::corpus`] (issue #952), replayed under wasm.
+///
+/// The production resident route fold (`fold_resident_tiles`) over a hostile ragged corpus: two
+/// four-lane cohorts onto one master at `Simd4` -- the fold every browser session runs -- one
+/// eight-lane cohort at `Simd8`, and an independent scalar reference at `f32`. Lane generic and
+/// width independent, so digested at every width. Appended after the automation block, so no
+/// earlier index moves; their pins live in that crate.
+pub const GRAPH_FOLD_CASE_COUNT: usize = graph_corpus::CASE_COUNT;
+
 /// Total cases the guest exports.
 pub const CASE_COUNT: usize = LANE_CASE_COUNT
     + MATH_CASE_COUNT
@@ -265,7 +276,8 @@ pub const CASE_COUNT: usize = LANE_CASE_COUNT
     + BUILTINS_CASE_COUNT
     + LIMITER_CASE_COUNT
     + COMPRESSOR_CASE_COUNT
-    + AUTOMATION_CASE_COUNT;
+    + AUTOMATION_CASE_COUNT
+    + GRAPH_FOLD_CASE_COUNT;
 
 /// The block kernels the corpus drives, in pin order.
 const KERNELS: [Kernel; 13] = [
@@ -480,6 +492,8 @@ enum Case {
     Compressor(usize),
     /// One case of the `automation` event corpus.
     Automation(usize),
+    /// One case of the `graph` resident-fold corpus.
+    GraphFold(usize),
 }
 
 /// Decodes a case index. This order is part of the pin.
@@ -557,7 +571,11 @@ fn case_of(index: usize) -> Case {
     if index < builtins_tail {
         return Case::Builtins(BUILTINS_ORIGINAL_CASE_COUNT + index);
     }
-    Case::Automation(index - builtins_tail)
+    let index = index - builtins_tail;
+    if index < AUTOMATION_CASE_COUNT {
+        return Case::Automation(index);
+    }
+    Case::GraphFold(index - AUTOMATION_CASE_COUNT)
 }
 
 /// `true` when the case has a lane instantiation, so its digest must be identical at all three
@@ -633,6 +651,7 @@ pub fn case_name(index: usize) -> String {
             format!("effect/compressor/{}", compressor_corpus::CASE_NAMES[case])
         }
         Case::Automation(case) => automation_corpus::CASE_NAMES[case].to_string(),
+        Case::GraphFold(case) => format!("graph/{}", graph_corpus::CASE_NAMES[case]),
     }
 }
 
@@ -1162,6 +1181,7 @@ pub fn expected_digest(index: usize) -> [u8; 32] {
         Case::Limiter(case) => limiter_corpus::D90_DIGESTS[case],
         Case::Compressor(case) => compressor_corpus::C1_DIGESTS[case],
         Case::Automation(case) => automation_corpus::G5_DIGESTS[case],
+        Case::GraphFold(case) => graph_corpus::DIGESTS[case],
     }
 }
 
@@ -1191,6 +1211,7 @@ pub fn digest_case(index: usize, width: usize) -> [u8; 32] {
         Case::Limiter(case) => at_width!(width, |L| digest_limiter::<L>(case)),
         Case::Compressor(case) => at_width!(width, |L| digest_compressor::<L>(case)),
         Case::Automation(case) => digest_words(automation_corpus::run_case(case)),
+        Case::GraphFold(case) => at_width!(width, |L| digest_graph_fold::<L>(case)),
     }
 }
 
@@ -1275,7 +1296,8 @@ fn lane_values(index: usize, width: usize, fused: bool) -> [[f32; FRAMES]; LANES
         | Case::Builtins(_)
         | Case::Limiter(_)
         | Case::Compressor(_)
-        | Case::Automation(_) => {
+        | Case::Automation(_)
+        | Case::GraphFold(_) => {
             panic!("case {index} is not a lane-kernel case")
         }
     }
@@ -1867,6 +1889,14 @@ fn digest_builtins<L: Lane>(case: usize) -> [u8; 32] {
 fn digest_limiter<L: Lane>(case: usize) -> [u8; 32] {
     let mut out = vec![0_u32; limiter_corpus::POINTS];
     limiter_corpus::run_case::<L>(case, &mut out);
+    digest_words(out.iter().copied())
+}
+
+/// Digests one `graph` resident-fold case: SHA-256 over the little-endian result words of that
+/// crate's `corpus::run_case`, the form its `DIGESTS` pins take.
+fn digest_graph_fold<L: Lane>(case: usize) -> [u8; 32] {
+    let mut out = vec![0_u32; graph_corpus::WORDS];
+    graph_corpus::run_case::<L>(case, &mut out);
     digest_words(out.iter().copied())
 }
 
