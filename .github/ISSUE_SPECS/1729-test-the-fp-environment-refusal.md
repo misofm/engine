@@ -20,7 +20,7 @@ Split the decision out of the hardware access: a pure function that takes the th
 
 TA4 deleted host-web `tests::canonical_live::a_live_fader_and_vca_move_under_a_hostile_caller_word_render_the_canonical_bits` (#1709 D2, browser); the capi test of the same name stays (`crates/capi/src/runtime/live_tests.rs:8158`), so only the C ABI side of that check remains. If the owner wants the browser side back, restore it from `b9135008d` (`hosts/host-web/src/tests.rs`) with the `lane` test-support dev-dependency.
 
-Decision (2026-10-24): no. The capi twin keeps the claim, and the one-row-per-host rule holds.
+Decision (root, 2026-10-24, a test-value call under AGENTS.md's one-parity-row-per-host rule): no. The capi twin keeps the claim.
 
 ## Evidence and decision record
 
