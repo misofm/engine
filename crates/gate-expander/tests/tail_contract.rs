@@ -11,8 +11,9 @@ mod support;
 
 use effect_contract::{
     CompositionBound, EffectProcessBlock, EffectQuality, FlushStall, InitialParameterValue,
-    NativeEffectFactory, NodeTailBound, PeakGain, PreparedNativeEffect, PreparedSidechainPort,
-    RestBound, StatePayloadOutput, StatePayloadSizes, TailDecay, TailSamples,
+    NativeEffectFactory, NodeTailBound, ParameterChannel, PeakGain, PreparedAutomationSpan,
+    PreparedNativeEffect, PreparedSidechainPort, RestBound, StatePayloadOutput, StatePayloadSizes,
+    TailDecay, TailSamples,
 };
 use effect_runtime::envelope::attack_release_coefficient;
 use gate_expander::{GATE_EXPANDER_PARAMETERS, GateExpanderFactory};
@@ -55,8 +56,10 @@ fn stated(rate: u32) -> NodeTailBound {
 
 fn stated_rest(rate: u32) -> u64 {
     let bound = stated(rate);
-    let RestBound::Bounded(rest) = bound.rest else {
-        panic!("{rate} Hz: no exact-rest bound stated");
+    // A fixed point, not equality with `Z` (#1376 root option (a)): an edited history can rest on
+    // another stall word.
+    let RestBound::FixedPoint(rest) = bound.rest else {
+        panic!("{rate} Hz: no fixed-point rest bound stated");
     };
     assert_eq!(
         rest.peak_plus_24_dbfs, rest.any_sanitized_input,
@@ -115,16 +118,33 @@ fn render(
     sidechain: Option<(&[f32], &[f32])>,
     first: u64,
 ) {
+    render_with(effect, left, right, sidechain, first, &[]);
+}
+
+/// [`render`], delivering each span in the block that holds its sample.
+fn render_with(
+    effect: &mut dyn PreparedNativeEffect,
+    left: &mut [f32],
+    right: &mut [f32],
+    sidechain: Option<(&[f32], &[f32])>,
+    first: u64,
+    spans: &[PreparedAutomationSpan],
+) {
     let mut offset = 0;
     while offset < left.len() {
         let end = (offset + QUANTUM).min(left.len());
+        let block: Vec<PreparedAutomationSpan> = spans
+            .iter()
+            .filter(|span| span.sample >= first + offset as u64 && span.sample < first + end as u64)
+            .copied()
+            .collect();
         let _ = effect.process(
             EffectProcessBlock::new(
                 &mut left[offset..end],
                 &mut right[offset..end],
                 sidechain.map(|(l, r)| (&l[offset..end], &r[offset..end])),
                 first + offset as u64,
-                &[],
+                &block,
                 QUANTUM as u32,
             )
             .expect("block"),
@@ -258,7 +278,12 @@ fn slowest_release(rate: u32) -> f32 {
 /// The real gain word's walk from `+0.0` toward `t`: `flush(fma(c, t - e, e))` at `f32` (two
 /// roundings), counted until a step leaves it unchanged.
 fn walk(c: f32, t: f32) -> (u64, f32) {
-    let mut e = 0.0_f32;
+    walk_from(c, t, 0.0)
+}
+
+/// [`walk`] from the word `e`.
+fn walk_from(c: f32, t: f32, e: f32) -> (u64, f32) {
+    let mut e = e;
     let mut steps = 0;
     loop {
         let next = c * (t - e) + e;
@@ -309,6 +334,18 @@ fn the_stated_rest_is_the_hold_and_the_gain_words_walk() {
                 worst = (steps, t);
             }
         }
+        // From below (#1376 root option (a)): the word an edit left at the -96 dB floor rises at
+        // the slowest attack toward a shallow target, at the flush threshold and under it (where
+        // it flushes to `+0.0`) and an ordinary one; every walk ends within the stated bound.
+        let attack = attack_release_coefficient(domain(ATTACK).1, rate) - 1.0 / 16_777_216.0;
+        for t in [-1.000_001e-20_f32, -1.0e-25, -3.0] {
+            let (steps, word) = walk_from(attack, t, -96.0);
+            assert!(
+                steps <= walk_bound,
+                "{rate} Hz t = {t:e}: from below the word stops in {steps} steps, stated {walk_bound}"
+            );
+            eprintln!("{rate} Hz: from below toward {t:e}, {steps} steps to {word:e}");
+        }
         let count = worst.0;
         assert!(
             walk_bound <= count + 2.max(count.div_ceil(100)),
@@ -324,14 +361,16 @@ fn the_stated_rest_is_the_hold_and_the_gain_words_walk() {
     }
 }
 
-/// **Gate 2: exact rest by the stated `R`, real kernel, and the rest state is one word from every
-/// history**, at the deepest curve, the longest hold, the fastest attack and the slowest release,
+/// **Gate 2: rest by the stated `R`, real kernel: a fixed point from every history, and `Z` from
+/// every history with settled parameters**, at the deepest curve, the longest hold, the fastest attack and the slowest release,
 /// for a range of 96 dB and a range just above 32 dB that puts the target in the walk's slowest
 /// class. Histories: full-scale noise at both peak cases (`10^(24/20)` and `1e29`: the gate open,
 /// its hold loaded) and sub-threshold noise longer than the hold (the gate closed, the gain word
 /// released toward a partial target first). After `R` zeros the output is `+-0.0` and the payload
 /// equals, word for word, the payload of a freshly reset instance fed `R` zeros (`Z`, which is
-/// itself a fixed point), and the two then render the same seeded noise to the bit.
+/// itself a fixed point), and the two then render the same seeded noise to the bit. An edited
+/// history (a range automation still ramping at the silence makes the target shallower than the
+/// closed gate's word) is at a zero-input fixed point by `R`, below its target and not equal to `Z`.
 #[test]
 fn the_state_reaches_one_rest_by_the_stated_bound() {
     for &rate in rates() {
@@ -378,6 +417,69 @@ fn the_state_reaches_one_rest_by_the_stated_bound() {
                 ("open, 1e29", SIGNAL, 1.0e29),
                 ("closed, partial target", 2 * rate as usize, quiet),
             ];
+            // An edited history (#1376 root option (a)): the gate is closed with its word near
+            // -10 dB when a range automation toward 3 dB, still ramping at the silence, makes the
+            // target shallower than the word. The word rises from below and rests on a fixed point
+            // that is not `Z`.
+            {
+                let length = 2 * rate as usize;
+                let (mut effect, _) = prepare(rate, &values, false);
+                let mut left = noise(length, 0x1376_a000, quiet);
+                let mut right = noise(length, 0x1376_a001, quiet);
+                let spans: Vec<PreparedAutomationSpan> =
+                    [ParameterChannel::Left, ParameterChannel::Right]
+                        .into_iter()
+                        .map(|channel| PreparedAutomationSpan {
+                            channel,
+                            parameter_index: RANGE as u32,
+                            sample: (length - 16) as u64,
+                            value: 3.0,
+                        })
+                        .collect();
+                let split = length - 16;
+                render(
+                    effect.as_mut(),
+                    &mut left[..split],
+                    &mut right[..split],
+                    None,
+                    0,
+                );
+                render_with(
+                    effect.as_mut(),
+                    &mut left[split..],
+                    &mut right[split..],
+                    None,
+                    split as u64,
+                    &spans,
+                );
+                assert!(
+                    zeros(effect.as_mut(), length as u64),
+                    "{rate} Hz range {range} edited: non-zero output in the silence"
+                );
+                let state = snapshot(effect.as_ref(), sizes);
+                let (mut l, mut r) = (vec![0.0_f32; QUANTUM], vec![0.0_f32; QUANTUM]);
+                render(
+                    effect.as_mut(),
+                    &mut l,
+                    &mut r,
+                    None,
+                    length as u64 + rest_bound,
+                );
+                assert_eq!(
+                    state,
+                    snapshot(effect.as_ref(), sizes),
+                    "{rate} Hz range {range} edited: not at a fixed point after {rest_bound} zeros"
+                );
+                let word = f32::from_bits(state[gain_word]);
+                assert!(
+                    word < -3.0 && word != f32::from_bits(rest[gain_word]),
+                    "{rate} Hz range {range} edited: the word {word} did not rest below its target"
+                );
+                eprintln!(
+                    "{rate} Hz range {range} edited: at a fixed point ({word} dB, Z has {} dB) after {rest_bound} zeros",
+                    f32::from_bits(rest[gain_word])
+                );
+            }
             for (name, length, peak) in histories {
                 let (mut effect, _) = prepare(rate, &values, false);
                 let mut left = noise(length, 0x1376_a000, peak);

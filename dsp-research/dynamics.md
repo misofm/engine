@@ -52,9 +52,10 @@ passes the same words, and none jumps past the first stall. `effect_runtime::tai
 bounds the walk over every target and every release coefficient of the domain; the slowest targets
 sit just above a power of two, where the walk ends on the finer grid. `R` is the longest hold plus
 that walk: 602,859 samples at 48 kHz (12.6 s), 0.27 % above the longest walk measured. A parameter
-edit that leaves the word deeper than the stall word is a recorded limit: the word stops on its own
-fixed point, accepted by `lanes_at_rest`, not equal to the rest state; a snap to the target would
-remove it and is a rendered-bit change. The composition gain is 1 mB (0 dB, the fast tier's `1e-5`
+edit that leaves the word deeper than its target makes it rise at the attack rate and stop on the
+far side, on a fixed point that is not the fresh instance's rest state, so the gate states its `R`
+as a fixed-point bound (`RestBound::FixedPoint`, root option (a)); that walk is bounded separately
+and is shorter. A snap to the target would make the rest state unique and is a rendered-bit change. The composition gain is 1 mB (0 dB, the fast tier's `1e-5`
 dB and one rounding) for every sidechain input; the flush stall is one underflow, -75,859 mB.
 
 ## Units, mappings, automation and smoothing
