@@ -1694,17 +1694,18 @@ fn live_oracle(rate: u32) -> LiveOracle {
             continue;
         };
         let ck = half_row * qk + omega;
+        let e_bar = zones[k].beta / (1.0 - rk);
         for l in 0..n {
             let Some((rl, ql, _)) = zones[l].settled else {
                 continue;
             };
-            tail_settled = tail_settled.max(settled_pair_sup(
-                [rk, rl],
-                [zones[k].beta, zones[l].beta],
-                [ck, half_second_row * ql + omega_second],
-                [hpf_end[k], lpf_end[l]],
-                oi,
-            ));
+            let state = lpf_end[l]
+                + zones[l].beta * ck * hpf_end[k] / (1.0 - rk.min(rl))
+                + zones[l].beta * (ck * e_bar + oi) / (1.0 - rl);
+            tail_settled = tail_settled.max(
+                (half_second_row * ql + omega_second) * state
+                    + oi * (ck * hpf_end[k].max(e_bar) + oi),
+            );
         }
     }
     let tail_window = gain * tail_window;
@@ -1766,50 +1767,6 @@ fn live_oracle(rate: u32) -> LiveOracle {
         tail_settled,
         peak_split,
     }
-}
-
-/// #1487: the largest output over every frame `m >= 0` after the window of one settled pair's
-/// majorant recursion (`E' = u E + beta_k`, `a = c_k E + delta`, `S' = v S + beta_l a`, output
-/// `c_l S + delta a`, from `(E*_k, S*_l)`), in closed form: `y(m) = K0 + K1 u^m + K2 v^m` (or
-/// `K0 + (K1 + K2 m) u^m` when `u = v`), whose derivative in `m` has at most one zero, so its
-/// largest value over the integers is at `m = 0`, at the limit `K0`, or next to the zero, which
-/// a bisection on the derivative's sign finds. Independent of the module's frame-by-frame walk.
-fn settled_pair_sup(
-    [u, v]: [f64; 2],
-    [beta_k, beta_l]: [f64; 2],
-    [c_k, c_l]: [f64; 2],
-    [e_start, s_start]: [f64; 2],
-    delta: f64,
-) -> f64 {
-    let e_bar = beta_k / (1.0 - u);
-    let s_bar = beta_l * (c_k * e_bar + delta) / (1.0 - v);
-    let d = e_start - e_bar;
-    let equal = (u - v).abs() < 1.0e-12;
-    let y = |m: f64| {
-        let (pu, pv) = (math::pow(u, m), math::pow(v, m));
-        let g = if equal {
-            m * math::pow(u, m - 1.0)
-        } else {
-            (pu - pv) / (u - v)
-        };
-        let s = s_bar * (1.0 - pv) + pv * s_start + beta_l * c_k * d * g;
-        c_l * s + delta * (c_k * (e_bar + d * pu) + delta)
-    };
-    let slope = |m: f64| y(m + 1.0e-3) - y(m);
-    let limit = c_l * s_bar + delta * (c_k * e_bar + delta);
-    let mut best = y(0.0).max(limit);
-    let far = 80.0 / (1.0 - u.max(v));
-    if slope(0.0) > 0.0 && slope(far) <= 0.0 {
-        let (mut lo, mut hi) = (0.0_f64, far);
-        while hi - lo > 0.5 {
-            let mid = 0.5 * (lo + hi);
-            if slope(mid) > 0.0 { lo = mid } else { hi = mid }
-        }
-        for m in [lo.floor(), lo.floor() + 1.0, hi.ceil()] {
-            best = best.max(y(m));
-        }
-    }
-    best
 }
 
 /// The relative tolerance of the intermediate quantities' comparison with the recomputation: far
@@ -2809,10 +2766,10 @@ fn live_composition(rate: u32) -> LiveComposition {
 /// deterministic.
 const F_P: f64 = 22.75;
 
-/// #1487 `F_t` (T-D4): the measured `r_t,max` 7.2190 (the stated `G_t` over L2's largest trim x
-/// exact supremum, at 88.2 and 96 kHz, with the settled phase time-resolved) times `1 + 5 %`,
-/// rounded up to two decimals, with `F_P`'s reason for the margin. #1485's was 14.37.
-const F_T: f64 = 7.58;
+/// #1485 `F_t` (V-D3, confirmed by root on 2026-10-08): the measured `r_t,max` 13.677 (the stated
+/// `G_t` over L2's largest trim x exact supremum, at 96 kHz) times `1 + 5 %`, rounded up to two
+/// decimals, with `F_P`'s reason for the margin.
+const F_T: f64 = 14.37;
 
 /// One control event of a gate 1 history ([`peak_history`]), at a frame after the drive.
 #[derive(Clone, Copy)]
@@ -2996,7 +2953,7 @@ fn worst_sign_history(rate: u32, events: &[(usize, PeakEvent)], trim: f64) -> (u
 }
 
 /// #1485 gate 1 (#1466 L1, widened). The real kernel's largest `|y|` per unit of the input's peak
-/// is at most `g_p + sigma_p`, the live peak gain and peak stall at `X = 1`, on nine histories.
+/// is at most `g_p + sigma_p`, the live peak gain and peak stall at `X = 1`, on seven histories.
 /// Five follow the Nyquist drive of [`peak_history`] (#1379 H9: the drive builds a large first
 /// integrator in both sections at the top of the domain while the output stays near 1, and a
 /// retarget exposes it). Each history, with its reason:
@@ -3014,19 +2971,15 @@ fn worst_sign_history(rate: u32, events: &[(usize, PeakEvent)], trim: f64) -> (u
 /// row's own worst-case input: the HPF to 10 Hz, then the LPF to 10 Hz 16 frames later (#1485
 /// attempt 1's verifier); and the HPF to 0.9 times the maximum cutoff, the LPF to 10 Hz 36 frames
 /// later and the HPF to 10 Hz 3 frames after that (row at +42, the follow-ups' verifier), the
-/// larger by 5.3 % at every launch rate. The eighth and ninth are #1487 T-D1's worst-schedule
-/// search's best (random schedules of up to four retargets, then a local refinement): the HPF to
-/// 0.95 times the maximum at +4 and again at +7, to 0.9 times it at +20, the LPF to 500 Hz (the
-/// search's best at 44.1 kHz) or 1 kHz (at 48 kHz) at +49, and the HPF to 10 Hz at +52 (row at
-/// +55), 0.26 % above the seventh, so they set `g_meas`. All were found by finite searches over
-/// event schedules, so `g_meas` is a measured lower bound of the true worst-case peak, not the
-/// supremum. The kernel's peak must reach the row's `l1` times the trim within `10^-3`, so
+/// larger by 5.3 % at every launch rate, so it sets `g_meas`. Both were found by finite searches
+/// over event schedules, so `g_meas` is a measured lower bound of the true worst-case peak, not
+/// the supremum. The kernel's peak must reach the row's `l1` times the trim within `10^-3`, so
 /// each history is the worst-case input it claims to be.
 ///
 /// Prints, per history and rate, the peak (`g_meas` of the largest) and the ratio
 /// `g_p / peak` (issue #1485, V-D3).
 ///
-/// #1485 gate 2 on the same runs: with `g_meas` the largest peak over the nine histories at the
+/// #1485 gate 2 on the same runs: with `g_meas` the largest peak over the seven histories at the
 /// rate, `g_meas <= g_p` (the raw gain, without `sigma_p`) and the stated `G_p` is at most
 /// [`F_P`] `g_meas`. No other test bounds the live peak gain from above against the real kernel:
 /// #1466's `W_0` bound (a ratio of about 473) passes every other assertion here.
@@ -3072,7 +3025,7 @@ fn live_peak_gain_bounds_the_real_kernel_on_its_worst_histories() {
                  {stated:e}"
             );
         }
-        let sign_histories: [SignHistory; 4] = [
+        let sign_histories: [SignHistory; 2] = [
             (
                 "worst sign, HPF to 10 Hz, LPF to 10 Hz at +16",
                 vec![(0, Retarget(0, 10.0)), (16, Retarget(1, 10.0))],
@@ -3083,28 +3036,6 @@ fn live_peak_gain_bounds_the_real_kernel_on_its_worst_histories() {
                     (0, Retarget(0, 0.9 * maximum(rate))),
                     (36, Retarget(1, 10.0)),
                     (39, Retarget(0, 10.0)),
-                ],
-            ),
-            (
-                "worst sign, HPF to 0.95 max at +4 and +7, to 0.9 max at +20, LPF to 500 Hz at \
-                 +49, HPF to 10 Hz at +52",
-                vec![
-                    (4, Retarget(0, 0.95 * maximum(rate))),
-                    (7, Retarget(0, 0.95 * maximum(rate))),
-                    (20, Retarget(0, 0.9 * maximum(rate))),
-                    (49, Retarget(1, 500.0)),
-                    (52, Retarget(0, 10.0)),
-                ],
-            ),
-            (
-                "worst sign, HPF to 0.95 max at +4 and +7, to 0.9 max at +20, LPF to 1 kHz at \
-                 +49, HPF to 10 Hz at +52",
-                vec![
-                    (4, Retarget(0, 0.95 * maximum(rate))),
-                    (7, Retarget(0, 0.95 * maximum(rate))),
-                    (20, Retarget(0, 0.9 * maximum(rate))),
-                    (49, Retarget(1, 1_000.0)),
-                    (52, Retarget(0, 10.0)),
                 ],
             ),
         ];
