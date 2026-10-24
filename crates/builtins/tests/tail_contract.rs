@@ -2996,7 +2996,7 @@ fn worst_sign_history(rate: u32, events: &[(usize, PeakEvent)], trim: f64) -> (u
 }
 
 /// #1485 gate 1 (#1466 L1, widened). The real kernel's largest `|y|` per unit of the input's peak
-/// is at most `g_p + sigma_p`, the live peak gain and peak stall at `X = 1`, on nine histories.
+/// is at most `g_p + sigma_p`, the live peak gain and peak stall at `X = 1`, on eight histories.
 /// Five follow the Nyquist drive of [`peak_history`] (#1379 H9: the drive builds a large first
 /// integrator in both sections at the top of the domain while the output stays near 1, and a
 /// retarget exposes it). Each history, with its reason:
@@ -3014,11 +3014,12 @@ fn worst_sign_history(rate: u32, events: &[(usize, PeakEvent)], trim: f64) -> (u
 /// row's own worst-case input: the HPF to 10 Hz, then the LPF to 10 Hz 16 frames later (#1485
 /// attempt 1's verifier); and the HPF to 0.9 times the maximum cutoff, the LPF to 10 Hz 36 frames
 /// later and the HPF to 10 Hz 3 frames after that (row at +42, the follow-ups' verifier), the
-/// larger by 5.3 % at every launch rate. The eighth and ninth are #1487 T-D1's worst-schedule
-/// search's best (random schedules of up to four retargets, then a local refinement): the HPF to
-/// 0.95 times the maximum at +4 and again at +7, to 0.9 times it at +20, the LPF to 500 Hz (the
-/// search's best at 44.1 kHz) or 1 kHz (at 48 kHz) at +49, and the HPF to 10 Hz at +52 (row at
-/// +55), 0.26 % above the seventh, so they set `g_meas`. All were found by finite searches over
+/// larger by 5.3 % at every launch rate. The eighth is #1487 T-D1's worst-schedule search's best
+/// at 44.1 kHz (random schedules of up to four retargets, then a local refinement): the HPF to
+/// 0.95 times the maximum at +4 and again at +7, to 0.9 times it at +20, the LPF to 500 Hz at +49
+/// and the HPF to 10 Hz at +52 (row at +55), 0.23 % to 0.24 % above the seventh at every launch
+/// rate, so it sets `g_meas` (the search's best at 48 kHz, the LPF to 1 kHz instead, is within
+/// `1.4e-5` of it). All were found by finite searches over
 /// event schedules, so `g_meas` is a measured lower bound of the true worst-case peak, not the
 /// supremum. The kernel's peak must reach the row's `l1` times the trim within `10^-3`, so
 /// each history is the worst-case input it claims to be.
@@ -3026,7 +3027,7 @@ fn worst_sign_history(rate: u32, events: &[(usize, PeakEvent)], trim: f64) -> (u
 /// Prints, per history and rate, the peak (`g_meas` of the largest) and the ratio
 /// `g_p / peak` (issue #1485, V-D3).
 ///
-/// #1485 gate 2 on the same runs: with `g_meas` the largest peak over the nine histories at the
+/// #1485 gate 2 on the same runs: with `g_meas` the largest peak over the eight histories at the
 /// rate, `g_meas <= g_p` (the raw gain, without `sigma_p`) and the stated `G_p` is at most
 /// [`F_P`] `g_meas`. No other test bounds the live peak gain from above against the real kernel:
 /// #1466's `W_0` bound (a ratio of about 473) passes every other assertion here.
@@ -3072,7 +3073,7 @@ fn live_peak_gain_bounds_the_real_kernel_on_its_worst_histories() {
                  {stated:e}"
             );
         }
-        let sign_histories: [SignHistory; 4] = [
+        let sign_histories: [SignHistory; 3] = [
             (
                 "worst sign, HPF to 10 Hz, LPF to 10 Hz at +16",
                 vec![(0, Retarget(0, 10.0)), (16, Retarget(1, 10.0))],
@@ -3093,17 +3094,6 @@ fn live_peak_gain_bounds_the_real_kernel_on_its_worst_histories() {
                     (7, Retarget(0, 0.95 * maximum(rate))),
                     (20, Retarget(0, 0.9 * maximum(rate))),
                     (49, Retarget(1, 500.0)),
-                    (52, Retarget(0, 10.0)),
-                ],
-            ),
-            (
-                "worst sign, HPF to 0.95 max at +4 and +7, to 0.9 max at +20, LPF to 1 kHz at \
-                 +49, HPF to 10 Hz at +52",
-                vec![
-                    (4, Retarget(0, 0.95 * maximum(rate))),
-                    (7, Retarget(0, 0.95 * maximum(rate))),
-                    (20, Retarget(0, 0.9 * maximum(rate))),
-                    (49, Retarget(1, 1_000.0)),
                     (52, Retarget(0, 10.0)),
                 ],
             ),
