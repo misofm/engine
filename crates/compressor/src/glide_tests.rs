@@ -437,8 +437,12 @@ fn a_lane_snapshotted_mid_glide_continues_bit_for_bit_and_forged_weights_are_ref
         );
     }
 
-    // Under another mode the lane keeps its own, at rest: Maximum's weights `[1, 0]`.
-    let mut other = prepare(LinkMode::Maximum);
+    // Under another mode the lane keeps its own, at rest: Maximum's weights `[1, 0]`, whatever
+    // glide it held before.
+    // The lane is itself mid-glide to Maximum: the restore replaces that glide too.
+    let mut other = prepare(LinkMode::DualMono);
+    assert!(other.retarget_link(0, LinkMode::Maximum, 96));
+    render(other.as_mut(), 0..20);
     restore(other.as_mut(), &left, &right).expect("restores under another mode");
     let one = 1.0_f32.to_bits();
     assert_eq!(

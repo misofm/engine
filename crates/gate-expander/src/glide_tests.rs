@@ -435,23 +435,26 @@ fn a_lane_snapshotted_mid_glide_continues_bit_for_bit_and_forged_weights_are_ref
             StatePayloadInput::new(&payload.0, &payload.1, &payload.2, sizes).expect("sizes"),
         )
     };
-    let (input_left, input_right) = (noise(7, 256, 0.05), noise(8, 256, 0.005));
+    // The oracle's square waves: the right channel is closed alone and opened by the link, so
+    // the glide's frames show in the output.
+    let (input_left, input_right) = oracle_signals();
     let render = |effect: &mut dyn PreparedNativeEffect, range: core::ops::Range<usize>| {
         let (mut left, mut right) = (
             input_left[range.clone()].to_vec(),
             input_right[range.clone()].to_vec(),
         );
-        effect.process(
-            EffectProcessBlock::new(
-                &mut left,
-                &mut right,
-                None,
-                range.start as u64,
-                &[],
-                QUANTUM,
-            )
-            .expect("a block"),
-        );
+        let quantum = QUANTUM as usize;
+        for (block, (left, right)) in left
+            .chunks_mut(quantum)
+            .zip(right.chunks_mut(quantum))
+            .enumerate()
+        {
+            let first_sample = (range.start + block * quantum) as u64;
+            effect.process(
+                EffectProcessBlock::new(left, right, None, first_sample, &[], QUANTUM)
+                    .expect("a block"),
+            );
+        }
         let bits = |values: &[f32]| {
             values
                 .iter()
@@ -460,15 +463,16 @@ fn a_lane_snapshotted_mid_glide_continues_bit_for_bit_and_forged_weights_are_ref
         };
         (bits(&left), bits(&right))
     };
+    // Long enough for the right channel's hold and release to close it.
     let mut source = prepare(LinkMode::DualMono).processor;
-    render(source.as_mut(), 0..64);
+    render(source.as_mut(), 0..1_024);
     assert!(source.retarget_link(0, LinkMode::Average, 96));
-    render(source.as_mut(), 64..84);
+    render(source.as_mut(), 1_024..1_044);
     let payload = snapshot(source.as_ref());
 
     let mut successor = prepare(LinkMode::Average).processor;
     restore(successor.as_mut(), &payload).expect("a mid-glide payload restores");
-    for range in [84..128, 128..256] {
+    for range in [1_044..1_100, 1_100..1_400] {
         assert_eq!(
             render(successor.as_mut(), range.clone()),
             render(source.as_mut(), range.clone()),
@@ -476,8 +480,12 @@ fn a_lane_snapshotted_mid_glide_continues_bit_for_bit_and_forged_weights_are_ref
         );
     }
 
-    // Under another mode the lane keeps its own, at rest: Maximum's weights `[1, 0]`.
-    let mut other = prepare(LinkMode::Maximum).processor;
+    // Under another mode the lane keeps its own, at rest: Maximum's weights `[1, 0]`, whatever
+    // glide it held before.
+    // The lane is itself mid-glide to Maximum: the restore replaces that glide too.
+    let mut other = prepare(LinkMode::DualMono).processor;
+    assert!(other.retarget_link(0, LinkMode::Maximum, 96));
+    render(other.as_mut(), 0..20);
     restore(other.as_mut(), &payload).expect("restores under another mode");
     let first = STATE_LINK_WORD * 4;
     let words = |section: &[u8]| -> Vec<u32> {
