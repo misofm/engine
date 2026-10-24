@@ -681,11 +681,33 @@ fn link_material(rate: u32, name: &'static str, mats: &[Material]) -> Material {
 
 const LINK_TRANSITIONS: [(&str, Toward); 2] = [("link", Toward::Wet), ("unlink", Toward::Dry)];
 
-/// The reference programme of a link glide: the input delayed by the effect's latency, the
-/// alignment of both planes (each a render of the same prepared effect, so each carries that
-/// latency), as the bypass rows' shunt dry signal is.
-fn link_reference(setting: &Setting, rate: u32, source: &Stereo) -> Stereo {
-    shunt_dry(source, setting.latency(rate))
+/// One link glide's planes: the setting under `maximum`, the reference programme (the input
+/// delayed by the effect's latency, the alignment of both planes, each a render of the same
+/// prepared effect, as the bypass rows' shunt dry signal is), `dual_mono`'s render (the
+/// crossfade's dry plane) and `maximum`'s (its wet plane).
+struct LinkPlanes {
+    maximum: Setting,
+    reference: Stereo,
+    dry: Stereo,
+    wet: Stereo,
+}
+
+fn link_planes(rate: u32, effect: Effect, source: &Stereo) -> LinkPlanes {
+    let maximum = Setting::calibrate(effect, rate, source, LinkMode::Maximum);
+    let dual = Setting {
+        link: LinkMode::DualMono,
+        ..maximum.clone()
+    };
+    let latency = maximum.latency(rate);
+    if effect == Effect::Compressor {
+        assert_eq!(latency, 0, "the compressor adds no latency");
+    }
+    LinkPlanes {
+        reference: shunt_dry(source, latency),
+        dry: dual.render(rate, source),
+        wet: maximum.render(rate, source),
+        maximum,
+    }
 }
 
 /// `effect` at its representative setting (the compressor and the limiter calibrated to 6 dB of
@@ -695,17 +717,12 @@ fn link_reference(setting: &Setting, rate: u32, source: &Stereo) -> Stereo {
 fn link_glide(rate: u32, effect: Effect, name: &'static str, mats: &[Material]) -> String {
     let mut out = String::new();
     let m = link_material(rate, name, mats);
-    let maximum = Setting::calibrate(effect, rate, &m.source, LinkMode::Maximum);
-    let dual = Setting {
-        link: LinkMode::DualMono,
-        ..maximum.clone()
-    };
-    if effect == Effect::Compressor {
-        assert_eq!(maximum.latency(rate), 0, "the compressor adds no latency");
-    }
-    let wet = maximum.render(rate, &m.source);
-    let dry = dual.render(rate, &m.source);
-    let reference = link_reference(&maximum, rate, &m.source);
+    let LinkPlanes {
+        maximum,
+        reference,
+        dry,
+        wet,
+    } = link_planes(rate, effect, &m.source);
     let pair = Pair {
         reference: &reference,
         dry: &dry,
@@ -819,13 +836,13 @@ mod tests {
     use super::*;
 
     /// A link glide's reference is aligned with both planes: for the limiter, whose lookahead
-    /// delays both renders, it is the input delayed by that latency sample for sample; for the
-    /// compressor (no latency) it is the input itself. A reference that passed the undelayed
-    /// input would misalign the limiter's rows with its planes.
+    /// delays both renders, it is the shunt's latency-matched input; for the compressor (no
+    /// latency) it is the input itself. A link glide that passed the undelayed input would
+    /// misalign the limiter's rows with its planes.
     #[test]
     fn the_link_reference_is_the_latency_matched_input() {
         let rate = 48_000;
-        let frames = 8 * QUANTUM + 37;
+        let frames = rate as usize;
         let tone = |f: f64, a: f64| -> Vec<f32> {
             (0..frames)
                 .map(|i| {
@@ -837,43 +854,19 @@ mod tests {
             left: tone(220.0, 0.9),
             right: tone(330.0, 0.4),
         };
-        let limiter = Setting {
-            effect: Effect::Limiter,
-            overrides: vec![("ceiling", -6.0)],
-            link: LinkMode::Maximum,
+        let bits = |x: &Stereo| -> Vec<(u32, u32)> {
+            x.left
+                .iter()
+                .zip(&x.right)
+                .map(|(l, r)| (l.to_bits(), r.to_bits()))
+                .collect()
         };
-        let latency = limiter.latency(rate);
+        let limiter = link_planes(rate, Effect::Limiter, &source);
+        let latency = limiter.maximum.latency(rate);
         assert!(latency > 0, "the limiter has a lookahead");
-        let reference = link_reference(&limiter, rate, &source);
-        for i in 0..frames {
-            let want = |x: &[f32]| if i < latency { 0.0 } else { x[i - latency] };
-            assert_eq!(
-                reference.left[i].to_bits(),
-                want(&source.left).to_bits(),
-                "left {i}"
-            );
-            assert_eq!(
-                reference.right[i].to_bits(),
-                want(&source.right).to_bits(),
-                "right {i}"
-            );
-        }
-        let compressor = Setting::calibrate(Effect::Compressor, rate, &source, LinkMode::Maximum);
-        let reference = link_reference(&compressor, rate, &source);
-        assert!(
-            reference
-                .left
-                .iter()
-                .zip(&source.left)
-                .all(|(a, b)| a.to_bits() == b.to_bits())
-        );
-        assert!(
-            reference
-                .right
-                .iter()
-                .zip(&source.right)
-                .all(|(a, b)| a.to_bits() == b.to_bits())
-        );
+        assert_eq!(bits(&limiter.reference), bits(&shunt_dry(&source, latency)));
+        let compressor = link_planes(rate, Effect::Compressor, &source);
+        assert_eq!(bits(&compressor.reference), bits(&source));
     }
 
     /// The route probe is the shipped kernel's law: every ramping frame is `IndexedRamp`'s
