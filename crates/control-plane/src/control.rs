@@ -55,9 +55,9 @@ pub struct ProviderEpoch {
     /// The consumers of this epoch's plan's strip meters (#1581 D6), one per strip in strip order
     /// (`host_core::meter_selection`). Nothing reads them until #1587; a full strip queue drops
     /// and counts on the render side. Their rings are `Arc`s shared with the plan's observers, as
-    /// the producers' cells are, so the epoch may drop after its plan. Only the adapters' tests
-    /// read them before #1587.
-    #[cfg_attr(not(feature = "test-support"), allow(dead_code))]
+    /// the producers' cells are, so the epoch may drop after its plan. At promotion a carried
+    /// meter's consumer moves from the displaced epoch to this one, at the entry the plan's
+    /// `meter_pairing` names (#1674 R1), so a consumer stays with the observer that renders on.
     pub(crate) meters: Box<[host_core::MeterConsumer]>,
     /// The capi resources this epoch's plan was prepared with (#1257 D4).
     pub(crate) capi: CapiResources,
@@ -2198,6 +2198,15 @@ where
                 )),
                 other => other,
             };
+            // #1674 R1: likewise its strip meters. The swap block moved each carried meter's
+            // observer, producer included, into `next`'s plan, so the consumer the running epoch
+            // holds follows it, and the parked epoch keeps `next`'s fresh one, whose producer
+            // retires with the displaced plan.
+            host_core::pair_carried_meters(
+                &mut next.meters,
+                &mut self.providers.meters,
+                next.inventory.meter_pairing(),
+            );
             let mut previous = core::mem::replace(&mut self.providers, next);
             // Dropped with the parked epoch, when its plan is reclaimed.
             previous.spectrum = displaced;
