@@ -566,17 +566,21 @@ fn a_live_enable_or_family_change_settles_on_the_new_design() {
 /// {20, 1000, 18000} Hz, gains {-24, 0, 24} dB and Q {0.1, 0.707, 18} (slope 1), band 1 is
 /// prepared at the first state and sent the second. The test walks the kernel's `f32` ramp
 /// (`step = (to - from) / 64`, one add per sample) and pins that walk to the real lane after 17
-/// frames, then retargets to the next state of the seven-cycle and walks the rest from the lane's
-/// words. Every word set of both walks that is not the identity must pass the production ramp
-/// predicate (`validate_svf_within` at `RAMP_PATH_NORM_TOLERANCE`): each is a convex mix of two
-/// admitted designs (#1337 D3). Across the 128 noise frames that carry both ramps, every output is
-/// finite and at most `OUTPUT_MIX_BOUND` times the input peak.
+/// frames, then retargets to the next state of the seven-cycle, walks the rest from the lane's
+/// words and pins that walk too, 32 samples in. Every word set of both walks that is not the
+/// identity must pass the production ramp predicate (`validate_svf_within` at `RAMP_PATH_NORM_TOLERANCE`): each is a convex mix of two
+/// admitted designs (#1337 D3). The first walk is checked whole on purpose, not only its 17
+/// rendered word sets: without the retarget the lane renders all 64. Across the 128 noise frames
+/// that carry both ramps, every output is finite and at most `OUTPUT_MIX_BOUND` times the input
+/// peak.
 #[cfg(feature = "test-support")]
 #[test]
 fn every_live_enable_or_family_ramp_is_contractive_and_bounded() {
     use parametric_eq::{TEST_ONLY_OUTPUT_MIX_BOUND, test_only_ramp_word_is_admissible};
     const FRAMES: usize = 128;
     const RETARGET_AT: usize = 17;
+    /// Where the retarget walk is pinned to the lane a second time, 32 samples into it.
+    const SECOND_PIN: usize = 49;
     let states: Vec<(bool, EqBandKind)> = core::iter::once((false, EqBandKind::Bell))
         .chain(support::FROZEN_KINDS.into_iter().map(|kind| (true, kind)))
         .collect();
@@ -655,32 +659,48 @@ fn every_live_enable_or_family_ramp_is_contractive_and_bounded() {
                                 .processor
                                 .apply_prepared_target(&target(to))
                                 .expect("live target");
-                            effect.processor.process(
-                                EffectProcessBlock::new(
-                                    &mut left[..RETARGET_AT],
-                                    &mut right[..RETARGET_AT],
-                                    None,
-                                    0,
-                                    &[],
-                                    128,
-                                )
-                                .expect("first segment"),
-                            );
-                            let pinned = snapshot(&effect);
-                            let cursor = first[RETARGET_AT];
-                            let lane_words: [f32; 6] = core::array::from_fn(|index| {
-                                f32::from_bits(word(&pinned.1, base + 2 + index))
-                            });
+                            let mut render =
+                                |effect: &mut effect_contract::PreparedEffect,
+                                 frames: core::ops::Range<usize>| {
+                                    let first_sample = frames.start as u64;
+                                    effect.processor.process(
+                                        EffectProcessBlock::new(
+                                            &mut left[frames.clone()],
+                                            &mut right[frames],
+                                            None,
+                                            first_sample,
+                                            &[],
+                                            128,
+                                        )
+                                        .expect("segment"),
+                                    );
+                                };
+                            let lane_words = |effect: &effect_contract::PreparedEffect| {
+                                let lane = snapshot(effect).1;
+                                core::array::from_fn::<f32, 6, _>(|index| {
+                                    f32::from_bits(word(&lane, base + 2 + index))
+                                })
+                            };
+                            render(&mut effect, 0..RETARGET_AT);
+                            let retarget_from = lane_words(&effect);
                             assert_eq!(
-                                lane_words.map(f32::to_bits),
-                                cursor.map(f32::to_bits),
+                                retarget_from.map(f32::to_bits),
+                                first[RETARGET_AT].map(f32::to_bits),
                                 "{point}: the in-test walk is the lane's walk"
                             );
                             effect
                                 .processor
                                 .apply_prepared_target(&target(next))
                                 .expect("mid-ramp retarget");
-                            for words in first.iter().chain(&walk(lane_words, design(next))) {
+                            let second = walk(retarget_from, design(next));
+                            render(&mut effect, RETARGET_AT..SECOND_PIN);
+                            assert_eq!(
+                                lane_words(&effect).map(f32::to_bits),
+                                second[SECOND_PIN - RETARGET_AT].map(f32::to_bits),
+                                "{point}: the in-test retarget walk is the lane's walk"
+                            );
+                            render(&mut effect, SECOND_PIN..FRAMES);
+                            for words in first.iter().chain(&second) {
                                 if words.map(f32::to_bits) != identity {
                                     assert!(
                                         test_only_ramp_word_is_admissible(EqSvfWords::from_array(
@@ -691,17 +711,6 @@ fn every_live_enable_or_family_ramp_is_contractive_and_bounded() {
                                     checked += 1;
                                 }
                             }
-                            effect.processor.process(
-                                EffectProcessBlock::new(
-                                    &mut left[RETARGET_AT..],
-                                    &mut right[RETARGET_AT..],
-                                    None,
-                                    RETARGET_AT as u64,
-                                    &[],
-                                    128,
-                                )
-                                .expect("second segment"),
-                            );
                             for (output, peak) in [&left, &right].into_iter().zip(peaks) {
                                 for sample in output {
                                     assert!(
