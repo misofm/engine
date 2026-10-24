@@ -176,14 +176,15 @@ pub use prepare::{
 pub use render_session::StartedRenderSession;
 pub use response::{
     PreparedResponsePreview, PreparedResponseQuery, RESPONSE_MAXIMUM_OVERRIDES,
-    RESPONSE_MAXIMUM_POINTS, ResponseChannels, ResponseCurves, ResponseMember, ResponseMemberKind,
-    ResponseMemberSection, ResponseParameterOverride, ResponsePreviewError, ResponsePreviewGrid,
-    ResponsePreviewLimits, ResponsePreviewOutput, ResponsePreviewRequest, ResponsePreviewTarget,
-    ResponseQuery, ResponseQueryError, ResponseRefusal, ResponseSnapshot,
-    ResponseSnapshotCollector, ResponseSnapshotMode, ResponseSnapshotOutput, ResponseSnapshotOwner,
+    RESPONSE_MAXIMUM_POINTS, ResolvedResponseTarget, ResponseAddressSection, ResponseChannels,
+    ResponseCurves, ResponseMember, ResponseMemberKind, ResponseMemberSection,
+    ResponseParameterOverride, ResponsePreviewError, ResponsePreviewGrid, ResponsePreviewLimits,
+    ResponsePreviewOutput, ResponsePreviewRequest, ResponsePreviewTarget, ResponseQuery,
+    ResponseQueryError, ResponseRefusal, ResponseSnapshot, ResponseSnapshotCollector,
+    ResponseSnapshotMode, ResponseSnapshotOutput, ResponseSnapshotOwner,
     ResponseSnapshotQueryError, ResponseSnapshotQuerySummary, TrackResponse,
     compose_track_response, generate_response_grid, input_filter_target, prepare_response_preview,
-    prepare_response_query, query_response_snapshot_into,
+    prepare_response_query, query_response_snapshot_into, resolve_response_target,
 };
 pub use route_controls::{
     RouteControlError, RouteControlProducer, RouteControlRecord, RouteControlResources,

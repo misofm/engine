@@ -768,22 +768,6 @@ fn every_reachable_refusal_is_typed_and_changes_nothing() {
             "response.reply_too_large",
         ),
         (
-            "the address target",
-            ResponseGetRequest {
-                target: ResponseTarget::Address(protocol::ControlAddress {
-                    owner_kind: protocol::ControlOwnerKind::Strip,
-                    owner_id: Some("eq0".to_owned()),
-                    section: protocol::ControlSection::Console,
-                    slot_id: Some("eq".to_owned()),
-                    control: None,
-                    lane: None,
-                }),
-                ..request(eq_target(), 64)
-            },
-            StatusCode::Unavailable,
-            "response.target.unavailable",
-        ),
-        (
             "the strip target",
             ResponseGetRequest {
                 target: ResponseTarget::Strip("eq0".to_owned()),
@@ -867,4 +851,124 @@ fn the_sessionless_frame_entry_answers_the_payload_of_a_session() {
     // The header differs only in the revision: the same request, a revision of 0.
     let decoded = decode(&reply);
     assert!(matches!(decoded, Reply::Result(ResponseResult::Curves(_))));
+}
+
+/// #1575, the C ABI parity row: after a live `SET_CONTROL` of one band gain of `eq0`'s console
+/// entry, the address of that entry is answered with the curves of the configuration request that
+/// gives the committed values with that gain, at the committed revision, with no plan rebuild, on
+/// every one of 100 requests.
+///
+/// Red if the host answers from a stale prepared copy instead of the committed model.
+#[test]
+fn an_address_follows_a_live_edit_and_keeps_nothing() {
+    let mut endpoint = Endpoint::new(1 << 20);
+    let (_, revision) = endpoint.state();
+    let edit = protocol::SessionEdit::SetControl {
+        expected_effect: None,
+        address: protocol::control_core::ControlAddress {
+            owner: protocol::control_core::Owner::Strip(
+                session::StableId::parse("eq0").expect("strip"),
+            ),
+            section: protocol::control_core::Section::Console(
+                session::StableId::parse("eq").expect("slot"),
+            ),
+            control: BAND_1_GAIN,
+            lane: protocol::control_core::Lane::Left,
+        },
+        value: 2.5,
+        ramp_samples: None,
+    };
+    // A transaction names the revision it was written against.
+    let mut bytes = vec![0_u8; 1 << 12];
+    let length = ProtocolCodec::default()
+        .encode_command_frame_into(
+            &TypedCommandFrame {
+                request_id: RequestId::new(endpoint.next_request).expect("request ID"),
+                expected_revision: ExpectedRevision::Exact(protocol::SessionRevision(revision)),
+                payload: CommandPayload::SessionTransactionApply(core::slice::from_ref(&edit)),
+            },
+            &mut bytes,
+        )
+        .expect("transaction frame");
+    bytes.truncate(length);
+    endpoint.next_request += 1;
+    let reply = endpoint.submit(&bytes);
+    let mut fields = [0_u16; 64];
+    let DecodedTypedResponseFrame::Success {
+        header,
+        payload: DecodedSuccessResponsePayload::SessionTransactionApplied(applied),
+    } = ProtocolCodec::default()
+        .decode_typed_response(&reply, &mut DecodeScratch::new(&mut fields))
+        .expect("transaction reply")
+    else {
+        panic!("the live edit is refused");
+    };
+    assert_eq!(
+        applied.edit_path,
+        protocol::EditPath::Live,
+        "no plan rebuild"
+    );
+    assert_eq!(header.revision.0, revision + 1);
+
+    // The committed values of `eq0`'s entry with the edited gain, as configuration overrides.
+    let model = session::parse_session_json(SESSION).expect("fixture");
+    let mut overrides = vec![row(RESPONSE_BYPASS_CONTROL, ParameterChannel::Both, 0.0)];
+    for item in &model.tracks[0].console[0].params {
+        let lane = match item.channel {
+            session::ParameterChannel::Left => ParameterChannel::Left,
+            session::ParameterChannel::Right => ParameterChannel::Right,
+            session::ParameterChannel::Both => ParameterChannel::Both,
+        };
+        let edited = item.parameter_id == BAND_1_GAIN && lane == ParameterChannel::Left;
+        overrides.push(row(
+            item.parameter_id,
+            lane,
+            if edited { 2.5 } else { item.value },
+        ));
+    }
+    let expected = endpoint.ask(&ResponseGetRequest {
+        overrides,
+        ..request(eq_target(), 96)
+    });
+    let address = request(
+        ResponseTarget::Address(protocol::ControlAddress {
+            owner_kind: protocol::ControlOwnerKind::Strip,
+            owner_id: Some("eq0".to_owned()),
+            section: protocol::ControlSection::Console,
+            slot_id: Some("eq".to_owned()),
+            control: None,
+            lane: None,
+        }),
+        96,
+    );
+    let expected = match expected {
+        Reply::Result(ResponseResult::Curves(expected)) => expected,
+        Reply::Refused { status, codes } => panic!("refused {status:?} {codes:?}"),
+        Reply::Result(_) => panic!("the configuration is answered"),
+    };
+    for _ in 0..100 {
+        let bytes = endpoint.encode(CommandPayload::ResponseGet(&address));
+        let reply = endpoint.submit(&bytes);
+        let mut fields = [0_u16; 1024];
+        let DecodedTypedResponseFrame::Success {
+            header,
+            payload: DecodedSuccessResponsePayload::ResponseResult(ResponseResult::Curves(curves)),
+        } = ProtocolCodec::default()
+            .decode_typed_response(&reply, &mut DecodeScratch::new(&mut fields))
+            .expect("a typed response")
+        else {
+            panic!("the address is answered");
+        };
+        assert_eq!(header.revision.0, revision + 1, "the committed revision");
+        assert_eq!(curves.enabled_left, expected.enabled_left);
+        assert_eq!(curves.enabled_right, expected.enabled_right);
+        for (actual, wanted) in [
+            (&curves.left_db, &expected.left_db),
+            (&curves.right_db, &expected.right_db),
+            (&curves.sections_left_db, &expected.sections_left_db),
+            (&curves.sections_right_db, &expected.sections_right_db),
+        ] {
+            assert_eq!(actual.as_deref().map(bits), wanted.as_deref().map(bits));
+        }
+    }
 }

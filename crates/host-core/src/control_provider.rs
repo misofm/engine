@@ -23,9 +23,10 @@ use protocol::{
 use session::{EffectIdentity, SessionModel, StripKind};
 
 use crate::response::{
-    ResponseChannels, ResponseParameterOverride, ResponsePreviewError, ResponsePreviewGrid,
-    ResponsePreviewLimits, ResponsePreviewTarget, ResponseQuery, ResponseQueryError,
-    ResponseRefusal, check_response_request, input_filter_target, prepare_response_query,
+    ResponseAddressSection, ResponseChannels, ResponseParameterOverride, ResponsePreviewError,
+    ResponsePreviewGrid, ResponsePreviewLimits, ResponsePreviewTarget, ResponseQuery,
+    ResponseQueryError, ResponseRefusal, check_response_request, contract_link_mode,
+    contract_quality, input_filter_target, prepare_response_query, resolve_response_target,
 };
 
 /// The counters the provider serves, in ascending ID order (#1351 D1): the two telemetry
@@ -632,20 +633,33 @@ fn contract_channel(lane: ParameterChannel) -> effect_contract::ParameterChannel
     }
 }
 
+/// What a `RESPONSE_GET` that passed [`response_preflight`] is computed for.
+#[derive(Clone, Copy)]
+enum CheckedTarget<'a> {
+    /// An explicit configuration, from the request alone.
+    Configuration(&'a ResponseConfiguration),
+    /// A control address of the session's own effect or input filters (#1575).
+    Address(&'a ControlAddress),
+}
+
 /// The checks every `RESPONSE_GET` meets first, whatever the endpoint: the target is a
-/// configuration (the address and strip targets are served by later slices), then the core's own
-/// checks in the core's order (rate, points, override count, axis, override values), so the
-/// refusal of a request that is wrong in several ways is the same on every host. It returns the
-/// configuration the request targets and the grid it names.
+/// configuration or an address (the strip target is served by a later slice, #1578), then the
+/// core's own checks in the core's order (rate, points, override count, axis, override values), so
+/// the refusal of a request that is wrong in several ways is the same on every host. It returns the
+/// target the request names and its grid.
 fn response_preflight(
     sample_rate_hz: u32,
     request: &ResponseGetRequest,
-) -> Result<(&ResponseConfiguration, ResponsePreviewGrid), ResponseProviderError> {
-    let ResponseTarget::Configuration(configuration) = &request.target else {
-        return Err(refuse(
-            StatusCode::Unavailable,
-            "response.target.unavailable",
-        ));
+) -> Result<(CheckedTarget<'_>, ResponsePreviewGrid), ResponseProviderError> {
+    let target = match &request.target {
+        ResponseTarget::Configuration(configuration) => CheckedTarget::Configuration(configuration),
+        ResponseTarget::Address(address) => CheckedTarget::Address(address),
+        ResponseTarget::Strip(_) => {
+            return Err(refuse(
+                StatusCode::Unavailable,
+                "response.target.unavailable",
+            ));
+        }
     };
     let points = request.points as usize;
     let grid = match request.grid {
@@ -667,11 +681,12 @@ fn response_preflight(
         request.overrides.iter().all(|row| row.value.is_finite()),
     )
     .map_err(query_refusal)?;
-    Ok((configuration, grid))
+    Ok((target, grid))
 }
 
 /// Serve one `RESPONSE_GET` for a session endpoint: the rate and quantum are the committed
-/// model's, and a request that names its own is refused.
+/// model's, and a request that names its own is refused. An address target resolves against the
+/// committed model.
 fn serve_response(
     maximum_reply_bytes: usize,
     model: &SessionModel,
@@ -682,7 +697,7 @@ fn serve_response(
         model.quantum_frames,
         maximum_reply_bytes,
         request,
-        true,
+        Some(model),
     )
 }
 
@@ -691,19 +706,20 @@ fn serve_response(
 /// several ways is the same for every endpoint. This function reads neither
 /// `request.sample_rate_hz` nor `request.quantum_frames` for its curves.
 ///
-/// `session` is true for an endpoint that has one rate and one quantum, the session's: a request
-/// that names its own is then refused after the preflight (`response.rate.session`). An endpoint
-/// that has no session (#1574) passes false and has resolved the rate and the quantum from the
-/// request itself.
+/// `session` is the committed model of an endpoint that has one rate and one quantum, the
+/// session's: a request that names its own is then refused after the preflight
+/// (`response.rate.session`), and an address target resolves against it. An endpoint that has no
+/// session (#1574) passes `None` and has resolved the rate and the quantum from the request itself;
+/// it has no address to resolve (`response.target.unavailable`).
 pub(crate) fn serve_response_at(
     sample_rate_hz: u32,
     quantum_frames: u32,
     maximum_reply_bytes: usize,
     request: &ResponseGetRequest,
-    session: bool,
+    session: Option<&SessionModel>,
 ) -> Result<ResponseResult, ResponseProviderError> {
-    let (configuration, grid) = response_preflight(sample_rate_hz, request)?;
-    if session && (request.sample_rate_hz.is_some() || request.quantum_frames.is_some()) {
+    let (target, grid) = response_preflight(sample_rate_hz, request)?;
+    if session.is_some() && (request.sample_rate_hz.is_some() || request.quantum_frames.is_some()) {
         return Err(refuse(StatusCode::InvalidField, "response.rate.session"));
     }
     serve_checked(
@@ -711,8 +727,9 @@ pub(crate) fn serve_response_at(
         quantum_frames,
         maximum_reply_bytes,
         request,
-        configuration,
+        target,
         grid,
+        session,
     )
 }
 
@@ -741,7 +758,8 @@ pub enum ResponseFrameError {
 /// [`ResponseFrameError::Malformed`] and writes nothing. Any message but `RESPONSE_GET` is
 /// answered with a non-OK `UNSUPPORTED_MESSAGE` frame, and a payload that does not decode with
 /// the status of its decode error. A `RESPONSE_GET` needs a configuration target
-/// (`response.target.unavailable` otherwise) and both `sample_rate_hz` and `quantum_frames`
+/// (`response.target.unavailable` otherwise: an address names a session effect, and there is no
+/// session) and both `sample_rate_hz` and `quantum_frames`
 /// (`response.rate` otherwise); it then runs `serve_response_at`, the function a session
 /// endpoint runs, so the reply payload equals a session endpoint's for the same request. The
 /// reply echoes the request ID with revision 0. `reply` is cleared, then holds one complete
@@ -784,7 +802,7 @@ pub fn serve_response_frame(request: &[u8], reply: &mut Vec<u8>) -> Result<(), R
     };
     let outcome = match (&query.target, query.sample_rate_hz, query.quantum_frames) {
         (ResponseTarget::Configuration(_), Some(rate), Some(quantum)) => {
-            serve_response_at(rate, quantum, SESSIONLESS_REPLY_BYTES, &query, false)
+            serve_response_at(rate, quantum, SESSIONLESS_REPLY_BYTES, &query, None)
         }
         (ResponseTarget::Configuration(_), _, _) => {
             Err(refuse(StatusCode::InvalidField, "response.rate"))
@@ -893,16 +911,17 @@ fn write_non_ok(
     Ok(())
 }
 
-/// Everything after the rate rules: the limits, the bypass rows, the preparation, the reply bound
-/// and the curves. The request has passed [`response_preflight`], which returned its
-/// configuration and grid.
+/// Everything after the rate rules: the limits, the target (a configuration's bypass rows, or an
+/// address resolved against the committed model), then [`serve_target`]. The request has passed
+/// [`response_preflight`], which returned its target and grid.
 fn serve_checked(
     sample_rate_hz: u32,
     quantum_frames: u32,
     maximum_reply_bytes: usize,
     request: &ResponseGetRequest,
-    configuration: &ResponseConfiguration,
+    target: CheckedTarget<'_>,
     grid: ResponsePreviewGrid,
+    session: Option<&SessionModel>,
 ) -> Result<ResponseResult, ResponseProviderError> {
     let defaults = ResponsePreviewLimits::default();
     let maximum_prepared_bytes = request
@@ -924,6 +943,48 @@ fn serve_checked(
         maximum_automation_spans_per_block: request
             .maximum_automation_spans
             .unwrap_or(defaults.maximum_automation_spans_per_block),
+    };
+    let serve = |target: ResponsePreviewTarget<'_>| {
+        serve_target(
+            sample_rate_hz,
+            quantum_frames,
+            maximum_reply_bytes,
+            request,
+            limits,
+            target,
+            grid,
+        )
+    };
+    let configuration = match target {
+        CheckedTarget::Configuration(configuration) => configuration,
+        CheckedTarget::Address(address) => {
+            let Some(model) = session else {
+                return Err(refuse(
+                    StatusCode::Unavailable,
+                    "response.target.unavailable",
+                ));
+            };
+            let (strip, section) = response_address(address).map_err(query_refusal)?;
+            // An address override names a control of the addressed section by its row ID: the
+            // bypass, the link-mode row, a parameter, or a cutoff; the resolver checks each as a
+            // control write.
+            let mut rows = Vec::new();
+            rows.try_reserve_exact(request.overrides.len())
+                .map_err(|_| refuse(StatusCode::Internal, "response.internal"))?;
+            rows.extend(
+                request
+                    .overrides
+                    .iter()
+                    .map(|row| ResponseParameterOverride {
+                        parameter_id: row.control,
+                        channel: contract_channel(row.lane),
+                        value: row.value,
+                    }),
+            );
+            let resolved = resolve_response_target(model, strip, section, &rows, sample_rate_hz)
+                .map_err(query_refusal)?;
+            return serve(resolved.target());
+        }
     };
     // The bypass (control 0) is the effect-wide switch; every other row is a parameter row.
     let mut bypass = None;
@@ -969,21 +1030,49 @@ fn serve_checked(
         } => ResponsePreviewTarget::Effect {
             effect_id: effect,
             overrides: &rows,
-            quality: match quality {
-                session::EffectQuality::Draft => effect_contract::EffectQuality::Draft,
-                session::EffectQuality::Normal => effect_contract::EffectQuality::Normal,
-                session::EffectQuality::High => effect_contract::EffectQuality::High,
-            },
+            quality: contract_quality(*quality),
             bypass: bypass.unwrap_or(false),
-            link_mode: match link_mode {
-                session::LinkMode::DualMono => effect_contract::LinkMode::DualMono,
-                session::LinkMode::Maximum => effect_contract::LinkMode::Maximum,
-                session::LinkMode::Average => effect_contract::LinkMode::Average,
-            },
+            link_mode: contract_link_mode(*link_mode),
         },
         ResponseConfiguration::InputFilters => input_filter_target(&rows)
             .map_err(|error| query_refusal(ResponseQueryError::Preview(error)))?,
     };
+    serve(target)
+}
+
+/// The strip and the section a response address names (#1575 D1): the owner is a strip and the
+/// section its builtins, a console slot or an insert, with `control` and `lane` absent; anything
+/// else is [`ResponseQueryError::Address`].
+fn response_address(
+    address: &ControlAddress,
+) -> Result<(&str, ResponseAddressSection<'_>), ResponseQueryError> {
+    let (ControlOwnerKind::Strip, Some(strip), None, None) = (
+        address.owner_kind,
+        address.owner_id.as_deref(),
+        address.control,
+        address.lane,
+    ) else {
+        return Err(ResponseQueryError::Address);
+    };
+    let section = match (address.section, address.slot_id.as_deref()) {
+        (ControlSection::Builtins, None) => ResponseAddressSection::Builtins,
+        (ControlSection::Console, Some(slot)) => ResponseAddressSection::Console(slot),
+        (ControlSection::Inserts, Some(insert)) => ResponseAddressSection::Inserts(insert),
+        _ => return Err(ResponseQueryError::Address),
+    };
+    Ok((strip, section))
+}
+
+/// The part every target shares: the preparation, the reply bound and the curves.
+fn serve_target(
+    sample_rate_hz: u32,
+    quantum_frames: u32,
+    maximum_reply_bytes: usize,
+    request: &ResponseGetRequest,
+    limits: ResponsePreviewLimits,
+    target: ResponsePreviewTarget<'_>,
+    grid: ResponsePreviewGrid,
+) -> Result<ResponseResult, ResponseProviderError> {
     let channels = ResponseChannels::from_raw(request.channels as u8)
         .ok_or_else(|| refuse(StatusCode::Internal, "response.internal"))?;
     #[cfg(any(test, feature = "test-support"))]
@@ -2633,22 +2722,34 @@ mod tests {
         other_rate.sample_rate_hz = Some(RATE);
         other_rate.quantum_frames = Some(64);
         same(
-            serve_response_at(SESSION_RATE, SESSION_QUANTUM, BOUND, &other_rate, false)
+            serve_response_at(SESSION_RATE, SESSION_QUANTUM, BOUND, &other_rate, None)
                 .expect("the core serves"),
         );
 
         // A session endpoint refuses the rates the request names, after the preflight and before
         // anything else: one function serves both endpoints, so the order is the same.
-        let named = serve_response_at(SESSION_RATE, SESSION_QUANTUM, BOUND, &other_rate, true)
-            .expect_err("a session has one rate");
+        let named = serve_response_at(
+            SESSION_RATE,
+            SESSION_QUANTUM,
+            BOUND,
+            &other_rate,
+            Some(&nine_track()),
+        )
+        .expect_err("a session has one rate");
         assert_eq!(
             (named.status, named.code),
             (StatusCode::InvalidField, "response.rate.session")
         );
         let mut named_and_short = other_rate.clone();
         named_and_short.points = 1;
-        let named = serve_response_at(SESSION_RATE, SESSION_QUANTUM, BOUND, &named_and_short, true)
-            .expect_err("refused");
+        let named = serve_response_at(
+            SESSION_RATE,
+            SESSION_QUANTUM,
+            BOUND,
+            &named_and_short,
+            Some(&nine_track()),
+        )
+        .expect_err("refused");
         assert_eq!(
             (named.status, named.code),
             (StatusCode::InvalidField, "response.points"),
@@ -2663,7 +2764,7 @@ mod tests {
 
         // The core's refusals are the session's, in the session's codes.
         let refusal = |request: &ResponseGetRequest| {
-            let error = serve_response_at(SESSION_RATE, SESSION_QUANTUM, BOUND, request, false)
+            let error = serve_response_at(SESSION_RATE, SESSION_QUANTUM, BOUND, request, None)
                 .expect_err("refused");
             let session = serve_response(BOUND, &model, request).expect_err("refused");
             assert_eq!((error.status, error.code), (session.status, session.code));
@@ -2687,6 +2788,434 @@ mod tests {
             refusal(&nan_axis),
             (StatusCode::InvalidField, "response.grid")
         );
+    }
+
+    /// #1575: a nine-track session with asymmetric input filters on `eq0`, a parametric EQ insert
+    /// `ins` with its own values, a compressor insert `comp` and a `cid` insert `pkg` on `eq1`, and
+    /// `eq2`'s own console entry of the session's EQ slot `eq`, and `eq3`'s bypassed entry.
+    fn address_session() -> session::SessionModel {
+        let mut model = nine_track();
+        let builtins = &mut model.tracks[0].builtins;
+        (builtins.left.hpf_hz, builtins.left.lpf_hz) = (40.0, 16_000.0);
+        (builtins.right.hpf_hz, builtins.right.lpf_hz) = (90.0, 11_000.0);
+        let param = |parameter_id: u32, channel, unit, value: f32| session::EffectParam {
+            parameter_id,
+            channel,
+            unit,
+            value,
+        };
+        let (left, right) = (
+            session::ParameterChannel::Left,
+            session::ParameterChannel::Right,
+        );
+        let mut entry = model.tracks[0].console[0].params.clone();
+        for item in &mut entry {
+            if item.parameter_id == 4 {
+                item.value = if item.channel == left { 3.5 } else { -7.25 };
+            }
+        }
+        model.tracks[2].console[0].params = entry;
+        // `eq3` runs eq0's values with its entry bypassed.
+        model.tracks[3].console[0] = session::ConsoleEntry {
+            bypass: true,
+            ..model.tracks[0].console[0].clone()
+        };
+        let mut eq = model.tracks[0].console[0].params.clone();
+        eq.extend([
+            param(
+                17,
+                session::ParameterChannel::Both,
+                session::ParameterUnit::Linear,
+                1.0,
+            ),
+            param(19, left, session::ParameterUnit::Hz, 5_000.0),
+            param(19, right, session::ParameterUnit::Hz, 700.0),
+            param(20, left, session::ParameterUnit::Db, -4.0),
+            param(20, right, session::ParameterUnit::Db, 8.0),
+        ]);
+        let effect = |id: &str, identity, params| session::Effect {
+            id: session::StableId::parse(id).expect("id"),
+            identity,
+            quality: session::EffectQuality::Normal,
+            bypass: false,
+            link_mode: session::LinkMode::DualMono,
+            params,
+            sidechain: session::SidechainDeclaration::None,
+        };
+        let native = |effect_id: &str| EffectIdentity::Native {
+            effect_id: session::StableId::parse(effect_id).expect("effect"),
+        };
+        model.tracks[1].inserts.effects = vec![
+            effect("ins", native("miso.parametric-eq"), eq),
+            effect("comp", native("miso.compressor"), Vec::new()),
+            effect(
+                "pkg",
+                EffectIdentity::ThirdPartyCid {
+                    cid: "bafkreigh2akiscaildc".to_owned(),
+                },
+                Vec::new(),
+            ),
+        ];
+        model
+    }
+
+    fn wire_lane(lane: session::ParameterChannel) -> ParameterChannel {
+        match lane {
+            session::ParameterChannel::Left => ParameterChannel::Left,
+            session::ParameterChannel::Right => ParameterChannel::Right,
+            session::ParameterChannel::Both => ParameterChannel::Both,
+        }
+    }
+
+    fn strip_address(strip: &str, section: ControlSection, slot: Option<&str>) -> ControlAddress {
+        ControlAddress {
+            owner_kind: ControlOwnerKind::Strip,
+            owner_id: Some(strip.to_owned()),
+            section,
+            slot_id: slot.map(str::to_owned),
+            control: None,
+            lane: None,
+        }
+    }
+
+    fn address_request(
+        address: ControlAddress,
+        overrides: Vec<ResponseOverride>,
+    ) -> ResponseGetRequest {
+        ResponseGetRequest {
+            target: ResponseTarget::Address(address),
+            sections: true,
+            overrides,
+            configuration_id: Some(0x1575),
+            ..response_request()
+        }
+    }
+
+    /// The configuration request that names `effect` (an EQ) or the input filters with `rows` as
+    /// its overrides.
+    fn configuration_request(effect: bool, overrides: Vec<ResponseOverride>) -> ResponseGetRequest {
+        let mut request = response_request();
+        if !effect {
+            request.target = ResponseTarget::Configuration(ResponseConfiguration::InputFilters);
+        }
+        request.sections = true;
+        request.overrides = overrides;
+        request.configuration_id = Some(0x1575);
+        request
+    }
+
+    /// The committed values of an effect entry as override rows, read from the model as written:
+    /// every declared parameter row, and the bypass.
+    fn entry_rows(params: &[session::EffectParam], bypass: bool) -> Vec<ResponseOverride> {
+        let mut rows = vec![ResponseOverride {
+            control: protocol::RESPONSE_BYPASS_CONTROL,
+            lane: ParameterChannel::Both,
+            value: f32::from(u8::from(bypass)),
+        }];
+        rows.extend(params.iter().map(|item| ResponseOverride {
+            control: item.parameter_id,
+            lane: wire_lane(item.channel),
+            value: item.value,
+        }));
+        rows
+    }
+
+    fn cutoff_rows(builtins: &session::DualMonoBuiltins) -> Vec<ResponseOverride> {
+        let row = |control, lane, value| ResponseOverride {
+            control,
+            lane,
+            value,
+        };
+        vec![
+            row(3, ParameterChannel::Left, builtins.left.hpf_hz),
+            row(4, ParameterChannel::Left, builtins.left.lpf_hz),
+            row(3, ParameterChannel::Right, builtins.right.hpf_hz),
+            row(4, ParameterChannel::Right, builtins.right.lpf_hz),
+        ]
+    }
+
+    /// Every field of a curve reply, floats by their bits.
+    fn reply_bits(result: &ResponseResult) -> Vec<Vec<u32>> {
+        let ResponseResult::Curves(curves) = result else {
+            panic!("expected curves");
+        };
+        let bits = |values: &[f32]| values.iter().map(|value| value.to_bits()).collect();
+        let side = |values: &Option<Vec<f32>>| values.as_deref().map_or_else(Vec::new, bits);
+        vec![
+            vec![
+                curves.sample_rate_hz,
+                curves.configuration_id as u32,
+                curves.floor_db.to_bits(),
+                u32::from(curves.bypass),
+                curves.section_count,
+                curves.enabled_left,
+                curves.enabled_right,
+                curves.retained_bytes as u32,
+            ],
+            bits(&curves.frequencies_hz),
+            side(&curves.left_db),
+            side(&curves.right_db),
+            side(&curves.sections_left_db),
+            side(&curves.sections_right_db),
+        ]
+    }
+
+    fn served(model: &session::SessionModel, request: &ResponseGetRequest) -> Vec<Vec<u32>> {
+        reply_bits(&serve_response(1 << 20, model, request).expect("served"))
+    }
+
+    /// #1575 gate 1: the address of an insert, of a strip's console entry and of a strip's
+    /// builtins is answered with the curves and masks of the configuration request that gives the
+    /// same effect and every committed value as overrides, bit for bit.
+    ///
+    /// Red if an address resolves other values than the ones a rebuild prepares: the defaults,
+    /// another strip's entry of the same slot, or the builtin defaults instead of the strip's
+    /// cutoffs.
+    #[test]
+    fn an_address_answers_the_curves_of_its_committed_values() {
+        let model = address_session();
+        let insert = &model.tracks[1].inserts.effects[0];
+        let entry = &model.tracks[2].console[0];
+        for (name, address, expected) in [
+            (
+                "insert",
+                strip_address("eq1", ControlSection::Inserts, Some("ins")),
+                configuration_request(true, entry_rows(&insert.params, insert.bypass)),
+            ),
+            (
+                "console entry",
+                strip_address("eq2", ControlSection::Console, Some("eq")),
+                configuration_request(true, entry_rows(&entry.params, entry.bypass)),
+            ),
+            (
+                "builtins",
+                strip_address("eq0", ControlSection::Builtins, None),
+                configuration_request(false, cutoff_rows(&model.tracks[0].builtins)),
+            ),
+        ] {
+            let reply = served(&model, &address_request(address, Vec::new()));
+            assert_eq!(reply, served(&model, &expected), "{name}");
+            assert_ne!(
+                reply,
+                served(
+                    &model,
+                    &configuration_request(name != "builtins", Vec::new())
+                ),
+                "{name}: the committed values are not the defaults"
+            );
+        }
+    }
+
+    /// #1575 gate 3: an override gives the curve of the committed values with that value, and
+    /// neither the model nor anything else changes; `both` on a per-lane parameter is its `left`
+    /// and its `right` row; each override is checked as a control write by the one validator.
+    ///
+    /// Red if an override bypasses `controls::check` (a gain outside its range is answered), is
+    /// looked up anywhere but the section's control rows, replaces the committed values instead of
+    /// one, or writes the model.
+    #[test]
+    fn an_address_override_is_a_checked_what_if_over_the_committed_values() {
+        let model = address_session();
+        let before = model.clone();
+        let insert = &model.tracks[1].inserts.effects[0];
+        let row = |control, lane, value| ResponseOverride {
+            control,
+            lane,
+            value,
+        };
+        let ins = || strip_address("eq1", ControlSection::Inserts, Some("ins"));
+        let mut committed = entry_rows(&insert.params, insert.bypass);
+        committed.retain(|item| !(item.control == 20 && item.lane == ParameterChannel::Left));
+        committed.push(row(20, ParameterChannel::Left, 11.0));
+        assert_eq!(
+            served(
+                &model,
+                &address_request(ins(), vec![row(20, ParameterChannel::Left, 11.0)])
+            ),
+            served(&model, &configuration_request(true, committed)),
+            "one band gain over the committed values"
+        );
+        assert_eq!(
+            served(
+                &model,
+                &address_request(ins(), vec![row(20, ParameterChannel::Both, 2.5)])
+            ),
+            served(
+                &model,
+                &address_request(
+                    ins(),
+                    vec![
+                        row(20, ParameterChannel::Left, 2.5),
+                        row(20, ParameterChannel::Right, 2.5),
+                    ]
+                )
+            ),
+            "`both` is `left` and `right`"
+        );
+        let bypassed = &model.tracks[3].console[0];
+        let eq3 = || strip_address("eq3", ControlSection::Console, Some("eq"));
+        assert_eq!(
+            served(&model, &address_request(eq3(), Vec::new())),
+            served(
+                &model,
+                &configuration_request(true, entry_rows(&bypassed.params, true))
+            ),
+            "the committed bypass"
+        );
+        assert_eq!(
+            served(
+                &model,
+                &address_request(eq3(), vec![row(0, ParameterChannel::Both, 0.0)])
+            ),
+            served(
+                &model,
+                &configuration_request(true, entry_rows(&bypassed.params, false))
+            ),
+            "a bypass override over the committed bypass"
+        );
+        let mut cutoffs = cutoff_rows(&model.tracks[0].builtins);
+        cutoffs[0].value = 200.0;
+        assert_eq!(
+            served(
+                &model,
+                &address_request(
+                    strip_address("eq0", ControlSection::Builtins, None),
+                    vec![row(3, ParameterChannel::Left, 200.0)]
+                )
+            ),
+            served(&model, &configuration_request(false, cutoffs)),
+            "one cutoff over the committed cutoffs"
+        );
+        for (name, address, overrides, code) in [
+            (
+                "a lane on the shared bypass",
+                ins(),
+                vec![row(0, ParameterChannel::Left, 1.0)],
+                "control.lane",
+            ),
+            (
+                "a gain outside its range",
+                ins(),
+                vec![row(20, ParameterChannel::Left, 1_000.0)],
+                "control.domain",
+            ),
+            (
+                "no such parameter",
+                ins(),
+                vec![row(9_999, ParameterChannel::Both, 1.0)],
+                "control.address.unknown",
+            ),
+            (
+                "a link mode the compressor does not have",
+                strip_address("eq1", ControlSection::Inserts, Some("comp")),
+                vec![row(
+                    controls::LINK_MODE_CONTROL,
+                    ParameterChannel::Both,
+                    9.0,
+                )],
+                "control.domain",
+            ),
+            (
+                "a link-mode row on the EQ, which has one link mode",
+                ins(),
+                vec![row(
+                    controls::LINK_MODE_CONTROL,
+                    ParameterChannel::Both,
+                    1.0,
+                )],
+                "control.address.unknown",
+            ),
+            (
+                "a builtin control other than the cutoffs",
+                strip_address("eq0", ControlSection::Builtins, None),
+                vec![row(5, ParameterChannel::Left, 1.0)],
+                "response.override.control",
+            ),
+            (
+                "`both` beside a lane",
+                ins(),
+                vec![
+                    row(20, ParameterChannel::Left, 1.0),
+                    row(20, ParameterChannel::Both, 1.0),
+                ],
+                "response.override.duplicate",
+            ),
+        ] {
+            let error = serve_response(1 << 20, &model, &address_request(address, overrides))
+                .expect_err(name);
+            assert_eq!(
+                (error.status, error.code),
+                (StatusCode::InvalidField, code),
+                "{name}"
+            );
+        }
+        assert_eq!(model, before, "a response read writes nothing");
+    }
+
+    /// #1575 gate 4: an address that names no response owner is refused with its own status and
+    /// code, and one that names one is never answered as another.
+    ///
+    /// Red if an unknown strip, slot or insert is answered or misclassified, a route owner or the
+    /// own section is resolved, a compressor is answered, or a `cid` insert reaches preparation.
+    #[test]
+    fn an_address_that_names_no_response_owner_is_refused() {
+        let model = address_session();
+        let route = ControlAddress {
+            owner_kind: ControlOwnerKind::Route,
+            owner_id: Some("eq0-main".to_owned()),
+            section: ControlSection::Own,
+            slot_id: None,
+            control: None,
+            lane: None,
+        };
+        for (name, address, status, code) in [
+            (
+                "an unknown strip",
+                strip_address("nobody", ControlSection::Builtins, None),
+                StatusCode::NotFound,
+                "control.address.unknown",
+            ),
+            (
+                "an unknown console slot",
+                strip_address("eq0", ControlSection::Console, Some("nope")),
+                StatusCode::NotFound,
+                "control.address.unknown",
+            ),
+            (
+                "an insert the strip does not have",
+                strip_address("eq0", ControlSection::Inserts, Some("ins")),
+                StatusCode::NotFound,
+                "control.address.unknown",
+            ),
+            (
+                "a route owner",
+                route,
+                StatusCode::InvalidField,
+                "response.address",
+            ),
+            (
+                "the own section",
+                strip_address("eq0", ControlSection::Own, None),
+                StatusCode::InvalidField,
+                "response.address",
+            ),
+            (
+                "a compressor insert",
+                strip_address("eq1", ControlSection::Inserts, Some("comp")),
+                StatusCode::Unavailable,
+                "response.effect.unsupported",
+            ),
+            (
+                "a cid insert",
+                strip_address("eq1", ControlSection::Inserts, Some("pkg")),
+                StatusCode::Unavailable,
+                "effect.third_party.unavailable_at_launch",
+            ),
+        ] {
+            let error = serve_response(1 << 20, &model, &address_request(address, Vec::new()))
+                .expect_err(name);
+            assert_eq!((error.status, error.code), (status, code), "{name}");
+        }
     }
 
     fn nine_track() -> session::SessionModel {

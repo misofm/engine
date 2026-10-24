@@ -18,6 +18,7 @@ use engine::realtime::{
     ResponseSnapshotOwnerInfo, ResponseSnapshotSection, ResponseSnapshotSink,
 };
 use math::{exp, log};
+use session::{EffectIdentity, SessionModel, StableId};
 
 /// The explicit target supplied by a stopped preview caller.
 #[derive(Clone, Copy, Debug)]
@@ -28,6 +29,21 @@ pub enum ResponsePreviewTarget<'a> {
         effect_id: &'a str,
         /// Numeric parameter/channel overrides over descriptor defaults.
         overrides: &'a [ResponseParameterOverride],
+        /// Native preparation quality.
+        quality: EffectQuality,
+        /// Effect-wide bypass.
+        bypass: bool,
+        /// Native channel-link mode.
+        link_mode: LinkMode,
+    },
+    /// One native effect owner with every value resolved (#1575 D4): a session effect's
+    /// committed values, overrides applied, from [`resolve_response_target`].
+    ResolvedEffect {
+        /// Generated native effect identity.
+        effect_id: &'a str,
+        /// Exactly one value per descriptor parameter and lane, in [`default_initial_values`]
+        /// order ([`ResponsePreviewError::InvalidParameter`] otherwise).
+        values: &'a [InitialParameterValue],
         /// Native preparation quality.
         quality: EffectQuality,
         /// Effect-wide bypass.
@@ -57,6 +73,360 @@ pub struct ResponseParameterOverride {
     pub channel: ParameterChannel,
     /// The descriptor-domain value, before owner validation.
     pub value: f32,
+}
+
+/// The section of a strip that a response address names (#1575 D1): the input filters of the
+/// builtins section, one console slot's entry or one insert. Any other owner or section names no
+/// response owner; a host refuses it as [`ResponseQueryError::Address`] before it resolves.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ResponseAddressSection<'a> {
+    /// The strip's builtins section: its input high-pass and low-pass filters.
+    Builtins,
+    /// The strip's entry of the console slot with this ID.
+    Console(&'a str),
+    /// The strip's insert with this ID.
+    Inserts(&'a str),
+}
+
+/// A response target resolved from the committed model (#1575 D2): the values a plan rebuild
+/// prepares for the addressed owner, with the request's overrides applied. It owns what it holds;
+/// [`Self::target`] borrows it as the target a query prepares, and nothing outlives the request.
+#[derive(Clone, Debug, PartialEq)]
+pub enum ResolvedResponseTarget {
+    /// One native effect: a console slot's entry or an insert.
+    Effect {
+        /// Generated native effect identity.
+        effect_id: String,
+        /// One value per descriptor parameter and lane, in [`default_initial_values`] order.
+        values: Vec<InitialParameterValue>,
+        /// Native preparation quality.
+        quality: EffectQuality,
+        /// Effect-wide bypass.
+        bypass: bool,
+        /// Native channel-link mode.
+        link_mode: LinkMode,
+    },
+    /// The strip's input filters: its four cutoffs.
+    InputFilters {
+        /// Left high-pass cutoff, in Hz.
+        left_hpf_hz: f32,
+        /// Left low-pass cutoff, in Hz.
+        left_lpf_hz: f32,
+        /// Right high-pass cutoff, in Hz.
+        right_hpf_hz: f32,
+        /// Right low-pass cutoff, in Hz.
+        right_lpf_hz: f32,
+    },
+}
+
+impl ResolvedResponseTarget {
+    /// The target a response query prepares for this resolution.
+    #[must_use]
+    pub fn target(&self) -> ResponsePreviewTarget<'_> {
+        match self {
+            Self::Effect {
+                effect_id,
+                values,
+                quality,
+                bypass,
+                link_mode,
+            } => ResponsePreviewTarget::ResolvedEffect {
+                effect_id,
+                values,
+                quality: *quality,
+                bypass: *bypass,
+                link_mode: *link_mode,
+            },
+            Self::InputFilters {
+                left_hpf_hz,
+                left_lpf_hz,
+                right_hpf_hz,
+                right_lpf_hz,
+            } => ResponsePreviewTarget::InputFilters {
+                left_hpf_hz: *left_hpf_hz,
+                left_lpf_hz: *left_lpf_hz,
+                right_hpf_hz: *right_hpf_hz,
+                right_lpf_hz: *right_lpf_hz,
+            },
+        }
+    }
+}
+
+/// The builtin row IDs of the input filters (`BUILTIN_PARAMETER_DESCRIPTORS`): `hpf_hz` and
+/// `lpf_hz`, the only builtin controls a response override may name.
+const INPUT_FILTER_CONTROLS: [u32; 2] = [3, 4];
+
+/// Resolve the response owner a control address names against the committed model (#1575 D1-D3).
+///
+/// `strip` is a strip's stable ID (a track's or a submix's) and `section` the part of it. Each
+/// override names a control of that section by its row ID (`parameter_id`): `0` is an effect's
+/// bypass, [`controls::LINK_MODE_CONTROL`] its link-mode row, any other ID a parameter, and in the
+/// builtins section only `hpf_hz` (3) and `lpf_hz` (4). Every override is checked as a control
+/// write before anything is resolved or prepared: the row must be one of the rows the control list
+/// gives for that section (`control.address.unknown` otherwise), and the one validator
+/// [`controls::check`] must accept the value on that lane (its own code otherwise). A (control,
+/// lane) pair given twice, or `both` beside a lane, is `response.override.duplicate`. Nothing is
+/// written.
+///
+/// The values are the committed model's: a builtins section reads its four cutoffs with
+/// [`controls::get`]; a console slot or an insert resolves its entry's parameters with
+/// [`effect_compiler::resolve_initial_values`], the function a rebuild prepares them with, and takes
+/// its quality and link mode from the slot or the insert and its bypass from the entry. The
+/// overrides then replace the values they name.
+///
+/// # Errors
+///
+/// [`ResponseQueryError::AddressUnknown`] for an unknown strip, slot or insert;
+/// [`ResponseQueryError::ThirdParty`] for a `cid` effect; [`ResponseQueryError::OverrideControl`]
+/// for an override the control validator refuses; [`ResponsePreviewError::InvalidParameter`] for a
+/// builtins override of another control than the two cutoffs and
+/// [`ResponsePreviewError::DuplicateParameter`] for a duplicate (both as
+/// [`ResponseQueryError::Preview`]); [`ResponsePreviewError::UnknownEffect`] for a native effect
+/// the registry does not hold; [`ResponseQueryError::Committed`] if the committed values do not
+/// resolve.
+pub fn resolve_response_target(
+    model: &SessionModel,
+    strip: &str,
+    section: ResponseAddressSection<'_>,
+    overrides: &[ResponseParameterOverride],
+    sample_rate_hz: u32,
+) -> Result<ResolvedResponseTarget, ResponseQueryError> {
+    let unknown = ResponseQueryError::AddressUnknown;
+    let strip_id = StableId::parse(strip).ok_or(unknown)?;
+    let strip_index = controls::strip_index(model, &strip_id).ok_or(unknown)?;
+    let strip_ref = model.strips().nth(strip_index).ok_or(unknown)?;
+    // The effect the section names, as the plan lowering gives it: a console entry with its slot's
+    // identity, quality and link mode, or an insert.
+    let lowered = matches!(section, ResponseAddressSection::Console(_))
+        .then(|| model.lower_strip(&strip_ref));
+    let effect = match section {
+        ResponseAddressSection::Builtins => None,
+        ResponseAddressSection::Console(slot) => Some(
+            lowered
+                .iter()
+                .flat_map(|racks| racks.pre_insert.iter().chain(&racks.post_insert))
+                .find(|candidate| candidate.id.as_str() == slot)
+                .ok_or(unknown)?,
+        ),
+        ResponseAddressSection::Inserts(insert) => Some(
+            strip_ref
+                .inserts
+                .effects
+                .iter()
+                .find(|candidate| candidate.id.as_str() == insert)
+                .ok_or(unknown)?,
+        ),
+    }
+    .map(|effect| {
+        (
+            &effect.id,
+            &effect.identity,
+            effect.quality,
+            effect.link_mode,
+            effect.bypass,
+            &effect.params[..],
+        )
+    });
+    let effect_id = match effect {
+        Some((_, EffectIdentity::ThirdPartyCid { .. }, ..)) => {
+            return Err(ResponseQueryError::ThirdParty);
+        }
+        Some((_, EffectIdentity::Native { effect_id }, ..)) => Some(effect_id.as_str()),
+        None => None,
+    };
+    let owner = controls::Owner::Strip(strip_id);
+    let address_section = match effect {
+        None => controls::Section::Builtins,
+        Some((id, ..)) => match section {
+            ResponseAddressSection::Console(_) => controls::Section::Console(id.clone()),
+            _ => controls::Section::Inserts(id.clone()),
+        },
+    };
+    check_response_overrides(
+        model,
+        strip_index,
+        &address_section,
+        effect.is_none(),
+        overrides,
+        sample_rate_hz,
+    )?;
+    let (Some(effect_id), Some((_, _, quality, link_mode, bypass, params))) = (effect_id, effect)
+    else {
+        // The builtins section: the committed cutoffs, then the overrides by the lane rule.
+        let committed = |control: u32, lane: session::ParameterChannel| {
+            controls::get(
+                model,
+                &controls::MonitorOverlay::default(),
+                &controls::ControlAddress {
+                    owner: owner.clone(),
+                    section: controls::Section::Builtins,
+                    control,
+                    lane,
+                },
+                sample_rate_hz,
+            )
+            .map_err(ResponseQueryError::OverrideControl)
+        };
+        let (hpf, lpf) = (INPUT_FILTER_CONTROLS[0], INPUT_FILTER_CONTROLS[1]);
+        let left = session::ParameterChannel::Left;
+        let right = session::ParameterChannel::Right;
+        // [left hpf, left lpf, right hpf, right lpf]
+        let mut cutoffs = [
+            committed(hpf, left)?,
+            committed(lpf, left)?,
+            committed(hpf, right)?,
+            committed(lpf, right)?,
+        ];
+        for row in overrides {
+            let offset = usize::from(row.parameter_id == lpf);
+            if matches!(row.channel, ParameterChannel::Left | ParameterChannel::Both) {
+                cutoffs[offset] = row.value;
+            }
+            if matches!(
+                row.channel,
+                ParameterChannel::Right | ParameterChannel::Both
+            ) {
+                cutoffs[2 + offset] = row.value;
+            }
+        }
+        return Ok(ResolvedResponseTarget::InputFilters {
+            left_hpf_hz: cutoffs[0],
+            left_lpf_hz: cutoffs[1],
+            right_hpf_hz: cutoffs[2],
+            right_lpf_hz: cutoffs[3],
+        });
+    };
+    let registry = launch_native_effect_registry()
+        .map_err(|_| ResponseQueryError::Preview(ResponsePreviewError::UnknownEffect))?;
+    let descriptor = registry
+        .get_ascii(effect_id)
+        .ok_or(ResponseQueryError::Preview(
+            ResponsePreviewError::UnknownEffect,
+        ))?
+        .descriptor();
+    let mut values = effect_compiler::resolve_initial_values(descriptor, params)
+        .map_err(ResponseQueryError::Committed)?;
+    let mut bypass = bypass;
+    let mut link_mode = contract_link_mode(link_mode);
+    for row in overrides {
+        // The validator has accepted every value: the bypass is exactly 0 or 1 and the link mode
+        // one of the effect's codes.
+        match row.parameter_id {
+            controls::BYPASS_CONTROL => bypass = row.value.to_bits() == 1.0_f32.to_bits(),
+            controls::LINK_MODE_CONTROL => {
+                link_mode = [LinkMode::DualMono, LinkMode::Maximum, LinkMode::Average]
+                    .into_iter()
+                    .find(|mode| *mode as u32 as f32 == row.value)
+                    .ok_or(ResponseQueryError::OverrideControl(
+                        controls::ControlError::Domain,
+                    ))?;
+            }
+            // A duplicate was refused by `check_response_overrides`, which saw every override;
+            // `apply_overrides` sees one row at a time and cannot.
+            _ => apply_overrides(
+                descriptor,
+                &mut values,
+                core::slice::from_ref(&ResponseParameterOverride {
+                    value: effect_contract::normalize_zero(row.value),
+                    ..*row
+                }),
+            )
+            .map_err(ResponseQueryError::Preview)?,
+        }
+    }
+    Ok(ResolvedResponseTarget::Effect {
+        effect_id: effect_id.to_owned(),
+        values,
+        quality: contract_quality(quality),
+        bypass,
+        link_mode,
+    })
+}
+
+/// #1575 D3: every override is a control write the validator accepts, on a row of the addressed
+/// section, given once; checked before anything is resolved or prepared, and writing nothing.
+fn check_response_overrides(
+    model: &SessionModel,
+    strip_index: usize,
+    section: &controls::Section,
+    builtins: bool,
+    overrides: &[ResponseParameterOverride],
+    sample_rate_hz: u32,
+) -> Result<(), ResponseQueryError> {
+    if overrides.is_empty() {
+        return Ok(());
+    }
+    // The rows the control list gives for this strip (its owner index is its strip index), read
+    // for this one owner alone.
+    let overlay = controls::MonitorOverlay::default();
+    let view = controls::ModelView::whole(model);
+    let effective = controls::LocalEffective::new(view, &overlay);
+    let mut rows = Vec::new();
+    controls::owner_rows_in(
+        view,
+        &effective,
+        &overlay,
+        strip_index,
+        sample_rate_hz,
+        &mut rows,
+    );
+    for (index, row) in overrides.iter().enumerate() {
+        if builtins && !INPUT_FILTER_CONTROLS.contains(&row.parameter_id) {
+            return Err(ResponseQueryError::Preview(
+                ResponsePreviewError::InvalidParameter,
+            ));
+        }
+        let listed = rows
+            .iter()
+            .find(|listed| {
+                listed.address.section == *section && listed.address.control == row.parameter_id
+            })
+            .ok_or(ResponseQueryError::OverrideControl(
+                controls::ControlError::AddressUnknown,
+            ))?;
+        controls::check(
+            &listed.descriptor,
+            session_lane(row.channel),
+            row.value,
+            None,
+        )
+        .map_err(ResponseQueryError::OverrideControl)?;
+        if overrides[..index].iter().any(|previous| {
+            previous.parameter_id == row.parameter_id
+                && lanes_overlap(previous.channel, row.channel)
+        }) {
+            return Err(ResponseQueryError::Preview(
+                ResponsePreviewError::DuplicateParameter,
+            ));
+        }
+    }
+    Ok(())
+}
+
+const fn session_lane(channel: ParameterChannel) -> session::ParameterChannel {
+    match channel {
+        ParameterChannel::Left => session::ParameterChannel::Left,
+        ParameterChannel::Right => session::ParameterChannel::Right,
+        ParameterChannel::Both => session::ParameterChannel::Both,
+    }
+}
+
+/// The native quality of a session quality.
+pub(crate) const fn contract_quality(quality: session::EffectQuality) -> EffectQuality {
+    match quality {
+        session::EffectQuality::Draft => EffectQuality::Draft,
+        session::EffectQuality::Normal => EffectQuality::Normal,
+        session::EffectQuality::High => EffectQuality::High,
+    }
+}
+
+/// The native link mode of a session link mode.
+pub(crate) const fn contract_link_mode(link_mode: session::LinkMode) -> LinkMode {
+    match link_mode {
+        session::LinkMode::DualMono => LinkMode::DualMono,
+        session::LinkMode::Maximum => LinkMode::Maximum,
+        session::LinkMode::Average => LinkMode::Average,
+    }
 }
 
 /// Bounded preparation resources for one response preview.
@@ -529,60 +899,120 @@ pub fn prepare_response_preview(
             quality,
             bypass,
             link_mode,
-        } => {
-            let registry =
-                launch_native_effect_registry().map_err(|_| ResponsePreviewError::UnknownEffect)?;
-            let factory = registry
-                .get_ascii(effect_id)
-                .ok_or(ResponsePreviewError::UnknownEffect)?;
-            let response = factory
-                .response_analysis()
-                .ok_or(ResponsePreviewError::UnsupportedEffect)?;
-            let descriptor = factory.descriptor();
-            let mut initial_values: Vec<InitialParameterValue> =
-                default_initial_values(descriptor).collect();
-            apply_overrides(descriptor, &mut initial_values, overrides)?;
-            // Issue #1462 D1: the registry's tail-bound entry. A rate or quality the effect does
-            // not declare has none, and is the owner's `effect.quality.unsupported` refusal.
-            let tail_bound = registry
-                .tail_bound(descriptor.id, request.sample_rate_hz, quality)
-                .map_err(|error| {
-                    ResponsePreviewError::Owner(
-                        effect_contract::ResponseAnalysisError::Configuration(
-                            effect_contract::EffectPrepareError { code: error.code },
-                        ),
-                    )
-                })?;
-            response
-                .prepare_response(
-                    effect_contract::PrepareEffectRequest {
-                        sample_rate: request.sample_rate_hz,
-                        quantum: request.quantum_frames,
-                        quality,
-                        bypass,
-                        link_mode,
-                        ports: PreparedPorts {
-                            sidechain: effect_contract::PreparedSidechainPort::None,
-                        },
-                        initial_values: &initial_values,
-                        limits: effect_contract::PrepareEffectLimits {
-                            maximum_total_state_bytes: request.limits.maximum_total_state_bytes,
-                            maximum_scratch_bytes: request.limits.maximum_scratch_bytes,
-                            maximum_automation_spans_per_block: request
-                                .limits
-                                .maximum_automation_spans_per_block,
-                        },
-                        tail_bound,
-                    },
-                    limits,
-                )
-                .map_err(ResponsePreviewError::Owner)?
-        }
+        } => prepare_effect_response(
+            &request,
+            limits,
+            effect_id,
+            EffectValues::Overrides(overrides),
+            quality,
+            bypass,
+            link_mode,
+        )?,
+        ResponsePreviewTarget::ResolvedEffect {
+            effect_id,
+            values,
+            quality,
+            bypass,
+            link_mode,
+        } => prepare_effect_response(
+            &request,
+            limits,
+            effect_id,
+            EffectValues::Resolved(values),
+            quality,
+            bypass,
+            link_mode,
+        )?,
     };
     Ok(PreparedResponsePreview {
         owner,
         configuration_id: request.configuration_id,
     })
+}
+
+/// The values a native effect target prepares with: overrides over the descriptor defaults, or
+/// values already resolved for every parameter and lane.
+enum EffectValues<'a> {
+    Overrides(&'a [ResponseParameterOverride]),
+    Resolved(&'a [InitialParameterValue]),
+}
+
+/// Prepare one native effect's response owner: the registry entry, its response provider, the
+/// initial values and the tail bound, then the owner's own preparation.
+fn prepare_effect_response(
+    request: &ResponsePreviewRequest<'_>,
+    limits: ResponsePrepareLimits,
+    effect_id: &str,
+    values: EffectValues<'_>,
+    quality: EffectQuality,
+    bypass: bool,
+    link_mode: LinkMode,
+) -> Result<Box<dyn PreparedResponseAnalysis>, ResponsePreviewError> {
+    let registry =
+        launch_native_effect_registry().map_err(|_| ResponsePreviewError::UnknownEffect)?;
+    let factory = registry
+        .get_ascii(effect_id)
+        .ok_or(ResponsePreviewError::UnknownEffect)?;
+    let response = factory
+        .response_analysis()
+        .ok_or(ResponsePreviewError::UnsupportedEffect)?;
+    let descriptor = factory.descriptor();
+    let defaulted: Vec<InitialParameterValue>;
+    let initial_values = match values {
+        EffectValues::Overrides(overrides) => {
+            let mut initial: Vec<InitialParameterValue> =
+                default_initial_values(descriptor).collect();
+            apply_overrides(descriptor, &mut initial, overrides)?;
+            defaulted = initial;
+            &defaulted[..]
+        }
+        EffectValues::Resolved(values) => {
+            // Exactly the slots of the defaults, in their order: a value per parameter and lane.
+            let mut slots = default_initial_values(descriptor);
+            let complete = values.iter().all(|value| {
+                slots.next().is_some_and(|slot| {
+                    slot.parameter_index == value.parameter_index && slot.channel == value.channel
+                })
+            }) && slots.next().is_none();
+            if !complete {
+                return Err(ResponsePreviewError::InvalidParameter);
+            }
+            values
+        }
+    };
+    // Issue #1462 D1: the registry's tail-bound entry. A rate or quality the effect does not
+    // declare has none, and is the owner's `effect.quality.unsupported` refusal.
+    let tail_bound = registry
+        .tail_bound(descriptor.id, request.sample_rate_hz, quality)
+        .map_err(|error| {
+            ResponsePreviewError::Owner(effect_contract::ResponseAnalysisError::Configuration(
+                effect_contract::EffectPrepareError { code: error.code },
+            ))
+        })?;
+    response
+        .prepare_response(
+            effect_contract::PrepareEffectRequest {
+                sample_rate: request.sample_rate_hz,
+                quantum: request.quantum_frames,
+                quality,
+                bypass,
+                link_mode,
+                ports: PreparedPorts {
+                    sidechain: effect_contract::PreparedSidechainPort::None,
+                },
+                initial_values,
+                limits: effect_contract::PrepareEffectLimits {
+                    maximum_total_state_bytes: request.limits.maximum_total_state_bytes,
+                    maximum_scratch_bytes: request.limits.maximum_scratch_bytes,
+                    maximum_automation_spans_per_block: request
+                        .limits
+                        .maximum_automation_spans_per_block,
+                },
+                tail_bound,
+            },
+            limits,
+        )
+        .map_err(ResponsePreviewError::Owner)
 }
 
 /// Whether two lanes of one parameter are the same storage: equal lanes, or `both` against any.
@@ -759,6 +1189,17 @@ pub enum ResponseQueryError {
     SampleRate,
     /// An override value (or, for the input filters, a cutoff) is NaN or infinite.
     OverrideValue,
+    /// An address target names no strip's builtins, console or inserts section (#1575 D1).
+    Address,
+    /// An address target names a strip, console slot or insert the session does not have.
+    AddressUnknown,
+    /// An address target names a third-party (`cid`) effect.
+    ThirdParty,
+    /// The control validator refused an override of an address target (#1575 D3); the code is
+    /// the validator's own.
+    OverrideControl(controls::ControlError),
+    /// The committed values of an address target do not resolve; the code is the resolver's.
+    Committed(&'static str),
 }
 
 /// The class of a refused response query, which a host maps to its own status.
@@ -791,6 +1232,11 @@ impl ResponseQueryError {
             Self::Overrides => (LimitExceeded, "response.override.count"),
             Self::SampleRate => (InvalidField, "response.rate"),
             Self::OverrideValue => (InvalidField, "response.override.value"),
+            Self::Address => (InvalidField, "response.address"),
+            Self::AddressUnknown => (NotFound, "control.address.unknown"),
+            Self::ThirdParty => (Unavailable, "effect.third_party.unavailable_at_launch"),
+            Self::OverrideControl(error) => (InvalidField, error.code()),
+            Self::Committed(code) => (ValidationFailed, code),
             Self::Preview(error) => match error {
                 ResponsePreviewError::InvalidShape => (InvalidField, "response.rate"),
                 ResponsePreviewError::InvalidGrid => (InvalidField, "response.grid"),
@@ -908,6 +1354,11 @@ pub fn prepare_response_query(
             overrides.len(),
             overrides.iter().all(|row| row.value.is_finite()),
         ),
+        // A resolved effect's values are the session's, not the request's: the request's own
+        // override count was checked before it was resolved.
+        ResponsePreviewTarget::ResolvedEffect { values, .. } => {
+            (0, values.iter().all(|value| value.value.is_finite()))
+        }
         ResponsePreviewTarget::InputFilters {
             left_hpf_hz,
             left_lpf_hz,
