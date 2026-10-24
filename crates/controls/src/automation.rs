@@ -5,7 +5,7 @@ use automation::{CellDescription, Completion, JumpLength, SeekMode, Segment, Sha
 use effect_contract::ParameterUnit;
 use session::{
     Automation, AutomationSegment, AutomationShape, ControlAddress, Owner, Section, SessionModel,
-    StableId, StripRef,
+    StableId, StripRef, Vca,
 };
 
 use crate::ControlKind;
@@ -462,11 +462,14 @@ pub fn vca_mute_automation<'a>(
 /// own hand offset, the mask) reads [`fader_automation`] instead.
 #[must_use]
 pub fn fader_event_lanes(model: &SessionModel, strip: &StableId, reach: &[usize]) -> [bool; 2] {
+    if model.automation.is_empty() {
+        return [false; 2];
+    }
     event_lanes(
-        model,
+        &model.vcas,
         reach,
         automated_fader_lanes(model, strip),
-        vca_offset_automation,
+        |vca| vca_offset_automation(model, vca),
     )
 }
 
@@ -480,22 +483,25 @@ pub fn mute_event_lanes(model: &SessionModel, strip: &StableId, reach: &[usize])
         return [false; 2];
     }
     let own = mute_automation(model, strip).map(|entry| entry.is_some());
-    event_lanes(model, reach, own, vca_mute_automation)
+    event_lanes(&model.vcas, reach, own, |vca| {
+        vca_mute_automation(model, vca)
+    })
 }
 
-/// `own`, ORed per lane with whether some VCA of `reach` has an entry `entries` gives on that lane.
+/// `own`, ORed per lane with whether some VCA of `reach` (indices into `vcas`) has an entry
+/// `entries` gives on that lane.
 fn event_lanes<'a>(
-    model: &'a SessionModel,
+    vcas: &[Vca],
     reach: &[usize],
     own: [bool; 2],
-    entries: fn(&'a SessionModel, &StableId) -> [Option<&'a Automation>; 2],
+    entries: impl Fn(&StableId) -> [Option<&'a Automation>; 2],
 ) -> [bool; 2] {
     let mut lanes = own;
-    if model.automation.is_empty() || lanes == [true; 2] {
+    if lanes == [true; 2] {
         return lanes;
     }
-    for vca in reach.iter().filter_map(|&index| model.vcas.get(index)) {
-        let driven = entries(model, &vca.id);
+    for vca in reach.iter().filter_map(|&index| vcas.get(index)) {
+        let driven = entries(&vca.id);
         for lane in 0..2 {
             lanes[lane] |= driven[lane].is_some();
         }
@@ -601,9 +607,12 @@ enum RenderedRow {
 /// with no rendered entry.
 #[derive(Clone)]
 pub struct AutomationIndex<'a> {
-    /// The table the index was built from, so a view checks it reads the same model.
-    table: &'a [Automation],
+    /// The model the index was built from: a view checks it reads the same table, and the event
+    /// lanes read a VCA reach's IDs from its `vcas`.
+    model: &'a SessionModel,
     lanes: BTreeMap<(RenderedRow, &'a StableId), [Option<&'a Automation>; 2]>,
+    /// Whether some entry is on a VCA `mute` row ([`vca_mute_row`]).
+    any_vca_mute: bool,
 }
 
 impl<'a> AutomationIndex<'a> {
@@ -611,13 +620,17 @@ impl<'a> AutomationIndex<'a> {
     #[must_use]
     pub fn of(model: &'a SessionModel) -> Self {
         let mut lanes: BTreeMap<_, [Option<&'a Automation>; 2]> = BTreeMap::new();
+        let mut any_vca_mute = false;
         for automation in &model.automation {
             let target = &automation.target;
             let key = match &target.owner {
                 Owner::Strip(id) if fader_row(target) => (RenderedRow::Fader, id),
                 Owner::Strip(id) if mute_row(target) => (RenderedRow::Mute, id),
                 Owner::Vca(id) if vca_offset_row(target) => (RenderedRow::VcaOffset, id),
-                Owner::Vca(id) if vca_mute_row(target) => (RenderedRow::VcaMute, id),
+                Owner::Vca(id) if vca_mute_row(target) => {
+                    any_vca_mute = true;
+                    (RenderedRow::VcaMute, id)
+                }
                 _ => continue,
             };
             let driven = lanes.entry(key).or_default();
@@ -628,14 +641,18 @@ impl<'a> AutomationIndex<'a> {
             }
         }
         Self {
-            table: &model.automation,
+            model,
             lanes,
+            any_vca_mute,
         }
     }
 
     /// Whether the index was built from `model`'s table.
     pub(crate) fn is_of(&self, model: &SessionModel) -> bool {
-        core::ptr::eq(self.table, model.automation.as_slice())
+        core::ptr::eq(
+            self.model.automation.as_slice(),
+            model.automation.as_slice(),
+        )
     }
 
     fn get(&self, row: RenderedRow, owner: &StableId) -> [Option<&'a Automation>; 2] {
@@ -665,6 +682,36 @@ impl<'a> AutomationIndex<'a> {
     #[must_use]
     pub fn vca_mute(&self, vca: &StableId) -> [Option<&'a Automation>; 2] {
         self.get(RenderedRow::VcaMute, vca)
+    }
+
+    /// [`automated_fader_lanes`] of strip `strip` (#1844): the lanes [`Self::fader`] drives.
+    #[must_use]
+    pub fn automated_fader_lanes(&self, strip: &StableId) -> [bool; 2] {
+        self.fader(strip).map(|entry| entry.is_some())
+    }
+
+    /// [`fader_event_lanes`] of strip `strip`, `reach` its VCA reach in the indexed model.
+    #[must_use]
+    pub fn fader_event_lanes(&self, strip: &StableId, reach: &[usize]) -> [bool; 2] {
+        event_lanes(
+            &self.model.vcas,
+            reach,
+            self.automated_fader_lanes(strip),
+            |vca| self.vca_offset(vca),
+        )
+    }
+
+    /// [`mute_event_lanes`] of strip `strip`, `reach` its VCA reach in the indexed model.
+    #[must_use]
+    pub fn mute_event_lanes(&self, strip: &StableId, reach: &[usize]) -> [bool; 2] {
+        let own = self.mute(strip).map(|entry| entry.is_some());
+        event_lanes(&self.model.vcas, reach, own, |vca| self.vca_mute(vca))
+    }
+
+    /// Whether some entry of the indexed table is on a VCA `mute` row ([`vca_mute_row`]).
+    #[must_use]
+    pub const fn any_vca_mute(&self) -> bool {
+        self.any_vca_mute
     }
 }
 
