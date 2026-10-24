@@ -1033,7 +1033,7 @@ fn capi_retained_bytes_charge_every_byte_the_compile_retains() {
         // table's submix entries and the C ABI's lane selection (no route lanes) are observed.
         ("routed submix", two_track_routed_submix_session()),
         // #1074: every registered native effect as an insert, so each effect's own walk is
-        // observed. The de-esser is not in the native registry on this tree, so no session names it.
+        // observed.
         ("every native insert", every_native_insert_session()),
         // #1916: automated faders, so the strips' offsets-writer boxes are charged to the strip
         // table, and #1074's automation walkers are on the plan-walk row.
@@ -3565,7 +3565,7 @@ fn every_native_insert_session() -> String {
     });
     let inserts: [&[&str]; 3] = [
         &["parametric-eq", "compressor", "gate-expander"],
-        &["delay", "multiband-compressor", "de-esser"],
+        &["delay", "multiband-compressor", "de-esser", "dynamic-eq"],
         &["true-peak-limiter", "transient-shaper", "soft-clip"],
     ];
     for (track, effects) in model.tracks.iter_mut().zip(inserts) {

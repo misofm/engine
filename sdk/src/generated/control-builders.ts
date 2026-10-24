@@ -496,6 +496,320 @@ export const EFFECT_PARAMETER_ROWS: Readonly<Record<string, Readonly<Record<stri
         "choices": []
       }
     },
+    "miso.dynamic-eq": {
+      "band 1 enabled": {
+        "control": "band_1_enabled",
+        "kind": "boolean",
+        "choices": []
+      },
+      "band 1 frequency": {
+        "control": "band_1_frequency_hz",
+        "kind": "continuous",
+        "choices": []
+      },
+      "band 1 Q": {
+        "control": "band_1_q",
+        "kind": "continuous",
+        "choices": []
+      },
+      "band 1 gain": {
+        "control": "band_1_gain_db",
+        "kind": "continuous",
+        "choices": []
+      },
+      "band 1 threshold": {
+        "control": "band_1_threshold_db",
+        "kind": "continuous",
+        "choices": []
+      },
+      "band 1 ratio": {
+        "control": "band_1_ratio",
+        "kind": "continuous",
+        "choices": []
+      },
+      "band 1 range": {
+        "control": "band_1_range_db",
+        "kind": "continuous",
+        "choices": []
+      },
+      "band 1 attack": {
+        "control": "band_1_attack_ms",
+        "kind": "continuous",
+        "choices": []
+      },
+      "band 1 release": {
+        "control": "band_1_release_ms",
+        "kind": "continuous",
+        "choices": []
+      },
+      "band 1 direction": {
+        "control": "band_1_direction",
+        "kind": "enumeration",
+        "choices": [
+          [
+            "down",
+            1
+          ],
+          [
+            "up",
+            2
+          ]
+        ]
+      },
+      "band 1 detector": {
+        "control": "band_1_detector",
+        "kind": "enumeration",
+        "choices": [
+          [
+            "internal",
+            1
+          ],
+          [
+            "external",
+            2
+          ]
+        ]
+      },
+      "band 1 knee": {
+        "control": "band_1_knee_db",
+        "kind": "continuous",
+        "choices": []
+      },
+      "band 2 enabled": {
+        "control": "band_2_enabled",
+        "kind": "boolean",
+        "choices": []
+      },
+      "band 2 frequency": {
+        "control": "band_2_frequency_hz",
+        "kind": "continuous",
+        "choices": []
+      },
+      "band 2 Q": {
+        "control": "band_2_q",
+        "kind": "continuous",
+        "choices": []
+      },
+      "band 2 gain": {
+        "control": "band_2_gain_db",
+        "kind": "continuous",
+        "choices": []
+      },
+      "band 2 threshold": {
+        "control": "band_2_threshold_db",
+        "kind": "continuous",
+        "choices": []
+      },
+      "band 2 ratio": {
+        "control": "band_2_ratio",
+        "kind": "continuous",
+        "choices": []
+      },
+      "band 2 range": {
+        "control": "band_2_range_db",
+        "kind": "continuous",
+        "choices": []
+      },
+      "band 2 attack": {
+        "control": "band_2_attack_ms",
+        "kind": "continuous",
+        "choices": []
+      },
+      "band 2 release": {
+        "control": "band_2_release_ms",
+        "kind": "continuous",
+        "choices": []
+      },
+      "band 2 direction": {
+        "control": "band_2_direction",
+        "kind": "enumeration",
+        "choices": [
+          [
+            "down",
+            1
+          ],
+          [
+            "up",
+            2
+          ]
+        ]
+      },
+      "band 2 detector": {
+        "control": "band_2_detector",
+        "kind": "enumeration",
+        "choices": [
+          [
+            "internal",
+            1
+          ],
+          [
+            "external",
+            2
+          ]
+        ]
+      },
+      "band 2 knee": {
+        "control": "band_2_knee_db",
+        "kind": "continuous",
+        "choices": []
+      },
+      "band 3 enabled": {
+        "control": "band_3_enabled",
+        "kind": "boolean",
+        "choices": []
+      },
+      "band 3 frequency": {
+        "control": "band_3_frequency_hz",
+        "kind": "continuous",
+        "choices": []
+      },
+      "band 3 Q": {
+        "control": "band_3_q",
+        "kind": "continuous",
+        "choices": []
+      },
+      "band 3 gain": {
+        "control": "band_3_gain_db",
+        "kind": "continuous",
+        "choices": []
+      },
+      "band 3 threshold": {
+        "control": "band_3_threshold_db",
+        "kind": "continuous",
+        "choices": []
+      },
+      "band 3 ratio": {
+        "control": "band_3_ratio",
+        "kind": "continuous",
+        "choices": []
+      },
+      "band 3 range": {
+        "control": "band_3_range_db",
+        "kind": "continuous",
+        "choices": []
+      },
+      "band 3 attack": {
+        "control": "band_3_attack_ms",
+        "kind": "continuous",
+        "choices": []
+      },
+      "band 3 release": {
+        "control": "band_3_release_ms",
+        "kind": "continuous",
+        "choices": []
+      },
+      "band 3 direction": {
+        "control": "band_3_direction",
+        "kind": "enumeration",
+        "choices": [
+          [
+            "down",
+            1
+          ],
+          [
+            "up",
+            2
+          ]
+        ]
+      },
+      "band 3 detector": {
+        "control": "band_3_detector",
+        "kind": "enumeration",
+        "choices": [
+          [
+            "internal",
+            1
+          ],
+          [
+            "external",
+            2
+          ]
+        ]
+      },
+      "band 3 knee": {
+        "control": "band_3_knee_db",
+        "kind": "continuous",
+        "choices": []
+      },
+      "band 4 enabled": {
+        "control": "band_4_enabled",
+        "kind": "boolean",
+        "choices": []
+      },
+      "band 4 frequency": {
+        "control": "band_4_frequency_hz",
+        "kind": "continuous",
+        "choices": []
+      },
+      "band 4 Q": {
+        "control": "band_4_q",
+        "kind": "continuous",
+        "choices": []
+      },
+      "band 4 gain": {
+        "control": "band_4_gain_db",
+        "kind": "continuous",
+        "choices": []
+      },
+      "band 4 threshold": {
+        "control": "band_4_threshold_db",
+        "kind": "continuous",
+        "choices": []
+      },
+      "band 4 ratio": {
+        "control": "band_4_ratio",
+        "kind": "continuous",
+        "choices": []
+      },
+      "band 4 range": {
+        "control": "band_4_range_db",
+        "kind": "continuous",
+        "choices": []
+      },
+      "band 4 attack": {
+        "control": "band_4_attack_ms",
+        "kind": "continuous",
+        "choices": []
+      },
+      "band 4 release": {
+        "control": "band_4_release_ms",
+        "kind": "continuous",
+        "choices": []
+      },
+      "band 4 direction": {
+        "control": "band_4_direction",
+        "kind": "enumeration",
+        "choices": [
+          [
+            "down",
+            1
+          ],
+          [
+            "up",
+            2
+          ]
+        ]
+      },
+      "band 4 detector": {
+        "control": "band_4_detector",
+        "kind": "enumeration",
+        "choices": [
+          [
+            "internal",
+            1
+          ],
+          [
+            "external",
+            2
+          ]
+        ]
+      },
+      "band 4 knee": {
+        "control": "band_4_knee_db",
+        "kind": "continuous",
+        "choices": []
+      }
+    },
     "miso.gate-expander": {
       "threshold": {
         "control": "threshold_db",
@@ -935,6 +1249,23 @@ export const EFFECT_LINK_MODE_ROWS: Readonly<Record<string, {
         ]
       ]
     },
+    "miso.dynamic-eq": {
+      "control": "link_mode",
+      "choices": [
+        [
+          "dual_mono",
+          1
+        ],
+        [
+          "maximum",
+          2
+        ],
+        [
+          "average",
+          3
+        ]
+      ]
+    },
     "miso.gate-expander": {
       "control": "link_mode",
       "choices": [
@@ -1005,6 +1336,7 @@ export const EFFECT_LINK_MODE_ROWS: Readonly<Record<string, {
 export type EffectLinkModeLabel<E extends EffectId> =
     E extends "miso.compressor" ? "dual_mono" | "maximum" | "average" :
     E extends "miso.de-esser" ? "dual_mono" | "maximum" | "average" :
+    E extends "miso.dynamic-eq" ? "dual_mono" | "maximum" | "average" :
     E extends "miso.gate-expander" ? "dual_mono" | "maximum" | "average" :
     E extends "miso.multiband-compressor" ? "dual_mono" | "maximum" | "average" :
     E extends "miso.transient-shaper" ? "dual_mono" | "maximum" | "average" :
