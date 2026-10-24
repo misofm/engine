@@ -1,4 +1,3 @@
-import { ABI_LAYOUT } from "../generated/abi.ts";
 import { CATALOG } from "../generated/catalog.ts";
 import type { EffectDescriptor } from "../generated/catalog.ts";
 import { MisoEngineError, MisoUsageError } from "./errors.ts";
