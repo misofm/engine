@@ -246,7 +246,14 @@ needs named exceptions for `crates/engine/src/realtime/plan.rs` and `crates/grap
 
 ## Attempt record
 
-- Attempt 1: in progress (see the root decision below).
+- Attempt 1 (counter route, root decision below), commit `7880d0a4f`. Red first: with counter 20
+  served but nothing counting, gate 1 read `[0, 0, 0, 0]` for case A (expected `[0, 0, 1, 2]`).
+  Mutations (each red, then restored green): add every block -> A `[1, 2, 3, 4]`; remove the add
+  -> A `[0, 0, 0, 0]`; read the flag before `render_inner` -> A `[0, 0, 0, 1]`; count
+  `copied_frames == 0` in the source driver -> B `[0, 0, 1, 2]`. Served-set mutant
+  (`SourceUnderrunBlocks` left out of `SERVED_COUNTERS`): host-core's served-set test red, counter
+  capacity 12 not 6. One path past the scope note: `crates/control-plane/src/compile.rs`, the
+  `SharedPlanState` constructor's new field (one line; the struct cannot compile without it).
 
 ## Root rulings (2026-10-13)
 
