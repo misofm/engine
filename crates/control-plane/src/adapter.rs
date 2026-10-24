@@ -18,6 +18,11 @@ pub trait ControlAdapter {
     /// The byte sizes of the fixed allocations the adapter keeps per session. They are charged to
     /// the session's fixed rows and largest-allocation fold on every preparation.
     const ADAPTER_ALLOCATIONS: &'static [u64];
+    /// Whether the adapter passes a document beside a command frame, so the session serves and
+    /// advertises `SESSION_REPLACE` (`0x0013`, #1386). An adapter with no document transport keeps
+    /// the default: the command is then unadvertised and refused `UNAVAILABLE`, never advertised
+    /// and refused on every call. The browser turns it on with its transport (#1697).
+    const DOCUMENT_TRANSPORT: bool = false;
 }
 
 /// Plain compile limits (#1309 D3): every numeric field of the C ABI's `CompileLimits`, with the

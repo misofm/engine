@@ -33,6 +33,7 @@ struct Adapter;
 impl ControlAdapter for Adapter {
     type Row = PlanResources;
     const ADAPTER_ALLOCATIONS: &'static [u64] = &[];
+    const DOCUMENT_TRANSPORT: bool = true;
 }
 
 /// The C ABI's own preparation: host-core's live-lanes entries.

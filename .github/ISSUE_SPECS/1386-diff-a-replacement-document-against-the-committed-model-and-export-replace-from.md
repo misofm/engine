@@ -659,3 +659,25 @@ still open.
 - Paths outside the listed a2 set, needed by the change: `crates/capi/Cargo.toml` (`sha2` as a
   dev-dependency, for the frame digest in the test) and `crates/capi/tests/c/header_smoke.cpp`
   (the bit and the signature, the header twin of `abi_smoke.c`).
+
+## Attempt 2 (2026-10-24, after the attempt-1 verdict)
+
+- **Unsafe allowlist.** `crates/capi/tests/session_replace.rs` joins `UNSAFE_ALLOWLIST`
+  (`tools/realtime-policy`) with its ownership row in `docs/REALTIME_DEPENDENCY_POLICY.md`, the
+  form #1573 used for `response_get.rs`.
+- **Digest before parse.** The control-plane refusal row corrupts a structural byte at the same
+  length, so a parse-first order answers `VALIDATION_FAILED` and the row turns red.
+- **Host-chosen advertisement (root decision).** `ControlAdapter::DOCUMENT_TRANSPORT` (default
+  `false`) chooses whether `compile_children` sets the document hook. The C ABI sets it; the
+  browser does not, so it neither advertises `0x0013` nor serves it (`UNAVAILABLE`). #1697 turns
+  the browser's advertisement on with its transport. The parity row now asserts exactly this.
+- **Smoothing rows (nit).** For an explicit arm `diff()` emits one `SetControl` per changed
+  session row, and `prepare_replacement` then sets the document's `control_smoothing` whole,
+  which supersedes them: the rows change only `applied_operations`, never the committed model.
+
+- **Open: one red test from the host-chosen advertisement.**
+  `hosts/host-web/tests/protocol_cross_host.rs::the_browser_and_the_c_abi_give_the_same_bytes_for_one_script`
+  requires byte-equal `CAPABILITIES_GET` replies on both hosts (step "1 capabilities",
+  `Legs::both`). By the root decision they now differ in exactly the `0x0013` entry of the
+  command list. The file is on no authorized list; it needs root's authorization to compare that
+  step modulo `0x0013` (or to expect the C ABI's list to be the browser's plus `0x0013`).

@@ -7087,16 +7087,17 @@ fn the_automation_fixture_renders_alike_on_both_hosts_across_one_session_seek() 
     }
 }
 
-/// #1386 gate 6 (the refusal row of part a): a `SESSION_REPLACE` frame sent with no document
-/// beside it, through the browser's `control_command` and the C ABI's `submit_command`, gets the
-/// same reply bytes on both hosts (the core's `session.replace.document_length`), and changes
-/// neither host's control rows, document or rendered blocks. The browser's document transport is
-/// #1697's.
+/// #1386 gate 6 (root decision, attempt 2): the browser has no document transport until #1697, so
+/// it neither advertises `SESSION_REPLACE` (`0x0013`) nor serves it: the frame is `UNAVAILABLE`.
+/// The C ABI advertises it, and the same frame with no document beside it gets the core's
+/// `session.replace.document_length`. Neither host commits anything: both keep the same control
+/// rows, document and rendered blocks.
 ///
-/// Test value: red if either host runs replace code of its own (another reply, another code), or
-/// if a host commits anything for a frame whose document never came.
+/// Test value: red if the browser advertises a command every call of which is refused, if either
+/// host answers otherwise (a host of its own replace code), or if a host commits anything for a
+/// frame whose document never came.
 #[test]
-fn a_session_replace_without_its_document_is_refused_alike_on_both_hosts() {
+fn a_session_replace_is_unavailable_on_the_browser_and_refused_without_its_document_on_the_c_abi() {
     use sha2::{Digest, Sha256};
     for rate in [44_100, 48_000] {
         let model = model_at(rate);
@@ -7134,11 +7135,35 @@ fn a_session_replace_without_its_document_is_refused_alike_on_both_hosts() {
             (0, C_RESULT_OK),
             "{rate} Hz: both entries answer"
         );
-        assert_eq!(b_reply, c_reply, "{rate} Hz: the same reply bytes");
+        let status = |reply: &[u8]| u16::from_le_bytes([reply[18], reply[19]]);
+        assert_eq!(
+            status(&b_reply),
+            protocol::StatusCode::Unavailable as u16,
+            "{rate} Hz: browser"
+        );
         assert!(matches!(
             decode_verdict(&c_reply),
             Verdict::Refused { codes, .. } if codes == ["session.replace.document_length"]
         ));
+        let advertised = |reply: Vec<u8>| {
+            let mut fields = [0_u16; 64];
+            let DecodedTypedResponseFrame::Success {
+                payload: DecodedSuccessResponsePayload::Capabilities(capabilities),
+                ..
+            } = ProtocolCodec::default()
+                .decode_typed_response(&reply, &mut DecodeScratch::new(&mut fields))
+                .expect("capabilities")
+            else {
+                panic!("a capabilities reply")
+            };
+            capabilities
+                .supported_commands
+                .chunks_exact(2)
+                .any(|id| u16::from_le_bytes([id[0], id[1]]) == 0x0013)
+        };
+        let get = || CommandPayload::CapabilitiesGet;
+        assert!(!advertised(browser.command(get(), ExpectedRevision::Any)));
+        assert!(advertised(c_abi.send(get(), ExpectedRevision::Any)));
         let after_b = dump(|payload, expected| browser.command(payload, expected));
         assert_eq!(
             after_b.1, before_b.1,

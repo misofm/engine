@@ -1432,9 +1432,10 @@ where
             maximum_transaction_edits: maximum_tlvs,
             maximum_response_diagnostics: u16::MAX,
             provider_features: ProviderFeatures::ALL,
-            // #1386 D3: both hosts serve `SESSION_REPLACE` through this one hook, bounded by the
-            // boot's document bound (0 is unbounded, as in every zero control limit).
-            document_replace: Some(protocol::DocumentReplace {
+            // #1386 D3: an adapter with a document transport serves `SESSION_REPLACE` through this
+            // one hook, bounded by the boot's document bound (0 is unbounded, as in every zero
+            // control limit); without one the command is unadvertised and `UNAVAILABLE`.
+            document_replace: A::DOCUMENT_TRANSPORT.then_some(protocol::DocumentReplace {
                 replace: crate::document::replace,
                 maximum_document_bytes: limits.maximum_document_bytes,
             }),
