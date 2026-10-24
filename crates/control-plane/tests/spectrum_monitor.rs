@@ -318,12 +318,8 @@ impl Rig {
         self.session.command_response(length).to_vec()
     }
 
-    /// Send one `SPECTRUM_STREAM` (#1595) as a new request: its reply, or the refusal's status
-    /// and code.
-    fn stream(
-        &mut self,
-        request: &StreamRequest,
-    ) -> Result<SpectrumStreamReply<'static>, (StatusCode, String)> {
+    /// Send one `SPECTRUM_STREAM` (#1595) as a new request: the response frame's bytes.
+    fn stream_frame(&mut self, request: &StreamRequest) -> Vec<u8> {
         self.request += 1;
         let codec = ProtocolCodec::default();
         let frame = TypedCommandFrame {
@@ -339,12 +335,19 @@ impl Rig {
             .session
             .command(&bytes[..length], 65_536)
             .expect("a stream command answers a frame");
+        self.session.command_response(length).to_vec()
+    }
+
+    /// Send one `SPECTRUM_STREAM` (#1595) as a new request: its reply, or the refusal's status
+    /// and code.
+    fn stream(
+        &mut self,
+        request: &StreamRequest,
+    ) -> Result<SpectrumStreamReply<'static>, (StatusCode, String)> {
+        let frame = self.stream_frame(request);
         let mut fields = [0_u16; 64];
-        match codec
-            .decode_typed_response(
-                self.session.command_response(length),
-                &mut DecodeScratch::new(&mut fields),
-            )
+        match ProtocolCodec::default()
+            .decode_typed_response(&frame, &mut DecodeScratch::new(&mut fields))
             .expect("a stream response")
         {
             DecodedTypedResponseFrame::Success {
@@ -521,6 +524,22 @@ impl Rig {
 }
 
 /// A `SPECTRUM_CAPTURE` response frame: its reply, or the refusal's status and code.
+/// A non-OK response frame's status, first diagnostic code and backpressure record.
+fn refusal_of(frame: &[u8]) -> (StatusCode, String, Option<protocol::Backpressure>) {
+    let mut fields = [0_u16; 64];
+    let DecodedTypedResponseFrame::NonOk { header, payload } = ProtocolCodec::default()
+        .decode_typed_response(frame, &mut DecodeScratch::new(&mut fields))
+        .expect("a response")
+    else {
+        panic!("a non-OK reply");
+    };
+    (
+        header.status,
+        payload.diagnostics[0].code.clone(),
+        payload.backpressure,
+    )
+}
+
 fn decode_capture(frame: &[u8]) -> Result<SpectrumCaptureReply<'static>, (StatusCode, String)> {
     let mut fields = [0_u16; 64];
     match ProtocolCodec::default()
@@ -2098,7 +2117,8 @@ fn a_read_the_frame_cannot_carry_consumes_nothing() {
 
 /// #1595 gate 6 (one-shot). Turns red if a refusal writes service state or maps to a status
 /// outside D6's table: each refusal answers its status and code, and the next valid call behaves
-/// as if the refused one never ran.
+/// as if the refused one never ran. #1944: red if a `Busy` capture or stream-start refusal names
+/// the replay cache, or no record, instead of the arm slot (capacity 1, occupancy 1).
 #[test]
 fn each_capture_refusal_answers_its_status_and_changes_nothing() {
     let refusal = |status, code: &str| Err((status, code.to_owned()));
@@ -2124,10 +2144,27 @@ fn each_capture_refusal_answers_its_status_and_changes_nothing() {
         refusal(StatusCode::ValidationFailed, "spectrum.select.single")
     );
     rig.capture(&ARM).expect("arm");
-    assert_eq!(
-        rig.capture(&ARM),
-        refusal(StatusCode::Backpressure, "spectrum.busy")
+    // #1944: a `Busy` capture, and a stream start while the caller holds the arm, each name the
+    // one-shot arm slot, not the replay cache.
+    let busy = (
+        StatusCode::Backpressure,
+        "spectrum.busy".to_owned(),
+        Some(protocol::Backpressure {
+            queue_kind: protocol::BackpressureQueueKind::SpectrumArm,
+            capacity: 1,
+            occupancy: 1,
+            requested_items: 1,
+            generation: None,
+            retry_boundary: None,
+            requested_bytes: None,
+            available_bytes: None,
+        }),
     );
+    rig.request += 1;
+    let frame = rig.capture_frame(rig.request, &ARM);
+    assert_eq!(refusal_of(&frame), busy);
+    let frame = rig.stream_frame(&StreamRequest::Start { smoothing_ms: 0.0 });
+    assert_eq!(refusal_of(&frame), busy, "a stream start");
     for _ in 0..SPECTRUM_WINDOW_FRAMES / QUANTUM {
         rig.block();
     }

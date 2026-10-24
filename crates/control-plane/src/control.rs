@@ -296,6 +296,20 @@ impl SpectrumRefusal {
     }
 }
 
+/// The record of every spectrum `BACKPRESSURE` refusal, which only `Busy` answers (#1944 D2,
+/// #1595 D6): the capture's one-shot arm slot, one entry, held. A collection without a selection
+/// also answers `Busy` and so reports the slot as held: a known imprecision, reopened only with D6.
+const SPECTRUM_ARM_BACKPRESSURE: protocol::Backpressure = protocol::Backpressure {
+    queue_kind: protocol::BackpressureQueueKind::SpectrumArm,
+    capacity: 1,
+    occupancy: 1,
+    requested_items: 1,
+    generation: None,
+    retry_boundary: None,
+    requested_bytes: None,
+    available_bytes: None,
+};
+
 /// The configuration a `SPECTRUM_CONFIGURE` request sets, by #1591 D2's constructors: `None` for
 /// an empty collection with budget 0. A constructor's refusal is `INVALID_FIELD` with its code.
 fn spectrum_configuration_of(
@@ -3184,20 +3198,41 @@ where
                     &mut self.response_scratch,
                 )
                 .map_err(map_command_process_error),
-            Err(SpectrumRefusal::Reply(status, code)) => self
-                .controller
-                .complete_session_command_refused(
-                    prepared,
-                    status,
-                    &code,
-                    &mut self.response_scratch,
-                )
-                .map_err(map_command_process_error),
+            Err(SpectrumRefusal::Reply(status, code)) => {
+                self.complete_spectrum_refusal(prepared, status, &code)
+            }
             Err(SpectrumRefusal::Error(error)) => {
                 drop(prepared);
                 Err(error)
             }
         }
+    }
+
+    /// Completes a spectrum command's typed refusal, recorded for replay: a `BACKPRESSURE` with
+    /// the arm slot's record (#1944), any other status without one.
+    fn complete_spectrum_refusal(
+        &mut self,
+        prepared: protocol::PreparedSessionCommand,
+        status: protocol::StatusCode,
+        code: &str,
+    ) -> Result<usize, CommandError> {
+        if status == protocol::StatusCode::Backpressure {
+            self.controller
+                .complete_session_command_refused_backpressure(
+                    prepared,
+                    code,
+                    SPECTRUM_ARM_BACKPRESSURE,
+                    &mut self.response_scratch,
+                )
+        } else {
+            self.controller.complete_session_command_refused(
+                prepared,
+                status,
+                code,
+                &mut self.response_scratch,
+            )
+        }
+        .map_err(map_command_process_error)
     }
 
     /// Completes a `SPECTRUM_CAPTURE` with its reply or its refusal, as [`Self::session_command`]
@@ -3211,15 +3246,7 @@ where
         let outcome = match outcome {
             Ok(outcome) => outcome,
             Err(SpectrumRefusal::Reply(status, code)) => {
-                return self
-                    .controller
-                    .complete_session_command_refused(
-                        prepared,
-                        status,
-                        &code,
-                        &mut self.response_scratch,
-                    )
-                    .map_err(map_command_process_error);
+                return self.complete_spectrum_refusal(prepared, status, &code);
             }
             Err(SpectrumRefusal::Error(error)) => {
                 drop(prepared);
@@ -3272,15 +3299,7 @@ where
         let outcome = match outcome {
             Ok(outcome) => outcome,
             Err(SpectrumRefusal::Reply(status, code)) => {
-                return self
-                    .controller
-                    .complete_session_command_refused(
-                        prepared,
-                        status,
-                        &code,
-                        &mut self.response_scratch,
-                    )
-                    .map_err(map_command_process_error);
+                return self.complete_spectrum_refusal(prepared, status, &code);
             }
             Err(SpectrumRefusal::Error(error)) => {
                 drop(prepared);
