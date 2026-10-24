@@ -63,13 +63,14 @@
 //
 // ## What metering costs
 //
-// `liveControlMeterBlocks === 0n` binds no meter observer at all: the render path folds nothing,
-// and `meters({ enabled: true })` is refused with `RESULT_UNSUPPORTED` rather than reporting zeros.
-// A nonzero value binds one post-matrix meter per track with a `blocks * quantumFrames` window and
-// makes the port lease a second, finer switch over the master fold and every drain and post. The
-// honest summary: *not attaching* meters costs nothing at all; attaching them and releasing the
-// lease costs one branch per block plus the per-track observation fold, which runs whenever the
-// observers exist.
+// Every plan meters every strip (one post-matrix peak pair per strip, tracks then submixes) and the
+// output. `liveControlMeterBlocks === 0n` gives the strip meters the engine's default window (about
+// 32 ms) and delivers nothing: `meters({ enabled: true })` is refused with `RESULT_UNSUPPORTED`
+// rather than reporting zeros, and the output fold stays shut at one load per block. A nonzero
+// value sets a `blocks * quantumFrames` window and makes the port lease a second, finer switch
+// over the output fold and every drain and post. The honest summary: releasing the lease, or
+// never taking it, costs one load per block plus the per-strip observation fold, which runs on
+// every plan.
 //
 // Gain reduction **is** in the meter frame, since issue #143. The frame carries `trackGrDb` --
 // one non-negative decibel magnitude per track -- and `masterGrDb`. These are latest folds from

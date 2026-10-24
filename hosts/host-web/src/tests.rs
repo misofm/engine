@@ -944,11 +944,11 @@ fn observation_staging_resource_is_exact_for_the_taps_off_and_on_modes() {
         let model = compiled.normalized_model();
         let frame_bytes = (3 * (model.tracks.len() + model.submixes.len()) as u64 + 3) * 4;
         // The strip meters' delivery rows, bound with the boot word `0` too (#1581 D2): per strip
-        // a pending snapshot, a remaining count and a carried-from handle, and the master ring.
+        // a pending snapshot, a remaining count and a carried-from handle. The master windows are
+        // the control plane's output meter, in its retained row (#1581 D5).
         let strips = (model.tracks.len() + model.submixes.len()) as u64;
         let meter_delivery_bytes = strips
-            * (size_of::<Option<MeterSnapshot>>() + size_of::<usize>() + size_of::<u64>()) as u64
-            + (METER_QUEUE_DEPTH * size_of::<Option<MasterMeasurement>>()) as u64;
+            * (size_of::<Option<MeterSnapshot>>() + size_of::<usize>() + size_of::<u64>()) as u64;
         let frame_bytes = frame_bytes + meter_delivery_bytes;
         let expected_bridge_metadata = projection
             .report
@@ -3385,7 +3385,7 @@ fn meter_invalid_master_rejects_transactionally_then_recovers_with_loss() {
         host.ready
             .as_mut()
             .expect("ready")
-            .pop_master_window()
+            .pop_output_window()
             .is_some()
     );
     assert_eq!(host.poll_meters(), 0);
@@ -4113,6 +4113,11 @@ fn bus_meters_render_and_poll_without_allocating() {
             false,
         ),
         RESULT_OK
+    );
+    // #1581 gate 7: the measured block folds the core output meter, whose gate the lease opened.
+    assert!(
+        host.ready.as_ref().expect("ready").output_gate_from <= host.status.next_absolute_sample,
+        "the output meter's gate is open for the measured block"
     );
     let ((render, windows), allocations, deallocations) =
         crate::ffi::live_response_ffi_tests::measured(|| {
@@ -8575,7 +8580,12 @@ mod structural_apply {
         for _ in 0..4 {
             rig.step();
         }
-        let waiting = rig.host.ready.as_ref().expect("ready").master_count as u64;
+        let waiting = rig
+            .host
+            .ready
+            .as_mut()
+            .expect("ready")
+            .output_windows_queued() as u64;
         assert!(waiting > 0, "the render side closed windows nobody polled");
         let ready = rig.host.ready.as_mut().expect("ready");
         ready.meter_loss_count = 5;
