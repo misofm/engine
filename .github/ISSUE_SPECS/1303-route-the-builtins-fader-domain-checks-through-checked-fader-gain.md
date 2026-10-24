@@ -170,6 +170,18 @@ The anchors above are stale; these supersede them for paths and decisions.
 - Gate 2's two runs.
 - The module digests before and after.
 
+### Attempt 1 results (branch vs merge base `4ebb72ae0`)
+
+- `audit capi`: `pcm_digest` `bffc21e857b5e134` on both; allocations, deallocations, locks and
+  syscalls 0 on both. `check-builtins-fixtures.sh`: ok (50 files).
+- Gate 2: with `checked_fader_gain`'s bound at `25.0`, both D4 tests are red on the branch and
+  green on the base. With `checked_trim_gain`'s bound at `23.5`, the mutation test (class 3,
+  `trim_db = 24.0`) is red on the branch and green on the base.
+- simd128 module SHA-256: base `7716d1f2e90f4ec3f3fac956c9e0c49903355426981925a2f9ff377c4d3c3c22`,
+  branch `c329be461c5ceb855d1b948bda31ad036675f4d65c4bb5e095c2043060e506b8`; every expected
+  render digest agrees.
+- `scripts/check-realtime-policy.sh` and `test-realtime-policy.sh` do not exist on `main`.
+
 ## Dependencies
 
 - *Carry fader, mute and pan ramps across a plan swap* (#1277). Both edit `crates/builtins`; this
