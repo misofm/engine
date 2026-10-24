@@ -119,3 +119,35 @@ because a single CPU was not preempted at the right moment.
 - **Gate 2 (PR evidence): PASS.** With `in_render.store(true, ..)` commented out, each test failed
   with "vacuous: no control call overlapped a render call" after 4096 blocks past its last
   admission (4146, 4510 and 4160 blocks, in 5.2 s, 9.0 s and 2.8 s). The line is restored.
+
+## Root decisions for attempt 2 (2026-10-24)
+
+- The attempt 1 evidence stands. The e^-65 argument was invalid, because a vacuous run stays
+  vacuous. The likely reason is that under EEVDF each `yield_now` moves the yielding control
+  thread's deadline later, so a tick that preempts the render thread mid-call does not hand the CPU
+  to the control thread.
+- **D2 = (a) plus a sleeping control thread.** `OVERLAP_BLOCKS` and `race_over` stay. After the
+  last admission, the paced race stops rendering, and `race_unpaced` runs the control side
+  unlocked: feed, dequeue, query, then `sleep(OVERLAP_SLEEP = 50 us)`, until the race is over.
+  The back-to-back mode uses the same loop: `yield_now` while edits remain, the sleep after that.
+  `tools/bench-support` is unchanged.
+- **#1310's `withdrawn > 0 && taken > 0` guard (third caller) is folded into the race's end.**
+  Implementer finding: these outcomes are counted only inside a command's withdrawal
+  (`crates/control-plane/src/control.rs`, `withdraw_pending_candidate`), so they cannot change
+  after the last admission. The fold is therefore in `is_done`: back to back, `swaps` is a floor.
+  The race admits further edits, in pairs to end on the boot model, until both outcomes are seen
+  or `edits_bound = 2 * swaps` (128) edits are admitted.
+
+## Attempt 2 evidence
+
+- **Gate 1: FAIL, 1 of 150.** Same harness as attempt 1: 6 lanes on CPUs 26-31, each pinned to
+  one CPU with one busy loop.
+  - 24 swaps: 50/50 pass.
+  - 200 swaps, 2 readers: 50/50 pass.
+  - 64 back to back: 49/50 pass.
+  - The overlap guard passed in all 150 runs.
+  - The one failure was the #1310 guard, after the full bound: "128 edits ... 71 withdrawn,
+    0 taken". So `Taken`, too, is a per-run property on one CPU, and more edits do not rescue it.
+  - Per-run overlap counts for passing runs were not captured: the lane script matched the
+    attempt 1 print. The gate was not rerun.
+- Gates 2 and 3 were not run for attempt 2: root's instruction was to stop if gate 1 fails.
