@@ -143,6 +143,25 @@ pub enum SpectrumPreparation {
 }
 
 impl SpectrumPreparation {
+    /// The bytes the captures of this preparation retain once prepared: what its budget must
+    /// cover (#1594 D5). Allocates nothing.
+    ///
+    /// # Errors
+    ///
+    /// The collection's [`SpectrumPrepareError`](crate::spectrum::SpectrumPrepareError): a
+    /// duplicate entry or an overflowing size.
+    pub fn retained_bytes(&self) -> Result<u64, crate::spectrum::SpectrumPrepareError> {
+        match self {
+            Self::Single(request) => {
+                Ok(crate::spectrum::spectrum_capture_resources_for(&request.target).retained_bytes)
+            }
+            Self::Collection(request) => {
+                crate::spectrum::spectrum_capture_collection_resources(&request.entries)
+                    .map(|resources| resources.retained_bytes)
+            }
+        }
+    }
+
     /// Build a single-target preparation from raw words.
     ///
     /// The checks run in this order: identity, kind, channel mask, then a budget from 1 byte to
@@ -666,6 +685,18 @@ pub struct SpectrumService {
 }
 
 impl SpectrumService {
+    /// The bytes one session's spectrum monitor retains beside a plan's captures (#1594 R6): the
+    /// service's boxed stream window and its analysis's boxed analyzer and smoothing history
+    /// (the history is boxed at the first analyzed window; it is charged from the start).
+    #[allow(
+        clippy::cast_possible_truncation,
+        reason = "three fixed type sizes, far below u64::MAX"
+    )]
+    pub const RETAINED_BYTES: u64 = (core::mem::size_of::<SpectrumContinuousWindow>()
+        + core::mem::size_of::<SpectrumAnalyzer>()
+        + core::mem::size_of::<SpectrumAnalysisHistory>())
+        as u64;
+
     /// Own `captures` for a session at `sample_rate_hz` and `quantum_frames`. A stream starts with
     /// `hop` when the preparation named one, else with the default cadence of the session shape.
     ///
@@ -719,6 +750,12 @@ impl SpectrumService {
     #[must_use]
     pub const fn hop(&self) -> Option<SpectrumHop> {
         self.hop
+    }
+
+    /// Set the hop the next stream starts with (#1594 D5): `None` for the session shape's
+    /// default cadence. A running stream keeps the cadence it started with. Allocates nothing.
+    pub const fn set_hop(&mut self, hop: Option<SpectrumHop>) {
+        self.hop = hop;
     }
 
     /// Install the captures of a successor plan whose adoption block has run (#1395 D3, D5): the

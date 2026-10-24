@@ -467,8 +467,13 @@ pub const fn continuous_mapping_admissible(mapping: ParameterMapping, minimum: f
 // reason the parameter vocabularies are -- the descriptor wire, the C inspect surface and the
 // browser metadata all carry the raw `u32`, and `from_raw` is the single place a foreign value is
 // refused rather than silently reinterpreted.
-// What an observation tap reports. One kind ships in V1.
-scalar_enum!(ObservationKind {GainReductionDb=1});
+// What an observation tap reports.
+//
+// `GainReductionDb` is a reduction depth: with the `PeakMagnitude` fold it publishes a
+// non-negative number of decibels. `GainChangeDb` is a signed gain change in decibels (positive
+// is a boost, negative a cut) for an effect that can move gain both ways, such as an upward
+// dynamic EQ band; it pairs with the `PeakSigned` fold so a boost never reads as a reduction.
+scalar_enum!(ObservationKind {GainReductionDb=1,GainChangeDb=2});
 // What publishing an observation costs.
 //
 // `Resident` means the value already exists in kernel state when the block ends: publishing is a
@@ -484,7 +489,10 @@ scalar_enum!(ObservationCadence {PerBlock=1,PerWindow=2});
 // a **non-negative magnitude** even though the contract's internal sign convention is
 // negative-for-reduction ([`GainReduction`]). The published value is non-negative *by the
 // declared fold*, not by a host convention nobody can check.
-scalar_enum!(ObservationFold {Latest=1,PeakMagnitude=2});
+//
+// `PeakSigned` publishes the value of largest `|x|` in the window with its sign kept; of two
+// values of equal magnitude the earlier one stays. A window of zeros publishes `0`.
+scalar_enum!(ObservationFold {Latest=1,PeakMagnitude=2,PeakSigned=3});
 // Whether a tap publishes one value per instance or one per dual-mono lane.
 scalar_enum!(ObservationChannels {Shared=1,PerLane=2});
 /// An effect-local observation tap identifier: nonzero, and ascending within a descriptor.
@@ -820,7 +828,8 @@ pub struct PortDescriptor {
 /// subscribe path, the descriptor wire, the browser metadata -- reads this and nothing else.
 ///
 /// `minimum`/`maximum` are the declared bounds of the **published** value, after the declared
-/// [`fold`](Self::fold). A gain-reduction tap therefore declares `0 .. 100`, not `-100 .. 0`.
+/// [`fold`](Self::fold). A gain-reduction tap therefore declares `0 .. 100`, not `-100 .. 0`; a
+/// signed gain-change tap (`PeakSigned`) declares a range that spans zero, such as `-24 .. 24`.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ObservationDescriptor {
     /// Effect-local tap id: nonzero, unique, and strictly ascending in declaration order.
@@ -1033,7 +1042,7 @@ fn parameter_valid(p: &ParameterDescriptor) -> bool {
         }
     }
 }
-/// The three rules an [`ObservationDescriptor`] must satisfy beyond text and bounds.
+/// The rules an [`ObservationDescriptor`] must satisfy.
 ///
 /// * **Text and bounds.** Both display strings are non-empty printable text, and the declared
 ///   published range is finite, ordered, and free of `-0.0` -- the same canonicalisation rule
@@ -1044,6 +1053,10 @@ fn parameter_valid(p: &ParameterDescriptor) -> bool {
 /// * **A `PerLane` tap requires per-lane state to read.** The observation is a read of kernel
 ///   state, so an effect whose qualities declare no per-lane state (`left_bytes == 0`) cannot
 ///   produce two independent lanes and must declare `Shared`.
+/// * **A signed gain change is a signed decibel fold** (issue #1918). `GainChangeDb` requires the
+///   `PeakSigned` fold and the `Db` unit, and `PeakSigned` is admitted only for `GainChangeDb`: a
+///   gain-change tap folded by magnitude would publish a boost as a reduction, and a reduction tap
+///   folded with its sign would publish negative reduction a meter cannot draw.
 ///
 /// The third rule is the in-descriptor form of issue #143's "PerLane requires bank width": bank
 /// width is not a descriptor field (it is a *factory* capability, `bind_homogeneous_bank`), so the
@@ -1061,6 +1074,12 @@ fn observation_valid(d: &EffectDescriptor, o: &ObservationDescriptor) -> bool {
             && matches!(o.cadence, ObservationCadence::PerBlock))
         && (!matches!(o.channels, ObservationChannels::PerLane)
             || d.qualities.iter().all(|q| q.maximum_state.left_bytes > 0))
+        && match o.kind {
+            ObservationKind::GainReductionDb => !matches!(o.fold, ObservationFold::PeakSigned),
+            ObservationKind::GainChangeDb => {
+                matches!(o.fold, ObservationFold::PeakSigned) && matches!(o.unit, ParameterUnit::Db)
+            }
+        }
 }
 /// Whether `name` is a stable machine name: `[a-z][a-z0-9_]*` (decision 17, C3).
 fn valid_machine_name(name: &str) -> bool {

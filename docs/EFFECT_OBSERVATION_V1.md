@@ -125,6 +125,16 @@ declaring the transport unit separately.
 own negative-for-reduction convention into the non-negative magnitude a meter reads, and it is why
 an app's `Math.max(0, x ?? 0)` is a **no-op** rather than a silent zeroing.
 
+An effect that can move gain both ways (an upward dynamic EQ band boosts) declares
+`ObservationKind::GainChangeDb` with `ObservationFold::PeakSigned` (issue #1918) and a range that
+spans zero, such as `-24 .. 24`. `PeakSigned` publishes the value of largest `|x|` in the window
+with its sign kept (positive is a boost); of two equal magnitudes the earlier one stays, and a
+window of zeros publishes `0`. The fold runs in `ObservationLane::accumulate`, the one function both
+hosts use. The strip's frame slot (`trackGrDb`, `submixGrDb`) stays a non-negative reduction: a
+signed tap adds only a cut's depth `max(0, -x)` and a boost adds `0`. The signed value reaches a
+consumer through the selected read (`readObservations`). Both values are additive to the V1
+vocabulary: no wire, ABI or frame layout changes.
+
 ## Absent-effect semantics
 
 `MisoMeterFrame.trackGrDb` is positional and `trackCount` long, and every entry is finite.
@@ -173,6 +183,9 @@ each declare exactly one tap: id `1`, "Gain Reduction", `Resident`, `PerBlock`, 
 because the bands are applied to disjoint parts of the spectrum and adding them would report a
 reduction the signal never received. Per-band taps are an additive follow-up that needs no wire,
 contract or transport change to arrive.
+
+The dynamic EQ is the first declarer of the signed kind; its declaration arrives with its
+registration (#17).
 
 No computed tap ships. No other effect declares a tap, and every one of their descriptors is
 byte-for-byte unmoved.

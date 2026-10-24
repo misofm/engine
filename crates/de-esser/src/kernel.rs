@@ -8,12 +8,13 @@
 //! law: the wideband, split and listen arms. `Lane` keeps the scalar, four-lane and eight-lane
 //! paths on this one body.
 
+use effect_runtime::dynamic_band::WordRamp;
 use effect_runtime::dynamic_band::{
-    BandWords, DynamicBandCoef, LinkWords, applied_gain, band_step, detector_level_db,
-    dynamic_band_gain,
+    BandWords, DynamicBandCoef, LinkWords, advance_word_ramps, applied_gain, band_step, blend,
+    detector_level_db, dynamic_band_gain,
 };
 use effect_runtime::dynamics::GainComputerCoef;
-use lane::kernels::{SvfState, ramp_toward};
+use lane::kernels::SvfState;
 use lane::{Lane, silence_step};
 
 /// The widest backend and the length of lane scratch arrays owned by this effect.
@@ -41,19 +42,6 @@ pub const MODE: usize = 9;
 pub const DETECTOR: usize = 10;
 /// `1.0` to output the filter tap itself (listen).
 pub const LISTEN: usize = 11;
-
-/// One live word in the precomputed-step form of `effect_runtime::ramp` (D11).
-#[derive(Clone, Copy, Debug)]
-pub struct WordRamp<L: Lane> {
-    /// Value used for the current sample.
-    pub current: L,
-    /// Target assigned exactly on the final ramp sample.
-    pub target: L,
-    /// Precomputed per-sample increment.
-    pub step: L,
-    /// Samples remaining, an exact integer-valued lane word.
-    pub remaining: L,
-}
 
 /// Per-channel words written only by the control plane.
 #[derive(Clone, Copy, Debug)]
@@ -86,19 +74,13 @@ pub struct Chan<L: Lane> {
 impl<L: Lane> Default for Chan<L> {
     fn default() -> Self {
         let zero = L::zero();
-        let ramp = WordRamp {
-            current: zero,
-            target: zero,
-            step: zero,
-            remaining: zero,
-        };
         Self {
             main: SvfState::default(),
             side: SvfState::default(),
             run: zero,
             side_run: zero,
             gain_db: zero,
-            ramps: [ramp; RAMPS],
+            ramps: [WordRamp::zero(); RAMPS],
         }
     }
 }
@@ -117,30 +99,6 @@ pub struct Args<'a, L: Lane> {
     pub coef: (&'a Coef<L>, &'a Coef<L>),
     /// Left and right state.
     pub state: (&'a mut Chan<L>, &'a mut Chan<L>),
-}
-
-/// `a` at `w == 0`, `b` at `w == 1`, `a + w (b - a)` between: a live switch's crossfade. The
-/// endpoints are selected, so a settled switch renders its arm's own bits.
-#[inline(always)]
-fn blend<L: Lane>(a: L, b: L, w: L) -> L {
-    let mixed = w.fma(b.sub(a), a);
-    L::select(w.eq(L::zero()), a, L::select(w.eq(L::splat(1.0)), b, mixed))
-}
-
-/// Advances every ramp one sample: `ramp_toward` (never past the target, #1409), the target on
-/// the final sample. A settled ramp selects every field back, an exact no-op.
-#[inline(always)]
-fn advance<L: Lane>(ramps: &mut [WordRamp<L>; RAMPS]) {
-    let zero = L::zero();
-    let one = L::splat(1.0);
-    for ramp in ramps {
-        let moving = ramp.remaining.gt(zero);
-        let last = ramp.remaining.eq(one);
-        let stepped = ramp_toward(ramp.current, ramp.step, ramp.target);
-        ramp.current = L::select(moving, L::select(last, ramp.target, stepped), ramp.current);
-        ramp.step = L::select(last, zero, ramp.step);
-        ramp.remaining = L::select(moving, ramp.remaining.sub(one), ramp.remaining);
-    }
 }
 
 /// One SVF step on `x` and the selected tap: band `k v1` (0 dB at the centre) or high
@@ -180,7 +138,7 @@ fn front<L: Lane, const RAMPING: bool, const CONNECTED: bool, const ARMABLE: boo
     armed_after: L,
 ) -> (L, L) {
     if RAMPING {
-        advance(&mut s.ramps);
+        advance_word_ramps(&mut s.ramps);
     }
     let tap = filter::<L, ARMABLE>(x, &mut s.main, &mut s.run, &s.ramps, armed_after);
     let detector = if CONNECTED {

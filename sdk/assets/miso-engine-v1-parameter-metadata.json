@@ -23,10 +23,10 @@
     { "value": 15, "name": "observationLimit" }
   ],
   "observationVocabularies": {
-    "kinds": [{ "value": 1, "name": "gainReductionDb" }],
+    "kinds": [{ "value": 1, "name": "gainReductionDb" }, { "value": 2, "name": "gainChangeDb" }],
     "costs": [{ "value": 1, "name": "resident" }, { "value": 2, "name": "computed" }],
     "cadences": [{ "value": 1, "name": "perBlock" }, { "value": 2, "name": "perWindow" }],
-    "folds": [{ "value": 1, "name": "latest" }, { "value": 2, "name": "peakMagnitude" }],
+    "folds": [{ "value": 1, "name": "latest" }, { "value": 2, "name": "peakMagnitude" }, { "value": 3, "name": "peakSigned" }],
     "channels": [{ "value": 1, "name": "shared" }, { "value": 2, "name": "perLane" }]
   },
   "builtins": {

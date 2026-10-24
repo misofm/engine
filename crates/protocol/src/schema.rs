@@ -646,6 +646,54 @@ pub(crate) mod response_result {
     };
 }
 
+/// One tap of a `SPECTRUM_CONFIGURE` request (#1594 D2).
+pub(crate) mod spectrum_entry {
+    use super::*;
+    /// Track post-input `1`, track post-pan `2`, output `3`.
+    pub(crate) const TARGET_KIND: FieldSpec = FieldSpec::req(1, Wire::U8);
+    pub(crate) const TARGET_ID: FieldSpec = FieldSpec::req(2, Wire::Utf8);
+    /// Left `1`, right `2`, both `3`.
+    pub(crate) const CHANNELS: FieldSpec = FieldSpec::req(3, Wire::U8);
+    pub(crate) static SPEC: MessageSpec = MessageSpec {
+        name: "SpectrumEntry",
+        fields: &[TARGET_KIND, TARGET_ID, CHANNELS],
+    };
+}
+
+/// `SPECTRUM_CONFIGURE` (`0x0010`, #1594 D2): the form, the taps, the budget and the hop.
+pub(crate) mod spectrum_configure_request {
+    use super::*;
+    /// Single `1`, collection `2`.
+    pub(crate) const FORM: FieldSpec = FieldSpec::req(1, Wire::U8);
+    pub(crate) const ENTRY: FieldSpec = FieldSpec::msg(2, false, true, &spectrum_entry::SPEC);
+    pub(crate) const MAXIMUM_CAPTURE_BYTES: FieldSpec = FieldSpec::req(3, Wire::U64);
+    pub(crate) const HOP_FRAMES: FieldSpec = FieldSpec::opt(4, Wire::U32);
+    pub(crate) static SPEC: MessageSpec = MessageSpec {
+        name: "SpectrumConfigureRequest",
+        fields: &[FORM, ENTRY, MAXIMUM_CAPTURE_BYTES, HOP_FRAMES],
+    };
+}
+
+/// The `SPECTRUM_CONFIGURE` reply (#1594 D3).
+pub(crate) mod spectrum_configured {
+    use super::*;
+    pub(crate) const REVISION: FieldSpec = FieldSpec::req(1, Wire::U64);
+    pub(crate) const CONFIGURED_EPOCH: FieldSpec = FieldSpec::req(2, Wire::U64);
+    pub(crate) const ADOPTED_EPOCH: FieldSpec = FieldSpec::req(3, Wire::U64);
+    pub(crate) const REBUILD: FieldSpec = FieldSpec::req(4, Wire::Bool);
+    pub(crate) const PLAN_EPOCH: FieldSpec = FieldSpec::opt(5, Wire::U64);
+    pub(crate) static SPEC: MessageSpec = MessageSpec {
+        name: "SpectrumConfigured",
+        fields: &[
+            REVISION,
+            CONFIGURED_EPOCH,
+            ADOPTED_EPOCH,
+            REBUILD,
+            PLAN_EPOCH,
+        ],
+    };
+}
+
 pub(crate) mod transport_get {
     use super::MessageSpec;
     pub(crate) static SPEC: MessageSpec = MessageSpec {
@@ -1885,6 +1933,9 @@ mod tests {
             &response_override::SPEC,
             &response_request::SPEC,
             &response_result::SPEC,
+            &spectrum_entry::SPEC,
+            &spectrum_configure_request::SPEC,
+            &spectrum_configured::SPEC,
             &transport_get::SPEC,
             &transport_set::SPEC,
             &transport_set::RETIRED,

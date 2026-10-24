@@ -363,15 +363,18 @@ fn capability_id_views_reject_order_allocation_and_session_family_identically() 
     assert_parity_rejects(&commands, &[]);
     assert!(!IdSource::LittleEndian(&[1]).is_strict_allocated(false));
     // #1386: `SESSION_REPLACE` (`0x0013`) is allocated and rides the session family;
-    // `0x000f`-`0x0012` are claimed by open specs, not allocated.
+    // `SPECTRUM_CONFIGURE` (`0x0010`) is allocated (#1594; its capability bit is #1595's);
+    // `0x000f`, `0x0011` and `0x0012` are claimed by open specs, not allocated.
     assert!(
         check_capabilities_invariants(view(
-            IdSource::Native(&[1, 2, 3, 0x0013]),
+            IdSource::Native(&[1, 2, 3, 0x0010, 0x0013]),
             IdSource::Native(&events),
         ))
         .is_ok()
     );
-    assert_parity_rejects(&[1, 2, 3, 0x0010], &events);
+    for claimed in [0x000f, 0x0011, 0x0012] {
+        assert_parity_rejects(&[1, 2, 3, claimed], &events);
+    }
     let without_session = |commands: &'static [u16]| CapabilityInvariantView {
         maximum_transaction_edits: 0,
         flags: CapabilityFlags(CapabilityFlags::B1B_BASE.0 & !(1 << 3)),
@@ -3619,4 +3622,184 @@ fn response_result_encoded_len_is_the_exact_frame_length() {
         response_result_encoded_len(usize::MAX / 2, ParameterChannel::Both, 4, true),
         None
     );
+}
+
+fn spectrum_entry(kind: SpectrumTargetKind, id: &str, channels: ParameterChannel) -> SpectrumEntry {
+    SpectrumEntry {
+        target_kind: kind,
+        target_id: id.to_owned(),
+        channels,
+    }
+}
+
+fn encode_spectrum_request(codec: &ProtocolCodec, value: &SpectrumConfigureRequest) -> Vec<u8> {
+    let mut bytes = vec![
+        0;
+        codec
+            .encoded_spectrum_configure_request_len(value)
+            .expect("length")
+    ];
+    codec
+        .encode_spectrum_configure_request(value, &mut bytes)
+        .expect("encode");
+    bytes
+}
+
+/// #1594 gate 1: a `SPECTRUM_CONFIGURE` request of each form and its reply with and without a plan
+/// epoch round-trip exactly; a form, kind or channel code outside its table, a 128-byte identity, a
+/// hop of 300, a single form with two entries and a reply whose `rebuild` disagrees with its plan
+/// epoch are each refused as `INVALID_FIELD`, on encode where the typed value can say it and always
+/// on decode.
+///
+/// Red if the codec admits a malformed or contradictory request or reply in either direction.
+#[test]
+fn spectrum_configure_round_trips_and_refuses_malformed_requests_both_ways() {
+    let codec = ProtocolCodec::default();
+    let single = SpectrumConfigureRequest {
+        form: SpectrumForm::Single,
+        entries: vec![spectrum_entry(
+            SpectrumTargetKind::TrackPostPan,
+            "t1",
+            ParameterChannel::Both,
+        )],
+        maximum_capture_bytes: 1 << 16,
+        hop_frames: None,
+    };
+    let collection = SpectrumConfigureRequest {
+        form: SpectrumForm::Collection,
+        entries: vec![
+            spectrum_entry(
+                SpectrumTargetKind::TrackPostInput,
+                "t1",
+                ParameterChannel::Left,
+            ),
+            spectrum_entry(SpectrumTargetKind::Output, "main", ParameterChannel::Right),
+        ],
+        maximum_capture_bytes: 1 << 20,
+        hop_frames: Some(2048),
+    };
+    let empty = SpectrumConfigureRequest {
+        form: SpectrumForm::Collection,
+        entries: Vec::new(),
+        maximum_capture_bytes: 0,
+        hop_frames: None,
+    };
+    for request in [&single, &collection, &empty] {
+        let bytes = encode_spectrum_request(&codec, request);
+        let count = top_level_count(&bytes);
+        assert_eq!(
+            codec.decode_spectrum_configure_request(&bytes, count),
+            Ok(request.clone())
+        );
+    }
+    for reply in [
+        SpectrumConfigured {
+            revision: 5,
+            configured_epoch: 3,
+            adopted_epoch: 2,
+            rebuild: true,
+            plan_epoch: Some(3),
+        },
+        SpectrumConfigured {
+            revision: 0,
+            configured_epoch: 1,
+            adopted_epoch: 1,
+            rebuild: false,
+            plan_epoch: None,
+        },
+    ] {
+        let mut bytes = vec![
+            0;
+            codec
+                .encoded_spectrum_configured_len(&reply)
+                .expect("length")
+        ];
+        codec
+            .encode_spectrum_configured(&reply, &mut bytes)
+            .expect("encode");
+        let count = top_level_count(&bytes);
+        assert_eq!(codec.decode_spectrum_configured(&bytes, count), Ok(reply));
+        // `rebuild` that disagrees with the plan epoch, both ways.
+        let flipped = SpectrumConfigured {
+            rebuild: !reply.rebuild,
+            ..reply
+        };
+        assert_eq!(
+            codec.encode_spectrum_configured(&flipped, &mut [0; 256]),
+            Err(EncodeError::InvalidField)
+        );
+        let (wire, count) = edited(&bytes, |f| set(f, 4, &[u8::from(!reply.rebuild)]));
+        assert_eq!(
+            codec.decode_spectrum_configured(&wire, count),
+            Err(DecodeError::InvalidField)
+        );
+    }
+
+    let long = "t".repeat(SPECTRUM_TARGET_ID_MAXIMUM_BYTES + 1);
+    // Typed refusals: what the typed value can say.
+    let mut long_id = single.clone();
+    long_id.entries[0].target_id.clone_from(&long);
+    let mut empty_id = single.clone();
+    empty_id.entries[0].target_id.clear();
+    let mut two = collection.clone();
+    two.form = SpectrumForm::Single;
+    let mut odd_hop = single.clone();
+    odd_hop.hop_frames = Some(300);
+    for refused in [&long_id, &empty_id, &two, &odd_hop] {
+        assert_eq!(
+            codec.encoded_spectrum_configure_request_len(refused),
+            Err(EncodeError::InvalidField)
+        );
+    }
+
+    // Wire refusals: each rule on decode.
+    let single_bytes = encode_spectrum_request(&codec, &single);
+    let collection_bytes = encode_spectrum_request(&codec, &collection);
+    type Edit = Box<dyn Fn(&mut Vec<Tlv>)>;
+    let rules: [(&str, &Vec<u8>, Edit); 8] = [
+        ("form 3", &single_bytes, Box::new(|f| set(f, 1, &[3]))),
+        ("form 0", &single_bytes, Box::new(|f| set(f, 1, &[0]))),
+        (
+            "kind 4",
+            &single_bytes,
+            Box::new(|f| set(nth(f, 2, 0), 1, &[4])),
+        ),
+        (
+            "channels 0",
+            &single_bytes,
+            Box::new(|f| set(nth(f, 2, 0), 3, &[0])),
+        ),
+        (
+            "a 128-byte identity",
+            &single_bytes,
+            Box::new(move |f| set(nth(f, 2, 0), 2, long.as_bytes())),
+        ),
+        (
+            "an empty identity",
+            &single_bytes,
+            Box::new(|f| set(nth(f, 2, 0), 2, b"")),
+        ),
+        (
+            "hop 300",
+            &collection_bytes,
+            Box::new(|f| set(f, 4, &300_u32.to_le_bytes())),
+        ),
+        (
+            "a single form with two entries",
+            &collection_bytes,
+            Box::new(|f| set(f, 1, &[SpectrumForm::Single.code()])),
+        ),
+    ];
+    for (name, base, edit) in rules {
+        let (wire, count) = edited(base, |fields| edit(fields));
+        assert_eq!(
+            codec.decode_spectrum_configure_request(&wire, count),
+            Err(DecodeError::InvalidField),
+            "{name}"
+        );
+        assert_eq!(
+            DecodeError::InvalidField.status(),
+            crate::StatusCode::InvalidField
+        );
+    }
 }

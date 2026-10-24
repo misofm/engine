@@ -92,10 +92,10 @@ EFFECT_OBSERVATION_KEYS = {
     "cadence", "cadenceName", "fold", "foldName", "channels", "channelsName", "minimum", "maximum",
     "subscribable",
 }
-OBSERVATION_KINDS = {1: "gainReductionDb"}
+OBSERVATION_KINDS = {1: "gainReductionDb", 2: "gainChangeDb"}
 OBSERVATION_COSTS = {1: "resident", 2: "computed"}
 OBSERVATION_CADENCES = {1: "perBlock", 2: "perWindow"}
-OBSERVATION_FOLDS = {1: "latest", 2: "peakMagnitude"}
+OBSERVATION_FOLDS = {1: "latest", 2: "peakMagnitude", 3: "peakSigned"}
 OBSERVATION_CHANNELS = {1: "shared", 2: "perLane"}
 OBSERVATION_VOCABULARIES = {
     "kinds": OBSERVATION_KINDS,
