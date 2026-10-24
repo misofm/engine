@@ -576,9 +576,10 @@ impl Legs {
     }
 }
 
-/// The `CAPABILITIES_GET` reply `reply` with `added` appended to its command list, re-encoded by
-/// the codec so every length field matches. The browser's list must not hold an added ID already.
-fn capabilities_plus(reply: &[u8], added: &[u16]) -> Vec<u8> {
+/// The `CAPABILITIES_GET` reply `reply` with `added` merged into its ascending command list and
+/// `flags` set, re-encoded by the codec so every length field matches. The browser's list must not
+/// hold an added ID already.
+fn capabilities_plus(reply: &[u8], added: &[u16], flags: u64) -> Vec<u8> {
     let codec = protocol::ProtocolCodec::default();
     let mut fields = [0_u16; 64];
     let protocol::DecodedTypedResponseFrame::Success {
@@ -601,6 +602,7 @@ fn capabilities_plus(reply: &[u8], added: &[u16]) -> Vec<u8> {
     let mut commands = ids(value.supported_commands);
     assert!(added.iter().all(|id| !commands.contains(id)));
     commands.extend_from_slice(added);
+    commands.sort_unstable();
     let events = ids(value.supported_events);
     let capabilities = protocol::Capabilities {
         minimum_version: value.minimum_version,
@@ -623,7 +625,7 @@ fn capabilities_plus(reply: &[u8], added: &[u16]) -> Vec<u8> {
         maximum_transaction_edits: value.maximum_transaction_edits,
         supported_commands: &commands,
         supported_events: &events,
-        flags: value.flags,
+        flags: protocol::CapabilityFlags(value.flags.0 | flags),
     };
     let mut out = vec![0_u8; reply.len() + 64];
     let length = codec
@@ -650,6 +652,8 @@ fn the_browser_and_the_c_abi_give_the_same_bytes_for_one_script() {
     // 1. CAPABILITIES_GET. #1697 removes this exception: until the browser has a document
     // transport, the C ABI's reply is the browser's plus exactly the `SESSION_REPLACE` (`0x0013`)
     // entry of the command list (#1386, root decision), and every other step stays byte-equal.
+    // #1596 removes the second: until the browser reads spectrum through the frames, the C ABI
+    // also lists the three spectrum commands (`0x0010`-`0x0012`) with flag bit 16 (#1595 R2).
     let request = legs.next();
     let bytes = frame(
         request,
@@ -660,14 +664,18 @@ fn the_browser_and_the_c_abi_give_the_same_bytes_for_one_script() {
     let (c_result, c_reply) = legs.c.send(&bytes);
     assert_eq!(browser_result, c_result, "1 capabilities: the result codes");
     assert_eq!(
-        capabilities_plus(&browser_reply, &[]),
+        capabilities_plus(&browser_reply, &[], 0),
         browser_reply,
         "1 capabilities: the browser's reply re-encodes to itself"
     );
     assert_eq!(
-        capabilities_plus(&browser_reply, &[0x0013]),
+        capabilities_plus(
+            &browser_reply,
+            &[0x0010, 0x0011, 0x0012, 0x0013],
+            protocol::CapabilityFlags::SPECTRUM.0
+        ),
         c_reply,
-        "1 capabilities: the C ABI's reply is the browser's plus exactly 0x0013"
+        "1 capabilities: the C ABI's reply is the browser's plus exactly 0x0010-0x0013 and bit 16"
     );
 
     // 2. SESSION_SNAPSHOT_GET at offset 0 with 64 bytes, then continuation pages until eof.
