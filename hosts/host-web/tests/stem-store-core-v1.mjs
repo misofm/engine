@@ -60,6 +60,7 @@ function store(backend, locks, options = {}) {
     hooks: options.hooks,
     now: options.now,
     readDeadlineMs: options.readDeadlineMs ?? 1_000,
+    maintenanceBudgetMs: options.maintenanceBudgetMs,
     ingestReadDeadlineMs: options.ingestReadDeadlineMs ?? 1_000,
   })
 }
@@ -232,32 +233,79 @@ async function corruptionSelfHeals() {
 }
 
 async function wedgedDemoteDeleteIsBounded() {
-  const stem = fixture("wedged-demote", 4096)
+  for (const blocker of ["createWritableBlocker", "writeBlocker", "closeBlocker"]) {
+    const stem = fixture(`wedged-demote-${blocker}`, 4096)
+    const backend = new FakeOpfsBackend()
+    const opfs = store(backend, new FakeLockManager(), {
+      tabId: "wedged-demote",
+      readDeadlineMs: 10,
+    })
+    const lease = await opfs.openSession({
+      sessionId: "seed",
+      stems: requirements([stem]),
+      resolver: new MemoryStemResolver(stemMap([stem])),
+    })
+    await lease.close()
+    const finalName = `blake3-${stem.identity.slice(7)}`
+    const corrupted = new Uint8Array(stem.pcm)
+    corrupted[5] ^= 1
+    backend.setBytes(`miso-stems-blake3-v1/${finalName}`, corrupted)
+    backend.removeEntryBlocker = ({ name }) => (name === finalName ? never() : undefined)
+    const outcome = await settledWithin(opfs.verify(stem.identity), 500)
+    assert.notEqual(outcome, "timed-out", "a demote awaited a wedged delete without a deadline")
+    assert.equal(outcome.value, false)
+    assert.equal(indexStems(backend)[stem.identity], undefined, "a demoted stem stayed indexed")
+
+    // The wedged delete left the corrupt final, so a second verify demotes
+    // again; now one step of the index write under the index lock hangs.
+    backend[blocker] = ({ fileName }) => (fileName === "index.json" ? never() : undefined)
+    const wedgedWrite = await settledWithin(opfs.verify(stem.identity), 500)
+    assert.notEqual(
+      wedgedWrite,
+      "timed-out",
+      `an index write under the index lock had no deadline (${blocker})`
+    )
+    assert.equal(wedgedWrite.error?.code, "storage.write_stalled")
+  }
+}
+
+async function lateIndexWriteCannotOverwriteANewerOne() {
+  const stem = fixture("late-index-write", 4096)
   const backend = new FakeOpfsBackend()
-  const locks = new FakeLockManager()
-  const opfs = store(backend, locks, { tabId: "wedged-demote", readDeadlineMs: 10 })
+  const opfs = store(backend, new FakeLockManager(), { tabId: "late", readDeadlineMs: 20 })
   const lease = await opfs.openSession({
     sessionId: "seed",
     stems: requirements([stem]),
     resolver: new MemoryStemResolver(stemMap([stem])),
   })
   await lease.close()
-  const finalName = `blake3-${stem.identity.slice(7)}`
-  const corrupted = new Uint8Array(stem.pcm)
-  corrupted[5] ^= 1
-  backend.setBytes(`miso-stems-blake3-v1/${finalName}`, corrupted)
-  backend.removeEntryBlocker = ({ name }) => (name === finalName ? never() : undefined)
-  const outcome = await settledWithin(opfs.verify(stem.identity), 500)
-  assert.notEqual(outcome, "timed-out", "a demote awaited a wedged delete without a deadline")
-  assert.equal(outcome.value, false)
-  assert.equal(indexStems(backend)[stem.identity], undefined, "a demoted stem stayed indexed")
-
-  // The wedged delete left the corrupt final, so a second verify demotes
-  // again; now the index write under the index lock hangs too.
-  backend.closeBlocker = ({ fileName }) => (fileName === "index.json" ? never() : undefined)
-  const wedgedWrite = await settledWithin(opfs.verify(stem.identity), 500)
-  assert.notEqual(wedgedWrite, "timed-out", "an index write under the index lock had no deadline")
-  assert.equal(wedgedWrite.error?.code, "storage.write_stalled")
+  let lateOnce = true
+  backend.closeBlocker = ({ fileName }) => {
+    if (fileName !== "index.json" || !lateOnce) return undefined
+    lateOnce = false
+    return new Promise((resolve) => setTimeout(resolve, 80))
+  }
+  await assert.rejects(opfs.setOfflinePin(stem.identity, "older", true), (error) => {
+    assert.equal(error.code, "storage.write_stalled")
+    return true
+  })
+  // The newer write either is refused while the late close is pending, or
+  // lands; it must still be on disk after the late close settles.
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      await opfs.setOfflinePin(stem.identity, "newer", true)
+      break
+    } catch (error) {
+      assert.equal(error.code, "storage.write_stalled")
+      assert.ok(attempt < 50, "a stalled index write never settled")
+      await new Promise((resolve) => setTimeout(resolve, 10))
+    }
+  }
+  await new Promise((resolve) => setTimeout(resolve, 150))
+  assert.ok(
+    indexStems(backend)[stem.identity].pins.includes("offline:newer"),
+    "a late index close overwrote a newer index"
+  )
 }
 
 async function unwritableStoreRefusesBeforeNetwork() {
@@ -308,6 +356,7 @@ async function openSurvivesFailingSweeps() {
   const opfs = store(backend, locks, {
     tabId: "sweep-open",
     readDeadlineMs: 20,
+    maintenanceBudgetMs: 200,
     hooks: { maintenanceFailure: (event) => failures.push(event.sweep) },
   })
   const opened = await settledWithin(opfs.open(), 500)
@@ -1090,6 +1139,7 @@ async function modeDetection() {
 await twoMixNarrative()
 await twoTabCollision()
 await wedgedDemoteDeleteIsBounded()
+await lateIndexWriteCannotOverwriteANewerOne()
 await unwritableStoreRefusesBeforeNetwork()
 await openSurvivesFailingSweeps()
 await indexRecoveryAdoptsSelfVerifyingFinals()

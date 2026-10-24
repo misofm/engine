@@ -38,6 +38,7 @@ export class OpfsStemStore {
   #ingestReadDeadlineMs
   #maintenanceBudgetMs
   #maintenanceFailures = 0
+  #stalledIndexWrite
   #hooks
   #directory
   #staging
@@ -962,28 +963,56 @@ export class OpfsStemStore {
   }
 
   // Runs inside the index lock, so every await is deadlined: one wedged
-  // write must not block every stem in the realm.
+  // write must not block every stem in the realm. A timed-out step may still
+  // land later, so until it settles no newer index write of this store starts
+  // (the late close would overwrite it). No rewrite follows the settle: a late
+  // success already committed this, the newest index of this store; a late
+  // failure matches the error its caller got; and a rewrite could overwrite
+  // an index that another tab wrote after the settle.
   async #writeIndex(index) {
-    const deadline = (operation, step) =>
-      withDeadline(
+    if (this.#stalledIndexWrite !== undefined) {
+      throw new StemStoreError(
+        "storage.write_stalled",
+        "An earlier stem index write has not settled"
+      )
+    }
+    let pending
+    const deadline = (operation, step) => {
+      pending = operation
+      return withDeadline(
         operation,
         this.#readDeadlineMs,
         "storage.write_stalled",
         `${step} the stem index made no progress`
       )
-    const handle = await deadline(
-      this.#directory.getFileHandle(INDEX_FILE, { create: true }),
-      "Opening"
-    )
-    const writable = await deadline(handle.createWritable(), "Opening")
+    }
     try {
-      await deadline(writable.write(`${JSON.stringify(index)}\n`), "Writing")
-      await deadline(writable.close(), "Closing")
+      const handle = await deadline(
+        this.#directory.getFileHandle(INDEX_FILE, { create: true }),
+        "Opening"
+      )
+      const writable = await deadline(handle.createWritable(), "Opening")
+      try {
+        await deadline(writable.write(`${JSON.stringify(index)}\n`), "Writing")
+        await deadline(writable.close(), "Closing")
+      } catch (error) {
+        const stalled = pending
+        await deadline(writable.abort(error), "Aborting").catch(() => {})
+        pending = stalled
+        throw error
+      }
     } catch (error) {
-      await deadline(writable.abort(error), "Aborting").catch(() => {})
+      if (error?.code === "storage.write_stalled" && this.#stalledIndexWrite === undefined) {
+        this.#stalledIndexWrite = Promise.resolve(pending)
+          .catch(() => {})
+          .then(() => {
+            this.#stalledIndexWrite = undefined
+          })
+      }
       throw error
     }
   }
+
 
   async #bestEffortSweep(sweep, work) {
     try {
