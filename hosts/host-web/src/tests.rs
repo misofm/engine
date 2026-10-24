@@ -1,6 +1,6 @@
 use core::mem::{offset_of, size_of, size_of_val};
 
-use host_core::{SpectrumSmoothingConfig, prepare_host_runtime_with_selected_meters};
+use host_core::SpectrumSmoothingConfig;
 use session::{canonical_session_json, parse_session_json};
 
 use super::*;
@@ -3840,6 +3840,17 @@ fn bus_meter_host_with(
     meter_blocks: u64,
     source_quanta: u64,
 ) -> AudioWorkletEngineHost {
+    bus_meter_host_with_spectrum(quantum, buses, meter_blocks, source_quanta, None)
+}
+
+/// [`bus_meter_host_with`] booted with `spectrum` (issue #1581 gate 2).
+fn bus_meter_host_with_spectrum(
+    quantum: u32,
+    buses: bool,
+    meter_blocks: u64,
+    source_quanta: u64,
+    spectrum: Option<SpectrumPreparationRequest>,
+) -> AudioWorkletEngineHost {
     let mut model = parse_session_json(include_str!(
         "../../../fixtures/session/v1/observation-frame-shape.json"
     ))
@@ -3882,12 +3893,13 @@ fn bus_meter_host_with(
         live_control_meter_blocks: meter_blocks,
         ..boot_options(quantum)
     };
-    AudioWorkletEngineHost::boot(document.as_bytes(), options).unwrap_or_else(|failure| {
-        panic!(
-            "bus meter boot: {}",
-            String::from_utf8_lossy(failure.diagnostic())
-        )
-    })
+    AudioWorkletEngineHost::boot_with_spectrum(document.as_bytes(), options, spectrum)
+        .unwrap_or_else(|failure| {
+            panic!(
+                "bus meter boot: {}",
+                String::from_utf8_lossy(failure.diagnostic())
+            )
+        })
 }
 
 /// Issue #1448 D6: after a window is lost on one or two meters, the poll that recovers publishes
@@ -4030,6 +4042,42 @@ fn the_meter_frame_carries_a_peak_pair_and_a_gain_word_per_submix() {
         assert_eq!(value.to_bits(), 0.0_f32.to_bits(), "gain word {word}");
     }
     assert_eq!(header.master_gr_present, 0);
+}
+
+/// Issue #1581 gate 2: a boot with a spectrum capture meters the submixes as the plain boot does,
+/// so the bus fixture's frame is the plain boot's, word for word, with nonzero submix peaks.
+///
+/// Red on the base: the spectrum entries metered the tracks alone, so the submix pairs stayed `0`.
+#[test]
+fn a_spectrum_boot_meters_every_submix_like_the_plain_boot() {
+    const QUANTUM: u32 = 128;
+    const BLOCKS: u64 = 8;
+    let mut plain = bus_meter_host(QUANTUM, true);
+    let expected = bus_meter_frame(&mut plain, BLOCKS);
+    let spectrum = SpectrumPreparationRequest::Single(SpectrumCaptureRequest {
+        target: SpectrumTarget::Output("main-out".into()),
+        channels: SpectrumChannels::Stereo,
+        maximum_capture_bytes: u64::MAX,
+    });
+    let mut host = bus_meter_host_with_spectrum(QUANTUM, true, 2, 64, Some(spectrum));
+    let frame = bus_meter_frame(&mut host, BLOCKS);
+    let tracks = 3;
+    for (word, peak) in frame
+        .iter()
+        .enumerate()
+        .take(2 * (tracks + 2))
+        .skip(2 * tracks)
+    {
+        assert!(*peak > 0.0, "submix peak word {word} is metered");
+    }
+    assert_eq!(
+        frame.iter().map(|word| word.to_bits()).collect::<Vec<_>>(),
+        expected
+            .iter()
+            .map(|word| word.to_bits())
+            .collect::<Vec<_>>(),
+        "the spectrum boot's frame is the plain boot's"
+    );
 }
 
 /// Issue #1209 gate 5 (also #1207 verdict MINOR-2): on a session with submix strips carrying

@@ -200,16 +200,24 @@ Commands: `cargo test --locked -p host-core --all-features`,
 - **R1.** host-web's no-spectrum branch calls the plain live-lanes entries; its own list is gone.
 - **R2.** A request with no selection routes the core selection through the selected-builtins path;
   the plain entry (no request) still prepares no meter.
-- **T1 attempt 1 (blocked).** Host-core D1/D2 are in (`meters.rs`, gate 1 `tests/meters.rs`, gate 5
-  unit test, host-core tests green). Putting the strip meters on every C ABI plan makes the C ABI's
-  own `CompileLimits` meter caps bind: every test host there sets `maximum_meter_streams`,
-  `maximum_meter_items` and `maximum_meter_bytes` to `1`, so a session of two or more strips is now
-  refused with `builtin.resource.limit $.meter_requests`. Measured on this branch: capi 177 tests
-  red, control-plane 29, host-web `tests/control_parity.rs` 45. Their fixes are outside T1's paths
-  (`crates/capi/tests/*`, `crates/capi/tests/c/abi_smoke.c`, `crates/capi/src/{ffi.rs,runtime/tests.rs}`,
-  `crates/control-plane/{src/control.rs,tests/*}`, `hosts/host-web/tests/control_parity.rs`,
-  `tools/audit/src/capi.rs`), and the C ABI header must then say that the meter caps bound one
-  stream per strip. Open for root: accept that contract (and widen T1's paths), or count the core's
-  strip meters outside the caller's meter caps. A boot word of `0` now also binds the browser's
-  strip meters, so `observation_staging_resource_is_exact_for_the_taps_off_and_on_modes`
-  (`hosts/host-web/src/tests.rs`) no longer holds its "no meter" rows.
+- **Meter caps (root ruling, 2026-10-24).** The caller's meter caps bound every meter stream, the
+  core's strip meters included: a host must admit one stream per strip plus the output. The C ABI
+  header and `docs/C_ABI_V1_QUALIFICATION.md` state it; a cap below that refuses the compile with
+  `builtin.resource.limit $.meter_requests` (capi `a_meter_cap_below_the_strip_count_is_refused`).
+  The test hosts' cap helpers admit 4,096 streams.
+- **Resources move (class A, no rendered bit).** A boot word of `0` now binds the browser's strip
+  meters (R5: the lease is still refused until T3), so the browser oracle's `builtinRetainedBytes`
+  is 6,095 (ceiling 4,288 -> 6,720) and the boot-word-0 test charges the strip meters' delivery
+  rows. The capi reference session: `builtin_meter_payload_bytes` 0 -> 10,458,
+  `builtin_retained_payload_bytes` 46,917 (ceilings 11,520 and 51,648). The meter-carry test's
+  window is 5 blocks (was 600 frames): a request's window is a whole number of blocks.
+- **Red on base (T1).** Gate 1 on `2179497cc`: `session_with_live_controls` gives
+  `[t0, t1, t2]`, not the five strips. Gate 2
+  (`a_spectrum_boot_meters_every_submix_like_the_plain_boot`): submix peak word 6 is `0`.
+- **D7 evidence (#882).** `console-sixty-four-track-intended.json` (64 strips, source fed for the
+  whole run), C ABI lanes, release x86-64 AVX2, 2,000 blocks a round, one warmup and two rounds,
+  arms alternated: no meters 96,883 / 97,275 ns per block, the 64 core strip meters 103,400 /
+  103,281 ns per block (about +6.3 us, +6.5 %). Retained: `builtin_meter_payload_bytes` 0 ->
+  74,752 and `builtin_retained_payload_bytes` 259,968 -> 334,720. An earlier invocation fed the
+  48,000-frame source past its end and so mostly timed silence (8.9 / 14.7 us per block); it is
+  discarded as a harness defect.
