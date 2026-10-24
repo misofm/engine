@@ -9346,39 +9346,42 @@ fn a_route_whose_source_changed_kind_does_not_carry_its_line() {
 }
 
 /// #1891: a sidechain key's line is keyed by its effect's strip ID. A has track `eq1` behind a
-/// limiter with a compressor keyed from `eq0`'s post-input tap, ahead of `eq0`'s own limiter, so the key
-/// has a line; B replaces
-/// the track with a submix `eq1` with the same inserts, fed from `eq0`. The submix is another
-/// strip, so its key line starts at rest, as the line of a strip B adds does: the swapped run
-/// equals the swap into B from A without `eq1`, from the swap block on. Red if the line joins by
-/// graph node alone: the submix's compressor reads the track's pending key.
+/// limiter with a compressor keyed from `eq0`'s post-input tap, ahead of `eq0`'s own limiter, so
+/// the key has a line. B replaces the track with a submix `eq1` with the same inserts, fed from
+/// `eq0`. The submix is another strip, so its key line starts at rest: the swapped run equals the
+/// swap into B from A keyed from `eq0`'s input tap instead, whose line has another source and
+/// starts at rest, from the swap block on. Red if the line joins by graph node alone: the
+/// submix's compressor reads the track's pending key.
 #[test]
 fn a_sidechain_line_onto_a_strip_of_another_kind_starts_at_rest() {
     let rate = 48_000;
     let feed = Feed::new(SOURCE, 1);
-    let mut a_model = pdc_session(rate, &["eq0", "eq1"]);
-    remove_track(&mut a_model, "eq2");
-    remove_track(&mut a_model, "eq3");
-    track_mut(&mut a_model, "eq1").inserts.effects.push(Effect {
-        id: id("duck"),
-        identity: EffectIdentity::Native {
-            effect_id: id("miso.compressor"),
-        },
-        quality: EffectQuality::Normal,
-        bypass: false,
-        link_mode: LinkMode::Maximum,
-        params: console_params("comp", 1, false),
-        sidechain: SidechainDeclaration::Routed(session::Sidechain {
-            source: RouteSource::Track {
-                track_id: id("eq0"),
-                tap: session::SendTap::PostInput,
+    let keyed = |tap: session::SendTap| {
+        let mut model = pdc_session(rate, &["eq0", "eq1"]);
+        remove_track(&mut model, "eq2");
+        remove_track(&mut model, "eq3");
+        track_mut(&mut model, "eq1").inserts.effects.push(Effect {
+            id: id("duck"),
+            identity: EffectIdentity::Native {
+                effect_id: id("miso.compressor"),
             },
-            port_id: id("sidechain-in"),
-        }),
-    });
-    let mut without = a_model.clone();
-    remove_track(&mut without, "eq1");
-    let mut b_model = without.clone();
+            quality: EffectQuality::Normal,
+            bypass: false,
+            link_mode: LinkMode::Maximum,
+            params: console_params("comp", 1, false),
+            sidechain: SidechainDeclaration::Routed(session::Sidechain {
+                source: RouteSource::Track {
+                    track_id: id("eq0"),
+                    tap,
+                },
+                port_id: id("sidechain-in"),
+            }),
+        });
+        model
+    };
+    let mut a_model = keyed(session::SendTap::PostInput);
+    let mut b_model = a_model.clone();
+    remove_track(&mut b_model, "eq1");
     let mut submix = session::Submix::unity(id("eq1"), &b_model.console);
     submix.inserts = track_mut(&mut a_model, "eq1").inserts.clone();
     b_model.submixes.push(submix);
@@ -9407,31 +9410,33 @@ fn a_sidechain_line_onto_a_strip_of_another_kind_starts_at_rest() {
         submix_id: id("eq1"),
     };
     b_model.routes.extend([out, feed_route]);
-    let (a, without, b) = (
+    let (a, rekeyed, b) = (
         Session::compile(a_model),
-        Session::compile(without),
+        Session::compile(keyed(session::SendTap::Input)),
         Session::compile(b_model),
     );
     for backend in backends() {
         let what = format!("{backend:?}");
-        assert_eq!(
-            a.prepare(backend).inventory.delay_line_count(),
-            1,
-            "{what}: A's key has a line"
-        );
+        for session in [&a, &rekeyed] {
+            assert_eq!(
+                session.prepare(backend).inventory.delay_line_count(),
+                1,
+                "{what}: the key has a line"
+            );
+        }
         let run = effect_run(&a, Some((&b, &a.model)), &feed, &[], &[], backend);
-        let added = effect_run(
-            &without,
-            Some((&b, &without.model)),
+        let at_rest = effect_run(
+            &rekeyed,
+            Some((&b, &rekeyed.model)),
             &feed,
             &[],
             &[],
             backend,
         );
         assert_clean_swap(&run, &what);
-        assert_clean_swap(&added, &what);
+        assert_clean_swap(&at_rest, &what);
         assert!(
-            added.blocks[SWAP_BLOCK..]
+            at_rest.blocks[SWAP_BLOCK..]
                 .iter()
                 .flatten()
                 .any(|bits| *bits != 0),
@@ -9439,11 +9444,11 @@ fn a_sidechain_line_onto_a_strip_of_another_kind_starts_at_rest() {
         );
         let difference = run.blocks[SWAP_BLOCK..]
             .iter()
-            .zip(&added.blocks[SWAP_BLOCK..])
-            .position(|(swapped, fresh)| swapped != fresh);
+            .zip(&at_rest.blocks[SWAP_BLOCK..])
+            .position(|(swapped, rest)| swapped != rest);
         assert_eq!(
             difference, None,
-            "{what}: the submix's key line starts at rest, as an added strip's does"
+            "{what}: the submix's key line starts at rest"
         );
     }
 }
