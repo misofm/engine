@@ -51,8 +51,8 @@ use super::{Consumer, GATE_REVISION_MAX, Producer, QueueEmpty, QueueGeneration, 
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct PlanEpoch(pub u64);
 use super::{
-    CarryOutcome, ObserverKind, PlanRevisionGate, PreparedRenderPlan, RenderError, RenderIo,
-    RenderReport, RenderTime,
+    CarryOutcome, PlanRevisionGate, PreparedRenderPlan, RenderError, RenderIo, RenderReport,
+    RenderTime,
 };
 use core::{
     alloc::Layout,
@@ -853,25 +853,18 @@ impl RealtimePlanOwner {
         self.strip_meters = on;
     }
     /// Set the strip meter level of a block that applies a swap whose successor carried no strip
-    /// meter ([`ObserverKind::Meter`] in its [`PreparedRenderPlan::observer_carries`], #882). Such
-    /// a successor's meters open their first window at the adoption block, and a host restarts
-    /// its meter grid there, so that block follows this level instead of
-    /// [`Self::set_strip_meter_level`]'s. One store; called between blocks by the plan's owner.
+    /// meter (no [`super::ObserverKind::Meter`] entry in its
+    /// [`PreparedRenderPlan::observer_carries`], #882). Such a successor's meters open their first
+    /// window at the adoption block, and a host restarts its meter grid there, so that block
+    /// follows this level instead of [`Self::set_strip_meter_level`]'s. One store; called between
+    /// blocks by the plan's owner.
     pub fn set_strip_meter_level_at_restart(&mut self, on: bool) {
         self.strip_meters_at_restart = on;
     }
     /// The strip meter level of the block that just entered with `swap`: the restart level when
-    /// the swap applied and its successor carried no strip meter, the steady level otherwise. A
-    /// walk of the successor's carries only on a swap block, bounded by them.
+    /// the swap applied and its successor carried no strip meter, the steady level otherwise.
     fn strip_meter_level(&self, swap: SwapOutcome) -> bool {
-        if swap == SwapOutcome::Applied
-            && !self
-                .active
-                .1
-                .observer_carries()
-                .iter()
-                .any(|carry| carry.kind == ObserverKind::Meter)
-        {
+        if swap == SwapOutcome::Applied && !self.active.1.strip_meters_carried() {
             self.strip_meters_at_restart
         } else {
             self.strip_meters

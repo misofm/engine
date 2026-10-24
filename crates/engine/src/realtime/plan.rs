@@ -406,12 +406,20 @@ pub trait PreparedPlanExecutor: Send {
     fn begin_live_block(&mut self, _snapshot: LiveSnapshot) {}
     /// Receive the block's strip meter level (#882): `false` asks the executor to skip every
     /// strip meter observer this block, so a block nobody meters does no strip meter work; taps
-    /// and other observers run unchanged. Called once per block, on the render thread inside the
-    /// render scope, right before [`begin_live_block`](Self::begin_live_block).
+    /// and other observers run unchanged. Called once per block, from
+    /// [`begin_block`](Self::begin_block).
     ///
     /// **Render-thread code.** One store: no allocation, free, lock, syscall, log or loop. The
     /// default ignores it, which is right for an executor that binds no strip meter.
     fn set_strip_meter_level(&mut self, _on: bool) {}
+    /// The block's entry, once per block where [`begin_live_block`](Self::begin_live_block) is
+    /// documented to run: the strip meter level ([`set_strip_meter_level`](Self::set_strip_meter_level),
+    /// #882), then the live snapshot. One dispatch for both, so the render path's dynamic calls
+    /// stay as they were; an executor overrides the two hooks, not this.
+    fn begin_block(&mut self, snapshot: LiveSnapshot, strip_meters: bool) {
+        self.set_strip_meter_level(strip_meters);
+        self.begin_live_block(snapshot);
+    }
     /// Render one already-validated block using only preallocated state, and report the
     /// block's source facts ([`ExecutorBlockReport`]) in the same call.
     fn render(
@@ -891,6 +899,10 @@ pub struct PreparedRenderPlan {
     /// default) keeps every bound strip meter observing, so a plan with no host meter policy
     /// meters every block. Render reads it; [`Self::set_strip_meter_level`] stores it.
     strip_meters: bool,
+    /// Whether this plan's executor carried a strip meter from its predecessor at its swap block
+    /// (#882): an [`ObserverKind::Meter`] entry in its [`Self::observer_carries`], recorded by
+    /// [`Self::carry_from`]. `false` until then.
+    strip_meters_carried: bool,
     _not_sync: Cell<()>,
     #[cfg(test)]
     drop_observer: Option<DropObserver>,
@@ -965,6 +977,7 @@ impl PreparedRenderPlan {
             gate_pin: Some(gate_pin),
             host_attachment: None,
             strip_meters: true,
+            strip_meters_carried: false,
             _not_sync: Cell::new(()),
             #[cfg(test)]
             drop_observer: None,
@@ -1453,17 +1466,25 @@ impl PreparedRenderPlan {
             (Some(successor), Some(predecessor)) => successor.adopt_predecessor(predecessor),
             _ => CarryOutcome::NotRequested,
         };
+        let carries = self
+            .executor
+            .as_deref()
+            .map_or(&[][..], |executor| executor.observer_carries());
+        self.strip_meters_carried = carries
+            .iter()
+            .any(|carry| carry.kind == ObserverKind::Meter);
         if let (Some(successor), Some(predecessor)) = (
             self.host_attachment.as_deref_mut(),
             predecessor.host_attachment.as_deref_mut(),
         ) {
-            let carries = self
-                .executor
-                .as_deref()
-                .map_or(&[][..], |executor| executor.observer_carries());
             successor.adopt_predecessor(predecessor, carries);
         }
         outcome
+    }
+
+    /// Whether this plan's swap block carried a strip meter from its predecessor (#882).
+    pub(crate) const fn strip_meters_carried(&self) -> bool {
+        self.strip_meters_carried
     }
 
     /// Render one block through the plan's own revision gate (#1502 D2). After the output-shape
@@ -1516,8 +1537,7 @@ impl PreparedRenderPlan {
         live_snapshot: LiveSnapshot,
     ) -> Result<ExecutorBlockReport, RenderError> {
         if let Some(executor) = &mut self.executor {
-            executor.set_strip_meter_level(self.strip_meters);
-            executor.begin_live_block(live_snapshot);
+            executor.begin_block(live_snapshot, self.strip_meters);
             return executor.render(&mut self.arena, io.output, time);
         }
         {
