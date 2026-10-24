@@ -604,3 +604,78 @@ already carry both rulings.
   The alternative is to commit it (`model_only`, revision + 1, one `SESSION_COMMITTED` with 0
   operations). Gate 3's identical case and gate 6 follow the ruling.
   ROOT DECISION (2026-10-16): an identical-document replace replies with a new `EditPath::Unchanged` (5): OK, 0 operations, unchanged revision, no event. Nothing changed, so the revision does not move. The `edit_path` vocabulary (protocol, registry, the vocabulary gates), the SDK decoder and the parity row all include 5.
+
+## Evidence and decisions, tranche a1 (attempt 1, 2026-10-24)
+
+Scope note `opt/scope/1386.md` governs; a1 is the core (protocol, control plane, corpus, docs).
+a2 (C ABI export, feature bit `1 << 11`, capi tests, the parity refusal row, the audit frame) is
+still open.
+
+- **Hook shape.** `ProtocolControllerConfig::document_replace: Option<DocumentReplace>`, a plain
+  `fn` plus the boot's `maximum_document_bytes` (0 unbounded). The hook gets the committed
+  `SessionStore`, so it can compile the document under the store's own caps: the document is
+  validated exactly as a boot validates it, and both sides of the diff are normalized models.
+  `SessionStore::caps()` is added for that.
+- **Bits, not `PartialEq`.** Entities are compared by a byte stream of the session's own model
+  walk (`VisitModel`, floats by `to_bits`), not by canonical JSON text.
+- **Smoothing.** The diff emits `SetControl` rows for an explicit arm as D2 says, and
+  `SessionStore::prepare_replacement` then sets the document's `control_smoothing` whole, so both
+  arms and both directions land exactly. A smoothing-only change commits with 0 operations
+  (`model_only`).
+- **One added diagnostic code.** A document that is not UTF-8 is `VALIDATION_FAILED`
+  `session.replace.document_utf8` (D4 lists "does not parse" with the parser's diagnostics; the
+  parser takes `&str`, so this case needs its own code).
+- **No document on the controller's other paths.** `ProtocolController::process` and the one-call
+  `process_command_frame_into` carry no document, so a `SESSION_REPLACE` there gets the
+  `document_length` refusal from the same hook.
+- **Paths outside the a1 list, needed by the change:** `crates/protocol/tests/set_control_frames.rs`
+  (one `EditPath::Unchanged` match arm), `crates/conformance/src/main.rs` and
+  `crates/conformance/tests/mutation_million.rs` (the corpus frame count 46 -> 48, part of the
+  re-pin).
+- **Re-pin.** `COMPLETE_SCHEMA_HASH` `5cab2cf3b4e4767f` -> `c85b2a0dff5d2a92`, 48 frames
+  (`command.session_replace`, `response.session_replace` with `unchanged`, and `0x0013` in the
+  capabilities response), in every spelling.
+- **C ABI capability pins (root-authorized for a2).** The C ABI endpoint is built by
+  `compile_children`, so it advertises `0x0013`; two capability-reply pins in
+  `crates/capi/src/runtime/tests.rs` move by exactly two bytes (field 25's length 0x16 -> 0x18 and
+  the ID in the former padding). The dispatcher test needs no `0x0013` row: it does not iterate
+  the advertised list.
+
+## Evidence and decisions, tranche a2 (attempt 1, 2026-10-24; root: a1 and a2 land as one PR)
+
+- `miso_engine_v1_submit_document_command` and `miso_engine_v1_submit_command` share one body
+  (`submit`) into `command_with_document`; `submit_command` passes no document. A null document
+  with a nonzero length is `INVALID_ARGUMENT`; the document's own bound is the control plane's
+  typed reply, so only the platform slice cap applies at the ABI.
+- `FEATURE_SESSION_REPLACE = 1 << 11`, mask 4095 (abi.rs, header, `abi_smoke.c`,
+  `header_smoke.cpp`); the export list in `check-capi-abi.sh` (22 symbols); one frame in
+  `audit protocol`.
+- `crates/capi/tests/session_replace.rs` holds the ABI rows only: twin-transaction parity (reply,
+  event and 8 rendered blocks each for a rebuild, a live change and an identical document), the
+  null document, the no-document retry through `submit_command`, and a 70 KiB-plus document
+  (four times the 16 KiB frame, 96 edits) whose large live replace leaves exactly the live bytes
+  (`bench_support::alloc` thread counters) of the equal transaction on a twin.
+- `hosts/host-web/tests/control_parity.rs` gains the gate-6 refusal row at 44.1 and 48 kHz.
+- Paths outside the listed a2 set, needed by the change: `crates/capi/Cargo.toml` (`sha2` as a
+  dev-dependency, for the frame digest in the test) and `crates/capi/tests/c/header_smoke.cpp`
+  (the bit and the signature, the header twin of `abi_smoke.c`).
+
+## Attempt 2 (2026-10-24, after the attempt-1 verdict)
+
+- **Unsafe allowlist.** `crates/capi/tests/session_replace.rs` joins `UNSAFE_ALLOWLIST`
+  (`tools/realtime-policy`) with its ownership row in `docs/REALTIME_DEPENDENCY_POLICY.md`, the
+  form #1573 used for `response_get.rs`.
+- **Digest before parse.** The control-plane refusal row corrupts a structural byte at the same
+  length, so a parse-first order answers `VALIDATION_FAILED` and the row turns red.
+- **Host-chosen advertisement (root decision).** `ControlAdapter::DOCUMENT_TRANSPORT` (default
+  `false`) chooses whether `compile_children` sets the document hook. The C ABI sets it; the
+  browser does not, so it neither advertises `0x0013` nor serves it (`UNAVAILABLE`). #1697 turns
+  the browser's advertisement on with its transport. The parity row now asserts exactly this.
+- **Smoothing rows (nit).** For an explicit arm `diff()` emits one `SetControl` per changed
+  session row, and `prepare_replacement` then sets the document's `control_smoothing` whole,
+  which supersedes them: the rows change only `applied_operations`, never the committed model.
+
+- **Cross-host capabilities step (root-authorized).** `protocol_cross_host`'s `CAPABILITIES_GET`
+  step asserts that the C ABI's reply is the browser's plus exactly the `0x0013` entry, with the
+  codec re-encoding the length fields, and the browser's own fields re-encode to its exact bytes.
+  Every other step stays byte-equal. #1697 removes the exception.

@@ -51,16 +51,16 @@ fn carry_counts(prepared: &mut host_core::PreparedHost) -> [usize; 4] {
     graph::test_only_carry_counts(&mut prepared.plan)
 }
 
-/// The command queue a successor's carried timeline brings (#1641 D7): every successor's carried
-/// source bytes hold it, as they hold a carried ring's overhead, so a successor that carries no
-/// ring still carries these bytes.
+/// The command queue and seek-report record a successor's carried timeline brings (#1641 D7,
+/// #1704 D4): every successor's carried source bytes hold them, as they hold a carried ring's
+/// overhead, so a successor that carries no ring still carries these bytes.
 fn timeline_queue_bytes() -> u64 {
-    source::SourceTimeline::resource_report(
+    let report = source::SourceTimeline::resource_report(
         engine::QuantumFrames(QUANTUM as u32),
         core::num::NonZeroUsize::MIN,
     )
-    .expect("timeline report")
-    .command_queue_bytes
+    .expect("timeline report");
+    report.command_queue_bytes + report.seek_report_bytes
 }
 
 fn id(value: &str) -> StableId {
@@ -6096,12 +6096,22 @@ fn pending_observe_swap(
 
 /// The acknowledged Observe records in the retired queues -- one subscribe, and every queue full --
 /// at the build's own width, `Backend::current()`, on a full bank of insert lanes: a console effect
-/// bank binds only at the width its build executes (#1017).
+/// bank binds only at the width its build executes (#1017). Then the same records of per-node
+/// instances that carry to per-node instances (#1816): a group one lane short of a bank on both
+/// sides of the swap.
 #[test]
 fn pending_observe_records_are_applied_at_the_carry_at_the_build_width() {
     let backend = Backend::current();
+    let (short, _) = short_and_full(Insert::Compressor, backend);
     for pending in [PendingObserve::OneSubscribe, PendingObserve::FullQueues] {
         pending_observe_records_are_applied_at_the_carry(backend, backend.width(), pending);
+        pending_observe_swap(
+            backend,
+            short.clone(),
+            short.clone(),
+            pending,
+            Some((true, true)),
+        );
     }
 }
 
@@ -6645,14 +6655,19 @@ fn unread_values_and_a_live_bypass_cross_the_swap_at_every_width() {
     }
 }
 
-/// Gate 3: a committed bypass change on the delay is a prepared one (the delay lowers no live
-/// bypass), so its owner restarts and its strip, and only it, is in the restart set. The other
-/// two per-node instances still move.
-fn a_prepared_bypass_change_restarts_its_strip(backend: Backend) {
+/// Gate 3: a committed bypass change on the multiband compressor is a prepared one (it lowers no
+/// live bypass until #1340), so its owner restarts and its strip, and only it, is in the restart
+/// set. The other two per-node instances still move.
+///
+/// #1339 D5: the delay's bypass is lane state, so a rebuild that also lifts it carries the delay
+/// (its ring and feedback tail) and applies the committed bypass as a lane record over the
+/// session's bypass crossfade. A runs the delay bypassed; B lifts it and adds the muted track.
+/// Nothing restarts, and every block equals A lifting the bypass live at the swap block.
+fn a_prepared_bypass_change_restarts_its_strip_and_a_live_one_carries(backend: Backend) {
     let what = format!("{backend:?}");
     let (a, _) = tail_pair();
     let mut b_model = tail_session();
-    track_mut(&mut b_model, "eq0").inserts.effects[0].bypass = true;
+    track_mut(&mut b_model, "eq1").inserts.effects[0].bypass = true;
     let b = Session::compile(b_model);
     let feed = tail_feed();
     let run = effect_run_blocks(
@@ -6667,8 +6682,8 @@ fn a_prepared_bypass_change_restarts_its_strip(backend: Backend) {
     assert_clean_swap(&run, &what);
     assert_eq!(
         run.restarted,
-        vec![Box::<str>::from("eq0")],
-        "{what}: exactly the delay's strip restarts"
+        vec![Box::<str>::from("eq1")],
+        "{what}: exactly the multiband's strip restarts"
     );
     assert_eq!(run.payload_bytes, 0, "{what}");
     // The restarted strip starts at rest, so the swapped run is not B rendered from frame 0.
@@ -6678,12 +6693,56 @@ fn a_prepared_bypass_change_restarts_its_strip(backend: Backend) {
         None,
         "{what}: the restarted strip starts at rest"
     );
+
+    // The delay: A bypasses it, B lifts it.
+    let mut a_model = tail_session();
+    track_mut(&mut a_model, "eq0").inserts.effects[0].bypass = true;
+    let a = Session::compile(a_model);
+    let (_, b) = tail_pair();
+    let run = effect_run_blocks(
+        &a,
+        Some((&b, &a.model)),
+        &feed,
+        &[],
+        &[],
+        backend,
+        TAIL_BLOCKS,
+    );
+    assert_clean_swap(&run, &what);
+    assert_eq!(
+        run.restarted,
+        Vec::<Box<str>>::new(),
+        "{what}: the delay's bypass carries"
+    );
+    let ramp = LiveRamps::for_session(&a.model).for_row(LiveRampRow::BypassCrossfade);
+    let lift = EffectWrite {
+        block: SWAP_BLOCK,
+        strip: "eq0",
+        address: LiveEffectAddress::insert(0),
+        value: EffectValue::Bypass(BypassSwitch {
+            bypassed: false,
+            ramp_samples: ramp,
+        }),
+    };
+    let live = effect_run_blocks(&a, None, &feed, &[lift], &[], backend, TAIL_BLOCKS);
+    assert_eq!(
+        first_effect_difference(&run, &live),
+        None,
+        "{what}: the rebuild equals A lifting the delay's bypass live at the swap block"
+    );
+    // Not vacuous: the lift is heard.
+    let kept = effect_run_blocks(&a, None, &feed, &[], &[], backend, TAIL_BLOCKS);
+    assert_ne!(
+        first_effect_difference(&live, &kept),
+        None,
+        "{what}: the lift changes the output"
+    );
 }
 
 #[test]
-fn a_prepared_bypass_change_restarts_its_strip_at_every_width() {
+fn a_prepared_bypass_change_restarts_its_strip_and_a_live_one_carries_at_every_width() {
     for backend in backends() {
-        a_prepared_bypass_change_restarts_its_strip(backend);
+        a_prepared_bypass_change_restarts_its_strip_and_a_live_one_carries(backend);
     }
 }
 
@@ -8958,6 +9017,67 @@ fn undelayed_send_session() -> SessionModel {
 fn strip_delays_and_a_send_ramp_cross_the_swap_on_every_width() {
     for backend in backends() {
         strip_delays_and_a_send_ramp_cross_the_swap(backend);
+    }
+}
+
+/// #1391: [`send_session`] with `eq0`'s route into the output taken from its `pre_fader` tap, so it
+/// has a live lane, and the cases' send records written to it. Red if the swap's route join keeps
+/// only routes into a submix: B's lane then starts at its prepared value, and the level steps at
+/// the swap block instead of finishing the ramp.
+fn a_pre_fader_output_ramp_crosses_the_swap(backend: Backend) {
+    const DIRECT: &str = "eq0-main";
+    // The tap moves after B's muted track copies `eq0`'s route, so that copy stays `post_pan`
+    // and silent.
+    let pre_fader = |mut model: SessionModel| {
+        let route = route_mut(&mut model, DIRECT);
+        let RouteSource::Track { track_id, .. } = route.source.clone() else {
+            panic!("a track route");
+        };
+        route.source = RouteSource::Track {
+            track_id,
+            tap: session::SendTap::PreFader,
+        };
+        model
+    };
+    let a = Session::compile(pre_fader(send_session(false)));
+    let b = Session::compile(pre_fader(with_muted_output_track(send_session(false))));
+    let feed = Feed::new(SOURCE, 1);
+    let writes: Vec<EffectWrite> = send_writes()
+        .into_iter()
+        .map(|mut write| {
+            if let EffectValue::SendGain { route, .. } = &mut write.value {
+                *route = DIRECT;
+            }
+            write
+        })
+        .collect();
+    let probe = LivePlan::fresh(&a, backend).prepared;
+    assert_eq!(
+        probe.inventory.live_route_count(),
+        4,
+        "the three sends into bus1 and the pre-fader route into the output"
+    );
+    drop(probe);
+    let reference = effect_run(&b, None, &feed, &writes, &[], backend);
+    let run = effect_run(&a, Some((&b, &a.model)), &feed, &writes, &[], backend);
+    assert_clean_swap(&run, &format!("{backend:?}"));
+    assert_eq!(
+        first_effect_difference(&run, &reference),
+        None,
+        "{backend:?}: the pre-fader output route's ramp carries across the swap"
+    );
+    let unmoved = effect_run(&b, None, &feed, &[], &[], backend);
+    assert_ne!(
+        unmoved.blocks[SWAP_BLOCK + 1],
+        reference.blocks[SWAP_BLOCK + 1],
+        "{backend:?}: the ramp is in flight after the swap block"
+    );
+}
+
+#[test]
+fn a_pre_fader_output_ramp_crosses_the_swap_on_every_width() {
+    for backend in backends() {
+        a_pre_fader_output_ramp_crosses_the_swap(backend);
     }
 }
 

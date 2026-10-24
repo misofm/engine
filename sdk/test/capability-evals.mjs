@@ -383,10 +383,12 @@ describe("issue 321 -- complete headless ABI capability parity", () => {
       liveControls: {
         meterBlocks,
         observationTaps: 1,
-        masterTrackPlusOne: 1,
       },
     });
     try {
+      // #1689 D6: the master is the strip's `master` row, written after boot.
+      const controls = engine.liveControls();
+      await controls.submit(controls.edit.track(engine.sessionMap().tracks[0]).master(true));
       assert.equal(engine.sessionMap().metersAttached, true);
       assert.deepEqual(engine.meters(true), { ok: true, result: 0, code: "ok" });
 
@@ -446,7 +448,6 @@ describe("issue 321 -- complete headless ABI capability parity", () => {
       liveControls: {
         meterBlocks,
         observationTaps: 0,
-        masterTrackPlusOne: 0,
       },
     });
     try {
@@ -498,7 +499,6 @@ describe("issue 321 -- complete headless ABI capability parity", () => {
       liveControls: {
         meterBlocks,
         observationTaps: 0,
-        masterTrackPlusOne: 0,
       },
     });
     try {

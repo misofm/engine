@@ -89,7 +89,6 @@ fn handles_list_tracks_then_submixes_and_file_bus_effects() {
             meter_queue_depth: NonZeroUsize::new(16).expect("meter depth"),
             meter_tap: MeterTap::PostMatrix,
             observation_taps: 1,
-            master_track: None,
         },
     )
     .unwrap_or_else(|failure| panic!("prepare: {}", String::from_utf8_lossy(failure.as_bytes())));

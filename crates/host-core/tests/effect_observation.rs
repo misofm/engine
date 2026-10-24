@@ -90,7 +90,6 @@ fn live_controls(leg: Leg) -> HostLiveControlRequest {
             Leg::NoLiveControls | Leg::LiveControlsNoCapacity => 0,
             Leg::CapacityUnarmed | Leg::AllArmed => 4,
         },
-        master_track: matches!(leg, Leg::CapacityUnarmed | Leg::AllArmed).then_some(0),
     }
 }
 
@@ -139,7 +138,6 @@ fn prepare_from(document: &str, leg: Leg) -> Session {
             effect_observations: Vec::new(),
             route_controls: Vec::new(),
             follow_route_controls: Vec::new(),
-            master_track: None,
             live_values_superseded: LiveValuesSuperseded::default(),
             jump_lengths: None,
         };
@@ -367,14 +365,12 @@ fn a_session_that_asked_for_no_observation_holds_none() {
             "{leg:?} retained observation bytes"
         );
         assert_eq!(session.prepared.plan.observation_retained_bytes(), 0);
-        assert_eq!(session.handles.master_track, None);
     }
 
     // A capable plan, in contrast, binds exactly one lane per compressor and exactly one tap per
     // lane -- and arms none of them until it is asked to.
     let mut capable = prepare(Leg::CapacityUnarmed);
     assert_eq!(capable.handles.effect_observations.len(), TRACKS);
-    assert_eq!(capable.handles.master_track, Some(0));
     let [stages, declared, armed] = capable.prepared.plan.observation_binding_counts();
     assert_eq!(stages, TRACKS as u64, "one observed lane per compressor");
     assert_eq!(declared, TRACKS as u64, "one declared tap each");
@@ -537,16 +533,11 @@ fn prepare_successor(
     bindings: &controls::ObservationBindings,
 ) -> Session {
     let request = live_controls(Leg::AllArmed);
-    // #1683: a successor's master designation is its overlay's, never the request's.
-    let successor_request = HostLiveControlRequest {
-        master_track: None,
-        ..live_controls(Leg::AllArmed)
-    };
     let (mut prepared, handles) = match &first {
         Some((first, committed)) => host_core::prepare_host_runtime_with_live_controls_successor(
             compiled,
             &caps(),
-            &successor_request,
+            &request,
             host_core::SuccessorBase {
                 observation: bindings,
                 ..host_core::SuccessorBase::new(&first.prepared.inventory, committed, 2)
@@ -850,7 +841,6 @@ fn the_per_node_scalar_path_publishes_its_own_block() {
         meter_queue_depth: NonZeroUsize::new(16).expect("meter depth"),
         meter_tap: MeterTap::PostMatrix,
         observation_taps: 4,
-        master_track: Some(0),
     };
     let (_session, mut prepared, handles) =
         prepare_host_session_with_live_controls(DYNAMIC_SESSION, &caps(), &request).unwrap_or_else(
@@ -952,7 +942,6 @@ fn observation_without_effect_lanes_is_refused() {
         meter_queue_depth: NonZeroUsize::new(16).expect("meter depth"),
         meter_tap: MeterTap::PostMatrix,
         observation_taps: 4,
-        master_track: None,
     };
     let compiled = compile_host_session(SESSION, &caps()).expect("compiles");
     let failure = prepare_host_runtime_with_live_lanes(
@@ -966,19 +955,6 @@ fn observation_without_effect_lanes_is_refused() {
     .expect("a subscription has no delivery path without effect lanes");
     assert!(
         String::from_utf8_lossy(failure.as_bytes()).contains("host.observation.live_controls"),
-        "the diagnostic names the rule"
-    );
-
-    // And a designated master must name a track this session has.
-    let request = HostLiveControlRequest {
-        master_track: Some(TRACKS as u32),
-        ..request
-    };
-    let failure = prepare_host_session_with_live_controls(SESSION, &caps(), &request)
-        .err()
-        .expect("an out-of-range master designation is refused");
-    assert!(
-        String::from_utf8_lossy(failure.as_bytes()).contains("host.observation.master_track"),
         "the diagnostic names the rule"
     );
 }

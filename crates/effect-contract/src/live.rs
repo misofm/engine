@@ -721,7 +721,7 @@ pub fn effect_control_lane(
 /// # A lane without cells (issue #1087)
 ///
 /// A session `bypass` is per-lane state, not a prepared program, for every effect whose bypass
-/// `effect_compiler::lowers_session_bypass` (all but the delay and the multiband): preparation
+/// `effect_compiler::lowers_session_bypass` (all but the multiband): preparation
 /// lowers it to a prepared `bypass = false` plus this lane's initial bypass, so a bypassed track
 /// keeps its place in its effect bank and the rack's [`BypassShunt`] selects the dry signal for
 /// exactly that lane. A session with no live controls still needs somewhere to hold that bit, so
@@ -904,14 +904,6 @@ impl EffectControlLane {
     #[must_use]
     pub fn take_observe_queue(&mut self) -> Option<Consumer<EffectControlRecord>> {
         self.observe.take()
-    }
-
-    /// The observation queue's consumer, borrowed, when the lane still holds it (a per-node lane
-    /// does; a bank lane's was taken at bind). A plan swap's carry pops it in a loop of its own
-    /// (#1280 D3); this pops nothing.
-    #[must_use]
-    pub fn observe_queue_mut(&mut self) -> Option<&mut Consumer<EffectControlRecord>> {
-        self.observe.as_mut()
     }
 
     /// Exact heap this lane and its shared cells retain, each allocation counted once, including
@@ -1888,12 +1880,13 @@ impl ObservationLane {
 /// copies, so `-0.0` survives. The two differ only where that D7 check fires on the dry block
 /// itself: a non-finite sample, or one at least `1e30` in magnitude. An effect never receives one
 /// in a compiled plan, because the track's input stage sanitises every such sample to `+0.0` and
-/// every stage after it zeroes a block that leaves that range. The delay, whose D7 check also
-/// reads its state, never banks and keeps its prepared bypass
-/// (`effect_compiler::NEVER_BANKED_EFFECTS`), and so does the multiband, whose D7 recovery is
-/// whole-bank (`effect_compiler::PREPARED_BYPASS_EFFECTS`, issue #1100). `graph-compiler`'s
-/// `bypass_shunt_identity` and
-/// `bypass_cohorts` tests are the gates.
+/// every stage after it zeroes a block that leaves that range. The delay, which never banks
+/// (`effect_compiler::NEVER_BANKED_EFFECTS`), lowers its bypass to a per-node shunt too (issue
+/// #1339), and its D7 check also reads its ring and damping state: on a block where that state
+/// trips it, the shunt passes the dry block where its prepared bypass zeroed it (decision 15 E4).
+/// The multiband keeps its prepared bypass, because its D7 recovery is whole-bank
+/// (`effect_compiler::PREPARED_BYPASS_EFFECTS`, issue #1100). `graph-compiler`'s
+/// `bypass_shunt_identity` and `bypass_cohorts` tests are the gates.
 pub struct BypassShunt {
     /// Dry copy of this block's input, taken before the effect runs.
     dry_left: Box<[f32]>,

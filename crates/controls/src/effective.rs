@@ -105,6 +105,23 @@ impl MonitorOverlay {
         }
     }
 
+    /// The bytes an overlay [`Self::after`] returns can retain on a session of `strips` strips
+    /// whose IDs total `strip_id_bytes` and whose longest ID is `longest_strip_id` bytes (#1696
+    /// D1): the solo vector at its reserve, one copy of each soloed strip's ID text (a solo names
+    /// a distinct strip) and the master's copy of one ID. A ceiling of the session's shape, not of
+    /// its edits.
+    #[must_use]
+    pub fn retained_ceiling(
+        strips: usize,
+        strip_id_bytes: usize,
+        longest_strip_id: usize,
+    ) -> Option<usize> {
+        strips
+            .checked_mul(size_of::<StableId>())?
+            .checked_add(strip_id_bytes)?
+            .checked_add(longest_strip_id)
+    }
+
     /// Whether the two overlays solo the same strips: a change of the master alone moves no
     /// effective value.
     #[must_use]
@@ -133,12 +150,34 @@ impl MonitorOverlay {
     /// result, and `None` (the session's `mute_ms`) when no solo write changed anything or the last
     /// such write gave no ramp; a master write has no ramp, since it moves no render value. A strip
     /// `next` no longer has is dropped from the result.
+    ///
+    /// The result's solo vector is reserved to `next`'s strip count (#1696 D2), or holds nothing
+    /// when no strip is or becomes soloed, and a solo names a strip of `next`, so its capacity is
+    /// at most that count and no solo write reallocates it: the charge
+    /// [`Self::retained_ceiling`] is a layout, not a growth estimate.
     #[must_use]
     pub fn after(&self, writes: &[MonitorWrite], next: &SessionModel) -> MonitorChange {
-        let mut overlay = self.clone();
+        let in_next = |id: &StableId| crate::registry::strip_index(next, id).is_some();
+        // An overlay that solos nothing and gets no solo keeps no vector, so a value edit
+        // allocates nothing here; any other reserves the whole strip count at once.
+        let solos = !self.soloed.is_empty()
+            || writes
+                .iter()
+                .any(|write| write.row == MonitorRow::Solo && write.on);
+        let mut soloed = Vec::with_capacity(if solos { next.strips().count() } else { 0 });
+        soloed.extend(self.soloed.iter().filter(|id| in_next(id)).cloned());
+        let mut overlay = Self {
+            soloed,
+            master: self.master.clone(),
+        };
         for write in writes {
             match write.row {
-                MonitorRow::Solo => overlay.set_soloed(&write.strip, write.on),
+                // A solo of a strip `next` does not have is dropped below anyway; skipping it here
+                // keeps the vector within its reserve. Solo writes to distinct IDs commute.
+                MonitorRow::Solo if in_next(&write.strip) => {
+                    overlay.set_soloed(&write.strip, write.on);
+                }
+                MonitorRow::Solo => {}
                 MonitorRow::Master => overlay.set_master(&write.strip, write.on),
             }
         }
@@ -487,11 +526,7 @@ impl<'a> ModelInputs<'a> {
             .routes
             .iter()
             .map(|route| {
-                let id = source_id(route);
-                model
-                    .strips()
-                    .position(|strip| strip.id == id)
-                    .unwrap_or(strip_count)
+                crate::registry::strip_index(model, source_id(route)).unwrap_or(strip_count)
             })
             .collect();
         Self {
@@ -534,44 +569,57 @@ pub(crate) fn model_fader_offsets(model: &SessionModel) -> Vec<[Option<f32>; 2]>
         if offsets.is_empty() {
             offsets = vec![[None; 2]; model.tracks.len() + model.submixes.len()];
         }
-        let lanes: &mut [Option<f32>; 2] = &mut offsets[index];
-        for (lane, (drives, offset)) in [
-            (
-                matches!(target.lane, session::Lane::Left | session::Lane::Both),
-                entry.offset.left_db,
-            ),
-            (
-                matches!(target.lane, session::Lane::Right | session::Lane::Both),
-                entry.offset.right_db,
-            ),
-        ]
-        .into_iter()
-        .enumerate()
-        {
-            if drives && lanes[lane].is_none() {
-                lanes[lane] = Some(offset);
-            }
-        }
+        keep_first_offsets(&mut offsets[index], entry);
     }
     offsets
 }
 
-/// The [`EffectiveInputs::vca_offset`] of every VCA of `model`, by VCA index
-/// ([`crate::vca_offset_automation`]'s rule), or an empty table when no entry is on a VCA
-/// `offset_db` row.
+/// The [`EffectiveInputs::vca_offset`] of every VCA of `model`, by VCA index: one pass over the
+/// automation table ([`crate::vca_offset_automation`]'s rule: the first VCA `offset_db` entry,
+/// [`crate::vca_offset_row`], that drives a lane, #1710), or an empty table when no entry is on a
+/// VCA `offset_db` row.
 fn model_vca_offsets(model: &SessionModel) -> Vec<[Option<f32>; 2]> {
-    if !model
-        .automation
-        .iter()
-        .any(|entry| crate::vca_offset_row(&entry.target))
-    {
-        return Vec::new();
+    let mut offsets = Vec::new();
+    for entry in &model.automation {
+        let target = &entry.target;
+        let session::Owner::Vca(id) = &target.owner else {
+            continue;
+        };
+        if !crate::vca_offset_row(target) {
+            continue;
+        }
+        let Some(index) = crate::view::position(&model.vcas, id, |vca| &vca.id) else {
+            continue;
+        };
+        if offsets.is_empty() {
+            offsets = vec![[None; 2]; model.vcas.len()];
+        }
+        keep_first_offsets(&mut offsets[index], entry);
     }
-    model
-        .vcas
-        .iter()
-        .map(|vca| crate::builtin_rows::fader_offsets(crate::vca_offset_automation(model, &vca.id)))
-        .collect()
+    offsets
+}
+
+/// Give each lane of `lanes` that `entry` drives and that has no offset yet `entry`'s hand-move
+/// offset: the first entry per lane in table order.
+fn keep_first_offsets(lanes: &mut [Option<f32>; 2], entry: &session::Automation) {
+    let lane = entry.target.lane;
+    for (index, (drives, offset)) in [
+        (
+            matches!(lane, session::Lane::Left | session::Lane::Both),
+            entry.offset.left_db,
+        ),
+        (
+            matches!(lane, session::Lane::Right | session::Lane::Both),
+            entry.offset.right_db,
+        ),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        if drives && lanes[index].is_none() {
+            lanes[index] = Some(offset);
+        }
+    }
 }
 
 fn source_id(route: &Route) -> &StableId {

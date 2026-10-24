@@ -24,6 +24,7 @@ import type {
   RouteSource,
   RouteSpec,
   SessionSampleRateHz,
+  SidechainSpec,
   SourceSpec,
   SubmixSpec,
   TrackSpec,
@@ -263,7 +264,8 @@ function bool(value: unknown, path: string, code?: string): boolean {
  * (anything else is `schema.invalid_enum`), and every launch native descriptor publishes only
  * `normal` (`effect.quality.unsupported` at prepare-effects).
  */
-function quality(value: unknown, path: string): "normal" {
+/** @internal */
+export function quality(value: unknown, path: string): "normal" {
   if (value === undefined || value === "normal") return "normal";
   if (value === "draft" || value === "high") {
     fail(path, "launch native descriptors publish only the 'normal' quality row", CODE.qualityUnsupported);
@@ -561,16 +563,7 @@ export function effect<E extends EffectId>(
     fail(`${path}.channel`, "expected left, right or both");
   }
   if (options.sidechain !== undefined) {
-    validateRouteSource(options.sidechain.source, `${path}.sidechain.source`);
-    // `portId` is typed to the descriptor's own sidechain inputs, so a caller who typechecks
-    // cannot reach the refusals below. They are here for the caller who does not -- plain
-    // JavaScript, a JSON round-trip, a value that arrived as `string` -- which is every caller
-    // whose port the engine used to be the first thing to look at.
-    const portId: unknown = options.sidechain.portId;
-    if (typeof portId !== "string" || portId.length === 0) {
-      fail(`${path}.sidechain.portId`, "a routed sidechain requires a nonempty port ID");
-    }
-    sidechainPort(descriptor, portId, `${path}.sidechain.portId`);
+    normalizeSidechain(descriptor.id, options.sidechain, `${path}.sidechain`);
   }
   for (const [name, value] of Object.entries(parameters)) {
     parameterRows(descriptor, name, value, channel, `${path}.parameters.${name}`);
@@ -587,6 +580,71 @@ export function effect<E extends EffectId>(
       ...(options.sidechain === undefined ? {} : { sidechain: options.sidechain }),
     },
   }) as EffectDecl<E>;
+}
+
+/**
+ * A routed sidechain's `sidechain` record, validated against the effect it feeds: its route source
+ * and its port. Shared by `effect()`, the inserts it becomes and the transaction builder's
+ * `setEffectSidechain` (#1383).
+ * @internal
+ */
+export function normalizeSidechain(effectId: string, sidechain: SidechainSpec, path: string): ModelRecord {
+  const descriptor = effectDescriptor(effectId, path);
+  if (sidechain === null || typeof sidechain !== "object" || Array.isArray(sidechain)) {
+    fail(path, "expected a routed sidechain { source, portId }");
+  }
+  validateRouteSource(sidechain.source, `${path}.source`);
+  // `portId` is typed to the descriptor's own sidechain inputs, so a caller who typechecks
+  // cannot reach the refusals below. They are here for the caller who does not -- plain
+  // JavaScript, a JSON round-trip, a value that arrived as `string` -- which is every caller
+  // whose port the engine used to be the first thing to look at.
+  const portId: unknown = sidechain.portId;
+  if (typeof portId !== "string" || portId.length === 0) {
+    fail(`${path}.portId`, "a routed sidechain requires a nonempty port ID");
+  }
+  sidechainPort(descriptor, portId, `${path}.portId`);
+  return freeze({ kind: "routed", source: normalizeRouteSource(sidechain.source), port_id: portId });
+}
+
+/**
+ * An insert's record with its native effect replaced by `effectId` (#1383 `setEffectIdentity`),
+ * refused unless the rest of the record is valid for the new effect, as the engine's preparation
+ * would refuse it: its link mode, its sidechain port, and each `params` row's parameter, unit,
+ * lane and value, all checked with the validators `effect()` uses.
+ * @internal
+ */
+export function retargetInsert(insert: ModelRecord, effectId: unknown, path: string): ModelRecord {
+  if (typeof effectId !== "string") fail(path, "expected a native effect ID");
+  const descriptor = effectDescriptor(effectId, path);
+  linkMode(descriptor.id, insert.link_mode, path);
+  const sidechain = insert.sidechain as ModelRecord;
+  if (sidechain.kind === "routed") sidechainPort(descriptor, String(sidechain.port_id), path);
+  for (const param of insert.params as readonly ModelRecord[]) {
+    const id = Number(param.parameter_id);
+    const row = descriptor.parameters.find((candidate) => candidate.id === id);
+    if (row === undefined) {
+      fail(path, `${descriptor.id} has no parameter ${id}, which this insert sets`);
+    }
+    if (row.unitName !== param.unit) {
+      fail(path, `${descriptor.id}'s parameter ${id} (${row.name}) is in ${row.unitName}, not ${String(param.unit)}`);
+    }
+    parameterRows(descriptor, row.name, displayValue(row, Number(param.value), path), param.channel as Channel, path);
+  }
+  return freeze({ ...insert, identity: { kind: "native", effect_id: descriptor.id } });
+}
+
+/** The display-unit value a `params` row's wire value spells for `row`, the inverse of `wireRows`. */
+function displayValue(row: EffectParameterRow, value: number, path: string): unknown {
+  if (row.domainName === "boolean") {
+    if (value !== 0 && value !== 1) fail(path, `${row.name} is a toggle, and ${value} is not 0 or 1`);
+    return value === 1;
+  }
+  if (row.domainName === "enumeration") {
+    const choice = row.enumChoices.find((candidate) => Math.fround(candidate.value) === value);
+    if (choice === undefined) fail(path, `${value} is not a declared choice for ${row.name}`);
+    return choice.label;
+  }
+  return value;
 }
 
 // -------------------------------------------------------------------------------------------
@@ -1311,8 +1369,11 @@ function insertId(decl: EffectDecl, index: number): string {
   return decl.slotId ?? `insert-${index + 1}`;
 }
 
-/** A track's inserts, in declared order. Only the *entities* sort; inserts preserve signal order. */
-function normalizeInserts(
+/**
+ * A strip's inserts, in declared order. Only the *entities* sort; inserts preserve signal order.
+ * @internal
+ */
+export function normalizeInserts(
   effects: readonly EffectDecl[] | undefined,
   path: string,
 ): readonly ModelRecord[] {
@@ -1327,24 +1388,33 @@ function normalizeInserts(
     const id = stableId(insertId(decl, index), `${where}.slotId`);
     if (ids.has(id)) fail(`${where}.slotId`, `'${id}' is repeated in the inserts`, CODE.duplicateId);
     ids.add(id);
-    const descriptor = effectDescriptor(decl.effectId, `${where}.effectId`);
-    const params = normalizeParams(descriptor, decl.parameters, decl.options.channel, where);
-    const sidechain = decl.options.sidechain;
-    return freeze({
-      id,
-      identity: { kind: "native", effect_id: decl.effectId },
-      quality: decl.options.quality,
-      bypass: decl.options.bypass,
-      link_mode: decl.options.linkMode,
-      params,
-      sidechain: sidechain === undefined
-        ? { kind: "none" }
-        : {
-          kind: "routed",
-          source: normalizeRouteSource(sidechain.source),
-          port_id: sidechain.portId,
-        },
-    });
+    return normalizeInsert(decl, id, where);
+  });
+}
+
+/**
+ * One insert's record under the stable ID `id`. Shared by `normalizeInserts` and the transaction
+ * builder's `putTrackEffect` (#1383).
+ * @internal
+ */
+export function normalizeInsert(decl: EffectDecl, id: unknown, where: string): ModelRecord {
+  if (decl === null || typeof decl !== "object") {
+    fail(where, "expected an effect declaration from effect()");
+  }
+  stableId(id, `${where}.slotId`);
+  const descriptor = effectDescriptor(decl.effectId, `${where}.effectId`);
+  const params = normalizeParams(descriptor, decl.parameters, decl.options.channel, where);
+  const sidechain = decl.options.sidechain;
+  return freeze({
+    id: id as string,
+    identity: { kind: "native", effect_id: decl.effectId },
+    quality: decl.options.quality,
+    bypass: decl.options.bypass,
+    link_mode: decl.options.linkMode,
+    params,
+    sidechain: sidechain === undefined
+      ? { kind: "none" }
+      : normalizeSidechain(decl.effectId, sidechain, `${where}.sidechain`),
   });
 }
 
@@ -1404,7 +1474,8 @@ function consoleSlot(
  * the track's knobs, so any other key (`effectId`, `quality`, `linkMode`, `sidechain`, ...) is
  * `schema.unknown_field`.
  */
-function normalizeConsoleEntries(
+/** @internal */
+export function normalizeConsoleEntries(
   entries: readonly ConsoleEntrySpec[] | undefined,
   slots: readonly ConsoleSlotEntry[],
   path: string,

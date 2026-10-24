@@ -28,14 +28,14 @@
 //! # State layout
 //!
 //! Version 1. Per physical section and lane, 19 little-endian 32-bit words (114 words), followed
-//! by the two retained dedicated-cut enable words (116 words, 464 bytes per channel); the common
-//! section is the shared codec's two-word header — the layout version and data word count — and
+//! by the two dedicated-cut enable words, the input's silence counter, and each general band's
+//! enable and family (`0|1`, then `1..=6`, band by band: 125 words, 500 bytes per channel); the
+//! common section is the shared codec's two-word header — the layout version and data word count — and
 //! nothing else, because the two channels share no state. The header makes a payload
 //! self-describing, so a stale or truncated restore is rejected on the payload's own evidence and
 //! not only on the caller's out-of-band `state_layout_version`. A stale payload is rejected with
 //! `effect.state.version`; there is no silent migration.
 
-use effect_contract::control::{PreparedReason, RebuildReason};
 use effect_contract::{
     AutomationRate, BankProcessReport, BankWidth, EffectBankProcessBlock, EffectDescriptor,
     EffectPrepareError, EffectProcessBlock, EffectQuality as Quality, EffectTargetError,
@@ -102,13 +102,18 @@ const STATE_LAYOUT_VERSION: u32 = 1;
 /// Words one band occupies in a lane section of the payload.
 const STATE_WORDS_PER_BAND: usize = 19;
 /// Effect-owned words in each channel section.
-const STATE_LANE_WORDS: usize = EQ_SECTION_COUNT * STATE_WORDS_PER_BAND + 3;
+const STATE_LANE_WORDS: usize = STATE_BAND_CONFIG_WORD + 2 * EQ_BAND_COUNT;
 const STATE_HPF_ENABLE_WORD: usize = EQ_SECTION_COUNT * STATE_WORDS_PER_BAND;
 const STATE_LPF_ENABLE_WORD: usize = STATE_HPF_ENABLE_WORD + 1;
 /// The channel input's silence counter (issue #1328, amendment A9): the run of exactly-zero input
 /// frames, an `f32` integer in `[0, 2^24]`, carried so that a restored lane arms its joint flush
 /// on exactly the frame the lane it was taken from would.
 const STATE_SILENCE_WORD: usize = STATE_LPF_ENABLE_WORD + 1;
+/// The first of the general bands' configuration words (issue #1337, D5): for band `b` in
+/// `0..EQ_BAND_COUNT`, word `STATE_BAND_CONFIG_WORD + 2b` is its enable (`0` or `1`) and the next
+/// its family's discriminant (`1..=6`). Both are live, so a lane can hold another value than the
+/// prepared one, and a restore takes them from here.
+const STATE_BAND_CONFIG_WORD: usize = STATE_SILENCE_WORD + 1;
 /// The counter's saturation, `2^24`: the largest word a snapshot can hold.
 const SILENCE_SATURATION: f32 = 16_777_216.0;
 /// The payload shape, stamped into the common section by the shared codec.
@@ -311,6 +316,20 @@ impl EqBandKind {
             5 => Self::HighPass,
             6 => Self::Notch,
             _ => Self::Bell,
+        }
+    }
+
+    /// The family whose `repr(u32)` discriminant is `word`, or `None` for any other word: the
+    /// state payload's decoding (issue #1337, D5), which refuses rather than coerces.
+    fn from_payload_word(word: u32) -> Option<Self> {
+        match word {
+            1 => Some(Self::Bell),
+            2 => Some(Self::LowShelf),
+            3 => Some(Self::HighShelf),
+            4 => Some(Self::LowPass),
+            5 => Some(Self::HighPass),
+            6 => Some(Self::Notch),
+            _ => None,
         }
     }
 
@@ -541,9 +560,9 @@ const MAPPINGS: [ParameterMapping; 6] = [
     ParameterMapping::Linear,
 ];
 
-/// One descriptor of one field of one band.
+/// One descriptor of one field of one band. Every field is live (decision 15 E2): `enabled` and
+/// `kind` ramp the band's six words like its numeric fields do (#1337).
 const fn parameter(band: usize, field: usize) -> ParameterDescriptor {
-    let automatable = field >= 2;
     ParameterDescriptor {
         id: parameter_id(band_base(band) + field as u32),
         name: PARAMETER_MACHINE_NAMES[band * 6 + field],
@@ -559,36 +578,21 @@ const fn parameter(band: usize, field: usize) -> ParameterDescriptor {
             DEFAULTS[field]
         },
         mapping: MAPPINGS[field],
-        automation_rate: if automatable {
-            AutomationRate::Block
-        } else {
-            AutomationRate::None
-        },
+        automation_rate: AutomationRate::Block,
         channel_policy: ParameterChannelPolicy::PerLane,
-        smoothing: if automatable {
-            SmoothingRule::Linear
-        } else {
-            SmoothingRule::None
-        },
-        smoothing_samples: if automatable { RAMP_SAMPLES } else { 0 },
+        smoothing: SmoothingRule::Linear,
+        smoothing_samples: RAMP_SAMPLES,
         readable: true,
-        automatable,
+        automatable: true,
         enum_choices: if field == 1 { &KIND_CHOICES } else { &[] },
         lattice: effect_contract::default_parameter_lattice(
             UNITS[field],
             DOMAINS[field],
             MAPPINGS[field],
         ),
-        prepared_reason: if automatable { None } else { Some(BAND_REASON) },
+        prepared_reason: None,
     }
 }
-
-/// Why a band's `enabled` and `kind` are prepared: decision 15 E2 makes them live and #1337 builds
-/// that, so the rows are rebuild-only until then (decision 17, D1).
-const BAND_REASON: PreparedReason = PreparedReason {
-    reason: RebuildReason::RuledLiveNotBuilt { issue: 1337 },
-    reopen: "#1337 makes a parametric EQ band's enabled and kind live; its last step flips the rows",
-};
 
 const fn cut_parameter(
     id: u32,
@@ -1574,7 +1578,20 @@ impl<L: Lane, const W: usize> Channel<L, W> {
     ///
     /// All decoding and validation is completed by the caller before this method mutates the
     /// semantic target or coefficient ramp. The target words are supplied by the off-render
-    /// preparer and are copied directly into the existing ramp state.
+    /// preparer and are copied directly into the existing ramp state. A change of enable or family
+    /// ramps the six words like a numeric change does, on the same integrators (issue #1337, D3).
+    ///
+    /// # Re-enable from rest (D4)
+    ///
+    /// A section whose words are exactly [`EqSvfWords::IDENTITY`] with no ramp in flight holds its
+    /// integrators frozen (`svf_step` integrates nothing through zero words), so after a live
+    /// disable they keep the state of a signal long gone. When such a lane is sent words that are
+    /// not the identity, its two integrators are set to `+0.0` first, through its own lane mask:
+    /// the state a section prepared disabled holds. The re-enabled lane then renders the same bits
+    /// as one prepared disabled and enabled at the same block, whatever its history. A disabled
+    /// section keeps its frozen words until then, so a live-disabled lane does not reach rest; that
+    /// is a cost (the silence skip and elision), never a bit, and the same one a live-disabled
+    /// HPF had before.
     fn apply_prepared_target(
         &mut self,
         track: usize,
@@ -1583,7 +1600,24 @@ impl<L: Lane, const W: usize> Channel<L, W> {
         words: EqSvfWords,
     ) {
         self.targets[track][section] = target;
+        if self.remaining[section][track] == 0
+            && !words_are_identity(words)
+            && words_are_identity(self.lane_words(section, track))
+        {
+            let mask = lane_mask::<L>(track);
+            let state = &mut self.sections[section].state;
+            lane_put(&mut state.ic1, mask, 0.0);
+            lane_put(&mut state.ic2, mask, 0.0);
+        }
         self.start_ramp(section, track, words);
+    }
+
+    /// The words lane `track` of `section` holds now (its `coef`), read back out of the lane words.
+    fn lane_words(&self, section: usize, track: usize) -> EqSvfWords {
+        let slot = &self.sections[section];
+        EqSvfWords::from_array(core::array::from_fn(|index| {
+            lane_get(coef_word(&slot.coef, index), track)
+        }))
     }
 
     /// The words lane `track` of `section` is heading for, read back out of the lane words.
@@ -2895,6 +2929,11 @@ impl<L: Lane, const W: usize> Channel<L, W> {
         out[STATE_HPF_ENABLE_WORD] = u32::from(self.targets[track][HPF_SECTION].enabled);
         out[STATE_LPF_ENABLE_WORD] = u32::from(self.targets[track][LPF_SECTION].enabled);
         out[STATE_SILENCE_WORD] = lane_get(self.silence, track).to_bits();
+        for band in 0..EQ_BAND_COUNT {
+            let target = self.targets[track][BAND_SECTION_OFFSET + band];
+            out[STATE_BAND_CONFIG_WORD + 2 * band] = u32::from(target.enabled);
+            out[STATE_BAND_CONFIG_WORD + 2 * band + 1] = target.kind as u32;
+        }
     }
 
     /// Decodes the silence counter word: `+0.0`, or an `f32` integer in `[1, 2^24]` -- exactly the
@@ -2913,29 +2952,40 @@ impl<L: Lane, const W: usize> Channel<L, W> {
         }
     }
 
-    /// Decodes the two retained dedicated-cut enable words, refusing malformed values before any
-    /// state or semantic target is written.
-    fn snapshot_cut_enables(
+    /// The lane's configuration as its payload states it: `prepared` (the lane's prepared
+    /// targets) with every section's enable and every general band's family replaced by the
+    /// payload's words (issue #1337, D5). The dedicated cuts keep their fixed families. A word
+    /// outside the encoding (an enable other than `0` or `1`, a family outside `1..=6`) is refused
+    /// before any state or semantic target is written.
+    fn decode_configuration(
         words: &[u32; STATE_LANE_WORDS],
-    ) -> Result<[bool; 2], StatePayloadError> {
+        prepared: &[BandTarget; EQ_SECTION_COUNT],
+    ) -> Result<[BandTarget; EQ_SECTION_COUNT], StatePayloadError> {
         let invalid = StatePayloadError {
             code: "effect.state.payload",
         };
-        let decode = |word| match word {
+        let enable = |word| match word {
             0 => Ok(false),
             1 => Ok(true),
             _ => Err(invalid),
         };
-        Ok([
-            decode(words[STATE_HPF_ENABLE_WORD])?,
-            decode(words[STATE_LPF_ENABLE_WORD])?,
-        ])
+        let mut configuration = *prepared;
+        configuration[HPF_SECTION].enabled = enable(words[STATE_HPF_ENABLE_WORD])?;
+        configuration[LPF_SECTION].enabled = enable(words[STATE_LPF_ENABLE_WORD])?;
+        for band in 0..EQ_BAND_COUNT {
+            let target = &mut configuration[BAND_SECTION_OFFSET + band];
+            target.enabled = enable(words[STATE_BAND_CONFIG_WORD + 2 * band])?;
+            target.kind =
+                EqBandKind::from_payload_word(words[STATE_BAND_CONFIG_WORD + 2 * band + 1])
+                    .ok_or(invalid)?;
+        }
+        Ok(configuration)
     }
 
     /// Validates lane `track`'s state words and applies them all or none.
     ///
-    /// `configuration` supplies the two parameters that are not automatable and therefore not in
-    /// the payload — the band's enable and family. The ramp target words are **recomputed** from
+    /// `configuration` supplies each section's enable and family, decoded from the payload by
+    /// [`decode_configuration`](Self::decode_configuration). The ramp target words are **recomputed** from
     /// the stored parameters rather than stored, so a payload cannot carry words that disagree with
     /// the parameters it also carries. (The effect itself decodes both channels before committing
     /// either; this one-channel form serves the crate's unit tests.)
@@ -3201,21 +3251,6 @@ impl<L: Lane, const W: usize> PreparedParametricEq<L, W> {
             return Err(EffectTargetError::Capacity);
         }
         let (section, channel, band, words) = control::decode_prepared_target(target)?;
-        if section != HPF_SECTION && section != LPF_SECTION {
-            let permitted = |prepared: BandTarget| {
-                band.enabled == prepared.enabled && band.kind == prepared.kind
-            };
-            let left_permitted = permitted(self.initial[lane][0][section]);
-            let right_permitted = permitted(self.initial[lane][1][section]);
-            let allowed = match channel {
-                ParameterChannel::Left => left_permitted,
-                ParameterChannel::Right => right_permitted,
-                ParameterChannel::Both => left_permitted && right_permitted,
-            };
-            if !allowed {
-                return Err(EffectTargetError::Domain);
-            }
-        }
         self.silent_fixed_point = false;
         match channel {
             ParameterChannel::Left => self.left.apply_prepared_target(lane, section, band, words),
@@ -3791,14 +3826,10 @@ impl<L: Lane, const W: usize> PreparedParametricEq<L, W> {
             });
         }
         let (left, right) = read_payload(input)?;
-        let left_enables = Channel::<L, W>::snapshot_cut_enables(&left)?;
-        let right_enables = Channel::<L, W>::snapshot_cut_enables(&right)?;
-        let mut left_configuration = self.initial[track][0];
-        let mut right_configuration = self.initial[track][1];
-        left_configuration[HPF_SECTION].enabled = left_enables[0];
-        left_configuration[LPF_SECTION].enabled = left_enables[1];
-        right_configuration[HPF_SECTION].enabled = right_enables[0];
-        right_configuration[LPF_SECTION].enabled = right_enables[1];
+        let left_configuration =
+            Channel::<L, W>::decode_configuration(&left, &self.initial[track][0])?;
+        let right_configuration =
+            Channel::<L, W>::decode_configuration(&right, &self.initial[track][1])?;
         let sample_rate = self.sample_rate();
         // Both channels validate before either commits: all or none. Each band's target is
         // designed once, here, and committed as designed.
@@ -3820,8 +3851,8 @@ impl<L: Lane, const W: usize> PreparedParametricEq<L, W> {
     /// ([`LANE_DEFAULT_BYTES`]).
     ///
     /// They are `initial[lane]` and `initial_words[lane]`: what a full reset re-seeds the lane
-    /// from, what a restore takes the general bands' enable and family from (they are not in the
-    /// payload), and what a prepared target's permission check compares against. No state word
+    /// from, and what a restore takes the dedicated cuts' fixed families from (every other target
+    /// field is in the payload, #1337). No state word
     /// changes. The enable and family words of this crate's own encoding round-trip exactly; a
     /// word outside it (only ever a caller's spare area passing through, which no reader sees
     /// before it leaves again) is held as the nearest legal value: a non-zero enable as enabled,

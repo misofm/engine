@@ -18,9 +18,8 @@ use lane::fpenv::CanonicalFpEnv;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
 use crate::runtime::{
-    CommandError, EventError, EventLane, PlanQueries, PlanState, SOURCE_ID_INVALID,
-    SessionSeekFailure, SourceFailure, SourceFailureReport, compile_children, limits_are_valid,
-    plan_error, render_error_code,
+    CommandError, EventError, EventLane, PlanQueries, PlanState, SessionSeekFailure, SourceFailure,
+    SourceFailureReport, compile_children, limits_are_valid, plan_error, render_error_code,
 };
 
 fn catch_result(operation: impl FnOnce() -> u32) -> u32 {
@@ -115,8 +114,9 @@ unsafe fn borrowed_bytes<'a>(data: *const u8, bytes: u64, limit: u64) -> Result<
     Ok(unsafe { core::slice::from_raw_parts(data, bytes) })
 }
 
-/// Borrows a source entry point's source ID, or refuses a null, empty, non-UTF-8 or over-long one
-/// with `RESULT_INVALID_ARGUMENT` and the `source.id.invalid` diagnostic.
+/// Borrows a source entry point's source ID, or refuses a null or over-long one with the core's
+/// `SourceControlError::InvalidId` result and diagnostic (`source.id.invalid`). An empty or
+/// non-UTF-8 ID is borrowed: the core refuses it with the same failure (#1706 D4).
 ///
 /// # Safety
 ///
@@ -129,12 +129,16 @@ unsafe fn borrowed_source_id<'a>(
 ) -> Result<&'a [u8], u32> {
     // SAFETY: The caller promises a nonnull `source_id` is readable for its declared byte count.
     match unsafe { borrowed_bytes(source_id, source_id_bytes, MAX_SOURCE_ID_BYTES) } {
-        Ok(value) if !value.is_empty() && core::str::from_utf8(value).is_ok() => Ok(value),
-        _ => {
+        Ok(value) => Ok(value),
+        Err(_) => {
+            // The pointer-level forms only; an empty or non-UTF-8 ID reaches the core, which
+            // refuses it with this same failure (#1706 D4).
+            let (code, diagnostic) =
+                SourceFailure::Control(host_core::SourceControlError::InvalidId).report();
             // SAFETY: `session` passed the live-kind check; the ABI serializes session calls, so
             // this short diagnostic borrow overlaps no other borrow of the session.
-            unsafe { (*session).last_error.borrow_mut() }.set(SOURCE_ID_INVALID);
-            Err(RESULT_INVALID_ARGUMENT)
+            unsafe { (*session).last_error.borrow_mut() }.set(diagnostic);
+            Err(code)
         }
     }
 }
@@ -673,7 +677,7 @@ unsafe fn source_seek_entry(
 /// (`source.seek.frame_out_of_range`); `RESULT_BACKPRESSURE` with `source.seek.backpressure` when
 /// any consumer still holds a seek (nothing changed; retry after a render); otherwise the source
 /// seek's mapping (`RESULT_INVALID_ARGUMENT` with `source.ring.vacated`, `RESULT_INTERNAL` with
-/// `capi.source.epoch` or `source.internal`); and a refused declaration's result and diagnostic,
+/// `source.epoch` or `source.internal`); and a refused declaration's result and diagnostic,
 /// as [`miso_engine_v1_declare_discontinuity`] returns them, with nothing pushed. The diagnostic is
 /// in `miso_engine_v1_last_error`.
 ///
@@ -846,7 +850,7 @@ pub unsafe extern "C" fn miso_engine_v1_source_seek_report(
 /// this at least once per render-buffer period.
 ///
 /// Returns `RESULT_OK`; a null or wrong handle as every session call; and `RESULT_INTERNAL` with
-/// the session diagnostic `capi.source.epoch` when the session's plan epochs cannot be
+/// the session diagnostic `source.epoch` when the session's plan epochs cannot be
 /// synchronized.
 ///
 /// # Safety
@@ -948,56 +952,129 @@ pub unsafe extern "C" fn miso_engine_v1_submit_command(
     request_bytes: u64,
     response: *mut BytesOut,
 ) -> u32 {
-    catch_result(|| {
-        // SAFETY: Nonnull live handle pointers are caller-provided under the handle contract.
-        let kind = unsafe { session_kind(session) };
-        if kind != RESULT_OK {
-            return kind;
-        }
-        if request.is_null() || response.is_null() {
-            return RESULT_INVALID_ARGUMENT;
-        }
-        // SAFETY: The response descriptor is nonnull and promised readable/writable for this call.
-        let output_capacity = match unsafe { validate_bytes_out(response) } {
-            Ok(value) => value.capacity_bytes,
-            Err(code) => return code,
-        };
-        // SAFETY: The caller promises the complete request frame is readable for this call.
-        // The control codec bounds the frame itself; only the platform slice cap applies here.
-        let request = match unsafe { borrowed_bytes(request, request_bytes, MAX_BORROWED_BYTES) } {
-            Ok(value) if !value.is_empty() => value,
-            _ => return RESULT_INVALID_ARGUMENT,
-        };
-        // SAFETY: The live-kind check establishes the concrete session representation; generic
-        // command calls are serialized with source control by the ABI contract.
-        let session = unsafe { &mut *session };
-        match session.state.command(request, output_capacity) {
-            Ok(bytes) => {
-                let encoded = session.state.command_response(bytes);
-                // SAFETY: The descriptor was validated and command preflight proved capacity.
-                let code = unsafe { write_bytes(response, encoded) };
-                if code == RESULT_OK {
-                    session.last_error.borrow_mut().clear();
-                }
-                code
-            }
-            Err(refused) => {
-                if let CommandError::BufferTooSmall { required } = refused {
-                    // SAFETY: The response descriptor was validated above; only required length
-                    // is updated and no caller payload byte is written.
-                    unsafe { (*response).required_bytes = required };
-                }
-                session.last_error.borrow_mut().set(&refused.diagnostic());
-                match refused {
-                    CommandError::BufferTooSmall { .. } => RESULT_BUFFER_TOO_SMALL,
-                    CommandError::Invalid => RESULT_INVALID_ARGUMENT,
-                    CommandError::Backpressure => RESULT_BACKPRESSURE,
-                    CommandError::CompileRejected(_) => RESULT_COMPILE_REJECTED,
-                    CommandError::Internal => RESULT_INTERNAL,
-                }
-            }
-        }
+    // SAFETY: The caller's contract is `submit`'s, with no document.
+    catch_result(|| unsafe {
+        submit(
+            session,
+            request,
+            request_bytes,
+            core::ptr::null(),
+            0,
+            response,
+        )
     })
+}
+
+/// [`miso_engine_v1_submit_command`] with a session document borrowed beside the frame for this
+/// call only (#1386 D7): the document a `SESSION_REPLACE` frame names. `document` may be null only
+/// when `document_bytes` is 0. The library keeps nothing of it; the control plane checks, hashes,
+/// parses and diffs it (`SessionState::command_with_document`). A host checks
+/// [`crate::FEATURE_SESSION_REPLACE`] before calling it.
+///
+/// # Safety
+///
+/// Every pointer must satisfy its ABI V1 borrowed-frame, output, or live-handle contract, and a
+/// nonnull `document` must be readable for `document_bytes` for this call.
+///
+/// Thread: control.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn miso_engine_v1_submit_document_command(
+    session: *mut Session,
+    request: *const u8,
+    request_bytes: u64,
+    document: *const u8,
+    document_bytes: u64,
+    response: *mut BytesOut,
+) -> u32 {
+    // SAFETY: The caller's contract is `submit`'s.
+    catch_result(|| unsafe {
+        submit(
+            session,
+            request,
+            request_bytes,
+            document,
+            document_bytes,
+            response,
+        )
+    })
+}
+
+/// The one body of both submit exports: a frame and an optional borrowed document (`null`, 0 for
+/// none) through `SessionState::command_with_document`.
+///
+/// # Safety
+///
+/// As [`miso_engine_v1_submit_document_command`].
+unsafe fn submit(
+    session: *mut Session,
+    request: *const u8,
+    request_bytes: u64,
+    document: *const u8,
+    document_bytes: u64,
+    response: *mut BytesOut,
+) -> u32 {
+    // SAFETY: Nonnull live handle pointers are caller-provided under the handle contract.
+    let kind = unsafe { session_kind(session) };
+    if kind != RESULT_OK {
+        return kind;
+    }
+    if request.is_null() || response.is_null() {
+        return RESULT_INVALID_ARGUMENT;
+    }
+    // SAFETY: The response descriptor is nonnull and promised readable/writable for this call.
+    let output_capacity = match unsafe { validate_bytes_out(response) } {
+        Ok(value) => value.capacity_bytes,
+        Err(code) => return code,
+    };
+    // SAFETY: The caller promises the complete request frame is readable for this call.
+    // The control codec bounds the frame itself; only the platform slice cap applies here.
+    let request = match unsafe { borrowed_bytes(request, request_bytes, MAX_BORROWED_BYTES) } {
+        Ok(value) if !value.is_empty() => value,
+        _ => return RESULT_INVALID_ARGUMENT,
+    };
+    // The document's own bound is the control plane's (`maximum_document_bytes`, a typed reply);
+    // only the platform slice cap applies here, as for the frame.
+    let document: &[u8] = if document_bytes == 0 {
+        &[]
+    } else {
+        // SAFETY: The caller promises a nonnull document is readable for `document_bytes`.
+        match unsafe { borrowed_bytes(document, document_bytes, MAX_BORROWED_BYTES) } {
+            Ok(value) => value,
+            Err(code) => return code,
+        }
+    };
+    // SAFETY: The live-kind check establishes the concrete session representation; generic
+    // command calls are serialized with source control by the ABI contract.
+    let session = unsafe { &mut *session };
+    match session
+        .state
+        .command_with_document(request, document, output_capacity)
+    {
+        Ok(bytes) => {
+            let encoded = session.state.command_response(bytes);
+            // SAFETY: The descriptor was validated and command preflight proved capacity.
+            let code = unsafe { write_bytes(response, encoded) };
+            if code == RESULT_OK {
+                session.last_error.borrow_mut().clear();
+            }
+            code
+        }
+        Err(refused) => {
+            if let CommandError::BufferTooSmall { required } = refused {
+                // SAFETY: The response descriptor was validated above; only required length
+                // is updated and no caller payload byte is written.
+                unsafe { (*response).required_bytes = required };
+            }
+            session.last_error.borrow_mut().set(&refused.diagnostic());
+            match refused {
+                CommandError::BufferTooSmall { .. } => RESULT_BUFFER_TOO_SMALL,
+                CommandError::Invalid => RESULT_INVALID_ARGUMENT,
+                CommandError::Backpressure => RESULT_BACKPRESSURE,
+                CommandError::CompileRejected(_) => RESULT_COMPILE_REJECTED,
+                CommandError::Internal => RESULT_INTERNAL,
+            }
+        }
+    }
 }
 
 /// Dequeue one complete reliable or lossy event frame into caller-owned bytes.
@@ -1935,6 +2012,11 @@ mod tests {
         );
         // #1642 gate 6.
         assert_ne!(capabilities.feature_mask & crate::FEATURE_SESSION_SEEK, 0);
+        // #1386.
+        assert_ne!(
+            capabilities.feature_mask & crate::FEATURE_SESSION_REPLACE,
+            0
+        );
         assert_eq!(capabilities.reserved, [0; 4]);
     }
 
@@ -3240,7 +3322,7 @@ mod tests {
                 assert_eq!(call(), RESULT_INVALID_ARGUMENT, "{entry}, {form}");
                 assert_eq!(
                     read_last_error(session.cast()),
-                    SOURCE_ID_INVALID,
+                    b"source.id.invalid",
                     "{entry}, {form}"
                 );
             }

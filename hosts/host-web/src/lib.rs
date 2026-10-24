@@ -36,7 +36,7 @@ use builtins_compiler::MeterConsumer;
 use control_plane::{
     CompileFailure, ControlAdapter, ControlLimits, ObservationChange, ObservationKeyError,
     ObservationKeyRef, ObservationRefusal, PlanQueries, PlanResources, PlanState,
-    SessionSeekFailure, SessionState, SourceFailure,
+    SessionSeekFailure, SessionState, SourceFailure, SourceRefusalKind,
 };
 use effect_contract::{ObservationCost, ObservationDescriptor};
 use engine::realtime::{
@@ -1095,19 +1095,11 @@ pub struct WebBootOptions {
     /// records (kinds 7 and 8): a subscription rides the effect's own observation queue. With zero,
     /// a command submission is `RESULT_UNSUPPORTED` with `COMMAND_REASON_UNSUPPORTED_KIND`.
     pub live_control_observation_taps: u64,
-    /// The designated master strip index (tracks first, then submixes) **plus one**, or `0` for
-    /// none (issue #143 D6). `T + j + 1` designates submix `j` (issue #1213 D5), so a mix bus
-    /// with a limiter can report `masterGrDb`; a value past `T + S` refuses at boot.
-    ///
-    /// Boot v1 has no structural master bus, so `masterGrDb` is a designation rather than a discovery.
-    /// Plus one because zero has to keep meaning "unset" in a word every V1 writer already zeroes.
-    ///
-    /// Two rules stand side by side until a successor retires this word (#1683). The word is
-    /// refused at boot (`web.options.live_controls`) unless `live_control_observation_taps` is
-    /// nonzero. The core's `master` monitor row, written by `SET_CONTROL`, is a designation valid
-    /// on every host with or without observation taps (the C ABI has none); without a tap on the
-    /// strip, `masterGrDb` is `null`. The word seeds that row at boot by the strip's ID.
-    pub live_control_master_track_plus_one: u64,
+    /// Must be zero. This was the master boot word (the designated master strip index plus one)
+    /// until #1689 retired it: the master is the strip's `master` row, written by `SET_CONTROL`
+    /// after boot, as on every host. The offset keeps its place and the word is refused when
+    /// nonzero (`web.options.reserved2`).
+    pub reserved2: u64,
 }
 
 impl WebBootOptions {
@@ -1125,7 +1117,7 @@ impl WebBootOptions {
             reserved1: 0,
             live_control_meter_blocks: 0,
             live_control_observation_taps: 0,
-            live_control_master_track_plus_one: 0,
+            reserved2: 0,
         }
     }
 
@@ -1780,6 +1772,9 @@ impl ReadyOwnership {
                 adoption: None,
                 spectrum: handover,
             });
+            // The replacement's header carries its master word before the rendering plan's header
+            // names it (#1689), so the page never reads the successor without its master.
+            self.sync_master();
             // The rendering plan's header names the newest replacement's, so the page cuts its
             // views over the successor's frame in the handler that committed it (#1290d1).
             if let Some(entry) = self.pending_shapes.last() {
@@ -2662,6 +2657,32 @@ impl AudioWorkletEngineHost {
         })
     }
 
+    /// A refused source call (#1706 D3): the control plane's diagnostic for `failure` into the
+    /// session diagnostic and the response, as a refused control call writes its own, and the
+    /// result code of the failure's kind. It records nothing: each caller records exactly when
+    /// its call records its results. The copy is into preallocated storage, so `submit_source`
+    /// calls it from `process()`.
+    pub(crate) fn refuse_source(&mut self, failure: SourceFailure) -> u32 {
+        if let Some(buffers) = self.buffers.as_mut() {
+            let diagnostic = failure.diagnostic().as_bytes();
+            let kept = diagnostic.len().min(buffers.diagnostic.len());
+            buffers.diagnostic[..kept].copy_from_slice(&diagnostic[..kept]);
+            self.diagnostic_len = kept;
+            self.control_response = ControlResponse::Diagnostic;
+        }
+        match failure.kind() {
+            SourceRefusalKind::InvalidArgument => RESULT_INVALID_ARGUMENT,
+            SourceRefusalKind::Backpressure => RESULT_BACKPRESSURE,
+            SourceRefusalKind::Internal => RESULT_INTERNAL,
+        }
+    }
+
+    /// A source ID the staging cannot hold (#1706 D4): the core's malformed-ID refusal, unrecorded
+    /// as `refuse_source`.
+    pub(crate) fn refuse_source_id(&mut self) -> u32 {
+        self.refuse_source(SourceFailure::Control(SourceControlError::InvalidId))
+    }
+
     /// Dequeue the next event of `lane` (issue #1570b D1): `0` is the reliable lane, `1` the lossy
     /// lane, the C ABI's codes. This is the browser form of `miso_engine_v1_dequeue_event`: the
     /// same [`control_plane::SessionState::dequeue_event`], with the whole response scratch as
@@ -2864,6 +2885,7 @@ impl AudioWorkletEngineHost {
     /// again); a source the session does not declare is [`RESULT_INVALID_ARGUMENT`]. Every refusal
     /// leaves the record alone. Like [`Self::service`] it leaves the status's last result alone.
     pub fn read_seek_report(&mut self, source_id: &[u8]) -> u32 {
+        self.control_response = ControlResponse::None;
         if self.status.state != STATE_READY {
             return RESULT_REFUSED_LIFECYCLE;
         }
@@ -2884,7 +2906,7 @@ impl AudioWorkletEngineHost {
                 };
                 RESULT_OK
             }
-            Err(failure) => source_failure_result(failure),
+            Err(failure) => self.refuse_source(failure),
         }
     }
 
@@ -3633,6 +3655,7 @@ impl AudioWorkletEngineHost {
         frames: u32,
         end_of_region: bool,
     ) -> u32 {
+        self.control_response = ControlResponse::None;
         if self.status.state != STATE_READY {
             return self.record(RESULT_WRONG_STATE);
         }
@@ -3658,7 +3681,7 @@ impl AudioWorkletEngineHost {
         );
         let code = match result {
             Ok(_) => RESULT_OK,
-            Err(failure) => source_failure_result(failure),
+            Err(failure) => self.refuse_source(failure),
         };
         self.record(code)
     }
@@ -3671,6 +3694,7 @@ impl AudioWorkletEngineHost {
     /// position while the absolute render clock stays continuous; it therefore neither resets
     /// meter accumulators nor advances the meter publication epoch.
     pub fn seek_source(&mut self, source_id: &[u8], generation: u64, source_frame: u64) -> u32 {
+        self.control_response = ControlResponse::None;
         if self.status.state != STATE_READY {
             return self.record(RESULT_WRONG_STATE);
         }
@@ -3683,7 +3707,10 @@ impl AudioWorkletEngineHost {
             .sources
             .binary_search_by(|source| source.id.as_str().as_bytes().cmp(source_id))
         else {
-            return self.record(RESULT_INVALID_ARGUMENT);
+            // The core's refusal for an ID that names no source, as the C ABI reports it.
+            let failure = SourceFailure::Control(SourceControlError::unmatched_id(source_id));
+            let code = self.refuse_source(failure);
+            return self.record(code);
         };
         if !plan.can_prepare_source_seek(source_index) {
             return self.record(RESULT_WRONG_STATE);
@@ -3699,7 +3726,7 @@ impl AudioWorkletEngineHost {
                     RESULT_INTERNAL
                 }
             }
-            Err(failure) => source_failure_result(failure),
+            Err(failure) => self.refuse_source(failure),
         };
         self.record(code)
     }
@@ -3713,7 +3740,7 @@ impl AudioWorkletEngineHost {
     /// anchored seek is held by the ring and the consumer applies it at its anchor block, where
     /// `prepare_source_seek` would refuse a held seek. A host that is not ready refuses with
     /// [`RESULT_REFUSED_LIFECYCLE`] and changes nothing; the core's refusals map through
-    /// `source_failure_result` (an unknown source or an anchor that is not a quantum multiple is
+    /// `refuse_source` (an unknown source or an anchor that is not a quantum multiple is
     /// [`RESULT_INVALID_ARGUMENT`]).
     pub fn seek_source_at(
         &mut self,
@@ -3722,6 +3749,7 @@ impl AudioWorkletEngineHost {
         source_frame: u64,
         anchor_sample: u64,
     ) -> u32 {
+        self.control_response = ControlResponse::None;
         if self.status.state != STATE_READY {
             return self.record(RESULT_REFUSED_LIFECYCLE);
         }
@@ -3733,7 +3761,7 @@ impl AudioWorkletEngineHost {
             .seek_at(source_id, generation, source_frame, anchor_sample)
         {
             Ok(()) => RESULT_OK,
-            Err(failure) => source_failure_result(failure),
+            Err(failure) => self.refuse_source(failure),
         };
         self.record(code)
     }
@@ -3748,7 +3776,7 @@ impl AudioWorkletEngineHost {
     /// logic, and it never prepares the plan's consumer: every consumer observes the seek through
     /// its command queue at the next block, the timeline included. A host that is not ready
     /// refuses with [`RESULT_REFUSED_LIFECYCLE`] and changes nothing; the core's refusals map
-    /// through `source_failure_result` (a stale generation or an anchor that is not a quantum
+    /// through `refuse_source` (a stale generation or an anchor that is not a quantum
     /// multiple is [`RESULT_INVALID_ARGUMENT`], one full slot [`RESULT_BACKPRESSURE`]). The plain
     /// form declares the discontinuity in the same call (root ruling B16-R9): a plan it publishes
     /// is kept and counted as [`Self::declare_discontinuity`]'s, and a refused declaration
@@ -3777,7 +3805,7 @@ impl AudioWorkletEngineHost {
         ) {
             Ok(()) => self.record(RESULT_OK),
             Err(SessionSeekFailure::Seek(failure)) => {
-                let code = source_failure_result(failure);
+                let code = self.refuse_source(failure);
                 self.record(code)
             }
             // B16-R9: the plain form's declaration refused, reported as
@@ -5330,10 +5358,14 @@ fn validate_options(mut options: WebBootOptions) -> Result<WebBootOptions, BootF
             "web.options.reserved1",
         ));
     }
+    // #1689: the word at offset 56 was the master boot word, reserved the same way.
+    if options.reserved2 != 0 {
+        return Err(BootFailure::fixed(
+            RESULT_REFUSED_OPTIONS,
+            "web.options.reserved2",
+        ));
+    }
     if options.live_control_observation_taps > u64::from(MAXIMUM_OBSERVATION_TAPS)
-        || options.live_control_master_track_plus_one > u64::from(u32::MAX)
-        || (options.live_control_master_track_plus_one != 0
-            && options.live_control_observation_taps == 0)
         || options.live_control_meter_blocks > u64::from(u32::MAX)
     {
         return Err(BootFailure::fixed(
@@ -5393,31 +5425,6 @@ fn exact_retained_bytes(report: &WebResourceReport) -> Result<u64, BootFailure> 
         .checked_add(report.graph_session_plus_plan_bytes)
         .and_then(|total| total.checked_add(report.source_total_bytes))
         .ok_or_else(|| BootFailure::fixed(RESULT_REFUSED_BUDGET, "host.budget.arithmetic"))
-}
-
-/// Map the facade's one typed source rejection onto the frozen browser result codes.
-///
-/// The facade owns the vocabulary and the diagnostic strings; the browser ABI owns the numbers.
-/// Backpressure is bounded and retryable, an internal invariant failure is not the caller's fault,
-/// and everything else is a malformed submission.
-fn source_result(error: SourceControlError) -> u32 {
-    if error.is_backpressure() {
-        RESULT_BACKPRESSURE
-    } else if error.is_internal() {
-        RESULT_INTERNAL
-    } else {
-        RESULT_INVALID_ARGUMENT
-    }
-}
-
-/// The result word of a source submission or seek the control plane's source routing refused
-/// (#1381a D2): the facade's typed rejection as [`source_result`] maps it, or the control plane's
-/// own epoch failure, which is internal.
-fn source_failure_result(failure: SourceFailure) -> u32 {
-    match failure {
-        SourceFailure::Control(error) => source_result(error),
-        SourceFailure::Internal => RESULT_INTERNAL,
-    }
 }
 
 /// Translate document-derived shape plus host policy into the shared preparation caps.
@@ -5976,15 +5983,10 @@ impl WebRuntimePreparer {
         superseded: &host_core::LiveValuesSuperseded,
         boot: bool,
     ) -> Result<(PreparedHost, host_core::HostLiveControlHandles), PrepareDiagnostics> {
-        let mut live_controls = live_control_request(self.options, compiled.quantum().0)
-            .ok_or_else(|| {
+        let live_controls =
+            live_control_request(self.options, compiled.quantum().0).ok_or_else(|| {
                 PrepareDiagnostics::fixed(PrepareRejection::Session, "web.live_controls.config")
             })?;
-        // #1683: the boot word designates the first plan's master only; the core's overlay, which
-        // it seeds, designates every successor's.
-        if successor.is_some() {
-            live_controls.master_track = None;
-        }
         // Observation taps ride the effect lanes (#1254 D2): an app that asked for taps gets the
         // effect lanes whatever the session's live rows chose, as before the control plane chose
         // the lanes, so a session with no effect to observe still boots.
@@ -6010,7 +6012,6 @@ impl WebRuntimePreparer {
             &handles.effect_controls,
             &handles.effect_observations,
             handles.meters.len(),
-            handles.master_track,
         )
         .map_err(|code| {
             let rejection = if code.starts_with("web.resource.") {
@@ -6112,7 +6113,6 @@ fn build_plan_shape(
     producers: &[host_core::EffectControlProducer],
     observations: &[EffectObservationHandle],
     meter_count: usize,
-    master_track: Option<u32>,
 ) -> Result<PlanShape, &'static str> {
     let track_count = model.tracks.len();
     let submix_count = model.submixes.len();
@@ -6246,7 +6246,6 @@ fn build_plan_shape(
         u32::try_from(track_count).map_err(|_| "web.live_controls.effects")?;
     meter_header.submix_count =
         u32::try_from(submix_count).map_err(|_| "web.live_controls.effects")?;
-    meter_header.master_track_plus_one = master_track.map_or(0, |track| track.saturating_add(1));
     meter_header.frame_pointer = address_word(meter_frame.as_ptr());
     for (reader, handle) in observations.iter().enumerate() {
         let Some(strip) = strip_index(&tracks, &submixes, handle.track_id.as_bytes()) else {
@@ -6296,7 +6295,9 @@ fn build_plan_shape(
         observation_armed,
         observation_arm_samples: observation_arm_samples.into_boxed_slice(),
         observation_commanded: zero_u32(total_effects as usize)?,
-        master_track,
+        // #1689: no plan is prepared with a master; `ReadyOwnership::sync_master` points the
+        // shape at the strip the core's `master` row designates after every control command.
+        master_track: None,
         command_wanted: zero_u32(total_effects as usize)?,
         observe_named: zero_u32(total_effects as usize)?,
         in_flight: zero_u32(total_effects as usize)?,
@@ -6882,12 +6883,8 @@ fn live_control_request(
         meter_period_frames,
         meter_queue_depth: NonZeroUsize::new(METER_QUEUE_DEPTH)?,
         meter_tap: MeterTap::PostMatrix,
-        // Issue #143 D3/D6: both are carved browser configuration words, translated once, here.
+        // Issue #143 D3: a carved browser configuration word, translated once, here.
         observation_taps: u32::try_from(options.live_control_observation_taps).ok()?,
-        master_track: match options.live_control_master_track_plus_one {
-            0 => None,
-            value => Some(u32::try_from(value.checked_sub(1)?).ok()?),
-        },
     })
 }
 
@@ -6984,6 +6981,8 @@ mod render_lock;
 
 pub use ffi::*;
 pub use render_lock::RenderLockedAllocator;
+#[cfg(feature = "render-lock-probe")]
+pub use render_lock::miso_engine_web_v1_render_lock_probe;
 
 #[cfg(test)]
 mod tests;

@@ -3,6 +3,7 @@
 use session::{SessionModel, StableId, StripRef};
 
 use crate::Family;
+use crate::automation::AutomationIndex;
 use crate::descriptor::{ControlDescriptor, ControlScope, Lanes, Motion, check};
 use crate::effective::{
     Effective, EffectiveSource, EffectiveStrip, MonitorOverlay, MonitorRow, MonitorWrite, effective,
@@ -84,16 +85,20 @@ pub(crate) fn push_control_automated(
 /// console slots (each instance: bypass, parameters, link mode). A per-lane row is listed as `left`
 /// then `right`; a shared row once, as `both`. Every address appears exactly once.
 ///
-/// The list is the rows of every owner in turn, from [`owner_rows_with`] and nowhere else.
+/// The list is the rows of every owner in turn, from [`owner_rows_in`] over the whole model and
+/// nowhere else: the rows [`owner_rows_with`] gives, with the automation table walked once
+/// ([`AutomationIndex`], #1710).
 pub fn list(
     model: &SessionModel,
     overlay: &MonitorOverlay,
     sample_rate: u32,
 ) -> impl Iterator<Item = ControlRow> + use<> {
     let effective = effective(model, overlay);
+    let automation = AutomationIndex::of(model);
+    let view = ModelView::whole(model).indexed(&automation);
     let mut rows = Vec::new();
     for owner in 0..owner_count(model) {
-        owner_rows_with(model, &effective, overlay, owner, sample_rate, &mut rows);
+        owner_rows_in(view, &effective, overlay, owner, sample_rate, &mut rows);
     }
     rows.into_iter()
 }
@@ -227,8 +232,7 @@ pub fn owner_rows_in(
                 // Which entry drives a mute lane is read from the committed table, as for the
                 // fader (a transaction of values leaves the table's entries and targets as
                 // committed).
-                muted: crate::automation::mute_automation(model, strip.id)
-                    .map(|entry| entry.is_some()),
+                muted: view.mute_automation(strip.id).map(|entry| entry.is_some()),
             };
             strip::push_rows(
                 out,
@@ -251,7 +255,8 @@ pub fn owner_rows_in(
                 vca::VcaEntries {
                     offset: view.vca_automation(&vca.id),
                     // Which entry drives a mute lane is read from the committed table.
-                    muted: crate::automation::vca_mute_automation(model, &vca.id)
+                    muted: view
+                        .vca_mute_automation(&vca.id)
                         .map(|entry| entry.is_some()),
                 }
             };

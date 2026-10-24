@@ -85,7 +85,6 @@ fn live_controls() -> HostLiveControlRequest {
         meter_queue_depth: NonZeroUsize::new(16).expect("meter depth"),
         meter_tap: MeterTap::PostMatrix,
         observation_taps: 0,
-        master_track: None,
     }
 }
 

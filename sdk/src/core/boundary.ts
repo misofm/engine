@@ -198,15 +198,16 @@ function snapshotBootOptions(options: BootOptions): BootSnapshot {
     throw new MisoUsageError("spectrum and spectrumCollection are mutually exclusive");
   }
   const liveControlOptions = options.liveControls === undefined ? undefined : (() => {
-    const {
-      meterBlocks,
-      observationTaps,
-      masterTrackPlusOne,
-    } = options.liveControls!;
+    // Issue #1689: the retired master boot word is refused, never ignored, for an untyped caller.
+    if ((options.liveControls as { masterTrackPlusOne?: unknown }).masterTrackPlusOne !== undefined) {
+      throw new MisoUsageError(
+        "liveControls.masterTrackPlusOne was retired (issue #1689): designate the master after boot with strip.master(true)",
+      );
+    }
+    const { meterBlocks, observationTaps } = options.liveControls!;
     return Object.freeze({
       ...(meterBlocks === undefined ? {} : { meterBlocks }),
       ...(observationTaps === undefined ? {} : { observationTaps }),
-      ...(masterTrackPlusOne === undefined ? {} : { masterTrackPlusOne }),
     });
   })();
   const bootOptions: BootOptions = Object.freeze({
@@ -1339,10 +1340,16 @@ export class WasmBoundary {
     const { pointer } = this.#buffer("outputPcm");
     const quantum = this.#status().u32("quantumFrames");
     const contiguous = new Float32Array(this.#exports.memory.buffer, pointer, quantum * 2);
-    return Object.freeze({
+    const output = Object.freeze({
       left: contiguous.slice(0, actualFrames),
       right: contiguous.slice(quantum, quantum + actualFrames),
     });
+    // A block produces events (telemetry, render diagnostics, a transport change it applied), and
+    // the lossy lane holds one: they are read here, after each block, or a later block's would
+    // replace them before the next control frame read them (#1571 D4). The read runs the core's
+    // service step first, so the headless engine needs no other service call.
+    this.#drainControlEvents(handle);
+    return output;
   }
 
   /**
@@ -1412,8 +1419,10 @@ export class WasmBoundary {
    * Subscribe to the protocol events of the engine's control plane (#1570b): every listener gets
    * `{ lane, frame }` for each event the engine queued, in arrival order, where `lane` is `0` for the
    * reliable lane and `1` for the lossy lane and `frame` is the event frame the engine encoded,
-   * unchanged. Events are read after each control frame; one that arrives while no listener is
-   * subscribed is dropped and counted in `discardedControlEvents`. An event is not the ack of a
+   * unchanged. Events are read after each control frame and after each `render()`; one that arrives
+   * while no listener is subscribed is dropped and counted in `discardedControlEvents` as it is read.
+   * With no listener, each block's lossy telemetry is therefore dropped after that block, and a
+   * listener subscribed later does not receive the last block's lossy event. An event is not the ack of a
    * command (its reply is), so a drop changes no engine state. Returns the unsubscribe function.
    */
   onControlEvent(listener: (event: ControlEvent) => void): () => void {

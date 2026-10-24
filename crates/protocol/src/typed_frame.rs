@@ -11,8 +11,8 @@ use crate::{
     DecodedCapabilities, DecodedMeterBatch, Diagnostic, DiagnosticEvent, DiagnosticsPage,
     DiagnosticsRequest, EncodeError, EventHeader, FrameKind, MessageId, MeterBatch, NonOkResponse,
     OUTER_HEADER_BYTES, ObservationEnded, ProtocolCodec, RequestId, ResponseGetRequest,
-    ResponseHeader, ResponseResult, SessionCommitted, SessionEdit, SessionRevision,
-    SessionSnapshot, SessionSnapshotRequest, StatusCode, TelemetryConfiguration,
+    ResponseHeader, ResponseResult, SessionCommitted, SessionEdit, SessionReplaceRequest,
+    SessionRevision, SessionSnapshot, SessionSnapshotRequest, StatusCode, TelemetryConfiguration,
     TransactionApplied, TransportSetRequest, TransportSnapshot, TransportStateEvent,
 };
 
@@ -50,6 +50,7 @@ pub enum CommandPayload<'a> {
     ControlListGet(&'a ControlListRequest),
     ControlStateGet(&'a ControlListRequest),
     ResponseGet(&'a ResponseGetRequest),
+    SessionReplace(SessionReplaceRequest),
 }
 
 /// One typed command frame with a command-only revision precondition.
@@ -74,6 +75,8 @@ pub enum SuccessResponsePayload<'a> {
     ControlListPage(ControlListPage),
     ControlStatePage(ControlStatePage),
     ResponseResult(ResponseResult),
+    /// The reply of a `SESSION_REPLACE`: the `SESSION_TRANSACTION_APPLY` reply's fields.
+    SessionReplaced(TransactionApplied),
 }
 
 /// One typed successful response frame. The payload selects and fixes the echoed command ID.
@@ -126,6 +129,7 @@ pub enum DecodedCommandPayload {
     ControlListGet(ControlListRequest),
     ControlStateGet(ControlListRequest),
     ResponseGet(ResponseGetRequest),
+    SessionReplace(SessionReplaceRequest),
 }
 
 /// A strictly decoded kind-specific command header and its exact registered payload.
@@ -149,6 +153,7 @@ pub enum DecodedSuccessResponsePayload<'a> {
     ControlListPage(ControlListPage),
     ControlStatePage(ControlStatePage),
     ResponseResult(ResponseResult),
+    SessionReplaced(TransactionApplied),
 }
 
 /// A strictly decoded response payload selected by its non-OK status or successful schema.
@@ -196,6 +201,7 @@ impl<'a> CommandPayload<'a> {
             Self::ControlListGet(_) => MessageId::ControlListGet,
             Self::ControlStateGet(_) => MessageId::ControlStateGet,
             Self::ResponseGet(_) => MessageId::ResponseGet,
+            Self::SessionReplace(_) => MessageId::SessionReplace,
         }
     }
 }
@@ -214,6 +220,7 @@ impl<'a> SuccessResponsePayload<'a> {
             Self::ControlListPage(_) => MessageId::ControlListGet,
             Self::ControlStatePage(_) => MessageId::ControlStateGet,
             Self::ResponseResult(_) => MessageId::ResponseGet,
+            Self::SessionReplaced(_) => MessageId::SessionReplace,
         }
     }
 }
@@ -448,6 +455,9 @@ impl ProtocolCodec {
             MessageId::ResponseGet => DecodedCommandPayload::ResponseGet(
                 self.decode_response_request(decoded.payload, header.tlv_count)?,
             ),
+            MessageId::SessionReplace => DecodedCommandPayload::SessionReplace(
+                self.decode_session_replace_request(decoded.payload, header.tlv_count)?,
+            ),
             _ => return Err(DecodeError::MessageKindMismatch),
         };
         Ok(DecodedTypedCommandFrame { header, payload })
@@ -508,6 +518,9 @@ impl ProtocolCodec {
             MessageId::ResponseGet => DecodedSuccessResponsePayload::ResponseResult(
                 self.decode_response_result(decoded.payload, header.tlv_count)?,
             ),
+            MessageId::SessionReplace => DecodedSuccessResponsePayload::SessionReplaced(
+                self.decode_transaction_applied(decoded.payload, header.tlv_count)?,
+            ),
             _ => return Err(DecodeError::MessageKindMismatch),
         };
         Ok(DecodedTypedResponseFrame::Success { header, payload })
@@ -558,6 +571,7 @@ const fn command_message_requires_exact(message_id: MessageId) -> bool {
     matches!(
         message_id,
         MessageId::SessionTransactionApply
+            | MessageId::SessionReplace
             | MessageId::TransportSet
             | MessageId::TelemetryConfigure
     )
@@ -673,6 +687,9 @@ fn write_command_payload(
         CommandPayload::ResponseGet(value) => {
             crate::message_wire::write_response_request(sink, value)
         }
+        CommandPayload::SessionReplace(value) => {
+            crate::message_wire::write_session_replace_request(sink, *value)
+        }
     }
 }
 
@@ -688,7 +705,8 @@ fn write_success_payload(
         SuccessResponsePayload::SessionSnapshot(value) => {
             crate::message_wire::write_snapshot(sink, *value)
         }
-        SuccessResponsePayload::SessionTransactionApplied(value) => {
+        SuccessResponsePayload::SessionTransactionApplied(value)
+        | SuccessResponsePayload::SessionReplaced(value) => {
             crate::message_wire::write_transaction_applied(sink, *value)
         }
         SuccessResponsePayload::TransportGetSnapshot(value)
@@ -1044,6 +1062,17 @@ mod tests {
                 },
                 MessageId::ControlStateGet,
             ),
+            (
+                TypedCommandFrame {
+                    request_id: request_id(),
+                    expected_revision: crate::ExpectedRevision::Exact(SessionRevision(7)),
+                    payload: CommandPayload::SessionReplace(SessionReplaceRequest {
+                        document_bytes: 1024,
+                        document_sha256: [0x5a; 32],
+                    }),
+                },
+                MessageId::SessionReplace,
+            ),
         ];
         for (frame, expected_id) in &frames {
             assert_command_frame(&codec, frame, *expected_id);
@@ -1196,6 +1225,17 @@ mod tests {
                     payload: SuccessResponsePayload::ResponseResult(crate::ResponseResult::Tag(9)),
                 },
                 MessageId::ResponseGet,
+            ),
+            (
+                TypedSuccessResponseFrame {
+                    request_id: request_id(),
+                    revision: SessionRevision(7),
+                    payload: SuccessResponsePayload::SessionReplaced(TransactionApplied {
+                        applied_operations: 0,
+                        edit_path: crate::EditPath::Unchanged,
+                    }),
+                },
+                MessageId::SessionReplace,
             ),
         ];
         for (frame, expected_id) in &responses {

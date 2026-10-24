@@ -5,8 +5,8 @@ use session::SessionModel;
 
 use crate::effective::MonitorOverlay;
 use crate::effective::effective;
-use crate::registry::{ControlRow, owner_count, owner_rows_with};
-use crate::{ControlClass, Family};
+use crate::registry::{ControlRow, owner_count, owner_rows_in};
+use crate::{AutomationIndex, ControlClass, Family, ModelView};
 
 /// The optional live lanes a plan attaches. A strip's fader/mute and matrix/pan lanes are always
 /// attached and have no flag.
@@ -16,7 +16,8 @@ pub struct LiveLanes {
     pub strip_input: bool,
     /// One lane per prepared effect instance: some effect instance has a live row.
     pub effects: bool,
-    /// One lane per route into a submix: some route row is live.
+    /// One lane per route whose rows are live ([`crate::route_rows_live`]: into a submix, or from a
+    /// tap before its strip's fader, #1391): some route row is live.
     pub routes: bool,
 }
 
@@ -58,12 +59,15 @@ impl LiveLanes {
 pub fn live_lanes(model: &SessionModel) -> LiveLanes {
     let overlay = MonitorOverlay::default();
     let effective = effective(model, &overlay);
+    // The automation table is walked once for every owner's rows (#1844).
+    let automation = AutomationIndex::of(model);
+    let view = ModelView::whole(model).indexed(&automation);
     let mut lanes = LiveLanes::default();
     let mut rows = Vec::new();
     for owner in 0..owner_count(model) {
         rows.clear();
-        owner_rows_with(
-            model,
+        owner_rows_in(
+            view,
             &effective,
             &overlay,
             owner,

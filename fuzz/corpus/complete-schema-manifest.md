@@ -1,13 +1,13 @@
 # Issue-005 complete typed BTLV corpus
 
-The shared `complete_schema_corpus()` fixture has 46 canonical frames: all 11 commands (the
-session transaction contains all 35 allocated `SessionEditOpcode` values), all 13 successful
+The shared `complete_schema_corpus()` fixture has 48 canonical frames: all 12 commands (the
+session transaction contains all 35 allocated `SessionEditOpcode` values), all 14 successful
 responses, all 16 registered non-OK statuses (including typed `BACKPRESSURE`), and all six event
 schemas. Optional/boundary values are represented by the transaction's nested fixture, the optional
 transport-event origin, empty valid pages, and the typed backpressure variant.
 
 The canonical sequence is FNV-1a-64 over each stable frame label followed by its frame bytes:
-`5cab2cf3b4e4767f`, pinned once as `COMPLETE_SCHEMA_HASH`. Native mutation, each typed fuzz
+`c85b2a0dff5d2a92`, pinned once as `COMPLETE_SCHEMA_HASH`. Native mutation, each typed fuzz
 decoder, and scalar/simd128 Wasm execution all consume this same public fixture source.
 
 Issue #787 re-pinned this value after the transaction's two same-length source-identity spellings
@@ -88,3 +88,8 @@ The value stood at `88a8ee6a6d9e4acc` here until #274. It was correct until `b45
 two re-pins that followed (`b454b230`, then #241's `04d291dd`) did not reach this file or the
 Wasm runner, because the parity gate over them could not fail; the arithmetic that carries
 `88a8ee6a6d9e4acc` to the current value is in `docs/derivations/274-parity-repin.md`.
+
+Issue #1386 re-pinned it from `5cab2cf3b4e4767f`: `SESSION_REPLACE` (`0x0013`) adds
+`command.session_replace` (the document's length and 32-byte SHA-256, never the document) and
+`response.session_replace` (the transaction reply with `edit_path` `unchanged`, 5), and the
+capabilities response lists command `0x0013`. The frame count is 48.

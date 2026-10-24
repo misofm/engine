@@ -14,11 +14,11 @@
 //! the same `live_values_superseded` and `STRIPS_RESTARTED` counts (#1768), and every page of `CONTROL_LIST_GET` and
 //! `CONTROL_STATE_GET` and the `SESSION_SNAPSHOT_GET` bytes are byte-identical. The whole run
 //! repeats at 44.1, 48, 88.2 and 96 kHz. The script holds the edits that take the rebuild arm (a
-//! route into the output, the prepared bypass of the delay and the multiband compressor, and
-//! `delay_samples`): the browser prepares and publishes the successor like the C ABI does, and the
-//! two hosts answer the same bytes and render the same bits across the swap (#1562b). No launch
-//! effect declares an audio-rate parameter, so that row of the batch 7 amendment has no edit to
-//! script.
+//! route into the output, the prepared bypass of the multiband compressor, and `delay_samples`;
+//! the delay's bypass is live since #1339): the browser prepares and publishes the successor like
+//! the C ABI does, and the two hosts answer the same bytes and render the same bits across the swap
+//! (#1562b). No launch effect declares an audio-rate parameter, so that row of the batch 7
+//! amendment has no edit to script.
 //!
 //! It absorbs #1364 gate 3 (the edits carry no per-edit ramp, so each host resolves the session's
 //! own length, and one pan carries a window of its own while another does not) and #1399 (a fader,
@@ -724,8 +724,8 @@ fn script() -> Vec<Step> {
         ),
         unchanged(39, Edit::SendMute { muted: false }, 480),
         // The rebuild arm (#1562b): a route into the output has no live lane, so its gain and
-        // mute rebuild the plan; so does the prepared bypass of the delay and of the multiband
-        // compressor, and a strip's `delay_samples`, which moves the plan's latency. Each is a
+        // mute rebuild the plan; so does the prepared bypass of the multiband compressor, and a
+        // strip's `delay_samples`, which moves the plan's latency. Each is a
         // swap at the next block on both hosts, with the watermark advancing at that block.
         rebuilt(11, Edit::OutputGain { db: -3.0 }),
         rebuilt(17, Edit::OutputMute { muted: true }),
@@ -744,7 +744,8 @@ fn script() -> Vec<Step> {
                 bypassed: true,
             },
         ),
-        rebuilt(
+        // The delay's bypass is a live shunt since #1339: a crossfade on both hosts, no swap.
+        live(
             43,
             Edit::Bypass {
                 insert: DELAY,
@@ -4061,6 +4062,7 @@ fn a_supersession_that_would_drop_acked_pcm_is_backpressure_alike_on_both_hosts(
 }
 
 /// The C ABI plan's `latency_samples`, through the exported resource query.
+#[cfg(feature = "test-support")]
 fn c_latency(c_abi: &CAbi) -> u64 {
     // SAFETY: Every field of the report is an integer, for which zero is a valid value.
     let mut report: capi::PlanResourceReport = unsafe { core::mem::zeroed() };
@@ -4531,6 +4533,208 @@ fn the_seek_report_is_alike_on_both_hosts_for_plain_late_and_future_seeks() {
         );
         assert!(ahead.4 > 0, "{label} ahead: the wait held frames");
     }
+}
+
+/// One refused source call on both hosts: its row label, the expected `(result, diagnostic)`, the
+/// browser call and the C ABI call. Each call returns its result code.
+type RefusalRow<'a> = (
+    &'a str,
+    (u32, &'a [u8]),
+    Box<dyn Fn(&mut Rig) -> u32 + 'a>,
+    Box<dyn Fn(*mut Session) -> u32 + 'a>,
+);
+
+/// #1706 gate 1: every source call a host can refuse (submit, seek, anchored seek, session seek,
+/// seek report) reports the same result code and the same diagnostic on both hosts, read through
+/// the browser's session diagnostic and the C ABI's `miso_engine_v1_last_error`. The rows run in
+/// one order on both rigs, and no two neighbours share a text, so a host that leaves the previous
+/// diagnostic in place reads red.
+///
+/// Test value: red when either host maps a refusal kind to another code, drops or rewords the
+/// core's text (the browser wrote none before #1706), or refuses a malformed or unknown ID before
+/// the core with a code or text of its own (the browser's own unknown-ID lookup in `seek_source`),
+/// when the browser's control response (what the page reads) does not carry the text, or when a
+/// later successful source call leaves the refusal's text in it.
+#[test]
+fn a_refused_source_call_reports_the_same_result_and_diagnostic_on_both_hosts() {
+    const RATE: u32 = 48_000;
+    let model = model_at(RATE);
+    let mut browser = Rig::new(&model);
+    let c_abi = CAbi::new(&model);
+    let [left, right] = planes(0, 0);
+    let pointers = [left.as_ptr(), right.as_ptr()];
+    let invalid = host_web::RESULT_INVALID_ARGUMENT;
+    let submit = |rig: &mut Rig, id: &[u8], rate: u32| {
+        rig.host
+            .submit_source(id, 1, 0, rate, &[&left, &right], QUANTUM, false)
+    };
+    let c_submit = |session: *mut Session, id: &[u8], rate: u32| {
+        let chunk = SourceChunk {
+            struct_size: SOURCE_CHUNK_SIZE,
+            sample_rate_hz: rate,
+            generation: 1,
+            start_frame: 0,
+            planes: pointers.as_ptr(),
+            plane_count: 2,
+            frames: QUANTUM,
+            end_of_region: 0,
+            reserved0: 0,
+        };
+        let mut report = SubmitReport {
+            struct_size: SUBMIT_REPORT_SIZE,
+            reserved0: 0,
+            accepted_frames: 0,
+            cumulative_written_frames: 0,
+            active_generation: 0,
+        };
+        // SAFETY: The session is live and used by this thread alone; the ID, the chunk's planes
+        // and the report are owned storage that outlives the synchronous call.
+        unsafe {
+            capi::miso_engine_v1_source_submit_planar_f32(
+                session,
+                id.as_ptr(),
+                id.len() as u64,
+                &chunk,
+                &mut report,
+            )
+        }
+    };
+    let c_seek = |session: *mut Session, id: &[u8], generation: u64| {
+        // SAFETY: For every C ABI row below, the session is live and used by this thread alone, and
+        // the ID and any report are owned storage that outlives the synchronous call.
+        unsafe {
+            capi::miso_engine_v1_source_seek(session, id.as_ptr(), id.len() as u64, generation, 0)
+        }
+    };
+    let c_seek_at = |session: *mut Session, id: &[u8], generation: u64, anchor: u64| {
+        // SAFETY: As above.
+        unsafe {
+            capi::miso_engine_v1_source_seek_at(
+                session,
+                id.as_ptr(),
+                id.len() as u64,
+                generation,
+                0,
+                anchor,
+            )
+        }
+    };
+    let c_seek_report = |session: *mut Session, id: &[u8]| {
+        let mut out = SourceSeekReport {
+            struct_size: SOURCE_SEEK_REPORT_SIZE,
+            reserved0: 0,
+            generation: 0,
+            first_sample: 0,
+            source_frame: 0,
+            cumulative_underrun_frames: 0,
+            cumulative_held_frames: 0,
+            reserved: [0; 2],
+        };
+        // SAFETY: As above.
+        unsafe {
+            capi::miso_engine_v1_source_seek_report(session, id.as_ptr(), id.len() as u64, &mut out)
+        }
+    };
+    let unknown: &[u8] = b"src-absent";
+    let known: &[u8] = b"src-t1";
+    let rows: Vec<RefusalRow<'_>> = vec![
+        (
+            "seek, unknown ID",
+            (invalid, b"source.id.unknown"),
+            Box::new(|rig| rig.host.seek_source(unknown, 2, 0)),
+            Box::new(|session| c_seek(session, unknown, 2)),
+        ),
+        (
+            "seek, empty ID",
+            (invalid, b"source.id.invalid"),
+            Box::new(|rig| rig.host.seek_source(b"", 2, 0)),
+            Box::new(|session| c_seek(session, b"", 2)),
+        ),
+        (
+            "seek report, undeclared source",
+            (invalid, b"source.id.unknown"),
+            Box::new(|rig| rig.host.read_seek_report(unknown)),
+            Box::new(|session| c_seek_report(session, unknown)),
+        ),
+        (
+            "seek report, non-UTF-8 ID",
+            (invalid, b"source.id.invalid"),
+            Box::new(|rig| rig.host.read_seek_report(b"\xff")),
+            Box::new(|session| c_seek_report(session, b"\xff")),
+        ),
+        (
+            "submit, unknown ID",
+            (invalid, b"source.id.unknown"),
+            Box::new(|rig| submit(rig, unknown, RATE)),
+            Box::new(|session| c_submit(session, unknown, RATE)),
+        ),
+        (
+            "seek_at, empty ID",
+            (invalid, b"source.id.invalid"),
+            Box::new(|rig| rig.host.seek_source_at(b"", 2, 0, 0)),
+            Box::new(|session| c_seek_at(session, b"", 2, 0)),
+        ),
+        (
+            "seek, stale generation",
+            (invalid, b"source.generation.stale"),
+            Box::new(|rig| rig.host.seek_source(known, 1, 0)),
+            Box::new(|session| c_seek(session, known, 1)),
+        ),
+        (
+            "seek_at, unaligned anchor",
+            (invalid, b"source.seek.anchor_unaligned"),
+            Box::new(|rig| rig.host.seek_source_at(known, 2, 0, 1)),
+            Box::new(|session| c_seek_at(session, known, 2, 1)),
+        ),
+        (
+            "session seek, stale generation",
+            (invalid, b"source.generation.stale"),
+            Box::new(|rig| rig.host.session_seek(None, 1, 0, None)),
+            // SAFETY: As above.
+            Box::new(|session| unsafe { capi::miso_engine_v1_session_seek(session, 1, 0) }),
+        ),
+        (
+            "session seek_at, unaligned anchor",
+            (invalid, b"source.seek.anchor_unaligned"),
+            Box::new(|rig| rig.host.session_seek(None, 2, 0, Some(1))),
+            // SAFETY: As above.
+            Box::new(|session| unsafe { capi::miso_engine_v1_session_seek_at(session, 2, 0, 1) }),
+        ),
+        (
+            "submit, wrong sample rate",
+            (invalid, b"source.rate.mismatch"),
+            Box::new(|rig| submit(rig, known, RATE / 2)),
+            Box::new(|session| c_submit(session, known, RATE / 2)),
+        ),
+    ];
+    for (label, (code, text), on_browser, on_c_abi) in &rows {
+        let browser_code = on_browser(&mut browser);
+        let browser_reply = (browser_code, browser.host.diagnostic().to_vec());
+        let c_code = on_c_abi(c_abi.session);
+        let c_reply = (c_code, c_abi.last_error());
+        assert_eq!(browser_reply, c_reply, "{label}: the two hosts");
+        assert_eq!(
+            c_reply,
+            (*code, text.to_vec()),
+            "{label}: the core's refusal"
+        );
+        // The page reads the text through `miso_engine_web_v1_control_response_ptr/_bytes`.
+        assert_eq!(
+            browser.host.control_response(),
+            *text,
+            "{label}: the browser's control response"
+        );
+    }
+    // A source call that succeeds after a refusal leaves no stale text in the response.
+    assert_eq!(
+        browser.host.read_seek_report(known),
+        host_web::RESULT_OK,
+        "the seek report of a declared source"
+    );
+    assert!(
+        browser.host.control_response().is_empty(),
+        "a successful source call clears the response"
+    );
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -7084,5 +7288,95 @@ fn the_automation_fixture_renders_alike_on_both_hosts_across_one_session_seek() 
         let c = c_abi.render(block);
         assert_eq!(b[..plane], c[..plane], "block {block}: left plane bits");
         assert_eq!(b[plane..], c[plane..], "block {block}: right plane bits");
+    }
+}
+
+/// #1386 gate 6 (root decision, attempt 2): the browser has no document transport until #1697, so
+/// it neither advertises `SESSION_REPLACE` (`0x0013`) nor serves it: the frame is `UNAVAILABLE`.
+/// The C ABI advertises it, and the same frame with no document beside it gets the core's
+/// `session.replace.document_length`. Neither host commits anything: both keep the same control
+/// rows, document and rendered blocks.
+///
+/// Test value: red if the browser advertises a command every call of which is refused, if either
+/// host answers otherwise (a host of its own replace code), or if a host commits anything for a
+/// frame whose document never came.
+#[test]
+fn a_session_replace_is_unavailable_on_the_browser_and_refused_without_its_document_on_the_c_abi() {
+    use sha2::{Digest, Sha256};
+    for rate in [44_100, 48_000] {
+        let model = model_at(rate);
+        let mut next = model.clone();
+        next.tracks[0].fader.left_db = -3.0;
+        let document = canonical_session_json(&next).expect("a valid document");
+        let mut browser = Rig::new(&model);
+        let mut c_abi = CAbi::new(&model);
+        same_blocks(&mut browser, &mut c_abi, 0..2, "before the replace");
+        let before_b = dump(|payload, expected| browser.command(payload, expected));
+        let before_c = dump(|payload, expected| c_abi.send(payload, expected));
+        assert_eq!(before_b, before_c);
+        // One request ID above both hosts' frontiers: the browser's encoder is advanced to it and
+        // the C ABI's allocator set to it, so both hosts see the same frame bytes and their later
+        // requests stay new.
+        let payload = || {
+            CommandPayload::SessionReplace(protocol::SessionReplaceRequest {
+                document_bytes: u32::try_from(document.len()).expect("length"),
+                document_sha256: Sha256::digest(document.as_bytes()).into(),
+            })
+        };
+        let expected = ExpectedRevision::Exact(SessionRevision(browser.revision));
+        let frame = loop {
+            let frame = browser.encode(payload(), expected);
+            let request = u64::from_le_bytes(frame[24..32].try_into().expect("request ID"));
+            if request > c_abi.request {
+                c_abi.request = request;
+                break frame;
+            }
+        };
+        let (b_code, b_reply) = browser.send_frame(&frame);
+        let (c_code, c_reply) = c_abi.send_raw(&frame);
+        assert_eq!(
+            (b_code, c_code),
+            (0, C_RESULT_OK),
+            "{rate} Hz: both entries answer"
+        );
+        let status = |reply: &[u8]| u16::from_le_bytes([reply[18], reply[19]]);
+        assert_eq!(
+            status(&b_reply),
+            protocol::StatusCode::Unavailable as u16,
+            "{rate} Hz: browser"
+        );
+        assert!(matches!(
+            decode_verdict(&c_reply),
+            Verdict::Refused { codes, .. } if codes == ["session.replace.document_length"]
+        ));
+        let advertised = |reply: Vec<u8>| {
+            let mut fields = [0_u16; 64];
+            let DecodedTypedResponseFrame::Success {
+                payload: DecodedSuccessResponsePayload::Capabilities(capabilities),
+                ..
+            } = ProtocolCodec::default()
+                .decode_typed_response(&reply, &mut DecodeScratch::new(&mut fields))
+                .expect("capabilities")
+            else {
+                panic!("a capabilities reply")
+            };
+            capabilities
+                .supported_commands
+                .chunks_exact(2)
+                .any(|id| u16::from_le_bytes([id[0], id[1]]) == 0x0013)
+        };
+        let get = || CommandPayload::CapabilitiesGet;
+        assert!(!advertised(browser.command(get(), ExpectedRevision::Any)));
+        assert!(advertised(c_abi.send(get(), ExpectedRevision::Any)));
+        let after_b = dump(|payload, expected| browser.command(payload, expected));
+        assert_eq!(
+            after_b.1, before_b.1,
+            "{rate} Hz: the document is unchanged"
+        );
+        assert_eq!(
+            after_b,
+            dump(|payload, expected| c_abi.send(payload, expected))
+        );
+        same_blocks(&mut browser, &mut c_abi, 2..6, "after the refusal");
     }
 }

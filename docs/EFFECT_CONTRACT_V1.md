@@ -58,10 +58,10 @@ one bypass flag for all its lanes, so the prepared flag stays in `EffectProgramK
 bypass is not prepared (issue #1087): `effect-compiler` prepares an effect that can bank
 enabled and carries the bypass as per-lane state to the rack's latency-preserving shunt
 (`BypassShunt`), which copies the same delayed dry words into exactly the bypassed lanes, so a
-bypassed track keeps its bank. Two effects keep their session bypass as a prepared one
-(`effect_compiler::lowers_session_bypass`): the delay, which never banks, and the multiband
-compressor, whose whole-bank D7 recovery would let a bypassed lane silence its bank-mates
-(issue #1100).
+bypassed track keeps its bank. The delay, which never banks, lowers its bypass too and renders a
+per-node shunt (issue #1339). One effect keeps its session bypass as a prepared one
+(`effect_compiler::lowers_session_bypass`): the multiband compressor, whose whole-bank D7
+recovery would let a bypassed lane silence its bank-mates (issue #1100).
 
 A live bypass change crossfades (#1341). The bypass cell holds the bypass and the crossfade's ramp
 length in samples as one unit (`BypassSwitch`; the `Bypass(bool)` record is the same write with a

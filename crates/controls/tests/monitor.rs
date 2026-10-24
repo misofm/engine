@@ -216,3 +216,64 @@ fn the_master_designation_is_one_monitor_row_held_by_strip_id() {
     overlay.retain_strips_of(&without_guitar);
     assert_eq!(overlay.master(), Some(&id("bus")));
 }
+
+/// #1696 gate 2: an overlay that solos every strip of a session and designates a master, through
+/// [`MonitorOverlay::after`] and again from that full overlay, never reallocates its solo vector
+/// and never retains more than [`MonitorOverlay::retained_ceiling`] of the session's shape, even
+/// when a write names a strip the session no longer has.
+///
+/// Red when a solo write reallocates the vector (the reserve in `after` was lost, so its capacity
+/// can double past the charge) or the ID text exceeds the charge.
+#[test]
+fn a_full_overlay_stays_within_its_reserve_and_its_ceiling() {
+    use bench_support::alloc::{
+        assert_installed, current_thread_counters, current_thread_delta_since, current_thread_peak,
+        current_thread_peak_reset,
+    };
+    assert_installed();
+    let mut model = fixture();
+    let template = model.tracks[0].clone();
+    for index in 0..40 {
+        let mut track = template.clone();
+        track.id = id(&format!("track-{index:0>90}"));
+        model.tracks.push(track);
+    }
+    let names: Vec<_> = model.strips().map(|strip| strip.id.clone()).collect();
+    let longest = names.iter().map(|id| id.as_str().len()).max().unwrap_or(0);
+    let ceiling = MonitorOverlay::retained_ceiling(
+        names.len(),
+        names.iter().map(|id| id.as_str().len()).sum(),
+        longest,
+    )
+    .expect("the ceiling fits");
+    let mut writes: Vec<MonitorWrite> = names
+        .iter()
+        .rev()
+        .map(|strip| write(strip.as_str(), true, None))
+        .collect();
+    writes.push(write("ghost", true, None));
+    writes.push(MonitorWrite {
+        strip: names[names.len() - 1].clone(),
+        row: MonitorRow::Master,
+        on: true,
+        ramp: None,
+    });
+    let churn = [write("vocal", false, None), write("vocal", true, None)];
+
+    let mark = current_thread_counters();
+    current_thread_peak_reset();
+    let full = MonitorOverlay::new().after(&writes, &model).overlay;
+    let full_live = current_thread_peak().live_bytes;
+    let again = full.after(&churn, &model).overlay;
+    let moved = current_thread_delta_since(mark);
+    assert_eq!(full.soloed().len(), names.len(), "every strip is soloed");
+    assert_eq!(again, full);
+    assert_eq!(
+        moved.reallocations, 0,
+        "a solo write reallocated the vector"
+    );
+    assert!(
+        full_live <= ceiling as u64,
+        "the full overlay retains {full_live} bytes, above its ceiling {ceiling}"
+    );
+}

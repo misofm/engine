@@ -34,8 +34,8 @@ use controls::{
 use effect_compiler::{LiveEffectAddress, launch_native_effect_registry, resolve_initial_values};
 use effect_contract::{EffectControlRecord, PreparedEffectTarget};
 use session::{
-    EditRamps, Effect, EffectIdentity, EffectParam, LoweredRacks, Route, RouteDestination,
-    SessionModel, StableId, StripRef, canonical_session_json,
+    EditRamps, Effect, EffectIdentity, EffectParam, LoweredRacks, Route, SessionModel, StableId,
+    StripRef, canonical_session_json,
 };
 
 #[cfg(feature = "test-support")]
@@ -53,11 +53,13 @@ pub fn take_fast_classification_count() -> usize {
 
 // The ramp rule and the per-owner record derivation live with preparation, which needs them on
 // every build (a successor's carry-then-retarget, #1277 D5); the classifier calls them.
+use crate::control_provider::STAGE_INDEX_OWNERS;
 use crate::prepare::{
-    EffectiveDiff, FaderEventLanes, LevelRecords, LevelRules, OutOfDomain, RouteEditRamps,
-    SendRecord, StripChange, StripEditRamps, effect_instance_records, follow_route_record_between,
-    following_route_lanes, input_records, level_differs, level_records_between, matrix_record,
-    route_record_between, route_source_strip, same_params, strip_at,
+    AutomationReads, EffectiveDiff, FaderEventLanes, LevelRecords, LevelRules, OutOfDomain,
+    RouteEditRamps, SendRecord, StripChange, StripEditRamps, effect_instance_records,
+    follow_route_record_between, following_route_lanes, input_records, level_differs,
+    level_records_between, matrix_record, route_record_between, route_source_strip, same_params,
+    strip_at,
 };
 use crate::prepare::{GraphJumpLengths, LiveRampRow, LiveRamps, MonitorBase, session_jump_lengths};
 
@@ -462,9 +464,19 @@ pub fn classify_live_delta_with_monitor<'a>(
     refuse_unresolvable_params(current, next)?;
 
     // Step 6. The effective values of both models, once (decision 17, C7).
-    let diff = accumulated
-        .derived
-        .then(|| EffectiveDiff::new(current, next, ramps, edit_ramps, monitor));
+    let diff = accumulated.derived.then(|| {
+        EffectiveDiff::new(
+            current,
+            next,
+            ramps,
+            edit_ramps,
+            monitor,
+            [
+                AutomationReads::lazy(current, STAGE_INDEX_OWNERS),
+                AutomationReads::lazy(next, STAGE_INDEX_OWNERS),
+            ],
+        )
+    });
     let mut work = accumulated.work.drain(..).peekable();
     let strips = next.strips().enumerate().map(|(index, after)| {
         let item = work
@@ -881,7 +893,8 @@ impl Changes {
         }
         let strip = match &change.address.owner {
             Owner::Strip(strip) => strip,
-            // A live route row is a send into a submix (#1557); an output route's rows are
+            // A live route row is a send into a submix (#1557) or a route into the output from
+            // before the fader (#1391); a `post_fader` or `post_pan` output route's rows are
             // rebuild-only above.
             Owner::Route(route) if descriptor.family == Family::Route => {
                 self.routes.insert(route.clone());
@@ -995,7 +1008,7 @@ fn lower_strips<'a>(
 }
 
 /// Step 6 for sends: the record of each route in `indices` (ascending positions in
-/// `model.routes`) into a submix whose own rows changed (`routes`) or whose effective gate changed.
+/// `model.routes`) with a live lane (`controls::route_rows_live`) whose own rows changed (`routes`) or whose effective gate changed.
 #[expect(
     clippy::too_many_arguments,
     reason = "the two models and the lowering's inputs"
@@ -1027,14 +1040,15 @@ fn lower_routes<'a>(
             .get(index)
             .filter(|before| before.id == after.id)
             .ok_or(LiveRebuild::Structure)?;
-        if !matches!(after.destination, RouteDestination::SubmixInput { .. }) {
+        // #1391: a route into a submix or one whose tap precedes its strip's fader has a lane.
+        if !controls::route_rows_live(after) {
             continue;
         }
         let gates = diff.gates(index).ok_or(LiveRebuild::Structure)?;
         // #1653: a route the plan gives the seven-word cell also holds its source lanes' effective
         // mute (`terms`), which can change while the gate does not (`follows_mute` off), so the
         // cell always holds the committed words.
-        let following = match following_route_lanes(next.structure(), after) {
+        let following = match following_route_lanes(diff.automation(), after) {
             Some(automated) => Some(Following {
                 terms: diff.terms(before, after).ok_or(LiveRebuild::Structure)?,
                 automated,
@@ -1091,6 +1105,9 @@ trait LevelDiff {
     /// The effective mute of the route's source strip per lane, in `[current, next]`: a following
     /// route's `terms` (#1652 D1, OQ1 = C), or `None` when the form does not hold the source.
     fn terms(&self, before: &Route, after: &Route) -> Option<[[bool; 2]; 2]>;
+    /// The post-change model, read for its automation entries (#1844): the diff's own reads, so
+    /// one lowering indexes the table at most once.
+    fn automation(&self) -> ModelView<'_>;
 }
 
 impl LevelDiff for EffectiveDiff<'_> {
@@ -1123,6 +1140,10 @@ impl LevelDiff for EffectiveDiff<'_> {
         let source = self.source_strips(before, after)?;
         Some(self.strip_mutes(source.0, source.1))
     }
+
+    fn automation(&self) -> ModelView<'_> {
+        EffectiveDiff::automation(self)
+    }
 }
 
 /// What an edit reaches, for [`LocalDiff`].
@@ -1151,6 +1172,8 @@ struct LocalStrip {
 /// moved and for nothing else. A strip or send it does not hold has unchanged effective values.
 struct LocalDiff<'a> {
     rules: LevelRules<'a>,
+    /// Where the event lanes of the post-change model are read from (#1844).
+    automation: AutomationReads<'a>,
     /// Ascending by strip index.
     strips: Vec<LocalStrip>,
     /// Ascending by route index: the gate per source lane in `[current, next]`.
@@ -1162,6 +1185,7 @@ impl<'a> LocalDiff<'a> {
     fn new(rules: LevelRules<'a>, monitor: MonitorBase<'_>, seeds: LocalSeeds) -> Option<Self> {
         let (current, view) = (rules.current, rules.next);
         let next = view.structure();
+        let automation = AutomationReads::lazy(next, STAGE_INDEX_OWNERS);
         let strip_count = next.tracks.len() + next.submixes.len();
         let any_before = controls::any_solo_in(current, monitor.committed);
         let any_after = controls::any_solo_in(next, monitor.next);
@@ -1211,7 +1235,8 @@ impl<'a> LocalDiff<'a> {
             .any(|strip| strip.before.mute != strip.after.mute)
         {
             for (index, route) in next.routes.iter().enumerate() {
-                if !route.follows_mute && following_route_lanes(next, route).is_none() {
+                if !route.follows_mute && following_route_lanes(automation.view(), route).is_none()
+                {
                     continue;
                 }
                 let Some(source) = route_source_strip(next, route) else {
@@ -1255,6 +1280,7 @@ impl<'a> LocalDiff<'a> {
         }
         Some(Self {
             rules,
+            automation,
             strips,
             routes,
         })
@@ -1330,7 +1356,7 @@ impl LevelDiff for LocalDiff<'_> {
             &strip.after,
             [change.own_before, change.own_after],
             self.rules.lengths(&change),
-            || FaderEventLanes::of(self.rules.next.structure(), change.id, change.reach),
+            || FaderEventLanes::of(self.automation.view(), change.id, change.reach),
         )
     }
 
@@ -1358,6 +1384,10 @@ impl LevelDiff for LocalDiff<'_> {
     fn terms(&self, _before: &Route, after: &Route) -> Option<[[bool; 2]; 2]> {
         let source = self.strip(route_source_strip(self.rules.next.structure(), after)?)?;
         Some([source.before.mute, source.after.mute])
+    }
+
+    fn automation(&self) -> ModelView<'_> {
+        self.automation.view()
     }
 }
 

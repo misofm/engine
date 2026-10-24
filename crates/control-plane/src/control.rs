@@ -96,6 +96,9 @@ pub(crate) struct KeptBase {
     pub(crate) monitor: controls::MonitorOverlay,
     /// The ramp length of every row an edit committed after the epoch's last revision gave one,
     /// the latest edit winning on every row it wrote (#1394 D2's rule across transactions).
+    /// Pruned to the newest committed model's owners, with no rewritten targets, whenever it is
+    /// stored (`EditRamps::keep_within`, #1696 root ruling): its bound is that model's, not this
+    /// epoch's, and `CapiResources::edit_ramps` charges it so, `KEPT_BASES` times.
     pub(crate) edit_ramps: session::EditRamps,
     /// The ramp of the latest overlay change committed after the epoch's last revision, or `None`
     /// while no commit since wrote a monitor row: a replacement that writes none renders the
@@ -139,6 +142,12 @@ impl ProviderEpoch {
     #[cfg(feature = "test-support")]
     pub fn test_carried(&self) -> (u64, u64) {
         (self.carried.total, self.carried.overhead)
+    }
+
+    /// The edit ramps this epoch's kept base holds, or `None` while it keeps no base (#1696).
+    #[cfg(feature = "test-support")]
+    pub fn test_kept_ramps(&self) -> Option<&session::EditRamps> {
+        self.kept.as_ref().map(|kept| &kept.edit_ramps)
     }
 
     /// What this epoch's plan holds, for preparing its successor (#1323's gates read its floors).
@@ -585,6 +594,12 @@ pub struct SessionState<A: ControlAdapter> {
     /// withdrawn candidate adds nothing; the control plane copies it into the provider's counters
     /// with `live_values_superseded`. Render does not touch it.
     pub(crate) strips_restarted: u64,
+    /// The session's `source_frames_discarded` count (#1699 D1): the accepted source frames
+    /// render never read because the caller's transaction removed or redeclared their source.
+    /// [`Self::synchronize_plan_epochs`] adds each retired plan's unread frames before the plan is
+    /// dropped (a carried ring left that plan's entry vacant, so it adds 0); session destroy adds
+    /// nothing. Monotone, saturating, never reset. Render does not touch it.
+    pub(crate) source_frames_discarded: u64,
     /// `u16` scratch the protocol decoder writes field offsets into. It is exactly
     /// `max_frame_bytes / 2` entries; the odd trailing byte of an odd frame limit used to buy a
     /// one-byte box that nothing ever read (audit F7).
@@ -1898,6 +1913,11 @@ where
         #[cfg(not(feature = "test-support"))]
         let hold = false;
         while !hold && let Ok((retired_epoch, retired_plan)) = self.retirer.try_reclaim() {
+            // #1699 D1/D3: a source the successor carried left a vacant entry, so what the
+            // retired plan still holds unread is a removed or redeclared source's discarded PCM.
+            self.source_frames_discarded = self
+                .source_frames_discarded
+                .saturating_add(retired_plan.unread_source_frames());
             drop(ObservedRetiredPlan::new(retired_plan));
             if retired_epoch.0 == self.providers.epoch {
                 let replacement = self
@@ -2032,21 +2052,23 @@ where
 
     /// Sets every counter the provider serves from a source outside it (#1348 D8): the
     /// controller's telemetry counters, the session's `live_values_superseded` count (#1312
-    /// D8), its `strips_restarted` count (#1768) and the render-side `live_block_errors` (#1521
-    /// D3) and `source_underrun_blocks` (#1537) mirrors. A counter added later joins this refresh,
-    /// never a single control call.
+    /// D8), its `strips_restarted` (#1768) and `source_frames_discarded` (#1699) counts and the
+    /// render-side `live_block_errors` (#1521 D3) and `source_underrun_blocks` (#1537) mirrors.
+    /// A counter added later joins this refresh, never a single control call.
     fn refresh_provider_counters(&mut self) {
         let telemetry_counters = self.controller.queues().telemetry_counters();
         let superseded = self.live_values_superseded.get();
         let restarted = self.strips_restarted;
         let errors = self.shared.live_block_errors.load(Ordering::Acquire);
         let underruns = self.shared.source_underrun_blocks.load(Ordering::Acquire);
+        let discarded = self.source_frames_discarded;
         let provider = self.controller.provider_mut();
         provider.set_telemetry_counters(telemetry_counters);
         provider.set_live_values_superseded(superseded);
         provider.set_strips_restarted(restarted);
         provider.set_live_block_errors(errors);
         provider.set_source_underrun_blocks(underruns);
+        provider.set_source_frames_discarded(discarded);
     }
 
     /// Runs one control command frame. A success returns the response's length in the response
@@ -2062,6 +2084,24 @@ where
     /// preparation's) saves and restores the canonical word. Render never calls this: it pins its
     /// own environment.
     pub fn command(&mut self, request: &[u8], output_capacity: u64) -> Result<usize, CommandError> {
+        self.command_with_document(request, &[], output_capacity)
+    }
+
+    /// [`Self::command`] with the document a `SESSION_REPLACE` frame names (#1386 D3), borrowed for
+    /// this call only: nothing here or in the controller keeps it. Every command reaches this one
+    /// path; `document` is read only by a `SESSION_REPLACE`, after its replay preflight, its
+    /// exact-revision check and its output reservation. The controller's document hook checks its
+    /// length (against the frame and against `maximum_document_bytes`), its SHA-256, parses it
+    /// and diffs it against the committed model ([`crate::replace_document`]); the edits then
+    /// take this function's transaction path exactly: the live commit or the rebuild, the rate and quantum
+    /// refusal, the plan admission and the `SESSION_COMMITTED` event. A document equal to the
+    /// committed model answers `EditPath::Unchanged` and commits nothing.
+    pub fn command_with_document(
+        &mut self,
+        request: &[u8],
+        document: &[u8],
+        output_capacity: u64,
+    ) -> Result<usize, CommandError> {
         let _canonical = lane::CanonicalFpEnv::enter();
         self.service()?;
         let output_capacity = usize::try_from(output_capacity).unwrap_or(usize::MAX);
@@ -2073,11 +2113,15 @@ where
         let in_place = true;
         let mut scratch = DecodeScratch::new(&mut self.decode_fields);
         let prepared = if in_place {
-            self.controller
-                .prepare_command_frame_in_place(request, &mut scratch, output_capacity)
+            self.controller.prepare_command_frame_in_place(
+                request,
+                document,
+                &mut scratch,
+                output_capacity,
+            )
         } else {
             self.controller
-                .prepare_command_frame(request, &mut scratch, output_capacity)
+                .prepare_command_frame(request, document, &mut scratch, output_capacity)
         }
         .map_err(map_command_process_error)?;
         match prepared {
@@ -2420,7 +2464,7 @@ where
         };
         // The ramp lengths the epoch B succeeds keeps from now on: B's own, or, across a
         // withdrawn candidate, the kept base's with B's laid over them (B wins on a shared row).
-        let kept_ramps = if superseding {
+        let mut kept_ramps = if superseding {
             let kept = self
                 .kept_holder()
                 .and_then(|holder| holder.kept.as_ref())
@@ -2437,6 +2481,9 @@ where
                 .ok_or(CommandError::Internal)?,
             Rebuild::Discontinuity(model) => &**model,
         };
+        // #1696 root ruling: a kept base holds only the rows of owners B's model has, and no
+        // rewritten targets, so the ramp row of B's model bounds it.
+        kept_ramps.keep_within(prospective.normalized_model());
         // #1698 (amending #1310 D2 and #1344 D1): across a withdrawn candidate A, P0's own
         // inventory, with only the source rows A carries from P0, and P0's kept base. An owner B
         // keeps unchanged from P0 carries from P0 as a direct P0 -> B swap carries it; a source A
@@ -2517,7 +2564,6 @@ where
             control_catalog: candidate_catalog,
             capi: prospective_capi,
             revision_gate,
-            master_track: _,
         } = prepared_runtime;
         // #1652 U2a fold 2 (MAJOR-A; #1713 deletes it): read before the inventory moves into the
         // candidate's provider epoch.
@@ -3094,6 +3140,10 @@ where
             ),
         };
         let next = view.structure();
+        // #1696: only a transaction compiled whole can add or remove an owner (an in-place or an
+        // edited view reads the committed model's structure); every other keeps the owner set,
+        // and with it the ramp row's bound and a kept base's pruning, as they are.
+        let owners_change = matches!((transaction.edited_owners(), in_place), (None, false));
         // #1559 D6, D7: the overlay the transaction leaves, and the classifier's view of both.
         let monitor_change = self.monitor.after(prepared.get().monitor_edits(), next);
         let monitor_only = prepared.get().is_monitor_only();
@@ -3160,10 +3210,15 @@ where
                     .is_untouched()
             })
             .map(|kept| {
-                merged_ramps(
+                let mut ramps = merged_ramps(
                     &kept.edit_ramps,
                     prepared.get().prospective_session().edit_ramps(),
-                )
+                );
+                // #1696 root ruling: pruned to the committed model, as a rebuild stores them.
+                if owners_change {
+                    ramps.keep_within(next);
+                }
+                ramps
             });
         // And the ramp of the overlay change, when the edit writes a monitor row: a replacement
         // that writes none renders the solo with it (#1310, kept monitor overlay).
@@ -3173,7 +3228,28 @@ where
         // 1. Admission (#1053 D8), with the catalog of the committed model built first, so that
         // its growth is charged and the commit's last steps cannot fail for room (#1552 D3,
         // #1558 D6). Its refusal is the compile diagnostic a rebuild would give, before any write.
-        let catalog = match self.live_admission(&prepared, &monitor_change.overlay, view, &delta) {
+        // #1696 root ruling: the committed model's edit-ramp row, which the newest epoch's follows.
+        let committed_ramps = if owners_change {
+            match monitor_rows(next) {
+                Ok(rows) => rows.edit_ramps,
+                Err(failure) => {
+                    return LiveCommit::Done(Err(CommandError::CompileRejected(failure)));
+                }
+            }
+        } else {
+            self.pending_providers
+                .last()
+                .unwrap_or(&self.providers)
+                .capi
+                .edit_ramps
+        };
+        let catalog = match self.live_admission(
+            &prepared,
+            &monitor_change.overlay,
+            view,
+            &delta,
+            committed_ramps,
+        ) {
             Ok(catalog) => catalog,
             Err(error) => return LiveCommit::Done(Err(error)),
         };
@@ -3545,6 +3621,10 @@ where
         // admissions charge, and `plan_resources` reports the retained bytes. An older epoch's row
         // keeps the catalog it was prepared with until its plan is gone. Nothing here fails.
         newest_capi.follow_catalog(previous_catalog, committed_catalog);
+        // #1696 root ruling: and the committed model's edit-ramp row, so a VCA added live is
+        // charged at once, in the admissions and in the report.
+        let previous_ramps = newest_capi.edit_ramps;
+        newest_capi.follow_edit_ramps(committed_ramps);
         {
             let mut reports = self
                 .shared
@@ -3556,7 +3636,9 @@ where
                 resources.control_retained_bytes = resources
                     .control_retained_bytes
                     .saturating_sub(previous_catalog.retained_bytes)
-                    .saturating_add(committed_catalog.retained_bytes);
+                    .saturating_add(committed_catalog.retained_bytes)
+                    .saturating_sub(previous_ramps)
+                    .saturating_add(committed_ramps);
                 resources.largest_named_allocation_bytes = resources
                     .largest_named_allocation_bytes
                     .max(committed_catalog.largest_allocation_bytes);
@@ -3599,6 +3681,7 @@ where
         overlay: &controls::MonitorOverlay,
         view: controls::ModelView<'_>,
         delta: &host_core::LiveDelta<'_>,
+        committed_ramps: u64,
     ) -> Result<host_core::StagedCatalog, CommandError> {
         let transaction = prepared.get().prospective_session();
         let committed = self.controller.session().compiled();
@@ -3638,13 +3721,17 @@ where
         // A values-only stage holds no table: the catalog stays as large as it is, and only a
         // full catalog is held beside the current one until the commit publishes it.
         let current_catalog = self.controller.provider().catalog_resources();
-        let catalog_admission = LiveCatalogAdmission::between(
+        let mut catalog_admission = LiveCatalogAdmission::between(
             current_catalog,
             match &catalog {
                 host_core::StagedCatalog::Values(_) => current_catalog,
                 host_core::StagedCatalog::Full(full) => full.resources(),
             },
         );
+        // #1696 root ruling: a VCA added live raises the bound of the ramps a kept base holds.
+        let newest = self.pending_providers.last().unwrap_or(&self.providers);
+        catalog_admission.ramp_growth_bytes =
+            committed_ramps.saturating_sub(newest.capi.edit_ramps);
         validate_live_peak(
             self.held_epochs()?.as_slice(),
             models,
@@ -4217,8 +4304,8 @@ where
     }
 
     /// The designated master strip of the newest commit (#1683): the strip whose `master`
-    /// monitor row is on, or `None`. Host-local, never saved; the boot word seeds it and a
-    /// `SET_CONTROL` of the row sets or changes it. A host that reports a master reading resolves
+    /// monitor row is on, or `None`. Host-local, never saved; a boot designates no master (#1689),
+    /// and a `SET_CONTROL` of the row sets or changes it. A host that reports a master reading resolves
     /// it by ID in each plan it holds.
     #[must_use]
     pub fn master_strip(&self) -> Option<&session::StableId> {
@@ -4407,6 +4494,41 @@ pub enum SourceFailure {
     Control(SourceControlError),
     /// The control plane could not synchronise its plan epochs.
     Internal,
+}
+
+/// The kind of result a refused source call reports (#1706 D1): each host maps the three kinds to
+/// its own result codes, and neither holds the rule that classifies a [`SourceFailure`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SourceRefusalKind {
+    /// A caller mistake: the call is refused and retrying it unchanged is refused again.
+    InvalidArgument,
+    /// Bounded backpressure: the host retries.
+    Backpressure,
+    /// An engine invariant or the control plane's epoch synchronisation failed.
+    Internal,
+}
+
+impl SourceFailure {
+    /// The kind of result this refusal reports on every host.
+    #[must_use]
+    pub const fn kind(self) -> SourceRefusalKind {
+        match self {
+            Self::Internal => SourceRefusalKind::Internal,
+            Self::Control(error) if error.is_backpressure() => SourceRefusalKind::Backpressure,
+            Self::Control(error) if error.is_internal() => SourceRefusalKind::Internal,
+            Self::Control(_) => SourceRefusalKind::InvalidArgument,
+        }
+    }
+
+    /// The diagnostic text this refusal reports on every host: the facade's text for a typed
+    /// rejection, and `source.epoch` when the plan epochs could not synchronise.
+    #[must_use]
+    pub const fn diagnostic(self) -> &'static str {
+        match self {
+            Self::Internal => "source.epoch",
+            Self::Control(error) => error.diagnostic(),
+        }
+    }
 }
 
 /// Why a session seek was refused (root ruling B16-R9): the seek's own refusal, or, for the

@@ -56,13 +56,13 @@ const qualificationUrl = qualificationModuleIndex === -1
 const limits = Object.freeze({
   sourceRingFrames: 256,
   maximumMemoryBytes: 0n,
-  // Issue #137 D1/D2 and #143 D3/D6: the live-control words. `reserved1` (offset 32) must be zero
-  // (issue #1565). All zero is "no meter observers, no observation capacity, no master
-  // designation"; the live-control tests below override them.
+  // Issue #137 D1/D2 and #143 D3: the live-control words. `reserved1` (offset 32, issue #1565)
+  // and `reserved2` (offset 56, the master boot word until issue #1689) must be zero. All zero is
+  // "no meter observers, no observation capacity"; the live-control tests below override them.
   reserved1: 0n,
   liveControlMeterBlocks: 2n,
   liveControlObservationTaps: 2n,
-  liveControlMasterTrackPlusOne: 1n,
+  reserved2: 0n,
 });
 
 function resourceReport(backend, quantumFrames) {
@@ -865,7 +865,9 @@ async function testMainRealm() {
         ["reserved1 nonzero", plainOptions({ reserved1: 1n })],
         ["reserved1 type", plainOptions({ reserved1: 0 })],
         ["observation taps bound", plainOptions({ liveControlObservationTaps: 17n })],
-        ["master dependency", plainOptions({ liveControlObservationTaps: 0n })],
+        // Issue #1689 gate 2: the retired master word is refused at both ends of its range.
+        ["reserved2 one", plainOptions({ reserved2: 1n })],
+        ["reserved2 all ones", plainOptions({ reserved2: 0xffff_ffff_ffff_ffffn })],
         ["spectrum hop unsupported", plainOptions({
           spectrumHopFrames: 300, spectrum: null, spectrumCollection: null,
         })],
@@ -1040,7 +1042,7 @@ async function testMainRealm() {
           reserved1: 0n,
           liveControlMeterBlocks: 7n,
           liveControlObservationTaps: 0n,
-          liveControlMasterTrackPlusOne: 0n,
+          reserved2: 0n,
           spectrumHopFrames: 256,
           spectrum,
           spectrumCollection: null,
@@ -3265,26 +3267,26 @@ async function testQualificationBoot({
     assert(plain.every(({ options }) => options.options.reserved1 === 0n
       && options.options.liveControlMeterBlocks === 0n
       && options.options.liveControlObservationTaps === 0n
-      && options.options.liveControlMasterTrackPlusOne === 0n),
+      && options.options.reserved2 === 0n),
     "qualification boot contract: plain option variant changed");
     const liveControlOptions = observed
       .find(({ label }) => label === "runLiveControlQualification").options.options;
     assert.equal(liveControlOptions.reserved1, 0n);
     assert.equal(liveControlOptions.liveControlMeterBlocks, 2n);
     assert.equal(liveControlOptions.liveControlObservationTaps, 0n);
-    assert.equal(liveControlOptions.liveControlMasterTrackPlusOne, 0n);
+    assert.equal(liveControlOptions.reserved2, 0n);
     const observationOptions = observed.find(({ label }) => label === "runObservationRun").options.options;
     assert.equal(observationOptions.reserved1, 0n);
     assert.equal(observationOptions.liveControlMeterBlocks, 2n);
     assert.equal(observationOptions.liveControlObservationTaps, 4n);
-    assert.equal(observationOptions.liveControlMasterTrackPlusOne, 1n);
+    assert.equal(observationOptions.reserved2, 0n);
     // Issue #1477 D2: the staging-read run boots the observation caller's live-control fields with
     // no fixed spectrum target and the two-entry collection, in order.
     const stagingReadOptions = observed.find(({ label }) => label === "runStagingReadRun").options.options;
     assert.equal(stagingReadOptions.reserved1, 0n);
     assert.equal(stagingReadOptions.liveControlMeterBlocks, 2n);
     assert.equal(stagingReadOptions.liveControlObservationTaps, 4n);
-    assert.equal(stagingReadOptions.liveControlMasterTrackPlusOne, 1n);
+    assert.equal(stagingReadOptions.reserved2, 0n);
     assert.equal(stagingReadOptions.spectrum, null,
       "qualification boot contract: staging-read run must boot no fixed spectrum target");
     assert.deepEqual(
@@ -3499,6 +3501,15 @@ async function testProcessor() {
         `H${hop} additive boot arguments`,
       );
       assert.equal(fake.calls.spectrumHopCapability, 1, `H${hop} probes capability once`);
+    }
+
+    // Issue #1689 gate 2: the processor's `writeBootOptions` refuses the retired master word before
+    // the module sees it, at both ends of its range; zero (every `limits` boot here) is accepted.
+    for (const reserved2 of [1n, 0xffff_ffff_ffff_ffffn]) {
+      const fake = createFakeExports(64);
+      const processor = construct(fake, { ...limits, reserved2 });
+      assert.equal(processor.port.posts[0].message.result, 1, `reserved2 ${reserved2} is refused`);
+      assert.deepEqual(fake.calls.boot, [], `reserved2 ${reserved2} never reaches the module`);
     }
 
     {

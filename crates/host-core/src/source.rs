@@ -18,6 +18,12 @@ use source::{
 
 use crate::PlanStateInventory;
 
+/// The reserved ID that [`SourceControlSet::seek_report`] reads the session timeline's seek
+/// report under (#1704 D5), on both hosts. A stable ID starts with `a`-`z`
+/// (`session::STABLE_ID_MAXIMUM_BYTES` bounds its length), so an ID that starts with `$` never
+/// names a source.
+pub const TIMELINE_SEEK_REPORT_ID: &[u8] = b"$timeline";
+
 /// One host-owned producer endpoint plus the immutable facts a submission is checked against.
 pub(crate) struct ControlSource {
     id_offset: usize,
@@ -124,6 +130,10 @@ pub enum SourceControlError {
     Chunk(HostChunkError),
     /// The producer ring rejected the seek.
     Seek(SourceSeekError),
+    /// The supplied ID cannot name a source: it is empty, not UTF-8, or longer than
+    /// [`session::STABLE_ID_MAXIMUM_BYTES`] ([`Self::unmatched_id`]), refused by every per-source
+    /// call, so both hosts refuse a malformed ID with the same text.
+    InvalidId,
     /// The source exists but this set holds no producer for it: the set belongs to a successor
     /// plan whose producer has not been handed over yet ([`SourceControlSet::adopt_persisting`]),
     /// or to a predecessor whose producer has already moved to its successor. Neither
@@ -163,6 +173,24 @@ impl SourceControlError {
             Self::Seek(SourceSeekError::AnchorUnaligned) => "source.seek.anchor_unaligned",
             Self::ReportBusy => "source.report.busy",
             Self::Seek(SourceSeekError::FrameOutOfRange) => "source.seek.frame_out_of_range",
+            Self::InvalidId => "source.id.invalid",
+        }
+    }
+
+    /// The refusal for a source ID that names no source (#1706 D4): [`Self::InvalidId`] for an
+    /// empty, non-UTF-8 or over-[`session::STABLE_ID_MAXIMUM_BYTES`] ID, [`Self::UnknownSource`]
+    /// for a well-formed one. Every declared source ID is a stable ID, so a malformed ID never
+    /// names one: classifying after a failed lookup refuses exactly what checking first would.
+    /// A host that looks a source up itself reports its miss through this, never its own text.
+    #[must_use]
+    pub fn unmatched_id(id: &[u8]) -> Self {
+        if id.is_empty()
+            || id.len() > session::STABLE_ID_MAXIMUM_BYTES
+            || core::str::from_utf8(id).is_err()
+        {
+            Self::InvalidId
+        } else {
+            Self::UnknownSource
         }
     }
 
@@ -237,6 +265,13 @@ impl SourceControlSet {
             .ok()
     }
 
+    /// The index of the source a host call names, or the core's refusal for an ID that names none
+    /// ([`SourceControlError::unmatched_id`]).
+    fn source_index(&self, id: &[u8]) -> Result<usize, SourceControlError> {
+        self.index_of(id)
+            .ok_or_else(|| SourceControlError::unmatched_id(id))
+    }
+
     /// Submit one borrowed planar chunk to the named source.
     ///
     /// Preconditions are checked in a fixed order — rate, channel count, region, end-of-region
@@ -247,7 +282,7 @@ impl SourceControlSet {
         id: &[u8],
         submission: SourceSubmission<'_>,
     ) -> Result<SubmitReport, SourceControlError> {
-        let index = self.index_of(id).ok_or(SourceControlError::UnknownSource)?;
+        let index = self.source_index(id)?;
         let source = &mut self.sources[index];
         let provider = source
             .provider
@@ -429,8 +464,23 @@ impl SourceControlSet {
     /// [`SourceControlError::ReportBusy`]. The record belongs to the ring, so it survives a plan
     /// swap that carries the source; a vacant entry is [`SourceControlError::Vacated`], as for
     /// [`Self::seek`].
+    ///
+    /// The reserved ID [`TIMELINE_SEEK_REPORT_ID`] reads the session timeline's report instead
+    /// (#1704 D5), in the same form: its `source_frame` is the timeline sample the block started
+    /// at, and its underrun and held counts are `0`. A vacant timeline is
+    /// [`SourceControlError::Vacated`]. Only this call takes the reserved ID: [`Self::submit`],
+    /// [`Self::seek`] and [`Self::seek_at`] refuse it as an unknown source, because the timeline
+    /// is seeked by [`Self::seek_session`] alone.
     pub fn seek_report(&self, id: &[u8]) -> Result<SourceSeekReport, SourceControlError> {
-        let index = self.index_of(id).ok_or(SourceControlError::UnknownSource)?;
+        if id == TIMELINE_SEEK_REPORT_ID {
+            return self
+                .timeline
+                .as_ref()
+                .ok_or(SourceControlError::Vacated)?
+                .seek_report()
+                .map_err(|_| SourceControlError::ReportBusy);
+        }
+        let index = self.source_index(id)?;
         self.sources[index]
             .provider
             .as_ref()
@@ -446,7 +496,7 @@ impl SourceControlSet {
         frame: u64,
         anchor_sample: Option<u64>,
     ) -> Result<(), SourceControlError> {
-        let index = self.index_of(id).ok_or(SourceControlError::UnknownSource)?;
+        let index = self.source_index(id)?;
         let source = &mut self.sources[index];
         let provider = source
             .provider

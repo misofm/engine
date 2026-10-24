@@ -3039,53 +3039,6 @@ fn prepared_reason(effect_id: &str, parameter_id: u32) -> RebuildReason {
         .reason
 }
 
-/// #1264 gate 1(d), #1265 gate 1(c). Red if a parameter the plan keeps prepared -- a gate/expander
-/// attack, or an EQ band's `enabled` or `kind` (`automation_rate` `None`, decision 14 F2) -- is
-/// classified live: the edit would be acked and the effect would never apply it.
-#[test]
-fn prepared_parameter_changes_need_a_rebuild() {
-    let current = with_effects();
-    // Gate/expander attack (ID 5).
-    assert_eq!(
-        classify_effects(&current, |next| {
-            inserts(next, 1).push(param(
-                5,
-                ParameterChannel::Both,
-                ParameterUnit::Milliseconds,
-                10.0,
-            ));
-        }),
-        Err(LiveRebuild::RebuildOnly(prepared_reason(
-            "miso.gate-expander",
-            5
-        )))
-    );
-    // The gate's threshold (ID 1) is live.
-    assert!(
-        classify_effects(&current, |next| {
-            inserts(next, 1).push(param(1, ParameterChannel::Both, ParameterUnit::Db, -50.0));
-        })
-        .is_ok()
-    );
-    // EQ band 1 `enabled` (ID 1) and `kind` (ID 2, a low shelf), each beside a live gain.
-    for prepared in [
-        param(1, ParameterChannel::Left, ParameterUnit::Linear, 1.0),
-        param(2, ParameterChannel::Both, ParameterUnit::Linear, 2.0),
-    ] {
-        assert_eq!(
-            classify_effects(&current, |next| {
-                inserts(next, 2).push(param(4, ParameterChannel::Left, ParameterUnit::Db, 3.0));
-                inserts(next, 2).push(prepared.clone());
-            }),
-            Err(LiveRebuild::RebuildOnly(prepared_reason(
-                "miso.parametric-eq",
-                prepared.parameter_id
-            ))),
-            "{prepared:?}"
-        );
-    }
-}
-
 /// #1264 gate 1(e). Red if the classifier admits `params` that preparation refuses (a unit
 /// mismatch, a value outside the domain, an unknown parameter ID), so that a live commit would
 /// leave a committed model its own rebuild refuses.
@@ -3361,36 +3314,35 @@ fn a_live_bypass_flip_is_one_record_ahead_of_its_parameters() {
     );
 }
 
-/// #1266 gate 1, decision 14 F4. Red if a prepared bypass -- the delay's or the multiband
-/// compressor's -- is classified live in either direction: the record would be acked and never
-/// heard, because the running plan holds that bypass in its prepared state.
+/// #1266 gate 1, decision 14 F4. Red if a prepared bypass -- the multiband compressor's -- is
+/// classified live in either direction: the record would be acked and never heard, because the
+/// running plan holds that bypass in its prepared state. (The delay's is live since #1339.)
 #[test]
 fn a_prepared_bypass_change_needs_a_rebuild() {
-    // The delay (#1339) and the multiband compressor (#1340): the reason is the row's.
-    for (index, issue) in [(3, 1339), (4, 1340)] {
-        let enabled = with_bypassable();
-        assert_eq!(
-            classify_effects(&enabled, |next| {
-                next.tracks[0].inserts.effects[index].bypass = true;
-            }),
-            Err(LiveRebuild::RebuildOnly(RebuildReason::RuledLiveNotBuilt {
-                issue
-            })),
-            "insert {index} bypassed"
-        );
-        let mut bypassed = enabled.clone();
-        bypassed.tracks[0].inserts.effects[index].bypass = true;
-        let bypassed = normalized(&bypassed);
-        assert_eq!(
-            classify_effects(&bypassed, |next| {
-                next.tracks[0].inserts.effects[index].bypass = false;
-            }),
-            Err(LiveRebuild::RebuildOnly(RebuildReason::RuledLiveNotBuilt {
-                issue
-            })),
-            "insert {index} lifted"
-        );
-    }
+    // The multiband compressor (#1340): the reason is the row's.
+    let (index, issue) = (4, 1340);
+    let enabled = with_bypassable();
+    assert_eq!(
+        classify_effects(&enabled, |next| {
+            next.tracks[0].inserts.effects[index].bypass = true;
+        }),
+        Err(LiveRebuild::RebuildOnly(RebuildReason::RuledLiveNotBuilt {
+            issue
+        })),
+        "insert {index} bypassed"
+    );
+    let mut bypassed = enabled.clone();
+    bypassed.tracks[0].inserts.effects[index].bypass = true;
+    let bypassed = normalized(&bypassed);
+    assert_eq!(
+        classify_effects(&bypassed, |next| {
+            next.tracks[0].inserts.effects[index].bypass = false;
+        }),
+        Err(LiveRebuild::RebuildOnly(RebuildReason::RuledLiveNotBuilt {
+            issue
+        })),
+        "insert {index} lifted"
+    );
 }
 
 /// #1554 D5 on the bypass. Red if a submix strip's effects are left structural: a submix effect's
@@ -3538,21 +3490,28 @@ fn eq_automation(model: &SessionModel, parameter_id: u32, unit: ParameterUnit) -
     }
 }
 
-/// #1335 gate 4. An edit that only adds an automation on the EQ's `band-1-enabled`
-/// (`automation_rate` `None`) routes to the rebuild, whose preparation refuses it; one that adds
-/// an automation on the block-rate `band-1-gain` stays live with no records (#1260 D2).
+/// #1335 gate 4. An edit that only adds an automation on the limiter's `lookahead`
+/// (`automation_rate` `None`; the EQ's band enables were the subject until #1337 made them live)
+/// routes to the rebuild, whose preparation refuses it; one that adds an automation on the EQ's
+/// block-rate `band-1-gain` stays live with no records (#1260 D2).
 ///
 /// Red mutations: no step-4 check -> the prepared target is live with no records, acked and never
 /// heard; route every automation change to the rebuild -> the block-rate target is not live.
 #[test]
 fn an_automation_on_a_prepared_effect_parameter_needs_a_rebuild() {
-    let mut declared = with_effects();
+    let mut declared = with_limiter();
     // An automation names the row, not a declared parameter (#1566 D5): the instance states none.
     declared.tracks[0].inserts.effects[2].params = Vec::new();
     let current = normalized(&declared);
     assert_eq!(
         classify_effects(&current, |next| {
-            let ride = eq_automation(next, 1, ParameterUnit::Linear);
+            let mut ride = eq_automation(next, 3, ParameterUnit::Milliseconds);
+            ride.id = id("lookahead-ride");
+            ride.target.section = Section::Inserts(id("limiter"));
+            for segment in &mut ride.segments {
+                segment.start_value = 2.0;
+                segment.end_value = 2.0;
+            }
             next.automation.push(ride);
         }),
         Err(LiveRebuild::AutomationTarget)
@@ -4053,29 +4012,44 @@ fn send_values_outside_the_route_domain_need_a_rebuild() {
     );
 }
 
-/// Gate 2. Red if a route into the output loses its fold through a live edit: its gain, mute and
-/// matrix are rebuilds for the optimisation reason, at any tap.
+/// Gate 2 (#1391). Red if the classifier admits every route into the output or none: a
+/// `pre_fader` route into the output takes its gain, mute and matrix edits live, while a
+/// `post_fader` or `post_pan` one keeps its fold and rebuilds for the optimisation reason.
 #[test]
-fn output_route_values_stay_rebuilds() {
-    let mut model = two_tracks();
-    model.routes[0].source = RouteSource::Track {
-        track_id: model.tracks[0].id.clone(),
-        tap: SendTap::PreFader,
-    };
-    let current = normalized(&model);
-    assert!(matches!(
-        current.routes[0].destination,
-        RouteDestination::OutputInput { .. }
-    ));
-    for edit in [
-        (|next: &mut SessionModel| next.routes[0].gain_db = -6.0) as fn(&mut SessionModel),
-        |next| next.routes[0].mute = true,
-        |next| next.routes[0].channel_matrix.lr = 0.5,
+fn output_route_values_are_live_only_before_the_fader() {
+    for (tap, live) in [
+        (SendTap::PreFader, true),
+        (SendTap::PostFader, false),
+        (SendTap::PostPan, false),
     ] {
-        assert_eq!(
-            classify_routes(&current, edit),
-            Err(LiveRebuild::RebuildOnly(RebuildReason::Optimisation))
-        );
+        let mut model = two_tracks();
+        model.routes[0].source = RouteSource::Track {
+            track_id: model.tracks[0].id.clone(),
+            tap,
+        };
+        let current = normalized(&model);
+        assert!(matches!(
+            current.routes[0].destination,
+            RouteDestination::OutputInput { .. }
+        ));
+        for edit in [
+            (|next: &mut SessionModel| next.routes[0].gain_db = -6.0) as fn(&mut SessionModel),
+            |next| next.routes[0].mute = true,
+            |next| next.routes[0].channel_matrix.lr = 0.5,
+        ] {
+            let classified = classify_routes(&current, edit);
+            if live {
+                let rows = classified.expect("a pre-fader output route edit is live");
+                assert_eq!(rows.len(), 1, "{tap:?}");
+                assert_eq!(rows[0].0, current.routes[0].id.as_str());
+            } else {
+                assert_eq!(
+                    classified,
+                    Err(LiveRebuild::RebuildOnly(RebuildReason::Optimisation)),
+                    "{tap:?}"
+                );
+            }
+        }
     }
 }
 

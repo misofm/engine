@@ -702,6 +702,11 @@ pub struct GraphPreparedEffect {
 /// holds one, so `graph-compiler`'s resource estimate charges this size for it.
 pub const EFFECT_RENDER_NODE_BYTES: usize = core::mem::size_of::<runtime::EffectNode>();
 
+/// Bytes of a live-control-driven per-node effect's boxed owner (`runtime::LiveControlEffect`),
+/// padding included, which `graph-compiler`'s resource estimate charges for it. One size, so a
+/// new field of the owner is charged without a second edit (#1816).
+pub const LIVE_CONTROL_EFFECT_BYTES: usize = core::mem::size_of::<runtime::LiveControlEffect>();
+
 /// One prepared effect's live-control channel, carried **beside** the prepared effects
 /// rather than inside them (issue #140 A).
 ///
@@ -2249,6 +2254,21 @@ pub trait GraphPreparedBuiltinBankProcessor: Send + Any {
         frames: u32,
         first_sample: u64,
     ) -> Result<(), RenderError>;
+    /// [`Self::process`] for a block whose right input is its left plane, forwarded from
+    /// `rack::BankStage::process_from_left` with that method's contract (issue #975): `right` is
+    /// output only, `Ok(true)` when the bank wrote it from `left` itself, `Ok(false)` when it
+    /// copied `left` into it first, as this default does.
+    fn process_from_left(
+        &mut self,
+        left: &mut [f32],
+        right: &mut [f32],
+        frames: u32,
+        first_sample: u64,
+    ) -> Result<bool, RenderError> {
+        right.copy_from_slice(left);
+        self.process(left, right, frames, first_sample)?;
+        Ok(false)
+    }
     /// Copy one bank member's retained response words without advancing render state.
     fn copy_response_snapshot_lane(
         &self,
@@ -2309,7 +2329,8 @@ pub trait GraphPreparedBuiltinBankProcessor: Send + Any {
     ///
     /// The default is [`SeamSide::UpstreamOfSeam`] for the reason
     /// `rack::BankStage::seam_side` gives: it is the conservative answer, because an
-    /// upstream stage that has not written a one-plane body declines the whole chain.
+    /// upstream stage that has not written a one-plane body ends the collapsible prefix, and
+    /// declines the whole chain when it is the first slot.
     fn seam_side(&self) -> SeamSide {
         SeamSide::UpstreamOfSeam
     }
@@ -2606,18 +2627,19 @@ impl PreparedGraphPlan {
         self.program = self.lower_from_current_fields();
         Ok(self)
     }
-    /// Give every route into a submix input a live lane (issue #1220 D1, D7, #1347 D1): one
-    /// latest-target cell per route, in canonical route-ID order, whose producers are returned.
-    /// Every lane adds the replaced writes it finds to `superseded`, the session's count.
+    /// Give every route into a submix input, and every route whose source tap precedes its
+    /// strip's fader (#1391), a live lane (issue #1220 D1, D7, #1347 D1): one latest-target cell
+    /// per route, in canonical route-ID order, whose producers are returned. Every lane adds the
+    /// replaced writes it finds to `superseded`, the session's count.
     ///
-    /// Runs after compile and before bind. Routes into an output keep their prepared constants,
-    /// their fold and their structural edits. Bind turns each lane's route op into a live route,
-    /// which reads its cell under the block's live snapshot at the start of every block and
-    /// ramps by the indexed ramp; a live route never folds (VERIFY-2 M3). Without this call the
-    /// plan binds what it bound before.
+    /// Runs after compile and before bind. A `post_fader` or `post_pan` route into an output keeps
+    /// its prepared constant, its fold and its structural edits. Bind turns each lane's route op
+    /// into a live route, which reads its cell under the block's live snapshot at the start of
+    /// every block and ramps by the indexed ramp; a live route never folds (VERIFY-2 M3). Without
+    /// this call the plan binds what it bound before.
     ///
-    /// Refused when called twice ([`GraphRouteControlError::AlreadyAttached`]) or when a route into
-    /// a submix is a node the plan requires a processor for.
+    /// Refused when called twice ([`GraphRouteControlError::AlreadyAttached`]) or when a route
+    /// that gets a lane is a node the plan requires a processor for.
     pub fn attach_route_controls(
         &mut self,
         superseded: &engine::realtime::LiveValuesSuperseded,
@@ -2629,9 +2651,10 @@ impl PreparedGraphPlan {
     /// [`Self::attach_route_controls`] with following routes (#1652 D1, #1652c): every route into
     /// a submix input for which `following` gives a source gets a seven-word lane reading it
     /// (`follow_route_control_pair`) and no six-word lane; every other such route gets a
-    /// six-word lane when `six_word` is set and none otherwise. Both producer lists are in
-    /// canonical route-ID order. `following` is asked once per route into a submix, in that
-    /// order, so a route into an output never follows (decision 13 P11).
+    /// six-word lane when `six_word` is set and none otherwise; a pre-fader route into an output
+    /// takes the six-word rule. Both producer lists are in canonical route-ID order. `following`
+    /// is asked once per route into a submix, in that order, so a route into an output never
+    /// follows (decision 13 P11).
     ///
     /// Refused as [`Self::attach_route_controls`] is, and with
     /// [`GraphRouteControlError::CursorTable`] when a following route's cursor tables cannot be
@@ -2669,12 +2692,28 @@ impl PreparedGraphPlan {
                 _ => None,
             })
             .collect();
+        // #1391: a route whose source edge leaves its strip before the fader has a live lane at
+        // any destination (`controls::route_rows_live` is the model-side form of this rule). A
+        // `post_fader` or `post_pan` route into the output keeps its constant and its fold.
+        let pre_fader: BTreeSet<&StableGraphId> =
+            self.spec
+                .edges
+                .iter()
+                .filter_map(|edge| match (&edge.id, &edge.source.node) {
+                    (
+                        GraphEdgeId::RouteSource { route_id },
+                        GraphNodeId::TrackStage { stage, .. },
+                    ) if *stage < TrackStage::PostFader => Some(route_id),
+                    _ => None,
+                })
+                .collect();
         let mut live: Vec<&GraphNodeId> = self
             .routes
             .iter()
             .map(|route| &route.node)
             .filter(|node| {
-                matches!(node, GraphNodeId::Route { route_id } if into_submix.contains(route_id))
+                matches!(node, GraphNodeId::Route { route_id }
+                    if into_submix.contains(route_id) || pre_fader.contains(route_id))
             })
             .collect();
         live.sort_unstable();
@@ -2691,6 +2730,13 @@ impl PreparedGraphPlan {
             let GraphNodeId::Route { route_id } = node else {
                 continue;
             };
+            // Only a route into a submix may follow (decision 13 P11, #1218).
+            if !into_submix.contains(route_id) {
+                if six_word {
+                    kinds.push((route_id, None));
+                }
+                continue;
+            }
             match following(route_id) {
                 Some(source) => kinds.push((route_id, Some(source))),
                 None if six_word => kinds.push((route_id, None)),
@@ -3210,6 +3256,13 @@ pub trait GraphPreparedSourceSetDriver: Send {
         GraphObservationValidity::CLEAR
     }
     fn copy_after_disarm_telemetry(&self, _output: &mut [u64]) -> usize {
+        0
+    }
+    /// The accepted source frames still in this driver's occupied rings that render never read
+    /// (#1699 D1). Control thread only, once the plan is retired: a source the successor carried
+    /// left a vacant entry here, so what remains is exactly the removed or redeclared sources'
+    /// discarded PCM. The default (no rings) is 0.
+    fn unread_source_frames(&self) -> u64 {
         0
     }
     /// Whether [`Self::played_planes`] lends this driver's played block (issue #918).
@@ -4837,7 +4890,7 @@ pub struct GraphStripDelayMove {
     pub lanes: u8,
 }
 
-/// One live send of a bound graph plan (#1284 D2): a route into a submix with a live lane, named
+/// One live send of a bound graph plan (#1284 D2): a route with a live lane (#1391), named
 /// by its route ID. What a successor's preparation joins with its own, by ID.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct GraphLiveRoute {
@@ -5869,6 +5922,12 @@ impl PreparedPlanExecutor for GraphExecutor {
         self.runtime.units.iter().fold(0_u64, |total, unit| {
             total.saturating_add(unit.observation_retained_bytes() as u64)
         })
+    }
+
+    fn unread_source_frames(&self) -> u64 {
+        self.source_set
+            .as_ref()
+            .map_or(0, |set| set.driver.unread_source_frames())
     }
 }
 

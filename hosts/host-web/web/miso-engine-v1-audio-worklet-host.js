@@ -70,7 +70,7 @@ const OPTION_FIELDS = [
 ];
 const BOOT_OPTION_FIELDS = [
   "sourceRingFrames", "maximumMemoryBytes", "reserved1", "liveControlMeterBlocks",
-  "liveControlObservationTaps", "liveControlMasterTrackPlusOne", "spectrumHopFrames", "spectrum",
+  "liveControlObservationTaps", "reserved2", "spectrumHopFrames", "spectrum",
   "spectrumCollection",
 ];
 const NEW_NO_SPECTRUM_BOOT_OPTION_FIELDS = BOOT_OPTION_FIELDS.slice(0, -2);
@@ -517,7 +517,7 @@ function snapshotBootOptions(value) {
     reserved1: captured.descriptors.get("reserved1").value,
     liveControlMeterBlocks: captured.descriptors.get("liveControlMeterBlocks").value,
     liveControlObservationTaps: captured.descriptors.get("liveControlObservationTaps").value,
-    liveControlMasterTrackPlusOne: captured.descriptors.get("liveControlMasterTrackPlusOne").value,
+    reserved2: captured.descriptors.get("reserved2").value,
     spectrumHopFrames: hopDescriptor === undefined ? 0 : hopDescriptor.value,
     spectrum,
     spectrumCollection,
@@ -637,9 +637,7 @@ function validBootOptions(options) {
     && options.liveControlMeterBlocks <= 0xffffffffn
     && validU64(options.liveControlObservationTaps)
     && options.liveControlObservationTaps <= BigInt(MAXIMUM_OBSERVATION_TAPS)
-    && validU64(options.liveControlMasterTrackPlusOne)
-    && options.liveControlMasterTrackPlusOne <= 0xffffffffn
-    && (options.liveControlMasterTrackPlusOne === 0n || options.liveControlObservationTaps !== 0n)
+    && options.reserved2 === 0n
     && validSpectrumBoot(options.spectrum ?? null)
     && validSpectrumCollectionBoot(options.spectrumCollection ?? null)
     && (options.spectrum === null || options.spectrum === undefined

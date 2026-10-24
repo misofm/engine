@@ -18,7 +18,8 @@ extern "C" {
  *   session      Control thread. At most one thread at a time calls
  *                miso_engine_v1_source_submit_planar_f32, miso_engine_v1_source_seek,
  *                miso_engine_v1_source_seek_at, miso_engine_v1_source_seek_report,
- *                miso_engine_v1_submit_command, miso_engine_v1_dequeue_event,
+ *                miso_engine_v1_submit_command, miso_engine_v1_submit_document_command,
+ *                miso_engine_v1_dequeue_event,
  *                miso_engine_v1_service, miso_engine_v1_declare_discontinuity,
  *                miso_engine_v1_session_seek, miso_engine_v1_session_seek_at, or
  *                miso_engine_v1_last_error on the session; they are serialized with each other.
@@ -42,7 +43,7 @@ extern "C" {
  * fader levels, mutes, and pan or matrix values; a changed value of a track effect parameter
  * whose automation rate is Block, on a console-slot entry or an insert, the parametric EQ's live
  * parameters included (applied through prepared targets); and a track effect's bypass, except the
- * delay's and the multiband compressor's, which rebuild. A transaction that changes only the
+ * multiband compressor's, which rebuilds. A transaction that changes only the
  * session ID, a profile's id or a stored automation entry on a row that does not render yet
  * commits with no replacement and no live value. A stored fader automation edit (an entry on a
  * strip's fader_db added, removed, retargeted or given other segments) rebuilds the plan, and
@@ -208,7 +209,7 @@ extern "C" {
  * cost does not grow with the time since the last call. It returns MISO_ENGINE_V1_OK; a null
  * session as MISO_ENGINE_V1_INVALID_ARGUMENT and another handle as MISO_ENGINE_V1_WRONG_HANDLE;
  * and, should the session's plan epochs fail to synchronize, MISO_ENGINE_V1_INTERNAL with the
- * session diagnostic "capi.source.epoch". The host's duty: a pending edit progresses only while the
+ * session diagnostic "source.epoch". The host's duty: a pending edit progresses only while the
  * host makes session calls, the same duty as draining events. A host that renders but never calls
  * keeps retired plans allocated, and its next structural edit waits for that reclaim; a warm
  * successor that misses its deadline falls back only at the host's next session call. The plan
@@ -241,7 +242,15 @@ extern "C" {
  * path, so a nonzero value is an engine defect. The counter SOURCE_UNDERRUN_BLOCKS (protocol
  * counter 20, read with COUNTERS_GET) counts the rendered blocks in which a source played zeros
  * because the host had not delivered PCM it owed, or a source had no stream (graph-wide, not per source); a held block and a
- * block past the end of a region are not counted, and it never resets. A rejected source
+ * block past the end of a region are not counted, and it never resets. The counter
+ * SOURCE_FRAMES_DISCARDED (protocol counter 21) counts, in frames, the accepted source PCM that
+ * render never read because the caller's own transaction removed or redeclared the source: the
+ * chunks still queued in the discarded ring (a stale-generation chunk included) when a later call
+ * reclaims the displaced plan. A failed carry (the new plan could not take the old plan's rings)
+ * loses the frames of every ring it did not move, and those frames are counted too. Frames render
+ * played, a ring discarded by session destroy and the
+ * rings of a withdrawn replacement (never fed: such a transaction is refused) are not counted; it
+ * never resets. A rejected source
  * submission or seek likewise names the rule it broke ("source.region.outside",
  * "source.generation.stale", "source.channels.mismatch", ...). A null, empty, non-UTF-8 or
  * over-127-byte source ID on submit, seek, seek_at or seek_report is
@@ -290,8 +299,9 @@ extern "C" {
  * replacement carries unchanged from the plan that renders is not refused this way. A source the
  * caller's own transaction removes discards its queued audio, whether the plan that renders or the
  * waiting replacement (carrying it unchanged) holds it: the caller asked for the removal, so this
- * is not an unintended drop. No counter reports the discarded frames yet; issue 1699 is the
- * successor issue for one. A resource cap counts every plan the session still holds and the new
+ * is not an unintended drop. The counter SOURCE_FRAMES_DISCARDED (protocol counter 21, read with
+ * COUNTERS_GET; issue 1699) counts those frames, and the frames a redeclared source's old ring
+ * discards (above). A resource cap counts every plan the session still holds and the new
  * one: the running plan, the waiting replacement, and a plan render has displaced until a later
  * call reclaims it. A refusal is MISO_ENGINE_V1_BACKPRESSURE when the new plan fit against the
  * newest held plan alone, so a retry after a render normally commits; the split is approximate, and
@@ -342,7 +352,7 @@ extern "C" {
  * ("source.generation.stale"), T over the timeline limit ("source.seek.frame_out_of_range"), a
  * source whose producer the newest session does not hold yet ("source.ring.vacated"), and
  * MISO_ENGINE_V1_BACKPRESSURE with "source.seek.backpressure" while any source or the timeline
- * still holds an unpopped seek; MISO_ENGINE_V1_INTERNAL with "capi.source.epoch" when the
+ * still holds an unpopped seek; MISO_ENGINE_V1_INTERNAL with "source.epoch" when the
  * session's plan epochs cannot be synchronized, or with "source.internal" for an engine invariant.
  * miso_engine_v1_session_seek_at(session, g, T, A) is the anchored form, with the anchor of
  * miso_engine_v1_source_seek_at: every consumer changes at the block at A, or, reached late, at
@@ -358,6 +368,25 @@ extern "C" {
  * and exact-start form); a host that wants the floors reset declares at a stop. A seek of every
  * source made with per-source seeks is still the host's own call, and the host declares before
  * it. A host checks MISO_ENGINE_V1_FEATURE_SESSION_SEEK before calling either symbol.
+ *
+ * Session replace (#1386). miso_engine_v1_submit_document_command is
+ * miso_engine_v1_submit_command plus a session document borrowed beside the frame for this call
+ * only, under miso_engine_v1_compile_session's pointer-plus-length rule: document may be null
+ * only when document_bytes is 0, else MISO_ENGINE_V1_INVALID_ARGUMENT. The library keeps nothing
+ * of it. A SESSION_REPLACE (0x0013) frame names the document by its exact length and its
+ * SHA-256; the engine checks both, bounds the document by the compile limits'
+ * maximum_document_bytes (not by the control frame), parses and validates it as a boot would,
+ * diffs it against the committed session and applies the diff as the one transaction it is: the
+ * same revision, edit path, SESSION_COMMITTED event and rendered blocks as that
+ * SESSION_TRANSACTION_APPLY. A document equal to the committed session replies edit path 5,
+ * unchanged, and commits nothing. A document refusal is a non-OK reply frame
+ * (session.replace.document_length, session.replace.document_too_large,
+ * session.replace.document_digest, session.replace.document_utf8, or VALIDATION_FAILED with the
+ * session's diagnostics) and changes nothing; a SESSION_REPLACE through
+ * miso_engine_v1_submit_command is the document_length refusal. Every other frame behaves as it
+ * does through miso_engine_v1_submit_command. A replayed request answers its cached reply without
+ * reading the document. A host checks MISO_ENGINE_V1_FEATURE_SESSION_REPLACE before calling the
+ * symbol.
  *
  * Choosing the anchor. To start a stem that a transaction added, after the command returns OK:
  * pick A, a quantum multiple past the last rendered block by enough quanta to cover the time the
@@ -488,7 +517,8 @@ extern "C" {
 #define MISO_ENGINE_V1_FEATURE_DECLARE_DISCONTINUITY UINT64_C(256)
 #define MISO_ENGINE_V1_FEATURE_SOURCE_SEEK_REPORT UINT64_C(512)
 #define MISO_ENGINE_V1_FEATURE_SESSION_SEEK UINT64_C(1024)
-#define MISO_ENGINE_V1_FEATURE_MASK UINT64_C(2047)
+#define MISO_ENGINE_V1_FEATURE_SESSION_REPLACE UINT64_C(2048)
+#define MISO_ENGINE_V1_FEATURE_MASK UINT64_C(4095)
 
 #define MISO_ENGINE_V1_OUTCOME_EXACT UINT64_C(1)
 #define MISO_ENGINE_V1_OUTCOME_TRANSITION_FALLBACK UINT64_C(2)
@@ -700,6 +730,9 @@ uint32_t miso_engine_v1_source_seek_at(miso_engine_v1_session *session,
                                        uint64_t generation,
                                        uint64_t source_frame,
                                        uint64_t anchor_sample);
+/* The reserved source_id "$timeline" (9 bytes) reads the session timeline's seek report: its
+ * source_frame is the timeline sample that block started at, and its underrun and held counts are
+ * 0. Only this call takes it; submit, seek and seek_at refuse it as an unknown source. */
 uint32_t miso_engine_v1_source_seek_report(miso_engine_v1_session *session,
                                            const uint8_t *source_id,
                                            uint64_t source_id_bytes,
@@ -715,6 +748,12 @@ uint32_t miso_engine_v1_submit_command(miso_engine_v1_session *session,
                                        const uint8_t *request,
                                        uint64_t request_bytes,
                                        miso_engine_v1_bytes_out *response);
+uint32_t miso_engine_v1_submit_document_command(miso_engine_v1_session *session,
+                                                const uint8_t *request,
+                                                uint64_t request_bytes,
+                                                const uint8_t *document,
+                                                uint64_t document_bytes,
+                                                miso_engine_v1_bytes_out *response);
 uint32_t miso_engine_v1_dequeue_event(miso_engine_v1_session *session,
                                       uint32_t lane,
                                       miso_engine_v1_bytes_out *event);

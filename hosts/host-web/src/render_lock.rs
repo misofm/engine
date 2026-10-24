@@ -151,6 +151,19 @@ pub(crate) fn render_allocation_count() -> u32 {
     RENDER_ALLOCATIONS.load(Ordering::Relaxed)
 }
 
+/// Issue #1529: the positive control of the render-allocation gates, never in a shipped build.
+#[cfg(feature = "render-lock-probe")]
+#[unsafe(no_mangle)]
+pub extern "C" fn miso_engine_web_v1_render_lock_probe(inside: u32) -> u32 {
+    let allocate = || drop(std::hint::black_box(Box::new(inside)));
+    if inside != 0 {
+        render_locked(allocate);
+    } else {
+        allocate();
+    }
+    render_allocation_count()
+}
+
 /// The number of allocator calls made outside render-locked windows since this instance started
 /// (#1381a): its boot, control messages and service steps. It saturates at `u32::MAX` and never
 /// wraps.

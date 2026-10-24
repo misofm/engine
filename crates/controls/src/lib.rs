@@ -45,7 +45,7 @@ mod vca;
 mod view;
 
 pub use automation::{
-    CellRule, ControlDiagnostic, FADER_CELL_RULE, MUTE_CELL_RULE, automated_cell,
+    AutomationIndex, CellRule, ControlDiagnostic, FADER_CELL_RULE, MUTE_CELL_RULE, automated_cell,
     automated_fader_lanes, automation_diagnostics, automation_row_renders, continued_fader_lanes,
     continued_mute_lanes, fader_automation, fader_event_lanes, fader_row,
     filter_statics_changed_under_automation, filter_under_automation, mute_automation,
@@ -81,6 +81,7 @@ pub use registry::{
     owner_index, owner_rows_in, owner_rows_with, row_descriptor, row_motion, row_scope, set,
     strip_index,
 };
+pub use route::route_rows_live;
 pub use session::{ControlAddress, Lane, Owner, OwnerKind, Section, SectionKind};
 pub use tables::{EffectTableRows, OutputCase, RowSource, TableRow, effect_table_rows, table_rows};
 pub use view::ModelView;

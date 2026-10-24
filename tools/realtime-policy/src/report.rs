@@ -43,6 +43,12 @@ pub enum Class {
     RefusedSkippedModule,
     /// Unsafe code outside the allowlisted ownership files.
     UnsafeOutsideOwnership,
+    /// Unsafe code in a compiled doctest block of a file outside the allowlisted ownership files.
+    UnsafeInDoctest,
+    /// An identifier `include`, `include_str` or `include_bytes` in a compiled doctest block.
+    IncludeInDoctest,
+    /// A compiled doctest block that does not lex, so no rule can read it.
+    DoctestNotLexable,
     /// A line mentions a region marker but is not a valid marker line.
     MalformedMarker,
     /// A file has a different number of begin and end markers.
@@ -101,13 +107,37 @@ pub enum Class {
     /// a guarded module's declaration or inner attributes: the build could ship something else
     /// than the code the wrap rule read (rule (a)).
     ConditionalWrapPath,
-    /// An `#[export_name]` whose value starts with `miso_engine_web_v1_` under
-    /// `hosts/host-web/src` (rule (b)).
+    /// A listed export with a generic parameter, a `where` clause or an `impl Trait` in its
+    /// signature, refused fail-closed: some of these forms emit no symbol, so another function
+    /// could take the name (#1528 D1(a)).
+    GenericWebExport,
+    /// An `export_name` attribute under `hosts/host-web/src`, whatever its value or spelling: every
+    /// exported name there comes from a function's own identifier (rule (b), #1528 D1(b)).
     ExportNameOnWebExport,
+    /// A function named like a listed export that carries `no_mangle` in any spelling, and is not
+    /// a top-level item of `hosts/host-web/src/ffi.rs` (#1528 D1(c)).
+    ExportTwinOutsideFfi,
     /// A `#[path]` on `mod ffi;` or `mod render_lock;` in `hosts/host-web/src/lib.rs` (rule (c)).
     PathOnWebModule,
     /// A glob `use` among the top-level items of `ffi.rs` or `render_lock.rs` (rule (d)).
     GlobInWrapModule,
+    /// A `#[cfg]` or `#[cfg_attr]` on a top-level item of `hosts/host-web/src/render_lock.rs` that
+    /// is not one of the three allowed forms (the allocator, `#[cfg(test)] mod tests`, the probe)
+    /// (#1528 D2).
+    ConditionalRenderLockItem,
+    /// A `#[cfg]` or `#[cfg_attr]` at a nested site of `render_lock.rs`, or a `cfg` in a macro
+    /// invocation there, outside the allowed `mod tests` (#1528 D2).
+    ConditionalInRenderLockBody,
+    /// `render_lock.rs` does not hold exactly one top-level `#[global_allocator]` of the exact
+    /// form: `#[cfg(all(target_family = "wasm", not(test)))]`, `#[global_allocator]`, type
+    /// `RenderLockedAllocator<std::alloc::System>` (#1528 D2).
+    RenderLockAllocatorForm,
+    /// A `#[global_allocator]` under `hosts/host-web/src` outside the top level of
+    /// `render_lock.rs` and outside a `#[cfg(test)]` module (#1528 D2).
+    AllocatorOutsideRenderLock,
+    /// `render_locked` is not exactly one top-level function of `render_lock.rs`, or another file
+    /// of `hosts/host-web/src` than `ffi.rs` introduces the name (#1528 D2).
+    RenderLockedNotUnique,
     /// `hosts/host-web/src/lib.rs` does not declare `mod ffi;` and `mod render_lock;` as
     /// out-of-line modules.
     WebModuleNotDeclared,
@@ -148,6 +178,13 @@ impl fmt::Display for Class {
             Self::UnsafeOutsideOwnership => {
                 out.write_str("unsafe code exists outside the issue-approved ownership/audit files")
             }
+            Self::UnsafeInDoctest => out.write_str(
+                "unsafe code in a compiled doctest block outside the issue-approved ownership/audit files",
+            ),
+            Self::IncludeInDoctest => out.write_str(
+                "include, include_str or include_bytes in a compiled doctest block (rustdoc reads the file relative to the source)",
+            ),
+            Self::DoctestNotLexable => out.write_str("compiled doctest block does not lex"),
             Self::MalformedMarker => out.write_str("malformed realtime policy marker"),
             Self::UnmatchedMarkers => out.write_str("unmatched realtime policy markers"),
             Self::MisorderedMarkers => out.write_str("misordered realtime policy markers"),
@@ -208,14 +245,35 @@ impl fmt::Display for Class {
             Self::ConditionalWrapPath => out.write_str(
                 "#[cfg] or #[cfg_attr] on the render_locked import, a render-thread export, its wrap call or a guarded module (hosts/host-web/src/ffi.rs, render_lock.rs)",
             ),
+            Self::GenericWebExport => out.write_str(
+                "a render-thread export with a generic parameter, a where clause or impl Trait in its signature, refused fail-closed (some of these forms emit no symbol of their own)",
+            ),
             Self::ExportNameOnWebExport => out.write_str(
-                "#[export_name] whose value starts with the miso_engine_web_v1_ prefix under hosts/host-web/src",
+                "export_name under hosts/host-web/src (in any spelling and with any value): an exported name there must be a function's own identifier",
+            ),
+            Self::ExportTwinOutsideFfi => out.write_str(
+                "a no_mangle function named like a render-thread export that is not a top-level item of hosts/host-web/src/ffi.rs",
             ),
             Self::PathOnWebModule => out.write_str(
                 "#[path] on `mod ffi;` or `mod render_lock;`, which would move the shipped module away from the file the wrap rule reads",
             ),
             Self::GlobInWrapModule => out.write_str(
                 "glob use at the top level of ffi.rs or render_lock.rs, which could supply a render_locked the wrap rule never sees",
+            ),
+            Self::ConditionalRenderLockItem => out.write_str(
+                "#[cfg] or #[cfg_attr] on a top-level item of hosts/host-web/src/render_lock.rs that is not the allocator, #[cfg(test)] mod tests or the render-lock probe in their exact forms",
+            ),
+            Self::ConditionalInRenderLockBody => out.write_str(
+                "#[cfg], #[cfg_attr] or cfg! inside an item of hosts/host-web/src/render_lock.rs, outside #[cfg(test)] mod tests",
+            ),
+            Self::RenderLockAllocatorForm => out.write_str(
+                "hosts/host-web/src/render_lock.rs does not hold exactly one top-level #[global_allocator] with exactly #[cfg(all(target_family = \"wasm\", not(test)))] and type RenderLockedAllocator<std::alloc::System>",
+            ),
+            Self::AllocatorOutsideRenderLock => out.write_str(
+                "#[global_allocator] under hosts/host-web/src outside the top level of render_lock.rs and outside a #[cfg(test)] module",
+            ),
+            Self::RenderLockedNotUnique => out.write_str(
+                "render_locked is not exactly one top-level function of hosts/host-web/src/render_lock.rs, or another file of hosts/host-web/src than ffi.rs introduces the name",
             ),
             Self::WebModuleNotDeclared => out.write_str(
                 "hosts/host-web/src/lib.rs does not declare `mod ffi;` and `mod render_lock;` as out-of-line modules",

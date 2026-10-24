@@ -258,6 +258,7 @@ dependencies = [
  "lane",
  "protocol",
  "session",
+ "sha2 0.11.0",
  "source",
 ]
 
@@ -343,6 +344,7 @@ dependencies = [
  "lane",
  "protocol",
  "session",
+ "sha2 0.11.0",
  "source",
 ]
 
@@ -1937,6 +1939,7 @@ name = "session"
 version = "0.1.0"
 dependencies = [
  "automation",
+ "bench-support",
  "engine",
  "json-syntax",
  "jsonschema",

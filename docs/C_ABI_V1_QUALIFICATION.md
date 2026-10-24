@@ -184,7 +184,7 @@ acknowledges nothing, adds no queue, and never takes or drops a pending candidat
 candidate stays in its mailbox cell until render adopts it, and its provider is promoted only
 after. So an ack cannot precede a drop through it. Results: `OK`; a null session
 `INVALID_ARGUMENT` and another handle `WRONG_HANDLE`, as every session call; an epoch
-synchronization failure `INTERNAL` with the session diagnostic `capi.source.epoch`, the one the
+synchronization failure `INTERNAL` with the session diagnostic `source.epoch`, the one the
 source calls already set for it. The host's duty, in the header: a pending edit progresses only
 while the host makes session calls, the same duty as draining events. A host that renders but
 never calls keeps retired plans allocated, and its next structural edit waits for that reclaim; a
@@ -243,7 +243,7 @@ published generation or a consumer's (`source.generation.stale`), an unaligned a
 (`source.seek.anchor_unaligned`) or a `T` over the timeline limit
 (`source.seek.frame_out_of_range`); `BACKPRESSURE` with `source.seek.backpressure` while any slot
 holds a seek; the source seek's mapping otherwise (`INVALID_ARGUMENT` with `source.ring.vacated`,
-`INTERNAL` with `capi.source.epoch` or `source.internal`). The anchored form takes the anchor of
+`INTERNAL` with `source.epoch` or `source.internal`). The anchored form takes the anchor of
 `miso_engine_v1_source_seek_at`. A per-source seek leaves the timeline where it is.
 
 A plain session seek is a declared discontinuity; the engine declares it in the same call, and a
@@ -270,6 +270,30 @@ scope with 0 violations. The gates: `capi` `runtime::tests::session_seek_declare
 seek publishes nothing; an accepted one publishes exactly one successor and applies, also across a
 waiting replacement; an anchored one publishes none) and the parity row
 `control_parity::a_plain_session_seek_declares_and_an_anchored_one_does_not_alike_on_both_hosts`.
+
+A host replaces the whole session with a document while it plays through
+`miso_engine_v1_submit_document_command(session, request, request_bytes, document,
+document_bytes, response)` (#1386), an in-place V1 amendment: one new exported symbol, announced by
+`MISO_ENGINE_V1_FEATURE_SESSION_REPLACE` (bit 11, 2048) in the capability report, whose feature
+mask grows to 4095; no struct, size or `ABI_VERSION` changes. It is `miso_engine_v1_submit_command`'s
+contract plus a document borrowed for the call only, under `compile_session`'s pointer-plus-length
+rule (a null `document` with a nonzero `document_bytes` is `INVALID_ARGUMENT`); both exports run one
+body into `control_plane::SessionState::command_with_document`, the one core path both hosts call,
+and `submit_command` passes no document. The `SESSION_REPLACE` frame (`0013`) names the document by
+its length and SHA-256; the control plane checks both, bounds it by the compile limits'
+`maximum_document_bytes` (never by the control frame), parses and compiles it as a boot would, and
+commits its diff as the one transaction it is (`docs/CONTROL_PROTOCOL_SEMANTICS.md`, "Session
+replace"). A document refusal is a non-OK reply frame with `RESULT_OK`. The library keeps nothing of
+the document. The frozen exported set is now 22 `miso_engine_v1_*` definitions; `abi_smoke.c`
+checks the bit against the queried mask and calls the symbol with a null session for
+`INVALID_ARGUMENT`, `header_smoke.cpp` pins the bit inside the mask and the signature, and
+`audit protocol` encodes one `SESSION_REPLACE` frame caller-buffer. The gates: `capi`
+`tests/session_replace.rs` (the export renders the blocks, reply and event of the equal
+`SESSION_TRANSACTION_APPLY` on a twin, for a rebuild, a live change and an identical document; a
+null document is refused and a retry through `submit_command` answers the cached reply; a document
+more than four times the 16 KiB frame commits, and a large live replace leaves exactly the live
+bytes the equal transaction leaves on a twin, so 0 bytes of the document stay) and the parity row
+`control_parity::a_session_replace_without_its_document_is_refused_alike_on_both_hosts`.
 
 The seek contract in the header (#1317, decision 15 D15-12) states, from the code, the source-read
 clock and its origin (0 at compile, one quantum per render call, continued by a swapped-in plan),
@@ -367,15 +391,16 @@ response would exceed the endpoint's response bound (the page then is not the en
 `AUTOMATION_ENQUEUE` (`0x0006`) is retired (#1627): the C ABI refuses a frame under that ID at decode (`INVALID_ARGUMENT`, nothing written and no state moved), and `CAPABILITIES_GET` lists no command `0x0006`, clears flag bit 5 and has no capability fields 9, 12, 19 and 20 (23 fields). Sample-timed changes are stored automation edits. Current/effective sample reads the active
 plan's existing release/acquire next-sample publication, while transport remains endpoint-local.
 Protocol telemetry counters and the existing bounded CAPI render-diagnostic slots feed the
-provider's counter and diagnostic pages. The seven provider-owned counters (the two telemetry
+provider's counter and diagnostic pages. The eight provider-owned counters (the two telemetry
 counters `TELEMETRY_COALESCED` 5 and `TELEMETRY_DROPPED` 6, `LIVE_VALUES_SUPERSEDED` 16, #1312 D8,
 `TRANSITION_REPREPARE_REFUSALS` 17, #1351 D6, `STRIPS_RESTARTED` 18, #1768,
-`LIVE_BLOCK_ERRORS` 19, #1521, and `SOURCE_UNDERRUN_BLOCKS` 20, #1537) retain an independent
-seven-slot minimum even when the frame-derived telemetry configuration capacity is
-smaller. Canceled automation (counter 12) retired with the automation queue (#1629).
+`LIVE_BLOCK_ERRORS` 19, #1521, `SOURCE_UNDERRUN_BLOCKS` 20, #1537, and `SOURCE_FRAMES_DISCARDED`
+21, #1699) retain an independent eight-slot minimum even when the frame-derived telemetry
+configuration capacity is smaller. Canceled automation (counter 12) retired with the automation
+queue (#1629).
 
-**Served counters and the counter snapshot (#1351).** The provider serves exactly those seven
-counters, each at 0 from construction, so `COUNTERS_GET` with `all` returns all seven and a read of
+**Served counters and the counter snapshot (#1351).** The provider serves exactly those eight
+counters, each at 0 from construction, so `COUNTERS_GET` with `all` returns all eight and a read of
 any of them is never `NOT_FOUND`. `STRIPS_RESTARTED` adds, for each replacement plan render
 adopted, the strips that plan started at rest, each once; the control plane adds it when it
 promotes the adopted plan, so a withdrawn candidate adds nothing (#1768). `LIVE_BLOCK_ERRORS`
@@ -383,7 +408,10 @@ counts the blocks render refused after the block took its live snapshot; the ser
 the render-side mirror in, and it stays 0 in a correct build (#1521). `SOURCE_UNDERRUN_BLOCKS`
 counts the rendered blocks in which a source played zeros because the host had not delivered PCM
 it owed (graph-wide; a held block and a block past the end of a region are not counted); the
-service step copies the render-side mirror in, on both hosts (#1537). `TELEMETRY_CONFIGURE` naming any other counter ID (for example
+service step copies the render-side mirror in, on both hosts (#1537). `SOURCE_FRAMES_DISCARDED`
+counts the accepted source frames render never read because the caller's transaction removed or
+redeclared the source, or a failed carry could not move; the service step adds them when it
+reclaims the displaced plan (#1699). `TELEMETRY_CONFIGURE` naming any other counter ID (for example
 `MALFORMED_FRAMES`) is `NOT_FOUND`, and the stored configuration does not change. `TRANSITION_REPREPARE_REFUSALS`
 is protocol counter 17; nothing writes a nonzero value until #1360. The periodic `COUNTER_SNAPSHOT`
 event (`0x8021`) reports, for each configured ID in order, the value after the service step's first
@@ -555,16 +583,20 @@ nine-track EQ reference session) and, for the producers' table, in `capi_retaine
 
 ## Live sends: gain, mute and matrix (#1557)
 
-A route into a submix has `gain_db`, `mute` and the four `matrix_*` coefficients as live rows of
-the control list (decision 17, S6). `miso_engine_v1_submit_command` commits a change of them as a
-live revision through `SET_CONTROL`; no plan is prepared and the plan
-epoch does not move. A route into the output is unchanged: its gain, mute and matrix stay rebuilds
-for decision 14's fold reason, at any tap. **A
-route into a submix carries a lane and does not fold**: the core chooses the lanes from the rows
-(`controls::live_lanes`), so a C ABI plan with a route into a submix attaches one latest-target
-cell per such route (`graph::route_control_resources`, charged in `capi_retained_bytes` and
-admitted against the graph cap) and the route's constants are no longer folded into the epilogue.
-A plan with no route into a submix attaches none and renders as before.
+A route into a submix, and since #1391 a route into the output whose source tap precedes its
+strip's fader (`input`, `post_input`, `insert_send`, `insert_return`, `pre_fader`), has `gain_db`,
+`mute` and the four `matrix_*` coefficients as live rows of the control list (decision 17, S6;
+`controls::route_rows_live` is the one rule). `miso_engine_v1_submit_command` commits a change of
+them as a live revision through `SET_CONTROL`; no plan is prepared and the plan epoch does not
+move. A `post_fader` or `post_pan` route into the output is unchanged: its gain, mute and matrix
+stay rebuilds for decision 14's fold reason. `follows_mute` never applies to a route into the
+output (#1218), at any tap. **A live route carries a lane and does not fold**: the core chooses
+the lanes from the rows (`controls::live_lanes`), so a C ABI plan with a live route attaches one
+latest-target cell per such route (`graph::route_control_resources`, charged in
+`capi_retained_bytes` and admitted against the graph cap) and the route's constants are no longer
+folded into the epilogue. A plan with no live route attaches none and renders as before; a
+`post_fader` or `post_pan` route into the output keeps its fold. With no record, a live route
+renders the bits of its prepared constant.
 
 - **Record.** One per changed route, in canonical route-ID order: the four coefficients
   `graph_compiler::route_coefficients(gain_db, matrix, mute, source_lane_muted)` returns, and
@@ -672,8 +704,8 @@ model's delta (`host_core::classify_live_delta`, #1053 D1), never by its opcodes
 - **Live effect parameters (#1264, #1265).** A track's console-slot entry or insert whose
   `params` change only in live parameters, parametric EQ values included, is live too; see
   "Value-only effect parameter edits" and "Value-only parametric EQ edits" below. So is a
-  bypass change on one, except the delay's and the multiband compressor's; see "Value-only effect
-  bypass edits" below.
+  bypass change on one, except the multiband compressor's; see "Value-only effect bypass edits"
+  below.
 - **Rebuild.** Everything else replaces the plan exactly as before: a fader dB outside
   `[-144, 24]` or a pan/matrix the setter refuses (reported as `COMPILE_REJECTED` with the
   preparation diagnostic a rebuild gives), and every other field.
@@ -918,10 +950,11 @@ the rack's latency-preserving bypass shunt (decision 14).
   the per-node path renders for that lane (#1341a2), so where the session places the effect never
   moves a rendered bit. The browser edits through the same core, so it crossfades alike
   (`hosts/host-web/tests/control_parity.rs`); #1393 is superseded.
-- **Prepared, so a rebuild.** A bypass change, in either direction, on the delay or the multiband
-  compressor: their session bypass is prepared into the effect, not lowered to the lane
+- **Prepared, so a rebuild.** A bypass change, in either direction, on the multiband
+  compressor: its session bypass is prepared into the effect, not lowered to the lane
   (`effect_compiler::lowers_session_bypass`), so a live record would be acked and never heard
-  (decision 14, F4). A submix strip's bypass stays a rebuild too, as every submix value does.
+  (decision 14, F4). The delay's bypass is live since #1339. A submix strip's bypass stays a
+  rebuild too, as every submix value does.
 - **No ack before a drop.** The bypass record passes its producer's preflight before the first
   cell write, and nothing after it can fail.
 - **Equal to a rebuild, on the gate fixture.** The wet path keeps running, so the switched

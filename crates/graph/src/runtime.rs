@@ -2663,6 +2663,9 @@ pub(crate) struct LiveControlEffect {
     /// What a state payload must share with the lane it is moved to or from (#1281): read off the
     /// prepared metadata at bind, which `EffectNode` does not keep.
     layout: rack::EffectLaneLayout,
+    /// Whether a plan swap's carry marked this instance for its pending-`Observe` drain (#1816),
+    /// taken by [`Self::carry_observes`]. Always `false` while the plan renders.
+    observe_carry: bool,
 }
 
 impl LiveControlEffect {
@@ -2732,17 +2735,19 @@ impl LiveControlEffect {
     }
     // REALTIME_POLICY_END
 
-    /// This instance's pending-`Observe` drain for a plan swap's carry (#1281, #1280 D3): its
-    /// queue and its tap. Pops nothing; the carry pops in a loop of its own. `None` when the
-    /// instance holds no queue.
-    fn observe_target_mut(&mut self) -> Option<rack::ObserveTarget<'_>> {
-        Some(rack::ObserveTarget {
-            queue: self.control.observe_queue_mut()?,
-            tap: self.observation.as_deref_mut(),
+    /// Apply this instance's pending `Observe` records at `first_sample` when a plan swap's
+    /// carry marked it (#1281, #1280 D3, #1816), through the lane's own drain loop, the one
+    /// [`Self::stage`] runs every block. The predecessor never renders again, so a record
+    /// admitted after its last block is applied now, as its next block would have.
+    fn carry_observes(&mut self, first_sample: u64) {
+        if core::mem::take(&mut self.observe_carry) {
             // The control plane refuses a subscription the plan cannot hold (no observation
-            // capacity, or an undeclared tap) before it reaches a queue, so nothing is unbound here.
-            unbound: None,
-        })
+            // capacity, or an undeclared tap) before it reaches a queue, so nothing is unbound
+            // here, and the block path drops the count too.
+            let _ = self
+                .control
+                .drain_observations(first_sample, self.observation.as_deref_mut());
+        }
     }
 
     /// The spans of this instance's staging window (#1621).
@@ -2794,6 +2799,7 @@ impl LiveControlEffect {
             effect: EffectNode::new(effect),
             control,
             layout,
+            observe_carry: false,
         }
     }
 }
@@ -5604,6 +5610,11 @@ impl BankStage for BuiltinStage {
         self.0
             .process(block.left, block.right, block.frames, block.first_sample)
     }
+    /// The bank's from-left body, forwarded (issue #975).
+    fn process_from_left(&mut self, block: BankBlock<'_>) -> Result<bool, RenderError> {
+        self.0
+            .process_from_left(block.left, block.right, block.frames, block.first_sample)
+    }
     fn copy_response_snapshot_lane(
         &self,
         lane: usize,
@@ -5926,12 +5937,11 @@ impl EffectStageMut<'_> {
 }
 
 impl<'a> EffectStageMut<'a> {
-    /// The pending-`Observe` drain of a live stage's lane (#1280 D3). A plain stage has no
-    /// control lane, so no queue. Pops nothing.
-    fn into_observe_target(self, lane: usize) -> Option<rack::ObserveTarget<'a>> {
-        match self {
-            Self::Plain(_) => None,
-            Self::Live(stage) => stage.observe_target_mut(lane),
+    /// Mark a live stage's lane for the carry's pending-`Observe` drain (#1280 D3, #1816). A
+    /// plain stage has no control lane, so no queue. Pops nothing.
+    fn mark_observe_carry(&mut self, lane: usize) {
+        if let Self::Live(stage) = self {
+            stage.mark_observe_carry(lane);
         }
     }
 
@@ -5975,22 +5985,6 @@ fn mark_effect_move_taken(taps: &mut [crate::ObserverTapMove], cursor: &mut usiz
             }
             return;
         }
-    }
-}
-
-/// The pending-`Observe` drain of the predecessor instance at `site`: its queue, tap and unbound
-/// counter, if the owner keeps one. Pops nothing (#1280 D3). The first sample of the block it would have rendered next is
-/// the predecessor executor's, one clock for a lane and a per-node instance alike.
-fn observe_target_at(
-    units: &mut [crate::runtime::RuntimeUnit],
-    site: crate::GraphEffectSite,
-) -> Option<rack::ObserveTarget<'_>> {
-    match site {
-        crate::GraphEffectSite::Lane(at) => {
-            let (chain, slot, lane) = effect_lane_mut(units, at)?;
-            effect_stage_mut(chain, slot)?.into_observe_target(lane)
-        }
-        crate::GraphEffectSite::Node(unit) => effect_node_mut(units, unit)?.observe_target_mut(),
     }
 }
 
@@ -6942,10 +6936,11 @@ impl crate::runtime::Runtime {
     /// count them. A refused lane carries no agreement, being at rest.
     ///
     /// The pending `Observe` records of every moved predecessor instance are applied to its tap
-    /// as its next block would have (#1280 D3), by a second loop over `moves` after the first has
-    /// moved every state: a bank stage at its own `next_block_sample`, a per-node instance at
-    /// `predecessor_next_sample`. That loop pops each queue at most as many times as its count at
-    /// entry. The caller has checked [`Self::can_carry_effect_lanes`]. Bounded by `moves.len()`,
+    /// as its next block would have (#1280 D3), at `predecessor_next_sample`, after the first loop
+    /// has moved every state: that loop marks each predecessor instance it resolves, and one call,
+    /// [`Self::carry_observes`], then runs each marked instance's own drain loop, the one its
+    /// block path runs (#1816). Each queue pops at most as many times as its count at entry. The
+    /// caller has checked [`Self::can_carry_effect_lanes`]. Bounded by `moves.len()`, the units,
     /// the prepared state sizes and those counts; allocation-free, and never panics.
     pub(crate) fn carry_effect_lanes(
         &mut self,
@@ -6972,9 +6967,10 @@ impl crate::runtime::Runtime {
                         disengaged = Some(before.unit);
                     }
                     let agree = chain.carried_channel_agreement();
-                    let Some(from) = effect_stage_mut(chain, slot) else {
+                    let Some(mut from) = effect_stage_mut(chain, slot) else {
                         continue;
                     };
+                    from.mark_observe_carry(predecessor_lane);
                     let Some((chain, slot, lane)) = effect_lane_mut(&mut self.units, successor)
                     else {
                         continue;
@@ -6993,6 +6989,7 @@ impl crate::runtime::Runtime {
                     let Some(node) = effect_node_mut(&mut predecessor.units, before) else {
                         continue;
                     };
+                    node.observe_carry = true;
                     let Some((chain, slot, lane)) = effect_lane_mut(&mut self.units, successor)
                     else {
                         continue;
@@ -7015,9 +7012,10 @@ impl crate::runtime::Runtime {
                         chain.disengage_for_carry();
                         disengaged = Some(before.unit);
                     }
-                    let Some(from) = effect_stage_mut(chain, slot) else {
+                    let Some(mut from) = effect_stage_mut(chain, slot) else {
                         continue;
                     };
+                    from.mark_observe_carry(predecessor_lane);
                     let Some(node) = effect_node_mut(&mut self.units, successor) else {
                         continue;
                     };
@@ -7039,6 +7037,7 @@ impl crate::runtime::Runtime {
                     let Some(from) = effect_node_mut(&mut predecessor.units, before) else {
                         continue;
                     };
+                    from.observe_carry = true;
                     let Some(into) = effect_node_mut(&mut self.units, successor) else {
                         continue;
                     };
@@ -7048,40 +7047,30 @@ impl crate::runtime::Runtime {
             }
         }
         // The predecessor never renders again: an `Observe` record admitted after its last block
-        // is applied to its tap now, as its next block would have (#1280 D3). A loop of its own
-        // over the same program, so each pop is bounded where it stands: the queue's count at
-        // entry, one pass per move.
-        for step in moves.iter() {
-            let Some(target) = observe_target_at(&mut predecessor.units, step.predecessor) else {
-                continue;
-            };
-            let rack::ObserveTarget {
-                queue,
-                mut tap,
-                unbound,
-            } = target;
-            let mut available = queue.available_at_entry();
-            let mut unapplied = 0_u64;
-            while available != 0 {
-                available -= 1;
-                let Ok(record) = queue.try_pop() else {
-                    // The entry snapshot and SPSC ownership guarantee this cannot happen. Keep
-                    // the drain bounded if a malformed test double violates that invariant.
-                    break;
-                };
-                if !effect_contract::apply_observe(
-                    record,
-                    predecessor_next_sample,
-                    tap.as_deref_mut(),
-                ) {
-                    unapplied = unapplied.saturating_add(1);
-                }
-            }
-            if let Some(count) = unbound {
-                *count = count.saturating_add(unapplied);
-            }
+        // is applied to its tap now, as its next block would have (#1280 D3). The first loop
+        // marked every moved predecessor instance; one walk over its units now runs each marked
+        // instance's own drain loop (#1816).
+        if !moves.is_empty() {
+            predecessor.carry_observes(predecessor_next_sample);
         }
         node_refused
+    }
+
+    /// Apply the pending `Observe` records of every predecessor instance the carry marked, at
+    /// `first_sample` (#1280 D3, #1816): each bank chain's [`BankChain::carry_observes`] and each
+    /// per-node instance's own drain. Each queue pops at most its count at entry; bounded by the
+    /// units and those counts; allocation-free, and never panics.
+    fn carry_observes(&mut self, first_sample: u64) {
+        for unit in self.units.iter_mut() {
+            match unit {
+                RuntimeUnit::Bank { chain, .. } => chain.carry_observes(first_sample),
+                RuntimeUnit::Op(op) => {
+                    if let NodeKind::LiveControlEffect(live) = &mut op.kind {
+                        live.carry_observes(first_sample);
+                    }
+                }
+            }
+        }
     }
 
     /// Whether the effect instance at `site` holds an observation lane (#1327 D1), which a tap

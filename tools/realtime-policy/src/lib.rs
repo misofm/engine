@@ -1,6 +1,7 @@
 //! Checks the marked realtime regions (their boundaries, forbidden spellings and `try_pop` drains),
 //! the C ABI's whole-plan rule, the browser host's render-locked wrap rule and the unsafe-ownership
-//! boundary of the workspace from Rust's own lexer and syntax tree.
+//! boundary of the workspace, in code and in compiled doctest blocks, from Rust's own lexer and
+//! syntax tree.
 //!
 //! [`check`] walks `crates`, `hosts` and `tools` under a workspace root and returns a [`Report`].
 //! [`run`] is the binary's whole behaviour with its environment passed in. [`Policy`] holds the
@@ -12,6 +13,7 @@
 mod boundary;
 mod calls;
 mod cli;
+mod doctests;
 mod drain;
 mod forbidden;
 mod leaf;
@@ -69,6 +71,7 @@ pub fn check(workspace_root: &Path, policy: &Policy) -> Report {
             }
         };
         unsafe_scan::scan(&source, policy, &mut findings);
+        doctests::scan(&source, policy, &mut findings);
         source_reads::scan(&source, &file.absolute, &mut findings);
         names.read(&source);
         calls::read_aliases(&source, &mut aliases);
@@ -156,6 +159,8 @@ pub fn check(workspace_root: &Path, policy: &Policy) -> Report {
     }
     web_host::scan_modules(&web_files, &mut findings);
     web_host::scan_export_names(&web_files, &mut findings);
+    render_wrap::scan_twins(&web_files, policy, &mut findings);
+    web_host::scan_render_lock(&web_files, &mut findings);
     if files < policy.marked_files_floor {
         findings.push(Finding::bare(Class::MarkedFileFloor(
             policy.marked_files_floor,

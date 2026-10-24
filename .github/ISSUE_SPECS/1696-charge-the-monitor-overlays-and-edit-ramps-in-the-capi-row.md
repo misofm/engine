@@ -174,3 +174,41 @@ Half a day.
 ## Decision record: #1696
 
 To be filled by the implementer. The bounds decision goes first.
+
+Attempt 1 (implementer, 2026-10-24, on `main` a97b522be; stopped for a root ruling):
+
+- D1-D4 of the scope note taken as ruled. Built: `MonitorOverlay::retained_ceiling` and a reserve
+  in `after` (the solo vector is built at `next`'s strip count and a solo of a strip `next` lacks is
+  skipped, so it never reallocates); `EditRamps::retained_ceiling` (std B-tree node layout, at least
+  five keys per non-root node); two `epoch_rows` (`monitor.overlay`, `monitor.edit_ramps`) from
+  `monitor_rows(model)` in `prepared_capi_resources`; the overlay vector joins `largest`. The boot
+  seed keeps `MonitorOverlay::new()`: every commit replaces it with `after`'s reserved result, so a
+  boot reserve would only allocate bytes no write uses.
+- Re-anchor: #1386's `SESSION_REPLACE` keeps nothing of the document between transactions
+  (`document.rs`); no new retained structure.
+- **Root decision (2026-10-24, amends the non-goal "no change to what the ramps hold").**
+  Attempt 1 found D1/D3 false for the kept base: its ramps are the successor's and later live
+  commits', so the newest committed model bounds them, not the holding epoch's; `cleared` keeps every
+  owner an upsert or removal named and `merged_ramps` unions them while a successor is pending, so
+  no model bounds it; and a live VCA add moved the bound while the row followed only the catalog.
+  Ruled and built:
+  1. A kept base stores no `cleared` and only rows of owners the newest committed model has
+     (`EditRamps::keep_within`, at both stores in `control.rs`). Nothing reads a kept base's
+     `cleared` (it is only the earlier side of `overlay`), and a removed owner returns only through
+     an upsert, which clears its rows in the later overlay, so no reader loses a key.
+  2. The ramp row is `CapiResources::edit_ramps`, part of `active_retained` and no epoch row:
+     `KEPT_BASES` (= `PENDING_PROVIDERS`, two) tables at the newest committed model's bounds. Bounded
+     because a kept base sits on the epoch a pending successor succeeds, one per pending epoch. The
+     replacement admission adds the candidate's row beyond the newest's.
+  3. A live commit follows it (`follow_edit_ramps`, beside `follow_catalog`), and the live
+     admission adds its growth (`LiveCatalogAdmission::ramp_growth_bytes`).
+  4. `KEPT_BASES` is 2 for its own reason (verifier fold): one stored kept base (created only
+     with nothing pending, dropped by promotion) and the replacement table a commit builds while
+     the stored one still lives.
+  5. A commit holds a third table, the transaction's own `EditRamps` (its `cleared` is
+     transaction-sized). It is no retained row and the capi row does not charge it: it lives and
+     dies with the prepared transaction, a peak term bounded by the request it comes from (a
+     control frame, `maximum_control_frame_bytes`, or a `SESSION_REPLACE` document,
+     `maximum_document_bytes`), whose edits bound its keys and ID text.
+- `capi_retained_bytes` on the reference session: 168,818 -> 192,972 (+24,154), over 175,296;
+  ceiling 212,288 (+10 %, rounded to 64).

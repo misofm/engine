@@ -1,5 +1,11 @@
 use core::sync::atomic::{AtomicU32, Ordering};
 static RENDER_ALLOCATIONS: AtomicU32 = AtomicU32::new(0);
+pub struct RenderLockedAllocator<A>(pub A);
+/// The browser module's allocator.
+#[cfg(all(target_family = "wasm", not(test)))]
+#[global_allocator]
+static ALLOCATOR: RenderLockedAllocator<std::alloc::System> =
+    RenderLockedAllocator(std::alloc::System);
 pub(crate) fn render_locked<R>(body: impl FnOnce() -> R) -> R {
     body()
 }

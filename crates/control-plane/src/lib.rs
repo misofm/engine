@@ -23,6 +23,7 @@
 //! | `compile` | the control plane's own resource projection and the children a compile returns |
 //! | `plan` | render-thread plan ownership and the any-thread query projection |
 //! | `control` | the control-protocol session: commands, events, sources, plan replacement |
+//! | `document` | `SESSION_REPLACE`: the check, parse and diff of a replacement document |
 //!
 //! The compile *pipeline* is not here at all: it is `host-core`, shared with every host.
 
@@ -55,6 +56,7 @@ pub(crate) use session::{CompiledSession, DiagnosticSet};
 mod adapter;
 mod compile;
 mod control;
+mod document;
 mod error;
 mod plan;
 
@@ -66,7 +68,11 @@ pub use control::{
     CommandError, EventError, EventLane, ObservationChange, ObservationForward,
     ObservationKeyError, ObservationKeyRef, ObservationLimit, ObservationRefusal,
     REPREPARE_REQUIRED, ResolvedObservationTap, SessionSeekFailure, SessionState, SourceFailure,
-    resolve_observation_tap,
+    SourceRefusalKind, resolve_observation_tap,
+};
+pub use document::{
+    DOCUMENT_DIGEST, DOCUMENT_LENGTH, DOCUMENT_TOO_LARGE, DOCUMENT_UTF8, diff as diff_document,
+    replace as replace_document,
 };
 pub use error::{CompileFailure, ResourceFault};
 /// One planar chunk a host submits to a source of the session ([`SessionState::submit`]).
@@ -77,8 +83,8 @@ pub use source::SourceSeekReport;
 #[cfg(feature = "test-support")]
 pub use compile::{
     CapiResources, CarriedSourceBytes, CompiledModelAdmission, LiveCatalogAdmission,
-    LiveEpochResources, observation_binding_table_bytes, observation_reserve_bytes, prepare_caps,
-    validate_live_peak,
+    LiveEpochResources, monitor_and_ramp_bytes, observation_binding_table_bytes,
+    observation_reserve_bytes, prepare_caps, validate_live_peak,
 };
 #[cfg(feature = "test-support")]
 pub use control::{

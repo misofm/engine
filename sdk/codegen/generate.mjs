@@ -349,11 +349,18 @@ function camelCase(name) {
   return name.replace(/_([a-z0-9])/g, (_, character) => character.toUpperCase());
 }
 
-/** A row's class: a route row carries one per target (a send into a submix, or into the output). */
+/**
+ * A row's class: a route row carries one per target (a send into a submix, a route into the output
+ * from before the fader, or from after it).
+ */
 function rowClasses(row) {
   if (row.class !== undefined) return [row.class];
-  if (row.intoSubmix !== undefined && row.intoOutput !== undefined) {
-    return [row.intoSubmix.class, row.intoOutput.class];
+  if (
+    row.intoSubmix !== undefined &&
+    row.intoOutputBeforeFader !== undefined &&
+    row.intoOutput !== undefined
+  ) {
+    return [row.intoSubmix.class, row.intoOutputBeforeFader.class, row.intoOutput.class];
   }
   throw new Error(`control row ${row.name} has neither a class nor a class per route target`);
 }
