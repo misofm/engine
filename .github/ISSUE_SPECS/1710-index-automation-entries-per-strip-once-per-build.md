@@ -41,3 +41,29 @@ table, not O(strips × entries). The rows, their values and the `automated` flag
   (`controls::mute_automation`, the listing's `automated` flag on a driven mute row, R18-2) and the
   following-route predicate of #1652 (`following_route_lanes`), so the gate's session also carries
   one rendered mute entry per strip and a following send per strip.
+
+## Decision record (attempt 1, 2026-10-24)
+
+- R1 (root, measure first): `ControlCatalog::build`, release, one warmup and two rounds, on a
+  generated session of N tracks with one fader entry, one mute entry and one following send per
+  track (plus one VCA ride): before, 256 strips 4.0 ms and 1024 strips 39 ms (load average about 8
+  on 32 cores). Over the 5 ms stop line, so implemented.
+- After (same session, same runner, load average about 6): 256 strips 2.7 ms, 1024 strips
+  13.5 ms. The 256-strip list and catalog entries are byte-equal before and after. The rest
+  still grows faster than linear (about 5x for 4x strips); `controls::ModelInputs::new` finds
+  each route's source strip by a linear scan, outside this issue's automation table.
+- D1 as `controls::AutomationIndex<'a>` (`crates/controls/src/automation.rs`): one pass over the
+  table fills a map of (rendered row, owner ID) to the first entry per lane in table order, for
+  the strip `fader_db` and `mute` rows and the VCA `offset_db` and `mute` rows. It is a value of
+  one build (R3), not a cache on `SessionModel`.
+- The index rides in the `ModelView` the row readers already take (`ModelView::indexed`), so
+  `owner_rows_in`, `ModelView::fader_automation`/`vca_automation`, the mute readers and
+  `LocalEffective` (the stage's effective values) read it with no signature change. `list`,
+  `ControlCatalog::build` and `stage_live` build it once each. A view without an index (the
+  one-owner readers: `owner_rows_with`, `live_delta`, `owner_edits`) keeps the scan. The dense
+  `controls::effective` already walked the table once (`model_fader_offsets`), so it is unchanged.
+- R2: no production counter; the timings and a one-time byte comparison of the 256-strip list
+  and catalog are PR evidence. Rows, values and the `automated` flag are unchanged.
+- Successor, not mechanical here: preparation (`FaderEventLanes::of`, `following_route_lanes`,
+  `prepare.rs`) and the live classifier (`live_delta.rs`) still scan per strip and per route,
+  and `controls::live_lanes` walks owners through the unindexed `owner_rows_with`.

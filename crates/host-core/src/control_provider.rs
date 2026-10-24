@@ -1224,6 +1224,10 @@ impl ControlCatalog {
         // every table, once to fill them. No pass holds the whole list, so the transient is one
         // owner's rows, not every control of the session's rows at full size (#1400b).
         let effective = controls::effective(model, overlay);
+        // The automation table is walked once, here, and every owner looks its driving entries up
+        // (#1710). The index is O(entries) and freed with the build, as the scratch is.
+        let automation = controls::AutomationIndex::of(model);
+        let view = controls::ModelView::whole(model).indexed(&automation);
         let owner_total = controls::owner_count(model);
         let mut scratch: Vec<controls::ControlRow> = Vec::new();
         let mut listed_count = 0_usize;
@@ -1232,7 +1236,7 @@ impl ControlCatalog {
         let mut section_count = 0_usize;
         for owner in 0..owner_total {
             scratch.clear();
-            controls::owner_rows_with(model, &effective, overlay, owner, sample_rate, &mut scratch);
+            controls::owner_rows_in(view, &effective, overlay, owner, sample_rate, &mut scratch);
             // An owner's rows are contiguous and no two owners share an address, so the first row
             // of an owner's run is the one that opens it.
             let mut previous: Option<&controls::ControlAddress> = None;
@@ -1275,7 +1279,7 @@ impl ControlCatalog {
         let mut effect: Option<&'static EffectDescriptor> = None;
         for owner in 0..owner_total {
             scratch.clear();
-            controls::owner_rows_with(model, &effective, overlay, owner, sample_rate, &mut scratch);
+            controls::owner_rows_in(view, &effective, overlay, owner, sample_rate, &mut scratch);
             let mut previous: Option<&controls::ControlAddress> = None;
             for row in &scratch {
                 let address = &row.address;
@@ -1541,6 +1545,9 @@ impl ControlCatalog {
         }) {
             return Err(SessionControlProviderError);
         }
+        // The committed table is walked once for every owner the stage reads (#1710).
+        let automation = controls::AutomationIndex::of(next.structure());
+        let next = next.indexed(&automation);
         if let Some(staged) = self.stage_values(next, overlay, sample_rate, delta)? {
             #[cfg(any(test, feature = "test-support"))]
             if cfg!(debug_assertions) && VERIFY_STAGES.with(core::cell::Cell::get) {
