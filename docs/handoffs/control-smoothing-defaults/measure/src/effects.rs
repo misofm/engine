@@ -1,28 +1,32 @@
-//! The six launch effects that have a live bypass shunt, prepared and rendered through their
+//! The eight launch effects, each with a live bypass shunt, prepared and rendered through their
 //! shipped factories, and the shunt's latency-matched dry signal (#1055 questions 5 and 6).
 //!
-//! Every effect except the delay and the multiband compressor lowers a session `bypass` to a
-//! per-lane shunt (`effect_compiler::lowers_session_bypass`, `crates/effect-compiler/src/prepare.rs:
-//! 244-268`): the compressor, the gate-expander, the parametric EQ, the soft clip, the transient
-//! shaper and the true-peak limiter. Each is prepared here exactly as `effect-compiler` prepares
-//! one (`crates/effect-compiler/src/prepare.rs:388-470`): the descriptor's default initial values
-//! with the named parameters overridden on both channels, an unconnected optional sidechain, the
-//! requested link mode, `bypass = false` (the shunt carries the bypass), normal quality, and the
-//! 128-frame quantum. The wet signal is the scalar instance's output, rendered block by block from
-//! the first frame of the material, so its state is continuous as in a running session. The dry
-//! signal is the engine's own `effect_contract::BypassShunt` fed every block, which delays the
-//! input by exactly the effect's declared latency. Nothing here is timed.
+//! Every launch effect lowers a session `bypass` to a per-lane shunt
+//! (`effect_compiler::EffectPreparedEntry::initial_bypass`; the delay since #1339, the multiband
+//! compressor since #1340): the compressor, the delay, the gate-expander, the multiband
+//! compressor, the parametric EQ, the soft clip, the transient shaper and the true-peak limiter.
+//! Each is prepared here exactly as `effect-compiler` prepares one
+//! (`prepare_with_console_eligibility`, `crates/effect-compiler/src/prepare.rs`): the descriptor's
+//! default initial values with the named parameters overridden on both channels, an unconnected
+//! optional sidechain, the requested link mode, `bypass = false` (the shunt carries the bypass),
+//! normal quality, the 128-frame quantum and the registry's tail bound. The wet signal is the
+//! scalar instance's output, rendered block by block from the first frame of the material, so its
+//! state is continuous as in a running session. The dry signal is the engine's own
+//! `effect_contract::BypassShunt` fed every block, which delays the input by exactly the effect's
+//! declared latency. Nothing here is timed.
 
-use compressor::CompressorFactory;
 use std::sync::OnceLock;
 
+use compressor::CompressorFactory;
+use delay::DelayFactory;
 use effect_contract::{
     BypassShunt, EffectProcessBlock, EffectQuality, InitialParameterValue, LinkMode,
-    NativeEffectFactory, NativeEffectRegistry, PortRole, PrepareEffectLimits, PrepareEffectRequest,
-    PreparedEffect, PreparedNativeEffect, PreparedPorts, PreparedSidechainPort, ProcessReport,
-    default_initial_values,
+    NativeEffectFactory, NativeEffectRegistry, ObservationSample, PortRole, PrepareEffectLimits,
+    PrepareEffectRequest, PreparedEffect, PreparedNativeEffect, PreparedPorts,
+    PreparedSidechainPort, ProcessReport, default_initial_values,
 };
 use gate_expander::GateExpanderFactory;
+use multiband_compressor::MultibandCompressorFactory;
 use parametric_eq::ParametricEqFactory;
 use soft_clip::SoftClipFactory;
 use transient_shaper::TransientShaperFactory;
@@ -31,7 +35,8 @@ use true_peak_limiter::TruePeakLimiterFactory;
 use crate::material::Stereo;
 use crate::strip::QUANTUM;
 
-/// The gain reduction the compressor and limiter rows are calibrated to (#1055 question 5).
+/// The gain reduction the compressor, limiter and multiband rows are calibrated to (#1055
+/// question 5).
 pub const REDUCTION_DB: f64 = 6.0;
 /// The saturator's drive. Its output gain is then set so that the wet RMS equals the dry RMS.
 pub const SATURATOR_DRIVE_DB: f32 = 12.0;
@@ -65,10 +70,19 @@ pub enum Effect {
     /// release 50 ms, so that it opens on each kick's attack and closes in the body, where the
     /// measured switches fall.
     Gate,
+    /// Delay at its shipped defaults: 250 ms (an eighth note at the materials' 120 BPM), feedback
+    /// 0.35, damping 0.25, mix 0.35, cross feedback 0 (dual mono).
+    Delay,
+    /// Two-band multiband compressor, shipped defaults (crossover 1 kHz, ratio 4, attack 10 ms,
+    /// release 100 ms, no makeup), one threshold shared by both bands and set so that the peak of
+    /// the effect's own `Gain Reduction` observation is [`REDUCTION_DB`]. Its unprocessed output is
+    /// the crossover's all-pass of the input, not the input, so the per-sample ratio the
+    /// compressor's calibration reads would count the all-pass's phase as reduction.
+    Multiband,
 }
 
 impl Effect {
-    pub const ALL: [Self; 7] = [
+    pub const ALL: [Self; 9] = [
         Self::Compressor,
         Self::Limiter,
         Self::EqBoost,
@@ -76,6 +90,8 @@ impl Effect {
         Self::Saturator,
         Self::TransientShaper,
         Self::Gate,
+        Self::Delay,
+        Self::Multiband,
     ];
 
     pub const fn name(self) -> &'static str {
@@ -87,6 +103,8 @@ impl Effect {
             Self::Saturator => "saturator",
             Self::TransientShaper => "transient-shaper",
             Self::Gate => "gate",
+            Self::Delay => "delay",
+            Self::Multiband => "multiband",
         }
     }
 
@@ -108,6 +126,8 @@ impl Effect {
             Self::Saturator => &SoftClipFactory,
             Self::TransientShaper => &TransientShaperFactory,
             Self::Gate => &GateExpanderFactory,
+            Self::Delay => &DelayFactory,
+            Self::Multiband => &MultibandCompressorFactory,
         }
     }
 
@@ -115,7 +135,7 @@ impl Effect {
     /// [`Setting::calibrate`].
     fn fixed(self) -> Vec<(&'static str, f32)> {
         match self {
-            Self::Compressor | Self::Limiter => Vec::new(),
+            Self::Compressor | Self::Limiter | Self::Multiband => Vec::new(),
             Self::EqBoost | Self::EqCut => vec![
                 ("band-1-enabled", 1.0),
                 ("band-1-kind", 1.0),
@@ -141,6 +161,12 @@ impl Effect {
                 ("hold", 20.0),
                 ("release", 50.0),
             ],
+            Self::Delay => vec![
+                ("delay time", 250.0),
+                ("feedback", 0.35),
+                ("damping", 0.25),
+                ("mix", 0.35),
+            ],
         }
     }
 }
@@ -155,7 +181,8 @@ pub struct Setting {
 
 impl Setting {
     /// The representative setting of `effect` on `input` at `rate`, with the compressor's
-    /// threshold, the limiter's ceiling or the saturator's output gain calibrated on `input`.
+    /// threshold, the limiter's ceiling, the multiband's shared threshold or the saturator's
+    /// output gain calibrated on `input`.
     pub fn calibrate(effect: Effect, rate: u32, input: &Stereo, link: LinkMode) -> Self {
         let mut setting = Self {
             effect,
@@ -163,8 +190,17 @@ impl Setting {
             link,
         };
         match effect {
-            Effect::Compressor => setting.bisect("threshold", -80.0, 0.0, rate, input),
-            Effect::Limiter => setting.bisect("ceiling", -24.0, 0.0, rate, input),
+            Effect::Compressor => {
+                setting.bisect(&["threshold"], -80.0, 0.0, |s| s.reduction_db(rate, input));
+            }
+            Effect::Limiter => {
+                setting.bisect(&["ceiling"], -24.0, 0.0, |s| s.reduction_db(rate, input));
+            }
+            Effect::Multiband => {
+                setting.bisect(&["low_threshold", "high_threshold"], -80.0, 0.0, |s| {
+                    s.observed_reduction_db(rate, input)
+                })
+            }
             Effect::Saturator => {
                 let wet = setting.render(rate, input);
                 let from = settle(rate);
@@ -177,25 +213,60 @@ impl Setting {
         setting
     }
 
-    /// Sets `parameter` so that the peak gain reduction on `input` is [`REDUCTION_DB`]: the
-    /// reduction falls as the parameter rises, so a bisection converges; the result is the `f32`
-    /// nearest the bracket's midpoint after 24 halvings (a bracket of at most 80 dB is then
-    /// narrower than 0.00001 dB).
-    fn bisect(&mut self, parameter: &'static str, low: f64, high: f64, rate: u32, input: &Stereo) {
+    /// Sets every one of `parameters` to one value so that `reduction` (the peak gain reduction
+    /// in dB) is [`REDUCTION_DB`]: the reduction falls as the value rises, so a bisection
+    /// converges; the result is the `f32` nearest the bracket's midpoint after 24 halvings (a
+    /// bracket of at most 80 dB is then narrower than 0.00001 dB).
+    fn bisect(
+        &mut self,
+        parameters: &[&'static str],
+        low: f64,
+        high: f64,
+        reduction: impl Fn(&Self) -> f64,
+    ) {
         let (mut low, mut high) = (low, high);
-        self.overrides.push((parameter, 0.0));
-        let slot = self.overrides.len() - 1;
+        let first = self.overrides.len();
+        self.overrides
+            .extend(parameters.iter().map(|&parameter| (parameter, 0.0)));
+        let set = |setting: &mut Self, value: f64| {
+            for slot in &mut setting.overrides[first..] {
+                slot.1 = value as f32;
+            }
+        };
         for _ in 0..24 {
             let mid = 0.5 * (low + high);
-            self.overrides[slot].1 = mid as f32;
-            let wet = self.render(rate, input);
-            if peak_reduction_db(input, &wet, self.latency(rate), settle(rate)) > REDUCTION_DB {
+            set(self, mid);
+            if reduction(self) > REDUCTION_DB {
                 low = mid;
             } else {
                 high = mid;
             }
         }
-        self.overrides[slot].1 = (0.5 * (low + high)) as f32;
+        set(self, 0.5 * (low + high));
+    }
+
+    /// The peak gain reduction of the wet signal against the latency-matched input
+    /// ([`peak_reduction_db`]).
+    fn reduction_db(&self, rate: u32, input: &Stereo) -> f64 {
+        let wet = self.render(rate, input);
+        peak_reduction_db(input, &wet, self.latency(rate), settle(rate))
+    }
+
+    /// The peak of the effect's own resident observation 0 (the multiband's `Gain Reduction`, the
+    /// deeper band's smoother word in negative dB, on each channel), read after every block that
+    /// ends after the settling time.
+    pub fn observed_reduction_db(&self, rate: u32, input: &Stereo) -> f64 {
+        let mut effect = self.prepare(rate).processor;
+        let from = settle(rate);
+        let mut worst = 0.0_f64;
+        render_with(effect.as_mut(), input, |effect, end| {
+            let mut sample = ObservationSample::default();
+            assert!(effect.observe_resident(0, &mut sample), "observation 0");
+            if end > from {
+                worst = worst.max(-f64::from(sample.left.min(sample.right)));
+            }
+        });
+        worst
     }
 
     /// Every override, `name=value` separated by spaces, for the CSV.
@@ -242,13 +313,15 @@ fn settle(rate: u32) -> usize {
 fn registry() -> &'static NativeEffectRegistry {
     static REGISTRY: OnceLock<NativeEffectRegistry> = OnceLock::new();
     REGISTRY.get_or_init(|| {
-        let factories: [Box<dyn NativeEffectFactory>; 6] = [
+        let factories: [Box<dyn NativeEffectFactory>; 8] = [
             Box::new(CompressorFactory),
             Box::new(TruePeakLimiterFactory),
             Box::new(ParametricEqFactory),
             Box::new(SoftClipFactory),
             Box::new(TransientShaperFactory),
             Box::new(GateExpanderFactory),
+            Box::new(DelayFactory),
+            Box::new(MultibandCompressorFactory),
         ];
         NativeEffectRegistry::new(factories).expect("the measured effects are admitted")
     })
@@ -320,6 +393,15 @@ pub fn prepare(
 /// `input` through `effect`, in 128-frame blocks from frame 0. Every block must report nothing:
 /// no invalid span, no sanitised or non-finite sample.
 pub fn render(effect: &mut dyn PreparedNativeEffect, input: &Stereo) -> Stereo {
+    render_with(effect, input, |_, _| {})
+}
+
+/// [`render`], calling `after(effect, end)` after the block that ends at frame `end`.
+fn render_with(
+    effect: &mut dyn PreparedNativeEffect,
+    input: &Stereo,
+    mut after: impl FnMut(&dyn PreparedNativeEffect, usize),
+) -> Stereo {
     let mut out = input.clone();
     let frames = out.left.len();
     let mut start = 0;
@@ -337,6 +419,7 @@ pub fn render(effect: &mut dyn PreparedNativeEffect, input: &Stereo) -> Stereo {
             .expect("block"),
         );
         assert_eq!(report, ProcessReport::default(), "block at {start}");
+        after(effect, end);
         start = end;
     }
     out
@@ -418,8 +501,8 @@ mod tests {
         )
     }
 
-    /// The shunt delays by exactly the declared latency, and a calibrated compressor reduces a
-    /// steady tone by the calibration target.
+    /// The shunt delays by exactly the declared latency, and a calibrated compressor and a
+    /// calibrated multiband each reduce a steady tone by the calibration target.
     #[test]
     fn the_shunt_is_the_latency_matched_input_and_the_calibration_lands() {
         let rate = 48_000;
@@ -443,5 +526,8 @@ mod tests {
         let wet = compressor.render(rate, &input);
         let reduction = peak_reduction_db(&input, &wet, 0, settle(rate));
         assert!((reduction - REDUCTION_DB).abs() < 0.01, "{reduction}");
+        let multiband = Setting::calibrate(Effect::Multiband, rate, &input, LinkMode::DualMono);
+        let observed = multiband.observed_reduction_db(rate, &input);
+        assert!((observed - REDUCTION_DB).abs() < 0.01, "{observed}");
     }
 }
