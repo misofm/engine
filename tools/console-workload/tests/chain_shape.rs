@@ -338,9 +338,8 @@ fn the_ragged_tail_banks_like_any_other_cohort_and_pays_one_chain_for_it() {
 /// therefore folds twice what the 64-track console row does, which is where the doubled absolute
 /// saving on that row comes from.
 ///
-/// Every standing row binds builtin banks, and so does the driver-fed gain/pan row (issue #956),
-/// which is why it is iterated here beside [`WORKLOADS`]: how a track's input is fed does not
-/// decide where its route folds. The builtins-less plumbing row that was this test's one
+/// Every standing row binds builtin banks, and so does the gain/pan row (issue #956), which is
+/// why it is iterated here beside [`WORKLOADS`]. The builtins-less plumbing row that was this test's one
 /// bankless exception was retired by the same issue, because no host compiles such a plan.
 #[test]
 fn every_standing_workload_folds_one_route_per_track() {
@@ -480,7 +479,7 @@ fn the_half_mono_cohort_banks_like_a_uniform_one() {
     };
     assert_eq!(
         counted(Workload::SixtyFourTrackConsoleMono),
-        (64, [65, 129]),
+        (64, [129, 129]),
         "every track of the mono fixture is collapse-eligible"
     );
     // The half-mono row's own census, derived rather than pinned -- and it is the standing worked
@@ -488,21 +487,22 @@ fn the_half_mono_cohort_banks_like_a_uniform_one() {
     //
     // The uniform mono row counts 129 "lanes": 64 bank-chain lanes, 64 source-input ops and the
     // master, its 64 route ops having been absorbed by the #218 fold and never built as units at
-    // all. Its identity master contributes one eligible, vacuous witness in addition to the 64
-    // eligible bank-chain lanes; it adds no collapse-eligible track. The half-mono row's fold declines (see
+    // all. Its 64 source-input ops (claims of the source set every row binds, issue #965) and its
+    // identity master are the engine's own kinds and report `SYMMETRIC`, vacuous witnesses in
+    // addition to the 64 eligible bank-chain lanes; they add no collapse-eligible track. The half-mono row's fold declines (see
     // `every_standing_workload_folds_one_route_per_track` for the association-order derivation),
     // so its 64 route ops *are* dispatched: 193 lanes, not 129. And a `Route` reports
     // `ChannelSymmetryWitness::SYMMETRIC` -- it is not per-track upstream work, so nothing about
     // it can make two channels disagree -- which adds 64 to the eligible half as well.
     //
-    // So the pair moves from `[65, 129]` to `[129, 193]` on a row where **not one track's
+    // So the pair moves from `[129, 129]` to `[193, 193]` on a row where **not one track's
     // symmetry changed**: 32 of its tracks are collapse-eligible before and after, which is what
     // `structural_mono_tracks` still reports and what the per-cohort rows below actually measure.
     // Two censuses are comparable only when the plans' unit inventories are; this is that caveat
     // with numbers on it.
     assert_eq!(
         counted(Workload::SixtyFourTrackConsoleHalfMono),
-        (32, [65 + 64, 129 + 64]),
+        (32, [129 + 64, 129 + 64]),
         "half the tracks of the half-mono row read two source channels; the census additionally \
          carries the 64 route ops this row's declined fold left dispatched"
     );
@@ -743,8 +743,10 @@ fn mono_fixture_rows(chains: usize) -> Vec<PlanUnitEligibility> {
         lane_eligible: vec![eligible; lane_tracks.len()].into(),
     };
     let mut rows = Vec::with_capacity(MONO_TRACKS + chains + 1);
-    // Each track's `Input` stage: one op upstream of the seam, naming its track, and declined --
-    // the harness binds it to `FrozenGraphSource`, a host processor the engine cannot see through.
+    // Each track's `Input` stage: one op upstream of the seam, naming its track, and eligible --
+    // the harness claims it through a prepared source set (issue #965), so it is the engine's own
+    // source-input kind, which reports `SYMMETRIC`: nothing in a played block's read can make two
+    // channels disagree.
     for track in &tracks {
         rows.push(row(
             rows.len(),
@@ -753,7 +755,7 @@ fn mono_fixture_rows(chains: usize) -> Vec<PlanUnitEligibility> {
             1,
             1,
             core::slice::from_ref(track),
-            false,
+            true,
         ));
     }
     // One chain per cohort: the six strip slots, four of them upstream of the seam, each track on
@@ -778,7 +780,9 @@ fn mono_fixture_rows(chains: usize) -> Vec<PlanUnitEligibility> {
 /// harness's `main-out` from an opaque do-nothing processor (declines) to
 /// `GraphNodeBinding::identity` (the engine's identity kind, symmetric), the census moved from
 /// `[64, 129]` to `[65, 129]` with not one track's witness changed, and because the bench runs in
-/// no CI job the premise broke silently until the next measurement tried to run it.
+/// no CI job the premise broke silently until the next measurement tried to run it. Issue #965
+/// moved it again, to `[129, 129]`: the 64 track inputs became source-set claims, which the engine
+/// lowers to its own symmetric source-input kind.
 ///
 /// The premise now counts the bank chains' track lanes (`bank_symmetry_counters`), and this test
 /// pins every row of both arms -- every field, in execution order -- plus the census and the
@@ -787,11 +791,12 @@ fn mono_fixture_rows(chains: usize) -> Vec<PlanUnitEligibility> {
 /// The cohort count is read from the plan, for the reason [`cohorts`] reads it: a four-lane host
 /// runs sixteen chains of four, and every other field is width-independent.
 ///
-/// Red mutations, both run when this was written: bind `main-out` through an opaque processor
-/// again (the pre-#221 harness) and the last row fails (`lane_eligible` `[false]`; the census is
-/// `[64, 129]` in that tree) while every bank row, and so the premise's count, stays put; drop the
-/// `banked` filter from `bank_symmetry_counters` and every row still matches while the premise's
-/// count fails at `[64, 128]`, having taken in the 64 declined input ops.
+/// Red mutations, both run when this was written (the counts restated for the #965 inventory):
+/// bind `main-out` through an opaque processor again (the pre-#221 harness) and the last row fails
+/// (`lane_eligible` `[false]`; the census is `[128, 129]` in that tree) while every bank row, and
+/// so the premise's count, stays put; drop the `banked` filter from `bank_symmetry_counters` and
+/// every row still matches while the premise's count fails at `[128, 128]`, having taken in the 64
+/// source-input ops.
 #[test]
 fn the_mono_row_pairs_unit_rows_are_pinned() {
     for workload in [
@@ -812,8 +817,8 @@ fn the_mono_row_pairs_unit_rows_are_pinned() {
         for (actual, expected) in rows.iter().zip(&expected) {
             assert_eq!(actual, expected, "{kind}: unit {}", expected.unit);
         }
-        // The census and its rows cannot disagree: 64 eligible bank lanes plus the vacuous output,
-        // over 64 bank lanes, 64 input ops and the output.
+        // The census and its rows cannot disagree: 64 eligible bank lanes plus the 64 vacuous
+        // source inputs and the vacuous output, over 64 bank lanes, 64 input ops and the output.
         let folded = rows.iter().fold([0_u64, 0], |mut total, row| {
             total[0] += u64::from(row.eligible_lanes());
             total[1] += u64::from(row.lanes());
@@ -824,7 +829,11 @@ fn the_mono_row_pairs_unit_rows_are_pinned() {
             folded,
             "{kind}: rows sum to the census"
         );
-        assert_eq!(runtime.symmetry_counters(), [65, 129], "{kind}: the census");
+        assert_eq!(
+            runtime.symmetry_counters(),
+            [129, 129],
+            "{kind}: the census"
+        );
         // What the bench's premise asserts and its `console_mono` record reports.
         let tracks = MONO_TRACKS as u64;
         assert_eq!(
@@ -842,11 +851,9 @@ fn the_mono_row_pairs_unit_rows_are_pinned() {
 
 /// The identity pair banks alike and renders apart.
 ///
-/// `gain_pan_only` and `dispatch_only` bank the same slots and pay the same round-trips -- the
+/// `gain_pan_ring` and `dispatch_only` bank the same slots and pay the same round-trips -- the
 /// floor table costs them at one inventory for that reason -- and render different bits, because
-/// their fader and matrix carry different constants. The driver-fed gain/pan row (issue #956)
-/// banks exactly as its bound twin does: the feed decides how a claim reaches its bank's gather,
-/// never which bank gathers it.
+/// their fader and matrix carry different constants.
 ///
 /// This was the second half of the builtins-less plumbing row's test, which issue #956 retired
 /// with the row; the half that states the identity pair is kept.
@@ -858,11 +865,6 @@ fn the_identity_pair_banks_alike_and_renders_apart() {
         BLOCKS,
     );
     let gain_pan = render(
-        Workload::SixtyFourTrackGainPanOnly,
-        PlanConfig::BASELINE,
-        BLOCKS,
-    );
-    let ring = render(
         Workload::SixtyFourTrackGainPanRing,
         PlanConfig::BASELINE,
         BLOCKS,
@@ -876,12 +878,6 @@ fn the_identity_pair_banks_alike_and_renders_apart() {
         gain_pan.0, identity.0,
         "a real fader and pan must not render what a 0 dB fader and a hard-identity pan render"
     );
-    assert_eq!(
-        (ring.1, ring.2),
-        (gain_pan.1, gain_pan.2),
-        "the driver-fed row must bank and transpose as its bound twin does"
-    );
-    assert_eq!(ring.0, gain_pan.0, "and render its bits");
 }
 
 /// The folded master carries the reduction's own bits, and the declined arm is the oracle that says
@@ -925,7 +921,7 @@ fn the_folded_master_is_the_reductions_own_bits() {
         }
         sink.finish_hex()
     };
-    // The driver-fed gain/pan row folds like every banked row (issue #956), so its folded master
+    // The gain/pan row folds like every banked row (issue #956), so its folded master
     // is checked against the same oracle.
     for workload in WORKLOADS.into_iter().chain(DRIVER_FED_WORKLOADS) {
         let mut folded_runtime = SessionRuntime::build(workload, PlanConfig::BASELINE);

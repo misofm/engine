@@ -17,3 +17,24 @@ Make the production feed (a `FrozenSourceDriver` source set bound with `into_bou
 
 #956.
 
+
+## Decision record (attempt 1, 2026-10-24)
+
+- Scope note accepted by root: every row binds `into_bound_with_source_set` through `FrozenSourceDriver`;
+  `SourceFeed::Bound`, the bound arm and its helpers are deleted. `sixty_four_track_gain_pan_only`
+  (bit-identical twin of `gain_pan_ring`, a feed no host runs) is retired, with its in-run pair
+  assertion and pair tests. Records 74 -> 72, session records 46 -> 44; `source_feed` stays and is
+  pinned `played_planes` on every session record; a `bound` record is refused.
+- The wasm console arm went with #1039 (R9), so the "wasm validator" gate is moot and the
+  `WORKLOADS` append-only comments were deleted.
+- Fact: every one of the 22 surviving rows reads every claim in place (`[0, tracks * 64, 0]`
+  source-plane counts over 64 blocks), except `sixty_four_track_idle`, whose all-silent banks skip
+  their gather (`[0, 0, 0]`). No row copies a claim, so the zero-copy gate is exact on every row.
+- Fact: the 64-block digest of all 22 surviving rows is unchanged (pre/post table in the PR).
+- Fact: the mono census moves from `[65, 129]` to `[129, 129]` (half-mono `[193, 193]`): the
+  claimed inputs lower to the engine's `SourceInput` kind, which reports `SYMMETRIC`. The bank
+  premise (`bank_symmetry_counters`, `[64, 64]`) and every record field are unchanged.
+- Paths beyond the scope note's list, forced by retiring the row: `tools/bench/src/floor.rs`,
+  `tools/console-workload/tests/chain_shape.rs`, `scripts/operator/run-console-benchmark.sh`
+  (record count 74 -> 72). `docs/rulings/effect-floor-accounting.md` still names `gain_pan_only`
+  (left for root).
