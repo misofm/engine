@@ -90,7 +90,9 @@ Narrowed to the planner policy, one PR for #888 and #889 (root scope note).
   lanes' compressor and limiter are not at rest within the fixture's 12 blocks, the same as every
   full cohort's (rest `0`). Before #888 the per-node tail fed a builtin-only chain, which gathered
   exact zeros and skipped 3 blocks. That chain is now fed by the padded bank, which renders.
-  There is no padding defect: the skip moved with the fixture's shape. The test now uses `W - 1`
+  There is no padding defect: the skip moved with the fixture's shape. Padded lanes report at
+  rest; a bank rests only when its active lanes do, which is the known banking trade-off (root,
+  2026-10-24). The test now uses `W - 1`
   bare tracks, so the stripped remainder is one track, below k at both widths, and the skip is
   counted again. One more fact: the scatter-redirect count equals the per-node tail's size
   (`(64 - bare) % W`: checked with tails of 1 and 2), not the bare count.
@@ -113,3 +115,20 @@ Narrowed to the planner policy, one PR for #888 and #889 (root scope note).
     from the threshold.
   - The randomized per-node-bits oracle now also asserts that the sweep reaches a padded insert
     bank.
+  - `tests/bypass_resources.rs` `a_mixed_session_bypass_renders_without_allocating`: the insert
+    legs use nine tracks, a one-track remainder at either width, so a bypassed instance still
+    renders per node. With thirteen tracks, W=8 would pad its five-track remainder. The console
+    leg keeps thirteen tracks.
+  - `tests/compile_shapes.rs` `mixed_rack_depths_bank_every_stage_and_leave_subsequences_and_sidechains_scalar`:
+    there is now one subsequence track (`rack02`) and three sidechain fallbacks, so the
+    subsequence remainder is one member at either width. Two subsequence tracks would pad at W=4.
+  - `tests/bank_levels.rs` reduced mono console: the pins are derived from the plan. At W=4 the
+    mono pair `t11, t13` pads, nothing strands, and the plan does not depend on factory binds:
+    three banks, and one misaligned compressor in `t0, t14, t18, t6`. At W=8 the pair strands,
+    #971 moves it, and a seven-member padded compressor binds: one bank, nothing misaligned. The
+    misaligned counts [1, 0] are asserted at every width that compiles (both on x86). The AArch64
+    leg runs the W=4 bank pin (3); this host cannot run it.
+- **Gates (attempt 1):** graph-compiler lib and all its integration tests; graph,
+  console-workload, host-core, host-web, audit and bench tests; determinism 100/100;
+  effect-runtime policy; realtime-policy; fmt; clippy -D warnings; aarch64 check; doc
+  -D warnings; `lint-checks.sh`. The threshold mutants (W=8: 2 and 4) turn `bank_padding` red.
