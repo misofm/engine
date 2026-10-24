@@ -203,6 +203,15 @@ fn prepare_corpus() -> Corpus {
             minimum_severity: protocol::DiagnosticSeverity::Info,
         }),
     });
+    // #1386: the frame names the document by length and digest; the document is not in it.
+    corpus.push_command(TypedCommandFrame {
+        request_id: request_id(15),
+        expected_revision: revision,
+        payload: CommandPayload::SessionReplace(protocol::SessionReplaceRequest {
+            document_bytes: 1_048_576,
+            document_sha256: [0xa5; 32],
+        }),
+    });
     corpus.push_success(TypedSuccessResponseFrame {
         request_id: request_id(12),
         revision: SessionRevision(7),
