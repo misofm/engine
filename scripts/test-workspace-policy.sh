@@ -908,7 +908,7 @@ row host-web-lib-path "hosts/host-web/Cargo.toml: [lib] path = 'src/other.rs' mu
 row host-web-lib-inline "[lib] path = './src/lib.rs' must be absent or exactly 'src/lib.rs'" \
     write hosts/host-web/Cargo.toml $'lib = { name = "host_web", path = "./src/lib.rs" }\n[package]\nname = "host-web"\nlicense.workspace = true\n'
 
-# D5: a Cargo configuration file, at any depth. Test value: a crate-attribute flag, an argument file
+# D5: a Cargo configuration file, at any depth. Test value: a crate attribute flag, an argument file
 # or an `include` in a config file that the ISA `rg` line never matches injects a crate attribute.
 row config-flag-array "injects a crate attribute" write .cargo/config.toml \
     "[target.'cfg(unix)']"$'\n'"rustflags = [\"-Z\", \"$attr_word=feature(x)\"]"$'\n'
