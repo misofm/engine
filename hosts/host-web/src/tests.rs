@@ -3455,6 +3455,9 @@ fn meter_queue_saturation_recovers_with_explicit_loss() {
     for block in 0..8 {
         assert_eq!(host.poll_meters(), 1);
         assert_eq!(host.meter_header().first_sample, block * 128);
+        // #1581 D5: the four output windows the full queue dropped (blocks 8 to 11) are counted
+        // from the first frame on; the strip's own drops reach the count with its next snapshot.
+        assert_eq!(host.meter_header().reserved[1] >> METER_LOSS_SHIFT, 4);
     }
     assert_eq!(host.poll_meters(), 0);
     feed_and_render(&mut host, 1, 12, 0.3);
@@ -3462,7 +3465,11 @@ fn meter_queue_saturation_recovers_with_explicit_loss() {
     assert_eq!(host.meter_header().first_sample, 12 * 128);
     assert_eq!(&host.meter_frame()[..4], &[0.3, 0.3, 0.3, 0.3]);
     assert_ne!(host.meter_header().reserved[1] & METER_VALID_LOSS, 0);
-    assert!(host.meter_header().reserved[1] >> METER_LOSS_SHIFT > 0);
+    // Exact: the four output drops, the strip's four, and the gap from block 8 to block 12.
+    assert_eq!(
+        host.meter_header().reserved[1] >> METER_LOSS_SHIFT,
+        4 + 4 + 1
+    );
 }
 
 #[test]
@@ -8625,10 +8632,15 @@ mod structural_apply {
             "a window from the adoption block on, not one of the predecessor's"
         );
         assert!(header.reserved[1] & METER_VALID_LOSS != 0);
-        assert!(
-            header.reserved[1] >> 32 >= 5 + waiting,
-            "the windows left behind are counted ({} for {waiting} waiting and 5 before)",
-            header.reserved[1] >> 32
+        // Exact: the 5 counted before; per strip of the predecessor, its two windows the
+        // successor's group cannot pair (each strip's older head dropped twice); the `waiting`
+        // output windows they span, stale against the successor's first window; and one gap, since
+        // the published stream ends at block 6 and the next frame starts at block 10.
+        let predecessor_strips = (model.tracks.len() + model.submixes.len()) as u64;
+        assert_eq!(
+            header.reserved[1] >> 32,
+            5 + 2 * predecessor_strips + waiting + 1,
+            "the windows left behind are counted ({waiting} waiting and 5 before)",
         );
         assert_eq!(header.sequence, published.sequence + 1);
     }
