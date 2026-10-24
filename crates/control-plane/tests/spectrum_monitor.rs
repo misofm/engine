@@ -1595,3 +1595,26 @@ fn a_configure_that_supersedes_a_fallback_edit_reports_the_fallback() {
     );
     assert_eq!(after.outcome_flags, twin.watermark().outcome_flags);
 }
+
+/// #1594 R6. Turns red if a plan with spectrum captures does not charge the session's spectrum
+/// service and analysis: the running plan's control-retained bytes grow by
+/// `SpectrumService::RETAINED_BYTES` plus the few bytes of the plan's own spectrum rows (a ceiling
+/// of 1 KiB) when a configure adds a tap, and fall back when a configure removes every tap.
+#[test]
+fn a_plan_with_spectrum_charges_the_service_once() {
+    let mut rig = Rig::new(None);
+    rig.block();
+    let bytes = |rig: &Rig| rig.plan.resources().control_retained_bytes;
+    let before = bytes(&rig);
+    rig.configure(&single_request()).expect("add a tap");
+    rig.until_promoted();
+    let grown = bytes(&rig) - before;
+    assert!(
+        (SpectrumService::RETAINED_BYTES..SpectrumService::RETAINED_BYTES + 1_024).contains(&grown),
+        "the service is charged once: {grown}"
+    );
+    rig.configure(&collection_request(Vec::new(), None))
+        .expect("remove every tap");
+    rig.until_promoted();
+    assert_eq!(bytes(&rig), before);
+}
