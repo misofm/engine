@@ -193,3 +193,94 @@ Fixture as #1593's, with `maximum_control_frame_bytes` 65,536 unless a gate says
 ## Supersedes and shrinks
 
 - None.
+
+## Decision and evidence record: slice 1595a (attempt 1)
+
+Scope (root, 2026-10-24; scope note `1595.md`, R1-R7 accepted): 1595a is `SPECTRUM_CAPTURE`
+(`0x0011`), served and unadvertised as `0x0010` is. 1595b (`SPECTRUM_STREAM` `0x0012`, bit 16,
+`KNOWN`, `ProviderFeatures::spectrum`, the decode invariants, R2's switch) is a later slice. The
+root decisions amend the frozen ones above:
+
+- **R1.** No new C symbol or struct: the read rides `miso_engine_v1_submit_command` through
+  `PreparedCommandFrame::Session`; the header changes prose only (`check-capi-abi.sh` green).
+- **R3 (amends D5).** The `BufferTooSmall` branch is dropped: the controller already refuses a new
+  request whose output is below the frame limit before the session runs. The one preflight is
+  `ProtocolCodec::spectrum_capture_ready_frame_len`, which measures a ready reply of the read's
+  shape with the encoder's own `CountSink`; a read above the frame limit answers `LIMIT_EXCEEDED`
+  `spectrum.frame` before it pops.
+- **R4.** Gate 5 and `hosts/host-web/tests/spectrum_parity.rs` are dropped.
+- **R5.** Tests in `crates/control-plane/tests/spectrum_monitor.rs`, the codec test in
+  `message_wire/tests.rs`, one capi row at a 65,536-byte frame limit.
+- **R6.** `SPECTRUM_CONFIGURE` refuses (`LIMIT_EXCEEDED` `spectrum.frame`) a tap whose one-plane
+  read without the window the frame limit cannot carry.
+- **R7.** The monitor makes one boxed `SpectrumAnalysisResult` with its service; the capi charge
+  is `SPECTRUM_MONITOR_RETAINED_BYTES` (`SpectrumService::RETAINED_BYTES` plus that box).
+
+Decisions made while building (implementer, for review):
+
+- The reply type borrows: `SpectrumCaptureReply<'a>` holds `Cow` planes, so the session encodes
+  straight from the monitor's result and the popped window (no plane copy); a decoded reply owns
+  them. `SessionCommandReply` gains the lifetime and loses `Copy`; a capture reply is encoded in
+  `complete_session_command` itself (`complete_session_encoded`), not held as a `Body`.
+- The codec pins `window_frames` 2,048 and `bin_count` 1,025 (`SPECTRUM_CAPTURE_*` constants),
+  and checks `end_sample = captured_sample + 2048`, a non-zero token and a finite floor.
+- A ready reply's `target_kind`/`target_id` are the service's selected target (the window's).
+- D6 has no row for `WindowInvalid` or `MetadataInvalid`: both answer `UNAVAILABLE`, as
+  `CaptureInvalid` does. `Busy` answers `BACKPRESSURE` as D6 says; the controller's non-OK builder
+  then attaches its replay-cache backpressure record (a pre-existing shape of every
+  `BACKPRESSURE` reply), with the code `spectrum.busy`.
+- `include_window` absent and present-false decode alike (D2: absent is false); the encoder
+  writes it only when true.
+- `crates/protocol/src/typed_frame.rs` is edited (the payload enums and their dispatch), as
+  #1594 did; the spec authorizes `crates/protocol/src/**`, the scope note's list omitted it.
+- Gate 7 is at the session (`spectrum_monitor.rs`), not `controller/tests.rs`: its second half
+  ("the next new read is pending") needs the session; the controller's own replay of a session
+  command is #1594's `a_session_command_completes_once_and_replays_its_exact_bytes`.
+- Gate 2 taps `eq0` post-input: the fixture's `eq0` post-pan carries about 2e-17 (its window is at
+  the floor in every bin), which would make a bin comparison vacuous.
+
+Corpus re-pin (approved paths: `conformance` `main.rs`, `mutation_million.rs`, the parity script,
+`docs/CONTROL_PROTOCOL_CONFORMANCE.md`): the corpus gains `command.spectrum_capture` (a read of
+both planes with the window) and `response.spectrum_captured` (a ready one-plane read); 52
+frames. `COMPLETE_SCHEMA_HASH` moves from `a3d6a9dd72195701` to `c7e010362827dab3`. The FNV hash
+of the corpus with those two frames left out, in order, is `a3d6a9dd72195701`, the old pin: the
+50 earlier frames are byte-equal.
+
+Frame sizes (measured by the gate-1 test against the encoder, identity `eq0`): one plane 8,496
+bytes, both 12,608, one plane with the window 16,696, both with the window 29,008.
+
+Gates (attempt 1), test value:
+
+- Gate 1 `message_wire::tests::spectrum_capture_round_trips_and_refuses_malformed_frames_both_ways`:
+  red if the codec admits a contradictory request or a reply of the wrong shape (planes against
+  `channels`, a 1,024-bin plane, a lone window plane, a pending reply with window fields), or the
+  frame-limit measure drifts from the encoder.
+- Gate 2 `a_capture_read_returns_the_reference_analysis`: red if the read path analyzes, labels
+  or counts a window differently from `analyze_into` on the reference window.
+- Gate 3 and R6 `a_read_the_frame_cannot_carry_consumes_nothing`: red if a read pops a window it
+  cannot deliver, or a configure accepts a tap no read can carry.
+- Gate 6 `each_capture_refusal_answers_its_status_and_changes_nothing`: red if a refusal writes
+  state or maps outside D6 (unprepared, not armed, select single, busy twice, unknown entry,
+  channels, dropped).
+- Gate 7 `a_replayed_read_returns_its_bytes_and_pops_nothing`: red if a replayed read pops again.
+- Gate 8, a capture phase in
+  `alternating_configures_against_a_rendering_thread_allocate_nothing_on_render` (1,000 captures,
+  20 of them ready): red if a read allocates on the render thread or answers `INTERNAL`.
+- R7 row `a_plan_with_spectrum_charges_the_service_once` (amended): red if the result box is not
+  charged.
+- capi `runtime::spectrum_tests::spectrum_commands_cross_the_c_abi_to_the_session` replaces the
+  #1594 row (whose 4,096-byte frame limit R6 now refuses): red if a C ABI client cannot reach a
+  ready read.
+
+Acked-batch question for a read: can a reply acknowledge a window it did not return? No. Every
+refusal (the D5 measure, `Channels`, `NotArmed`, `Exhausted`) runs before the pop, the output is
+reserved for the frame limit before the session runs, and the reply is recorded for replay in the
+call that writes it. The one consume-then-fail path is an analyzer refusal of a popped window
+(`WindowInvalid`), which no window the service produces reaches.
+
+Mutants (each red on its gate, restored by `git checkout` + `touch`): no read preflight (gate 3),
+no configure R6 check (gate 3), `Busy` to `VALIDATION_FAILED` (gate 6), left bins from the right
+plane (gate 2), no replay record for a capture reply (gate 7), the R6 charge without the result box
+(R7 row), a plane length not checked (gate 1), a read accepting target fields (gate 1). One
+mutant was equivalent (re-planning a cached request: the preflight refuses it anyway) and is not
+counted.

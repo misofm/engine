@@ -1190,8 +1190,22 @@ that window is admitted against the plan that renders.
 unchanged committed revision; a hop or budget change prepares none. The capability report does not
 list `0010` until #1595 sets bit 16. A plan prepared with spectrum captures charges the session's
 spectrum service and analysis (`SpectrumService::RETAINED_BYTES`) to its capi retained bytes. The
-gate is `runtime::spectrum_tests::a_spectrum_configure_crosses_the_c_abi_to_the_session`; the core
+gate is `runtime::spectrum_tests::spectrum_commands_cross_the_c_abi_to_the_session`; the core
 claims are `crates/control-plane/tests/spectrum_monitor.rs`.
+
+## Issue 1595 spectrum capture (slice a)
+
+`SPECTRUM_CAPTURE` (`0011`) crosses `miso_engine_v1_submit_command` to the same core path, with no
+new C symbol or struct: arm, read, cancel and select on the session's spectrum service, and a ready
+read analyzed into dB bins on the calling control thread. The capability report does not list
+`0011` until the second slice sets bit 16. A read the session's frame limit cannot carry is refused
+`LIMIT_EXCEEDED` (`spectrum.frame`) before it pops the window, and a configure refuses a tap no
+one-plane read can carry, so a C ABI host that reads spectrum compiles with
+`maximum_control_frame_bytes` of at least 8,496 bytes (12,608 for stereo reads, 29,008 with the
+window). The session's capi retained bytes also charge the one analysis result a read writes
+(`SpectrumAnalysisResult`, beside the service and analysis). The gate is the same
+`runtime::spectrum_tests::spectrum_commands_cross_the_c_abi_to_the_session` at a 65,536-byte frame
+limit; the core claims are `crates/control-plane/tests/spectrum_monitor.rs`.
 
 ## Issue 1584 observation subscriptions
 
