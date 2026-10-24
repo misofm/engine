@@ -258,7 +258,7 @@ key on `lowers_session_bypass` and on the registry row.
   bypass in a rebuild, restarts nothing, and equals A lifting it live at the swap block.
 - **Gate 8 split** (root, 2026-10-24): the standalone click harness is not run in this slice. #1341
   proved the bypass crossfade law for every shunt, and the delay has no latency line. Root files
-  the click-harness successor: #TBD (placeholder, root fills in the number).
+  the click-harness successor: #1830.
 - **Verifier fold (root-authorized, 2026-10-24):** `host-core`'s
   `a_per_node_effect_snapshot_reports_its_prepared_bypass` now uses the multiband (red at `true`
   when the `NodeKind::Effect` arm drops `prepared_bypass`); the delay is dropped from the
