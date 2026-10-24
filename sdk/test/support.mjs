@@ -76,7 +76,7 @@ export function sessionDocument(options = {}) {
   const slot = (entry) => ({
     slot: entry.id, identity: entry.identity, quality: entry.quality, link_mode: entry.link_mode,
   });
-  const consoleEntry = (entry) => ({ slot: entry.id, bypass: entry.bypass, params: entry.params });
+  const consoleEntry = (entry) => ({ slot: entry.id, bypass: entry.bypass, link_mode: "slot", params: entry.params });
   const preInsert = effects.preInsert ?? [];
   const postInsert = effects.postInsert ?? [];
   const lane = { polarity_invert: false, trim_db: 0.0, hpf_hz: 0.0, lpf_hz: 0.0, delay_samples: 0 };
