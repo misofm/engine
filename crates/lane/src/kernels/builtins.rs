@@ -356,43 +356,13 @@ pub fn matrix2x2_block<L: Lane>(
         .chunks_exact_mut(L::WIDTH)
         .zip(right.chunks_exact_mut(L::WIDTH))
     {
-        let (yl, yr) = matrix2x2_frame(L::load(left_frame), L::load(right_frame), c);
-        yl.store(left_frame);
-        yr.store(right_frame);
-    }
-}
-
-/// [`matrix2x2_block`] for a block whose right input is its left plane (issue #975): a collapsed
-/// chain's right plane is never written before this, and `right` is output only. Each frame loads
-/// `l` once and passes it as both inputs of [`matrix2x2_block`]'s frame body, so an identity
-/// lane's right output is its right input, the left word, and every product and sum is the dual
-/// block's on the same words: `ll*l + lr*r` stays two products with `r == l`.
-#[inline(always)]
-pub fn matrix2x2_block_from_left<L: Lane>(
-    left: &mut [f32],
-    right: &mut [f32],
-    frames: usize,
-    c: &Matrix2x2Coef<L>,
-) {
-    debug_assert_eq!(left.len(), frames * L::WIDTH);
-    debug_assert_eq!(right.len(), frames * L::WIDTH);
-    for (left_frame, right_frame) in left
-        .chunks_exact_mut(L::WIDTH)
-        .zip(right.chunks_exact_mut(L::WIDTH))
-    {
         let l = L::load(left_frame);
-        let (yl, yr) = matrix2x2_frame(l, l, c);
+        let r = L::load(right_frame);
+        let yl = L::select(c.identity, l, c.ll.mul(l).add(c.lr.mul(r)));
+        let yr = L::select(c.identity, r, c.rl.mul(l).add(c.rr.mul(r)));
         yl.store(left_frame);
         yr.store(right_frame);
     }
-}
-
-/// The frame body of [`matrix2x2_block`] and [`matrix2x2_block_from_left`].
-#[inline(always)]
-fn matrix2x2_frame<L: Lane>(l: L, r: L, c: &Matrix2x2Coef<L>) -> (L, L) {
-    let yl = L::select(c.identity, l, c.ll.mul(l).add(c.lr.mul(r)));
-    let yr = L::select(c.identity, r, c.rl.mul(l).add(c.rr.mul(r)));
-    (yl, yr)
 }
 
 /// [`matrix2x2_block`] for a coefficient set with **no** identity lane: its second arm alone.
@@ -440,45 +410,13 @@ pub fn matrix2x2_block_without_identity<L: Lane>(
         .chunks_exact_mut(L::WIDTH)
         .zip(right.chunks_exact_mut(L::WIDTH))
     {
-        let (yl, yr) =
-            matrix2x2_frame_without_identity(L::load(left_frame), L::load(right_frame), c);
-        yl.store(left_frame);
-        yr.store(right_frame);
-    }
-}
-
-/// [`matrix2x2_block_without_identity`] for a block whose right input is its left plane (issue
-/// #975), as [`matrix2x2_block_from_left`] is to [`matrix2x2_block`]. Same precondition.
-#[inline(always)]
-pub fn matrix2x2_block_without_identity_from_left<L: Lane>(
-    left: &mut [f32],
-    right: &mut [f32],
-    frames: usize,
-    c: &Matrix2x2Coef<L>,
-) {
-    debug_assert_eq!(left.len(), frames * L::WIDTH);
-    debug_assert_eq!(right.len(), frames * L::WIDTH);
-    debug_assert!(
-        !L::mask_any(c.identity),
-        "the select-free matrix arm requires a coefficient set with no identity lane"
-    );
-    for (left_frame, right_frame) in left
-        .chunks_exact_mut(L::WIDTH)
-        .zip(right.chunks_exact_mut(L::WIDTH))
-    {
         let l = L::load(left_frame);
-        let (yl, yr) = matrix2x2_frame_without_identity(l, l, c);
+        let r = L::load(right_frame);
+        let yl = c.ll.mul(l).add(c.lr.mul(r));
+        let yr = c.rl.mul(l).add(c.rr.mul(r));
         yl.store(left_frame);
         yr.store(right_frame);
     }
-}
-
-/// The frame body of [`matrix2x2_block_without_identity`] and its from-left form: no select.
-#[inline(always)]
-fn matrix2x2_frame_without_identity<L: Lane>(l: L, r: L, c: &Matrix2x2Coef<L>) -> (L, L) {
-    let yl = c.ll.mul(l).add(c.lr.mul(r));
-    let yr = c.rl.mul(l).add(c.rr.mul(r));
-    (yl, yr)
 }
 
 /// Applies the settled fader/mute and 2x2 matrix in one frame traversal.

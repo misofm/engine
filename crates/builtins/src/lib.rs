@@ -66,8 +66,7 @@ use lane::{
             input_chain_block_mono_elided, input_chain_plan, input_chain_ramp_block_elided,
             input_chain_ramp_block_filter, input_chain_ramp_block_filter_mono,
             input_chain_ramp_block_mono_elided, lanes_below, mask_from_flags, matrix2x2_block,
-            matrix2x2_block_from_left, matrix2x2_block_without_identity,
-            matrix2x2_block_without_identity_from_left, matrix2x2_ramp_block, no_lanes,
+            matrix2x2_block_without_identity, matrix2x2_ramp_block, no_lanes,
             plan_is_channel_symmetric, section_is_identity, zero_lanes_block,
         },
     },
@@ -3834,24 +3833,6 @@ impl<L: Lane> MatrixStage<L> {
         }
     }
 
-    /// [`Self::process`] for a block whose right input is its left plane (issue #975), when every
-    /// lane is settled: [`Self::settled_block`]'s two arms in their from-left form. Returns
-    /// `false`, having written nothing, while a lane ramps: the caller copies the left plane and
-    /// calls [`Self::process`].
-    fn process_from_left(&mut self, left: &mut [f32], right: &mut [f32], frames: usize) -> bool {
-        if !self.is_settled() {
-            return false;
-        }
-        if L::mask_any(self.coef.identity) {
-            matrix2x2_block_from_left::<L>(left, right, frames, &self.coef);
-        } else {
-            #[cfg(test)]
-            MATRIX_SELECT_FREE_BLOCKS.with(|blocks| blocks.set(blocks.get() + 1));
-            matrix2x2_block_without_identity_from_left::<L>(left, right, frames, &self.coef);
-        }
-        true
-    }
-
     /// Renders one settled block of the fused fader and matrix on the current coefficients.
     ///
     /// The fused twin of [`Self::settled_block`] (issue #954). With no identity lane over all
@@ -5252,18 +5233,6 @@ impl BuiltinMatrixBank {
             stage.process(left, right, frames);
         });
         BuiltinProcessReport::default()
-    }
-
-    /// [`Self::process`] for a block whose right input is its left plane (issue #975), as
-    /// [`BuiltinFaderBank::process_from_left`]: `false`, having written nothing, while a lane
-    /// ramps.
-    pub fn process_from_left(&mut self, left: &mut [f32], right: &mut [f32], frames: u32) -> bool {
-        let frames = frames as usize;
-        debug_assert_eq!(left.len(), frames * self.width.lanes() as usize);
-        debug_assert_eq!(right.len(), frames * self.width.lanes() as usize);
-        per_width!(MatrixStageKernel(stage) in &mut self.stage => {
-            stage.process_from_left(left, right, frames)
-        })
     }
 
     // REALTIME_POLICY_BEGIN

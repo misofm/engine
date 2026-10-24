@@ -5550,26 +5550,6 @@ impl GraphPreparedBuiltinBankProcessor for MatrixBankProcessor {
         Ok(())
     }
 
-    /// The seam on a collapsed block (issue #975), when no fader ran before it: the bank writes
-    /// the right plane from the left one on a settled block.
-    fn process_from_left(
-        &mut self,
-        left: &mut [f32],
-        right: &mut [f32],
-        frames: u32,
-        first_sample: u64,
-    ) -> Result<bool, RenderError> {
-        let _ = first_sample;
-        let took = self.bank.process_from_left(left, right, frames);
-        if !took {
-            right.copy_from_slice(left);
-            self.bank.process(left, right, frames);
-        }
-        self.process_calls = self.process_calls.saturating_add(1);
-        self.frames_processed = self.frames_processed.saturating_add(u64::from(frames));
-        Ok(took)
-    }
-
     fn qualification_counters(&self) -> [u64; 2] {
         [self.process_calls, self.frames_processed]
     }

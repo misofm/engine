@@ -62,11 +62,18 @@ Changing the matrix arithmetic (`ll*l + lr*r` stays two products even when `l ==
   chain gives the seam to the first seam-side slot with an active lane and copies itself when no
   seam-side slot runs. `BankChain::seam_copies` counts collapsed blocks that still copied.
 - The fader takes it when its right channel is settled and, on an automated bank, when no stored
-  event lands inside the block (`process_with` then renders `process`); the matrix when every lane
-  is settled. Otherwise copy, then the existing body. New lane kernels `gain_mute_block_from`,
-  `matrix2x2_block_from_left` and `matrix2x2_block_without_identity_from_left` share one
-  `#[inline(always)]` frame body with their in-place kernels, so the arithmetic and order are the
-  same by construction. Class A.
+  event lands inside the block (`process_with` then renders `process`). Otherwise copy, then the
+  existing body. One new lane kernel, `gain_mute_block_from`, shares one `#[inline(always)]` frame
+  body with `gain_mute_block`, so the arithmetic and order are the same by construction. Class A.
+- Attempt 2: the matrix keeps the trait default (copy, then `process`), because a matrix-first
+  collapsed chain does not occur in production. Every banked strip binds all three builtin stages
+  (input, fader, matrix: "banked on all three stages or on none", `lower_strip_banks`); the graph
+  fuses a chain only along a single producer-to-consumer edge (`chains_into`), and the matrix's
+  only producer is the fader, so a chain that holds the matrix and an upstream prefix holds the
+  fader directly before it; `collapse_prefix_of` collapses only when every slot has the chain's
+  active lanes, so that fader slot always runs. A break between fader and matrix (an observer on
+  the fader) leaves the matrix in a chain with no upstream prefix, which never collapses. Attempt 1's
+  matrix override and its two kernels were untested dead code and are removed.
 - Evidence (PR, not committed): 64-block release digests of every `WORKLOADS` row and the ring row
   at Simd8 and Simd4, plus a fader ride on `sixty_four_track_console` and `_mono`, identical before
   and after. With temporary counters: `sixty_four_track_console_mono` at Simd8 renders 512
