@@ -403,3 +403,21 @@ reset reply (gate 4), select through `select_stream` (gate 4), the reply's smoot
 (gate 1), the `0x0011` together rule dropped (invariants), bit 16 never set (controller row),
 capi `SPECTRUM` false (capi row). One survived and was folded: the ready `windows = sequence + 1`
 rule unchecked; gate 1 now refuses it.
+
+Attempt 2 (root rulings on the verifier's FAIL, 2026-10-24):
+
+- **R6 (MINOR, done).** R6 refuses a tap unless its one-plane one-shot read (without the window)
+  and its stream read of the tap's own channels fit: 8,576 bytes for a one-plane tap, 12,688 for
+  a stereo tap (identity up to 8 bytes), at configure and at an advertising host's boot. No
+  accepted tap is refused on every read. The 1595a decision above ("the alternative ... is not
+  taken") is reversed. Gate 3 (one-shot) now runs at 16,384 bytes and keeps a stereo refusal
+  through the window (29,008 bytes); gate 3 (stream) keeps its size-refused `gap` on a session
+  that does not advertise (its boot runs no R6) and checks R6 at each tap's exact size and one
+  byte below, by configure and by an advertising boot (test adapter `Advertised`).
+- **iOS memset (MAJOR), blocked on one reader.** With the ruled host-core change (dead floor fills
+  to zero; `analyze_into` and `analyze_stream_into` write straight into `out`; the unrequested
+  plane is unspecified) the shipped capi iOS library has 0 `memset_pattern16` calls charged to
+  host-core (the ratchet asks to delete the row). The C ABI encoder and the browser read only
+  requested planes, but `crates/host-core/tests/spectrum_service.rs:527-532` reads the unrequested
+  plane and asserts it is the floor (the old contract), so the ruling's stop rule applies: the
+  change is not committed, and the `host-core` row stays at 10.
