@@ -1,4 +1,4 @@
-//! Certified tail, exact-rest and composition arithmetic for native effects (decision 15
+//! Certified exact-rest arithmetic for native effects (decision 15
 //! D15-4(b); issue #1375).
 //!
 //! Control-plane only: every function here runs at registry build, once per launch rate, in
@@ -24,10 +24,6 @@
 
 /// The `f32` unit roundoff, `2^-24`.
 pub const ROUNDOFF: f64 = 1.0 / 16_777_216.0;
-
-/// `2^-126`, the smallest normal `f32`: the absolute error one rounded `f32` operation can make by
-/// underflowing (gradual underflow loses less, flush-to-zero at most this).
-pub const UNDERFLOW: f64 = 1.0 / 85_070_591_730_234_615_865_843_651_857_942_052_864.0;
 
 /// When the snap after a follower step writes `+0.0`.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -140,30 +136,6 @@ pub fn rate_follower_rest_samples(rate_min: f32, distance_max: f32, snap: RestSn
     }
 }
 
-/// `ceil(2000 log10 g)`, the millibels of a positive finite linear value, rounded up.
-///
-/// `math::log` keeps every target on the same value. `x = 2000 ln(g) / ln 10` carries a few
-/// `2^-53` relative errors, so the ceiling is taken of `x + |x| 2^-30`, plus `2^-30` mB when `g`
-/// is itself the result of rounded operations (`computed`); an exact `g = 1` stays `0`. The same
-/// rule as the builtin input section's (#1465 F-D3).
-///
-/// # Panics
-///
-/// When the millibels do not fit an `i32` (a `g` that is not positive and finite).
-#[must_use]
-pub fn ceil_millibels(g: f64, computed: bool) -> i32 {
-    const MARGIN: f64 = 1.0 / 1_073_741_824.0;
-    let x = 2000.0 * math::log(g) / core::f64::consts::LN_10;
-    let absolute = if computed { MARGIN } else { 0.0 };
-    let up = x + x.abs() * MARGIN + absolute;
-    let ceiling = -math::floor(-up);
-    assert!(
-        ceiling.is_finite() && ceiling.abs() < f64::from(i32::MAX),
-        "a millibel value of a finite positive gain"
-    );
-    ceiling as i32
-}
-
 #[cfg(test)]
 mod tests {
     extern crate std;
@@ -187,30 +159,17 @@ mod tests {
         steps
     }
 
-    /// **#1375 gate 4: the bound is the real recurrence's count, from above and within
-    /// `max(2, ceil(B / 100))`,** at both effects' slowest coefficients (the compressor's
-    /// 5,000 ms and the limiter's 2,000 ms release at 44.1 and 96 kHz), at faster ones, and at
-    /// both snap rules, from the start distance each effect states (`100` dB plus one ulp, `1.0`).
+    /// **The bound is the real recurrence's count, from above and within `max(2, ceil(B / 100))`,**
+    /// at faster coefficients than the effects' slowest (which their own gate 4 checks, in
+    /// `tests/tail_contract.rs`), up to the `1/8` clamp, and at both snap rules.
     #[test]
     fn the_bound_is_the_recurrence_count_from_above() {
         let rate = |ms: f64, fs: f64| (1.0 - math::exp(-1.0 / (0.001 * ms * fs))) as f32;
         let compressor = RestSnap::AtOrBelow(f32::from_bits(0x3510_7e90));
         let limiter = RestSnap::Below(lane::FLUSH_EPS);
         let cases = [
-            (
-                rate(5_000.0, 96_000.0),
-                f32::from_bits(100.0_f32.to_bits() + 1),
-                compressor,
-            ),
-            (
-                rate(5_000.0, 44_100.0),
-                f32::from_bits(100.0_f32.to_bits() + 1),
-                compressor,
-            ),
             (rate(100.0, 48_000.0), 37.5, compressor),
             (rate(5.0, 44_100.0), 100.0, compressor),
-            (rate(2_000.0, 96_000.0), 1.0, limiter),
-            (rate(2_000.0, 44_100.0), 1.0, limiter),
             (rate(10.0, 48_000.0), 1.0, limiter),
             (0.1, 1.0, limiter),
             (0.125, 3.0, compressor),

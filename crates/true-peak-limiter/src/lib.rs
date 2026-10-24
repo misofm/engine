@@ -329,20 +329,20 @@ fn rest_samples(sample_rate: u32) -> Option<u64> {
 ///   upper bound of `max(0, R(P*))`.
 /// * **Composition** (#1375 D4): `0 <= g = fl(1 - d) <= 1` (`0 <= d <= 1`), so `G_p = G_t` is
 ///   0 dB times `(1 + u)` for the one rounded product, rounded up to millibels; `sigma_p = sigma_t`
-///   is one [`effect_runtime::tail::UNDERFLOW`]. The limiter has no sidechain.
+///   is one [`math::tail::UNDERFLOW`]. The limiter has no sidechain.
 ///
 /// A rate the follower bound cannot cover states no bound.
 fn tail_and_rest(sample_rate: u32, _quality: EffectQuality) -> effect_contract::NodeTailBound {
     let Some(rest) = rest_samples(sample_rate) else {
         return effect_contract::NodeTailBound::UNBOUNDED;
     };
-    let gain = effect_contract::PeakGain::Millibels(effect_runtime::tail::ceil_millibels(
+    let gain = effect_contract::PeakGain::Millibels(math::tail::ceil_millibels(
         1.0 + effect_runtime::tail::ROUNDOFF,
-        true,
+        math::tail::Rounding::Computed,
     ));
-    let stall = effect_contract::FlushStall::Level(effect_runtime::tail::ceil_millibels(
-        effect_runtime::tail::UNDERFLOW,
-        false,
+    let stall = effect_contract::FlushStall::Level(math::tail::ceil_millibels(
+        math::tail::UNDERFLOW,
+        math::tail::Rounding::Exact,
     ));
     effect_contract::NodeTailBound {
         tail: TailSamples::Finite(0),

@@ -352,8 +352,13 @@ fn slowest_release_rate(sample_rate: u32) -> f32 {
 /// The exact-rest bound `R`, in samples, at `sample_rate` (#1375 D2), or `None` when it does not
 /// exist (D3).
 ///
-/// With every input exactly zero (main and sidechain, or a silent or unconnected sidechain) the
-/// detector reads `+0.0`, the level clamps to -160 dB, under every legal knee start (`-80 - 12`
+/// **Quantifier.** `R` holds when every input port is exactly zero from the first silent sample
+/// `M` on: the main input **and** the sidechain (a connected sidechain without a buffer, or an
+/// unconnected one, reads as zero). A sidechain that keeps playing keeps the detector moving, so it
+/// states no rest; the output is still exactly zero (the tail), and the five composition values
+/// hold for every sidechain input.
+///
+/// With every input zero the detector reads `+0.0`, the level clamps to -160 dB, under every legal knee start (`-80 - 12`
 /// dB), so the curve target is `+0.0` from the first silent sample. The one signal-state word, the
 /// gain-reduction word `g`, then steps `g' = snap_reduction(fma(c, 0 - g, g))` at the release rate
 /// `c >= slowest_release_rate` (the attack arm needs `0 < g`, and `g <= 0` always), which is the
@@ -387,15 +392,18 @@ fn peak_gain_millibels() -> i32 {
     let makeup_max = f64::from(COMPRESSOR_PARAMETERS[5].maximum.unwrap_or(0.0)).max(0.0);
     let gain = math::db_to_gain(makeup_max + FAST_GAIN_ERROR_DB);
     let rounding = rounding_factor(4);
-    effect_runtime::tail::ceil_millibels(gain * rounding, true)
+    math::tail::ceil_millibels(gain * rounding, math::tail::Rounding::Computed)
 }
 
 /// `sigma_p = sigma_t` in millibels (#1375 D4, #1379 H3): the underflow allowance of the output's
-/// chain, one [`effect_runtime::tail::UNDERFLOW`] per rounded operation (four), each carried by at
+/// chain, one [`math::tail::UNDERFLOW`] per rounded operation (four), each carried by at
 /// most `(1 + u)^3` through the operations after it (the mix is at most `1`).
 fn flush_stall_millibels() -> i32 {
     let rounding = rounding_factor(3);
-    effect_runtime::tail::ceil_millibels(4.0 * effect_runtime::tail::UNDERFLOW * rounding, true)
+    math::tail::ceil_millibels(
+        4.0 * math::tail::UNDERFLOW * rounding,
+        math::tail::Rounding::Computed,
+    )
 }
 
 /// This effect's tail, tail over every peak, exact-rest bound and composition values, the one place
