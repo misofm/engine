@@ -417,8 +417,8 @@ fn every_metadata_observation_tap_resolves_through_a_command_acknowledgement() {
         }
     }
     assert_eq!(
-        declared, 5,
-        "the four dynamics effects and the de-esser declare one tap each"
+        declared, 9,
+        "the four dynamics effects and the de-esser declare one tap each, the dynamic EQ four"
     );
 
     let json = session_with_every_effect(&ids);
@@ -528,12 +528,13 @@ fn every_published_sidechain_port_prepares_and_an_unpublished_one_does_not() {
             rows += 1;
         }
     }
-    assert_eq!(rows, 21, "nine effects, three of which declare a sidechain");
+    assert_eq!(rows, 24, "ten effects, four of which declare a sidechain");
     assert_eq!(
         sidechains,
         vec![
             ("miso.compressor", "sidechain-in"),
             ("miso.de-esser", "sidechain-in"),
+            ("miso.dynamic-eq", "sidechain-in"),
             ("miso.gate-expander", "sidechain-in"),
         ]
     );

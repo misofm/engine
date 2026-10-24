@@ -50,7 +50,7 @@ const QUANTUM: u32 = 128;
 const BLOCKS: u64 = 16;
 
 /// Every launch effect, by registry id.
-const EFFECTS: [&str; 9] = [
+const EFFECTS: [&str; 10] = [
     "miso.parametric-eq",
     "miso.compressor",
     "miso.gate-expander",
@@ -60,6 +60,7 @@ const EFFECTS: [&str; 9] = [
     "miso.transient-shaper",
     "miso.delay",
     "miso.de-esser",
+    "miso.dynamic-eq",
 ];
 
 fn width() -> BankWidth {
