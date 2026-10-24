@@ -323,7 +323,15 @@ KERNEL_ROSTER: tuple[tuple[str, str, float], ...] = (
         r"multiband_compressor.*4wide6f32x4.*12process_bank",
         0.10,
     ),
-    ("transient-shaper f32x4", r"transient_shaper.*4wide6f32x4", 0.38),
+    # #1368b: pinned to the block body. The per-lane link grew the bank's constructor
+    # (`Shaper::<f32x4>::new`), which LLVM now outlines with the follower coefficients' four
+    # control-side `f32x4.sub`; it is not a render kernel, and the generic shape rule still
+    # checks it. The body went 522 -> 700 vector operations, 0 scalar: the mixed-link arm.
+    (
+        "transient-shaper f32x4",
+        r"transient_shaper.*Shaper.*4wide6f32x4.*13process_block",
+        0.38,
+    ),
     ("gate-expander f32x4 dual", r"gate_expander.*4wide6f32x4.*12process_bank", 0.10),
     (
         "gate-expander f32x4 collapsed",
