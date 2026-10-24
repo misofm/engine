@@ -7971,6 +7971,14 @@ mod tests {
     ///
     /// It regroups lanes and never changes what a lane computes, so the digest assertions stand:
     /// both sessions render the bits the `Scalar` oracle renders.
+    ///
+    /// # The second lever (issue #969)
+    ///
+    /// A track is odd by its source mapping or by its prepared input section. The first arm's
+    /// stereo mapping is classed by `SessionPoolClasses::from_session`, so it cannot see the input
+    /// section's witness; the second arm keeps the mono source and inverts one side's polarity,
+    /// which only the compile's `input_channel_symmetry()` conjoin reports. It groups alike, and
+    /// asserts the grouping only: the bit claim is the first arm's.
     #[test]
     fn a_single_odd_track_no_longer_strands_a_pool_remainder() {
         const BLOCKS: u64 = 12;
@@ -7988,7 +7996,6 @@ mod tests {
         let unsplit = compile_console_model_with_builtins(&uniform, 2_074, &[], registry);
         let split = compile_console_model_with_builtins(&odd, 2_075, &[], registry);
         let unsplit_slots = unsplit.graph().prepared_bank_count();
-        let split_slots = split.graph().prepared_bank_count();
 
         // Three effect slots per cohort (EQ, compressor, limiter).
         assert_eq!(
@@ -7996,26 +8003,36 @@ mod tests {
             3 * (64 / lanes),
             "every cohort of 64 is full"
         );
-        assert_eq!(
-            split_slots,
-            3 * (63_usize.div_ceil(lanes) + 1),
-            "every mono cohort, the padded remainder's included, and the odd track's padded one"
-        );
-        let pooled = pooled_tracks(&split);
-        assert_eq!(
-            pooled[0],
-            BTreeSet::from_iter(
-                (0..64)
-                    .filter(|index| *index != 7)
-                    .map(|index| format!("ch{index:02}"))
-            ),
-            "the mono pool keeps every mono track"
-        );
-        assert_eq!(
-            pooled[1],
-            BTreeSet::from(["ch07".to_owned()]),
-            "the stereo pool is the odd track alone"
-        );
+        let assert_odd_track_pools_alone = |artifact: &PreparedGraphBuiltinsArtifact, lever| {
+            assert_eq!(
+                artifact.graph().prepared_bank_count(),
+                3 * (63_usize.div_ceil(lanes) + 1),
+                "{lever}: every mono cohort, the padded remainder's included, and the odd \
+                 track's padded one"
+            );
+            let pooled = pooled_tracks(artifact);
+            assert_eq!(
+                pooled[0],
+                BTreeSet::from_iter(
+                    (0..64)
+                        .filter(|index| *index != 7)
+                        .map(|index| format!("ch{index:02}"))
+                ),
+                "{lever}: the mono pool keeps every mono track"
+            );
+            assert_eq!(
+                pooled[1],
+                BTreeSet::from(["ch07".to_owned()]),
+                "{lever}: the stereo pool is the odd track alone"
+            );
+        };
+        assert_odd_track_pools_alone(&split, "source mapping");
+
+        // The second lever: a mono source whose input section is asymmetric (issue #969).
+        let mut odd_input = uniform.clone();
+        odd_input.tracks[7].builtins.left.polarity_invert = true;
+        let split_input = compile_console_model_with_builtins(&odd_input, 2_099, &[], registry);
+        assert_odd_track_pools_alone(&split_input, "input section");
 
         // Class A: splitting the pools regroups lanes and moves no bit.
         let (unsplit_pcm, _, unsplit_chains, unsplit_shape_slots, ..) =
