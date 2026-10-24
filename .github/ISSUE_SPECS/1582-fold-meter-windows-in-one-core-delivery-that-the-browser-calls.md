@@ -186,10 +186,11 @@ Commands: `cargo test --locked -p host-core --all-features`,
   `fold_meter_windows`: the policy's call rule matches by name, and a popping `fold` made an
   unrelated `.fold(..)` in `crates/rack` read as a popping call. Tests: helpers that read a moved
   field now read it through the delivery (`tables()`, `frame()`, `loss_count()`,
-  `output_gate_from()`, `output_windows_queued()`, and `#[doc(hidden)]` `test_only_*` writers for
-  the three tests that plant a snapshot or a loss); no assertion was edited. One new test,
-  `set_level_is_idempotent_and_a_transition_restarts_the_epoch` (red on the mutant that drops the
-  idempotence check). Evidence: the T1 byte run (scenarios A, B; sha256 `b35cbfbe...a9c1`) plus a
+  `output_gate_from()`, `output_windows_queued()`, and `test_only_*` writers, gated on
+  `test-support`, for the three tests that plant a snapshot or a loss; the two such browser tests
+  outside `structural_apply` carry the same gate); no assertion was edited. One new test,
+  `a_level_off_shuts_the_output_gate` (red on the mutant that leaves the gate open; the
+  idempotence half was dropped, `meter_lease_reacquisition_waits_for_a_clean_boundary` holds it). Evidence: the T1 byte run (scenarios A, B; sha256 `b35cbfbe...a9c1`) plus a
   scenario C (an uncarried swap from an empty boot, a lease release and re-take, a producer reset;
   88 lines, sha256 `846e4329...e811`) is byte-identical on `c80aa2fba` and on the branch.
   `check-browser-expected-resources.py` agrees with no `expected.json` change.
