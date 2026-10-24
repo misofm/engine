@@ -1715,13 +1715,11 @@ fn a_configure_that_supersedes_a_fallback_edit_reports_the_fallback() {
 /// #1594 R6, #1595 R7. Turns red if a plan with spectrum captures does not charge the session's
 /// spectrum service, analysis and one-shot slot: the running plan's control-retained bytes grow
 /// by `SpectrumService::RETAINED_BYTES`, one `SpectrumAnalysisResult` and one `SpectrumSnapshot`
-/// plus the plan
-/// inventory's own spectrum row when a configure adds a tap, and fall back when a configure
-/// removes every tap, to the boot plan's bytes plus the pairing rows of the meters the plan
-/// carries (#1674 R1). The row is 51 bytes here (one
-/// `SpectrumInventoryRow`, 48 bytes on a 64-bit target, plus the 3 bytes of `eq0`, and no pairing
-/// row, since the predecessor had no capture); it is host-core's private layout, so the check is a
-/// 1 KiB ceiling over the service's bytes, which no inventory row of one tap approaches and which
+/// plus the plan inventory's own spectrum row when a configure adds a tap, and fall back when a
+/// configure removes every tap, to the boot plan's bytes plus the pairing rows of the meters the
+/// plan carries (#1674 R1). The row is 51 bytes here (one `SpectrumInventoryRow`, 48 bytes on a
+/// 64-bit target, plus the 3 bytes of `eq0`, and no pairing row, since the predecessor had no
+/// capture); it is host-core's private layout, so the check is a 1 KiB ceiling over the service's bytes, which no inventory row of one tap approaches and which
 /// stays far below the service's own size, so a missing charge cannot pass.
 #[test]
 fn a_plan_with_spectrum_charges_the_service_once() {
