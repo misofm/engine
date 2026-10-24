@@ -64,7 +64,8 @@ answered the amendments on 2026-09-29. Ruling:
   4.2 µs per per-node track, arithmetic on the uncontrolled `final-0400` record). There is one
   bank group per (slot, pool class, dependency level), each padded; differing insert counts
   therefore split `post_insert` into several groups and can cost chain fusion (H2, M3,
-  amendments 3 and 9). Inserts bank opportunistically, as today.
+  amendments 3 and 9). Inserts bank opportunistically, and a partial insert cohort pads from k
+  members (W=4: 2, W=8: 3; the H5 arithmetic, issues #888 and #889).
 - **Padding contract.** A padded lane is a clone of an active member's prepared request, never
   zeros; it is fed `+0.0` and its output is discarded. D7 recovery and reports are masked by active
   lanes (M1, amendment 6).

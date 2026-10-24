@@ -29,6 +29,7 @@ enum Kind {
     Transient,
     Limiter,
     Multiband,
+    DeEsser,
     /// Not console-eligible: an insert that banks nowhere and so renders per node (issue #1899).
     Delay,
 }
@@ -43,6 +44,19 @@ const ELIGIBLE: [Kind; 7] = [
     Kind::Multiband,
 ];
 
+/// Every launch effect that can pad an insert cohort (#888): the console eligibility list and the
+/// de-esser, which is registered but not console-eligible (#1920).
+const INSERT_KINDS: [Kind; 8] = [
+    Kind::Eq,
+    Kind::Comp,
+    Kind::Gate,
+    Kind::SoftClip,
+    Kind::Transient,
+    Kind::Limiter,
+    Kind::Multiband,
+    Kind::DeEsser,
+];
+
 impl Kind {
     const fn native_id(self) -> &'static str {
         match self {
@@ -53,6 +67,7 @@ impl Kind {
             Self::Transient => "miso.transient-shaper",
             Self::Limiter => "miso.true-peak-limiter",
             Self::Multiband => "miso.multiband-compressor",
+            Self::DeEsser => "miso.de-esser",
             Self::Delay => "miso.delay",
         }
     }
@@ -65,6 +80,7 @@ impl Kind {
             Self::Transient => "transient",
             Self::Limiter => "limiter",
             Self::Multiband => "multiband",
+            Self::DeEsser => "de-esser",
             Self::Delay => "delay",
         }
     }
@@ -661,7 +677,7 @@ fn a_mono_track_whose_witness_declines_pools_as_stereo() {
 }
 
 /// Seeds the randomized differential renders per PR; `PROBE_1098_SEEDS` widens a manual sweep.
-const SEEDS: u64 = 24;
+const SEEDS: u64 = 48;
 
 /// xorshift64*: deterministic, dependency-free, and the same on every target.
 struct Rng(u64);
@@ -694,7 +710,10 @@ impl Rng {
 /// bypass on each console slot, its own parameter values ([`VARIANTS`]), a mono or stereo feed, a
 /// gain that is silent, quiet, or hot (+6 to +18 dBFS peak, so every limiter and compressor works
 /// its gain path), and now and then a NaN input sample, which the input section's bank sanitizes on
-/// its lane alone.
+/// its lane alone. Every third seed then gives most tracks one shared two-slot insert chain,
+/// cycling through [`INSERT_KINDS`] by seed, so partial insert cohorts at and above the padding
+/// threshold form and bind padded for every kind that can pad one (#888). Those draws come last,
+/// so every other seed's session is unchanged.
 fn generate(seed: u64) -> (Console, Vec<TrackShape>) {
     let mut rng = Rng::new(seed);
     let n = TRACK_COUNTS[rng.below(TRACK_COUNTS.len() as u64) as usize];
@@ -708,7 +727,7 @@ fn generate(seed: u64) -> (Console, Vec<TrackShape>) {
         pre: kinds[..split].to_vec(),
         post: kinds[split..].to_vec(),
     };
-    let tracks = (0..n)
+    let mut tracks: Vec<TrackShape> = (0..n)
         .map(|_| TrackShape {
             feed: Feed {
                 gain: match rng.below(8) {
@@ -726,6 +745,18 @@ fn generate(seed: u64) -> (Console, Vec<TrackShape>) {
             variant: rng.below(VARIANTS.len() as u64) as usize,
         })
         .collect();
+    // Every third seed only, and drawn last, so every other seed is the session main generates.
+    if seed.is_multiple_of(3) {
+        let cycle = seed / 3;
+        let kind =
+            |offset: u64| INSERT_KINDS[((cycle + offset) % INSERT_KINDS.len() as u64) as usize];
+        let shared = [kind(0), kind(3)];
+        for track in &mut tracks {
+            if rng.chance(800) {
+                track.inserts = shared.to_vec();
+            }
+        }
+    }
     (console, tracks)
 }
 
@@ -739,11 +770,13 @@ fn generate(seed: u64) -> (Console, Vec<TrackShape>) {
 /// and padded remainders at every count the gate names, so a whole-bank decision that is not
 /// bit-neutral per lane moves some track's bits here. Each track is read at its post-pan stage,
 /// so a defect cannot hide in the session output's sum. Every seed must bind every console slot
-/// (the compile refuses otherwise), and the sweep must reach a padded bank with a bypassed lane
-/// and a padded mono bank.
+/// (the compile refuses otherwise), and the sweep must reach a padded bank with a bypassed lane,
+/// a padded mono bank and a padded insert bank (#888).
 ///
 /// Red (measured, #1098 evidence): a limiter bank that skips the gain path for every lane when its
 /// first lane is quiet; a padded lane fed anything but `+0.0`; the rack scattering a padded lane.
+/// The padded insert banks (#888) put the same clauses in the dynamic rack, where a clone lane
+/// leaking into an active one moves an insert's bits.
 #[test]
 fn randomized_console_sessions_render_the_per_node_bits_on_every_track() {
     const BLOCKS: u64 = 12;
@@ -755,6 +788,8 @@ fn randomized_console_sessions_render_the_per_node_bits_on_every_track() {
         .expect("a vector host")
         .lanes() as usize;
     let (mut padded_with_bypass, mut padded_mono, mut poisoned_beside_a_mate) = (0, 0, 0);
+    // Padded insert banks per kind (#888), keyed by the kind's name in the insert's id.
+    let mut padded_inserts = [0_usize; INSERT_KINDS.len()];
     for seed in 0..seeds {
         let (console, tracks) = generate(seed);
         let model = console_session(&console, &tracks);
@@ -791,6 +826,18 @@ fn randomized_console_sessions_render_the_per_node_bits_on_every_track() {
             });
             padded_with_bypass += usize::from(bypassed);
         }
+        for bound in report.bound_slots.iter().filter(|bound| {
+            report.plan.groups[bound.group].rack == RackLocation::Dynamic
+                && bound.members.len() < lanes
+        }) {
+            let id = bound.members[0].effect_id.as_str();
+            let (_, name) = id.split_once('-').expect("insertN-kind");
+            let kind = INSERT_KINDS
+                .iter()
+                .position(|kind| kind.name() == name)
+                .unwrap_or_else(|| panic!("{what}: an insert of no known kind: {id}"));
+            padded_inserts[kind] += 1;
+        }
         let poisoned = |member: &EffectNodeId| {
             tracks[member.track_id.as_str()[2..]
                 .parse::<usize>()
@@ -813,14 +860,22 @@ fn randomized_console_sessions_render_the_per_node_bits_on_every_track() {
     }
     println!(
         "#1098 randomized console differential: {seeds} seeds, padded banks with a bypassed lane \
-         {padded_with_bypass}, padded mono banks {padded_mono}, effect banks holding a poisoned \
-         track beside a bank-mate {poisoned_beside_a_mate}"
+         {padded_with_bypass}, padded mono banks {padded_mono}, padded insert banks per kind \
+         {padded_inserts:?}, effect banks holding a poisoned track beside a bank-mate \
+         {poisoned_beside_a_mate}"
     );
     assert!(
         padded_with_bypass > 0 && padded_mono > 0 && poisoned_beside_a_mate > 0,
         "the sweep reaches a padded bank with a bypassed lane, a padded mono bank and a poisoned \
          track beside a bank-mate"
     );
+    for (kind, count) in INSERT_KINDS.iter().zip(padded_inserts) {
+        assert!(
+            count > 0,
+            "the sweep reaches a padded insert bank of the {} (#888)",
+            kind.name()
+        );
+    }
 }
 
 /// Gate 2, named (#1091 verdict L3): the true-peak limiter as a padded `post_insert` slot, with
@@ -1041,31 +1096,33 @@ fn a_console_group_a_factory_declines_fails_the_compile() {
 /// Gate 4, #971 under padding: a mono track that carries a console slot is never pooled as stereo,
 /// even where moving it would fill a stereo insert group.
 ///
-/// `ch00..=ch{W}` are mono and `ch{W+1}..` stereo, `W - 1` of them. Every track carries the
-/// limiter as its console slot and the same two inserts, EQ then compressor. Under #971's rule as
-/// it stood, `ch{W}` strands -- every group it sits in is a partial mono one -- and moving it
-/// completes the stereo insert group, two banks, at the price of one padded limiter bank, so the
-/// move bound more banks and was kept, and the mono track lost its collapse. Since #1098 a console
-/// group always binds, so a track that carries a console slot banks somewhere and is never
-/// stranded (`banks::stranded_mono_tracks`): `ch{W}` stays mono in a padded limiter bank, the
-/// insert remainders render per node, and the session binds five banks at any width.
+/// `ch00..=ch{W}` are mono and `ch{W+1}..` stereo, `k - 1` of them, where `k` is the insert padding
+/// threshold (#888), so the stereo insert remainder binds nothing. Every track carries the limiter
+/// as its console slot and the same two inserts, EQ then compressor. Under #971's rule as it stood,
+/// `ch{W}` strands -- every group it sits in is a partial mono one -- and moving it lifts the
+/// stereo insert group to `k` members, which pads, two banks, at the price of one padded limiter
+/// bank, so the move bound more banks and was kept, and the mono track lost its collapse. Since
+/// #1098 a console group always binds, so a track that carries a console slot banks somewhere and
+/// is never stranded (`banks::stranded_mono_tracks`): `ch{W}` stays mono in a padded limiter bank,
+/// the insert remainders render per node, and the session binds five banks at any width.
 ///
 /// The console-free counterpart keeps #971: the same chain as inserts alone, where the stranded
-/// track banks nowhere, moves `ch{W}` to the stereo pool and binds both insert groups, six banks.
+/// track banks nowhere, moves `ch{W}` to the stereo pool and binds both insert groups (the stereo
+/// one padded), six banks.
 ///
 /// Red if a padded console group strands its members again (`ch{W}` moves and six banks bind), or
 /// if the demotion is retired for console-free sessions too (`ch{W}` stays mono there).
 #[test]
 fn a_console_track_is_never_pooled_as_stereo_to_fill_a_bank() {
     const BLOCKS: u64 = 12;
-    let lanes = BankWidth::for_backend(host_dispatch())
-        .expect("a vector host")
-        .lanes() as usize;
+    let width = BankWidth::for_backend(host_dispatch()).expect("a vector host");
+    let lanes = width.lanes() as usize;
+    let k = crate::banks::min_padded_insert_members(width);
     let console = Console {
         pre: Vec::new(),
         post: vec![Kind::Limiter],
     };
-    let tracks: Vec<TrackShape> = (0..2 * lanes)
+    let tracks: Vec<TrackShape> = (0..lanes + k)
         .map(|index| TrackShape {
             feed: Feed {
                 gain: 2.0,

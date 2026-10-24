@@ -2721,10 +2721,17 @@ pub trait PreparedNativeEffectBank: Send {
     /// path asks for this mask with every lane set, padded lanes included.
     ///
     /// While a bank is collapsed its right channel is frozen at the collapse
-    /// ([`process_bank_mono`](Self::process_bank_mono)). The answer still reads both channels and
-    /// stays sound: a frozen right channel that is not at rest only clears a bit, and one that is
-    /// at rest sets no bit the left channel does not, because the counterfactual right channel is
-    /// the left one.
+    /// ([`process_bank_mono`](Self::process_bank_mono)), and stale: the counterfactual right
+    /// channel is the left one. **The collapsed-bank rule** (#1894, root's revision of its own
+    /// #1107 D3 reading): from a rendered `process_bank_mono` until
+    /// [`desymmetrize_channels`](Self::desymmetrize_channels), the bank answers this predicate
+    /// from its left channel alone, and [`advance_clocks`](Self::advance_clocks) advances the left
+    /// channel's per-channel clocks alone (the bank-level clocks as before), as the skipped mono
+    /// block would have. The disengage copy is the one place the right channel is made equal
+    /// again. A bank that has rendered no mono block since its last disengage answers from both
+    /// channels, which agree whenever the chain may collapse, so that answer is exact too. A stage
+    /// that still reads its frozen right channel stays sound -- a frozen word that is not at rest
+    /// only clears a bit -- but keeps a silent collapsed lane rendering.
     ///
     /// The default is `0`: an effect that has not written the predicate declines for every lane,
     /// and a wrong set bit is the only answer that could ever be unsound.
@@ -2753,7 +2760,8 @@ pub trait PreparedNativeEffectBank: Send {
     /// passes every lane, padded lanes included: the padding contract feeds a padded lane `+0.0`,
     /// so a rendered block would have advanced its clocks too. A bit for a lane that
     /// `lanes_at_rest` does not report is a caller defect, and an implementation may
-    /// `debug_assert` against it.
+    /// `debug_assert` against it. A collapsed bank advances its left channel's clocks alone (the
+    /// collapsed-bank rule on [`lanes_at_rest`](Self::lanes_at_rest)).
     ///
     /// # The default
     ///

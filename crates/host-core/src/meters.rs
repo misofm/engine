@@ -157,6 +157,28 @@ fn output_peak_queue_depth() -> NonZeroUsize {
 
 // REALTIME_POLICY_BEGIN: #1581 D3, the output meter's render half.
 impl OutputPeakObserver {
+    /// Whether [`Self::observe`] would fold the block that starts at `first_sample` (#882): the
+    /// gate is active and the block starts at or after it. One `Acquire` load; the render thread's
+    /// owner asks it before the block so the strip meters observe exactly the blocks the output
+    /// meter does. The gate moves only on the render thread between blocks
+    /// ([`MeterDelivery::align`]), except at a swap that restarts the grid, which
+    /// [`Self::admits_restart_block`] answers.
+    #[must_use]
+    pub fn admits(&self, first_sample: u64) -> bool {
+        let gate = self.gate.load(Ordering::Acquire);
+        gate != INACTIVE && first_sample >= gate
+    }
+
+    /// Whether [`Self::observe`] will fold a block that adopts a successor whose strip meters were
+    /// not carried (#882): such a swap restarts the meter grid at its adoption block, and a gate
+    /// that is active, open or still waiting for its activation, moves there before the block is
+    /// observed ([`MeterDelivery::adopt`]), so the block is admitted exactly when the gate is
+    /// active. One `Acquire` load, asked before the block beside [`Self::admits`].
+    #[must_use]
+    pub fn admits_restart_block(&self) -> bool {
+        self.gate.load(Ordering::Acquire) != INACTIVE
+    }
+
     /// Observe one rendered block, `[first_sample, next_sample)`, from its two output planes.
     ///
     /// Loads the gate once. While it is inactive, or the block starts before it, the call folds
