@@ -775,8 +775,9 @@ def runs_m3_on_config_flags(command: str) -> bool:
 
 
 # Issue #1434 D1: an owner step that is a `run: |` block is a guard only with the lines around its
-# owner command. Each block-form owner step that carries such lines is named here with them, in
-# order, each with the issue that owns it. They must appear in the step's comment-stripped lines
+# owner command. Each block-form owner step that carries such lines (a #1044 owner's, or the sdk
+# job's qualify step, which #1435 gave the same shape) is named here with them, in order, each with
+# the issue that owns it. They must appear in the step's comment-stripped lines
 # as an ordered subsequence: other lines (a message, a `fi`) carry no claim and stay free. An edit
 # to one of these steps must update this table in the same change.
 GUARDED_OWNER_STEPS = {
@@ -790,6 +791,18 @@ GUARDED_OWNER_STEPS = {
          "#1429"),
         ('if [[ -n "$leftover" ]]; then', "#1429"),
         ("exit 1", "#1429"),
+    )),
+    "sdk": ("Qualify the SDK package against the shared artifact", (
+        ("set -o pipefail", "#1435"),
+        ('scratch="$(mktemp -d "$RUNNER_TEMP/sdk-qualify-tmp.XXXXXX")"', "#1435"),
+        ("trap 'rm -rf -- \"$scratch\"' EXIT", "#1435"),
+        ('export TMPDIR="$scratch"', "#1435"),
+        ("export NODE_DISABLE_COMPILE_CACHE=1", "#1435"),
+        *((command, "#1044") for command in SDK_CLOSURE_LINES),
+        ("leftover=\"$(find \"$scratch\" -mindepth 1 -maxdepth 1 -printf '%f\\n' | LC_ALL=C sort)\"",
+         "#1435"),
+        ('if [[ -n "$leftover" ]]; then', "#1435"),
+        ("exit 1", "#1435"),
     )),
 }
 # Issue #1434 D2: shell lines that disable or swallow a failure. None may appear in an owner step
@@ -864,23 +877,34 @@ def check_qualification_deduplicated_owners(text: str) -> None:
             if owned:
                 check_unmasked_step(f"{name}'s owner step running `{owned[0]}`", step, owned,
                                     "#1044, #1434")
-        if name in GUARDED_OWNER_STEPS:
-            step_name, guard = GUARDED_OWNER_STEPS[name]
-            step = named_step(block, step_name)
-            require(step is not None,
-                    f"qualification.yml: {name} must keep its step \"{step_name}\" (#1434: an edit "
-                    "to it updates GUARDED_OWNER_STEPS in scripts/check-ci-path-routing.py)")
-            remaining = iter(run_lines(step))
-            for line, issue in guard:
-                require(any(candidate == line for candidate in remaining),
-                        f"qualification.yml: {name}'s step \"{step_name}\" must run `{line}` "
-                        f"({issue}), after the guard lines before it in GUARDED_OWNER_STEPS; an "
-                        "edit to this step updates that table in the same change (#1434)")
     require(any(runs_m3_on_config_flags(command)
                 for command in unconditional_step_commands(job(text, "test-release"))),
             "qualification.yml: test-release must run M3 (`cargo test --release -p math`, "
             f"`{M3_TEST}` not deselected) unconditionally with no RUSTFLAGS in front of it, on "
             "the x86-64-v3 flags .cargo/config.toml pins (#1044)")
+
+
+def check_qualification_guarded_owner_steps(text: str) -> None:
+    """D1: each GUARDED_OWNER_STEPS step runs its guard lines in order. D2 and A2-D1: nothing in
+    the step or its job can make a failure of any of those lines pass (the sdk job is not a #1044
+    deduplicated owner, so the owner loop does not cover it)."""
+    for name, (step_name, guard) in GUARDED_OWNER_STEPS.items():
+        block = job(text, name)
+        require(CONTINUE_ON_ERROR_JOB.search(block) is None,
+                f"qualification.yml: {name} runs a guarded owner step and must carry no job-level "
+                "continue-on-error key, whatever its value (#1434)")
+        step = named_step(block, step_name)
+        require(step is not None,
+                f"qualification.yml: {name} must keep its step \"{step_name}\" (#1434: an edit "
+                "to it updates GUARDED_OWNER_STEPS in scripts/check-ci-path-routing.py)")
+        remaining = iter(run_lines(step))
+        for line, issue in guard:
+            require(any(candidate == line for candidate in remaining),
+                    f"qualification.yml: {name}'s step \"{step_name}\" must run `{line}` "
+                    f"({issue}), after the guard lines before it in GUARDED_OWNER_STEPS; an "
+                    "edit to this step updates that table in the same change (#1434)")
+        check_unmasked_step(f"{name}'s guarded step \"{step_name}\"", step,
+                            tuple(line for line, _ in guard), "#1434")
 
 
 # Issue #1434 A1-D1 (#1422): `--all-targets` runs no doctest, so each whole-package test step has a
@@ -1325,6 +1349,7 @@ def check_qualification_workflow(root: pathlib.Path) -> None:
     check_qualification_artifact_identity(text)
     check_qualification_metadata_generated_once(text, names)
     check_qualification_deduplicated_owners(text)
+    check_qualification_guarded_owner_steps(text)
     check_qualification_doctest_twins(text)
     check_qualification_realtime_policy_tests(text)
     check_qualification_v8_spill(text)
