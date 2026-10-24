@@ -331,3 +331,17 @@ Host: `x86_64`, AVX2 pin, debug profile. Suite: `cargo test --locked -p rack`. "
 | 987-R1 | the dispatch arms on the structural term alone (`&& self.input_symmetric` removed from `armed`) | `rack/src/lib.rs` | the window test | RED (`left: 9, right: 4`: the window collapsed over unequal planes) |
 | 987-R2 | the agreement maintenance keeps agreement across a block with the input term down (`!self.input_symmetric ||` becomes `false ||`) | `rack/src/lib.rs` | the window test | RED (`left: 5, right: 4`: block 8 re-engaged on separated states) |
 | 987-R3 | `planes_identical` drops its seam clause (`self.resident_zero \|\| self.collapsed`) | `rack/src/lib.rs` | the window test | RED (the per-block `!planes_identical()` assertion, block 0) |
+
+## Issue #887 — the tiled transpose for partial banks
+
+Every bank now gathers and scatters through the tiled transpose; `scatter_lane` and the per-lane
+loops behind M1, M6 and M7 above are the `#[cfg(test)]` scalar oracle (`force_scalar_transpose`),
+and M7's production counterpart is 887-R2. Each row was applied to the committed tree, run with
+`cargo test --locked -p rack --lib -- tiled_transpose_matches inactive_lanes_are_never the_fold_epilogue`,
+and reverted with `git checkout`.
+
+| # | mutation | file | test | result |
+|---|---|---|---|---|
+| 887-R1 | the direct scatter drops its chain-side full-bank guard (`self.full_bank &&` removed) | `rack/src/lib.rs` | `tiled_transpose_matches_the_scalar_path_bit_for_bit`, `inactive_lanes_are_never_gathered_or_scattered` | RED (an inactive member's plane written) |
+| 887-R2 | the staged copy-out hands inactive lanes to members (`if !self.active[lane] { continue; }` removed) | `rack/src/lib.rs` | both tests above | RED |
+| 887-R3 | the gather reads an inactive lane's member plane instead of the zero plane (`if self.active[lane]` becomes `if true \|\| ..`) | `rack/src/lib.rs` | `tiled_transpose_matches_the_scalar_path_bit_for_bit` only | RED (inactive scratch word not the image of `+0.0`) |

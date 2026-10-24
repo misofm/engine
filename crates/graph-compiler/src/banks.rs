@@ -793,7 +793,8 @@ pub(crate) struct EffectBankResourceEstimate {
 /// A bank may be padded (issue #1088): it has `1..=lanes` members and its active mask is `true` on
 /// exactly lanes `0..members`, the planner's members-before-padding layout, which is also the
 /// layout the graph runtime gathers and scatters by. Scratch is charged for every lane, because a
-/// padded lane still occupies its AoSoA column; member metadata for the members only.
+/// padded lane still occupies its AoSoA column; member metadata for the members only. The runtime
+/// buffers are the chain's staging planes, plus a padded bank's `+0.0` plane (issue #887).
 pub(crate) fn effect_bank_resource(
     banks: &[graph::GraphPreparedEffectBank],
     quantum: u32,
@@ -829,7 +830,16 @@ pub(crate) fn effect_bank_resource(
         // L and R only: the sidechain planes were never read (#96 F9).
         let scratch_samples = scratch_plane_samples.checked_mul(2)?;
         let scratch_bytes = scratch_samples.checked_mul(4)?;
-        let runtime_buffer_samples = scratch_plane_samples.checked_mul(2)?;
+        // The chain's two lane-major staging planes, and for a padded bank the `quantum`-word
+        // `+0.0` plane its tiled gather reads for an inactive lane (issue #887).
+        let zero_plane_samples = if members < lanes {
+            u64::from(quantum)
+        } else {
+            0
+        };
+        let runtime_buffer_samples = scratch_plane_samples
+            .checked_mul(2)?
+            .checked_add(zero_plane_samples)?;
         let runtime_buffer_bytes = runtime_buffer_samples.checked_mul(4)?;
         resource.scratch_samples = resource.scratch_samples.checked_add(scratch_samples)?;
         resource.scratch_bytes = resource.scratch_bytes.checked_add(scratch_bytes)?;

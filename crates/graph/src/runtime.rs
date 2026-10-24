@@ -7382,8 +7382,10 @@ pub fn test_only_prepare_bank_chain_inputs(
     }
 
     let scratch = AoSoaScratch::new(width, 1).expect("test width and quantum");
-    // Keep this ownership oracle ragged so tiled staging remains a separate owner. Slot count and
-    // lane width are independent: S=0 still has a legal nonempty direct-caller chain mask.
+    // Keep this ownership oracle ragged: a padded chain owns the most -- two staging planes, as
+    // every chain does, and the `+0.0` plane only a padded chain allocates (issue #887). Slot
+    // count and lane width are independent: S=0 still has a legal nonempty direct-caller chain
+    // mask.
     let active = trailing_active_mask(width.lanes() as usize - 1, width);
     let mut stages = Vec::with_capacity(slot_count);
     for _ in 0..slot_count {

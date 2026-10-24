@@ -416,14 +416,19 @@ fn actual_runtime_bank_slot_owners_fit_retained_largest_and_conversion_reservati
         let lanes = width.lanes() as usize;
         for slot_count in [0_usize, 1, 3, 9] {
             // Stage storage, chain mask and scratch are created before the measured conversion.
-            // The graph test seam deliberately keeps this chain ragged, so tiled staging remains
-            // absent and separately owned.
+            // The graph test seam keeps this chain ragged (padded), so construction also makes
+            // the chain's own planes (issue #887): two staging planes, which every chain owns for
+            // its tiled scatter and which at quantum 1 have the scratch plane's layout, and the
+            // one-word `+0.0` plane only a padded chain owns, which its tiled gather reads for the
+            // inactive lane. They are the three allocations, and the bytes, this test adds below.
             let stage_layout =
                 Layout::array::<Box<dyn rack::BankStage>>(slot_count).expect("stage layout");
             let slot_layout =
                 Layout::array::<rack::BankSlot>(slot_count).expect("public slot layout");
             let mask_layout = Layout::array::<bool>(lanes).expect("one lane mask layout");
             let scratch_layout = Layout::array::<f32>(lanes).expect("one scratch plane");
+            let zero_layout = Layout::array::<f32>(1).expect("one quantum-1 zero plane");
+            let chain_plane_bytes = (2 * scratch_layout.size() + zero_layout.size()) as u64;
             let inputs = graph::test_only_prepare_bank_chain_inputs(width, slot_count);
             test_only_reset_phase_two_allocation_tracker();
             reset_byte_counters();
@@ -447,10 +452,13 @@ fn actual_runtime_bank_slot_owners_fit_retained_largest_and_conversion_reservati
             assert_eq!(ownership.slot_bytes, slot_layout.size());
             assert_eq!(ownership.mask_bytes, mask_layout.size());
 
+            // The chain's own planes, on every slot count: two staging planes and the zero plane.
+            assert_eq!(count(&snapshot.layouts, scratch_layout), 2);
+            assert_eq!(count(&snapshot.layouts, zero_layout), 1);
             let prepared_layout = if slot_count == 0 {
-                assert_eq!(snapshot.allocation_count, 0);
+                assert_eq!(snapshot.allocation_count, 3);
                 assert_eq!(snapshot.deallocation_count, 0);
-                assert!(snapshot.layouts.is_empty());
+                assert_eq!(snapshot.layouts.len(), 2);
                 assert!(snapshot.deallocation_layouts.is_empty());
                 None
             } else {
@@ -459,6 +467,8 @@ fn actual_runtime_bank_slot_owners_fit_retained_largest_and_conversion_reservati
                     .iter()
                     .find(|layout| {
                         layout.allocation_count == 1
+                            && !(layout.size_bytes == zero_layout.size() as u64
+                                && layout.align_bytes == zero_layout.align() as u64)
                             && !(layout.size_bytes == slot_layout.size() as u64
                                 && layout.align_bytes == slot_layout.align() as u64)
                             && !(layout.size_bytes == mask_layout.size() as u64
@@ -486,7 +496,8 @@ fn actual_runtime_bank_slot_owners_fit_retained_largest_and_conversion_reservati
                         unit.0, unit.1
                     );
                 }
-                assert_eq!(snapshot.allocation_count, slot_count as u64 + 2);
+                // `+ 3`: the two staging planes and the zero plane are never freed here.
+                assert_eq!(snapshot.allocation_count, slot_count as u64 + 2 + 3);
                 assert_eq!(snapshot.deallocation_count, slot_count as u64 + 2);
                 assert_eq!(count(&snapshot.layouts, slot_layout), 1);
                 assert_eq!(count(&snapshot.layouts, layout), 1);
@@ -511,17 +522,22 @@ fn actual_runtime_bank_slot_owners_fit_retained_largest_and_conversion_reservati
             });
             assert_eq!(core::mem::size_of::<bool>(), 1);
             assert!(p <= b, "actual private slot layout fits public slot layout");
-            let retained = n * p + w;
+            let retained = n * p + w + chain_plane_bytes;
+            let staging_plane = scratch_layout.size() as u64;
             if n == 0 {
-                assert_eq!(LARGEST_REQUESTED_BYTES.get(), 0);
-                assert_eq!(LIVE_BYTES.get(), w, "direct caller retains its chain mask");
+                assert_eq!(LARGEST_REQUESTED_BYTES.get(), staging_plane);
+                assert_eq!(
+                    LIVE_BYTES.get(),
+                    w + chain_plane_bytes,
+                    "direct caller retains its chain mask and the chain its own planes"
+                );
             } else {
                 let c = n * (f + 3 * b + 3 * w);
-                let l = (n * f).max(n * b).max(w);
+                let l = (n * f).max(n * b).max(w).max(staging_plane);
                 let conversion_coexistence = n * f + n * b + 2 * n * p + 2 * n * w;
                 assert!(n * p + n * w <= n * (b + 2 * w));
                 assert!(conversion_coexistence <= c);
-                for request in [n * f, n * b, n * p, w] {
+                for request in [n * f, n * b, n * p, w, staging_plane] {
                     assert!(request <= l);
                 }
                 assert_eq!(LARGEST_REQUESTED_BYTES.get(), l);
@@ -555,16 +571,41 @@ fn actual_runtime_bank_slot_owners_fit_retained_largest_and_conversion_reservati
             assert!(!release.overflowed);
             assert!(!BYTE_COUNTER_FAILED.get());
             assert_eq!(release.allocation_count, 0);
-            assert_eq!(release.deallocation_count, u64::from(slot_count != 0) + 3);
+            // `+ 3` more than before #887: the two staging planes and the zero plane.
+            assert_eq!(
+                release.deallocation_count,
+                u64::from(slot_count != 0) + 3 + 3
+            );
             if let Some(prepared_layout) = prepared_layout {
                 assert_eq!(count(&release.deallocation_layouts, prepared_layout), 1);
             }
             assert_eq!(count(&release.deallocation_layouts, mask_layout), 1);
-            assert_eq!(count(&release.deallocation_layouts, scratch_layout), 2);
+            // Two scratch planes and two staging planes share the layout at quantum 1.
+            assert_eq!(count(&release.deallocation_layouts, scratch_layout), 4);
+            assert_eq!(count(&release.deallocation_layouts, zero_layout), 1);
             assert_eq!(LIVE_BYTES.get(), 0, "owned slot chain releases off render");
             assert_eq!(LIVE_ALLOCS.get(), 0);
-            assert_eq!(LIVE_FREES.get(), u64::from(slot_count != 0) + 3);
+            assert_eq!(LIVE_FREES.get(), u64::from(slot_count != 0) + 3 + 3);
         }
+    }
+    // The full-mask row (issue #887): a full chain owns its two staging planes and no `+0.0`
+    // plane, which only a padded chain's gather reads. Red if a full chain allocates one.
+    for &width in effect_contract::BankWidth::ALL {
+        let lanes = width.lanes() as usize;
+        let staging_layout = Layout::array::<f32>(lanes).expect("one quantum-1 staging plane");
+        let scratch = rack::AoSoaScratch::new(width, 1).expect("test width and quantum");
+        let active = vec![true; lanes].into_boxed_slice();
+        test_only_reset_phase_two_allocation_tracker();
+        reset_byte_counters();
+        let observation = test_only_begin_phase_two_allocation_observation();
+        let chain =
+            armed(|| rack::BankChain::new(scratch, active, Vec::new())).expect("a full chain");
+        drop(observation);
+        let snapshot = test_only_phase_two_allocation_snapshot();
+        assert!(!snapshot.overflowed);
+        assert_eq!(snapshot.allocation_count, 2, "{width:?}: staging only");
+        assert_eq!(count(&snapshot.layouts, staging_layout), 2, "{width:?}");
+        drop(chain);
     }
     assert!(
         prepared_unit_layout.is_some(),
