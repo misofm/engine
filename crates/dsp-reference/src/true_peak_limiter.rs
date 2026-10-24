@@ -480,7 +480,7 @@ mod tests {
             ReferenceTruePeakLimiter::new(48_000.0, parameters(11.0)),
             Err(ReferenceTruePeakLimiterError::InvalidInput)
         ));
-        for rate in [1_000.0, f64::MAX] {
+        for rate in [1_000.0, 48_000.5, f64::MAX] {
             assert!(matches!(
                 ReferenceTruePeakLimiter::new(rate, parameters(5.0)),
                 Err(ReferenceTruePeakLimiterError::InvalidInput)

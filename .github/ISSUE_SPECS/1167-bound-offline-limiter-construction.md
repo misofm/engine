@@ -16,7 +16,7 @@ A minimal constructor regression must prove typed refusal without panic at the d
 
 ## Evidence / authorization
 
-Finding supplied by worker B (requested GPT-6.1 Sol xhigh), independently checked by root Sol on2026-10-01 during #1141. No fix, runtime reproducer or implementation attempt is authorized by this finding record. A bounded Sol brief must freeze the rate-domain decision and gates before a later attempt. This is a correctness follow-up, not an owner API design question.
+Finding supplied by worker B (requested GPT-6.1 Sol xhigh), independently checked by root Sol on 2026-10-01 during #1141. No fix, runtime reproducer or implementation attempt is authorized by this finding record. A bounded Sol brief must freeze the rate-domain decision and gates before a later attempt. This is a correctness follow-up, not an owner API design question.
 
 ## Decision record (attempt 1, 2026-10-24)
 
