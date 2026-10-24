@@ -286,8 +286,10 @@ and gate 4. Checked against `origin/main` `068742aba`.
   the running plan's duck overlay (a restore) is refused as `CommandError::Backpressure` before
   anything is prepared, so the caller republishes the withdrawn candidate. Without the base overlay
   of 1325b the restored strip would carry its ducked fader and stay muted. Once the watermark
-  reports the removal, the same edit is an added strip (#1288). 1325b removes the refusal and the
-  retry in `crates/capi/tests/plan_swap_race.rs` (`Control::restore_retries`) that depends on it.
+  reports the removal, the same edit is an added strip (#1288). 1325b removes the refusal, the
+  retry in `crates/capi/tests/plan_swap_race.rs` (`Control::restore_retries`) that depends on it,
+  and the two restore assertions in `strip_transitions.rs`'s gate-1 test (refused mid-ramp,
+  committed after the adoption).
 - **D2 records come from the classifier.** `plan_strip_transition` classifies the running plan's
   base model with the overlay applied against the same with the new mutes
   (`classify_live_delta_with_monitor`, ramps `LiveRamps::for_session(next)`, no edit ramps, the
@@ -317,9 +319,27 @@ and gate 4. Checked against `origin/main` `068742aba`.
   inherits `S` again.
 - **D4 routing (R5).** `submit`, `seek` and `seek_at` (and their unserviced forms) look the source
   up in the kept holder's overlay first (one binary search, no allocation, no lock) and go to that
-  epoch's producers on a hit. `session_seek` and `seek_report` are unchanged.
+  epoch's producers on a hit, unless render has already adopted a later epoch (one `Acquire` load
+  of the active epoch render publishes): then the overlay is over and the call falls through to
+  the newest set, so the browser's unserviced feed after the adoption is refused as
+  `source.id.unknown` before any service step (attempt 2). `session_seek` and `seek_report` are
+  unchanged.
+- **The browser's plain seek (attempt 2).** `hosts/host-web/src/lib.rs` `seek_source` prepared the
+  consumer at the committed session's source index. Through phase 1 the plan that renders still
+  has the removed source and its own indices, so the index is now the rendering plan's
+  (`SessionState::rendering_source_index`, from that epoch's inventory). A source that plan does
+  not render has no consumer to prepare and is answered by the control plane's routing.
+- **The overlay's charge (attempt 2).** `DuckOverlay::retained_ceiling` bounds an overlay by its
+  plan's strips, routes and sources (three `Box<str>` vectors at count capacity and the ID text);
+  `merged`/`sorted_ids` shrink to length after dedup. Each epoch's capi row carries `KEPT_BASES`
+  times that ceiling at its own model (`MonitorRows::duck`), an epoch row like the monitor
+  overlay's: an overlay names only the plan it ducks, and a superseding commit never changes that
+  plan. The second copy is the replacement a superseding rebuild builds while the stored one
+  lives. The longest vector joins the largest-allocation check.
 - **`C`.** The rows of `PlanStateInventory::delay_lines` whose edge is a route's `RouteSource` or
-  `RouteDestination` edge; a route's two lines add. Root approved a read-only accessor
+  `RouteDestination` edge; a route's two lines add. A route has both when a successor floors its
+  route node above its source's arrival: re-pointing a route to an earlier tap keeps the node at
+  its old arrival (#1285), and the unit test builds exactly that. Root approved a read-only accessor
   `PlanStateInventory::delay_lines` in `prepare.rs` for this (the field was private).
 - **Paths outside the scope note, root-approved.** `crates/host-core/src/prepare.rs` (the
   accessor, nothing else). Seven test files whose tests encoded the old contract (a removal adopted
@@ -334,6 +354,7 @@ and gate 4. Checked against `origin/main` `068742aba`.
   `crates/control-plane/tests/spectrum_monitor.rs` (the promotion bound), `hosts/host-web/src/tests.rs`
   (the discard count: none before `S`, two blocks after it) and `hosts/host-web/tests/control_parity.rs`
   (render until the adoption). Both hosts change: the browser runs the same control-plane rebuild.
+  Attempt 2, root-approved: `hosts/host-web/src/lib.rs` (`seek_source` only).
   Also root-approved: `tools/realtime-policy/src/policy.rs` and `docs/REALTIME_DEPENDENCY_POLICY.md`
   put the new capi test binary on the unsafe-ownership list (its unsafe is the C calls), as every
   other capi test binary is.
@@ -350,19 +371,26 @@ and gate 4. Checked against `origin/main` `068742aba`.
   strip, or if the producer of a source removed across a withdrawn candidate is not returned to the
   running epoch (#1310 D5 step 5).
 - `host_core::transition::tests::a_transition_ducks_the_removed_strips_outside_the_overlay`: red if
-  the duck set includes an overlay strip, if `C` is not the route's compensation line, or if a
-  route whose tap follows the fader is muted.
+  the duck set includes an overlay strip, if `C` is not the route's compensation line or not the
+  sum of a route's two lines, if a route whose tap follows the fader is muted, or if an overlay
+  keeps spare capacity past its charge.
+- The restore assertions in gate 1's test: red if a phase-1 restore commits (1325b boundary).
+- `capi/tests/resource_lifecycle.rs` capi epoch oracle: red if the duck row leaves the charge.
+- `host-web/tests/control_parity.rs::a_removed_source_seeks_and_feeds_until_its_adoption_alike_on_both_hosts`:
+  red if the browser prepares a seek at the committed session's index, or if its unserviced feed
+  routes a removed source to the retiring plan after the adoption.
 - Mutants, each recorded red (committed tree, restored with `git checkout` and `touch`): adoption
   left `Next`; `S` without `+ q`; `S` without `C`; no route records; source routing off; no `S`
   inheritance; no overlay exclusion and no overlay applied (second write); #1310 D5 step 5 removed;
   an allocation in `PlanAdoption::admits` (the test process aborts); and, on the unit test, no
-  overlay exclusion, `C` = 0, and post-fader routes muted.
+  overlay exclusion, `C` = 0, and post-fader routes muted. Attempt 2: no restore refusal (gate 1
+  red), `C` as the max of a route's lines (972 expected, 486 got), no shrink (over the charge), no
+  duck row (resource oracle red by 834 bytes), no adoption check in the source routing and the
+  committed-index browser seek (parity test red on each).
 
 ### Stated limits (1325a)
 
 - A removed strip that is already silent (muted long before) still waits for `S`: the control plane
   cannot know that its route lines are empty.
-- The overlay is not charged in the replacement admission; it holds IDs only.
-- `submit_unserviced` (the browser's `process()` path) after render adopted the successor but before
-  the next service step still routes a removed source to the retiring plan's producer: the PCM is
-  accepted and then discarded with that plan, as D4 documents for PCM queued past `S`.
+- The `StripTransition` built inside one rebuild is a transient control-thread value, as the
+  classifier's own working sets are, and is not charged.

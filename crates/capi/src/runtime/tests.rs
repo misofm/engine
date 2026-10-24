@@ -1320,7 +1320,6 @@ fn render_c(plan: *mut crate::Plan, block: u64) -> Vec<f32> {
     pcm
 }
 
-/// Feeds `fixture-source` one block ahead and renders `blocks` blocks from `first`.
 /// [`feed_and_render_c`] from `first` until the watermark reports `revision` (#1325 D3: a strip
 /// removal is adopted at `S`); the next block.
 fn feed_and_render_until_c(
@@ -1341,6 +1340,7 @@ fn feed_and_render_until_c(
     block
 }
 
+/// Feeds `fixture-source` one block ahead and renders `blocks` blocks from `first`.
 fn feed_and_render_c(
     session: *mut crate::Session,
     plan: *mut crate::Plan,
