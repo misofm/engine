@@ -2463,9 +2463,10 @@ impl<L: Lane, const W: usize> PreparedNativeEffectBank for PreparedMultibandComp
 
     /// Issue #893: the clocks are the two channels' silence counters and nothing else
     /// ([`Side::rest_lanes`]). A masked lane takes `min(run + frames, 2^24)` on both channels (on
-    /// the left alone on a collapsed bank, #1894), which is what a rendered `+0.0` block leaves; a prepared bypass freezes the counters, so it
-    /// advances nothing. A rendered quiet block after which every lane is at rest earns
-    /// `silent_fixed_point`, so a mask that covers the whole bank earns it too.
+    /// the left alone on a collapsed bank, #1894), which is what a rendered `+0.0` block leaves; a
+    /// prepared bypass freezes the counters, so it advances nothing. A rendered quiet block after
+    /// which every lane is at rest earns `silent_fixed_point`, so a mask that covers the whole bank
+    /// earns it too.
     fn advance_clocks(&mut self, lanes_mask: u32, frames: u32) {
         let bank = all_lanes::<W>();
         let bits = lanes_mask & bank;

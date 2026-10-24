@@ -364,6 +364,32 @@ fn a_collapsed_bank_that_falls_silent_is_at_rest_and_skips_exactly() {
             "track {track}: the payload after the skip and the disengage"
         );
     }
+    // The flag the disengage clears: one dual block whose left plane is `+0.0` and whose right
+    // carries signal moves the right channel off rest, so no lane may answer at rest. A flag left
+    // set answers from the rested left channel and the right tail would be skipped.
+    for bank in [&mut mixed, &mut never] {
+        let mut left = vec![0.0; FRAMES * NATIVE_LANES];
+        let mut right = vec![0.25; FRAMES * NATIVE_LANES];
+        let offsets = [0_u32; NATIVE_LANES + 1];
+        let block = EffectBankProcessBlock::new(
+            &mut left,
+            &mut right,
+            None,
+            FRAMES as u32,
+            native_width(),
+            1 << 30,
+            &[],
+            &offsets,
+            128,
+        )
+        .expect("bank block");
+        bank.processor.process_bank(block);
+    }
+    assert_eq!(
+        mixed.processor.lanes_at_rest() & all,
+        0,
+        "the right channel is live again"
+    );
     for _ in 0..2 {
         run(&mut mixed, &mut never, true, false, false);
     }

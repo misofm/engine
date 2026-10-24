@@ -1944,9 +1944,9 @@ impl<L: Lane> InputStage<L> {
     }
 
     /// Advance the silence counters of the lanes in `lanes_mask` by `frames`, both channels (the
-    /// live one alone when collapsed, below), exactly as a rendered block of `frames` frames of `+0.0` would (`silence_advance`, issue
-    /// #1781): the caller skips the block, and every lane in the mask is one
-    /// [`Self::lanes_at_rest`] reports. A lane outside the mask keeps its counters.
+    /// live one alone when collapsed, below), exactly as a rendered block of `frames` frames of
+    /// `+0.0` would (`silence_advance`, issue #1781): the caller skips the block, and every lane in
+    /// the mask is one [`Self::lanes_at_rest`] reports. A lane outside the mask keeps its counters.
     ///
     /// A collapsed stage advances channel `0`'s counter alone, as the one-plane body would: the
     /// right counter stays frozen until the disengage copy ([`Self::desymmetrize`]) overwrites it
@@ -4708,8 +4708,8 @@ impl BuiltinInputBank {
     /// The lanes of this bank at exact rest, bit `l` for lane `l`, padded lanes included (issue
     /// #1781, #1107 D3): one block of exact `+0.0` on both planes would leave every state word of
     /// the lane bit-identical and write exact `+0.0` on both planes; a collapsed bank answers from
-    /// channel `0` alone (#1894). The silence counters are the
-    /// one clock ([`Self::advance_clocks`]). See `InputStage::lanes_at_rest` for the terms and the
+    /// channel `0` alone (#1894). The silence counters are the one clock
+    /// ([`Self::advance_clocks`]). See `InputStage::lanes_at_rest` for the terms and the
     /// signed-zero finding: no ramp in flight in the bank, every integrator at `+0.0` bits, and a
     /// polarity-inverted lane is not declined because the kernel writes `+0.0` for it. State only,
     /// allocation-free and bounded by the lane count.
@@ -4720,10 +4720,10 @@ impl BuiltinInputBank {
 
     /// Advance the silence counters of the lanes in `lanes_mask` by `frames` on both channels (on
     /// channel `0` alone while collapsed, #1894), exactly as a rendered `+0.0` block would, for a
-    /// block the caller skips (issue #1781). Each
-    /// lane in the mask must be one [`Self::lanes_at_rest`] reports for the block; the caller skips
-    /// a bank whole, so it passes every lane, padded lanes included. Allocation-free and bounded by
-    /// the lane count, never by `frames`.
+    /// block the caller skips (issue #1781). Each lane in the mask must be one
+    /// [`Self::lanes_at_rest`] reports for the block; the caller skips a bank whole, so it passes
+    /// every lane, padded lanes included. Allocation-free and bounded by the lane count, never by
+    /// `frames`.
     pub fn advance_clocks(&mut self, lanes_mask: u32, frames: u32) {
         debug_assert_eq!(
             lanes_mask & !self.lanes_at_rest() & ((1 << self.width.lanes()) - 1),

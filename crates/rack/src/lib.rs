@@ -4145,10 +4145,10 @@ impl BankChain {
     /// The resident scratch is zeroed once per run of skips, so the final-output readers -- the
     /// observers, the meters and a resident successor -- read the `+0.0` a rendered block leaves
     /// there. Every slot with an active lane advances its clocks over that zero block in place of
-    /// `process`, on every lane. On a collapsed block each prefix stage advances its left
-    /// channel's clocks alone, as `process_mono` would (the effect contract's collapsed-bank rule,
-    /// #1894); the disengage copies the left channel over the frozen right one before any dual
-    /// block reads it, and the swap and carry paths disengage first. No gather, no stage, no seam copy and no
+    /// `process`, on every lane. On a collapsed block each prefix stage advances its left channel's
+    /// clocks alone, as `process_mono` would (the effect contract's collapsed-bank rule, #1894);
+    /// the disengage copies the left channel over the frozen right one before any dual block reads
+    /// it, and the swap and carry paths disengage first. No gather, no stage, no seam copy and no
     /// transpose; then the outputs: `+0.0` into each unfolded active lane's plane, and the folded
     /// lanes' master effect through [`BankMembers::fold_silent`], or the ordinary scatter over the
     /// zeroed block when that declines.
