@@ -70,12 +70,12 @@ fn counted(before: &str, after: &str) -> String {
     )
 }
 
-/// A drain whose only bound is a loop over the slice parameter `lanes`, with `before` first in the
+/// A drain of each element of the slice parameter `lanes`, with `before` first in the
 /// function body and `after` last in it, at the body's own level. The count is
 /// `available_at_entry()` written in the header, so no `let` binds it.
 fn over_slice(before: &str, after: &str) -> String {
     format!(
-        "fn drain(control: &mut Consumer<Record>, lanes: &[u8]) {{\n{before}    for _ in lanes {{\n        for _ in 0..control.available_at_entry() {{\n            {POP}\n        }}\n    }}\n{after}}}"
+        "fn drain(lanes: &mut [Consumer<Record>]) {{\n{before}    for control in lanes {{\n        for _ in 0..control.available_at_entry() {{\n            {POP}\n        }}\n    }}\n{after}}}"
     )
 }
 
@@ -152,7 +152,7 @@ fn per_queue_form(before: &str) -> String {
 #[test]
 fn a_statement_macro_that_can_declare_a_collection_root_refuses_the_drain() {
     let over_root = "fn drain(state: &mut State) {\n    let State { controls, .. } = state;\n    {\n        shadow!();\n        for control in controls.iter_mut() {\n            let available = control.available_at_entry();\n            for _ in 0..available {\n                POP\n            }\n        }\n    }\n}".replace("POP", POP);
-    let over_lanes = "fn drain(control: &mut Consumer<Record>, lanes: &[u8]) {\n    for _ in lanes.iter() {\n        let available = control.available_at_entry();\n        for _ in 0..available {\n            POP\n        }\n    }\n    shadow!();\n}".replace("POP", POP);
+    let over_lanes = "fn drain(lanes: &mut [Consumer<Record>]) {\n    for control in lanes.iter() {\n        let available = control.available_at_entry();\n        for _ in 0..available {\n            POP\n        }\n    }\n    shadow!();\n}".replace("POP", POP);
     let rows: Vec<(&'static str, String)> = vec![
         (
             "macro-emitted-struct-shadows-the-collection-root",
@@ -273,9 +273,9 @@ fn a_macro_that_cannot_declare_an_item_in_the_span_is_not_refused() {
 ///   first in the body. The slice loop notes `rounds`; the pass-count loop `0..passes` then fails
 ///   `count::bounds`, and its rewind must stop at its own mark. Rewound to zero it would forget
 ///   `rounds`, and the macro, which declares an unbounded `const rounds`, would pass.
-/// - A drain whose outer loop `0..lanes` first reads `lanes` as the alias of an entry count
-///   (`let lanes = first;` notes `first`), fails because `apply(lanes)` uses the alias, and is
-///   finite by its form anyway. With no rewind the stale read of `first` would extend a span over
+/// - A drain of `self.controls[lane]` whose outer loop `0..lanes` first reads `lanes` as the alias
+///   of an entry count (`let lanes = first;` notes `first`), fails because `apply(lanes)` uses the
+///   alias, and is finite by its form anyway. With no rewind the stale read of `first` would extend a span over
 ///   a statement macro that cannot shadow anything the drain reads, and refuse it.
 #[test]
 fn a_loop_that_does_not_bound_takes_back_only_its_own_reads() {
@@ -289,9 +289,7 @@ fn a_loop_that_does_not_bound_takes_back_only_its_own_reads() {
     );
     let stale = appended(
         SHADOWS_COUNT,
-        &format!(
-            "fn drain(control: &mut Consumer<Record>) {{\n    let first = control.available_at_entry();\n    let lanes = first;\n    apply(lanes);\n    shadow!();\n    for _ in 0..lanes {{\n        let available = control.available_at_entry();\n        for _ in 0..available {{\n            {POP}\n        }}\n    }}\n}}"
-        ),
+        "impl Bank {\n    fn drain(&mut self, control: &mut Consumer<Record>) {\n        let first = control.available_at_entry();\n        let lanes = first;\n        apply(lanes);\n        shadow!();\n        for lane in 0..lanes {\n            let available = self.controls[lane].available_at_entry();\n            for _ in 0..available {\n                let Ok(record) = self.controls[lane].try_pop() else {\n                    break;\n                };\n                apply(record);\n            }\n        }\n    }\n}",
     );
     accepted("failed-alias-read-does-not-extend-the-span", &stale);
 }
