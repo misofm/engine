@@ -130,14 +130,26 @@ pub(super) fn lane_requests<'a>(
     rate: u32,
     link: LinkMode,
 ) -> Vec<PrepareEffectRequest<'a>> {
+    mixed_lane_requests(members, mask, clone_of, rate, &vec![link; members.len()])
+}
+
+/// [`lane_requests`] with member `k` at its own link mode `links[k]` (issue #1368); a padded lane
+/// is the clone source's request, link mode included.
+fn mixed_lane_requests<'a>(
+    members: &'a [Values],
+    mask: &[bool],
+    clone_of: usize,
+    rate: u32,
+    links: &[LinkMode],
+) -> Vec<PrepareEffectRequest<'a>> {
     let mut next = 0;
     mask.iter()
         .map(|active| {
             if *active {
                 next += 1;
-                request(&members[next - 1], rate, link)
+                request(&members[next - 1], rate, links[next - 1])
             } else {
-                request(&members[clone_of], rate, link)
+                request(&members[clone_of], rate, links[clone_of])
             }
         })
         .collect()
@@ -164,7 +176,8 @@ struct Block {
 /// A padded bank's members, their mask, and what they are fed.
 struct Case {
     rate: u32,
-    link: LinkMode,
+    /// Each member's link mode: members of one bank mix modes (issue #1368).
+    links: Vec<LinkMode>,
     /// Rendered through `process_bank_mono`: symmetric values, identical planes and symmetric
     /// automation, as the rack only collapses such a bank.
     mono: bool,
@@ -205,11 +218,15 @@ pub(super) fn draw_spans(draw: &mut Draw, mono: bool) -> Vec<PreparedAutomationS
 }
 
 /// Seed `seed`'s case at `width`: `1 + seed % (width - 1)` members, so a width's first
-/// `3 * (width - 1)` seeds reach every active count under every link mode.
+/// `3 * (width - 1)` seeds reach every active count with lane 0 at every link mode. Member `m`
+/// takes the mode `m` places after lane 0's, so a bank of two or more members mixes modes.
 fn draw_case(seed: u64, width: usize) -> Case {
     let mut draw = Draw::new(seed ^ 0x1090);
     let members = 1 + seed as usize % (width - 1);
-    let link = LINKS[(seed as usize / (width - 1)) % LINKS.len()];
+    let first = seed as usize / (width - 1);
+    let links = (0..members)
+        .map(|member| LINKS[(first + member) % LINKS.len()])
+        .collect();
     let mono = draw.chance(1, 3);
     let rate = draw.pick(&RATES);
     // Members first: the only layout the planner emits and `validate_shape` admits (P2a, L3).
@@ -253,7 +270,7 @@ fn draw_case(seed: u64, width: usize) -> Case {
         .collect();
     Case {
         rate,
-        link,
+        links,
         mono,
         members: values,
         mask,
@@ -303,7 +320,7 @@ fn per_node(case: &Case) -> Rendered {
     };
     for (member, values) in case.members.iter().enumerate() {
         let prepared = CompressorFactory
-            .prepare(request(values, case.rate, case.link))
+            .prepare(request(values, case.rate, case.links[member]))
             .expect("a member prepares");
         let sizes = prepared.metadata.state_sizes;
         let mut effect = prepared.processor;
@@ -377,7 +394,7 @@ fn at_rest(state: &[u32]) -> bool {
 fn banked<L: Lane>(case: &Case, clone_of: usize) -> Rendered {
     let lanes = L::WIDTH;
     let (_, width) = width_of::<L>();
-    let requests = lane_requests(&case.members, &case.mask, clone_of, case.rate, case.link);
+    let requests = mixed_lane_requests(&case.members, &case.mask, clone_of, case.rate, &case.links);
     let mut bank = bind::<L>(&requests, &case.mask);
     let active = member_lanes(&case.mask);
     let members = active.len();
@@ -545,6 +562,8 @@ struct Reach {
     silent_admissions: usize,
     /// Cases rendered collapsed.
     collapsed: usize,
+    /// Cases whose members mix link modes (issue #1368).
+    mixed_links: usize,
 }
 
 /// Gates 1 and 2 at one width: every seed's padded bank, under every clone source, renders every
@@ -553,6 +572,7 @@ fn padded_differential<L: Lane>(seed: u64, reach: &mut Reach) {
     let case = draw_case(seed, L::WIDTH);
     let oracle = per_node(&case);
     reach.collapsed += usize::from(case.mono);
+    reach.mixed_links += usize::from(case.links.iter().any(|link| *link != case.links[0]));
     for (block, _) in case.blocks.iter().enumerate() {
         let rejected = |member: usize| {
             let report = oracle.reports[member][block];
@@ -589,7 +609,7 @@ fn padded_differential<L: Lane>(seed: u64, reach: &mut Reach) {
         let context = format!(
             "seed {seed} W{} {:?} {} members {:?} mono {} clone of {clone_of}",
             L::WIDTH,
-            case.link,
+            case.links,
             case.rate,
             case.mask,
             case.mono
@@ -663,7 +683,7 @@ fn staggered_rest_case(width: usize, mono: bool) -> Case {
         .collect();
     Case {
         rate: 48_000,
-        link: LinkMode::DualMono,
+        links: vec![LinkMode::DualMono; members],
         mono,
         members: values,
         mask: members_first(members, width),
@@ -715,7 +735,8 @@ fn staggered_rest<L: Lane>() {
 /// * a padded lane's failure reported, or a span addressed to it counted;
 /// * a padded lane that does not stay at `+0.0` out, or a padded lane counted as a track;
 /// * active bits that depend on the clone source (every source is rendered);
-/// * a link that reads another lane (every link mode, heterogeneous neighbours);
+/// * a link that reads another lane (every link mode, heterogeneous neighbours), or a lane that
+///   takes another lane's link mode (members mix modes, issue #1368);
 /// * a bank-wide silent claim earned on some lanes at rest rather than every lane, on the dual or
 ///   the collapsed body ([`staggered_rest_case`]: lanes rest on different blocks of one silence).
 #[test]
@@ -731,8 +752,13 @@ fn a_padded_bank_renders_each_member_as_its_own_instance() {
         },
     );
     println!(
-        "reach: {} mixed rejections, {} cut ramps, {} silent admissions, {} collapsed cases",
-        reach.mixed_rejections, reach.cut_ramps, reach.silent_admissions, reach.collapsed
+        "reach: {} mixed rejections, {} cut ramps, {} silent admissions, {} collapsed cases, \
+         {} mixed-link cases",
+        reach.mixed_rejections,
+        reach.cut_ramps,
+        reach.silent_admissions,
+        reach.collapsed,
+        reach.mixed_links
     );
     if !dsp_reference::randomized::replaying() {
         assert!(
@@ -745,6 +771,7 @@ fn a_padded_bank_renders_each_member_as_its_own_instance() {
             "no banked block took the silent fast path"
         );
         assert!(reach.collapsed > 0, "no case rendered collapsed");
+        assert!(reach.mixed_links > 0, "no bank mixed link modes");
     }
     lane::each_vector_lane!(|L| staggered_rest::<L>());
 }

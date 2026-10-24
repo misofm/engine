@@ -380,12 +380,6 @@ impl<L: Lane> Links<L> {
             dual_mono: links.iter().all(|link| matches!(link, LinkMode::DualMono)),
         }
     }
-
-    /// Whether every lane is DualMono (the D4 arm test).
-    #[cfg(test)]
-    pub(crate) const fn dual_mono(&self) -> bool {
-        self.dual_mono
-    }
 }
 
 #[inline(always)]
