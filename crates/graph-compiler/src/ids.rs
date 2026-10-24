@@ -197,6 +197,11 @@ impl<'a> NodeTable<'a> {
         &self.node(dense).id
     }
 
+    /// The position in [`nodes`](Self::nodes) of the node of ID rank `dense`.
+    pub(crate) fn position(&self, dense: usize) -> usize {
+        self.order[dense]
+    }
+
     /// The nodes in the caller's order (not dense order).
     pub(crate) fn nodes(&self) -> &'a [GraphNode] {
         self.nodes
