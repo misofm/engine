@@ -143,11 +143,6 @@ fn fader_entries<'a>(
     crate::automation::fader_automation(model, strip)
 }
 
-/// The [`FaderOffsets`] of strip `strip` in a whole model.
-pub(crate) fn model_fader_offsets(model: &session::SessionModel, strip: &StableId) -> FaderOffsets {
-    fader_offsets(fader_entries(model, strip))
-}
-
 /// Write `value` as the hand-move offset of each side in `sides` of strip `strip`'s fader that a
 /// rendered entry of `model` drives (#1650 D3), and return the sides no entry drives, which keep
 /// the static fader write. The caller has run [`crate::check`] with the row's own domain,
