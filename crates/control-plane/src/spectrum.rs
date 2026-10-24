@@ -6,9 +6,26 @@
 //! analysis that smooths its stream.
 
 use host_core::{
-    PreparedSpectrumCaptures, SpectrumAnalysis, SpectrumConfiguration, SpectrumHop, SpectrumPair,
-    SpectrumService,
+    PreparedSpectrumCaptures, SpectrumAnalysis, SpectrumAnalysisResult, SpectrumConfiguration,
+    SpectrumHop, SpectrumPair, SpectrumService,
 };
+
+/// The bytes a session's spectrum monitor retains beside a plan's captures (#1594 R6, #1595 R7):
+/// the service's and the analysis's ([`SpectrumService::RETAINED_BYTES`]) and the one boxed
+/// result a one-shot read is analyzed into.
+#[allow(
+    clippy::cast_possible_truncation,
+    reason = "a fixed type size, far below u64::MAX"
+)]
+pub(crate) const SPECTRUM_MONITOR_RETAINED_BYTES: u64 =
+    SpectrumService::RETAINED_BYTES + core::mem::size_of::<SpectrumAnalysisResult>() as u64;
+
+/// The one-shot half of a monitor, as a `SPECTRUM_CAPTURE` read takes it.
+pub(crate) struct CaptureParts<'a> {
+    pub(crate) service: &'a mut SpectrumService,
+    pub(crate) analysis: &'a SpectrumAnalysis,
+    pub(crate) result: &'a mut SpectrumAnalysisResult,
+}
 
 /// One session's spectrum monitor: its configuration, the epochs that tell a reader which
 /// configuration the captures it reads were prepared with, the service over the running plan's
@@ -25,6 +42,8 @@ pub struct SpectrumMonitor {
     service: Option<SpectrumService>,
     /// The stream's one analysis, made with the service.
     analysis: Option<SpectrumAnalysis>,
+    /// The one result a one-shot read is analyzed into (#1595 D4), made with the service.
+    result: Option<Box<SpectrumAnalysisResult>>,
     /// The session's rate and quantum, for a service a promotion makes.
     sample_rate_hz: u32,
     quantum_frames: u32,
@@ -62,7 +81,11 @@ pub(crate) struct SpectrumDisplaced {
     #[allow(dead_code, reason = "held only to be dropped with the parked epoch")]
     captures: Option<PreparedSpectrumCaptures>,
     #[allow(dead_code, reason = "held only to be dropped with the parked epoch")]
-    service: Option<(SpectrumService, Option<SpectrumAnalysis>)>,
+    service: Option<(
+        SpectrumService,
+        Option<SpectrumAnalysis>,
+        Option<Box<SpectrumAnalysisResult>>,
+    )>,
 }
 
 impl SpectrumMonitor {
@@ -82,12 +105,16 @@ impl SpectrumMonitor {
             })
         });
         let analysis = service.as_ref().map(|_| SpectrumAnalysis::new());
+        let result = service
+            .as_ref()
+            .map(|_| Box::new(SpectrumAnalysisResult::new()));
         Self {
             configuration,
             configured_epoch: epoch,
             adopted_epoch: epoch,
             service,
             analysis,
+            result,
             sample_rate_hz,
             quantum_frames,
         }
@@ -137,7 +164,7 @@ impl SpectrumMonitor {
             let service = self
                 .service
                 .take()
-                .map(|service| (service, self.analysis.take()));
+                .map(|service| (service, self.analysis.take(), self.result.take()));
             return SpectrumDisplaced {
                 captures: None,
                 service,
@@ -153,6 +180,7 @@ impl SpectrumMonitor {
                 hop,
             ));
             self.analysis = Some(SpectrumAnalysis::new());
+            self.result = Some(Box::new(SpectrumAnalysisResult::new()));
             return SpectrumDisplaced {
                 captures: None,
                 service: None,
@@ -222,5 +250,27 @@ impl SpectrumMonitor {
         &mut self,
     ) -> Option<(&mut SpectrumService, &mut SpectrumAnalysis)> {
         self.service.as_mut().zip(self.analysis.as_mut())
+    }
+
+    /// The service, the analysis and the one-shot result at once, or `None` with no service.
+    pub(crate) fn capture_parts(&mut self) -> Option<CaptureParts<'_>> {
+        match (
+            self.service.as_mut(),
+            self.analysis.as_ref(),
+            self.result.as_deref_mut(),
+        ) {
+            (Some(service), Some(analysis), Some(result)) => Some(CaptureParts {
+                service,
+                analysis,
+                result,
+            }),
+            _ => None,
+        }
+    }
+
+    /// The result the last ready one-shot read was analyzed into, or `None` with no service.
+    #[must_use]
+    pub fn result(&self) -> Option<&SpectrumAnalysisResult> {
+        self.result.as_deref()
     }
 }

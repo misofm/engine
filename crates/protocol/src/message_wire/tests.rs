@@ -363,16 +363,17 @@ fn capability_id_views_reject_order_allocation_and_session_family_identically() 
     assert_parity_rejects(&commands, &[]);
     assert!(!IdSource::LittleEndian(&[1]).is_strict_allocated(false));
     // #1386: `SESSION_REPLACE` (`0x0013`) is allocated and rides the session family;
-    // `SPECTRUM_CONFIGURE` (`0x0010`) is allocated (#1594; its capability bit is #1595's);
-    // `0x000f`, `0x0011` and `0x0012` are claimed by open specs, not allocated.
+    // `SPECTRUM_CONFIGURE` (`0x0010`, #1594) and `SPECTRUM_CAPTURE` (`0x0011`, #1595 slice a)
+    // are allocated (their capability bit is slice b's); `0x000f` and `0x0012` are claimed by
+    // open specs, not allocated.
     assert!(
         check_capabilities_invariants(view(
-            IdSource::Native(&[1, 2, 3, 0x0010, 0x0013]),
+            IdSource::Native(&[1, 2, 3, 0x0010, 0x0011, 0x0013]),
             IdSource::Native(&events),
         ))
         .is_ok()
     );
-    for claimed in [0x000f, 0x0011, 0x0012] {
+    for claimed in [0x000f, 0x0012] {
         assert_parity_rejects(&[1, 2, 3, claimed], &events);
     }
     let without_session = |commands: &'static [u16]| CapabilityInvariantView {
@@ -3800,6 +3801,293 @@ fn spectrum_configure_round_trips_and_refuses_malformed_requests_both_ways() {
         assert_eq!(
             DecodeError::InvalidField.status(),
             crate::StatusCode::InvalidField
+        );
+    }
+}
+
+fn capture_ready(
+    channels: ParameterChannel,
+    include_window: bool,
+) -> SpectrumCaptureReply<'static> {
+    use std::borrow::Cow;
+    let bins = |seed: f32| -> Option<Cow<'static, [f32]>> {
+        Some(Cow::Owned(
+            (0..SPECTRUM_CAPTURE_BIN_COUNT)
+                .map(|bin| seed - bin as f32 / 16.0)
+                .collect(),
+        ))
+    };
+    let window = |seed: f32| -> Option<Cow<'static, [f32]>> {
+        include_window.then(|| {
+            Cow::Owned(
+                (0..SPECTRUM_CAPTURE_WINDOW_FRAMES)
+                    .map(|frame| seed * (frame as f32 / 2048.0 - 0.5))
+                    .collect(),
+            )
+        })
+    };
+    let left = matches!(channels, ParameterChannel::Left | ParameterChannel::Both);
+    let right = matches!(channels, ParameterChannel::Right | ParameterChannel::Both);
+    SpectrumCaptureReply {
+        adopted_epoch: 3,
+        selection_epoch: 2,
+        status: SpectrumCaptureStatus::Ready,
+        window: Some(SpectrumCaptureWindow {
+            target_kind: SpectrumTargetKind::TrackPostPan,
+            target_id: Cow::Borrowed("eq0"),
+            channels,
+            sample_rate_hz: 48_000,
+            window_frames: SPECTRUM_CAPTURE_WINDOW_FRAMES,
+            bin_count: SPECTRUM_CAPTURE_BIN_COUNT,
+            floor_db: -120.0,
+            captured_sample: 4_096,
+            end_sample: 6_144,
+            snapshot_token: 2,
+            source_underrun: true,
+            frequencies_hz: Cow::Owned(
+                (0..SPECTRUM_CAPTURE_BIN_COUNT)
+                    .map(|bin| bin as f32 * 23.4375)
+                    .collect(),
+            ),
+            left_db: if left { bins(-3.0) } else { None },
+            right_db: if right { bins(-9.0) } else { None },
+            left_window: if left { window(0.5) } else { None },
+            right_window: if right { window(0.25) } else { None },
+        }),
+    }
+}
+
+fn encode_capture_reply(codec: &ProtocolCodec, value: &SpectrumCaptureReply<'_>) -> Vec<u8> {
+    let mut bytes = vec![
+        0;
+        codec
+            .encoded_spectrum_capture_reply_len(value)
+            .expect("length")
+    ];
+    codec
+        .encode_spectrum_capture_reply(value, &mut bytes)
+        .expect("encode");
+    bytes
+}
+
+/// #1595 gate 1 (the capture half): each `SPECTRUM_CAPTURE` operation and the done, pending and
+/// ready replies (each channel mask, with and without the raw window) round-trip exactly, and
+/// the frame-limit measure equals the encoded frame of each ready shape. Every presence rule of
+/// D2 (a field outside its operation, a missing one), an operation or status outside its table, a
+/// plane that disagrees with `channels`, a 1,024-bin plane, a window plane without its pair, a
+/// pending reply with a window field and an `end_sample` that is not `captured_sample + 2048`
+/// are refused as `INVALID_FIELD`, on encode where the typed value can say it and on decode.
+///
+/// Red if the codec admits a contradictory request or a reply of the wrong shape in either
+/// direction, or the measure the session refuses reads by drifts from the encoder.
+#[test]
+fn spectrum_capture_round_trips_and_refuses_malformed_frames_both_ways() {
+    let codec = ProtocolCodec::default();
+    let read = SpectrumCaptureRequest::Read {
+        channels: ParameterChannel::Right,
+        include_window: true,
+    };
+    let select = SpectrumCaptureRequest::Select {
+        target_kind: SpectrumTargetKind::Output,
+        target_id: "main".to_owned(),
+        channels: ParameterChannel::Both,
+    };
+    let encode_request = |value: &SpectrumCaptureRequest| {
+        let mut bytes = vec![
+            0;
+            codec
+                .encoded_spectrum_capture_request_len(value)
+                .expect("length")
+        ];
+        codec
+            .encode_spectrum_capture_request(value, &mut bytes)
+            .expect("encode");
+        bytes
+    };
+    for request in [
+        SpectrumCaptureRequest::Arm,
+        SpectrumCaptureRequest::Read {
+            channels: ParameterChannel::Left,
+            include_window: false,
+        },
+        read.clone(),
+        SpectrumCaptureRequest::Cancel,
+        select.clone(),
+    ] {
+        let bytes = encode_request(&request);
+        assert_eq!(
+            codec.decode_spectrum_capture_request(&bytes, top_level_count(&bytes)),
+            Ok(request)
+        );
+    }
+    let read_bytes = encode_request(&read);
+    let select_bytes = encode_request(&select);
+    type Edit = Box<dyn Fn(&mut Vec<Tlv>)>;
+    let requests: [(&str, &Vec<u8>, Edit); 7] = [
+        ("op 0", &read_bytes, Box::new(|f| set(f, 1, &[0]))),
+        ("op 5", &read_bytes, Box::new(|f| set(f, 1, &[5]))),
+        (
+            "arm with channels",
+            &read_bytes,
+            Box::new(|f| set(f, 1, &[1])),
+        ),
+        (
+            "cancel with include_window",
+            &read_bytes,
+            Box::new(|f| {
+                remove(f, 2);
+                set(f, 1, &[3]);
+            }),
+        ),
+        (
+            "read with a target",
+            &select_bytes,
+            Box::new(|f| set(f, 1, &[2])),
+        ),
+        (
+            "read without channels",
+            &read_bytes,
+            Box::new(|f| remove(f, 2)),
+        ),
+        (
+            "select without its target",
+            &read_bytes,
+            Box::new(|f| {
+                remove(f, 5);
+                set(f, 1, &[4]);
+            }),
+        ),
+    ];
+    for (name, base, edit) in requests {
+        let (wire, count) = edited(base, |fields| edit(fields));
+        assert_eq!(
+            codec.decode_spectrum_capture_request(&wire, count),
+            Err(DecodeError::InvalidField),
+            "{name}"
+        );
+    }
+    let long = SpectrumCaptureRequest::Select {
+        target_kind: SpectrumTargetKind::Output,
+        target_id: "m".repeat(SPECTRUM_TARGET_ID_MAXIMUM_BYTES + 1),
+        channels: ParameterChannel::Both,
+    };
+    assert_eq!(
+        codec.encoded_spectrum_capture_request_len(&long),
+        Err(EncodeError::InvalidField)
+    );
+
+    // Replies: each shape round-trips, and the measure is the encoded frame.
+    let mut replies = vec![
+        SpectrumCaptureReply {
+            adopted_epoch: 1,
+            selection_epoch: 0,
+            status: SpectrumCaptureStatus::Done,
+            window: None,
+        },
+        SpectrumCaptureReply {
+            adopted_epoch: 1,
+            selection_epoch: 4,
+            status: SpectrumCaptureStatus::Pending,
+            window: None,
+        },
+    ];
+    for channels in [
+        ParameterChannel::Left,
+        ParameterChannel::Right,
+        ParameterChannel::Both,
+    ] {
+        for include_window in [false, true] {
+            let reply = capture_ready(channels, include_window);
+            let frame = crate::TypedSuccessResponseFrame {
+                request_id: crate::RequestId::new(9).expect("nonzero"),
+                revision: crate::SessionRevision(3),
+                payload: crate::SuccessResponsePayload::SpectrumCaptured(reply.clone()),
+            };
+            let mut output = vec![0; 1 << 16];
+            let written = codec
+                .encode_success_response_frame_into(&frame, &mut output)
+                .expect("frame");
+            assert_eq!(
+                codec.spectrum_capture_ready_frame_len(channels, include_window, 3),
+                Ok(written),
+                "{channels:?} {include_window}"
+            );
+            replies.push(reply);
+        }
+    }
+    for reply in &replies {
+        let bytes = encode_capture_reply(&codec, reply);
+        assert_eq!(
+            codec.decode_spectrum_capture_reply(&bytes, top_level_count(&bytes)),
+            Ok(reply.clone())
+        );
+    }
+
+    // Typed refusals.
+    let mut wrong_plane = capture_ready(ParameterChannel::Both, false);
+    wrong_plane.window.as_mut().expect("ready").right_db = None;
+    let mut short_plane = capture_ready(ParameterChannel::Left, false);
+    short_plane.window.as_mut().expect("ready").left_db =
+        Some(std::borrow::Cow::Owned(vec![0.0; 1024]));
+    let mut ready_without = capture_ready(ParameterChannel::Left, false);
+    ready_without.window = None;
+    let mut pending_with = capture_ready(ParameterChannel::Left, false);
+    pending_with.status = SpectrumCaptureStatus::Pending;
+    for refused in [&wrong_plane, &short_plane, &ready_without, &pending_with] {
+        assert_eq!(
+            codec.encoded_spectrum_capture_reply_len(refused),
+            Err(EncodeError::InvalidField)
+        );
+    }
+
+    // Wire refusals.
+    let both = encode_capture_reply(&codec, &capture_ready(ParameterChannel::Both, true));
+    let left = encode_capture_reply(&codec, &capture_ready(ParameterChannel::Left, false));
+    let rules: [(&str, &Vec<u8>, Edit); 9] = [
+        ("status 0", &left, Box::new(|f| set(f, 3, &[0]))),
+        ("status 4", &left, Box::new(|f| set(f, 3, &[4]))),
+        (
+            "a pending reply with a window",
+            &left,
+            Box::new(|f| set(f, 3, &[2])),
+        ),
+        (
+            "planes that disagree with channels",
+            &both,
+            Box::new(|f| set(f, 6, &[1])),
+        ),
+        (
+            "a 1,024-bin plane",
+            &left,
+            Box::new(|f| set(f, 16, &[0; 4 * 1024])),
+        ),
+        (
+            "bin count 1,024",
+            &left,
+            Box::new(|f| set(f, 9, &1024_u32.to_le_bytes())),
+        ),
+        (
+            "window frames 1,024",
+            &left,
+            Box::new(|f| set(f, 8, &1024_u32.to_le_bytes())),
+        ),
+        (
+            "a window plane without its pair",
+            &both,
+            Box::new(|f| remove(f, 19)),
+        ),
+        (
+            "end_sample one past",
+            &left,
+            Box::new(|f| set(f, 12, &6_145_u64.to_le_bytes())),
+        ),
+    ];
+    for (name, base, edit) in rules {
+        let (wire, count) = edited(base, |fields| edit(fields));
+        assert_eq!(
+            codec.decode_spectrum_capture_reply(&wire, count),
+            Err(DecodeError::InvalidField),
+            "{name}"
         );
     }
 }

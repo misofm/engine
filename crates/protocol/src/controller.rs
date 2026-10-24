@@ -26,10 +26,11 @@ use crate::{
     NonOkResponse, ObservationEnded, ObservationTapKey, PreparedSessionTransaction, ProtocolCodec,
     ProtocolQueues, QueueReport, ReliablePayload, ReliableSlot, RequestId, ResponseGetRequest,
     ResponseResult, SampleTime, SessionCommitted, SessionEdit, SessionReplaceRequest,
-    SessionRevision, SessionSnapshot, SessionStore, SessionStoreError, SpectrumConfigureRequest,
-    SpectrumConfigured, StatusCode, SuccessResponsePayload, TelemetryConfiguration, TelemetryKey,
-    TelemetryRecord, TransactionApplied, TransportSetRequest, TransportSnapshot,
-    TransportStateEvent, TypedEventFrame, TypedNonOkResponseFrame, TypedSuccessResponseFrame,
+    SessionRevision, SessionSnapshot, SessionStore, SessionStoreError, SpectrumCaptureReply,
+    SpectrumCaptureRequest, SpectrumConfigureRequest, SpectrumConfigured, StatusCode,
+    SuccessResponsePayload, TelemetryConfiguration, TelemetryKey, TelemetryRecord,
+    TransactionApplied, TransportSetRequest, TransportSnapshot, TransportStateEvent,
+    TypedEventFrame, TypedNonOkResponseFrame, TypedSuccessResponseFrame,
 };
 #[cfg(any(test, feature = "test-support"))]
 use crate::{
@@ -1055,6 +1056,11 @@ pub enum ControlCommand<'a> {
     SpectrumConfigure {
         request: SpectrumConfigureRequest,
     },
+    /// `SPECTRUM_CAPTURE` (#1595): executed by the session, refused here as
+    /// [`Self::SpectrumConfigure`] is.
+    SpectrumCapture {
+        request: SpectrumCaptureRequest,
+    },
 }
 
 impl ControlCommand<'_> {
@@ -1083,6 +1089,7 @@ impl ControlCommand<'_> {
             Self::ResponseGet { .. } => MessageId::ResponseGet,
             Self::SessionReplace { .. } => MessageId::SessionReplace,
             Self::SpectrumConfigure { .. } => MessageId::SpectrumConfigure,
+            Self::SpectrumCapture { .. } => MessageId::SpectrumCapture,
         }
     }
 }
@@ -1237,18 +1244,23 @@ impl PreparedImmediateCommandFrame {
 }
 
 /// The decoded payload of a command the session executes (#1594 D9). One variant per such
-/// command; #1595 adds its reads here.
+/// command.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum SessionCommand {
     /// `SPECTRUM_CONFIGURE`.
     SpectrumConfigure(SpectrumConfigureRequest),
+    /// `SPECTRUM_CAPTURE` (#1595).
+    SpectrumCapture(SpectrumCaptureRequest),
 }
 
-/// The success reply of a command the session executed.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum SessionCommandReply {
+/// The success reply of a command the session executed. A reply borrows what it carries (a
+/// ready capture's planes) only until it is encoded.
+#[derive(Clone, Debug, PartialEq)]
+pub enum SessionCommandReply<'a> {
     /// The `SPECTRUM_CONFIGURE` reply.
     SpectrumConfigured(SpectrumConfigured),
+    /// The `SPECTRUM_CAPTURE` reply.
+    SpectrumCaptured(SpectrumCaptureReply<'a>),
 }
 
 /// A command the session executes, decoded and checked, whose replay entry is planned against
@@ -1806,6 +1818,9 @@ impl<P: ControlProvider> ProtocolController<P> {
             DecodedCommandPayload::SpectrumConfigure(request) => {
                 ControlCommand::SpectrumConfigure { request }
             }
+            DecodedCommandPayload::SpectrumCapture(request) => {
+                ControlCommand::SpectrumCapture { request }
+            }
         };
         Ok(self.process(ControllerRequest {
             request_id: header.request_id,
@@ -2031,7 +2046,10 @@ impl<P: ControlProvider> ProtocolController<P> {
         preparation: Preparation,
         observe: crate::ObserveContext<'_>,
     ) -> Result<PreparedCommandFrame, CommandFrameProcessError> {
-        if header.message_id == MessageId::SpectrumConfigure {
+        if matches!(
+            header.message_id,
+            MessageId::SpectrumConfigure | MessageId::SpectrumCapture
+        ) {
             return self.prepare_session_command(input, scratch, output_capacity, header);
         }
         match self.plan_structural_command(
@@ -2090,6 +2108,9 @@ impl<P: ControlProvider> ProtocolController<P> {
             Ok(decoded) => match decoded.payload {
                 DecodedCommandPayload::SpectrumConfigure(request) => {
                     SessionCommand::SpectrumConfigure(request)
+                }
+                DecodedCommandPayload::SpectrumCapture(request) => {
+                    SessionCommand::SpectrumCapture(request)
                 }
                 _ => {
                     let outcome = refusal(self, StatusCode::Internal);
@@ -2166,13 +2187,42 @@ impl<P: ControlProvider> ProtocolController<P> {
     pub fn complete_session_command(
         &mut self,
         prepared: PreparedSessionCommand,
-        reply: SessionCommandReply,
+        reply: SessionCommandReply<'_>,
         output: &mut [u8],
     ) -> Result<usize, CommandFrameProcessError> {
         let body = match reply {
             SessionCommandReply::SpectrumConfigured(value) => {
                 debug_assert_eq!(value.revision, self.session.revision().0);
                 Body::SpectrumConfigured(value)
+            }
+            // A capture reply borrows its planes, so it is encoded here rather than held as a
+            // body; a reply the codec refuses answers `INTERNAL` as an encoder fault does.
+            SessionCommandReply::SpectrumCaptured(value) => {
+                let frame = TypedSuccessResponseFrame {
+                    request_id: prepared.request_id,
+                    revision: self.session.revision(),
+                    payload: SuccessResponsePayload::SpectrumCaptured(value),
+                };
+                return self.complete_session_encoded(prepared, output, |controller, output| {
+                    match controller
+                        .codec
+                        .encode_success_response_frame_into(&frame, output)
+                    {
+                        Err(EncodeError::OutputTooSmall { required }) => {
+                            Err(EncodeError::OutputTooSmall { required })
+                        }
+                        Err(_) => {
+                            let fallback = controller.encode_failure_outcome();
+                            controller.encode_outcome_into(
+                                MessageId::SpectrumCapture,
+                                frame.request_id,
+                                fallback,
+                                output,
+                            )
+                        }
+                        Ok(written) => Ok(written),
+                    }
+                });
             }
         };
         let outcome = self.ok(body);
@@ -2204,23 +2254,32 @@ impl<P: ControlProvider> ProtocolController<P> {
 
     fn complete_session_outcome(
         &mut self,
-        mut prepared: PreparedSessionCommand,
+        prepared: PreparedSessionCommand,
         outcome: Outcome,
         output: &mut [u8],
+    ) -> Result<usize, CommandFrameProcessError> {
+        let (message_id, request_id) = (prepared.message_id, prepared.request_id);
+        self.complete_session_encoded(prepared, output, |controller, output| {
+            controller
+                .encode_outcome_or_internal_into(message_id, request_id, outcome, output)
+                .map(|(written, _, _)| written)
+        })
+    }
+
+    /// Encode a session command's reply with `encode`, then record its replay entry with those
+    /// bytes (#1594 D9).
+    fn complete_session_encoded(
+        &mut self,
+        mut prepared: PreparedSessionCommand,
+        output: &mut [u8],
+        encode: impl FnOnce(&Self, &mut [u8]) -> Result<usize, EncodeError>,
     ) -> Result<usize, CommandFrameProcessError> {
         if !Arc::ptr_eq(&self.structural_generation, &prepared.owner)
             || self.structural_generation.load(Ordering::Acquire) != prepared.generation
         {
             return Err(CommandFrameProcessError::Internal);
         }
-        let (written, _, _) = self
-            .encode_outcome_or_internal_into(
-                prepared.message_id,
-                prepared.request_id,
-                outcome,
-                output,
-            )
-            .map_err(CommandFrameProcessError::Encode)?;
+        let written = encode(self, output).map_err(CommandFrameProcessError::Encode)?;
         self.replay.apply_preflight_plan(
             prepared.request_id,
             &prepared.request,
@@ -3018,6 +3077,9 @@ impl<P: ControlProvider> ProtocolController<P> {
             DecodedCommandPayload::SpectrumConfigure(request) => {
                 ControlCommand::SpectrumConfigure { request }
             }
+            DecodedCommandPayload::SpectrumCapture(request) => {
+                ControlCommand::SpectrumCapture { request }
+            }
         };
         self.execute(&ControllerRequest {
             request_id: header.request_id,
@@ -3794,7 +3856,9 @@ impl<P: ControlProvider> ProtocolController<P> {
                 Ok(_) => self.non_ok(StatusCode::Internal, None),
             },
             // The session executes it (#1594 D9); this path has none.
-            ControlCommand::SpectrumConfigure { .. } => self.non_ok(StatusCode::Unavailable, None),
+            ControlCommand::SpectrumConfigure { .. } | ControlCommand::SpectrumCapture { .. } => {
+                self.non_ok(StatusCode::Unavailable, None)
+            }
             ControlCommand::ControlListGet { request } => {
                 match self.provider.control_list(request) {
                     Ok(page) => match self.fit_control_list(page) {

@@ -261,6 +261,125 @@ const fn spectrum_budget(preparation: &host_core::SpectrumPreparation) -> u64 {
     }
 }
 
+/// What a `SPECTRUM_CAPTURE` did, before its reply is built (#1595 D2).
+enum CaptureOutcome {
+    Done,
+    Pending,
+    /// The popped window, analyzed into the monitor's result; boxed off the stack on the control
+    /// thread, as the read's reply allocates anyway.
+    Ready {
+        snapshot: Box<host_core::SpectrumSnapshot>,
+        include_window: bool,
+    },
+}
+
+/// A service or analysis refusal with its status (#1595 D6). `WindowInvalid` and
+/// `MetadataInvalid` (outside D6's table) are `UNAVAILABLE`, as `CaptureInvalid` is.
+fn spectrum_service_refusal(error: host_core::SpectrumServiceError) -> SpectrumRefusal {
+    use host_core::SpectrumServiceError as E;
+    use protocol::StatusCode;
+    let status = match error {
+        E::Unprepared | E::UnknownEntry => StatusCode::NotFound,
+        E::Busy => StatusCode::Backpressure,
+        E::Dropped | E::CaptureInvalid | E::WindowInvalid | E::MetadataInvalid => {
+            StatusCode::Unavailable
+        }
+        E::Exhausted => StatusCode::LimitExceeded,
+        E::SelectSingle
+        | E::NotArmed
+        | E::Channels
+        | E::StreamActive
+        | E::StreamInactive
+        | E::CadenceRate
+        | E::CadenceShape => StatusCode::ValidationFailed,
+        E::Smoothing => StatusCode::InvalidField,
+    };
+    SpectrumRefusal::reply(status, error.code())
+}
+
+const fn spectrum_channels(channels: protocol::ParameterChannel) -> host_core::SpectrumChannels {
+    match channels {
+        protocol::ParameterChannel::Left => host_core::SpectrumChannels::Left,
+        protocol::ParameterChannel::Right => host_core::SpectrumChannels::Right,
+        protocol::ParameterChannel::Both => host_core::SpectrumChannels::Stereo,
+    }
+}
+
+const fn protocol_channels(channels: host_core::SpectrumChannels) -> protocol::ParameterChannel {
+    match channels {
+        host_core::SpectrumChannels::Left => protocol::ParameterChannel::Left,
+        host_core::SpectrumChannels::Right => protocol::ParameterChannel::Right,
+        host_core::SpectrumChannels::Stereo => protocol::ParameterChannel::Both,
+    }
+}
+
+fn spectrum_target_id(target: &host_core::SpectrumTarget) -> &str {
+    match target {
+        host_core::SpectrumTarget::TrackPostInputBuiltins(id)
+        | host_core::SpectrumTarget::TrackPostMatrix(id)
+        | host_core::SpectrumTarget::Output(id) => id,
+    }
+}
+
+/// Whether a ready `SPECTRUM_CAPTURE` reply of this shape fits a session frame limit of `limit`
+/// bytes (#1595 D5, R3): measured by the codec, so it cannot drift from the encoder.
+fn reply_fits(
+    channels: protocol::ParameterChannel,
+    include_window: bool,
+    target_id_bytes: usize,
+    limit: u64,
+) -> bool {
+    protocol::ProtocolCodec::default()
+        .spectrum_capture_ready_frame_len(channels, include_window, target_id_bytes)
+        .is_ok_and(|bytes| u64::try_from(bytes).is_ok_and(|bytes| bytes <= limit))
+}
+
+/// The analyzed window of a ready read: `result`'s words, borrowed until the reply is encoded,
+/// and with `include_window` the popped window's planes of its mask.
+fn capture_window<'a>(
+    result: &'a host_core::SpectrumAnalysisResult,
+    target: &'a host_core::SpectrumTarget,
+    snapshot: &'a host_core::SpectrumSnapshot,
+    include_window: bool,
+) -> protocol::SpectrumCaptureWindow<'a> {
+    use std::borrow::Cow;
+    let left = matches!(
+        result.channels,
+        host_core::SpectrumChannels::Left | host_core::SpectrumChannels::Stereo
+    );
+    let right = matches!(
+        result.channels,
+        host_core::SpectrumChannels::Right | host_core::SpectrumChannels::Stereo
+    );
+    let plane = |held: bool, words: &'a [f32]| held.then_some(Cow::Borrowed(words));
+    protocol::SpectrumCaptureWindow {
+        target_kind: match target {
+            host_core::SpectrumTarget::TrackPostInputBuiltins(_) => {
+                protocol::SpectrumTargetKind::TrackPostInput
+            }
+            host_core::SpectrumTarget::TrackPostMatrix(_) => {
+                protocol::SpectrumTargetKind::TrackPostPan
+            }
+            host_core::SpectrumTarget::Output(_) => protocol::SpectrumTargetKind::Output,
+        },
+        target_id: Cow::Borrowed(spectrum_target_id(target)),
+        channels: protocol_channels(result.channels),
+        sample_rate_hz: result.sample_rate_hz,
+        window_frames: protocol::SPECTRUM_CAPTURE_WINDOW_FRAMES,
+        bin_count: protocol::SPECTRUM_CAPTURE_BIN_COUNT,
+        floor_db: host_core::SPECTRUM_FLOOR_DB,
+        captured_sample: result.captured_sample,
+        end_sample: result.end_sample,
+        snapshot_token: result.token,
+        source_underrun: result.source_underrun,
+        frequencies_hz: Cow::Borrowed(&result.frequencies_hz),
+        left_db: plane(left, &result.left_dbfs),
+        right_db: plane(right, &result.right_dbfs),
+        left_window: plane(left && include_window, &snapshot.window.left),
+        right_window: plane(right && include_window, &snapshot.window.right),
+    }
+}
+
 /// The first diagnostic code of a refused preparation: the text before the first tab of its
 /// first line.
 fn first_diagnostic_code(failure: &CompileFailure) -> String {
@@ -2729,7 +2848,13 @@ where
         &mut self,
         prepared: protocol::PreparedSessionCommand,
     ) -> Result<usize, CommandError> {
-        let protocol::SessionCommand::SpectrumConfigure(request) = prepared.command();
+        let request = match prepared.command() {
+            protocol::SessionCommand::SpectrumConfigure(request) => request,
+            protocol::SessionCommand::SpectrumCapture(request) => {
+                let outcome = self.spectrum_capture(request);
+                return self.complete_spectrum_capture(prepared, outcome);
+            }
+        };
         let outcome = self.spectrum_configure(request);
         match outcome {
             Ok(reply) => self
@@ -2752,6 +2877,156 @@ where
             Err(SpectrumRefusal::Error(error)) => {
                 drop(prepared);
                 Err(error)
+            }
+        }
+    }
+
+    /// Completes a `SPECTRUM_CAPTURE` with its reply or its refusal, as [`Self::session_command`]
+    /// completes a configure. A ready reply borrows the monitor's result and the window's planes
+    /// until it is encoded.
+    fn complete_spectrum_capture(
+        &mut self,
+        prepared: protocol::PreparedSessionCommand,
+        outcome: Result<CaptureOutcome, SpectrumRefusal>,
+    ) -> Result<usize, CommandError> {
+        let outcome = match outcome {
+            Ok(outcome) => outcome,
+            Err(SpectrumRefusal::Reply(status, code)) => {
+                return self
+                    .controller
+                    .complete_session_command_refused(
+                        prepared,
+                        status,
+                        &code,
+                        &mut self.response_scratch,
+                    )
+                    .map_err(map_command_process_error);
+            }
+            Err(SpectrumRefusal::Error(error)) => {
+                drop(prepared);
+                return Err(error);
+            }
+        };
+        let monitor = &self.spectrum;
+        let service = monitor.service();
+        let (status, window) = match &outcome {
+            CaptureOutcome::Done => (protocol::SpectrumCaptureStatus::Done, None),
+            CaptureOutcome::Pending => (protocol::SpectrumCaptureStatus::Pending, None),
+            CaptureOutcome::Ready {
+                snapshot,
+                include_window,
+            } => {
+                let (Some(result), Some(target)) = (
+                    monitor.result(),
+                    service.and_then(host_core::SpectrumService::target),
+                ) else {
+                    drop(prepared);
+                    return Err(CommandError::Internal);
+                };
+                (
+                    protocol::SpectrumCaptureStatus::Ready,
+                    Some(capture_window(result, target, snapshot, *include_window)),
+                )
+            }
+        };
+        let reply = protocol::SpectrumCaptureReply {
+            adopted_epoch: monitor.adopted_epoch(),
+            selection_epoch: service.map_or(0, host_core::SpectrumService::selection_epoch),
+            status,
+            window,
+        };
+        self.controller
+            .complete_session_command(
+                prepared,
+                protocol::SessionCommandReply::SpectrumCaptured(reply),
+                &mut self.response_scratch,
+            )
+            .map_err(map_command_process_error)
+    }
+
+    /// `SPECTRUM_CAPTURE` (#1595 D4-D6) on the monitor's service, on this control thread: arm,
+    /// cancel and select answer `done`; a read answers `pending` or analyzes the window it pops
+    /// into the monitor's one result (`SpectrumAnalysis::analyze_into`). Every refusal is the
+    /// service's error with its status (D6) and changes nothing.
+    ///
+    /// **Acked-batch question for a read: can a reply ever acknowledge a window it did not
+    /// return? No.** Before it pops, a read measures the frame a ready reply of its shape takes
+    /// (D5) and refuses `LIMIT_EXCEEDED` (`spectrum.frame`) when the session's frame limit cannot
+    /// carry it; the service's own refusals (`Channels`, `NotArmed`, `Exhausted`) also come before
+    /// the pop. The controller reserved the caller's output for a frame of that limit before the
+    /// session ran, so a measured reply always fits, and the reply is recorded for replay in the
+    /// same call that writes it: a replay returns those bytes and pops nothing.
+    fn spectrum_capture(
+        &mut self,
+        request: &protocol::SpectrumCaptureRequest,
+    ) -> Result<CaptureOutcome, SpectrumRefusal> {
+        let limit = self.limits.maximum_control_frame_bytes;
+        let Some(parts) = self.spectrum.capture_parts() else {
+            return Err(spectrum_service_refusal(
+                host_core::SpectrumServiceError::Unprepared,
+            ));
+        };
+        let crate::spectrum::CaptureParts {
+            service,
+            analysis,
+            result,
+        } = parts;
+        match request {
+            protocol::SpectrumCaptureRequest::Arm => service
+                .arm()
+                .map(|()| CaptureOutcome::Done)
+                .map_err(spectrum_service_refusal),
+            protocol::SpectrumCaptureRequest::Cancel => service
+                .cancel()
+                .map(|()| CaptureOutcome::Done)
+                .map_err(spectrum_service_refusal),
+            protocol::SpectrumCaptureRequest::Select {
+                target_kind,
+                target_id,
+                channels,
+            } => {
+                let target =
+                    host_core::spectrum_target_ref(u32::from(target_kind.code()), target_id)
+                        .map_err(|error| {
+                            SpectrumRefusal::reply(protocol::StatusCode::InvalidField, error.code())
+                        })?;
+                service
+                    .select(target, spectrum_channels(*channels))
+                    .map(|_| CaptureOutcome::Done)
+                    .map_err(spectrum_service_refusal)
+            }
+            protocol::SpectrumCaptureRequest::Read {
+                channels,
+                include_window,
+            } => {
+                // D5: without a selection the read refuses `NotArmed` before it pops; with one,
+                // the frame a ready reply of this shape takes must fit the session's limit.
+                if let Some(target) = service.target()
+                    && !reply_fits(
+                        *channels,
+                        *include_window,
+                        spectrum_target_id(target).len(),
+                        limit,
+                    )
+                {
+                    return Err(SpectrumRefusal::reply(
+                        protocol::StatusCode::LimitExceeded,
+                        "spectrum.frame",
+                    ));
+                }
+                let Some(snapshot) = service
+                    .read(spectrum_channels(*channels))
+                    .map_err(spectrum_service_refusal)?
+                else {
+                    return Ok(CaptureOutcome::Pending);
+                };
+                analysis
+                    .analyze_into(&snapshot, result)
+                    .map_err(spectrum_service_refusal)?;
+                Ok(CaptureOutcome::Ready {
+                    snapshot: Box::new(snapshot),
+                    include_window: *include_window,
+                })
             }
         }
     }
@@ -2808,6 +3083,22 @@ where
                     "spectrum.duplicate",
                 ));
             }
+        }
+        // #1595 R6: a tap whose one-plane read (without the window) the session's frame limit
+        // cannot carry would answer `LIMIT_EXCEEDED` on every read; it is refused here.
+        let limit = self.limits.maximum_control_frame_bytes;
+        if request.entries.iter().any(|entry| {
+            !reply_fits(
+                protocol::ParameterChannel::Left,
+                false,
+                entry.target_id.len(),
+                limit,
+            )
+        }) {
+            return Err(SpectrumRefusal::reply(
+                StatusCode::LimitExceeded,
+                "spectrum.frame",
+            ));
         }
         let revision = self.controller.session().revision().0;
         let reply = |monitor: &crate::spectrum::SpectrumMonitor, plan_epoch: Option<u64>| {

@@ -416,10 +416,15 @@ pub(crate) use response::{write_response_request, write_response_result};
 
 mod spectrum;
 pub use spectrum::{
-    SPECTRUM_HOP_FRAMES, SPECTRUM_TARGET_ID_MAXIMUM_BYTES, SpectrumConfigureRequest,
-    SpectrumConfigured, SpectrumEntry, SpectrumForm, SpectrumTargetKind,
+    SPECTRUM_CAPTURE_BIN_COUNT, SPECTRUM_CAPTURE_WINDOW_FRAMES, SPECTRUM_HOP_FRAMES,
+    SPECTRUM_TARGET_ID_MAXIMUM_BYTES, SpectrumCaptureReply, SpectrumCaptureRequest,
+    SpectrumCaptureStatus, SpectrumCaptureWindow, SpectrumConfigureRequest, SpectrumConfigured,
+    SpectrumEntry, SpectrumForm, SpectrumTargetKind,
 };
-pub(crate) use spectrum::{write_spectrum_configure_request, write_spectrum_configured};
+pub(crate) use spectrum::{
+    write_spectrum_capture_reply, write_spectrum_capture_request, write_spectrum_configure_request,
+    write_spectrum_configured,
+};
 
 control_code_table! {
     /// Which kind of owner a control, or a control request, names.
@@ -4252,9 +4257,9 @@ fn allocated_id(id: u16, event: bool) -> bool {
             && !crate::wire::is_retired_message_id(id)
     } else {
         // `0x0004`, `0x0005` and `0x0006` are retired: never allocated again, never advertised.
-        // `0x0010` is `SPECTRUM_CONFIGURE` (#1594) and `0x0013` is `SESSION_REPLACE` (#1386);
-        // `0x000f`, `0x0011` and `0x0012` are claimed, not allocated.
-        matches!(id, 1..=14 | 0x0010 | 0x0013) && !crate::wire::is_retired_message_id(id)
+        // `0x0010` is `SPECTRUM_CONFIGURE` (#1594), `0x0011` is `SPECTRUM_CAPTURE` (#1595) and
+        // `0x0013` is `SESSION_REPLACE` (#1386); `0x000f` and `0x0012` are claimed, not allocated.
+        matches!(id, 1..=14 | 0x0010 | 0x0011 | 0x0013) && !crate::wire::is_retired_message_id(id)
     }
 }
 
