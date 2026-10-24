@@ -427,7 +427,8 @@ impl Rig {
         while !self.session.test_pending_providers().is_empty() {
             self.block();
             blocks += 1;
-            assert!(blocks <= 4, "the candidate is promoted within a few blocks");
+            // A removal is adopted at `S`, after the removed strip's ramp (#1325 D3).
+            assert!(blocks <= 64, "the candidate is promoted");
         }
     }
 
