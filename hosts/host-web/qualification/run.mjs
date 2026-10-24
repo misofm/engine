@@ -292,9 +292,12 @@ function validate(browserName, result) {
     && BigInt(first?.finalRevision ?? "0") > BigInt(first?.initialRevision ?? "0")
     && BigInt(first?.finalSample ?? "-1") === 0n,
   `the first stem was not committed once, by a structural transaction, and applied at the swap block: ${JSON.stringify(first)}`);
+  // #1288: the added track fades in from its first played block over the session mute ramp, then
+  // plays exactly as fed.
   gate(browserName, "empty-boot-first-stem", first?.heard === true && first?.exactInputOutput === true
+    && first?.fadeShaped === true && first?.fireFrame === 0 && first?.rampFrames === 480
     && first?.renderedDigest === first?.expectedDigest,
-  "the first stem was not heard exactly as it was fed");
+  `the first stem did not fade in from its first played block and then play exactly as it was fed: ${JSON.stringify({ fadeShaped: first?.fadeShaped, exact: first?.exactInputOutput, fireFrame: first?.fireFrame, rampFrames: first?.rampFrames })}`);
   gate(browserName, "empty-boot-meter", first?.meterLeaseResult === 0 && first?.meterFrames >= 1
     && JSON.stringify(first?.meterTrackCounts) === "[1]"
     && JSON.stringify(first?.meterWidths) === "[4]"

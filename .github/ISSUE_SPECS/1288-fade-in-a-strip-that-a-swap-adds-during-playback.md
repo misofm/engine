@@ -240,3 +240,16 @@ Implementation facts and the changes they forced:
   unmute before an anchored source plays cannot turn the fade into a step. Gate 1 covers it.
 - D4 for a submix has its own control-thread assertion
   (`an_added_submix_delays_its_fade_by_its_longest_route_line`, `D = 486`).
+
+## CI fold (PR #1878)
+
+- `fixtures/graph/v1/direct-route.resources.json`: `builtin_bank_bytes` 7191 -> 7223 and
+  `incremental_plan_bytes`/`session_plus_plan_bytes` 49047 -> 49079, +32 each and nothing else.
+  The fixture has no successor, so no fade table or watch is charged; the +32 is the fader bank's
+  `FaderRampStage::armed` (`[[bool; 8]; 2]`, 16 bytes) rounded up to the stage's 32-byte lane
+  alignment. Regenerated with `graph_fixture --write`.
+- Browser row `empty-boot-first-stem`: the first stem an empty boot adds while playing now fades
+  in, as D1-D5 require. The row asserts exact zero before the fire frame (first played block 0 plus
+  D = 0), a fade over the 480-frame session mute ramp (each frame the input times a gain in
+  `[0, 1]` that never falls, and not the input itself), and the input bit for bit after it (the
+  digest covers the frames after the ramp). The engine is unchanged.
