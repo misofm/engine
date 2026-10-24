@@ -1387,8 +1387,10 @@ impl PreparedNativeEffect for EpisodeEffect {
     }
 }
 
-/// A stateless pass-through bank that collapses and, holding no state, proves its channels agree:
-/// the recovery proof (`BankStage::channels_agree`) no launch effect bank gives yet.
+/// A stateless pass-through bank that collapses and, holding no state, proves its channels agree
+/// (`BankStage::channels_agree`) on the first block its input agrees again. A stateful proving bank
+/// would have seen its own state differ while its input differed, and its proof would hide the
+/// op's.
 struct PassBank;
 impl PreparedNativeEffectBank for PassBank {
     fn retained_bytes(&self) -> u64 {
@@ -1480,8 +1482,8 @@ fn split_strip_tracks(count: usize, insert: Kind) -> (Console, Vec<TrackShape>) 
 ///
 /// Red if the delay's fact is this block's input and words alone (the sticky `&&` dropped in
 /// `Runtime::execute`): the later chain re-engages after the episode and copies the left echo over
-/// the right one. No launch effect bank proves `channels_agree`, so no host-core session can see
-/// that mutation: a later chain whose input term failed once never recovers there.
+/// the right one. No host-core probe sees that mutation: none has an episode followed by
+/// symmetric words, and a stateful proving bank behind the op still holds a state that differs.
 #[test]
 fn a_chain_behind_a_per_node_effect_whose_channels_parted_stays_dual() {
     let (console, tracks) = split_strip_tracks(8, Kind::Delay);

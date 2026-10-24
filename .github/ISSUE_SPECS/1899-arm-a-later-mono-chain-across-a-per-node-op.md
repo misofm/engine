@@ -67,11 +67,19 @@ Op table (slice item 1), verified on main `c6e295947`:
   and no sidechain; one that keeps its op has a PDC-delayed input, which admission excludes.
 
 - Gate change (root's gate list named a host-core sticky probe): the sticky term is moved to a
-  graph-compiler rig. Measured: with the sticky `&&` dropped, no host-core probe goes red, because
-  a later chain whose input term failed once clears its own agreement and re-engages only on a
-  `channels_agree` proof, which no launch effect bank gives (`PreparedNativeEffectBank` default
-  `false`). The rig's later chain holds a stateless pass-through bank that proves it, so the
-  mutation is visible there. The bit is still owed: it is what keeps a future proving bank sound.
+  graph-compiler rig. Measured: with the sticky `&&` dropped, no host-core probe goes red. A
+  later chain whose input term failed once clears its own agreement and re-engages only on a
+  `channels_agree` proof of its prefix. Some launch banks do give that proof (soft-clip,
+  gate-expander, transient-shaper, multiband, the builtin input stage), but none of the host-core
+  probes has an asymmetric episode followed by symmetric words on the op, and a stateful proving
+  bank behind the op saw its own state differ while its input differed, so its proof fails while
+  the op's state still differs. The rig's later chain holds a stateless pass-through bank, whose
+  proof holds at once, so the mutation is visible there.
+- Swap carry (R3) probe, added at review: `a_swap_carries_a_per_node_effects_agreement_with_its_state`
+  renders a predecessor through the episode, adopts a successor that moves every live-controlled
+  delay node to node, and compares armed with forced off. Handing `true` on the carry turns it red
+  (mutation 1899-4). The lane-to-node arm is not exercised: no rig moves a bank lane into a
+  per-node instance.
 
 ## Evidence (attempt 1, AVX2 host, debug unless named)
 
