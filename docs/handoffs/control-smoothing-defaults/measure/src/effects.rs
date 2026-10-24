@@ -14,10 +14,13 @@
 //! input by exactly the effect's declared latency. Nothing here is timed.
 
 use compressor::CompressorFactory;
+use std::sync::OnceLock;
+
 use effect_contract::{
     BypassShunt, EffectProcessBlock, EffectQuality, InitialParameterValue, LinkMode,
-    NativeEffectFactory, PortRole, PrepareEffectLimits, PrepareEffectRequest, PreparedNativeEffect,
-    PreparedPorts, PreparedSidechainPort, ProcessReport, default_initial_values,
+    NativeEffectFactory, NativeEffectRegistry, PortRole, PrepareEffectLimits, PrepareEffectRequest,
+    PreparedEffect, PreparedNativeEffect, PreparedPorts, PreparedSidechainPort, ProcessReport,
+    default_initial_values,
 };
 use gate_expander::GateExpanderFactory;
 use parametric_eq::ParametricEqFactory;
@@ -208,17 +211,17 @@ impl Setting {
         text.join(" ")
     }
 
-    pub fn prepare(&self, rate: u32) -> Box<dyn PreparedNativeEffect> {
+    pub fn prepare(&self, rate: u32) -> PreparedEffect {
         prepare(self.effect.factory(), rate, &self.overrides, self.link)
     }
 
     pub fn latency(&self, rate: u32) -> usize {
-        usize::try_from(self.prepare(rate).metadata().latency.0).expect("latency")
+        usize::try_from(self.prepare(rate).metadata.latency.0).expect("latency")
     }
 
     /// The wet signal: `input` through a fresh instance, block by block.
     pub fn render(&self, rate: u32, input: &Stereo) -> Stereo {
-        render(self.prepare(rate).as_mut(), input)
+        render(self.prepare(rate).processor.as_mut(), input)
     }
 }
 
@@ -234,13 +237,30 @@ fn settle(rate: u32) -> usize {
     (SETTLE_S * f64::from(rate)).round() as usize
 }
 
+/// Every measured effect's factory, admitted once, as a host admits them: the source of each
+/// request's registered tail bound.
+fn registry() -> &'static NativeEffectRegistry {
+    static REGISTRY: OnceLock<NativeEffectRegistry> = OnceLock::new();
+    REGISTRY.get_or_init(|| {
+        let factories: [Box<dyn NativeEffectFactory>; 6] = [
+            Box::new(CompressorFactory),
+            Box::new(TruePeakLimiterFactory),
+            Box::new(ParametricEqFactory),
+            Box::new(SoftClipFactory),
+            Box::new(TransientShaperFactory),
+            Box::new(GateExpanderFactory),
+        ];
+        NativeEffectRegistry::new(factories).expect("the measured effects are admitted")
+    })
+}
+
 /// Prepares one scalar instance as `effect-compiler` does, with `overrides` on both channels.
 pub fn prepare(
     factory: &dyn NativeEffectFactory,
     rate: u32,
     overrides: &[(&str, f32)],
     link: LinkMode,
-) -> Box<dyn PreparedNativeEffect> {
+) -> PreparedEffect {
     let descriptor = factory.descriptor();
     let mut values: Vec<InitialParameterValue> = default_initial_values(descriptor).collect();
     for &(name, value) in overrides {
@@ -290,6 +310,9 @@ pub fn prepare(
                 maximum_scratch_bytes: u64::MAX,
                 maximum_automation_spans_per_block: 64,
             },
+            tail_bound: registry()
+                .tail_bound(descriptor.id, rate, EffectQuality::Normal)
+                .unwrap_or_else(|error| panic!("{}: {}", descriptor.id.as_str(), error.code)),
         })
         .unwrap_or_else(|error| panic!("{}: {}", descriptor.id.as_str(), error.code))
 }
