@@ -47,8 +47,7 @@ use host_core::{
     HostPrepareCaps, HostPrepareReport, HostShapePolicy, MAXIMUM_VCA_REACH_PAIRS,
     MAXIMUM_VCAS_BOUNDED, PrepareDiagnostics, PrepareRejection, PreparedHost, SourceControlError,
     SourceSubmission, SuccessorBase, compile_host_model, compiled_session_shape,
-    control_table_bytes, parse_host_session, prepare_host_runtime_with_live_controls_and_spectrum,
-    source_id_arena_bytes,
+    control_table_bytes, parse_host_session, source_id_arena_bytes,
 };
 use host_core::{
     PreparedSpectrumCaptures, ResponseSnapshotError, ResponseSnapshotSink, SpectrumAnalysis,
@@ -1882,7 +1881,9 @@ impl ReadyOwnership {
     /// captures it displaces here, off the audio thread. Entries go in commit order, so two
     /// adoptions before one service step promote one after the other, each against the captures
     /// the one before left. A plan that was superseded before it rendered was never adopted
-    /// (`adoption` is `None`) and its captures drop with its entry. Control side only: it frees.
+    /// (`adoption` is `None`) and its captures drop with its entry. An adopted plan with no
+    /// captures was prepared with no configuration and removes the service (#1593 D6). Control
+    /// side only: it frees.
     ///
     /// `analysis` is the smoothing history of the instance that owns both halves (the ffi staging's
     /// analysis, #1618): a promotion that does not keep the stream ends the stream's analysis in
@@ -1893,12 +1894,24 @@ impl ReadyOwnership {
             // A candidate render has not adopted keeps its hand-over: a service step or command
             // between its commit and its adoption block must not drop it (batch 15a review fold
             // 2). Only an adopted entry's is taken.
-            let Some(carried) = entry.adoption else {
+            let Some(carried) = entry.adoption.take() else {
                 continue;
             };
             let Some(handover) = entry.spectrum.take() else {
+                // A plan prepared with no configuration (#1593 D6: an edit removed every target):
+                // the service goes, its stream and the analysis's end, and every read answers
+                // `Unprepared`.
+                if let Some(mut service) = self.spectrum.take() {
+                    service.stop_stream(analysis.as_deref_mut());
+                }
                 continue;
             };
+            // A configuration only shrinks today, so captures never follow a removed service;
+            // #1594's re-configure must create the service here instead.
+            debug_assert!(
+                self.spectrum.is_some(),
+                "a plan with captures was adopted after the service was removed"
+            );
             let Some(service) = self.spectrum.as_mut() else {
                 continue;
             };
@@ -5649,112 +5662,6 @@ fn boot_refusal(failure: &CompileFailure, record: &Mutex<BootRecord>) -> BootFai
     }
 }
 
-/// The browser's preparation (issue #1400 D5): the live request's meters, the three branches
-/// (no spectrum, one spectrum capture, a spectrum collection) and the host-core entry each one
-/// calls, at boot (`successor` is `None`) and as a successor of a running plan.
-///
-/// Every branch delivers controls concurrently (the only delivery since #1767), so the same
-/// function serves a control plane that prepares while another thread renders. A
-/// successor prepares every source it leaves unchanged vacant, to carry the displaced plan's ring.
-/// Every branch meters what host-core's selection meters (issue #1581 D1,
-/// [`host_core::meter_selection`]): one `PostMatrix` sample-peak meter per strip, the tracks then
-/// the submixes, so `meters[i]` is strip `i`'s peak pair.
-fn prepare_web_host(
-    compiled: &CompiledSession,
-    caps: &HostPrepareCaps,
-    live_controls: &HostLiveControlRequest,
-    spectrum: Option<&SpectrumPreparationRequest>,
-    lanes: HostLiveLanes,
-    superseded: &host_core::LiveValuesSuperseded,
-    successor: Option<SuccessorBase<'_>>,
-) -> Result<
-    (
-        PreparedHost,
-        host_core::HostLiveControlHandles,
-        Option<PreparedSpectrumCaptures>,
-    ),
-    PrepareDiagnostics,
-> {
-    match spectrum {
-        Some(SpectrumPreparationRequest::Single(request)) => {
-            let (host, handles, capture) = match successor {
-                Some(base) => {
-                    host_core::prepare_host_runtime_with_live_controls_and_spectrum_successor(
-                        compiled,
-                        caps,
-                        live_controls,
-                        request,
-                        lanes,
-                        superseded,
-                        base,
-                    )
-                }
-                None => prepare_host_runtime_with_live_controls_and_spectrum(
-                    compiled,
-                    caps,
-                    live_controls,
-                    request,
-                    lanes,
-                    superseded,
-                ),
-            }?;
-            Ok((
-                host,
-                handles,
-                Some(PreparedSpectrumCaptures::Single(capture)),
-            ))
-        }
-        Some(SpectrumPreparationRequest::Collection(request)) => {
-            let (host, handles, capture) = match successor {
-                Some(base) => {
-                    host_core::prepare_host_runtime_with_live_controls_and_spectrum_collection_successor(
-                        compiled,
-                        caps,
-                        live_controls,
-                        request,
-                        lanes,
-                        superseded,
-                        base,
-                    )
-                }
-                None => host_core::prepare_host_runtime_with_live_controls_and_spectrum_collection(
-                    compiled,
-                    caps,
-                    live_controls,
-                    request,
-                    lanes,
-                    superseded,
-                ),
-            }?;
-            Ok((
-                host,
-                handles,
-                Some(PreparedSpectrumCaptures::Collection(capture)),
-            ))
-        }
-        None => {
-            let (host, handles) = match successor {
-                Some(base) => host_core::prepare_host_runtime_with_live_lanes_successor(
-                    compiled,
-                    caps,
-                    live_controls,
-                    lanes,
-                    base,
-                    superseded,
-                ),
-                None => host_core::prepare_host_runtime_with_live_lanes(
-                    compiled,
-                    caps,
-                    live_controls,
-                    lanes,
-                    superseded,
-                ),
-            }?;
-            Ok((host, handles, None))
-        }
-    }
-}
-
 /// The browser as a control-plane adapter (#1381a): its plan resource table stores the control
 /// plane's own row, and it keeps no per-session handle beside the two halves.
 ///
@@ -6001,27 +5908,33 @@ impl HostAttachment for RenderCompanions {
 /// record another thread poisoned): refused before the transaction is committed (#1290a).
 const SHAPE_UNAVAILABLE: &str = "web.apply.shape_unavailable";
 
-/// The browser's [`control_plane::RuntimePreparer`] (issue #1400 D5): `prepare_web_host` for the
-/// session's boot options and spectrum request, with the render-side companions moved into the
-/// plan.
+/// The browser's [`control_plane::RuntimePreparer`] (issue #1400 D5): host-core's one entry
+/// ([`host_core::prepare_host_runtime_with_live_lanes_and_spectrum`]) for the session's boot
+/// options and the spectrum configuration the session passes (#1593 D3), with the render-side
+/// companions moved into the plan.
+///
+/// Every plan, the boot plan and every successor, delivers controls concurrently and meters what
+/// host-core's selection meters (issue #1581 D1, [`host_core::meter_selection`]): one `PostMatrix`
+/// sample-peak meter per strip, the tracks then the submixes, so `meters[i]` is strip `i`'s peak
+/// pair. A successor prepares every source it leaves unchanged vacant, to carry the displaced
+/// plan's ring.
 ///
 /// It attaches the live lanes the control plane chose ([`controls::live_lanes`], passed in as the
 /// `lanes` argument), so the boot word chooses no lane here.
 pub struct WebRuntimePreparer {
     options: WebBootOptions,
-    spectrum: Option<SpectrumPreparationRequest>,
     /// Where the boot preparation leaves its facts for the host (#1381a), or `None` for a preparer
     /// that is only called.
     record: Option<Arc<Mutex<BootRecord>>>,
 }
 
 impl WebRuntimePreparer {
-    /// A preparer for a session booted with `options` and the optional `spectrum` request.
+    /// A preparer for a session booted with `options`. The spectrum request is the session's
+    /// (#1593 D3): every call takes it as an argument.
     #[must_use]
-    pub fn new(options: WebBootOptions, spectrum: Option<SpectrumPreparationRequest>) -> Self {
+    pub fn new(options: WebBootOptions) -> Self {
         Self {
             options,
-            spectrum,
             record: None,
         }
     }
@@ -6039,9 +5952,10 @@ impl control_plane::RuntimePreparer for WebRuntimePreparer {
         compiled: &CompiledSession,
         caps: &HostPrepareCaps,
         lanes: HostLiveLanes,
-        // #1593 T3 takes the request from here; until then the preparer holds its own, keeps its
-        // capture in the render companions and returns none.
-        _spectrum: Option<&host_core::SpectrumPreparation>,
+        // The session's configuration (#1593 D3): the boot request, then whatever of it the
+        // session's edits left. The capture stays in the record for the browser's service, so the
+        // preparer returns none until #1596 moves the browser's readers.
+        spectrum: Option<&host_core::SpectrumPreparation>,
         successor: Option<SuccessorBase<'_>>,
         superseded: &host_core::LiveValuesSuperseded,
     ) -> Result<
@@ -6052,8 +5966,7 @@ impl control_plane::RuntimePreparer for WebRuntimePreparer {
         ),
         PrepareDiagnostics,
     > {
-        let boot = successor.is_none();
-        let prepared = self.prepare_plan(compiled, caps, lanes, successor, superseded, boot);
+        let prepared = self.prepare_plan(compiled, caps, lanes, spectrum, successor, superseded);
         if let (Err(failure), Some(record)) = (&prepared, &self.record)
             && let Ok(mut record) = record.lock()
         {
@@ -6070,17 +5983,18 @@ impl control_plane::RuntimePreparer for WebRuntimePreparer {
 }
 
 impl WebRuntimePreparer {
-    /// The preparation itself. `boot` is whether it prepares the session's first plan, whose facts
-    /// the host's boot reads from the record.
+    /// The preparation itself. With no `successor` it prepares the session's first plan, whose
+    /// facts the host's boot reads from the record.
     fn prepare_plan(
         &self,
         compiled: &CompiledSession,
         caps: &HostPrepareCaps,
         lanes: HostLiveLanes,
+        spectrum: Option<&host_core::SpectrumPreparation>,
         successor: Option<SuccessorBase<'_>>,
         superseded: &host_core::LiveValuesSuperseded,
-        boot: bool,
     ) -> Result<(PreparedHost, host_core::HostLiveControlHandles), PrepareDiagnostics> {
+        let boot = successor.is_none();
         let live_controls =
             live_control_request(self.options, compiled.quantum().0).ok_or_else(|| {
                 PrepareDiagnostics::fixed(PrepareRejection::Session, "web.live_controls.config")
@@ -6092,15 +6006,16 @@ impl WebRuntimePreparer {
             effects: lanes.effects || live_controls.observation_taps != 0,
             ..lanes
         };
-        let (mut host, mut handles, spectrum_captures) = prepare_web_host(
-            compiled,
-            caps,
-            &live_controls,
-            self.spectrum.as_ref(),
-            lanes,
-            superseded,
-            successor,
-        )?;
+        let (mut host, mut handles, spectrum_captures) =
+            host_core::prepare_host_runtime_with_live_lanes_and_spectrum(
+                compiled,
+                caps,
+                &live_controls,
+                lanes,
+                spectrum,
+                successor,
+                superseded,
+            )?;
         // #1290a: the plan's tables, built from the plan's own model, producers and companions.
         // They go to the host through the record: the boot's at boot, a replacement's when its
         // command commits. The boot report charges the boot's to the bridge rows; a replacement
@@ -6729,16 +6644,26 @@ fn compile_ready(
     let commands_enabled = options.live_control_observation_taps != 0;
     // #1312 D2, #1399: the session's `live_values_superseded` count is the control plane's, made
     // once before any plan is prepared; the preparer leaves a handle on it in the record, which the
-    // status reads. #1400 D5: the three boot shapes are `prepare_web_host`'s.
+    // status reads.
     let record = Arc::new(Mutex::new(BootRecord::default()));
-    let preparer =
-        WebRuntimePreparer::new(options, spectrum_request.cloned()).recording(Arc::clone(&record));
+    let preparer = WebRuntimePreparer::new(options).recording(Arc::clone(&record));
     let limits = control_limits(caps, memory_budget);
+    // #1593 D2: the boot request and hop are the session's spectrum configuration, which the
+    // session gives every plan it prepares, keeping each entry whose target an edit leaves.
+    let spectrum = spectrum_request.map(|preparation| host_core::SpectrumConfiguration {
+        preparation: preparation.clone(),
+        hop: spectrum_hop,
+    });
     let control_plane::CompiledChildren {
         session: mut control,
         mut plan,
-    } = control_plane::compile_children::<WebAdapter>(document, limits, Box::new(preparer), None)
-        .map_err(|failure| boot_refusal(&failure, &record))?;
+    } = control_plane::compile_children::<WebAdapter>(
+        document,
+        limits,
+        Box::new(preparer),
+        spectrum,
+    )
+    .map_err(|failure| boot_refusal(&failure, &record))?;
     let (engine, live_values_superseded, shape, spectrum_boot) = {
         let mut record = record
             .lock()

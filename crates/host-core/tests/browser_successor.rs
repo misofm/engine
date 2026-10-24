@@ -2,10 +2,11 @@
 //! boot and as the successor of a running plan.
 //!
 //! The three branches are one spectrum capture, a spectrum collection and the browser's selected
-//! per-strip meters with no spectrum. Each successor entry is the boot entry with a
-//! [`SuccessorBase`], so the cases below render a predecessor, swap the successor in through the
-//! plan exchange and compare every block with the post-edit session prepared fresh through the
-//! matching boot entry.
+//! per-strip meters with no spectrum. The two spectrum branches are the one entry
+//! `prepare_host_runtime_with_live_lanes_and_spectrum` (#1593 D3), whose successor is its boot
+//! preparation with a [`SuccessorBase`], so the cases below render a predecessor, swap the
+//! successor in through the plan exchange and compare every block with the post-edit session
+//! prepared fresh through the same entry.
 //!
 //! * **Gate 1, gap-free, each branch.** Adding a muted track renders every block bit-identical to
 //!   the reference, and the swap block reports `Carried`. The same run with a fresh successor
@@ -31,13 +32,10 @@ use engine::realtime::{CarryOutcome, SwapOutcome};
 use host_core::{
     HostLiveControlHandles, HostLiveControlRequest, HostLiveLanes, HostMeterRequest,
     LiveValuesSuperseded, PlanStateInventory, PrepareDiagnostics, PreparedHost,
-    SPECTRUM_WINDOW_FRAMES, SourceSubmission, SpectrumCapture, SpectrumCaptureCollection,
-    SpectrumCaptureCollectionEntry, SpectrumCaptureCollectionRequest, SpectrumCaptureRequest,
-    SpectrumChannels, SpectrumPair, SpectrumTarget, SuccessorBase,
-    prepare_host_runtime_with_live_controls_and_spectrum,
-    prepare_host_runtime_with_live_controls_and_spectrum_collection,
-    prepare_host_runtime_with_live_controls_and_spectrum_collection_successor,
-    prepare_host_runtime_with_live_controls_and_spectrum_successor,
+    PreparedSpectrumCaptures, SPECTRUM_WINDOW_FRAMES, SourceSubmission, SpectrumCapture,
+    SpectrumCaptureCollection, SpectrumCaptureCollectionEntry, SpectrumCaptureCollectionRequest,
+    SpectrumCaptureRequest, SpectrumChannels, SpectrumPair, SpectrumPreparation, SpectrumTarget,
+    SuccessorBase, prepare_host_runtime_with_live_lanes_and_spectrum,
     prepare_host_runtime_with_selected_meters, prepare_host_runtime_with_selected_meters_successor,
     spectrum_capture_collection_resources, spectrum_capture_resources_for,
 };
@@ -185,56 +183,29 @@ fn prepare(
     let superseded = LiveValuesSuperseded::default();
     let lanes = HostLiveLanes::ALL;
     Ok(match (branch, base) {
-        (Branch::Single, None) => {
-            let (host, handles, capture) = prepare_host_runtime_with_live_controls_and_spectrum(
+        (Branch::Single | Branch::Collection, base) => {
+            let preparation = match branch {
+                Branch::Single => SpectrumPreparation::Single(single_request(track)),
+                _ => SpectrumPreparation::Collection(collection_request([track, "eq1"])),
+            };
+            let (host, handles, captures) = prepare_host_runtime_with_live_lanes_and_spectrum(
                 compiled,
                 &caps(),
                 &request,
-                &single_request(track),
                 lanes,
+                Some(&preparation),
+                base,
                 &superseded,
             )?;
-            let pairing = host.inventory.spectrum_pairing().to_vec();
-            (host, Kept::Single(handles, capture, pairing))
-        }
-        (Branch::Single, Some(base)) => {
-            let (host, handles, capture) =
-                prepare_host_runtime_with_live_controls_and_spectrum_successor(
-                    compiled,
-                    &caps(),
-                    &request,
-                    &single_request(track),
-                    lanes,
-                    &superseded,
-                    base,
-                )?;
-            let pairing = host.inventory.spectrum_pairing().to_vec();
-            (host, Kept::Single(handles, capture, pairing))
-        }
-        (Branch::Collection, None) => {
-            let (host, handles, capture) =
-                prepare_host_runtime_with_live_controls_and_spectrum_collection(
-                    compiled,
-                    &caps(),
-                    &request,
-                    &collection_request([track, "eq1"]),
-                    lanes,
-                    &superseded,
-                )?;
-            (host, Kept::Collection(handles, capture))
-        }
-        (Branch::Collection, Some(base)) => {
-            let (host, handles, capture) =
-                prepare_host_runtime_with_live_controls_and_spectrum_collection_successor(
-                    compiled,
-                    &caps(),
-                    &request,
-                    &collection_request([track, "eq1"]),
-                    lanes,
-                    &superseded,
-                    base,
-                )?;
-            (host, Kept::Collection(handles, capture))
+            match captures.expect("a spectrum preparation returns its captures") {
+                PreparedSpectrumCaptures::Single(capture) => {
+                    let pairing = host.inventory.spectrum_pairing().to_vec();
+                    (host, Kept::Single(handles, capture, pairing))
+                }
+                PreparedSpectrumCaptures::Collection(capture) => {
+                    (host, Kept::Collection(handles, capture))
+                }
+            }
         }
         (Branch::Meters, None) => {
             let (host, handles) = prepare_host_runtime_with_selected_meters(
