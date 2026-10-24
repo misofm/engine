@@ -2514,7 +2514,6 @@ where
             control_catalog: candidate_catalog,
             capi: prospective_capi,
             revision_gate,
-            master_track: _,
         } = prepared_runtime;
         // #1652 U2a fold 2 (MAJOR-A; #1713 deletes it): read before the inventory moves into the
         // candidate's provider epoch.

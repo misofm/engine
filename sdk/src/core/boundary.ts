@@ -198,15 +198,10 @@ function snapshotBootOptions(options: BootOptions): BootSnapshot {
     throw new MisoUsageError("spectrum and spectrumCollection are mutually exclusive");
   }
   const liveControlOptions = options.liveControls === undefined ? undefined : (() => {
-    const {
-      meterBlocks,
-      observationTaps,
-      masterTrackPlusOne,
-    } = options.liveControls!;
+    const { meterBlocks, observationTaps } = options.liveControls!;
     return Object.freeze({
       ...(meterBlocks === undefined ? {} : { meterBlocks }),
       ...(observationTaps === undefined ? {} : { observationTaps }),
-      ...(masterTrackPlusOne === undefined ? {} : { masterTrackPlusOne }),
     });
   })();
   const bootOptions: BootOptions = Object.freeze({

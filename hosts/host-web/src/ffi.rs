@@ -516,7 +516,7 @@ const ZERO_BOOT_OPTIONS: WebBootOptions = WebBootOptions {
     reserved1: 0,
     live_control_meter_blocks: 0,
     live_control_observation_taps: 0,
-    live_control_master_track_plus_one: 0,
+    reserved2: 0,
 };
 
 impl BootStaging {

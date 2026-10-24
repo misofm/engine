@@ -115,13 +115,12 @@ export interface BootOptions {
   /** Optional prepared continuous-spectrum hop, selected outside the packed boot options block. */
   readonly spectrumHopFrames?: 256 | 512 | 1024 | 2048;
   /**
-   * The three live-control words. Absent attaches no live controls at all. `masterTrackPlusOne` is
-   * the designated master's strip index (tracks first, then submixes) plus one, or `0` for none.
+   * The two live-control words. Absent attaches no live controls at all. The master strip is not a
+   * boot option (issue #1689): designate it after boot with `strip.master(enabled)`.
    */
   readonly liveControls?: {
     readonly meterBlocks?: number;
     readonly observationTaps?: number;
-    readonly masterTrackPlusOne?: number;
   };
   /** One optional prepared graph boundary for the bounded spectrum query. */
   readonly spectrum?: SpectrumQuery;
@@ -142,7 +141,6 @@ export const POLICY_WORDS = Object.freeze([
   "maximumMemoryBytes",
   "liveControlMeterBlocks",
   "liveControlObservationTaps",
-  "liveControlMasterTrackPlusOne",
 ] as const);
 
 /** The two words whose values are defined by the boot's role rather than shared. */
@@ -187,7 +185,7 @@ export function writeBootOptions(
   u64("reserved1", 0n);
   u64("liveControlMeterBlocks", BigInt(options.liveControls?.meterBlocks ?? 0));
   u64("liveControlObservationTaps", BigInt(options.liveControls?.observationTaps ?? 0));
-  u64("liveControlMasterTrackPlusOne", BigInt(options.liveControls?.masterTrackPlusOne ?? 0));
+  u64("reserved2", 0n);
 
   // A detached copy, so a caller can compare two boots' option blocks after the fact without
   // holding a view onto wasm memory that a later `document_ptr` growth could detach.

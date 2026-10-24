@@ -707,19 +707,11 @@ export interface MisoWebBootOptions {
   /// `MisoCommandReason.UnsupportedKind`. A nonzero value also allocates the command staging
   /// that carries the subscription records; without it `command()` is refused `UnsupportedKind`.
   liveControlObservationTaps: bigint;
-  /// The designated master strip index (tracks first, then submixes) **plus one**, or `0n` for
-  /// none (issue 143). `T + j + 1` designates submix `j`, so a mix bus with a limiter can report
-  /// `masterGrDb` (issue 1213).
-  ///
-  /// V1 has no structural master bus, so `masterGrDb` is a designation rather than a discovery.
-  /// Plus one because zero has to keep meaning "unset". Requires
-  /// `liveControlObservationTaps !== 0n`. This word designates the first plan only (issue
-  /// 1683): after boot the app sets or moves the master with the strip's `master` monitor row
-  /// (`SET_CONTROL`), the core holds it by strip ID, and every later plan follows it. The row has
-  /// no tap requirement: it is valid on every host (the C ABI has no taps), and with no tap on the
-  /// strip `masterGrDb` is `null`. Only this boot word keeps the stricter rule, until its
-  /// successor retires it.
-  liveControlMasterTrackPlusOne: bigint;
+  /// Reserved (offset 56 of the boot options): must be exactly `0n`. It was the master boot word
+  /// until issue 1689 retired it: the app designates the master with the strip's `master` monitor
+  /// row (`SET_CONTROL`), as on every host, and the core holds it by strip ID. With no tap on the
+  /// strip `masterGrDb` is `null`.
+  reserved2: bigint;
   /// One optional prepared graph boundary; `null` retains no capture storage.
   spectrum?: MisoSpectrumBootOptions | null;
   spectrumCollection?: MisoSpectrumCollectionBootOptions | null;
