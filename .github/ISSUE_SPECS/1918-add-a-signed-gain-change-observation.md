@@ -34,4 +34,10 @@ The dynamic EQ's upward mode boosts a band, but the only observation kind it can
 
 ## Evidence (attempt 1)
 
-Recorded in the PR body by root from the implementer's report.
+- `observation_lane::the_signed_peak_fold_keeps_the_sign_of_the_largest_magnitude` passes; red on three mutants
+  of the arm (store `abs`, `>=` tie, signed `>` max).
+- `host-web` `observation_unit_conversion_is_declared_and_clamped` gains the signed row; red when a boost adds to
+  the strip slot.
+- Vocabulary: exhaustive `match` in `parameter-metadata`, the py pin, regenerated SDK output,
+  `check-sdk-generated.sh` (source and fresh named-twin artifact), `check-sdk-types.sh`,
+  `check-web-audioworklet.sh`, `check-browser-expected-resources.py`: pass.
