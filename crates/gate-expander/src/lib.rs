@@ -1584,7 +1584,7 @@ impl<L: Lane> PreparedGate<L, false> {
 
     /// [`PreparedNativeEffectBank::channels_agree`] (issue #973): every word
     /// [`desymmetrize`](Self::desymmetrize) copies compares bit-equal between the channels, on
-    /// every lane. The whole per-channel state is 32 lane words, so it is compared outright; no
+    /// every lane. The whole per-channel state is 31 lane words, so it is compared outright; no
     /// fixed point is needed.
     fn channels_bit_equal(&self) -> bool {
         let words = |coef: &GateCoef<L>, state: &GateState<L>| {

@@ -73,13 +73,19 @@ The sidechain-connected gate (never banks); the other three effects (sibling iss
   values and the disengage copy does not carry it, so a left-only re-seed left the right payload's
   attack time stale (found red by the new test). Reports duplicate left onto right.
 * `desymmetrize_channels` copies `state[1] = state[0]` and `coef[1] = coef[0]`; `channels_agree`
-  compares those words bit for bit (32 lane words per channel, so no fixed point is needed).
+  compares those words bit for bit (31 lane words per channel, so no fixed point is needed).
 * Root decision: the spec's console-level gate is dropped (tests-overboard); the rack chain and the
   randomized differential's collapsed arm already cover the bank surface.
 * Class A evidence (PR, not committed): a scratch digest of the dual scalar and native-bank output,
   reports and payloads over three link modes, two holds, asymmetric channels and automation was
   `77de805f037e2064` on base `3b5740cdd` and on this branch, debug and release.
-* Wasm: `process_bank` keeps 162 `f32x4` operations (base 162 vector / 8 scalar, branch 162 / 0);
+* Wasm: `process_bank` keeps 162 `f32x4` operations (base 162 vector / 8 scalar, branch 162 / 0;
+  the roster table's 180 / 8 was an older build). The drop to 0 scalar is codegen drift, fewer
+  operations: the dual source path is unchanged (`gate_block` is `gate_frames::<.., false>`);
   `process_bank_mono` is 82 / 0. The roster row `gate_expander.*4wide6f32x4` now matches two
   kernels, so it must split into dual (`12process_bank`) and collapsed (`17process_bank_mono`)
-  rows in `scripts/check-web-audioworklet-callgraph.py`, outside this issue's paths.
+  rows in `scripts/check-web-audioworklet-callgraph.py` (root authorized it, with the dual
+  ceiling set to 0.10 by the four-times-ratio rule, measured ratio 0).
+* Root also authorized `tests/randomized.rs` `witness: true` and the effect-contract
+  `channels_agree` note. The apart arm of the transition test makes the channels differ in the
+  hold countdown alone, so the `channels_agree` word list is defended.

@@ -189,13 +189,16 @@ fn a_collapsed_then_desymmetrized_bank_is_a_never_collapsed_bank() {
             }
         }
 
-        // Under DualMono, channels driven apart by the render disagree; the copy makes them
-        // agree. No hold, so the silent right channel closes inside the block while the loud left
-        // stays open. A linked detector reads one level on both channels, so their state stays
-        // bit-equal and agreement holds without the copy.
-        let mut apart = prepare_bank_native(&[active_values(); 8], link).expect("bank");
-        let mut left = block(0, &signals);
-        let mut right = vec![0.0; left.len()];
+        // Under DualMono, channels driven apart by the render disagree, here in the hold
+        // countdown alone: both channels stay open with `gain_db` at exact `0.0`, the left
+        // reloads its 480-sample hold every frame, and the right last reloads at frame 7 (a hold
+        // longer than the block keeps it open). The copy makes them agree. A linked detector
+        // reads one level on both channels, so their state stays bit-equal without the copy.
+        let mut apart = prepare_bank_native(&values(), link).expect("bank");
+        let mut left = vec![0.5_f32; FRAMES * NATIVE_LANES];
+        let mut right: Vec<f32> = (0..FRAMES * NATIVE_LANES)
+            .map(|word| if word / NATIVE_LANES < 8 { 0.5 } else { 0.0 })
+            .collect();
         let offsets = [0_u32; NATIVE_LANES + 1];
         apart.processor.process_bank(
             EffectBankProcessBlock::new(
