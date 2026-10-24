@@ -4,7 +4,10 @@ impl LaneDrainForTheStrip {
             .control_lane_consumer_for_this_strip_with_a_long_name
             .available_at_entry()
         {
-            let Ok(record) = control.try_pop() else {
+            let Ok(record) = self
+                .control_lane_consumer_for_this_strip_with_a_long_name
+                .try_pop()
+            else {
                 break;
             };
             self.apply(record);

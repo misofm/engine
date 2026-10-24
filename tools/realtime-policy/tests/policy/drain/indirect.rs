@@ -164,13 +164,10 @@ fn the_map_or_count_form_is_not_a_count() {
     );
 }
 
-/// D3: the callee of a call stands where it is called, so the loops around it bound it.
+/// D3: the callee of a call stands where it is called, so the loops around it judge it. In a
+/// counted loop it is not a readable pop either (#1426 D2, `pop-receiver-unreadable-call`).
 #[test]
 fn a_function_value_called_in_place_is_judged_by_its_loops() {
-    accepts(
-        "callee-in-a-counted-loop",
-        "fn drain(control: &mut Consumer<Record>) {\n    let available = control.available_at_entry();\n    for _ in 0..available {\n        let Ok(record) = Consumer::try_pop(control) else {\n            break;\n        };\n        apply(record);\n    }\n}",
-    );
     refuses(
         "callee-in-an-unbounded-loop",
         "fn drain(control: &mut Consumer<Record>) {\n    loop {\n        let Ok(record) = Consumer::try_pop(control) else {\n            break;\n        };\n        apply(record);\n    }\n}",
