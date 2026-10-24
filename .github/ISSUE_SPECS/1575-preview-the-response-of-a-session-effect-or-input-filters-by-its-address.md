@@ -140,3 +140,32 @@ entry values) and a compressor insert:
   (#774): a session effect or a strip's input filters is addressed by its stable decision-17
   address, resolved on demand from the committed model, on both hosts, with no retained catalog.
   See the amendment record.
+
+## Decision record (attempt 1, 2026-10-24)
+
+Scope note `scope/1575.md` (root-accepted) amends the spec:
+
+- **Resolver signature.** Protocol-free `host_core::resolve_response_target(model, strip: &str,
+  section: ResponseAddressSection, overrides: &[ResponseParameterOverride], sample_rate_hz) ->
+  ResolvedResponseTarget` (owned; `target()` borrows it as `ResponsePreviewTarget::ResolvedEffect`
+  or `InputFilters`). The provider maps the wire address (`response_address`) and refuses a
+  non-strip owner, the `own` section or a present `control`/`lane` as `response.address`.
+- **Override rows (D3).** Read with `controls::owner_rows_in` for the addressed strip alone (the
+  rows `controls::list` gives for that owner, without listing the session), then
+  `controls::check`. Applied after resolution: control `0` bypass, `LINK_MODE_CONTROL` link mode,
+  parameters through the existing `apply_overrides` lane walk over the resolved values
+  (`normalize_zero`d, as `controls::set` writes them).
+- **Serving (D5).** `response_preflight` returns a `CheckedTarget`; `serve_checked` computes the
+  limits once, builds the configuration or address target, and `serve_target` shares preparation,
+  the reply bound and the curves. `serve_response_at` takes `Option<&SessionModel>` in place of
+  its `session: bool`; the session-less entry passes `None` and keeps refusing an address.
+- **Codes.** New `ResponseQueryError` variants in the one `refusal()` table: `Address`
+  (`INVALID_FIELD response.address`), `AddressUnknown` (`NOT_FOUND control.address.unknown`),
+  `ThirdParty` (`UNAVAILABLE effect.third_party.unavailable_at_launch`), `OverrideControl`
+  (`INVALID_FIELD` + the validator's code), `Committed` (`VALIDATION_FAILED` + the resolver's
+  code; unreachable on a validated model).
+- **Tests.** Gates 1, 3 and 4 are host-core unit tests in `control_provider.rs` (a model built in
+  the test); gates 2 and 5 are one C ABI row in `crates/capi/tests/response_get.rs`
+  (`EditPath::Live`, revision + 1, `miso_engine_v1_plan_resources` equal after 100 requests),
+  not a new `response_address.rs`. The capi refusal case "the address target" is deleted: it is
+  served now.
