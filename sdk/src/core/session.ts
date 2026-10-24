@@ -220,6 +220,7 @@ export const EFFECT_LINK_MODES: Readonly<Record<EffectId, readonly LinkMode[]>> 
   "miso.compressor": Object.freeze(["dual_mono", "maximum", "average"] as const),
   "miso.de-esser": Object.freeze(["dual_mono", "maximum", "average"] as const),
   "miso.delay": Object.freeze(["dual_mono"] as const),
+  "miso.dynamic-eq": Object.freeze(["dual_mono", "maximum", "average"] as const),
   "miso.gate-expander": Object.freeze(["dual_mono", "maximum", "average"] as const),
   "miso.multiband-compressor": Object.freeze(["dual_mono", "maximum", "average"] as const),
   "miso.parametric-eq": Object.freeze(["dual_mono"] as const),

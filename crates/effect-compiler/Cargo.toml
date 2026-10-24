@@ -16,6 +16,7 @@ effect-contract.workspace = true
 parametric-eq.workspace = true
 compressor.workspace = true
 de-esser.workspace = true
+dynamic-eq.workspace = true
 gate-expander.workspace = true
 multiband-compressor.workspace = true
 true-peak-limiter.workspace = true
