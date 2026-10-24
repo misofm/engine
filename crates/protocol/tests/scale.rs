@@ -1,7 +1,7 @@
 //! Issue #1079: the protocol session store holds a session above the former 65,536-track boundary.
 //!
 //! Release-only nightly row: the store compiles 65,537 tracks twice (the base and the edit's
-//! candidate) and writes their canonical snapshot, about 94 MB each.
+//! candidate) and writes their canonical snapshot, 88.8 MB each.
 
 use protocol::control_core::{Lane, Owner, Section, row_address};
 use protocol::{ExpectedRevision, SessionEdit, SessionRevision, SessionStore};

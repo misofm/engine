@@ -62,7 +62,7 @@ fn compiles_65_537_tracks_without_a_product_track_limit() {
     );
 }
 
-/// Issue #1079: the canonical writer and the parser hold a 65,537-track document (about 94 MB),
+/// Issue #1079: the canonical writer and the parser hold a 65,537-track document (88.8 MB),
 /// the size a session reaches before any compile. Release-only: debug parse alone takes ~19 s.
 #[test]
 #[ignore = "release-mode scale gate; runs nightly"]
