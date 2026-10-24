@@ -776,7 +776,8 @@ struct CompileObservation {
     owners: HostOwners,
     /// `PreparedRenderPlan::retained_bytes`, walked before any owner dropped (#1074).
     plan_walk: u64,
-    /// `strip_control_table_bytes` at the compiled session's strip count and strip ID bytes.
+    /// `strip_control_table_bytes` at the compiled session's strip count, strip ID bytes and the
+    /// producers' own heap bytes.
     strip_table_charge: u64,
     /// The observation rows that are bounds, not allocations (#1584 D6a): the cells' event heap,
     /// the binding table and its transient copies, from `control_plane::observation_reserve_bytes`
@@ -822,8 +823,13 @@ fn observe_compile(document: &str, compile_limits: &CompileLimits) -> CompileObs
         .fold((0, 0), |(count, bytes), strip| {
             (count + 1, bytes + strip.id.as_str().len())
         });
-    let strip_table_charge = host_core::strip_control_table_bytes(strip_count, strip_id_bytes)
-        .expect("the strip table's charge");
+    let strip_heap_bytes = strips
+        .iter()
+        .map(host_core::TrackControlProducer::retained_heap_bytes)
+        .sum();
+    let strip_table_charge =
+        host_core::strip_control_table_bytes(strip_count, strip_id_bytes, strip_heap_bytes)
+            .expect("the strip table's charge");
     let (observation_reserve, _) = control_plane::observation_reserve_bytes(
         compile_limits.maximum_control_frame_bytes,
         effects
@@ -1045,6 +1051,12 @@ fn capi_retained_bytes_charge_every_byte_the_compile_retains() {
         // #1074: every registered native effect as an insert, so each effect's own walk is
         // observed. The de-esser is not in the native registry on this tree, so no session names it.
         ("every native insert", every_native_insert_session()),
+        // #1916: automated faders, so the strips' offsets-writer boxes are charged to the strip
+        // table, and #1074's automation walkers are on the plan-walk row.
+        (
+            "builtins automation",
+            include_str!("../../../fixtures/session/v1/builtins-automation.json").to_owned(),
+        ),
     ] {
         let observed = observe_compile(&document, &limits());
         observed.assert_capi_retained_bytes_are_complete(label, &limits());

@@ -15,13 +15,16 @@
 //!    the word (the change is growing), the release rate otherwise. Every word is a lane word, so
 //!    a ramped threshold, slope, range or rate is read as it stands this sample.
 //!
+//! 4. [`WordRamp`] and [`advance_word_ramps`]: the live words both effects ramp per sample, and
+//!    [`blend`], the crossfade of a live switch.
+//!
 //! Each effect then applies its own output law to `(x, v1, g)` (the de-esser's split, wideband
 //! and listen arms; the dynamic EQ's modulated bell mix). The `f64` oracle is
 //! `dsp_reference::dynamic_band`, which shares no code with this module.
 
 use crate::dynamics::{GainComputerCoef, gain_delta_db};
 use lane::Lane;
-use lane::kernels::{SvfState, svf_step_when};
+use lane::kernels::{SvfState, ramp_toward, svf_step_when};
 use math::fast_db::{fast_gain_from_db, fast_level_db};
 
 /// Detector level floor, below which the logarithm is not taken.
@@ -143,4 +146,55 @@ pub fn dynamic_band_gain<L: Lane>(level_db: L, c: &DynamicBandCoef<L>, gain_db: 
 )]
 pub fn applied_gain<L: Lane>(delta_db: L) -> L {
     fast_gain_from_db(delta_db)
+}
+
+/// One live word in the precomputed-step form of `crate::ramp` (D11), as lane words.
+#[derive(Clone, Copy, Debug)]
+pub struct WordRamp<L: Lane> {
+    /// Value used for the current sample.
+    pub current: L,
+    /// Target assigned exactly on the final ramp sample.
+    pub target: L,
+    /// Precomputed per-sample increment.
+    pub step: L,
+    /// Samples remaining, an exact integer-valued lane word.
+    pub remaining: L,
+}
+
+impl<L: Lane> WordRamp<L> {
+    /// A settled ramp at `+0.0`.
+    #[must_use]
+    pub fn zero() -> Self {
+        let zero = L::zero();
+        Self {
+            current: zero,
+            target: zero,
+            step: zero,
+            remaining: zero,
+        }
+    }
+}
+
+/// Advances every ramp one sample: `ramp_toward` (never past the target, #1409), the target on
+/// the final sample. A settled ramp selects every field back, an exact no-op.
+#[inline(always)]
+pub fn advance_word_ramps<L: Lane>(ramps: &mut [WordRamp<L>]) {
+    let zero = L::zero();
+    let one = L::splat(1.0);
+    for ramp in ramps {
+        let moving = ramp.remaining.gt(zero);
+        let last = ramp.remaining.eq(one);
+        let stepped = ramp_toward(ramp.current, ramp.step, ramp.target);
+        ramp.current = L::select(moving, L::select(last, ramp.target, stepped), ramp.current);
+        ramp.step = L::select(last, zero, ramp.step);
+        ramp.remaining = L::select(moving, ramp.remaining.sub(one), ramp.remaining);
+    }
+}
+
+/// `a` at `w == 0`, `b` at `w == 1`, `a + w (b - a)` between: a live switch's crossfade. The
+/// endpoints are selected, so a settled switch renders its arm's own bits.
+#[inline(always)]
+pub fn blend<L: Lane>(a: L, b: L, w: L) -> L {
+    let mixed = w.fma(b.sub(a), a);
+    L::select(w.eq(L::zero()), a, L::select(w.eq(L::splat(1.0)), b, mixed))
 }

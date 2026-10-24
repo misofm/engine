@@ -221,6 +221,37 @@ The claim-line carry, keyed by (claiming node, source), the L2 and L3 fill routi
 host-core join are *Carry source-claim lines across a plan swap and fill a grown line for a prime*
 (#1402).
 
+## Decision record (slice 1)
+
+- **D3 check (2026-10-24, main `4918d928a`).** No correction. `pdc::timings` sets a node's `max`
+  to its latest incoming arrival or its floor, whichever is larger, and compensates every incoming
+  edge to `max`, with source arrival `max(m) + lat(m)`. A C->C edge with both ends at `a + P`
+  then has `c' = c` (L1). A track's `Input` has no incoming edge, so its raise is `floor - 0`, and
+  a `floor`-sample line on its claim emits source-read sample `r + O - λ` at render sample `r`
+  (L2 with `λ' = λ + P`).
+- **R1 (root).** The claim line is a `SourceClaimLine { node, samples }` report row
+  (`PreparedGraphPlan::source_claim_lines()`, the canonical `claim-line` row, a `claim=` field on
+  the node's `dot` label). It is lowered by adding `samples` to both lanes of the track's
+  `PreparedTrackDelay` (the entry is created when the session declared no delay), so it runs on
+  `runtime::TrackDelayLine` and `pdc_delay_block` with no new node kind and no runtime change.
+  The rows reach the plan through `PreparedGraphPlan::with_source_claim_lines`, not a
+  `PreparedGraphPlanParts` field, so the 26 hand-built plans in other crates need no edit (a plan
+  built from Parts has no lines). Bind refuses, as `graph.scheduler.layout`, a plan whose lines are
+  out of node order, name a node that is not a track-stage `Input` of the graph, or are longer than
+  either lane of that node's track-delay entry. #1402, which reads the lines for its fill rule, may
+  move them into Parts.
+- **R2 (root).** Claim samples count in `total_delay_samples` (so their bytes are charged once,
+  through `total_delay * 8`, and `track_delay_bytes` stays the declared delay's) and are checked
+  against `maximum_delay_samples_per_edge` (per line) and `maximum_total_delay_samples`. They are
+  not in `delay_count`: a line adds no node, edge or schedule item. The merged ring is the
+  `largest_allocation_bytes` term. A track's `Input` tail bound adds its floor. A declared track
+  delay stays outside PDC.
+- **R3 (root).** Gate 2 runs at 48 kHz on every vector backend (`Backend::VECTOR`), not four
+  rates by two widths. It renders through `into_bound_with_source_set` with a frame-encoded
+  driver, and also checks that the tail extents and the PDC total grow by the line.
+- Only a track's `Input` is a source-reading node (`timings`'s `sources`); a submix `Input` never
+  has a line. The slice is inert until #1354: no production path produces a track-`Input` floor.
+
 ## Deliverables
 
 1. D3, then D1-D2 in the graph compiler and the graph runtime.

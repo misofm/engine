@@ -15,6 +15,7 @@ mod compressor;
 mod de_esser;
 mod delay;
 mod dynamic_band;
+mod dynamic_eq;
 mod gate_expander;
 mod lr4;
 mod parametric_eq;
@@ -42,6 +43,7 @@ pub use dynamic_band::{
     ReferenceBandTap, ReferenceDynamicBand, ReferenceDynamicBandLaw, ReferenceRbjBiquad,
     reference_level_db,
 };
+pub use dynamic_eq::ReferenceDynamicEqBand;
 pub use gate_expander::{
     ReferenceGateExpanderError, ReferenceGateExpanderParameters, ReferenceGateLink,
     ReferenceGatePhase, ReferenceGateTiming, ReferenceGateTimingChange, ReferenceGateTrace,
