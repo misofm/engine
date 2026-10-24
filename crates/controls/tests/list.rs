@@ -129,7 +129,7 @@ fn reason(class: ControlClass) -> RebuildReason {
 }
 
 /// Gate 1, classes. Red if a row's class contradicts decision 14 (or decision 17's ruled-live
-/// rule): builtins by descriptor, routes by destination.
+/// rule): builtins by descriptor, routes by destination and tap.
 #[test]
 fn classes_match_decision_14() {
     let model = fixture();
@@ -157,14 +157,24 @@ fn classes_match_decision_14() {
             "send {control}"
         );
     }
-    // A route into the output keeps the fold, whatever its tap.
-    for route in ["post-fader-out", "pre-fader-out", "bus-out"] {
+    // A route into the output whose tap precedes the fader is live (#1391); a `post_fader` or
+    // `post_pan` one keeps the fold.
+    for (route, live) in [
+        ("post-fader-out", false),
+        ("pre-fader-out", true),
+        ("bus-out", false),
+    ] {
         for control in 1..=6 {
-            assert_eq!(
-                reason(class(&model, &route_own(route, control))),
-                RebuildReason::Optimisation,
-                "{route} {control}"
-            );
+            let class = class(&model, &route_own(route, control));
+            if live {
+                assert_eq!(class, ControlClass::Live, "{route} {control}");
+            } else {
+                assert_eq!(
+                    reason(class),
+                    RebuildReason::Optimisation,
+                    "{route} {control}"
+                );
+            }
         }
         // `follows_mute` is always false there: the row does not apply.
         assert!(!row_of(&model, &route_own(route, 7)).descriptor.active);

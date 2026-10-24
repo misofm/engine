@@ -34,8 +34,8 @@ use controls::{
 use effect_compiler::{LiveEffectAddress, launch_native_effect_registry, resolve_initial_values};
 use effect_contract::{EffectControlRecord, PreparedEffectTarget};
 use session::{
-    EditRamps, Effect, EffectIdentity, EffectParam, LoweredRacks, Route, RouteDestination,
-    SessionModel, StableId, StripRef, canonical_session_json,
+    EditRamps, Effect, EffectIdentity, EffectParam, LoweredRacks, Route, SessionModel, StableId,
+    StripRef, canonical_session_json,
 };
 
 #[cfg(feature = "test-support")]
@@ -881,7 +881,8 @@ impl Changes {
         }
         let strip = match &change.address.owner {
             Owner::Strip(strip) => strip,
-            // A live route row is a send into a submix (#1557); an output route's rows are
+            // A live route row is a send into a submix (#1557) or a route into the output from
+            // before the fader (#1391); a `post_fader` or `post_pan` output route's rows are
             // rebuild-only above.
             Owner::Route(route) if descriptor.family == Family::Route => {
                 self.routes.insert(route.clone());
@@ -995,7 +996,7 @@ fn lower_strips<'a>(
 }
 
 /// Step 6 for sends: the record of each route in `indices` (ascending positions in
-/// `model.routes`) into a submix whose own rows changed (`routes`) or whose effective gate changed.
+/// `model.routes`) with a live lane (`controls::route_rows_live`) whose own rows changed (`routes`) or whose effective gate changed.
 #[expect(
     clippy::too_many_arguments,
     reason = "the two models and the lowering's inputs"
@@ -1027,7 +1028,8 @@ fn lower_routes<'a>(
             .get(index)
             .filter(|before| before.id == after.id)
             .ok_or(LiveRebuild::Structure)?;
-        if !matches!(after.destination, RouteDestination::SubmixInput { .. }) {
+        // #1391: a route into a submix or one whose tap precedes its strip's fader has a lane.
+        if !controls::route_rows_live(after) {
             continue;
         }
         let gates = diff.gates(index).ok_or(LiveRebuild::Structure)?;

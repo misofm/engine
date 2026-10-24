@@ -549,7 +549,7 @@ fn a_live_fader_moved_to_its_maximum_is_covered() {
         &model,
         graph_compiler::GainLiveness {
             strip_fader_matrix: true,
-            routes_into_submixes: false,
+            routes: false,
         },
     );
     assert_eq!(
