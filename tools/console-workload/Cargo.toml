@@ -27,6 +27,8 @@ graph.workspace = true
 graph-compiler.workspace = true
 lane.workspace = true
 session.workspace = true
+# Issue #938: the live-producer row binds the production source set over host-region rings.
+source.workspace = true
 
 # Test-only: `test_only_set_route_fold_declined` gives `the_folded_master_is_the_reductions_own_bits`
 # its unfolded oracle (issue #885). Dev-dependency features are resolved only when this crate's own
@@ -37,6 +39,9 @@ graph = { workspace = true, features = ["test-support"] }
 # `LiveControlEffectBankStage` in a production `BankChain`, so its differential can read each bank's
 # state payload between blocks -- the one surface a whole-plan render does not expose.
 rack.workspace = true
+# Test-only: the live-producer row's test pins `LIVE_RING_FRAMES` to the ring a product host
+# prepares (`host_core::default_source_ring_frames`), which this subject mirrors (issue #938).
+host-core.workspace = true
 
 [lints]
 workspace = true

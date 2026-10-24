@@ -78,9 +78,9 @@ Modes
     Assert the artifact still computes in the vector family, and in four lanes only. Four rules,
     none of which is a raw op-count minimum:
 
-    1. **Roster presence.** Each of the eleven named kernels in `KERNEL_ROSTER` -- the
+    1. **Roster presence.** Each of the twelve named kernels in `KERNEL_ROSTER` -- the
        `process_bank`/`process_section`/`process_block` bodies of the shipped effect library and
-       the live route's indexed-ramp mix (#1220); the twelfth, the collapsed limiter's, is held
+       the live route's indexed-ramp mix (#1220); the thirteenth, the collapsed limiter's, is held
        by the forwarding rule below -- must match exactly
        one arithmetic-carrying function. A kernel that vanished, that was renamed, or that
        de-vectorised so completely it stopped carrying `f32x4` arithmetic at all fails here.
@@ -246,8 +246,8 @@ EIGHT_LANE = re.compile(r"(?:f32|f64|u32|i32)x8|(?i:simd8)|transpose_tile_8")
 
 # The smallest scalar budget any kernel gets, in instructions.
 #
-# Nine of the twelve roster kernels -- the eleven `KERNEL_ROSTER` rows and the collapsed limiter's
-# kernel -- currently emit *zero* scalar `f32` arithmetic, so a ceiling
+# Eleven of the thirteen roster kernels -- the twelve `KERNEL_ROSTER` rows and the collapsed
+# limiter's kernel -- currently emit *zero* scalar `f32` arithmetic, so a ceiling
 # expressed purely as a multiple of `vector` would be exactly zero for them: a single scalar
 # coefficient load introduced by an ordinary refactor would fail the gate. Eight instructions is
 # well under the ~4x explosion de-vectorisation produces even in the smallest roster kernel
@@ -267,7 +267,8 @@ SCALAR_SLACK = 8
 # (vector = `f32x4.{mul,add,sub,div}`, scalar = `f32.{mul,add,sub,div}`):
 #
 #   (multiband-compressor f32x8 was 2560 / 20; #1110 removed eight lanes from the browser build)
-#   multiband-compressor f32x4   1280 / 20   ratio 0.0156
+#   multiband-compressor f32x4   2527 /  0   ratio 0        (dual; 2527 / 20 before #1871, codegen)
+#   multiband-compressor f32x4   1389 /  0   ratio 0        (collapsed, #1871)
 #   transient-shaper     f32x4    786 / 72   ratio 0.0916
 #   true-peak-limiter    f32x4    448 /  0   ratio 0        (dual)
 #   compressor           f32x4    267 /  0   ratio 0        (dual)
@@ -295,10 +296,11 @@ SCALAR_SLACK = 8
 # ## What mono-collapse M2 did to this roster, and why the limiter has a forwarding rule
 #
 # The collapse gave the compressor, the true-peak limiter and the parametric EQ a **second** block
-# body each, and #973 gave the gate/expander one: a one-plane variant a bank chain runs when
-# every lane of its cohort is collapse-eligible. All four survive monomorphisation as their own
-# symbols, so `compressor.*4wide6f32x4` (and at #973 `gate_expander.*4wide6f32x4`) went from one
-# match to two and the roster failed exactly as
+# body each, #973 gave the gate/expander one and #1871 the multiband compressor one: a one-plane
+# variant a bank chain runs when every lane of its cohort is collapse-eligible. All five survive
+# monomorphisation as their own symbols, so `compressor.*4wide6f32x4` (and at #973
+# `gate_expander.*4wide6f32x4`; the multiband row was already pinned to its `process_bank` by #893)
+# went from one match to two and the roster failed exactly as
 # it is designed to -- "two matches is a failure" is not a nuisance here, it is the rule noticing
 # that the artifact grew a kernel.
 #
@@ -320,14 +322,19 @@ SCALAR_SLACK = 8
 # vanished, not as a row that grew.
 #
 # Each collapsed body carries about **half** its dual sibling's vector arithmetic (138 against 267,
-# 224 against 448, 84 against 168, 82 against 162) and zero scalar arithmetic, which is what a
-# correct one-plane variant looks like from here.
+# 224 against 448, 84 against 168, 82 against 162, 1389 against 2527) and zero scalar arithmetic,
+# which is what a correct one-plane variant looks like from here.
 KERNEL_ROSTER: tuple[tuple[str, str, float], ...] = (
     # #893: named by its `process_bank` body, as the EQ rows are, because the bank's
     # `advance_clocks` now carries one vector add of its own (the silence counters' advance).
     (
         "multiband-compressor f32x4",
         r"multiband_compressor.*4wide6f32x4.*12process_bank",
+        0.10,
+    ),
+    (
+        "multiband-compressor f32x4 collapsed",
+        r"multiband_compressor.*4wide6f32x4.*17process_bank_mono",
         0.10,
     ),
     ("transient-shaper f32x4", r"transient_shaper.*4wide6f32x4", 0.38),

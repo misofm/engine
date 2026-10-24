@@ -181,8 +181,8 @@ impl AoSoaScratch {
     /// `debug_assert`: the compiler fixed it once (master plan §4.3).
     ///
     /// This is the **per-lane scalar** move: one `f32` store per lane-sample, at the lane's stride
-    /// through the block. It stays the whole path for a partial bank and the ragged tail of a full
-    /// one; [`BankChain::gather`] explains why.
+    /// through the block. It is the ragged tail of the tiled gather (frames past the last whole
+    /// tile), and in a test build the whole of the scalar oracle.
     fn gather_lane(&mut self, lane: usize, left: &[f32], right: &[f32], from: usize, frames: u32) {
         let lanes = self.width.lanes() as usize;
         let len = frames as usize * lanes;
@@ -223,8 +223,11 @@ impl AoSoaScratch {
     }
     // REALTIME_POLICY_END
 
-    // REALTIME_POLICY_BEGIN
     /// Copy frames `[from, frames)` of one stable AoSoA lane back into its planar graph buffer.
+    ///
+    /// Test-only since issue #887: the scalar oracle behind `force_scalar_transpose`. Production
+    /// scatters every bank through the tiled transpose.
+    #[cfg(test)]
     fn scatter_lane(
         &self,
         lane: usize,
@@ -252,7 +255,6 @@ impl AoSoaScratch {
             *sample = chunk[lane];
         }
     }
-    // REALTIME_POLICY_END
 }
 
 // REALTIME_POLICY_BEGIN
@@ -3212,14 +3214,25 @@ pub struct BankChain {
     active: Box<[bool]>,
     slots: Box<[PreparedSlot]>,
     transposes: u64,
-    /// Every lane of this chain is active, so the whole bank may transpose in `W`-frame tiles.
-    /// Decided once in [`BankChain::new`]; a partial bank never takes the tiled path.
+    /// Every lane of this chain is active. Decided once in [`BankChain::new`]. Every bank
+    /// transposes in `W`-frame tiles (issue #887); only a full bank may scatter straight into its
+    /// members' planes ([`BankMembers::distinct_planes_mut`] views every lane, and a padded lane's
+    /// output must never be written), so a partial bank always scatters through staging.
     full_bank: bool,
-    /// Lane-major landing block for the tiled scatter, `lanes * stride` words per plane. Empty --
-    /// and never allocated -- for a partial bank, which scatters per lane as it always did.
+    /// Lane-major landing block for the tiled scatter, `lanes * stride` words per plane. Allocated
+    /// for every chain at construction.
     staging_left: Box<[f32]>,
     /// See [`Self::staging_left`].
     staging_right: Box<[f32]>,
+    /// `quantum` words of `+0.0`: the planar plane the tiled gather reads for an inactive lane, so
+    /// on every gathered block a padded lane is fed `+0.0` and its members are never asked for a
+    /// plane (issue #887). A resident-input block copies the predecessor's inactive words instead
+    /// ([`Self::acquire_resident_input`]), which need not be `+0.0`. Never written. Empty on a full bank, which has no inactive lane; on a partial
+    /// bank it is the chain's one extra allocation, `4 * quantum` bytes.
+    zero_plane: Box<[f32]>,
+    /// Test-only: take the per-lane scalar oracle instead of the tiled transpose.
+    #[cfg(test)]
+    scalar_transpose: bool,
     /// Lanes with an armed accumulating auxiliary destination (issue #210's PFL seam).
     ///
     /// **Empty, and never allocated, on every chain the engine builds today.** The epilogue tests
@@ -3394,14 +3407,17 @@ impl BankChain {
             return Err(RackError::Shape);
         }
         // AoSoaScratch has no public mutable/reused constructor: these planes are already zeroed.
-        // The tiled round trip needs every lane's planar view, and its scatter fully overwrites
-        // every lane's planar buffer. Both are only true of a full bank, so a partial one keeps
-        // the per-lane scalar path: that is what preserves the invariant above, that an inactive
-        // lane is neither read from nor written to and can never hand stale garbage across the
-        // block boundary. The standing 64-track fixture is all-full banks; the nine-track ragged
-        // fixture is what exercises the fallback.
+        // Every bank tiles (issue #887). The gather reads the chain's `+0.0` plane for an
+        // inactive lane, so its scratch words are `+0.0` at the start of every gathered block, and the
+        // staged scatter copies only active lanes out: an inactive lane's members are neither
+        // read from nor written to.
         let full_bank = active.iter().all(|lane| *lane);
-        let staging = if full_bank { scratch.left.len() } else { 0 };
+        let staging = scratch.left.len();
+        let zero_plane = if full_bank {
+            0
+        } else {
+            scratch.quantum as usize
+        };
         let collapse_prefix = Self::collapse_prefix_of(&slots, &active);
         let mut prepared_slots = Vec::with_capacity(slots.len());
         for slot in slots {
@@ -3428,6 +3444,9 @@ impl BankChain {
             full_bank,
             staging_left: vec![0.0; staging].into_boxed_slice(),
             staging_right: vec![0.0; staging].into_boxed_slice(),
+            zero_plane: vec![0.0; zero_plane].into_boxed_slice(),
+            #[cfg(test)]
+            scalar_transpose: false,
             aux: Box::default(),
             fold: Box::default(),
             collapse_prefix,
@@ -3719,10 +3738,7 @@ impl BankChain {
             self.fold = Box::default();
             return;
         }
-        if self.staging_left.len() != self.scratch.left.len() {
-            self.staging_left = vec![0.0; self.scratch.left.len()].into_boxed_slice();
-            self.staging_right = vec![0.0; self.scratch.right.len()].into_boxed_slice();
-        }
+        debug_assert_eq!(self.staging_left.len(), self.scratch.left.len());
         self.fold = lanes;
     }
 
@@ -4199,41 +4215,33 @@ impl BankChain {
     /// scratch is not written; the seam writes it, after the prefix and before anything reads it.
     /// Copy exactly the words ordinary acquisition overwrites. The mode is the successor's
     /// post-drain collapse decision, independent of how its predecessor rendered this block.
+    ///
+    /// The whole block is one contiguous copy on every bank. An inactive lane therefore receives
+    /// the predecessor's output for that lane (which may be `-0.0` or any other word), not the
+    /// gather's `+0.0`; its words are only ever read by its own discarded kernel lane, never by an
+    /// active lane or a member.
     fn acquire_resident_input(&mut self, source: &BankChain, frames: u32, mono: bool) {
         let len = frames as usize * self.lanes;
-        if self.full_bank {
-            self.scratch.left[..len].copy_from_slice(&source.scratch.left[..len]);
-            if !mono {
-                self.scratch.right[..len].copy_from_slice(&source.scratch.right[..len]);
-            }
-        } else {
-            for lane in 0..self.lanes {
-                if self.active[lane] {
-                    for frame in 0..frames as usize {
-                        let word = frame * self.lanes + lane;
-                        self.scratch.left[word] = source.scratch.left[word];
-                        if !mono {
-                            self.scratch.right[word] = source.scratch.right[word];
-                        }
-                    }
-                }
-            }
+        self.scratch.left[..len].copy_from_slice(&source.scratch.left[..len]);
+        if !mono {
+            self.scratch.right[..len].copy_from_slice(&source.scratch.right[..len]);
         }
     }
 
     fn gather_mono<M: BankMembers + ?Sized>(&mut self, members: &M, frames: u32) {
-        if self.full_bank {
-            effect_contract::match_bank_width!(self.scratch.width, |_, W, transpose| {
-                self.gather_mono_tiled::<M, W>(members, frames, transpose)
-            });
+        #[cfg(test)]
+        if self.scalar_transpose {
+            for lane in 0..self.lanes {
+                if self.active[lane] {
+                    let (left, _right) = members.plane(lane);
+                    self.scratch.gather_lane_left(lane, left, 0, frames);
+                }
+            }
             return;
         }
-        for lane in 0..self.lanes {
-            if self.active[lane] {
-                let (left, _right) = members.plane(lane);
-                self.scratch.gather_lane_left(lane, left, 0, frames);
-            }
-        }
+        effect_contract::match_bank_width!(self.scratch.width, |_, W, transpose| {
+            self.gather_mono_tiled::<M, W>(members, frames, transpose)
+        });
     }
     // REALTIME_POLICY_END
 
@@ -4250,9 +4258,13 @@ impl BankChain {
         let tiled = (frames_used / W) * W;
         let mut left_planes: [&[f32]; W] = [&[]; W];
         for (lane, plane) in left_planes.iter_mut().enumerate() {
-            let (left, right) = members.plane(lane);
-            debug_assert!(left.len() == frames_used && right.len() == frames_used);
-            *plane = left;
+            *plane = if self.active[lane] {
+                let (left, right) = members.plane(lane);
+                debug_assert!(left.len() == frames_used && right.len() == frames_used);
+                left
+            } else {
+                &self.zero_plane[..frames_used]
+            };
         }
         tile_gather(&mut self.scratch.left[..tiled * W], &left_planes, transpose);
         if tiled < frames_used {
@@ -4266,10 +4278,12 @@ impl BankChain {
     /// Record the structural half of this cohort's witness: the `SOURCE` term, joined at bind.
     ///
     /// `structural` is "every active lane of this chain renders a track whose two channels read
-    /// one source channel **and this chain gathers that track's input**" (issue #970: a later chain
-    /// of a split strip reads planes an earlier stage produced, which the source mapping says
-    /// nothing about). Passing `false`, or never calling this at all, makes the chain decline
-    /// forever. See the `collapse_source` field for why the chain cannot derive this itself.
+    /// one source channel" and either this chain gathers that track's input (issue #970), or the
+    /// caller proves its input per block through
+    /// [`set_input_symmetric`](Self::set_input_symmetric) (issue #987: a later chain reads planes
+    /// an earlier stage produced, which the source mapping says nothing about, so the graph
+    /// runtime passes `true` for it only with that per-block term). Passing `false`, or never
+    /// calling this at all, makes the chain decline forever. See the `collapse_source` field for why the chain cannot derive this itself.
     ///
     /// # The obligation, which M3's invariant rests on
     ///
@@ -4278,7 +4292,8 @@ impl BankChain {
     /// The block-order half is a caller obligation because the chain cannot check it, and it is
     /// what lets [`run`](Self::run) leave `SOURCE` out of the agreement invariant: a chain armed
     /// before it renders has one answer to "do the two planes carry the same samples" for its whole
-    /// life, so that term cannot be the cause of a *transient* divergence. Arming a chain that has
+    /// life, so that term cannot be the cause of a *transient* divergence; a later chain's
+    /// transient divergence is the per-block input term's, which does enter the invariant. Arming a chain that has
     /// already rendered blocks fed by two different source channels would break that reading, and
     /// nothing in the engine does it -- the join runs once, from the compiled session, at bind.
     pub const fn arm_mono_collapse(&mut self, structural: bool) {
@@ -4637,25 +4652,26 @@ impl BankChain {
     // REALTIME_POLICY_END
 
     // REALTIME_POLICY_BEGIN
-    /// Planar -> AoSoA for the whole bank: one tiled transpose per plane when every lane is
-    /// active, the per-lane scalar move otherwise.
+    /// Planar -> AoSoA for the whole bank: one tiled transpose per plane, on every bank. An
+    /// inactive lane reads the chain's `+0.0` plane (issue #887).
     ///
     /// A tile is `W` frames wide, `W` being the bank width, so this is the same code at four lanes
-    /// and at eight. Frames past the last whole tile are the ragged tail and take the scalar path
-    /// too -- there is no partial-tile transpose and no read past `frames`.
+    /// and at eight. Frames past the last whole tile are the ragged tail and take the per-lane
+    /// move -- there is no partial-tile transpose and no read past `frames`.
     fn gather<M: BankMembers + ?Sized>(&mut self, members: &M, frames: u32) {
-        if self.full_bank {
-            effect_contract::match_bank_width!(self.scratch.width, |_, W, transpose| {
-                self.gather_tiled::<M, W>(members, frames, transpose)
-            });
+        #[cfg(test)]
+        if self.scalar_transpose {
+            for lane in 0..self.lanes {
+                if self.active[lane] {
+                    let (left, right) = members.plane(lane);
+                    self.scratch.gather_lane(lane, left, right, 0, frames);
+                }
+            }
             return;
         }
-        for lane in 0..self.lanes {
-            if self.active[lane] {
-                let (left, right) = members.plane(lane);
-                self.scratch.gather_lane(lane, left, right, 0, frames);
-            }
-        }
+        effect_contract::match_bank_width!(self.scratch.width, |_, W, transpose| {
+            self.gather_tiled::<M, W>(members, frames, transpose)
+        });
     }
     // REALTIME_POLICY_END
 
@@ -4671,11 +4687,16 @@ impl BankChain {
         let frames_used = frames as usize;
         let tiled = (frames_used / W) * W;
         // `plane` takes `&self`, so every lane's planar view can be held at once: the gather needs
-        // no staging block, only `W` live shared borrows.
+        // no staging block, only `W` live shared borrows. An inactive lane borrows the zero plane.
         let mut left_planes: [&[f32]; W] = [&[]; W];
         let mut right_planes: [&[f32]; W] = [&[]; W];
         for lane in 0..W {
-            let (left, right) = members.plane(lane);
+            let (left, right) = if self.active[lane] {
+                members.plane(lane)
+            } else {
+                let zero = &self.zero_plane[..frames_used];
+                (zero, zero)
+            };
             debug_assert!(left.len() == frames_used && right.len() == frames_used);
             left_planes[lane] = left;
             right_planes[lane] = right;
@@ -4704,17 +4725,25 @@ impl BankChain {
     /// AoSoA -> planar for the whole bank, the inverse of [`Self::gather`] under the same rule.
     ///
     /// A folded lane (see [`BankChain::arm_fold`]) takes the same transpose and then goes to
-    /// [`BankMembers::fold_plane`] instead of to its own plane. On the per-lane scalar path that
-    /// means transposing into this chain's staging block first, which is the one thing arming
-    /// costs a partial bank; the tiled path already lands there -- unless every lane folds and the
-    /// members accept the resident block instead ([`BankMembers::fold_resident`], issue #915).
+    /// [`BankMembers::fold_plane`] instead of to its own plane -- unless every lane folds and the
+    /// members accept the resident block instead ([`BankMembers::fold_resident`], issue #915). An
+    /// inactive lane's output is never handed to a member.
     fn scatter<M: BankMembers + ?Sized>(&mut self, members: &mut M, frames: u32) {
-        if self.full_bank {
-            effect_contract::match_bank_width!(self.scratch.width, |_, W, transpose| {
-                self.scatter_tiled::<M, W>(members, frames, transpose)
-            });
+        #[cfg(test)]
+        if self.scalar_transpose {
+            self.scatter_scalar(members, frames);
             return;
         }
+        effect_contract::match_bank_width!(self.scratch.width, |_, W, transpose| {
+            self.scatter_tiled::<M, W>(members, frames, transpose)
+        });
+    }
+    // REALTIME_POLICY_END
+
+    /// The per-lane scalar oracle for [`Self::scatter`]: one strided store per lane-sample, with a
+    /// folded lane landing in staging first. Test-only since issue #887.
+    #[cfg(test)]
+    fn scatter_scalar<M: BankMembers + ?Sized>(&mut self, members: &mut M, frames: u32) {
         if self.fold.is_empty() {
             for lane in 0..self.lanes {
                 if self.active[lane] {
@@ -4770,7 +4799,6 @@ impl BankChain {
             members.fold_cohort(cohort);
         }
     }
-    // REALTIME_POLICY_END
 
     // REALTIME_POLICY_BEGIN
     #[inline(always)]
@@ -4783,7 +4811,8 @@ impl BankChain {
         debug_assert_eq!(self.lanes, W);
         let frames_used = frames as usize;
         let stride = self.scratch.quantum as usize;
-        if self.fold.is_empty()
+        if self.full_bank
+            && self.fold.is_empty()
             && let Some(mut destinations) = members.distinct_planes_mut(W, frames_used)
         {
             if !destinations.supports(W, frames_used) {
@@ -4829,7 +4858,7 @@ impl BankChain {
         }
         // Issue #915: a bank whose every lane folds is offered its resident block whole, before
         // anything is written. The test is every lane of `0..W`, not `all_active_folded` below:
-        // `full_bank` makes the two agree today, but only this form guarantees the cohort is
+        // a folded lane is active, so the two agree, but only this form guarantees the cohort is
         // exactly lanes `0..W` in order -- the lanes, in the order, the staged `FoldCohort` below
         // would name -- and that no lane is left needing a `plane_mut` copy. An accepted offer
         // finishes the fold; the staging block and every plane stay unwritten. A declined one
@@ -4869,6 +4898,9 @@ impl BankChain {
         }
         if self.fold.is_empty() {
             for lane in 0..W {
+                if !self.active[lane] {
+                    continue;
+                }
                 let (left, right) = members.plane_mut(lane);
                 debug_assert!(left.len() == frames_used && right.len() == frames_used);
                 left.copy_from_slice(
@@ -4883,6 +4915,7 @@ impl BankChain {
         let all_active_folded = (0..W).any(|lane| self.active[lane])
             && (0..W).all(|lane| !self.active[lane] || self.fold[lane]);
         let Self {
+            active,
             staging_left,
             staging_right,
             fold,
@@ -4891,6 +4924,9 @@ impl BankChain {
         let mut folded_lanes = [0usize; 8];
         let mut folded_count = 0;
         for lane in 0..W {
+            if !active[lane] {
+                continue;
+            }
             let left = &mut staging_left[lane * stride..lane * stride + frames_used];
             let right = &mut staging_right[lane * stride..lane * stride + frames_used];
             if fold[lane] {
@@ -4921,14 +4957,14 @@ impl BankChain {
     }
     // REALTIME_POLICY_END
 
-    /// Take the per-lane scalar path even on a full bank.
+    /// Take the per-lane scalar oracle instead of the tiled transpose.
     ///
-    /// Test-only, and the only way to reach the scalar transpose with an all-active mask: it is
-    /// what lets `tiled_transpose_matches_the_scalar_path_bit_for_bit` run identical input through
+    /// Test-only, and the only way to reach the scalar transpose at all (issue #887): it is what
+    /// lets `tiled_transpose_matches_the_scalar_path_bit_for_bit` run identical input through
     /// both implementations and compare words, instead of comparing the tiled path to itself.
     #[cfg(test)]
     fn force_scalar_transpose(&mut self) {
-        self.full_bank = false;
+        self.scalar_transpose = true;
     }
 
     #[must_use]
@@ -5204,7 +5240,7 @@ mod tests {
     }
 
     #[test]
-    fn rt9_resident_copy_matches_scalar_gather_and_preserves_poisoned_words() {
+    fn rt9_resident_copy_matches_gather_and_preserves_poisoned_words() {
         for &width in BankWidth::ALL {
             let lanes = width.lanes() as usize;
             let quantum = 17;
@@ -5241,7 +5277,6 @@ mod tests {
                             chain.scratch.left.fill(f32::from_bits(0x7fc0_aaaa));
                             chain.scratch.right.fill(f32::from_bits(0xffc0_bbbb));
                         }
-                        reference.force_scalar_transpose();
                         if mono {
                             reference.gather_mono(&planes, frames);
                         } else {
@@ -6464,11 +6499,9 @@ mod tests {
         assert_planes_bit_equal(&malformed.planes, &expected, "short-claim staged fallback");
     }
 
-    /// T1b: on a **full** bank -- the tiled whole-bank transpose -- the round trip is bit-exact at
-    /// both widths and at every frame shape, ragged tails included.
-    ///
-    /// T1 below is the partial bank, which is a different code path: a chain with any inactive
-    /// lane keeps the per-lane scalar move.
+    /// T1b: on a **full** bank -- the tiled whole-bank transpose with the direct scatter -- the
+    /// round trip is bit-exact at both widths and at every frame shape, ragged tails included, and
+    /// writes no staging word.
     #[test]
     fn full_bank_gather_scatter_round_trip_is_bit_exact() {
         let mut state = 0x5eed_1234_abcd_0001_u64;
@@ -6515,13 +6548,20 @@ mod tests {
     }
 
     /// T1c: the tiled transpose and the per-lane scalar move it replaces are the **same
-    /// permutation**, at both widths and every frame shape.
+    /// permutation**, at both widths, every frame shape and **every active mask** (issue #887: a
+    /// partial bank tiles too).
     ///
     /// The stage in the middle rewrites every resident word as a function of its **index in the
     /// block**, so a gather that laid the block out differently would scatter differently: the
     /// planar comparison at the end therefore pins the gather layout as well as the scatter, and
     /// does it without reaching inside the boxed stage. "Agree" is `to_bits` equality, never a
-    /// float comparison -- `NaN == NaN` is false and would pass vacuously.
+    /// float comparison -- `NaN == NaN` is false and would pass vacuously. The scalar oracle never
+    /// reads or writes an inactive lane's planes, so agreeing with it also pins that the tiled
+    /// path leaves an inactive member's planes alone (the direct arm's provider offers views for
+    /// a partial bank, which the chain must refuse). Each frame shape is one more block of the same
+    /// three chains, and after each block every inactive scratch word of the production arms holds
+    /// the stage's image of `+0.0`: the padding contract feeds a padded lane `+0.0` every block,
+    /// never the previous block's output (which this stage would cancel back to `+0.0`).
     #[test]
     fn tiled_transpose_matches_the_scalar_path_bit_for_bit() {
         struct IndexXor;
@@ -6536,67 +6576,71 @@ mod tests {
                 Ok(())
             }
         }
+        fn assert_inactive_fed_zero(chain: &BankChain, frames: u32, what: &str) {
+            let lanes = chain.lanes;
+            for index in 0..frames as usize * lanes {
+                if !chain.active[index % lanes] {
+                    assert_eq!(
+                        chain.scratch.left[index].to_bits(),
+                        index as u32 | 1,
+                        "{what}"
+                    );
+                    assert_eq!(
+                        chain.scratch.right[index].to_bits(),
+                        index as u32 | 2,
+                        "{what}"
+                    );
+                }
+            }
+        }
 
         let mut state = 0x5eed_1234_abcd_0002_u64;
         for &width in BankWidth::ALL {
             let lanes = width.lanes() as usize;
-            for frames in frame_shapes(lanes) {
-                let source = hostile_planes(lanes, frames, &mut state);
-                let mut outcomes = Vec::new();
-                for scalar in [false, true] {
-                    let mut planes = Planes {
-                        left: source.left.clone(),
-                        right: source.right.clone(),
-                    };
-                    let active = vec![true; lanes];
-                    let mut chain = BankChain::new(
+            for mask in 1_u32..1 << lanes {
+                let active: Vec<bool> = (0..lanes).map(|lane| mask >> lane & 1 == 1).collect();
+                let make = || {
+                    BankChain::new(
                         AoSoaScratch::new(width, 128).expect("scratch"),
                         active.clone().into_boxed_slice(),
-                        vec![slot(active, Box::new(IndexXor))],
+                        vec![slot(active.clone(), Box::new(IndexXor))],
                     )
-                    .expect("chain");
-                    if scalar {
-                        chain.force_scalar_transpose();
+                    .expect("chain")
+                };
+                let [mut tiled, mut scalar, mut staged_chain] = [make(), make(), make()];
+                scalar.force_scalar_transpose();
+                for frames in frame_shapes(lanes) {
+                    let source = hostile_planes(lanes, frames, &mut state);
+                    let what = format!("{lanes} lanes, mask {mask:#x}, {frames} frames");
+                    let mut outcomes = Vec::new();
+                    for chain in [&mut tiled, &mut scalar] {
+                        let mut planes = source.clone();
+                        chain
+                            .run(&mut planes, frames, 0, LiveSnapshot::ALL)
+                            .expect("run");
+                        outcomes.push(planes);
                     }
-                    chain
-                        .run(&mut planes, frames, 0, LiveSnapshot::ALL)
-                        .expect("run");
-                    outcomes.push(planes);
+                    let mut staged = StagedPlanes(source.clone());
+                    staged_chain
+                        .run(&mut staged, frames, 0, LiveSnapshot::ALL)
+                        .expect("staged run");
+                    assert_planes_bit_equal(
+                        &outcomes[0],
+                        &outcomes[1],
+                        &format!("tiled vs scalar, {what}"),
+                    );
+                    assert_planes_bit_equal(
+                        &outcomes[0],
+                        &staged.0,
+                        &format!("direct vs staged, {what}"),
+                    );
+                    assert_inactive_fed_zero(&tiled, frames, &format!("tiled, {what}"));
+                    assert_inactive_fed_zero(&staged_chain, frames, &format!("staged, {what}"));
                 }
-                let mut staged = StagedPlanes(Planes {
-                    left: source.left.clone(),
-                    right: source.right.clone(),
-                });
-                let active = vec![true; lanes];
-                let mut staged_chain = BankChain::new(
-                    AoSoaScratch::new(width, 128).expect("scratch"),
-                    active.clone().into_boxed_slice(),
-                    vec![slot(active, Box::new(IndexXor))],
-                )
-                .expect("chain");
-                staged_chain
-                    .run(&mut staged, frames, 0, LiveSnapshot::ALL)
-                    .expect("staged run");
-                assert_planes_bit_equal(
-                    &outcomes[0],
-                    &outcomes[1],
-                    &format!("tiled vs scalar, {lanes} lanes, {frames} frames"),
-                );
-                assert_planes_bit_equal(
-                    &outcomes[0],
-                    &staged.0,
-                    &format!("direct vs staged, {lanes} lanes, {frames} frames"),
-                );
             }
         }
     }
 
-    /// T1: the gather/scatter round-trip is bit-exact for every active lane, including NaN
-    /// payloads, `-0.0` and subnormals, and never writes an inactive lane's planar buffer.
-    ///
-    /// The mask below has inactive lanes, so this is the **partial-bank scalar path** -- the one a
-    /// ragged-tail bank takes, and the one that carries the "an inactive lane is never read and
-    /// never written" invariant.
     /// Planes with one shared accumulating auxiliary destination (issue #210's PFL seam).
     ///
     /// Every armed lane names *the same* `aux` buffer on purpose: that is the case the seam exists
@@ -6915,9 +6959,8 @@ mod tests {
     /// 4. **Lane order.** The epilogue visits lanes in ascending order, which is what a
     ///    scatter-accumulate into a shared destination associates in.
     ///
-    /// Both transpose paths are exercised: the full bank takes the tiled scatter, the masked chain
-    /// takes the per-lane scalar one, and a folded partial bank is the case that made `arm_fold`
-    /// allocate a staging block a partial bank does not otherwise own.
+    /// Both bank shapes are exercised: the full bank and the masked chain, whose staged scatter
+    /// must hand no inactive lane to a member.
     #[test]
     fn the_fold_epilogue_is_absent_by_default_and_replaces_the_lane_write_when_armed() {
         let frames = 48_u32;
@@ -7539,6 +7582,12 @@ mod tests {
         );
     }
 
+    /// T1: the gather/scatter round-trip is bit-exact for every active lane, including NaN
+    /// payloads, `-0.0` and subnormals, and never writes an inactive lane's planar buffer.
+    ///
+    /// The mask below has inactive lanes, so this is the **partial-bank staged path** -- the one a
+    /// padded bank takes, and the one that carries the "an inactive lane is never read and never
+    /// written" invariant.
     #[test]
     fn gather_scatter_round_trip_is_bit_exact() {
         let frames = 128_u32;

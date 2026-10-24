@@ -1293,18 +1293,34 @@ impl Budget {
 /// overlay's solo vector, ID text and master, and two ramp tables' B-tree nodes and ID copies; the
 /// row does not depend on the lane width), above the 175,296 ceiling, so the ceiling is 192,972
 /// plus 10 %, rounded up to 64: 212,269.2 -> 212,288.
+///
+/// #887 (batch 13) tiles the gather and scatter of padded banks, a structural move: every bank
+/// chain now owns two lane-major staging planes, and a padded chain a `quantum`-word `+0.0` plane,
+/// and the estimates charge both (builtin banks had never been charged their staging). The
+/// nine-track session has six eight-lane builtin banks, three padded, and two effect banks, one
+/// padded, at quantum 128. At eight lanes (x86-64) `builtin_bank_scratch_bytes` moved 49,152 ->
+/// 99,840 (+49,152 staging, +1,536 zero planes), `effect_bank_runtime_buffer_bytes` 16,384 ->
+/// 16,896 (+512, within its ceiling), and the two graph rows by the sum, +51,200:
+/// `graph_session_plus_plan_bytes` 322,094 -> 373,294 and `graph_incremental_plan_bytes` 321,854
+/// -> 373,054. The ceilings are the new values plus 10 %, rounded up to 64: 410,623.4 -> 410,624,
+/// 410,359.4 -> 410,368 and 109,824 -> 109,824. At four lanes (not measured here; AArch64 runs only
+/// in CI) the same session has nine builtin banks, three padded, and three effect banks, one
+/// padded: `builtin_bank_scratch_bytes` is exactly 36,864 -> 75,264, so its ceiling is 75,264 plus
+/// 10 %, rounded up to 64: 82,790.4 -> 82,816; the effect runtime row gains 512 (12,800, within
+/// 13,568); and the graph ceilings rise by the +38,912 delta plus 10 %: 324,352 + 42,803.2 ->
+/// 367,168 and 324,224 + 42,803.2 -> 367,040, until the next `aarch64-debug` print tightens them.
 const REFERENCE_BUDGETS: [Budget; 19] = [
     Budget {
         row: "graph_session_plus_plan_bytes",
         value: |report| report.graph_session_plus_plan_bytes,
-        eight_lanes: 346_432,
-        four_lanes: 324_352,
+        eight_lanes: 410_624,
+        four_lanes: 367_168,
     },
     Budget {
         row: "graph_incremental_plan_bytes",
         value: |report| report.graph_incremental_plan_bytes,
-        eight_lanes: 346_368,
-        four_lanes: 324_224,
+        eight_lanes: 410_368,
+        four_lanes: 367_040,
     },
     Budget {
         row: "graph_metadata_bytes",
@@ -1345,8 +1361,8 @@ const REFERENCE_BUDGETS: [Budget; 19] = [
     Budget {
         row: "builtin_bank_scratch_bytes",
         value: |report| report.builtin_bank_scratch_bytes,
-        eight_lanes: 54_080,
-        four_lanes: 40_576,
+        eight_lanes: 109_824,
+        four_lanes: 82_816,
     },
     Budget {
         row: "source_pcm_payload_bytes",

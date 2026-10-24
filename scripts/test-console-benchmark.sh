@@ -2,7 +2,7 @@
 # Console validator mutation suite. Hermetic: no workload, no timing, no binary.
 #
 # A validator that has never been shown to reject anything is decoration. Every rule below is
-# mutated in turn and asserted red, so the aggregate's guarantees -- seventy-two records, both
+# mutated in turn and asserted red, so the aggregate's guarantees -- seventy-four records, both
 # rounds, one host, one admissibility state, the decomposition rows' pinned strip contents, every
 # session row's pinned source feed, the class-A statements that neither the stationary smoother nor
 # a meter nor an armed observation tap nor a restated parameter nor the mono collapse nor the
@@ -331,6 +331,17 @@ expect_accept "$session_floor_not_derived" 'a row whose fixture was never invent
 expect_accept "$session_floor_dispatch" 'the identity row carrying the identity inventory'
 expect_accept "$session_floor_ring" 'the gain-and-pan row carrying the identity inventory'
 
+# #938: the live-producer row, the gain-and-pan plan fed by a producer thread on a core of the
+# render core's L3 (cpu 14 beside the base record's cpu 15), with no ring underrun. It states the
+# ring row's facts and floor, and its producer group.
+session_live=$(printf '%s' "$session_ring" | jq -c '.workload_kind = "sixty_four_track_gain_pan_live"
+      | .source_feed = "live_producer"
+      | . + {producer_cpu: 14, producer_placement: "same_ccd", underruns: 0}')
+session_floor_live=$(printf '%s' "$session_live" | jq -c -L "$scripts_dir" --arg s "$core_clock_source" \
+    "$add_floor"' with_floor(5480000000; $s)')
+expect_accept "$session_live" 'the live-producer row'
+expect_accept "$session_floor_live" 'the live-producer row carrying the identity inventory'
+
 # #881: the metered console row. The standing console row's six facts, plus the meter group that
 # row alone carries: the default web boot's meter set (one sample-peak meter at the post-matrix tap
 # per track, a twelve-block window), every snapshot it published over the thousand timed blocks
@@ -381,7 +392,7 @@ expect_reject "$(printf '%s' "$session" | jq -c --arg f "$sends_fixture" '.fixtu
 # ---------------------------------------------------------------------------------------------
 # Per-key structural mutations: every key is load-bearing in both directions.
 # ---------------------------------------------------------------------------------------------
-for base in "$session" "$session_floor" "$session_ring" "$session_metered" "$session_app" \
+for base in "$session" "$session_floor" "$session_ring" "$session_live" "$session_metered" "$session_app" \
     "$session_sparse" "$session_sends" "$hoist" "$meters" "$observation" "$placement" "$automation" "$mono" "$mixing"; do
     kind=$(printf '%s' "$base" | jq -r '.record')
     while read -r field; do
@@ -591,6 +602,32 @@ ring_mutation '.tracks = 9' 'a gain-and-pan row that is not eight full banks'
 ring_mutation '.fixture_id = "fixtures/session/v1/console-sixty-four-track-mono.json"' \
     'a gain-and-pan row rendered from another fixture'
 ring_mutation '.input_signal = "silence"' 'a gain-and-pan row claiming silence'
+ring_mutation '.source_feed = "live_producer"' 'a ring row claiming the live producer feed'
+ring_mutation '. + {producer_cpu: 14, producer_placement: "same_ccd", underruns: 0}' \
+    'a ring row carrying a producer group'
+
+# #938: the live row's producer. Any underrun refuses the record, and a controlled record's producer
+# ran on another core of the render core's L3 that is not its SMT sibling. An uncontrolled record
+# may state an unpinned producer, with no core.
+live_mutation() { expect_reject "$(printf '%s' "$session_live" | jq -c "$1")" "$2"; }
+live_mutation '.underruns = 1' 'a live row whose rings underran'
+live_mutation '.source_feed = "played_planes"' 'a live row claiming the frozen driver feed'
+live_mutation '.producer_placement = "smt_sibling"' 'a live row whose producer ran on the SMT sibling'
+live_mutation '.producer_placement = "other_l3"' 'a live row whose producer ran on another L3'
+live_mutation '.producer_placement = "same_cpu"' 'a live row whose producer ran on the render core'
+live_mutation '.producer_placement = "no_producer_cpu" | .producer_cpu = null' \
+    'a live row with no producer core'
+live_mutation '.producer_cpu = 15' 'a same-L3 producer on the render core itself'
+live_mutation '.producer_cpu = "14"' 'a producer core that is not a number'
+live_mutation '.producer_placement = "unpinned" | .producer_cpu = null' \
+    'a controlled live row with an unpinned producer'
+live_mutation '.workload_kind = "sixty_four_track_gain_pan_live" | .strip_content = "identity"' \
+    'a live row claiming the identity fader and pan'
+uncontrolled='.measurement_control = "uncontrolled" | .cpu_affinity = "uncontrolled" | .background_load_note = "uncontrolled; MISO_ENGINE_BENCH_ALLOW_UNCONTROLLED=1; waived affinity_unavailable; loadavg 9.9"'
+expect_accept "$(printf '%s' "$session_live" | jq -c "$uncontrolled"' | .producer_placement = "unpinned" | .producer_cpu = null')" \
+    'an uncontrolled live row with an unpinned producer'
+live_mutation "$uncontrolled"' | .producer_placement = "unpinned"' \
+    'an unpinned producer that names a core'
 
 # #881: the metered console row. The meter group is carried by that row alone and is pinned field
 # by field: a row that metered another tap, another metric set or another window would publish a
@@ -1255,7 +1292,7 @@ lanes_mutation '.p95_ns_per_block = 1' 'product-lane percentiles out of order'
 lanes_mutation '.render_total_forbidden_operations = 1' 'a product-lane row with a forbidden operation on render'
 lanes_mutation '.extra = 1' 'a product-lane record with a key the shape does not list'
 
-records=$(jq -cn --argjson session "$session" --argjson hoist "$hoist" \
+records=$(jq -cn --argjson session "$session" --argjson hoist "$hoist" --argjson live "$session_live" \
     --argjson meters "$meters" --argjson observation "$observation" \
     --argjson placement "$placement" --argjson automation "$automation" \
     --argjson mono "$mono" --argjson mixing "$mixing" --argjson ride "$fader_ride" \
@@ -1371,9 +1408,16 @@ records=$(jq -cn --argjson session "$session" --argjson hoist "$hoist" \
         standing_row: "sixty_four_track_app_shape", strip_content: "eq+compressor",
         strip_layout: "pre_insert:eq+compressor", fixture_id: app_fixture,
         output_sha256: ($a[0:63] + "4")}) as $arm
-      | (1, 2) as $round | $lanes + $arm | .round = $round ]')
+      | (1, 2) as $round | $lanes + $arm | .round = $round ]
+  # #938: the live-producer row of each round, appended last so the index map below is unchanged:
+  # 72 and 73. It renders the ring row bits.
+  + [ (1, 2) as $round | $live | .round = $round | .output_sha256 = ($a[0:63] + "a") ]')
 
-expect_aggregate_accept "$(printf '%s' "$records" | jq -c '.[]')" 'the seventy-two-record set'
+expect_aggregate_accept "$(printf '%s' "$records" | jq -c '.[]')" 'the seventy-four-record set'
+# #938: the live row renders the ring row bits in both rounds, and it is a row of the set. Both of
+# its rounds move together, so only the pair pin can refuse the first edit.
+expect_aggregate_reject "$(printf '%s' "$records" | jq -c --arg c "$digest_c" '.[72].output_sha256 = $c | .[73].output_sha256 = $c | .[]')" 'a live-producer row that rendered other bits than the ring row'
+expect_aggregate_reject "$(printf '%s' "$records" | jq -c '[.[] | select(.workload_kind != "sixty_four_track_gain_pan_live")] | .[]')" 'a set missing the live-producer row'
 expect_aggregate_reject "$(printf '%s' "$records" | jq -c --arg a "$digest_a" '.[62].output_sha256 = ($a[0:63] + "7") | .[63].output_sha256 = ($a[0:63] + "7") | .[]')" 'a product-lane row that rendered other bits than the standing row'
 expect_aggregate_reject "$(printf '%s' "$records" | jq -c --arg a "$digest_a" '.[70].output_sha256 = ($a[0:63] + "7") | .[71].output_sha256 = ($a[0:63] + "7") | .[]')" 'an app-shape product-lane arm that rendered other bits than the app-shape row'
 expect_aggregate_reject "$(printf '%s' "$records" | jq -c '[.[] | select(.record != "console_fader_ride")] | .[]')" 'a set with no fader-ride row'
@@ -1388,9 +1432,11 @@ expect_aggregate_reject "$(printf '%s' "$records" | jq -c '.[61].fader_tracks |=
 # and 29 its mixing-automation row; 30-59 repeat for round two. #956 took two records out of the
 # fifty before it (the plumbing row, both rounds), #1003 added two back at the end of each round,
 # #1085 added ten after the metered row, #1227 two between the metered row and the console-strip
-# rows, and #965 took two out (the bound-feed gain-and-pan row, both rounds).
-expect_aggregate_reject "$(printf '%s' "$records" | jq -c 'del(.[0]) | .[]')" 'seventy-one records'
-expect_aggregate_reject "$(printf '%s' "$records" | jq -c '. as $r | ($r + [$r[26]]) | .[]')" 'seventy-three records'
+# rows, and #965 took two out (the bound-feed gain-and-pan row, both rounds). The rows appended
+# after both rounds follow: 60-61 fader ride, 62-63 product lanes, 64-71 the lane-group arms and
+# 72-73 the live-producer row of #938.
+expect_aggregate_reject "$(printf '%s' "$records" | jq -c 'del(.[0]) | .[]')" 'seventy-three records'
+expect_aggregate_reject "$(printf '%s' "$records" | jq -c '. as $r | ($r + [$r[26]]) | .[]')" 'seventy-five records'
 expect_aggregate_reject "$(printf '%s' "$records" | jq -c '. as $r | ($r + [$r[0]]) | .[]')" 'a duplicated record'
 expect_aggregate_reject "$(printf '%s' "$records" | jq -c '.[30].round = 1 | .[]')" 'a workload measured twice in one round'
 expect_aggregate_reject "$(printf '%s' "$records" | jq -c '.[0].cpu_model = "Another CPU" | .[]')" 'records from two hosts'
@@ -1493,7 +1539,7 @@ floor_records=$(printf '%s' "$records" | jq -c -L "$scripts_dir" --arg s "$core_
     "sixty_four_track_compressor_only": 2.60, "sixty_four_track_eq_comp_simd1": 3.20,
     "sixty_four_track_console_legacy": 3.30, "sixty_four_track_console": 4.40,
     "one_twenty_eight_track_stretch": 8.60,
-    "sixty_four_track_gain_pan_ring": 0.98,
+    "sixty_four_track_gain_pan_ring": 0.98, "sixty_four_track_gain_pan_live": 0.99,
     "sixty_four_track_console_metered": 4.80, "sixty_four_track_console_sends": 5.20,
     "sixty_four_track_console_mono": 4.38, "sixty_four_track_console_mono_dual": 4.38,
     "sixty_four_track_console_half_mono": 4.39,
@@ -1521,7 +1567,7 @@ floor_records=$(printf '%s' "$records" | jq -c -L "$scripts_dir" --arg s "$core_
                  / .isolated_cycles_per_lane_sample)
         else . end ]')
 
-expect_aggregate_accept "$(printf '%s' "$floor_records" | jq -c '.[]')" 'the seventy-two-record set with floor accounting'
+expect_aggregate_accept "$(printf '%s' "$floor_records" | jq -c '.[]')" 'the seventy-four-record set with floor accounting'
 expect_aggregate_reject "$(printf '%s' "$floor_records" | jq -c '(.[] | select(.workload_kind == "sixty_four_track_compressor_only")).isolated_cycles_per_lane_sample = 3.0 | .[]')" 'an isolate that is not the subtraction it names'
 expect_aggregate_reject "$(printf '%s' "$floor_records" | jq -c '(.[] | select(.workload_kind == "sixty_four_track_compressor_only")).isolated_percent_of_floor = 88.0 | .[]')" 'an isolate percentage that does not follow from the two rows floors'
 # The control row moving is the same defect seen from the other side: the subtraction stops being
