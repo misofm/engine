@@ -686,29 +686,13 @@ a zone `l`, with settled constants (`r_k`, `q_k^s`; `beta_k` the zone's). With
 `a_s <= c_k E_s + delta`, and
 
 ```text
-E_(s+1) <= r_k E_s + beta_k,   a_s <= c_k E_s + delta,   S_(s+1) <= r_l S_s + beta_l a_s,
-y_s <= ex_l S_s + delta a_s,   E_0 <= E*_k,   S_0 <= S*_l,   ex_l = h_2 q_l^s + omega_2.
+S_s <= r_l^s S*_l + beta_l sum_{i < s} r_l^(s-1-i) (c_k (r_k^i E*_k + Ebar_k) + delta)
+    <= S*_l + beta_l c_k E*_k / (1 - min(r_k, r_l)) + beta_l (c_k Ebar_k + delta) / (1 - r_l),
 ```
 
-Each recursion is non-negative and non-decreasing in its state and input, so by induction the
-sequence it produces from `(E*_k, S*_l)`, each step rounded up, bounds the kernel's at every `s`
-(issue #1487; #1485 summed the separate suprema of `S*_l r_l^s`, of the cross term and of the
-steady term, which peak at different frames: `S*` at `s = 0`, the steady term as `s` grows).
-*The tail.* At any frame `H`, let `X = max(E_H, Ebar_k)` and `a' = c_k X + delta`. A state `E <= X`
-steps to at most `r_k X + (1 - r_k) Ebar_k <= X`, so `E_s <= X` and `a_s <= a'` for every
-`s >= H`; likewise `S_s <= max(S_H, beta_l a' / (1 - r_l))`. So
-`T_H = ex_l max(S_H, beta_l a' / (1 - r_l)) + delta a'` bounds `y_s` for every `s >= H`, and the
-larger of `T_H` and the outputs at `s < H` bounds the pair's output at every frame after the window.
-The module (`settled_pair_peak`) walks `s` from `0`, every product and sum rounded up, and stops at
-the first `H` where `T_H` is within `2^-20` of the larger of the outputs so far and of `T` at the
-fixed points (`E = Ebar_k`, `S = beta_l (c_k Ebar_k + delta) / (1 - r_l)`; the rounded-up walk
-converges just above them, so it never reaches them exactly), or at `HORIZON_LIMIT` frames, and
-returns the larger of the two. Every value it returns is a bound whatever the stopping frame; the
-rule only decides how close to the supremum it lands. `Z*` is the largest over every pair
-`(k, l)`. Gate L3' recomputes it in closed form: the recursion's solution is
-`y(s) = K0 + K1 r_k^s + K2 r_l^s` (or `K0 + (K1 + K2 s) r_k^s` when `r_k = r_l`), whose derivative
-in `s` has at most one zero, so its largest value over the integers is at `s = 0`, at the limit
-`K0`, or next to that zero. A section at the identity (state zero, output its input) is covered by any pair
+because each `r_l^(s-1-i) r_k^i` is at most `r_k^i` and at most `r_l^(s-1-i)`. The output is at
+most `(h_2 q_l^s + omega_2) S_s + delta (c_k max(E*_k, Ebar_k) + delta)`; `Z*` is the largest over
+every pair `(k, l)`. A section at the identity (state zero, output its input) is covered by any pair
 (`delta >= 1`), and a reset or a joint flush only lowers a state: these plain majorants carry no
 one-off term, unlike #1433's `tau` system.
 
@@ -717,9 +701,7 @@ one-off term, unlike #1433's `tau` system.
 For every `n >= M`, `|y_late[n]| <= max(W*, Z*) G = g max(W*, Z*) epsilon`, and the module states
 `tail_gain = g max(W*, Z*) SLACK` (`LiveBound::tail_gain`; every step a rounded-up product or sum,
 the intervals' ends padded by `1e-15` above their `f64` rounding) and `G_t = ceil_mB(tail_gain)`.
-Since #1487 `W*` sets it at every launch rate: `W* g = 433.68`, against the time-resolved
-`Z* g` of 431.17 / 431.46 / 432.96 / 433.11 at 44.1 / 48 / 88.2 / 96 kHz, a margin of only 0.58 % /
-0.51 % / 0.17 % / 0.13 %. #1485's separated `Z* g` was 815.8 at 44.1 kHz.
+`Z*` sets it at every launch rate (at 44.1 kHz `Z* g = 815.8` against `W* g = 433.7`).
 
 **On the kernel.** The exact supremum of the late part over every input `|x| <= 1` from `N` (the
 time-varying cascade's row `l1`, gate L2's oracle) is close to the largest settled pair's `l1` and
@@ -730,10 +712,11 @@ the largest settled `l1` is about 3.798, +35.59 dB with the trim at every launch
 maximum near an HPF of `0.00342 fs` into the top LPF: about 151 Hz (44.1 kHz), 164 Hz (48 kHz),
 301 Hz (88.2 kHz) and 328 Hz (96 kHz) (the #1467 attempt-2 verifier's golden-section refinement;
 the grid's points are within `1.1e-4` of it, and no bound depends on the frequencies). `G_t`
-(+52.75 dB since #1487) is 17.1 to 17.2 dB above it (7.21 to 7.22 times; #1485's was 22.6 to
-22.7 dB). What remains is the window part's in-flight paths (the second section's input taken as the
-first's largest output over every path) and the plain `V`-norm majorant per section, which is
-frequency-blind (#1487's T-D1 record).
+(+58.2 to +58.3 dB) is 22.6 to 22.7 dB above it (13.6 to 13.7 times; the #1485 attempt record).
+What remains is the settled pair bound's frequency-blindness (a plain `V`-norm majorant per section,
+where the kernel's cascade of a low HPF into a low LPF passes little) and the window's transient
+state carried into it (`E*`, `S*`), the second section's input taken as the first's largest output
+over every path.
 
 ### The statement
 
@@ -744,7 +727,7 @@ value ("Numerical limits"). Rule (g) and A1's `tail_gain <= peak_gain` run only 
 registry, which never sees this bound, so the statement checks both on the millibel values and
 states `Unstated` when either fails (equality is admissible). `sigma_t <= sigma_p` holds raw by B1's
 construction (the smaller of `stall(T)` and `stall(0)`) and `G_t <= G_p` holds raw as measured
-(69.40 to 69.49 dB apart since #1487); `ceil_mB` is non-decreasing, so the raw orders give the millibel ones.
+(63.85 to 64.01 dB apart); `ceil_mB` is non-decreasing, so the raw orders give the millibel ones.
 At the launch rates the statement is made (the values below). Preparation reads the statement from
 `input_section_live_bound_table`, which the table test holds equal to the computed bound.
 
@@ -756,15 +739,14 @@ Per rate (44.1 / 48 / 88.2 / 96 kHz), the module's raw value (`LiveComposition::
 | value | 44.1 kHz | 48 kHz | 88.2 kHz | 96 kHz |
 |---|---|---|---|---|
 | window part, `W* g` | 4.336808e2 | 4.336794e2 | 4.336809e2 | 4.336793e2 |
-| settled part, `Z* g` (#1487, time-resolved) | 4.311676e2 | 4.314573e2 | 4.329617e2 | 4.331078e2 |
-| `g_t` raw | 4.336809e2 | 4.336794e2 | 4.336809e2 | 4.336794e2 |
-| `G_t` mB (stated) | 5,275 | 5,275 | 5,275 | 5,275 |
+| settled part, `Z* g` | 8.157735e2 | 8.166609e2 | 8.212876e2 | 8.217405e2 |
+| `g_t` raw | 8.157736e2 | 8.166610e2 | 8.212877e2 | 8.217405e2 |
+| `G_t` mB (stated) | 5,824 | 5,825 | 5,829 | 5,830 |
 | `G_p` mB (stated) | 12,224 | 12,215 | 12,224 | 12,215 |
 
 The statement at every launch rate is `Stated { decay, peak_gain, tail_gain, peak_stall,
-tail_stall }` with B1's `D`, the stalls of B1's table above, #1485's `G_p` and #1487's `G_t`
-(+52.75 dB), 69.40 to 69.49 dB below `G_p`. #1485's `G_t` was 5,824 to 5,830 mB and #1467's
-9,242 mB (+92.42 dB) at every rate. The
+tail_stall }` with B1's `D`, the stalls of B1's table above, #1485's `G_p` and `G_t` (+58.24 to
++58.30 dB), 63.85 to 64.01 dB below `G_p`. #1467's `G_t` was 9,242 mB (+92.42 dB) at every rate. The
 exact supremum of the late part on gate L2's scanned histories is at most +35.59 dB (gate L2; the
 #1485 attempt record).
 
