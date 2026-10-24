@@ -11,22 +11,6 @@ pub(crate) struct SharedPlanState<Row> {
     pub(crate) reports: Mutex<Vec<(u64, Row)>>,
     pub(crate) render_sequence: AtomicU64,
     pub(crate) render_sample: AtomicU64,
-    pub(crate) render_peak_bits: AtomicU32,
-    /// Whether anything can currently consume the per-block output peak (#163 phase 4 item 2).
-    ///
-    /// The render thread computed a 2 x `frames` scalar `abs`/`max` scan on every successful
-    /// render and published the result unconditionally. Its only consumer is
-    /// `SessionState::collect_render_activity`, which turns it into `MeterRecord`s and stages
-    /// them through `ProtocolController::stage_meter_batch_event` -- and that call refuses
-    /// outright unless the endpoint has configured meter handles and a nonzero meter period. With
-    /// no meters configured, which is every session that has not asked for them, the scan ran 256
-    /// times per block to produce a number nothing could read.
-    ///
-    /// This flag is that consumer condition, hoisted to where the render thread can see it. It is
-    /// deliberately a *superset* of the refusal condition in `stage_meter_batch_event`: it omits
-    /// the `provider_features.meters` term, so it can only ever cause the scan to run when it was
-    /// not strictly needed, never to be skipped when it was.
-    pub(crate) render_peak_observed: AtomicBool,
     /// Blocks the executor failed after the live snapshot (#1502 D7), mirrored from the plan
     /// owner on the render thread when such a block happens.
     pub(crate) live_block_errors: AtomicU64,
@@ -76,6 +60,11 @@ pub struct PlanState<A: ControlAdapter> {
     /// The output meter's render half (#1581 D4): made with the session's first plan and part of
     /// no plan, so a plan swap does not touch it. The session hands out its reader and gate.
     pub(crate) output_meter: host_core::OutputPeakObserver,
+    /// The relay of the output meter's gate (#1583) when the session's meter delivery runs on the
+    /// control thread (the C ABI): the delivery writes a requested gate, and [`Self::render`]
+    /// applies it before each block, so the gate moves only here, between blocks. `None` when the
+    /// delivery shares this thread (the browser), whose gate the delivery moves between blocks.
+    pub(crate) output_gate: Option<host_core::meters::OutputPeakGateRelay>,
 }
 
 impl<A: ControlAdapter> PlanState<A> {
@@ -83,6 +72,7 @@ impl<A: ControlAdapter> PlanState<A> {
         owner: RealtimePlanOwner,
         shared: Arc<SharedPlanState<A::Row>>,
         output_meter: host_core::OutputPeakObserver,
+        output_gate: Option<host_core::meters::OutputPeakGateRelay>,
     ) -> Self {
         #[cfg(feature = "test-support")]
         update_test_owners(|owners| owners.current_plan_constructed += 1);
@@ -91,6 +81,7 @@ impl<A: ControlAdapter> PlanState<A> {
             shared,
             fp_env_attested: core::cell::Cell::new(false),
             output_meter,
+            output_gate,
         }
     }
 }
@@ -357,6 +348,11 @@ impl<A: ControlAdapter> PlanState<A> {
         absolute_sample: u64,
         output: PlanarBufferMut<'_>,
     ) -> Result<Option<PlanWatermark>, RenderError> {
+        // #1583: a requested gate reaches the output meter here, before the block, so this block's
+        // strip meter level and its output fold read the one gate value.
+        if let Some(relay) = self.output_gate.as_mut() {
+            relay.apply();
+        }
         // #882: the strip meters observe exactly the blocks the output meter does, by its gate's
         // own rule, so a block rendered with the meter level off does no strip meter work. A block
         // that adopts a successor carrying no strip meter restarts the grid there, by the gate's
@@ -387,30 +383,13 @@ impl<A: ControlAdapter> PlanState<A> {
         Ok(report.watermark)
     }
 
-    /// Whether the peak scan has a consumer this block (#163 phase 4 item 2).
-    ///
-    /// `Relaxed` is the correct ordering and not a shortcut: the flag guards no other memory, the
-    /// value it gates is published through its own `Release` store below, and a render that
-    /// straddles the control thread's `refresh_render_peak_gate` is allowed either answer. Taking
-    /// the stale `false` for one block costs one dropped record on the lossy telemetry lane --
-    /// which that lane documents as permitted -- and `publish_render_observation` marks that block
-    /// so the consumer drops it rather than reading a `0.0` that was never measured.
-    pub fn render_peak_observed(&self) -> bool {
-        self.shared.render_peak_observed.load(Ordering::Relaxed)
-    }
-
     /// Publish the activity of one successfully rendered block, `[first_sample, next_sample)`,
     /// from its two output planes.
     ///
-    /// The output meter observes the block first (#1581 D4): one gate load while it is inactive,
+    /// The output meter observes the block (#1581 D4): one gate load while it is inactive,
     /// otherwise a vector fold of each plane's sanitized peak ([`host_core::OutputPeakObserver`]).
-    ///
-    /// Issue #163 phase 4 item 2: the scan runs only for an armed observer. When
-    /// [`Self::render_peak_observed`] is true the peak starts at `0.0` and folds
-    /// `peak.max(sample.abs())` over plane 0 and then plane 1 in frame order; otherwise the block
-    /// publishes `NaN`, which the consumer reads as "not measured", so an unarmed block never
-    /// fabricates a peak of `0.0`. It costs at most one load per output sample and allocates
-    /// nothing, so it is render-safe.
+    /// Then the render sample and sequence advance, which the service step's counters read. The
+    /// per-block peak scan is gone (#1583 D6): the meter batches are the output meter's windows.
     pub fn observe_rendered_block(
         &mut self,
         planes: [&[f32]; 2],
@@ -419,28 +398,14 @@ impl<A: ControlAdapter> PlanState<A> {
     ) {
         self.output_meter
             .observe(planes[0], planes[1], first_sample, next_sample);
-        let peak = if self.render_peak_observed() {
-            let mut peak = 0.0_f32;
-            for plane in planes {
-                for &sample in plane {
-                    peak = peak.max(sample.abs());
-                }
-            }
-            peak
-        } else {
-            f32::NAN
-        };
-        self.publish_render_observation(peak);
+        self.publish_render_observation();
     }
 
-    /// Publish this block's observation. A `NaN` peak means "not measured this block".
-    fn publish_render_observation(&self, peak: f32) {
+    /// Publish this block's render sample and sequence.
+    fn publish_render_observation(&self) {
         self.shared
             .render_sample
             .store(self.owner.next_absolute_sample(), Ordering::Release);
-        self.shared
-            .render_peak_bits
-            .store(peak.to_bits(), Ordering::Release);
         self.shared.render_sequence.fetch_add(1, Ordering::AcqRel);
     }
 }
@@ -520,8 +485,6 @@ mod tests {
             reports: Mutex::new(Vec::new()),
             render_sequence: AtomicU64::new(0),
             render_sample: AtomicU64::new(0),
-            render_peak_bits: AtomicU32::new(0),
-            render_peak_observed: AtomicBool::new(false),
             live_block_errors: AtomicU64::new(0),
             source_underrun_blocks: AtomicU64::new(0),
             watermark: publisher.watermark_reader(),
@@ -529,7 +492,7 @@ mod tests {
         let (output_meter, _reader, gate) =
             host_core::output_peak_meter(core::num::NonZeroU32::MIN).expect("output meter");
         (
-            PlanState::<TestAdapter>::new(owner, shared, output_meter),
+            PlanState::<TestAdapter>::new(owner, shared, output_meter, None),
             gate,
         )
     }
@@ -583,37 +546,6 @@ mod tests {
         assert_eq!(
             *levels.lock().expect("levels"),
             [false, false, true, true, false]
-        );
-    }
-
-    /// #1570a D3: an armed observer publishes the largest absolute sample over both planes, and an
-    /// unarmed block publishes `NaN` ("not measured") instead of a fabricated `0.0`; either way
-    /// the render sequence advances once.
-    #[test]
-    fn a_rendered_block_publishes_the_peak_over_both_planes_only_when_armed() {
-        let mut state = test_state();
-        let left = [0.25_f32, -0.5];
-        let right = [0.75_f32, -1.5];
-
-        state.observe_rendered_block([&left, &right], 0, 2);
-        assert!(f32::from_bits(state.shared.render_peak_bits.load(Ordering::Acquire)).is_nan());
-        assert_eq!(state.shared.render_sequence.load(Ordering::Acquire), 1);
-
-        state
-            .shared
-            .render_peak_observed
-            .store(true, Ordering::Relaxed);
-        state.observe_rendered_block([&left, &right], 0, 2);
-        assert_eq!(
-            f32::from_bits(state.shared.render_peak_bits.load(Ordering::Acquire)),
-            1.5
-        );
-        assert_eq!(state.shared.render_sequence.load(Ordering::Acquire), 2);
-
-        state.observe_rendered_block([&[0.0; 2], &[0.0; 2]], 0, 2);
-        assert_eq!(
-            f32::from_bits(state.shared.render_peak_bits.load(Ordering::Acquire)),
-            0.0
         );
     }
 

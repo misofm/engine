@@ -93,7 +93,7 @@ jq -n -S \
     --arg preconditions_sha256 "$(sha256sum scripts/check-bench-preconditions.sh | awk '{print $1}')" \
     --arg bench_cpu "$bench_cpu" --arg producer_cpu "$producer_cpu" \
     '{schema_version: 1, issue: 149, kind: "console_benchmark_preflight",
-      workload_launches: 0, warmup_rounds: 1, measured_rounds: 2, records_required: 74,
+      workload_launches: 0, warmup_rounds: 1, measured_rounds: 2, records_required: 78,
       bench_cpu: $bench_cpu, producer_cpu: $producer_cpu,
       taskset_mask: ($bench_cpu + "," + $producer_cpu),
       candidate_commit: $commit, candidate_commit_sha256: $commit_sha256,

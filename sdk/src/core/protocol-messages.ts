@@ -10,6 +10,7 @@ import {
   WIRE_U32,
   WIRE_U64,
   WIRE_U8,
+  WIRE_UTF8,
   commandFrame,
   concat,
   decodeProtocolDiagnostic,
@@ -18,11 +19,13 @@ import {
   encodeRevisionProbe,
   field,
   malformed,
+  nested as nestedField,
   nestedFields,
   readFields,
   requireU32,
   requireU64,
   scalar,
+  text,
   u32,
   u8,
 } from "./control-frame.ts";
@@ -100,6 +103,7 @@ export const COUNTER_IDS = Object.freeze([
   { name: "liveBlockErrors", code: 19 },
   { name: "sourceUnderrunBlocks", code: 20 },
   { name: "sourceFramesDiscarded", code: 21 },
+  { name: "meterWindowsLost", code: 22 },
 ] as const);
 
 /** A protocol counter, by name. */
@@ -118,6 +122,8 @@ const TRANSPORT_NAMES: readonly (TransportStateName | undefined)[] = [undefined,
 const SEVERITY_CODES: ReadonlyMap<string, number> = new Map([["info", 1], ["warning", 2], ["error", 3]]);
 const SEVERITY_NAMES: readonly (DiagnosticSeverityName | undefined)[] = [undefined, "info", "warning", "error"];
 const COMPONENT_NAMES: readonly (MeterComponentName | undefined)[] = [undefined, "left", "right", "aggregate"];
+const METRIC_CODES: ReadonlyMap<string, number> = new Map([["peak", 1], ["gainReduction", 2]]);
+const METRIC_NAMES: readonly (MeterMetricName | undefined)[] = [undefined, "peak", "gainReduction"];
 
 /** A protocol version an endpoint supports. */
 export interface ProtocolVersion {
@@ -180,11 +186,25 @@ export interface TransportRequest {
   readonly state: TransportStateName;
 }
 
+/**
+ * One meter table entry (#1583 D1): the session output, or a strip by its stable ID, and the metric.
+ * Its handle is its 1-based position in the table.
+ */
+export type MeterEntry =
+  | { readonly target: "output"; readonly metric: MeterMetricName }
+  | { readonly target: "strip"; readonly stripId: string; readonly metric: MeterMetricName };
+
+/** A meter table entry's metric. */
+export type MeterMetricName = "peak" | "gainReduction";
+
 /** The endpoint's telemetry: which meters and counters it sends as events, and how often. */
 export interface TelemetryConfiguration {
-  /** Nonzero meter handles, ascending. */
-  readonly meterHandles: readonly number[];
+  /** The meter table: entry `i` is meter handle `i + 1`. */
+  readonly meters: readonly MeterEntry[];
+  /** Blocks per meter batch: a whole number of meter windows when the table is not empty. */
   readonly meterPeriodBlocks: number;
+  /** The engine's meter window in blocks, in a reply only, when the engine delivers meters. */
+  readonly meterWindowBlocks?: number;
   readonly counterIds: readonly CounterName[];
   readonly counterPeriodBlocks: number;
   readonly diagnosticsEnabled: boolean;
@@ -276,7 +296,11 @@ export type ProtocolEvent =
   | {
     readonly kind: "meterBatch";
     readonly revision: bigint;
+    /** One past the window's last sample: the window is `[firstSample, observedSample)`. */
     readonly observedSample: bigint;
+    readonly firstSample: bigint;
+    /** The window's sequence since the accepted configuration, from 1. */
+    readonly windowSequence: bigint;
     readonly records: readonly MeterRecord[];
   }
   | {
@@ -420,21 +444,33 @@ export function encodeTelemetryConfigureRequest(request: {
   if (typeof configuration !== "object" || configuration === null) {
     throw new MisoUsageError("a telemetry configuration must be an object");
   }
-  const handles = list<number>(configuration.meterHandles, "meterHandles")
-    .map((handle) => requireU32(handle, "a meter handle"));
+  const meters = list<MeterEntry>(configuration.meters, "meters").map(meterEntryField);
   const counters = list<CounterName>(configuration.counterIds, "counterIds")
     .map((name) => code(COUNTER_CODES, name, "a counter"));
   if (typeof configuration.diagnosticsEnabled !== "boolean") {
     throw new MisoUsageError("diagnosticsEnabled must be a boolean");
   }
+  // Field 1, the positional meter handles, is retired (#1583 D2); the table is field 7.
   return mutation(MESSAGE_TELEMETRY_CONFIGURE, request.requestId, request.expectedRevision, [
-    field(1, WIRE_PACKED_U32, true, packedU32(handles)),
     field(2, WIRE_U32, true, u32(requireU32(configuration.meterPeriodBlocks, "meterPeriodBlocks"))),
     field(3, WIRE_PACKED_U32, true, packedU32(counters)),
     field(4, WIRE_U32, true, u32(requireU32(configuration.counterPeriodBlocks, "counterPeriodBlocks"))),
     field(5, WIRE_BOOL, true, u8(configuration.diagnosticsEnabled ? 1 : 0)),
     field(6, WIRE_U8, true, u8(code(SEVERITY_CODES, configuration.minimumSeverity, "a severity"))),
+    ...meters,
   ]);
+}
+
+/** One meter table entry as its repeated field 7 message: target, the strip ID of a strip, metric. */
+function meterEntryField(entry: MeterEntry): Uint8Array {
+  if (typeof entry !== "object" || entry === null) throw new MisoUsageError("a meter entry must be an object");
+  const metric = field(3, WIRE_U8, true, u8(code(METRIC_CODES, entry.metric, "a meter metric")));
+  if (entry.target === "output") return nestedField(7, false, [field(1, WIRE_U8, true, u8(1)), metric]);
+  if (entry.target === "strip") {
+    if (typeof entry.stripId !== "string") throw new MisoUsageError("a strip meter entry needs a stripId string");
+    return nestedField(7, false, [field(1, WIRE_U8, true, u8(2)), field(2, WIRE_UTF8, false, text(entry.stripId)), metric]);
+  }
+  throw new MisoUsageError(`a meter target ${String((entry as { target?: unknown }).target)} is not output or strip`);
 }
 
 /** Encode `COUNTERS_GET`: the named counters, in the order given, or every counter when `ids` is absent. */
@@ -602,13 +638,37 @@ export function decodeTransportReply(bytes: Uint8Array, command: "get" | "set"):
 /** Decode the reply to `TELEMETRY_CONFIGURE`: the configuration the core applied. */
 export function decodeTelemetryReply(bytes: Uint8Array): ProtocolReply<TelemetryConfiguration> {
   return decodeReply(bytes, MESSAGE_TELEMETRY_CONFIGURE, (fields) => Object.freeze({
-    meterHandles: Object.freeze(packed(need(fields, 1, WIRE_PACKED_U32), 4)),
+    meters: Object.freeze(fields.filter((row) => row.id === 7).map(meterEntryOf)),
     meterPeriodBlocks: readU32(fields, 2),
+    ...meterWindowOf(fields),
     counterIds: Object.freeze(packed(need(fields, 3, WIRE_PACKED_U32), 4).map(counterName)),
     counterPeriodBlocks: readU32(fields, 4),
     diagnosticsEnabled: readBool(fields, 5),
     minimumSeverity: named(SEVERITY_NAMES, readU8(fields, 6), "severity"),
   }));
+}
+
+function meterEntryOf(row: RawField): MeterEntry {
+  const inner = nested(row);
+  const metric = named(METRIC_NAMES, readU8(inner, 3), "meter metric");
+  const target = readU8(inner, 1);
+  const strip = only(inner, 2, WIRE_UTF8);
+  if (target === 1 && strip === undefined) return Object.freeze({ target: "output", metric });
+  if (target === 2 && strip !== undefined) {
+    let stripId: string;
+    try {
+      stripId = DECODER.decode(strip.value);
+    } catch {
+      throw malformed("a meter entry's strip ID is not UTF-8");
+    }
+    return Object.freeze({ target: "strip", stripId, metric });
+  }
+  throw malformed("a meter entry's target and strip ID disagree");
+}
+
+function meterWindowOf(fields: readonly RawField[]): { meterWindowBlocks?: number } {
+  const window = scalar(fields, 8, WIRE_U32, 4);
+  return window === undefined ? {} : { meterWindowBlocks: window.getUint32(0, true) };
 }
 
 function counterBody(fields: readonly RawField[]): CounterSnapshot {
@@ -706,6 +766,8 @@ export function decodeProtocolEvent(frame: Uint8Array): ProtocolEvent {
         kind: "meterBatch",
         revision,
         observedSample: readU64(fields, 1),
+        firstSample: readU64(fields, 5),
+        windowSequence: readU64(fields, 6),
         records: Object.freeze(meterRecords(fields)),
       });
     case EVENT_COUNTER_SNAPSHOT:
