@@ -16,6 +16,10 @@
 //!   preceding subtraction contributes at most another `ulp(48)` to the accumulated error.
 //!   The 1 ms attack has a larger `b`, and therefore a smaller accumulated bound.
 //! * `fast_gain_from_db` is qualified below `7.431e-6 dB` on negative gain values, again by F1.
+//! * The changed-timing render (#1336) adds the `f32` coefficient ramp, within a few ulp of the
+//!   reference's `f64` linear ramp, a relative error far below the state-addition term. Its changed
+//!   attack (20 ms, `b = 1.04e-3`) is faster than the 100 ms release, so the slowest rate and the
+//!   `0.0184 dB` bound above stand.
 //!
 //! Total under the unchanged `0.02 dB` limit asserted below.
 

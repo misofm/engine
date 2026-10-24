@@ -227,3 +227,12 @@ the same track rendered alone.
   128-frame blocks with parameter ramps, a restore, both resets, and a native bank with ramps)
   is identical before and after.
 - **Listening pass (D11): not done** by the implementer; it needs a person.
+- **Gates 4, 6, 7 (verifier fold).** Gate 4: `tests/randomized.rs` (24 seeds, both widths, whole
+  and chunked, continued and restored; its generator now draws ids 5-7) passes, as do
+  `the_effects_own_edge_ramp_snapshots_restore` and the D7 report test. Gate 6: capi
+  `live_effect_parameter_edits_render_like_the_browsers_lane` and host-core
+  `a_staged_live_commit_gives_the_list_of_a_full_build` pass with no edit. Gate 7: allocations 0;
+  the conformance points probe (`render_points` -> `armed_process`, `process.allocation` under the
+  audited allocator) applies a span for every `Block` row, ids 5-7 included, and passes.
+- **Resting-rate restore clause tested:** `a_coefficient_ramp_in_flight_survives_a_carry` refuses a
+  resting release ramp whose current is one ulp off its target; red with the clause deleted.

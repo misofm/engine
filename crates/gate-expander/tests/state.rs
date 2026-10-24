@@ -688,10 +688,12 @@ fn a_subnormal_gain_word_is_refused() {
 ///
 /// Test value: a restore that re-derives the coefficient from the time (and so drops the ramp in
 /// flight), or that does not arm the ramping segment for a rate-only ramp, moves bits and turns it
-/// red; so does a restore that accepts a coefficient the time word does not design.
+/// red; so does a restore that accepts a coefficient the time word does not design, or a resting
+/// coefficient that is not its target.
 #[test]
 fn a_coefficient_ramp_in_flight_survives_a_carry() {
     const ATTACK_TARGET_WORD: usize = 23;
+    const RELEASE_CURRENT_WORD: usize = 26;
     for rate in [44_100, 48_000, 88_200, 96_000] {
         let values = active_values();
         let mut donor = prepare(support::request_at_rate(&values, rate));
@@ -765,6 +767,35 @@ fn a_coefficient_ramp_in_flight_survives_a_carry() {
             snapshot(&carried),
             before,
             "{rate} Hz: the refused restore changes nothing"
+        );
+
+        // The release ramp rests (remaining 0, step 0); its current one ulp off its target is a
+        // word the engine never holds at rest.
+        let at = RELEASE_CURRENT_WORD * 4;
+        assert_eq!(
+            f32::from_le_bytes(saved.1[at + 12..at + 16].try_into().unwrap()),
+            0.0
+        );
+        assert_eq!(
+            f32::from_le_bytes(saved.1[at + 8..at + 12].try_into().unwrap()).to_bits(),
+            0
+        );
+        let mut off = saved.1.clone();
+        let target = f32::from_le_bytes(off[at + 4..at + 8].try_into().unwrap());
+        off[at..at + 4].copy_from_slice(&target.next_up().to_le_bytes());
+        let input = StatePayloadInput::new(&saved.0, &off, &saved.2, sizes).expect("sizes");
+        assert_eq!(
+            carried
+                .processor
+                .restore_state_payload(STATE_LAYOUT_VERSION, input)
+                .expect_err("a resting rate one ulp off its target")
+                .code,
+            "effect.state.parameter"
+        );
+        assert_eq!(
+            snapshot(&carried),
+            before,
+            "{rate} Hz: the refused resting-rate restore changes nothing"
         );
     }
 }
