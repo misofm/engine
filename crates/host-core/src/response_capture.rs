@@ -191,6 +191,25 @@ pub fn response_capture_channel()
     ))
 }
 
+/// The bytes the channel's two queues retain, ring headers and slots, as a resource report
+/// charges them. An armed job is the control side's transient, allocated by `arm` and freed by
+/// `poll`, and is not part of it.
+///
+/// # Errors
+///
+/// [`ResponseCaptureSetupError`] when the layout cannot be represented.
+pub fn response_capture_retained_bytes() -> Result<u64, ResponseCaptureSetupError> {
+    let queue = engine::realtime::bounded_spsc_retained_payload::<Box<ResponseCaptureJob>>(
+        NonZeroUsize::MIN,
+    )
+    .map_err(|_| ResponseCaptureSetupError)?;
+    queue
+        .total_bytes()
+        .and_then(|bytes| bytes.checked_mul(2))
+        .and_then(|bytes| u64::try_from(bytes).ok())
+        .ok_or(ResponseCaptureSetupError)
+}
+
 /// The number of owners `strip_id` has in `model` (its input filters, every console slot and its
 /// inserts), or `None` when the model has no such track or submix.
 fn strip_owners(model: &SessionModel, strip_id: &str) -> Option<usize> {

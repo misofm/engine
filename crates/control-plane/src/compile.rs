@@ -445,6 +445,9 @@ pub(crate) fn capi_resources<A: ControlAdapter>(
         queue.retained_payload_bytes,
         replay.retained_payload_bytes,
         exchange.retained_payload_bytes,
+        // #1577 D2: the response capture channel's two queues.
+        host_core::response_capture_retained_bytes()
+            .map_err(|_| failure(ResourceFault::Arithmetic))?,
     ];
     // The affine token (#1615): the response frame it stages (the measured length, never more than
     // a control frame), its own layout, and a copy of the request the commit writes into the
