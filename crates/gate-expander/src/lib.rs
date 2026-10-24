@@ -893,7 +893,7 @@ impl<L: Lane, const CONNECTED: bool> PreparedGate<L, CONNECTED> {
                 lane_set(&mut slot.target, lane, ramp.target);
                 lane_set(&mut slot.step, lane, ramp.step);
                 lane_set(&mut slot.remaining, lane, ramp.remaining as f32);
-                self.ramp_frames_left = RAMP_SAMPLES;
+                self.ramp_frames_left = self.ramp_frames_left.max(RAMP_SAMPLES);
             }
         }
     }
@@ -930,7 +930,7 @@ impl<L: Lane, const CONNECTED: bool> PreparedGate<L, CONNECTED> {
         lane_set(&mut rate.target, lane, ramp.target);
         lane_set(&mut rate.step, lane, ramp.step);
         lane_set(&mut rate.remaining, lane, ramp.remaining as f32);
-        self.ramp_frames_left = RAMP_SAMPLES;
+        self.ramp_frames_left = self.ramp_frames_left.max(RAMP_SAMPLES);
     }
 
     /// Commits a hold time for one lane and channel (#1336 D4): the window keeps its start.
