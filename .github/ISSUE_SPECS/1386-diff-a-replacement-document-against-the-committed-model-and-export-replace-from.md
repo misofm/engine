@@ -604,3 +604,41 @@ already carry both rulings.
   The alternative is to commit it (`model_only`, revision + 1, one `SESSION_COMMITTED` with 0
   operations). Gate 3's identical case and gate 6 follow the ruling.
   ROOT DECISION (2026-10-16): an identical-document replace replies with a new `EditPath::Unchanged` (5): OK, 0 operations, unchanged revision, no event. Nothing changed, so the revision does not move. The `edit_path` vocabulary (protocol, registry, the vocabulary gates), the SDK decoder and the parity row all include 5.
+
+## Evidence and decisions, tranche a1 (attempt 1, 2026-10-24)
+
+Scope note `opt/scope/1386.md` governs; a1 is the core (protocol, control plane, corpus, docs).
+a2 (C ABI export, feature bit `1 << 11`, capi tests, the parity refusal row, the audit frame) is
+still open.
+
+- **Hook shape.** `ProtocolControllerConfig::document_replace: Option<DocumentReplace>`, a plain
+  `fn` plus the boot's `maximum_document_bytes` (0 unbounded). The hook gets the committed
+  `SessionStore`, so it can compile the document under the store's own caps: the document is
+  validated exactly as a boot validates it, and both sides of the diff are normalized models.
+  `SessionStore::caps()` is added for that.
+- **Bits, not `PartialEq`.** Entities are compared by a byte stream of the session's own model
+  walk (`VisitModel`, floats by `to_bits`), not by canonical JSON text.
+- **Smoothing.** The diff emits `SetControl` rows for an explicit arm as D2 says, and
+  `SessionStore::prepare_replacement` then sets the document's `control_smoothing` whole, so both
+  arms and both directions land exactly. A smoothing-only change commits with 0 operations
+  (`model_only`).
+- **One added diagnostic code.** A document that is not UTF-8 is `VALIDATION_FAILED`
+  `session.replace.document_utf8` (D4 lists "does not parse" with the parser's diagnostics; the
+  parser takes `&str`, so this case needs its own code).
+- **No document on the controller's other paths.** `ProtocolController::process` and the one-call
+  `process_command_frame_into` carry no document, so a `SESSION_REPLACE` there gets the
+  `document_length` refusal from the same hook.
+- **Paths outside the a1 list, needed by the change:** `crates/protocol/tests/set_control_frames.rs`
+  (one `EditPath::Unchanged` match arm), `crates/conformance/src/main.rs` and
+  `crates/conformance/tests/mutation_million.rs` (the corpus frame count 46 -> 48, part of the
+  re-pin).
+- **Re-pin.** `COMPLETE_SCHEMA_HASH` `5cab2cf3b4e4767f` -> `c85b2a0dff5d2a92`, 48 frames
+  (`command.session_replace`, `response.session_replace` with `unchanged`, and `0x0013` in the
+  capabilities response), in every spelling.
+- **Open for a2 (blocks merging a1 alone).** The C ABI endpoint is built by `compile_children`,
+  so it now advertises `0x0013`. Three tests in `crates/capi/src/runtime/tests.rs` pin the
+  capabilities reply bytes and fail until re-pinned:
+  `all_five_event_families_cross_c_dequeue_with_exact_oracle_bytes`,
+  `capi_controller_dispatches_every_advertised_command_family` and
+  `exported_c_replay_revision_event_and_publication_pressure_statuses_are_exact`. That file is on
+  neither tranche's path list; a2 needs it added. host-web's suite passes unchanged.

@@ -244,55 +244,110 @@ fn a_replace_commits_what_a_boot_of_the_document_gives_for_every_kind() {
         cases.push((name, next, committed.clone(), edits));
     };
     // Each pair adds and removes; the change cases run both ways too.
-    case("source", &base, &|m| {
-        let mut source = m.sources[0].clone();
-        source.id = id("extra");
-        m.sources.push(source);
-    }, 1);
+    case(
+        "source",
+        &base,
+        &|m| {
+            let mut source = m.sources[0].clone();
+            source.id = id("extra");
+            m.sources.push(source);
+        },
+        1,
+    );
     case("source frames", &base, &|m| m.sources[0].frames = 24_000, 1);
     // A session has one output: renaming it removes one, adds one and retargets its route.
-    case("output", &base, &|m| {
-        m.outputs = vec![Output { id: id("alt-out") }];
-        for route in &mut m.routes {
-            if let RouteDestination::OutputInput { output_id } = &mut route.destination {
-                *output_id = id("alt-out");
+    case(
+        "output",
+        &base,
+        &|m| {
+            m.outputs = vec![Output { id: id("alt-out") }];
+            for route in &mut m.routes {
+                if let RouteDestination::OutputInput { output_id } = &mut route.destination {
+                    *output_id = id("alt-out");
+                }
             }
-        }
-    }, 3);
-    case("submix", &base, &|m| {
-        let mut submix = m.submixes[0].clone();
-        submix.id = id("bus-b");
-        m.submixes.push(submix);
-    }, 1);
-    case("submix fader", &base, &|m| m.submixes[0].fader.left_db = -3.0, 1);
-    case("track", &base, &|m| {
-        let mut track = m.tracks[0].clone();
-        track.id = id("vocal-b");
-        m.tracks.push(track);
-    }, 1);
-    case("track fader", &base, &|m| m.tracks[0].fader.left_db = -6.0, 1);
-    case("route", &base, &|m| {
-        let mut route = m.routes[1].clone();
-        route.id = id("bus-main");
-        route.source = RouteSource::Submix {
-            submix_id: id("bus"),
-            tap: session::SendTap::PostPan,
-        };
-        m.routes.push(route);
-    }, 1);
+        },
+        3,
+    );
+    case(
+        "submix",
+        &base,
+        &|m| {
+            let mut submix = m.submixes[0].clone();
+            submix.id = id("bus-b");
+            m.submixes.push(submix);
+        },
+        1,
+    );
+    case(
+        "submix fader",
+        &base,
+        &|m| m.submixes[0].fader.left_db = -3.0,
+        1,
+    );
+    case(
+        "track",
+        &base,
+        &|m| {
+            let mut track = m.tracks[0].clone();
+            track.id = id("vocal-b");
+            m.tracks.push(track);
+        },
+        1,
+    );
+    case(
+        "track fader",
+        &base,
+        &|m| m.tracks[0].fader.left_db = -6.0,
+        1,
+    );
+    case(
+        "route",
+        &base,
+        &|m| {
+            let mut route = m.routes[1].clone();
+            route.id = id("bus-main");
+            route.source = RouteSource::Submix {
+                submix_id: id("bus"),
+                tap: session::SendTap::PostPan,
+            };
+            m.routes.push(route);
+        },
+        1,
+    );
     case("route gain", &base, &|m| m.routes[0].gain_db = -2.0, 1);
-    case("automation", &base, &|m| m.automation.retain(|a| a.id.as_str() != "pan-ride"), 1);
-    case("automation segment", &base, &|m| {
-        m.automation[0].segments[0].end_value = -6.0;
-    }, 1);
-    case("vca", &base, &|m| {
-        m.vcas.clear();
-        m.automation.retain(|a| a.id.as_str() != "vca-ride");
-    }, 2);
+    case(
+        "automation",
+        &base,
+        &|m| m.automation.retain(|a| a.id.as_str() != "pan-ride"),
+        1,
+    );
+    case(
+        "automation segment",
+        &base,
+        &|m| {
+            m.automation[0].segments[0].end_value = -6.0;
+        },
+        1,
+    );
+    case(
+        "vca",
+        &base,
+        &|m| {
+            m.vcas.clear();
+            m.automation.retain(|a| a.id.as_str() != "vca-ride");
+        },
+        2,
+    );
     case("vca fader", &base, &|m| m.vcas[0].fader.left_db = -1.0, 1);
     case("session id", &base, &|m| m.session_id = id("renamed"), 1);
     // `PartialEq` holds these equal; their bits, and the canonical text, differ.
-    case("signed zero", &base, &|m| m.tracks[0].fader.right_db = -0.0, 1);
+    case(
+        "signed zero",
+        &base,
+        &|m| m.tracks[0].fader.right_db = -0.0,
+        1,
+    );
     // Default to explicit writes the two rows that differ from the defaults; explicit back to
     // default has no edit and commits the smoothing alone.
     let explicit = |m: &mut SessionModel| {
@@ -333,9 +388,9 @@ fn a_replace_commits_what_a_boot_of_the_document_gives_for_every_kind() {
                     max_source_ring_bytes: u64::MAX,
                 },
             )
-                .expect("compiles")
-                .normalized_model()
-                .clone()
+            .expect("compiles")
+            .normalized_model()
+            .clone()
         };
         assert_eq!(
             diff_document(&compiled(&committed), &compiled(&next)).len(),
@@ -359,7 +414,11 @@ fn a_replace_commits_what_a_boot_of_the_document_gives_for_every_kind() {
             booted_snapshot(&next, before + 1),
             "{name} #{index}: the committed snapshot is a boot of the document"
         );
-        assert_eq!(reliable_events(&mut session), 1, "{name} #{index}: one event");
+        assert_eq!(
+            reliable_events(&mut session),
+            1,
+            "{name} #{index}: one event"
+        );
     }
 }
 
@@ -444,6 +503,10 @@ fn a_retry_replays_without_the_document_and_another_document_is_request_id_reuse
     assert_eq!(snapshot(&session), committed);
 }
 
+/// One refusal case: its name, the document the frame names, the document passed, the status
+/// and the one diagnostic code (empty for the parser's own diagnostics).
+type Refusal<'a> = (&'a str, &'a [u8], &'a [u8], StatusCode, &'a str);
+
 /// Test value: red if a refusal of D4 moves the model, the revision or queues an event before it
 /// fails, or answers another status or diagnostic than the registry names.
 #[test]
@@ -462,13 +525,49 @@ fn every_document_refusal_happens_before_anything_commits() {
     let invalid = BASE.replacen("\"sample_rate_hz\"", "\"sample_rate\"", 1);
     let not_utf8 = [0xff_u8; 8];
     let bound = u64::try_from(BASE.len() + 64).expect("small");
-    let cases: [(&str, &[u8], &[u8], StatusCode, &str); 6] = [
-        ("no document", changed.as_bytes(), &[], StatusCode::InvalidField, "session.replace.document_length"),
-        ("short document", changed.as_bytes(), &changed.as_bytes()[1..], StatusCode::InvalidField, "session.replace.document_length"),
-        ("too large", bigger.as_bytes(), bigger.as_bytes(), StatusCode::LimitExceeded, "session.replace.document_too_large"),
-        ("digest", changed.as_bytes(), &wrong_digest, StatusCode::InvalidField, "session.replace.document_digest"),
-        ("not UTF-8", &not_utf8, &not_utf8, StatusCode::ValidationFailed, "session.replace.document_utf8"),
-        ("invalid", invalid.as_bytes(), invalid.as_bytes(), StatusCode::ValidationFailed, ""),
+    let cases: [Refusal<'_>; 6] = [
+        (
+            "no document",
+            changed.as_bytes(),
+            &[],
+            StatusCode::InvalidField,
+            "session.replace.document_length",
+        ),
+        (
+            "short document",
+            changed.as_bytes(),
+            &changed.as_bytes()[1..],
+            StatusCode::InvalidField,
+            "session.replace.document_length",
+        ),
+        (
+            "too large",
+            bigger.as_bytes(),
+            bigger.as_bytes(),
+            StatusCode::LimitExceeded,
+            "session.replace.document_too_large",
+        ),
+        (
+            "digest",
+            changed.as_bytes(),
+            &wrong_digest,
+            StatusCode::InvalidField,
+            "session.replace.document_digest",
+        ),
+        (
+            "not UTF-8",
+            &not_utf8,
+            &not_utf8,
+            StatusCode::ValidationFailed,
+            "session.replace.document_utf8",
+        ),
+        (
+            "invalid",
+            invalid.as_bytes(),
+            invalid.as_bytes(),
+            StatusCode::ValidationFailed,
+            "",
+        ),
     ];
     let CompiledChildren {
         mut session,
@@ -495,7 +594,10 @@ fn every_document_refusal_happens_before_anything_commits() {
     let frame = replace_frame(9, before.0, rate.as_bytes());
     let refused = session.command_with_document(&frame, rate.as_bytes(), 16_384);
     assert!(
-        matches!(refused, Err(control_plane::CommandError::CompileRejected(_))),
+        matches!(
+            refused,
+            Err(control_plane::CommandError::CompileRejected(_))
+        ),
         "{refused:?}"
     );
     assert_eq!((revision(&session), snapshot(&session)), before);

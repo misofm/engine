@@ -1465,12 +1465,10 @@ impl ProtocolCodec {
             message,
             schema::session_replace_request::DOCUMENT_BYTES
         )?)?;
-        let document_sha256: [u8; SESSION_REPLACE_DIGEST_BYTES] = one_spec!(
-            message,
-            schema::session_replace_request::DOCUMENT_SHA256
-        )?
-        .try_into()
-        .map_err(|_| DecodeError::InvalidField)?;
+        let document_sha256: [u8; SESSION_REPLACE_DIGEST_BYTES] =
+            one_spec!(message, schema::session_replace_request::DOCUMENT_SHA256)?
+                .try_into()
+                .map_err(|_| DecodeError::InvalidField)?;
         if document_bytes == 0 {
             return Err(DecodeError::InvalidField);
         }

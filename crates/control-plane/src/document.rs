@@ -31,8 +31,8 @@ use protocol::{
     DocumentDiff, DocumentReplaceRefusal, DocumentReplaceRequest, SessionEdit, StatusCode,
 };
 use session::{
-    CONTROL_SMOOTHING_DEFAULT, ControlSmoothing, FieldKey, Lane, ModelVisitor, Owner,
-    SessionModel, SourceBitDepth, StableId, Token, VisitModel, WalkOrder,
+    CONTROL_SMOOTHING_DEFAULT, ControlSmoothing, FieldKey, Lane, ModelVisitor, Owner, SessionModel,
+    SourceBitDepth, StableId, Token, VisitModel, WalkOrder,
 };
 use sha2::{Digest, Sha256};
 
@@ -55,7 +55,9 @@ pub const DOCUMENT_UTF8: &str = "session.replace.document_utf8";
 /// [`DocumentReplaceRefusal`]: `INVALID_FIELD` for the length or the digest, `LIMIT_EXCEEDED` for
 /// the bound, `VALIDATION_FAILED` for a document that is not UTF-8 or that does not parse or
 /// validate (with the session's diagnostics).
-pub fn replace(request: DocumentReplaceRequest<'_>) -> Result<DocumentDiff, DocumentReplaceRefusal> {
+pub fn replace(
+    request: DocumentReplaceRequest<'_>,
+) -> Result<DocumentDiff, DocumentReplaceRefusal> {
     let refused = |status, code| DocumentReplaceRefusal::Refused { status, code };
     let document = request.document;
     if u64::try_from(document.len()).ok() != Some(u64::from(request.request.document_bytes)) {
@@ -118,27 +120,57 @@ pub fn diff(committed: &SessionModel, next: &SessionModel) -> Vec<SessionEdit> {
     }
 
     let id = |value: &StableId| value.clone();
-    removals(&committed.routes, &next.routes, |r| &r.id, &mut edits, |r| {
-        SessionEdit::RemoveRoute { route_id: id(r) }
-    });
-    removals(&committed.automation, &next.automation, |a| &a.id, &mut edits, |a| {
-        SessionEdit::RemoveAutomation { automation_id: id(a) }
-    });
-    removals(&committed.vcas, &next.vcas, |v| &v.id, &mut edits, |v| {
-        SessionEdit::RemoveVca { vca_id: id(v) }
-    });
-    removals(&committed.tracks, &next.tracks, |t| &t.id, &mut edits, |t| {
-        SessionEdit::RemoveTrack { track_id: id(t) }
-    });
-    removals(&committed.submixes, &next.submixes, |s| &s.id, &mut edits, |s| {
-        SessionEdit::RemoveSubmix { submix_id: id(s) }
-    });
-    removals(&committed.outputs, &next.outputs, |o| &o.id, &mut edits, |o| {
-        SessionEdit::RemoveOutput { output_id: id(o) }
-    });
-    removals(&committed.sources, &next.sources, |s| &s.id, &mut edits, |s| {
-        SessionEdit::RemoveSource { source_id: id(s) }
-    });
+    removals(
+        &committed.routes,
+        &next.routes,
+        |r| &r.id,
+        &mut edits,
+        |r| SessionEdit::RemoveRoute { route_id: id(r) },
+    );
+    removals(
+        &committed.automation,
+        &next.automation,
+        |a| &a.id,
+        &mut edits,
+        |a| SessionEdit::RemoveAutomation {
+            automation_id: id(a),
+        },
+    );
+    removals(
+        &committed.vcas,
+        &next.vcas,
+        |v| &v.id,
+        &mut edits,
+        |v| SessionEdit::RemoveVca { vca_id: id(v) },
+    );
+    removals(
+        &committed.tracks,
+        &next.tracks,
+        |t| &t.id,
+        &mut edits,
+        |t| SessionEdit::RemoveTrack { track_id: id(t) },
+    );
+    removals(
+        &committed.submixes,
+        &next.submixes,
+        |s| &s.id,
+        &mut edits,
+        |s| SessionEdit::RemoveSubmix { submix_id: id(s) },
+    );
+    removals(
+        &committed.outputs,
+        &next.outputs,
+        |o| &o.id,
+        &mut edits,
+        |o| SessionEdit::RemoveOutput { output_id: id(o) },
+    );
+    removals(
+        &committed.sources,
+        &next.sources,
+        |s| &s.id,
+        &mut edits,
+        |s| SessionEdit::RemoveSource { source_id: id(s) },
+    );
 
     if !same_bits(&committed.console, &next.console) {
         edits.push(SessionEdit::SetConsole {
@@ -147,29 +179,57 @@ pub fn diff(committed: &SessionModel, next: &SessionModel) -> Vec<SessionEdit> {
         });
     }
 
-    upserts(&committed.sources, &next.sources, |s| &s.id, &mut edits, |s| {
-        SessionEdit::UpsertSource { source: s.clone() }
-    });
-    upserts(&committed.outputs, &next.outputs, |o| &o.id, &mut edits, |o| {
-        SessionEdit::UpsertOutput { output: o.clone() }
-    });
-    upserts(&committed.submixes, &next.submixes, |s| &s.id, &mut edits, |s| {
-        SessionEdit::UpsertSubmix { submix: s.clone() }
-    });
-    upserts(&committed.tracks, &next.tracks, |t| &t.id, &mut edits, |t| {
-        SessionEdit::UpsertTrack { track: t.clone() }
-    });
-    upserts(&committed.vcas, &next.vcas, |v| &v.id, &mut edits, |v| {
-        SessionEdit::UpsertVca { vca: v.clone() }
-    });
-    upserts(&committed.routes, &next.routes, |r| &r.id, &mut edits, |r| {
-        SessionEdit::UpsertRoute { route: r.clone() }
-    });
-    upserts(&committed.automation, &next.automation, |a| &a.id, &mut edits, |a| {
-        SessionEdit::UpsertAutomation {
+    upserts(
+        &committed.sources,
+        &next.sources,
+        |s| &s.id,
+        &mut edits,
+        |s| SessionEdit::UpsertSource { source: s.clone() },
+    );
+    upserts(
+        &committed.outputs,
+        &next.outputs,
+        |o| &o.id,
+        &mut edits,
+        |o| SessionEdit::UpsertOutput { output: o.clone() },
+    );
+    upserts(
+        &committed.submixes,
+        &next.submixes,
+        |s| &s.id,
+        &mut edits,
+        |s| SessionEdit::UpsertSubmix { submix: s.clone() },
+    );
+    upserts(
+        &committed.tracks,
+        &next.tracks,
+        |t| &t.id,
+        &mut edits,
+        |t| SessionEdit::UpsertTrack { track: t.clone() },
+    );
+    upserts(
+        &committed.vcas,
+        &next.vcas,
+        |v| &v.id,
+        &mut edits,
+        |v| SessionEdit::UpsertVca { vca: v.clone() },
+    );
+    upserts(
+        &committed.routes,
+        &next.routes,
+        |r| &r.id,
+        &mut edits,
+        |r| SessionEdit::UpsertRoute { route: r.clone() },
+    );
+    upserts(
+        &committed.automation,
+        &next.automation,
+        |a| &a.id,
+        &mut edits,
+        |a| SessionEdit::UpsertAutomation {
             automation: a.clone(),
-        }
-    });
+        },
+    );
 
     // D2: an explicit arm writes each changed row; the default arm has no edit (the replace's
     // preparation sets it whole).
@@ -280,7 +340,8 @@ impl Bits {
             .extend_from_slice(&key.map_or(u16::MAX, |key| key.id).to_le_bytes());
     }
     fn bytes(&mut self, value: &[u8]) {
-        self.0.extend_from_slice(&(value.len() as u64).to_le_bytes());
+        self.0
+            .extend_from_slice(&(value.len() as u64).to_le_bytes());
         self.0.extend_from_slice(value);
     }
 }

@@ -25,11 +25,11 @@ use crate::{
     EditPath, EncodeError, EventPayload, ExpectedRevision, MessageId, MeterBatch, MeterRecord,
     NonOkResponse, ObservationEnded, ObservationTapKey, PreparedSessionTransaction, ProtocolCodec,
     ProtocolQueues, QueueReport, ReliablePayload, ReliableSlot, RequestId, ResponseGetRequest,
-    ResponseResult, SampleTime, SessionCommitted, SessionEdit, SessionRevision, SessionSnapshot,
-    SessionReplaceRequest, SessionStore, SessionStoreError, StatusCode, SuccessResponsePayload,
-    TelemetryConfiguration,
-    TelemetryKey, TelemetryRecord, TransactionApplied, TransportSetRequest, TransportSnapshot,
-    TransportStateEvent, TypedEventFrame, TypedNonOkResponseFrame, TypedSuccessResponseFrame,
+    ResponseResult, SampleTime, SessionCommitted, SessionEdit, SessionReplaceRequest,
+    SessionRevision, SessionSnapshot, SessionStore, SessionStoreError, StatusCode,
+    SuccessResponsePayload, TelemetryConfiguration, TelemetryKey, TelemetryRecord,
+    TransactionApplied, TransportSetRequest, TransportSnapshot, TransportStateEvent,
+    TypedEventFrame, TypedNonOkResponseFrame, TypedSuccessResponseFrame,
 };
 #[cfg(any(test, feature = "test-support"))]
 use crate::{
@@ -2076,10 +2076,10 @@ impl<P: ControlProvider> ProtocolController<P> {
                             })),
                         });
                     }
-                    Err(outcome) => {
+                    Err(refusal) => {
                         return Ok(StructuralCommandDisposition::Immediate {
                             replay_plan,
-                            outcome,
+                            outcome: self.document_refusal_outcome(refusal),
                         });
                     }
                 }
@@ -3452,7 +3452,7 @@ impl<P: ControlProvider> ProtocolController<P> {
             // back): the hook refuses it as a document of the wrong length. A document that
             // somehow diffed here would have no preparation to go to.
             ControlCommand::SessionReplace { request } => match self.diff_document(*request, &[]) {
-                Err(outcome) => outcome,
+                Err(refusal) => self.document_refusal_outcome(refusal),
                 Ok(_) => self.non_ok(StatusCode::Internal, None),
             },
             ControlCommand::ControlListGet { request } => {
@@ -3802,15 +3802,18 @@ impl<P: ControlProvider> ProtocolController<P> {
         )
     }
 
-    /// Run the `SESSION_REPLACE` document hook (#1386 D3) against the committed store; a refusal
-    /// is its outcome, before anything is prepared (D4).
+    /// Run the `SESSION_REPLACE` document hook (#1386 D3) against the committed store, before
+    /// anything is prepared; [`Self::document_refusal_outcome`] answers a refusal (D4).
     fn diff_document(
         &self,
         request: SessionReplaceRequest,
         document: &[u8],
-    ) -> Result<DocumentDiff, Outcome> {
+    ) -> Result<DocumentDiff, DocumentReplaceRefusal> {
         let Some(hook) = self.config.document_replace else {
-            return Err(self.non_ok(StatusCode::Unavailable, None));
+            return Err(DocumentReplaceRefusal::Refused {
+                status: StatusCode::Unavailable,
+                code: "protocol.failure",
+            });
         };
         (hook.replace)(DocumentReplaceRequest {
             committed: &self.session,
@@ -3818,7 +3821,12 @@ impl<P: ControlProvider> ProtocolController<P> {
             request,
             maximum_document_bytes: hook.maximum_document_bytes,
         })
-        .map_err(|refusal| match refusal {
+    }
+
+    /// The outcome of a document refusal: its status with one diagnostic that carries its code,
+    /// or `VALIDATION_FAILED` with the session's diagnostics (no edit caused them).
+    fn document_refusal_outcome(&self, refusal: DocumentReplaceRefusal) -> Outcome {
+        match refusal {
             DocumentReplaceRefusal::Refused { status, code } => {
                 self.response_error_outcome(ResponseProviderError { status, code })
             }
@@ -3833,7 +3841,7 @@ impl<P: ControlProvider> ProtocolController<P> {
                     self.bounded_non_ok_diagnostics(&diagnostics),
                 )
             }
-        })
+        }
     }
 
     fn transaction_error_outcome(&self, error: &SessionStoreError) -> Outcome {
@@ -4099,7 +4107,10 @@ fn transaction_error_diagnostics(error: &SessionStoreError) -> Vec<Diagnostic> {
 
 /// The reply payload of a structural command: `SESSION_REPLACE` (#1386) answers the
 /// transaction's fields under its own message ID.
-fn applied_payload(message_id: MessageId, value: TransactionApplied) -> SuccessResponsePayload<'static> {
+fn applied_payload(
+    message_id: MessageId,
+    value: TransactionApplied,
+) -> SuccessResponsePayload<'static> {
     if message_id == MessageId::SessionReplace {
         SuccessResponsePayload::SessionReplaced(value)
     } else {

@@ -2067,8 +2067,8 @@ where
     /// path; `document` is read only by a `SESSION_REPLACE`, after its replay preflight, its
     /// exact-revision check and its output reservation. The controller's document hook checks its
     /// length (against the frame and against `maximum_document_bytes`), its SHA-256, parses it
-    /// and diffs it against the committed model ([`crate::document`]); the edits then take this
-    /// function's transaction path exactly: the live commit or the rebuild, the rate and quantum
+    /// and diffs it against the committed model ([`crate::replace_document`]); the edits then
+    /// take this function's transaction path exactly: the live commit or the rebuild, the rate and quantum
     /// refusal, the plan admission and the `SESSION_COMMITTED` event. A document equal to the
     /// committed model answers `EditPath::Unchanged` and commits nothing.
     pub fn command_with_document(
