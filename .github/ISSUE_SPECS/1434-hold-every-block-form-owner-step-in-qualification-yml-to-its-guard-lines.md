@@ -246,11 +246,12 @@ Root accepted the scope note's recommendations; anchors re-measured at `7255ebc3
   bare `exit` with no `||` before it (`cmd || exit` passes the failure on and is allowed).
 - Stated limits (closing them needs a shell parser): a mask through a condition, loop or negation
   written in other ways (for example `if cmd; then` on one line, or `cmd || echo`) is accepted.
-  D1's subsequence rule accepts inserted lines that undo a guard (for example a second `export
-  TMPDIR=` after the pinned one); the threat model is an accidental edit, not a hostile one.
-  Known false refusals, all fail-closed: `|| true` inside quotes, a mask pattern inside a
-  trailing comment (`cmd # || true`), and a trailing `&` inside a heredoc. A2-D1 is a presence test (any value) at step and job level, on all four
-  owner jobs; the same helper holds the doctest twins (A1-D1).
+  Verifier MINOR 4: D1's subsequence rule accepts inserted lines that undo a guard (for example a
+  second `export TMPDIR=` after the pinned one); the threat model is an accidental edit, not a
+  hostile one. Verifier MINOR 5, the known false refusals, all fail-closed: `|| true` inside quotes,
+  a mask pattern inside a trailing comment (`cmd # || true`), and a trailing `&` inside a heredoc.
+- A2-D1 is a presence test (any value) at step and job level, on all four owner jobs; the same
+  helper holds the doctest twins (A1-D1).
 - A1-D1/A1-D2: `DOCTEST_TWINS`; apart from its `--exclude`, `-p` and `--features` sets, the doctest
   command must equal its twin's other words with `--all-targets` turned into `--doc`, so a flag such
   as `--all-features` on one step only is refused and on both is accepted.
