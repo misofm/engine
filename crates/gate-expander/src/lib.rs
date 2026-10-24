@@ -514,6 +514,12 @@ struct PreparedGate<L: Lane, const CONNECTED: bool> {
     state: [GateState<L>; 2],
     timing: [[LaneTiming; 2]; MAX_WIDTH],
     ramp_frames_left: u32,
+    /// Whether a collapsed block (`run_block::<true>`) has rendered since the last disengage copy
+    /// (`desymmetrize`), which alone clears it (#1894). While it is set the right channel is
+    /// frozen and stale, so [`rest_lanes`](Self::rest_lanes) reads the left channel alone: the
+    /// effect contract's collapsed-bank rule. The gate's one clock is bank-level, so nothing else
+    /// reads it.
+    collapsed: bool,
     /// Bit `l` is set when lane `l` carries a member (issue #1092). A padded lane's bit is clear:
     /// it takes no automation, and D7 recovers it without reporting it (the padding contract on
     /// `PrepareEffectBankRequest`). Every lane of a scalar instance and of a full bank is active.
@@ -602,6 +608,7 @@ impl<L: Lane, const CONNECTED: bool> PreparedGate<L, CONNECTED> {
             state: [GateState::default(); 2],
             timing: [[LaneTiming::default(); 2]; MAX_WIDTH],
             ramp_frames_left: 0,
+            collapsed: false,
             active: all_lanes(width),
         };
         for channel in 0..2 {
@@ -887,6 +894,10 @@ impl<L: Lane, const CONNECTED: bool> PreparedGate<L, CONNECTED> {
         reports: &mut [ProcessReport; MAX_WIDTH],
     ) {
         let width = L::WIDTH;
+        if MONO {
+            // From here until the disengage copy the right channel is frozen and stale.
+            self.collapsed = true;
+        }
         let smoothed = (self.ramp_frames_left as usize).min(frames);
         if self.silent_block::<MONO>(left, right, sidechain) {
             // Every lane of both channels is at its exact rest and every input word is `+0.0`,
@@ -968,12 +979,17 @@ impl<L: Lane, const CONNECTED: bool> PreparedGate<L, CONNECTED> {
     /// channels, so one block of exact `+0.0` on every input of the lane leaves every one of its
     /// state words bit-identical and writes `+0.0` on both output planes. See that function for
     /// the words pinned and why the list is complete. A padded lane is answered by the same rule.
+    /// While [`collapsed`](Self::collapsed) the left channel answers alone (#1894).
     ///
     /// The gate has one clock, and it is bank-level: `ramp_frames_left`, the countdown that
     /// selects the ramping segment, advances by the block length alone once every ramp is
     /// settled. It has no per-lane clock. From state only, no allocation, bounded by the width.
     fn rest_lanes(&self) -> u32 {
-        self.channel_rest_lanes(0) & self.channel_rest_lanes(1)
+        if self.collapsed {
+            self.channel_rest_lanes(0)
+        } else {
+            self.channel_rest_lanes(0) & self.channel_rest_lanes(1)
+        }
     }
 
     /// The lanes of one channel at exact rest: [`kernel::channel_at_rest`] per lane.
@@ -1495,7 +1511,8 @@ macro_rules! bank_impl {
                 PreparedGate::reset(self, kind);
             }
 
-            /// Issue #1746: `PreparedGate::rest_lanes`, both channels, padded lanes included.
+            /// Issue #1746: `PreparedGate::rest_lanes`, both channels, padded lanes included; the
+            /// left channel alone on a collapsed bank (#1894).
             fn lanes_at_rest(&self) -> u32 {
                 self.rest_lanes()
             }
@@ -1623,6 +1640,7 @@ impl<L: Lane> PreparedGate<L, false> {
     fn desymmetrize(&mut self) {
         self.state[1] = self.state[0];
         self.coef[1] = self.coef[0];
+        self.collapsed = false;
     }
 
     /// [`PreparedNativeEffectBank::channels_agree`] (issue #973): every word
