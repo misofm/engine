@@ -1206,6 +1206,12 @@ impl ControlProvider for SessionControlProvider {
     }
 }
 
+/// The most owners a staged live commit reads before it builds a
+/// [`controls::AutomationIndex`] (#1710). Each owner's rows scan the automation table a few
+/// times; the index is one pass plus its map, so it pays only past a few owners. A
+/// 1024-strip, one-owner fader stage measured about 4 % slower with the index built.
+const STAGE_INDEX_OWNERS: usize = 4;
+
 impl ControlCatalog {
     /// Build the catalog of `model` at `sample_rate`: one `controls::list` pass with the owner and
     /// section headers inserted, every allocation reserved up front.
@@ -1525,8 +1531,9 @@ impl ControlCatalog {
     ///
     /// # Errors
     ///
-    /// [`SessionControlProviderError`] if an allocation fails or the list outgrows the table
-    /// indices.
+    /// [`SessionControlProviderError`] if a reserved table cannot be allocated or the list
+    /// outgrows the table indices. (The automation index of a stage that reads many owners
+    /// allocates as an ordinary map does, with no fallible path.)
     pub fn stage_live(
         &self,
         next: controls::ModelView<'_>,
@@ -1545,9 +1552,17 @@ impl ControlCatalog {
         }) {
             return Err(SessionControlProviderError);
         }
-        // The committed table is walked once for every owner the stage reads (#1710).
-        let automation = controls::AutomationIndex::of(next.structure());
-        let next = next.indexed(&automation);
+        // A stage that reads the automation of more than a few owners walks the committed table
+        // once for all of them (#1710); a one-owner hand move scans it per reader, which is
+        // cheaper than building the index.
+        let reads = delta.changed_owners.len() + delta.derived_owners.as_ref().map_or(0, Vec::len);
+        let automation;
+        let next = if reads > STAGE_INDEX_OWNERS {
+            automation = controls::AutomationIndex::of(next.structure());
+            next.indexed(&automation)
+        } else {
+            next
+        };
         if let Some(staged) = self.stage_values(next, overlay, sample_rate, delta)? {
             #[cfg(any(test, feature = "test-support"))]
             if cfg!(debug_assertions) && VERIFY_STAGES.with(core::cell::Cell::get) {

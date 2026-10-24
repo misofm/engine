@@ -49,9 +49,8 @@ table, not O(strips × entries). The rows, their values and the `automated` flag
   track (plus one VCA ride): before, 256 strips 4.0 ms and 1024 strips 39 ms (load average about 8
   on 32 cores). Over the 5 ms stop line, so implemented.
 - After (same session, same runner, load average about 6): 256 strips 2.7 ms, 1024 strips
-  13.5 ms. The 256-strip list and catalog entries are byte-equal before and after. The rest
-  still grows faster than linear (about 5x for 4x strips); `controls::ModelInputs::new` finds
-  each route's source strip by a linear scan, outside this issue's automation table.
+  13.5 ms. The 256-strip list and catalog entries are byte-equal before and after. The build
+  still grows faster than linear (about 5x for 4x strips); see the successors.
 - D1 as `controls::AutomationIndex<'a>` (`crates/controls/src/automation.rs`): one pass over the
   table fills a map of (rendered row, owner ID) to the first entry per lane in table order, for
   the strip `fader_db` and `mute` rows and the VCA `offset_db` and `mute` rows. It is a value of
@@ -61,9 +60,18 @@ table, not O(strips × entries). The rows, their values and the `automated` flag
   `LocalEffective` (the stage's effective values) read it with no signature change. `list`,
   `ControlCatalog::build` and `stage_live` build it once each. A view without an index (the
   one-owner readers: `owner_rows_with`, `live_delta`, `owner_edits`) keeps the scan. The dense
-  `controls::effective` already walked the table once (`model_fader_offsets`), so it is unchanged.
+  `controls::effective` already walked the table once for the strip faders (`model_fader_offsets`).
 - R2: no production counter; the timings and a one-time byte comparison of the 256-strip list
   and catalog are PR evidence. Rows, values and the `automated` flag are unchanged.
-- Successor, not mechanical here: preparation (`FaderEventLanes::of`, `following_route_lanes`,
-  `prepare.rs`) and the live classifier (`live_delta.rs`) still scan per strip and per route,
-  and `controls::live_lanes` walks owners through the unindexed `owner_rows_with`.
+- Verifier fold: `stage_live` for a one-owner fader edit (the submix's left fader) at 1024
+  strips, release, one warmup and two rounds: before 5.05 / 5.03 ms. With the index built on every
+  stage it was 5.40 / 5.32 ms (+4 %, over the 2 % allowance), so a stage builds the index only
+  when it reads more than `STAGE_INDEX_OWNERS` = 4 owners (changed plus reached derived owners).
+  `model_vca_offsets` (the dense effective values) now fills every VCA's offsets in one pass
+  over the table, not one scan per VCA. With both changes: before 5.03 / 5.00 ms, after 5.07 /
+  5.01 ms (+0.5 %; load average about 8).
+- Successors (not in this issue): preparation's `FaderEventLanes::of` and
+  `following_route_lanes` (`prepare.rs`) and the live classifier (`live_delta.rs`) still scan the
+  table per strip and per route; `controls::live_lanes` walks every owner through the unindexed
+  `owner_rows_with`; and `controls::ModelInputs::new` finds each route's source strip by a linear
+  `strips().position`, which keeps the catalog build faster than linear after this change.
