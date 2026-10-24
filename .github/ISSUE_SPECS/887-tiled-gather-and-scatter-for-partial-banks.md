@@ -61,3 +61,32 @@ effects with per-track inserts*. What changes here:
 - **Gate 4 is replaced.** `scripts/run-rack-benchmark.sh` no longer exists: #1026 retired the rack
   benchmark. Read the motion on the console benchmark's remainder rows (N = 9, 10 and 13, added by
   *Add the console-strip benchmark rows*) with one `--step` run, one warmup and two measured rounds.
+
+## Decision record (2026-10-24, attempt 1)
+
+Scope note `scope/887.md` and root's decisions supersede the slice above where they differ:
+
+- **No dump buffer and no runtime change.** A padded lane's `bank_inputs` entry is already
+  `ARENA_SILENCE_BUFFER`, and `distinct_planes_mut` declines for a partial bank, so the staged
+  scatter is the partial bank's path. `crates/graph/src/runtime.rs` is not touched.
+- **A chain-owned `+0.0` plane.** A partial chain allocates one `quantum`-word zero plane at
+  construction (`4 * quantum` bytes; 512 B at quantum 128); a full chain allocates none. The tiled
+  gather reads it for every inactive lane, so the rack never asks a provider for an inactive
+  lane's plane, and an inactive scratch lane is `+0.0` at the start of every block (the scalar
+  path left it stale).
+- **Staging for every chain.** `staging_left/right` (`2 * W * quantum * 4` bytes) are now
+  allocated for a partial chain too. The compile estimate already charged them for every bound
+  bank (`effect_bank_runtime_buffer_bytes`, `graph-compiler/src/banks.rs`); the zero plane's
+  `4 * quantum` bytes are not in that estimate (see the evidence below).
+- **Scatter.** The direct-plane scatter now also requires a full bank in the chain itself, not
+  only in the provider. The staged path copies out, or folds, only active lanes. Resident
+  acquisition copies the whole block on every bank.
+- **The scalar move is test-only.** `scatter_lane` and the per-lane gather/scatter loops are the
+  `#[cfg(test)]` oracle behind `force_scalar_transpose`; `gather_lane`/`gather_lane_left` remain
+  production only for the ragged frame tail.
+- **Gate 1** is `tiled_transpose_matches_the_scalar_path_bit_for_bit`, extended over every active
+  mask `1..2^W` at both widths and every frame shape, and asserting that inactive scratch lanes
+  are fed `+0.0` each block. Recorded red on the pre-change code (`tiled, 4 lanes, mask 0x1,
+  3 frames`: the stale inactive word). Gate 2's allocation evidence is the existing graph/console
+  render allocation gates (the zero plane and staging are made in `BankChain::new`). Gate 4 is
+  read by the coordinator after the batch.
