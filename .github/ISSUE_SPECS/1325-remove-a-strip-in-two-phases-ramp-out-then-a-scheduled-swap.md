@@ -334,6 +334,9 @@ and gate 4. Checked against `origin/main` `068742aba`.
   `crates/control-plane/tests/spectrum_monitor.rs` (the promotion bound), `hosts/host-web/src/tests.rs`
   (the discard count: none before `S`, two blocks after it) and `hosts/host-web/tests/control_parity.rs`
   (render until the adoption). Both hosts change: the browser runs the same control-plane rebuild.
+  Also root-approved: `tools/realtime-policy/src/policy.rs` and `docs/REALTIME_DEPENDENCY_POLICY.md`
+  put the new capi test binary on the unsafe-ownership list (its unsafe is the C calls), as every
+  other capi test binary is.
 
 ### Gates and test value (1325a)
 
