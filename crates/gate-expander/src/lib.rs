@@ -310,7 +310,16 @@ fn slowest_release_rate(sample_rate: u32) -> f32 {
     c - 1.0 / 16_777_216.0
 }
 
-/// The exact-rest bound `R` at `sample_rate` (#1376 D2), or `None` when it does not exist.
+/// The smallest attack rate coefficient over the parameter domain, by the same rule as
+/// [`slowest_release_rate`]: the 50 ms design less `2^-24`.
+fn slowest_attack_rate(sample_rate: u32) -> f32 {
+    let longest = GATE_SPECS[4].maximum;
+    let c = attack_release_coefficient(longest, sample_rate);
+    c - 1.0 / 16_777_216.0
+}
+
+/// The exact-rest bound `R` at `sample_rate` (#1376 D2), a [`effect_contract::RestBound::FixedPoint`] bound (root
+/// option (a)), or `None` when it does not exist.
 ///
 /// **Quantifier.** `R` holds when every input port is exactly zero from the first silent sample
 /// `M` on: the main input and the sidechain. With a zero detector the level clamps to
@@ -318,29 +327,41 @@ fn slowest_release_rate(sample_rate: u32) -> f32 {
 /// the re-arm threshold (at least `-80 - 24` dB), so no reload happens: an open gate holds for at
 /// most its hold count, at most `rounded_samples(1000 ms)`, and then closes with `hold = +0.0`;
 /// a closed gate always has `hold = +0.0` (closing needs it, and only an opening reloads it). A
-/// ramp in flight at `M` settles within 64 samples, under every rate's longest hold.
+/// ramp in flight at `M` settles within 64 samples, under every rate's longest hold. From then on
+/// the target `t = min(max((ratio - 1)(-160 - threshold), -range), 0)` is one fixed word.
 ///
-/// Closed, the gain word walks toward the curve's target at the silent level,
-/// `t = min(max((ratio - 1)(-160 - threshold), -range), 0)`, a fixed word once the ramps settle,
-/// at the release rate (`t < e`). It stops at the **stall word** `w*`, the first word whose step
-/// rounds away ([`effect_runtime::tail::rate_follower_stall_samples`] states the walk's bound and
-/// proves `w*` the same for every start in `[w*, 0]`). Every history with these parameters leaves
-/// the word there: the targets any input produces are at or above `t` (the level is at least
-/// `-160` dB and the curve is monotone), the walk never overshoots its target, and a walk toward a
-/// shallower target stops at or above that target's own stall word. The rest state `Z` is
-/// therefore `(gain = w*, open = +0.0, hold = +0.0)`, the state a reset (open, hold loaded) reaches
-/// after `R` zeros: `R = H_max + K`, `H_max` the longest hold and `K` the walk's bound.
+/// Closed, the gain word walks toward `t` and stops on a word whose step rounds away. Two cases:
 ///
-/// **Recorded limit (#1376 D2 amendment).** A history in which a parameter edit (a range, ratio or
-/// threshold change, a ramp in flight included) left the word *below* `w*` (deeper, between `t` and
-/// `w*`, or below `t`) rests on its own fixed point, which `lanes_at_rest` accepts but which is
-/// not word-equal to `Z`. A snap of the word to its target would make `Z` unique for every history
-/// and is a rendered-bit change, an owner question.
+/// * **From above** (`t < e <= 0`, at the release rate): it stops at the **stall word** `w*`,
+///   within [`effect_runtime::tail::rate_follower_stall_samples`] steps, and `w*` is the same for
+///   every start in `[w*, 0]`. Every history with fixed parameters is in this case and ends on
+///   `w*`: the targets any input produces are at or above `t` (the level is at least `-160` dB and
+///   the curve is monotone), the walk never overshoots, and a walk toward a shallower target stops
+///   at or above that target's own stall word. A reset (open, hold loaded) is too, so this `w*` is
+///   the fresh instance's `Z = (w*, open = +0.0, hold = +0.0)`.
+/// * **From below** (`e < t`, at the attack rate): a parameter edit before `M` (a range, ratio or
+///   threshold that makes the target shallower, a ramp in flight included) can leave the word
+///   deeper than `t`. It then rises and stops on a fixed point on the far side of `t`, within
+///   [`effect_runtime::tail::rate_follower_approach_samples`] steps from a distance of at most
+///   96 dB (the word lies in `[-96, 0]`). A word an edit leaves between `t` and `w*` is already at,
+///   or one step from, a fixed point, inside either bound.
+///
+/// So from `M + R`, `R = max(H_max, 64) + max(walk from above, walk from below)`, every signal-state
+/// word is at a zero-input fixed point. It equals `Z` for every history whose parameters were
+/// settled before the gate closed, but not for an edited one, which is why the bound is stated as a
+/// fixed point. A snap of the word to its target would make `Z` unique for every history and is a
+/// rendered-bit change, an owner question.
 fn rest_samples(sample_rate: u32) -> Option<u64> {
     let hold = u64::from(rounded_samples(GATE_SPECS[5].maximum, sample_rate)?);
-    let walk =
+    let above =
         effect_runtime::tail::rate_follower_stall_samples(slowest_release_rate(sample_rate))?;
-    hold.max(u64::from(RAMP_SAMPLES)).checked_add(walk)
+    let below = effect_runtime::tail::rate_follower_approach_samples(
+        slowest_attack_rate(sample_rate),
+        GATE_SPECS[2].maximum,
+        lane::FLUSH_EPS,
+    )?;
+    hold.max(u64::from(RAMP_SAMPLES))
+        .checked_add(above.max(below))
 }
 
 /// `G_p = G_t` in millibels (#1376 D4): the output is the input `x`, or `x g` with
@@ -363,8 +384,9 @@ fn flush_stall_millibels() -> i32 {
 ///
 /// * **Tail `Finite(0)`, decay `0`** (#1376 D1): the output is `select(identity, x, x g)` of the
 ///   current main input `x`: no audio history, zero latency. A sidechain feeds only the detector.
-/// * **Rest** [`rest_samples`], the same for both peak cases (the walk's start does not depend on
-///   the input); **tail over every peak** the same `R`.
+/// * **Rest** [`rest_samples`], a fixed-point bound (the rest state depends on the history of
+///   parameter edits), the same for both peak cases (the walk's start does not depend on the
+///   input); **tail over every peak** the same `R`.
 /// * **Composition** [`peak_gain_millibels`] and [`flush_stall_millibels`].
 fn tail_and_rest(sample_rate: u32, _quality: EffectQuality) -> effect_contract::NodeTailBound {
     let Some(rest) = rest_samples(sample_rate) else {
@@ -375,7 +397,7 @@ fn tail_and_rest(sample_rate: u32, _quality: EffectQuality) -> effect_contract::
     effect_contract::NodeTailBound {
         tail: TailSamples::Finite(0),
         tail_every_peak: TailSamples::Finite(rest),
-        rest: effect_contract::RestBound::Bounded(effect_contract::RestSamples {
+        rest: effect_contract::RestBound::FixedPoint(effect_contract::RestSamples {
             peak_plus_24_dbfs: rest,
             any_sanitized_input: rest,
         }),

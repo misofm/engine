@@ -388,6 +388,9 @@ fn stall_bracket(lo: f32, hi: f32) -> Option<u64> {
 /// The ranges and brackets cost their width: a few thousand samples above the worst real walk at
 /// the gate's slowest release. The class that attains the maximum is B at the slowest bracket (a
 /// target just above a power of two, whose walk ends on the fine grid), with A within about 0.2 %.
+/// B's arm is a proof obligation that no brute force can check: its value lies within a sample or
+/// two of M's lowest range (which starts one unit above `S`), so removing it moves the bound by less
+/// than any walk can show. It is there because M's argument needs `L > S`.
 ///
 /// # Uniqueness of the stall word
 ///
@@ -429,6 +432,58 @@ pub fn rate_follower_stall_samples(rate_min: f32) -> Option<u64> {
         worst = worst.max(stall_bracket(lo, hi)?);
         lo = hi;
     }
+}
+
+/// Steps after which a rate-form word `e' = flush(fma(c, t - e, e))` walking toward a target
+/// `t` of **smaller** magnitude (`e < t <= 0`, or its mirror: the word's magnitude falls toward
+/// the target's) has stopped moving, for every target, every start with `|e| - |t| <=
+/// distance_max` and every coefficient `c` in `[rate_min, 1/8]`; `floor` is the flush threshold
+/// ([`lane::FLUSH_EPS`]). `None` for arguments the derivation does not cover.
+///
+/// This is the gate's gain word left deeper than its target by a parameter edit, which then rises
+/// at the attack rate (issue #1376, root option (a)). Unlike the walk from above it is not
+/// scale-free in a bounded number of units: the word starts up to `distance_max` away and ends
+/// within a few units of `ulp(t)`, which is as small as the flush allows. So the bound is coarse.
+///
+/// # Derivation
+///
+/// Write `tau = max(|t|, floor)` and `d = |e| - tau`. A step moves the word toward `t` and never
+/// past it (`fl(c fl(t - e))` is at most `c (1 + u)^2 < 1` times the distance). Its size is at
+/// least `c (1 - u)^2 (|e| - |t|) >= c'' d`, and the sum rounds by at most `u |e'| <= u (tau + d)`,
+/// so `d' <= (1 - g) d + u tau` with `g = c'' - u`: an affine contraction whose fixed point is
+/// `F = u tau / g`. From `d_0 <= distance_max`, `d <= 2 F` after
+/// `j_1 = ceil(ln((d_0 - F) / F) / -ln(1 - g))` steps; `j_1` falls as `tau` grows, so `tau = floor`
+/// is the worst target. From there each moving step moves to a word at least one float closer, and
+/// the floats of magnitude in `[tau, tau + 2 F]` are at most `2 F / ulp(tau) + 1 < 2 / g + 1`
+/// (`u tau < ulp(tau)`). A target under the flush threshold adds one step: the word flushes to
+/// `+0.0`, where the target's own step `fl(c t)` flushes again, a fixed point. Bound:
+/// `j_1 + ceil(2 / g) + 2` at `tau = floor`, plus one sample for the `f64` logarithm's rounding.
+#[must_use]
+pub fn rate_follower_approach_samples(rate_min: f32, distance_max: f32, floor: f32) -> Option<u64> {
+    if !rate_min.is_normal()
+        || !(0.0..=0.125).contains(&rate_min)
+        || !floor.is_normal()
+        || floor < 0.0
+        || !distance_max.is_finite()
+        || distance_max < 0.0
+    {
+        return None;
+    }
+    let c = f64::from(rate_min);
+    let g = c * (1.0 - ROUNDOFF) * (1.0 - ROUNDOFF) - ROUNDOFF;
+    if g <= 0.0 {
+        return None;
+    }
+    let fixed = ROUNDOFF * f64::from(floor) / g;
+    let start = f64::from(distance_max);
+    let contraction = if start <= 2.0 * fixed {
+        0.0
+    } else {
+        -math::floor(-(math::log((start - fixed) / fixed) / -math::log(1.0 - g))) + 1.0
+    };
+    let words = -math::floor(-2.0 / g) + 2.0;
+    let total = contraction + words;
+    (total < 1.0e18).then_some(total as u64)
 }
 
 /// The coarse bound of [`rate_follower_stall_samples`] for every coefficient `c >= lo`: the

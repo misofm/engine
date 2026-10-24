@@ -34,7 +34,7 @@ const LAUNCH_RATES: [u32; 4] = [44_100, 48_000, 88_200, 96_000];
 fn stated_rest(rest: RestBound, message: &str) -> RestSamples {
     match rest {
         RestBound::Bounded(rest) => rest,
-        RestBound::Unstated => panic!("{message}"),
+        RestBound::FixedPoint(_) | RestBound::Unstated => panic!("{message}"),
     }
 }
 
