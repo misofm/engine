@@ -300,8 +300,9 @@ fn readiness_and_sixteen_primes_allocate_nothing() {
 }
 
 /// #1320 D3: a prime reads on the caller's source-read clock, as `begin_block_at` does, even when
-/// that clock jumped since the last block: a clockless block after the window continues it, so a
-/// seek applied there reports the sample after the window on both rings.
+/// that clock jumped since the last block: a seek prepared between blocks before the window
+/// applies at the window's first block, so the seek reports the window's first sample on both
+/// rings, not the consumer's own clock from before the jump.
 #[test]
 fn the_prime_continues_the_callers_clock_across_a_jump() {
     const JUMPED: u64 = 64 * QUANTUM;
@@ -310,6 +311,15 @@ fn the_prime_continues_the_callers_clock_across_a_jump() {
         let (mut host, mut consumer) = ring();
         let first_sample = prepare(Feed::Steady, &mut host, &mut consumer);
         assert!(JUMPED > first_sample);
+        host.try_seek(SourceCommand::Seek {
+            generation: SourceGeneration(2),
+            frame: SourceFrame(SEEK_FRAME),
+        })
+        .expect("seek");
+        for block in 0..=u64::from(K) {
+            submit(&mut host, 2, SEEK_FRAME + block * QUANTUM, Q, false);
+        }
+        assert!(consumer.prepare_seek(SourceGeneration(2), SourceFrame(SEEK_FRAME)));
         assert!(consumer.prime_ready(JUMPED, K));
         for j in 0..u64::from(K) {
             let sample = JUMPED + j * QUANTUM;
@@ -319,14 +329,9 @@ fn the_prime_continues_the_callers_clock_across_a_jump() {
                 consumer.begin_block_at(sample)
             };
         }
-        host.try_seek(SourceCommand::Seek {
-            generation: SourceGeneration(2),
-            frame: SourceFrame(SEEK_FRAME),
-        })
-        .expect("seek");
-        assert!(consumer.begin_block().generation_changed);
         reports.push(seek_report(&host));
     }
-    assert_eq!(reports[0].first_sample, JUMPED + u64::from(K) * QUANTUM);
+    assert_eq!(reports[0].generation, 2);
+    assert_eq!(reports[0].first_sample, JUMPED);
     assert_eq!(reports[1], reports[0]);
 }

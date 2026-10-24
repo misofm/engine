@@ -240,7 +240,9 @@ extern "C" {
  * is not a rendered block, and the watermark does not advance on it. No valid plan reaches this
  * path, so a nonzero value is an engine defect. A rejected source
  * submission or seek likewise names the rule it broke ("source.region.outside",
- * "source.generation.stale", "source.channels.mismatch", ...).
+ * "source.generation.stale", "source.channels.mismatch", ...). A null, empty, non-UTF-8 or
+ * over-127-byte source ID on submit, seek, seek_at or seek_report is
+ * MISO_ENGINE_V1_INVALID_ARGUMENT with "source.id.invalid".
  * MISO_ENGINE_V1_UNSUPPORTED is returned by exactly one entry point: miso_engine_v1_engine_create
  * refuses to create an engine on a CPU that cannot execute the instruction set this library was
  * built for (issue 083, master plan D4 -- the engine dispatches nothing at runtime, so the check
@@ -419,7 +421,8 @@ extern "C" {
  * overwrites, not a queue. The ring owns it, so a swap that carries the source keeps it, and a
  * source that a transaction added or changed starts at generation 0. The call returns
  * MISO_ENGINE_V1_OK; MISO_ENGINE_V1_INVALID_ARGUMENT for a wrong struct_size, a nonzero reserved
- * word, a malformed source ID, or an undeclared source ("source.id.unknown"); and
+ * word, a malformed source ID ("source.id.invalid"), or an undeclared source
+ * ("source.id.unknown"); and
  * MISO_ENGINE_V1_BACKPRESSURE with "source.report.busy", out untouched, when every bounded read
  * (64) landed inside render's publication, so the host reads again. A host checks
  * MISO_ENGINE_V1_FEATURE_SOURCE_SEEK_REPORT before calling it.

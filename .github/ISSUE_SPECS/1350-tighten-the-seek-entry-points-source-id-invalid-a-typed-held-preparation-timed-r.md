@@ -61,6 +61,39 @@ Four seek-path defects found in the #1275 review are closed:
   of #1316 D1); the two integration tests call it with their block's first sample. Plain-seek
   behaviour of those tests is unchanged; any anchored step they take now waits for its anchor.
 
+## Scope amendment (2026-10-24, root, re-verified on `main` `7255ebc37`)
+
+The slice is D1 + D3 + D4 as restated here; this section supersedes D2-D4 above, the
+Deliverables, the Authorized paths and gates 2-4 where they differ.
+
+- **D1** as above. The string is `SOURCE_ID_INVALID` in `crates/capi/src/runtime/error.rs`, set
+  through one helper (`borrowed_source_id`, `ffi.rs`) on every malformed-ID branch of
+  `miso_engine_v1_source_submit_planar_f32`, `source_seek_entry` (`seek`, `seek_at`) and
+  `miso_engine_v1_source_seek_report`.
+- **D2 superseded:** closed by #1293 D5 as shipped: no host prepares an anchored seek
+  (`seek_source_at` never calls `prepare_source_seek`; the C ABI never prepares). No
+  `SeekPreparation`.
+- **D3 re-anchored:** lateness is computed in `SeekState::observe` (shared by `PcmSourceConsumer`
+  and `TimelineConsumer` since #1640), which now takes `quantum_frames` and `debug_assert!`s the
+  whole-quantum lateness.
+- **D4 restated:** #1730 already deleted `read_block`. The clockless path is deleted outright, not
+  `cfg(test)`-gated: `SeekClock::Now` and `PcmSourceConsumer::begin_block()` are gone. Test callers
+  use `begin_block_at(sample)`; `a_clockless_consumer_reports_consecutive_quanta` is deleted (its
+  claim was the deleted path); `crates/source/tests/prime.rs`'s jump test reads the post-window block
+  at its own sample.
+- **Authorized paths:** `crates/capi/src/ffi.rs`, `crates/capi/src/runtime/error.rs`,
+  `crates/source/src/lib.rs`, `crates/source/tests/prime.rs`, this spec.
+- **Gates:** 1 as above (the extension of `oversized_borrowed_lengths_are_rejected_before_any_read`);
+  2 dropped with D2; 3 is `an_off_grid_late_anchored_seek_panics_in_a_debug_build` (anchor 64,
+  quantum 4, block at 65); 4 is a build property (no `begin_block()`/`SeekClock::Now` in the crate).
+
+## Evidence (attempt 1)
+
+- Mutant: an early `source_id.is_null()` return in `source_seek_report` turns gate 1 red (stale
+  `source.id.unknown`). Mutant: the D3 assertion disabled turns gate 3 red.
+- Not changed (outside the authorized paths): `crates/capi/include/miso_engine_v1.h` still says
+  "a malformed source ID" without naming `source.id.invalid`.
+
 ## Deliverables
 
 1. D1 in capi; D2-D4 in `crates/source`, with the integration tests moved to `read_block_at`.

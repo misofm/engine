@@ -1390,7 +1390,7 @@ fn validate_submission_metadata(
 ///
 /// # Played-block ownership (#917)
 ///
-/// The played block is the consumer's from `begin_block` until the next `begin_block`,
+/// The played block is the consumer's from `begin_block_at` until the next `begin_block_at`,
 /// `prepare_seek`, `end_block`, or drop. Until then [`Self::played_plane`] can borrow its planes
 /// in place and [`Self::copy_channel`] can copy them, as often as the render needs.
 ///
@@ -1403,7 +1403,7 @@ fn validate_submission_metadata(
 /// seek's pending block (#1274), of another generation and possibly behind `next_frame`. The hold
 /// is therefore "what it held before, plus one", which is what keeps the producer's admission
 /// sequence unchanged. The idle storage goes back to the producer's recycle queue only inside
-/// `begin_block`, at the moment a newer block becomes the played block. So:
+/// `begin_block_at`, at the moment a newer block becomes the played block. So:
 ///
 /// * a block is never recycled while a `played_plane` borrow is live: the only release point takes
 ///   `&mut self`, and a block is only ever reached by the producer through the recycle queue;
@@ -1449,8 +1449,8 @@ pub struct PcmSourceConsumer {
     seek_report: PublishedWordsWriter<SEEK_REPORT_WORDS>,
     /// What the seek report holds; render is its only writer, so it never loads it back.
     published_seek_report: SourceSeekReport,
-    /// The source-read sample of the block after the last one begun: the clock a clockless
-    /// [`PcmSourceConsumer::begin_block`] continues, so its blocks are consecutive quanta.
+    /// The source-read sample of the block after the last one begun: the clock a
+    /// [`SeekClock::Hold`] block (a prime) reports on, so its blocks are consecutive quanta.
     next_source_read_sample: u64,
     /// The ring's `prime_required` flag, which control sets (#1320 D4).
     prime_required: Arc<AtomicBool>,
@@ -1476,8 +1476,6 @@ struct HeldSeek {
 /// When an observed anchored seek may apply.
 #[derive(Clone, Copy)]
 enum SeekClock {
-    /// At once, as a plain seek to its frame: a caller that supplies no block time.
-    Now,
     /// In the block that reads source time from `source_read_sample`, if it is at or past the
     /// anchor.
     At {
@@ -1540,10 +1538,16 @@ impl SeekState {
     /// Observe one popped command (or none) at a block boundary, then apply a held anchored seek
     /// whose block has come. A plain seek clears any held seek and applies at once; an anchored
     /// seek replaces the held one; a held seek applies in the first block whose
-    /// [`SeekClock::At`] sample is at or past its anchor, at `frame + lateness` (saturating), at
-    /// once on [`SeekClock::Now`], and never on [`SeekClock::Hold`]. Allocation-free and
-    /// wait-free.
-    fn observe(&mut self, command: Option<SourceCommand>, clock: SeekClock) -> SeekObservation {
+    /// [`SeekClock::At`] sample is at or past its anchor, at `frame + lateness` (saturating), and
+    /// never on [`SeekClock::Hold`]. Admission keeps every anchor on the `quantum_frames` grid and
+    /// render clocks advance by whole quanta, so the lateness is a whole number of quanta; a debug
+    /// build asserts it (#1350 D3). Allocation-free and wait-free.
+    fn observe(
+        &mut self,
+        command: Option<SourceCommand>,
+        clock: SeekClock,
+        quantum_frames: u32,
+    ) -> SeekObservation {
         let mut newly_held = None;
         match command {
             Some(SourceCommand::Seek { generation, frame }) => {
@@ -1579,12 +1583,16 @@ impl SeekState {
             return unapplied;
         };
         let late_by = match clock {
-            SeekClock::Now => 0,
             SeekClock::At { source_read_sample } if source_read_sample >= held.anchor_sample => {
                 source_read_sample - held.anchor_sample
             }
             SeekClock::At { .. } | SeekClock::Hold => return unapplied,
         };
+        debug_assert!(
+            late_by.is_multiple_of(u64::from(quantum_frames)),
+            "a late anchored seek must be late by whole quanta, or no producer block matches \
+             next_frame and the source starves"
+        );
         self.held_seek = None;
         self.active_generation = held.generation;
         SeekObservation {
@@ -1811,22 +1819,13 @@ impl PcmSourceConsumer {
         self.shape
     }
 
-    /// Advance the source state machine once and retain this quantum for channel fan-out reads.
-    /// The previously played block stops being readable here. A short (end-of-region) block has
-    /// its tail zeroed in place, once, so every [`Self::played_plane`] is a whole quantum.
-    /// This render-path operation allocates nothing and never blocks.
-    ///
-    /// Without a block time an anchored seek applies at once, as a plain seek to its frame; the
-    /// graph calls [`Self::begin_block_at`] instead.
-    pub fn begin_block(&mut self) -> SourceReadReport {
-        self.observed_published = self.published.load_at_block_entry();
-        self.begin_block_with(SeekClock::Now)
-    }
-
-    /// [`Self::begin_block`] for the block that reads source time from `source_read_sample`: the
-    /// plan's source-read clock, the absolute sample of source time this block reads (#1316 D1):
+    /// Advance the source state machine once and retain this quantum for channel fan-out reads,
+    /// for the block that reads source time from `source_read_sample`: the plan's source-read
+    /// clock, the absolute sample of source time this block reads (#1316 D1):
     /// the render clock plus the plan's source-read offset (#1396 D1). The offset is 0 unless a
-    /// plan is prepared to read ahead, so in this version the two clocks are equal.
+    /// plan is prepared to read ahead, so in this version the two clocks are equal. The previously
+    /// played block stops being readable here. A short (end-of-region) block has its tail zeroed in
+    /// place, once, so every [`Self::played_plane`] is a whole quantum.
     ///
     /// An anchored seek ([`SourceCommand::SeekAt`]) is held while `source_read_sample` is before
     /// its anchor; the block that starts at or past it applies the seek at `frame +
@@ -1883,7 +1882,7 @@ impl PcmSourceConsumer {
         let source_frame = self.next_frame;
         let source_read_sample = match clock {
             SeekClock::At { source_read_sample } => source_read_sample,
-            SeekClock::Now | SeekClock::Hold => self.next_source_read_sample,
+            SeekClock::Hold => self.next_source_read_sample,
         };
         self.next_source_read_sample =
             source_read_sample.saturating_add(u64::from(self.quantum_frames));
@@ -2117,7 +2116,7 @@ impl PcmSourceConsumer {
     fn observe_seek_at_block_boundary(&mut self, clock: SeekClock) {
         let command =
             SeekState::take_published(&mut self.command_consumer, self.observed_published);
-        let observation = self.seek.observe(command, clock);
+        let observation = self.seek.observe(command, clock, self.quantum_frames);
         if let Some(held) = observation.newly_held {
             // A newer command replaces a held one; the replaced seek's pending block is stale.
             if let Some(block) = self.current.take_if(|block| {
@@ -2657,9 +2656,11 @@ impl TimelineConsumer {
             Some(consumer) => SeekState::take_published(consumer, published),
             None => None,
         };
-        let observation = self
-            .seek
-            .observe(command, SeekClock::At { source_read_sample });
+        let observation = self.seek.observe(
+            command,
+            SeekClock::At { source_read_sample },
+            self.quantum_frames,
+        );
         if let Some(seek) = observation.apply {
             self.position = seek.frame.0;
         }
@@ -3688,7 +3689,12 @@ mod tests {
             host.submit(chunk(1, 0, &[&old], 4, false)).unwrap();
             host.submit(chunk(1, 4, &[&old], 4, false)).unwrap();
             if retained {
-                consumer.acquire_current_block(SeekClock::Now, CommandObservation::Allowed);
+                consumer.acquire_current_block(
+                    SeekClock::At {
+                        source_read_sample: 0,
+                    },
+                    CommandObservation::Allowed,
+                );
             }
             host.try_seek(SourceCommand::Seek {
                 generation: SourceGeneration(2),
@@ -4051,7 +4057,7 @@ mod tests {
             },
             |block| {
                 let before = consumer.stale_generation_discard_count;
-                consumer.begin_block();
+                consumer.begin_block_at(4 * u64::try_from(block).unwrap());
                 let discarded = consumer.stale_generation_discard_count - before;
                 assert!(
                     discarded <= 1,
@@ -4153,7 +4159,7 @@ mod tests {
         host.submit(chunk(1, 4, &[&left_final, &right_final], 2, true))
             .expect("short EOF block");
 
-        let first = consumer.begin_block();
+        let first = consumer.begin_block_at(0);
         assert_eq!(first.copied_frames, 4);
         assert_eq!(first.cumulative_read_frames, 4);
         let mut left = [0.0; 4];
@@ -4181,7 +4187,7 @@ mod tests {
         assert_eq!(right, right_first);
         assert_eq!(consumer.telemetry().cumulative_read_frames, 4);
 
-        let final_report = consumer.begin_block();
+        let final_report = consumer.begin_block_at(4);
         assert_eq!(final_report.copied_frames, 2);
         assert_eq!(final_report.cumulative_read_frames, 6);
         assert!(final_report.end_of_region);
@@ -4429,26 +4435,18 @@ mod tests {
         assert_eq!(host.seek_report(), Ok(seek_report(3, 16, 100, 0, 0)));
     }
 
-    /// #1316 D3 for a clockless consumer: its blocks are consecutive quanta from 0. Red if
-    /// `begin_block` publishes no sample, or does not continue its own clock.
+    /// #1350 D3: a held anchored seek that a block reaches off the quantum grid would apply at a
+    /// frame no producer block starts at, so the source would starve; a debug build stops there.
+    /// Test value: red if the assertion is removed, or computed on a clock other than the block's
+    /// source-read sample.
+    #[cfg(debug_assertions)]
     #[test]
-    fn a_clockless_consumer_reports_consecutive_quanta() {
+    #[should_panic(expected = "late by whole quanta")]
+    fn an_off_grid_late_anchored_seek_panics_in_a_debug_build() {
         let (producer, mut consumer, _) = session_ring(config(1, 4, 8)).unwrap();
         let mut host = producer.into_host_chunk_provider(RATE);
-        let mut output = [0.0; 4];
-        host.submit(chunk(1, 0, &[&[1.0; 4]], 4, false)).unwrap();
-        consumer.begin_block();
-        copy_planes_and_end(&mut consumer, &mut [&mut output]);
-        host.try_seek(SourceCommand::Seek {
-            generation: SourceGeneration(2),
-            frame: SourceFrame(40),
-        })
-        .unwrap();
-        host.submit(chunk(2, 40, &[&[2.0; 4]], 4, false)).unwrap();
-        consumer.begin_block();
-        copy_planes_and_end(&mut consumer, &mut [&mut output]);
-        assert_eq!(output, [2.0; 4]);
-        assert_eq!(host.seek_report(), Ok(seek_report(2, 4, 40, 0, 0)));
+        host.try_seek(seek_at(2, 0, 64)).unwrap();
+        consumer.begin_block_at(65);
     }
 
     /// #1316 gate 5. Red if the report carries a block's own held or underrun frames instead of
@@ -4685,7 +4683,7 @@ mod tests {
 
     /// Gate 1, "at every point" (#917): while the render borrows the played planes, the producer
     /// still admits exactly the configured number of blocks, and filling the ring to
-    /// backpressure never touches the borrowed storage. Only the next `begin_block` releases it.
+    /// backpressure never touches the borrowed storage. Only the next `begin_block_at` releases it.
     ///
     /// Red mutation: drop the retained block from the allocation -- the producer admits one
     /// block fewer while the planes are borrowed.
@@ -4700,7 +4698,7 @@ mod tests {
             let first_right = [-1.0, -2.0, -3.0, -4.0];
             host.submit(chunk(1, 0, &[&first_left, &first_right], 4, false))
                 .expect("first block");
-            let played = consumer.begin_block();
+            let played = consumer.begin_block_at(0);
             assert_eq!(played.copied_frames, 4);
             let left = consumer.played_plane(0).expect("left plane");
             let right = consumer.played_plane(1).expect("right plane");
@@ -4723,7 +4721,7 @@ mod tests {
             assert_eq!(plane_bits(left), first_left.map(f32::to_bits));
             assert_eq!(plane_bits(right), first_right.map(f32::to_bits));
             // The next boundary releases the held block and exactly one admission opens.
-            let next = consumer.begin_block();
+            let next = consumer.begin_block_at(4);
             assert_eq!(next.copied_frames, 4);
             assert!(
                 consumer
@@ -4760,7 +4758,7 @@ mod tests {
         for (index, start) in [0_u64, 4].into_iter().enumerate() {
             host.submit(chunk(1, start, &[&poison, &poison], 4, false))
                 .expect("poison block");
-            let report = consumer.begin_block();
+            let report = consumer.begin_block_at(start);
             assert_eq!(report.copied_frames, 4, "poison block {index}");
             assert_eq!(
                 plane_bits(consumer.played_plane(1).expect("poison plane")),
@@ -4772,7 +4770,7 @@ mod tests {
         let right_short = [f32::MIN_POSITIVE, -6.0];
         host.submit(chunk(1, 8, &[&left_short, &right_short], 2, true))
             .expect("short EOF block");
-        let short = consumer.begin_block();
+        let short = consumer.begin_block_at(8);
         assert_eq!(short.copied_frames, 2);
         assert!(short.end_of_region);
         for (channel, played) in [(0_u32, left_short), (1, right_short)] {
@@ -4801,7 +4799,7 @@ mod tests {
         assert_copy_channel(&consumer, 0, &[0.0; 4], "after end_block");
 
         // Past the end of the region nothing is played.
-        let after = consumer.begin_block();
+        let after = consumer.begin_block_at(12);
         assert!(after.end_of_region);
         assert_eq!(after.copied_frames, 0);
         assert!(consumer.played_plane(0).is_none());
@@ -4810,7 +4808,7 @@ mod tests {
 
         // An underrun (in-region, nothing queued) plays nothing either.
         let (_producer, mut starved, _) = session_ring(config(1, 4, 8)).expect("ring");
-        let underrun = starved.begin_block();
+        let underrun = starved.begin_block_at(0);
         assert!(underrun.underrun_event);
         assert!(starved.played_plane(0).is_none());
     }
@@ -6723,7 +6721,7 @@ mod tests {
             );
             assert_eq!(host.check_seek(seek(2, 100)), Ok(()));
             assert_eq!(host.telemetry().active_generation, SourceGeneration(1));
-            consumer.begin_block();
+            consumer.begin_block_at(0);
             assert_eq!(consumer.telemetry().active_generation, SourceGeneration(1));
             host.try_seek(seek(2, 100)).unwrap();
             assert!(matches!(
@@ -6731,7 +6729,7 @@ mod tests {
                 Err(SourceSeekError::Backpressure { .. })
             ));
             // A source seek has no frame limit.
-            consumer.begin_block();
+            consumer.begin_block_at(4);
             assert_eq!(host.check_seek(seek(3, u64::MAX)), Ok(()));
         }
     }
