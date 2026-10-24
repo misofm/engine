@@ -565,3 +565,33 @@ qualification of decision 15's heavy gates" (#1605) or the first CI run that app
 | same (S3), Chromium, Firefox, WebKit | in `#submit` (`sdk/src/core/observation-subscriptions.ts`), drop `if (!rendered)` so the typed refusal is thrown whatever `next` returns | gate 3: the render instance's close ends in `backpressure` (`resolved: false`, log `[ok, bp]`) |
 | same (S4) | `current.renderedQuanta >= since` in `next` | gate 1: early, and more than one close send in the log |
 | same (S5) | the browser engine passes no `renderWait` | gates 1 and 3 |
+
+## Issue #1533 — any page error or unhandled rejection fails the browser qualification
+
+Gate `page-errors` in `qualification/run.mjs` (`validate`, right after `result-schema`) over two
+channels: Playwright `pageerror`, and page-side `error`/`unhandledrejection` listeners installed by
+`page.addInitScript` before `page.goto`. Unmutated tree (gate 1): green in Chromium 151.0.7922.34,
+Firefox 153.0 and WebKit 26.5 (Playwright 1.62.1), one unloaded run each, with
+`--sdk-root --check-matrix --self-test-mutations`.
+
+### Result mutations (`--self-test-mutations`)
+
+Each mutation changes only `result.pageErrors` of the real result, and `validate` passes on the
+unmutated result, so the throw is `<browser>: page-errors:`. All three red in the three legs above.
+
+| Where | Mutation | Observed red |
+|---|---|---|
+| `page-errors` | push `"pageerror: Error: planted"` into `pageErrors.playwright` | `page-errors` |
+| `page-errors-window` | push `"unhandledrejection: Error: planted"` into `pageErrors.window` | `page-errors` |
+| `page-errors-missing` | delete `result.pageErrors` | `page-errors` (`null`) |
+
+### Page mutations (PR evidence; one at a time, then reverted)
+
+| Where | Mutation | Observed red |
+|---|---|---|
+| P3, Chromium, Firefox | `void Promise.reject(new Error("planted"));` as the first line of `runQualification` (`qualification.js`) | `page-errors: {"playwright":["pageerror: Error: planted"],"window":["unhandledrejection: Error: planted"]}` |
+| P3, WebKit (with and without `--sdk-root`) | same | `page-errors: {"playwright":["pageerror: Unhandled Promise Rejection: Error: planted"],"window":["unhandledrejection: Error: planted"]}` |
+
+Not run in this slice (sprint mode, root 2026-10-24): P1 (the B2 order restored in
+`sdk-response-entry.ts`), P2 (P1 without the `addInitScript` channel) and the 5 loaded WebKit runs
+(spec gate 4). They move to #1605 "Post-sprint qualification of decision 15's heavy gates".
