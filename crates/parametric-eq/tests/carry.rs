@@ -219,7 +219,8 @@ fn a_malformed_silence_word_is_refused() {
             } else {
                 &mut payload.2
             };
-            section[support::SILENCE_WORD * 4..].copy_from_slice(&bad.to_le_bytes());
+            section[support::SILENCE_WORD * 4..support::SILENCE_WORD * 4 + 4]
+                .copy_from_slice(&bad.to_le_bytes());
             let mut target = ParametricEqFactory
                 .prepare(request(&values, false))
                 .expect("prepare");
@@ -241,7 +242,8 @@ fn a_malformed_silence_word_is_refused() {
     }
     for counted in [0.0_f32, 1.0, 4_096.0, 16_777_216.0] {
         let mut payload = good;
-        payload.1[support::SILENCE_WORD * 4..].copy_from_slice(&counted.to_bits().to_le_bytes());
+        payload.1[support::SILENCE_WORD * 4..support::SILENCE_WORD * 4 + 4]
+            .copy_from_slice(&counted.to_bits().to_le_bytes());
         let mut target = ParametricEqFactory
             .prepare(request(&values, false))
             .expect("prepare");
@@ -257,5 +259,88 @@ fn a_malformed_silence_word_is_refused() {
             support::word(&snapshot(&target).1, support::SILENCE_WORD),
             counted.to_bits()
         );
+    }
+}
+
+/// Gate 7 (#1337, D5): the payload carries each general band's enable and family. A lane taken
+/// mid-ramp of a live bell-to-notch change, restored into an instance prepared as the bell,
+/// continues bit for bit and settles on the notch; an enable word other than `0` or `1`, or a
+/// family word outside `1..=6`, is refused on either channel and moves nothing.
+#[test]
+fn a_restore_takes_enable_and_family_from_the_payload() {
+    let bell = single_section_values(EqBandKind::Bell, 1_000.0, 6.0, 1.0, 1.0);
+    let mut notch = bell.clone();
+    let mut changed = vec![false; notch.len()];
+    for (offset, channel) in [(0, ParameterChannel::Left), (1, ParameterChannel::Right)] {
+        set_initial(&mut notch, 1, channel, EqBandKind::Notch as u32 as f32);
+        changed[2 + offset] = true;
+    }
+    let ramp = Ramp {
+        values: bell.clone(),
+        retargets: vec![(0, notch, changed)],
+    };
+    let mut source = continuing(&ramp, 23);
+    let payload = snapshot(&source);
+    let mut restored = ParametricEqFactory
+        .prepare(request(&bell, false))
+        .expect("prepare");
+    let sizes = restored.metadata.state_sizes;
+    restored
+        .processor
+        .restore_state_payload(
+            1,
+            StatePayloadInput::new(&payload.0, &payload.1, &payload.2, sizes).expect("input"),
+        )
+        .expect("a mid-ramp family change restores");
+    let rendered = [&mut source, &mut restored].map(|effect| {
+        let (mut left, mut right) = (signal(96, 5), signal(96, 6));
+        effect.processor.process(
+            EffectProcessBlock::new(&mut left, &mut right, None, 60, &[], 128).expect("tail"),
+        );
+        left.iter()
+            .chain(&right)
+            .map(|s| s.to_bits())
+            .collect::<Vec<_>>()
+    });
+    assert_eq!(
+        rendered[0], rendered[1],
+        "the restored lane continues bit for bit"
+    );
+    let (continued, carried) = (snapshot(&source), snapshot(&restored));
+    assert!(continued == carried, "and holds the same state");
+    assert_eq!(
+        support::word(&carried.1, support::BAND_CONFIG_WORD + 1),
+        EqBandKind::Notch as u32,
+        "the restored lane settled on the notch"
+    );
+
+    let good = snapshot(&source);
+    for (offset, bad) in [(0, 2_u32), (1, 0), (1, 7)] {
+        for channel in 0..2 {
+            let mut payload = good;
+            let section = if channel == 0 {
+                &mut payload.1
+            } else {
+                &mut payload.2
+            };
+            let at = (support::BAND_CONFIG_WORD + 2 * 3 + offset) * 4;
+            section[at..at + 4].copy_from_slice(&bad.to_le_bytes());
+            let mut target = ParametricEqFactory
+                .prepare(request(&bell, false))
+                .expect("prepare");
+            let before = snapshot(&target);
+            assert_eq!(
+                target.processor.restore_state_payload(
+                    1,
+                    StatePayloadInput::new(&payload.0, &payload.1, &payload.2, sizes)
+                        .expect("input"),
+                ),
+                Err(effect_contract::StatePayloadError {
+                    code: "effect.state.payload"
+                }),
+                "word {offset} = {bad} on channel {channel} must be refused"
+            );
+            assert!(snapshot(&target) == before, "a refusal changes nothing");
+        }
     }
 }

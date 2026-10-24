@@ -306,3 +306,16 @@ the graph suites of `graph/tests/MUTATIONS.md` issue #915, and console-workload
 
 Row 915-R1 is the reason the rack half of gate 1 exists. Whether the staging block is written is
 invisible to every digest, so it is pinned where it can be seen.
+
+## Issue #974 — a collapsible prefix before an incompatible slot
+
+Applied one at a time to the working tree at `961d2d011`, restored with `git checkout` and
+`touch`. Host: `x86_64`, AVX2 pin, debug profile. Suite: `cargo test --locked -p rack`. "The
+prefix test" is `mono_reengage.rs` `a_collapsible_prefix_before_an_incompatible_slot_collapses_exactly`.
+
+| # | mutation | file | test | result |
+|---|---|---|---|---|
+| 974-R1 | the dispatch's witness is conjoined over every slot again (`lane_symmetry_bank(self.slots.len())` in `run_with_input`) | `rack/src/lib.rs` | the prefix test | RED (transitions `[0, 0, 0]`, expected `[1, 1, 0]`: never collapses) |
+| 974-R2 | the agreement maintenance reads every slot's witness (`lane_symmetry_bank(self.slots.len())` in the forced-off fallback) | `rack/src/lib.rs` | the prefix test | RED (transitions `[1, 1, 1]`: the forced-off window cleared the invariant and the re-engage needed a proof) |
+| 974-R3 | `collapse_prefix_of` keeps the whole-prefix conjunction (`prefix` is `0` unless every upstream slot has a one-plane body) | `rack/src/lib.rs` | `only_a_seam_suffix_over_a_collapsible_prefix_can_collapse` | RED (`left: 0, right: 1`) |
+| 974-R4 | `disengage_collapse` desymmetrizes every slot (`self.slots[..]`), not only the prefix (at `beda00117`) | `rack/src/lib.rs` | the prefix test | RED (the bit comparison: the dual-only slot's forwarded `desymmetrize` overwrites its right state) |

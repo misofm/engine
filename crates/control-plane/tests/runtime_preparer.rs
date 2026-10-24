@@ -247,6 +247,16 @@ fn strips_restarted(session: &mut SessionState<Adapter>, request: u64) -> u64 {
 
 /// Commit `edits` as one rebuild transaction (request `request`) and drain the reliable events.
 fn rebuild(session: &mut SessionState<Adapter>, request: u64, edits: &[SessionEdit]) {
+    assert_eq!(
+        apply(session, request, edits),
+        EditPath::Rebuild,
+        "request {request} rebuilds"
+    );
+}
+
+/// Commit `edits` as one transaction (request `request`), drain the reliable events, and return
+/// the path it took.
+fn apply(session: &mut SessionState<Adapter>, request: u64, edits: &[SessionEdit]) -> EditPath {
     let revision = session.test_controller().session().revision();
     let bytes = command_bytes(
         request,
@@ -273,12 +283,12 @@ fn rebuild(session: &mut SessionState<Adapter>, request: u64, edits: &[SessionEd
         }
         DecodedTypedResponseFrame::Success { .. } => panic!("another success payload"),
     };
-    assert_eq!(path, EditPath::Rebuild, "request {request} rebuilds");
     while session
         .dequeue_event(EventLane::Reliable, 4_096)
         .expect("an event")
         .is_some()
     {}
+    path
 }
 
 /// Render block `block` (no source PCM: the block underruns to silence, which is enough to adopt
@@ -390,4 +400,59 @@ fn strips_restarted_counts_the_restarts_of_every_adopted_plan_and_of_no_other() 
     assert!(listed(&calls, 4).is_empty());
     render(&mut plan, 3);
     assert_eq!(strips_restarted(&mut session, 10), 4, "no strip restarted");
+}
+
+/// #1696 root ruling: while a successor is pending, live commits that add and then remove
+/// distinct VCAs leave the kept base holding nothing of them: no row and no rewritten target of an
+/// owner the newest model no longer has, so the model bounds the kept table however long the
+/// churn.
+///
+/// Test value: red if a kept base is stored without `keep_within` (its `cleared` set keeps every
+/// removed VCA, which no model bounds).
+#[test]
+fn a_kept_base_keeps_nothing_of_owners_removed_while_a_successor_waits() {
+    let CompiledChildren {
+        mut session,
+        mut plan,
+    } = compile_children::<Adapter>(
+        SESSION,
+        limits(1_024),
+        Box::new(CountingPreparer(Arc::new(Mutex::new(Calls::default())))),
+    )
+    .expect("boot compile");
+    render(&mut plan, 0);
+    rebuild(&mut session, 2, &[put_compressor("eq1")]);
+    assert_eq!(
+        session.test_pending_providers().len(),
+        1,
+        "the successor waits"
+    );
+    let mut request = 3;
+    for index in 0..4 {
+        let vca = StableId::parse(&format!("churn-{index}")).expect("VCA ID");
+        let upsert = SessionEdit::UpsertVca {
+            vca: session::Vca {
+                id: vca.clone(),
+                fader: session::DualMonoFader {
+                    left_db: -6.0,
+                    right_db: -6.0,
+                    left_mute: false,
+                    right_mute: false,
+                },
+                members: vec![StableId::parse("eq2").expect("member")],
+            },
+        };
+        for edits in [vec![upsert], vec![SessionEdit::RemoveVca { vca_id: vca }]] {
+            assert_eq!(apply(&mut session, request, &edits), EditPath::Live);
+            request += 1;
+        }
+    }
+    let kept = session
+        .test_providers()
+        .test_kept_ramps()
+        .expect("the running epoch keeps its base while the successor waits");
+    assert!(
+        kept.is_untouched(),
+        "the kept base holds rows or targets of removed VCAs"
+    );
 }

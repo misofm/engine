@@ -667,6 +667,13 @@ impl HostHalf {
     /// response buffer, the affine token, the request copy the token keeps for the replay entry
     /// (#1615; the token holds a plan against the committed replay cache, not a clone) and the
     /// parameter catalog.
+    /// The monitor overlay's epoch row and the kept bases' edit-ramp row of this half's model
+    /// (#1696).
+    fn monitor_and_ramp_rows(&self) -> (u64, u64) {
+        control_plane::monitor_and_ramp_bytes(self.store.compiled().normalized_model())
+            .expect("the monitor and ramp rows")
+    }
+
     fn capi_epoch_terms(&self, compile_limits: &CompileLimits) -> (u64, u64) {
         let strips = size_of_val(&*self.strips) as u64
             + self
@@ -684,7 +691,9 @@ impl HostHalf {
             + strips
             + effects
             + self.prepared.report.route_control_resources.total_bytes
-            + self.prepared.report.inventory_retained_bytes;
+            + self.prepared.report.inventory_retained_bytes
+            // #1696 D3: the epoch's monitor overlay row, at its model's bounds.
+            + self.monitor_and_ramp_rows().0;
         // The token also holds the commit's one `OBSERVATION_ENDED` event (#1584 D6a), which the
         // control plane bounds by the frame it must fit.
         let (_, ended_event) =
@@ -750,6 +759,10 @@ struct CompileObservation {
     /// at the compile's control frame and observation slots. Nothing holds them until a host arms
     /// a tap, so they are on the observed side as the send producers' upper bound is.
     observation_reserve: u64,
+    /// The monitor overlay's and the edit-ramp table's rows (#1696), from
+    /// `control_plane::monitor_and_ramp_bytes` over the compiled model: bounds, not allocations,
+    /// since a boot solos nothing and keeps no ramp.
+    monitor_and_ramps: u64,
 }
 
 fn observe_compile(document: &str, compile_limits: &CompileLimits) -> CompileObservation {
@@ -793,6 +806,10 @@ fn observe_compile(document: &str, compile_limits: &CompileLimits) -> CompileObs
             .sum(),
     )
     .expect("the observation reserve");
+    let (overlay_row, ramp_row) =
+        control_plane::monitor_and_ramp_bytes(store.compiled().normalized_model())
+            .expect("the monitor and ramp rows");
+    let monitor_and_ramps = overlay_row + ramp_row;
     let host_core::PreparedHost {
         plan,
         sources,
@@ -831,6 +848,7 @@ fn observe_compile(document: &str, compile_limits: &CompileLimits) -> CompileObs
         owners,
         strip_table_charge,
         observation_reserve,
+        monitor_and_ramps,
     }
 }
 
@@ -875,12 +893,14 @@ impl CompileObservation {
                 + self.owners.catalog
                 + self.owners.inventory
                 + self.observation_reserve
+                + self.monitor_and_ramps
                 + decode_field_rounding,
             self.report.capi_retained_bytes,
             "{label}: capi's own allocations + the effect producers + the strip producers + the \
              source producers + the parameter catalog + the plan state inventory + the \
              decode-field rounding, all observed (left; the send producers' row is the graph \
-             function's total, and the observation reserve is the control plane's bound), against \
+             function's total, and the observation reserve and the monitor and ramp rows are the control \
+             plane's bounds), against \
              `capi_retained_bytes` (right)"
         );
     }
@@ -1258,6 +1278,13 @@ impl Budget {
 /// so its ceiling is 4,654 plus 10 %, rounded up to 64: 5,119.4 -> 5,120 (was 4,352).
 /// `source_total_bytes` moved 12,366 -> 12,846 and `capi_retained_bytes` 167,754 -> 168,378 (the
 /// timeline producer in each kept source control set), both within their ceilings.
+///
+/// #1696 charges the monitor overlay in each epoch's rows, at the epoch model's bounds, and the
+/// kept bases' edit-ramp tables once, at the newest committed model's bounds times `KEPT_BASES`
+/// (two). `capi_retained_bytes` measured 168,818 before and 192,972 after (x86-64, +24,154: the
+/// overlay's solo vector, ID text and master, and two ramp tables' B-tree nodes and ID copies; the
+/// row does not depend on the lane width), above the 175,296 ceiling, so the ceiling is 192,972
+/// plus 10 %, rounded up to 64: 212,269.2 -> 212,288.
 const REFERENCE_BUDGETS: [Budget; 19] = [
     Budget {
         row: "graph_session_plus_plan_bytes",
@@ -1364,8 +1391,8 @@ const REFERENCE_BUDGETS: [Budget; 19] = [
     Budget {
         row: "capi_retained_bytes",
         value: |report| report.capi_retained_bytes,
-        eight_lanes: 175_296,
-        four_lanes: 175_296,
+        eight_lanes: 212_288,
+        four_lanes: 212_288,
     },
     Budget {
         row: "largest_named_allocation_bytes",
@@ -1855,7 +1882,13 @@ fn double_live_oracle_drives_exact_and_one_below_c_caps() {
     // inventory is that much larger than `capi_epoch_terms` read off the fresh preparation.
     let prospective_epoch = prospective_epoch
         - prospective_host.prepared.report.inventory_retained_bytes
-        + successor.inventory_retained_bytes;
+        + successor.inventory_retained_bytes
+        // #1696: the kept base the commit stores holds ramps at the prospective model's bound,
+        // beyond the current row's.
+        + prospective_host
+            .monitor_and_ramp_rows()
+            .1
+            .saturating_sub(current_host.monitor_and_ramp_rows().1);
     let rows: [(&str, u64); 8] = [
         (
             "graph",
