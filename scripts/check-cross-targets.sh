@@ -136,9 +136,10 @@ known_defects=(python3 -B "$root/scripts/lib/aarch64-known-defects.py")
 "${known_defects[@]}" --self-test >/dev/null || fail 'the known-defect judges failed their self-test'
 asm_out="$(mktemp -d)"
 trap 'rm -rf "$asm_out"' EXIT
+# The shipped build itself (#1499): scripts/build-capi-release.sh, which also judges the archive.
 CARGO_TARGET_DIR="$base_target_dir/aarch64-apple-ios-asm" \
-    cargo rustc --quiet --locked --release --target aarch64-apple-ios -p capi --lib \
-    --crate-type staticlib -- --emit "asm=$asm_out/ios-capi.s"
+    bash scripts/build-capi-release.sh --emit-asm "$asm_out/ios-capi.s" aarch64-apple-ios staticlib \
+    "$asm_out/ios-lib" >/dev/null
 [[ -s "$asm_out/ios-capi.s" ]] || fail 'no iOS release assembly for capi'
 printf '%s\n' "$product_list" >"$asm_out/products"
 "${known_defects[@]}" count-memset "$asm_out/ios-capi.s" "$asm_out/products" "$asm_out/counts" ||
@@ -159,9 +160,10 @@ fi
 # after inlining. A staticlib links nothing, so no NDK is needed. iOS and Android set the same
 # width predicates, so this row differs from the iOS scan only if a regression keys eight lanes
 # on the operating system. On 089ef456 it matched 832 lines and 28 function labels.
+# The shipped build itself (#1499): scripts/build-capi-release.sh, which also judges the archive.
 CARGO_TARGET_DIR="$base_target_dir/aarch64-linux-android-asm" \
-    cargo rustc --quiet --locked --release --target aarch64-linux-android -p capi --lib \
-    --crate-type staticlib -- --emit "asm=$asm_out/android-capi.s"
+    bash scripts/build-capi-release.sh --emit-asm "$asm_out/android-capi.s" aarch64-linux-android staticlib \
+    "$asm_out/android-lib" >/dev/null
 [[ -s "$asm_out/android-capi.s" ]] || fail 'no Android release assembly for capi'
 if android_eight="$(rg -n "$eight_lane" "$asm_out/android-capi.s")"; then
     head -n 20 <<<"$android_eight" >&2
