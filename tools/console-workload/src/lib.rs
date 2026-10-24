@@ -2561,10 +2561,11 @@ mod tests {
     /// counts nothing. On every row each track input's only reader is its cohort's
     /// `PostInputBuiltins` bank, whose gather reads the played block in place (issue #918,
     /// `source_plane_table` clause (b)), so no claim is copied and every track's claim is
-    /// gathered once per block (none on the all-silent idle row, whose banks skip their work). A
-    /// row whose inputs rendered per node instead would copy each claim into the arena and fail
-    /// the copy count; no row does today, so the gate is exact on every row rather than
-    /// "production feed, digest unchanged" on some.
+    /// gathered from its played block once per block (none on the all-silent idle row, whose banks
+    /// skip their work; the sparse row's silent tracks lend frozen zeros, so none is served
+    /// silence either). A row whose inputs rendered per node instead would copy each claim into
+    /// the arena and fail the copy count; no row does today, so the gate is exact on every row
+    /// rather than "production feed, digest unchanged" on some.
     ///
     /// Every render runs under the realtime audit, and the audited allocator aborts the process on
     /// an allocation inside a render scope, so zero forbidden operations is the driver's methods
@@ -2583,12 +2584,11 @@ mod tests {
                 runtime.render(block).expect("console render");
             }
             let forbidden = audit::snapshot().total();
-            let [copied, played, silence] = graph::test_only_source_plane_counts();
+            let planes = graph::test_only_source_plane_counts();
             assert_eq!(
                 forbidden, 0,
                 "{kind}: a forbidden operation on the render path"
             );
-            assert_eq!(copied, 0, "{kind}: a claim was copied into the arena");
             // A bank whose every lane reads exact zeros skips its work, its gather included, so
             // the all-silent idle row gathers nothing.
             let gathers = if workload.input() == InputSignal::Silence {
@@ -2597,9 +2597,10 @@ mod tests {
                 u64::from(workload.tracks()) * BLOCKS
             };
             assert_eq!(
-                played + silence,
-                gathers,
-                "{kind}: every track's claim is gathered in place once per block"
+                planes,
+                [0, gathers, 0],
+                "{kind}: no claim copied, every track's claim gathered from its played block once \
+                 per block, none served silence"
             );
         }
     }
