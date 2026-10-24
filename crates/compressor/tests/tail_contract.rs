@@ -1,3 +1,5 @@
+#![allow(clippy::disallowed_methods)]
+// D6 oracle/measurement exemption: the test's own f64 recomputation of the stated values.
 //! Issue #1375's gates for the compressor: the stated zero tail beyond latency, the exact-rest
 //! bound and the composition values, against the real kernel.
 //!

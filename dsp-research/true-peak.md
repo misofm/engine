@@ -24,7 +24,7 @@ The limiter (#1375) states a zero tail beyond its latency: the output is the del
 `g <= 1` and nothing else. Its exact rest is the ring drain (`N + 5` samples beyond the latency,
 `N = Fs / 100`) plus the reduction word's release from `d = 1` to the `FLUSH_EPS` flush at the
 slowest release (2,000 ms), counted on the word's `f32` grid: 4,421,447 samples at 48 kHz (about
-92 s), tight at the worst start (`d = 1` exactly). The composition gain is 1 mB (0 dB and one
+92 s); at the worst start the kernel rests about `Wb / 2` samples before it. The composition gain is 1 mB (0 dB and one
 rounding) and the flush stall one underflow, -75,859 mB. A rest snap like the compressor's would
 shorten the rest but moves rendered bits (class B), so it is not part of #1375.
 

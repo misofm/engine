@@ -370,6 +370,13 @@ fn rest_samples(sample_rate: u32) -> Option<u64> {
     )
 }
 
+/// `(1 + u)^count`, the relative growth of `count` rounded operations.
+fn rounding_factor(count: u32) -> f64 {
+    (0..count).fold(1.0, |factor, _| {
+        factor * (1.0 + effect_runtime::tail::ROUNDOFF)
+    })
+}
+
 /// `G_p = G_t` in millibels (#1375 D4): the output law is `y = fma(mix, x g - x, x)`, or `x g` on
 /// the all-wet arm, or `x` on the identity arms, with `0 < g = fast_gain_from_db(smoothed +
 /// makeup)`, `smoothed <= 0` and `mix` in `[0, 1]`. Through the four rounded operations,
@@ -379,7 +386,7 @@ fn rest_samples(sample_rate: u32) -> Option<u64> {
 fn peak_gain_millibels() -> i32 {
     let makeup_max = f64::from(COMPRESSOR_PARAMETERS[5].maximum.unwrap_or(0.0)).max(0.0);
     let gain = math::db_to_gain(makeup_max + FAST_GAIN_ERROR_DB);
-    let rounding = (1.0 + effect_runtime::tail::ROUNDOFF).powi(4);
+    let rounding = rounding_factor(4);
     effect_runtime::tail::ceil_millibels(gain * rounding, true)
 }
 
@@ -387,7 +394,7 @@ fn peak_gain_millibels() -> i32 {
 /// chain, one [`effect_runtime::tail::UNDERFLOW`] per rounded operation (four), each carried by at
 /// most `(1 + u)^3` through the operations after it (the mix is at most `1`).
 fn flush_stall_millibels() -> i32 {
-    let rounding = (1.0 + effect_runtime::tail::ROUNDOFF).powi(3);
+    let rounding = rounding_factor(3);
     effect_runtime::tail::ceil_millibels(4.0 * effect_runtime::tail::UNDERFLOW * rounding, true)
 }
 
