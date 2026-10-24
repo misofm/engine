@@ -70,12 +70,12 @@ fn counted(before: &str, after: &str) -> String {
     )
 }
 
-/// A drain whose only bound is a loop over the slice parameter `lanes`, with `before` first in the
+/// A drain of each element of the slice parameter `lanes`, with `before` first in the
 /// function body and `after` last in it, at the body's own level. The count is
 /// `available_at_entry()` written in the header, so no `let` binds it.
 fn over_slice(before: &str, after: &str) -> String {
     format!(
-        "fn drain(control: &mut Consumer<Record>, lanes: &[u8]) {{\n{before}    for _ in lanes {{\n        for _ in 0..control.available_at_entry() {{\n            {POP}\n        }}\n    }}\n{after}}}"
+        "fn drain(lanes: &mut [Consumer<Record>]) {{\n{before}    for control in lanes {{\n        for _ in 0..control.available_at_entry() {{\n            {POP}\n        }}\n    }}\n{after}}}"
     )
 }
 
@@ -152,7 +152,7 @@ fn per_queue_form(before: &str) -> String {
 #[test]
 fn a_statement_macro_that_can_declare_a_collection_root_refuses_the_drain() {
     let over_root = "fn drain(state: &mut State) {\n    let State { controls, .. } = state;\n    {\n        shadow!();\n        for control in controls.iter_mut() {\n            let available = control.available_at_entry();\n            for _ in 0..available {\n                POP\n            }\n        }\n    }\n}".replace("POP", POP);
-    let over_lanes = "fn drain(control: &mut Consumer<Record>, lanes: &[u8]) {\n    for _ in lanes.iter() {\n        let available = control.available_at_entry();\n        for _ in 0..available {\n            POP\n        }\n    }\n    shadow!();\n}".replace("POP", POP);
+    let over_lanes = "fn drain(lanes: &mut [Consumer<Record>]) {\n    for control in lanes.iter() {\n        let available = control.available_at_entry();\n        for _ in 0..available {\n            POP\n        }\n    }\n    shadow!();\n}".replace("POP", POP);
     let rows: Vec<(&'static str, String)> = vec![
         (
             "macro-emitted-struct-shadows-the-collection-root",

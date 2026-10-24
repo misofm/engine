@@ -42,6 +42,10 @@
 //! other than a trusted `debug_assert!`, is refused too: a `macro_rules!` defined earlier can move
 //! the base with no name in the body.
 //!
+//! A zero-argument call step in a base (`self.pick()[lane]`) is taken at its word, as #1426 R1
+//! compares such a receiver by spelling only: the method can return another collection on each
+//! pass, which this rule does not read.
+//!
 //! **Collections are taken at their word (D3).** The walk does not prove that a collection holds
 //! each queue once. Iterating `&mut <fields>` yields distinct elements, and an SPSC consumer is not
 //! `Clone`, so each element is a different queue.

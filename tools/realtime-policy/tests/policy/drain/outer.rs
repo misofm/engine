@@ -312,6 +312,14 @@ fn the_outer_loops_that_do_not_select_the_queue_are_refused() {
             ),
         ),
         (
+            // The same reorder through a slice of the base: `[..]` is not the receiver's index.
+            "outer-index-base-slice-swapped",
+            format!(
+                "fn drain(controls: &mut [Consumer<Record>; 2]) {{\n    for lane in 0..2 {{\n        controls[..].swap(0, 1);\n{}    }}\n}}",
+                lane_drain("controls[lane]")
+            ),
+        ),
+        (
             // Lane 1 drains lane 0's queue again, through the spare.
             "outer-element-swapped-with-spare",
             format!(
@@ -345,19 +353,12 @@ fn the_outer_loops_that_do_not_select_the_queue_are_refused() {
             ),
         ),
         (
-            // MINOR-1: a local macro moves the base with no name in the loop body.
+            // MINOR-1: a local macro moves the base with no name in the loop body. `self` is
+            // never a read, so the item scan leaves the `macro_rules!` alone.
             "outer-macro-call",
             format!(
-                "fn drain(controls: &mut [Consumer<Record>; 2]) {{\n    macro_rules! rotate {{\n        () => {{\n            controls.swap(0, 1)\n        }};\n    }}\n    for lane in 0..2 {{\n        let () = rotate!();\n{}    }}\n}}",
-                lane_drain("controls[lane]")
-            ),
-        ),
-        (
-            // MAJOR-3 b: a mention of the base in a macro's token tree.
-            "outer-macro-mention",
-            format!(
-                "fn drain(controls: &mut [Consumer<Record>; 2]) {{\n    for lane in 0..2 {{\n        let () = note!(controls);\n{}    }}\n}}",
-                lane_drain("controls[lane]")
+                "impl Bank {{\n    fn drain(&mut self) {{\n        macro_rules! rotate {{\n            () => {{\n                self.controls.swap(0, 1)\n            }};\n        }}\n        for lane in 0..2 {{\n            let () = rotate!();\n{}        }}\n    }}\n}}",
+                lane_drain("self.controls[lane]")
             ),
         ),
     ];
