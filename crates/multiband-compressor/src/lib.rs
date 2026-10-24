@@ -1260,7 +1260,7 @@ fn render<L: Lane, const W: usize, const FORCE_RAMPING: bool>(
             );
         }
     }
-    instance.finish(left, right, frames, reports);
+    instance.finish(left, right, reports);
 }
 
 impl<L: Lane, const W: usize> Side<L, W> {
@@ -1390,32 +1390,32 @@ impl<L: Lane, const W: usize> Instance<L, W> {
     ///
     /// The scan, the policy and the counters are `effect-runtime`'s; the only thing
     /// added here is attributing a rejected block to the contract's per-track reports. A bank's
-    /// two channels share a reset, so the lane mask is the union over both and both counters move
-    /// for a failing track.
-    fn finish(
-        &mut self,
-        left: &mut [f32],
-        right: &mut [f32],
-        frames: usize,
-        reports: &mut [ProcessReport],
-    ) {
+    /// two channels share a reset, so a failing lane zeroes both channels of the whole bank, but
+    /// the report counts **one block** on each channel whose own output failed (D7, #1073): a
+    /// channel that was only zeroed alongside it is not a nonfinite block.
+    fn finish(&mut self, left: &mut [f32], right: &mut [f32], reports: &mut [ProcessReport]) {
+        if bank::check_block::<L>(left) && bank::check_block::<L>(right) {
+            return;
+        }
+        // The rejected path only: which lanes failed on which channel, read before the zeroing.
+        let failed = [
+            bank::nonfinite_lane_mask::<L>(left),
+            bank::nonfinite_lane_mask::<L>(right),
+        ];
         let sides = &mut self.sides;
         let accepted = bank::finish_block::<L>(left, right, &mut self.nonfinite, || {
             for side in sides.iter_mut() {
                 side.discontinuity_reset();
             }
         });
-        if accepted {
-            return;
-        }
-        let mask = self.nonfinite.nonfinite_lanes;
-        let samples = frames as u64;
+        debug_assert!(!accepted, "the block was checked out of bounds above");
         for (track, report) in reports.iter_mut().enumerate().take(W) {
-            if mask & (1 << track) != 0 {
-                report.nonfinite_left_blocks = report.nonfinite_left_blocks.saturating_add(samples);
-                report.nonfinite_right_blocks =
-                    report.nonfinite_right_blocks.saturating_add(samples);
-            }
+            report.nonfinite_left_blocks = report
+                .nonfinite_left_blocks
+                .saturating_add(u64::from((failed[0] >> track) & 1));
+            report.nonfinite_right_blocks = report
+                .nonfinite_right_blocks
+                .saturating_add(u64::from((failed[1] >> track) & 1));
         }
     }
 

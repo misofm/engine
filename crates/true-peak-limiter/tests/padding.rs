@@ -354,14 +354,15 @@ fn per_node(scenario: &Scenario) -> Planes {
 
 /// The bank arm. `layout[lane]` is the member on that lane, or `None` for a padded lane carrying
 /// `padding[lane]`. The planes are the bank's resident block: `+0.0` at bind, then whatever the
-/// bank left in a padded lane, which must stay `+0.0`.
+/// bank left in a padded lane, which must stay `+0.0`. Beside the planes, each member's D7
+/// counts over the run, `[left, right]` blocks.
 fn banked(
     scenario: &Scenario,
     width: BankWidth,
     backend: Backend,
     layout: &[Option<usize>],
     padding: &[Values],
-) -> Planes {
+) -> (Planes, Vec<[u64; 2]>) {
     let lanes = width.lanes() as usize;
     assert_eq!(layout.len(), lanes);
     let requests: Vec<PrepareEffectRequest<'_>> = layout
@@ -390,6 +391,7 @@ fn banked(
         .iter()
         .map(|_| (Vec::new(), Vec::new()))
         .collect();
+    let mut counts = vec![[0_u64; 2]; scenario.members.len()];
     for block in 0..scenario.blocks {
         let range = block * FRAMES..(block + 1) * FRAMES;
         let mut spans = Vec::new();
@@ -420,14 +422,17 @@ fn banked(
             FRAMES as u32,
         )
         .expect("bank block");
-        if scenario.mono {
-            bank.process_bank_mono(process);
+        let report = if scenario.mono {
+            bank.process_bank_mono(process)
         } else {
-            bank.process_bank(process);
-        }
+            bank.process_bank(process)
+        };
         for (lane, member) in layout.iter().enumerate() {
             match *member {
                 Some(member) => {
+                    let lane_report = report.reports[lane];
+                    counts[member][0] += lane_report.nonfinite_left_blocks;
+                    counts[member][1] += lane_report.nonfinite_right_blocks;
                     output[member]
                         .0
                         .extend(left.iter().skip(lane).step_by(lanes).copied());
@@ -452,7 +457,7 @@ fn banked(
             }
         }
     }
-    output
+    (output, counts)
 }
 
 /// Class-A identity of every member's output, NaN folded (decision 10). A collapsed bank leaves
@@ -524,7 +529,7 @@ fn a_padded_bank_renders_its_members_per_node_bits() {
                 let oracle = per_node(scenario);
                 let padding = clones_of(scenario, lanes, 0);
                 let layout = members_first(lanes, members);
-                let shipped = banked(scenario, width, backend, &layout, &padding);
+                let (shipped, _) = banked(scenario, width, backend, &layout, &padding);
                 assert_members_match(&shipped, &oracle, scenario.mono, &scenario.label);
             }
         }
@@ -558,7 +563,7 @@ fn the_members_bits_do_not_depend_on_the_padded_lanes() {
                 let label = format!("{} {width:?} {members}/{lanes}", scenario.label);
                 let oracle = per_node(scenario);
                 let layout = members_first(lanes, members);
-                let reference = banked(
+                let (reference, _) = banked(
                     scenario,
                     width,
                     backend,
@@ -586,7 +591,7 @@ fn the_members_bits_do_not_depend_on_the_padded_lanes() {
                 ));
                 paddings.push(("an asymmetric non-clone".into(), vec![asymmetric; lanes]));
                 for (name, padding) in paddings {
-                    let shipped = banked(scenario, width, backend, &layout, &padding);
+                    let (shipped, _) = banked(scenario, width, backend, &layout, &padding);
                     assert_members_match(
                         &shipped,
                         &reference,
@@ -637,7 +642,7 @@ fn a_member_fed_a_non_finite_sample_fails_alone() {
                     scenario.label
                 );
                 let layout = members_first(lanes, members);
-                let shipped = banked(
+                let (shipped, counts) = banked(
                     &scenario,
                     width,
                     backend,
@@ -645,6 +650,16 @@ fn a_member_fed_a_non_finite_sample_fails_alone() {
                     &clones_of(&scenario, lanes, 0),
                 );
                 assert_members_match(&shipped, &oracle, mono, &scenario.label);
+                // D7 (#1073): one block on the failed left channel; a collapsed block duplicates
+                // it into the right, since the seam writes the left plane there.
+                assert_eq!(counts[failing][0], 1, "{}: left D7 blocks", scenario.label);
+                if mono {
+                    assert_eq!(
+                        counts[failing][1], counts[failing][0],
+                        "{}: a collapsed block reports its right channel as its left",
+                        scenario.label
+                    );
+                }
             }
         }
     }

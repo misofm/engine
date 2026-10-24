@@ -879,10 +879,12 @@ fn planted_nonfinite_state<L: Lane, const W: usize>(width: BankWidth) {
             let (left, right, report) = one_block(&mut bank, width, &mask, block, hostile);
             let (control_left, control_right, control_report) =
                 one_block(&mut control, width, &mask, block, None);
-            assert_eq!(
-                report, control_report,
-                "{context}: block {block}: the reports"
-            );
+            // The failing member counts one block on its left channel alone (#1073).
+            let mut expected = control_report;
+            if hostile.is_some() && !is_padded {
+                expected.reports[target].nonfinite_left_blocks = 1;
+            }
+            assert_eq!(report, expected, "{context}: block {block}: the reports");
             bank_mates_unchanged(
                 W,
                 target,

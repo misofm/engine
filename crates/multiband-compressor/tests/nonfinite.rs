@@ -76,8 +76,8 @@ fn a_nonfinite_block_is_zeroed_reset_and_counted() {
             "{injected}: expected exactly one rejected block, got {recovered:?}"
         );
         assert_eq!(
-            recovered[failing], FRAMES as u64,
-            "{injected}: the failing block is attributed its whole frame count"
+            recovered[failing], 1,
+            "{injected}: the failing block counts one block, not its frames"
         );
         for (offset, sample) in left[failing * FRAMES..(failing + 1) * FRAMES]
             .iter()
@@ -240,7 +240,7 @@ fn the_boundary_is_the_shared_limit_and_a_bank_shares_its_reset() {
                 .all(|sample| *sample == 0.0),
             "a bank shares its reset, so a failing lane zeroes the whole block"
         );
-        assert_eq!(report.reports[3].nonfinite_left_blocks, FRAMES as u64);
+        assert_eq!(report.reports[3].nonfinite_left_blocks, 1);
         for (track, item) in report.reports.iter().enumerate() {
             if track != 3 {
                 assert_eq!(

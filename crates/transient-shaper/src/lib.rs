@@ -569,7 +569,10 @@ impl<L: Lane, const W: usize> Shaper<L, W> {
     /// so a block with signal pays one early-exiting bit scan. Bit tests and integer compares
     /// only: the predicate adds no `f32` arithmetic to the kernel. The scalar instance (`W = 1`)
     /// renders through here as well and takes the same path.
-    fn process_block(&mut self, left: &mut [f32], right: &mut [f32], frames: usize) {
+    ///
+    /// Returns, per channel (`[left, right]`), the bitmask of the active lanes whose own output on
+    /// that channel failed the D7 check: each is one nonfinite **block** on that channel (#1073).
+    fn process_block(&mut self, left: &mut [f32], right: &mut [f32], frames: usize) -> [u32; 2] {
         debug_assert_eq!(W, L::WIDTH);
         if block_is_positive_zero(left)
             && block_is_positive_zero(right)
@@ -578,7 +581,7 @@ impl<L: Lane, const W: usize> Shaper<L, W> {
         {
             #[cfg(test)]
             SILENT_ADMISSIONS.with(|blocks| blocks.set(blocks.get() + 1));
-            return;
+            return [0, 0];
         }
         match self.link_mode {
             LinkMode::DualMono => self.run::<LINK_DUAL_MONO>(left, right, frames),
@@ -586,10 +589,14 @@ impl<L: Lane, const W: usize> Shaper<L, W> {
             LinkMode::Average => self.run::<LINK_AVERAGE>(left, right, frames),
         }
         if check_block::<L>(left) && check_block::<L>(right) {
-            return;
+            return [0, 0];
         }
-        let failed = nonfinite_lane_mask::<L>(left) | nonfinite_lane_mask::<L>(right);
-        self.recover_lanes(left, right, failed);
+        let failed = [
+            nonfinite_lane_mask::<L>(left),
+            nonfinite_lane_mask::<L>(right),
+        ];
+        let charged = self.recover_lanes(left, right, failed[0] | failed[1]);
+        [failed[0] & charged, failed[1] & charged]
     }
 
     /// The lanes at their **exact rest** on both channels (`PreparedNativeEffectBank::lanes_at_rest`,
@@ -647,8 +654,8 @@ impl<L: Lane, const W: usize> Shaper<L, W> {
     /// reset clears history, not automation.
     ///
     /// A padded lane is recovered like any other, so it stays at rest, but only active lanes are
-    /// charged to `nonfinite`.
-    fn recover_lanes(&mut self, left: &mut [f32], right: &mut [f32], failed: u32) {
+    /// charged to `nonfinite`. Returns the charged lanes.
+    fn recover_lanes(&mut self, left: &mut [f32], right: &mut [f32], failed: u32) -> u32 {
         for lane in 0..W {
             if failed & (1 << lane) == 0 {
                 continue;
@@ -669,6 +676,7 @@ impl<L: Lane, const W: usize> Shaper<L, W> {
             self.nonfinite.nonfinite_lanes = charged;
             self.nonfinite.nonfinite_blocks = self.nonfinite.nonfinite_blocks.saturating_add(1);
         }
+        charged
     }
 
     #[inline(always)]
@@ -1123,7 +1131,9 @@ impl PreparedNativeEffect for PreparedTransientShaper {
             &mut report,
         );
         let frames = block.frames();
-        self.0.process_block(block.left, block.right, frames);
+        let [left, right] = self.0.process_block(block.left, block.right, frames);
+        report.nonfinite_left_blocks = u64::from(left & 1);
+        report.nonfinite_right_blocks = u64::from(right & 1);
         report
     }
 
@@ -1172,8 +1182,13 @@ impl<L: Lane, const W: usize> PreparedNativeEffectBank for PreparedTransientShap
                 &mut report.reports[track],
             );
         }
-        self.shaper
-            .process_block(block.left, block.right, block.frames as usize);
+        let [left, right] =
+            self.shaper
+                .process_block(block.left, block.right, block.frames as usize);
+        for (track, entry) in report.reports.iter_mut().enumerate().take(W) {
+            entry.nonfinite_left_blocks = u64::from((left >> track) & 1);
+            entry.nonfinite_right_blocks = u64::from((right >> track) & 1);
+        }
         report
     }
 

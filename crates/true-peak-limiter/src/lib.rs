@@ -3709,7 +3709,15 @@ impl<L: Lane> LimiterCore<L> {
     /// them. There is still no per-value check anywhere on this path: a signal that leaves the
     /// representable range is a bug report, not a signal-processing feature. What is per lane is
     /// only who pays for it.
-    fn process_block(&mut self, left_io: &mut [f32], right_io: &mut [f32], frames: usize) {
+    ///
+    /// Returns, per channel (`[left, right]`), the members whose own output on that channel failed
+    /// the check: each is one nonfinite **block** on that channel, never its frames (#1073).
+    fn process_block(
+        &mut self,
+        left_io: &mut [f32],
+        right_io: &mut [f32],
+        frames: usize,
+    ) -> [u32; 2] {
         let words = frames * L::WIDTH;
         // Issue #182 S2, the phase-4 admission test. Whole-bank, never per lane, and every leg is
         // cheap next to the block it can replace:
@@ -3757,7 +3765,7 @@ impl<L: Lane> LimiterCore<L> {
             {
                 self.silent_engagements = self.silent_engagements.saturating_add(1);
             }
-            return;
+            return [0, 0];
         }
         // Issue #990: the whole-block linked-pair decision, and the record it leaves. A block that
         // renders under `Maximum` with every designed word agreeing leaves agreeing gain words
@@ -3799,9 +3807,14 @@ impl<L: Lane> LimiterCore<L> {
         // `finish_block` test. The two channels fail together per lane, as they do there, because
         // a lane's pair shares its reset.
         if check_block::<L>(left_io) && check_block::<L>(right_io) {
-            return;
+            return [0, 0];
         }
-        let failed = nonfinite_lane_mask::<L>(left_io) | nonfinite_lane_mask::<L>(right_io);
+        let channels = [
+            nonfinite_lane_mask::<L>(left_io),
+            nonfinite_lane_mask::<L>(right_io),
+        ];
+        let failed = channels[0] | channels[1];
+        let charged = [channels[0] & self.active, channels[1] & self.active];
         if self.reset_failed_lanes(failed) {
             left_io.fill(0.0);
             right_io.fill(0.0);
@@ -3816,6 +3829,7 @@ impl<L: Lane> LimiterCore<L> {
             // partial reset, and this runs only on a block that failed the check.
             self.gain_linked = gain_state_agrees(&self.left, &self.right);
         }
+        charged
     }
 
     /// The D7 recovery of a failed block, attributed per lane (issue #1091; decision 12, "Coupling
@@ -3902,8 +3916,9 @@ impl<L: Lane> LimiterCore<L> {
     /// The §4.4 boundary check scans the one live plane. Its lane mask is the dual check's
     /// `mask(left) | mask(right)` with `right` equal to `left`, so it is the same mask; the
     /// recovery it triggers is the dual one ([`reset_failed_lanes`](Self::reset_failed_lanes)),
-    /// which restores **both** channels of each failed lane.
-    fn process_block_mono(&mut self, left_io: &mut [f32], frames: usize) {
+    /// which restores **both** channels of each failed lane. Its return is the dual one's: the
+    /// failed members on both channels, since the right plane the seam writes is the left one.
+    fn process_block_mono(&mut self, left_io: &mut [f32], frames: usize) -> [u32; 2] {
         // #990: only the left channel advances from here, the silent path included, so the right
         // channel's gain words go stale until `desymmetrize` copies the left over them.
         self.gain_linked = false;
@@ -3919,7 +3934,7 @@ impl<L: Lane> LimiterCore<L> {
             {
                 self.silent_engagements = self.silent_engagements.saturating_add(1);
             }
-            return;
+            return [0, 0];
         }
         limiter_block_mono::<L>(
             left_io,
@@ -3935,9 +3950,10 @@ impl<L: Lane> LimiterCore<L> {
             quiet && self.left.lanes_at_silent_rest::<L>() == every_lane(L::WIDTH);
         self.silent_bypass = self.coefficients.bypass;
         if check_block::<L>(left_io) {
-            return;
+            return [0, 0];
         }
         let failed = nonfinite_lane_mask::<L>(left_io);
+        let charged = failed & self.active;
         if self.reset_failed_lanes(failed) {
             left_io.fill(0.0);
         } else {
@@ -3945,6 +3961,7 @@ impl<L: Lane> LimiterCore<L> {
         }
         // #990: a collapsed block leaves the record cleared, its recovery included. Only the left
         // channel advanced, and `desymmetrize` re-establishes the record at the disengage boundary.
+        [charged, charged]
     }
 
     #[cfg(test)]
@@ -3969,7 +3986,7 @@ impl<L: Lane> LimiterCore<L> {
         self.gain_linked = true;
     }
 
-    /// The boundary-check record, for the gates. Missing public recovery counts are tracked by #1073.
+    /// The boundary-check record, for the gates.
     #[cfg(test)]
     const fn nonfinite_report(&self) -> NonFiniteReport {
         self.report
@@ -4742,7 +4759,9 @@ impl PreparedNativeEffect for PreparedTruePeakLimiter {
             0,
             &mut report,
         );
-        self.core.process_block(block.left, block.right, frames);
+        let [left, right] = self.core.process_block(block.left, block.right, frames);
+        report.nonfinite_left_blocks = u64::from(left & 1);
+        report.nonfinite_right_blocks = u64::from(right & 1);
         report
     }
 
@@ -4916,12 +4935,17 @@ impl<L: Lane> PreparedTruePeakLimiterBank<L> {
                 &mut report.reports[track],
             );
         }
-        if MONO {
+        let [left, right] = if MONO {
             self.core
-                .process_block_mono(block.left, block.frames as usize);
+                .process_block_mono(block.left, block.frames as usize)
         } else {
             self.core
-                .process_block(block.left, block.right, block.frames as usize);
+                .process_block(block.left, block.right, block.frames as usize)
+        };
+        // D7 (#1073): one block on each channel whose output failed, for the members alone.
+        for (track, entry) in report.reports.iter_mut().enumerate().take(L::WIDTH) {
+            entry.nonfinite_left_blocks = u64::from((left >> track) & 1);
+            entry.nonfinite_right_blocks = u64::from((right >> track) & 1);
         }
         report
     }

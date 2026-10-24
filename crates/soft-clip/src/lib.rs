@@ -1084,8 +1084,10 @@ impl<L: Lane> SoftClip<L> {
 
     /// Renders one block of both channels and applies the master plan §4.4 boundary check.
     ///
-    /// Returns the bitmask of the active lanes charged with a D7 recovery, `0` when the block was
-    /// accepted. See [`recover_lanes`](Self::recover_lanes).
+    /// Returns, per channel (`[left, right]`), the bitmask of the active lanes whose own output on
+    /// that channel failed the D7 check, `[0, 0]` when the block was accepted. A failing lane is
+    /// recovered on both channels, but each channel reports only its own failure, once per block
+    /// (#1073). See [`recover_lanes`](Self::recover_lanes).
     ///
     /// # The silent fast path (issue #1746)
     ///
@@ -1093,10 +1095,16 @@ impl<L: Lane> SoftClip<L> {
     /// block's automation was applied: when both input planes are exact `+0.0` and every lane,
     /// padded lanes included, is at rest ([`lanes_at_rest`](Self::lanes_at_rest)), the kernel is
     /// skipped. The buffers already hold the `+0.0` it would write, no lane word would move, and the
-    /// D7 check would pass, so the block reports `0` as a rendered one does. The one word a
+    /// D7 check would pass, so the block reports `[0, 0]` as a rendered one does. The one word a
     /// rendered block would still move is each channel's cursor, which is advanced here. Bit tests
     /// and integer arithmetic only.
-    fn process(&mut self, left: &mut [f32], right: &mut [f32], frames: usize, bypass: bool) -> u32 {
+    fn process(
+        &mut self,
+        left: &mut [f32],
+        right: &mut [f32],
+        frames: usize,
+        bypass: bool,
+    ) -> [u32; 2] {
         #[cfg(test)]
         let allowed = !silent_forbidden();
         #[cfg(not(test))]
@@ -1110,15 +1118,19 @@ impl<L: Lane> SoftClip<L> {
             admitted_silent();
             self.left.advance_cursor(frames);
             self.right.advance_cursor(frames);
-            return 0;
+            return [0, 0];
         }
         self.left.process(left, frames, bypass);
         self.right.process(right, frames, bypass);
         if check_block::<L>(left) && check_block::<L>(right) {
-            return 0;
+            return [0, 0];
         }
-        let failed = nonfinite_lane_mask::<L>(left) | nonfinite_lane_mask::<L>(right);
-        self.recover_lanes(left, right, failed)
+        let failed = [
+            nonfinite_lane_mask::<L>(left),
+            nonfinite_lane_mask::<L>(right),
+        ];
+        let charged = self.recover_lanes(left, right, failed[0] | failed[1]);
+        [failed[0] & charged, failed[1] & charged]
     }
 
     /// The lanes at exact rest on both channels (`PreparedNativeEffectBank::lanes_at_rest`): see
@@ -1371,11 +1383,14 @@ impl PreparedNativeEffect for PreparedSoftClip {
             &mut report,
         );
         let bypass = self.inner.bypass;
-        if self.inner.process(block.left, block.right, frames, bypass) != 0 {
-            let count = frames as u64;
-            report.nonfinite_left_blocks = report.nonfinite_left_blocks.saturating_add(count);
-            report.nonfinite_right_blocks = report.nonfinite_right_blocks.saturating_add(count);
-        }
+        // One block on each channel whose output failed, never its frames (D7, #1073).
+        let [left, right] = self.inner.process(block.left, block.right, frames, bypass);
+        report.nonfinite_left_blocks = report
+            .nonfinite_left_blocks
+            .saturating_add(u64::from(left & 1));
+        report.nonfinite_right_blocks = report
+            .nonfinite_right_blocks
+            .saturating_add(u64::from(right & 1));
         report
     }
 
@@ -1435,19 +1450,16 @@ impl<L: Lane> PreparedNativeEffectBank for PreparedSoftClipBank<L> {
         let frames = block.frames as usize;
         let bypass = self.inner.bypass;
         // Only the lanes that failed are charged, never a bank-mate or a padded lane (issue
-        // #1092). Each is charged as its scalar instance charges itself: the block's frames, on
-        // both channels (#1073 owns that unit).
-        let charged = self.inner.process(block.left, block.right, frames, bypass);
-        let count = frames as u64;
-        for lane in 0..L::WIDTH {
-            if charged & (1 << lane) == 0 {
-                continue;
-            }
-            let lane_report = &mut report.reports[lane];
-            lane_report.nonfinite_left_blocks =
-                lane_report.nonfinite_left_blocks.saturating_add(count);
-            lane_report.nonfinite_right_blocks =
-                lane_report.nonfinite_right_blocks.saturating_add(count);
+        // #1092). Each is charged as its scalar instance charges itself: one block on each
+        // channel whose own output failed, never the block's frames (D7, #1073).
+        let [left, right] = self.inner.process(block.left, block.right, frames, bypass);
+        for (lane, lane_report) in report.reports.iter_mut().enumerate().take(L::WIDTH) {
+            lane_report.nonfinite_left_blocks = lane_report
+                .nonfinite_left_blocks
+                .saturating_add(u64::from((left >> lane) & 1));
+            lane_report.nonfinite_right_blocks = lane_report
+                .nonfinite_right_blocks
+                .saturating_add(u64::from((right >> lane) & 1));
         }
         report
     }
