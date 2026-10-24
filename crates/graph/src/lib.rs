@@ -148,10 +148,8 @@ impl GraphNodeId {
             | Self::Submix { submix_id: id }
             | Self::Output { output_id: id } => id.retained_bytes(),
             Self::Effect(effect) => effect.retained_bytes(),
-            Self::CompensationDelay { edge_id } => {
-                engine::realtime::retained::boxed::<GraphEdgeId>()
-                    .saturating_add(edge_id.retained_bytes())
-            }
+            Self::CompensationDelay { edge_id } => engine::realtime::retained::boxed(&**edge_id)
+                .saturating_add(edge_id.retained_bytes()),
         }
     }
 }
@@ -5922,8 +5920,8 @@ impl PreparedPlanExecutor for GraphExecutor {
     /// and outliving the plan.
     fn retained_bytes(&self) -> u64 {
         use engine::realtime::retained::{arc, boxed, slice, str, vec};
-        let program = self.automation_program.as_deref().map_or(0, |program| {
-            arc::<automation::Program>().saturating_add(program.retained_bytes())
+        let program = self.automation_program.as_ref().map_or(0, |program| {
+            arc(program).saturating_add(program.retained_bytes())
         });
         let source_set = self.source_set.as_ref().map_or(0, |set| {
             set.claims
@@ -5942,14 +5940,14 @@ impl PreparedPlanExecutor for GraphExecutor {
             .as_ref()
             .map_or(0, GraphCarryProgram::retained_bytes);
         let observer_carry = self.observer_carry.as_deref().map_or(0, |program| {
-            boxed::<ObserverCarryProgram>()
+            boxed(program)
                 .saturating_add(slice(&program.moves))
                 .saturating_add(slice(&program.joins))
                 .saturating_add(slice(&program.taps))
                 .saturating_add(slice(&program.record))
         });
         let route_checks = self.route_checks.as_deref().map_or(0, |checks| {
-            boxed::<RouteCarryChecks>().saturating_add(slice(&checks.slots))
+            boxed(checks).saturating_add(slice(&checks.slots))
         });
         let compensation_lines =
             self.compensation_lines
@@ -5973,9 +5971,10 @@ impl PreparedPlanExecutor for GraphExecutor {
             .fold(vec(&identities.live_routes), |total, route| {
                 total.saturating_add(str(&route.route_id))
             });
-        let jump_lengths = self.jump_lengths.as_deref().map_or(0, |_| {
-            boxed::<JumpLengthReader>().saturating_add(arc::<JumpLengthLane>())
-        });
+        let jump_lengths = self
+            .jump_lengths
+            .as_deref()
+            .map_or(0, |reader| boxed(reader).saturating_add(arc(&reader.lane)));
         self.runtime
             .retained_bytes()
             .saturating_add(source_set)
@@ -6616,7 +6615,7 @@ mod tests {
     }
     impl GraphRuntimeObserver for W4OrderObserver {
         fn retained_bytes(&self) -> u64 {
-            engine::realtime::retained::arc::<AtomicU64>()
+            engine::realtime::retained::arc(&self.order)
         }
         fn observe(&mut self, block: GraphObservationBlock<'_>) -> Result<(), RenderError> {
             let expected_order = block.first_sample * 4 + self.lane;
@@ -7366,7 +7365,9 @@ mod tests {
     }
     impl GraphPreparedSourceSetDriver for RecoverySource {
         fn retained_bytes(&self) -> u64 {
-            3 * engine::realtime::retained::arc::<AtomicU64>()
+            engine::realtime::retained::arc(&self.begins)
+                + engine::realtime::retained::arc(&self.copies)
+                + engine::realtime::retained::arc(&self.drops)
         }
         fn claim_count(&self) -> usize {
             1
@@ -8761,8 +8762,7 @@ mod tests {
     struct TapRecorder(Arc<AtomicU64>, Arc<std::sync::Mutex<Vec<u32>>>);
     impl GraphRuntimeObserver for TapRecorder {
         fn retained_bytes(&self) -> u64 {
-            engine::realtime::retained::arc::<AtomicU64>()
-                + engine::realtime::retained::arc::<std::sync::Mutex<Vec<u32>>>()
+            engine::realtime::retained::arc(&self.0) + engine::realtime::retained::arc(&self.1)
         }
         fn observe(&mut self, block: GraphObservationBlock<'_>) -> Result<(), RenderError> {
             self.0.fetch_add(1, Ordering::SeqCst);
@@ -9277,7 +9277,7 @@ mod tests {
     }
     impl GraphRuntimeObserver for LoggingObserver {
         fn retained_bytes(&self) -> u64 {
-            engine::realtime::retained::arc::<std::sync::Mutex<Vec<ObservationRow>>>()
+            engine::realtime::retained::arc(&self.log)
         }
         fn observe(&mut self, block: GraphObservationBlock<'_>) -> Result<(), RenderError> {
             let bits = |plane: &[f32]| -> Vec<u32> { plane.iter().map(|x| x.to_bits()).collect() };

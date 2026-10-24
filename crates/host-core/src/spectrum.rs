@@ -2731,9 +2731,9 @@ impl GraphRuntimeObserver for SpectrumCaptureObserver {
         use engine::realtime::retained::arc;
         self.producer
             .retained_bytes()
-            .saturating_add(arc::<AtomicU8>())
-            .saturating_add(arc::<StateWord>())
-            .saturating_add(arc::<SpectrumContinuousShared>())
+            .saturating_add(arc(&self.mode))
+            .saturating_add(arc(&self.one_shot.state))
+            .saturating_add(arc(&self.continuous.shared))
     }
     fn observe(&mut self, block: GraphObservationBlock<'_>) -> Result<(), RenderError> {
         self.capture(

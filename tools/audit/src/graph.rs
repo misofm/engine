@@ -39,9 +39,9 @@ struct Silence {
 }
 impl GraphRuntimeProcessor for Silence {
     fn retained_bytes(&self) -> u64 {
-        self.drops.as_ref().map_or(0, |_| {
-            engine::realtime::retained::arc::<Mutex<Vec<(u64, ThreadId)>>>()
-        })
+        self.drops
+            .as_ref()
+            .map_or(0, engine::realtime::retained::arc)
     }
     fn process(&mut self, block: GraphBindingBlock<'_>) -> Result<(), RenderError> {
         block.left.fill(0.0);

@@ -795,6 +795,7 @@ pub fn plan_revision_gate_retained_bytes() -> u64 {
 #[doc(hidden)]
 pub mod retained {
     use core::alloc::Layout;
+    use std::sync::Arc;
 
     fn to_u64(bytes: usize) -> u64 {
         u64::try_from(bytes).unwrap_or(u64::MAX)
@@ -802,8 +803,9 @@ pub mod retained {
 
     /// A `Box<[T]>` or a borrowed slice's backing allocation: `len * size_of::<T>()`.
     #[must_use]
-    pub fn slice<T>(values: &[T]) -> u64 {
-        to_u64(core::mem::size_of_val(values))
+    pub const fn slice<T>(values: &[T]) -> u64 {
+        // Lossless: `usize` is at most 64 bits on every supported target.
+        core::mem::size_of_val(values) as u64
     }
 
     /// A `Box<str>`'s allocation.
@@ -818,22 +820,17 @@ pub mod retained {
         to_u64(values.capacity().saturating_mul(core::mem::size_of::<T>()))
     }
 
-    /// A `Box<T>`'s allocation: `size_of::<T>()` (zero for a zero-sized `T`).
+    /// A `Box<T>` of a sized `T`: `size_of::<T>()` (zero for a zero-sized `T`).
     #[must_use]
-    pub const fn boxed<T>() -> u64 {
+    pub const fn boxed<T>(_value: &T) -> u64 {
         core::mem::size_of::<T>() as u64
     }
 
-    /// An `Arc<T>`'s whole allocation: the two reference counts, then `T`, padded.
+    /// An `Arc<T>`'s whole allocation (the two reference counts, then `T`, padded), charged in
+    /// full whatever its strong count.
     #[must_use]
-    pub fn arc<T>() -> u64 {
-        arc_layout(Layout::new::<T>())
-    }
-
-    /// An `Arc<[T]>` of `len` elements' whole allocation.
-    #[must_use]
-    pub fn arc_slice<T>(len: usize) -> u64 {
-        Layout::array::<T>(len).map_or(u64::MAX, arc_layout)
+    pub fn arc<T: ?Sized>(value: &Arc<T>) -> u64 {
+        arc_layout(Layout::for_value::<T>(value))
     }
 
     fn arc_layout(value: Layout) -> u64 {
@@ -1166,7 +1163,7 @@ impl PreparedRenderPlan {
         self.arena
             .retained_bytes()
             .saturating_add(executor)
-            .saturating_add(retained::arc::<RevisionGate>())
+            .saturating_add(retained::arc(&self.gate))
     }
     /// Walk the built runtime for retained observation bytes, outside the render scope.
     #[doc(hidden)]

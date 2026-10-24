@@ -234,7 +234,7 @@ mod tests {
 
     impl PreparedPlanExecutor for OffsetExecutor {
         fn retained_bytes(&self) -> u64 {
-            crate::realtime::retained::arc::<std::sync::atomic::AtomicU64>()
+            crate::realtime::retained::arc(&self.offset)
         }
         fn set_source_read_offset(&mut self, offset: u64) {
             self.offset
@@ -939,8 +939,9 @@ mod tests {
 
         impl PreparedPlanExecutor for Snapshotting {
             fn retained_bytes(&self) -> u64 {
-                2 * crate::realtime::retained::arc::<AtomicU64>()
-                    + crate::realtime::retained::arc::<AtomicBool>()
+                crate::realtime::retained::arc(&self.0.last)
+                    + crate::realtime::retained::arc(&self.0.calls)
+                    + crate::realtime::retained::arc(&self.0.fail)
             }
             fn begin_live_block(&mut self, snapshot: LiveSnapshot) {
                 self.0.last.store(snapshot.revision(), Ordering::Relaxed);
@@ -1063,9 +1064,9 @@ mod tests {
 
         impl PreparedPlanExecutor for CellProbe {
             fn retained_bytes(&self) -> u64 {
-                crate::realtime::retained::arc::<LatestCell<2>>()
-                    + crate::realtime::retained::arc::<DirtyWord>()
-                    + crate::realtime::retained::arc::<AtomicU64>()
+                crate::realtime::retained::arc(&self.cell)
+                    + crate::realtime::retained::arc(&self.dirty)
+                    + crate::realtime::retained::arc(&self.applied)
             }
             fn begin_live_block(&mut self, snapshot: LiveSnapshot) {
                 let pending = self.stage.pending(&self.dirty);
@@ -1534,10 +1535,10 @@ mod tests {
 
         impl PreparedPlanExecutor for Gated {
             fn retained_bytes(&self) -> u64 {
-                crate::realtime::retained::arc::<AtomicBool>()
-                    + crate::realtime::retained::arc::<AtomicUsize>()
-                    + crate::realtime::retained::arc::<AtomicU64>()
-                    + crate::realtime::retained::arc::<AtomicU32>()
+                crate::realtime::retained::arc(&self.0.ready)
+                    + crate::realtime::retained::arc(&self.0.calls)
+                    + crate::realtime::retained::arc(&self.0.block_start)
+                    + crate::realtime::retained::arc(&self.0.lead_blocks)
             }
             fn prime_ready(&self, block_start: u64, lead_blocks: u32) -> bool {
                 self.0.calls.fetch_add(1, Ordering::Relaxed);
@@ -2026,7 +2027,7 @@ mod tests {
 
         impl PreparedPlanExecutor for Oscillator {
             fn retained_bytes(&self) -> u64 {
-                crate::realtime::retained::arc::<AtomicUsize>()
+                crate::realtime::retained::arc(&self.hooks)
             }
             fn as_any_mut(&mut self) -> Option<&mut dyn core::any::Any> {
                 Some(self)

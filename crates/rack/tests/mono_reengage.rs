@@ -182,7 +182,7 @@ impl Recursive {
 }
 impl BankStage for Recursive {
     fn retained_bytes(&self) -> u64 {
-        engine::realtime::retained::arc::<Mutex<RecursiveCore>>()
+        engine::realtime::retained::arc(&self.0)
     }
     fn process(&mut self, block: BankBlock<'_>) -> Result<(), RenderError> {
         let mut core = self.core();

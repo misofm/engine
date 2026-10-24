@@ -1799,7 +1799,7 @@ impl PcmSourceConsumer {
             .saturating_add(self.command_consumer.retained_bytes())
             .saturating_add((blocks as u64).saturating_mul(block))
             .saturating_add(self.seek_report.retained_bytes())
-            .saturating_add(arc::<AtomicBool>())
+            .saturating_add(arc(&self.prime_required))
     }
     /// Apply an already-admitted seek on the exclusive consumer owner between blocks.
     /// Recycles stale storage and retains current-generation PCM without consuming a frame.
@@ -5146,7 +5146,7 @@ mod tests {
         struct Validity(Arc<AtomicU8>);
         impl GraphRuntimeObserver for Validity {
             fn retained_bytes(&self) -> u64 {
-                engine::realtime::retained::arc::<AtomicU8>()
+                engine::realtime::retained::arc(&self.0)
             }
             fn observe(
                 &mut self,

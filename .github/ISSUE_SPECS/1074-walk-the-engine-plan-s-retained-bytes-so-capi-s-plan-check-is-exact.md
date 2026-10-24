@@ -76,3 +76,12 @@ Scope note `scratchpad/opt/scope/1074.md` (Fable, against main 9e99df434) govern
   row holds the plan equality (96,771 == 96,771) but is red on a pre-existing host-core gap outside
   this issue: the strip producer table retains 1,016 bytes against `strip_control_table_bytes` 936 on an
   automated session. The row is not kept; it needs that host-core charge fixed first (successor).
+- Gate 1 planted table (PR evidence, reverted): a `Box<[u64]>` of 16 words per unit added to graph
+  `Runtime` with no walk entry turns the capi test red at the first fixture: "parametric-eq-nine-track:
+  dropping the prepared plan freed 222036 bytes; its retained-bytes walk names 220500".
+- Effects outside the capi fixtures (scratch, deleted): for all eight native effects, bytes freed by
+  dropping the boxed effect == `size_of_val` + walk, per node and as full and padded banks at every
+  width this x86-64 host binds, at 48 and 96 kHz; the same for the 30 builtins bank processors of a
+  live-control/automation session and a VCA session, and the meter observer.
+- Console digests: one untimed warmup run of `bench console` at base 9ac7d0d6b and at branch
+  ed3c04c3a: all 42 digest lines identical.

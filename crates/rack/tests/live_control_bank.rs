@@ -513,7 +513,7 @@ fn run_hands_the_blocks_snapshot_to_every_active_slot_in_every_block() {
     }
     impl BankStage for Recording {
         fn retained_bytes(&self) -> u64 {
-            engine::realtime::retained::arc::<Mutex<Vec<(usize, u64, u64)>>>()
+            engine::realtime::retained::arc(&self.drains)
         }
         fn process(&mut self, _block: BankBlock<'_>) -> Result<(), RenderError> {
             Ok(())

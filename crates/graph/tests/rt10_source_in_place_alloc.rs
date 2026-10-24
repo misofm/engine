@@ -63,7 +63,7 @@ impl Played {
 
 impl GraphPreparedSourceSetDriver for Played {
     fn retained_bytes(&self) -> u64 {
-        engine::realtime::retained::vec(&self.planes) + engine::realtime::retained::arc::<Calls>()
+        engine::realtime::retained::vec(&self.planes) + engine::realtime::retained::arc(&self.calls)
     }
     fn claim_count(&self) -> usize {
         LANES

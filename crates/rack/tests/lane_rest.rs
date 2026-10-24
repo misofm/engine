@@ -109,7 +109,7 @@ impl MockBank {
 
 impl PreparedNativeEffectBank for MockBank {
     fn retained_bytes(&self) -> u64 {
-        engine::realtime::retained::arc::<Mutex<MockState>>()
+        engine::realtime::retained::arc(&self.0)
     }
     fn reset(&mut self, _kind: ResetKind) {}
 

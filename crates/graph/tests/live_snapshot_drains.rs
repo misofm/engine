@@ -81,7 +81,7 @@ struct NodeProbe {
 }
 impl GraphRuntimeProcessor for NodeProbe {
     fn retained_bytes(&self) -> u64 {
-        engine::realtime::retained::arc::<Recorder>()
+        engine::realtime::retained::arc(&self.recorder)
     }
     fn process(&mut self, block: GraphBindingBlock<'_>) -> Result<(), RenderError> {
         let at = block_of(block.first_sample);
@@ -95,7 +95,7 @@ impl GraphRuntimeProcessor for NodeProbe {
 struct BankProbe(Arc<Recorder>);
 impl GraphPreparedBuiltinBankProcessor for BankProbe {
     fn retained_bytes(&self) -> u64 {
-        engine::realtime::retained::arc::<Recorder>()
+        engine::realtime::retained::arc(&self.0)
     }
     fn as_any(&self) -> &dyn std::any::Any {
         self

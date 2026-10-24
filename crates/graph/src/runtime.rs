@@ -4304,7 +4304,7 @@ impl Runtime {
                         .saturating_add(str(&binding.stable_id))
                 });
         let route_activity = self.route_activity.as_deref().map_or(0, |activity| {
-            engine::realtime::retained::boxed::<RouteActivity>()
+            engine::realtime::retained::boxed(activity)
                 .saturating_add(slice(&activity.active))
                 .saturating_add(slice(&activity.units))
                 .saturating_add(slice(&activity.destinations))
@@ -4411,12 +4411,12 @@ impl NodeKind {
             Self::Effect(node) => node.retained_bytes(),
             Self::LiveControlEffect(live) => {
                 let observation = live.observation.as_deref().map_or(0, |lane| {
-                    boxed::<ObservationLane>()
+                    boxed(lane)
                         .saturating_add(u64::try_from(lane.retained_bytes()).unwrap_or(u64::MAX))
                 });
-                boxed::<LiveControlEffect>()
+                boxed(&**live)
                     .saturating_add(live.effect.retained_bytes())
-                    .saturating_add(boxed::<EffectControlLane>())
+                    .saturating_add(boxed(&*live.control))
                     .saturating_add(live.control.retained_bytes())
                     .saturating_add(slice(&live.spans))
                     .saturating_add(live.shunt.retained_bytes())
@@ -4424,12 +4424,12 @@ impl NodeKind {
             }
             // The control lane's `superseded` counter is the host's, shared by every lane and
             // outliving the plan: not charged here (#1074).
-            Self::LiveRoute(_) => boxed::<LiveRoute>()
-                .saturating_add(boxed::<crate::RouteControlLane>())
-                .saturating_add(arc::<crate::RouteLane>()),
-            Self::LiveFollowRoute(route) => boxed::<LiveFollowRoute>()
-                .saturating_add(boxed::<crate::FollowRouteControlLane>())
-                .saturating_add(arc::<crate::FollowRouteLane>())
+            Self::LiveRoute(route) => boxed(&**route)
+                .saturating_add(boxed(&*route.control))
+                .saturating_add(arc(&route.control.lane)),
+            Self::LiveFollowRoute(route) => boxed(&**route)
+                .saturating_add(boxed(&*route.control))
+                .saturating_add(arc(&route.control.lane))
                 .saturating_add(route.follow.retained_bytes()),
         }
     }
@@ -11179,7 +11179,7 @@ mod tests {
         }
         impl crate::GraphRuntimeObserver for Observer {
             fn retained_bytes(&self) -> u64 {
-                engine::realtime::retained::arc::<std::sync::Mutex<Vec<(u64, bool)>>>()
+                engine::realtime::retained::arc(&self.trace)
             }
             fn observe(&mut self, block: GraphObservationBlock<'_>) -> Result<(), RenderError> {
                 self.trace.lock().unwrap().push((self.handle, false));
@@ -11481,7 +11481,7 @@ mod tests {
         struct Visit(Arc<AtomicUsize>);
         impl crate::GraphRuntimeObserver for Visit {
             fn retained_bytes(&self) -> u64 {
-                engine::realtime::retained::arc::<AtomicUsize>()
+                engine::realtime::retained::arc(&self.0)
             }
             fn observe(&mut self, _block: GraphObservationBlock<'_>) -> Result<(), RenderError> {
                 self.0.fetch_add(1, Ordering::Relaxed);
@@ -11597,7 +11597,7 @@ mod tests {
     struct AddingOwner(Arc<AtomicUsize>);
     impl GraphPreparedBuiltinBankProcessor for AddingOwner {
         fn retained_bytes(&self) -> u64 {
-            engine::realtime::retained::arc::<AtomicUsize>()
+            engine::realtime::retained::arc(&self.0)
         }
         fn as_any(&self) -> &dyn Any {
             self
@@ -11622,7 +11622,7 @@ mod tests {
     struct DoublingOwner(Arc<AtomicUsize>);
     impl GraphPreparedBuiltinBankProcessor for DoublingOwner {
         fn retained_bytes(&self) -> u64 {
-            engine::realtime::retained::arc::<AtomicUsize>()
+            engine::realtime::retained::arc(&self.0)
         }
         fn as_any(&self) -> &dyn Any {
             self
@@ -11689,7 +11689,7 @@ mod tests {
     struct RestingBank(u32, Arc<std::sync::Mutex<Vec<(u32, u32)>>>);
     impl GraphPreparedBuiltinBankProcessor for RestingBank {
         fn retained_bytes(&self) -> u64 {
-            engine::realtime::retained::arc::<std::sync::Mutex<Vec<(u32, u32)>>>()
+            engine::realtime::retained::arc(&self.1)
         }
         fn as_any(&self) -> &dyn Any {
             self
@@ -13557,7 +13557,7 @@ mod tests {
 
     impl crate::GraphRuntimeObserver for WordMeter {
         fn retained_bytes(&self) -> u64 {
-            engine::realtime::retained::arc::<std::sync::Mutex<Vec<MeterFrame>>>()
+            engine::realtime::retained::arc(&self.published)
         }
         fn observe(&mut self, block: GraphObservationBlock<'_>) -> Result<(), RenderError> {
             self.publish(block.first_sample, block.left, block.right);
@@ -15625,7 +15625,9 @@ mod tests {
 
         impl crate::GraphRuntimeObserver for BlockEnd {
             fn retained_bytes(&self) -> u64 {
-                3 * engine::realtime::retained::arc::<AtomicU64>()
+                engine::realtime::retained::arc(&self.sequence)
+                    + engine::realtime::retained::arc(&self.calls)
+                    + engine::realtime::retained::arc(&self.last_stamp)
             }
             fn observe(&mut self, block: GraphObservationBlock<'_>) -> Result<(), RenderError> {
                 if block.first_sample >= self.fail_from {
