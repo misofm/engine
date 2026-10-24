@@ -40,3 +40,13 @@ Carry an exact per-chain "input is symmetric" fact from the producing chain's ow
 
 - 987a: `crates/rack/tests/mono_reengage.rs` `an_asymmetric_input_window_declines_and_waits_for_a_proof`; mutants in
   `crates/rack/tests/MUTATIONS.md` (issue #987).
+- 987b: `crates/graph/src/runtime.rs` `input_producer_table` (bind) and `Runtime::execute` (per block);
+  test `crates/graph-compiler/src/tests/console_banking.rs`
+  `a_later_mono_chain_arms_on_its_producers_and_renders_the_dual_bits` (`[48, 4]` armed, `[24, 2]` on
+  the #970 rule alone); mutants 987-1..3 in `crates/graph/tests/MUTATIONS.md`. One-time digest of
+  every `native_session_rows()` workload, armed and forced off, 256 blocks after warm-up, base
+  `0f8641cd3` against the branch: all 30 digests and collapse counters identical (no standing row
+  has a later mono chain, as the scope note said).
+- 987b deviation: `PlanUnitEligibility.armed_on_input` was not added. Adding a field breaks the
+  struct literal in `tools/console-workload/tests/chain_shape.rs`, outside the authorized paths;
+  `bank_collapse_counters` carries the evidence. A successor may add it with that path authorized.
