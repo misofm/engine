@@ -588,6 +588,25 @@ fn actual_runtime_bank_slot_owners_fit_retained_largest_and_conversion_reservati
             assert_eq!(LIVE_FREES.get(), u64::from(slot_count != 0) + 3 + 3);
         }
     }
+    // The full-mask row (issue #887): a full chain owns its two staging planes and no `+0.0`
+    // plane, which only a padded chain's gather reads. Red if a full chain allocates one.
+    for &width in effect_contract::BankWidth::ALL {
+        let lanes = width.lanes() as usize;
+        let staging_layout = Layout::array::<f32>(lanes).expect("one quantum-1 staging plane");
+        let scratch = rack::AoSoaScratch::new(width, 1).expect("test width and quantum");
+        let active = vec![true; lanes].into_boxed_slice();
+        test_only_reset_phase_two_allocation_tracker();
+        reset_byte_counters();
+        let observation = test_only_begin_phase_two_allocation_observation();
+        let chain =
+            armed(|| rack::BankChain::new(scratch, active, Vec::new())).expect("a full chain");
+        drop(observation);
+        let snapshot = test_only_phase_two_allocation_snapshot();
+        assert!(!snapshot.overflowed);
+        assert_eq!(snapshot.allocation_count, 2, "{width:?}: staging only");
+        assert_eq!(count(&snapshot.layouts, staging_layout), 2, "{width:?}");
+        drop(chain);
+    }
     assert!(
         prepared_unit_layout.is_some(),
         "nonzero cases expose the actual private target layout"

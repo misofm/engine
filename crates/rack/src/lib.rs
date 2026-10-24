@@ -3221,8 +3221,9 @@ pub struct BankChain {
     /// See [`Self::staging_left`].
     staging_right: Box<[f32]>,
     /// `quantum` words of `+0.0`: the planar plane the tiled gather reads for an inactive lane, so
-    /// a padded lane is fed `+0.0` every block and its members are never asked for a plane
-    /// (issue #887). Never written. Empty on a full bank, which has no inactive lane; on a partial
+    /// on every gathered block a padded lane is fed `+0.0` and its members are never asked for a
+    /// plane (issue #887). A resident-input block copies the predecessor's inactive words instead
+    /// ([`Self::acquire_resident_input`]), which need not be `+0.0`. Never written. Empty on a full bank, which has no inactive lane; on a partial
     /// bank it is the chain's one extra allocation, `4 * quantum` bytes.
     zero_plane: Box<[f32]>,
     /// Test-only: take the per-lane scalar oracle instead of the tiled transpose.
@@ -3403,7 +3404,7 @@ impl BankChain {
         }
         // AoSoaScratch has no public mutable/reused constructor: these planes are already zeroed.
         // Every bank tiles (issue #887). The gather reads the chain's `+0.0` plane for an
-        // inactive lane, so its scratch words are `+0.0` at the start of every block, and the
+        // inactive lane, so its scratch words are `+0.0` at the start of every gathered block, and the
         // staged scatter copies only active lanes out: an inactive lane's members are neither
         // read from nor written to.
         let full_bank = active.iter().all(|lane| *lane);
@@ -4211,8 +4212,10 @@ impl BankChain {
     /// Copy exactly the words ordinary acquisition overwrites. The mode is the successor's
     /// post-drain collapse decision, independent of how its predecessor rendered this block.
     ///
-    /// The whole block is one contiguous copy on every bank: an inactive lane's words are only
-    /// ever read by its own discarded kernel lane, never by an active lane or a member.
+    /// The whole block is one contiguous copy on every bank. An inactive lane therefore receives
+    /// the predecessor's output for that lane (which may be `-0.0` or any other word), not the
+    /// gather's `+0.0`; its words are only ever read by its own discarded kernel lane, never by an
+    /// active lane or a member.
     fn acquire_resident_input(&mut self, source: &BankChain, frames: u32, mono: bool) {
         let len = frames as usize * self.lanes;
         self.scratch.left[..len].copy_from_slice(&source.scratch.left[..len]);
@@ -6631,12 +6634,6 @@ mod tests {
         }
     }
 
-    /// T1: the gather/scatter round-trip is bit-exact for every active lane, including NaN
-    /// payloads, `-0.0` and subnormals, and never writes an inactive lane's planar buffer.
-    ///
-    /// The mask below has inactive lanes, so this is the **partial-bank staged path** -- the one a
-    /// padded bank takes, and the one that carries the "an inactive lane is never read and never
-    /// written" invariant.
     /// Planes with one shared accumulating auxiliary destination (issue #210's PFL seam).
     ///
     /// Every armed lane names *the same* `aux` buffer on purpose: that is the case the seam exists
@@ -7578,6 +7575,12 @@ mod tests {
         );
     }
 
+    /// T1: the gather/scatter round-trip is bit-exact for every active lane, including NaN
+    /// payloads, `-0.0` and subnormals, and never writes an inactive lane's planar buffer.
+    ///
+    /// The mask below has inactive lanes, so this is the **partial-bank staged path** -- the one a
+    /// padded bank takes, and the one that carries the "an inactive lane is never read and never
+    /// written" invariant.
     #[test]
     fn gather_scatter_round_trip_is_bit_exact() {
         let frames = 128_u32;

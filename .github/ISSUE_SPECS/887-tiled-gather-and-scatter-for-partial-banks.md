@@ -97,3 +97,35 @@ Scope note `scope/887.md` and root's decisions supersede the slice above where t
   3 frames`: the stale inactive word). Gate 2's allocation evidence is the existing graph/console
   render allocation gates (the zero plane and staging are made in `BankChain::new`). Gate 4 is
   read by the coordinator after the batch.
+
+### Class-A evidence: console workload digests (64 blocks, x86-64-v3 release)
+
+One-time PR evidence, not a committed test. Each row of `WORKLOADS`, `DRIVER_FED_WORKLOADS`,
+`METERED_WORKLOADS`, `BUS_SEND_WORKLOADS` and `CONSOLE_STRIP_WORKLOADS` was rendered for 64 blocks
+through `SessionRuntime::hash_output` on the base (origin/main 9ddfe1fb8) and on 2a715095a.
+**Result: all 23 digests identical**, the 9-, 10- and 13-track padded rows included.
+
+| workload | SHA-256 before = after |
+| `nine_track_baseline` | `e7c6ef01770ab7da98d4b793a6a817bd50a4dfe682321ecfc023ddc275285a80` |
+| `nine_track_ragged_strip` | `33995dfc62a9158d4c90e5cb07d5e379bbb75337234886ab2c3719c1895a210c` |
+| `sixty_four_track_console` | `b6671122275a7829fdd0dc653e5930637c6453023599822820bb1bcbc564fa67` |
+| `one_twenty_eight_track_stretch` | `8fa5b08d370bef83f9fbbbb655f844ec304e237184750db59b5819072216c73a` |
+| `sixty_four_track_eq_only` | `9b2c56a1da62ebda8aef595973870ea077477d209aacdcd6321637e949d5c828` |
+| `sixty_four_track_compressor_only` | `3890551c423c0fa1feca22d1fbf57c56b395c2254f6d0fc1fa653743696749ea` |
+| `sixty_four_track_builtins_only` | `b63eccd09c19eb7a6e0608144024ac5b14c7d5f7d1c56012cbbd49d6aad8f7f0` |
+| `sixty_four_track_dispatch_only` | `15688888612d161e507bc400b9eed356fc1776797c8c66ca52d1e7c9114d3a2d` |
+| `sixty_four_track_idle` | `de2f256064a0af797747c2b97505dc0b9f3df0de4f489eac731c23ae9ca9cc31` |
+| `sixty_four_track_console_legacy` | `add57c85031ac996ef80497ba73207302a2fde29a6c438858deb8aa8c5613791` |
+| `sixty_four_track_eq_comp_simd1` | `add57c85031ac996ef80497ba73207302a2fde29a6c438858deb8aa8c5613791` |
+| `sixty_four_track_gain_pan_only` | `01e465a797036fb4267e895d9319a911bc108d554705d268d9a84a2e2e2dfdb4` |
+| `sixty_four_track_console_mono` | `0db1c16c8ba93d645acd5a3f1221112c5c93888ac205b24a155029f6b0aafc65` |
+| `sixty_four_track_console_mono_dual` | `0db1c16c8ba93d645acd5a3f1221112c5c93888ac205b24a155029f6b0aafc65` |
+| `sixty_four_track_console_half_mono` | `1f4c885f3811075cd5166d2405ee03c67b307253db876cc9680a31a8055c836f` |
+| `sixty_four_track_gain_pan_ring` | `01e465a797036fb4267e895d9319a911bc108d554705d268d9a84a2e2e2dfdb4` |
+| `sixty_four_track_console_metered` | `b6671122275a7829fdd0dc653e5930637c6453023599822820bb1bcbc564fa67` |
+| `sixty_four_track_console_sends` | `5a79110007f66da1239a302ea6846e72a58e579c795db51b072b18db16ec5814` |
+| `ten_track_ragged_strip` | `4e334d3d4e545968e480c605cf64af2a65b0011e667524b5e7505e8d95811aec` |
+| `thirteen_track_ragged_strip` | `7a7b1a6db67bdd59dc1529bf2cf1470798d9e9cd60c6b070fbfd7c652e079bae` |
+| `sixteen_track_strip` | `11af3f2b1e36125abf1bb07755d0861d7319c9caaaa4d29d5b20e412198854b8` |
+| `sixty_four_track_app_shape` | `33b53571775dbce4884b5829d26ecbca42859dfde6169f900328467c761d48b0` |
+| `sixty_four_track_console_sparse` | `a728ee5bf4a400df245128edadc4d32e44ce836c6ace715662c1eac1bc5d7b48` |
