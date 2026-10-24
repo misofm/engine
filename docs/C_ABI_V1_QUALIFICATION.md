@@ -1209,8 +1209,8 @@ claims are `crates/control-plane/tests/spectrum_monitor.rs`.
 
 `SPECTRUM_CAPTURE` (`0011`) crosses `miso_engine_v1_submit_command` to the same core path, with no
 new C symbol or struct: arm, read, cancel and select on the session's spectrum service, and a ready
-read analyzed into dB bins on the calling control thread. The capability report does not list
-`0011` until the second slice sets bit 16. A read the session's frame limit cannot carry is refused
+read analyzed into dB bins on the calling control thread. The second slice lists it, with
+bit 16. A read the session's frame limit cannot carry is refused
 `LIMIT_EXCEEDED` (`spectrum.frame`) before it pops the window, and a configure refuses a tap no
 one-plane read can carry, so a C ABI host that reads spectrum compiles with
 `maximum_control_frame_bytes` of at least 8,496 bytes (12,608 for stereo reads, 29,008 with the
@@ -1218,6 +1218,21 @@ window). The session's capi retained bytes also charge the one analysis result a
 (`SpectrumAnalysisResult`, beside the service and analysis). The gate is the same
 `runtime::spectrum_tests::spectrum_commands_cross_the_c_abi_to_the_session` at a 65,536-byte frame
 limit; the core claims are `crates/control-plane/tests/spectrum_monitor.rs`.
+
+## Issue 1595 spectrum stream (slice b)
+
+`SPECTRUM_STREAM` (`0012`) crosses `miso_engine_v1_submit_command` to the same core path, with no
+new C symbol or struct: start, select, read, reset and stop on the session's spectrum service and
+analysis, and a ready read analyzed with the stream's smoothing on the calling control thread. The
+C ABI's capability report now lists `0010`, `0011` and `0012` and sets flag bit 16 (the adapter's
+`ControlAdapter::SPECTRUM`); the browser lists none until #1596. A configure (and a boot) refuses
+a tap whose stream read of its own channels cannot fit the frame limit (`spectrum.frame`), so a C
+ABI host that reads spectrum compiles with `maximum_control_frame_bytes` of at least 8,576 bytes
+for a one-plane tap (12,688 for a stereo tap, 29,008 for a one-shot read of both sides with the
+window); a stream read also measures its reply before it reads, in depth. The capability vectors pinned in
+`crates/capi/src/runtime/tests.rs` re-pin for the three IDs and bit 16. The gate is
+`runtime::spectrum_tests::spectrum_commands_cross_the_c_abi_to_the_session` (the capability report
+and one ready stream read); the core claims are `crates/control-plane/tests/spectrum_monitor.rs`.
 
 ## Issue 1584 observation subscriptions
 
