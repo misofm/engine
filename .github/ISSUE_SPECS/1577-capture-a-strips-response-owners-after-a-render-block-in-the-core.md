@@ -194,7 +194,15 @@ tracks, input filters, an EQ insert and an EQ console slot:
   inlined SPSC `slots[...]` index of its pop and push, the class `enter_block` is admitted for),
   and `RealtimePlanOwner::copy_response_snapshot` is a new `call_indirect` site (1: the
   executor's `copy_response_snapshot` through `Box<dyn PreparedPlanExecutor>`). No allocation or
-  drop glue is reachable. Root decides the pin edits.
+  drop glue is reachable. Root authorized both pins (2026-10-24, extra paths
+  `scripts/check-web-audioworklet.sh` and `scripts/check-web-audioworklet-callgraph.py`):
+  `--trap-owner 21ResponseCaptureServer11after_block=2` (the SPSC `slots[...]` index of
+  `after_block`'s one pop and one push, `panic_bounds_check`, the same class as `enter_block`),
+  and an `INDIRECT_SITES` row of 1 for `RealtimePlanOwner::copy_response_snapshot` (the capture
+  copies the plan's snapshot through the executor trait object, once per armed job; no
+  allocation, no drop). The two checks are not removed instead: they are the engine SPSC's own
+  `slots[local]` index (`crates/engine/src/realtime/spsc.rs`), which every SPSC user inlines, so
+  removing them is an engine change outside this issue.
 
 ### Test value (`crates/control-plane/tests/response_capture.rs`)
 
