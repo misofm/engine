@@ -4266,10 +4266,12 @@ impl BankChain {
     /// Record the structural half of this cohort's witness: the `SOURCE` term, joined at bind.
     ///
     /// `structural` is "every active lane of this chain renders a track whose two channels read
-    /// one source channel **and this chain gathers that track's input**" (issue #970: a later chain
-    /// of a split strip reads planes an earlier stage produced, which the source mapping says
-    /// nothing about). Passing `false`, or never calling this at all, makes the chain decline
-    /// forever. See the `collapse_source` field for why the chain cannot derive this itself.
+    /// one source channel" and either this chain gathers that track's input (issue #970), or the
+    /// caller proves its input per block through
+    /// [`set_input_symmetric`](Self::set_input_symmetric) (issue #987: a later chain reads planes
+    /// an earlier stage produced, which the source mapping says nothing about, so the graph
+    /// runtime passes `true` for it only with that per-block term). Passing `false`, or never
+    /// calling this at all, makes the chain decline forever. See the `collapse_source` field for why the chain cannot derive this itself.
     ///
     /// # The obligation, which M3's invariant rests on
     ///
@@ -4278,7 +4280,8 @@ impl BankChain {
     /// The block-order half is a caller obligation because the chain cannot check it, and it is
     /// what lets [`run`](Self::run) leave `SOURCE` out of the agreement invariant: a chain armed
     /// before it renders has one answer to "do the two planes carry the same samples" for its whole
-    /// life, so that term cannot be the cause of a *transient* divergence. Arming a chain that has
+    /// life, so that term cannot be the cause of a *transient* divergence; a later chain's
+    /// transient divergence is the per-block input term's, which does enter the invariant. Arming a chain that has
     /// already rendered blocks fed by two different source channels would break that reading, and
     /// nothing in the engine does it -- the join runs once, from the compiled session, at bind.
     pub const fn arm_mono_collapse(&mut self, structural: bool) {

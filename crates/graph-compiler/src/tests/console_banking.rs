@@ -1172,6 +1172,18 @@ fn a_later_mono_chain_arms_on_its_producers_and_renders_the_dual_bits() {
     let mono_chains = mono.len() as u64;
     let gathering = mono.iter().filter(|unit| unit.gathers_track_input).count() as u64;
     assert!(
+        mono.iter()
+            .all(|unit| unit.gathers_track_input != unit.armed_on_input),
+        "every later mono chain reports itself armed on its input, and no gathering chain does"
+    );
+    assert!(
+        !armed
+            .units
+            .iter()
+            .any(|unit| unit.armed_on_input && !mono.contains(&unit)),
+        "no chain outside the mono chains is armed on its input"
+    );
+    assert!(
         mono_chains > gathering && gathering > 0,
         "the strip splits into later mono chains ({mono_chains} mono chains, {gathering} gather)"
     );

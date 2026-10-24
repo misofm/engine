@@ -209,10 +209,15 @@ pub struct PlanUnitEligibility {
     /// the structural join alone; `false` for every later chain of a split strip and for a single
     /// op. Since issue #987 a later chain whose every lane gathers a same-track bank producer is
     /// armed too, and collapses only on a block its producers rendered with bit-identical planes;
-    /// `bank_collapse_counters` counts it, and this row does not mark it. A caller reading
+    /// [`armed_on_input`](Self::armed_on_input) marks it. A caller reading
     /// [`all_lanes_eligible`](Self::all_lanes_eligible) as collapse evidence tests this and
     /// [`witness_is_vacuous`](Self::witness_is_vacuous) first.
     pub gathers_track_input: bool,
+    /// Issue #987: `true` for a later bank chain that the mono collapse armed on its producers:
+    /// every lane gathers a same-track bank producer's planes, and the chain collapses only on a
+    /// block whose producers rendered them bit-identical. `false` for an input-gathering chain,
+    /// an unarmed chain and a single op. Evidence only.
+    pub armed_on_input: bool,
     /// Stages this unit renders: a chain's bound slots, or 1 for a single op.
     pub stages: u32,
     /// Of those, the stages that sit **upstream of the fader/matrix seam** -- the stages a

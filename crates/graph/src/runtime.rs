@@ -4026,7 +4026,9 @@ impl UnitBanking {
     }
 
     /// Whether this unit is a bank whose gathered planes are its tracks' input: the only unit the
-    /// structural `SOURCE` witness may arm.
+    /// structural `SOURCE` witness arms on its own. The one other armed unit is a `Bank` with an
+    /// `input_producers` row (issue #987), whose input term is proven per block from its
+    /// producers' rendering.
     pub(crate) const fn gathers_track_input(self) -> bool {
         matches!(self, Self::BankGatheringTrackInput)
     }
@@ -4333,6 +4335,15 @@ impl Runtime {
                     .all(|track| !track.is_empty() && eligible(track));
             chain.arm_mono_collapse(armed);
         }
+    }
+
+    /// Whether `unit` is a later bank chain armed on its producers (issue #987): it has an
+    /// [`input_producer_table`] row and the join armed it. Evidence only, off the render thread.
+    pub(crate) fn armed_on_input(&self, unit: usize) -> bool {
+        self.input_producers
+            .get(unit)
+            .is_some_and(|producers| !producers.is_empty())
+            && matches!(self.units.get(unit), Some(RuntimeUnit::Bank { chain, .. }) if chain.can_collapse())
     }
 
     /// Force every chain's collapse off (or back on). Bind-time, off the render thread.
@@ -9370,11 +9381,21 @@ fn input_producer_table(
             let producer_track = identity[before].lane_tracks.get(lane_of);
             let ok = before < unit
                 && lane_of < *earlier_lanes
-                && earlier[member].output == source
-                && chain.fold_lanes().get(lane_of) != Some(&true)
                 && !tracks[lane].is_empty()
                 && producer_track == Some(&tracks[lane]);
             if ok {
+                // `first_producer` is the colour's last writer, and `scatter_target` never
+                // redirects into a bank member, so the copy reads the producer's own output.
+                debug_assert_eq!(
+                    earlier[member].output, source,
+                    "a bank consumer reads its producer"
+                );
+                // A folded lane's only reader is a retired route op, never a bank member.
+                debug_assert_ne!(
+                    chain.fold_lanes().get(lane_of),
+                    Some(&true),
+                    "a folded lane feeds no bank"
+                );
                 producers.push(u32::try_from(before).unwrap_or(u32::MAX));
             }
             ok

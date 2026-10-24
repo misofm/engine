@@ -47,6 +47,9 @@ Carry an exact per-chain "input is symmetric" fact from the producing chain's ow
   every `native_session_rows()` workload, armed and forced off, 256 blocks after warm-up, base
   `0f8641cd3` against the branch: all 30 digests and collapse counters identical (no standing row
   has a later mono chain, as the scope note said).
-- 987b deviation: `PlanUnitEligibility.armed_on_input` was not added. Adding a field breaks the
-  struct literal in `tools/console-workload/tests/chain_shape.rs`, outside the authorized paths;
-  `bank_collapse_counters` carries the evidence. A successor may add it with that path authorized.
+- 987b follow-up (root, after the PASS verdict; paths `tools/console-workload/tests/chain_shape.rs`,
+  `crates/rack/src/lib.rs` and `crates/host-core/tests/collapse_arming.rs` authorized for docs/literal):
+  `PlanUnitEligibility.armed_on_input` added (`Runtime::armed_on_input`: a producer row and the join armed
+  it), asserted in the graph-compiler test; the producer table's buffer-match and unfolded-lane clauses are
+  `debug_assert!`s (unreachable: `scatter_target` never redirects into a bank member, and a folded lane's
+  only reader is a retired route op); stale #970-only docs in rack and `collapse_arming.rs` updated.
