@@ -74,7 +74,10 @@ in with it. Every other path stays bit-identical.
 - **D3a. A swap before the fire, until #1877.** `carry_route` fires a displaced plan's armed route
   before the successor takes its state, so the successor ramps it in from the swap block. Without
   this the successor would take a silent route waiting for a fire its own table does not hold, and
-  it would stay silent for good. #1877 replaces this by carrying the arm.
+  it would stay silent for good. #1877 replaces this by carrying the arm. One case is not covered:
+  an added `post_fader`/`post_pan` route into the output with a source-edge line above zero,
+  displaced before its fire, has no live op in the next plan, so its arm is lost and it steps in at
+  that plan's swap (as on main); that case goes to #1877.
 - **D6. Length.** `N = LiveRamps::for_session(next model).mute_samples` (D15-9's law, #1054's
   length). The shape is the route's own `IndexedRamp`, so after `N` the route mixes the
   reference's bits.
@@ -137,6 +140,14 @@ output hears the step 486 samples after the swap); arm only lane-ful routes (gat
 re-arm every route of the committed model (gate 1 red); a send of an added strip without its
 strip's claim and delay (gate 2 (c) red); a record lifts the arm (gate 3 red); no fire at the swap
 (gate 3's carry test red).
+
+Verifier round (attempt 1 PASS, three surviving mutants closed): gate 2 (d), a send that a later
+swap adds before its added strip's fire, red when `added_route_fades` ignores the waiting strips;
+gate 3's muting record, red when the arm drops a record's mute; `with_transition_routes` is
+checked against the bound plan's retention in graph-compiler's
+`route_control_resources_cover_the_allocation`, red when it returns its input. That check found
+the bind row (`GraphLiveRoute`) uncharged: the charge now counts it, and `live_route_rows` keeps
+its exact length.
 
 ## Dependencies
 

@@ -3401,11 +3401,19 @@ fn into_output() -> session::RouteDestination {
 /// compensation line on its destination edge. The output arrives 486 samples late already, so a
 /// limited added track grows no latency.
 fn route_fade_base() -> SessionModel {
+    route_fade_base_limited(true)
+}
+
+/// [`route_fade_base`], with `late`'s limiter only when `limited`: without it the output arrives
+/// at once, so a fade late in the run reaches the output inside it.
+fn route_fade_base_limited(limited: bool) -> SessionModel {
     let mut model = session_a();
     add_source(&mut model, AUX_SOURCE);
     add_track(&mut model, "eq0", "aux", AUX_SOURCE, false);
     add_track(&mut model, "eq0", "late", SOURCE, true);
-    add_limiter(&mut model, "late", "lim");
+    if limited {
+        add_limiter(&mut model, "late", "lim");
+    }
     model
         .submixes
         .push(session::Submix::unity(id(ROUTE_BUS), &model.console));
@@ -3640,10 +3648,61 @@ fn an_added_strips_pre_fader_send_fades_with_it(backend: Backend) {
             "{backend:?} {case}: every block equals the reference"
         );
     }
+    // (d) The send is added by a later swap, before the strip's fade fires: B adds the track on
+    // [`ADDED_SOURCE`], anchored at [`FADE_ANCHOR_BLOCK`]; C, adopted one block after B, adds the
+    // send. The send waits with the strip's claim, so both fire at the anchor.
+    let mut unlimited = route_fade_base_limited(false);
+    add_source(&mut unlimited, ADDED_SOURCE);
+    let a = Session::compile(unlimited.clone());
+    let track = |muted| with_fade_track(unlimited.clone(), ADDED_SOURCE, false, muted);
+    let send = |model, muted| {
+        with_route(
+            model,
+            "fade-bus",
+            FADE_TRACK,
+            session::SendTap::PreFader,
+            into_bus(),
+            muted,
+        )
+    };
+    let b1 = Session::compile(track(false));
+    let b2 = Session::compile(send(track(false), false));
+    let muted_model = send(track(true), true);
+    let muted = Session::compile(muted_model.clone());
+    let (added, reference_added) = anchored_feeds();
+    let run = two_swap_run(
+        &a,
+        &b1,
+        &b2,
+        SWAP_BLOCK + 1,
+        Some(Anchored {
+            feed: &added,
+            anchor_block: FADE_ANCHOR_BLOCK,
+        }),
+        &[&kept, &aux],
+        backend,
+    );
+    let reference = fade_run(
+        &muted,
+        &[],
+        &[&kept, &aux, &reference_added],
+        None,
+        &[
+            unmute_fade(FADE_ANCHOR_BLOCK, ramp),
+            unmute_route(&muted_model, "fade-bus", FADE_ANCHOR_BLOCK, ramp),
+        ],
+        backend,
+    );
+    assert_eq!(
+        first_fade_difference(&run, &reference),
+        None,
+        "{backend:?} (d): a send added before its strip's fire waits for the strip"
+    );
 }
 
 /// Issue #1363 gate 6 on every width. Red if a pre-fader send of an added strip is left unarmed
-/// beside its armed fader: it enters the bus at full level at adoption, a step.
+/// beside its armed fader (it enters the bus at full level at adoption, a step), or if a send that
+/// a later swap adds before the strip's fire does not wait for the strip.
 #[test]
 fn an_added_strips_pre_fader_send_fades_with_it_on_every_width() {
     for backend in backends() {

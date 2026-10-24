@@ -9183,7 +9183,7 @@ fn live_route_rows(
     units: &[RuntimeUnit],
     route_gates: &[(GraphNodeId, RouteGate)],
 ) -> Vec<crate::GraphLiveRoute> {
-    units
+    let mut rows = units
         .iter()
         .enumerate()
         .filter_map(|(unit, owner)| {
@@ -9207,7 +9207,10 @@ fn live_route_rows(
                 automated,
             })
         })
-        .collect()
+        .collect::<Vec<_>>();
+    // Exact length, so a plan's charge can name it (#1363 D2: one row per transition route).
+    rows.shrink_to_fit();
+    rows
 }
 
 /// Issue #1217 D5: the executor's [`RouteActivity`], or `None` when no route gate silences.
@@ -18521,8 +18524,8 @@ mod follow_route_op_tests {
         /// armed length, not the record's own; its block is that ramp's, bit for bit.
         ///
         /// Test value: red if a live edit lifts the arm early (the record retargets the ramp and
-        /// the route mixes before its fire) or if the fire forgets the record (it ramps to the
-        /// prepared target).
+        /// the route mixes before its fire), if the fire forgets the record (it ramps to the
+        /// prepared target), or if it forgets a muting record's mute (the route mixes on).
         #[test]
         fn a_record_before_an_armed_routes_fire_retargets_the_fire_only() {
             const ARMED: u32 = 64;
@@ -18553,6 +18556,28 @@ mod follow_route_op_tests {
                 bits((&left, &right)),
                 bits((&want_left, &want_right)),
                 "the fire ramps from rest to the record's target over the armed length"
+            );
+            // A muting record before the fire: the fire keeps the route muted, so once its ramp
+            // has run the route is inactive (it is never unmuted).
+            let mut muted = Six::new(gated(OPEN, [false; 2]), false);
+            assert!(muted.route.arm_fade_in(ARMED));
+            muted.revision += 1;
+            let record = RouteControlRecord::new([0.0; 4], true, RECORD_RAMP).expect("record");
+            muted
+                .producer
+                .write(muted.pin.stamp(muted.revision).expect("stamp"), record);
+            muted.pin.publish(&muted.gate, muted.revision);
+            let (mut left, mut right) = input(AFTER);
+            assert!(!muted.block(&mut left, &mut right), "it waits silent");
+            muted.route.fire_fade_in();
+            for _ in 0..2 {
+                let (mut left, mut right) = input(AFTER);
+                muted.block(&mut left, &mut right);
+            }
+            let (mut left, mut right) = input(AFTER);
+            assert!(
+                !muted.block(&mut left, &mut right),
+                "a route muted before its fire stays muted after it"
             );
         }
 

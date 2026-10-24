@@ -1492,7 +1492,8 @@ pub enum GraphRouteControlError {
 pub struct GraphTransitionRoutes {
     /// How many routes bind as transition routes.
     pub routes: u64,
-    /// Their route IDs' bytes, once: the binding's node ID (held until bind).
+    /// Their route IDs' bytes, once (the charge counts them twice: the binding's node ID, held
+    /// until bind, and the bind row's copy).
     pub route_id_bytes: u64,
     /// The route-activity table bind builds for them when no lane-ful route charges it: `0` when
     /// the call returned a producer, or a prepared gate silences (the compile charged it then).
@@ -1547,8 +1548,9 @@ pub struct RouteControlResources {
 
 impl RouteControlResources {
     /// These resources with the transition routes of the same attach added (#1363 D2): each
-    /// route's binding entry (held until bind) and boxed render-side owner, its node ID's bytes,
-    /// and the route-activity table when no producer charged it. Saturating.
+    /// route's binding entry (held until bind), boxed render-side owner and bind row
+    /// ([`GraphLiveRoute`], held until taken), its route ID's bytes twice (the binding's node ID
+    /// and the row's copy), and the route-activity table when no producer charged it. Saturating.
     #[must_use]
     pub fn with_transition_routes(self, transition: &GraphTransitionRoutes) -> Self {
         if transition.routes == 0 {
@@ -1557,18 +1559,18 @@ impl RouteControlResources {
         let count = |value: usize| u64::try_from(value).unwrap_or(u64::MAX);
         let binding = count(core::mem::size_of::<GraphRouteControlBinding>());
         let owner = count(LIVE_ROUTE_OWNER_BYTES);
+        let row = count(core::mem::size_of::<GraphLiveRoute>());
         let owner_bytes = transition
             .routes
-            .saturating_mul(binding.saturating_add(owner));
+            .saturating_mul(binding.saturating_add(owner).saturating_add(row));
+        let id_bytes = transition.route_id_bytes.saturating_mul(2);
         let added = owner_bytes
-            .saturating_add(transition.route_id_bytes)
+            .saturating_add(id_bytes)
             .saturating_add(transition.activity_bytes);
         Self {
             routes: self.routes.saturating_add(transition.routes),
             owner_bytes: self.owner_bytes.saturating_add(owner_bytes),
-            route_id_bytes: self
-                .route_id_bytes
-                .saturating_add(transition.route_id_bytes),
+            route_id_bytes: self.route_id_bytes.saturating_add(id_bytes),
             activity_bytes: self
                 .activity_bytes
                 .saturating_add(transition.activity_bytes),
@@ -1577,6 +1579,7 @@ impl RouteControlResources {
                 .largest_allocation_bytes
                 .max(owner)
                 .max(transition.routes.saturating_mul(binding))
+                .max(transition.routes.saturating_mul(row))
                 .max(transition.activity_largest),
             ..self
         }
