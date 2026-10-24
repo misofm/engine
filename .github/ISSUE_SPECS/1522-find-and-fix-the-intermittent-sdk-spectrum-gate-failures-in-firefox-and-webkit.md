@@ -266,8 +266,8 @@ exported trees.
   since 2026-10-22 (40082172520) failed all three browsers and the workspace job together, a batch
   defect, not this flake. Every recorded spectrum failure came from the 32-CPU development box,
   most under artificial load.
-- **R1 (root).** The slice is D2 only. After it lands, #1522 closes with: *cause unproven, no CI
-  repro in the last 60 main runs, capture in place, reopen on the next red log*. D1, D4, the fix
+- **R1 (root).** The slice is D2 only. After it lands, #1522 closes (the close text was rewritten
+  when the verifier found a candidate cause; see the Attempt record). D1, D4, the fix
   (deliverable 3) and gates 1-3 (cause, reproduction, soak) are not done; they come back with the
   next red `sdk-spectrum-*` log.
 - **R2 (root).** Amendment 1's paired M-vs-B matrix is dropped as moot: #1345's batch 3 merged
@@ -303,5 +303,29 @@ exported trees.
   verbatim.)
 - Real-browser legs on `08ea327e0`, CI command (`--check-matrix --self-test-mutations`, private
   PulseAudio null sink), each run once: Firefox 153.0 passed; WebKit 26.5 passed.
-- **Close record (R1).** Cause unproven, no CI repro in the last 60 main runs, capture in place,
-  reopen on the next red log.
+
+**Attempt 1, verifier MAJOR folded in (root, option b; `41428c6df`).**
+
+- **Candidate cause.** The `publications` condition compared `metadata.endSample >
+  metadata.capturedSample`, two decimal strings from `streamMetadataFields`. A string compare is
+  lexicographic, so it is false whenever `endSample` has one more digit than `capturedSample`:
+  `capturedSample` in 97953..99999, the first consecutive pair landing about 2.04-2.08 s into the
+  context at 48 kHz. The probe's audio start is delayed 750 ms, and under load the first pair can
+  land that late, which fits the loaded Firefox and WebKit failures and the old message's lack of a
+  named condition. Not reproduced in a browser; the defect is shown on the record.
+- **Fix.** The clause compares `canonicalU64` values. The same string compare in the
+  `sdk-observation` window check (`observations.windows[0]`) now uses `validResidentWindow`, whose
+  width-crossing proof already exists. No other ordered compare of string sample fields remains in
+  `run.mjs`; the probe in `sdk-response-entry.ts` compares `bigint`s.
+- **Proof (in `mutationProofs`).** `sdk-spectrum-hop-width` moves the real record's pair to
+  98304..100352 and 99328..101376 and asserts the gate accepts it. Red on the string compare
+  (Chromium, `41428c6df` with the clause reverted): `Got unwanted exception: chromium:
+  sdk-spectrum-hop-width: valid decimal-width-crossing hop pair was refused`, actual
+  `sdk-spectrum-hop: ... failed ["publications"]`. Test value: a sample-field ordering compare that
+  goes back to strings turns it red; the existing mutations all keep the pair below 5 digits.
+- **Clock reads bounded.** Each `status()` read and the resume sample race a 2 s timer
+  (`HOP_PROBE_CLOCK_TIMEOUT_MS`); a timed-out read records `status: "timeout"` instead of hanging.
+- Legs on `41428c6df`, each run once: Firefox 153.0 passed; WebKit 26.5 passed.
+- **Close record (R1, rewritten).** Candidate cause found and fixed: a lexicographic compare of
+  decimal sample strings fails when the first pair lands between about 2.04 and 2.08 s (under
+  load); capture in place; reopen on the next red log.
