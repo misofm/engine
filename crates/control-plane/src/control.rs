@@ -3188,9 +3188,15 @@ where
             protocol::SpectrumStreamRequest::Stop => service.stop_stream(Some(&mut *analysis)),
         }
         // The service's metadata with the analysis's facts: a reset changes only the analysis.
+        // Only a read delivers a window, so a reply to anything else is never `ready`: after a
+        // ready read, a reset discards the window at hand, and the stream runs with none queued
+        // for this reader (`pending`) until the next read.
         let mut metadata = *service.stream_metadata();
         metadata.analysis_epoch = analysis.analysis_epoch();
         metadata.history_start_sample = analysis.history_start_sample();
+        if metadata.status == host_core::SpectrumStreamStatus::Ready {
+            metadata.status = host_core::SpectrumStreamStatus::Pending;
+        }
         Ok(StreamOutcome {
             metadata,
             ready: false,

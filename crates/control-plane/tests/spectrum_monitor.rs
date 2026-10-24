@@ -28,7 +28,8 @@ use protocol::{
     EditPath, ExpectedRevision, ParameterChannel, ProtocolCodec, RequestId, SessionEdit,
     SessionSnapshotRequest, SpectrumCaptureReply, SpectrumCaptureRequest as CaptureRequest,
     SpectrumCaptureStatus, SpectrumConfigureRequest, SpectrumConfigured, SpectrumEntry,
-    SpectrumForm, SpectrumTargetKind, StatusCode, TypedCommandFrame,
+    SpectrumForm, SpectrumStreamReply, SpectrumStreamRequest as StreamRequest,
+    SpectrumStreamStatus as StreamStatus, SpectrumTargetKind, StatusCode, TypedCommandFrame,
 };
 use session::{
     RouteDestination, RouteSource, SessionModel, StableId, Submix, canonical_session_json,
@@ -45,6 +46,9 @@ struct Adapter;
 impl ControlAdapter for Adapter {
     type Row = PlanResources;
     const ADAPTER_ALLOCATIONS: &'static [u64] = &[];
+    /// As the C ABI's: the session advertises the spectrum reads (#1595 R2), so a boot
+    /// configuration passes R6.
+    const SPECTRUM: bool = true;
 }
 
 /// The C ABI's preparation: host-core's one session entry.
@@ -315,6 +319,49 @@ impl Rig {
             .command(&bytes[..length], 65_536)
             .expect("a capture answers a frame");
         self.session.command_response(length).to_vec()
+    }
+
+    /// Send one `SPECTRUM_STREAM` (#1595) as a new request: its reply, or the refusal's status
+    /// and code.
+    fn stream(
+        &mut self,
+        request: &StreamRequest,
+    ) -> Result<SpectrumStreamReply<'static>, (StatusCode, String)> {
+        self.request += 1;
+        let codec = ProtocolCodec::default();
+        let frame = TypedCommandFrame {
+            request_id: RequestId::new(self.request).expect("nonzero request"),
+            expected_revision: ExpectedRevision::Any,
+            payload: CommandPayload::SpectrumStream(request),
+        };
+        let mut bytes = vec![0_u8; codec.limits().max_frame_bytes];
+        let length = codec
+            .encode_command_frame_into(&frame, &mut bytes)
+            .expect("stream command");
+        let length = self
+            .session
+            .command(&bytes[..length], 65_536)
+            .expect("a stream command answers a frame");
+        let mut fields = [0_u16; 64];
+        match codec
+            .decode_typed_response(
+                self.session.command_response(length),
+                &mut DecodeScratch::new(&mut fields),
+            )
+            .expect("a stream response")
+        {
+            DecodedTypedResponseFrame::Success {
+                header,
+                payload: DecodedSuccessResponsePayload::SpectrumStreamed(reply),
+            } => {
+                assert_eq!(header.message_id, protocol::MessageId::SpectrumStream);
+                Ok(reply)
+            }
+            DecodedTypedResponseFrame::NonOk { header, payload } => {
+                Err((header.status, payload.diagnostics[0].code.clone()))
+            }
+            DecodedTypedResponseFrame::Success { .. } => panic!("another success payload"),
+        }
     }
 
     /// Send one `SPECTRUM_CAPTURE` as a new request: its reply, or the refusal's status and code.
@@ -2192,4 +2239,281 @@ fn a_replayed_read_returns_its_bytes_and_pops_nothing() {
         status_of(&rig.capture(&request).expect("read")),
         (SpectrumCaptureStatus::Ready, Some((2, 2_048)))
     );
+}
+
+/// One `SPECTRUM_STREAM` reply's machine facts, comparable to the core's metadata.
+fn stream_facts(reply: &SpectrumStreamReply<'_>) -> (u8, u64, u64, u64, u64, u64, u32) {
+    (
+        reply.status.code(),
+        reply.sequence,
+        reply.windows,
+        reply.dropped_captures,
+        reply.captured_sample,
+        reply.end_sample,
+        reply.hop_frames,
+    )
+}
+
+/// The core's metadata facts, as [`stream_facts`] takes them from a reply.
+fn core_facts(metadata: &host_core::SpectrumStreamMetadata) -> (u8, u64, u64, u64, u64, u64, u32) {
+    (
+        u8::try_from(metadata.status.code()).expect("a status code"),
+        metadata.sequence,
+        metadata.windows,
+        metadata.dropped_captures,
+        metadata.captured_sample,
+        metadata.end_sample,
+        metadata.hop_frames,
+    )
+}
+
+/// #1595 gate 4. Turns red if a stream reply's status, epochs, drop count or bins differ from the
+/// core machine: on the collection `(eq0 post-input, Stereo)`, `(eq1 post-input, Left)` (post-input:
+/// a boundary the tone reaches at full level), `select` `eq0` answers `inactive` with selection
+/// epoch 1; `start` (100 ms smoothing) answers `warming`,
+/// and every read after each block equals, in status, sequence, window count, drops, samples and
+/// hop, the core's `read_stream` on the reference session fed the same PCM, with the bins of the
+/// first four ready windows equal word for word to `analyze_stream_into` there, and ready windows
+/// one hop apart. A `select` of `eq1` at 50 ms answers `warming` with both the selection epoch
+/// and the analysis epoch one more; three hops without a read give `gap` with two dropped
+/// windows, then `ready`; `reset` advances the analysis epoch and answers `pending` (only a read
+/// delivers a window); a one-shot cancel is
+/// `VALIDATION_FAILED` `spectrum.stream.active`; `stop` answers `stopped`.
+#[test]
+fn a_stream_read_follows_the_core_machine() {
+    let target = SpectrumTarget::TrackPostInputBuiltins("eq0".into());
+    let entries = vec![
+        SpectrumCaptureCollectionEntry {
+            target: target.clone(),
+            channels: SpectrumChannels::Stereo,
+        },
+        SpectrumCaptureCollectionEntry {
+            target: SpectrumTarget::TrackPostInputBuiltins("eq1".into()),
+            channels: SpectrumChannels::Left,
+        },
+    ];
+    let maximum_capture_bytes = spectrum_capture_collection_resources(&entries)
+        .expect("collection resources")
+        .retained_bytes;
+    let mut rig = Rig::new(Some(SpectrumConfiguration {
+        preparation: SpectrumPreparation::Collection(SpectrumCaptureCollectionRequest {
+            entries,
+            maximum_capture_bytes,
+        }),
+        hop: None,
+    }));
+    let mut reference = Reference::of(&SpectrumCaptureRequest {
+        maximum_capture_bytes: spectrum_capture_resources_for(&target).retained_bytes,
+        target,
+        channels: SpectrumChannels::Stereo,
+    });
+    let mut analysis = host_core::SpectrumAnalysis::new();
+    let selected = rig
+        .stream(&StreamRequest::Select {
+            target_kind: SpectrumTargetKind::TrackPostInput,
+            target_id: "eq0".to_owned(),
+            channels: ParameterChannel::Both,
+            smoothing_ms: None,
+        })
+        .expect("select");
+    assert_eq!(
+        (selected.status, selected.selection_epoch),
+        (StreamStatus::Inactive, 1)
+    );
+    let hop = host_core::SpectrumCadence::new(SAMPLE_RATE_HZ, QUANTUM as u32)
+        .expect("a launch cadence")
+        .hop_frames();
+    let mut ready = Vec::new();
+    let mut last = None;
+    for block in 0..STREAM_BLOCK + 80 {
+        if block == STREAM_BLOCK {
+            let started = rig
+                .stream(&StreamRequest::Start {
+                    smoothing_ms: 100.0,
+                })
+                .expect("start");
+            assert_eq!(started.status, StreamStatus::Warming);
+            reference
+                .service
+                .start_stream(
+                    SpectrumSmoothingConfig::new(100.0).expect("smoothing"),
+                    Some(&mut analysis),
+                )
+                .expect("reference start");
+        }
+        rig.block();
+        reference.block();
+        if block < STREAM_BLOCK {
+            continue;
+        }
+        let reply = rig.stream(&StreamRequest::Read).expect("read");
+        reference
+            .service
+            .read_stream(Some(&mut analysis))
+            .expect("reference read");
+        let mut want = *reference.service.stream_metadata();
+        let mut bins = host_core::SpectrumAnalysisResult::new();
+        if let Some(window) = reference.service.stream_window() {
+            analysis
+                .analyze_stream_into(window, &mut bins, &mut want)
+                .expect("reference analysis");
+        }
+        assert_eq!(stream_facts(&reply), core_facts(&want), "block {block}");
+        if reply.status == StreamStatus::Ready {
+            let got = reply.bins.as_ref().expect("ready bins");
+            if ready.len() < 4 {
+                assert!(
+                    bins.left_dbfs.iter().any(|bin| *bin > -60.0),
+                    "a spectrum of signal"
+                );
+                assert!(same_words(&got.frequencies_hz, &bins.frequencies_hz));
+                assert!(same_words(
+                    got.left_db.as_deref().expect("left"),
+                    &bins.left_dbfs
+                ));
+                assert!(same_words(
+                    got.right_db.as_deref().expect("right"),
+                    &bins.right_dbfs
+                ));
+            }
+            ready.push(reply.captured_sample);
+        }
+        last = Some(reply);
+    }
+    assert!(ready.len() >= 4, "{} ready windows", ready.len());
+    assert!(
+        ready
+            .windows(2)
+            .all(|pair| pair[1] - pair[0] == u64::from(hop))
+    );
+    let before = last.expect("a read");
+
+    let selected = rig
+        .stream(&StreamRequest::Select {
+            target_kind: SpectrumTargetKind::TrackPostInput,
+            target_id: "eq1".to_owned(),
+            channels: ParameterChannel::Left,
+            smoothing_ms: Some(50.0),
+        })
+        .expect("select eq1");
+    assert_eq!(
+        (
+            selected.status,
+            selected.selection_epoch,
+            selected.analysis_epoch,
+            selected.smoothing_ms
+        ),
+        (
+            StreamStatus::Warming,
+            before.selection_epoch + 1,
+            before.analysis_epoch + 1,
+            50.0
+        )
+    );
+    let mut reads = 0;
+    let window = loop {
+        rig.block();
+        let reply = rig.stream(&StreamRequest::Read).expect("read eq1");
+        if reply.status == StreamStatus::Ready {
+            break reply;
+        }
+        reads += 1;
+        assert!(reads < 64, "eq1 reads ready");
+    };
+    let bins = window.bins.as_ref().expect("bins");
+    assert!(bins.left_db.is_some() && bins.right_db.is_none());
+    for _ in 0..3 * hop / QUANTUM as u32 {
+        rig.block();
+    }
+    let gap = rig.stream(&StreamRequest::Read).expect("gap");
+    assert_eq!(
+        (gap.status, gap.dropped_captures),
+        (StreamStatus::Gap, 2),
+        "{gap:?}"
+    );
+    rig.block();
+    let mut after = rig.stream(&StreamRequest::Read).expect("after the gap");
+    while after.status != StreamStatus::Ready {
+        rig.block();
+        after = rig.stream(&StreamRequest::Read).expect("after the gap");
+    }
+    let reset = rig.stream(&StreamRequest::Reset).expect("reset");
+    assert_eq!(
+        (reset.status, reset.analysis_epoch),
+        (StreamStatus::Pending, after.analysis_epoch + 1)
+    );
+    assert_eq!(
+        rig.capture(&CaptureRequest::Cancel),
+        Err((
+            StatusCode::ValidationFailed,
+            "spectrum.stream.active".to_owned()
+        ))
+    );
+    let stopped = rig.stream(&StreamRequest::Stop).expect("stop");
+    assert_eq!(stopped.status, StreamStatus::Stopped);
+}
+
+/// #1595 gate 3 (stream) and R6. Turns red if a stream read pops a window or consumes a `gap` it
+/// then fails to deliver, or R6 measures a tap's one-plane stream read wrongly: on a session
+/// whose frame limit is 12,288 bytes, a stereo `eq0` stream whose queue dropped two windows answers
+/// a read `LIMIT_EXCEEDED` `spectrum.frame` (its ready reply is larger), and the core's next read
+/// is still that `gap` with both drops. A tap is refused `spectrum.frame` by a configure and by a
+/// boot at the one-plane one-shot size (the stream's one-plane reply is larger), and accepted at
+/// the one-plane stream size.
+#[test]
+fn a_stream_read_the_frame_cannot_carry_consumes_nothing() {
+    let codec = ProtocolCodec::default();
+    let size = |bytes: Result<usize, protocol::EncodeError>| {
+        u64::try_from(bytes.expect("a ready frame")).expect("a size")
+    };
+    let stereo = size(codec.spectrum_stream_ready_frame_len(ParameterChannel::Both, 3));
+    let one_plane = size(codec.spectrum_stream_ready_frame_len(ParameterChannel::Left, 3));
+    let one_shot = size(codec.spectrum_capture_ready_frame_len(ParameterChannel::Left, false, 3));
+    assert!(one_shot < one_plane && one_plane < 12_288 && 12_288 < stereo);
+    let at = |limit: u64| ControlLimits {
+        maximum_control_frame_bytes: limit,
+        ..limits()
+    };
+    let mut rig = Rig::limited(SESSION, Some(configuration()), at(12_288));
+    assert_eq!(
+        rig.stream(&StreamRequest::Start { smoothing_ms: 0.0 })
+            .map(|reply| reply.status),
+        Ok(StreamStatus::Warming)
+    );
+    let mut blocks = 0;
+    while rig.read_stream().status != SpectrumStreamStatus::Ready {
+        rig.block();
+        blocks += 1;
+        assert!(blocks < 64, "the stream reads ready");
+    }
+    let hop = rig.service().stream_metadata().hop_frames;
+    for _ in 0..3 * hop / QUANTUM as u32 {
+        rig.block();
+    }
+    assert_eq!(
+        rig.stream(&StreamRequest::Read),
+        Err((StatusCode::LimitExceeded, "spectrum.frame".to_owned()))
+    );
+    assert_eq!(rig.read_stream().status, SpectrumStreamStatus::Gap);
+    assert_eq!(rig.service().stream_metadata().dropped_captures, 2);
+
+    let mut small = Rig::limited(SESSION, None, at(one_shot));
+    assert_eq!(
+        small.configure(&single_request()),
+        Err((StatusCode::LimitExceeded, "spectrum.frame".to_owned()))
+    );
+    let mut fits = Rig::limited(SESSION, None, at(one_plane));
+    assert!(fits.configure(&single_request()).is_ok());
+    let boot = |limit| {
+        compile_children::<Adapter>(
+            SESSION,
+            at(limit),
+            Box::new(Preparer),
+            Some(configuration()),
+        )
+        .map(|_| ())
+        .map_err(|failure| failure.diagnostic().into_owned())
+    };
+    assert_eq!(boot(one_shot), Err(b"spectrum.frame\t$\n".to_vec()));
+    assert_eq!(boot(one_plane), Ok(()));
 }
