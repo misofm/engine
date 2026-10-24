@@ -184,7 +184,7 @@ acknowledges nothing, adds no queue, and never takes or drops a pending candidat
 candidate stays in its mailbox cell until render adopts it, and its provider is promoted only
 after. So an ack cannot precede a drop through it. Results: `OK`; a null session
 `INVALID_ARGUMENT` and another handle `WRONG_HANDLE`, as every session call; an epoch
-synchronization failure `INTERNAL` with the session diagnostic `capi.source.epoch`, the one the
+synchronization failure `INTERNAL` with the session diagnostic `source.epoch`, the one the
 source calls already set for it. The host's duty, in the header: a pending edit progresses only
 while the host makes session calls, the same duty as draining events. A host that renders but
 never calls keeps retired plans allocated, and its next structural edit waits for that reclaim; a
@@ -243,7 +243,7 @@ published generation or a consumer's (`source.generation.stale`), an unaligned a
 (`source.seek.anchor_unaligned`) or a `T` over the timeline limit
 (`source.seek.frame_out_of_range`); `BACKPRESSURE` with `source.seek.backpressure` while any slot
 holds a seek; the source seek's mapping otherwise (`INVALID_ARGUMENT` with `source.ring.vacated`,
-`INTERNAL` with `capi.source.epoch` or `source.internal`). The anchored form takes the anchor of
+`INTERNAL` with `source.epoch` or `source.internal`). The anchored form takes the anchor of
 `miso_engine_v1_source_seek_at`. A per-source seek leaves the timeline where it is.
 
 A plain session seek is a declared discontinuity; the engine declares it in the same call, and a

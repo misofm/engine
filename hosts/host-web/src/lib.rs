@@ -36,7 +36,7 @@ use builtins_compiler::MeterConsumer;
 use control_plane::{
     CompileFailure, ControlAdapter, ControlLimits, ObservationChange, ObservationKeyError,
     ObservationKeyRef, ObservationRefusal, PlanQueries, PlanResources, PlanState,
-    SessionSeekFailure, SessionState, SourceFailure,
+    SessionSeekFailure, SessionState, SourceFailure, SourceRefusalKind,
 };
 use effect_contract::{ObservationCost, ObservationDescriptor};
 use engine::realtime::{
@@ -2662,6 +2662,32 @@ impl AudioWorkletEngineHost {
         })
     }
 
+    /// A refused source call (#1706 D3): the control plane's diagnostic for `failure` into the
+    /// session diagnostic and the response, as a refused control call writes its own, and the
+    /// result code of the failure's kind. It records nothing: each caller records exactly when
+    /// its call records its results. The copy is into preallocated storage, so `submit_source`
+    /// calls it from `process()`.
+    pub(crate) fn refuse_source(&mut self, failure: SourceFailure) -> u32 {
+        if let Some(buffers) = self.buffers.as_mut() {
+            let diagnostic = failure.diagnostic().as_bytes();
+            let kept = diagnostic.len().min(buffers.diagnostic.len());
+            buffers.diagnostic[..kept].copy_from_slice(&diagnostic[..kept]);
+            self.diagnostic_len = kept;
+            self.control_response = ControlResponse::Diagnostic;
+        }
+        match failure.kind() {
+            SourceRefusalKind::InvalidArgument => RESULT_INVALID_ARGUMENT,
+            SourceRefusalKind::Backpressure => RESULT_BACKPRESSURE,
+            SourceRefusalKind::Internal => RESULT_INTERNAL,
+        }
+    }
+
+    /// A source ID the staging cannot hold (#1706 D4): the core's malformed-ID refusal, unrecorded
+    /// as `refuse_source`.
+    pub(crate) fn refuse_source_id(&mut self) -> u32 {
+        self.refuse_source(SourceFailure::Control(SourceControlError::InvalidId))
+    }
+
     /// Dequeue the next event of `lane` (issue #1570b D1): `0` is the reliable lane, `1` the lossy
     /// lane, the C ABI's codes. This is the browser form of `miso_engine_v1_dequeue_event`: the
     /// same [`control_plane::SessionState::dequeue_event`], with the whole response scratch as
@@ -2864,6 +2890,7 @@ impl AudioWorkletEngineHost {
     /// again); a source the session does not declare is [`RESULT_INVALID_ARGUMENT`]. Every refusal
     /// leaves the record alone. Like [`Self::service`] it leaves the status's last result alone.
     pub fn read_seek_report(&mut self, source_id: &[u8]) -> u32 {
+        self.control_response = ControlResponse::None;
         if self.status.state != STATE_READY {
             return RESULT_REFUSED_LIFECYCLE;
         }
@@ -2884,7 +2911,7 @@ impl AudioWorkletEngineHost {
                 };
                 RESULT_OK
             }
-            Err(failure) => source_failure_result(failure),
+            Err(failure) => self.refuse_source(failure),
         }
     }
 
@@ -3633,6 +3660,7 @@ impl AudioWorkletEngineHost {
         frames: u32,
         end_of_region: bool,
     ) -> u32 {
+        self.control_response = ControlResponse::None;
         if self.status.state != STATE_READY {
             return self.record(RESULT_WRONG_STATE);
         }
@@ -3658,7 +3686,7 @@ impl AudioWorkletEngineHost {
         );
         let code = match result {
             Ok(_) => RESULT_OK,
-            Err(failure) => source_failure_result(failure),
+            Err(failure) => self.refuse_source(failure),
         };
         self.record(code)
     }
@@ -3671,6 +3699,7 @@ impl AudioWorkletEngineHost {
     /// position while the absolute render clock stays continuous; it therefore neither resets
     /// meter accumulators nor advances the meter publication epoch.
     pub fn seek_source(&mut self, source_id: &[u8], generation: u64, source_frame: u64) -> u32 {
+        self.control_response = ControlResponse::None;
         if self.status.state != STATE_READY {
             return self.record(RESULT_WRONG_STATE);
         }
@@ -3683,7 +3712,10 @@ impl AudioWorkletEngineHost {
             .sources
             .binary_search_by(|source| source.id.as_str().as_bytes().cmp(source_id))
         else {
-            return self.record(RESULT_INVALID_ARGUMENT);
+            // The core's refusal for an ID that names no source, as the C ABI reports it.
+            let failure = SourceFailure::Control(SourceControlError::unmatched_id(source_id));
+            let code = self.refuse_source(failure);
+            return self.record(code);
         };
         if !plan.can_prepare_source_seek(source_index) {
             return self.record(RESULT_WRONG_STATE);
@@ -3699,7 +3731,7 @@ impl AudioWorkletEngineHost {
                     RESULT_INTERNAL
                 }
             }
-            Err(failure) => source_failure_result(failure),
+            Err(failure) => self.refuse_source(failure),
         };
         self.record(code)
     }
@@ -3713,7 +3745,7 @@ impl AudioWorkletEngineHost {
     /// anchored seek is held by the ring and the consumer applies it at its anchor block, where
     /// `prepare_source_seek` would refuse a held seek. A host that is not ready refuses with
     /// [`RESULT_REFUSED_LIFECYCLE`] and changes nothing; the core's refusals map through
-    /// `source_failure_result` (an unknown source or an anchor that is not a quantum multiple is
+    /// `refuse_source` (an unknown source or an anchor that is not a quantum multiple is
     /// [`RESULT_INVALID_ARGUMENT`]).
     pub fn seek_source_at(
         &mut self,
@@ -3722,6 +3754,7 @@ impl AudioWorkletEngineHost {
         source_frame: u64,
         anchor_sample: u64,
     ) -> u32 {
+        self.control_response = ControlResponse::None;
         if self.status.state != STATE_READY {
             return self.record(RESULT_REFUSED_LIFECYCLE);
         }
@@ -3733,7 +3766,7 @@ impl AudioWorkletEngineHost {
             .seek_at(source_id, generation, source_frame, anchor_sample)
         {
             Ok(()) => RESULT_OK,
-            Err(failure) => source_failure_result(failure),
+            Err(failure) => self.refuse_source(failure),
         };
         self.record(code)
     }
@@ -3748,7 +3781,7 @@ impl AudioWorkletEngineHost {
     /// logic, and it never prepares the plan's consumer: every consumer observes the seek through
     /// its command queue at the next block, the timeline included. A host that is not ready
     /// refuses with [`RESULT_REFUSED_LIFECYCLE`] and changes nothing; the core's refusals map
-    /// through `source_failure_result` (a stale generation or an anchor that is not a quantum
+    /// through `refuse_source` (a stale generation or an anchor that is not a quantum
     /// multiple is [`RESULT_INVALID_ARGUMENT`], one full slot [`RESULT_BACKPRESSURE`]). The plain
     /// form declares the discontinuity in the same call (root ruling B16-R9): a plan it publishes
     /// is kept and counted as [`Self::declare_discontinuity`]'s, and a refused declaration
@@ -3777,7 +3810,7 @@ impl AudioWorkletEngineHost {
         ) {
             Ok(()) => self.record(RESULT_OK),
             Err(SessionSeekFailure::Seek(failure)) => {
-                let code = source_failure_result(failure);
+                let code = self.refuse_source(failure);
                 self.record(code)
             }
             // B16-R9: the plain form's declaration refused, reported as
@@ -5393,31 +5426,6 @@ fn exact_retained_bytes(report: &WebResourceReport) -> Result<u64, BootFailure> 
         .checked_add(report.graph_session_plus_plan_bytes)
         .and_then(|total| total.checked_add(report.source_total_bytes))
         .ok_or_else(|| BootFailure::fixed(RESULT_REFUSED_BUDGET, "host.budget.arithmetic"))
-}
-
-/// Map the facade's one typed source rejection onto the frozen browser result codes.
-///
-/// The facade owns the vocabulary and the diagnostic strings; the browser ABI owns the numbers.
-/// Backpressure is bounded and retryable, an internal invariant failure is not the caller's fault,
-/// and everything else is a malformed submission.
-fn source_result(error: SourceControlError) -> u32 {
-    if error.is_backpressure() {
-        RESULT_BACKPRESSURE
-    } else if error.is_internal() {
-        RESULT_INTERNAL
-    } else {
-        RESULT_INVALID_ARGUMENT
-    }
-}
-
-/// The result word of a source submission or seek the control plane's source routing refused
-/// (#1381a D2): the facade's typed rejection as [`source_result`] maps it, or the control plane's
-/// own epoch failure, which is internal.
-fn source_failure_result(failure: SourceFailure) -> u32 {
-    match failure {
-        SourceFailure::Control(error) => source_result(error),
-        SourceFailure::Internal => RESULT_INTERNAL,
-    }
 }
 
 /// Translate document-derived shape plus host policy into the shared preparation caps.

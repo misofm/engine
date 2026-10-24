@@ -4409,6 +4409,41 @@ pub enum SourceFailure {
     Internal,
 }
 
+/// The kind of result a refused source call reports (#1706 D1): each host maps the three kinds to
+/// its own result codes, and neither holds the rule that classifies a [`SourceFailure`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SourceRefusalKind {
+    /// A caller mistake: the call is refused and retrying it unchanged is refused again.
+    InvalidArgument,
+    /// Bounded backpressure: the host retries.
+    Backpressure,
+    /// An engine invariant or the control plane's epoch synchronisation failed.
+    Internal,
+}
+
+impl SourceFailure {
+    /// The kind of result this refusal reports on every host.
+    #[must_use]
+    pub const fn kind(self) -> SourceRefusalKind {
+        match self {
+            Self::Internal => SourceRefusalKind::Internal,
+            Self::Control(error) if error.is_backpressure() => SourceRefusalKind::Backpressure,
+            Self::Control(error) if error.is_internal() => SourceRefusalKind::Internal,
+            Self::Control(_) => SourceRefusalKind::InvalidArgument,
+        }
+    }
+
+    /// The diagnostic text this refusal reports on every host: the facade's text for a typed
+    /// rejection, and `source.epoch` when the plan epochs could not synchronise.
+    #[must_use]
+    pub const fn diagnostic(self) -> &'static str {
+        match self {
+            Self::Internal => "source.epoch",
+            Self::Control(error) => error.diagnostic(),
+        }
+    }
+}
+
 /// Why a session seek was refused (root ruling B16-R9): the seek's own refusal, or, for the
 /// plain form, the refusal of the discontinuity it declares. Either way nothing was pushed. The
 /// adapter maps `Seek` as it maps a source seek's [`SourceFailure`] and `Declaration` as it maps

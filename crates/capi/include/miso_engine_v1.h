@@ -208,7 +208,7 @@ extern "C" {
  * cost does not grow with the time since the last call. It returns MISO_ENGINE_V1_OK; a null
  * session as MISO_ENGINE_V1_INVALID_ARGUMENT and another handle as MISO_ENGINE_V1_WRONG_HANDLE;
  * and, should the session's plan epochs fail to synchronize, MISO_ENGINE_V1_INTERNAL with the
- * session diagnostic "capi.source.epoch". The host's duty: a pending edit progresses only while the
+ * session diagnostic "source.epoch". The host's duty: a pending edit progresses only while the
  * host makes session calls, the same duty as draining events. A host that renders but never calls
  * keeps retired plans allocated, and its next structural edit waits for that reclaim; a warm
  * successor that misses its deadline falls back only at the host's next session call. The plan
@@ -342,7 +342,7 @@ extern "C" {
  * ("source.generation.stale"), T over the timeline limit ("source.seek.frame_out_of_range"), a
  * source whose producer the newest session does not hold yet ("source.ring.vacated"), and
  * MISO_ENGINE_V1_BACKPRESSURE with "source.seek.backpressure" while any source or the timeline
- * still holds an unpopped seek; MISO_ENGINE_V1_INTERNAL with "capi.source.epoch" when the
+ * still holds an unpopped seek; MISO_ENGINE_V1_INTERNAL with "source.epoch" when the
  * session's plan epochs cannot be synchronized, or with "source.internal" for an engine invariant.
  * miso_engine_v1_session_seek_at(session, g, T, A) is the anchored form, with the anchor of
  * miso_engine_v1_source_seek_at: every consumer changes at the block at A, or, reached late, at
