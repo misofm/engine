@@ -85,3 +85,6 @@ Scope note `scratchpad/opt/scope/1074.md` (Fable, against main 9e99df434) govern
   live-control/automation session and a VCA session, and the meter observer.
 - Console digests: one untimed warmup run of `bench console` at base 9ac7d0d6b and at branch
   ed3c04c3a: all 42 digest lines identical.
+- D16 (root): #15 S1 merged first, so this branch adds the method to `crates/de-esser/src` (impl only):
+  both the per-node and the bank `DeEsser` own no heap (every field, `Coef` and `Chan` included, is
+  inline) and return 0.

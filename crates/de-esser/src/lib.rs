@@ -1063,6 +1063,11 @@ impl<L: Lane, const CONNECTED: bool> DeEsser<L, CONNECTED> {
 }
 
 impl<const CONNECTED: bool> PreparedNativeEffect for DeEsser<f32, CONNECTED> {
+    /// Every field is inline: this instance owns no heap (#1074).
+    fn retained_bytes(&self) -> u64 {
+        0
+    }
+
     fn reset(&mut self, kind: ResetKind) {
         DeEsser::reset(self, kind);
     }
@@ -1187,6 +1192,11 @@ impl<L: Lane> DeEsser<L, false> {
 macro_rules! bank_impl {
     ($lane:ty) => {
         impl PreparedNativeEffectBank for DeEsser<$lane, false> {
+            /// Every field is inline: this instance owns no heap (#1074).
+            fn retained_bytes(&self) -> u64 {
+                0
+            }
+
             fn observe_resident_bank(&self, tap_index: u32, out: &mut [ObservationSample]) -> bool {
                 if tap_index != 0 || out.len() != <$lane as Lane>::WIDTH {
                     return false;
