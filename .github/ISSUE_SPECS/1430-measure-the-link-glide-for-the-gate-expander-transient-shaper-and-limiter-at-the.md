@@ -122,3 +122,23 @@ for the compressor only (`FINDINGS.md` 9.5); 9.7 lists the other three as not ve
 
 *Ramp a lane's detector link between modes* (#1370) and *Carry the link record from the edit to the
 lane* (#1371) use its answer.
+
+## Attempt record
+
+### Attempt 1 (2026-10-24, on `6393919cc`)
+
+- **Re-anchored on main.** #1368 (per-lane link state) and #1830 (harness build repair, delay and
+  multiband bypass rows) are merged. The link is still not live: #1370 is open, and
+  `LiveRampRow::LinkGlide` still reads the fader's samples (`crates/controls/src/live_ramps.rs`).
+  The harness built and its 21 tests passed on main before any change, so no repair was needed.
+- **Decisions (scope note, root).** The new CSV is `data/link_glide_effects.csv`
+  (`link_glide.csv`'s columns with `effect` after `rate_hz`). The gate's D3 is analytic, not
+  measured: a detector ramp cannot smooth a threshold crossing, so the gate rows are the
+  emulation's values only and the gate gets no D4 answer. `measure/src/effects.rs` needed no change.
+- **Harness.** `link_glide` takes the effect; its reference is `link_reference` (the shunt dry
+  signal at the effect's latency) for every effect; the zero-latency assertion stays for the
+  compressor only. New test `the_link_reference_is_the_latency_matched_input`; mutant
+  (`link_reference` returns the undelayed source) turns it red.
+- **Result (FINDINGS 9.5.1).** No vacuous row (`step_db` -26.3 to -16.1 dB). `faderMs` is right for
+  the transient shaper and the limiter (at its default lookahead); the gate has no answer from the
+  emulation, and no ramp key governs its threshold crossing. No key change for root.
