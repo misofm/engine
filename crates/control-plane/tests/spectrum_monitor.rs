@@ -270,7 +270,9 @@ impl Rig {
             .test_spectrum_mut()
             .service_and_analysis_mut()
             .expect("a configured session has a service");
-        service.read_stream(Some(analysis)).expect("read the stream");
+        service
+            .read_stream(Some(analysis))
+            .expect("read the stream");
         let metadata = service.stream_metadata();
         Read {
             status: metadata.status,
@@ -646,13 +648,20 @@ fn a_structural_edit_carries_the_stream() {
     });
     let monitor = rig.session.test_spectrum();
     assert_eq!(monitor.configuration(), Some(&collection()));
-    assert_eq!((monitor.configured_epoch(), monitor.adopted_epoch()), (1, 1));
+    assert_eq!(
+        (monitor.configured_epoch(), monitor.adopted_epoch()),
+        (1, 1)
+    );
     assert!(
         rig.session.test_pending_providers().is_empty(),
         "the successor was promoted"
     );
     assert_continuous(&reads);
-    assert_eq!(rig.snapshot(), plain.snapshot(), "no spectrum in the snapshot");
+    assert_eq!(
+        rig.snapshot(),
+        plain.snapshot(),
+        "no spectrum in the snapshot"
+    );
 
     let mut reference = Rig::of(&document_after(&edits), Some(collection()));
     reference.select(&eq0, SpectrumChannels::Stereo);
@@ -711,8 +720,15 @@ fn a_removed_target_drops_its_entry_and_its_arm() {
             channels: SpectrumChannels::Stereo,
         }]
     );
-    assert_eq!((monitor.configured_epoch(), monitor.adopted_epoch()), (2, 2));
-    assert_eq!(rig.snapshot(), plain.snapshot(), "no spectrum in the snapshot");
+    assert_eq!(
+        (monitor.configured_epoch(), monitor.adopted_epoch()),
+        (2, 2)
+    );
+    assert_eq!(
+        rig.snapshot(),
+        plain.snapshot(),
+        "no spectrum in the snapshot"
+    );
 
     rig.rebuild(&remove_track("eq0"));
     plain.rebuild(&remove_track("eq0"));
@@ -723,7 +739,11 @@ fn a_removed_target_drops_its_entry_and_its_arm() {
     let monitor = rig.session.test_spectrum();
     assert!(monitor.service().is_none() && monitor.analysis().is_none());
     assert_eq!(monitor.adopted_epoch(), 3);
-    assert_eq!(rig.snapshot(), plain.snapshot(), "no spectrum in the snapshot");
+    assert_eq!(
+        rig.snapshot(),
+        plain.snapshot(),
+        "no spectrum in the snapshot"
+    );
 
     let mut armed = Rig::new(Some(collection()));
     armed.block();
@@ -779,7 +799,10 @@ fn a_refused_transaction_changes_no_spectrum_state() {
     assert!(rig.apply(&[route, track]).is_err(), "a commit fault");
     let monitor = rig.session.test_spectrum();
     assert_eq!(monitor.configuration(), Some(&collection()));
-    assert_eq!((monitor.configured_epoch(), monitor.adopted_epoch()), (1, 1));
+    assert_eq!(
+        (monitor.configured_epoch(), monitor.adopted_epoch()),
+        (1, 1)
+    );
     assert!(rig.session.test_pending_providers().is_empty());
     rig.select(&eq1, SpectrumChannels::Left);
     let _ = rig.service().cancel();

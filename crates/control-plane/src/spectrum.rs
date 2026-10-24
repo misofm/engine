@@ -32,6 +32,10 @@ pub struct SpectrumMonitor {
 
 /// The spectrum half of one provider epoch (#1593 D5).
 #[derive(Default)]
+#[allow(
+    clippy::large_enum_variant,
+    reason = "one per held epoch; boxing would allocate at promotion"
+)]
 pub(crate) enum EpochSpectrum {
     /// Nothing: the boot epoch, or an epoch whose promotion displaced nothing.
     #[default]
@@ -127,7 +131,10 @@ impl SpectrumMonitor {
     ) -> SpectrumDisplaced {
         self.adopted_epoch = epoch;
         let Some(captures) = captures else {
-            let service = self.service.take().map(|service| (service, self.analysis.take()));
+            let service = self
+                .service
+                .take()
+                .map(|service| (service, self.analysis.take()));
             return SpectrumDisplaced {
                 captures: None,
                 service,
