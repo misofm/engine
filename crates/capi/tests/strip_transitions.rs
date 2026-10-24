@@ -256,6 +256,18 @@ impl Rig {
 
     /// Applies `edits` and returns the edit path of the committed transaction.
     fn apply(&mut self, edits: &[SessionEdit]) -> EditPath {
+        let (code, path) = self.try_apply(edits);
+        assert_eq!(
+            code,
+            RESULT_OK,
+            "the transaction is accepted: {}",
+            self.last_error()
+        );
+        path.expect("a committed transaction's path")
+    }
+
+    /// Submits `edits`; the result code, and the edit path when it committed.
+    fn try_apply(&mut self, edits: &[SessionEdit]) -> (u32, Option<EditPath>) {
         self.request += 1;
         let mut request = vec![0_u8; FRAME_BYTES];
         let len = ProtocolCodec::default()
@@ -280,12 +292,9 @@ impl Rig {
         let code = unsafe {
             miso_engine_v1_submit_command(self.session, request.as_ptr(), len as u64, &mut out)
         };
-        assert_eq!(
-            code,
-            RESULT_OK,
-            "the transaction is accepted: {}",
-            self.last_error()
-        );
+        if code != RESULT_OK {
+            return (code, None);
+        }
         let mut fields = [0_u16; 64];
         let DecodedTypedResponseFrame::Success {
             header,
@@ -315,7 +324,7 @@ impl Rig {
             miso_engine_v1_dequeue_event(self.session, EVENT_LANE_RELIABLE, &mut event_out)
         };
         assert_eq!(code, RESULT_OK, "the commit's reliable event");
-        applied.edit_path
+        (code, Some(applied.edit_path))
     }
 
     fn last_error(&self) -> String {
@@ -481,6 +490,28 @@ fn reference_mutes(model: &SessionModel) -> Vec<SessionEdit> {
     edits
 }
 
+/// The edits that restore `b`, its routes and its source exactly as `model` declares them.
+fn restore(model: &SessionModel) -> Vec<SessionEdit> {
+    let mut edits = vec![
+        SessionEdit::UpsertSource {
+            source: model.sources[1].clone(),
+        },
+        SessionEdit::UpsertTrack {
+            track: model.tracks[1].clone(),
+        },
+    ];
+    edits.extend(
+        model
+            .routes
+            .iter()
+            .filter(|route| route.id.as_str().starts_with("b-"))
+            .map(|route| SessionEdit::UpsertRoute {
+                route: route.clone(),
+            }),
+    );
+    edits
+}
+
 /// A muted track `name` reading `src-a`, and its route into the output.
 fn muted_track(name: &str) -> Vec<SessionEdit> {
     let fixture = session::parse_session_json(FIXTURE).expect("fixture");
@@ -575,6 +606,11 @@ fn a_removed_strip_ramps_out_then_leaves_at_s() {
             fallbacks = Some(before.transition_fallback_count);
             assert_eq!(rig.apply(&removal()), EditPath::Rebuild);
         }
+        // The 1325a boundary (#1325b deletes this): a restore of `b` in phase 1 is refused as
+        // retryable backpressure and changes nothing, so the blocks still equal the reference.
+        if block == K + 4 {
+            assert_eq!(rig.try_apply(&restore(&model)).0, RESULT_BACKPRESSURE);
+        }
         assert_eq!(rig.feed("src-a", block + 1), RESULT_OK);
         if feeding {
             assert_eq!(
@@ -614,6 +650,8 @@ fn a_removed_strip_ramps_out_then_leaves_at_s() {
         }
     }
     assert!(adopted.is_some(), "the removal is adopted");
+    // Once the watermark reports the removal, the same restore commits (#1325b deletes this).
+    assert_eq!(rig.apply(&restore(&model)), EditPath::Rebuild);
 }
 
 /// Gates 3 and 5 (#1325): supersession during phase 1. Without a render in between, `t1` adds a
