@@ -1564,6 +1564,15 @@ fn spectrum_pairing_bytes(handover: &SpectrumHandover) -> Option<u64> {
         .checked_mul(u64::try_from(size_of::<host_core::SpectrumPair>()).ok()?)
 }
 
+/// The host's meter activation, as [`ReadyOwnership::align_meters`] moves it (#1581 D5): the
+/// first sample the poll accepts strip windows from, whether the lease is held, and the window in
+/// frames.
+struct MeterActivation<'a> {
+    activation: &'a mut u64,
+    lease: bool,
+    period: u64,
+}
+
 /// Everything one compiled session owns on the browser side.
 ///
 /// Field order is the drop order and is load-bearing: the control plane's session drops first (its
@@ -1931,6 +1940,7 @@ impl ReadyOwnership {
         swap_carried: bool,
         carried: &[CarriedReader],
         first_sample: u64,
+        meters: MeterActivation<'_>,
     ) {
         self.shape_epoch = epoch;
         let meters_carried = carried
@@ -2028,12 +2038,14 @@ impl ReadyOwnership {
                 self.meter_loss_count = lost;
                 self.meter_generation = self.meter_generation.saturating_add(1);
                 self.meter_grid_origin = first_sample;
-                // The restarted strip meters open their first window at this block, so the output
-                // meter does too (#1581 D5): a gate moved to this block discards the window it has
-                // open before the block is observed. A gate not yet reached opens nothing, so it
-                // stays where it is.
-                if self.output_gate_from != u64::MAX && self.output_gate_from < first_sample {
-                    self.set_output_gate(first_sample);
+                // The restarted strip meters open their first window at this block, a new grid
+                // (#1581 D5). A held lease, active or still waiting for its activation, moves to
+                // that grid's first boundary at or after both, and the gate with it, before the
+                // block is observed: an active lease restarts here, and a moved gate discards the
+                // window the output meter has open.
+                if meters.lease {
+                    let from = (*meters.activation).max(first_sample);
+                    self.align_meters(meters, from);
                 }
             }
             // The tables hold the admissions made against the plan before it rendered; the block
@@ -2104,6 +2116,38 @@ impl ReadyOwnership {
             self.shape.meter_header.master_gr_present = 0;
             self.shape.meter_header.reserved[1] = 0;
             self.meter_windows = 0;
+        }
+    }
+
+    /// The first boundary at or after `sample` of the strip meters' window grid (#1581 D5):
+    /// `meter_grid_origin + k * period`, or `sample` itself with no period.
+    fn grid_boundary(&self, sample: u64, period: u64) -> u64 {
+        let origin = self.meter_grid_origin;
+        if period == 0 {
+            return sample;
+        }
+        if sample <= origin {
+            return origin;
+        }
+        let remainder = (sample - origin) % period;
+        sample.saturating_add(if remainder == 0 {
+            0
+        } else {
+            period - remainder
+        })
+    }
+
+    /// The one activation rule (#1581 D5), for every event that moves the grid or the lease (a
+    /// lease change, a producer reset, a swap that carries no meter): the activation is the
+    /// grid's first boundary at or after `from`, and the output meter's gate opens there while the
+    /// lease is held and is shut otherwise. The strip windows the poll accepts and the output
+    /// windows the gate admits are then one grid's.
+    fn align_meters(&mut self, meters: MeterActivation<'_>, from: u64) {
+        *meters.activation = self.grid_boundary(from, meters.period);
+        if meters.lease {
+            self.set_output_gate(*meters.activation);
+        } else {
+            self.clear_output_gate();
         }
     }
 
@@ -3561,7 +3605,9 @@ impl AudioWorkletEngineHost {
             return self.record(RESULT_OK);
         }
         self.meter_lease = enabled;
-        self.meter_activation_sample = self.next_meter_boundary(self.status.next_absolute_sample);
+        let period = self.meter_period();
+        let from = self.status.next_absolute_sample;
+        self.meter_activation_sample = from;
         if let Some(ready) = self.ready.as_mut() {
             ready.meter_generation = ready.meter_generation.saturating_add(1);
             ready.reset_meter_delivery(true);
@@ -3569,39 +3615,24 @@ impl AudioWorkletEngineHost {
             ready.shape.meter_header.reserved[0] = ready.meter_generation;
             // #1581 D5: the lease drives the output meter's gate. It observes from the activation
             // boundary on, and a release stops it and discards the window it has open.
-            if enabled {
-                ready.set_output_gate(self.meter_activation_sample);
-            } else {
-                ready.clear_output_gate();
-            }
+            ready.align_meters(
+                MeterActivation {
+                    activation: &mut self.meter_activation_sample,
+                    lease: enabled,
+                    period,
+                },
+                from,
+            );
         }
         self.record(RESULT_OK)
     }
 
-    /// The first boundary at or after `sample` of the strip meters' window grid
-    /// ([`ReadyOwnership::meter_grid_origin`]), the one grid the output meter's gate opens on.
-    fn next_meter_boundary(&self, sample: u64) -> u64 {
-        let Some(period) = self
-            .options
+    /// The meter window in frames (`blocks * quantum`), `0` with no meter window.
+    fn meter_period(&self) -> u64 {
+        self.options
             .live_control_meter_blocks
             .checked_mul(u64::from(self.status.quantum_frames))
-            .filter(|period| *period != 0)
-        else {
-            return sample;
-        };
-        let origin = self
-            .ready
-            .as_ref()
-            .map_or(0, |ready| ready.meter_grid_origin);
-        if sample <= origin {
-            return origin;
-        }
-        let remainder = (sample - origin) % period;
-        sample.saturating_add(if remainder == 0 {
-            0
-        } else {
-            period - remainder
-        })
+            .unwrap_or(0)
     }
 
     /// Mutable source-ID staging storage, available only after preparation.
@@ -3894,6 +3925,7 @@ impl AudioWorkletEngineHost {
         // Lossless on every supported target (wasm32 and every 64-bit host); `try_from` would
         // leave an `expect_failed` trap owner in the render export's call graph.
         let quantum = self.status.quantum_frames as usize;
+        let meter_period = self.meter_period();
         let (Some(ready), Some(plan)) = (self.ready.as_mut(), self.plan.as_mut()) else {
             return self.fail(RESULT_INTERNAL, b"web.internal.ready\t$\n");
         };
@@ -3932,7 +3964,17 @@ impl AudioWorkletEngineHost {
                     let carried = plan
                         .active_attachment_mut::<RenderCompanions>()
                         .map_or(&[][..], |companions| companions.carried());
-                    ready.adopt_shape(epoch, swap_carried, carried, render_first_sample);
+                    ready.adopt_shape(
+                        epoch,
+                        swap_carried,
+                        carried,
+                        render_first_sample,
+                        MeterActivation {
+                            activation: &mut self.meter_activation_sample,
+                            lease: self.meter_lease,
+                            period: meter_period,
+                        },
+                    );
                 }
                 self.status.next_absolute_sample = next_absolute_sample;
                 self.status.rendered_quanta = self.status.rendered_quanta.saturating_add(1);
@@ -4079,7 +4121,7 @@ impl AudioWorkletEngineHost {
         if !self.meter_lease || self.status.state != STATE_READY {
             return 0;
         }
-        let reset_activation_sample = self.next_meter_boundary(self.status.next_absolute_sample);
+        let period = self.meter_period();
         let (Some(ready), Some(plan)) = (self.ready.as_mut(), self.plan.as_mut()) else {
             return 0;
         };
@@ -4242,7 +4284,6 @@ impl AudioWorkletEngineHost {
                 ready.meter_generation = ready.meter_generation.saturating_add(1);
                 ready.reset_meter_delivery(false);
                 ready.meter_loss_count = 1;
-                self.meter_activation_sample = reset_activation_sample;
                 producer_reset = true;
                 break;
             }
@@ -4267,9 +4308,14 @@ impl AudioWorkletEngineHost {
             // the window it has open).
             *output_pops = ready.output_discard;
             ready.output_discard = 0;
-            if ready.output_gate_from != u64::MAX {
-                ready.set_output_gate(self.meter_activation_sample);
-            }
+            ready.align_meters(
+                MeterActivation {
+                    activation: &mut self.meter_activation_sample,
+                    lease: true,
+                    period,
+                },
+                self.status.next_absolute_sample,
+            );
             return 0;
         }
         if !folded && !master_only {
