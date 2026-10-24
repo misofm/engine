@@ -62,6 +62,12 @@ import type {
  * sources, the console slots -- and the builder keeps a working copy, so an `upsertTrack` sees an
  * earlier `upsertSource` of the same transaction.
  *
+ * The builder checks the shape of each edit, not the references between entities: the engine's
+ * store refuses those at the transaction's final validation with a typed missing-entity error, so
+ * nothing is lost silently. A sidechain source, a sidechain whose source track a later edit
+ * removes, and automation that targets a removed insert are the store's to refuse, as they are for
+ * `SessionBuilder`.
+ *
  * # What the frame carries, and when
  *
  * `build()` encodes the edits: each one is a `SessionEdit` message `{ opcode: u16, payload }`

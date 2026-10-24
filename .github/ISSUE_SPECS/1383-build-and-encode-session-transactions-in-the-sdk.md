@@ -197,9 +197,13 @@ transaction format.
   `setConsole` (#1385), so it validates the strip, the entries against the slots and `rampSamples`
   (`requireU32`), then refuses with that code. The encoder (track ID, repeated entries, optional
   field 3 `ramp_samples` written only when given) is in place, but its bytes and its ramp rows
-  (omitted, 0, 960) cannot reach the oracle until #1385's `setConsole` opens it; those rows belong
-  to #1385's gate 1.
+  (omitted, 0, 960) cannot be tested yet: the public builder cannot make the frame until #1385's
+  `setConsole` opens it; those rows belong to #1385's gate 1.
 - **Evals.** Gate 1 gained one frame of all seven rack and effect edits on a track and a submix
   (racks and orders at 0, 1 and 3); gate 2 one snapshot of put, reorder, retarget, reroute, remove
   and a submix rack; gate 3 one test of their refusals and of `setTrackConsole` (no console change;
   `rampSamples` -1, 1.5, 2^32, "960").
+- **Cross-entity references (root, 2026-10-24).** The builder, like `SessionBuilder`, checks the
+  shape of each edit only; the engine's store refuses a reference between entities (a sidechain
+  source, a removed sidechain source, automation on a removed insert) with a typed
+  `MissingEntityReference`, so nothing is lost silently.

@@ -276,13 +276,18 @@ describe("the builder refuses what the engine would refuse, before any byte exis
         inserts: [
           effect("miso.soft-clip", { drive: 6 }, { slotId: "clip" }),
           effect("miso.parametric-eq", {}, { slotId: "eq" }),
+          effect("miso.compressor", {}, { slotId: "linked", linkMode: "maximum" }),
+          effect("miso.compressor", {}, {
+            slotId: "keyed",
+            sidechain: { source: { kind: "track", trackId: "t", tap: "input" }, portId: "sidechain-in" },
+          }),
         ],
       });
     const tx = transaction(base);
     refused(() => tx.setTrackRack("missing", []), /setTrackRack\("missing"\)\.id: 'missing' is not a declared track or submix/);
     refused(() => tx.removeTrackEffect("t", "gone"), /removeTrackEffect\("t"\)\.slotId: 'gone' is not an insert/);
     refused(() => tx.putTrackEffect("t", 0, effect("miso.delay")), /putTrackEffect\("t"\)\.effect\.slotId/);
-    refused(() => tx.putTrackEffect("t", 2, effect("miso.delay", {}, { slotId: "eq" })), /finalPosition: 2 is past the end of the 1 other/);
+    refused(() => tx.putTrackEffect("t", 4, effect("miso.delay", {}, { slotId: "eq" })), /finalPosition: 4 is past the end of the 3 other/);
     refused(() => tx.putTrackEffect("t", -1, effect("miso.delay", {}, { slotId: "d" })), /finalPosition must be an integer/);
     refused(() => tx.setTrackEffectOrder("t", ["eq"]), /setTrackEffectOrder\("t"\)\.slotIds: expected each of the strip's inserts exactly once/);
     refused(() => tx.setTrackEffectOrder("t", ["eq", "eq"]), /exactly once/);
@@ -290,6 +295,8 @@ describe("the builder refuses what the engine would refuse, before any byte exis
     // soft-clip's parameter 1 is drive in dB; the transient shaper's is attack amount, linear.
     refused(() => tx.setEffectIdentity("t", "clip", "miso.transient-shaper"), /setEffectIdentity\("t", "clip"\)\.effectId: .*is in linear, not db/);
     refused(() => tx.setEffectIdentity("t", "clip", "miso.not-an-effect"), /unknown native effect/);
+    refused(() => tx.setEffectIdentity("t", "linked", "miso.parametric-eq"), /supports only the link modes 'dual_mono', not 'maximum'/);
+    refused(() => tx.setEffectIdentity("t", "keyed", "miso.soft-clip"), /miso\.soft-clip declares no sidechain input/);
     refused(() => tx.setEffectQuality("t", "clip", "high"), /publish only the 'normal' quality/);
     refused(
       () => tx.setEffectSidechain("t", "clip", { source: { kind: "track", trackId: "t", tap: "input" }, portId: "sidechain-in" }),
