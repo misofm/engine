@@ -3388,6 +3388,7 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
             spectrum_collection,
             compiled.sample_rate().0,
             compiled.quantum().0,
+            |target| same_strip_kind(target, base.committed, compiled.normalized_model()),
         ),
         None => SpectrumCarry::default(),
     };
@@ -4059,11 +4060,40 @@ struct SpectrumCarry {
     pairing: Vec<crate::spectrum::SpectrumPair>,
 }
 
+/// Whether `target`'s ID names a strip of one kind in `before` and `after` (#1593 T2b): a track
+/// tap's ID is a track in both or a submix in both. An ID that a transaction moved from a track to
+/// a submix (or back) names another strip, so its observer must not carry. An output target is
+/// always the same kind.
+fn same_strip_kind(
+    target: &crate::spectrum::SpectrumTarget,
+    before: &SessionModel,
+    after: &SessionModel,
+) -> bool {
+    use crate::spectrum::SpectrumTarget;
+    let kind = |model: &SessionModel, id: &str| {
+        if model.tracks.iter().any(|track| track.id.as_str() == id) {
+            Some(false)
+        } else if model.submixes.iter().any(|submix| submix.id.as_str() == id) {
+            Some(true)
+        } else {
+            None
+        }
+    };
+    match target {
+        SpectrumTarget::TrackPostInputBuiltins(id) | SpectrumTarget::TrackPostMatrix(id) => {
+            kind(before, id) == kind(after, id)
+        }
+        SpectrumTarget::Output(_) => true,
+    }
+}
+
 /// Join the successor's spectrum rows `own` with the predecessor's (#1395 D1).
 ///
 /// A capture carries when its target and channels equal a predecessor capture's, both plans run at
-/// one sample rate and quantum, and both hold a single capture or both a collection (the control
-/// side holds one kind and pairs within it); nothing else matters, and nothing in it is a live value, so
+/// one sample rate and quantum, both hold a single capture or both a collection (the control
+/// side holds one kind and pairs within it), and `same_strip` says its target's ID names a strip
+/// of one kind in both plans' models (#1593 T2b: a track ID reused by a submix is another strip);
+/// nothing else matters, and nothing in it is a live value, so
 /// there is no retarget. Matching is by key, never by entry or handle. Every other capture is
 /// fresh.
 fn resolve_spectrum_carry(
@@ -4072,6 +4102,7 @@ fn resolve_spectrum_carry(
     own_is_collection: bool,
     sample_rate_hz: u32,
     quantum_frames: u32,
+    same_strip: impl Fn(&crate::spectrum::SpectrumTarget) -> bool,
 ) -> SpectrumCarry {
     let mut carry = SpectrumCarry::default();
     if predecessor.sample_rate_hz != sample_rate_hz
@@ -4081,7 +4112,7 @@ fn resolve_spectrum_carry(
         return carry;
     }
     let mut taken = vec![false; predecessor.spectrum.len()];
-    for row in own {
+    for row in own.iter().filter(|row| same_strip(&row.target)) {
         let found = predecessor
             .spectrum
             .iter()
@@ -7337,7 +7368,7 @@ mod tests {
         let mut before = inventory_with(lane_row(1, layout()));
         before.spectrum = Box::new([spectrum_row(target(), SpectrumChannels::Stereo, 0, 7)]);
         let own = [spectrum_row(target(), SpectrumChannels::Stereo, 0, 2)];
-        let carry = super::resolve_spectrum_carry(&before, &own, false, 48_000, 128);
+        let carry = super::resolve_spectrum_carry(&before, &own, false, 48_000, 128, |_| true);
         assert_eq!(carry.moves.len(), 1);
         assert_eq!(
             carry.moves[0].predecessor.unit, 7,
@@ -7376,7 +7407,8 @@ mod tests {
                 256,
             ),
         ] {
-            let carry = super::resolve_spectrum_carry(&before, &own, false, rate, quantum);
+            let carry =
+                super::resolve_spectrum_carry(&before, &own, false, rate, quantum, |_| true);
             assert!(
                 carry.moves.is_empty() && carry.pairing.is_empty(),
                 "a changed {label} starts fresh"
@@ -7404,7 +7436,7 @@ mod tests {
             spectrum_row(t(), SpectrumChannels::Stereo, 1, 21),
             spectrum_row(u(), SpectrumChannels::Right, 2, 22),
         ];
-        let carry = super::resolve_spectrum_carry(&before, &own, true, 48_000, 128);
+        let carry = super::resolve_spectrum_carry(&before, &own, true, 48_000, 128, |_| true);
         let pairs: Vec<(usize, usize)> = carry
             .pairing
             .iter()
@@ -7421,14 +7453,14 @@ mod tests {
             vec![(20, 11), (21, 10)],
             "named by their own locations"
         );
-        let none = super::resolve_spectrum_carry(&before, &own, false, 48_000, 128);
+        let none = super::resolve_spectrum_carry(&before, &own, false, 48_000, 128, |_| true);
         assert!(
             none.moves.is_empty() && none.pairing.is_empty(),
             "a collection does not carry into a single capture"
         );
         let mut single = inventory_with(lane_row(1, layout()));
         single.spectrum = Box::new([spectrum_row(t(), SpectrumChannels::Stereo, 0, 10)]);
-        let none = super::resolve_spectrum_carry(&single, &own, true, 48_000, 128);
+        let none = super::resolve_spectrum_carry(&single, &own, true, 48_000, 128, |_| true);
         assert!(
             none.moves.is_empty() && none.pairing.is_empty(),
             "a single capture does not carry into a collection"

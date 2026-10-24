@@ -205,11 +205,19 @@ pub struct PlanUnitEligibility {
     /// `true` for a homogeneous bank chain, `false` for a single dispatched op.
     pub banked: bool,
     /// Issue #970: `true` only for a bank chain every lane of which begins at its track's
-    /// `PostInputBuiltins` stage, the one unit the mono collapse (`arm_mono_collapse`) may arm;
-    /// `false` for every later chain of a split strip and for a single op. A caller reading
+    /// `PostInputBuiltins` stage, the one unit the mono collapse (`arm_mono_collapse`) may arm on
+    /// the structural join alone; `false` for every later chain of a split strip and for a single
+    /// op. Since issue #987 a later chain whose every lane gathers a same-track bank producer is
+    /// armed too, and collapses only on a block its producers rendered with bit-identical planes;
+    /// [`armed_on_input`](Self::armed_on_input) marks it. A caller reading
     /// [`all_lanes_eligible`](Self::all_lanes_eligible) as collapse evidence tests this and
     /// [`witness_is_vacuous`](Self::witness_is_vacuous) first.
     pub gathers_track_input: bool,
+    /// Issue #987: `true` for a later bank chain that the mono collapse armed on its producers:
+    /// every lane gathers a same-track bank producer's planes, and the chain collapses only on a
+    /// block whose producers rendered them bit-identical. `false` for an input-gathering chain,
+    /// an unarmed chain and a single op. Evidence only.
+    pub armed_on_input: bool,
     /// Stages this unit renders: a chain's bound slots, or 1 for a single op.
     pub stages: u32,
     /// Of those, the stages that sit **upstream of the fader/matrix seam** -- the stages a
@@ -252,8 +260,9 @@ impl PlanUnitEligibility {
     /// restated at the plan surface: masking the eligible lanes of a mixed cohort would save
     /// nothing, because the vector op runs every lane regardless. Making a cohort homogeneous is
     /// the *planner's* job (`CohortPoolClass`), not the dispatch's. Collapse also needs
-    /// [`gathers_track_input`](Self::gathers_track_input): a later chain of a split strip reports
-    /// every lane eligible and never arms.
+    /// [`gathers_track_input`](Self::gathers_track_input), or for a later chain of a split strip
+    /// an input its producers proved symmetric on that block (issue #987): such a chain reports
+    /// every lane eligible whatever its input.
     #[must_use]
     pub fn all_lanes_eligible(&self) -> bool {
         !self.lane_eligible.is_empty() && self.lane_eligible.iter().all(|lane| *lane)

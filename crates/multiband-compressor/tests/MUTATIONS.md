@@ -248,3 +248,15 @@ bypass_cohorts multiband`); each mutant was applied to a committed tree and rest
 | 1340-M1 | `finish` zeroes both channels of the whole bank and runs `discontinuity_reset` on both sides (the pre-#1340 recovery) | `src/lib.rs` | `nonfinite::a_failing_bank_lane_recovers_alone`, `bypass_cohorts::a_hot_bypassed_multiband_lane_leaves_its_bank_mates_bits_unchanged` | RED, both: `word 0: a neighbour of the failing lane moved`; `("ch01", "PostSimd2PreFader"): a bank-mate of the hot bypassed lane moved` |
 | 1340-M2 | `discontinuity_reset_lane` does not snap the lane's ramps | `src/lib.rs` | `nonfinite::a_failing_bank_lane_recovers_alone` | RED: `the recovered lane is exactly a fresh instance` (green on 128-frame blocks, where the 64-sample ramp had settled; the test now runs 32-frame blocks) |
 | 1340-M3 | `discontinuity_reset_lane` does not reset the lane's silence clock | `src/lib.rs` | `nonfinite::a_failing_bank_lane_recovers_alone` | RED: `the recovered lane is exactly a fresh instance` |
+
+## Mono collapse (#1871)
+
+Applied in the issue's worktree on the committed attempt-1 tree, run with
+`cargo test --locked -p multiband-compressor --all-features --test mono_collapse`, and restored
+with `git checkout` and `touch`.
+
+| mutation | file | result |
+|---|---|---|
+| `desymmetrize` skips `silence` (copies `filter`, `gain_db`, `ramps`) | `src/lib.rs` | RED: `DualMono: after the copy` (the right counter froze at the collapse) and `silence: after the copy` |
+| `channels_bit_equal` omits both `gain_db` words | `src/lib.rs` | RED: `channels_agree_and_the_witness_read_every_copied_word` at `low gain` |
+| the collapsed body passes `L::zero()` as the link partner (both bands) | `src/lib.rs` | RED: `Four Average block 2: left plane word 0`; `DualMono` ignores the partner and `max(\|p\|, 0) = \|p\|`, so those two modes stay green by construction |

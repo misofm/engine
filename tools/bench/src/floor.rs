@@ -269,7 +269,13 @@ pub(crate) fn floor_row(workload: Workload) -> Option<FloorRow> {
         // feeding a frozen block into the graph adds no lane-op. It names no control and is
         // nobody's. It is the native pure-path target, so its own `percent_of_floor` is the
         // number the pure-path work reads.
-        Workload::SixtyFourTrackGainPanRing => FloorRow {
+        //
+        // The live-producer row (issue #938) renders the ring row's plan, so it states the ring
+        // row's floor: a producer on another core adds no lane-op. What it adds is the read of
+        // input another core wrote, and that is the gap between its measurement and this floor,
+        // read against the ring row's. It names no control: the two rows share one floor, so an
+        // isolate between them would have no inventory to divide by.
+        Workload::SixtyFourTrackGainPanRing | Workload::SixtyFourTrackGainPanLive => FloorRow {
             lane_ops: BUILTINS_IDENTITY_LANE_OPS,
             width_factor: full,
             control: None,

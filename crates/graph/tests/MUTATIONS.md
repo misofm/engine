@@ -735,6 +735,21 @@ each source file restored after its run. x86-64 AVX2 host, debug profile. The ga
 | 1220-11 | `route_segments` forgets that an opening run stored (#1217 verdict 2, MC) | `graph/src/runtime.rs` `route_segments` | `host-core` `a_middle_inactive_route_keeps_every_active_contribution` | RED, 1 of 13: `Bus, 3 inputs, muted [1], plane 0: sample 0: 0.29300022 != 0.36220396`. |
 | 1220-12 | a second attach is accepted (the `AlreadyAttached` refusal removed) | `graph/src/lib.rs` `attach_route_controls` | `route_controls_attach_once` | RED: the second call returns `Ok(2)`, replacing the first call's lanes and orphaning its producers. |
 
+## Issue #987 -- a later chain arms on its producers' rendering
+
+Debug profile, AVX2 host. Each mutant was applied to the committed branch, run against host-core
+`--test collapse_arming` and graph-compiler `a_later_mono_chain_arms_on_its_producers_and_renders_the_dual_bits`,
+and restored with `git checkout`.
+
+| # | mutation | file | test | result |
+|---|---|---|---|---|
+| 987-1 | arm every bank chain on the track join, producer table or not | `graph/src/runtime.rs` `Runtime::arm_mono_collapse` | host-core `an_asymmetric_per_node_delay_between_chains_renders_the_dual_bits`, `only_the_input_gathering_chain_of_a_split_strip_is_armed` | RED, 2 of 8. |
+| 987-2 | the per-block input term is always `true` | `graph/src/runtime.rs` `Runtime::execute` | host-core `a_post_simd1_meter_after_an_asymmetric_eq_renders_the_dual_bits` and three more reproducers | RED, 4 of 8. |
+| 987-3 | the term reads the producer's `can_collapse()` (its arming) instead of `planes_identical()` (its rendering) | `graph/src/runtime.rs` `Runtime::execute` | host-core `a_live_left_only_polarity_write_on_misaligned_cohorts_renders_the_dual_bits` and three more reproducers | RED, 4 of 8. |
+
+Reverting the whole runtime change (the #970 rule alone) reddens the graph-compiler test: `[24, 2]`
+armed against the expected `[48, 4]`.
+
 ## TA1 policy cut (2026-10-18): tests these rows name that no longer exist or no longer assert it
 
 The owner-approved test policy cut (`.github/ISSUE_SPECS/1722-delete-digest-type-size-and-unrun-tests.md`)

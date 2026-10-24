@@ -11,11 +11,13 @@ probe, so the spectral analysis in `f64` measures exactly what the engine render
 
 The decision-15 addition (`src/live_rows.rs`, FINDINGS section 9) also links, by path only, `lane`
 (the live route's `IndexedRamp` and its kernel `route_mix_ramp_block`), `effect-contract`
-(`BypassShunt` and the factory contract) and the six launch effects that have a bypass shunt
-(compressor, gate-expander, parametric EQ, soft clip, transient shaper, true-peak limiter). The
-bypass and link-glide rows emulate a crossfade the engine does not have yet (#1341, #1370) with the
-law #1341 freezes (`src/crossfade.rs`): `y = dry + (wet - dry) * m(k)`, `m` on the indexed law,
-both ends exact copies. Dry is the engine's shunt; wet is the effect's own scalar instance.
+(`BypassShunt` and the factory contract) and the eight launch effects, each with a bypass shunt
+(compressor, delay, gate-expander, multiband compressor, parametric EQ, soft clip, transient shaper,
+true-peak limiter; the delay and the multiband since #1339 and #1340, measured by #1830). The engine
+has had the bypass crossfade since #1341, and #1370's link glide; the bypass and link-glide rows
+emulate both with the same law #1341 freezes (`src/crossfade.rs`): `y = dry + (wet - dry) * m(k)`,
+`m` on the indexed law, both ends exact copies. Dry is the engine's shunt; wet is the effect's own
+scalar instance.
 
 Nothing is timed. The only randomness is fixed-seed SplitMix64, so a rerun at the same commit
 reproduces the CSVs (on 12 threads of a shared machine, `measure` took about 5 minutes of wall time

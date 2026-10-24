@@ -89,6 +89,9 @@ pub struct ProviderEpoch {
     /// its source consumers carried. A successor that supersedes it unadopted is prepared at the
     /// same discontinuity, since render never played this plan.
     pub(crate) discontinuity: bool,
+    /// A candidate's spectrum captures until its promotion installs them (#1593 D5), and what
+    /// that promotion displaced once this epoch is parked.
+    pub(crate) spectrum: crate::spectrum::EpochSpectrum,
 }
 
 /// The committed base an epoch keeps while a successor prepared from it is pending (#1310 D3,
@@ -135,6 +138,21 @@ fn merged_ramps(earlier: &session::EditRamps, later: &session::EditRamps) -> ses
     let mut merged = earlier.clone();
     merged.overlay(later);
     merged
+}
+
+/// A structural successor's preparation failure as the command answers it (#1593 D4): a
+/// `host.spectrum.target` refusal is an invariant fault, because the session prepares a successor
+/// only with entries whose targets its model has; every other failure is the compile's own.
+fn spectrum_invariant(failure: CompileFailure) -> CommandError {
+    let refused = failure
+        .diagnostic()
+        .split(|byte| *byte == b'\n')
+        .any(|line| line.starts_with(b"host.spectrum.target\t"));
+    if refused {
+        CommandError::Internal
+    } else {
+        CommandError::CompileRejected(failure)
+    }
 }
 
 impl ProviderEpoch {
@@ -238,6 +256,7 @@ impl ProviderEpoch {
             kept: None,
             parked: None,
             discontinuity: false,
+            spectrum: crate::spectrum::EpochSpectrum::None,
         };
         #[cfg(feature = "test-support")]
         update_test_owners(|owners| owners.current_provider_constructed += 1);
@@ -268,6 +287,7 @@ impl ProviderEpoch {
             kept: None,
             parked: None,
             discontinuity: false,
+            spectrum: crate::spectrum::EpochSpectrum::None,
         };
         #[cfg(feature = "test-support")]
         update_test_owners(|owners| owners.candidate_provider_constructed += 1);
@@ -2046,12 +2066,30 @@ where
             }
         }
         for row in parked.into_iter().take(index + 1) {
-            let next = self.pending_providers.remove(0);
+            let mut next = self.pending_providers.remove(0);
             // #1768: render adopted `next`'s plan, so the strips it starts at rest restarted.
             let restarted =
                 u64::try_from(next.inventory.restarted_strips().len()).unwrap_or(u64::MAX);
             self.strips_restarted = self.strips_restarted.saturating_add(restarted);
+            // #1593 D5: render adopted `next`'s plan, so the service pairs the readers of the
+            // observers its swap block moved and settles the others. A superseded candidate never
+            // reaches here: it is dropped unpaired.
+            let displaced = match core::mem::take(&mut next.spectrum) {
+                crate::spectrum::EpochSpectrum::Candidate {
+                    captures,
+                    hop,
+                    epoch,
+                } => crate::spectrum::EpochSpectrum::Displaced(self.spectrum.adopt(
+                    captures,
+                    next.inventory.spectrum_pairing(),
+                    hop,
+                    epoch,
+                )),
+                other => other,
+            };
             let mut previous = core::mem::replace(&mut self.providers, next);
+            // Dropped with the parked epoch, when its plan is reclaimed.
+            previous.spectrum = displaced;
             // #1310 D3: render no longer runs the previous plan, so no successor is prepared
             // against its kept base again; the base drops here, on the control thread.
             previous.kept = None;
@@ -2589,16 +2627,23 @@ where
                 )
             }
         };
+        // #1593 D4: the successor keeps every spectrum entry whose target the prospective model
+        // still has. It is stored only beside the candidate push, after the protocol commit.
+        let spectrum_configuration = self
+            .spectrum
+            .successor_configuration(prospective.normalized_model());
         let prepared_runtime = prepare_runtime::<A>(
             &*self.preparer,
             prospective,
             self.limits,
-            self.spectrum.preparation(),
+            spectrum_configuration
+                .as_ref()
+                .map(|configuration| &configuration.preparation),
             Some(base),
             &self.live_values_superseded,
             self.observation_slots_high_water,
         )
-        .map_err(CommandError::CompileRejected)?;
+        .map_err(spectrum_invariant)?;
         let PreparedRuntime {
             sources,
             strips,
@@ -2611,10 +2656,9 @@ where
             control_catalog: candidate_catalog,
             capi: prospective_capi,
             revision_gate,
-            // #1593 T2b pairs the successor's captures at promotion; until then they drop here,
-            // on the control thread. The service keeps the running plan's readers: a carried
-            // observer goes on reading through them, and one that did not carry stays pending.
-            spectrum: _,
+            // #1593 D5, D7: held by the candidate until its promotion pairs them; until then the
+            // service reads the running plan's captures.
+            spectrum: candidate_captures,
         } = prepared_runtime;
         // #1652 U2a fold 2 (MAJOR-A; #1713 deletes it): read before the inventory moves into the
         // candidate's provider epoch.
@@ -2635,6 +2679,14 @@ where
             revision_gate,
         );
         candidate_provider.discontinuity = discontinuity;
+        // The configuration epoch is set beside the push, after the commit.
+        candidate_provider.spectrum = crate::spectrum::EpochSpectrum::Candidate {
+            captures: candidate_captures,
+            hop: spectrum_configuration
+                .as_ref()
+                .and_then(|configuration| configuration.hop),
+            epoch: 0,
+        };
         let candidate_plan = ObservedCandidatePlan::new(candidate_plan);
         #[cfg(feature = "test-support")]
         {
@@ -3055,6 +3107,14 @@ where
         }
         // A move: the list was built before the commit.
         self.observation_forwarded = forwards;
+        // #1593 D4: the configuration the successor was prepared with is the session's from now
+        // on; its epoch is the one the candidate's captures report at promotion.
+        let configured_epoch = self.spectrum.commit(spectrum_configuration);
+        if let crate::spectrum::EpochSpectrum::Candidate { epoch, .. } =
+            &mut candidate_provider.spectrum
+        {
+            *epoch = configured_epoch;
+        }
         self.pending_providers.push(candidate_provider);
         // #1584 D6a: the newest plan's slots, built above. The fold ran when this command was
         // serviced and nothing has been pushed since (one thread), so none is lost.
