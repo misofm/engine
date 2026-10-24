@@ -239,8 +239,9 @@ fn source_exports_after_a_render_with_counter_telemetry_never_allocate(handle: u
                 request_id: RequestId::new(1).expect("nonzero request"),
                 expected_revision: ExpectedRevision::Exact(SessionRevision(revision)),
                 payload: CommandPayload::TelemetryConfigure(&TelemetryConfiguration {
-                    meter_handles: Vec::new(),
+                    meters: Vec::new(),
                     meter_period_blocks: 0,
+                    meter_window_blocks: None,
                     counter_ids: vec![CounterId::LiveValuesSuperseded],
                     counter_period_blocks: 1,
                     diagnostics_enabled: false,

@@ -37,7 +37,9 @@
 // states, fed the same streamed tone, and rendered with no control traffic. A fourth document is the
 // native row `sixty_four_track_console_sparse` (#1744): the standing console's session with every
 // odd track fed exact +0.0 by the harness's own PCM, not by a mute or an edit to any strip (see
-// `sparseDocument`). After the three arms are timed, the four documents are timed alternated per
+// `rebind`), and two more are the native packing rows `sixty_four_track_console_toggle` and
+// `sixty_four_track_console_one_per_bank` (#1783), derived the same way. After the three arms are
+// timed, the six documents are timed alternated per
 // observation, `miso_engine_web_v1_render` alone inside the clock, and the record states each one's
 // percentiles and digest under `documents`. They are the console strip's browser baseline; no
 // per-N browser rows exist, because that would be a second framework.
@@ -53,9 +55,9 @@
 //        node web-mixing-automation-benchmark.mjs rebuild-validate RECORDS.jsonl
 //
 // `preflight` is untimed: seven arms over the pre-roll and the preflight blocks, and the row's
-// premises asserted on their digests; then the four documents over the same blocks, each rendering
+// premises asserted on their digests; then the six documents over the same blocks, each rendering
 // audible bits of its own. `run` asserts the same premises first, then times the three arms
-// alternated per observation, then the four documents alternated per observation, and prints one
+// alternated per observation, then the six documents alternated per observation, and prints one
 // JSON record for ROUND (`warmup`, `1` or `2`; the runner launches one process per round, as the
 // console runner does). Every assertion throws, so a broken premise exits non-zero before any
 // number is printed.
@@ -607,6 +609,7 @@ function loadDocument(fixtureId) {
     bytes: new TextEncoder().encode(stretched),
     sourceId: new TextEncoder().encode(parsed.sources[0].id),
     silentSourceId: null,
+    toggleSourceId: null,
   };
 }
 
@@ -655,7 +658,9 @@ const TABLE_DOCUMENT_KINDS = [
   "sixty_four_track_console", "sixty_four_track_app_shape", "sixty_four_track_console_sends",
 ];
 const SPARSE_KIND = "sixty_four_track_console_sparse";
-const DOCUMENT_KINDS = [...TABLE_DOCUMENT_KINDS, SPARSE_KIND];
+const TOGGLE_KIND = "sixty_four_track_console_toggle";
+const ONE_PER_BANK_KIND = "sixty_four_track_console_one_per_bank";
+const DOCUMENT_KINDS = [...TABLE_DOCUMENT_KINDS, SPARSE_KIND, TOGGLE_KIND, ONE_PER_BANK_KIND];
 const SHORT_NAMES = {
   "miso.parametric-eq": "eq", "miso.compressor": "compressor", "miso.true-peak-limiter": "limiter",
 };
@@ -704,57 +709,86 @@ assert.deepEqual((table.documents ?? []).map((doc) => doc.workload_kind), TABLE_
 // standing fixture binds all sixty-four tracks to its one source. So the odd tracks are bound to a
 // second source of the same shape, which the harness feeds exact +0.0 every block (`feed`). That
 // binding is the only difference from the standing document, and it is asserted: the derived
-// document, its odd tracks bound back and its second source dropped, is the standing one. No strip,
-// fader, mute, route or effect parameter changes. The second source costs one more source
+// document, its rebound tracks bound back and its second source dropped, is the standing one. No
+// strip, fader, mute, route or effect parameter changes. The second source costs one more source
 // consumer step per render inside the clock (its `begin_block`: one ring pop and recycle, no PCM
 // copy), a constant per block that the native row, fed without rings, does not have; it counts
-// against the sparse row. Its submit is outside the clock.
+// against the row. Its submit is outside the clock.
+//
+// The two packing rows (#1783) are derived the same way (`rebind`). The one-per-bank row binds
+// every track but one per four-lane bank (`track % 4 != 0`; host_web.wasm always banks four lanes,
+// as the native row keys the pattern on its build's lane width) to the silent source. The toggle
+// row binds the odd tracks to a third source, which `feed` fills with exact +0.0 and the tone in
+// turns of `TOGGLE_HALF_PERIOD_BLOCKS` source blocks, silent first, as the native row's driver does
+// (`console_workload::TOGGLE_HALF_PERIOD_BLOCKS`; the input's name states the period).
 const SILENT_SOURCE_ID = "fixture-source-silent";
-function sparseDocument(standing) {
+const TOGGLE_SOURCE_ID = "fixture-source-toggle";
+const TOGGLE_HALF_PERIOD_BLOCKS = 8;
+const WASM_LANE_WIDTH = 4;
+// Rebinds every track whose index `rebound(index)` accepts to a second source `sourceId`, of the
+// first source's shape, and returns the derived document. `role` names the field that carries the
+// second source's id, `silentSourceId` or `toggleSourceId`, which is how `feed` knows what to
+// submit to it.
+function rebind(standing, kind, rebound, sourceId, role) {
   const base = standing.fixture.sources[0];
   const binding = `"source_id": "${base.id}"`;
   const bindings = standing.text.split(binding);
-  assert.equal(bindings.length, standing.fixture.tracks.length + 1, `${SPARSE_KIND}: one binding per track`);
+  assert.equal(bindings.length, standing.fixture.tracks.length + 1, `${kind}: one binding per track`);
   // A second source after the first: the same object with another id and content.
   const sourceStart = standing.text.indexOf(`"sources": [`);
   const objectStart = standing.text.indexOf("{", sourceStart);
   const objectEnd = standing.text.indexOf("}", objectStart) + 1;
   const sourceText = standing.text.slice(objectStart, objectEnd);
-  const silentText = sourceText.replace(`"id": "${base.id}"`, `"id": "${SILENT_SOURCE_ID}"`)
-    .replace(`"content": "${base.content}"`, `"content": "blake3:${"0".repeat(64)}"`);
-  assert.notEqual(silentText.indexOf(SILENT_SOURCE_ID), -1, `${SPARSE_KIND}: second source id`);
+  const contentDigit = role === "toggleSourceId" ? "1" : "0";
+  const secondText = sourceText.replace(`"id": "${base.id}"`, `"id": "${sourceId}"`)
+    .replace(`"content": "${base.content}"`, `"content": "blake3:${contentDigit.repeat(64)}"`);
+  assert.notEqual(secondText.indexOf(sourceId), -1, `${kind}: second source id`);
   const indent = standing.text.slice(standing.text.lastIndexOf("\n", objectStart) + 1, objectStart);
-  const withSource = standing.text.slice(0, objectEnd) + `,\n${indent}${silentText}`
+  const withSource = standing.text.slice(0, objectEnd) + `,\n${indent}${secondText}`
     + standing.text.slice(objectEnd);
-  // The bindings appear in track order; every odd one is rebound.
-  const rebound = withSource.split(binding).reduce((text, piece, index) => (index === 0 ? piece
-    : text + (index % 2 === 0 ? `"source_id": "${SILENT_SOURCE_ID}"` : binding) + piece), "");
-  const derived = JSON.parse(rebound);
+  // The bindings appear in track order; every accepted one is rebound.
+  const text = withSource.split(binding).reduce((joined, piece, index) => (index === 0 ? piece
+    : joined + (rebound(index - 1) ? `"source_id": "${sourceId}"` : binding) + piece), "");
+  const derived = JSON.parse(text);
   derived.tracks.forEach((track, index) => {
-    assert.equal(track.id, standing.fixture.tracks[index].id, `${SPARSE_KIND}: track order`);
-    assert.equal(track.source_id, index % 2 === 1 ? SILENT_SOURCE_ID : base.id, `${SPARSE_KIND} ${track.id}: binding`);
+    assert.equal(track.id, standing.fixture.tracks[index].id, `${kind}: track order`);
+    assert.equal(track.source_id, rebound(index) ? sourceId : base.id, `${kind} ${track.id}: binding`);
   });
+  assert.ok(derived.tracks.some((track) => track.source_id === sourceId), `${kind}: a rebound track`);
+  assert.ok(derived.tracks.some((track) => track.source_id === base.id), `${kind}: a track left on the tone`);
   const restored = structuredClone(derived);
-  restored.sources = restored.sources.filter((source) => source.id !== SILENT_SOURCE_ID);
+  restored.sources = restored.sources.filter((source) => source.id !== sourceId);
   for (const track of restored.tracks) track.source_id = base.id;
   const stretchedStanding = JSON.parse(standing.text);
-  assert.deepEqual(restored, stretchedStanding, `${SPARSE_KIND}: differs from the standing document only in its odd tracks' source`);
+  assert.deepEqual(restored, stretchedStanding, `${kind}: differs from the standing document only in its rebound tracks' source`);
   return {
     fixture: derived,
-    text: rebound,
-    bytes: new TextEncoder().encode(rebound),
+    text,
+    bytes: new TextEncoder().encode(text),
     sourceId: standing.sourceId,
-    silentSourceId: new TextEncoder().encode(SILENT_SOURCE_ID),
+    silentSourceId: null,
+    toggleSourceId: null,
+    [role]: new TextEncoder().encode(sourceId),
   };
 }
 
 const TABLE_DOCUMENTS = table.documents.map((doc) => ({ doc, loaded: loadDocument(doc.fixture_id) }));
 const [STANDING] = TABLE_DOCUMENTS;
 assert.equal(STANDING.doc.input_signal, "tone", "the standing console is fed the tone");
-// The sparse row's facts are the standing console's, but its input (#1085's `odd_tracks_silent`).
+// The sparse row's facts are the standing console's, but its input (#1085's `odd_tracks_silent`),
+// and so are the packing rows' (#1783), each with the input the native row states.
+const TOGGLE_SIGNAL = `odd_tracks_toggle_${TOGGLE_HALF_PERIOD_BLOCKS}_blocks`;
+const odd = (index) => index % 2 === 1;
 const DOCUMENTS = [...TABLE_DOCUMENTS, {
   doc: { ...STANDING.doc, workload_kind: SPARSE_KIND, input_signal: "odd_tracks_silent" },
-  loaded: sparseDocument(STANDING.loaded),
+  loaded: rebind(STANDING.loaded, SPARSE_KIND, odd, SILENT_SOURCE_ID, "silentSourceId"),
+}, {
+  doc: { ...STANDING.doc, workload_kind: TOGGLE_KIND, input_signal: TOGGLE_SIGNAL },
+  loaded: rebind(STANDING.loaded, TOGGLE_KIND, odd, TOGGLE_SOURCE_ID, "toggleSourceId"),
+}, {
+  doc: { ...STANDING.doc, workload_kind: ONE_PER_BANK_KIND, input_signal: "one_track_per_bank" },
+  loaded: rebind(STANDING.loaded, ONE_PER_BANK_KIND, (index) => index % WASM_LANE_WIDTH !== 0,
+    SILENT_SOURCE_ID, "silentSourceId"),
 }].map(({ doc, loaded }) => {
   const document = loaded.fixture;
   assert.equal(document.tracks.length, doc.tracks, `${doc.workload_kind}: track count`);
@@ -851,6 +885,7 @@ function boot(document = mixingDocument) {
   return {
     e, handle, requestId: 1n, revision: e.miso_engine_web_v1_control_revision(handle),
     frame: 0n, block: 0, sourceId: document.sourceId, silentSourceId: document.silentSourceId,
+    toggleSourceId: document.toggleSourceId,
     outputPointer: e.miso_engine_web_v1_buffer_ptr(handle, BUFFER_OUTPUT),
     left: new Float32Array(Q), right: new Float32Array(Q),
   };
@@ -877,20 +912,35 @@ function feed(engine) {
   const result = engine.e.miso_engine_web_v1_source_submit(
     engine.handle, sourceId.length, 1n, engine.frame, 2, Q, 0);
   assert.equal(result, RESULT_OK, "source submit");
-  // The sparse row's second source (#1744): the same block of exact +0.0 on both planes, submitted
-  // like the tone, so its tracks read fed silence and never an underrun.
-  const { silentSourceId } = engine;
-  if (silentSourceId !== null) {
-    const silentIdPointer = engine.e.miso_engine_web_v1_buffer_ptr(engine.handle, BUFFER_SOURCE_ID);
-    const silentPcmPointer = engine.e.miso_engine_web_v1_buffer_ptr(engine.handle, BUFFER_SOURCE_PCM);
-    const silentMemory = engine.e.memory.buffer;
-    new Uint8Array(silentMemory, silentIdPointer, silentSourceId.length).set(silentSourceId);
-    new Float32Array(silentMemory, silentPcmPointer, 2 * Q).fill(0);
-    const silent = engine.e.miso_engine_web_v1_source_submit(
-      engine.handle, silentSourceId.length, 1n, engine.frame, 2, Q, 0);
-    assert.equal(silent, RESULT_OK, "silent source submit");
+  // The sparse and one-per-bank rows' second source (#1744, #1783): the same block of exact +0.0 on
+  // both planes, submitted like the tone, so its tracks read fed silence and never an underrun.
+  const { silentSourceId, toggleSourceId } = engine;
+  if (silentSourceId !== null) submitSecond(engine, silentSourceId, false, "silent source submit");
+  // The toggle row's second source (#1783): exact +0.0 for `TOGGLE_HALF_PERIOD_BLOCKS` source
+  // blocks, then the tone's block for as many, silent first.
+  if (toggleSourceId !== null) {
+    const tone = Math.floor(block / TOGGLE_HALF_PERIOD_BLOCKS) % 2 === 1;
+    submitSecond(engine, toggleSourceId, tone, "toggle source submit");
   }
   engine.frame += BigInt(Q);
+}
+
+// Submits this block to a second source: the tone `feed` just wrote, or exact +0.0 on both planes.
+function submitSecond(engine, sourceId, tone, what) {
+  const idPointer = engine.e.miso_engine_web_v1_buffer_ptr(engine.handle, BUFFER_SOURCE_ID);
+  const pcmPointer = engine.e.miso_engine_web_v1_buffer_ptr(engine.handle, BUFFER_SOURCE_PCM);
+  const memory = engine.e.memory.buffer;
+  new Uint8Array(memory, idPointer, sourceId.length).set(sourceId);
+  const pcm = new Float32Array(memory, pcmPointer, 2 * Q);
+  if (tone) {
+    pcm.set(engine.left, 0);
+    pcm.set(engine.right, Q);
+  } else {
+    pcm.fill(0);
+  }
+  const result = engine.e.miso_engine_web_v1_source_submit(
+    engine.handle, sourceId.length, 1n, engine.frame, 2, Q, 0);
+  assert.equal(result, RESULT_OK, what);
 }
 
 // One `SET_CONTROL` edit per control, lane `both`, with the core's default ramp: the strip is the
@@ -1002,11 +1052,13 @@ function underrunFrames(engine, sourceId) {
     .getBigUint64(field("seekReport", "cumulativeUnderrunFrames"), true);
 }
 
-// The sparse row's feed (#1744): its odd tracks' silence is the exact +0.0 the harness submitted,
-// never an underrun's zeros, which render the same bits and so no digest can tell apart.
+// The derived rows' feed (#1744, #1783): their rebound tracks' silence is the exact +0.0 the
+// harness submitted, never an underrun's zeros, which render the same bits and so no digest can
+// tell apart.
 function assertSparseFed(state, phase) {
-  if (state.engine.silentSourceId === null) return;
-  for (const sourceId of [state.engine.sourceId, state.engine.silentSourceId]) {
+  const second = state.engine.silentSourceId ?? state.engine.toggleSourceId;
+  if (second === null) return;
+  for (const sourceId of [state.engine.sourceId, second]) {
     assert.equal(underrunFrames(state.engine, sourceId), 0n,
       `${phase} ${state.doc.workload_kind}: source ${new TextDecoder().decode(sourceId)} underran`);
   }
@@ -1226,6 +1278,6 @@ const record = {
   loadavg_start: loadStart,
   loadavg_end: loadEnd,
   descriptive_only: true,
-  statistical_method: "three arms alternated per observation, then the four documents alternated per observation, the sparse document's odd tracks bound to a second source fed exact +0.0; one warmup launch and two measured launches; nearest-rank percentiles over per-block nanoseconds of miso_engine_web_v1_render alone; ramp delta is automated minus restated and collapse delta is restated minus quiet, per observation; descriptive only; no threshold",
+  statistical_method: "three arms alternated per observation, then the six documents alternated per observation, the sparse document's odd tracks and the one-per-bank document's tracks but one per four-lane bank bound to a second source fed exact +0.0, and the toggle document's odd tracks to a second source fed exact +0.0 and the tone in turns of eight blocks; one warmup launch and two measured launches; nearest-rank percentiles over per-block nanoseconds of miso_engine_web_v1_render alone; ramp delta is automated minus restated and collapse delta is restated minus quiet, per observation; descriptive only; no threshold",
 };
 process.stdout.write(`${JSON.stringify(record)}\n`);

@@ -181,6 +181,12 @@ def floor_pins:
     "sixty_four_track_app_shape":
       [null, 1, "none", "not_derived"],
     "sixty_four_track_console_sparse":
+      [null, 1, "none", "not_derived"],
+    # The two packing rows (#1783): their silent lanes, like the sparse row's, are arithmetic no
+    # inventory counts.
+    "sixty_four_track_console_toggle":
+      [null, 1, "none", "not_derived"],
+    "sixty_four_track_console_one_per_bank":
       [null, 1, "none", "not_derived"]
   };
 
@@ -221,12 +227,12 @@ def floor_shape:
    end);
 
 
-# The twenty-three session workloads, sorted: `WORKLOADS`'s fourteen (in emission order), the
+# The twenty-five session workloads, sorted: `WORKLOADS`'s fourteen (in emission order), the
 # gain/pan row the bench emits after them (#928 and #956, `DRIVER_FED_WORKLOADS`), its
 # live-producer twin (#938, `LIVE_FED_WORKLOADS`), the metered console row (#881, `METERED_WORKLOADS`), the bus-and-send
-# row (#1227, `BUS_SEND_WORKLOADS`), and the five console-strip rows it emits last (#1085,
-# `CONSOLE_STRIP_WORKLOADS`).
-def session_kinds: ["nine_track_baseline","nine_track_ragged_strip","one_twenty_eight_track_stretch","sixteen_track_strip","sixty_four_track_app_shape","sixty_four_track_builtins_only","sixty_four_track_compressor_only","sixty_four_track_console","sixty_four_track_console_half_mono","sixty_four_track_console_legacy","sixty_four_track_console_metered","sixty_four_track_console_mono","sixty_four_track_console_mono_dual","sixty_four_track_console_sends","sixty_four_track_console_sparse","sixty_four_track_dispatch_only","sixty_four_track_eq_comp_simd1","sixty_four_track_eq_only","sixty_four_track_gain_pan_live","sixty_four_track_gain_pan_ring","sixty_four_track_idle","ten_track_ragged_strip","thirteen_track_ragged_strip"];
+# row (#1227, `BUS_SEND_WORKLOADS`), the five console-strip rows (#1085,
+# `CONSOLE_STRIP_WORKLOADS`), and the two packing rows it emits last (#1783, `PACKING_WORKLOADS`).
+def session_kinds: ["nine_track_baseline","nine_track_ragged_strip","one_twenty_eight_track_stretch","sixteen_track_strip","sixty_four_track_app_shape","sixty_four_track_builtins_only","sixty_four_track_compressor_only","sixty_four_track_console","sixty_four_track_console_half_mono","sixty_four_track_console_legacy","sixty_four_track_console_metered","sixty_four_track_console_mono","sixty_four_track_console_mono_dual","sixty_four_track_console_one_per_bank","sixty_four_track_console_sends","sixty_four_track_console_sparse","sixty_four_track_console_toggle","sixty_four_track_dispatch_only","sixty_four_track_eq_comp_simd1","sixty_four_track_eq_only","sixty_four_track_gain_pan_live","sixty_four_track_gain_pan_ring","sixty_four_track_idle","ten_track_ragged_strip","thirteen_track_ragged_strip"];
 
 # #928, #965: how a session row's track inputs reach the graph. `played_planes` is a prepared
 # source set whose driver copies each claim's block on request and lends its played planes in
@@ -464,6 +470,19 @@ def session_kind_shape:
     .tracks == 64 and .synthetic_fixture == true and
     .strip_content == "eq+compressor+limiter" and
     .strip_layout == intended_layout and .input_signal == "odd_tracks_silent" and
+    .fixture_id == console_fixture
+  # #1783: the packing rows, the standing strip as written with an input fed in code -- odd tracks
+  # toggling between exact zeros and the tone every eight blocks, or one track per bank (at the
+  # record's lane width) fed the tone. Derived for the sparse row's reason; the aggregate holds each
+  # digest apart from the rows it is read against.
+  elif .workload_kind == "sixty_four_track_console_toggle" or
+       .workload_kind == "sixty_four_track_console_one_per_bank" then
+    .tracks == 64 and .synthetic_fixture == true and
+    .strip_content == "eq+compressor+limiter" and
+    .strip_layout == intended_layout and
+    .input_signal == ({"sixty_four_track_console_toggle": "odd_tracks_toggle_8_blocks",
+                       "sixty_four_track_console_one_per_bank": "one_track_per_bank"}
+                      [.workload_kind]) and
     .fixture_id == console_fixture
   else false end;
 

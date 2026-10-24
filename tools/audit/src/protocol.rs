@@ -101,8 +101,9 @@ fn prepare_corpus() -> Corpus {
         decode_fields: [0_u16; 1024],
     };
     let telemetry = TelemetryConfiguration {
-        meter_handles: Vec::new(),
+        meters: Vec::new(),
         meter_period_blocks: 0,
+        meter_window_blocks: None,
         counter_ids: Vec::new(),
         counter_period_blocks: 0,
         diagnostics_enabled: false,
@@ -283,8 +284,12 @@ fn prepare_egress_corpus() -> EgressCorpus {
         }),
     );
     let telemetry = TelemetryConfiguration {
-        meter_handles: vec![1],
+        meters: vec![protocol::MeterEntry {
+            target: protocol::MeterTarget::Output,
+            metric: protocol::MeterMetric::Peak,
+        }],
         meter_period_blocks: 1,
+        meter_window_blocks: None,
         counter_ids: vec![CounterId::ControlCommandBackpressure],
         counter_period_blocks: 1,
         diagnostics_enabled: false,
@@ -317,7 +322,15 @@ fn prepare_egress_corpus() -> EgressCorpus {
         value: 0.0,
     }];
     controller
-        .stage_meter_batch_event(revision, SampleTime(0), &meters)
+        .stage_meter_batch_event(
+            revision,
+            protocol::MeterWindowSpan {
+                first_sample: SampleTime(0),
+                end_sample: SampleTime(1),
+                window_sequence: 1,
+            },
+            &meters,
+        )
         .expect("prepared meter event");
     let counters = CounterSnapshot {
         observed_sample: SampleTime(0),
