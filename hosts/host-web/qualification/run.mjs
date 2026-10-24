@@ -1062,6 +1062,7 @@ function unsubscribeFailureProofs() {
     lowPeakFramesAfterAcknowledgement: 0,
     minimumPeakAfterAcknowledgement: 0.27,
     feedBehind: null,
+    sourceExhausted: null,
     maximumSourcesInFlight: 40,
   };
   const rows = [
@@ -1076,6 +1077,7 @@ function unsubscribeFailureProofs() {
     ["reduction, no frame (D9)", { framesAfterAcknowledgement: 0 }, ["reduction"]],
     ["shortfall frames", { signalFramesAfterAcknowledgement: 47 }, ["shortfall"]],
     ["shortfall flag", { signalShortfall: true }, ["shortfall"]],
+    ["shortfall, source exhausted", { sourceExhausted: { renderBlock: 481, fed: 512 } }, ["shortfall"]],
     ["feed in flight", { maximumSourcesInFlight: 41 }, ["feed"]],
     ["feed behind", { feedBehind: { block: 20, renderBlock: 21 } }, ["feed"]],
   ];

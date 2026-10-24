@@ -606,6 +606,12 @@ run each with `--sdk-root --check-matrix --self-test-mutations` (`resume-clicks`
 Firefox and WebKit without the SDK (`resume-clicks` 1). This replaces the gate #1345 Amendment 7
 removed (the history rows above).
 
+Reds on the unmutated tree: two Firefox 153.0 runs failed while the PulseAudio socket path was too
+long (113 characters), so there was no sink. Without the SDK: `resume timeout at the armed tap to
+render (click) after 10000 ms: state=suspended`. With the SDK: `spectrum collection audio resume
+timed out (gesture=true, state=suspended)`. `main` was red the same way under that path and green
+with a short one (spec, Attempt record).
+
 ### Node proof (`--self-test-mutations`, no browser)
 
 `unsubscribeFailureProofs()` holds `unsubscribeFailures` to a table: a green run at the bounds (four
@@ -622,6 +628,7 @@ step, the kind, the counts and a refusal record's `result`/`requestId`, never `[
 | unsubscribe-ack | `unsubscribeBindings = 1` | `unsubscribe-ack` |
 | reduction / no frame (D9) | `maximumTrackGrDbAfterAcknowledgement = 1` / `framesAfterAcknowledgement = 0` | `reduction` |
 | shortfall frames / flag | `signalFramesAfterAcknowledgement = 47` / `signalShortfall = true` | `shortfall` |
+| shortfall, source exhausted | `sourceExhausted = { renderBlock: 481, fed: 512 }` | `shortfall` |
 | feed in flight / behind | `maximumSourcesInFlight = 41` / `feedBehind = { block: 20, renderBlock: 21 }` | `feed` |
 
 Source mutations of the proof, run once each and reverted (PR evidence):

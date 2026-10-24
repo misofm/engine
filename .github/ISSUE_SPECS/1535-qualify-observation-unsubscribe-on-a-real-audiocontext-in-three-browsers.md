@@ -376,6 +376,20 @@ the named exceptions of #1345 Amendments 5 and 6 again.
   acknowledgement 48 / 49 / 49, frames after it 48 / 63 / 55, low-peak frames 0, minimum peak
   0.0815, `maximumSourcesInFlight` 32. `render-allocations`: all fourteen rows 0 in every browser,
   `observation-unsubscribe=0`; `sdk-render-allocations` rows all 0.
+- **Attempt 1 reds on the unmutated tree (verifier MAJOR, recorded, not retried away).** Two Firefox
+  153.0 runs of attempt 1 were red, both with the PulseAudio socket at a 113-character path (over
+  the 108-byte `sun_path` limit, so no sink existed):
+  - without the SDK (`n-firefox.log`): `observation-unsubscribe qualification failed: resume
+    timeout at the armed tap to render (click) after 10000 ms: state=suspended currentTime=0`;
+  - with the SDK (`r-firefox.log`): `spectrum collection audio resume timed out (gesture=true,
+    state=suspended)`, before the new run.
+  `main` (`40e3b61e9`) with the same socket path was red in Firefox with the second message
+  (`base-firefox.log`), and green once the socket path was short (`base-firefox2.log`). Chromium
+  and WebKit were green under both socket paths. Logs: `scratchpad/b1535/`.
+- **Attempt 2 (verifier MINOR and NITs).** When the feed would pass the end of the source, the D4
+  wait now ends and the run returns `sourceExhausted`, which the gate names `shortfall` (one more
+  node table row). Before this it was a thrown `Error`, which the gate reported as
+  `browser-execution`. The peak-floor comment gives the measured minimum, 0.0815.
 
 ## Decision record (root, 2026-10-24)
 

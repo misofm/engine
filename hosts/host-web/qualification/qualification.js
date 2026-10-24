@@ -33,8 +33,9 @@ const UNSUBSCRIBE_ARMED_FRAMES = 4;
 // the acknowledgement cannot supply them from the ring alone.
 const UNSUBSCRIBE_SIGNAL_FRAMES = 48;
 const RING_BLOCKS = DEFAULT_RING_FRAMES / QUANTUM_FRAMES;
-// The fed signal is a +-0.5 square wave; the compressor's reduction at that level leaves a track
-// peak near 0.27, far above this floor, and a block of zeros (an underrun) peaks at 0.
+// The fed signal is a +-0.5 square wave. The lowest track peak measured after the acknowledgement
+// is 0.0815 in all three browsers (#1535 attempt 1), 1.6 times this floor; a block of zeros (an
+// underrun) peaks at 0.
 const UNSUBSCRIBE_PEAK_FLOOR = 0.05;
 const MINIMUM_STALL_MS = 100;
 // Issue #1333 D3 / Amendment 1: the staging-read rows. One 2,048-frame spectrum window is sixteen
@@ -1065,12 +1066,15 @@ async function runObservationUnsubscribeRun(createHost, sessionDocument) {
   let feeding = true;
   let feedFailure = null;
   let feedBehind = null;
+  // The render block at which the feed would pass the end of the source: the run ends its wait
+  // and returns, and the gate names it `shortfall` (the signal after the acknowledgement stopped).
+  let sourceExhausted = null;
   const submits = new Set();
   const topUp = () => {
-    if (!feeding || feedFailure !== null || feedBehind !== null) return;
+    if (!feeding || feedFailure !== null || feedBehind !== null || sourceExhausted !== null) return;
     const target = renderBlock + UNSUBSCRIBE_LEAD_BLOCKS;
     if (target > UNSUBSCRIBE_SOURCE_BLOCKS) {
-      feedFailure = new Error(`observation unsubscribe source exhausted at render block ${renderBlock}`);
+      sourceExhausted = { renderBlock, fed };
       return;
     }
     while (fed < target && inFlight.source < RING_BLOCKS) {
@@ -1174,7 +1178,7 @@ async function runObservationUnsubscribeRun(createHost, sessionDocument) {
     context,
     async () => {
       requireFeed();
-      return feedBehind !== null
+      return feedBehind !== null || sourceExhausted !== null
         || signalFrames(frames.slice(acknowledgedAtFrame)) >= UNSUBSCRIBE_SIGNAL_FRAMES;
     },
     UNSUBSCRIBE_AFTER_WAIT,
@@ -1222,6 +1226,7 @@ async function runObservationUnsubscribeRun(createHost, sessionDocument) {
     maximumTrackGrDbAfterAcknowledgement: maximumGrDb(everyAfter),
     signalShortfall,
     feedBehind,
+    sourceExhausted,
     maximumSourcesInFlight,
     renderAllocations: allocations.count,
   };
@@ -1246,7 +1251,7 @@ export function unsubscribeFailures(run) {
   if (run.maximumTrackGrDbAfterAcknowledgement !== 0 || !(run.framesAfterAcknowledgement >= 1)) {
     failures.push("reduction");
   }
-  if (run.signalShortfall !== false
+  if (run.signalShortfall !== false || run.sourceExhausted !== null
       || !(run.signalFramesAfterAcknowledgement >= UNSUBSCRIBE_SIGNAL_FRAMES)) {
     failures.push("shortfall");
   }
