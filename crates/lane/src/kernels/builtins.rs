@@ -536,6 +536,8 @@ pub struct Matrix2x2Ramp<L: Lane> {
 /// once per call from the targets; with no identity target over all `L::WIDTH` lanes -- padding
 /// lanes included, so a partial bank keeps the select -- step 7 returns its second arm on every
 /// word and the body runs without it (the reason [`matrix2x2_block_without_identity`] exists).
+/// With an identity target, the select takes the same x86 masked-store fold as
+/// [`matrix2x2_block`]'s identity lanes (issue #944).
 ///
 /// `remaining` and `current` are advanced in place, so a lane's ramp carries across block
 /// boundaries and evolves by its own additions regardless of block size or of its neighbours:

@@ -3767,7 +3767,9 @@ impl<L: Lane> MatrixStage<L> {
     ///
     /// A settled lane of a bank in which another lane ramps runs the ramp kernel, which assigns
     /// it its target (equal in bits to its current words, since a settle assigns them) and
-    /// renders the same row sums; the kernel's `f32` countdown word it also rewrites is residue
+    /// renders the same row sums -- or, for a settled identity lane, passes its samples through
+    /// by the same select as the settled path (issue #1072), so `+0.0` stays `+0.0` and the rest
+    /// conclusion does not change; the kernel's `f32` countdown word it also rewrites is residue
     /// that [`Self::process`] recomputes from the `u32` countdown before every read and that the
     /// lane export does not carry, so it is not state.
     ///
