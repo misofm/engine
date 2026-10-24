@@ -3367,30 +3367,29 @@ fn a_live_bypass_flip_is_one_record_ahead_of_its_parameters() {
 #[test]
 fn a_prepared_bypass_change_needs_a_rebuild() {
     // The multiband compressor (#1340): the reason is the row's.
-    for (index, issue) in [(4, 1340)] {
-        let enabled = with_bypassable();
-        assert_eq!(
-            classify_effects(&enabled, |next| {
-                next.tracks[0].inserts.effects[index].bypass = true;
-            }),
-            Err(LiveRebuild::RebuildOnly(RebuildReason::RuledLiveNotBuilt {
-                issue
-            })),
-            "insert {index} bypassed"
-        );
-        let mut bypassed = enabled.clone();
-        bypassed.tracks[0].inserts.effects[index].bypass = true;
-        let bypassed = normalized(&bypassed);
-        assert_eq!(
-            classify_effects(&bypassed, |next| {
-                next.tracks[0].inserts.effects[index].bypass = false;
-            }),
-            Err(LiveRebuild::RebuildOnly(RebuildReason::RuledLiveNotBuilt {
-                issue
-            })),
-            "insert {index} lifted"
-        );
-    }
+    let (index, issue) = (4, 1340);
+    let enabled = with_bypassable();
+    assert_eq!(
+        classify_effects(&enabled, |next| {
+            next.tracks[0].inserts.effects[index].bypass = true;
+        }),
+        Err(LiveRebuild::RebuildOnly(RebuildReason::RuledLiveNotBuilt {
+            issue
+        })),
+        "insert {index} bypassed"
+    );
+    let mut bypassed = enabled.clone();
+    bypassed.tracks[0].inserts.effects[index].bypass = true;
+    let bypassed = normalized(&bypassed);
+    assert_eq!(
+        classify_effects(&bypassed, |next| {
+            next.tracks[0].inserts.effects[index].bypass = false;
+        }),
+        Err(LiveRebuild::RebuildOnly(RebuildReason::RuledLiveNotBuilt {
+            issue
+        })),
+        "insert {index} lifted"
+    );
 }
 
 /// #1554 D5 on the bypass. Red if a submix strip's effects are left structural: a submix effect's
