@@ -52,13 +52,13 @@ Single feature branch `codex/rust-1-98-1`, checkpoint-committed locally, pushed 
 - Under 1.98.1 with only the pin edits: `cargo fmt --all --check` clean; simd128 Wasm build clean; clippy fails in `lane` with 36 `chunks_exact_mut` and 4 `chunks_exact` `chunks_exact_to_as_chunks` diagnostics (`crates/lane/src/kernels.rs`, `crates/lane/src/kernels/builtins.rs`).
 - REPIN digest under 1.98.1: `08ae541cf39dd1809840eb213a27d993054b8151538bcfcb73d340b6dba0a0bd`.
 
-## Decision record (2026-10-24, attempt 1, branch `codex/batch-b13-877`, base `eb792c949`)
+## Decision record (2026-10-24, attempts 1-2, branch `codex/batch-b13-877`, base `eb792c949`)
 
 The scope note (`scope/877.md`) wins for paths and decisions; these changes over the body above follow it.
 
 - **Target 1.99.1**, not 1.98.1: 1.98.1 was stale. PR #878 is superseded; root closes it.
 - **Lints.** Workspace clippy under 1.99.1 fired only `chunks_exact_to_as_chunks` (allowed once in
-  `Cargo.toml` with its rationale) and rustc's `deprecated` on `Atomic*::fetch_update` (renamed
+  `Cargo.toml` for the whole workspace: 58 const-sized sites in 18 crates, none in `crates/lane`) and rustc's `deprecated` on `Atomic*::fetch_update` (renamed
   `try_update`; three sites in `crates/protocol` and `crates/host-core`, the same method). The lint
   groups carry `priority = -1`. No other allow.
 - **Pins.** Between releases (`docs/RELEASE.md`, "Between releases") only the pin file moves:
@@ -70,9 +70,17 @@ The scope note (`scope/877.md`) wins for paths and decisions; these changes over
 - **No bit moved.** The 37 native console bench rows' `output_sha256` and the mixing-automation
   preflight digests are equal under 1.97.1 and 1.99.1 (AVX2 host, PR evidence); release lane,
   math, wasm-gates, console-workload, conformance and dsp-reference tests and the fixture gates pass.
-- **AArch64.** iOS memset counts unchanged (builtins 4, lane 1). The arm64 test legs (LANE-3 row)
-  run only on CI's arm64 runner; no row was added or deleted.
-- **Blocker found.** `scripts/check-web-audioworklet.sh` rule 3 fails on 1.99.1:
-  `Channel<f32x4, 4>::decode_track` (state decode, control thread) went from vector 0 / scalar 6
-  to vector 1 / scalar 4, because LLVM 22 SLP-vectorizes part of its ramp-path validation. It is
-  not a render kernel. Root rules the fix.
+- **AArch64.** iOS memset counts unchanged (builtins 4, lane 1). CI's `aarch64-debug` and
+  `aarch64-release` legs on the arm64 runner decide the `scripts/lib/aarch64-known-defects.py` rows
+  (no local arm64 runner): a row that now passes is deleted in this PR; a rise or a new failure
+  blocks #877 and is filed, never registered.
+- **Rule 3 (kernel shape), root ruling.** On 1.99.1 `Channel<f32x4, 4>::decode_track` (state
+  decode, control thread) went from vector 0 / scalar 6 to vector 1 / scalar 4: LLVM 22
+  SLP-vectorizes part of its ramp-path check, and the `4wide6f32x4` name pattern matched it.
+  Attempt 1 scoped dominance to the render export's direct-call closure; verification refuted it,
+  because the export reaches its kernels through `call_indirect`, so 15 render kernels fell out.
+  Final shape: dominance stays on every pattern match, and `CONTROL_THREAD_EXEMPT` in
+  `scripts/check-web-audioworklet-callgraph.py` pins named control-thread functions by unhashed
+  symbol, with a reason each; an exempt function is not counted toward K, and an entry that
+  matches no function fails. The one entry is `decode_track`. Self-test rows d4-d6; a partly
+  scalarized `InputStage::process` (vector 504 / scalar 1008) in a disassembly copy fails.
