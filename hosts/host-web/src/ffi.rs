@@ -4873,10 +4873,12 @@ pub(crate) mod live_response_ffi_tests {
             let staging = slot.borrow();
             let bytes = &staging.live_result[..staging.live_result_len];
             let values = bytes
-                .chunks_exact(size_of::<f32>())
+                .as_chunks::<{ size_of::<f32>() }>()
+                .0
+                .iter()
                 .skip(size_of::<WebLiveResponseResult>() / size_of::<f32>())
                 .take(15)
-                .map(|chunk| f32::from_le_bytes(chunk.try_into().expect("f32 word")));
+                .map(|chunk| f32::from_le_bytes(*chunk));
             assert!(values.into_iter().all(f32::is_finite));
         });
 

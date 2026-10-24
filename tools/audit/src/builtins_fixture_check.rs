@@ -443,9 +443,11 @@ fn check(root: &Path) -> Result<(), String> {
     }
     let pcm = read_file(&root.join("direct-schedule.pcm.f32le"))?;
     if pcm.len() != 6 * QUANTUM * 2 * 4
-        || !pcm.chunks_exact(4).all(|word| {
-            f32::from_bits(u32::from_le_bytes(word.try_into().expect("word"))).is_finite()
-        })
+        || !pcm
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .all(|word| f32::from_bits(u32::from_le_bytes(*word)).is_finite())
     {
         return Err("direct PCM semantics".to_owned());
     }

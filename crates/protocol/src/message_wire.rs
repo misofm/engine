@@ -2395,8 +2395,10 @@ fn decode_nonzero_u32s(bytes: &[u8], allow_empty: bool) -> Result<Vec<u32>, Deco
         return Err(DecodeError::InvalidValueLength);
     }
     let result = bytes
-        .chunks_exact(4)
-        .map(read_u32)
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|word| read_u32(word))
         .collect::<Result<Vec<_>, _>>()?;
     if (!allow_empty && result.is_empty())
         || result.len() > 256
@@ -3712,8 +3714,10 @@ fn decode_control_entry(
             let float =
                 |spec: schema::FieldSpec| -> Result<f32, DecodeError> { read_f32(required(spec)?) };
             let ladder = required(e::LADDER)?
-                .chunks_exact(4)
-                .map(read_f32)
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .map(|word| read_f32(word))
                 .collect::<Result<Vec<_>, _>>()?;
             let choices = values_spec!(message, e::CHOICE)?
                 .map(|choice| decode_choice(Message::nested_at_depth(choice, limits, 2)?))
