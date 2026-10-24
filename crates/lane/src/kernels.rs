@@ -114,7 +114,9 @@ fn stream_planes<L: Lane, R: RestThresholds<L>, const S: usize>(
 ///
 /// [`svf_cascade_skewed_form`] keeps its indexed form: walked the same way, its steady-state loop
 /// let LLVM unroll the mono pair by two and gave the armed mono pair a carried stack slot in V8
-/// (issue #1454's record), so its per-frame bounds branches stay.
+/// (issue #1454's record), so its per-frame bounds branches stay. A `chunks_exact` walk, whose
+/// trip count is exact, was unrolled the same way (issue #1905). That loop runs on one word offset
+/// instead, which is both its exit test and its index.
 #[inline(always)]
 fn frames_left<L: Lane, const S: usize, const ARMED: bool>(
     io: &[&mut [f32]; S],
@@ -725,7 +727,22 @@ fn svf_cascade_skewed_impl<
     output: M,
 ) {
     if frames < D {
-        svf_cascade_interleaved_impl(io, frames, c, s, rest, output, &mut Unobserved);
+        // Fewer frames than sections: the interleaved body, one exact frame per call, so every
+        // call's frame loop runs once and leaves no loop of its own (issue #1905: LLVM 22 kept the
+        // whole-block call's walk as a second copy of the depth-2 armed loop).
+        let mut io = io;
+        for frame in 0..frames {
+            let base = frame * L::WIDTH;
+            svf_cascade_interleaved_impl(
+                io.each_mut().map(|block| &mut block[base..base + L::WIDTH]),
+                1,
+                c,
+                s,
+                rest.map(|plane| plane.skip(base)),
+                &output,
+                &mut Unobserved,
+            );
+        }
         return;
     }
     match stream_planes(&rest) {
@@ -759,6 +776,10 @@ fn svf_cascade_skewed_form<
     debug_assert!(io.iter().all(|block| block.len() == span));
     // Truncating once, outside the loops. The `base..base + width` indexing below still carries a
     // bounds branch per step, which LLVM cannot remove; [`frames_left`] says why it stays here.
+    // The steady-state loop's one induction variable is the word offset `base` of its newest
+    // frame, which is also its exit test (issue #1905): indexed by an iteration count `i` with
+    // `(i - section) * width` products, LLVM 22 (Rust 1.99.1) kept a second counter beside the
+    // offset, and in the armed mono pair V8 then carried a general-purpose word in a stack slot.
     let io = io.map(|block| &mut block[..span]);
     let rest = rest.map(|plane| if ARMED { &plane[..span] } else { plane });
     let mut state = *s;
@@ -771,8 +792,13 @@ fn svf_cascade_skewed_form<
     // body's operations, in its order, on the input the skew hands it.
     macro_rules! step {
         ($i:expr, $stream:expr, $section:expr) => {{
-            let (stream, section) = ($stream, $section);
-            let base = ($i - section) * width;
+            step_at!(($i - $section) * width, $stream, $section);
+        }};
+    }
+    // The step on the frame at word offset `$base`, the frame `i - section` of iteration `i`.
+    macro_rules! step_at {
+        ($base:expr, $stream:expr, $section:expr) => {{
+            let (base, stream, section) = ($base, $stream, $section);
             let x = if section == 0 {
                 L::load(&io[stream][base..base + width])
             } else {
@@ -808,12 +834,14 @@ fn svf_cascade_skewed_form<
             }
         }
     }
-    for i in D - 1..frames {
+    let mut base = (D - 1) * width;
+    while base < span {
         for stream in 0..S {
             for section in (0..D).rev() {
-                step!(i, stream, section);
+                step_at!(base - section * width, stream, section);
             }
         }
+        base += width;
     }
     for i in frames..frames + D - 1 {
         for stream in 0..S {
@@ -829,6 +857,13 @@ fn svf_cascade_skewed_form<
 /// while the two masked output policies add only their required bitwise selection.
 trait SvfOutput<L: Lane> {
     fn choose(&self, dry: L, wet: L, stream: usize, section: usize) -> L;
+}
+
+impl<L: Lane, M: SvfOutput<L>> SvfOutput<L> for &M {
+    #[inline(always)]
+    fn choose(&self, dry: L, wet: L, stream: usize, section: usize) -> L {
+        (**self).choose(dry, wet, stream, section)
+    }
 }
 
 struct UnmaskedOutput;
