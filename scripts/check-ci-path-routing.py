@@ -774,21 +774,219 @@ def runs_m3_on_config_flags(command: str) -> bool:
             and not any(word in NON_INTEGRATION_TARGET_SELECTORS for word in words))
 
 
+# Issue #1434 D1: an owner step that is a `run: |` block is a guard only with the lines around its
+# owner command. Each block-form owner step that carries such lines is named here with them, in
+# order, each with the issue that owns it. They must appear in the step's comment-stripped lines
+# as an ordered subsequence: other lines (a message, a `fi`) carry no claim and stay free. An edit
+# to one of these steps must update this table in the same change.
+GUARDED_OWNER_STEPS = {
+    "artifact-gates": ("Hermetic browser host and worklet tests", (
+        ("set -o pipefail", "#1429"),
+        ('scratch="$(mktemp -d "$RUNNER_TEMP/test-web-audioworklet-tmp.XXXXXX")"', "#1429"),
+        ("trap 'rm -rf -- \"$scratch\"' EXIT", "#1429"),
+        ('export TMPDIR="$scratch"', "#1429"),
+        ("bash scripts/test-web-audioworklet.sh", "#1044"),
+        ("leftover=\"$(find \"$scratch\" -mindepth 1 -maxdepth 1 -printf '%f\\n' | LC_ALL=C sort)\"",
+         "#1429"),
+        ('if [[ -n "$leftover" ]]; then', "#1429"),
+        ("exit 1", "#1429"),
+    )),
+}
+# Issue #1434 D2: shell lines that disable or swallow a failure. None may appear in an owner step
+# (or a doctest twin, A1-D1); `exit 0` is held separately, before the step's last owner command.
+FAILURE_MASKS = (
+    ("set +e", re.compile(r"\bset\s+(?:[-+]\S*\s+)*\+[A-Za-z]*e")),
+    ("set +o errexit", re.compile(r"\bset\s+.*\+o\s+errexit\b")),
+    ("set +o pipefail", re.compile(r"\bset\s+.*\+o\s+pipefail\b")),
+    ("|| true", re.compile(r"\|\|\s*true\b")),
+    ("|| :", re.compile(r"\|\|\s*:(?:\s|;|$)")),
+    ("a trailing &", re.compile(r"(?<!&)&\s*$")),
+    # Fail-closed for cheap forms: a group or subshell closed into `||`/`&&`, and a condition,
+    # loop or negation keyword alone on its line, each of which can run a command unchecked.
+    ("a group closed into || or &&", re.compile(r"^[})]\s*(?:\|\||&&)")),
+    ("a lone if, while, until or !", re.compile(r"^(?:if|while|until|!)$")),
+)
+# `exit 0` anywhere, and a bare `exit` unless a `||` before it passes a failure on (`cmd || exit`).
+# The quote characters catch `trap 'exit 0' EXIT`.
+EXIT_ZERO = re.compile(r"\bexit\s+0\s*(?:$|[;&|)}'\"])")
+BARE_EXIT = re.compile(r"\bexit\s*(?:$|[;&|)}'\"])")
+CONTINUE_ON_ERROR_STEP = re.compile(r"['\"]?continue-on-error['\"]?\s*:")
+CONTINUE_ON_ERROR_JOB = re.compile(r"^    ['\"]?continue-on-error['\"]?\s*:", re.MULTILINE)
+
+
+def named_step(job_text: str, name: str) -> str | None:
+    """The job's step whose `name:` is `name` (comment lines removed, as `job_steps` gives it)."""
+    for step in job_steps(job_text):
+        if re.search(rf"^      (?:- |  )name: {re.escape(name)}$", step, re.MULTILINE):
+            return step
+    return None
+
+
+def check_unmasked_step(where: str, step: str, commands: tuple[str, ...], issue: str) -> None:
+    """D2 and A2-D1: `step` (comment lines removed) runs `commands` with nothing that could make a
+    failure of one of them pass: no step-level `if:`, no `continue-on-error` key with any value, no
+    `FAILURE_MASKS` line, and no `exit 0` before the last of `commands`."""
+    require(re.search(r"^      (?:- |  )if:", step, re.MULTILINE) is None,
+            f"qualification.yml: {where} must carry no step-level if: ({issue})")
+    require(CONTINUE_ON_ERROR_STEP.search(step) is None,
+            f"qualification.yml: {where} must carry no continue-on-error key, whatever its value "
+            f"({issue}); it would let a failure pass")
+    lines = run_lines(step)
+    for line in lines:
+        for label, pattern in FAILURE_MASKS:
+            require(pattern.search(line) is None,
+                    f"qualification.yml: {where} must not mask a failure with `{label}` "
+                    f"(`{line}`, {issue})")
+    last = max((index for index, line in enumerate(lines) if line in commands), default=-1)
+    for line in lines[:max(last, 0)]:
+        bare = BARE_EXIT.search(line)
+        require(EXIT_ZERO.search(line) is None
+                and (bare is None or "||" in line[:bare.start()]),
+                f"qualification.yml: {where} must not `exit 0` before its last command (`{line}`, "
+                f"{issue})")
+
+
 def check_qualification_deduplicated_owners(text: str) -> None:
     for name, commands in DEDUPLICATED_OWNERS.items():
         block = job(text, name)
         require(job_if(block) == FULL_ROUTE_IF,
                 f"qualification.yml: {name} must run on exactly the full route (#1044 owner)")
+        require(CONTINUE_ON_ERROR_JOB.search(block) is None,
+                f"qualification.yml: {name} is a #1044 owner job and must carry no job-level "
+                "continue-on-error key, whatever its value (#1434)")
         unconditional = unconditional_step_commands(block)
         for command in commands:
             require(command in unconditional,
                     f"qualification.yml: {name} must run `{command}` unconditionally; it is the "
                     "one run left of a claim #1044 deduplicated")
+        for step in job_steps(block):
+            owned = tuple(command for command in commands if command in run_lines(step))
+            if owned:
+                check_unmasked_step(f"{name}'s owner step running `{owned[0]}`", step, owned,
+                                    "#1044, #1434")
+        if name in GUARDED_OWNER_STEPS:
+            step_name, guard = GUARDED_OWNER_STEPS[name]
+            step = named_step(block, step_name)
+            require(step is not None,
+                    f"qualification.yml: {name} must keep its step \"{step_name}\" (#1434: an edit "
+                    "to it updates GUARDED_OWNER_STEPS in scripts/check-ci-path-routing.py)")
+            remaining = iter(run_lines(step))
+            for line, issue in guard:
+                require(any(candidate == line for candidate in remaining),
+                        f"qualification.yml: {name}'s step \"{step_name}\" must run `{line}` "
+                        f"({issue}), after the guard lines before it in GUARDED_OWNER_STEPS; an "
+                        "edit to this step updates that table in the same change (#1434)")
     require(any(runs_m3_on_config_flags(command)
                 for command in unconditional_step_commands(job(text, "test-release"))),
             "qualification.yml: test-release must run M3 (`cargo test --release -p math`, "
             f"`{M3_TEST}` not deselected) unconditionally with no RUSTFLAGS in front of it, on "
             "the x86-64-v3 flags .cargo/config.toml pins (#1044)")
+
+
+# Issue #1434 A1-D1 (#1422): `--all-targets` runs no doctest, so each whole-package test step has a
+# doctest twin in the same job, and after #1422 the twins are the only CI run of the workspace's
+# compile_fail fences. (job, whole-package step name, doctest step name).
+DOCTEST_TWINS = (
+    ("test-debug-a",
+     "Workspace debug tests (excluding DSP crates, audit, and wasm evidence tools)",
+     "Workspace doctests (same packages and features as the debug tests)"),
+    ("test-debug-b",
+     "DSP crates debug tests (lane feature unification pinned explicitly)",
+     "DSP crates doctests (same packages and features as the debug tests)"),
+)
+# Issue #1434 A2-D2 (#1446): tools/realtime-policy's own suite runs only in this job.
+REALTIME_POLICY_JOB = "test-debug-a"
+REALTIME_POLICY_PACKAGE = "realtime-policy"
+
+
+def cargo_test_shape(command: str) -> tuple[list[str], dict[str, set[str]]] | None:
+    """A `cargo test` command split into its other words and its value sets: `--exclude`,
+    `-p`/`--package` and `--features`/`-F` (split on commas). None for any other command."""
+    try:
+        words = shlex.split(command)
+    except ValueError:
+        return None
+    if words[:2] != ["cargo", "test"]:
+        return None
+    values: dict[str, set[str]] = {"--exclude": set(), "-p": set(), "--features": set()}
+    rest: list[str] = []
+    index = 0
+    while index < len(words):
+        word = words[index]
+        key = {"--package": "-p", "-F": "--features"}.get(word, word)
+        if key in values and index + 1 < len(words):
+            values[key].update(words[index + 1].split(",") if key == "--features"
+                               else (words[index + 1],))
+            index += 2
+            continue
+        if word.startswith("--features="):
+            values["--features"].update(word[len("--features="):].split(","))
+        elif word.startswith(("--exclude=", "--package=")):
+            key = "--exclude" if word.startswith("--exclude=") else "-p"
+            values[key].add(word.split("=", 1)[1])
+        else:
+            rest.append(word)
+        index += 1
+    values["--features"].discard("")
+    return rest, values
+
+
+def check_qualification_doctest_twins(text: str) -> None:
+    for job_name, twin_name, doctest_name in DOCTEST_TWINS:
+        block = job(text, job_name)
+        shapes = []
+        for name in (twin_name, doctest_name):
+            step = named_step(block, name)
+            require(step is not None,
+                    f"qualification.yml: {job_name} must keep its step \"{name}\" (#1422 doctest "
+                    "twins; an edit to it updates DOCTEST_TWINS in "
+                    "scripts/check-ci-path-routing.py)")
+            tests = [(line, shape) for line in run_lines(step)
+                     if (shape := cargo_test_shape(line))]
+            require(len(tests) == 1,
+                    f"qualification.yml: {job_name}'s step \"{name}\" must run exactly one "
+                    "`cargo test` (#1422)")
+            shapes.append((step, tests[0]))
+        (_, (_, (twin_rest, twin_values))), (doctest_step, (line, (rest, values))) = shapes
+        check_unmasked_step(f"{job_name}'s doctest step \"{doctest_name}\"", doctest_step,
+                            (line,), "#1422, #1434")
+        # The doctest command is its twin's with `--all-targets` turned into `--doc`: a flag on one
+        # step only (`--all-features`, `--no-default-features`, ...) is a difference.
+        require("--all-targets" in twin_rest,
+                f"qualification.yml: {job_name}'s step \"{twin_name}\" must run --all-targets "
+                "(#1422: its doctest twin is derived from it)")
+        expected = ["--doc" if word == "--all-targets" else word for word in twin_rest]
+        require(sorted(rest) == sorted(expected),
+                f"qualification.yml: {job_name}'s doctest step \"{doctest_name}\" must be "
+                f"`{' '.join(expected)}` plus its twin's packages and features, not "
+                f"`{' '.join(rest)}` (#1422)")
+        for key in ("--exclude", "-p", "--features"):
+            missing, extra = twin_values[key] - values[key], values[key] - twin_values[key]
+            require(not missing and not extra,
+                    f"qualification.yml: {job_name}'s doctest step \"{doctest_name}\" must name "
+                    f"the same {key} set as \"{twin_name}\"; missing {sorted(missing)}, extra "
+                    f"{sorted(extra)} (#1422)")
+
+
+def runs_realtime_policy_tests(command: str) -> bool:
+    shape = cargo_test_shape(command)
+    if shape is None:
+        return False
+    rest, values = shape
+    if ("--all-targets" not in rest or "--" in rest
+            or any(word in NON_INTEGRATION_TARGET_SELECTORS for word in rest)):
+        return False
+    return (REALTIME_POLICY_PACKAGE in values["-p"]
+            or ("--workspace" in rest and not values["-p"]
+                and REALTIME_POLICY_PACKAGE not in values["--exclude"]))
+
+
+def check_qualification_realtime_policy_tests(text: str) -> None:
+    require(any(runs_realtime_policy_tests(command)
+                for command in unconditional_step_commands(job(text, REALTIME_POLICY_JOB))),
+            f"qualification.yml: {REALTIME_POLICY_JOB} must run `cargo test --all-targets` over "
+            f"{REALTIME_POLICY_PACKAGE} unconditionally (`--workspace` without excluding it, or "
+            f"`-p {REALTIME_POLICY_PACKAGE}`); it is the tool's only test run (#1446)")
 
 
 def check_qualification_v8_spill(text: str) -> None:
@@ -901,18 +1099,30 @@ def step_commands(job_text: str, conditional: bool = True) -> list[str]:
         lines = step.splitlines()
         if not conditional and any(line.strip().startswith("if:") for line in lines):
             continue
-        for index, line in enumerate(lines):
-            stripped = line.strip()
-            if stripped in ("run: |", "run: >"):
-                body: list[str] = []
-                for following in lines[index + 1:]:
-                    if following.startswith("          "):
-                        body.append(following.strip())
-                    elif following.strip():
-                        break
-                commands.extend("\n".join(body).replace("\\\n", " ").splitlines())
-            elif stripped.startswith("run: "):
-                commands.append(stripped[len("run: "):])
+        commands.extend(run_lines(step))
+    return commands
+
+
+def run_lines(step: str) -> list[str]:
+    """The shell command lines of one step's `run:` (a `run: |` block or a single line), with
+    `\\` continuations joined. `step` may start with its `- ` item marker (as `job_steps` keeps
+    it) or without it (as `step_commands` splits it)."""
+    commands: list[str] = []
+    lines = step.splitlines()
+    for index, line in enumerate(lines):
+        stripped = line.strip()
+        if index == 0 and stripped.startswith("- "):
+            stripped = stripped[2:]
+        if stripped in ("run: |", "run: >"):
+            body: list[str] = []
+            for following in lines[index + 1:]:
+                if following.startswith("          "):
+                    body.append(following.strip())
+                elif following.strip():
+                    break
+            commands.extend("\n".join(body).replace("\\\n", " ").splitlines())
+        elif stripped.startswith("run: "):
+            commands.append(stripped[len("run: "):])
     return commands
 
 
@@ -1115,6 +1325,8 @@ def check_qualification_workflow(root: pathlib.Path) -> None:
     check_qualification_artifact_identity(text)
     check_qualification_metadata_generated_once(text, names)
     check_qualification_deduplicated_owners(text)
+    check_qualification_doctest_twins(text)
+    check_qualification_realtime_policy_tests(text)
     check_qualification_v8_spill(text)
     check_qualification_aarch64(text)
     check_qualification_native_g5(text)

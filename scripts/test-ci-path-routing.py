@@ -716,6 +716,54 @@ def test_generated_once_mutations(checker) -> None:
             path.write_text(original, encoding="utf-8")
         raise AssertionError(f"#1044 mutation was accepted in {reader}: {old!r}")
 
+    workflow_path = root / ".github/workflows/qualification.yml"
+
+    def refused(mutated: str) -> bool:
+        """True when the checker refuses qualification.yml replaced by `mutated` (then restored)."""
+        original = workflow_path.read_text(encoding="utf-8")
+        workflow_path.write_text(mutated, encoding="utf-8")
+        try:
+            checker.check(root)
+        except checker.Invalid:
+            return True
+        finally:
+            workflow_path.write_text(original, encoding="utf-8")
+        return False
+
+    def replaced_after(anchor: str, old: str, new: str, text: str | None = None) -> str:
+        """qualification.yml (or `text`) with `old`'s first occurrence after `anchor` replaced by
+        `new`."""
+        text = workflow_path.read_text(encoding="utf-8") if text is None else text
+        at = text.index(old, text.index(anchor))
+        return text[:at] + new + text[at + len(old):]
+
+    def key_on_step(job_name: str, command: str, key: str) -> str:
+        """qualification.yml with the line `key` added to the step of `job_name` that runs
+        `command`, just before that step's `run:`."""
+        text = workflow_path.read_text(encoding="utf-8")
+        start = text.index(f"\n  {job_name}:\n")
+        at = text.rindex("\n        run:", start, text.index(command, start)) + 1
+        return text[:at] + f"        {key}\n" + text[at:]
+
+    def step_deleted(name: str) -> str:
+        """qualification.yml without the step named `name` (up to the next step or job)."""
+        text = workflow_path.read_text(encoding="utf-8")
+        start = text.index(f"      - name: {name}\n")
+        end = min(at for at in (text.find("\n      - ", start), text.find("\n\n  ", start))
+                  if at >= 0)
+        return text[:start] + text[end + 1:]
+
+    def key_on_job(job_name: str, key: str) -> str:
+        return replaced_after(f"\n  {job_name}:\n", "    runs-on: ", f"    {key}\n    runs-on: ")
+
+    def mutation_fails(mutated: str, what: str) -> None:
+        if not refused(mutated):
+            raise AssertionError(f"#1434 mutation was accepted: {what}")
+
+    def workflow_mutation_passes(mutated: str, what: str) -> None:
+        if refused(mutated):
+            raise AssertionError(f"#1434 control mutation was refused: {what}")
+
     skip = ("bash scripts/check-web-audioworklet.sh --without-metadata-regeneration "
             f"target/ci/qualification-artifacts {checker.NAMED_TWIN}\n")
     try:
@@ -786,6 +834,140 @@ def test_generated_once_mutations(checker) -> None:
             "      - name: Hermetic browser host and worklet tests\n"
             "        if: needs.route.outputs.math_closure == 'true'\n"
             "        run: |\n")  # the owner made conditional (#1429: a block step)
+        # Issue #1434 D1: #1429's step is a guard only with its lines around the owner command.
+        # Each deletion leaves the owner command verbatim, so only the guard table sees it: red
+        # when the step loses pipefail (a failing `find` reads as empty), its private TMPDIR, its
+        # cleanup, or the emptiness check that is the claim.
+        hermetic = "      - name: Hermetic browser host and worklet tests\n"
+        for line in (
+            "          set -o pipefail\n",
+            '          scratch="$(mktemp -d "$RUNNER_TEMP/test-web-audioworklet-tmp.XXXXXX")"\n',
+            "          trap 'rm -rf -- \"$scratch\"' EXIT\n",
+            '          export TMPDIR="$scratch"\n',
+            "          leftover=\"$(find \"$scratch\" -mindepth 1 -maxdepth 1 -printf '%f\\n' "
+            "| LC_ALL=C sort)\"\n",
+            '          if [[ -n "$leftover" ]]; then\n',
+            "            exit 1\n",
+        ):
+            mutation_fails(replaced_after(hermetic, line, ""), f"#1429 guard line deleted: {line!r}")
+        # The emptiness check moved before the suite: it then checks a directory nothing has used.
+        owner = "          bash scripts/test-web-audioworklet.sh\n"
+        emptiness = ("          leftover=\"$(find \"$scratch\" -mindepth 1 -maxdepth 1 -printf "
+                     "'%f\\n' | LC_ALL=C sort)\"\n"
+                     '          if [[ -n "$leftover" ]]; then\n'
+                     "            printf 'scripts/test-web-audioworklet.sh left these entries in its "
+                     "TMPDIR:\\n%s\\n' \"$leftover\" >&2\n"
+                     "            exit 1\n"
+                     "          fi\n")
+        mutation_fails(replaced_after(hermetic, owner + emptiness, emptiness + owner),
+                       "#1429 emptiness check moved before the owner command")
+        # Issue #1434 D2: each construct keeps every owner command verbatim and lets a failing one
+        # pass; red when an owner step swallows its own failure, which the presence check accepts.
+        effect = ("      - name: Effect runtime dependency-boundary and fixture policy and mutation "
+                  "tests\n")
+        first = "          bash scripts/check-effect-runtime-policy.sh\n"
+        last = "          bash scripts/test-effect-runtime-fixtures.sh\n"
+        for new, what in (
+            ("          set +e\n" + first, "set +e"),
+            ("          set +o errexit\n" + first, "set +o errexit"),
+            ("          set +o pipefail\n" + first, "set +o pipefail"),
+            ("          {\n" + first + "          } || true\n", "|| true"),
+            ("          {\n" + first + "          } || :\n", "|| :"),
+            ("          (\n" + first + "          ) &\n", "a trailing &"),
+        ):
+            mutation_fails(replaced_after(effect, first, new), f"lint owner masked by {what}")
+        mutation_fails(replaced_after(effect, last, "          trap 'exit 0' EXIT\n" + last),
+                       "lint owner step exits 0 (from a trap) before its last owner command")
+        mutation_fails(replaced_after(effect, first,
+                                      "          {\n" + first + "          } && echo ok\n"),
+                       "lint owner masked by a group closed into &&")
+        mutation_fails(replaced_after(effect, first, "          !\n" + first),
+                       "lint owner masked by a lone !")
+        # An unnamed step (`- run:` on the item line) is still an owner step.
+        mutation_fails(replaced_after("\n  audit-native:\n",
+                                      "      - name: Realtime source policy (tools/realtime-policy)\n"
+                                      "        run: ./target/release/realtime_policy\n",
+                                      "      - run: ./target/release/realtime_policy\n"
+                                      "        continue-on-error: true\n"),
+                       "continue-on-error: true on an unnamed audit-native owner step")
+        # A single-line owner turned into a block that masks it.
+        realtime = "        run: ./target/release/realtime_policy\n"
+        mutation_fails(replaced_after("\n  audit-native:\n", realtime,
+                                      "        run: |\n          set +o errexit\n"
+                                      "          ./target/release/realtime_policy\n"
+                                      "          echo done\n"),
+                       "audit-native owner masked by set +o errexit")
+        # Issue #1434 A2-D1: `continue-on-error` on an owner step or job makes a failing owner pass
+        # with every job green; the key is refused whatever its value, `false` included.
+        mutation_fails(key_on_step("audit-native", "./target/release/realtime_policy",
+                                   "continue-on-error: true"),
+                       "continue-on-error: true on audit-native's owner step")
+        mutation_fails(key_on_job("audit-native", "continue-on-error: true"),
+                       "continue-on-error: true on the audit-native job")
+        for name, command in (
+            ("artifact-gates", "bash scripts/test-web-audioworklet.sh"),
+            ("lint", "bash scripts/check-effect-runtime-policy.sh"),
+            ("test-release", "cargo rustc --locked --release -p math --lib"),
+            ("audit-native", "./target/release/realtime_policy"),
+        ):
+            mutation_fails(key_on_step(name, command, "continue-on-error: false"),
+                           f"continue-on-error: false on {name}'s owner step")
+            mutation_fails(key_on_job(name, "continue-on-error: false"),
+                           f"continue-on-error: false on the {name} job")
+        # Issue #1434 A1-D1/A1-D2 (#1422): each case leaves the whole-package step as it is and
+        # drops or narrows its doctest twin; red when the compile_fail fences of a package (or
+        # those a feature gates) stop running, which no other check sees.
+        debug_a = ("      - name: Workspace debug tests (excluding DSP crates, audit, and wasm "
+                   "evidence tools)\n")
+        doc_a = "      - name: Workspace doctests (same packages and features as the debug tests)\n"
+        doc_b = "      - name: DSP crates doctests (same packages and features as the debug tests)\n"
+        for mutated, what in (
+            (step_deleted("Workspace doctests (same packages and features as the debug tests)"),
+             "test-debug-a's doctest step deleted"),
+            (step_deleted("DSP crates doctests (same packages and features as the debug tests)"),
+             "test-debug-b's doctest step deleted"),
+            (replaced_after(doc_a, " --exclude delay", ""),
+             "an --exclude dropped from test-debug-a's doctest step"),
+            (replaced_after(doc_a, "host-core/test-support,", ""),
+             "a feature dropped from test-debug-a's doctest step"),
+            (replaced_after(doc_b, "-p delay ", ""),
+             "a -p package dropped from test-debug-b's doctest step"),
+            (replaced_after(doc_b, ",lane/test-support", ""),
+             "a feature dropped from test-debug-b's doctest step"),
+            (replaced_after(doc_b, "cargo test --locked --doc", "cargo test --locked --lib"),
+             "test-debug-b's doctest step runs --lib instead of --doc"),
+            (replaced_after(doc_a, "--workspace --doc", "--workspace --doc --all-features"),
+             "--all-features on test-debug-a's doctest step only"),
+            (replaced_after(debug_a, "--workspace --all-targets",
+                            "--workspace --all-targets --no-default-features"),
+             "--no-default-features on test-debug-a's debug tests only"),
+            (replaced_after(doc_a, doc_a, doc_a + "        if: false\n"),
+             "test-debug-a's doctest step made conditional"),
+        ):
+            mutation_fails(mutated, what)
+        # The pairing, not the values, is the claim: the same package excluded from both twins
+        # passes.
+        corpus = "--exclude wasm-gate-corpus \\\n"
+        both = replaced_after(debug_a, corpus, "--exclude wasm-gate-corpus --exclude foo \\\n")
+        workflow_mutation_passes(
+            replaced_after(doc_a, corpus, "--exclude wasm-gate-corpus --exclude foo \\\n", both),
+            "--exclude foo on both twins")
+        # The same flag on both twins passes too.
+        flagged = replaced_after(debug_a, "--workspace --all-targets",
+                                 "--workspace --all-targets --all-features")
+        workflow_mutation_passes(
+            replaced_after(doc_a, "--workspace --doc", "--workspace --doc --all-features", flagged),
+            "--all-features on both twins")
+        # Issue #1434 A2-D2 (#1446): red when tools/realtime-policy's own suite leaves its only
+        # run, including the edit to both twins that A1-D2 passes by design.
+        excluded = "--exclude wasm-gate-corpus --exclude realtime-policy \\\n"
+        alone = replaced_after(debug_a, corpus, excluded)
+        mutation_fails(alone, "realtime-policy excluded from test-debug-a's debug tests")
+        mutation_fails(replaced_after(doc_a, corpus, excluded, alone),
+                       "realtime-policy excluded from both test-debug-a twins")
+        mutation_fails(replaced_after(debug_a, "cargo test --locked --workspace --all-targets",
+                                      "cargo test --locked -p engine --all-targets"),
+                       "test-debug-a's debug tests narrowed to -p engine")
         m3 = "        run: cargo test --locked --release -p lane -p math -p wasm-gates --features math/lane\n"
         for new in (
             m3.replace("run: cargo", "run: RUSTFLAGS='-C target-feature=+fma' cargo"),  # config replaced

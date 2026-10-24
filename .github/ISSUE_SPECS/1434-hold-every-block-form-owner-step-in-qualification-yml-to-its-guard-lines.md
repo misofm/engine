@@ -231,3 +231,49 @@ the `continue-on-error` census above, re-run at the PR head.
 **Dependencies (added).** The `realtime_policy` owner entry in `DEDUPLICATED_OWNERS` and the
 `tools/realtime-policy` crate land with the J3 batch (#1446). This issue therefore lands after the J3
 batch is on `main`, and the re-measurement of the line numbers above is part of the implementation.
+
+## Decision record (implementation, attempt 1, 2026-10-24)
+
+Root accepted the scope note's recommendations; anchors re-measured at `7255ebc37`.
+- D1 matches the pinned lines as an ordered subsequence of the step's comment-stripped `run:` lines
+  (`GUARDED_OWNER_STEPS`), not whole-body equality: the `printf` message and `fi` carry no claim.
+  Pinned (artifact-gates, "Hermetic browser host and worklet tests"): `set -o pipefail`, the `mktemp -d`
+  line, the `trap` line, `export TMPDIR="$scratch"`, `exit 1` and the `find` and `if [[ -n "$leftover" ]]`
+  lines (#1429), with the owner command (#1044) between them.
+- D2 scans comment-stripped lines (`FAILURE_MASKS`). It also refuses, fail-closed, a line starting
+  with `}` or `)` then `||` or `&&`, and a line that is only `if`, `while`, `until` or `!`. Before the
+  step's last owner command it refuses `exit 0` (also inside quotes, as in `trap 'exit 0' EXIT`) and a
+  bare `exit` with no `||` before it (`cmd || exit` passes the failure on and is allowed).
+- Stated limits (closing them needs a shell parser): a mask through a condition, loop or negation
+  written in other ways (for example `if cmd; then` on one line, or `cmd || echo`) is accepted.
+  Verifier MINOR 4: D1's subsequence rule accepts inserted lines that undo a guard (for example a
+  second `export TMPDIR=` after the pinned one); the threat model is an accidental edit, not a
+  hostile one. Verifier MINOR 5, the known false refusals, all fail-closed: `|| true` inside quotes,
+  a mask pattern inside a trailing comment (`cmd # || true`), and a trailing `&` inside a heredoc.
+- A2-D1 is a presence test (any value) at step and job level, on all four owner jobs; the same
+  helper holds the doctest twins (A1-D1).
+- A1-D1/A1-D2: `DOCTEST_TWINS`; apart from its `--exclude`, `-p` and `--features` sets, the doctest
+  command must equal its twin's other words with `--all-targets` turned into `--doc`, so a flag such
+  as `--all-features` on one step only is refused and on both is accepted.
+- A2-D2: `test-debug-a` must run an unconditional `cargo test --all-targets` that is `--workspace` with
+  no `-p` and no `--exclude realtime-policy`, or names `-p realtime-policy`.
+- Masking census outside scope: the one `set +e` in `qualification.yml` is in `audit-native`'s non-owner
+  step "Issue-544 C ABI runtime caller audit" (it captures `PIPESTATUS` and re-raises). Not touched.
+  The `continue-on-error` census is unchanged: only the two `verdict` telemetry steps.
+- No owner step masks a failure today; the Non-goal stop did not trigger.
+
+## Evidence (attempt 1)
+
+- 42 mutation cases and 2 green controls in `test_generated_once_mutations`. With the parent
+  commit's checker every case is accepted; with the change every case is refused; the controls
+  (`--exclude foo`, `--all-features` on both twins) pass with both.
+- Rule removal, each in turn: D1 -> the 8 #1429 cases accepted; D2 masks -> the 7 mask cases;
+  D2 `exit 0` -> 1; A2-D1 step -> 5; A2-D1 job -> 5; A1-D1 step presence -> 2 deletions; A1-D1
+  unmasked -> `if: false`; A1-D1 command shape -> `--lib`; A1-D2 -> 4 narrowing cases; A2-D2 ->
+  the both-twins `--exclude realtime-policy` case. Verifier follow-ups: the quote characters in
+  `EXIT_ZERO` -> the `trap 'exit 0'` case; the group-closer rule -> `} && echo ok`; the lone-keyword
+  rule -> a lone `!`; the twin-derived doctest flags -> `--no-default-features` on the twin only
+  (and the both-twins control turns red); the `- ` branch of `run_lines` -> the unnamed
+  `- run:` owner step with `continue-on-error`. The `{ ... } || true` and `|| :` cases are also
+  refused by the group-closer rule, so those two labels overlap; every other rule's cases are its
+  own.
