@@ -144,6 +144,23 @@ fn a_name_of_the_set_in_a_macro_token_tree_is_refused_anywhere_in_a_region() {
             &[class],
         );
     }
+    // A hot local taken above BEGIN and called in a loop written in the tokens.
+    let body = format!(
+        "        let next = Lane::next_record;\n// {BEGIN}\n        assert!({{ while next(self).is_some() {{}} true }});\n// {END}\n"
+    );
+    refuses(
+        "calls-macro-hot-local",
+        &format!("{}{}", marked(HELPER), caller(&body)),
+        &[CALL],
+    );
+    // A field read of the same name is not a value.
+    accepts(
+        "calls-macro-field",
+        &marked(&format!(
+            "{HELPER}{}",
+            caller("        debug_assert!(self.next_record.is_none());\n")
+        )),
+    );
 }
 
 #[test]
@@ -245,6 +262,15 @@ fn a_function_value_hoisted_without_a_let_initializer_is_refused_when_called() {
         &assigned("        let next;\n        next = Lane::next_record;\n"),
         &[CALL],
     );
+    // A pattern bound from a hot value.
+    let pattern = format!(
+        "        if let Some(next) = Some(Lane::next_record as fn(&mut Lane) -> Option<Record>) {{\n// {BEGIN}\n            while let Some(record) = next(self) {{\n                apply(record);\n            }}\n// {END}\n        }}\n"
+    );
+    refuses(
+        "calls-hoisted-pattern",
+        &format!("{}{}", marked(HELPER), caller(&pattern)),
+        &[CALL],
+    );
     refuses(
         "calls-hoisted-macro-assign",
         &assigned(
@@ -283,6 +309,13 @@ fn a_function_value_hoisted_without_a_let_initializer_is_refused_when_called() {
         marked(&looped("quiet"))
     );
     refuses("calls-hoisted-use-rename", &text, &[CALL]);
+    // A field name and a module segment in an initializer do not name the function.
+    let text = format!(
+        "const LIMITS: Limits = Limits {{ next_record: next_record::DEPTH }};\n{}{}",
+        marked(HELPER),
+        marked(&caller("        let _ = LIMITS;\n"))
+    );
+    accepts("calls-item-field-and-module", &text);
 }
 
 #[test]

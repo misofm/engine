@@ -15,8 +15,9 @@
 //!    `for`'s iterator expression is outside it) or in a closure body: a method call whose method is
 //!    in the set; a call whose callee path ends in a name of the set; and a call whose callee is a
 //!    single-segment path that resolves to a hot local. A local is hot (#1544 D1) when its `let`
-//!    initializer or any assignment to it (`x = ..`, `x op= ..`, one written in a macro token tree
-//!    included) names a function of the set or a hot local anywhere (`Self::next_record`, a closure,
+//!    initializer, any assignment to it (`x = ..`, `x op= ..`, one written in a macro token tree
+//!    included) or the value that a pattern binding it matches (`if let`, `while let`, `match`,
+//!    `for`) names a function of the set or a hot local anywhere (`Self::next_record`, a closure,
 //!    a cast). The check is flow-insensitive: it reads every `let` and assignment of the function,
 //!    wherever it stands, and a deferred `let next;` counts.
 //! 2. Anywhere in a marked region: a path that is not a callee and ends in a name of the set. A
@@ -24,8 +25,9 @@
 //!    parameter. In a macro token tree (#1544 D3) an identifier of the set that does not resolve to
 //!    a local is refused anywhere in a region, in or out of a loop: as a call when a `( .. )` group
 //!    follows it, as a path value otherwise, so a loop or a closure written in the tokens is
-//!    covered without parsing them. A hot local followed by `( .. )` in a token tree is judged by
-//!    rule 1.
+//!    covered without parsing them. A hot local followed by `( .. )` in a token tree is refused
+//!    anywhere in a region for the same reason. A field name (`.name` with no `( .. )` after it, or
+//!    `name:` in a struct literal) is not a value.
 //! 3. Anywhere under the roots: an `impl` of `Iterator`, `DoubleEndedIterator` or `IntoIterator`
 //!    (or a name that a `use` renames one of them to) with a method that pops. Iteration calls
 //!    `next` with no call site.
@@ -35,7 +37,8 @@
 //!
 //! Limits that stay (D4): a loop in an unmarked caller (the helper's pop must still be marked or
 //! listed, #1443); a helper two calls deep (the loop calls `a`, `a` calls `b`, `b` pops); a function
-//! value that enters a function as a parameter, a field or a return value; an implicit call other
+//! value that enters a function as a parameter, a field or a return value, or that aliasing through
+//! `&mut` writes (`*r = ..`, `mem::swap`, `mem::replace`); an implicit call other
 //! than iteration (`Drop`, `Deref`, an operator trait); a standard-library adapter that holds a
 //! closure taken above the region (`let it = std::iter::from_fn(|| lane.next_record());`, then
 //! `for r in it`); a name that a macro builds from parts (`paste!`, a `$f` fragment spliced into a
@@ -164,21 +167,38 @@ pub(crate) fn read_aliases(source: &Source, aliases: &mut BTreeSet<Alias>) {
     scan(source.tokens.clone(), aliases);
 }
 
-/// Every identifier of `tokens` at any depth that can name a function: not a field name in a
-/// struct literal (`meters: true`) and not a field read (`.meters` with no `( .. )` after it).
+/// Whether the identifier at `at` is a field name: of a struct literal (`meters: true`), or of a
+/// field read (`.meters` with no `( .. )` or `::<` after it).
+fn field(tokens: &[proc_macro2::TokenTree], at: usize) -> bool {
+    let next = tokens.get(at + 1);
+    let literal = matches!(next, Some(proc_macro2::TokenTree::Punct(punct))
+        if punct.as_char() == ':' && punct.spacing() == proc_macro2::Spacing::Alone);
+    let read = at > 0
+        && matches!(&tokens[at - 1], proc_macro2::TokenTree::Punct(punct) if punct.as_char() == '.')
+        && !matches!(next, Some(proc_macro2::TokenTree::Group(group))
+            if group.delimiter() == proc_macro2::Delimiter::Parenthesis)
+        && !matches!(next, Some(proc_macro2::TokenTree::Punct(punct)) if punct.as_char() == ':');
+    literal || read
+}
+
+/// Every identifier of `tokens` at any depth that can name a function: not a field name
+/// ([`field`]) and not a module segment (`next_record::DEPTH`).
 fn values(tokens: &[proc_macro2::TokenTree], found: &mut BTreeSet<String>) {
     for (at, token) in tokens.iter().enumerate() {
         match token {
             proc_macro2::TokenTree::Ident(ident) => {
-                let next = tokens.get(at + 1);
-                let field = matches!(next, Some(proc_macro2::TokenTree::Punct(punct))
-                    if punct.as_char() == ':' && punct.spacing() == proc_macro2::Spacing::Alone);
-                let read = at > 0
-                    && matches!(&tokens[at - 1], proc_macro2::TokenTree::Punct(punct) if punct.as_char() == '.')
-                    && !matches!(next, Some(proc_macro2::TokenTree::Group(group))
-                        if group.delimiter() == proc_macro2::Delimiter::Parenthesis)
-                    && !matches!(next, Some(proc_macro2::TokenTree::Punct(punct)) if punct.as_char() == ':');
-                if !(field || read) {
+                // A module segment: `name::item`, not the turbofish `name::<T>`.
+                let module = matches!(
+                    tokens.get(at + 1..at + 4),
+                    Some([
+                        proc_macro2::TokenTree::Punct(first),
+                        proc_macro2::TokenTree::Punct(second),
+                        proc_macro2::TokenTree::Ident(_),
+                    ]) if first.as_char() == ':'
+                        && first.spacing() == proc_macro2::Spacing::Joint
+                        && second.as_char() == ':'
+                );
+                if !(field(tokens, at) || module) {
                     found.insert(bare(ident));
                 }
             }
@@ -341,8 +361,8 @@ impl Calls<'_> {
         self.assigned = outer;
     }
 
-    /// Meet the identifiers of a macro's tokens. A name of the set is refused anywhere in a
-    /// region (#1544 D3); a hot local only when called in a loop or a closure.
+    /// Meet the identifiers of a macro's tokens (#1544 D3): in a region, a name of the set is
+    /// refused anywhere, and a hot local wherever it is called. A field name is not a value.
     fn tokens(&mut self, tokens: &proc_macro2::TokenStream) {
         let list: Vec<proc_macro2::TokenTree> = tokens.clone().into_iter().collect();
         for (at, token) in list.iter().enumerate() {
@@ -352,11 +372,16 @@ impl Calls<'_> {
                     let called = matches!(list.get(at + 1), Some(proc_macro2::TokenTree::Group(group))
                         if group.delimiter() == proc_macro2::Delimiter::Parenthesis);
                     let line = ident.span().start().line;
+                    if field(&list, at) {
+                        continue;
+                    }
                     match self.local(&name) {
+                        // A loop or a closure written in the tokens is not seen, so a call of a
+                        // hot local is refused anywhere in a region.
                         Some(true) => {
                             self.hits += 1;
-                            if called {
-                                self.call(line);
+                            if called && self.in_region(line) {
+                                self.found.insert((Class::PoppingCall, line));
                             }
                         }
                         Some(false) => {}
@@ -382,7 +407,8 @@ impl Calls<'_> {
 }
 
 /// The locals of a function body that a name of the set or another such local reaches through a
-/// `let` initializer or an assignment, to a fixpoint (#1544 D1). Flow-insensitive: every `let` and
+/// `let` initializer, an assignment or a pattern of an `if let`, `while let`, `match` or `for`, to a
+/// fixpoint (#1544 D1). Flow-insensitive: every `let` and
 /// assignment of the body counts wherever it stands, closures included; a nested item is its own.
 fn assigned(names: &BTreeSet<String>, body: Option<&syn::Block>) -> BTreeSet<String> {
     /// Each edge: the names it binds or assigns, and the identifiers of its value.
@@ -419,6 +445,14 @@ fn assigned(names: &BTreeSet<String>, body: Option<&syn::Block>) -> BTreeSet<Str
         }
     }
     impl Edges {
+        /// The names a pattern binds, from the identifiers of the value it matches.
+        fn bind(&mut self, pattern: &syn::Pat, value: &syn::Expr) {
+            let mut targets = Targets::default();
+            targets.visit_pat(pattern);
+            let mut sources = Idents::default();
+            sources.visit_expr(value);
+            self.0.push((targets.0, sources.0));
+        }
         fn assign(&mut self, left: &syn::Expr, right: &syn::Expr) {
             let mut targets = Targets::default();
             targets.visit_expr(left);
@@ -438,6 +472,20 @@ fn assigned(names: &BTreeSet<String>, body: Option<&syn::Block>) -> BTreeSet<Str
                 self.0.push((targets.0, sources.0));
             }
             visit::visit_local(self, node);
+        }
+        fn visit_expr_let(&mut self, node: &'ast syn::ExprLet) {
+            self.bind(&node.pat, &node.expr);
+            visit::visit_expr_let(self, node);
+        }
+        fn visit_expr_match(&mut self, node: &'ast syn::ExprMatch) {
+            for arm in &node.arms {
+                self.bind(&arm.pat, &node.expr);
+            }
+            visit::visit_expr_match(self, node);
+        }
+        fn visit_expr_for_loop(&mut self, node: &'ast syn::ExprForLoop) {
+            self.bind(&node.pat, &node.expr);
+            visit::visit_expr_for_loop(self, node);
         }
         fn visit_expr_assign(&mut self, node: &'ast syn::ExprAssign) {
             self.assign(&node.left, &node.right);

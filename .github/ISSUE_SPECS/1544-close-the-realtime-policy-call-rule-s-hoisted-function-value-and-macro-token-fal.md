@@ -62,6 +62,8 @@ refuses `ident(..)` in a token tree only when the macro call itself stands in a 
   region: #1444 D4 and limit 1. Closing it needs a hot local refused as a value in a region, and
   `let record = self.next_record();` is hot too, so it would over-refuse every real drain result.
 - A helper two calls deep, a value that enters through a field or a return, `Drop`/`Deref`: #1444 D4.
+- Aliasing through `&mut` (`*r = ..`, `mem::swap`, `mem::replace`): root ruling 2026-10-24, the same
+  family as a value through a field or a return.
 
 ## Hazards
 
@@ -101,3 +103,12 @@ Stream J batch 4 (`codex/d15-stream-j4`) on `main`. Attempt budget: 3.
   loop test. Real tree: `ok (192 marked regions in 34 files)` before and after. Mutants (PR
   evidence): no pre-pass, the `repeats` test back in `tokens()`, no item/rename facts: each turns
   its group test red.
+- Attempt 2 (2026-10-24), after verifier FAIL on attempt 1. BLOCKER-1: a hot local called in a token
+  tree is now refused anywhere in a region (a loop or closure written in the tokens is not seen).
+  MAJOR-1: the D1 pre-pass also binds the patterns of `if let`/`while let`, each `match` arm and a
+  `for` from the identifiers of their value. MAJOR-2: recorded as a limit above. MINOR-1: in
+  `tokens()`, a field read (`.name` with no `( .. )`) and a struct-literal field name are not values.
+  MINOR-2: in an item initializer, a module segment (`name::item`, not `name::<T>`) does not count.
+  Rows added: `calls-macro-hot-local`, `calls-hoisted-pattern` (red on attempt 1), and the accept rows
+  `calls-macro-field`, `calls-item-field-and-module` (each red when its brake is removed). Real tree:
+  `ok (192 marked regions in 34 files)`.
