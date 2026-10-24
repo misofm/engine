@@ -322,9 +322,6 @@ pub struct MeterFrame {
     pub strip_gain_reduction_db: Box<[f32]>,
     /// Whether each strip's gain reduction came from at least one armed tap's window.
     pub strip_gain_reduction_present: Box<[bool]>,
-    /// The designated strip's gain reduction, or `None` when no strip is designated or the
-    /// designated strip published none (absent, not zero: zero reads as "not reducing").
-    pub designated_gain_reduction_db: Option<f32>,
 }
 
 impl MeterFrame {
@@ -346,8 +343,22 @@ impl MeterFrame {
             output_peak: [0.0; 2],
             strip_gain_reduction_db: filled(strip_count, 0.0)?,
             strip_gain_reduction_present: filled(strip_count, false)?,
-            designated_gain_reduction_db: None,
         })
+    }
+
+    /// The master strip's gain reduction (#1690 D1): strip `master`'s word when that strip is in
+    /// the frame and an armed tap's window folded into it, else `None` -- absent, not zero, when
+    /// no strip is the master or the master published nothing (zero reads as "not reducing").
+    /// Every host reads the master's reading through this one function, from the same frame.
+    #[must_use]
+    #[inline]
+    pub fn master_gain_reduction(&self, master: Option<u32>) -> Option<f32> {
+        let strip = usize::try_from(master?).ok()?;
+        if self.strip_gain_reduction_present.get(strip).copied()? {
+            self.strip_gain_reduction_db.get(strip).copied()
+        } else {
+            None
+        }
     }
 
     /// The heap bytes [`Self::new`] allocated, so an owner charges them.
@@ -396,15 +407,10 @@ pub trait GainReductionTaps {
 /// Clears every strip's word and presence, then, for each armed tap whose latest window opened at
 /// or after its arm sample ([`window_since_arm`]), acknowledges the window and folds its
 /// [`strip_reduction_db`] into the tap's strip word by maximum (from `0.0`). A strip outside the
-/// frame is skipped. `designated_gain_reduction_db` becomes the `designated` strip's word when
-/// that strip is present, and [`MeterValidity::GAIN_REDUCTION`] is set exactly when some tap
-/// folded. Allocation-free, no runtime-checked index, bounded by the visited taps.
+/// frame is skipped. [`MeterValidity::GAIN_REDUCTION`] is set exactly when some tap folded; the
+/// master's reading is [`MeterFrame::master_gain_reduction`] of the folded frame. Allocation-free, no runtime-checked index, bounded by the visited taps.
 #[inline]
-pub fn fold_gain_reduction(
-    frame: &mut MeterFrame,
-    taps: &mut impl GainReductionTaps,
-    designated: Option<u32>,
-) {
+pub fn fold_gain_reduction(frame: &mut MeterFrame, taps: &mut impl GainReductionTaps) {
     for slot in &mut frame.strip_gain_reduction_db {
         *slot = 0.0;
     }
@@ -440,21 +446,6 @@ pub fn fold_gain_reduction(
             *present = true;
         }
         observed_any = true;
-    });
-    // A designation, not a discovery: absent, not zero, when no strip is designated or the
-    // designated strip published nothing.
-    frame.designated_gain_reduction_db = designated.and_then(|strip| {
-        let strip = strip as usize;
-        if frame
-            .strip_gain_reduction_present
-            .get(strip)
-            .copied()
-            .unwrap_or(false)
-        {
-            frame.strip_gain_reduction_db.get(strip).copied()
-        } else {
-            None
-        }
     });
     frame.validity = if observed_any {
         frame.validity.union(MeterValidity::GAIN_REDUCTION)
@@ -865,7 +856,6 @@ impl MeterDelivery {
         into.validity = from.validity;
         into.loss_count = from.loss_count;
         into.output_peak = from.output_peak;
-        into.designated_gain_reduction_db = from.designated_gain_reduction_db;
         for carry in carries {
             let (Ok(next), Ok(previous)) = (
                 usize::try_from(carry.successor),
@@ -908,8 +898,7 @@ impl MeterDelivery {
     /// Fold the closed windows into the frame (#1582 D1): at most one published window per call.
     ///
     /// `meters` are the rendering plan's strip meter consumers, in strip order; `taps` its
-    /// observation taps; `designated` its designated strip; `next_sample` the next block's first
-    /// sample. Returns the frame when this call published one, else `None` and leaves the frame
+    /// observation taps; `next_sample` the next block's first sample. Returns the frame when this call published one, else `None` and leaves the frame
     /// as it was.
     ///
     /// Groups the strip meters' heads: equal groups (handle or carried handle, reset generation,
@@ -932,7 +921,6 @@ impl MeterDelivery {
         &mut self,
         meters: &mut [MeterConsumer],
         taps: &mut impl GainReductionTaps,
-        designated: Option<u32>,
         next_sample: u64,
     ) -> Option<&MeterFrame> {
         if !self.level {
@@ -942,8 +930,7 @@ impl MeterDelivery {
         // popped here, at one site, so the queue's checked slot index inlines once.
         let mut output_pops = 0_usize;
         let strips = StripMeters { consumers: meters };
-        let published =
-            self.fold_meter_windows(strips, taps, designated, next_sample, &mut output_pops);
+        let published = self.fold_meter_windows(strips, taps, next_sample, &mut output_pops);
         self.pop_output_windows(output_pops);
         published.then_some(&self.tables.frame)
     }
@@ -956,7 +943,6 @@ impl MeterDelivery {
         &mut self,
         strips: StripMeters<'_>,
         taps: &mut impl GainReductionTaps,
-        designated: Option<u32>,
         next_sample: u64,
         output_pops: &mut usize,
     ) -> bool {
@@ -1222,7 +1208,7 @@ impl MeterDelivery {
         // Issue #143 D5: the gain-reduction section. The poll runs after the render, with no
         // allocation, lock or unbounded loop, so the one unit conversion the design permits, a
         // linear tap's magnitude to decibels, runs here once per closed window.
-        fold_gain_reduction(frame, taps, designated);
+        fold_gain_reduction(frame, taps);
         frame.windows = windows;
         frame.sequence = frame.sequence.saturating_add(1);
         frame.first_sample = folded_start;
@@ -1262,7 +1248,6 @@ impl MeterDelivery {
                 *present = false;
             }
             frame.output_peak = [0.0; 2];
-            frame.designated_gain_reduction_db = None;
             frame.validity = MeterValidity::NONE;
             frame.loss_count = 0;
             frame.sequence = 0;
