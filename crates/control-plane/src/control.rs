@@ -55,7 +55,9 @@ pub struct ProviderEpoch {
     /// The consumers of this epoch's plan's strip meters (#1581 D6), one per strip in strip order
     /// (`host_core::meter_selection`). Nothing reads them until #1587; a full strip queue drops
     /// and counts on the render side. Their rings are `Arc`s shared with the plan's observers, as
-    /// the producers' cells are, so the epoch may drop after its plan.
+    /// the producers' cells are, so the epoch may drop after its plan. Only the adapters' tests
+    /// read them before #1587.
+    #[cfg_attr(not(feature = "test-support"), allow(dead_code))]
     pub(crate) meters: Box<[host_core::MeterConsumer]>,
     /// The capi resources this epoch's plan was prepared with (#1257 D4).
     pub(crate) capi: CapiResources,

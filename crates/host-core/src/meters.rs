@@ -207,20 +207,30 @@ fn plane_peak(plane: &[f32], seed: f32) -> f32 {
 }
 
 /// [`meter_sample_peak_block`] over `plane` read as consecutive `L::WIDTH`-sample chunks, the
-/// lanes' maximum, then the tail with the same rule. The select-form maximum over sanitized
-/// magnitudes is commutative and associative, so the order is free and the result is the scalar
-/// sample-serial fold's, bit for bit.
+/// lanes' maximum, then the tail with the same kernel at `f32`. The select-form maximum over
+/// sanitized magnitudes is commutative and associative, so the order is free and the result is the
+/// scalar sample-serial fold's, bit for bit.
+///
+/// Every slice comes from `chunks_exact` and every kernel call reads exactly one frame of it, so
+/// no bounds check or slice-index panic joins the render call graph.
 #[inline(always)]
 fn fold_peak<L: Lane>(plane: &[f32], seed: f32) -> f32 {
-    let chunks = plane.len() / L::WIDTH;
-    let (body, tail) = plane.split_at(chunks * L::WIDTH);
+    let mut chunks = plane.chunks_exact(L::WIDTH);
+    let mut lanes_peak = L::zero();
+    for chunk in &mut chunks {
+        lanes_peak = meter_sample_peak_block::<L>(chunk, 1, lanes_peak);
+    }
     let mut lanes = [0.0_f32; 8];
-    meter_sample_peak_block::<L>(body, chunks, L::zero()).store(&mut lanes);
+    lanes_peak.store(&mut lanes);
+    // Lanes past `L::WIDTH` stay `+0.0`, the fold's identity.
     let mut peak = seed;
     for &lane in &lanes {
         peak = <f32 as Lane>::max(lane, peak);
     }
-    meter_sample_peak_block::<f32>(tail, tail.len(), peak)
+    for sample in chunks.remainder() {
+        peak = meter_sample_peak_block::<f32>(core::slice::from_ref(sample), 1, peak);
+    }
+    peak
 }
 // REALTIME_POLICY_END
 
