@@ -371,8 +371,8 @@ provider's counter and diagnostic pages. The eight provider-owned counters (the 
 counters `TELEMETRY_COALESCED` 5 and `TELEMETRY_DROPPED` 6, `LIVE_VALUES_SUPERSEDED` 16, #1312 D8,
 `TRANSITION_REPREPARE_REFUSALS` 17, #1351 D6, `STRIPS_RESTARTED` 18, #1768,
 `LIVE_BLOCK_ERRORS` 19, #1521, `SOURCE_UNDERRUN_BLOCKS` 20, #1537, and `SOURCE_FRAMES_DISCARDED`
-21, #1699) retain an independent eight-slot minimum even when the frame-derived telemetry configuration capacity is
-smaller. Canceled automation (counter 12) retired with the automation queue (#1629).
+21, #1699) retain an independent eight-slot minimum even when the frame-derived telemetry
+configuration capacity is smaller. Canceled automation (counter 12) retired with the automation queue (#1629).
 
 **Served counters and the counter snapshot (#1351).** The provider serves exactly those eight
 counters, each at 0 from construction, so `COUNTERS_GET` with `all` returns all eight and a read of
@@ -385,7 +385,8 @@ counts the rendered blocks in which a source played zeros because the host had n
 it owed (graph-wide; a held block and a block past the end of a region are not counted); the
 service step copies the render-side mirror in, on both hosts (#1537). `SOURCE_FRAMES_DISCARDED`
 counts the accepted source frames render never read because the caller's transaction removed or
-redeclared the source; the service step adds them when it reclaims the displaced plan (#1699). `TELEMETRY_CONFIGURE` naming any other counter ID (for example
+redeclared the source, or a failed carry could not move; the service step adds them when it
+reclaims the displaced plan (#1699). `TELEMETRY_CONFIGURE` naming any other counter ID (for example
 `MALFORMED_FRAMES`) is `NOT_FOUND`, and the stored configuration does not change. `TRANSITION_REPREPARE_REFUSALS`
 is protocol counter 17; nothing writes a nonzero value until #1360. The periodic `COUNTER_SNAPSHOT`
 event (`0x8021`) reports, for each configured ID in order, the value after the service step's first

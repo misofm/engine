@@ -2044,8 +2044,8 @@ where
     /// Sets every counter the provider serves from a source outside it (#1348 D8): the
     /// controller's telemetry counters, the session's `live_values_superseded` count (#1312
     /// D8), its `strips_restarted` (#1768) and `source_frames_discarded` (#1699) counts and the
-    /// render-side `live_block_errors` (#1521 D3) and `source_underrun_blocks` (#1537) mirrors. A counter added later joins this refresh,
-    /// never a single control call.
+    /// render-side `live_block_errors` (#1521 D3) and `source_underrun_blocks` (#1537) mirrors.
+    /// A counter added later joins this refresh, never a single control call.
     fn refresh_provider_counters(&mut self) {
         let telemetry_counters = self.controller.queues().telemetry_counters();
         let superseded = self.live_values_superseded.get();

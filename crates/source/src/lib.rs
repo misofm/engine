@@ -3946,6 +3946,15 @@ mod tests {
         let (output, _) = render_at(&mut consumer, 8);
         assert_eq!(output, [2.0; 4]);
         assert_eq!(consumer.unread_frames(), 4 + 2);
+        // R2: a further seek replaces generation 2; its two queued blocks are stale but still
+        // accepted and unread, and they count with the new generation's first block.
+        host.try_seek(SourceCommand::Seek {
+            generation: SourceGeneration(3),
+            frame: SourceFrame(200),
+        })
+        .unwrap();
+        host.submit(chunk(3, 200, &[&[3.0; 4]], 4, false)).unwrap();
+        assert_eq!(consumer.unread_frames(), 4 + 2 + 4);
     }
 
     /// #1274 MINOR-1. Red if an on-time apply keeps the primed block without noting the region

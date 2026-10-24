@@ -245,7 +245,9 @@ extern "C" {
  * SOURCE_FRAMES_DISCARDED (protocol counter 21) counts, in frames, the accepted source PCM that
  * render never read because the caller's own transaction removed or redeclared the source: the
  * chunks still queued in the discarded ring (a stale-generation chunk included) when a later call
- * reclaims the displaced plan. Frames render played, a ring discarded by session destroy and the
+ * reclaims the displaced plan. A failed carry (the new plan could not take the old plan's rings)
+ * loses the frames of every ring it did not move, and those frames are counted too. Frames render
+ * played, a ring discarded by session destroy and the
  * rings of a withdrawn replacement (never fed: such a transaction is refused) are not counted; it
  * never resets. A rejected source
  * submission or seek likewise names the rule it broke ("source.region.outside",
