@@ -15,3 +15,26 @@ A state-variable filter's three design words (c1, a2, a3) ramp as separate `Line
 ## Paths
 
 Per effect, decided by the probe; this spec.
+
+## Evidence and decision record (attempt 1, 2026-10-24, base main 068742aba)
+
+Verdict: no shipped effect restarts some words and not others; no rendered bit moves, so class B does not arise. No `src/lib.rs` changed in any effect crate.
+
+| Effect | Reading | Guard |
+|---|---|---|
+| De-esser | `crates/de-esser/src/lib.rs` `retarget` restarts c1, a2, a3 together (PR #1922). | `crates/de-esser/tests/svf_chord.rs` |
+| Dynamic EQ | `crates/dynamic-eq/src/lib.rs` restarts all nine design words of a band together (#17 S2). | `crates/dynamic-eq/tests/svf_chord.rs` |
+| Parametric EQ | `start_ramp` rewrites all six words' targets and steps from the words in force under one shared `remaining`; the stationary hoist settles only when all six already match. | existing, see below |
+| Builtins HPF/LPF | `apply_input_filter_target` skips only when the whole six-word in-flight target equals the new one; otherwise every step is recomputed from the current word under one shared `filter_remaining`. | existing, see below |
+| Multiband crossover | An accepted crossover span calls `LinearRamp::set_target` on all three LR4 words unconditionally; `set_target` restarts from `current`. | new leg (c) of gate 2, `crates/multiband-compressor/tests/crossover.rs` |
+
+Mutant runs (each applied to the committed tree, run, then restored with `git checkout` and `touch`):
+- Parametric EQ, `start_ramp` skips a word whose target bits are unchanged: red on `contract.rs` gate 3 `every_live_enable_or_family_ramp_is_contractive_and_bounded` ("the in-test retarget walk is the lane's walk", 44.1 kHz 20 Hz -24 dB Q 0.1, 0 -> 4 -> next) and on `randomized.rs` `the_bank_renders_its_scalar_instances_under_random_state`.
+- Builtins, an in-flight word whose target bits are unchanged keeps its old step: red on `filter_liveness.rs` gate 8 `every_lane_steps_exactly_four_words_from_its_own_countdown` (bit-exact against the joint-retarget oracle).
+- Multiband, `set_target` guarded on `ramp.target.to_bits() != target.to_bits()`: no existing test red (all 14 test binaries green); the new leg (c) is red at frame 33 (word fractions 0.03125 against 0.015625).
+
+Decision D1 (root: one assertion per crate) is applied where it adds a claim. The parametric EQ and the builtins already have a test that the mutant turns red, so by the one-test-per-claim rule no PEQ or builtins assertion is added; the multiband crossover had none, so it gets one. Nudge pair found by the leg's search: 1000 Hz -> 1000.00006 Hz at 48 kHz keeps c1's bits and moves a2 and a3.
+
+Test value, leg (c): a crossover retarget that restarts only the words whose target bits moved leaves a mid-glide nudge off the chord, and no other multiband test retargets the crossover mid-glide.
+
+Doc: `RAMP_PATH_NORM_TOLERANCE` (`crates/effect-runtime/src/svf.rs`) now names the lockstep precondition.
