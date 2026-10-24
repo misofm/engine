@@ -1169,8 +1169,8 @@ fn added_removed_and_changed_vca_mute_entries_carry_the_member_stage() {
             }
             normalized(&model)
         };
-        let (old, new): ((f32, &[(u64, f32)]), (f32, &[(u64, f32)])) =
-            ((0.0, &[(3_000, 1.0)]), (0.0, &[(500, 1.0), (2_600, 0.0)]));
+        let old: (f32, &[(u64, f32)]) = (0.0, &[(3_000, 1.0)]);
+        let new: (f32, &[(u64, f32)]) = (0.0, &[(500, 1.0), (2_600, 0.0)]);
         let (a, b) = (session(old, false, true), session(new, true, true));
         let (a_vca, b_vca) = (session(old, false, false), session(new, true, false));
         let q = quantum as usize;
@@ -1188,13 +1188,18 @@ fn added_removed_and_changed_vca_mute_entries_carry_the_member_stage() {
             let swapped = carry_run(&a, Some((&b, &a)), backend, &pcm, frames, &none);
             assert_eq!(swapped.swap_allocations, (0, 0), "{what}: the swap block");
             assert!(swapped.restarted.is_empty(), "{what}: the strip carries");
-            for plane in 0..2 {
+            for (plane, (out, (vca_only, fresh))) in swapped
+                .out
+                .iter()
+                .zip(vca_only.out.iter().zip(&fresh))
+                .enumerate()
+            {
                 assert!(
-                    same_bits(&swapped.out[plane], &vca_only.out[plane]),
+                    same_bits(out, vca_only),
                     "{what}: plane {plane} repositions as the VCA-only lane does"
                 );
                 assert!(
-                    same_bits(&swapped.out[plane][settled..], &fresh[plane][settled..]),
+                    same_bits(&out[settled..], &fresh[settled..]),
                     "{what}: plane {plane} from the first block boundary after the ramp"
                 );
             }

@@ -2857,7 +2857,7 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
                 .zip(level_diff.as_ref())
                 .map_or([false; 2], |(base, diff)| {
                     let id = route_source_id(route);
-                    diff.continued_lanes(controls::strip_index(base.committed, id), source, id)[1]
+                    diff.continued_mute_lanes(controls::strip_index(base.committed, id), source, id)
                 });
         follow_cells.push((
             route.id.as_str(),
@@ -5109,6 +5109,9 @@ pub(crate) struct EffectiveDiff<'a> {
     solo_after: Vec<bool>,
 }
 
+/// One model read for its automation entries, with one strip's VCA reach there (#1864).
+type ReachRead<'r> = (controls::ModelView<'r>, &'r [usize]);
+
 /// Where a diff reads the automation entries of one model's rendered rows from (#1844): the
 /// [`controls::AutomationIndex`] its caller built once, or the model's table, scanned per read
 /// until more than `threshold` reads, then indexed once. A preparation reads every strip and
@@ -5224,15 +5227,31 @@ impl<'a> EffectiveDiff<'a> {
         after: usize,
         id: &session::StableId,
     ) -> [[bool; 2]; 2] {
-        let [current, next] = &self.rules.automation;
-        let reach_before = before.map_or(&[][..], |before| &self.reach_before[before]);
-        let (current, next) = (
-            (current.view(), reach_before),
-            (next.view(), &self.reach[after][..]),
-        );
+        let [current, next] = self.continued_reads(before, after);
         [
             controls::continued_fader_lanes_in(current, next, id),
             controls::continued_mute_lanes_in(current, next, id),
+        ]
+    }
+
+    /// The mute half of [`Self::continued_lanes`], for a following route's source.
+    pub(crate) fn continued_mute_lanes(
+        &self,
+        before: Option<usize>,
+        after: usize,
+        id: &session::StableId,
+    ) -> [bool; 2] {
+        let [current, next] = self.continued_reads(before, after);
+        controls::continued_mute_lanes_in(current, next, id)
+    }
+
+    /// Both models' reads with the strip's reach in each, for [`Self::continued_lanes`].
+    fn continued_reads(&self, before: Option<usize>, after: usize) -> [ReachRead<'_>; 2] {
+        let [current, next] = &self.rules.automation;
+        let reach_before = before.map_or(&[][..], |before| &self.reach_before[before]);
+        [
+            (current.view(), reach_before),
+            (next.view(), &self.reach[after][..]),
         ]
     }
 
