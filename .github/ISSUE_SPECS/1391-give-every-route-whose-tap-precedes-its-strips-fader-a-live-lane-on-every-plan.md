@@ -185,8 +185,12 @@ its master already does not fold.
 - **Class A.** No browser fixture holds a pre-fader output route; `expected.json` is unchanged.
   Gate 3: a pre-fader output lane with no record renders the prepared constant's bits from
   sample 0, and a pushed record settles on a fresh plan.
-- **Open (outside the authorized paths, reported to root).** `graph-compiler/src/compile.rs`
-  `StripGains::route_bound` states a live route's domain bound only for routes into a submix, so
-  the reported `tail_samples` of a plan with a pre-fader output route is computed from its
-  prepared constant, not every live history. The parameter-metadata `intoOutput` case
-  (`controls::OutputCase`, sdk assets) describes the `post_fader`/`post_pan` case only.
+- **Tail bound (root-authorized).** `StripGains::route_bound` states the route domain bound for
+  every route whose rows are live; `GainLiveness::routes_into_submixes` is renamed `routes`.
+  `a_live_fader_states_its_domain_maximum...` asserts it (red on the destination-only bound).
+- **Metadata (root-authorized).** The route table carries `into_output_before_fader`; the
+  parameter metadata emits `intoOutputBeforeFader` (live) beside `intoOutput` (`post_fader`,
+  `post_pan`: rebuildOnly); SDK assets regenerated. Pre-fader output rows are automatable
+  (decision 14 rule 4).
+- **Swap carry.** `a_pre_fader_output_ramp_crosses_the_swap_on_every_width` (successor_swap) is red
+  on a `join_routes` that keeps only routes into a submix (first difference at block 6).
