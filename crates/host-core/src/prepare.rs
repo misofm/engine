@@ -2334,17 +2334,28 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
     // predecessor's base and this model: the join's model half, resolved against the plans' rows
     // once this plan is bound.
     let live_strips = attach_live;
+    // #1844: the automation table of each model is walked once, here, and the strip join, the
+    // send join, the following routes and their count look each owner up.
+    let model_automation = controls::AutomationIndex::of(model);
+    let view = controls::ModelView::whole(model).indexed(&model_automation);
+    let committed_automation = successor.map(|base| controls::AutomationIndex::of(base.committed));
     // The effective values of both models, computed once: the strip join and the send join read
     // the same rules (#1558 D1).
-    let effective = successor.map(|base| {
-        EffectiveDiff::new(
-            base.committed,
-            model,
-            LiveRamps::for_session(model),
-            base.edit_ramps,
-            base.monitor,
-        )
-    });
+    let effective = successor
+        .zip(committed_automation.as_ref())
+        .map(|(base, committed)| {
+            EffectiveDiff::new(
+                base.committed,
+                model,
+                LiveRamps::for_session(model),
+                base.edit_ramps,
+                base.monitor,
+                [
+                    AutomationReads::indexed(base.committed, committed),
+                    AutomationReads::indexed(model, &model_automation),
+                ],
+            )
+        });
     let strip_joins: Vec<StripJoin<'_>> = match (successor, &effective) {
         (Some(base), Some(diff)) => {
             join_strips(base.committed, model, live_strips, base.edit_ramps, diff)
@@ -2750,7 +2761,7 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
     // `automated` is the plan's. The arrival `a(tap)` is the compile report's, below.
     let mut follow_cells = Vec::new();
     for route in &model.routes {
-        let Some(automated) = following_route_lanes(model, route) else {
+        let Some(automated) = following_route_lanes(view, route) else {
             continue;
         };
         let Some(source) = route_source_strip(model, route) else {
@@ -2771,6 +2782,7 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
         let vca_mutes = follow_vca_mute_cells(
             |vca| builtins.vca_cells(vca),
             model,
+            &model_automation,
             route_source_id(route),
             &mut program,
         )
@@ -2890,7 +2902,7 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
         != model
             .routes
             .iter()
-            .filter(|route| follows_automated_mute(model, route))
+            .filter(|route| follows_automated_mute(view, route))
             .count()
     {
         return Err(graph_failure("host.route_control.attach"));
@@ -2903,7 +2915,7 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
             .routes
             .iter()
             .filter(|route| {
-                controls::route_rows_live(route) && !follows_automated_mute(model, route)
+                controls::route_rows_live(route) && !follows_automated_mute(view, route)
             })
             .map(|route| route.id.as_str())
             .collect();
@@ -4302,24 +4314,22 @@ impl SendRecord {
 /// `vca_cells` is the plan's `PreparedBuiltinsSession::vca_cells`. Empty lanes when no entry drives
 /// a VCA `mute` row. `program` is the plan's one automation program when the caller holds it (else
 /// it takes the VCA cells' own). `None` when a reaching VCA's entry has no cell in that program: a
-/// plan that disagrees with its model. Control side; it allocates the two lists.
+/// plan that disagrees with its model. `automation` is the index of `model`'s automation table
+/// (#1844). Control side; it allocates the two lists.
 pub(crate) fn follow_vca_mute_cells<P>(
     vca_cells: impl Fn(&str) -> Option<(std::sync::Arc<P>, builtins_compiler::VcaCells)>,
     model: &SessionModel,
+    automation: &controls::AutomationIndex<'_>,
     source: &session::StableId,
     program: &mut Option<std::sync::Arc<P>>,
 ) -> Option<[Vec<u32>; 2]> {
     let mut lanes = [Vec::new(), Vec::new()];
-    if !model
-        .automation
-        .iter()
-        .any(|entry| controls::vca_mute_row(&entry.target))
-    {
+    if !automation.any_vca_mute() {
         return Some(lanes);
     }
     for index in model.vca_reach_of(source) {
         let vca = &model.vcas.get(index)?.id;
-        let driven = controls::vca_mute_automation(model, vca);
+        let driven = automation.vca_mute(vca);
         if driven.iter().all(Option::is_none) {
             continue;
         }
@@ -4557,12 +4567,17 @@ pub(crate) struct FaderEventLanes {
 }
 
 impl FaderEventLanes {
-    /// The event lanes of strip `strip` in `model`, `reach` its VCA reach there (indices into
-    /// `model.vcas`, [`SessionModel::vca_reach`]).
-    pub(crate) fn of(model: &SessionModel, strip: &session::StableId, reach: &[usize]) -> Self {
+    /// The event lanes of strip `strip` in the committed model of `model`, `reach` its VCA reach
+    /// there (indices into its `vcas`, [`SessionModel::vca_reach`]). Lookups when `model` is
+    /// indexed (#1844).
+    pub(crate) fn of(
+        model: controls::ModelView<'_>,
+        strip: &session::StableId,
+        reach: &[usize],
+    ) -> Self {
         Self {
-            events: controls::fader_event_lanes(model, strip, reach),
-            own: controls::automated_fader_lanes(model, strip),
+            events: model.fader_event_lanes(strip, reach),
+            own: model.automated_fader_lanes(strip),
         }
     }
 
@@ -4873,6 +4888,68 @@ pub(crate) struct EffectiveDiff<'a> {
     /// Per strip of each model, whether the solo term of its mute holds ([`controls::solo_term`]).
     solo_before: Vec<bool>,
     solo_after: Vec<bool>,
+    /// Where the event lanes of `current` and of `next` are read from (#1844).
+    automation: [AutomationReads<'a>; 2],
+}
+
+/// Where a diff reads the automation entries of one model's rendered rows from (#1844): the
+/// [`controls::AutomationIndex`] its caller built once, or the model's table, scanned per read
+/// until more than `threshold` reads, then indexed once. A preparation reads every strip and
+/// following route, so it builds the index up front; the live classifier reads the few owners an
+/// edit reaches, where the scan is cheaper than the index (#1710's one-owner measurement).
+pub(crate) struct AutomationReads<'a> {
+    model: &'a SessionModel,
+    built: Option<&'a controls::AutomationIndex<'a>>,
+    threshold: usize,
+    reads: core::cell::Cell<usize>,
+    lazy: core::cell::OnceCell<controls::AutomationIndex<'a>>,
+}
+
+impl<'a> AutomationReads<'a> {
+    /// The reads of `model` through `index`, its index.
+    pub(crate) fn indexed(
+        model: &'a SessionModel,
+        index: &'a controls::AutomationIndex<'a>,
+    ) -> Self {
+        Self {
+            model,
+            built: Some(index),
+            threshold: 0,
+            reads: core::cell::Cell::new(0),
+            lazy: core::cell::OnceCell::new(),
+        }
+    }
+
+    /// The reads of `model`, indexed once past `threshold` reads.
+    #[cfg(feature = "control-provider")]
+    pub(crate) fn lazy(model: &'a SessionModel, threshold: usize) -> Self {
+        Self {
+            model,
+            built: None,
+            threshold,
+            reads: core::cell::Cell::new(0),
+            lazy: core::cell::OnceCell::new(),
+        }
+    }
+
+    /// The model, read whole, for one read: indexed when the caller built the index or once the
+    /// reads pass the threshold.
+    pub(crate) fn view(&self) -> controls::ModelView<'_> {
+        let whole = controls::ModelView::whole(self.model);
+        if let Some(index) = self.built {
+            return whole.indexed(index);
+        }
+        let reads = self.reads.get().saturating_add(1);
+        self.reads.set(reads);
+        if reads > self.threshold {
+            whole.indexed(
+                self.lazy
+                    .get_or_init(|| controls::AutomationIndex::of(self.model)),
+            )
+        } else {
+            whole
+        }
+    }
 }
 
 /// The solo term of every strip of `model` under `overlay`, in [`SessionModel::strips`] order.
@@ -4887,13 +4964,15 @@ fn solo_terms(model: &SessionModel, overlay: &controls::MonitorOverlay) -> Vec<b
 
 impl<'a> EffectiveDiff<'a> {
     /// The effective values of `current` under `monitor.committed` and of `next` under
-    /// `monitor.next` (decision 17, C7; #1559 D6).
+    /// `monitor.next` (decision 17, C7; #1559 D6). `automation` reads the event lanes of
+    /// `[current, next]`.
     pub(crate) fn new(
         current: &'a SessionModel,
         next: &'a SessionModel,
         ramps: LiveRamps,
         edit_ramps: &'a EditRamps,
         monitor: MonitorBase<'_>,
+        automation: [AutomationReads<'a>; 2],
     ) -> Self {
         Self {
             rules: LevelRules {
@@ -4909,7 +4988,13 @@ impl<'a> EffectiveDiff<'a> {
             reach_before: current.vca_reach(),
             solo_before: solo_terms(current, monitor.committed),
             solo_after: solo_terms(next, monitor.next),
+            automation,
         }
+    }
+
+    /// The post-change model, read for its automation entries (#1844).
+    pub(crate) fn automation(&self) -> controls::ModelView<'_> {
+        self.automation[1].view()
     }
 
     /// What the ramp rules read about the strip at `before` in `current` and `after` in `next`.
@@ -4957,7 +5042,7 @@ impl<'a> EffectiveDiff<'a> {
             &self.after.strips[after],
             [change.own_before, change.own_after],
             self.rules.lengths(&change),
-            || FaderEventLanes::of(self.rules.next.structure(), change.id, change.reach),
+            || FaderEventLanes::of(self.automation(), change.id, change.reach),
         )
     }
 
@@ -4992,19 +5077,23 @@ impl<'a> EffectiveDiff<'a> {
         let mut level = self.strip_level_records(before, after)?;
         let records = &mut level.fader;
         let change = self.change(before, after);
-        let next = self.rules.next.structure();
+        let [before_reads, next_reads] = &self.automation;
         let lost =
             |lanes: [bool; 2], kept: [bool; 2]| [0, 1].map(|lane| lanes[lane] && !kept[lane]);
         // #1655 D6: an event lane (an own curve, or a reaching automated VCA's) that the change
         // makes a plain lane is released; a lane that stays an event lane keeps its composed
         // stage, which the carry repositions.
         let fader_released = lost(
-            controls::fader_event_lanes(self.rules.current, change.id, change.reach_before),
-            controls::fader_event_lanes(next, change.id, change.reach),
+            before_reads
+                .view()
+                .fader_event_lanes(change.id, change.reach_before),
+            next_reads.view().fader_event_lanes(change.id, change.reach),
         );
         let mute_released = lost(
-            controls::mute_event_lanes(self.rules.current, change.id, change.reach_before),
-            controls::mute_event_lanes(next, change.id, change.reach),
+            before_reads
+                .view()
+                .mute_event_lanes(change.id, change.reach_before),
+            next_reads.view().mute_event_lanes(change.id, change.reach),
         );
         if fader_released == [false; 2] && mute_released == [false; 2] {
             return Ok(level);
@@ -5130,7 +5219,10 @@ fn route_source_id(route: &session::Route) -> &session::StableId {
 /// compiles mute cells from, or an automated VCA `mute` lane reaches it). Every other route keeps
 /// the six-word cell. A route into the output never follows.
 #[must_use]
-pub(crate) fn follows_automated_mute(model: &SessionModel, route: &session::Route) -> bool {
+pub(crate) fn follows_automated_mute(
+    model: controls::ModelView<'_>,
+    route: &session::Route,
+) -> bool {
     following_route_lanes(model, route).is_some()
 }
 
@@ -5138,30 +5230,27 @@ pub(crate) fn follows_automated_mute(model: &SessionModel, route: &session::Rout
 /// automated VCA's), when that plan gives `route` the seven-word cell of a following route
 /// ([`follows_automated_mute`]), else `None`: the `automated` bits of the route's records (#1652
 /// D1, #1653 D1, #1655 D4). The source's VCA reach is read only when an entry drives a VCA `mute`
-/// row and an own mute lane is not automated.
+/// row and an own mute lane is not automated. `model`'s committed model is read; lookups when it
+/// is indexed (#1844).
 #[must_use]
 pub(crate) fn following_route_lanes(
-    model: &SessionModel,
+    model: controls::ModelView<'_>,
     route: &session::Route,
 ) -> Option<[bool; 2]> {
     if !matches!(
         route.destination,
         session::RouteDestination::SubmixInput { .. }
-    ) || model.automation.is_empty()
+    ) || model.structure().automation.is_empty()
     {
         return None;
     }
     let source = route_source_id(route);
-    let own = controls::mute_automation(model, source).map(|entry| entry.is_some());
-    let lanes = if own == [true; 2]
-        || !model
-            .automation
-            .iter()
-            .any(|entry| controls::vca_mute_row(&entry.target))
-    {
+    // The own mute lanes: the event lanes with no reach.
+    let own = model.mute_event_lanes(source, &[]);
+    let lanes = if own == [true; 2] || !model.any_vca_mute() {
         own
     } else {
-        controls::mute_event_lanes(model, source, &model.vca_reach_of(source))
+        model.mute_event_lanes(source, &model.structure().vca_reach_of(source))
     };
     lanes.contains(&true).then_some(lanes)
 }
@@ -5945,7 +6034,7 @@ fn join_routes<'a>(
         // #1652 D3 (#1652c): a route the successor gives the seven-word cell takes the
         // seven-word record, written only when a word the models hold changes; any other route
         // keeps today's record.
-        let retarget = if let Some(automated) = following_route_lanes(model, after) {
+        let retarget = if let Some(automated) = following_route_lanes(diff.automation(), after) {
             let Some(source) = diff.source_strips(before, after) else {
                 continue;
             };

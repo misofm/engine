@@ -526,11 +526,7 @@ impl<'a> ModelInputs<'a> {
             .routes
             .iter()
             .map(|route| {
-                let id = source_id(route);
-                model
-                    .strips()
-                    .position(|strip| strip.id == id)
-                    .unwrap_or(strip_count)
+                crate::registry::strip_index(model, source_id(route)).unwrap_or(strip_count)
             })
             .collect();
         Self {
