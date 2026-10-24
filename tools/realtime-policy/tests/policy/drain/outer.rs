@@ -304,10 +304,10 @@ fn the_outer_loops_that_do_not_select_the_queue_are_refused() {
             ),
         ),
         (
-            // MAJOR-1: with the feature off, the queue is `controls[0]` on every pass.
+            // MAJOR-1: with the feature off, the queue is the spare on every pass.
             "outer-cfg-let",
             format!(
-                "fn drain(controls: &mut [Consumer<Record>; 2]) {{\n    for lane in 0..2 {{\n        let control = &mut controls[0];\n        #[cfg(feature = \"lanes\")]\n        let control = &mut controls[lane];\n{}    }}\n}}",
+                "fn drain(controls: &mut [Consumer<Record>; 2], spare: &mut Consumer<Record>) {{\n    for lane in 0..2 {{\n        let control = &mut *spare;\n        #[cfg(feature = \"lanes\")]\n        let control = &mut controls[lane];\n{}    }}\n}}",
                 counted_drain("")
             ),
         ),
