@@ -9,8 +9,9 @@
 # <target> is a target triple, or `host` for the native host build (no `--target`, so the library
 # lands at `target/release/`, which the audit-native shard reads). <crate-type> is `staticlib` or
 # `cdylib`. The shipped mobile libraries are the `aarch64-apple-ios` and `aarch64-linux-android`
-# staticlibs (docs/TARGET_MATRIX.md); the `host` cdylib and staticlib on x86_64 are the forms
-# scripts/check-capi-abi.sh links, not shipped.
+# staticlibs (docs/TARGET_MATRIX.md); the `host` cdylib (`libcapi.so`, or `libcapi.dylib` on an
+# Apple host) and staticlib are the forms scripts/check-capi-abi.sh links, not shipped. A cdylib is
+# built for the host only: a cross-target cdylib needs a target linker (the NDK, Xcode).
 #
 # Why `cargo rustc --crate-type`: cargo passes `-C lto` to a library only when every crate type it
 # builds can be LTO'd. `crates/capi/Cargo.toml` lists `rlib` too (tools/audit and capi's own tests
@@ -21,11 +22,14 @@
 # which the next build of another form overwrites), and the copy is then judged by its own content:
 #   staticlib: the archive's Rust objects are exactly one `capi` module plus `compiler_builtins`
 #              (the C builtins objects are not Rust objects and are not counted). A non-LTO archive
-#              holds one or more objects per crate (`lane-*`, `builtins-*`, `std-*`, ...).
-#   cdylib (x86_64 Linux host only): `miso_engine_v1_render_f32_planar` holds the floating-point guard's
-#              STMXCSR and LDMXCSR inline and calls no `lane::softfma` helper; without LTO they are
-#              out-of-line calls. On AArch64 the guard is inline in both forms, so there is no
-#              cdylib marker and a cdylib is refused.
+#              holds one or more objects per crate (`lane-*`, `builtins-*`, `std-*`, ...); a
+#              thin-LTO archive holds many `capi-*` objects, which the "not exactly one" error
+#              catches.
+#   cdylib, on an x86_64 Linux host: `miso_engine_v1_render_f32_planar` holds the floating-point
+#              guard's STMXCSR and LDMXCSR inline and calls no `lane::softfma` helper; without LTO
+#              they are out-of-line calls. On AArch64 the guard is inline in both forms, so there is
+#              no cdylib marker: on any other host the cdylib is built by the same command and not
+#              checked, and the same command's staticlib is.
 # --emit-asm FILE also writes the same compilation's assembly to FILE (scripts/check-cross-targets.sh
 # scans it), so a scan reads exactly the library that ships.
 set -euo pipefail
@@ -69,13 +73,21 @@ check_staticlib() {
         fail "$artifact is not the fat-LTO build: it holds $capi_count capi objects, not exactly one"
 }
 
-# Judge an x86_64 cdylib by the render entry's disassembly.
+# Judge an x86_64 Linux cdylib by the render entry's disassembly. Other hosts have no marker.
 check_cdylib() {
-    local artifact="$1" body
+    local artifact="$1" body host
+    host="$(rustc -vV | sed -n 's/^host: //p')"
+    if [[ "$host" != x86_64-*-linux-* ]]; then
+        printf 'no cdylib LTO check on %s; the same command'"'"'s staticlib is checked\n' "$host" >&2
+        return 0
+    fi
+    require_tools objdump
     body="$(objdump -d -C --no-show-raw-insn --disassemble=miso_engine_v1_render_f32_planar \
         "$artifact")" || fail "objdump could not disassemble $artifact"
     rg -q '<miso_engine_v1_render_f32_planar>:' <<<"$body" ||
         fail "$artifact has no miso_engine_v1_render_f32_planar to read"
+    # A named helper call is refused, but objdump rarely names it: the non-LTO cdylib calls
+    # through unnamed GOT slots. The real red case is the missing inline MXCSR below.
     if rg -q 'call.*softfma' <<<"$body"; then
         fail "$artifact is not the fat-LTO build: miso_engine_v1_render_f32_planar calls a lane::softfma helper"
     fi
@@ -88,15 +100,15 @@ check_artifact() {
     [[ -f "$artifact" ]] || fail "missing artifact: $artifact"
     case "$crate_type" in
         staticlib) require_tools ar; check_staticlib "$artifact" ;;
-        cdylib) require_tools objdump; check_cdylib "$artifact" ;;
+        cdylib) require_tools rustc; check_cdylib "$artifact" ;;
         *) usage ;;
     esac
-    printf 'C ABI release check: ok (%s %s is the fat-LTO build)\n' "$crate_type" "$artifact"
+    printf 'C ABI release check: ok (%s %s)\n' "$crate_type" "$artifact"
 }
 
 # Hermetic: synthesized archives and a tiny assembled library; builds no Rust.
 self_test() {
-    require_tools ar cc objdump
+    require_tools ar cc
     local scratch self
     self="${BASH_SOURCE[0]}"
     scratch="$(mktemp -d)"
@@ -135,7 +147,7 @@ self_test() {
     expect staticlib-no-capi fail '0 capi objects' bash "$self" --check staticlib "$scratch/nocapi.a"
     expect staticlib-not-archive fail 'cannot list' bash "$self" --check staticlib "$self"
 
-    if [[ "$(uname -m)" == x86_64 ]]; then
+    if [[ "$(rustc -vV | sed -n 's/^host: //p')" == x86_64-*-linux-* ]]; then
         printf '%s\n' '.text' '.globl miso_engine_v1_render_f32_planar' \
             'miso_engine_v1_render_f32_planar:' 'vstmxcsr -4(%rsp)' 'vldmxcsr -4(%rsp)' 'ret' \
             >"$scratch/inline.s"
@@ -145,6 +157,7 @@ self_test() {
             'miso_engine_v1_render_f32_planar:' 'call _ZN4lane7softfma10read_mxcsr17h0123456789abcdefE' \
             'vldmxcsr -4(%rsp)' 'ret' >"$scratch/helper.s"
         printf '%s\n' '.text' '.globl other_entry' 'other_entry:' 'ret' >"$scratch/other.s"
+        require_tools objdump
         cc -shared -nostdlib -o "$scratch/inline.so" "$scratch/inline.s"
         cc -shared -nostdlib -o "$scratch/other.so" "$scratch/other.s"
         cc -shared -nostdlib -o "$scratch/helper.so" "$scratch/helper.s"
@@ -154,7 +167,7 @@ self_test() {
         expect cdylib-no-entry fail 'no miso_engine_v1_render_f32_planar' \
             bash "$self" --check cdylib "$scratch/other.so"
     else
-        printf 'self-test note: not an x86_64 host, cdylib cases skipped\n' >&2
+        printf 'self-test note: not an x86_64 Linux host, cdylib cases skipped\n' >&2
     fi
 
     # Preflight refusals, before any cargo run.
@@ -162,7 +175,7 @@ self_test() {
     mkdir -p "$scratch/out" && : >"$scratch/out/libcapi.a"
     expect preflight-crate-type fail 'unsupported crate type' \
         bash "$self" host rlib "$scratch/fresh"
-    expect preflight-android-cdylib fail 'cdylib is built only for' \
+    expect preflight-android-cdylib fail 'cdylib is built only for the host' \
         bash "$self" aarch64-linux-android cdylib "$scratch/fresh"
     expect preflight-overwrite fail 'refusing to overwrite' \
         bash "$self" host staticlib "$scratch/out"
@@ -194,10 +207,14 @@ host_triple="$(rustc -vV | sed -n 's/^host: //p')"
 case "$crate_type" in
     staticlib) artifact_name=libcapi.a; require_tools ar ;;
     cdylib)
-        [[ "$target" == host && "$host_triple" == x86_64-*-linux-* ]] ||
-            fail "cdylib is built only for an x86_64 Linux host (the check-capi-abi.sh test form); no $target cdylib marker exists"
-        artifact_name=libcapi.so
-        require_tools objdump
+        [[ "$target" == host ]] ||
+            fail "cdylib is built only for the host (the check-capi-abi.sh test form); a $target cdylib needs its target linker"
+        case "$host_triple" in
+            *-apple-*) artifact_name=libcapi.dylib ;;
+            *-linux-*) artifact_name=libcapi.so ;;
+            *) fail "unsupported host for a cdylib: $host_triple" ;;
+        esac
+        [[ "$host_triple" != x86_64-*-linux-* ]] || require_tools objdump
         ;;
     *) fail "unsupported crate type: $crate_type (staticlib or cdylib)" ;;
 esac

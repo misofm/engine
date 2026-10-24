@@ -253,3 +253,16 @@ Root files these when a product need or a release asks for them.
 - Attempt budget: two attempts, one adversarial verdict each.
 - Size: half a day. D1 is a stop point: if the Android answer needs root, D1's record is the
   first checkpoint.
+
+### Attempt 2 (2026-10-24, after the attempt-1 verdict)
+
+- `host cdylib` builds on every host with the same command (`libcapi.dylib` on Apple, `.so` on
+  Linux); the MXCSR check runs on an x86_64 Linux host only, and other hosts print "no cdylib LTO
+  check on <host>" and pass, because the same command's staticlib is checked. `check-capi-abi.sh`
+  and its `--self-test` choose the library by host triple again, so the Apple branches run
+  without `SKIP_BUILD`. A non-host cdylib is still refused (it needs the target's linker).
+- The staticlib check keeps `capi_count == 1` exactly: a thin-LTO archive holds many `capi-*`
+  objects and is refused by it.
+- CI cost: audit-native now pays for about two fat-LTO `capi` builds (cdylib and staticlib,
+  45-60 s each on this machine; the self-test's builds are fresh), against its 15-minute timeout.
+  Root records the CI time after the first run.

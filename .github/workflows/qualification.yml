@@ -923,14 +923,16 @@ jobs:
       # G1: compiles a C++17 header consumer and a C11 fixture at -Wall -Wextra -Werror
       # -pedantic, links the real libcapi.so, diffs its exported symbols against the frozen ABI V1
       # list, and executes the fixture. Builds capi in release itself (the shipped-crate link
-      # proof, design §6.7); the release build above already primed the target dir.
+      # proof, design §6.7) through scripts/build-capi-release.sh, the fat-LTO cdylib and
+      # staticlib (#1499), which cargo builds apart from the release build above.
       - name: C ABI linkage, frozen symbol set, native consumer smoke test, and self-test
         run: |
           bash scripts/check-capi-abi.sh
           bash scripts/check-capi-abi.sh --self-test
-      # #1059: check-capi-abi.sh just built `-p capi` alone, which is the shipped feature set (the
-      # shard's four-package build unifies audit's graph/test-support in, so it is not). That
-      # library must contain no whole-plan scalar path.
+      # #1059: check-capi-abi.sh just built `-p capi` alone through build-capi-release.sh, which is
+      # the shipped feature set (the shard's four-package build unifies audit's graph/test-support
+      # in, so it is not). This step reads target/release/libcapi.so because cargo copies the
+      # script's host cdylib there. That library must contain no whole-plan scalar path.
       - name: Shipped C ABI library contains no whole-plan scalar path
         run: python3 -B scripts/check-scalar-oracle-absent.py --native target/release/libcapi.so
       # G2: HashMap iteration order is per-process, so this runs `graph_fixture` fresh 100 times.
