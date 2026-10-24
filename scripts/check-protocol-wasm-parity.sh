@@ -28,6 +28,7 @@
 # so is silence. `--self-test` proves that discrimination for real -- it rebuilds the guest from
 # mutated copies of the pin in a scratch tree and requires every one of them to come back red.
 set -euo pipefail
+source "$(dirname "${BASH_SOURCE[0]}")/lib/gate.sh"
 
 script_directory="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repository_root="$(cd "$script_directory/.." && pwd)"

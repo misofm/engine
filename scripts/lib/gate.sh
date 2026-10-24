@@ -2,6 +2,20 @@
 
 # Shared checked-search primitives. Callers set GATE_FAILURE_PREFIX before invoking these.
 
+# Refuse to run without a required tool: print "<script> requires <tool>" and exit 2, so a missing
+# tool never passes a negated `! rg` check (exit 127 inverted) or reads like an audit error (#1512).
+# `$0` names the top-level script, not this library.
+require_tools() {
+    local tool
+    for tool in "$@"; do
+        command -v "$tool" >/dev/null 2>&1 || {
+            printf '%s requires %s\n' "${0##*/}" "$tool" >&2
+            exit 2
+        }
+    done
+}
+require_tools rg
+
 gate_fail() {
     printf '%s: %s\n' "${GATE_FAILURE_PREFIX:-gate policy failure}" "$1" >&2
     return 1

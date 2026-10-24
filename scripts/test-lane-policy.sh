@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Mutation tests proving every clause of the lane policy is enforced.
 set -euo pipefail
+source "$(dirname "${BASH_SOURCE[0]}")/lib/gate.sh"
 
 script_directory="$(cd "$(dirname "$0")" && pwd)"
 policy_script="$script_directory/check-lane-policy.sh"

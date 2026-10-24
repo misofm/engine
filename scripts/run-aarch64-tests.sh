@@ -35,6 +35,7 @@
 # CARGO_TARGET_<TRIPLE>_LINKER and _RUNNER (qemu-user). Tests that re-execute their own binary
 # then also need binfmt_misc.
 set -euo pipefail
+source "$(dirname "${BASH_SOURCE[0]}")/lib/gate.sh"
 
 usage() {
     printf 'usage: run-aarch64-tests.sh debug|release\n' >&2

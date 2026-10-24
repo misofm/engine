@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Prove the reference render thread makes no syscall between explicit outer-loop markers.
 set -euo pipefail
+source "$(dirname "${BASH_SOURCE[0]}")/lib/gate.sh"
 
 binary="${1:-target/release/audit}"
 blocks="${2:-1000000}"

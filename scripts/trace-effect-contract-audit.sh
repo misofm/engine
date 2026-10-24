@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
+source "$(dirname "${BASH_SOURCE[0]}")/lib/gate.sh"
 binary="${1:-target/release/bench}"
 blocks="${2:-1000000}"
 trace_root="target/issue11/strace"

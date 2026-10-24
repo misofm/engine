@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
+source "$(dirname "${BASH_SOURCE[0]}")/lib/gate.sh"
 root="$(cd "${1:-$(dirname "${BASH_SOURCE[0]}")/..}" && pwd)"
 temp="$(mktemp -d)"; trap 'rm -rf -- "$temp"' EXIT
 fixture="$temp/fixture"

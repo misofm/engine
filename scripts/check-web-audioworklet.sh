@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
+source "$(dirname "${BASH_SOURCE[0]}")/lib/gate.sh"
 
 process_policy_re='BigInt|new[[:space:]]|subarray|memory\.grow|WebAssembly|fetch\(|Promise|console\.|JSON\.|performance\.now|Date\.now'
 # Issue #137 D2/D3 amend this gate deliberately.

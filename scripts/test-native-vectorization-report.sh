@@ -2,6 +2,7 @@
 # Red mutations for the native vectorization report. Each mutation changes one allowlist claim and
 # must be rejected by the release artifact, without modifying the artifact or production sources.
 set -euo pipefail
+source "$(dirname "${BASH_SOURCE[0]}")/lib/gate.sh"
 
 script_directory="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repository_root="$(cd "$script_directory/.." && pwd)"
@@ -16,11 +17,6 @@ else
     printf 'native vectorization mutations require llvm-objdump or objdump\n' >&2
     exit 2
 fi
-
-command -v rg >/dev/null 2>&1 || {
-    printf 'native vectorization mutations require rg (ripgrep)\n' >&2
-    exit 2
-}
 
 if [[ ! -x "$binary" ]]; then
     (cd "$repository_root" && cargo build --locked --release \

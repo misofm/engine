@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Mutation tests proving raw-byte provider and message-payload escape hatches are rejected.
 set -euo pipefail
+source "$(dirname "${BASH_SOURCE[0]}")/lib/gate.sh"
 
 script_directory="$(cd "$(dirname "$0")" && pwd)"
 policy_script="$script_directory/check-protocol-control-policy.sh"
