@@ -172,21 +172,20 @@ fn spectrum_invariant(failure: CompileFailure) -> CommandError {
 }
 
 /// How a `SPECTRUM_CONFIGURE` is refused (#1594 D4): a typed reply, recorded for replay, or a
-/// retryable or internal error that records nothing. A `BACKPRESSURE` reply carries the record
-/// that names the saturated resource (#1944); every other reply carries none.
+/// retryable or internal error that records nothing.
 enum SpectrumRefusal {
-    Reply(protocol::StatusCode, String, Option<protocol::Backpressure>),
+    Reply(protocol::StatusCode, String),
     Error(CommandError),
 }
 
 impl SpectrumRefusal {
     fn reply(status: protocol::StatusCode, code: &str) -> Self {
-        Self::Reply(status, code.to_owned(), None)
+        Self::Reply(status, code.to_owned())
     }
 }
 
-/// The record of a spectrum `Busy` refusal (#1944 D2): the capture's one-shot arm slot, one
-/// entry, held. A collection without a selection also answers `Busy` (#1595 D6) and so reports
+/// The record of every spectrum `BACKPRESSURE` refusal, which only `Busy` answers (#1944 D2,
+/// #1595 D6): the capture's one-shot arm slot, one entry, held. A collection without a selection also answers `Busy` (#1595 D6) and so reports
 /// the slot as held: a known imprecision, reopened only with D6.
 const SPECTRUM_ARM_BACKPRESSURE: protocol::Backpressure = protocol::Backpressure {
     queue_kind: protocol::BackpressureQueueKind::SpectrumArm,
@@ -307,8 +306,7 @@ fn spectrum_service_refusal(error: host_core::SpectrumServiceError) -> SpectrumR
         | E::CadenceShape => StatusCode::ValidationFailed,
         E::Smoothing => StatusCode::InvalidField,
     };
-    let backpressure = matches!(error, E::Busy).then_some(SPECTRUM_ARM_BACKPRESSURE);
-    SpectrumRefusal::Reply(status, error.code().to_owned(), backpressure)
+    SpectrumRefusal::reply(status, error.code())
 }
 
 const fn spectrum_channels(channels: protocol::ParameterChannel) -> host_core::SpectrumChannels {
@@ -2958,8 +2956,8 @@ where
                     &mut self.response_scratch,
                 )
                 .map_err(map_command_process_error),
-            Err(SpectrumRefusal::Reply(status, code, backpressure)) => {
-                self.complete_spectrum_refusal(prepared, status, &code, backpressure)
+            Err(SpectrumRefusal::Reply(status, code)) => {
+                self.complete_spectrum_refusal(prepared, status, &code)
             }
             Err(SpectrumRefusal::Error(error)) => {
                 drop(prepared);
@@ -2969,31 +2967,28 @@ where
     }
 
     /// Completes a spectrum command's typed refusal, recorded for replay: a `BACKPRESSURE` with
-    /// the record that names its resource (#1944), any other status without one.
+    /// the arm slot's record (#1944), any other status without one.
     fn complete_spectrum_refusal(
         &mut self,
         prepared: protocol::PreparedSessionCommand,
         status: protocol::StatusCode,
         code: &str,
-        backpressure: Option<protocol::Backpressure>,
     ) -> Result<usize, CommandError> {
-        match backpressure {
-            Some(backpressure) => {
-                debug_assert_eq!(status, protocol::StatusCode::Backpressure);
-                self.controller
-                    .complete_session_command_refused_backpressure(
-                        prepared,
-                        code,
-                        backpressure,
-                        &mut self.response_scratch,
-                    )
-            }
-            None => self.controller.complete_session_command_refused(
+        if status == protocol::StatusCode::Backpressure {
+            self.controller
+                .complete_session_command_refused_backpressure(
+                    prepared,
+                    code,
+                    SPECTRUM_ARM_BACKPRESSURE,
+                    &mut self.response_scratch,
+                )
+        } else {
+            self.controller.complete_session_command_refused(
                 prepared,
                 status,
                 code,
                 &mut self.response_scratch,
-            ),
+            )
         }
         .map_err(map_command_process_error)
     }
@@ -3008,8 +3003,8 @@ where
     ) -> Result<usize, CommandError> {
         let outcome = match outcome {
             Ok(outcome) => outcome,
-            Err(SpectrumRefusal::Reply(status, code, backpressure)) => {
-                return self.complete_spectrum_refusal(prepared, status, &code, backpressure);
+            Err(SpectrumRefusal::Reply(status, code)) => {
+                return self.complete_spectrum_refusal(prepared, status, &code);
             }
             Err(SpectrumRefusal::Error(error)) => {
                 drop(prepared);
@@ -3061,8 +3056,8 @@ where
     ) -> Result<usize, CommandError> {
         let outcome = match outcome {
             Ok(outcome) => outcome,
-            Err(SpectrumRefusal::Reply(status, code, backpressure)) => {
-                return self.complete_spectrum_refusal(prepared, status, &code, backpressure);
+            Err(SpectrumRefusal::Reply(status, code)) => {
+                return self.complete_spectrum_refusal(prepared, status, &code);
             }
             Err(SpectrumRefusal::Error(error)) => {
                 drop(prepared);
@@ -3505,7 +3500,6 @@ where
             Err(CommandError::CompileRejected(failure)) => Err(SpectrumRefusal::Reply(
                 protocol::StatusCode::LimitExceeded,
                 first_diagnostic_code(&failure),
-                None,
             )),
             Err(error) => Err(SpectrumRefusal::Error(error)),
         }
