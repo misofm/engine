@@ -638,3 +638,20 @@ observation capacity under-reports its walk by 16 bytes per tap. The C ABI plans
 `capi_retained_bytes_charge_every_byte_the_compile_retains` fails at the #1074 plan-walk equality ("routed submix":
 freed 140,553, walked 140,537; one compressor tap). The fix is one line in `crates/engine/src/realtime/observe.rs`
 (charge the `Arc` allocation, as `engine::realtime::retained::arc` does); the browser under-reports the same bytes today.
+
+**T2 and the kept readers.** A structural transaction's `Observe` records go to the successor's own fresh queues
+(`observe_successor_pushes`, deduplicated against the #1310 forwards, room checked before the commit; a target the
+transaction removed is skipped and its binding ends with the event). A carried tap keeps its publisher across the
+swap (#1327 D2), so its windows continue in the reader of the epoch it was armed on, not the successor's
+(`an_observe_in_a_structural_transaction_arms_the_new_effect_and_keeps_the_carried_one` reads them there). D7 keeps
+the handles only and pairs nothing. Constraint for the later pairing (#1586, #1674's observation half; from #1674's
+verifier): readers must be paired at promotion from the swap record's tap entries (graph `carry_taps`, which records
+only taps that were taken and whose `swap_state` succeeded; a refused effect restore drops its tap), never from a
+list built at preparation.
+
+Evidence: reference nine-track `capi_retained_bytes` 197,311 (ceiling 212,288; the reference session has no tapped
+effect, so no handle and no slot is added); with the engine one-liner applied locally and reverted, all five labels
+of `capi_retained_bytes_charge_every_byte_the_compile_retains` balance exactly, every-native-insert included.
+Mutants (each red, restored): disarm ignoring refs, a computed tap accepted, no window check, admission and push
+silent (ack before drop), no successor push, codec accepting `control`, `observation.unavailable` ignored, C ABI
+with no observation capacity.
