@@ -36,9 +36,9 @@ fn caps() -> HostPrepareCaps {
         maximum_effect_scratch_bytes: 100_000_000,
         maximum_builtin_retained_bytes: 100_000_000,
         maximum_named_allocation_bytes: 100_000_000,
-        maximum_meter_streams: 1,
-        maximum_meter_items: 1,
-        maximum_meter_bytes: 1,
+        maximum_meter_streams: 64,
+        maximum_meter_items: 1 << 16,
+        maximum_meter_bytes: 1 << 24,
     }
 }
 
@@ -55,7 +55,7 @@ fn report() -> HostPrepareReport {
 fn selected_meter_observers_preserve_caller_order_taps_and_metric_identity() {
     let compiled = compile_host_session(SESSION, &caps()).expect("compiled fixture");
     let live_controls = HostLiveControlRequest {
-        meter_period_frames: core::num::NonZeroU32::new(128),
+        meter_window_blocks: 1,
         meter_queue_depth: core::num::NonZeroUsize::new(2).unwrap(),
         ..HostLiveControlRequest::default()
     };
@@ -625,7 +625,7 @@ fn contract_types_are_send_and_not_sync() {
 /// finds nine tracks but only eight producers, so the `zip` below panics on the missing channel.
 #[test]
 fn live_controls_attach_bounded_control_and_meter_halves_in_canonical_track_order() {
-    use core::num::{NonZeroU32, NonZeroUsize};
+    use core::num::NonZeroUsize;
     use host_core::{HostLiveControlRequest, prepare_host_session_with_live_controls};
 
     let mut live_control_caps = caps();
@@ -633,7 +633,7 @@ fn live_controls_attach_bounded_control_and_meter_halves_in_canonical_track_orde
     live_control_caps.maximum_meter_items = 1 << 16;
     live_control_caps.maximum_meter_bytes = 1 << 24;
     let live_controls = HostLiveControlRequest {
-        meter_period_frames: Some(NonZeroU32::new(128).expect("nonzero")),
+        meter_window_blocks: 1,
         meter_queue_depth: NonZeroUsize::new(8).expect("nonzero"),
         ..HostLiveControlRequest::default()
     };

@@ -38,10 +38,10 @@
 //! `symmetry_witness.rs` uses, with its right source channel remapped so the structural `SOURCE`
 //! term holds and the collapse census is not vacuously zero.
 
-use core::num::{NonZeroU32, NonZeroUsize};
+use core::num::NonZeroUsize;
 use std::collections::BTreeMap;
 
-use builtins::{BuiltinLaneSelector, MeterTap};
+use builtins::BuiltinLaneSelector;
 use builtins_compiler::{TestOnlyWriteGate, TrackInputRecord};
 use engine::realtime::{PlanRevisionGate, PlanarBufferMut, RenderIo, RenderTime};
 use host_core::{
@@ -93,9 +93,8 @@ fn caps() -> HostPrepareCaps {
 
 fn live_controls() -> HostLiveControlRequest {
     HostLiveControlRequest {
-        meter_period_frames: Some(NonZeroU32::new(QUANTUM as u32).expect("period")),
+        meter_window_blocks: 1,
         meter_queue_depth: NonZeroUsize::new(16).expect("meter depth"),
-        meter_tap: MeterTap::PostMatrix,
         observation_taps: 0,
     }
 }

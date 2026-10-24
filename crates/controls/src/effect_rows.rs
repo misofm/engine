@@ -9,7 +9,7 @@
 //! In an effect section the control `0` is the instance's bypass, a parameter row has the
 //! parameter's ID, and an insert with a choice of link modes has [`LINK_MODE_CONTROL`].
 
-use effect_compiler::{launch_native_effect_registry, lowers_session_bypass};
+use effect_compiler::launch_native_effect_registry;
 use effect_contract::control::PreparedReason;
 use effect_contract::{
     AutomationRate, EffectDescriptor, LinkMode as ContractLinkMode, ObservationCost,
@@ -38,8 +38,6 @@ pub const BYPASS_CONTROL: u32 = 0;
 /// refuses a descriptor that does).
 pub const LINK_MODE_CONTROL: u32 = 0x8000_0000;
 
-/// The multiband compressor's bypass is a prepared bypass until #1340 (decision 15 E4).
-const MULTIBAND_BYPASS_ISSUE: u32 = 1340;
 /// The multiband compressor's link mode is live once #1367 lands (decision 15 E2).
 const MULTIBAND_LINK_ISSUE: u32 = 1367;
 
@@ -200,22 +198,10 @@ pub(crate) fn parameter_descriptor(parameter: &'static ParameterDescriptor) -> C
     }
 }
 
-/// The bypass row of an instance of `effect_id`.
-pub(crate) fn bypass_descriptor(effect_id: &str) -> ControlDescriptor {
-    // The one place that decides whether a session bypass is live is `lowers_session_bypass`; the
-    // issue that flips each prepared bypass is a fact of the effect, kept beside it.
-    let class = if lowers_session_bypass(effect_id) {
-        ControlClass::Live
-    } else {
-        match effect_id {
-            MULTIBAND_ID => ruled_live_not_built(
-                MULTIBAND_BYPASS_ISSUE,
-                "#1340 gives the multiband compressor a live bypass shunt; its last step flips the row",
-            ),
-            // An effect that gains a prepared bypass before root numbers its issue.
-            _ => ruled_live_not_built(0, "a prepared bypass whose live path root has not numbered"),
-        }
-    };
+/// The bypass row of an effect instance: the same for every effect.
+pub(crate) fn bypass_descriptor() -> ControlDescriptor {
+    // Every session bypass lowers to per-lane shunt state (issues #1087, #1339, #1340), so every
+    // effect's bypass is live.
     ControlDescriptor {
         name: "bypass",
         display_name: "Bypass",
@@ -224,7 +210,7 @@ pub(crate) fn bypass_descriptor(effect_id: &str) -> ControlDescriptor {
         lattice: ParameterLattice::indices(),
         // The bypass crossfade is the one ramp with no per-edit length (#1341).
         motion: Motion::Fixed,
-        class,
+        class: ControlClass::Live,
         family: Family::Effect,
         ..BASE
     }
@@ -331,7 +317,7 @@ pub(crate) fn push_rows(
         &owner,
         section,
         BYPASS_CONTROL,
-        &bypass_descriptor(effect_id),
+        &bypass_descriptor(),
         |_| toggle(instance.bypass),
     );
     for parameter in descriptor.parameters {
@@ -362,9 +348,7 @@ pub(crate) fn resolve(instance: &Instance<'_>, control: u32) -> Option<Resolved>
     let descriptor = contract(instance.identity)?;
     let effect_id = descriptor.id.as_str();
     Some(match control {
-        BYPASS_CONTROL => {
-            Resolved::stored(bypass_descriptor(effect_id), |_| toggle(instance.bypass))
-        }
+        BYPASS_CONTROL => Resolved::stored(bypass_descriptor(), |_| toggle(instance.bypass)),
         LINK_MODE_CONTROL => {
             let (mode, choices) = (instance.link_mode?, link_choices(descriptor)?);
             Resolved::stored(link_mode_descriptor(effect_id, choices), |_| {

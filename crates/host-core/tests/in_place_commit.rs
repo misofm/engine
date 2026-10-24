@@ -341,11 +341,18 @@ fn a_following_routes_edits_commit_as_the_full_path_does() {
     }
 }
 
-/// Gate 1b. A seeded random walk of at least 2,400 transactions of one to four edits drawn from
-/// every row of the control list (every class, the session's rows, a strip's matrix mode, an insert's
+/// Gate 1b. Every row kind of each session first, deterministically: one committed transaction of
+/// one edit per row name of the control list, and one structural edit ([`first_appearances`]).
+/// Then a seeded random walk of at least 2,400 transactions of one to four edits drawn from every
+/// row of the control list (every class, the session's rows, a strip's matrix mode, an insert's
 /// link mode, the solo rows), with and without a per-edit ramp, over a random committed overlay,
 /// sometimes with a structural edit, sometimes abandoned: the stores stay equal and the in-place
 /// chain gives the full chain's delta, catalog stage and refusal.
+///
+/// The first appearances make the coverage assertion a property of the row list, not of the seed:
+/// a rare row kind (an insert's link mode is one row among hundreds) is reached however a new row
+/// shifts the random draws (#1340, whose live multiband bypass row left the walk without one full
+/// `link_mode` commit at this seed).
 ///
 /// Red if they differ anywhere, if a transaction the in-place form accepted is refused by the full
 /// path, or if the generator did not reach every live row through the in-place form and every
@@ -355,6 +362,18 @@ fn a_random_walk_of_transactions_commits_as_the_full_path_does() {
     let mut pairs = [Pair::new(rich_session(10)), Pair::new(plain_session(4))];
     let mut draw = Draw(0x9E37_79B9_7F4A_7C15);
     let mut tally = Tally::default();
+    for pair in &mut pairs {
+        for (edits, names) in first_appearances(pair) {
+            pair.step(&edits, &names, true, &mut tally);
+        }
+    }
+    // The fallbacks are reached before the random tail, whatever its seed draws.
+    for row in ["matrix_mode", "fader_ms", "link_mode", "<structural>"] {
+        assert!(
+            tally.full_rows.contains(row),
+            "no first-appearance full commit of {row}"
+        );
+    }
     let mut cases = 0_usize;
     while cases < 2_600 {
         let at = usize::from(cases % 6 == 5);
@@ -408,9 +427,54 @@ fn a_random_walk_of_transactions_commits_as_the_full_path_does() {
             "no in-place commit of {row}"
         );
     }
-    for row in ["matrix_mode", "fader_ms", "link_mode", "<structural>"] {
-        assert!(tally.full_rows.contains(row), "no full commit of {row}");
+}
+
+/// One transaction per row name of `pair`'s control list, of one edit on the first row with that
+/// name (in list order), with a value its domain accepts other than the committed one and no
+/// ramp, and one structural edit: the deterministic first appearance of every row kind before the
+/// walk's random tail.
+fn first_appearances(pair: &Pair) -> Vec<(Vec<SessionEdit>, Vec<&'static str>)> {
+    let model = pair.full.compiled().normalized_model();
+    let mut draw = Draw(0x1340_1340_1340_1341);
+    let mut seen = BTreeSet::new();
+    let mut cases = Vec::new();
+    for row in controls::list(model, &pair.overlay, model.sample_rate_hz) {
+        if row.descriptor.class == controls::ControlClass::Derived
+            || !row.descriptor.active
+            || !seen.insert(row.descriptor.name)
+        {
+            continue;
+        }
+        // A value other than the committed one, so the edit is a change its path must carry.
+        let mut value = edit_sessions::draw_value(&mut draw, &row);
+        for _ in 0..16 {
+            if value.to_bits() != row.value.to_bits() {
+                break;
+            }
+            value = edit_sessions::draw_value(&mut draw, &row);
+        }
+        cases.push((
+            vec![SessionEdit::set_control(row.address.clone(), value, None)],
+            vec![row.descriptor.name],
+        ));
     }
+    let tracks = &model.tracks;
+    cases.push((
+        vec![SessionEdit::UpsertVca {
+            vca: Vca {
+                id: id("zz-first"),
+                fader: session::DualMonoFader {
+                    left_db: -1.0,
+                    right_db: 0.0,
+                    left_mute: false,
+                    right_mute: false,
+                },
+                members: vec![tracks[0].id.clone()],
+            },
+        }],
+        vec!["<structural>"],
+    ));
+    cases
 }
 
 /// What the in-place preparation hands to the full one, one transaction each and each beside a

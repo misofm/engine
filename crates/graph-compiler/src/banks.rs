@@ -115,9 +115,8 @@ pub(crate) const fn pads(group: &BankGroup<RackChainId>) -> bool {
 /// onto the bound bank, so the rack gathers and scatters the active lanes only.
 ///
 /// A *bypassed* slot is not a skipped one (issue #1087). It has its node and its latency, and a
-/// lowered session bypass (every effect but the multiband;
-/// `effect_compiler::lowers_session_bypass`) never reaches the program key this planner compares:
-/// preparation lowers it to
+/// session bypass (every effect's since #1340) never reaches the program key this planner
+/// compares: preparation lowers it to
 /// a prepared `bypass = false` plus a bypassed lane on the rack's latency-preserving shunt
 /// (`EffectControlLane::without_channel`), so a cohort's tracks group, and its slots bind, whatever
 /// mix of them is bypassed. The runtime builds the bank's `rack::LiveControlEffectBankStage` from
