@@ -64,3 +64,32 @@ need a re-pin. Growth past a recorded budget still does.
 ## Size
 
 A third of a day.
+
+## Decision record (root, 2026-10-24, from the scope note)
+
+- **Four snapshots, not three.** #1669 added `automationTimeline.beforeDisposeStatus` (45 pages).
+  All four share one ceiling (R3: one module; Wasm memory never shrinks).
+- **#1720 D1 (folded here; #1720 closed as its duplicate).** `memoryBytes` is the only status
+  field that is a size: the oracle reads it from `exports.memory.buffer.byteLength`, not from the
+  status structure. The seven status words (`state`, `lastResult`, `backend`, `sampleRateHz`,
+  `quantumFrames`, `nextAbsoluteSample`, `renderedQuanta`) are contract facts and stay exact;
+  `setControlTimeline.frames[].responseBytes` are control-response wire sizes and stay exact; the
+  `resources` partition is unchanged. #1720 D2 (the 10 % rule) is not taken: see the margin.
+- **Placement (R1).** `directOracle.memoryBytesCeiling`, a JSON number, because the snapshots span
+  three legs.
+- **Margin (R2).** Measured peak + 2 pages = 3,080,192 bytes (47 pages); peak 2,949,120 (45 pages)
+  measured 2026-10-24 at 807b474a4's layout (tree 4ebb72ae0). The 10 % rule would give 50 pages and
+  hide five pages of growth.
+- **expected.json drops the four measured values (R4)**; the oracle prints them. The checker fails
+  on any `memoryBytes` left in `expected.json` and on any printed `memoryBytes` outside the four
+  budgeted snapshots.
+- **`direct-oracle.mjs` assert mode is in scope (R5)**: it mirrors the rule, so its manual verdict
+  and the CI checker's agree. Authorized paths gain `hosts/host-web/tests/browser-v1/direct-oracle.mjs`
+  (the assert-mode comparison block only).
+
+## Evidence (attempt 1)
+
+- `python3 -B scripts/check-browser-expected-resources.py`: green; memory headroom 3, 3, 3 and 2
+  pages; digests and exact rows unchanged. `--self-test`: 43 red mutations (10 new).
+- `direct-oracle.mjs` assert mode: green on the built module; red on a ceiling below the peak, on
+  a re-pinned `memoryBytes` and on a missing ceiling.

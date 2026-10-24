@@ -676,6 +676,17 @@ async function main() {
     assert.ok(value <= BigInt(ceiling), `${name} ${value} is over its ceiling ${ceiling}`);
     delete comparableActual.simd128.resources[name];
   }
+  // #1691: the snapshots' memoryBytes is a size under one shared ceiling, never pinned.
+  const memoryCeiling = comparableExpected.memoryBytesCeiling;
+  assert.ok(Number.isSafeInteger(memoryCeiling), "expected.json must carry memoryBytesCeiling");
+  delete comparableExpected.memoryBytesCeiling;
+  for (const [leg, snapshot] of [["simd128", "initialStatus"], ["simd128", "beforeDisposeStatus"],
+    ["setControlTimeline", "beforeDisposeStatus"], ["automationTimeline", "beforeDisposeStatus"]]) {
+    const value = comparableActual[leg][snapshot].memoryBytes;
+    assert.ok(value > 0 && value % 65536 === 0 && value <= memoryCeiling,
+      `${leg}.${snapshot}.memoryBytes ${value} is not a whole page within ${memoryCeiling}`);
+    delete comparableActual[leg][snapshot].memoryBytes;
+  }
   assert.deepEqual(comparableActual, comparableExpected, "checked raw-Wasm oracle drift");
   console.log("web AudioWorklet independent raw-Wasm oracle passed");
 }

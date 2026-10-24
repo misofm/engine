@@ -29,8 +29,18 @@ resource row belongs to exactly one class:
   cannot see; that the rows charge every allocation is capi's allocator oracle
   (`crates/capi/tests/resource_lifecycle.rs`).
 
-Everything else in the printed document -- the status snapshots, the result transcripts, the
-SET_CONTROL, observation and automation timelines and the four PCM digests, which
+The status snapshots' `memoryBytes` is the one status field that is a size (#1691, which carries
+#1720's D1): the oracle reads it from `exports.memory.buffer.byteLength`, not from the status
+structure, whose seven words are contract facts and stay exact. Linear memory grows by whole 64 KiB
+pages and never shrinks, so the four snapshots that carry it (`STATUS_MEMORY_PATHS`) share one
+ceiling, `directOracle.memoryBytesCeiling`: each printed value must be positive, a whole page and
+at most the ceiling, and the gate prints its headroom in pages. The ceiling is the measured peak
+plus two pages, raised only with its reason. `expected.json` carries no `memoryBytes` (the oracle
+prints them; the file carries the budget), and a `memoryBytes` anywhere else in the printed
+document is red until it is classified here.
+
+Everything else in the printed document -- the rest of the status snapshots, the result
+transcripts, the SET_CONTROL, observation and automation timelines and the four PCM digests, which
 `direct-oracle.mjs` has already asserted equal to the native digests before printing -- must equal
 `expected.json` exactly.
 
@@ -115,6 +125,19 @@ CEILING_ROWS = frozenset(
 )
 
 CEILINGS_KEY = "resourceCeilings"
+
+# The status snapshots that carry the module's linear memory size,
+# `exports.memory.buffer.byteLength` (#1691). One module, and a Wasm memory never shrinks, so all
+# four share one ceiling.
+STATUS_MEMORY_PATHS = (
+    ("simd128", "initialStatus"),
+    ("simd128", "beforeDisposeStatus"),
+    ("setControlTimeline", "beforeDisposeStatus"),
+    ("automationTimeline", "beforeDisposeStatus"),
+)
+MEMORY_KEY = "memoryBytes"
+MEMORY_CEILING_KEY = "memoryBytesCeiling"
+WASM_PAGE_BYTES = 65536
 
 # The four digests `expected.json` pins. Named here so a report that stops carrying one is a
 # failure rather than a silently skipped comparison.
@@ -227,6 +250,79 @@ def check_ceilings(actual_rows: dict, ceilings: object, ceiling_rows: frozenset)
     return report
 
 
+def memory_keys(value: object, at: str = "") -> list[str]:
+    """Every path in `value` that carries a `memoryBytes` key."""
+    found = []
+    if isinstance(value, dict):
+        for key, child in value.items():
+            path = f"{at}.{key}" if at else key
+            if key == MEMORY_KEY:
+                found.append(path)
+            found.extend(memory_keys(child, path))
+    elif isinstance(value, list):
+        for index, child in enumerate(value):
+            found.extend(memory_keys(child, f"{at}[{index}]"))
+    return found
+
+
+def page_count(value: object, name: str) -> int:
+    """A positive whole number of Wasm pages, in bytes."""
+    require(
+        isinstance(value, int) and not isinstance(value, bool) and value > 0,
+        f"{name} is not a positive byte count: {value!r}",
+    )
+    require(
+        value % WASM_PAGE_BYTES == 0,
+        f"{name} {value} is not a whole number of {WASM_PAGE_BYTES}-byte Wasm pages",
+    )
+    return value
+
+
+def check_status_memory(actual: dict, expected: dict) -> list[str]:
+    """Each status snapshot's memory size is a positive page multiple within the one ceiling, and
+    neither document carries a `memoryBytes` this gate does not budget. Strips the budgeted keys
+    from `actual` and the ceiling from `expected`, both comparable copies; returns the report."""
+    require(
+        MEMORY_CEILING_KEY in expected,
+        f"expected.json's directOracle carries no {MEMORY_CEILING_KEY}, so memory has no budget",
+    )
+    ceiling = page_count(expected.pop(MEMORY_CEILING_KEY), MEMORY_CEILING_KEY)
+    pinned = memory_keys(expected)
+    require(
+        not pinned,
+        f"expected.json pins {MEMORY_KEY} exactly at {pinned}; it is a size, budgeted by "
+        f"{MEMORY_CEILING_KEY}, not a pin",
+    )
+    report = []
+    over = []
+    for leg, snapshot in STATUS_MEMORY_PATHS:
+        name = f"{leg}.{snapshot}"
+        status = actual.get(leg, {}).get(snapshot)
+        require(
+            isinstance(status, dict) and MEMORY_KEY in status,
+            f"the report carries no {MEMORY_KEY} at {name}",
+        )
+        value = page_count(status.pop(MEMORY_KEY), f"{MEMORY_KEY} {name}")
+        report.append(
+            f"{MEMORY_KEY} {name} {value} of {ceiling} "
+            f"({(ceiling - value) // WASM_PAGE_BYTES} pages free)"
+        )
+        if value > ceiling:
+            over.append(f"{name} {value} > {ceiling}")
+    require(
+        not over,
+        f"the module's linear memory is over its budget: {', '.join(over)}. Raise "
+        f"{MEMORY_CEILING_KEY} in expected.json with the reason in the commit message, or find "
+        "the regression.",
+    )
+    unclassified = memory_keys(actual)
+    require(
+        not unclassified,
+        f"the report carries {MEMORY_KEY} at {unclassified}, which this gate does not budget",
+    )
+    return report
+
+
 def check_document(
     actual: dict,
     expected: dict,
@@ -278,6 +374,7 @@ def check_document(
     for name in ceiling:
         del resource_rows(comparable_actual, "the printed oracle document")[name]
     del simd128_leg(comparable_expected, "expected.json")[CEILINGS_KEY]
+    report += check_status_memory(comparable_actual, comparable_expected)
     require(
         comparable_actual == comparable_expected,
         "the printed oracle document differs from expected.json outside the budgeted rows",
@@ -423,12 +520,16 @@ def green_pair() -> tuple[dict, dict, str, str]:
     Built from the committed `expected.json`, so the self-test's green case is the real document
     and its mutations are the real rows. Every budgeted row is printed at exactly its ceiling: the
     green case is the edge of the budget, so "one byte over" below is the other side of it.
+    Each status snapshot prints `memoryBytes` at the memory ceiling, for the same reason.
     """
     expected = json.loads(EXPECTED_JSON.read_text())["directOracle"]
     actual = json.loads(json.dumps(expected))
     leg = simd128_leg(actual, "the fabricated document")
     ceilings = leg.pop(CEILINGS_KEY)
     leg["resources"].update(ceilings)
+    memory_ceiling = actual.pop(MEMORY_CEILING_KEY)
+    for status_leg, snapshot in STATUS_MEMORY_PATHS:
+        actual[status_leg][snapshot][MEMORY_KEY] = memory_ceiling
     return actual, expected, WORKLET_JS.read_text(), FIXTURE_RUNNER_JS.read_text()
 
 
@@ -542,6 +643,42 @@ def self_test() -> int:
 
         return apply
 
+    def printed_memory(leg: str, snapshot: str, offset: int):
+        """Derived, never a literal: the memory ceiling plus `offset` bytes, at one snapshot."""
+
+        def apply(pair: tuple) -> tuple:
+            actual, expected, worklet, fixture = pair
+            actual[leg][snapshot][MEMORY_KEY] = expected[MEMORY_CEILING_KEY] + offset
+            return actual, expected, worklet, fixture
+
+        return apply
+
+    def zero_memory(pair: tuple) -> tuple:
+        actual, expected, worklet, fixture = pair
+        actual["simd128"]["beforeDisposeStatus"][MEMORY_KEY] = 0
+        return actual, expected, worklet, fixture
+
+    def repin_memory(pair: tuple) -> tuple:
+        actual, expected, worklet, fixture = pair
+        status = expected["automationTimeline"]["beforeDisposeStatus"]
+        status[MEMORY_KEY] = actual["automationTimeline"]["beforeDisposeStatus"][MEMORY_KEY]
+        return actual, expected, worklet, fixture
+
+    def drop_memory_ceiling(pair: tuple) -> tuple:
+        actual, expected, worklet, fixture = pair
+        del expected[MEMORY_CEILING_KEY]
+        return actual, expected, worklet, fixture
+
+    def leg_memory_ceiling(pair: tuple) -> tuple:
+        actual, expected, worklet, fixture = pair
+        expected["automationTimeline"][MEMORY_CEILING_KEY] = expected[MEMORY_CEILING_KEY]
+        return actual, expected, worklet, fixture
+
+    def unbudgeted_memory(pair: tuple) -> tuple:
+        actual, expected, worklet, fixture = pair
+        actual["observationTimeline"][MEMORY_KEY] = expected[MEMORY_CEILING_KEY]
+        return actual, expected, worklet, fixture
+
     def with_schema(value: str):
         def apply(pair: tuple) -> tuple:
             actual, expected, worklet, fixture = pair
@@ -562,6 +699,25 @@ def self_test() -> int:
         ("a retained row is not a byte count", printed_row("graphMetadataBytes", "-1"), None),
         ("expected.json stops budgeting a retained row", drop_ceiling("graphMetadataBytes"), None),
         ("expected.json budgets a row that is not retained", add_ceiling("outputPcmBytes"), None),
+        # The linear memory budget: one page over the shared ceiling is red at every snapshot.
+        *(
+            (
+                f"memoryBytes {leg}.{snapshot} is one page over its ceiling",
+                printed_memory(leg, snapshot, WASM_PAGE_BYTES),
+                None,
+            )
+            for leg, snapshot in STATUS_MEMORY_PATHS
+        ),
+        ("a status snapshot reports zero memory", zero_memory, None),
+        (
+            "a status snapshot reports a memory size that is not a whole page",
+            printed_memory("simd128", "initialStatus", -1),
+            None,
+        ),
+        ("expected.json pins memoryBytes exactly again", repin_memory, None),
+        ("expected.json carries no memory ceiling", drop_memory_ceiling, None),
+        ("expected.json carries a second memory ceiling", leg_memory_ceiling, None),
+        ("a memoryBytes outside the budgeted snapshots", unbudgeted_memory, None),
         # The exact rows: a fact moving by one byte is red.
         (
             "a staging capacity moves by one byte in the module",
