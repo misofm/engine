@@ -17,3 +17,26 @@ Carry an exact per-chain "input is symmetric" fact from the producing chain's ow
 ## Dependencies
 
 #970.
+
+## Decision record
+
+- 2026-10-24, root (accepting the scope note's split): class A, no rendered bit moves; gate on counters and bits, not on
+  the µs numbers above (no standing console row has track inserts; #1039 retired descriptive benchmarks).
+- **987a (rack).** `BankChain::set_input_symmetric(bool)`, a per-block input term, default `true`; the dispatch arms
+  only when it holds. Unlike `SOURCE` it can be an episode, so a dual block with it down clears
+  `collapse_channels_agree` (M3), and only a `channels_agree` proof brings the chain back.
+  `BankChain::planes_identical()` publishes "this block's resident planes are bit-identical by construction": the
+  block collapsed with every slot in the prefix, or it was skipped silent. Both are structural facts; no sample value
+  is compared (owner rule: dual-mono only from the source's layout, no content detection).
+- **987b (graph runtime, own branch, later).** At bind, the per-lane producer table for each bank unit; per block,
+  AND the producers' `planes_identical()` into `set_input_symmetric`; arm `UnitBanking::Bank` only when every lane's
+  track is eligible and every lane's producer is a same-track bank unit (per-node ops between: successor).
+  `PlanUnitEligibility.armed_on_input` as evidence. Paths: `crates/graph/src/runtime.rs`, `crates/graph/src/lib.rs`,
+  `crates/engine/src/realtime/plan.rs`, the graph-compiler console test, `crates/graph/tests/MUTATIONS.md`.
+  `set_input_symmetric` is sticky, so 987b sets it on **every** block, including blocks that are not armed, and never
+  reads a producer's `planes_identical` after that producer's `run` failed (for example in `begin_block`).
+
+## Evidence
+
+- 987a: `crates/rack/tests/mono_reengage.rs` `an_asymmetric_input_window_declines_and_waits_for_a_proof`; mutants in
+  `crates/rack/tests/MUTATIONS.md` (issue #987).

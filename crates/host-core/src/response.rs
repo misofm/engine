@@ -1966,11 +1966,11 @@ mod tests {
         }
     }
 
-    /// A per-node effect's snapshot reports its prepared bypass (#1460 D3): the multiband
-    /// compressor keeps its session bypass as a prepared `bypass` until #1340 (a lone insert
-    /// renders per node), and the owner record must carry it, for both values.
+    /// A per-node effect's snapshot reports its session bypass (#1460 D3): a lone multiband
+    /// insert renders per node, its session bypass is lowered to its lane (#1340), and the owner
+    /// record must carry the lane's bit, for both values.
     #[test]
-    fn a_per_node_effect_snapshot_reports_its_prepared_bypass() {
+    fn a_per_node_effect_snapshot_reports_its_session_bypass() {
         for bypass in [false, true] {
             let caps = unbounded_caps();
             let mut model = parse_host_session(include_str!(
@@ -2013,7 +2013,7 @@ mod tests {
                 owner.availability,
                 ResponseSnapshotAvailability::DeclaredUnavailable
             );
-            assert_eq!(owner.bypassed, bypass, "the multiband's prepared bypass");
+            assert_eq!(owner.bypassed, bypass, "the multiband's session bypass");
         }
     }
 

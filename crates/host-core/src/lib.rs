@@ -102,6 +102,7 @@ pub mod control_provider;
 pub mod diagnostics;
 #[cfg(feature = "control-provider")]
 pub mod live_delta;
+pub mod meters;
 pub use control_preparation::{
     EQ_EDIT_CAPACITY, EQ_TARGET_CAPACITY, EQ_VALUE_COUNT, EqTargetEdit, EqTargetPreparer,
     EqTargetPreparerError, INPUT_FILTER_EDIT_CAPACITY, INPUT_FILTER_TARGET_CAPACITY,
@@ -152,6 +153,7 @@ pub use live_delta::{
 };
 #[cfg(all(feature = "control-provider", feature = "test-support"))]
 pub use live_delta::{take_fast_classification_count, take_lowered_owner_count};
+pub use meters::{default_meter_window_blocks, meter_selection};
 pub use prepare::{
     GraphJumpLengthProducer, GraphJumpLengths, HostLiveControlHandles, HostLiveControlRequest,
     HostLiveLanes, HostMeterRequest, HostPrepareCaps, HostPrepareReport, HostShapePolicy,

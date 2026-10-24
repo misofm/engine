@@ -704,8 +704,7 @@ model's delta (`host_core::classify_live_delta`, #1053 D1), never by its opcodes
 - **Live effect parameters (#1264, #1265).** A track's console-slot entry or insert whose
   `params` change only in live parameters, parametric EQ values included, is live too; see
   "Value-only effect parameter edits" and "Value-only parametric EQ edits" below. So is a
-  bypass change on one, except the multiband compressor's; see "Value-only effect bypass edits"
-  below.
+  bypass change on one; see "Value-only effect bypass edits" below.
 - **Rebuild.** Everything else replaces the plan exactly as before: a fader dB outside
   `[-144, 24]` or a pan/matrix the setter refuses (reported as `COMPILE_REJECTED` with the
   preparation diagnostic a rebuild gives), and every other field.
@@ -950,11 +949,9 @@ the rack's latency-preserving bypass shunt (decision 14).
   the per-node path renders for that lane (#1341a2), so where the session places the effect never
   moves a rendered bit. The browser edits through the same core, so it crossfades alike
   (`hosts/host-web/tests/control_parity.rs`); #1393 is superseded.
-- **Prepared, so a rebuild.** A bypass change, in either direction, on the multiband
-  compressor: its session bypass is prepared into the effect, not lowered to the lane
-  (`effect_compiler::lowers_session_bypass`), so a live record would be acked and never heard
-  (decision 14, F4). The delay's bypass is live since #1339. A submix strip's bypass stays a
-  rebuild too, as every submix value does.
+- **Every effect's bypass is lane state.** No session effect keeps a prepared bypass: the delay's
+  is live since #1339 and the multiband compressor's since #1340, whose bank recovers per lane. A
+  submix strip's bypass stays a rebuild, as every submix value does.
 - **No ack before a drop.** The bypass record passes its producer's preflight before the first
   cell write, and nothing after it can fail.
 - **Equal to a rebuild, on the gate fixture.** The wet path keeps running, so the switched
@@ -967,6 +964,19 @@ the rack's latency-preserving bypass shunt (decision 14).
   tracks at the four launch rates. A second stateful effect after the switched one (a compressor
   after a compressor) does not converge within that window; its difference decays.
 - **No resource movement.** The record rides the lanes #1263 attached; no readback row reads it.
+
+## Strip meters on every plan (#1581)
+
+Every C ABI plan carries the engine's meters: one post-matrix sample-peak meter stream per strip,
+the tracks then the submixes, at the default window (`default_meter_window_blocks`, about 32 ms:
+12 blocks at 48 kHz and 128 frames), and, from #1581's second slice, one output meter. The
+caller's `maximum_meter_streams`, `maximum_meter_items` and `maximum_meter_bytes` bound them like
+any other meter, so they must admit one meter stream per strip plus the output. A cap below that
+refuses the compile with `MISO_ENGINE_V1_COMPILE_REJECTED` and
+`builtin.resource.limit $.meter_requests`. On the nine-strip reference session the meters add
+10,458 bytes to `builtin_meter_payload_bytes` (it was 0); `builtin_retained_payload_bytes` is
+46,917 bytes on x86-64. No symbol, result code or event is added; nothing reads the meters through
+the C ABI until #1587.
 
 ## Input design bounds (#1602)
 

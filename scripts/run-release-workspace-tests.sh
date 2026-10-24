@@ -37,7 +37,9 @@
 # This script's own `--no-run` invocation -- the release build-clobber link proof this header
 # describes -- used to run on every `main` push and manifest-touching PR from `release-build.yml`;
 # design #359 §12 stage 4 moved it to `nightly.yml`'s `release-link-proof` job (once a day, or on
-# manual dispatch), and `release-build.yml` is retired.
+# manual dispatch), and `release-build.yml` is retired. That job sets thin LTO, 16 codegen units
+# and no debug info in its env (#1511 D2): the clobber depends on the panic setting and the
+# crate-types, not on codegen. Run without that env, this script uses the full release profile.
 #
 # The structural alternative -- move `panic = "abort"` off `[profile.release]` onto a separate
 # `dist` profile -- is NOT taken here, because it would change D12's "a benchmark measures the

@@ -720,9 +720,8 @@ pub fn effect_control_lane(
 ///
 /// # A lane without cells (issue #1087)
 ///
-/// A session `bypass` is per-lane state, not a prepared program, for every effect whose bypass
-/// `effect_compiler::lowers_session_bypass` (all but the multiband): preparation
-/// lowers it to a prepared `bypass = false` plus this lane's initial bypass, so a bypassed track
+/// A session `bypass` is per-lane state, not a prepared program, for every effect (issues #1087,
+/// #1339, #1340): preparation lowers it to a prepared `bypass = false` plus this lane's initial bypass, so a bypassed track
 /// keeps its place in its effect bank and the rack's [`BypassShunt`] selects the dry signal for
 /// exactly that lane. A session with no live controls still needs somewhere to hold that bit, so
 /// [`without_channel`](Self::without_channel) builds a lane with no cells and no queue: nothing
@@ -1865,8 +1864,8 @@ impl ObservationLane {
 ///
 /// # When a shunt exists (issue #1087)
 ///
-/// A session `bypass` is per-lane shunt state, not a prepared program, for every effect whose
-/// bypass `effect_compiler::lowers_session_bypass`: preparation lowers it to a prepared
+/// A session `bypass` is per-lane shunt state, not a prepared program, for every effect (issues
+/// #1087, #1339, #1340): preparation lowers it to a prepared
 /// `bypass = false` plus the lane's initial bypass, carried by an
 /// [`EffectControlLane`] (a live channel, or [`EffectControlLane::without_channel`] when no live
 /// controls are attached). A shunt is built for every instance, and every bank slot, that holds
@@ -1884,8 +1883,9 @@ impl ObservationLane {
 /// (`effect_compiler::NEVER_BANKED_EFFECTS`), lowers its bypass to a per-node shunt too (issue
 /// #1339), and its D7 check also reads its ring and damping state: on a block where that state
 /// trips it, the shunt passes the dry block where its prepared bypass zeroed it (decision 15 E4).
-/// The multiband keeps its prepared bypass, because its D7 recovery is whole-bank
-/// (`effect_compiler::PREPARED_BYPASS_EFFECTS`, issue #1100). `graph-compiler`'s
+/// The multiband's D7 check reads its crossover and smoother state the same way, and recovers
+/// per lane (issue #1340), so the shunt passes a tripped bypassed lane's dry block and its
+/// bank-mates are untouched. `graph-compiler`'s
 /// `bypass_shunt_identity` and `bypass_cohorts` tests are the gates.
 pub struct BypassShunt {
     /// Dry copy of this block's input, taken before the effect runs.

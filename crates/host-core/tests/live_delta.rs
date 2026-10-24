@@ -3263,21 +3263,31 @@ fn a_live_bypass_flip_is_one_record_ahead_of_its_parameters() {
     let current = with_bypassable();
     let first = track_id(&current, 0);
     let second = track_id(&current, 1);
-    // A compressor insert bypassed.
-    assert_eq!(
-        classify_effects(&current, |next| next.tracks[0].inserts.effects[0].bypass =
-            true),
-        Ok((
-            Vec::new(),
-            vec![(
-                first.clone(),
-                LiveEffectAddress::insert(0),
-                vec![EffectControlRecord::Bypass(
-                    effect_contract::BypassSwitch::step(true)
+    // A compressor insert bypassed, and the multiband compressor's (#1340) bypassed and lifted.
+    let mut multiband_bypassed = current.clone();
+    multiband_bypassed.tracks[0].inserts.effects[4].bypass = true;
+    let multiband_bypassed = normalized(&multiband_bypassed);
+    for (model, index, bypassed) in [
+        (&current, 0, true),
+        (&current, 4, true),
+        (&multiband_bypassed, 4, false),
+    ] {
+        assert_eq!(
+            classify_effects(model, |next| next.tracks[0].inserts.effects[index].bypass =
+                bypassed),
+            Ok((
+                Vec::new(),
+                vec![(
+                    first.clone(),
+                    LiveEffectAddress::insert(index as u32),
+                    vec![EffectControlRecord::Bypass(
+                        effect_contract::BypassSwitch::step(bypassed)
+                    )]
                 )]
-            )]
-        ))
-    );
+            )),
+            "insert {index} bypassed: {bypassed}"
+        );
+    }
     // A console EQ entry un-bypassed on the second track: a bare record, no targets.
     let next = edited(&current, |next| next.tracks[1].console[0].bypass = false);
     let delta = classify_live_delta(&current, &next, STEP, &EditRamps::new()).expect("live");
@@ -3311,37 +3321,6 @@ fn a_live_bypass_flip_is_one_record_ahead_of_its_parameters() {
                 ]
             )]
         ))
-    );
-}
-
-/// #1266 gate 1, decision 14 F4. Red if a prepared bypass -- the multiband compressor's -- is
-/// classified live in either direction: the record would be acked and never heard, because the
-/// running plan holds that bypass in its prepared state. (The delay's is live since #1339.)
-#[test]
-fn a_prepared_bypass_change_needs_a_rebuild() {
-    // The multiband compressor (#1340): the reason is the row's.
-    let (index, issue) = (4, 1340);
-    let enabled = with_bypassable();
-    assert_eq!(
-        classify_effects(&enabled, |next| {
-            next.tracks[0].inserts.effects[index].bypass = true;
-        }),
-        Err(LiveRebuild::RebuildOnly(RebuildReason::RuledLiveNotBuilt {
-            issue
-        })),
-        "insert {index} bypassed"
-    );
-    let mut bypassed = enabled.clone();
-    bypassed.tracks[0].inserts.effects[index].bypass = true;
-    let bypassed = normalized(&bypassed);
-    assert_eq!(
-        classify_effects(&bypassed, |next| {
-            next.tracks[0].inserts.effects[index].bypass = false;
-        }),
-        Err(LiveRebuild::RebuildOnly(RebuildReason::RuledLiveNotBuilt {
-            issue
-        })),
-        "insert {index} lifted"
     );
 }
 
