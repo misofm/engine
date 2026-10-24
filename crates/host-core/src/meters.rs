@@ -773,6 +773,12 @@ impl MeterDelivery {
     }
 }
 
+/// The rendering plan's strip meter consumers, as [`MeterDelivery::poll`] borrows them. A field
+/// place, because the realtime policy's per-queue drain form names its queue collection as one.
+struct StripMeters<'a> {
+    consumers: &'a mut [MeterConsumer],
+}
+
 // REALTIME_POLICY_BEGIN: #1582 D1, the meter delivery's render-thread half.
 impl MeterDelivery {
     /// The one activation rule (#1581 D5), for every event that moves the grid or the level (a
@@ -910,7 +916,9 @@ impl MeterDelivery {
         // The fold reads the output windows in place and counts the ones it is done with; they are
         // popped here, at one site, so the queue's checked slot index inlines once.
         let mut output_pops = 0_usize;
-        let published = self.fold(meters, taps, designated, next_sample, &mut output_pops);
+        let strips = StripMeters { consumers: meters };
+        let published =
+            self.fold_meter_windows(strips, taps, designated, next_sample, &mut output_pops);
         self.pop_output_windows(output_pops);
         published.then_some(&self.tables.frame)
     }
@@ -919,15 +927,15 @@ impl MeterDelivery {
     /// and leaves in `output_pops` how many from the head the caller pops.
     #[inline(always)]
     #[allow(clippy::too_many_lines)]
-    fn fold(
+    fn fold_meter_windows(
         &mut self,
-        meters: &mut [MeterConsumer],
+        strips: StripMeters<'_>,
         taps: &mut impl GainReductionTaps,
         designated: Option<u32>,
         next_sample: u64,
         output_pops: &mut usize,
     ) -> bool {
-        let meter_count = meters.len();
+        let meter_count = strips.consumers.len();
         // The output meter's windows a reset discarded go first, unread, and the windows its full
         // queue dropped are losses.
         *output_pops = self.output_discard;
@@ -957,7 +965,7 @@ impl MeterDelivery {
         // the next pass either refills it (spending one count) or ends the loop at the empty-slot
         // check, so `1 + sum(remaining)` passes always suffice: the bound never cuts a recovery
         // short.
-        for (meter, remaining) in meters.iter().zip(&mut tables.remaining) {
+        for (meter, remaining) in strips.consumers.iter().zip(&mut tables.remaining) {
             *remaining = meter.consumer.available_at_entry().min(METER_QUEUE_DEPTH);
         }
         let mut passes = 1_usize;
@@ -965,7 +973,8 @@ impl MeterDelivery {
             passes = passes.saturating_add(*remaining);
         }
         for _ in 0..passes {
-            for ((meter, pending), remaining) in meters
+            for ((meter, pending), remaining) in strips
+                .consumers
                 .iter_mut()
                 .zip(&mut tables.pending)
                 .zip(&mut tables.remaining)
@@ -991,7 +1000,7 @@ impl MeterDelivery {
                 let Some(snapshot) = entry else { return false };
                 // A window the predecessor closed before a swap names the predecessor's handle for
                 // the strip the meter was carried from (#1290d1).
-                meters.get(index).is_some_and(|meter| {
+                strips.consumers.get(index).is_some_and(|meter| {
                     snapshot.handle == meter.handle
                         || carried_from
                             .get(index)
