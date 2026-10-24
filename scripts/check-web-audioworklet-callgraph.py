@@ -78,9 +78,9 @@ Modes
     Assert the artifact still computes in the vector family, and in four lanes only. Five rules,
     none of which is a raw op-count minimum:
 
-    1. **Roster presence.** Each of the nineteen named kernels in `KERNEL_ROSTER` -- the
+    1. **Roster presence.** Each of the seventeen named kernels in `KERNEL_ROSTER` -- the
        `process_bank`/`process_section`/`process_block`/`run_block` bodies of the shipped effect
-       library and the live route's indexed-ramp mix (#1220); the twentieth, the collapsed
+       library and the live route's indexed-ramp mix (#1220); the eighteenth, the collapsed
        limiter's, is held
        by the forwarding rule below -- must match exactly
        one arithmetic-carrying function. A kernel that vanished, that was renamed, or that
@@ -257,7 +257,7 @@ EIGHT_LANE = re.compile(r"(?:f32|f64|u32|i32)x8|(?i:simd8)|transpose_tile_8")
 
 # The smallest scalar budget any kernel gets, in instructions.
 #
-# Eighteen of the twenty roster kernels -- the nineteen `KERNEL_ROSTER` rows and the collapsed
+# Sixteen of the eighteen roster kernels -- the seventeen `KERNEL_ROSTER` rows and the collapsed
 # limiter's kernel -- currently emit *zero* scalar `f32` arithmetic, so a ceiling
 # expressed purely as a multiple of `vector` would be exactly zero for them: a single scalar
 # coefficient load introduced by an ordinary refactor would fail the gate. Eight instructions is
