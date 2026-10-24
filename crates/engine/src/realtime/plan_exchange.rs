@@ -816,6 +816,13 @@ impl RealtimePlanOwner {
     pub fn active_plan_mut(&mut self) -> &mut PreparedRenderPlan {
         &mut self.active.1
     }
+    /// Whether the active plan carried a strip meter from its predecessor at its swap block
+    /// (#882): the fact the restart level ([`Self::set_strip_meter_level_at_restart`]) reads, for
+    /// a host that keeps its own copy to check against. `false` for a plan that never swapped in.
+    #[must_use]
+    pub const fn active_strip_meters_carried(&self) -> bool {
+        self.active.1.strip_meters_carried()
+    }
     /// Saturating count of applied swaps whose incoming plan took state from its predecessor.
     #[must_use]
     pub const fn carried_count(&self) -> u64 {

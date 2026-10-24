@@ -11862,11 +11862,13 @@ mod tests {
 
     /// #882: with the strip meter level off, no strip meter binding observes and every other
     /// observer still does. A unit whose every observer is a meter is skipped before its walk (no
-    /// `observe` call); a unit that also holds a tap walks, visits the tap and skips the meter;
-    /// with the level on, every observer observes.
+    /// `observe` call); a unit that also holds a tap walks, visits the tap and skips the meter,
+    /// and a bank that does runs no sample-peak pass for the meter; with the level on, every
+    /// observer observes.
     ///
     /// Test value: red if the level skips a tap beside a meter, if a meters-only unit still walks
-    /// its members with the level off, or if a meter observes with it off.
+    /// its members with the level off, if a meter observes with it off, or if a bank runs a meter
+    /// pass with it off.
     #[test]
     fn strip_meter_level_off_skips_meter_bindings_and_keeps_every_other_observer() {
         struct Visit(Arc<AtomicUsize>, bool);
@@ -11880,6 +11882,10 @@ mod tests {
             }
             fn carry_kind(&self) -> Option<engine::realtime::ObserverKind> {
                 self.1.then_some(engine::realtime::ObserverKind::Meter)
+            }
+            // A meter asks its bank for the sample-peak pass, as a strip meter does.
+            fn accepts_sample_peak(&self) -> bool {
+                self.1
             }
         }
         let meters = Arc::new(AtomicUsize::new(0));
@@ -11909,9 +11915,10 @@ mod tests {
             kind: NodeKind::BankMember,
             observers,
         };
-        let bank = RuntimeUnit::Bank {
+        // A bank whose last member holds the observers `last`.
+        let bank = |last: &[bool]| RuntimeUnit::Bank {
             members: (0..4)
-                .map(|member| op(observers(if member == 3 { &[true] } else { &[] })))
+                .map(|member| op(observers(if member == 3 { last } else { &[] })))
                 .collect(),
             lanes: 4,
             chain: BankChain::new(
@@ -11939,22 +11946,31 @@ mod tests {
             vec![
                 RuntimeUnit::Op(op(observers(&[true, false, true]))),
                 RuntimeUnit::Op(op(observers(&[true, true]))),
-                bank,
+                bank(&[true]),
+                bank(&[true, false]),
             ],
-            vec![row(), row(), row()],
+            vec![row(), row(), row(), row()],
             Vec::new(),
             0,
             0,
         );
-        // Per unit: [observe calls, meter visits, tap visits].
+        // Per unit: [observe calls, meter visits, tap visits, bank sample-peak passes]. The mixed
+        // bank (unit 3) walks with the level off, so only the level keeps its meter's pass off.
         for (level, expected) in [
-            (false, [[1, 0, 1], [0, 0, 0], [0, 0, 0]]),
-            (true, [[1, 2, 1], [1, 2, 0], [4, 1, 0]]),
+            (
+                false,
+                [[1, 0, 1, 0], [0, 0, 0, 0], [0, 0, 0, 0], [4, 0, 1, 0]],
+            ),
+            (
+                true,
+                [[1, 2, 1, 0], [1, 2, 0, 0], [4, 1, 0, 1], [4, 1, 1, 1]],
+            ),
         ] {
             let (mut left, mut right) = ([0.0_f32; 2], [0.0_f32; 2]);
             let host = HostMaster::new(&mut left, &mut right, 2).expect("host planes");
             for (unit, expected) in expected.into_iter().enumerate() {
                 test_only_observe_calls_reset(false);
+                test_only_set_bank_sample_peak_declined(false);
                 meters.store(0, Ordering::Relaxed);
                 taps.store(0, Ordering::Relaxed);
                 assert_eq!(
@@ -11966,6 +11982,7 @@ mod tests {
                         test_only_observe_calls(),
                         meters.load(Ordering::Relaxed) as u64,
                         taps.load(Ordering::Relaxed) as u64,
+                        test_only_bank_sample_peak_passes(),
                     ],
                     expected,
                     "unit {unit}, level {level}"
