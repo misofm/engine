@@ -67,8 +67,9 @@ off.
   every crate.
 - Every ceiling in `IOS_MEMSET_CEILINGS` (`scripts/lib/aarch64-known-defects.py`) may only go down,
   and #1451 re-measures each one.
-- This issue closes when every ceiling reaches 0 and the gates above are met. If some do not, #1451
-  records what remains and why, those rows stay this issue's, and this issue stays open.
+- This issue closes when its own rows (`builtins`, `lane`) are gone and the gates above are met
+  (root, 2026-10-24, amending "every ceiling reaches 0"). The `host-core` row is #1595's
+  control-thread row and stays.
 - #1451 owns the cause, the fix and the builtins constants only. *Undo the iOS memset ratchet
   workarounds once splats are free* (#1452, Stream G, after #1451) undoes the earlier ratchet workarounds.
 

@@ -96,6 +96,7 @@ const LANE_INDEX: [f32; 8] = [0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0];
 /// turns into `bl _memset_pattern16` on Apple targets (#1018).
 #[inline(always)]
 pub fn lanes_below<L: Lane>(count: usize) -> L::Mask {
+    const { assert!(L::WIDTH <= LANE_INDEX.len()) };
     debug_assert!(count <= L::WIDTH);
     // `count <= L::WIDTH <= 8`, so the `f32` conversion is exact.
     L::splat(count as f32).gt(L::load(&LANE_INDEX[..L::WIDTH]))
