@@ -2020,6 +2020,7 @@ impl<P: ControlProvider> ProtocolController<P> {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn prepare_command_frame_with(
         &mut self,
         input: &[u8],
@@ -2331,6 +2332,7 @@ impl<P: ControlProvider> ProtocolController<P> {
         })
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn plan_structural_command(
         &self,
         input: &[u8],
