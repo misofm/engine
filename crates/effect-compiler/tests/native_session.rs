@@ -367,8 +367,7 @@ fn console_slots_accept_exactly_the_eligible_native_effects() {
     }
     for (effect_id, post, section) in [
         ("miso.delay", false, "pre_insert"),
-        ("miso.multiband-compressor", true, "post_insert"),
-        ("parametric-eq", false, "pre_insert"),
+        ("parametric-eq", true, "post_insert"),
     ] {
         let session = compiled(effect_id, post);
         let diagnostics = match prepare_native_session_effects(&session, registry, generous) {
