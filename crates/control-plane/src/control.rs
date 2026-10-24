@@ -2379,6 +2379,16 @@ where
         TEST_OBSERVE_PUSH_KEY.with(core::cell::Cell::take)
     }
 
+    /// The key the newest epoch's gate published last (#1968).
+    #[cfg(feature = "test-support")]
+    pub fn test_newest_gate_key(&self) -> engine::realtime::GateKey {
+        self.pending_providers
+            .last()
+            .unwrap_or(&self.providers)
+            .revision_gate
+            .last_published_key()
+    }
+
     /// The pending provider epochs, oldest first.
     #[cfg(feature = "test-support")]
     pub fn test_pending_providers(&self) -> &[ProviderEpoch] {
@@ -5045,7 +5055,12 @@ where
         // block whose snapshot covers the revision drains them in the same block (the drain pops
         // the queue after the snapshot), and a watermark that covers the revision means the tap
         // is armed. Render drains the queues outside the gate, so a record may apply one block
-        // early: it is committed, nothing after it can fail, and no acknowledgement precedes it.
+        // early: a subscription has no revision (CONTROL_PROTOCOL_SEMANTICS.md, "Observation
+        // subscriptions"), so it is not one of the transaction's live values, and it applies at
+        // whatever block drains next, as an `Observe`-only transaction's does. So the first window
+        // may open one block before the revision's values apply; its `first_sample` says so, and a
+        // reader that needs the changed audio takes the windows whose `first_sample` is at or
+        // after the watermark's.
         if !observe_changes.is_empty() {
             self.push_admitted_observation_batch(observe_changes.iter().copied());
         }

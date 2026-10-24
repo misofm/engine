@@ -1951,7 +1951,7 @@ fn an_observe_on_a_superseded_candidate_reaches_its_replacement() {
 /// record before it publishes `r` on the plan gate, so a render block whose snapshot covers `r`
 /// drains the record in the same block: a reader that sees the watermark cover `r` sees the tap
 /// armed from that block. The push records the key the gate had last published, which must still
-/// be `r - 1`'s.
+/// be the key it held before the commit.
 ///
 /// Red if the commit publishes the revision before it queues the transaction's observation
 /// records (the order before #1968), so the watermark can cover `r` one block before the arm.
@@ -1971,6 +1971,7 @@ fn a_live_commit_queues_its_observation_records_before_it_publishes_the_revision
         ramp_samples: None,
     };
     let _ = rig.session.test_take_observe_push_key();
+    let published = rig.session.test_newest_gate_key();
     assert_eq!(
         rig.transact(&[mute, observe("comp1", true, 1)]),
         Reply::Applied(protocol::EditPath::Live)
@@ -1982,8 +1983,8 @@ fn a_live_commit_queues_its_observation_records_before_it_publishes_the_revision
         .test_take_observe_push_key()
         .expect("the arm was queued");
     assert_eq!(
-        pushed.revision(),
-        before,
+        (pushed, published.revision()),
+        (published, before),
         "the arm is queued before its revision is published"
     );
     let first_sample = rig.block * 128;
