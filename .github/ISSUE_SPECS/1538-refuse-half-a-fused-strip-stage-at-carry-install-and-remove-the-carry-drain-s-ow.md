@@ -11,15 +11,15 @@ anchor before you start.
 
 ## Product outcome
 
-A plan swap carries a strip's fader, mute and pan state. In the fused form (the browser's plans,
-prepared between render calls) one stage holds both halves of a strip: the fader and mute half and
-the matrix and pan half. Issue #1277 D9 says that this stage carries both halves or neither. Today
-only host-core keeps that rule. The graph crate's public install function accepts a move set that
-carries one half alone, and the render thread then needs an owner filter to keep the count of
-replaced values (`live_values_superseded`) correct for a state that nothing makes. No test reaches
-that filter. After this issue, the install function refuses a move set that breaks the rule, before
-the plan goes to the render thread, a test proves the refusal, and the render-thread filter is
-removed because it cannot change a result.
+Narrowed on 2026-10-24 (scope note, root decision). #1767 (PR #1776, merge `2724b2f58`) removed
+the fused `BuiltinStripStage::FaderMatrix`: today `BuiltinStripStage` is `Fader | Matrix` and each
+stage holds one owner (`crates/graph/src/lib.rs`, `BuiltinStripStage::holds`). A move set that
+carries "half a fused stage" can no longer be built, so the install-time refusal (D1-D3) and its
+red-first test (gate 1) are superseded. What remains is D4: the render-thread owner filter in
+`carried_strip_lane_mask` cannot change a result, so it is removed, and `carry_strip_lanes` drains
+each predecessor bank once with one `Option` instead of one per owner.
+
+The Context section below describes the pre-#1767 tree and is kept as history.
 
 ## Context
 
@@ -67,46 +67,22 @@ removed because it cannot change a result.
 
 ## Decisions frozen
 
-- **D1. The rule.** A strip move whose successor location is in a `BuiltinStripStage::FaderMatrix`
-  bank is admitted only if the same move set holds exactly one move of the other owner with the
-  same successor location and the same predecessor location. A move into a `Fader` or `Matrix`
-  (split) bank is not affected: in the split form each stage carries on its own (#1277 coordinator
-  ruling, `1277-*.md:372-378`).
-- **D2. Where.** The check runs in `install_builtin_strip_carry`, after the existing per-move
-  checks and before the sort, off the render thread. It may allocate nothing new; its cost is at
-  most the existing duplicate scan's (quadratic in the move count is accepted, as the duplicate scan at `:3151-3156` is).
-  The bank stage of a successor location is read through a new `pub(crate)` runtime method next to
-  `has_strip_lane` and outside every realtime region, for example
-  `fn strip_stage_at(&mut self, at: GraphLaneLocation) -> Option<BuiltinStripStage>`, which reads
-  `carried_strip_lanes()` of the slot's processor.
-- **D3. The refusal.** A new variant `GraphCarryInstallError::FusedStripHalf`, documented as "a move
-  into a fused fader and matrix lane has no move of the other owner between the same two lanes
-  (#1277 D9: a fused stage carries both halves or neither)". The refused install leaves any earlier
-  section in place, as every other refusal does. The doc of `install_builtin_strip_carry` names the
-  new refusal.
+- **D1-D3 (install-time `FusedStripHalf` refusal, `strip_stage_at` helper, the new error
+  variant): superseded by #1767.** No fused strip stage exists, so no move set can carry one half.
 - **D4. Remove the filter.** Delete `.filter(|step| step.owner == head.owner)` from
-  `carried_strip_lane_mask`. Its doc says that every move from `first` on in the bank is read, and
-  why that is the owner's lane set: in a fused bank both owners move the same lanes (D1), and the
-  sort puts each lane's two moves next to each other. The `carry_strip_lanes` doc keeps its current
-  meaning. Do not merge the two mask helpers (non-goal).
-- **D5. No render-thread check.** Do not add a `debug_assert` or any other check of D1 to the swap
-  block. The install is the only way moves enter a plan (`executor.carry_strips` takes a move set only at
-  `lib.rs:3159`; elsewhere it is built empty, `:3539`).
+  `carried_strip_lane_mask`; its doc says every move from `first` on in the predecessor bank is
+  read and why they share one owner. Do not merge the two mask helpers (non-goal).
+- **D4a (root, 2026-10-24).** In `carry_strip_lanes`, fold `drained: [Option<(u32, u16)>; 2]` to
+  one `Option<(u32, u16)>` and drop the owner-to-half `match`. Same argument as D4.
+- **D5. No render-thread check.** No `debug_assert` or other check is added to the swap block.
+- **No new test** (owner ruling "tests overboard"). One strip bank holding one owner is already
+  enforced by `has_strip_lane` at install and by `can_carry_strip_lanes` / `can_adopt_strip_lane`
+  at the swap, and the `successor_swap` strip-carry suites exercise the drain mask on every swap.
 
-## Deliverables
+## Authorized paths (narrowed)
 
-1. D2 and D3 in `crates/graph/src/lib.rs` and the D2 helper in `crates/graph/src/runtime.rs`.
-2. D4 in `crates/graph/src/runtime.rs`.
-3. One new test in `crates/host-core/tests/successor_swap.rs`, written first (gate 1), after
-   `a_bad_input_move_is_refused_whole`.
-
-## Authorized paths
-
-- `crates/graph/src/lib.rs`: the new `GraphCarryInstallError` variant and its doc; the body and doc
-  of `install_builtin_strip_carry`.
-- `crates/graph/src/runtime.rs`: the new D2 helper (outside every realtime region); the filter line
-  and doc of `carried_strip_lane_mask`.
-- `crates/host-core/tests/successor_swap.rs`: the new test only; no helper changes.
+- `crates/graph/src/runtime.rs`: `carried_strip_lane_mask` (doc and body) and `carry_strip_lanes`
+  (doc, body, comment) only. Both are in realtime regions; the edits only remove code.
 - This issue's own spec file.
 
 ## Non-goals
@@ -121,50 +97,19 @@ removed because it cannot change a result.
 
 ## Objective gates
 
-1. **Red-first test** `a_fused_strip_move_without_its_other_half_is_refused`. First add the D3
-   variant with no check, write the test, run it and record it red in the attempt record (the
-   failing assertion: install returned `Ok(())`). Then add the D2 check and record it green.
-   1. `backend = Backend::Simd4`; `a = Session::compile(strip_state_session())`;
-      `b = Session::compile(with_muted_track(strip_state_session()))`.
-   2. Fused leg: `predecessor = CellPlan::fresh(&a, backend, Form::Fused)`,
-      `successor = CellPlan::fresh(&b, backend, Form::Fused)`. Install a carry program on the
-      successor's plan naming `predecessor.live.prepared.inventory.plan_identity()` with no source
-      (as `a_bad_input_move_is_refused_whole` does). From `graph::builtin_strip_lanes` of each plan,
-      take `eq0`'s and `eq1`'s lanes. Assert that each is `BuiltinStripStage::FaderMatrix` and that
-      a strip's Fader and Matrix lanes have one location. Name them `s0` (successor `eq0`), `p0`,
-      `p1` (predecessor `eq0`, `eq1`).
-   3. Assert, in this order, on the successor's plan:
-      - `[Fader s0 <- p0]` alone: `Err(GraphCarryInstallError::FusedStripHalf)`;
-      - `[Matrix s0 <- p0]` alone: `Err(FusedStripHalf)`;
-      - `[Fader s0 <- p0, Matrix s0 <- p1]` (halves from two predecessor lanes): `Err(FusedStripHalf)`;
-      - `[Fader s0 <- p0, Matrix s0 <- p0]`: `Ok(())`.
-   4. Split leg: the same two sessions with `Form::Split`, a carry program as in step 2, and
-      `eq0`'s Fader lane (stage `Fader`) in each plan. `[Fader s0 <- p0]` alone is `Ok(())`.
-   - *Test value:* red if the graph's public strip install accepts a move set that carries one half
-     of a fused fader and matrix stage, or the two halves from different lanes, which #1277 D9
-     forbids and which made the render-thread owner filter necessary; or if the check also refuses
-     a single-owner move into a split bank, which host-core makes for every followed-mute restart.
-     No existing test checks a strip install refusal.
-   - *Mutations (PR evidence; record each red with its failing step):* M1, the bug's revert (remove
-     the D2 check): red at step 3, first assertion. M2, the check compares only the successor
-     location, not the predecessor: red at step 3, third assertion. M3, the check applies to split
-     banks too: red at step 4; also record which existing split-form `successor_swap` tests go red.
-2. **Filter removal evidence (PR evidence, not a committed test).** With D4 applied, the full suites
-   of gate 4 pass unchanged. Record in the attempt record the argument of "Context, When the filter
-   changes the mask" for this tree, and that `executor.carry_strips` takes a move set only in
-   `install_builtin_strip_carry`.
-3. **Realtime.** `cargo run --locked --release -q -p realtime-policy` passes. The D2 helper is outside every
-   marked region; the marked-region count does not change.
-4. **Workspace.**
-   - `cargo test --locked -p host-core --all-features --test successor_swap a_fused_strip_move_without_its_other_half_is_refused`
-   - `cargo test --locked -p graph --all-features`
-   - `cargo test --locked -p host-core --all-features`
-   - `cargo test --locked -p capi --all-features`
-   - `cargo test --locked -p host-web --all-features`
-   - `cargo fmt --all -- --check`
-   - `cargo clippy --locked -p graph -p host-core --all-targets --all-features -- -D warnings`
-   - `cargo doc --locked -p graph --no-deps` with `RUSTDOCFLAGS="-D warnings"`
-   - `bash scripts/check-workspace-policy.sh`
+1. **Single-owner argument (PR evidence, not a test).** Recorded in the attempt record.
+2. **Realtime.** `cargo run --locked --release -q -p realtime-policy` passes; the marked-region
+   count does not change.
+3. **Workspace.** `cargo test --locked --all-features` for `-p graph`, `-p host-core` (full, with
+   `successor_swap`), `-p capi`, `-p host-web`; `cargo fmt --all -- --check`; `cargo clippy --locked
+   -p graph -p host-core --all-targets --all-features -- -D warnings`; `RUSTDOCFLAGS="-D warnings"
+   cargo doc --locked -p graph --no-deps`; `bash scripts/check-workspace-policy.sh`; AArch64
+   `cargo check --tests -p graph`.
+
+## Possible later fold (not this issue)
+
+`crates/builtins-compiler` `drain_strip_for_carry`'s `owner ==` guard is now equally dead; its
+signature is the trait contract, so a fold is a separate issue.
 
 ## Dependencies
 
@@ -186,7 +131,26 @@ removed because it cannot change a result.
 
 ## Attempt record
 
-- Attempt 1: not started.
+- Attempt 1 (2026-10-24, branch `codex/batch-b9-1538` from `82f987296`): D4 and D4a in
+  `crates/graph/src/runtime.rs`. Single-owner argument, verified on this tree:
+  1. `Executor` swap calls `carry_strip_lanes` only after `can_carry_strip_lanes` returned true
+     for every move (`lib.rs`, the swap block refuses the whole hand-over with
+     `PredecessorMismatch` otherwise).
+  2. `can_carry_strip_lanes` resolves each move's predecessor through
+     `strip_lane_mut(&mut predecessor.units, step.owner, step.predecessor)`, which requires
+     `stage.holds(owner)` for that slot's `carried_strip_lanes()` stage.
+  3. A strip bank reports one stage (`Fader` in the fader processor, `Matrix` in the matrix
+     processor, `crates/builtins-compiler/src/lib.rs`), and `holds` pairs each stage with one
+     owner. So every move of one predecessor `(unit, slot)` has that bank's owner: the
+     `take_while` run is single-owner and the filter kept every element.
+  4. `install_builtin_strip_carry` sorts by `(predecessor, owner)` with `GraphLaneLocation`
+     ordered `unit, slot, lane`, so a bank's moves are adjacent; one `drained` slot therefore
+     drains each bank exactly once, as the two-slot array did.
+  `executor.carry_strips` takes a move set only in `install_builtin_strip_carry`; elsewhere it is
+  built empty. No test or other code calls `carried_strip_lane_mask`. Gates all pass:
+  realtime-policy (192 marked regions, no marker moved), tests graph 129, host-core 546 (incl.
+  `successor_swap`), capi 185, host-web 204, 0 failed; fmt, clippy, doc `-D warnings`, AArch64
+  check, workspace policy.
 
 ## Root rulings (2026-10-13)
 

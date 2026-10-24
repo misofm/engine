@@ -5742,7 +5742,10 @@ fn carried_input_lane_mask(moves: &[crate::GraphLaneMove], first: usize) -> u8 {
         .fold(0, |mask, step| mask | lane_bit(step.predecessor.lane))
 }
 
-/// [`carried_input_lane_mask`] for the strip moves of `moves[first]`'s owner.
+/// [`carried_input_lane_mask`] for strip moves: every move from `first` on in the predecessor bank
+/// of `moves[first]` is read. They all have one owner: a strip bank has one stage, a stage holds
+/// one owner ([`crate::BuiltinStripStage::holds`]), and [`Runtime::can_carry_strip_lanes`]
+/// has resolved every predecessor lane through [`strip_lane_mut`] before the drain runs.
 fn carried_strip_lane_mask(moves: &[crate::GraphStripMove], first: usize) -> u8 {
     let Some(head) = moves.get(first) else {
         return 0;
@@ -5754,7 +5757,6 @@ fn carried_strip_lane_mask(moves: &[crate::GraphStripMove], first: usize) -> u8 
             step.predecessor.unit == head.predecessor.unit
                 && step.predecessor.slot == head.predecessor.slot
         })
-        .filter(|step| step.owner == head.owner)
         .fold(0, |mask, step| mask | lane_bit(step.predecessor.lane))
 }
 
@@ -6586,10 +6588,11 @@ impl crate::runtime::Runtime {
 
     /// Run the strip section of a carry program at the swap block (issue #1277 D8).
     ///
-    /// `moves` is sorted by predecessor location. Each predecessor bank applies the pending live
-    /// values of the lanes `moves` carries for one owner once
+    /// `moves` is sorted by predecessor location, so a bank's moves are adjacent, and they share
+    /// the bank's one owner ([`carried_strip_lane_mask`]). Each predecessor bank applies the
+    /// pending live values of the lanes `moves` carries once
     /// ([`GraphPreparedBuiltinBankProcessor::drain_strip_for_carry`], the block drain under
-    /// `LiveSnapshot::ALL`) before any lane of that owner is copied. A lane the swap restarts is
+    /// `LiveSnapshot::ALL`) before any of its lanes is copied. A lane the swap restarts is
     /// not drained, so the writes it replaced are not counted in `live_values_superseded`,
     /// whatever bank it shares with a carried lane (#1312 D2). Then every lane is copied. The
     /// caller has checked [`Self::can_carry_strip_lanes`]. Bounded by `moves.len()` and the bank
@@ -6599,8 +6602,8 @@ impl crate::runtime::Runtime {
         predecessor: &mut Self,
         moves: &[crate::GraphStripMove],
     ) {
-        // The bank each owner's half was last drained for: fader, then matrix.
-        let mut drained: [Option<(u32, u16)>; 2] = [None; 2];
+        // The predecessor bank last drained.
+        let mut drained: Option<(u32, u16)> = None;
         for (index, step) in moves.iter().enumerate() {
             let Some((chain, slot, predecessor_lane)) =
                 strip_lane_mut(&mut predecessor.units, step.owner, step.predecessor)
@@ -6610,11 +6613,7 @@ impl crate::runtime::Runtime {
             let Some(from) = builtin_processor_mut(chain, slot) else {
                 continue;
             };
-            let half = match step.owner {
-                crate::BuiltinStripOwner::Fader => 0,
-                crate::BuiltinStripOwner::Matrix => 1,
-            };
-            if drained[half] != Some((step.predecessor.unit, step.predecessor.slot)) {
+            if drained != Some((step.predecessor.unit, step.predecessor.slot)) {
                 // Admission validated every value, so none is refused; a refused one is still
                 // consumed, and the rest of the bank's values with it.
                 let refused =
@@ -6623,7 +6622,7 @@ impl crate::runtime::Runtime {
                     refused, 0,
                     "an admitted strip value was refused at the carry"
                 );
-                drained[half] = Some((step.predecessor.unit, step.predecessor.slot));
+                drained = Some((step.predecessor.unit, step.predecessor.slot));
             }
             let Some((chain, slot, lane)) =
                 strip_lane_mut(&mut self.units, step.owner, step.successor)
