@@ -764,3 +764,55 @@ issue therefore changes:
 - `drain_lane_pairs` stays an expected failure (D4), and its base-tree text follows #1442 Amendment 3.
 
 **#1816 note (root R1, 2026-10-24).** #1444 D4's stated limit ("a helper two calls deep") has a second instance: `carry_effect_lanes` -> `carry_observes` (graph executor, `BankChain`, the `BankStage` hook) -> the owner's drain loop, `LiveControlEffectBankStage::drain_observe_queues` or `EffectControlLane::drain_observations` (the first is `BankChain::run` -> `begin_block` -> `drain`); the D1 walk must accept that shared loop, which `twin-carry-observe-lanes` holds.
+
+## Amendment 1, attempt 1 (implementer, 2026-10-24): slice 1418a delivered, 1418b recorded
+
+Root decisions R1-R3 of 2026-10-24 and the scope note govern; where they differ from Amendment 1
+(paths, case volume), they win.
+
+**Real tree, re-measured on `2abeb2a38`.** Marked counted drains with an outer loop:
+`crates/rack/src/lib.rs:2392` (`drain_observe_queues`, #1816: pattern root of
+`self.observe_queues.iter_mut()`) and `crates/host-core/src/spectrum.rs:1201` (`cancel_except`:
+element slot of `.iter_mut().enumerate()`). `hosts/host-web/src/lib.rs` `poll_meters` is the
+per-queue form. The builtins-compiler fader, matrix and input drains are gone (cell slices).
+`crates/effect-contract/src/live.rs:1380` has no outer loop. All pass unchanged:
+`realtime policy: ok (192 marked regions in 34 files)`, 3.0 s for the release binary.
+
+**What changed.**
+- `drain/select.rs` (new): the D1 walk (pattern root, pass index, `let`/`let .. else`/`if let`
+  rebinding; `.zip(..)` argument selects its own loop only; `cfg` rebinding, a `mut` index and a
+  macro call other than a trusted `debug_assert!` in a selecting loop's body refuse; no depth cap).
+  Invariance (R3) is #1426's place rule, `place::untouched_except`, over each selecting loop's
+  body, with the walk's own reads left out. `drain/mod.rs` runs it for every counted drain.
+- `place.rs` holds the one `is_assign_op`; `per_queue/window.rs` uses it. `count::under_cfg` is
+  shared. Module docs (D6 headline) in `mod.rs`, `outer.rs`, `select.rs`.
+- Tests: base twin `drain_lane_pairs` drains `controls[lane]`; probe n07 is `.drain`. The 21
+  `outer.rs` finite rows are selecting shapes (each keeps its finite form; `outer-counted-while`
+  moved to the refused rows, D4), plus three accepted rows (NIT-3's `.as_mut()` after an index,
+  `else if let`, an index inside an element) and the 64-link chain and 60-level nest. Seventeen
+  refused rows, one per defect. The may-not-end rows select where they can, so only the finite
+  check refuses them.
+
+**Red on revert.** With `2abeb2a38`'s tool and these tests, exactly the seventeen new refused rows
+and probe n07 pass the old tool; every accepted row passes both.
+
+**Mutants** (on the committed tree, each restored): invariance off - `outer-index-base-swapped`,
+`outer-element-swapped-with-spare` red; enumerate element slot as index - `outer-enumerated-index-table`
+red; `cfg` check off - first survived (the row's other binding took `&mut` of the base), row
+rewritten with a spare, then red.
+
+**Outside the authorized list.** `tests/policy/drain/declarations.rs`: one accepted row
+(`failed-alias-read-does-not-extend-the-span`) drained one parameter queue inside `for _ in 0..lanes`,
+which D1 refuses; it now drains `self.controls[lane]` and keeps its claim.
+
+**1418b (for root to file).**
+- The per-queue form's enclosing loops (`per_queue_inside_outer_loop`): D1 must refuse a loop that
+  encloses the set loop. That needs `per_queue::bounds` to hand back the set loop's block
+  (`drain/per_queue/mod.rs`, outside this slice's paths). Today such a loop is judged finite only.
+- Rows now doubly refused (D1 and the rule they were written for), so their own rule lost its sole
+  catch: `declarations.rs` `over_slice` / `over_lanes` rows (`for _ in lanes`), the ported awk
+  corpus and the refused probes with `_` outer loops. Rewrite to selecting shapes where the rule
+  matters.
+- Not added: separate rows for `controls[0]`, a struct `let`, a `match` arm, `while let`, `.rev()`
+  and `chunks_mut(1)` over the queue, `mem::take`, and the `(&mut it).enumerate()` index (the
+  finite check refuses it first).
