@@ -206,5 +206,13 @@ order), so this slice rebases on their payload code instead of racing it.
 - **1368b cost (descriptive).** One console run on each arm (base `fd2a49d84`, candidate), with the
   build done first and the run under the exclusive lock. The runner refused both before any workload
   launched: base `loadavg_above_ceiling smt_sibling_busy`, candidate `loadavg_above_ceiling` (other
-  streams' builds). Recorded and not retried. So there is no cost number for this tranche. The
-  wasm body counts above are the only cost evidence.
+  streams' builds). Recorded and not retried. The cost row waits for a later unloaded run; it is
+  not a gate for this issue (root, 2026-10-24).
+- **1368b class A (PR evidence, not committed).** Every console `*output_sha256` (60 digest
+  fields over 37 records of one untimed `bench console` warmup run, `MISO_ENGINE_BENCH_ROUND=warmup`)
+  is identical on base `fd2a49d84` and on this branch. The committed corpus digests are unchanged
+  (`CROSS_TARGET_DIGESTS`, `D90_DIGESTS`; `wasm-gates` `g5_native_corpus`, the shaper's
+  `cross_target` and the limiter's `determinism` pass in release).
+- **Roster reason (root accepted).** One row pinned to the block body rather than two rows: a row
+  pinned to the outlined constructor would fail as a false de-vectorisation the day LLVM inlines it
+  again, and the constructor runs on the control side only.
