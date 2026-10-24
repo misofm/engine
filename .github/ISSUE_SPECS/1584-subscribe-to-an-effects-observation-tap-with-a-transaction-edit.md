@@ -655,3 +655,11 @@ of `capi_retained_bytes_charge_every_byte_the_compile_retains` balance exactly, 
 Mutants (each red, restored): disarm ignoring refs, a computed tap accepted, no window check, admission and push
 silent (ack before drop), no successor push, codec accepting `control`, `observation.unavailable` ignored, C ABI
 with no observation capacity.
+
+**Engine fix (root-authorized, `crates/engine/src/realtime/observe.rs` only).** `observation_slot_retained_bytes()`
+now charges the slot's whole shared allocation, `Layout::new::<SharedAllocation<ObservationSlot>>()` (the one rule
+every shared lane's charge uses), 72 bytes instead of 56. This also fixes the same 16-byte-per-tap under-charge on the
+browser. No browser row moved past its ceiling and no exact row moved (`check-browser-expected-resources.py` on a
+fresh build: green, self-test 43 red mutations); no other host test pinned the old value. `capi` (195), `engine`,
+`effect-contract`, `host-core --all-features` and `host-web --features test-support` (211) pass; `realtime_policy`
+ok; audit `pcm_digest` `bffc21e857b5e134`; `lint-checks.sh --self-tests` passes.
