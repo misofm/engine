@@ -24,7 +24,10 @@ const fn tap(id: u32, fold: ObservationFold) -> ObservationDescriptor {
         id: ObservationTapId(id),
         display_name: "Gain Reduction",
         display_unit: "dB",
-        kind: ObservationKind::GainReductionDb,
+        kind: match fold {
+            ObservationFold::PeakSigned => ObservationKind::GainChangeDb,
+            _ => ObservationKind::GainReductionDb,
+        },
         unit: ParameterUnit::Db,
         cost: ObservationCost::Resident,
         cadence: ObservationCadence::PerBlock,

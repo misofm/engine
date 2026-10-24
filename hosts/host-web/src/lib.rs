@@ -5105,8 +5105,8 @@ fn read_observation_values(
 ///
 /// A `GainReductionDb` tap contributes its reduction as published. A `GainChangeDb` tap
 /// (issue #1918) publishes a signed change, positive for a boost; only a cut is a reduction, so it
-/// contributes the cut's depth `max(0, -x)` and a boost contributes `0`. The signed value itself
-/// reaches a consumer through the selected read, never through this slot.
+/// contributes the cut's depth `max(0, -x)` and a boost or a non-finite lane contributes `0`. The
+/// signed value itself reaches a consumer through the selected read, never through this slot.
 fn strip_reduction_decibels(
     tap: effect_contract::ObservationDescriptor,
     left: f32,
@@ -5117,9 +5117,18 @@ fn strip_reduction_decibels(
         ObservationKind::GainReductionDb => {
             observed_decibels(tap, if left > right { left } else { right })
         }
+        // A non-finite lane is no reading: the clamp in `observed_decibels` would turn `+inf` into
+        // the declared minimum, a full-depth cut the effect never made.
         ObservationKind::GainChangeDb => {
-            let change = observed_decibels(tap, if left < right { left } else { right });
-            if change < 0.0 { -change } else { 0.0 }
+            let cut = |change: f32| {
+                if !change.is_finite() {
+                    return 0.0;
+                }
+                let change = observed_decibels(tap, change);
+                if change < 0.0 { -change } else { 0.0 }
+            };
+            let (left, right) = (cut(left), cut(right));
+            if left > right { left } else { right }
         }
     }
 }

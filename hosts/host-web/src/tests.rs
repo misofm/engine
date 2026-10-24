@@ -5287,6 +5287,16 @@ fn observation_unit_conversion_is_declared_and_clamped() {
         0.0,
         "a boost is no reduction"
     );
+    assert_eq!(
+        strip_reduction_decibels(signed, f32::INFINITY, 0.0),
+        0.0,
+        "+inf is no cut"
+    );
+    assert_eq!(
+        strip_reduction_decibels(signed, 0.0, f32::NAN),
+        0.0,
+        "NaN is no cut"
+    );
 }
 
 /// The identity fixture with three sources declared out of canonical order (issue #207).

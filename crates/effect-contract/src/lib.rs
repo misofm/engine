@@ -1039,7 +1039,7 @@ fn parameter_valid(p: &ParameterDescriptor) -> bool {
         }
     }
 }
-/// The three rules an [`ObservationDescriptor`] must satisfy beyond text and bounds.
+/// The rules an [`ObservationDescriptor`] must satisfy.
 ///
 /// * **Text and bounds.** Both display strings are non-empty printable text, and the declared
 ///   published range is finite, ordered, and free of `-0.0` -- the same canonicalisation rule
@@ -1050,6 +1050,10 @@ fn parameter_valid(p: &ParameterDescriptor) -> bool {
 /// * **A `PerLane` tap requires per-lane state to read.** The observation is a read of kernel
 ///   state, so an effect whose qualities declare no per-lane state (`left_bytes == 0`) cannot
 ///   produce two independent lanes and must declare `Shared`.
+/// * **A signed gain change is a signed decibel fold** (issue #1918). `GainChangeDb` requires the
+///   `PeakSigned` fold and the `Db` unit, and `PeakSigned` is admitted only for `GainChangeDb`: a
+///   gain-change tap folded by magnitude would publish a boost as a reduction, and a reduction tap
+///   folded with its sign would publish negative reduction a meter cannot draw.
 ///
 /// The third rule is the in-descriptor form of issue #143's "PerLane requires bank width": bank
 /// width is not a descriptor field (it is a *factory* capability, `bind_homogeneous_bank`), so the
@@ -1067,6 +1071,12 @@ fn observation_valid(d: &EffectDescriptor, o: &ObservationDescriptor) -> bool {
             && matches!(o.cadence, ObservationCadence::PerBlock))
         && (!matches!(o.channels, ObservationChannels::PerLane)
             || d.qualities.iter().all(|q| q.maximum_state.left_bytes > 0))
+        && match o.kind {
+            ObservationKind::GainReductionDb => !matches!(o.fold, ObservationFold::PeakSigned),
+            ObservationKind::GainChangeDb => {
+                matches!(o.fold, ObservationFold::PeakSigned) && matches!(o.unit, ParameterUnit::Db)
+            }
+        }
 }
 /// Whether `name` is a stable machine name: `[a-z][a-z0-9_]*` (decision 17, C3).
 fn valid_machine_name(name: &str) -> bool {

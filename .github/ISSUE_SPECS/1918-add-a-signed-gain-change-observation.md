@@ -14,7 +14,12 @@ The dynamic EQ's upward mode boosts a band, but the only observation kind it can
 
 ## Paths
 
-`crates/effect-contract/src/**`, `docs/EFFECT_OBSERVATION_V1.md`, the host fold in `crates/host-core` (and its browser and C ABI surfaces if a kind list is exported), `crates/dynamic-eq/src/lib.rs` (the declaration), this spec. After #17 S1 merges.
+`crates/effect-contract/src/{lib.rs,live.rs}`, `crates/effect-contract/tests/{observation_lane.rs,registry.rs}`,
+`tools/parameter-metadata/src/lib.rs`, `scripts/check-parameter-metadata-v1.py`,
+`scripts/fixtures/parameter-metadata-v1-self-test.json`, the generated `sdk/assets/miso-engine-v1-parameter-metadata.json`
+and `sdk/src/generated/catalog.ts`, `sdk/src/browser/shipped-host.d.ts`, `hosts/host-web/src/{lib.rs,tests.rs}`,
+`hosts/host-web/web/miso-engine-v1-audio-worklet-host.d.ts`, `docs/EFFECT_OBSERVATION_V1.md`, this spec. The fold is in
+effect-contract, not host-core, and the C ABI has no observation surface. The dynamic EQ's declaration moves to #17 S2.
 
 ## Decision record (attempt 1, 2026-10-24)
 
@@ -29,6 +34,9 @@ The dynamic EQ's upward mode boosts a band, but the only observation kind it can
   `strip_reduction_decibels`, the per-strip frame-slot contribution: a `GainReductionDb` window as before
   (larger lane, then convert), a `GainChangeDb` window `max(0, -x)` of the lower lane. `trackGrDb`/`submixGrDb`
   stay non-negative per the `.d.ts`; the signed value is on the `readObservations` path.
+- Review fold-in: `validate_descriptor` refuses a mismatched tap: `GainChangeDb` requires `PeakSigned` and `Db`, and
+  `PeakSigned` is admitted only for `GainChangeDb`. The host's strip slot takes `0` from a non-finite signed lane (the
+  clamp would otherwise turn `+inf` into a full-depth cut).
 - Not in this PR: the dynamic EQ's declaration (its crate is in open PR #1919); it moves to #17 S2. Compressor,
   gate, de-esser, multiband and limiter are untouched (class A: the fold `match` gains an arm only).
 
