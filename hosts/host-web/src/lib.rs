@@ -1906,6 +1906,12 @@ impl ReadyOwnership {
                 }
                 continue;
             };
+            // A configuration only shrinks today, so captures never follow a removed service;
+            // #1594's re-configure must create the service here instead.
+            debug_assert!(
+                self.spectrum.is_some(),
+                "a plan with captures was adopted after the service was removed"
+            );
             let Some(service) = self.spectrum.as_mut() else {
                 continue;
             };

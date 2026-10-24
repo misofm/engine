@@ -7128,6 +7128,15 @@ mod structural_apply {
             },
             "the edit is never refused for a spectrum entry"
         );
+        // D7: until render adopts the successor, a service step keeps the running plan's service.
+        assert_eq!(rig.host.service(None), RESULT_OK);
+        assert_eq!(
+            rig.host
+                .spectrum_stream_metadata()
+                .expect("the running plan's service reads until adoption")
+                .status,
+            SpectrumStreamStatus::Ready
+        );
         rig.step();
         assert_eq!(rig.epoch(), 1, "render adopted the successor");
         assert_eq!(rig.host.service(None), RESULT_OK);
