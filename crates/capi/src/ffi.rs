@@ -18,8 +18,9 @@ use lane::fpenv::CanonicalFpEnv;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
 use crate::runtime::{
-    CommandError, EventError, EventLane, PlanQueries, PlanState, SessionSeekFailure, SourceFailure,
-    SourceFailureReport, compile_children, limits_are_valid, plan_error, render_error_code,
+    CommandError, EventError, EventLane, PlanQueries, PlanState, SOURCE_ID_INVALID,
+    SessionSeekFailure, SourceFailure, SourceFailureReport, compile_children, limits_are_valid,
+    plan_error, render_error_code,
 };
 
 fn catch_result(operation: impl FnOnce() -> u32) -> u32 {
@@ -112,6 +113,30 @@ unsafe fn borrowed_bytes<'a>(data: *const u8, bytes: u64, limit: u64) -> Result<
     // SAFETY: `data` is nonnull, the caller promises it is readable for the declared byte count for
     // this call, and the length was proved to be at most `isize::MAX` above.
     Ok(unsafe { core::slice::from_raw_parts(data, bytes) })
+}
+
+/// Borrows a source entry point's source ID, or refuses a null, empty, non-UTF-8 or over-long one
+/// with `RESULT_INVALID_ARGUMENT` and the `source.id.invalid` diagnostic.
+///
+/// # Safety
+///
+/// `session` must have passed `session_kind`, and a nonnull `source_id` must be readable for
+/// `source_id_bytes` bytes for the duration of the call.
+unsafe fn borrowed_source_id<'a>(
+    session: *mut Session,
+    source_id: *const u8,
+    source_id_bytes: u64,
+) -> Result<&'a [u8], u32> {
+    // SAFETY: The caller promises a nonnull `source_id` is readable for its declared byte count.
+    match unsafe { borrowed_bytes(source_id, source_id_bytes, MAX_SOURCE_ID_BYTES) } {
+        Ok(value) if !value.is_empty() && core::str::from_utf8(value).is_ok() => Ok(value),
+        _ => {
+            // SAFETY: `session` passed the live-kind check; the ABI serializes session calls, so
+            // this short diagnostic borrow overlaps no other borrow of the session.
+            unsafe { (*session).last_error.borrow_mut() }.set(SOURCE_ID_INVALID);
+            Err(RESULT_INVALID_ARGUMENT)
+        }
+    }
 }
 
 unsafe fn engine_kind(engine: *const Engine) -> u32 {
@@ -418,6 +443,8 @@ pub unsafe extern "C" fn miso_engine_v1_compile_session(
 }
 
 /// Submit one borrowed planar source chunk atomically into its prepared host ring.
+/// A null, empty, non-UTF-8 or over-long source ID is `RESULT_INVALID_ARGUMENT` with
+/// `source.id.invalid`.
 ///
 /// # Safety
 ///
@@ -438,7 +465,7 @@ pub unsafe extern "C" fn miso_engine_v1_source_submit_planar_f32(
         if kind != RESULT_OK {
             return kind;
         }
-        if source_id.is_null() || chunk.is_null() || out_report.is_null() {
+        if chunk.is_null() || out_report.is_null() {
             return RESULT_INVALID_ARGUMENT;
         }
         // SAFETY: The caller promises readable input/output ABI structs for this call.
@@ -459,12 +486,12 @@ pub unsafe extern "C" fn miso_engine_v1_source_submit_planar_f32(
         {
             return RESULT_INVALID_ARGUMENT;
         }
-        // SAFETY: The caller promises the source-ID storage is readable for this call.
-        let source_id =
-            match unsafe { borrowed_bytes(source_id, source_id_bytes, MAX_SOURCE_ID_BYTES) } {
-                Ok(value) if !value.is_empty() && core::str::from_utf8(value).is_ok() => value,
-                _ => return RESULT_INVALID_ARGUMENT,
-            };
+        // SAFETY: `session` passed the live-kind check and the caller promises the source-ID storage
+        // is readable for this call.
+        let source_id = match unsafe { borrowed_source_id(session, source_id, source_id_bytes) } {
+            Ok(value) => value,
+            Err(code) => return code,
+        };
         let plane_count = chunk.plane_count as usize;
         // SAFETY: `chunk.planes` was proved nonnull and pointer-aligned above, `plane_count` is at
         // most the launch source-channel maximum (two) so the array is far inside `isize::MAX`
@@ -515,6 +542,8 @@ pub unsafe extern "C" fn miso_engine_v1_source_submit_planar_f32(
 }
 
 /// Queue one generation-tagged source seek for the next render block.
+/// A null, empty, non-UTF-8 or over-long source ID is `RESULT_INVALID_ARGUMENT` with
+/// `source.id.invalid`.
 ///
 /// # Safety
 ///
@@ -593,15 +622,12 @@ unsafe fn source_seek_entry(
         if kind != RESULT_OK {
             return kind;
         }
-        if source_id.is_null() {
-            return RESULT_INVALID_ARGUMENT;
-        }
-        // SAFETY: The caller promises the source-ID storage is readable for this call.
-        let source_id =
-            match unsafe { borrowed_bytes(source_id, source_id_bytes, MAX_SOURCE_ID_BYTES) } {
-                Ok(value) if !value.is_empty() && core::str::from_utf8(value).is_ok() => value,
-                _ => return RESULT_INVALID_ARGUMENT,
-            };
+        // SAFETY: `session` passed the live-kind check and the caller promises the source-ID storage
+        // is readable for this call.
+        let source_id = match unsafe { borrowed_source_id(session, source_id, source_id_bytes) } {
+            Ok(value) => value,
+            Err(code) => return code,
+        };
         // SAFETY: `session` passed the live-kind check and the ABI requires exclusive serial
         // source-control ownership for seek.
         let session = unsafe { &mut *session };
@@ -740,8 +766,9 @@ unsafe fn session_seek_entry(
 /// starts at generation `0`.
 ///
 /// Runs the service step first, as every session call does. Returns `RESULT_OK` and fills `out`;
-/// `RESULT_INVALID_ARGUMENT` for a wrong `struct_size`, a nonzero reserved word, or a null, empty,
-/// non-UTF-8 or over-long source ID, and, with `source.id.unknown`, for a source the session does
+/// `RESULT_INVALID_ARGUMENT` for a wrong `struct_size` or a nonzero reserved word, with
+/// `source.id.invalid` for a null, empty, non-UTF-8 or over-long source ID, and, with
+/// `source.id.unknown`, for a source the session does
 /// not declare; `RESULT_BACKPRESSURE` with `source.report.busy` when every bounded read landed
 /// inside render's publication (`out` untouched; read again).
 ///
@@ -764,7 +791,7 @@ pub unsafe extern "C" fn miso_engine_v1_source_seek_report(
         if kind != RESULT_OK {
             return kind;
         }
-        if source_id.is_null() || out.is_null() {
+        if out.is_null() {
             return RESULT_INVALID_ARGUMENT;
         }
         // SAFETY: `out` is nonnull and the caller promises readable seek-report storage for these
@@ -774,12 +801,12 @@ pub unsafe extern "C" fn miso_engine_v1_source_seek_report(
         if struct_size != SOURCE_SEEK_REPORT_SIZE || reserved0 != 0 || reserved != [0; 2] {
             return RESULT_INVALID_ARGUMENT;
         }
-        // SAFETY: The caller promises the source-ID storage is readable for this call.
-        let source_id =
-            match unsafe { borrowed_bytes(source_id, source_id_bytes, MAX_SOURCE_ID_BYTES) } {
-                Ok(value) if !value.is_empty() && core::str::from_utf8(value).is_ok() => value,
-                _ => return RESULT_INVALID_ARGUMENT,
-            };
+        // SAFETY: `session` passed the live-kind check and the caller promises the source-ID storage
+        // is readable for this call.
+        let source_id = match unsafe { borrowed_source_id(session, source_id, source_id_bytes) } {
+            Ok(value) => value,
+            Err(code) => return code,
+        };
         // SAFETY: `session` passed the live-kind check and the ABI serializes session calls.
         let session = unsafe { &mut *session };
         match session.state.seek_report(source_id) {
@@ -3127,6 +3154,11 @@ mod tests {
     /// F3: every caller-declared length is bounded by the call's own limit and by `isize::MAX`
     /// before the region becomes a slice. The pointer used here is dangling: if any check were
     /// missing, `from_raw_parts` would hit its debug precondition and abort the test process.
+    ///
+    /// #1350 D1: every malformed source-ID form (null, empty, non-UTF-8, over-long) on each of the
+    /// four source entry points replaces the previous call's diagnostic with `source.id.invalid`.
+    /// Test value: red if any malformed-ID branch returns before setting the diagnostic, which
+    /// leaves the stale `source.id.unknown` behind.
     #[test]
     fn oversized_borrowed_lengths_are_rejected_before_any_read() {
         let (engine, session, plan) = compiled_fixture();
@@ -3152,26 +3184,68 @@ mod tests {
             cumulative_written_frames: 0,
             active_generation: 0,
         };
-        for source_id_bytes in [u64::MAX, MAX_SOURCE_ID_BYTES + 1, MAX_BORROWED_BYTES + 1] {
-            assert_eq!(
-                // SAFETY: The oversized declared length is rejected before `dangling` is read.
-                unsafe {
+        let malformed: [(&str, *const u8, u64); 6] = [
+            ("null", ptr::null(), 4),
+            ("empty", b"x".as_ptr(), 0),
+            ("non-UTF-8", b"\xff".as_ptr(), 1),
+            ("128 bytes", dangling, MAX_SOURCE_ID_BYTES + 1),
+            ("isize::MAX + 1 bytes", dangling, MAX_BORROWED_BYTES + 1),
+            ("u64::MAX bytes", dangling, u64::MAX),
+        ];
+        let mut seek_report = SourceSeekReport {
+            struct_size: SOURCE_SEEK_REPORT_SIZE,
+            reserved0: 0,
+            generation: 0,
+            first_sample: 0,
+            source_frame: 0,
+            cumulative_underrun_frames: 0,
+            cumulative_held_frames: 0,
+            reserved: [0; 2],
+        };
+        for (form, source_id, source_id_bytes) in malformed {
+            let entry_points: [(&str, &mut dyn FnMut() -> u32); 4] = [
+                // SAFETY: A malformed ID is rejected before `source_id` is read.
+                ("submit", &mut || unsafe {
                     miso_engine_v1_source_submit_planar_f32(
                         session,
-                        dangling,
+                        source_id,
                         source_id_bytes,
                         &chunk,
                         &mut submitted,
                     )
-                },
-                RESULT_INVALID_ARGUMENT
-            );
-            assert_eq!(submitted.accepted_frames, 0);
-            assert_eq!(
-                seek(session, dangling, source_id_bytes, 1, 0),
-                RESULT_INVALID_ARGUMENT
-            );
+                }),
+                ("seek", &mut || {
+                    seek(session, source_id, source_id_bytes, 1, 0)
+                }),
+                // SAFETY: A malformed ID is rejected before `source_id` is read.
+                ("seek_at", &mut || unsafe {
+                    miso_engine_v1_source_seek_at(session, source_id, source_id_bytes, 1, 0, 0)
+                }),
+                // SAFETY: A malformed ID is rejected before `source_id` is read.
+                ("seek_report", &mut || unsafe {
+                    miso_engine_v1_source_seek_report(
+                        session,
+                        source_id,
+                        source_id_bytes,
+                        &mut seek_report,
+                    )
+                }),
+            ];
+            for (entry, call) in entry_points {
+                assert_eq!(
+                    seek(session, b"absent-source".as_ptr(), 13, 1, 0),
+                    RESULT_INVALID_ARGUMENT
+                );
+                assert_eq!(read_last_error(session.cast()), b"source.id.unknown");
+                assert_eq!(call(), RESULT_INVALID_ARGUMENT, "{entry}, {form}");
+                assert_eq!(
+                    read_last_error(session.cast()),
+                    SOURCE_ID_INVALID,
+                    "{entry}, {form}"
+                );
+            }
         }
+        assert_eq!(submitted.accepted_frames, 0);
         let mut response = BytesOut {
             struct_size: BYTES_OUT_SIZE,
             reserved0: 0,
