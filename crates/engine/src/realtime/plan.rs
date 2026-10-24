@@ -204,6 +204,12 @@ pub struct PlanUnitEligibility {
     pub unit: u32,
     /// `true` for a homogeneous bank chain, `false` for a single dispatched op.
     pub banked: bool,
+    /// Issue #970: `true` only for a bank chain every lane of which begins at its track's
+    /// `PostInputBuiltins` stage, the one unit the mono collapse (`arm_mono_collapse`) may arm;
+    /// `false` for every later chain of a split strip and for a single op. A caller reading
+    /// [`all_lanes_eligible`](Self::all_lanes_eligible) as collapse evidence tests this and
+    /// [`witness_is_vacuous`](Self::witness_is_vacuous) first.
+    pub gathers_track_input: bool,
     /// Stages this unit renders: a chain's bound slots, or 1 for a single op.
     pub stages: u32,
     /// Of those, the stages that sit **upstream of the fader/matrix seam** -- the stages a
@@ -245,7 +251,9 @@ impl PlanUnitEligibility {
     /// All-lanes-or-nothing, which is `rack::BankChain::all_lanes_symmetric`'s rule
     /// restated at the plan surface: masking the eligible lanes of a mixed cohort would save
     /// nothing, because the vector op runs every lane regardless. Making a cohort homogeneous is
-    /// the *planner's* job (`CohortPoolClass`), not the dispatch's.
+    /// the *planner's* job (`CohortPoolClass`), not the dispatch's. Collapse also needs
+    /// [`gathers_track_input`](Self::gathers_track_input): a later chain of a split strip reports
+    /// every lane eligible and never arms.
     #[must_use]
     pub fn all_lanes_eligible(&self) -> bool {
         !self.lane_eligible.is_empty() && self.lane_eligible.iter().all(|lane| *lane)
@@ -257,7 +265,8 @@ impl PlanUnitEligibility {
     /// `ChannelSymmetryWitness::SYMMETRIC`, so such a unit reports every lane eligible on every
     /// session, mono or not. That is correct as a statement about the seam and useless as
     /// collapse evidence, and a caller must test this before believing
-    /// [`all_lanes_eligible`](Self::all_lanes_eligible).
+    /// [`all_lanes_eligible`](Self::all_lanes_eligible), together with
+    /// [`gathers_track_input`](Self::gathers_track_input).
     #[must_use]
     pub const fn witness_is_vacuous(&self) -> bool {
         self.upstream_of_seam_stages == 0

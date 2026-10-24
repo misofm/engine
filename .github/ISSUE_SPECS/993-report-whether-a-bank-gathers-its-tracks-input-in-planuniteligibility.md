@@ -14,3 +14,10 @@ Add `gathers_track_input: bool` to `PlanUnitEligibility`, set from the same bind
 - A mutation that sets it from the old "every lane mono" rule turns a reproducer's assertion red.
 - Also cover the one surviving mutation in `UnitBanking::of` the #970 verification found (it changes no audio but should change this field).
 - fmt, clippy `-D warnings`.
+
+## Decision and evidence record
+
+- Scope (root, 2026-10-24): field `gathers_track_input`, set in `graph`'s `unit_eligibility` from `UnitBanking::gathers_track_input` (already `pub(crate)`), so `crates/graph/src/runtime.rs` is not edited. No `armable()` helper.
+- Gate 1: `chain_shape`'s written-out mono rows carry the field (`true` on every cohort chain, `false` on the input ops and `main-out`); the #970 split-strip reproducer asserts one gathering bank per cohort, the earlier of its two chains.
+- Gate 2 (PR evidence): the builder copying `banked()` (old every-lane rule) turns `only_the_input_gathering_chain_of_a_split_strip_is_armed` red at the new count.
+- Gate 3 (PR evidence): `UnitBanking::of` `(true, true) => Bank` is red in both suites. `(false, true) => BankGatheringTrackInput` stays green, and it is unreachable in shipped builds: every `PostInputBuiltins` op is a builtin-bank member (`planned_builtin_bank_members` banks at every shipped width, and `unbanked_strip_bindings` asserts no unbanked strip outside test-support). Only the test-only `Backend::Scalar` oracle leaves a plain `PostInputBuiltins` op, so no production-path test can discriminate it; no test added.

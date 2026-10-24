@@ -5834,6 +5834,7 @@ impl PreparedPlanExecutor for GraphExecutor {
             .map(|(unit, (runtime_unit, identity))| PlanUnitEligibility {
                 unit: u32::try_from(unit).unwrap_or(u32::MAX),
                 banked: identity.banking.banked(),
+                gathers_track_input: identity.banking.gathers_track_input(),
                 stages: identity.stages,
                 upstream_of_seam_stages: identity.upstream_of_seam_stages,
                 lane_tracks: identity.lane_tracks.clone(),
