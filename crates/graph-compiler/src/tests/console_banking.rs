@@ -273,12 +273,27 @@ fn folded(sample: f32) -> u32 {
 struct Rendered {
     output: Vec<u32>,
     tracks: Vec<Vec<u32>>,
+    /// `bank_collapse_counters()`: `[blocks rendered collapsed, chains armed with a prefix]`.
+    collapse: [u64; 2],
+    units: Vec<engine::realtime::PlanUnitEligibility>,
+    /// Blocks rendered.
+    blocks: u64,
 }
 
 /// Bind `artifact` with a [`NoiseSource`] per track and a `BitRecorder` at each track's post-pan
 /// stage, arm the mono collapse on the mono-mapped tracks as `host-core` arms it, and render
 /// `blocks` blocks, or four past the plan's output latency if that is more.
 fn render(artifact: PreparedGraphBuiltinsArtifact, tracks: &[TrackShape], blocks: u64) -> Rendered {
+    render_arm(artifact, tracks, blocks, false)
+}
+
+/// [`render`], with every chain's collapse forced off when `forced_off`: the dual oracle.
+fn render_arm(
+    artifact: PreparedGraphBuiltinsArtifact,
+    tracks: &[TrackShape],
+    blocks: u64,
+    forced_off: bool,
+) -> Rendered {
     let envelope = artifact.envelope();
     let frames = envelope.quantum.0 as usize;
     let blocks = blocks.max(artifact.report().output_latency.0.div_ceil(frames as u64) + 4);
@@ -328,6 +343,7 @@ fn render(artifact: PreparedGraphBuiltinsArtifact, tracks: &[TrackShape], blocks
         .unwrap_or_else(|failure| panic!("bind: {}", failure.code))
         .plan;
     plan.arm_mono_collapse(&|track: &str| !tracks[index_of(track)].feed.stereo);
+    plan.force_mono_collapse_off(forced_off);
     let mut output = Vec::new();
     let mut pcm = vec![0.0_f32; frames * 2];
     for block in 0..blocks {
@@ -342,8 +358,13 @@ fn render(artifact: PreparedGraphBuiltinsArtifact, tracks: &[TrackShape], blocks
         .expect("render");
         output.extend(pcm.iter().map(|sample| folded(*sample)));
     }
+    let collapse = plan.bank_collapse_counters();
+    let units = plan.unit_eligibility();
     drop(plan);
     Rendered {
+        collapse,
+        units,
+        blocks,
         output,
         tracks: sinks
             .iter()
@@ -1092,5 +1113,71 @@ fn inserts_at_mixed_link_modes_share_one_bank_per_slot() {
             BLOCKS,
         ),
         "mixed-link inserts",
+    );
+}
+
+/// Issue #987: a later chain of a mono strip is armed on its producers' rendering, and collapses.
+///
+/// Sixteen tracks on the collapse-capable console (EQ and compressor, then the limiter), every
+/// fourth one stereo; the even tracks carry a banked EQ insert, so their strip is three chains
+/// (the `pre_insert` chain, the insert chain and the `post_insert` chain) and every odd track's is
+/// one. Armed and forced off, every track's post-matrix bits and the session output agree, the
+/// forced-off arm never collapses, and every collapsible chain whose lanes are all mono -- the
+/// later ones included -- is armed and collapses on every block; no stereo chain is armed.
+///
+/// Red if a later chain stays unarmed (the #970 rule alone arms only the chains that gather the
+/// input), or if the producer table or the per-block term drops a lane whose producer collapsed.
+#[test]
+fn a_later_mono_chain_arms_on_its_producers_and_renders_the_dual_bits() {
+    let console = Console {
+        pre: vec![Kind::Eq, Kind::Comp],
+        post: vec![Kind::Limiter],
+    };
+    let tracks: Vec<TrackShape> = (0..16)
+        .map(|index| TrackShape {
+            feed: Feed {
+                gain: 0.5,
+                stereo: index % 4 == 3,
+                poison: false,
+            },
+            inserts: if index % 2 == 0 {
+                vec![Kind::Eq]
+            } else {
+                Vec::new()
+            },
+            bypass: vec![false; console.slots()],
+            variant: index % VARIANTS.len(),
+        })
+        .collect();
+    let model = console_session(&console, &tracks);
+    let compile = || compile_at(&model, host_dispatch()).expect("compile");
+    let armed = render_arm(compile(), &tracks, 12, false);
+    let dual = render_arm(compile(), &tracks, 12, true);
+    assert_eq!(dual.collapse[0], 0, "the forced-off arm never collapses");
+    assert_renders_the_oracle(&armed, &dual, "later mono chains, armed against forced off");
+    // Every collapsible chain whose lanes all render mono tracks.
+    let mono: Vec<_> = armed
+        .units
+        .iter()
+        .filter(|unit| {
+            unit.banked
+                && unit.upstream_of_seam_stages > 0
+                && !unit.lane_tracks.is_empty()
+                && unit.lane_tracks.iter().all(|track| {
+                    let index: usize = track[2..].parse().expect("chNN");
+                    !tracks[index].feed.stereo
+                })
+        })
+        .collect();
+    let mono_chains = mono.len() as u64;
+    let gathering = mono.iter().filter(|unit| unit.gathers_track_input).count() as u64;
+    assert!(
+        mono_chains > gathering && gathering > 0,
+        "the strip splits into later mono chains ({mono_chains} mono chains, {gathering} gather)"
+    );
+    assert_eq!(
+        armed.collapse,
+        [mono_chains * armed.blocks, mono_chains],
+        "every mono chain, the later ones too, is armed and collapses on every block"
     );
 }
