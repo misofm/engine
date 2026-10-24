@@ -47,3 +47,30 @@ used by between-render-calls delivery).
 
 Changing the matrix arithmetic (`ll*l + lr*r` stays two products even when `l == r`).
 
+
+## Decision record (2026-10-24, attempt 1)
+
+- Scope (root, from the scope note): the seam is in `BankChain::run` (`crates/rack/src/lib.rs`,
+  `if collapse` after the prefix loop); the seam-side slots are the graph's `BuiltinStage` around
+  `FaderBankProcessor` and `MatrixBankProcessor` (`crates/builtins-compiler/src/lib.rs`). Authorized
+  paths add `crates/lane/src/kernels/builtins.rs` and `crates/graph` (trait default and the
+  `BuiltinStage` forward). The "fused fader-matrix stage" gate is void: #1767 removed that stage and
+  `make_fader_matrix`.
+- Design: `BankStage::process_from_left` (and the same default on
+  `GraphPreparedBuiltinBankProcessor`) copies the left plane into the right one, calls `process`
+  and returns `Ok(false)`; an override that writes the right plane itself returns `Ok(true)`. The
+  chain gives the seam to the first seam-side slot with an active lane and copies itself when no
+  seam-side slot runs. `BankChain::seam_copies` counts collapsed blocks that still copied.
+- The fader takes it when its right channel is settled and, on an automated bank, when no stored
+  event lands inside the block (`process_with` then renders `process`); the matrix when every lane
+  is settled. Otherwise copy, then the existing body. New lane kernels `gain_mute_block_from`,
+  `matrix2x2_block_from_left` and `matrix2x2_block_without_identity_from_left` share one
+  `#[inline(always)]` frame body with their in-place kernels, so the arithmetic and order are the
+  same by construction. Class A.
+- Evidence (PR, not committed): 64-block release digests of every `WORKLOADS` row and the ring row
+  at Simd8 and Simd4, plus a fader ride on `sixty_four_track_console` and `_mono`, identical before
+  and after. With temporary counters: `sixty_four_track_console_mono` at Simd8 renders 512
+  collapsed blocks with 0 seam copies (`_half_mono` 256 / 0). At Simd4 dispatch on this AVX2 host
+  the console folds into per-node inserts, so the collapsed chain holds no seam-side slot and every
+  collapsed block takes the chain's own copy (1024 / 1024). A native four-lane build banks its
+  effects, so its chain is expected to have the Simd8 shape; not measured here (no AArch64 host).

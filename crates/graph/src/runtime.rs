@@ -5604,6 +5604,11 @@ impl BankStage for BuiltinStage {
         self.0
             .process(block.left, block.right, block.frames, block.first_sample)
     }
+    /// The bank's from-left body, forwarded (issue #975).
+    fn process_from_left(&mut self, block: BankBlock<'_>) -> Result<bool, RenderError> {
+        self.0
+            .process_from_left(block.left, block.right, block.frames, block.first_sample)
+    }
     fn copy_response_snapshot_lane(
         &self,
         lane: usize,

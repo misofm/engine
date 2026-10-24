@@ -2245,6 +2245,21 @@ pub trait GraphPreparedBuiltinBankProcessor: Send + Any {
         frames: u32,
         first_sample: u64,
     ) -> Result<(), RenderError>;
+    /// [`Self::process`] for a block whose right input is its left plane, forwarded from
+    /// `rack::BankStage::process_from_left` with that method's contract (issue #975): `right` is
+    /// output only, `Ok(true)` when the bank wrote it from `left` itself, `Ok(false)` when it
+    /// copied `left` into it first, as this default does.
+    fn process_from_left(
+        &mut self,
+        left: &mut [f32],
+        right: &mut [f32],
+        frames: u32,
+        first_sample: u64,
+    ) -> Result<bool, RenderError> {
+        right.copy_from_slice(left);
+        self.process(left, right, frames, first_sample)?;
+        Ok(false)
+    }
     /// Copy one bank member's retained response words without advancing render state.
     fn copy_response_snapshot_lane(
         &self,

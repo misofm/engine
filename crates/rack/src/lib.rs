@@ -610,8 +610,9 @@ pub trait BankStage: Send {
     /// Render one block with the cohort's two channels collapsed onto `block.left`.
     ///
     /// `block.right` is the resident scratch the chain did **not** gather. It holds the previous
-    /// block's words and reading it is a defect; the chain overwrites it with the left plane at the
-    /// seam, before the first seam-side slot and before the scatter.
+    /// block's words and reading it is a defect; at the seam, before the scatter, the first
+    /// seam-side slot writes it from the left plane, or the chain copies the left plane over it
+    /// (see [`process_from_left`](Self::process_from_left)).
     ///
     /// Never called unless [`supports_mono_collapse`](Self::supports_mono_collapse) is `true`.
     ///
@@ -639,6 +640,21 @@ pub trait BankStage: Send {
     /// state, so a stage whose only mono gate is a digest has not been gated.
     fn process_mono(&mut self, block: BankBlock<'_>) -> Result<(), RenderError> {
         self.process(block)
+    }
+
+    /// Render one dual block whose right input is its left plane: a collapsed chain's first
+    /// seam-side slot with an active lane (issue #975). `block.right` is output only; it holds
+    /// stale words on entry.
+    ///
+    /// Returns `Ok(true)` when the stage wrote the right plane from the left one itself, and
+    /// `Ok(false)` when it copied the left plane into the right one first, as this default does:
+    /// [`BankChain::seam_copies`] counts the `false` answers. Either way the output must be bit for
+    /// bit what that copy followed by [`process`](Self::process) renders: an override reads the
+    /// left words where the dual body reads the right ones, in the same arithmetic and order.
+    fn process_from_left(&mut self, block: BankBlock<'_>) -> Result<bool, RenderError> {
+        block.right.copy_from_slice(block.left);
+        self.process(block)?;
+        Ok(false)
     }
 
     /// Copy every lane's left-channel state onto the right channel.
@@ -3236,6 +3252,10 @@ pub struct BankChain {
     collapse_source: bool,
     /// Blocks this chain rendered collapsed. Evidence only, read after render is disarmed.
     collapses: u64,
+    /// Collapsed blocks whose seam still copied the left plane into the right one: the first
+    /// seam-side slot declined [`BankStage::process_from_left`], or no seam-side slot ran (issue
+    /// #975). Evidence only, read after render is disarmed.
+    seam_copies: u64,
     /// `[disengages, re-engages, agreement proofs]`. Evidence only; see
     /// [`collapse_transitions`](Self::collapse_transitions) for what each one counts and why a
     /// block count alone cannot say it.
@@ -3384,6 +3404,7 @@ impl BankChain {
             collapse_channels_agree: true,
             collapse_source: false,
             collapses: 0,
+            seam_copies: 0,
             transitions: [0; 3],
             silent_skip: true,
             silent_skips: 0,
@@ -3928,24 +3949,41 @@ impl BankChain {
             }
         }
         if collapse {
-            // The seam. One extra copy of the resident block per collapsed chain per block, and it
-            // is the whole of the duplication: everything from here on -- the fader, the matrix,
-            // the scatter, the route fold, the master accumulation -- reads two planes and runs
-            // exactly the arithmetic it runs on a dual block, in exactly its operation order. The
-            // fold's `ll*l + lr*r` is *not* rewritten as `(ll + lr) * l` on the strength of
-            // `l == r`: the two round differently, and the second is not what a dual run computes.
-            let AoSoaScratch { left, right, .. } = &mut self.scratch;
-            right[..len].copy_from_slice(&left[..len]);
+            // The seam. The right plane is the left one from here on, and it is the whole of the
+            // duplication: everything after it -- the fader, the matrix, the scatter, the route
+            // fold, the master accumulation -- reads two planes and runs exactly the arithmetic it
+            // runs on a dual block, in exactly its operation order. The fold's `ll*l + lr*r` is
+            // *not* rewritten as `(ll + lr) * l` on the strength of `l == r`: the two round
+            // differently, and the second is not what a dual run computes.
+            //
+            // The first seam-side slot that runs takes the seam (issue #975): it reads the left
+            // plane as its right input and writes the right plane itself, or copies first. No
+            // reader needs the right plane before it. When no seam-side slot runs, the chain copies
+            // before the scatter.
+            let mut seam = true;
             for slot in &mut self.slots[self.collapse_prefix..] {
                 if slot.has_active_lanes() {
-                    slot.stage.process(BankBlock {
+                    let block = BankBlock {
                         left: &mut self.scratch.left[..len],
                         right: &mut self.scratch.right[..len],
                         frames,
                         first_sample,
                         lanes: self.lanes,
-                    })?;
+                    };
+                    if seam {
+                        seam = false;
+                        if !slot.stage.process_from_left(block)? {
+                            self.seam_copies = self.seam_copies.saturating_add(1);
+                        }
+                    } else {
+                        slot.stage.process(block)?;
+                    }
                 }
+            }
+            if seam {
+                let AoSoaScratch { left, right, .. } = &mut self.scratch;
+                right[..len].copy_from_slice(&left[..len]);
+                self.seam_copies = self.seam_copies.saturating_add(1);
             }
         }
         self.scatter(members, frames);
@@ -4206,6 +4244,14 @@ impl BankChain {
     #[must_use]
     pub const fn collapses(&self) -> u64 {
         self.collapses
+    }
+
+    /// Collapsed blocks whose seam still copied the left plane into the right one (issue #975):
+    /// `0` while every collapsed block's first seam-side slot wrote the right plane from the left
+    /// one itself. Read only after render is disarmed.
+    #[must_use]
+    pub const fn seam_copies(&self) -> u64 {
+        self.seam_copies
     }
 
     /// Leading slots a collapsed block runs one-plane; `0` when this chain can never collapse.
@@ -8379,7 +8425,20 @@ mod tests {
             dual.run(&mut reference, 8, 0, LiveSnapshot::ALL)
                 .expect("render");
             assert_eq!(chain.collapses(), u64::from(symmetric));
+            // No seam-side slot: a collapsed block's chain copies the left plane over the
+            // ungathered right one before the scatter (issue #975), and counts it.
+            assert_eq!(chain.seam_copies(), u64::from(symmetric));
             for lane in 0..4 {
+                if symmetric {
+                    let duplicated = planes.right[lane]
+                        .iter()
+                        .zip(&planes.left[lane])
+                        .all(|(a, b)| a.to_bits() == b.to_bits());
+                    assert!(
+                        duplicated,
+                        "a collapsed block publishes the left plane twice"
+                    );
+                }
                 let left_agrees = planes.left[lane]
                     .iter()
                     .zip(&reference.left[lane])
