@@ -499,6 +499,22 @@ fn muted_track(name: &str) -> Vec<SessionEdit> {
     ]
 }
 
+/// Asserts that block `block` equals the reference's, bit for bit, naming the first sample that
+/// differs.
+fn same(bits: &[u32], reference: &[u32], block: u64) {
+    if let Some(index) = bits
+        .iter()
+        .zip(reference)
+        .position(|(got, want)| got != want)
+    {
+        panic!(
+            "block {block} differs from the reference at sample {index}: {} != {}",
+            f32::from_bits(bits[index]),
+            f32::from_bits(reference[index])
+        );
+    }
+}
+
 /// `S = ceil_q(p + q + N + C)`.
 fn scheduled(p: u64, compensation: u64) -> u64 {
     (p + Q + N + compensation).div_ceil(Q) * Q
@@ -581,10 +597,7 @@ fn a_removed_strip_ramps_out_then_leaves_at_s() {
                 "block {block} allocates nothing on the render thread"
             );
         }
-        assert_eq!(
-            bits, reference[block as usize],
-            "block {block} equals the reference"
-        );
+        same(&bits, &reference[block as usize], block);
         let watermark = rig.watermark();
         if block > K && adopted.is_none() {
             if watermark.revision >= rig.revision {
@@ -645,10 +658,7 @@ fn a_supersession_in_phase_one_keeps_s_and_the_feed() {
         }
         let (bits, _) = rig.render(block);
         if block * Q < s {
-            assert_eq!(
-                bits, reference[block as usize],
-                "block {block} equals the reference"
-            );
+            same(&bits, &reference[block as usize], block);
         }
         let watermark = rig.watermark();
         if block > K && adopted.is_none() && watermark.revision >= rig.revision {
