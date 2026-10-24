@@ -27,6 +27,7 @@
   },
   "directOracle": {
     "schema": "miso.web.browser.direct-oracle.v1",
+    "memoryBytesCeiling": 3080192,
     "simd128": {
       "initialStatus": {
         "state": 2,
@@ -35,8 +36,7 @@
         "sampleRateHz": 48000,
         "quantumFrames": 128,
         "nextAbsoluteSample": "0",
-        "renderedQuanta": "0",
-        "memoryBytes": 2883584
+        "renderedQuanta": "0"
       },
       "beforeDisposeStatus": {
         "state": 2,
@@ -45,8 +45,7 @@
         "sampleRateHz": 48000,
         "quantumFrames": 128,
         "nextAbsoluteSample": "384",
-        "renderedQuanta": "3",
-        "memoryBytes": 2883584
+        "renderedQuanta": "3"
       },
       "resources": {
         "sampleRateHz": 48000,
@@ -113,8 +112,7 @@
         "sampleRateHz": 48000,
         "quantumFrames": 128,
         "nextAbsoluteSample": "1280",
-        "renderedQuanta": "10",
-        "memoryBytes": 2883584
+        "renderedQuanta": "10"
       },
       "pcmF32leSha256": "c3659578f50d02030fcef19df98be88d70e89f2a0c9bade3e23e9570864d1cfd"
     },
@@ -142,8 +140,7 @@
         "sampleRateHz": 48000,
         "quantumFrames": 128,
         "nextAbsoluteSample": "12288",
-        "renderedQuanta": "96",
-        "memoryBytes": 2949120
+        "renderedQuanta": "96"
       },
       "pcmF32leSha256": "a81d883b3f83eaf629bd78db149d1a39825c821c6cb2e9a53506341a97ed1363"
     },
