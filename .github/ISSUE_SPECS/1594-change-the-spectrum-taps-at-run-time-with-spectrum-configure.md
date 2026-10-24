@@ -241,3 +241,41 @@ Checkpoint 1 (protocol):
 - `tools/audit/src/protocol.rs` is untouched: it enumerates no message IDs.
 - Checkpoint 1 leaves the control plane answering `UNAVAILABLE` (`spectrum.unavailable`) for the
   new frame; checkpoint 2 replaces that arm with the executor.
+
+Checkpoint 2 (control plane, host-core, capi):
+
+- `SessionState::command` completes `PreparedCommandFrame::Session` through
+  `session_command` / `spectrum_configure`: the D4 checks in order against the committed model,
+  then D5. A typed refusal is a recorded non-OK reply; a retryable or internal error (plan gone,
+  backpressure) drops the token, so nothing is recorded or acknowledged. A preparation or
+  admission refusal of the monitor rebuild is `LIMIT_EXCEEDED` with the preparation's first code.
+  Duplicates are exact `(kind, id, channels)` repeats, as preparation's `host.spectrum.duplicate`.
+- D5 hop or budget only: `SpectrumMonitor::retune` stores the configuration, advances both epochs
+  (the adopted one when the running captures are the replaced configuration's) and sets the
+  service's hop with `SpectrumService::set_hop`; a pending candidate of the replaced epoch takes the
+  new epoch and hop. The budget check uses `SpectrumPreparation::retained_bytes`.
+- R1 as built: `Rebuild::Monitor { model, configuration }` in `rebuild()`: no edit ramps, no
+  monitor write, the request's configuration instead of `successor_configuration`, no stamp,
+  `publish(r)` only when `r > 0`, outcome `Exact`, commit as a discontinuity. Deviation found while
+  building: `SuccessorBase.unchanged_revision` is set only when the base is the running plan's (or
+  `r = 0`). Across a withdrawn candidate at a newer revision the base is the older plan, whose
+  model differs by the candidate's edits, so preparation stamps those retargets with `r` exactly as
+  for a transaction; the flag's retarget refusal (`host.successor.monitor`) would otherwise refuse
+  every supersession. `fold_send_move` (ramp 0) and `replace_session_catalog` (same structure) are
+  no-ops for the equal model, as R1 asked to verify.
+- `SpectrumMonitor::adopt` now sets the kept service's hop from the promoted candidate, so a hop
+  that changed while a rebuild was pending reaches the service; a promotion that installs captures
+  after every tap was removed makes a new service (the case #1593 T3 named).
+- R6: `SpectrumService::RETAINED_BYTES` (the stream window, the analyzer and the smoothing history)
+  is added to a plan's capi `active_retained` when the plan has spectrum captures.
+- hosts/host-web is untouched: its preparer returns no captures until #1596, so a browser
+  configure makes candidates without captures and `promote_spectrum`'s `debug_assert` (captures
+  after a removed service) cannot fire; #1596 must create the service there.
+- The #1595 spec records R3 (D8a).
+
+Gates (attempt 1): the codec and replay tests in `crates/protocol`; six tests in
+`crates/control-plane/tests/spectrum_monitor.rs` (revision 0, watermark, no-op and hop, keep/add/
+remove/re-add, refusals and supersession, 40 alternations against a rendering thread); one capi
+row. Mutants, each red on its gate and restored: revision 0 refused in preparation (revision-0
+test), a monitor rebuild that publishes `r + 1` (watermark and supersession tests), a retune that
+leaves the service's hop (hop test).

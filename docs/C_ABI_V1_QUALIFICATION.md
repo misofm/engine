@@ -1181,3 +1181,14 @@ that window is admitted against the plan that renders.
   `successor_swap::a_declared_discontinuity_resets_the_floors_at_every_rate_and_width`; `host-web`
   `tests::structural_apply::a_declared_discontinuity_resets_the_floors_on_the_browser` and the
   parity row `control_parity::a_declared_discontinuity_resets_the_floors_alike_on_both_hosts` (deleted by TA4).
+
+## Issue 1594 spectrum configure
+
+`SPECTRUM_CONFIGURE` (`0010`) crosses `miso_engine_v1_submit_command` to the one core path
+(`SessionState::command`), which executes it as monitor state: no revision, no saved state, no
+`SESSION_COMMITTED`, no new C symbol. A form or entry change prepares a replacement plan at the
+unchanged committed revision; a hop or budget change prepares none. The capability report does not
+list `0010` until #1595 sets bit 16. A plan prepared with spectrum captures charges the session's
+spectrum service and analysis (`SpectrumService::RETAINED_BYTES`) to its capi retained bytes. The
+gate is `runtime::spectrum_tests::a_spectrum_configure_crosses_the_c_abi_to_the_session`; the core
+claims are `crates/control-plane/tests/spectrum_monitor.rs`.
