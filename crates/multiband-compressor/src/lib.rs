@@ -860,7 +860,7 @@ impl<L: Lane, const W: usize> Side<L, W> {
     ///   target is `+0.0`; the branching smoother from `+0.0` to `+0.0` stays `+0.0`, and
     ///   `flush(+0.0) = +0.0`. The applied gain is finite, so each band writes `+0.0 * g = +0.0`.
     /// * **Ramps.** `remaining == 0` with a `+0.0` step is the flat path, which moves no ramp word
-    ///   ([`Instance::flat_path_is_identity`]); a ramp in flight clears its track's bit.
+    ///   ([`Instance::flat_sides_are_identity`]); a ramp in flight clears its track's bit.
     ///
     /// A plain `flush` brings each smoother word to `+0.0` (the compressor's rest snap is not
     /// adopted here: that would move rendered bits). The crossover and coefficient words are ramps
@@ -1090,7 +1090,9 @@ fn band_target<L: Lane>(level: L, threshold: L, inv_ratio_minus_one: L, knee: (f
 ///
 /// `MONO` (issue #1871) renders a collapsed track: `left` holds both channels and `right` is the
 /// ungathered scratch, never read or written. Only the near side's state and `segments[0]` move;
-/// the far side and `segments[1]` are left as they are. Every cross-channel term is the dual one
+/// the far side and `segments[1]` are left as they are (the automation drain still retargets the
+/// far side's ramps from their stale `current` while collapsed, and the disengage copy overwrites
+/// them, so no bit moves). Every cross-channel term is the dual one
 /// with the near word read twice: `link_levels::<LINK>(own, own)` is `|p|`, `max(|p|, |p|)` or
 /// `0.5|p| + 0.5|p|` in the dual order, so the near output and state are the dual block's bits on
 /// `L == R`, in every link mode. A const parameter and never a runtime flag, so the dual body
@@ -1244,7 +1246,9 @@ fn run_segment<
 ///
 /// `MONO` (issue #1871) plans, arms, counts silence and writes ramps back on the left side only:
 /// on a collapsed track the right side is the left one by the witness's induction, so the left
-/// side's plan is the dual plan, and the right side stays exactly as the collapse found it.
+/// side's plan is the dual plan, and the right side stays exactly as the collapse found it but for
+/// the automation drain, which still retargets its ramps from their stale `current`; the
+/// disengage copy overwrites them, so no bit moves.
 #[inline(always)]
 fn process_block<
     L: Lane,
@@ -1515,8 +1519,8 @@ impl<L: Lane, const W: usize> Instance<L, W> {
         self.flat_sides_are_identity(2)
     }
 
-    /// [`flat_path_is_identity`](Self::flat_path_is_identity) on the first `sides` sides: a
-    /// collapsed block (issue #1871) runs the left side's ramps alone.
+    /// The flat-path identity precondition on the first `sides` sides: a collapsed block (issue
+    /// #1871) runs the left side's ramps alone; `sides = 2` is the dual block's.
     #[cfg(any(debug_assertions, test))]
     fn flat_sides_are_identity(&self, sides: usize) -> bool {
         const NEGATIVE_ZERO: u32 = 0x8000_0000;

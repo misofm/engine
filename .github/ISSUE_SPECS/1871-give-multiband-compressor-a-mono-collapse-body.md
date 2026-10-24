@@ -48,3 +48,7 @@ Only mono source files get dual-mono processing; no content detection.
   `MONO` monomorphs). `process_bank` keeps 2,527 `f32x4` operations (scalar 20 on base, 0 on the
   branch, codegen); `process_bank_mono` is 1,389 / 0, a new pinned roster row. Every
   browser expected-resources row is unchanged against base, so nothing is re-pinned.
+* Follow-up (verifier MINOR, inherited, performance only; root files it on the shared
+  mono-collapse contract): the bank's `lanes_at_rest` and the `advance_clocks` debug assert AND in
+  the frozen side 1, so a rack-level silence skip during a collapsed run fires only if side 1 was
+  at rest when the collapse began. The gate-expander has the same shape. Sound, not fixed here.
