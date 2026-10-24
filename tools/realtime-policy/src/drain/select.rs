@@ -1,9 +1,12 @@
-//! The selecting outer loop (#1418 D1): every loop around a counted drain, inside its region, must
-//! drain a different queue on each pass. [`super::outer`] proves that the loop is finite; this
-//! module proves that it selects.
+//! The selecting outer loop (#1418 D1, #1851): every loop around a counted drain, inside its
+//! region, must drain a different queue on each pass. [`super::outer`] proves that the loop is
+//! finite; this module proves that it selects.
 //!
 //! The walk starts from the counted receiver (`<recv>` of `<recv>.available_at_entry()`) and goes
-//! outward over the loops between the counted loop and the region's top. It holds one receiver at a
+//! outward over the loops between the counted loop and the region's top. For a per-queue form
+//! ([`super::per_queue`]) it starts from the queue collection `<Q>` of the pass loop's
+//! `<Q>.iter_mut()` and goes outward over the loops that enclose the set loop: the form's own pass
+//! count loop, between the set loop and the pass loop, is [`super::outer`]'s alone. It holds one receiver at a
 //! time, a root identifier with `.field`, `[<index>]` and zero-argument `.method()` steps, and
 //! resolves the root with the one resolver ([`super::scope`]). A loop selects in one of three ways:
 //!
@@ -53,7 +56,7 @@
 use syn::visit::{self, Visit};
 
 use super::Ctx;
-use super::count::{Counted, under_cfg};
+use super::count::under_cfg;
 use super::names::bare;
 use super::place;
 use super::scope::{Binding, BindingKind, nearest};
@@ -167,22 +170,24 @@ enum Slot<'f> {
     Zip,
 }
 
-/// Whether every loop of `steps[top..at]` selects the queue that the loop at `steps[at]` counts.
+/// Whether every loop of `steps[top..until]` selects the queue `receiver`: the counted receiver of
+/// a counted loop at `steps[until]`, or the queue collection `<Q>` of a per-queue form whose set
+/// loop stands in the block at `steps[until]`.
 pub(super) fn selects<'f>(
     ctx: &Ctx<'f>,
     steps: &[Step<'f>],
     top: usize,
-    at: usize,
-    counted: &Counted<'f>,
+    until: usize,
+    receiver: &'f syn::Expr,
 ) -> bool {
-    let loops: Vec<usize> = (top..at)
+    let loops: Vec<usize> = (top..until)
         .rev()
         .filter(|&i| steps[i].node.is_loop())
         .collect();
     if loops.is_empty() {
         return true;
     }
-    let Some(mut chain) = Chain::of(counted.receiver) else {
+    let Some(mut chain) = Chain::of(receiver) else {
         return false;
     };
     // The positions of the walk's own reads, which the place rule does not judge.
@@ -389,8 +394,13 @@ fn pass_index(each: &syn::ExprForLoop) -> Option<String> {
         }
         _ => None,
     };
-    match &*each.expr {
-        // Any range yields a new integer on each pass; whether it ends is [`super::outer`]'s.
+    let mut iter = &*each.expr;
+    while let syn::Expr::Paren(inner) = iter {
+        iter = &inner.expr;
+    }
+    match iter {
+        // Any range yields a new integer on each pass, in parentheses or not; whether it ends is
+        // [`super::outer`]'s.
         syn::Expr::Range(_) => ident(&each.pat),
         expr => {
             let call = method0(expr, "enumerate")?;
