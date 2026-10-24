@@ -627,6 +627,31 @@ fn every_query_error_has_its_class_and_code() {
             "response.override.value",
         ),
         (
+            ResponseQueryError::Address,
+            InvalidField,
+            "response.address",
+        ),
+        (
+            ResponseQueryError::AddressUnknown,
+            NotFound,
+            "control.address.unknown",
+        ),
+        (
+            ResponseQueryError::ThirdParty,
+            Unavailable,
+            "effect.third_party.unavailable_at_launch",
+        ),
+        (
+            ResponseQueryError::OverrideControl(controls::ControlError::Inactive),
+            InvalidField,
+            "control.inactive",
+        ),
+        (
+            ResponseQueryError::Committed("effect.parameter.domain"),
+            ValidationFailed,
+            "effect.parameter.domain",
+        ),
+        (
             preview(Preview::InvalidShape),
             InvalidField,
             "response.rate",
