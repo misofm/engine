@@ -658,6 +658,12 @@ struct Instance<L: Lane> {
     /// every target, automation, reset and restore. See the matching field on `parametric-eq`
     /// for the induction it licenses.
     silent_fixed_point: bool,
+    /// Whether a collapsed block ([`render_mono`](Self::render_mono)) has rendered since the last
+    /// disengage copy ([`desymmetrize`](Self::desymmetrize)), which alone clears it (#1894). While
+    /// it is set the right channel is frozen and stale, so [`lanes_at_rest`](Self::lanes_at_rest)
+    /// reads the left channel alone: the effect contract's collapsed-bank rule. The compressor has
+    /// no clocks, so nothing else reads it.
+    collapsed: bool,
     /// The bypass flag in force when the claim above was earned. Bypass selects a different path
     /// through the kernel, so a claim earned on one side of it says nothing about the other.
     silent_bypass: bool,
@@ -682,6 +688,7 @@ impl<L: Lane> Instance<L> {
             left: Channel::new(left_defaults, metadata.sample_rate),
             right: Channel::new(right_defaults, metadata.sample_rate),
             silent_fixed_point: false,
+            collapsed: false,
             silent_bypass: metadata.bypass,
         }
     }
@@ -781,6 +788,8 @@ impl<L: Lane> Instance<L> {
         frames: usize,
         mut record: impl FnMut(usize, bool, bool),
     ) {
+        // From here until the disengage copy the right channel is frozen and stale.
+        self.collapsed = true;
         let words = frames * L::WIDTH;
         let quiet = self.left.max_remaining() == 0
             && matches!(detector, Detector::Main | Detector::Silent)
@@ -814,10 +823,15 @@ impl<L: Lane> Instance<L> {
         }
     }
 
-    /// The lanes at exact rest on both channels (`PreparedNativeEffectBank::lanes_at_rest`): see
+    /// The lanes at exact rest on both channels (`PreparedNativeEffectBank::lanes_at_rest`), or
+    /// on the left channel alone while [`collapsed`](Self::collapsed) (#1894): see
     /// `kernel::Channel::rest_lanes` for the words pinned and why the list is complete.
     fn lanes_at_rest(&self) -> u32 {
-        self.left.rest_lanes() & self.right.rest_lanes()
+        if self.collapsed {
+            self.left.rest_lanes()
+        } else {
+            self.left.rest_lanes() & self.right.rest_lanes()
+        }
     }
 
     /// Copies the left channel's whole state onto the right (the collapse's disengage boundary).
@@ -825,6 +839,7 @@ impl<L: Lane> Instance<L> {
     /// See `kernel::Channel::copy_state_from` for the word-by-word list and why each is on it.
     fn desymmetrize(&mut self) {
         self.right.copy_state_from(&self.left);
+        self.collapsed = false;
     }
 
     // REALTIME_POLICY_BEGIN: #1278 D3, the payload calls run in the plan-swap block.
@@ -1361,7 +1376,8 @@ impl<L: Lane> PreparedNativeEffectBank for PreparedCompressorBank<L> {
         self.instance.designed_channel_symmetry(lane)
     }
 
-    /// Issue #1745: `kernel::Channel::rest_lanes` on both channels, padded lanes included.
+    /// Issue #1745: `kernel::Channel::rest_lanes` on both channels, padded lanes included; on the
+    /// left channel alone on a collapsed bank (#1894).
     fn lanes_at_rest(&self) -> u32 {
         self.instance.lanes_at_rest()
     }
