@@ -41,12 +41,36 @@ fn id(value: &str) -> StableId {
 
 /// The fixture with one stored automation on the first track's console EQ, `control` on the left.
 fn with_eq_automation(control: u32, unit: ParameterUnit) -> SessionModel {
+    with_automation(Section::Console(id("eq")), control, unit)
+}
+
+/// The fixture with a true-peak limiter insert (`limiter`) on the first track and one stored
+/// automation of its `control` on the left.
+fn with_limiter_automation(control: u32, unit: ParameterUnit) -> SessionModel {
+    let mut model = with_automation(Section::Inserts(id("limiter")), control, unit);
+    model.tracks[0].inserts.effects.push(session::Effect {
+        id: id("limiter"),
+        identity: session::EffectIdentity::Native {
+            effect_id: id("miso.true-peak-limiter"),
+        },
+        quality: session::EffectQuality::Normal,
+        bypass: false,
+        link_mode: session::LinkMode::DualMono,
+        params: Vec::new(),
+        sidechain: session::SidechainDeclaration::None,
+    });
+    model
+}
+
+/// The fixture with one stored automation of `control` in `section` of the first track, on the
+/// left.
+fn with_automation(section: Section, control: u32, unit: ParameterUnit) -> SessionModel {
     let mut model = parse_session_json(FIXTURE).expect("fixture parses");
     model.automation = vec![Automation {
         id: id("ride"),
         target: ControlAddress {
             owner: Owner::Strip(model.tracks[0].id.clone()),
-            section: Section::Console(id("eq")),
+            section,
             control,
             lane: ParameterChannel::Left,
         },
@@ -77,9 +101,9 @@ fn prepare(model: &SessionModel) -> Result<(), String> {
 /// acked and never heard), or reports a code other than the rule's.
 #[test]
 fn preparation_refuses_an_automation_the_row_refuses() {
-    // `band-1-enabled` is a prepared parameter.
+    // The limiter's `lookahead` is a prepared parameter.
     assert_eq!(
-        prepare(&with_eq_automation(1, ParameterUnit::Linear)),
+        prepare(&with_limiter_automation(3, ParameterUnit::Milliseconds)),
         Err("control.automation.target\t$.automation[id=ride].target\n".to_owned())
     );
     // `band-1-gain`, in the wrong unit: the segment is the fault.
