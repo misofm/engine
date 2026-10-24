@@ -67,7 +67,7 @@ No change to the automation grammar or to render. No new public API beyond what 
   | `controls::live_lanes` | 1.59 / 1.57 | 0.74 / 0.75 | 18.0 / 18.3 | 3.19 / 3.19 |
 
   The catalog build and `live_lanes` are now linear (4.0x and 4.3x for 4x strips).
-- Successor (root files it as a weekly optimization-pass issue). Three control-thread costs stay
+- Successor (filed by root as #1864). Three control-thread costs stay
   faster than linear after this issue, measured on the session above (release, one warmup, two
   rounds):
   1. First-plan preparation: 28.2 / 28.2 ms at 256 strips and 154.6 / 153.3 ms at 1024 (5.5x for
