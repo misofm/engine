@@ -22,26 +22,30 @@ const SWAP_RATE: u32 = 48_000;
 // Gate 1: a swapped strip renders its twin's bits (driver: `conformance::swap_probe`)
 // ---------------------------------------------------------------------------------------------
 
-/// Two full banks of one slot, every strip on its own drawn parameters.
+/// Two full banks of one slot, every strip on its own drawn parameters and link mode.
 struct ShaperProbe {
     width: BankWidth,
-    link: LinkMode,
+    /// Each strip's link mode (issue #1368): a swapped lane must take its mode with it.
+    links: Vec<LinkMode>,
     values: Vec<Values>,
     sizes: StatePayloadSizes,
     draw: Draw,
 }
 
 impl ShaperProbe {
-    fn new(width: BankWidth, link: LinkMode, seed: u64) -> Self {
+    fn new(width: BankWidth, seed: u64) -> Self {
         let strips = 2 * width.lanes() as usize;
         let mut draw = Draw::new(seed);
         let values = (0..strips).map(|_| draw.values()).collect();
+        let links = (0..strips)
+            .map(|_| LINKS[draw.below(LINKS.len())])
+            .collect();
         let sizes = scalar(request(&default_values(), SWAP_RATE, LinkMode::DualMono))
             .metadata
             .state_sizes;
         Self {
             width,
-            link,
+            links,
             values,
             sizes,
             draw,
@@ -73,7 +77,10 @@ impl Probe for ShaperProbe {
     fn bind(&mut self, which: usize) -> Box<dyn PreparedNativeEffectBank> {
         let lanes = self.lanes();
         let requests: Vec<PrepareEffectRequest<'_>> = (0..lanes)
-            .map(|lane| request(&self.values[which * lanes + lane], SWAP_RATE, self.link))
+            .map(|lane| {
+                let strip = which * lanes + lane;
+                request(&self.values[strip], SWAP_RATE, self.links[strip])
+            })
             .collect();
         bind(self.width, &requests, &vec![true; lanes])
             .expect("a well-formed request")
@@ -142,15 +149,15 @@ impl Probe for ShaperProbe {
 /// moved, holds its twin's payload, re-seeds from its own defaults on a full reset, and the swap
 /// reaches the allocator zero times.
 ///
-/// It runs at every link mode, seed `s` at `LINKS[s % 3]`, because the linked detectors read both
-/// channels of a lane and a restore must carry both.
+/// Each strip draws its own link mode, because the linked detectors read both channels of a lane
+/// and a restore must carry both, and because a lane's mode is per lane (issue #1368): a swap that
+/// left the mode in place would render the strip at its new neighbour's law.
 #[test]
 fn a_swapped_strip_renders_its_unmoved_twins_bits() {
     for width in WIDTHS.iter().copied() {
         for seed in 0..6_u64 {
-            let link = LINKS[seed as usize % LINKS.len()];
             let seed = 0x1747_5000 + seed;
-            swap_probe::check(&mut ShaperProbe::new(width, link, seed), seed);
+            swap_probe::check(&mut ShaperProbe::new(width, seed), seed);
         }
     }
 }

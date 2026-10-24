@@ -183,3 +183,45 @@ order), so this slice rebases on their payload code instead of racing it.
   `EffectLaneLayout` (effect, layout version, sizes, bypass, latency), which never held the link
   mode, so the key change does not alter which lanes carry. Neither effect's state payload holds
   a link word, so the successor keeps its own prepared mode.
+- **1368b facts.** `lane_link` is now `true` for `miso.transient-shaper` and
+  `miso.true-peak-limiter` as well. Transient shaper: the shaper keeps `[LinkMode; W]` and a
+  `LinkLanes` record (per-lane `linked`/`averaged` masks plus the arm). A bank whose lanes share one
+  mode takes that mode's const arm, as before; a mixed bank takes a fourth arm, `LINK_MIXED`, which
+  computes `max` and `0.5 * l + 0.5 * r` in the const arms' order and selects per lane (no blend).
+  Limiter: `LimiterCoef.link_max: bool` became a per-lane mask plus `link_all` (every lane
+  `Maximum`); the #990 linked pair needs `link_all`, so a bank with any `DualMono` lane renders the
+  dual body, which renders a `Maximum` lane's bits equal to the linked pair's. The #990 record is a
+  statement about gain words only, so it needs no update on a lane swap. D5 in both: a padded lane
+  takes the first member's mode. Swap: both put the mode in the lane's defaults (+4 bytes,
+  `exchange_lane_link_word`) and re-derive the masks; each crate's `swap_tests` probe now draws a
+  link per strip, red when the exchange drops the mode.
+- **Limiter latency.** The declared latency is `N + 6` per rate and the main delay does not read
+  the link, which only selects the peak a lane's gain path reads; the mixed-link tests compare each
+  lane from the first block, line fill included, so no lane's latency moved.
+- **Web roster.** The shaper's bank constructor is now outlined and carries the follower
+  coefficients' four control-side `f32x4.sub`, so the row's pattern matched two functions. The
+  row is pinned to `Shaper<f32x4>::process_block` (narrower, not looser); the constructor is not a
+  render kernel and stays under the generic shape rule. The body went from 522 to 700 vector
+  operations, 0 scalar (the mixed arm). The limiter bodies are unchanged at 913 and 424.
+- **1368b cost (descriptive).** One console run on each arm (base `fd2a49d84`, candidate), with the
+  build done first and the run under the exclusive lock. The runner refused both before any workload
+  launched: base `loadavg_above_ceiling smt_sibling_busy`, candidate `loadavg_above_ceiling` (other
+  streams' builds). Recorded and not retried. The cost row waits for a later unloaded run; it is
+  not a gate for this issue (root, 2026-10-24).
+- **1368b class A (PR evidence, not committed).** Every console `*output_sha256` (60 digest
+  fields over 37 records of one untimed `bench console` warmup run, `MISO_ENGINE_BENCH_ROUND=warmup`)
+  is identical on base `fd2a49d84` and on this branch. The committed corpus digests are unchanged
+  (`CROSS_TARGET_DIGESTS`, `D90_DIGESTS`; `wasm-gates` `g5_native_corpus`, the shaper's
+  `cross_target` and the limiter's `determinism` pass in release).
+- **Roster reason (root accepted).** One row pinned to the block body rather than two rows: a row
+  pinned to the outlined constructor would fail as a false de-vectorisation the day LLVM inlines it
+  again, and the constructor runs on the control side only.
+- **1368b review fold (verifier PASS, two minors).** D5 now holds after a render-time lane swap
+  too: in both effects `set_lane_link` gives every padded lane the first active lane's mode again
+  (allocation-free), so a bank whose members became uniform leaves the shaper's mixed arm and gets
+  the limiter's #990 linked pair back. Padded output is discarded, so no member's bit moves. The
+  limiter's `lane_identity_holds_across_widths` now checks the linked pair on a padded uniform
+  all-`Maximum` bank, and on the same bank after a swap made its members uniform. Mutants: padded
+  lanes forced to `DualMono` at bind, red; the post-swap re-derive removed, red.
+- **Status.** With 1368a, this tranche delivers D1-D5 for all four effects, so it completes
+  #1368. The cost row (gate 4) waits for an unloaded run and does not gate the issue (root).

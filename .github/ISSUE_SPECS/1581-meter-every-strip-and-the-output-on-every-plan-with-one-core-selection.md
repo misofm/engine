@@ -260,3 +260,39 @@ Commands: `cargo test --locked -p host-core --all-features`,
   meters' grid. #1583: the C ABI exposes `OutputPeakReader::dropped_windows()` beside the windows.
   The worklet gate pins `OutputPeakObserver::observe` to its one trap site
   (`--trap-owner 18OutputPeakObserver7observe=1`).
+- **T3 (attempt 1, 2026-10-24).** The browser master ring and `meter_sample_magnitude` are gone
+  (D5). The host takes the reader and gate at boot (`take_output_meter`); `set_meter_lease`
+  activates the gate at `meter_activation_sample` and deactivates it on release; the producer-reset
+  poll and a swap that carries no meter move it to their restart sample, so the output windows
+  restart with the strip meters (a moved gate discards the open window).
+  `WebRuntimePreparer::meter_window_blocks` returns the boot word. The lease stays refused for the
+  boot word `0` (the worklet JavaScript derives `metersAttached` from that word, outside T3's
+  paths); the d.ts sentence says what `0n` now binds. A reset's queued windows are popped unread:
+  at once on a lease change and a producer reset, and by the next poll after a swap (the render
+  export pops nothing). A full queue's drops are folded into `meter_loss_count` by the poll.
+  Stated limit: a swap that carries no meter while all eight output slots hold unpolled windows
+  drops a one-block adoption window (counted), where the old ring had room.
+- **T3 worklet shape.** The poll reads the output windows in place and pops them at one site
+  after its fold, so `Consumer<OutputPeakWindow>::peek` and `try_pop` inline once into
+  `AudioWorkletEngineHost::poll_meters`, its one admitted owner: no new trap owner, no script
+  change. The master ring's 8 x 32 bridge bytes leave the bridge rows (the output meter's are in the
+  control plane's retained row since T2); `check-browser-expected-resources.py` agrees with no
+  re-pin.
+- **T3 verdict fold (root, 2026-10-24).** MAJOR, already on main: the lease and the producer reset
+  activated on the absolute `sample % period` grid, while the strip meters tile from their plan's
+  first block. After an uncarried swap at an off-grid block, a lease cycle published nothing, with
+  loss word 0. Now `ReadyOwnership::meter_grid_origin` (boot 0; the adoption block of each swap
+  that carries no meter) is the one origin, and `next_meter_boundary` rounds up on it for both
+  activations. Red first (`e5b188ae6`): lease row, and the producer-reset row red alone under a
+  probe. The two loss counts are exact now: the added-strip swap (`5 + 2 * strips + waiting + 1`)
+  and saturation (`4` from the first frame, `4 + 4 + 1` at the end). The uncarried test queues one
+  window before the swap, so the unread-discard mutant (`*output_pops = 0`) is red. No resource
+  or digest moved.
+- **T3 attempt 2 (root, 2026-10-24).** MAJOR: a lease still waiting for its activation when a swap
+  that carries no meter adopts stayed on the old grid (0 frames, loss 22 over 36 blocks). Now one
+  rule, `ReadyOwnership::align_meters`, sets the activation to the grid's first boundary at or
+  after a given sample and opens or shuts the gate. A lease change, a producer reset and an
+  uncarried swap with the lease held all call it (the swap from `max(activation, adoption)`).
+  Red first: `c83567ad3`. Probe of a carried swap that adds a strip off the grid (window 3,
+  adoption at block 4): the new strip joins the carried grid (frames at 3, 6, 9 with 10 tracks,
+  loss 0), so no defect.
