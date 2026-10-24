@@ -666,10 +666,10 @@ fn a_collapsible_prefix_before_an_incompatible_slot_collapses_exactly() {
 /// # Red mutations
 ///
 /// Drop `self.input_symmetric` from the dispatch's `armed` and the window collapses over unequal
-/// planes: the right plane is the left one, and the bit comparison fails. Drop the
-/// `!self.input_symmetric` clause from the agreement maintenance and the disengage copy's
-/// agreement survives the window, so block 8 re-engages on separated states: the bit comparison
-/// fails again.
+/// planes (block 8 counts 9 collapses, not 4). Drop the `!self.input_symmetric` clause from the
+/// agreement maintenance and the disengage copy's agreement survives the window, so block 8
+/// re-engages on separated states (5, not 4). Report `planes_identical` without its seam clause
+/// and the per-block assertion fails on the first collapsed block.
 #[test]
 fn an_asymmetric_input_window_declines_and_waits_for_a_proof() {
     let stage = Recursive::new([0.5, 0.5]);
