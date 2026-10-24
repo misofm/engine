@@ -973,8 +973,9 @@ fn render_points(
 }
 
 /// The schedule's prepared targets: per scheduled sample, the targets `prepare_targets` designs
-/// for the candidate whose continuous `Block` cells all take that event's value. `None` when a
-/// moved cell has no two legal values or a legal candidate does not prepare.
+/// for the candidate whose `Block` cells (Boolean and Enumeration ones included, #1337) all take
+/// that event's value. `None` when a moved cell has no two legal values or a legal candidate does
+/// not prepare.
 fn point_targets(
     preparation: &dyn NativeEffectTargetPreparation,
     descriptor: &'static EffectDescriptor,
@@ -985,9 +986,8 @@ fn point_targets(
     let moved: Vec<bool> = initial
         .iter()
         .map(|value| {
-            let parameter = &descriptor.parameters[value.parameter_index as usize];
-            parameter.automation_rate != AutomationRate::None
-                && parameter.domain == ParameterDomain::Continuous
+            descriptor.parameters[value.parameter_index as usize].automation_rate
+                != AutomationRate::None
         })
         .collect();
     let mut candidate = initial.to_vec();
@@ -1065,9 +1065,10 @@ fn point_spans(descriptor: &'static EffectDescriptor, samples: &[usize]) -> Opti
 ///
 /// An effect that takes prepared targets (the parametric EQ refuses every raw span) takes the
 /// schedule as targets from its own `prepare_targets`, applied immediately before the block that
-/// starts at the scheduled sample. Only continuous cells move there, because the EQ refuses a
-/// target whose `enabled` or `kind` differs from the prepared one until #1337; every Boolean cell
-/// is prepared on, so the sections whose values move are in the signal path.
+/// starts at the scheduled sample. Every `Block` cell moves there, its Booleans and Enumerations
+/// included (the EQ's band enables and families are live since #1337), and the schedule runs twice:
+/// once with every Boolean prepared on, so the sections whose values move start in the signal
+/// path, and once from the defaults, so sections prepared off are switched on and off by it.
 fn partition_with_points_probe(
     factory: &dyn NativeEffectFactory,
     request: PrepareEffectRequest<'_>,
@@ -1088,31 +1089,57 @@ fn partition_with_points_probe(
         .into_iter()
         .filter(|&sample| sample < total)
         .collect();
-    let mut initial: Vec<InitialParameterValue> = default_initial_values(descriptor).collect();
-    let schedule = if let Some(preparation) = factory.target_preparation() {
-        for value in &mut initial {
+    let defaults: Vec<InitialParameterValue> = default_initial_values(descriptor).collect();
+    if let Some(preparation) = factory.target_preparation() {
+        let mut on = defaults.clone();
+        for value in &mut on {
             if descriptor.parameters[value.parameter_index as usize].domain
                 == ParameterDomain::Boolean
             {
                 value.value = 1.0;
             }
         }
-        point_targets(
-            preparation,
-            descriptor,
-            request.sample_rate,
-            &initial,
-            &samples,
-        )
+        for initial in [on, defaults] {
+            let schedule = point_targets(
+                preparation,
+                descriptor,
+                request.sample_rate,
+                &initial,
+                &samples,
+            );
+            check_point_schedule(
+                factory, request, &initial, schedule, &samples, total, quantum, tier,
+            );
+        }
     } else {
-        point_spans(descriptor, &samples)
-    };
+        let schedule = point_spans(descriptor, &samples);
+        check_point_schedule(
+            factory, request, &defaults, schedule, &samples, total, quantum, tier,
+        );
+    }
+}
+
+/// Renders one Point schedule prepared from `initial` in the three partitions of
+/// [`partition_with_points_probe`] and compares them.
+#[allow(clippy::too_many_arguments)]
+fn check_point_schedule(
+    factory: &dyn NativeEffectFactory,
+    request: PrepareEffectRequest<'_>,
+    initial: &[InitialParameterValue],
+    schedule: Option<PointSchedule>,
+    samples: &[usize],
+    total: usize,
+    quantum: usize,
+    tier: &mut EffectConformanceTierReport,
+) {
     let Some(schedule) = schedule else {
         tier.failures.push("process.partition_invariance_points");
         return;
     };
-    let mut request = request;
-    request.initial_values = &initial;
+    let mut request = PrepareEffectRequest {
+        initial_values: initial,
+        ..request
+    };
     if let PointSchedule::Spans(spans) = &schedule {
         let per_sample = spans.len().div_ceil(samples.len().max(1));
         request.limits.maximum_automation_spans_per_block = request

@@ -29,7 +29,7 @@ pub enum RowSource {
     SessionOwn,
 }
 
-/// What a route row is on a route into the output.
+/// What a route row is on a route into the output, from one side of the strip's fader.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct OutputCase {
     /// The row's class on a route into the output.
@@ -48,9 +48,12 @@ pub struct TableRow {
     pub descriptor: ControlDescriptor,
     /// `false` for a strip row that a submix does not have (solo); `true` for every other row.
     pub on_submix: bool,
-    /// A route row's case on a route into the output; `descriptor` is its case on a route into a
-    /// submix. `None` for a row of any other table.
+    /// A route row's case on a `post_fader` or `post_pan` route into the output; `descriptor` is
+    /// its case on a route into a submix. `None` for a row of any other table.
     pub into_output: Option<OutputCase>,
+    /// A route row's case on a route into the output from a tap before the fader
+    /// ([`crate::route_rows_live`], #1391). `None` for a row of any other table.
+    pub into_output_before_fader: Option<OutputCase>,
     builtin: Option<&'static BuiltinParameterDescriptor>,
 }
 
@@ -61,6 +64,7 @@ impl TableRow {
             descriptor,
             on_submix: true,
             into_output: None,
+            into_output_before_fader: None,
             builtin: None,
         }
     }
@@ -99,7 +103,11 @@ pub fn table_rows(source: RowSource) -> Vec<TableRow> {
             .iter()
             .map(|row| TableRow {
                 into_output: Some(OutputCase {
-                    class: row.output_class,
+                    class: route::output_class(row, false),
+                    active: row.output_active,
+                }),
+                into_output_before_fader: Some(OutputCase {
+                    class: route::output_class(row, true),
                     active: row.output_active,
                 }),
                 ..TableRow::plain(row.id, row.descriptor)

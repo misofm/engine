@@ -1151,7 +1151,8 @@ impl StripGains {
         mix_bound(largest_row(words))
     }
 
-    /// `Route` (H3): live (a route into a submix with route lanes), the domain maximum
+    /// `Route` (H3): live (a route whose rows are live, `controls::route_rows_live`, with route
+    /// lanes: into a submix or from before its strip's fader, #1391), the domain maximum
     /// `2 fl(10^(ROUTE_GAIN_DB_MAXIMUM / 20) ROUTE_COEFFICIENT_MAGNITUDE_MAXIMUM)`; fixed, the
     /// prepared ungated fold's largest row, or `Zero` when it is muted at preparation or follows a
     /// source strip whose mute is fixed and muted on both lanes (its coefficients are then
@@ -1162,8 +1163,7 @@ impl StripGains {
         transform: &RouteTransform,
         gate: RouteGate,
     ) -> NodeTailBound {
-        let into_submix = matches!(route.destination, RouteDestination::SubmixInput { .. });
-        if self.liveness.routes_into_submixes && into_submix {
+        if self.liveness.routes && controls::route_rows_live(route) {
             // Every coefficient folds to the same word, `gain * coefficient` at the domain's
             // maxima (`gated_route_coefficients`' product: normal, so never flushed), and a row is
             // two of them. Spelled as one scalar, not a four-word array, so the iOS build emits no

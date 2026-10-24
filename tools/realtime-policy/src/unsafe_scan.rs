@@ -13,14 +13,23 @@ pub(crate) fn scan(source: &Source, policy: &Policy, findings: &mut Vec<Finding>
     if policy.unsafe_allowlist.contains(&source.path) {
         return;
     }
-    scan_stream(&source.tokens, source, findings);
+    scan_stream(&source.tokens, &mut |line| {
+        findings.push(Finding::at_line(
+            Class::UnsafeOutsideOwnership,
+            &source.path,
+            line,
+            source.line_text(line),
+        ));
+    });
 }
 
-fn scan_stream(stream: &TokenStream, source: &Source, findings: &mut Vec<Finding>) {
+/// Call `found` with the line of every `unsafe` in `stream` that opens unsafe code, in token
+/// trees too. The doctest rule runs it over a re-lexed code block.
+pub(crate) fn scan_stream(stream: &TokenStream, found: &mut dyn FnMut(usize)) {
     let mut tokens = stream.clone().into_iter().peekable();
     while let Some(token) = tokens.next() {
         match &token {
-            TokenTree::Group(group) => scan_stream(&group.stream(), source, findings),
+            TokenTree::Group(group) => scan_stream(&group.stream(), found),
             TokenTree::Ident(ident) if ident == "unsafe" => {
                 let opens_unsafe_code = match tokens.peek() {
                     Some(TokenTree::Ident(next)) => {
@@ -30,13 +39,7 @@ fn scan_stream(stream: &TokenStream, source: &Source, findings: &mut Vec<Finding
                     _ => false,
                 };
                 if opens_unsafe_code {
-                    let line = ident.span().start().line;
-                    findings.push(Finding::at_line(
-                        Class::UnsafeOutsideOwnership,
-                        &source.path,
-                        line,
-                        source.line_text(line),
-                    ));
+                    found(ident.span().start().line);
                 }
             }
             _ => {}

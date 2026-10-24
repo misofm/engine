@@ -10,10 +10,10 @@
 mod support;
 
 use effect_contract::{
-    AutomationRate, EffectProcessBlock, EffectTargetError, EffectTargetRequest,
-    NativeEffectFactory, NativeEffectTargetPreparation, ParameterChannel, ParameterDomain,
-    ParameterMapping, PreparedEffectTarget, ResetKind, ResponseSnapshotSection, SmoothingRule,
-    StatePayloadError, StatePayloadInput, StatePayloadOutput, validate_descriptor,
+    AutomationRate, EffectProcessBlock, EffectTargetRequest, NativeEffectFactory,
+    NativeEffectTargetPreparation, ParameterChannel, ParameterDomain, ParameterMapping,
+    PreparedEffectTarget, ResetKind, ResponseSnapshotSection, SmoothingRule, StatePayloadError,
+    StatePayloadInput, StatePayloadOutput, validate_descriptor,
 };
 use engine::SampleRateHz;
 use parametric_eq::{
@@ -80,24 +80,12 @@ fn descriptor_is_frozen() {
             );
             assert_eq!(parameter.domain, domains[field]);
             assert_eq!(parameter.mapping, mappings[field]);
-            assert_eq!(parameter.automatable, field >= 2);
-            assert_eq!(
-                parameter.automation_rate,
-                if field >= 2 {
-                    AutomationRate::Block
-                } else {
-                    AutomationRate::None
-                }
-            );
-            assert_eq!(
-                parameter.smoothing,
-                if field >= 2 {
-                    SmoothingRule::Linear
-                } else {
-                    SmoothingRule::None
-                }
-            );
-            assert_eq!(parameter.smoothing_samples, if field >= 2 { 64 } else { 0 });
+            // Every field is live (#1337): enable and family ramp like the numeric fields.
+            assert!(parameter.automatable);
+            assert_eq!(parameter.automation_rate, AutomationRate::Block);
+            assert_eq!(parameter.smoothing, SmoothingRule::Linear);
+            assert_eq!(parameter.smoothing_samples, 64);
+            assert_eq!(parameter.prepared_reason, None);
         }
         assert_eq!(parameters[band * 6 + 2].default_value, frequencies[band]);
         assert_eq!(parameters[band * 6 + 1].enum_choices.len(), 6);
@@ -155,7 +143,10 @@ fn descriptor_is_frozen() {
         assert!(parameter.readable);
     }
     assert_eq!(SECTIONS, EQ_SECTION_COUNT);
-    assert_eq!(SECTIONS * WORDS_PER_BAND * 4 + 3 * 4, LANE_BYTES);
+    assert_eq!(
+        SECTIONS * WORDS_PER_BAND * 4 + (3 + 2 * parametric_eq::EQ_BAND_COUNT) * 4,
+        LANE_BYTES
+    );
 }
 
 /// Enables band one as a bell at `1 kHz`, `0 dB`, on the left channel only.
@@ -478,30 +469,95 @@ fn prepared_target_applies_and_settles_at_sample_a_plus_64() {
     assert_eq!(word(&disabled_state.1, 114), 0);
 }
 
-/// A general band's prepared-only enable/kind cannot be changed through the live target hook, and
-/// rejecting it leaves the coefficients, retained targets and witness state untouched.
+/// Gate 2 (#1337): a live change of a general band's enable or family settles on the new design.
+///
+/// For every ordered pair of the seven band states (disabled and the six families) at each launch
+/// rate, band 1 prepared at the first state and sent the second renders 64 samples and then holds
+/// exactly the second state's designed words (the identity when disabled), and its payload states
+/// the second state's enable, family and numeric fields: the target was stored, not only ramped.
 #[test]
-fn prepared_target_rejects_general_enable_change_without_mutation() {
-    let configured = single_section_values(EqBandKind::Bell, 1_000.0, 6.0, 1.0, 1.0);
-    let mut effect = ParametricEqFactory
-        .prepare(request(&configured, false))
-        .expect("prepare");
-    let before = snapshot(&effect);
-    let target = prepared_target(
-        1,
-        ParameterChannel::Left,
-        false,
-        EqBandKind::Bell,
-        1_000.0,
-        0.0,
-        1.0,
-        1.0,
-    );
-    assert_eq!(
-        effect.processor.apply_prepared_target(&target),
-        Err(EffectTargetError::Domain)
-    );
-    assert_eq!(snapshot(&effect), before);
+fn a_live_enable_or_family_change_settles_on_the_new_design() {
+    let states: Vec<(bool, EqBandKind)> = core::iter::once((false, EqBandKind::Bell))
+        .chain(support::FROZEN_KINDS.into_iter().map(|kind| (true, kind)))
+        .collect();
+    let (frequency, gain, q, slope) = (1_000.0_f32, 6.0_f32, 0.9_f32, 0.8_f32);
+    let base = WORDS_PER_BAND;
+    for rate in support::LAUNCH_RATES {
+        let design = |enabled: bool, kind: EqBandKind| {
+            if enabled {
+                design_svf(kind, frequency, gain, q, slope, SampleRateHz(rate)).expect("design")
+            } else {
+                EqSvfWords::IDENTITY
+            }
+        };
+        for &(from_enabled, from_kind) in &states {
+            let mut configured = single_section_values(from_kind, frequency, gain, q, slope);
+            for channel in [ParameterChannel::Left, ParameterChannel::Right] {
+                set_initial(
+                    &mut configured,
+                    0,
+                    channel,
+                    f32::from(u8::from(from_enabled)),
+                );
+            }
+            for &(enabled, kind) in &states {
+                let mut effect = ParametricEqFactory
+                    .prepare(support::request_at_rate(&configured, false, rate))
+                    .expect("prepare");
+                let mut target = prepared_target(
+                    1,
+                    ParameterChannel::Both,
+                    enabled,
+                    kind,
+                    frequency,
+                    gain,
+                    q,
+                    slope,
+                );
+                for (destination, source) in target.words[6..12]
+                    .iter_mut()
+                    .zip(design(enabled, kind).to_array())
+                {
+                    *destination = source.to_bits();
+                }
+                effect
+                    .processor
+                    .apply_prepared_target(&target)
+                    .expect("a live enable or family change is admitted");
+                let mut left = [0.5_f32; 64];
+                let mut right = [-0.25_f32; 64];
+                effect.processor.process(
+                    EffectProcessBlock::new(&mut left, &mut right, None, 0, &[], 128)
+                        .expect("ramp block"),
+                );
+                let settled = snapshot(&effect);
+                let pair = format!("{rate} Hz: {from_enabled}/{from_kind:?} -> {enabled}/{kind:?}");
+                for lane in [&settled.1, &settled.2] {
+                    let words: Vec<u32> =
+                        (0..6).map(|index| word(lane, base + 2 + index)).collect();
+                    let expected: Vec<u32> =
+                        design(enabled, kind).to_array().map(f32::to_bits).to_vec();
+                    assert_eq!(words, expected, "{pair}: settled words");
+                    assert_eq!(word(lane, base + 14), 0, "{pair}: ramp finished");
+                    assert_eq!(
+                        [
+                            word(lane, support::BAND_CONFIG_WORD),
+                            word(lane, support::BAND_CONFIG_WORD + 1)
+                        ],
+                        [u32::from(enabled), kind as u32],
+                        "{pair}: stored enable and family"
+                    );
+                    assert_eq!(
+                        (0..4)
+                            .map(|index| word(lane, base + 15 + index))
+                            .collect::<Vec<_>>(),
+                        [frequency, gain, q, slope].map(f32::to_bits).to_vec(),
+                        "{pair}: stored numeric fields"
+                    );
+                }
+            }
+        }
+    }
 }
 
 /// A payload claiming an invalid prelaunch version is rejected, never silently migrated.
@@ -582,7 +638,7 @@ fn a_payload_with_a_stale_header_is_rejected_on_its_own_evidence() {
     assert_eq!(word(&common, 0), 1, "the layout version is stamped");
     assert_eq!(
         word(&common, 1),
-        (SECTIONS * WORDS_PER_BAND * 2 + 3 * 2) as u32,
+        (SECTIONS * WORDS_PER_BAND * 2 + (3 + 2 * parametric_eq::EQ_BAND_COUNT) * 2) as u32,
         "the data word count is stamped"
     );
 

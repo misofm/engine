@@ -81,3 +81,18 @@ After: the J batch (J3 with #1496 attempt 2 and #1519 attempt 3) on `main`. Befo
 
 Work from this body. A test that greps source is refused; each new test answers which plausible defect it turns red. Attempt budget: three, one adversarial verdict each. Size: one day.
 
+
+## Attempt 1 record (2026-10-24, base `40e3b61e9`, commit `687988d3b`)
+
+- Root decisions: the scope note's slice is D3 unchanged; the probe module is `miso-engine-v1-render-lock-probe.wasm` (written alone, never pinned, never a twin; `--render-lock-probe` refuses `--module-only`, `--check-pin` and `--named-twin`); the wasm leg stays in `artifact-gates`; the node proof is plain `WebAssembly.instantiate(bytes, {})`.
+- Native leg green (`[0, 2, 2]`); wasm leg green (`[0,2,2]`). Shipped module unchanged: `7fa8499de750..` equals the base's `audioworklet-sha256` status; `check-web-audioworklet.sh` and `check-browser-expected-resources.py --artifacts` pass on it; `realtime_policy` prints `ok (192 marked regions in 34 files)`.
+- Mutations (each alone, reverted): `render_lock_cfg_split.diff` -> native red `[0,0,0]`, wasm red `[0,0,0]`. Allocator predicate `all(target_family = "wasm", test)` -> wasm red `[0,0,0]`, native green. Drop the item's `cfg(feature)` -> the default build fails (`-D unreachable-pub`); dropping it on the `pub use` too -> the build succeeds, the digest moves (`11ca6398..`) and `check-web-audioworklet.sh` is red: unexpected export `miso_engine_web_v1_render_lock_probe`.
+- CI time: the probe build is cold in its own target directory, 27 s locally (32 cores). On CI the same cold module build (the identity job's rebuild step at the base run) took 40 s, plus about 5 s for the wasm target install: `artifact-gates` goes from about 1 m 45 s to about 2 m 30 s, so `timeout-minutes: 10` stays.
+- Not in scope, seen: `cargo clippy -p host-web --all-targets -- -D warnings` without `test-support` is red at base on `tests/control_parity.rs` `c_latency` (dead code); with `test-support` or `--all-features` it is clean.
+
+## Attempt 2 record (2026-10-24)
+
+- Root amendment to D3: the probe body is `drop(black_box(Box::new(inside)))`, so the optimizer cannot remove the alloc/free pair.
+- The probe features now go before `--target`, so the cargo line still ends `-p host-web` (the anchor `test-artifact-evidence-leak.sh` reads). The probe target directory is absolute when the output path is relative.
+- Native `[0, 2, 2]` and wasm `[0,2,2]` green again. The wasm proof ran with a relative output path from a cwd outside the repo.
+- `scripts/test-test-support-ci.py` (root-authorized, one line): `DEBUG_A_FEATURES` gains `host-web/render-lock-probe`, matching the D3 CI edit; `lint-checks.sh --self-tests` 38/38.

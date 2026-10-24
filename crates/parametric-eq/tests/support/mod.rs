@@ -15,9 +15,10 @@ use effect_contract::{
 };
 use parametric_eq::{EQ_SECTION_COUNT, EqBandKind, PARAMETRIC_EQ_DESCRIPTOR, ParametricEqFactory};
 
-/// Bytes in each channel section of the current payload (114 section words, two cut enables and
-/// the input's silence counter, issue #1328 amendment A9).
-pub const LANE_BYTES: usize = 468;
+/// Bytes in each channel section of the current payload (114 section words, two cut enables, the
+/// input's silence counter, issue #1328 amendment A9, and each general band's enable and family,
+/// issue #1337).
+pub const LANE_BYTES: usize = 500;
 /// Bytes in the common section: the shared codec's two-word header (version, data word count).
 /// The two channels share no state, so the effect adds no common words of its own.
 pub const COMMON_BYTES: usize = 8;
@@ -254,9 +255,12 @@ pub fn point(
 /// A whole payload: common header, left lane, right lane.
 pub type Payload = ([u8; COMMON_BYTES], [u8; LANE_BYTES], [u8; LANE_BYTES]);
 
-/// The lane section word that carries the channel input's silence counter (issue #1328, A9): the
-/// last one, after the six bands and the two cut enables.
-pub const SILENCE_WORD: usize = LANE_BYTES / 4 - 1;
+/// The lane section word that carries the channel input's silence counter (issue #1328, A9): after
+/// the six bands and the two cut enables.
+pub const SILENCE_WORD: usize = EQ_SECTION_COUNT * WORDS_PER_BAND + 2;
+/// The first general band's enable word (issue #1337, D5): band `b`'s enable is word
+/// `BAND_CONFIG_WORD + 2b` and its family the next.
+pub const BAND_CONFIG_WORD: usize = SILENCE_WORD + 1;
 
 /// `payload` with both channels' silence counters cleared.
 ///
@@ -265,8 +269,8 @@ pub const SILENCE_WORD: usize = LANE_BYTES / 4 - 1;
 #[must_use]
 pub fn without_silence(payload: &Payload) -> Payload {
     let mut words = *payload;
-    words.1[SILENCE_WORD * 4..].fill(0);
-    words.2[SILENCE_WORD * 4..].fill(0);
+    words.1[SILENCE_WORD * 4..SILENCE_WORD * 4 + 4].fill(0);
+    words.2[SILENCE_WORD * 4..SILENCE_WORD * 4 + 4].fill(0);
     words
 }
 

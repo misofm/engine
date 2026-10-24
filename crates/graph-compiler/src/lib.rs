@@ -82,15 +82,17 @@ pub struct GainLiveness {
     /// Every strip's fader, mute, VCA, matrix and pan values ride a live lane (a plan with a
     /// control queue).
     pub strip_fader_matrix: bool,
-    /// Every route into a submix rides a live lane. A route into the output never has one.
-    pub routes_into_submixes: bool,
+    /// Every route whose rows are live (`controls::route_rows_live`: into a submix, or from a tap
+    /// before its strip's fader, #1391) rides a live lane. A `post_fader` or `post_pan` route
+    /// into the output never has one.
+    pub routes: bool,
 }
 
 impl GainLiveness {
     /// No live gain lane: a plan prepared without a control queue.
     pub const FIXED: Self = Self {
         strip_fader_matrix: false,
-        routes_into_submixes: false,
+        routes: false,
     };
 }
 

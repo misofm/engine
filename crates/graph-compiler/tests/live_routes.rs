@@ -592,8 +592,9 @@ fn idle_attached_lanes_change_nothing() {
     let live_ids: Vec<&str> = live.producers.iter().map(|p| &*p.route_id).collect();
     assert_eq!(
         live_ids,
-        ["a-b", "c-b", "d-b", "e-x", "f-x"],
-        "every route into a submix, and only those, is live, in route-ID order"
+        ["a-b", "b-main", "c-b", "d-b", "e-x", "f-x", "x-main"],
+        "every route into a submix and every route from before a fader (the buses' `input` taps \
+         into the output, #1391), and only those, is live, in route-ID order"
     );
     let actual = live.render(16);
     let mixes = graph::test_only_route_mix_counts();
@@ -1355,7 +1356,8 @@ fn no_live_route_folds() {
         "without route controls the bus folds, or this is vacuous"
     );
     let mut live = Bound::new(&model, &feeds, true);
-    assert_eq!(live.producers.len(), 8);
+    // The eight sends and `bus-main`, which leaves the bus's `pre_fader` tap (#1391).
+    assert_eq!(live.producers.len(), 9);
     assert_eq!(live.plan.bank_route_folds(), 0, "no live route folds");
     let mut actual = live.render(1);
     sends[3] = rng.values(false);
@@ -1426,7 +1428,8 @@ fn route_control_resources_cover_the_allocation() {
         let resources = route_control_resources(&producers, &[]);
 
         let routes = producers.len() as u64;
-        assert_eq!(routes, 2);
+        // `r0`, `r1` and `b-main` from the bus's `input` tap (#1391).
+        assert_eq!(routes, 3);
         // The producer's copy and the binding's node-ID copy (#1220 verdict MINOR-1).
         let ids: u64 = producers.iter().map(|p| 2 * p.route_id.len() as u64).sum();
         let artifact = compile(&model);
@@ -1490,7 +1493,7 @@ fn route_control_resources_cover_the_attached_state() {
         .checked_sub(window.released_bytes)
         .expect("the attach frees nothing it did not allocate");
     let resources = route_control_resources(&producers, &[]);
-    assert_eq!(producers.len(), 2);
+    assert_eq!(producers.len(), 3, "`r0`, `r1` and `b-main` (#1391)");
     assert_eq!(
         resources.activity_bytes, 0,
         "the muted plan's table is pre-charged"
@@ -1517,7 +1520,7 @@ fn route_controls_attach_once() {
         artifact
             .attach_route_live_controls(&superseded)
             .map(|p| p.len()),
-        Ok(2)
+        Ok(3)
     );
     assert_eq!(
         artifact
