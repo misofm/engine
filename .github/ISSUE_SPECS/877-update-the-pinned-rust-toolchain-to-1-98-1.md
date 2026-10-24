@@ -1,8 +1,8 @@
-# Update the pinned Rust toolchain to 1.98.1
+# Update the pinned Rust toolchain to 1.99.1
 
 ## Product outcome
 
-Move every live toolchain pin from Rust 1.97.1 to the current stable release, Rust 1.98.1 (2026-09-03; the only change over 1.98.0 is a vtable miscompilation fix, and the bundled LLVM is 22.1.8), so that the engine, hosts, tools, fuzz builds, npm publication, and browser qualification all build with one current compiler. Keep every DSP, realtime, protocol, session, and ABI contract unchanged: this issue moves no rendered bit by design and changes no product surface.
+Move every live toolchain pin from Rust 1.97.1 to the current stable release, Rust 1.99.1 (58cf8f9c3, 2026-10-13; retargeted from 1.98.1 on 2026-10-24, see the decision record), so that the engine, hosts, tools, fuzz builds, npm publication, and browser qualification all build with one current compiler. Keep every DSP, realtime, protocol, session, and ABI contract unchanged: this issue moves no rendered bit by design and changes no product surface.
 
 ## Trigger and root evidence
 
@@ -51,3 +51,28 @@ Single feature branch `codex/rust-1-98-1`, checkpoint-committed locally, pushed 
 - 1.98.1 host toolchain: `rustc 1.98.1 (48a229cea 2026-09-01)`, LLVM 22.1.8, installed with `clippy`, `rustfmt`, and `wasm32-unknown-unknown`.
 - Under 1.98.1 with only the pin edits: `cargo fmt --all --check` clean; simd128 Wasm build clean; clippy fails in `lane` with 36 `chunks_exact_mut` and 4 `chunks_exact` `chunks_exact_to_as_chunks` diagnostics (`crates/lane/src/kernels.rs`, `crates/lane/src/kernels/builtins.rs`).
 - REPIN digest under 1.98.1: `08ae541cf39dd1809840eb213a27d993054b8151538bcfcb73d340b6dba0a0bd`.
+
+## Decision record (2026-10-24, attempt 1, branch `codex/batch-b13-877`, base `eb792c949`)
+
+The scope note (`scope/877.md`) wins for paths and decisions; these changes over the body above follow it.
+
+- **Target 1.99.1**, not 1.98.1: 1.98.1 was stale. PR #878 is superseded; root closes it.
+- **Lints.** Workspace clippy under 1.99.1 fired only `chunks_exact_to_as_chunks` (allowed once in
+  `Cargo.toml` with its rationale) and rustc's `deprecated` on `Atomic*::fetch_update` (renamed
+  `try_update`; three sites in `crates/protocol` and `crates/host-core`, the same method). The lint
+  groups carry `priority = -1`. No other allow.
+- **Pins.** Between releases (`docs/RELEASE.md`, "Between releases") only the pin file moves:
+  `EXPECTED_WORKLET_SHA256` and `test-npm-publish-modes.py`'s `release_pin` stay the 0.4.3
+  release's, and the release checks do not fire. `npm-publish.yml`'s `RUSTUP_TOOLCHAIN` and step
+  name move to 1.99.1; the npm audit normalizes exactly those two literals back to its 1.97.1 hash.
+- **Repin.** AudioWorklet module under 1.99.1: `81fa52ee9a58074b6750ff5f038229a8b0c609d10afcece6c2d974f8c9fb5cff`
+  (the same tree under 1.97.1 builds `cfd36a3e…`).
+- **No bit moved.** The 37 native console bench rows' `output_sha256` and the mixing-automation
+  preflight digests are equal under 1.97.1 and 1.99.1 (AVX2 host, PR evidence); release lane,
+  math, wasm-gates, console-workload, conformance and dsp-reference tests and the fixture gates pass.
+- **AArch64.** iOS memset counts unchanged (builtins 4, lane 1). The arm64 test legs (LANE-3 row)
+  run only on CI's arm64 runner; no row was added or deleted.
+- **Blocker found.** `scripts/check-web-audioworklet.sh` rule 3 fails on 1.99.1:
+  `Channel<f32x4, 4>::decode_track` (state decode, control thread) went from vector 0 / scalar 6
+  to vector 1 / scalar 4, because LLVM 22 SLP-vectorizes part of its ramp-path validation. It is
+  not a render kernel. Root rules the fix.
