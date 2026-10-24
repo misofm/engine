@@ -7284,7 +7284,7 @@ mod tests {
                     .map(|id| GraphNode {
                         id: id.clone(),
                         latency: LatencySamples(0),
-                        tail: TailSamples::Finite(0),
+                        bound: NodeTailBound::ZERO,
                     })
                     .to_vec(),
             );
