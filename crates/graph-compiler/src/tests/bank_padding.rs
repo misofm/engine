@@ -2,8 +2,8 @@
 //! the real graph and the real rack, under the production policy.
 //!
 //! Every console group is padded (S2), so a console remainder binds as one padded bank. An insert
-//! remainder is not: inserts bank opportunistically, and their remainder renders per node
-//! (decision 12). The factory here is a test double over each launch effect: it validates the
+//! remainder is padded from a per-width member threshold (issues #888 and #889) and renders per
+//! node below it (decision 12, as refined by #888). The factory here is a test double over each launch effect: it validates the
 //! request, checks the padding contract's clone clause, logs the mask it was asked for, and then
 //! hands the request unchanged to the launch effect, which binds its own padded bank (P2b-P2e).
 
@@ -173,35 +173,48 @@ fn bound_effect_banks(
     (banks, session.quantum().0)
 }
 
-/// A console remainder binds as one padded bank of each slot, and an insert remainder renders per
-/// node, under the production policy, and both render the per-node oracle's bits.
+/// A console remainder binds as one padded bank of each slot, and an insert remainder does from
+/// `k` members (`k` = 2 at four lanes, 3 at eight) and renders per node below it, under the
+/// production policy, and every plan renders the per-node oracle's bits.
 ///
-/// For `1`, `W - 1` and `W + 3` tracks of the intended console (a lone track, the widest partial
-/// group, and a full group beside a partial one), at the host's width:
+/// For `1`, `k - 1`, `k`, `W - 1` and `W + 3` tracks of the intended console (a lone track, the
+/// insert threshold's two sides, the widest partial group, and a full group beside a partial one),
+/// at the host's width:
 ///
 /// * **Console slots pad.** Every slot of every group binds, and nothing renders per node. The
 ///   partial group's three slots are asked for with its mask, `true` on lanes `0..members` and
 ///   `false` after, and each padded lane carries a clone of a member's request (the double asserts
 ///   it on every bind).
-/// * **Inserts do not.** The same strip folded into every track's inserts binds only its full
-///   groups: no padded request is made, and the remainder's three slots render per node.
+/// * **Inserts pad from `k` members.** The same strip folded into every track's inserts binds its
+///   full groups, and its remainder as one padded bank per slot when it has at least `k` members;
+///   below `k` no padded request is made and the remainder's three slots render per node.
 /// * **The graph carries the mask.** Each bound `GraphPreparedEffectBank` holds its members only,
 ///   and its `active_mask` is `true` on exactly those lanes; the resource estimate accepts it.
 /// * **The rack reads and writes the active lanes only.** Both plans render the bits of the plan
 ///   compiled at the test-only `Scalar` oracle, where nothing banks.
 ///
-/// Red if console groups stop padding, or insert groups start; if a padded lane is fed zeros or
+/// Red if console groups stop padding; if insert groups pad below `k` members or not from it (the
+/// insert threshold is written out here, not read from the planner); if a padded lane is fed zeros or
 /// defaults instead of a clone; if the bound bank's mask or members disagree with the group; if the
 /// estimate refuses a partial mask (the compile fails); or if the rack gathers or scatters a padded
 /// lane -- the graph runtime hands the chain one plane per member, so a planted scatter of lane
 /// `members` indexes past them and the render panics, and a lane swapped with a padded one moves a
 /// track's bits.
 #[test]
-fn a_console_remainder_binds_one_padded_bank_and_an_insert_remainder_renders_per_node() {
+fn a_console_remainder_always_pads_and_an_insert_remainder_pads_from_k_members() {
     let width = BankWidth::for_backend(host_dispatch()).expect("a vector host");
     let lanes = width.lanes() as usize;
     let full = (1_usize << lanes) - 1;
-    for tracks in [1, lanes - 1, lanes + 3] {
+    // Issues #888 and #889: the H5 threshold, written out rather than read from the planner.
+    let k = match lanes {
+        4 => 2,
+        8 => 3,
+        other => panic!("no insert threshold recorded for {other} lanes"),
+    };
+    let mut counts = vec![1, k - 1, k, lanes - 1, lanes + 3];
+    counts.sort_unstable();
+    counts.dedup();
+    for tracks in counts {
         let model = intended(tracks);
         let what = format!("{tracks} tracks at {lanes} lanes");
         let partial = tracks % lanes;
@@ -268,15 +281,23 @@ fn a_console_remainder_binds_one_padded_bank_and_an_insert_remainder_renders_per
             );
         }
 
-        // Inserts: only the full groups bind, and the remainder renders per node.
+        // Inserts: the full groups bind, and the remainder pads from `k` members (#888, #889).
         let mut inserts = model.clone();
         fold_console_into_inserts(&mut inserts);
         let (registry, seen) = padding_registry();
         let folded = compile_console_model_with_builtins(&inserts, 1_088, &[], &registry);
-        assert!(
-            asked(&seen).iter().all(|(bits, _)| *bits == full),
-            "{what}: an insert group never asks for padding: {:?}",
-            asked(&seen)
+        let insert_pads = partial >= k;
+        let mut expected = Vec::new();
+        if partial != 0 && insert_pads {
+            expected.push(((1_usize << partial) - 1, 3));
+        }
+        if tracks >= lanes {
+            expected.push((full, 3 * (tracks / lanes) as u64));
+        }
+        assert_eq!(
+            asked(&seen),
+            expected,
+            "{what}: an insert remainder of {partial} asks for padding only from {k} members"
         );
         assert_eq!(
             folded
@@ -284,8 +305,8 @@ fn a_console_remainder_binds_one_padded_bank_and_an_insert_remainder_renders_per
                 .rack_cohorts
                 .scalar_in(RackLocation::Dynamic)
                 .len(),
-            3 * partial,
-            "{what}: the insert remainder's three slots render per node"
+            if insert_pads { 0 } else { 3 * partial },
+            "{what}: the insert remainder's three slots render per node only below {k} members"
         );
         let folded =
             render_armed_console_blocks(folded, BLOCKS, &BTreeSet::new(), &BTreeSet::new());
