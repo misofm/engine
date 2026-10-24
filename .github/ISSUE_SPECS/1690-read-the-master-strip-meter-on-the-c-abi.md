@@ -188,3 +188,34 @@ Commands: `cargo test --locked -p host-core --all-features`,
 ## Size
 
 Half a day.
+
+## Split and decision record (2026-10-24, scoped against main `068742aba`)
+
+The issue splits in two slices.
+
+- **#1690a (done on `codex/batch-b13-1690a`): D1 and the browser half of D2.**
+  `MeterFrame::master_gain_reduction(master)` replaces `MeterFrame::designated_gain_reduction_db`.
+  Amendment to D1: #1582 landed the designation as a `designated: Option<u32>` argument of
+  `fold_gain_reduction` and `MeterDelivery::poll`, not as a constructor argument; #1690a deletes
+  that argument and the field's copy in `MeterDelivery::adopt` and its clear in the reset. The
+  browser half of D2 is already `sync_master`: `publish_web_meter_frame` takes
+  `PlanShape::master_track` (the index the fold received before, read at the same point) and calls
+  the function; its lease-transition call passes the same index, on a frame whose presence the
+  reset cleared, so it reads absent as before. No wire or C ABI change.
+  Evidence: the existing browser tests defend the claim (no new test). Mutants, each red in
+  `cargo test -p host-web --all-features --lib`: presence ignored and absence read as `Some(0.0)`
+  turn `a_resubscribed_tap_leaves_the_meter_frame_until_its_first_new_window` red; no master read
+  as strip 0 turns `the_meter_frame_carries_the_app_shaped_gain_reduction` red. Gate 6 (browser
+  bytes unchanged): a one-time uncommitted digest of every meter-frame word and header field after
+  every poll and lease transition (four master choices, a silence/loud run, master moves, a
+  disarm/re-arm and a lease toggle; 132 records, 70 with the master present) is the same on the
+  base and on the branch (PR evidence, not a committed test).
+- **#1690b (open, blocked by #1587b, so by #1583 and #1585): D2's C ABI half, D3, D5, D6.**
+  The C ABI keeps the resolved master index (`Option<u32>`) beside #1587's entry-resolution vector
+  in `SessionState`, recomputed at each promotion, after every command and after a `SET_CONTROL` of
+  the `master` row; the `Master` target is wire code 3 of #1583's `meter_entry.target`, with its
+  record `frame.master_gain_reduction(index)` through #1587's gain row rule; the corpus and
+  `COMPLETE_SCHEMA_HASH` re-pin once, in the order #1595b -> #1583 -> #1690b. Gate 1 extends the
+  existing parity row `both_hosts_designate_the_master_strip_after_an_empty_boot_alike`
+  (`hosts/host-web/tests/control_parity.rs`) rather than adding one. Gates 1, 3, 4, 5 and 7 are
+  #1690b's; gate 2's C ABI record half also moves there.
