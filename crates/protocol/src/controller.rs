@@ -1848,6 +1848,7 @@ impl<P: ControlProvider> ProtocolController<P> {
             output.len(),
             header,
             Preparation::Whole,
+            crate::ObserveContext::NONE,
         )? {
             StructuralCommandDisposition::Legacy => {
                 self.process_command_frame_into_legacy(input, scratch, output)
@@ -1890,6 +1891,41 @@ impl<P: ControlProvider> ProtocolController<P> {
             output_capacity,
             header,
             Preparation::Monitor,
+            crate::ObserveContext::NONE,
+        )
+    }
+
+    /// [`Self::prepare_command_frame`] for a host that keeps observation subscriptions (#1584 D3):
+    /// a transaction's `Observe` edits are checked and applied against `observe`, the host's
+    /// binding table, which the host keeps (`SessionStore::prepare_transaction_observed`). Without
+    /// it ([`Self::prepare_command_frame`]) an `Observe` edit is refused `observation.unavailable`.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::prepare_command_frame`].
+    pub fn prepare_command_frame_observed(
+        &mut self,
+        input: &[u8],
+        document: &[u8],
+        scratch: &mut DecodeScratch<'_>,
+        output_capacity: usize,
+        observe: crate::ObserveContext<'_>,
+    ) -> Result<PreparedCommandFrame, CommandFrameProcessError> {
+        if self.structural_generation.load(Ordering::Acquire) & 1 != 0 {
+            return Err(CommandFrameProcessError::PreparedCommandOutstanding);
+        }
+        let header = self
+            .codec
+            .decode_command_header(input)
+            .map_err(CommandFrameProcessError::Uncorrelatable)?;
+        self.prepare_command_frame_with(
+            input,
+            document,
+            scratch,
+            output_capacity,
+            header,
+            Preparation::Monitor,
+            observe,
         )
     }
 
@@ -1923,6 +1959,40 @@ impl<P: ControlProvider> ProtocolController<P> {
             output_capacity,
             header,
             Preparation::InPlace,
+            crate::ObserveContext::NONE,
+        )
+    }
+
+    /// [`Self::prepare_command_frame_in_place`] for a host that keeps observation subscriptions,
+    /// as [`Self::prepare_command_frame_observed`]. A transaction that holds an `Observe` edit is
+    /// prepared by the full path.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::prepare_command_frame_in_place`].
+    pub fn prepare_command_frame_in_place_observed(
+        &mut self,
+        input: &[u8],
+        document: &[u8],
+        scratch: &mut DecodeScratch<'_>,
+        output_capacity: usize,
+        observe: crate::ObserveContext<'_>,
+    ) -> Result<PreparedCommandFrame, CommandFrameProcessError> {
+        if self.structural_generation.load(Ordering::Acquire) & 1 != 0 {
+            return Err(CommandFrameProcessError::PreparedCommandOutstanding);
+        }
+        let header = self
+            .codec
+            .decode_command_header(input)
+            .map_err(CommandFrameProcessError::Uncorrelatable)?;
+        self.prepare_command_frame_with(
+            input,
+            document,
+            scratch,
+            output_capacity,
+            header,
+            Preparation::InPlace,
+            observe,
         )
     }
 
@@ -1950,6 +2020,7 @@ impl<P: ControlProvider> ProtocolController<P> {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn prepare_command_frame_with(
         &mut self,
         input: &[u8],
@@ -1958,6 +2029,7 @@ impl<P: ControlProvider> ProtocolController<P> {
         output_capacity: usize,
         header: CommandHeader,
         preparation: Preparation,
+        observe: crate::ObserveContext<'_>,
     ) -> Result<PreparedCommandFrame, CommandFrameProcessError> {
         if header.message_id == MessageId::SpectrumConfigure {
             return self.prepare_session_command(input, scratch, output_capacity, header);
@@ -1969,6 +2041,7 @@ impl<P: ControlProvider> ProtocolController<P> {
             output_capacity,
             header,
             preparation,
+            observe,
         )? {
             StructuralCommandDisposition::Legacy => {
                 self.process_immediate_command(input, scratch, output_capacity)
@@ -2259,6 +2332,7 @@ impl<P: ControlProvider> ProtocolController<P> {
         })
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn plan_structural_command(
         &self,
         input: &[u8],
@@ -2267,6 +2341,7 @@ impl<P: ControlProvider> ProtocolController<P> {
         output_capacity: usize,
         header: CommandHeader,
         preparation: Preparation,
+        observe: crate::ObserveContext<'_>,
     ) -> Result<StructuralCommandDisposition, CommandFrameProcessError> {
         let monitor = preparation != Preparation::Whole;
         // #1386 D3: a `SESSION_REPLACE` takes this one path with a transaction: the same replay
@@ -2404,12 +2479,15 @@ impl<P: ControlProvider> ProtocolController<P> {
             (None, Preparation::Whole) => self
                 .session
                 .prepare_transaction(header.expected_revision, &edits),
-            (None, Preparation::Monitor) => self
-                .session
-                .prepare_transaction_with_monitor(header.expected_revision, &edits),
-            (None, Preparation::InPlace) => self
-                .session
-                .prepare_transaction_in_place(header.expected_revision, &edits),
+            (None, Preparation::Monitor) => {
+                self.session
+                    .prepare_transaction_observed(header.expected_revision, &edits, observe)
+            }
+            (None, Preparation::InPlace) => self.session.prepare_transaction_in_place_observed(
+                header.expected_revision,
+                &edits,
+                observe,
+            ),
         };
         let prospective_session = match prepared_transaction {
             Ok(value) => value,
@@ -4345,6 +4423,8 @@ fn transaction_error_diagnostics(error: &SessionStoreError) -> Vec<Diagnostic> {
                 crate::SessionEditError::ValueOpRetired => "session.edit.value_op_retired",
                 // The control core's own code (`control.domain`, ...), unprefixed.
                 crate::SessionEditError::Control(error) => error.code(),
+                // The observation code (`observation.tap.unknown`, ...), unprefixed (#1584).
+                crate::SessionEditError::Observe(error) => error.code(),
             }
             .to_owned(),
             severity: crate::DiagnosticSeverity::Error,

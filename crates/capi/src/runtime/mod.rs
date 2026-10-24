@@ -83,11 +83,15 @@ impl ControlAdapter for CapiAdapter {
     ];
     /// `miso_engine_v1_submit_document_command` borrows the document beside the frame (#1386).
     const DOCUMENT_TRANSPORT: bool = true;
+    /// The C ABI subscribes through the `Observe` edit (#1584 D7a): its plans bind an observation
+    /// queue slot for every declared tap ([`CapiPreparer`]), and nothing else writes those queues.
+    const OBSERVE_EDIT: bool = true;
 }
 
-/// capi's preparation (issue #1400 D3): today's live request, the lanes the control plane chose
-/// and the session's spectrum preparation (#1593 D3), through host-core's one session entry. It
-/// holds no lane constant: the lanes arrive as an argument (decision 17 C6).
+/// capi's preparation (issue #1400 D3): the live request with observation capacity for every
+/// declared tap (#1584 D7), the lanes the control plane chose (with the effect lanes that
+/// observation rides) and the session's spectrum preparation (#1593 D3), through host-core's one
+/// session entry. It holds no lane constant: the lanes arrive as an argument (decision 17 C6).
 pub(crate) struct CapiPreparer;
 
 impl control_plane::RuntimePreparer for CapiPreparer {
@@ -107,7 +111,17 @@ impl control_plane::RuntimePreparer for CapiPreparer {
         ),
         host_core::PrepareDiagnostics,
     > {
-        let live = host_core::HostLiveControlRequest::default();
+        // #1584 D7: an observation queue slot for every declared tap of every effect, so an
+        // `Observe` edit always has a queue. Observation rides the effect lanes (#1254 D2), so a
+        // session whose live rows chose none gets them, as the browser's does.
+        let live = host_core::HostLiveControlRequest {
+            observation_taps: host_core::launch_maximum_observation_taps(),
+            ..host_core::HostLiveControlRequest::default()
+        };
+        let lanes = host_core::HostLiveLanes {
+            effects: lanes.effects || live.observation_taps != 0,
+            ..lanes
+        };
         host_core::prepare_host_runtime_with_live_lanes_and_spectrum(
             compiled, caps, &live, lanes, spectrum, successor, superseded,
         )

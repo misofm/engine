@@ -878,8 +878,8 @@ their cells, and #1265 publishes live EQ targets through the owners (below). The
 
   Every other reference row is unchanged. The graph estimate charges what a lane retains
   (`EffectControlLane::retained_resources`) and, in a bank, one `(lane index, queue)` table entry
-  for each lane that has an observation queue; the C ABI binds no observation queue, so it charges
-  none. `tests/bypass_resources.rs` holds the lane term and the queue table to the audited
+  for each lane that has an observation queue; since #1584 the C ABI binds one for every effect
+  that declares a tap, and the reference session has none, so its rows charge none. `tests/bypass_resources.rs` holds the lane term and the queue table to the audited
   allocator, exactly. The member and bank terms above no longer
   hold: a member's term is its cell arrays, which grow with the effect's live parameter cells and,
   for the parametric EQ, its target slots, and the staging window is `max(S, live parameter
@@ -1192,3 +1192,21 @@ list `0010` until #1595 sets bit 16. A plan prepared with spectrum captures char
 spectrum service and analysis (`SpectrumService::RETAINED_BYTES`) to its capi retained bytes. The
 gate is `runtime::spectrum_tests::a_spectrum_configure_crosses_the_c_abi_to_the_session`; the core
 claims are `crates/control-plane/tests/spectrum_monitor.rs`.
+
+## Issue 1584 observation subscriptions
+
+The `Observe` edit (`0801`) crosses `miso_engine_v1_submit_command` in a `SESSION_TRANSACTION_APPLY`
+to the one core path, which checks it against the session's binding table at preparation, shares
+one arm among subscribers of the same tap and window, and queues at most one record per tap after
+the commit; no C symbol or struct changes. Every C ABI plan now binds an observation queue slot for
+every declared tap (`host_core::launch_maximum_observation_taps()`, with the effect lanes it rides),
+and the session keeps each plan's observation readers with its epoch. `capi_retained_bytes` charges
+those readers' heap per epoch exactly (the slice, the ID text, the reader boxes); the readers' slots
+and the plan's observation lanes are the plan's `observation_retained_bytes`. The reference
+nine-track session has no tapped effect, so its rows are unchanged. The parity row is
+`runtime::live_tests::an_observe_edit_arms_a_tap_through_the_c_abi`; the race of
+`live_edits_racing_a_rendering_plan_and_its_swaps_stay_exact_and_allocation_free` arms and disarms a
+bypassed compressor's tap every sixteenth edit with zero render-thread allocations; the core claims
+are `crates/control-plane/tests/observation_bindings.rs`. A carried tap keeps its publisher across a
+swap (#1327 D2), so its windows go on in the reader of the epoch it was armed on: a read command
+(#1586) must follow carried readers across a swap, as the browser does (`pair_carried_observations`).

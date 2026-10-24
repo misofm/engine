@@ -94,6 +94,8 @@ pub enum SessionEditOpcode {
     /// `SetControl` (decision 17, #1553): any control by its stable address. The first code of
     /// the control family (`0x08xx`).
     SetControl = 0x0800,
+    /// `Observe` (decision 17, C9, #1584 D1): arm or disarm an effect's observation tap.
+    Observe = 0x0801,
 }
 
 impl SessionEditOpcode {
@@ -142,6 +144,7 @@ impl SessionEditOpcode {
             0x0700 => Some(Self::UpsertVca),
             0x0701 => Some(Self::RemoveVca),
             0x0800 => Some(Self::SetControl),
+            0x0801 => Some(Self::Observe),
             _ => None,
         }
     }
@@ -353,6 +356,26 @@ pub enum SessionEdit {
         /// instance it names runs another. Absent applies the edit to whatever runs there now.
         expected_effect: Option<StableId>,
     },
+    /// Arm or disarm one observation tap of an effect (decision 17, C9, #1584 D1): a subscription,
+    /// not a value. It is a monitor edit: it writes nothing to the model, is never saved and never
+    /// in a snapshot, and a transaction of monitor edits only keeps the revision and replies
+    /// `monitor`. Subscribers share one arm when they ask for the same window (D3); the host's
+    /// binding table holds the subscriber counts, and the store checks the edit against it at
+    /// preparation ([`ObserveContext`]).
+    Observe {
+        /// The strip: a track ID or a submix ID.
+        strip_id: StableId,
+        /// The console slot or the insert, by its ID.
+        section: controls::TapSection,
+        /// The effect-local tap ID (`ObservationDescriptor::id`).
+        tap_id: u32,
+        /// `true` subscribes, `false` ends one subscription.
+        armed: bool,
+        /// Render blocks per published window; `0` is the plan's meter window. At most
+        /// [`controls::MAXIMUM_OBSERVATION_WINDOW_BLOCKS`]. A disarm names the window it subscribed
+        /// with.
+        window_blocks: u32,
+    },
 }
 
 impl SessionEdit {
@@ -425,6 +448,7 @@ impl SessionEdit {
             Self::UpsertVca { .. } => SessionEditOpcode::UpsertVca,
             Self::RemoveVca { .. } => SessionEditOpcode::RemoveVca,
             Self::SetControl { .. } => SessionEditOpcode::SetControl,
+            Self::Observe { .. } => SessionEditOpcode::Observe,
         }
     }
 }
@@ -473,7 +497,8 @@ impl SessionEdit {
             | Self::SetAutomationTarget { .. }
             | Self::SetAutomationSegments { .. }
             | Self::UpsertVca { .. }
-            | Self::RemoveVca { .. } => None,
+            | Self::RemoveVca { .. }
+            | Self::Observe { .. } => None,
         }
     }
 }
@@ -568,7 +593,9 @@ fn record_edit_ramps(
         | SessionEdit::UpsertAutomation { .. }
         | SessionEdit::RemoveAutomation { .. }
         | SessionEdit::SetAutomationTarget { .. }
-        | SessionEdit::SetAutomationSegments { .. } => {}
+        | SessionEdit::SetAutomationSegments { .. }
+        // A subscription is not a model row: it carries no ramp (#1584 D1).
+        | SessionEdit::Observe { .. } => {}
     }
     Ok(())
 }
@@ -690,6 +717,9 @@ pub enum SessionEditError {
     /// console (decision 17, #1561 D3). The op only gives a strip its entries after the slot set changed; a console
     /// knob's value is set with `SetControl`. The diagnostic code is `session.edit.value_op_retired`.
     ValueOpRetired,
+    /// An `Observe` edit was refused (#1584 D2, D3, D7a). The diagnostic code is the observation
+    /// code itself (`observation.tap.unknown`, `observation.window_conflict`, ...).
+    Observe(controls::ObserveError),
 }
 
 impl fmt::Display for SessionEditError {
@@ -905,8 +935,48 @@ pub fn apply_session_edit(
             controls::set(session, address, *value, *ramp_samples, sample_rate_hz)
                 .map_err(SessionEditError::Control)?;
         }
+        // A subscription writes nothing to the model: a preparation with a host's binding table
+        // checks and records it before this is reached (`ObserveContext`). Here there is no host
+        // to apply it, so it is refused rather than acknowledged and dropped.
+        SessionEdit::Observe { .. } => {
+            return Err(SessionEditError::Observe(
+                controls::ObserveError::Unavailable,
+            ));
+        }
     }
     Ok(())
+}
+
+/// What a transaction preparation knows of the host's observation subscriptions (#1584 D3, D7a):
+/// the binding table the host keeps (borrowed: the host keeps ownership and installs the
+/// preparation's copy when it commits) and whether the host serves the `Observe` edit at all.
+#[derive(Clone, Copy, Debug)]
+pub struct ObserveContext<'a> {
+    /// The host's committed binding table.
+    pub bindings: &'a controls::ObservationBindings,
+    /// Whether the host serves `Observe`: when it does not, every `Observe` edit is refused
+    /// `observation.unavailable`.
+    pub enabled: bool,
+}
+
+/// The empty table [`ObserveContext::NONE`] borrows.
+static NO_OBSERVATION_BINDINGS: controls::ObservationBindings =
+    controls::ObservationBindings::new();
+
+impl ObserveContext<'static> {
+    /// A host that serves no `Observe` edit.
+    pub const NONE: Self = Self {
+        bindings: &NO_OBSERVATION_BINDINGS,
+        enabled: false,
+    };
+}
+
+/// What a transaction's `Observe` edits leave (#1584 D3): the host's binding table with every edit
+/// applied in order, and the records that table needs, at most one per tap.
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ObservePrepared {
+    bindings: controls::ObservationBindings,
+    writes: Vec<controls::ObserveWrite>,
 }
 
 /// A committed transaction result.
@@ -932,6 +1002,7 @@ pub struct PreparedSessionTransaction {
     monitor_edits: Vec<controls::MonitorWrite>,
     monitor_only: bool,
     set_control_rows: Option<Vec<controls::ControlAddress>>,
+    observation: Option<ObservePrepared>,
 }
 
 /// What a prepared transaction holds of the session it would commit.
@@ -1053,6 +1124,25 @@ impl PreparedSessionTransaction {
     #[must_use]
     pub const fn is_monitor_only(&self) -> bool {
         self.monitor_only
+    }
+
+    /// The host's binding table with the transaction's `Observe` edits applied in order (#1584
+    /// D3), or `None` when the transaction holds none. The host installs it when it commits the
+    /// token; a token that is dropped changes nothing.
+    #[must_use]
+    pub fn observe_bindings(&self) -> Option<&controls::ObservationBindings> {
+        self.observation
+            .as_ref()
+            .map(|observation| &observation.bindings)
+    }
+
+    /// The observation records the transaction's `Observe` edits need (#1584 D3): at most one per
+    /// tap, in key order. Empty when the edits only share or end one of several arms.
+    #[must_use]
+    pub fn observe_writes(&self) -> &[controls::ObserveWrite] {
+        self.observation
+            .as_ref()
+            .map_or(&[], |observation| &observation.writes)
     }
 }
 
@@ -1186,7 +1276,14 @@ impl SessionStore {
         expected_revision: ExpectedRevision,
         edits: &[SessionEdit],
     ) -> Result<PreparedSessionTransaction, SessionStoreError> {
-        self.prepare_transaction_with(expected_revision, edits, false, false, None)
+        self.prepare_transaction_with(
+            expected_revision,
+            edits,
+            false,
+            false,
+            None,
+            ObserveContext::NONE,
+        )
     }
 
     /// The preparation of a `SESSION_REPLACE` (#1386 D2), and only of that: the edits of the
@@ -1210,6 +1307,7 @@ impl SessionStore {
             false,
             false,
             Some(control_smoothing),
+            ObserveContext::NONE,
         )
     }
 
@@ -1226,7 +1324,28 @@ impl SessionStore {
         expected_revision: ExpectedRevision,
         edits: &[SessionEdit],
     ) -> Result<PreparedSessionTransaction, SessionStoreError> {
-        self.prepare_transaction_with(expected_revision, edits, true, false, None)
+        self.prepare_transaction_observed(expected_revision, edits, ObserveContext::NONE)
+    }
+
+    /// [`Self::prepare_transaction_with_monitor`] for a host that also keeps observation
+    /// subscriptions (#1584 D3): each `Observe` edit is checked against the candidate at its place
+    /// in the transaction (`controls::observe_target`) and applied, in order, to a copy of
+    /// `observe.bindings` (`controls::ObservationBindings::observe`), and writes nothing to the
+    /// model. The copy and the records it needs are the preparation's
+    /// ([`PreparedSessionTransaction::observe_bindings`], [`PreparedSessionTransaction::observe_writes`]).
+    /// A transaction of monitor edits only (solo writes and subscriptions) keeps the revision.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::prepare_transaction_with_monitor`], and [`SessionEditError::Observe`] at an
+    /// `Observe` edit the target check, the sharing rule or a disabled `observe` refuses.
+    pub fn prepare_transaction_observed(
+        &self,
+        expected_revision: ExpectedRevision,
+        edits: &[SessionEdit],
+        observe: ObserveContext<'_>,
+    ) -> Result<PreparedSessionTransaction, SessionStoreError> {
+        self.prepare_transaction_with(expected_revision, edits, true, false, None, observe)
     }
 
     /// [`Self::prepare_transaction_with_monitor`] for a host that commits a transaction of values
@@ -1263,7 +1382,23 @@ impl SessionStore {
         expected_revision: ExpectedRevision,
         edits: &[SessionEdit],
     ) -> Result<PreparedSessionTransaction, SessionStoreError> {
-        self.prepare_transaction_with(expected_revision, edits, true, true, None)
+        self.prepare_transaction_in_place_observed(expected_revision, edits, ObserveContext::NONE)
+    }
+
+    /// [`Self::prepare_transaction_in_place`] for a host that keeps observation subscriptions, as
+    /// [`Self::prepare_transaction_observed`]. A transaction that holds an `Observe` edit is never
+    /// prepared in place: the full path prepares it.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::prepare_transaction_observed`].
+    pub fn prepare_transaction_in_place_observed(
+        &self,
+        expected_revision: ExpectedRevision,
+        edits: &[SessionEdit],
+        observe: ObserveContext<'_>,
+    ) -> Result<PreparedSessionTransaction, SessionStoreError> {
+        self.prepare_transaction_with(expected_revision, edits, true, true, None, observe)
     }
 
     /// The full preparation of a transaction prepared in place: the same edits, compiled, as
@@ -1284,12 +1419,15 @@ impl SessionStore {
             TransactionForm::InPlace(edit) => &edit.edits,
             TransactionForm::Monitor(edits) => edits,
         };
+        // A token prepared in place holds no `Observe` edit (the full path prepares those), so no
+        // binding table is needed.
         self.prepare_transaction_with(
             ExpectedRevision::Exact(prepared.base_revision),
             edits,
             true,
             false,
             None,
+            ObserveContext::NONE,
         )
     }
 
@@ -1302,6 +1440,7 @@ impl SessionStore {
         monitor: bool,
         in_place: bool,
         replacement: Option<Option<session::ControlSmoothing>>,
+        observe: ObserveContext<'_>,
     ) -> Result<PreparedSessionTransaction, SessionStoreError> {
         let ExpectedRevision::Exact(expected_revision) = expected_revision else {
             return Err(SessionStoreError::ExactRevisionRequired);
@@ -1333,6 +1472,9 @@ impl SessionStore {
         let mut control_writes = ControlRampWrites::new();
         let mut monitor_edits: Vec<controls::MonitorWrite> = Vec::new();
         let mut set_control_rows: Option<Vec<controls::ControlAddress>> = Some(Vec::new());
+        // #1584 D3: the copy of the host's binding table the `Observe` edits apply to, made at the
+        // first one, and the taps they named.
+        let mut observation: Option<(controls::ObservationBindings, Vec<controls::TapKey>)> = None;
         // #1561 D3: `SetTrackConsole` is structural, so it is accepted only after a `SetConsole`
         // of the same transaction actually changed the console: the candidate's console, with the
         // earlier edits applied, must differ from the committed one.
@@ -1345,6 +1487,36 @@ impl SessionStore {
                 && candidate.console == self.compiled.normalized_model().console
             {
                 return Err(refused(SessionEditError::ValueOpRetired));
+            }
+            // #1584 D2, D3: a subscription is checked against the candidate here, at its place in
+            // the transaction, and applied to the copy of the table; it writes nothing to the model.
+            if let SessionEdit::Observe {
+                strip_id,
+                section,
+                tap_id,
+                armed,
+                window_blocks,
+            } = edit
+            {
+                let observe_refused = |error| refused(SessionEditError::Observe(error));
+                if !(monitor && observe.enabled) {
+                    return Err(observe_refused(controls::ObserveError::Unavailable));
+                }
+                let key = controls::TapKey {
+                    strip: strip_id.clone(),
+                    section: section.clone(),
+                    tap_id: *tap_id,
+                };
+                controls::observe_target(&candidate, &key, *window_blocks)
+                    .map_err(observe_refused)?;
+                let (bindings, touched) =
+                    observation.get_or_insert_with(|| (observe.bindings.clone(), Vec::new()));
+                bindings
+                    .observe(&key, *armed, *window_blocks)
+                    .map_err(observe_refused)?;
+                touched.push(key);
+                set_control_rows = None;
+                continue;
             }
             if monitor
                 && let SessionEdit::SetControl {
@@ -1411,6 +1583,10 @@ impl SessionStore {
                 error: SessionEditError::RampOutOfRange,
             });
         }
+        let observation = observation.map(|(bindings, touched)| ObservePrepared {
+            writes: observe.bindings.writes_to(&bindings, &touched),
+            bindings,
+        });
         Ok(PreparedSessionTransaction {
             base_revision: current,
             form: TransactionForm::Compiled(compiled),
@@ -1419,6 +1595,7 @@ impl SessionStore {
             monitor_edits,
             monitor_only,
             set_control_rows,
+            observation,
         })
     }
 
@@ -1534,6 +1711,7 @@ impl SessionStore {
                 monitor_edits,
                 monitor_only: true,
                 set_control_rows: Some(rows),
+                observation: None,
             });
         }
         let (owners, slots) = owners.finish();
@@ -1572,18 +1750,24 @@ impl SessionStore {
             monitor_edits,
             monitor_only: false,
             set_control_rows: Some(rows),
+            observation: None,
         })
     }
 }
 
-/// Whether every edit of a non-empty transaction is a `SetControl` on a monitor row (solo).
+/// Whether every edit of a non-empty transaction is a monitor edit: a `SetControl` on a monitor
+/// row (solo) or an `Observe` (#1584 D1).
 pub(crate) fn is_monitor_transaction(edits: &[SessionEdit]) -> bool {
     !edits.is_empty() && edits.iter().all(is_monitor_row_edit)
 }
 
-/// Whether `edit` is a `SetControl` on a monitor row (solo). Decided by the address alone: the
-/// row's table says its scope, and the strip is looked up when the edit is checked.
+/// Whether `edit` is a monitor edit: an `Observe`, or a `SetControl` on a monitor row (solo).
+/// Decided by the edit alone: the row's table says its scope, and the strip is looked up when the
+/// edit is checked.
 fn is_monitor_row_edit(edit: &SessionEdit) -> bool {
+    if matches!(edit, SessionEdit::Observe { .. }) {
+        return true;
+    }
     let SessionEdit::SetControl { address, .. } = edit else {
         return false;
     };
@@ -1767,6 +1951,64 @@ mod tests {
 
     fn id(value: &str) -> StableId {
         StableId::parse(value).expect("test stable ID")
+    }
+
+    /// #1584 D7a: an `Observe` edit needs a host that serves it. The one-call preparation, a
+    /// monitor preparation with no binding table and one whose host does not serve the edit (the
+    /// browser until #1589) each refuse it `observation.unavailable` at its own index, before its
+    /// target is looked up; a host that serves it gets the target check (the canonical fixture's
+    /// track has no insert `eq1`).
+    ///
+    /// Red if a host without the edit acknowledges a subscription nobody queues, or if a second
+    /// writer of a browser observation queue could arm through the core.
+    #[test]
+    fn an_observe_edit_is_refused_where_no_host_serves_it() {
+        let store = store();
+        let revision = ExpectedRevision::Exact(store.revision());
+        let track = store.compiled().normalized_model().tracks[0].id.clone();
+        let edits = [
+            SessionEdit::SetSessionId {
+                session_id: id("observed"),
+            },
+            SessionEdit::Observe {
+                strip_id: track,
+                section: controls::TapSection::Inserts(id("eq1")),
+                tap_id: 1,
+                armed: true,
+                window_blocks: 4,
+            },
+        ];
+        let refusal = |error| {
+            Err(SessionStoreError::Edit {
+                operation_index: 1,
+                error: SessionEditError::Observe(error),
+            })
+        };
+        let bindings = controls::ObservationBindings::new();
+        let disabled = ObserveContext {
+            bindings: &bindings,
+            enabled: false,
+        };
+        for prepared in [
+            store.prepare_transaction(revision, &edits),
+            store.prepare_transaction_with_monitor(revision, &edits),
+            store.prepare_transaction_observed(revision, &edits, disabled),
+        ] {
+            assert_eq!(
+                prepared.map(|_| ()),
+                refusal(controls::ObserveError::Unavailable)
+            );
+        }
+        let enabled = ObserveContext {
+            enabled: true,
+            ..disabled
+        };
+        assert_eq!(
+            store
+                .prepare_transaction_observed(revision, &edits, enabled)
+                .map(|_| ()),
+            refusal(controls::ObserveError::AddressUnknown)
+        );
     }
 
     /// A `SET_CONTROL` of the row `row` of `route`.
@@ -2467,9 +2709,9 @@ mod tests {
 
     /// #1094 appends `SetConsole` (`0x0007`) and `SetTrackConsole` (`0x0211`), #1241 opens the VCA
     /// family with `UpsertVca` and `RemoveVca` (`0x0700`, `0x0701`) and #1553 opens the control
-    /// family with `SetControl` (`0x0800`). Decision 17 (C5, #1561) retires the thirteen per-kind
-    /// value ops: every allocated code round-trips through `from_raw`, there are exactly 35 of
-    /// them, and no retired code came back.
+    /// family with `SetControl` (`0x0800`), and #1584 appends `Observe` (`0x0801`). Decision 17
+    /// (C5, #1561) retires the thirteen per-kind value ops: every allocated code round-trips
+    /// through `from_raw`, there are exactly 36 of them, and no retired code came back.
     ///
     /// Red if a retired code is allocated again (a value then has two ops that can drift), if a
     /// `from_raw` arm maps a code to another variant, or if an opcode is added to the enum but not
@@ -2479,7 +2721,7 @@ mod tests {
         let allocated = (0..=u16::MAX)
             .filter_map(|raw| SessionEditOpcode::from_raw(raw).map(|opcode| (raw, opcode)))
             .collect::<Vec<_>>();
-        assert_eq!(allocated.len(), 35);
+        assert_eq!(allocated.len(), 36);
         assert!(allocated.iter().all(|(raw, opcode)| opcode.raw() == *raw));
         assert_eq!(
             SessionEditOpcode::from_raw(0x0007),
