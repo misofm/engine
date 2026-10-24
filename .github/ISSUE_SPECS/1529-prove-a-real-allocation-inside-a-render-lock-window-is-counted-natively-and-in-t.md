@@ -95,4 +95,4 @@ Work from this body. A test that greps source is refused; each new test answers 
 - Root amendment to D3: the probe body is `drop(black_box(Box::new(inside)))`, so the optimizer cannot remove the alloc/free pair.
 - The probe features now go before `--target`, so the cargo line still ends `-p host-web` (the anchor `test-artifact-evidence-leak.sh` reads). The probe target directory is absolute when the output path is relative.
 - Native `[0, 2, 2]` and wasm `[0,2,2]` green again. The wasm proof ran with a relative output path from a cwd outside the repo.
-- Open: `scripts/test-test-support-ci.py` :20-24 pins the whole test-debug-a `--features` string, so it is red after the D3 CI edit. The fix is one line (add `host-web/render-lock-probe,` after `host-web/test-support,`), but that path is not authorized.
+- `scripts/test-test-support-ci.py` (root-authorized, one line): `DEBUG_A_FEATURES` gains `host-web/render-lock-probe`, matching the D3 CI edit; `lint-checks.sh --self-tests` 38/38.

@@ -19,7 +19,7 @@ CHECKER = ROOT / "scripts/check-test-support-ci.py"
 WORKFLOW = ".github/workflows/qualification.yml"
 DEBUG_A_FEATURES = (
     "--features builtins-compiler/test-support,graph/test-support,"
-    "host-web/test-support,host-core/test-support,effect-compiler/test-support,"
+    "host-web/test-support,host-web/render-lock-probe,host-core/test-support,effect-compiler/test-support,"
     "protocol/test-support,control-plane/test-support,engine/test-support,engine/realtime-audit\n"
 )
 DEBUG_B_FEATURES = (
