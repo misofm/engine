@@ -183,3 +183,28 @@ order), so this slice rebases on their payload code instead of racing it.
   `EffectLaneLayout` (effect, layout version, sizes, bypass, latency), which never held the link
   mode, so the key change does not alter which lanes carry. Neither effect's state payload holds
   a link word, so the successor keeps its own prepared mode.
+- **1368b facts.** `lane_link` is now `true` for `miso.transient-shaper` and
+  `miso.true-peak-limiter` as well. Transient shaper: the shaper keeps `[LinkMode; W]` and a
+  `LinkLanes` record (per-lane `linked`/`averaged` masks plus the arm). A bank whose lanes share one
+  mode takes that mode's const arm, as before; a mixed bank takes a fourth arm, `LINK_MIXED`, which
+  computes `max` and `0.5 * l + 0.5 * r` in the const arms' order and selects per lane (no blend).
+  Limiter: `LimiterCoef.link_max: bool` became a per-lane mask plus `link_all` (every lane
+  `Maximum`); the #990 linked pair needs `link_all`, so a bank with any `DualMono` lane renders the
+  dual body, which renders a `Maximum` lane's bits equal to the linked pair's. The #990 record is a
+  statement about gain words only, so it needs no update on a lane swap. D5 in both: a padded lane
+  takes the first member's mode. Swap: both put the mode in the lane's defaults (+4 bytes,
+  `exchange_lane_link_word`) and re-derive the masks; each crate's `swap_tests` probe now draws a
+  link per strip, red when the exchange drops the mode.
+- **Limiter latency.** The declared latency is `N + 6` per rate and the main delay does not read
+  the link, which only selects the peak a lane's gain path reads; the mixed-link tests compare each
+  lane from the first block, line fill included, so no lane's latency moved.
+- **Web roster.** The shaper's bank constructor is now outlined and carries the follower
+  coefficients' four control-side `f32x4.sub`, so the row's pattern matched two functions. The
+  row is pinned to `Shaper<f32x4>::process_block` (narrower, not looser); the constructor is not a
+  render kernel and stays under the generic shape rule. The body went from 522 to 700 vector
+  operations, 0 scalar (the mixed arm). The limiter bodies are unchanged at 913 and 424.
+- **1368b cost (descriptive).** One console run on each arm (base `fd2a49d84`, candidate), with the
+  build done first and the run under the exclusive lock. The runner refused both before any workload
+  launched: base `loadavg_above_ceiling smt_sibling_busy`, candidate `loadavg_above_ceiling` (other
+  streams' builds). Recorded and not retried. So there is no cost number for this tranche. The
+  wasm body counts above are the only cost evidence.
