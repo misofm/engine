@@ -206,8 +206,12 @@ pub struct TelemetryKey {
 pub struct TelemetryRecord {
     /// Replacement/coalescing identity.
     pub key: TelemetryKey,
-    /// Observed absolute engine sample.
+    /// One past the last sample of the meter window (#1583 D2).
     pub observed_sample: SampleTime,
+    /// The meter window's first sample.
+    pub first_sample: SampleTime,
+    /// The meter window's sequence since the accepted configuration, from `1`.
+    pub window_sequence: u64,
     /// Frozen VALID/CLIPPED/HELD meter flags.
     pub flags: u16,
     /// Meter/counter scalar value.
@@ -772,6 +776,8 @@ mod tests {
                 component: 0,
             },
             observed_sample: SampleTime(1),
+            first_sample: SampleTime(0),
+            window_sequence: 1,
             flags: 1,
             value: 1.0,
         };
@@ -810,6 +816,8 @@ mod tests {
                 component: 0,
             },
             observed_sample: SampleTime(1),
+            first_sample: SampleTime(0),
+            window_sequence: 1,
             flags: 1,
             value: 1.0,
         };
@@ -829,6 +837,8 @@ mod tests {
                 component: 0,
             },
             observed_sample: SampleTime(1),
+            first_sample: SampleTime(0),
+            window_sequence: 1,
             flags: 1,
             value: 1.0,
         });
@@ -839,6 +849,8 @@ mod tests {
                 component: 0,
             },
             observed_sample: SampleTime(1),
+            first_sample: SampleTime(0),
+            window_sequence: 1,
             flags: 1,
             value: 1.0,
         });
@@ -849,6 +861,8 @@ mod tests {
                 component: 0,
             },
             observed_sample: SampleTime(1),
+            first_sample: SampleTime(0),
+            window_sequence: 1,
             flags: 1,
             value: 1.0,
         });
@@ -889,6 +903,8 @@ mod tests {
                 component: 1,
             },
             observed_sample: SampleTime(1),
+            first_sample: SampleTime(0),
+            window_sequence: 1,
             flags: 1,
             value: 1.0,
         };
