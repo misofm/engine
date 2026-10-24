@@ -210,6 +210,8 @@ fn backends() -> Vec<graph_compiler::Backend> {
 struct Rig {
     prepared: PreparedHost,
     handles: host_core::HostLiveControlHandles,
+    /// Read only by the `classifier` module, which needs the `control-provider` feature.
+    #[cfg_attr(not(feature = "control-provider"), allow(dead_code))]
     gate: engine::realtime::PlanRevisionGate,
     quantum: usize,
     rendered: u64,

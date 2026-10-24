@@ -79,6 +79,8 @@ impl ControlAdapter for CapiAdapter {
         size_of::<crate::Session>() as u64,
         size_of::<crate::Plan>() as u64,
     ];
+    /// `miso_engine_v1_submit_document_command` borrows the document beside the frame (#1386).
+    const DOCUMENT_TRANSPORT: bool = true;
 }
 
 /// capi's preparation (issue #1400 D3): today's live request and the lanes the control plane

@@ -553,6 +553,12 @@ pub trait PreparedPlanExecutor: Send {
     fn observation_retained_bytes(&self) -> u64 {
         0
     }
+    /// The accepted source frames this plan's rings hold that render never read (#1699 D1).
+    /// Control thread only, after the plan is retired; render never calls it. Default 0 (no
+    /// sources).
+    fn unread_source_frames(&self) -> u64 {
+        0
+    }
 }
 
 /// What a successor plan took from the plan it displaced, at the block that applied the swap.
@@ -1074,6 +1080,18 @@ impl PreparedRenderPlan {
         self.executor
             .as_deref()
             .map_or(0, PreparedPlanExecutor::observation_retained_bytes)
+    }
+    /// The accepted source frames this plan's rings hold that render never read (#1699 D1).
+    /// Control thread only, once the plan is retired; render never calls it.
+    #[must_use]
+    pub fn unread_source_frames(&self) -> u64 {
+        assert!(
+            !super::audit::is_render_scope_active(),
+            "unread source frames are sealed until the render audit is disarmed"
+        );
+        self.executor
+            .as_deref()
+            .map_or(0, PreparedPlanExecutor::unread_source_frames)
     }
     /// Read the cumulative bank transpose count outside the render scope.
     #[doc(hidden)]

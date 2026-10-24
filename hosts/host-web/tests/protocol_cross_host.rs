@@ -576,6 +576,68 @@ impl Legs {
     }
 }
 
+/// The `CAPABILITIES_GET` reply `reply` with `added` appended to its command list, re-encoded by
+/// the codec so every length field matches. The browser's list must not hold an added ID already.
+fn capabilities_plus(reply: &[u8], added: &[u16]) -> Vec<u8> {
+    let codec = protocol::ProtocolCodec::default();
+    let mut fields = [0_u16; 64];
+    let protocol::DecodedTypedResponseFrame::Success {
+        header,
+        payload: protocol::DecodedSuccessResponsePayload::Capabilities(value),
+    } = codec
+        .decode_typed_response(reply, &mut protocol::DecodeScratch::new(&mut fields))
+        .expect("a capabilities reply")
+    else {
+        panic!("a capabilities reply")
+    };
+    let ids = |bytes: &[u8]| {
+        bytes
+            .chunks_exact(2)
+            .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+            .collect::<Vec<_>>()
+    };
+    let mut commands = ids(value.supported_commands);
+    assert!(added.iter().all(|id| !commands.contains(id)));
+    commands.extend_from_slice(added);
+    let events = ids(value.supported_events);
+    let capabilities = protocol::Capabilities {
+        minimum_version: value.minimum_version,
+        maximum_version: value.maximum_version,
+        maximum_frame_bytes: value.maximum_frame_bytes,
+        maximum_tlvs: value.maximum_tlvs,
+        maximum_string_bytes: value.maximum_string_bytes,
+        maximum_nesting: value.maximum_nesting,
+        control_command_slots: value.control_command_slots,
+        control_command_bytes: value.control_command_bytes,
+        reliable_response_slots: value.reliable_response_slots,
+        reliable_event_slots: value.reliable_event_slots,
+        telemetry_slots: value.telemetry_slots,
+        replay_entries: value.replay_entries,
+        replay_bytes: value.replay_bytes,
+        maximum_cached_response_bytes: value.maximum_cached_response_bytes,
+        maximum_control_page_items: value.maximum_control_page_items,
+        maximum_diagnostic_page_items: value.maximum_diagnostic_page_items,
+        maximum_telemetry_handles: value.maximum_telemetry_handles,
+        maximum_transaction_edits: value.maximum_transaction_edits,
+        supported_commands: &commands,
+        supported_events: &events,
+        flags: value.flags,
+    };
+    let mut out = vec![0_u8; reply.len() + 64];
+    let length = codec
+        .encode_success_response_frame_into(
+            &protocol::TypedSuccessResponseFrame {
+                request_id: header.request_id,
+                revision: header.revision,
+                payload: protocol::SuccessResponsePayload::Capabilities(capabilities),
+            },
+            &mut out,
+        )
+        .expect("a capabilities frame");
+    out.truncate(length);
+    out
+}
+
 /// Test value: red if any command or event takes a browser-only path, if the browser publishes no
 /// render activity (no telemetry events, a wrong `effective_sample`), or if the two hosts are built
 /// with different protocol limits.
@@ -583,8 +645,28 @@ impl Legs {
 fn the_browser_and_the_c_abi_give_the_same_bytes_for_one_script() {
     let mut legs = Legs::new();
 
-    // 1. CAPABILITIES_GET.
-    legs.command("1 capabilities", CommandPayload::CapabilitiesGet);
+    // 1. CAPABILITIES_GET. #1697 removes this exception: until the browser has a document
+    // transport, the C ABI's reply is the browser's plus exactly the `SESSION_REPLACE` (`0x0013`)
+    // entry of the command list (#1386, root decision), and every other step stays byte-equal.
+    let request = legs.next();
+    let bytes = frame(
+        request,
+        ExpectedRevision::Any,
+        CommandPayload::CapabilitiesGet,
+    );
+    let (browser_result, browser_reply) = legs.browser.send(&bytes);
+    let (c_result, c_reply) = legs.c.send(&bytes);
+    assert_eq!(browser_result, c_result, "1 capabilities: the result codes");
+    assert_eq!(
+        capabilities_plus(&browser_reply, &[]),
+        browser_reply,
+        "1 capabilities: the browser's reply re-encodes to itself"
+    );
+    assert_eq!(
+        capabilities_plus(&browser_reply, &[0x0013]),
+        c_reply,
+        "1 capabilities: the C ABI's reply is the browser's plus exactly 0x0013"
+    );
 
     // 2. SESSION_SNAPSHOT_GET at offset 0 with 64 bytes, then continuation pages until eof.
     let mut offset = 0_u64;

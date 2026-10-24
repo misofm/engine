@@ -271,6 +271,30 @@ seek publishes nothing; an accepted one publishes exactly one successor and appl
 waiting replacement; an anchored one publishes none) and the parity row
 `control_parity::a_plain_session_seek_declares_and_an_anchored_one_does_not_alike_on_both_hosts`.
 
+A host replaces the whole session with a document while it plays through
+`miso_engine_v1_submit_document_command(session, request, request_bytes, document,
+document_bytes, response)` (#1386), an in-place V1 amendment: one new exported symbol, announced by
+`MISO_ENGINE_V1_FEATURE_SESSION_REPLACE` (bit 11, 2048) in the capability report, whose feature
+mask grows to 4095; no struct, size or `ABI_VERSION` changes. It is `miso_engine_v1_submit_command`'s
+contract plus a document borrowed for the call only, under `compile_session`'s pointer-plus-length
+rule (a null `document` with a nonzero `document_bytes` is `INVALID_ARGUMENT`); both exports run one
+body into `control_plane::SessionState::command_with_document`, the one core path both hosts call,
+and `submit_command` passes no document. The `SESSION_REPLACE` frame (`0013`) names the document by
+its length and SHA-256; the control plane checks both, bounds it by the compile limits'
+`maximum_document_bytes` (never by the control frame), parses and compiles it as a boot would, and
+commits its diff as the one transaction it is (`docs/CONTROL_PROTOCOL_SEMANTICS.md`, "Session
+replace"). A document refusal is a non-OK reply frame with `RESULT_OK`. The library keeps nothing of
+the document. The frozen exported set is now 22 `miso_engine_v1_*` definitions; `abi_smoke.c`
+checks the bit against the queried mask and calls the symbol with a null session for
+`INVALID_ARGUMENT`, `header_smoke.cpp` pins the bit inside the mask and the signature, and
+`audit protocol` encodes one `SESSION_REPLACE` frame caller-buffer. The gates: `capi`
+`tests/session_replace.rs` (the export renders the blocks, reply and event of the equal
+`SESSION_TRANSACTION_APPLY` on a twin, for a rebuild, a live change and an identical document; a
+null document is refused and a retry through `submit_command` answers the cached reply; a document
+more than four times the 16 KiB frame commits, and a large live replace leaves exactly the live
+bytes the equal transaction leaves on a twin, so 0 bytes of the document stay) and the parity row
+`control_parity::a_session_replace_without_its_document_is_refused_alike_on_both_hosts`.
+
 The seek contract in the header (#1317, decision 15 D15-12) states, from the code, the source-read
 clock and its origin (0 at compile, one quantum per render call, continued by a swapped-in plan),
 the plain and the anchored seek, how to choose the anchor, held behaviour (queued PCM of the
@@ -367,15 +391,16 @@ response would exceed the endpoint's response bound (the page then is not the en
 `AUTOMATION_ENQUEUE` (`0x0006`) is retired (#1627): the C ABI refuses a frame under that ID at decode (`INVALID_ARGUMENT`, nothing written and no state moved), and `CAPABILITIES_GET` lists no command `0x0006`, clears flag bit 5 and has no capability fields 9, 12, 19 and 20 (23 fields). Sample-timed changes are stored automation edits. Current/effective sample reads the active
 plan's existing release/acquire next-sample publication, while transport remains endpoint-local.
 Protocol telemetry counters and the existing bounded CAPI render-diagnostic slots feed the
-provider's counter and diagnostic pages. The seven provider-owned counters (the two telemetry
+provider's counter and diagnostic pages. The eight provider-owned counters (the two telemetry
 counters `TELEMETRY_COALESCED` 5 and `TELEMETRY_DROPPED` 6, `LIVE_VALUES_SUPERSEDED` 16, #1312 D8,
 `TRANSITION_REPREPARE_REFUSALS` 17, #1351 D6, `STRIPS_RESTARTED` 18, #1768,
-`LIVE_BLOCK_ERRORS` 19, #1521, and `SOURCE_UNDERRUN_BLOCKS` 20, #1537) retain an independent
-seven-slot minimum even when the frame-derived telemetry configuration capacity is
-smaller. Canceled automation (counter 12) retired with the automation queue (#1629).
+`LIVE_BLOCK_ERRORS` 19, #1521, `SOURCE_UNDERRUN_BLOCKS` 20, #1537, and `SOURCE_FRAMES_DISCARDED`
+21, #1699) retain an independent eight-slot minimum even when the frame-derived telemetry
+configuration capacity is smaller. Canceled automation (counter 12) retired with the automation
+queue (#1629).
 
-**Served counters and the counter snapshot (#1351).** The provider serves exactly those seven
-counters, each at 0 from construction, so `COUNTERS_GET` with `all` returns all seven and a read of
+**Served counters and the counter snapshot (#1351).** The provider serves exactly those eight
+counters, each at 0 from construction, so `COUNTERS_GET` with `all` returns all eight and a read of
 any of them is never `NOT_FOUND`. `STRIPS_RESTARTED` adds, for each replacement plan render
 adopted, the strips that plan started at rest, each once; the control plane adds it when it
 promotes the adopted plan, so a withdrawn candidate adds nothing (#1768). `LIVE_BLOCK_ERRORS`
@@ -383,7 +408,10 @@ counts the blocks render refused after the block took its live snapshot; the ser
 the render-side mirror in, and it stays 0 in a correct build (#1521). `SOURCE_UNDERRUN_BLOCKS`
 counts the rendered blocks in which a source played zeros because the host had not delivered PCM
 it owed (graph-wide; a held block and a block past the end of a region are not counted); the
-service step copies the render-side mirror in, on both hosts (#1537). `TELEMETRY_CONFIGURE` naming any other counter ID (for example
+service step copies the render-side mirror in, on both hosts (#1537). `SOURCE_FRAMES_DISCARDED`
+counts the accepted source frames render never read because the caller's transaction removed or
+redeclared the source, or a failed carry could not move; the service step adds them when it
+reclaims the displaced plan (#1699). `TELEMETRY_CONFIGURE` naming any other counter ID (for example
 `MALFORMED_FRAMES`) is `NOT_FOUND`, and the stored configuration does not change. `TRANSITION_REPREPARE_REFUSALS`
 is protocol counter 17; nothing writes a nonzero value until #1360. The periodic `COUNTER_SNAPSHOT`
 event (`0x8021`) reports, for each configured ID in order, the value after the service step's first

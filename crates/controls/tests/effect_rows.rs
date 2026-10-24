@@ -165,11 +165,10 @@ fn an_unknown_or_third_party_effect_has_no_rows() {
 }
 
 /// The classes the rulings give, written out per row: decision 14's limiter lookahead and decision
-/// 15 E2's gate, EQ and crossover rows, E4's two bypass shunts and #1367's link mode.
+/// 15 E2's EQ and crossover rows, E4's two bypass shunts and #1367's link mode.
 fn expected_prepared(effect: &str, parameter: u32) -> Option<RebuildReason> {
     match (effect, parameter) {
         ("miso.true-peak-limiter", 3) => Some(RebuildReason::Glitch),
-        ("miso.gate-expander", 5..=7) => Some(RebuildReason::RuledLiveNotBuilt { issue: 1336 }),
         ("miso.parametric-eq", 1 | 2 | 17 | 18 | 33 | 34 | 49 | 50) => {
             Some(RebuildReason::RuledLiveNotBuilt { issue: 1337 })
         }
@@ -596,17 +595,25 @@ fn bypass_link_mode_and_prepared_rows_are_written_by_set() {
     assert!(model.tracks[0].console[0].bypass);
 
     // A prepared parameter is written like any other; its class says only how it applies.
-    let attack = insert_row("vocal", "miso.gate-expander", 5, Lane::Left);
+    let lookahead = |lane| {
+        address(
+            Owner::Strip(id("vocal")),
+            Section::Console(id("ceiling")),
+            3,
+            lane,
+        )
+    };
+    let left = lookahead(Lane::Left);
     let row = controls::list(&model, &MonitorOverlay::default(), RATE)
-        .find(|row| row.address == attack)
+        .find(|row| row.address == left)
         .unwrap();
     assert!(rebuild_reason(row.descriptor.class).is_some());
-    set(&mut model, &attack, 2.0, None, RATE).unwrap();
+    set(&mut model, &left, 2.0, None, RATE).unwrap();
     assert_eq!(
-        get(&model, &MonitorOverlay::default(), &attack, RATE),
+        get(&model, &MonitorOverlay::default(), &left, RATE),
         Ok(2.0)
     );
-    let right = insert_row("vocal", "miso.gate-expander", 5, Lane::Right);
+    let right = lookahead(Lane::Right);
     assert_ne!(
         get(&model, &MonitorOverlay::default(), &right, RATE),
         Ok(2.0)

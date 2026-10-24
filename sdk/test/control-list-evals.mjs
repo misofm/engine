@@ -238,7 +238,9 @@ describe("#1564A gate 1 -- the list is the core's", () => {
       assert.equal(fader.value, SESSION.tracks[0].fader.left_db);
       const gate = find(list, (e) => owned(e, "strip", "t2") && e.address.section.kind === "inserts"
         && e.address.section.effect === "gate" && e.name === "attack_ms", "the gate's attack_ms");
-      assert.equal(gate.class, "rebuildOnly");
+      // Live since #1336: an effect row's class and its absent reason come off the wire too.
+      assert.equal(gate.class, "live");
+      assert.equal(gate.reason, undefined);
     } finally {
       engine.dispose();
     }

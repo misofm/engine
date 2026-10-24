@@ -55,3 +55,10 @@ static_assert(std::is_same<decltype(&miso_engine_v1_session_seek),
 static_assert(std::is_same<decltype(&miso_engine_v1_session_seek_at),
                            uint32_t (*)(miso_engine_v1_session *, uint64_t, uint64_t,
                                         uint64_t)>::value);
+static_assert(MISO_ENGINE_V1_FEATURE_SESSION_REPLACE == UINT64_C(2048));
+static_assert((MISO_ENGINE_V1_FEATURE_MASK & MISO_ENGINE_V1_FEATURE_SESSION_REPLACE) ==
+              MISO_ENGINE_V1_FEATURE_SESSION_REPLACE);
+static_assert(std::is_same<decltype(&miso_engine_v1_submit_document_command),
+                           uint32_t (*)(miso_engine_v1_session *, const uint8_t *, uint64_t,
+                                        const uint8_t *, uint64_t,
+                                        miso_engine_v1_bytes_out *)>::value);

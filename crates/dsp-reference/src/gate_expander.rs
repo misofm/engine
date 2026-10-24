@@ -155,6 +155,51 @@ struct ChannelState {
     hold_remaining: u64,
 }
 
+/// One live timing change (#1336): from `frame` on, each channel takes its new timing.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ReferenceGateTimingChange {
+    /// The first frame rendered under the new timing.
+    pub frame: usize,
+    /// The new left and right timing, at the render's sample rate.
+    pub timing: (ReferenceGateTiming, ReferenceGateTiming),
+}
+
+/// Samples a changed rate coefficient takes to reach its new design (#1336 D3).
+const RATE_RAMP_SAMPLES: usize = 64;
+
+/// One channel's timing in effect at a frame, with its coefficient ramps.
+#[derive(Clone, Copy)]
+struct Timing {
+    hold_samples: u64,
+    /// `(from, to)` per rate: attack, then release.
+    rates: [(f64, f64); 2],
+}
+
+impl Timing {
+    fn fixed(derived: Derived) -> Self {
+        Self {
+            hold_samples: derived.hold_samples,
+            rates: [
+                (derived.attack_rate, derived.attack_rate),
+                (derived.release_rate, derived.release_rate),
+            ],
+        }
+    }
+
+    /// The attack and release coefficients of frame `frame`, `since` frames after a change
+    /// (`None` before one): `c[k] = c0 + k (c1 - c0) / 64` for `k = since + 1`, and `c1` from
+    /// `k = 64` on, the linear ramp of D3 in `f64`.
+    fn rates(self, since: Option<usize>) -> (f64, f64) {
+        let at = |(from, to): (f64, f64)| match since {
+            Some(since) if since + 1 < RATE_RAMP_SAMPLES => {
+                from + (to - from) * (since + 1) as f64 / RATE_RAMP_SAMPLES as f64
+            }
+            _ => to,
+        };
+        (at(self.rates[0]), at(self.rates[1]))
+    }
+}
+
 /// Renders a whole signal through the `f64` transcription of the gate/expander.
 ///
 /// A full f64 transcription of the causal gain computer: current-sample detector, the algebraic
@@ -176,6 +221,71 @@ pub fn reference_gate_expander_process(
     link: ReferenceGateLink,
     main: (&[f64], &[f64]),
     sidechain: Option<(&[f64], &[f64])>,
+) -> Result<ReferenceGateTrace, ReferenceGateExpanderError> {
+    process(
+        (params_left, params_right),
+        hysteresis_db,
+        timing,
+        link,
+        main,
+        sidechain,
+        None,
+    )
+}
+
+/// As [`reference_gate_expander_process`], with one live timing change at `change.frame` (#1336).
+///
+/// * **Attack and release (D3).** From the change's frame each coefficient moves linearly from the
+///   design in effect, `c0`, to the new design `c1 = 1 - exp(-1000 / (t fs))`: frame
+///   `change.frame + k - 1` uses `c0 + k (c1 - c0) / 64` for `k = 1..=64`, so `c1` exactly from
+///   the 64th frame on. The production ramp's `f32` steps and clamp are not modelled.
+/// * **Hold (D4).** Before the change's frame, with `H0` the hold count in effect, `H1` the new
+///   count and `r` the countdown: an open channel takes `r' = max(0, r + H1 - H0)`, a closed one
+///   `r' = min(r, H1)`, and every later reload uses `H1`.
+///
+/// # Errors
+///
+/// As [`reference_gate_expander_process`], and also if the change lies past the render, or its
+/// timing has another sample rate.
+pub fn reference_gate_expander_process_with_timing_change(
+    params: (
+        ReferenceGateExpanderParameters,
+        ReferenceGateExpanderParameters,
+    ),
+    hysteresis_db: (f64, f64),
+    timing: (ReferenceGateTiming, ReferenceGateTiming),
+    link: ReferenceGateLink,
+    main: (&[f64], &[f64]),
+    change: ReferenceGateTimingChange,
+) -> Result<ReferenceGateTrace, ReferenceGateExpanderError> {
+    if change.frame >= main.0.len()
+        || change.timing.0.sample_rate != timing.0.sample_rate
+        || change.timing.1.sample_rate != timing.0.sample_rate
+    {
+        return Err(ReferenceGateExpanderError::InvalidInput);
+    }
+    process(
+        params,
+        hysteresis_db,
+        timing,
+        link,
+        main,
+        None,
+        Some(change),
+    )
+}
+
+fn process(
+    (params_left, params_right): (
+        ReferenceGateExpanderParameters,
+        ReferenceGateExpanderParameters,
+    ),
+    hysteresis_db: (f64, f64),
+    timing: (ReferenceGateTiming, ReferenceGateTiming),
+    link: ReferenceGateLink,
+    main: (&[f64], &[f64]),
+    sidechain: Option<(&[f64], &[f64])>,
+    change: Option<ReferenceGateTimingChange>,
 ) -> Result<ReferenceGateTrace, ReferenceGateExpanderError> {
     let frames = main.0.len();
     if main.1.len() != frames
@@ -213,6 +323,15 @@ pub fn reference_gate_expander_process(
         }
     }
     let derived = (derive(timing.0)?, derive(timing.1)?);
+    let changed = match change {
+        Some(change) => Some((
+            change.frame,
+            derive(change.timing.0)?,
+            derive(change.timing.1)?,
+        )),
+        None => None,
+    };
+    let mut timings = [Timing::fixed(derived.0), Timing::fixed(derived.1)];
 
     let mut state = [
         ChannelState {
@@ -241,12 +360,37 @@ pub fn reference_gate_expander_process(
     };
     for frame in 0..frames {
         let dry = (main.0[frame], main.1[frame]);
+        let since = match changed {
+            Some((at, left, right)) if frame >= at => {
+                if frame == at {
+                    for ((slot, timing), next) in
+                        state.iter_mut().zip(&mut timings).zip([left, right])
+                    {
+                        let (from, to) = (timing.hold_samples, next.hold_samples);
+                        slot.hold_remaining = if slot.open {
+                            (slot.hold_remaining + to).saturating_sub(from)
+                        } else {
+                            slot.hold_remaining.min(to)
+                        };
+                        let (attack, release) = timing.rates(None);
+                        *timing = Timing {
+                            hold_samples: to,
+                            rates: [(attack, next.attack_rate), (release, next.release_rate)],
+                        };
+                    }
+                }
+                Some(frame - at)
+            }
+            _ => None,
+        };
         for channel in 0..2 {
-            let (parameters, hysteresis, derived, partner) = if channel == 0 {
-                (params_left, hysteresis_db.0, derived.0, 1)
+            let (parameters, hysteresis, partner) = if channel == 0 {
+                (params_left, hysteresis_db.0, 1)
             } else {
-                (params_right, hysteresis_db.1, derived.1, 0)
+                (params_right, hysteresis_db.1, 0)
             };
+            let hold_samples = timings[channel].hold_samples;
+            let (attack_rate, release_rate) = timings[channel].rates(since);
             let sources = [detector_source.0[frame], detector_source.1[frame]];
             let own = sources[channel].abs();
             let other = sources[partner].abs();
@@ -264,10 +408,10 @@ pub fn reference_gate_expander_process(
             if !slot.open {
                 if level_db >= threshold {
                     slot.open = true;
-                    slot.hold_remaining = derived.hold_samples;
+                    slot.hold_remaining = hold_samples;
                 }
             } else if level_db >= threshold - hysteresis {
-                slot.hold_remaining = derived.hold_samples;
+                slot.hold_remaining = hold_samples;
             } else if slot.hold_remaining != 0 {
                 slot.hold_remaining -= 1;
             } else {
@@ -280,9 +424,9 @@ pub fn reference_gate_expander_process(
             };
             let target = reference_gate_expander_gain_reduction_db(level_db, parameters, phase)?;
             let rate = if target > slot.gain_db {
-                derived.attack_rate
+                attack_rate
             } else {
-                derived.release_rate
+                release_rate
             };
             let mut gain_db = slot.gain_db + rate * (target - slot.gain_db);
             if gain_db.abs() < 1.0e-20 {

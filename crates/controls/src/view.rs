@@ -8,6 +8,7 @@
 
 use session::{Automation, Route, SessionModel, StableId, StripRef, Vca};
 
+use crate::automation::AutomationIndex;
 use crate::registry::strip_at;
 
 /// The committed model (`structure`: counts, order, IDs, header, console slots, the automation
@@ -15,10 +16,15 @@ use crate::registry::strip_at;
 /// the edited clones in ID order, among them the automation entries whose offset a hand move wrote,
 /// #1650), read as one.
 /// For a model that is whole, both are the same model.
+///
+/// A view may carry the [`AutomationIndex`] of its committed model ([`Self::indexed`], #1710): its
+/// readers of the entries that drive an owner's rendered rows then look the owner up instead of
+/// scanning the table.
 #[derive(Clone, Copy, Debug)]
 pub struct ModelView<'a> {
     structure: &'a SessionModel,
     owners: &'a SessionModel,
+    automation: Option<&'a AutomationIndex<'a>>,
 }
 
 impl<'a> ModelView<'a> {
@@ -28,6 +34,7 @@ impl<'a> ModelView<'a> {
         Self {
             structure: model,
             owners: model,
+            automation: None,
         }
     }
 
@@ -35,7 +42,30 @@ impl<'a> ModelView<'a> {
     /// of its tables, and holds only owners that `structure` also holds.
     #[must_use]
     pub const fn edited(structure: &'a SessionModel, owners: &'a SessionModel) -> Self {
-        Self { structure, owners }
+        Self {
+            structure,
+            owners,
+            automation: None,
+        }
+    }
+
+    /// The same view, reading the driving entries of an owner's rendered rows from `automation`,
+    /// the index of the committed model ([`Self::structure`]): one pass over the table for a
+    /// caller that reads many owners (#1710). The entries read are the ones the scan gives.
+    ///
+    /// # Panics
+    ///
+    /// If `automation` is not the index of the view's committed model.
+    #[must_use]
+    pub fn indexed(self, automation: &'a AutomationIndex<'a>) -> Self {
+        assert!(
+            automation.is_of(self.structure),
+            "the automation index of another model"
+        );
+        Self {
+            automation: Some(automation),
+            ..self
+        }
     }
 
     /// The model the view reads its structure from: the counts, the order, the IDs, the header and
@@ -106,10 +136,14 @@ impl<'a> ModelView<'a> {
     ///
     /// A transaction of values leaves the automation table's entries and targets as committed, so
     /// which entry drives a lane is read from the committed table, and only its offset from the
-    /// edit. Linear in the committed table's length, with an early out when it is empty.
+    /// edit. A lookup in the view's [`AutomationIndex`] when it carries one ([`Self::indexed`]),
+    /// else linear in the committed table's length, with an early out when it is empty.
     #[must_use]
     pub fn fader_automation(&self, strip: &StableId) -> [Option<&'a Automation>; 2] {
-        let lanes = crate::automation::fader_automation(self.structure, strip);
+        let lanes = match self.automation {
+            Some(index) => index.fader(strip),
+            None => crate::automation::fader_automation(self.structure, strip),
+        };
         if self.is_whole() {
             return lanes;
         }
@@ -131,7 +165,10 @@ impl<'a> ModelView<'a> {
         if self.structure.automation.is_empty() {
             return [None; 2];
         }
-        let lanes = crate::automation::vca_offset_automation(self.structure, vca);
+        let lanes = match self.automation {
+            Some(index) => index.vca_offset(vca),
+            None => crate::automation::vca_offset_automation(self.structure, vca),
+        };
         if self.is_whole() {
             return lanes;
         }
@@ -140,6 +177,29 @@ impl<'a> ModelView<'a> {
                 find(&self.owners.automation, &entry.id, |held| &held.id).unwrap_or(entry)
             })
         })
+    }
+
+    /// The stored automation entries that drive strip `strip`'s mute, per lane
+    /// ([`crate::mute_automation`]), read from the committed table: a transaction of values leaves
+    /// the table's entries and targets as committed. A lookup when the view is
+    /// [`Self::indexed`].
+    #[must_use]
+    pub(crate) fn mute_automation(&self, strip: &StableId) -> [Option<&'a Automation>; 2] {
+        match self.automation {
+            Some(index) => index.mute(strip),
+            None => crate::automation::mute_automation(self.structure, strip),
+        }
+    }
+
+    /// The stored automation entries that drive VCA `vca`'s `mute`, per lane
+    /// ([`crate::vca_mute_automation`]), read from the committed table as for
+    /// [`Self::mute_automation`].
+    #[must_use]
+    pub(crate) fn vca_mute_automation(&self, vca: &StableId) -> [Option<&'a Automation>; 2] {
+        match self.automation {
+            Some(index) => index.vca_mute(vca),
+            None => crate::automation::vca_mute_automation(self.structure, vca),
+        }
     }
 
     /// The dense model the view stands for: a clone of the committed model with the edited owners
