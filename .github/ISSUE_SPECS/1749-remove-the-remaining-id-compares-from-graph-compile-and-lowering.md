@@ -81,7 +81,7 @@ First measure, then change only what the measurement names. Run the #1384 gate 6
   `e54b112dc`, built in separate scratch target dirs: equal digests for all four:
   `parametric-eq-nine-track.json` `2938bb78...f1f5c8`, `console-sixty-four-track.json`
   `fa320199...03e9244c`, `console-sixty-four-track-app.json` `ac23bd04...888430cf`,
-  `console-sixty-four-track-sends.json` `bcf300dd...5d94768`. (Two differ from #1384's record
+  `console-sixty-four-track-sends.json` `bcf300dd...35d94768`. (Two differ from #1384's record
   because `main` moved since; base equals branch.)
 - **No new test**, as scoped: the change is a representation change under the existing `topo`,
   lowering and compile-shape tests, and the gate-2 digests.
