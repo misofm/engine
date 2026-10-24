@@ -3127,6 +3127,9 @@ struct FadeSwap<'a> {
     block: usize,
     to: &'a Session,
     committed: &'a SessionModel,
+    /// The block before which the successor is prepared, when earlier than `block`: it is prepared
+    /// against the plan running then, which renders on until `block`.
+    prepared_at: Option<usize>,
 }
 
 /// A source a [`fade_run`]'s first successor adds and the host starts with
@@ -3163,16 +3166,21 @@ fn fade_run(
         feed.submit(&mut plan.live.prepared.sources, rate, 0);
     }
     let mut blocks = Vec::with_capacity(BLOCKS);
+    // A successor prepared before its swap block (`FadeSwap::prepared_at`).
+    let mut early: Option<CellPlan> = None;
     for block in 0..BLOCKS {
         if let Some(swap) = swaps.iter().find(|swap| swap.block == block) {
             let first = arms.is_empty();
-            let mut successor = CellPlan::successor(
-                swap.to,
-                &plan.live.prepared.inventory,
-                swap.committed,
-                &EditRamps::new(),
-                backend,
-            );
+            let mut successor = match early.take() {
+                Some(successor) => successor,
+                None => CellPlan::successor(
+                    swap.to,
+                    &plan.live.prepared.inventory,
+                    swap.committed,
+                    &EditRamps::new(),
+                    backend,
+                ),
+            };
             arms.push(
                 graph::test_only_fade_arms(&mut successor.live.prepared.plan)
                     .expect("a graph plan"),
@@ -3206,6 +3214,18 @@ fn fade_run(
             add(bench_alloc::current_thread_delta_since(mark));
             assert_eq!(carry, CarryOutcome::Carried, "the swap at block {block}");
             plan = successor;
+        }
+        if let Some(swap) = swaps.iter().find(|swap| {
+            swap.prepared_at
+                .is_some_and(|at| at == block && at < swap.block)
+        }) {
+            early = Some(CellPlan::successor(
+                swap.to,
+                &plan.live.prepared.inventory,
+                swap.committed,
+                &EditRamps::new(),
+                backend,
+            ));
         }
         plan.write_block(writes, block);
         if block + 1 < BLOCKS {
@@ -3268,6 +3288,7 @@ fn an_added_track_fades_in_from_its_first_played_block(backend: Backend) {
             block: SWAP_BLOCK,
             to: &b,
             committed: &a.model,
+            prepared_at: None,
         }];
         let feeds = [&kept, &aux];
         let run = fade_run(&a, &swap, &feeds, None, &[], backend);
@@ -3361,16 +3382,31 @@ fn two_swap_run(
     feeds: &[&Feed],
     backend: Backend,
 ) -> FadeRun {
+    two_swap_run_prepared(a, b1, b2, (second, None), anchored, feeds, backend)
+}
+
+/// [`two_swap_run`] whose second successor is prepared before block `second.1` when given.
+fn two_swap_run_prepared(
+    a: &Session,
+    b1: &Session,
+    b2: &Session,
+    second: (usize, Option<usize>),
+    anchored: Option<Anchored<'_>>,
+    feeds: &[&Feed],
+    backend: Backend,
+) -> FadeRun {
     let swaps = [
         FadeSwap {
             block: SWAP_BLOCK,
             to: b1,
             committed: &a.model,
+            prepared_at: None,
         },
         FadeSwap {
-            block: second,
+            block: second.0,
             to: b2,
             committed: &b1.model,
+            prepared_at: second.1,
         },
     ];
     fade_run(a, &swaps, feeds, anchored, &[], backend)
@@ -3492,11 +3528,20 @@ fn a_fired_fade_does_not_repeat(backend: Backend) {
         backend,
     );
     let silent = fade_run(&muted, &[], &feeds, None, &[], backend);
-    for second in [SWAP_BLOCK + 1, 10] {
-        let run = two_swap_run(&a, &b1, &b2, second, None, &feeds, backend);
-        assert!(
+    // The second successor prepared after the fire drops the fired row; one prepared before it
+    // (at the first swap block, before that block renders) re-arms the strip, and its carry copies
+    // `Done` while the lane import must overwrite the arm's mute with the carried lane's state.
+    for (second, prepared_at) in [
+        (SWAP_BLOCK + 1, None),
+        (10, None),
+        (SWAP_BLOCK + 1, Some(SWAP_BLOCK)),
+        (10, Some(SWAP_BLOCK)),
+    ] {
+        let run = two_swap_run_prepared(&a, &b1, &b2, (second, prepared_at), None, &feeds, backend);
+        assert_eq!(
             run.arms[1].is_empty(),
-            "{backend:?}: a fired fade is not re-armed"
+            prepared_at.is_none(),
+            "{backend:?}: only a successor prepared before the fire re-arms the strip"
         );
         assert_eq!(
             first_fade_difference(&run, &reference),
