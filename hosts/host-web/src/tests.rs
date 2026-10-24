@@ -856,11 +856,12 @@ fn observation_staging_resource_is_exact_for_the_taps_off_and_on_modes() {
         let caps = prepare_caps(&compiled, options, source_ring_frames, u64::MAX);
         let live_controls =
             live_control_request(options, shape.quantum_frames).expect("live-control request");
-        let (engine, _) = prepare_host_runtime_with_selected_meters(
+        // The browser's own entry: a boot word of `0` binds the core's strip meters at the default
+        // window (#1581 D2).
+        let (engine, _) = host_core::prepare_host_runtime_with_live_lanes(
             &compiled,
             &caps,
             &live_controls,
-            &[],
             HostLiveLanes {
                 effects: options.live_control_observation_taps != 0,
                 ..controls::live_lanes(compiled.normalized_model()).into()
@@ -877,7 +878,10 @@ fn observation_staging_resource_is_exact_for_the_taps_off_and_on_modes() {
             "{name}: compiled model retention is exact"
         );
         assert_eq!(engine.report.observation_retained_bytes, 0);
-        assert_eq!(engine.report.builtin_meter_payload_bytes, 0);
+        assert!(
+            engine.report.builtin_meter_payload_bytes > 0,
+            "{name}: the strip meters"
+        );
         // The prepared plan's state inventory the browser keeps for a successor (#1272), walked
         // from the inventory itself rather than read from the report row.
         let inventory_bytes = engine.inventory.retained_bytes();
@@ -903,7 +907,11 @@ fn observation_staging_resource_is_exact_for_the_taps_off_and_on_modes() {
             ready.shape.effect_instances.is_empty(),
             "no effect additions"
         );
-        assert!(ready.shape.meter_pending.is_empty(), "no meter additions");
+        assert_eq!(
+            ready.shape.meter_pending.len(),
+            ready.shape.tracks.len() + ready.shape.submixes.len(),
+            "{name}: one meter per strip"
+        );
         assert!(
             ready
                 .shape
@@ -935,6 +943,13 @@ fn observation_staging_resource_is_exact_for_the_taps_off_and_on_modes() {
         // `3(T + S) + 3` words, held whether or not metering is on.
         let model = compiled.normalized_model();
         let frame_bytes = (3 * (model.tracks.len() + model.submixes.len()) as u64 + 3) * 4;
+        // The strip meters' delivery rows, bound with the boot word `0` too (#1581 D2): per strip
+        // a pending snapshot, a remaining count and a carried-from handle, and the master ring.
+        let strips = (model.tracks.len() + model.submixes.len()) as u64;
+        let meter_delivery_bytes = strips
+            * (size_of::<Option<MeterSnapshot>>() + size_of::<usize>() + size_of::<u64>()) as u64
+            + (METER_QUEUE_DEPTH * size_of::<Option<MasterMeasurement>>()) as u64;
+        let frame_bytes = frame_bytes + meter_delivery_bytes;
         let expected_bridge_metadata = projection
             .report
             .bridge_metadata_bytes

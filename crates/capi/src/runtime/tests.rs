@@ -35,9 +35,10 @@ pub(super) fn limits() -> CompileLimits {
         maximum_builtin_retained_bytes: 100_000_000,
         maximum_capi_retained_bytes: 10_000_000,
         maximum_named_allocation_bytes: 100_000_000,
-        maximum_meter_streams: 1,
-        maximum_meter_items: 1,
-        maximum_meter_bytes: 1,
+        // One meter stream per strip (#1581 D2): generous for every test session.
+        maximum_meter_streams: 4_096,
+        maximum_meter_items: 1 << 20,
+        maximum_meter_bytes: 1 << 26,
         maximum_control_frame_bytes: 4_096,
         maximum_replay_bytes: 8_192,
         maximum_replay_entries: 16,
@@ -684,6 +685,29 @@ fn render_parity_shape(track_count: usize, sample_rate_hz: u32) {
         crate::ffi::test_plan_destroy(c_plan);
         crate::ffi::test_session_destroy(c_session);
     }
+}
+
+/// The caller's meter caps bound the core's strip meters (#1581 D2): one stream per strip. A cap
+/// of one stream refuses a session of more strips, with the builtin compiler's own diagnostic.
+///
+/// Test value: red if the core's meters escape the caller's caps, or if the refusal loses its code.
+#[test]
+fn a_meter_cap_below_the_strip_count_is_refused() {
+    let strips = parse_session_json(SESSION)
+        .expect("session")
+        .strips()
+        .count();
+    assert!(strips > 1, "the reference session has several strips");
+    let mut small = limits();
+    small.maximum_meter_streams = 1;
+    let failure = compile_children(SESSION, small)
+        .err()
+        .expect("one meter stream cannot meter every strip");
+    let diagnostics = String::from_utf8_lossy(&failure.diagnostics);
+    assert!(
+        diagnostics.contains("builtin.resource.limit\t$.meter_requests"),
+        "{diagnostics}"
+    );
 }
 
 #[test]

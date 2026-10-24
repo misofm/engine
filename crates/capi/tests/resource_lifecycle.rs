@@ -193,9 +193,10 @@ fn limits() -> CompileLimits {
         maximum_builtin_retained_bytes: 100_000_000,
         maximum_capi_retained_bytes: 10_000_000,
         maximum_named_allocation_bytes: 100_000_000,
-        maximum_meter_streams: 1,
-        maximum_meter_items: 1,
-        maximum_meter_bytes: 1,
+        // One meter stream per strip (#1581 D2): generous for every test session.
+        maximum_meter_streams: 4_096,
+        maximum_meter_items: 1 << 20,
+        maximum_meter_bytes: 1 << 26,
         maximum_control_frame_bytes: 4_096,
         maximum_replay_bytes: 8_192,
         maximum_replay_entries: 16,
@@ -1154,6 +1155,13 @@ impl Budget {
 /// on AArch64, which runs only in CI). The ceilings are the new value plus 10 %, rounded up to 64:
 /// 39,768.3 -> 39,808.
 ///
+/// #1581 D2 raised the meter payload row from zero and the builtin retained payload row with it,
+/// a structural move: every C ABI plan now carries the core's strip meters, one post-matrix
+/// sample-peak meter per strip at the default window, 0 -> 10,458 bytes for the nine strips, and
+/// the retained payload 46,917 bytes on x86-64. Meter payload is lane-width independent, so the
+/// four-lane ceilings move with it. The ceilings are the new values plus 10 %, rounded up to 64:
+/// 11,503.8 -> 11,520 and 51,608.7 -> 51,648.
+///
 /// #1599 shrank the two catalog rows, a structural move: the control list's catalog no longer
 /// holds a full wire row per entry. It holds three shared tables (owners, sections and the
 /// distinct control descriptors, each stored once) and a 16-byte record per entry, so the
@@ -1344,14 +1352,14 @@ const REFERENCE_BUDGETS: [Budget; 19] = [
     Budget {
         row: "builtin_meter_payload_bytes",
         value: |report| report.builtin_meter_payload_bytes,
-        eight_lanes: 0,
-        four_lanes: 0,
+        eight_lanes: 11_520,
+        four_lanes: 11_520,
     },
     Budget {
         row: "builtin_retained_payload_bytes",
         value: |report| report.builtin_retained_payload_bytes,
-        eight_lanes: 39_808,
-        four_lanes: 39_808,
+        eight_lanes: 51_648,
+        four_lanes: 51_648,
     },
     Budget {
         row: "capi_retained_bytes",
@@ -3504,9 +3512,10 @@ fn submix_limits(maximum_tracks: u64, maximum_submixes: u64) -> CompileLimits {
         maximum_builtin_retained_bytes: 1_000_000_000,
         maximum_capi_retained_bytes: 100_000_000,
         maximum_named_allocation_bytes: 1_000_000_000,
-        maximum_meter_streams: 1,
-        maximum_meter_items: 1,
-        maximum_meter_bytes: 1,
+        // One meter stream per strip (#1581 D2): generous for every test session.
+        maximum_meter_streams: 4_096,
+        maximum_meter_items: 1 << 20,
+        maximum_meter_bytes: 1 << 26,
         maximum_control_frame_bytes: 4_096,
         maximum_replay_bytes: 8_192,
         maximum_replay_entries: 16,
