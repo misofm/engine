@@ -11,8 +11,8 @@ use bench_support::alloc::{self, Counters};
 use std::hint::black_box;
 
 use effect_contract::{
-    BankWidth, EffectBankProcessBlock, LinkMode, NativeEffectFactory, ParameterChannel,
-    PreparedAutomationSpan, ResetKind, StatePayloadInput, StatePayloadOutput,
+    BankWidth, EffectBankProcessBlock, EffectProcessBlock, LinkMode, NativeEffectFactory,
+    ParameterChannel, PreparedAutomationSpan, ResetKind, StatePayloadInput, StatePayloadOutput,
 };
 use multiband_compressor::MultibandCompressorFactory;
 use support::{new_sections, point, process, request_with, varied_values};
@@ -57,13 +57,23 @@ fn the_scalar_render_path_allocates_nothing() {
     let mut effect = prepared.processor;
     let mut left = support::signal(128, 0x0BAD_C0DE);
     let mut right = support::signal(128, 0x0BAD_BEEF);
-    let spans = [point(1, ParameterChannel::Left, 128, -30.0)];
+    // Issue #1338 gate 5: a crossover span designs its words on the render thread.
+    let spans = [
+        point(0, ParameterChannel::Left, 128, 2_000.0),
+        point(1, ParameterChannel::Left, 128, -30.0),
+    ];
     // Warm the allocator's own lazy state outside the measured region.
     process(effect.as_mut(), &mut left, &mut right, 0, &[], 128);
     let mut sections = new_sections(sizes);
 
+    let mut invalid = u64::MAX;
     let counted = events(|| {
-        process(effect.as_mut(), &mut left, &mut right, 128, &spans, 128);
+        invalid = effect
+            .process(
+                EffectProcessBlock::new(&mut left, &mut right, None, 128, &spans, 128)
+                    .expect("block"),
+            )
+            .invalid_spans;
         effect.reset(ResetKind::DiscontinuityKeepParameters);
         process(effect.as_mut(), &mut left, &mut right, 256, &[], 128);
         effect.reset(ResetKind::FullToDefaults);
@@ -85,6 +95,7 @@ fn the_scalar_render_path_allocates_nothing() {
         counted, 0,
         "the scalar render path allocated {counted} times"
     );
+    assert_eq!(invalid, 0, "the measured spans were applied");
 }
 
 #[test]
@@ -103,9 +114,15 @@ fn the_bank_render_path_allocates_nothing() {
             let mut left = support::signal(128 * lanes, 0x00C0_FFEE);
             let mut right = support::signal(128 * lanes, 0x00DE_CAF0);
             let offsets = vec![0u32; lanes + 1];
-            let automation = [point(1, ParameterChannel::Left, 128, -30.0)];
-            let mut automation_offsets = vec![0u32; lanes + 1];
-            automation_offsets[1..].fill(1);
+            // Issue #1338 gate 5: a crossover span on every lane, and a threshold span on lane 0.
+            let mut automation = vec![
+                point(0, ParameterChannel::Left, 128, 2_000.0),
+                point(1, ParameterChannel::Left, 128, -30.0),
+            ];
+            automation.extend((1..lanes).map(|_| point(0, ParameterChannel::Left, 128, 2_000.0)));
+            let automation_offsets = (0..=lanes)
+                .map(|lane| if lane == 0 { 0 } else { lane as u32 + 1 })
+                .collect::<Vec<_>>();
             let mut sections = new_sections(sizes);
             let run = |bank: &mut dyn effect_contract::PreparedNativeEffectBank,
                        left: &mut [f32],
@@ -118,12 +135,17 @@ fn the_bank_render_path_allocates_nothing() {
                         left, right, None, 128, width, first, spans, offsets, 128,
                     )
                     .expect("bank block"),
-                );
+                )
+                .reports
+                .iter()
+                .map(|report| report.invalid_spans)
+                .sum::<u64>()
             };
             run(bank.as_mut(), &mut left, &mut right, 0, &[], &offsets);
 
+            let mut invalid = u64::MAX;
             let counted = events(|| {
-                run(
+                invalid = run(
                     bank.as_mut(),
                     &mut left,
                     &mut right,
@@ -154,6 +176,7 @@ fn the_bank_render_path_allocates_nothing() {
                 .expect("restore");
             });
             assert_eq!(counted, 0, "{width:?} allocated {counted} times");
+            assert_eq!(invalid, 0, "{width:?}: the measured spans were applied");
         }
     }
 }
