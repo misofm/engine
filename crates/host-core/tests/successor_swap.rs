@@ -3069,10 +3069,17 @@ const FADE_TRACK: &str = "fade";
 /// a successor that adds a track on it. `aux` holds a true-peak limiter, so the output already
 /// arrives 486 samples late and an added limited track grows no latency (#1287's case).
 fn fade_base() -> SessionModel {
+    let mut model = unlimited_fade_base();
+    add_limiter(&mut model, "aux", "lim");
+    model
+}
+
+/// [`fade_base`] without the limiter: the output arrives at once, so a fade at block 9 reaches
+/// the output inside the run (#1392's anchored cases).
+fn unlimited_fade_base() -> SessionModel {
     let mut model = session_a();
     add_source(&mut model, AUX_SOURCE);
     add_track(&mut model, "eq0", "aux", AUX_SOURCE, true);
-    add_limiter(&mut model, "aux", "lim");
     model
 }
 
@@ -3329,7 +3336,7 @@ const FADE_ANCHOR_BLOCK: usize = SWAP_BLOCK + 3;
 
 /// [`fade_base`] plus [`ADDED_SOURCE`] and [`FADE_TRACK`] on it.
 fn anchored_fade_model(muted: bool) -> SessionModel {
-    let mut model = fade_base();
+    let mut model = unlimited_fade_base();
     add_source(&mut model, ADDED_SOURCE);
     with_fade_track(model, ADDED_SOURCE, false, muted)
 }
@@ -3378,8 +3385,8 @@ fn two_swap_run(
 fn a_pending_fade_survives_a_second_swap(backend: Backend) {
     let ramp = LiveRamps::for_session(&fade_base()).mute_samples;
     let (kept, aux) = fade_feeds();
-    let a = Session::compile(fade_base());
     // (b) Waiting.
+    let a = Session::compile(unlimited_fade_base());
     let (added, reference_added) = anchored_feeds();
     let b1 = Session::compile(anchored_fade_model(false));
     let b2 = Session::compile(with_muted_track(anchored_fade_model(false)));
@@ -3411,7 +3418,14 @@ fn a_pending_fade_survives_a_second_swap(backend: Backend) {
         "{backend:?} (b): a waiting fade fires at the anchor after a second swap"
     );
     assert_eq!(run.allocator, (0, 0, 0), "{backend:?} (b): allocator calls");
+    assert_audible(
+        &muted,
+        &[&kept, &aux, &reference_added],
+        &reference,
+        backend,
+    );
     // (c) FireAt.
+    let a = Session::compile(fade_base());
     let limited = |muted: bool| with_fade_track(fade_base(), AUX_SOURCE, true, muted);
     let b1 = Session::compile(limited(false));
     let b2 = Session::compile(with_muted_track(limited(false)));
@@ -3515,7 +3529,7 @@ fn a_chain_restarted_strip_still_fades() {
             .push(transparent_insert());
         model
     };
-    let a = Session::compile(fade_base());
+    let a = Session::compile(unlimited_fade_base());
     let b1 = Session::compile(anchored_fade_model(false));
     let b2 = Session::compile(with_insert(false));
     let muted = Session::compile(with_insert(true));
@@ -3548,6 +3562,21 @@ fn a_chain_restarted_strip_still_fades() {
         first_fade_difference(&run, &reference),
         None,
         "the restarted strip still fades in at the anchor"
+    );
+    assert_audible(
+        &muted,
+        &[&kept, &aux, &reference_added],
+        &reference,
+        backend,
+    );
+}
+
+/// The oracle sees the fade: `reference` differs from `muted` rendered with no unmute.
+fn assert_audible(muted: &Session, feeds: &[&Feed], reference: &FadeRun, backend: Backend) {
+    let silent = fade_run(muted, &[], feeds, None, &[], backend);
+    assert_ne!(
+        silent.blocks, reference.blocks,
+        "the fade reaches the output"
     );
 }
 
