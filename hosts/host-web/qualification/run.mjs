@@ -1038,6 +1038,7 @@ function mutationProofs(browserName, result) {
         mutation.startsWith("resume-clicks-") ? `${browserName}: resume-clicks:`
           : mutation.startsWith("sdk-observation-wait-") ? `${browserName}: sdk-observation-wait:`
             : mutation.startsWith("sdk-spectrum-hop-wait-") ? `${browserName}: sdk-spectrum-hop-wait:`
+            : mutation.startsWith("page-errors") ? `${browserName}: page-errors:`
             : `${browserName}:`,
       ),
       `${browserName}: ${mutation}: red mutation escaped its gate`,
