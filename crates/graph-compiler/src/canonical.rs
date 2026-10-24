@@ -144,7 +144,61 @@ pub(crate) fn tail_text(tail: TailSamples) -> String {
         TailSamples::Infinite => "infinite".to_owned(),
     }
 }
+/// A node's whole tail bound as one canonical field list (#1379 Amendment 1 H2): `tail`,
+/// `tail_every_peak`, the two rest values, `D`, `G_p`, `G_t`, `sigma_p`, `sigma_t`, tab-separated,
+/// with `unstated` and `zero` as tokens.
+pub(crate) fn bound_text(bound: &NodeTailBound) -> String {
+    let rest = match bound.rest {
+        RestBound::Bounded(samples) => format!(
+            "{}\t{}",
+            samples.peak_plus_24_dbfs, samples.any_sanitized_input
+        ),
+        RestBound::Unstated => "unstated\tunstated".to_owned(),
+    };
+    let gain = |gain: PeakGain| match gain {
+        PeakGain::Zero => "zero".to_owned(),
+        PeakGain::Millibels(value) => value.to_string(),
+    };
+    let stall = |stall: FlushStall| match stall {
+        FlushStall::Zero => "zero".to_owned(),
+        FlushStall::Level(value) => value.to_string(),
+    };
+    let composition = match bound.composition {
+        CompositionBound::Stated {
+            decay,
+            peak_gain,
+            tail_gain,
+            peak_stall,
+            tail_stall,
+        } => format!(
+            "{}\t{}\t{}\t{}\t{}",
+            decay.0,
+            gain(peak_gain),
+            gain(tail_gain),
+            stall(peak_stall),
+            stall(tail_stall)
+        ),
+        CompositionBound::Unstated => "unstated\tunstated\tunstated\tunstated\tunstated".to_owned(),
+    };
+    format!(
+        "{}\t{}\t{rest}\t{composition}",
+        tail_text(bound.tail),
+        tail_text(bound.tail_every_peak)
+    )
+}
+/// `P*_graph` as a canonical token: `unstated`, `zero`, millibels, or `above_range`.
+pub(crate) fn floor_text(floor: FlushFloor) -> String {
+    match floor {
+        FlushFloor::Unstated => "unstated".to_owned(),
+        FlushFloor::Zero => "zero".to_owned(),
+        FlushFloor::Millibels(value) => value.to_string(),
+        FlushFloor::AboveRange => "above_range".to_owned(),
+    }
+}
 pub(crate) struct CanonicalParts<'a> {
+    pub(crate) output_tail: TailSamples,
+    pub(crate) output_tail_every_peak: TailSamples,
+    pub(crate) output_flush_floor: FlushFloor,
     pub(crate) rate: u32,
     pub(crate) quantum: u32,
     pub(crate) nodes: &'a [GraphNode],
@@ -187,6 +241,9 @@ pub(crate) fn canonical_parts<'a>(
     reductions: &'a [ReductionRecord],
 ) -> CanonicalParts<'a> {
     CanonicalParts {
+        output_tail: report.output_tail,
+        output_tail_every_peak: report.output_tail_every_peak,
+        output_flush_floor: report.output_flush_floor,
         rate: graph.envelope.sample_rate.0,
         quantum: graph.envelope.quantum.0,
         nodes: &graph.spec.nodes,
@@ -216,7 +273,7 @@ pub(crate) fn write_canonical(out: &mut impl core::fmt::Write, parts: CanonicalP
             node_text(&node.id),
             node_kind_token(&node.id),
             node.latency.0,
-            tail_text(node.tail)
+            tail_text(node.bound.tail)
         );
     }
     for port in parts.ports {
@@ -298,14 +355,22 @@ pub(crate) fn write_canonical(out: &mut impl core::fmt::Write, parts: CanonicalP
             route.destination_arrival.0
         );
     }
+    // #1379 Amendment 1 H2: each node's whole bound, then the graph's two extents and floor.
     for node in parts.nodes {
         let _ = writeln!(
             out,
             "tail\t{}\t{}",
             node_text(&node.id),
-            tail_text(node.tail)
+            bound_text(&node.bound)
         );
     }
+    let _ = writeln!(
+        out,
+        "extent\t{}\t{}\t{}",
+        tail_text(parts.output_tail),
+        tail_text(parts.output_tail_every_peak),
+        floor_text(parts.output_flush_floor)
+    );
     for buffer in parts.buffers {
         let _ = writeln!(
             out,
@@ -349,7 +414,7 @@ pub(crate) fn dot(nodes: &[GraphNode], edges: &[GraphEdge], delays: &[InsertedDe
             node_text(&node.id),
             node_kind_token(&node.id),
             node.latency.0,
-            tail_text(node.tail)
+            tail_text(node.bound.tail)
         ));
         text.push_str(&format!("  \"{id}\" [label=\"{label}\"];\n"));
     }

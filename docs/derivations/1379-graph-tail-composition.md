@@ -788,6 +788,148 @@ statement's own unit test (equality admissible, a tail value above its peak valu
 measurements are in the #1467 attempt record, and #1485's restated `G_t` (L2 unchanged, L3'
 restated) in the #1485 attempt record.
 
+## The graph extent (issue #1379, slice C)
+
+The node values above, and every other node's (H3), compose into the plan's two extents and its
+floor in `crates/graph-compiler/src/pdc.rs` (`compose`). Notation: `eps = 10^(-144/20)`,
+`u = 2^-24`, `UF = 2^-126`; every graph input (each source) has peak at most `P` and is zero from
+`N`; no control event happens at or after `N`.
+
+### The gain-only nodes (H3, D2a)
+
+Each value is an upper bound of the linear gain with the `f32` rounding of each product, rounded up
+into millibels (`math::tail::ceil_millibels`); "fixed" means no lane the caller attaches
+(`GainLiveness`) and no stored automation (`controls::fader_event_lanes`,
+`controls::mute_event_lanes`) can change it after preparation.
+
+* **Track `Input`.** A copy of the source through the strip's delay ring: `T = max(left, right)
+  delay_samples`, `D = 0`, `G = 0` mB, both stalls `Zero`, rest `T` (the ring holds only input
+  samples, so it is exact zero `T` samples after its input is).
+* **Submix `Input` and `Output`** (a sum of `m` inputs in fixed order, then the submix's ring):
+  `|fl(...fl(x_1 + x_2) ... + x_m)| <= (1 + u)^(m-1) sum |x_i| <= m (1 + u)^(m-1) max |x_i|`, and
+  `(1 + u)^(m-1) <= exp((m - 1) u)`; `(m - 1)` underflows; exact for `m = 1` (a copy); `Zero`
+  for `m = 0`. The fused route fold (`fold_words`) adds the routed words in the same order, so the
+  route node then the sum node bound it.
+* **`PostFader`** (`gain_mute_block`, `gain_mute_ramp_block`, `fader_matrix_block`):
+  `|fl(x g)| <= |x| g (1 + u) + UF`, `ceil_mB(g)` when `g` is a power of two (the product is
+  exact). `g` is the larger lane word: the prepared `checked_fader_gain(effective fader_db)`, the
+  word of +24 dB for a live or automated lane (the effective gain is clamped to +24 dB after VCA
+  offsets), or no word for a settled fixed mute. **Mute.** Every fader kernel clears a settled
+  muted lane with `andnot` (`gain_mute_block`; the ramp kernel from the settling frame, `done &
+  mute`), so its output is exactly `+0.0` for every input: a lane whose mute is fixed and set
+  contributes no word, and a strip with both lanes so muted states `Zero`. A mute that a live lane
+  or stored automation can clear is never `Zero`. The effective values are taken under the default
+  monitor overlay: an overlay only adds mutes (a solo), so the stated gain bounds every overlay.
+* **`PostMatrix`** (`matrix2x2_block`, the ramp and the fused kernels):
+  `|fl(fl(a l) + fl(b r))| <= (|a| + |b|) X (1 + u)^2 + 2 UF (1 + u)`; the row `l1` is the
+  prepared matrix's (a pan lowers to its matrix, `lower_matrix_or_pan`), `2` for a live matrix
+  (every coefficient is in `[-1, 1]`), and exactly `0` mB with no stall for the identity matrix
+  (the kernel's identity select passes the samples through).
+* **`Route`**: the same 2x2 arithmetic on `graph::gated_route_coefficients`' folded words. Fixed:
+  the ungated fold's largest row. Live (a route into a submix with route lanes): the fold of
+  `ROUTE_GAIN_DB_MAXIMUM` and `ROUTE_COEFFICIENT_MAGNITUDE_MAXIMUM` (#1237). `Zero` only when the
+  route is muted at preparation or follows a source strip whose mute is fixed and set on both
+  lanes: the gate then folds `+0.0` into every coefficient (or the route is inactive and adds
+  nothing), so every product is a product by `0.0`.
+* **Identity boundaries** (`PostSimd1`, `PostDynamic`, `PostSimd2PreFader`): aliases, `0` mB, no
+  stall.
+
+**Carried values.** #1277 D4 carries a fader, mute or matrix stage only when both plans attach the
+same control kind and no prepared value differs; #1276 D1 as amended by #1630 D1
+(`crates/host-core/src/prepare.rs`, "the strip input sections that carry") carries an input section
+only when the live kind matches, and then either retargets a live lane (whose statement is the live
+bound over every admitted history) or, with no input cells, carries only bit-equal values
+(`same_input_section`). So a carried gain is on a live lane (it states its domain maximum) or equals
+the successor's prepared value with no ramp, and the compile needs no carried endpoint (checked on
+this branch, 2026-10-24).
+
+### The rule (H4)
+
+Signal edges are main and route edges; a sidechain edge carries no magnitude and enters only the
+two time recurrences. With `G` in millibels and `Zero` as `-infinity`:
+`down(v) = max_w (G_t(w) + down(w))` over signal successors, `down(output) = 0`;
+`up(v) = max_u (up(u) + G_p(u))` over signal predecessors, `0` at a source; `nu`, `nd` the same
+maxima of the count of nodes with `D > 0` (`v` excluded); `A(v) = up(v) + down(v) +
+ceil(2000 log10(nu + nd + 1))` and `k(v) = max(0, ceil(A / 2000))` for `D_v > 0` and `A` finite,
+else `0`. Then
+
+* `extent(v) = max_in (extent(u) + comp(u -> v)) + L_v + T_v + k(v) D_v`, `output_tail =
+  extent(output)`;
+* `S_out(v) = g_p(v) max_u S_out(u) + sigma_p(v)`, `S_in(v) = max_u S_out(u)`,
+  `sigma'(v) = sigma_t(v) + (3/4) eps 10^(-k(v)) S_in(v)` for `D_v > 0` (else `sigma_t(v)`),
+  `Sigma = sum_v 10^(down(v)/2000) sigma'(v)`, `P*_graph = 4 Sigma / eps`;
+* below the floor, `R_v = peak_plus_24_dbfs` when `X*(v) = P*_graph 10^(up(v)/2000) + S_in(v)` is
+  at most +24 dBFS, else `any_sanitized_input`; `rest_extent(v) = max_in (rest_extent(u) +
+  comp(u -> v)) + L_v + R_v`, `output_tail_every_peak = max(output_tail, rest_extent(output))`
+  (`= output_tail` when `Sigma = 0`; `R_v = any_sanitized_input` everywhere when the `f64` sum is
+  not finite, the floor `AboveRange`).
+
+A node from which the output is not reachable takes no part. An `Infinite` tail or an `Unstated`
+composition from which the output is reachable makes both values `Infinite` and the floor
+unstated; an `Unstated` rest does the same to `output_tail_every_peak` unless `Sigma = 0` (D4).
+
+### Proof
+
+*Path weights.* For a source-to-output signal path `p`, let `w_p = prod 1 / m_s` over the nodes `s`
+on `p` with a signal predecessor (`m_s` its signal in-degree). `w_p` is the probability that a
+backward walk from the output, choosing a signal predecessor uniformly at each node, follows `p`, so
+`sum_p w_p <= 1`. A sum's gain is `m (1 + u)^(m-1)`, so `|y_v| <= g_v max |x_i|` gives the
+peak-gain path sum `U_v = sum_p w_p prod_{q before v} g_p(q) <= 10^(up(v)/2000)` (each `1 / m` cancels
+the `m` in the sum's gain on the same path), and the tail-gain path sum from `v` to the output,
+`W_v <= 10^(down(v)/2000)`, the same way.
+
+*(i) Peak.* By (N1) at each node in schedule order, `|x_v[n]| <= X_v <= P U_v + S_in(v)` for every
+`n` (`S_in` carries the upstream peak stalls).
+
+*(ii) Tail.* Let `M_v = max_in (extent(u) + comp(u -> v))`. Induction in schedule order: for
+`n >= N + M_v`, `|x_v[n]| <= epsilon_v`, where `epsilon_v` sums, over every node `j` upstream of
+`v`, `j`'s relative residual `(3/4) eps 10^(-k_j) P U_j` and its effective stall `sigma'_j`, each
+carried to `v`'s input by the tail-gain path sum. A compensation delay is an exact ring (a bound
+from `N + extent(u)` holds for the delayed copy from `N + extent(u) + comp`), a latency shifts by
+`L`, and a sum adds its inputs with `(1 + u)^(m-1)`, which its `G_t` carries. (N2) at `v` with
+`M = N + M_v`, `k = k(v)` and `X = X_v <= P U_v + S_in(v)` gives, for `n >= N + extent(v)`,
+`|y_v[n]| <= (3/4) eps 10^(-k_v) P U_v + g_t(v) epsilon_v + sigma'_v`: the claim at `v`'s
+successors (the `S_in(v)` part of `X_v` is `sigma'_v`'s second term, which reads the tail stall
+`sigma_t(v)` plus the carried peak stalls).
+
+*(iii) Output.* At the output, for `n >= N + output_tail`:
+`|y| <= (3/4) eps P sum_j 10^(-k_j) U_j W_j + sum_j W_j sigma'_j`. `U_j W_j = sum_{p through j}
+w_p Gamma_{p,j}` with `Gamma_{p,j}` the product of the other nodes' gains on `p`, and step 4 gives
+`10^(-k_j) Gamma_{p,j} <= 1 / n_p` (`n_p` the nodes with `D > 0` on `p`; `A` includes
+`2000 log10(n_p)` through `nu + nd + 1 >= n_p`, and `k >= A / 2000`). So the first term is at most
+`(3/4) eps P sum_p w_p sum_{j on p, D_j > 0} 1 / n_p <= (3/4) eps P`. The second is at most `Sigma`.
+For `P >= P*_graph`: `Sigma < (eps / 4) P*_graph <= (eps / 4) P` (the stated floor is strictly above
+`4 Sigma / eps`), so `|y| < eps P`. For `Sigma = 0`: `|y| <= (3/4) eps P < eps P` for every `P > 0`.
+A node with `D = 0` takes no share of the relative budget, which is why a delay adds exactly its
+length.
+
+*(iv) Below the floor.* For `P < P*_graph`, every node's input peak is at most `X*(v)` by (i), or is
+replaced by `+0.0` (the range hypothesis: every input section sanitizes `|x| >= 1e30` and non-finite
+samples, and a replacement only lowers magnitudes). Exact zero propagates: a node whose every input
+is `+-0.0` from `M` rests by `M + L + R` (N3); a gain, a sum and a ring of `+-0.0` give `+-0.0`. So
+the output is `+-0.0` from `N + rest_extent(output)`. With the floor `AboveRange` every `X*` is
+taken above +24 dBFS, which `any_sanitized_input` covers.
+
+### Numerics
+
+The millibel sums are `i64`, checked (`graph.tail.arithmetic_overflow`; a session cannot reach it).
+The stall sum is one `f64` pass on the control thread: every operation's result is inflated by
+`1 + 2^-30` and then the smallest positive `f64` added (an upper bound even where a product lands
+subnormal), every `10^(x/2000)` is `math::exp` (the same bits on every target) rounded up the same
+way, a value below `10^-300` is stated as `10^-300`, and the floor is `ceil_millibels` of the
+inflated quotient, so the stated floor is strictly above `4 Sigma / eps` and the canonical text is
+target-independent. A non-finite value anywhere states `AboveRange` (about 73 nested submix levels
+at domain maxima with trim +24 dB, `crates/graph-compiler/tests/tail_composition.rs`), never a
+refusal. `graph.tail.limit` checks `output_tail_every_peak` (Q7).
+
+### Gates
+
+`crates/graph-compiler/tests/tail_composition.rs` recomputes the three values by enumerating every
+path (C3, over C1, C2, C4, C5 and C11's sessions under both selections and a live track into a live
+submix), and holds C4 (fan-in), C5 (strip delay), C7 (`Unstated` wins), C11 (a) and C13 (a, b);
+C13 (c) is `an_overflowing_millibel_sum_is_a_diagnostic` beside the helper. The real-kernel gates
+(C1, C2, C5's impulse, C6, C11 (b)) are `crates/host-core/tests/tail_composition.rs`.
+
 ## Citations
 
 As #1329: [SIMPER-SVF], [ZAVALISHIN-TPT], [ORFANIDIS-ISP] (state-space norms), [SMITH-SASP]

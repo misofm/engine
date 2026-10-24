@@ -7,7 +7,7 @@
 
 use bench_support::alloc::{Mode, assert_installed, current_thread_counters, mode, set_mode};
 use core::num::NonZeroUsize;
-use effect_contract::{LatencySamples, TailSamples};
+use effect_contract::LatencySamples;
 use engine::{
     QuantumFrames, SampleRateHz,
     realtime::{
@@ -107,7 +107,7 @@ fn bound(slot: Option<Box<[f32]>>) -> PreparedRenderPlan {
         .map(|id| GraphNode {
             id,
             latency: LatencySamples(0),
-            tail: TailSamples::Finite(0),
+            bound: effect_contract::NodeTailBound::ZERO,
         })
         .collect();
     nodes.sort_by(|left, right| left.id.cmp(&right.id));

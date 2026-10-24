@@ -11329,12 +11329,12 @@ mod tests {
                     crate::GraphNode {
                         id: fader.clone(),
                         latency: effect_contract::LatencySamples(0),
-                        tail: effect_contract::TailSamples::Finite(0),
+                        bound: effect_contract::NodeTailBound::ZERO,
                     },
                     crate::GraphNode {
                         id: matrix.clone(),
                         latency: effect_contract::LatencySamples(0),
-                        tail: effect_contract::TailSamples::Finite(0),
+                        bound: effect_contract::NodeTailBound::ZERO,
                     },
                 ],
                 ports: Vec::new(),
@@ -13397,7 +13397,7 @@ mod tests {
             .map(|id| crate::GraphNode {
                 id,
                 latency: effect_contract::LatencySamples(0),
-                tail: effect_contract::TailSamples::Finite(0),
+                bound: effect_contract::NodeTailBound::ZERO,
             })
             .collect();
         nodes.sort_by(|left, right| left.id.cmp(&right.id));
@@ -13916,7 +13916,7 @@ mod tests {
             .map(|id| crate::GraphNode {
                 id,
                 latency: effect_contract::LatencySamples(0),
-                tail: effect_contract::TailSamples::Finite(0),
+                bound: effect_contract::NodeTailBound::ZERO,
             })
             .collect();
         nodes.sort_by(|left, right| left.id.cmp(&right.id));
@@ -14179,7 +14179,7 @@ mod tests {
             .map(|id| crate::GraphNode {
                 id,
                 latency: effect_contract::LatencySamples(0),
-                tail: effect_contract::TailSamples::Finite(0),
+                bound: effect_contract::NodeTailBound::ZERO,
             })
             .collect();
         nodes.sort_by(|left, right| left.id.cmp(&right.id));
@@ -14691,7 +14691,7 @@ mod tests {
             .map(|id| crate::GraphNode {
                 id,
                 latency: effect_contract::LatencySamples(0),
-                tail: effect_contract::TailSamples::Finite(0),
+                bound: effect_contract::NodeTailBound::ZERO,
             })
             .collect();
         nodes.sort_by(|left, right| left.id.cmp(&right.id));
@@ -15915,7 +15915,7 @@ mod tests {
             .map(|id| crate::GraphNode {
                 id,
                 latency: effect_contract::LatencySamples(0),
-                tail: effect_contract::TailSamples::Finite(0),
+                bound: effect_contract::NodeTailBound::ZERO,
             })
             .collect();
         nodes.sort_by(|left, right| left.id.cmp(&right.id));

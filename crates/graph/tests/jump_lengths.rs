@@ -6,7 +6,7 @@
 #![cfg(feature = "test-support")]
 
 use core::num::NonZeroUsize;
-use effect_contract::{LatencySamples, TailSamples};
+use effect_contract::LatencySamples;
 use engine::{
     QuantumFrames, SampleRateHz,
     realtime::{
@@ -79,7 +79,7 @@ fn bound() -> PreparedRenderPlan {
     let node = |id: &GraphNodeId| GraphNode {
         id: id.clone(),
         latency: LatencySamples(0),
-        tail: TailSamples::Finite(0),
+        bound: effect_contract::NodeTailBound::ZERO,
     };
     let mut nodes = vec![node(&input), node(&output)];
     nodes.sort_by(|a, b| a.id.cmp(&b.id));

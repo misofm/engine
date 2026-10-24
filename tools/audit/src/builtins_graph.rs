@@ -701,6 +701,7 @@ fn prepare_graph_plan(
             maximum_single_allocation_bytes: 10_000_000,
             maximum_finite_tail_samples: 10_000_000,
         },
+        gain_liveness: graph_compiler::GainLiveness::FIXED,
     })
     .unwrap_or_else(|_| panic!("graph compile"));
     assert_graph_fixture_pdc(artifact.graph());

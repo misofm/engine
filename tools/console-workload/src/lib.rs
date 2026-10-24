@@ -1580,6 +1580,7 @@ impl SessionRuntime {
             effects,
             builtins,
             caps: graph_caps(),
+            gain_liveness: graph_compiler::GainLiveness::FIXED,
         })
         .unwrap_or_else(|_| panic!("{}: production console graph", workload.kind()));
 
@@ -3309,6 +3310,7 @@ mod tests {
             effects,
             builtins,
             caps: graph_caps(),
+            gain_liveness: graph_compiler::GainLiveness::FIXED,
         }) else {
             panic!("bus-and-send console graph");
         };

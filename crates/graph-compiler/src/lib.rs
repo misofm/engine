@@ -11,7 +11,9 @@ use builtins_compiler::{
 use effect_compiler::{EffectPreparedEntry, EffectPreparedSession, EffectRack};
 use effect_contract::{BankWidth, ChannelSymmetryWitness};
 use effect_contract::{
-    LatencySamples, PrepareEffectBankRequest, PreparedSidechainPort, TailSamples,
+    CompositionBound, FlushStall, LatencySamples, NodeTailBound, PeakGain,
+    PrepareEffectBankRequest, PreparedSidechainPort, RestBound, RestSamples, TailDecay,
+    TailSamples,
 };
 use engine::realtime::RenderEnvelope;
 use graph::{
@@ -27,9 +29,12 @@ use graph::{
 /// (#99 F6). The build's backend is read by the caller -- `lane::Backend::current()`
 /// -- and never inside the compiler.
 pub use lane::Backend;
+use math::tail::{Rounding, UNDERFLOW, ceil_millibels};
 use rack::{RackLocation, RackProgram};
 use rack_compiler::{BankGroup, BankPlan, CohortCandidate, CohortLevel, plan_bank_groups};
-use session::{RouteDestination, RouteSource, SendTap, SidechainDeclaration};
+use session::{
+    RouteDestination, RouteSource, SendTap, SessionModel, SidechainDeclaration, StripKind, StripRef,
+};
 use sha2::{Digest, Sha256};
 
 pub struct GraphCompiler;
@@ -60,6 +65,47 @@ pub struct GraphBuiltinsCompileRequest {
     /// names no node of this graph is ignored. Empty for a plan with no predecessor: with no
     /// floors, neither the program nor its canonical bytes change.
     pub input_floors: BTreeMap<GraphNodeId, LatencySamples>,
+    /// Which gain values this plan can change after preparation (#1379 Amendment 1 H3, D2b). A
+    /// live gain states its domain maximum in the tail composition; a fixed one states its
+    /// prepared value. Only the caller knows which lanes it attaches after the compile, so this
+    /// has no default.
+    pub gain_liveness: GainLiveness,
+}
+
+/// Which gain lanes a plan attaches (#1379 Amendment 1 H3, D2b): the graph compile's tail
+/// composition states a live gain at its domain maximum and a fixed gain at its prepared value.
+///
+/// A strip's fader, mute or VCA lane driven by stored automation is live whatever this says: the
+/// compile reads that from the session.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct GainLiveness {
+    /// Every strip's fader, mute, VCA, matrix and pan values ride a live lane (a plan with a
+    /// control queue).
+    pub strip_fader_matrix: bool,
+    /// Every route into a submix rides a live lane. A route into the output never has one.
+    pub routes_into_submixes: bool,
+}
+
+impl GainLiveness {
+    /// No live gain lane: a plan prepared without a control queue.
+    pub const FIXED: Self = Self {
+        strip_fader_matrix: false,
+        routes_into_submixes: false,
+    };
+}
+
+/// The graph's flush floor `P*_graph`, in graph-input terms (#1379 Amendment 1 H4 step 6).
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub enum FlushFloor {
+    /// No floor: `output_tail` is `Infinite`, so no stall sum is formed.
+    Unstated,
+    /// The stall sum is exactly zero: `output_tail` holds for every peak.
+    Zero,
+    /// `ceil(2000 log10 P*_graph)` millibels re 1.0.
+    Millibels(i32),
+    /// The stall sum is not a finite `f64`: every peak is below the floor, and the exact-zero
+    /// branch (`output_tail_every_peak`) is the bound for every input.
+    AboveRange,
 }
 /// The one-way, sealed builtin attachment result.
 ///
@@ -186,8 +232,16 @@ pub struct GraphBuiltinsCompileFailure {
 pub struct GraphCompileReport {
     /// Arrival of the sole session output after checked latency and PDC propagation.
     pub output_latency: LatencySamples,
-    /// Propagated extent of the sole session output after latency and declared tails.
+    /// The decay extent of the sole session output (#1379 Amendment 1 H4 step 5): for every graph
+    /// input peak `P` at or above [`Self::output_flush_floor`], the output is below
+    /// `P * 10^(-144/20)` from `N + output_tail` on. It includes every latency on the path.
     pub output_tail: TailSamples,
+    /// The extent for every peak (H4 step 7), at least [`Self::output_tail`]: from
+    /// `N + output_tail_every_peak` on the output is below `P * 10^(-144/20)` at or above the
+    /// floor and exactly `+-0.0` below it. Hosts report this value (H10).
+    pub output_tail_every_peak: TailSamples,
+    /// `P*_graph`, the graph's flush floor (H4 step 6).
+    pub output_flush_floor: FlushFloor,
     /// The input arrival (the floored `max` of PDC) of every node at which it is nonzero, sorted
     /// by node ID (#1285 D2). A node absent here has input arrival 0. A successor's preparation
     /// passes this back as [`GraphBuiltinsCompileRequest::input_floors`].
@@ -1658,7 +1712,16 @@ mod tests {
         GraphNode {
             id: node(name),
             latency: LatencySamples(latency),
-            tail,
+            bound: stated_bound(tail),
+        }
+    }
+
+    /// A gain-free node bound (0 mB, no decay, no stall) with tail and exact rest `tail`, or the
+    /// unbounded bound for `Infinite`.
+    fn stated_bound(tail: TailSamples) -> NodeTailBound {
+        match tail {
+            TailSamples::Finite(samples) => crate::compile::sum_bound(1, samples),
+            TailSamples::Infinite => NodeTailBound::UNBOUNDED,
         }
     }
 
@@ -2053,6 +2116,7 @@ mod tests {
             builtins,
             caps,
             dispatch,
+            gain_liveness: crate::GainLiveness::FIXED,
         })
     }
 
@@ -2844,6 +2908,7 @@ mod tests {
                 },
                 builtins,
                 caps,
+                gain_liveness: crate::GainLiveness::FIXED,
             })
         };
 
@@ -3403,6 +3468,7 @@ mod tests {
             builtins: prepare_session_builtins(&session, &[], builtin_caps)
                 .expect("semantic baseline builtins"),
             caps: integration_caps(),
+            gain_liveness: crate::GainLiveness::FIXED,
         })
         .unwrap_or_else(|failure| panic!("semantic baseline: {:?}", failure.diagnostics));
         assert_eq!(semantic_baseline.prepared_builtin_bank_count(), 0);
@@ -3445,6 +3511,7 @@ mod tests {
             },
             builtins: prepared,
             caps: integration_caps(),
+            gain_liveness: crate::GainLiveness::FIXED,
         })
         .unwrap_or_else(|failure| panic!("bank graph: {:?}", failure.diagnostics));
         assert_eq!(
@@ -3478,6 +3545,7 @@ mod tests {
                     .expect("scalar mixed builtins")
             },
             caps: integration_caps(),
+            gain_liveness: crate::GainLiveness::FIXED,
         })
         .unwrap_or_else(|failure| panic!("scalar mixed graph: {:?}", failure.diagnostics));
         assert_eq!(scalar_mixed.prepared_builtin_bank_count(), 0);
@@ -3536,6 +3604,7 @@ mod tests {
             },
             builtins: mixed_builtins,
             caps: integration_caps(),
+            gain_liveness: crate::GainLiveness::FIXED,
         })
         .unwrap_or_else(|failure| panic!("mixed graph: {:?}", failure.diagnostics));
         assert_eq!(mixed.report().estimate, expected_report);
@@ -3600,6 +3669,7 @@ mod tests {
                 effects,
                 builtins: prepared,
                 caps,
+                gain_liveness: crate::GainLiveness::FIXED,
             });
             assert!(exact_result.is_ok(), "exact whole-plan cap accepts");
             let mut below = caps;
@@ -3619,6 +3689,7 @@ mod tests {
                 effects,
                 builtins: prepared,
                 caps: below,
+                gain_liveness: crate::GainLiveness::FIXED,
             }) {
                 Ok(_) => panic!("one byte below whole-plan cap rejects"),
                 Err(failure) => failure,
@@ -3890,6 +3961,7 @@ mod tests {
             builtins: baseline_builtins,
             caps: integration_caps(),
             dispatch: Backend::Scalar,
+            gain_liveness: crate::GainLiveness::FIXED,
         })
         .unwrap_or_else(|failure| panic!("baseline: {:?}", failure.diagnostics));
         let (mut effects, mut builtins) = prepare();
@@ -3913,6 +3985,7 @@ mod tests {
                 builtins,
                 caps: constrained,
                 dispatch: Backend::Scalar,
+                gain_liveness: crate::GainLiveness::FIXED,
             }) {
                 Ok(_) => panic!("zero cap rejects early; nonzero node cap rejects after planning"),
                 Err(failure) => failure,
@@ -3964,6 +4037,7 @@ mod tests {
             builtins,
             caps: integration_caps(),
             dispatch: Backend::Scalar,
+            gain_liveness: crate::GainLiveness::FIXED,
         })
         .unwrap_or_else(|failure| panic!("retry: {:?}", failure.diagnostics));
         assert_eq!(
@@ -4869,7 +4943,7 @@ mod tests {
             .spec
             .nodes
             .iter()
-            .map(|node| (node.id.clone(), node.tail))
+            .map(|node| (node.id.clone(), node.bound.tail))
             .collect();
         let envelope = artifact.envelope();
         let nodes = artifact
@@ -4961,7 +5035,7 @@ mod tests {
                 .spec
                 .nodes
                 .iter()
-                .map(|node| (node.id.clone(), node.tail))
+                .map(|node| (node.id.clone(), node.bound.tail))
                 .collect::<Vec<_>>(),
             bank_tails
         );
@@ -10979,6 +11053,7 @@ mod tests {
             .expect("prepared console effects"),
             builtins,
             caps: integration_caps(),
+            gain_liveness: crate::GainLiveness::FIXED,
         })
         .unwrap_or_else(|_| panic!("production console graph"));
         let builtin_banks = artifact.prepared_builtin_bank_count();
@@ -11192,6 +11267,7 @@ mod tests {
             .expect("prepared console effects"),
             builtins,
             caps: integration_caps(),
+            gain_liveness: crate::GainLiveness::FIXED,
         })
         .map_err(|failure| failure.diagnostics)
     }
@@ -11272,6 +11348,7 @@ mod tests {
             .expect("prepared console effects"),
             builtins,
             caps: integration_caps(),
+            gain_liveness: crate::GainLiveness::FIXED,
         })
         .unwrap_or_else(|_| panic!("production selected-meter console graph"))
     }
@@ -11744,7 +11821,7 @@ mod tests {
         assert_eq!(effect_nodes.len(), 10);
         assert!(effect_nodes.iter().all(|node| {
             node.latency == LatencySamples(0)
-                && node.tail == TailSamples::Infinite
+                && node.bound.tail == TailSamples::Infinite
                 && matches!(&node.id, GraphNodeId::Effect(id) if id.rack == RackId::Dynamic)
         }));
         assert!(artifact.graph().route_timings.iter().all(|route| {
@@ -11984,7 +12061,8 @@ mod tests {
         )
         .expect("builtins");
         // #1329: the fixture's input HPF has a certified finite tail, computed at preparation;
-        // the graph carries the prepared value onto the node and composes it to the output.
+        // the graph carries the prepared value onto the node (its composition to the output is
+        // `tests/tail_composition.rs`'s).
         let (_, prepared_tail) = builtins
             .tails()
             .find(|(track, _)| *track == "vocal")
@@ -12000,10 +12078,10 @@ mod tests {
             },
             builtins,
             caps: integration_caps(),
+            gain_liveness: crate::GainLiveness::FIXED,
         })
         .unwrap_or_else(|_| panic!("graph"));
         assert_eq!(artifact.external_binding_nodes().count(), 2);
-        assert_eq!(artifact.report().output_tail, prepared_tail);
         // Issue #925: with builtins the three stages are compiler-owned bindings, listed in
         // `required_bindings`, and each keeps its op -- a builtin bank member or a scalar owner
         // has to run. Every other stage boundary lowers as an alias, so the ops are exactly these.
@@ -12047,6 +12125,7 @@ mod tests {
             .iter()
             .find(|node| node.id == track_node("vocal", TrackStage::PostInputBuiltins))
             .expect("input builtins node")
+            .bound
             .tail;
         assert_eq!(tail, prepared_tail);
     }
@@ -12119,6 +12198,7 @@ mod tests {
                 },
                 builtins,
                 caps: integration_caps(),
+                gain_liveness: crate::GainLiveness::FIXED,
             })
             .unwrap_or_else(|_| panic!("graph"))
         };
@@ -12337,6 +12417,7 @@ mod tests {
             },
             builtins: baseline_builtins,
             caps: integration_caps(),
+            gain_liveness: crate::GainLiveness::FIXED,
         })
         .unwrap_or_else(|failure| panic!("baseline bank graph: {:?}", failure.diagnostics));
         // The graph's own samples, before the builtin banks attach their scratch: the report's
@@ -12374,6 +12455,7 @@ mod tests {
             },
             builtins,
             caps: constrained,
+            gain_liveness: crate::GainLiveness::FIXED,
         }) {
             Ok(_) => panic!("post-bank cap must reject"),
             Err(failure) => failure,
@@ -12485,6 +12567,7 @@ mod tests {
                 },
                 builtins,
                 caps: integration_caps(),
+                gain_liveness: crate::GainLiveness::FIXED,
             }) {
                 Ok(artifact) => artifact,
                 Err(_) => panic!("seeded graph"),
@@ -12516,6 +12599,7 @@ mod tests {
                     },
                     builtins: native_builtins,
                     caps: integration_caps(),
+                    gain_liveness: crate::GainLiveness::FIXED,
                 })
                 .unwrap_or_else(|_| panic!("native seeded graph"));
             let width = BankWidth::for_backend(Backend::current());
@@ -12833,6 +12917,7 @@ mod tests {
                 },
                 builtins,
                 caps: integration_caps(),
+                gain_liveness: crate::GainLiveness::FIXED,
             }) else {
                 panic!("forged builtin artifact must reject: {corruption:?}");
             };
@@ -12970,21 +13055,6 @@ mod tests {
     }
 
     #[test]
-    fn timing_applies_declared_tail_after_node_latency() {
-        let nodes = [
-            graph_node("source", 0, TailSamples::Finite(0)),
-            graph_node("effect", 3, TailSamples::Finite(5)),
-        ];
-        let edges = [edge("serial", "source", "effect")];
-        let table = table(&nodes, &edges);
-        let schedule = topo(&table).expect("acyclic").schedule;
-        let error = timings(&table, &schedule, &BTreeMap::new(), &caps(7))
-            .err()
-            .expect("latency plus tail exceeds cap");
-        assert_eq!(error.code, "graph.tail.limit");
-    }
-
-    #[test]
     fn timing_reports_the_checked_sole_output_arrival_and_extent() {
         let early = node("early");
         let late = node("late");
@@ -12995,17 +13065,17 @@ mod tests {
             GraphNode {
                 id: early.clone(),
                 latency: LatencySamples(3),
-                tail: TailSamples::Finite(5),
+                bound: stated_bound(TailSamples::Finite(5)),
             },
             GraphNode {
                 id: late.clone(),
                 latency: LatencySamples(7),
-                tail: TailSamples::Finite(1),
+                bound: stated_bound(TailSamples::Finite(1)),
             },
             GraphNode {
                 id: output.clone(),
                 latency: LatencySamples(0),
-                tail: TailSamples::Finite(0),
+                bound: stated_bound(TailSamples::Finite(0)),
             },
         ];
         let edges = [
@@ -13035,12 +13105,28 @@ mod tests {
         assert_eq!(timing.delays.len(), 1);
 
         let mut infinite_nodes = nodes.clone();
-        infinite_nodes[1].tail = TailSamples::Infinite;
+        infinite_nodes[1].bound = NodeTailBound::UNBOUNDED;
         let infinite_table = table(&infinite_nodes, &edges);
         let infinite = timings(&infinite_table, &schedule, &BTreeMap::new(), &caps(100))
             .expect("infinite output tail");
         assert_eq!(infinite.output_latency, LatencySamples(7));
         assert_eq!(infinite.output_tail, TailSamples::Infinite);
+    }
+
+    /// #1379 C13 (c): an `i64` millibel sum that overflows is a diagnostic, never a wrap. A session
+    /// cannot reach it (`i32` node gains need about `2^32` nodes on one path), so the helper is
+    /// tested alone. Red if the sum wraps or saturates.
+    #[test]
+    fn an_overflowing_millibel_sum_is_a_diagnostic() {
+        assert_eq!(crate::pdc::millibel_sum(i64::MAX - 1, 1), Ok(i64::MAX));
+        assert_eq!(
+            crate::pdc::millibel_sum(i64::MAX, 1).map_err(|error| error.code),
+            Err("graph.tail.arithmetic_overflow")
+        );
+        assert_eq!(
+            crate::pdc::millibel_sum(i64::MIN, -1).map_err(|error| error.code),
+            Err("graph.tail.arithmetic_overflow")
+        );
     }
 
     /// #1285 D1: a floor above a node's latest incoming arrival raises its `max`, and every
@@ -13059,17 +13145,17 @@ mod tests {
             GraphNode {
                 id: early.clone(),
                 latency: LatencySamples(3),
-                tail: TailSamples::Finite(0),
+                bound: stated_bound(TailSamples::Finite(0)),
             },
             GraphNode {
                 id: late.clone(),
                 latency: LatencySamples(7),
-                tail: TailSamples::Finite(0),
+                bound: stated_bound(TailSamples::Finite(0)),
             },
             GraphNode {
                 id: output.clone(),
                 latency: LatencySamples(0),
-                tail: TailSamples::Finite(0),
+                bound: stated_bound(TailSamples::Finite(0)),
             },
         ];
         let edges = [
@@ -13152,7 +13238,7 @@ mod tests {
             GraphNode {
                 id: output.clone(),
                 latency: LatencySamples(0),
-                tail: TailSamples::Finite(0),
+                bound: stated_bound(TailSamples::Finite(0)),
             },
         ];
         let to_output = |name: &str, source: &str| GraphEdge {
@@ -13243,7 +13329,7 @@ mod tests {
             .map(|id| GraphNode {
                 id: id.clone(),
                 latency: LatencySamples(0),
-                tail: TailSamples::Finite(0),
+                bound: stated_bound(TailSamples::Finite(0)),
             })
             .collect();
         let assigned: BTreeMap<_, _> = assignments_for(&nodes, &edges, &schedule)

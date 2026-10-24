@@ -253,6 +253,7 @@ fn bind(
         builtins,
         caps: graph_caps(),
         dispatch,
+        gain_liveness: graph_compiler::GainLiveness::FIXED,
     })
     .unwrap_or_else(|failure| panic!("graph: {:?}", failure.diagnostics));
     let estimate = artifact.graph_resource_estimate().incremental_plan_bytes;

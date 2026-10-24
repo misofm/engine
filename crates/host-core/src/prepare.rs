@@ -2865,6 +2865,12 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
             maximum_single_allocation_bytes: caps.maximum_named_allocation_bytes,
             maximum_finite_tail_samples: u64::MAX,
         },
+        // #1379 Amendment 1 H3: with a control queue every strip's fader, mute and matrix lanes
+        // are attached; a route into a submix gets its lane after the compile, when asked.
+        gain_liveness: graph_compiler::GainLiveness {
+            strip_fader_matrix: attach_live,
+            routes_into_submixes: attach_live && lanes.routes,
+        },
     })
     .map_err(|failure| {
         PrepareDiagnostics::new(
