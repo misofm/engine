@@ -339,8 +339,9 @@ fn the_ragged_tail_banks_like_any_other_cohort_and_pays_one_chain_for_it() {
 /// saving on that row comes from.
 ///
 /// Every standing row binds builtin banks, and so does the gain/pan row (issue #956), which is
-/// why it is iterated here beside [`WORKLOADS`]. The builtins-less plumbing row that was this test's one
-/// bankless exception was retired by the same issue, because no host compiles such a plan.
+/// why it is iterated here beside [`WORKLOADS`]. The builtins-less plumbing row that was this
+/// test's one bankless exception was retired by the same issue, because no host compiles such a
+/// plan.
 #[test]
 fn every_standing_workload_folds_one_route_per_track() {
     for workload in WORKLOADS.into_iter().chain(DRIVER_FED_WORKLOADS) {
@@ -489,9 +490,9 @@ fn the_half_mono_cohort_banks_like_a_uniform_one() {
     // master, its 64 route ops having been absorbed by the #218 fold and never built as units at
     // all. Its 64 source-input ops (claims of the source set every row binds, issue #965) and its
     // identity master are the engine's own kinds and report `SYMMETRIC`, vacuous witnesses in
-    // addition to the 64 eligible bank-chain lanes; they add no collapse-eligible track. The half-mono row's fold declines (see
-    // `every_standing_workload_folds_one_route_per_track` for the association-order derivation),
-    // so its 64 route ops *are* dispatched: 193 lanes, not 129. And a `Route` reports
+    // addition to the 64 eligible bank-chain lanes; they add no collapse-eligible track. The
+    // half-mono row's fold declines (see `every_standing_workload_folds_one_route_per_track` for
+    // the association-order derivation), so its 64 route ops *are* dispatched: 193 lanes, not 129. And a `Route` reports
     // `ChannelSymmetryWitness::SYMMETRIC` -- it is not per-track upstream work, so nothing about
     // it can make two channels disagree -- which adds 64 to the eligible half as well.
     //
@@ -791,7 +792,8 @@ fn mono_fixture_rows(chains: usize) -> Vec<PlanUnitEligibility> {
 /// The cohort count is read from the plan, for the reason [`cohorts`] reads it: a four-lane host
 /// runs sixteen chains of four, and every other field is width-independent.
 ///
-/// Red mutations, both run when this was written (the counts restated for the #965 inventory):
+/// Red mutations, both run when this was written (the counts below are derived for the #965
+/// inventory, not re-run):
 /// bind `main-out` through an opaque processor again (the pre-#221 harness) and the last row fails
 /// (`lane_eligible` `[false]`; the census is `[128, 129]` in that tree) while every bank row, and
 /// so the premise's count, stays put; drop the `banked` filter from `bank_symmetry_counters` and

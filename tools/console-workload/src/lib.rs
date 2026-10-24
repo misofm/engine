@@ -2311,8 +2311,8 @@ impl SourceSignal {
 /// Every track input is a frozen block per observation; nothing is decoded on the render path.
 ///
 /// Aligned to 64 bytes (issue #935) so both planes start a cache line wherever the struct is
-/// boxed: every row's source set holds one slice of them ([`FrozenSourceDriver`]). Unaligned, the allocator's 16-byte placement split
-/// half the 32-byte loads that copy or read these words, and moved the ring row's time between
+/// boxed: every row's source set holds one slice of them ([`FrozenSourceDriver`]). Unaligned,
+/// the allocator's 16-byte placement split half the 32-byte loads that copy or read these words, and moved the ring row's time between
 /// builds for no reason in the engine. `repr(C)` keeps `left` at offset 0 and `right` at
 /// `QUANTUM * 4`, a line multiple, and the size stays exactly the two planes: no padding.
 #[repr(C, align(64))]
@@ -2362,17 +2362,6 @@ impl FrozenGraphSource {
         left.copy_from_slice(plane(mapping.0));
         right.copy_from_slice(plane(mapping.1));
         Self { left, right }
-    }
-}
-
-impl GraphRuntimeProcessor for FrozenGraphSource {
-    fn process(
-        &mut self,
-        block: GraphBindingBlock<'_>,
-    ) -> Result<(), engine::realtime::RenderError> {
-        block.left.copy_from_slice(&self.left);
-        block.right.copy_from_slice(&self.right);
-        Ok(())
     }
 }
 
