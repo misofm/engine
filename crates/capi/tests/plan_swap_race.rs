@@ -60,7 +60,7 @@ const WEDGE_BLOCKS: u64 = 256;
 /// of one.
 const OVERLAP_BLOCKS: u64 = 4_096;
 
-/// The control thread's sleep between steps once every edit is admitted (#1405). Its timer wakeup
+/// The control thread's sleep between steps once every swap is admitted (#1405). Its timer wakeup
 /// can preempt the render thread inside a render call; a `yield_now` cannot, because under EEVDF
 /// each yield moves the yielding thread's deadline later.
 const OVERLAP_SLEEP: std::time::Duration = std::time::Duration::from_micros(50);
@@ -293,13 +293,10 @@ struct Control<'a> {
     plan_address: usize,
     model: session::SessionModel,
     swaps: u64,
-    /// The most edits the race admits: `swaps`, or back to back up to twice that, in pairs, until
-    /// both withdrawal outcomes are seen (#1405).
-    edits_bound: u64,
     rendered: &'a AtomicU64,
     in_render: &'a AtomicBool,
     done: &'a AtomicBool,
-    /// Set with [`Control::is_done`]: every edit is admitted, or the race failed.
+    /// Set with [`Control::is_done`]: every swap is admitted, or the race failed.
     swapped: &'a AtomicBool,
     response: [u8; 4_096],
     event: [u8; 4_096],
@@ -326,18 +323,9 @@ struct Control<'a> {
 }
 
 impl Control<'_> {
-    /// Whether every edit is admitted (or the race failed). The race goes on after this.
-    ///
-    /// Back to back, `swaps` is a floor (#1405): #1310's `Withdrawn` and `Taken` outcomes are
-    /// counted only inside a command, so the race admits further edits, in pairs to end on the
-    /// boot model, until both are seen or `edits_bound` edits are admitted.
+    /// Whether every swap is admitted (or the race failed). The race goes on after this.
     fn is_done(&self) -> bool {
-        let (withdrawn, taken, _) = self.outcomes;
-        self.failure.is_some()
-            || self.admitted >= self.edits_bound
-            || (self.admitted >= self.swaps
-                && (!self.back_to_back
-                    || (self.admitted.is_multiple_of(2) && withdrawn > 0 && taken > 0)))
+        self.admitted == self.swaps || self.failure.is_some()
     }
 
     /// Whether the race is over (#1405): every swap is admitted and either a control call has
@@ -522,7 +510,7 @@ impl Control<'_> {
 
 /// Runs the control side on a scoped thread, unlocked, while `render` renders on this thread, until
 /// the race is over or `render` returns. Between steps the control thread yields while edits
-/// remain and sleeps [`OVERLAP_SLEEP`] once every edit is admitted (#1405).
+/// remain and sleeps [`OVERLAP_SLEEP`] once every swap is admitted (#1405).
 fn race_unpaced(control: &mut Control<'_>, render: impl FnOnce()) {
     let halt = AtomicBool::new(false);
     std::thread::scope(|scope| {
@@ -598,7 +586,6 @@ fn race_plan_swaps(swaps: u64, readers: usize, back_to_back: bool) {
     let done = AtomicBool::new(false);
     let swapped = AtomicBool::new(false);
     let rendered = AtomicU64::new(0);
-    let edits_bound = if back_to_back { 2 * swaps } else { swaps };
     let fed_frames = AtomicU64::new(0);
     let request = track_command(1, 42, &model, true);
     let mut control = Control {
@@ -606,7 +593,6 @@ fn race_plan_swaps(swaps: u64, readers: usize, back_to_back: bool) {
         plan_address,
         model,
         swaps,
-        edits_bound,
         rendered: &rendered,
         in_render: &in_render,
         done: &done,
@@ -642,7 +628,7 @@ fn race_plan_swaps(swaps: u64, readers: usize, back_to_back: bool) {
     // Every swap needs two blocks, and a healthy one is never backpressured for longer than
     // `WEDGE_BLOCKS`; blocks after the race ends render nothing. The bound also holds the
     // `OVERLAP_BLOCKS` after the last admission, which the unpaced loop adds.
-    let block_bound = usize::try_from(edits_bound * (WEDGE_BLOCKS + 2)).expect("block bound");
+    let block_bound = usize::try_from(swaps * (WEDGE_BLOCKS + 2)).expect("block bound");
     let overlap_bound = usize::try_from(OVERLAP_BLOCKS + 2).expect("overlap bound");
     let polled = std::thread::scope(|scope| {
         let pollers = (0..readers)
@@ -777,10 +763,7 @@ fn race_plan_swaps(swaps: u64, readers: usize, back_to_back: bool) {
                 .map(|sample| sample.to_bits())
                 .collect::<Vec<_>>();
         }
-        assert!(
-            control.admitted.is_multiple_of(2),
-            "the race ends on the boot model"
-        );
+        assert!(swaps.is_multiple_of(2), "the race ends on the boot model");
         // SAFETY: These handles are uniquely owned until the matching destroy calls below.
         let twin = unsafe {
             let (twin_session, twin_plan) = compile_c(&document, &limits());
@@ -819,9 +802,9 @@ fn race_plan_swaps(swaps: u64, readers: usize, back_to_back: bool) {
         miso_engine_v1_plan_destroy(plan);
     }
     println!(
-        "{} edits: {} overlaps, the first at block {:?}; last admission at block {}, \
+        "{swaps} swaps: {} overlaps, the first at block {:?}; last admission at block {}, \
          {blocks} blocks",
-        control.admitted, control.overlapped, control.first_overlap, control.admission_block
+        control.overlapped, control.first_overlap, control.admission_block
     );
     assert_eq!(last_render, RESULT_OK, "render refused the last block");
     for (reader, (queries, failure)) in polled.iter().enumerate() {
@@ -835,10 +818,9 @@ fn race_plan_swaps(swaps: u64, readers: usize, back_to_back: bool) {
         control.failure, None,
         "a control call lost the race with a plan swap"
     );
-    assert!(
-        control.admitted >= swaps,
-        "every swap admitted within the block bound: {} of {swaps}",
-        control.admitted
+    assert_eq!(
+        control.admitted, swaps,
+        "every swap admitted within the block bound"
     );
     let (withdrawn, taken, superseded) = control.outcomes;
     assert_eq!(
@@ -858,14 +840,10 @@ fn race_plan_swaps(swaps: u64, readers: usize, back_to_back: bool) {
             [f32::from_bits(raced[0]), f32::from_bits(raced[128])],
             [f32::from_bits(twin[0]), f32::from_bits(twin[128])],
         );
-        println!(
-            "{} back-to-back edits: {withdrawn} withdrawn, {taken} taken",
-            control.admitted
-        );
+        println!("{swaps} back-to-back edits: {withdrawn} withdrawn, {taken} taken");
         assert!(
             withdrawn > 0 && taken > 0,
-            "vacuous: {withdrawn} withdrawn and {taken} taken over {} back-to-back edits",
-            control.admitted
+            "vacuous: {withdrawn} withdrawn and {taken} taken over {swaps} back-to-back edits"
         );
     } else {
         assert_eq!(
@@ -874,11 +852,7 @@ fn race_plan_swaps(swaps: u64, readers: usize, back_to_back: bool) {
         );
     }
     // Back to back, one block is fed per admission (the last admission's step ends the race).
-    let fed_floor = if back_to_back {
-        control.admitted - 1
-    } else {
-        swaps + 1
-    };
+    let fed_floor = if back_to_back { swaps - 1 } else { swaps + 1 };
     assert!(
         control.fed_blocks >= fed_floor,
         "vacuous: {} source blocks fed across {swaps} swaps",
@@ -897,7 +871,7 @@ fn race_plan_swaps(swaps: u64, readers: usize, back_to_back: bool) {
     );
     // Back to back, a superseded candidate never renders a block of its own.
     assert!(
-        blocks > control.admitted - superseded,
+        blocks > swaps - superseded,
         "each adopted swap rendered its own block"
     );
 }

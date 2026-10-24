@@ -151,3 +151,42 @@ because a single CPU was not preempted at the right moment.
   - Per-run overlap counts for passing runs were not captured: the lane script matched the
     attempt 1 print. The gate was not rerun.
 - Gates 2 and 3 were not run for attempt 2: root's instruction was to stop if gate 1 fails.
+
+## Root decisions for attempt 3 (2026-10-24)
+
+- **#1310's `withdrawn > 0 && taken > 0` guard is split out.** It is a different claim with a
+  different cause: a `Taken` needs render to start a block inside a command. Root files it as its
+  own issue. Attempt 2's growth of the back-to-back race (`swaps` as a floor, `edits_bound`) is
+  reverted, so the third caller keeps that guard exactly as it is on `main`. The overlap shape
+  stays: `OVERLAP_BLOCKS`, `race_over`, `race_unpaced` and `OVERLAP_SLEEP`.
+- **Gate 1, restated:** 50 pinned runs per test, with 0 overlap-guard failures. Failures of the
+  #1310 guard are evidence for its own issue, not #1405 failures.
+
+## Attempt 3 evidence
+
+- **Gate 1: PASS.** Debug binary, 150 runs (50 per test), 6 lanes on CPUs 26-31, each pinned to
+  one CPU shared with one busy loop. No run had 0 overlaps. The first overlap was at most 3 blocks
+  after the last admission, never near half of `OVERLAP_BLOCKS`. Negative values mean the first
+  overlap came before the last admission.
+
+  | Test | Overlap guard | Overlaps (min/median/max) | First overlap minus last admission (min/median/max) |
+  |---|---|---|---|
+  | 24 swaps | 50/50 | 2 / 2 / 40 | -49 / -12 / 2 |
+  | 200 swaps, 2 readers | 50/50 | 2 / 10 / 44 | -397 / -363 / 3 |
+  | 64 back to back | 50/50 | 2 / 2 / 2 | 0 / 0 / 1 |
+
+- **Evidence for the split #1310 issue:** the back-to-back test failed 3 of 50 runs at #1310's
+  guard: "32/33/37 withdrawn and 0 taken over 64 back-to-back edits". Each of these runs had 2
+  overlaps. 0 runs had 0 withdrawn.
+- **Gate 2: PASS (PR evidence, one run each).** With `in_render.store(true, ..)` commented out,
+  each test failed with "vacuous: no control call overlapped a render call" after 4096 blocks
+  past its last admission (4146, 4509 and 4160 blocks, in 4.9 s, 8.6 s and 2.7 s). The line is
+  restored.
+- **Gate 3: PASS.**
+  - `cargo fmt --all -- --check`.
+  - `cargo clippy --locked --workspace --all-targets --all-features -- -D warnings`.
+  - `cargo run --locked --release -q -p realtime-policy` (192 regions in 34 files) and
+    `cargo test --locked -p realtime-policy`.
+  - `scripts/check-workspace-policy.sh` and `scripts/test-workspace-policy.sh`.
+  - `cargo check --locked --target aarch64-unknown-linux-gnu --tests -p capi`.
+  - `cargo test --locked -p capi --test plan_swap_race`: 4 passed.
