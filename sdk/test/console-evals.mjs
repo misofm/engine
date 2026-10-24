@@ -235,10 +235,10 @@ describe("issue #1097 -- every builder refusal is the engine's, with the engine'
       edit: (model) => { model.console.post_insert[0].identity.effect_id = "miso.delay"; },
     },
     {
-      name: "an ineligible console effect (the multiband, until #1069)",
+      name: "an ineligible console effect (the delay)",
       code: "console.slot.ineligible_effect",
-      build: () => stripBase({ postInsert: [{ slot: "limiter", effectId: "miso.multiband-compressor" }] }),
-      edit: (model) => { model.console.post_insert[0].identity.effect_id = "miso.multiband-compressor"; },
+      build: () => stripBase({ postInsert: [{ slot: "limiter", effectId: "miso.delay" }] }),
+      edit: (model) => { model.console.post_insert[0].identity.effect_id = "miso.delay"; },
     },
     {
       name: "a slot ID repeated across the two sections",

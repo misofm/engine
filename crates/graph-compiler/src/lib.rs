@@ -498,13 +498,14 @@ mod tests {
     /// Many fixtures here put that double in a lowered SIMD rack, which decision 12 spells as a
     /// console slot; every host still prepares through the launch list alone, and
     /// `effect_compiler`'s own tests hold the refusal of anything else.
-    const TEST_CONSOLE_ELIGIBLE: [&str; 7] = [
+    const TEST_CONSOLE_ELIGIBLE: [&str; 8] = [
         effect_compiler::CONSOLE_ELIGIBLE_EFFECTS[0],
         effect_compiler::CONSOLE_ELIGIBLE_EFFECTS[1],
         effect_compiler::CONSOLE_ELIGIBLE_EFFECTS[2],
         effect_compiler::CONSOLE_ELIGIBLE_EFFECTS[3],
         effect_compiler::CONSOLE_ELIGIBLE_EFFECTS[4],
         effect_compiler::CONSOLE_ELIGIBLE_EFFECTS[5],
+        effect_compiler::CONSOLE_ELIGIBLE_EFFECTS[6],
         "conformance.delay",
     ];
 

@@ -224,10 +224,10 @@ sidechains included. It may be empty.
 The chain is `input -> input section -> console.pre_insert -> inserts -> console.post_insert ->
 fader/mute -> pan/matrix -> routes`.
 
-**Eligibility.** A console slot must be one of the six effects that always bank:
+**Eligibility.** A console slot must be one of the seven effects that always bank:
 `miso.parametric-eq`, `miso.compressor`, `miso.gate-expander`, `miso.soft-clip`,
-`miso.transient-shaper` and `miso.true-peak-limiter`. The delay never banks, and the multiband
-compressor is excluded until #1069 closes. The schema checks the identity's syntax only; the list
+`miso.transient-shaper`, `miso.true-peak-limiter` and `miso.multiband-compressor`. The delay never
+banks. The schema checks the identity's syntax only; the list
 is enforced where native identities resolve, by effect preparation, which refuses any other slot
 with `console.slot.ineligible_effect` at `$.console.<section>[slot=<id>].identity`.
 

@@ -260,3 +260,15 @@ with `git checkout` and `touch`.
 | `desymmetrize` skips `silence` (copies `filter`, `gain_db`, `ramps`) | `src/lib.rs` | RED: `DualMono: after the copy` (the right counter froze at the collapse) and `silence: after the copy` |
 | `channels_bit_equal` omits both `gain_db` words | `src/lib.rs` | RED: `channels_agree_and_the_witness_read_every_copied_word` at `low gain` |
 | the collapsed body passes `L::zero()` as the link partner (both bands) | `src/lib.rs` | RED: `Four Average block 2: left plane word 0`; `DualMono` ignores the partner and `max(\|p\|, 0) = \|p\|`, so those two modes stay green by construction |
+
+## Padded banks (#1893)
+
+Applied on the committed attempt-1 tree (`f32767cfc`), run with
+`cargo test --locked -p multiband-compressor --lib padding`, and restored with `git checkout` and
+`touch`.
+
+| mutation | file | result |
+|---|---|---|
+| `Instance::charge` does not mask with `active` | `src/lib.rs` | RED: `a_planted_nonfinite_state_in_a_padded_lane_recovers_uncharged`, `Four: NaN in lane 3 (padded true): block 2: the reports` (the pad lane charged one left block) |
+| `process_bank_inner` applies a padded lane's automation | `src/lib.rs` | RED: `every_padded_bank_renders_its_members_per_node_bits`, padded lane reported (`invalid_spans: 1`) |
+| `checked_track` ignores `active` | `src/lib.rs` | RED: `every_padded_bank_renders_its_members_per_node_bits`, `padded lane ... has no payload` |
