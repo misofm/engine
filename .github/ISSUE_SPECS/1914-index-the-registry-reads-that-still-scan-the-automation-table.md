@@ -35,5 +35,14 @@ Route both readers through the #1710 `AutomationIndex` / `ModelView` reads that 
 
 ## Evidence (attempt 1)
 
-Recorded in the PR body (class A one-time comparisons and the descriptive timing are PR
-evidence, not committed).
+- Class A (one time, PR evidence): `automation_diagnostics` output, the full control listing and
+  `get` of every builtin and VCA row are byte-equal at base 6172dc4e6 and the branch on #1710's
+  generated session (256 tracks), the same with hand offsets on a fader and the VCA ride, #1844's
+  VCA-mute variant, and a refused variant (an out-of-domain offset and an HPF/LPF order fault: two
+  diagnostics).
+- Descriptive timing of the `sources` stage (#1864 harness, release, one warmup, two rounds,
+  `flock -x`, load 1.7): first plan 0.15/0.14 ms at 256 strips and 0.70/0.69 ms at 1024 (#1864:
+  0.41 and 5.96 ms); successor 0.15/0.19 and 0.71/0.70 ms. The stage now grows about 4.8x for 4x
+  strips.
+- Mutants on the D3 row: `strip::resolve` keying the mute entries, and swapping the lanes, both
+  turn it red; the wrong-row mutant turns no other `controls` or `host-core` test red.
