@@ -31,7 +31,6 @@ use core::mem::{MaybeUninit, size_of};
 use core::num::NonZeroUsize;
 use std::sync::{Arc, Mutex};
 
-use builtins::MeterSnapshot;
 use builtins_compiler::MeterConsumer;
 use control_plane::{
     CompileFailure, ControlAdapter, ControlLimits, ObservationChange, ObservationKeyError,
@@ -46,9 +45,10 @@ use host_core::meters::window_since_arm;
 use host_core::{
     CompiledSession, EffectObservationHandle, GainReductionTaps, HostLiveControlRequest,
     HostLiveLanes, HostPrepareCaps, HostPrepareReport, HostShapePolicy, MAXIMUM_VCA_REACH_PAIRS,
-    MAXIMUM_VCAS_BOUNDED, MeterFrame, MeterValidity, PrepareDiagnostics, PrepareRejection,
-    PreparedHost, SourceControlError, SourceSubmission, SuccessorBase, TapView, compile_host_model,
-    compiled_session_shape, control_table_bytes, parse_host_session, source_id_arena_bytes,
+    MAXIMUM_VCAS_BOUNDED, MeterCarry, MeterDelivery, MeterFrame, MeterTables, MeterValidity,
+    PrepareDiagnostics, PrepareRejection, PreparedHost, SourceControlError, SourceSubmission,
+    SuccessorBase, TapView, compile_host_model, compiled_session_shape, control_table_bytes,
+    parse_host_session, source_id_arena_bytes,
 };
 use host_core::{
     PreparedSpectrumCaptures, ResponseSnapshotError, ResponseSnapshotSink, SpectrumAnalysis,
@@ -1479,22 +1479,11 @@ struct PlanShape {
     /// empties every control queue. That is what makes this an exact free-slot count rather than
     /// an estimate, and it is what lets a submission be refused *before* anything is queued.
     in_flight: Box<[u32]>,
-    /// One bounded pending snapshot per track. This is fixed at preparation and never grows from
-    /// the callback; the queue itself remains the only producer-side buffer.
-    meter_pending: Box<[Option<MeterSnapshot>]>,
-    /// One count per strip meter (track or submix), read from its queue at each poll's entry and
-    /// decremented before each pop (issue #1448 D2). Scratch for one call: every poll sets every
-    /// entry before it pops, so delivery resets do not touch it. Allocated at preparation, sized
-    /// by the meter count.
-    meter_remaining: Box<[usize]>,
-    /// Per meter, the handle its carried predecessor published under, or `0` (#1290d1). The swap
-    /// block pairs a meter with the predecessor's at a strip identity, and a strip added or
-    /// removed in front shifts the handles (a handle is a position), so a window the predecessor
-    /// closed before the swap and the poll finds after it names the predecessor's handle. The poll
-    /// accepts it for this meter, for the plan's life: a meter's queue is its strip's alone, so
-    /// the second handle names the same strip. A window two swaps old names a handle this table
-    /// no longer holds and is dropped with a count.
-    meter_carried_from: Box<[u64]>,
+    /// The plan's meter delivery tables (#1582 R1): built with the plan, off the render thread,
+    /// and handed to the delivery by pointer exchange at the block that adopts the plan. `None`
+    /// while the plan renders (the delivery holds them); a retired plan's are back here, for the
+    /// control side to drop.
+    meter_tables: Option<MeterTables>,
     /// The published frame, `3(T + S) + 3` words (issue #1209 D1): `[track0 L, track0 R, .., trackN
     /// L, trackN R, bus0 L, bus0 R, .., busM L, busM R, master L, master R, track0 GR, .., trackN
     /// GR, bus0 GR, .., busM GR, master GR]`, one peak pair and one gain-reduction word per strip.
@@ -1511,11 +1500,6 @@ struct PlanShape {
     /// [`Self::name_successor`], and a gate compares it with `core::ptr::eq`.
     #[cfg(any(test, feature = "test-support"))]
     successor_address: usize,
-    /// The core's meter frame of the most recent publication (#1582 D2): the poll writes it whole
-    /// and copies it into [`Self::meter_frame`] and [`Self::meter_header`]. Allocated at
-    /// compilation, one entry per strip in each table; its gain-reduction presence is what makes
-    /// `masterGrDb` absent rather than zero.
-    core_frame: MeterFrame,
 }
 
 /// How many replacement plans' tables the host holds at once. After every commit the core holds
@@ -1565,15 +1549,6 @@ fn spectrum_pairing_bytes(handover: &SpectrumHandover) -> Option<u64> {
     u64::try_from(handover.pairing.len())
         .ok()?
         .checked_mul(u64::try_from(size_of::<host_core::SpectrumPair>()).ok()?)
-}
-
-/// The host's meter activation, as [`ReadyOwnership::align_meters`] moves it (#1581 D5): the
-/// first sample the poll accepts strip windows from, whether the lease is held, and the window in
-/// frames.
-struct MeterActivation<'a> {
-    activation: &'a mut u64,
-    lease: bool,
-    period: u64,
 }
 
 /// Everything one compiled session owns on the browser side.
@@ -1630,36 +1605,11 @@ struct ReadyOwnership {
     /// collection. It is declared before the prepared host so consumers are released before the
     /// plan's producers.
     spectrum: Option<SpectrumService>,
-    /// The session's output meter (#1581 D5): the reader of the windows the control plane's plan
-    /// state closes over the rendered output, at the strip meters' period, so a delayed poll never
-    /// unions several master envelopes or relabels one as another.
-    output_reader: host_core::OutputPeakReader,
-    /// The output meter's gate, which the lease drives (#1581 D5).
-    output_gate: host_core::OutputPeakGate,
-    /// The first sample the gate admits, or `u64::MAX` while it is inactive: the host's own copy
-    /// of the word it last stored.
-    output_gate_from: u64,
-    /// Closed output windows at the queue's head that a delivery reset discarded: the next poll
-    /// pops them unread and uncounted, as the reset of the ring they replace cleared it.
-    output_discard: usize,
-    /// The reader's dropped-window count already folded into `meter_loss_count`.
-    output_dropped_seen: u64,
-    /// The first sample of the strip meters' window grid (#1581 D5): the strip meters tile
-    /// `[origin + k * period, ..)` from the block their plan first rendered, the boot block or the
-    /// adoption block of the last swap that carried no meter (a carried swap keeps the grid). Every
-    /// activation, the lease's and a producer reset's, is a boundary of this grid, so the output
-    /// meter's windows and the strips' are one grid.
-    meter_grid_origin: u64,
-    /// Host publication generation, advanced on lease transitions and detected producer resets.
-    meter_generation: u64,
-    /// Losses and rejected stale/mismatched windows waiting to be reported in the next complete
-    /// frame. Keeping this out of the public header until publication preserves empty-poll
-    /// immutability.
-    meter_loss_count: u64,
-    meter_snapshot_drops_seen: u64,
-    meter_snapshot_generation: Option<u64>,
-    /// Windows folded into `meter_frame` since the host was compiled.
-    meter_windows: u64,
+    /// The session's one meter delivery (#1582 D1): the output meter's reader and gate (#1581 D5),
+    /// the level the lease drives, the window grid, the generation, the loss count and the
+    /// rendering plan's meter tables. The poll calls it and copies the frame it publishes into
+    /// the plan's [`PlanShape::meter_frame`] and [`PlanShape::meter_header`].
+    meters: MeterDelivery,
     /// Test-only proof that incomplete master intervals never reach effect-reader scanning.
     #[cfg(test)]
     meter_effect_scan_count: u64,
@@ -1943,9 +1893,9 @@ impl ReadyOwnership {
     /// keep their window grid and the host's master windows are continuous; one that carried none
     /// restarts it, because its meters open their first window at the adoption block. A swap that
     /// adds or removes a strip in front shifts the meters' handles (a handle is a position): each
-    /// carried meter remembers the handle its predecessor published under
-    /// ([`PlanShape::meter_carried_from`]), so a window closed before the swap, pending or still
-    /// queued, is accepted by the strip it was carried to, not dropped.
+    /// carried meter remembers the handle its predecessor published under ([`MeterDelivery::adopt`],
+    /// which takes the adopted plan's [`PlanShape::meter_tables`]), so a window closed before the
+    /// swap, pending or still queued, is accepted by the strip it was carried to, not dropped.
     ///
     /// The meter frame travels with the tables (#1290d1): the adopted plan's frame and header are
     /// the published ones from this block on. The retiring header is marked
@@ -1957,20 +1907,11 @@ impl ReadyOwnership {
         swap_carried: bool,
         carried: &[CarriedReader],
         first_sample: u64,
-        meters: MeterActivation<'_>,
     ) {
         self.shape_epoch = epoch;
         let meters_carried = carried
             .iter()
             .any(|reader| reader.kind == ObserverKind::Meter);
-        // The windows a restart discards unpublished (the master intervals waiting for a poll and
-        // the group of track snapshots a poll had begun to assemble) are lost telemetry, counted
-        // with the others (#1290a, batch 10 review).
-        let discarded = u64::try_from(self.output_windows_queued())
-            .unwrap_or(u64::MAX)
-            .saturating_add(u64::from(
-                self.shape.meter_pending.iter().any(Option::is_some),
-            ));
         let mut taken = false;
         for entry in self.pending_shapes.iter_mut() {
             if entry.adopted {
@@ -1997,38 +1938,40 @@ impl ReadyOwnership {
                 self.shape.meter_header.sequence = stream.sequence;
                 self.shape.meter_header.master_gr_present = stream.master_gr_present;
                 self.shape.meter_header.reserved = stream.reserved;
-                // The pending track snapshots and the tap state follow their readers.
+                // The delivery adopts the plan's meter tables (#1582 R1): the pending strip
+                // snapshots follow their meters, and a swap that carried no meter restarts the
+                // delivery at this block, on a new grid (#1581 D5). The retired tables come back
+                // in the adopted shape's slot and go to the retired one, by pointer exchange.
+                if let Some(tables) = self.shape.meter_tables.as_mut() {
+                    self.meters.adopt(
+                        tables,
+                        carried
+                            .iter()
+                            .filter(|reader| reader.kind == ObserverKind::Meter)
+                            .map(|reader| MeterCarry {
+                                successor: reader.successor,
+                                predecessor: reader.predecessor,
+                                successor_handle: reader.successor_handle,
+                                predecessor_handle: reader.predecessor_handle,
+                            }),
+                        meters_carried,
+                        first_sample,
+                    );
+                }
+                core::mem::swap(&mut self.shape.meter_tables, &mut entry.shape.meter_tables);
+                // The tap state follows its readers.
                 for reader in carried {
+                    if reader.kind != ObserverKind::Observation {
+                        continue;
+                    }
                     let (Ok(successor), Ok(predecessor)) = (
                         usize::try_from(reader.successor),
                         usize::try_from(reader.predecessor),
                     ) else {
                         continue;
                     };
-                    match reader.kind {
-                        ObserverKind::Meter => {
-                            if let (Some(into), Some(from)) = (
-                                self.shape.meter_pending.get_mut(successor),
-                                entry.shape.meter_pending.get_mut(predecessor),
-                            ) {
-                                core::mem::swap(into, from);
-                            }
-                            // The windows the predecessor closed under its handle and the poll
-                            // finds after this block belong to this strip (#1290d1).
-                            if let Some(from) = self.shape.meter_carried_from.get_mut(successor) {
-                                *from = if reader.predecessor_handle == reader.successor_handle {
-                                    0
-                                } else {
-                                    reader.predecessor_handle
-                                };
-                            }
-                        }
-                        ObserverKind::Observation => {
-                            self.shape
-                                .carry_tap_state(&mut entry.shape, successor, predecessor);
-                        }
-                        ObserverKind::Spectrum => {}
-                    }
+                    self.shape
+                        .carry_tap_state(&mut entry.shape, successor, predecessor);
                 }
             } else if entry.epoch < epoch {
                 entry.adopted = true;
@@ -2045,27 +1988,6 @@ impl ReadyOwnership {
                     core::ptr::from_ref(&entry.shape.meter_header)
                 });
             self.shape.name_successor(waiting);
-            if meters_carried {
-                // The delivery epoch is the stream's, not the plan's: the page sees the same
-                // generation, and the poll finds the carried windows where it left them.
-            } else {
-                self.fold_output_drops();
-                let lost = self.meter_loss_count.saturating_add(discarded);
-                self.reset_meter_delivery(false);
-                self.meter_loss_count = lost;
-                self.meter_generation = self.meter_generation.saturating_add(1);
-                self.meter_grid_origin = first_sample;
-                // The restarted strip meters open their first window at this block, a new grid
-                // (#1581 D5). A held lease, active or still waiting for its activation, moves to
-                // that grid's first boundary at or after both, and the gate with it, before the
-                // block is observed: an active lease restarts here, and a moved gate discards the
-                // window the output meter has open.
-                if meters.lease {
-                    // The lease was taken at or before this block and the new grid starts here,
-                    // so this block is the first clean boundary, even for a lease still pending.
-                    self.align_meters(meters, first_sample);
-                }
-            }
             // The tables hold the admissions made against the plan before it rendered; the block
             // that adopted it drained its observation queues at its top, so the pass that follows
             // the swap clears the counts (a block that did not adopt cleared only the tables of
@@ -2104,130 +2026,6 @@ impl ReadyOwnership {
         core::mem::swap(&mut self.shape, &mut self.pending_shapes[index].shape);
         Ok(admitted)
     }
-
-    /// Clear host-owned pending delivery state. Producer-side accumulators continue rendering;
-    /// `meter_activation_sample` makes the already bounded poll reject queued pre-activation
-    /// windows before it accepts a clean interval.
-    fn reset_meter_delivery(&mut self, clear_publication: bool) {
-        for pending in &mut self.shape.meter_pending {
-            *pending = None;
-        }
-        // The output windows queued now are the previous delivery's: they are popped unread (by
-        // the caller at once off the render export, by the next poll after a swap, whose render
-        // closure pops nothing), and the drops counted so far are forgotten with the loss count.
-        // The window the meter has open is its own; each caller moves the gate, which discards it.
-        self.output_discard = self.output_reader.windows_mut().available_at_entry();
-        self.output_dropped_seen = self.output_reader.dropped_windows();
-        self.meter_snapshot_generation = None;
-        self.meter_snapshot_drops_seen = 0;
-        self.meter_loss_count = 0;
-        if clear_publication {
-            // Keep the callback-reachable reset free of slice-fill's bounds-panic owner in the
-            // shipped Wasm call graph. The iterator walks the already prepared frame exactly once.
-            for slot in &mut self.shape.meter_frame {
-                *slot = 0.0;
-            }
-            self.shape.meter_header.sequence = 0;
-            self.shape.meter_header.windows = 0;
-            self.shape.meter_header.first_sample = 0;
-            self.shape.meter_header.end_sample = 0;
-            self.shape.meter_header.master_gr_present = 0;
-            self.shape.meter_header.reserved[1] = 0;
-            self.meter_windows = 0;
-        }
-    }
-
-    /// The first boundary at or after `sample` of the strip meters' window grid (#1581 D5):
-    /// `meter_grid_origin + k * period`, or `sample` itself with no period.
-    fn grid_boundary(&self, sample: u64, period: u64) -> u64 {
-        let origin = self.meter_grid_origin;
-        if period == 0 {
-            return sample;
-        }
-        if sample <= origin {
-            return origin;
-        }
-        let remainder = (sample - origin) % period;
-        sample.saturating_add(if remainder == 0 {
-            0
-        } else {
-            period - remainder
-        })
-    }
-
-    /// The one activation rule (#1581 D5), for every event that moves the grid or the lease (a
-    /// lease change, a producer reset, a swap that carries no meter): the activation is the
-    /// grid's first boundary at or after `from`, and the output meter's gate opens there while the
-    /// lease is held and is shut otherwise. The strip windows the poll accepts and the output
-    /// windows the gate admits are then one grid's.
-    fn align_meters(&mut self, meters: MeterActivation<'_>, from: u64) {
-        *meters.activation = self.grid_boundary(from, meters.period);
-        if meters.lease {
-            self.set_output_gate(*meters.activation);
-        } else {
-            self.clear_output_gate();
-        }
-    }
-
-    /// Let the output meter observe every block from `from_sample` on (#1581 D5). A store moved
-    /// from the gate's last value discards the window the meter has open.
-    fn set_output_gate(&mut self, from_sample: u64) {
-        self.output_gate_from = from_sample;
-        self.output_gate.activate(from_sample);
-    }
-
-    /// Stop the output meter (#1581 D5): it folds nothing and discards its open window.
-    fn clear_output_gate(&mut self) {
-        self.output_gate_from = u64::MAX;
-        self.output_gate.deactivate();
-    }
-
-    /// The closed output windows the next poll can read: the queue less the windows a reset
-    /// discarded.
-    fn output_windows_queued(&mut self) -> usize {
-        self.output_reader
-            .windows_mut()
-            .available_at_entry()
-            .saturating_sub(self.output_discard)
-    }
-
-    /// Add the output windows a full queue dropped since the last fold to `meter_loss_count`: a
-    /// dropped window is a loss, as the engine meter queue's drop-newest contract reports it, and
-    /// is visible in the next successful browser snapshot through `reserved[1]`.
-    fn fold_output_drops(&mut self) {
-        let dropped = self.output_reader.dropped_windows();
-        self.meter_loss_count = self
-            .meter_loss_count
-            .saturating_add(dropped.saturating_sub(self.output_dropped_seen));
-        self.output_dropped_seen = dropped;
-    }
-
-    // REALTIME_POLICY_BEGIN: #1581 D5, the one pop site of the output meter's windows.
-    /// Pop `count` output windows from the head, unread: at most the count read at entry, which no
-    /// pop of a single-consumer queue can exceed. Inlined, so the poll export's call graph keeps
-    /// the queue's checked slot index under its own admitted owner.
-    #[inline(always)]
-    fn pop_output_windows(&mut self, count: usize) {
-        let windows = self.output_reader.windows_mut();
-        let count = windows.available_at_entry().min(count);
-        for _ in 0..count {
-            let _ = windows.try_pop();
-        }
-    }
-
-    /// The output window `index` places from the head, not popped. The queue's one read site, so
-    /// its checked slot index inlines into the poll export once.
-    #[inline(always)]
-    fn output_window_at(&mut self, index: usize) -> Option<host_core::OutputPeakWindow> {
-        self.output_reader.windows_mut().peek(index).copied()
-    }
-
-    /// Pop the output windows a reset discarded, at once (a lease change, off the render export).
-    fn skip_discarded_output_windows(&mut self) {
-        let discard = core::mem::take(&mut self.output_discard);
-        self.pop_output_windows(discard);
-    }
-    // REALTIME_POLICY_END
 
     /// The dense effect index of the console slot or insert `effect_id` of one strip on this plan
     /// (#1677): the one place a stable effect ID becomes a position, so an observation record and
@@ -2318,8 +2116,6 @@ pub struct AudioWorkletEngineHost {
     status: WebStatus,
     resources: WebResourceReport,
     command_report: WebCommandReport,
-    /// Issue #137 D2: the meter lease. `false` skips the master fold and every drain.
-    meter_lease: bool,
     /// The watermark `read_watermark` last copied (#1381a D5), at a stable address in the
     /// control half: all zero until the first successful read.
     watermark: WebPlanWatermark,
@@ -2329,9 +2125,6 @@ pub struct AudioWorkletEngineHost {
     /// The seek report `read_seek_report` last copied (#1293 D6), at a stable address in the
     /// control half: all zero until the first successful read.
     seek_report: WebSeekReport,
-    /// First sample eligible for the current lease. A snapshot that opens before this boundary
-    /// is an old/partial interval and is dropped rather than presented as a clean measurement.
-    meter_activation_sample: u64,
     buffers: Option<PreparedBuffers>,
     ready: Option<ReadyOwnership>,
     /// The render half of the plan exchange (#1381a D4): the plan owner that `render_next` renders
@@ -2530,8 +2323,6 @@ impl AudioWorkletEngineHost {
             },
             plan_latency: WebPlanLatency::default(),
             seek_report: WebSeekReport::default(),
-            meter_lease: false,
-            meter_activation_sample: 0,
             buffers: Some(buffers),
             ready: Some(ready),
             plan: Some(plan),
@@ -3572,7 +3363,9 @@ impl AudioWorkletEngineHost {
     /// Number of complete meter windows folded since compilation.
     #[must_use]
     pub fn meter_windows(&self) -> u64 {
-        self.ready.as_ref().map_or(0, |ready| ready.meter_windows)
+        self.ready
+            .as_ref()
+            .map_or(0, |ready| ready.meters.folded_windows())
     }
 
     #[cfg(test)]
@@ -3616,41 +3409,22 @@ impl AudioWorkletEngineHost {
         if enabled && !self.meters_attached() {
             return self.record(RESULT_UNSUPPORTED);
         }
-        // Repeated acquisition/release is idempotent. A real transition starts a new publication
-        // generation, clears host-owned pending state, and marks producer-queued intervals from
-        // the previous lease for bounded rejection by the next poll.
-        if enabled == self.meter_lease {
-            return self.record(RESULT_OK);
-        }
-        self.meter_lease = enabled;
-        let period = self.meter_period();
+        // The lease is the core delivery's level (#1582 D4). Repeated acquisition/release is
+        // idempotent. A real transition starts a new publication generation, clears the pending
+        // state and the publication, marks producer-queued intervals from the previous lease for
+        // bounded rejection by the next poll, and drives the output meter's gate (#1581 D5); the
+        // cleared publication is copied into the page's frame and header.
         let from = self.status.next_absolute_sample;
-        self.meter_activation_sample = from;
-        if let Some(ready) = self.ready.as_mut() {
-            ready.meter_generation = ready.meter_generation.saturating_add(1);
-            ready.reset_meter_delivery(true);
-            ready.skip_discarded_output_windows();
-            ready.shape.meter_header.reserved[0] = ready.meter_generation;
-            // #1581 D5: the lease drives the output meter's gate. It observes from the activation
-            // boundary on, and a release stops it and discards the window it has open.
-            ready.align_meters(
-                MeterActivation {
-                    activation: &mut self.meter_activation_sample,
-                    lease: enabled,
-                    period,
-                },
-                from,
+        if let Some(ready) = self.ready.as_mut()
+            && ready.meters.set_level(enabled, from)
+        {
+            publish_web_meter_frame(
+                ready.meters.frame(),
+                &mut ready.shape.meter_frame,
+                &mut ready.shape.meter_header,
             );
         }
         self.record(RESULT_OK)
-    }
-
-    /// The meter window in frames (`blocks * quantum`), `0` with no meter window.
-    fn meter_period(&self) -> u64 {
-        self.options
-            .live_control_meter_blocks
-            .checked_mul(u64::from(self.status.quantum_frames))
-            .unwrap_or(0)
     }
 
     /// Mutable source-ID staging storage, available only after preparation.
@@ -3943,7 +3717,6 @@ impl AudioWorkletEngineHost {
         // Lossless on every supported target (wasm32 and every 64-bit host); `try_from` would
         // leave an `expect_failed` trap owner in the render export's call graph.
         let quantum = self.status.quantum_frames as usize;
-        let meter_period = self.meter_period();
         let (Some(ready), Some(plan)) = (self.ready.as_mut(), self.plan.as_mut()) else {
             return self.fail(RESULT_INTERNAL, b"web.internal.ready\t$\n");
         };
@@ -3982,17 +3755,7 @@ impl AudioWorkletEngineHost {
                     let carried = plan
                         .active_attachment_mut::<RenderCompanions>()
                         .map_or(&[][..], |companions| companions.carried());
-                    ready.adopt_shape(
-                        epoch,
-                        swap_carried,
-                        carried,
-                        render_first_sample,
-                        MeterActivation {
-                            activation: &mut self.meter_activation_sample,
-                            lease: self.meter_lease,
-                            period: meter_period,
-                        },
-                    );
+                    ready.adopt_shape(epoch, swap_carried, carried, render_first_sample);
                 }
                 self.status.next_absolute_sample = next_absolute_sample;
                 self.status.rendered_quanta = self.status.rendered_quanta.saturating_add(1);
@@ -4121,25 +3884,10 @@ impl AudioWorkletEngineHost {
     /// Allocation-free by construction: it moves `Copy` snapshots out of bounded queues into a
     /// buffer allocated at compilation.
     pub fn poll_meters(&mut self) -> u32 {
-        // #1581 D5: the fold reads the output meter's windows in place and counts the ones it is
-        // done with; they are popped here, at one site, so the queue's checked slot index is
-        // inlined into this export once.
-        let mut output_pops = 0_usize;
-        let windows = self.fold_meter_windows(&mut output_pops);
-        if let Some(ready) = self.ready.as_mut() {
-            ready.pop_output_windows(output_pops);
-        }
-        windows
-    }
-
-    /// [`Self::poll_meters`]'s fold. It pops no output window: it reads them in place, from the
-    /// head on, and leaves in `output_pops` how many from the head the caller pops.
-    #[inline(always)]
-    fn fold_meter_windows(&mut self, output_pops: &mut usize) -> u32 {
-        if !self.meter_lease || self.status.state != STATE_READY {
+        if self.status.state != STATE_READY {
             return 0;
         }
-        let period = self.meter_period();
+        let next_sample = self.status.next_absolute_sample;
         let (Some(ready), Some(plan)) = (self.ready.as_mut(), self.plan.as_mut()) else {
             return 0;
         };
@@ -4148,329 +3896,39 @@ impl AudioWorkletEngineHost {
         let Some(companions) = plan.active_attachment_mut::<RenderCompanions>() else {
             return 0;
         };
-        // This function has no runtime-checked `[]` index (only `get`/`get_mut` and constant
-        // indexes into a fixed array), so it adds no bounds check of its own. The one
-        // `panic_bounds_check` in this export's call graph is the slot index of the inlined SPSC
-        // `try_pop` (`slots[self.local]` in `crates/engine/src/realtime/spsc.rs`), which the ring
-        // keeps in range. This export is called from `process()`, so the shipped artifact's
-        // call-graph gate covers it as it covers the render export.
-        let meter_count = companions.meters.len();
-        // #1581 D5: the output meter's windows a reset discarded go first, unread, and the windows
-        // its full queue dropped are losses.
-        *output_pops = ready.output_discard;
-        ready.output_discard = 0;
-        ready.fold_output_drops();
-        // The render path's output meter is the sole producer of this fixed-capacity queue and
-        // pushes only when the configured master interval closes. An empty queue therefore proves
-        // that no coherent track/master publication can exist. Preserve pending/public bytes and
-        // avoid walking every track consumer on incomplete quanta.
-        if ready.output_reader.windows_mut().available_at_entry() <= *output_pops {
-            return 0;
-        }
-        let mut windows = 0_u32;
-        let mut folded_start = 0_u64;
-        let mut folded_end = 0_u64;
-        let mut folded = false;
-        // A plan with no strip (#1682) has no strip window to pair the master with, so the
-        // master's own windows are the stream: the frame is the master's three words. The passes
-        // below find no strip and fold nothing; the master's front window is read where every
-        // master window is read, after them.
-        let master_only = meter_count == 0;
-        // Set by a producer reset, which ends the passes and publishes nothing.
-        let mut producer_reset = false;
-        // Issue #1448 D2: each meter's queue pops at most its own count read here, at entry, capped
-        // at the configured depth, whatever a producer on another thread publishes meanwhile. A
-        // pass that does not end the loop has cleared at least one pending slot, and the next pass
-        // either refills it (spending one count) or ends the loop at the empty-slot check, so
-        // `1 + sum(remaining)` passes always suffice: the bound never cuts a recovery short.
-        for (meter, remaining) in companions
-            .meters
-            .iter()
-            .zip(&mut ready.shape.meter_remaining)
-        {
-            *remaining = meter.consumer.available_at_entry().min(METER_QUEUE_DEPTH);
-        }
-        let mut passes = 1_usize;
-        for remaining in ready.shape.meter_remaining.iter() {
-            passes = passes.saturating_add(*remaining);
-        }
-        for _ in 0..passes {
-            for ((meter, pending), remaining) in companions
-                .meters
-                .iter_mut()
-                .zip(&mut ready.shape.meter_pending)
-                .zip(&mut ready.shape.meter_remaining)
-            {
-                if pending.is_some() || *remaining == 0 {
-                    continue;
-                }
-                // On a single-consumer queue a count read at entry is a lower bound on what this
-                // consumer can pop, so a pop under a count above zero does not fail.
-                *remaining -= 1;
-                if let Ok(snapshot) = meter.consumer.try_pop() {
-                    *pending = Some(snapshot);
-                }
-            }
-            if ready.shape.meter_pending.iter().any(Option::is_none) {
-                break;
-            }
-            let Some(first) = ready
-                .shape
-                .meter_pending
-                .first()
-                .and_then(Option::as_ref)
-                .copied()
-            else {
-                break;
-            };
-            let all_equal = ready
-                .shape
-                .meter_pending
-                .iter()
-                .enumerate()
-                .all(|(index, entry)| {
-                    let Some(snapshot) = entry else { return false };
-                    // A window the predecessor closed before a swap names the predecessor's handle
-                    // for the strip the meter was carried from (#1290d1).
-                    companions.meters.get(index).is_some_and(|meter| {
-                        snapshot.handle == meter.handle
-                            || ready
-                                .shape
-                                .meter_carried_from
-                                .get(index)
-                                .is_some_and(|from| *from != 0 && snapshot.handle.0.get() == *from)
-                    }) && snapshot.reset_generation == first.reset_generation
-                        && snapshot.window_sequence == first.window_sequence
-                        && snapshot.start_sample == first.start_sample
-                        && snapshot.end_sample == first.end_sample
-                        && snapshot.frames == first.frames
-                });
-            if !all_equal {
-                // A sequence gap can be recovered by dropping only the older stream head. Equal
-                // sequences with different spans/generations are a discontinuity: drop the whole
-                // candidate set so no mixed interval reaches the public frame.
-                let same_generation = ready.shape.meter_pending.iter().all(|entry| {
-                    entry
-                        .is_some_and(|snapshot| snapshot.reset_generation == first.reset_generation)
-                });
-                let same_sequence = ready.shape.meter_pending.iter().all(|entry| {
-                    entry.is_some_and(|snapshot| snapshot.window_sequence == first.window_sequence)
-                });
-                if same_generation && !same_sequence {
-                    let minimum = ready
-                        .shape
-                        .meter_pending
-                        .iter()
-                        .filter_map(|entry| entry.as_ref().map(|snapshot| snapshot.window_sequence))
-                        .min()
-                        .unwrap_or(first.window_sequence);
-                    for pending in &mut ready.shape.meter_pending {
-                        if pending
-                            .as_ref()
-                            .is_some_and(|snapshot| snapshot.window_sequence == minimum)
-                        {
-                            *pending = None;
-                            ready.meter_loss_count = ready.meter_loss_count.saturating_add(1);
-                        }
-                    }
-                } else {
-                    for pending in &mut ready.shape.meter_pending {
-                        *pending = None;
-                        ready.meter_loss_count = ready.meter_loss_count.saturating_add(1);
-                    }
-                }
-                continue;
-            }
-            if first.start_sample < self.meter_activation_sample
-                || first.end_sample <= first.start_sample
-                || u64::from(first.frames) != first.end_sample - first.start_sample
-            {
-                for pending in &mut ready.shape.meter_pending {
-                    *pending = None;
-                }
-                ready.meter_loss_count = ready.meter_loss_count.saturating_add(1);
-                continue;
-            }
-            if ready
-                .meter_snapshot_generation
-                .is_some_and(|generation| generation != first.reset_generation)
-            {
-                // A producer reset is a new delivery epoch. Reject this group under the old
-                // public identity and clear all bounded delivery state so the next render opens a
-                // clean master/track interval. The prior public frame and header stay byte-stable
-                // because a zero return never publishes an epoch transition.
-                ready.meter_generation = ready.meter_generation.saturating_add(1);
-                ready.reset_meter_delivery(false);
-                ready.meter_loss_count = 1;
-                producer_reset = true;
-                break;
-            }
-            if ready.shape.meter_header.sequence > 0
-                && ready.shape.meter_header.reserved[0] == ready.meter_generation
-                && first.start_sample != ready.shape.meter_header.end_sample
-            {
-                ready.meter_loss_count = ready.meter_loss_count.saturating_add(1);
-            }
-            folded_start = first.start_sample;
-            folded = true;
-            folded_end = first.end_sample;
-            windows = windows.saturating_add(1);
-            // The frozen adapter policy is bounded per-window delivery. Further complete windows
-            // remain queued for the next poll, preserving one exact span per public frame.
-            break;
-        }
-        if producer_reset {
-            // #1581 D5, outside the passes: every queued output window is the old epoch's and is
-            // popped by this call, so the next render finds the room the cleared ring it replaces
-            // had, and the output meter restarts at the strips' boundary (a moved gate discards
-            // the window it has open).
-            *output_pops = ready.output_discard;
-            ready.output_discard = 0;
-            ready.align_meters(
-                MeterActivation {
-                    activation: &mut self.meter_activation_sample,
-                    lease: true,
-                    period,
-                },
-                self.status.next_absolute_sample,
-            );
-            return 0;
-        }
-        if !folded && !master_only {
-            return 0;
-        }
-        let stale_master_budget = ready
-            .output_reader
-            .windows_mut()
-            .available_at_entry()
-            .saturating_sub(*output_pops);
-        // The first window that ends after the strips' start is the candidate; each earlier one is
-        // stale, counted and popped. Without a strip the front window is the candidate, or, when
-        // it predates the activation or is empty, a loss. One read site, so the queue's peek
-        // inlines here.
-        let mut master_measurement = None;
-        for _ in 0..stale_master_budget {
-            let Some(measurement) = ready.output_window_at(*output_pops) else {
-                break;
-            };
-            if master_only {
-                if measurement.start_sample < self.meter_activation_sample
-                    || measurement.end_sample <= measurement.start_sample
-                {
-                    *output_pops += 1;
-                    ready.meter_loss_count = ready.meter_loss_count.saturating_add(1);
-                    return 0;
-                }
-                if ready.shape.meter_header.sequence > 0
-                    && ready.shape.meter_header.reserved[0] == ready.meter_generation
-                    && measurement.start_sample != ready.shape.meter_header.end_sample
-                {
-                    ready.meter_loss_count = ready.meter_loss_count.saturating_add(1);
-                }
-                folded_start = measurement.start_sample;
-                folded_end = measurement.end_sample;
-                folded = true;
-                windows = 1;
-                master_measurement = Some(measurement);
-                break;
-            }
-            if measurement.end_sample > folded_start {
-                master_measurement = Some(measurement);
-                break;
-            }
-            *output_pops += 1;
-            ready.meter_loss_count = ready.meter_loss_count.saturating_add(1);
-        }
-        if !folded {
-            return 0;
-        }
-        let master_valid = master_measurement.is_some_and(|measurement| {
-            measurement.start_sample == folded_start && measurement.end_sample == folded_end
-        });
-        if !master_valid {
-            // The host cannot recover an interval peak from one envelope once its boundary is
-            // lost. Consume the track group, count the discontinuity, and wait for the next clean
-            // master/track span rather than publishing a mixed or guessed master value.
-            for pending in &mut ready.shape.meter_pending {
-                if let Some(snapshot) = pending.take()
-                    && snapshot.cumulative_dropped_snapshots > ready.meter_snapshot_drops_seen
-                {
-                    ready.meter_loss_count = ready.meter_loss_count.saturating_add(
-                        snapshot
-                            .cumulative_dropped_snapshots
-                            .saturating_sub(ready.meter_snapshot_drops_seen),
-                    );
-                    ready.meter_snapshot_drops_seen = snapshot.cumulative_dropped_snapshots;
-                }
-            }
-            ready.meter_loss_count = ready.meter_loss_count.saturating_add(1);
-            return 0;
-        }
-        *output_pops += 1;
-        let master_peak = master_measurement.map_or([0.0, 0.0], |measurement| measurement.peak);
-        // All candidate validation is complete. Only this commit section mutates the public frame;
-        // every earlier zero-return path leaves both public buffers byte-for-byte unchanged. It
-        // writes the core frame whole (#1582 D2) and copies it into the page's frame and header.
-        let frame = &mut ready.shape.core_frame;
-        for (index, pending) in ready.shape.meter_pending.iter_mut().enumerate() {
-            let Some(snapshot) = pending.take() else {
-                continue;
-            };
-            if snapshot.cumulative_dropped_snapshots > ready.meter_snapshot_drops_seen {
-                ready.meter_loss_count = ready.meter_loss_count.saturating_add(
-                    snapshot
-                        .cumulative_dropped_snapshots
-                        .saturating_sub(ready.meter_snapshot_drops_seen),
-                );
-                ready.meter_snapshot_drops_seen = snapshot.cumulative_dropped_snapshots;
-            }
-            if let Some(peak) = frame.strip_peaks.get_mut(index) {
-                *peak = [snapshot.left.sample_peak, snapshot.right.sample_peak];
-            }
-            ready.meter_snapshot_generation = Some(snapshot.reset_generation);
-        }
-        frame.output_peak = master_peak;
-        let mut validity = MeterValidity::COMPLETE;
-        if master_valid {
-            validity = validity.union(MeterValidity::OUTPUT);
-        }
-        if ready.meter_loss_count != 0 {
-            validity = validity.union(MeterValidity::LOSS);
-        }
-        frame.validity = validity;
-        // Issue #143 D5: the gain-reduction section. This is the control plane -- `poll_meters` is
-        // called from `process()` but after the render export, and it performs no allocation, no
-        // lock and no unbounded loop -- so the one unit conversion the whole design permits, a
-        // linear tap's magnitude to decibels, runs here once per closed window (#1582 D3: the
-        // core's fold over this plan's taps).
+        // #1582 D4: the core delivery folds the windows; this export keeps only the copy. This
+        // function has no runtime-checked `[]` index, so it adds no bounds check of its own. The
+        // one `panic_bounds_check` in this export's call graph is the slot index of the SPSC
+        // queues inlined into `MeterDelivery::poll`, which the ring keeps in range. This export
+        // is called from `process()`, so the shipped artifact's call-graph gate covers it as it
+        // covers the render export.
+        let shape = &mut *ready.shape;
         let mut taps = WebGainReductionTaps {
-            effect_instances: &ready.shape.effect_instances,
-            observation_tracks: &ready.shape.observation_tracks,
-            observation_armed: &ready.shape.observation_armed,
-            observation_arm_samples: &ready.shape.observation_arm_samples,
+            effect_instances: &shape.effect_instances,
+            observation_tracks: &shape.observation_tracks,
+            observation_armed: &shape.observation_armed,
+            observation_arm_samples: &shape.observation_arm_samples,
             effect_observations: &companions.effect_observations,
             #[cfg(test)]
             scans: 0,
         };
-        host_core::fold_gain_reduction(frame, &mut taps, ready.shape.master_track);
+        let published = ready.meters.poll(
+            &mut companions.meters,
+            &mut taps,
+            shape.master_track,
+            next_sample,
+        );
         #[cfg(test)]
         {
             ready.meter_effect_scan_count =
                 ready.meter_effect_scan_count.saturating_add(taps.scans);
         }
-        frame.windows = windows;
-        frame.sequence = ready.shape.meter_header.sequence.saturating_add(1);
-        frame.first_sample = folded_start;
-        frame.end_sample = folded_end;
-        frame.generation = ready.meter_generation;
-        frame.loss_count = ready.meter_loss_count;
-        publish_web_meter_frame(
-            &ready.shape.core_frame,
-            &mut ready.shape.meter_frame,
-            &mut ready.shape.meter_header,
-        );
-        ready.meter_windows = ready.meter_windows.saturating_add(u64::from(windows));
-        windows
+        let Some(frame) = published else {
+            return 0;
+        };
+        // R4: one copy per published window.
+        publish_web_meter_frame(frame, &mut shape.meter_frame, &mut shape.meter_header);
+        frame.windows
     }
     // REALTIME_POLICY_END
     fn finish_commands(&mut self, result: u32, reason: u32, index: u32, admitted: u32) -> u32 {
@@ -4505,7 +3963,6 @@ impl AudioWorkletEngineHost {
     /// This runs in the worklet's `port.onmessage` handler, never inside `process()`; it is the
     /// single point where the plan, the compiled session and the source rings are freed.
     pub fn dispose(&mut self) -> u32 {
-        self.meter_lease = false;
         self.ready = None;
         self.plan = None;
         self.buffers = None;
@@ -6198,7 +5655,8 @@ fn build_plan_shape(
     reader_slots
         .try_reserve_exact(observations.len())
         .map_err(|_| "web.resource.allocation")?;
-    let core_frame = MeterFrame::new(strip_count).map_err(|_| "web.resource.allocation")?;
+    let meter_tables =
+        MeterTables::new(meter_count, strip_count).map_err(|_| "web.resource.allocation")?;
     let mut observation_armed = zero_u32(total_effects as usize)?;
     // The plan's published frame and the header that describes it (#1290d1). The frame's address
     // is the heap block's, so it stays put as the tables move.
@@ -6263,23 +5721,11 @@ fn build_plan_shape(
         command_wanted: zero_u32(total_effects as usize)?,
         observe_named: zero_u32(total_effects as usize)?,
         in_flight: zero_u32(total_effects as usize)?,
-        meter_pending: (0..meter_count)
-            .map(|_| None)
-            .collect::<Vec<_>>()
-            .into_boxed_slice(),
-        meter_remaining: (0..meter_count)
-            .map(|_| 0)
-            .collect::<Vec<_>>()
-            .into_boxed_slice(),
-        meter_carried_from: (0..meter_count)
-            .map(|_| 0)
-            .collect::<Vec<_>>()
-            .into_boxed_slice(),
+        meter_tables: Some(meter_tables),
         meter_frame,
         meter_header,
         #[cfg(any(test, feature = "test-support"))]
         successor_address: 0,
-        core_frame,
     })
 }
 
@@ -6357,18 +5803,13 @@ struct ShapeRows {
     arm_sample_bytes: u64,
     /// The largest single allocation among the arm tables.
     arm_largest: u64,
-    /// The per-meter pending snapshots.
-    pending_bytes: u64,
-    /// The per-meter remaining counts.
-    remaining_bytes: u64,
-    /// The per-meter carried-from handles.
-    carried_bytes: u64,
+    /// The meter delivery tables (#1582 R1): per meter a pending snapshot, a remaining count and
+    /// a carried-from handle, and the core meter frame's per-strip tables (#1582 D2).
+    meter_tables_bytes: u64,
+    /// The largest of those tables, a single allocation.
+    meter_tables_largest: u64,
     /// The published meter frame (#1290d1).
     frame_bytes: u64,
-    /// The core meter frame's per-strip tables (#1582 D2).
-    core_frame_bytes: u64,
-    /// The largest of those tables, a single allocation.
-    core_frame_largest: u64,
 }
 
 impl PlanShape {
@@ -6479,40 +5920,24 @@ impl PlanShape {
                     .ok()?
                     .checked_mul(size_of::<u32>() as u64)?,
             )?;
-        let pending_bytes = u64::try_from(self.meter_pending.len())
-            .ok()?
-            .checked_mul(size_of::<Option<MeterSnapshot>>() as u64)?;
-        let remaining_bytes = u64::try_from(self.meter_remaining.len())
-            .ok()?
-            .checked_mul(size_of::<usize>() as u64)?;
-        let carried_bytes = u64::try_from(self.meter_carried_from.len())
-            .ok()?
-            .checked_mul(size_of::<u64>() as u64)?;
-        // #1582 D2: the core frame's per-strip tables, each smaller than the page's frame.
+        // #1582 R1: the delivery tables, held here from the plan's preparation to its adoption
+        // and from its retirement on; the boot plan's are charged before the delivery takes them.
+        let (meter_tables_bytes, meter_tables_largest) =
+            self.meter_tables.as_ref().map_or((0, 0), |tables| {
+                (tables.heap_bytes(), tables.largest_allocation_bytes())
+            });
+        let meter_tables_bytes = u64::try_from(meter_tables_bytes).ok()?;
+        let meter_tables_largest = u64::try_from(meter_tables_largest).ok()?;
         let frame_bytes = u64::try_from(self.meter_frame.len())
             .ok()?
             .checked_mul(size_of::<f32>() as u64)?;
-        let core_frame_bytes = u64::try_from(self.core_frame.heap_bytes()).ok()?;
-        let core_frame_largest = u64::try_from(
-            size_of_val::<[[f32; 2]]>(&self.core_frame.strip_peaks)
-                .max(size_of_val::<[f32]>(
-                    &self.core_frame.strip_gain_reduction_db,
-                ))
-                .max(size_of_val::<[bool]>(
-                    &self.core_frame.strip_gain_reduction_present,
-                )),
-        )
-        .ok()?;
         Some(ShapeRows {
             arm_table_bytes,
             arm_sample_bytes,
             arm_largest: arm_sample_largest.max(arm_table_bytes),
-            pending_bytes,
-            remaining_bytes,
-            carried_bytes,
+            meter_tables_bytes,
+            meter_tables_largest,
             frame_bytes,
-            core_frame_bytes,
-            core_frame_largest,
         })
     }
 
@@ -6524,18 +5949,12 @@ impl PlanShape {
         let total = shell
             .checked_add(rows.arm_table_bytes)?
             .checked_add(rows.arm_sample_bytes)?
-            .checked_add(rows.pending_bytes)?
-            .checked_add(rows.remaining_bytes)?
-            .checked_add(rows.carried_bytes)?
-            .checked_add(rows.frame_bytes)?
-            .checked_add(rows.core_frame_bytes)?;
+            .checked_add(rows.meter_tables_bytes)?
+            .checked_add(rows.frame_bytes)?;
         let largest = shell
             .max(rows.arm_largest)
-            .max(rows.pending_bytes)
-            .max(rows.remaining_bytes)
-            .max(rows.carried_bytes)
-            .max(rows.frame_bytes)
-            .max(rows.core_frame_largest);
+            .max(rows.meter_tables_largest)
+            .max(rows.frame_bytes);
         Some((total, largest))
     }
 }
@@ -6633,7 +6052,7 @@ fn compile_ready(
         spectrum,
     )
     .map_err(|failure| boot_refusal(&failure, &record))?;
-    let (engine, live_values_superseded, shape, spectrum_boot) = {
+    let (engine, live_values_superseded, mut shape, spectrum_boot) = {
         let mut record = record
             .lock()
             .map_err(|_| fixed_diagnostic("web.internal.boot_record"))?;
@@ -6725,17 +6144,9 @@ fn compile_ready(
         .max(report.largest_bridge_allocation_bytes);
     // The master windows are the control plane's output meter (#1581 D5): its queue and words are
     // in the control plane's retained row, charged above with it.
-    let pending_meter_bytes = rows.pending_bytes;
-    let remaining_meter_bytes = rows.remaining_bytes;
-    let carried_meter_bytes = rows.carried_bytes;
-    let frame_meter_bytes = rows
-        .frame_bytes
-        .checked_add(rows.core_frame_bytes)
-        .ok_or_else(|| fixed_diagnostic("web.resource.arithmetic"))?;
-    let meter_delivery_bytes = pending_meter_bytes
-        .checked_add(remaining_meter_bytes)
-        .and_then(|bytes| bytes.checked_add(carried_meter_bytes))
-        .and_then(|bytes| bytes.checked_add(frame_meter_bytes))
+    let meter_delivery_bytes = rows
+        .meter_tables_bytes
+        .checked_add(rows.frame_bytes)
         .ok_or_else(|| fixed_diagnostic("web.resource.arithmetic"))?;
     report.bridge_metadata_bytes = report
         .bridge_metadata_bytes
@@ -6747,11 +6158,8 @@ fn compile_ready(
         .ok_or_else(|| fixed_diagnostic("web.resource.arithmetic"))?;
     report.largest_bridge_allocation_bytes = report
         .largest_bridge_allocation_bytes
-        .max(pending_meter_bytes)
-        .max(remaining_meter_bytes)
-        .max(carried_meter_bytes)
-        .max(rows.frame_bytes)
-        .max(rows.core_frame_largest);
+        .max(rows.meter_tables_largest)
+        .max(rows.frame_bytes);
     report.largest_named_allocation_bytes = report
         .largest_named_allocation_bytes
         .max(report.largest_bridge_allocation_bytes);
@@ -6793,6 +6201,17 @@ fn compile_ready(
         .take_output_meter()
         .ok_or_else(|| fixed_diagnostic("web.internal.output_meter"))?;
     let structure_epoch = control.structure_epoch();
+    // #1582 D1: the session's one meter delivery takes the boot plan's tables (charged above with
+    // the plan's rows) and the output meter's halves; the boot plan's first block is the grid's
+    // origin.
+    let meter_tables = shape
+        .meter_tables
+        .take()
+        .ok_or_else(|| fixed_diagnostic("web.internal.meter_tables"))?;
+    let meter_window_frames = options
+        .live_control_meter_blocks
+        .checked_mul(u64::from(session_quantum_frames))
+        .unwrap_or(0);
     let ready = ReadyOwnership {
         control,
         queries,
@@ -6826,18 +6245,12 @@ fn compile_ready(
                 spectrum_hop,
             )
         }),
-        output_reader,
-        output_gate,
-        output_gate_from: u64::MAX,
-        output_discard: 0,
-        output_dropped_seen: 0,
-        // The boot plan's first block is the session's sample 0.
-        meter_grid_origin: 0,
-        meter_generation: 0,
-        meter_loss_count: 0,
-        meter_snapshot_drops_seen: 0,
-        meter_snapshot_generation: None,
-        meter_windows: 0,
+        meters: MeterDelivery::new(
+            output_reader,
+            output_gate,
+            meter_window_frames,
+            meter_tables,
+        ),
         #[cfg(test)]
         meter_effect_scan_count: 0,
     };

@@ -424,3 +424,35 @@ fn a_full_output_queue_drops_the_newest_window_and_counts_it() {
             .collect::<Vec<_>>()
     );
 }
+
+/// #1582 gate 3. The meter level is idempotent: only a real transition starts a new delivery
+/// generation, and turning it off shuts the output meter's gate.
+///
+/// Test value: red if a repeated lease starts a new epoch (no browser test holds the lease twice
+/// without a release between), or if turning the level off leaves the output meter observing.
+#[test]
+fn set_level_is_idempotent_and_a_transition_restarts_the_epoch() {
+    const QUANTUM: u64 = 64;
+    let (mut observer, reader, gate) =
+        host_core::output_peak_meter(core::num::NonZeroU32::new(64).expect("window"))
+            .expect("output meter");
+    let tables = host_core::MeterTables::new(0, 0).expect("tables");
+    let mut delivery = host_core::MeterDelivery::new(reader, gate, QUANTUM, tables);
+    let block = vec![0.25_f32; QUANTUM as usize];
+    assert!(delivery.set_level(true, 0), "off to on is a transition");
+    let generation = delivery.frame().generation;
+    assert!(
+        !delivery.set_level(true, QUANTUM),
+        "on to on changes nothing"
+    );
+    assert_eq!(delivery.frame().generation, generation);
+    observer.observe(&block, &block, 0, QUANTUM);
+    assert_eq!(delivery.output_windows_queued(), 1, "the gate is open");
+    assert!(
+        delivery.set_level(false, QUANTUM),
+        "on to off is a transition"
+    );
+    assert_eq!(delivery.frame().generation, generation + 1);
+    observer.observe(&block, &block, QUANTUM, 2 * QUANTUM);
+    assert_eq!(delivery.output_windows_queued(), 0, "the gate is shut");
+}
