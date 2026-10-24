@@ -347,9 +347,11 @@ fn a_desymmetrized_bank_is_a_never_collapsed_bank() {
 /// is exact.
 ///
 /// Dual signal first, so the collapse freezes a right channel that is **not** at rest; then
-/// collapsed signal, then collapsed `+0.0` until the left channel rests. The bank must then answer
-/// every lane at rest (a scan or a claim that still reads the frozen right channel answers `0` and
-/// never gets there), `advance_clocks` stands in for three zero blocks the reference renders (red
+/// collapsed signal with one ceiling and release retarget, so the right channel's ramps freeze in
+/// flight, then collapsed `+0.0` until the left channel rests. The bank must then answer every lane
+/// at rest: a #182 S2 claim that still reads the frozen right ramps fails, and a scan that still
+/// ANDs the frozen right channel then answers `0` (the claim is the scan's cached answer, so only
+/// both legs reading the right channel together turn this red), `advance_clocks` stands in for three zero blocks the reference renders (red
 /// on a skip that leaves a phase or a cursor behind), and after the disengage the payloads and the
 /// next dual blocks are the never-collapsed bank's, bit for bit.
 #[test]
@@ -373,7 +375,8 @@ fn a_collapsed_bank_that_falls_silent_is_at_rest_and_skips_exactly() {
                    never: &mut PreparedEffectBank,
                    signal: bool,
                    mono: bool,
-                   skip: bool| {
+                   skip: bool,
+                   automated: bool| {
         let mut never_left = if signal {
             block(step, lanes)
         } else {
@@ -387,6 +390,12 @@ fn a_collapsed_bank_that_falls_silent_is_at_rest_and_skips_exactly() {
             never_left.clone()
         };
         let first = (step * FRAMES) as u64;
+        let automation = automated.then(|| automation(step, lanes));
+        let (spans, packed) = automation
+            .as_ref()
+            .map_or((&[][..], idle.as_slice()), |(spans, packed)| {
+                (spans.as_slice(), packed.as_slice())
+            });
         let (l, r) = (&mut never_left, &mut never_right);
         run_block(
             never.processor.as_mut(),
@@ -394,8 +403,8 @@ fn a_collapsed_bank_that_falls_silent_is_at_rest_and_skips_exactly() {
             r,
             width,
             first,
-            &[],
-            &idle,
+            spans,
+            packed,
             false,
         );
         step += 1;
@@ -410,8 +419,8 @@ fn a_collapsed_bank_that_falls_silent_is_at_rest_and_skips_exactly() {
             r,
             width,
             first,
-            &[],
-            &idle,
+            spans,
+            packed,
             mono,
         );
         assert_eq!(bits(&mixed_left), bits(&never_left), "block {step}: left");
@@ -424,12 +433,19 @@ fn a_collapsed_bank_that_falls_silent_is_at_rest_and_skips_exactly() {
         }
     };
     for mono in [false, true] {
-        for _ in 0..8 {
-            run(&mut mixed, &mut never, true, mono, false);
+        for block in 0..8 {
+            run(
+                &mut mixed,
+                &mut never,
+                true,
+                mono,
+                false,
+                mono && block == 6,
+            );
         }
     }
     let rested = (0..REST_BOUND).any(|_| {
-        run(&mut mixed, &mut never, false, true, false);
+        run(&mut mixed, &mut never, false, true, false, false);
         mixed.processor.lanes_at_rest() == all
     });
     assert!(
@@ -442,7 +458,7 @@ fn a_collapsed_bank_that_falls_silent_is_at_rest_and_skips_exactly() {
         "the reference rests on the same block"
     );
     for _ in 0..SKIPPED {
-        run(&mut mixed, &mut never, false, true, true);
+        run(&mut mixed, &mut never, false, true, true, false);
     }
     mixed.processor.desymmetrize_channels();
     assert_eq!(
@@ -474,6 +490,6 @@ fn a_collapsed_bank_that_falls_silent_is_at_rest_and_skips_exactly() {
         "the right channel is live again"
     );
     for _ in 0..2 {
-        run(&mut mixed, &mut never, true, false, false);
+        run(&mut mixed, &mut never, true, false, false, false);
     }
 }

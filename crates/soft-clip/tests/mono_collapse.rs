@@ -339,9 +339,8 @@ fn the_word_lists_are_complete_and_the_witness_declines_on_exactly_the_asymmetri
 /// Dual signal first, so the collapse freezes a right channel that is **not** at rest; then
 /// collapsed signal, then collapsed `+0.0` until the left channel rests. The bank must then answer
 /// every lane at rest (a predicate that still ANDs the frozen right channel answers `0` and never
-/// gets there), `advance_clocks` stands in for three zero blocks the reference renders (red on a
-/// skip that leaves the cursor behind), and after the disengage the payloads and the next dual
-/// blocks are the never-collapsed bank's, bit for bit.
+/// gets there), `advance_clocks` stands in for three zero blocks the reference renders, and after
+/// the disengage the payloads and the next dual blocks are the never-collapsed bank's, bit for bit.
 #[test]
 fn a_collapsed_bank_that_falls_silent_is_at_rest_and_skips_exactly() {
     const SKIPPED: usize = 3;
