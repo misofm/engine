@@ -185,8 +185,8 @@ impl SpectrumRefusal {
 }
 
 /// The record of every spectrum `BACKPRESSURE` refusal, which only `Busy` answers (#1944 D2,
-/// #1595 D6): the capture's one-shot arm slot, one entry, held. A collection without a selection also answers `Busy` (#1595 D6) and so reports
-/// the slot as held: a known imprecision, reopened only with D6.
+/// #1595 D6): the capture's one-shot arm slot, one entry, held. A collection without a selection
+/// also answers `Busy` and so reports the slot as held: a known imprecision, reopened only with D6.
 const SPECTRUM_ARM_BACKPRESSURE: protocol::Backpressure = protocol::Backpressure {
     queue_kind: protocol::BackpressureQueueKind::SpectrumArm,
     capacity: 1,
