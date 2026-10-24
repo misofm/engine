@@ -51,3 +51,11 @@ console effects with per-track inserts*) splits this issue as it splits #888.
   describes.
 - **Dependencies** become P2c and the amended #888.
 - **Gates** 1 and 2 apply to the kept half, including blocks where active lanes ramp.
+
+## Decision and evidence record (2026-10-24, backlog sprint, attempt 1)
+
+Delivered with #888 in one PR; #888's record is the full one. The planner pads a partial insert
+cohort from k members (W=4: 2, W=8: 3, the H5 arithmetic; reopen on a measured per-node row). The
+compressor has bound padded banks since P2c, so no compressor change is needed. The identity-slot
+half (a member lacking the compressor slot) is retired for the reasons #888 records: it needs a
+per-lane bypass in every bank kernel, which #96 F7 refused.

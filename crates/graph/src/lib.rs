@@ -1990,8 +1990,8 @@ pub struct GraphPreparedEffectBank {
     /// `false` on every padded lane after them (issue #1088). It is the mask the effect's factory
     /// was bound with (`effect_contract::PrepareEffectBankRequest::active_mask`) and the mask the
     /// rack chain gathers and scatters by, so a padded lane is never read from or written to a
-    /// track. A full bank is all `true`, and every shipped plan binds only full banks until a group
-    /// asks for padding (`graph_compiler`'s padding policy).
+    /// track. A full bank is all `true`. `graph_compiler`'s padding policy pads every partial
+    /// console group and every partial insert group from a per-width member threshold (#888).
     pub active_mask: Box<[bool]>,
     pub processor: Box<dyn effect_contract::PreparedNativeEffectBank>,
     /// The bank's width and shared program key, from its bind result (issue #1461).
