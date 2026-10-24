@@ -91,6 +91,10 @@ export const CATALOG = deepFreeze(
       {
         "value": 1,
         "name": "gainReductionDb"
+      },
+      {
+        "value": 2,
+        "name": "gainChangeDb"
       }
     ],
     "costs": [
@@ -121,6 +125,10 @@ export const CATALOG = deepFreeze(
       {
         "value": 2,
         "name": "peakMagnitude"
+      },
+      {
+        "value": 3,
+        "name": "peakSigned"
       }
     ],
     "channels": [
