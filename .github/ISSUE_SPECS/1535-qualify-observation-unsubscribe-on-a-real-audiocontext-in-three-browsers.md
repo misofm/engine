@@ -390,6 +390,9 @@ the named exceptions of #1345 Amendments 5 and 6 again.
   wait now ends and the run returns `sourceExhausted`, which the gate names `shortfall` (one more
   node table row). Before this it was a thrown `Error`, which the gate reported as
   `browser-execution`. The peak-floor comment gives the measured minimum, 0.0815.
+  Final tree, one unloaded run each with the CI command and a short socket path: green in
+  Chromium, Firefox and WebKit (signal frames 48 / 49 / 48, low-peak frames 0, all
+  `render-allocations` rows 0).
 
 ## Decision record (root, 2026-10-24)
 
