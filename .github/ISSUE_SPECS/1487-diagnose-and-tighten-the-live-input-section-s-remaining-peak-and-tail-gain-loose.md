@@ -418,3 +418,30 @@ the base (e6cd552d9, built in a scratch worktree). `check-builtins-fixtures.sh`,
 - `check-workspace-policy.sh` and `lint-checks.sh`.
 
 325 tests passed in the gate run, and none failed. Release `tail_contract` takes about 11 s.
+
+### Verdict and close (2026-10-24)
+
+The verifier's verdict on #1487-B attempt 1 is FAIL. The bound is sound: each step is a one-step
+majorant, every step rounds up, and the value is a bound at every stopping frame. But two defects
+remain:
+- a required CI test goes red: the multiband compressor's pinned live table
+  (`crates/multiband-compressor/tests/tail_contract.rs`, `G_t` 6,259 -> 5,735 mB at 44.1 kHz,
+  through `live_cascade_composition`);
+- no test exercises `settled_pair_peak`: a `return 0.0` mutant passes everything, because the
+  window part binds.
+
+Root's decision is to close #1487 as measured, not shipped:
+- **`G_p`** closes with #1485's value under T-D6.
+- **`G_t`'s C1** is sound and gives -5.5 dB (5,824-5,830 -> 5,275 mB). It is not shipped, because:
+  - it moves no reported tail on today's fixtures (a 549 mB drop does not cross a decade of the
+    extent);
+  - it moves only the graph's flush floor, and no production path reads that value (only
+    `GraphCompileReport` and the canonical evidence text read it);
+  - a ship would also restate the multiband compressor's table and the #1373 derivation row, and
+    would need a direct test of the settled part.
+
+Commits `cd27acb60` and `468ea3234` hold the code, and the branch history keeps them. Commits
+`ac60aa2c0` and `559d1691f` revert them. The diagnosis (`e6cd552d9`) and this record stay.
+
+**Reopen condition:** a production path reads the graph's flush floor, or a session's `G_t` drop
+would cross a decade in a reported tail.
