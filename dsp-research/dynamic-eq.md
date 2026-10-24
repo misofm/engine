@@ -114,6 +114,56 @@ Deterministic in-test signals only: unit impulses for the static response, a 1 k
 -6 dBFS on a 30,000-sample period (1,000,000 samples), a -30 dBFS 1 kHz main tone with the burst
 on the sidechain, and xorshift noise for the bank and rest tests.
 
+**Measured response (#1943 O1).** One run of a throwaway harness (not committed) on
+`tests/support` at `origin/main` 39247834b, `cargo test --release -p dynamic-eq`, scalar instance,
+48 kHz, dual mono, both channels equal. Only the named band is enabled; every other parameter is
+the default (Q 1, threshold -20 dB, ratio 2, knee 6 dB, attack 5 ms, release 100 ms). The change
+is the band's resident observation, read after each one-frame block; output gains are DFT-bin
+ratios against the dry input.
+
+Static bell (range 0, detector idle), unit impulse, 65,536 frames, in dB; the difference to the
+cookbook bell (`ReferenceParametricEqCoefficients`) is at most `1.5e-6` dB at all 36 points:
+
+| Band, f_c | G | -1 octave | f_c | +1 octave |
+|---|---|---|---|---|
+| 0, 200 Hz | +6 / -6 / +12 | +1.884 / -1.884 / +3.964 | +6.000 / -6.000 / +12.000 | +1.883 / -1.883 / +3.963 |
+| 1, 1 kHz | +6 / -6 / +12 | +1.879 / -1.879 / +3.956 | +6.000 / -6.000 / +12.000 | +1.866 / -1.866 / +3.931 |
+| 2, 3 kHz | +6 / -6 / +12 | +1.844 / -1.844 / +3.889 | +6.000 / -6.000 / +12.000 | +1.723 / -1.723 / +3.662 |
+| 3, 8 kHz | +6 / -6 / +12 | +1.598 / -1.598 / +3.423 | +6.000 / -6.000 / +12.000 | +0.778 / -0.778 / +1.780 |
+
+The +1 octave column narrows toward Nyquist as the cookbook's bilinear design does (8 kHz).
+
+Change against level: band 0 at 1 kHz, a steady 1 kHz tone at the stated peak level for 1 s, the
+mean change over the last 200 ms (its ripple is at most +-0.005 dB), in dB. "Curve" is the static
+knee curve at the tone's peak level, clamped to the range; the detector reads the instantaneous
+magnitude, so the attack-release smoother settles 0.06 to 0.55 dB short of it, as the oracle does.
+
+| Peak level (dBFS) | -60 to -24 | -18 | -12 | -6 | 0 |
+|---|---|---|---|---|---|
+| Down, static +3 dB, range 12: change | 0.000 | -0.856 | -3.585 | -6.497 | -9.455 |
+| Down: curve | 0 | -1.042 | -4.000 | -7.000 | -10.000 |
+| Down: 1 kHz output gain | +3.000 | +2.144 | -0.585 | -3.498 | -6.455 |
+| Up, static 0 dB, range 6: change | 0.000 | +0.856 | +3.585 | +5.821 | +5.943 |
+| Up: curve | 0 | +1.042 | +4.000 | +6.000 | +6.000 |
+
+At every level the 1 kHz output gain equals the static gain plus the mean change within 0.001 dB;
+the up row stays under its +6 dB clamp.
+
+Internal and external detector, timings: band 0 at 1 kHz, sidechain connected, 30,000 frames, the
+main a -30 dBFS 1 kHz tone, the -6 dBFS 1 kHz burst from 50 ms to 250 ms. "Held" is the mean
+change over the burst's last 10 ms; attack is the first frame after the onset where the change
+reaches 90 % of held, release the first frame after the burst where it falls to 10 %.
+
+| Detector, burst on | Change before burst | Held | 1 kHz main, 150-250 ms | Attack 90 % | Release 10 % |
+|---|---|---|---|---|---|
+| internal, sidechain | 0.000 | 0.000 | +0.000 dB | none | none |
+| external, sidechain | 0.000 | -6.487 | -6.487 dB | 1,091 (22.7 ms) | 11,061 (230.4 ms) |
+| internal, main (summed) | 0.000 | -6.748 | -6.748 dB | 1,070 (22.3 ms) | 11,062 (230.5 ms) |
+
+The release matches the one-pole `100 ms * ln 10 = 230.3 ms`. The 90 % attack is about twice the
+one-pole `5 ms * ln 10 = 11.5 ms`, because the attack branch runs only while the instantaneous
+target exceeds the change, part of each tone cycle; the oracle rows hold the same crossings.
+
 ## Objective tests and tolerances
 
 `tests/oracle.rs`: static mode (range 0), 16 bell rows in four four-band cascades against the
@@ -133,11 +183,14 @@ conformance macro at four enabled bands. The link modes are the shared step's ro
 ## Benchmark plan
 
 None in S1 (not registered, so no production path runs it). A console record of
-`isolated_cycles_per_lane_sample` and its class-A floor is a stateless successor (S5).
+`isolated_cycles_per_lane_sample` and its class-A floor is an owner item, not #1943's: no
+post-limiter effect has a floor row, and the measured column needs a controlled console record
+with a core clock, which this host does not produce (#1943 decision record).
 
 ## Listening protocol or evidence
 
-Not yet: a blinded listening record (folds into #26) is a stateless successor (S5).
+Not yet: a blinded listening session needs a person; it is an owner item (#1943 decision record),
+in one packet with the de-esser's if the owner wants it.
 
 ## Primary and official sources
 
@@ -163,6 +216,7 @@ Not yet: a blinded listening record (folds into #26) is a stateless successor (S
 - The certified tail and exact-rest bound of a live, Q-variable SVF (#1372); until then the
   descriptor is `UNBOUNDED`, which #1378 must retire.
 - Registry and consumer wiring (S2), banking surfaces and console eligibility (S3), dynamic shelves
-  (S4), fixtures, plots, benchmark and listening (S5). The observation kind is `GainReductionDb`
+  (S4); the measured response tables are recorded (#1943 O1, Fixtures); the floor row and blinded
+  listening are owner items. The observation kind is `GainReductionDb`
   (the only one in V1), whose peak-magnitude fold drops the sign of an upward band's boost; #1918
   adds a signed gain-change kind and fold, and S2 depends on it.
