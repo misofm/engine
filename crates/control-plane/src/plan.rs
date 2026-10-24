@@ -458,6 +458,9 @@ mod tests {
     struct FailAfterSnapshot;
 
     impl PreparedPlanExecutor for FailAfterSnapshot {
+        fn retained_bytes(&self) -> u64 {
+            0
+        }
         fn render(
             &mut self,
             _arena: &mut BufferArena,

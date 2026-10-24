@@ -5,7 +5,8 @@ use session::SessionModel;
 use crate::descriptor::{ControlDescriptor, ControlScope};
 use crate::effective::MonitorOverlay;
 use crate::lane::Side;
-use crate::registry::{ControlRow, Source, list, resolve};
+use crate::registry::{ControlRow, Source, list, resolve_in};
+use crate::view::ModelView;
 use crate::{ControlClass, strip};
 use session::{ControlAddress, Owner, Section};
 
@@ -139,11 +140,34 @@ pub fn changed_rows(
     address: &ControlAddress,
     sample_rate: u32,
 ) -> Option<Vec<ChangedControl>> {
+    changed_rows_in(
+        ModelView::whole(current),
+        ModelView::whole(next),
+        address,
+        sample_rate,
+    )
+}
+
+/// [`changed_rows`] on two whole views (#1914): each reads the entries that drive a strip's
+/// `fader_db` or a VCA's `offset_db` from its [`crate::AutomationIndex`] when it is
+/// [`ModelView::indexed`], so a caller that judges many rows walks each automation table once
+/// instead of once per row.
+///
+/// # Panics
+///
+/// In a debug build, if either view is not whole ([`ModelView::is_whole`]).
+#[must_use]
+pub fn changed_rows_in(
+    current: ModelView<'_>,
+    next: ModelView<'_>,
+    address: &ControlAddress,
+    sample_rate: u32,
+) -> Option<Vec<ChangedControl>> {
     if !writes_only_its_row(address) {
         return None;
     }
-    let before = resolve(current, address, sample_rate).ok()?;
-    let after = resolve(next, address, sample_rate).ok()?;
+    let before = resolve_in(current, address, sample_rate).ok()?;
+    let after = resolve_in(next, address, sample_rate).ok()?;
     let descriptor = after.descriptor;
     if descriptor.class == ControlClass::Derived
         || descriptor.scope == ControlScope::Monitor

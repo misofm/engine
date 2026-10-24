@@ -122,6 +122,10 @@ impl NativeEffectFactory for Factory {
 /// The double's processor reads no prepared value, so it holds none (issue #1461).
 struct Processor;
 impl PreparedNativeEffect for Processor {
+    fn retained_bytes(&self) -> u64 {
+        0
+    }
+
     fn reset(&mut self, _: ResetKind) {}
     fn process(&mut self, _: EffectProcessBlock<'_>) -> ProcessReport {
         ProcessReport::default()
@@ -367,8 +371,7 @@ fn console_slots_accept_exactly_the_eligible_native_effects() {
     }
     for (effect_id, post, section) in [
         ("miso.delay", false, "pre_insert"),
-        ("miso.multiband-compressor", true, "post_insert"),
-        ("parametric-eq", false, "pre_insert"),
+        ("parametric-eq", true, "post_insert"),
     ] {
         let session = compiled(effect_id, post);
         let diagnostics = match prepare_native_session_effects(&session, registry, generous) {
@@ -660,7 +663,7 @@ fn every_launch_effect_is_prepared_with_a_window_for_all_its_live_cells() {
         checked += 1;
         with_many_cells += usize::from(cells > 1);
     }
-    assert_eq!(checked, 8, "the eight launch effects");
+    assert_eq!(checked, 9, "the nine launch effects");
     assert!(with_many_cells > 0);
 }
 

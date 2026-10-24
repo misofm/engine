@@ -97,6 +97,12 @@ nothing.
   same bytes and pops nothing. A host that reads often gives each read a new request ID.
 - **D8. Capability.** With `ProviderFeatures::spectrum` set (the C ABI session), the registry
   lists `0x0010`, `0x0011` and `0x0012` and sets capability flag bit 16 (#1594 D10).
+- **D8a. #1594 D10 moves here whole (root decision R3 of #1594, 2026-10-24).** This slice adds
+  capability bit 16, `CapabilityFlags::KNOWN` with it, `ProviderFeatures::spectrum` and the two
+  decode invariants of #1594 D10 (bit 16 is set exactly when `0x0010`, `0x0011` and `0x0012` are
+  listed; the three are listed together or not at all). #1594 left `0x0010` allocated, served by
+  both hosts' sessions and listed by no registry; the `SessionCommand` variant of
+  `PreparedCommandFrame::Session` is where this slice's reads go.
 - **D9. Docs.** As #1594 D11, for the two messages: the semantics doc states D5 and that the
   analysis runs on the calling control thread.
 

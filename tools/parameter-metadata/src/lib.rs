@@ -64,9 +64,9 @@
 //!
 //! Each effect carries its declared `"ports"` -- id, role, `required` and lane layout -- for the
 //! same reason it carries its parameters: the descriptor is the only thing that knows them, and a
-//! consumer that kept its own table would go stale. Exactly two launch effects declare a
-//! `sidechainInput` (`miso.compressor` and `miso.gate-expander`, both `"sidechain-in"`, both
-//! optional); the other six declare only their main pair, and every effect gets the key.
+//! consumer that kept its own table would go stale. Exactly three launch effects declare a
+//! `sidechainInput` (`miso.compressor`, `miso.de-esser` and `miso.gate-expander`, each
+//! `"sidechain-in"`, each optional); the other six declare only their main pair, and every effect gets the key.
 //!
 //! This is an ADDITIVE extension of the v1 surface, handled exactly as #143's `observations` was:
 //! the schema tag and `abiVersion` are unmoved, and the new key is *never absent*, so there is no
@@ -217,7 +217,10 @@ pub fn render() -> String {
     let vocabularies: [(&str, &[(u32, &str)]); 5] = [
         (
             "kinds",
-            &[(ObservationKind::GainReductionDb as u32, "gainReductionDb")],
+            &[
+                (ObservationKind::GainReductionDb as u32, "gainReductionDb"),
+                (ObservationKind::GainChangeDb as u32, "gainChangeDb"),
+            ],
         ),
         (
             "costs",
@@ -238,6 +241,7 @@ pub fn render() -> String {
             &[
                 (ObservationFold::Latest as u32, "latest"),
                 (ObservationFold::PeakMagnitude as u32, "peakMagnitude"),
+                (ObservationFold::PeakSigned as u32, "peakSigned"),
             ],
         ),
         (
@@ -816,6 +820,7 @@ fn effect_observation(out: &mut String, observation: &ObservationDescriptor) {
 const fn observation_kind_name(kind: ObservationKind) -> &'static str {
     match kind {
         ObservationKind::GainReductionDb => "gainReductionDb",
+        ObservationKind::GainChangeDb => "gainChangeDb",
     }
 }
 
@@ -837,6 +842,7 @@ const fn observation_fold_name(fold: ObservationFold) -> &'static str {
     match fold {
         ObservationFold::Latest => "latest",
         ObservationFold::PeakMagnitude => "peakMagnitude",
+        ObservationFold::PeakSigned => "peakSigned",
     }
 }
 

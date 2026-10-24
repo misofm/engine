@@ -144,8 +144,8 @@ impl SpectrumMonitor {
             };
         };
         let Some(service) = self.service.as_mut() else {
-            // A configuration made after boot: the first captures make the service, with the
-            // candidate's own hop. Unreachable until #1594 (a configuration only shrinks today).
+            // A configuration made after boot or after every tap was removed (#1594): the first
+            // captures make the service, with the candidate's own hop.
             self.service = Some(SpectrumService::new(
                 captures,
                 self.sample_rate_hz,
@@ -158,11 +158,32 @@ impl SpectrumMonitor {
                 service: None,
             };
         };
+        // The next stream starts with the hop of the configuration the candidate carries; a
+        // stream the swap keeps runs on with its own cadence (#1594 D5).
+        service.set_hop(hop);
         let displaced = service.adopt_successor(captures, pairing, true, self.analysis.as_mut());
         SpectrumDisplaced {
             captures: Some(displaced),
             service: None,
         }
+    }
+
+    /// Store a configuration that changes only the hop or the budget of the session's (#1594 D5):
+    /// no plan is prepared. The configuration epoch advances by one, and so does the adopted
+    /// epoch when the running plan's captures are of the configuration replaced (they hold the
+    /// same taps); the service's next stream starts with the new hop. Returns the epoch replaced,
+    /// for the caller to move a pending candidate of it to the new one. Allocates nothing.
+    pub(crate) fn retune(&mut self, configuration: SpectrumConfiguration) -> u64 {
+        let replaced = self.configured_epoch;
+        self.configured_epoch = replaced.saturating_add(1);
+        if self.adopted_epoch == replaced {
+            self.adopted_epoch = self.configured_epoch;
+            if let Some(service) = self.service.as_mut() {
+                service.set_hop(configuration.hop);
+            }
+        }
+        self.configuration = Some(configuration);
+        replaced
     }
 
     /// The session's configuration, or `None`.

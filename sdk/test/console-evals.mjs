@@ -235,10 +235,10 @@ describe("issue #1097 -- every builder refusal is the engine's, with the engine'
       edit: (model) => { model.console.post_insert[0].identity.effect_id = "miso.delay"; },
     },
     {
-      name: "an ineligible console effect (the multiband, until #1069)",
+      name: "an ineligible console effect (the delay)",
       code: "console.slot.ineligible_effect",
-      build: () => stripBase({ postInsert: [{ slot: "limiter", effectId: "miso.multiband-compressor" }] }),
-      edit: (model) => { model.console.post_insert[0].identity.effect_id = "miso.multiband-compressor"; },
+      build: () => stripBase({ postInsert: [{ slot: "limiter", effectId: "miso.delay" }] }),
+      edit: (model) => { model.console.post_insert[0].identity.effect_id = "miso.delay"; },
     },
     {
       name: "a slot ID repeated across the two sections",
@@ -992,6 +992,7 @@ describe("issue #1097 -- live controls address console slots by slot ID and inse
 /** Parameters that make each catalog effect audible on `feed()`'s noise, so bypass is heard. */
 const AUDIBLE = Object.freeze({
   "miso.compressor": { threshold: -40, ratio: 8 },
+  "miso.de-esser": { threshold: -60, ratio: 20, range: 40 },
   "miso.delay": { "delay time": 2, mix: 0.5 },
   "miso.gate-expander": { threshold: -3, ratio: 20, hold: 0, hysteresis: 0, release: 5 },
   "miso.multiband-compressor": { low_threshold: -40, low_ratio: 8, high_threshold: -40, high_ratio: 8 },

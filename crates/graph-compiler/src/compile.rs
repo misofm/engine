@@ -42,7 +42,12 @@ impl GraphCompiler {
         GraphEvidence {
             canonical_bytes: text.into_bytes(),
             sha256,
-            dot: dot(&graph.spec.nodes, &graph.spec.edges, &graph.inserted_delays),
+            dot: dot(
+                &graph.spec.nodes,
+                &graph.spec.edges,
+                &graph.inserted_delays,
+                graph.source_claim_lines(),
+            ),
         }
     }
 
@@ -231,7 +236,7 @@ impl GraphCompiler {
             for stage in stages() {
                 let id = track_node(strip.id.as_str(), stage);
                 let bound = match stage {
-                    TrackStage::Input => strip_input_bound(model, strip),
+                    TrackStage::Input => strip_input_bound(model, strip, input_floors),
                     TrackStage::PostInputBuiltins => *builtin_bounds
                         .get(strip.id.as_str())
                         .expect("validated builtins carry one bound per track"),
@@ -441,7 +446,14 @@ impl GraphCompiler {
                 vec![diag("graph.resource.limit", "$.graph_compile_caps")],
             ));
         }
-        let timing = match timings(&table, &dense_schedule, input_floors, &caps) {
+        // #1287 D1: every track's `Input` reads its source through a claim, so a floor on it is a
+        // source-claim line. A submix's `Input` sums its routes, which carry its compensation.
+        let sources: BTreeSet<GraphNodeId> = model
+            .tracks
+            .iter()
+            .map(|track| track_node(track.id.as_str(), TrackStage::Input))
+            .collect();
+        let timing = match timings(&table, &dense_schedule, input_floors, &sources, &caps) {
             Ok(value) => value,
             Err(diagnostic) => return Err(failure(effects, vec![diagnostic])),
         };
@@ -495,22 +507,47 @@ impl GraphCompiler {
         // session produces an empty vector, and every downstream consumer -- the estimate term,
         // the lowering, the runtime's line vector -- is then exactly what it was before this
         // feature existed.
-        let track_delays: Vec<PreparedTrackDelay> = model
-            .strips()
-            .filter(|strip| {
-                strip.builtins.left.delay_samples != 0 || strip.builtins.right.delay_samples != 0
-            })
-            .map(|strip| PreparedTrackDelay {
-                node: track_node(strip.id.as_str(), TrackStage::Input),
-                left_samples: strip.builtins.left.delay_samples,
-                right_samples: strip.builtins.right.delay_samples,
-            })
-            .collect();
-        let Some(track_delay_bytes) = track_delays.iter().try_fold(0_u64, |total, delay| {
-            total
-                .checked_add(u64::from(delay.left_samples).checked_mul(4)?)?
-                .checked_add(u64::from(delay.right_samples).checked_mul(4)?)
-        }) else {
+        //
+        // #1287 D1: a source-claim line rides the same entry. Its samples are added to both lanes
+        // of the track's entry, which is created when the session declared no delay, so the one
+        // ring per lane holds the declared delay and the line. Its bytes are charged through
+        // `total_delay` (it is compensation), so `track_delay_bytes` stays the declared delay's.
+        let mut track_delay_bytes = Some(0_u64);
+        let mut track_delays = Vec::new();
+        for strip in model.strips() {
+            let node = track_node(strip.id.as_str(), TrackStage::Input);
+            let declared = [
+                strip.builtins.left.delay_samples,
+                strip.builtins.right.delay_samples,
+            ];
+            let bytes = |lane: u32| u64::from(lane).checked_mul(4);
+            track_delay_bytes = track_delay_bytes
+                .and_then(|total| total.checked_add(bytes(declared[0])?))
+                .and_then(|total| total.checked_add(bytes(declared[1])?));
+            let line = timing
+                .claim_lines
+                .binary_search_by(|line| line.node.cmp(&node))
+                .map_or(0, |index| timing.claim_lines[index].samples.0);
+            if declared == [0, 0] && line == 0 {
+                continue;
+            }
+            let lane = |declared: u32| {
+                u32::try_from(line)
+                    .ok()
+                    .and_then(|line| declared.checked_add(line))
+            };
+            let (Some(left_samples), Some(right_samples)) = (lane(declared[0]), lane(declared[1]))
+            else {
+                track_delay_bytes = None;
+                break;
+            };
+            track_delays.push(PreparedTrackDelay {
+                node,
+                left_samples,
+                right_samples,
+            });
+        }
+        let Some(track_delay_bytes) = track_delay_bytes else {
             return Err(failure(
                 effects,
                 vec![diag(
@@ -877,7 +914,8 @@ impl GraphCompiler {
             builtin_banks: Vec::new(),
             observers: Vec::new(),
             effect_observations,
-        });
+        })
+        .with_source_claim_lines(timing.claim_lines);
         Ok(CompiledGraph {
             pool_classes,
             graph,
@@ -999,7 +1037,16 @@ pub(crate) fn sum_bound(fan_in: usize, delay: u64) -> NodeTailBound {
 
 /// A strip's `Input` node (H3, D2a): a track's source, or a submix's sum of the routes that name
 /// it, then the strip's delay line, `T = max(left, right) delay_samples`.
-fn strip_input_bound(model: &SessionModel, strip: &StripRef<'_>) -> NodeTailBound {
+///
+/// A track's line also holds its source-claim line (#1287 D1), whose length is the track's floor
+/// (a track's `Input` has no incoming edge, so its incoming arrival is 0), so a track's `T` adds
+/// the floor. `pdc::timings` refuses a floor above `maximum_delay_samples_per_edge`, so the
+/// saturating add never saturates on a compile that succeeds.
+fn strip_input_bound(
+    model: &SessionModel,
+    strip: &StripRef<'_>,
+    floors: &BTreeMap<GraphNodeId, LatencySamples>,
+) -> NodeTailBound {
     let delay = u64::from(
         strip
             .builtins
@@ -1008,7 +1055,16 @@ fn strip_input_bound(model: &SessionModel, strip: &StripRef<'_>) -> NodeTailBoun
             .max(strip.builtins.right.delay_samples),
     );
     match strip.kind {
-        StripKind::Track(_) => gain_only_bound(delay, PeakGain::Millibels(0), FlushStall::Zero),
+        StripKind::Track(_) => {
+            let line = floors
+                .get(&track_node(strip.id.as_str(), TrackStage::Input))
+                .map_or(0, |floor| floor.0);
+            gain_only_bound(
+                delay.saturating_add(line),
+                PeakGain::Millibels(0),
+                FlushStall::Zero,
+            )
+        }
         StripKind::Submix(submix) => {
             let fan_in = model
                 .routes

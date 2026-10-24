@@ -55,9 +55,9 @@ pub struct ProviderEpoch {
     /// The consumers of this epoch's plan's strip meters (#1581 D6), one per strip in strip order
     /// (`host_core::meter_selection`). Nothing reads them until #1587; a full strip queue drops
     /// and counts on the render side. Their rings are `Arc`s shared with the plan's observers, as
-    /// the producers' cells are, so the epoch may drop after its plan. Only the adapters' tests
-    /// read them before #1587.
-    #[cfg_attr(not(feature = "test-support"), allow(dead_code))]
+    /// the producers' cells are, so the epoch may drop after its plan. At promotion a carried
+    /// meter's consumer moves from the displaced epoch to this one, at the entry the plan's
+    /// `meter_pairing` names (#1674 R1), so a consumer stays with the observer that renders on.
     pub(crate) meters: Box<[host_core::MeterConsumer]>,
     /// The capi resources this epoch's plan was prepared with (#1257 D4).
     pub(crate) capi: CapiResources,
@@ -126,6 +126,15 @@ enum Rebuild {
     /// this is the control plane's own copy, prepared with no floors and only its source
     /// consumers carried. Nothing is committed.
     Discontinuity(Box<CompiledSession>),
+    /// A `SPECTRUM_CONFIGURE` whose taps differ in form or entries (#1594 D6, R1): the successor
+    /// is the committed model (the control plane's own copy) prepared with `configuration`, which
+    /// replaces the session's. It carries like a transaction with no edit and commits like a
+    /// discontinuity: nothing is committed, the revision does not change, no stamp is taken and
+    /// the candidate's gate publishes the committed revision only when it is above 0.
+    Monitor {
+        model: Box<CompiledSession>,
+        configuration: Option<host_core::SpectrumConfiguration>,
+    },
 }
 
 /// The edit ramps of a discontinuity successor: no edit gave a row a length (#1323).
@@ -153,6 +162,108 @@ fn spectrum_invariant(failure: CompileFailure) -> CommandError {
     } else {
         CommandError::CompileRejected(failure)
     }
+}
+
+/// How a `SPECTRUM_CONFIGURE` is refused (#1594 D4): a typed reply, recorded for replay, or a
+/// retryable or internal error that records nothing.
+enum SpectrumRefusal {
+    Reply(protocol::StatusCode, String),
+    Error(CommandError),
+}
+
+impl SpectrumRefusal {
+    fn reply(status: protocol::StatusCode, code: &str) -> Self {
+        Self::Reply(status, code.to_owned())
+    }
+}
+
+/// The configuration a `SPECTRUM_CONFIGURE` request sets, by #1591 D2's constructors: `None` for
+/// an empty collection with budget 0. A constructor's refusal is `INVALID_FIELD` with its code.
+fn spectrum_configuration_of(
+    request: &protocol::SpectrumConfigureRequest,
+) -> Result<Option<host_core::SpectrumConfiguration>, SpectrumRefusal> {
+    let invalid = |code: &str| SpectrumRefusal::reply(protocol::StatusCode::InvalidField, code);
+    let hop = request
+        .hop_frames
+        .map(host_core::SpectrumHop::new)
+        .transpose()
+        .map_err(|_| invalid("spectrum.hop"))?;
+    let raw = |entry: &protocol::SpectrumEntry| {
+        (
+            u32::from(entry.target_kind.code()),
+            match entry.channels {
+                protocol::ParameterChannel::Left => host_core::SPECTRUM_CHANNEL_LEFT,
+                protocol::ParameterChannel::Right => host_core::SPECTRUM_CHANNEL_RIGHT,
+                protocol::ParameterChannel::Both => host_core::SPECTRUM_CHANNEL_BOTH,
+            },
+        )
+    };
+    let preparation = match request.form {
+        protocol::SpectrumForm::Single => {
+            let [entry] = request.entries.as_slice() else {
+                return Err(invalid("spectrum.form"));
+            };
+            let (kind, channels) = raw(entry);
+            Some(
+                host_core::SpectrumPreparation::single(
+                    kind,
+                    &entry.target_id,
+                    channels,
+                    request.maximum_capture_bytes,
+                )
+                .map_err(|error| invalid(error.code()))?,
+            )
+        }
+        protocol::SpectrumForm::Collection => {
+            let mut entries = Vec::new();
+            entries
+                .try_reserve_exact(request.entries.len())
+                .map_err(|_| invalid(host_core::SpectrumRequestError::Budget.code()))?;
+            entries.extend(request.entries.iter().map(|entry| {
+                let (kind, channels) = raw(entry);
+                (kind, entry.target_id.as_str(), channels)
+            }));
+            host_core::SpectrumPreparation::collection(&entries, request.maximum_capture_bytes)
+                .map_err(|error| invalid(error.code()))?
+        }
+    };
+    Ok(preparation.map(|preparation| host_core::SpectrumConfiguration { preparation, hop }))
+}
+
+/// Whether two preparations hold the same taps (form, targets and channels), whatever their
+/// budgets (#1594 D5).
+fn same_taps(
+    next: &host_core::SpectrumPreparation,
+    current: &host_core::SpectrumPreparation,
+) -> bool {
+    use host_core::SpectrumPreparation::{Collection, Single};
+    match (next, current) {
+        (Single(next), Single(current)) => {
+            next.target == current.target && next.channels == current.channels
+        }
+        (Collection(next), Collection(current)) => next.entries == current.entries,
+        _ => false,
+    }
+}
+
+/// A preparation's byte budget.
+const fn spectrum_budget(preparation: &host_core::SpectrumPreparation) -> u64 {
+    match preparation {
+        host_core::SpectrumPreparation::Single(request) => request.maximum_capture_bytes,
+        host_core::SpectrumPreparation::Collection(request) => request.maximum_capture_bytes,
+    }
+}
+
+/// The first diagnostic code of a refused preparation: the text before the first tab of its
+/// first line.
+fn first_diagnostic_code(failure: &CompileFailure) -> String {
+    let diagnostic = failure.diagnostic();
+    let line = diagnostic
+        .split(|byte| *byte == b'\n')
+        .next()
+        .unwrap_or_default();
+    let code = line.split(|byte| *byte == b'\t').next().unwrap_or_default();
+    String::from_utf8_lossy(code).into_owned()
 }
 
 impl ProviderEpoch {
@@ -2087,6 +2198,15 @@ where
                 )),
                 other => other,
             };
+            // #1674 R1: likewise its strip meters. The swap block moved each carried meter's
+            // observer, producer included, into `next`'s plan, so the consumer the running epoch
+            // holds follows it, and the parked epoch keeps `next`'s fresh one, whose producer
+            // retires with the displaced plan.
+            host_core::pair_carried_meters(
+                &mut next.meters,
+                &mut self.providers.meters,
+                next.inventory.meter_pairing(),
+            );
             let mut previous = core::mem::replace(&mut self.providers, next);
             // Dropped with the parked epoch, when its plan is reclaimed.
             previous.spectrum = displaced;
@@ -2211,6 +2331,8 @@ where
             PreparedCommandFrame::Immediate(response) => response
                 .write_into(&mut self.response_scratch)
                 .map_err(map_encode_error),
+            // #1594 D9: a command the session executes.
+            PreparedCommandFrame::Session(prepared) => self.session_command(*prepared),
             PreparedCommandFrame::Structural(prepared) => {
                 let prepared = ObservedPreparedToken::new(prepared);
                 #[cfg(feature = "test-support")]
@@ -2443,6 +2565,207 @@ where
         result.map(|_| ())
     }
 
+    /// Executes a command the session runs (#1594 D9) and completes it: a reply or a typed
+    /// refusal is recorded for replay with the response, so an exact replay answers the same
+    /// bytes and reaches here no second time. A retryable or internal failure drops the token:
+    /// nothing is recorded, nothing is acknowledged, and the same request may be sent again.
+    fn session_command(
+        &mut self,
+        prepared: protocol::PreparedSessionCommand,
+    ) -> Result<usize, CommandError> {
+        let protocol::SessionCommand::SpectrumConfigure(request) = prepared.command();
+        let outcome = self.spectrum_configure(request);
+        match outcome {
+            Ok(reply) => self
+                .controller
+                .complete_session_command(
+                    prepared,
+                    protocol::SessionCommandReply::SpectrumConfigured(reply),
+                    &mut self.response_scratch,
+                )
+                .map_err(map_command_process_error),
+            Err(SpectrumRefusal::Reply(status, code)) => self
+                .controller
+                .complete_session_command_refused(
+                    prepared,
+                    status,
+                    &code,
+                    &mut self.response_scratch,
+                )
+                .map_err(map_command_process_error),
+            Err(SpectrumRefusal::Error(error)) => {
+                drop(prepared);
+                Err(error)
+            }
+        }
+    }
+
+    /// `SPECTRUM_CONFIGURE` (#1594 D4-D7). Every check runs before any write, in order: the
+    /// request's own rules (#1591 D2's constructors, `INVALID_FIELD` with the
+    /// `SpectrumRequestError` code); each target names a strip or an output of the committed
+    /// model (`NOT_FOUND`, `spectrum.target.unknown`); no entry twice (`VALIDATION_FAILED`,
+    /// `spectrum.duplicate`). Then:
+    ///
+    /// - an equal configuration changes nothing (`rebuild` false, the epochs unchanged);
+    /// - a configuration with the same taps and another hop or budget publishes no plan: it is
+    ///   stored and both epochs advance by one ([`crate::spectrum::SpectrumMonitor::retune`]);
+    ///   a budget below what the captures retain is `LIMIT_EXCEEDED`
+    ///   (`spectrum.budget.retained`);
+    /// - any other change is a monitor rebuild ([`Rebuild::Monitor`]) at the committed revision.
+    ///   A pending candidate is superseded first, as a transaction supersedes it (#1594 R2): its
+    ///   edits are in the committed model the successor is compiled from.
+    ///
+    /// **Acked-batch question: can an ack ever precede a drop? No.** The command acknowledges no
+    /// edit and changes neither the model nor the revision. A refusal changes nothing: a
+    /// withdrawn candidate is published again whole, and a superseded candidate's fed rings move
+    /// by the checked donation or the supersession is refused as backpressure.
+    fn spectrum_configure(
+        &mut self,
+        request: &protocol::SpectrumConfigureRequest,
+    ) -> Result<protocol::SpectrumConfigured, SpectrumRefusal> {
+        use protocol::StatusCode;
+        let configuration = spectrum_configuration_of(request)?;
+        let model = self.controller.session().compiled().normalized_model();
+        for entry in &request.entries {
+            let id = entry.target_id.as_str();
+            let present = match entry.target_kind {
+                protocol::SpectrumTargetKind::TrackPostInput
+                | protocol::SpectrumTargetKind::TrackPostPan => {
+                    model.tracks.iter().any(|track| track.id.as_str() == id)
+                        || model.submixes.iter().any(|submix| submix.id.as_str() == id)
+                }
+                protocol::SpectrumTargetKind::Output => {
+                    model.outputs.iter().any(|output| output.id.as_str() == id)
+                }
+            };
+            if !present {
+                return Err(SpectrumRefusal::reply(
+                    StatusCode::NotFound,
+                    "spectrum.target.unknown",
+                ));
+            }
+        }
+        for (index, entry) in request.entries.iter().enumerate() {
+            if request.entries[..index].contains(entry) {
+                return Err(SpectrumRefusal::reply(
+                    StatusCode::ValidationFailed,
+                    "spectrum.duplicate",
+                ));
+            }
+        }
+        let revision = self.controller.session().revision().0;
+        let reply = |monitor: &crate::spectrum::SpectrumMonitor, plan_epoch: Option<u64>| {
+            protocol::SpectrumConfigured {
+                revision,
+                configured_epoch: monitor.configured_epoch(),
+                adopted_epoch: monitor.adopted_epoch(),
+                rebuild: plan_epoch.is_some(),
+                plan_epoch,
+            }
+        };
+        let current = self.spectrum.configuration();
+        if configuration.as_ref() == current {
+            return Ok(reply(&self.spectrum, None));
+        }
+        if let (Some(next), Some(current)) = (configuration.as_ref(), current)
+            && same_taps(&next.preparation, &current.preparation)
+        {
+            let retained = next
+                .preparation
+                .retained_bytes()
+                .map_err(|_| SpectrumRefusal::Error(CommandError::Internal))?;
+            if spectrum_budget(&next.preparation) < retained {
+                return Err(SpectrumRefusal::reply(
+                    StatusCode::LimitExceeded,
+                    "spectrum.budget.retained",
+                ));
+            }
+            let hop = next.hop;
+            let replaced = self.spectrum.retune(next.clone());
+            let configured = self.spectrum.configured_epoch();
+            // A pending candidate prepared with the replaced configuration holds the same taps: it
+            // now carries the new one, with its hop.
+            for provider in &mut self.pending_providers {
+                if let crate::spectrum::EpochSpectrum::Candidate {
+                    hop: candidate_hop,
+                    epoch,
+                    ..
+                } = &mut provider.spectrum
+                    && *epoch == replaced
+                {
+                    *epoch = configured;
+                    *candidate_hop = hop;
+                }
+            }
+            return Ok(reply(&self.spectrum, None));
+        }
+        let epoch = self.monitor_rebuild(configuration)?;
+        Ok(reply(&self.spectrum, Some(epoch)))
+    }
+
+    /// The monitor rebuild of a `SPECTRUM_CONFIGURE` (#1594 D6): the committed model, prepared
+    /// with `configuration` as a successor of the newest plan at the committed revision. Returns
+    /// the epoch of the plan it published.
+    fn monitor_rebuild(
+        &mut self,
+        configuration: Option<host_core::SpectrumConfiguration>,
+    ) -> Result<u64, SpectrumRefusal> {
+        if !self.shared.plan_alive.load(Ordering::Acquire) {
+            return Err(SpectrumRefusal::Error(CommandError::Backpressure));
+        }
+        let revision = self.controller.session().revision().0;
+        if revision > engine::realtime::GATE_REVISION_MAX {
+            return Err(SpectrumRefusal::Error(CommandError::Internal));
+        }
+        let model = Box::new(self.controller.session().compiled().clone());
+        // Nothing changes the overlay or the subscriptions: the successor renders under the ones
+        // the newest plan holds, and every binding keeps its target.
+        let monitor_change = self.monitor.after(&[], model.normalized_model());
+        let observation_change =
+            self.observation
+                .after(model.normalized_model())
+                .map_err(|_| {
+                    SpectrumRefusal::Error(CommandError::CompileRejected(failure(
+                        ResourceFault::Allocation,
+                    )))
+                })?;
+        if !observation_change.ended.is_empty() {
+            return Err(SpectrumRefusal::Error(CommandError::Internal));
+        }
+        let mut withdrawn = self
+            .withdraw_pending_candidate()
+            .map_err(SpectrumRefusal::Error)?;
+        let result = self.rebuild(
+            Rebuild::Monitor {
+                model,
+                configuration,
+            },
+            revision,
+            monitor_change,
+            observation_change,
+            &mut withdrawn,
+        );
+        // #1310 D4: as for a transaction, a refusal republishes the withdrawn candidate whole.
+        if let Some(candidate) = withdrawn.take() {
+            self.publisher.republish(candidate);
+            #[cfg(feature = "test-support")]
+            update_test_owners(|owners| owners.candidate_republished += 1);
+        }
+        match result {
+            Ok(_) => self
+                .pending_providers
+                .last()
+                .map(|provider| provider.epoch)
+                .ok_or(SpectrumRefusal::Error(CommandError::Internal)),
+            // D4: a preparation or resource refusal is the command's typed answer.
+            Err(CommandError::CompileRejected(failure)) => Err(SpectrumRefusal::Reply(
+                protocol::StatusCode::LimitExceeded,
+                first_diagnostic_code(&failure),
+            )),
+            Err(error) => Err(SpectrumRefusal::Error(error)),
+        }
+    }
+
     /// Takes back the newest pending candidate if render has not adopted it (#1310 D1). `None`
     /// while nothing is pending, or when render adopted it first (`Taken`), which is the path a
     /// rebuild on the newest plan has always taken.
@@ -2538,13 +2861,19 @@ where
                     .is_some_and(|newest| newest.discontinuity));
         let own_ramps = match &kind {
             Rebuild::Transaction(prepared) => prepared.get().prospective_session().edit_ramps(),
-            Rebuild::Discontinuity(_) => &NO_EDIT_RAMPS,
+            Rebuild::Discontinuity(_) | Rebuild::Monitor { .. } => &NO_EDIT_RAMPS,
         };
         // Whether B writes a monitor row: then its overlay change's ramp is the latest.
         let writes_monitor = match &kind {
             Rebuild::Transaction(prepared) => !prepared.get().monitor_edits().is_empty(),
-            Rebuild::Discontinuity(_) => false,
+            Rebuild::Discontinuity(_) | Rebuild::Monitor { .. } => false,
         };
+        // #1594 D6: a monitor rebuild keeps the committed revision, which may be 0. Against the
+        // running plan its model is the base's, so nothing retargets; across a withdrawn
+        // candidate at a newer revision the base is the older plan's, whose retargets the
+        // preparation stamps with that revision as it does for a transaction.
+        let monitor = matches!(kind, Rebuild::Monitor { .. });
+        let unchanged_revision = monitor && (!superseding || revision == 0);
         // The ramp lengths the epoch B succeeds keeps from now on: B's own, or, across a
         // withdrawn candidate, the kept base's with B's laid over them (B wins on a shared row).
         let mut kept_ramps = if superseding {
@@ -2562,7 +2891,7 @@ where
                 .prospective_session()
                 .compiled()
                 .ok_or(CommandError::Internal)?,
-            Rebuild::Discontinuity(model) => &**model,
+            Rebuild::Discontinuity(model) | Rebuild::Monitor { model, .. } => &**model,
         };
         // #1696 root ruling: a kept base holds only the rows of owners B's model has, and no
         // rewritten targets, so the ramp row of B's model bounds it.
@@ -2604,6 +2933,7 @@ where
                 },
                 observation: &observation_change.bindings,
                 discontinuity,
+                unchanged_revision,
                 ..SuccessorBase::new(inventory, kept.model.normalized_model(), revision)
             }
         } else {
@@ -2620,6 +2950,7 @@ where
                 },
                 observation: &observation_change.bindings,
                 discontinuity,
+                unchanged_revision,
                 ..SuccessorBase::new(
                     &self.newest_providers().inventory,
                     self.controller.session().compiled().normalized_model(),
@@ -2629,9 +2960,13 @@ where
         };
         // #1593 D4: the successor keeps every spectrum entry whose target the prospective model
         // still has. It is stored only beside the candidate push, after the protocol commit.
-        let spectrum_configuration = self
-            .spectrum
-            .successor_configuration(prospective.normalized_model());
+        // #1594 D6: a monitor rebuild is prepared with the request's configuration instead.
+        let spectrum_configuration = match &kind {
+            Rebuild::Monitor { configuration, .. } => configuration.clone(),
+            _ => self
+                .spectrum
+                .successor_configuration(prospective.normalized_model()),
+        };
         let prepared_runtime = prepare_runtime::<A>(
             &*self.preparer,
             prospective,
@@ -2776,7 +3111,19 @@ where
         // not yet in the window, which folds them only after the commit), or a move of the
         // window (read here, before the reservation; a watermark read that gives up counts as
         // "may"). A declared discontinuity carries nothing. Conservative, it over-reports.
-        let transaction = matches!(kind, Rebuild::Transaction(_));
+        // #1594 (attempt 2): a monitor rebuild that supersedes a withdrawn candidate A carries A's
+        // edits against the plan A succeeds, so its join can carry a following route as a
+        // transaction that supersedes A would: it takes the same outcome terms. A monitor rebuild
+        // on the newest plan has an equal model and carries no route change. It inherits only when
+        // it covers a revision the plan it succeeds has not published: a withdrawn monitor
+        // candidate at the same revision carried no edit, and a claim at a revision the watermark
+        // already reached would pass its outcome to the next advance.
+        let carries_withdrawn_edits = monitor
+            && superseding
+            && self
+                .kept_holder()
+                .is_some_and(|holder| revision > holder.revision_gate.last_published());
+        let transaction = matches!(kind, Rebuild::Transaction(_)) || carries_withdrawn_edits;
         let send_fallback = transaction
             && follow_into_following
             && (follow_retarget_ramp > 0
@@ -2799,7 +3146,14 @@ where
                 follow_retarget_ramp.max(send_landing_ramp(next))
             }
             Rebuild::Transaction(_) => follow_retarget_ramp,
-            Rebuild::Discontinuity(_) => 0,
+            Rebuild::Monitor { model, .. } if carries_withdrawn_edits => {
+                if follow_loses_a_curve || send_fallback {
+                    follow_retarget_ramp.max(send_landing_ramp(model.normalized_model()))
+                } else {
+                    follow_retarget_ramp
+                }
+            }
+            Rebuild::Discontinuity(_) | Rebuild::Monitor { .. } => 0,
         };
         let outcome = if transaction && (follow_into_six_word || send_fallback) {
             engine::realtime::CandidateOutcome::TransitionFallback
@@ -2947,7 +3301,9 @@ where
         // published. Nothing else is stamped on the handle before the publication below. The
         // handle inherits the open stamp of the carry retargets preparation wrote (#1277 D5), so
         // this is the same revision again, which the pin allows.
-        if candidate_provider.revision_gate.stamp(revision).is_err() {
+        // #1594 D6: a monitor rebuild takes no stamp: it spends no revision, and the committed
+        // one may be 0, which a gate never stamps.
+        if !monitor && candidate_provider.revision_gate.stamp(revision).is_err() {
             drop(reports);
             drop(reservation);
             drop(candidate_provider);
@@ -2994,7 +3350,7 @@ where
             // #1323 D4: nothing is committed. The copy of the committed model is the base the
             // epoch this successor displaces keeps (the model that epoch renders), or, across a
             // withdrawn candidate, drops below as a commit's displaced model does.
-            Rebuild::Discontinuity(model) => (None, Some(*model)),
+            Rebuild::Discontinuity(model) | Rebuild::Monitor { model, .. } => (None, Some(*model)),
         };
         // B19-R7: the rebuild's own send moves ramp from its successor's first block.
         fold_send_move(&mut self.send_moves, revision, rebuild_send_ramp);
@@ -3091,7 +3447,11 @@ where
             self.controller.session().revision().0,
             "the revision stamped is the revision committed (#1312 D7)"
         );
-        candidate_provider.revision_gate.publish(revision);
+        // #1594 D6: a monitor rebuild's revision is the committed one, published only above 0, as
+        // the first plan's is: a fresh gate holds 0 already.
+        if !monitor || revision > 0 {
+            candidate_provider.revision_gate.publish(revision);
+        }
         // #1310 D5 step 3, D6: B's `superseded` word, written before B is published.
         reservation.set_superseded(superseded_revisions);
         // #1310 (root ruling B15-Q4): A's queued observation records, on B's queues before B is

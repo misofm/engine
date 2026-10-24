@@ -150,6 +150,10 @@ struct TrackSource {
     right_channel: u8,
 }
 impl GraphRuntimeProcessor for TrackSource {
+    fn retained_bytes(&self) -> u64 {
+        0
+    }
+
     fn process(
         &mut self,
         block: GraphBindingBlock<'_>,
@@ -170,6 +174,10 @@ impl GraphRuntimeProcessor for TrackSource {
 
 struct Identity;
 impl GraphRuntimeProcessor for Identity {
+    fn retained_bytes(&self) -> u64 {
+        0
+    }
+
     fn process(
         &mut self,
         _block: GraphBindingBlock<'_>,

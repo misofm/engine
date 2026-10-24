@@ -12,8 +12,9 @@ use crate::{
     DiagnosticsRequest, EncodeError, EventHeader, FrameKind, MessageId, MeterBatch, NonOkResponse,
     OUTER_HEADER_BYTES, ObservationEnded, ProtocolCodec, RequestId, ResponseGetRequest,
     ResponseHeader, ResponseResult, SessionCommitted, SessionEdit, SessionReplaceRequest,
-    SessionRevision, SessionSnapshot, SessionSnapshotRequest, StatusCode, TelemetryConfiguration,
-    TransactionApplied, TransportSetRequest, TransportSnapshot, TransportStateEvent,
+    SessionRevision, SessionSnapshot, SessionSnapshotRequest, SpectrumConfigureRequest,
+    SpectrumConfigured, StatusCode, TelemetryConfiguration, TransactionApplied,
+    TransportSetRequest, TransportSnapshot, TransportStateEvent,
 };
 
 #[cfg(test)]
@@ -51,6 +52,7 @@ pub enum CommandPayload<'a> {
     ControlStateGet(&'a ControlListRequest),
     ResponseGet(&'a ResponseGetRequest),
     SessionReplace(SessionReplaceRequest),
+    SpectrumConfigure(&'a SpectrumConfigureRequest),
 }
 
 /// One typed command frame with a command-only revision precondition.
@@ -77,6 +79,7 @@ pub enum SuccessResponsePayload<'a> {
     ResponseResult(ResponseResult),
     /// The reply of a `SESSION_REPLACE`: the `SESSION_TRANSACTION_APPLY` reply's fields.
     SessionReplaced(TransactionApplied),
+    SpectrumConfigured(SpectrumConfigured),
 }
 
 /// One typed successful response frame. The payload selects and fixes the echoed command ID.
@@ -130,6 +133,7 @@ pub enum DecodedCommandPayload {
     ControlStateGet(ControlListRequest),
     ResponseGet(ResponseGetRequest),
     SessionReplace(SessionReplaceRequest),
+    SpectrumConfigure(SpectrumConfigureRequest),
 }
 
 /// A strictly decoded kind-specific command header and its exact registered payload.
@@ -154,6 +158,7 @@ pub enum DecodedSuccessResponsePayload<'a> {
     ControlStatePage(ControlStatePage),
     ResponseResult(ResponseResult),
     SessionReplaced(TransactionApplied),
+    SpectrumConfigured(SpectrumConfigured),
 }
 
 /// A strictly decoded response payload selected by its non-OK status or successful schema.
@@ -202,6 +207,7 @@ impl<'a> CommandPayload<'a> {
             Self::ControlStateGet(_) => MessageId::ControlStateGet,
             Self::ResponseGet(_) => MessageId::ResponseGet,
             Self::SessionReplace(_) => MessageId::SessionReplace,
+            Self::SpectrumConfigure(_) => MessageId::SpectrumConfigure,
         }
     }
 }
@@ -221,6 +227,7 @@ impl<'a> SuccessResponsePayload<'a> {
             Self::ControlStatePage(_) => MessageId::ControlStateGet,
             Self::ResponseResult(_) => MessageId::ResponseGet,
             Self::SessionReplaced(_) => MessageId::SessionReplace,
+            Self::SpectrumConfigured(_) => MessageId::SpectrumConfigure,
         }
     }
 }
@@ -458,6 +465,9 @@ impl ProtocolCodec {
             MessageId::SessionReplace => DecodedCommandPayload::SessionReplace(
                 self.decode_session_replace_request(decoded.payload, header.tlv_count)?,
             ),
+            MessageId::SpectrumConfigure => DecodedCommandPayload::SpectrumConfigure(
+                self.decode_spectrum_configure_request(decoded.payload, header.tlv_count)?,
+            ),
             _ => return Err(DecodeError::MessageKindMismatch),
         };
         Ok(DecodedTypedCommandFrame { header, payload })
@@ -520,6 +530,9 @@ impl ProtocolCodec {
             ),
             MessageId::SessionReplace => DecodedSuccessResponsePayload::SessionReplaced(
                 self.decode_transaction_applied(decoded.payload, header.tlv_count)?,
+            ),
+            MessageId::SpectrumConfigure => DecodedSuccessResponsePayload::SpectrumConfigured(
+                self.decode_spectrum_configured(decoded.payload, header.tlv_count)?,
             ),
             _ => return Err(DecodeError::MessageKindMismatch),
         };
@@ -690,6 +703,9 @@ fn write_command_payload(
         CommandPayload::SessionReplace(value) => {
             crate::message_wire::write_session_replace_request(sink, *value)
         }
+        CommandPayload::SpectrumConfigure(value) => {
+            crate::message_wire::write_spectrum_configure_request(sink, value)
+        }
     }
 }
 
@@ -736,6 +752,9 @@ fn write_success_payload(
         }
         SuccessResponsePayload::ResponseResult(value) => {
             crate::message_wire::write_response_result(sink, value)
+        }
+        SuccessResponsePayload::SpectrumConfigured(value) => {
+            crate::message_wire::write_spectrum_configured(sink, value)
         }
     }
 }
@@ -952,6 +971,16 @@ mod tests {
             maximum_automation_spans: None,
             maximum_reply_bytes: None,
         };
+        let spectrum_request = crate::SpectrumConfigureRequest {
+            form: crate::SpectrumForm::Collection,
+            entries: vec![crate::SpectrumEntry {
+                target_kind: crate::SpectrumTargetKind::TrackPostPan,
+                target_id: "t1".to_owned(),
+                channels: crate::ParameterChannel::Both,
+            }],
+            maximum_capture_bytes: 1 << 16,
+            hop_frames: Some(1024),
+        };
         let telemetry = TelemetryConfiguration {
             meter_handles: Vec::new(),
             meter_period_blocks: 0,
@@ -1072,6 +1101,14 @@ mod tests {
                     }),
                 },
                 MessageId::SessionReplace,
+            ),
+            (
+                TypedCommandFrame {
+                    request_id: request_id(),
+                    expected_revision: crate::ExpectedRevision::Any,
+                    payload: CommandPayload::SpectrumConfigure(&spectrum_request),
+                },
+                MessageId::SpectrumConfigure,
             ),
         ];
         for (frame, expected_id) in &frames {
@@ -1236,6 +1273,22 @@ mod tests {
                     }),
                 },
                 MessageId::SessionReplace,
+            ),
+            (
+                TypedSuccessResponseFrame {
+                    request_id: request_id(),
+                    revision: SessionRevision(7),
+                    payload: SuccessResponsePayload::SpectrumConfigured(
+                        crate::SpectrumConfigured {
+                            revision: 7,
+                            configured_epoch: 2,
+                            adopted_epoch: 1,
+                            rebuild: true,
+                            plan_epoch: Some(2),
+                        },
+                    ),
+                },
+                MessageId::SpectrumConfigure,
             ),
         ];
         for (frame, expected_id) in &responses {

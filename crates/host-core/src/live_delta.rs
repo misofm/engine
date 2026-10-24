@@ -639,14 +639,16 @@ fn classify_rows<'a>(
     }
     ordered.sort_by_key(|left| left.0);
     ordered.dedup_by(|later, earlier| later.0 == earlier.0);
+    // One pass over each automation table for every row (#1914). `next` is read from the owners
+    // model: the small model of the edited owners for an edited view, the whole next model for a
+    // whole one, so its index costs what that table holds.
+    let current_drivers = controls::AutomationIndex::of(current);
+    let next_drivers = controls::AutomationIndex::of(view.owners());
+    let before = ModelView::whole(current).indexed(&current_drivers);
+    let after = ModelView::whole(view.owners()).indexed(&next_drivers);
     let mut changes: Vec<ChangedControl> = Vec::new();
     for (_, address) in ordered {
-        changes.extend(controls::changed_rows(
-            current,
-            view.owners(),
-            address,
-            rate,
-        )?);
+        changes.extend(controls::changed_rows_in(before, after, address, rate)?);
     }
 
     let mut accumulated = Changes {

@@ -42,12 +42,13 @@ use effect_contract::{ObservationCost, ObservationDescriptor};
 use engine::realtime::{
     HostAttachment, ObservationWindow, ObserverCarry, ObserverKind, PlanarBufferMut,
 };
+use host_core::meters::window_since_arm;
 use host_core::{
-    CompiledSession, EffectObservationHandle, HostLiveControlRequest, HostLiveLanes,
-    HostPrepareCaps, HostPrepareReport, HostShapePolicy, MAXIMUM_VCA_REACH_PAIRS,
-    MAXIMUM_VCAS_BOUNDED, PrepareDiagnostics, PrepareRejection, PreparedHost, SourceControlError,
-    SourceSubmission, SuccessorBase, compile_host_model, compiled_session_shape,
-    control_table_bytes, parse_host_session, source_id_arena_bytes,
+    CompiledSession, EffectObservationHandle, GainReductionTaps, HostLiveControlRequest,
+    HostLiveLanes, HostPrepareCaps, HostPrepareReport, HostShapePolicy, MAXIMUM_VCA_REACH_PAIRS,
+    MAXIMUM_VCAS_BOUNDED, MeterFrame, MeterValidity, PrepareDiagnostics, PrepareRejection,
+    PreparedHost, SourceControlError, SourceSubmission, SuccessorBase, TapView, compile_host_model,
+    compiled_session_shape, control_table_bytes, parse_host_session, source_id_arena_bytes,
 };
 use host_core::{
     PreparedSpectrumCaptures, ResponseSnapshotError, ResponseSnapshotSink, SpectrumAnalysis,
@@ -1009,14 +1010,15 @@ pub struct WebMeterHeader {
 }
 
 /// `WebMeterHeader::reserved[1]` validity bits. The high 32 bits carry a saturating loss count.
-pub const METER_VALID_COMPLETE: u64 = 1;
-/// The master peak covers the exact published track interval.
-pub const METER_VALID_MASTER: u64 = 1 << 1;
+/// Each is the core frame's [`MeterValidity`] bit of the same name (#1582 D2).
+pub const METER_VALID_COMPLETE: u64 = MeterValidity::COMPLETE.bits() as u64;
+/// The master peak covers the exact published track interval ([`MeterValidity::OUTPUT`]).
+pub const METER_VALID_MASTER: u64 = MeterValidity::OUTPUT.bits() as u64;
 /// One or more queued windows were dropped or rejected before this publication.
-pub const METER_VALID_LOSS: u64 = 1 << 2;
+pub const METER_VALID_LOSS: u64 = MeterValidity::LOSS.bits() as u64;
 /// Gain-reduction values are present from the effect tap's own latest window; their timing is
 /// intentionally independent and never supplies the track/master interval.
-pub const METER_VALID_GAIN_REDUCTION: u64 = 1 << 3;
+pub const METER_VALID_GAIN_REDUCTION: u64 = MeterValidity::GAIN_REDUCTION.bits() as u64;
 const METER_LOSS_SHIFT: u32 = 32;
 /// Depth of every strip meter queue, track or submix (issue #1448 D1): one window per strip per
 /// post, plus headroom for a control-side stall of a few windows. The live-control request builds
@@ -1509,9 +1511,11 @@ struct PlanShape {
     /// [`Self::name_successor`], and a gate compares it with `core::ptr::eq`.
     #[cfg(any(test, feature = "test-support"))]
     successor_address: usize,
-    /// Whether each strip contributed a gain-reduction reading to the most recent poll. Allocated
-    /// at compilation, one entry per strip; it is what makes `masterGrDb` absent rather than zero.
-    observation_present: Box<[bool]>,
+    /// The core's meter frame of the most recent publication (#1582 D2): the poll writes it whole
+    /// and copies it into [`Self::meter_frame`] and [`Self::meter_header`]. Allocated at
+    /// compilation, one entry per strip in each table; its gain-reduction presence is what makes
+    /// `masterGrDb` absent rather than zero.
+    core_frame: MeterFrame,
 }
 
 /// How many replacement plans' tables the host holds at once. After every commit the core holds
@@ -4335,10 +4339,6 @@ impl AudioWorkletEngineHost {
         if !folded && !master_only {
             return 0;
         }
-        // Issue #1209 D1: one peak pair per strip, tracks then submixes, so the master follows the
-        // last submix rather than the last track.
-        let strips = ready.shape.tracks.len() + ready.shape.submixes.len();
-        let master = strips * 2;
         let stale_master_budget = ready
             .output_reader
             .windows_mut()
@@ -4409,7 +4409,9 @@ impl AudioWorkletEngineHost {
         *output_pops += 1;
         let master_peak = master_measurement.map_or([0.0, 0.0], |measurement| measurement.peak);
         // All candidate validation is complete. Only this commit section mutates the public frame;
-        // every earlier zero-return path leaves both public buffers byte-for-byte unchanged.
+        // every earlier zero-return path leaves both public buffers byte-for-byte unchanged. It
+        // writes the core frame whole (#1582 D2) and copies it into the page's frame and header.
+        let frame = &mut ready.shape.core_frame;
         for (index, pending) in ready.shape.meter_pending.iter_mut().enumerate() {
             let Some(snapshot) = pending.take() else {
                 continue;
@@ -4422,149 +4424,51 @@ impl AudioWorkletEngineHost {
                 );
                 ready.meter_snapshot_drops_seen = snapshot.cumulative_dropped_snapshots;
             }
-            if let Some(slot) = ready.shape.meter_frame.get_mut(index * 2) {
-                *slot = snapshot.left.sample_peak;
-            }
-            if let Some(slot) = ready.shape.meter_frame.get_mut(index * 2 + 1) {
-                *slot = snapshot.right.sample_peak;
+            if let Some(peak) = frame.strip_peaks.get_mut(index) {
+                *peak = [snapshot.left.sample_peak, snapshot.right.sample_peak];
             }
             ready.meter_snapshot_generation = Some(snapshot.reset_generation);
         }
-        for (plane, peak) in master_peak.iter().enumerate() {
-            if let Some(slot) = ready.shape.meter_frame.get_mut(master + plane) {
-                *slot = *peak;
-            }
-        }
-
-        // Issue #143 D5: the gain-reduction section. This is the control plane -- `poll_meters` is
-        // called from `process()` but after the render export, and it performs no allocation, no
-        // lock and no unbounded loop -- so the one unit conversion the whole design permits lives
-        // here: a tap that publishes a **linear** magnitude (the true-peak limiter's recursive
-        // reduction word) becomes decibels once per closed window, never per sample and never on a
-        // lane kernel.
-        let gain_base = strips * 2 + 2;
-        for slot in ready.shape.meter_frame.iter_mut().skip(gain_base) {
-            *slot = 0.0;
-        }
-        for slot in ready.shape.observation_present.iter_mut() {
-            *slot = false;
-        }
-        let mut observed_any = false;
-        for (effect, entry) in ready.shape.effect_instances.iter().enumerate() {
-            #[cfg(test)]
-            {
-                ready.meter_effect_scan_count = ready.meter_effect_scan_count.saturating_add(1);
-            }
-            let Some(observed) = entry.as_ref() else {
-                continue;
-            };
-            let Some(handle) = observed
-                .reader
-                .and_then(|reader| companions.effect_observations.get(reader as usize))
-            else {
-                continue;
-            };
-            let Some(track) = ready.shape.observation_tracks.get(effect).copied() else {
-                continue;
-            };
-            // Issue #1209 D5: the frame carries one gain-reduction word per strip, so a submix's
-            // effect folds into its own word at `gain_base + T + j`.
-            if track == u32::MAX {
-                continue;
-            }
-            let armed = ready
-                .shape
-                .observation_armed
-                .get(effect)
-                .copied()
-                .unwrap_or(0);
-            if armed == 0 {
-                continue;
-            }
-            for (tap_index, reader) in handle.readers.iter().enumerate() {
-                if u32::try_from(tap_index)
-                    .ok()
-                    .is_none_or(|index| index >= u32::BITS || armed & (1_u32 << index) == 0)
-                {
-                    continue;
-                }
-                // Issue #1534 D1-D4: a window from before the tap's last subscribe is no window.
-                // It writes no slot, marks nothing present and is not acknowledged; the first
-                // fresh window's acknowledgement covers its sequence.
-                let Some(window) = reader.read().and_then(|window| {
-                    window_since_arm(
-                        &ready.shape.observation_arm_samples,
-                        effect,
-                        tap_index,
-                        window,
-                    )
-                }) else {
-                    continue;
-                };
-                reader.acknowledge(window.sequence);
-                let Some(tap) = observed.descriptor.observations.get(tap_index) else {
-                    continue;
-                };
-                let magnitude = if window.left > window.right {
-                    window.left
-                } else {
-                    window.right
-                };
-                let value = observed_decibels(*tap, magnitude);
-                // Several armed taps on one track fold max-magnitude into the one positional slot
-                // the frame carries for that track, on the control plane.
-                if let Some(slot) = ready.shape.meter_frame.get_mut(gain_base + track as usize)
-                    && value > *slot
-                {
-                    *slot = value;
-                }
-                if let Some(present) = ready.shape.observation_present.get_mut(track as usize) {
-                    *present = true;
-                }
-                observed_any = true;
-            }
-        }
-        // `masterGrDb` is a designation, not a discovery (D6). It is absent -- not zero -- when no
-        // track was designated or the designated track published nothing, because zero would be
-        // indistinguishable from "the master is not reducing".
-        let master_present = match ready.shape.master_track {
-            Some(track) => ready
-                .shape
-                .observation_present
-                .get(track as usize)
-                .copied()
-                .unwrap_or(false),
-            None => false,
-        };
-        if master_present
-            && let Some(track) = ready.shape.master_track
-            && let Some(value) = ready
-                .shape
-                .meter_frame
-                .get(gain_base + track as usize)
-                .copied()
-            && let Some(slot) = ready.shape.meter_frame.get_mut(gain_base + strips)
-        {
-            *slot = value;
-        }
-        ready.shape.meter_header.windows = windows;
-        ready.shape.meter_header.sequence = ready.shape.meter_header.sequence.saturating_add(1);
-        ready.shape.meter_header.master_gr_present = u32::from(master_present);
-        ready.shape.meter_header.first_sample = folded_start;
-        ready.shape.meter_header.end_sample = folded_end;
-        let mut validity = METER_VALID_COMPLETE;
+        frame.output_peak = master_peak;
+        let mut validity = MeterValidity::COMPLETE;
         if master_valid {
-            validity |= METER_VALID_MASTER;
+            validity = validity.union(MeterValidity::OUTPUT);
         }
         if ready.meter_loss_count != 0 {
-            validity |= METER_VALID_LOSS;
+            validity = validity.union(MeterValidity::LOSS);
         }
-        if observed_any {
-            validity |= METER_VALID_GAIN_REDUCTION;
+        frame.validity = validity;
+        // Issue #143 D5: the gain-reduction section. This is the control plane -- `poll_meters` is
+        // called from `process()` but after the render export, and it performs no allocation, no
+        // lock and no unbounded loop -- so the one unit conversion the whole design permits, a
+        // linear tap's magnitude to decibels, runs here once per closed window (#1582 D3: the
+        // core's fold over this plan's taps).
+        let mut taps = WebGainReductionTaps {
+            effect_instances: &ready.shape.effect_instances,
+            observation_tracks: &ready.shape.observation_tracks,
+            observation_armed: &ready.shape.observation_armed,
+            observation_arm_samples: &ready.shape.observation_arm_samples,
+            effect_observations: &companions.effect_observations,
+            #[cfg(test)]
+            scans: 0,
+        };
+        host_core::fold_gain_reduction(frame, &mut taps, ready.shape.master_track);
+        #[cfg(test)]
+        {
+            ready.meter_effect_scan_count =
+                ready.meter_effect_scan_count.saturating_add(taps.scans);
         }
-        ready.shape.meter_header.reserved[0] = ready.meter_generation;
-        ready.shape.meter_header.reserved[1] =
-            validity | (ready.meter_loss_count.min(u64::from(u32::MAX)) << METER_LOSS_SHIFT);
+        frame.windows = windows;
+        frame.sequence = ready.shape.meter_header.sequence.saturating_add(1);
+        frame.first_sample = folded_start;
+        frame.end_sample = folded_end;
+        frame.generation = ready.meter_generation;
+        frame.loss_count = ready.meter_loss_count;
+        publish_web_meter_frame(
+            &ready.shape.core_frame,
+            &mut ready.shape.meter_frame,
+            &mut ready.shape.meter_header,
+        );
         ready.meter_windows = ready.meter_windows.saturating_add(u64::from(windows));
         windows
     }
@@ -5014,26 +4918,112 @@ fn resolve_observation(
     Ok((effect, tap_index))
 }
 
-/// The one rule for whether an armed tap's latest window counts (issue #1534 D5): it counts only
-/// if it opened at or after the tap's last subscribe, the `applied_at_sample` that
-/// `arm_samples[effect][tap_index]` records. An observation cell conflates and keeps its last
-/// window for ever, so a window from before a re-subscribe or a re-arm is a stale reading of the
-/// previous arm and is the same as no window. An absent arm sample is `0`. The selected read
-/// ([`read_observation_values`]) and the meter frame (`poll_meters`) both call it, so they cannot
-/// drift apart; it uses `get` only, because `poll_meters` runs inside `process()`.
-fn window_since_arm(
-    arm_samples: &[Box<[u64]>],
-    effect: usize,
-    tap_index: usize,
-    window: ObservationWindow,
-) -> Option<ObservationWindow> {
-    let arm_sample = arm_samples
+/// The sample a tap's current arm was acknowledged at (issue #1534 D5), `arm_samples[effect]
+/// [tap_index]`, or `0` when absent. The selected read ([`read_observation_values`]) and the meter
+/// frame's taps ([`WebGainReductionTaps`]) both take it to the core's one rule,
+/// [`window_since_arm`]; it uses `get` only, because `poll_meters` runs inside `process()`.
+fn arm_sample(arm_samples: &[Box<[u64]>], effect: usize, tap_index: usize) -> u64 {
+    arm_samples
         .get(effect)
         .and_then(|samples| samples.get(tap_index))
         .copied()
-        .unwrap_or(0);
-    (window.first_sample >= arm_sample).then_some(window)
+        .unwrap_or(0)
 }
+
+/// One plan's observation taps as the core's gain-reduction fold sees them (#1582 D3): the
+/// shape's dense effect table, strip table and arm state over the plan companions' reader sets.
+/// #1585 moves the arm state into the tap's slot and deletes the arrays this reads.
+struct WebGainReductionTaps<'a> {
+    effect_instances: &'a [Option<EffectInstance>],
+    observation_tracks: &'a [u32],
+    observation_armed: &'a [u32],
+    observation_arm_samples: &'a [Box<[u64]>],
+    effect_observations: &'a [EffectObservationHandle],
+    /// Test-only: the effect slots visited, so a test proves an incomplete master interval never
+    /// reaches the scan.
+    #[cfg(test)]
+    scans: u64,
+}
+
+// REALTIME_POLICY_BEGIN: #1582 D3, the browser's taps for the meter frame's fold.
+impl GainReductionTaps for WebGainReductionTaps<'_> {
+    fn for_each_tap(&mut self, visit: &mut impl FnMut(TapView<'_>)) {
+        for (effect, entry) in self.effect_instances.iter().enumerate() {
+            #[cfg(test)]
+            {
+                self.scans = self.scans.saturating_add(1);
+            }
+            let Some(observed) = entry.as_ref() else {
+                continue;
+            };
+            let Some(handle) = observed
+                .reader
+                .and_then(|reader| self.effect_observations.get(reader as usize))
+            else {
+                continue;
+            };
+            let Some(strip) = self.observation_tracks.get(effect).copied() else {
+                continue;
+            };
+            // Issue #1209 D5: the frame carries one gain-reduction word per strip, so a submix's
+            // effect folds into its own word at strip `T + j`.
+            if strip == u32::MAX {
+                continue;
+            }
+            let armed = self.observation_armed.get(effect).copied().unwrap_or(0);
+            if armed == 0 {
+                continue;
+            }
+            for ((tap_index, reader), descriptor) in handle
+                .readers
+                .iter()
+                .enumerate()
+                .zip(observed.descriptor.observations)
+            {
+                let armed = u32::try_from(tap_index)
+                    .ok()
+                    .is_some_and(|index| index < u32::BITS && armed & (1_u32 << index) != 0);
+                visit(TapView {
+                    strip,
+                    descriptor,
+                    reader,
+                    armed,
+                    arm_sample: arm_sample(self.observation_arm_samples, effect, tap_index),
+                });
+            }
+        }
+    }
+}
+
+/// Copy the core frame into the page's frame words and header (#1582 D4), the layout of
+/// [`PlanShape::meter_frame`]: every strip's peak pair, tracks then submixes (issue #1209 D1, so
+/// the master follows the last submix rather than the last track), the master's, every strip's
+/// gain-reduction word, then the master's (`0.0` when absent). Bounded by the strip count.
+fn publish_web_meter_frame(frame: &MeterFrame, words: &mut [f32], header: &mut WebMeterHeader) {
+    let mut slots = words.iter_mut();
+    // The source goes first in each zip, so its end leaves the next slot unconsumed.
+    for (peak, slot) in frame.strip_peaks.iter().flatten().zip(&mut slots) {
+        *slot = *peak;
+    }
+    let master_gain = frame.designated_gain_reduction_db.unwrap_or(0.0);
+    let tail = frame
+        .output_peak
+        .iter()
+        .chain(&frame.strip_gain_reduction_db)
+        .chain(core::iter::once(&master_gain));
+    for (value, slot) in tail.zip(slots) {
+        *slot = *value;
+    }
+    header.windows = frame.windows;
+    header.sequence = frame.sequence;
+    header.master_gr_present = u32::from(frame.designated_gain_reduction_db.is_some());
+    header.first_sample = frame.first_sample;
+    header.end_sample = frame.end_sample;
+    header.reserved[0] = frame.generation;
+    header.reserved[1] = u64::from(frame.validity.bits())
+        | (frame.loss_count.min(u64::from(u32::MAX)) << METER_LOSS_SHIFT);
+}
+// REALTIME_POLICY_END
 
 fn read_observation_values(
     ready: &ReadyOwnership,
@@ -5069,10 +5059,8 @@ fn read_observation_values(
                 .and_then(|reader| reader.read())
                 .and_then(|window| {
                     window_since_arm(
-                        &ready.shape.observation_arm_samples,
-                        effect,
-                        tap_index,
                         window,
+                        arm_sample(&ready.shape.observation_arm_samples, effect, tap_index),
                     )
                 })
         })
@@ -5103,45 +5091,6 @@ fn read_observation_values(
         left,
         right,
     })
-}
-
-/// One published observation magnitude, as the **decibels of reduction** the frame carries.
-///
-/// The tap declares what crosses the transport (`unit`) and what a consumer reads (`display_unit`,
-/// `minimum`, `maximum`); this is the one place the two are reconciled, and it runs once per closed
-/// window on the control plane. That placement is the whole of R4: the true-peak limiter's `d` is a
-/// linear reduction word and turning it into decibels needs a logarithm, which a render thread may
-/// not take.
-///
-/// The result is clamped into the tap's own declared range, so a consumer never has to guess what
-/// a number outside it would have meant.
-fn observed_decibels(tap: effect_contract::ObservationDescriptor, magnitude: f32) -> f32 {
-    use effect_contract::ParameterUnit;
-    let decibels = match tap.unit {
-        // Already a decibel magnitude: the declared `PeakMagnitude` fold made it non-negative.
-        ParameterUnit::Db => magnitude,
-        // `gain = 1 - d`, so the reduction in decibels is `-20 log10(1 - d)`. `d == 1` is total
-        // reduction and has no finite decibel value; the declared maximum is what a meter draws.
-        ParameterUnit::Linear => {
-            if magnitude <= 0.0 {
-                0.0
-            } else if magnitude >= 1.0 {
-                tap.maximum
-            } else {
-                -20.0 * math::log10f(1.0 - magnitude)
-            }
-        }
-        // No launch tap declares another unit, and a menu that did would be describing something
-        // this frame slot has no meaning for.
-        _ => 0.0,
-    };
-    if !decibels.is_finite() || decibels < tap.minimum {
-        tap.minimum
-    } else if decibels > tap.maximum {
-        tap.maximum
-    } else {
-        decibels
-    }
 }
 
 const fn empty_command_report() -> WebCommandReport {
@@ -6249,7 +6198,7 @@ fn build_plan_shape(
     reader_slots
         .try_reserve_exact(observations.len())
         .map_err(|_| "web.resource.allocation")?;
-    let observation_present = vec![false; strip_count];
+    let core_frame = MeterFrame::new(strip_count).map_err(|_| "web.resource.allocation")?;
     let mut observation_armed = zero_u32(total_effects as usize)?;
     // The plan's published frame and the header that describes it (#1290d1). The frame's address
     // is the heap block's, so it stays put as the tables move.
@@ -6330,7 +6279,7 @@ fn build_plan_shape(
         meter_header,
         #[cfg(any(test, feature = "test-support"))]
         successor_address: 0,
-        observation_present: observation_present.into_boxed_slice(),
+        core_frame,
     })
 }
 
@@ -6416,6 +6365,10 @@ struct ShapeRows {
     carried_bytes: u64,
     /// The published meter frame (#1290d1).
     frame_bytes: u64,
+    /// The core meter frame's per-strip tables (#1582 D2).
+    core_frame_bytes: u64,
+    /// The largest of those tables, a single allocation.
+    core_frame_largest: u64,
 }
 
 impl PlanShape {
@@ -6535,9 +6488,21 @@ impl PlanShape {
         let carried_bytes = u64::try_from(self.meter_carried_from.len())
             .ok()?
             .checked_mul(size_of::<u64>() as u64)?;
+        // #1582 D2: the core frame's per-strip tables, each smaller than the page's frame.
         let frame_bytes = u64::try_from(self.meter_frame.len())
             .ok()?
             .checked_mul(size_of::<f32>() as u64)?;
+        let core_frame_bytes = u64::try_from(self.core_frame.heap_bytes()).ok()?;
+        let core_frame_largest = u64::try_from(
+            size_of_val::<[[f32; 2]]>(&self.core_frame.strip_peaks)
+                .max(size_of_val::<[f32]>(
+                    &self.core_frame.strip_gain_reduction_db,
+                ))
+                .max(size_of_val::<[bool]>(
+                    &self.core_frame.strip_gain_reduction_present,
+                )),
+        )
+        .ok()?;
         Some(ShapeRows {
             arm_table_bytes,
             arm_sample_bytes,
@@ -6546,6 +6511,8 @@ impl PlanShape {
             remaining_bytes,
             carried_bytes,
             frame_bytes,
+            core_frame_bytes,
+            core_frame_largest,
         })
     }
 
@@ -6560,13 +6527,15 @@ impl PlanShape {
             .checked_add(rows.pending_bytes)?
             .checked_add(rows.remaining_bytes)?
             .checked_add(rows.carried_bytes)?
-            .checked_add(rows.frame_bytes)?;
+            .checked_add(rows.frame_bytes)?
+            .checked_add(rows.core_frame_bytes)?;
         let largest = shell
             .max(rows.arm_largest)
             .max(rows.pending_bytes)
             .max(rows.remaining_bytes)
             .max(rows.carried_bytes)
-            .max(rows.frame_bytes);
+            .max(rows.frame_bytes)
+            .max(rows.core_frame_largest);
         Some((total, largest))
     }
 }
@@ -6759,7 +6728,10 @@ fn compile_ready(
     let pending_meter_bytes = rows.pending_bytes;
     let remaining_meter_bytes = rows.remaining_bytes;
     let carried_meter_bytes = rows.carried_bytes;
-    let frame_meter_bytes = rows.frame_bytes;
+    let frame_meter_bytes = rows
+        .frame_bytes
+        .checked_add(rows.core_frame_bytes)
+        .ok_or_else(|| fixed_diagnostic("web.resource.arithmetic"))?;
     let meter_delivery_bytes = pending_meter_bytes
         .checked_add(remaining_meter_bytes)
         .and_then(|bytes| bytes.checked_add(carried_meter_bytes))
@@ -6778,7 +6750,8 @@ fn compile_ready(
         .max(pending_meter_bytes)
         .max(remaining_meter_bytes)
         .max(carried_meter_bytes)
-        .max(frame_meter_bytes);
+        .max(rows.frame_bytes)
+        .max(rows.core_frame_largest);
     report.largest_named_allocation_bytes = report
         .largest_named_allocation_bytes
         .max(report.largest_bridge_allocation_bytes);

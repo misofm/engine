@@ -108,6 +108,9 @@ impl MockBank {
 }
 
 impl PreparedNativeEffectBank for MockBank {
+    fn retained_bytes(&self) -> u64 {
+        engine::realtime::retained::arc(&self.0)
+    }
     fn reset(&mut self, _kind: ResetKind) {}
 
     fn process_bank(&mut self, block: EffectBankProcessBlock<'_>) -> BankProcessReport {

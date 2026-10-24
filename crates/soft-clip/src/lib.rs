@@ -1420,6 +1420,22 @@ fn same_state_lane<L: Lane>(left: &Channel<L>, right: &Channel<L>, lane: usize) 
     })
 }
 
+impl<L: Lane> SoftClip<L> {
+    /// The heap this cohort owns (#1074): both default tables, and per channel its ramp table and
+    /// its three histories. Every other field is inline.
+    fn heap_bytes(&self) -> u64 {
+        use effect_contract::retained::slice;
+        let channel = |channel: &Channel<L>| {
+            let history = &channel.history;
+            slice(&channel.ramps) + slice(&history.x) + slice(&history.e) + slice(&history.dry)
+        };
+        slice(&self.left_defaults)
+            + slice(&self.right_defaults)
+            + channel(&self.left)
+            + channel(&self.right)
+    }
+}
+
 /// A prepared scalar soft-clip dual-mono instance.
 struct PreparedSoftClip {
     inner: SoftClip<f32>,
@@ -1611,6 +1627,10 @@ fn prepare_bank<L: Lane, const NATIVE_ONLY: bool>(
 }
 
 impl PreparedNativeEffect for PreparedSoftClip {
+    fn retained_bytes(&self) -> u64 {
+        self.inner.heap_bytes()
+    }
+
     fn reset(&mut self, kind: ResetKind) {
         self.inner.reset(kind);
     }
@@ -1671,6 +1691,10 @@ impl PreparedNativeEffect for PreparedSoftClip {
 }
 
 impl<L: Lane> PreparedNativeEffectBank for PreparedSoftClipBank<L> {
+    fn retained_bytes(&self) -> u64 {
+        self.inner.heap_bytes()
+    }
+
     fn reset(&mut self, kind: ResetKind) {
         self.inner.reset(kind);
     }

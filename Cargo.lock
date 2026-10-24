@@ -633,11 +633,27 @@ name = "dsp-reference"
 version = "0.1.0"
 
 [[package]]
+name = "dynamic-eq"
+version = "0.1.0"
+dependencies = [
+ "bench-support",
+ "conformance",
+ "dsp-reference",
+ "effect-contract",
+ "effect-runtime",
+ "engine",
+ "lane",
+ "math",
+ "parametric-eq",
+]
+
+[[package]]
 name = "effect-compiler"
 version = "0.1.0"
 dependencies = [
  "builtins",
  "compressor",
+ "de-esser",
  "delay",
  "effect-contract",
  "engine",

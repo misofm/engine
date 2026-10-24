@@ -244,7 +244,7 @@ const _: () = {
     shared_across_threads::<RegistryError>();
 };
 
-/// The eight launch factories, in registry order. Called only by the static's one build.
+/// The nine launch factories, in registry order. Called only by the static's one build.
 fn build_launch_native_effect_registry() -> Result<NativeEffectRegistry, RegistryError> {
     NativeEffectRegistry::new([
         Box::new(parametric_eq::ParametricEqFactory) as Box<dyn NativeEffectFactory>,
@@ -255,24 +255,27 @@ fn build_launch_native_effect_registry() -> Result<NativeEffectRegistry, Registr
         Box::new(soft_clip::SoftClipFactory) as Box<dyn NativeEffectFactory>,
         Box::new(transient_shaper::TransientShaperFactory) as Box<dyn NativeEffectFactory>,
         Box::new(delay::DelayFactory) as Box<dyn NativeEffectFactory>,
+        Box::new(de_esser::DeEsserFactory) as Box<dyn NativeEffectFactory>,
     ])
 }
 
 /// The native effects a session console slot may name (owner decision 12, Sol's L2).
 ///
 /// A console slot always banks, so it must be an effect whose homogeneous bank kernel the console
-/// can rely on: the parametric EQ, compressor, gate/expander, soft-clip, transient shaper and
-/// true-peak limiter. The delay never banks. The multiband compressor is excluded until #1069
-/// closes. Anything else is refused with `console.slot.ineligible_effect` where native identities
-/// resolve, in [`prepare_native_session_effects`]; the session schema refuses a third-party slot
-/// before this runs.
-pub const CONSOLE_ELIGIBLE_EFFECTS: [&str; 6] = [
+/// can rely on: the parametric EQ, compressor, gate/expander, soft-clip, transient shaper,
+/// true-peak limiter and multiband compressor (admitted by #1893 once #1069 closed). The delay
+/// never banks, and the de-esser is excluded until the owner rules on its eligibility (#1920).
+/// Anything else is refused with `console.slot.ineligible_effect` where native identities resolve,
+/// in [`prepare_native_session_effects`]; the session schema refuses a third-party slot before
+/// this runs.
+pub const CONSOLE_ELIGIBLE_EFFECTS: [&str; 7] = [
     "miso.parametric-eq",
     "miso.compressor",
     "miso.gate-expander",
     "miso.soft-clip",
     "miso.transient-shaper",
     "miso.true-peak-limiter",
+    "miso.multiband-compressor",
 ];
 
 /// Launch effects whose factory binds no homogeneous bank at any width (issue #1087).
@@ -2141,6 +2144,10 @@ mod tail_bound_count_tests {
     }
     struct Processor;
     impl PreparedNativeEffect for Processor {
+        fn retained_bytes(&self) -> u64 {
+            0
+        }
+
         fn reset(&mut self, _: ResetKind) {}
         fn process(&mut self, _: EffectProcessBlock<'_>) -> ProcessReport {
             ProcessReport::default()

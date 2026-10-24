@@ -330,6 +330,69 @@ fn bounded_spsc_with_slots<T: Send + 'static>(
         },
     ))
 }
+// The control-only retained-bytes walkers (#1074), outside the realtime-policy region: render
+// never calls them.
+/// How many items the ring holds now (#1074), from its two cursors. Control thread only, for the
+/// retained-bytes walk of payloads a ring owns.
+fn ring_queued_len<T>(ring: &Ring<T>) -> usize {
+    let producer = ring.producer.0.load(Ordering::Acquire);
+    let consumer = ring.consumer.0.load(Ordering::Acquire);
+    if producer >= consumer {
+        producer - consumer
+    } else {
+        producer + ring.slots_len - consumer
+    }
+}
+
+/// A ring's shared allocation and its slot table (#1074), from its slot count.
+fn ring_retained_bytes<T>(ring: &Ring<T>) -> u64 {
+    let header = Layout::new::<SharedRingAllocation<T>>().size();
+    let slots = ring
+        .slots_len
+        .saturating_mul(core::mem::size_of::<UnsafeCell<MaybeUninit<T>>>());
+    u64::try_from(header.saturating_add(slots)).unwrap_or(u64::MAX)
+}
+
+impl<T: Send + 'static> Producer<T> {
+    /// The heap bytes this endpoint's shared ring retains (#1074), as
+    /// [`Consumer::retained_bytes`]: the ring's shared allocation in full and its slot table.
+    #[must_use]
+    pub fn retained_bytes(&self) -> u64 {
+        ring_retained_bytes(self.ring())
+    }
+    /// How many items the ring holds now (#1074): the payloads it frees if it is dropped now.
+    /// Control thread only; render never calls it.
+    #[must_use]
+    pub fn queued_len(&self) -> usize {
+        ring_queued_len(self.ring())
+    }
+}
+
+impl<T: Copy + Send + 'static> InPlaceProducer<T> {
+    /// The heap bytes this endpoint's shared ring retains (#1074), as
+    /// [`Producer::retained_bytes`].
+    #[must_use]
+    pub fn retained_bytes(&self) -> u64 {
+        self.producer.retained_bytes()
+    }
+}
+
+impl<T: Send + 'static> Consumer<T> {
+    /// The heap bytes this endpoint's shared ring retains (#1074): the ring's shared allocation
+    /// in full, whoever else holds it, and its slot table. Not the heap a queued payload owns.
+    /// Control thread only.
+    #[must_use]
+    pub fn retained_bytes(&self) -> u64 {
+        ring_retained_bytes(self.ring())
+    }
+    /// How many items the ring holds now (#1074): the payloads it frees if it is dropped now.
+    /// Control thread only; render never calls it.
+    #[must_use]
+    pub fn queued_len(&self) -> usize {
+        ring_queued_len(self.ring())
+    }
+}
+
 // REALTIME_POLICY_BEGIN
 impl<T: Send + 'static> Producer<T> {
     fn ring(&self) -> &Ring<T> {

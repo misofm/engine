@@ -70,6 +70,11 @@ pub struct CapiResources {
     /// base's ramps follow the newest commit, not the epoch that holds them; a live commit moves it
     /// with the committed model (`follow_edit_ramps`).
     pub edit_ramps: u64,
+    /// The session's spectrum service and analysis (#1594 R6), part of `active_retained`: one per
+    /// session, beside the plan whose captures it reads. Not an epoch row: a successor that keeps
+    /// spectrum keeps the same service, so the replacement peak adds only a candidate's bytes
+    /// beyond the newest plan's.
+    pub spectrum_service: u64,
 }
 
 /// Source-ring bytes a successor plan carries from the plan it displaces (issue #1273 D5).
@@ -320,7 +325,9 @@ pub(crate) fn capi_resources<A: ControlAdapter>(
     // accumulator also charges the producer vector itself (`add_vector_layout::<
     // TrackControlProducer>`), so that vector is charged twice, here against the capi cap and
     // there against the builtin cap: #1256 D4's recorded, conservative double charge. Removing
-    // either side is a deliberate decision, not a cleanup.
+    // either side is a deliberate decision, not a cleanup. Each producer's own heap owners (the
+    // automated faders' offsets-writer boxes, #1916) are charged here only, through the producers'
+    // `retained_heap_bytes`.
     //
     // The effect producer table and its owned payload (#1263 D3) are the epoch's too: capi keeps
     // the producers, and with them each parametric EQ's prepared-target owner. host-core walks
@@ -487,6 +494,7 @@ pub(crate) fn capi_resources<A: ControlAdapter>(
         prepared_protocol_retained,
         largest,
         edit_ramps: monitor.edit_ramps,
+        spectrum_service: 0,
     })
 }
 
@@ -499,6 +507,7 @@ pub(crate) fn prepared_capi_resources<A: ControlAdapter>(
     route_controls: host_core::RouteControlResources,
     observation: ObservationResources,
     limits: ControlLimits,
+    strip_heap_bytes: u64,
 ) -> Result<CapiResources, CompileFailure> {
     let source_id_bytes =
         compiled
@@ -531,7 +540,7 @@ pub(crate) fn prepared_capi_resources<A: ControlAdapter>(
         limits,
         compiled.source_count(),
         source_id_bytes,
-        host_core::strip_control_table_bytes(strip_count, strip_id_bytes)
+        host_core::strip_control_table_bytes(strip_count, strip_id_bytes, strip_heap_bytes)
             .ok_or_else(|| failure(ResourceFault::Arithmetic))?,
         provider,
         inventory.retained_bytes(),
@@ -1076,6 +1085,16 @@ pub(crate) fn validate_replacement_peak(
                     .saturating_sub(newest.capi.edit_ramps),
             )
         })
+        // #1594 R6: the spectrum service the candidate's promotion makes, when the newest plan
+        // has none.
+        .and_then(|value| {
+            value.checked_add(
+                prospective
+                    .capi
+                    .spectrum_service
+                    .saturating_sub(newest.capi.spectrum_service),
+            )
+        })
         .ok_or_else(arithmetic)?;
     if capi_peak > limits.maximum_control_retained_bytes {
         return Err(failure(ResourceFault::Limit));
@@ -1395,6 +1414,13 @@ pub(crate) fn prepare_runtime<A: ControlAdapter>(
             "host.jump_lengths.attach",
         ))
     })?;
+    // #1916: the producers' own heap owners, summed before the table is boxed, for the strip
+    // table's charge.
+    let strip_heap_bytes = strip_controls
+        .iter()
+        .map(host_core::TrackControlProducer::retained_heap_bytes)
+        .try_fold(0_u64, u64::checked_add)
+        .ok_or_else(|| failure(ResourceFault::Arithmetic))?;
     let strips = StripLanes {
         controls: strip_controls.into_boxed_slice(),
         track_count,
@@ -1412,7 +1438,7 @@ pub(crate) fn prepare_runtime<A: ControlAdapter>(
     // exactly one entry per request and charges it in `builtin_meter_payload_bytes`, with each
     // consumer's ring, so the boxed slice does not reallocate and is not charged again here.
     let meters = meters.into_boxed_slice();
-    let capi = prepared_capi_resources::<A>(
+    let mut capi = prepared_capi_resources::<A>(
         compiled,
         &prepared.control_catalog,
         &prepared.inventory,
@@ -1420,7 +1446,18 @@ pub(crate) fn prepare_runtime<A: ControlAdapter>(
         prepared.report.route_control_resources,
         observation_resources(&effects, observation_slots_high_water)?,
         limits,
+        strip_heap_bytes,
     )?;
+    // #1594 R6: a plan with spectrum captures has a session spectrum service and analysis beside
+    // it (made at boot or at the promotion that installs the first captures), charged here, with
+    // the plan, so the admission of the configure that creates them sees them.
+    if spectrum.is_some() {
+        capi.spectrum_service = host_core::SpectrumService::RETAINED_BYTES;
+        capi.active_retained = capi
+            .active_retained
+            .checked_add(capi.spectrum_service)
+            .ok_or_else(|| failure(ResourceFault::Arithmetic))?;
+    }
     if capi.active_retained > limits.maximum_control_retained_bytes
         || capi.largest > limits.maximum_named_allocation_bytes
     {
@@ -1810,6 +1847,7 @@ mod admission_tests {
                 prepared_protocol_retained: 9 * base,
                 largest: base,
                 edit_ramps: 0,
+                spectrum_service: 0,
             },
             carried: CarriedSourceBytes::default(),
         }
@@ -2020,6 +2058,38 @@ mod admission_tests {
             assert_eq!(
                 verdict(&held, prospective, models, with_cap(8, cap)),
                 expected
+            );
+        }
+    }
+
+    /// #1594 R6. Turns red if the replacement admission does not charge the spectrum service a
+    /// candidate's promotion makes: a candidate with the service beside a newest plan without it
+    /// raises the control-retained peak by the service's bytes (accepted at the peak, refused one
+    /// byte below), and beside a newest plan that has it already, by nothing.
+    #[test]
+    fn the_replacement_admission_charges_a_new_spectrum_service_once() {
+        let models =
+            compiled_model_admission_over(&[model(1 << 20, 3)], model(1 << 22, 7)).expect("models");
+        let control = peaks(&[1], 1_000, models.retained_bytes, (0, 0))[7];
+        let service = host_core::SpectrumService::RETAINED_BYTES;
+        let mut prospective = candidate(1_000);
+        prospective.capi.spectrum_service = service;
+        let mut newest = epoch(1);
+        for (label, newest_service, peak) in [
+            ("a new service", 0, control + service),
+            ("a kept service", service, control),
+        ] {
+            newest.capi.spectrum_service = newest_service;
+            let held = [newest];
+            assert_eq!(
+                verdict(&held, prospective, models, with_cap(7, peak)),
+                Ok(()),
+                "{label}: accepted at the peak"
+            );
+            assert_eq!(
+                verdict(&held, prospective, models, with_cap(7, peak - 1)),
+                Err(CAPS[7].1.to_owned()),
+                "{label}: refused one byte below"
             );
         }
     }

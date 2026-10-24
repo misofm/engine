@@ -9,7 +9,7 @@ dependencies() { gate_toml_dependencies "$1" plain; }
 # #84 phase A: PrepareEffectBankRequest.backend is lane::Backend now.
 expected_contract=$'engine\nlane\nmath'
 [[ "$(dependencies crates/effect-contract/Cargo.toml)" == "$expected_contract" ]] || fail 'effect-contract dependency boundary changed'
-expected_compiler=$'compressor\ndelay\neffect-contract\nengine\ngate-expander\nmultiband-compressor\nparametric-eq\nsession\nsoft-clip\ntransient-shaper\ntrue-peak-limiter'
+expected_compiler=$'compressor\nde-esser\ndelay\neffect-contract\nengine\ngate-expander\nmultiband-compressor\nparametric-eq\nsession\nsoft-clip\ntransient-shaper\ntrue-peak-limiter'
 [[ "$(dependencies crates/effect-compiler/Cargo.toml)" == "$expected_compiler" ]] || fail 'effect-compiler dependency boundary changed'
 gate_scan_forbidden 'core/session reverse dependency' 'effect-(contract|compiler)' '' crates/{engine,session}/Cargo.toml || exit 1
 gate_scan_forbidden 'wire/hash/persistence identity leaked into runtime API' 'descriptor_schema_hash|EffectProgramSignature|canonical_effect_descriptor|encode_lane_payload' '' crates/effect-contract/src crates/effect-compiler/src || exit 1
@@ -51,6 +51,7 @@ done
 # #15 S1 raised `state_error` (the structural contract/runtime error bridge above) and
 # `apply_automation` (effect-runtime has no shared span pass; each effect's pass commits into its
 # own ramp layout, so a shared one is the #95 sweep, not one effect's change) by one each.
+# #17 S1 (the dynamic EQ) raised the same two rows by one each, for the same two reasons.
 #
 #   pattern                          count  owner
 duplicated_helper_manifest() {
@@ -74,8 +75,8 @@ fn\s+map_normalized\(                    0  95
 fn\s+inverse_map_normalized\(            0  95
 fn\s+parameter_value_valid\(             3  95
 fn\s+validate_state_lengths\(            2  95
-fn\s+state_error\(                       7  95
-fn\s+apply_automation\(                  5  95
+fn\s+state_error\(                       8  95
+fn\s+apply_automation\(                  6  95
 fn\s+discontinuity_reset\(               4  95
 MANIFEST
 }

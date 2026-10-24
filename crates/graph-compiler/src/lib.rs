@@ -22,7 +22,8 @@ use graph::{
     GraphPreparedEffect, GraphPreparedEffectBank, GraphResourceEstimate,
     GraphScalarOwnerResourceEstimate, GraphSpec, InsertedDelay, PreparedGraphPlan,
     PreparedGraphPlanParts, PreparedRoute, PreparedTrackDelay, RackId, ReductionRecord, RouteGate,
-    RouteTiming, RouteTransform, StableGraphId, TrackStage, gated_route_coefficients,
+    RouteTiming, RouteTransform, SourceClaimLine, StableGraphId, TrackStage,
+    gated_route_coefficients,
 };
 /// Re-exported so a caller can name the compile input without taking a `lane`
 /// dependency of its own: the backend is this crate's input now, so this crate publishes its type
@@ -497,13 +498,14 @@ mod tests {
     /// Many fixtures here put that double in a lowered SIMD rack, which decision 12 spells as a
     /// console slot; every host still prepares through the launch list alone, and
     /// `effect_compiler`'s own tests hold the refusal of anything else.
-    const TEST_CONSOLE_ELIGIBLE: [&str; 7] = [
+    const TEST_CONSOLE_ELIGIBLE: [&str; 8] = [
         effect_compiler::CONSOLE_ELIGIBLE_EFFECTS[0],
         effect_compiler::CONSOLE_ELIGIBLE_EFFECTS[1],
         effect_compiler::CONSOLE_ELIGIBLE_EFFECTS[2],
         effect_compiler::CONSOLE_ELIGIBLE_EFFECTS[3],
         effect_compiler::CONSOLE_ELIGIBLE_EFFECTS[4],
         effect_compiler::CONSOLE_ELIGIBLE_EFFECTS[5],
+        effect_compiler::CONSOLE_ELIGIBLE_EFFECTS[6],
         "conformance.delay",
     ];
 
@@ -596,6 +598,10 @@ mod tests {
 
     struct IdentityBinding;
     impl GraphRuntimeProcessor for IdentityBinding {
+        fn retained_bytes(&self) -> u64 {
+            0
+        }
+
         fn process(
             &mut self,
             _block: GraphBindingBlock<'_>,
@@ -606,6 +612,10 @@ mod tests {
 
     struct ImpulseBinding;
     impl GraphRuntimeProcessor for ImpulseBinding {
+        fn retained_bytes(&self) -> u64 {
+            0
+        }
+
         fn process(
             &mut self,
             block: GraphBindingBlock<'_>,
@@ -623,6 +633,10 @@ mod tests {
         right: f32,
     }
     impl GraphRuntimeProcessor for AsymmetricTrackImpulseBinding {
+        fn retained_bytes(&self) -> u64 {
+            0
+        }
+
         fn process(
             &mut self,
             block: GraphBindingBlock<'_>,
@@ -648,6 +662,10 @@ mod tests {
         right: f32,
     }
     impl GraphRuntimeProcessor for SustainedTrackBinding {
+        fn retained_bytes(&self) -> u64 {
+            0
+        }
+
         fn process(
             &mut self,
             block: GraphBindingBlock<'_>,
@@ -685,6 +703,10 @@ mod tests {
         right: f32,
     }
     impl GraphRuntimeProcessor for LimiterReleaseImpulseBinding {
+        fn retained_bytes(&self) -> u64 {
+            0
+        }
+
         fn process(
             &mut self,
             block: GraphBindingBlock<'_>,
@@ -706,6 +728,10 @@ mod tests {
         right: f32,
     }
     impl GraphRuntimeProcessor for MultibandReleaseBinding {
+        fn retained_bytes(&self) -> u64 {
+            0
+        }
+
         fn process(
             &mut self,
             block: GraphBindingBlock<'_>,
@@ -745,6 +771,10 @@ mod tests {
         right: f32,
     }
     impl GraphRuntimeProcessor for DelayImpulseBinding {
+        fn retained_bytes(&self) -> u64 {
+            0
+        }
+
         fn process(
             &mut self,
             block: GraphBindingBlock<'_>,
@@ -759,6 +789,10 @@ mod tests {
         }
     }
     impl GraphRuntimeProcessor for TransientShaperBinding {
+        fn retained_bytes(&self) -> u64 {
+            0
+        }
+
         fn process(
             &mut self,
             block: GraphBindingBlock<'_>,
@@ -774,6 +808,10 @@ mod tests {
         }
     }
     impl GraphRuntimeProcessor for SoftClipImpulseBinding {
+        fn retained_bytes(&self) -> u64 {
+            0
+        }
+
         fn process(
             &mut self,
             block: GraphBindingBlock<'_>,
@@ -1661,6 +1699,11 @@ mod tests {
         observed_post_bank_audio: Arc<AtomicBool>,
     }
     impl GraphRuntimeObserver for OrderedPostBankObserver {
+        fn retained_bytes(&self) -> u64 {
+            effect_contract::retained::arc(&self.order)
+                + effect_contract::retained::arc(&self.observed_post_bank_audio)
+        }
+
         fn observe(
             &mut self,
             block: GraphObservationBlock<'_>,
@@ -1685,6 +1728,11 @@ mod tests {
         observed_post_bank_audio: Arc<AtomicBool>,
     }
     impl GraphRuntimeObserver for RepeatedOrderedPostBankObserver {
+        fn retained_bytes(&self) -> u64 {
+            effect_contract::retained::arc(&self.order)
+                + effect_contract::retained::arc(&self.observed_post_bank_audio)
+        }
+
         fn observe(
             &mut self,
             block: GraphObservationBlock<'_>,
@@ -5467,6 +5515,14 @@ mod tests {
     /// Records every rendered sample of one observed node, bit for bit.
     struct BitRecorder(BitSink);
     impl GraphRuntimeObserver for BitRecorder {
+        fn retained_bytes(&self) -> u64 {
+            effect_contract::retained::arc(&self.0)
+                + self
+                    .0
+                    .lock()
+                    .map_or(0, |v| effect_contract::retained::vec(&v))
+        }
+
         fn observe(
             &mut self,
             block: GraphObservationBlock<'_>,
@@ -8929,6 +8985,12 @@ mod tests {
         }
     }
     impl PreparedNativeEffectBank for CountedBank {
+        fn retained_bytes(&self) -> u64 {
+            core::mem::size_of_val(&*self.inner) as u64
+                + self.inner.retained_bytes()
+                + effect_contract::retained::arc(&self.live)
+        }
+
         fn reset(&mut self, kind: effect_contract::ResetKind) {
             self.inner.reset(kind);
         }
@@ -10514,6 +10576,10 @@ mod tests {
             frames: u64,
         }
         impl GraphRuntimeObserver for FailOnce {
+            fn retained_bytes(&self) -> u64 {
+                0
+            }
+
             fn observe(
                 &mut self,
                 block: GraphObservationBlock<'_>,
@@ -10531,6 +10597,11 @@ mod tests {
             first: Arc<AtomicU64>,
         }
         impl GraphRuntimeObserver for Order {
+            fn retained_bytes(&self) -> u64 {
+                effect_contract::retained::arc(&self.sequence)
+                    + effect_contract::retained::arc(&self.first)
+            }
+
             fn observe(
                 &mut self,
                 _block: GraphObservationBlock<'_>,
@@ -13128,8 +13199,14 @@ mod tests {
         ];
         let finite_table = table(&nodes, &edges);
         let schedule = topo(&finite_table).expect("acyclic output graph").schedule;
-        let timing = timings(&finite_table, &schedule, &BTreeMap::new(), &caps(100))
-            .expect("checked output timing");
+        let timing = timings(
+            &finite_table,
+            &schedule,
+            &BTreeMap::new(),
+            &BTreeSet::new(),
+            &caps(100),
+        )
+        .expect("checked output timing");
         assert_eq!(timing.output_latency, LatencySamples(7));
         assert_eq!(timing.output_tail, TailSamples::Finite(12));
         assert_eq!(timing.delays.len(), 1);
@@ -13137,8 +13214,14 @@ mod tests {
         let mut infinite_nodes = nodes.clone();
         infinite_nodes[1].bound = NodeTailBound::UNBOUNDED;
         let infinite_table = table(&infinite_nodes, &edges);
-        let infinite = timings(&infinite_table, &schedule, &BTreeMap::new(), &caps(100))
-            .expect("infinite output tail");
+        let infinite = timings(
+            &infinite_table,
+            &schedule,
+            &BTreeMap::new(),
+            &BTreeSet::new(),
+            &caps(100),
+        )
+        .expect("infinite output tail");
         assert_eq!(infinite.output_latency, LatencySamples(7));
         assert_eq!(infinite.output_tail, TailSamples::Infinite);
     }
@@ -13213,7 +13296,8 @@ mod tests {
                 .iter()
                 .map(|(node, floor)| (node.clone(), LatencySamples(*floor)))
                 .collect();
-            let timing = timings(&table, &schedule, &floors, &caps(100)).expect("checked timing");
+            let timing = timings(&table, &schedule, &floors, &BTreeSet::new(), &caps(100))
+                .expect("checked timing");
             let delays: Vec<u64> = timing
                 .routes
                 .iter()
@@ -13288,7 +13372,14 @@ mod tests {
         ];
         let table = table(&nodes, &edges);
         let schedule = topo(&table).expect("acyclic chain").schedule;
-        let timing = timings(&table, &schedule, &BTreeMap::new(), &caps(100)).expect("timing");
+        let timing = timings(
+            &table,
+            &schedule,
+            &BTreeMap::new(),
+            &BTreeSet::new(),
+            &caps(100),
+        )
+        .expect("timing");
         assert_eq!(
             timing.input_arrivals.as_ref(),
             [
@@ -13747,12 +13838,14 @@ mod tests {
                     &table,
                     &first_topo.schedule,
                     &BTreeMap::new(),
+                    &BTreeSet::new(),
                     &caps(1_000_000),
                 );
                 let second = timings(
                     &table,
                     &second_topo.schedule,
                     &BTreeMap::new(),
+                    &BTreeSet::new(),
                     &caps(1_000_000),
                 );
                 assert_eq!(

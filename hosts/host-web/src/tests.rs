@@ -1,6 +1,10 @@
 use core::mem::{offset_of, size_of, size_of_val};
 
 use host_core::SpectrumSmoothingConfig;
+// #1582 D3: the strip word's conversion and fold moved into the core under these names.
+use host_core::meters::{
+    reduction_db as observed_decibels, strip_reduction_db as strip_reduction_decibels,
+};
 use session::{canonical_session_json, parse_session_json};
 
 use super::*;
@@ -949,6 +953,10 @@ fn observation_staging_resource_is_exact_for_the_taps_off_and_on_modes() {
         let strips = (model.tracks.len() + model.submixes.len()) as u64;
         let meter_delivery_bytes = strips
             * (size_of::<Option<MeterSnapshot>>() + size_of::<usize>() + size_of::<u64>()) as u64;
+        // #1582 D2: the core meter frame's per-strip tables, a peak pair, a gain-reduction word
+        // and its presence.
+        let meter_delivery_bytes = meter_delivery_bytes
+            + strips * (size_of::<[f32; 2]>() + size_of::<f32>() + size_of::<bool>()) as u64;
         let frame_bytes = frame_bytes + meter_delivery_bytes;
         let expected_bridge_metadata = projection
             .report
@@ -3829,7 +3837,10 @@ fn a_bus_session_boots_live_controlled_and_files_every_bus_effect() {
         13,
         "no producer slot beyond the strips'"
     );
-    assert_eq!(ready.shape.observation_present.len(), strips.len());
+    assert_eq!(
+        ready.shape.core_frame.strip_gain_reduction_present.len(),
+        strips.len()
+    );
 }
 
 /// Issue #1209 gates 1 and 5: three effect-free tracks over the observation fixture's source,
@@ -5266,6 +5277,37 @@ fn observation_unit_conversion_is_declared_and_clamped() {
         assert!(value.is_finite());
         previous = value;
     }
+
+    // Issue #1918: a signed gain-change tap keeps its sign through the clamp, and the strip's
+    // reduction slot takes only a cut's depth, so a boost never reads as reduction.
+    let signed = ObservationDescriptor {
+        kind: ObservationKind::GainChangeDb,
+        fold: ObservationFold::PeakSigned,
+        minimum: -24.0,
+        maximum: 24.0,
+        ..decibels
+    };
+    assert_eq!(observed_decibels(signed, -6.0), -6.0, "not clamped at 0");
+    assert_eq!(
+        strip_reduction_decibels(signed, -6.0, 2.0),
+        6.0,
+        "a cut's depth"
+    );
+    assert_eq!(
+        strip_reduction_decibels(signed, 6.0, 6.0),
+        0.0,
+        "a boost is no reduction"
+    );
+    assert_eq!(
+        strip_reduction_decibels(signed, f32::INFINITY, 0.0),
+        0.0,
+        "+inf is no cut"
+    );
+    assert_eq!(
+        strip_reduction_decibels(signed, 0.0, f32::NAN),
+        0.0,
+        "NaN is no cut"
+    );
 }
 
 /// The identity fixture with three sources declared out of canonical order (issue #207).
@@ -5926,8 +5968,8 @@ fn a_bus_compressor_reports_its_gain_reduction_in_the_bus_word() {
     );
 }
 
-/// The gain-reduction word a tap's own latest window reads as: the same `observed_decibels` of the
-/// larger lane that `poll_meters` folds into the strip's slot.
+/// The gain-reduction word a tap's own latest window reads as: the same
+/// `strip_reduction_decibels` that `poll_meters` folds into the strip's slot.
 fn tap_gain_reduction(host: &mut AudioWorkletEngineHost, effect_index: u32) -> f32 {
     let rows = host
         .read_observation_addresses(&[ObservationAddress {
@@ -5948,7 +5990,7 @@ fn tap_gain_reduction(host: &mut AudioWorkletEngineHost, effect_index: u32) -> f
         .expect("observation handle")
         .descriptor
         .observations[0];
-    observed_decibels(tap, left.max(right))
+    strip_reduction_decibels(tap, left, right)
 }
 
 /// #1345 Amendment 6: the gain-reduction section is recomputed from the taps armed when each frame

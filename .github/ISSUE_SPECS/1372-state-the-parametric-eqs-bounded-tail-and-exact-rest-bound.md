@@ -119,3 +119,87 @@ with an EQ slot reports `Infinite`.
 - *State a bounded tail and an exact-rest bound for every node* (#1329)
 - *Carry each effect's tail and exact-rest bound in its prepared metadata* (#1377)
 - *Define how node tails compose through gain in the graph extent* (#1379)
+
+## 1372a record (attempt 1, stopped under R4)
+
+Tranche #1372a (the word-hull Lyapunov cascade in `math::tail`) stopped before code, under root
+decision R4: the identity-vertex argument does not close, so no uniform hull bound is stated.
+
+- **The gap R4 names (flush).** With a cross term `Q12 = eps`, a per-word flush can raise
+  `||s||_Q^2` by up to `2 eps |n_i| |n_j|`. Near the identity the decay per frame is
+  `delta (1 - q)` (`delta` the design weight of the affine split), so it does not pay for a flush
+  event that the input re-arms frame after frame. The crude charge (bump against the increments
+  `|2 d_i| <= 2 delta C Z` since the last flush) needs `4 eps C kappa_Q < 1 - q`, and with
+  `C ~ 2 g`, `1 - q ~ 2 eps g` (scope F2) that fails by a factor of about `4 kappa_Q`.
+- **A second gap the scope note does not list (final rounding).** The kernel's last step
+  `n = fl(ic + 2 d)` errs by up to `u |n|` per word (the `KAPPA * U * q` term of
+  `state_rounding`). That error does not scale with `delta`: it is `min(u |n|, |2 d|)`, and
+  `|2 d| >> u |n|` in the zone. So at a chord word `w = (1 - delta) I + delta w'` the kernel
+  contraction is at least `1 - delta (1 - q) + u`, and it is not below 1 for
+  `delta < delta* = u / (1 - q)`. No metric certifies `1 - q` above the extreme pole's gap
+  (bell 10 Hz, Q 18, +24 dB, `k = 0.0140`), so `delta*` is at least 0.0060, 0.0065, 0.0120 and
+  0.0131 at 44.1, 48, 88.2 and 96 kHz, and about twice that with the certified rate of scope F2.
+  One frame of ramp toward any design moves `delta` by 1/64 = 0.0156.
+- **Reachability.** `quantum_frames` only has to be nonzero (`crates/session/src/validate.rs:63`),
+  and a retarget restarts the ramp from the words in force (`start_ramp`). So a history that sends
+  the band toward a design for one or two frames and then toward the identity again holds `delta`
+  in or near `(0, delta*)` for as long as it likes. At 48 kHz and `B = 1`, one cycle (one frame
+  toward a design, then a 64-frame ramp back to the identity) has a worst-case rounding gain of
+  about `64 u = 3.8e-6` against an exact decay of about `0.5 (1 - q) = 2.3e-6`. So the certified
+  pre-`N` state bound grows without limit. An exact identity (`delta = 0`) is frozen with no
+  rounding, which is why the gap occurs only on the chord.
+- **Consequence.** Without a further lemma on the ramp law and the minimum block size, the
+  pre-`N` state of a section whose band can ramp toward the identity has no certified
+  peak-relative bound. Such a lemma depends on fine margins (at `B = 2` the cycle balance is
+  within about 20%). Its alternative is scope R4's class-B kernel snap (for example, snap a ramp
+  word below a stated weight to the exact identity), which only the owner can rule on. The bound
+  and the gates stay as frozen.
+- **What still holds.** Hulls without the identity (the de-esser's and the dynamic EQ's
+  frequency and Q live section, if neither ramps to the identity) are not affected. There the
+  uniform `q < 1` over the design hull is the whole argument, and a slice limited to
+  `identity_reachable = false` closes on the scope note's plan.
+
+### Root ruling after the stop (2026-10-24)
+
+- #1372a takes option (b), which moves no bit. The norm constants are parametrised, and
+  `common_lyapunov` and `hull_cascade` (`crates/math/src/tail/hull.rs`) cover design hulls only.
+  `HullSection::identity_reachable = true` is refused with `TailBoundError::IdentityReachable`.
+  A hull with an identity vertex cannot certify `q < 1`, so `common_lyapunov` refuses it as
+  `NotContracting`.
+- Options (a), a class-B kernel snap, and (c), a ramp-law and minimum-block lemma, go to the
+  owner. #1372b (the EQ's own bound) needs the identity case, so the parametric EQ keeps its
+  current `Infinite`/`Unstated` declaration until the owner rules.
+- Which callers qualify (read on `main` 6172dc4e6 and PR #1919 head 5316681de):
+  - **De-esser qualifies.** Its SVF words are always the EQ's 0 dB high-pass design (`targets`).
+    They ramp only between designs on frequency or Q changes. The mode, detector and listen
+    switches crossfade the output arms, not the SVF words, and there is no enable or kind ramp.
+  - **Dynamic EQ does not qualify.** A disabled band's design is `[0.0; 9]` (`band_design`), and
+    its words ramp to the identity section. It stays `UNBOUNDED` for now.
+
+### 1372a evidence (option b, attempt 1)
+
+- Derivation: `docs/derivations/1372-parametric-eq-tail-and-rest.md`, part 1.
+- Gates: a1 (`contraction_bounds_every_hull_word` and `cascade_bound_covers_every_hull_member`),
+  a2 (`one_vertex_tail_is_tight`), the composition check (`composition_covers_crossings`), and
+  a3 (the builtins' and the multiband's `tail_contract` tables, unchanged).
+- Tightness (a2): with a one-vertex hull at the extreme (bell 10 Hz, Q 18, +24 dB, 48 kHz),
+  `T = 2,262,795` and `T_b = 2,212,870`, a ratio of 1.0226.
+- Evidence, not a gate: a 25 x 25 `(g, k)` grid hull over the whole EQ domain certifies
+  `q = 0.99999095` at 48 kHz, with `l12 ~ k_min / 2`. The extreme's `T / T_b` under that hull is
+  1.032 at 44.1 and 48 kHz, far inside R3's factor of 2.
+
+### 1372a attempt 2 (verifier FAIL on attempt 1; the math module itself was sound)
+
+- Added a feedthrough row to `cascade_bound_covers_every_hull_member`: two one-vertex sections
+  at `g = 0.05`, `k = 1.0` and `k = 0.1`, with section 1's mix `(1, 0, 0)` and section 2's
+  `(0, 0, 1)`. Removing `section.output_input * v` from `invariant` turns it red.
+- Caller obligation, restated in the derivation and `HullSection`: every word triple the kernel
+  can load under its own per-word ramp and retarget rule must lie in hull + margin. The state
+  rounding is taken at word magnitudes that are suprema over hull + margin. `identity_reachable`
+  is the caller's attestation, and each caller crate tests its own claim.
+- The de-esser qualifies only with the joint retarget of all three SVF words. At 6172dc4e6,
+  `lib.rs:723` skipped a word whose target bits were unchanged; root's fix is in PR #1922.
+  `effect_runtime::svf::RAMP_PATH_NORM_TOLERANCE` makes the same lockstep assumption; #1928
+  checks it for the parametric EQ.
+- The margin box for `f32` ramp walks and retarget restarts cites the bounded-excess inductions
+  of `multiband-compressor/src/tail.rs` and `RAMP_PATH_NORM_TOLERANCE`.

@@ -635,19 +635,26 @@ pub fn effect_producer_position(
 
 /// Bytes a host that keeps the strip producers as one exactly sized boxed slice retains: the
 /// slice of `strip_count` [`TrackControlProducer`]s plus each producer's `track_id`, whose text is
-/// `strip_id_bytes` long in total (#1256 D3).
+/// `strip_id_bytes` long in total (#1256 D3), plus each producer's own heap owners
+/// (`producer_heap_bytes`: [`TrackControlProducer::retained_heap_bytes`] summed by the caller over
+/// the built producers, #1916).
 ///
 /// This is the mirror a host's pre-flight resource projection reads, as `control_table_bytes` is
-/// for the source producers: a function of the producer's own layout, so the host never spells
-/// it. The rings the producers share with the plan are not here; builtins charges them in
+/// for the source producers: a function of the producers' layout, so the host never spells it.
+/// The rings the producers share with the plan are not here; builtins charges them in
 /// `builtin_retained_payload_bytes`.
 #[must_use]
-pub fn strip_control_table_bytes(strip_count: usize, strip_id_bytes: usize) -> Option<u64> {
+pub fn strip_control_table_bytes(
+    strip_count: usize,
+    strip_id_bytes: usize,
+    producer_heap_bytes: u64,
+) -> Option<u64> {
     let table = core::alloc::Layout::array::<TrackControlProducer>(strip_count).ok()?;
     let ids = core::alloc::Layout::array::<u8>(strip_id_bytes).ok()?;
     u64::try_from(table.size())
         .ok()?
-        .checked_add(u64::try_from(ids.size()).ok()?)
+        .checked_add(u64::try_from(ids.size()).ok()?)?
+        .checked_add(producer_heap_bytes)
 }
 
 /// One prepared session: the render plan, the control-side source set, and the resource report.
@@ -837,6 +844,8 @@ pub struct PlanStateInventory {
     spectrum_collection: bool,
     /// The captures this plan takes over from its predecessor (#1395 D3), built at preparation.
     spectrum_pairing: Box<[crate::spectrum::SpectrumPair]>,
+    /// The meters this plan takes over from its predecessor (#1674 R1), built at preparation.
+    meter_pairing: Box<[engine::realtime::ObserverCarry]>,
     /// One row per compensation line of the plan (#1283 D1), sorted by edge ID.
     delay_lines: Box<[graph::GraphDelayLine]>,
     /// One row per strip input alignment line of the plan (#1284 D1), sorted by strip ID.
@@ -1093,6 +1102,19 @@ impl PlanStateInventory {
         &self.spectrum_pairing
     }
 
+    /// The strip meter readers this plan takes over from the plan it was prepared to displace
+    /// (#1674 R1): the records the control side pairs its meter consumers by at promotion, with
+    /// [`pair_carried_meters`], when the adoption carried. Built at preparation from the meter
+    /// moves, so its rows equal the swap block's record's meter entries, in order: the observer
+    /// carry is all or nothing and runs every meter move. It holds no spectrum or tap row; a tap's
+    /// carry also depends on its effect's restore at the swap, so observation readers pair from the
+    /// record's tap entries, never from a preparation-time list. Empty for a plan prepared without
+    /// a predecessor or one that carries no meter.
+    #[must_use]
+    pub fn meter_pairing(&self) -> &[engine::realtime::ObserverCarry] {
+        &self.meter_pairing
+    }
+
     /// Compensation line rows, one per delayed edge of the plan (#1283).
     #[must_use]
     pub fn delay_line_count(&self) -> usize {
@@ -1160,6 +1182,7 @@ impl PlanStateInventory {
             spectrum: Box::default(),
             spectrum_collection: false,
             spectrum_pairing: Box::default(),
+            meter_pairing: Box::default(),
             delay_lines: Box::default(),
             strip_delays: Box::default(),
             live_routes: Box::default(),
@@ -1198,6 +1221,7 @@ impl PlanStateInventory {
             spectrum: Box::default(),
             spectrum_collection: false,
             spectrum_pairing: Box::default(),
+            meter_pairing: Box::default(),
             delay_lines: Box::default(),
             strip_delays: Box::default(),
             live_routes: Box::default(),
@@ -1308,6 +1332,7 @@ impl PlanStateInventory {
                 + core::mem::size_of_val::<[ObservationInventoryRow]>(&self.observations)
                 + core::mem::size_of_val::<[SpectrumInventoryRow]>(&self.spectrum)
                 + core::mem::size_of_val::<[crate::spectrum::SpectrumPair]>(&self.spectrum_pairing)
+                + core::mem::size_of_val::<[engine::realtime::ObserverCarry]>(&self.meter_pairing)
                 + core::mem::size_of_val::<[graph::GraphDelayLine]>(&self.delay_lines)
                 + core::mem::size_of_val::<[graph::GraphStripDelayLine]>(&self.strip_delays)
                 + core::mem::size_of_val::<[graph::GraphLiveRoute]>(&self.live_routes)
@@ -1445,6 +1470,12 @@ pub struct SuccessorBase<'a> {
     /// continuity constraint. `false` is the neutral value: a successor continues its
     /// predecessor.
     pub discontinuity: bool,
+    /// The successor is a monitor rebuild at the unchanged committed revision (#1594 D6, R1):
+    /// only the session's spectrum taps differ from the predecessor, so `committed` is the model
+    /// the successor is prepared from and `revision` is the committed revision, which may be 0
+    /// (`0..=GATE_REVISION_MAX`). Such a successor has no carry retarget to stamp; a preparation
+    /// that finds one refuses with `host.successor.monitor`. `false` is the neutral value.
+    pub unchanged_revision: bool,
 }
 
 impl<'a> SuccessorBase<'a> {
@@ -1467,6 +1498,7 @@ impl<'a> SuccessorBase<'a> {
             monitor: MonitorBase::NONE,
             observation: &NO_OBSERVATION,
             discontinuity: false,
+            unchanged_revision: false,
         }
     }
 }
@@ -2055,7 +2087,11 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
     let live_controls = live_controls.unwrap_or(&default_request);
     // #1277 D10: a successor commits as a revision its own gate can stamp. Checked before this
     // preparation allocates anything.
-    if successor.is_some_and(|base| !(1..=GATE_REVISION_MAX).contains(&base.revision)) {
+    // #1594 D6: a monitor rebuild stays at the committed revision, which may be 0.
+    if successor.is_some_and(|base| {
+        let lowest = u64::from(!base.unchanged_revision);
+        !(lowest..=GATE_REVISION_MAX).contains(&base.revision)
+    }) {
         return Err(successor_revision_refusal());
     }
     // #1323 D3: at a host-declared discontinuity the successor joins against its predecessor's
@@ -3516,6 +3552,17 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
         }
         fade_arm_rows.sort_unstable_by(|left, right| left.id.cmp(&right.id));
     }
+    // #1674 R1: the meter readers the control side pairs at promotion, in the swap block's record
+    // order, read before the moves go to the plan.
+    let meter_pairing: Box<[engine::realtime::ObserverCarry]> = meter_carry
+        .moves
+        .iter()
+        .map(|step| engine::realtime::ObserverCarry {
+            kind: step.kind,
+            successor: step.successor_entry,
+            predecessor: step.predecessor_entry,
+        })
+        .collect();
     if !effect_carry.moves.is_empty() {
         graph::install_effect_carry(&mut plan, effect_carry.moves, effect_carry_scratch_bytes)
             .map_err(|_| graph_failure("host.carry.install"))?;
@@ -3603,6 +3650,7 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
         spectrum: spectrum_rows.into_boxed_slice(),
         spectrum_collection,
         spectrum_pairing: spectrum_carry.pairing.into_boxed_slice(),
+        meter_pairing,
         delay_lines: delay_lines.into_boxed_slice(),
         strip_delays: strip_delays.into_boxed_slice(),
         live_routes: live_routes.into_boxed_slice(),
@@ -3693,6 +3741,14 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
             && route_carry.retargets.is_empty()
             && carried_inputs.iter().all(|join| join.retarget.is_empty()),
     ) {
+        // #1594 D6: a monitor rebuild's model equals its predecessor's base, so nothing retargets;
+        // a retarget would need a revision the commit never publishes.
+        if base.unchanged_revision {
+            return Err(PrepareDiagnostics::fixed(
+                PrepareRejection::Session,
+                "host.successor.monitor",
+            ));
+        }
         let Some(Ok(stamp)) = plan.stamp_held_gate(base.revision) else {
             return Err(successor_revision_refusal());
         };
@@ -7281,6 +7337,7 @@ mod tests {
             spectrum: Box::default(),
             spectrum_collection: false,
             spectrum_pairing: Box::default(),
+            meter_pairing: Box::default(),
             delay_lines: Box::default(),
             strip_delays: Box::default(),
             live_routes: Box::default(),

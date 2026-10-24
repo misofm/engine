@@ -27,6 +27,9 @@ impl Drop for RestoreMode {
 
 struct Noop;
 impl GraphRuntimeProcessor for Noop {
+    fn retained_bytes(&self) -> u64 {
+        0
+    }
     fn process(&mut self, _block: GraphBindingBlock<'_>) -> Result<(), RenderError> {
         Ok(())
     }
@@ -38,6 +41,11 @@ struct CarriedSlot {
 }
 
 impl GraphPreparedSourceSetDriver for CarriedSlot {
+    fn retained_bytes(&self) -> u64 {
+        self.slot
+            .as_deref()
+            .map_or(0, engine::realtime::retained::slice)
+    }
     fn claim_count(&self) -> usize {
         1
     }

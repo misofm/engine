@@ -33,6 +33,65 @@ fn registry_refuses_an_invalid_main_descriptor() {
             id: Some(EFFECT_ID),
         }
     );
+
+    // Issue #1918: a tap's kind, fold and unit must agree. Only `GainChangeDb` folds with its
+    // sign, and only in decibels.
+    let pairs = [
+        (
+            ObservationKind::GainReductionDb,
+            ObservationFold::PeakMagnitude,
+            ParameterUnit::Linear,
+            true,
+        ),
+        (
+            ObservationKind::GainChangeDb,
+            ObservationFold::PeakSigned,
+            ParameterUnit::Db,
+            true,
+        ),
+        (
+            ObservationKind::GainChangeDb,
+            ObservationFold::PeakMagnitude,
+            ParameterUnit::Db,
+            false,
+        ),
+        (
+            ObservationKind::GainReductionDb,
+            ObservationFold::PeakSigned,
+            ParameterUnit::Db,
+            false,
+        ),
+        (
+            ObservationKind::GainChangeDb,
+            ObservationFold::PeakSigned,
+            ParameterUnit::Linear,
+            false,
+        ),
+    ];
+    for (kind, fold, unit, admitted) in pairs {
+        let tap = ObservationDescriptor {
+            id: ObservationTapId(1),
+            display_name: "Gain",
+            display_unit: "dB",
+            kind,
+            unit,
+            cost: ObservationCost::Resident,
+            cadence: ObservationCadence::PerBlock,
+            fold,
+            channels: ObservationChannels::Shared,
+            minimum: -24.0,
+            maximum: 24.0,
+        };
+        let with_tap: &'static EffectDescriptor = Box::leak(Box::new(EffectDescriptor {
+            observations: Box::leak(Box::new([tap])),
+            ..VALID
+        }));
+        assert_eq!(
+            validate_descriptor(with_tap).is_ok(),
+            admitted,
+            "{kind:?} {fold:?} {unit:?}"
+        );
+    }
 }
 
 /// The one launch rate each inconsistent fixture below breaks its rule at; every other rate states
