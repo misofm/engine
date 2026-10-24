@@ -17,7 +17,8 @@ Each row names its owning issue. Two scripts consume this file, so the rows live
   with a row fails ("fixed: delete the row"). A crate above its ceiling fails ("rose"). A crate
   with calls and no row fails, and so do calls charged to a crate outside the product closure and
   a row for a crate that is not a product crate. A crate below its ceiling passes and is reported,
-  so a partial fix shows as progress and the defect reads fixed only when every row is gone.
+  so a partial fix shows as progress and a defect reads fixed only when every row it owns is gone.
+  #1018's rows are gone: a product crate with no row must ship no call at all.
 
 Subcommands:
 
@@ -61,13 +62,12 @@ TEST_ROWS: dict[str, list[tuple[str, str, str, str, str]]] = {
 # `lane` now builds its splats as array literals (`crates/lane/src/wide_impl.rs`): 2,122 -> 16.
 # #1456 removed the `true-peak-limiter`'s 6 (`clear_runtime` and `ChannelState::new`): 16 -> 10.
 #
-# #1472 re-based the rows on the shipped library, where fat LTO keeps 5 calls, all in preparation
-# code reached from `builtins-compiler`'s `into_graph_artifact_with_banks` and from `builtins`'
-# constructors: `builtins` 4 (`BuiltinChain::new`, `FaderMuteRampBuiltins::new`,
-# `BuiltinInputBank::new`, `BuiltinFaderBank::new`; the last two are inlined into
-# `builtins-compiler`) and `lane` 1 (`kernels::builtins::lanes_below`'s flag fill, inlined into
-# `builtins-compiler`). The pre-link rows of `host-core` (4, the spectrum arrays) and `soft-clip`
-# (1, the test corpus) were code that LTO removes: no iPhone app links it.
+# #1472 re-based the rows on the shipped library, where fat LTO kept 5 calls, all in preparation
+# code: `builtins` 4 (the `[[1.0; MAX_BANK_LANES]; 2]` unit fills of the input, fader and fader-ramp
+# stage constructors) and `lane` 1 (`kernels::builtins::lanes_below`'s flag fill). The pre-link
+# rows of `host-core` (4, the spectrum arrays) and `soft-clip` (1, the test corpus) were code that
+# LTO removes: no iPhone app links it. #1018 deleted the `builtins` and `lane` rows at 0: the unit
+# fills copy a compile-time constant and `lanes_below` is one compare against the lane indices.
 #
 # #1595 links host-core's spectrum analysis into the C ABI (`SPECTRUM_CAPTURE` analyzes a window
 # on the thread that calls `miso_engine_v1_submit_command`), so 5 of its floor and table fills
@@ -79,10 +79,7 @@ TEST_ROWS: dict[str, list[tuple[str, str, str, str, str]]] = {
 # control-thread spectrum analysis, never render. #1595b removed them: the fills were dead stores
 # (zero fills now) and the analysis writes straight into its result, so host-core has 0 calls
 # (4 on main before the slice) and no row.
-IOS_MEMSET_CEILINGS: dict[str, tuple[str, int]] = {
-    "builtins": ("1018", 4),
-    "lane": ("1018", 1),
-}
+IOS_MEMSET_CEILINGS: dict[str, tuple[str, int]] = {}
 
 
 class Refused(RuntimeError):

@@ -1088,7 +1088,7 @@ def check_cross_target_aarch64_rows(root: pathlib.Path) -> None:
                     for command in commands),
                 f"{CROSS_TARGET_SCRIPT}: aarch64_row must run `{tool} ...{tail}{suffix}` over the "
                 "product crates")
-    # The iOS memset scan (#1018's expected failures): the judge refuses a product crate it has no
+    # The iOS memset scan (#1595's host-core row): the judge refuses a product crate it has no
     # count for, so it must be handed the whole product list and must run. Scanning a hand-picked
     # subset, or dropping the judge, would read a partly fixed defect as fixed.
     for line, why in (
