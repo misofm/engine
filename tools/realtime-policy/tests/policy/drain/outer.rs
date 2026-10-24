@@ -34,100 +34,231 @@ fn shadowed_by(params: &str, header: &str, item: &str) -> String {
     )
 }
 
-/// A counted drain in each pass of a loop over the slice parameter `rounds`, with a block item
+/// A counted drain of each element of the slice parameter `rounds`, with a block item
 /// after the loop. Only the item scan tells it from the finite outer loop of D1, so only a row
 /// built this way defends the scan on the slice parameter.
 fn slice_shadowed_by(item: &str) -> String {
     format!(
-        "fn drain(control: &mut Consumer<Record>, rounds: &[u8]) {{\n    for _ in rounds {{\n{}    }}\n    {item}\n}}",
+        "fn drain(rounds: &mut [Consumer<Record>]) {{\n    for control in rounds {{\n{}    }}\n    {item}\n}}",
         counted_drain("")
     )
 }
 
 const CONFIG: &str = ", cfg: &Config";
 
-/// D1: a loop around a counted drain that runs a finite number of passes by its form.
+/// A drain of `controls[lane]` in each pass of the loop `header`, which binds `lane`.
+fn by_lane(params: &str, header: &str) -> String {
+    format!(
+        "fn drain(controls: &mut [Consumer<Record>; 4]{params}) {{\n    {header} {{\n        let available = controls[lane].available_at_entry();\n        for _ in 0..available {{\n            let Ok(record) = controls[lane].try_pop() else {{\n                break;\n            }};\n            apply(record);\n        }}\n    }}\n}}"
+    )
+}
+
+/// A drain of `control` in each pass of the loop `header`, which binds `control`, with `prelude`
+/// statements before the loop.
+fn by_element(params: &str, prelude: &str, header: &str) -> String {
+    format!(
+        "fn drain({params}) {{\n{prelude}    {header} {{\n{}    }}\n}}",
+        counted_drain("")
+    )
+}
+
+const CONFIG_MUT: &str = "cfg: &mut Config";
+
+/// D1 (B1b) and #1418 D1: a loop around a counted drain that runs a finite number of passes by its
+/// form, and drains a different queue on each pass. Each row keeps one finite form.
 #[test]
 fn the_finite_outer_loops_pass() {
     let rows: Vec<(&'static str, String)> = vec![
-        ("outer-literal-bound", around("", "", "for _ in 0..4", "")),
+        ("outer-literal-bound", by_lane("", "for lane in 0..4")),
         (
             "outer-suffixed-literal-bound",
-            around("", "", "for _ in 0..4_usize", ""),
+            by_lane("", "for lane in 0..4_usize"),
         ),
         (
             "outer-identifier-bound",
-            around(", lanes: usize", "", "for _ in 0..lanes", ""),
+            by_lane(", lanes: usize", "for lane in 0..lanes"),
         ),
         (
             "outer-field-bound",
-            around(CONFIG, "", "for _ in 0..cfg.lanes", ""),
+            by_lane(CONFIG, "for lane in 0..cfg.lanes"),
         ),
         (
             "outer-segment-bound",
-            around("", "", "for _ in 0..usize::MAX", ""),
+            by_lane("", "for lane in 0..Bank::LANES"),
         ),
         (
             "outer-reference",
-            around(CONFIG, "", "for _ in &cfg.controls", ""),
+            by_element("cfg: &Config", "", "for control in &cfg.controls"),
         ),
         (
             "outer-mutable-reference",
-            around(CONFIG, "", "for _ in &mut cfg.controls", ""),
+            by_element(CONFIG_MUT, "", "for control in &mut cfg.controls"),
         ),
         (
             "outer-iter",
-            around(CONFIG, "", "for _ in cfg.controls.iter()", ""),
+            by_element("cfg: &Config", "", "for control in cfg.controls.iter()"),
         ),
         (
             "outer-iter-mut-enumerate",
-            around(
-                CONFIG,
+            by_element(
+                CONFIG_MUT,
                 "",
-                "for (_, _) in cfg.controls.iter_mut().enumerate()",
-                "",
+                "for (_, control) in cfg.controls.iter_mut().enumerate()",
             ),
         ),
         (
+            // The queue on the zip chain's receiver.
             "outer-zip-chain",
-            around(
-                CONFIG,
+            by_element(
+                CONFIG_MUT,
                 "",
-                "for _ in cfg.a.iter().zip(&cfg.b).enumerate().zip(&mut cfg.c).zip(cfg.d).zip(4)",
-                "",
+                "for ((((_, (control, _)), _), _), _) in cfg.a.iter_mut().zip(&cfg.b).enumerate().zip(&mut cfg.c).zip(cfg.d).zip(4)",
             ),
         ),
         (
             "outer-slice-reference",
-            around(", rounds: &[u8]", "", "for _ in rounds", ""),
+            by_element("rounds: &[Consumer<Record>]", "", "for control in rounds"),
         ),
         (
             "outer-slice-mutable",
-            around(", rounds: &mut [u8]", "", "for _ in rounds", ""),
+            by_element("rounds: &mut [Consumer<Record>]", "", "for control in rounds"),
         ),
         (
             "outer-slice-lifetime",
-            around(", rounds: &'static [u8]", "", "for _ in rounds", ""),
+            by_element(
+                "rounds: &'static [Consumer<Record>]",
+                "",
+                "for control in rounds",
+            ),
         ),
         (
             "outer-array-value",
-            around(", rounds: [u8; 4]", "", "for _ in rounds", ""),
+            by_element("rounds: [Consumer<Record>; 4]", "", "for control in rounds"),
         ),
         (
             "outer-mutable-array-value",
-            around(", mut rounds: [u8; 4]", "", "for _ in rounds", ""),
+            by_element(
+                "mut rounds: [Consumer<Record>; 4]",
+                "",
+                "for control in rounds",
+            ),
         ),
         (
             "outer-array-reference",
-            around(", rounds: &[u8; 4]", "", "for _ in rounds", ""),
+            by_element("rounds: &[Consumer<Record>; 4]", "", "for control in rounds"),
         ),
-        (
-            "outer-labelled",
-            around("", "", "'lanes: for _ in 0..4", ""),
-        ),
+        ("outer-labelled", by_lane("", "'lanes: for lane in 0..4")),
         (
             "outer-counted-for-header",
-            around("", "", "for _ in 0..control.available_at_entry()", ""),
+            by_lane(
+                ", gate: &mut Consumer<Record>",
+                "for lane in 0..gate.available_at_entry()",
+            ),
+        ),
+        (
+            // Two levels: the inner collection is the outer loop's element.
+            "outer-two-finite-loops",
+            format!(
+                "fn drain({CONFIG_MUT}) {{\n    for bank in &mut cfg.banks {{\n        for control in &mut bank.controls {{\n{}        }}\n    }}\n}}",
+                counted_drain("")
+            ),
+        ),
+        (
+            "outer-slice-parameter-of-a-method",
+            format!(
+                "impl Drain {{\n    fn run(&mut self, rounds: &mut [Consumer<Record>]) {{\n        for control in rounds {{\n{}        }}\n    }}\n}}",
+                counted_drain("")
+            ),
+        ),
+        (
+            // NIT-3: the index form followed by one `.as_mut()`, in a `let .. else`.
+            "outer-index-as-mut-let-else",
+            "impl Bank {\n    fn drain(&mut self) {\n        for lane in 0..LANES {\n            let Some(control) = self.controls[lane].as_mut() else {\n                continue;\n            };\n            let available = control.available_at_entry();\n            for _ in 0..available {\n                let Ok(record) = control.try_pop() else {\n                    break;\n                };\n                apply(record);\n            }\n        }\n    }\n}".to_owned(),
+        ),
+        (
+            // NIT-3: an `if let` in an `else` branch binds as `if let` does.
+            "outer-else-if-let",
+            "fn drain(controls: &mut [Option<Consumer<Record>>], skip: bool) {\n    for control in controls.iter_mut() {\n        if skip {\n            continue;\n        } else if let Some(control) = control.as_mut() {\n            let available = control.available_at_entry();\n            for _ in 0..available {\n                let Ok(record) = control.try_pop() else {\n                    break;\n                };\n                apply(record);\n            }\n        }\n    }\n}".to_owned(),
+        ),
+        (
+            // Two levels through an index: the base of `bank.controls[lane]` is the outer element.
+            "outer-index-in-an-element",
+            "impl Set {\n    fn drain(&mut self) {\n        for bank in &mut self.banks {\n            for lane in 0..LANES {\n                let available = bank.controls[lane].available_at_entry();\n                for _ in 0..available {\n                    let Ok(record) = bank.controls[lane].try_pop() else {\n                        break;\n                    };\n                    apply(record);\n                }\n            }\n        }\n    }\n}".to_owned(),
+        ),
+    ];
+    each_row(rows, |name, text| accepts(name, &text));
+}
+
+/// #1418 D1 (MINOR-2): the walk has no depth cap. A 64-link rebinding chain and a 60-level nest of
+/// distinctly named bank loops each give one answer.
+#[test]
+fn deep_selecting_chains_pass() {
+    let links: String = (0..63)
+        .map(|_| "        let control = &mut control;\n")
+        .collect();
+    let chain = format!(
+        "fn drain(controls: &mut [Consumer<Record>; 2]) {{\n    for lane in 0..2 {{\n        let control = &mut controls[lane];\n{links}{}    }}\n}}",
+        counted_drain("")
+    );
+    let mut nest = format!(
+        "        for control in &mut b59.controls {{\n{}        }}\n",
+        counted_drain("")
+    );
+    for level in (0..60).rev() {
+        let outer = if level == 0 {
+            "cfg".to_owned()
+        } else {
+            format!("b{}", level - 1)
+        };
+        nest = format!("    for b{level} in &mut {outer}.banks {{\n{nest}    }}\n");
+    }
+    let nest = format!("fn drain({CONFIG_MUT}) {{\n{nest}}}");
+    each_row(
+        [
+            ("outer-64-link-chain", chain),
+            ("outer-60-level-nest", nest),
+        ],
+        |name, text| accepts(name, &text),
+    );
+}
+
+/// #1418 D1: a finite loop around a counted drain that can drain one queue on more than one pass is
+/// refused. One row per way the loop can fail to select, or let the selected queue move.
+#[test]
+fn the_outer_loops_that_do_not_select_the_queue_are_refused() {
+    let lane_drain = |queue: &str| {
+        format!(
+            "        let available = {queue}.available_at_entry();\n        for _ in 0..available {{\n            let Ok(record) = {queue}.try_pop() else {{\n                break;\n            }};\n            apply(record);\n        }}\n"
+        )
+    };
+    let rows: Vec<(&'static str, String)> = vec![
+        // D4: a pop-until-empty drain through a finite but endless-in-practice loop.
+        (
+            "outer-usize-max",
+            around("", "", "for _ in 0..usize::MAX", ""),
+        ),
+        (
+            "outer-unit-array-parameter",
+            around(", rounds: [(); usize::MAX]", "", "for () in rounds", ""),
+        ),
+        (
+            // A limit of B1b: `&mut` of an endless iterator is finite by its form.
+            "outer-borrowed-open-range",
+            around(
+                "",
+                "    let mut rounds = 0_u32..;\n",
+                "for _ in &mut rounds",
+                "",
+            ),
+        ),
+        (
+            "outer-counted-loop",
+            around(
+                "",
+                "    let outer_available = control.available_at_entry();\n",
+                "for _ in 0..outer_available",
+                "",
+            ),
         ),
         (
             "outer-counted-while",
@@ -138,26 +269,106 @@ fn the_finite_outer_loops_pass() {
                 "        passes -= 1;\n",
             ),
         ),
+        // D4: the old base-tree `drain_lane_pairs`, one queue in each of two lanes.
         (
-            "outer-two-finite-loops",
+            "same-queue-lane-pairs",
+            around("", "", "for lane in 0..2", ""),
+        ),
+        (
+            "outer-index-expression",
             format!(
-                "fn drain(control: &mut Consumer<Record>{CONFIG}) {{\n    for _ in 0..4 {{\n        for _ in &cfg.controls {{\n{}        }}\n    }}\n}}",
+                "fn drain(controls: &mut [Consumer<Record>; 2]) {{\n    for lane in 0..2 {{\n        let control = &mut controls[lane % 2];\n{}    }}\n}}",
                 counted_drain("")
             ),
         ),
         (
-            "outer-slice-parameter-of-a-method",
+            // Attempt 2's mutation H: a `mut` index can be set to one value on every pass.
+            "outer-mutable-index",
             format!(
-                "impl Drain {{\n    fn run(&mut self, control: &mut Consumer<Record>, rounds: &[u8]) {{\n        for _ in rounds {{\n{}        }}\n    }}\n}}",
+                "fn drain(controls: &mut [Consumer<Record>; 2]) {{\n    for mut lane in 0..2 {{\n        lane = 0;\n{}    }}\n}}",
+                lane_drain("controls[lane]")
+            ),
+        ),
+        (
+            "outer-index-shadowed-by-block-const",
+            format!(
+                "fn drain(controls: &mut [Consumer<Record>; 2]) {{\n    for lane in 0..2 {{\n        const lane: usize = 0;\n{}    }}\n}}",
+                lane_drain("controls[lane]")
+            ),
+        ),
+        (
+            // Attempt 2's L2: the element slot of an `.enumerate()` is a table value, not the index.
+            "outer-enumerated-index-table",
+            format!(
+                "fn drain(controls: &mut [Consumer<Record>; 2], order: &[usize]) {{\n    for (_, lane) in order.iter().enumerate() {{\n{}    }}\n}}",
+                lane_drain("controls[lane]")
+            ),
+        ),
+        (
+            "outer-index-base-swapped",
+            format!(
+                "fn drain(controls: &mut [Consumer<Record>; 2]) {{\n    for lane in 0..2 {{\n        controls.swap(0, 1);\n{}    }}\n}}",
+                lane_drain("controls[lane]")
+            ),
+        ),
+        (
+            // The same reorder through a slice of the base: `[..]` is not the receiver's index.
+            "outer-index-base-slice-swapped",
+            format!(
+                "fn drain(controls: &mut [Consumer<Record>; 2]) {{\n    for lane in 0..2 {{\n        controls[..].swap(0, 1);\n{}    }}\n}}",
+                lane_drain("controls[lane]")
+            ),
+        ),
+        (
+            // Lane 1 drains lane 0's queue again, through the spare.
+            "outer-element-swapped-with-spare",
+            format!(
+                "fn drain(controls: &mut [Consumer<Record>; 2], spare: &mut Consumer<Record>) {{\n    for (lane, control) in controls.iter_mut().enumerate() {{\n        if lane == 1 {{\n            core::mem::swap(control, spare);\n        }}\n{}        if lane == 0 {{\n            core::mem::swap(control, spare);\n        }}\n    }}\n}}",
+                lane_drain("control")
+            ),
+        ),
+        (
+            // Attempt 2's D2: the outer loop must select the base, not the inner loop's collection.
+            "outer-loop-around-unselected-base",
+            format!(
+                "fn drain(controls: &mut [Consumer<Record>; 2], cfg: &mut Config) {{\n    for bank in &mut cfg.banks {{\n        for (lane, _) in bank.order.iter().enumerate() {{\n{}        }}\n    }}\n}}",
+                lane_drain("controls[lane]")
+            ),
+        ),
+        (
+            // MAJOR-2: a zip argument's element selects its own loop only; every bank re-drains
+            // `cfg.controls`.
+            "outer-zip-carried-outward",
+            format!(
+                "fn drain({CONFIG_MUT}) {{\n    for bank in &mut cfg.banks {{\n        for (_, control) in bank.order.iter().zip(&mut cfg.controls) {{\n{}        }}\n    }}\n}}",
                 counted_drain("")
+            ),
+        ),
+        (
+            // MAJOR-1: with the feature off, the queue is the spare on every pass.
+            "outer-cfg-let",
+            format!(
+                "fn drain(controls: &mut [Consumer<Record>; 2], spare: &mut Consumer<Record>) {{\n    for lane in 0..2 {{\n        let control = &mut *spare;\n        #[cfg(feature = \"lanes\")]\n        let control = &mut controls[lane];\n{}    }}\n}}",
+                counted_drain("")
+            ),
+        ),
+        (
+            // MINOR-1: a local macro moves the base with no name in the loop body. `self` is
+            // never a read, so the item scan leaves the `macro_rules!` alone.
+            "outer-macro-call",
+            format!(
+                "impl Bank {{\n    fn drain(&mut self) {{\n        macro_rules! rotate {{\n            () => {{\n                self.controls.swap(0, 1)\n            }};\n        }}\n        for lane in 0..2 {{\n            let () = rotate!();\n{}        }}\n    }}\n}}",
+                lane_drain("self.controls[lane]")
             ),
         ),
     ];
-    each_row(rows, |name, text| accepts(name, &text));
+    each_row(rows, |name, text| refuses(name, &text));
 }
 
 /// D1, D7: a loop around a counted drain that may run forever, or that the form cannot prove
-/// finite, is refused. Each row names the form it breaks.
+/// finite, is refused. Each row names the form it breaks. Where the loop could select the queue,
+/// it does, so only the finite check refuses it; `loop`, `while` and the adapters other than
+/// `.enumerate()` and `.zip(..)` never select, and the selection walk refuses them too.
 #[test]
 fn the_outer_loops_that_may_not_end_are_refused() {
     let rows: Vec<(&'static str, String)> = vec![
@@ -170,14 +381,14 @@ fn the_outer_loops_that_may_not_end_are_refused() {
             "outer-while-let",
             around(CONFIG, "", "while let Some(_) = cfg.next()", ""),
         ),
-        ("outer-open-range", around("", "", "for _ in 0..", "")),
+        ("outer-open-range", by_lane("", "for lane in 0..")),
         (
             "outer-range-from-one",
-            around(CONFIG, "", "for _ in 1..cfg.lanes", ""),
+            by_lane(CONFIG, "for lane in 1..cfg.lanes"),
         ),
         (
             "outer-inclusive-range",
-            around(CONFIG, "", "for _ in 0..=cfg.lanes", ""),
+            by_lane(CONFIG, "for lane in 0..=cfg.lanes"),
         ),
         (
             "outer-reversed",
@@ -193,28 +404,26 @@ fn the_outer_loops_that_may_not_end_are_refused() {
         ),
         (
             "outer-vec-parameter-by-value",
-            around(", rounds: Vec<u8>", "", "for _ in rounds", ""),
+            by_element("rounds: Vec<Consumer<Record>>", "", "for control in rounds"),
         ),
         (
             "outer-field-by-value",
-            around(CONFIG, "", "for _ in cfg.controls", ""),
+            by_element("cfg: Config", "", "for control in cfg.controls"),
         ),
         (
             "outer-slice-parameter-rebound-by-a-macro",
-            around(
-                ", rounds: &[u8]",
+            by_element(
+                "rounds: &mut [Consumer<Record>]",
                 "    macro_rules! shadow {\n        ($x:ident) => {\n            let $x = 0_u32..;\n        };\n    }\n    shadow!(rounds);\n",
-                "for _ in rounds",
-                "",
+                "for control in rounds",
             ),
         ),
         (
             "outer-slice-parameter-with-a-pattern",
-            around(
-                ", [rounds, other]: [core::ops::RangeFrom<u32>; 2]",
+            by_element(
+                "[rounds, other]: [core::ops::RangeFrom<u32>; 2]",
                 "",
-                "for _ in rounds",
-                "",
+                "for control in rounds",
             ),
         ),
         (
@@ -232,7 +441,7 @@ fn the_outer_loops_that_may_not_end_are_refused() {
 #[test]
 fn a_slice_parameter_of_a_function_outside_the_region_is_not_read() {
     let inside = format!(
-        "fn drain_params(control: &mut Consumer<Record>, rounds: &[u8]) {{\n    // {BEGIN}\n    for _ in rounds {{\n{}    }}\n    // {END}\n}}\n",
+        "fn drain_params(rounds: &mut [Consumer<Record>]) {{\n    // {BEGIN}\n    for control in rounds {{\n{}    }}\n    // {END}\n}}\n",
         counted_drain("")
     );
     expect_failure(
@@ -244,7 +453,7 @@ fn a_slice_parameter_of_a_function_outside_the_region_is_not_read() {
         &[Class::UnboundedTryPop],
     );
     let whole = format!(
-        "// {BEGIN}\nfn drain_params(control: &mut Consumer<Record>, rounds: &[u8]) {{\n    for _ in rounds {{\n{}    }}\n}}\n// {END}\n",
+        "// {BEGIN}\nfn drain_params(rounds: &mut [Consumer<Record>]) {{\n    for control in rounds {{\n{}    }}\n}}\n// {END}\n",
         counted_drain("")
     );
     expect_valid(
@@ -404,7 +613,7 @@ fn an_item_that_declares_the_collection_root_refuses_the_drain() {
         (
             "slice-parameter-collection-root-shadowed-by-a-struct",
             format!(
-                "fn drain(control: &mut Consumer<Record>, lanes: &[u8]) {{\n    for _ in lanes.iter() {{\n        let available = control.available_at_entry();\n        for _ in 0..available {{\n            {POP}\n        }}\n    }}\n    struct lanes;\n    impl lanes {{\n        fn iter(&self) -> core::iter::Repeat<u8> {{\n            core::iter::repeat(0)\n        }}\n    }}\n}}"
+                "fn drain(lanes: &mut [Consumer<Record>]) {{\n    for control in lanes.iter() {{\n        let available = control.available_at_entry();\n        for _ in 0..available {{\n            {POP}\n        }}\n    }}\n    struct lanes;\n    impl lanes {{\n        fn iter(&self) -> core::iter::Repeat<u8> {{\n            core::iter::repeat(0)\n        }}\n    }}\n}}"
             ),
         ),
         (

@@ -1,6 +1,8 @@
 //! Finite outer loops (D1): every loop that surrounds a counted drain, inside its region, must run
-//! a finite number of passes. The gate bounds each pass, not the product of the passes, so
-//! "finite" is not "small": `0..usize::MAX` around a drain that re-reads its count passes.
+//! a finite number of passes. Finite is half of the rule: "finite" is not "small", so each such
+//! loop must also drain a different queue on each pass ([`super::select`], #1418). Then
+//! `0..usize::MAX` around a drain that re-reads its count is refused, and the rule bounds each
+//! queue by its own count, however many passes run.
 //!
 //! A loop around the innermost bounding loop is one of:
 //!

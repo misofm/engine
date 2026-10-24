@@ -88,8 +88,6 @@ fn lane_words<L: Lane, const CONNECTED: bool>(
                 state.gain_db,
                 state.hysteresis.open,
                 state.hysteresis.hold,
-                coef.attack,
-                coef.release,
                 coef.hold_samples,
                 coef.bypass,
                 coef.link_max,
@@ -97,7 +95,7 @@ fn lane_words<L: Lane, const CONNECTED: bool>(
             ]
             .map(f32::to_bits),
         );
-        for ramp in state.ramps {
+        for ramp in state.ramps.into_iter().chain(state.rates) {
             out.extend([ramp.current, ramp.target, ramp.step, ramp.remaining].map(f32::to_bits));
         }
     }
@@ -313,7 +311,7 @@ fn rest_bound<L: Lane>(gate: &PreparedGate<L, false>, lane: usize) -> usize {
     (0..2)
         .map(|channel| {
             let coef = gate.coef[channel].lanes()[lane];
-            let c = f64::from(coef.release);
+            let c = f64::from(gate.state[channel].lanes()[lane].rates[1].current);
             let steps = 24.0 * core::f64::consts::LN_2 / -math::log(1.0 - c * (1.0 - ROUNDOFF));
             coef.hold_samples as usize + 1 + steps.ceil() as usize + 3
         })

@@ -18,6 +18,12 @@ use source::{
 
 use crate::PlanStateInventory;
 
+/// The reserved ID that [`SourceControlSet::seek_report`] reads the session timeline's seek
+/// report under (#1704 D5), on both hosts. A stable ID starts with `a`-`z`
+/// (`session::STABLE_ID_MAXIMUM_BYTES` bounds its length), so an ID that starts with `$` never
+/// names a source.
+pub const TIMELINE_SEEK_REPORT_ID: &[u8] = b"$timeline";
+
 /// One host-owned producer endpoint plus the immutable facts a submission is checked against.
 pub(crate) struct ControlSource {
     id_offset: usize,
@@ -458,7 +464,22 @@ impl SourceControlSet {
     /// [`SourceControlError::ReportBusy`]. The record belongs to the ring, so it survives a plan
     /// swap that carries the source; a vacant entry is [`SourceControlError::Vacated`], as for
     /// [`Self::seek`].
+    ///
+    /// The reserved ID [`TIMELINE_SEEK_REPORT_ID`] reads the session timeline's report instead
+    /// (#1704 D5), in the same form: its `source_frame` is the timeline sample the block started
+    /// at, and its underrun and held counts are `0`. A vacant timeline is
+    /// [`SourceControlError::Vacated`]. Only this call takes the reserved ID: [`Self::submit`],
+    /// [`Self::seek`] and [`Self::seek_at`] refuse it as an unknown source, because the timeline
+    /// is seeked by [`Self::seek_session`] alone.
     pub fn seek_report(&self, id: &[u8]) -> Result<SourceSeekReport, SourceControlError> {
+        if id == TIMELINE_SEEK_REPORT_ID {
+            return self
+                .timeline
+                .as_ref()
+                .ok_or(SourceControlError::Vacated)?
+                .seek_report()
+                .map_err(|_| SourceControlError::ReportBusy);
+        }
         let index = self.source_index(id)?;
         self.sources[index]
             .provider

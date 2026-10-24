@@ -3392,6 +3392,11 @@ pub extern "C" fn miso_engine_web_v1_session_seek_at(
 /// frames. It runs the control plane's `SessionState::seek_report`, the call the C ABI's
 /// `miso_engine_v1_source_seek_report` runs, so it is control side only.
 ///
+/// The reserved source ID `$timeline` (9 bytes) reads the session timeline's report instead
+/// (#1704): its source frame is the timeline sample that block started at, and its underrun and
+/// held counts are 0. Only this call takes it; submit, seek and seek-at refuse it as an unknown
+/// source.
+///
 /// Results: [`RESULT_OK`]; [`RESULT_INVALID_ARGUMENT`] for a wrong handle, an ID count past the
 /// staging or an unknown source; [`RESULT_BACKPRESSURE`] for a read that landed inside render's
 /// publication (read again); [`RESULT_REFUSED_LIFECYCLE`] for a host that is not ready;
