@@ -42,3 +42,10 @@ The bench unit test turns red when a row's record drifts from its validator; no 
 ### Stated limit
 
 After real signal the standing console's compressor needs about 620 blocks to rest (#1784: 79,200 samples). With a half period of 8 blocks no toggling lane ever rests, so the toggle row cannot thrash a packer: it measures the activity test under flipping input and, after #1782, that the packer adds nothing on lanes that never rest. A row that cycles rest needs a period above the rest bound, which a 1,000-block run cannot cycle meaningfully.
+
+## Evidence (descriptive; nothing tuned)
+
+Both runs at `22147c7ba`, `artifacts/steps/b14-1783/`, one warmup and two measured rounds each, uncontrolled (`MISO_ENGINE_BENCH_ALLOW_UNCONTROLLED=1`: the machine is shared, loadavg about 9 against the 0.50 ceiling). Both preflights passed with no workload launched.
+
+- Native (`console-benchmark.accepted.jsonl`, 78 records, validator PASS, Simd8), p50 us/block, rounds 1/2: console 100.9/100.5, sparse 101.0/101.4, toggle 99.9/100.4, one-per-bank 100.7/101.1, idle 5.6/5.4. Every bank of the toggle and one-per-bank rows holds an active lane, so the whole-bank skip (#1107) cannot serve them and they cost the console row's time, as expected before packing (#1782).
+- V8 (`web-mixing-automation.jsonl`, two rounds, validator PASS), p50 us/block, rounds 1/2: console 238.0/295.2, sparse 241.3/300.2, toggle 237.1/296.5, one-per-bank 240.9/292.4. Round 2 ran about 25% slower on every document (host load); the rows are read within a round.
