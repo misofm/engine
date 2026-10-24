@@ -2108,8 +2108,9 @@ impl<L: Lane> HotChannel<L> {
 /// Frozen operation order; `A` marks a step that is bit-preserving against layout 1 and `B` a step
 /// of the new law.
 ///
-/// 1. **required (A)** `r = select(P > limit, limit / P, 1)`. `P > limit >= 10^(-25/20)` implies
-///    `P > 0`, so the divide is always defined; it is a divide and not a reciprocal because the
+/// 1. **required (A)** `r = limit / max(P, limit)`, [`required_gain`] (#992), which the caller
+///    computes and passes in: every word equals `select(P > limit, limit / P, 1)`, the form the
+///    test oracle `reference_block` keeps. It is a divide and not a reciprocal because the
 ///    unlimited case must be exactly `1.0`.
 /// 2. **write (A)** `r` is stored at the write cursor, before the minimum filter reads the window.
 /// 3. **minimum (B)** the van Herk window minimum of each lane.
@@ -2136,8 +2137,7 @@ fn channel_frame<L: Lane>(
     io: &mut [f32],
     base: usize,
     x: L,
-    peak: L,
-    limit: L,
+    required: L,
     release: L,
     hot: &mut HotChannel<L>,
     state: &mut ChannelState,
@@ -2150,7 +2150,6 @@ fn channel_frame<L: Lane>(
     let width = state.width;
     let one = L::splat(1.0);
 
-    let required = L::select(peak.gt(limit), limit.div(peak), one);
     required.store(&mut state.required_ring[ring_cursor * width..]);
 
     sliding_minimum(state, ring, ring_cursor, scratch);
@@ -2394,7 +2393,7 @@ fn channel_frame_uniform<L: Lane>(
 ) {
     let one = L::splat(1.0);
 
-    let required = L::select(peak.gt(limit), limit.div(peak), one);
+    let required = required_gain(peak, limit);
     store_ring_lane::<L>(uniform.required_ring, slots.ring_cursor, required);
 
     let minimum = sliding_minimum_uniform::<L>(
@@ -2466,7 +2465,7 @@ fn linked_frame_uniform<L: Lane>(
 ) {
     let one = L::splat(1.0);
 
-    let required = L::select(peak.gt(limit), limit.div(peak), one);
+    let required = required_gain(peak, limit);
     store_ring_lane::<L>(left.required_ring, slots.ring_cursor, required);
     store_ring_lane::<L>(right.required_ring, slots.ring_cursor, required);
 
@@ -2535,7 +2534,7 @@ fn channel_target_uniform<L: Lane>(
     slots: FrameSlots,
 ) -> L {
     let one = L::splat(1.0);
-    let required = L::select(peak.gt(limit), limit.div(peak), one);
+    let required = required_gain(peak, limit);
     store_ring_lane::<L>(uniform.required_ring, slots.ring_cursor, required);
     let minimum = sliding_minimum_uniform::<L>(
         uniform.required_ring,
@@ -2574,7 +2573,7 @@ fn linked_target_uniform<L: Lane>(
     slots: FrameSlots,
 ) -> L {
     let one = L::splat(1.0);
-    let required = L::select(peak.gt(limit), limit.div(peak), one);
+    let required = required_gain(peak, limit);
     store_ring_lane::<L>(left.required_ring, slots.ring_cursor, required);
     store_ring_lane::<L>(right.required_ring, slots.ring_cursor, required);
     let minimum = sliding_minimum_uniform_mirrored::<L>(
@@ -2615,7 +2614,7 @@ fn channel_target_steady<L: Lane>(
     slots: FrameSlots,
 ) -> L {
     let one = L::splat(1.0);
-    let required = L::select(peak.gt(limit), limit.div(peak), one);
+    let required = required_gain(peak, limit);
     store_ring_lane::<L>(uniform.required_ring, slots.ring_cursor, required);
     let newest = ring_lane::<L>(uniform.required_ring, slots.end);
     let running = uniform.prefix.min(newest);
@@ -2647,7 +2646,7 @@ fn linked_target_steady<L: Lane>(
     slots: FrameSlots,
 ) -> L {
     let one = L::splat(1.0);
-    let required = L::select(peak.gt(limit), limit.div(peak), one);
+    let required = required_gain(peak, limit);
     store_ring_lane::<L>(left.required_ring, slots.ring_cursor, required);
     store_ring_lane::<L>(right.required_ring, slots.ring_cursor, required);
     let newest = ring_lane::<L>(left.required_ring, slots.end);
@@ -2664,6 +2663,27 @@ fn linked_target_steady<L: Lane>(
     store_ring_lane::<L>(right.box_ring, slots.ring_cursor, quantised);
     let smoothed = hot.box_sum.div(hot.window);
     one.sub(smoothed)
+}
+
+/// Step 1 of the frozen order, the gain computer: `limit / max(peak, limit)` (#992).
+///
+/// Every word equals the earlier `select(peak > limit, limit / peak, 1)`, one lane-op fewer:
+///
+/// * `peak > limit`: `max` is `peak`, and both forms are `limit / peak`.
+/// * otherwise `max` is `limit`, and `limit / limit` is exactly `1.0`, because `limit` is finite
+///   and nonzero. A prepared limit is a `limit_coefficient` value in `[10^(-25/20), 10^(-1/20)]`;
+///   a restored ramp passes `ramp_path_inside` in [`read_lane`] (current and target inside that
+///   domain, finite step), and [`RampLanes::advance`] clamps every step between current and
+///   target with `ramp_toward`. So `limit` is in the domain on every frame of every dispatch.
+/// * `peak` is `+0.0`, `-0.0` or a subnormal: below `limit`, so `1.0` in both.
+/// * `peak` is `+inf`: `limit / inf = +0.0` in both.
+/// * `peak` is NaN: `Lane::max` is the D8 `select(self > b, self, b)` on every target (x86
+///   `maxps` and wasm's operand-swapped `pmax` lower exactly that), so `peak.max(limit)` is
+///   `limit` and the gain is `1.0`, as `select` gives. **The operand order is load-bearing:**
+///   `limit.max(peak)` would return the NaN and propagate it into the gain word.
+#[inline(always)]
+fn required_gain<L: Lane>(peak: L, limit: L) -> L {
+    limit.div(peak.max(limit))
 }
 
 /// Issue #1014 pass 2, step 6: the release recursion from a stored target, returning the gain.
@@ -2767,7 +2787,7 @@ fn ramp_value<const DISPATCH: u8, L: Lane>(stationary: bool, ramp: &mut RampLane
 /// `B[j - 1]` and its mirror; the target `1 - box_sum / Wb`) before it starts frame `j` (ramp,
 /// peak, required gain into `C[j]` and its mirror, `running = prefix.min(E[j])`). The epilogue
 /// finishes frame `steady - 1` from the old word of `C[steady]`. Every frame's operations and
-/// operand order are [`linked_target_steady`]'s: `limit.div(peak)` inside the same select,
+/// operand order are [`linked_target_steady`]'s: the same [`required_gain`],
 /// `prefix.min(newest)`, `oldest.min(running)`, `box_sum.add(q).sub(expired)`. Only the program
 /// interleaving across frames changes, and the finishing half of frame `j - 1` reads nothing the
 /// starting half of frame `j` writes but the old word of `C[j]`, which it reads first.
@@ -2832,7 +2852,7 @@ fn linked_steady_streams<const DISPATCH: u8, L: Lane>(
     // Prologue: start frame 0.
     let limit = ramp_value::<DISPATCH, L>(stationary, &mut hot.limit);
     let peak = L::load(&right_peaks[..width]).max(L::load(&left_peaks[..width]));
-    let required = L::select(peak.gt(limit), limit.div(peak), one);
+    let required = required_gain(peak, limit);
     required.store(&mut cursor_block[..width]);
     required.store(&mut mirror_required[..width]);
     let mut running = prefix.min(L::load(&newest[..width]));
@@ -2863,7 +2883,7 @@ fn linked_steady_streams<const DISPATCH: u8, L: Lane>(
         // Start frame j.
         let limit = ramp_value::<DISPATCH, L>(stationary, &mut hot.limit);
         let peak = L::load(right_peak).max(L::load(left_peak));
-        let required = L::select(peak.gt(limit), limit.div(peak), one);
+        let required = required_gain(peak, limit);
         required.store(cursor);
         required.store(mirror_r);
         running = prefix.min(L::load(newest));
@@ -3103,8 +3123,7 @@ fn limiter_block_per_lane<const DISPATCH: u8, L: Lane>(
                 left_io,
                 base,
                 L::load(&left_io[base..]),
-                peak_left,
-                limit_left,
+                required_gain(peak_left, limit_left),
                 release_left,
                 &mut hot_left,
                 left,
@@ -3118,8 +3137,7 @@ fn limiter_block_per_lane<const DISPATCH: u8, L: Lane>(
                 right_io,
                 base,
                 L::load(&right_io[base..]),
-                peak_right,
-                limit_right,
+                required_gain(peak_right, limit_right),
                 release_right,
                 &mut hot_right,
                 right,
@@ -5327,8 +5345,7 @@ fn limiter_block_per_lane_mono<const DISPATCH: u8, L: Lane>(
                 left_io,
                 base,
                 L::load(&left_io[base..]),
-                peak_left,
-                limit_left,
+                required_gain(peak_left, limit_left),
                 release_left,
                 &mut hot_left,
                 left,
@@ -9525,6 +9542,88 @@ mod tests {
     // Linked and stationary censuses separately prove that the optimized bodies actually ran.
     // ---------------------------------------------------------------------------------------
 
+    /// The gain computer's earlier law, `select(peak > limit, limit / peak, 1)`: the oracle
+    /// [`reference_block`] keeps it, so every differential against that driver compares the two
+    /// laws, and `required_gain_matches_the_select_law` compares them word by word.
+    #[inline(always)]
+    fn select_required_gain<L: Lane>(peak: L, limit: L) -> L {
+        L::select(peak.gt(limit), limit.div(peak), L::splat(1.0))
+    }
+
+    /// #992: [`required_gain`] equals the select law on every word, NaN as "both NaN", at every
+    /// width this build binds: the ceiling grid (-24 to 0 dB in 1/32 dB) against signed zeros,
+    /// subnormals, `l` and its neighbours, `1.0`, infinities, two NaN payloads and seeded words.
+    #[test]
+    fn required_gain_matches_the_select_law() {
+        fn check<L: Lane>(peaks: &[f32]) {
+            let width = L::WIDTH;
+            let mut got = [0.0f32; MAXIMUM_WIDTH];
+            let mut want = [0.0f32; MAXIMUM_WIDTH];
+            let mut words = Vec::with_capacity(peaks.len() + 3);
+            for step in 0..=24 * 32 {
+                let l = limit_coefficient(-(step as f32) / 32.0);
+                words.clear();
+                words.extend([
+                    l,
+                    f32::from_bits(l.to_bits() - 1),
+                    f32::from_bits(l.to_bits() + 1),
+                ]);
+                words.extend_from_slice(peaks);
+                for chunk in words.chunks(width) {
+                    let mut lane = [0.0f32; MAXIMUM_WIDTH];
+                    lane[..chunk.len()].copy_from_slice(chunk);
+                    let peak = L::load(&lane);
+                    let limit = L::splat(l);
+                    required_gain(peak, limit).store(&mut got);
+                    select_required_gain(peak, limit).store(&mut want);
+                    for i in 0..width {
+                        assert!(
+                            got[i].to_bits() == want[i].to_bits()
+                                || (got[i].is_nan() && want[i].is_nan()),
+                            "width {width} l {l:e} peak {:e}: {:e} against {:e}",
+                            lane[i],
+                            got[i],
+                            want[i],
+                        );
+                    }
+                }
+            }
+        }
+        let mut peaks = vec![
+            0.0,
+            -0.0,
+            f32::from_bits(1),
+            -f32::from_bits(1),
+            f32::MIN_POSITIVE,
+            -f32::MIN_POSITIVE,
+            1.0,
+            f32::INFINITY,
+            f32::NEG_INFINITY,
+            f32::NAN,
+            f32::from_bits(0xFFC0_0001),
+        ];
+        // SplitMix64: full-range bit patterns (NaNs, infinities and subnormals included) on even
+        // draws, and words around the ceiling domain on odd ones.
+        let mut seed = 0x0992_u64;
+        for index in 0..10_000 {
+            seed = seed.wrapping_add(0x9E37_79B9_7F4A_7C15);
+            let mut mixed = seed;
+            mixed = (mixed ^ (mixed >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+            mixed = (mixed ^ (mixed >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+            mixed ^= mixed >> 31;
+            let bits = (mixed >> 32) as u32;
+            peaks.push(if index % 2 == 0 {
+                f32::from_bits(bits)
+            } else {
+                (bits >> 8) as f32 * (1.25 / 16_777_216.0)
+            });
+        }
+        check::<f32>(&peaks);
+        check::<Simd4>(&peaks);
+        #[cfg(target_feature = "avx2")]
+        check::<lane::Simd8>(&peaks);
+    }
+
     /// The current per-frame law, with independent channel state and scalar ring addressing.
     ///
     /// Each frame advances both ramps, shifts each detector once, links peaks in the documented
@@ -9566,8 +9665,7 @@ mod tests {
                 left_io,
                 base,
                 x_left,
-                L::select(link, linked, peak_left),
-                limit_left,
+                select_required_gain(L::select(link, linked, peak_left), limit_left),
                 release_left,
                 &mut hot_left,
                 left,
@@ -9581,8 +9679,7 @@ mod tests {
                 right_io,
                 base,
                 x_right,
-                L::select(link, linked, peak_right),
-                limit_right,
+                select_required_gain(L::select(link, linked, peak_right), limit_right),
                 release_right,
                 &mut hot_right,
                 right,
