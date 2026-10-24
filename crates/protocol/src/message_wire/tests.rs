@@ -362,6 +362,94 @@ fn capability_id_views_reject_order_allocation_and_session_family_identically() 
     assert_parity_rejects(&[1, 2, 6], &events);
     assert_parity_rejects(&commands, &[]);
     assert!(!IdSource::LittleEndian(&[1]).is_strict_allocated(false));
+    // #1386: `SESSION_REPLACE` (`0x0013`) is allocated and rides the session family;
+    // `0x000f`-`0x0012` are claimed by open specs, not allocated.
+    assert!(
+        check_capabilities_invariants(view(
+            IdSource::Native(&[1, 2, 3, 0x0013]),
+            IdSource::Native(&events),
+        ))
+        .is_ok()
+    );
+    assert_parity_rejects(&[1, 2, 3, 0x0010], &events);
+    let without_session = |commands: &'static [u16]| CapabilityInvariantView {
+        maximum_transaction_edits: 0,
+        flags: CapabilityFlags(CapabilityFlags::B1B_BASE.0 & !(1 << 3)),
+        ..view(IdSource::Native(commands), IdSource::Native(&[]))
+    };
+    assert!(check_capabilities_invariants(without_session(&[1, 2])).is_ok());
+    assert_eq!(
+        check_capabilities_invariants(without_session(&[1, 2, 0x0013])),
+        Err(DecodeError::InvalidTlv)
+    );
+}
+
+/// #1386 gate 7: the `SESSION_REPLACE` request round-trips; a missing field, `document_bytes` 0
+/// and a digest that is not 32 bytes are refused.
+#[test]
+fn session_replace_request_round_trips_and_refuses_a_bad_digest() {
+    let codec = codec();
+    let value = crate::SessionReplaceRequest {
+        document_bytes: 70_000,
+        document_sha256: core::array::from_fn(|index| index as u8),
+    };
+    let mut bytes = [0_u8; 64];
+    let written = codec
+        .encode_session_replace_request(value, &mut bytes)
+        .expect("encode");
+    assert_eq!(
+        codec.decode_session_replace_request(&bytes[..written], 2),
+        Ok(value)
+    );
+    assert_eq!(
+        codec.encode_session_replace_request(
+            crate::SessionReplaceRequest {
+                document_bytes: 0,
+                ..value
+            },
+            &mut bytes
+        ),
+        Err(EncodeError::LimitExceeded)
+    );
+    let field = |id: u16, wire: u8, payload: &[u8]| {
+        let mut out = vec![];
+        out.extend_from_slice(&id.to_le_bytes());
+        out.push(wire);
+        // Mandatory: both fields are required.
+        out.push(1);
+        out.extend_from_slice(&u32::try_from(payload.len()).unwrap().to_le_bytes());
+        out.extend_from_slice(payload);
+        while out.len() % 8 != 0 {
+            out.push(0);
+        }
+        out
+    };
+    let length = |bytes: u32| field(1, 3, &bytes.to_le_bytes());
+    let digest = |len: usize| field(2, 10, &vec![7_u8; len]);
+    let frame = |parts: &[Vec<u8>]| parts.concat();
+    assert_eq!(
+        codec.decode_session_replace_request(&frame(&[length(9), digest(32)]), 2),
+        Ok(crate::SessionReplaceRequest {
+            document_bytes: 9,
+            document_sha256: [7; 32],
+        })
+    );
+    for (bad, count, name) in [
+        (frame(&[length(9), digest(31)]), 2, "a 31-byte digest"),
+        (frame(&[length(9), digest(33)]), 2, "a 33-byte digest"),
+        (frame(&[length(0), digest(32)]), 2, "document_bytes 0"),
+        (frame(&[length(9)]), 1, "no digest"),
+        (frame(&[digest(32)]), 1, "no length"),
+    ] {
+        assert!(
+            codec.decode_session_replace_request(&bad, count).is_err(),
+            "{name} must be refused"
+        );
+    }
+    assert_eq!(
+        codec.decode_session_replace_request(&frame(&[length(9), digest(31)]), 2),
+        Err(DecodeError::InvalidField)
+    );
 }
 
 #[test]
@@ -2945,6 +3033,8 @@ fn transaction_applied_edit_path_is_required_and_refuses_unallocated_codes() {
         (EditPath::ModelOnly, 2),
         (EditPath::Rebuild, 3),
         (EditPath::Monitor, 4),
+        // #1386: a `SESSION_REPLACE` of an identical document.
+        (EditPath::Unchanged, 5),
     ] {
         let value = TransactionApplied {
             applied_operations: 5,
@@ -2964,7 +3054,7 @@ fn transaction_applied_edit_path_is_required_and_refuses_unallocated_codes() {
             Ok(value)
         );
         // Zero and every value above the last allocated code are refused.
-        for bad in [0_u8, 5, 6, 255] {
+        for bad in [0_u8, 6, 7, 255] {
             let mut corrupt = bytes;
             corrupt[written - 8] = bad;
             assert!(

@@ -170,6 +170,11 @@ pub enum EditPath {
     /// `SESSION_COMMITTED` event followed (decision 17, C8, #1559). A transaction that holds a
     /// model edit never has this path.
     Monitor = 4,
+    /// A `SESSION_REPLACE` whose document equals the committed model (#1386, root decision
+    /// 2026-10-16): nothing committed, so the revision did not advance, no `SESSION_COMMITTED`
+    /// event followed and no plan was prepared; `applied_operations` is 0. A
+    /// `SESSION_TRANSACTION_APPLY` never has this path.
+    Unchanged = 5,
 }
 
 impl EditPath {
@@ -187,6 +192,7 @@ impl EditPath {
             2 => Some(Self::ModelOnly),
             3 => Some(Self::Rebuild),
             4 => Some(Self::Monitor),
+            5 => Some(Self::Unchanged),
             _ => None,
         }
     }
@@ -198,6 +204,19 @@ impl EditPath {
 pub struct TransactionApplied {
     pub applied_operations: u32,
     pub edit_path: EditPath,
+}
+
+/// Bytes of a `SESSION_REPLACE` document digest: a SHA-256.
+pub const SESSION_REPLACE_DIGEST_BYTES: usize = 32;
+
+/// Typed `SESSION_REPLACE` request fields (#1386): the document the host passes beside the frame,
+/// named by its exact length and its SHA-256. The frame never carries the document.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SessionReplaceRequest {
+    /// The exact length of the document, nonzero.
+    pub document_bytes: u32,
+    /// The SHA-256 of the document.
+    pub document_sha256: [u8; SESSION_REPLACE_DIGEST_BYTES],
 }
 
 /// Typed reliable `SESSION_COMMITTED` payload.
@@ -1416,6 +1435,51 @@ impl ProtocolCodec {
         Ok(result)
     }
 
+    /// Encode the typed two-field `SESSION_REPLACE` request. `document_bytes` 0 is refused.
+    pub fn encode_session_replace_request(
+        &self,
+        value: SessionReplaceRequest,
+        output: &mut [u8],
+    ) -> Result<usize, EncodeError> {
+        let mut sizing = CountSink::new(self.limits());
+        write_session_replace_request(&mut sizing, value)?;
+        let required = checked_sink_len(self, &mut sizing)?;
+        if output.len() < required {
+            return Err(EncodeError::OutputTooSmall { required });
+        }
+        let mut writer = SliceSink::new(output, self.limits());
+        write_session_replace_request(&mut writer, value)?;
+        checked_writer_len(&writer, required)
+    }
+
+    /// Strictly decode the typed two-field `SESSION_REPLACE` request: `document_bytes` 0, or a
+    /// digest that is not exactly 32 bytes, is `INVALID_FIELD`.
+    pub fn decode_session_replace_request(
+        &self,
+        payload: &[u8],
+        count: u32,
+    ) -> Result<SessionReplaceRequest, DecodeError> {
+        let message = Message::top_level(payload, count, self.limits())?;
+        let message = message.schema_spec(&schema::session_replace_request::SPEC)?;
+        let document_bytes = read_u32(one_spec!(
+            message,
+            schema::session_replace_request::DOCUMENT_BYTES
+        )?)?;
+        let document_sha256: [u8; SESSION_REPLACE_DIGEST_BYTES] = one_spec!(
+            message,
+            schema::session_replace_request::DOCUMENT_SHA256
+        )?
+        .try_into()
+        .map_err(|_| DecodeError::InvalidField)?;
+        if document_bytes == 0 {
+            return Err(DecodeError::InvalidField);
+        }
+        Ok(SessionReplaceRequest {
+            document_bytes,
+            document_sha256,
+        })
+    }
+
     /// Encode/decode helpers for the two-field transaction success payload.
     pub fn encode_transaction_applied(
         &self,
@@ -2518,6 +2582,26 @@ pub(crate) fn write_transaction_applied(
         sink,
         schema::transaction_applied::EDIT_PATH,
         &[value.edit_path.code()]
+    )
+}
+
+pub(crate) fn write_session_replace_request(
+    sink: &mut dyn Sink,
+    value: SessionReplaceRequest,
+) -> Result<(), EncodeError> {
+    if value.document_bytes == 0 {
+        return Err(EncodeError::LimitExceeded);
+    }
+    sink.check_field_count(schema::session_replace_request::SPEC.field_count(&[])?)?;
+    write_spec!(
+        sink,
+        schema::session_replace_request::DOCUMENT_BYTES,
+        &value.document_bytes.to_le_bytes()
+    )?;
+    write_spec!(
+        sink,
+        schema::session_replace_request::DOCUMENT_SHA256,
+        &value.document_sha256
     )
 }
 
@@ -4134,6 +4218,8 @@ fn check_capabilities_invariants(value: CapabilityInvariantView<'_>) -> Result<(
         || ((value.flags.0 & CapabilityFlags::SESSION_EVENT_STREAM.0 != 0) != session_family)
         || ((value.flags.0 & (1 << 13) != 0) != (has_command(0x0008) && has_event(0x8010)))
         || ((value.flags.0 & (1 << 14) != 0) != has_command(0x000e))
+        // `SESSION_REPLACE` rides the session family and has no flag bit of its own (#1386).
+        || (has_command(0x0013) && !session_family)
         || (has_command(0x0003) != has_event(0x8001))
         // `OBSERVATION_ENDED` rides the session family (#1584): it follows a commit.
         || (has_event(0x8011) && !session_family)
@@ -4153,7 +4239,8 @@ fn allocated_id(id: u16, event: bool) -> bool {
             && !crate::wire::is_retired_message_id(id)
     } else {
         // `0x0004`, `0x0005` and `0x0006` are retired: never allocated again, never advertised.
-        matches!(id, 1..=14) && !crate::wire::is_retired_message_id(id)
+        // `0x0013` is `SESSION_REPLACE` (#1386); `0x000f`-`0x0012` are claimed, not allocated.
+        matches!(id, 1..=14 | 0x0013) && !crate::wire::is_retired_message_id(id)
     }
 }
 

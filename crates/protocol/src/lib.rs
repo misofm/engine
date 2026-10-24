@@ -30,7 +30,8 @@ pub use message_wire::{
     ObservationSection, ObservationTapKey, ParameterChannel, ParameterRack, ParameterUnit,
     PathSegment, RESPONSE_BYPASS_CONTROL, ResponseConfiguration, ResponseConfigurationKind,
     ResponseCurves, ResponseGetRequest, ResponseGrid, ResponseOverride, ResponseResult,
-    ResponseTarget, SessionCommitted, SessionSnapshot, SessionSnapshotRequest,
+    ResponseTarget, SESSION_REPLACE_DIGEST_BYTES, SessionCommitted, SessionReplaceRequest,
+    SessionSnapshot, SessionSnapshotRequest,
     TelemetryConfiguration, TransactionApplied, TransportSetRequest, TransportSnapshot,
     TransportState, TransportStateEvent, response_result_encoded_len,
 };
@@ -86,6 +87,8 @@ pub use controller::MockProvider;
 pub use controller::{
     AttachObservationEndedError, CommandFrameProcessError, CommittedCommandFrame, ControlCommand,
     ControlProvider, ControllerRequest, ControllerResourceAllocationError, ControllerResponse,
+    DocumentDiff, DocumentReplace, DocumentReplaceFn, DocumentReplaceRefusal,
+    DocumentReplaceRequest,
     ControllerRetainedCapacity, EventEgressError, ParameterProviderError,
     PreparedCommandCommitError, PreparedCommandFrame, PreparedImmediateCommandFrame,
     PreparedStructuralCommand, ProtocolController, ProtocolControllerConfig, ProviderFeatures,
