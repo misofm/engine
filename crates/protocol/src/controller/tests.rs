@@ -4407,10 +4407,12 @@ fn a_stale_structure_epoch_is_a_revision_conflict_that_names_itself() {
 
 /// Gate 2: the capability registry lists `0x000c` and `0x000d` and never the retired `0x0004` and
 /// `0x0005`; without the controls feature neither new message is listed, bit 7 is clear and a
-/// request for one is `UNAVAILABLE`.
+/// request for one is `UNAVAILABLE`. #1595 D8: with the spectrum feature the three spectrum
+/// commands are listed with bit 16, and without it none is and bit 16 is clear.
 ///
-/// Red if a retired ID is advertised or served, bit 7 stops tracking the pair, or a disabled
-/// provider answers a control request.
+/// Red if a retired ID is advertised or served, bit 7 stops tracking the pair, a disabled
+/// provider answers a control request, or the spectrum feature does not switch the three
+/// commands and bit 16 together.
 #[test]
 fn the_capability_registry_lists_the_control_messages_and_not_the_retired_ones() {
     let ids = |endpoint: &mut ProtocolController<MockProvider>, request_id: u64| {
@@ -4425,17 +4427,23 @@ fn the_capability_registry_lists_the_control_messages_and_not_the_retired_ones()
             .iter()
             .map(|id| u16::from_le_bytes([id[0], id[1]]))
             .collect::<Vec<_>>();
-        // Bit 14 tracks `RESPONSE_GET` whatever else is listed.
+        // Bit 14 tracks `RESPONSE_GET` and bit 16 the spectrum commands (#1595 D8) whatever else
+        // is listed.
         assert_eq!(decoded.flags.0 & (1 << 14) != 0, commands.contains(&14));
+        assert_eq!(decoded.flags.0 & (1 << 16) != 0, commands.contains(&0x0010));
         (commands, decoded.flags.0 & (1 << 7) != 0)
     };
     let mut endpoint = controller(8);
     assert_eq!(
         ids(&mut endpoint, 1),
-        (vec![1, 2, 3, 7, 8, 9, 10, 11, 12, 13, 14], true)
+        (
+            vec![1, 2, 3, 7, 8, 9, 10, 11, 12, 13, 14, 0x0010, 0x0011, 0x0012],
+            true
+        )
     );
     endpoint.set_provider_features(ProviderFeatures {
         controls: false,
+        spectrum: false,
         ..ProviderFeatures::ALL
     });
     assert_eq!(

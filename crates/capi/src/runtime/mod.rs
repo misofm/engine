@@ -86,6 +86,9 @@ impl ControlAdapter for CapiAdapter {
     /// The C ABI subscribes through the `Observe` edit (#1584 D7a): its plans bind an observation
     /// queue slot for every declared tap ([`CapiPreparer`]), and nothing else writes those queues.
     const OBSERVE_EDIT: bool = true;
+    /// The C ABI reads spectrum through `miso_engine_v1_submit_command` (#1595 R1, R2): its
+    /// sessions advertise the three spectrum commands and capability bit 16.
+    const SPECTRUM: bool = true;
 }
 
 /// capi's preparation (issue #1400 D3): the live request with observation capacity for every

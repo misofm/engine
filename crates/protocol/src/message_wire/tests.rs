@@ -362,19 +362,55 @@ fn capability_id_views_reject_order_allocation_and_session_family_identically() 
     assert_parity_rejects(&[1, 2, 6], &events);
     assert_parity_rejects(&commands, &[]);
     assert!(!IdSource::LittleEndian(&[1]).is_strict_allocated(false));
-    // #1386: `SESSION_REPLACE` (`0x0013`) is allocated and rides the session family;
-    // `SPECTRUM_CONFIGURE` (`0x0010`, #1594) and `SPECTRUM_CAPTURE` (`0x0011`, #1595 slice a)
-    // are allocated (their capability bit is slice b's); `0x000f` and `0x0012` are claimed by
-    // open specs, not allocated.
+    // #1386: `SESSION_REPLACE` (`0x0013`) is allocated and rides the session family; `0x000f` is
+    // claimed by an open spec, not allocated.
     assert!(
         check_capabilities_invariants(view(
-            IdSource::Native(&[1, 2, 3, 0x0010, 0x0011, 0x0013]),
+            IdSource::Native(&[1, 2, 3, 0x0013]),
             IdSource::Native(&events),
         ))
         .is_ok()
     );
-    for claimed in [0x000f, 0x0012] {
-        assert_parity_rejects(&[1, 2, 3, claimed], &events);
+    assert_parity_rejects(&[1, 2, 3, 0x000f], &events);
+    // #1595 D8a: the three spectrum commands are listed together, exactly when bit 16 is set.
+    let spectrum = |flags: u64| CapabilityInvariantView {
+        flags: CapabilityFlags(view(IdSource::Native(&[]), IdSource::Native(&[])).flags.0 | flags),
+        ..view(
+            IdSource::Native(&[1, 2, 3, 0x0010, 0x0011, 0x0012]),
+            IdSource::Native(&events),
+        )
+    };
+    assert!(check_capabilities_invariants(spectrum(CapabilityFlags::SPECTRUM.0)).is_ok());
+    assert_eq!(
+        check_capabilities_invariants(spectrum(0)),
+        Err(DecodeError::InvalidTlv),
+        "the three commands without bit 16"
+    );
+    let bit_16 = |commands: &'static [u16]| CapabilityInvariantView {
+        flags: CapabilityFlags(
+            view(IdSource::Native(&[]), IdSource::Native(&[])).flags.0
+                | CapabilityFlags::SPECTRUM.0,
+        ),
+        ..view(IdSource::Native(commands), IdSource::Native(&events))
+    };
+    for partial in [
+        &[1, 2, 3][..],
+        &[1, 2, 3, 0x0010, 0x0011],
+        &[1, 2, 3, 0x0010, 0x0012],
+        &[1, 2, 3, 0x0011, 0x0012],
+    ] {
+        assert_eq!(
+            check_capabilities_invariants(bit_16(partial)),
+            Err(DecodeError::InvalidTlv),
+            "bit 16 with {partial:x?}"
+        );
+    }
+    for partial in [
+        &[1, 2, 3, 0x0010][..],
+        &[1, 2, 3, 0x0011],
+        &[1, 2, 3, 0x0012],
+    ] {
+        assert_parity_rejects(partial, &events);
     }
     let without_session = |commands: &'static [u16]| CapabilityInvariantView {
         maximum_transaction_edits: 0,
@@ -4086,6 +4122,325 @@ fn spectrum_capture_round_trips_and_refuses_malformed_frames_both_ways() {
         let (wire, count) = edited(base, |fields| edit(fields));
         assert_eq!(
             codec.decode_spectrum_capture_reply(&wire, count),
+            Err(DecodeError::InvalidField),
+            "{name}"
+        );
+    }
+}
+
+/// A ready `SPECTRUM_STREAM` reply on `eq0` with `channels`' planes.
+fn stream_ready(channels: ParameterChannel) -> SpectrumStreamReply<'static> {
+    use std::borrow::Cow;
+    let bins = |level: f32| -> Option<Cow<'static, [f32]>> {
+        Some(Cow::Owned(
+            (0..SPECTRUM_CAPTURE_BIN_COUNT)
+                .map(|bin| level - bin as f32 / 100.0)
+                .collect(),
+        ))
+    };
+    let left = matches!(channels, ParameterChannel::Left | ParameterChannel::Both);
+    let right = matches!(channels, ParameterChannel::Right | ParameterChannel::Both);
+    SpectrumStreamReply {
+        adopted_epoch: 2,
+        selection_epoch: 3,
+        status: SpectrumStreamStatus::Ready,
+        target: Some(SpectrumStreamTarget {
+            target_kind: SpectrumTargetKind::TrackPostPan,
+            target_id: Cow::Borrowed("eq0"),
+            channels,
+        }),
+        sample_rate_hz: 48_000,
+        quantum_frames: 128,
+        hop_frames: 2_048,
+        capture_epoch: 1,
+        sequence: 2,
+        dropped_captures: 0,
+        windows: 3,
+        captured_sample: 4_096,
+        end_sample: 6_144,
+        analysis_epoch: 1,
+        history_start_sample: 0,
+        smoothing_ms: 100.0,
+        source_underrun: false,
+        bins: Some(SpectrumStreamBins {
+            frequencies_hz: Cow::Owned(
+                (0..SPECTRUM_CAPTURE_BIN_COUNT)
+                    .map(|bin| bin as f32 * 23.4375)
+                    .collect(),
+            ),
+            left_db: if left { bins(-3.0) } else { None },
+            right_db: if right { bins(-9.0) } else { None },
+        }),
+    }
+}
+
+/// #1595 gate 1 (the stream half): each `SPECTRUM_STREAM` operation and a reply of every status
+/// (with and without a selection; ready with each channel mask) round-trip exactly, and the
+/// frame-limit measure equals the encoded frame of each ready shape. Every presence rule of D3, an
+/// operation or a status outside its table, a smoothing of 10,001 ms or NaN, planes that disagree
+/// with `channels`, a 1,024-bin plane, a ready reply without a selection and a selection without
+/// its identity are refused as `INVALID_FIELD`, on encode where the typed value can say it and on
+/// decode.
+///
+/// Red if the codec admits a contradictory stream request or a reply of the wrong shape in either
+/// direction, or the measure the session refuses stream reads by drifts from the encoder.
+#[test]
+fn spectrum_stream_round_trips_and_refuses_malformed_frames_both_ways() {
+    use std::borrow::Cow;
+    let codec = ProtocolCodec::default();
+    let select = SpectrumStreamRequest::Select {
+        target_kind: SpectrumTargetKind::TrackPostInput,
+        target_id: "eq1".to_owned(),
+        channels: ParameterChannel::Left,
+        smoothing_ms: Some(50.0),
+    };
+    let start = SpectrumStreamRequest::Start {
+        smoothing_ms: 100.0,
+    };
+    let encode_request = |value: &SpectrumStreamRequest| {
+        let mut bytes = vec![
+            0;
+            codec
+                .encoded_spectrum_stream_request_len(value)
+                .expect("length")
+        ];
+        codec
+            .encode_spectrum_stream_request(value, &mut bytes)
+            .expect("encode");
+        bytes
+    };
+    for request in [
+        start.clone(),
+        select.clone(),
+        SpectrumStreamRequest::Select {
+            target_kind: SpectrumTargetKind::Output,
+            target_id: "main".to_owned(),
+            channels: ParameterChannel::Both,
+            smoothing_ms: None,
+        },
+        SpectrumStreamRequest::Read,
+        SpectrumStreamRequest::Reset,
+        SpectrumStreamRequest::Stop,
+    ] {
+        let bytes = encode_request(&request);
+        assert_eq!(
+            codec.decode_spectrum_stream_request(&bytes, top_level_count(&bytes)),
+            Ok(request)
+        );
+    }
+    let start_bytes = encode_request(&start);
+    let select_bytes = encode_request(&select);
+    type Edit = Box<dyn Fn(&mut Vec<Tlv>)>;
+    let requests: [(&str, &Vec<u8>, Edit); 8] = [
+        ("op 0", &start_bytes, Box::new(|f| set(f, 1, &[0]))),
+        ("op 6", &start_bytes, Box::new(|f| set(f, 1, &[6]))),
+        (
+            "start without smoothing",
+            &start_bytes,
+            Box::new(|f| remove(f, 2)),
+        ),
+        (
+            "read with smoothing",
+            &start_bytes,
+            Box::new(|f| set(f, 1, &[3])),
+        ),
+        (
+            "start with a target",
+            &select_bytes,
+            Box::new(|f| set(f, 1, &[1])),
+        ),
+        (
+            "select without channels",
+            &select_bytes,
+            Box::new(|f| remove(f, 5)),
+        ),
+        (
+            "smoothing 10,001",
+            &start_bytes,
+            Box::new(|f| set(f, 2, &10_001.0_f64.to_le_bytes())),
+        ),
+        (
+            "smoothing NaN",
+            &select_bytes,
+            Box::new(|f| set(f, 2, &f64::NAN.to_le_bytes())),
+        ),
+    ];
+    for (name, base, edit) in requests {
+        let (wire, count) = edited(base, |fields| edit(fields));
+        assert_eq!(
+            codec.decode_spectrum_stream_request(&wire, count),
+            Err(DecodeError::InvalidField),
+            "{name}"
+        );
+    }
+    for refused in [
+        SpectrumStreamRequest::Start {
+            smoothing_ms: 10_001.0,
+        },
+        SpectrumStreamRequest::Start { smoothing_ms: -1.0 },
+        SpectrumStreamRequest::Select {
+            target_kind: SpectrumTargetKind::Output,
+            target_id: String::new(),
+            channels: ParameterChannel::Both,
+            smoothing_ms: None,
+        },
+    ] {
+        assert_eq!(
+            codec.encoded_spectrum_stream_request_len(&refused),
+            Err(EncodeError::InvalidField),
+            "{refused:?}"
+        );
+    }
+
+    // Replies: a reply of every status round-trips, and the measure is the encoded frame.
+    let inactive = SpectrumStreamReply {
+        status: SpectrumStreamStatus::Inactive,
+        target: None,
+        bins: None,
+        ..stream_ready(ParameterChannel::Left)
+    };
+    let mut replies = vec![inactive.clone()];
+    for status in [
+        SpectrumStreamStatus::Warming,
+        SpectrumStreamStatus::Pending,
+        SpectrumStreamStatus::Gap,
+        SpectrumStreamStatus::Failed,
+        SpectrumStreamStatus::Stopped,
+    ] {
+        replies.push(SpectrumStreamReply {
+            status,
+            dropped_captures: 2,
+            bins: None,
+            ..stream_ready(ParameterChannel::Both)
+        });
+    }
+    for channels in [
+        ParameterChannel::Left,
+        ParameterChannel::Right,
+        ParameterChannel::Both,
+    ] {
+        let reply = stream_ready(channels);
+        let frame = crate::TypedSuccessResponseFrame {
+            request_id: crate::RequestId::new(9).expect("nonzero"),
+            revision: crate::SessionRevision(3),
+            payload: crate::SuccessResponsePayload::SpectrumStreamed(reply.clone()),
+        };
+        let mut output = vec![0; 1 << 16];
+        let written = codec
+            .encode_success_response_frame_into(&frame, &mut output)
+            .expect("frame");
+        assert_eq!(
+            codec.spectrum_stream_ready_frame_len(channels, 3),
+            Ok(written),
+            "{channels:?}"
+        );
+        replies.push(reply);
+    }
+    let encode_reply = |value: &SpectrumStreamReply<'_>| {
+        let mut bytes = vec![
+            0;
+            codec
+                .encoded_spectrum_stream_reply_len(value)
+                .expect("length")
+        ];
+        codec
+            .encode_spectrum_stream_reply(value, &mut bytes)
+            .expect("encode");
+        bytes
+    };
+    for reply in &replies {
+        let bytes = encode_reply(reply);
+        assert_eq!(
+            codec.decode_spectrum_stream_reply(&bytes, top_level_count(&bytes)),
+            Ok(reply.clone())
+        );
+    }
+
+    // Typed refusals.
+    let mut wrong_plane = stream_ready(ParameterChannel::Both);
+    wrong_plane.bins.as_mut().expect("ready").right_db = None;
+    let mut short_plane = stream_ready(ParameterChannel::Left);
+    short_plane.bins.as_mut().expect("ready").left_db = Some(Cow::Owned(vec![0.0; 1024]));
+    let ready_without_bins = SpectrumStreamReply {
+        bins: None,
+        ..stream_ready(ParameterChannel::Left)
+    };
+    let pending_with_bins = SpectrumStreamReply {
+        status: SpectrumStreamStatus::Pending,
+        ..stream_ready(ParameterChannel::Left)
+    };
+    let ready_without_target = SpectrumStreamReply {
+        target: None,
+        ..stream_ready(ParameterChannel::Left)
+    };
+    let rough = SpectrumStreamReply {
+        smoothing_ms: 10_001.0,
+        ..inactive
+    };
+    for refused in [
+        &wrong_plane,
+        &short_plane,
+        &ready_without_bins,
+        &pending_with_bins,
+        &ready_without_target,
+        &rough,
+    ] {
+        assert_eq!(
+            codec.encoded_spectrum_stream_reply_len(refused),
+            Err(EncodeError::InvalidField)
+        );
+    }
+
+    // Wire refusals.
+    let both = encode_reply(&stream_ready(ParameterChannel::Both));
+    let left = encode_reply(&stream_ready(ParameterChannel::Left));
+    let rules: [(&str, &Vec<u8>, Edit); 9] = [
+        ("status 7", &left, Box::new(|f| set(f, 3, &[7]))),
+        (
+            "a pending reply with bins",
+            &left,
+            Box::new(|f| set(f, 3, &[2])),
+        ),
+        (
+            "planes that disagree with channels",
+            &both,
+            Box::new(|f| set(f, 6, &[1])),
+        ),
+        (
+            "a 1,024-bin plane",
+            &left,
+            Box::new(|f| set(f, 21, &[0; 4 * 1024])),
+        ),
+        (
+            "a plane without the axis",
+            &left,
+            Box::new(|f| remove(f, 20)),
+        ),
+        (
+            "a selection without its identity",
+            &left,
+            Box::new(|f| remove(f, 5)),
+        ),
+        (
+            "an identity without a selection",
+            &left,
+            Box::new(|f| set(f, 4, &[0])),
+        ),
+        (
+            "smoothing 10,001",
+            &left,
+            Box::new(|f| set(f, 18, &10_001.0_f64.to_le_bytes())),
+        ),
+        (
+            "end_sample one past",
+            &left,
+            Box::new(|f| set(f, 15, &6_145_u64.to_le_bytes())),
+        ),
+    ];
+    for (name, base, edit) in rules {
+        let (wire, count) = edited(base, |fields| edit(fields));
+        assert_eq!(
+            codec.decode_spectrum_stream_reply(&wire, count),
             Err(DecodeError::InvalidField),
             "{name}"
         );
