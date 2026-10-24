@@ -154,6 +154,77 @@ is `T_decay` 2,613, `T_rest` 5,673, `R(+24 dBFS)` 9,000, `R(1e29)` 17,646, `P*` 
 `N + 12,564` (`1e29`), its peak `2.2 P` and its late peak `3.67`. These are the test envelope's
 figures, not the effect's (part 2 states those).
 
+## Part 2 (tranche 1373b): the effect's bound
+
+Code: `crates/multiband-compressor/src/tail.rs`; gate: `crates/multiband-compressor/tests/tail_contract.rs`.
+
+**The envelope** (`crossover_live_envelope`). Both stages load the same `(c1, a2, a3)`: an `f32`
+design of a crossover in `[80 Hz, 8 kHz]`, or a word of the iterated ramp of #1338
+(`s = fl(t - c) / 64`, exact; `w = clamp(fl(w + s))` toward the target; the target assigned on the
+64th frame). After `j` frames an unclamped word lies within `j h + (j / 64) |t - c| u` of the chord
+point `c + (j / 64)(t - c)`; the endpoint clamp only moves a word toward that point, or holds it
+where its step is below its rounding (`|s| <= h`), so the bound holds with `h (1 + 3u)`. A retarget
+restarts from the word in force with its distance carried at weight `1 - j / 64`, so
+`E = 64 h (1 + 3u) + 2 u w_max` is a fixed point (`|t - c| <= w_max + E`), and every word is within
+`E + h` of the hull of the exact designs. On `g < 1` (the whole domain at every launch rate) the
+pole radius falls in `g` (80 Hz is the slowest), the words rise in `g` (8 kHz is the largest),
+`||b||_V` rises in `g`, and the low-pass row's `||c||_V* = sqrt(2) / sqrt(1 + t)` falls in `g`.
+The rest follows the builtin input section's envelope with fixed mix words (no mix ramp): both
+stages' output rows are the low-pass mix `(0, 0, 1)`, and the tap's row is part 1's.
+
+**The band gains.** A band amplitude is `fast_gain_from_db(fl(smoothed + makeup))` with the
+smoothed reduction in `[-100, 0]` and the makeup word in `[-24, 24]`, so the argument lies in
+`[-124, 24]`, inside `math::fast_db`'s exhaustive F1 sweep, whose error is below `1e-5` dB. With
+the output's three roundings, `G = 10^((24 + 1e-5) / 20) (1 + u)^3 (1 + 2^-30)` (`output_gain`).
+
+**Composition of the two terms** (as "How part 2 composes" above). `T` from `live_cascade` at gain
+`4 G` and `live_first_section` at `2 G`; the rests and the gains at gain `1` (the crossover's input
+is the effect's input; the band gains follow it); `P* = (G (2 P*_lp + P*_ap) + 4 UNDERFLOW G /
+(eps / 2)) (1 + 2^-30)`, the last term the output chain's absolute underflow; `D` from the scaled
+compositions, the gains and stalls from the unit ones (each term's tail stall is from its own `T`,
+at most the node's).
+
+**The smoother words.** Once both bands are `+-0` the detector floors at -160 dB, below every
+threshold's knee, so the target is `+0.0`; a word `y <= 0` takes the release arm and steps
+`flush(fl(fl(c y) + 0))`, the pole form of `effect_runtime::tail::pole_follower_rest_samples`,
+from at most `100` dB. The largest retention `c` any release word can hold is found exactly
+(`smoother_retention_max`): `x = -1 / fl(fl(t 0.001) fs)` does not decrease with `t`, `expf` is
+within one ulp of `exp`, so every `x` below `x_max - 2^-21` gives an `expf` below the slowest
+design's, and the `f32` arguments in `[x_max - 2^-21, x_max]` are scanned. The D3 stall check
+holds (`1 - c` is about `2e-6` at 96 kHz, far above `2^-24`).
+
+**The statement** (`multiband_live_bound`). `tail = T`; `tail_every_peak = max(T, R_x(P*))`
+(below `P*` both taps are exactly zero from `R_x(P*)`, and so is the output, whatever the gains);
+`R(P) = max(R_x(P), 64) + R_s`, `R_x` the larger of the two terms' rests, `R_s` the smoother's.
+`Z` is the reset state, which #893's `rest_lanes` names: the four crossover words and both
+smoother words `+0.0`, every ramp settled, the silence counter a clock. The composition is
+`Stated` (step 8 of `graph-compiler/src/pdc.rs` makes a plan's tail `Infinite` on an `Unstated`
+one), with the builtin input section's checks `G_t <= G_p` and `sigma_t <= sigma_p`.
+
+**The pinned values** (`multiband_live_bound_table`, held equal to the recompute by T1):
+
+| rate | `T` | `T_rest` | `R(+24 dBFS)` | `R(any)` | `D` | `G_p` mB | `G_t` mB | `sigma_p` mB | `sigma_t` mB |
+|---|---|---|---|---|---|---|---|---|---|
+| 44.1 kHz | 3,505 | 9,579 | 11,195,358 | 11,203,587 | 288 | 6,834 | 6,259 | -27,515 | -29,780 |
+| 48 kHz | 3,810 | 10,434 | 12,155,124 | 12,164,081 | 314 | 6,884 | 6,261 | -27,429 | -29,719 |
+| 88.2 kHz | 6,990 | 19,334 | 22,394,952 | 22,411,410 | 578 | 7,341 | 6,279 | -26,815 | -29,177 |
+| 96 kHz | 7,600 | 21,063 | 24,301,393 | 24,319,307 | 627 | 7,409 | 6,281 | -26,732 | -29,116 |
+
+The rest is almost all the smoother's (`R_s` 11,183,325 frames at 44.1 kHz, 24,275,194 at 96 kHz,
+equal to the brute-force count from -100 dB at the 5,000 ms release; the crossover's `R_x(any)` is
+20,262 and 44,113): a dB-domain word flushed at `1e-20` decays about 51 natural logs at the slowest
+release. A rest snap would shorten it but moves rendered bits (class B, not adopted). `T` lies far
+past the 64-frame window at every rate, so the composition branch with `T` in the window is not
+reached by this envelope.
+
+**Evidence (T2, release, every launch rate).** The kernel at 80 Hz, deepest curve, fastest
+attack, slowest release, +24 dB makeup, worst-sign input for the band sum's response: the last
+frame at or above `P eps` is `N + 1,228` settled and `N + 431` / `N + 467` with the glide in flight
+(48 kHz, against `T = 3,810`); `N + 2,462` / `N + 1,561` at 96 kHz (`T = 7,600`). At `N + R` the
+state payload equals a fresh instance's, and both then render the same noise to the bit.
+Construction cost: about 0.1 to 0.25 s per rate in release (test-only; the descriptor reads the
+pin).
+
 ## Citations
 
 [SIMPER-SVF] A. Simper, "Linear trapezoidal integrated state variable filter", Cytomic technical
