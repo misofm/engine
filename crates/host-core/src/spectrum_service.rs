@@ -638,7 +638,8 @@ impl SpectrumSnapshot {
 ///
 /// Every method is allocation-free. See the module documentation and decision 17 D7: an arm that
 /// the caller made with [`Self::arm`] belongs to the caller until a read returns its window or
-/// [`SpectrumServiceError::CaptureInvalid`], or until [`Self::cancel`]. A stream start refuses
+/// [`SpectrumServiceError::CaptureInvalid`], until [`Self::cancel`], or until a swap that does not
+/// carry it ([`SpectrumServiceError::Dropped`]). A stream start refuses
 /// `Busy` while that arm stands (D4 of issue #1592); an arm that [`Self::select`] made is not the
 /// caller's and the start replaces it.
 ///
@@ -747,8 +748,8 @@ impl SpectrumService {
     ///
     /// - The caller's one-shot arm, capturing or held (with or without a result queued), is
     ///   dropped (#1593 D6): the caller's next [`Self::read`] answers
-    ///   [`SpectrumServiceError::Dropped`] once, and the arm is released, so a new arm completes on
-    ///   the successor. A single capture's generation carries over
+    ///   [`SpectrumServiceError::Dropped`] once (unless the caller cancels or arms anew first), and
+    ///   the arm is released, so a new arm completes on the successor. A single capture's generation carries over
     ///   ([`SpectrumCapture::settle_unpaired`]), so the new arm is a later generation than the
     ///   dropped one.
     /// - A collection whose selected entry did not carry has no selection (see above); the
@@ -818,6 +819,8 @@ impl SpectrumService {
     pub fn arm(&mut self) -> Result<(), SpectrumServiceError> {
         self.captures.arm()?;
         self.caller_armed = true;
+        // A new arm supersedes the dropped one: its read is this arm's (#1593 D6).
+        self.arm_dropped = false;
         Ok(())
     }
 
@@ -890,6 +893,8 @@ impl SpectrumService {
         }
         self.captures.cancel();
         self.caller_armed = false;
+        // The caller gave up its arm, the dropped one included (#1593 D6).
+        self.arm_dropped = false;
         Ok(())
     }
 

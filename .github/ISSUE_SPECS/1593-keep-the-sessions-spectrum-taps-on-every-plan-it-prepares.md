@@ -225,3 +225,9 @@ through `test_spectrum_mut()`.
   `src/spectrum.rs` and `tests/successor_swap.rs` change their expectation, and host-web maps it
   to `RESULT_WRONG_STATE` (R3; the match is exhaustive). A single capture's generation still
   carries over, so the next arm is a later generation.
+- T1 verdict fold, root: a `cancel()` or a successful `arm()` after a drop clears the pending
+  `Dropped`: a caller that gave up the dropped arm, or armed a new one, reads that arm's answer,
+  not the old one's.
+- Note for T2b: carry pairing matches on `SpectrumTarget` equality (kind and ID), so T2b must make
+  sure an old observer is never carried onto a new strip that reuses the ID with another kind
+  (for example a removed track and a new submix of the same ID).

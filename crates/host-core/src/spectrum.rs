@@ -4392,6 +4392,10 @@ mod tests {
         );
 
         // The plan swaps; the successor's capture is fresh and its observer is its own.
+        let (_, first) = one_shot_pair(SpectrumChannels::Left);
+        let first_displaced =
+            service.adopt_successor(PreparedSpectrumCaptures::Single(first), &[], true, None);
+        // A second swap that does not carry, before any read: the drop is still answered once.
         let (mut next_observer, next) = one_shot_pair(SpectrumChannels::Left);
         let displaced =
             service.adopt_successor(PreparedSpectrumCaptures::Single(next), &[], true, None);
@@ -4418,7 +4422,30 @@ mod tests {
             .expect("read")
             .expect("the new arm completes on the successor");
         assert_eq!(snapshot.window.first_sample, 16_384);
-        drop(displaced);
+
+        // A cancel, or a new arm, after a drop supersedes it: the read is not `Dropped`.
+        for rearm in [false, true] {
+            service.arm().expect("arm");
+            let (_, swapped) = one_shot_pair(SpectrumChannels::Left);
+            drop(service.adopt_successor(
+                PreparedSpectrumCaptures::Single(swapped),
+                &[],
+                true,
+                None,
+            ));
+            if rearm {
+                service.arm().expect("arm after the drop");
+                assert!(matches!(service.read(SpectrumChannels::Left), Ok(None)));
+                service.cancel().expect("cancel");
+            } else {
+                service.cancel().expect("cancel after the drop");
+                assert!(matches!(
+                    service.read(SpectrumChannels::Left),
+                    Err(SpectrumServiceError::NotArmed)
+                ));
+            }
+        }
+        drop((first_displaced, displaced));
     }
 
     /// Gate 1 (issue #1609): a cancel races the completion of the window it cancels.
