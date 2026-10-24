@@ -39,8 +39,10 @@
 //! artifact. R9 retired the Wasmtime driver and descriptive nightly benchmarks.
 
 use core::num::{NonZeroU32, NonZeroU64, NonZeroUsize};
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::borrow::Cow;
 use std::collections::BTreeSet;
+use std::sync::Arc;
 
 use bench_support::digest::Sha256Sink;
 use builtins::{MeterConfig, MeterHandle, MeterMetricSet, MeterSnapshot, MeterTap};
@@ -58,6 +60,7 @@ use engine::realtime::{
     LiveStamp, LiveValuesSuperseded, PlanRevisionGate, PlanUnitEligibility, PlanarBufferMut,
     PreparedRenderPlan, RenderError, RenderIo, RenderTime,
 };
+use engine::{QuantumFrames, SampleRateHz};
 use graph::{
     GraphNodeBinding, GraphNodeId, GraphPreparedSourceSet, GraphPreparedSourceSetDriver,
     GraphRuntimeBindings, GraphSourceInputClaim, GraphSourceSetResourceReport, TrackStage,
@@ -67,6 +70,11 @@ use lane::Backend;
 use session::{
     CompileCaps, DualMonoFader, MatrixOrPan, SessionModel, StableId, compile_session,
     parse_session_json,
+};
+use source::{
+    HostChunkError, HostChunkProvider, HostPlanarChunk, PcmSourceRing, PcmSourceRingConfig,
+    PublishedGeneration, SourceFrame, SourceGeneration, SourceGraphSource, SourceGraphTrackMapping,
+    SourceTimeline, TimelineProducer, prepare_session_graph_source_set,
 };
 
 pub mod fader_ride;
@@ -290,6 +298,27 @@ pub enum Workload {
     /// onto this session. Its bound-feed twin, `sixty_four_track_gain_pan_only`, rendered the same
     /// bits through a processor per track input no host binds, and issue #965 retired it.
     SixtyFourTrackGainPanRing,
+    /// The gain/pan row fed by a live producer on another core (issue #938).
+    ///
+    /// The plan is [`Self::SixtyFourTrackGainPanRing`]'s: the same fixture, strip edit, compile
+    /// and bind. Only the feed differs. The ring row's driver lends one frozen block per track,
+    /// every block, so its input stays warm in the render core's cache. In a product session a
+    /// producer on another core (the browser's PCM pump in a Worker, a mobile decode thread)
+    /// writes every source's ring, and render reads blocks that core wrote. This row measures that
+    /// read: its sixty-four track inputs are claimed by the production source set
+    /// (`source::prepare_session_graph_source_set`), one host-region ring per track
+    /// ([`LIVE_RING_FRAMES`] deep), and one producer thread submits each track's frozen block into
+    /// its ring through `HostChunkProvider::submit`, as a host submits decoded PCM. So the row
+    /// renders the ring row's bits, and the in-run and test digests say so.
+    ///
+    /// The producer is started by [`SessionRuntime::start_live_producer`] before any block is
+    /// rendered and joined by [`SessionRuntime::finish_live_producer`] after the last one. A
+    /// driver calls [`SessionRuntime::await_live_feed`] outside its clock before each block, so
+    /// every ring is at least [`LIVE_LEAD_BLOCKS`] blocks ahead of render when the block starts
+    /// and no block underruns; the report's underrun count says whether one did.
+    ///
+    /// Not in [`DRIVER_FED_WORKLOADS`]: see [`LIVE_FED_WORKLOADS`].
+    SixtyFourTrackGainPanLive,
     /// The mono qualification session: sixty-four collapse-eligible strips, rendered as written.
     ///
     /// The same strip, the same coefficients and the same input as `sixty_four_track_console`,
@@ -445,11 +474,16 @@ impl Workload {
 
     /// How this row's track inputs reach the graph, named in the record as `source_feed`.
     ///
-    /// [`SourceFeed::PlayedPlanes`] for every row (issue #965): every row's track inputs are
-    /// claimed by a prepared source set, the feed every host binds.
+    /// Every row's track inputs are claimed by a prepared source set, the feed every host binds
+    /// (issue #965). [`SourceFeed::LiveProducer`] for the live row (issue #938), whose set is the
+    /// production one over rings a producer thread fills, and [`SourceFeed::PlayedPlanes`] for
+    /// every other row.
     #[must_use]
     pub const fn source_feed(self) -> SourceFeed {
-        SourceFeed::PlayedPlanes
+        match self {
+            Self::SixtyFourTrackGainPanLive => SourceFeed::LiveProducer,
+            _ => SourceFeed::PlayedPlanes,
+        }
     }
 }
 
@@ -489,14 +523,17 @@ impl InputSignal {
 
 /// How a row's track inputs reach the graph (issue #928).
 ///
-/// One feed is left: issue #965 retired the bound feed (a `FrozenGraphSource` processor per track
-/// input, one dispatched copy per track per block), which no host binds.
+/// Both feeds are source sets: issue #965 retired the bound feed (a `FrozenGraphSource` processor
+/// per track input, one dispatched copy per track per block), which no host binds.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SourceFeed {
     /// The inputs are claimed by a prepared source set whose driver copies each claim's block on
     /// request and lends its played planes in place: the production feed, over the same frozen
     /// blocks.
     PlayedPlanes,
+    /// The inputs are claimed by the production source set over one host-region ring per track,
+    /// which a producer thread fills with the same frozen blocks (issue #938).
+    LiveProducer,
 }
 
 impl SourceFeed {
@@ -505,6 +542,7 @@ impl SourceFeed {
     pub const fn name(self) -> &'static str {
         match self {
             Self::PlayedPlanes => "played_planes",
+            Self::LiveProducer => "live_producer",
         }
     }
 }
@@ -541,7 +579,17 @@ pub const WORKLOADS: [Workload; 14] = [
 /// track, and the folded master's bits -- iterate it beside [`WORKLOADS`].
 pub const DRIVER_FED_WORKLOADS: [Workload; 1] = [Workload::SixtyFourTrackGainPanRing];
 
-/// The session rows the native bench emits after [`DRIVER_FED_WORKLOADS`]: the rows prepared with
+/// The session row the native bench emits after [`DRIVER_FED_WORKLOADS`]: the gain/pan row fed by
+/// a live producer on another core (issue #938).
+///
+/// Its own array, not [`DRIVER_FED_WORKLOADS`], because a live row renders its input only while
+/// its producer runs ([`SessionRuntime::start_live_producer`]). The shape tests under `tests/` that
+/// iterate the driver-fed rows render without one; this row's plan is the ring row's, so what
+/// they state of that plan they state of this one, and this crate's own test of the row checks
+/// its bits against the ring row's with the producer live.
+pub const LIVE_FED_WORKLOADS: [Workload; 1] = [Workload::SixtyFourTrackGainPanLive];
+
+/// The session rows the native bench emits after [`LIVE_FED_WORKLOADS`]: the rows prepared with
 /// the default web boot's meter set (issue #881).
 ///
 /// The census and shape tests under `tests/` iterate [`WORKLOADS`] only. What this row shares with
@@ -573,12 +621,13 @@ pub const CONSOLE_STRIP_WORKLOADS: [Workload; 5] = [
 ];
 
 /// Every session row the native bench emits, in emission order: [`WORKLOADS`], then
-/// [`DRIVER_FED_WORKLOADS`], then [`METERED_WORKLOADS`], then [`BUS_SEND_WORKLOADS`], then
-/// [`CONSOLE_STRIP_WORKLOADS`].
+/// [`DRIVER_FED_WORKLOADS`], then [`LIVE_FED_WORKLOADS`], then [`METERED_WORKLOADS`], then
+/// [`BUS_SEND_WORKLOADS`], then [`CONSOLE_STRIP_WORKLOADS`].
 pub fn native_session_rows() -> impl Iterator<Item = Workload> {
     WORKLOADS
         .into_iter()
         .chain(DRIVER_FED_WORKLOADS)
+        .chain(LIVE_FED_WORKLOADS)
         .chain(METERED_WORKLOADS)
         .chain(BUS_SEND_WORKLOADS)
         .chain(CONSOLE_STRIP_WORKLOADS)
@@ -675,6 +724,7 @@ impl Workload {
             Self::SixtyFourTrackConsoleLegacy => "sixty_four_track_console_legacy",
             Self::SixtyFourTrackEqCompSimd1 => "sixty_four_track_eq_comp_simd1",
             Self::SixtyFourTrackGainPanRing => "sixty_four_track_gain_pan_ring",
+            Self::SixtyFourTrackGainPanLive => "sixty_four_track_gain_pan_live",
             Self::SixtyFourTrackConsoleMono => "sixty_four_track_console_mono",
             Self::SixtyFourTrackConsoleMonoDual => "sixty_four_track_console_mono_dual",
             Self::SixtyFourTrackConsoleHalfMono => "sixty_four_track_console_half_mono",
@@ -753,7 +803,7 @@ impl Workload {
             Self::SixtyFourTrackBuiltinsOnly => Strip::BuiltinsOnly,
             Self::SixtyFourTrackDispatchOnly => Strip::Identity,
             Self::SixtyFourTrackEqCompSimd1 => Strip::LimiterRemoved,
-            Self::SixtyFourTrackGainPanRing => Strip::GainPan,
+            Self::SixtyFourTrackGainPanRing | Self::SixtyFourTrackGainPanLive => Strip::GainPan,
             Self::SixtyFourTrackConsoleHalfMono => Strip::HalfMono,
             _ => Strip::AsWritten,
         }
@@ -771,7 +821,7 @@ impl Workload {
             Self::SixtyFourTrackConsoleLegacy
             | Self::SixtyFourTrackEqCompSimd1
             | Self::SixtyFourTrackAppShape => "eq+compressor",
-            Self::SixtyFourTrackGainPanRing => "gain+pan",
+            Self::SixtyFourTrackGainPanRing | Self::SixtyFourTrackGainPanLive => "gain+pan",
             _ => "eq+compressor+limiter",
         }
     }
@@ -804,7 +854,8 @@ impl Workload {
             Self::SixtyFourTrackCompressorOnly => "pre_insert:compressor",
             Self::SixtyFourTrackBuiltinsOnly
             | Self::SixtyFourTrackDispatchOnly
-            | Self::SixtyFourTrackGainPanRing => "builtins",
+            | Self::SixtyFourTrackGainPanRing
+            | Self::SixtyFourTrackGainPanLive => "builtins",
             // The retired layout: two one-slot chains, one per rack.
             Self::SixtyFourTrackConsoleLegacy => "pre_insert:eq,inserts:compressor",
             // The chain-shape row: one two-slot chain, no limiter.
@@ -1177,6 +1228,8 @@ pub struct SessionRuntime {
     structural_symmetry: Vec<(Box<str>, ChannelSymmetryWitness)>,
     /// Which tracks the compiled session bypasses, taken at compile time (issue #1085).
     bypass: BypassCensus,
+    /// The live row's rings and producer (issue #938), and `None` on every other row.
+    live: Option<LiveFeed>,
 }
 
 /// One transaction of live writes, as a host makes it: stamp the next revision on the plan's gate,
@@ -1565,9 +1618,35 @@ impl SessionRuntime {
         // The set requires its claims strictly ascending, and the driver serves claim `i` as the
         // `i`-th of them.
         claims.sort_unstable();
-        let driver = FrozenSourceDriver::new(&claims, input, &source, &mappings);
-        let resources = driver.resource_report();
-        let source_set = GraphPreparedSourceSet::new(envelope, claims, resources, Box::new(driver));
+        // Issue #938: the live row's claims go to the production source set over rings a producer
+        // thread fills; every other row's to the frozen driver.
+        let (source_set, live) = match workload.source_feed() {
+            SourceFeed::PlayedPlanes => {
+                let driver = FrozenSourceDriver::new(&claims, input, &source, &mappings);
+                let resources = driver.resource_report();
+                let set =
+                    GraphPreparedSourceSet::new(envelope, claims, resources, Box::new(driver));
+                (set, None)
+            }
+            SourceFeed::LiveProducer => {
+                let largest_arrival = artifact
+                    .report()
+                    .input_arrivals
+                    .iter()
+                    .map(|(_, arrival)| arrival.0)
+                    .max()
+                    .unwrap_or(0);
+                let (set, feed) = LiveFeed::prepare(
+                    envelope,
+                    &claims,
+                    input,
+                    &source,
+                    &mappings,
+                    largest_arrival,
+                );
+                (set, Some(feed))
+            }
+        };
         let nodes = artifact
             .external_binding_nodes()
             .filter(|node| !is_track_input(node))
@@ -1649,6 +1728,7 @@ impl SessionRuntime {
             observations,
             structural_symmetry: structural,
             bypass: BypassCensus::of(session.normalized_model()),
+            live,
         };
         if config.observation == ObservationArm::Armed {
             runtime.arm_observation();
@@ -2164,6 +2244,88 @@ impl SessionRuntime {
             hash.update(value.to_bits().to_le_bytes());
         }
     }
+
+    /// Starts the live row's producer thread and returns once every ring is full (issue #938).
+    ///
+    /// `pin` runs first on the producer thread, before it submits anything: a driver places the
+    /// thread there (the native bench pins it to its producer core). The thread then tops every
+    /// ring up, sleeps while they are full and tops them up again, until
+    /// [`SessionRuntime::finish_live_producer`] stops it. It allocates nothing after it starts.
+    ///
+    /// # Panics
+    ///
+    /// Panics if this row has no live feed, if the producer was already started, or if the
+    /// producer thread panics before the rings are full (`pin` included).
+    pub fn start_live_producer(&mut self, pin: impl FnOnce() + Send + 'static) {
+        let feed = self.live.as_mut().expect("a live-fed row");
+        let LiveState::Ready(mut sources) =
+            core::mem::replace(&mut feed.state, LiveState::Finished)
+        else {
+            panic!("the live producer was already started");
+        };
+        let shared = Arc::clone(&feed.shared);
+        let handle = std::thread::Builder::new()
+            .name("console-live-producer".to_owned())
+            .spawn(move || {
+                pin();
+                while !shared.stop.load(Ordering::Acquire) {
+                    let submitted = sources.top_up();
+                    shared
+                        .submitted_blocks
+                        .store(sources.submitted_blocks(), Ordering::Release);
+                    if !submitted {
+                        std::thread::sleep(LIVE_PRODUCER_IDLE);
+                    }
+                }
+                sources
+            })
+            .expect("the live producer thread");
+        feed.state = LiveState::Running(handle);
+        feed.wait_for(feed.ring_blocks);
+    }
+
+    /// Waits, outside any clock, until every live ring holds block `observation` and
+    /// [`LIVE_LEAD_BLOCKS`] more (issue #938). Returns at once on every row without a live feed.
+    ///
+    /// # Panics
+    ///
+    /// Panics if this row's producer is not running or has ended.
+    pub fn await_live_feed(&self, observation: u64) {
+        if let Some(feed) = &self.live {
+            feed.wait_for(observation + 1 + LIVE_LEAD_BLOCKS);
+        }
+    }
+
+    /// Stops and joins the live row's producer, then reads every ring's underrun count (issue
+    /// #938). Call it after the last rendered block; the producer is joined on drop otherwise.
+    ///
+    /// # Panics
+    ///
+    /// Panics if this row has no live feed, if it was already finished, or if the producer
+    /// thread panicked.
+    pub fn finish_live_producer(&mut self) -> LiveProducerReport {
+        let sources = self
+            .live
+            .as_mut()
+            .expect("a live-fed row")
+            .join()
+            .expect("the live producer was already finished");
+        let underrun_frames = sources
+            .providers
+            .iter()
+            .map(|provider| {
+                // Render has stopped, so no publication is in flight and the first read lands.
+                provider
+                    .seek_report()
+                    .expect("a seek report with render stopped")
+                    .cumulative_underrun_frames
+            })
+            .sum();
+        LiveProducerReport {
+            underrun_frames,
+            submitted_blocks: sources.submitted_blocks(),
+        }
+    }
 }
 
 /// Clones the fixture's strips up to `tracks`, keeping every track's parameters distinct.
@@ -2393,6 +2555,19 @@ fn frozen_track_source(
     source: &SourceSignal,
     mappings: &[(usize, usize)],
 ) -> FrozenGraphSource {
+    let (block, mapping) = track_block(track_id, input, source, mappings);
+    FrozenGraphSource::from_block(&block, mapping)
+}
+
+/// One track input's unmapped stereo block (left plane, then right) and its declared channel
+/// mapping, from its track id: what [`frozen_track_source`] maps into planes and what the live
+/// producer submits into the track's ring (issue #938), whose set applies the mapping.
+fn track_block<'a>(
+    track_id: &str,
+    input: InputSignal,
+    source: &'a SourceSignal,
+    mappings: &[(usize, usize)],
+) -> (Cow<'a, [f32]>, (usize, usize)) {
     let track = track_id
         .trim_start_matches(|c: char| !c.is_ascii_digit())
         .parse()
@@ -2404,7 +2579,7 @@ fn frozen_track_source(
         .get(track)
         .copied()
         .unwrap_or_else(|| panic!("the model must declare a source mapping for track {track}"));
-    FrozenGraphSource::from_block(&block, mapping)
+    (block, mapping)
 }
 
 /// Whether `node` is a track's input stage: the nodes a source set may claim.
@@ -2524,6 +2699,258 @@ impl GraphPreparedSourceSetDriver for FrozenSourceDriver {
 }
 // REALTIME_POLICY_END
 
+/// Frames each live source ring holds (issue #938): the default ring a product host prepares.
+///
+/// `host_core::default_source_ring_frames(48_000, 128)`: 100 ms of stall tolerance rounded up to
+/// whole quanta (38), plus one quantum held by the consumer and one in the recycle path, so forty
+/// quanta. Mirrored rather than imported, as [`WEB_METER_BLOCKS`] is: the host crate is not a
+/// dependency of this subject. The live row's test pins the two equal.
+pub const LIVE_RING_FRAMES: u64 = 40 * QUANTUM as u64;
+
+/// Blocks every live ring holds beyond the one a block reads, at least, when the block starts
+/// (issue #938): [`SessionRuntime::await_live_feed`] waits outside the clock until they are there.
+pub const LIVE_LEAD_BLOCKS: u64 = 2;
+
+/// How long the live producer sleeps after a pass that found every ring full.
+///
+/// The producer does not spin: a spinning producer polls the recycle queue render writes, and that
+/// traffic is a cost no host's pump adds. A host tops its rings up in batches, from a timer or a
+/// message; this one does after each sleep. A full ring holds forty blocks, which render consumes in
+/// no less than a few hundred microseconds even when it runs flat out, so one sleep never empties a
+/// ring, and the render side's wait catches the case that it nearly does.
+const LIVE_PRODUCER_IDLE: std::time::Duration = std::time::Duration::from_micros(100);
+
+/// What the live producer and its rings report after it has been joined (issue #938).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LiveProducerReport {
+    /// Missing in-region frames, summed over every ring: the frames render played as silence
+    /// because the producer had not submitted them. Zero is the only admissible value.
+    pub underrun_frames: u64,
+    /// Blocks the producer submitted into each ring, the smallest over the rings.
+    pub submitted_blocks: u64,
+}
+
+/// The state the live producer thread and render's wait share.
+struct LiveShared {
+    /// Set by the driver after the last block; the producer finishes its pass and returns.
+    stop: AtomicBool,
+    /// Blocks every ring has been submitted, the smallest over the rings. Published after every
+    /// pass of the producer; read by [`SessionRuntime::await_live_feed`].
+    submitted_blocks: AtomicU64,
+}
+
+/// The producer's half of every live ring, and the block it submits into each.
+struct LiveSources {
+    /// One provider per claim, in claim order: source `i` feeds claim `i`.
+    providers: Vec<HostChunkProvider>,
+    /// Source `i`'s frozen stereo block: `QUANTUM` left samples, then `QUANTUM` right.
+    blocks: Vec<Box<[f32]>>,
+    /// The next frame each provider accepts.
+    next_frames: Vec<u64>,
+}
+
+impl LiveSources {
+    /// One pass over every ring: submit each source's block until its ring is full. Allocates
+    /// nothing: the chunk borrows the frozen block and the ring copies it into a recycled block.
+    ///
+    /// Returns whether any block was submitted.
+    fn top_up(&mut self) -> bool {
+        let mut submitted = false;
+        for ((provider, block), next) in self
+            .providers
+            .iter_mut()
+            .zip(&self.blocks)
+            .zip(&mut self.next_frames)
+        {
+            let planes = [&block[..QUANTUM], &block[QUANTUM..SOURCE_BLOCK_VALUES]];
+            loop {
+                let chunk = HostPlanarChunk {
+                    sample_rate_hz: SampleRateHz(SAMPLE_RATE_HZ),
+                    generation: SourceGeneration(1),
+                    start_frame: SourceFrame(*next),
+                    planes: &planes,
+                    frames: QUANTUM as u32,
+                    end_of_region: false,
+                };
+                match provider.submit(chunk) {
+                    Ok(_) => {
+                        *next += QUANTUM as u64;
+                        submitted = true;
+                    }
+                    Err(HostChunkError::Full { .. }) => break,
+                    Err(error) => panic!("the live producer's chunk was refused: {error:?}"),
+                }
+            }
+        }
+        submitted
+    }
+
+    /// Blocks every ring has been submitted, the smallest over the rings.
+    fn submitted_blocks(&self) -> u64 {
+        self.next_frames.iter().copied().min().unwrap_or(0) / QUANTUM as u64
+    }
+}
+
+/// Where the live producer is in its life.
+enum LiveState {
+    /// Prepared and not started: the providers wait on the control thread.
+    Ready(LiveSources),
+    /// Started: the producer thread owns the providers and returns them when it is stopped.
+    Running(std::thread::JoinHandle<LiveSources>),
+    /// Joined, or never startable again.
+    Finished,
+}
+
+/// The live row's rings and producer (issue #938).
+struct LiveFeed {
+    shared: Arc<LiveShared>,
+    state: LiveState,
+    /// Blocks a full ring holds: what [`SessionRuntime::start_live_producer`] waits for.
+    ring_blocks: u64,
+    /// The session timeline's producer half, held for the plan's life as a host holds it. Nothing
+    /// seeks.
+    _timeline: TimelineProducer,
+}
+
+impl LiveFeed {
+    /// The production source set over one host-region ring per claim, and the providers that feed
+    /// them, built the way `host-core` builds a session's (`crates/host-core/src/prepare.rs`): rings
+    /// by `PcmSourceRing::prepare_host_region` from frame zero under one published generation, a
+    /// timeline whose history covers the largest input arrival, and the set by
+    /// `prepare_session_graph_source_set`. One two-channel source per track, because every track
+    /// of the benchmark carries its own tone; each claim maps its source's channels as its track
+    /// declares them.
+    ///
+    /// # Panics
+    ///
+    /// Panics if a claim names anything but a track input, or if a preparation step refuses: both
+    /// are defects in the subject.
+    fn prepare(
+        envelope: engine::realtime::RenderEnvelope,
+        claims: &[GraphSourceInputClaim],
+        input: InputSignal,
+        source: &SourceSignal,
+        mappings: &[(usize, usize)],
+        largest_arrival: u64,
+    ) -> (GraphPreparedSourceSet, Self) {
+        let published = PublishedGeneration::new(SourceGeneration(1));
+        let config = PcmSourceRingConfig {
+            channel_count: 2,
+            quantum_frames: QuantumFrames(QUANTUM as u32),
+            frame_capacity: LIVE_RING_FRAMES,
+            initial_generation: SourceGeneration(1),
+        };
+        let mut providers = Vec::with_capacity(claims.len());
+        let mut blocks = Vec::with_capacity(claims.len());
+        let mut sources = Vec::with_capacity(claims.len());
+        let mut track_mappings = Vec::with_capacity(claims.len());
+        for (index, claim) in claims.iter().enumerate() {
+            let GraphNodeId::TrackStage {
+                track_id,
+                stage: TrackStage::Input,
+            } = &claim.node
+            else {
+                panic!(
+                    "a source claim must name a track input, not {:?}",
+                    claim.node
+                );
+            };
+            let (block, (left, right)) = track_block(track_id.as_str(), input, source, mappings);
+            let (producer, consumer, resources) =
+                PcmSourceRing::prepare_host_region(config, SourceFrame(0), published.clone())
+                    .expect("a live source ring");
+            providers.push(producer.into_host_chunk_provider(SampleRateHz(SAMPLE_RATE_HZ)));
+            blocks.push(Box::from(&*block));
+            sources.push(SourceGraphSource::new(consumer, resources, 0, 0));
+            track_mappings.push(SourceGraphTrackMapping {
+                node: claim.node.clone(),
+                source_index: index,
+                left_channel: u32::try_from(left).expect("a stereo channel index"),
+                right_channel: u32::try_from(right).expect("a stereo channel index"),
+            });
+        }
+        let history_blocks = largest_arrival
+            .div_ceil(QUANTUM as u64)
+            .checked_add(1)
+            .and_then(|blocks| usize::try_from(blocks).ok())
+            .and_then(NonZeroUsize::new)
+            .expect("a timeline history length");
+        let (timeline_producer, timeline, _) = SourceTimeline::prepare(
+            QuantumFrames(QUANTUM as u32),
+            history_blocks,
+            published.clone(),
+        )
+        .expect("a live session timeline");
+        let set = prepare_session_graph_source_set(
+            envelope,
+            sources,
+            timeline,
+            published,
+            track_mappings,
+        )
+        .expect("the live source set");
+        let next_frames = vec![0; providers.len()];
+        let feed = Self {
+            shared: Arc::new(LiveShared {
+                stop: AtomicBool::new(false),
+                submitted_blocks: AtomicU64::new(0),
+            }),
+            state: LiveState::Ready(LiveSources {
+                providers,
+                blocks,
+                next_frames,
+            }),
+            ring_blocks: LIVE_RING_FRAMES / QUANTUM as u64,
+            _timeline: timeline_producer,
+        };
+        (set, feed)
+    }
+
+    /// Waits until every ring holds `blocks` submitted blocks. Panics if the producer thread has
+    /// ended, so a producer that panicked fails the driver instead of hanging it.
+    fn wait_for(&self, blocks: u64) {
+        let LiveState::Running(handle) = &self.state else {
+            panic!("the live producer is not running");
+        };
+        let mut spins = 0_u32;
+        while self.shared.submitted_blocks.load(Ordering::Acquire) < blocks {
+            assert!(
+                !handle.is_finished(),
+                "the live producer thread ended early"
+            );
+            spins += 1;
+            if spins.is_multiple_of(64) {
+                std::thread::yield_now();
+            } else {
+                core::hint::spin_loop();
+            }
+        }
+    }
+
+    /// Stops and joins the producer, if it runs, and returns its sources.
+    fn join(&mut self) -> Option<LiveSources> {
+        match core::mem::replace(&mut self.state, LiveState::Finished) {
+            LiveState::Running(handle) => {
+                self.shared.stop.store(true, Ordering::Release);
+                Some(handle.join().expect("the live producer thread panicked"))
+            }
+            LiveState::Ready(sources) => Some(sources),
+            LiveState::Finished => None,
+        }
+    }
+}
+
+impl Drop for LiveFeed {
+    fn drop(&mut self) {
+        if let LiveState::Running(handle) = core::mem::replace(&mut self.state, LiveState::Finished)
+        {
+            self.shared.stop.store(true, Ordering::Release);
+            // A producer that panicked has already said why; a drop does not panic again.
+            let _ = handle.join();
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2563,16 +2990,34 @@ mod tests {
         const BLOCKS: u64 = 64;
         for workload in native_session_rows() {
             let kind = workload.kind();
-            assert_eq!(workload.source_feed(), SourceFeed::PlayedPlanes, "{kind}");
+            let live = LIVE_FED_WORKLOADS.contains(&workload);
+            assert_eq!(
+                workload.source_feed(),
+                if live {
+                    SourceFeed::LiveProducer
+                } else {
+                    SourceFeed::PlayedPlanes
+                },
+                "{kind}"
+            );
             let mut runtime = SessionRuntime::new(workload);
+            // Issue #938: the live row's rings are the production source set's, fed by its
+            // producer, and they are read in place exactly as the frozen driver's blocks are.
+            if live {
+                runtime.start_live_producer(|| {});
+            }
             graph::test_only_source_plane_reset();
             audit::warm_up();
             audit::reset();
             for block in 0..BLOCKS {
+                runtime.await_live_feed(block);
                 runtime.render(block).expect("console render");
             }
             let forbidden = audit::snapshot().total();
             let planes = graph::test_only_source_plane_counts();
+            if live {
+                assert_eq!(runtime.finish_live_producer().underrun_frames, 0, "{kind}");
+            }
             assert_eq!(
                 forbidden, 0,
                 "{kind}: a forbidden operation on the render path"
@@ -2591,6 +3036,53 @@ mod tests {
                  per block, none served silence"
             );
         }
+    }
+
+    /// Issue #938 gates 1 and 2: with its producer thread live, the live row renders the ring
+    /// row's bits over 256 blocks and no ring underruns.
+    ///
+    /// 256 blocks is six times a ring's forty, so the producer has refilled every ring many times
+    /// over while render read it, and every block render read was written by the producer thread
+    /// into a recycled ring block. The ring row lends the same frozen words in place, so the two
+    /// digests agree block for block; there is no first-block latency to shift by, because the
+    /// session timeline and every ring start at frame zero and the plan has no input arrival.
+    /// The ring depth is the default a product host prepares, pinned here against the host's own
+    /// formula because this subject mirrors it.
+    #[test]
+    fn the_live_row_renders_the_ring_rows_bits_with_no_underrun() {
+        const BLOCKS: u64 = 256;
+        assert_eq!(
+            LIVE_RING_FRAMES,
+            u64::from(host_core::default_source_ring_frames(
+                SAMPLE_RATE_HZ,
+                QUANTUM as u32
+            ))
+        );
+        let digest = |runtime: &mut SessionRuntime| {
+            let mut sink = Sha256Sink::new();
+            for block in 0..BLOCKS {
+                runtime.await_live_feed(block);
+                runtime.render(block).expect("console render");
+                runtime.hash_output(&mut sink);
+            }
+            sink.finish_hex()
+        };
+        let ring = digest(&mut SessionRuntime::new(
+            Workload::SixtyFourTrackGainPanRing,
+        ));
+        let mut live = SessionRuntime::new(Workload::SixtyFourTrackGainPanLive);
+        live.start_live_producer(|| {});
+        let live_digest = digest(&mut live);
+        let report = live.finish_live_producer();
+        assert_eq!(report.underrun_frames, 0, "a live ring underran");
+        assert!(
+            report.submitted_blocks >= BLOCKS + LIVE_LEAD_BLOCKS,
+            "the producer stayed ahead: {report:?}"
+        );
+        assert_eq!(
+            live_digest, ring,
+            "the live feed served other words than the ring row's"
+        );
     }
 
     /// The driver's five methods, called directly under the realtime audit: `played_planes` lends
@@ -2815,6 +3307,7 @@ mod tests {
         for workload in WORKLOADS
             .into_iter()
             .chain(DRIVER_FED_WORKLOADS)
+            .chain(LIVE_FED_WORKLOADS)
             .chain(BUS_SEND_WORKLOADS)
             .chain(CONSOLE_STRIP_WORKLOADS)
         {
@@ -2825,13 +3318,15 @@ mod tests {
             rows.len(),
             WORKLOADS.len()
                 + DRIVER_FED_WORKLOADS.len()
+                + LIVE_FED_WORKLOADS.len()
                 + METERED_WORKLOADS.len()
                 + BUS_SEND_WORKLOADS.len()
                 + CONSOLE_STRIP_WORKLOADS.len()
         );
         assert!(
-            rows.get(WORKLOADS.len() + DRIVER_FED_WORKLOADS.len()) == Some(&metered),
-            "the metered row is emitted after the gain/pan row, before the bus-and-send row"
+            rows.get(WORKLOADS.len() + DRIVER_FED_WORKLOADS.len() + LIVE_FED_WORKLOADS.len())
+                == Some(&metered),
+            "the metered row is emitted after the gain/pan rows, before the bus-and-send row"
         );
         let mut kinds: Vec<&str> = rows.iter().map(|workload| workload.kind()).collect();
         kinds.sort_unstable();
@@ -3055,8 +3550,12 @@ mod tests {
         assert!(!DRIVER_FED_WORKLOADS.contains(&sends));
         let rows: Vec<Workload> = native_session_rows().collect();
         assert!(
-            rows.get(WORKLOADS.len() + DRIVER_FED_WORKLOADS.len() + METERED_WORKLOADS.len())
-                == Some(&sends),
+            rows.get(
+                WORKLOADS.len()
+                    + DRIVER_FED_WORKLOADS.len()
+                    + LIVE_FED_WORKLOADS.len()
+                    + METERED_WORKLOADS.len()
+            ) == Some(&sends),
             "the bus-and-send row is emitted after the metered row, before the console-strip rows"
         );
     }
