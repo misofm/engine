@@ -83,9 +83,9 @@ impl ControlAdapter for CapiAdapter {
     const DOCUMENT_TRANSPORT: bool = true;
 }
 
-/// capi's preparation (issue #1400 D3): today's live request and the lanes the control plane
-/// chose, through the same two host-core entries the control plane called before the preparer
-/// existed. It holds no lane constant: the lanes arrive as an argument (decision 17 C6).
+/// capi's preparation (issue #1400 D3): today's live request, the lanes the control plane chose
+/// and the session's spectrum preparation (#1593 D3), through host-core's one session entry. It
+/// holds no lane constant: the lanes arrive as an argument (decision 17 C6).
 pub(crate) struct CapiPreparer;
 
 impl control_plane::RuntimePreparer for CapiPreparer {
@@ -94,21 +94,21 @@ impl control_plane::RuntimePreparer for CapiPreparer {
         compiled: &host_core::CompiledSession,
         caps: &host_core::HostPrepareCaps,
         lanes: host_core::HostLiveLanes,
+        spectrum: Option<&host_core::SpectrumPreparation>,
         successor: Option<host_core::SuccessorBase<'_>>,
         superseded: &host_core::LiveValuesSuperseded,
     ) -> Result<
-        (host_core::PreparedHost, host_core::HostLiveControlHandles),
+        (
+            host_core::PreparedHost,
+            host_core::HostLiveControlHandles,
+            Option<host_core::PreparedSpectrumCaptures>,
+        ),
         host_core::PrepareDiagnostics,
     > {
         let live = host_core::HostLiveControlRequest::default();
-        match successor {
-            Some(base) => host_core::prepare_host_runtime_with_live_lanes_successor(
-                compiled, caps, &live, lanes, base, superseded,
-            ),
-            None => host_core::prepare_host_runtime_with_live_lanes(
-                compiled, caps, &live, lanes, superseded,
-            ),
-        }
+        host_core::prepare_host_runtime_with_live_lanes_and_spectrum(
+            compiled, caps, &live, lanes, spectrum, successor, superseded,
+        )
     }
 }
 
@@ -139,6 +139,9 @@ pub(crate) fn compile_children(
             document,
             ControlLimits::from(limits),
             Box::new(CapiPreparer),
+            // #1593 D2: the C ABI has no boot input for a spectrum configuration (#1594 adds the
+            // message).
+            None,
         )?;
     Ok(CompiledChildren {
         session,

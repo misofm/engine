@@ -1744,3 +1744,64 @@ fn randomized_consoles_compile_bind_and_render_the_scalar_bits() {
         "the probe renders a bus console lane at level 1 or more against the scalar plan"
     );
 }
+
+/// Issue #931: banking costs the arena no buffers on the plan every host renders.
+///
+/// `console-sixty-four-track.json` compiled with builtins merges each cohort's
+/// `post-input -> EQ -> compressor -> fader -> matrix` chain, and the eight cohorts' spans
+/// overlap into one. Before #931 the colouring held every slot freed inside that span until it
+/// closed, so the 64 input slots the post-input ops free were never reused: 256 buffers against
+/// the bank-unaware colouring's count. The release is now keyed on render position, so a slot a
+/// cohort frees goes to any op that renders in a later run, and the hold costs nothing.
+///
+/// The comparison arm is the same plan lowered with no banks declared: the colouring that knows
+/// no window at all, which is the floor any window rule can reach.
+#[test]
+fn the_banked_console_arena_equals_the_bank_unaware_arena() {
+    let model = parse_session_json(include_str!(
+        "../../../fixtures/session/v1/console-sixty-four-track.json"
+    ))
+    .expect("console fixture");
+    let session = compile_session(&model, compile_caps()).expect("compiled console fixture");
+    let effects = prepare_native_session_effects(
+        &session,
+        launch_native_effect_registry().expect("launch registry"),
+        EffectCompileCaps {
+            maximum_total_state_bytes: 1 << 30,
+            maximum_scratch_bytes: 1 << 28,
+            maximum_automation_spans_per_block: 32,
+        },
+    )
+    .expect("prepared console effects");
+    let builtins =
+        prepare_session_builtins(&session, &[], builtin_caps()).expect("the session's builtins");
+    let artifact = GraphCompiler::compile_with_builtins(GraphBuiltinsCompileRequest {
+        input_floors: Default::default(),
+        plan_id: 931,
+        effects,
+        builtins,
+        caps: graph_caps(),
+        dispatch: Backend::current(),
+        gain_liveness: graph_compiler::GainLiveness::FIXED,
+    })
+    .unwrap_or_else(|failure| panic!("console graph: {:?}", failure.diagnostics));
+    let plan = artifact.graph();
+    let banked = plan.program().expect("lowers").buffers;
+    let unaware = graph::program::lower(
+        &plan.spec,
+        &plan.sequential_schedule,
+        &plan.dependency_levels,
+        &plan.inserted_delays,
+        &[],
+    )
+    .expect("lowers without banks")
+    .buffers;
+    assert!(
+        plan.effect_bank_members().next().is_some(),
+        "the console must bank, or the comparison is vacuous"
+    );
+    assert_eq!(
+        banked, unaware,
+        "a merged cohort span must not hold slots past the last run that reads them"
+    );
+}

@@ -134,17 +134,10 @@ def floor_pins:
       [$b, 1, "none", floor_document + "builtins"],
     "sixty_four_track_dispatch_only":
       [$bi, 1, "none", floor_document + "builtins, identity"],
-    # The other row that composes the identity inventory. One basis string for both identity rows
-    # is deliberate -- a real fader and pan cost what an identity fader and pan cost, because
-    # neither kernel has an identity arm, and that claim is what the shared inventory states. It
-    # names no control.
-    "sixty_four_track_gain_pan_only":
-      [$bi, 1, "none", floor_document + "builtins, identity"],
-    # Its driver-fed twin (#928, re-based onto the gain/pan session by #956) and the native
-    # pure-path target: the same session with its track inputs claimed by a prepared source set.
-    # Moving a frozen block into the graph is a copy, not a lane-op, whichever feed does it, so the
-    # inventory is the gain/pan row's -- the floor of the table, not below it -- and like its twin
-    # it names no control.
+    # The other row that composes the identity inventory, and the native pure-path target (#928,
+    # #956). One basis string for both identity rows is deliberate -- a real fader and pan cost
+    # what an identity fader and pan cost, because neither kernel has an identity arm, and that
+    # claim is what the shared inventory states. It names no control.
     "sixty_four_track_gain_pan_ring":
       [$bi, 1, "none", floor_document + "builtins, identity"],
     # The three mono rows carry the whole intended strip, so they carry its inventory. Their
@@ -220,25 +213,19 @@ def floor_shape:
    end);
 
 
-# The twenty-three session workloads, sorted: `WORKLOADS`'s fifteen (append-only, in emission
-# order), the driver-fed gain/pan row the bench emits after them (#928 and #956,
-# `DRIVER_FED_WORKLOADS`), the metered console row (#881, `METERED_WORKLOADS`), the bus-and-send
+# The twenty-two session workloads, sorted: `WORKLOADS`'s fourteen (in emission order), the
+# gain/pan row the bench emits after them (#928 and #956, `DRIVER_FED_WORKLOADS`), the metered console row (#881, `METERED_WORKLOADS`), the bus-and-send
 # row (#1227, `BUS_SEND_WORKLOADS`), and the five console-strip rows it emits last (#1085,
 # `CONSOLE_STRIP_WORKLOADS`).
-def session_kinds: ["nine_track_baseline","nine_track_ragged_strip","one_twenty_eight_track_stretch","sixteen_track_strip","sixty_four_track_app_shape","sixty_four_track_builtins_only","sixty_four_track_compressor_only","sixty_four_track_console","sixty_four_track_console_half_mono","sixty_four_track_console_legacy","sixty_four_track_console_metered","sixty_four_track_console_mono","sixty_four_track_console_mono_dual","sixty_four_track_console_sends","sixty_four_track_console_sparse","sixty_four_track_dispatch_only","sixty_four_track_eq_comp_simd1","sixty_four_track_eq_only","sixty_four_track_gain_pan_only","sixty_four_track_gain_pan_ring","sixty_four_track_idle","ten_track_ragged_strip","thirteen_track_ragged_strip"];
+def session_kinds: ["nine_track_baseline","nine_track_ragged_strip","one_twenty_eight_track_stretch","sixteen_track_strip","sixty_four_track_app_shape","sixty_four_track_builtins_only","sixty_four_track_compressor_only","sixty_four_track_console","sixty_four_track_console_half_mono","sixty_four_track_console_legacy","sixty_four_track_console_metered","sixty_four_track_console_mono","sixty_four_track_console_mono_dual","sixty_four_track_console_sends","sixty_four_track_console_sparse","sixty_four_track_dispatch_only","sixty_four_track_eq_comp_simd1","sixty_four_track_eq_only","sixty_four_track_gain_pan_ring","sixty_four_track_idle","ten_track_ragged_strip","thirteen_track_ragged_strip"];
 
-# #928: how a session row's track inputs reach the graph. `bound` is a `FrozenGraphSource`
-# processor per track input, dispatched once per track per block; `played_planes` is a prepared
+# #928, #965: how a session row's track inputs reach the graph. `played_planes` is a prepared
 # source set whose driver copies each claim's block on request and lends its played planes in
-# place -- the production feed. Exactly one row is driver-fed, and the feed is pinned per kind for
-# the reason every other row fact is: a record claiming the production feed over bound processors,
-# or the reverse, would attribute the feed's cost to the wrong row. The field is required on every
-# session record, so a record from before it existed is refused; the driver-fed row's digest
-# partner is pinned by the aggregate.
-def driver_fed_kinds: ["sixty_four_track_gain_pan_ring"];
-def session_source_feed:
-  .workload_kind as $kind |
-  .source_feed == (if any(driver_fed_kinds[]; . == $kind) then "played_planes" else "bound" end);
+# place -- the production feed, and since #965 the feed of every row. The retired `bound` feed (a
+# `FrozenGraphSource` processor per track input, dispatched once per track per block) is refused,
+# so a record from before #965 cannot pass for a production-feed measurement. The field is
+# required on every session record, so a record from before it existed is refused too.
+def session_source_feed: .source_feed == "played_planes";
 
 # #881: the rows prepared with the default web boot's meter set -- one `SAMPLE_PEAK` meter at
 # `PostMatrix` per track, a twelve-block window, bound as permanent observers -- and the key sets a
@@ -388,13 +375,6 @@ def session_kind_shape:
   # own fader and pan values kept. `strip_content` is what separates the two records, and the pair
   # is only a measurement of "an identity fader costs what a real one costs" while both rows say
   # honestly which they carried.
-  elif .workload_kind == "sixty_four_track_gain_pan_only" then
-    .tracks == 64 and .synthetic_fixture == true and
-    .strip_content == "gain+pan" and .strip_layout == "builtins" and .input_signal == "tone" and
-    .fixture_id == console_fixture
-  # Its driver-fed twin (#928, re-based by #956) states the same six facts: one session, fed two
-  # ways. What separates the two records is `source_feed`, pinned by `session_source_feed`, and
-  # nothing else.
   elif .workload_kind == "sixty_four_track_gain_pan_ring" then
     .tracks == 64 and .synthetic_fixture == true and
     .strip_content == "gain+pan" and .strip_layout == "builtins" and .input_signal == "tone" and
