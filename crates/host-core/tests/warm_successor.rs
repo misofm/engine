@@ -20,13 +20,12 @@ mod successor;
 use graph::{GraphNodeId, StableGraphId, TrackStage};
 use graph_compiler::Backend;
 use host_core::{
-    HostLiveControlRequest, HostPrepareCaps, PrepareDiagnostics, PreparedHost, SuccessorBase, WarmConfig, WarmDecision,
-    WarmLead, WarmUnavailable, stall_ring_frames, warm_lead,
+    HostLiveControlRequest, HostPrepareCaps, PrepareDiagnostics, PreparedHost, SuccessorBase,
+    WarmConfig, WarmDecision, WarmLead, WarmUnavailable, stall_ring_frames, warm_lead,
 };
 use session::{
-    Console, Effect, EffectIdentity, EffectQuality, LinkMode, Route, RouteDestination,
-    RouteSource, SendTap, SessionModel, Sidechain, SidechainDeclaration, StableId, Submix,
-    parse_session_json,
+    Console, Effect, EffectIdentity, EffectQuality, LinkMode, Route, RouteDestination, RouteSource,
+    SendTap, SessionModel, Sidechain, SidechainDeclaration, StableId, Submix, parse_session_json,
 };
 use successor::{Session, caps};
 
@@ -83,7 +82,11 @@ fn track(model: &mut SessionModel, id: &str, inserts: Vec<Effect>) {
 
 /// Strip `id`'s inserts.
 fn inserts<'m>(model: &'m mut SessionModel, id: &str) -> &'m mut Vec<Effect> {
-    if let Some(track) = model.tracks.iter_mut().find(|track| track.id.as_str() == id) {
+    if let Some(track) = model
+        .tracks
+        .iter_mut()
+        .find(|track| track.id.as_str() == id)
+    {
         return &mut track.inserts.effects;
     }
     let submix = model
@@ -359,8 +362,16 @@ fn limiter_on_t1() -> Edit {
 fn a_growth_leads_every_carried_node_by_whole_quanta() {
     // A latent insert on a playing track.
     let edit = limiter_on_t1();
-    let latency = edit.prepare(edit.base()).expect("ordinary").report.latency_samples;
-    assert_eq!(latency.div_ceil(QUANTUM) * QUANTUM, LEAD, "L rounds up to 512");
+    let latency = edit
+        .prepare(edit.base())
+        .expect("ordinary")
+        .report
+        .latency_samples;
+    assert_eq!(
+        latency.div_ceil(QUANTUM) * QUANTUM,
+        LEAD,
+        "L rounds up to 512"
+    );
     let lead = warm(edit.decide(&CONFIG));
     assert_eq!((lead.lead_samples, &*lead.restart_whole), (LEAD, &[][..]));
     let w = edit.warm(&lead);
@@ -558,7 +569,13 @@ fn prime_budget_holds_at_the_exact_count() {
         .iter()
         .map(|track| arrival(&w, &stages(track.id.as_str(), TrackStage::Input)[0]))
         .sum();
-    let channels: u64 = edit.b.model.sources.iter().map(|source| u64::from(source.channels)).sum();
+    let channels: u64 = edit
+        .b
+        .model
+        .sources
+        .iter()
+        .map(|source| u64::from(source.channels))
+        .sum();
     let expected = 4 * (LEAD * channels + 2 * lines);
     assert_eq!(w.prime_bytes(), expected);
     assert_eq!(lead.prime_bytes(), expected);
@@ -737,4 +754,3 @@ fn a_lead_of_another_edit_is_the_invariant_error() {
         )
     );
 }
-
