@@ -1923,10 +1923,10 @@ impl<L: Lane> InputStage<L> {
     /// # Padded lanes and a collapsed stage
     ///
     /// A padded lane carries identity coefficients and unit trim and is answered by the same
-    /// terms on its own state. A collapsed stage's right channel is frozen at the collapse; it
-    /// is still read, and that is sound for the reason the effect contract gives
-    /// (`PreparedNativeEffectBank::lanes_at_rest`): a frozen word that is not at rest only clears
-    /// a bit.
+    /// terms on its own state. A collapsed stage ([`InputStage::collapsed`]) answers from channel
+    /// `0` alone: its right channel is frozen at the collapse and stale until the disengage copy,
+    /// and the counterfactual right channel is the left one (the effect contract's collapsed-bank
+    /// rule, `PreparedNativeEffectBank::lanes_at_rest`, #1894).
     ///
     /// State only, `&self`, allocation-free and bounded by the lane count.
     fn lanes_at_rest(&self) -> u32 {
@@ -1934,7 +1934,8 @@ impl<L: Lane> InputStage<L> {
             return 0;
         }
         let mut rest = (1_u32 << L::WIDTH) - 1;
-        for channel in &self.state.section {
+        let live = if self.collapsed { 1 } else { 2 };
+        for channel in &self.state.section[..live] {
             for section in channel {
                 for word in [section.ic1, section.ic2] {
                     let words = lane_read::<L>(word);
@@ -1949,22 +1950,22 @@ impl<L: Lane> InputStage<L> {
         rest
     }
 
-    /// Advance the silence counters of the lanes in `lanes_mask` by `frames`, both channels,
-    /// exactly as a rendered block of `frames` frames of `+0.0` would (`silence_advance`, issue
-    /// #1781): the caller skips the block, and every lane in the mask is one
-    /// [`Self::lanes_at_rest`] reports. A lane outside the mask keeps its counters.
+    /// Advance the silence counters of the lanes in `lanes_mask` by `frames`, both channels (the
+    /// live one alone when collapsed, below), exactly as a rendered block of `frames` frames of
+    /// `+0.0` would (`silence_advance`, issue #1781): the caller skips the block, and every lane in
+    /// the mask is one [`Self::lanes_at_rest`] reports. A lane outside the mask keeps its counters.
     ///
-    /// Both channels advance even when the stage is collapsed, where the one-plane body would have
-    /// left the right counter frozen. Nothing reads a collapsed stage's right counter before the
-    /// disengage copy ([`Self::desymmetrize`]) overwrites it with the left one, so the difference
-    /// cannot be observed.
+    /// A collapsed stage advances channel `0`'s counter alone, as the one-plane body would: the
+    /// right counter stays frozen until the disengage copy ([`Self::desymmetrize`]) overwrites it
+    /// with the left one (the effect contract's collapsed-bank rule, #1894).
     fn advance_clocks(&mut self, lanes_mask: u32, frames: usize) {
         let mut flags = [0.0_f32; MAX_BANK_LANES];
         for (lane, flag) in flags.iter_mut().enumerate().take(L::WIDTH) {
             *flag = f32::from(u8::from(lanes_mask & (1 << lane) != 0));
         }
         let mask = mask_from_flags::<L>(&flags[..L::WIDTH]);
-        for silence in &mut self.state.silence {
+        let live = if self.collapsed { 1 } else { 2 };
+        for silence in &mut self.state.silence[..live] {
             let mut advanced = *silence;
             lane::kernels::silence_advance(&mut advanced, frames);
             *silence = L::select(mask, advanced, *silence);
@@ -4713,8 +4714,9 @@ impl BuiltinInputBank {
     // REALTIME_POLICY_BEGIN
     /// The lanes of this bank at exact rest, bit `l` for lane `l`, padded lanes included (issue
     /// #1781, #1107 D3): one block of exact `+0.0` on both planes would leave every state word of
-    /// the lane bit-identical and write exact `+0.0` on both planes. The silence counters are the
-    /// one clock ([`Self::advance_clocks`]). See `InputStage::lanes_at_rest` for the terms and the
+    /// the lane bit-identical and write exact `+0.0` on both planes; a collapsed bank answers from
+    /// channel `0` alone (#1894). The silence counters are the one clock
+    /// ([`Self::advance_clocks`]). See `InputStage::lanes_at_rest` for the terms and the
     /// signed-zero finding: no ramp in flight in the bank, every integrator at `+0.0` bits, and a
     /// polarity-inverted lane is not declined because the kernel writes `+0.0` for it. State only,
     /// allocation-free and bounded by the lane count.
@@ -4723,11 +4725,12 @@ impl BuiltinInputBank {
         per_width!(InputStageKernel(stage) in &self.stage => stage.lanes_at_rest())
     }
 
-    /// Advance the silence counters of the lanes in `lanes_mask` by `frames` on both channels,
-    /// exactly as a rendered `+0.0` block would, for a block the caller skips (issue #1781). Each
-    /// lane in the mask must be one [`Self::lanes_at_rest`] reports for the block; the caller skips
-    /// a bank whole, so it passes every lane, padded lanes included. Allocation-free and bounded by
-    /// the lane count, never by `frames`.
+    /// Advance the silence counters of the lanes in `lanes_mask` by `frames` on both channels (on
+    /// channel `0` alone while collapsed, #1894), exactly as a rendered `+0.0` block would, for a
+    /// block the caller skips (issue #1781). Each lane in the mask must be one
+    /// [`Self::lanes_at_rest`] reports for the block; the caller skips a bank whole, so it passes
+    /// every lane, padded lanes included. Allocation-free and bounded by the lane count, never by
+    /// `frames`.
     pub fn advance_clocks(&mut self, lanes_mask: u32, frames: u32) {
         debug_assert_eq!(
             lanes_mask & !self.lanes_at_rest() & ((1 << self.width.lanes()) - 1),
