@@ -122,6 +122,29 @@ sees: the runner's shared temporary directory hides it.
 
 - Gates 1 to 3's runs and outputs; any D3 leftover found and what was done with it.
 
+Attempt 1 (2026-10-24, from `main` 7255ebc37; the six sites had moved to `:203`, `:211`, `:283`,
+`:339`, `:439` and `:542`, and the step is still at `:274-280`). D1 uses one module-level
+`withScratch(prefix, body)` helper with a try/finally, and the two multi-line preload template
+literals keep their bytes.
+
+- Gate 1 (parent commit's test file, new step): exit 1. The step names the six entries
+  `enginectl-{eval,report-eval,request-precedence,retired-stems,submix,vca}-*` **and a seventh,
+  `node-compile-cache`**. `RUNNER_TEMP` is empty afterwards.
+- Gate 2 (with D1): the 569 + 18 tests pass, but the step exits 1 on `node-compile-cache` alone.
+  `RUNNER_TEMP` is empty afterwards.
+- Gate 3: the step exits 1 on the `assert.fail("probe")` test failure. A direct `node --test` with
+  a fresh `TMPDIR` fails 1 of 18 tests and leaves that `TMPDIR` empty. The probe is reverted.
+- Gate 4: `check-ci-path-routing.py`, `test-ci-path-routing.py` and `check-workspace-policy.sh`
+  exit 0.
+- **D3 leftover (stopped and reported, not fixed):** `node-compile-cache` is Node's module compile
+  cache. Its default directory is `os.tmpdir()/node-compile-cache`, and a tool that calls
+  `module.enableCompileCache()` writes it. When each command runs alone, it comes from
+  `scripts/check-sdk-types.sh` (`node_modules/.bin/tsc`: `typescript/lib/tsc.js` enables the
+  cache) and from `scripts/sdk-package.sh check` (`npm pack` at `:60`: npm 10.9.8's
+  `lib/cli.js:1-7` enables it). The other three commands leave nothing. Neither creator is in this
+  issue's authorized paths. Setting `NODE_DISABLE_COMPILE_CACHE=1` stops both from writing it (one
+  local probe). Root decides; there is no exemption list.
+
 ## Dependencies
 
 - *Fail the web AudioWorklet test step when it leaves anything in its temporary directory*
