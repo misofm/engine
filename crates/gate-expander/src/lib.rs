@@ -62,7 +62,7 @@ use effect_runtime::ramp::LinearRamp;
 use effect_runtime::state_payload as payload;
 use lane::{Backend, Lane, Simd4};
 
-use kernel::{GateArgs, GateCoef, GateState, MAX_WIDTH, RAMP_COUNT, RATE_COUNT, gate_block};
+use kernel::{GateArgs, GateCoef, GateState, MAX_WIDTH, RAMP_COUNT, RATE_COUNT, gate_frames};
 
 const PARAMETER_COUNT: usize = 7;
 
@@ -841,7 +841,12 @@ impl<L: Lane, const CONNECTED: bool> PreparedGate<L, CONNECTED> {
     /// at all, would produce the same samples — the `RAMPING = false` variant omits updates that
     /// are exact no-ops once every `remaining` is zero — which is what makes the render
     /// partition-invariant.
-    fn run_block(
+    ///
+    /// `MONO` (issue #973) renders the collapsed track: `left` holds both channels, `right` is the
+    /// ungathered scratch and is never read or written, and only the left channel's state moves.
+    /// The silent test, the kernel and the D7 check then read the left plane and the left state
+    /// only, which is the dual predicate with the right conjunct restated as the left one.
+    fn run_block<const MONO: bool>(
         &mut self,
         left: &mut [f32],
         right: &mut [f32],
@@ -851,7 +856,7 @@ impl<L: Lane, const CONNECTED: bool> PreparedGate<L, CONNECTED> {
     ) {
         let width = L::WIDTH;
         let smoothed = (self.ramp_frames_left as usize).min(frames);
-        if self.silent_block(left, right, sidechain) {
+        if self.silent_block::<MONO>(left, right, sidechain) {
             // Every lane of both channels is at its exact rest and every input word is `+0.0`,
             // so the kernel would leave every state word as it is and write the `+0.0` the
             // buffers already hold, and `finish_block` would recover and report nothing. The
@@ -865,20 +870,29 @@ impl<L: Lane, const CONNECTED: bool> PreparedGate<L, CONNECTED> {
         if smoothed > 0 {
             let split = smoothed * width;
             let side = sidechain.map(|(l, r)| (&l[..split], &r[..split]));
-            self.run_segment::<true>(&mut left[..split], &mut right[..split], side, smoothed);
+            let right = if MONO {
+                &mut [][..]
+            } else {
+                &mut right[..split]
+            };
+            self.run_segment::<true, MONO>(&mut left[..split], right, side, smoothed);
         }
         if smoothed < frames {
             let split = smoothed * width;
             let side = sidechain.map(|(l, r)| (&l[split..], &r[split..]));
-            self.run_segment::<false>(
-                &mut left[split..],
-                &mut right[split..],
-                side,
-                frames - smoothed,
-            );
+            let right = if MONO {
+                &mut [][..]
+            } else {
+                &mut right[split..]
+            };
+            self.run_segment::<false, MONO>(&mut left[split..], right, side, frames - smoothed);
         }
         self.ramp_frames_left -= smoothed as u32;
-        self.finish_block(left, right, frames, reports);
+        if MONO {
+            self.finish_block_mono(left, frames, reports);
+        } else {
+            self.finish_block(left, right, frames, reports);
+        }
     }
 
     /// Whether this block may skip the kernel (issue #1746): every input plane is exact `+0.0`
@@ -891,8 +905,11 @@ impl<L: Lane, const CONNECTED: bool> PreparedGate<L, CONNECTED> {
     /// `#[inline(never)]`: it carries no vector arithmetic, and out of line it cannot change how
     /// the kernel inlines into `process_bank`, the one `f32x4` function the wasm kernel roster
     /// requires for this effect.
+    ///
+    /// `MONO` reads the left plane and the left channel's rest only (issue #973): the right plane
+    /// is not gathered, and a collapsed bank's counterfactual right channel is its left one.
     #[inline(never)]
-    fn silent_block(
+    fn silent_block<const MONO: bool>(
         &self,
         left: &[f32],
         right: &[f32],
@@ -902,12 +919,16 @@ impl<L: Lane, const CONNECTED: bool> PreparedGate<L, CONNECTED> {
         if SILENT_FORBIDDEN.with(core::cell::Cell::get) {
             return false;
         }
+        let all = all_lanes(L::WIDTH);
+        if MONO {
+            return block_is_positive_zero(left) && self.channel_rest_lanes(0) == all;
+        }
         block_is_positive_zero(left)
             && block_is_positive_zero(right)
             && sidechain.is_none_or(|(side_left, side_right)| {
                 block_is_positive_zero(side_left) && block_is_positive_zero(side_right)
             })
-            && self.rest_lanes() == all_lanes(L::WIDTH)
+            && self.rest_lanes() == all
     }
 
     /// The lanes at exact rest on both channels (`PreparedNativeEffectBank::lanes_at_rest`, issue
@@ -920,21 +941,24 @@ impl<L: Lane, const CONNECTED: bool> PreparedGate<L, CONNECTED> {
     /// selects the ramping segment, advances by the block length alone once every ramp is
     /// settled. It has no per-lane clock. From state only, no allocation, bounded by the width.
     fn rest_lanes(&self) -> u32 {
+        self.channel_rest_lanes(0) & self.channel_rest_lanes(1)
+    }
+
+    /// The lanes of one channel at exact rest: [`kernel::channel_at_rest`] per lane.
+    fn channel_rest_lanes(&self, channel: usize) -> u32 {
         let width = L::WIDTH;
         let mut mask = all_lanes(width);
-        for channel in 0..2 {
-            let coef = self.coef[channel].lanes();
-            let state = self.state[channel].lanes();
-            for lane in 0..width {
-                if !kernel::channel_at_rest(&coef[lane], &state[lane]) {
-                    mask &= !(1 << lane);
-                }
+        let coef = self.coef[channel].lanes();
+        let state = self.state[channel].lanes();
+        for lane in 0..width {
+            if !kernel::channel_at_rest(&coef[lane], &state[lane]) {
+                mask &= !(1 << lane);
             }
         }
         mask
     }
 
-    fn run_segment<const RAMPING: bool>(
+    fn run_segment<const RAMPING: bool, const MONO: bool>(
         &mut self,
         left: &mut [f32],
         right: &mut [f32],
@@ -942,7 +966,7 @@ impl<L: Lane, const CONNECTED: bool> PreparedGate<L, CONNECTED> {
         frames: usize,
     ) {
         let (state_left, state_right) = self.state.split_at_mut(1);
-        gate_block::<L, CONNECTED, RAMPING>(GateArgs {
+        gate_frames::<L, CONNECTED, RAMPING, MONO>(GateArgs {
             left,
             right,
             sidechain,
@@ -1001,6 +1025,92 @@ impl<L: Lane, const CONNECTED: bool> PreparedGate<L, CONNECTED> {
                 *counter = counter.saturating_add(1);
             }
         }
+    }
+
+    /// [`finish_block`](Self::finish_block) for a collapsed block (issue #973): the left plane and
+    /// the left gain words only decide. A failed lane is zeroed and recovered on **both**
+    /// channels, as the dual block on `L == R` fails and recovers both: the right channel's
+    /// `timing` is its own committed values, which the disengage copy does not carry, so the dual
+    /// run's re-seed from the right defaults must happen here (its right state words the copy then
+    /// replaces). An active lane's failure is counted on both channels, because the right plane
+    /// the seam writes is this left plane.
+    fn finish_block_mono(
+        &mut self,
+        left: &mut [f32],
+        frames: usize,
+        reports: &mut [ProcessReport; MAX_WIDTH],
+    ) {
+        let width = L::WIDTH;
+        let mut gains = [0.0_f32; MAX_WIDTH];
+        self.state[0].gain_db.store(&mut gains[..width]);
+        if check_block::<L>(left) && check_block::<L>(&gains[..width]) {
+            return;
+        }
+        let failed = nonfinite_lane_mask::<L>(left) | nonfinite_lane_mask::<L>(&gains[..width]);
+        for lane in 0..width {
+            if failed & (1 << lane) == 0 {
+                continue;
+            }
+            for frame in 0..frames {
+                left[frame * width + lane] = 0.0;
+            }
+            self.reset_lane_full(0, lane);
+            self.reset_lane_full(1, lane);
+            if !self.is_active(lane) {
+                continue;
+            }
+            let report = &mut reports[lane];
+            report.nonfinite_left_blocks = report.nonfinite_left_blocks.saturating_add(1);
+            report.nonfinite_right_blocks = report.nonfinite_right_blocks.saturating_add(1);
+        }
+    }
+
+    /// The `DESIGNED` term of the channel-symmetry witness for `lane` (issue #973): whether every
+    /// per-channel word the kernel reads that is not running state compares bit-equal between
+    /// the two channels.
+    ///
+    /// # The word list, and why it is exactly this
+    ///
+    /// [`gate_frames`] reads per channel a [`GateCoef`] and a [`GateState`], and nothing else:
+    ///
+    /// * `GateCoef`: `hold_samples` (the reload value), `bypass`, `link_max` and `link_avg`. The
+    ///   bypass and link words are prepared from whole-instance values, so they cannot differ
+    ///   today; they are compared because the kernel loads them per channel.
+    /// * the four parameter ramps (`GateState::ramps`) and the two rate ramps
+    ///   (`GateState::rates`), all four fields each: `remaining` decides whether a ramp moves and
+    ///   when it snaps, and `current`, `target` and `step` are what it moves.
+    ///
+    /// Deliberately excluded:
+    ///
+    /// * `gain_db` and `hysteresis` (`open`, `hold`): running state, which the induction the
+    ///   witness states carries, not designed words.
+    /// * `defaults` and `timing`: control-side values the kernel never loads. A reset or a hold
+    ///   retime that made the channels disagree shows in `hold_samples` and the ramps.
+    /// * `sample_rate`, `automation_capacity`, `ramp_frames_left`, `active`: whole-instance.
+    ///
+    /// Raw bits, so `+0.0` against `-0.0` declines. A lane past the width declines.
+    fn designed_channel_symmetry(&self, lane: usize) -> bool {
+        if lane >= L::WIDTH {
+            return false;
+        }
+        let same = |a: L, b: L| lane_get(a, lane).to_bits() == lane_get(b, lane).to_bits();
+        let (coef_left, coef_right) = (&self.coef[0], &self.coef[1]);
+        let (left, right) = (&self.state[0], &self.state[1]);
+        same(coef_left.hold_samples, coef_right.hold_samples)
+            && same(coef_left.bypass, coef_right.bypass)
+            && same(coef_left.link_max, coef_right.link_max)
+            && same(coef_left.link_avg, coef_right.link_avg)
+            && left
+                .ramps
+                .iter()
+                .chain(&left.rates)
+                .zip(right.ramps.iter().chain(&right.rates))
+                .all(|(l, r)| {
+                    same(l.current, r.current)
+                        && same(l.target, r.target)
+                        && same(l.step, r.step)
+                        && same(l.remaining, r.remaining)
+                })
     }
 
     // REALTIME_POLICY_BEGIN: #1278 D3, the payload codec runs in the plan-swap block.
@@ -1253,8 +1363,15 @@ impl<const CONNECTED: bool> PreparedNativeEffect for PreparedGate<f32, CONNECTED
         self.apply_automation(block.automation, block.first_sample, 0, &mut reports[0]);
         let frames = block.frames();
         let sidechain = if CONNECTED { block.sidechain } else { None };
-        self.run_block(block.left, block.right, sidechain, frames, &mut reports);
+        self.run_block::<false>(block.left, block.right, sidechain, frames, &mut reports);
         reports[0]
+    }
+
+    /// Issue #973: [`PreparedGate::designed_channel_symmetry`] on lane 0. The term speaks for
+    /// designed words only, connected or not: a sidechain's two channels are signal, which the
+    /// witness's other terms and the compile's routing own, as for the compressor.
+    fn channel_symmetry(&self) -> bool {
+        self.designed_channel_symmetry(0)
     }
 
     /// Issue #143 D2: the branching smoother's own gain word, read for lane 0.
@@ -1341,34 +1458,31 @@ macro_rules! bank_impl {
             }
 
             fn process_bank(&mut self, block: EffectBankProcessBlock<'_>) -> BankProcessReport {
-                let width = self.bank_width.expect("a bank is prepared with a width");
-                let mut report = BankProcessReport::empty(width);
-                // The block constructor validated every shape (finding F11); what it cannot know
-                // is which bank the block is handed to, so the width and the absent sidechain --
-                // a bank is only bound for an unconnected sidechain port -- stay real guards.
-                if block.width != width || block.sidechain.is_some() {
-                    return report;
-                }
-                debug_assert_eq!(block.left.len(), block.frames as usize * <$lane>::WIDTH);
-                let mut reports = [ProcessReport::default(); MAX_WIDTH];
-                for track in 0..<$lane>::WIDTH {
-                    // A padded lane carries no track, so no span is its to apply (issue #1092).
-                    if !self.is_active(track) {
-                        continue;
-                    }
-                    let start = block.automation_offsets[track] as usize;
-                    let end = block.automation_offsets[track + 1] as usize;
-                    self.apply_automation(
-                        &block.automation[start..end],
-                        block.first_sample,
-                        track,
-                        &mut reports[track],
-                    );
-                }
-                let frames = block.frames as usize;
-                self.run_block(block.left, block.right, None, frames, &mut reports);
-                report.reports[..<$lane>::WIDTH].copy_from_slice(&reports[..<$lane>::WIDTH]);
-                report
+                self.process_bank_inner::<false>(block)
+            }
+
+            /// Issue #973: [`PreparedGate::designed_channel_symmetry`].
+            fn lane_channel_symmetry(&self, lane: usize) -> bool {
+                self.designed_channel_symmetry(lane)
+            }
+
+            fn supports_mono_collapse(&self) -> bool {
+                true
+            }
+
+            fn process_bank_mono(
+                &mut self,
+                block: EffectBankProcessBlock<'_>,
+            ) -> BankProcessReport {
+                self.process_bank_inner::<true>(block)
+            }
+
+            fn desymmetrize_channels(&mut self) {
+                self.desymmetrize();
+            }
+
+            fn channels_agree(&self) -> bool {
+                self.channels_bit_equal()
             }
 
             // REALTIME_POLICY_BEGIN: #1278 D3, the payload calls run in the plan-swap block.
@@ -1411,6 +1525,95 @@ macro_rules! bank_impl {
             }
         }
     };
+}
+
+impl<L: Lane> PreparedGate<L, false> {
+    /// The one bank body, dual or collapsed (issue #973).
+    ///
+    /// `MONO` chooses the render body and nothing else: the guard, the automation drain (both
+    /// channels' spans, as a dual block takes them) and the report are the same statements in the
+    /// same order. Inlined into each caller so the dual and the collapsed body stay two symbols,
+    /// `process_bank` and `process_bank_mono`, each with the kernel inlined.
+    #[inline(always)]
+    fn process_bank_inner<const MONO: bool>(
+        &mut self,
+        block: EffectBankProcessBlock<'_>,
+    ) -> BankProcessReport {
+        let width = self.bank_width.expect("a bank is prepared with a width");
+        let mut report = BankProcessReport::empty(width);
+        // The block constructor validated every shape (finding F11); what it cannot know is which
+        // bank the block is handed to, so the width and the absent sidechain -- a bank is only
+        // bound for an unconnected sidechain port -- stay real guards.
+        if block.width != width || block.sidechain.is_some() {
+            return report;
+        }
+        debug_assert_eq!(block.left.len(), block.frames as usize * L::WIDTH);
+        let mut reports = [ProcessReport::default(); MAX_WIDTH];
+        for track in 0..L::WIDTH {
+            // A padded lane carries no track, so no span is its to apply (issue #1092).
+            if !self.is_active(track) {
+                continue;
+            }
+            let start = block.automation_offsets[track] as usize;
+            let end = block.automation_offsets[track + 1] as usize;
+            self.apply_automation(
+                &block.automation[start..end],
+                block.first_sample,
+                track,
+                &mut reports[track],
+            );
+        }
+        let frames = block.frames as usize;
+        self.run_block::<MONO>(block.left, block.right, None, frames, &mut reports);
+        report.reports[..L::WIDTH].copy_from_slice(&reports[..L::WIDTH]);
+        report
+    }
+
+    /// The collapse's disengage copy (issue #973): the left channel's whole per-channel render
+    /// state onto the right, every lane. That is every word [`gate_frames`] reads per channel:
+    /// the [`GateState`] (`gain_db`, `open`, `hold`, the parameter and rate ramps) and the
+    /// [`GateCoef`]. A hold retime taken on the right during the collapse read a frozen
+    /// countdown; this copy replaces it with the left one, which is the dual run's.
+    ///
+    /// `defaults` and `timing` are not copied: they are each channel's own committed values,
+    /// which a collapsed block's automation updates on both channels as a dual block would.
+    fn desymmetrize(&mut self) {
+        self.state[1] = self.state[0];
+        self.coef[1] = self.coef[0];
+    }
+
+    /// [`PreparedNativeEffectBank::channels_agree`] (issue #973): every word
+    /// [`desymmetrize`](Self::desymmetrize) copies compares bit-equal between the channels, on
+    /// every lane. The whole per-channel state is 32 lane words, so it is compared outright; no
+    /// fixed point is needed.
+    fn channels_bit_equal(&self) -> bool {
+        let words = |coef: &GateCoef<L>, state: &GateState<L>| {
+            let ramp_words =
+                |ramp: &kernel::GateRamp<L>| [ramp.current, ramp.target, ramp.step, ramp.remaining];
+            let mut all = [L::zero(); 4 + 3 + 4 * (RAMP_COUNT + RATE_COUNT)];
+            all[..7].copy_from_slice(&[
+                coef.hold_samples,
+                coef.bypass,
+                coef.link_max,
+                coef.link_avg,
+                state.gain_db,
+                state.hysteresis.open,
+                state.hysteresis.hold,
+            ]);
+            for (chunk, ramp) in all[7..]
+                .chunks_exact_mut(4)
+                .zip(state.ramps.iter().chain(&state.rates))
+            {
+                chunk.copy_from_slice(&ramp_words(ramp));
+            }
+            all
+        };
+        let left = words(&self.coef[0], &self.state[0]);
+        let right = words(&self.coef[1], &self.state[1]);
+        left.iter().zip(&right).all(|(l, r)| {
+            (0..L::WIDTH).all(|lane| lane_get(*l, lane).to_bits() == lane_get(*r, lane).to_bits())
+        })
+    }
 }
 
 // REALTIME_POLICY_BEGIN: #1747, the clock advance of a skipped block.
@@ -1785,14 +1988,14 @@ mod tests {
             }
             bank_reports = [ProcessReport::default(); MAX_WIDTH];
             peer_reports = [ProcessReport::default(); MAX_WIDTH];
-            bank.run_block(
+            bank.run_block::<false>(
                 &mut bank_left,
                 &mut bank_right,
                 None,
                 FRAMES,
                 &mut bank_reports,
             );
-            control.run_block(
+            control.run_block::<false>(
                 &mut control_left,
                 &mut control_right,
                 None,
@@ -1801,7 +2004,7 @@ mod tests {
             );
             for track in 0..lanes {
                 let mut single = [ProcessReport::default(); MAX_WIDTH];
-                peers[track].run_block(
+                peers[track].run_block::<false>(
                     &mut peer_left[track],
                     &mut peer_right[track],
                     None,
@@ -1881,7 +2084,7 @@ mod tests {
         let mut prefix_left = vec![0.01_f32; PREFIX * WIDTH];
         let mut prefix_right = prefix_left.clone();
         let mut reports = [ProcessReport::default(); MAX_WIDTH];
-        donor.run_block(
+        donor.run_block::<false>(
             &mut prefix_left,
             &mut prefix_right,
             None,
@@ -1937,14 +2140,14 @@ mod tests {
                 restored_right[frame * WIDTH + lane] = -sample;
             }
         }
-        donor.run_block(
+        donor.run_block::<false>(
             &mut donor_left,
             &mut donor_right,
             None,
             continuation_frames,
             &mut reports,
         );
-        restored.run_block(
+        restored.run_block::<false>(
             &mut restored_left,
             &mut restored_right,
             None,

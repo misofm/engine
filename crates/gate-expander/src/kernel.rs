@@ -245,6 +245,22 @@ pub struct GateArgs<'a, L: Lane> {
 /// causality and signed-zero identity in bypass and zero-gain paths.
 #[inline(always)]
 pub fn gate_block<L: Lane, const CONNECTED: bool, const RAMPING: bool>(args: GateArgs<'_, L>) {
+    gate_frames::<L, CONNECTED, RAMPING, false>(args);
+}
+
+/// The one block body of [`gate_block`], dual or collapsed.
+///
+/// `MONO` (issue #973) selects the collapsed body: the track's two channels are on the left plane,
+/// `right` is never read or written (the chain does not gather it) and the right state is left as
+/// it is. The left channel takes the dual body's own step with the left word as both its own and
+/// its partner detector, so the link is `max(|p|, |p|)` or `0.5|p| + 0.5|p|` in the dual
+/// operation order (`0.5|p| + 0.5|p|` is not `|p|` for a subnormal `p`): the left plane and state
+/// come out bit-identical to a dual block whose right plane equals its left. A collapsed bank is
+/// never connected.
+#[inline(always)]
+pub fn gate_frames<L: Lane, const CONNECTED: bool, const RAMPING: bool, const MONO: bool>(
+    args: GateArgs<'_, L>,
+) {
     let GateArgs {
         left,
         right,
@@ -255,7 +271,8 @@ pub fn gate_block<L: Lane, const CONNECTED: bool, const RAMPING: bool>(args: Gat
     } = args;
     let width = L::WIDTH;
     debug_assert_eq!(left.len(), frames * width);
-    debug_assert_eq!(right.len(), frames * width);
+    debug_assert!(MONO || right.len() == frames * width);
+    debug_assert!(!(MONO && CONNECTED));
     debug_assert_eq!(CONNECTED, sidechain.is_some());
     let empty: &[f32] = &[];
     let (side_left, side_right) = sidechain.unwrap_or((empty, empty));
@@ -266,6 +283,15 @@ pub fn gate_block<L: Lane, const CONNECTED: bool, const RAMPING: bool>(args: Gat
     let (coef_left, coef_right) = coef;
     let (state_left, state_right) = state;
 
+    if MONO {
+        for frame in 0..frames {
+            let span = frame * width;
+            let main = L::load(&left[span..span + width]);
+            let out = channel_step::<L, RAMPING>(coef_left, state_left, main, main, main);
+            out.store(&mut left[span..span + width]);
+        }
+        return;
+    }
     for frame in 0..frames {
         let span = frame * width;
         // Load all source words before either channel writes its output.
