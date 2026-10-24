@@ -4062,6 +4062,7 @@ fn a_supersession_that_would_drop_acked_pcm_is_backpressure_alike_on_both_hosts(
 }
 
 /// The C ABI plan's `latency_samples`, through the exported resource query.
+#[cfg(feature = "test-support")]
 fn c_latency(c_abi: &CAbi) -> u64 {
     // SAFETY: Every field of the report is an integer, for which zero is a valid value.
     let mut report: capi::PlanResourceReport = unsafe { core::mem::zeroed() };
