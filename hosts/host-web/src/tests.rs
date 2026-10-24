@@ -9233,7 +9233,7 @@ mod structural_apply {
         assert!(
             frames
                 .iter()
-                .all(|start| (start / quantum - ADOPTION) % WINDOW == 0),
+                .all(|start| (start / quantum - ADOPTION).is_multiple_of(WINDOW)),
             "on the adoption grid: {frames:?}"
         );
 
@@ -9273,7 +9273,7 @@ mod structural_apply {
         assert!(
             frames
                 .iter()
-                .all(|start| (start / quantum - ADOPTION) % WINDOW == 0),
+                .all(|start| (start / quantum - ADOPTION).is_multiple_of(WINDOW)),
             "on the adoption grid: {frames:?}"
         );
     }
