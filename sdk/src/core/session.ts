@@ -238,7 +238,8 @@ function channelOrder(channel: string): number {
   return channel === "left" ? 0 : channel === "right" ? 1 : 2;
 }
 
-function stableId(value: unknown, path: string): string {
+/** @internal */
+export function stableId(value: unknown, path: string): string {
   if (typeof value !== "string" || !STABLE_ID.test(value)) {
     fail(path, "a Session V1 stable ID must match [a-z][a-z0-9._-]{0,126}", CODE.invalidId);
   }
@@ -1697,7 +1698,8 @@ function normalizeAutomationOffset(raw: AutomationSpec["offset"], path: string):
 
 /**
  * One track's normalized record against the session's sources, console slots and rate. Shared by
- * the session builder and the transaction builder's `upsertTrack` (#1383).
+ * the session builder and the transaction builder's `upsertTrack` (#1383). Refusal paths start
+ * with `verb("id")`: `track` for the builder, `upsertTrack` for a transaction.
  * @internal
  */
 export function normalizeTrack(
@@ -1705,8 +1707,9 @@ export function normalizeTrack(
   sources: readonly SourceEntry[],
   slots: readonly ConsoleSlotEntry[],
   sampleRateHz: number,
+  verb = "track",
 ): ModelRecord {
-  const path = `track("${entry.id}")`;
+  const path = `${verb}("${entry.id}")`;
   const spec = entry.spec;
   if (spec === null || typeof spec !== "object") fail(path, "expected a track specification");
   knownKeys(spec, TRACK_KEYS, path, "a track");

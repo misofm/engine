@@ -172,9 +172,13 @@ describe("the builder refuses what the engine would refuse, before any byte exis
     refused(() => tx.build(), /at least one edit/);
     const unknown = { effectId: "miso.not-an-effect", parameters: {}, options: { bypass: false, quality: "normal", linkMode: "dual_mono", channel: "both" } };
     refused(() => tx.upsertTrack("t", { source: "a", inserts: [unknown] }), /unknown native effect/);
-    refused(() => tx.upsertTrack("t", { source: "missing" }), /'missing' is not a declared source/);
-    refused(() => tx.upsertTrack("t", { source: "a", fader: { leftDb: 40 } }), /fader\.leftDb/);
+    refused(() => tx.upsertTrack("t", { source: "missing" }), /upsertTrack\("t"\)\.source: 'missing' is not a declared source/);
+    refused(() => tx.upsertTrack("t", { source: "a", fader: { leftDb: 40 } }), /upsertTrack\("t"\)\.fader\.leftDb/);
     refused(() => tx.removeSource("missing"), /'missing' is not a declared source/);
+    // An ID the codec cannot carry as a stable ID would encode and then fail to decode.
+    refused(() => tx.upsertSource("Bad ID", mono), /upsertSource\(\)\.id: a Session V1 stable ID/);
+    refused(() => tx.upsertSource("", mono), /upsertSource\(\)\.id: a Session V1 stable ID/);
+    refused(() => tx.upsertTrack("Bad ID", { source: "a" }), /upsertTrack\(\)\.id: a Session V1 stable ID/);
     // The refusals left the builder as it was: still no edit.
     refused(() => tx.build(), /at least one edit/);
   });

@@ -25,6 +25,7 @@ import {
   normalizeSource,
   normalizeTrack,
   resolveLanes,
+  stableId,
   trackSourceRef,
 } from "./session.ts";
 import type { ConsoleSlotEntry, ModelRecord, ModelValue, SourceEntry } from "./session.ts";
@@ -158,7 +159,8 @@ export class TransactionBuilder {
 
   /** Declare a source, or replace the source with this ID. */
   upsertSource(sourceId: string, spec: SourceSpec): TransactionBuilder {
-    const record = normalizeSource(sourceId, spec, `upsertSource("${String(sourceId)}")`);
+    stableId(sourceId, "upsertSource().id");
+    const record = normalizeSource(sourceId, spec, `upsertSource("${sourceId}")`);
     const sources = new Map(this.#state.sources);
     sources.set(sourceId, freeze({ id: sourceId, spec: { ...spec } }));
     return this.#next(
@@ -201,7 +203,7 @@ export class TransactionBuilder {
 
   /** Declare a track, or replace the track with this ID, with the session builder's rules. */
   upsertTrack(trackId: string, spec: TrackSpec): TransactionBuilder {
-    if (typeof trackId !== "string") fail("upsertTrack().id", "expected a stable ID");
+    stableId(trackId, "upsertTrack().id");
     if (this.#state.otherGraphIds.has(trackId)) {
       fail(
         `upsertTrack("${trackId}").id`,
@@ -214,6 +216,7 @@ export class TransactionBuilder {
       [...this.#state.sources.values()],
       this.#state.slots,
       this.#state.sampleRateHz,
+      "upsertTrack",
     );
     const tracks = new Set(this.#state.tracks);
     tracks.add(trackId);
