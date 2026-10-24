@@ -20,6 +20,8 @@ Frequency ordering and Nyquist margins are validated. State passband ripple, sto
 
 Declare all crossover and multirate group delay in integer output samples, plus any filter tail. A unity/bypass path preserves that latency via PDC.
 
+The launch two-band multiband compressor has latency 0 and states a certified tail and exact-rest bound per rate (#1373): `T` = 3,810 samples and `R` about 12.2 M samples at 48 kHz (the smoother words' rest), over every crossover in 80 Hz to 8 kHz and any 64-sample crossover glide in flight (`docs/derivations/1373-multiband-compressor-tail-and-rest.md`).
+
 ## Units, mappings, automation and smoothing
 
 Crossover points are Hz; orders and quality are discrete; band gains/thresholds use declared units. Frequency movement either names a stable smoothing scheme or is structural-only.

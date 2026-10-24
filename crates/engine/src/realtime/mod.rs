@@ -48,8 +48,9 @@ pub use seqlock::{
     PublishedWordsWriter, published_words, published_words_retained_bytes,
 };
 pub use spsc::{
-    Consumer, PlanAdoption, Producer, QueueEmpty, QueueFull, QueueGeneration, SpscError,
-    SpscRetainedPayload, bounded_spsc, bounded_spsc_move, bounded_spsc_retained_payload,
+    Consumer, InPlaceProducer, PlanAdoption, Producer, QueueEmpty, QueueFull, QueueGeneration,
+    SpscError, SpscRetainedPayload, bounded_spsc, bounded_spsc_move, bounded_spsc_prefilled,
+    bounded_spsc_retained_payload,
 };
 pub use watermark::{
     CandidateOutcome, OUTCOME_EXACT, OUTCOME_SUPERSEDED, OUTCOME_TRANSITION_FALLBACK,

@@ -124,3 +124,19 @@ its crossover and detector state reach exact rest. Today it declares `Infinite`.
   + 1)`); this envelope's `T` is past it, and 1373b's per-rate T1 reaches other envelopes.
   For 1373b: at 96 kHz `1 - r` is about half its 48 kHz value, so the certificate may return
   `None` or the horizon may be hit; T1 at every launch rate must cover it.
+- **1373b, attempt 1 (2026-10-24).** `crates/multiband-compressor/src/tail.rs`: the crossover's
+  live envelope (80 Hz to 8 kHz, the iterated ramp's restart allowance
+  `E = 64 h (1 + 3u) + 2 u w_max`), `G = 10^((24 + 1e-5) / 20) (1 + u)^3` from the fast tier's F1
+  bound, `T` from `live_cascade` at `4 G` and `live_first_section` at `2 G`, rests and gains at
+  unit gain, `D` from the scaled compositions; `R = max(R_x, 64) + R_s` with `R_s` the smoother's
+  pole-form rest at the exactly scanned largest release retention; `RestBound::Bounded`, `Z` the
+  reset state; `CompositionBound::Stated`. The descriptor reads a pinned per-rate table. At 96 kHz
+  every term is bounded (no `None`, no horizon). 48 kHz: `T` 3,810, `T_rest` 10,434,
+  `R` 12,155,124 / 12,164,081 (almost all the smoother's: a dB word flushed at `1e-20` at the
+  5,000 ms release), `D` 314, `G_p` 6,884 mB; every rate in derivation part 2. The composition
+  branch with `T` in the window stays unreached (`T` is far past it at every rate).
+  Class A: no rendered bit moves. Tails that change: every plan with a reachable multiband node
+  now composes its finite tail instead of `Infinite` (graph-compiler's launch multiband fixture,
+  whose row now reads the descriptor's value); no checked-in canonical fixture holds a multiband.
+  Tests: `tests/tail_contract.rs` T1 (pin = recompute), T2 (kernel worst case, settled and
+  gliding, two peaks, `Z` and identical noise after), T3 (smoother count; `R_s` equals brute force).
