@@ -1946,3 +1946,55 @@ fn an_observe_on_a_superseded_candidate_reaches_its_replacement() {
         );
     }
 }
+
+/// #1968: a live transaction that commits revision `r` with an `Observe` arm queues the arm's
+/// record before it publishes `r` on the plan gate, so a render block whose snapshot covers `r`
+/// drains the record in the same block: a reader that sees the watermark cover `r` sees the tap
+/// armed from that block. The push records the key the gate had last published, which must still
+/// be `r - 1`'s.
+///
+/// Red if the commit publishes the revision before it queues the transaction's observation
+/// records (the order before #1968), so the watermark can cover `r` one block before the arm.
+#[test]
+fn a_live_commit_queues_its_observation_records_before_it_publishes_the_revision() {
+    let mut rig = Rig::new();
+    let before = rig.revision();
+    let mute = SessionEdit::SetControl {
+        expected_effect: None,
+        address: ControlAddress {
+            owner: Owner::Strip(StableId::parse("comp1").expect("strip")),
+            section: Section::Builtins,
+            control: 6,
+            lane: Lane::Both,
+        },
+        value: 1.0,
+        ramp_samples: None,
+    };
+    let _ = rig.session.test_take_observe_push_key();
+    assert_eq!(
+        rig.transact(&[mute, observe("comp1", true, 1)]),
+        Reply::Applied(protocol::EditPath::Live)
+    );
+    let revision = rig.revision();
+    assert_eq!(revision, before + 1, "the mute spends a revision");
+    let pushed = rig
+        .session
+        .test_take_observe_push_key()
+        .expect("the arm was queued");
+    assert_eq!(
+        pushed.revision(),
+        before,
+        "the arm is queued before its revision is published"
+    );
+    let first_sample = rig.block * 128;
+    rig.render();
+    let watermark = rig.plan.queries().watermark().expect("a watermark");
+    assert_eq!(
+        (watermark.revision, watermark.first_sample),
+        (revision, first_sample)
+    );
+    let window = rig
+        .window("comp1")
+        .expect("armed in the block that applied the revision");
+    assert_eq!((window.first_sample, window.blocks), (first_sample, 1));
+}
