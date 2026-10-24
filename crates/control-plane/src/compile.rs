@@ -74,10 +74,10 @@ pub struct CapiResources {
     /// base's ramps follow the newest commit, not the epoch that holds them; a live commit moves it
     /// with the committed model (`follow_edit_ramps`).
     pub edit_ramps: u64,
-    /// The session's spectrum service and analysis (#1594 R6), part of `active_retained`: one per
-    /// session, beside the plan whose captures it reads. Not an epoch row: a successor that keeps
-    /// spectrum keeps the same service, so the replacement peak adds only a candidate's bytes
-    /// beyond the newest plan's.
+    /// The session's spectrum service, analysis and one-shot result (#1594 R6, #1595 R7), part of
+    /// `active_retained`: one per session, beside the plan whose captures it reads. Not an epoch
+    /// row: a successor that keeps spectrum keeps the same service, so the replacement peak adds
+    /// only a candidate's bytes beyond the newest plan's.
     pub spectrum_service: u64,
 }
 
@@ -1489,11 +1489,12 @@ pub(crate) fn prepare_runtime<A: ControlAdapter>(
         limits,
         strip_heap_bytes,
     )?;
-    // #1594 R6: a plan with spectrum captures has a session spectrum service and analysis beside
-    // it (made at boot or at the promotion that installs the first captures), charged here, with
-    // the plan, so the admission of the configure that creates them sees them.
+    // #1594 R6, #1595 R7: a plan with spectrum captures has a session spectrum service, analysis
+    // and one-shot result beside it (made at boot or at the promotion that installs the first
+    // captures), charged here, with the plan, so the admission of the configure that creates them
+    // sees them.
     if spectrum.is_some() {
-        capi.spectrum_service = host_core::SpectrumService::RETAINED_BYTES;
+        capi.spectrum_service = crate::spectrum::SPECTRUM_MONITOR_RETAINED_BYTES;
         capi.active_retained = capi
             .active_retained
             .checked_add(capi.spectrum_service)
@@ -2115,7 +2116,7 @@ mod admission_tests {
         let models =
             compiled_model_admission_over(&[model(1 << 20, 3)], model(1 << 22, 7)).expect("models");
         let control = peaks(&[1], 1_000, models.retained_bytes, (0, 0))[7];
-        let service = host_core::SpectrumService::RETAINED_BYTES;
+        let service = crate::spectrum::SPECTRUM_MONITOR_RETAINED_BYTES;
         let mut prospective = candidate(1_000);
         prospective.capi.spectrum_service = service;
         let mut newest = epoch(1);
