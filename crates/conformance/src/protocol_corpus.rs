@@ -935,7 +935,12 @@ pub enum ConformanceDecoder {
 /// and the 32-byte digest) and `response.session_replace` (`edit_path` `unchanged`, 5), and the
 /// capabilities response lists command `0x0013`. Re-pinned from `5cab2cf3b4e4767f`; the frame
 /// count is 48.
-pub const COMPLETE_SCHEMA_HASH: u64 = 0xc85b_2a0d_ff5d_2a92;
+/// #1594 adds `SPECTRUM_CONFIGURE` (`0x0010`): the corpus gains `command.spectrum_configure` (a
+/// collection of two taps with the hop) and `response.spectrum_configured` (a monitor rebuild with
+/// its plan epoch). The capability registry does not list `0x0010` until #1595. The 48 earlier
+/// frames are byte-equal: their hash is the old pin. Re-pinned from `c85b2a0dff5d2a92`; the frame
+/// count is 50.
+pub const COMPLETE_SCHEMA_HASH: u64 = 0x2657_9fcd_7f95_9310;
 
 /// Build every command, successful response, registered non-OK status, event, and all-opcode
 /// session transaction using only public typed encoder entry points.
@@ -993,6 +998,24 @@ pub fn complete_schema_corpus() -> Vec<ConformanceFrame> {
         maximum_automation_spans: Some(4096),
         maximum_reply_bytes: Some(65_536),
     };
+    // #1594: a collection of two taps with every optional field (the hop).
+    let spectrum_request = SpectrumConfigureRequest {
+        form: SpectrumForm::Collection,
+        entries: vec![
+            SpectrumEntry {
+                target_kind: SpectrumTargetKind::TrackPostPan,
+                target_id: "vocal".to_owned(),
+                channels: ParameterChannel::Both,
+            },
+            SpectrumEntry {
+                target_kind: SpectrumTargetKind::Output,
+                target_id: "main".to_owned(),
+                channels: ParameterChannel::Left,
+            },
+        ],
+        maximum_capture_bytes: 1 << 18,
+        hop_frames: Some(512),
+    };
     let telemetry = TelemetryConfiguration {
         meter_handles: Vec::new(),
         meter_period_blocks: 0,
@@ -1020,6 +1043,7 @@ pub fn complete_schema_corpus() -> Vec<ConformanceFrame> {
                             | CommandPayload::ControlListGet(_)
                             | CommandPayload::ControlStateGet(_)
                             | CommandPayload::ResponseGet(_)
+                            | CommandPayload::SpectrumConfigure(_)
                             | CommandPayload::TransportGet
                             | CommandPayload::CountersGet(_)
                             | CommandPayload::DiagnosticsGet(_)
@@ -1087,6 +1111,10 @@ pub fn complete_schema_corpus() -> Vec<ConformanceFrame> {
             document_bytes: 70_000,
             document_sha256: core::array::from_fn(|index| u8::try_from(index).unwrap_or(0)),
         })
+    );
+    command!(
+        "command.spectrum_configure",
+        CommandPayload::SpectrumConfigure(&spectrum_request)
     );
 
     let capabilities = Capabilities {
@@ -1191,6 +1219,17 @@ pub fn complete_schema_corpus() -> Vec<ConformanceFrame> {
     success!(
         "response.response_get_tag",
         SuccessResponsePayload::ResponseResult(ResponseResult::Tag(77))
+    );
+    // #1594: a monitor rebuild, so the optional plan epoch is present.
+    success!(
+        "response.spectrum_configured",
+        SuccessResponsePayload::SpectrumConfigured(SpectrumConfigured {
+            revision: 7,
+            configured_epoch: 3,
+            adopted_epoch: 2,
+            rebuild: true,
+            plan_epoch: Some(3),
+        })
     );
     success!(
         "response.transport_get",

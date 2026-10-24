@@ -24,7 +24,10 @@ const fn tap(id: u32, fold: ObservationFold) -> ObservationDescriptor {
         id: ObservationTapId(id),
         display_name: "Gain Reduction",
         display_unit: "dB",
-        kind: ObservationKind::GainReductionDb,
+        kind: match fold {
+            ObservationFold::PeakSigned => ObservationKind::GainChangeDb,
+            _ => ObservationKind::GainReductionDb,
+        },
         unit: ParameterUnit::Db,
         cost: ObservationCost::Resident,
         cadence: ObservationCadence::PerBlock,
@@ -35,9 +38,10 @@ const fn tap(id: u32, fold: ObservationFold) -> ObservationDescriptor {
     }
 }
 
-static MENU: [ObservationDescriptor; 2] = [
+static MENU: [ObservationDescriptor; 3] = [
     tap(1, ObservationFold::PeakMagnitude),
     tap(2, ObservationFold::Latest),
+    tap(3, ObservationFold::PeakSigned),
 ];
 
 fn lane(default_window_blocks: u32) -> (ObservationLane, Vec<ObservationReader>) {
@@ -243,6 +247,33 @@ fn the_latest_fold_publishes_the_last_block_verbatim() {
     assert_eq!(window.blocks, 2);
 }
 
+/// Issue #1918: `PeakSigned` publishes the value of largest magnitude with its sign, so a boost
+/// and a cut of one size stay distinct, and of two equal magnitudes the earlier one stays.
+///
+/// Test value: red if the fold drops the sign (9.5), keeps the latest block (+4), takes the
+/// signed maximum (+4), or lets a later equal magnitude replace the earlier one.
+#[test]
+fn the_signed_peak_fold_keeps_the_sign_of_the_largest_magnitude() {
+    let (mut observation, readers) = lane(3);
+    observation.arm(2, true, 3, 0);
+    let readings = [(2.0, -1.0), (-9.5, 8.25), (4.0, -3.0)];
+    for (index, (left, right)) in readings.into_iter().enumerate() {
+        observation.accumulate(2, sample(left, right), index as u64 * 64, 64);
+    }
+    let first = readers[2].read().expect("first window");
+    assert_eq!((first.left, first.right), (-9.5, 8.25));
+
+    // A tie in magnitude keeps the earlier value, whichever its sign.
+    for (index, (left, right)) in [(1.5, -1.5), (-1.5, 1.5), (0.5, 0.5)]
+        .into_iter()
+        .enumerate()
+    {
+        observation.accumulate(2, sample(left, right), 192 + index as u64 * 64, 64);
+    }
+    let second = readers[2].read().expect("second window");
+    assert_eq!((second.left, second.right), (1.5, -1.5));
+}
+
 /// Re-arming is idempotent except that the newer window length wins and the window restarts.
 #[test]
 fn a_second_subscribe_takes_the_newer_window_length() {
@@ -332,9 +363,10 @@ fn a_lane_swap_carries_the_open_window_and_the_publisher() {
 #[test]
 fn a_lane_swap_refuses_another_menu() {
     static ONE_TAP: [ObservationDescriptor; 1] = [tap(1, ObservationFold::PeakMagnitude)];
-    static FOLDED: [ObservationDescriptor; 2] = [
+    static FOLDED: [ObservationDescriptor; 3] = [
         tap(1, ObservationFold::PeakMagnitude),
         tap(2, ObservationFold::PeakMagnitude),
+        tap(3, ObservationFold::PeakSigned),
     ];
     let (mut two, _readers) = lane(4);
     let (publisher, _reader) = observation_slot();
