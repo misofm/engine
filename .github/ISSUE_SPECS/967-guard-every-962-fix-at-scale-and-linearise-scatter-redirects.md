@@ -88,3 +88,15 @@ redirects. The `graph_fixture` fingerprint is byte-identical before and after.
 
 Mutant: the in-between check counts the run's own ops (`.any(|_| true)`). It turns
 `cohort_chain_merging_preserves_dataflow_on_random_graphs` red at `program/tests.rs:1704`.
+
+- **D5 (root ruling, after the finding).** The nightly `compiles_and_binds_65_537_tracks_with_builtins`
+  now also binds and renders the hand-built shape (`hand_built_bank_plan(true)`: builtin banks and
+  one route per track) under a 15 s bound of its own, and asserts its exact bank-member and route
+  counts. The test is the same one that `nightly.yml` already runs by name, so no workflow changes.
+  The compiled routes+console phase stays as the guard for `effect_control_resource` and the
+  route-fold metadata. The per-PR hand-built bank test shares the builder, without routes. Checked
+  once each, release with overflow checks: on pre-fix `runtime.rs` (5346bbd70) the new phase fails
+  at 16.66 s, and on the branch the whole test passes in 20.1 s.
+- **Deviation from the one-invocation timing rule.** The timing above took two invocations. The
+  first (compiled shapes) showed no difference before and after, so a frozen hand-built workload
+  (the #1045 shape) was added and timed in a second invocation, once. Neither was retried.
