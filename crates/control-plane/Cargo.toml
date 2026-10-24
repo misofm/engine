@@ -24,6 +24,8 @@ host-core = { workspace = true, features = ["control-provider"] }
 lane.workspace = true
 protocol.workspace = true
 session.workspace = true
+# #1386 D3: the `SESSION_REPLACE` document digest.
+sha2.workspace = true
 source.workspace = true
 
 [dev-dependencies]

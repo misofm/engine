@@ -395,6 +395,7 @@ fn success_reply(
         EditPath::ModelOnly => "model_only",
         EditPath::Rebuild => "rebuild",
         EditPath::Monitor => "monitor",
+        EditPath::Unchanged => "unchanged",
     };
     Reply {
         name,

@@ -881,7 +881,12 @@ fn one_call_transaction_success_and_fallbacks_avoid_owned_preparation() {
 
     let mut prepared_compat = controller(4);
     let prepared = prepared_compat
-        .prepare_command_frame(&conflict, &mut DecodeScratch::new(&mut [0_u16; 1024]), 2048)
+        .prepare_command_frame(
+            &conflict,
+            &[],
+            &mut DecodeScratch::new(&mut [0_u16; 1024]),
+            2048,
+        )
         .expect("public owned fallback");
     let PreparedCommandFrame::Immediate(prepared) = prepared else {
         panic!("revision conflict must not produce a structural token");
@@ -1087,7 +1092,12 @@ fn structural_prepare_is_invisible_until_commit_and_byte_identical_to_one_call()
     PROSPECTIVE_REPLAY_CLONES.with(|clones| clones.set(0));
     RESPONSE_STAGING_VECS.with(|allocations| allocations.set(0));
     let prepared = match endpoint
-        .prepare_command_frame(&input, &mut DecodeScratch::new(&mut [0_u16; 1024]), 2048)
+        .prepare_command_frame(
+            &input,
+            &[],
+            &mut DecodeScratch::new(&mut [0_u16; 1024]),
+            2048,
+        )
         .expect("prepare")
     {
         PreparedCommandFrame::Structural(prepared) => *prepared,
@@ -1197,7 +1207,12 @@ fn attached_observation_ends_follow_their_commit_in_one_event() {
         2,
     );
     let mut prepared = match endpoint
-        .prepare_command_frame(&input, &mut DecodeScratch::new(&mut [0_u16; 1024]), 2048)
+        .prepare_command_frame(
+            &input,
+            &[],
+            &mut DecodeScratch::new(&mut [0_u16; 1024]),
+            2048,
+        )
         .expect("prepare")
     {
         PreparedCommandFrame::Structural(prepared) => *prepared,
@@ -1288,7 +1303,12 @@ fn the_end_needs_room_with_the_commit_and_a_dropped_token_releases_it() {
         2,
     );
     let prepare = |endpoint: &mut ProtocolController<MockProvider>| match endpoint
-        .prepare_command_frame(&input, &mut DecodeScratch::new(&mut [0_u16; 1024]), 2048)
+        .prepare_command_frame(
+            &input,
+            &[],
+            &mut DecodeScratch::new(&mut [0_u16; 1024]),
+            2048,
+        )
         .expect("prepare")
     {
         PreparedCommandFrame::Structural(prepared) => *prepared,
@@ -1337,7 +1357,12 @@ fn the_end_needs_room_with_the_commit_and_a_dropped_token_releases_it() {
         crate::CommandPayload::SessionTransactionApply(&transaction),
     );
     let mut token = match endpoint
-        .prepare_command_frame(&again, &mut DecodeScratch::new(&mut [0_u16; 1024]), 2048)
+        .prepare_command_frame(
+            &again,
+            &[],
+            &mut DecodeScratch::new(&mut [0_u16; 1024]),
+            2048,
+        )
         .expect("prepare")
     {
         PreparedCommandFrame::Structural(prepared) => *prepared,
@@ -1374,7 +1399,12 @@ fn prepare_at(
         crate::CommandPayload::SessionTransactionApply(transaction),
     );
     match endpoint
-        .prepare_command_frame(&input, &mut DecodeScratch::new(&mut [0_u16; 1024]), 2048)
+        .prepare_command_frame(
+            &input,
+            &[],
+            &mut DecodeScratch::new(&mut [0_u16; 1024]),
+            2048,
+        )
         .expect("prepare")
     {
         PreparedCommandFrame::Structural(prepared) => *prepared,
@@ -1425,7 +1455,12 @@ fn edit_path_is_written_at_commit_and_replayed_byte_for_byte() {
     for path in [EditPath::Live, EditPath::ModelOnly, EditPath::Rebuild] {
         let mut endpoint = controller(8);
         let prepared = match endpoint
-            .prepare_command_frame(&input, &mut DecodeScratch::new(&mut [0_u16; 1024]), 2048)
+            .prepare_command_frame(
+                &input,
+                &[],
+                &mut DecodeScratch::new(&mut [0_u16; 1024]),
+                2048,
+            )
             .expect("prepare")
         {
             PreparedCommandFrame::Structural(prepared) => *prepared,
@@ -1477,7 +1512,12 @@ fn a_structural_commit_writes_its_replay_entry_and_evicts_at_the_commit() {
         input: &[u8],
     ) -> PreparedStructuralCommand {
         match endpoint
-            .prepare_command_frame(input, &mut DecodeScratch::new(&mut [0_u16; 1024]), 2048)
+            .prepare_command_frame(
+                input,
+                &[],
+                &mut DecodeScratch::new(&mut [0_u16; 1024]),
+                2048,
+            )
             .expect("prepare")
         {
             PreparedCommandFrame::Structural(prepared) => *prepared,
@@ -1635,7 +1675,12 @@ fn a_transaction_of_monitor_writes_commits_no_model_revision_or_event() {
         crate::CommandPayload::SessionTransactionApply(&solo),
     );
     let prepare = |endpoint: &mut ProtocolController<MockProvider>, input: &[u8]| match endpoint
-        .prepare_command_frame(input, &mut DecodeScratch::new(&mut [0_u16; 1024]), 2048)
+        .prepare_command_frame(
+            input,
+            &[],
+            &mut DecodeScratch::new(&mut [0_u16; 1024]),
+            2048,
+        )
         .expect("prepare")
     {
         PreparedCommandFrame::Structural(prepared) => *prepared,
@@ -1793,7 +1838,12 @@ fn structural_token_cancel_owner_generation_and_serial_rules_are_affine() {
         input: &[u8],
     ) -> PreparedStructuralCommand {
         match endpoint
-            .prepare_command_frame(input, &mut DecodeScratch::new(&mut [0_u16; 1024]), 2048)
+            .prepare_command_frame(
+                input,
+                &[],
+                &mut DecodeScratch::new(&mut [0_u16; 1024]),
+                2048,
+            )
             .expect("prepare")
         {
             PreparedCommandFrame::Structural(prepared) => *prepared,
@@ -1817,7 +1867,12 @@ fn structural_token_cancel_owner_generation_and_serial_rules_are_affine() {
 
     let canceled = structural(&mut owner, &first);
     assert!(matches!(
-        owner.prepare_command_frame(&first, &mut DecodeScratch::new(&mut [0_u16; 1024]), 2048,),
+        owner.prepare_command_frame(
+            &first,
+            &[],
+            &mut DecodeScratch::new(&mut [0_u16; 1024]),
+            2048,
+        ),
         Err(CommandFrameProcessError::PreparedCommandOutstanding)
     ));
     let blocked = owner.process(capability(99, b"must-not-enter-replay"));

@@ -118,6 +118,11 @@ pub enum MessageId {
     ControlStateGet = 0x000d,
     /// `RESPONSE_GET` (decision 17, C13).
     ResponseGet = 0x000e,
+    /// `SESSION_REPLACE` (#1386): replace the session with a document the host passes beside the
+    /// frame, applied as the one transaction its diff against the committed model gives.
+    /// `0x000f`-`0x0012` are claimed by open specs (#1586, #1594, #1595) and stay unallocated until
+    /// they land.
+    SessionReplace = 0x0013,
     /// `SESSION_COMMITTED`.
     SessionCommitted = 0x8001,
     /// `TRANSPORT_STATE`.
@@ -179,6 +184,7 @@ impl MessageId {
             0x000c => Self::ControlListGet,
             0x000d => Self::ControlStateGet,
             0x000e => Self::ResponseGet,
+            0x0013 => Self::SessionReplace,
             0x8001 => Self::SessionCommitted,
             0x8010 => Self::TransportState,
             0x8011 => Self::ObservationEnded,

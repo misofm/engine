@@ -329,6 +329,20 @@ pub(crate) mod transaction_applied {
     };
 }
 
+/// `SESSION_REPLACE` (#1386): the frame names the document the host passes beside it, by its exact
+/// length and its SHA-256; it never carries the document. Its success reply is
+/// [`transaction_applied`].
+pub(crate) mod session_replace_request {
+    use super::*;
+    pub(crate) const DOCUMENT_BYTES: FieldSpec = FieldSpec::req(1, Wire::U32);
+    /// Exactly 32 bytes.
+    pub(crate) const DOCUMENT_SHA256: FieldSpec = FieldSpec::req(2, Wire::Bytes);
+    pub(crate) static SPEC: MessageSpec = MessageSpec {
+        name: "SessionReplaceRequest",
+        fields: &[DOCUMENT_BYTES, DOCUMENT_SHA256],
+    };
+}
+
 pub(crate) mod session_committed {
     use super::*;
     pub(crate) const EVENT_SEQUENCE: FieldSpec = FieldSpec::req(1, Wire::U64);
@@ -1859,6 +1873,7 @@ mod tests {
             &snapshot_request::SPEC,
             &snapshot::SPEC,
             &transaction_applied::SPEC,
+            &session_replace_request::SPEC,
             &session_committed::SPEC,
             &control_list_request::SPEC,
             &control_address::SPEC,

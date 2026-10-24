@@ -1110,6 +1110,12 @@ impl SessionStore {
         })
     }
 
+    /// The caps every compilation of this store runs under.
+    #[must_use]
+    pub const fn caps(&self) -> CompileCaps {
+        self.caps
+    }
+
     /// Borrow the immutable accepted control-plane compilation artifact.
     #[must_use]
     pub const fn compiled(&self) -> &CompiledSession {
@@ -1180,7 +1186,31 @@ impl SessionStore {
         expected_revision: ExpectedRevision,
         edits: &[SessionEdit],
     ) -> Result<PreparedSessionTransaction, SessionStoreError> {
-        self.prepare_transaction_with(expected_revision, edits, false, false)
+        self.prepare_transaction_with(expected_revision, edits, false, false, None)
+    }
+
+    /// The preparation of a `SESSION_REPLACE` (#1386 D2), and only of that: the edits of the
+    /// document's diff, as [`Self::prepare_transaction`] prepares them, then the document's
+    /// `control_smoothing` (`None`, the session default, included), set on the candidate after the
+    /// edits and before the final validation. No wire edit can write the default arm back, so the
+    /// replace sets it here. `edits` may be empty when only the smoothing differs.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::prepare_transaction`], except that an empty `edits` is accepted.
+    pub fn prepare_replacement(
+        &self,
+        expected_revision: ExpectedRevision,
+        edits: &[SessionEdit],
+        control_smoothing: Option<session::ControlSmoothing>,
+    ) -> Result<PreparedSessionTransaction, SessionStoreError> {
+        self.prepare_transaction_with(
+            expected_revision,
+            edits,
+            false,
+            false,
+            Some(control_smoothing),
+        )
     }
 
     /// [`Self::prepare_transaction`] for a host that owns a monitor overlay (decision 17, C8,
@@ -1196,7 +1226,7 @@ impl SessionStore {
         expected_revision: ExpectedRevision,
         edits: &[SessionEdit],
     ) -> Result<PreparedSessionTransaction, SessionStoreError> {
-        self.prepare_transaction_with(expected_revision, edits, true, false)
+        self.prepare_transaction_with(expected_revision, edits, true, false, None)
     }
 
     /// [`Self::prepare_transaction_with_monitor`] for a host that commits a transaction of values
@@ -1233,7 +1263,7 @@ impl SessionStore {
         expected_revision: ExpectedRevision,
         edits: &[SessionEdit],
     ) -> Result<PreparedSessionTransaction, SessionStoreError> {
-        self.prepare_transaction_with(expected_revision, edits, true, true)
+        self.prepare_transaction_with(expected_revision, edits, true, true, None)
     }
 
     /// The full preparation of a transaction prepared in place: the same edits, compiled, as
@@ -1259,15 +1289,19 @@ impl SessionStore {
             edits,
             true,
             false,
+            None,
         )
     }
 
+    /// `replacement` is a replace's `control_smoothing` ([`Self::prepare_replacement`]): `Some`
+    /// sets it after the edits and admits an empty `edits`.
     fn prepare_transaction_with(
         &self,
         expected_revision: ExpectedRevision,
         edits: &[SessionEdit],
         monitor: bool,
         in_place: bool,
+        replacement: Option<Option<session::ControlSmoothing>>,
     ) -> Result<PreparedSessionTransaction, SessionStoreError> {
         let ExpectedRevision::Exact(expected_revision) = expected_revision else {
             return Err(SessionStoreError::ExactRevisionRequired);
@@ -1276,7 +1310,7 @@ impl SessionStore {
         if expected_revision != current {
             return Err(SessionStoreError::RevisionConflict { current });
         }
-        if edits.is_empty() {
+        if edits.is_empty() && replacement.is_none() {
             return Err(SessionStoreError::EmptyTransaction);
         }
         // A transaction of monitor writes commits no revision (#1559 D4, #1603): it advances
@@ -1346,6 +1380,12 @@ impl SessionStore {
             }
             record_edit_ramps(&mut edit_ramps, &mut control_writes, edit)
                 .map_err(|error| refused(SessionEditError::Control(error)))?;
+        }
+        // #1386 D2: the replace's smoothing, whole. The rows it changes are not `SetControl`
+        // rows the fast classification could list, so the candidate is classified whole.
+        if let Some(control_smoothing) = replacement {
+            candidate.control_smoothing = control_smoothing;
+            set_control_rows = None;
         }
         let compiled = if monitor_only {
             // Not a mutation: the committed compilation, at the committed revision.
