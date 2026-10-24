@@ -1,5 +1,8 @@
 //! The drain-bound rule: every render-thread `try_pop` runs at most once per record counted at
-//! block entry by `available_at_entry`, per pass of the finite loops around its drain.
+//! block entry by `available_at_entry`. Each drain pops at most the records its queue held when its
+//! count was read, and reads a given queue at most once per pass of its outer loops: every loop
+//! around the drain is finite and drains a different queue on each pass (#1418 D6). A sequential
+//! double drain of one queue stays outside the rule.
 //!
 //! A loop that pops until the queue is empty keeps popping whatever a concurrent producer
 //! publishes while it runs: data-dependent, unbounded render work. The rule reads each file's
@@ -21,8 +24,11 @@
 //!   no written replacement of its place stands between the count and the end of the loop
 //!   ([`place`]). A method call through auto-ref on the receiver or a prefix of it is not read
 //!   (a stated limit of root decision R1; see [`place`]).
-//! - **Outer loops (D1)** are in [`outer`]: every other loop around a pop, inside its region,
-//!   must be finite. **Attributes and items (D2, D9)** are in [`count`], [`outer`], [`per_queue`]
+//! - **Outer loops (D1)** are in [`outer`] and [`select`]: every other loop around a counted drain,
+//!   inside its region, must be finite ([`outer`]) and must select the queue, a different one on
+//!   each pass, and keep it in place for the pass ([`select`], #1418 D1, R3). The loops of a
+//!   per-queue form are judged by [`outer`] alone: each pop there is bounded by its own queue's
+//!   counter, however many passes run. **Attributes and items (D2, D9)** are in [`count`], [`outer`], [`per_queue`]
 //!   and [`items`]: a count binding under a `cfg`-family attribute, and an item of any kind
 //!   (`const`, `static`, `struct`, `enum`, `union`, `fn`, `type`, `trait`, `mod`, or a `use`) that
 //!   declares the name of any binding a rule read to bound the pop, anywhere in that binding's
@@ -103,11 +109,11 @@
 //! names or paths that a macro expansion builds from parts. The tool judges the workspace's own
 //! written source, token by token and inside macro token trees too, so:
 //!
-//! - **An iterator that never ends, borrowed from a field or a local (type-level).** `for _ in
-//!   &mut rounds` and `rounds.iter_mut()` are finite outer loops by their form (D1), so `let mut
-//!   rounds = 0_u32..; for _ in &mut rounds { <counted drain> }` passes, and runs without end. The
-//!   `main` gate documented the same hole. Restructure so that no unbounded iterator is reachable
-//!   by that name; a ruling is needed to refuse these forms. For the same reason a `let` of a unit
+//! - **An iterator that never ends, borrowed from a field or a local (type-level).** `&mut rounds`
+//!   and `rounds.iter_mut()` are finite outer loops by their form (D1). Since #1418 such a loop
+//!   must also select the queue, so `let mut rounds = 0_u32..; for _ in &mut rounds { <counted
+//!   drain> }` is refused (`_` selects nothing); a loop whose element is the queue still takes the
+//!   collection at its word (D3). For the same reason a `let` of a unit
 //!   struct's name (`let controls = controls;` with `struct controls;` at module level) binds
 //!   nothing, and its value has that item's type: limit 2, as for a `let` of any type.
 //! - **A registry crate (code outside the workspace).** One that exports a macro named
@@ -136,6 +142,7 @@ mod outer;
 mod per_queue;
 mod place;
 mod scope;
+mod select;
 mod shapes;
 mod tree;
 mod trusted;
@@ -318,7 +325,9 @@ fn bounded<'f>(ctx: &Ctx<'f>, site: &PopSite) -> bool {
         return false;
     }
     if let Some(counted) = count::bounds(ctx, &steps, at) {
-        return pops_the_counted_queue(ctx, &steps, at, &counted)
+        // #1418 D1: and every one of them drains a different queue on each pass.
+        return select::selects(ctx, &steps, top, at, &counted)
+            && pops_the_counted_queue(ctx, &steps, at, &counted)
             && !shadowed_by_an_item(ctx, &steps);
     }
     per_queue::bounds(ctx, &steps, at, site) && !shadowed_by_an_item(ctx, &steps)

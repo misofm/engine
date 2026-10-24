@@ -179,7 +179,7 @@ fn entry_binding<'f>(ctx: &Ctx<'f>, binding: &Binding<'f>, depth: usize) -> Opti
 
 /// D2: whether the `let` carries a `cfg`-family attribute (`cfg`, `cfg_attr`, or a path ending in
 /// either). A binding that may not be compiled leaves an earlier binding of the name as the count.
-fn under_cfg(local: &syn::Local) -> bool {
+pub(super) fn under_cfg(local: &syn::Local) -> bool {
     local.attrs.iter().any(|attribute| {
         attribute
             .path()
