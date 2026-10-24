@@ -1,16 +1,17 @@
 #!/usr/bin/env bash
 # Check the frozen Issue-022 C header, exact exported symbols, and native consumer linkage.
 #
-# S4 (#359): the default path below still does a full `cargo build --locked --release -p capi`, so
-# a bare invocation stays self-contained. But that build resolves a different feature/package set
-# than the audit-native CI shard's single `cargo build --locked --release -p audit -p bench
-# -p session-validator -p capi`, so running both back to back in the same shard's `target/`
-# alternately invalidates each other's fingerprints and rebuilds every time. The shard-friendly
-# path is first-class, not a workaround: it builds that four-package release set exactly once,
-# then calls this script with `MISO_ENGINE_CAPI_SKIP_BUILD=1` (an existing hook, no new env name)
-# so this script skips its own build and links straight against the release artifacts the shard
-# already produced (`target/release/libcapi.so`/`.a`, overridable via `MISO_ENGINE_CAPI_LIBRARY`
-# / `MISO_ENGINE_CAPI_STATIC_LIBRARY` exactly as before).
+# S4 (#359): the default path below still builds `capi` itself, so a bare invocation stays
+# self-contained; since #1499 it builds the fat-LTO cdylib and staticlib through
+# scripts/build-capi-release.sh into a scratch directory, because `cargo build -p capi` drops LTO.
+# But that build resolves a different feature/package set than the audit-native CI shard's single
+# `cargo build --locked --release -p audit -p bench -p session-validator -p capi`, so running both
+# back to back in the same shard's `target/` alternately invalidates each other's fingerprints and
+# rebuilds every time. The shard-friendly path is first-class, not a workaround: it builds that
+# four-package release set exactly once, then calls this script with `MISO_ENGINE_CAPI_SKIP_BUILD=1`
+# (an existing hook, no new env name) so this script skips its own build and links straight against
+# the release artifacts the shard already produced (`target/release/libcapi.so`/`.a`, overridable
+# via `MISO_ENGINE_CAPI_LIBRARY` / `MISO_ENGINE_CAPI_STATIC_LIBRARY` exactly as before).
 set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/lib/gate.sh"
 
@@ -26,12 +27,14 @@ capi_abi_self_test() {
     workspace_root="$(cd "$script_directory/.." && pwd)"
     scratch_root="$(mktemp -d)"
     trap 'rm -rf -- "$scratch_root"' RETURN
-    cargo build --locked --release -p capi --manifest-path "$workspace_root/Cargo.toml" >/dev/null
+    # The fat-LTO forms, through the one release build command (#1499).
+    bash "$script_directory/build-capi-release.sh" host cdylib "$scratch_root/lib" >/dev/null
+    bash "$script_directory/build-capi-release.sh" host staticlib "$scratch_root/lib" >/dev/null
 
     host_triple="$(rustc -vV | sed -n 's/^host: //p')"
     case "$host_triple" in
-        *-linux-*) library="$workspace_root/target/release/libcapi.so" ;;
-        *-apple-*) library="$workspace_root/target/release/libcapi.dylib" ;;
+        *-linux-*) library="$scratch_root/lib/libcapi.so" ;;
+        *-apple-*) library="$scratch_root/lib/libcapi.dylib" ;;
         *) printf 'unsupported pinned native host: %s\n' "$host_triple" >&2; exit 1 ;;
     esac
 
@@ -44,7 +47,8 @@ capi_abi_self_test() {
         fi
     }
 
-    common_env=(env MISO_ENGINE_CAPI_SKIP_BUILD=1 MISO_ENGINE_CAPI_LIBRARY="$library")
+    common_env=(env MISO_ENGINE_CAPI_SKIP_BUILD=1 MISO_ENGINE_CAPI_LIBRARY="$library"
+        MISO_ENGINE_CAPI_STATIC_LIBRARY="$scratch_root/lib/libcapi.a")
 
         # Positive control: the unmutated checker must pass against the real header and library
         # before any mutation is asked to fail it. Without this, a checker "hardened" into
@@ -203,16 +207,24 @@ cpp_fixture="${MISO_ENGINE_CAPI_CPP_FIXTURE:-crates/capi/tests/c/header_smoke.cp
 [[ -f "$c_fixture" ]] || fail "missing C11 fixture: $c_fixture"
 [[ -f "$cpp_fixture" ]] || fail "missing C++17 fixture: $cpp_fixture"
 
-if [[ "${MISO_ENGINE_CAPI_SKIP_BUILD:-0}" != 1 ]]; then
-    cargo build --locked --release -p capi
-fi
+scratch_root="$(mktemp -d)"
+trap 'rm -rf -- "$scratch_root"' EXIT
 
 host_triple="$(rustc -vV | sed -n 's/^host: //p')"
+if [[ "${MISO_ENGINE_CAPI_SKIP_BUILD:-0}" != 1 ]]; then
+    # The fat-LTO libraries, built and judged by the one release build command (#1499).
+    bash scripts/build-capi-release.sh host cdylib "$scratch_root/lib"
+    bash scripts/build-capi-release.sh host staticlib "$scratch_root/lib"
+    library_directory="$scratch_root/lib"
+else
+    library_directory=target/release
+fi
 case "$host_triple" in
-    *-linux-*) default_library="target/release/libcapi.so" ;;
-    *-apple-*) default_library="target/release/libcapi.dylib" ;;
+    *-linux-*) default_library="$library_directory/libcapi.so" ;;
+    *-apple-*) default_library="$library_directory/libcapi.dylib" ;;
     *) fail "unsupported pinned native host for ABI seal: $host_triple" ;;
 esac
+default_static_library="$library_directory/libcapi.a"
 library="${MISO_ENGINE_CAPI_LIBRARY:-$default_library}"
 [[ -f "$library" ]] || fail "missing native library: $library"
 # The staticlib leg (issue #114's toolchain matrix named both static and shared linkage, but
@@ -221,12 +233,10 @@ library="${MISO_ENGINE_CAPI_LIBRARY:-$default_library}"
 # links and runs, rather than asserting a string appears in a script nobody ran.
 #
 # Release, not debug: release is the shipped profile, and the shared/static objects this script
-# links against must be the ones a consumer actually gets (WP-3, #359).
-static_library="${MISO_ENGINE_CAPI_STATIC_LIBRARY:-target/release/libcapi.a}"
+# links against must be the ones a consumer actually gets (WP-3, #359): the fat-LTO build
+# (#1499), which `cargo build -p capi` is not.
+static_library="${MISO_ENGINE_CAPI_STATIC_LIBRARY:-$default_static_library}"
 [[ -f "$static_library" ]] || fail "missing native static library: $static_library"
-
-scratch_root="$(mktemp -d)"
-trap 'rm -rf -- "$scratch_root"' EXIT
 
 include_directory="$(cd "$(dirname "$header")" && pwd)"
 library_path="$(cd "$(dirname "$library")" && pwd)/$(basename "$library")"

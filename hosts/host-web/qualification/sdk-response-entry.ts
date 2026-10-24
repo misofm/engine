@@ -15,6 +15,7 @@ import type { TrackResponseResult } from "../../../sdk/src/core/live-response.ts
 import { createResponsePreview } from "../../../sdk/src/browser/response.ts";
 import { createEngine } from "../../../sdk/src/browser/engine.ts";
 import { createDefaultHost } from "../../../sdk/src/browser/default-host.ts";
+import { PROTOCOL_BLOCKS, protocolCalls } from "./protocol-calls.mjs";
 
 const EQ_CONFIGURATION_ID = 9_007_199_254_740_993n;
 /**
@@ -2462,6 +2463,64 @@ async function runSdkLiveBypassQualification(): Promise<Record<string, unknown>>
 }
 
 /**
+ * #1571 gates 2, 3 and 5, the browser half: `protocol-calls.mjs`'s sequence on the browser engine,
+ * rendering its quanta in an OfflineAudioContext. `run.mjs` runs the same sequence on the headless
+ * engine, booted in Node from the `document` returned here and the same module, and holds the two
+ * equal.
+ */
+async function runSdkProtocolQualification(): Promise<Record<string, unknown>> {
+  const frames = PROTOCOL_BLOCKS * LIVE_BYPASS_QUANTUM;
+  const document = liveBypassSession();
+  const browser = await createSdkEngine("protocol-messages", {
+    document,
+    policy: { sourceRingFrames: LIVE_BYPASS_FRAMES, liveControls: {} },
+    scratchBoot: async () => ({
+      sampleRateHz: 48_000,
+      quantumFrames: 128,
+      sourceRingFrames: LIVE_BYPASS_FRAMES,
+      backend: "simd128" as const,
+      sources: [{ id: "live-control-source", channels: 2, frames: BigInt(LIVE_BYPASS_FRAMES) }],
+      tracks: ["track"],
+      submixes: [],
+    }),
+    createContext: () => {
+      const context = new OfflineAudioContext(2, frames, 48_000);
+      Object.defineProperty(context, "close", { value: async () => {} });
+      return context;
+    },
+    createHost: (request) => createDefaultHost({
+      ...request,
+      hostModuleUrl: "/artifacts/miso-engine-v1-audio-worklet-host.js",
+    }),
+    simd128ModuleUrl: "/artifacts/miso-engine-v1-audio-worklet.simd128.wasm",
+    workletModuleUrl: "/artifacts/miso-engine-v1-audio-worklet.js",
+    responseWorkerModuleUrl: "/sdk/response-worker.js",
+  });
+  try {
+    const browserResult = await protocolCalls(
+      browser,
+      async () => {
+        const controls = await browser.liveControls();
+        return controls.submit(controls.edit.track("track").faderDb(-3));
+      },
+      async () => {
+        await (browser.context as OfflineAudioContext).startRendering();
+      },
+    );
+    return {
+      document: document.toJson(),
+      sourceRingFrames: LIVE_BYPASS_FRAMES,
+      blocks: PROTOCOL_BLOCKS,
+      browser: browserResult,
+    };
+  } catch (error) {
+    throw sdkEngineFailed(browser, error);
+  } finally {
+    await closeSdkEngine(browser);
+  }
+}
+
+/**
  * The raw qualification rows' live edit (#1563B): one matrix retarget of `trackId` as a `SET_CONTROL`
  * transaction, built and sent by the SDK through `host.control()` with the explicit ramp `0`, and
  * the core's report. `qualification.js` imports this from the served bundle so that it carries no
@@ -2611,6 +2670,7 @@ export async function runSdkResponseQualification(): Promise<Record<string, unkn
       observations: await runSdkObservationQualification(),
       spectrum: await runSdkSpectrumQualification(),
       liveBypass: await runSdkLiveBypassQualification(),
+      protocol: await runSdkProtocolQualification(),
       // Issue #1476 D2: read last, after every instance above has closed through closeSdkEngine.
       renderAllocations: sdkRenderAllocations.rows.slice(),
       renderAllocationInstances: sdkRenderAllocations.instances,

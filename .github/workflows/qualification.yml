@@ -923,14 +923,16 @@ jobs:
       # G1: compiles a C++17 header consumer and a C11 fixture at -Wall -Wextra -Werror
       # -pedantic, links the real libcapi.so, diffs its exported symbols against the frozen ABI V1
       # list, and executes the fixture. Builds capi in release itself (the shipped-crate link
-      # proof, design §6.7); the release build above already primed the target dir.
+      # proof, design §6.7) through scripts/build-capi-release.sh, the fat-LTO cdylib and
+      # staticlib (#1499), which cargo builds apart from the release build above.
       - name: C ABI linkage, frozen symbol set, native consumer smoke test, and self-test
         run: |
           bash scripts/check-capi-abi.sh
           bash scripts/check-capi-abi.sh --self-test
-      # #1059: check-capi-abi.sh just built `-p capi` alone, which is the shipped feature set (the
-      # shard's four-package build unifies audit's graph/test-support in, so it is not). That
-      # library must contain no whole-plan scalar path.
+      # #1059: check-capi-abi.sh just built `-p capi` alone through build-capi-release.sh, which is
+      # the shipped feature set (the shard's four-package build unifies audit's graph/test-support
+      # in, so it is not). This step reads target/release/libcapi.so because cargo copies the
+      # script's host cdylib there. That library must contain no whole-plan scalar path.
       - name: Shipped C ABI library contains no whole-plan scalar path
         run: python3 -B scripts/check-scalar-oracle-absent.py --native target/release/libcapi.so
       # G2: HashMap iteration order is per-process, so this runs `graph_fixture` fresh 100 times.
@@ -1022,6 +1024,11 @@ jobs:
           rustup target add --toolchain 1.97.1 wasm32-unknown-unknown armv7-linux-androideabi aarch64-apple-ios aarch64-linux-android
           sudo apt-get update
           sudo apt-get install -y ripgrep
+      # #1499: the shipped iOS and Android staticlibs are built with fat LTO by
+      # build-capi-release.sh, which judges each archive it builds; check-cross-targets.sh below
+      # builds both through it. This hermetic self-test proves the judge refuses a non-LTO archive.
+      - name: Fat-LTO C ABI release build gate self-test
+        run: bash scripts/build-capi-release.sh --self-test
       # Replaces check-parametric-eq-targets.sh's and check-builtins-targets.sh's cargo halves with
       # one script, one cached target dir per triple (WP-3 contract). The render-contract rg half
       # moved to lint.

@@ -74,10 +74,10 @@
 //!
 //! # Realtime properties
 //!
-//! No allocation, lock or syscall; the barriers emit nothing. Shipped `x86_64` cdylib: `enter`
-//! calls `softfma::read_mxcsr` then `write_mxcsr` out of line, and `Drop` calls `write_mxcsr` on
-//! each exit path; each helper is a stack-slot `STMXCSR`/`LDMXCSR`. AArch64 (Android object):
-//! inline `mrs`/`msr`, no call. Cost: `artifacts/issue146/fp-environment-benchmark.raw.jsonl`.
+//! No allocation, lock or syscall; the barriers emit nothing. `x86_64` fat-LTO cdylib (the test
+//! form `check-capi-abi.sh` links): `enter` is an inline stack-slot `STMXCSR` then `LDMXCSR`, and
+//! `Drop`'s is inline in the one exit block every return reaches, no call. AArch64 (Android
+//! object): inline `mrs`/`msr`. Cost: `artifacts/issue146/fp-environment-benchmark.raw.jsonl`.
 
 #![allow(unsafe_code)]
 
