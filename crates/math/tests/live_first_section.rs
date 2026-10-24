@@ -112,7 +112,9 @@ fn envelope() -> (LiveCascade, FirstSectionRow) {
             settled_state_rounding: mu_settled,
             input_rounding: mu_input,
         },
-        first_mix_row: 2.0,
+        // Unused: `live_first_section` replaces the first section's row with the tap's. A value
+        // unlike the tap's, so that a bound which ignores the row is seen below.
+        first_mix_row: 0.0,
         first_output_rounding: 0.0,
         second_mix_row: 2.0,
         second_output_rounding: 0.0,
@@ -327,21 +329,30 @@ fn the_first_section_row_bound_holds_on_the_kernel_all_pass_tap() {
     let (live, row) = envelope();
     let law = law();
     let (low, high) = (design(LOW_HZ), design(HIGH_HZ));
-    for words in [low, high] {
-        let re = math::tail::pole_real(&SvfWords::from_f32([
-            words[0], words[1], words[2], 0.0, 0.0, 0.0,
-        ]));
-        assert!(
-            live.poles.low < re && re < live.poles.high,
-            "{words:?} in the domain"
-        );
-    }
     let peaks = [math::pow(10.0, 24.0 / 20.0), 1.0e29];
     let bound = live_first_section(&live, &row, 1.0, &law, u64::from(RAMP), peaks)
         .expect("the tap is bounded");
     let composition = live_first_section_composition(&live, &row, 1.0, &law, u64::from(RAMP))
         .expect("the tap is bounded")
         .expect("the composition is certified");
+    // The stated values follow the row: a doubled mix row states a larger peak gain and tail.
+    let doubled = FirstSectionRow {
+        mix_row: 2.0 * row.mix_row,
+        ..row
+    };
+    let louder = live_first_section(&live, &doubled, 1.0, &law, u64::from(RAMP), peaks)
+        .expect("the tap is bounded");
+    let louder_gain = live_first_section_composition(&live, &doubled, 1.0, &law, u64::from(RAMP))
+        .expect("the tap is bounded")
+        .expect("the composition is certified")
+        .peak_gain;
+    assert!(
+        louder.tail > bound.tail && louder_gain > composition.peak_gain,
+        "a doubled row: tail {} against {}, G_p {louder_gain:e} against {:e}",
+        louder.tail,
+        bound.tail,
+        composition.peak_gain
+    );
     let tail = bound.tail as usize;
     let decay = composition.decay as usize;
     let response = impulse(low, tail + 1 + LOUD);

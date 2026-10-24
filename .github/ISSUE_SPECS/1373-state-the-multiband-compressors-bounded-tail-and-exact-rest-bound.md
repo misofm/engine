@@ -116,3 +116,11 @@ its crossover and detector state reach exact rest. Today it declares `Infinite`.
   its recompute (`live_bound_table_is_the_computed_live_bound_at_every_launch_rate`, release).
   Gate: `crates/math/tests/live_first_section.rs`. Derivation part 1:
   `docs/derivations/1373-multiband-compressor-tail-and-rest.md`.
+- **1373a verdict fold (2026-10-24).** The gate also asserts that the stated values follow the
+  row (a doubled `mix_row` states a larger tail and `G_p`); red when `with_first_row` ignores the
+  row. Stated limit of the brute-force gate: an under-statement within its slack (about 18 dB, or
+  279 frames of the tail at 80 Hz, 48 kHz; for example a tail 64 frames early) stays green.
+  Untested: the composition branch where `T` lies in the window (`anchor = tail.max(ramp_frames
+  + 1)`); this envelope's `T` is past it, and 1373b's per-rate T1 reaches other envelopes.
+  For 1373b: at 96 kHz `1 - r` is about half its 48 kHz value, so the certificate may return
+  `None` or the horizon may be hit; T1 at every launch rate must cover it.
