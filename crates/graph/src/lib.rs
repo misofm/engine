@@ -5595,6 +5595,16 @@ impl PreparedPlanExecutor for GraphExecutor {
     // REALTIME_POLICY_END
 
     // REALTIME_POLICY_BEGIN
+    /// The graph-wide underrun flag the source driver stored for the block it last admitted
+    /// (#1537 D3); `false` with no source set. A read of the stored flag, no new work.
+    fn last_block_source_underrun(&self) -> bool {
+        self.source_set
+            .as_ref()
+            .is_some_and(|set| set.observation_validity().source_underrun)
+    }
+    // REALTIME_POLICY_END
+
+    // REALTIME_POLICY_BEGIN
     /// Render one block into `output`, whose two planes are the session Output op's storage for
     /// the block (issue #916). Nothing is copied out of the arena afterwards: the Output op, and a
     /// folded chain whose master it is, write the planes directly.

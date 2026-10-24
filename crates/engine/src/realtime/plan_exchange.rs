@@ -191,6 +191,8 @@ pub struct RealtimePlanOwner {
     carry_mismatched: u64,
     /// Blocks the executor failed after the live snapshot (#1502 D7), saturating.
     live_block_errors: u64,
+    /// Blocks rendered in which a source underran (#1537 D1), saturating, over every plan.
+    source_underrun_blocks: u64,
     watermark: WatermarkWriter,
     /// The clock record render stores after each rendered block (#1396 D4).
     clocks: Arc<PlanClocks>,
@@ -495,6 +497,7 @@ fn plan_exchange_inner(
             carried: 0,
             carry_mismatched: 0,
             live_block_errors: 0,
+            source_underrun_blocks: 0,
             watermark: watermark_writer,
             clocks,
             _not_sync: Cell::new(()),
@@ -805,6 +808,14 @@ impl RealtimePlanOwner {
     pub const fn live_block_errors(&self) -> u64 {
         self.live_block_errors
     }
+    /// Saturating count of blocks rendered successfully in which a source played zeros because
+    /// the host had not delivered PCM it owed (#1537 D1): graph-wide, one per block, never reset.
+    /// A failed block, a held block and a block past the end of a region add nothing; a plan swap
+    /// does not reset it.
+    #[must_use]
+    pub const fn source_underrun_blocks(&self) -> u64 {
+        self.source_underrun_blocks
+    }
     /// The block-boundary adoption decision for the block that starts at `block_start`: one
     /// `Acquire` load and, only if a cell is `Full`, the claim rule (#1311 D2), then one
     /// compare-and-swap that claims it.
@@ -891,6 +902,9 @@ impl RealtimePlanOwner {
                     .source_read
                     .store(source_read_clock, Ordering::Release);
                 self.clocks.render.store(render_clock, Ordering::Release);
+                if self.active.1.last_block_source_underrun() {
+                    self.source_underrun_blocks = self.source_underrun_blocks.saturating_add(1);
+                }
                 Ok((render, watermark))
             }
             Err(failure) => {

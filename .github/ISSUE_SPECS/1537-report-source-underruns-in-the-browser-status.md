@@ -6,6 +6,11 @@ Successor S3 of *Hold effect parameter, bypass and EQ-target values in latest-ta
 "underrun substitute" because the host publishes no source-underrun count. Code anchors verified at
 `806de000a` (`codex/d15-stream-b3`). Verify them again on `main` before the first edit.
 
+> **Superseded route (root decision, 2026-10-24; see the end of this spec).** The count is
+> protocol counter `CounterId 20 SOURCE_UNDERRUN_BLOCKS`, served on both hosts through
+> `COUNTERS_GET`, not a `WebStatus` word. D2-D4, R1 and the status-layout gates 2-4 no longer apply;
+> D1, D5, D6 and R2-R4 stand. The root decision lists the slice, the paths and the gates.
+
 ## Product outcome
 
 AGENTS.md: "underrun emits zero plus a counter". The engine counts underruns, but neither browser
@@ -241,7 +246,7 @@ needs named exceptions for `crates/engine/src/realtime/plan.rs` and `crates/grap
 
 ## Attempt record
 
-- Attempt 1: not started.
+- Attempt 1: in progress (see the root decision below).
 
 ## Root rulings (2026-10-13)
 
@@ -255,3 +260,51 @@ needs named exceptions for `crates/engine/src/realtime/plan.rs` and `crates/grap
   counter" non-goal. The C ABI qualification doc and its gates are updated with it.
 - **R4. Placement.** Stream B, after #1318, before H #1332, with a named exception for
   `crates/graph/src/lib.rs` (the counting site only).
+
+## Root decision (2026-10-24): a protocol counter, not a status word
+
+Root-level reversal of R1 and of D2-D4's status route, under decision 17's one control
+abstraction. The count is protocol counter `CounterId::SourceUnderrunBlocks = 20`
+(`SOURCE_UNDERRUN_BLOCKS`), in the host-core served set, so `COUNTERS_GET` answers it on the C ABI
+and in the browser (`control_command`) from one count, as #1521 did for counter 19. `WebStatus`,
+`MisoStatus` and `EngineStatus` do not change. Reasons:
+
+1. **One control abstraction.** The browser renders through `control_plane::PlanState::render` and
+   answers protocol frames through the same `SessionState::command` as the C ABI, so one served
+   counter reaches both hosts; a status word would be a second surface for the same fact.
+2. **Cost.** The status route edits about fifteen hand-sized mirrors (layout JSON, `abi.ts`, two
+   `.d.ts` twins, worklet `readStatus`, host field list, layout checker and fixture, direct oracle,
+   `expected.json`, `tests.rs` offsets); the counter route adds one registry value, one setter, one
+   refresh line and one wire re-pin.
+3. **Semantics.** The status record is the worklet's per-block level (clock, watermark). A
+   session-wide, never-resetting count is what the counter registry holds
+   (`live_values_superseded`, `strips_restarted`, `live_block_errors`).
+
+**Slice.** D1's unit and D3's executor plumbing stand. `RealtimePlanOwner` keeps
+`source_underrun_blocks: u64`; `render_active` adds 1 (saturating) on its `Ok` path when the plan
+reports `last_block_source_underrun()`, so a failed block adds nothing and a plan swap does not
+reset it. `SharedPlanState.source_underrun_blocks: AtomicU64` takes the owner's count on
+`PlanState::render`'s `Ok` path (`Release`); `refresh_provider_counters` copies it into
+`SessionControlProvider::set_source_underrun_blocks`. `SERVED_COUNTERS` becomes 7.
+
+**Paths.** `crates/engine/src/realtime/{plan,plan_exchange}.rs` (`render_active`'s `Ok` path, the
+field and its accessor only: #1482 edits `enter_block`/`note_claim`, #1576 edits
+`copy_response_snapshot`); `crates/graph/src/lib.rs` (the one method);
+`crates/control-plane/src/{plan,control}.rs` (and `compile.rs`'s `SharedPlanState` constructor, one
+field); `crates/host-core/src/control_provider.rs`; `crates/protocol/src/message_wire.rs` and its
+tests' ID round-trip row; `crates/capi/src/runtime/tests.rs` (`ALL_COMMAND_RESPONSE_VECTORS[9]`
+re-pin); `crates/capi/include/miso_engine_v1.h` (one sentence); `hosts/host-web/src/tests.rs` (one
+test); `docs/CONTROL_PROTOCOL_REGISTRY.md`, `docs/C_ABI_V1_QUALIFICATION.md`; this spec.
+
+**Gates.**
+1. `the_counters_get_reply_counts_each_block_a_source_underran` (host-web): read
+   `SOURCE_UNDERRUN_BLOCKS` through a `COUNTERS_GET` frame after each render (and a service step):
+   case A (`N = 8`) `[0, 0, 1, 2]`, case B (`N = 2`) all `0`, `0` at boot. Red first; mutations as
+   gate 1 above (PR evidence).
+2. host-core's served-set test sets `set_source_underrun_blocks(k)`; capacity stays
+   `PROVIDER_COUNTER_SLOTS`.
+3. `ALL_COMMAND_RESPONSE_VECTORS[9]` re-pinned (length 0x130 -> 0x160, TLV 7 -> 8); the protocol
+   ID round-trip takes 20 and refuses 21.
+4. Package tests, `realtime-policy`, `check-protocol-control-policy.sh`, `check-capi-abi.sh`,
+   `check-workspace-policy.sh`, fmt, clippy. No browser artifact gate: no JS, `.d.ts`, layout or SDK
+   change.

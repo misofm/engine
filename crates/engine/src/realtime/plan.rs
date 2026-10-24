@@ -389,6 +389,13 @@ pub trait PreparedPlanExecutor: Send {
     /// default ignores the snapshot, which is right for an executor whose live drains still pop
     /// queues at their nodes (#1504 hands `S` to the drains).
     fn begin_live_block(&mut self, _snapshot: LiveSnapshot) {}
+    /// Whether the block this executor last rendered had a source in-region underrun
+    /// (graph-wide, #1537 D3): a source played zeros because the host had not delivered PCM it
+    /// owed. Read on the render thread right after a successful render; a value the render already
+    /// stored, so it does no new work. The default, for an executor without sources, is `false`.
+    fn last_block_source_underrun(&self) -> bool {
+        false
+    }
     /// Render one already-validated block using only preallocated state.
     fn render(
         &mut self,
@@ -1349,6 +1356,18 @@ impl PreparedRenderPlan {
             frames: envelope.quantum.0,
             live_snapshot,
         })
+    }
+
+    /// Whether the block this plan last rendered had a source in-region underrun (#1537 D3):
+    /// `false` unless the last block rendered successfully (a failed block poisons it), else the
+    /// executor's answer, `false` without an executor.
+    #[must_use]
+    pub fn last_block_source_underrun(&self) -> bool {
+        self.response_snapshot_valid
+            && self
+                .executor
+                .as_deref()
+                .is_some_and(PreparedPlanExecutor::last_block_source_underrun)
     }
 
     /// The part of a block that follows its live snapshot.

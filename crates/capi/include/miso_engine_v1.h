@@ -238,7 +238,10 @@ extern "C" {
  * returned MISO_ENGINE_V1_RENDER_REJECTED with "render.plan.rejected": blocks the plan refused
  * after the block took its live snapshot. Such a block may have applied live values, its output
  * is not a rendered block, and the watermark does not advance on it. No valid plan reaches this
- * path, so a nonzero value is an engine defect. A rejected source
+ * path, so a nonzero value is an engine defect. The counter SOURCE_UNDERRUN_BLOCKS (protocol
+ * counter 20, read with COUNTERS_GET) counts the rendered blocks in which a source played zeros
+ * because the host had not delivered PCM it owed (graph-wide, not per source); a held block and a
+ * block past the end of a region are not counted, and it never resets. A rejected source
  * submission or seek likewise names the rule it broke ("source.region.outside",
  * "source.generation.stale", "source.channels.mismatch", ...).
  * MISO_ENGINE_V1_UNSUPPORTED is returned by exactly one entry point: miso_engine_v1_engine_create

@@ -30,6 +30,9 @@ pub(crate) struct SharedPlanState<Row> {
     /// Blocks the executor failed after the live snapshot (#1502 D7), mirrored from the plan
     /// owner on the render thread when such a block happens.
     pub(crate) live_block_errors: AtomicU64,
+    /// Blocks rendered in which a source underran (#1537 D1), mirrored from the plan owner on the
+    /// render thread after each rendered block.
+    pub(crate) source_underrun_blocks: AtomicU64,
     /// The applied-revision watermark render publishes (#1314 D4): any thread reads it.
     pub(crate) watermark: PlanWatermarkReader,
 }
@@ -102,6 +105,12 @@ impl<A: ControlAdapter> PlanQueries<A> {
     /// have applied live values and rendered no output. A defect path, normally 0.
     pub fn live_block_errors(&self) -> u64 {
         self.shared.live_block_errors.load(Ordering::Acquire)
+    }
+
+    /// Blocks rendered in which a source played zeros because the host had not delivered PCM it
+    /// owed (#1537 D1): graph-wide, saturating, never reset.
+    pub fn source_underrun_blocks(&self) -> u64 {
+        self.shared.source_underrun_blocks.load(Ordering::Acquire)
     }
 
     /// Test seam (#1521 D6): stores `count` into the session's `live_block_errors` mirror, as
@@ -350,6 +359,9 @@ impl<A: ControlAdapter> PlanState<A> {
         self.shared
             .active_epoch
             .store(report.active_epoch.0, Ordering::Release);
+        self.shared
+            .source_underrun_blocks
+            .store(self.owner.source_underrun_blocks(), Ordering::Release);
         Ok(report.watermark)
     }
 
@@ -468,6 +480,7 @@ mod tests {
             render_peak_bits: AtomicU32::new(0),
             render_peak_observed: AtomicBool::new(false),
             live_block_errors: AtomicU64::new(0),
+            source_underrun_blocks: AtomicU64::new(0),
             watermark: publisher.watermark_reader(),
         });
         PlanState::<TestAdapter>::new(owner, shared)
