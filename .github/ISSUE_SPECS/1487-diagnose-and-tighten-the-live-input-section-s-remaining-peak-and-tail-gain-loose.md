@@ -212,4 +212,118 @@ recomputation.
 
 ## Attempt record
 
-(none yet)
+### Root decision (2026-10-24)
+
+The scoper marked the issue NEEDS-OWNER with three options: (a) close with #1485's values, (b) the
+T-D1 diagnosis only, (c) diagnosis plus tightening. Root chose (b): the T-D1 diagnosis only, no
+product code, scratch-only probes. Gates 1 to 4 do not apply to this slice.
+
+### T-D1 diagnosis (2026-10-24, on `main` 506196ce5)
+
+**Method.** I used a scratch copy of `tail_contract.rs` (never committed; deleted after the run).
+It has four parts: the L3 recomputation oracle, changed to print each term; an exact `f64` adjoint
+split of the worst histories into the two sections; #1467 L2's scan with its rows split at the
+window's end; and a worst-schedule search. All values are per unit of the trimmed input `G`, and
+"x trim" means times the +24 dB trim word 15.849. Release build, one invocation per probe.
+
+**`G_p`, the terms of `g_p / g`** (m0 = 16 at every rate):
+
+| rate | `delta A` | fast | potential `h Gbar(m0) V` | slow `C sum Gamma_s` | sum | exact cascade sup |
+|---|---|---|---|---|---|---|
+| 44.1 | 7.266e3 (8.9 %) | 6.068e3 (7.4 %) | 3.016e4 (36.9 %) | 3.816e4 (46.7 %) | 8.165e4 | 3.771e3 |
+| 48 | 7.210e3 | 6.022e3 | 2.981e4 | 3.774e4 | 8.078e4 | 3.749e3 |
+| 88.2 | 7.266e3 | 6.068e3 | 3.016e4 | 3.816e4 | 8.165e4 | 3.771e3 |
+| 96 | 7.210e3 | 6.022e3 | 2.981e4 | 3.774e4 | 8.078e4 | 3.749e3 |
+
+The shares are the same to 0.1 % at every rate.
+
+**Each part against its exact counterpart** (44.1 kHz; the other rates are within 1 %). The
+"exact" column is the time-varying cascade's adjoint split on gate 1's histories: the LPF's row
+`h2(n, m)` weighted by the HPF's exact row `l1` at each input frame. On the worst history (row
++42), this split is 4.523e3, only 1.20 times the cascade's own 3.771e3.
+
+| part | bound | exact | ratio | reason |
+|---|---|---|---|---|
+| `A` (HPF output) | 7.266e3 | 2.482e3 (L1 history, row +6) | 2.93 | `max_k (h q_k + omega) Phi_k` pairs each zone's largest state with its exposure |
+| `Phi` at the top | 5.445e4 | 3.112e4 (`sup` of the HPF state in the `V`-norm at the event) | 1.75 | 1.39 from `rho_ramp` (`1 - rho` 3.67e-5 against the top design's `1 - |p|` 5.23e-5; `rho_settled` gives 5.09e-5), 1.26 because the input signs cannot hold the rotating state aligned |
+| `sum Gamma` | 7.265e3 (96 % of it is the tail past `H`) | 1.473e3 (`sum |h2|` over lags of 1 or more) | 4.93 | the long-lag level `Gamma` 0.257 to 0.267 against the exact `|h2|` 0.102 to 0.114 (2.3 to 2.5 times), and the `rho_ramp` mass (1.39) |
+| fast (lags below 16) | 6.068e3 | 716.5 | 8.5 | `A` against `Gammabar` differences |
+| potential + slow (lags of 16 or more) | 6.832e4 | 3.672e3 | 18.6 | see the next two rows |
+| slow: `C` | 5.25 | 1.09 (the top HPF's settled `l1`, the steady output per frame) | 4.8 | `C` charges every input frame at the top with `h Psi beta` (4.15 of the 5.25). This is the mass that a later retarget could expose, but at the top it decays, it is not output |
+| potential: `h Psi` per unit of state | 2.08 | 0.83 (the HPF's exposed output summed over 400 frames, per unit of state) | 2.5 | `Psi` is a scalar potential over the zone paths |
+
+**Which part carries `r_p`.** The potential and the slow charges carry 83.6 % of `g_p`, and they
+are 18.6 times their exact counterpart. If they were exact, `delta A` would move `G_p` by at most 0.5
+dB, the fast part by at most 0.6 dB, and both together (16.3 % of `g_p`) by at most 1.2 dB. The section split is not the gap: the exact split is 1.20
+times the cascade (1.6 dB). The gap is the frequency-blindness of the scalar `V`-norm zone
+constants at the top of the domain (`Psi`, `C`, `Gamma`'s long-lag level, `Phi`), plus the 1.39
+`rho_ramp` mass in `Phi` and in `Gamma`'s tail.
+
+**Worst-schedule search** (44.1 and 48 kHz; 88.2 and 96 kHz repeat them to five digits
+everywhere else). The start is the worst-case pair. I ran 3,000 random schedules of 1 to 4 retargets
+(frames 0 to 63, 21 cutoffs from 10 Hz to the maximum), then a greedy local refinement of the best
+8 (event times, cutoffs, sections, adding and removing events). Polarity and trim are not searched:
+a flip changes only the input's sign, which the worst-sign input already sets, and the trim ramp
+never goes above its maximum. Best: `(+4 HPF 0.95 max, +7 HPF 0.95 max, +20 HPF 0.9 max, +49 LPF
+500 Hz, +52 HPF 10 Hz)`, row +55. Exact x trim 5.9906e4 at 44.1 kHz and 5.9558e4 at 48 kHz, that is
+0.26 % above `g_meas` (so `r_p` is 21.60 and 21.50, not 21.66 and 21.55). The five-event history
+is a gate 1 widening for any tightening slice. It needs no change while #1485's bound stands.
+
+**`G_t`, the terms of `g_t / g`:**
+
+| rate | window `W*` | settled `Z*` (sets `G_t`) | exact window rows (n < 64) x trim | exact settled rows (n >= 64) x trim |
+|---|---|---|---|---|
+| 44.1 | 27.36 (433.7 x trim) | 51.47 (815.8) | 41.41 | 60.16 |
+| 48 | 27.36 | 51.53 | 41.34 | 60.17 |
+| 88.2 | 27.36 | 51.82 | 40.77 | 60.12 |
+| 96 | 27.36 | 51.85 | 40.82 | 60.12 |
+
+The window part is 10.5 times its exact counterpart, and the settled part 13.6 times. At every rate,
+`Z*` comes from the pair of settled zones `k = l = 121` (`Re p` in [0.948, 0.965]). Its parts at
+44.1 kHz are: the exposure `h_2 q_l + omega_2` 1.39 times (`S*_l` 15.39, cross term 9.51, steady
+term 8.13), plus `delta` times the first output, 5.56. The shares are 41.6 % `S*`, 25.7 % cross,
+22.0 % steady and 10.8 % `delta` output. Exact: at the settled rows, the in-flight states add
+nothing measurable. The largest settled row (60.1642) equals the largest settled design's `l1`
+(60.1641). The settled bound alone (steady plus `delta` output, 16.86) is 4.4 times the exact
+settled cascade `l1` (3.796). The `V`-norm `l1` bound of one settled section is 3.90 for both
+sections in zone 121. The exact section `l1`s are 2.39 to 2.43 (HPF at 10 to 200 Hz) and 1.09 to
+2.43 (LPF).
+
+**Which part carries `r_t`.** It is the settled part. The in-flight terms `S*` and cross carry 67 %
+of `Z*`, and the exact settled rows show no in-flight excess. The module adds the separate suprema
+of the three state terms (`S*` decays from the window's end while the steady term builds up). A
+scratch time-resolved form gives 27.20 / 27.22 / 27.32 / 27.33: the sup over `m` of the same
+majorant recursion's solution, `E_m = Ebar + (E* - Ebar) r_k^m`, `S_(m+1) = r_l S_m + beta_l (c_k
+E_m + delta)`, over every settled pair. This is an estimate on a dense grid of `m`, not a proof.
+The sup is at the settled phase's first frame. At every rate it is below the window part, so
+`G_t` would become `W*`: 433.7 x trim, -5.5 dB, `r_t` about 7.2.
+
+**Candidate tightenings.** None moves a rendered bit unless the table says so. Each one moves
+reported tails and #1379's canonical digests.
+
+| id | gain | change | expected effect | cost | class |
+|---|---|---|---|---|---|
+| C1 | `G_t` | the settled phase time-resolved (the sup over `m` of the recursion's closed form per pair, with its stationary point) in place of the sum of separate suprema | `G_t` 815.8 to about 433.7 (-5.5 dB, `W*` then binds), `r_t` about 7.2, every rate | M (the formula is S; then the derivation, the oracle, the table, `F_T`, and the #1379 digests and tails re-pinned) | A |
+| C2 | `G_t` | the window phase (`RampPaths`) frequency-aware, after C1 | below `W*`, which is 10.5 times its exact counterpart; no estimate | L | A |
+| C3 | `G_p` | `rho_settled` in place of `rho_ramp` for a long dwell at the top | at most 1.39 times on each term that scales with `Phi` or with `Gamma`'s tail: -2.3 dB (potential and slow only) to -2.9 dB (every term) | M to L. It needs a proof that in-flight words cannot hold the top zone's worst-corner contraction (an in-flight re-send keeps a word in flight indefinitely). Soundness is not shown | A as a bound. It touches render if done by changing the ramp arithmetic |
+| C4 | `G_p` | frequency-aware zone constants (a per-zone basis or a vector majorant for `Psi`, `Phi`, `Gamma`) | the 2.3 to 4.8 factors above; not estimated | L+, a research re-derivation of #1433's zones | A |
+| C5 | `G_p` | `delta A` or the fast part made exact | at most -0.5 dB and -0.6 dB (-1.2 dB together) | M | A; not worth it |
+| C6 | `G_p` | one joint zone DP on `(||s1||, ||s2||)` over pairs of zones, in place of `Gamma` and the potential | scratch result 1.97e6 per unit against the module's 8.17e4: 24 times looser. Rejected | - | - |
+
+**Recommendation.** For `G_p`: keep #1485's values (T-D6). The bounded candidates (C3, C5) move
+`G_p` by at most about 2.9 dB and 1.2 dB, C3's soundness is not shown, and the real gap (C4) is research.
+For `G_t`: one bounded tightening slice, *#1487-B: time-resolve the live `G_t`'s settled phase*
+(C1). Its scope is `LiveBound::tail_gain` and the oracle's `G_t` recomputation, the derivation's
+"`G_t`" section, the table's `tail_gain`, `F_T` restated from the new `r_t`, and the #1379 digests
+and tails that move. Its gates are 1t, 2t, 3 and 4 as written, plus the five-event history in gate
+1. The slice measures how much the reported live tails actually shorten. If root prefers no more
+work in this program family, closing with #1485's values for both gains is sound. The cost is
+`G_t` staying 5.5 dB looser than C1 would make it.
+
+**Surprises.** (1) The two-section split costs only 1.20 times. An obvious joint DP is 24 times
+looser, so #1485's potential is essential, and the gap is frequency-blindness, not the split.
+(2) The search moves `g_meas` by only 0.26 %, so the measured reference is robust. (3) At the
+settled rows, the in-flight terms add nothing measurable but carry 67 % of `Z*`. After C1 the
+window part binds, with a margin of only 0.1 % (96 kHz) to 0.6 % (44.1 kHz) over the time-resolved
+settled sup. (4) The LPF at the top has `l1` 2.43, not about 1. The largest settled cascade is the
+HPF at 200 Hz into the top LPF.
