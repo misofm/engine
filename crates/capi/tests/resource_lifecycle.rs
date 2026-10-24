@@ -1362,10 +1362,13 @@ const REFERENCE_BUDGETS: [Budget; 19] = [
     Budget {
         row: "largest_named_allocation_bytes",
         value: |report| report.largest_named_allocation_bytes,
-        eight_lanes: 53_824,
-        // Four lanes: the aarch64-debug CI print of PR #1607 measured 48,915 bytes (the engine's
-        // own allocation since #1599), plus 10 %, rounded up to 64.
-        four_lanes: 53_824,
+        // #1379: every `GraphNode` carries its whole `NodeTailBound`, 80 bytes more per node, and
+        // the largest allocation grows by exactly the session's 82 nodes x 80 = 6,560 bytes,
+        // 48,915 -> 55,475, measured at eight lanes (the term has no lane width); plus 10 %,
+        // rounded up to 64. Before: the aarch64-debug CI print of PR #1607 measured 48,915 bytes (the
+        // engine's own allocation since #1599).
+        eight_lanes: 61_056,
+        four_lanes: 61_056,
     },
 ];
 

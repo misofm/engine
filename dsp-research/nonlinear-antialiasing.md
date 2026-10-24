@@ -20,6 +20,17 @@ Input/drive/bias domains are finite; `f`, antiderivative, and all intermediates 
 
 Latency equals declared multirate/filter delay plus any lookahead. A memoryless waveshaper has no intrinsic tail, while filter histories have declared reset/tail behavior; bypass retains PDC.
 
+The launch soft clip (#1376) declares latency 31 and tail 29, recomputed from its layout: the
+interpolator and the decimator each read 30 even-tap ages, so the last non-zero output is 60 samples
+after the last non-zero input, 29 beyond the latency. Its exact rest is the reset state, every row of
+its three 32-row rings `+0.0` (mirrors included, the words `lanes_at_rest` pins): the last non-zero
+shaped sample is pushed 30 samples after the input stops and leaves its ring 32 pushes later, so
+`R = 30 + 32 - 31 = 31` for every input peak, and the tail over every peak is 31. The composition
+gain is 7,025 mB: the +24 dB output word times `2 g_drive (l1e^2 + 1/4)` at the +36 dB drive, with
+`l1e` the even taps' `l1` norm, the centre tap `1/2`, the cubic's Lipschitz constant `1` (its clamp
+is an absolute bound and is not used) and 129 roundings; the flush stall is 129 underflows carried
+through two half-band stages and the output word, -68,344 mB.
+
 ## Units, mappings, automation and smoothing
 
 Drive, output, and bias specify dB or linear units; shape and quality are enums or normalized domains with mappings. Parameter changes use documented bounded smoothing.

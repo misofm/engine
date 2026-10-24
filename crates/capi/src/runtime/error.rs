@@ -118,10 +118,6 @@ pub(crate) fn render_error_code(error: RenderError) -> u32 {
     }
 }
 
-/// capi's diagnostic for a null, empty, non-UTF-8 or over-127-byte source ID on a source entry
-/// point (`RESULT_INVALID_ARGUMENT`), so the host never reads the previous call's diagnostic.
-pub(crate) const SOURCE_ID_INVALID: &[u8] = b"source.id.invalid";
-
 /// The result code and diagnostic text a source failure reports across the C boundary.
 pub(crate) trait SourceFailureReport {
     /// The result code and diagnostic text this failure reports across the C boundary.
@@ -129,20 +125,15 @@ pub(crate) trait SourceFailureReport {
 }
 
 impl SourceFailureReport for SourceFailure {
+    /// The control plane classifies the failure and names its text (#1706 D1); capi only maps
+    /// the kind to its result code.
     fn report(self) -> (u32, &'static [u8]) {
-        match self {
-            Self::Internal => (RESULT_INTERNAL, b"capi.source.epoch"),
-            Self::Control(error) => {
-                let code = if error.is_backpressure() {
-                    RESULT_BACKPRESSURE
-                } else if error.is_internal() {
-                    RESULT_INTERNAL
-                } else {
-                    RESULT_INVALID_ARGUMENT
-                };
-                (code, error.diagnostic().as_bytes())
-            }
-        }
+        let code = match self.kind() {
+            control_plane::SourceRefusalKind::InvalidArgument => RESULT_INVALID_ARGUMENT,
+            control_plane::SourceRefusalKind::Backpressure => RESULT_BACKPRESSURE,
+            control_plane::SourceRefusalKind::Internal => RESULT_INTERNAL,
+        };
+        (code, self.diagnostic().as_bytes())
     }
 }
 
@@ -198,7 +189,7 @@ mod failure_bytes_tests {
 
         assert_eq!(
             SourceFailure::Internal.report(),
-            (RESULT_INTERNAL, &b"capi.source.epoch"[..])
+            (RESULT_INTERNAL, &b"source.epoch"[..])
         );
     }
 }

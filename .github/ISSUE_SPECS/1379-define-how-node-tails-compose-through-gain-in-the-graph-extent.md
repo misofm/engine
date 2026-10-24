@@ -774,3 +774,133 @@ The implementer stopped on a spec conflict before writing code: D1-D3 (2026-10-0
 Amendment 3's two tails, and three faults followed (Amendment 1's opening paragraph). Root ruled
 Amendment 1; under its Q9 this attempt is not counted, and the next verified run of slice C is its
 attempt 1.
+
+### Attempt 1 (2026-10-24): implementation, two tranches on `codex/batch-b9-1379`
+
+Built on #1375's tip (`f20fd389b`; `math::tail::{ceil_millibels, Rounding, UNDERFLOW}`), to land in
+one batch with #1375 and #1376. Anchors as the scope note re-verified them
+(`crates/capi/src/runtime/compile.rs`, `ZERO_DELAY_CANONICAL_SHA256` and `track_delay.rs`'s digest
+are gone; the host value flows through `control_plane::PlanResources`).
+
+**C-i (graph).** `GraphNode { id, latency, bound: NodeTailBound }` (no render-owned structure holds
+a `GraphNode`: `GraphExecutor` consumes the plan and keeps no spec). `GraphBuiltinsCompileRequest`
+gains the required `gain_liveness: GainLiveness { strip_fader_matrix, routes_into_submixes }`
+(`GainLiveness::FIXED` for every tool, fixture and test; host-core passes `{attach_live,
+attach_live && lanes.routes}`). `compile.rs` states H3's gain-only rows and D2a; `pdc.rs`
+(`compose`) evaluates H4; `GraphCompileReport` gains `output_tail_every_peak` and
+`output_flush_floor: FlushFloor { Unstated, Zero, Millibels, AboveRange }`; the canonical `tail`
+row carries the whole bound and a new `extent` row the three values. Literals: 40 `GraphNode {` in
+14 files and 46 `GraphBuiltinsCompileRequest {` literals in 22 files (the field only), plus
+`compile.rs`'s destructuring.
+
+**C-ii (hosts).** host-core's report field is `output_tail_every_peak` (filled from the graph's);
+`control_plane::PlanResources.output_tail_every_peak` carries it to the C ABI's `tail_kind` and
+`tail_samples` and the browser's plan-latency record (no ABI or wire field changes); the two
+`abi.rs` doc comments; H10 applied to decision 15; C ABI qualification, effect contract and
+builtins docs; the derivation note's graph part ("The graph extent").
+
+**Decisions taken in the attempt.**
+- *Stored automation is live.* Automation postdates this spec: a strip's fader, mute or VCA lane
+  driven by stored automation (`controls::fader_event_lanes`, `controls::mute_event_lanes`) states
+  its domain maximum and never `Zero`, whatever `GainLiveness` says (H3's "nothing can change it
+  after preparation"). Routes have no rendered automation row today.
+- *Effective values* come from `controls::effective` under the default monitor overlay: an
+  overlay only adds mutes (a solo), so a mute stated from it is one every overlay has.
+- *Mute `Zero`, per kernel* (decision 2): `gain_mute_block`, `gain_mute_ramp_block` and
+  `fader_matrix_block` clear a settled muted lane with `andnot` (exact `+0.0`), so a fixed set mute
+  is `Zero` per lane; a route muted at preparation, or following a source whose mute is fixed and
+  set on both lanes, folds `+0.0` into every coefficient (`gated_route_coefficients`) or is
+  inactive, so it is `Zero`. A fixed identity matrix states `0` mB with no stall (the kernel's
+  identity select). Everything else states the unmuted gain with the `f32` rounding included.
+- *Carried values* (H3): re-checked on this branch after #1630's amendment of #1276 D1: a carried
+  input section is either live (retargeted, live bound) or bit-equal (`same_input_section`), and
+  #1277 D4 carries a stage only at equal prepared values and control kind. The property holds.
+- *Step 4's invariant*: a node with `D > 0` and signal fan-in above one is refused as
+  `graph.internal.invariant` (no such node exists).
+- *Numerics*: each `f64` operation of step 6 is inflated by `1 + 2^-30` and the smallest positive
+  `f64` added (an upper bound where a product lands subnormal), `10^(x/2000)` below `10^-300` is
+  stated as `10^-300`; the rest branch's "+24 dBFS" is the smaller of the `f32` word and
+  `10^(24/20)`.
+- *H10*: the C ABI's `tail_samples` now means `output_tail_every_peak` for every plan (ruled; root
+  states it in the batch report).
+
+**Values (C8).** `live_lanes.rs`'s `HostLiveLanes::ALL` plain fixture at 48 kHz: `output_tail`
+2,374,745, `output_tail_every_peak` 4,744,016, floor +3,505 mB (headroom to 10,000,000:
+5,255,984); `FADER_AND_MATRIX`: 0, 0, -51,968 mB. C1 (48 kHz, fixed): 614,383, 991,228,
+-16,025 mB (headroom 9,008,772); C2: 810,935, 991,228, -16,025 mB (headroom 9,008,772); C11 (b)
+live: as C1. C6 (fixed, the 1 kHz LPF, every gain 0 dB):
+
+| rate | `output_tail` | `output_tail_every_peak` | floor (mB) | last non-zero, DC / worst-sign / random / alternating |
+|---|---|---|---|---|
+| 44.1 kHz | 202 | 4,122 | -21,506 | N+374 / N+347 / N+184 / N+334 |
+| 48 kHz | 220 | 4,486 | -21,437 | N+432 / N+409 / N+201 / N+373 |
+| 88.2 kHz | 403 | 8,242 | -20,933 | N+1,388 / N+1,296 / N+1,354 / N+333 |
+| 96 kHz | 439 | 8,971 | -20,862 | N+1,629 / N+1,510 / N+1,572 / N+362 |
+
+H5's first design meets (ii) at every rate. The same session through the C ABI (live lanes) reports
+1,061,497 (the 48 kHz `peak_plus_24_dbfs` rest). C13 (b): the floor is `AboveRange` from 73 nested
+levels (trim +24 dB per level); 72 levels state +589,351 mB.
+
+**Real kernel.** C1: the worst-sign output from `N + output_tail` peaks 42.0 dB under `P eps`;
+C2: 46.9 dB under; C11 (b): 42.0 dB under.
+
+**Re-pins (C9).** `fixtures/graph/v1/direct-route.{canonical.txt,report.json,resources.json}` and
+`MANIFEST.tsv`: the `tail` rows' new fields, the new `extent` row, and `graph_metadata_bytes`
+6,316 -> 7,036 (9 nodes x 80 bytes, `size_of::<GraphNode>()`) with the totals that include it
+(`largest_allocation_bytes`, `incremental_plan_bytes`, `session_plus_plan_bytes`); no other byte
+moved. `capi`'s `resource_lifecycle.rs` budget `largest_named_allocation_bytes` 53,824 -> 61,056
+(measured 48,915 -> 55,475: 82 nodes x 80 bytes; plus 10 %). C10: `audit capi`'s `pcm_digest`
+`bffc21e857b5e134` equals `f20fd389b`'s; `check-builtins-fixtures.sh` ok (50 files).
+
+**Tests.** New: `crates/graph-compiler/tests/tail_composition.rs` (C3 over C1, C2, C4, C5, C6 at
+every rate and C11 under both selections and a live track into a live submix; C4, C5, C7, C11 (a),
+C13 (a, b)), `an_overflowing_millibel_sum_is_a_diagnostic` (C13 (c)) and
+`crates/host-core/tests/tail_composition.rs` (C1, C2, C6, C11 (b); release, ignored in debug).
+Restated: `live_lanes.rs`'s two asserts (C8), against the graph compile with the stated selection.
+Deleted: `timing_applies_declared_tail_after_node_latency` (a per-node cap; the cap now checks the
+reported value), and `builtins_replace_only_the_three_internal_track_bindings` loses its
+output-tail assertion (the enumeration owns it).
+
+**Deviations, for root.**
+- *No `test-release` step.* The stream rules forbid CI workflow edits, so
+  `.github/workflows/qualification.yml` is unchanged: root adds
+  `cargo test --locked --release -p host-core --test tail_composition -- --include-ignored`.
+- *C12 has no new capi test.* A `crates/capi` test cannot name `graph-compiler` without new
+  dev-dependencies (and a `Cargo.lock` change) outside the authorized paths, and against host-core's
+  report it repeats `runtime/tests.rs`'s ABI-equals-host checks. C12's claim is held in two parts:
+  host-core's copy by `host-core/tests/tail_composition.rs` (the host's report equals the graph's
+  `output_tail_every_peak` on C1, C2 and C6, where it differs from `output_tail`) and `live_lanes.rs`
+  (C8), and the C ABI's copy of the host value by `capi`'s existing
+  `c_abi_plans_with_live_lanes_render_like_lanes_free_plans`.
+- *C5's host half* is `host-core/tests/track_delay.rs`'s shift-exactness eval P2-1 (the ring
+  delays the whole output by its length); a second impulse test would repeat it.
+- *`crates/graph-compiler/Cargo.toml`*: `controls` moves from a dev-dependency to a dependency (the
+  compile reads the effective values and the automation lanes); `Cargo.lock` is unchanged.
+
+**Mutation table** (each applied alone, the named test run, the file restored; all red). The
+graph-compiler rows are `crates/graph-compiler/tests/MUTATIONS.md` 1379-1 to 1379-12. Host side:
+
+| mutant | test | result |
+|---|---|---|
+| the decay extent drops `k D` (today's rule) | C1 `gain_after_a_tail_is_composed` | red, +40.6 dB over `P eps` (H9 predicted +40.6) |
+| `up(v)` ignores upstream gain (only gain after the tail node) | C2 `gain_before_a_tail_is_composed` | red, +42.1 dB |
+| `output_tail_every_peak = output_tail` (rest branch dropped) | C6 | red at 44.1 kHz, DC: non-zero past the reported tail |
+| a live fader states its prepared -24 dB | C11 (b) | red, +17.9 dB (predicted +10 to +21) |
+| host-core passes `strip_fader_matrix: false` | C8 (`live_lanes.rs`) | red, 3,433,505 against 4,744,016 |
+| host-core passes `routes_into_submixes: false` | C8 | red, 3,433,505 against 4,744,016 |
+| host-core copies the decay value `output_tail` | C8; C1, C2, C6, C11 (b) | red in all five |
+
+**Verifier follow-ups (attempt 1 PASS, two MINORs folded).** C11 (a)'s test also holds a live route
+into a submix at the route domain's maximum and a fixed one at its prepared row, a fader with
+stored automation at the +24 dB word under `FIXED`, and a muted strip with mute automation as not
+`Zero`; mutants 1379-13 to 1379-15 (`MUTATIONS.md`) are red. `console-workload` passes the strip
+liveness it attaches. Left for #1487/#1468: `product_bound` states one underflow stall even for an
+exact power-of-two product (sound; a tightening only).
+
+**Batch integration (#1375, #1376, #1379; rebased onto `origin/main` `f4e1f01c0`).** #1376's
+`RestBound::FixedPoint` composes as a rest (`pdc.rs` reads `RestBound::samples()`; a gate-only plan
+reports a finite every-peak tail, red on the `Bounded`-only pattern); the canonical `tail` row writes
+it as `fixed_point <R>` (no fixture moves: no fixture holds a fixed-point node). With every launch
+effect stated, a console session of stated effects reports an every-peak tail above 10,000,000, so
+graph-compiler's unit-test `integration_caps` cap is unbounded, as on every host. `test-release`
+runs host-core's `tail_composition` (root-authorized).

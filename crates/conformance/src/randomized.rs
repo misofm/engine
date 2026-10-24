@@ -149,6 +149,9 @@ pub struct DifferentialCoverage {
     pub blocks: u64,
     /// Blocks the scalar oracle rendered in two pieces.
     pub chunked_blocks: u64,
+    /// Of the bank blocks rendered in two pieces, at four and at eight lanes, the ones whose
+    /// second piece carried a `Point` at its first sample, mid-block (issue #1661 D2).
+    pub chunked_blocks_with_point: [u64; 2],
     /// Blocks the second bank rendered collapsed.
     pub collapsed_blocks: u64,
     /// Collapsed runs that ended in `desymmetrize_channels` and a state comparison.
@@ -215,6 +218,7 @@ impl DifferentialCoverage {
         for index in 0..2 {
             self.banks[index] += other.banks[index];
             self.declined[index] += other.declined[index];
+            self.chunked_blocks_with_point[index] += other.chunked_blocks_with_point[index];
         }
         self.refused_cohorts += other.refused_cohorts;
         self.heterogeneous_declines += other.heterogeneous_declines;
@@ -620,11 +624,12 @@ fn run_scalar(
             } else {
                 (0..frames).map(|_| draw.sample(side_profile)).collect()
             };
+            // The oracle renders whole, so a mid-block `Point` would be refused by it alone.
             let spans = draw_spans(
                 draw,
                 descriptor,
                 first,
-                frames,
+                (frames, None),
                 shape.capacity as usize,
                 shape.mono,
                 invalid,
@@ -1174,6 +1179,12 @@ fn run_width(
 
         // --- Automation --------------------------------------------------------------------------
         let invalid = !shape.mono && draw.chance(1, 16);
+        // The scalar oracle, the bank and its twin render a chunked block in the same two pieces,
+        // so a chunked block may carry `Point`s at the second piece's first sample too. Only
+        // where no block-granular recovery can run: D7 zeroes a whole block whose output is not
+        // finite, so a poisoned state is legitimately partition-dependent.
+        let chunk = (frames > 1 && finite_input && !shape.hostile && !invalid && draw.chance(1, 3))
+            .then(|| 1 + draw.below(frames - 1));
         let mut spans = Vec::new();
         let mut offsets = vec![0_u32; lanes + 1];
         let mut lane_spans = Vec::with_capacity(lanes);
@@ -1183,7 +1194,7 @@ fn run_width(
                 draw,
                 descriptor,
                 first,
-                frames,
+                (frames, chunk),
                 shape.capacity as usize,
                 shape.mono,
                 lane_invalid,
@@ -1214,10 +1225,6 @@ fn run_width(
         });
 
         // --- Scalar oracle -----------------------------------------------------------------------
-        // Only where no block-granular recovery can run: D7 zeroes a whole block whose output is
-        // not finite, so a poisoned state is legitimately partition-dependent.
-        let chunk = (frames > 1 && finite_input && !shape.hostile && !invalid && draw.chance(1, 3))
-            .then(|| 1 + draw.below(frames - 1));
         let mut scalar_left = vec![0.0_f32; words];
         let mut scalar_right = vec![0.0_f32; words];
         let mut scalar_reports = Vec::with_capacity(lanes);
@@ -1283,8 +1290,12 @@ fn run_width(
             }
             scalar_reports.push(report);
         }
-        if chunk.is_some() {
+        if let Some(cut) = chunk {
             coverage.chunked_blocks += 1;
+            let mid = first + cut as u64;
+            if spans.iter().any(|span| span.sample == mid) {
+                coverage.chunked_blocks_with_point[index_of(width)] += 1;
+            }
         }
         // Only spans the lane accepted can have started a ramp: a lane whose report counts an
         // invalid span (the EQ counts every raw span) credits nothing for this block.
@@ -1298,21 +1309,16 @@ fn run_width(
 
         // --- The bank, and its collapsing twin ------------------------------------------------------
         let (mut bank_left, mut bank_right) = (input_left.clone(), input_right.clone());
-        let bank_report = {
-            let block = EffectBankProcessBlock::new(
-                &mut bank_left,
-                &mut bank_right,
-                connected.then_some((side_left.as_slice(), side_right.as_slice())),
-                frames as u32,
-                width,
-                first,
-                &spans,
-                &offsets,
-                shape.quantum,
-            )
-            .expect("a well-shaped bank block");
-            audited(audited_calls, "process_bank", || bank.process_bank(block))
-        };
+        let pieces = bank_pieces(first, frames, chunk, &lane_spans, (&spans, &offsets));
+        let side = connected.then_some((side_left.as_slice(), side_right.as_slice()));
+        let bank_report = render_bank(
+            (&mut bank_left, &mut bank_right),
+            side,
+            width,
+            shape.quantum,
+            &pieces,
+            |block| audited(audited_calls, "process_bank", || bank.process_bank(block)),
+        );
         coverage.blocks += 1;
         // Every word before the hostile block is finite and legal -- input, sidechain, spans,
         // restored state -- so a D7 recovery there is an effect that diverged on legal input, and
@@ -1369,12 +1375,10 @@ fn run_width(
                     );
                 }
             }
-            if chunk.is_none() {
-                assert_eq!(
-                    bank_report.reports[lane], scalar_reports[lane],
-                    "{context}: lane {lane}'s bank report is not its scalar instance's"
-                );
-            }
+            assert_eq!(
+                bank_report.reports[lane], scalar_reports[lane],
+                "{context}: lane {lane}'s bank report is not its scalar instance's"
+            );
         }
         if !shape.bypass {
             coverage.bounded_blocks += 1;
@@ -1402,27 +1406,24 @@ fn run_width(
             } else {
                 input_right.clone()
             };
-            let block = EffectBankProcessBlock::new(
-                &mut left,
-                &mut right,
-                connected.then_some((side_left.as_slice(), side_right.as_slice())),
-                frames as u32,
+            let report = render_bank(
+                (&mut left, &mut right),
+                side,
                 width,
-                first,
-                &spans,
-                &offsets,
                 shape.quantum,
-            )
-            .expect("a well-shaped bank block");
-            let report = if collapse {
-                audited(audited_calls, "process_bank_mono", || {
-                    arm.bank.process_bank_mono(block)
-                })
-            } else {
-                audited(audited_calls, "process_bank", || {
-                    arm.bank.process_bank(block)
-                })
-            };
+                &pieces,
+                |block| {
+                    if collapse {
+                        audited(audited_calls, "process_bank_mono", || {
+                            arm.bank.process_bank_mono(block)
+                        })
+                    } else {
+                        audited(audited_calls, "process_bank", || {
+                            arm.bank.process_bank(block)
+                        })
+                    }
+                },
+            );
             assert_eq!(
                 report_lanes(&report, lanes),
                 report_lanes(&bank_report, lanes),
@@ -1802,7 +1803,7 @@ fn draw_spans(
     draw: &mut Draw,
     descriptor: &'static EffectDescriptor,
     first: u64,
-    frames: usize,
+    (frames, cut): (usize, Option<usize>),
     capacity: usize,
     mono: bool,
     invalid: bool,
@@ -1819,9 +1820,13 @@ fn draw_spans(
         for _ in 0..=draw.below(capacity) {
             let index = draw.pick(&automatable);
             let parameter = &descriptor.parameters[index];
-            // An automatable parameter is `Block` rate: one `Point` span at the block's first
-            // sample (#1636 retired the other rates and span kinds).
-            let start = first;
+            // An automatable parameter is `Block` rate: one `Point` span at the first sample of
+            // the call it arrives in (#1636 retired the other rates and span kinds). A block
+            // rendered in two pieces may also carry one at the second piece's first sample.
+            let start = match cut {
+                Some(cut) if draw.chance(1, 2) => first + cut as u64,
+                _ => first,
+            };
             // One span per parameter and start sample: two would sort as `L L R R`, which is no
             // longer twin pairs.
             if spans.iter().any(|span: &PreparedAutomationSpan| {
@@ -1934,11 +1939,107 @@ fn render_scalar(
         )
         .expect("a well-shaped block");
         let report = audited(audited_calls, "process", || effect.process(block));
-        total.sanitized_main_samples += report.sanitized_main_samples;
-        total.sanitized_sidechain_samples += report.sanitized_sidechain_samples;
-        total.invalid_spans += report.invalid_spans;
-        total.nonfinite_left_blocks += report.nonfinite_left_blocks;
-        total.nonfinite_right_blocks += report.nonfinite_right_blocks;
+        add_report(&mut total, &report);
+    }
+    total
+}
+
+fn add_report(total: &mut ProcessReport, report: &ProcessReport) {
+    total.sanitized_main_samples += report.sanitized_main_samples;
+    total.sanitized_sidechain_samples += report.sanitized_sidechain_samples;
+    total.invalid_spans += report.invalid_spans;
+    total.nonfinite_left_blocks += report.nonfinite_left_blocks;
+    total.nonfinite_right_blocks += report.nonfinite_right_blocks;
+}
+
+/// One piece of a bank block: its frames `[start, end)`, and its packed spans and per-lane
+/// offsets.
+struct BankPiece {
+    start: usize,
+    end: usize,
+    first: u64,
+    spans: Vec<PreparedAutomationSpan>,
+    offsets: Vec<u32>,
+}
+
+/// The pieces a bank renders a block in: the whole block with its spans as drawn, or, when the
+/// scalar oracle renders it in two pieces at `cut`, the same two pieces, each with the spans of
+/// every lane that fall inside it (issue #1661 D2). Built off the audited scope.
+fn bank_pieces(
+    first: u64,
+    frames: usize,
+    chunk: Option<usize>,
+    lane_spans: &[Vec<PreparedAutomationSpan>],
+    (spans, offsets): (&[PreparedAutomationSpan], &[u32]),
+) -> Vec<BankPiece> {
+    let Some(cut) = chunk else {
+        return vec![BankPiece {
+            start: 0,
+            end: frames,
+            first,
+            spans: spans.to_vec(),
+            offsets: offsets.to_vec(),
+        }];
+    };
+    [(0, cut), (cut, frames)]
+        .into_iter()
+        .map(|(start, end)| {
+            let (from, to) = (first + start as u64, first + end as u64);
+            let mut spans = Vec::new();
+            let mut offsets = vec![0_u32];
+            for lane in lane_spans {
+                spans.extend(
+                    lane.iter()
+                        .filter(|span| span.sample >= from && span.sample < to)
+                        .copied(),
+                );
+                offsets.push(spans.len() as u32);
+            }
+            BankPiece {
+                start,
+                end,
+                first: from,
+                spans,
+                offsets,
+            }
+        })
+        .collect()
+}
+
+/// Renders one bank block in `pieces`: piece `[a, b)` is the contiguous words `[a * W, b * W)` of
+/// every plane. Returns the per-lane sums of the piece reports.
+fn render_bank(
+    (left, right): (&mut [f32], &mut [f32]),
+    side: Option<(&[f32], &[f32])>,
+    width: BankWidth,
+    quantum: u32,
+    pieces: &[BankPiece],
+    mut process: impl FnMut(EffectBankProcessBlock<'_>) -> BankProcessReport,
+) -> BankProcessReport {
+    let lanes = width.lanes() as usize;
+    let mut total = BankProcessReport {
+        width,
+        reports: [ProcessReport::default(); 8],
+    };
+    for piece in pieces {
+        let words = piece.start * lanes..piece.end * lanes;
+        let block = EffectBankProcessBlock::new(
+            &mut left[words.clone()],
+            &mut right[words.clone()],
+            side.map(|(l, r)| (&l[words.clone()], &r[words.clone()])),
+            (piece.end - piece.start) as u32,
+            width,
+            piece.first,
+            &piece.spans,
+            &piece.offsets,
+            quantum,
+        )
+        .expect("a well-shaped bank block");
+        let report = process(block);
+        total.width = report.width;
+        for (sum, lane) in total.reports.iter_mut().zip(&report.reports) {
+            add_report(sum, lane);
+        }
     }
     total
 }
@@ -2407,6 +2508,13 @@ pub fn assert_reached(coverage: &DifferentialCoverage) {
     assert!(
         coverage.blocks > 0 && coverage.chunked_blocks > 0 && coverage.bounded_blocks > 0,
         "blocks were not compared whole, chunked and bounded: {coverage:?}"
+    );
+    assert!(
+        (0..2).all(|index| {
+            coverage.banks[index] == 0 || coverage.chunked_blocks_with_point[index] > 0
+        }),
+        "a width bound banks, yet none of its chunked blocks carried a mid-block Point: \
+         {coverage:?}"
     );
     assert!(
         coverage.restores > 0 && coverage.resets > 0,

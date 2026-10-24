@@ -306,6 +306,7 @@ fn render_with(
         builtins,
         caps: graph_caps(),
         dispatch,
+        gain_liveness: graph_compiler::GainLiveness::FIXED,
     })
     .unwrap_or_else(|failure| panic!("graph: {:?}", failure.diagnostics));
     let banks = artifact
@@ -498,6 +499,7 @@ fn a_mixed_bypass_cohort_binds_one_bank_per_slot() {
             builtins,
             caps: graph_caps(),
             dispatch: Backend::current(),
+            gain_liveness: graph_compiler::GainLiveness::FIXED,
         })
         .unwrap_or_else(|failure| panic!("graph: {:?}", failure.diagnostics));
         let banks: Vec<Vec<String>> = artifact

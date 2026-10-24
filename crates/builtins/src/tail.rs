@@ -24,8 +24,8 @@ use effect_contract::{
 };
 use math::tail::{
     CascadeBound, CascadeComposition, EnvelopeSection, FlushLaw, LiveCascade, LiveComposition,
-    PoleDomain, SvfWords, fixed_cascade_within, live_cascade, live_cascade_composition,
-    output_rounding, state_rounding, v_dual_norm, v_norm, word_box_norm,
+    PoleDomain, Rounding, SvfWords, UNDERFLOW, ceil_millibels, fixed_cascade_within, live_cascade,
+    live_cascade_composition, output_rounding, state_rounding, v_dual_norm, v_norm, word_box_norm,
 };
 
 use crate::filter_control::INPUT_FILTER_RAMP_SAMPLES;
@@ -88,38 +88,6 @@ fn live_stated_composition(composition: &LiveComposition) -> CompositionBound {
         tail_stall: FlushStall::Level(tail_stall),
     }
 }
-
-/// Whether a linear value handed to [`ceil_millibels`] is exactly the value it states, or a value
-/// computed by rounded operations, which may lie a few `2^-53` below it.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum Rounding {
-    Exact,
-    Computed,
-}
-
-/// `ceil_mB(g) = ceil(2000 log10 g)` (#1465 F-D3), with `math::log`, so every target computes the
-/// same value, and rounded up: `x = 2000 log(g) / ln 10` carries a few `2^-53` relative errors (the
-/// logarithm within one ulp, the product and the quotient), and a computed `g` a few more. The
-/// ceiling is taken of `x + |x| 2^-30`, plus `2^-30` mB for a computed `g`; an exact `g = 1` stays
-/// `0` (`log(1) = 0` exactly). `g` is positive and finite.
-fn ceil_millibels(g: f64, rounding: Rounding) -> i32 {
-    const MARGIN: f64 = 1.0 / 1_073_741_824.0;
-    let x = 2000.0 * math::log(g) / core::f64::consts::LN_10;
-    let absolute = match rounding {
-        Rounding::Exact => 0.0,
-        Rounding::Computed => MARGIN,
-    };
-    let up = x + x.abs() * MARGIN + absolute;
-    let ceiling = -math::floor(-up);
-    assert!(
-        ceiling.is_finite() && ceiling.abs() < f64::from(i32::MAX),
-        "a millibel value of a finite positive gain"
-    );
-    ceiling as i32
-}
-
-/// `2^-126`, the smallest normal `f32`: one rounded operation's underflow.
-const UNDERFLOW: f64 = 1.0 / 85_070_591_730_234_615_865_843_651_857_942_052_864.0;
 
 /// #1465 F-D3: a channel with both filters disabled is `y = fl(x trim)`: no tail (`D = 0`, rest
 /// `ZERO`), `G_p = G_t = ceil_mB(|trim|)` when the product is exact (a power-of-two trim, 0 dB

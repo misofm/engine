@@ -1,7 +1,7 @@
 //! Actual prepared-plan allocation and differential evidence for adjacent resident input.
 
 use bench_support::alloc::{Mode, assert_installed, mode, set_mode};
-use effect_contract::{BankWidth, ChannelSymmetryWitness, LatencySamples, TailSamples};
+use effect_contract::{BankWidth, ChannelSymmetryWitness, LatencySamples};
 use engine::{
     QuantumFrames,
     realtime::{
@@ -296,7 +296,7 @@ fn prepared(
         .map(|id| GraphNode {
             id,
             latency: LatencySamples(0),
-            tail: TailSamples::Finite(0),
+            bound: effect_contract::NodeTailBound::ZERO,
         })
         .collect();
     nodes.sort_by(|a, b| a.id.cmp(&b.id));

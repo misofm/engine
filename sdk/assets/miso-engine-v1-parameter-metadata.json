@@ -409,11 +409,11 @@
           "domain": 1, "domainName": "continuous",
           "minimum": 80.0, "maximum": 8000.0, "default": 1000.0,
           "mapping": 2, "mappingName": "logarithmic",
-          "automationRate": 3, "automationRateName": "none",
+          "automationRate": 2, "automationRateName": "block",
           "channelPolicy": 2, "channelPolicyName": "perLane",
-          "smoothing": 1, "smoothingName": "none", "smoothingSamples": 0,
-          "readable": true, "automatable": false,
-          "liveUpdatable": false,
+          "smoothing": 2, "smoothingName": "linear", "smoothingSamples": 64,
+          "readable": true, "automatable": true,
+          "liveUpdatable": true,
           "enumChoices": [],
           "step": { "unit": "cents", "size": "20", "precision": 3, "ladder": { "xs": 1, "sm": 3, "md": 5, "lg": 10, "xl": 30 } }
         },
@@ -1354,7 +1354,7 @@
       "miso.multiband-compressor": {
         "bypass": { "control": 0, "name": "bypass", "displayName": "Bypass", "displayUnit": "", "unit": "linear", "kind": "toggle", "minimum": 0.0, "maximum": 1.0, "disabledValue": null, "default": 0.0, "taper": "stepped", "step": { "unit": "index", "size": "1", "precision": 0, "ladder": { "xs": 1, "sm": 3, "md": 5, "lg": 10, "xl": 30 } }, "choices": [], "ramp": "fixed", "scope": "model", "family": "effect", "lanes": "shared", "class": "rebuildOnly", "reason": "ruledLiveNotBuilt", "reasonIssue": 1340, "reopen": "#1340 gives the multiband compressor a live bypass shunt; its last step flips the row", "automatable": false },
         "parameters": [
-          { "control": 1, "name": "crossover_hz", "displayName": "crossover", "displayUnit": "Hz", "unit": "hz", "kind": "continuous", "minimum": 80.0, "maximum": 8000.0, "disabledValue": null, "default": 1000.0, "taper": "logarithmic", "step": { "unit": "cents", "size": "20", "precision": 3, "ladder": { "xs": 1, "sm": 3, "md": 5, "lg": 10, "xl": 30 } }, "choices": [], "ramp": "fixed", "scope": "model", "family": "effect", "lanes": "perLane", "class": "rebuildOnly", "reason": "ruledLiveNotBuilt", "reasonIssue": 1338, "reopen": "#1338 makes the crossover live; its last step flips the row", "automatable": false },
+          { "control": 1, "name": "crossover_hz", "displayName": "crossover", "displayUnit": "Hz", "unit": "hz", "kind": "continuous", "minimum": 80.0, "maximum": 8000.0, "disabledValue": null, "default": 1000.0, "taper": "logarithmic", "step": { "unit": "cents", "size": "20", "precision": 3, "ladder": { "xs": 1, "sm": 3, "md": 5, "lg": 10, "xl": 30 } }, "choices": [], "ramp": "fixed", "scope": "model", "family": "effect", "lanes": "perLane", "class": "live", "reason": null, "reasonIssue": null, "reopen": null, "automatable": true },
           { "control": 3, "name": "low_threshold_db", "displayName": "low_threshold", "displayUnit": "dB", "unit": "db", "kind": "continuous", "minimum": -80.0, "maximum": 0.0, "disabledValue": null, "default": -18.0, "taper": "decibel", "step": { "unit": "absolute", "size": "0.1", "precision": 1, "ladder": { "xs": 1, "sm": 3, "md": 5, "lg": 10, "xl": 30 } }, "choices": [], "ramp": "fixed", "scope": "model", "family": "effect", "lanes": "perLane", "class": "live", "reason": null, "reasonIssue": null, "reopen": null, "automatable": true },
           { "control": 4, "name": "low_ratio", "displayName": "low_ratio", "displayUnit": "ratio", "unit": "ratio", "kind": "continuous", "minimum": 1.0, "maximum": 20.0, "disabledValue": null, "default": 4.0, "taper": "logarithmic", "step": { "unit": "ratio", "size": "1.02", "precision": 8, "ladder": { "xs": 1, "sm": 3, "md": 5, "lg": 10, "xl": 30 } }, "choices": [], "ramp": "fixed", "scope": "model", "family": "effect", "lanes": "perLane", "class": "live", "reason": null, "reasonIssue": null, "reopen": null, "automatable": true },
           { "control": 5, "name": "low_attack_ms", "displayName": "low_attack", "displayUnit": "ms", "unit": "milliseconds", "kind": "continuous", "minimum": 0.1, "maximum": 200.0, "disabledValue": null, "default": 10.0, "taper": "logarithmic", "step": { "unit": "ratio", "size": "1.02", "precision": 3, "ladder": { "xs": 1, "sm": 3, "md": 5, "lg": 10, "xl": 30 } }, "choices": [], "ramp": "fixed", "scope": "model", "family": "effect", "lanes": "perLane", "class": "live", "reason": null, "reasonIssue": null, "reopen": null, "automatable": true },

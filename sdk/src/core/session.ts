@@ -24,6 +24,7 @@ import type {
   RouteSource,
   RouteSpec,
   SessionSampleRateHz,
+  SidechainSpec,
   SourceSpec,
   SubmixSpec,
   TrackSpec,
@@ -238,7 +239,8 @@ function channelOrder(channel: string): number {
   return channel === "left" ? 0 : channel === "right" ? 1 : 2;
 }
 
-function stableId(value: unknown, path: string): string {
+/** @internal */
+export function stableId(value: unknown, path: string): string {
   if (typeof value !== "string" || !STABLE_ID.test(value)) {
     fail(path, "a Session V1 stable ID must match [a-z][a-z0-9._-]{0,126}", CODE.invalidId);
   }
@@ -262,7 +264,8 @@ function bool(value: unknown, path: string, code?: string): boolean {
  * (anything else is `schema.invalid_enum`), and every launch native descriptor publishes only
  * `normal` (`effect.quality.unsupported` at prepare-effects).
  */
-function quality(value: unknown, path: string): "normal" {
+/** @internal */
+export function quality(value: unknown, path: string): "normal" {
   if (value === undefined || value === "normal") return "normal";
   if (value === "draft" || value === "high") {
     fail(path, "launch native descriptors publish only the 'normal' quality row", CODE.qualityUnsupported);
@@ -560,16 +563,7 @@ export function effect<E extends EffectId>(
     fail(`${path}.channel`, "expected left, right or both");
   }
   if (options.sidechain !== undefined) {
-    validateRouteSource(options.sidechain.source, `${path}.sidechain.source`);
-    // `portId` is typed to the descriptor's own sidechain inputs, so a caller who typechecks
-    // cannot reach the refusals below. They are here for the caller who does not -- plain
-    // JavaScript, a JSON round-trip, a value that arrived as `string` -- which is every caller
-    // whose port the engine used to be the first thing to look at.
-    const portId: unknown = options.sidechain.portId;
-    if (typeof portId !== "string" || portId.length === 0) {
-      fail(`${path}.sidechain.portId`, "a routed sidechain requires a nonempty port ID");
-    }
-    sidechainPort(descriptor, portId, `${path}.sidechain.portId`);
+    normalizeSidechain(descriptor.id, options.sidechain, `${path}.sidechain`);
   }
   for (const [name, value] of Object.entries(parameters)) {
     parameterRows(descriptor, name, value, channel, `${path}.parameters.${name}`);
@@ -586,6 +580,71 @@ export function effect<E extends EffectId>(
       ...(options.sidechain === undefined ? {} : { sidechain: options.sidechain }),
     },
   }) as EffectDecl<E>;
+}
+
+/**
+ * A routed sidechain's `sidechain` record, validated against the effect it feeds: its route source
+ * and its port. Shared by `effect()`, the inserts it becomes and the transaction builder's
+ * `setEffectSidechain` (#1383).
+ * @internal
+ */
+export function normalizeSidechain(effectId: string, sidechain: SidechainSpec, path: string): ModelRecord {
+  const descriptor = effectDescriptor(effectId, path);
+  if (sidechain === null || typeof sidechain !== "object" || Array.isArray(sidechain)) {
+    fail(path, "expected a routed sidechain { source, portId }");
+  }
+  validateRouteSource(sidechain.source, `${path}.source`);
+  // `portId` is typed to the descriptor's own sidechain inputs, so a caller who typechecks
+  // cannot reach the refusals below. They are here for the caller who does not -- plain
+  // JavaScript, a JSON round-trip, a value that arrived as `string` -- which is every caller
+  // whose port the engine used to be the first thing to look at.
+  const portId: unknown = sidechain.portId;
+  if (typeof portId !== "string" || portId.length === 0) {
+    fail(`${path}.portId`, "a routed sidechain requires a nonempty port ID");
+  }
+  sidechainPort(descriptor, portId, `${path}.portId`);
+  return freeze({ kind: "routed", source: normalizeRouteSource(sidechain.source), port_id: portId });
+}
+
+/**
+ * An insert's record with its native effect replaced by `effectId` (#1383 `setEffectIdentity`),
+ * refused unless the rest of the record is valid for the new effect, as the engine's preparation
+ * would refuse it: its link mode, its sidechain port, and each `params` row's parameter, unit,
+ * lane and value, all checked with the validators `effect()` uses.
+ * @internal
+ */
+export function retargetInsert(insert: ModelRecord, effectId: unknown, path: string): ModelRecord {
+  if (typeof effectId !== "string") fail(path, "expected a native effect ID");
+  const descriptor = effectDescriptor(effectId, path);
+  linkMode(descriptor.id, insert.link_mode, path);
+  const sidechain = insert.sidechain as ModelRecord;
+  if (sidechain.kind === "routed") sidechainPort(descriptor, String(sidechain.port_id), path);
+  for (const param of insert.params as readonly ModelRecord[]) {
+    const id = Number(param.parameter_id);
+    const row = descriptor.parameters.find((candidate) => candidate.id === id);
+    if (row === undefined) {
+      fail(path, `${descriptor.id} has no parameter ${id}, which this insert sets`);
+    }
+    if (row.unitName !== param.unit) {
+      fail(path, `${descriptor.id}'s parameter ${id} (${row.name}) is in ${row.unitName}, not ${String(param.unit)}`);
+    }
+    parameterRows(descriptor, row.name, displayValue(row, Number(param.value), path), param.channel as Channel, path);
+  }
+  return freeze({ ...insert, identity: { kind: "native", effect_id: descriptor.id } });
+}
+
+/** The display-unit value a `params` row's wire value spells for `row`, the inverse of `wireRows`. */
+function displayValue(row: EffectParameterRow, value: number, path: string): unknown {
+  if (row.domainName === "boolean") {
+    if (value !== 0 && value !== 1) fail(path, `${row.name} is a toggle, and ${value} is not 0 or 1`);
+    return value === 1;
+  }
+  if (row.domainName === "enumeration") {
+    const choice = row.enumChoices.find((candidate) => Math.fround(candidate.value) === value);
+    if (choice === undefined) fail(path, `${value} is not a declared choice for ${row.name}`);
+    return choice.label;
+  }
+  return value;
 }
 
 // -------------------------------------------------------------------------------------------
@@ -657,12 +716,14 @@ interface NormalizedOptions {
   readonly controlSmoothing: ModelRecord;
 }
 
-interface SourceEntry {
+/** @internal */
+export interface SourceEntry {
   readonly id: string;
   readonly spec: SourceSpec;
 }
 
-interface TrackEntry {
+/** @internal */
+export interface TrackEntry {
   readonly id: string;
   readonly spec: TrackSpec;
 }
@@ -680,8 +741,8 @@ interface VcaEntry {
   readonly members: readonly string[];
 }
 
-/** One validated console slot, in the session's slot order. */
-interface ConsoleSlotEntry {
+/** One validated console slot, in the session's slot order. @internal */
+export interface ConsoleSlotEntry {
   readonly slot: string;
   readonly section: "pre_insert" | "post_insert";
   readonly effectId: ConsoleEffectId;
@@ -702,9 +763,49 @@ interface BuilderState {
   readonly automation: readonly AutomationSpec[];
 }
 
+/**
+ * What a builder has declared that an edit of it is validated against (#1383): the rate, the
+ * sources, the console slots, the tracks, and the other graph IDs (submixes, VCAs, outputs).
+ * @internal
+ */
+export interface BuilderContext {
+  readonly sampleRateHz: SessionSampleRateHz;
+  readonly sources: readonly SourceEntry[];
+  readonly slots: readonly ConsoleSlotEntry[];
+  readonly tracks: readonly TrackEntry[];
+  readonly otherGraphIds: ReadonlySet<string>;
+}
+
+let readContext: (builder: SessionBuilder) => BuilderContext;
+
+/**
+ * The declarations of `builder`, for the transaction builder that edits it.
+ * @internal
+ */
+export function builderContext(builder: SessionBuilder): BuilderContext {
+  return readContext(builder);
+}
+
 export class SessionBuilder {
   readonly #state: BuilderState;
   #model: SessionModel | undefined;
+
+  static {
+    readContext = (builder) => {
+      const state = builder.#state;
+      return {
+        sampleRateHz: state.options.sampleRateHz,
+        sources: state.sources,
+        slots: state.console ?? [],
+        tracks: state.tracks,
+        otherGraphIds: new Set([
+          ...state.submixes.map((entry) => entry.id),
+          ...state.vcas.map((entry) => entry.id),
+          ...state.outputs,
+        ]),
+      };
+    };
+  }
 
   constructor(state: BuilderState) {
     this.#state = state;
@@ -717,19 +818,7 @@ export class SessionBuilder {
     if (this.#state.sources.some((entry) => entry.id === id)) {
       fail(`${path}.id`, "a source with this ID is already declared");
     }
-    if (spec === null || typeof spec !== "object") fail(path, "expected a source specification");
-    // The engine's own limit, from its generated ABI constants: a source is mono or stereo.
-    const maximumChannels = ABI_LAYOUT.constants.maximumSourceChannels;
-    if (!Number.isInteger(spec.channels) || spec.channels < 1 || spec.channels > maximumChannels) {
-      fail(`${path}.channels`, `a V1 source has 1 to ${maximumChannels} channels (mono or stereo)`);
-    }
-    if (spec.bitDepth !== 16 && spec.bitDepth !== 24 && spec.bitDepth !== "32f") {
-      fail(`${path}.bitDepth`, 'expected the token 16, 24 or "32f"');
-    }
-    if (u64(spec.frames, `${path}.frames`) === 0n) fail(`${path}.frames`, "expected a nonzero frame count");
-    if (typeof spec.content !== "string" || !CONTENT_IDENTITY.test(spec.content)) {
-      fail(`${path}.content`, "source content must match blake3:[0-9a-f]{64}");
-    }
+    normalizeSource(id, spec, path);
     return this.#next({
       sources: [...this.#state.sources, freeze({ id, spec: { ...spec } })],
     });
@@ -1064,13 +1153,43 @@ export function session(options: SessionOptions): SessionBuilder {
 // -------------------------------------------------------------------------------------------
 
 /**
+ * One source's normalized record, refusing what the engine refuses in a source declaration. Shared
+ * by `SessionBuilder.source` and the transaction builder's source edits (#1383).
+ * @internal
+ */
+export function normalizeSource(id: string, spec: SourceSpec, path: string): ModelRecord {
+  if (spec === null || typeof spec !== "object") fail(path, "expected a source specification");
+  // The engine's own limit, from its generated ABI constants: a source is mono or stereo.
+  const maximumChannels = ABI_LAYOUT.constants.maximumSourceChannels;
+  if (!Number.isInteger(spec.channels) || spec.channels < 1 || spec.channels > maximumChannels) {
+    fail(`${path}.channels`, `a V1 source has 1 to ${maximumChannels} channels (mono or stereo)`);
+  }
+  if (spec.bitDepth !== 16 && spec.bitDepth !== 24 && spec.bitDepth !== "32f") {
+    fail(`${path}.bitDepth`, 'expected the token 16, 24 or "32f"');
+  }
+  const frames = u64(spec.frames, `${path}.frames`);
+  if (frames === 0n) fail(`${path}.frames`, "expected a nonzero frame count");
+  if (typeof spec.content !== "string" || !CONTENT_IDENTITY.test(spec.content)) {
+    fail(`${path}.content`, "source content must match blake3:[0-9a-f]{64}");
+  }
+  return freeze({
+    id,
+    content: spec.content,
+    channels: spec.channels,
+    bit_depth: spec.bitDepth,
+    frames: frames.toString(),
+  });
+}
+
+/**
  * Read a track's source reference without yet knowing the source's channel count.
  *
  * The bare-string form leaves both lanes open, because "the whole source" means lane 0 for a mono
  * source and lanes 0/1 for a dual-mono one, and only the declaration knows which. `resolveLanes`
  * closes them once the source is in hand.
  */
-function trackSourceRef(
+/** @internal */
+export function trackSourceRef(
   source: TrackSpec["source"],
   path: string,
 ): { readonly id: string; readonly left: number | undefined; readonly right: number | undefined } {
@@ -1083,7 +1202,8 @@ function trackSourceRef(
   return { id: stableId(source.id, `${path}.id`), left: source.left, right: source.right };
 }
 
-function resolveLanes(
+/** @internal */
+export function resolveLanes(
   reference: { readonly left: number | undefined; readonly right: number | undefined },
   channels: number,
   path: string,
@@ -1249,8 +1369,11 @@ function insertId(decl: EffectDecl, index: number): string {
   return decl.slotId ?? `insert-${index + 1}`;
 }
 
-/** A track's inserts, in declared order. Only the *entities* sort; inserts preserve signal order. */
-function normalizeInserts(
+/**
+ * A strip's inserts, in declared order. Only the *entities* sort; inserts preserve signal order.
+ * @internal
+ */
+export function normalizeInserts(
   effects: readonly EffectDecl[] | undefined,
   path: string,
 ): readonly ModelRecord[] {
@@ -1265,24 +1388,33 @@ function normalizeInserts(
     const id = stableId(insertId(decl, index), `${where}.slotId`);
     if (ids.has(id)) fail(`${where}.slotId`, `'${id}' is repeated in the inserts`, CODE.duplicateId);
     ids.add(id);
-    const descriptor = effectDescriptor(decl.effectId, `${where}.effectId`);
-    const params = normalizeParams(descriptor, decl.parameters, decl.options.channel, where);
-    const sidechain = decl.options.sidechain;
-    return freeze({
-      id,
-      identity: { kind: "native", effect_id: decl.effectId },
-      quality: decl.options.quality,
-      bypass: decl.options.bypass,
-      link_mode: decl.options.linkMode,
-      params,
-      sidechain: sidechain === undefined
-        ? { kind: "none" }
-        : {
-          kind: "routed",
-          source: normalizeRouteSource(sidechain.source),
-          port_id: sidechain.portId,
-        },
-    });
+    return normalizeInsert(decl, id, where);
+  });
+}
+
+/**
+ * One insert's record under the stable ID `id`. Shared by `normalizeInserts` and the transaction
+ * builder's `putTrackEffect` (#1383).
+ * @internal
+ */
+export function normalizeInsert(decl: EffectDecl, id: unknown, where: string): ModelRecord {
+  if (decl === null || typeof decl !== "object") {
+    fail(where, "expected an effect declaration from effect()");
+  }
+  stableId(id, `${where}.slotId`);
+  const descriptor = effectDescriptor(decl.effectId, `${where}.effectId`);
+  const params = normalizeParams(descriptor, decl.parameters, decl.options.channel, where);
+  const sidechain = decl.options.sidechain;
+  return freeze({
+    id: id as string,
+    identity: { kind: "native", effect_id: decl.effectId },
+    quality: decl.options.quality,
+    bypass: decl.options.bypass,
+    link_mode: decl.options.linkMode,
+    params,
+    sidechain: sidechain === undefined
+      ? { kind: "none" }
+      : normalizeSidechain(decl.effectId, sidechain, `${where}.sidechain`),
   });
 }
 
@@ -1342,7 +1474,8 @@ function consoleSlot(
  * the track's knobs, so any other key (`effectId`, `quality`, `linkMode`, `sidechain`, ...) is
  * `schema.unknown_field`.
  */
-function normalizeConsoleEntries(
+/** @internal */
+export function normalizeConsoleEntries(
   entries: readonly ConsoleEntrySpec[] | undefined,
   slots: readonly ConsoleSlotEntry[],
   path: string,
@@ -1634,14 +1767,23 @@ function normalizeAutomationOffset(raw: AutomationSpec["offset"], path: string):
   });
 }
 
-function normalizeTrack(
+/**
+ * One track's normalized record against the session's sources, console slots and rate. Shared by
+ * the session builder and the transaction builder's `upsertTrack` (#1383). Refusal paths start
+ * with `verb("id")`: `track` for the builder, `upsertTrack` for a transaction.
+ * @internal
+ */
+export function normalizeTrack(
   entry: TrackEntry,
   sources: readonly SourceEntry[],
   slots: readonly ConsoleSlotEntry[],
   sampleRateHz: number,
+  verb = "track",
 ): ModelRecord {
-  const path = `track("${entry.id}")`;
+  const path = `${verb}("${entry.id}")`;
   const spec = entry.spec;
+  if (spec === null || typeof spec !== "object") fail(path, "expected a track specification");
+  knownKeys(spec, TRACK_KEYS, path, "a track");
   const reference = trackSourceRef(spec.source, `${path}.source`);
   const source = sources.find((candidate) => candidate.id === reference.id);
   if (source === undefined) fail(`${path}.source`, `'${reference.id}' is not a declared source`);
@@ -1689,13 +1831,7 @@ function normalizeSubmix(
 function normalize(state: BuilderState): SessionModel {
   const options = state.options;
   const sources = state.sources
-    .map(({ id, spec }) => freeze({
-      id,
-      content: spec.content,
-      channels: spec.channels,
-      bit_depth: spec.bitDepth,
-      frames: u64(spec.frames, `source("${id}").frames`).toString(),
-    }))
+    .map(({ id, spec }) => normalizeSource(id, spec, `source("${id}")`))
     .sort(byId);
   const slots = state.console ?? [];
   const tracks = state.tracks

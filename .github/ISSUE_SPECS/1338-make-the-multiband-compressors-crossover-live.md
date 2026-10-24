@@ -198,3 +198,60 @@ This slice changes the payload #1280 and #1282 move, so it lands after them and 
 the new words.
 
 **Decision 17 amendment (2026-10-13).** The crossover carries `prepared_reason: RuledLiveNotBuilt { issue: 1338 }` (#1549). Last step of this issue: set its `automation_rate` to `Block`, remove the reason, and assert that its control row is `Live`; no host or protocol code.
+
+## Decision and evidence record (attempt 1, 2026-10-24)
+
+**Scope-note amendments (root, 2026-10-24; the scope note wins for paths and decisions).**
+- D6 numbers: since #1069 the payload already held four coefficient ramps after the silence
+  counter (`LANE_HEADER_WORDS = 64`), so the three word ramps go after those
+  (`CROSSOVER_WORD = 64`) and `LANE_HEADER_WORDS` goes 64 -> 76 (304 bytes per channel, 608 per
+  track). `STATE_LAYOUT_VERSION` stays 1.
+- The word ramps are `RAMP_SLOTS` 14..17, after the four rate ramps (#1069's pattern). The kernel
+  derives `Lr4Coef` from the segment words (`crossover_coefficients`), once per flat segment and
+  per frame on a ramped one; `Side::coefficients`, `prepared_coefficients`, `designed` and
+  `lane_coefficients` are deleted (one copy of the words: the ramps). `src/split.rs`'s test
+  fingerprint drops the two deleted fields (the words are in the ramps it already hashes).
+- Restore (D6): each word ramp is a positive normal below 1, `ramp_path_inside(.., (0, 1), 64)`,
+  settled implies `current == target`, target triple `== design_lr4(crossover_hz)` bit for bit,
+  current triple `transition_norm <= RAMP_PATH_NORM_TOLERANCE`; refusal code
+  `effect.state.coefficient`, nothing staged. The target's `NORM_TOLERANCE` is #1366's proof, not a
+  runtime check.
+- Tests: no `crossover_live.rs`. Gates 2 and 4 are in `tests/crossover.rs`; gate 3 is the
+  randomized differential's reach (its generator draws every non-`None` row); gate 5 extends
+  `tests/no_alloc_render.rs` (a crossover span on every bank lane, spans asserted applied);
+  `tests/ramp_endpoint.rs` gains the three words with one shared move (80 Hz to `0x42a00022`, which
+  the unclamped law overshoots on all three words, scanned at 48 kHz).
+- Feature-sprint mode: the measured gate-2(b) continuity margin below replaces the blinded A/B
+  listening note for this slice; listening moves to the post-sprint testing phase.
+- `crates/controls/tests/effect_rows.rs`: the `("miso.multiband-compressor", 1)` arm is deleted, so
+  the row is asserted `Live`.
+
+**Gate 2 measurements** (scalar, 48 kHz, 1 kHz sine at 0.5, 40-frame blocks so the 64-sample glide
+is cut by a block boundary; unity gain asserted bit for bit before the span):
+
+| glide | worst `|y - ap_ref| / max(|low|,|high|,|ap_ref|)` (bound `2^-22` = 2.4e-7) | largest step, glide | largest step, static | ratio (bound 2) |
+|---|---|---|---|---|
+| 200 Hz -> 4 kHz | 9.0e-8 | 0.07766 | 0.06539 | 1.19 |
+| 4 kHz -> 200 Hz | 7.7e-8 | 0.07447 | 0.06539 | 1.14 |
+| 80 Hz -> 8 kHz | 1.2e-7 | 0.07524 | 0.06534 | 1.15 |
+
+Assigning the words at once instead (mutant 1338-M1) measures 0.335 against 0.065 static
+(ratio 5.1), red at (b) alone, and red at (a) first. Mutants 1338-M1..M6 are in
+`crates/multiband-compressor/tests/MUTATIONS.md`; all red.
+
+**Console benchmark (descriptive).** `scripts/operator/run-console-benchmark.sh --step b12-1338` at
+f3a473449, one invocation under the exclusive machine lock, after a passing preflight: refused
+before any workload launch, `precondition_loadavg_above_ceiling` (loadavg 0.52 on a shared
+machine). The run was not retried, as root directed. No timing exists. The console workload does
+not contain the multiband compressor; the 55 console-workload tests and the wasm-gate native
+corpus (`g5_native_corpus`, 7 tests) pass, and `corpus_digests.in` did not move.
+
+**Verifier follow-ups (PASS with two minors, folded in).** Restore now walks the three word ramps
+point by point with `LinearRamp::next_value` (the kernel's clamped law and its snap, at most 64
+points) and holds `transition_norm <= RAMP_PATH_NORM_TOLERANCE` at every point, as the parametric
+EQ's restore does: a forged step keeps each word inside its endpoints but can leave the line
+between the designs (the verifier measured a path norm of 1.149). Gate 4 gains two forged cases,
+an off-line a2 step (next point norm about 1.022 at 40/64 into a 200 Hz to 4 kHz glide) and a
+settled word one ulp off its target; mutants 1338-M7 and M8 are red without the walk and without
+the settled check. `effect_runtime::svf`'s module doc names the multiband as a user of
+`RAMP_PATH_NORM_TOLERANCE` (root authorized that one doc edit).

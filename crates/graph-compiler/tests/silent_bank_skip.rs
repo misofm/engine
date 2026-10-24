@@ -372,6 +372,7 @@ fn bind(model: &SessionModel, schedules: &[Arc<[Block]>], observed: bool) -> Bou
             maximum_finite_tail_samples: u64::MAX,
         },
         dispatch: width(),
+        gain_liveness: graph_compiler::GainLiveness::FIXED,
     })
     .unwrap_or_else(|failure| panic!("graph: {:?}", failure.diagnostics));
     let latency = artifact.report().output_latency.0;

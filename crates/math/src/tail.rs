@@ -60,7 +60,43 @@ const U: f64 = 1.0 / 16_777_216.0;
 
 /// `2^-126`, the smallest normal `f32`: the absolute error one `f32` operation can make by
 /// underflowing (gradual underflow loses less, flush-to-zero at most this).
-const UNDERFLOW: f64 = 1.0 / 85_070_591_730_234_615_865_843_651_857_942_052_864.0;
+pub const UNDERFLOW: f64 = 1.0 / 85_070_591_730_234_615_865_843_651_857_942_052_864.0;
+
+/// Whether a linear value handed to [`ceil_millibels`] is exactly the value it states, or a value
+/// computed by rounded operations, which may lie a few `2^-53` below it.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Rounding {
+    /// `g` is exactly the value it states.
+    Exact,
+    /// `g` is the result of rounded operations.
+    Computed,
+}
+
+/// `ceil_mB(g) = ceil(2000 log10 g)` (#1465 F-D3), with [`crate::log`], so every target computes
+/// the same value, and rounded up: `x = 2000 log(g) / ln 10` carries a few `2^-53` relative errors
+/// (the logarithm within one ulp, the product and the quotient), and a computed `g` a few more.
+/// The ceiling is taken of `x + |x| 2^-30`, plus `2^-30` mB for a computed `g`; an exact `g = 1`
+/// stays `0` (`log(1) = 0` exactly). `g` is positive and finite.
+///
+/// # Panics
+///
+/// When the millibels do not fit an `i32` (a `g` that is not positive and finite).
+#[must_use]
+pub fn ceil_millibels(g: f64, rounding: Rounding) -> i32 {
+    const MARGIN: f64 = 1.0 / 1_073_741_824.0;
+    let x = 2000.0 * crate::log(g) / core::f64::consts::LN_10;
+    let absolute = match rounding {
+        Rounding::Exact => 0.0,
+        Rounding::Computed => MARGIN,
+    };
+    let up = x + x.abs() * MARGIN + absolute;
+    let ceiling = -crate::floor(-up);
+    assert!(
+        ceiling.is_finite() && ceiling.abs() < f64::from(i32::MAX),
+        "a millibel value of a finite positive gain"
+    );
+    ceiling as i32
+}
 
 /// Absolute underflow allowance per section step, per word and on the output: sixteen
 /// operations' worth, more than the step or the mix performs.

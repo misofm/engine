@@ -18,9 +18,8 @@ use lane::fpenv::CanonicalFpEnv;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
 use crate::runtime::{
-    CommandError, EventError, EventLane, PlanQueries, PlanState, SOURCE_ID_INVALID,
-    SessionSeekFailure, SourceFailure, SourceFailureReport, compile_children, limits_are_valid,
-    plan_error, render_error_code,
+    CommandError, EventError, EventLane, PlanQueries, PlanState, SessionSeekFailure, SourceFailure,
+    SourceFailureReport, compile_children, limits_are_valid, plan_error, render_error_code,
 };
 
 fn catch_result(operation: impl FnOnce() -> u32) -> u32 {
@@ -115,8 +114,9 @@ unsafe fn borrowed_bytes<'a>(data: *const u8, bytes: u64, limit: u64) -> Result<
     Ok(unsafe { core::slice::from_raw_parts(data, bytes) })
 }
 
-/// Borrows a source entry point's source ID, or refuses a null, empty, non-UTF-8 or over-long one
-/// with `RESULT_INVALID_ARGUMENT` and the `source.id.invalid` diagnostic.
+/// Borrows a source entry point's source ID, or refuses a null or over-long one with the core's
+/// `SourceControlError::InvalidId` result and diagnostic (`source.id.invalid`). An empty or
+/// non-UTF-8 ID is borrowed: the core refuses it with the same failure (#1706 D4).
 ///
 /// # Safety
 ///
@@ -129,12 +129,16 @@ unsafe fn borrowed_source_id<'a>(
 ) -> Result<&'a [u8], u32> {
     // SAFETY: The caller promises a nonnull `source_id` is readable for its declared byte count.
     match unsafe { borrowed_bytes(source_id, source_id_bytes, MAX_SOURCE_ID_BYTES) } {
-        Ok(value) if !value.is_empty() && core::str::from_utf8(value).is_ok() => Ok(value),
-        _ => {
+        Ok(value) => Ok(value),
+        Err(_) => {
+            // The pointer-level forms only; an empty or non-UTF-8 ID reaches the core, which
+            // refuses it with this same failure (#1706 D4).
+            let (code, diagnostic) =
+                SourceFailure::Control(host_core::SourceControlError::InvalidId).report();
             // SAFETY: `session` passed the live-kind check; the ABI serializes session calls, so
             // this short diagnostic borrow overlaps no other borrow of the session.
-            unsafe { (*session).last_error.borrow_mut() }.set(SOURCE_ID_INVALID);
-            Err(RESULT_INVALID_ARGUMENT)
+            unsafe { (*session).last_error.borrow_mut() }.set(diagnostic);
+            Err(code)
         }
     }
 }
@@ -673,7 +677,7 @@ unsafe fn source_seek_entry(
 /// (`source.seek.frame_out_of_range`); `RESULT_BACKPRESSURE` with `source.seek.backpressure` when
 /// any consumer still holds a seek (nothing changed; retry after a render); otherwise the source
 /// seek's mapping (`RESULT_INVALID_ARGUMENT` with `source.ring.vacated`, `RESULT_INTERNAL` with
-/// `capi.source.epoch` or `source.internal`); and a refused declaration's result and diagnostic,
+/// `source.epoch` or `source.internal`); and a refused declaration's result and diagnostic,
 /// as [`miso_engine_v1_declare_discontinuity`] returns them, with nothing pushed. The diagnostic is
 /// in `miso_engine_v1_last_error`.
 ///
@@ -846,7 +850,7 @@ pub unsafe extern "C" fn miso_engine_v1_source_seek_report(
 /// this at least once per render-buffer period.
 ///
 /// Returns `RESULT_OK`; a null or wrong handle as every session call; and `RESULT_INTERNAL` with
-/// the session diagnostic `capi.source.epoch` when the session's plan epochs cannot be
+/// the session diagnostic `source.epoch` when the session's plan epochs cannot be
 /// synchronized.
 ///
 /// # Safety
@@ -3240,7 +3244,7 @@ mod tests {
                 assert_eq!(call(), RESULT_INVALID_ARGUMENT, "{entry}, {form}");
                 assert_eq!(
                     read_last_error(session.cast()),
-                    SOURCE_ID_INVALID,
+                    b"source.id.invalid",
                     "{entry}, {form}"
                 );
             }

@@ -208,7 +208,7 @@ extern "C" {
  * cost does not grow with the time since the last call. It returns MISO_ENGINE_V1_OK; a null
  * session as MISO_ENGINE_V1_INVALID_ARGUMENT and another handle as MISO_ENGINE_V1_WRONG_HANDLE;
  * and, should the session's plan epochs fail to synchronize, MISO_ENGINE_V1_INTERNAL with the
- * session diagnostic "capi.source.epoch". The host's duty: a pending edit progresses only while the
+ * session diagnostic "source.epoch". The host's duty: a pending edit progresses only while the
  * host makes session calls, the same duty as draining events. A host that renders but never calls
  * keeps retired plans allocated, and its next structural edit waits for that reclaim; a warm
  * successor that misses its deadline falls back only at the host's next session call. The plan
@@ -238,7 +238,10 @@ extern "C" {
  * returned MISO_ENGINE_V1_RENDER_REJECTED with "render.plan.rejected": blocks the plan refused
  * after the block took its live snapshot. Such a block may have applied live values, its output
  * is not a rendered block, and the watermark does not advance on it. No valid plan reaches this
- * path, so a nonzero value is an engine defect. A rejected source
+ * path, so a nonzero value is an engine defect. The counter SOURCE_UNDERRUN_BLOCKS (protocol
+ * counter 20, read with COUNTERS_GET) counts the rendered blocks in which a source played zeros
+ * because the host had not delivered PCM it owed, or a source had no stream (graph-wide, not per source); a held block and a
+ * block past the end of a region are not counted, and it never resets. A rejected source
  * submission or seek likewise names the rule it broke ("source.region.outside",
  * "source.generation.stale", "source.channels.mismatch", ...). A null, empty, non-UTF-8 or
  * over-127-byte source ID on submit, seek, seek_at or seek_report is
@@ -339,7 +342,7 @@ extern "C" {
  * ("source.generation.stale"), T over the timeline limit ("source.seek.frame_out_of_range"), a
  * source whose producer the newest session does not hold yet ("source.ring.vacated"), and
  * MISO_ENGINE_V1_BACKPRESSURE with "source.seek.backpressure" while any source or the timeline
- * still holds an unpopped seek; MISO_ENGINE_V1_INTERNAL with "capi.source.epoch" when the
+ * still holds an unpopped seek; MISO_ENGINE_V1_INTERNAL with "source.epoch" when the
  * session's plan epochs cannot be synchronized, or with "source.internal" for an engine invariant.
  * miso_engine_v1_session_seek_at(session, g, T, A) is the anchored form, with the anchor of
  * miso_engine_v1_source_seek_at: every consumer changes at the block at A, or, reached late, at

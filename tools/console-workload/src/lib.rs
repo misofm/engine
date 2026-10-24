@@ -1580,6 +1580,12 @@ impl SessionRuntime {
             effects,
             builtins,
             caps: graph_caps(),
+            // #1379 H3: the strip lanes this row attaches are live; no row has a route into a
+            // submix, so no route lane is.
+            gain_liveness: graph_compiler::GainLiveness {
+                strip_fader_matrix: strip_controls_requested,
+                routes_into_submixes: false,
+            },
         })
         .unwrap_or_else(|_| panic!("{}: production console graph", workload.kind()));
 
@@ -3309,6 +3315,7 @@ mod tests {
             effects,
             builtins,
             caps: graph_caps(),
+            gain_liveness: graph_compiler::GainLiveness::FIXED,
         }) else {
             panic!("bus-and-send console graph");
         };

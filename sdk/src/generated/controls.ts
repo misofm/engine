@@ -2218,11 +2218,11 @@ export const CONTROLS = deepFreeze(
           "scope": "model",
           "family": "effect",
           "lanes": "perLane",
-          "class": "rebuildOnly",
-          "reason": "ruledLiveNotBuilt",
-          "reasonIssue": 1338,
-          "reopen": "#1338 makes the crossover live; its last step flips the row",
-          "automatable": false
+          "class": "live",
+          "reason": null,
+          "reasonIssue": null,
+          "reopen": null,
+          "automatable": true
         },
         {
           "control": 3,

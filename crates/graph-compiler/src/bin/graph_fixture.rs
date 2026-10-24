@@ -153,6 +153,7 @@ fn compile_fixture() -> PreparedGraphBuiltinsArtifact {
             maximum_single_allocation_bytes: 10_000_000,
             maximum_finite_tail_samples: 10_000_000,
         },
+        gain_liveness: graph_compiler::GainLiveness::FIXED,
     })
     .unwrap_or_else(|failure| panic!("graph compile diagnostics: {:?}", failure.diagnostics))
 }

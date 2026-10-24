@@ -366,3 +366,34 @@ deleted or trimmed some tests that rows above name. The rows stay as history; th
   the owner bytes from `size_of`. It asserts that the three deltas agree, are zero exactly when no
   instance is controlled, and that the exact caps accept and one byte below refuses. A partial
   under-charge such as this row's is left to the allocator ceiling in `tests/bypass_resources.rs`.
+
+---
+
+## #1379 slice C — the tail composition through gain (`tests/tail_composition.rs`)
+
+Applied one at a time on `codex/batch-b9-1379`, run, restored (`git diff` clean after each).
+Command: `cargo test -p graph-compiler --test tail_composition` (M12: `--lib an_overflowing`).
+
+| id | mutation | file | red tests |
+|---|---|---|---|
+| 1379-1 | `A` drops the path-count term `ceil(2000 log10(nu + nd + 1))` | `src/pdc.rs` | `compiled_tail_values_equal_the_enumerated_rule` |
+| 1379-2 | `down` sums peak gains instead of tail gains | `src/pdc.rs` | `compiled_tail_values_equal_the_enumerated_rule` (the live input lane's `G_t < G_p`) |
+| 1379-3 | the stall sum takes the maximum of the terms | `src/pdc.rs` | `compiled_tail_values_equal_the_enumerated_rule`, `fan_in_costs_the_track_section_one_decade` |
+| 1379-4 | a stall is not carried by the downstream tail gain | `src/pdc.rs` | five tests, the enumeration among them |
+| 1379-5 | a sum of `m >= 2` inputs states 0 dB | `src/compile.rs` | `fan_in_costs_the_track_section_one_decade` |
+| 1379-6 | a track `Input` omits its delay line | `src/compile.rs` | `a_strip_delay_lengthens_both_extents_by_its_length` |
+| 1379-7 | an `Unstated` composition composes as gain-free and decay-free | `src/pdc.rs` | `an_unstated_node_makes_the_graph_tail_infinite` |
+| 1379-8 | the cap checks `output_tail` | `src/pdc.rs` | `the_tail_cap_refuses_on_the_every_peak_value` |
+| 1379-9 | an overflowing stall sum states `Millibels(i32::MAX)` | `src/pdc.rs` | `an_overflowing_stall_sum_states_the_floor_above_range` |
+| 1379-10 | a live fader states its prepared gain | `src/compile.rs` | `a_live_fader_states_its_domain_maximum_and_a_fixed_one_its_prepared_gain` |
+| 1379-11 | the decay extent drops `k D` | `src/pdc.rs` | five tests, the enumeration among them |
+| 1379-12 | `millibel_sum` wraps | `src/pdc.rs` | `tests::an_overflowing_millibel_sum_is_a_diagnostic` |
+| 1379-13 | a fader lane driven by stored automation is taken as fixed (`|| fader_events[lane]` dropped) | `src/compile.rs` | `a_live_fader_states_its_domain_maximum_and_a_fixed_one_its_prepared_gain` (-2399 mB against 2401) |
+| 1379-14 | a muted lane with mute automation states `Zero` (`&& !mute_events[lane]` dropped) | `src/compile.rs` | same test (`Zero` against -2399 mB) |
+| 1379-15 | a live route into a submix states its prepared value (`false && into_submix`) | `src/compile.rs` | same test (3 mB against 3003 mB) |
+
+`builtins_replace_only_the_three_internal_track_bindings` no longer asserts that the output tail
+equals the input section's `T_decay` (the composition adds `k D`; the enumeration owns that claim);
+964-3's #1329 recheck row above named that assertion. `timing_applies_declared_tail_after_node_latency`
+(a per-node cap on a graph with no output) is deleted: the cap now checks the reported
+`output_tail_every_peak` only, which 1379-8 holds.
