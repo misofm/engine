@@ -181,24 +181,27 @@ fn field(tokens: &[proc_macro2::TokenTree], at: usize) -> bool {
     literal || read
 }
 
+/// Whether the identifier at `at` is a module segment: `name::item`, not the turbofish `name::<T>`.
+fn module(tokens: &[proc_macro2::TokenTree], at: usize) -> bool {
+    matches!(
+        tokens.get(at + 1..at + 4),
+        Some([
+            proc_macro2::TokenTree::Punct(first),
+            proc_macro2::TokenTree::Punct(second),
+            proc_macro2::TokenTree::Ident(_),
+        ]) if first.as_char() == ':'
+            && first.spacing() == proc_macro2::Spacing::Joint
+            && second.as_char() == ':'
+    )
+}
+
 /// Every identifier of `tokens` at any depth that can name a function: not a field name
 /// ([`field`]) and not a module segment (`next_record::DEPTH`).
 fn values(tokens: &[proc_macro2::TokenTree], found: &mut BTreeSet<String>) {
     for (at, token) in tokens.iter().enumerate() {
         match token {
             proc_macro2::TokenTree::Ident(ident) => {
-                // A module segment: `name::item`, not the turbofish `name::<T>`.
-                let module = matches!(
-                    tokens.get(at + 1..at + 4),
-                    Some([
-                        proc_macro2::TokenTree::Punct(first),
-                        proc_macro2::TokenTree::Punct(second),
-                        proc_macro2::TokenTree::Ident(_),
-                    ]) if first.as_char() == ':'
-                        && first.spacing() == proc_macro2::Spacing::Joint
-                        && second.as_char() == ':'
-                );
-                if !(field(tokens, at) || module) {
+                if !(field(tokens, at) || module(tokens, at)) {
                     found.insert(bare(ident));
                 }
             }
@@ -362,7 +365,8 @@ impl Calls<'_> {
     }
 
     /// Meet the identifiers of a macro's tokens (#1544 D3): in a region, a name of the set is
-    /// refused anywhere, and a hot local wherever it is called. A field name is not a value.
+    /// refused anywhere, and a hot local wherever it is called. A field name and a module segment are
+    /// not values.
     fn tokens(&mut self, tokens: &proc_macro2::TokenStream) {
         let list: Vec<proc_macro2::TokenTree> = tokens.clone().into_iter().collect();
         for (at, token) in list.iter().enumerate() {
@@ -372,7 +376,7 @@ impl Calls<'_> {
                     let called = matches!(list.get(at + 1), Some(proc_macro2::TokenTree::Group(group))
                         if group.delimiter() == proc_macro2::Delimiter::Parenthesis);
                     let line = ident.span().start().line;
-                    if field(&list, at) {
+                    if field(&list, at) || module(&list, at) {
                         continue;
                     }
                     match self.local(&name) {

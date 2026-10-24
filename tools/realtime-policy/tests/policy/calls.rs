@@ -271,6 +271,22 @@ fn a_function_value_hoisted_without_a_let_initializer_is_refused_when_called() {
         &format!("{}{}", marked(HELPER), caller(&pattern)),
         &[CALL],
     );
+    let matched = format!(
+        "        let pick = Some(Lane::next_record as fn(&mut Lane) -> Option<Record>);\n        match pick {{\n            Some(next) => {{\n// {BEGIN}\n                while let Some(record) = next(self) {{\n                    apply(record);\n                }}\n// {END}\n            }}\n            None => {{}}\n        }}\n"
+    );
+    refuses(
+        "calls-hoisted-match",
+        &format!("{}{}", marked(HELPER), caller(&matched)),
+        &[CALL],
+    );
+    let looped_over = format!(
+        "        for next in [Lane::next_record as fn(&mut Lane) -> Option<Record>] {{\n// {BEGIN}\n            while let Some(record) = next(self) {{\n                apply(record);\n            }}\n// {END}\n        }}\n"
+    );
+    refuses(
+        "calls-hoisted-for",
+        &format!("{}{}", marked(HELPER), caller(&looped_over)),
+        &[CALL],
+    );
     refuses(
         "calls-hoisted-macro-assign",
         &assigned(

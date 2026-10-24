@@ -112,3 +112,6 @@ Stream J batch 4 (`codex/d15-stream-j4`) on `main`. Attempt budget: 3.
   Rows added: `calls-macro-hot-local`, `calls-hoisted-pattern` (red on attempt 1), and the accept rows
   `calls-macro-field`, `calls-item-field-and-module` (each red when its brake is removed). Real tree:
   `ok (192 marked regions in 34 files)`.
+- Post-PASS fold (verifier MINOR): rows `calls-hoisted-match` and `calls-hoisted-for`. A mutant that
+  removes both pattern edges turns each red (run once, restored). NIT-1: `tokens()` shares the
+  module-segment brake with item initializers. Real tree: `ok (192 marked regions in 34 files)`.
