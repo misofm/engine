@@ -171,3 +171,8 @@ Steps:
 Under root's pre-set rule (ship only if within 2 % or better; the #1773 precedent), the change
 does not ship: every native round is slower, and the V8 console row's first round is +2.95 %.
 `65fc9b328` reverts `cf6110c8d`; the code stays in the history of branch `codex/batch-b13-992`.
+
+- The truth-table test would duplicate the three oracle differentials in D4 under one test per
+  claim, so a future attempt adds no new test unless it covers a case those do not.
+- A local `git reset --keep` undid an accidental amend of `cf6110c8d` before the revert (local
+  only, nothing lost).
