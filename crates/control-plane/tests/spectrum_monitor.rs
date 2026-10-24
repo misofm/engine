@@ -825,9 +825,6 @@ fn a_refused_transaction_changes_no_spectrum_state() {
 /// the submix's (it ends, as for an entry that did not carry), and a new arm completes on the
 /// submix.
 #[test]
-#[ignore = "red: host-core's resolve_spectrum_carry pairs on SpectrumTarget equality alone, so the \
-            track's observer moves onto the submix; the fix is in crates/host-core/src/prepare.rs, \
-            outside #1593 T2b's paths"]
 fn an_observer_is_never_carried_onto_a_strip_of_another_kind() {
     let eq1 = SpectrumTarget::TrackPostMatrix("eq1".into());
     let configuration = SpectrumConfiguration {

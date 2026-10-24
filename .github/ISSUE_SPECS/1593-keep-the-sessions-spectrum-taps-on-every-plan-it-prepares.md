@@ -265,3 +265,7 @@ through `test_spectrum_mut()`.
   alone, so the track's observer and stream carry onto the submix. The reproducer
   `an_observer_is_never_carried_onto_a_strip_of_another_kind` is committed `#[ignore]`, red. The
   fix compares the strip kind of a track tap's ID in the base model and the successor's model.
+- T2b root fold: root authorized the host-core fix. `resolve_spectrum_carry` pairs a capture only
+  when `same_strip_kind` finds its target's ID a track in both the base model and the successor's,
+  or a submix in both; a kind change does not carry, so T1's `Dropped` answers its arm. The
+  reproducer is un-ignored (red before, green after).
