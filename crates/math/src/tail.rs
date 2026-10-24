@@ -1519,6 +1519,57 @@ impl Powers4 {
     }
 }
 
+/// One section of a settled pair in [`LiveBound::tail_gain`] (issue #1487): its settled
+/// contraction `r`, its input column `beta`, its output row on the state `h q^s + omega` and its
+/// state bound at the window's end (`E*` or `S*`), per unit of the late input's peak.
+struct SettledSection {
+    contraction: f64,
+    input: f64,
+    row: f64,
+    start: f64,
+}
+
+/// [`settled_pair_peak`]'s stopping tolerance, `1 + 2^-20`.
+const SETTLED_STOP: f64 = 1.0 + 1.0 / 1_048_576.0;
+
+/// The largest output of a settled pair over every frame `s >= 0` after the window (issue #1487;
+/// the derivation's "Settled, from `M + R`"): the majorant recursion
+/// `E_(s+1) = r_k E_s + beta_k`, `a_s = c_k E_s + delta`, `S_(s+1) = r_l S_s + beta_l a_s`, output
+/// `y_s = (h_2 q_l + omega_2) S_s + delta a_s`, from `E_0 = E*_k`, `S_0 = S*_l`, carried frame by
+/// frame with every product and sum rounded up. At every frame `H` the tail bound
+/// `T_H = ex max(S_H, beta_l a' / (1 - r_l)) + delta a'`, `a' = c_k max(E_H, Ebar_k) + delta`,
+/// bounds `y_s` for every `s >= H` (each recursion keeps its state at most the larger of its value
+/// and its fixed point at the larger input), so the larger of `T_H` and the outputs before `H` is
+/// a bound at every `H`. The walk stops at the first `H` where `T_H` is within `2^-20` of the
+/// larger of the outputs so far and the tail bound `T` at the fixed points (the rounded-up
+/// recursion converges just above its fixed points, so it never reaches them exactly), or at
+/// [`HORIZON_LIMIT`] frames.
+fn settled_pair_peak(first: &SettledSection, second: &SettledSection, delta: f64) -> f64 {
+    let (r_k, r_l) = (first.contraction, second.contraction);
+    let e_bar = first.input / (1.0 - r_k) * SLACK;
+    let tail = |energy: f64, state: f64| {
+        let input = (first.row * energy.max(e_bar) + delta) * SLACK;
+        let fixed = (second.input * input / (1.0 - r_l)) * SLACK;
+        (second.row * state.max(fixed) + delta * input) * SLACK
+    };
+    let limit = tail(0.0, 0.0);
+    let (mut energy, mut state) = (first.start, second.start);
+    let mut peak = 0.0_f64;
+    let mut frames = 0_u64;
+    loop {
+        let input = (first.row * energy + delta) * SLACK;
+        peak = nan_max(peak, (second.row * state + delta * input) * SLACK);
+        let bound = tail(energy, state);
+        // A NaN bound is returned (it never compares at most).
+        if bound <= peak.max(limit) * SETTLED_STOP || frames >= HORIZON_LIMIT || bound.is_nan() {
+            return nan_max(peak, bound);
+        }
+        state = (r_l * state + second.input * input) * SLACK;
+        energy = (r_k * energy + first.input) * SLACK;
+        frames += 1;
+    }
+}
+
 /// The bound machinery of [`live_cascade`] for one cascade.
 struct LiveBound<'a> {
     live: &'a LiveCascade,
@@ -2107,10 +2158,10 @@ impl<'a> LiveBound<'a> {
     ///   largest `E` at `M + ramp_frames` over the paths to `t`.
     /// * The second section, every `(s, t, r)`, driven by `A_j`: `S_0 = 0`,
     ///   `S' = rho S + beta A_j`, output `(1/2 |m_2| q + omega_2) S + delta A_j`; `S*_t` likewise.
-    /// * Settled, per pair of settled zones `(k, l)`: `E <= max(E*_k, Ebar_k)`,
-    ///   `Ebar_k = beta_k / (1 - r_k)`, and
-    ///   `S <= S*_l + beta_l c_k E*_k / (1 - min(r_k, r_l)) + beta_l (c_k Ebar_k + delta) / (1 - r_l)`,
-    ///   `c_k = 1/2 |m| q_k^s + omega`; output `(1/2 |m_2| q_l^s + omega_2) S + delta a`.
+    /// * Settled, per pair of settled zones `(k, l)` (issue #1487): the largest output over every
+    ///   frame after the window of the majorant recursion from `(E*_k, S*_l)`, frame by frame
+    ///   ([`settled_pair_peak`]), with `c_k = 1/2 |m| q_k^s + omega` and the output row
+    ///   `1/2 |m_2| q_l^s + omega_2`.
     ///
     /// A section at the identity has zero state and passes its input (at most `delta` times the
     /// bound's own input term), and a reset only lowers a state, so both are covered.
@@ -2139,23 +2190,23 @@ impl<'a> LiveBound<'a> {
             let Some(settled) = first.settled else {
                 continue;
             };
-            let r_k = settled.contraction;
-            let c_k = (half_rows[0] * settled.sum_norm + omegas[0]) * SLACK;
-            let e_bar = first.input / (1.0 - r_k) * SLACK;
-            let output = (c_k * end.max(e_bar) + delta) * SLACK;
-            let steady = (c_k * e_bar + delta) * SLACK;
+            let first = SettledSection {
+                contraction: settled.contraction,
+                input: first.input,
+                row: (half_rows[0] * settled.sum_norm + omegas[0]) * SLACK,
+                start: *end,
+            };
             for (second, start) in zones.iter().zip(&second_end) {
                 let Some(other) = second.settled else {
                     continue;
                 };
-                let r_l = other.contraction;
-                let state = (start
-                    + second.input * c_k * end / (1.0 - r_k.min(r_l))
-                    + second.input * steady / (1.0 - r_l))
-                    * SLACK;
-                settled_peak = settled_peak.max(
-                    ((half_rows[1] * other.sum_norm + omegas[1]) * state + delta * output) * SLACK,
-                );
+                let second = SettledSection {
+                    contraction: other.contraction,
+                    input: second.input,
+                    row: (half_rows[1] * other.sum_norm + omegas[1]) * SLACK,
+                    start: *start,
+                };
+                settled_peak = settled_peak.max(settled_pair_peak(&first, &second, delta));
             }
         }
         g * window.max(settled_peak) * SLACK
