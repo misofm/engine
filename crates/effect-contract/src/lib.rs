@@ -467,8 +467,13 @@ pub const fn continuous_mapping_admissible(mapping: ParameterMapping, minimum: f
 // reason the parameter vocabularies are -- the descriptor wire, the C inspect surface and the
 // browser metadata all carry the raw `u32`, and `from_raw` is the single place a foreign value is
 // refused rather than silently reinterpreted.
-// What an observation tap reports. One kind ships in V1.
-scalar_enum!(ObservationKind {GainReductionDb=1});
+// What an observation tap reports.
+//
+// `GainReductionDb` is a reduction depth: with the `PeakMagnitude` fold it publishes a
+// non-negative number of decibels. `GainChangeDb` is a signed gain change in decibels (positive
+// is a boost, negative a cut) for an effect that can move gain both ways, such as an upward
+// dynamic EQ band; it pairs with the `PeakSigned` fold so a boost never reads as a reduction.
+scalar_enum!(ObservationKind {GainReductionDb=1,GainChangeDb=2});
 // What publishing an observation costs.
 //
 // `Resident` means the value already exists in kernel state when the block ends: publishing is a
@@ -484,7 +489,10 @@ scalar_enum!(ObservationCadence {PerBlock=1,PerWindow=2});
 // a **non-negative magnitude** even though the contract's internal sign convention is
 // negative-for-reduction ([`GainReduction`]). The published value is non-negative *by the
 // declared fold*, not by a host convention nobody can check.
-scalar_enum!(ObservationFold {Latest=1,PeakMagnitude=2});
+//
+// `PeakSigned` publishes the value of largest `|x|` in the window with its sign kept; of two
+// values of equal magnitude the earlier one stays. A window of zeros publishes `0`.
+scalar_enum!(ObservationFold {Latest=1,PeakMagnitude=2,PeakSigned=3});
 // Whether a tap publishes one value per instance or one per dual-mono lane.
 scalar_enum!(ObservationChannels {Shared=1,PerLane=2});
 /// An effect-local observation tap identifier: nonzero, and ascending within a descriptor.
@@ -817,7 +825,8 @@ pub struct PortDescriptor {
 /// subscribe path, the descriptor wire, the browser metadata -- reads this and nothing else.
 ///
 /// `minimum`/`maximum` are the declared bounds of the **published** value, after the declared
-/// [`fold`](Self::fold). A gain-reduction tap therefore declares `0 .. 100`, not `-100 .. 0`.
+/// [`fold`](Self::fold). A gain-reduction tap therefore declares `0 .. 100`, not `-100 .. 0`; a
+/// signed gain-change tap (`PeakSigned`) declares a range that spans zero, such as `-24 .. 24`.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ObservationDescriptor {
     /// Effect-local tap id: nonzero, unique, and strictly ascending in declaration order.

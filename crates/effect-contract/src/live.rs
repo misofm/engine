@@ -1800,6 +1800,17 @@ impl ObservationLane {
                     tap.peak_right = right;
                 }
             }
+            // The value of largest magnitude, sign kept, so a boost and a cut of the same size
+            // stay distinguishable. The strict `>` keeps the earlier of two equal magnitudes, and
+            // the window's `0.0` reset is beaten by any nonzero reading.
+            ObservationFold::PeakSigned => {
+                if sample.left.abs() > tap.peak_left.abs() {
+                    tap.peak_left = sample.left;
+                }
+                if sample.right.abs() > tap.peak_right.abs() {
+                    tap.peak_right = sample.right;
+                }
+            }
             ObservationFold::Latest => {
                 tap.peak_left = sample.left;
                 tap.peak_right = sample.right;
