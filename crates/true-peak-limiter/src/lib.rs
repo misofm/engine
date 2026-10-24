@@ -4790,10 +4790,10 @@ impl NativeEffectFactory for TruePeakLimiterFactory {
             if candidate.program_key() != metadata.program_key() {
                 same_program = false;
             }
-            if request.active_mask[lane] {
-                if let Some(slot) = links.get_mut(lane) {
-                    *slot = candidate.link_mode;
-                }
+            if request.active_mask[lane]
+                && let Some(slot) = links.get_mut(lane)
+            {
+                *slot = candidate.link_mode;
             }
             let (left, right) = initial_defaults(member.initial_values)?;
             left_defaults.push(left);
