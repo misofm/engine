@@ -629,3 +629,46 @@ fn a_lane_snapshotted_mid_glide_continues_bit_for_bit_and_forged_weights_are_ref
         assert_eq!(snapshot(target.as_ref()), before, "a refused restore wrote");
     }
 }
+
+/// **D1 refusals.** A glide longer than `LINK_GLIDE_MAX_SAMPLES`, a padded bank lane and track 1
+/// of a scalar instance each return `false` and leave every payload word as it was.
+#[test]
+fn an_out_of_range_glide_is_refused_and_changes_nothing() {
+    let values = oracle_values();
+    let too_long = effect_contract::LINK_GLIDE_MAX_SAMPLES + 1;
+    let scalar_request = request(&values, RATE, LinkMode::DualMono);
+    let mut scalar = Under::new(None, core::slice::from_ref(&scalar_request));
+    let before = scalar.link_words(0);
+    assert!(
+        !scalar.retarget(0, LinkMode::Maximum, too_long),
+        "2^24 + 1 samples"
+    );
+    assert!(
+        !scalar.retarget(1, LinkMode::Maximum, 64),
+        "track 1 of a scalar instance"
+    );
+    assert_eq!(scalar.link_words(0), before);
+
+    for &width in BankWidth::ALL {
+        let lanes = width.lanes() as usize;
+        let requests = vec![request(&values, RATE, LinkMode::DualMono); lanes];
+        let mask: Vec<bool> = (0..lanes).map(|lane| lane == 0).collect();
+        let bank = bind(width, &requests, &mask)
+            .expect("a bank binds")
+            .expect("one program");
+        let mut bank = Under::Bank(bank.processor, width);
+        let before = bank.link_words(0);
+        assert!(
+            !bank.retarget(0, LinkMode::Maximum, too_long),
+            "2^24 + 1 samples"
+        );
+        assert!(!bank.retarget(1, LinkMode::Maximum, 64), "a padded lane");
+        assert!(
+            !bank.retarget(lanes, LinkMode::Maximum, 64),
+            "a lane past the width"
+        );
+        assert_eq!(bank.link_words(0), before);
+        // The bound itself is accepted.
+        assert!(bank.retarget(0, LinkMode::Maximum, too_long - 1));
+    }
+}

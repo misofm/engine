@@ -330,7 +330,9 @@ fn oracle_case<L: Lane>(from: LinkMode, to: Option<LinkMode>, case: GlideCase) -
                 && (1..=64).contains(&k)
             {
                 let makeup = f64::from(CHANGED_MAKEUP_DB) * k as f64 / 64.0;
-                channels.iter_mut().for_each(|channel| channel.set_makeup_db(makeup));
+                channels
+                    .iter_mut()
+                    .for_each(|channel| channel.set_makeup_db(makeup));
             }
             let (detector_left, detector_right) = reference_link_blend(key_left, key_right, now);
             let expected = [
@@ -587,4 +589,44 @@ fn a_lane_snapshotted_mid_glide_continues_bit_for_bit_and_forged_weights_are_ref
 
 fn bits(values: &[f32]) -> Vec<u32> {
     values.iter().map(|value| value.to_bits()).collect()
+}
+
+/// **D1 refusals.** A glide longer than `LINK_GLIDE_MAX_SAMPLES`, a padded bank lane and track 1
+/// of a scalar instance each return `false` and leave every payload word as it was.
+#[test]
+fn an_out_of_range_glide_is_refused_and_changes_nothing() {
+    let values = values(-24.0, 4.0, 6.0, 2.0, 80.0);
+    let too_long = effect_contract::LINK_GLIDE_MAX_SAMPLES + 1;
+    let scalar_request = request(&values, RATE, LinkMode::DualMono);
+    let mut scalar = Under::new::<f32>(core::slice::from_ref(&scalar_request));
+    let before = payload_link_words(&scalar, 0);
+    assert!(
+        !scalar.retarget(0, LinkMode::Maximum, too_long),
+        "2^24 + 1 samples"
+    );
+    assert!(
+        !scalar.retarget(1, LinkMode::Maximum, 64),
+        "track 1 of a scalar instance"
+    );
+    assert_eq!(payload_link_words(&scalar, 0), before);
+
+    lane::each_vector_lane!(|L| {
+        let requests = vec![request(&values, RATE, LinkMode::DualMono); L::WIDTH];
+        let mask: Vec<bool> = (0..L::WIDTH).map(|lane| lane == 0).collect();
+        let width = BankWidth::for_lanes(L::WIDTH).expect("a bank width");
+        let mut bank = Under::Bank(Box::new(bind::<L>(&requests, &mask)), width);
+        let before = payload_link_words(&bank, 0);
+        assert!(
+            !bank.retarget(0, LinkMode::Maximum, too_long),
+            "2^24 + 1 samples"
+        );
+        assert!(!bank.retarget(1, LinkMode::Maximum, 64), "a padded lane");
+        assert!(
+            !bank.retarget(L::WIDTH, LinkMode::Maximum, 64),
+            "a lane past the width"
+        );
+        assert_eq!(payload_link_words(&bank, 0), before);
+        // The bound itself is accepted.
+        assert!(bank.retarget(0, LinkMode::Maximum, too_long - 1));
+    });
 }
