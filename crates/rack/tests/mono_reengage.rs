@@ -746,3 +746,61 @@ fn an_asymmetric_input_window_declines_and_waits_for_a_proof() {
         "an asymmetric-input window renders the never-collapsed bits"
     );
 }
+
+/// A stateless one-plane gain that is always at rest, so a silent block skips whole.
+struct RestingGain;
+impl BankStage for RestingGain {
+    fn process(&mut self, block: BankBlock<'_>) -> Result<(), RenderError> {
+        block.left.iter_mut().for_each(|word| *word *= 0.5);
+        block.right.iter_mut().for_each(|word| *word *= 0.5);
+        Ok(())
+    }
+    fn process_mono(&mut self, block: BankBlock<'_>) -> Result<(), RenderError> {
+        block.left.iter_mut().for_each(|word| *word *= 0.5);
+        Ok(())
+    }
+    fn supports_mono_collapse(&self) -> bool {
+        true
+    }
+    fn lanes_at_rest(&self) -> u32 {
+        u32::MAX
+    }
+    fn lane_symmetry(&self, _lane: usize) -> ChannelSymmetryWitness {
+        ChannelSymmetryWitness::SYMMETRIC
+    }
+}
+
+/// The true half of [`BankChain::planes_identical`] (issue #987): a chain whose every slot is in
+/// the collapsible prefix publishes identical planes on a collapsed block and on a silent skip,
+/// and not on a dual block.
+///
+/// # Red mutation
+///
+/// Make `planes_identical` return `false` and the collapsed assertion fails; drop its
+/// `resident_zero` clause and the silent-skip assertion fails.
+#[test]
+fn a_prefix_only_chain_publishes_identical_planes() {
+    let mut chain = mono_chain(4, 8, vec![Box::new(RestingGain)]);
+    chain.arm_mono_collapse(true);
+    assert_eq!(chain.collapse_prefix(), 1);
+
+    chain
+        .run(&mut finite_planes(4, 8, 0), 8, 0, LiveSnapshot::ALL)
+        .expect("render");
+    assert!(chain.is_collapsed());
+    assert!(chain.planes_identical(), "a collapsed prefix-only block");
+
+    // The term down, so the skipped block is not also a collapsed one: only the zero clause holds.
+    chain.set_input_symmetric(false);
+    chain
+        .run(&mut silent_planes(4, 8), 8, 8, LiveSnapshot::ALL)
+        .expect("render");
+    assert_eq!(chain.silent_skips(), 1);
+    assert!(!chain.is_collapsed());
+    assert!(chain.planes_identical(), "a silent skip");
+
+    chain
+        .run(&mut finite_planes(4, 8, 2), 8, 16, LiveSnapshot::ALL)
+        .expect("render");
+    assert!(!chain.planes_identical(), "a dual block");
+}

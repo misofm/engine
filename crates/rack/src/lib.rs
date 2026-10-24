@@ -3276,9 +3276,10 @@ pub struct BankChain {
     ///
     /// `true` from construction, which leaves a chain that gathers its tracks' inputs exactly as
     /// it was: there [`collapse_source`](Self::collapse_source) already says it. A chain that reads
-    /// planes an earlier chain produced has its caller set it before every block from that
-    /// producer's [`planes_identical`](Self::planes_identical) -- a fact about how the producer
-    /// rendered, never a comparison of sample values. Unlike `SOURCE` it can be an episode, so a
+    /// planes an earlier chain produced has its caller set it from that producer's
+    /// [`planes_identical`](Self::planes_identical) -- a fact about how the producer rendered, not
+    /// a left/right comparison. The value is sticky: it holds until the next call, so the caller
+    /// sets it before every block. Unlike `SOURCE` it can be an episode, so a
     /// dual block with it down clears [`collapse_channels_agree`](Self::collapse_channels_agree).
     input_symmetric: bool,
     /// Blocks this chain rendered collapsed. Evidence only, read after render is disarmed.
@@ -4282,11 +4283,12 @@ impl BankChain {
     }
 
     /// Set this block's input term (issue #987): whether every active lane's input planes carry
-    /// the same samples on this block. `true` from construction.
+    /// the same samples on this block. `true` from construction. It holds until the next call:
+    /// set it before every block.
     ///
     /// The caller decides it from what it knows structurally -- the producing chain's
     /// [`planes_identical`](Self::planes_identical) for the block it just rendered -- and never by
-    /// comparing samples. `false` declines this block's collapse and, on a chain that
+    /// comparing the left plane with the right one. `false` declines this block's collapse and, on a chain that
     /// [`can_collapse`](Self::can_collapse), clears the channel agreement it would otherwise keep.
     /// Allocation-free; callable on the render thread between blocks.
     pub const fn set_input_symmetric(&mut self, symmetric: bool) {
@@ -4298,7 +4300,9 @@ impl BankChain {
     /// every slot is in the collapsible prefix, so no slot ran dual after the seam copy; or the
     /// block was skipped silent, so both planes are `+0.0`. `false` otherwise, including whenever a
     /// seam-side slot ran: its words may differ per channel. A structural fact about the block's
-    /// rendering, never a comparison of its samples.
+    /// rendering, with no left/right comparison (the silent skip's zero test reads the input
+    /// words, but it never compares the two planes). Undefined after a `run` that returned an
+    /// error.
     #[must_use]
     pub fn planes_identical(&self) -> bool {
         self.resident_zero || (self.collapsed && self.collapse_prefix == self.slots.len())

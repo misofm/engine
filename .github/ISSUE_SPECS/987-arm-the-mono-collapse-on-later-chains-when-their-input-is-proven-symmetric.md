@@ -33,6 +33,8 @@ Carry an exact per-chain "input is symmetric" fact from the producing chain's ow
   track is eligible and every lane's producer is a same-track bank unit (per-node ops between: successor).
   `PlanUnitEligibility.armed_on_input` as evidence. Paths: `crates/graph/src/runtime.rs`, `crates/graph/src/lib.rs`,
   `crates/engine/src/realtime/plan.rs`, the graph-compiler console test, `crates/graph/tests/MUTATIONS.md`.
+  `set_input_symmetric` is sticky, so 987b sets it on **every** block, including blocks that are not armed, and never
+  reads a producer's `planes_identical` after that producer's `run` failed (for example in `begin_block`).
 
 ## Evidence
 
