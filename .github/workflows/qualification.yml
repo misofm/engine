@@ -271,13 +271,28 @@ jobs:
       # sdk-package.sh check already runs it as its own first step (see scripts/sdk-package.sh:29-30)
       # before the `sdk-package.sh check` call below, so adding it here again would be a duplicate
       # invocation, not a new gate.
+      # Issue #1435: the five commands run with a fresh, private TMPDIR, so anything they or a
+      # process they start leave there fails the step (the runner's shared temporary directory hid
+      # the enginectl CLI test's leak). A command's own failure still fails the step first; the trap
+      # removes the directory.
       - name: Qualify the SDK package against the shared artifact
         run: |
+          # pipefail: GitHub's default shell is `bash -e {0}`, so without it a `find` failure in the
+          # emptiness check would leave `leftover` empty and the check would pass.
+          set -o pipefail
+          scratch="$(mktemp -d "$RUNNER_TEMP/sdk-qualify-tmp.XXXXXX")"
+          trap 'rm -rf -- "$scratch"' EXIT
+          export TMPDIR="$scratch"
           bash scripts/check-sdk-generated.sh target/ci/qualification-artifacts
           python3 -B scripts/check-sdk-deletions.py
           bash scripts/check-sdk-types.sh
           bash scripts/check-sdk-headless.sh target/ci/qualification-artifacts
           bash scripts/sdk-package.sh check target/ci/qualification-artifacts
+          leftover="$(find "$scratch" -mindepth 1 -maxdepth 1 -printf '%f\n' | LC_ALL=C sort)"
+          if [[ -n "$leftover" ]]; then
+            printf 'the SDK qualify step left these entries in its TMPDIR:\n%s\n' "$leftover" >&2
+            exit 1
+          fi
       # check-sdk-generated.sh, given the artifact directory, skips the SOURCE_ONLY assets
       # (sdk/codegen/assets.mjs: session keys and response frame), whose currency tests otherwise run
       # only on the full route; an sdk-only change routes here, so they run here too (#1623).
