@@ -1601,7 +1601,9 @@ impl<L: Lane> PreparedGate<L, false> {
                 state.hysteresis.hold,
             ]);
             for (chunk, ramp) in all[7..]
-                .chunks_exact_mut(4)
+                .as_chunks_mut::<4>()
+                .0
+                .iter_mut()
                 .zip(state.ramps.iter().chain(&state.rates))
             {
                 chunk.copy_from_slice(&ramp_words(ramp));
@@ -1647,7 +1649,7 @@ impl<L: Lane> PreparedGate<L, false> {
             return false;
         }
         let words = self.defaults[lane].iter_mut().flatten();
-        for (value, chunk) in words.zip(bytes.chunks_exact_mut(4)) {
+        for (value, chunk) in words.zip(bytes.as_chunks_mut::<4>().0.iter_mut()) {
             let mut incoming = [0_u8; 4];
             incoming.copy_from_slice(chunk);
             chunk.copy_from_slice(&value.to_bits().to_le_bytes());

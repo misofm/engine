@@ -459,8 +459,10 @@ fn render(padded: &Padded<'_>, blocks: &[Block], context: &str) -> Vec<Vec<u32>>
             let (_, left_words, right_words) = &state;
             assert!(
                 left_words
-                    .chunks_exact(4)
-                    .chain(right_words.chunks_exact(4))
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
+                    .chain(right_words.as_chunks::<4>().0.iter())
                     .all(
                         |word| f32::from_le_bytes([word[0], word[1], word[2], word[3]]).is_finite()
                     ),

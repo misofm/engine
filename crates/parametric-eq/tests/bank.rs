@@ -3034,7 +3034,7 @@ fn a_live_re_enable_starts_from_rest() {
         (prepared, edits)
     };
     let check = |rendered: &[Vec<Vec<u32>>], leg: &str| {
-        for pair in rendered.chunks_exact(2) {
+        for pair in rendered.as_chunks::<2>().0 {
             assert_ne!(pair[0][0], pair[1][0], "{leg}: the history lane filtered");
             assert_eq!(
                 pair[0][REENABLE..],

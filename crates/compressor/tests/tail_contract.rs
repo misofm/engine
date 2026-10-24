@@ -153,9 +153,11 @@ fn snapshot(effect: &dyn PreparedNativeEffect, sizes: StatePayloadSizes) -> Vec<
             StatePayloadOutput::new(&mut [], &mut left, &mut right, sizes).expect("payload"),
         )
         .expect("snapshot");
-    left.chunks_exact(4)
-        .chain(right.chunks_exact(4))
-        .map(|word| f32::from_le_bytes(word.try_into().expect("a word")))
+    left.as_chunks::<4>()
+        .0
+        .iter()
+        .chain(right.as_chunks::<4>().0.iter())
+        .map(|word| f32::from_le_bytes(*word))
         .collect()
 }
 

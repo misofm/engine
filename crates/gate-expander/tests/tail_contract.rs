@@ -164,10 +164,12 @@ fn snapshot(effect: &dyn PreparedNativeEffect, sizes: StatePayloadSizes) -> Vec<
         )
         .expect("snapshot");
     common
-        .chunks_exact(4)
-        .chain(left.chunks_exact(4))
-        .chain(right.chunks_exact(4))
-        .map(|word| u32::from_le_bytes(word.try_into().expect("a word")))
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .chain(left.as_chunks::<4>().0.iter())
+        .chain(right.as_chunks::<4>().0.iter())
+        .map(|word| u32::from_le_bytes(*word))
         .collect()
 }
 

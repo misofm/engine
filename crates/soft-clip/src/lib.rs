@@ -1653,7 +1653,7 @@ impl<L: Lane> PreparedSoftClipBank<L> {
         let words = inner.left_defaults[lane]
             .iter_mut()
             .chain(inner.right_defaults[lane].iter_mut());
-        for (value, chunk) in words.zip(bytes.chunks_exact_mut(4)) {
+        for (value, chunk) in words.zip(bytes.as_chunks_mut::<4>().0.iter_mut()) {
             let mut incoming = [0_u8; 4];
             incoming.copy_from_slice(chunk);
             chunk.copy_from_slice(&value.to_bits().to_le_bytes());

@@ -300,7 +300,9 @@ fn native_render_is_bit_identical_for_duplicate_stereo_and_prepared_mono() {
     assert!(stereo.iter().any(|sample| *sample != 0.0));
     assert!(
         stereo
-            .chunks_exact(2 * 128)
+            .as_chunks::<{ 2 * 128 }>()
+            .0
+            .iter()
             .flat_map(|block| block[..128].iter().zip(&block[128..]))
             .any(|(left, right)| left.to_bits() != right.to_bits())
     );

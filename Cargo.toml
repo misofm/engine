@@ -107,11 +107,6 @@ correctness = { level = "deny", priority = -1 }
 suspicious = { level = "deny", priority = -1 }
 perf = { level = "deny", priority = -1 }
 undocumented_unsafe_blocks = "deny"
-# Issue #877: allowed once, here, for the whole workspace. Under 1.99.1 it fires at 58
-# `chunks_exact(N)`/`chunks_exact_mut(N)` sites with a literal or const `N` in 18 crates (none in
-# `crates/lane`, whose `L::WIDTH` sites cannot take `as_chunks::<L::WIDTH>()` on stable Rust).
-# The suggested `as_chunks` rewrite is cosmetic; it is a separate refactor, not a toolchain gate.
-chunks_exact_to_as_chunks = "allow"
 
 # Master plan #83 D12. One release profile for every artifact the engine ships, so a benchmark, a
 # CI probe and a shipped host all measure and execute the same code.

@@ -4646,7 +4646,10 @@ impl<L: Lane> LimiterCore<L> {
             (&mut self.left_defaults[lane], left_bytes),
             (&mut self.right_defaults[lane], right_bytes),
         ] {
-            for (value, word) in values.iter_mut().zip(side.chunks_exact_mut(4)) {
+            for (value, word) in values
+                .iter_mut()
+                .zip(side.as_chunks_mut::<4>().0.iter_mut())
+            {
                 let incoming =
                     f32::from_bits(u32::from_le_bytes([word[0], word[1], word[2], word[3]]));
                 word.copy_from_slice(&value.to_bits().to_le_bytes());

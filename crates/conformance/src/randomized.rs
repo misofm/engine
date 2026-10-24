@@ -2111,13 +2111,14 @@ fn same_payload(a: &Payload, b: &Payload) -> bool {
     .into_iter()
     .all(|(x, y)| {
         x.len() == y.len()
-            && x.chunks_exact(4).zip(y.chunks_exact(4)).all(|(p, q)| {
-                let (p, q) = (
-                    u32::from_le_bytes(p.try_into().expect("a word")),
-                    u32::from_le_bytes(q.try_into().expect("a word")),
-                );
-                p == q || (zero(p) && zero(q))
-            })
+            && x.as_chunks::<4>()
+                .0
+                .iter()
+                .zip(y.as_chunks::<4>().0.iter())
+                .all(|(p, q)| {
+                    let (p, q) = (u32::from_le_bytes(*p), u32::from_le_bytes(*q));
+                    p == q || (zero(p) && zero(q))
+                })
     })
 }
 
