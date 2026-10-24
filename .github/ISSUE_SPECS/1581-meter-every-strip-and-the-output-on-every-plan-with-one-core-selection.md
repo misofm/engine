@@ -288,3 +288,11 @@ Commands: `cargo test --locked -p host-core --all-features`,
   and saturation (`4` from the first frame, `4 + 4 + 1` at the end). The uncarried test queues one
   window before the swap, so the unread-discard mutant (`*output_pops = 0`) is red. No resource
   or digest moved.
+- **T3 attempt 2 (root, 2026-10-24).** MAJOR: a lease still waiting for its activation when a swap
+  that carries no meter adopts stayed on the old grid (0 frames, loss 22 over 36 blocks). Now one
+  rule, `ReadyOwnership::align_meters`, sets the activation to the grid's first boundary at or
+  after a given sample and opens or shuts the gate. A lease change, a producer reset and an
+  uncarried swap with the lease held all call it (the swap from `max(activation, adoption)`).
+  Red first: `c83567ad3`. Probe of a carried swap that adds a strip off the grid (window 3,
+  adoption at block 4): the new strip joins the carried grid (frames at 3, 6, 9 with 10 tracks,
+  loss 0), so no defect.
