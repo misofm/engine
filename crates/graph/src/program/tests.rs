@@ -1210,20 +1210,29 @@ fn touched(program: &ExecutionProgram, op: &Op) -> (Vec<u32>, Vec<u32>) {
     (writes, reads)
 }
 
-/// The #169 invariant, checked structurally: **no physical slot is recycled inside a bank
-/// window**.
+/// The #169 invariant, checked structurally, as #931 restated it: **a physical slot is recycled
+/// inside a bank window only to an op that renders in a later run.**
 ///
 /// A window is the op range from a bank's first member to its last. Execution over that range
-/// is a permutation of the schedule -- members hoisted forward, non-members deferred -- so
-/// colouring is sound there only if no op in the window writes storage another op in the
-/// window reads or writes. An op writing its own input in place is the one exception, because
-/// that is one op, not two.
+/// is a permutation of the schedule -- members hoisted forward, non-members deferred -- and no op
+/// in a single bank's window reads another's output, so two ops in it that name one slot hold
+/// two different values: the schedule-later op recycled the slot. That is sound only if its run
+/// renders after the schedule-earlier op's run has finished, which is what this asserts against
+/// the executor's own run order ([`runs_in_runtime_order`]). An op writing its own input in place
+/// is the one exception, because that is one op, not two.
 fn assert_no_slot_is_recycled_inside_a_bank_window(
     program: &ExecutionProgram,
     spec: &GraphSpec,
     banks: &[Vec<GraphNodeId>],
     label: &str,
 ) {
+    let lanes = member_lanes(spec, banks);
+    let mut run_of_op = vec![usize::MAX; program.ops.len()];
+    for (position, run) in runs_in_runtime_order(program, &lanes).iter().enumerate() {
+        for op in run.iter().flatten() {
+            run_of_op[*op] = position;
+        }
+    }
     for members in banks {
         let positions: Vec<usize> = members
             .iter()
@@ -1242,15 +1251,15 @@ fn assert_no_slot_is_recycled_inside_a_bank_window(
                 }
                 let (other_writes, other_reads) = touched(program, &program.ops[there]);
                 for slot in &writes {
+                    if !other_writes.contains(slot) && !other_reads.contains(slot) {
+                        continue;
+                    }
+                    let (earlier, later) = (here.min(there), here.max(there));
                     assert!(
-                        !other_writes.contains(slot),
-                        "{label}: ops {here} and {there} both write buffer {slot} inside a \
-                         bank window"
-                    );
-                    assert!(
-                        !other_reads.contains(slot),
-                        "{label}: op {here} writes buffer {slot}, which op {there} reads \
-                         inside the same bank window"
+                        run_of_op[later] > run_of_op[earlier],
+                        "{label}: ops {here} and {there} share buffer {slot} inside a bank \
+                         window, and op {later}, which recycled it, does not render in a later \
+                         run than op {earlier}"
                     );
                 }
             }
@@ -1320,7 +1329,7 @@ fn a_bank_window_never_recycles_a_physical_slot() {
         "and that collision must actually change what renders"
     );
 
-    // Told about the bank, the slot is held until the window closes.
+    // Told about the bank, the slot is never recycled to an op that renders before its reader.
     let program = lower(&spec, &schedule, &levels, &delays, &banks).expect("lowers");
     assert_program_matches_spec(&spec, &schedule, &delays, &program);
     assert_no_slot_is_recycled_inside_a_bank_window(&program, &spec, &banks, "minimal");
@@ -1328,8 +1337,8 @@ fn a_bank_window_never_recycles_a_physical_slot() {
         divergence_in_runtime_order(&spec, &schedule, &delays, &program, &lanes),
         None
     );
-    // And it costs nothing here: holding a slot across the window changes *which* slot each
-    // op gets, not how many exist. The window hold buys the collision away out of the
+    // And it costs nothing here: keeping the slot from the hoisted member changes *which* slot
+    // each op gets, not how many exist. The window rule buys the collision away out of the
     // colouring's own slack -- which is why it, and not dedication, is the fix that shipped.
     assert_eq!((unaware.buffers, program.buffers), (7, 7));
 }
@@ -1366,7 +1375,7 @@ fn no_slot_is_recycled_inside_a_merged_bank_window() {
     let program = lower(&spec, &schedule, &levels, &[], &banks).expect("lowers");
     assert_program_matches_spec(&spec, &schedule, &[], &program);
 
-    // The two windows really do interleave, so `bank_windows` really does merge them.
+    // The two windows really do interleave, so each bank reorders the other's ops.
     let window = |members: &[GraphNodeId]| {
         let ops: Vec<usize> = members
             .iter()
@@ -1546,7 +1555,7 @@ fn bank_window_hoisting_preserves_dataflow_on_random_graphs() {
 ///   [`chainable_bank_groups`] unions the fusible pairs and the window spans the whole chain.
 ///   No graph may diverge.
 /// * **Narrow window.** The same lowering with [`chainable_bank_groups`] switched off
-///   ([`lower_with_per_bank_windows`]), so every bank holds only its own span. That is
+///   ([`lower_with_per_bank_windows`]), so every bank bounds only its own span. That is
 ///   precisely the window set a merge-unaware lowering would hold, and the count of graphs it
 ///   gets wrong is the measurement of what the union buys.
 /// * **No window at all.** The pre-#169 arm, kept so the corpus cannot quietly stop
@@ -1758,13 +1767,21 @@ fn cohort_chain_merging_preserves_dataflow_on_random_graphs() {
         "the number of realised multi-slot chains moved: if this ever falls to zero the arm \
          above is passing on a corpus where nothing merges"
     );
+    // 1669 until issue #931. Recycling by render position hands slots out in a different
+    // order, so fewer consumers' buffers are named by an op between a chain and its consumer,
+    // which is the clause that declines a redirect. Every redirect interprets without a
+    // divergence above.
     assert_eq!(
-        redirected_lanes, 1669,
+        redirected_lanes, 1737,
         "the number of lanes whose scatter is redirected into their consumer moved (#202 \
          rec 3): a zero here would mean this eval never interprets one"
     );
+    // 885 until issue #931. The narrow arm now recycles by render position too, with each op's
+    // earliest render position taken from its own bank instead of its chain's head, which
+    // over-estimates when a chained slot renders; the per-bank hold it replaced and this rule
+    // get different graphs wrong. The merged arm above is the claim, at zero.
     assert_eq!(
-        narrow_divergences, 885,
+        narrow_divergences, 1015,
         "the number of graphs a per-bank window gets wrong moved -- this is the measurement \
          of what the cohort-chain window union buys, and a zero here would mean the union is \
          held for nothing"
@@ -1834,8 +1851,6 @@ fn route_fold_model(
                     .inputs_of(op)
                     .iter()
                     .any(|input| input.delay.is_some())
-                || program.ops[*producer].output == program.output
-                || op.output == program.output
             {
                 break;
             }

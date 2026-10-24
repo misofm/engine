@@ -1,6 +1,7 @@
 #![allow(clippy::disallowed_methods)]
 // D6 oracle/measurement exemption: compares against the platform deliberately (formerly check-math-policy.sh structural_exempt)
-//! The console benchmark's *subject*, shared by the native bench and the wasm guest.
+//! The console benchmark's *subject*, linked by the native bench (the wasm guest it was first
+//! built for went with #1039, ruling R9).
 //!
 //! # Why this crate exists
 //!
@@ -58,9 +59,8 @@ use engine::realtime::{
     PreparedRenderPlan, RenderError, RenderIo, RenderTime,
 };
 use graph::{
-    GraphBindingBlock, GraphNodeBinding, GraphNodeId, GraphPreparedSourceSet,
-    GraphPreparedSourceSetDriver, GraphRuntimeBindings, GraphRuntimeProcessor,
-    GraphSourceInputClaim, GraphSourceSetResourceReport, TrackStage,
+    GraphNodeBinding, GraphNodeId, GraphPreparedSourceSet, GraphPreparedSourceSetDriver,
+    GraphRuntimeBindings, GraphSourceInputClaim, GraphSourceSetResourceReport, TrackStage,
 };
 use graph_compiler::{GraphBuiltinsCompileRequest, GraphCompiler};
 use lane::Backend;
@@ -199,7 +199,7 @@ pub enum Workload {
     /// `m1 = m2 = 0`, `k = 0` (`builtins`, the version-1 cutoff contract). A 0 dB fader
     /// is still a multiply and a mask clear, and the hard-right pan is a real 2x2 matrix: with no
     /// identity lane in any bank, it runs the settled matrix's select-free arm (issue #944), the
-    /// same arm `sixty_four_track_gain_pan_only` runs. Both run over the same lanes every block.
+    /// same arm `sixty_four_track_gain_pan_ring` runs. Both run over the same lanes every block.
     ///
     /// The two SVF sections no longer do. A prepared section that is the exact identity in every
     /// lane and every word is the map `v |-> v + 0.0`, so a run of them is one `add(+0.0)`, and
@@ -279,32 +279,16 @@ pub enum Workload {
     /// (22 lane-ops) for precisely that reason, and a material gap between them would mean one of
     /// the two kernels had acquired another data-dependent path.
     ///
-    /// It is the bound-feed twin of [`Self::SixtyFourTrackGainPanRing`], and it is **not** the
-    /// native pure-path target: every one of its track inputs is a `FrozenGraphSource` processor,
-    /// one dispatched unit per track per block that copies a frozen block into the arena, and no
-    /// host feeds a session that way. The ring row is the same session fed the way a host feeds it.
-    SixtyFourTrackGainPanOnly,
-    /// The native pure-audio-path target: [`Self::SixtyFourTrackGainPanOnly`]'s session fed the way
-    /// a host feeds a session, through a prepared source set instead of a bound processor per track
-    /// input (issue #956, re-basing the driver-fed row of issue #928).
+    /// It is also the native pure-audio-path target. Its sixty-four `TrackStage::Input` nodes are
+    /// claimed by the prepared source set every row binds (issue #965), and every claim's only
+    /// reader is its cohort's `PostInputBuiltins` bank, whose gather reads the played block in place
+    /// (issue #918, `source_plane_table` clause (b)): no claim is copied into the arena and the
+    /// input units are left out of the dispatched-unit table (issue #936). That is the feed
+    /// `crates/host-core/tests/source_in_place.rs` pins.
     ///
-    /// The same strip edit, the same compile with builtins and the same frozen tone as
-    /// `gain_pan_only`; the difference is how its sixty-four `TrackStage::Input` nodes are fed.
-    /// The builtins artifact is bound through `into_bound_with_source_set`, the entry `host-core`
-    /// binds a session through (`crates/host-core/src/prepare.rs`), and the set's driver,
-    /// `FrozenSourceDriver`, serves each claim the frozen block the bound feed's processor copies.
-    /// Every claim's only reader is its cohort's `PostInputBuiltins` bank, whose gather reads the
-    /// played block in place (issue #918, `source_plane_table` clause (b)), so no claim is copied
-    /// into the arena and the input units are left out of the dispatched-unit table (issue #936).
-    /// That is the production feed, the one `crates/host-core/tests/source_in_place.rs` pins, and
-    /// it is why this row -- not the bound-feed `gain_pan_only` -- is the native pure-path target.
-    ///
-    /// Both feeds deliver the same frozen words, honouring the same channel mapping, so the two
-    /// rows render the same bits; a digest difference between them is a harness defect, never a
-    /// finding. The row replaced the builtins-less `sixty_four_track_plumbing_ring`, which fed the
-    /// same driver into a plan no host compiles (issue #956).
-    ///
-    /// Not in [`WORKLOADS`]: see [`DRIVER_FED_WORKLOADS`].
+    /// Its name keeps the `ring` of issue #956, which re-based the driver-fed row of issue #928
+    /// onto this session. Its bound-feed twin, `sixty_four_track_gain_pan_only`, rendered the same
+    /// bits through a processor per track input no host binds, and issue #965 retired it.
     SixtyFourTrackGainPanRing,
     /// The mono qualification session: sixty-four collapse-eligible strips, rendered as written.
     ///
@@ -376,8 +360,8 @@ pub enum Workload {
     /// is muted, so every send is active, and there is no VCA (a VCA is baked into the faders at
     /// preparation and adds no render work). The tracks are the standing console row's, as
     /// written, so this row and [`Self::SixtyFourTrackConsole`] differ by the buses and sends
-    /// alone: both are prepared at [`PlanConfig::BASELINE`] with the bound feed, the shape the C
-    /// ABI prepares today (no live controls, no meters).
+    /// alone: both are prepared at [`PlanConfig::BASELINE`] and fed through a source set, the
+    /// shape the C ABI prepares today (no live controls, no meters).
     ///
     /// The committed sends fixture as written (`scripts/derive-sends-console-fixture.py`), so the
     /// browser arm can boot the same document.
@@ -461,14 +445,11 @@ impl Workload {
 
     /// How this row's track inputs reach the graph, named in the record as `source_feed`.
     ///
-    /// [`SourceFeed::PlayedPlanes`] for exactly one row, the driver-fed gain/pan row; every other
-    /// row binds a `FrozenGraphSource` processor per track input.
+    /// [`SourceFeed::PlayedPlanes`] for every row (issue #965): every row's track inputs are
+    /// claimed by a prepared source set, the feed every host binds.
     #[must_use]
     pub const fn source_feed(self) -> SourceFeed {
-        match self {
-            Self::SixtyFourTrackGainPanRing => SourceFeed::PlayedPlanes,
-            _ => SourceFeed::Bound,
-        }
+        SourceFeed::PlayedPlanes
     }
 }
 
@@ -507,11 +488,11 @@ impl InputSignal {
 }
 
 /// How a row's track inputs reach the graph (issue #928).
+///
+/// One feed is left: issue #965 retired the bound feed (a `FrozenGraphSource` processor per track
+/// input, one dispatched copy per track per block), which no host binds.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SourceFeed {
-    /// Every `TrackStage::Input` is bound to a `FrozenGraphSource` processor: one dispatched unit
-    /// per track per block, which copies the track's frozen block into its arena buffer.
-    Bound,
     /// The inputs are claimed by a prepared source set whose driver copies each claim's block on
     /// request and lends its played planes in place: the production feed, over the same frozen
     /// blocks.
@@ -523,7 +504,6 @@ impl SourceFeed {
     #[must_use]
     pub const fn name(self) -> &'static str {
         match self {
-            Self::Bound => "bound",
             Self::PlayedPlanes => "played_planes",
         }
     }
@@ -531,14 +511,11 @@ impl SourceFeed {
 
 /// The standing session workloads, in the order their records are emitted.
 ///
-/// **Append-only.** The wasm console guest is addressed by *index* into this array
-/// (`miso_console_prepare(index)`), so reordering it silently re-labels every wasm record. New
-/// rows go on the end.
-///
-/// One row has left it, deliberately and once: `sixty_four_track_plumbing_only`, index 11, a plan
-/// compiled without builtins, which no host builds (issue #956). Every row after it moved down one
-/// index, and the wasm arm's validator and its mutation suite were re-indexed in the same change.
-pub const WORKLOADS: [Workload; 15] = [
+/// Two rows have left it: `sixty_four_track_plumbing_only`, a plan compiled without builtins,
+/// which no host builds (issue #956), and `sixty_four_track_gain_pan_only`, the bound-feed twin of
+/// [`Workload::SixtyFourTrackGainPanRing`], fed through a processor per track input no host binds
+/// (issue #965).
+pub const WORKLOADS: [Workload; 14] = [
     Workload::NineTrackBaseline,
     Workload::NineTrackRaggedStrip,
     Workload::SixtyFourTrackConsole,
@@ -550,33 +527,22 @@ pub const WORKLOADS: [Workload; 15] = [
     Workload::SixtyFourTrackIdle,
     Workload::SixtyFourTrackConsoleLegacy,
     Workload::SixtyFourTrackEqCompSimd1,
-    Workload::SixtyFourTrackGainPanOnly,
     Workload::SixtyFourTrackConsoleMono,
     Workload::SixtyFourTrackConsoleMonoDual,
     Workload::SixtyFourTrackConsoleHalfMono,
 ];
 
-/// The session rows the native bench emits after [`WORKLOADS`]: the rows whose track inputs are
-/// claimed by a prepared source set rather than bound to a processor (issue #928).
+/// The session row the native bench emits after [`WORKLOADS`]: the gain/pan row, the native
+/// pure-path target (issues #928 and #956).
 ///
-/// Kept out of [`WORKLOADS`] on purpose. That array is the wasm console arm's address space --
-/// the guest prepares a row by its index (`miso_console_prepare(index)`), the wasm host iterates
-/// it, and the wasm arm's validator pins its fifteen kinds -- so a row appended there would change
-/// what that arm measures and break its next capture. This row exists to measure the native
-/// source feed, and carrying it into the wasm arm is that arm's own change.
-///
-/// The row is banked, so the shape tests under `tests/` that state a law of every banked row --
-/// one folded route per track, and the folded master's bits -- iterate it beside [`WORKLOADS`].
-/// What is its own -- its bits against its bound twin's, its bank shape, its source-plane counts
-/// and its dispatched units -- is asserted beside that twin by this crate's own test of the pair.
+/// Its own array because it is emitted in that place; since issue #965 every row's track inputs
+/// are claimed by a prepared source set, so the feed no longer sets it apart. The row is banked,
+/// so the shape tests under `tests/` that state a law of every banked row -- one folded route per
+/// track, and the folded master's bits -- iterate it beside [`WORKLOADS`].
 pub const DRIVER_FED_WORKLOADS: [Workload; 1] = [Workload::SixtyFourTrackGainPanRing];
 
 /// The session rows the native bench emits after [`DRIVER_FED_WORKLOADS`]: the rows prepared with
 /// the default web boot's meter set (issue #881).
-///
-/// Kept out of [`WORKLOADS`] for the reason [`DRIVER_FED_WORKLOADS`] is: that array is the wasm
-/// console arm's address space, and a row appended there would change what that arm measures.
-/// Carrying the metered row into the wasm arm is that arm's own change.
 ///
 /// The census and shape tests under `tests/` iterate [`WORKLOADS`] only. What this row shares with
 /// the standing console row -- its bits, its bank memberships, its stages and its folds -- is
@@ -584,10 +550,6 @@ pub const DRIVER_FED_WORKLOADS: [Workload; 1] = [Workload::SixtyFourTrackGainPan
 pub const METERED_WORKLOADS: [Workload; 1] = [Workload::SixtyFourTrackConsoleMetered];
 
 /// The bus-and-send rows the native bench emits after [`METERED_WORKLOADS`] (issue #1227).
-///
-/// Kept out of [`WORKLOADS`] for the reason [`DRIVER_FED_WORKLOADS`] is: that array is the wasm
-/// console arm's address space, and a row appended there would change what that arm measures.
-/// The browser arm's bus-and-send session is that arm's own change.
 ///
 /// The shape tests under `tests/` that state a law of every banked standing row (one folded route
 /// per track) do not iterate it: its tracks feed submixes, not the output. Its plan facts -- one
@@ -601,7 +563,7 @@ pub const BUS_SEND_WORKLOADS: [Workload; 1] = [Workload::SixtyFourTrackConsoleSe
 /// The shapes the console strip moves, frozen before any console slice lands so the same rows can
 /// be measured before and after: the strip at ten, thirteen and sixteen tracks (with the existing
 /// nine- and sixty-four-track rows, the strip at N in {9, 10, 13, 16, 64}), the app shape, and
-/// sparse activity. Kept out of [`WORKLOADS`] for the reason [`DRIVER_FED_WORKLOADS`] is.
+/// sparse activity.
 pub const CONSOLE_STRIP_WORKLOADS: [Workload; 5] = [
     Workload::TenTrackRaggedStrip,
     Workload::ThirteenTrackRaggedStrip,
@@ -712,7 +674,6 @@ impl Workload {
             Self::SixtyFourTrackIdle => "sixty_four_track_idle",
             Self::SixtyFourTrackConsoleLegacy => "sixty_four_track_console_legacy",
             Self::SixtyFourTrackEqCompSimd1 => "sixty_four_track_eq_comp_simd1",
-            Self::SixtyFourTrackGainPanOnly => "sixty_four_track_gain_pan_only",
             Self::SixtyFourTrackGainPanRing => "sixty_four_track_gain_pan_ring",
             Self::SixtyFourTrackConsoleMono => "sixty_four_track_console_mono",
             Self::SixtyFourTrackConsoleMonoDual => "sixty_four_track_console_mono_dual",
@@ -792,9 +753,7 @@ impl Workload {
             Self::SixtyFourTrackBuiltinsOnly => Strip::BuiltinsOnly,
             Self::SixtyFourTrackDispatchOnly => Strip::Identity,
             Self::SixtyFourTrackEqCompSimd1 => Strip::LimiterRemoved,
-            // The driver-fed twin takes the same strip edit and the same compile with builtins;
-            // only how `build_full` binds its track inputs differs (`Workload::source_feed`).
-            Self::SixtyFourTrackGainPanOnly | Self::SixtyFourTrackGainPanRing => Strip::GainPan,
+            Self::SixtyFourTrackGainPanRing => Strip::GainPan,
             Self::SixtyFourTrackConsoleHalfMono => Strip::HalfMono,
             _ => Strip::AsWritten,
         }
@@ -812,8 +771,7 @@ impl Workload {
             Self::SixtyFourTrackConsoleLegacy
             | Self::SixtyFourTrackEqCompSimd1
             | Self::SixtyFourTrackAppShape => "eq+compressor",
-            // The feed is not strip content; the record names it separately, as `source_feed`.
-            Self::SixtyFourTrackGainPanOnly | Self::SixtyFourTrackGainPanRing => "gain+pan",
+            Self::SixtyFourTrackGainPanRing => "gain+pan",
             _ => "eq+compressor+limiter",
         }
     }
@@ -846,7 +804,6 @@ impl Workload {
             Self::SixtyFourTrackCompressorOnly => "pre_insert:compressor",
             Self::SixtyFourTrackBuiltinsOnly
             | Self::SixtyFourTrackDispatchOnly
-            | Self::SixtyFourTrackGainPanOnly
             | Self::SixtyFourTrackGainPanRing => "builtins",
             // The retired layout: two one-slot chains, one per rack.
             Self::SixtyFourTrackConsoleLegacy => "pre_insert:eq,inserts:compressor",
@@ -1590,66 +1547,48 @@ impl SessionRuntime {
         .unwrap_or_else(|_| panic!("{}: production console graph", workload.kind()));
 
         let envelope = artifact.envelope();
-        // `observers` stays empty on purpose in both feeds: it is the *external* observer slot. A
-        // meter observer is compiler-owned and is appended to this vector by the sealed builtins
-        // artifact inside `into_bound` (or `into_bound_with_source_set`), which is why
-        // `meters: true` is expressed as a meter *request* and not as a hand-built observer.
-        // Driving the real path is the whole point of the arm.
-        let bound = match workload.source_feed() {
-            SourceFeed::Bound => {
-                let nodes = artifact
-                    .external_binding_nodes()
-                    .map(|node| source_binding(node, input, &source, &mappings))
-                    .collect();
-                artifact
-                    .into_bound(GraphRuntimeBindings {
-                        envelope,
-                        nodes,
-                        observers: Vec::new(),
-                    })
-                    .unwrap_or_else(|_| panic!("{}: console graph bindings", workload.kind()))
-            }
-            // Issue #928, re-based by #956: the same artifact, its track inputs claimed by a
-            // prepared source set instead of bound to processors -- the shape `host-core` binds a
-            // session in (`crates/host-core/src/prepare.rs`, `into_bound_with_source_set`). Every
-            // external node that is not a track input is acknowledged by the same `source_binding`
-            // the bound feed uses, so the feed is the only thing the two rows bind differently.
-            SourceFeed::PlayedPlanes => {
-                let mut claims: Vec<GraphSourceInputClaim> = artifact
-                    .external_binding_nodes()
-                    .filter(|node| is_track_input(node))
-                    .map(|node| GraphSourceInputClaim { node: node.clone() })
-                    .collect();
-                // The set requires its claims strictly ascending, and the driver serves claim `i`
-                // as the `i`-th of them.
-                claims.sort_unstable();
-                let driver = FrozenSourceDriver::new(&claims, input, &source, &mappings);
-                let resources = driver.resource_report();
-                let source_set =
-                    GraphPreparedSourceSet::new(envelope, claims, resources, Box::new(driver));
-                let nodes = artifact
-                    .external_binding_nodes()
-                    .filter(|node| !is_track_input(node))
-                    .map(|node| source_binding(node, input, &source, &mappings))
-                    .collect();
-                artifact
-                    .into_bound_with_source_set(
-                        GraphRuntimeBindings {
-                            envelope,
-                            nodes,
-                            observers: Vec::new(),
-                        },
-                        source_set,
-                    )
-                    .unwrap_or_else(|failure| {
-                        panic!(
-                            "{}: driver-fed console graph bindings: {}",
-                            workload.kind(),
-                            failure.code
-                        )
-                    })
-            }
-        };
+        // Issue #965: every row binds its track inputs the way `host-core` binds a session
+        // (`crates/host-core/src/prepare.rs`, `into_bound_with_source_set`): the artifact's track
+        // inputs are claimed by a prepared source set, and every other external node is
+        // acknowledged as an identity binding.
+        //
+        // `observers` stays empty on purpose: it is the *external* observer slot. A meter
+        // observer is compiler-owned and is appended to this vector by the sealed builtins
+        // artifact inside `into_bound_with_source_set`, which is why `meters: true` is expressed
+        // as a meter *request* and not as a hand-built observer. Driving the real path is the
+        // whole point of the arm.
+        let mut claims: Vec<GraphSourceInputClaim> = artifact
+            .external_binding_nodes()
+            .filter(|node| is_track_input(node))
+            .map(|node| GraphSourceInputClaim { node: node.clone() })
+            .collect();
+        // The set requires its claims strictly ascending, and the driver serves claim `i` as the
+        // `i`-th of them.
+        claims.sort_unstable();
+        let driver = FrozenSourceDriver::new(&claims, input, &source, &mappings);
+        let resources = driver.resource_report();
+        let source_set = GraphPreparedSourceSet::new(envelope, claims, resources, Box::new(driver));
+        let nodes = artifact
+            .external_binding_nodes()
+            .filter(|node| !is_track_input(node))
+            .map(|node| GraphNodeBinding::identity(node.clone()))
+            .collect();
+        let bound = artifact
+            .into_bound_with_source_set(
+                GraphRuntimeBindings {
+                    envelope,
+                    nodes,
+                    observers: Vec::new(),
+                },
+                source_set,
+            )
+            .unwrap_or_else(|failure| {
+                panic!(
+                    "{}: console graph bindings: {}",
+                    workload.kind(),
+                    failure.code
+                )
+            });
         let (plan, meter_consumers, strip_controls) =
             (bound.plan, bound.meter_consumers, bound.track_controls);
         assert_eq!(
@@ -2112,14 +2051,14 @@ impl SessionRuntime {
     ///
     /// * **Every single dispatched op.** On the console fixtures these are the tracks' `Input`
     ///   stages and the `main-out` output (plus the route ops of a row whose route fold declines).
-    ///   The inputs are bound to this crate's `FrozenGraphSource`, a host-supplied processor the
-    ///   engine cannot see through, so they decline. The output is bound through
-    ///   `GraphNodeBinding::identity`, so the engine lowers it to its own identity kind, which
-    ///   reports `SYMMETRIC` -- truthfully, nothing in an identity can make two channels disagree
-    ///   -- while naming no track and rendering nothing upstream of the seam. That one row is why
-    ///   the mono fixture's census has read `[65, 129]` rather than `[64, 129]` since issue #221
-    ///   (`d1cb3653`) moved this crate's binding of the output off an opaque do-nothing processor,
-    ///   with not one track's witness changed.
+    ///   The inputs are claims of a prepared source set (issue #965), which the engine lowers to
+    ///   its own source-input kind, and the output is bound through
+    ///   `GraphNodeBinding::identity`, which it lowers to its own identity kind. Both report
+    ///   `SYMMETRIC` -- truthfully, nothing in a played block's read or an identity can make two
+    ///   channels disagree -- while rendering nothing a collapse acts on. That is why the mono
+    ///   fixture's census reads `[129, 129]`: it read `[64, 129]` while both were opaque
+    ///   processors, `[65, 129]` after issue #221 (`d1cb3653`) rebound the output, and
+    ///   `[129, 129]` after issue #965 claimed the inputs, with not one track's witness changed.
     /// * **Vacuous bank chains** ([`PlanUnitEligibility::witness_is_vacuous`]): a seam-side-only
     ///   chain's witness is an unconditional `SYMMETRIC`, so its lanes would count a constant.
     /// * **A bank lane naming no track**, which is not a track lane by definition. No console
@@ -2371,9 +2310,8 @@ impl SourceSignal {
 /// Every track input is a frozen block per observation; nothing is decoded on the render path.
 ///
 /// Aligned to 64 bytes (issue #935) so both planes start a cache line wherever the struct is
-/// boxed: the bound feed boxes one per track input ([`bound_track_source`]) and the driver-fed row
-/// one slice of them ([`FrozenSourceDriver`]). Unaligned, the allocator's 16-byte placement split
-/// half the 32-byte loads that copy or read these words, and moved the ring row's time between
+/// boxed: every row's source set holds one slice of them ([`FrozenSourceDriver`]). Unaligned,
+/// the allocator's 16-byte placement split half the 32-byte loads that copy or read these words, and moved the ring row's time between
 /// builds for no reason in the engine. `repr(C)` keeps `left` at offset 0 and `right` at
 /// `QUANTUM * 4`, a line multiple, and the size stays exactly the two planes: no padding.
 #[repr(C, align(64))]
@@ -2426,17 +2364,6 @@ impl FrozenGraphSource {
     }
 }
 
-impl GraphRuntimeProcessor for FrozenGraphSource {
-    fn process(
-        &mut self,
-        block: GraphBindingBlock<'_>,
-    ) -> Result<(), engine::realtime::RenderError> {
-        block.left.copy_from_slice(&self.left);
-        block.right.copy_from_slice(&self.right);
-        Ok(())
-    }
-}
-
 /// Every track's declared `(left_source_channel, right_source_channel)`, in model order.
 ///
 /// Read from the compiled model rather than assumed, because it is the field the mono fixture
@@ -2456,12 +2383,10 @@ fn channel_mappings(model: &SessionModel) -> Vec<(usize, usize)> {
         .collect()
 }
 
-/// One track input's frozen block, from its track id: the words both feeds serve for that track.
+/// One track input's frozen block, from its track id: the words the source set serves for that
+/// track.
 ///
-/// The one place a track id becomes samples. The bound feed wraps the result in a processor
-/// ([`source_binding`]) and the driver-fed row serves it from a source set
-/// ([`FrozenSourceDriver`]), so the two feeds cannot disagree about which block, or which channel
-/// mapping, a track reads.
+/// The one place a track id becomes samples; [`FrozenSourceDriver`] builds every claim with it.
 fn frozen_track_source(
     track_id: &str,
     input: InputSignal,
@@ -2493,45 +2418,13 @@ fn is_track_input(node: &GraphNodeId) -> bool {
     )
 }
 
-/// The bound feed's processor for one track input: its frozen block, boxed at the 64-byte
-/// alignment [`FrozenGraphSource`] carries.
-fn bound_track_source(
-    track_id: &str,
-    input: InputSignal,
-    source: &SourceSignal,
-    mappings: &[(usize, usize)],
-) -> Box<FrozenGraphSource> {
-    Box::new(frozen_track_source(track_id, input, source, mappings))
-}
-
-fn source_binding(
-    node: &GraphNodeId,
-    input: InputSignal,
-    source: &SourceSignal,
-    mappings: &[(usize, usize)],
-) -> GraphNodeBinding {
-    if let GraphNodeId::TrackStage {
-        track_id,
-        stage: TrackStage::Input,
-    } = node
-    {
-        GraphNodeBinding::new(
-            node.clone(),
-            bound_track_source(track_id.as_str(), input, source, mappings),
-        )
-    } else {
-        GraphNodeBinding::identity(node.clone())
-    }
-}
-
 /// A prepared source set's driver over the benchmark's frozen blocks (issue #928).
 ///
 /// The production feed on the benchmark's input. A host binds a session's track inputs to a
 /// source set whose driver plays a block per quantum; this one plays the same frozen block every
-/// quantum, as the bound feed's processor copies the same block every quantum. It holds one
-/// `FrozenGraphSource` per claim, in claim order, each built by [`frozen_track_source`] -- the
-/// function the bound feed's processors are built by -- so claim `i` carries exactly the words the
-/// bound feed would copy for that track, channel mapping included.
+/// quantum. It holds one `FrozenGraphSource` per claim, in claim order, each built by
+/// [`frozen_track_source`], so claim `i` carries exactly that track's frozen words, channel
+/// mapping included. Every row binds its track inputs through it (issue #965).
 ///
 /// It offers the graph both ways to read a claim: `copy_track_input` copies the claim's block into
 /// the arena buffer the executor hands it, and `played_planes` lends the same words in place.
@@ -2636,7 +2529,7 @@ mod tests {
     use super::*;
     use engine::realtime::audit;
 
-    /// The row facts a record states, less the feed: what the two gain/pan rows must share.
+    /// The row facts a record states, less the feed.
     fn stated_facts(workload: Workload) -> (u32, &'static str, bool, &'static str, &'static str) {
         (
             workload.tracks(),
@@ -2647,140 +2540,57 @@ mod tests {
         )
     }
 
-    /// Issues #928 and #956: the driver-fed row is the gain/pan row in every stated fact but its
-    /// feed, and it is the only driver-fed row.
-    #[test]
-    fn the_driver_fed_row_states_the_gain_pan_rows_facts_and_its_own_feed() {
-        let bound = Workload::SixtyFourTrackGainPanOnly;
-        let ring = Workload::SixtyFourTrackGainPanRing;
-        assert_eq!(ring.kind(), "sixty_four_track_gain_pan_ring");
-        assert_eq!(stated_facts(ring), stated_facts(bound));
-        assert_eq!(ring.input_signal(), bound.input_signal());
-        assert_eq!(ring.warmup_blocks(), bound.warmup_blocks());
-        assert!(ring.strip() == Strip::GainPan && bound.strip() == Strip::GainPan);
-        assert!(!ring.collapse_forced_off());
-        assert!(!ring.web_meters());
-        assert_eq!(ring.source_feed().name(), "played_planes");
-        assert_eq!(bound.source_feed().name(), "bound");
-        for workload in WORKLOADS {
-            assert_eq!(
-                workload.source_feed(),
-                SourceFeed::Bound,
-                "{}",
-                workload.kind()
-            );
-        }
-        assert!(
-            DRIVER_FED_WORKLOADS == [ring],
-            "the driver-fed row is the only one"
-        );
-        let mut kinds: Vec<&str> = WORKLOADS
-            .iter()
-            .chain(DRIVER_FED_WORKLOADS.iter())
-            .map(|workload| workload.kind())
-            .collect();
-        kinds.sort_unstable();
-        kinds.dedup();
-        assert_eq!(kinds.len(), WORKLOADS.len() + DRIVER_FED_WORKLOADS.len());
-    }
-
-    /// Issue #956 gate 1 (#928 gate 1, re-based): the driver-fed gain/pan row renders the
-    /// bound-feed row's bits, and every claim is read in place by its bank's gather.
-    ///
-    /// Sixty-four blocks of both rows, digested by `hash_output`, must agree: the two rows are one
-    /// session and one frozen tone, and the
-    /// feed is the only thing bound differently. Beside the digest, the plan facts the feed must
-    /// not move: the same bank chains and slots, the same transposes, every route folded, and no
-    /// collapse or transition.
+    /// Issue #965 gate 1: every session row the bench emits is fed the way a host feeds a
+    /// session, and every claim is read in place by its bank's gather.
     ///
     /// The source-plane counts (`graph::test_only_source_plane_counts`, `[claims copied into the
     /// arena, gathers served from a played block, gathers served silence]`) are the statement of
-    /// which feed ran. The bound row has no source set and counts nothing. The driver-fed row's
-    /// sixty-four claims are each read by one reader, their cohort's `PostInputBuiltins` bank, whose
-    /// gather reads the played block in place (issue #918, `source_plane_table` clause (b)): no
-    /// claim is copied, sixty-four gathers per block are served from played blocks, and none
-    /// silence.
+    /// which feed ran: a row bound through a processor per track input has no source set and
+    /// counts nothing. On every row each track input's only reader is its cohort's
+    /// `PostInputBuiltins` bank, whose gather reads the played block in place (issue #918,
+    /// `source_plane_table` clause (b)), so no claim is copied and every track's claim is
+    /// gathered from its played block once per block (none on the all-silent idle row, whose banks
+    /// skip their work; the sparse row's silent tracks lend frozen zeros, so none is served
+    /// silence either). A row whose inputs rendered per node instead would copy each claim into
+    /// the arena and fail the copy count; no row does today, so the gate is exact on every row
+    /// rather than "production feed, digest unchanged" on some.
     ///
     /// Every render runs under the realtime audit, and the audited allocator aborts the process on
-    /// an allocation inside a render scope, so zero forbidden operations is the driver's five
-    /// methods and the source-set loop around them staying allocation-, lock- and syscall-free.
+    /// an allocation inside a render scope, so zero forbidden operations is the driver's methods
+    /// and the source-set loop around them staying allocation-, lock- and syscall-free.
     #[test]
-    fn the_driver_fed_gain_pan_row_renders_the_bound_rows_bits() {
+    fn every_row_is_fed_through_a_source_set_and_gathered_in_place() {
         const BLOCKS: u64 = 64;
-        let run = |workload: Workload| {
+        for workload in native_session_rows() {
+            let kind = workload.kind();
+            assert_eq!(workload.source_feed(), SourceFeed::PlayedPlanes, "{kind}");
             let mut runtime = SessionRuntime::new(workload);
-            let mut digest = Sha256Sink::new();
-            let mut audible = false;
             graph::test_only_source_plane_reset();
             audit::warm_up();
             audit::reset();
             for block in 0..BLOCKS {
                 runtime.render(block).expect("console render");
-                runtime.hash_output(&mut digest);
-                audible |= runtime.output.0.iter().any(|word| *word != 0.0);
             }
             let forbidden = audit::snapshot().total();
             let planes = graph::test_only_source_plane_counts();
-            (runtime, digest.finish_hex(), audible, forbidden, planes)
-        };
-        let (bound, bound_digest, bound_audible, bound_forbidden, bound_planes) =
-            run(Workload::SixtyFourTrackGainPanOnly);
-        let (ring, ring_digest, ring_audible, ring_forbidden, ring_planes) =
-            run(Workload::SixtyFourTrackGainPanRing);
-
-        assert!(
-            bound_audible && ring_audible,
-            "both rows must render the tone, or their equality says nothing"
-        );
-        assert_eq!(
-            ring_digest, bound_digest,
-            "the driver-fed row must render the bound-feed row's bits: a difference is a harness \
-             defect, never a finding"
-        );
-        let tracks = u64::from(Workload::SixtyFourTrackGainPanRing.tracks());
-        assert_ne!(
-            bound.bank_shape(),
-            [0, 0],
-            "the gain/pan row binds bank chains"
-        );
-        assert_eq!(
-            ring.bank_shape(),
-            bound.bank_shape(),
-            "the feed moves no bank chain or slot"
-        );
-        assert_eq!(ring.bank_transposes(), bound.bank_transposes());
-        for (name, runtime) in [("bound", &bound), ("driver-fed", &ring)] {
             assert_eq!(
-                runtime.bank_route_folds(),
-                tracks,
-                "{name}: every route folds into its cohort's epilogue"
+                forbidden, 0,
+                "{kind}: a forbidden operation on the render path"
             );
+            // A bank whose every lane reads exact zeros skips its work, its gather included, so
+            // the all-silent idle row gathers nothing.
+            let gathers = if workload.input() == InputSignal::Silence {
+                0
+            } else {
+                u64::from(workload.tracks()) * BLOCKS
+            };
             assert_eq!(
-                runtime.bank_collapse_counters()[0],
-                0,
-                "{name}: no collapsed block"
-            );
-            assert_eq!(
-                runtime.bank_collapse_transitions(),
-                [0, 0, 0],
-                "{name}: no transition"
+                planes,
+                [0, gathers, 0],
+                "{kind}: no claim copied, every track's claim gathered from its played block once \
+                 per block, none served silence"
             );
         }
-        assert_eq!(
-            bound_planes,
-            [0, 0, 0],
-            "the bound feed binds no source set"
-        );
-        assert_eq!(
-            ring_planes,
-            [0, tracks * BLOCKS, 0],
-            "every claim is read in place by its bank's gather every block, none copied"
-        );
-        assert_eq!(
-            (bound_forbidden, ring_forbidden),
-            (0, 0),
-            "no forbidden operation on either render path"
-        );
     }
 
     /// The driver's five methods, called directly under the realtime audit: `played_planes` lends
@@ -2926,15 +2736,13 @@ mod tests {
         );
     }
 
-    /// Issue #935 gate 2 (re-homed onto the gain/pan pair by #956): every frozen block the harness
-    /// serves, and both output planes, start a 64-byte line.
+    /// Issue #935 gate 2 (re-homed onto the gain/pan row by #956 and #965): every frozen block the
+    /// harness serves, and both output planes, start a 64-byte line.
     ///
     /// The ring row's claims are built by `FrozenSourceDriver::new`, the constructor `build_full`
     /// calls, over that row's own track inputs, and each is read back through `played_planes`,
-    /// the accessor the graph reads a claim in place through. The bound row's blocks are built by
-    /// `bound_track_source`, the function `source_binding` boxes them with, and all sixty-four are
-    /// held at once so each is its own allocation rather than one reused slot. The output planes
-    /// are the two runtimes' own. Alignment follows from the types' layout, but every claim and
+    /// the accessor the graph reads a claim in place through. The output planes are the runtime's
+    /// own. Alignment follows from the types' layout, but every claim and
     /// every track is checked anyway: at the allocator's 16-byte granularity one allocation in
     /// four lands on a 64-byte boundary by luck.
     #[test]
@@ -2977,43 +2785,14 @@ mod tests {
             );
         }
 
-        let bound = Workload::SixtyFourTrackGainPanOnly;
-        let model = console_model(bound);
-        let mappings = channel_mappings(&model);
-        let blocks: Vec<Box<FrozenGraphSource>> = model
-            .tracks
-            .iter()
-            .map(|track| {
-                bound_track_source(
-                    track.id.as_str(),
-                    InputSignal::Tone,
-                    &SourceSignal::Local,
-                    &mappings,
-                )
-            })
-            .collect();
-        assert_eq!(blocks.len(), bound.tracks() as usize);
-        for (track, block) in model.tracks.iter().zip(&blocks) {
-            assert!(
-                aligned(&block.left) && aligned(&block.right),
-                "bound {}: left {:p}, right {:p}",
-                track.id.as_str(),
-                block.left.as_ptr(),
-                block.right.as_ptr()
-            );
-        }
-
-        for workload in [bound, ring] {
-            let runtime = SessionRuntime::new(workload);
-            let (left, right) = runtime.output.0.split_at(QUANTUM);
-            assert!(
-                aligned(left) && aligned(right),
-                "{} output: left {:p}, right {:p}",
-                workload.kind(),
-                left.as_ptr(),
-                right.as_ptr()
-            );
-        }
+        let runtime = SessionRuntime::new(ring);
+        let (left, right) = runtime.output.0.split_at(QUANTUM);
+        assert!(
+            aligned(left) && aligned(right),
+            "output: left {:p}, right {:p}",
+            left.as_ptr(),
+            right.as_ptr()
+        );
     }
 
     /// Issue #881: the metered row states every fact the standing console row states -- it is that
@@ -3027,7 +2806,6 @@ mod tests {
         assert_eq!(metered.input_signal(), console.input_signal());
         assert_eq!(metered.warmup_blocks(), console.warmup_blocks());
         assert!(metered.strip() == Strip::AsWritten && console.strip() == Strip::AsWritten);
-        assert_eq!(metered.source_feed(), SourceFeed::Bound);
         assert!(!metered.collapse_forced_off());
         assert!(metered.web_meters());
         assert!(
@@ -3053,7 +2831,7 @@ mod tests {
         );
         assert!(
             rows.get(WORKLOADS.len() + DRIVER_FED_WORKLOADS.len()) == Some(&metered),
-            "the metered row is emitted after the driver-fed row, before the bus-and-send row"
+            "the metered row is emitted after the gain/pan row, before the bus-and-send row"
         );
         let mut kinds: Vec<&str> = rows.iter().map(|workload| workload.kind()).collect();
         kinds.sort_unstable();
@@ -3268,14 +3046,12 @@ mod tests {
         );
         assert!(sends.strip() == Strip::AsWritten);
         assert_eq!(sends.input(), InputSignal::Tone);
-        assert_eq!(sends.source_feed(), SourceFeed::Bound);
         assert_eq!(sends.warmup_blocks(), console.warmup_blocks());
         assert!(!sends.web_meters() && !sends.collapse_forced_off());
         assert!(
             BUS_SEND_WORKLOADS == [sends],
             "the bus-and-send row is the only one"
         );
-        assert!(!WORKLOADS.contains(&sends), "not a wasm-arm row");
         assert!(!DRIVER_FED_WORKLOADS.contains(&sends));
         let rows: Vec<Workload> = native_session_rows().collect();
         assert!(
@@ -3462,15 +3238,9 @@ mod tests {
         assert_eq!(sparse.warmup_blocks(), standing.warmup_blocks());
         for row in STRIP_ROWS {
             assert!(row.strip() == Strip::AsWritten, "{}", row.kind());
-            assert_eq!(row.source_feed(), SourceFeed::Bound, "{}", row.kind());
             assert!(
                 !row.web_meters() && !row.collapse_forced_off(),
                 "{}",
-                row.kind()
-            );
-            assert!(
-                !WORKLOADS.contains(&row),
-                "{}: not a wasm-arm row",
                 row.kind()
             );
         }
