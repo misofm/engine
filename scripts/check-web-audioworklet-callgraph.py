@@ -107,7 +107,8 @@ Modes
        render kernel rule 3 counts, by its name without the mangling hash and with the stage it
        renders. Each entry must resolve to exactly one function over the whole module (pattern
        or not, so a rename away from the pattern cannot hide it) and that function must carry
-       `f32x4` arithmetic; zero matches, more than one, or `vector == 0` fails. A vanished entry
+       `f32x4` arithmetic; zero matches, more than one, or `vector == 0` fails. A counted kernel
+       in neither this table nor `CONTROL_THREAD_EXEMPT` fails too. A vanished entry
        is answered by a reviewed table edit with evidence that its arithmetic moved into a kernel
        the table or roster still holds, never by deleting the row silently.
 
@@ -631,7 +632,6 @@ CONTROL_THREAD_EXEMPT: dict[str, str] = {
 }
 
 
-
 # Issue #1889: the render kernels the f32x4 build must keep, by name without the mangling hash
 # (`unhashed`), with the stage each renders. `kernel_arithmetic` skips a function with no `f32x4`
 # arithmetic as a helper, so a kernel that LLVM or a source change scalarises in full would leave
@@ -639,7 +639,8 @@ CONTROL_THREAD_EXEMPT: dict[str, str] = {
 # vector-carrying. Measured on the 1.99.1 named twin of shipped module 47e9c699 (#877): these are
 # all the kernels rule 3 counts. A vanished entry is answered by a reviewed edit, with evidence
 # that its arithmetic moved into a kernel this table or the roster still holds, never by
-# deleting the row silently (the INDIRECT_SITES policy). A new counted kernel gets a row.
+# deleting the row silently (the INDIRECT_SITES policy). A counted kernel that is neither here
+# nor in `CONTROL_THREAD_EXEMPT` fails, so a change that adds a kernel adds its row.
 RENDER_KERNELS: dict[str, str] = {
     "_RNvMs4_Cs_8builtinsINtB5_10InputStageNtNtCs_4wide6f32x4_5f32x4E7processB5_":
         "builtins input section (polarity/trim/HPF/LPF), stereo body",
@@ -769,6 +770,14 @@ def check_kernel_shape(
         if unhashed(function.name) in exempt:
             print(f"  exempt control-thread vector={vector} scalar={scalar} {function.name}")
             continue
+        if pinned is not None and unhashed(function.name) not in pinned:
+            failures += 1
+            print(
+                f"FAIL kernel {function.name}: vector={vector} scalar={scalar} is counted but "
+                "is in neither RENDER_KERNELS nor CONTROL_THREAD_EXEMPT. Add its row with the "
+                "stage it renders (or its control-thread reason).",
+                file=sys.stderr,
+            )
         kernels.append((function, vector, scalar))
     for function, vector, scalar in kernels:
         if vector <= scalar:
@@ -1325,7 +1334,7 @@ def self_test() -> int:
         "_RINvNtCsaB1_4lane7kernels28route_mix_column_ramps_blockNtNtCsgmSSuZlKkZ2_4wide6f32x4_"
         "5f32x4ECsQ9_5graph"
     )
-    kernel_table = {unhashed(route): "live route mix"}
+    kernel_table = {"render_next": "synthetic render", unhashed(route): "live route mix"}
     for vector, verdict in ((0, 1), (1, 0)):
         module = VALID_SHAPE + synthetic_kernel(route, vector=vector, scalar=0, index=2)
         expect(
@@ -1337,7 +1346,14 @@ def self_test() -> int:
     expect(
         "(e2) stale render-kernel entry fails",
         check_kernel_shape(parse(VALID_SHAPE), "render_next", 1, SELF_TEST_ROSTER,
-                           pinned={"no_such_kernel": "stale"}) == 1,
+                           pinned={"render_next": "synthetic render",
+                                   "no_such_kernel": "stale"}) == 1,
+    )
+    # (e4) a counted kernel that the table does not name fails, so the table cannot go stale.
+    expect(
+        "(e4) unpinned counted kernel fails",
+        check_kernel_shape(parse(VALID_SHAPE), "render_next", 1, SELF_TEST_ROSTER,
+                           pinned={}) == 1,
     )
     # (e3) the shipped table survives a rebuild and never pins an exempted function.
     expect(
