@@ -3401,7 +3401,6 @@ struct SourceGather<'a> {
 
 impl SourceGather<'_> {
     /// No source set: every gather reads the arena. What a hand-built `ArenaMembers` carries.
-    #[cfg(test)]
     const NONE: Self = Self {
         planes: None,
         of_buffer: &[],
@@ -3827,6 +3826,47 @@ impl ArenaMembers<'_> {
         }
         true
     }
+}
+
+/// [`BankMembers::fold_resident`] on a hand-built cohort, for the cross-target corpus
+/// ([`crate::corpus`], issue #952): `resident` is one cohort's AoSoA planes (frame `f`, lane `k` is
+/// word `f * width.lanes() + k`), `coefficients` one `[ll, lr, rl, rr]` per lane, and lane 0 stores
+/// when `store`. The master is the arena's stereo buffer `master`. Returns what the fold returned,
+/// and `false` for a cohort shape `ResidentFoldCohort::new` refuses or more than eight lanes.
+pub(crate) fn run_resident_fold(
+    width: BankWidth,
+    resident: (&[f32], &[f32]),
+    frames: usize,
+    coefficients: &[[f32; 4]],
+    store: bool,
+    arena: &mut DisjointArena,
+    master: u32,
+) -> bool {
+    if coefficients.len() > 8 {
+        return false;
+    }
+    let Ok(cohort) = ResidentFoldCohort::new(resident.0, resident.1, width, frames) else {
+        return false;
+    };
+    let mut fold = [FoldLane {
+        coefficients: [0.0; 4],
+        store: false,
+    }; 8];
+    for (lane, (slot, constants)) in fold.iter_mut().zip(coefficients).enumerate() {
+        *slot = FoldLane {
+            coefficients: *constants,
+            store: store && lane == 0,
+        };
+    }
+    ArenaMembers {
+        arena,
+        inputs: &[],
+        outputs: &[],
+        fold: &fold[..coefficients.len()],
+        master: MasterPlanes::Arena(master),
+        sources: SourceGather::NONE,
+    }
+    .fold_resident(cohort)
 }
 
 /// One `W * W` block of AoSoA words as its `W` frame rows, the input of a tile transpose.

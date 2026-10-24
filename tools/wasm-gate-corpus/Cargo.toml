@@ -20,6 +20,8 @@ compressor.workspace = true
 delay.workspace = true
 effect-runtime.workspace = true
 gate-expander.workspace = true
+# The resident route fold of issue #952; its pins live in graph.
+graph.workspace = true
 lane.workspace = true
 math = { workspace = true, features = ["lane"] }
 # The wave-2 effect crates whose corpora this gate replays; their pins live in those crates,

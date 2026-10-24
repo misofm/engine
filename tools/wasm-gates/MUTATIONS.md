@@ -300,3 +300,25 @@ body. #977's scans reported the loop clean because it is entered in the middle: 
 line from the back edge's target, the rotated body stores each slot before it loads it. Whether
 this costs time is not measured, and in a loop that starved the count moves with any allocation
 change, so a count would be a byte pin by another name.
+
+## The 4-wide resident route fold (issue #952)
+
+The corpus gained the `graph/resident_fold/{store,accumulate}` cases (indices 153 and 154, appended
+last), which run `graph::corpus::run_case`: eight hostile lanes over 131 frames folded into one
+master through the production `ArenaMembers::fold_resident_tiles`, as two four-lane cohorts at
+`Simd4`, one eight-lane cohort at `Simd8`, and an independent scalar reference at `f32`. Their pins
+are `graph::corpus::DIGESTS`.
+
+**Red mutation, applied and reverted on the delivery host.** In `fold_resident_tiles`, after the
+tile transpose, `if W == 4 { rows_left.swap(0, 1); }` (lanes 0 and 1 exchange their left-plane
+words in every full W4 tile). Both cases move at `simd4` only, on both legs; scalar and `simd8` stay
+green, and so does every other case:
+
+```
+native mismatch: case 153 (graph/resident_fold/store) at simd4: expected 83f33f30…b84c, got b3e2a33c…097d
+native mismatch: case 154 (graph/resident_fold/accumulate) at simd4: expected 4a8bc43f…f481, got 8a5095cd…8ab0
+{"schema_version":1,"kind":"wasm_gates","leg":"native",…,"cases":155,"comparisons":385,…,"mismatches":[{"case":153,…,"width":"simd4",…},{"case":154,…,"width":"simd4",…}]}
+wasm mismatch: case 153 (graph/resident_fold/store) at simd4: expected 83f33f30…b84c, got b3e2a33c…097d
+wasm mismatch: case 154 (graph/resident_fold/accumulate) at simd4: expected 4a8bc43f…f481, got 8a5095cd…8ab0
+{"schema_version":1,"kind":"wasm_gates","leg":"wasm",…,"backend":1,"cases":155,"comparisons":270,…,"mismatches":[{"case":153,…,"width":"simd4",…},{"case":154,…,"width":"simd4",…}]}
+```

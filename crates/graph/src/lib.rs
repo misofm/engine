@@ -4,6 +4,7 @@
 //! only retains the already-validated immutable result and its preallocated render state.
 #![allow(missing_docs)]
 
+pub mod corpus;
 pub mod program;
 mod runtime;
 

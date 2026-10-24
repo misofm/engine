@@ -23,6 +23,7 @@ builtins.workspace = true
 compressor.workspace = true
 effect-runtime.workspace = true
 gate-expander.workspace = true
+graph.workspace = true
 lane.workspace = true
 math = { workspace = true, features = ["lane"] }
 parametric-eq.workspace = true

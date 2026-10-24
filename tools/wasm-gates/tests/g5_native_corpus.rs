@@ -373,9 +373,14 @@ fn g5_delegated_cases_use_the_owning_crates_pins() {
     );
     let compressor_base = limiter_base + corpus::LIMITER_CASE_COUNT;
     assert_eq!(
-        compressor_base + corpus::COMPRESSOR_CASE_COUNT + 2 + corpus::AUTOMATION_CASE_COUNT,
+        compressor_base
+            + corpus::COMPRESSOR_CASE_COUNT
+            + 2
+            + corpus::AUTOMATION_CASE_COUNT
+            + corpus::GRAPH_FOLD_CASE_COUNT,
         corpus::CASE_COUNT,
-        "two builtin cases, then the automation block, follow the original final compressor case"
+        "two builtin cases, the automation block, then the graph block follow the original final \
+         compressor case"
     );
     assert_eq!(corpus::BUILTINS_ORIGINAL_CASE_COUNT, 8);
     assert_eq!(corpus::BUILTINS_CASE_COUNT, 10);
@@ -410,6 +415,27 @@ fn g5_delegated_cases_use_the_owning_crates_pins() {
         assert_eq!(
             corpus::case_name(automation_base + case),
             automation::corpus::CASE_NAMES[case]
+        );
+    }
+    assert_eq!(
+        corpus::GRAPH_FOLD_CASE_COUNT,
+        graph::corpus::CASE_COUNT,
+        "the graph block must cover every case that crate pins"
+    );
+    let graph_base = automation_base + corpus::AUTOMATION_CASE_COUNT;
+    for case in 0..corpus::GRAPH_FOLD_CASE_COUNT {
+        assert_eq!(
+            corpus::expected_digest(graph_base + case),
+            graph::corpus::DIGESTS[case],
+            "graph case {case} must be pinned by graph, not by this crate"
+        );
+        assert!(
+            corpus::is_width_dependent(graph_base + case),
+            "a resident-fold case is lane generic and must be digested at every width"
+        );
+        assert_eq!(
+            corpus::case_name(graph_base + case),
+            format!("graph/{}", graph::corpus::CASE_NAMES[case])
         );
     }
     for case in 0..corpus::COMPRESSOR_CASE_COUNT {
