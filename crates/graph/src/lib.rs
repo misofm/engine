@@ -4275,6 +4275,8 @@ pub fn fade_arm_table_bytes(arms: usize, pairs: usize) -> Option<u64> {
             .checked_mul(core::mem::size_of::<GraphFadeArmPair>())
             .and_then(|pair_bytes| bytes.checked_add(pair_bytes))
     })
+    // The watch's `Arc` header (issue #1392).
+    .and_then(|bytes| bytes.checked_add(WATCH_HEADER_BYTES))
     .and_then(|bytes| u64::try_from(bytes).ok())
 }
 
@@ -4421,12 +4423,15 @@ impl GraphFadeArmWatch {
             .is_some_and(|flag| flag.load(core::sync::atomic::Ordering::Acquire))
     }
 
-    /// Heap bytes the watch holds: its flags.
+    /// Heap bytes the watch holds: its flags and the shared allocation's two reference counts.
     #[must_use]
     pub fn heap_bytes(&self) -> usize {
-        core::mem::size_of_val::<[core::sync::atomic::AtomicBool]>(&self.0)
+        core::mem::size_of_val::<[core::sync::atomic::AtomicBool]>(&self.0) + WATCH_HEADER_BYTES
     }
 }
+
+/// The strong and weak counts at the head of an `Arc` allocation.
+const WATCH_HEADER_BYTES: usize = 2 * core::mem::size_of::<usize>();
 
 /// Two watches are equal when they are one table.
 impl PartialEq for GraphFadeArmWatch {

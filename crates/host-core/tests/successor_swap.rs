@@ -3635,6 +3635,94 @@ fn assert_audible(muted: &Session, feeds: &[&Feed], reference: &FadeRun, backend
     );
 }
 
+/// `model` with a stored mute automation curve on [`FADE_TRACK`] that holds it unmuted: the lane
+/// becomes an automated lane, whose live mute goes through the cell's mute terms.
+fn with_fade_mute_automation(mut model: SessionModel) -> SessionModel {
+    let owner = model
+        .tracks
+        .iter()
+        .find(|track| track.id.as_str() == FADE_TRACK)
+        .expect("the fade track")
+        .id
+        .clone();
+    model.automation.push(session::Automation {
+        id: id("fade-mute"),
+        target: session::ControlAddress {
+            owner: session::Owner::Strip(owner),
+            section: session::Section::Builtins,
+            control: 6,
+            lane: ParameterChannel::Both,
+        },
+        segments: vec![session::AutomationSegment {
+            shape: session::AutomationShape::Step,
+            start_sample: 0,
+            end_sample: 1,
+            start_value: 0.0,
+            end_value: 0.0,
+            unit: ParameterUnit::Linear,
+        }],
+        offset: session::AutomationOffset::default(),
+    });
+    model
+}
+
+/// Issue #1288 gate 1 on an automated lane (attempt 3): the added track carries stored mute
+/// automation that holds it unmuted, and waits for its anchored source at block 9. A user mute at
+/// block 7 must end the arm, so the fire time passes and the track stays muted: the run equals
+/// the post-edit session with the track muted from frame 0, and no fade. Red if an armed lane's
+/// mute terms compare with the arm's own mute and return early (the fire then unmutes a strip the
+/// user muted).
+#[test]
+fn a_user_mute_on_an_automated_armed_lane_outlasts_the_fire() {
+    let backend = Backend::current();
+    let ramp = LiveRamps::for_session(&fade_base()).mute_samples;
+    let (kept, aux) = fade_feeds();
+    let (added, reference_added) = anchored_feeds();
+    let a = Session::compile(unlimited_fade_base());
+    let b = Session::compile(with_fade_mute_automation(anchored_fade_model(false)));
+    let muted = Session::compile(with_fade_mute_automation(anchored_fade_model(true)));
+    let swap = [FadeSwap {
+        block: SWAP_BLOCK,
+        to: &b,
+        committed: &a.model,
+        prepared_at: None,
+    }];
+    let mute = CellWrite {
+        block: SWAP_BLOCK + 1,
+        strip: FADE_TRACK,
+        record: CellRecord::Fader(mute_both(true, ramp)),
+    };
+    let anchored = Anchored {
+        feed: &added,
+        anchor_block: FADE_ANCHOR_BLOCK,
+    };
+    let run = fade_run(&a, &swap, &[&kept, &aux], Some(anchored), &[mute], backend);
+    assert_eq!(run.arms[0].len(), 1, "the automated track is armed");
+    let reference = fade_run(
+        &muted,
+        &[],
+        &[&kept, &aux, &reference_added],
+        None,
+        &[],
+        backend,
+    );
+    assert_eq!(
+        first_fade_difference(&run, &reference),
+        None,
+        "the user's mute outlasts the fire time"
+    );
+    // The oracle can fail: the same reference given an unmute at the anchor is heard.
+    let unmuted = fade_run(
+        &muted,
+        &[],
+        &[&kept, &aux, &reference_added],
+        None,
+        &[unmute_fade(FADE_ANCHOR_BLOCK, ramp)],
+        backend,
+    );
+    assert_ne!(unmuted.blocks, reference.blocks, "the fade would be heard");
+}
+
 /// Issue #1288 D4 for a submix, on the control thread: B adds submix `bus` and sends `eq0`
 /// (behind a 486-sample limiter) and `eq1` (no latency) to it. The bus's input sums at 486, so
 /// `eq1`'s route into it gets a 486-sample compensation line that starts at rest; the bus has no
