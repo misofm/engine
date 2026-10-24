@@ -382,6 +382,8 @@ fn schedule(seed: u64, reach: &mut Reach) {
     let mut model = Model::new(quantum, channels, capacity, generation);
     let mut planes: Vec<Vec<f32>> =
         vec![vec![f32::from_bits(0xffff_ffff); quantum as usize]; channels];
+    // The source-read sample of the next block: the product path reads each block at its clock.
+    let mut source_read_sample = 0_u64;
     for step in 0..96 {
         let context = format!(
             "seed {seed} step {step} (quantum {quantum}, capacity {capacity}, {channels} channels)"
@@ -451,9 +453,14 @@ fn schedule(seed: u64, reach: &mut Reach) {
                 for plane in &mut planes {
                     plane.fill(f32::from_bits(0xffff_ffff));
                 }
-                let mut outputs: Vec<&mut [f32]> =
-                    planes.iter_mut().map(Vec::as_mut_slice).collect();
-                let report = consumer.read_block(&mut outputs).expect("a legal read");
+                let report = consumer.begin_block_at(source_read_sample);
+                source_read_sample += u64::from(quantum);
+                for (channel, plane) in planes.iter_mut().enumerate() {
+                    consumer
+                        .copy_channel(channel as u32, plane)
+                        .expect("a legal channel");
+                }
+                consumer.end_block();
                 let expected = model.render();
                 let words: Vec<Vec<u32>> = planes
                     .iter()

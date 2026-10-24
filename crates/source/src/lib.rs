@@ -1811,26 +1811,6 @@ impl PcmSourceConsumer {
         self.shape
     }
 
-    /// Copy one exact render quantum into planar caller storage without allocation or blocking.
-    pub fn read_block(
-        &mut self,
-        output_planes: &mut [&mut [f32]],
-    ) -> Result<SourceReadReport, SourceReadError> {
-        self.validate_output_shape(output_planes)?;
-        let report = self.begin_block();
-        let copied = (|| {
-            for (channel, output) in output_planes.iter_mut().enumerate() {
-                self.copy_channel(
-                    u32::try_from(channel).expect("prepared channel count fits u32"),
-                    output,
-                )?;
-            }
-            Ok(())
-        })();
-        self.end_block();
-        copied.map(|()| report)
-    }
-
     /// Advance the source state machine once and retain this quantum for channel fan-out reads.
     /// The previously played block stops being readable here. A short (end-of-region) block has
     /// its tail zeroed in place, once, so every [`Self::played_plane`] is a whole quantum.
@@ -2108,25 +2088,6 @@ impl PcmSourceConsumer {
         }
     }
 
-    fn validate_output_shape(
-        &self,
-        output_planes: &mut [&mut [f32]],
-    ) -> Result<(), SourceReadError> {
-        if output_planes.len() != usize::try_from(self.channel_count).expect("u32 fits usize") {
-            return Err(SourceReadError::ChannelCount {
-                expected: self.channel_count,
-                actual: output_planes.len(),
-            });
-        }
-        if output_planes.iter().any(|plane| {
-            plane.len() != usize::try_from(self.quantum_frames).expect("u32 fits usize")
-        }) {
-            return Err(SourceReadError::PlaneLength {
-                expected_frames: self.quantum_frames,
-            });
-        }
-        Ok(())
-    }
     // REALTIME_POLICY_BEGIN
     /// Publish the ring's seek report if this block changed it (#1316 D3): a new generation in
     /// effect (the ring's first block, or one a seek applied at) takes this block's
@@ -3746,7 +3707,7 @@ mod tests {
             assert!(consumer.prepare_seek(SourceGeneration(2), SourceFrame(100)));
             assert!(!consumer.prepare_seek(SourceGeneration(1), SourceFrame(100)));
             let mut output = [0.0; 4];
-            let report = consumer.read_block(&mut [&mut output]).unwrap();
+            let report = read_at(&mut consumer, 0, &mut [&mut output]);
             assert_eq!(output, target);
             assert_eq!(report.underrun_frames, 0);
             assert_eq!(consumer.next_frame, SourceFrame(104));
@@ -3766,11 +3727,31 @@ mod tests {
         consumer: &mut PcmSourceConsumer,
         first_sample: u64,
     ) -> ([f32; 4], SourceReadReport) {
-        let report = consumer.begin_block_at(first_sample);
         let mut output = [f32::NAN; 4];
-        consumer.copy_channel(0, &mut output).unwrap();
-        consumer.end_block();
+        let report = read_at(consumer, first_sample, &mut [&mut output]);
         (output, report)
+    }
+
+    /// The product read path for one block starting at `first_sample`: begin the block, copy
+    /// every channel into `planes`, end the block.
+    fn read_at(
+        consumer: &mut PcmSourceConsumer,
+        first_sample: u64,
+        planes: &mut [&mut [f32]],
+    ) -> SourceReadReport {
+        let report = consumer.begin_block_at(first_sample);
+        copy_planes_and_end(consumer, planes);
+        report
+    }
+
+    /// Copy every channel of the begun block into `planes`, then end the block.
+    fn copy_planes_and_end(consumer: &mut PcmSourceConsumer, planes: &mut [&mut [f32]]) {
+        for (channel, plane) in planes.iter_mut().enumerate() {
+            consumer
+                .copy_channel(u32::try_from(channel).unwrap(), plane)
+                .unwrap();
+        }
+        consumer.end_block();
     }
 
     /// #1274 D1. Red if an anchor no block starts at is admitted, or if the refusal switches the
@@ -4154,7 +4135,7 @@ mod tests {
             .expect("post-seek chunk");
         let mut output = [0.0; 4];
         let mut planes = [&mut output[..]];
-        let report = consumer.read_block(&mut planes).expect("consumer retained");
+        let report = read_at(&mut consumer, 0, &mut planes);
         assert_eq!(report.active_generation, SourceGeneration(2));
         assert_eq!(output, sought);
     }
@@ -4456,14 +4437,16 @@ mod tests {
         let mut host = producer.into_host_chunk_provider(RATE);
         let mut output = [0.0; 4];
         host.submit(chunk(1, 0, &[&[1.0; 4]], 4, false)).unwrap();
-        consumer.read_block(&mut [&mut output]).unwrap();
+        consumer.begin_block();
+        copy_planes_and_end(&mut consumer, &mut [&mut output]);
         host.try_seek(SourceCommand::Seek {
             generation: SourceGeneration(2),
             frame: SourceFrame(40),
         })
         .unwrap();
         host.submit(chunk(2, 40, &[&[2.0; 4]], 4, false)).unwrap();
-        consumer.read_block(&mut [&mut output]).unwrap();
+        consumer.begin_block();
+        copy_planes_and_end(&mut consumer, &mut [&mut output]);
         assert_eq!(output, [2.0; 4]);
         assert_eq!(host.seek_report(), Ok(seek_report(2, 4, 40, 0, 0)));
     }
@@ -4652,9 +4635,7 @@ mod tests {
             .expect("planar submission");
         let mut left = [0.0; 4];
         let mut right = [0.0; 4];
-        let report = consumer
-            .read_block(&mut [&mut left, &mut right])
-            .expect("read");
+        let report = read_at(&mut consumer, 0, &mut [&mut left, &mut right]);
         assert_eq!(report.copied_frames, 4);
         assert_eq!(left, left_in);
         assert_eq!(right, right_in);
@@ -4695,9 +4676,7 @@ mod tests {
             Err(HostChunkError::Full { .. })
         ));
         let mut output = [f32::NAN; 4];
-        let report = consumer
-            .read_block(&mut [&mut output])
-            .expect("first target block");
+        let report = read_at(&mut consumer, 0, &mut [&mut output]);
         assert_eq!(output, blocks[0]);
         assert_eq!(report.copied_frames, 4);
         assert_eq!(report.cumulative_read_frames, 4);
