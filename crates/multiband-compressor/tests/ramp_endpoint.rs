@@ -1,9 +1,10 @@
 //! Issue #1409 gate 2: every ramped word of this effect stays inside its endpoints.
 //!
 //! The render site: site 6 (`run_segment`): each band's threshold, ratio, attack, release and
-//! makeup.
+//! makeup, and the crossover's three designed words (issue #1338).
 //! Each word has one in-domain move, found by #1409's scan, whose word the unclamped D11 law
-//! (`current + step` before the snap) took past its target. The shared harness
+//! (`current + step` before the snap) took past its target. The crossover words share one move,
+//! 80 Hz to the 34th `f32` above it, which overshoots all three (#1338's scan at 48 kHz). The shared harness
 //! (`conformance::ramp_endpoint`, issue #1458) renders each move in one-frame blocks and checks
 //! that the effect's own state snapshot holds every ramp word between its value at rest and its
 //! target, and that the same window rendered as one block gives the same ramp words, output and
@@ -25,7 +26,7 @@ use conformance::ramp_endpoint::{
 };
 
 /// Every ramp word of this effect's payload.
-const WORDS: [RampWord; 10] = [
+const WORDS: [RampWord; 13] = [
     RampWord {
         name: "low threshold",
         parameter: 1,
@@ -86,10 +87,33 @@ const WORDS: [RampWord; 10] = [
         section: Section::Channels,
         word: 39,
     },
+    RampWord {
+        name: "crossover c1",
+        parameter: 0,
+        section: Section::Channels,
+        word: 64,
+    },
+    RampWord {
+        name: "crossover a2",
+        parameter: 0,
+        section: Section::Channels,
+        word: 68,
+    },
+    RampWord {
+        name: "crossover a3",
+        parameter: 0,
+        section: Section::Channels,
+        word: 72,
+    },
 ];
 
+/// The crossover move: 80 Hz to `0x42a00022`, whose three designed words the unclamped law takes
+/// past their targets.
+const CROSSOVER_FROM: f32 = 80.0;
+const CROSSOVER_TO: f32 = f32::from_bits(0x42a0_0022);
+
 /// One overshooting move per word (#1409 gate 2, recorded in the issue).
-const MOVES: [Move; 10] = [
+const MOVES: [Move; 13] = [
     Move {
         word: WORDS[0],
         start: f32::from_bits(0xc29fffdf),
@@ -148,6 +172,24 @@ const MOVES: [Move; 10] = [
         word: WORDS[9],
         start: f32::from_bits(0x41bfffdf),
         target: 24.0,
+        whole: true,
+    },
+    Move {
+        word: WORDS[10],
+        start: CROSSOVER_FROM,
+        target: CROSSOVER_TO,
+        whole: true,
+    },
+    Move {
+        word: WORDS[11],
+        start: CROSSOVER_FROM,
+        target: CROSSOVER_TO,
+        whole: true,
+    },
+    Move {
+        word: WORDS[12],
+        start: CROSSOVER_FROM,
+        target: CROSSOVER_TO,
         whole: true,
     },
 ];
