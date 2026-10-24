@@ -992,6 +992,7 @@ describe("issue #1097 -- live controls address console slots by slot ID and inse
 /** Parameters that make each catalog effect audible on `feed()`'s noise, so bypass is heard. */
 const AUDIBLE = Object.freeze({
   "miso.compressor": { threshold: -40, ratio: 8 },
+  "miso.de-esser": { threshold: -60, ratio: 20, range: 40 },
   "miso.delay": { "delay time": 2, mix: 0.5 },
   "miso.gate-expander": { threshold: -3, ratio: 20, hold: 0, hysteresis: 0, release: 5 },
   "miso.multiband-compressor": { low_threshold: -40, low_ratio: 8, high_threshold: -40, high_ratio: 8 },
