@@ -4181,10 +4181,10 @@ impl<L: Lane> LimiterCore<L> {
     /// # The standing claim (issue #1107)
     ///
     /// When the #182 S2 claim stands -- `silent_fixed_point`, earned under the bypass now in
-    /// force, with every ramp of both channels stationary -- every lane is at rest, and the scan
-    /// is not run. The scan reads every ring word of every lane (about 3 us per bank per call on
-    /// the 64-track console at 48 kHz), which a whole-bank skip would otherwise pay on every
-    /// silent block. The claim is the scan's own answer, taken after the last rendered or skipped
+    /// force, with every ramp of both channels stationary (the left channel's alone while
+    /// collapsed) -- every lane is at rest, and the scan is not run. The scan reads every ring
+    /// word of every lane (about 3 us per bank per call on the 64-track console at 48 kHz), which
+    /// a whole-bank skip would otherwise pay on every silent block. The claim is the scan's own answer, taken after the last rendered or skipped
     /// block ([`process_block`](Self::process_block), [`advance_clocks`](Self::advance_clocks)),
     /// and every path that can move a lane's state between two blocks clears it: both resets,
     /// a restore (the plan-swap carry and #1747's lane swap restore through it), an automation

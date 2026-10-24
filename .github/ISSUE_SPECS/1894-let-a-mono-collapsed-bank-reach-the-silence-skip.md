@@ -72,4 +72,5 @@ The mono-collapse effects' `src/lib.rs` and tests, `crates/effect-contract/src/l
   keeps the flag" red in all five.
 - Class A on the compiled-plan path: `graph-compiler/tests/silent_bank_skip.rs` gate 1 (skip allowed
   against forbidden, bit-equal every block) runs the limiter in its collapsed console bank and
-  passes. No main-against-branch digest was taken for PR 2.
+  passes. No main-against-branch digest was taken for PR 2; root accepts the class-A evidence
+  without one (2026-10-24): the per-crate bit compares plus that gate prove the claim.
