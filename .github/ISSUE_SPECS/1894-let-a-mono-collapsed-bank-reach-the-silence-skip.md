@@ -47,3 +47,8 @@ The mono-collapse effects' `src/lib.rs` and tests, `crates/effect-contract/src/l
   signal to block 60, then silence to block 400. Output digest identical on main and branch
   (`dee65cc39e65c522`), skip-vs-forbidden bit-equal every block on both; silent skips 400 on main,
   672 on the branch.
+- Attempt 2 (verifier finding): each gate now renders, after the disengage, one dual block with a
+  `+0.0` left plane and a live right one and asserts `lanes_at_rest() & all == 0`. Mutant "drop
+  `collapsed = false` in desymmetrize": red in all five crates (builtins by its dual-after-mono
+  debug assertion). The compressor gate runs dual mono: an Average-linked detector moved the left
+  channel too and hid the stuck flag.
