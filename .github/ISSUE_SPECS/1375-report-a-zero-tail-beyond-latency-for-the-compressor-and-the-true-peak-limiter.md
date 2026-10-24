@@ -173,8 +173,9 @@ rest. Today both declare `Infinite`, which makes every plan that holds one repor
 - **Limiter ring drain.** From the first silent sample `M`: history rests after `M + 11`, the box
   target `1 - s` is `+0.0` from `S0 = M + N + Wb + 10`, every ring and `prefix` rest by
   `M + 2N + 11`, `d` after `S0 + K - 1`. With latency `N + 6`, `R = N + K + 5`. At the worst start
-  (peak `1e29`, `d = 1`, lookahead maximum) the real kernel rested in the last block before the
-  bound, so the drain term is tight.
+  (peak `1e29`, lookahead maximum) the real kernel, checked sample by sample near the end, rests
+  221-482 samples before `latency + R` (about `Wb / 2`: `d` has already released a little during
+  the box ramp), so gate 2 does not see a one-sample error in the drain term; gate 4 recomputes it.
 - **No rendered bit moved.** The limiter reaches exact rest through its existing `FLUSH_EPS` flush;
   no snap was added. A plateau snap like #1784's would shorten its rest (about 92 s at 48 kHz) and
   is class B.
@@ -182,8 +183,12 @@ rest. Today both declare `Infinite`, which makes every plan that holds one repor
   `1e-5` dB is the fast tier's proven gain error (`math` F1, `GAIN_MAX_DB`), which D4 omitted, and
   four roundings (mul, sub, mul, add); `sigma = 4 * 2^-126 (1 + u)^3` = -74,655 mB. Limiter
   `G = 1` mB (`1 + u`), `sigma = 2^-126` = -75,859 mB.
-- **Stated values, 48 kHz.** Compressor `R = 4,569,940` (brute force 4,569,940). Limiter
-  `R = 4,421,447 = 485 + 4,420,962` (brute force 4,420,962). `tail_every_peak = Finite(R)`.
+- **Stated `R`, 44.1 / 48 / 88.2 / 96 kHz** (brute force of the word in brackets). Compressor
+  4,198,600 [4,198,600], 4,569,940 [4,569,940], 8,398,676 [8,398,675], 9,137,133 [9,137,133].
+  Limiter `N + 5 +` 4,061,801 [4,061,801], 4,420,962 [4,420,962], 8,123,339 [8,123,339],
+  8,842,140 [8,842,139]: 4,062,247, 4,421,447, 8,124,226, 8,843,105. `tail_every_peak =
+  Finite(R)`. Gate 2 in release, every rate and case: compressor rests at most 9,132,032 against
+  9,137,133 (96 kHz), limiter at the bound's last block.
 - **Tests.** `crates/compressor/tests/tail_contract.rs` and
   `crates/true-peak-limiter/tests/tail_contract.rs` (gates 1-4; debug runs 48 kHz and the slowest
   release only at the worst start; release runs every rate and case), helper tests in
