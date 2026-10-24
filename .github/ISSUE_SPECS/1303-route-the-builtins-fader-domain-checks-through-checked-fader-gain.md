@@ -148,6 +148,22 @@ Run every command from the repository root.
 *Test value.* No new or rewritten test (D4). Gate 2 shows once, as PR evidence, that the existing
 preparation tests now guard the shared domain.
 
+## Decision record (2026-10-24, scope note at `main` `4ebb72ae0`)
+
+The anchors above are stale; these supersede them for paths and decisions.
+
+- **Copy 1 moved.** The per-lane check now lives in `prepare_input_track`
+  (`crates/builtins/src/lib.rs`, called by `prepare_sections`, `input_section_bound_charged` and
+  the live-bound table). Its one `if` (trim and fader together) becomes
+  `checked_trim_gain(lane.trim_db)?; checked_fader_gain(lane.fader_db)?;`, then the cutoff and
+  order checks unchanged: same `GainDomain`, same first-failure order. `prepare_sections` builds
+  its faders with `fader_lanes` (D1).
+- **Trim is included** (supersedes the trim non-goal): `checked_trim_gain` is `pub` since #1556,
+  so `gain_path` calls `builtins::checked_trim_gain(..).is_err()` and
+  `builtins::checked_fader_gain(..).is_err()` (D2).
+- **D3** covers both helpers' docs: each lists its callers; the "two other checks" sentence is gone.
+- host-core's fader classifier is now `crates/host-core/src/prepare.rs` (`checked_fader_gain`).
+
 ## Evidence
 
 - `audit capi`'s `pcm_digest` before and after.

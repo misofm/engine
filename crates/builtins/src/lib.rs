@@ -4077,13 +4077,8 @@ fn prepare_input_track(
     }
     parameters.matrix.checked()?;
     for lane in [parameters.left, parameters.right] {
-        if !lane.trim_db.is_finite()
-            || !(-144.0..=24.0).contains(&lane.trim_db)
-            || !lane.fader_db.is_finite()
-            || !(-144.0..=24.0).contains(&lane.fader_db)
-        {
-            return Err(BuiltinParameterError::GainDomain);
-        }
+        checked_trim_gain(lane.trim_db)?;
+        checked_fader_gain(lane.fader_db)?;
         validate_builtin_filter_cutoff(lane.hpf_hz, sample_rate, 0.0, 10.0)?;
         validate_builtin_filter_cutoff(lane.lpf_hz, sample_rate, 0.0, 10.0)?;
         if lane.hpf_hz > 0.0 && lane.lpf_hz > 0.0 && lane.hpf_hz >= lane.lpf_hz {
@@ -4223,13 +4218,7 @@ fn prepare_sections(
 ) -> Result<(InputBuiltins, FaderMuteBuiltins, MatrixBuiltins), BuiltinParameterError> {
     let track = prepare_input_track(sample_rate, &parameters)?;
     let matrix = parameters.matrix.checked()?;
-    let fader = |params: ChannelParameters| -> Result<FaderLane, BuiltinParameterError> {
-        Ok(FaderLane {
-            gain: db_gain(params.fader_db)?,
-            muted: params.muted,
-        })
-    };
-    let faders = [(fader(parameters.left)?, fader(parameters.right)?)];
+    let faders = [fader_lanes(parameters)?];
     Ok((
         InputBuiltins {
             stage: InputStage::<f32>::new(&[track]),
@@ -5661,11 +5650,12 @@ impl FaderMuteRampBuiltins {
 /// The domain is `fader_db`'s own, so a live move is admitted on exactly the terms a declared one
 /// is; sharing this with preparation is what keeps the two from drifting.
 ///
-/// Issue #1255 D3: preparation's `fader_lanes`, the render-side setter
-/// ([`BuiltinFaderBank::set_fader_db`]) and host-core's live-delta classifier share this one
-/// function, so those three cannot disagree on the domain. Two other checks still spell the
-/// `[-144, 24]` dB range themselves (`prepare_sections` here and builtins-compiler's `gain_path`);
-/// they agree with it today.
+/// Issue #1255 D3 and #1303: every check of the `fader_db` domain calls this one function, so
+/// none can disagree on it. Its callers are preparation's per-lane check (`prepare_input_track`)
+/// and fader build (`fader_lanes`, which `prepare_sections` uses), the render-side setters
+/// ([`BuiltinFaderBank::set_fader_db`] and `FaderMuteRampBuiltins::set_fader_db`), host-core's
+/// live-delta classifier and builtins-compiler's automation and VCA paths and its diagnostic path
+/// (`gain_path`).
 ///
 /// # Errors
 ///
@@ -5680,8 +5670,7 @@ pub fn checked_fader_gain(db: f32) -> Result<f32, BuiltinParameterError> {
 /// Validates one live `trim_db` against the declared domain and converts it to a coefficient.
 ///
 /// The domain is `trim_db`'s own in `BUILTIN_PARAMETER_DESCRIPTORS` -- the same `[-144, 24]`
-/// `fader_db` carries, and the same range `prepare_sections` checks a declared value against -- so
-/// a live move is admitted on exactly the terms a declared one is. Sharing this with preparation
+/// `fader_db` carries -- so a live move is admitted on exactly the terms a declared one is. Sharing this with preparation
 /// is what keeps the two from drifting, which is the argument [`checked_fader_gain`] makes for the
 /// fader.
 ///
@@ -5689,9 +5678,11 @@ pub fn checked_fader_gain(db: f32) -> Result<f32, BuiltinParameterError> {
 /// `polarity_invert` is its own parameter with its own command kind and a trim move must not
 /// silently clear it.
 ///
-/// Issue #1556 D3: preparation, the render-side setter and host-core's live-delta classifier share
-/// this one function, as they share [`checked_fader_gain`], so a live trim record is refused on
-/// exactly the terms a declared value is.
+/// Issue #1556 D3 and #1303: every check of the `trim_db` domain calls this one function, as every
+/// fader check calls [`checked_fader_gain`], so a live trim record is refused on exactly the terms
+/// a declared value is. Its callers are preparation's per-lane check (`prepare_input_track`), the
+/// render-side setters (`InputBuiltins::set_trim_db` and `BuiltinInputBank::set_trim_db`),
+/// host-core's live-delta classifier and builtins-compiler's diagnostic path (`gain_path`).
 ///
 /// # Errors
 ///
