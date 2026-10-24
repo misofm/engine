@@ -734,16 +734,19 @@ impl MeterDelivery {
         self.folded_windows
     }
 
+    #[cfg(feature = "test-support")]
     #[doc(hidden)]
     pub fn test_only_set_loss_count(&mut self, losses: u64) {
         self.loss_count = losses;
     }
 
+    #[cfg(feature = "test-support")]
     #[doc(hidden)]
     pub fn test_only_pending_mut(&mut self) -> &mut [Option<MeterSnapshot>] {
         &mut self.tables.pending
     }
 
+    #[cfg(feature = "test-support")]
     #[doc(hidden)]
     pub fn test_only_output_mut(&mut self) -> &mut OutputPeakReader {
         &mut self.output

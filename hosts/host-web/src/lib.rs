@@ -1942,6 +1942,12 @@ impl ReadyOwnership {
                 // snapshots follow their meters, and a swap that carried no meter restarts the
                 // delivery at this block, on a new grid (#1581 D5). The retired tables come back
                 // in the adopted shape's slot and go to the retired one, by pointer exchange.
+                // Every pending shape is built with its tables (`build_plan_shape`), and only
+                // this exchange takes them.
+                debug_assert!(
+                    self.shape.meter_tables.is_some(),
+                    "an adopted plan shape has no meter tables"
+                );
                 if let Some(tables) = self.shape.meter_tables.as_mut() {
                     self.meters.adopt(
                         tables,

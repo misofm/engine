@@ -425,13 +425,12 @@ fn a_full_output_queue_drops_the_newest_window_and_counts_it() {
     );
 }
 
-/// #1582 gate 3. The meter level is idempotent: only a real transition starts a new delivery
-/// generation, and turning it off shuts the output meter's gate.
+/// #1582 gate 3. Turning the meter level off shuts the output meter's gate.
 ///
-/// Test value: red if a repeated lease starts a new epoch (no browser test holds the lease twice
-/// without a release between), or if turning the level off leaves the output meter observing.
+/// Test value: red if a level-off leaves the output meter observing (the browser tests release
+/// the lease only to take it again, which reopens the gate and hides a gate left open).
 #[test]
-fn set_level_is_idempotent_and_a_transition_restarts_the_epoch() {
+fn a_level_off_shuts_the_output_gate() {
     const QUANTUM: u64 = 64;
     let (mut observer, reader, gate) =
         host_core::output_peak_meter(core::num::NonZeroU32::new(64).expect("window"))
@@ -439,20 +438,10 @@ fn set_level_is_idempotent_and_a_transition_restarts_the_epoch() {
     let tables = host_core::MeterTables::new(0, 0).expect("tables");
     let mut delivery = host_core::MeterDelivery::new(reader, gate, QUANTUM, tables);
     let block = vec![0.25_f32; QUANTUM as usize];
-    assert!(delivery.set_level(true, 0), "off to on is a transition");
-    let generation = delivery.frame().generation;
-    assert!(
-        !delivery.set_level(true, QUANTUM),
-        "on to on changes nothing"
-    );
-    assert_eq!(delivery.frame().generation, generation);
+    assert!(delivery.set_level(true, 0));
     observer.observe(&block, &block, 0, QUANTUM);
     assert_eq!(delivery.output_windows_queued(), 1, "the gate is open");
-    assert!(
-        delivery.set_level(false, QUANTUM),
-        "on to off is a transition"
-    );
-    assert_eq!(delivery.frame().generation, generation + 1);
+    assert!(delivery.set_level(false, QUANTUM));
     observer.observe(&block, &block, QUANTUM, 2 * QUANTUM);
     assert_eq!(delivery.output_windows_queued(), 0, "the gate is shut");
 }

@@ -3380,6 +3380,8 @@ fn meter_delayed_poll_delivers_each_queued_window_with_its_own_peak() {
     assert_eq!(*host.meter_header(), partial_header);
 }
 
+// It plants a window through host-core's `test-support` writers.
+#[cfg(feature = "test-support")]
 #[test]
 fn meter_invalid_master_rejects_transactionally_then_recovers_with_loss() {
     let mut host = live_control_host(128, 1);
@@ -3417,6 +3419,8 @@ fn meter_invalid_master_rejects_transactionally_then_recovers_with_loss() {
     assert_ne!(host.meter_header().reserved[1] & METER_VALID_LOSS, 0);
 }
 
+// It plants a window through host-core's `test-support` writers.
+#[cfg(feature = "test-support")]
 #[test]
 fn meter_producer_reset_starts_a_fresh_delivery_epoch() {
     let mut host = live_control_host(128, 1);
