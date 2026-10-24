@@ -2133,31 +2133,20 @@ impl ReadyOwnership {
         self.output_dropped_seen = dropped;
     }
 
-    /// Pop the output windows a reset discarded, unread. Bounded by the count read at entry, which
-    /// no pop of a single-consumer queue can exceed.
+    // REALTIME_POLICY_BEGIN: #1581 D5, the poll's discard of the windows a reset left queued.
+    /// Pop the output windows a reset discarded, unread: at most the count read at entry, which no
+    /// pop of a single-consumer queue can exceed. Inlined, so the poll export's call graph keeps
+    /// the queue's checked slot index under its own admitted owner.
     #[inline(always)]
     fn skip_discarded_output_windows(&mut self) {
-        let discard = self
-            .output_discard
-            .min(self.output_reader.windows_mut().available_at_entry());
-        self.output_discard = 0;
+        let windows = self.output_reader.windows_mut();
+        let discard = windows.available_at_entry().min(self.output_discard);
         for _ in 0..discard {
-            let _ = self.output_reader.windows_mut().try_pop();
+            let _ = windows.try_pop();
         }
+        self.output_discard = 0;
     }
-
-    /// The oldest closed output window, not popped. Call [`Self::skip_discarded_output_windows`]
-    /// first.
-    #[inline(always)]
-    fn front_output_window(&mut self) -> Option<host_core::OutputPeakWindow> {
-        self.output_reader.windows_mut().peek(0).copied()
-    }
-
-    /// Pop the oldest closed output window. Call [`Self::skip_discarded_output_windows`] first.
-    #[inline(always)]
-    fn pop_output_window(&mut self) -> Option<host_core::OutputPeakWindow> {
-        self.output_reader.windows_mut().try_pop().ok()
-    }
+    // REALTIME_POLICY_END
 
     /// The dense effect index of the console slot or insert `effect_id` of one strip on this plan
     /// (#1677): the one place a stable effect ID becomes a position, so an observation record and
@@ -4081,13 +4070,13 @@ impl AudioWorkletEngineHost {
         if meter_count == 0 {
             // A plan with no strip (#1682) has no strip window to pair the master with, so the
             // master's own windows are the stream: the frame is the master's three words.
-            let Some(front) = ready.front_output_window() else {
+            let Some(front) = ready.output_reader.windows_mut().peek(0).copied() else {
                 return 0;
             };
             if front.start_sample < self.meter_activation_sample
                 || front.end_sample <= front.start_sample
             {
-                let _ = ready.pop_output_window();
+                let _ = ready.output_reader.windows_mut().try_pop();
                 ready.meter_loss_count = ready.meter_loss_count.saturating_add(1);
                 return 0;
             }
@@ -4102,6 +4091,8 @@ impl AudioWorkletEngineHost {
             folded = true;
             windows = 1;
         }
+        // Set by a producer reset, which ends the passes and publishes nothing.
+        let mut producer_reset = false;
         // Issue #1448 D2: each meter's queue pops at most its own count read here, at entry, capped
         // at the configured depth, whatever a producer on another thread publishes meanwhile. A
         // pass that does not end the loop has cleared at least one pending slot, and the next pass
@@ -4225,15 +4216,10 @@ impl AudioWorkletEngineHost {
                 // because a zero return never publishes an epoch transition.
                 ready.meter_generation = ready.meter_generation.saturating_add(1);
                 ready.reset_meter_delivery(false);
-                ready.skip_discarded_output_windows();
                 ready.meter_loss_count = 1;
                 self.meter_activation_sample = reset_activation_sample;
-                // #1581 D5: the output meter restarts at the same boundary; a moved gate discards
-                // the window it has open.
-                if ready.output_gate_from != u64::MAX {
-                    ready.set_output_gate(reset_activation_sample);
-                }
-                return 0;
+                producer_reset = true;
+                break;
             }
             if ready.shape.meter_header.sequence > 0
                 && ready.shape.meter_header.reserved[0] == ready.meter_generation
@@ -4249,6 +4235,16 @@ impl AudioWorkletEngineHost {
             // remain queued for the next poll, preserving one exact span per public frame.
             break;
         }
+        if producer_reset {
+            // #1581 D5, outside the passes: the reset's output windows are popped now, so the
+            // next render finds the room the cleared ring it replaces had, and the output meter
+            // restarts at the strips' boundary (a moved gate discards the window it has open).
+            ready.skip_discarded_output_windows();
+            if ready.output_gate_from != u64::MAX {
+                ready.set_output_gate(self.meter_activation_sample);
+            }
+            return 0;
+        }
         if !folded {
             return 0;
         }
@@ -4256,19 +4252,19 @@ impl AudioWorkletEngineHost {
         // last submix rather than the last track.
         let strips = ready.shape.tracks.len() + ready.shape.submixes.len();
         let master = strips * 2;
-        let mut stale_master_budget = ready.output_windows_queued();
-        while stale_master_budget > 0 {
-            let stale = ready
-                .front_output_window()
+        let master_windows = ready.output_reader.windows_mut();
+        let stale_master_budget = master_windows.available_at_entry();
+        for _ in 0..stale_master_budget {
+            let stale = master_windows
+                .peek(0)
                 .is_some_and(|measurement| measurement.end_sample <= folded_start);
             if !stale {
                 break;
             }
-            let _ = ready.pop_output_window();
+            let _ = master_windows.try_pop();
             ready.meter_loss_count = ready.meter_loss_count.saturating_add(1);
-            stale_master_budget -= 1;
         }
-        let master_measurement = ready.front_output_window();
+        let master_measurement = master_windows.peek(0).copied();
         let master_valid = master_measurement.is_some_and(|measurement| {
             measurement.start_sample == folded_start && measurement.end_sample == folded_end
         });
@@ -4292,7 +4288,9 @@ impl AudioWorkletEngineHost {
             return 0;
         }
         let master_peak = ready
-            .pop_output_window()
+            .output_reader
+            .windows_mut()
+            .try_pop()
             .map_or([0.0, 0.0], |measurement| measurement.peak);
         // All candidate validation is complete. Only this commit section mutates the public frame;
         // every earlier zero-return path leaves both public buffers byte-for-byte unchanged.

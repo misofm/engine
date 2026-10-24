@@ -3385,7 +3385,10 @@ fn meter_invalid_master_rejects_transactionally_then_recovers_with_loss() {
         host.ready
             .as_mut()
             .expect("ready")
-            .pop_output_window()
+            .output_reader
+            .windows_mut()
+            .try_pop()
+            .ok()
             .is_some()
     );
     assert_eq!(host.poll_meters(), 0);
