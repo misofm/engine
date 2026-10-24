@@ -6223,7 +6223,13 @@ mod tests {
                         .total_bytes;
                 let quantum = u64::from(session.quantum().0);
                 let scratch_bytes = bank_count * lanes * quantum * 2 * 4;
-                let runtime_buffer_bytes = bank_count * lanes * quantum * 2 * 4;
+                // Two staging planes per bank's chain, and a padded bank's `+0.0` plane (#887).
+                let padded_banks = cohorts
+                    .bound_groups_in(location)
+                    .filter(|bank| !bank.is_full())
+                    .count() as u64;
+                let runtime_buffer_bytes =
+                    bank_count * lanes * quantum * 2 * 4 + padded_banks * quantum * 4;
                 let metadata_bytes = bank_count
                     * (u64::try_from(core::mem::size_of::<graph::GraphPreparedEffectBank>())
                         .expect("bank metadata size")
@@ -7336,14 +7342,17 @@ mod tests {
         // `PrepareEffectRequest` per lane -- and neither type has a rack in it. These pin the
         // observable consequence: every bank retains the same scratch under either placement
         // (the console placement's padded one included, which charges every lane), so a
-        // snapshot taken under one restores under the other.
+        // snapshot taken under one restores under the other. The runtime buffers agree per bank
+        // too once the console's padded bank's `+0.0` plane (#887) is set aside: the chain's
+        // staging is the same at either placement.
+        let zero_planes = u64::from(10 % lanes != 0) * u64::from(simd1.envelope().quantum.0) * 4;
         for (simd1_bytes, dynamic_bytes) in [
             (
                 simd1.report().estimate.effect_bank_scratch_bytes,
                 dynamic.report().estimate.effect_bank_scratch_bytes,
             ),
             (
-                simd1.report().estimate.effect_bank_runtime_buffer_bytes,
+                simd1.report().estimate.effect_bank_runtime_buffer_bytes - zero_planes,
                 dynamic.report().estimate.effect_bank_runtime_buffer_bytes,
             ),
         ] {
@@ -12317,10 +12326,16 @@ mod tests {
                     .expect("bank width")
                     .lanes(),
             );
-            // Two planes, not four: a fixed-stage bank has no sidechain surface (#86 F4).
+            // Two scratch planes (a fixed-stage bank has no sidechain surface, #86 F4), the
+            // chain's two staging planes, and a padded bank's `+0.0` plane (#887).
+            let quantum = u64::from(artifact.envelope().quantum.0);
+            let padded = artifact
+                .prepared_builtin_banks()
+                .filter(|bank| bank.members.len() < bank.width.lanes() as usize)
+                .count() as u64;
             assert_eq!(
                 resource.builtin_bank_scratch_bytes,
-                expected_banks as u64 * u64::from(artifact.envelope().quantum.0) * width * 2 * 4
+                expected_banks as u64 * quantum * width * 4 * 4 + padded * quantum * 4
             );
         }
         let envelope = artifact.envelope();
