@@ -1713,8 +1713,9 @@ fn a_configure_that_supersedes_a_fallback_edit_reports_the_fallback() {
 }
 
 /// #1594 R6, #1595 R7. Turns red if a plan with spectrum captures does not charge the session's
-/// spectrum service, analysis and one-shot result: the running plan's control-retained bytes grow
-/// by `SpectrumService::RETAINED_BYTES` and one `SpectrumAnalysisResult` plus the plan
+/// spectrum service, analysis and one-shot slot: the running plan's control-retained bytes grow
+/// by `SpectrumService::RETAINED_BYTES`, one `SpectrumAnalysisResult` and one `SpectrumSnapshot`
+/// plus the plan
 /// inventory's own spectrum row when a configure adds a tap, and fall back when a configure
 /// removes every tap, to the boot plan's bytes plus the pairing rows of the meters the plan
 /// carries (#1674 R1). The row is 51 bytes here (one
@@ -1732,7 +1733,8 @@ fn a_plan_with_spectrum_charges_the_service_once() {
     rig.until_promoted();
     let grown = bytes(&rig) - before;
     let monitor = SpectrumService::RETAINED_BYTES
-        + core::mem::size_of::<host_core::SpectrumAnalysisResult>() as u64;
+        + core::mem::size_of::<host_core::SpectrumAnalysisResult>() as u64
+        + core::mem::size_of::<SpectrumSnapshot>() as u64;
     assert!(
         (monitor..monitor + 1_024).contains(&grown),
         "the service is charged once: {grown}"
@@ -1995,10 +1997,12 @@ fn a_capture_read_returns_the_reference_analysis() {
 }
 
 /// #1595 gate 3 (one-shot) and R6. Turns red if a read pops a window it then fails to deliver,
-/// or a configure accepts a tap no read can carry: on a session whose frame limit is 12,288
-/// bytes, a ready stereo read (12,608 bytes) answers `LIMIT_EXCEEDED` `spectrum.frame`, and a
-/// `Left` read (8,496 bytes) then returns that same window (token 1, frame 0). At 8,192 bytes a
-/// configure of the same tap is refused `LIMIT_EXCEEDED` `spectrum.frame` and sets nothing.
+/// or a configure measures a tap's one-plane read wrongly: on a session whose frame limit is
+/// 12,288 bytes, a ready stereo read (12,608 bytes) and a `Left` read with its window (16,696
+/// bytes) each answer `LIMIT_EXCEEDED` `spectrum.frame`, and a `Left` read (8,496 bytes) then
+/// returns that same window (token 1, frame 0). A configure of the tap is accepted there (its
+/// one-plane read fits) and refused `LIMIT_EXCEEDED` `spectrum.frame` at 8,192 bytes, setting
+/// nothing.
 #[test]
 fn a_read_the_frame_cannot_carry_consumes_nothing() {
     let mut rig = Rig::limited(
@@ -2018,11 +2022,19 @@ fn a_read_the_frame_cannot_carry_consumes_nothing() {
         Err((StatusCode::LimitExceeded, "spectrum.frame".to_owned()))
     );
     assert_eq!(
+        rig.capture(&read(ParameterChannel::Left, true)),
+        Err((StatusCode::LimitExceeded, "spectrum.frame".to_owned()))
+    );
+    assert_eq!(
         status_of(
             &rig.capture(&read(ParameterChannel::Left, false))
                 .expect("read")
         ),
         (SpectrumCaptureStatus::Ready, Some((1, 0)))
+    );
+    assert!(
+        rig.configure(&single_request()).is_ok(),
+        "a tap whose one-plane read fits is accepted"
     );
 
     let mut small = Rig::limited(
@@ -2151,8 +2163,9 @@ fn each_capture_refusal_answers_its_status_and_changes_nothing() {
     );
 }
 
-/// #1595 gate 7. Turns red if a replayed read pops again: the exact replay of a ready read
-/// returns the same bytes, and the next new read is pending (the replay consumed nothing more).
+/// #1595 gate 7. Turns red if a replayed read pops again: after a second window is complete, the
+/// exact replay of the first ready read returns the same bytes, and the next new read returns the
+/// second window (token 2, frame 2,048): the replay consumed nothing.
 #[test]
 fn a_replayed_read_returns_its_bytes_and_pops_nothing() {
     let mut rig = Rig::new(Some(configuration()));
@@ -2169,6 +2182,9 @@ fn a_replayed_read_returns_its_bytes_and_pops_nothing() {
         SpectrumCaptureStatus::Ready
     );
     rig.capture(&ARM).expect("arm again");
+    for _ in 0..SPECTRUM_WINDOW_FRAMES / QUANTUM {
+        rig.block();
+    }
     assert_eq!(
         rig.capture_frame(id, &request),
         first,
@@ -2176,6 +2192,6 @@ fn a_replayed_read_returns_its_bytes_and_pops_nothing() {
     );
     assert_eq!(
         status_of(&rig.capture(&request).expect("read")),
-        (SpectrumCaptureStatus::Pending, None)
+        (SpectrumCaptureStatus::Ready, Some((2, 2_048)))
     );
 }

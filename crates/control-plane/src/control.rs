@@ -265,10 +265,8 @@ const fn spectrum_budget(preparation: &host_core::SpectrumPreparation) -> u64 {
 enum CaptureOutcome {
     Done,
     Pending,
-    /// The popped window, analyzed into the monitor's result; boxed off the stack on the control
-    /// thread, as the read's reply allocates anyway.
+    /// The popped window, in the monitor's one-shot slot with its analysis.
     Ready {
-        snapshot: Box<host_core::SpectrumSnapshot>,
         include_window: bool,
     },
 }
@@ -2912,12 +2910,10 @@ where
         let (status, window) = match &outcome {
             CaptureOutcome::Done => (protocol::SpectrumCaptureStatus::Done, None),
             CaptureOutcome::Pending => (protocol::SpectrumCaptureStatus::Pending, None),
-            CaptureOutcome::Ready {
-                snapshot,
-                include_window,
-            } => {
-                let (Some(result), Some(target)) = (
+            CaptureOutcome::Ready { include_window } => {
+                let (Some(result), Some(snapshot), Some(target)) = (
                     monitor.result(),
+                    monitor.snapshot(),
                     service.and_then(host_core::SpectrumService::target),
                 ) else {
                     drop(prepared);
@@ -2969,7 +2965,7 @@ where
         let crate::spectrum::CaptureParts {
             service,
             analysis,
-            result,
+            one_shot,
         } = parts;
         match request {
             protocol::SpectrumCaptureRequest::Arm => service
@@ -3020,11 +3016,14 @@ where
                 else {
                     return Ok(CaptureOutcome::Pending);
                 };
+                // The popped window goes into the slot the monitor made with its service: a read
+                // allocates only its reply. An analyzer refusal here (`WindowInvalid`) has
+                // consumed the window and ended the arm: the one exception to D5.
+                one_shot.snapshot = snapshot;
                 analysis
-                    .analyze_into(&snapshot, result)
+                    .analyze_into(&one_shot.snapshot, &mut one_shot.result)
                     .map_err(spectrum_service_refusal)?;
                 Ok(CaptureOutcome::Ready {
-                    snapshot: Box::new(snapshot),
                     include_window: *include_window,
                 })
             }
