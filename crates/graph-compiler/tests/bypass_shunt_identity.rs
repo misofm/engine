@@ -2,8 +2,8 @@
 //! instance prepared with `bypass = true` and rendered per node, which is how every session bypass
 //! rendered before #1087.
 //!
-//! Preparation now lowers a session's `bypass` (on every effect but the delay and, since #1100,
-//! the multiband) to a prepared `bypass = false` plus the lane's
+//! Preparation now lowers a session's `bypass` (on every effect but, since #1100, the multiband)
+//! to a prepared `bypass = false` plus the lane's
 //! initial shunt state (`EffectControlLane::without_channel`), so a bypassed track stays in its
 //! effect bank. The bank runs every lane's wet path and the rack's `LiveControlEffectBankStage`
 //! restores the latency-matched dry signal into exactly the bypassed lanes; a lane that ends up per
@@ -541,7 +541,9 @@ fn a_shunt_bypassed_bank_lane_is_bit_identical_to_prepared_bypass() {
 /// that order with the contract's `BypassShunt` and requires today's prepared-bypass bits, at
 /// [`Level::Extreme`]: there the wet path's own D7 check fires, and the shunt's copy must still be
 /// today's dry block. (The session-level twin, through the real graph, is
-/// `bypass_cohorts::a_session_bypass_renders_todays_bits`.)
+/// `bypass_cohorts::a_session_bypass_renders_todays_bits`.) The delay lowers its bypass too
+/// (#1339) but is left out: on a block its ring trips, its shunt passes the dry block where its
+/// prepared bypass zeroed it (#1339 D4), which `bypass_cohorts` holds.
 ///
 /// Red mutation: `BypassShunt::capture` stops feeding its latency line -> the limiter's and the
 /// soft clip's dry output is undelayed.
@@ -612,9 +614,9 @@ fn a_shunt_bypassed_per_node_instance_is_bit_identical_to_prepared_bypass() {
 /// of default members at the host's width, and every launch effect is in the registry this file
 /// walks.
 ///
-/// Red mutations: add a banking effect to the list (its session bypass would stay prepared and
-/// split its cohort again), or remove the delay (its bypass would take a shunt it gains no bank
-/// from, and move the bits `the_delay_keeps_its_prepared_bypass` pins).
+/// Red mutations: add a banking effect to the list, or remove the delay. (The list no longer
+/// decides a bypass: since #1339 the delay lowers its bypass to a per-node shunt, which
+/// `bypass_cohorts::a_bypassed_delay_passes_its_dry_block_when_its_ring_trips` holds.)
 #[test]
 fn the_never_banked_list_is_exactly_the_launch_effects_that_decline_a_bank() {
     let registry = launch_native_effect_registry().expect("launch registry");

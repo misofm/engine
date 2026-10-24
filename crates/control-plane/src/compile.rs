@@ -1408,6 +1408,7 @@ where
         // No endpoint has configured telemetry yet, so nothing can read a peak.
         render_peak_observed: AtomicBool::new(false),
         live_block_errors: AtomicU64::new(0),
+        source_underrun_blocks: AtomicU64::new(0),
         watermark: publisher.watermark_reader(),
     });
     let sample_source: Arc<dyn host_core::PlanSampleSource> = Arc::clone(&shared) as Arc<_>;

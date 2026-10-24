@@ -1,5 +1,5 @@
 /**
- * Issue #1383 (slice 1383a): the SDK's session-transaction builder against the engine.
+ * Issue #1383 (slices 1383a and 1383b): the SDK's session-transaction builder against the engine.
  *
  * The oracle (`hosts/host-web/examples/sdk_transaction_oracle.rs`) decodes each SDK frame with the
  * protocol codec, re-encodes the decoded edits, and applies them to the base session with the
@@ -60,7 +60,7 @@ const mono = { channels: 1, bitDepth: 16, frames: 4800, content: CONTENT_A };
 const stereo = { channels: 2, bitDepth: 24, frames: 9600n, content: CONTENT_B };
 
 describe("session transactions encode as the engine's codec does", () => {
-  test("every source and track edit, repeated fields at 0, 1 and 3, is the codec's bytes", () => {
+  test("every source, track, rack and effect edit, repeated fields at 0, 1 and 3, is the codec's bytes", () => {
     // Red if any field is out of order, at the wrong width, without its mandatory flag, or if a
     // repeated field (inserts, params, console entries) is miscounted: the codec then decodes other
     // edits, which re-encode to other bytes, or refuses the frame.
@@ -104,6 +104,38 @@ describe("session transactions encode as the engine's codec does", () => {
       .removeTrack("t")
       .removeSource("a");
     assertCodecBytes(oracle(bare, [first.build(), second.build()]));
+
+    // The rack and effect edits, on a track and on a submix strip; racks and effect orders at 0, 1
+    // and 3 inserts.
+    const racks = session({ id: "tx.racks", sampleRateHz: 48_000 })
+      .source("a", stereo)
+      .track("t", {
+        source: "a",
+        inserts: [
+          effect("miso.soft-clip", { mix: 0.5 }, { slotId: "clip" }),
+          effect("miso.compressor", { ratio: 4 }, { slotId: "comp" }),
+        ],
+      })
+      .track("key", { source: "a" })
+      .submix("bus");
+    const rackEdits = transaction(racks)
+      .setTrackRack("bus", [])
+      .setTrackEffectOrder("bus", [])
+      .setTrackRack("bus", [effect("miso.true-peak-limiter", { ceiling: -1 }, { slotId: "limit" })])
+      .setTrackEffectOrder("bus", ["limit"])
+      .putTrackEffect("t", 1, effect("miso.gate-expander", { threshold: -40 }, { slotId: "gate", linkMode: "average" }))
+      .setTrackEffectOrder("t", ["comp", "gate", "clip"])
+      .setEffectIdentity("t", "clip", "miso.transient-shaper")
+      .setEffectQuality("t", "comp", "normal")
+      .setEffectSidechain("t", "comp", { source: { kind: "track", trackId: "key", tap: "post_fader" }, portId: "sidechain-in" })
+      .setEffectSidechain("t", "gate", null)
+      .removeTrackEffect("t", "gate")
+      .setTrackRack("key", [
+        effect("miso.parametric-eq", { "band-1-gain": 2 }, { slotId: "eq" }),
+        effect("miso.delay", {}, { slotId: "delay" }),
+        effect("miso.soft-clip", { drive: { left: 3, right: 1 } }, { slotId: "clip" }),
+      ]);
+    assertCodecBytes(oracle(racks, [rackEdits.build()]));
 
     // Console entries at 1 and 3: one per declared slot, so each count is its own base.
     const one = session({ id: "tx.console.one", sampleRateHz: 48_000 })
@@ -156,6 +188,57 @@ describe("session transactions encode as the engine's codec does", () => {
     const reassigned = { ...vocal, source: { id: "drums", left: 1, right: 0 } };
     assert.equal(removed.ok, declare(2).source("vox", mono).track("vocal", reassigned).toJson());
   });
+
+  test("rack and effect edits land on the strip, insert and field they name", () => {
+    // Red if a byte-valid encoder writes a put at the wrong position, reorders the wrong strip,
+    // retargets or reroutes the wrong insert, or crosses a sidechain's tap: the store's snapshot
+    // then differs from the builder's document for the same strips.
+    const declare = (revision, strips) => strips(session({ id: "tx.effects", sampleRateHz: 48_000, revision })
+      .source("a", stereo)
+      .track("key", { source: "a" }));
+    const base = declare(0, (builder) => builder
+      .track("t", {
+        source: "a",
+        inserts: [
+          effect("miso.soft-clip", { mix: 0.25 }, { slotId: "clip" }),
+          effect("miso.compressor", { ratio: 3 }, { slotId: "comp" }),
+          effect("miso.parametric-eq", { "band-1-gain": -4 }, { slotId: "eq" }),
+        ],
+      })
+      .submix("bus"));
+    const edits = transaction(base)
+      .putTrackEffect("t", 1, effect("miso.gate-expander", { threshold: -45 }, { slotId: "gate" }))
+      .setTrackEffectOrder("t", ["eq", "comp", "gate", "clip"])
+      .setEffectIdentity("t", "clip", "miso.transient-shaper")
+      .setEffectSidechain("t", "comp", { source: { kind: "track", trackId: "key", tap: "pre_fader" }, portId: "sidechain-in" })
+      .removeTrackEffect("t", "eq")
+      .setTrackRack("bus", [effect("miso.true-peak-limiter", { ceiling: -2 }, { slotId: "limit" })]);
+    const [answer] = oracle(base, [edits.build()]);
+    const expected = declare(1, (builder) => builder
+      .track("t", {
+        source: "a",
+        inserts: [
+          effect("miso.compressor", { ratio: 3 }, {
+            slotId: "comp",
+            sidechain: { source: { kind: "track", trackId: "key", tap: "pre_fader" }, portId: "sidechain-in" },
+          }),
+          effect("miso.gate-expander", { threshold: -45 }, { slotId: "gate" }),
+          effect("miso.transient-shaper", { mix: 0.25 }, { slotId: "clip" }),
+        ],
+      })
+      .submix("bus", {
+        inserts: [effect("miso.true-peak-limiter", { ceiling: -2 }, { slotId: "limit" })],
+        // The transparent strip a spec-less `.submix(id)` declares keeps its identity matrix.
+        pan: { matrix: { ll: 1, lr: 0, rl: 0, rr: 1 } },
+      }));
+    assert.equal(answer.ok, expected.toJson());
+  });
+});
+
+const refused = (call, pattern) => assert.throws(call, (error) => {
+  assert.ok(error instanceof MisoUsageError, `expected a MisoUsageError, got ${error}`);
+  assert.match(error.message, pattern);
+  return true;
 });
 
 describe("the builder refuses what the engine would refuse, before any byte exists", () => {
@@ -164,11 +247,6 @@ describe("the builder refuses what the engine would refuse, before any byte exis
     // round trip and gets the refusal without the path of the call that caused it.
     const base = session({ id: "tx.refusals", sampleRateHz: 48_000 }).source("a", mono);
     const tx = transaction(base);
-    const refused = (call, pattern) => assert.throws(call, (error) => {
-      assert.ok(error instanceof MisoUsageError, `expected a MisoUsageError, got ${error}`);
-      assert.match(error.message, pattern);
-      return true;
-    });
     refused(() => tx.build(), /at least one edit/);
     const unknown = { effectId: "miso.not-an-effect", parameters: {}, options: { bypass: false, quality: "normal", linkMode: "dual_mono", channel: "both" } };
     refused(() => tx.upsertTrack("t", { source: "a", inserts: [unknown] }), /unknown native effect/);
@@ -180,6 +258,54 @@ describe("the builder refuses what the engine would refuse, before any byte exis
     refused(() => tx.upsertSource("", mono), /upsertSource\(\)\.id: a Session V1 stable ID/);
     refused(() => tx.upsertTrack("Bad ID", { source: "a" }), /upsertTrack\(\)\.id: a Session V1 stable ID/);
     // The refusals left the builder as it was: still no edit.
+    refused(() => tx.build(), /at least one edit/);
+  });
+
+  test("rack and effect edits the engine would refuse, and setTrackConsole without a console change", () => {
+    // Red if a strip edit the engine refuses (a missing strip or insert, a put past the end or with
+    // no stable ID, an order that is not a permutation, an identity the insert's parameters do not
+    // fit, an unknown port) or a `setTrackConsole` with no earlier console change, or a
+    // `rampSamples` that is not a u32, reaches the wire: the caller pays a round trip and loses the
+    // path of the call.
+    const base = session({ id: "tx.effect.refusals", sampleRateHz: 48_000 })
+      .console({ preInsert: [{ slot: "eq", effectId: "miso.parametric-eq" }] })
+      .source("a", mono)
+      .track("t", {
+        source: "a",
+        console: [{ slot: "eq" }],
+        inserts: [
+          effect("miso.soft-clip", { drive: 6 }, { slotId: "clip" }),
+          effect("miso.parametric-eq", {}, { slotId: "eq" }),
+          effect("miso.compressor", {}, { slotId: "linked", linkMode: "maximum" }),
+          effect("miso.compressor", {}, {
+            slotId: "keyed",
+            sidechain: { source: { kind: "track", trackId: "t", tap: "input" }, portId: "sidechain-in" },
+          }),
+        ],
+      });
+    const tx = transaction(base);
+    refused(() => tx.setTrackRack("missing", []), /setTrackRack\("missing"\)\.id: 'missing' is not a declared track or submix/);
+    refused(() => tx.removeTrackEffect("t", "gone"), /removeTrackEffect\("t"\)\.slotId: 'gone' is not an insert/);
+    refused(() => tx.putTrackEffect("t", 0, effect("miso.delay")), /putTrackEffect\("t"\)\.effect\.slotId/);
+    refused(() => tx.putTrackEffect("t", 4, effect("miso.delay", {}, { slotId: "eq" })), /finalPosition: 4 is past the end of the 3 other/);
+    refused(() => tx.putTrackEffect("t", -1, effect("miso.delay", {}, { slotId: "d" })), /finalPosition must be an integer/);
+    refused(() => tx.setTrackEffectOrder("t", ["eq"]), /setTrackEffectOrder\("t"\)\.slotIds: expected each of the strip's inserts exactly once/);
+    refused(() => tx.setTrackEffectOrder("t", ["eq", "eq"]), /exactly once/);
+    refused(() => tx.setTrackEffectOrder("t", ["Bad", "eq"]), /slotIds\[0\]: a Session V1 stable ID/);
+    // soft-clip's parameter 1 is drive in dB; the transient shaper's is attack amount, linear.
+    refused(() => tx.setEffectIdentity("t", "clip", "miso.transient-shaper"), /setEffectIdentity\("t", "clip"\)\.effectId: .*is in linear, not db/);
+    refused(() => tx.setEffectIdentity("t", "clip", "miso.not-an-effect"), /unknown native effect/);
+    refused(() => tx.setEffectIdentity("t", "linked", "miso.parametric-eq"), /supports only the link modes 'dual_mono', not 'maximum'/);
+    refused(() => tx.setEffectIdentity("t", "keyed", "miso.soft-clip"), /miso\.soft-clip declares no sidechain input/);
+    refused(() => tx.setEffectQuality("t", "clip", "high"), /publish only the 'normal' quality/);
+    refused(
+      () => tx.setEffectSidechain("t", "clip", { source: { kind: "track", trackId: "t", tap: "input" }, portId: "sidechain-in" }),
+      /setEffectSidechain\("t", "clip"\)\.sidechain\.portId: miso\.soft-clip declares no sidechain input/,
+    );
+    refused(() => tx.setTrackConsole("t", [{ slot: "eq" }]), /setTrackConsole\("t"\): .*change only after the same transaction changes the console/);
+    for (const rampSamples of [-1, 1.5, 2 ** 32, "960"]) {
+      refused(() => tx.setTrackConsole("t", [{ slot: "eq" }], { rampSamples }), /setTrackConsole\("t"\)\.rampSamples must be an integer/);
+    }
     refused(() => tx.build(), /at least one edit/);
   });
 });

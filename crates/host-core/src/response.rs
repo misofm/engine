@@ -1966,9 +1966,9 @@ mod tests {
         }
     }
 
-    /// A per-node effect's snapshot reports its prepared bypass (#1460 D3): the delay keeps its
-    /// session bypass as a prepared `bypass` (it never banks, so the bypass is not lowered to a
-    /// lane), and the owner record must carry it, for both values.
+    /// A per-node effect's snapshot reports its prepared bypass (#1460 D3): the multiband
+    /// compressor keeps its session bypass as a prepared `bypass` until #1340 (a lone insert
+    /// renders per node), and the owner record must carry it, for both values.
     #[test]
     fn a_per_node_effect_snapshot_reports_its_prepared_bypass() {
         for bypass in [false, true] {
@@ -1977,20 +1977,21 @@ mod tests {
                 "../../../fixtures/session/v1/parametric-eq-nine-track.json"
             ))
             .expect("EQ fixture");
-            let mut delay = model.lower_track(&model.tracks[0]).pre_insert[0].clone();
-            delay.id = session::StableId::parse("dly").expect("stable id");
-            delay.identity = session::EffectIdentity::Native {
-                effect_id: session::StableId::parse("miso.delay").expect("stable id"),
+            let mut multiband = model.lower_track(&model.tracks[0]).pre_insert[0].clone();
+            multiband.id = session::StableId::parse("mb").expect("stable id");
+            multiband.identity = session::EffectIdentity::Native {
+                effect_id: session::StableId::parse("miso.multiband-compressor")
+                    .expect("stable id"),
             };
-            delay.params.clear();
-            delay.bypass = bypass;
-            model.tracks[0].inserts.effects = vec![delay];
+            multiband.params.clear();
+            multiband.bypass = bypass;
+            model.tracks[0].inserts.effects = vec![multiband];
             let compiled = compile_host_model(
                 &model,
                 caps.compile_caps(model.sources.len())
                     .expect("compile caps"),
             )
-            .expect("delay session");
+            .expect("multiband session");
             let mut host = prepare_host_runtime(&compiled, &caps).expect("prepared host");
             let mut collector = ResponseSnapshotCollector::new(
                 48_000,
@@ -2001,18 +2002,18 @@ mod tests {
             let track = model.tracks[0].id.as_str().to_owned();
             let capture = host
                 .copy_response_snapshot(&track, &mut collector)
-                .expect("delay track capture");
+                .expect("multiband track capture");
             let snapshot = collector.finish(capture);
             let owner = snapshot
                 .owners
                 .iter()
-                .find(|owner| owner.native_id.as_ref() == "miso.delay")
-                .expect("delay owner");
+                .find(|owner| owner.native_id.as_ref() == "miso.multiband-compressor")
+                .expect("multiband owner");
             assert_eq!(
                 owner.availability,
                 ResponseSnapshotAvailability::DeclaredUnavailable
             );
-            assert_eq!(owner.bypassed, bypass, "the delay's prepared bypass");
+            assert_eq!(owner.bypassed, bypass, "the multiband's prepared bypass");
         }
     }
 

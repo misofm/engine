@@ -36,3 +36,35 @@ a `SourceFailure` to its result kind and diagnostic; both hosts call it.
 ## Dependencies
 
 - None blocking. #1644 (browser SDK `seek`) benefits from it.
+
+## Decision record (root, 2026-10-24; scope note wins)
+
+- D1 as filed, named `SourceRefusalKind { InvalidArgument, Backpressure, Internal }` with
+  `SourceFailure::kind()` and `SourceFailure::diagnostic()` in `crates/control-plane` beside
+  `SourceFailure`. capi's `SourceFailureReport` and the browser's `refuse_source` keep only the
+  3-arm kind-to-code map.
+- D2 (scope D2): the epoch failure reads `source.epoch` on both hosts; the C ABI's former
+  `capi.source.epoch` is a prelaunch string change (root-accepted), header and docs follow.
+- D3 (scope D3, replaces D2 above): `AudioWorkletEngineHost::refuse_source` writes the text into
+  the session diagnostic with `ControlResponse::Diagnostic`, read by `diagnostic()` and
+  `miso_engine_web_v1_control_response_ptr/_bytes`. The JS message shapes and the SDK surface are
+  #1644's (non-goal here).
+- D4 (scope D4): `SourceControlError::InvalidId` (`source.id.invalid`) lives in host-core; every
+  per-source call refuses an empty, non-UTF-8 or over-127-byte ID with it
+  (`SourceControlError::unmatched_id`, which the browser's own seek lookup also reports through).
+  capi keeps only the pointer-level forms (null, over-long count) with the core's failure; the
+  browser's over-staging count refuses with it too.
+  On the C ABI an empty or non-UTF-8 ID is now checked after the service step and the plane
+  pointer loop: only during an epoch fault does such a call get `INTERNAL`/`source.epoch`, and a
+  null plane with an empty ID is `INVALID_ARGUMENT` with no new last error (capi's existing
+  struct and pointer rule).
+- Attempt 2: every browser source call resets the control response first, so a success after a
+  refusal leaves no stale text (the diagnostic buffer itself is not cleared).
+
+## Evidence (attempt 1)
+
+- Gate 1: `a_refused_source_call_reports_the_same_result_and_diagnostic_on_both_hosts` in
+  `hosts/host-web/tests/control_parity.rs`, 11 rows. Red with the browser writing no text and red
+  with the browser's seek lookup reporting `source.id.unknown` for an empty ID.
+- Gate 2: capi `failure_bytes_tests` pins `(RESULT_INTERNAL, b"source.epoch")`; host-core's
+  `source_diagnostics` table gains the `InvalidId` row its exhaustive guard requires.

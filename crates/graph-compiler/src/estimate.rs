@@ -7,7 +7,7 @@ use super::*;
 use crate::canonical::node_text_len;
 use crate::ids::{NodeTable, is_summing_node};
 use crate::pdc::TimingResult;
-use effect_contract::{BypassShunt, EffectControlLane, ObservationLane, PreparedAutomationSpan};
+use effect_contract::{BypassShunt, EffectControlLane, PreparedAutomationSpan};
 
 /// Eleven inputs because the estimate is a function of that many independent facts about the
 /// compile, and bundling them into a struct would only move the argument list. Was inside `lib.rs`
@@ -194,15 +194,9 @@ pub(crate) fn effect_control_resource(
 ) -> Option<GraphScalarOwnerResourceEstimate> {
     let bytes = |value: usize| u64::try_from(value).ok();
     let span_bytes = bytes(core::mem::size_of::<PreparedAutomationSpan>())?;
-    // Charge the six fields retained by `graph`'s `runtime::LiveControlEffect`.
-    // `bypass_resources`' allocator-observed estimate test sees the box if it
-    // ever outgrows this sum.
-    let live_control_effect_bytes = bytes(graph::EFFECT_RENDER_NODE_BYTES)?
-        .checked_add(bytes(core::mem::size_of::<Box<EffectControlLane>>())?)?
-        .checked_add(bytes(core::mem::size_of::<Box<[PreparedAutomationSpan]>>())?)?
-        .checked_add(bytes(core::mem::size_of::<BypassShunt>())?)?
-        .checked_add(bytes(core::mem::size_of::<Option<Box<ObservationLane>>>())?)?
-        .checked_add(bytes(core::mem::size_of::<rack::EffectLaneLayout>())?)?;
+    // Charge the box of `graph`'s `runtime::LiveControlEffect` at its own size, padding
+    // included: a sum of its fields missed the padding a new field brings (#1816).
+    let live_control_effect_bytes = bytes(graph::LIVE_CONTROL_EFFECT_BYTES)?;
     let live_control_stage_bytes = bytes(core::mem::size_of::<rack::LiveControlEffectBankStage>())?;
     let live_control_stage_growth = live_control_stage_bytes
         .saturating_sub(bytes(core::mem::size_of::<rack::EffectBankStage>())?);

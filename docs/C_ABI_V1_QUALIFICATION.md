@@ -184,7 +184,7 @@ acknowledges nothing, adds no queue, and never takes or drops a pending candidat
 candidate stays in its mailbox cell until render adopts it, and its provider is promoted only
 after. So an ack cannot precede a drop through it. Results: `OK`; a null session
 `INVALID_ARGUMENT` and another handle `WRONG_HANDLE`, as every session call; an epoch
-synchronization failure `INTERNAL` with the session diagnostic `capi.source.epoch`, the one the
+synchronization failure `INTERNAL` with the session diagnostic `source.epoch`, the one the
 source calls already set for it. The host's duty, in the header: a pending edit progresses only
 while the host makes session calls, the same duty as draining events. A host that renders but
 never calls keeps retired plans allocated, and its next structural edit waits for that reclaim; a
@@ -243,7 +243,7 @@ published generation or a consumer's (`source.generation.stale`), an unaligned a
 (`source.seek.anchor_unaligned`) or a `T` over the timeline limit
 (`source.seek.frame_out_of_range`); `BACKPRESSURE` with `source.seek.backpressure` while any slot
 holds a seek; the source seek's mapping otherwise (`INVALID_ARGUMENT` with `source.ring.vacated`,
-`INTERNAL` with `capi.source.epoch` or `source.internal`). The anchored form takes the anchor of
+`INTERNAL` with `source.epoch` or `source.internal`). The anchored form takes the anchor of
 `miso_engine_v1_source_seek_at`. A per-source seek leaves the timeline where it is.
 
 A plain session seek is a declared discontinuity; the engine declares it in the same call, and a
@@ -367,19 +367,23 @@ response would exceed the endpoint's response bound (the page then is not the en
 `AUTOMATION_ENQUEUE` (`0x0006`) is retired (#1627): the C ABI refuses a frame under that ID at decode (`INVALID_ARGUMENT`, nothing written and no state moved), and `CAPABILITIES_GET` lists no command `0x0006`, clears flag bit 5 and has no capability fields 9, 12, 19 and 20 (23 fields). Sample-timed changes are stored automation edits. Current/effective sample reads the active
 plan's existing release/acquire next-sample publication, while transport remains endpoint-local.
 Protocol telemetry counters and the existing bounded CAPI render-diagnostic slots feed the
-provider's counter and diagnostic pages. The six provider-owned counters (the two telemetry
+provider's counter and diagnostic pages. The seven provider-owned counters (the two telemetry
 counters `TELEMETRY_COALESCED` 5 and `TELEMETRY_DROPPED` 6, `LIVE_VALUES_SUPERSEDED` 16, #1312 D8,
-`TRANSITION_REPREPARE_REFUSALS` 17, #1351 D6, `STRIPS_RESTARTED` 18, #1768, and
-`LIVE_BLOCK_ERRORS` 19, #1521) retain an independent six-slot minimum even when the frame-derived telemetry configuration capacity is
+`TRANSITION_REPREPARE_REFUSALS` 17, #1351 D6, `STRIPS_RESTARTED` 18, #1768,
+`LIVE_BLOCK_ERRORS` 19, #1521, and `SOURCE_UNDERRUN_BLOCKS` 20, #1537) retain an independent
+seven-slot minimum even when the frame-derived telemetry configuration capacity is
 smaller. Canceled automation (counter 12) retired with the automation queue (#1629).
 
-**Served counters and the counter snapshot (#1351).** The provider serves exactly those six
-counters, each at 0 from construction, so `COUNTERS_GET` with `all` returns all six and a read of
+**Served counters and the counter snapshot (#1351).** The provider serves exactly those seven
+counters, each at 0 from construction, so `COUNTERS_GET` with `all` returns all seven and a read of
 any of them is never `NOT_FOUND`. `STRIPS_RESTARTED` adds, for each replacement plan render
 adopted, the strips that plan started at rest, each once; the control plane adds it when it
 promotes the adopted plan, so a withdrawn candidate adds nothing (#1768). `LIVE_BLOCK_ERRORS`
 counts the blocks render refused after the block took its live snapshot; the service step copies
-the render-side mirror in, and it stays 0 in a correct build (#1521). `TELEMETRY_CONFIGURE` naming any other counter ID (for example
+the render-side mirror in, and it stays 0 in a correct build (#1521). `SOURCE_UNDERRUN_BLOCKS`
+counts the rendered blocks in which a source played zeros because the host had not delivered PCM
+it owed (graph-wide; a held block and a block past the end of a region are not counted); the
+service step copies the render-side mirror in, on both hosts (#1537). `TELEMETRY_CONFIGURE` naming any other counter ID (for example
 `MALFORMED_FRAMES`) is `NOT_FOUND`, and the stored configuration does not change. `TRANSITION_REPREPARE_REFUSALS`
 is protocol counter 17; nothing writes a nonzero value until #1360. The periodic `COUNTER_SNAPSHOT`
 event (`0x8021`) reports, for each configured ID in order, the value after the service step's first
@@ -668,8 +672,8 @@ model's delta (`host_core::classify_live_delta`, #1053 D1), never by its opcodes
 - **Live effect parameters (#1264, #1265).** A track's console-slot entry or insert whose
   `params` change only in live parameters, parametric EQ values included, is live too; see
   "Value-only effect parameter edits" and "Value-only parametric EQ edits" below. So is a
-  bypass change on one, except the delay's and the multiband compressor's; see "Value-only effect
-  bypass edits" below.
+  bypass change on one, except the multiband compressor's; see "Value-only effect bypass edits"
+  below.
 - **Rebuild.** Everything else replaces the plan exactly as before: a fader dB outside
   `[-144, 24]` or a pan/matrix the setter refuses (reported as `COMPILE_REJECTED` with the
   preparation diagnostic a rebuild gives), and every other field.
@@ -914,10 +918,11 @@ the rack's latency-preserving bypass shunt (decision 14).
   the per-node path renders for that lane (#1341a2), so where the session places the effect never
   moves a rendered bit. The browser edits through the same core, so it crossfades alike
   (`hosts/host-web/tests/control_parity.rs`); #1393 is superseded.
-- **Prepared, so a rebuild.** A bypass change, in either direction, on the delay or the multiband
-  compressor: their session bypass is prepared into the effect, not lowered to the lane
+- **Prepared, so a rebuild.** A bypass change, in either direction, on the multiband
+  compressor: its session bypass is prepared into the effect, not lowered to the lane
   (`effect_compiler::lowers_session_bypass`), so a live record would be acked and never heard
-  (decision 14, F4). A submix strip's bypass stays a rebuild too, as every submix value does.
+  (decision 14, F4). The delay's bypass is live since #1339. A submix strip's bypass stays a
+  rebuild too, as every submix value does.
 - **No ack before a drop.** The bypass record passes its producer's preflight before the first
   cell write, and nothing after it can fail.
 - **Equal to a rebuild, on the gate fixture.** The wet path keeps running, so the switched
