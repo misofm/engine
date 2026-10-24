@@ -242,3 +242,57 @@ Commands: `cargo test --locked -p protocol --all-features`, `cargo test --locked
 - Not edited, needs root: `hosts/host-web/qualification/run.mjs` still expects a `meterBatch` per
   block (`PROTOCOL_LOSSY_KINDS`, `3 * protocol.blocks`); with step 5's empty table it must drop
   `meterBatch` and expect `2 * protocol.blocks`.
+- T2 facts. The gate: `host_core::meters::output_peak_gate_relay` gives the C ABI's delivery a
+  requested-gate word and the plan an `OutputPeakGateRelay`, which `PlanState::render` applies
+  once before each block (before `admits`). The relay is the gate's one writer and applies a
+  request only when it changes, so #1587a's render-side move at an uncarried swap is a relay method
+  that an unchanged request never undoes. The browser keeps the direct gate (its delivery runs
+  between its own blocks). An accepted configure is seen through
+  `ProtocolController::telemetry_configuration_generation` (an exact replay does not move it).
+- D5 lost windows, amended: `MeterWindowsLost` = the output reader's dropped-window count + the
+  fold's discarded partial-batch windows + the windows of batches the lane refused to stage. The
+  delivery's `loss_count` is not used: it counts a dropped window once at the drop and once more as
+  the gap at the next frame, so gate 5's "exactly" would fail. A window the delivery pops unread
+  when the table is emptied is not counted (the client turned the meters off).
+- The lossy lane had one telemetry slot, so a batch's right record was always dropped beside its
+  left. `protocol_queue_config` now gives it two (one output batch whole); the capabilities report
+  telemetry slots 2 on both hosts. #1587 sizes it for strip entries (and must note that a frame
+  carries at most 256 records).
+- Gate 6 against D4: the step 5 echo cannot be byte-identical, because the C ABI's echo carries its
+  window (field 8) and the browser's does not. `protocol_cross_host` step 5 compares the headers
+  and every other field and checks the C window is 12; every other step stays byte-identical.
+- Gate 2's "an empty-table configure echoes the previous configuration" is read as: the configure
+  accepted before the refusals keeps its fold (its first batch spans from sample 0, no window
+  lost) and no refusal stages a batch.
+- Paths beyond the list (T2): `crates/capi/src/runtime/mod.rs` (`METER_DELIVERY = true`, R2) and
+  `crates/control-plane/src/lib.rs` (an import D6 left unused). `crates/capi/src/ffi.rs` needed no
+  change. #1690a's `designated` argument is passed as `None`, not grown.
+- Limits: the race-allocation gate (7) applies one gate request under the counters (the configure
+  before the race); the strip-ID text of a configured table (at most 256 x 127 bytes per copy) is
+  allocated at configure time and is not in the boot resource rows; an SDK eval gate 3 run needs a
+  built browser artifact.
+
+## Evidence (attempt 1)
+
+Tests (each recorded red on a mutant, then green):
+- `message_wire::tests::the_meter_table_and_the_window_span_follow_one_rule_on_encode_and_decode`
+  (gate 1): red if the encoder, the decoder and the registry disagree on the table, the span or
+  the retired field. Red on: no duplicate rule; no zero-sequence rule; field 8 accepted in a
+  command; field 1 skipped instead of retired.
+- capi `a_refused_meter_table_is_typed_and_changes_nothing` (gate 2): red if a refused configure is
+  half stored or untyped. Red on: the generation moving on a refusal; no unknown-strip check.
+- capi `the_output_meter_batch_is_two_windows_of_each_planes_own_peak` (gates 3, 4): red on the
+  replaced defect (one combined peak labelled left), a fold that keeps only the last window, or a
+  structural commit that restarts the sequence. Red on all three mutants.
+- capi `lost_meter_windows_are_counted_and_the_sequence_does_not_skip` (gate 5): red if a dropped
+  window or a discarded partial batch is not counted. Red on each term removed.
+- capi `resource_lifecycle` race (gate 7, an existing test with a table configured): red if the
+  output meter or the gate relay allocates on render. Red on an allocation at window close and in
+  the relay's apply.
+- Folded or extended: `empty_boot` (the empty mixer's two output records read silence; red if a
+  batch lacks the right record), host-core `clock_transport_counters_...` (red if the provider does
+  not serve `METER_WINDOWS_LOST`), `every_counter_id_round_trips...` (red if 22 does not parse),
+  `protocol_cross_host` step 5 (red if the controller does not echo the window). Deleted: the
+  #1570a per-block peak test (`plan.rs`, D6) and the output half of the #1581 C ABI meter test
+  (superseded by gates 3 and 7). The #1348/#1351 service-step tests now probe with the windowed
+  meter or with counters.

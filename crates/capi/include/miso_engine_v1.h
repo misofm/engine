@@ -248,10 +248,26 @@ extern "C" {
  * returns MISO_ENGINE_V1_BACKPRESSURE with out untouched, and the host retries. A host checks
  * MISO_ENGINE_V1_FEATURE_PLAN_WATERMARK before calling the symbol.
  *
+ * Meters (issue 1583). TELEMETRY_CONFIGURE takes a meter table: entry i (meter handle i + 1) names
+ * the output, or a track or submix by its stable ID, and a metric, so a structural commit never
+ * moves a handle. Its reply carries the session's meter window in blocks (meter_window_blocks,
+ * about 32 ms). A nonempty table turns the output meter on from the next rendered block, an empty
+ * one off; render applies the change before a block, with no allocation, lock or syscall. Each
+ * METER_BATCH reports meter_period_blocks / meter_window_blocks consecutive windows: first_sample
+ * to observed_sample (exclusive), window_sequence from 1 after each accepted configure, and for the
+ * output's peak entry a left and a right record, each the windows' maximum, VALID, and CLIPPED above
+ * 1.0. A configure is all or nothing: an unknown strip is NOT_FOUND (meter.strip.unknown), a period
+ * that is not a whole number of windows INVALID_FIELD (meter.period), and a strip or gain-reduction
+ * entry UNAVAILABLE until a later issue serves it. The output meter queues eight windows; a window
+ * that reaches no batch (dropped while the host did not call into the session, or in a partial
+ * batch a gap discarded) is counted by METER_WINDOWS_LOST (protocol counter 22), and the sequence
+ * never skips.
+ *
  * Control service (issue 1348). The engine owns no thread, so the host drives the control work
  * between edits. miso_engine_v1_service(session) runs one bounded step of it: it reclaims plans
  * render has retired, brings the session's view of the running plan up to render, refreshes the
- * session counters, and stages render telemetry. Every other session call (source submit, seek,
+ * session counters, and stages render telemetry: the counter snapshot, the diagnostics and one
+ * METER_BATCH per completed batch of meter windows. Every other session call (source submit, seek,
  * seek_at, seek_report, session_seek, session_seek_at, submit_command, dequeue_event) that passes
  * its argument checks runs the same step first; a call refused for its arguments returns before the
  * step. So a host that makes those calls anyway need not also call service. The step never waits
