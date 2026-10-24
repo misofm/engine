@@ -675,9 +675,7 @@ still open.
   session row, and `prepare_replacement` then sets the document's `control_smoothing` whole,
   which supersedes them: the rows change only `applied_operations`, never the committed model.
 
-- **Open: one red test from the host-chosen advertisement.**
-  `hosts/host-web/tests/protocol_cross_host.rs::the_browser_and_the_c_abi_give_the_same_bytes_for_one_script`
-  requires byte-equal `CAPABILITIES_GET` replies on both hosts (step "1 capabilities",
-  `Legs::both`). By the root decision they now differ in exactly the `0x0013` entry of the
-  command list. The file is on no authorized list; it needs root's authorization to compare that
-  step modulo `0x0013` (or to expect the C ABI's list to be the browser's plus `0x0013`).
+- **Cross-host capabilities step (root-authorized).** `protocol_cross_host`'s `CAPABILITIES_GET`
+  step asserts that the C ABI's reply is the browser's plus exactly the `0x0013` entry, with the
+  codec re-encoding the length fields, and the browser's own fields re-encode to its exact bytes.
+  Every other step stays byte-equal. #1697 removes the exception.
