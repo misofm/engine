@@ -61,6 +61,11 @@ pub struct CapiResources {
     pub prepared_protocol_retained: u64,
     /// The largest single allocation among them.
     pub largest: u64,
+    /// The kept bases' edit-ramp tables, part of `active_retained` (#1696 root ruling): every kept
+    /// base at most, each at the newest committed model's bounds. Not an epoch row, since a kept
+    /// base's ramps follow the newest commit, not the epoch that holds them; a live commit moves it
+    /// with the committed model (`follow_edit_ramps`).
+    pub edit_ramps: u64,
 }
 
 /// Source-ring bytes a successor plan carries from the plan it displaces (issue #1273 D5).
@@ -139,6 +144,9 @@ pub struct LiveCatalogAdmission {
     pub growth_bytes: u64,
     /// The new catalog's largest single allocation.
     pub largest_allocation_bytes: u64,
+    /// The committed model's edit-ramp row beyond the newest epoch's, at least zero (#1696 root
+    /// ruling): a VCA added live raises the bound of the ramps a kept base may hold.
+    pub ramp_growth_bytes: u64,
 }
 
 impl CapiResources {
@@ -158,6 +166,17 @@ impl CapiResources {
         self.prepared_protocol_retained = follow(self.prepared_protocol_retained);
         self.largest = self.largest.max(committed.largest_allocation_bytes);
     }
+
+    /// This epoch's rows after a live commit moved the edit-ramp bound to `committed`, the
+    /// committed model's [`MonitorRows::edit_ramps`] (#1696 root ruling): a VCA added live is
+    /// charged at once. Infallible, as the commit's last steps are.
+    pub(crate) fn follow_edit_ramps(&mut self, committed: u64) {
+        self.active_retained = self
+            .active_retained
+            .saturating_sub(self.edit_ramps)
+            .saturating_add(committed);
+        self.edit_ramps = committed;
+    }
 }
 
 impl LiveCatalogAdmission {
@@ -169,6 +188,7 @@ impl LiveCatalogAdmission {
         Self {
             growth_bytes: new.retained_bytes.saturating_sub(current.retained_bytes),
             largest_allocation_bytes: new.largest_allocation_bytes,
+            ramp_growth_bytes: 0,
         }
     }
 }
@@ -223,6 +243,12 @@ pub(crate) const REPORT_ROWS: usize = 4;
 /// The pending provider epochs (#1398 D1): a withdrawn candidate's and its successor's coexist
 /// until the former is dropped (#1310 D5).
 pub(crate) const PENDING_PROVIDERS: usize = 2;
+
+/// The kept bases that can be live at once (#1696 root ruling): a kept base sits on the epoch a
+/// pending successor succeeds (`SessionState::kept_holder`), one per pending epoch, so at most
+/// [`PENDING_PROVIDERS`]. A ceiling: between commands at most one is live, since a rebuild that
+/// finds nothing withdrawn runs after promotion dropped every older base.
+pub(crate) const KEPT_BASES: usize = PENDING_PROVIDERS;
 
 /// The provider epochs parked until render's displaced plan is reclaimed (#1398 D1): one per
 /// retirement credit, because each parked epoch's plan holds one until the service step reclaims
@@ -319,13 +345,13 @@ pub(crate) fn capi_resources<A: ControlAdapter>(
         strip_table_bytes,
         effect_row,
         route_row,
-        // #1696 D3: the monitor overlay and the edit-ramp table, at this epoch's model bounds. The
-        // newest epoch's rows cover the committed overlay; an older epoch's cover the kept base a
-        // successor displaced from it (`KeptBase`, whose model is that epoch's). The transients
-        // (`MonitorOverlay::after`'s result until its commit, `merged_ramps`' clone) are the same
-        // rows one commit ahead and are not charged twice.
+        // #1696 D3: the monitor overlay, at this epoch's model bounds. The newest epoch's row
+        // covers the committed overlay; an older epoch's covers the overlay its kept base holds
+        // (`KeptBase::monitor`, the overlay committed on that epoch's model: no live commit
+        // changes a strip). The transient (`MonitorOverlay::after`'s result until its commit) is
+        // the same row one commit ahead and is not charged twice. The edit ramps are not an epoch
+        // row: see `CapiResources::edit_ramps`.
         monitor.overlay,
-        monitor.edit_ramps,
     ];
     let ObservationReserve {
         ended_event,
@@ -413,6 +439,7 @@ pub(crate) fn capi_resources<A: ControlAdapter>(
         .checked_add(checked_sum(&fixed_aggregate_rows)?)
         .and_then(|value| value.checked_add(epoch_retained))
         .and_then(|value| value.checked_add(provider.catalog_retained_bytes))
+        .and_then(|value| value.checked_add(monitor.edit_ramps))
         .ok_or_else(|| failure(ResourceFault::Arithmetic))?;
     let prepared_protocol_retained = checked_sum(&prepared_protocol_allocation_rows)?
         .checked_add(provider.catalog_retained_bytes)
@@ -448,6 +475,7 @@ pub(crate) fn capi_resources<A: ControlAdapter>(
         epoch_retained,
         prepared_protocol_retained,
         largest,
+        edit_ramps: monitor.edit_ramps,
     })
 }
 
@@ -512,7 +540,9 @@ pub(crate) struct MonitorRows {
     pub(crate) overlay: u64,
     /// The solo vector alone, one allocation, for the largest-allocation check.
     pub(crate) overlay_vector: u64,
-    /// `session::EditRamps::retained_ceiling` of the model's strips, routes and VCAs.
+    /// [`KEPT_BASES`] times `session::EditRamps::retained_ceiling` of the model's strips, routes
+    /// and VCAs: the kept bases' ramp tables, pruned to this (the newest committed) model's owners
+    /// whenever they are stored (#1696 root ruling).
     pub(crate) edit_ramps: u64,
 }
 
@@ -528,7 +558,7 @@ fn id_text_bytes<'a>(
 pub(crate) fn monitor_rows(model: &session::SessionModel) -> Result<MonitorRows, CompileFailure> {
     let arithmetic = || failure(ResourceFault::Arithmetic);
     let strips = model.strips().count();
-    let strip_id_bytes = id_text_bytes(model.strips().map(|strip| &*strip.id))?;
+    let strip_id_bytes = id_text_bytes(model.strips().map(|strip| strip.id))?;
     let longest_strip_id = model
         .strips()
         .map(|strip| strip.id.as_str().len())
@@ -553,21 +583,22 @@ pub(crate) fn monitor_rows(model: &session::SessionModel) -> Result<MonitorRows,
                 route_id_bytes,
                 vca_id_bytes,
             )
+            .and_then(|table| table.checked_mul(KEPT_BASES))
             .ok_or_else(arithmetic)?,
         )?,
     })
 }
 
-/// The monitor overlay's and the edit-ramp table's rows of `model`, summed (#1696), so the C
-/// ABI's oracle can hold `capi_retained_bytes` to them.
+/// The monitor overlay's epoch row and the kept bases' edit-ramp row of `model` (#1696), so the
+/// C ABI's oracle can hold `capi_retained_bytes` and the admissions to them.
 ///
 /// # Errors
 ///
 /// The arithmetic overflowed.
 #[cfg(feature = "test-support")]
-pub fn monitor_and_ramp_bytes(model: &session::SessionModel) -> Result<u64, CompileFailure> {
+pub fn monitor_and_ramp_bytes(model: &session::SessionModel) -> Result<(u64, u64), CompileFailure> {
     let rows = monitor_rows(model)?;
-    checked_sum(&[rows.overlay, rows.edit_ramps])
+    Ok((rows.overlay, rows.edit_ramps))
 }
 
 /// What a plan's observation subscriptions retain (#1584 D6a).
@@ -1024,6 +1055,16 @@ pub(crate) fn validate_replacement_peak(
         .checked_add(prospective.capi.prepared_protocol_retained)
         .and_then(|candidate| candidate.checked_add(newest.report.control_retained_bytes))
         .and_then(|value| value.checked_add(older_epochs))
+        // #1696: the kept base this commit stores holds ramps at the candidate's model, which the
+        // newest row charges at its own.
+        .and_then(|value| {
+            value.checked_add(
+                prospective
+                    .capi
+                    .edit_ramps
+                    .saturating_sub(newest.capi.edit_ramps),
+            )
+        })
         .ok_or_else(arithmetic)?;
     if capi_peak > limits.maximum_control_retained_bytes {
         return Err(failure(ResourceFault::Limit));
@@ -1076,7 +1117,8 @@ pub struct LiveEpochResources {
 ///   committed model's (#1552 D3), so the term is the same one a rebuild charges;
 /// - **catalog growth:** the new catalog's retained bytes beyond the current catalog's are added to
 ///   the capi term, and its largest single allocation joins the largest-allocation term, so a VCA
-///   added live that grows the catalog meets the ceiling a rebuild would (#1558 D6);
+///   added live that grows the catalog meets the ceiling a rebuild would (#1558 D6); the
+///   committed model's edit-ramp row beyond the newest epoch's is added the same way (#1696);
 /// - **largest allocation:** the largest of every held plan's `largest_named_allocation_bytes`,
 ///   the newest epoch's capi `largest`, the compiled models' largest allocation and the new
 ///   catalog's.
@@ -1111,6 +1153,7 @@ pub fn validate_live_peak(
         })
         .and_then(|value| value.checked_add(newest.capi.prepared_protocol_retained))
         .and_then(|value| value.checked_add(catalog.growth_bytes))
+        .and_then(|value| value.checked_add(catalog.ramp_growth_bytes))
         .ok_or_else(arithmetic)?;
     if capi > limits.maximum_control_retained_bytes {
         return Err(failure(ResourceFault::Limit));
@@ -1630,6 +1673,7 @@ mod admission_tests {
                 epoch_retained: 8 * base,
                 prepared_protocol_retained: 9 * base,
                 largest: base,
+                edit_ramps: 0,
             },
             carried: CarriedSourceBytes::default(),
         }

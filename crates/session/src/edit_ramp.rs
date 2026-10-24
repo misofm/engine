@@ -184,6 +184,31 @@ impl EditRamps {
         }
     }
 
+    /// Make these lengths a kept base's (#1696 root ruling): drop every entry and unset row whose
+    /// owner `model`, the newest committed model, no longer has, and forget the rewritten targets.
+    ///
+    /// No [`Self::get`] result of an owner `model` has changes, and a kept base is only ever the
+    /// earlier side of [`Self::overlay`], which never reads its `cleared`. A dropped owner can
+    /// return only through an upsert, which rewrites it whole and so clears its rows in any later
+    /// overlay. What remains is bounded by `model` ([`Self::retained_ceiling`]).
+    pub fn keep_within(&mut self, model: &crate::SessionModel) {
+        let mut strips: Vec<&StableId> = model.strips().map(|strip| strip.id).collect();
+        let mut routes: Vec<&StableId> = model.routes.iter().map(|route| &route.id).collect();
+        let mut vcas: Vec<&StableId> = model.vcas.iter().map(|vca| &vca.id).collect();
+        strips.sort_unstable();
+        routes.sort_unstable();
+        vcas.sort_unstable();
+        let has = |owner: &Owner| match owner {
+            Owner::Strip(id) => strips.binary_search(&id).is_ok(),
+            Owner::Route(id) => routes.binary_search(&id).is_ok(),
+            Owner::Vca(id) => vcas.binary_search(&id).is_ok(),
+            Owner::Console => true,
+        };
+        self.entries.retain(|key, _| has(&key.owner));
+        self.unset.retain(|key| has(&key.owner));
+        self.cleared.clear();
+    }
+
     /// Whether the transaction wrote no live row at all: no length, no row without one, and no
     /// target rewritten whole. [`Self::overlay`] of such a transaction changes nothing.
     #[must_use]
@@ -409,5 +434,59 @@ mod tests {
             }
             drop(ramps);
         }
+    }
+
+    /// #1696 root ruling: a kept base's lengths, after rows and whole rewrites of owners the
+    /// newest model no longer has (a churn of removed VCAs), are pruned to that model and keep no
+    /// rewritten target, so they stay within the model's [`EditRamps::retained_ceiling`] however
+    /// long the churn; a length of an owner the model has survives. Red when a kept base keeps its
+    /// `cleared` set or a removed owner's rows, which no model bounds.
+    #[test]
+    fn a_kept_base_is_bounded_by_the_newest_model() {
+        use bench_support::alloc::{
+            assert_installed, current_thread_peak, current_thread_peak_reset,
+        };
+        assert_installed();
+        let model =
+            crate::parse_session_json(include_str!("../../../fixtures/session/v1/canonical.json"))
+                .expect("the fixture parses");
+        let text = |ids: &mut dyn Iterator<Item = &StableId>| {
+            ids.map(|id| id.as_str().len()).sum::<usize>()
+        };
+        let ceiling = EditRamps::retained_ceiling(
+            model.strips().count(),
+            model.routes.len(),
+            model.vcas.len(),
+            text(&mut model.strips().map(|strip| strip.id)),
+            text(&mut model.routes.iter().map(|route| &route.id)),
+            text(&mut model.vcas.iter().map(|vca| &vca.id)),
+        )
+        .expect("the ceiling fits");
+        let kept_strip = EditRampTarget::Strip(model.tracks[0].id.clone());
+        let gone: Vec<EditRampTarget> = (0..400)
+            .map(|index| EditRampTarget::Vca(id(&format!("gone-{index:0>100}"))))
+            .collect();
+
+        current_thread_peak_reset();
+        let mut ramps = EditRamps::new();
+        ramps.set(&kept_strip, EditRampRow::Fader, Some(11));
+        for target in &gone {
+            ramps.set(target, EditRampRow::VcaFader, Some(3));
+            ramps.set(target, EditRampRow::VcaMute, None);
+            ramps.clear_target(target);
+            ramps.set(target, EditRampRow::VcaFader, Some(4));
+        }
+        assert!(
+            current_thread_peak().live_bytes > ceiling as u64,
+            "vacuous: no churn"
+        );
+        ramps.keep_within(&model);
+        let live = current_thread_peak().live_bytes;
+        assert!(
+            live <= ceiling as u64,
+            "{live} bytes kept, above the newest model's ceiling {ceiling}"
+        );
+        assert_eq!(ramps.get(&kept_strip, EditRampRow::Fader), Some(11));
+        assert_eq!(ramps.entries().len(), 1);
     }
 }

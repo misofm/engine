@@ -666,6 +666,13 @@ impl HostHalf {
     /// response buffer, the affine token, the request copy the token keeps for the replay entry
     /// (#1615; the token holds a plan against the committed replay cache, not a clone) and the
     /// parameter catalog.
+    /// The monitor overlay's epoch row and the kept bases' edit-ramp row of this half's model
+    /// (#1696).
+    fn monitor_and_ramp_rows(&self) -> (u64, u64) {
+        control_plane::monitor_and_ramp_bytes(self.store.compiled().normalized_model())
+            .expect("the monitor and ramp rows")
+    }
+
     fn capi_epoch_terms(&self, compile_limits: &CompileLimits) -> (u64, u64) {
         let strips = size_of_val(&*self.strips) as u64
             + self
@@ -684,9 +691,8 @@ impl HostHalf {
             + effects
             + self.prepared.report.route_control_resources.total_bytes
             + self.prepared.report.inventory_retained_bytes
-            // #1696 D3: the epoch's monitor overlay and edit-ramp rows, at its model's bounds.
-            + control_plane::monitor_and_ramp_bytes(self.store.compiled().normalized_model())
-                .expect("the monitor and ramp rows");
+            // #1696 D3: the epoch's monitor overlay row, at its model's bounds.
+            + self.monitor_and_ramp_rows().0;
         // The token also holds the commit's one `OBSERVATION_ENDED` event (#1584 D6a), which the
         // control plane bounds by the frame it must fit.
         let (_, ended_event) =
@@ -799,9 +805,10 @@ fn observe_compile(document: &str, compile_limits: &CompileLimits) -> CompileObs
             .sum(),
     )
     .expect("the observation reserve");
-    let monitor_and_ramps =
+    let (overlay_row, ramp_row) =
         control_plane::monitor_and_ramp_bytes(store.compiled().normalized_model())
             .expect("the monitor and ramp rows");
+    let monitor_and_ramps = overlay_row + ramp_row;
     let host_core::PreparedHost {
         plan,
         sources,
@@ -1264,11 +1271,12 @@ impl Budget {
 /// `source_total_bytes` moved 12,366 -> 12,846 and `capi_retained_bytes` 167,754 -> 168,378 (the
 /// timeline producer in each kept source control set), both within their ceilings.
 ///
-/// #1696 charges the monitor overlay and the edit-ramp table in each epoch's rows, at the epoch
-/// model's bounds. `capi_retained_bytes` measured 168,818 before
-/// and 180,970 after (x86-64, +12,152: the overlay's solo vector, ID text and master, and the ramp
-/// table's B-tree nodes and ID copies; the row does not depend on the lane width), above the
-/// 175,296 ceiling, so the ceiling is 180,970 plus 10 %, rounded up to 64: 199,067 -> 199,104.
+/// #1696 charges the monitor overlay in each epoch's rows, at the epoch model's bounds, and the
+/// kept bases' edit-ramp tables once, at the newest committed model's bounds times `KEPT_BASES`
+/// (two). `capi_retained_bytes` measured 168,818 before and 192,972 after (x86-64, +24,154: the
+/// overlay's solo vector, ID text and master, and two ramp tables' B-tree nodes and ID copies; the
+/// row does not depend on the lane width), above the 175,296 ceiling, so the ceiling is 192,972
+/// plus 10 %, rounded up to 64: 212,269.2 -> 212,288.
 const REFERENCE_BUDGETS: [Budget; 19] = [
     Budget {
         row: "graph_session_plus_plan_bytes",
@@ -1375,8 +1383,8 @@ const REFERENCE_BUDGETS: [Budget; 19] = [
     Budget {
         row: "capi_retained_bytes",
         value: |report| report.capi_retained_bytes,
-        eight_lanes: 199_104,
-        four_lanes: 199_104,
+        eight_lanes: 212_288,
+        four_lanes: 212_288,
     },
     Budget {
         row: "largest_named_allocation_bytes",
@@ -1866,7 +1874,13 @@ fn double_live_oracle_drives_exact_and_one_below_c_caps() {
     // inventory is that much larger than `capi_epoch_terms` read off the fresh preparation.
     let prospective_epoch = prospective_epoch
         - prospective_host.prepared.report.inventory_retained_bytes
-        + successor.inventory_retained_bytes;
+        + successor.inventory_retained_bytes
+        // #1696: the kept base the commit stores holds ramps at the prospective model's bound,
+        // beyond the current row's.
+        + prospective_host
+            .monitor_and_ramp_rows()
+            .1
+            .saturating_sub(current_host.monitor_and_ramp_rows().1);
     let rows: [(&str, u64); 8] = [
         (
             "graph",

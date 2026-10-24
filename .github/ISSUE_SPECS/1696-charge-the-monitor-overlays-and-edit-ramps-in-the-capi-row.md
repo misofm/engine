@@ -186,21 +186,21 @@ Attempt 1 (implementer, 2026-10-24, on `main` a97b522be; stopped for a root ruli
   boot reserve would only allocate bytes no write uses.
 - Re-anchor: #1386's `SESSION_REPLACE` keeps nothing of the document between transactions
   (`document.rs`); no new retained structure.
-- `capi_retained_bytes` on the reference session: 168,818 -> 180,970 (+12,152), over 175,296;
-  ceiling raised to 199,104 (+10 %, rounded to 64).
-- **Open (root ruling needed).** D1/D3 do not hold for the kept base:
-  1. A kept base's `edit_ramps` are the successor's (and later live commits') ramps, so their keys
-     are bounded by the newest committed model, not by the model of the epoch that holds them; a
-     structural commit that adds strips makes the older epoch's row too small.
-  2. `cleared` keeps every owner an upsert or a removal named (`protocol/src/model.rs:518-543`), and
-     `merged_ramps` unions them across every commit while a successor is pending. A kept base's
-     `cleared` is only ever the earlier side of `overlay` (never read), but it grows with VCA (or
-     strip) churn while render stalls: no model bounds it.
-  3. A live commit that adds a VCA changes the ramp bound, but the newest epoch's row follows only
-     the catalog (`follow_catalog`), so the report differs from a rebuild's
-     (`capi/src/runtime/live_tests.rs` `a_vca_added_live_is_charged_for_the_catalog_it_adds`: 203,945
-     against 205,019, red on this checkpoint).
-  Candidate fix (needs `control.rs` beyond the scope note, and touches what the kept ramps hold):
-  drop `cleared` from a kept base (it is never read there) or prune it to the committed model's
-  owners at each merge; charge the ramp row at the newest committed model on the newest epoch (the
-  kept ramps' real bound) and let it follow a live commit as the catalog does.
+- **Root decision (2026-10-24, amends the non-goal "no change to what the ramps hold").**
+  Attempt 1 found D1/D3 false for the kept base: its ramps are the successor's and later live
+  commits', so the newest committed model bounds them, not the holding epoch's; `cleared` keeps every
+  owner an upsert or removal named and `merged_ramps` unions them while a successor is pending, so
+  no model bounds it; and a live VCA add moved the bound while the row followed only the catalog.
+  Ruled and built:
+  1. A kept base stores no `cleared` and only rows of owners the newest committed model has
+     (`EditRamps::keep_within`, at both stores in `control.rs`). Nothing reads a kept base's
+     `cleared` (it is only the earlier side of `overlay`), and a removed owner returns only through
+     an upsert, which clears its rows in the later overlay, so no reader loses a key.
+  2. The ramp row is `CapiResources::edit_ramps`, part of `active_retained` and no epoch row:
+     `KEPT_BASES` (= `PENDING_PROVIDERS`, two) tables at the newest committed model's bounds. Bounded
+     because a kept base sits on the epoch a pending successor succeeds, one per pending epoch. The
+     replacement admission adds the candidate's row beyond the newest's.
+  3. A live commit follows it (`follow_edit_ramps`, beside `follow_catalog`), and the live
+     admission adds its growth (`LiveCatalogAdmission::ramp_growth_bytes`).
+- `capi_retained_bytes` on the reference session: 168,818 -> 192,972 (+24,154), over 175,296;
+  ceiling 212,288 (+10 %, rounded to 64).

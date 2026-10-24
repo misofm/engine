@@ -5871,7 +5871,20 @@ mod set_control {
             .resources()
             .retained_bytes
         };
-        let growth = catalog_bytes(&grown) - catalog_bytes(&document);
+        // #1696: the added VCAs also raise the kept bases' edit-ramp row, which follows the
+        // committed model as the catalog does.
+        let ramp_bytes = |document: &str| {
+            let model = parse_session_json(document).expect("model");
+            control_plane::monitor_and_ramp_bytes(&model)
+                .expect("the ramp row")
+                .1
+        };
+        assert!(
+            ramp_bytes(&grown) > ramp_bytes(&document),
+            "the VCAs add ramp rows"
+        );
+        let growth = catalog_bytes(&grown) - catalog_bytes(&document) + ramp_bytes(&grown)
+            - ramp_bytes(&document);
         assert!(growth > 0, "the added VCAs add catalog bytes");
 
         // Whether the edits commit under `ceiling`; a refusal changes nothing.
