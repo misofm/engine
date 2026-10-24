@@ -60,3 +60,14 @@ Add the gate-expander to console-workload `paired_spans.rs` Part 1 chained diffe
   (`witness: true`) does not check: the right plane untouched while collapsed, agreement after the
   disengage copy, the Left-only span and the cursor-only difference. It is renamed
   `a_collapsed_bank_spares_the_right_plane_and_its_copy_makes_the_channels_agree`.
+* CI fold (root ruling, 2026-10-24): `graph-compiler`'s
+  `the_reduced_mono_console_from_the_970_probe_binds_at_every_width` failed on x86 at Simd4
+  (1 misaligned slot, expected 0). The cause is #1872: t11 and t13 are mono-class now, and the
+  session has no console, so #971's demotion decides their pool and keeps the move only when the
+  re-plan binds more banks. At the build's own width the move binds the compressor bank, so the
+  plan is unchanged (AArch64 Simd4: 0 misaligned, 1 bank; x86 Simd8: 0, 0). At a width the build
+  does not execute nothing binds and the move is not kept, which leaves the #966 shape in the
+  stereo group t0, t14, t18, t6. Root ruled this an expected-value change, not a defect, and
+  authorized `crates/graph-compiler/tests/bank_levels.rs`: the every-width bind-and-render check
+  stays, the native-width misaligned count stays exact at 0, the native bank count stays exact,
+  and only the foreign-width row is dropped, with the reason in the test's doc.
