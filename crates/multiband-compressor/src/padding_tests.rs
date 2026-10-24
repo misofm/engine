@@ -263,26 +263,25 @@ fn render(
             )
             .expect("a well-shaped bank block"),
         );
-        for lane in 0..lanes {
-            if lane >= members.len() {
-                for frame in 0..frames {
-                    let at = frame * lanes + lane;
-                    assert_eq!(
-                        (left[at].to_bits(), right[at].to_bits()),
-                        (0, 0),
-                        "{context}: block {index}: padded lane {lane} fed +0.0 wrote another \
-                         word at frame {frame}"
-                    );
-                }
+        for lane in members.len()..lanes {
+            for frame in 0..frames {
+                let at = frame * lanes + lane;
                 assert_eq!(
-                    report.reports[lane],
-                    ProcessReport::default(),
-                    "{context}: block {index}: padded lane {lane} was reported"
+                    (left[at].to_bits(), right[at].to_bits()),
+                    (0, 0),
+                    "{context}: block {index}: padded lane {lane} fed +0.0 wrote another \
+                     word at frame {frame}"
                 );
-                continue;
             }
+            assert_eq!(
+                report.reports[lane],
+                ProcessReport::default(),
+                "{context}: block {index}: padded lane {lane} was reported"
+            );
+        }
+        for (lane, scalar) in scalars.iter_mut().enumerate() {
             let [mut own_left, mut own_right] = block.input[lane].clone();
-            let own = scalars[lane].process(
+            let own = scalar.process(
                 EffectProcessBlock::new(
                     &mut own_left,
                     &mut own_right,
@@ -313,21 +312,21 @@ fn render(
         }
         first_sample += frames as u64;
     }
-    for lane in 0..lanes {
-        let payload = bank_payload(bank.as_ref(), lane, sizes);
-        if lane < members.len() {
-            assert_eq!(
-                payload.expect("an active lane snapshots"),
-                payload_of(scalars[lane].as_ref(), sizes),
-                "{context}: lane {lane}: state after the render"
-            );
-        } else {
-            assert_eq!(
-                payload.err().map(|error| error.code),
-                Some("effect.state.track"),
-                "{context}: padded lane {lane} has no payload"
-            );
-        }
+    for (lane, scalar) in scalars.iter().enumerate() {
+        assert_eq!(
+            bank_payload(bank.as_ref(), lane, sizes).expect("an active lane snapshots"),
+            payload_of(scalar.as_ref(), sizes),
+            "{context}: lane {lane}: state after the render"
+        );
+    }
+    for lane in members.len()..lanes {
+        assert_eq!(
+            bank_payload(bank.as_ref(), lane, sizes)
+                .err()
+                .map(|error| error.code),
+            Some("effect.state.track"),
+            "{context}: padded lane {lane} has no payload"
+        );
     }
 }
 
