@@ -125,3 +125,31 @@ Evidence (48 kHz, this worktree):
   `1.2e-6`, attack 470/470 and 251/251, release 6643/6643 and 6673/6673; static `1.5e-5` dB;
   external `2.4e-7`; rest 145,280 frames. Mutant: the detector designed at `Q A` again: red
   (`dynamic_mode_matches_the_reference_band`, the +3 dB row).
+
+## S2 decision and evidence record (2026-10-24, attempt 1)
+
+Slice S2 per the root scope note: the dynamic EQ is the tenth launch effect, **insert only**
+(not in `CONSOLE_ELIGIBLE_EFFECTS`; root decision). Wiring follows the de-esser's S2 (#1922).
+
+Decisions (root unless marked):
+- Observation: the four per-band taps are `GainChangeDb` with the `PeakSigned` fold, unit dB,
+  domain `-24 .. 24` (#1918's admission rule), so an upward band reads as a boost. The tap still
+  reads the smoother's own signed change word; no state word moved.
+- Tail stays `NodeTailBound::UNBOUNDED`: a disabled band ramps to the identity, so #1372a's
+  bounded-tail rule does not apply.
+- #1928: a retarget restarted only the ramps whose design bits moved, so a one-ulp frequency nudge
+  mid-ramp left the bell's and the detector's `a2` on their old schedule (probe: frame 33 at
+  fraction 1/32 against 1/64 for the restarted words). Fixed: when any of a band's nine design
+  words moves, all nine restart together from their current values, so every SVF triple the
+  kernel loads is on the chord to the new design. Class A (the effect was not registered).
+- Implementer: a prepared-bypass lane whose wet state alone fails D7 now keeps its dry output, as
+  the de-esser's S2 (`graph-compiler`'s `bypass_shunt_identity` was red on block 13, extreme
+  input). Class A for the same reason.
+- Implementer: the host-web parity session carries the dynamic EQ on `t3` (position 4). The SDK
+  evals that boot that fixture set `observationTaps: 4`: the dynamic EQ is the first effect with
+  more than one tap, and a cap below an effect's tap count refuses the boot
+  (`effect.observation.taps`). That refusal is the existing contract and is unchanged here.
+
+Evidence (this worktree):
+- `crates/dynamic-eq/tests/svf_chord.rs` red on the old retarget, green after.
+- Browser budget (fresh named twin): `bridgeMetadataBytes` 1,519,458 of 1,628,864; no re-pin.

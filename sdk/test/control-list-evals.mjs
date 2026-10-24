@@ -30,7 +30,9 @@ const FIXTURE = JSON.parse(readFileSync(
   "utf8",
 ));
 const SESSION = JSON.parse(FIXTURE.session);
-const OPTIONS = { liveControls: { observationTaps: 1 } };
+// Four taps: the fixture carries every launch effect, and the dynamic EQ declares one per band
+// (#17 S2); a cap below an effect's tap count refuses the boot (`effect.observation.taps`).
+const OPTIONS = { liveControls: { observationTaps: 4 } };
 
 let asset;
 
