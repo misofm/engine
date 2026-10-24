@@ -4209,10 +4209,11 @@ fn resolve_observation_carry(
 /// endpoints, so its line starts at rest and nothing about its strip changes. Lines of other
 /// lengths carry too: the swap block aligns their heads (D4).
 ///
-/// The graph names a submix's stage as it names a track's (`TrackStage`), so a route whose
-/// source or destination strip changed kind under one ID keeps its endpoints: its line carries
-/// only if `same_strip` passes the ID of each `TrackStage` endpoint (#1891). Other endpoints
-/// pass.
+/// The graph names a submix's stage as it names a track's (`TrackStage`), and a submix's effect
+/// as a track's (`Effect`), so a route or a sidechain key whose strip changed kind under one ID
+/// keeps its endpoints: its line carries only if `same_strip` passes the strip ID of each
+/// `TrackStage` and `Effect` endpoint (#1891), and a strip of another kind starts its lines at
+/// rest, as an added strip does. Other endpoints pass.
 fn resolve_delay_carry(
     predecessor: &[graph::GraphDelayLine],
     own: &[graph::GraphDelayLine],
@@ -4220,9 +4221,12 @@ fn resolve_delay_carry(
 ) -> Vec<graph::GraphDelayMove> {
     let same_node = |node: &graph::GraphNodeId| match node {
         graph::GraphNodeId::TrackStage { track_id, .. } => same_strip(track_id.as_str()),
+        graph::GraphNodeId::Effect(effect) => same_strip(effect.track_id.as_str()),
         _ => true,
     };
     own.iter()
+        // A route's `TrackStage` destination is a submix's input on both sides (a route never
+        // targets a track), so a kind change cannot reach it today; it is checked for the rule.
         .filter(|line| same_node(&line.source) && same_node(&line.destination))
         .filter_map(|line| {
             let index = predecessor
