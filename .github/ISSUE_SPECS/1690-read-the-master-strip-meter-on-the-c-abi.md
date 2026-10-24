@@ -219,3 +219,5 @@ The issue splits in two slices.
   existing parity row `both_hosts_designate_the_master_strip_after_an_empty_boot_alike`
   (`hosts/host-web/tests/control_parity.rs`) rather than adding one. Gates 1, 3, 4, 5 and 7 are
   #1690b's; gate 2's C ABI record half also moves there.
+  #1690b also gives `master_gain_reduction` its single host-core test (gate 2, in the owning
+  crate) and removes that role from the host-web tests.

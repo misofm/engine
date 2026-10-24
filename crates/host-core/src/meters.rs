@@ -408,7 +408,8 @@ pub trait GainReductionTaps {
 /// or after its arm sample ([`window_since_arm`]), acknowledges the window and folds its
 /// [`strip_reduction_db`] into the tap's strip word by maximum (from `0.0`). A strip outside the
 /// frame is skipped. [`MeterValidity::GAIN_REDUCTION`] is set exactly when some tap folded; the
-/// master's reading is [`MeterFrame::master_gain_reduction`] of the folded frame. Allocation-free, no runtime-checked index, bounded by the visited taps.
+/// master's reading is [`MeterFrame::master_gain_reduction`] of the folded frame.
+/// Allocation-free, no runtime-checked index, bounded by the visited taps.
 #[inline]
 pub fn fold_gain_reduction(frame: &mut MeterFrame, taps: &mut impl GainReductionTaps) {
     for slot in &mut frame.strip_gain_reduction_db {
@@ -898,8 +899,8 @@ impl MeterDelivery {
     /// Fold the closed windows into the frame (#1582 D1): at most one published window per call.
     ///
     /// `meters` are the rendering plan's strip meter consumers, in strip order; `taps` its
-    /// observation taps; `next_sample` the next block's first sample. Returns the frame when this call published one, else `None` and leaves the frame
-    /// as it was.
+    /// observation taps; `next_sample` the next block's first sample. Returns the frame when this
+    /// call published one, else `None` and leaves the frame as it was.
     ///
     /// Groups the strip meters' heads: equal groups (handle or carried handle, reset generation,
     /// sequence, span and frames) are one candidate window; a sequence gap drops only the older
