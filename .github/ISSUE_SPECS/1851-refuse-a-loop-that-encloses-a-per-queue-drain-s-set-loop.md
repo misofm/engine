@@ -58,8 +58,13 @@ queue, `mem::take`, and the `(&mut it).enumerate()` index.
   alone); `receiver.rs` `pop-receiver-swapped-in-outer-loop` (scope note (b)). Left as is (c): the
   `while` / `loop` outers (`bounded-drain-inside-outer-loop`, `wrapped-outer-while`, `adv/a11`,
   `adv/a17`, `rt-shapes/e10`, `per_queue_inside_an_unbounded_outer_loop`).
-- Not done (optional in the scope note): the `outermost` window of `pops_the_counted_queue` now
-  has no row of its own; it was not proved dead in this PR.
+- Verifier MINOR (folded): the `outermost` window of `pops_the_counted_queue` was dead and is
+  deleted; D1.3's window now ends with the counted loop (`steps[at]`). Reason: `select::selects`
+  runs first (`&&`), a loop that starts after the count cannot select the counted receiver (its
+  root resolves at the count, outside the loop's pattern, and a rebinding inside the loop makes
+  the pop's root another binding, D1.2), and a loop before `top` is refused before either rule
+  runs. So the search always found `at`; the verifier's `assert_eq!(outermost, at)` mutant stayed
+  green on all 240 tests and the real tree. D1.3's wording ("the end of the loop") is unchanged.
 
 ## Evidence (attempt 1)
 

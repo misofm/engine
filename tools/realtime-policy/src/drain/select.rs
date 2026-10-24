@@ -6,9 +6,10 @@
 //! outward over the loops between the counted loop and the region's top. For a per-queue form
 //! ([`super::per_queue`]) it starts from the queue collection `<Q>` of the pass loop's
 //! `<Q>.iter_mut()` and goes outward over the loops that enclose the set loop: the form's own pass
-//! count loop, between the set loop and the pass loop, is [`super::outer`]'s alone. It holds one receiver at a
-//! time, a root identifier with `.field`, `[<index>]` and zero-argument `.method()` steps, and
-//! resolves the root with the one resolver ([`super::scope`]). A loop selects in one of three ways:
+//! count loop, between the set loop and the pass loop, is [`super::outer`]'s alone. It holds one
+//! receiver at a time, a root identifier with `.field`, `[<index>]` and zero-argument `.method()`
+//! steps, and resolves the root with the one resolver ([`super::scope`]). A loop selects in one of
+//! three ways:
 //!
 //! - **Pattern root.** The root is bound by this `for` loop's pattern, in the slot of the element
 //!   of its collection (`for control in &mut controls`, `for (index, queue) in
