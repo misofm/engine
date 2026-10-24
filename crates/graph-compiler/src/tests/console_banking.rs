@@ -679,7 +679,9 @@ impl Rng {
 /// bypass on each console slot, its own parameter values ([`VARIANTS`]), a mono or stereo feed, a
 /// gain that is silent, quiet, or hot (+6 to +18 dBFS peak, so every limiter and compressor works
 /// its gain path), and now and then a NaN input sample, which the input section's bank sanitizes on
-/// its lane alone.
+/// its lane alone. One seed in three then gives most tracks one shared insert chain, so partial
+/// insert cohorts at and above the padding threshold form and bind padded (#888); those draws
+/// come last, so every other seed's session is the one it always was.
 fn generate(seed: u64) -> (Console, Vec<TrackShape>) {
     let mut rng = Rng::new(seed);
     let n = TRACK_COUNTS[rng.below(TRACK_COUNTS.len() as u64) as usize];
@@ -693,7 +695,7 @@ fn generate(seed: u64) -> (Console, Vec<TrackShape>) {
         pre: kinds[..split].to_vec(),
         post: kinds[split..].to_vec(),
     };
-    let tracks = (0..n)
+    let mut tracks: Vec<TrackShape> = (0..n)
         .map(|_| TrackShape {
             feed: Feed {
                 gain: match rng.below(8) {
@@ -711,6 +713,16 @@ fn generate(seed: u64) -> (Console, Vec<TrackShape>) {
             variant: rng.below(VARIANTS.len() as u64) as usize,
         })
         .collect();
+    if rng.below(3) == 0 {
+        let shared: Vec<Kind> = (0..1 + rng.below(2))
+            .map(|_| ELIGIBLE[rng.below(ELIGIBLE.len() as u64) as usize])
+            .collect();
+        for track in &mut tracks {
+            if rng.chance(800) {
+                track.inserts.clone_from(&shared);
+            }
+        }
+    }
     (console, tracks)
 }
 
@@ -724,11 +736,13 @@ fn generate(seed: u64) -> (Console, Vec<TrackShape>) {
 /// and padded remainders at every count the gate names, so a whole-bank decision that is not
 /// bit-neutral per lane moves some track's bits here. Each track is read at its post-pan stage,
 /// so a defect cannot hide in the session output's sum. Every seed must bind every console slot
-/// (the compile refuses otherwise), and the sweep must reach a padded bank with a bypassed lane
-/// and a padded mono bank.
+/// (the compile refuses otherwise), and the sweep must reach a padded bank with a bypassed lane,
+/// a padded mono bank and a padded insert bank (#888).
 ///
 /// Red (measured, #1098 evidence): a limiter bank that skips the gain path for every lane when its
 /// first lane is quiet; a padded lane fed anything but `+0.0`; the rack scattering a padded lane.
+/// The padded insert banks (#888) put the same clauses in the dynamic rack, where a clone lane
+/// leaking into an active one moves an insert's bits.
 #[test]
 fn randomized_console_sessions_render_the_per_node_bits_on_every_track() {
     const BLOCKS: u64 = 12;
@@ -740,6 +754,7 @@ fn randomized_console_sessions_render_the_per_node_bits_on_every_track() {
         .expect("a vector host")
         .lanes() as usize;
     let (mut padded_with_bypass, mut padded_mono, mut poisoned_beside_a_mate) = (0, 0, 0);
+    let mut padded_inserts = 0;
     for seed in 0..seeds {
         let (console, tracks) = generate(seed);
         let model = console_session(&console, &tracks);
@@ -776,6 +791,14 @@ fn randomized_console_sessions_render_the_per_node_bits_on_every_track() {
             });
             padded_with_bypass += usize::from(bypassed);
         }
+        padded_inserts += report
+            .bound_slots
+            .iter()
+            .filter(|bound| {
+                report.plan.groups[bound.group].rack == RackLocation::Dynamic
+                    && bound.members.len() < lanes
+            })
+            .count();
         let poisoned = |member: &EffectNodeId| {
             tracks[member.track_id.as_str()[2..]
                 .parse::<usize>()
@@ -798,13 +821,17 @@ fn randomized_console_sessions_render_the_per_node_bits_on_every_track() {
     }
     println!(
         "#1098 randomized console differential: {seeds} seeds, padded banks with a bypassed lane \
-         {padded_with_bypass}, padded mono banks {padded_mono}, effect banks holding a poisoned \
-         track beside a bank-mate {poisoned_beside_a_mate}"
+         {padded_with_bypass}, padded mono banks {padded_mono}, padded insert banks \
+         {padded_inserts}, effect banks holding a poisoned track beside a bank-mate \
+         {poisoned_beside_a_mate}"
     );
     assert!(
-        padded_with_bypass > 0 && padded_mono > 0 && poisoned_beside_a_mate > 0,
-        "the sweep reaches a padded bank with a bypassed lane, a padded mono bank and a poisoned \
-         track beside a bank-mate"
+        padded_with_bypass > 0
+            && padded_mono > 0
+            && padded_inserts > 0
+            && poisoned_beside_a_mate > 0,
+        "the sweep reaches a padded bank with a bypassed lane, a padded mono bank, a padded insert \
+         bank and a poisoned track beside a bank-mate"
     );
 }
 

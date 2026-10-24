@@ -62,3 +62,54 @@ console effects with per-track inserts*) splits this issue's two halves.
 - **Dependencies** become P2b, whose mask and lane bookkeeping this reuses. #887 is optional.
 - **Gates** 1 and 2 apply to the kept half: sessions whose EQ insert cohort has a member lacking
   the slot.
+
+## Decision and evidence record (2026-10-24, backlog sprint, attempt 1; closes #888 and #889)
+
+Narrowed to the planner policy, one PR for #888 and #889 (root scope note).
+
+- **Absent-member lanes: delivered as policy.** The mechanism shipped in P2a-P2e, #887 and #1893.
+  `banks::pads(group, width)` is now `console OR active_count() >= min_padded_insert_members(width)`.
+  The planner constant is W=4: 2 and W=8: 3 (root decision). It comes from the H5 arithmetic
+  (`docs/handoffs/console-strip-2026-09-29/VERIFY.md`, H5): a padded eight-lane bank of three
+  slots costs about 9.3 µs and a per-node track about 4.2 µs, so padding wins from three members
+  at eight lanes. At four lanes, H5's "break-even probably near one member" gives two.
+  **Reopen** when a measured per-node row exists at either width. There is no benchmark row: no
+  per-node isolate exists, and production never runs a tuning mode.
+  `stranded_mono_tracks` keeps `!pads`, so an insert remainder below k still strands (#971).
+  Decision 12's Banking bullet gains one sentence: a partial insert cohort pads from k members.
+  Class A: padding never moves an active lane's bits (coupling rule).
+- **Identity slots (a member lacks a slot of its leader): retired, not delivered.** That needs a
+  per-lane bypass in every bank kernel, which #96 F7 refused, or a per-slot save/restore copy
+  (no-unnecessary-copies rule). `rack::BankChain` runs every slot over the whole resident block,
+  and the contract admits prefix masks only (`effect.bank.mask_not_prefix`). The two 2026-09-27
+  comments on #888 rule out identity coefficients as well: they are not exact on `-0.0`/inf, and
+  a whole-bank D7 reaches bank-mates. This needs a new issue with its own design.
+- **Silent skip (root question).** When the misaligned fixture's tail padded, the `skips > 0`
+  check of `misaligned_lane_sets_decline_the_merge` failed. Cause, read from per-chain counters:
+  the padded insert bank's padded lanes report at rest (rest mask `0b11110000`). Its active
+  lanes' compressor and limiter are not at rest within the fixture's 12 blocks, the same as every
+  full cohort's (rest `0`). Before #888 the per-node tail fed a builtin-only chain, which gathered
+  exact zeros and skipped 3 blocks. That chain is now fed by the padded bank, which renders.
+  There is no padding defect: the skip moved with the fixture's shape. The test now uses `W - 1`
+  bare tracks, so the stripped remainder is one track, below k at both widths, and the skip is
+  counted again. One more fact: the scatter-redirect count equals the per-node tail's size
+  (`(64 - bare) % W`: checked with tails of 1 and 2), not the bare count.
+- **Tests (keep the claim; shrink below k where the claim is per-node, pooling or replan):**
+  - `bank_padding`: extended. Counts {1, k-1, k, W-1, W+3}, with k written out in the test. k
+    members pad and k-1 do not, and every plan renders the Scalar oracle's bits.
+  - `a_mono_track_that_fills_a_cohort_is_not_pooled_as_stereo`: shrunk. Only `ch00` keeps the
+    limiter (a remainder of 1), so the per-program rule still moves a track and #971's does not.
+  - `the_mono_remainder_stays_when_moving_it_binds_no_more_banks`: shrunk to one mono track.
+  - `a_move_that_binds_as_many_banks_as_it_loses_is_not_kept`: one mono track and `W + k - 1`
+    compressors. The trial's remainder of k-1 binds nothing; the move gains 2 and loses 2.
+  - `the_rule_not_the_bank_gain_check_picks_the_moved_tracks`: P's stereo remainder is k-1, which
+    the moved track lifts to k; T keeps one mono limiter.
+  - The two replan tests (#1001): the stereo remainder is k-1, so the trial never binds it, and
+    the move lifts it to k.
+  - `a_console_track_is_never_pooled_as_stereo_to_fill_a_bank`: the stereo inserts are k-1.
+  - `rack_placement_changes_the_bank_but_never_the_samples`: the counts are restated, because
+    the claim is the bank count. Ten tracks leave a remainder of 2, which pads at W=4 and stays
+    per node at W=8; the expected banks, the per-node count and the zero-plane bytes are derived
+    from the threshold.
+  - The randomized per-node-bits oracle now also asserts that the sweep reaches a padded insert
+    bank.
