@@ -1392,6 +1392,27 @@ async function testMainRealm() {
       assert.throws(() => host.onControlEvent("not a function"));
     }
 
+    // Issue #1294a: a watermark post reaches every listener as one frozen record of its six
+    // words, and unsubscribing stops delivery. (A malformed post fails the host, below.)
+    {
+      const words = {
+        revision: 7n, sample: 256n, outcome: 2n, exactCount: 6n, transitionFallbackCount: 1n,
+        supersededCount: 0n,
+      };
+      const deliver = (extra = {}) => host.node.port.onmessage({
+        data: { tag: "miso.watermark.v1", ...words, ...extra },
+      });
+      const seen = [];
+      const off = host.onWatermark((watermark) => seen.push(watermark));
+      deliver();
+      assert.deepEqual(seen, [words], "the listener gets the posted words");
+      assert(Object.isFrozen(seen[0]));
+      off();
+      deliver({ revision: 8n });
+      assert.equal(seen.length, 1, "an unsubscribed listener hears nothing more");
+      assert.throws(() => host.onWatermark("not a function"));
+    }
+
     failSource = true;
     const failedStorage = new ArrayBuffer(16);
     const failedSource = host.submitSource({
@@ -1463,6 +1484,28 @@ async function testMainRealm() {
       await errorResult(controlHost.control(new Uint8Array([1])), 255);
       controlMutation = null;
       await controlHost.dispose().catch(() => undefined);
+    }
+
+    // Issue #1294a: a malformed watermark post is a schema failure, sticky for the host.
+    for (const malformed of [
+      { revision: 1, sample: 0n }, { revision: -1n, sample: 0n }, { revision: 1n },
+    ]) {
+      const watermarkHost = await createMisoAudioWorkletHost({
+        context,
+        document: new Uint8Array(),
+        options: limits,
+        simd128ModuleUrl: "simd.wasm",
+        workletModuleUrl: "processor.js",
+      });
+      const doomed = watermarkHost.status();
+      watermarkHost.node.port.onmessage({
+        data: {
+          tag: "miso.watermark.v1", outcome: 1n, exactCount: 1n, transitionFallbackCount: 0n,
+          supersededCount: 0n, ...malformed,
+        },
+      });
+      await errorResult(doomed, 255);
+      await watermarkHost.dispose().catch(() => undefined);
     }
 
     // #1536: concurrent status calls share one read and are never refused for being in flight.
@@ -2589,7 +2632,15 @@ function createFakeExports(quantum, backend = 1, liveControlsAttached = true, su
     // Issue #1570b D1: the lanes' queued event frames (lane 0 reliable, lane 1 lossy), every
     // `control_event` call the fake received, and the result it answers with.
     events: [[], []], eventCalls: [], eventResult: 0,
+    // Issue #1294a: the watermark record `watermark_read` copies, the result it answers with (a
+    // non-zero one writes nothing, as the export's `BACKPRESSURE` does), and its call count.
+    watermark: {
+      revision: 3n, sample: 0n, outcome: 1n, exactCount: 3n, transitionFallbackCount: 0n,
+      supersededCount: 0n,
+    },
+    watermarkResult: 0, watermarkReads: 0, watermarkBytes: 96,
   };
+  const watermarkPointer = 66000;
   // What `control_response_*` reads now: the last control command's response, or the event frame
   // the last `control_event` dequeued (empty for an empty lane), as the real exports share their
   // staging (issue #1570b D1).
@@ -2827,6 +2878,20 @@ function createFakeExports(quantum, backend = 1, liveControlsAttached = true, su
     miso_engine_web_v1_service: (handle) => {
       calls.service.push(handle);
       return calls.serviceResult;
+    },
+    miso_engine_web_v1_watermark_ptr: () => watermarkPointer,
+    miso_engine_web_v1_watermark_read: () => {
+      calls.watermarkReads += 1;
+      if (calls.watermarkResult !== 0) return calls.watermarkResult;
+      const record = new DataView(memory.buffer, watermarkPointer, 96);
+      const words = calls.watermark;
+      record.setUint32(0, calls.watermarkBytes, true);
+      record.setUint32(4, 0, true);
+      [
+        words.revision, words.sample, words.outcome, words.exactCount,
+        words.transitionFallbackCount, words.supersededCount,
+      ].forEach((word, index) => record.setBigUint64(8 + index * 8, word, true));
+      return 0;
     },
     miso_engine_web_v1_control_allocation_count: () => calls.controlAllocations,
     miso_engine_web_v1_control_request_ptr: (_handle, length) => {
@@ -3735,6 +3800,65 @@ async function testProcessor() {
       const steps = fake.calls.service.length;
       processor.port.onmessage({ data: { tag: "miso.service.v1" } });
       assert.equal(fake.calls.service.length, steps, "no service step after dispose");
+    }
+
+    // Issue #1294a (D3): after each service step the handler reads the watermark and posts
+    // `miso.watermark.v1` only when its `(revision, first_sample)` pair changed, on a tick and on a
+    // request alike, never from `process()`; the boot watermark is the baseline, and a
+    // `BACKPRESSURE` read skips one message without failing the worklet.
+    {
+      const { processor, fake } = makeProcessor();
+      const watermarks = () => processor.port.posts
+        .map((post) => post.message).filter((message) => message.tag === "miso.watermark.v1");
+      assert.equal(fake.calls.watermarkReads, 1, "boot reads the baseline watermark");
+      processor.port.onmessage({ data: { tag: "miso.service.v1" } });
+      assert.equal(fake.calls.watermarkReads, 2, "a tick reads the watermark");
+      assert.equal(watermarks().length, 0, "an unchanged watermark is not posted");
+      Object.assign(fake.calls.watermark, {
+        revision: 5n, sample: 128n, outcome: 3n, exactCount: 4n, transitionFallbackCount: 1n,
+      });
+      processor.process([], [[new Float32Array(64), new Float32Array(64)]]);
+      assert.equal(fake.calls.watermarkReads, 2, "process() never reads the watermark");
+      processor.port.onmessage({ data: { tag: "miso.service.v1" } });
+      assert.deepEqual(watermarks(), [{
+        tag: "miso.watermark.v1", revision: 5n, sample: 128n, outcome: 3n, exactCount: 4n,
+        transitionFallbackCount: 1n, supersededCount: 0n,
+      }], "an advance is posted once, with the record's words");
+      processor.port.onmessage({ data: { tag: "miso.service.v1" } });
+      assert.equal(watermarks().length, 1, "the same pair is not posted again");
+      fake.calls.watermarkResult = 6;
+      Object.assign(fake.calls.watermark, { revision: 6n, sample: 192n, exactCount: 5n });
+      processor.port.onmessage({ data: { tag: "miso.service.v1" } });
+      assert.equal(watermarks().length, 1, "a BACKPRESSURE read posts nothing");
+      assert.equal(processor.ready, true, "a BACKPRESSURE read is not sticky");
+      fake.calls.watermarkResult = 0;
+      processor.port.onmessage({ data: { tag: "miso.status.v1", requestId: 1 } });
+      assert.deepEqual(
+        processor.port.posts.slice(-2).map((post) => post.message.tag),
+        ["miso.status.v1", "miso.watermark.v1"],
+        "a request is followed by the watermark its service step advanced",
+      );
+      assert.equal(watermarks().at(-1).revision, 6n, "the next read posts the newest record");
+      assert.equal(watermarks().at(-1).sample, 192n);
+      // Two advances between two reads: the first a transition fallback, the second exact. The
+      // record's flags are the second's alone; the post's outcome carries both.
+      Object.assign(fake.calls.watermark, {
+        revision: 8n, sample: 320n, outcome: 1n, exactCount: 6n, transitionFallbackCount: 2n,
+      });
+      processor.port.onmessage({ data: { tag: "miso.service.v1" } });
+      assert.equal(watermarks().at(-1).outcome, 3n, "a count that rose since the last post names its flag");
+    }
+    for (const [what, mutate, result] of [
+      ["a refused read", (calls) => { calls.watermarkResult = 5; }, 5],
+      ["a record of the wrong size", (calls) => { calls.watermarkBytes = 88; }, 255],
+    ]) {
+      const { processor, fake } = makeProcessor();
+      mutate(fake.calls);
+      processor.port.onmessage({ data: { tag: "miso.service.v1" } });
+      assert.equal(processor.ready, false, `${what} is sticky`);
+      const failure = processor.port.posts.at(-1).message;
+      assert.equal(failure.tag, "miso.error.v1", `${what} posts the error`);
+      assert.equal(failure.result, result, `${what} carries its result`);
     }
 
     // Issue #1562a D1, gate 7's worklet half: a `miso.control.v1` message stages its frame,

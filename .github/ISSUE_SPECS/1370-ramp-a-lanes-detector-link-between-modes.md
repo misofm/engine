@@ -127,3 +127,72 @@ lane* (#1371) connects it to edits.
 ## Dependencies
 
 - *Lower the link mode to per-lane state in the linked effects' banks* (#1368).
+
+## Decision record (root split and 1370a, 2026-10-24)
+
+- **Split.** 1370a: the trait entry point (D1), the shared glide (D2-D3), the payload (D6) and
+  gates 1, 2, 5, 6 in the compressor and the gate-expander, and the `f64` reference
+  (`dsp_reference::{ReferenceLinkGlide, reference_link_blend}`, and the reference gate's
+  `reference_gate_expander_process_with_link_glide`). 1370b, after #1894 PR 2 merges: the
+  transient shaper and the true-peak limiter (D4, D5, gates 3-4). De-esser and dynamic-eq stay out
+  (R5, successor issue). No control-row change: the row stays `RebuildOnly` until #1371 (R1).
+- **Class A.** Every block with no glide in flight renders main's bits: the glide rides the
+  ramping prefix, and only a prefix with a glide in flight takes the blend (`Glide` law, `GLIDE`
+  body). The existing bank, padding, swap and digest tests pass unchanged. A glide is the
+  feature, not a class-B move.
+- **D1 additions.** `samples > LINK_GLIDE_MAX_SAMPLES` (`2^24`, the exact `f32` countdown) also
+  refuses; a bank's padded lane refuses. `link_glide_weights` and `link_glide_mode` sit beside
+  the trait methods in `effect-contract` as the shared statement of D2's weights.
+- **D3 as built.** `retarget_link` sets the lane's mode (and its masks) to the target at once;
+  the weights carry the transition. A lane still in flight after a frame's advance takes the
+  blend; every other lane, the arriving one included, takes the `select` form. A blend at rest
+  weights equals the `select` form on finite words, but not on non-finite ones (`0 * inf`), so the
+  `select` is load-bearing.
+- **Mode as a default.** The retargeted mode is the lane's mode: a full reset keeps it and seats
+  the weights at rest, a discontinuity reset snaps a glide to it, a lane swap moves it (and rests
+  the weights until the swap's payload restore brings a glide), and the D7 recovery leaves a glide
+  alone.
+- **D6 as built.** Each channel section gains the two weights (8 words; compressor 37 -> 45,
+  gate 30 -> 38). The mode is the weights' targets (`link_glide_mode`), so it takes no word.
+  Restore refuses (`effect.state.link`) a weight outside `[0, 1]`, `-0.0`, a moving weight with a
+  zero step, targets that are no supported mode's, or channels that disagree. A payload whose mode
+  is the lane's own commits the glide; one of another mode (today's plan-swap carry into a
+  successor prepared with a new mode) leaves the lane's own mode at rest, as before the glide.
+
+- **Gate ramp clock (attempt 2).** A parameter retarget (`apply_automation`) and a rate
+  retarget (`retime_rate`) each raise the gate's bank clock to at least 64 samples (`max`), never
+  lower it: before, `= RAMP_SAMPLES` cut a longer glide (its weights froze mid-flight, at 4,608
+  samples left in the verifier's probe). The oracle's 4,800-sample case sends both a threshold
+  span (re-sent at its value) and an attack span on every lane in one block, and is red with
+  either site alone reverted to `= RAMP_SAMPLES`: `apply_automation` red, `retime_rate` red. Bits
+  are unchanged for every block without a glide: before #1370 the clock never held more than 64.
+- **Collapsed body.** It has no glide test of its own: on a collapsed lane `L = R`, so the three
+  link laws, and every blend of them, give the same level.
+- **Known limit for #1371.** A mid-glide plan-swap carry into a successor prepared at another
+  mode seats that mode at rest (D6 above): a step, correct while a link change is rebuild-only.
+  #1371 must either prepare the successor at the lane's carried mode and retarget after
+  adoption, or keep the carried words and retarget them to the lane's mode.
+
+## Test value (1370a)
+
+- `glide_tests::a_glide_tracks_the_f64_blend_into_the_target_law` (both effects, f32/Simd4/Simd8):
+  a blend with its weights swapped, a glide the ramping prefix does not cover, or a retarget that
+  leaves the old masks renders away from the `f64` model. Its longer glide crossed by a parameter
+  ramp on every lane (gate 4,800 samples with a threshold and an attack span, compressor 300 with
+  a makeup ramp) turns red on a parameter or rate retarget that cuts the glide (the gate's clock,
+  red at each site), and its compressor sidechain leg on a glide that skips the sidechain body; each
+  case also asserts the glide arrives exactly.
+- `glide_tests::an_out_of_range_glide_is_refused_and_changes_nothing` (both): a dropped `2^24`
+  bound, or a padded lane or scalar track 1 accepted, returns `true` or moves a payload word.
+- `dsp-reference` `link_glide::tests::rest_weights_give_the_three_link_laws_and_the_glide_arrives_exactly`:
+  a reference whose rest weights do not give the three laws, or whose glide arrives a frame late,
+  would mislead both effects' oracle tests in the same way as a matching production defect.
+- `kernel::glide_law_tests::a_glide_lands_on_its_target_law_and_a_resting_lane_never_leaves_its_own`
+  (both): a blend applied on the arrival frame or to resting lanes turns a partner's `inf` into
+  NaN where the `select` form would not.
+- `glide_tests::a_glide_moves_no_bank_mates_bit_and_allocates_nothing` (both, gates 2 and 6): a
+  glide body that picks the wrong output arm or skips a bank-mate's parameter ramps, a retarget
+  that reaches other lanes, or a heap call in the retarget moves a bank-mate's bit or the counter.
+- `glide_tests::a_lane_snapshotted_mid_glide_continues_bit_for_bit_and_forged_weights_are_refused`
+  (both, gate 5): a restore that drops the weights, adopts them under another mode, keeps a prior
+  glide, or admits a weight outside `[0, 1]` turns it red.

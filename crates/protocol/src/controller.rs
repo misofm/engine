@@ -152,8 +152,8 @@ pub enum DocumentReplaceRefusal {
 /// Eager retained collection capacities for controller/provider configuration state.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ControllerRetainedCapacity {
-    /// Meter handles retained independently by the controller and provider.
-    pub meter_handles: usize,
+    /// Meter table entries retained independently by the controller and provider.
+    pub meters: usize,
     /// Counter identifiers retained independently by the controller and provider.
     pub counter_ids: usize,
 }
@@ -165,17 +165,18 @@ pub struct ControllerResourceAllocationError;
 fn retained_telemetry_configuration(
     capacity: ControllerRetainedCapacity,
 ) -> Result<TelemetryConfiguration, ControllerResourceAllocationError> {
-    let mut meter_handles = Vec::new();
-    meter_handles
-        .try_reserve_exact(capacity.meter_handles)
+    let mut meters = Vec::new();
+    meters
+        .try_reserve_exact(capacity.meters)
         .map_err(|_| ControllerResourceAllocationError)?;
     let mut counter_ids = Vec::new();
     counter_ids
         .try_reserve_exact(capacity.counter_ids)
         .map_err(|_| ControllerResourceAllocationError)?;
     Ok(TelemetryConfiguration {
-        meter_handles,
+        meters,
         meter_period_blocks: 0,
+        meter_window_blocks: None,
         counter_ids,
         counter_period_blocks: 0,
         diagnostics_enabled: false,
@@ -699,11 +700,60 @@ pub trait ControlProvider {
     /// Persist and echo one complete typed endpoint-local telemetry configuration idempotently.
     ///
     /// A provider refuses a configuration it can never serve with a typed error and changes
-    /// nothing (#1351 D2): a counter ID it does not report is [`ParameterProviderError::NotFound`].
+    /// nothing (#1351 D2): a counter ID it does not report is [`ParameterProviderError::NotFound`];
+    /// a meter table it cannot serve is refused with its code and the entry it names (#1583 D3).
+    /// The controller has already refused a strip entry the committed model does not have, and
+    /// writes the echo's meter window from [`Self::meter_window_blocks`].
     fn telemetry_configure(
         &mut self,
         configuration: TelemetryConfiguration,
-    ) -> Result<TelemetryConfiguration, ParameterProviderError>;
+    ) -> Result<TelemetryConfiguration, TelemetryRefusal>;
+    /// The provider's meter window in blocks, or `None` when it has no meter delivery (#1583 D4).
+    fn meter_window_blocks(&self) -> Option<core::num::NonZeroU32>;
+}
+
+/// A provider's refusal of a `TELEMETRY_CONFIGURE` (#1351 D2, #1583 D3): the typed error, and the
+/// diagnostic the response carries. The refusal changes nothing.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct TelemetryRefusal {
+    /// The typed error, which sets the response status.
+    pub error: ParameterProviderError,
+    /// The dotted diagnostic code, such as `meter.period`; `None` for `protocol.failure`.
+    pub code: Option<&'static str>,
+    /// What the diagnostic's path names.
+    pub path: TelemetryRefusalPath,
+}
+
+/// What a [`TelemetryRefusal`]'s diagnostic path names.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TelemetryRefusalPath {
+    /// Nothing: an empty path.
+    None,
+    /// The meter table entry at this zero-based index (`meters[i]`).
+    Meter(usize),
+    /// The meter period (`meter_period_blocks`).
+    MeterPeriod,
+}
+
+/// The span of one closed meter window a `METER_BATCH` reports (#1583 D2).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct MeterWindowSpan {
+    /// The window's first sample.
+    pub first_sample: SampleTime,
+    /// One past the window's last sample: the batch's `observed_sample`.
+    pub end_sample: SampleTime,
+    /// The window's sequence since the accepted configuration, from `1`.
+    pub window_sequence: u64,
+}
+
+impl From<ParameterProviderError> for TelemetryRefusal {
+    fn from(error: ParameterProviderError) -> Self {
+        Self {
+            error,
+            code: None,
+            path: TelemetryRefusalPath::None,
+        }
+    }
 }
 
 /// A provider's refusal of a `RESPONSE_GET`: the status and the diagnostic code the response
@@ -729,6 +779,9 @@ pub enum ParameterProviderError {
     ReplayExpired,
     /// The provider's bounded catalog or page limit was exceeded.
     LimitExceeded,
+    /// The request breaks a rule the provider owns, such as a meter period that is not a whole
+    /// number of its meter windows (#1583 D3).
+    InvalidField,
 }
 
 /// Small deterministic provider suitable for protocol conformance fixtures.
@@ -770,8 +823,9 @@ impl Default for MockProvider {
             diagnostics: Vec::new(),
             transport_state: TransportState::Stopped,
             telemetry_configuration: TelemetryConfiguration {
-                meter_handles: Vec::new(),
+                meters: Vec::new(),
                 meter_period_blocks: 0,
+                meter_window_blocks: None,
                 counter_ids: Vec::new(),
                 counter_period_blocks: 0,
                 diagnostics_enabled: false,
@@ -999,11 +1053,10 @@ impl ControlProvider for MockProvider {
     fn telemetry_configure(
         &mut self,
         configuration: TelemetryConfiguration,
-    ) -> Result<TelemetryConfiguration, ParameterProviderError> {
-        self.telemetry_configuration.meter_handles.clear();
+    ) -> Result<TelemetryConfiguration, TelemetryRefusal> {
         self.telemetry_configuration
-            .meter_handles
-            .extend_from_slice(&configuration.meter_handles);
+            .meters
+            .clone_from(&configuration.meters);
         self.telemetry_configuration.counter_ids.clear();
         self.telemetry_configuration
             .counter_ids
@@ -1014,6 +1067,10 @@ impl ControlProvider for MockProvider {
         self.telemetry_configuration.minimum_diagnostic_severity =
             configuration.minimum_diagnostic_severity;
         Ok(configuration)
+    }
+    /// The fixture's meter delivery has a one-block window (#1583 D4).
+    fn meter_window_blocks(&self) -> Option<core::num::NonZeroU32> {
+        Some(core::num::NonZeroU32::MIN)
     }
 }
 
@@ -1533,7 +1590,7 @@ enum PendingTelemetryEvent {
     None,
     Meter {
         revision: SessionRevision,
-        observed_sample: SampleTime,
+        window: MeterWindowSpan,
         len: u16,
         records: [MeterRecord; crate::MAXIMUM_TELEMETRY_PAGE_RECORDS],
     },
@@ -1575,6 +1632,9 @@ pub struct ProtocolController<P: ControlProvider> {
     config: ProtocolControllerConfig,
     next_reliable_event_sequence: u64,
     telemetry_configuration: TelemetryConfiguration,
+    /// How many `TELEMETRY_CONFIGURE` commands this endpoint accepted (#1583 D5): a host that
+    /// serves meter batches restarts their sequence when it moves.
+    telemetry_generation: u64,
     diagnostic_event_slots: Box<[RetainedDiagnosticSlot]>,
     /// Prepared storage for the keys of queued `OBSERVATION_ENDED` events (#1584 D6a): one cell
     /// more than the reliable queue has slots, because one popped event stays pending in
@@ -1622,6 +1682,7 @@ impl<P: ControlProvider> ProtocolController<P> {
             config,
             next_reliable_event_sequence: 1,
             telemetry_configuration: retained_telemetry_configuration(capacity)?,
+            telemetry_generation: 0,
             diagnostic_event_slots: diagnostics.into_boxed_slice(),
             observation_ended_cells: observation_ended_cells.into_boxed_slice(),
             pending_reliable_event: None,
@@ -1636,7 +1697,7 @@ impl<P: ControlProvider> ProtocolController<P> {
     #[must_use]
     pub fn retained_configuration_capacity(&self) -> ControllerRetainedCapacity {
         ControllerRetainedCapacity {
-            meter_handles: self.telemetry_configuration.meter_handles.capacity(),
+            meters: self.telemetry_configuration.meters.capacity(),
             counter_ids: self.telemetry_configuration.counter_ids.capacity(),
         }
     }
@@ -1690,7 +1751,7 @@ impl<P: ControlProvider> ProtocolController<P> {
             codec,
             config,
             ControllerRetainedCapacity {
-                meter_handles: 0,
+                meters: 0,
                 counter_ids: 0,
             },
         )
@@ -3402,12 +3463,19 @@ impl<P: ControlProvider> ProtocolController<P> {
         &self.telemetry_configuration
     }
 
-    /// Stage one mock/control-only meter batch for explicitly configured lossy event egress.
-    /// This does not create production meters or touch a render plan.
+    /// How many `TELEMETRY_CONFIGURE` commands the endpoint accepted (#1583 D5). An exact replay
+    /// answers from the cache and does not move it.
+    #[must_use]
+    pub const fn telemetry_configuration_generation(&self) -> u64 {
+        self.telemetry_generation
+    }
+
+    /// Stage the meter batch of one closed meter window for configured lossy event egress
+    /// (#1583 D2). Every record's handle is at most the meter table's length.
     pub fn stage_meter_batch_event(
         &mut self,
         revision: SessionRevision,
-        observed_sample: SampleTime,
+        window: MeterWindowSpan,
         records: &[MeterRecord],
     ) -> Result<(), EventEgressError> {
         if self.structural_outstanding() {
@@ -3416,23 +3484,24 @@ impl<P: ControlProvider> ProtocolController<P> {
             ));
         }
         if !self.config.provider_features.meters
-            || self.telemetry_configuration.meter_handles.is_empty()
+            || self.telemetry_configuration.meters.is_empty()
             || self.telemetry_configuration.meter_period_blocks == 0
         {
             return Err(EventEgressError::Disabled);
         }
         self.codec
             .encoded_meter_batch_len(MeterBatch {
-                observed_sample,
+                observed_sample: window.end_sample,
+                first_sample: window.first_sample,
+                window_sequence: window.window_sequence,
                 records,
             })
             .map_err(EventEgressError::Encode)?;
-        if records.iter().any(|record| {
-            !self
-                .telemetry_configuration
-                .meter_handles
-                .contains(&record.handle)
-        }) {
+        let table = self.telemetry_configuration.meters.len();
+        if records
+            .iter()
+            .any(|record| usize::try_from(record.handle).map_or(true, |handle| handle > table))
+        {
             return Err(EventEgressError::Encode(EncodeError::LimitExceeded));
         }
         for record in records {
@@ -3442,7 +3511,9 @@ impl<P: ControlProvider> ProtocolController<P> {
                     handle: record.handle,
                     component: record.component as u16,
                 },
-                observed_sample,
+                observed_sample: window.end_sample,
+                first_sample: window.first_sample,
+                window_sequence: window.window_sequence,
                 flags: record.flags,
                 value: record.value,
             });
@@ -3585,14 +3656,16 @@ impl<P: ControlProvider> ProtocolController<P> {
             PendingTelemetryEvent::None => return Ok(None),
             PendingTelemetryEvent::Meter {
                 revision,
-                observed_sample,
+                window,
                 len,
                 records,
             } => self.codec.encode_event_frame_into(
                 &TypedEventFrame {
                     revision: *revision,
                     payload: EventPayload::MeterBatch(MeterBatch {
-                        observed_sample: *observed_sample,
+                        observed_sample: window.end_sample,
+                        first_sample: window.first_sample,
+                        window_sequence: window.window_sequence,
                         records: &records[..usize::from(*len)],
                     }),
                 },
@@ -3707,7 +3780,11 @@ impl<P: ControlProvider> ProtocolController<P> {
             .or_else(|| self.queues.try_dequeue_telemetry().ok())
         {
             let revision = first.key.revision;
-            let observed_sample = first.observed_sample;
+            let window = MeterWindowSpan {
+                first_sample: first.first_sample,
+                end_sample: first.observed_sample,
+                window_sequence: first.window_sequence,
+            };
             let mut records = [EMPTY_METER_RECORD; crate::MAXIMUM_TELEMETRY_PAGE_RECORDS];
             records[0] = MeterRecord {
                 handle: first.key.handle,
@@ -3724,7 +3801,11 @@ impl<P: ControlProvider> ProtocolController<P> {
                 let Some(next) = self.queues.try_dequeue_telemetry().ok() else {
                     break;
                 };
-                if next.key.revision != revision || next.observed_sample != observed_sample {
+                // #1583 D2: one batch is one window of one revision.
+                if next.key.revision != revision
+                    || next.observed_sample != window.end_sample
+                    || next.window_sequence != window.window_sequence
+                {
                     self.pending_meter_record = Some(next);
                     break;
                 }
@@ -3742,7 +3823,7 @@ impl<P: ControlProvider> ProtocolController<P> {
             }
             self.pending_telemetry_event = PendingTelemetryEvent::Meter {
                 revision,
-                observed_sample,
+                window,
                 len: u16::try_from(len).expect("fixed telemetry batch length"),
                 records,
             };
@@ -3969,15 +4050,32 @@ impl<P: ControlProvider> ProtocolController<P> {
                 self.ok(Body::Transport(snapshot))
             }
             ControlCommand::TelemetryConfigure { configuration } => {
-                let configured = match self.provider.telemetry_configure(configuration.clone()) {
+                // #1583 D3: a strip entry names a strip of the committed model, checked before
+                // the provider sees the table.
+                let model = self.session.compiled().normalized_model();
+                if let Some(index) = configuration.meters.iter().position(|entry| {
+                    matches!(&entry.target, crate::MeterTarget::Strip(id)
+                        if !model.strips().any(|strip| strip.id.as_str() == &**id))
+                }) {
+                    return self.telemetry_refusal_outcome(TelemetryRefusal {
+                        error: ParameterProviderError::NotFound,
+                        code: Some("meter.strip.unknown"),
+                        path: TelemetryRefusalPath::Meter(index),
+                    });
+                }
+                let mut configured = match self.provider.telemetry_configure(configuration.clone())
+                {
                     Ok(configured) => configured,
                     // A refused configuration changes nothing: the stored one stays (#1351 D2).
-                    Err(error) => return self.non_ok(status_for_parameter(error), None),
+                    Err(refusal) => return self.telemetry_refusal_outcome(refusal),
                 };
-                self.telemetry_configuration.meter_handles.clear();
+                // #1583 D4: the echo carries the provider's meter window.
+                configured.meter_window_blocks = self.provider.meter_window_blocks();
                 self.telemetry_configuration
-                    .meter_handles
-                    .extend_from_slice(&configured.meter_handles);
+                    .meters
+                    .clone_from(&configured.meters);
+                self.telemetry_configuration.meter_window_blocks = configured.meter_window_blocks;
+                self.telemetry_generation = self.telemetry_generation.saturating_add(1);
                 self.telemetry_configuration.counter_ids.clear();
                 self.telemetry_configuration
                     .counter_ids
@@ -4167,6 +4265,40 @@ impl<P: ControlProvider> ProtocolController<P> {
 
     /// The outcome of a `RESPONSE_GET` refusal: its status and one error diagnostic that carries
     /// its code.
+    /// The outcome of a refused `TELEMETRY_CONFIGURE` (#1583 D3): its status, and its code and
+    /// path when it names one.
+    fn telemetry_refusal_outcome(&self, refusal: TelemetryRefusal) -> Outcome {
+        let Some(code) = refusal.code else {
+            return self.non_ok(status_for_parameter(refusal.error), None);
+        };
+        let path = match refusal.path {
+            TelemetryRefusalPath::None => Vec::new(),
+            TelemetryRefusalPath::Meter(index) => vec![
+                crate::PathSegment::Field("meters".to_owned()),
+                crate::PathSegment::Index(index as u64),
+            ],
+            TelemetryRefusalPath::MeterPeriod => {
+                vec![crate::PathSegment::Field("meter_period_blocks".to_owned())]
+            }
+        };
+        self.non_ok_value(
+            status_for_parameter(refusal.error),
+            NonOkResponse {
+                diagnostics: vec![Diagnostic {
+                    code: code.to_owned(),
+                    severity: crate::DiagnosticSeverity::Error,
+                    path,
+                    detail: None,
+                    operation_index: None,
+                    sample_time: None,
+                    provider_sequence: None,
+                }],
+                omitted_diagnostics: 0,
+                backpressure: None,
+            },
+        )
+    }
+
     fn response_error_outcome(&self, error: ResponseProviderError) -> Outcome {
         self.non_ok_value(
             error.status,
@@ -4645,6 +4777,7 @@ fn status_for_parameter(error: ParameterProviderError) -> StatusCode {
         ParameterProviderError::Unavailable => StatusCode::Unavailable,
         ParameterProviderError::ReplayExpired => StatusCode::ReplayExpired,
         ParameterProviderError::LimitExceeded => StatusCode::LimitExceeded,
+        ParameterProviderError::InvalidField => StatusCode::InvalidField,
     }
 }
 

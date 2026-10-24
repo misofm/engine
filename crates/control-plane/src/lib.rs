@@ -31,7 +31,7 @@
 pub(crate) use core::{alloc::Layout, mem::size_of, num::NonZeroUsize};
 pub(crate) use std::sync::{
     Arc, Mutex,
-    atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering},
+    atomic::{AtomicBool, AtomicU64, Ordering},
 };
 
 pub(crate) use effect_contract::TailSamples;

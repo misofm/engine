@@ -763,6 +763,8 @@ class MisoAudioWorkletHost {
   /// count of frames that arrived with none.
   #controlEventListeners = new Set();
   #discardedControlEvents = 0;
+  /// Issue #1294a: the listeners of the applied-revision watermark, in subscription order.
+  #watermarkListeners = new Set();
   #lastRequestId = 0;
   #stickyError = null;
   #disposed = false;
@@ -972,6 +974,30 @@ class MisoAudioWorkletHost {
       }
       const event = Object.freeze({ lane: message.lane, frame: message.frame });
       for (const listener of [...this.#controlEventListeners]) listener(event);
+      return;
+    }
+    // Issue #1294a: the worklet posts the applied-revision watermark each time it changes. It is
+    // state, not an event: the newest post supersedes every earlier one, so one with no listener
+    // is dropped uncounted.
+    if (message?.tag === "miso.watermark.v1") {
+      const words = [
+        "revision", "sample", "outcome", "exactCount", "transitionFallbackCount", "supersededCount",
+      ];
+      if (!hasExactFields(message, ["tag", ...words])
+          || words.some((word) => typeof message[word] !== "bigint" || message[word] < 0n
+            || message[word] > 0xffffffffffffffffn)) {
+        this.#fail(webError(255, this.#oldestRequestId()));
+        return;
+      }
+      const watermark = Object.freeze({
+        revision: message.revision,
+        sample: message.sample,
+        outcome: message.outcome,
+        exactCount: message.exactCount,
+        transitionFallbackCount: message.transitionFallbackCount,
+        supersededCount: message.supersededCount,
+      });
+      for (const listener of [...this.#watermarkListeners]) listener(watermark);
       return;
     }
     const pending = this.#pending.get(message?.requestId) ?? null;
@@ -1707,6 +1733,17 @@ class MisoAudioWorkletHost {
     return () => { this.#controlEventListeners.delete(listener); };
   }
 
+  /// @internal Subscribe to the applied-revision watermark (issue #1294a). Every listener is called
+  /// with `{ revision, sample, outcome, exactCount, transitionFallbackCount, supersededCount }`
+  /// (each a `bigint`) each time the watermark's `(revision, sample)` pair changes: the highest
+  /// revision in effect with every one before it, the first sample it was in effect, the outcome
+  /// flags the advance covered and the cumulative outcome counts. Returns the unsubscribe function.
+  onWatermark(listener) {
+    if (typeof listener !== "function") throw webError(1);
+    this.#watermarkListeners.add(listener);
+    return () => { this.#watermarkListeners.delete(listener); };
+  }
+
   /// @internal The count of engine events that arrived with no listener subscribed (issue #1570b D5).
   get discardedControlEvents() {
     return this.#discardedControlEvents;
@@ -1721,6 +1758,7 @@ class MisoAudioWorkletHost {
     this.#onMeterFrame = null;
     this.#onTelemetryFrame = null;
     this.#controlEventListeners.clear();
+    this.#watermarkListeners.clear();
     this.#port.onmessage = null;
     this.#port.onmessageerror = null;
     this.node.onprocessorerror = null;
