@@ -585,6 +585,12 @@ pub struct SessionState<A: ControlAdapter> {
     /// withdrawn candidate adds nothing; the control plane copies it into the provider's counters
     /// with `live_values_superseded`. Render does not touch it.
     pub(crate) strips_restarted: u64,
+    /// The session's `source_frames_discarded` count (#1699 D1): the accepted source frames
+    /// render never read because the caller's transaction removed or redeclared their source.
+    /// [`Self::synchronize_plan_epochs`] adds each retired plan's unread frames before the plan is
+    /// dropped (a carried ring left that plan's entry vacant, so it adds 0); session destroy adds
+    /// nothing. Monotone, saturating, never reset. Render does not touch it.
+    pub(crate) source_frames_discarded: u64,
     /// `u16` scratch the protocol decoder writes field offsets into. It is exactly
     /// `max_frame_bytes / 2` entries; the odd trailing byte of an odd frame limit used to buy a
     /// one-byte box that nothing ever read (audit F7).
@@ -1898,6 +1904,11 @@ where
         #[cfg(not(feature = "test-support"))]
         let hold = false;
         while !hold && let Ok((retired_epoch, retired_plan)) = self.retirer.try_reclaim() {
+            // #1699 D1/D3: a source the successor carried left a vacant entry, so what the
+            // retired plan still holds unread is a removed or redeclared source's discarded PCM.
+            self.source_frames_discarded = self
+                .source_frames_discarded
+                .saturating_add(retired_plan.unread_source_frames());
             drop(ObservedRetiredPlan::new(retired_plan));
             if retired_epoch.0 == self.providers.epoch {
                 let replacement = self
@@ -2032,21 +2043,23 @@ where
 
     /// Sets every counter the provider serves from a source outside it (#1348 D8): the
     /// controller's telemetry counters, the session's `live_values_superseded` count (#1312
-    /// D8), its `strips_restarted` count (#1768) and the render-side `live_block_errors` (#1521
-    /// D3) and `source_underrun_blocks` (#1537) mirrors. A counter added later joins this refresh,
-    /// never a single control call.
+    /// D8), its `strips_restarted` (#1768) and `source_frames_discarded` (#1699) counts and the
+    /// render-side `live_block_errors` (#1521 D3) and `source_underrun_blocks` (#1537) mirrors.
+    /// A counter added later joins this refresh, never a single control call.
     fn refresh_provider_counters(&mut self) {
         let telemetry_counters = self.controller.queues().telemetry_counters();
         let superseded = self.live_values_superseded.get();
         let restarted = self.strips_restarted;
         let errors = self.shared.live_block_errors.load(Ordering::Acquire);
         let underruns = self.shared.source_underrun_blocks.load(Ordering::Acquire);
+        let discarded = self.source_frames_discarded;
         let provider = self.controller.provider_mut();
         provider.set_telemetry_counters(telemetry_counters);
         provider.set_live_values_superseded(superseded);
         provider.set_strips_restarted(restarted);
         provider.set_live_block_errors(errors);
         provider.set_source_underrun_blocks(underruns);
+        provider.set_source_frames_discarded(discarded);
     }
 
     /// Runs one control command frame. A success returns the response's length in the response

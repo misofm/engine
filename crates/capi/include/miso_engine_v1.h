@@ -242,7 +242,15 @@ extern "C" {
  * path, so a nonzero value is an engine defect. The counter SOURCE_UNDERRUN_BLOCKS (protocol
  * counter 20, read with COUNTERS_GET) counts the rendered blocks in which a source played zeros
  * because the host had not delivered PCM it owed, or a source had no stream (graph-wide, not per source); a held block and a
- * block past the end of a region are not counted, and it never resets. A rejected source
+ * block past the end of a region are not counted, and it never resets. The counter
+ * SOURCE_FRAMES_DISCARDED (protocol counter 21) counts, in frames, the accepted source PCM that
+ * render never read because the caller's own transaction removed or redeclared the source: the
+ * chunks still queued in the discarded ring (a stale-generation chunk included) when a later call
+ * reclaims the displaced plan. A failed carry (the new plan could not take the old plan's rings)
+ * loses the frames of every ring it did not move, and those frames are counted too. Frames render
+ * played, a ring discarded by session destroy and the
+ * rings of a withdrawn replacement (never fed: such a transaction is refused) are not counted; it
+ * never resets. A rejected source
  * submission or seek likewise names the rule it broke ("source.region.outside",
  * "source.generation.stale", "source.channels.mismatch", ...). A null, empty, non-UTF-8 or
  * over-127-byte source ID on submit, seek, seek_at or seek_report is
@@ -291,8 +299,9 @@ extern "C" {
  * replacement carries unchanged from the plan that renders is not refused this way. A source the
  * caller's own transaction removes discards its queued audio, whether the plan that renders or the
  * waiting replacement (carrying it unchanged) holds it: the caller asked for the removal, so this
- * is not an unintended drop. No counter reports the discarded frames yet; issue 1699 is the
- * successor issue for one. A resource cap counts every plan the session still holds and the new
+ * is not an unintended drop. The counter SOURCE_FRAMES_DISCARDED (protocol counter 21, read with
+ * COUNTERS_GET; issue 1699) counts those frames, and the frames a redeclared source's old ring
+ * discards (above). A resource cap counts every plan the session still holds and the new
  * one: the running plan, the waiting replacement, and a plan render has displaced until a later
  * call reclaims it. A refusal is MISO_ENGINE_V1_BACKPRESSURE when the new plan fit against the
  * newest held plan alone, so a retry after a render normally commits; the split is approximate, and

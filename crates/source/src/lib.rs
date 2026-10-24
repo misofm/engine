@@ -2087,6 +2087,24 @@ impl PcmSourceConsumer {
         }
     }
 
+    /// The accepted frames render has not read (#1699 D1): the frames of the popped-but-unplayed
+    /// pending block plus those of every block still queued, a stale-generation block included
+    /// (R2). The played block is read already and does not count. Pops nothing. Control thread,
+    /// once the consumer's plan is retired: the count it is summed into is
+    /// `SOURCE_FRAMES_DISCARDED`.
+    #[must_use]
+    pub fn unread_frames(&self) -> u64 {
+        let pending = self
+            .current
+            .as_ref()
+            .map_or(0, |block| u64::from(block.frames));
+        (0..self.data_consumer.available_at_entry())
+            .map_while(|index| self.data_consumer.peek(index))
+            .fold(pending, |total, block| {
+                total.saturating_add(u64::from(block.frames))
+            })
+    }
+
     // REALTIME_POLICY_BEGIN
     /// Publish the ring's seek report if this block changed it (#1316 D3): a new generation in
     /// effect (the ring's first block, or one a seek applied at) takes this block's
@@ -3303,6 +3321,16 @@ impl GraphPreparedSourceSetDriver for SourceGraphSourceSetDriver {
         written
     }
 
+    /// A vacant entry contributes 0: its ring moved to the successor.
+    fn unread_source_frames(&self) -> u64 {
+        self.sources
+            .iter()
+            .filter_map(|source| source.consumer.as_ref())
+            .fold(0, |total, consumer| {
+                total.saturating_add(consumer.unread_frames())
+            })
+    }
+
     fn as_any_mut(&mut self) -> Option<&mut dyn core::any::Any> {
         Some(self)
     }
@@ -3956,6 +3984,39 @@ mod tests {
         assert!(report.end_of_region);
         assert_eq!(report.copied_frames, 0);
         assert_eq!(report.underrun_frames, 0, "past the end is not an underrun");
+    }
+
+    /// #1699 D1. Red if `unread_frames` misses the popped-but-unplayed pending block, counts a
+    /// short end block as a whole quantum, or counts a block render already played.
+    #[test]
+    fn unread_frames_count_the_pending_and_queued_blocks_not_the_played_one() {
+        let (producer, mut consumer, _) = session_ring(config(1, 4, 16)).unwrap();
+        let mut host = producer.into_host_chunk_provider(RATE);
+        host.submit(chunk(1, 0, &[&[1.0; 4]], 4, false)).unwrap();
+        assert_eq!(consumer.unread_frames(), 4);
+        let (output, _) = render_at(&mut consumer, 0);
+        assert_eq!(output, [1.0; 4]);
+        assert_eq!(consumer.unread_frames(), 0, "the played block is read");
+        host.try_seek(seek_at(2, 100, 8)).unwrap();
+        host.submit(chunk(2, 100, &[&[2.0; 4]], 4, false)).unwrap();
+        host.submit(chunk(2, 104, &[&[2.0; 4]], 4, false)).unwrap();
+        host.submit(chunk(2, 108, &[&[2.0, 2.0]], 2, true)).unwrap();
+        // The held seek's first block is popped and pending; two blocks stay queued.
+        let (_, report) = render_at(&mut consumer, 4);
+        assert_eq!(report.held_frames, 4);
+        assert_eq!(consumer.unread_frames(), 4 + 4 + 2);
+        let (output, _) = render_at(&mut consumer, 8);
+        assert_eq!(output, [2.0; 4]);
+        assert_eq!(consumer.unread_frames(), 4 + 2);
+        // R2: a further seek replaces generation 2; its two queued blocks are stale but still
+        // accepted and unread, and they count with the new generation's first block.
+        host.try_seek(SourceCommand::Seek {
+            generation: SourceGeneration(3),
+            frame: SourceFrame(200),
+        })
+        .unwrap();
+        host.submit(chunk(3, 200, &[&[3.0; 4]], 4, false)).unwrap();
+        assert_eq!(consumer.unread_frames(), 4 + 2 + 4);
     }
 
     /// #1274 MINOR-1. Red if an on-time apply keeps the primed block without noting the region
