@@ -16,9 +16,15 @@
 //!   facade returns typed values ([`PrepareRejection`], [`SourceControlError`]) and each host maps
 //!   them onto its own frozen numbering.
 //! * **Control transport orchestration.** Protocol queues, replay and command dispatch remain
-//!   host-specific. This crate supplies only [`SessionControlProvider`], the shared typed adapter
-//!   from a compiled session and live plan sample projection to the transport-neutral provider
-//!   trait; a host still owns whether and how that provider is transported.
+//!   host-specific. This crate supplies only
+#![cfg_attr(feature = "control-provider", doc = "  [`SessionControlProvider`],")]
+#![cfg_attr(
+    not(feature = "control-provider"),
+    doc = "  `SessionControlProvider` (feature `control-provider`),"
+)]
+//!   the shared typed adapter from a compiled session and live plan sample projection to the
+//!   transport-neutral provider trait; a host still owns whether and how that provider is
+//!   transported.
 //! * **Unsafe code and FFI.** This crate is a plain `rlib` with no `#[unsafe(no_mangle)]` items: a
 //!   `cdylib` re-exports every `no_mangle` symbol it links, so a facade that carried them would
 //!   push the C ABI's exports into the browser artifact and break its frozen export gate.

@@ -70,7 +70,8 @@ use crate::spectrum::{
 
 /// The jump lengths a plan's cell holds for `model` (#1639 D1): its `control_smoothing` keys in
 /// samples, the values of [`LiveRamps::for_session`]. Preparation seeds every plan's cell with
-/// them, and a live `control_smoothing` change writes them ([`crate::LiveDelta::jump_lengths`]).
+/// them, and a live `control_smoothing` change writes them (`LiveDelta::jump_lengths`, feature
+/// `control-provider`).
 #[must_use]
 pub fn session_jump_lengths(model: &SessionModel) -> GraphJumpLengths {
     let ramps = LiveRamps::for_session(model);
