@@ -2200,7 +2200,6 @@ fn one_shot_invalidate(state: &mut SpectrumOneShotState) {
 fn one_shot_invalidate_after_failure(state: &mut SpectrumOneShotState) {
     one_shot_invalidate(state);
 }
-// REALTIME_POLICY_END
 
 fn continuous_begin(
     state: &mut SpectrumContinuousState,
@@ -2266,66 +2265,151 @@ fn continuous_begin(
     true
 }
 
-/// Append one selected sample to the private circular history and publish every window whose end
-/// is reached by that sample. The loop is driven by sample time rather than render-block shape,
-/// so nonaligned and multiple-in-block completions follow the same path.
-fn continuous_append_sample(
+/// One selected source plane of a block: planar words, or one lane of an AoSoA bank plane whose
+/// word for frame `f` is `f * lanes + lane` (`lane < lanes`, `frames * lanes` words).
+#[derive(Clone, Copy)]
+enum ContinuousPlane<'a> {
+    Planar(&'a [f32]),
+    Lane {
+        words: &'a [f32],
+        lanes: usize,
+        lane: usize,
+    },
+}
+
+impl ContinuousPlane<'_> {
+    /// Copy frames `from..from + destination.len()` into `destination`.
+    fn copy_into(self, destination: &mut [f32], from: usize) {
+        match self {
+            Self::Planar(values) => {
+                destination.copy_from_slice(&values[from..from + destination.len()]);
+            }
+            // One lane of `lanes` is data movement, not arithmetic: a strided copy reads only the
+            // words this tap needs (#896 R1).
+            Self::Lane { words, lanes, lane } => {
+                for (slot, frame) in destination
+                    .iter_mut()
+                    .zip(words[from * lanes..].chunks_exact(lanes))
+                {
+                    *slot = frame[lane];
+                }
+            }
+        }
+    }
+
+    /// Whether every frame of this plane is finite. A neighbour lane's words are never read.
+    fn is_finite(self, frames: usize) -> bool {
+        probe_add(PROBE_VALIDATION_SAMPLES, frames);
+        match self {
+            Self::Planar(values) => all_finite(values),
+            Self::Lane { words, lanes, lane } => words
+                .chunks_exact(lanes)
+                .fold(true, |finite, frame| finite & frame[lane].is_finite()),
+        }
+    }
+}
+
+/// Append `frames` frames of the block, starting at frame `from` (absolute sample `sample`), to
+/// the private circular history: at most two contiguous runs per selected plane (the ring wrap)
+/// and one validity fill. Only the newest [`SPECTRUM_WINDOW_FRAMES`] frames can stay in the ring,
+/// so an older prefix of a longer span is skipped. The caller bounds the span by the next window
+/// end, so the history matches a per-sample append of the same frames.
+#[allow(clippy::too_many_arguments)]
+fn continuous_append_span(
     state: &mut SpectrumContinuousState,
-    buffers: &mut SpectrumCaptureBuffers<'_>,
-    left: f32,
-    right: f32,
+    channels: SpectrumChannels,
+    left: ContinuousPlane<'_>,
+    right: ContinuousPlane<'_>,
+    from: usize,
+    frames: usize,
     sample: u64,
     source_underrun: bool,
 ) -> bool {
-    let write_index = state.history_write_index;
-    if state.history_filled == 0 {
+    let filled = state.history_filled;
+    if filled == 0 {
         state.history_first_sample = sample;
-    } else if state.history_filled == SPECTRUM_WINDOW_FRAMES {
-        let Some(next_first_sample) = state.history_first_sample.checked_add(1) else {
-            continuous_fail(state);
-            return false;
-        };
-        state.history_first_sample = next_first_sample;
     }
-    if buffers.channels.includes_left() {
-        state.history_left[write_index] = left;
-        probe_add(PROBE_STORAGE_WRITES, 1);
-    }
-    if buffers.channels.includes_right() {
-        state.history_right[write_index] = right;
-        probe_add(PROBE_STORAGE_WRITES, 1);
-    }
-    state.history_validity[write_index] = u8::from(source_underrun);
-    state.history_write_index = if write_index + 1 == SPECTRUM_WINDOW_FRAMES {
-        0
-    } else {
-        write_index + 1
+    // Every frame appended to a full ring evicts the oldest one.
+    let evicted = (filled + frames).saturating_sub(SPECTRUM_WINDOW_FRAMES);
+    let Some(first_sample) = u64::try_from(evicted)
+        .ok()
+        .and_then(|evicted| state.history_first_sample.checked_add(evicted))
+    else {
+        continuous_fail(state);
+        return false;
     };
-    if state.history_filled < SPECTRUM_WINDOW_FRAMES {
-        state.history_filled += 1;
+    state.history_first_sample = first_sample;
+    let skip = frames.saturating_sub(SPECTRUM_WINDOW_FRAMES);
+    let kept = frames - skip;
+    let start = (state.history_write_index + skip) % SPECTRUM_WINDOW_FRAMES;
+    let head = kept.min(SPECTRUM_WINDOW_FRAMES - start);
+    let tail = kept - head;
+    for (selected, plane, history) in [
+        (channels.includes_left(), left, &mut state.history_left),
+        (channels.includes_right(), right, &mut state.history_right),
+    ] {
+        if selected {
+            plane.copy_into(&mut history[start..start + head], from + skip);
+            plane.copy_into(&mut history[..tail], from + skip + head);
+            probe_add(PROBE_STORAGE_WRITES, frames);
+        }
     }
+    let validity = u8::from(source_underrun);
+    state.history_validity[start..start + head].fill(validity);
+    state.history_validity[..tail].fill(validity);
+    state.history_write_index = (state.history_write_index + frames) % SPECTRUM_WINDOW_FRAMES;
+    state.history_filled = (filled + frames).min(SPECTRUM_WINDOW_FRAMES);
+    true
+}
 
-    let Some(sample_end) = sample.checked_add(1) else {
-        continuous_fail(state);
-        return false;
-    };
-    let Some(window_start) = state.next_window_start else {
-        continuous_fail(state);
-        return false;
-    };
-    let Some(window_end) = window_start.checked_add(SPECTRUM_WINDOW_FRAMES as u64) else {
-        continuous_fail(state);
-        return false;
-    };
-    if sample_end == window_end {
-        continuous_publish(state, buffers, window_start)
-    } else if sample_end > window_end {
+/// Append one validated block to the history span by span and publish every window whose end a
+/// span reaches. The loop is driven by sample time rather than render-block shape, so nonaligned
+/// and multiple-in-block completions follow the same path.
+fn continuous_append_block(
+    state: &mut SpectrumContinuousState,
+    buffers: &mut SpectrumCaptureBuffers<'_>,
+    left: ContinuousPlane<'_>,
+    right: ContinuousPlane<'_>,
+    frames: usize,
+    first_sample: u64,
+    source_underrun: bool,
+) {
+    // `continuous_begin` checked `first_sample + frames`, so no sample below overflows.
+    let mut from = 0;
+    while from < frames {
+        let sample = first_sample + from as u64;
+        let Some(window_start) = state.next_window_start else {
+            continuous_fail(state);
+            return;
+        };
+        let Some(window_end) = window_start.checked_add(SPECTRUM_WINDOW_FRAMES as u64) else {
+            continuous_fail(state);
+            return;
+        };
         // A contiguous render stream can only pass a completion boundary if the producer missed
         // samples. Treat that as a discontinuity and fence the partial history.
-        continuous_fail(state);
-        false
-    } else {
-        true
+        let Some(until_end) = window_end.checked_sub(sample).filter(|&until| until > 0) else {
+            continuous_fail(state);
+            return;
+        };
+        let span =
+            usize::try_from(until_end).map_or(frames - from, |until| until.min(frames - from));
+        if !continuous_append_span(
+            state,
+            buffers.channels,
+            left,
+            right,
+            from,
+            span,
+            sample,
+            source_underrun,
+        ) {
+            return;
+        }
+        from += span;
+        if span as u64 == until_end && !continuous_publish(state, buffers, window_start) {
+            return;
+        }
     }
 }
 
@@ -2448,32 +2532,15 @@ fn continuous_capture(
         continuous_fail(state);
         return;
     }
-    if (buffers.channels.includes_left() && !selected_is_finite(left))
-        || (buffers.channels.includes_right() && !selected_is_finite(right))
-    {
-        continuous_fail(state);
-        return;
-    }
-    if !continuous_begin(state, first_sample, left.len(), validity) {
-        return;
-    }
-    for (offset, (&left, &right)) in left.iter().zip(right).enumerate() {
-        let Some(sample) = first_sample.checked_add(u64::try_from(offset).unwrap_or(u64::MAX))
-        else {
-            continuous_fail(state);
-            return;
-        };
-        if !continuous_append_sample(
-            state,
-            buffers,
-            left,
-            right,
-            sample,
-            validity.source_underrun,
-        ) {
-            return;
-        }
-    }
+    continuous_capture_planes(
+        state,
+        buffers,
+        ContinuousPlane::Planar(left),
+        ContinuousPlane::Planar(right),
+        left.len(),
+        first_sample,
+        validity,
+    );
 }
 
 fn continuous_capture_resident(
@@ -2481,109 +2548,111 @@ fn continuous_capture_resident(
     buffers: &mut SpectrumCaptureBuffers<'_>,
     block: GraphResidentObservationBlock<'_>,
 ) {
-    if state.shared.active.load(Ordering::Acquire) == 0 {
-        return;
-    }
-    let lanes = block.lane.width().lanes() as usize;
-    let lane = block.lane.lane();
-    let Some(frames) = usize::try_from(block.lane.frames()).ok() else {
+    let Ok(frames) = usize::try_from(block.lane.frames()) else {
         continuous_fail(state);
         return;
     };
-    let Some(words) = frames.checked_mul(lanes) else {
-        continuous_fail(state);
-        return;
-    };
-    let Some(left) = block.lane.left().get(..words) else {
-        continuous_fail(state);
-        return;
-    };
-    let Some(right) = block.lane.right().get(..words) else {
-        continuous_fail(state);
-        return;
-    };
-    if !resident_selected_is_finite(left, right, frames, lanes, lane, buffers.channels) {
-        continuous_fail(state);
-        return;
-    }
-    if !continuous_begin(state, block.first_sample, frames, block.validity) {
-        return;
-    }
-    for frame in 0..frames {
-        let Some(index) = frame
-            .checked_mul(lanes)
-            .and_then(|value| value.checked_add(lane))
-        else {
-            continuous_fail(state);
-            return;
-        };
-        let Some(left_value) = left.get(index).copied() else {
-            continuous_fail(state);
-            return;
-        };
-        let Some(right_value) = right.get(index).copied() else {
-            continuous_fail(state);
-            return;
-        };
-        let Some(sample) = block
-            .first_sample
-            .checked_add(u64::try_from(frame).unwrap_or(u64::MAX))
-        else {
-            continuous_fail(state);
-            return;
-        };
-        if !continuous_append_sample(
-            state,
-            buffers,
-            left_value,
-            right_value,
-            sample,
-            block.validity.source_underrun,
-        ) {
-            return;
-        }
-    }
+    continuous_capture_lane(
+        state,
+        buffers,
+        block.lane.left(),
+        block.lane.right(),
+        frames,
+        block.lane.width().lanes() as usize,
+        block.lane.lane(),
+        block.first_sample,
+        block.validity,
+    );
 }
 
-fn selected_is_finite(values: &[f32]) -> bool {
-    for value in values {
-        probe_add(PROBE_VALIDATION_SAMPLES, 1);
-        if !value.is_finite() {
-            return false;
-        }
-    }
-    true
-}
-
-fn resident_selected_is_finite(
+/// The resident entry over plain words: lane `lane` of `lanes`, `frames * lanes` words per plane.
+#[allow(clippy::too_many_arguments)]
+fn continuous_capture_lane(
+    state: &mut SpectrumContinuousState,
+    buffers: &mut SpectrumCaptureBuffers<'_>,
     left: &[f32],
     right: &[f32],
     frames: usize,
     lanes: usize,
     lane: usize,
-    channels: SpectrumChannels,
-) -> bool {
-    for frame in 0..frames {
-        let Some(index) = frame
-            .checked_mul(lanes)
-            .and_then(|value| value.checked_add(lane))
-        else {
-            return false;
-        };
-        if channels.includes_left() {
-            probe_add(PROBE_VALIDATION_SAMPLES, 1);
-            if left.get(index).is_none_or(|value| !value.is_finite()) {
-                return false;
-            }
-        }
-        if channels.includes_right() {
-            probe_add(PROBE_VALIDATION_SAMPLES, 1);
-            if right.get(index).is_none_or(|value| !value.is_finite()) {
-                return false;
-            }
-        }
+    first_sample: u64,
+    validity: GraphObservationValidity,
+) {
+    if state.shared.active.load(Ordering::Acquire) == 0 {
+        return;
     }
-    true
+    let words = frames.checked_mul(lanes);
+    let (Some(left), Some(right)) = (
+        words.and_then(|words| left.get(..words)),
+        words.and_then(|words| right.get(..words)),
+    ) else {
+        continuous_fail(state);
+        return;
+    };
+    if lane >= lanes {
+        continuous_fail(state);
+        return;
+    }
+    continuous_capture_planes(
+        state,
+        buffers,
+        ContinuousPlane::Lane {
+            words: left,
+            lanes,
+            lane,
+        },
+        ContinuousPlane::Lane {
+            words: right,
+            lanes,
+            lane,
+        },
+        frames,
+        first_sample,
+        validity,
+    );
+}
+
+/// Validate the selected planes, open the block, then append it. A non-finite selected word fails
+/// the block before any of its frames is appended or any window it completes is published.
+fn continuous_capture_planes(
+    state: &mut SpectrumContinuousState,
+    buffers: &mut SpectrumCaptureBuffers<'_>,
+    left: ContinuousPlane<'_>,
+    right: ContinuousPlane<'_>,
+    frames: usize,
+    first_sample: u64,
+    validity: GraphObservationValidity,
+) {
+    if (buffers.channels.includes_left() && !left.is_finite(frames))
+        || (buffers.channels.includes_right() && !right.is_finite(frames))
+    {
+        continuous_fail(state);
+        return;
+    }
+    if !continuous_begin(state, first_sample, frames, validity) {
+        return;
+    }
+    continuous_append_block(
+        state,
+        buffers,
+        left,
+        right,
+        frames,
+        first_sample,
+        validity.source_underrun,
+    );
+}
+
+/// Whether every value is finite: a branch-free fold the compiler vectorises.
+fn all_finite(values: &[f32]) -> bool {
+    values
+        .iter()
+        .fold(true, |finite, value| finite & value.is_finite())
+}
+
+fn selected_is_finite(values: &[f32]) -> bool {
+    probe_add(PROBE_VALIDATION_SAMPLES, values.len());
+    all_finite(values)
 }
 
 fn continuous_fail(state: &mut SpectrumContinuousState) {
@@ -2627,6 +2696,7 @@ fn continuous_fail(state: &mut SpectrumContinuousState) {
         .phase
         .store(CONTINUOUS_WARMING, Ordering::Release);
 }
+// REALTIME_POLICY_END
 
 impl GraphRuntimeObserver for SpectrumCaptureObserver {
     fn observe(&mut self, block: GraphObservationBlock<'_>) -> Result<(), RenderError> {
@@ -4758,11 +4828,57 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![0, 512]
         );
-        for window in windows {
+        for window in &windows {
             for offset in 0..SPECTRUM_WINDOW_FRAMES {
                 let sample = (window.first_sample as usize + offset) as f32;
                 assert_eq!(window.left[offset], sample);
                 assert_eq!(window.right[offset], -sample);
+            }
+        }
+        // A resident bank lane (not lane 0) publishes the planar arm's windows, though a
+        // neighbour lane carries non-finite words in every frame.
+        for lanes in [4_usize, 8] {
+            let lane = lanes - 1;
+            let (mut observer, mut capture) = continuous_pair(SpectrumChannels::Stereo);
+            let cadence = SpectrumCadence::with_hop(48_000, 192, 512).expect("q192 cadence");
+            capture
+                .begin_continuous(cadence, false)
+                .expect("continuous test activation");
+            let mut resident = Vec::new();
+            for first_sample in (0..15 * 192).step_by(192) {
+                let (left, right) = ramp_block(first_sample, 192);
+                let mut left_words = vec![f32::NAN; 192 * lanes];
+                let mut right_words = vec![f32::INFINITY; 192 * lanes];
+                for frame in 0..192 {
+                    left_words[frame * lanes + lane] = left[frame];
+                    right_words[frame * lanes + lane] = right[frame];
+                }
+                let mut buffers = super::SpectrumCaptureBuffers {
+                    producer: &mut observer.producer,
+                    left: &mut observer.left,
+                    right: &mut observer.right,
+                    channels: observer.channels,
+                };
+                super::continuous_capture_lane(
+                    &mut observer.continuous,
+                    &mut buffers,
+                    &left_words,
+                    &right_words,
+                    192,
+                    lanes,
+                    lane,
+                    first_sample as u64,
+                    super::GraphObservationValidity::CLEAR,
+                );
+                if let Ok(window) = capture.try_read_continuous() {
+                    resident.push(window);
+                }
+            }
+            assert_eq!(resident.len(), windows.len(), "{lanes} lanes");
+            for (resident, planar) in resident.iter().zip(&windows) {
+                assert_eq!(resident.first_sample, planar.first_sample, "{lanes} lanes");
+                assert_eq!(resident.left, planar.left, "{lanes} lanes, lane {lane}");
+                assert_eq!(resident.right, planar.right, "{lanes} lanes, lane {lane}");
             }
         }
     }
