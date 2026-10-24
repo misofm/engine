@@ -153,7 +153,7 @@ render-only* (#1332).
    and the browser legs' `npm run qualify -- --artifacts <dir> --sdk-root <repo>/sdk --browser
    <b>` for each of chromium, firefox, webkit, against a closure built from the non-atomic D2
    module (copy `scripts/build-web-audioworklet.sh` to scratch and change only its cargo line).
-6. AArch64 under the nightly: `RUSTUP_TOOLCHAIN=nightly-2026-08-20 bash scripts/run-aarch64-tests.sh
+6. **Dropped (root, 2026-10-24; see the decision record).** AArch64 under the nightly: `RUSTUP_TOOLCHAIN=nightly-2026-08-20 bash scripts/run-aarch64-tests.sh
    release` and `cargo test --locked --release -p wasm-gates --features math/lane` on arm64
    (hardware, or the emulated route the script header documents); record which.
 7. Stable gates unaffected: `git status` shows only this spec changed.
@@ -223,15 +223,21 @@ memory; `single-plain` = D5; `single-iso` = the same module's single-instance re
 | Engine | D4.1 COI | D4.2 digest (two, single-iso, single-plain) | D4.3 Worker cycles: total / inside window | D4.3 glitches | D4.4 growth | D5 shared memory in worklet, non-isolated |
 |---|---|---|---|---|---|---|
 | Chromium 151.0.7922.34 | true | = native, all three | 32 / 31 | no trap, hang, render error, non-finite or render allocation; one 5-quantum skip at the 2nd `process()` call (before the window) and one 23 ms first rendered block: the same pair appears in both single legs | 2 explicit grows of 16 MiB inside the window plus allocator growth (6.5 -> 45.5 MiB); worklet saw 14 buffer changes | succeeds (`SharedArrayBuffer` undefined on page and in worklet), digest = native |
-| Firefox 153.0 | true | = native, all three | 20 / 5 (boot ~150 ms; the worklet kept rendering, 1197 blocks, until the 20th) | none of the above; 0 skipped quanta; about 44 % of calls read 3-5 ms by `Date.now()` (1 ms resolution) in `two` and 47-48 % in both single legs: the session's own cost, not the Worker's | as Chromium, 14 changes | succeeds, digest = native |
+| Firefox 153.0 | true | = native, all three | 20 / 5 (boot ~150 ms; the worklet kept rendering, 1197 blocks, until the 20th) | none of the above; 0 skipped quanta; about 44 % of calls inside the window (155/350) read 3-5 ms by `Date.now()` (1 ms resolution), 36 % over the whole run (436/1216), and 47-48 % in both single legs: the session's own cost, not the Worker's | as Chromium, 14 changes | succeeds, digest = native |
 | WebKit 26.5 | true | = native, all three | 57 / 56 | none; one 6 ms first rendered block (single legs: 5 ms + one 3 ms call, and 4 ms) | as Chromium, 13 changes | succeeds, digest = native |
+
+D4.3 is judged as no increase over the same engine's single-instance legs; the glitch proxy has 1 ms
+resolution. Late `process()` calls (over 2 ms) inside the window, `two` against `single-iso` /
+`single-plain`: Chromium one 23 ms first block against one 16 ms / one 14 ms; Firefox 155 against
+163 / 168; WebKit one 6 ms first block against two (5 ms, 3 ms) / one 4 ms.
 
 D4.4 in all three engines: `memory.buffer` changes identity on every growth, on the growing side and
 in the worklet; old views stay valid (an old `SharedArrayBuffer` keeps its length and reads the same
-bytes); the worklet re-derives its views and the digest holds. D4.5: the CI form of the render
+word at a probe index as the new view); the worklet re-derives its views and the digest holds. D4.5: the CI form of the render
 call-graph gate (`--trap-owner ...enter_block --trap-owner ...observe=1 --render-thread`) passes on
 both nightly twins, `atomic_waits=0`; the direct-call closure does not cover the plan executor's
-`call_indirect` targets, which the render-locked allocation count (0 in every leg) covers instead.
+`call_indirect` targets: these targets are not checked for atomic waits; a zero render-allocation
+count only excludes the allocator lock on the paths that ran.
 
 **Recipe rules found (#1332 adopts them).**
 
