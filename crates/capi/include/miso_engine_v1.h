@@ -150,6 +150,25 @@ extern "C" {
  * reports revisions only, so it never reads a number above the committed revision, and it is
  * never early.
  *
+ * Observation subscriptions (issue 1584). An OBSERVE edit (opcode 0x0801) in a
+ * SESSION_TRANSACTION_APPLY arms or disarms one observation tap of an effect, such as a
+ * compressor's gain reduction: the address is the strip and its console slot or insert, with the
+ * effect-local tap ID, armed 1 or 0, and window_blocks (0 is the plan's meter window, at most
+ * 4096). No C symbol or struct is added. A subscription is monitor state, as a solo is: never
+ * saved, never in a SESSION_SNAPSHOT_GET document, no revision; a transaction of OBSERVE and solo
+ * edits only replies edit-path 4 (monitor) at the committed revision with no SESSION_COMMITTED.
+ * Subscribers share one arm per tap and window: a second arm with the same window and a disarm
+ * that leaves a subscriber queue nothing, an arm with another window is
+ * observation.window_conflict, and a disarm of a tap not armed with that window is
+ * observation.not_subscribed. Every refusal (also observation.address.unknown,
+ * observation.tap.unknown, observation.tap.unsupported, observation.window) is
+ * VALIDATION_FAILED at the edit's index, with nothing changed. The tap's one-slot queue drains at
+ * the next rendered block; an OBSERVE that needs a record in a queue that has not drained yet
+ * (an arm and a disarm before any render) is MISO_ENGINE_V1_RESULT_BACKPRESSURE with nothing
+ * recorded, and the same request succeeds after one render. A subscription survives every plan
+ * rebuild while its effect exists; a rebuild that removes the effect ends it with one
+ * OBSERVATION_ENDED event. Every plan binds an observation queue for every declared tap.
+ *
  * Response preview (issue 1573). RESPONSE_GET (message ID 0x000e, capability flag bit 14)
  * through miso_engine_v1_submit_command asks for the frequency response of a native effect or of
  * the input filters, for parameters the caller chooses, and answers the curves in the reply. No C
