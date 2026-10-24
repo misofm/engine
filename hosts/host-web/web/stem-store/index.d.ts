@@ -104,6 +104,8 @@ export class OpfsStemStore {
     tabId?: string
     readDeadlineMs?: number
     ingestReadDeadlineMs?: number
+    /** Overall budget for the best-effort debris sweeps at open; defaults to `readDeadlineMs`. */
+    maintenanceBudgetMs?: number
   })
   readonly folderName: string
   open(): Promise<this>

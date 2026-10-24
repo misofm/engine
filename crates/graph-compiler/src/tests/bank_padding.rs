@@ -303,7 +303,8 @@ fn a_console_remainder_binds_one_padded_bank_and_an_insert_remainder_renders_per
 /// the same scratch, because a padded lane still occupies its AoSoA column.
 ///
 /// Red if the member factor in `effect_bank_resource` becomes the lane count (the difference is
-/// then the id strings alone), or if a padded bank stops charging a padded lane's scratch.
+/// then the id strings alone), if a padded bank stops charging a padded lane's scratch, or if a
+/// bank's charge misses its chain's staging or a padded chain's `+0.0` plane (issue #887).
 #[test]
 fn a_padded_bank_charges_member_metadata_per_active_member() {
     let lanes = BankWidth::for_backend(host_dispatch())
@@ -352,6 +353,17 @@ fn a_padded_bank_charges_member_metadata_per_active_member() {
         assert_eq!(
             full_estimate.scratch_bytes, padded_estimate.scratch_bytes,
             "{effect}: a padded lane still charges its scratch column"
+        );
+        // Issue #887: the chain over a bank retains two staging planes, and a padded bank's
+        // chain one `quantum`-word `+0.0` plane besides.
+        let plane = u64::from(quantum) * lanes as u64 * 4;
+        assert_eq!(
+            (
+                full_estimate.runtime_buffer_bytes,
+                padded_estimate.runtime_buffer_bytes
+            ),
+            (2 * plane, 2 * plane + u64::from(quantum) * 4),
+            "{effect}: staging on every bank, the zero plane on a padded one"
         );
     }
 }

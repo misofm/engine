@@ -6,7 +6,7 @@
 # rounds, one host, one admissibility state, the decomposition rows' pinned strip contents, every
 # session row's pinned source feed, the class-A statements that neither the stationary smoother nor
 # a meter nor an armed observation tap nor a restated parameter nor the mono collapse nor the
-# driver-fed source feed nor the metered row's web meters changes a rendered bit, the meters
+# metered row's web meters changes a rendered bit, the meters
 # pair's equal fold and redirect counters, the metered row's pinned meter group, the
 # mixing-automation row's pinned controls, host lowerings, collapse counters
 # and per-effect bit movement, and the console-strip rows' pinned layouts, bypass group and sparse
@@ -74,7 +74,7 @@ session=$(jq -cn --arg a "$digest_a" --argjson m "$metadata" '$m + {
   p99_ns_per_block: 295702, max_ns_per_block: 297245,
   output_sha256: $a, render_errors: 0, render_total_forbidden_operations: 0,
   descriptive_only: true, strip_content: "eq+compressor+limiter",
-  strip_layout: "pre_insert:eq+compressor,post_insert:limiter", input_signal: "tone", source_feed: "bound",
+  strip_layout: "pre_insert:eq+compressor,post_insert:limiter", input_signal: "tone", source_feed: "played_planes",
   statistical_method: "nearest-rank percentiles over per-block nanoseconds; one warmup pass and two measured rounds; descriptive only; no threshold"
 }')
 
@@ -318,29 +318,29 @@ session_floor_dispatch=$(printf '%s' "$session" | jq -c -L "$scripts_dir" --arg 
       | .strip_content = "identity" | .strip_layout = "builtins"
       | with_floor(5480000000; $s)')
 
-# The gain-and-pan row: the identity inventory again, the floor of the table since #956 retired
-# the builtins-less plumbing row. Built through the library's own pins rather than by writing the
-# numbers a second time.
-session_floor_gain_pan=$(printf '%s' "$session" | jq -c -L "$scripts_dir" --arg s "$core_clock_source" \
-    "$add_floor"' .workload_kind = "sixty_four_track_gain_pan_only" | .synthetic_fixture = true
-      | .strip_content = "gain+pan" | .strip_layout = "builtins"
-      | with_floor(5480000000; $s)')
-# #928, re-based by #956: the driver-fed gain-and-pan row, the native pure-path target. The
-# gain-and-pan row's six facts and its inventory, and the one fact that separates the two: its
-# track inputs are claimed by a prepared source set whose driver lends its played planes, instead
-# of being bound to processors.
+# #928, #956: the gain-and-pan row, the native pure-path target, on the identity inventory again,
+# the floor of the table since #956 retired the builtins-less plumbing row. Built through the
+# library's own pins rather than by writing the numbers a second time.
 session_ring=$(printf '%s' "$session" | jq -c '.workload_kind = "sixty_four_track_gain_pan_ring"
-      | .synthetic_fixture = true | .strip_content = "gain+pan" | .strip_layout = "builtins"
-      | .source_feed = "played_planes"')
+      | .synthetic_fixture = true | .strip_content = "gain+pan" | .strip_layout = "builtins"')
 session_floor_ring=$(printf '%s' "$session_ring" | jq -c -L "$scripts_dir" --arg s "$core_clock_source" \
     "$add_floor"' with_floor(5480000000; $s)')
 
 expect_accept "$session_floor" 'the base session record carrying the floor columns'
-expect_accept "$session_floor_gain_pan" 'the gain-and-pan row, which names no control'
 expect_accept "$session_floor_not_derived" 'a row whose fixture was never inventoried'
 expect_accept "$session_floor_dispatch" 'the identity row carrying the identity inventory'
-expect_accept "$session_ring" 'the driver-fed gain-and-pan row'
-expect_accept "$session_floor_ring" 'the driver-fed gain-and-pan row carrying the identity inventory'
+expect_accept "$session_floor_ring" 'the gain-and-pan row carrying the identity inventory'
+
+# #938: the live-producer row, the gain-and-pan plan fed by a producer thread on a core of the
+# render core's L3 (cpu 14 beside the base record's cpu 15), with no ring underrun. It states the
+# ring row's facts and floor, and its producer group.
+session_live=$(printf '%s' "$session_ring" | jq -c '.workload_kind = "sixty_four_track_gain_pan_live"
+      | .source_feed = "live_producer"
+      | . + {producer_cpu: 14, producer_placement: "same_ccd", underruns: 0}')
+session_floor_live=$(printf '%s' "$session_live" | jq -c -L "$scripts_dir" --arg s "$core_clock_source" \
+    "$add_floor"' with_floor(5480000000; $s)')
+expect_accept "$session_live" 'the live-producer row'
+expect_accept "$session_floor_live" 'the live-producer row carrying the identity inventory'
 
 # #881: the metered console row. The standing console row's six facts, plus the meter group that
 # row alone carries: the default web boot's meter set (one sample-peak meter at the post-matrix tap
@@ -392,7 +392,7 @@ expect_reject "$(printf '%s' "$session" | jq -c --arg f "$sends_fixture" '.fixtu
 # ---------------------------------------------------------------------------------------------
 # Per-key structural mutations: every key is load-bearing in both directions.
 # ---------------------------------------------------------------------------------------------
-for base in "$session" "$session_floor" "$session_ring" "$session_metered" "$session_app" \
+for base in "$session" "$session_floor" "$session_ring" "$session_live" "$session_metered" "$session_app" \
     "$session_sparse" "$session_sends" "$hoist" "$meters" "$observation" "$placement" "$automation" "$mono" "$mixing"; do
     kind=$(printf '%s' "$base" | jq -r '.record')
     while read -r field; do
@@ -518,22 +518,22 @@ expect_reject "$(printf '%s' "$session_floor" | jq -c \
 # Costed at the retired four-lane-op routing inventory, or citing it, is the same defect as the
 # identity row costed at 69 -- self-consistent, floor and percentage together, and wrong about which
 # arithmetic it executes.
-expect_reject "$(printf '%s' "$session_floor_gain_pan" | jq -c \
+expect_reject "$(printf '%s' "$session_floor_ring" | jq -c \
     '.floor_cycles_per_lane_sample = (4 / (8 * 3.7))
      | .percent_of_floor = (100 * (4 / (8 * 3.7)) / .cycles_per_lane_sample)')" \
     'a gain-and-pan row costed at the retired routing-only inventory'
-expect_reject "$(printf '%s' "$session_floor_gain_pan" | jq -c \
+expect_reject "$(printf '%s' "$session_floor_ring" | jq -c \
     '.floor_basis = "docs/rulings/effect-floor-accounting.md: plumbing"')" \
     'a gain-and-pan row citing the retired plumbing inventory'
-expect_reject "$(printf '%s' "$session_floor_gain_pan" | jq -c \
+expect_reject "$(printf '%s' "$session_floor_ring" | jq -c \
     '.floor_basis = "docs/rulings/effect-floor-accounting.md: builtins"')" \
     'a gain-and-pan row citing the executed-filter inventory'
 # It claims no isolate. `builtins_only` against it would subtract cleanly (69 - 22 = 47) but is not
 # declared, so a record claiming it is claiming a control the table does not name.
-expect_reject "$(printf '%s' "$session_floor_gain_pan" | jq -c \
+expect_reject "$(printf '%s' "$session_floor_ring" | jq -c \
     '.floor_control_row = "sixty_four_track_builtins_only" | .isolated_cycles_per_lane_sample = 0.5 | .isolated_percent_of_floor = 20.0')" \
     'a gain-and-pan row isolated against a row it is not a subset of'
-expect_reject "$(printf '%s' "$session_floor_gain_pan" | jq -c \
+expect_reject "$(printf '%s' "$session_floor_ring" | jq -c \
     '.floor_control_row = "sixty_four_track_dispatch_only" | .isolated_cycles_per_lane_sample = 0.1 | .isolated_percent_of_floor = 1.0')" \
     'a gain-and-pan row isolated against the row that shares its inventory'
 # The not-derived row is the other half of the same rule: it must not invent a floor either.
@@ -565,10 +565,10 @@ session_mutation '.workload_kind = "sixty_four_track_idle" | .synthetic_fixture 
     'an idle row that emptied the strip it claims to idle'
 session_mutation '.strip_content = "eq+compressor+saturator"' 'a strip content no workload declares'
 
-# The overhead rows. `gain_pan_only` and `dispatch_only` share a strip edit but for one field and
+# The overhead rows. `gain_pan_ring` and `dispatch_only` share a strip edit but for one field and
 # share a floor inventory, so the only thing that separates them in a record is what they say they
 # carried -- which makes each row claiming the other's content exactly the fiction to refuse.
-session_mutation '.workload_kind = "sixty_four_track_gain_pan_only" | .strip_content = "identity" | .strip_layout = "builtins" | .synthetic_fixture = true' \
+session_mutation '.workload_kind = "sixty_four_track_gain_pan_ring" | .strip_content = "identity" | .strip_layout = "builtins" | .synthetic_fixture = true' \
     'a gain-and-pan row claiming the identity fader and pan'
 session_mutation '.workload_kind = "sixty_four_track_dispatch_only" | .strip_content = "gain+pan" | .strip_layout = "builtins" | .synthetic_fixture = true' \
     'an identity row claiming the fixture fader and pan'
@@ -580,47 +580,54 @@ session_mutation '.workload_kind = "sixty_four_track_plumbing_ring" | .strip_con
     'the retired builtins-less driver-fed plumbing row'
 session_mutation '.workload_kind = "sixty_four_track_builtins_only" | .strip_content = "plumbing" | .strip_layout = "plumbing" | .synthetic_fixture = true' \
     'a builtins row claiming it prepared no builtin'
-expect_accept "$(printf '%s' "$session" | jq -c '.workload_kind = "sixty_four_track_gain_pan_only" | .strip_content = "gain+pan" | .strip_layout = "builtins" | .synthetic_fixture = true')" \
-    'an honest gain-and-pan row'
+expect_accept "$session_ring" 'an honest gain-and-pan row'
+# #965 retired the bound-feed twin of the gain-and-pan row: it fed the session through a processor
+# per track input, which no host binds.
+session_mutation '.workload_kind = "sixty_four_track_gain_pan_only" | .strip_content = "gain+pan" | .strip_layout = "builtins" | .synthetic_fixture = true' \
+    'the retired bound-feed gain-and-pan row'
 
-# #928: the source feed, required on every session record and pinned per kind. Exactly one row is
-# driver-fed; a record naming the wrong feed would charge the feed's cost to the wrong row.
+# #928, #965: the source feed, required on every session record. Every row is fed through a
+# prepared source set; a record naming the retired bound feed measured a path no host runs.
 expect_reject "$(printf '%s' "$session" | jq -c 'del(.source_feed)')" \
     'a session record from before source_feed existed'
 expect_reject "$(printf '%s' "$session_floor" | jq -c 'del(.source_feed)')" \
     'a floor-accounted session record missing source_feed'
-session_mutation '.source_feed = "played_planes"' 'the standing console row claiming the driver-fed feed'
+session_mutation '.source_feed = "bound"' 'a session record claiming the retired bound feed'
 session_mutation '.source_feed = "ring"' 'a feed no workload declares'
-session_mutation '.workload_kind = "sixty_four_track_gain_pan_only" | .strip_content = "gain+pan" | .strip_layout = "builtins" | .synthetic_fixture = true | .source_feed = "played_planes"' \
-    'the bound gain-and-pan row claiming the driver-fed feed'
 ring_mutation() { expect_reject "$(printf '%s' "$session_ring" | jq -c "$1")" "$2"; }
-ring_mutation '.source_feed = "bound"' 'the driver-fed row claiming the bound feed'
-ring_mutation 'del(.source_feed)' 'the driver-fed row missing source_feed'
-ring_mutation '.strip_layout = "plumbing"' 'a driver-fed row claiming the retired plumbing layout'
-ring_mutation '.strip_content = "identity"' 'a driver-fed row claiming the identity fader and pan'
-ring_mutation '.synthetic_fixture = false' 'a derived driver-fed row reported as a checked-in fixture'
-ring_mutation '.tracks = 9' 'a driver-fed row that is not eight full banks'
+ring_mutation '.strip_layout = "plumbing"' 'a gain-and-pan row claiming the retired plumbing layout'
+ring_mutation '.strip_content = "identity"' 'a gain-and-pan row claiming the identity fader and pan'
+ring_mutation '.synthetic_fixture = false' 'a derived gain-and-pan row reported as a checked-in fixture'
+ring_mutation '.tracks = 9' 'a gain-and-pan row that is not eight full banks'
 ring_mutation '.fixture_id = "fixtures/session/v1/console-sixty-four-track-mono.json"' \
-    'a driver-fed row rendered from another fixture'
-ring_mutation '.input_signal = "silence"' 'a driver-fed row claiming silence'
-expect_reject "$(printf '%s' "$session_floor_ring" | jq -c '.source_feed = "bound"')" \
-    'a floor-accounted driver-fed row claiming the bound feed'
-# Its floor is the gain-and-pan row's, and like that row it isolates nothing. A feed change is not
-# an arithmetic change, so a subtraction between the two feeds would publish a copy's cost as an
-# isolate against a floor with no copy in it.
-expect_reject "$(printf '%s' "$session_floor_ring" | jq -c \
-    '.floor_cycles_per_lane_sample = (4 / (8 * 3.7))
-     | .percent_of_floor = (100 * (4 / (8 * 3.7)) / .cycles_per_lane_sample)')" \
-    'a driver-fed gain-and-pan row costed at the retired routing-only inventory'
-expect_reject "$(printf '%s' "$session_floor_ring" | jq -c \
-    '.floor_basis = "docs/rulings/effect-floor-accounting.md: plumbing"')" \
-    'a driver-fed gain-and-pan row citing the retired plumbing inventory'
-expect_reject "$(printf '%s' "$session_floor_ring" | jq -c \
-    '.floor_control_row = "sixty_four_track_gain_pan_only" | .isolated_cycles_per_lane_sample = 0.1 | .isolated_percent_of_floor = 1.0')" \
-    'the driver-fed row isolating its feed against the bound row'
-expect_reject "$(printf '%s' "$session_floor_gain_pan" | jq -c \
-    '.floor_control_row = "sixty_four_track_gain_pan_ring" | .isolated_cycles_per_lane_sample = 0.1 | .isolated_percent_of_floor = 1.0')" \
-    'the bound gain-and-pan row isolated against the driver-fed row'
+    'a gain-and-pan row rendered from another fixture'
+ring_mutation '.input_signal = "silence"' 'a gain-and-pan row claiming silence'
+ring_mutation '.source_feed = "live_producer"' 'a ring row claiming the live producer feed'
+ring_mutation '. + {producer_cpu: 14, producer_placement: "same_ccd", underruns: 0}' \
+    'a ring row carrying a producer group'
+
+# #938: the live row's producer. Any underrun refuses the record, and a controlled record's producer
+# ran on another core of the render core's L3 that is not its SMT sibling. An uncontrolled record
+# may state an unpinned producer, with no core.
+live_mutation() { expect_reject "$(printf '%s' "$session_live" | jq -c "$1")" "$2"; }
+live_mutation '.underruns = 1' 'a live row whose rings underran'
+live_mutation '.source_feed = "played_planes"' 'a live row claiming the frozen driver feed'
+live_mutation '.producer_placement = "smt_sibling"' 'a live row whose producer ran on the SMT sibling'
+live_mutation '.producer_placement = "other_l3"' 'a live row whose producer ran on another L3'
+live_mutation '.producer_placement = "same_cpu"' 'a live row whose producer ran on the render core'
+live_mutation '.producer_placement = "no_producer_cpu" | .producer_cpu = null' \
+    'a live row with no producer core'
+live_mutation '.producer_cpu = 15' 'a same-L3 producer on the render core itself'
+live_mutation '.producer_cpu = "14"' 'a producer core that is not a number'
+live_mutation '.producer_placement = "unpinned" | .producer_cpu = null' \
+    'a controlled live row with an unpinned producer'
+live_mutation '.workload_kind = "sixty_four_track_gain_pan_live" | .strip_content = "identity"' \
+    'a live row claiming the identity fader and pan'
+uncontrolled='.measurement_control = "uncontrolled" | .cpu_affinity = "uncontrolled" | .background_load_note = "uncontrolled; MISO_ENGINE_BENCH_ALLOW_UNCONTROLLED=1; waived affinity_unavailable; loadavg 9.9"'
+expect_accept "$(printf '%s' "$session_live" | jq -c "$uncontrolled"' | .producer_placement = "unpinned" | .producer_cpu = null')" \
+    'an uncontrolled live row with an unpinned producer'
+live_mutation "$uncontrolled"' | .producer_placement = "unpinned"' \
+    'an unpinned producer that names a core'
 
 # #881: the metered console row. The meter group is carried by that row alone and is pinned field
 # by field: a row that metered another tap, another metric set or another window would publish a
@@ -636,7 +643,7 @@ session_mutation '.workload_kind = "sixty_four_track_console_metered"' \
 expect_reject "$(printf '%s' "$session_floor" | jq -c "$metered_group")" \
     'a floor-accounted standing row carrying the meter group'
 metered_mutation '.workload_kind = "sixty_four_track_console"' 'the meter group on the standing row'
-metered_mutation '.workload_kind = "sixty_four_track_gain_pan_only" | .strip_content = "gain+pan" | .strip_layout = "builtins" | .synthetic_fixture = true' \
+metered_mutation '.workload_kind = "sixty_four_track_gain_pan_ring" | .strip_content = "gain+pan" | .strip_layout = "builtins" | .synthetic_fixture = true' \
     'the meter group on another row'
 metered_mutation '.meter_streams = 32' 'a metered row that metered half its tracks'
 metered_mutation '.meter_tap = "post_fader"' 'a metered row at a tap the browser does not meter'
@@ -664,7 +671,6 @@ metered_mutation '.strip_layout = "builtins"' 'a metered row claiming the builti
 metered_mutation '.input_signal = "silence"' 'a metered row claiming silence'
 metered_mutation '.fixture_id = "fixtures/session/v1/console-sixty-four-track-mono.json"' \
     'a metered row rendered from the mono fixture'
-metered_mutation '.source_feed = "played_planes"' 'a metered row claiming the driver-fed feed'
 metered_mutation '.tracks = 9' 'a metered row that is not eight full banks'
 metered_mutation '.observations = 100' 'a shortened metered run'
 # The redirect count is the metered plan's own, whatever it is: any non-negative integer.
@@ -772,7 +778,6 @@ for count in 10 13 16; do
     strip_mutation '.input_signal = "odd_tracks_silent"' 'a strip-at-N row claiming sparse input'
     strip_mutation '.fixture_id = "fixtures/session/v1/console-sixty-four-track-mono.json"' \
         'a strip-at-N row cut from the mono fixture'
-    strip_mutation '.source_feed = "played_planes"' 'a strip-at-N row claiming the driver-fed feed'
     strip_mutation '. + {bypass_pattern: "none", bypassed_tracks: 0}' 'a strip-at-N row carrying the bypass group'
     expect_reject "$(printf '%s' "$strip_n" | jq -c -L "$scripts_dir" --arg s "$core_clock_source" "$add_floor"' with_floor(5480000000; $s)
         | .floor_cycles_per_lane_sample = (307 / (8 * 3.7))
@@ -1263,7 +1268,7 @@ product_lanes=$(jq -cn --arg a "$digest_a" --argjson m "$metadata" '$m + {
   standing_row: "sixty_four_track_console", tracks: 64, synthetic_fixture: false,
   strip_content: "eq+compressor+limiter",
   strip_layout: "pre_insert:eq+compressor,post_insert:limiter", input_signal: "tone",
-  source_feed: "bound",
+  source_feed: "played_planes",
   fixture_id: "fixtures/session/v1/console-sixty-four-track-intended.json",
   round: 1, backend: "Simd8", sample_rate_hz: 48000, quantum_frames: 128,
   observations: 1000, control_delivery: "concurrent",
@@ -1287,7 +1292,7 @@ lanes_mutation '.p95_ns_per_block = 1' 'product-lane percentiles out of order'
 lanes_mutation '.render_total_forbidden_operations = 1' 'a product-lane row with a forbidden operation on render'
 lanes_mutation '.extra = 1' 'a product-lane record with a key the shape does not list'
 
-records=$(jq -cn --argjson session "$session" --argjson hoist "$hoist" \
+records=$(jq -cn --argjson session "$session" --argjson hoist "$hoist" --argjson live "$session_live" \
     --argjson meters "$meters" --argjson observation "$observation" \
     --argjson placement "$placement" --argjson automation "$automation" \
     --argjson mono "$mono" --argjson mixing "$mixing" --argjson ride "$fader_ride" \
@@ -1323,8 +1328,6 @@ records=$(jq -cn --argjson session "$session" --argjson hoist "$hoist" \
      layout: "pre_insert:eq,inserts:compressor", signal: "tone", fixture: legacy_fixture, digest: "e"},
     {kind: "sixty_four_track_eq_comp_simd1", tracks: 64, synthetic: true, strip: "eq+compressor",
      layout: "pre_insert:eq+compressor", signal: "tone", fixture: console_fixture, digest: "f"},
-    {kind: "sixty_four_track_gain_pan_only", tracks: 64, synthetic: true, strip: "gain+pan",
-     layout: "builtins", signal: "tone", fixture: console_fixture, digest: "a"},
     {kind: "sixty_four_track_console_mono", tracks: 64, synthetic: false,
      strip: "eq+compressor+limiter", layout: intended_layout, signal: "tone",
      fixture: mono_fixture, digest: "b"},
@@ -1334,11 +1337,9 @@ records=$(jq -cn --argjson session "$session" --argjson hoist "$hoist" \
     {kind: "sixty_four_track_console_half_mono", tracks: 64, synthetic: true,
      strip: "eq+compressor+limiter", layout: intended_layout, signal: "tone",
      fixture: mono_fixture, digest: "d"},
-    # #928 and #956: emitted after the fifteen, and rendering the bits of the bound gain-and-pan
-    # row.
+    # #928 and #956: emitted after the fourteen.
     {kind: "sixty_four_track_gain_pan_ring", tracks: 64, synthetic: true, strip: "gain+pan",
-     layout: "builtins", signal: "tone", fixture: console_fixture, digest: "a",
-     feed: "played_planes"},
+     layout: "builtins", signal: "tone", fixture: console_fixture, digest: "a"},
     # #881: emitted last, rendering the bits of the standing console row, and carrying the meter
     # group and the counters of its own plan.
     {kind: "sixty_four_track_console_metered", tracks: 64, synthetic: false,
@@ -1377,7 +1378,6 @@ records=$(jq -cn --argjson session "$session" --argjson hoist "$hoist" \
         | .workload_kind = $s.kind | .tracks = $s.tracks
         | .synthetic_fixture = $s.synthetic
         | .strip_content = $s.strip | .strip_layout = $s.layout | .input_signal = $s.signal
-        | .source_feed = ($s.feed // "bound")
         | .fixture_id = $s.fixture | .round = $round
         | .output_sha256 = ($a[0:63] + $s.digest)
         | . + ($s.extra // {})),
@@ -1394,12 +1394,12 @@ records=$(jq -cn --argjson session "$session" --argjson hoist "$hoist" \
       ($mixing | .round = $round)
   ) ]
   # #1750: the fader-ride row of each round, appended after both rounds so the index map below
-  # is unchanged: 62 is the round-one fader-ride row and 63 the round-two one.
+  # is unchanged: 60 is the round-one fader-ride row and 61 the round-two one.
   + [ (1, 2) as $round | $ride | .round = $round ]
-  # #1758: the product-lane row of each round, appended after those: 64 and 65.
+  # #1758: the product-lane row of each round, appended after those: 62 and 63.
   + [ (1, 2) as $round | $lanes | .round = $round ]
-  # #1763: the lane-group arms and the app-shape arm, each round in turn, after those: 66-67
-  # fader/matrix, 68-69 strip input, 70-71 effects, 72-73 app shape.
+  # #1763: the lane-group arms and the app-shape arm, each round in turn, after those: 64-65
+  # fader/matrix, 66-67 strip input, 68-69 effects, 70-71 app shape.
   + [ ({workload_kind: "sixty_four_track_console_fader_matrix_lanes", live_lanes: "fader_matrix"},
        {workload_kind: "sixty_four_track_console_strip_input_lanes",
         live_lanes: "fader_matrix+strip_input"},
@@ -1408,42 +1408,51 @@ records=$(jq -cn --argjson session "$session" --argjson hoist "$hoist" \
         standing_row: "sixty_four_track_app_shape", strip_content: "eq+compressor",
         strip_layout: "pre_insert:eq+compressor", fixture_id: app_fixture,
         output_sha256: ($a[0:63] + "4")}) as $arm
-      | (1, 2) as $round | $lanes + $arm | .round = $round ]')
+      | (1, 2) as $round | $lanes + $arm | .round = $round ]
+  # #938: the live-producer row of each round, appended last so the index map below is unchanged:
+  # 72 and 73. It renders the ring row bits.
+  + [ (1, 2) as $round | $live | .round = $round | .output_sha256 = ($a[0:63] + "a") ]')
 
 expect_aggregate_accept "$(printf '%s' "$records" | jq -c '.[]')" 'the seventy-four-record set'
-expect_aggregate_reject "$(printf '%s' "$records" | jq -c --arg a "$digest_a" '.[64].output_sha256 = ($a[0:63] + "7") | .[65].output_sha256 = ($a[0:63] + "7") | .[]')" 'a product-lane row that rendered other bits than the standing row'
-expect_aggregate_reject "$(printf '%s' "$records" | jq -c --arg a "$digest_a" '.[72].output_sha256 = ($a[0:63] + "7") | .[73].output_sha256 = ($a[0:63] + "7") | .[]')" 'an app-shape product-lane arm that rendered other bits than the app-shape row'
+# #938: the live row renders the ring row bits in both rounds, and it is a row of the set. Both of
+# its rounds move together, so only the pair pin can refuse the first edit.
+expect_aggregate_reject "$(printf '%s' "$records" | jq -c --arg c "$digest_c" '.[72].output_sha256 = $c | .[73].output_sha256 = $c | .[]')" 'a live-producer row that rendered other bits than the ring row'
+expect_aggregate_reject "$(printf '%s' "$records" | jq -c '[.[] | select(.workload_kind != "sixty_four_track_gain_pan_live")] | .[]')" 'a set missing the live-producer row'
+expect_aggregate_reject "$(printf '%s' "$records" | jq -c --arg a "$digest_a" '.[62].output_sha256 = ($a[0:63] + "7") | .[63].output_sha256 = ($a[0:63] + "7") | .[]')" 'a product-lane row that rendered other bits than the standing row'
+expect_aggregate_reject "$(printf '%s' "$records" | jq -c --arg a "$digest_a" '.[70].output_sha256 = ($a[0:63] + "7") | .[71].output_sha256 = ($a[0:63] + "7") | .[]')" 'an app-shape product-lane arm that rendered other bits than the app-shape row'
 expect_aggregate_reject "$(printf '%s' "$records" | jq -c '[.[] | select(.record != "console_fader_ride")] | .[]')" 'a set with no fader-ride row'
-expect_aggregate_reject "$(printf '%s' "$records" | jq -c --arg b "$digest_b" '.[63].riding_output_sha256 = $b | .[]')" 'a fader-ride row whose rounds rendered different output'
-expect_aggregate_reject "$(printf '%s' "$records" | jq -c --arg b "$digest_b" '.[63].quiet_output_sha256 = $b | .[]')" 'a fader-ride quiet arm whose rounds rendered different output'
-expect_aggregate_reject "$(printf '%s' "$records" | jq -c '.[63].fader_tracks |= reverse | .[63].pan_tracks |= reverse | .[]')" 'a fader-ride row whose rounds rode different tracks'
+expect_aggregate_reject "$(printf '%s' "$records" | jq -c --arg b "$digest_b" '.[61].riding_output_sha256 = $b | .[]')" 'a fader-ride row whose rounds rendered different output'
+expect_aggregate_reject "$(printf '%s' "$records" | jq -c --arg b "$digest_b" '.[61].quiet_output_sha256 = $b | .[]')" 'a fader-ride quiet arm whose rounds rendered different output'
+expect_aggregate_reject "$(printf '%s' "$records" | jq -c '.[61].fader_tracks |= reverse | .[61].pan_tracks |= reverse | .[]')" 'a fader-ride row whose rounds rode different tracks'
 
-# Index map of the frozen emission order: 0-22 are round one's twenty-three session rows (15 is
-# the driver-fed gain-and-pan row, 16 the metered console row, 17 the bus-and-send row of #1227 and
-# 18-22 the five console-strip rows of #1085), 23-24 its two hoist rows, 25 its meters row, 26 its
-# observation row, 27 its placement row-pair, 28 its automation-active row, 29 its mono row-pair
-# and 30 its mixing-automation row; 31-61 repeat for round two. #956 took two records out of the
+# Index map of the frozen emission order: 0-21 are round one's twenty-two session rows (14 is
+# the gain-and-pan row, 15 the metered console row, 16 the bus-and-send row of #1227 and 17-21 the
+# five console-strip rows of #1085), 22-23 its two hoist rows, 24 its meters row, 25 its
+# observation row, 26 its placement row-pair, 27 its automation-active row, 28 its mono row-pair
+# and 29 its mixing-automation row; 30-59 repeat for round two. #956 took two records out of the
 # fifty before it (the plumbing row, both rounds), #1003 added two back at the end of each round,
-# #1085 added ten after the metered row, and #1227 two between the metered row and the
-# console-strip rows.
+# #1085 added ten after the metered row, #1227 two between the metered row and the console-strip
+# rows, and #965 took two out (the bound-feed gain-and-pan row, both rounds). The rows appended
+# after both rounds follow: 60-61 fader ride, 62-63 product lanes, 64-71 the lane-group arms and
+# 72-73 the live-producer row of #938.
 expect_aggregate_reject "$(printf '%s' "$records" | jq -c 'del(.[0]) | .[]')" 'seventy-three records'
-expect_aggregate_reject "$(printf '%s' "$records" | jq -c '. as $r | ($r + [$r[27]]) | .[]')" 'seventy-five records'
+expect_aggregate_reject "$(printf '%s' "$records" | jq -c '. as $r | ($r + [$r[26]]) | .[]')" 'seventy-five records'
 expect_aggregate_reject "$(printf '%s' "$records" | jq -c '. as $r | ($r + [$r[0]]) | .[]')" 'a duplicated record'
-expect_aggregate_reject "$(printf '%s' "$records" | jq -c '.[31].round = 1 | .[]')" 'a workload measured twice in one round'
+expect_aggregate_reject "$(printf '%s' "$records" | jq -c '.[30].round = 1 | .[]')" 'a workload measured twice in one round'
 expect_aggregate_reject "$(printf '%s' "$records" | jq -c '.[0].cpu_model = "Another CPU" | .[]')" 'records from two hosts'
 expect_aggregate_reject "$(printf '%s' "$records" | jq -c '.[0].candidate_commit = "ffffffffffffffffffffffffffffffffffffffff" | .[]')" 'records from two commits'
 expect_aggregate_reject "$(printf '%s' "$records" | jq -c '.[0].backend = "Scalar" | .[]')" 'records from two backends'
 # Round one and round two must render the same bytes: they are two measurements of one workload.
-expect_aggregate_reject "$(printf '%s' "$records" | jq -c --arg c "$digest_c" '.[31].output_sha256 = $c | .[]')" 'a workload whose rounds rendered different output'
+expect_aggregate_reject "$(printf '%s' "$records" | jq -c --arg c "$digest_c" '.[30].output_sha256 = $c | .[]')" 'a workload whose rounds rendered different output'
 expect_aggregate_reject "$(printf '%s' "$records" | jq -c '[.[] | select(.record == "console_session")] | .[]')" 'a set with no hoist rows'
 expect_aggregate_reject "$(printf '%s' "$records" | jq -c '[.[] | select(.record != "console_meters")] | .[]')" 'a set with no meters arm'
 expect_aggregate_reject "$(printf '%s' "$records" | jq -c '[.[] | select(.record != "console_observation")] | .[]')" 'a set with no observation arm'
-expect_aggregate_reject "$(printf '%s' "$records" | jq -c --arg c "$digest_c" '.[56].meters_off_output_sha256 = $c | .[56].meters_on_output_sha256 = $c | .[]')" 'a meters arm whose rounds rendered different output'
-expect_aggregate_reject "$(printf '%s' "$records" | jq -c --arg c "$digest_c" '.[57].absent_output_sha256 = $c | .[57].unarmed_output_sha256 = $c | .[57].armed_output_sha256 = $c | .[]')" 'an observation arm whose rounds rendered different output'
-expect_aggregate_reject "$(printf '%s' "$records" | jq -c --arg c "$digest_c" '.[58].split_chains_output_sha256 = $c | .[58].merged_chain_output_sha256 = $c | .[]')" 'a placement pair whose rounds rendered different output'
+expect_aggregate_reject "$(printf '%s' "$records" | jq -c --arg c "$digest_c" '.[54].meters_off_output_sha256 = $c | .[54].meters_on_output_sha256 = $c | .[]')" 'a meters arm whose rounds rendered different output'
+expect_aggregate_reject "$(printf '%s' "$records" | jq -c --arg c "$digest_c" '.[55].absent_output_sha256 = $c | .[55].unarmed_output_sha256 = $c | .[55].armed_output_sha256 = $c | .[]')" 'an observation arm whose rounds rendered different output'
+expect_aggregate_reject "$(printf '%s' "$records" | jq -c --arg c "$digest_c" '.[56].split_chains_output_sha256 = $c | .[56].merged_chain_output_sha256 = $c | .[]')" 'a placement pair whose rounds rendered different output'
 expect_aggregate_reject "$(printf '%s' "$records" | jq -c '[.[] | select(.record != "console_placement")] | .[]')" 'a set with no placement row-pair'
 expect_aggregate_reject "$(printf '%s' "$records" | jq -c '[.[] | select(.record != "console_automation")] | .[]')" 'a set with no automation-active row'
-expect_aggregate_reject "$(printf '%s' "$records" | jq -c --arg c "$digest_c" '.[59].quiet_output_sha256 = $c | .[59].restated_output_sha256 = $c | .[]')" 'an automation row whose rounds rendered different output'
+expect_aggregate_reject "$(printf '%s' "$records" | jq -c --arg c "$digest_c" '.[57].quiet_output_sha256 = $c | .[57].restated_output_sha256 = $c | .[]')" 'an automation row whose rounds rendered different output'
 # #144 item 13: two admissibility states in one accepted run is the comparison the control field
 # exists to prevent, and a run that never stated one at all is not an accepted run.
 expect_aggregate_reject "$(printf '%s' "$records" | jq -c '.[0].measurement_control = "uncontrolled" | .[0].cpu_affinity = "uncontrolled" | .[0].background_load_note = "uncontrolled; MISO_ENGINE_BENCH_ALLOW_UNCONTROLLED=1; waived affinity_unavailable" | .[]')" 'a run mixing controlled and uncontrolled records'
@@ -1459,28 +1468,23 @@ expect_aggregate_reject "$(printf '%s' "$records" | jq -c '[.[] | select(.record
 # workload: the quiet and restated digests, the moving arm, the preflight and the collapse
 # counters all agree across them.
 expect_aggregate_reject "$(printf '%s' "$records" | jq -c '[.[] | select(.record != "console_mixing_automation")] | .[]')" 'a set with no mixing-automation row'
-expect_aggregate_reject "$(printf '%s' "$records" | jq -c --arg c "$digest_c" '.[61].quiet_output_sha256 = $c | .[61].restated_output_sha256 = $c | .[]')" 'a mixing row whose rounds rendered different output'
-expect_aggregate_reject "$(printf '%s' "$records" | jq -c --arg c "$digest_c" '.[61].automated_output_sha256 = $c | .[]')" 'a mixing row whose rounds rode different traffic'
+expect_aggregate_reject "$(printf '%s' "$records" | jq -c --arg c "$digest_c" '.[59].quiet_output_sha256 = $c | .[59].restated_output_sha256 = $c | .[]')" 'a mixing row whose rounds rendered different output'
+expect_aggregate_reject "$(printf '%s' "$records" | jq -c --arg c "$digest_c" '.[59].automated_output_sha256 = $c | .[]')" 'a mixing row whose rounds rode different traffic'
 # #1011: a fresh digest. `$digest_c` is the base record's preflight `restated` digest, so that
 # edit is refused by the per-record A3 rule before the rounds are compared.
-expect_aggregate_reject "$(printf '%s' "$records" | jq -c --arg a "$digest_a" '.[61].preflight_output_sha256.automated_limiter_only = ($a[0:63] + "4") | .[]')" 'a mixing preflight whose rounds disagree'
-expect_aggregate_reject "$(printf '%s' "$records" | jq -c '.[61].preflight_bank_collapse_counters.automated_compressor_only = [512, 8] | .[]')" 'a mixing preflight whose rounds collapsed differently'
-expect_aggregate_reject "$(printf '%s' "$records" | jq -c '.[61].restated_bank_collapse_counters = [2128, 8] | .[]')" 'a mixing row whose rounds collapsed differently'
-expect_aggregate_reject "$(printf '%s' "$records" | jq -c '.[61].automated_bank_collapse_counters = [2128, 8] | .[]')" 'a mixing automated arm whose rounds collapsed differently'
-expect_aggregate_reject "$(printf '%s' "$records" | jq -c '.[61].quiet_bank_collapse_counters = [17024, 16] | .[61].restated_bank_collapse_counters = [6384, 16] | .[61].automated_bank_collapse_counters = [6384, 16] | .[]')" 'a mixing row whose rounds formed different cohorts'
-expect_aggregate_reject "$(printf '%s' "$records" | jq -c --arg c "$digest_c" '.[60].collapse_eligible_output_sha256 = $c | .[60].collapse_forced_off_output_sha256 = $c | .[]')" 'a mono pair whose rounds rendered different output'
+expect_aggregate_reject "$(printf '%s' "$records" | jq -c --arg a "$digest_a" '.[59].preflight_output_sha256.automated_limiter_only = ($a[0:63] + "4") | .[]')" 'a mixing preflight whose rounds disagree'
+expect_aggregate_reject "$(printf '%s' "$records" | jq -c '.[59].preflight_bank_collapse_counters.automated_compressor_only = [512, 8] | .[]')" 'a mixing preflight whose rounds collapsed differently'
+expect_aggregate_reject "$(printf '%s' "$records" | jq -c '.[59].restated_bank_collapse_counters = [2128, 8] | .[]')" 'a mixing row whose rounds collapsed differently'
+expect_aggregate_reject "$(printf '%s' "$records" | jq -c '.[59].automated_bank_collapse_counters = [2128, 8] | .[]')" 'a mixing automated arm whose rounds collapsed differently'
+expect_aggregate_reject "$(printf '%s' "$records" | jq -c '.[59].quiet_bank_collapse_counters = [17024, 16] | .[59].restated_bank_collapse_counters = [6384, 16] | .[59].automated_bank_collapse_counters = [6384, 16] | .[]')" 'a mixing row whose rounds formed different cohorts'
+expect_aggregate_reject "$(printf '%s' "$records" | jq -c --arg c "$digest_c" '.[58].collapse_eligible_output_sha256 = $c | .[58].collapse_forced_off_output_sha256 = $c | .[]')" 'a mono pair whose rounds rendered different output'
 expect_aggregate_reject "$(printf '%s' "$records" | jq -c '(.[] | select(.workload_kind == "sixty_four_track_gain_pan_ring")) |= (.workload_kind = "sixty_four_track_plumbing_ring" | .strip_content = "plumbing" | .strip_layout = "plumbing") | .[]')" 'a set carrying the retired plumbing ring row in place of the gain-and-pan ring row'
-expect_aggregate_reject "$(printf '%s' "$records" | jq -c '[.[] | select(.workload_kind != "sixty_four_track_gain_pan_only")] | .[]')" 'a set missing the gain-and-pan row'
 expect_aggregate_reject "$(printf '%s' "$records" | jq -c '[.[] | select(.workload_kind != "sixty_four_track_console_mono")] | .[]')" 'a set missing the mono session row'
 expect_aggregate_reject "$(printf '%s' "$records" | jq -c '[.[] | select(.workload_kind != "sixty_four_track_console_mono_dual")] | .[]')" 'a set missing the mono control row'
 expect_aggregate_reject "$(printf '%s' "$records" | jq -c '[.[] | select(.workload_kind != "sixty_four_track_console_half_mono")] | .[]')" 'a set missing the mixed-cohort row'
-# #928 and #956: the driver-fed row is a row of the set, and its digest is the bound gain-and-pan
-# row's. Both
-# rounds are moved together so the rounds rule is satisfied and only the pair pin can refuse it.
-expect_aggregate_reject "$(printf '%s' "$records" | jq -c '[.[] | select(.workload_kind != "sixty_four_track_gain_pan_ring")] | .[]')" 'a set missing the driver-fed gain-and-pan row'
-expect_aggregate_reject "$(printf '%s' "$records" | jq -c --arg c "$digest_c" '(.[] | select(.workload_kind == "sixty_four_track_gain_pan_ring")).output_sha256 = $c | .[]')" 'a driver-fed row that rendered other bits than the bound row'
-expect_aggregate_reject "$(printf '%s' "$records" | jq -c --arg c "$digest_c" '(.[] | select(.workload_kind == "sixty_four_track_gain_pan_only")).output_sha256 = $c | .[]')" 'a bound gain-and-pan row that rendered other bits than the driver-fed row'
-expect_aggregate_accept "$(printf '%s' "$records" | jq -c --arg c "$digest_c" '(.[] | select(.workload_kind == "sixty_four_track_gain_pan_only" or .workload_kind == "sixty_four_track_gain_pan_ring")).output_sha256 = $c | .[]')" 'the gain-and-pan pair moving together'
+# #928, #956: the gain-and-pan row is a row of the set. #965 retired its bound-feed twin, and
+# with it the pair pin.
+expect_aggregate_reject "$(printf '%s' "$records" | jq -c '[.[] | select(.workload_kind != "sixty_four_track_gain_pan_ring")] | .[]')" 'a set missing the gain-and-pan row'
 # #881: the metered console row is a row of the set and its digest is the standing console row's.
 # Both rounds are moved together so the rounds rule is satisfied and only the pair pin can refuse
 # it. Its counters are compared with no other record: every other plan in the run is a
@@ -1535,7 +1539,7 @@ floor_records=$(printf '%s' "$records" | jq -c -L "$scripts_dir" --arg s "$core_
     "sixty_four_track_compressor_only": 2.60, "sixty_four_track_eq_comp_simd1": 3.20,
     "sixty_four_track_console_legacy": 3.30, "sixty_four_track_console": 4.40,
     "one_twenty_eight_track_stretch": 8.60,
-    "sixty_four_track_gain_pan_only": 1.01, "sixty_four_track_gain_pan_ring": 0.98,
+    "sixty_four_track_gain_pan_ring": 0.98, "sixty_four_track_gain_pan_live": 0.99,
     "sixty_four_track_console_metered": 4.80, "sixty_four_track_console_sends": 5.20,
     "sixty_four_track_console_mono": 4.38, "sixty_four_track_console_mono_dual": 4.38,
     "sixty_four_track_console_half_mono": 4.39,

@@ -157,6 +157,12 @@ async function runMutationLedger() {
     replace:
       "    if (observed.hex !== stemDigest(stem.identity)) {\n      await removeEntry(this.#directory, finalName)",
   }
+  // The cheap size pre-check is the first verify-on-open length arm; the
+  // comparison after the hash is the second. Both go, or neither is tested.
+  const verifyOnOpenPreCheck = {
+    search: "      if (file.size !== stem.bytes) {",
+    replace: "      if (false) {",
+  }
   const verifyOnOpenArm = {
     search:
       "      if (\n        observed.bytes !== stem.bytes ||\n        observed.hex !== stemDigest(stem.identity)\n      ) {\n        await this.#demote(stem.identity)",
@@ -211,7 +217,7 @@ async function runMutationLedger() {
       name: "trust warm filename without verify-on-open",
       file: "web/stem-store/opfs-store.js",
       search:
-        "const observed = await this.#hashOpenFile(handle, stem, onProgress, signal)",
+        "const observed = await this.#hashOpenFile(file, stem, onProgress, signal)",
       replace:
         "const observed = { bytes: stem.bytes, hex: stemDigest(stem.identity) }",
       test: "stem-store-core-v1.mjs",
@@ -311,9 +317,16 @@ async function runMutationLedger() {
       expectedFailure: "a lying declaration must never survive fallback promotion",
     },
     {
+      name: "hash a wrong-size stem before refusing it at open",
+      file: "web/stem-store/opfs-store.js",
+      edits: [verifyOnOpenPreCheck],
+      test: "stem-store-core-v1.mjs",
+      expectedFailure: "a truncated stem was hashed before its size refused it",
+    },
+    {
       name: "drop the verify-on-open byte-length check",
       file: "web/stem-store/opfs-store.js",
-      edits: [verifyOnOpenArm],
+      edits: [verifyOnOpenPreCheck, verifyOnOpenArm],
       test: "stem-store-core-v1.mjs",
       expectedFailure: "verify-on-open must demote a lying declaration to a miss",
     },
@@ -329,7 +342,13 @@ async function runMutationLedger() {
     {
       name: "drop every open-time byte-length check",
       file: "web/stem-store/opfs-store.js",
-      edits: [streamedArm, reopenArm, fallbackFinalArm, verifyOnOpenArm],
+      edits: [
+        streamedArm,
+        reopenArm,
+        fallbackFinalArm,
+        verifyOnOpenPreCheck,
+        verifyOnOpenArm,
+      ],
       test: "stem-store-core-v1.mjs",
       expectedFailure: "a lying declaration must never survive fallback promotion",
     },

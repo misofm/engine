@@ -17,7 +17,9 @@
 # in that directory (a record is never overwritten), when the host is not x86_64 with AVX2, when
 # the tree is not clean and committed, and when the console fixture check fails. It then builds
 # `bench` in release and refuses again when an admissibility precondition below is unmet. An
-# admitted run takes one untimed warmup and exactly two measured rounds, validates the 74 records
+# admitted run pins the process to the benchmark core and the live-producer row's core (#938, a core
+# of its L3 that is not its SMT sibling; none is a refusal), takes one untimed warmup and exactly
+# two measured rounds, validates the 74 records
 # with `console-benchmark-validator.jq`, and promotes them to the accepted file beside a
 # disposition.
 # `scripts/operator/preflight-console-benchmark.sh --step NAME` checks everything that can fail
@@ -181,6 +183,26 @@ if command -v taskset >/dev/null 2>&1 && [[ -r /sys/devices/system/cpu/online ]]
 else
     refusals+=(affinity_unavailable)
     bench_cpu=
+fi
+
+# 1b. The live-producer row's core (#938). Its producer thread runs on a core that shares
+#     `bench_cpu`'s L3 and is not its SMT sibling, the placement a product host's producer has.
+#     The process mask is widened to both cores; the bench pins its render thread to `bench_cpu`
+#     (`MISO_ENGINE_BENCH_CPU_AFFINITY`) and the producer to the other core of the mask. No such
+#     core is a refusal that no escape hatch waives: run on one core, the row would time a producer
+#     sharing the render core under the name of one that does not.
+producer_cpu=
+if [[ -n "$bench_cpu" ]]; then
+    if producer_cpu=$(bench_read_producer_cpu "$bench_cpu") &&
+        taskset -c "$bench_cpu,$producer_cpu" true >/dev/null 2>&1; then
+        affinity=(taskset -c "$bench_cpu,$producer_cpu")
+        note_affinity="$note_affinity producer cpu $producer_cpu"
+    else
+        failure_reason=precondition_producer_cpu_unavailable
+        printf 'refusing the run (live-producer row placement): no core shares cpu %s'"'"'s L3 outside its SMT siblings\n' \
+            "$bench_cpu" >&2
+        exit 1
+    fi
 fi
 
 # 2. Binary-mtime cooldown. A release build saturates every core; the package is hot and the

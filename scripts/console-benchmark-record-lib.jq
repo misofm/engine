@@ -32,6 +32,9 @@ def metered_session_keys: ["bank_route_folds","bank_scatter_redirects","meter_dr
 # #1085: the app shape's bypass group, carried by that row alone, on the same terms as the metered
 # group: a standing row that grew it, or the app shape without it, matches no key set.
 def bypass_session_keys: ["bypass_pattern","bypassed_tracks"];
+# #938: the live-producer row's producer group: where its producer thread ran and how many frames
+# its rings underran. Every other session row validates without it.
+def live_session_keys: ["producer_cpu","producer_placement","underruns"];
 
 def hoist_keys: ["arms","backend","background_load_note","bank_boundary","bit_identity","candidate_commit","cpu_affinity","cpu_model","descriptive_only","governor_or_power_mode","issue","llvm_version","measurement_control","missing_metadata","moving_output_sha256","moving_p50_ns","moving_p95_ns","moving_p99_ns","observations","os","paired_delta_median_ns","pairing","percentile_method","profile","quiet_output_sha256","quiet_p50_ns","quiet_p99_ns","record","restated_output_sha256","restated_p50_ns","restated_p95_ns","restated_p99_ns","round","rust_version","schema_version","statistical_method","target_features","target_triple","tracks","units","workload_kind"];
 
@@ -134,18 +137,16 @@ def floor_pins:
       [$b, 1, "none", floor_document + "builtins"],
     "sixty_four_track_dispatch_only":
       [$bi, 1, "none", floor_document + "builtins, identity"],
-    # The other row that composes the identity inventory. One basis string for both identity rows
-    # is deliberate -- a real fader and pan cost what an identity fader and pan cost, because
-    # neither kernel has an identity arm, and that claim is what the shared inventory states. It
-    # names no control.
-    "sixty_four_track_gain_pan_only":
-      [$bi, 1, "none", floor_document + "builtins, identity"],
-    # Its driver-fed twin (#928, re-based onto the gain/pan session by #956) and the native
-    # pure-path target: the same session with its track inputs claimed by a prepared source set.
-    # Moving a frozen block into the graph is a copy, not a lane-op, whichever feed does it, so the
-    # inventory is the gain/pan row's -- the floor of the table, not below it -- and like its twin
-    # it names no control.
+    # The other row that composes the identity inventory, and the native pure-path target (#928,
+    # #956). One basis string for both identity rows is deliberate -- a real fader and pan cost
+    # what an identity fader and pan cost, because neither kernel has an identity arm, and that
+    # claim is what the shared inventory states. It names no control.
     "sixty_four_track_gain_pan_ring":
+      [$bi, 1, "none", floor_document + "builtins, identity"],
+    # The live-producer row (#938) renders the ring row's plan, so it states the ring row's floor;
+    # the read of input another core wrote is the gap between the two rows' measurements, not an
+    # inventory. It names no control: the two rows share one floor.
+    "sixty_four_track_gain_pan_live":
       [$bi, 1, "none", floor_document + "builtins, identity"],
     # The three mono rows carry the whole intended strip, so they carry its inventory. Their
     # fixture differs from the standing one in per-channel values only -- one source channel
@@ -220,25 +221,24 @@ def floor_shape:
    end);
 
 
-# The twenty-three session workloads, sorted: `WORKLOADS`'s fifteen (append-only, in emission
-# order), the driver-fed gain/pan row the bench emits after them (#928 and #956,
-# `DRIVER_FED_WORKLOADS`), the metered console row (#881, `METERED_WORKLOADS`), the bus-and-send
+# The twenty-three session workloads, sorted: `WORKLOADS`'s fourteen (in emission order), the
+# gain/pan row the bench emits after them (#928 and #956, `DRIVER_FED_WORKLOADS`), its
+# live-producer twin (#938, `LIVE_FED_WORKLOADS`), the metered console row (#881, `METERED_WORKLOADS`), the bus-and-send
 # row (#1227, `BUS_SEND_WORKLOADS`), and the five console-strip rows it emits last (#1085,
 # `CONSOLE_STRIP_WORKLOADS`).
-def session_kinds: ["nine_track_baseline","nine_track_ragged_strip","one_twenty_eight_track_stretch","sixteen_track_strip","sixty_four_track_app_shape","sixty_four_track_builtins_only","sixty_four_track_compressor_only","sixty_four_track_console","sixty_four_track_console_half_mono","sixty_four_track_console_legacy","sixty_four_track_console_metered","sixty_four_track_console_mono","sixty_four_track_console_mono_dual","sixty_four_track_console_sends","sixty_four_track_console_sparse","sixty_four_track_dispatch_only","sixty_four_track_eq_comp_simd1","sixty_four_track_eq_only","sixty_four_track_gain_pan_only","sixty_four_track_gain_pan_ring","sixty_four_track_idle","ten_track_ragged_strip","thirteen_track_ragged_strip"];
+def session_kinds: ["nine_track_baseline","nine_track_ragged_strip","one_twenty_eight_track_stretch","sixteen_track_strip","sixty_four_track_app_shape","sixty_four_track_builtins_only","sixty_four_track_compressor_only","sixty_four_track_console","sixty_four_track_console_half_mono","sixty_four_track_console_legacy","sixty_four_track_console_metered","sixty_four_track_console_mono","sixty_four_track_console_mono_dual","sixty_four_track_console_sends","sixty_four_track_console_sparse","sixty_four_track_dispatch_only","sixty_four_track_eq_comp_simd1","sixty_four_track_eq_only","sixty_four_track_gain_pan_live","sixty_four_track_gain_pan_ring","sixty_four_track_idle","ten_track_ragged_strip","thirteen_track_ragged_strip"];
 
-# #928: how a session row's track inputs reach the graph. `bound` is a `FrozenGraphSource`
-# processor per track input, dispatched once per track per block; `played_planes` is a prepared
+# #928, #965: how a session row's track inputs reach the graph. `played_planes` is a prepared
 # source set whose driver copies each claim's block on request and lends its played planes in
-# place -- the production feed. Exactly one row is driver-fed, and the feed is pinned per kind for
-# the reason every other row fact is: a record claiming the production feed over bound processors,
-# or the reverse, would attribute the feed's cost to the wrong row. The field is required on every
-# session record, so a record from before it existed is refused; the driver-fed row's digest
-# partner is pinned by the aggregate.
-def driver_fed_kinds: ["sixty_four_track_gain_pan_ring"];
+# place -- the production feed, and since #965 the feed of every row. The retired `bound` feed (a
+# `FrozenGraphSource` processor per track input, dispatched once per track per block) is refused,
+# so a record from before #965 cannot pass for a production-feed measurement. The field is
+# required on every session record, so a record from before it existed is refused too. #938's
+# live row alone is `live_producer`: the production source set over rings a producer thread fills.
+def live_kinds: ["sixty_four_track_gain_pan_live"];
+def session_live: .workload_kind as $kind | any(live_kinds[]; . == $kind);
 def session_source_feed:
-  .workload_kind as $kind |
-  .source_feed == (if any(driver_fed_kinds[]; . == $kind) then "played_planes" else "bound" end);
+  .source_feed == (if session_live then "live_producer" else "played_planes" end);
 
 # #881: the rows prepared with the default web boot's meter set -- one `SAMPLE_PEAK` meter at
 # `PostMatrix` per track, a twelve-block window, bound as permanent observers -- and the key sets a
@@ -251,6 +251,7 @@ def session_bypass: .workload_kind as $kind | any(bypass_kinds[]; . == $kind);
 def session_row_keys:
   if session_metered then (session_keys + metered_session_keys) | sort
   elif session_bypass then (session_keys + bypass_session_keys) | sort
+  elif session_live then (session_keys + live_session_keys) | sort
   else session_keys end;
 def session_row_floor_keys: (session_row_keys + floor_keys) | sort;
 
@@ -280,6 +281,20 @@ def bypass_session_shape:
   .bypass_pattern == "index_mod_3_is_2" and
   (.bypassed_tracks | nonnegative_integer) and
   .bypassed_tracks == ([range(.tracks) | select(. % 3 == 2)] | length);
+
+# #938: the live row's producer. Any underrun refuses the record: a block rendered from a ring the
+# producer had not filled measured silence, not the read of another core's writes. A controlled
+# run's producer ran on a core that shares the render core's L3 and is not its SMT sibling
+# (`same_ccd`), never on the render core; an uncontrolled run may also state `unpinned`, with no
+# core. Every other placement the bench can name (`smt_sibling`, `other_l3`, `same_cpu`,
+# `topology_unavailable`, `no_producer_cpu`, `unsupported_platform`) is refused.
+def live_session_shape:
+  .underruns == 0 and
+  (if .producer_placement == "same_ccd" then
+     (.producer_cpu | nonnegative_integer) and (.producer_cpu | tostring) != .cpu_affinity
+   elif .producer_placement == "unpinned" then
+     .producer_cpu == null and .measurement_control != "controlled"
+   else false end);
 
 # The standing qualification fixture (#175): the intended production layout, EQ and compressor as
 # one two-slot chain on `simd1` and a true-peak limiter on `simd2`.
@@ -388,14 +403,9 @@ def session_kind_shape:
   # own fader and pan values kept. `strip_content` is what separates the two records, and the pair
   # is only a measurement of "an identity fader costs what a real one costs" while both rows say
   # honestly which they carried.
-  elif .workload_kind == "sixty_four_track_gain_pan_only" then
-    .tracks == 64 and .synthetic_fixture == true and
-    .strip_content == "gain+pan" and .strip_layout == "builtins" and .input_signal == "tone" and
-    .fixture_id == console_fixture
-  # Its driver-fed twin (#928, re-based by #956) states the same six facts: one session, fed two
-  # ways. What separates the two records is `source_feed`, pinned by `session_source_feed`, and
-  # nothing else.
-  elif .workload_kind == "sixty_four_track_gain_pan_ring" then
+  # The live-producer row (#938) states the ring row's facts: one plan, two feeds.
+  elif .workload_kind == "sixty_four_track_gain_pan_ring" or
+       .workload_kind == "sixty_four_track_gain_pan_live" then
     .tracks == 64 and .synthetic_fixture == true and
     .strip_content == "gain+pan" and .strip_layout == "builtins" and .input_signal == "tone" and
     .fixture_id == console_fixture
@@ -549,6 +559,7 @@ def session_record_valid:
   .render_errors == 0 and .render_total_forbidden_operations == 0 and
   (if session_metered then metered_session_shape else true end) and
   (if session_bypass then bypass_session_shape else true end) and
+  (if session_live then live_session_shape else true end) and
   (if (keys | sort) == session_row_floor_keys then floor_shape else true end);
 
 def hoist_record_valid:

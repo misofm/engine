@@ -231,3 +231,46 @@ through `test_spectrum_mut()`.
 - Note for T2b: carry pairing matches on `SpectrumTarget` equality (kind and ID), so T2b must make
   sure an old observer is never carried onto a new strip that reuses the ID with another kind
   (for example a removed track and a new submix of the same ID).
+- T2a: `SpectrumMonitor` holds `analysis: Option<SpectrumAnalysis>`, made with the service, so a
+  session with no configuration allocates nothing for spectrum (gate 7: capi's retained-bytes
+  ledger is exact). Every preparation, successors included, passes the monitor's preparation;
+  until T2b pairs them, a successor's captures drop on the control thread and the service reads
+  the running plan's. Gates 1 and 5 use the nine-track fixture (`eq0` post-pan) and a sawtooth
+  tone (`math` is not a control-plane dev-dependency). No capi test-support constructor with a
+  configuration: no capi test reads spectrum until #1595 (R1), so it would be dead code.
+  `hosts/host-web/src/tests.rs` takes the trait's new argument at its two direct `prepare` calls.
+- T2a verdict fold, root: the D1 deviation (`analysis` as `Option`, made with the service) is
+  accepted; it is consistent with D6 (a `None` configuration has no service).
+- Note for T2b: in T2a a structural edit on a configured session drops the successor's captures
+  and never calls `adopt_successor`. No host passes a configuration yet, so the path is not
+  reachable, but a kept target that does not carry would leave an armed capture pending forever.
+  T2b calls `adopt_successor` there, so T1's `Dropped` answers it, and extends gate 5 over its
+  transactions.
+- Note for #1594: when capi passes a configuration, capi's exact retained-bytes ledger must charge
+  the service's boxed stream window (about 16 KiB) and the analysis's boxed analyzer.
+- Note for T3: decide `adopted_epoch` for a configuration whose preparer returns no captures
+  (the browser's, until #1596).
+- T2b: the structural arm prepares the successor with `retain_present` over the prospective
+  model and stores it (advancing `configured_epoch` when it differs) only beside the candidate
+  push. `ProviderEpoch::spectrum` holds the candidate's captures and configuration epoch; the
+  pairing list is the candidate's own `inventory.spectrum_pairing()` (no copy). Promotion calls
+  `adopt_successor` with `carried = true` (D5), or removes the service for a `None`
+  configuration; what it displaces is parked in the retired epoch and dropped with it, on the
+  control thread. A `host.spectrum.target` refusal of a successor answers `CommandError::Internal`.
+  Gates 2-6 are in `tests/spectrum_monitor.rs`; gate 4 also refuses at `ProtocolCommit` (after the
+  successor was prepared), the case that tells a drop stored before the commit.
+- T2b finding (open, outside T2b's paths): the T1 kind-reuse note is a live defect. One
+  transaction that removes track `eq1` and adds submix `eq1` keeps the `TrackPostMatrix("eq1")`
+  entry (D4), and host-core's `resolve_spectrum_carry` (`prepare.rs`) pairs on target equality
+  alone, so the track's observer and stream carry onto the submix. The reproducer
+  `an_observer_is_never_carried_onto_a_strip_of_another_kind` is committed `#[ignore]`, red. The
+  fix compares the strip kind of a track tap's ID in the base model and the successor's model.
+- T2b root fold: root authorized the host-core fix. `resolve_spectrum_carry` pairs a capture only
+  when `same_strip_kind` finds its target's ID a track in both the base model and the successor's,
+  or a submix in both; a kind change does not carry, so T1's `Dropped` answers its arm. The
+  reproducer is un-ignored (red before, green after).
+- T2b verdict fold, root: PASS. The meter and route-delay carries have the same kind-reuse hole;
+  #1891 owns them. `EpochSpectrum::Candidate` carries the hop of the configuration the candidate
+  was prepared with, and a service that a promotion makes takes it (not the newest committed
+  configuration's). That path is unreachable until #1594 (a configuration only shrinks), so it has
+  no test here.

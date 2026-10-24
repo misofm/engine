@@ -1584,7 +1584,10 @@ trait FaderJumpStage {
     /// Whether `channel`'s gain is held (muted, or in a mute or unmute ramp): a gain operation
     /// then only remembers the gain (#1638 D2).
     fn gain_held(&self, channel: usize) -> bool;
-    /// Whether `channel` is muted (settled, or in a ramp toward `0.0`).
+    /// Whether `channel` is muted (settled, or in a ramp toward `0.0`) by the model, a live
+    /// record or a curve. An armed channel (issue #1288) is not: its mute is the arm's, and the
+    /// model holds it unmuted, so a mute that arrives while it is armed is a change that reaches
+    /// the stage and ends the arm, and an unmute is no change.
     fn muted(&self, channel: usize) -> bool;
     /// Frames left in `channel`'s ramp; `0` when settled.
     fn ramp_remaining(&self, channel: usize) -> u32;
@@ -1605,6 +1608,7 @@ impl FaderJumpStage for BankLaneStage<'_> {
     }
     fn muted(&self, channel: usize) -> bool {
         self.bank.is_muted(self.lane, channel) == Some(true)
+            && self.bank.is_armed(self.lane, channel) != Some(true)
     }
     fn ramp_remaining(&self, channel: usize) -> u32 {
         self.bank.ramp_remaining(self.lane, channel).unwrap_or(0)
@@ -1622,7 +1626,7 @@ impl FaderJumpStage for FaderMuteRampBuiltins {
         Self::gain_held(self, channel) == Some(true)
     }
     fn muted(&self, channel: usize) -> bool {
-        self.is_muted(channel)
+        self.is_muted(channel) && self.is_armed(channel) != Some(true)
     }
     fn ramp_remaining(&self, channel: usize) -> u32 {
         Self::ramp_remaining(self, channel).unwrap_or(0)
@@ -5229,6 +5233,17 @@ impl GraphPreparedBuiltinBankProcessor for FaderBankProcessor {
     fn live_lanes(&self) -> u8 {
         live_lane_mask(self.controls.iter().map(Option::is_some))
     }
+    /// Issue #1288 D2: [`BuiltinFaderBank::arm_fade_in`]; `false` for a lane past the bank.
+    fn arm_fade_in(&mut self, lane: usize) -> bool {
+        self.bank.arm_fade_in(lane).unwrap_or(false)
+    }
+    // REALTIME_POLICY_BEGIN
+    /// Issue #1288 D3: [`BuiltinFaderBank::fire_fade_in`], at the block boundary before this
+    /// block's drain.
+    fn fire_fade_in(&mut self, lane: usize, ramp_samples: u32) {
+        self.bank.fire_fade_in(lane, ramp_samples);
+    }
+    // REALTIME_POLICY_END
     // REALTIME_POLICY_BEGIN
     /// The fader bank's own rest mask ([`BuiltinFaderBank::lanes_at_rest`]) minus every lane
     /// that holds stored automation (issue #1781). The drain applies every live value readable
@@ -5311,7 +5326,9 @@ fn bank_hold(bank: &BuiltinFaderBank) -> impl Fn(usize, usize) -> Option<Channel
         let held = bank.gain_held(lane, channel)?;
         Some(ChannelHold {
             held,
-            muted: bank.is_muted(lane, channel)?,
+            // Issue #1288: an armed channel's mute is the arm's, not the model's (see
+            // `FaderJumpStage::muted`), so a curve's mute reaches the stage and ends the arm.
+            muted: bank.is_muted(lane, channel)? && bank.is_armed(lane, channel) != Some(true),
             remaining: bank.ramp_remaining(lane, channel)?,
             stage_gain: if held {
                 bank.fader_gain(lane, channel)
@@ -5942,6 +5959,11 @@ fn build_input_bank(
 /// heap it owns. The three strip kinds differ only there -- an input bank owns nothing beyond its
 /// kernel, while a fader or matrix bank owns a `lanes`-long array of optional live-control
 /// consumers -- so the rest of the accounting is shared rather than restated three times.
+///
+/// The sample charge is the bank chain's whole `f32` storage: two AoSoA scratch planes, the two
+/// lane-major staging planes every `rack::BankChain` owns for its tiled scatter, and, for a
+/// padded bank, the chain's `quantum`-word `+0.0` plane its tiled gather reads for an inactive
+/// lane (issue #887).
 fn builtin_bank_resource(
     groups: &[Box<[GraphNodeId]>],
     width: effect_contract::BankWidth,
@@ -5960,8 +5982,9 @@ fn builtin_bank_resource(
     // Two planes: `AoSoaScratch` has no sidechain surface at all (#96 F9 deleted it).
     let scratch_plane_samples = u64::from(quantum).checked_mul(lanes)?;
     let scratch_plane_bytes = scratch_plane_samples.checked_mul(4)?;
-    let scratch_samples_per_bank = scratch_plane_samples.checked_mul(2)?;
-    let scratch_bytes_per_bank = scratch_samples_per_bank.checked_mul(4)?;
+    // Scratch and staging: four planes. The zero plane is charged per padded bank below.
+    let scratch_samples_per_bank = scratch_plane_samples.checked_mul(4)?;
+    let mut padded_banks = 0_u64;
     let mut member_string_bytes = 0_u64;
     let mut largest_member_string = 0_u64;
     let mut payload_bytes = 0_u64;
@@ -5970,6 +5993,7 @@ fn builtin_bank_resource(
         // A padded bank owns exactly the ids it holds, not a full-width array.
         let member_array_bytes = node_bytes.checked_mul(u64::try_from(members.len()).ok()?)?;
         largest_member_array = largest_member_array.max(member_array_bytes);
+        padded_banks += u64::from((members.len() as u64) < lanes);
         payload_bytes = payload_bytes
             .checked_add(member_array_bytes)?
             .checked_add(processor_bytes)?;
@@ -5983,8 +6007,10 @@ fn builtin_bank_resource(
         }
     }
     let payload_bytes = payload_bytes.checked_add(member_string_bytes)?;
-    let scratch_samples = scratch_samples_per_bank.checked_mul(bank_count)?;
-    let scratch_bytes = scratch_bytes_per_bank.checked_mul(bank_count)?;
+    let scratch_samples = scratch_samples_per_bank
+        .checked_mul(bank_count)?
+        .checked_add(u64::from(quantum).checked_mul(padded_banks)?)?;
+    let scratch_bytes = scratch_samples.checked_mul(4)?;
     let metadata_bytes = u64::try_from(core::mem::size_of::<GraphPreparedBuiltinBank>())
         .ok()?
         .checked_mul(bank_count)?;
@@ -8982,7 +9008,7 @@ fn render_oracle_fader(
                 |_, channel| {
                     Some(ChannelHold {
                         held: fader.gain_held(channel)?,
-                        muted: fader.is_muted(channel),
+                        muted: fader.is_muted(channel) && fader.is_armed(channel) != Some(true),
                         remaining: fader.ramp_remaining(channel)?,
                         stage_gain: None,
                     })
@@ -10137,9 +10163,10 @@ mod tests {
             .is_empty()
         );
     }
-    /// F4/F11: a bank is charged for the two main planes it actually owns and for the member ids
-    /// it actually holds -- a padded bank is not charged a full-width id array, and no bank is
-    /// charged the two sidechain planes a fixed stage can never reach.
+    /// F4/F11: a bank is charged for the two main planes it actually owns, its chain's staging
+    /// and (padded) zero plane (issue #887), and the member ids it actually holds -- a padded bank
+    /// is not charged a full-width id array, and no bank is charged the two sidechain planes a
+    /// fixed stage can never reach.
     #[test]
     fn builtin_bank_resource_charges_two_planes_and_actual_members() {
         let node = |index: usize| GraphNodeId::TrackStage {
@@ -10199,11 +10226,17 @@ mod tests {
             let strings: u64 = string_lengths.iter().sum();
             let largest_string = string_lengths.iter().copied().max().expect("a member");
             assert_eq!(resource.bank_count, banks);
+            // Scratch and staging, four planes per bank, plus the `+0.0` plane of each padded
+            // bank (issue #887): exactly what one `rack::BankChain` over the bank retains.
+            let padded = sizes.iter().filter(|size| (**size as u64) < lanes).count() as u64;
             assert_eq!(
                 resource.scratch_samples,
-                banks * u64::from(quantum) * lanes * 2
+                banks * u64::from(quantum) * lanes * 4 + padded * u64::from(quantum)
             );
-            assert_eq!(resource.scratch_bytes, banks * plane_bytes * 2);
+            assert_eq!(
+                resource.scratch_bytes,
+                banks * plane_bytes * 4 + padded * u64::from(quantum) * 4
+            );
             assert_eq!(
                 resource.payload_bytes,
                 sizes

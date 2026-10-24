@@ -15,6 +15,8 @@ pub(crate) struct PreparedRuntime {
     pub(crate) strips: StripLanes,
     /// One live-control producer per prepared effect instance (#1263 D2).
     pub(crate) effects: Box<[host_core::EffectControlProducer]>,
+    /// The plan's meter consumers (#1581 D6), one per strip in strip order: kept, not dropped.
+    pub(crate) meters: Box<[host_core::MeterConsumer]>,
     pub(crate) plan: PreparedRenderPlan,
     /// The plan's one revision-gate handle, taken before the plan is published (#1502 D6).
     pub(crate) revision_gate: PlanRevisionGate,
@@ -25,6 +27,8 @@ pub(crate) struct PreparedRuntime {
     pub(crate) inventory: PlanStateInventory,
     pub(crate) control_catalog: ControlCatalog,
     pub(crate) capi: CapiResources,
+    /// The captures of the spectrum observers the plan was prepared with (#1593 D3), or `None`.
+    pub(crate) spectrum: Option<host_core::PreparedSpectrumCaptures>,
 }
 
 /// A zeroed byte buffer of exactly `bytes` bytes, allocated fallibly.
@@ -298,6 +302,7 @@ pub(crate) fn capi_resources<A: ControlAdapter>(
     };
     let replay = ReplayCache::resource_report_for_config(replay_config)
         .map_err(|_| failure(ResourceFault::Arithmetic))?;
+    let output_meter = output_meter_rows()?;
     let exchange = plan_exchange_resource_report(PlanExchangeConfig {
         retirement_capacity: retirement_capacity(),
     })
@@ -374,6 +379,11 @@ pub(crate) fn capi_resources<A: ControlAdapter>(
         // #1312 D2: the session's `live_values_superseded` count, one `Arc<AtomicU64>`.
         checked_layout::<SharedArcAllocation<AtomicU64>>(1)?,
         checked_layout::<SharedArcAllocation<SharedPlanState<A::Row>>>(1)?,
+        // #1581 D4: the session's output meter (`output_meter_rows`). The meter-bytes cap charges
+        // the same bytes (`prepare_caps`): a recorded, conservative double charge, as #1256 D4's.
+        output_meter[0],
+        output_meter[1],
+        output_meter[2],
         checked_layout::<RetainedDiagnosticSlotMirror>(2)?,
         // #1584 D6a: the observation-ended cells, one more than the reliable queue's slots (an
         // event popped for egress keeps its cell until its frame is delivered), and the heap the
@@ -1211,10 +1221,54 @@ pub fn prepare_caps(limits: ControlLimits) -> HostPrepareCaps {
         maximum_effect_scratch_bytes: limits.maximum_effect_scratch_bytes,
         maximum_builtin_retained_bytes: limits.maximum_builtin_retained_bytes,
         maximum_named_allocation_bytes: limits.maximum_named_allocation_bytes,
-        maximum_meter_streams: limits.maximum_meter_streams,
-        maximum_meter_items: limits.maximum_meter_items,
-        maximum_meter_bytes: limits.maximum_meter_bytes,
+        // The caller's meter caps bound every meter stream, the session's output meter included
+        // (#1581, root caps ruling): the plan's meters get what the output meter leaves.
+        // `check_output_meter_caps` refuses caps that cannot hold the output meter itself.
+        maximum_meter_streams: limits.maximum_meter_streams.saturating_sub(1),
+        maximum_meter_items: limits
+            .maximum_meter_items
+            .saturating_sub(host_core::METER_QUEUE_DEPTH as u64),
+        maximum_meter_bytes: limits
+            .maximum_meter_bytes
+            .saturating_sub(output_meter_bytes().unwrap_or(u64::MAX)),
     }
+}
+
+/// The session's output meter's allocations (#1581 D4): its gate and its dropped-window count,
+/// one `Arc<AtomicU64>` each, and its window queue's header and slots.
+fn output_meter_rows() -> Result<[u64; 3], CompileFailure> {
+    let queue =
+        host_core::output_peak_queue_payload().map_err(|_| failure(ResourceFault::Arithmetic))?;
+    let row = |bytes: usize| u64::try_from(bytes).map_err(|_| failure(ResourceFault::Platform));
+    Ok([
+        checked_layout::<SharedArcAllocation<AtomicU64>>(2)?,
+        row(queue.ring_header_bytes)?,
+        row(queue.slot_payload_bytes)?,
+    ])
+}
+
+/// The output meter's bytes, as the meter-bytes cap charges them.
+fn output_meter_bytes() -> Result<u64, CompileFailure> {
+    checked_sum(&output_meter_rows()?)
+}
+
+/// Refuse caps that cannot hold the session's output meter (#1581, root caps ruling), with the
+/// builtin compiler's own diagnostics: one meter stream (`$.meter_requests`), and its queue's
+/// items and bytes (`$.builtin_compile_caps`). The plan's own meters are bounded by what is left
+/// ([`prepare_caps`]).
+fn check_output_meter_caps(limits: ControlLimits) -> Result<(), CompileFailure> {
+    let refuse = |path: &str| {
+        CompileFailure::Diagnostics(format!("builtin.resource.limit\t{path}\n").into_bytes())
+    };
+    if limits.maximum_meter_streams == 0 {
+        return Err(refuse("$.meter_requests"));
+    }
+    if limits.maximum_meter_items < host_core::METER_QUEUE_DEPTH as u64
+        || limits.maximum_meter_bytes < output_meter_bytes()?
+    {
+        return Err(refuse("$.builtin_compile_caps"));
+    }
+    Ok(())
 }
 
 pub(crate) fn prepare_failure(diagnostics: PrepareDiagnostics) -> CompileFailure {
@@ -1237,6 +1291,10 @@ pub(crate) fn prepare_failure(diagnostics: PrepareDiagnostics) -> CompileFailure
 /// and the preparer then prepares through the host-core entry that takes the base, so the
 /// unchanged sources carry their rings. `superseded` is the session's `live_values_superseded`
 /// count; the preparer passes it to host-core as it is.
+///
+/// `spectrum` is the session's spectrum preparation (#1593 D3), the same for the boot plan and
+/// every successor; the preparer passes it to host-core and returns the captures beside the host
+/// and the handles. A preparer whose host keeps the captures elsewhere returns `None`.
 pub trait RuntimePreparer: Send {
     /// Prepare the plan for `compiled`, or refuse with host-core's diagnostics.
     ///
@@ -1249,9 +1307,25 @@ pub trait RuntimePreparer: Send {
         compiled: &CompiledSession,
         caps: &HostPrepareCaps,
         lanes: HostLiveLanes,
+        spectrum: Option<&host_core::SpectrumPreparation>,
         successor: Option<SuccessorBase<'_>>,
         superseded: &host_core::LiveValuesSuperseded,
-    ) -> Result<(host_core::PreparedHost, host_core::HostLiveControlHandles), PrepareDiagnostics>;
+    ) -> Result<
+        (
+            host_core::PreparedHost,
+            host_core::HostLiveControlHandles,
+            Option<host_core::PreparedSpectrumCaptures>,
+        ),
+        PrepareDiagnostics,
+    >;
+
+    /// The meter window, in blocks, this adapter prepares its plans' strip meters with (#1581 D2):
+    /// `0`, the default, is host-core's [`host_core::default_meter_window_blocks`]. The session's
+    /// output meter closes its windows at the same length, so its windows and the strip meters'
+    /// tile one grid.
+    fn meter_window_blocks(&self) -> u32 {
+        0
+    }
 }
 
 /// Prepare one plan plus its source producers, and project its resource accounting.
@@ -1262,14 +1336,18 @@ pub trait RuntimePreparer: Send {
 /// With a `successor` base (a structural transaction, issue #1273 D1) every source the
 /// transaction leaves unchanged is prepared vacant, to carry the displaced plan's ring; the
 /// report's source rows count those rings too (D5). `compile_session` passes `None`.
+///
+/// `spectrum` is the session's spectrum preparation (#1593 D3), passed to the preparer as it is.
 pub(crate) fn prepare_runtime<A: ControlAdapter>(
     preparer: &dyn RuntimePreparer,
     compiled: &CompiledSession,
     limits: ControlLimits,
+    spectrum: Option<&host_core::SpectrumPreparation>,
     successor: Option<SuccessorBase<'_>>,
     superseded: &host_core::LiveValuesSuperseded,
     observation_slots_high_water: usize,
 ) -> Result<PreparedRuntime, CompileFailure> {
+    check_output_meter_caps(limits)?;
     let caps = prepare_caps(limits);
     // Shape still runs before host/runtime allocation. The exact provider catalog exists only
     // after shared host preparation, so CAPI retained-resource admission necessarily follows the
@@ -1282,8 +1360,8 @@ pub(crate) fn prepare_runtime<A: ControlAdapter>(
     // With a `successor` base (issue #1273 D1) the same lanes attach, and every source the
     // transaction left unchanged is prepared vacant to carry its predecessor's ring.
     let lanes: HostLiveLanes = controls::live_lanes(compiled.normalized_model()).into();
-    let (prepared, handles) = preparer
-        .prepare(compiled, &caps, lanes, successor, superseded)
+    let (prepared, handles, spectrum) = preparer
+        .prepare(compiled, &caps, lanes, spectrum, successor, superseded)
         .map_err(prepare_failure)?;
     // #1396 deliverable 3: a test gives the next plan a source-read offset before publication.
     #[cfg(feature = "test-support")]
@@ -1305,6 +1383,7 @@ pub(crate) fn prepare_runtime<A: ControlAdapter>(
         route_controls,
         follow_route_controls,
         jump_lengths,
+        meters,
         ..
     } = handles;
     // #1639 D1: every prepared plan has a jump-length cell, so a handle set without its writer is
@@ -1329,6 +1408,10 @@ pub(crate) fn prepare_runtime<A: ControlAdapter>(
     // #1263 D2: likewise one entry per effect instance, built at exactly that capacity, so the
     // boxed slice is the allocation host-core walked for `effect_control_resources`.
     let effects = effect_controls.into_boxed_slice();
+    // #1581 D6: the meter consumers stay with the plan's epoch. builtins builds the vector at
+    // exactly one entry per request and charges it in `builtin_meter_payload_bytes`, with each
+    // consumer's ring, so the boxed slice does not reallocate and is not charged again here.
+    let meters = meters.into_boxed_slice();
     let capi = prepared_capi_resources::<A>(
         compiled,
         &prepared.control_catalog,
@@ -1369,6 +1452,7 @@ pub(crate) fn prepare_runtime<A: ControlAdapter>(
         sources: prepared.sources,
         strips,
         effects,
+        meters,
         plan,
         revision_gate,
         resources: PlanResources {
@@ -1408,6 +1492,7 @@ pub(crate) fn prepare_runtime<A: ControlAdapter>(
         inventory: prepared.inventory,
         control_catalog: prepared.control_catalog,
         capi,
+        spectrum,
     })
 }
 
@@ -1417,10 +1502,15 @@ pub(crate) fn prepare_runtime<A: ControlAdapter>(
 ///
 /// `preparer` (issue #1400 D2) is the adapter's preparation: the session stores it and prepares
 /// the boot plan and every structural successor through it, and through nothing else.
+///
+/// `spectrum` is the session's spectrum monitor configuration (#1593 D2): the first plan is
+/// prepared with it, and the session's monitor starts at configuration epoch 1 with one and 0
+/// without. It is monitor state: no revision, model or snapshot holds it.
 pub fn compile_children<A: ControlAdapter>(
     document: &str,
     mut limits: ControlLimits,
     preparer: Box<dyn RuntimePreparer>,
+    spectrum: Option<host_core::SpectrumConfiguration>,
 ) -> Result<CompiledChildren<A>, CompileFailure>
 where
     A::Row: Send + 'static,
@@ -1451,6 +1541,9 @@ where
         &*preparer,
         store.compiled(),
         limits,
+        spectrum
+            .as_ref()
+            .map(|configuration| &configuration.preparation),
         None,
         &live_values_superseded,
         0,
@@ -1484,6 +1577,7 @@ where
         sources,
         strips,
         effects,
+        meters,
         plan,
         mut revision_gate,
         resources,
@@ -1491,7 +1585,14 @@ where
         inventory,
         control_catalog,
         capi,
+        spectrum: captures,
     } = runtime;
+    let spectrum = crate::spectrum::SpectrumMonitor::new(
+        spectrum,
+        captures,
+        resources.sample_rate_hz,
+        resources.quantum_frames,
+    );
     // #1314 D1, #1502 D5: the initial plan carries the store's initial revision, published on its
     // own gate, and the watermark starts there.
     let (publisher, owner, retirer) = plan_exchange_at_revision(
@@ -1521,6 +1622,12 @@ where
         source_underrun_blocks: AtomicU64::new(0),
         watermark: publisher.watermark_reader(),
     });
+    // #1581 D4: the session's one output meter, made with its first plan and part of no plan. Its
+    // windows are as long as the strip meters'.
+    let (output_observer, output_reader, output_gate) = host_core::output_peak_meter(
+        output_meter_window_frames(store.compiled(), preparer.meter_window_blocks())?,
+    )
+    .map_err(|_| failure(ResourceFault::Allocation))?;
     let sample_source: Arc<dyn host_core::PlanSampleSource> = Arc::clone(&shared) as Arc<_>;
     let provider = SessionControlProvider::try_new(
         control_catalog,
@@ -1570,7 +1677,15 @@ where
     decode_fields.resize(decode_field_count, 0);
     let mut session = SessionState {
         controller: ObservedController::new(controller),
-        providers: ProviderEpoch::current(sources, inventory, strips, effects, capi, revision_gate),
+        providers: ProviderEpoch::current(
+            sources,
+            inventory,
+            strips,
+            effects,
+            meters,
+            capi,
+            revision_gate,
+        ),
         pending_providers,
         retired_providers,
         publisher,
@@ -1601,6 +1716,8 @@ where
         observation_slots_high_water: 0,
         observation_forwarded: Vec::new(),
         send_moves: None,
+        spectrum,
+        output_meter: Some((output_reader, output_gate)),
     };
     let (offsets, pending, counts, armed, armed_bytes) = crate::control::observation_slots(
         &session.providers.effects,
@@ -1616,8 +1733,25 @@ where
     session.observation_slots_high_water = session.observation_pending.len();
     Ok(CompiledChildren {
         session,
-        plan: PlanState::new(owner, shared),
+        plan: PlanState::new(owner, shared, output_observer),
     })
+}
+
+/// The output meter's window in frames (#1581 D4): `window_blocks` blocks of the session's quantum,
+/// `0` meaning host-core's default, as the strip meters' window is.
+fn output_meter_window_frames(
+    compiled: &CompiledSession,
+    window_blocks: u32,
+) -> Result<core::num::NonZeroU32, CompileFailure> {
+    let quantum = compiled.quantum().0;
+    let blocks = core::num::NonZeroU32::new(window_blocks).unwrap_or_else(|| {
+        host_core::default_meter_window_blocks(compiled.sample_rate().0, quantum)
+    });
+    blocks
+        .get()
+        .checked_mul(quantum)
+        .and_then(core::num::NonZeroU32::new)
+        .ok_or_else(|| failure(ResourceFault::Arithmetic))
 }
 
 #[cfg(test)]

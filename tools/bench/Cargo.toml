@@ -27,6 +27,12 @@ graph-compiler.workspace = true
 lane.workspace = true
 sha2.workspace = true
 
+# Issue #938: the bench pins its render thread and the live row's producer thread. Linux-only, as
+# thread pinning is; rustix's affinity calls are safe wrappers, so the bench owns no `unsafe`.
+# Already in `Cargo.lock` at this version.
+[target.'cfg(target_os = "linux")'.dependencies]
+rustix = { version = "=1.1.4", default-features = false, features = ["std", "thread"] }
+
 [features]
 default = []
 

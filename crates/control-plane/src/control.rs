@@ -52,6 +52,13 @@ pub struct ProviderEpoch {
     /// producers, the cells are `Arc`s shared with the plan's lanes, so the epoch may drop after
     /// its plan, and does: `synchronize_plan_epochs` drops a reclaimed plan before its provider.
     pub(crate) effects: Box<[host_core::EffectControlProducer]>,
+    /// The consumers of this epoch's plan's strip meters (#1581 D6), one per strip in strip order
+    /// (`host_core::meter_selection`). Nothing reads them until #1587; a full strip queue drops
+    /// and counts on the render side. Their rings are `Arc`s shared with the plan's observers, as
+    /// the producers' cells are, so the epoch may drop after its plan. Only the adapters' tests
+    /// read them before #1587.
+    #[cfg_attr(not(feature = "test-support"), allow(dead_code))]
+    pub(crate) meters: Box<[host_core::MeterConsumer]>,
     /// The capi resources this epoch's plan was prepared with (#1257 D4).
     pub(crate) capi: CapiResources,
     /// The handle of this epoch's plan's revision gate (#1502 D1). Control publishes every
@@ -82,6 +89,9 @@ pub struct ProviderEpoch {
     /// its source consumers carried. A successor that supersedes it unadopted is prepared at the
     /// same discontinuity, since render never played this plan.
     pub(crate) discontinuity: bool,
+    /// A candidate's spectrum captures until its promotion installs them (#1593 D5), and what
+    /// that promotion displaced once this epoch is parked.
+    pub(crate) spectrum: crate::spectrum::EpochSpectrum,
 }
 
 /// The committed base an epoch keeps while a successor prepared from it is pending (#1310 D3,
@@ -128,6 +138,21 @@ fn merged_ramps(earlier: &session::EditRamps, later: &session::EditRamps) -> ses
     let mut merged = earlier.clone();
     merged.overlay(later);
     merged
+}
+
+/// A structural successor's preparation failure as the command answers it (#1593 D4): a
+/// `host.spectrum.target` refusal is an invariant fault, because the session prepares a successor
+/// only with entries whose targets its model has; every other failure is the compile's own.
+fn spectrum_invariant(failure: CompileFailure) -> CommandError {
+    let refused = failure
+        .diagnostic()
+        .split(|byte| *byte == b'\n')
+        .any(|line| line.starts_with(b"host.spectrum.target\t"));
+    if refused {
+        CommandError::Internal
+    } else {
+        CommandError::CompileRejected(failure)
+    }
 }
 
 impl ProviderEpoch {
@@ -180,6 +205,12 @@ impl ProviderEpoch {
         &self.effects
     }
 
+    /// This epoch's strip meter consumers (#1581 D6).
+    #[cfg(feature = "test-support")]
+    pub fn test_meters(&self) -> &[host_core::MeterConsumer] {
+        &self.meters
+    }
+
     /// Whether this epoch's set holds source `id` vacant (`Some(true)`), holds its producer
     /// (`Some(false)`), or does not hold it (`None`) (#1310 gate 6). It probes with a submission
     /// at a sample rate of 1, which the set refuses before its ring sees it, so nothing changes.
@@ -208,6 +239,7 @@ impl ProviderEpoch {
         inventory: PlanStateInventory,
         strips: StripLanes,
         effects: Box<[host_core::EffectControlProducer]>,
+        meters: Box<[host_core::MeterConsumer]>,
         capi: CapiResources,
         revision_gate: PlanRevisionGate,
     ) -> Self {
@@ -217,12 +249,14 @@ impl ProviderEpoch {
             inventory,
             strips,
             effects,
+            meters,
             capi,
             revision_gate,
             carried: CarriedSourceBytes::default(),
             kept: None,
             parked: None,
             discontinuity: false,
+            spectrum: crate::spectrum::EpochSpectrum::None,
         };
         #[cfg(feature = "test-support")]
         update_test_owners(|owners| owners.current_provider_constructed += 1);
@@ -236,6 +270,7 @@ impl ProviderEpoch {
         carried: CarriedSourceBytes,
         strips: StripLanes,
         effects: Box<[host_core::EffectControlProducer]>,
+        meters: Box<[host_core::MeterConsumer]>,
         capi: CapiResources,
         revision_gate: PlanRevisionGate,
     ) -> Self {
@@ -245,12 +280,14 @@ impl ProviderEpoch {
             inventory,
             strips,
             effects,
+            meters,
             capi,
             revision_gate,
             carried,
             kept: None,
             parked: None,
             discontinuity: false,
+            spectrum: crate::spectrum::EpochSpectrum::None,
         };
         #[cfg(feature = "test-support")]
         update_test_owners(|owners| owners.candidate_provider_constructed += 1);
@@ -670,6 +707,13 @@ pub struct SessionState<A: ControlAdapter> {
     /// The live send moves that may still ramp, as one conservative window (root ruling B19-R7,
     /// the B17-R14 pattern; #1718 deletes it): `None` when none may.
     pub(crate) send_moves: Option<SendMoveWindow>,
+    /// The session's spectrum monitor state (#1593 D1): host-local, never saved, never in a
+    /// snapshot, and no change of it advances the revision. Every plan is prepared with its
+    /// configuration.
+    pub(crate) spectrum: crate::spectrum::SpectrumMonitor,
+    /// The output meter's reader and gate (#1581 D4) until the adapter takes them: the browser's
+    /// render half does; the C ABI's control half keeps them here for #1583.
+    pub(crate) output_meter: Option<(host_core::OutputPeakReader, host_core::OutputPeakGate)>,
 }
 
 /// Every live send move (a following route's record with a ramp, written by a live commit or by a
@@ -1736,6 +1780,27 @@ where
         &self.controller
     }
 
+    /// The session's spectrum monitor (#1593): its configuration, epochs, service and analysis.
+    #[cfg(feature = "test-support")]
+    pub fn test_spectrum(&self) -> &crate::spectrum::SpectrumMonitor {
+        &self.spectrum
+    }
+
+    /// The session's spectrum monitor, for the service's arm, read and stream calls (#1593).
+    #[cfg(feature = "test-support")]
+    pub fn test_spectrum_mut(&mut self) -> &mut crate::spectrum::SpectrumMonitor {
+        &mut self.spectrum
+    }
+
+    /// The output meter's reader and gate (#1581 D4), handed out once: `None` on every later call.
+    /// The observer is the plan state's, so the windows the reader returns are the session's
+    /// output over every plan it renders.
+    pub fn take_output_meter(
+        &mut self,
+    ) -> Option<(host_core::OutputPeakReader, host_core::OutputPeakGate)> {
+        self.output_meter.take()
+    }
+
     /// The current provider epoch.
     #[cfg(feature = "test-support")]
     pub fn test_providers(&self) -> &ProviderEpoch {
@@ -2001,12 +2066,30 @@ where
             }
         }
         for row in parked.into_iter().take(index + 1) {
-            let next = self.pending_providers.remove(0);
+            let mut next = self.pending_providers.remove(0);
             // #1768: render adopted `next`'s plan, so the strips it starts at rest restarted.
             let restarted =
                 u64::try_from(next.inventory.restarted_strips().len()).unwrap_or(u64::MAX);
             self.strips_restarted = self.strips_restarted.saturating_add(restarted);
+            // #1593 D5: render adopted `next`'s plan, so the service pairs the readers of the
+            // observers its swap block moved and settles the others. A superseded candidate never
+            // reaches here: it is dropped unpaired.
+            let displaced = match core::mem::take(&mut next.spectrum) {
+                crate::spectrum::EpochSpectrum::Candidate {
+                    captures,
+                    hop,
+                    epoch,
+                } => crate::spectrum::EpochSpectrum::Displaced(self.spectrum.adopt(
+                    captures,
+                    next.inventory.spectrum_pairing(),
+                    hop,
+                    epoch,
+                )),
+                other => other,
+            };
             let mut previous = core::mem::replace(&mut self.providers, next);
+            // Dropped with the parked epoch, when its plan is reclaimed.
+            previous.spectrum = displaced;
             // #1310 D3: render no longer runs the previous plan, so no successor is prepared
             // against its kept base again; the base drops here, on the control thread.
             previous.kept = None;
@@ -2544,19 +2627,28 @@ where
                 )
             }
         };
+        // #1593 D4: the successor keeps every spectrum entry whose target the prospective model
+        // still has. It is stored only beside the candidate push, after the protocol commit.
+        let spectrum_configuration = self
+            .spectrum
+            .successor_configuration(prospective.normalized_model());
         let prepared_runtime = prepare_runtime::<A>(
             &*self.preparer,
             prospective,
             self.limits,
+            spectrum_configuration
+                .as_ref()
+                .map(|configuration| &configuration.preparation),
             Some(base),
             &self.live_values_superseded,
             self.observation_slots_high_water,
         )
-        .map_err(CommandError::CompileRejected)?;
+        .map_err(spectrum_invariant)?;
         let PreparedRuntime {
             sources,
             strips,
             effects,
+            meters,
             plan: candidate_plan,
             resources,
             carried,
@@ -2564,6 +2656,9 @@ where
             control_catalog: candidate_catalog,
             capi: prospective_capi,
             revision_gate,
+            // #1593 D5, D7: held by the candidate until its promotion pairs them; until then the
+            // service reads the running plan's captures.
+            spectrum: candidate_captures,
         } = prepared_runtime;
         // #1652 U2a fold 2 (MAJOR-A; #1713 deletes it): read before the inventory moves into the
         // candidate's provider epoch.
@@ -2579,10 +2674,19 @@ where
             carried,
             strips,
             effects,
+            meters,
             prospective_capi,
             revision_gate,
         );
         candidate_provider.discontinuity = discontinuity;
+        // The configuration epoch is set beside the push, after the commit.
+        candidate_provider.spectrum = crate::spectrum::EpochSpectrum::Candidate {
+            captures: candidate_captures,
+            hop: spectrum_configuration
+                .as_ref()
+                .and_then(|configuration| configuration.hop),
+            epoch: 0,
+        };
         let candidate_plan = ObservedCandidatePlan::new(candidate_plan);
         #[cfg(feature = "test-support")]
         {
@@ -3003,6 +3107,14 @@ where
         }
         // A move: the list was built before the commit.
         self.observation_forwarded = forwards;
+        // #1593 D4: the configuration the successor was prepared with is the session's from now
+        // on; its epoch is the one the candidate's captures report at promotion.
+        let configured_epoch = self.spectrum.commit(spectrum_configuration);
+        if let crate::spectrum::EpochSpectrum::Candidate { epoch, .. } =
+            &mut candidate_provider.spectrum
+        {
+            *epoch = configured_epoch;
+        }
         self.pending_providers.push(candidate_provider);
         // #1584 D6a: the newest plan's slots, built above. The fold ran when this command was
         // serviced and nothing has been pushed since (one thread), so none is lost.
@@ -4603,18 +4715,27 @@ mod tests {
                 compiled: &CompiledSession,
                 caps: &HostPrepareCaps,
                 lanes: HostLiveLanes,
+                _spectrum: Option<&host_core::SpectrumPreparation>,
                 successor: Option<SuccessorBase<'_>>,
                 superseded: &LiveValuesSuperseded,
-            ) -> Result<(PreparedHost, HostLiveControlHandles), PrepareDiagnostics> {
+            ) -> Result<
+                (
+                    PreparedHost,
+                    HostLiveControlHandles,
+                    Option<host_core::PreparedSpectrumCaptures>,
+                ),
+                PrepareDiagnostics,
+            > {
                 let live = HostLiveControlRequest::default();
-                match successor {
+                let (host, handles) = match successor {
                     Some(base) => prepare_host_runtime_with_live_lanes_successor(
                         compiled, caps, &live, lanes, base, superseded,
                     ),
                     None => prepare_host_runtime_with_live_lanes(
                         compiled, caps, &live, lanes, superseded,
                     ),
-                }
+                }?;
+                Ok((host, handles, None))
             }
         }
 
@@ -4701,7 +4822,8 @@ mod tests {
         fn declare_after(offset: u64) -> u64 {
             super::super::test_reset_lifecycle_observer();
             let mut children =
-                compile_children::<Adapter>(SESSION, limits(), Box::new(Preparer)).expect("boot");
+                compile_children::<Adapter>(SESSION, limits(), Box::new(Preparer), None)
+                    .expect("boot");
             if offset > 0 {
                 children.session.test_set_next_source_read_offset(offset);
             }
