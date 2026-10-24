@@ -2363,7 +2363,7 @@ fn observation_ended_round_trips_every_key_and_refuses_anything_else() {
     }
 }
 
-/// Issue #1351 gate 4: every registered counter ID, the newest `SOURCE_FRAMES_DISCARDED` (#1699)
+/// Issue #1351 gate 4: every registered counter ID, the newest `METER_WINDOWS_LOST` (#1583)
 /// included, round-trips through the telemetry configuration; the next ID and the retired IDs
 /// 2 and 11 to 14 (#1629) are refused.
 ///
@@ -2389,16 +2389,20 @@ fn every_counter_id_round_trips_and_the_next_is_refused() {
         CounterId::LiveBlockErrors,
         CounterId::SourceUnderrunBlocks,
         CounterId::SourceFramesDiscarded,
+        CounterId::MeterWindowsLost,
     ];
-    let allocated = [1_u32, 3, 4, 5, 6, 7, 8, 9, 10, 15, 16, 17, 18, 19, 20, 21];
+    let allocated = [
+        1_u32, 3, 4, 5, 6, 7, 8, 9, 10, 15, 16, 17, 18, 19, 20, 21, 22,
+    ];
     assert_eq!(
         all.iter().map(|id| *id as u32).collect::<Vec<_>>(),
         allocated,
         "IDs 2 and 11 to 14 are retired, never reallocated"
     );
     let configuration = TelemetryConfiguration {
-        meter_handles: Vec::new(),
+        meters: Vec::new(),
         meter_period_blocks: 0,
+        meter_window_blocks: None,
         counter_ids: all.to_vec(),
         counter_period_blocks: 1,
         diagnostics_enabled: false,
@@ -2409,12 +2413,12 @@ fn every_counter_id_round_trips_and_the_next_is_refused() {
         .encode_telemetry_configuration(&configuration, &mut bytes)
         .expect("configuration");
     assert_eq!(
-        codec.decode_telemetry_configuration(&bytes[..len], 6),
+        codec.decode_telemetry_configuration(&bytes[..len], 5),
         Ok(configuration.clone())
     );
     // One ID per request, so a refusal cannot come from the sorted-unique rule.
     let single = TelemetryConfiguration {
-        counter_ids: vec![CounterId::SourceFramesDiscarded],
+        counter_ids: vec![CounterId::MeterWindowsLost],
         counter_period_blocks: 3,
         ..configuration
     };
@@ -2422,19 +2426,276 @@ fn every_counter_id_round_trips_and_the_next_is_refused() {
     let len = codec
         .encode_telemetry_configuration(&single, &mut bytes)
         .expect("single");
-    let id_bytes = 21_u32.to_le_bytes();
+    let id_bytes = 22_u32.to_le_bytes();
     let at = bytes[..len]
         .windows(4)
         .position(|window| window == id_bytes)
         .expect("counter ID");
-    for refused_id in [0_u32, 2, 11, 12, 13, 14, 22] {
+    for refused_id in [0_u32, 2, 11, 12, 13, 14, 23] {
         let mut refused = bytes;
         refused[at..at + 4].copy_from_slice(&refused_id.to_le_bytes());
         assert!(
             codec
-                .decode_telemetry_configuration(&refused[..len], 6)
+                .decode_telemetry_configuration(&refused[..len], 5)
                 .is_err(),
             "counter ID {refused_id} must be refused"
+        );
+    }
+}
+
+/// Issue #1583 gate 1: a meter table with each target and metric round-trips as a command and,
+/// with its window, as an echo; a batch round-trips with its span; and every D2 rule refuses with
+/// `INVALID_FIELD` on encode and on decode alike, with the retired field 1 refused in either flag
+/// form and field 8 refused in a command.
+///
+/// Test value: red if the encoder, the decoder and the registry disagree on the table, the span or
+/// the retired field: a rule one side forgets (a duplicate, an output gain reduction, a 257th entry,
+/// a zero period, an empty span, a zero sequence, a command window) is a frame one side writes and
+/// the other refuses.
+#[test]
+fn the_meter_table_and_the_window_span_follow_one_rule_on_encode_and_decode() {
+    let codec = ProtocolCodec::new(ProtocolLimits {
+        max_frame_bytes: 1 << 16,
+        max_tlv_count: 4096,
+        max_string_bytes: 256,
+        max_nesting: 4,
+    });
+    let entry = |target: MeterTarget, metric| MeterEntry { target, metric };
+    let strip = |id: &str| MeterTarget::Strip(id.into());
+    let base = TelemetryConfiguration {
+        meters: vec![
+            entry(MeterTarget::Output, MeterMetric::Peak),
+            entry(strip("vocal"), MeterMetric::Peak),
+            entry(strip("vocal"), MeterMetric::GainReduction),
+        ],
+        meter_period_blocks: 24,
+        meter_window_blocks: None,
+        counter_ids: Vec::new(),
+        counter_period_blocks: 0,
+        diagnostics_enabled: false,
+        minimum_diagnostic_severity: DiagnosticSeverity::Info,
+    };
+    let encode = |value: &TelemetryConfiguration| {
+        let mut bytes = vec![0; codec.encoded_telemetry_configuration_len(value)?];
+        codec.encode_telemetry_configuration(value, &mut bytes)?;
+        Ok::<_, EncodeError>(bytes)
+    };
+    // A command is written without a window; the echo form carries one.
+    let command = |value: &TelemetryConfiguration| {
+        let mut sink = crate::btlv::CountSink::new(codec.limits());
+        write_telemetry_configuration(&mut sink, value, false)
+    };
+    let count = |value: &TelemetryConfiguration| {
+        u32::try_from(5 + value.meters.len() + usize::from(value.meter_window_blocks.is_some()))
+            .expect("count")
+    };
+    let bytes = encode(&base).expect("command bytes");
+    assert_eq!(command(&base), Ok(()));
+    assert_eq!(
+        codec.decode_telemetry_configuration(&bytes, count(&base)),
+        Ok(base.clone())
+    );
+    let echo = TelemetryConfiguration {
+        meter_window_blocks: core::num::NonZeroU32::new(12),
+        ..base.clone()
+    };
+    let echo_bytes = encode(&echo).expect("echo bytes");
+    assert_eq!(
+        codec.decode_telemetry_configuration_echo(&echo_bytes, count(&echo)),
+        Ok(echo.clone())
+    );
+    // Field 8 in a command.
+    assert_eq!(command(&echo), Err(EncodeError::InvalidField));
+    assert_eq!(
+        codec.decode_telemetry_configuration(&echo_bytes, count(&echo)),
+        Err(DecodeError::InvalidField)
+    );
+
+    // Each typed refusal, on encode, and on decode as the same table's bytes with one code moved
+    // (the encoder writes none of them).
+    let replace = |bytes: &[u8], from: &[u8], to: &[u8], nth: usize| {
+        let at = bytes
+            .windows(from.len())
+            .enumerate()
+            .filter(|(_, window)| *window == from)
+            .nth(nth)
+            .map(|(at, _)| at)
+            .expect("pattern");
+        let mut patched = bytes.to_vec();
+        patched[at..at + to.len()].copy_from_slice(to);
+        patched
+    };
+    // A required one-byte field: ID, `U8`, required, length 1, the value.
+    let u8_field = |id: u8, value: u8| [id, 0, 1, 1, 1, 0, 0, 0, value];
+    let refused_tables = [
+        // A duplicate entry.
+        TelemetryConfiguration {
+            meters: vec![
+                entry(strip("vocal"), MeterMetric::Peak),
+                entry(strip("vocal"), MeterMetric::Peak),
+            ],
+            ..base.clone()
+        },
+        // The output's gain reduction.
+        TelemetryConfiguration {
+            meters: vec![entry(MeterTarget::Output, MeterMetric::GainReduction)],
+            ..base.clone()
+        },
+        // A table with no period.
+        TelemetryConfiguration {
+            meter_period_blocks: 0,
+            ..base.clone()
+        },
+        // A strip ID that is no stable ID.
+        TelemetryConfiguration {
+            meters: vec![entry(strip("Vocal"), MeterMetric::Peak)],
+            ..base.clone()
+        },
+    ];
+    for refused in &refused_tables {
+        assert_eq!(
+            encode(refused),
+            Err(EncodeError::InvalidField),
+            "{refused:?}"
+        );
+    }
+    let one_strip = TelemetryConfiguration {
+        meters: vec![
+            entry(strip("vocal"), MeterMetric::Peak),
+            entry(strip("vocal"), MeterMetric::GainReduction),
+        ],
+        ..base.clone()
+    };
+    let one_strip_bytes = encode(&one_strip).expect("two entries");
+    let output_bytes = encode(&TelemetryConfiguration {
+        meters: vec![entry(MeterTarget::Output, MeterMetric::Peak)],
+        ..base.clone()
+    })
+    .expect("one entry");
+    let period = [2, 0, 3, 1, 4, 0, 0, 0, 24, 0, 0, 0];
+    let refused_frames = [
+        // The duplicate: the second entry's metric moved to the first's.
+        (
+            replace(&one_strip_bytes, &u8_field(3, 2), &u8_field(3, 1), 0),
+            7,
+        ),
+        // The output's gain reduction.
+        (
+            replace(&output_bytes, &u8_field(3, 1), &u8_field(3, 2), 0),
+            6,
+        ),
+        // No period.
+        (
+            replace(&bytes, &period, &[2, 0, 3, 1, 4, 0, 0, 0, 0, 0, 0, 0], 0),
+            8,
+        ),
+        // An unknown target and an unknown metric.
+        (
+            replace(&output_bytes, &u8_field(1, 1), &u8_field(1, 3), 0),
+            6,
+        ),
+        (
+            replace(&output_bytes, &u8_field(3, 1), &u8_field(3, 3), 0),
+            6,
+        ),
+        // A strip target with no strip ID, and the output with one.
+        (
+            replace(&output_bytes, &u8_field(1, 1), &u8_field(1, 2), 0),
+            6,
+        ),
+        (
+            replace(&one_strip_bytes, &u8_field(1, 2), &u8_field(1, 1), 0),
+            7,
+        ),
+    ];
+    for (frame, fields) in &refused_frames {
+        assert_eq!(
+            codec.decode_telemetry_configuration(frame, *fields),
+            Err(DecodeError::InvalidField)
+        );
+    }
+    // 256 entries are the most; a 257th is refused both ways.
+    let wide = |range: core::ops::Range<u32>| TelemetryConfiguration {
+        meters: range
+            .map(|index| entry(strip(&format!("s{index:03}")), MeterMetric::Peak))
+            .collect(),
+        ..base.clone()
+    };
+    let full = wide(0..256);
+    let full_bytes = encode(&full).expect("256 entries");
+    assert_eq!(
+        codec.decode_telemetry_configuration(&full_bytes, count(&full)),
+        Ok(full.clone())
+    );
+    assert_eq!(encode(&wide(0..257)), Err(EncodeError::InvalidField));
+    // Every entry encodes to the same length, so the last entry of `1..257` is the 257th.
+    let shifted = encode(&wide(1..257)).expect("256 entries");
+    let entry_bytes = shifted.len() - encode(&wide(1..256)).expect("255").len();
+    let mut overfull = full_bytes.clone();
+    overfull.extend_from_slice(&shifted[shifted.len() - entry_bytes..]);
+    assert_eq!(
+        codec.decode_telemetry_configuration(&overfull, count(&full) + 1),
+        Err(DecodeError::InvalidField)
+    );
+    // Field 1, the retired positional handles, in either flag form.
+    for flags in [0_u8, 1] {
+        let mut retired = vec![1, 0, 0x0d, flags, 4, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0];
+        retired.extend_from_slice(&bytes);
+        assert!(
+            codec
+                .decode_telemetry_configuration(&retired, count(&base) + 1)
+                .is_err(),
+            "field 1 with flags {flags}"
+        );
+    }
+
+    // The batch's span: a window `[first, end)` with `first < end` and a sequence from 1.
+    let records = [MeterRecord {
+        handle: 1,
+        component: MeterComponent::Left,
+        flags: 1,
+        value: 0.5,
+    }];
+    let batch = |first: u64, end: u64, sequence: u64| MeterBatch {
+        observed_sample: crate::SampleTime(end),
+        first_sample: crate::SampleTime(first),
+        window_sequence: sequence,
+        records: &records,
+    };
+    let mut batch_bytes = vec![
+        0;
+        codec
+            .encoded_meter_batch_len(batch(256, 512, 3))
+            .expect("len")
+    ];
+    codec
+        .encode_meter_batch(batch(256, 512, 3), &mut batch_bytes)
+        .expect("batch");
+    let decoded = codec.decode_meter_batch(&batch_bytes, 6).expect("decoded");
+    assert_eq!(
+        (
+            decoded.first_sample,
+            decoded.observed_sample,
+            decoded.window_sequence
+        ),
+        (crate::SampleTime(256), crate::SampleTime(512), 3)
+    );
+    let u64_field = |id: u8, value: u64| {
+        let mut field = vec![id, 0, 4, 1, 8, 0, 0, 0];
+        field.extend_from_slice(&value.to_le_bytes());
+        field
+    };
+    for (first, end, sequence) in [(512, 512, 3), (600, 512, 3), (256, 512, 0)] {
+        assert_eq!(
+            codec.encoded_meter_batch_len(batch(first, end, sequence)),
+            Err(EncodeError::InvalidField)
+        );
+        let frame = replace(&batch_bytes, &u64_field(5, 256), &u64_field(5, first), 0);
+        let frame = replace(&frame, &u64_field(6, 3), &u64_field(6, sequence), 0);
+        assert_eq!(
+            codec.decode_meter_batch(&frame, 6),
+            Err(DecodeError::InvalidField),
+            "[{first}, {end}) sequence {sequence}"
         );
     }
 }
@@ -2443,8 +2704,9 @@ fn every_counter_id_round_trips_and_the_next_is_refused() {
 fn b3b1_telemetry_and_counters_are_typed_canonical_and_bounded() {
     let codec = codec();
     let configuration = TelemetryConfiguration {
-        meter_handles: vec![1, 2],
+        meters: Vec::new(),
         meter_period_blocks: 4,
+        meter_window_blocks: None,
         counter_ids: vec![
             CounterId::ControlCommandBackpressure,
             CounterId::TelemetryCoalesced,
@@ -2453,14 +2715,13 @@ fn b3b1_telemetry_and_counters_are_typed_canonical_and_bounded() {
         diagnostics_enabled: true,
         minimum_diagnostic_severity: DiagnosticSeverity::Error,
     };
-    let mut config_bytes = [0_u8; 96];
+    let mut config_bytes = [0_u8; 80];
     codec
         .encode_telemetry_configuration(&configuration, &mut config_bytes)
         .expect("config");
     assert_eq!(
         hex(&config_bytes),
         concat!(
-            "01000d01080000000100000002000000",
             "02000301040000000400000000000000",
             "03000d01080000000100000005000000",
             "04000301040000000800000000000000",
@@ -2469,18 +2730,21 @@ fn b3b1_telemetry_and_counters_are_typed_canonical_and_bounded() {
         )
     );
     assert_eq!(
-        codec.decode_telemetry_configuration(&config_bytes, 6),
+        codec.decode_telemetry_configuration(&config_bytes, 5),
         Ok(configuration.clone())
     );
     for end in 0..config_bytes.len() {
         assert!(
             codec
-                .decode_telemetry_configuration(&config_bytes[..end], 6)
+                .decode_telemetry_configuration(&config_bytes[..end], 5)
                 .is_err()
         );
     }
     let bad_config = TelemetryConfiguration {
-        meter_handles: vec![2, 1],
+        counter_ids: vec![
+            CounterId::TelemetryCoalesced,
+            CounterId::ControlCommandBackpressure,
+        ],
         ..configuration.clone()
     };
     assert!(
@@ -2489,7 +2753,7 @@ fn b3b1_telemetry_and_counters_are_typed_canonical_and_bounded() {
             .is_err()
     );
     let bad_coupling = TelemetryConfiguration {
-        meter_period_blocks: 0,
+        counter_period_blocks: 0,
         ..configuration.clone()
     };
     assert!(
@@ -2743,9 +3007,11 @@ fn b4_event_payloads_are_typed_canonical_and_truncation_safe() {
     }];
     let batch = MeterBatch {
         observed_sample: crate::SampleTime(9),
+        first_sample: crate::SampleTime(3),
+        window_sequence: 2,
         records: &records,
     };
-    let mut meter_bytes = [0_u8; 72];
+    let mut meter_bytes = [0_u8; 104];
     codec
         .encode_meter_batch(batch, &mut meter_bytes)
         .expect("meter");
@@ -2755,26 +3021,28 @@ fn b4_event_payloads_are_typed_canonical_and_truncation_safe() {
             "01000401080000000900000000000000",
             "02000201020000000100000000000000",
             "03000201020000001000000000000000",
-            "04000a011000000001000000020003000000c03f00000000"
+            "04000a011000000001000000020003000000c03f00000000",
+            "05000401080000000300000000000000",
+            "06000401080000000200000000000000"
         )
     );
     let decoded = codec
-        .decode_meter_batch(&meter_bytes, 4)
+        .decode_meter_batch(&meter_bytes, 6)
         .expect("decoded meter");
     assert_eq!(decoded.observed_sample, crate::SampleTime(9));
     assert_eq!(decoded.record(0), Ok(records[0]));
     for end in 0..meter_bytes.len() {
-        assert!(codec.decode_meter_batch(&meter_bytes[..end], 4).is_err());
+        assert!(codec.decode_meter_batch(&meter_bytes[..end], 6).is_err());
     }
     let mut bad_meter = meter_bytes;
     bad_meter[40..42].copy_from_slice(&15_u16.to_le_bytes());
-    assert!(codec.decode_meter_batch(&bad_meter, 4).is_err());
+    assert!(codec.decode_meter_batch(&bad_meter, 6).is_err());
     bad_meter = meter_bytes;
     bad_meter[64..68].copy_from_slice(&f32::NAN.to_le_bytes());
-    assert!(codec.decode_meter_batch(&bad_meter, 4).is_err());
+    assert!(codec.decode_meter_batch(&bad_meter, 6).is_err());
     bad_meter = meter_bytes;
     bad_meter[68] = 1;
-    assert!(codec.decode_meter_batch(&bad_meter, 4).is_err());
+    assert!(codec.decode_meter_batch(&bad_meter, 6).is_err());
 
     let counters = CounterSnapshot {
         observed_sample: crate::SampleTime(9),
@@ -2880,13 +3148,14 @@ fn b4_event_payloads_are_typed_canonical_and_truncation_safe() {
     assert_event_frame(
         crate::MessageId::MeterBatch,
         &meter_bytes,
-        4,
+        6,
         concat!(
-            "4d49534f43544c00010000003000030020800000480000000000000000000000",
-            "07000000000000000400000000000000",
+            "4d49534f43544c00010000003000030020800000680000000000000000000000",
+            "07000000000000000600000000000000",
             "0100040108000000090000000000000002000201020000000100000000000000",
             "0300020102000000100000000000000004000a01100000000100000002000300",
-            "0000c03f00000000"
+            "0000c03f00000000",
+            "0500040108000000030000000000000006000401080000000200000000000000"
         ),
     );
     assert_event_frame(

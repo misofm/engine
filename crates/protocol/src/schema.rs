@@ -950,30 +950,69 @@ pub(crate) mod meter_batch {
     pub(crate) const COUNT: FieldSpec = FieldSpec::req(2, Wire::U16);
     pub(crate) const RECORD_BYTES: FieldSpec = FieldSpec::req(3, Wire::U16);
     pub(crate) const RECORDS: FieldSpec = FieldSpec::req(4, Wire::Bytes);
+    /// The first sample of the closed meter window; `observed_sample` is its exclusive end
+    /// (#1583 D2).
+    pub(crate) const FIRST_SAMPLE: FieldSpec = FieldSpec::req(5, Wire::U64);
+    /// The window's sequence since the accepted configuration, from `1` (#1583 D2).
+    pub(crate) const WINDOW_SEQUENCE: FieldSpec = FieldSpec::req(6, Wire::U64);
     pub(crate) static SPEC: MessageSpec = MessageSpec {
         name: "MeterBatch",
-        fields: &[OBSERVED_SAMPLE, COUNT, RECORD_BYTES, RECORDS],
+        fields: &[
+            OBSERVED_SAMPLE,
+            COUNT,
+            RECORD_BYTES,
+            RECORDS,
+            FIRST_SAMPLE,
+            WINDOW_SEQUENCE,
+        ],
+    };
+}
+
+/// One meter table entry of `TELEMETRY_CONFIGURE` (#1583 D1): its 1-based position is its handle.
+pub(crate) mod meter_entry {
+    use super::*;
+    /// Output `1`, strip `2`.
+    pub(crate) const TARGET: FieldSpec = FieldSpec::req(1, Wire::U8);
+    /// The strip's stable ID: present exactly when `target` is a strip.
+    pub(crate) const STRIP_ID: FieldSpec = FieldSpec::opt(2, Wire::Utf8);
+    /// Peak `1`, gain reduction `2`.
+    pub(crate) const METRIC: FieldSpec = FieldSpec::req(3, Wire::U8);
+    pub(crate) static SPEC: MessageSpec = MessageSpec {
+        name: "MeterEntry",
+        fields: &[TARGET, STRIP_ID, METRIC],
     };
 }
 
 pub(crate) mod telemetry_configuration {
     use super::*;
-    pub(crate) const METER_HANDLES: FieldSpec = FieldSpec::req(1, Wire::PackedU32);
+    // Field 1 (`meter_handles`) is retired by #1583 D2 and never reallocated; see `RETIRED`.
     pub(crate) const METER_PERIOD_BLOCKS: FieldSpec = FieldSpec::req(2, Wire::U32);
     pub(crate) const COUNTER_IDS: FieldSpec = FieldSpec::req(3, Wire::PackedU32);
     pub(crate) const COUNTER_PERIOD_BLOCKS: FieldSpec = FieldSpec::req(4, Wire::U32);
     pub(crate) const DIAGNOSTICS_ENABLED: FieldSpec = FieldSpec::req(5, Wire::Bool);
     pub(crate) const MINIMUM_DIAGNOSTIC_SEVERITY: FieldSpec = FieldSpec::req(6, Wire::U8);
+    /// The meter table, 0 to 256 entries, in handle order (#1583 D1).
+    pub(crate) const METER: FieldSpec = FieldSpec::msg(7, false, true, &meter_entry::SPEC);
+    /// The meter window in blocks: refused in a command, present in a success echo exactly when
+    /// the provider has a meter delivery (#1583 D4).
+    pub(crate) const METER_WINDOW_BLOCKS: FieldSpec = FieldSpec::opt(8, Wire::U32);
     pub(crate) static SPEC: MessageSpec = MessageSpec {
         name: "TelemetryConfiguration",
         fields: &[
-            METER_HANDLES,
             METER_PERIOD_BLOCKS,
             COUNTER_IDS,
             COUNTER_PERIOD_BLOCKS,
             DIAGNOSTICS_ENABLED,
             MINIMUM_DIAGNOSTIC_SEVERITY,
+            METER,
+            METER_WINDOW_BLOCKS,
         ],
+    };
+    /// The retired position (#1583 D2): field 1, the positional meter handles, is refused in
+    /// either flag form, never skipped as an unknown optional field and never reallocated.
+    pub(crate) static RETIRED: MessageSpec = MessageSpec {
+        name: "TelemetryConfigurationRetiredFields",
+        fields: &[FieldSpec::opt(1, Wire::PackedU32)],
     };
 }
 
@@ -2135,7 +2174,9 @@ mod tests {
             &observation_tap_key::SPEC,
             &observation_ended::SPEC,
             &meter_batch::SPEC,
+            &meter_entry::SPEC,
             &telemetry_configuration::SPEC,
+            &telemetry_configuration::RETIRED,
             &counters_request::SPEC,
             &counter_value::SPEC,
             &counter_snapshot::SPEC,
