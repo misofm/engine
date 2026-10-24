@@ -419,6 +419,11 @@ impl<T: Send + 'static> PushPermit<'_, T> {
         sync::with_mut(&self.producer.ring.slots[local], |slot| unsafe {
             (*slot).write(value);
         });
+        self.publish();
+    }
+    /// Publish the reserved slot, now written: the one `Release` store and the producer's
+    /// cursor and success count, shared by [`Self::commit`] and `commit_in_place`.
+    fn publish(self) {
         self.producer
             .ring
             .producer
@@ -493,13 +498,7 @@ impl<T: Copy + Send + 'static> PushPermit<'_, T> {
             let slot = unsafe { (*slot).assume_init_mut() };
             write(slot);
         });
-        self.producer
-            .ring
-            .producer
-            .0
-            .store(self.next, Ordering::Release);
-        self.producer.local = self.next;
-        self.producer.successes = self.producer.successes.saturating_add(1);
+        self.publish();
     }
 }
 impl<T: Send + 'static> Consumer<T> {
@@ -1101,8 +1100,8 @@ impl<T: Send + 'static> MailboxReader<T> {
 #[cfg(all(test, loom))]
 mod loom_tests {
     use super::{
-        MailboxReader, MailboxWithdrawal, MailboxWriter, PlanAdoption, QueueGeneration,
-        bounded_spsc, plan_mailbox,
+        Consumer, MailboxReader, MailboxWithdrawal, MailboxWriter, PlanAdoption, QueueGeneration,
+        bounded_spsc, bounded_spsc_prefilled, plan_mailbox,
     };
     use crate::realtime::latest_cell::RevisionGate;
     use core::num::NonZeroUsize;
@@ -1116,7 +1115,7 @@ mod loom_tests {
     #[test]
     fn spsc_loom_real_ring_fifo_with_cached_cursors() {
         loom::model(|| {
-            let (mut producer, mut consumer) =
+            let (mut producer, consumer) =
                 bounded_spsc::<usize>(NonZeroUsize::new(2).expect("two"), QueueGeneration(1))
                     .expect("ring");
             let writer = loom::thread::spawn(move || {
@@ -1126,22 +1125,44 @@ mod loom_tests {
                     }
                 }
             });
-            let reader = loom::thread::spawn(move || {
-                for expected in 0..3 {
-                    loop {
-                        match consumer.try_pop() {
-                            Ok(got) => {
-                                assert_eq!(got, expected);
-                                break;
-                            }
-                            Err(_) => loom::thread::yield_now(),
-                        }
+            fifo_reader(consumer, writer);
+        });
+        // The in-place arm (#897): the writer's slot write must happen-before the pop.
+        loom::model(|| {
+            let (mut producer, consumer) = bounded_spsc_prefilled::<usize>(
+                NonZeroUsize::new(2).expect("two"),
+                usize::MAX,
+                QueueGeneration(1),
+            )
+            .expect("ring");
+            let writer = loom::thread::spawn(move || {
+                for value in 0..3 {
+                    while producer.try_push_in_place(|slot| *slot = value).is_err() {
+                        loom::thread::yield_now();
                     }
                 }
             });
-            writer.join().expect("producer");
-            reader.join().expect("consumer");
+            fifo_reader(consumer, writer);
         });
+    }
+
+    /// Pop `0..3` in order on a second thread, then join both.
+    fn fifo_reader(mut consumer: Consumer<usize>, writer: loom::thread::JoinHandle<()>) {
+        let reader = loom::thread::spawn(move || {
+            for expected in 0..3 {
+                loop {
+                    match consumer.try_pop() {
+                        Ok(got) => {
+                            assert_eq!(got, expected);
+                            break;
+                        }
+                        Err(_) => loom::thread::yield_now(),
+                    }
+                }
+            }
+        });
+        writer.join().expect("producer");
+        reader.join().expect("consumer");
     }
 
     /// #1320 gate 1: the consumer peeks while the producer pushes three items through a two-slot

@@ -2328,9 +2328,8 @@ impl ContinuousPlane<'_> {
 
 /// Append `frames` frames of the block, starting at frame `from` (absolute sample `sample`), to
 /// the private circular history: at most two contiguous runs per selected plane (the ring wrap)
-/// and one validity fill. Only the newest [`SPECTRUM_WINDOW_FRAMES`] frames can stay in the ring,
-/// so an older prefix of a longer span is skipped. The caller bounds the span by the next window
-/// end, so the history matches a per-sample append of the same frames.
+/// and one validity fill. The caller bounds the span by the next window end, so it is at most
+/// [`SPECTRUM_WINDOW_FRAMES`] frames and the history matches a per-sample append of them.
 #[allow(clippy::too_many_arguments)]
 fn continuous_append_span(
     state: &mut SpectrumContinuousState,
@@ -2356,18 +2355,22 @@ fn continuous_append_span(
         return false;
     };
     state.history_first_sample = first_sample;
-    let skip = frames.saturating_sub(SPECTRUM_WINDOW_FRAMES);
-    let kept = frames - skip;
-    let start = (state.history_write_index + skip) % SPECTRUM_WINDOW_FRAMES;
-    let head = kept.min(SPECTRUM_WINDOW_FRAMES - start);
-    let tail = kept - head;
+    // A span ends at or before the next window end, which is at most one hop (<= N) past the
+    // previous one, so a span never exceeds the ring.
+    debug_assert!(
+        frames <= SPECTRUM_WINDOW_FRAMES,
+        "span longer than the ring"
+    );
+    let start = state.history_write_index;
+    let head = frames.min(SPECTRUM_WINDOW_FRAMES - start);
+    let tail = frames - head;
     for (selected, plane, history) in [
         (channels.includes_left(), left, &mut state.history_left),
         (channels.includes_right(), right, &mut state.history_right),
     ] {
         if selected {
-            plane.copy_into(&mut history[start..start + head], from + skip);
-            plane.copy_into(&mut history[..tail], from + skip + head);
+            plane.copy_into(&mut history[start..start + head], from);
+            plane.copy_into(&mut history[..tail], from + head);
             probe_add(PROBE_STORAGE_WRITES, frames);
         }
     }
