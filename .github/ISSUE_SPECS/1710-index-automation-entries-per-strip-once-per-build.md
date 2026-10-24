@@ -70,7 +70,7 @@ table, not O(strips × entries). The rows, their values and the `automated` flag
   `model_vca_offsets` (the dense effective values) now fills every VCA's offsets in one pass
   over the table, not one scan per VCA. With both changes: before 5.03 / 5.00 ms, after 5.07 /
   5.01 ms (+0.5 %; load average about 8).
-- Successors (not in this issue): preparation's `FaderEventLanes::of` and
+- Successors (not in this issue; filed as #1844): preparation's `FaderEventLanes::of` and
   `following_route_lanes` (`prepare.rs`) and the live classifier (`live_delta.rs`) still scan the
   table per strip and per route; `controls::live_lanes` walks every owner through the unindexed
   `owner_rows_with`; and `controls::ModelInputs::new` finds each route's source strip by a linear
