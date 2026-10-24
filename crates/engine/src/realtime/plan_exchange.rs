@@ -902,7 +902,7 @@ impl RealtimePlanOwner {
                     .source_read
                     .store(source_read_clock, Ordering::Release);
                 self.clocks.render.store(render_clock, Ordering::Release);
-                if self.active.1.last_block_source_underrun() {
+                if render.source_underrun {
                     self.source_underrun_blocks = self.source_underrun_blocks.saturating_add(1);
                 }
                 Ok((render, watermark))

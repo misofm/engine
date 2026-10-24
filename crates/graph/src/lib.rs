@@ -41,9 +41,9 @@ use effect_contract::{
     ResponseSnapshotSummary, SeamSide, TailSamples,
 };
 use engine::realtime::{
-    BufferArena, CarryOutcome, LiveSnapshot, ObserverCarry, ObserverKind, PlanUnitEligibility,
-    PlanarBufferMut, PrepareRenderPlan, PreparedPlanExecutor, PreparedRenderPlan, RenderEnvelope,
-    RenderError, ResponseSnapshotError, ResponseSnapshotSink,
+    BufferArena, CarryOutcome, ExecutorBlockReport, LiveSnapshot, ObserverCarry, ObserverKind,
+    PlanUnitEligibility, PlanarBufferMut, PrepareRenderPlan, PreparedPlanExecutor,
+    PreparedRenderPlan, RenderEnvelope, RenderError, ResponseSnapshotError, ResponseSnapshotSink,
 };
 use lane::Backend;
 use rack::AoSoaScratch;
@@ -5595,16 +5595,6 @@ impl PreparedPlanExecutor for GraphExecutor {
     // REALTIME_POLICY_END
 
     // REALTIME_POLICY_BEGIN
-    /// The graph-wide underrun flag the source driver stored for the block it last admitted
-    /// (#1537 D3); `false` with no source set. A read of the stored flag, no new work.
-    fn last_block_source_underrun(&self) -> bool {
-        self.source_set
-            .as_ref()
-            .is_some_and(|set| set.observation_validity().source_underrun)
-    }
-    // REALTIME_POLICY_END
-
-    // REALTIME_POLICY_BEGIN
     /// Render one block into `output`, whose two planes are the session Output op's storage for
     /// the block (issue #916). Nothing is copied out of the arena afterwards: the Output op, and a
     /// folded chain whose master it is, write the planes directly.
@@ -5633,7 +5623,7 @@ impl PreparedPlanExecutor for GraphExecutor {
         _arena: &mut BufferArena,
         mut output: PlanarBufferMut<'_>,
         time: engine::realtime::RenderTime,
-    ) -> Result<(), RenderError> {
+    ) -> Result<ExecutorBlockReport, RenderError> {
         let Self {
             runtime,
             sample_rate_hz: _,
@@ -5768,7 +5758,11 @@ impl PreparedPlanExecutor for GraphExecutor {
         // Issue #1609: the block rendered without failure, so a result an observer held for it
         // may now be published.
         runtime.block_end_observers();
-        Ok(())
+        // #1537 D3: the block's graph-wide underrun flag, returned with the block rather than
+        // asked for afterwards.
+        Ok(ExecutorBlockReport {
+            source_underrun: source_validity.source_underrun,
+        })
     }
     // REALTIME_POLICY_END
 

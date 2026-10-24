@@ -14309,13 +14309,15 @@ mod tests {
         let mut arena = engine::realtime::BufferArena::try_new(&[]).expect("empty arena");
         // A direct executor render names the snapshot it means, as `PreparedRenderPlan` does.
         executor.begin_live_block(LiveSnapshot::ALL);
-        executor.render(
-            &mut arena,
-            output,
-            engine::realtime::RenderTime {
-                absolute_sample: first_sample,
-            },
-        )
+        executor
+            .render(
+                &mut arena,
+                output,
+                engine::realtime::RenderTime {
+                    absolute_sample: first_sample,
+                },
+            )
+            .map(|_| ())
     }
 
     /// Issue #916's arena oracle: the render loop `GraphExecutor::render` ran before the issue,

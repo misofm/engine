@@ -425,8 +425,8 @@ mod tests {
     use super::*;
     use core::num::NonZeroUsize;
     use engine::realtime::{
-        BufferArena, PrepareRenderPlan, PreparedPlanExecutor, RenderEnvelope, RenderTime,
-        plan_exchange,
+        BufferArena, ExecutorBlockReport, PrepareRenderPlan, PreparedPlanExecutor, RenderEnvelope,
+        RenderTime, plan_exchange,
     };
     use engine::{QuantumFrames, SampleRateHz};
 
@@ -438,7 +438,7 @@ mod tests {
             _arena: &mut BufferArena,
             _output: PlanarBufferMut<'_>,
             _time: RenderTime,
-        ) -> Result<(), RenderError> {
+        ) -> Result<ExecutorBlockReport, RenderError> {
             Err(RenderError::InvalidEnvelope)
         }
     }
