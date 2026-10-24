@@ -183,3 +183,9 @@ Checked against `12d4a4f9d`.
   A harness mutant that skips the EQ's targets in forms (b) and (c) turns the EQ red, so the
   targets move its output. A harness mutant that packs the bank pieces' spans in reversed lane
   order turns the compressor differential red. All reverted.
+- **EQ form limit (verifier fold).** The EQ form prepares every Boolean cell on and moves only
+  continuous cells. When #1337 makes `enabled` live, the probe must also move the Boolean cells
+  and run once more with the default Booleans (some sections off).
+- **Verifier fold.** The schedule adds sample 128, a quantum start, so a mid-quantum Point is
+  compared with a quantum-aligned one. A `Block` cell with no two legal values, and a block the
+  probe cannot build, now fail `process.partition_invariance_points` instead of passing silently.

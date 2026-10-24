@@ -841,10 +841,11 @@ fn latency_and_partition_probe(
     }
 }
 
-/// The samples of the Point schedule (issue #1661 D1): none is a block start at `q = 128`, and
+/// The samples of the Point schedule (issue #1661 D1): all but `128` are mid-quantum at `q = 128`,
+/// so a mid-quantum Point is compared with a quantum-aligned one; they are
 /// they are spaced closer than the launch effects' smoothing, so each Point cuts the ramp before it
 /// in flight.
-const POINT_SAMPLES: [usize; 8] = [1, 37, 63, 64, 100, 127, 129, 191];
+const POINT_SAMPLES: [usize; 9] = [1, 37, 63, 64, 100, 127, 128, 129, 191];
 
 /// The two legal values a scheduled cell alternates between, the first one away from the default.
 fn point_values(parameter: &ParameterDescriptor) -> Option<[f32; 2]> {
@@ -942,15 +943,17 @@ fn render_points(
                 &[]
             }
         };
-        let block = EffectProcessBlock::new(
+        let Ok(block) = EffectProcessBlock::new(
             &mut left[start..end],
             &mut right[start..end],
             None,
             start as u64,
             spans,
             request.quantum,
-        )
-        .ok()?;
+        ) else {
+            tier.failures.push("process.partition_invariance_points");
+            return None;
+        };
         let report = armed_process(
             effect.as_mut(),
             block,
@@ -971,7 +974,7 @@ fn render_points(
 
 /// The schedule's prepared targets: per scheduled sample, the targets `prepare_targets` designs
 /// for the candidate whose continuous `Block` cells all take that event's value. `None` when a
-/// legal candidate does not prepare.
+/// moved cell has no two legal values or a legal candidate does not prepare.
 fn point_targets(
     preparation: &dyn NativeEffectTargetPreparation,
     descriptor: &'static EffectDescriptor,
@@ -1000,8 +1003,8 @@ fn point_targets(
     for (event, &sample) in samples.iter().enumerate() {
         for (value, &moves) in candidate.iter_mut().zip(&moved) {
             let parameter = &descriptor.parameters[value.parameter_index as usize];
-            if let (true, Some(pair)) = (moves, point_values(parameter)) {
-                value.value = pair[event % 2];
+            if moves {
+                value.value = point_values(parameter)?[event % 2];
             }
         }
         let count = preparation
@@ -1020,16 +1023,15 @@ fn point_targets(
 }
 
 /// The schedule's spans: at every scheduled sample, one `Point` per channel of every `Block` cell.
-fn point_spans(descriptor: &'static EffectDescriptor, samples: &[usize]) -> PointSchedule {
+/// `None` when a `Block` cell has no two legal values to alternate between.
+fn point_spans(descriptor: &'static EffectDescriptor, samples: &[usize]) -> Option<PointSchedule> {
     let mut spans = Vec::new();
     for (event, &sample) in samples.iter().enumerate() {
         for (index, parameter) in descriptor.parameters.iter().enumerate() {
-            let Some(pair) = point_values(parameter) else {
-                continue;
-            };
             if parameter.automation_rate == AutomationRate::None {
                 continue;
             }
+            let pair = point_values(parameter)?;
             let channels: &[ParameterChannel] = match parameter.channel_policy {
                 ParameterChannelPolicy::Shared => &[ParameterChannel::Both],
                 ParameterChannelPolicy::PerLane => {
@@ -1047,7 +1049,7 @@ fn point_spans(descriptor: &'static EffectDescriptor, samples: &[usize]) -> Poin
         }
     }
     spans.sort_by_key(|span| (span.sample, span.parameter_index, span.channel));
-    PointSchedule::Spans(spans)
+    Some(PointSchedule::Spans(spans))
 }
 
 /// Partition invariance with `Point`s at mid-quantum samples (issue #1661 D1).
@@ -1095,19 +1097,19 @@ fn partition_with_points_probe(
                 value.value = 1.0;
             }
         }
-        let Some(schedule) = point_targets(
+        point_targets(
             preparation,
             descriptor,
             request.sample_rate,
             &initial,
             &samples,
-        ) else {
-            tier.failures.push("process.partition_invariance_points");
-            return;
-        };
-        schedule
+        )
     } else {
         point_spans(descriptor, &samples)
+    };
+    let Some(schedule) = schedule else {
+        tier.failures.push("process.partition_invariance_points");
+        return;
     };
     let mut request = request;
     request.initial_values = &initial;
