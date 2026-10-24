@@ -148,11 +148,39 @@ Run every command from the repository root.
 *Test value.* No new or rewritten test (D4). Gate 2 shows once, as PR evidence, that the existing
 preparation tests now guard the shared domain.
 
+## Decision record (2026-10-24, scope note at `main` `4ebb72ae0`)
+
+The anchors above are stale; these supersede them for paths and decisions.
+
+- **Copy 1 moved.** The per-lane check now lives in `prepare_input_track`
+  (`crates/builtins/src/lib.rs`, called by `prepare_sections`, `input_section_bound_charged` and
+  the live-bound table). Its one `if` (trim and fader together) becomes
+  `checked_trim_gain(lane.trim_db)?; checked_fader_gain(lane.fader_db)?;`, then the cutoff and
+  order checks unchanged: same `GainDomain`, same first-failure order. `prepare_sections` builds
+  its faders with `fader_lanes` (D1).
+- **Trim is included** (supersedes the trim non-goal): `checked_trim_gain` is `pub` since #1556,
+  so `gain_path` calls `builtins::checked_trim_gain(..).is_err()` and
+  `builtins::checked_fader_gain(..).is_err()` (D2).
+- **D3** covers both helpers' docs: each lists its callers; the "two other checks" sentence is gone.
+- host-core's fader classifier is now `crates/host-core/src/prepare.rs` (`checked_fader_gain`).
+
 ## Evidence
 
 - `audit capi`'s `pcm_digest` before and after.
 - Gate 2's two runs.
 - The module digests before and after.
+
+### Attempt 1 results (branch vs merge base `4ebb72ae0`)
+
+- `audit capi`: `pcm_digest` `bffc21e857b5e134` on both; allocations, deallocations, locks and
+  syscalls 0 on both. `check-builtins-fixtures.sh`: ok (50 files).
+- Gate 2: with `checked_fader_gain`'s bound at `25.0`, both D4 tests are red on the branch and
+  green on the base. With `checked_trim_gain`'s bound at `23.5`, the mutation test (class 3,
+  `trim_db = 24.0`) is red on the branch and green on the base.
+- simd128 module SHA-256: base `7716d1f2e90f4ec3f3fac956c9e0c49903355426981925a2f9ff377c4d3c3c22`,
+  branch `c329be461c5ceb855d1b948bda31ad036675f4d65c4bb5e095c2043060e506b8`; every expected
+  render digest agrees.
+- `scripts/check-realtime-policy.sh` and `test-realtime-policy.sh` do not exist on `main`.
 
 ## Dependencies
 

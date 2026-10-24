@@ -9430,10 +9430,10 @@ fn gain_path(strip: &StripRef<'_>, track_path: &str) -> String {
         ("left", &strip.builtins.left, strip.fader.left_db),
         ("right", &strip.builtins.right, strip.fader.right_db),
     ] {
-        if !builtins.trim_db.is_finite() || !(-144.0..=24.0).contains(&builtins.trim_db) {
+        if builtins::checked_trim_gain(builtins.trim_db).is_err() {
             return format!("{track_path}.builtins.{lane}.trim_db");
         }
-        if !fader.is_finite() || !(-144.0..=24.0).contains(&fader) {
+        if builtins::checked_fader_gain(fader).is_err() {
             return format!("{track_path}.fader.{lane}_db");
         }
     }
