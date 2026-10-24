@@ -571,6 +571,11 @@ impl BankStage for DualOnly {
     fn lane_symmetry(&self, lane: usize) -> ChannelSymmetryWitness {
         self.0.lane_symmetry(lane)
     }
+    /// Forwarded, as the builtins input bank has a real one without a one-plane body: a disengage
+    /// that copied this slot's left state over its right would move its output.
+    fn desymmetrize(&mut self) {
+        self.0.desymmetrize();
+    }
 }
 
 /// A collapsible prefix ahead of an incompatible, asymmetric upstream slot collapses (issue
@@ -586,7 +591,8 @@ impl BankStage for DualOnly {
 /// Conjoin the decision's witness over every slot again (`lane_symmetry_bank(self.slots.len())`
 /// in `run_with_input`'s dispatch) and the triple is `[0, 0, 0]`: it never collapses. Do the same
 /// in the maintenance step only and the window clears the invariant, so the re-engage needs an
-/// agreement proof: the triple is `[1, 1, 1]`.
+/// agreement proof: the triple is `[1, 1, 1]`. Make `disengage_collapse` desymmetrize every slot
+/// and the bit comparison fails: the dual-only slot's right state becomes its left one.
 #[test]
 fn a_collapsible_prefix_before_an_incompatible_slot_collapses_exactly() {
     let build = || {

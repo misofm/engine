@@ -605,8 +605,9 @@ pub trait BankStage: Send {
     /// not the permissive one: an upstream stage is one a collapsed chain would have to run
     /// one-plane, so a stage that has not spoken is one the collapse must be able to run through --
     /// and it cannot, because [`supports_mono_collapse`](Self::supports_mono_collapse) defaults to
-    /// `false`. An unclassified stage therefore declines the whole chain rather than being silently
-    /// treated as seam-side and left to read a plane nobody gathered.
+    /// `false`. An unclassified stage therefore ends the collapsible prefix (issue #974) -- and
+    /// declines the whole chain when it is the first slot -- rather than being silently treated as
+    /// seam-side and left to read a plane nobody gathered.
     fn seam_side(&self) -> SeamSide {
         SeamSide::UpstreamOfSeam
     }
@@ -614,8 +615,9 @@ pub trait BankStage: Send {
     /// Whether this stage implements [`process_mono`](Self::process_mono) and
     /// [`desymmetrize`](Self::desymmetrize).
     ///
-    /// Decided off the render thread, at bind, and cached by [`BankChain::new`]: a chain whose
-    /// upstream prefix contains one stage that answers `false` can never collapse.
+    /// Decided off the render thread, at bind, and cached by [`BankChain::new`]: the first upstream
+    /// stage that answers `false` ends the collapsible prefix, and runs dual with every slot after
+    /// it (issue #974). A chain whose first slot answers `false` can never collapse.
     fn supports_mono_collapse(&self) -> bool {
         false
     }
@@ -4133,9 +4135,9 @@ impl BankChain {
     /// the dual run, it **is** the dual run's state, and the first dual block after this renders
     /// exactly what a never-collapsed run would have.
     ///
-    /// Only the prefix stages are copied, because only they ran one-plane: a seam-side slot ran
-    /// dual on every block, collapsed or not, and its two channels are already whatever the strip
-    /// asked for.
+    /// Only the prefix stages are copied, because only they ran one-plane: a seam-side slot, and
+    /// every slot after the prefix, ran dual on every block, collapsed or not, and its two channels
+    /// are already whatever the strip asked for.
     ///
     /// This is a one-off bounded copy of the prefix state per cohort on the block that stops
     /// collapsing, and it happens at most once per chain per plan. The amount follows each
