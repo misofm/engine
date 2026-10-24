@@ -313,7 +313,12 @@ impl<A: ControlAdapter> PlanState<A> {
         request: engine::realtime::ResponseSnapshotRequest<'_>,
     ) -> Result<engine::realtime::ResponseSnapshotCapture, engine::realtime::ResponseSnapshotError>
     {
-        self.owner.copy_response_snapshot(request)
+        self.owner.copy_response_snapshot(request).map(|capture| {
+            engine::realtime::ResponseSnapshotCapture {
+                captured_sample: capture.captured_sample,
+                owners: capture.owners,
+            }
+        })
     }
 
     /// Clones the any-thread query projection the adapter installs beside the plan.

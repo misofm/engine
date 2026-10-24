@@ -2207,6 +2207,16 @@ mod tests {
             assert_eq!(hooks.load(Ordering::Relaxed), 0);
         }
 
+        fn capture_epoch(owner: &mut RealtimePlanOwner) -> PlanEpoch {
+            owner
+                .copy_response_snapshot(ResponseSnapshotRequest {
+                    track_id: "track",
+                    sink: &mut Stranger,
+                })
+                .expect("capture")
+                .active_epoch
+        }
+
         #[test]
         fn the_non_contiguous_render_reports_the_hand_over() {
             let reference = reference();
@@ -2221,6 +2231,7 @@ mod tests {
                         .expect("reserve")
                         .commit();
                 }
+                let before = capture_epoch(&mut owner);
                 let mut output = [0.0_f32; FRAMES as usize];
                 let report = owner
                     .render(
@@ -2244,6 +2255,11 @@ mod tests {
                     CarryOutcome::NotRequested
                 };
                 assert_eq!(report.carry, carry, "block {block}");
+                // A capture names the plan that rendered: the predecessor until the swap block,
+                // the successor from it on.
+                let after = capture_epoch(&mut owner);
+                assert_eq!(after, owner.active_epoch(), "block {block}");
+                assert_eq!(before == after, block != 5, "block {block}");
                 blocks.push(output);
             }
             assert_eq!(blocks, reference);
