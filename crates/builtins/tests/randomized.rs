@@ -22,14 +22,9 @@
 //! `+-f32::MAX` -- because the input section is where the engine sanitises them: the sanitised
 //! count is part of the report every lane must agree on.
 //!
-//! # A known defect, narrowed
-//!
-//! The first run of this differential found that `BuiltinMatrixBank` renders a settled identity
-//! lane's `-0.0` as `+0.0` while another lane's matrix ramps, where that lane's own
-//! `MatrixBuiltins` passes the `-0.0` through (first found at eight lanes): with any lane
-//! ramping, the bank runs the ramp arithmetic on every lane, and `1 * -0.0 + 0 * x` is `+0.0`.
-//! Until #1072 lands, the per-PR test compares the two zeros as one value on a
-//! block where a matrix ramp may be in flight; the ignored test below is the reproducer.
+//! Signed zeros are compared by bits everywhere: the first run of this differential found the
+//! matrix bank rendering a settled identity lane's `-0.0` as `+0.0` while another lane's matrix
+//! ramped (#1072).
 
 use builtins::{
     BuiltinChain, BuiltinFaderBank, BuiltinInputBank, BuiltinLaneSelector, BuiltinMatrixBank,
@@ -145,12 +140,10 @@ struct Reach {
     collapsed: u64,
     retargets: u64,
     sanitized: u64,
-    /// Matrix words #1072's allowance forgave.
-    forgiven: u64,
 }
 
 #[allow(clippy::too_many_lines)]
-fn scenario(seed: u64, backend: Backend, width: BankWidth, strict: bool, reach: &mut Reach) {
+fn scenario(seed: u64, backend: Backend, width: BankWidth, reach: &mut Reach) {
     let mut draw = Draw::new(seed ^ (u64::from(width.lanes()) << 48));
     let rate = draw.pick(&[44_100_u32, 48_000, 88_200, 96_000]);
     let lanes = width.lanes() as usize;
@@ -200,10 +193,6 @@ fn scenario(seed: u64, backend: Backend, width: BankWidth, strict: bool, reach: 
     .expect("matrix bank");
     let mut collapsed = false;
     let mut agree = true;
-    // Per member: the sample its matrix ramp ends at (at or before `first` when settled), and the
-    // matrix it settles on. #1072's allowance is scoped by both.
-    let mut ramp_end = vec![0_u64; members];
-    let mut settled_on: Vec<Matrix2x2> = params.iter().map(|p| p.matrix).collect();
     let mut first = draw.pick(&[0_u64, 1 << 20, (1 << 40) + 3]);
 
     for block in 0..BLOCKS {
@@ -268,10 +257,6 @@ fn scenario(seed: u64, backend: Backend, width: BankWidth, strict: bool, reach: 
                     let banked = matrix_bank.set_target_smoothed(lane, target, window);
                     let single = scalar.matrix.set_target_smoothed(target, window);
                     assert_eq!(banked, single, "{context}: the matrix retarget's verdicts");
-                    if banked.is_ok() {
-                        ramp_end[lane] = first + u64::from(window);
-                        settled_on[lane] = target;
-                    }
                 }
             }
             reach.retargets += 1;
@@ -285,8 +270,6 @@ fn scenario(seed: u64, backend: Backend, width: BankWidth, strict: bool, reach: 
             twin.reset();
             fader_bank.reset();
             matrix_bank.reset();
-            // A reset snaps every matrix ramp to its target.
-            ramp_end.fill(0);
             for scalar in &mut scalars {
                 scalar.input.reset();
                 scalar.fader.reset();
@@ -431,24 +414,7 @@ fn scenario(seed: u64, backend: Backend, width: BankWidth, strict: bool, reach: 
                 "{context}: the banks sanitised another count than their scalar strips"
             );
         }
-        // #1072, and nowhere else: the matrix bank's output on a settled identity lane, on the
-        // frames another lane's matrix ramp is still in flight, may be `+0.0` where the lane's own
-        // section passes `-0.0` through. Every other stage, lane, frame and word is compared by
-        // bits (NaN as one class, #1065).
-        let forgiven = |stage: usize, lane: usize, frame: usize, scalar: f32, banked: f32| {
-            let others_in_flight = (0..members)
-                .filter(|other| *other != lane)
-                .map(|other| ramp_end[other])
-                .max()
-                .unwrap_or(0);
-            !strict
-                && stage == 2
-                && settled_on[lane] == Matrix2x2::IDENTITY
-                && ramp_end[lane] <= first
-                && first + (frame as u64) < others_in_flight
-                && scalar.to_bits() == 0x8000_0000
-                && banked.to_bits() == 0
-        };
+        // Every stage, lane, frame and word is compared by bits (NaN as one class, #1065).
         for (stage, name) in ["input section", "fader", "matrix"].into_iter().enumerate() {
             for lane in 0..members {
                 for (plane, scalar, banked) in [
@@ -458,7 +424,6 @@ fn scenario(seed: u64, backend: Backend, width: BankWidth, strict: bool, reach: 
                     if let Some(frame) = (0..frames).find(|frame| {
                         let word = frame * lanes + lane;
                         !dsp_reference::randomized::same_word(scalar[word], banked[word])
-                            && !forgiven(stage, lane, *frame, scalar[word], banked[word])
                     }) {
                         let word = frame * lanes + lane;
                         panic!(
@@ -472,22 +437,6 @@ fn scenario(seed: u64, backend: Backend, width: BankWidth, strict: bool, reach: 
                 }
             }
         }
-        reach.forgiven += (0..members)
-            .flat_map(|lane| (0..frames).map(move |frame| (lane, frame)))
-            .map(|(lane, frame)| {
-                let word = frame * lanes + lane;
-                [
-                    (scalar_stages[2].0[word], bank_stages[2].0[word]),
-                    (scalar_stages[2].1[word], bank_stages[2].1[word]),
-                ]
-                .into_iter()
-                .filter(|(scalar, banked)| {
-                    !dsp_reference::randomized::same_word(*scalar, *banked)
-                        && forgiven(2, lane, frame, *scalar, *banked)
-                })
-                .count() as u64
-            })
-            .sum::<u64>();
         first += frames as u64;
     }
 }
@@ -497,7 +446,7 @@ fn the_banks_render_their_scalar_sections_under_random_retargets() {
     let mut reach = Reach::default();
     let seeds = run_seeds(TEST, REPLAY, 24, |seed| {
         for (backend, width) in widths() {
-            scenario(seed, backend, width, false, &mut reach);
+            scenario(seed, backend, width, &mut reach);
         }
     });
     println!("{seeds} seeds: {reach:?}");
@@ -511,23 +460,5 @@ fn the_banks_render_their_scalar_sections_under_random_retargets() {
             && reach.retargets > 0
             && reach.sanitized > 0,
         "{reach:?}"
-    );
-}
-
-/// The same differential without the narrowing: red until the known defect's issue lands.
-#[test]
-#[ignore = "#1072: the matrix bank renders a settled lane's -0.0 as +0.0; see the module documentation"]
-fn the_banks_render_their_scalar_sections_including_the_known_defect() {
-    let mut reach = Reach::default();
-    run_seeds(
-        "the_banks_render_their_scalar_sections_including_the_known_defect",
-        "cargo test -p builtins --features builtins/test-support --test randomized -- --ignored \
-         --exact the_banks_render_their_scalar_sections_including_the_known_defect",
-        24,
-        |seed| {
-            for (backend, width) in widths() {
-                scenario(seed, backend, width, true, &mut reach);
-            }
-        },
     );
 }
