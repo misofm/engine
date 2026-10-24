@@ -66,4 +66,7 @@ Reach the pending Observe queues through one call outside any loop, into the own
 
 ## Evidence (attempt 1)
 
-- Recorded in the implementer's report and the PR.
+- realtime-policy: `ok (192 marked regions in 34 files)`, same as `main`; its tests 229/229.
+- Mutant: dropping the `(Lane, Lane)` mark turns
+  `pending_observe_records_are_applied_at_the_carry_at_the_build_width` red.
+- `check-graph-determinism.sh` JSON byte-identical at `661c96a5e` and head (sha256 `01a11f0c...`).
