@@ -74,6 +74,18 @@ fn an_unsafe_block_in_a_compiled_doctest_is_a_finding() {
             4,
         ),
         (
+            "tools/bench/src/d_order.rs",
+            fenced("no_run,text", &code),
+            4,
+        ),
+        ("tools/bench/src/d_class.rs", fenced("{.rust}", &code), 4),
+        (
+            "tools/bench/src/d_class_text.rs",
+            fenced("{.text}", &code),
+            4,
+        ),
+        ("tools/bench/src/d_entity.rs", fenced("r&#117;st", &code), 4),
+        (
             "tools/bench/src/d_inner.rs",
             format!("//! ```\n//! {code}\n//! ```\n"),
             2,
