@@ -135,3 +135,39 @@ Steps:
 * **The measured native saving is within run-to-run noise at `Simd8`.** This slice is justified by
   the floor, the wasm instruction count and every-block applicability, not by a timing claim.
 
+
+## Evidence and decisions (attempt 1, 2026-10-24, base `a2c21e58b`)
+
+- D1. Narrowed by the root scope (2026-10-24): 4 of the 7 lane-ops (the Annex-2 seed, E1b and
+  `tests/seedless.rs`) shipped in #1013 (`03a5afe33`). The residual is contract 1 only.
+- D2. The link arm is dropped: since #1368 `coef.link` is a per-lane mask and an all-`Maximum`
+  bank already takes the linked bodies, which have no select. The bypass arm is dropped: it
+  duplicates pass 2 for a rare configuration, and four monomorphised bodies break the wasm roster's
+  "exactly one function" row. `floor.rs` 129.5 stays (it moves only with the owner's recount ruling).
+- D3. Implemented in `cf6110c8d`: `required_gain(peak, limit) = limit.div(peak.max(limit))` at
+  the nine render sites; `channel_frame` takes the required gain from its caller, so the test
+  oracle `reference_block` keeps the select law; a lib truth table at f32/Simd4/Simd8. All gates
+  green (crate tests dev and release, wasm-gates, realtime-policy, aarch64 check,
+  `check-web-audioworklet.sh`: limiter roster rows dual 913 and collapsed 424 vectors, one
+  function). Output digests identical on every native console record (74) and every V8 digest.
+- D4. Mutant `limit.max(peak)`: red on the truth table and on three existing oracle differentials
+  (`randomized_scenarios_match_the_current_frame_law`, `the_linked_body_engages_exactly_where_the_record_allows`,
+  `the_stationary_walk_matches_the_current_frame_law`), because the oracle now keeps the select law.
+- D5. Measurement (uncontrolled: load average 7-14 at the start, waiver
+  `MISO_ENGINE_BENCH_ALLOW_UNCONTROLLED=1`; one invocation each, one warmup, two rounds, base and
+  candidate in the same session under `flock -x`), p50 per block, candidate against base:
+
+  | row | round 1 | round 2 |
+  |---|---:|---:|
+  | `sixty_four_track_console` Simd8 | 99.510 -> 99.870 us (+0.36 %) | 99.429 -> 100.031 us (+0.61 %) |
+  | `sixty_four_track_console_mono` Simd8 | 61.147 -> 61.607 us (+0.75 %) | 61.347 -> 62.078 us (+1.19 %) |
+  | V8 `sixty_four_track_console` | 233.3 -> 240.2 us (+2.95 %) | 236.8 -> 235.3 us (-0.60 %) |
+
+  No row is faster. No profile was possible (`perf_event_paranoid` 4); the cause is not
+  investigated.
+
+## Close (2026-10-24): measured, not worth it
+
+Under root's pre-set rule (ship only if within 2 % or better; the #1773 precedent), the change
+does not ship: every native round is slower, and the V8 console row's first round is +2.95 %.
+`65fc9b328` reverts `cf6110c8d`; the code stays in the history of branch `codex/batch-b13-992`.
