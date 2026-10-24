@@ -499,18 +499,11 @@ fn a_hand_built_65_537_input_plan_binds_and_renders_every_track() {
     bind_and_render_every_track(plan, inputs);
 }
 
-/// Issue #1045: builtin bank attachment above 65,536 tracks, per PR, at the bank width this build
-/// renders at.
-///
-/// Every track's input feeds its post-input builtin stage, and every stage sums straight into the
-/// output. The stages are attached as builtin banks through the public
-/// [`PreparedGraphPlan::with_builtin_banks`], in lane order of the sorted tracks, then the plan
-/// binds and renders through [`bind_and_render_every_track`]. A ceiling in bank attachment
-/// refuses, and one in the runtime's bank gather or scatter drops lanes from the count. No
-/// per-track route: banks and one route per track bind super-linearly (#967), and that is not
-/// this test's claim.
-#[test]
-fn a_hand_built_65_537_track_plan_attaches_builtin_banks_binds_and_renders() {
+/// [`TRACKS`] track inputs, each feeding its post-input builtin stage, attached as builtin banks
+/// through the public [`PreparedGraphPlan::with_builtin_banks`] in lane order of the sorted tracks.
+/// Every stage sums straight into the output, or, with `routes`, through a unity route of its own
+/// (issue #967). Returns the plan and the track inputs to bind.
+fn hand_built_bank_plan(routes: bool) -> (PreparedGraphPlan, Vec<GraphNodeId>) {
     let backend = Backend::current();
     let width = BankWidth::for_backend(backend).expect("native builds render in banks");
     let inputs = track_stages(TrackStage::Input);
@@ -518,7 +511,8 @@ fn a_hand_built_65_537_track_plan_attaches_builtin_banks_binds_and_renders() {
     let output = GraphNodeId::Output {
         output_id: stable("main".to_owned()),
     };
-    let mut edges = Vec::with_capacity(2 * TRACKS as usize);
+    let mut edges = Vec::with_capacity(3 * TRACKS as usize);
+    let mut route_nodes = Vec::new();
     for (input, member) in inputs.iter().zip(&members) {
         let GraphNodeId::TrackStage { track_id, .. } = member else {
             unreachable!("track stages")
@@ -530,17 +524,46 @@ fn a_hand_built_65_537_track_plan_attaches_builtin_banks_binds_and_renders() {
             input,
             member,
         ));
-        edges.push(edge(
-            GraphEdgeId::RouteSource {
-                route_id: stable(format!("route-{}", track_id.as_str())),
-            },
-            member,
-            &output,
-        ));
+        let route_id = stable(format!("route-{}", track_id.as_str()));
+        if routes {
+            let route = GraphNodeId::Route {
+                route_id: route_id.clone(),
+            };
+            edges.push(edge(
+                GraphEdgeId::RouteSource {
+                    route_id: route_id.clone(),
+                },
+                member,
+                &route,
+            ));
+            edges.push(edge(
+                GraphEdgeId::RouteDestination { route_id },
+                &route,
+                &output,
+            ));
+            route_nodes.push(route);
+        } else {
+            edges.push(edge(GraphEdgeId::RouteSource { route_id }, member, &output));
+        }
     }
+    route_nodes.sort();
     let mut required = inputs.clone();
     required.extend(members.iter().cloned());
     required.push(output.clone());
+    let transforms = route_nodes
+        .iter()
+        .map(|node| PreparedRoute {
+            node: node.clone(),
+            transform: RouteTransform {
+                gain: 1.0,
+                ll: 1.0,
+                lr: 0.0,
+                rl: 0.0,
+                rr: 1.0,
+            },
+            gate: RouteGate::OPEN,
+        })
+        .collect();
     let banks: Vec<_> = members
         .chunks(width.lanes() as usize)
         .map(|lanes| GraphPreparedBuiltinBank {
@@ -551,21 +574,36 @@ fn a_hand_built_65_537_track_plan_attaches_builtin_banks_binds_and_renders() {
         })
         .collect();
     let bank_count = banks.len() as u64;
-    let plan = hand_built_plan(
-        vec![inputs.clone(), members, vec![output]],
-        edges,
-        required,
-        Vec::new(),
-    )
-    .with_builtin_banks(
-        banks,
-        GraphBuiltinBankResourceEstimate {
-            bank_count,
-            ..GraphBuiltinBankResourceEstimate::default()
-        },
-    )
-    .unwrap_or_else(|error| panic!("65,537-track bank attachment: {error:?}"));
+    let mut levels = vec![inputs.clone(), members];
+    if routes {
+        levels.push(route_nodes);
+    }
+    levels.push(vec![output]);
+    let plan = hand_built_plan(levels, edges, required, transforms)
+        .with_builtin_banks(
+            banks,
+            GraphBuiltinBankResourceEstimate {
+                bank_count,
+                ..GraphBuiltinBankResourceEstimate::default()
+            },
+        )
+        .unwrap_or_else(|error| panic!("65,537-track bank attachment: {error:?}"));
     assert_eq!(plan.builtin_bank_members().count(), TRACKS as usize);
+    let expected_routes = if routes { TRACKS as usize } else { 0 };
+    assert_eq!(plan.routes().len(), expected_routes);
+    (plan, inputs)
+}
+
+/// Issue #1045: builtin bank attachment above 65,536 tracks, per PR, at the bank width this build
+/// renders at.
+///
+/// [`hand_built_bank_plan`] without routes binds and renders through
+/// [`bind_and_render_every_track`]. A ceiling in bank attachment refuses, and one in the runtime's
+/// bank gather or scatter drops lanes from the count. The route-per-track shape binds in the
+/// nightly [`compiles_and_binds_65_537_tracks_with_builtins`] instead, under a time bound.
+#[test]
+fn a_hand_built_65_537_track_plan_attaches_builtin_banks_binds_and_renders() {
+    let (plan, inputs) = hand_built_bank_plan(false);
     bind_and_render_every_track(plan, inputs);
 }
 
@@ -665,9 +703,10 @@ fn lowers_65_537_tracks_of_builtin_banks() {
 /// console's `eq` as a console slot carrying a live control lane on every track. The routes put
 /// every track's post-pan route into the bind's route-fold metadata, and the controls put every
 /// track's lane through #962's `effect_control_resource`. The per-PR gates' effect-less, one-route
-/// session reaches neither at scale. This session does not exercise `scatter_redirects`' in-between
-/// check at scale: it binds in the same time with or without #967's linearisation (the spec's
-/// evidence), so a quadratic there would not fail this bound. #962's other two fixes (the `Backend::Scalar` interval scan and the
+/// session reaches neither at scale. It does not exercise `scatter_redirects`' in-between check:
+/// it binds in the same time with or without #967's linearisation (the spec's evidence). So the
+/// test then binds [`hand_built_bank_plan`] with one route per track, the shape that reaches that
+/// check, under a 15 s bound of its own. That fails the old quadratic walk, which took longer. #962's other two fixes (the `Backend::Scalar` interval scan and the
 /// fused-split crossing scan) guarded code that #1767 and owner ruling R8 removed.
 ///
 /// Issue #1045: this runs nightly, in release with overflow checks on (`nightly.yml`,
@@ -764,5 +803,19 @@ fn compiles_and_binds_65_537_tracks_with_builtins() {
         elapsed < Duration::from_secs(60),
         "65,537-track session compile, effects, builtins, graph compile, bind and one block took \
          {elapsed:?}"
+    );
+
+    // Issue #967: the shape that reaches `scatter_redirects`' in-between check, which the
+    // compiled session above does not. Every lane of a builtin bank has a route as its sole
+    // reader, scheduled a track count of ops after the bank's first op, so the old per-lane
+    // walk was quadratic: about 16.7 s for this bind and render in release before the fix and
+    // about 1.1 s after (the spec's evidence).
+    let (plan, inputs) = hand_built_bank_plan(true);
+    let started = Instant::now();
+    bind_and_render_every_track(plan, inputs);
+    let elapsed = started.elapsed();
+    assert!(
+        elapsed < Duration::from_secs(15),
+        "65,537-track builtin banks with one route per track took {elapsed:?} to bind and render"
     );
 }
