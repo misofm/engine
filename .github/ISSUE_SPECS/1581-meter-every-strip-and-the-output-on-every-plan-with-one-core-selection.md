@@ -189,3 +189,27 @@ Commands: `cargo test --locked -p host-core --all-features`,
 - *Report each configured meter handle's own meter in the C ABI meter batch* (#1352): its D2 and
   D3 (per-plane, windowed output peaks) are this slice's output meter; the issue is superseded by
   #1583 and #1587, which deliver the rest, and closes when #1587 merges.
+
+## Decision record
+
+- **Tranches (root, 2026-10-24, from the scope note).** T1: D1, D2 and the request change with
+  every caller, gates 1, 2 and 5, and the D7 evidence. T2: D3, D4, D6 (the core
+  `OutputPeakObserver` in `PlanState`, the new `observe_rendered_block` arguments, the meter
+  consumers kept in `ProviderEpoch`), gates 3, 6 and 7 (C ABI). T3: D5 (the browser ring deleted,
+  the lease driving the gate), gates 4 and 7 (web). Each on its own branch.
+- **R1.** host-web's no-spectrum branch calls the plain live-lanes entries; its own list is gone.
+- **R2.** A request with no selection routes the core selection through the selected-builtins path;
+  the plain entry (no request) still prepares no meter.
+- **T1 attempt 1 (blocked).** Host-core D1/D2 are in (`meters.rs`, gate 1 `tests/meters.rs`, gate 5
+  unit test, host-core tests green). Putting the strip meters on every C ABI plan makes the C ABI's
+  own `CompileLimits` meter caps bind: every test host there sets `maximum_meter_streams`,
+  `maximum_meter_items` and `maximum_meter_bytes` to `1`, so a session of two or more strips is now
+  refused with `builtin.resource.limit $.meter_requests`. Measured on this branch: capi 177 tests
+  red, control-plane 29, host-web `tests/control_parity.rs` 45. Their fixes are outside T1's paths
+  (`crates/capi/tests/*`, `crates/capi/tests/c/abi_smoke.c`, `crates/capi/src/{ffi.rs,runtime/tests.rs}`,
+  `crates/control-plane/{src/control.rs,tests/*}`, `hosts/host-web/tests/control_parity.rs`,
+  `tools/audit/src/capi.rs`), and the C ABI header must then say that the meter caps bound one
+  stream per strip. Open for root: accept that contract (and widen T1's paths), or count the core's
+  strip meters outside the caller's meter caps. A boot word of `0` now also binds the browser's
+  strip meters, so `observation_staging_resource_is_exact_for_the_taps_off_and_on_modes`
+  (`hosts/host-web/src/tests.rs`) no longer holds its "no meter" rows.

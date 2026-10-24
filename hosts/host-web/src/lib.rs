@@ -28,10 +28,10 @@
 //! rejected source generation `0`.
 
 use core::mem::{MaybeUninit, size_of};
-use core::num::{NonZeroU32, NonZeroUsize};
+use core::num::NonZeroUsize;
 use std::sync::{Arc, Mutex};
 
-use builtins::{MeterMetricSet, MeterSnapshot, MeterTap};
+use builtins::MeterSnapshot;
 use builtins_compiler::MeterConsumer;
 use control_plane::{
     CompileFailure, ControlAdapter, ControlLimits, ObservationChange, ObservationKeyError,
@@ -44,7 +44,7 @@ use engine::realtime::{
 };
 use host_core::{
     CompiledSession, EffectObservationHandle, HostLiveControlRequest, HostLiveLanes,
-    HostMeterRequest, HostPrepareCaps, HostPrepareReport, HostShapePolicy, MAXIMUM_VCA_REACH_PAIRS,
+    HostPrepareCaps, HostPrepareReport, HostShapePolicy, MAXIMUM_VCA_REACH_PAIRS,
     MAXIMUM_VCAS_BOUNDED, PrepareDiagnostics, PrepareRejection, PreparedHost, SourceControlError,
     SourceSubmission, SuccessorBase, compile_host_model, compiled_session_shape,
     control_table_bytes, parse_host_session, prepare_host_runtime_with_live_controls_and_spectrum,
@@ -5556,9 +5556,9 @@ fn boot_refusal(failure: &CompileFailure, record: &Mutex<BootRecord>) -> BootFai
 /// Every branch delivers controls concurrently (the only delivery since #1767), so the same
 /// function serves a control plane that prepares while another thread renders. A
 /// successor prepares every source it leaves unchanged vacant, to carry the displaced plan's ring.
-/// Issue #1209 D3: one `PostMatrix` sample-peak meter per strip, the tracks then the submixes, in
-/// the strip order host-core's addressing authority uses, so `meters[i]` is strip `i`'s peak pair;
-/// none when the request has no meter period.
+/// Every branch meters what host-core's selection meters (issue #1581 D1,
+/// [`host_core::meter_selection`]): one `PostMatrix` sample-peak meter per strip, the tracks then
+/// the submixes, so `meters[i]` is strip `i`'s peak pair.
 fn prepare_web_host(
     compiled: &CompiledSession,
     caps: &HostPrepareCaps,
@@ -5633,37 +5633,19 @@ fn prepare_web_host(
             ))
         }
         None => {
-            let meters: Vec<HostMeterRequest> = if live_controls.meter_period_frames.is_some() {
-                let model = compiled.normalized_model();
-                model
-                    .tracks
-                    .iter()
-                    .map(|track| track.id.as_str())
-                    .chain(model.submixes.iter().map(|submix| submix.id.as_str()))
-                    .map(|strip| HostMeterRequest {
-                        strip_id: strip.into(),
-                        tap: MeterTap::PostMatrix,
-                        metrics: MeterMetricSet::SAMPLE_PEAK,
-                    })
-                    .collect()
-            } else {
-                Vec::new()
-            };
             let (host, handles) = match successor {
-                Some(base) => host_core::prepare_host_runtime_with_selected_meters_successor(
+                Some(base) => host_core::prepare_host_runtime_with_live_lanes_successor(
                     compiled,
                     caps,
                     live_controls,
-                    &meters,
                     lanes,
-                    superseded,
                     base,
+                    superseded,
                 ),
-                None => host_core::prepare_host_runtime_with_selected_meters(
+                None => host_core::prepare_host_runtime_with_live_lanes(
                     compiled,
                     caps,
                     live_controls,
-                    &meters,
                     lanes,
                     superseded,
                 ),
@@ -6867,22 +6849,19 @@ fn compile_ready(
 /// Translate the browser configuration's two live-control words into the facade's live-control
 /// request.
 ///
-/// `live_control_meter_blocks == 0` is the honest form of "metering off": no observer is bound, so
-/// the render path folds nothing at all. The port lease is a second, finer switch over posting.
+/// The meter word passes unchanged (issue #1581 D2): `live_control_meter_blocks == 0` binds the
+/// strip meters at host-core's default window, and the lease over such a host is still refused
+/// (`set_meter_lease`). The port lease is a second, finer switch over posting.
 fn live_control_request(
     options: WebBootOptions,
     quantum_frames: u32,
 ) -> Option<HostLiveControlRequest> {
-    let meter_period_frames = if options.live_control_meter_blocks == 0 {
-        None
-    } else {
-        let blocks = u32::try_from(options.live_control_meter_blocks).ok()?;
-        Some(NonZeroU32::new(blocks.checked_mul(quantum_frames)?)?)
-    };
+    let meter_window_blocks = u32::try_from(options.live_control_meter_blocks).ok()?;
+    // A window longer than `u32::MAX` frames is refused here, as host-core would.
+    meter_window_blocks.checked_mul(quantum_frames)?;
     Some(HostLiveControlRequest {
-        meter_period_frames,
+        meter_window_blocks,
         meter_queue_depth: NonZeroUsize::new(METER_QUEUE_DEPTH)?,
-        meter_tap: MeterTap::PostMatrix,
         // Issue #143 D3: a carved browser configuration word, translated once, here.
         observation_taps: u32::try_from(options.live_control_observation_taps).ok()?,
     })
