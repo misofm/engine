@@ -2873,7 +2873,7 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
         // are attached; a route into a submix gets its lane after the compile, when asked.
         gain_liveness: graph_compiler::GainLiveness {
             strip_fader_matrix: attach_live,
-            routes_into_submixes: attach_live && lanes.routes,
+            routes: attach_live && lanes.routes,
         },
     })
     .map_err(|failure| {

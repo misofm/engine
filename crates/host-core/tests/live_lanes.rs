@@ -321,7 +321,7 @@ fn fader_and_matrix_lanes_attach_nothing_else_and_render_the_lanes_free_bits() {
                 &model,
                 graph_compiler::GainLiveness {
                     strip_fader_matrix: true,
-                    routes_into_submixes: false,
+                    routes: false,
                 },
                 false,
             )
@@ -352,7 +352,7 @@ fn fader_and_matrix_lanes_attach_nothing_else_and_render_the_lanes_free_bits() {
         &plain_fixture(),
         graph_compiler::GainLiveness {
             strip_fader_matrix: true,
-            routes_into_submixes: true,
+            routes: true,
         },
         true,
     );

@@ -761,6 +761,14 @@ export const CONTROLS = deepFreeze(
         "automatable": true,
         "active": true
       },
+      "intoOutputBeforeFader": {
+        "class": "live",
+        "reason": null,
+        "reasonIssue": null,
+        "reopen": null,
+        "automatable": true,
+        "active": true
+      },
       "intoOutput": {
         "class": "rebuildOnly",
         "reason": "optimisation",
@@ -800,6 +808,14 @@ export const CONTROLS = deepFreeze(
       "family": "route",
       "lanes": "shared",
       "intoSubmix": {
+        "class": "live",
+        "reason": null,
+        "reasonIssue": null,
+        "reopen": null,
+        "automatable": true,
+        "active": true
+      },
+      "intoOutputBeforeFader": {
         "class": "live",
         "reason": null,
         "reasonIssue": null,
@@ -853,6 +869,14 @@ export const CONTROLS = deepFreeze(
         "automatable": true,
         "active": true
       },
+      "intoOutputBeforeFader": {
+        "class": "live",
+        "reason": null,
+        "reasonIssue": null,
+        "reopen": null,
+        "automatable": true,
+        "active": true
+      },
       "intoOutput": {
         "class": "rebuildOnly",
         "reason": "optimisation",
@@ -892,6 +916,14 @@ export const CONTROLS = deepFreeze(
       "family": "route",
       "lanes": "shared",
       "intoSubmix": {
+        "class": "live",
+        "reason": null,
+        "reasonIssue": null,
+        "reopen": null,
+        "automatable": true,
+        "active": true
+      },
+      "intoOutputBeforeFader": {
         "class": "live",
         "reason": null,
         "reasonIssue": null,
@@ -945,6 +977,14 @@ export const CONTROLS = deepFreeze(
         "automatable": true,
         "active": true
       },
+      "intoOutputBeforeFader": {
+        "class": "live",
+        "reason": null,
+        "reasonIssue": null,
+        "reopen": null,
+        "automatable": true,
+        "active": true
+      },
       "intoOutput": {
         "class": "rebuildOnly",
         "reason": "optimisation",
@@ -984,6 +1024,14 @@ export const CONTROLS = deepFreeze(
       "family": "route",
       "lanes": "shared",
       "intoSubmix": {
+        "class": "live",
+        "reason": null,
+        "reasonIssue": null,
+        "reopen": null,
+        "automatable": true,
+        "active": true
+      },
+      "intoOutputBeforeFader": {
         "class": "live",
         "reason": null,
         "reasonIssue": null,
@@ -1037,6 +1085,14 @@ export const CONTROLS = deepFreeze(
         "automatable": false,
         "active": true
       },
+      "intoOutputBeforeFader": {
+        "class": "rebuildOnly",
+        "reason": "optimisation",
+        "reasonIssue": null,
+        "reopen": "An owner product request together with live route lanes in the epilogue fold (decision 13, O9 and O4), or a real-path measurement showing that losing the fold costs little.",
+        "automatable": false,
+        "active": false
+      },
       "intoOutput": {
         "class": "rebuildOnly",
         "reason": "optimisation",
@@ -1076,6 +1132,14 @@ export const CONTROLS = deepFreeze(
       "family": "route",
       "lanes": "perLane",
       "intoSubmix": {
+        "class": "derived",
+        "reason": null,
+        "reasonIssue": null,
+        "reopen": null,
+        "automatable": false,
+        "active": true
+      },
+      "intoOutputBeforeFader": {
         "class": "derived",
         "reason": null,
         "reasonIssue": null,

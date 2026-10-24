@@ -240,14 +240,20 @@ fn descriptor(row: &RouteRow, route: &Route) -> ControlDescriptor {
     match route.destination {
         RouteDestination::SubmixInput { .. } => row.descriptor,
         RouteDestination::OutputInput { .. } => ControlDescriptor {
-            class: if row.output_active && route_rows_live(route) {
-                row.descriptor.class
-            } else {
-                row.output_class
-            },
+            class: output_class(row, route_rows_live(route)),
             active: row.output_active,
             ..row.descriptor
         },
+    }
+}
+
+/// A row's class on a route into the output: an active row of a route whose tap precedes the
+/// fader keeps its own class (#1391); otherwise the row's output class (the fold).
+pub(crate) fn output_class(row: &RouteRow, before_fader: bool) -> ControlClass {
+    if before_fader && row.output_active {
+        row.descriptor.class
+    } else {
+        row.output_class
     }
 }
 

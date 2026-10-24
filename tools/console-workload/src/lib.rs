@@ -1584,7 +1584,7 @@ impl SessionRuntime {
             // submix, so no route lane is.
             gain_liveness: graph_compiler::GainLiveness {
                 strip_fader_matrix: strip_controls_requested,
-                routes_into_submixes: false,
+                routes: false,
             },
         })
         .unwrap_or_else(|_| panic!("{}: production console graph", workload.kind()));
