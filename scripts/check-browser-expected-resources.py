@@ -287,6 +287,8 @@ def check_status_memory(actual: dict, expected: dict) -> list[str]:
         f"expected.json's directOracle carries no {MEMORY_CEILING_KEY}, so memory has no budget",
     )
     ceiling = page_count(expected.pop(MEMORY_CEILING_KEY), MEMORY_CEILING_KEY)
+    # This check and the unclassified-key check below diagnose; the final exact comparison is
+    # the backstop that would also turn either case red.
     pinned = memory_keys(expected)
     require(
         not pinned,
