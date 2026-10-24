@@ -805,7 +805,7 @@ rewritten with a spare, then red.
 (`failed-alias-read-does-not-extend-the-span`) drained one parameter queue inside `for _ in 0..lanes`,
 which D1 refuses; it now drains `self.controls[lane]` and keeps its claim.
 
-**1418b (for root to file).**
+**1418b (filed by root as #1851).**
 - The per-queue form's enclosing loops (`per_queue_inside_outer_loop`): D1 must refuse a loop that
   encloses the set loop. That needs `per_queue::bounds` to hand back the set loop's block
   (`drain/per_queue/mod.rs`, outside this slice's paths). Today such a loop is judged finite only.
