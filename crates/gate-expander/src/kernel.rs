@@ -16,6 +16,9 @@ pub const RAMP_COUNT: usize = 4;
 /// Ramped one-pole rate coefficients (#1336 D2): attack, then release.
 pub const RATE_COUNT: usize = 2;
 
+/// The detector link glide weights (issue #1370 D2): `w_link`, then `w_avg`.
+pub const LINK_COUNT: usize = 2;
+
 /// The widest backend and the length of lane scratch arrays owned by this effect.
 pub const MAX_WIDTH: usize = 8;
 
@@ -82,6 +85,11 @@ pub struct GateState<L: Lane> {
     /// The attack and release one-pole coefficients (#1336 D2): each rests at the design
     /// `attack_release_coefficient` of its committed time and ramps linearly to a new design.
     pub rates: [GateRamp<L>; RATE_COUNT],
+    /// The detector link glide weights (issue #1370 D2), `w_link` then `w_avg`: at rest each is
+    /// exactly `effect_contract::link_glide_weights` of the lane's mode, the mode
+    /// [`GateCoef::link_max`] and [`GateCoef::link_avg`] select. Only a glide in flight is read,
+    /// by the `GLIDE` body.
+    pub links: [GateRamp<L>; LINK_COUNT],
 }
 
 impl<L: Lane> Default for GateState<L> {
@@ -91,6 +99,7 @@ impl<L: Lane> Default for GateState<L> {
             hysteresis: HysteresisState::default(),
             ramps: [GateRamp::fixed(L::zero()); RAMP_COUNT],
             rates: [GateRamp::fixed(L::zero()); RATE_COUNT],
+            links: [GateRamp::fixed(L::zero()); LINK_COUNT],
         }
     }
 }
@@ -138,6 +147,7 @@ impl<L: Lane> GateState<L> {
         };
         let ramps = self.ramps.map(split);
         let rates = self.rates.map(split);
+        let links = self.links.map(split);
         let pick = |lane: usize| {
             move |[current, target, step, remaining]: [[f32; MAX_WIDTH]; 4]| GateRamp {
                 current: current[lane],
@@ -154,6 +164,7 @@ impl<L: Lane> GateState<L> {
             },
             ramps: ramps.map(pick(lane)),
             rates: rates.map(pick(lane)),
+            links: links.map(pick(lane)),
         })
     }
 }
@@ -170,8 +181,9 @@ impl<L: Lane> GateState<L> {
 /// the control plane (preparation, restore, D7 recovery), never by [`gate_block`]. Nothing else
 /// crosses a block: the gate keeps no audio history.
 ///
-/// * **Every ramp settled** (`remaining == 0`), the attack and release rate ramps included
-///   (#1336): a rate ramp in flight moves its coefficient word every frame. A settled ramp is an exact no-op under both
+/// * **Every ramp settled** (`remaining == 0`), the attack and release rate ramps and the link
+///   weights included (#1336, #1370): a rate ramp in flight moves its coefficient word every
+///   frame, a link weight its detector. A settled ramp is an exact no-op under both
 ///   `RAMPING` variants (`moving` and `final_sample` are false, so every field is selected back),
 ///   so its four fields are pinned and the frame map does not depend on where `run_block` splits
 ///   the block. A ramp in flight refuses the lane.
@@ -207,12 +219,13 @@ pub fn channel_at_rest(coef: &GateCoef<f32>, state: &GateState<f32>) -> bool {
         .ramps
         .iter()
         .chain(&state.rates)
+        .chain(&state.links)
         .any(|ramp| ramp.remaining != 0.0)
     {
         return false;
     }
     let mut next = *state;
-    let out = channel_step::<f32, false>(coef, &mut next, 0.0, 0.0, 0.0);
+    let out = channel_step::<f32, false, false>(coef, &mut next, 0.0, 0.0, 0.0);
     out.to_bits() == 0
         && next.gain_db.to_bits() == state.gain_db.to_bits()
         && next.hysteresis.open.to_bits() == state.hysteresis.open.to_bits()
@@ -245,7 +258,7 @@ pub struct GateArgs<'a, L: Lane> {
 /// causality and signed-zero identity in bypass and zero-gain paths.
 #[inline(always)]
 pub fn gate_block<L: Lane, const CONNECTED: bool, const RAMPING: bool>(args: GateArgs<'_, L>) {
-    gate_frames::<L, CONNECTED, RAMPING, false>(args);
+    gate_frames::<L, CONNECTED, RAMPING, false, false>(args);
 }
 
 /// The one block body of [`gate_block`], dual or collapsed.
@@ -257,8 +270,18 @@ pub fn gate_block<L: Lane, const CONNECTED: bool, const RAMPING: bool>(args: Gat
 /// operation order (`0.5|p| + 0.5|p|` is not `|p|` for a subnormal `p`): the left plane and state
 /// come out bit-identical to a dual block whose right plane equals its left. A collapsed bank is
 /// never connected.
+///
+/// `GLIDE` (issue #1370 D3) runs a link glide in flight: each frame advances the link weights,
+/// and a lane still in flight takes the blend of its own, maximum and average words. Only a
+/// `RAMPING` segment that has a glide to advance takes it; every other body is the one before.
 #[inline(always)]
-pub fn gate_frames<L: Lane, const CONNECTED: bool, const RAMPING: bool, const MONO: bool>(
+pub fn gate_frames<
+    L: Lane,
+    const CONNECTED: bool,
+    const RAMPING: bool,
+    const MONO: bool,
+    const GLIDE: bool,
+>(
     args: GateArgs<'_, L>,
 ) {
     let GateArgs {
@@ -287,7 +310,7 @@ pub fn gate_frames<L: Lane, const CONNECTED: bool, const RAMPING: bool, const MO
         for frame in 0..frames {
             let span = frame * width;
             let main = L::load(&left[span..span + width]);
-            let out = channel_step::<L, RAMPING>(coef_left, state_left, main, main, main);
+            let out = channel_step::<L, RAMPING, GLIDE>(coef_left, state_left, main, main, main);
             out.store(&mut left[span..span + width]);
         }
         return;
@@ -305,14 +328,14 @@ pub fn gate_frames<L: Lane, const CONNECTED: bool, const RAMPING: bool, const MO
         } else {
             (main_left, main_right)
         };
-        let out_left = channel_step::<L, RAMPING>(
+        let out_left = channel_step::<L, RAMPING, GLIDE>(
             coef_left,
             state_left,
             detector_left,
             detector_right,
             main_left,
         );
-        let out_right = channel_step::<L, RAMPING>(
+        let out_right = channel_step::<L, RAMPING, GLIDE>(
             coef_right,
             state_right,
             detector_right,
@@ -324,6 +347,26 @@ pub fn gate_frames<L: Lane, const CONNECTED: bool, const RAMPING: bool, const MO
     }
 }
 
+/// One frame of one `GateRamp`, `LinearRamp::next_value` lane-wide: a settled lane's update
+/// selects every field back, an exact no-op.
+#[inline(always)]
+fn advance_ramp<L: Lane>(ramp: &mut GateRamp<L>) {
+    let zero = L::zero();
+    let one = L::splat(1.0);
+    let moving = ramp.remaining.gt(zero);
+    let final_sample = ramp.remaining.eq(one);
+    // Issue #1409: the step added, held inside `[min(current, target), max(current,
+    // target)]`, so no parameter word passes its target before the snap.
+    let stepped = ramp_toward(ramp.current, ramp.step, ramp.target);
+    ramp.current = L::select(
+        moving,
+        L::select(final_sample, ramp.target, stepped),
+        ramp.current,
+    );
+    ramp.step = L::select(final_sample, zero, ramp.step);
+    ramp.remaining = L::select(moving, ramp.remaining.sub(one), ramp.remaining);
+}
+
 /// One current-sample step of one channel.
 #[inline(always)]
 // FAST-DB-CROSSING X3/X4: dynamics level and applied gain, never pinned coefficients.
@@ -331,7 +374,7 @@ pub fn gate_frames<L: Lane, const CONNECTED: bool, const RAMPING: bool, const MO
     clippy::disallowed_methods,
     reason = "gate detector level and applied gain are the sealed fast-db crossings"
 )]
-fn channel_step<L: Lane, const RAMPING: bool>(
+fn channel_step<L: Lane, const RAMPING: bool, const GLIDE: bool>(
     coef: &GateCoef<L>,
     state: &mut GateState<L>,
     own: L,
@@ -345,20 +388,22 @@ fn channel_step<L: Lane, const RAMPING: bool>(
         // The parameter ramps and the attack/release coefficient ramps (#1336 D2) advance by one
         // law. A settled ramp's update selects every field back, an exact no-op.
         for ramp in state.ramps.iter_mut().chain(state.rates.iter_mut()) {
-            let moving = ramp.remaining.gt(zero);
-            let final_sample = ramp.remaining.eq(one);
-            // Issue #1409: the step added, held inside `[min(current, target), max(current,
-            // target)]`, so no parameter word passes its target before the snap.
-            let stepped = ramp_toward(ramp.current, ramp.step, ramp.target);
-            ramp.current = L::select(
-                moving,
-                L::select(final_sample, ramp.target, stepped),
-                ramp.current,
-            );
-            ramp.step = L::select(final_sample, zero, ramp.step);
-            ramp.remaining = L::select(moving, ramp.remaining.sub(one), ramp.remaining);
+            advance_ramp(ramp);
         }
     }
+    // Issue #1370 D2: a glide's weights advance by the same law; the lanes still in flight
+    // afterwards take the blend.
+    let gliding = if GLIDE {
+        for ramp in &mut state.links {
+            advance_ramp(ramp);
+        }
+        L::mask_or(
+            state.links[0].remaining.gt(zero),
+            state.links[1].remaining.gt(zero),
+        )
+    } else {
+        L::mask_not(zero.eq(zero))
+    };
 
     let threshold = state.ramps[0].current;
     let ratio = state.ramps[1].current;
@@ -368,13 +413,19 @@ fn channel_step<L: Lane, const RAMPING: bool>(
     let partner_abs = partner.abs();
     let mut level = own_abs;
     level = L::select(coef.link_max.gt(zero), own_abs.max(partner_abs), level);
-    level = L::select(
-        coef.link_avg.gt(zero),
-        L::splat(0.5)
-            .mul(own_abs)
-            .add(L::splat(0.5).mul(partner_abs)),
-        level,
-    );
+    let average = L::splat(0.5)
+        .mul(own_abs)
+        .add(L::splat(0.5).mul(partner_abs));
+    level = L::select(coef.link_avg.gt(zero), average, level);
+    if GLIDE {
+        // D3, each a separate `mul` and `add` (base Wasm SIMD has no fused multiply-add):
+        // `combined = max + w_avg * (avg - max)`, `d = own + w_link * (combined - own)`. A lane at
+        // rest keeps the prepared law's word above, which its masks select.
+        let maximum = own_abs.max(partner_abs);
+        let combined = maximum.add(state.links[1].current.mul(average.sub(maximum)));
+        let blend = own_abs.add(state.links[0].current.mul(combined.sub(own_abs)));
+        level = L::select(gliding, blend, level);
+    }
     let level_db = fast_level_db(level.max(L::splat(LEVEL_FLOOR)))
         .min(L::splat(LEVEL_MAX_DB))
         .max(L::splat(LEVEL_MIN_DB));
