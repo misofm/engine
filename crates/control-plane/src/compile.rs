@@ -25,6 +25,8 @@ pub(crate) struct PreparedRuntime {
     pub(crate) inventory: PlanStateInventory,
     pub(crate) control_catalog: ControlCatalog,
     pub(crate) capi: CapiResources,
+    /// The captures of the spectrum observers the plan was prepared with (#1593 D3), or `None`.
+    pub(crate) spectrum: Option<host_core::PreparedSpectrumCaptures>,
 }
 
 /// A zeroed byte buffer of exactly `bytes` bytes, allocated fallibly.
@@ -1237,6 +1239,10 @@ pub(crate) fn prepare_failure(diagnostics: PrepareDiagnostics) -> CompileFailure
 /// and the preparer then prepares through the host-core entry that takes the base, so the
 /// unchanged sources carry their rings. `superseded` is the session's `live_values_superseded`
 /// count; the preparer passes it to host-core as it is.
+///
+/// `spectrum` is the session's spectrum preparation (#1593 D3), the same for the boot plan and
+/// every successor; the preparer passes it to host-core and returns the captures beside the host
+/// and the handles. A preparer whose host keeps the captures elsewhere returns `None`.
 pub trait RuntimePreparer: Send {
     /// Prepare the plan for `compiled`, or refuse with host-core's diagnostics.
     ///
@@ -1249,9 +1255,17 @@ pub trait RuntimePreparer: Send {
         compiled: &CompiledSession,
         caps: &HostPrepareCaps,
         lanes: HostLiveLanes,
+        spectrum: Option<&host_core::SpectrumPreparation>,
         successor: Option<SuccessorBase<'_>>,
         superseded: &host_core::LiveValuesSuperseded,
-    ) -> Result<(host_core::PreparedHost, host_core::HostLiveControlHandles), PrepareDiagnostics>;
+    ) -> Result<
+        (
+            host_core::PreparedHost,
+            host_core::HostLiveControlHandles,
+            Option<host_core::PreparedSpectrumCaptures>,
+        ),
+        PrepareDiagnostics,
+    >;
 }
 
 /// Prepare one plan plus its source producers, and project its resource accounting.
@@ -1262,10 +1276,13 @@ pub trait RuntimePreparer: Send {
 /// With a `successor` base (a structural transaction, issue #1273 D1) every source the
 /// transaction leaves unchanged is prepared vacant, to carry the displaced plan's ring; the
 /// report's source rows count those rings too (D5). `compile_session` passes `None`.
+///
+/// `spectrum` is the session's spectrum preparation (#1593 D3), passed to the preparer as it is.
 pub(crate) fn prepare_runtime<A: ControlAdapter>(
     preparer: &dyn RuntimePreparer,
     compiled: &CompiledSession,
     limits: ControlLimits,
+    spectrum: Option<&host_core::SpectrumPreparation>,
     successor: Option<SuccessorBase<'_>>,
     superseded: &host_core::LiveValuesSuperseded,
     observation_slots_high_water: usize,
@@ -1282,8 +1299,8 @@ pub(crate) fn prepare_runtime<A: ControlAdapter>(
     // With a `successor` base (issue #1273 D1) the same lanes attach, and every source the
     // transaction left unchanged is prepared vacant to carry its predecessor's ring.
     let lanes: HostLiveLanes = controls::live_lanes(compiled.normalized_model()).into();
-    let (prepared, handles) = preparer
-        .prepare(compiled, &caps, lanes, successor, superseded)
+    let (prepared, handles, spectrum) = preparer
+        .prepare(compiled, &caps, lanes, spectrum, successor, superseded)
         .map_err(prepare_failure)?;
     // #1396 deliverable 3: a test gives the next plan a source-read offset before publication.
     #[cfg(feature = "test-support")]
@@ -1408,6 +1425,7 @@ pub(crate) fn prepare_runtime<A: ControlAdapter>(
         inventory: prepared.inventory,
         control_catalog: prepared.control_catalog,
         capi,
+        spectrum,
     })
 }
 
@@ -1417,10 +1435,15 @@ pub(crate) fn prepare_runtime<A: ControlAdapter>(
 ///
 /// `preparer` (issue #1400 D2) is the adapter's preparation: the session stores it and prepares
 /// the boot plan and every structural successor through it, and through nothing else.
+///
+/// `spectrum` is the session's spectrum monitor configuration (#1593 D2): the first plan is
+/// prepared with it, and the session's monitor starts at configuration epoch 1 with one and 0
+/// without. It is monitor state: no revision, model or snapshot holds it.
 pub fn compile_children<A: ControlAdapter>(
     document: &str,
     mut limits: ControlLimits,
     preparer: Box<dyn RuntimePreparer>,
+    spectrum: Option<host_core::SpectrumConfiguration>,
 ) -> Result<CompiledChildren<A>, CompileFailure>
 where
     A::Row: Send + 'static,
@@ -1451,6 +1474,9 @@ where
         &*preparer,
         store.compiled(),
         limits,
+        spectrum
+            .as_ref()
+            .map(|configuration| &configuration.preparation),
         None,
         &live_values_superseded,
         0,
@@ -1491,7 +1517,14 @@ where
         inventory,
         control_catalog,
         capi,
+        spectrum: captures,
     } = runtime;
+    let spectrum = crate::spectrum::SpectrumMonitor::new(
+        spectrum,
+        captures,
+        resources.sample_rate_hz,
+        resources.quantum_frames,
+    );
     // #1314 D1, #1502 D5: the initial plan carries the store's initial revision, published on its
     // own gate, and the watermark starts there.
     let (publisher, owner, retirer) = plan_exchange_at_revision(
@@ -1601,6 +1634,7 @@ where
         observation_slots_high_water: 0,
         observation_forwarded: Vec::new(),
         send_moves: None,
+        spectrum,
     };
     let (offsets, pending, counts, armed, armed_bytes) = crate::control::observation_slots(
         &session.providers.effects,

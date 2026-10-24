@@ -670,6 +670,10 @@ pub struct SessionState<A: ControlAdapter> {
     /// The live send moves that may still ramp, as one conservative window (root ruling B19-R7,
     /// the B17-R14 pattern; #1718 deletes it): `None` when none may.
     pub(crate) send_moves: Option<SendMoveWindow>,
+    /// The session's spectrum monitor state (#1593 D1): host-local, never saved, never in a
+    /// snapshot, and no change of it advances the revision. Every plan is prepared with its
+    /// configuration.
+    pub(crate) spectrum: crate::spectrum::SpectrumMonitor,
 }
 
 /// Every live send move (a following route's record with a ramp, written by a live commit or by a
@@ -1736,6 +1740,18 @@ where
         &self.controller
     }
 
+    /// The session's spectrum monitor (#1593): its configuration, epochs, service and analysis.
+    #[cfg(feature = "test-support")]
+    pub fn test_spectrum(&self) -> &crate::spectrum::SpectrumMonitor {
+        &self.spectrum
+    }
+
+    /// The session's spectrum monitor, for the service's arm, read and stream calls (#1593).
+    #[cfg(feature = "test-support")]
+    pub fn test_spectrum_mut(&mut self) -> &mut crate::spectrum::SpectrumMonitor {
+        &mut self.spectrum
+    }
+
     /// The current provider epoch.
     #[cfg(feature = "test-support")]
     pub fn test_providers(&self) -> &ProviderEpoch {
@@ -2548,6 +2564,7 @@ where
             &*self.preparer,
             prospective,
             self.limits,
+            self.spectrum.preparation(),
             Some(base),
             &self.live_values_superseded,
             self.observation_slots_high_water,
@@ -2564,6 +2581,9 @@ where
             control_catalog: candidate_catalog,
             capi: prospective_capi,
             revision_gate,
+            // #1593 T2b pairs the successor's captures at promotion; until then they drop here,
+            // on the control thread, and the service reads the running plan's.
+            spectrum: _,
         } = prepared_runtime;
         // #1652 U2a fold 2 (MAJOR-A; #1713 deletes it): read before the inventory moves into the
         // candidate's provider epoch.
@@ -4603,18 +4623,27 @@ mod tests {
                 compiled: &CompiledSession,
                 caps: &HostPrepareCaps,
                 lanes: HostLiveLanes,
+                _spectrum: Option<&host_core::SpectrumPreparation>,
                 successor: Option<SuccessorBase<'_>>,
                 superseded: &LiveValuesSuperseded,
-            ) -> Result<(PreparedHost, HostLiveControlHandles), PrepareDiagnostics> {
+            ) -> Result<
+                (
+                    PreparedHost,
+                    HostLiveControlHandles,
+                    Option<host_core::PreparedSpectrumCaptures>,
+                ),
+                PrepareDiagnostics,
+            > {
                 let live = HostLiveControlRequest::default();
-                match successor {
+                let (host, handles) = match successor {
                     Some(base) => prepare_host_runtime_with_live_lanes_successor(
                         compiled, caps, &live, lanes, base, superseded,
                     ),
                     None => prepare_host_runtime_with_live_lanes(
                         compiled, caps, &live, lanes, superseded,
                     ),
-                }
+                }?;
+                Ok((host, handles, None))
             }
         }
 
@@ -4701,7 +4730,8 @@ mod tests {
         fn declare_after(offset: u64) -> u64 {
             super::super::test_reset_lifecycle_observer();
             let mut children =
-                compile_children::<Adapter>(SESSION, limits(), Box::new(Preparer)).expect("boot");
+                compile_children::<Adapter>(SESSION, limits(), Box::new(Preparer), None)
+                    .expect("boot");
             if offset > 0 {
                 children.session.test_set_next_source_read_offset(offset);
             }

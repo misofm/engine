@@ -231,3 +231,11 @@ through `test_spectrum_mut()`.
 - Note for T2b: carry pairing matches on `SpectrumTarget` equality (kind and ID), so T2b must make
   sure an old observer is never carried onto a new strip that reuses the ID with another kind
   (for example a removed track and a new submix of the same ID).
+- T2a: `SpectrumMonitor` holds `analysis: Option<SpectrumAnalysis>`, made with the service, so a
+  session with no configuration allocates nothing for spectrum (gate 7: capi's retained-bytes
+  ledger is exact). Every preparation, successors included, passes the monitor's preparation;
+  until T2b pairs them, a successor's captures drop on the control thread and the service reads
+  the running plan's. Gates 1 and 5 use the nine-track fixture (`eq0` post-pan) and a sawtooth
+  tone (`math` is not a control-plane dev-dependency). No capi test-support constructor with a
+  configuration: no capi test reads spectrum until #1595 (R1), so it would be dead code.
+  `hosts/host-web/src/tests.rs` takes the trait's new argument at its two direct `prepare` calls.
