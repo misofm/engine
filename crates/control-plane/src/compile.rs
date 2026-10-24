@@ -1614,6 +1614,16 @@ where
         .map_err(prepare_failure)?;
     let store =
         SessionStore::new(model, compile_caps).map_err(|value| session_diagnostics(&value))?;
+    // #1595 R6 at boot: every session serves the spectrum reads, so a boot refuses a tap no read
+    // can carry within the frame limit, as `SPECTRUM_CONFIGURE` does.
+    if spectrum.as_ref().is_some_and(|configuration| {
+        !crate::control::preparation_fits(
+            &configuration.preparation,
+            limits.maximum_control_frame_bytes,
+        )
+    }) {
+        return Err(CompileFailure::Diagnostics(b"spectrum.frame\t$\n".to_vec()));
+    }
     // #1312 D2: the session's `live_values_superseded` count, one for every plan it prepares.
     // Made here, with the session's other fixed rows, and charged by `capi_resources`.
     let live_values_superseded = host_core::LiveValuesSuperseded::default();
@@ -1730,7 +1740,12 @@ where
         ProtocolControllerConfig {
             maximum_transaction_edits: maximum_tlvs,
             maximum_response_diagnostics: u16::MAX,
-            provider_features: ProviderFeatures::ALL,
+            // #1595 R2: every session serves the spectrum commands; only an adapter that reads
+            // spectrum through them advertises them.
+            provider_features: ProviderFeatures {
+                spectrum: A::SPECTRUM,
+                ..ProviderFeatures::ALL
+            },
             // #1386 D3: an adapter with a document transport serves `SESSION_REPLACE` through this
             // one hook, bounded by the boot's document bound (0 is unbounded, as in every zero
             // control limit); without one the command is unadvertised and `UNAVAILABLE`.
