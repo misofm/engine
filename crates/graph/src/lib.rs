@@ -4423,10 +4423,17 @@ impl GraphFadeArmWatch {
             .is_some_and(|flag| flag.load(core::sync::atomic::Ordering::Acquire))
     }
 
-    /// Heap bytes the watch holds: its flags and the shared allocation's two reference counts.
+    /// Heap bytes the watch holds: its flags and the shared allocation's two reference counts;
+    /// none for the empty watch of a plan with no arm.
     #[must_use]
     pub fn heap_bytes(&self) -> usize {
-        core::mem::size_of_val::<[core::sync::atomic::AtomicBool]>(&self.0) + WATCH_HEADER_BYTES
+        match self.0.len() {
+            0 => 0,
+            _ => {
+                core::mem::size_of_val::<[core::sync::atomic::AtomicBool]>(&self.0)
+                    + WATCH_HEADER_BYTES
+            }
+        }
     }
 }
 
