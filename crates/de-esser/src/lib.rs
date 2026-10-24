@@ -816,8 +816,8 @@ impl<L: Lane, const CONNECTED: bool> DeEsser<L, CONNECTED> {
     /// integrators, `svf_step` gives `v1 = v2 = +0.0` and keeps them (armed or not, the flush
     /// keeps `+0.0`), so both taps and the crossfaded detector tap are `+0.0`; the level floors at
     /// -160 dB, under every threshold, so the curve's target is `+0.0` (`gain_delta_db`'s identity
-    /// arm, and `max(+0.0, -range)` is `+0.0` or `-0.0`); the rate step then writes
-    /// `flush(+-0.0) = +0.0`, so the gain word stays; a zero gain word selects the dry `+0.0` on the
+    /// arm, then `max(-range)` and `min(range)`, which give `+-0.0`); the rate step's rest snap
+    /// (`effect_runtime::dynamic_band::CHANGE_REST_DB`) then writes `+0.0`, so the gain word stays; a zero gain word selects the dry `+0.0` on the
     /// wideband and split arms, the listen arm is the `+0.0` tap and bypass the dry word. A
     /// settled ramp is an exact no-op of both segment variants.
     fn channel_rest_lanes(&self, channel: usize) -> u32 {

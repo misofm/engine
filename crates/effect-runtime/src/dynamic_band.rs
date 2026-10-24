@@ -11,7 +11,7 @@
 //! 3. [`dynamic_band_gain`]: the gain computer of `crate::dynamics` (Giannoulis, Massberg and
 //!    Reiss, JAES 2012, equation 4) as a delta, negated for an upward band, clamped to
 //!    `[-range, range]`, then smoothed **in the dB domain** by a branching one-pole in the rate
-//!    form `g' = flush(g + c (t - g))`: the attack rate while the target is further from 0 dB than
+//!    form `g' = snap(g + c (t - g))`: the attack rate while the target is further from 0 dB than
 //!    the word (the change is growing), the release rate otherwise. Every word is a lane word, so
 //!    a ramped threshold, slope, range or rate is read as it stands this sample.
 //!
@@ -20,8 +20,8 @@
 //! `dsp_reference::dynamic_band`, which shares no code with this module.
 
 use crate::dynamics::{GainComputerCoef, gain_delta_db};
+use lane::Lane;
 use lane::kernels::{SvfState, svf_step};
-use lane::{Lane, flush};
 use math::fast_db::{fast_gain_from_db, fast_level_db};
 
 /// Detector level floor, below which the logarithm is not taken.
@@ -87,6 +87,14 @@ pub fn detector_level_db<L: Lane>(own: L, partner: L, link: &LinkWords<L>) -> L 
         .max(L::splat(LEVEL_MIN_DB))
 }
 
+/// The largest change magnitude, in dB, on the applied gain's plateau next to zero: the
+/// compressor's `REDUCTION_REST_DB` (issue #1784, owner ruling B1 of 2026-10-23), the same bit
+/// pattern, about `5.38e-7` dB. [`dynamic_band_gain`] snaps a smoothed word within it to `+0.0`, so
+/// a released band reaches exact rest (and the applied gain exactly `1`) after
+/// `ln(range / 5.38e-7)` release time constants instead of `ln(range / 1e-20)`; the gain it skips
+/// is at most 2 ulps.
+pub const CHANGE_REST_DB: f32 = f32::from_bits(0x3510_7e90);
+
 /// The gain law's words for one sample.
 #[derive(Clone, Copy)]
 pub struct DynamicBandCoef<L: Lane> {
@@ -103,7 +111,9 @@ pub struct DynamicBandCoef<L: Lane> {
 }
 
 /// One step of the smoothed change in dB: the curve's target at `level_db`, clamped to
-/// `[-range, range]`, and the branching one-pole from `gain_db`, which it updates and returns.
+/// `[-range, range]`, and the branching one-pole from `gain_db`, which it updates and returns. The
+/// word is written through the [`CHANGE_REST_DB`] snap, which subsumes `lane::flush` (`FLUSH_EPS`
+/// is far below it); NaN passes, `-0.0` becomes `+0.0`.
 #[inline(always)]
 pub fn dynamic_band_gain<L: Lane>(level_db: L, c: &DynamicBandCoef<L>, gain_db: &mut L) -> L {
     let delta = gain_delta_db(level_db, &c.curve);
@@ -111,7 +121,8 @@ pub fn dynamic_band_gain<L: Lane>(level_db: L, c: &DynamicBandCoef<L>, gain_db: 
     let target = delta.max(c.range_db.neg()).min(c.range_db);
     let growing = target.abs().gt(gain_db.abs());
     let rate = L::select(growing, c.attack, c.release);
-    *gain_db = flush(rate.fma(target.sub(*gain_db), *gain_db));
+    let next = rate.fma(target.sub(*gain_db), *gain_db);
+    *gain_db = next.andnot(next.abs().le(L::splat(CHANGE_REST_DB)));
     *gain_db
 }
 
