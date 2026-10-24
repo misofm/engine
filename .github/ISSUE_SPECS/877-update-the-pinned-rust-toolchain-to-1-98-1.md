@@ -90,3 +90,8 @@ The scope note (`scope/877.md`) wins for paths and decisions; these changes over
   is skipped as an arithmetic-free helper, on `main` too -- is successor #1889.
 - **No bit moved after the rewrite.** The 37 console digests and the preflight digests equal the
   1.99.1 pre-rewrite run; the release tests above pass again.
+- **AArch64 LANE-3 (#1019) fixed by 1.99.1.** CI's `aarch64-release` leg (run 40091997453) found
+  `math`'s `m2_exp2_lane_identity` now passes on AArch64 release: the `fmaxnm`/`fminnm` fold no
+  longer breaks the identity. Its expected-failure row is deleted, as the judge requires.
+- **Release pin.** Any edit of the pin file is a release change to `web-audioworklet-identity.py`,
+  so `EXPECTED_WORKLET_SHA256` must equal the pin (correcting the "Pins" bullet above).
