@@ -289,14 +289,28 @@ fn deviation(rendered: &[f32], gain_db: &[f64], dry: &[f64], phase: &[ReferenceG
 }
 
 /// The attack change's spans, both channels, on every lane at `first_sample`.
+///
+/// It also re-sends the threshold, a ramped parameter, at its value (as an automation refresh
+/// does), so the block takes both retarget paths: `apply_automation`'s parameter ramp and
+/// `retime_rate`'s coefficient ramp. Each reloads the bank's ramp clock, and neither may cut the
+/// glide. The model's static threshold stays exact.
 fn change_spans(lanes: usize, first_sample: u64) -> Vec<Vec<PreparedAutomationSpan>> {
-    let span = |channel| PreparedAutomationSpan {
+    let span = |parameter_index, value, channel| PreparedAutomationSpan {
         channel,
-        parameter_index: 4,
+        parameter_index,
         sample: first_sample,
-        value: CHANGED_ATTACK_MS,
+        value,
     };
-    vec![vec![span(ParameterChannel::Left), span(ParameterChannel::Right)]; lanes]
+    let (left, right) = (ParameterChannel::Left, ParameterChannel::Right);
+    vec![
+        vec![
+            span(0, THRESHOLD, left),
+            span(0, THRESHOLD, right),
+            span(4, CHANGED_ATTACK_MS, left),
+            span(4, CHANGED_ATTACK_MS, right),
+        ];
+        lanes
+    ]
 }
 
 /// **Gate 1.** Each glide direction, over 64 samples and over 4,800 samples crossed by a live
