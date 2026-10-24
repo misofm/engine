@@ -195,6 +195,42 @@ LTO'd assembly and never read the shipped artifact.
 - D1's table; gate 2's red and green runs; gate 3's log lines; the `x86_64` disassembly excerpt
   for D5.
 
+### Attempt 1 record (2026-10-24, base `6b32d3fb4`, rustc 1.97.1)
+
+D1 (root, 2026-10-24, from the scope note): staticlib on both mobile targets, one shape across
+targets; an Android cdylib (NDK-linked `libcapi.so`) is a non-blocking owner question root records.
+The `x86_64` libraries `check-capi-abi.sh` links are test forms, not shipped.
+
+| artifact | command | `capi` rustc flags (`-v`) |
+| --- | --- | --- |
+| `aarch64-apple-ios` staticlib | `scripts/build-capi-release.sh aarch64-apple-ios staticlib <out>` | `--crate-type staticlib ... -C lto=fat` |
+| `aarch64-linux-android` staticlib | `scripts/build-capi-release.sh aarch64-linux-android staticlib <out>` | the same |
+
+D2/D4: no manifest change (root: cargo applies `-C lto` only when every crate type can LTO; `rlib`
+stays). Markers: staticlib, `ar t` Rust objects are exactly one `capi` module plus
+`compiler_builtins`; cdylib (x86_64 Linux host only), the render entry's disassembly holds inline
+`STMXCSR`/`LDMXCSR` and no `softfma` call; any other cdylib is refused at preflight.
+D3: `check-cross-targets.sh` calls the script with `--emit-asm` (`--emit link,asm=`), so the
+scans read the archive that ships. CI: `cross-target` runs the script's hermetic `--self-test`;
+its two builds run inside `check-cross-targets.sh`.
+
+Gate 2 (red on `cargo build --locked --release -p capi`, green on the script):
+- iOS: 453 members, red "per-crate Rust objects ... 75 crates besides capi and compiler_builtins";
+  script 374 members (1 `capi`, 228 `compiler_builtins`, 145 C builtins), green.
+- Android: 483 members, red (75 crates); script 404, green. The cdylib link fails without an NDK
+  or Xcode, so the red archive is `deps/libcapi.a` from that build.
+- x86_64 host: `.a` 389 members, red (76 crates); `.so` red "no inline STMXCSR/LDMXCSR" (its
+  guard calls through GOT slots); both script forms green.
+
+Gate 3: `check-cross-targets.sh` PASS, charges `builtins` 4, `lane` 1.
+D5 excerpt (script cdylib, `miso_engine_v1_render_f32_planar`): `vstmxcsr 0x8(%rsp)` at
+`0x9b959`, `movl $0x1f80` then `vldmxcsr 0x8(%rsp)` at `0x9b96b`; every return path reaches
+`0x9ba9b`, `mov %ebp,0x8(%rsp); vldmxcsr 0x8(%rsp)`, then `ret`; no helper call. A second
+`vstmxcsr` at `0x9ba0e` is a read (masked `0xffc0`), not a guard write. `fpenv.rs` lines 77-80
+keep their count, so no `REALTIME_DEPENDENCY_POLICY.md` citation moves.
+`check-scalar-oracle-absent.py --native target/release/libcapi.so` passes on the LTO cdylib
+(4081 symbols, all 4 banked controls present), which is what audit-native now reads there.
+
 ## Successors (qualification and tooling; not this slice)
 
 - Link the Android library with the NDK in CI and run D4's check on the linked `.so`.
@@ -217,3 +253,16 @@ Root files these when a product need or a release asks for them.
 - Attempt budget: two attempts, one adversarial verdict each.
 - Size: half a day. D1 is a stop point: if the Android answer needs root, D1's record is the
   first checkpoint.
+
+### Attempt 2 (2026-10-24, after the attempt-1 verdict)
+
+- `host cdylib` builds on every host with the same command (`libcapi.dylib` on Apple, `.so` on
+  Linux); the MXCSR check runs on an x86_64 Linux host only, and other hosts print "no cdylib LTO
+  check on <host>" and pass, because the same command's staticlib is checked. `check-capi-abi.sh`
+  and its `--self-test` choose the library by host triple again, so the Apple branches run
+  without `SKIP_BUILD`. A non-host cdylib is still refused (it needs the target's linker).
+- The staticlib check keeps `capi_count == 1` exactly: a thin-LTO archive holds many `capi-*`
+  objects and is refused by it.
+- CI cost: audit-native now pays for about two fat-LTO `capi` builds (cdylib and staticlib,
+  45-60 s each on this machine; the self-test's builds are fresh), against its 15-minute timeout.
+  Root records the CI time after the first run.

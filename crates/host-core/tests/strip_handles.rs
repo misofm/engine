@@ -2,13 +2,11 @@
 //!
 //! `HostLiveControlHandles::strips` is the addressing authority: the tracks in canonical ID order,
 //! then the submixes in canonical ID order. The builtin control producers (`strip_controls`) are
-//! parallel to every strip (issue #1211 D1), the default meters stay parallel to the track prefix,
-//! and a submix's effects get a live channel and an observation handle exactly as a track's do (D5
-//! removed the K1 interim).
+//! parallel to every strip (issue #1211 D1), and a submix's effects get a live channel and an
+//! observation handle exactly as a track's do (D5 removed the K1 interim).
 
-use core::num::{NonZeroU32, NonZeroUsize};
+use core::num::NonZeroUsize;
 
-use builtins::MeterTap;
 use host_core::{
     HostLiveControlRequest, HostPrepareCaps, HostShapePolicy,
     prepare_host_session_with_live_controls,
@@ -19,7 +17,6 @@ use session::{
 };
 
 const FIXTURE: &str = include_str!("../../../fixtures/session/v1/observation-frame-shape.json");
-const QUANTUM: u32 = 128;
 
 fn caps() -> HostPrepareCaps {
     HostPrepareCaps {
@@ -76,18 +73,16 @@ fn document() -> String {
 }
 
 /// Red if a submix lands inside the track prefix (or the strips stop being tracks-then-submixes),
-/// if the builtin controls stop being parallel to the strips (issue #1211 D1), if the default
-/// meters start to cover buses, or if a bus effect stays without a live channel or an observation
-/// handle.
+/// if the builtin controls stop being parallel to the strips (issue #1211 D1), or if a bus effect
+/// stays without a live channel or an observation handle.
 #[test]
 fn handles_list_tracks_then_submixes_and_file_bus_effects() {
     let (_, _, handles) = prepare_host_session_with_live_controls(
         &document(),
         &caps(),
         &HostLiveControlRequest {
-            meter_period_frames: Some(NonZeroU32::new(QUANTUM).expect("period")),
+            meter_window_blocks: 1,
             meter_queue_depth: NonZeroUsize::new(16).expect("meter depth"),
-            meter_tap: MeterTap::PostMatrix,
             observation_taps: 1,
         },
     )
@@ -97,7 +92,6 @@ fn handles_list_tracks_then_submixes_and_file_bus_effects() {
     assert_eq!(strips, ["t0", "t1", "t2", "aaa-bus", "zzz-bus"]);
     assert_eq!(handles.track_count, 3);
 
-    let tracks = &strips[..handles.track_count];
     let controls: Vec<&str> = handles
         .strip_controls
         .iter()
@@ -107,12 +101,6 @@ fn handles_list_tracks_then_submixes_and_file_bus_effects() {
         controls, strips,
         "one builtin channel per strip, in strip order"
     );
-    let meters: Vec<&str> = handles
-        .meters
-        .iter()
-        .map(|meter| meter.track_id.as_ref())
-        .collect();
-    assert_eq!(meters, tracks, "one default meter per track, none per bus");
 
     let mut effects: Vec<(&str, &str)> = handles
         .effect_controls

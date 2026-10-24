@@ -41,9 +41,8 @@
 
 mod support;
 
-use core::num::{NonZeroU32, NonZeroUsize};
+use core::num::NonZeroUsize;
 
-use builtins::MeterTap;
 use effect_contract::{EffectControlRecord, ParameterChannel};
 use host_core::{
     ChannelSymmetryWitness, HostLiveControlHandles, HostLiveControlRequest, HostPrepareCaps,
@@ -94,9 +93,8 @@ fn caps() -> HostPrepareCaps {
 
 fn live_controls() -> HostLiveControlRequest {
     HostLiveControlRequest {
-        meter_period_frames: Some(NonZeroU32::new(QUANTUM as u32).expect("period")),
+        meter_window_blocks: 1,
         meter_queue_depth: NonZeroUsize::new(16).expect("meter depth"),
-        meter_tap: MeterTap::PostMatrix,
         observation_taps: 0,
     }
 }
