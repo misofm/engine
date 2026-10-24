@@ -116,3 +116,9 @@ adds `command.spectrum_stream` (a select with a smoothing) and `response.spectru
 ready one-plane read). The capabilities response lists none of the three spectrum commands and
 leaves bit 16 clear, which the invariant allows. The 52 earlier frames are byte-equal (their hash
 is the old pin). The frame count is 54.
+
+Issue #1583 re-pinned it from `c146e8fad0b26299`: the meter table replaces the positional meter
+handles. `command.telemetry_configure` carries a table with both targets and both metrics (field 1
+retired, field 7 repeated), `response.telemetry` the same table and the meter window (field 8),
+and `event.meter_batch` the window's span and sequence (fields 5 and 6). Only those three frames
+move; the 51 others are byte-equal. The frame count stays 54.

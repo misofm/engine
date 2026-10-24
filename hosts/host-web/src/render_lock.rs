@@ -7,7 +7,7 @@
 //! render thread after boot runs inside [`render_locked`] (the set is the table
 //! `tools/realtime-policy/render-thread-exports.json`; its named exceptions are the entries with
 //! `wrapped: false` that the worklets call after boot: `dispose`, `render_allocation_count`,
-//! `service`, `control_allocation_count`, the control-frame exports and `control_event`), and the module's global allocator counts each allocator call
+//! `service`, `control_allocation_count`, the control-frame exports, `control_event` and `watermark_read`), and the module's global allocator counts each allocator call
 //! made while the flag is set. Browser qualification reads the count through
 //! `miso_engine_web_v1_render_allocation_count` and asserts it is exactly zero.
 //!

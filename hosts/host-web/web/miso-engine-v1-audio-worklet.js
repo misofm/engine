@@ -13,6 +13,7 @@ const METER_HEADER_SUCCESSOR_POINTER = 76;
 const METER_HEADER_STRUCTURE_EPOCH = 80;
 const RESULT_OK = 0;
 const RESULT_INVALID_ARGUMENT = 1;
+const RESULT_BACKPRESSURE = 6;
 const RESULT_UNSUPPORTED = 7;
 const RESULT_REPREPARE_REQUIRED = 9;
 const COMMAND_REASON_UNSUPPORTED_KIND = 7;
@@ -23,6 +24,10 @@ const BUFFER_OUTPUT_PCM = 5;
 const BUFFER_COMMAND = 6;
 const BUFFER_METER_FRAME = 7;
 const STATE_READY = 2;
+// Issue #1294a: the 96-byte watermark record `miso_engine_web_v1_watermark_ptr` names.
+const WATERMARK_BYTES = 96;
+// The outcome flag each of the record's three counts (exact, transition fallback, superseded) names.
+const WATERMARK_COUNT_FLAGS = [1n, 2n, 4n];
 const PROCESSOR_NAME = "miso-engine-v1-audio-worklet";
 
 // Issue #137 D1/D2/D3.
@@ -280,6 +285,11 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
     // was replaced, and never cuts a view.
     this.meterSet = null;
     this.pendingMeterSet = null;
+    // Issue #1294a: the watermark `(revision, first_sample)` pair last posted (or read at boot).
+    this.watermarkRevision = -1n;
+    this.watermarkSample = -1n;
+    // The record's three outcome counts as of that post: a count that rose since names a flag.
+    this.watermarkCounts = [0n, 0n, 0n];
     this.clock = renderClock();
     // Issue #1381a D6, `single` mode: the instance's control work runs here, in the message
     // handler, outside `process()`. The service step follows every message, the main realm's
@@ -293,6 +303,7 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
         const requestId = event.data?.tag === "miso.service.v1" ? 0 : this.lastRequestId;
         this.serviceControl(requestId);
         this.rebindMemoryViews();
+        this.pushWatermark(requestId);
         this.drainControlEvents(requestId);
       } finally {
         this.rebindMemoryViews();
@@ -442,6 +453,15 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
       return RESULT_INVALID_ARGUMENT;
     }
     if (!this.bindLiveControls(init)) return RESULT_INTERNAL;
+    const watermarkPointer = this.exports.miso_engine_web_v1_watermark_ptr(this.handle);
+    if (!u32(watermarkPointer) || watermarkPointer === 0) return RESULT_INTERNAL;
+    this.bindView("watermarkView", DataView, watermarkPointer, WATERMARK_BYTES);
+    // The boot watermark is the baseline, not an advance: only a later change is posted.
+    if (this.exports.miso_engine_web_v1_watermark_read(this.handle) === RESULT_OK) {
+      this.watermarkRevision = this.watermarkView.getBigUint64(8, true);
+      this.watermarkSample = this.watermarkView.getBigUint64(16, true);
+      this.watermarkCounts = [32, 40, 48].map((offset) => this.watermarkView.getBigUint64(offset, true));
+    }
     this.memoryBytes = this.memoryBuffer.byteLength;
     this.port.postMessage({
       tag: "miso.ready.v1",
@@ -1044,6 +1064,50 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
     if (this.disposed || !this.ready || this.stickyResult !== RESULT_OK || this.handle === 0) return;
     const result = this.exports.miso_engine_web_v1_service(this.handle);
     if (result !== RESULT_OK) this.sticky(result, requestId);
+  }
+
+  /// Issue #1294a (D3): after each service step, in the message handler and never in `process()`,
+  /// read the applied-revision watermark and post `miso.watermark.v1` when its
+  /// `(revision, first_sample)` pair changed. The record's flags cover only the engine's last
+  /// advance, so two advances between two reads would lose the first one's flags: the posted
+  /// `outcome` also ORs in the flag of each cumulative count that rose since the last post
+  /// (exact 1, transition fallback 2, superseded 4), and the newest post loses no flag. A read the engine gave up on (`BACKPRESSURE`, a
+  /// bounded seqlock retry) skips this tick and the next message reads again; any other refusal
+  /// is sticky, as the service step's is.
+  pushWatermark(requestId = this.lastRequestId) {
+    if (this.disposed || !this.ready || this.stickyResult !== RESULT_OK || this.handle === 0) return;
+    const result = this.exports.miso_engine_web_v1_watermark_read(this.handle);
+    if (result === RESULT_BACKPRESSURE) return;
+    if (result !== RESULT_OK) {
+      this.sticky(result, requestId);
+      return;
+    }
+    this.rebindMemoryViews();
+    const view = this.watermarkView;
+    if (view.getUint32(0, true) !== WATERMARK_BYTES || view.getUint32(4, true) !== 0) {
+      this.sticky(RESULT_INTERNAL, requestId);
+      return;
+    }
+    const revision = view.getBigUint64(8, true);
+    const sample = view.getBigUint64(16, true);
+    if (revision === this.watermarkRevision && sample === this.watermarkSample) return;
+    const counts = [32, 40, 48].map((offset) => view.getBigUint64(offset, true));
+    let outcome = view.getBigUint64(24, true);
+    counts.forEach((count, index) => {
+      if (count > this.watermarkCounts[index]) outcome |= WATERMARK_COUNT_FLAGS[index];
+    });
+    this.watermarkRevision = revision;
+    this.watermarkSample = sample;
+    this.watermarkCounts = counts;
+    this.port.postMessage({
+      tag: "miso.watermark.v1",
+      revision,
+      sample,
+      outcome,
+      exactCount: counts[0],
+      transitionFallbackCount: counts[1],
+      supersededCount: counts[2],
+    });
   }
 
   /// Issue #1570b D4: drain the engine's two event lanes after a message and its service step, in
