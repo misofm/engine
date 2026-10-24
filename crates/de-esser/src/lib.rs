@@ -17,7 +17,7 @@
 //! reads: threshold and range in dB, the slope `1/R - 1` (so the render never divides), the
 //! attack and release one-pole coefficients, the SVF words `c1, a2, a3` and the damping `k`
 //! (frequency and Q), and the three switch words (mode, detector, listen), which crossfade their
-//! two arms. A record designs its targets once on the block's control side ([`targets`]);
+//! two arms. A record designs its targets once on the block's control side (`targets`);
 //! the render only adds.
 //!
 //! # Realtime rules
