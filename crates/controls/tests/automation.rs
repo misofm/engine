@@ -21,9 +21,10 @@ const PAN_WINDOW_SAMPLES: u32 = 3;
 const EFFECTIVE_FADER_DB: u32 = 64;
 const GAIN_DB: u32 = 1;
 const OFFSET_DB: u32 = 1;
-/// The EQ's `band-1-enabled` (prepared, not live) and `band-1-gain` (block rate).
-const BAND_ENABLED: u32 = 1;
+/// The EQ's `band-1-gain` (block rate).
 const BAND_GAIN: u32 = 4;
+/// The true-peak limiter's `lookahead` (prepared, not live).
+const LOOKAHEAD: u32 = 3;
 
 fn segment(unit: ParameterUnit, value: f32) -> AutomationSegment {
     AutomationSegment {
@@ -100,8 +101,13 @@ fn the_row_decides_what_can_be_automated() {
         ),
         (
             "prepared",
-            eq_param("vocal", BAND_ENABLED, Lane::Left),
-            ParameterUnit::Linear,
+            address(
+                Owner::Strip(id("vocal")),
+                Section::Inserts(insert_id("miso.true-peak-limiter")),
+                LOOKAHEAD,
+                Lane::Left,
+            ),
+            ParameterUnit::Milliseconds,
         ),
         // Live rows that a ruling keeps out of automation (#1632): a routing setting and a mode.
         (

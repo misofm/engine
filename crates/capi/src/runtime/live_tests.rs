@@ -4002,13 +4002,50 @@ fn eq_automation_edit(
     channel: session::ParameterChannel,
     unit: session::ParameterUnit,
 ) -> SessionEdit {
+    strip_automation_edit(
+        session::Section::Console(StableId::parse("eq").expect("stable ID")),
+        parameter_id,
+        channel,
+        unit,
+    )
+}
+
+/// `eq_session` with a true-peak limiter insert (`limiter`) on track `eq0`.
+fn limiter_session(sample_rate_hz: u32) -> String {
+    let mut model = parse_session_json(&eq_session(sample_rate_hz)).expect("EQ session");
+    let mut limiter = model.lower_track(&model.tracks[0]).pre_insert[0].clone();
+    limiter.id = StableId::parse("limiter").expect("limiter insert");
+    limiter.identity = session::EffectIdentity::Native {
+        effect_id: StableId::parse("miso.true-peak-limiter").expect("limiter ID"),
+    };
+    limiter.bypass = false;
+    limiter.params = Vec::new();
+    model
+        .tracks
+        .iter_mut()
+        .find(|track| track.id.as_str() == "eq0")
+        .expect("eq0")
+        .inserts
+        .effects
+        .push(limiter);
+    session::canonical_session_json(&model).expect("canonical limiter session")
+}
+
+/// An `UpsertAutomation` of one step on track `eq0`'s `section`, on the row `parameter_id` at
+/// `channel`.
+fn strip_automation_edit(
+    section: session::Section,
+    parameter_id: u32,
+    channel: session::ParameterChannel,
+    unit: session::ParameterUnit,
+) -> SessionEdit {
     let id = |text: &str| StableId::parse(text).expect("stable ID");
     SessionEdit::UpsertAutomation {
         automation: session::Automation {
             id: id("eq-ride"),
             target: session::ControlAddress {
                 owner: session::Owner::Strip(id("eq0")),
-                section: session::Section::Console(id("eq")),
+                section,
                 control: parameter_id,
                 lane: channel,
             },
@@ -4025,8 +4062,9 @@ fn eq_automation_edit(
     }
 }
 
-/// #1335 gate 3. On a playing engine, a transaction that only adds an automation on the console
-/// EQ's `band-1-enabled` (`automation_rate` `None`) is refused with the compile rejection a
+/// #1335 gate 3. On a playing engine, a transaction that only adds an automation on a true-peak
+/// limiter insert's `lookahead` (`automation_rate` `None`; the console EQ's `band-1-enabled` was
+/// the subject until #1337 made it live) is refused with the compile rejection a
 /// rebuild's preparation gives (`control.automation.target`): the revision, the committed model and
 /// the reliable lane do not move, no candidate is prepared, and the following blocks are
 /// bit-identical to an engine that never received it. The same transaction on the block-rate
@@ -4037,14 +4075,19 @@ fn eq_automation_edit(
 #[test]
 fn an_automation_on_a_prepared_effect_parameter_is_refused_before_any_ack() {
     use session::{ParameterChannel, ParameterUnit};
-    let document = eq_session(48_000);
+    let document = limiter_session(48_000);
     let mut rig = Rig::new(&document);
     let mut untouched = Rig::new(&document);
     for _ in 0..window(rig.latency(), 0, rig.quantum) {
         assert_eq!(bits(&rig.step()), bits(&untouched.step()), "warm-up");
     }
 
-    let refused = eq_automation_edit(1, ParameterChannel::Both, ParameterUnit::Linear);
+    let refused = strip_automation_edit(
+        session::Section::Inserts(StableId::parse("limiter").expect("limiter")),
+        3,
+        ParameterChannel::Both,
+        ParameterUnit::Milliseconds,
+    );
     let before = (refusal_state(&rig), rig.summary());
     assert_eq!(
         rig.apply(core::slice::from_ref(&refused)),
@@ -4054,7 +4097,7 @@ fn an_automation_on_a_prepared_effect_parameter_is_refused_before_any_ack() {
     protocol::apply_session_edit(&mut rejected, &refused).expect("the edit applies to the model");
     let rejected = session::canonical_session_json(&rejected).expect("canonical rejected");
     let Err(failure) = compile_children(&rejected, limits()) else {
-        panic!("an automation on band-1-enabled does not prepare")
+        panic!("an automation on the lookahead does not prepare")
     };
     assert_eq!(
         rig.last_error(),
