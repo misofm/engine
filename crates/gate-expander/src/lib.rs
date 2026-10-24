@@ -62,14 +62,17 @@ use effect_runtime::ramp::LinearRamp;
 use effect_runtime::state_payload as payload;
 use lane::{Backend, Lane, Simd4};
 
-use kernel::{GateArgs, GateCoef, GateState, MAX_WIDTH, RAMP_COUNT, RATE_COUNT, gate_frames};
+use kernel::{
+    GateArgs, GateCoef, GateState, LINK_COUNT, MAX_WIDTH, RAMP_COUNT, RATE_COUNT, gate_frames,
+};
 
 const PARAMETER_COUNT: usize = 7;
 
 /// Effect-owned words at the front of each channel section of the state payload: gain, open flag,
-/// hold countdown, the three times, four parameter ramp quadruples and two rate ramp quadruples
-/// (#1336 D6).
-const STATE_LANE_HEADER_WORDS: usize = 30;
+/// hold countdown, the three times, four parameter ramp quadruples, two rate ramp quadruples
+/// (#1336 D6) and the two link weight quadruples (#1370 D6). The lane's link mode is the weights'
+/// targets (`effect_contract::link_glide_mode`), so it takes no word of its own.
+const STATE_LANE_HEADER_WORDS: usize = 38;
 
 /// Samples every smoothed parameter takes to reach a new target, from the descriptor.
 const RAMP_SAMPLES: u32 = 64;
@@ -278,7 +281,7 @@ const PORTS: [PortDescriptor; 3] = [
     },
 ];
 
-/// Causal quality resources: 30 words per channel, the common two-word codec header and no delay.
+/// Causal quality resources: 38 words per channel, the common two-word codec header and no delay.
 const fn quality(sample_rate: u32) -> effect_contract::QualityDescriptor {
     let per_lane = (STATE_LANE_HEADER_WORDS as u32) * 4;
     let common = payload::HEADER_WORDS * payload::WORD_BYTES as u32;
@@ -616,6 +619,9 @@ impl<L: Lane, const CONNECTED: bool> PreparedGate<L, CONNECTED> {
                 gate.seed_lane(channel, lane)?;
             }
         }
+        for lane in 0..width {
+            gate.rest_link(lane);
+        }
         Some(gate)
     }
 
@@ -625,6 +631,7 @@ impl<L: Lane, const CONNECTED: bool> PreparedGate<L, CONNECTED> {
     fn with_lane_links(mut self, links: &[LinkMode]) -> Self {
         for (lane, &link) in links.iter().enumerate().take(L::WIDTH) {
             self.set_lane_link(lane, link);
+            self.rest_link(lane);
         }
         self
     }
@@ -689,6 +696,76 @@ impl<L: Lane, const CONNECTED: bool> PreparedGate<L, CONNECTED> {
         Some(())
     }
 
+    /// Seats lane `lane`'s link weights at rest at its mode on both channels (issue #1370 D2):
+    /// preparation, a full reset and a lane whose mode a lane swap replaced. The D7 recovery
+    /// (`reset_lane_full` of one channel) leaves a glide in flight alone, as the compressor's does.
+    fn rest_link(&mut self, lane: usize) {
+        let weights = effect_contract::link_glide_weights(self.lane_link(lane));
+        for state in &mut self.state {
+            for (ramp, &value) in state.links.iter_mut().zip(&weights) {
+                lane_set(&mut ramp.current, lane, value);
+                lane_set(&mut ramp.target, lane, value);
+                lane_set(&mut ramp.step, lane, 0.0);
+                lane_set(&mut ramp.remaining, lane, 0.0);
+            }
+        }
+    }
+
+    // REALTIME_POLICY_BEGIN: #1370, a link glide is retargeted at a block boundary.
+    /// Glides lane `lane`'s detector link to `mode` over `samples` samples (issue #1370 D1-D3).
+    ///
+    /// The lane's link words become `mode`'s at once, so a glide that arrives lands on `mode`'s
+    /// own law; the weights, retargeted from the words in force, carry the transition, and the
+    /// bank's ramp clock covers it. The mode is the one a full reset keeps and a lane swap moves.
+    /// `false`, changing nothing, for a lane past the width or padded, a mode the descriptor does
+    /// not support or a glide longer than `LINK_GLIDE_MAX_SAMPLES`.
+    fn retarget_link(&mut self, lane: usize, mode: LinkMode, samples: u32) -> bool {
+        if lane >= L::WIDTH
+            || !self.is_active(lane)
+            || !GATE_EXPANDER_DESCRIPTOR.supported_link_modes.contains(mode)
+            || samples > effect_contract::LINK_GLIDE_MAX_SAMPLES
+        {
+            return false;
+        }
+        self.set_lane_link(lane, mode);
+        let weights = effect_contract::link_glide_weights(mode);
+        for state in &mut self.state {
+            for (slot, &weight) in state.links.iter_mut().zip(&weights) {
+                let mut ramp = LinearRamp {
+                    current: lane_get(slot.current, lane),
+                    target: lane_get(slot.target, lane),
+                    step: lane_get(slot.step, lane),
+                    remaining: lane_get(slot.remaining, lane) as u32,
+                };
+                ramp.set_target(weight, samples);
+                lane_set(&mut slot.current, lane, ramp.current);
+                lane_set(&mut slot.target, lane, ramp.target);
+                lane_set(&mut slot.step, lane, ramp.step);
+                lane_set(&mut slot.remaining, lane, ramp.remaining as f32);
+                self.ramp_frames_left = self.ramp_frames_left.max(ramp.remaining);
+            }
+        }
+        true
+    }
+
+    /// Whether a link glide is in flight on any lane of the channels the block renders: the
+    /// left alone on a collapsed block, whose right state is frozen.
+    fn gliding<const MONO: bool>(&self) -> bool {
+        let channels = if MONO {
+            &self.state[..1]
+        } else {
+            &self.state[..]
+        };
+        channels.iter().any(|state| {
+            state.links.iter().any(|ramp| {
+                let mut remaining = [0.0_f32; MAX_WIDTH];
+                ramp.remaining.store(&mut remaining[..L::WIDTH]);
+                remaining[..L::WIDTH].iter().any(|word| *word > 0.0)
+            })
+        })
+    }
+    // REALTIME_POLICY_END
+
     // REALTIME_POLICY_BEGIN: #1278 D3, a restore commit re-derives the hold count.
     /// Recomputes one lane's hold count from its timing. The attack and release coefficients are
     /// state (`GateState::rates`, #1336 D2): seeding designs them and a restore commits them as
@@ -715,7 +792,12 @@ impl<L: Lane, const CONNECTED: bool> PreparedGate<L, CONNECTED> {
         lane_set(&mut self.state[channel].hysteresis.open, lane, OPEN_WORD);
         lane_set(&mut self.state[channel].hysteresis.hold, lane, hold);
         let state = &mut self.state[channel];
-        for ramp in state.ramps.iter_mut().chain(&mut state.rates) {
+        for ramp in state
+            .ramps
+            .iter_mut()
+            .chain(&mut state.rates)
+            .chain(&mut state.links)
+        {
             let target = lane_get(ramp.target, lane);
             lane_set(&mut ramp.current, lane, target);
             lane_set(&mut ramp.step, lane, 0.0);
@@ -732,6 +814,11 @@ impl<L: Lane, const CONNECTED: bool> PreparedGate<L, CONNECTED> {
                         self.reset_lane_discontinuity(channel, lane);
                     }
                 }
+            }
+        }
+        if kind == ResetKind::FullToDefaults {
+            for lane in 0..L::WIDTH {
+                self.rest_link(lane);
             }
         }
         self.ramp_frames_left = 0;
@@ -806,7 +893,7 @@ impl<L: Lane, const CONNECTED: bool> PreparedGate<L, CONNECTED> {
                 lane_set(&mut slot.target, lane, ramp.target);
                 lane_set(&mut slot.step, lane, ramp.step);
                 lane_set(&mut slot.remaining, lane, ramp.remaining as f32);
-                self.ramp_frames_left = RAMP_SAMPLES;
+                self.ramp_frames_left = self.ramp_frames_left.max(RAMP_SAMPLES);
             }
         }
     }
@@ -843,7 +930,7 @@ impl<L: Lane, const CONNECTED: bool> PreparedGate<L, CONNECTED> {
         lane_set(&mut rate.target, lane, ramp.target);
         lane_set(&mut rate.step, lane, ramp.step);
         lane_set(&mut rate.remaining, lane, ramp.remaining as f32);
-        self.ramp_frames_left = RAMP_SAMPLES;
+        self.ramp_frames_left = self.ramp_frames_left.max(RAMP_SAMPLES);
     }
 
     /// Commits a hold time for one lane and channel (#1336 D4): the window keeps its start.
@@ -918,7 +1005,11 @@ impl<L: Lane, const CONNECTED: bool> PreparedGate<L, CONNECTED> {
             } else {
                 &mut right[..split]
             };
-            self.run_segment::<true, MONO>(&mut left[..split], right, side, smoothed);
+            if self.gliding::<MONO>() {
+                self.run_segment::<true, MONO, true>(&mut left[..split], right, side, smoothed);
+            } else {
+                self.run_segment::<true, MONO, false>(&mut left[..split], right, side, smoothed);
+            }
         }
         if smoothed < frames {
             let split = smoothed * width;
@@ -928,7 +1019,8 @@ impl<L: Lane, const CONNECTED: bool> PreparedGate<L, CONNECTED> {
             } else {
                 &mut right[split..]
             };
-            self.run_segment::<false, MONO>(&mut left[split..], right, side, frames - smoothed);
+            let rest = frames - smoothed;
+            self.run_segment::<false, MONO, false>(&mut left[split..], right, side, rest);
         }
         self.ramp_frames_left -= smoothed as u32;
         if MONO {
@@ -1006,7 +1098,7 @@ impl<L: Lane, const CONNECTED: bool> PreparedGate<L, CONNECTED> {
         mask
     }
 
-    fn run_segment<const RAMPING: bool, const MONO: bool>(
+    fn run_segment<const RAMPING: bool, const MONO: bool, const GLIDE: bool>(
         &mut self,
         left: &mut [f32],
         right: &mut [f32],
@@ -1014,7 +1106,7 @@ impl<L: Lane, const CONNECTED: bool> PreparedGate<L, CONNECTED> {
         frames: usize,
     ) {
         let (state_left, state_right) = self.state.split_at_mut(1);
-        gate_frames::<L, CONNECTED, RAMPING, MONO>(GateArgs {
+        gate_frames::<L, CONNECTED, RAMPING, MONO, GLIDE>(GateArgs {
             left,
             right,
             sidechain,
@@ -1125,8 +1217,9 @@ impl<L: Lane, const CONNECTED: bool> PreparedGate<L, CONNECTED> {
     ///   bypass word is prepared from a whole-instance value and the link words from the lane's
     ///   own mode (issue #1368), the same on both channels, so they cannot differ today; they
     ///   are compared because the kernel loads them per channel.
-    /// * the four parameter ramps (`GateState::ramps`) and the two rate ramps
-    ///   (`GateState::rates`), all four fields each: `remaining` decides whether a ramp moves and
+    /// * the four parameter ramps (`GateState::ramps`), the two rate ramps
+    ///   (`GateState::rates`) and the two link weights (`GateState::links`, #1370), all four
+    ///   fields each: `remaining` decides whether a ramp moves and
     ///   when it snaps, and `current`, `target` and `step` are what it moves.
     ///
     /// Deliberately excluded:
@@ -1153,7 +1246,8 @@ impl<L: Lane, const CONNECTED: bool> PreparedGate<L, CONNECTED> {
                 .ramps
                 .iter()
                 .chain(&left.rates)
-                .zip(right.ramps.iter().chain(&right.rates))
+                .chain(&left.links)
+                .zip(right.ramps.iter().chain(&right.rates).chain(&right.links))
                 .all(|(l, r)| {
                     same(l.current, r.current)
                         && same(l.target, r.target)
@@ -1180,7 +1274,7 @@ impl<L: Lane, const CONNECTED: bool> PreparedGate<L, CONNECTED> {
             payload::write_f32(bytes, word + 2, lane_get(ramp.step, lane));
             payload::write_f32(bytes, word + 3, lane_get(ramp.remaining, lane));
         }
-        for (index, rate) in state.rates.iter().enumerate() {
+        for (index, rate) in state.rates.iter().chain(&state.links).enumerate() {
             let word = STATE_RATE_WORD + index * 4;
             payload::write_f32(bytes, word, lane_get(rate.current, lane));
             payload::write_f32(bytes, word + 1, lane_get(rate.target, lane));
@@ -1306,6 +1400,43 @@ impl<L: Lane, const CONNECTED: bool> PreparedGate<L, CONNECTED> {
             }
             *rate = [current, target, step, remaining];
         }
+        // Issue #1370 D6: each weight lies in `[0, 1]` on its whole path, the engine never holds
+        // `-0.0` there, a glide in flight moves (its step is `(t - c) / n` with `t` in `{0, 1}`,
+        // `c` a word of an earlier glide and `n <= 2^24`, never `0`), and the two targets are
+        // exactly one supported mode's rest weights.
+        let mut links = [[0.0_f32; 4]; LINK_COUNT];
+        for (index, link) in links.iter_mut().enumerate() {
+            let word = STATE_LINK_WORD + index * 4;
+            let current = payload::read_f32(bytes, word);
+            let target = payload::read_f32(bytes, word + 1);
+            let step = payload::read_f32(bytes, word + 2);
+            let remaining = payload::read_f32(bytes, word + 3);
+            let maximum = effect_contract::LINK_GLIDE_MAX_SAMPLES;
+            let valid = integral_within(remaining, maximum as f32)
+                && !is_negative_zero(current)
+                && (remaining == 0.0 || step != 0.0)
+                && payload::ramp_path_inside(
+                    LinearRamp {
+                        current,
+                        target,
+                        step,
+                        remaining: remaining as u32,
+                    },
+                    (0.0, 1.0),
+                    maximum,
+                );
+            if !valid {
+                return Err(state_error("effect.state.link"));
+            }
+            *link = [current, target, step, remaining];
+        }
+        let mode = effect_contract::link_glide_mode([links[0][1], links[1][1]])
+            .filter(|mode| {
+                GATE_EXPANDER_DESCRIPTOR
+                    .supported_link_modes
+                    .contains(*mode)
+            })
+            .ok_or(state_error("effect.state.link"))?;
         Ok(LaneRestore {
             gain_db: normalize_zero(gain_db),
             open,
@@ -1313,6 +1444,8 @@ impl<L: Lane, const CONNECTED: bool> PreparedGate<L, CONNECTED> {
             timing,
             ramps,
             rates,
+            links,
+            mode,
         })
     }
 
@@ -1349,6 +1482,18 @@ impl<L: Lane, const CONNECTED: bool> PreparedGate<L, CONNECTED> {
         {
             self.ramp_frames_left = self.ramp_frames_left.max(RAMP_SAMPLES);
         }
+        // Issue #1370 D6: the weights land only under the mode they glide to. A payload taken
+        // under another mode (the plan-swap carry into a successor prepared with a new mode)
+        // leaves the lane's own mode at rest, as before the glide existed.
+        if parsed.mode == self.lane_link(lane) {
+            for (index, link) in self.state[channel].links.iter_mut().enumerate() {
+                lane_set(&mut link.current, lane, parsed.links[index][0]);
+                lane_set(&mut link.target, lane, parsed.links[index][1]);
+                lane_set(&mut link.step, lane, parsed.links[index][2]);
+                lane_set(&mut link.remaining, lane, parsed.links[index][3]);
+                self.ramp_frames_left = self.ramp_frames_left.max(parsed.links[index][3] as u32);
+            }
+        }
         Ok(())
     }
 
@@ -1370,6 +1515,12 @@ impl<L: Lane, const CONNECTED: bool> PreparedGate<L, CONNECTED> {
         payload::read_header(&layout, input.common).map_err(codec_error)?;
         let left = self.parse_lane(input.left)?;
         let right = self.parse_lane(input.right)?;
+        if left.mode != right.mode {
+            return Err(state_error("effect.state.link"));
+        }
+        if left.mode != self.lane_link(lane) {
+            self.rest_link(lane);
+        }
         self.commit_lane(0, lane, &left)?;
         self.commit_lane(1, lane, &right)
     }
@@ -1382,6 +1533,10 @@ const STATE_RAMP_WORD: usize = 6;
 /// Word index of the first coefficient ramp quadruple (attack, then release) in a channel section
 /// (#1336 D6).
 const STATE_RATE_WORD: usize = STATE_RAMP_WORD + RAMP_COUNT * 4;
+
+/// Word index of the first link weight quadruple (`w_link`, then `w_avg`) in a channel section
+/// (#1370 D6). The rate quadruples run straight into it.
+const STATE_LINK_WORD: usize = STATE_RATE_WORD + RATE_COUNT * 4;
 
 /// The launch interval of a one-pole rate coefficient (#1336 D3): every design over the attack
 /// and release domains at every launch rate lies inside it, and so does every word of a ramp
@@ -1400,6 +1555,9 @@ struct LaneRestore {
     timing: LaneTiming,
     ramps: [[f32; 4]; RAMP_COUNT],
     rates: [[f32; 4]; RATE_COUNT],
+    links: [[f32; 4]; LINK_COUNT],
+    /// The mode the weights glide to, decoded from their targets.
+    mode: LinkMode,
 }
 
 impl<const CONNECTED: bool> PreparedNativeEffect for PreparedGate<f32, CONNECTED> {
@@ -1426,6 +1584,10 @@ impl<const CONNECTED: bool> PreparedNativeEffect for PreparedGate<f32, CONNECTED
     /// witness's other terms and the compile's routing own, as for the compressor.
     fn channel_symmetry(&self) -> bool {
         self.designed_channel_symmetry(0)
+    }
+
+    fn retarget_link(&mut self, track: usize, mode: LinkMode, samples: u32) -> bool {
+        track == 0 && PreparedGate::retarget_link(self, 0, mode, samples)
     }
 
     /// Issue #143 D2: the branching smoother's own gain word, read for lane 0.
@@ -1524,6 +1686,11 @@ macro_rules! bank_impl {
             /// Issue #973: [`PreparedGate::designed_channel_symmetry`].
             fn lane_channel_symmetry(&self, lane: usize) -> bool {
                 self.designed_channel_symmetry(lane)
+            }
+
+            /// Issue #1370: `PreparedGate::retarget_link`; a padded lane takes no glide.
+            fn retarget_link(&mut self, track: usize, mode: LinkMode, samples: u32) -> bool {
+                PreparedGate::retarget_link(self, track, mode, samples)
             }
 
             fn supports_mono_collapse(&self) -> bool {
@@ -1651,7 +1818,7 @@ impl<L: Lane> PreparedGate<L, false> {
         let words = |coef: &GateCoef<L>, state: &GateState<L>| {
             let ramp_words =
                 |ramp: &kernel::GateRamp<L>| [ramp.current, ramp.target, ramp.step, ramp.remaining];
-            let mut all = [L::zero(); 4 + 3 + 4 * (RAMP_COUNT + RATE_COUNT)];
+            let mut all = [L::zero(); 4 + 3 + 4 * (RAMP_COUNT + RATE_COUNT + LINK_COUNT)];
             all[..7].copy_from_slice(&[
                 coef.hold_samples,
                 coef.bypass,
@@ -1665,7 +1832,7 @@ impl<L: Lane> PreparedGate<L, false> {
                 .as_chunks_mut::<4>()
                 .0
                 .iter_mut()
-                .zip(state.ramps.iter().chain(&state.rates))
+                .zip(state.ramps.iter().chain(&state.rates).chain(&state.links))
             {
                 chunk.copy_from_slice(&ramp_words(ramp));
             }
@@ -1715,6 +1882,9 @@ impl<L: Lane> PreparedGate<L, false> {
         let (values_bytes, link_bytes) = bytes.split_at_mut(2 * PARAMETER_COUNT * 4);
         let link = effect_contract::exchange_lane_link_word(self.lane_link(lane), link_bytes);
         self.set_lane_link(lane, link);
+        // The weights rest at the incoming mode; the swap's payload restore then brings a glide
+        // in flight with it (issue #1370 D6).
+        self.rest_link(lane);
         let words = self.defaults[lane].iter_mut().flatten();
         for (value, chunk) in words.zip(values_bytes.as_chunks_mut::<4>().0.iter_mut()) {
             let mut incoming = [0_u8; 4];
@@ -1883,6 +2053,8 @@ fn bind_bank<const NATIVE_ONLY: bool>(
     }))
 }
 
+#[cfg(test)]
+mod glide_tests;
 #[cfg(test)]
 mod padding_tests;
 #[cfg(test)]

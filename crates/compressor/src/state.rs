@@ -1,12 +1,16 @@
 //! Exact causal compressor state payload codec.
 //!
-//! Each channel is 37 little-endian words (148 bytes) (#1278 D2a):
+//! Each channel is 45 little-endian words (180 bytes) (#1278 D2a, #1370 D6):
 //!
 //! ```text
 //! [0]        gain reduction, dB
 //! [1 .. 29]  the seven smoothed parameters' ramps: current, target, step, remaining
 //! [29 .. 37] the attack and release coefficient ramps: current, target, step, remaining
+//! [37 .. 45] the detector link weights `w_link`, `w_avg`: current, target, step, remaining
 //! ```
+//!
+//! The lane's link mode is the weights' targets (`effect_contract::link_glide_mode`), so a
+//! payload taken mid-glide carries the glide and the mode it glides to, with no separate word.
 //!
 //! A payload carries every word a continuation reads, the ramps' steps included, so a lane
 //! restored mid-ramp continues bit for bit like the lane it was taken from. The 22-word layout before it carried each
@@ -19,7 +23,9 @@
 //! them again: no heap value is created or dropped (#1278 D1), and the four payload calls are
 //! render-safe.
 
-use effect_contract::{StatePayloadError, StatePayloadOutput, StatePayloadSizes};
+use effect_contract::{
+    LINK_GLIDE_MAX_SAMPLES, LinkMode, StatePayloadError, StatePayloadOutput, StatePayloadSizes,
+};
 use effect_runtime::params::{is_negative_zero, normalize_zero, parameter_value_valid};
 use effect_runtime::state_payload::{
     RAMP_WORDS, ramp_path_inside, read_f32, read_ramp, write_f32, write_ramp,
@@ -33,7 +39,7 @@ use crate::design::{
 use crate::kernel::Channel;
 
 /// Words in one channel section.
-pub const STATE_HEADER_WORDS: usize = 1 + RAMP_WORDS * (RAMP_COUNT + RATE_RAMPS);
+pub const STATE_HEADER_WORDS: usize = 1 + RAMP_WORDS * (RAMP_COUNT + RATE_RAMPS + LINK_RAMPS);
 
 /// The payload layout version.
 ///
@@ -47,11 +53,17 @@ pub(crate) const STATE_LAYOUT_VERSION: u32 = 1;
 /// The attack and release coefficient ramps.
 const RATE_RAMPS: usize = 2;
 
+/// The two detector link weights (issue #1370 D2).
+const LINK_RAMPS: usize = 2;
+
 /// First word of the parameter ramps.
 const PARAMETER_RAMP_WORD: usize = 1;
 
 /// First word of the coefficient ramps.
 const RATE_RAMP_WORD: usize = PARAMETER_RAMP_WORD + RAMP_WORDS * RAMP_COUNT;
+
+/// First word of the link weights.
+const LINK_RAMP_WORD: usize = RATE_RAMP_WORD + RAMP_WORDS * RATE_RAMPS;
 
 /// The parameter mask a restore designs from the current values: every smoothed parameter but
 /// attack and release, whose words are their coefficient ramps' current values.
@@ -100,9 +112,13 @@ pub(crate) fn write_channel<L: Lane>(bytes: &mut [u8], channel: &Channel<L>, lan
     for (index, ramp) in channel.rate_ramps.iter().enumerate() {
         write_ramp(bytes, RATE_RAMP_WORD + index * RAMP_WORDS, ramp[lane]);
     }
+    for (index, ramp) in channel.link_ramps.iter().enumerate() {
+        write_ramp(bytes, LINK_RAMP_WORD + index * RAMP_WORDS, ramp[lane]);
+    }
 }
 
-pub(crate) fn validate_channel(bytes: &[u8]) -> Result<(), StatePayloadError> {
+/// Validates one channel section and returns the link mode its weights glide to.
+pub(crate) fn validate_channel(bytes: &[u8]) -> Result<LinkMode, StatePayloadError> {
     let expected = STATE_HEADER_WORDS
         .checked_mul(4)
         .ok_or(state_error("effect.state.length"))?;
@@ -143,16 +159,41 @@ pub(crate) fn validate_channel(bytes: &[u8]) -> Result<(), StatePayloadError> {
             return Err(state_error("effect.state.parameter"));
         }
     }
-    Ok(())
+    // Issue #1370 D6: each weight lies in `[0, 1]` on its whole path, the engine never holds
+    // `-0.0` there, a glide in flight moves (its step is `(t - c) / n` with `t` in `{0, 1}`, `c`
+    // a word of an earlier glide and `n <= 2^24`, never `0`), and the two targets are exactly one
+    // mode's rest weights, a mode the compressor supports.
+    let mut targets = [0.0_f32; LINK_RAMPS];
+    for (index, target) in targets.iter_mut().enumerate() {
+        let ramp = read_ramp(bytes, LINK_RAMP_WORD + index * RAMP_WORDS);
+        if is_negative_zero(ramp.current)
+            || (ramp.remaining != 0 && ramp.step == 0.0)
+            || !ramp_path_inside(ramp, (0.0, 1.0), LINK_GLIDE_MAX_SAMPLES)
+        {
+            return Err(state_error("effect.state.link"));
+        }
+        *target = ramp.target;
+    }
+    effect_contract::link_glide_mode(targets)
+        .filter(|mode| {
+            crate::COMPRESSOR_DESCRIPTOR
+                .supported_link_modes
+                .contains(*mode)
+        })
+        .ok_or(state_error("effect.state.link"))
 }
 
 /// Commits an already validated channel section.  Validation of both channels happens before
 /// either commit, so a malformed right section leaves the complete destination unchanged.
+///
+/// `carried` commits the link weights too: the caller passes it when the payload's mode is the
+/// lane's own (issue #1370 D6), and otherwise seats the lane's mode at rest itself.
 pub(crate) fn commit_channel<L: Lane>(
     bytes: &[u8],
     channel: &mut Channel<L>,
     lane: usize,
     sample_rate: u32,
+    carried: bool,
 ) {
     let mut reduction = [0.0_f32; MAX_WIDTH];
     channel.gain_reduction_db.store(&mut reduction);
@@ -164,6 +205,11 @@ pub(crate) fn commit_channel<L: Lane>(
     }
     for (index, ramp) in channel.rate_ramps.iter_mut().enumerate() {
         ramp[lane] = read_ramp(bytes, RATE_RAMP_WORD + index * RAMP_WORDS);
+    }
+    if carried {
+        for (index, ramp) in channel.link_ramps.iter_mut().enumerate() {
+            ramp[lane] = read_ramp(bytes, LINK_RAMP_WORD + index * RAMP_WORDS);
+        }
     }
     let values = channel.current_values(lane);
     design_lane(
