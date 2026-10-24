@@ -173,7 +173,7 @@ pub(crate) fn scan(source: &Source, findings: &mut Vec<Finding>) -> Markers {
             source.line_text(line),
         ));
     } else {
-        regions.extend(valid.chunks_exact(2).map(|pair| Region {
+        regions.extend(valid.as_chunks::<2>().0.iter().map(|pair| Region {
             begin: pair[0].0,
             end: pair[1].0,
         }));

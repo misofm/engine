@@ -3873,7 +3873,7 @@ impl<L: Lane, const W: usize> PreparedParametricEq<L, W> {
         if lane >= W || bytes.len() != LANE_DEFAULT_BYTES {
             return false;
         }
-        let mut words = bytes.chunks_exact_mut(4);
+        let mut words = bytes.as_chunks_mut::<4>().0.iter_mut();
         // The length was checked, so `words` yields one word per call; the `else` is unreachable.
         let mut exchange = |old: u32| -> u32 {
             let Some(word) = words.next() else {

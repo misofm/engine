@@ -179,13 +179,15 @@ fn snapshot(effect: &dyn PreparedNativeEffect, sizes: StatePayloadSizes) -> Vec<
         .expect("snapshot");
     let section = |bytes: &[u8]| -> Vec<f32> {
         bytes
-            .chunks_exact(4)
+            .as_chunks::<4>()
+            .0
+            .iter()
             .enumerate()
             .map(|(word, bytes)| {
                 if CURSOR_WORDS.contains(&word) {
                     0.0
                 } else {
-                    f32::from_le_bytes(bytes.try_into().expect("a word"))
+                    f32::from_le_bytes(*bytes)
                 }
             })
             .collect()

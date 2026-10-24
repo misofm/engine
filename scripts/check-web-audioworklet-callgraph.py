@@ -91,7 +91,12 @@ Modes
        while moving arithmetic out of the vector family and into the scalar family fails it.
     3. **Kernel count.** At least `K` functions matching `REGEX` carry `f32x4.{mul,add,sub,div}`
        arithmetic, each using strictly more vector than scalar `f32` arithmetic. `K` is a
-       **ratchet**: when a wave adds kernels, raise it. It never drops.
+       **ratchet**: when a wave adds kernels, raise it. It never drops. The one exception is a
+       control-thread function pinned in `CONTROL_THREAD_EXEMPT`, by its name without the mangling
+       hash and with its reason: it is neither held to dominance nor counted. An entry that names
+       no function in the module fails, so the table cannot outlive its function. The render
+       export reaches its kernels through `call_indirect`, so the direct-call closure cannot tell
+       a render kernel from control code; a reviewed table can (#877).
     4. **No eight lanes (issue #1110).** No function name in the module may spell an eight-lane
        instantiation (`EIGHT_LANE`). The browser runs four lanes only, and since #1110 the wasm
        build has no eight-lane type, so a name that carries one means eight lanes came back to
@@ -602,6 +607,17 @@ def check_render_thread(
     return failures
 
 
+# Issue #877: control-thread functions whose lane-generic name matches the kernel pattern, by
+# name without the mangling hash (`unhashed`), with the reason each is not a render kernel. A new
+# entry is a review that no render path calls the function; an entry that matches nothing fails.
+CONTROL_THREAD_EXEMPT: dict[str, str] = {
+    "_RNvMs2_Cs_13parametric_eqINtB5_7ChannelNtNtCs_4wide6f32x4_5f32x4Kj4_E12decode_trackB5_": (
+        "control-thread state decode; LLVM 22 partly vectorizes its ramp check (#877); no render "
+        "path calls it"
+    ),
+}
+
+
 def kernel_arithmetic(
     functions: dict[int, Function], pattern: str
 ) -> list[tuple[Function, int, int]]:
@@ -624,10 +640,29 @@ def check_kernel_shape(
     pattern: str,
     minimum: int,
     roster: tuple[tuple[str, str, float], ...] = KERNEL_ROSTER,
+    exempt: dict[str, str] | None = None,
 ) -> int:
-    """The per-kernel shape gate that replaced the raw `--simd-floor` total (#163 phase 0e)."""
+    """The per-kernel shape gate that replaced the raw `--simd-floor` total (#163 phase 0e).
+
+    `exempt` is a `CONTROL_THREAD_EXEMPT`-shaped table (#877); `None` exempts nothing.
+    """
     failures = 0
-    kernels = kernel_arithmetic(functions, pattern)
+    exempt = exempt or {}
+    names = {unhashed(function.name) for function in functions.values()}
+    for name, reason in exempt.items():
+        if name not in names:
+            failures += 1
+            print(
+                f"FAIL kernel exemption {name}: matches no function in the module. Delete the "
+                f"stale entry ({reason}).",
+                file=sys.stderr,
+            )
+    kernels = []
+    for function, vector, scalar in kernel_arithmetic(functions, pattern):
+        if unhashed(function.name) in exempt:
+            print(f"  exempt control-thread vector={vector} scalar={scalar} {function.name}")
+            continue
+        kernels.append((function, vector, scalar))
     for function, vector, scalar in kernels:
         if vector <= scalar:
             failures += 1
@@ -1142,6 +1177,41 @@ def self_test() -> int:
         check_kernel_shape(parse(scalarized), "render_next", 1, SELF_TEST_ROSTER) == 1,
     )
 
+    # (d4) issue #877: a pinned control-thread function with vector <= scalar is exempt, and is
+    # not counted toward K.
+    decode = (
+        "_RNvMs2_Csb6SUMLvW3Nv_13parametric_eqINtB5_7ChannelNtNtCsgmSSuZlKkZ2_4wide6f32x4_5f32x4"
+        "Kj4_E12decode_trackB5_"
+    )
+    control = VALID_SHAPE + synthetic_kernel(decode, vector=1, scalar=4, index=2)
+    pinned = {unhashed(decode): "control-thread state decode"}
+    expect(
+        "(d4) exempted control-thread function passes",
+        check_kernel_shape(parse(control), "render_next|decode_track", 1, SELF_TEST_ROSTER,
+                           exempt=pinned) == 0,
+    )
+    expect(
+        "(d4) an exempted function does not count toward K",
+        check_kernel_shape(parse(control), "render_next|decode_track", 2, SELF_TEST_ROSTER,
+                           exempt=pinned) == 1,
+    )
+    # (d5) the same scalar shape in a function the table does not name fails.
+    expect(
+        "(d5) non-exempt function with vector <= scalar fails",
+        check_kernel_shape(parse(control), "render_next|decode_track", 1, SELF_TEST_ROSTER,
+                           exempt={}) == 1,
+    )
+    # (d6) a stale entry, one that names no function in the module, fails on its own.
+    expect(
+        "(d6) stale exemption entry fails",
+        check_kernel_shape(parse(VALID_SHAPE), "render_next", 1, SELF_TEST_ROSTER,
+                           exempt={"no_such_function": "stale"}) == 1,
+    )
+    expect(
+        "(d6) the shipped table's entries are hash-free",
+        all(unhashed(name) == name for name in CONTROL_THREAD_EXEMPT),
+    )
+
     # (d3) a vector-typed helper with no arithmetic is not counted as a kernel.
     helper = VALID_SHAPE + (
         "000030 func[2] <_RINv_soft_clip16write_lane_words4wide6f32x4E>:\n"
@@ -1304,7 +1374,9 @@ def main() -> int:
     if args.kernel_shape:
         if args.kernel_pattern is None or args.kernel_min is None:
             parser.error("--kernel-shape requires --kernel-pattern and --kernel-min")
-        failures += check_kernel_shape(functions, args.kernel_pattern, args.kernel_min)
+        failures += check_kernel_shape(
+            functions, args.kernel_pattern, args.kernel_min, exempt=CONTROL_THREAD_EXEMPT
+        )
         failures += check_limiter_forwarding(functions)
         failures += check_no_eight_lanes(functions)
     return 1 if failures else 0
