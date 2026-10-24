@@ -1198,6 +1198,11 @@ impl NativeEffectFactory for CompressorFactory {
 }
 
 impl PreparedNativeEffect for PreparedCompressor {
+    /// Every field is inline: this instance owns no heap (#1074).
+    fn retained_bytes(&self) -> u64 {
+        0
+    }
+
     fn channel_symmetry(&self) -> bool {
         self.instance.designed_channel_symmetry(0)
     }
@@ -1347,6 +1352,11 @@ impl PreparedNativeEffect for PreparedCompressor {
 }
 
 impl<L: Lane> PreparedNativeEffectBank for PreparedCompressorBank<L> {
+    /// Every field is inline: this instance owns no heap (#1074).
+    fn retained_bytes(&self) -> u64 {
+        0
+    }
+
     fn lane_channel_symmetry(&self, lane: usize) -> bool {
         self.instance.designed_channel_symmetry(lane)
     }

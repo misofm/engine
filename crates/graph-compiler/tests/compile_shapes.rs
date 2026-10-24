@@ -144,6 +144,10 @@ fn compile(
 /// Every input stage emits a fixed nonzero block; every other external node is the identity.
 struct ConstantSource;
 impl GraphRuntimeProcessor for ConstantSource {
+    fn retained_bytes(&self) -> u64 {
+        0
+    }
+
     fn process(&mut self, block: GraphBindingBlock<'_>) -> Result<(), RenderError> {
         block.left.fill(0.25);
         block.right.fill(-0.125);
@@ -152,6 +156,10 @@ impl GraphRuntimeProcessor for ConstantSource {
 }
 struct Identity;
 impl GraphRuntimeProcessor for Identity {
+    fn retained_bytes(&self) -> u64 {
+        0
+    }
+
     fn process(&mut self, _block: GraphBindingBlock<'_>) -> Result<(), RenderError> {
         Ok(())
     }

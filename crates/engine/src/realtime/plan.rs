@@ -289,6 +289,12 @@ impl PlanUnitEligibility {
 /// implementations are policy-limited to `graph`.
 #[doc(hidden)]
 pub trait PreparedPlanExecutor: Send {
+    /// The heap bytes this value retains (#1074), exclusive of the value itself: every `Box`,
+    /// `Vec`, `String` and `Arc` allocation reachable through its fields, a `Vec` or `String` at
+    /// its capacity, an `Arc`'s allocation in full whoever else holds it. Whoever boxes the value
+    /// adds `size_of_val` for the box. Computed from capacities on the control thread, never on
+    /// the render path. Required, so a new owner cannot under-report by default.
+    fn retained_bytes(&self) -> u64;
     /// Whether the exclusively owned source consumer supports between-block seek preparation.
     fn can_prepare_source_seek(&self, _source_index: usize) -> bool {
         false
@@ -783,6 +789,57 @@ pub fn plan_revision_gate_retained_bytes() -> u64 {
     u64::try_from(Layout::new::<SharedGateAllocation>().size())
         .expect("a gate allocation's size fits u64")
 }
+/// Heap-byte arithmetic for the plan's retained-bytes walk (#1074), shared by every crate that
+/// implements a walked trait. Each helper answers the bytes one owner allocates, exclusive of the
+/// owner itself, from lengths and capacities only: never from sample content, never on render.
+#[doc(hidden)]
+pub mod retained {
+    use core::alloc::Layout;
+    use std::sync::Arc;
+
+    fn to_u64(bytes: usize) -> u64 {
+        u64::try_from(bytes).unwrap_or(u64::MAX)
+    }
+
+    /// A `Box<[T]>` or a borrowed slice's backing allocation: `len * size_of::<T>()`.
+    #[must_use]
+    pub const fn slice<T>(values: &[T]) -> u64 {
+        // Lossless: `usize` is at most 64 bits on every supported target.
+        core::mem::size_of_val(values) as u64
+    }
+
+    /// A `Box<str>`'s allocation.
+    #[must_use]
+    pub fn str(value: &str) -> u64 {
+        to_u64(value.len())
+    }
+
+    /// A `Vec<T>`'s allocation, at its capacity (spare capacity counts).
+    #[must_use]
+    pub fn vec<T>(values: &Vec<T>) -> u64 {
+        to_u64(values.capacity().saturating_mul(core::mem::size_of::<T>()))
+    }
+
+    /// A `Box<T>` of a sized `T`: `size_of::<T>()` (zero for a zero-sized `T`).
+    #[must_use]
+    pub const fn boxed<T>(_value: &T) -> u64 {
+        core::mem::size_of::<T>() as u64
+    }
+
+    /// An `Arc<T>`'s whole allocation (the two reference counts, then `T`, padded), charged in
+    /// full whatever its strong count.
+    #[must_use]
+    pub fn arc<T: ?Sized>(value: &Arc<T>) -> u64 {
+        arc_layout(Layout::for_value::<T>(value))
+    }
+
+    fn arc_layout(value: Layout) -> u64 {
+        Layout::new::<[usize; 2]>()
+            .extend(value)
+            .map_or(u64::MAX, |(layout, _)| to_u64(layout.pad_to_align().size()))
+    }
+}
+
 /// Exclusive realtime state. It is `Send` but intentionally `!Sync`.
 ///
 /// A shared reference is refused at compile time. rustc reports E0277 (`Sync` is not implemented);
@@ -1077,6 +1134,36 @@ impl PreparedRenderPlan {
         self.executor
             .as_deref()
             .map_or([0; 3], PreparedPlanExecutor::observation_binding_counts)
+    }
+    /// The heap bytes this plan retains (#1074), exclusive of the plan value itself (its owner
+    /// holds it by value): the buffer arena's three tables, the executor's box and everything the
+    /// executor walks ([`PreparedPlanExecutor::retained_bytes`]), and the revision gate's shared
+    /// allocation, charged in full whoever else holds it. The program and the gate pin own no
+    /// heap.
+    ///
+    /// Excluded: the [`HostAttachment`]. It is host data the plan only carries (#1400 D4), and no
+    /// host that compares this walk with an allocator binds one (capi binds none; host-web's
+    /// render companions are host-owned and host-web has no plan oracle). Reopen if one gets an
+    /// oracle. The test-only drop observer is excluded too: it exists only under `cfg(test)`,
+    /// where no oracle reads this walk.
+    ///
+    /// Control thread only, from capacities and lengths; render never calls it.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn retained_bytes(&self) -> u64 {
+        assert!(
+            !super::audit::is_render_scope_active(),
+            "plan retained bytes are sealed until the render audit is disarmed"
+        );
+        let executor = self.executor.as_deref().map_or(0, |executor| {
+            u64::try_from(core::mem::size_of_val(executor))
+                .unwrap_or(u64::MAX)
+                .saturating_add(executor.retained_bytes())
+        });
+        self.arena
+            .retained_bytes()
+            .saturating_add(executor)
+            .saturating_add(retained::arc(&self.gate))
     }
     /// Walk the built runtime for retained observation bytes, outside the render scope.
     #[doc(hidden)]

@@ -938,6 +938,16 @@ impl EffectControlLane {
         resources
     }
 
+    /// The heap this lane retains, exclusive of the lane itself (#1074): exactly
+    /// [`Self::retained_resources`]' total, so the shared cells' `Arc` allocation is charged in
+    /// full whoever else holds it. The `LiveValuesSuperseded` counter is not charged: it is one
+    /// host-owned allocation cloned into every lane, made before the plan and outliving it, so the
+    /// plan never frees it. Control plane only.
+    #[must_use]
+    pub fn retained_bytes(&self) -> u64 {
+        self.retained_resources().total_bytes
+    }
+
     /// The bytes [`Self::install_carry_slots`] allocates for this lane, and the lane holds once it
     /// has: none for a lane without cells. The one place the slot charge is spelled, so
     /// preparation's admission and the retained-bytes row cannot disagree.
@@ -1930,6 +1940,17 @@ impl BypassShunt {
     /// AoSoA caller passes the interleaved sizes, `quantum * lanes` and `latency * lanes`, exactly
     /// as it constructs the shunt. This is what a resource estimate charges for a shunt before
     /// bind allocates it (issue #1100); the shunt's own struct is charged with its owner.
+    /// The heap this shunt retains, exclusive of the shunt itself (#1074): its four planes, from
+    /// their lengths. Control plane only.
+    #[must_use]
+    pub const fn retained_bytes(&self) -> u64 {
+        use crate::retained::slice;
+        slice(&self.dry_left)
+            + slice(&self.dry_right)
+            + slice(&self.line_left)
+            + slice(&self.line_right)
+    }
+
     #[must_use]
     pub const fn allocated_bytes(frames: usize, latency: usize) -> Option<usize> {
         let Some(words) = frames.checked_add(latency) else {
@@ -2876,6 +2897,12 @@ mod lane_swap_tests {
 
         fn process_bank(&mut self, _block: EffectBankProcessBlock<'_>) -> BankProcessReport {
             BankProcessReport::empty(BankWidth::Four)
+        }
+
+        fn retained_bytes(&self) -> u64 {
+            self.defaults
+                .as_ref()
+                .map_or(0, |d| d.iter().map(crate::retained::vec).sum())
         }
 
         fn snapshot_track_state_payload(
