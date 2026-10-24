@@ -279,3 +279,26 @@ remove/re-add, refusals and supersession, 40 alternations against a rendering th
 row. Mutants, each red on its gate and restored: revision 0 refused in preparation (revision-0
 test), a monitor rebuild that publishes `r + 1` (watermark and supersession tests), a retune that
 leaves the service's hop (hop test).
+
+Attempt 2 (after the attempt-1 verdict, FAIL):
+
+- A monitor rebuild that supersedes a withdrawn candidate takes a transaction's outcome terms
+  (`follow_into_six_word`, the send fallback and the rebuild send ramp): it carries the withdrawn
+  edits against the same older base. Red first: `a_configure_that_supersedes_a_fallback_edit_
+  reports_the_fallback` (removing `eq0`'s last mute entry under a following send) was red with the
+  old gate (`transition_fallback` 0) and is green with the fix.
+- The supersession test's pending edit now also moves `eq1`'s fader (a carry retarget), so the
+  `unchanged_revision` restriction is exercised: the mutant `unchanged_revision = monitor` turns it
+  and the fallback test red.
+- The hop test configures a hop-only change while a structural candidate is pending, then checks
+  adopted == configured and the 512-frame spacing; the mutant that skips moving the candidate turns
+  it red.
+- R6: `CapiResources::spectrum_service` (part of `active_retained`) is added to the replacement
+  peak beyond the newest plan's, as `edit_ramps` is; a unit row in `compile.rs` (accepted at the
+  peak, refused one byte below, nothing for a kept service) and a session row (the running plan's
+  control bytes grow by the service plus at most 1 KiB of its spectrum rows, and fall back) turn red
+  when either charge is removed. Root's attempt-2 note authorized the field in
+  `crates/capi/src/runtime/live_peak_tests.rs`.
+- A non-superseding monitor rebuild two blocks into a 4,000-sample send move on a following route
+  renders bit-equal to a twin that never configures (`a_monitor_rebuild_keeps_a_live_send_move_on_a_
+  following_route`).

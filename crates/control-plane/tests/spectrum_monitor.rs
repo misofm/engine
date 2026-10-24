@@ -156,6 +156,8 @@ struct Rig {
     plan: PlanState<Adapter>,
     frame: u64,
     request: u64,
+    /// The bits of the last rendered block.
+    output: Vec<u32>,
 }
 
 impl Rig {
@@ -172,6 +174,7 @@ impl Rig {
             plan,
             frame: 0,
             request: 0,
+            output: Vec::new(),
         }
     }
 
@@ -197,6 +200,7 @@ impl Rig {
                 self.frame
             );
         }
+        self.output = samples.iter().map(|sample| sample.to_bits()).collect();
         self.frame += QUANTUM as u64;
         self.session.service().expect("service step");
     }
@@ -1617,4 +1621,56 @@ fn a_plan_with_spectrum_charges_the_service_once() {
         .expect("remove every tap");
     rig.until_promoted();
     assert_eq!(bytes(&rig), before);
+}
+
+/// #1594 attempt 2 (the verifier's fifth point). Turns red if a monitor rebuild on the running
+/// plan cuts a live send move in flight on a following route: on [`follow_document`], the
+/// following send `eq0-b` moves to -6 dB over 4,000 samples, and two blocks into the move a
+/// configure adds a tap (a monitor rebuild with no supersession). Every rendered block, through
+/// the swap and the rest of the move, is bit-equal to a twin that never configures.
+#[test]
+fn a_monitor_rebuild_keeps_a_live_send_move_on_a_following_route() {
+    let document = follow_document();
+    let mut rig = Rig::of(&document, None);
+    let mut twin = Rig::of(&document, None);
+    // A session with no send move: the move is audible against it.
+    let mut still = Rig::of(&document, None);
+    for _ in 0..3 {
+        rig.block();
+        twin.block();
+        still.block();
+    }
+    let edit = [SessionEdit::SetControl {
+        expected_effect: None,
+        address: session::ControlAddress {
+            owner: session::Owner::Route(id("eq0-b")),
+            section: session::Section::Own,
+            control: 1,
+            lane: session::ParameterChannel::Both,
+        },
+        value: -6.0,
+        ramp_samples: Some(4_000),
+    }];
+    assert_eq!(rig.apply(&edit), Ok(EditPath::Live));
+    assert_eq!(twin.apply(&edit), Ok(EditPath::Live));
+    for _ in 0..2 {
+        rig.block();
+        twin.block();
+        still.block();
+        assert_eq!(rig.output, twin.output);
+    }
+    assert!(rig.configure(&single_request()).expect("configure").rebuild);
+    let mut moved = false;
+    for block in 0..40 {
+        rig.block();
+        twin.block();
+        still.block();
+        moved |= still.output != twin.output;
+        assert_eq!(rig.output, twin.output, "block {block} after the configure");
+    }
+    assert!(
+        rig.session.test_pending_providers().is_empty(),
+        "the plan was adopted"
+    );
+    assert!(moved, "the send move is audible");
 }
