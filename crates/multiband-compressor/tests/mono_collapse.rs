@@ -124,8 +124,16 @@ fn render(
 
 /// A bank of the descriptor defaults at `link`, and the state sizes its lanes' payloads take.
 fn prepare(width: BankWidth, link: LinkMode) -> (PreparedEffectBank, StatePayloadSizes) {
+    prepare_links(&vec![link; width.lanes() as usize], width)
+}
+
+/// [`prepare`] with lane `l` at `links[l]` (issue #1367: one bank mixes link modes).
+fn prepare_links(links: &[LinkMode], width: BankWidth) -> (PreparedEffectBank, StatePayloadSizes) {
     let values = values();
-    let requests = vec![request_with(&values, link, QUANTUM, false); width.lanes() as usize];
+    let requests: Vec<_> = links
+        .iter()
+        .map(|link| request_with(&values, *link, QUANTUM, false))
+        .collect();
     (bank(width, &requests), scalar(&values).1)
 }
 
@@ -144,7 +152,9 @@ fn assert_words(actual: &[f32], expected: &[f32], context: &str) {
     }
 }
 
-/// For every bound width and every link mode, a bank that runs collapsed and then disengages
+/// For every bound width and every link mode, and for a bank whose lanes mix the three modes
+/// (issue #1367: a collapsed lane links with its own `L == R` pair), a bank that runs collapsed and
+/// then disengages
 /// renders, block for block, the left plane, the left state, the reports and (after the
 /// disengage) the right plane and right state of a never-collapsed bank on `L == R` input; the
 /// collapsed body never touches the right plane; and `channels_agree` is false after one dual
@@ -157,9 +167,12 @@ fn a_collapsed_then_desymmetrized_bank_is_a_never_collapsed_bank() {
         let noise: Vec<Vec<f32>> = (0..lanes)
             .map(|lane| signal(total, 0x1871 + lane as u64))
             .collect();
-        for link in [LinkMode::DualMono, LinkMode::Maximum, LinkMode::Average] {
-            let (mut mixed, sizes) = prepare(width, link);
-            let (mut never, _) = prepare(width, link);
+        let modes = [LinkMode::DualMono, LinkMode::Maximum, LinkMode::Average];
+        let mut banks: Vec<Vec<LinkMode>> = modes.iter().map(|link| vec![*link; lanes]).collect();
+        banks.push((0..lanes).map(|lane| modes[lane % modes.len()]).collect());
+        for link in &banks {
+            let (mut mixed, sizes) = prepare_links(link, width);
+            let (mut never, _) = prepare_links(link, width);
             assert!(mixed.processor.supports_mono_collapse());
             for step in 0..BLOCKS {
                 let collapsed = step < DISENGAGE;
@@ -218,7 +231,7 @@ fn a_collapsed_then_desymmetrized_bank_is_a_never_collapsed_bank() {
 
             // Channels driven apart by the render disagree in every link mode (the crossover
             // state is per channel even when the detector is linked); the copy makes them agree.
-            let (mut apart, _) = prepare(width, link);
+            let (mut apart, _) = prepare_links(link, width);
             let mut left = vec![0.5_f32; 32 * lanes];
             let mut right = vec![0.25_f32; 32 * lanes];
             let offsets = vec![0_u32; lanes + 1];

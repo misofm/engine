@@ -1741,6 +1741,22 @@ pub(crate) mod session {
         };
     }
 
+    /// `OBSERVE` (decision 17, C9, #1584 D1): arm or disarm an effect's observation tap. The address
+    /// is the control list's address message with a strip owner, a console or inserts section, its
+    /// slot ID, and no `control` or `lane`; `window_blocks` `0` is the plan's meter window.
+    pub(crate) mod observe {
+        use super::*;
+        pub(crate) const ADDRESS: FieldSpec =
+            FieldSpec::msg(1, true, false, &crate::schema::control_address::SPEC);
+        pub(crate) const TAP_ID: FieldSpec = FieldSpec::req(2, Wire::U32);
+        pub(crate) const ARMED: FieldSpec = FieldSpec::req(3, Wire::Bool);
+        pub(crate) const WINDOW_BLOCKS: FieldSpec = FieldSpec::req(4, Wire::U32);
+        pub(crate) static SPEC: MessageSpec = MessageSpec {
+            name: "Observe",
+            fields: &[ADDRESS, TAP_ID, ARMED, WINDOW_BLOCKS],
+        };
+    }
+
     /// The optional `ramp_samples` field of a live-value edit's payload (#1394 D1), or `None` for
     /// an opcode that does not carry one.
     pub(crate) const fn ramp_samples_field(opcode: crate::SessionEditOpcode) -> Option<FieldSpec> {
@@ -1782,7 +1798,8 @@ pub(crate) mod session {
             | SetAutomationTarget
             | SetAutomationSegments
             | UpsertVca
-            | RemoveVca => None,
+            | RemoveVca
+            | Observe => None,
         }
     }
 
@@ -1824,6 +1841,7 @@ pub(crate) mod session {
             UpsertVca => &upsert_vca::SPEC,
             RemoveVca => &remove_vca::SPEC,
             SetControl => &set_control::SPEC,
+            Observe => &observe::SPEC,
         }
     }
 }
