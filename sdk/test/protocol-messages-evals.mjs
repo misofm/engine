@@ -163,9 +163,10 @@ describe("the headless engine's protocol calls", () => {
     try {
       const events = [];
       const stop = engine.onEvent((event) => events.push(event));
+      // The browser engine has no meter delivery until #1588 (#1583 D3): its meter table is empty.
       const applied = await engine.configureTelemetry({
-        meterHandles: [1],
-        meterPeriodBlocks: 1,
+        meters: [],
+        meterPeriodBlocks: 0,
         counterIds: ["liveValuesSuperseded"],
         counterPeriodBlocks: 1,
         diagnosticsEnabled: true,
@@ -177,7 +178,7 @@ describe("the headless engine's protocol calls", () => {
       const quantum = engine.status().quantumFrames;
       for (let block = 0; block < 4; block += 1) engine.render();
       stop();
-      const perBlock = ["diagnostic", "meterBatch", "counterSnapshot"];
+      const perBlock = ["diagnostic", "counterSnapshot"];
       assert.deepEqual(events.map((event) => event.kind), [
         "sessionCommitted",
         "transportState",
@@ -187,11 +188,9 @@ describe("the headless engine's protocol calls", () => {
       assert.equal(events[0].previousRevision, edited.revision - 1n);
       assert.equal(events[1].state, "playing");
       for (let block = 0; block < 4; block += 1) {
-        const [diagnostic, meters, counters] = events.slice(2 + block * 3, 5 + block * 3);
+        const [diagnostic, counters] = events.slice(2 + block * 2, 4 + block * 2);
         const sample = BigInt((block + 1) * quantum);
         assert.equal(diagnostic.diagnostic.sampleTime, sample);
-        assert.equal(meters.observedSample, sample);
-        assert.deepEqual(meters.records.map((record) => record.handle), [1]);
         assert.equal(counters.observedSample, sample);
         assert.deepEqual(counters.values.map((row) => row.id), ["liveValuesSuperseded"]);
       }

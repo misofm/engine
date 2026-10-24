@@ -248,3 +248,48 @@ Anchors checked against `90b76cfdf` (batch 16a with its first fold). Earlier tex
   refuses).
 - Dependencies (`:187`, `:193-194`): #1293 supplies only the seek exports. Add #1562 (the generic entry)
   and #1697 (document-replace transport). #1386 is a dependency only through its re-brief.
+
+## Amendment (root, backlog sprint, 2026-10-24): narrowed to the watermark push and a status word
+
+Scoped against `f89dc1d60`. Single mode (decision 17); the Worker routing is #1332's carry.
+
+- **Superseded.** D1 by `miso.control.v1` (#1562a; the replace is the same message with a `document`
+  field, #1697). D4 and D5 by #1290 d1: the meter frame travels with the plan, the adopting block
+  writes `retired`/`successor_pointer` in the header and `process()` switches views by reference, so
+  no plan-shape message, `knownRevision` or `meterShapeWaits` exists. Gates 1, 3, 4 and 5 go with them.
+- **Out.** D2 belongs to #1297 (the feed's anchored seek) and #1644 (the session seek). D6 reduces to
+  `onWatermark`; `apply`/`replace` are `control(frame[, document])`.
+- **Remaining.** Slice 1294a: D3, the watermark push, and `onWatermark`. Slice 1294b: #1290's one gap,
+  a page-visible `blockingRebuilds` status word in `WebStatus.reserved0`.
+- **D3 in single mode (1294a).** After `serviceControl` in the worklet's message handler (every
+  message, the `miso.service.v1` tick included), `pushWatermark` calls
+  `miso_engine_web_v1_watermark_read`; on `RESULT_OK` it reads the 96-byte record at
+  `miso_engine_web_v1_watermark_ptr` and posts `miso.watermark.v1 { tag, revision, sample, outcome,
+  exactCount, transitionFallbackCount, supersededCount }` (bigints) only when `(revision,
+  first_sample)` changed. The boot read is the baseline and is not posted. `BACKPRESSURE` skips the
+  message and is not sticky; any other refusal, or a record of the wrong size, is sticky. Gate 2's
+  "OR of both": the record's `outcome_flags` covers only the engine's last advance, so the worklet
+  keeps the counts it last posted and ORs in the flag of each count that rose since (exact 1,
+  transition fallback 2, superseded 4); two advances between two reads post both flags.
+  The wrapper's `onWatermark(listener) -> unsubscribe` (`@internal`) delivers one frozen record per
+  post; a malformed post fails the host with 255. No change to `process()` or its two pinned posts.
+- **Test value (1294a).** The worklet test (`scripts/test-web-audioworklet.mjs`, "Issue #1294a
+  (D3)") turns red if the handler posts on every message, never posts, posts a stale or repeated
+  pair, treats `BACKPRESSURE` as sticky, or skips the push after a request; the host test turns red
+  if a listener is not called or a malformed post is accepted. Verifier fold: two advances between
+  two reads (fallback, then exact) post outcome 3, red without the count OR (MB); a refused read
+  (result 5) and a record of the wrong size are sticky with their results, red on MC (refusal
+  ignored) and MD (size unchecked). Mutants M1-M8 (every message, never,
+  stale pair, sticky backpressure, no boot seed, host accepts malformed, host calls no listener,
+  handler skips the push) were each red.
+- **Companion row (1294a).** The worklet calls `watermark_read` after construction, so the hermetic
+  suite requires a `wrapped: false` row for it in `tools/realtime-policy/render-thread-exports.json`
+  (handler `pushWatermark`). Root authorized the path on 2026-10-24; the row is its own commit.
+  The realtime-policy tool (`./target/release/realtime_policy`) also refuses an unwrapped table row
+  that is not in its named exceptions, `UNWRAPPED_EXPORTS` in `tools/realtime-policy/src/policy.rs`
+  (a Rust list of 11); `watermark_read` joins it (length 12, one doc paragraph), and the prose list
+  in `hosts/host-web/src/render_lock.rs`'s module doc names it. Root authorized both on 2026-10-24:
+  they change only the policy tool's data and a doc comment, so the engine still has no Rust change.
+- The shipped module is unchanged (JS-only change): the release pin
+  (`miso-engine-v1-audio-worklet-artifact.sha256`) is the module's digest, so it does not move, and
+  `check-web-audioworklet.sh`'s export list already has both watermark exports.
