@@ -228,7 +228,7 @@ Filters for Musical Applications", DAFx-14. **Latency:** 0. **Tail:** unchanged 
 - **D4 moves bits on an existing live path.** An HPF or LPF that is disabled live and then
   enabled live now starts from rest. Before, it resumed its frozen state. This is a fix (gate 4
   covers the HPF), and no checked-in digest renders that path, so no digest moved.
-- **PR-b (successor, for root to file as a new issue).** Three deliverables on top of PR-a's live
+- **PR-b (filed by root as #1859).** Three deliverables on top of PR-a's live
   EQ band `enabled`/`kind`:
   1. *C ABI end to end (gate 1).* In `crates/capi/src/runtime/live_tests.rs`, on `eq_session`, one
      transaction enables band 2 of the console EQ and switches the eq-insert's band 1 from bell to
