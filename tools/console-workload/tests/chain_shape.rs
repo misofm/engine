@@ -729,12 +729,14 @@ fn mono_fixture_rows(chains: usize) -> Vec<PlanUnitEligibility> {
         .collect();
     let row = |unit: usize,
                banked: bool,
+               gathers_track_input: bool,
                stages: u32,
                upstream_of_seam_stages: u32,
                lane_tracks: &[Box<str>],
                eligible: bool| PlanUnitEligibility {
         unit: u32::try_from(unit).expect("unit index"),
         banked,
+        gathers_track_input,
         stages,
         upstream_of_seam_stages,
         lane_tracks: lane_tracks.into(),
@@ -747,6 +749,7 @@ fn mono_fixture_rows(chains: usize) -> Vec<PlanUnitEligibility> {
         rows.push(row(
             rows.len(),
             false,
+            false,
             1,
             1,
             core::slice::from_ref(track),
@@ -754,15 +757,16 @@ fn mono_fixture_rows(chains: usize) -> Vec<PlanUnitEligibility> {
         ));
     }
     // One chain per cohort: the six strip slots, four of them upstream of the seam, each track on
-    // exactly one lane in fixture order, and every lane eligible. These lanes are the premise.
+    // exactly one lane in fixture order, every lane eligible, and the chain gathers its tracks'
+    // input (it begins at `PostInputBuiltins`). These lanes are the premise.
     let slots = u32::try_from(SLOTS_PER_COHORT).expect("slot count");
     for cohort in tracks.chunks(MONO_TRACKS / chains) {
-        rows.push(row(rows.len(), true, slots, slots - 2, cohort, true));
+        rows.push(row(rows.len(), true, true, slots, slots - 2, cohort, true));
     }
     // The `main-out` output, last: bound through `GraphNodeBinding::identity`, so the engine's own
     // identity kind reports `SYMMETRIC` -- truthfully -- while naming no track and rendering
     // nothing upstream of the seam. The census's one eligible lane that no track owns.
-    rows.push(row(rows.len(), false, 1, 0, &[Box::from("")], true));
+    rows.push(row(rows.len(), false, false, 1, 0, &[Box::from("")], true));
     rows
 }
 

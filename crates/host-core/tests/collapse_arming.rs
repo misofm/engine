@@ -468,6 +468,40 @@ fn only_the_input_gathering_chain_of_a_split_strip_is_armed() {
             shipped / 2,
             "{left}/{right} ms: half the shipped value -- the first chain of each cohort only"
         );
+        // Issue #993: the rows report the same fact. Exactly one chain per cohort gathers its
+        // tracks' input, it is a bank, and it is the cohort's earlier chain.
+        let gathering: Vec<_> = armed
+            .units
+            .iter()
+            .filter(|unit| unit.gathers_track_input)
+            .collect();
+        assert_eq!(
+            gathering.len() as u64,
+            shipped / 2,
+            "{left}/{right} ms: one input-gathering chain per cohort"
+        );
+        for chain in &gathering {
+            assert!(chain.banked, "{left}/{right} ms: only a bank gathers");
+            let later = armed
+                .units
+                .iter()
+                .filter(|unit| {
+                    unit.banked
+                        && unit.upstream_of_seam_stages > 0
+                        && !unit.gathers_track_input
+                        && unit.lane_tracks == chain.lane_tracks
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(
+                later.len(),
+                1,
+                "{left}/{right} ms: the cohort's other chain does not gather"
+            );
+            assert!(
+                chain.unit < later[0].unit,
+                "{left}/{right} ms: the gathering chain runs first"
+            );
+        }
     }
 }
 
