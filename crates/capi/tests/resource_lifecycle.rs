@@ -1026,6 +1026,9 @@ fn capi_retained_bytes_charge_every_byte_the_compile_retains() {
         // #1256 MINOR-1, folded into #1258: submix strips and a route into a submix, so the strip
         // table's submix entries and the C ABI's lane selection (no route lanes) are observed.
         ("routed submix", two_track_routed_submix_session()),
+        // #1074: every registered native effect as an insert, so each effect's own walk is
+        // observed. The de-esser is not in the native registry on this tree, so no session names it.
+        ("every native insert", every_native_insert_session()),
     ] {
         let observed = observe_compile(&document, &limits());
         observed.assert_capi_retained_bytes_are_complete(label, &limits());
@@ -3537,6 +3540,42 @@ fn two_track_three_submix_session() -> String {
 /// [`two_track_three_submix_session`] with the first track routed through `bus0` to the main
 /// output: three submix strips beside two tracks, and one route into a submix, the route kind that
 /// would get a live lane if the C ABI selected route lanes (`HostLiveLanes::routes`).
+/// #1074: three tracks of the nine-track fixture, an empty console, and every native effect the
+/// registry carries as an insert, with no automation.
+fn every_native_insert_session() -> String {
+    let mut model = session::parse_session_json(SESSION).expect("fixture");
+    model.console.pre_insert.clear();
+    model.console.post_insert.clear();
+    model.tracks.truncate(3);
+    let kept: Vec<StableId> = model.tracks.iter().map(|track| track.id.clone()).collect();
+    model.routes.retain(|route| {
+        matches!(&route.source, session::RouteSource::Track { track_id, .. } if kept.contains(track_id))
+    });
+    let inserts: [&[&str]; 3] = [
+        &["parametric-eq", "compressor", "gate-expander"],
+        &["delay", "multiband-compressor"],
+        &["true-peak-limiter", "transient-shaper", "soft-clip"],
+    ];
+    for (track, effects) in model.tracks.iter_mut().zip(inserts) {
+        track.console.clear();
+        track.inserts.effects = effects
+            .iter()
+            .map(|name| session::Effect {
+                id: StableId::parse(name).expect("effect ID"),
+                identity: session::EffectIdentity::Native {
+                    effect_id: StableId::parse(&format!("miso.{name}")).expect("native ID"),
+                },
+                quality: session::EffectQuality::Normal,
+                bypass: false,
+                link_mode: session::LinkMode::DualMono,
+                params: Vec::new(),
+                sidechain: session::SidechainDeclaration::None,
+            })
+            .collect();
+    }
+    session::canonical_session_json(&model).expect("canonical session")
+}
+
 fn two_track_routed_submix_session() -> String {
     let mut model =
         session::parse_session_json(&two_track_three_submix_session()).expect("submix session");

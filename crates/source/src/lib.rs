@@ -1776,6 +1776,11 @@ impl PcmSourceConsumer {
     /// hold now (box and PCM), its seek-report record and its prime flag. Not the session's
     /// published generation, which the session owns. A block the host's producer
     /// holds is the host's. Control thread only.
+    ///
+    /// It counts the transfer blocks queued in the two block rings at the moment it reads their
+    /// cursors, so only a quiescent walk is meaningful: no block in flight between the host's
+    /// producer and this consumer (no submit, pop or recycle racing it). A block that moves while
+    /// the walk reads can be counted on both sides or on neither.
     pub(crate) fn retained_bytes(&self) -> u64 {
         use engine::realtime::retained::arc;
         let samples = u64::from(self.channel_count).saturating_mul(u64::from(self.quantum_frames));

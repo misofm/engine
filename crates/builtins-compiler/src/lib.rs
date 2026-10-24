@@ -9016,6 +9016,7 @@ impl LaneFaderAutomation {
 }
 
 /// A boxed lane automation: the box and its own heap.
+#[cfg(any(test, feature = "test-support"))]
 fn boxed_automation_bytes(automation: &LaneFaderAutomation) -> u64 {
     effect_contract::retained::boxed(automation) + automation.retained_bytes()
 }
