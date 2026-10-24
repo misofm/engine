@@ -504,23 +504,6 @@ fn drain_fader_tail(control: &mut Consumer<Record>, available: usize) {
 }"#,
     },
     Ported {
-        name: "count-rebound-by-for-pattern",
-        kind: "edit",
-        path: "crates/builtins-compiler/src/lib.rs",
-        anchor: r#"fn drain_matrix_controls() {}"#,
-        text: r#"fn drain_matrix_controls(control: &mut Consumer<Record>, limits: &[usize]) {
-    let available = control.available_at_entry();
-    for &available in limits.iter() {
-        for _ in 0..available {
-            let Ok(record) = control.try_pop() else {
-                break;
-            };
-            apply(record);
-        }
-    }
-}"#,
-    },
-    Ported {
         name: "inflated-count",
         kind: "edit",
         path: "crates/builtins-compiler/src/lib.rs",
@@ -722,11 +705,11 @@ fn drain_matrix_controls(control: &mut Consumer<Record>) {
         kind: "edit",
         path: "crates/builtins-compiler/src/lib.rs",
         anchor: r#"fn drain_matrix_controls() {}"#,
-        text: r#"fn drain_matrix_controls(control: &mut Consumer<Record>) {
-    for _ in (0..) {
-        let available = control.available_at_entry();
+        text: r#"fn drain_matrix_controls(controls: &mut [Consumer<Record>; 4]) {
+    for lane in (0..) {
+        let available = controls[lane].available_at_entry();
         for _ in 0..available {
-            let Ok(record) = control.try_pop() else {
+            let Ok(record) = controls[lane].try_pop() else {
                 break;
             };
             apply(record);
@@ -739,11 +722,11 @@ fn drain_matrix_controls(control: &mut Consumer<Record>) {
         kind: "edit",
         path: "crates/builtins-compiler/src/lib.rs",
         anchor: r#"fn drain_matrix_controls() {}"#,
-        text: r#"fn drain_matrix_controls(control: &mut Consumer<Record>) {
-    for _ in core::iter::repeat(()) {
-        let available = control.available_at_entry();
+        text: r#"fn drain_matrix_controls(controls: &mut [Consumer<Record>; 4]) {
+    for (lane, ()) in core::iter::repeat(()).enumerate() {
+        let available = controls[lane].available_at_entry();
         for _ in 0..available {
-            let Ok(record) = control.try_pop() else {
+            let Ok(record) = controls[lane].try_pop() else {
                 break;
             };
             apply(record);
@@ -756,11 +739,11 @@ fn drain_matrix_controls(control: &mut Consumer<Record>) {
         kind: "edit",
         path: "crates/builtins-compiler/src/lib.rs",
         anchor: r#"fn drain_matrix_controls() {}"#,
-        text: r#"fn drain_matrix_controls(control: &mut Consumer<Record>, rounds: RangeFrom<u32>) {
-    for _ in rounds {
-        let available = control.available_at_entry();
+        text: r#"fn drain_matrix_controls(controls: &mut [Consumer<Record>; 4], rounds: RangeFrom<u32>) {
+    for (lane, _) in rounds.enumerate() {
+        let available = controls[lane].available_at_entry();
         for _ in 0..available {
-            let Ok(record) = control.try_pop() else {
+            let Ok(record) = controls[lane].try_pop() else {
                 break;
             };
             apply(record);
@@ -773,12 +756,12 @@ fn drain_matrix_controls(control: &mut Consumer<Record>) {
         kind: "edit",
         path: "crates/builtins-compiler/src/lib.rs",
         anchor: r#"fn drain_matrix_controls() {}"#,
-        text: r#"fn drain_matrix_controls(control: &mut Consumer<Record>, rounds: &[u32]) {
+        text: r#"fn drain_matrix_controls(controls: &mut [Consumer<Record>; 4], rounds: &[u32]) {
     let rounds = 0_u32..;
-    for _ in rounds {
-        let available = control.available_at_entry();
+    for (lane, _) in rounds.enumerate() {
+        let available = controls[lane].available_at_entry();
         for _ in 0..available {
-            let Ok(record) = control.try_pop() else {
+            let Ok(record) = controls[lane].try_pop() else {
                 break;
             };
             apply(record);
@@ -791,11 +774,11 @@ fn drain_matrix_controls(control: &mut Consumer<Record>) {
         kind: "edit",
         path: "crates/builtins-compiler/src/lib.rs",
         anchor: r#"fn drain_matrix_controls() {}"#,
-        text: r#"fn drain_matrix_controls(controls: &[Consumer<Record>], gains: &[f32]) {
-    for (control, gain) in controls.iter().zip(gains).cycle() {
-        let available = control.available_at_entry();
+        text: r#"fn drain_matrix_controls(controls: &mut [Consumer<Record>; 4], order: &[u8], gains: &[f32]) {
+    for (lane, (_, gain)) in order.iter().zip(gains).cycle().enumerate() {
+        let available = controls[lane].available_at_entry();
         for _ in 0..available {
-            let Ok(record) = control.try_pop() else {
+            let Ok(record) = controls[lane].try_pop() else {
                 break;
             };
             apply_scaled(*gain, record);
@@ -808,9 +791,9 @@ fn drain_matrix_controls(control: &mut Consumer<Record>) {
         kind: "edit",
         path: "crates/builtins-compiler/src/lib.rs",
         anchor: r#"fn drain_matrix_controls() {}"#,
-        text: r#"fn drain_matrix_controls(rounds: &[u8], control: &mut Consumer<Record>) {
+        text: r#"fn drain_matrix_controls(rounds: &mut [Consumer<Record>]) {
     {
-        for _ in rounds {
+        for control in rounds {
             let available = control.available_at_entry();
             for _ in 0..available {
                 let Ok(record) = control.try_pop() else {

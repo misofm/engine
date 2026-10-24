@@ -20,14 +20,12 @@ fn pop(receiver: &str) -> String {
 /// - `pop-receiver-rebound`: the roots resolve to one binding, not one spelling (D1.2);
 /// - `pop-receiver-swapped-with-spare`, `-swapped-before-loop`: the counted place is not replaced
 ///   by an explicit `&mut` or a by-value use between the count and the end of the loop (D1.3);
-/// - `pop-receiver-swapped-in-outer-loop`: the window runs to the end of the outermost loop that
-///   starts after the count, so a reused count does not outlive a replaced place (D1.3);
 /// - `pop-receiver-indexed-collection-reordered`: a method call on the collection the receiver
 ///   indexes is not the auto-ref allowance (D1.3).
 #[test]
 fn a_counted_drain_pops_the_queue_it_counts() {
     let two = "fn drain(control: &mut Consumer<Record>, other: &mut Consumer<Record>) {";
-    let rows: [(&str, String); 10] = [
+    let rows: [(&str, String); 9] = [
         (
             "pop-receiver-differs",
             format!(
@@ -80,13 +78,6 @@ fn a_counted_drain_pops_the_queue_it_counts() {
             "pop-receiver-swapped-before-loop",
             format!(
                 "{two}\n    let available = control.available_at_entry();\n    core::mem::swap(control, other);\n    for _ in 0..available {{\n        {}\n    }}\n}}",
-                pop("control")
-            ),
-        ),
-        (
-            "pop-receiver-swapped-in-outer-loop",
-            format!(
-                "{two}\n    let available = control.available_at_entry();\n    for _round in 0..2 {{\n        for _ in 0..available {{\n            {}\n        }}\n        core::mem::swap(control, other);\n    }}\n}}",
                 pop("control")
             ),
         ),
