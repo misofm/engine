@@ -388,6 +388,11 @@ pub(crate) fn graph_metadata_bytes(
         .checked_add(sized(
             timing.delays.len(),
             core::mem::size_of::<InsertedDelay>(),
+        )?)?
+        // #1287 D1: the plan's source-claim rows; none without floors.
+        .checked_add(sized(
+            timing.claim_lines.len(),
+            core::mem::size_of::<SourceClaimLine>(),
         )?)?;
     // Lengths are computed arithmetically: this runs on every production compile and must not
     // allocate a `String` per node and three per edge only to read `.len()` (#99 F5).

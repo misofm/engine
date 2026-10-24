@@ -22,7 +22,8 @@ use graph::{
     GraphPreparedEffect, GraphPreparedEffectBank, GraphResourceEstimate,
     GraphScalarOwnerResourceEstimate, GraphSpec, InsertedDelay, PreparedGraphPlan,
     PreparedGraphPlanParts, PreparedRoute, PreparedTrackDelay, RackId, ReductionRecord, RouteGate,
-    RouteTiming, RouteTransform, StableGraphId, TrackStage, gated_route_coefficients,
+    RouteTiming, RouteTransform, SourceClaimLine, StableGraphId, TrackStage,
+    gated_route_coefficients,
 };
 /// Re-exported so a caller can name the compile input without taking a `lane`
 /// dependency of its own: the backend is this crate's input now, so this crate publishes its type
@@ -13197,8 +13198,14 @@ mod tests {
         ];
         let finite_table = table(&nodes, &edges);
         let schedule = topo(&finite_table).expect("acyclic output graph").schedule;
-        let timing = timings(&finite_table, &schedule, &BTreeMap::new(), &caps(100))
-            .expect("checked output timing");
+        let timing = timings(
+            &finite_table,
+            &schedule,
+            &BTreeMap::new(),
+            &BTreeSet::new(),
+            &caps(100),
+        )
+        .expect("checked output timing");
         assert_eq!(timing.output_latency, LatencySamples(7));
         assert_eq!(timing.output_tail, TailSamples::Finite(12));
         assert_eq!(timing.delays.len(), 1);
@@ -13206,8 +13213,14 @@ mod tests {
         let mut infinite_nodes = nodes.clone();
         infinite_nodes[1].bound = NodeTailBound::UNBOUNDED;
         let infinite_table = table(&infinite_nodes, &edges);
-        let infinite = timings(&infinite_table, &schedule, &BTreeMap::new(), &caps(100))
-            .expect("infinite output tail");
+        let infinite = timings(
+            &infinite_table,
+            &schedule,
+            &BTreeMap::new(),
+            &BTreeSet::new(),
+            &caps(100),
+        )
+        .expect("infinite output tail");
         assert_eq!(infinite.output_latency, LatencySamples(7));
         assert_eq!(infinite.output_tail, TailSamples::Infinite);
     }
@@ -13282,7 +13295,8 @@ mod tests {
                 .iter()
                 .map(|(node, floor)| (node.clone(), LatencySamples(*floor)))
                 .collect();
-            let timing = timings(&table, &schedule, &floors, &caps(100)).expect("checked timing");
+            let timing = timings(&table, &schedule, &floors, &BTreeSet::new(), &caps(100))
+                .expect("checked timing");
             let delays: Vec<u64> = timing
                 .routes
                 .iter()
@@ -13357,7 +13371,14 @@ mod tests {
         ];
         let table = table(&nodes, &edges);
         let schedule = topo(&table).expect("acyclic chain").schedule;
-        let timing = timings(&table, &schedule, &BTreeMap::new(), &caps(100)).expect("timing");
+        let timing = timings(
+            &table,
+            &schedule,
+            &BTreeMap::new(),
+            &BTreeSet::new(),
+            &caps(100),
+        )
+        .expect("timing");
         assert_eq!(
             timing.input_arrivals.as_ref(),
             [
@@ -13816,12 +13837,14 @@ mod tests {
                     &table,
                     &first_topo.schedule,
                     &BTreeMap::new(),
+                    &BTreeSet::new(),
                     &caps(1_000_000),
                 );
                 let second = timings(
                     &table,
                     &second_topo.schedule,
                     &BTreeMap::new(),
+                    &BTreeSet::new(),
                     &caps(1_000_000),
                 );
                 assert_eq!(
