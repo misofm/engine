@@ -15,3 +15,15 @@ Make the guard hold on one CPU without tuning a sleep to chase a pass. For examp
 1. 50 runs pinned to one CPU with a busy loop beside them: 0 failures of this guard.
 2. A planted defect that never yields `Taken` turns it red.
 
+
+## Decision record
+
+- **Root R1 (2026-10-24, accepted): the slice's second form.** The back-to-back guard in `race_plan_swaps` (`crates/capi/tests/plan_swap_race.rs`) loses its `taken > 0` half; `withdrawn > 0` and `withdrawn == superseded` stay, and the run still prints both counts. `Taken` is counted only when render's claim (`enter_block`, `crates/engine/src/realtime/plan_exchange.rs`) lands between the command's service step and its `withdraw()` (`withdraw_pending_candidate`, `crates/control-plane/src/control.rs`), a window of microseconds that on one CPU only a preemption opens. This is a test-design fix for a nondeterministic assertion, not a gate moved after its result: the claim "a taken candidate is found and promoted" stays held deterministically by `a_displaced_plan_not_yet_reclaimed_is_charged_after_a_taken_promotion` (`crates/capi/src/runtime/supersede_tests.rs`, `candidate_taken == 1` through `control_plane::test_hold_reclamation`) and, at the exchange level, `withdrawal_after_render_claimed_reports_taken` (`crates/engine/src/realtime/mod.rs`). The test's doc names both.
+- **Weighed and not taken (form A):** a hook that holds reclamation and waits for `rendered` to advance inside the race would make `Taken` deterministic, but it removes the withdraw-versus-claim concurrency from the steps that have it and repeats the scripted interleaving `supersede_tests.rs` already owns (one test per claim).
+- **Root R2:** no exact `withdrawn` count; the race does not control whether the previous block rendered before the previous command.
+
+## Evidence (attempt 1)
+
+- Gate 1: 50 debug runs of `structural_edits_back_to_back_supersede_or_swap_and_never_backpressure`, five lanes of ten, each lane `taskset -c` to its own CPU with a busy loop on that CPU: 50 passed, 0 failed; 32-39 withdrawn and 0-9 taken per 64 edits, and two runs had 0 taken (each a failure of the old guard).
+- Gate 2 (PR evidence, not committed): mutant `MailboxWithdrawal::Taken => Withdrawal::Nothing` in `crates/engine/src/realtime/plan_exchange.rs` turns `withdrawal_after_render_claimed_reports_taken` red at `mod.rs:550` and `a_displaced_plan_not_yet_reclaimed_is_charged_after_a_taken_promotion` red at `supersede_tests.rs:973` (`candidate_taken` 0 against 1); the race stays green, as designed. Restored.
+- `cargo test -p capi`, clippy `-p capi`, fmt, the AArch64 test check and the lint scripts pass.
