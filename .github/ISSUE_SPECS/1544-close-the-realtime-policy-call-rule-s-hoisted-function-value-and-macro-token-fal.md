@@ -36,9 +36,16 @@ refuses `ident(..)` in a token tree only when the macro call itself stands in a 
   to a local, in or out of a loop. The call class applies when a `( .. )` group follows the name. The
   path-value class applies otherwise. This covers the written loop, the written closure and the
   written path value above without parsing the tree into a loop or closure.
+- **D2b. `use` renames (root, 2026-10-24).** `use path::next_record as quiet;` adds `quiet` to the
+  set, as D2 does for an item. Items and renames are read token by token in every file (test code
+  and macro token trees included), to a fixpoint. In a `const`/`static` initializer, a field name of
+  a struct literal (`meters: true`) and a field read (`.meters` with no `( .. )`) do not count:
+  without that filter the real tree's `meters` field cascaded through `ALL`, `SPEC` and `_` into
+  hundreds of consts and 20 false findings.
 - **D4. One refused case per form** in `tools/realtime-policy` tests: assignment, deferred `let`,
   `const`, `static`, loop in tokens, closure in tokens, path value in tokens. A case where a local of
-  the same name shadows a set name stays accepted.
+  the same name shadows a set name stays accepted. Root: two grouped tests in
+  `tests/policy/calls.rs`; the `calls-macro-once` accept row is deleted (D3 supersedes it).
 
 ## Measured cost
 
@@ -46,6 +53,15 @@ refuses `ident(..)` in a token tree only when the macro call itself stands in a 
   `ok (126 marked regions in 27 files)`.
 - MAJOR-1 fix (D1, D2): to be measured; expected 0 new findings. If one appears, it is a real
   hoisted-value pop and root names the restructure (#1444 D3).
+
+## Stated limits (root, 2026-10-24; not implemented)
+
+- A name that a macro builds from parts (`paste!`, `concat_idents!`, a `$f` fragment spliced into a
+  call): limit 4 of the #1438 threat model (owner ruling 2026-10-11).
+- `let mut it = std::iter::from_fn(|| lane.next_record());` above BEGIN, then `for r in it` in a
+  region: #1444 D4 and limit 1. Closing it needs a hot local refused as a value in a region, and
+  `let record = self.next_record();` is hot too, so it would over-refuse every real drain result.
+- A helper two calls deep, a value that enters through a field or a return, `Drop`/`Deref`: #1444 D4.
 
 ## Hazards
 
@@ -64,7 +80,8 @@ refuses `ident(..)` in a token tree only when the macro call itself stands in a 
 
 ## Objective gates
 
-1. `cargo run --locked --release -q -p realtime-policy` prints `ok (126 marked regions in 27 files)`.
+1. `cargo run --locked --release -q -p realtime-policy` prints the same line as a run on `main`
+   before the change (`ok (192 marked regions in 34 files)` at `4ebb72ae0`).
 2. `cargo test --locked -p realtime-policy` passes with the D4 cases.
 3. `cargo fmt --all -- --check` and `cargo clippy --locked -p realtime-policy --all-targets -- -D warnings`.
 
@@ -72,3 +89,15 @@ refuses `ident(..)` in a token tree only when the macro call itself stands in a 
 
 Stream J batch 4 (`codex/d15-stream-j4`) on `main`. Attempt budget: 3.
 
+## Attempt record
+
+- Attempt 1 (2026-10-24, branch `codex/batch-b10-1544`). D1: a per-function pre-pass in
+  `src/calls.rs` collects every local that a `let`, an assignment, a compound assignment or an
+  `x = ..` written in a macro token tree reaches from a set name, to a fixpoint; `bind` marks it hot.
+  D2/D2b: `read_aliases` (already run on every file by `src/lib.rs`) now also reads `const`/`static`
+  items and `use` renames, so a fact in a file that no rule parses counts; `calls::check` extends the
+  set to a fixpoint. This replaces the scope note's walk in `src/unmarked/`, which sees only parsed
+  files, so `src/unmarked/**` is unchanged. D3: `tokens()` refuses a set name in a region with no
+  loop test. Real tree: `ok (192 marked regions in 34 files)` before and after. Mutants (PR
+  evidence): no pre-pass, the `repeats` test back in `tokens()`, no item/rename facts: each turns
+  its group test red.
