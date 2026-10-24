@@ -33,6 +33,25 @@ continues on the successor. The reader does not stay on the retiring plan.
 
 ## Decisions frozen for this slice
 
+D1-D3 below are replaced by R1 (root, 2026-10-24); they stay for the record.
+
+- **R1. The readers pair on the control thread at promotion (#1593 D5 precedent).** host-core's
+  `PlanStateInventory` holds `observer_pairing: Box<[engine::realtime::ObserverCarry]>`, built at
+  preparation from the meter moves and then the tap moves (the swap block's record order), and
+  charged in the inventory's retained bytes beside `spectrum_pairing`. `promote_pending_provider`
+  calls `host_core::pair_carried_meters(&mut next.meters, &mut self.providers.meters,
+  next.inventory.observer_pairing())` before the replace; the parked epoch keeps the fresh
+  consumers and drops them with its plan. Why D1 cannot hold: `active_attachment_mut` is on
+  `PlanState`, which is the render thread's alone (`control-plane/src/plan.rs`), and the C ABI's
+  readers are read on the control thread (`SessionState`, where `take_output_meter` is and where
+  #1583/#1587 stage `METER_BATCH`), which cannot reach the attachment. The list names the entries
+  the swap block's record names: observer and effect carries are all or nothing, and a promoted
+  candidate was prepared against the plan it displaced (#1310 D3). The rule's one assumption, that
+  promotion follows a carried adoption, is the one spectrum pairing makes (#1593 D5). No attachment,
+  no render-thread code. **#1587 D1's `carries` source is `inventory.observer_pairing()` at
+  promotion, not an attachment's record.** The observation half (`pair_carried_observations` at
+  the same spot) lands with #1584 D7, when the epoch keeps `effect_observations`; gate 2 moves
+  there.
 - **D1. The readers live in the plan's attachment.** The C ABI's plan carries one attachment that
   holds the meter consumers and the observation handles, in host-core's order. The giving issue's
   `PreparedRuntime` fields move into this attachment. The C ABI reads them through the plan owner's
@@ -46,6 +65,11 @@ continues on the successor. The reader does not stay on the retiring plan.
 - **D4. No engine edit.** `adopt_predecessor` and the record exist (#1327a).
 
 ## Objective gates
+
+Under R1, gates 1-3 are: (1) a capi test, `a_carried_strip_meter_keeps_its_reader_across_a_c_abi_rebuild`
+(`crates/capi/src/runtime/tests.rs`); (2) one assertion in host-core's `Paired` rig test,
+`observer_pairing() == carries`; (3) no new render-thread code, so `audit capi` is unchanged
+evidence. The observation gate waits for #1584 D7.
 
 1. **A meter window continues.** On the C ABI, meters on, add a muted track whose ID sorts first
    (a rebuild). The strip that was meter 0 and is now meter 1 continues its window sequence through
@@ -67,6 +91,10 @@ continues on the successor. The reader does not stay on the retiring plan.
 
 ## Authorized paths
 
+Under R1: `crates/host-core/src/prepare.rs`, `crates/control-plane/src/control.rs`
+(`promote_pending_provider`, the `meters` doc), `crates/capi/src/runtime/tests.rs` (one test),
+`crates/host-core/tests/successor_swap.rs` (one assertion), this spec.
+
 - `crates/capi/src/runtime/**` (the attachment and its tests), `crates/control-plane/src/{compile.rs,control.rs,plan.rs}`
   (the attachment at preparation and its read path), `crates/capi/tests/resource_lifecycle.rs`,
   and this spec's decision record.
@@ -80,3 +108,12 @@ continues on the successor. The reader does not stay on the retiring plan.
 ## Size
 
 Half a day.
+
+## Evidence (attempt 1, 2026-10-24)
+
+- Gate 1 is red on main: the running epoch's `test_meters()[1]` is empty after the rebuild. A
+  strip queue holds one window (capacity 1) and nothing pops it, so the test rebuilds at half a
+  window and reads the window that opened on the predecessor at sample 0 and closes on the
+  successor: `(0, 0, 1536)` at 48 kHz with the fix.
+- Mutants: passing `&[]` as the pairing in `promote_pending_provider` turns gate 1 red; swapping
+  `successor`/`predecessor` in the meter rows of `observer_pairing` turns gate 2 red.
