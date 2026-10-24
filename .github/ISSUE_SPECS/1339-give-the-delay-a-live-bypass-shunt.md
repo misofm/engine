@@ -244,7 +244,8 @@ key on `lowers_session_bypass` and on the registry row.
   delay's bypass control row is `Live` (the `DELAY_ID` arm of `controls::effect_rows` removed; the
   multiband arm stays for #1340). SDK metadata regenerated with `codegen/assets.mjs` and
   `codegen/generate.mjs`: the delay's bypass row is now `class: live, automatable: true`, like every
-  other live bypass.
+  other live bypass. `hosts/host-web/tests/fixtures/control-list.json` (generated, outside the
+  scope note's paths) is reblessed with `MISO_ENGINE_BLESS_FIXTURES=1` for the same row.
 - **D4, a stated bit move (decision 15 E4).** A bypassed delay now emits its dry block on a block
   where its ring or damping state trips D7, where the prepared bypass emitted zeros. Gate 1 pins it.
   No checked-in digest moved in the gates run.
