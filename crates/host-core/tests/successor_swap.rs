@@ -8156,6 +8156,90 @@ mod meter_carry {
         }
     }
 
+    /// #1891: B removes track `eq0` and adds a silent, unfed submix named `eq0`. A meter's key is
+    /// the strip ID, tap and metric set, which the submix's meters share with the track's; but
+    /// the submix is another strip, so its meters start fresh (on the carried window grid, D6)
+    /// and equal a fresh B's, and no carry record names their readers. Red if a meter pairs by
+    /// strip ID alone: the submix's reader receives the track's open window, with its peak. B
+    /// also changes `eq1`'s trim, a track in both: its meters still carry. Red if the kind test
+    /// compares the strips' contents, not their kinds (`eq1`'s seven meters restart).
+    #[test]
+    fn a_track_replaced_by_a_submix_of_its_name_carries_no_meter() {
+        let a = Session::compile(session_three());
+        let mut b_model = session_three();
+        let template = b_model
+            .routes
+            .iter()
+            .find(|route| route.id.as_str() == "eq0-main")
+            .expect("eq0-main")
+            .clone();
+        remove_track(&mut b_model, "eq0");
+        let mut out = template;
+        let RouteSource::Track { tap, .. } = out.source else {
+            panic!("a track route");
+        };
+        out.source = RouteSource::Submix {
+            submix_id: id("eq0"),
+            tap,
+        };
+        b_model.routes.push(out);
+        b_model
+            .submixes
+            .push(session::Submix::unity(id("eq0"), &b_model.console));
+        track_mut(&mut b_model, "eq1").builtins.left.trim_db -= 1.0;
+        let b = Session::compile(b_model);
+        let meters = requests(&["eq0", "eq1", THIRD_TRACK]);
+        // The submix's meters are the first readers.
+        assert_eq!(key(&meters[0]), ("eq0".to_string(), TAPS[0]));
+        for backend in backends() {
+            let expected = reference(backend, &b, &live(PERIOD), &meters);
+            let run = swapped(
+                backend,
+                &a,
+                &live(PERIOD),
+                &meters,
+                &b,
+                &live(PERIOD),
+                &meters,
+                Reader::Paired,
+            );
+            assert_eq!(run.blocks[SWAP_BLOCK].carry, CarryOutcome::Carried);
+            assert_eq!(
+                run.carries.len(),
+                meters.len() - TAPS.len(),
+                "{backend:?}: every track meter carries, the submix's do not"
+            );
+            assert!(
+                run.carries
+                    .iter()
+                    .all(|carry| carry.successor >= TAPS.len()),
+                "{backend:?}: no record names the submix's readers"
+            );
+            for tap in TAPS {
+                let k: Key = ("eq0".to_string(), tap);
+                let after: Vec<&MeterSnapshot> = run.streams[&k]
+                    .iter()
+                    .filter(|snapshot| snapshot.end_sample > SWAP_SAMPLE)
+                    .collect();
+                assert!(!after.is_empty(), "{backend:?} {k:?}: the submix publishes");
+                assert_eq!(
+                    after[0].window_sequence, 1,
+                    "{backend:?} {k:?}: it joined the open window of the grid"
+                );
+                for snapshot in after {
+                    let want = expected[&k]
+                        .iter()
+                        .find(|want| want.window_sequence == snapshot.window_sequence)
+                        .unwrap_or_else(|| panic!("{k:?}: window {}", snapshot.window_sequence));
+                    assert_eq!(
+                        snapshot, want,
+                        "{backend:?} {k:?}: the silent submix's window equals a fresh B's"
+                    );
+                }
+            }
+        }
+    }
+
     /// Gate 5: the swap block, with the hook's pairing in it, allocates and frees nothing.
     #[test]
     fn the_meter_swap_block_allocates_and_frees_nothing() {
@@ -9206,6 +9290,137 @@ fn a_repointed_route_does_not_carry_its_line_at_every_rate_and_width() {
         for rate in PDC_RATES {
             a_repointed_route_does_not_carry_its_line(backend, rate);
         }
+    }
+}
+
+/// #1891: B removes track `eq1` and adds an unfed submix named `eq1`, keeping route `eq1-main`
+/// into `bus1` with its ID and tap. The graph names a submix's stage as it names a track's, so the
+/// route's edge and endpoints are the same on both sides; but its source is another strip, so its
+/// line starts at rest, holds the silent submix's zeros, and the run equals B from frame 0 from
+/// the swap block on, exactly when every other line carried. Red if a line joins by graph node
+/// alone: `bus1` plays the removed track's pending audio after the swap.
+#[test]
+fn a_route_whose_source_changed_kind_does_not_carry_its_line() {
+    let rate = 48_000;
+    let feed = Feed::new(SOURCE, 1);
+    let a_model = two_bus_session(rate, None);
+    let mut b_model = a_model.clone();
+    b_model.tracks.retain(|track| track.id.as_str() != "eq1");
+    let route = b_model
+        .routes
+        .iter_mut()
+        .find(|route| route.id.as_str() == "eq1-main")
+        .expect("eq1-main");
+    let RouteSource::Track { tap, .. } = route.source else {
+        panic!("a track route");
+    };
+    route.source = RouteSource::Submix {
+        submix_id: id("eq1"),
+        tap,
+    };
+    b_model
+        .submixes
+        .push(session::Submix::unity(id("eq1"), &b_model.console));
+    let (a, b) = (Session::compile(a_model), Session::compile(b_model));
+    for backend in backends() {
+        let what = format!("{backend:?}");
+        // The control: both sides compensate `eq1-main` and `eq2-main`, so the route's line has
+        // a predecessor of its edge ID to carry from.
+        for session in [&a, &b] {
+            assert_eq!(
+                session.prepare(backend).inventory.delay_line_count(),
+                2,
+                "{what}"
+            );
+        }
+        let (run, reference) = pdc_runs(&a, &b, &feed, backend, &what);
+        let difference = run.blocks[SWAP_BLOCK..]
+            .iter()
+            .zip(&reference.blocks[SWAP_BLOCK..])
+            .position(|(swapped, fresh)| swapped != fresh);
+        assert_eq!(
+            difference, None,
+            "{what}: the line of the route from the submix starts at rest; the others carried"
+        );
+    }
+}
+
+/// #1891, the effect-source case: a strip's main edge into an effect whose key arrives late
+/// starts at the strip's own effect node and holds the strip's own audio. A has track `eq1` with
+/// a transparent compressor and then a compressor keyed from `eq0`'s insert return, behind
+/// `eq0`'s limiter, so the main edge into the keyed compressor has a line; B replaces the track
+/// with an unfed submix `eq1` with the same inserts. The line's source is another strip, so it
+/// starts at rest and the swapped run equals fresh B from the swap block on. Red if a line whose
+/// source is an `Effect` node joins by graph node alone: the submix plays the track's audio.
+#[test]
+fn a_line_from_an_effect_of_a_strip_of_another_kind_does_not_carry() {
+    let rate = 48_000;
+    let feed = Feed::new(SOURCE, 1);
+    let mut a_model = pdc_session(rate, &["eq0"]);
+    remove_track(&mut a_model, "eq2");
+    remove_track(&mut a_model, "eq3");
+    let inserts = &mut track_mut(&mut a_model, "eq1").inserts.effects;
+    inserts.push(transparent_insert());
+    inserts.push(Effect {
+        id: id("duck"),
+        identity: EffectIdentity::Native {
+            effect_id: id("miso.compressor"),
+        },
+        quality: EffectQuality::Normal,
+        bypass: false,
+        link_mode: LinkMode::Maximum,
+        params: console_params("comp", 1, false),
+        sidechain: SidechainDeclaration::Routed(session::Sidechain {
+            source: RouteSource::Track {
+                track_id: id("eq0"),
+                tap: session::SendTap::InsertReturn,
+            },
+            port_id: id("sidechain-in"),
+        }),
+    });
+    let mut b_model = a_model.clone();
+    let track = b_model.tracks.remove(
+        b_model
+            .tracks
+            .iter()
+            .position(|track| track.id.as_str() == "eq1")
+            .expect("eq1"),
+    );
+    let mut submix = session::Submix::unity(id("eq1"), &b_model.console);
+    submix.inserts = track.inserts;
+    b_model.submixes.push(submix);
+    let route = b_model
+        .routes
+        .iter_mut()
+        .find(|route| route.id.as_str() == "eq1-main")
+        .expect("eq1-main");
+    let RouteSource::Track { tap, .. } = route.source else {
+        panic!("a track route");
+    };
+    route.source = RouteSource::Submix {
+        submix_id: id("eq1"),
+        tap,
+    };
+    let (a, b) = (Session::compile(a_model), Session::compile(b_model));
+    for backend in backends() {
+        let what = format!("{backend:?}");
+        // The control: both sides delay the main edge into the keyed compressor.
+        for session in [&a, &b] {
+            assert_eq!(
+                session.prepare(backend).inventory.delay_line_count(),
+                1,
+                "{what}"
+            );
+        }
+        let (run, reference) = pdc_runs(&a, &b, &feed, backend, &what);
+        let difference = run.blocks[SWAP_BLOCK..]
+            .iter()
+            .zip(&reference.blocks[SWAP_BLOCK..])
+            .position(|(swapped, fresh)| swapped != fresh);
+        assert_eq!(
+            difference, None,
+            "{what}: the submix's line from its own effect starts at rest"
+        );
     }
 }
 
