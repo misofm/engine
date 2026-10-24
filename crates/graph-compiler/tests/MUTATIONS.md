@@ -388,6 +388,9 @@ Command: `cargo test -p graph-compiler --test tail_composition` (M12: `--lib an_
 | 1379-10 | a live fader states its prepared gain | `src/compile.rs` | `a_live_fader_states_its_domain_maximum_and_a_fixed_one_its_prepared_gain` |
 | 1379-11 | the decay extent drops `k D` | `src/pdc.rs` | five tests, the enumeration among them |
 | 1379-12 | `millibel_sum` wraps | `src/pdc.rs` | `tests::an_overflowing_millibel_sum_is_a_diagnostic` |
+| 1379-13 | a fader lane driven by stored automation is taken as fixed (`|| fader_events[lane]` dropped) | `src/compile.rs` | `a_live_fader_states_its_domain_maximum_and_a_fixed_one_its_prepared_gain` (-2399 mB against 2401) |
+| 1379-14 | a muted lane with mute automation states `Zero` (`&& !mute_events[lane]` dropped) | `src/compile.rs` | same test (`Zero` against -2399 mB) |
+| 1379-15 | a live route into a submix states its prepared value (`false && into_submix`) | `src/compile.rs` | same test (3 mB against 3003 mB) |
 
 `builtins_replace_only_the_three_internal_track_bindings` no longer asserts that the output tail
 equals the input section's `T_decay` (the composition adds `k D`; the enumeration owns that claim);

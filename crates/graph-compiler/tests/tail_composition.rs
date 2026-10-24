@@ -25,6 +25,10 @@ use graph_compiler::{
     GraphCompiler, PreparedGraphBuiltinsArtifact,
 };
 use session::{
+    Automation, AutomationOffset, AutomationSegment, AutomationShape, ControlAddress, Lane, Owner,
+    ParameterUnit, Section,
+};
+use session::{
     ChannelMatrix, CompileCaps, Effect, EffectIdentity, EffectQuality, LinkMode, MatrixOrPan,
     Route, RouteDestination, RouteSource, SendTap, SessionModel, SidechainDeclaration, StableId,
     Submix, compile_session, parse_session_json,
@@ -724,8 +728,11 @@ fn compiled_tail_values_equal_the_enumerated_rule() {
     assert!(finite(live.output_tail_every_peak) >= finite(live.output_tail));
 }
 
-/// C11 (a): without a live lane the fader states its prepared gain, with one the domain maximum.
-/// Red if a live fader states its prepared value, or a fixed one its domain maximum.
+/// C11 (a): without a live lane the fader states its prepared gain, with one the domain maximum; a
+/// fader or mute lane driven by stored automation is live under every selection; a live route into
+/// a submix states the route domain's maximum and a fixed one its prepared row. Red if a live fader
+/// or send states its prepared value, a fixed one its domain maximum, or an automated lane is taken
+/// as fixed.
 #[test]
 fn a_live_fader_states_its_domain_maximum_and_a_fixed_one_its_prepared_gain() {
     let mut model = c1();
@@ -756,6 +763,89 @@ fn a_live_fader_states_its_domain_maximum_and_a_fixed_one_its_prepared_gain() {
     };
     assert_eq!(fader_gain(FIXED), expected(-24.0));
     assert_eq!(fader_gain(LIVE), expected(24.0));
+
+    // Stored automation makes a lane live whatever the selection: a fader entry states the +24 dB
+    // word, and a mute entry on a muted strip forbids `Zero` (it can unmute).
+    let entry = |control: u32, unit: ParameterUnit, value: f32| Automation {
+        id: sid(&format!("ride{control}")),
+        target: ControlAddress {
+            owner: Owner::Strip(sid("vocal")),
+            section: Section::Builtins,
+            control,
+            lane: Lane::Both,
+        },
+        segments: vec![AutomationSegment {
+            shape: AutomationShape::Step,
+            start_sample: 0,
+            end_sample: 1,
+            start_value: value,
+            end_value: value,
+            unit,
+        }],
+        offset: AutomationOffset::default(),
+    };
+    let fader_gain_of = |model: &SessionModel| {
+        let artifact = compile(model, FIXED, InputLanes::None, u64::MAX).expect("compiles");
+        let node = artifact
+            .graph()
+            .spec
+            .nodes
+            .iter()
+            .find(|node| {
+                matches!(&node.id, graph::GraphNodeId::TrackStage {
+                    track_id, stage: graph::TrackStage::PostFader
+                } if track_id.as_str() == "vocal")
+            })
+            .expect("fader node")
+            .bound;
+        stated(&node).expect("stated").1
+    };
+    let mut ridden = model.clone();
+    ridden.automation.push(entry(5, ParameterUnit::Db, -24.0));
+    assert_eq!(fader_gain_of(&ridden), expected(24.0));
+    let mut muted = model.clone();
+    muted.tracks[0].fader.left_mute = true;
+    muted.tracks[0].fader.right_mute = true;
+    assert_eq!(fader_gain_of(&muted), PeakGain::Zero);
+    muted.automation.push(entry(6, ParameterUnit::Linear, 1.0));
+    assert_eq!(fader_gain_of(&muted), expected(-24.0));
+
+    // A route into a submix: live under `routes_into_submixes`, the fold of +24 dB and 1.0 with
+    // the 2x2's rounding; fixed, its prepared row (here -6 dB with ones).
+    let mut sends = c2();
+    sends
+        .routes
+        .iter_mut()
+        .find(|route| route.id.as_str() == "to-bus")
+        .expect("the send")
+        .gain_db = -6.0;
+    let send_gain = |liveness| {
+        let artifact = compile(&sends, liveness, InputLanes::None, u64::MAX).expect("compiles");
+        let node = artifact
+            .graph()
+            .spec
+            .nodes
+            .iter()
+            .find(|node| {
+                matches!(&node.id, graph::GraphNodeId::Route { route_id }
+                    if route_id.as_str() == "to-bus")
+            })
+            .expect("route node")
+            .bound;
+        stated(&node).expect("stated").1
+    };
+    let route_expected = |db: f32| {
+        let inflate = |x: f64| x * (1.0 + 1.0 / 1_073_741_824.0);
+        let u = 1.0 / 16_777_216.0;
+        let word = f64::from((math::db_to_gain_f32(db) * 1.0_f32).abs());
+        let row = inflate(word + word);
+        PeakGain::Millibels(math::tail::ceil_millibels(
+            inflate(inflate(row * (1.0 + u)) * (1.0 + u)),
+            math::tail::Rounding::Computed,
+        ))
+    };
+    assert_eq!(send_gain(LIVE), route_expected(24.0));
+    assert_eq!(send_gain(FIXED), route_expected(-6.0));
 }
 
 /// C4: with every gain at its maximum the submix sum's fan-in moves each track section across a

@@ -889,3 +889,10 @@ graph-compiler rows are `crates/graph-compiler/tests/MUTATIONS.md` 1379-1 to 137
 | host-core passes `strip_fader_matrix: false` | C8 (`live_lanes.rs`) | red, 3,433,505 against 4,744,016 |
 | host-core passes `routes_into_submixes: false` | C8 | red, 3,433,505 against 4,744,016 |
 | host-core copies the decay value `output_tail` | C8; C1, C2, C6, C11 (b) | red in all five |
+
+**Verifier follow-ups (attempt 1 PASS, two MINORs folded).** C11 (a)'s test also holds a live route
+into a submix at the route domain's maximum and a fixed one at its prepared row, a fader with
+stored automation at the +24 dB word under `FIXED`, and a muted strip with mute automation as not
+`Zero`; mutants 1379-13 to 1379-15 (`MUTATIONS.md`) are red. `console-workload` passes the strip
+liveness it attaches. Left for #1487/#1468: `product_bound` states one underflow stall even for an
+exact power-of-two product (sound; a tightening only).
