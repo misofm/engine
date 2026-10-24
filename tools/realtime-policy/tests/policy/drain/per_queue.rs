@@ -405,13 +405,26 @@ fn per_queue_terminal_break_leaves_a_labelled_block() {
     );
 }
 
-/// D1, condition 3: the loops that enclose the set loop are the drain's outer loops, judged like
-/// any other: a finite one passes.
+/// #1851: a finite loop that encloses the set loop but selects no queue runs the whole form four
+/// times on the same queues, popping each up to four times its count. Defect: the loops that
+/// enclose the set loop judged finite only, not selecting.
 #[test]
-fn per_queue_inside_a_finite_outer_loop() {
+fn per_queue_inside_a_non_selecting_outer_loop() {
     let mut poll = Poll::passing("self");
     poll.around = Some("'rounds: for _ in 0..4");
-    accepts("per-queue-inside-a-finite-outer-loop", &poll);
+    refuses("per-queue-inside-a-non-selecting-outer-loop", &poll);
+}
+
+/// #1851: a loop over the banks that encloses the form drains each bank's own queues once per
+/// pass. The tail names no `bank` in a closure (the place rule refuses that, as for any selecting
+/// loop's root). Defect: every loop that encloses the set loop refused, not only a non-selecting
+/// one.
+#[test]
+fn per_queue_inside_a_loop_over_banks() {
+    let mut poll = Poll::passing("bank");
+    poll.around = Some("for bank in &mut ready.banks");
+    poll.after = "if R.slots.iter().any(Option::is_none) {\n    break;\n}\nif R.lost > 9 {\n    R.reset_delivery(false);\n    R.lost = 1;\n    return 0;\n}".to_owned();
+    accepts("per-queue-inside-a-loop-over-banks", &poll);
 }
 
 /// D1, condition 3: a loop that may not end around the whole form is refused. Defect: the loops

@@ -31,3 +31,53 @@ queue, `mem::take`, and the `(&mut it).enumerate()` index.
 
 `tools/realtime-policy/src/drain/{per_queue/mod.rs,select.rs,mod.rs}`,
 `tools/realtime-policy/tests/policy/drain/**`, `tools/realtime-policy/tests/fixtures/**`, this spec.
+
+## Decision record (attempt 1, 2026-10-24)
+
+- Scope note: `scratchpad/opt/scope/1851.md`; its paths and decisions govern. Paths narrowed to
+  `src/drain/{per_queue/mod.rs,select.rs,mod.rs}`, `tests/policy/drain/{per_queue,ported,receiver,outer}.rs`
+  and the inventoried probes.
+- Root R1 (accepted): `select::pass_index` strips `Expr::Paren` in its range branch, so
+  `for lane in (0..) { controls[lane] }` selects and only `outer::finite` refuses the open range.
+- Root R2 (accepted): a per-queue form's pass count loop stays select-free; only the loops in
+  `steps[top..block_at]` (those that enclose the set loop) must select `<Q>`.
+- Implementation: `select::selects` takes the start receiver and an end step instead of a
+  `Counted`. `per_queue::Pass::holds` runs it from the pass header's `<Q>` (the receiver of
+  `.iter_mut()`) over `top..block_at`, inside the per-reading `any`, so a reading whose outer loops
+  do not select reads nothing (D10 rewind). `bounds` stays `bool` (the scope note's `Option<Form>`
+  sketch was not needed). Threat model unchanged: each new refusal is a direct written form.
+- Item 2 inventory. Rewritten to a selecting shape (`controls[lane]` under a range or
+  `.enumerate()` index, or an element pattern over a slice parameter): ported
+  `paren-open-range-outer`, `outer-repeat`, `outer-over-iterator-parameter`,
+  `outer-over-rebound-slice-parameter`, `outer-zip-then-cycle`,
+  `outer-over-slice-parameter-shadowed-by-block-const`; probes `a3-t/u20`, `rt-shapes/e09`,
+  `a2-n/n08`, `a2-n/n02`, `rt-shapes/e12`. Deleted: probes `adv/b03` and `a2-n/n01` (the same text
+  as the ported `paren-open-range-outer` and `outer-repeat`); ported `count-rebound-by-for-pattern`
+  and probe `a2-n/n04` (no selecting loop can enclose a count read before it, so D1 always refuses
+  them too; `forms.rs`'s `if let` / `match` / `while let` rebinding rows hold the count-scope claim
+  alone); `receiver.rs` `pop-receiver-swapped-in-outer-loop` (scope note (b)). Left as is (c): the
+  `while` / `loop` outers (`bounded-drain-inside-outer-loop`, `wrapped-outer-while`, `adv/a11`,
+  `adv/a17`, `rt-shapes/e10`, `per_queue_inside_an_unbounded_outer_loop`).
+- Verifier MINOR (folded): the `outermost` window of `pops_the_counted_queue` was dead and is
+  deleted; D1.3's window now ends with the counted loop (`steps[at]`). Reason: `select::selects`
+  runs first (`&&`), a loop that starts after the count cannot select the counted receiver (its
+  root resolves at the count, outside the loop's pattern, and a rebinding inside the loop makes
+  the pop's root another binding, D1.2), and a loop before `top` is refused before either rule
+  runs. So the search always found `at`; the verifier's `assert_eq!(outermost, at)` mutant stayed
+  green on all 240 tests and the real tree. D1.3's wording ("the end of the loop") is unchanged.
+
+## Evidence (attempt 1)
+
+- Item 1 rows: `per_queue_inside_a_finite_outer_loop` (accept) became
+  `per_queue_inside_a_non_selecting_outer_loop` (refuse). Red with the select call removed from
+  `Pass::holds` (the base tool's behaviour; the same text was an accept row on 38324eb3e).
+  New accept row `per_queue_inside_a_loop_over_banks` (`for bank in &mut ready.banks`): red under
+  a mutant that refuses every loop in `top..block_at`.
+- Mutants on the rewritten rows (each restored with `git checkout` + `touch`):
+  - `outer::finite` returns true: red on all six ported rows and the five probes.
+  - `slice_parameter`'s type check off: red on `outer-over-iterator-parameter` (and
+    `outer-vec-parameter-by-value`).
+  - `shadowed_by_an_item` returns false: red on `outer-over-slice-parameter-shadowed-by-block-const`
+    and `rt-shapes/e12`.
+  - R1 reverted together with `outer::finite` true: `paren-open-range-outer` stays refused (select
+    refuses it), so R1 is what leaves that row to its own rule. R1 reverted alone: all green.
