@@ -183,7 +183,8 @@ fn random_blocks(draw: &mut Draw, members: usize, count: usize) -> Vec<Block> {
 }
 
 /// Renders `blocks` through a padded bank (members first, every padded lane a clone of member
-/// `clone_of`) and through each member's scalar instance, and checks every block: an active lane's
+/// `clone_of`, member `k` at its own link mode `links[k]`, issue #1367) and through each member's
+/// scalar instance at that mode, and checks every block: an active lane's
 /// words and report are its scalar instance's, and a padded lane writes `+0.0` and reports nothing
 /// although every other block hands it stray spans, one of them malformed. At the end each active
 /// lane's payload is its scalar instance's, and a padded lane's payload is refused.
@@ -192,7 +193,7 @@ fn render(
     members: &[Values],
     clone_of: usize,
     rate: u32,
-    link: LinkMode,
+    links: &[LinkMode],
     blocks: &[Block],
     context: &str,
 ) {
@@ -200,19 +201,17 @@ fn render(
     let mask = prefix_mask(width, members.len());
     let requests: Vec<PrepareEffectRequest<'_>> = (0..lanes)
         .map(|lane| {
-            request(
-                &members[if lane < members.len() { lane } else { clone_of }],
-                rate,
-                link,
-            )
+            let member = if lane < members.len() { lane } else { clone_of };
+            request(&members[member], rate, links[member])
         })
         .collect();
     let mut bank = bind(width, &requests, &mask);
     let prepared: Vec<PreparedEffect> = members
         .iter()
-        .map(|values| {
+        .zip(links)
+        .map(|(values, link)| {
             MultibandCompressorFactory
-                .prepare(request(values, rate, link))
+                .prepare(request(values, rate, *link))
                 .expect("a valid member prepares")
         })
         .collect();
@@ -345,20 +344,24 @@ const FIXTURES: [&[u8]; 7] = [
 
 /// Every active lane of a padded bank renders its track's per-node bits.
 ///
-/// Random arm: per width, drawn seeds each bind `1..lanes` members at a drawn rate and link mode
-/// with drawn parameters, input profiles (hostile words included, so D7 trips on active lanes) and
+/// Random arm: per width, drawn seeds each bind `1..lanes` members at a drawn rate, each member at
+/// its own drawn link mode (issue #1367: a bank mixes modes), with drawn parameters, input profiles (hostile words included, so D7 trips on active lanes) and
 /// automation, the padded lanes cloning a member drawn per seed. Fixture arm: each conformance PCM
 /// fixture at its own rate, every padded member count at every width, member `k` reading the
-/// fixture from frame `29k` on at its own level, played twice over in blocks of 128, 37 and 1.
+/// fixture from frame `29k` on at its own level and at the link mode `k` places after member 0's
+/// (so every bank of two or more members mixes modes), played twice over in blocks of 128, 37
+/// and 1.
 ///
 /// Red if a padded lane's state or a bank-wide decision (the silent fixed point, the rest claim)
-/// moves an active lane's bit, if an active lane reads a clone's parameters, if a padded lane takes
+/// moves an active lane's bit, if an active lane reads a clone's parameters or renders at another
+/// lane's link mode (a mixed bank that links a DualMono lane, an arm taken from one lane's mode), if a padded lane takes
 /// automation or reports, if a padded lane has a payload, or if the #1088 decline returns (the bank
 /// does not bind).
 #[test]
 fn every_padded_bank_renders_its_members_per_node_bits() {
     for &width in BankWidth::ALL {
         let lanes = width.lanes() as usize;
+        let mut mixed_banks = 0;
         let ran = run_seeds(
             "every_padded_bank_renders_its_members_per_node_bits",
             "cargo test -p multiband-compressor --lib every_padded_bank_renders",
@@ -368,7 +371,8 @@ fn every_padded_bank_renders_its_members_per_node_bits() {
                 let members = 1 + draw.below(lanes - 1);
                 let clone_of = draw.below(members);
                 let rate = draw.pick(&RATES);
-                let link = draw.pick(&LINKS);
+                let links: Vec<LinkMode> = (0..members).map(|_| draw.pick(&LINKS)).collect();
+                mixed_banks += usize::from(links.iter().any(|link| *link != links[0]));
                 let values: Vec<Values> = (0..members).map(|_| draw_values(&mut draw)).collect();
                 let blocks = random_blocks(&mut draw, members, 8);
                 render(
@@ -376,13 +380,19 @@ fn every_padded_bank_renders_its_members_per_node_bits() {
                     &values,
                     clone_of,
                     rate,
-                    link,
+                    &links,
                     &blocks,
-                    &format!("{width:?} seed {seed}: {members} members, clone of {clone_of}"),
+                    &format!(
+                        "{width:?} seed {seed}: {members} members at {links:?}, clone of {clone_of}"
+                    ),
                 );
             },
         );
         assert!(ran > 0, "the random arm ran no seed");
+        assert!(
+            dsp_reference::randomized::replaying() || mixed_banks > 0,
+            "{width:?}: no drawn bank mixed link modes"
+        );
         for (index, bytes) in FIXTURES.iter().enumerate() {
             let fixture =
                 conformance::PcmFixture::parse(bytes, conformance::FixtureLimits::default())
@@ -425,7 +435,9 @@ fn every_padded_bank_renders_its_members_per_node_bits() {
                     &values,
                     (index + members) % members,
                     fixture.rate().0,
-                    LINKS[(index + members) % LINKS.len()],
+                    &(0..members)
+                        .map(|member| LINKS[(index + members + member) % LINKS.len()])
+                        .collect::<Vec<_>>(),
                     &blocks,
                     &format!("fixture {index} {width:?} {members} members"),
                 );

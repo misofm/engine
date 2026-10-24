@@ -8,6 +8,7 @@
 //! agreement. The caller flushes the smoother's stored recurrence and checks output at the block
 //! boundary.
 
+use effect_contract::LinkMode;
 use lane::Lane;
 
 /// Dual mono: each channel keeps its own detector level.
@@ -18,6 +19,48 @@ pub(crate) const LINK_MAXIMUM: u8 = 1;
 
 /// Both channels use the mean of the two detector levels.
 pub(crate) const LINK_AVERAGE: u8 = 2;
+
+/// The bank's lanes do not share one mode (issue #1367 D2): each lane selects its own law.
+pub(crate) const LINK_MIXED: u8 = 3;
+
+/// Each lane's detector link mode as select masks (issue #1367 D1), and the arm the lanes pick.
+///
+/// `linked` is set on a lane at `Maximum` or `Average`, `averaged` on a lane at `Average`. `arm`
+/// is the const arm of the lanes' one shared mode, or [`LINK_MIXED`] when they differ; it is
+/// derived from the modes only, never from data, and only [`LINK_MIXED`] reads the masks.
+#[derive(Clone, Copy)]
+pub(crate) struct LinkLanes<L: Lane> {
+    linked: L::Mask,
+    averaged: L::Mask,
+    pub(crate) arm: u8,
+}
+
+impl<L: Lane> LinkLanes<L> {
+    /// `links[lane]` is lane `lane`'s mode. Allocation-free and panic-free.
+    pub(crate) fn new(links: &[LinkMode]) -> Self {
+        debug_assert_eq!(links.len(), L::WIDTH);
+        let mut linked = [0.0_f32; 8];
+        let mut averaged = [0.0_f32; 8];
+        for (lane, link) in links.iter().enumerate().take(L::WIDTH) {
+            linked[lane] = f32::from(u8::from(*link != LinkMode::DualMono));
+            averaged[lane] = f32::from(u8::from(*link == LinkMode::Average));
+        }
+        let arm = match links.first() {
+            Some(first) if links.iter().all(|link| link == first) => match first {
+                LinkMode::DualMono => LINK_DUAL_MONO,
+                LinkMode::Maximum => LINK_MAXIMUM,
+                LinkMode::Average => LINK_AVERAGE,
+            },
+            _ => LINK_MIXED,
+        };
+        let zero = L::zero();
+        Self {
+            linked: L::load(&linked[..L::WIDTH]).gt(zero),
+            averaged: L::load(&averaged[..L::WIDTH]).gt(zero),
+            arm,
+        }
+    }
+}
 
 /// One sample of a log-domain branching smoother.
 ///
@@ -46,19 +89,36 @@ pub(crate) fn branching_smooth<L: Lane>(y: L, target: L, attack: L, release: L) 
 
 /// Combines a stereo pair of detector inputs into the pair of levels the two channels ride.
 ///
-/// The link mode is a **compile-time** parameter: it is fixed when the effect is prepared and
-/// never changes for the life of the prepared instance, so a per-sample branch on it would be a
-/// branch whose outcome is known at preparation. An unknown `MODE` is dual mono.
+/// `MODE` is a **compile-time** arm, chosen once per block from the lanes' prepared modes
+/// ([`LinkLanes::arm`]), so no per-sample branch reads it. An unknown `MODE` is dual mono.
 ///
 /// Frozen operation order:
 /// 1. `l = |left|`, `r = |right|` — sign-bit clears
 /// 2. [`LINK_MAXIMUM`]: `l.max(r)`, the D8 select form
 /// 3. [`LINK_AVERAGE`]: `0.5 * l + 0.5 * r` — two separately rounded half-products, which can
 ///    round subnormals but avoid the finite-input overflow possible in `0.5 * (l + r)`
+///
+/// [`LINK_MIXED`] (issue #1367 D2) computes both linked words in that same order and selects,
+/// per lane, the word of the lane's own mode from `lanes`, so each lane's bits are the const arm's
+/// of its mode and never depend on its bank-mates. The const arms do not read `lanes`.
 #[inline(always)]
-pub(crate) fn link_levels<L: Lane, const MODE: u8>(left: L, right: L) -> (L, L) {
+pub(crate) fn link_levels<L: Lane, const MODE: u8>(
+    left: L,
+    right: L,
+    lanes: &LinkLanes<L>,
+) -> (L, L) {
     let (left, right) = (left.abs(), right.abs());
     match MODE {
+        LINK_MIXED => {
+            let maximum = left.max(right);
+            let half = L::splat(0.5);
+            let average = half.mul(left).add(half.mul(right));
+            let value = L::select(lanes.averaged, average, maximum);
+            (
+                L::select(lanes.linked, value, left),
+                L::select(lanes.linked, value, right),
+            )
+        }
         LINK_MAXIMUM => {
             let value = left.max(right);
             (value, value)
@@ -145,6 +205,9 @@ mod tests {
     /// Red mutations: maximum becomes minimum; the `abs` is dropped; the average halves the sum.
     #[test]
     fn the_link_combines_the_pair_per_mode() {
+        let dual = LinkLanes::<f32>::new(&[LinkMode::DualMono]);
+        let maximum = LinkLanes::<f32>::new(&[LinkMode::Maximum]);
+        let average = LinkLanes::<f32>::new(&[LinkMode::Average]);
         for (left, right) in [
             (0.25f32, -0.75f32),
             (-0.75, 0.25),
@@ -153,11 +216,11 @@ mod tests {
             (1.0, 1.0),
             (-3.5, 3.5),
         ] {
-            let (near, far) = link_levels::<f32, LINK_DUAL_MONO>(left, right);
+            let (near, far) = link_levels::<f32, LINK_DUAL_MONO>(left, right, &dual);
             assert_eq!(near.to_bits(), left.abs().to_bits());
             assert_eq!(far.to_bits(), right.abs().to_bits());
 
-            let (near, far) = link_levels::<f32, LINK_MAXIMUM>(left, right);
+            let (near, far) = link_levels::<f32, LINK_MAXIMUM>(left, right, &maximum);
             assert_eq!(near.to_bits(), far.to_bits());
             let larger = if left.abs() > right.abs() {
                 left.abs()
@@ -170,7 +233,7 @@ mod tests {
                 "maximum must be the larger absolute level"
             );
 
-            let (near, far) = link_levels::<f32, LINK_AVERAGE>(left, right);
+            let (near, far) = link_levels::<f32, LINK_AVERAGE>(left, right, &average);
             assert_eq!(near.to_bits(), far.to_bits());
             assert_eq!(
                 near.to_bits(),
@@ -180,7 +243,7 @@ mod tests {
 
         // Halving each operand rather than the sum is what keeps the average finite at the top of
         // the range: `0.5 * (MAX + MAX)` overflows to infinity, `0.5 * MAX + 0.5 * MAX` does not.
-        let (near, _) = link_levels::<f32, LINK_AVERAGE>(f32::MAX, -f32::MAX);
+        let (near, _) = link_levels::<f32, LINK_AVERAGE>(f32::MAX, -f32::MAX, &average);
         assert_eq!(
             near.to_bits(),
             f32::MAX.to_bits(),
@@ -189,15 +252,17 @@ mod tests {
 
         // D8: `max(a, b)` returns `b` when the two are unordered, so a NaN on the right survives
         // and a NaN on the left does not.
-        let (near, _) = link_levels::<f32, LINK_MAXIMUM>(f32::NAN, 0.5);
+        let (near, _) = link_levels::<f32, LINK_MAXIMUM>(f32::NAN, 0.5, &maximum);
         assert_eq!(near, 0.5);
-        let (near, _) = link_levels::<f32, LINK_MAXIMUM>(0.5, f32::NAN);
+        let (near, _) = link_levels::<f32, LINK_MAXIMUM>(0.5, f32::NAN, &maximum);
         assert!(near.is_nan());
     }
 
-    /// Both shims produce the same bits at every width.
+    /// Both shims produce the same bits at every width, and the link's mixed arm gives each lane
+    /// its own mode's bits.
     ///
-    /// Red mutation: give either a `if L::WIDTH == 1` shortcut.
+    /// Red mutations: give either a `if L::WIDTH == 1` shortcut; the mixed arm links a DualMono
+    /// lane (`linked` ignored) or averages a Maximum lane (`averaged` ignored).
     #[test]
     fn the_shims_are_width_independent() {
         fn smoothed<L: Lane>(y: &[f32], target: &[f32], out: &mut [u32]) {
@@ -212,20 +277,20 @@ mod tests {
             }
         }
 
-        fn linked<L: Lane, const MODE: u8>(left: &[f32], right: &[f32], out: &mut [u32]) {
+        /// Each `L::WIDTH` chunk at the arm its lanes' modes pick (issue #1367 D2): a chunk whose
+        /// lanes mix modes takes [`LINK_MIXED`], a scalar lane always its own mode's const arm.
+        fn linked<L: Lane>(links: &[LinkMode; 8], left: &[f32], right: &[f32], out: &mut [u32]) {
             for first in (0..8).step_by(L::WIDTH) {
-                let (near, far) =
-                    link_levels::<L, MODE>(L::load(&left[first..]), L::load(&right[first..]));
+                let lanes = LinkLanes::<L>::new(&links[first..first + L::WIDTH]);
+                let (l, r) = (L::load(&left[first..]), L::load(&right[first..]));
+                let (near, far) = match lanes.arm {
+                    LINK_DUAL_MONO => link_levels::<L, LINK_DUAL_MONO>(l, r, &lanes),
+                    LINK_MAXIMUM => link_levels::<L, LINK_MAXIMUM>(l, r, &lanes),
+                    LINK_AVERAGE => link_levels::<L, LINK_AVERAGE>(l, r, &lanes),
+                    _ => link_levels::<L, LINK_MIXED>(l, r, &lanes),
+                };
                 near.add(far.mul(L::splat(3.0)))
                     .store_bits(&mut out[first..]);
-            }
-        }
-
-        fn linked_in<L: Lane>(mode: u8, left: &[f32], right: &[f32], out: &mut [u32]) {
-            match mode {
-                LINK_MAXIMUM => linked::<L, LINK_MAXIMUM>(left, right, out),
-                LINK_AVERAGE => linked::<L, LINK_AVERAGE>(left, right, out),
-                _ => linked::<L, LINK_DUAL_MONO>(left, right, out),
             }
         }
 
@@ -244,13 +309,22 @@ mod tests {
             assert_eq!(scalar, words, "branching_smooth at W={W}");
         });
 
-        for mode in [LINK_DUAL_MONO, LINK_MAXIMUM, LINK_AVERAGE] {
+        // Every mode across the bank, then a bank whose lanes mix modes (issue #1367): each lane of
+        // the mixed arm is its own mode's scalar bits, whatever its bank-mates' modes.
+        let (d, m, a) = (LinkMode::DualMono, LinkMode::Maximum, LinkMode::Average);
+        for links in [
+            [d; 8],
+            [m; 8],
+            [a; 8],
+            [d, m, a, d, a, m, d, m],
+            [m, a, a, d, d, d, m, a],
+        ] {
             let mut scalar = [0u32; 8];
-            linked_in::<f32>(mode, &y, &target, &mut scalar);
+            linked::<f32>(&links, &y, &target, &mut scalar);
             lane::each_vector_lane!(|L, W| {
                 let mut words = [0u32; 8];
-                linked_in::<L>(mode, &y, &target, &mut words);
-                assert_eq!(scalar, words, "link mode {mode} at W={W}");
+                linked::<L>(&links, &y, &target, &mut words);
+                assert_eq!(scalar, words, "link modes {links:?} at W={W}");
             });
         }
     }

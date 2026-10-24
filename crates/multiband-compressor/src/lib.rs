@@ -76,7 +76,10 @@ mod shim;
 mod split;
 pub mod tail;
 
-use shim::{LINK_AVERAGE, LINK_DUAL_MONO, LINK_MAXIMUM, branching_smooth, link_levels};
+use shim::{
+    LINK_AVERAGE, LINK_DUAL_MONO, LINK_MAXIMUM, LINK_MIXED, LinkLanes, branching_smooth,
+    link_levels,
+};
 
 /// Parameters in the frozen V1 order.
 const PARAMETER_COUNT: usize = 11;
@@ -487,7 +490,9 @@ pub const MULTIBAND_COMPRESSOR_DESCRIPTOR: EffectDescriptor = EffectDescriptor {
     contract_minor: 1,
     state_layout_version: STATE_LAYOUT_VERSION,
     supported_link_modes: LinkModeSet::ALL,
-    lane_link: false,
+    // Issue #1367 D1: the bank holds each lane's link mode (`Instance::link_lanes`), so members
+    // that differ only by link mode share one bank.
+    lane_link: true,
     parameters: &MULTIBAND_COMPRESSOR_PARAMETERS,
     ports: &PORTS,
     qualities: &QUALITIES,
@@ -946,7 +951,9 @@ impl<L: Lane, const W: usize> Side<L, W> {
 struct Instance<L: Lane, const W: usize> {
     sample_rate: u32,
     bypass: bool,
-    link: LinkMode,
+    /// Each lane's prepared detector link mode as masks and the arm they pick (issue #1367 D1),
+    /// read once per block by [`render_body`].
+    link_lanes: LinkLanes<L>,
     /// The active lanes (issue #1893): bit `l` is set when lane `l` carries a member. A padded
     /// lane (a clear bit) renders like any lane, a clone fed `+0.0`, but is never charged or
     /// reported (decision 12's padding contract) and takes no automation.
@@ -966,7 +973,7 @@ impl<L: Lane, const W: usize> Instance<L, W> {
         Some(Self {
             sample_rate: metadata.sample_rate,
             bypass: metadata.bypass,
-            link: metadata.link_mode,
+            link_lanes: LinkLanes::new(&[metadata.link_mode; W]),
             active: all_lanes::<W>(),
             nonfinite: NonFiniteReport::new(),
             sides: [
@@ -1059,7 +1066,8 @@ fn band_target<L: Lane>(level: L, threshold: L, inv_ratio_minus_one: L, knee: (f
 /// One segment: `frames` frames over which no ramp arrives at its target.
 ///
 /// The whole render path is here. `LINK` and `BYPASS` are compile-time, because both are fixed
-/// when the effect is prepared; a bypassed instance is a pure dry path and runs neither the
+/// when the effect is prepared (`LINK` is the arm the lanes' modes pick, [`LINK_MIXED`] when they
+/// differ, issue #1367 D2); a bypassed instance is a pure dry path and runs neither the
 /// crossover nor the dynamics, and it still advances its ramps so that its parameter state does
 /// not depend on whether it was bypassed.
 ///
@@ -1102,7 +1110,8 @@ fn band_target<L: Lane>(level: L, threshold: L, inv_ratio_minus_one: L, knee: (f
 /// them, so no bit moves). Every cross-channel term is the dual one
 /// with the near word read twice: `link_levels::<LINK>(own, own)` is `|p|`, `max(|p|, |p|)` or
 /// `0.5|p| + 0.5|p|` in the dual order, so the near output and state are the dual block's bits on
-/// `L == R`, in every link mode. A const parameter and never a runtime flag, so the dual body
+/// `L == R`, in every link mode; the mixed arm selects among those same words per lane, so a
+/// collapsed lane's link partner is its own `L == R` pair at its own mode. A const parameter and never a runtime flag, so the dual body
 /// keeps its own symbol (the roster's M2 lesson).
 #[inline(always)]
 #[allow(clippy::too_many_arguments)]
@@ -1121,6 +1130,7 @@ fn run_segment<
     frames: usize,
     segments: &mut [Segment<L>; 2],
     armed_after: L,
+    link_lanes: &LinkLanes<L>,
 ) {
     let (head, tail) = sides.split_at_mut(1);
     let near = &mut head[0];
@@ -1190,8 +1200,10 @@ fn run_segment<
             };
             lr4_step_when(ARMABLE, input_far, rest_far, &split[1], &mut filter_far)
         };
-        let (linked_near_low, linked_far_low) = link_levels::<L, LINK>(low_near, low_far);
-        let (linked_near_high, linked_far_high) = link_levels::<L, LINK>(high_near, high_far);
+        let (linked_near_low, linked_far_low) =
+            link_levels::<L, LINK>(low_near, low_far, link_lanes);
+        let (linked_near_high, linked_far_high) =
+            link_levels::<L, LINK>(high_near, high_far, link_lanes);
 
         let amplitude_near_low = band_amplitude(
             linked_near_low,
@@ -1273,6 +1285,7 @@ fn process_block<
     let sample_rate = instance.sample_rate;
     // `N_SILENCE` at the instance's rate (issue #1328, amendment A9).
     let armed_after = L::splat(lane::silence_frames(sample_rate) as f32);
+    let link_lanes = instance.link_lanes;
     let mut position = 0;
     while position < frames {
         let plan = instance.plan_segment::<MONO>(frames - position);
@@ -1321,6 +1334,7 @@ fn process_block<
                     length,
                     &mut segments,
                     armed_after,
+                    &link_lanes,
                 )
             };
         }
@@ -1352,7 +1366,8 @@ fn process_block<
     }
 }
 
-/// Dispatches on the two values that are fixed at preparation, once per block.
+/// Dispatches on the two values that are fixed at preparation, once per block: the link arm the
+/// lanes' modes pick ([`LinkLanes`], issue #1367 D2) and the prepared bypass.
 ///
 /// `FORCE_RAMPING` is threaded through from [`process_block`] and is `false` on every production
 /// call; only the crate's split-identity test instantiates the other arm.
@@ -1378,19 +1393,24 @@ fn render_body<L: Lane, const W: usize, const FORCE_RAMPING: bool, const MONO: b
     frames: usize,
     reports: &mut [ProcessReport],
 ) {
-    match (instance.link, instance.bypass) {
-        (LinkMode::DualMono, false) => {
+    match (instance.link_lanes.arm, instance.bypass) {
+        (LINK_DUAL_MONO, false) => {
             process_block::<L, W, LINK_DUAL_MONO, false, FORCE_RAMPING, MONO>(
                 instance, left, right, frames,
             );
         }
-        (LinkMode::Maximum, false) => {
+        (LINK_MAXIMUM, false) => {
             process_block::<L, W, LINK_MAXIMUM, false, FORCE_RAMPING, MONO>(
                 instance, left, right, frames,
             );
         }
-        (LinkMode::Average, false) => {
+        (LINK_AVERAGE, false) => {
             process_block::<L, W, LINK_AVERAGE, false, FORCE_RAMPING, MONO>(
+                instance, left, right, frames,
+            );
+        }
+        (_, false) => {
+            process_block::<L, W, LINK_MIXED, false, FORCE_RAMPING, MONO>(
                 instance, left, right, frames,
             );
         }
@@ -2100,7 +2120,8 @@ impl<L: Lane, const W: usize> Instance<L, W> {
     ///
     /// Deliberately excluded: `prepared_rates`, `prepared_designed`, `crossover_hz` and
     /// `defaults`, which the kernel never loads (a reset or a span that made the channels disagree
-    /// shows in the ramps); and `sample_rate`, `bypass` and `link`, which are whole-instance.
+    /// shows in the ramps); `sample_rate` and `bypass`, which are whole-instance; and
+    /// `link_lanes`, each lane's mode, which is one value for both channels of the lane.
     ///
     /// Raw bits, so `+0.0` against `-0.0` declines. A lane past the width declines.
     fn designed_channel_symmetry(&self, lane: usize) -> bool {
@@ -2219,6 +2240,10 @@ fn prepare_bank<L: Lane, const W: usize>(
     let (first_left, first_right) = initial_defaults(first.initial_values)?;
     let mut left = [first_left; W];
     let mut right = [first_right; W];
+    // Issue #1367 D1: the key carries no link mode (`lane_link`), so each active lane takes its
+    // own member's mode, and a padded lane the first member's, so padding never forces the mixed
+    // arm (members come first, so the first request is a member's).
+    let mut links: [LinkMode; W] = [metadata.link_mode; W];
     let mut same_program = true;
     // Every request is validated before any fallback: a malformed bank request is an error, not a
     // reason to fall back to scalar.
@@ -2226,6 +2251,9 @@ fn prepare_bank<L: Lane, const W: usize>(
         let candidate = expected_prepared_metadata(factory.descriptor(), item)?;
         if candidate.program_key() != metadata.program_key() {
             same_program = false;
+        }
+        if request.active_mask[track] {
+            links[track] = candidate.link_mode;
         }
         let (track_left, track_right) = initial_defaults(item.initial_values)?;
         left[track] = track_left;
@@ -2239,6 +2267,7 @@ fn prepare_bank<L: Lane, const W: usize>(
     // move an active lane's bits, because a clone fed `+0.0` rests like any lane. `active` keeps
     // them out of every charge, report, automation and payload.
     let mut instance = Instance::<L, W>::new(left, right, metadata).ok_or(PREPARE_FAILED)?;
+    instance.link_lanes = LinkLanes::new(&links);
     instance.active = request
         .active_mask
         .iter()
