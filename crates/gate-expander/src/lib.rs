@@ -293,15 +293,99 @@ const fn quality(sample_rate: u32) -> effect_contract::QualityDescriptor {
     }
 }
 
-/// This effect's tail, tail over every peak and exact-rest bound, the one place they are stated
-/// (decision 15 D15-4(b), #1377 D1). Today's declared tail, with no exact-rest bound yet and so no
-/// finite tail over every peak (#1377 D4); #1376 derives the bounds from the designer.
-fn tail_and_rest(_sample_rate: u32, _quality: EffectQuality) -> effect_contract::NodeTailBound {
+/// The fast tier's gain error, in dB: `fast_gain_from_db` is within this of `10^(g/20)` for every
+/// `g` in `[-160, 24]` dB, the bound `crates/math/tests/f1_fast_db_bounds.rs` proves by an
+/// exhaustive sweep (at most `7.431e-6` dB on `[-160, 0]`). The applied gain's argument, the gain
+/// word, lies in `[-96, 0]` dB. The same value as the compressor's, declared here because
+/// `math::fast_db` is sealed (#1376).
+const FAST_GAIN_ERROR_DB: f64 = 1.0e-5;
+
+/// The smallest release rate coefficient over the parameter domain at `sample_rate`: the design of
+/// the longest release, less `2^-24`. The design is `1 - expf(-1 / tau)` with `expf` in `[1/2, 1)`,
+/// so every release's coefficient is a multiple of `2^-24`, and `expf` is within one ulp of
+/// `e^x`: a shorter release can come out at most one `2^-24` step below the longest's, never two.
+fn slowest_release_rate(sample_rate: u32) -> f32 {
+    let longest = GATE_SPECS[6].maximum;
+    let c = attack_release_coefficient(longest, sample_rate);
+    c - 1.0 / 16_777_216.0
+}
+
+/// The exact-rest bound `R` at `sample_rate` (#1376 D2), or `None` when it does not exist.
+///
+/// **Quantifier.** `R` holds when every input port is exactly zero from the first silent sample
+/// `M` on: the main input and the sidechain. With a zero detector the level clamps to
+/// [`kernel::LEVEL_MIN_DB`] (`-160` dB), below the opening threshold (at least `-80` dB) and below
+/// the re-arm threshold (at least `-80 - 24` dB), so no reload happens: an open gate holds for at
+/// most its hold count, at most `rounded_samples(1000 ms)`, and then closes with `hold = +0.0`;
+/// a closed gate always has `hold = +0.0` (closing needs it, and only an opening reloads it). A
+/// ramp in flight at `M` settles within 64 samples, under every rate's longest hold.
+///
+/// Closed, the gain word walks toward the curve's target at the silent level,
+/// `t = min(max((ratio - 1)(-160 - threshold), -range), 0)`, a fixed word once the ramps settle,
+/// at the release rate (`t < e`). It stops at the **stall word** `w*`, the first word whose step
+/// rounds away ([`effect_runtime::tail::rate_follower_stall_samples`] states the walk's bound and
+/// proves `w*` the same for every start in `[w*, 0]`). Every history with these parameters leaves
+/// the word there: the targets any input produces are at or above `t` (the level is at least
+/// `-160` dB and the curve is monotone), the walk never overshoots its target, and a walk toward a
+/// shallower target stops at or above that target's own stall word. The rest state `Z` is
+/// therefore `(gain = w*, open = +0.0, hold = +0.0)`, the state a reset (open, hold loaded) reaches
+/// after `R` zeros: `R = H_max + K`, `H_max` the longest hold and `K` the walk's bound.
+///
+/// **Recorded limit (#1376 D2 amendment).** A history in which a parameter edit (a range, ratio or
+/// threshold change, a ramp in flight included) left the word *below* `w*` (deeper, between `t` and
+/// `w*`, or below `t`) rests on its own fixed point, which `lanes_at_rest` accepts but which is
+/// not word-equal to `Z`. A snap of the word to its target would make `Z` unique for every history
+/// and is a rendered-bit change, an owner question.
+fn rest_samples(sample_rate: u32) -> Option<u64> {
+    let hold = u64::from(rounded_samples(GATE_SPECS[5].maximum, sample_rate)?);
+    let walk =
+        effect_runtime::tail::rate_follower_stall_samples(slowest_release_rate(sample_rate))?;
+    hold.max(u64::from(RAMP_SAMPLES)).checked_add(walk)
+}
+
+/// `G_p = G_t` in millibels (#1376 D4): the output is the input `x`, or `x g` with
+/// `g = fast_gain_from_db(gain)`, `gain <= 0`, so `g <= 10^(FAST_GAIN_ERROR_DB / 20)`, through one
+/// rounded product. A sidechain feeds only the detector, so the bound holds for every sidechain
+/// input; after silence the output is the same law, so `G_t = G_p`.
+fn peak_gain_millibels() -> i32 {
+    let gain = math::db_to_gain(FAST_GAIN_ERROR_DB) * (1.0 + effect_runtime::tail::ROUNDOFF);
+    math::tail::ceil_millibels(gain, math::tail::Rounding::Computed)
+}
+
+/// `sigma_p = sigma_t` in millibels (#1376 D4, #1379 H3): the underflow allowance of the one
+/// rounded output product.
+fn flush_stall_millibels() -> i32 {
+    math::tail::ceil_millibels(math::tail::UNDERFLOW, math::tail::Rounding::Exact)
+}
+
+/// This effect's tail, tail over every peak, exact-rest bound and composition values, the one place
+/// they are stated (decision 15 D15-4(b), #1377 D1, #1376).
+///
+/// * **Tail `Finite(0)`, decay `0`** (#1376 D1): the output is `select(identity, x, x g)` of the
+///   current main input `x`: no audio history, zero latency. A sidechain feeds only the detector.
+/// * **Rest** [`rest_samples`], the same for both peak cases (the walk's start does not depend on
+///   the input); **tail over every peak** the same `R`.
+/// * **Composition** [`peak_gain_millibels`] and [`flush_stall_millibels`].
+fn tail_and_rest(sample_rate: u32, _quality: EffectQuality) -> effect_contract::NodeTailBound {
+    let Some(rest) = rest_samples(sample_rate) else {
+        return effect_contract::NodeTailBound::UNBOUNDED;
+    };
+    let gain = effect_contract::PeakGain::Millibels(peak_gain_millibels());
+    let stall = effect_contract::FlushStall::Level(flush_stall_millibels());
     effect_contract::NodeTailBound {
         tail: TailSamples::Finite(0),
-        tail_every_peak: TailSamples::Infinite,
-        rest: effect_contract::RestBound::Unstated,
-        composition: effect_contract::CompositionBound::Unstated,
+        tail_every_peak: TailSamples::Finite(rest),
+        rest: effect_contract::RestBound::Bounded(effect_contract::RestSamples {
+            peak_plus_24_dbfs: rest,
+            any_sanitized_input: rest,
+        }),
+        composition: effect_contract::CompositionBound::Stated {
+            decay: effect_contract::TailDecay(0),
+            peak_gain: gain,
+            tail_gain: gain,
+            peak_stall: stall,
+            tail_stall: stall,
+        },
     }
 }
 

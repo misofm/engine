@@ -220,6 +220,225 @@ pub fn pole_follower_rest_samples(
     magnitude_walk(weight, distance_max, snap)
 }
 
+/// One phase of a fixed-unit integer walk: from `b`, `b' = b - D(b)` with
+/// `D(b) = `[`Weight::decrement`]`(b, half)`, until `b <= stop` or `D(b) = 0` (a fixed point).
+/// Returns the steps taken and the last `b`; `None` only if the count overflows.
+fn fixed_walk(weight: Weight, start: u128, half: u128, stop: u128) -> Option<(u64, u128)> {
+    let mut b = start;
+    let mut steps = 0_u64;
+    while b > stop {
+        let m = weight.decrement(b, half);
+        if m == 0 {
+            break;
+        }
+        // Every `n` in `[first(m), b]` has the decrement `m` (it does not decrease with `n`).
+        let run = (b - weight.first(m, half)) / m + 1;
+        let need = (b - stop).div_ceil(m);
+        if need <= run {
+            return Some((steps.checked_add(u64::try_from(need).ok()?)?, b - need * m));
+        }
+        b -= run * m;
+        steps = steps.checked_add(u64::try_from(run).ok()?)?;
+    }
+    Some((steps, b))
+}
+
+/// A walk of two phases: the whole-unit allowance (`half = 2`) until `b <= switch`, then the
+/// half-unit one (`half = 1`) until `b <= stop` or a fixed point. `None` if the first phase stops
+/// above `switch`.
+fn phased_walk(weight: Weight, start: u128, switch: u128, stop: u128) -> Option<(u64, u128)> {
+    let (first, b) = fixed_walk(weight, start, 2, switch)?;
+    if b > switch {
+        return None;
+    }
+    let (second, b) = fixed_walk(weight, b, 1, stop)?;
+    Some((first.checked_add(second)?, b))
+}
+
+/// `c (1 - u)^2` of a positive normal `f32` as an exact weight: the least decrement weight of a
+/// rate-form step `fl(c fl(t - e))` relative to the distance `t - e`.
+fn inflated_weight(c: f32) -> Option<Weight> {
+    let (cm, cx) = decompose(c);
+    let s = (1_u128 << 24) - 1;
+    Some(Weight {
+        p: cm * s * s,
+        q: u32::try_from(48 - cx).ok()?,
+    })
+}
+
+/// The largest integer distance `d`, in units of the word's grid, with `c d (1 + u)^2 < 1/2` for
+/// every coefficient `c <= hi`: a word that close to its target cannot move (its step is under half
+/// a unit, so the sum rounds back to the word).
+fn sure_stall_distance(hi: f32) -> Option<u128> {
+    let (hm, hx) = decompose(hi);
+    let s = (1_u128 << 24) + 1;
+    let shift = u32::try_from(47 - hx).ok()?;
+    if shift >= 127 {
+        return None;
+    }
+    Some(((1_u128 << shift) - 1) / (hm * s * s))
+}
+
+/// The bound of one coefficient bracket `[lo, hi]` of [`rate_follower_stall_samples`]: the
+/// maximum over the three target classes, B, M and A, of the derivation.
+fn stall_bracket(lo: f32, hi: f32) -> Option<u64> {
+    const BINADE: u128 = 1 << 23;
+    const TOP: u128 = 3 << 21;
+    let weight = inflated_weight(lo)?;
+    let sure = sure_stall_distance(hi)?;
+    let after = |b: u128| u64::try_from(b.saturating_sub(sure)).ok();
+    // B: L <= sure, in units of the half grid.
+    let (steps, b) = phased_walk(weight, 2 * BINADE + 2 * sure, BINADE, 0)?;
+    let mut worst = steps.checked_add(after(b)?)?.checked_add(1)?;
+    // A: L >= TOP, in units of the grid of `t`.
+    let (steps, b) = phased_walk(weight, 2 * BINADE - 1, TOP, 0)?;
+    worst = worst.max(steps.checked_add(after(b)?)?);
+    // M: L in [low, high], ranges covering (sure, TOP). A range whose bound is under the maximum so
+    // far is done; a wider one is split at its geometric middle, down to ranges of 1 %.
+    let middle = |low: u128, high: u128| -> Option<u64> {
+        let (fine, b) = phased_walk(weight, 2 * BINADE + 2 * high, BINADE + 2 * low, 2 * low)?;
+        if b > 2 * low {
+            return None;
+        }
+        let (coarse, b) = fixed_walk(weight, high, 1, 0)?;
+        fine.checked_add(coarse)?.checked_add(after(b)?)
+    };
+    let mut ranges = [(0_u128, 0_u128); 64];
+    let mut pending = 0;
+    if sure + 1 < TOP {
+        ranges[0] = (sure + 1, TOP - 1);
+        pending = 1;
+    }
+    while pending > 0 {
+        pending -= 1;
+        let (low, high) = ranges[pending];
+        let bound = middle(low, high)?;
+        if bound <= worst || high - low <= low / 100 || pending + 2 > ranges.len() {
+            worst = worst.max(bound);
+            continue;
+        }
+        let split = math::sqrt((low as f64) * (high as f64)) as u128;
+        let split = split.clamp(low, high - 1);
+        ranges[pending] = (low, split);
+        ranges[pending + 1] = (split + 1, high);
+        pending += 2;
+    }
+    Some(worst)
+}
+
+/// Steps after which a rate-form word `e' = flush(fma(c, t - e, e))` walking toward a fixed
+/// non-zero target `t` from above (`t <= e <= 0` or its mirror) has stopped moving, for every target
+/// `t` and every coefficient `c` in `[rate_min, 1/8]`; `None` when the derivation does not cover
+/// `rate_min` (below `2^-20` or above `1/8`, or not a normal `f32`).
+///
+/// This is the gate's gain word after its hold expires (issue #1376 D2). It never reaches `t`: it
+/// stops at the first word where `fl(c fl(t - e))` is under half a grid unit, the **stall word**
+/// `w*`. With the walk measured from `t` in units of a grid, everything below is scale-free, so the
+/// bound holds for every `t` whose grid products stay normal (and a target so small that the first
+/// step flushes to `+0.0` stalls at once).
+///
+/// # The walk
+///
+/// Let `2^k <= |t| < 2^(k+1)`, `g = ulp(t)`, `h = g / 2`, and `L = (|t| - 2^k) / g`, an integer in
+/// `[0, 2^23)`. Words with `|e| >= 2^k` (distance `d = |t| - |e| <= L g`) are *coarse*, on the
+/// grid `g`; words in the binade below are *fine*, on `h`; lower ones are finer still. A step
+/// moves `e` toward `t` and never past it, and `|e|` only grows, so the walk visits coarser grids
+/// as it goes. One step: `d' = round(d - |p|)` on the grid of the new word, with
+/// `|p| = |fl(c fl(t - e))| >= c'' d`, `c'' = c (1 - u)^2`. In units `U` of a grid at least as fine
+/// as the new word's, with `x = d (1 - c'')`:
+///
+/// * if the new word is on the grid `U`, `d' <= floor(x + 1/2)` (round to nearest, ties up: a
+///   majorant of ties-to-even);
+/// * on any grid of at most `2 U`, `d' <= floor(x + 1)` (a multiple of a grid unit `q <= 2 U`
+///   within `q / 2` of a value at most `x`).
+///
+/// Both right sides are `b - D(b)` with `D(b) = ceil(c'' b - half / 2)`, nondecreasing in `b`, so
+/// a majorant `b` that takes the rule valid for every grid the real word can be on dominates the
+/// distance step by step (`d_j <= b_j`); the walk is evaluated in runs of equal `D`.
+///
+/// When the majorant reaches its fixed point `b*`, the real distance is at most `b*` but the word
+/// may still move. A word at distance `d <= S`, `S` the largest integer with
+/// `c d (1 + u)^2 < 1/2` for every `c` of the bracket, cannot move. Each
+/// moving step moves at least one unit, so at most `b* - S` more steps follow.
+///
+/// # The three target classes, per coefficient bracket `[lo, hi]`
+///
+/// The walk uses `lo` for the positions and `hi` for `S`, so it covers every `c` in the bracket.
+///
+/// * **B, `L <= S`.** Every coarse word is a stall. In units of `h` the start is
+///   `2^24 + 2 L <= 2^24 + 2 S`; the whole-unit rule holds while the word may be finer than `h`
+///   (`d > 2^23` units), then the half-unit rule while it is fine. A fine-to-coarse step is not
+///   dominated, but it lands on a stall: one step more. Bound: walk + `(b* - S)` + 1.
+/// * **M, `S < L < 3 2^21`, in ranges `[La, Lb]`.** While the word is fine it is
+///   dominated in units of `h` from `2^24 + 2 Lb` (whole-unit rule above `2^23 + 2 La`, half-unit
+///   below); a fine word has `d > 2 L >= 2 La`, so it is coarse by the first step `J` with
+///   `b_J <= 2 La`. From there it is coarse at `d <= Lb` in units of `g`, dominated by the
+///   half-unit walk from `Lb` to its fixed point. Bound: `J` + coarse walk + `(b* - S)`. A
+///   range costs about `ln(Lb / La) / c`; one whose bound is under B's and A's is done, a wider one
+///   is split (M's walks start lower than A's, so they need little splitting).
+/// * **A, `L >= 3 2^21`.** In units of `g` the start is `|t| / g < 2^24`; the whole-unit rule above
+///   `3 2^21`, below which every word the walk can hold is coarse. Bound: walk + `(b* - S)`.
+///
+/// Brackets of ratio `1.02` start at `rate_min`. A coarse bound covers every `c >= lo` at once:
+/// the whole-unit walk at `lo` from `2^24` units of `g` to its fixed point `b*`, then at most
+/// `2 b* + 1` moving steps, one per word within `b* g` of `t` (those words are on the grids `g` and
+/// `h`). It falls about as `1 / c`, so the brackets stop at the first `lo` whose coarse bound is
+/// under their maximum (about `1.16 rate_min`), or at `2 rate_min` with the coarse bound included.
+///
+/// The ranges and brackets cost their width: a few thousand samples above the worst real walk at
+/// the gate's slowest release. The class that attains the maximum is B at the slowest bracket (a
+/// target just above a power of two, whose walk ends on the fine grid), with A within about 0.2 %.
+///
+/// # Uniqueness of the stall word
+///
+/// Every walk from a start in `[w*, 0]` toward the same `t` with the same `c` ends on the same
+/// word. The successor of a word depends on the word alone. In the last stretch, where the step
+/// is `|p| < 3/2` units of the word's grid (`d < 3 / (2c)` units), a moving word goes to the
+/// adjacent float toward `t` (at the fine-to-coarse boundary too: the next float is one fine unit
+/// away), so a walk there visits consecutive words and stops at the first word that cannot move.
+/// A step from farther out (`|p| >= 3/2` units) lands no closer than
+/// `d (1 - c (1 + u)^2) - 1/2 >= 3 / (2c) - 2` units, still inside the last stretch's moving words
+/// (a word moves while `c d (1 - u)^2 >= 1/2`, `d >= 1 / (2c)` about). Every walk therefore
+/// enters the last stretch above its first stall word and walks it word by word: they all stop at
+/// the same one, and it is the walk from `+0.0`'s end, `w*`. A start between `w*` and `t` (only a
+/// parameter edit leaves one there) is past that word and stops at the first fixed point below it.
+#[must_use]
+pub fn rate_follower_stall_samples(rate_min: f32) -> Option<u64> {
+    const FLOOR: f32 = 1.0 / 1_048_576.0;
+    if !rate_min.is_normal() || !(FLOOR..=0.125).contains(&rate_min) {
+        return None;
+    }
+    let ceiling = 2.0 * f64::from(rate_min);
+    let mut lo = rate_min;
+    let mut worst = 0_u64;
+    loop {
+        // The coarse bound holds for every coefficient at or above `lo`: once it is under the
+        // brackets' maximum, no faster coefficient can raise it.
+        let crude = coarse_stall_bound(lo)?;
+        if crude <= worst {
+            return Some(worst);
+        }
+        if f64::from(lo) >= ceiling {
+            return Some(worst.max(crude));
+        }
+        let target = f64::from(lo) * 1.02;
+        let mut hi = target as f32;
+        if f64::from(hi) < target {
+            hi = f32::from_bits(hi.to_bits() + 1);
+        }
+        worst = worst.max(stall_bracket(lo, hi)?);
+        lo = hi;
+    }
+}
+
+/// The coarse bound of [`rate_follower_stall_samples`] for every coefficient `c >= lo`: the
+/// whole-unit walk at `lo` from `2^24` units of `g` to its fixed point `b*`, then one step per word
+/// within `b* g` of the target, at most `2 b* + 1`.
+fn coarse_stall_bound(lo: f32) -> Option<u64> {
+    let (steps, b) = fixed_walk(inflated_weight(lo)?, 1 << 24, 2, 0)?;
+    steps.checked_add(u64::try_from(2 * b + 1).ok()?)
+}
+
 #[cfg(test)]
 mod tests {
     extern crate std;
@@ -313,6 +532,69 @@ mod tests {
         assert_eq!(pole_follower_rest_samples(stall, 1.0, snap), None);
         let below = f32::from_bits(stall.to_bits() - 1);
         assert!(pole_follower_rest_samples(below, 1.0, snap).is_some());
+    }
+
+    /// The real gate word toward a non-zero target: `flush(fma(c, t - e, e))` at `f32` (two
+    /// roundings), from `e` until a step leaves it unchanged. Returns the steps and the word.
+    fn stall_brute_force(c: f32, t: f32, e: f32) -> (u64, f32) {
+        let mut e = e;
+        let mut steps = 0;
+        loop {
+            let next = c * (t - e) + e;
+            let next = if next.abs() < lane::FLUSH_EPS {
+                0.0
+            } else {
+                next
+            };
+            if next == e {
+                return (steps, e);
+            }
+            e = next;
+            steps += 1;
+        }
+    }
+
+    /// **The stall bound covers every target and every start ends on one word**, at coefficients
+    /// faster than the gate's slowest (its gate 4 checks that one): over targets
+    /// `t = -(2^k + L ulp(t))` for `L` across the three classes of the derivation (a target on a
+    /// power of two, just above one by fewer or more than the sure-stall distance, mid-binade and
+    /// just below the next power), the walk from `+0.0` stops within the bound, the largest walk
+    /// is within `max(2, ceil(B / 100))` of it, and walks from two other starts above the stall
+    /// word stop on the same word.
+    #[test]
+    fn the_stall_bound_covers_every_target_and_the_stall_word_is_unique() {
+        for c in [1.0e-3_f32, 2.0e-4] {
+            let bound = rate_follower_stall_samples(c).expect("a bound");
+            let sure = sure_stall_distance(c).expect("a distance");
+            let mut worst = 0;
+            let mut ls: std::vec::Vec<u32> = std::vec![0, 1, 2, 3, (1 << 23) - 1, 1 << 22, 3 << 21];
+            for offset in 0..40 {
+                ls.push(sure as u32 / 2 + offset * (sure as u32) / 40);
+                ls.push(sure as u32 + offset * 7);
+                ls.push((2 * sure) as u32 + offset * 13);
+            }
+            for exponent in [-3_i32, 6] {
+                let base = f32::from_bits(((127 + exponent) as u32) << 23);
+                for &l in &ls {
+                    let t = -f32::from_bits(base.to_bits() + l);
+                    let (steps, word) = stall_brute_force(c, t, 0.0);
+                    assert!(
+                        steps <= bound,
+                        "c = {c:e}, t = {t:e} (L = {l}): {steps} steps, bound {bound}"
+                    );
+                    worst = worst.max(steps);
+                    for start in [t / 3.0, f32::from_bits(word.to_bits() - 7)] {
+                        let (_, other) = stall_brute_force(c, t, start);
+                        assert_eq!(other.to_bits(), word.to_bits(), "c = {c:e}, t = {t:e}");
+                    }
+                }
+            }
+            std::eprintln!("c = {c:e}: largest walk {worst}, bound {bound}");
+            assert!(
+                bound <= worst + 2.max(worst.div_ceil(100)),
+                "c = {c:e}: largest walk {worst}, bound {bound}"
+            );
+        }
     }
 
     /// D3: at and below `2^-24` the word can stall above its floor, and no bound is stated.
