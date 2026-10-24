@@ -332,3 +332,125 @@ fn the_word_lists_are_complete_and_the_witness_declines_on_exactly_the_asymmetri
         );
     }
 }
+
+/// Issue #1894: a collapsed bank whose left channel falls silent is at rest, and a skipped block
+/// is exact.
+///
+/// Dual signal first, so the collapse freezes a right channel that is **not** at rest; then
+/// collapsed signal, then collapsed `+0.0` until the left channel rests. The bank must then answer
+/// every lane at rest (a predicate that still ANDs the frozen right channel answers `0` and never
+/// gets there), `advance_clocks` stands in for three zero blocks the reference renders (red on a
+/// skip that leaves the cursor behind), and after the disengage the payloads and the next dual
+/// blocks are the never-collapsed bank's, bit for bit.
+#[test]
+fn a_collapsed_bank_that_falls_silent_is_at_rest_and_skips_exactly() {
+    const SKIPPED: usize = 3;
+    const REST_BOUND: usize = 1_000;
+    let lanes = lanes();
+    let all = (1_u32 << lanes) - 1;
+    let offsets = vec![0_u32; lanes + 1];
+    let mut mixed = bank();
+    let mut never = bank();
+    let mut step = 0_usize;
+    // `skip`: the reference renders the `+0.0` block, the collapsed bank advances its clocks.
+    let mut run = |mixed: &mut dyn PreparedNativeEffectBank,
+                   never: &mut dyn PreparedNativeEffectBank,
+                   signal: bool,
+                   mono: bool,
+                   skip: bool| {
+        let mut never_left = if signal {
+            block(step)
+        } else {
+            vec![0.0; FRAMES * lanes]
+        };
+        let mut never_right = never_left.clone();
+        let mut mixed_left = never_left.clone();
+        let mut mixed_right = if mono {
+            vec![f32::from_bits(0x7F7F_FFFF); FRAMES * lanes]
+        } else {
+            never_left.clone()
+        };
+        let first = (step * FRAMES) as u64;
+        let spans = (&[][..], &offsets[..]);
+        render(
+            never,
+            &mut never_left,
+            &mut never_right,
+            FRAMES,
+            first,
+            spans,
+            false,
+        );
+        step += 1;
+        if skip {
+            mixed.advance_clocks(all, FRAMES as u32);
+            return;
+        }
+        render(
+            mixed,
+            &mut mixed_left,
+            &mut mixed_right,
+            FRAMES,
+            first,
+            spans,
+            mono,
+        );
+        assert_words(&mixed_left, &never_left, &format!("block {step}: left"));
+        if !mono {
+            assert_words(&mixed_right, &never_right, &format!("block {step}: right"));
+        }
+    };
+    for mono in [false, true] {
+        for _ in 0..8 {
+            run(mixed.as_mut(), never.as_mut(), true, mono, false);
+        }
+    }
+    let rested = (0..REST_BOUND).any(|_| {
+        run(mixed.as_mut(), never.as_mut(), false, true, false);
+        mixed.lanes_at_rest() == all
+    });
+    assert!(
+        rested,
+        "the collapsed bank's left channel rests within the bound"
+    );
+    assert_eq!(
+        never.lanes_at_rest(),
+        all,
+        "the reference rests on the same block"
+    );
+    for _ in 0..SKIPPED {
+        run(mixed.as_mut(), never.as_mut(), false, true, true);
+    }
+    mixed.desymmetrize_channels();
+    for lane in 0..lanes as u32 {
+        assert_eq!(
+            snapshot_bank(mixed.as_ref(), lane),
+            snapshot_bank(never.as_ref(), lane),
+            "lane {lane}: the payload after the skip and the disengage"
+        );
+    }
+    // The flag the disengage clears: one dual block whose left plane is `+0.0` and whose right
+    // carries signal moves the right channel off rest, so no lane may answer at rest. A flag left
+    // set answers from the rested left channel and the right tail would be skipped.
+    for bank in [&mut mixed, &mut never] {
+        let mut left = vec![0.0; FRAMES * lanes];
+        let mut right = vec![0.25; FRAMES * lanes];
+        render(
+            bank.as_mut(),
+            &mut left,
+            &mut right,
+            FRAMES,
+            1 << 30,
+            (&[], &offsets),
+            false,
+        );
+    }
+    assert_eq!(
+        mixed.lanes_at_rest() & all,
+        0,
+        "the right channel is live again"
+    );
+    for _ in 0..2 {
+        run(mixed.as_mut(), never.as_mut(), true, false, false);
+    }
+}
