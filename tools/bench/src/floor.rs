@@ -170,6 +170,9 @@ impl FloorRow {
 /// `sixty_four_track_console_sends` (issue #1227) is absent because no inventory exists for a bus
 /// or a send: its tracks carry the standing strip, but its submix strips, inserts and route mixes
 /// are arithmetic the rulings have never counted, so it states no floor and names no control.
+///
+/// The two packing rows (issue #1783) are absent on the sparse row's terms: their silent lanes are
+/// arithmetic no inventory counts.
 pub(crate) fn floor_row(workload: Workload) -> Option<FloorRow> {
     let full = 1.0_f64;
     Some(match workload {
@@ -180,7 +183,10 @@ pub(crate) fn floor_row(workload: Workload) -> Option<FloorRow> {
         | Workload::ThirteenTrackRaggedStrip
         | Workload::SixteenTrackStrip
         | Workload::SixtyFourTrackAppShape
-        | Workload::SixtyFourTrackConsoleSparse => return None,
+        | Workload::SixtyFourTrackConsoleSparse
+        // The packing rows (#1783): their silent lanes are arithmetic no inventory counts.
+        | Workload::SixtyFourTrackConsoleToggle
+        | Workload::SixtyFourTrackConsoleOnePerBank => return None,
         Workload::NineTrackRaggedStrip => FloorRow {
             lane_ops: BUILTINS_LANE_OPS + EQ_LANE_OPS + COMPRESSOR_LANE_OPS + LIMITER_LANE_OPS,
             width_factor: RAGGED_NINE_TRACK_WIDTH_FACTOR,
@@ -385,17 +391,20 @@ mod tests {
         BANK_WIDTH, BUILTINS_IDENTITY_LANE_OPS, OPS_PER_CYCLE, floor_row, lane_samples_per_block,
     };
     use console_workload::{
-        BUS_SEND_WORKLOADS, CONSOLE_STRIP_WORKLOADS, Workload, native_session_rows,
+        BUS_SEND_WORKLOADS, CONSOLE_STRIP_WORKLOADS, PACKING_WORKLOADS, Workload,
+        native_session_rows,
     };
 
     /// The rows the table states no floor for: the uninventoried nine-track fixture, the metered
-    /// row, the bus-and-send row (issue #1227) and the console-strip rows (issue #1085).
+    /// row, the bus-and-send row (issue #1227), the console-strip rows (issue #1085) and the packing
+    /// rows (issue #1783).
     fn underived(workload: Workload) -> bool {
         matches!(
             workload,
             Workload::NineTrackBaseline | Workload::SixtyFourTrackConsoleMetered
         ) || BUS_SEND_WORKLOADS.contains(&workload)
             || CONSOLE_STRIP_WORKLOADS.contains(&workload)
+            || PACKING_WORKLOADS.contains(&workload)
     }
 
     fn rust_floor_table() -> String {

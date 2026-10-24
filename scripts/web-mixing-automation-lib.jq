@@ -28,16 +28,17 @@ def web_mixing_keys: ["arms","automated_output_sha256","automated_p50_ns","autom
 def web_feed_keys: ["amplitude","block_frames","continuous_across_blocks","delivery","radians_per_frame","track_phase_radians","waveform"];
 def commit_id: type == "string" and test("^[0-9a-f]{40}$");
 
-# #1085, #1228, #1744: one console-strip document's entry, and the four documents in the order the
-# harness times them: the native rows' kinds, fixtures and facts, as `session_kind_shape` and
+# #1085, #1228, #1744, #1783: one console-strip document's entry, and the six documents in the
+# order the harness times them: the native rows' kinds, fixtures and facts, as `session_kind_shape` and
 # `bypass_session_shape` pin them for the native records. The app shape's layout reads `inserts`
 # on today's racks and `pre_insert` once the app puts its EQ and compressor in the session console;
 # both are accepted for that document alone, as the native validator accepts them for its row. The
 # sparse row is the standing console's fixture and facts with the native sparse row's input
-# (`odd_tracks_silent`); every other document is fed the tone.
+# (`odd_tracks_silent`), and the two packing rows (#1783) are its fixture and facts with theirs
+# (`odd_tracks_toggle_8_blocks`, `one_track_per_bank`); every other document is fed the tone.
 def web_document_keys: ["bypass_pattern","bypassed_tracks","fixture_id","input_signal","output_sha256","p50_ns","p95_ns","p99_ns","strip_content","strip_layout","tracks","workload_kind"];
 def web_documents_valid:
-  type == "array" and length == 4 and
+  type == "array" and length == 6 and
   all(.[]; type == "object" and (keys | sort) == web_document_keys and
     .tracks == 64 and (.output_sha256 | sha256) and
     ([.p50_ns,.p95_ns,.p99_ns] | all(positive_integer)) and
@@ -56,7 +57,16 @@ def web_documents_valid:
   (.[3] | .workload_kind == "sixty_four_track_console_sparse" and .fixture_id == console_fixture and
     .strip_content == "eq+compressor+limiter" and .strip_layout == intended_layout and
     .input_signal == "odd_tracks_silent" and .bypass_pattern == "none" and .bypassed_tracks == 0) and
-  (map(.output_sha256) | unique | length) == 4;
+  (.[4] | .workload_kind == "sixty_four_track_console_toggle" and .fixture_id == console_fixture and
+    .strip_content == "eq+compressor+limiter" and .strip_layout == intended_layout and
+    .input_signal == "odd_tracks_toggle_8_blocks" and .bypass_pattern == "none" and
+    .bypassed_tracks == 0) and
+  (.[5] | .workload_kind == "sixty_four_track_console_one_per_bank" and
+    .fixture_id == console_fixture and
+    .strip_content == "eq+compressor+limiter" and .strip_layout == intended_layout and
+    .input_signal == "one_track_per_bank" and .bypass_pattern == "none" and
+    .bypassed_tracks == 0) and
+  (map(.output_sha256) | unique | length) == 6;
 
 # One named claim of a record. A claim that cannot be evaluated on this record (a field of the wrong
 # type) is a failed claim, not an error, so every claim is judged and every failure can be named.

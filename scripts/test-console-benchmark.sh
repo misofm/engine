@@ -2,7 +2,7 @@
 # Console validator mutation suite. Hermetic: no workload, no timing, no binary.
 #
 # A validator that has never been shown to reject anything is decoration. Every rule below is
-# mutated in turn and asserted red, so the aggregate's guarantees -- seventy-four records, both
+# mutated in turn and asserted red, so the aggregate's guarantees -- seventy-eight records, both
 # rounds, one host, one admissibility state, the decomposition rows' pinned strip contents, every
 # session row's pinned source feed, the class-A statements that neither the stationary smoother nor
 # a meter nor an armed observation tap nor a restated parameter nor the mono collapse nor the
@@ -831,6 +831,28 @@ sparse_mutation '.tracks = 9' 'a sparse row that is not the sixty-four-track con
 session_mutation '.input_signal = "odd_tracks_silent"' 'the standing console row claiming sparse input'
 expect_reject "$(printf '%s' "$session" | jq -c '.workload_kind = "sixty_four_track_idle" | .synthetic_fixture = true | .input_signal = "odd_tracks_silent"')" \
     'the idle row claiming sparse input'
+# #1783: the packing rows, the standing strip as written with an input fed in code, each pinned on
+# its own input.
+session_toggle=$(printf '%s' "$session" | jq -c \
+    '.workload_kind = "sixty_four_track_console_toggle" | .synthetic_fixture = true
+      | .input_signal = "odd_tracks_toggle_8_blocks"')
+session_one_per_bank=$(printf '%s' "$session" | jq -c \
+    '.workload_kind = "sixty_four_track_console_one_per_bank" | .synthetic_fixture = true
+      | .input_signal = "one_track_per_bank"')
+expect_accept "$session_toggle" 'the toggle row'
+expect_accept "$session_one_per_bank" 'the one-per-bank row'
+for signal in tone odd_tracks_silent one_track_per_bank; do
+    expect_reject "$(printf '%s' "$session_toggle" | jq -c --arg s "$signal" '.input_signal = $s')" \
+        "a toggle row claiming the $signal input"
+done
+for signal in tone odd_tracks_silent odd_tracks_toggle_8_blocks; do
+    expect_reject "$(printf '%s' "$session_one_per_bank" | jq -c --arg s "$signal" '.input_signal = $s')" \
+        "a one-per-bank row claiming the $signal input"
+done
+expect_reject "$(printf '%s' "$session_toggle" | jq -c '.synthetic_fixture = false')" \
+    'a toggle row reported as the fixture rendered as written'
+expect_reject "$(printf '%s' "$session_sparse" | jq -c '.input_signal = "odd_tracks_toggle_8_blocks"')" \
+    'a sparse row claiming the toggle input'
 
 # #144 item 13 / #163 phase 0a: admissibility. The record has to say whether its measurement was
 # controlled, and the claim has to agree with the rest of the record.
@@ -1409,11 +1431,20 @@ records=$(jq -cn --argjson session "$session" --argjson hoist "$hoist" --argjson
         strip_layout: "pre_insert:eq+compressor", fixture_id: app_fixture,
         output_sha256: ($a[0:63] + "4")}) as $arm
       | (1, 2) as $round | $lanes + $arm | .round = $round ]
-  # #938: the live-producer row of each round, appended last so the index map below is unchanged:
-  # 72 and 73. It renders the ring row bits.
-  + [ (1, 2) as $round | $live | .round = $round | .output_sha256 = ($a[0:63] + "a") ]')
+  # #938: the live-producer row of each round, appended after those so the index map below is
+  # unchanged: 72 and 73. It renders the ring row bits.
+  + [ (1, 2) as $round | $live | .round = $round | .output_sha256 = ($a[0:63] + "a") ]
+  # #1783: the two packing rows of each round, appended last: 74-75 toggle, 76-77 one per bank.
+  # Each renders bits of its own.
+  + [ ({kind: "sixty_four_track_console_toggle", signal: "odd_tracks_toggle_8_blocks",
+        digest: "70"},
+       {kind: "sixty_four_track_console_one_per_bank", signal: "one_track_per_bank",
+        digest: "71"}) as $p
+      | (1, 2) as $round | $session
+      | .workload_kind = $p.kind | .synthetic_fixture = true | .input_signal = $p.signal
+      | .round = $round | .output_sha256 = ($a[0:62] + $p.digest) ]')
 
-expect_aggregate_accept "$(printf '%s' "$records" | jq -c '.[]')" 'the seventy-four-record set'
+expect_aggregate_accept "$(printf '%s' "$records" | jq -c '.[]')" 'the seventy-eight-record set'
 # #938: the live row renders the ring row bits in both rounds, and it is a row of the set. Both of
 # its rounds move together, so only the pair pin can refuse the first edit.
 expect_aggregate_reject "$(printf '%s' "$records" | jq -c --arg c "$digest_c" '.[72].output_sha256 = $c | .[73].output_sha256 = $c | .[]')" 'a live-producer row that rendered other bits than the ring row'
@@ -1515,6 +1546,21 @@ expect_aggregate_reject "$(printf '%s' "$records" | jq -c --arg c "$digest_c" '(
     'a sparse row whose rounds rendered different output'
 expect_aggregate_accept "$(printf '%s' "$records" | jq -c '(.[] | select(.workload_kind == "sixty_four_track_app_shape")).strip_layout = "pre_insert:eq+compressor" | .[]')" \
     'a run whose app shape reads the console spelling'
+# #1783: both packing rows are required, and each renders neither of the two rows it is read
+# against. Each digest edit moves both rounds of one row together, so only the packing rule can
+# refuse it.
+for kind in sixty_four_track_console_toggle sixty_four_track_console_one_per_bank; do
+    expect_aggregate_reject "$(printf '%s' "$records" | jq -c --arg k "$kind" '[.[] | select(.workload_kind != $k)] | .[]')" \
+        "a set missing the $kind row"
+done
+for pair in sixty_four_track_console_toggle:sixty_four_track_console \
+    sixty_four_track_console_toggle:sixty_four_track_console_sparse \
+    sixty_four_track_console_one_per_bank:sixty_four_track_console \
+    sixty_four_track_console_one_per_bank:sixty_four_track_idle; do
+    row=${pair%%:*} other=${pair##*:}
+    expect_aggregate_reject "$(printf '%s' "$records" | jq -c --arg r "$row" --arg o "$other" '(.[] | select(.record == "console_session" and .workload_kind == $r)).output_sha256 = (first(.[] | select(.record == "console_session" and .workload_kind == $o)).output_sha256) | .[]')" \
+        "a $row row that rendered the $other row bits"
+done
 # #1227: the bus-and-send row is required, and it never renders the standing console row's bits.
 # Each digest edit moves both rounds of the row together, so the rounds still agree and only the
 # bus-and-send rule can refuse it.
@@ -1545,7 +1591,8 @@ floor_records=$(printf '%s' "$records" | jq -c -L "$scripts_dir" --arg s "$core_
     "sixty_four_track_console_half_mono": 4.39,
     "ten_track_ragged_strip": 0.75, "thirteen_track_ragged_strip": 0.95,
     "sixteen_track_strip": 1.10, "sixty_four_track_app_shape": 2.90,
-    "sixty_four_track_console_sparse": 4.10
+    "sixty_four_track_console_sparse": 4.10,
+    "sixty_four_track_console_toggle": 4.20, "sixty_four_track_console_one_per_bank": 3.90
   }[.workload_kind];
   def rescale:
     scale as $k |
@@ -1567,7 +1614,7 @@ floor_records=$(printf '%s' "$records" | jq -c -L "$scripts_dir" --arg s "$core_
                  / .isolated_cycles_per_lane_sample)
         else . end ]')
 
-expect_aggregate_accept "$(printf '%s' "$floor_records" | jq -c '.[]')" 'the seventy-four-record set with floor accounting'
+expect_aggregate_accept "$(printf '%s' "$floor_records" | jq -c '.[]')" 'the seventy-eight-record set with floor accounting'
 expect_aggregate_reject "$(printf '%s' "$floor_records" | jq -c '(.[] | select(.workload_kind == "sixty_four_track_compressor_only")).isolated_cycles_per_lane_sample = 3.0 | .[]')" 'an isolate that is not the subtraction it names'
 expect_aggregate_reject "$(printf '%s' "$floor_records" | jq -c '(.[] | select(.workload_kind == "sixty_four_track_compressor_only")).isolated_percent_of_floor = 88.0 | .[]')" 'an isolate percentage that does not follow from the two rows floors'
 # The control row moving is the same defect seen from the other side: the subtraction stops being
@@ -1647,7 +1694,19 @@ web_round=$(jq -cn --arg a "$digest_a" --arg b "$digest_b" --arg c "$digest_c" -
      strip_content: "eq+compressor+limiter",
      strip_layout: "pre_insert:eq+compressor,post_insert:limiter", input_signal: "odd_tracks_silent",
      bypass_pattern: "none", bypassed_tracks: 0,
-     p50_ns: 306000, p95_ns: 327000, p99_ns: 345000, output_sha256: ($a[0:63] + "4")}],
+     p50_ns: 306000, p95_ns: 327000, p99_ns: 345000, output_sha256: ($a[0:63] + "4")},
+    {workload_kind: "sixty_four_track_console_toggle",
+     fixture_id: "fixtures/session/v1/console-sixty-four-track-intended.json", tracks: 64,
+     strip_content: "eq+compressor+limiter",
+     strip_layout: "pre_insert:eq+compressor,post_insert:limiter",
+     input_signal: "odd_tracks_toggle_8_blocks", bypass_pattern: "none", bypassed_tracks: 0,
+     p50_ns: 304000, p95_ns: 325000, p99_ns: 343000, output_sha256: ($a[0:63] + "3")},
+    {workload_kind: "sixty_four_track_console_one_per_bank",
+     fixture_id: "fixtures/session/v1/console-sixty-four-track-intended.json", tracks: 64,
+     strip_content: "eq+compressor+limiter",
+     strip_layout: "pre_insert:eq+compressor,post_insert:limiter",
+     input_signal: "one_track_per_bank", bypass_pattern: "none", bypassed_tracks: 0,
+     p50_ns: 300000, p95_ns: 321000, p99_ns: 339000, output_sha256: ($a[0:63] + "2")}],
   bit_identity: "quiet == restated, asserted in-run", bank_collapse_counters_exported: false,
   loadavg_start: "9.52 7.22 7.64 8/1930 3836898", loadavg_end: "9.48 7.25 7.65 6/1921 3837039",
   descriptive_only: true,
@@ -1743,9 +1802,14 @@ web_document_mutation 'del(.documents)' 'a browser round without its documents'
 web_document_mutation '.documents = []' 'a browser round that timed no document'
 web_document_mutation '.documents |= .[0:1]' 'a browser round that timed the console alone'
 web_document_mutation '.documents |= reverse' 'documents in another order'
-web_document_mutation '.documents |= . + [.[0]]' 'a fifth document'
+web_document_mutation '.documents |= . + [.[0]]' 'a seventh document'
 web_document_mutation '.documents |= .[0:3]' 'a browser round without the sparse document'
 web_document_mutation '.documents[3].input_signal = "tone"' 'the sparse document claiming every track active'
+# #1783: the packing documents, each pinned on its input.
+web_document_mutation '.documents |= .[0:4]' 'a browser round without the packing documents'
+web_document_mutation '.documents[4].input_signal = "odd_tracks_silent"' 'the toggle document claiming sparse input'
+web_document_mutation '.documents[5].input_signal = "odd_tracks_silent"' 'the one-per-bank document claiming sparse input'
+web_document_mutation '.documents[4].output_sha256 = .documents[3].output_sha256' 'the toggle document rendering the sparse bits'
 web_document_mutation '.documents |= .[0:2]' 'a browser round without the bus-and-send document'
 web_document_mutation '.documents[2].workload_kind = "sixty_four_track_console"' 'the bus-and-send document labelled the standing console'
 web_document_mutation '.documents[2].fixture_id = "fixtures/session/v1/console-sixty-four-track-intended.json"' 'the bus-and-send document booted from the standing fixture'

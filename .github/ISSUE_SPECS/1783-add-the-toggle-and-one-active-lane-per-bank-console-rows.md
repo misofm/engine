@@ -30,3 +30,15 @@ The bench unit test turns red when a row's record drifts from its validator; no 
 ## Dependencies
 
 #1107 merged (so the rows read against the whole-bank skip).
+
+## Decision record (2026-10-24, attempt 1)
+
+- Root accepted the scope note's R1-R3: the one-per-bank pattern is keyed on the build's lane width (`track % Backend::current().width() != 0` is silent; the record states its backend; wasm is always four lanes); the toggle flips odd tracks only, every `TOGGLE_HALF_PERIOD_BLOCKS = 8` blocks, starting silent; the rows sit in a new `PACKING_WORKLOADS` array emitted after `CONSOLE_STRIP_WORKLOADS`, which stays frozen.
+- Record names: `sixty_four_track_console_toggle` (input `odd_tracks_toggle_8_blocks`) and `sixty_four_track_console_one_per_bank` (input `one_track_per_bank`). Both are synthetic, on the standing fixture, with no warmup and no floor (`not_derived`, as the sparse row).
+- The frozen driver holds a second preallocated block per claim for a toggling input and picks the phase in `begin_block` from the block's first source sample; render only selects between two slices. The graph reads `played_planes` per block (`ArenaMembers::gather_planes`), so the phase reaches every gather.
+- Validator: 78 records, 50 `console_session` records (two rows times two rounds; the brief's "46 -> 48" counted rows, not records). Digest rules only: toggle != console and != sparse; one-per-bank != console and != idle. V8: `web_documents_valid` takes six documents, positions 4 and 5 pinned.
+- Paths: `tools/bench/src/floor.rs` and `scripts/operator/{run,preflight}-console-benchmark.sh` changed as consequences (the floor match is exhaustive; the runner and preflight pin the record count).
+
+### Stated limit
+
+After real signal the standing console's compressor needs about 620 blocks to rest (#1784: 79,200 samples). With a half period of 8 blocks no toggling lane ever rests, so the toggle row cannot thrash a packer: it measures the activity test under flipping input and, after #1782, that the packer adds nothing on lanes that never rest. A row that cycles rest needs a period above the rest bound, which a 1,000-block run cannot cycle meaningfully.
