@@ -255,3 +255,53 @@ same `sdk-spectrum-hop` failure in WebKit, only under CPU load:
 **Dependencies, added.** The WebKit clock-stall issue gives the out-of-scope rule its committed
 repro. #1345 does not need to be on `main` before the work starts, because the measurement uses
 exported trees.
+
+## Amendment 2 (root, 2026-10-24): narrowed to D2, then closed
+
+*Verified on `main` at `506196ce5`.*
+
+- **Facts.** #1106 (deadline-bound hop wait) and #1248 (named continuous predicates) have landed.
+  Of the last 60 `qualification` runs on `main`, no Firefox or WebKit leg failed; the one red
+  `main` run since 2026-10-09 was Chromium (37879401215). The one branch run with red browser legs
+  since 2026-10-22 (40082172520) failed all three browsers and the workspace job together, a batch
+  defect, not this flake. Every recorded spectrum failure came from the 32-CPU development box,
+  most under artificial load.
+- **R1 (root).** The slice is D2 only. After it lands, #1522 closes with: *cause unproven, no CI
+  repro in the last 60 main runs, capture in place, reopen on the next red log*. D1, D4, the fix
+  (deliverable 3) and gates 1-3 (cause, reproduction, soak) are not done; they come back with the
+  next red `sdk-spectrum-*` log.
+- **R2 (root).** Amendment 1's paired M-vs-B matrix is dropped as moot: #1345's batch 3 merged
+  2026-10-13 and `main` has not flaked since.
+
+## Attempt record
+
+**Attempt 1 (2026-10-24, D2).**
+
+- `run.mjs`: the `sdk-spectrum-hop` gate's predicate is split into twelve named conditions
+  (`requestHop`, `boundsHop`, `nativeStart`, `nativeRead`, `publicationCount`, `notificationHops`,
+  `notificationSmoothing`, `publications`, `startDelta`, `spans`, `resultMetadata`, `ownedArrays`;
+  their conjunction is the old predicate). A failure prints the failed names and the
+  `configuredHop` record. The record's publications already carry scalars only (no bin arrays);
+  the per-notification hop and smoothing lists are reduced to `{length, distinct}`.
+- `sdk-response-entry.ts`: Amendment 1's signature fields are added as `clock.atResume` (sampled
+  when `resume()` resolves, not awaited by the wait) and `clock.atEnd` (after the wait): the
+  context's `state` and `currentTime` and the status reply's `requestId`, `renderedQuanta` and
+  `lastResult`. The probe's own `published N windows` throw also prints `clock`. They are **not**
+  sampled at each `pump()`: a status round trip per poll would change the wait that
+  `sdk-spectrum-hop-wait` measures.
+- No new test (gate 4 is the self-test mutation). **Correction to the brief:** the mutation
+  `sdk-spectrum-hop-wrong` sets `continuous.first.hopFrames`, so it is caught by
+  `sdk-spectrum-continuous`, not by this gate. The mutation that reaches `sdk-spectrum-hop` is
+  `sdk-spectrum-hop-missing`. Its failure text, captured once in Chromium on `08ea327e0` with a
+  print-only patch that was then removed:
+
+  ```
+  chromium: sdk-spectrum-hop: actual browser H1024 did not preserve Worklet metadata, Worker results, overlap, smoothing, and ownership: failed ["nativeStart"] in {"requestHopFrames":1024,"smoothingMs":37.5,"boundsHopFrames":1024,"nativeStart":{"status":1,"sampleRateHz":48000,"quantumFrames":128,"smoothingMs":37.5,"capturedSample":"0","endSample":"0","sequence":"0","windows":"0","droppedCaptures":"0"},"nativeRead":[...4 entries, hopFrames 1024, smoothingMs 37.5...],"publicationCount":12,"wait":{"startDelayMs":750,"deadlineMs":10000,"pollMs":5,"firstPublicationAfterMs":806.5,"secondPublicationAfterMs":833.3,"elapsedMs":838.3,"polls":162,"neverPublishes":{"count":0,"polls":50,"elapsedMs":253.8,"deadlineMs":250}},"notificationHops":{"length":12,"distinct":[1024]},"notificationSmoothingMs":{"length":12,"distinct":[37.5]},"publications":[{"metadata":{"status":"ready","hopFrames":1024,...,"capturedSample":"37504","endSample":"39552","sequence":"0","windows":"1"},"result":{"capturedSample":"37504","endSample":"39552","windowFrames":2048,"binCount":1025,"finite":true,"ownedArrays":true}},{...,"capturedSample":"38528","endSample":"40576",...}],"startDelta":"1024","firstSpan":"2048","secondSpan":"2048","resultHopFrames":1024,"resultSmoothingMs":37.5,"ownedArrays":true,"clock":{"atResume":{"contextState":"running","currentTime":0.0133,"requestId":129,"renderedQuanta":"5","lastResult":0},"atEnd":{"contextState":"running","currentTime":0.8507,"requestId":145,"renderedQuanta":"319","lastResult":0}}}
+  ```
+
+  (`...` elides repeated fields of the one-line log; the names and the failed condition are
+  verbatim.)
+- Real-browser legs on `08ea327e0`, CI command (`--check-matrix --self-test-mutations`, private
+  PulseAudio null sink), each run once: Firefox 153.0 passed; WebKit 26.5 passed.
+- **Close record (R1).** Cause unproven, no CI repro in the last 60 main runs, capture in place,
+  reopen on the next red log.
