@@ -3746,6 +3746,13 @@ struct LimiterCore<L: Lane> {
     /// The bypass flag in force when the claim above was earned. Bypass selects a different arm of
     /// the output `select`, so a claim earned on one side of it says nothing about the other.
     silent_bypass: bool,
+    /// Whether a collapsed block ([`process_block_mono`](Self::process_block_mono)) has run since
+    /// the last disengage copy ([`desymmetrize`](Self::desymmetrize)), which alone clears it
+    /// (#1894). While it is set the right channel is frozen and stale, so
+    /// [`lanes_at_rest`](Self::lanes_at_rest) reads the left channel alone (its scan and the
+    /// claim's ramp legs) and [`advance_clocks`](Self::advance_clocks) advances the left channel's
+    /// phase alone, as the collapsed silent path does: the effect contract's collapsed-bank rule.
+    collapsed: bool,
     /// Issue #990: the linked-agreement record.
     ///
     /// **Invariant:** when this is `true`, then on every lane the two channels' gain words are
@@ -3802,6 +3809,7 @@ impl<L: Lane> LimiterCore<L> {
             active: every_lane(width),
             silent_fixed_point: false,
             silent_bypass: metadata.bypass,
+            collapsed: false,
             gain_linked,
             #[cfg(test)]
             silent_engagements: 0,
@@ -4085,6 +4093,8 @@ impl<L: Lane> LimiterCore<L> {
         // #990: only the left channel advances from here, the silent path included, so the right
         // channel's gain words go stale until `desymmetrize` copies the left over them.
         self.gain_linked = false;
+        // #1894: and so does every right word the rest predicate reads.
+        self.collapsed = true;
         let words = frames * L::WIDTH;
         let quiet = self.silent_bypass == self.coefficients.bypass
             && ramps_are_stationary(&self.left.limit)
@@ -4130,6 +4140,7 @@ impl<L: Lane> LimiterCore<L> {
     #[cfg(test)]
     fn process_block_mono_runtime_oracle(&mut self, left_io: &mut [f32], frames: usize) {
         self.gain_linked = false;
+        self.collapsed = true;
         limiter_block_mono_runtime_oracle::<L>(
             left_io,
             frames,
@@ -4147,6 +4158,7 @@ impl<L: Lane> LimiterCore<L> {
         self.right.copy_state_from(&self.left);
         // #990: every word of the right channel is now the left's, the gain words included.
         self.gain_linked = true;
+        self.collapsed = false;
     }
 
     /// The boundary-check record, for the gates.
@@ -4162,16 +4174,17 @@ impl<L: Lane> LimiterCore<L> {
     }
 
     /// The bank's rest mask (issue #1745): both channels' per-lane predicates ANDed
-    /// ([`ChannelState::lanes_at_silent_rest`]). Clocks excluded: the shared [`Cursors`] and each
+    /// ([`ChannelState::lanes_at_silent_rest`]), or the left channel's alone while
+    /// [`collapsed`](Self::collapsed) (#1894). Clocks excluded: the shared [`Cursors`] and each
     /// lane's van Herk `phase`.
     ///
     /// # The standing claim (issue #1107)
     ///
     /// When the #182 S2 claim stands -- `silent_fixed_point`, earned under the bypass now in
-    /// force, with every ramp of both channels stationary -- every lane is at rest, and the scan
-    /// is not run. The scan reads every ring word of every lane (about 3 us per bank per call on
-    /// the 64-track console at 48 kHz), which a whole-bank skip would otherwise pay on every
-    /// silent block. The claim is the scan's own answer, taken after the last rendered or skipped
+    /// force, with every ramp of both channels stationary (the left channel's alone while
+    /// collapsed) -- every lane is at rest, and the scan is not run. The scan reads every ring
+    /// word of every lane (about 3 us per bank per call on the 64-track console at 48 kHz), which
+    /// a whole-bank skip would otherwise pay on every silent block. The claim is the scan's own answer, taken after the last rendered or skipped
     /// block ([`process_block`](Self::process_block), [`advance_clocks`](Self::advance_clocks)),
     /// and every path that can move a lane's state between two blocks clears it: both resets,
     /// a restore (the plan-swap carry and #1747's lane swap restore through it), an automation
@@ -4187,20 +4200,27 @@ impl<L: Lane> LimiterCore<L> {
     }
 
     /// The #182 S2 claim, with the fast path's own state legs (the input leg excluded): earned
-    /// under the bypass in force and every ramp stationary.
+    /// under the bypass in force and every ramp stationary, the left channel's alone while
+    /// [`collapsed`](Self::collapsed), as the collapsed fast path reads them.
     fn silent_claim_stands(&self) -> bool {
         self.silent_fixed_point
             && self.silent_bypass == self.coefficients.bypass
             && ramps_are_stationary(&self.left.limit)
             && ramps_are_stationary(&self.left.release)
-            && ramps_are_stationary(&self.right.limit)
-            && ramps_are_stationary(&self.right.release)
+            && (self.collapsed
+                || (ramps_are_stationary(&self.right.limit)
+                    && ramps_are_stationary(&self.right.release)))
     }
 
     /// The per-lane scan [`lanes_at_rest`](Self::lanes_at_rest) answers from when the claim does
     /// not stand.
     fn scan_lanes_at_rest(&self) -> u32 {
-        self.left.lanes_at_silent_rest::<L>() & self.right.lanes_at_silent_rest::<L>()
+        let left = self.left.lanes_at_silent_rest::<L>();
+        if self.collapsed {
+            left
+        } else {
+            left & self.right.lanes_at_silent_rest::<L>()
+        }
     }
 
     /// What one dual block of `frames` frames of exact `+0.0` input leaves on a bank whose lanes
@@ -4224,15 +4244,18 @@ impl<L: Lane> LimiterCore<L> {
     /// A mask that leaves a lane out is not a whole-bank skip, so it withdraws the claim rather
     /// than keep or earn it: the claim only ever buys speed, and withdrawing it is always sound.
     ///
-    /// The right channel's phase advances on a collapsed bank too. A collapsed block would leave
-    /// it frozen, but a collapsed bank's right channel is stale by contract and
-    /// [`desymmetrize`](Self::desymmetrize) overwrites it before any dual block reads it.
+    /// A collapsed bank advances its left channel's phase alone (#1894), as the collapsed block
+    /// would: its right channel is stale by contract and [`desymmetrize`](Self::desymmetrize)
+    /// overwrites it before any dual block reads it. The #990 record stays cleared there, as the
+    /// collapsed block leaves it, since `gain_linked` is already `false`.
     ///
     /// Bounded by the lane count: one remainder per lane and per cursor, never a per-frame step.
     fn advance_clocks(&mut self, lanes: u32, frames: usize) {
         let lanes = lanes & every_lane(L::WIDTH);
         self.left.advance_rest_phase(lanes, frames);
-        self.right.advance_rest_phase(lanes, frames);
+        if !self.collapsed {
+            self.right.advance_rest_phase(lanes, frames);
+        }
         self.cursors.advance(frames, &self.shape);
         let whole = lanes == every_lane(L::WIDTH);
         let bypass_held = self.silent_bypass == self.coefficients.bypass;

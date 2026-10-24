@@ -3350,6 +3350,366 @@ fn an_added_track_fades_in_from_its_first_played_block_on_every_width() {
     }
 }
 
+// Issue #1363 (slice 1): a route a plan swap adds during playback fades in over the session mute
+// ramp, as #1288's added strips do.
+
+/// The submix the #1363 cases route into.
+const ROUTE_BUS: &str = "bus";
+
+/// `model` plus route `route` from track `track`'s `tap` into `destination` (a copy of `eq0-main`'s
+/// values), muted when `muted`.
+fn with_route(
+    mut model: SessionModel,
+    route: &str,
+    track: &str,
+    tap: session::SendTap,
+    destination: session::RouteDestination,
+    muted: bool,
+) -> SessionModel {
+    let mut added = model
+        .routes
+        .iter()
+        .find(|route| route.id.as_str() == "eq0-main")
+        .expect("template route")
+        .clone();
+    added.id = id(route);
+    added.source = RouteSource::Track {
+        track_id: id(track),
+        tap,
+    };
+    added.destination = destination;
+    added.mute = muted;
+    model.routes.push(added);
+    model
+}
+
+fn into_bus() -> session::RouteDestination {
+    session::RouteDestination::SubmixInput {
+        submix_id: id(ROUTE_BUS),
+    }
+}
+
+fn into_output() -> session::RouteDestination {
+    session::RouteDestination::OutputInput {
+        output_id: id("main-out"),
+    }
+}
+
+/// The #1363 base: [`session_a`] plus a playing track `aux` on [`AUX_SOURCE`], and the submix
+/// [`ROUTE_BUS`] fed by a muted track `late` whose true-peak limiter makes the bus input arrive 486
+/// samples late, so a route added into the bus from an unlimited track takes a 486-sample
+/// compensation line on its destination edge. The output arrives 486 samples late already, so a
+/// limited added track grows no latency.
+fn route_fade_base() -> SessionModel {
+    route_fade_base_limited(true)
+}
+
+/// [`route_fade_base`], with `late`'s limiter only when `limited`: without it the output arrives
+/// at once, so a fade late in the run reaches the output inside it.
+fn route_fade_base_limited(limited: bool) -> SessionModel {
+    let mut model = session_a();
+    add_source(&mut model, AUX_SOURCE);
+    add_track(&mut model, "eq0", "aux", AUX_SOURCE, false);
+    add_track(&mut model, "eq0", "late", SOURCE, true);
+    if limited {
+        add_limiter(&mut model, "late", "lim");
+    }
+    model
+        .submixes
+        .push(session::Submix::unity(id(ROUTE_BUS), &model.console));
+    let model = with_route(
+        model,
+        "late-bus",
+        "late",
+        session::SendTap::PostFader,
+        into_bus(),
+        false,
+    );
+    let mut model = with_route(
+        model,
+        "bus-main",
+        "eq0",
+        session::SendTap::PostPan,
+        into_output(),
+        false,
+    );
+    let bus = model
+        .routes
+        .iter_mut()
+        .find(|route| route.id.as_str() == "bus-main")
+        .expect("the bus route");
+    bus.source = RouteSource::Submix {
+        submix_id: id(ROUTE_BUS),
+        tap: session::SendTap::PostPan,
+    };
+    model
+}
+
+/// The live unmute a #1363 reference writes to route `route` of `model` before block `block`,
+/// over `ramp`: the record a live commit of `mute: false` writes.
+fn unmute_route(model: &SessionModel, route: &'static str, block: usize, ramp: u32) -> CellWrite {
+    let values = model
+        .routes
+        .iter()
+        .find(|candidate| candidate.id.as_str() == route)
+        .expect("the route");
+    let matrix = &values.channel_matrix;
+    let record = host_core::route_record(
+        values.gain_db,
+        [matrix.ll, matrix.lr, matrix.rl, matrix.rr],
+        false,
+        [false; 2],
+        ramp,
+    )
+    .expect("a send record");
+    CellWrite {
+        block,
+        strip: "aux",
+        record: CellRecord::Route(route, record),
+    }
+}
+
+/// Issue #1363 gates 1, 3 and 8 at one width. B adds route `aux-bus` from the playing track `aux`
+/// into [`ROUTE_BUS`], whose destination edge carries a 486-sample compensation line that starts
+/// at rest. The route waits for nothing (`D = 0`: the line sits after the route's op, so the fade
+/// enters it and the bus hears the fade start as the line delivers, 486 samples after the swap).
+/// Every block equals B with the route muted, rendered fresh from frame 0, given a live unmute
+/// over the session mute ramp at the swap block, and the hand-over and every successor block
+/// allocate and free nothing. Inner claims:
+///
+/// * (b) the same route `post_fader` into the output, which has no lane (a transition route):
+///   every block equals the reference of the same route from `pre_fader` (a unity fader moves no
+///   bit), which has a lane;
+/// * (c) with `aux` fed exact zeros, both swaps leave every block equal to A's own run: the arm
+///   touches no other route and no neighbour's fold.
+fn an_added_route_fades_in_after_its_line_fills(backend: Backend) {
+    let base = route_fade_base();
+    let ramp = LiveRamps::for_session(&base).mute_samples;
+    let a = Session::compile(base.clone());
+    let (kept, aux) = (Feed::new(SOURCE, 1), Feed::new(AUX_SOURCE, 2));
+    let zeros = spliced(AUX_SOURCE, &aux, |_| None);
+    let swap_to = |to: &Session| {
+        fade_run(
+            &a,
+            &[FadeSwap {
+                block: SWAP_BLOCK,
+                to,
+                committed: &a.model,
+                prepared_at: None,
+            }],
+            &[&kept, &aux],
+            None,
+            &[],
+            backend,
+        )
+    };
+    let post = session::SendTap::PostFader;
+    for (case, route, destination, reference_tap) in [
+        ("(a) into a submix", "aux-bus", into_bus(), post),
+        (
+            "(b) into the output",
+            "aux-out",
+            into_output(),
+            session::SendTap::PreFader,
+        ),
+    ] {
+        let added =
+            |tap, muted| with_route(base.clone(), route, "aux", tap, destination.clone(), muted);
+        let b = Session::compile(added(post, false));
+        let run = swap_to(&b);
+        assert_eq!(
+            run.arms[0],
+            vec![(0, ramp)],
+            "{backend:?} {case}: D and the ramp"
+        );
+        assert_eq!(
+            run.allocator,
+            (0, 0, 0),
+            "{backend:?} {case}: allocator calls"
+        );
+        let muted_model = added(reference_tap, true);
+        let muted = Session::compile(muted_model.clone());
+        let reference = |block| {
+            fade_run(
+                &muted,
+                &[],
+                &[&kept, &aux],
+                None,
+                &[unmute_route(&muted_model, route, block, ramp)],
+                backend,
+            )
+        };
+        let at_swap = reference(SWAP_BLOCK);
+        assert_eq!(
+            first_fade_difference(&run, &at_swap),
+            None,
+            "{backend:?} {case}: every block equals the reference"
+        );
+        // The oracle can fail: a fade one block late is different bits.
+        assert_ne!(
+            reference(SWAP_BLOCK + 1).blocks,
+            at_swap.blocks,
+            "{backend:?} {case}: the fire block is observable"
+        );
+        // (c) Only the route moves.
+        let silent = |to: Option<&Session>| {
+            let swaps: Vec<FadeSwap<'_>> = to
+                .into_iter()
+                .map(|to| FadeSwap {
+                    block: SWAP_BLOCK,
+                    to,
+                    committed: &a.model,
+                    prepared_at: None,
+                })
+                .collect();
+            fade_run(&a, &swaps, &[&kept, &zeros], None, &[], backend)
+        };
+        assert_eq!(
+            first_fade_difference(&silent(Some(&b)), &silent(None)),
+            None,
+            "{backend:?} {case}: with the route's source silent, the swap moves no bit"
+        );
+    }
+}
+
+/// Issue #1363 gates 1, 3 and 8 on every width. Red if an added route enters at a step at the
+/// swap, if a route with no lane still folds and steps, or if the arm moves a neighbour's bits.
+#[test]
+fn an_added_route_fades_in_after_its_line_fills_on_every_width() {
+    for backend in backends() {
+        an_added_route_fades_in_after_its_line_fills(backend);
+    }
+}
+
+/// Issue #1363 gate 6 at one width: B adds [`FADE_TRACK`] with a `pre_fader` send `fade-bus` into
+/// [`ROUTE_BUS`], (a) on the playing [`SOURCE`], `D = 0`, and (c) with a 486-sample true-peak
+/// limiter on [`AUX_SOURCE`], fed exact zeros before the swap, `D = 486`. The send's tap
+/// precedes the track's armed fader, so it fades with it: every block equals B with the track and
+/// the send muted, rendered fresh, given both live unmutes at the fader's fire block.
+fn an_added_strips_pre_fader_send_fades_with_it(backend: Backend) {
+    let base = route_fade_base();
+    let ramp = LiveRamps::for_session(&base).mute_samples;
+    let a = Session::compile(base.clone());
+    let kept = Feed::new(SOURCE, 1);
+    let aux = Feed::new(AUX_SOURCE, 2);
+    let aux = spliced(AUX_SOURCE, &aux, |block| {
+        (block >= SWAP_BLOCK).then_some(block)
+    });
+    for (case, source, limited, delay) in [
+        ("(a) a playing source", SOURCE, false, 0_u32),
+        ("(c) a limiter insert", AUX_SOURCE, true, 486),
+    ] {
+        let model = |muted| {
+            with_route(
+                with_fade_track(base.clone(), source, limited, muted),
+                "fade-bus",
+                FADE_TRACK,
+                session::SendTap::PreFader,
+                into_bus(),
+                muted,
+            )
+        };
+        let b = Session::compile(model(false));
+        let muted_model = model(true);
+        let muted = Session::compile(muted_model.clone());
+        let fire_block = ((SWAP_BLOCK * QUANTUM) as u32 + delay).div_ceil(QUANTUM as u32) as usize;
+        let run = fade_run(
+            &a,
+            &[FadeSwap {
+                block: SWAP_BLOCK,
+                to: &b,
+                committed: &a.model,
+                prepared_at: None,
+            }],
+            &[&kept, &aux],
+            None,
+            &[],
+            backend,
+        );
+        assert_eq!(
+            run.arms[0],
+            vec![(delay, ramp), (delay, ramp)],
+            "{backend:?} {case}: the fader's and the send's D and ramp"
+        );
+        let reference = fade_run(
+            &muted,
+            &[],
+            &[&kept, &aux],
+            None,
+            &[
+                unmute_fade(fire_block, ramp),
+                unmute_route(&muted_model, "fade-bus", fire_block, ramp),
+            ],
+            backend,
+        );
+        assert_eq!(
+            first_fade_difference(&run, &reference),
+            None,
+            "{backend:?} {case}: every block equals the reference"
+        );
+    }
+    // (d) The send is added by a later swap, before the strip's fade fires: B adds the track on
+    // [`ADDED_SOURCE`], anchored at [`FADE_ANCHOR_BLOCK`]; C, adopted one block after B, adds the
+    // send. The send waits with the strip's claim, so both fire at the anchor.
+    let mut unlimited = route_fade_base_limited(false);
+    add_source(&mut unlimited, ADDED_SOURCE);
+    let a = Session::compile(unlimited.clone());
+    let track = |muted| with_fade_track(unlimited.clone(), ADDED_SOURCE, false, muted);
+    let send = |model, muted| {
+        with_route(
+            model,
+            "fade-bus",
+            FADE_TRACK,
+            session::SendTap::PreFader,
+            into_bus(),
+            muted,
+        )
+    };
+    let b1 = Session::compile(track(false));
+    let b2 = Session::compile(send(track(false), false));
+    let muted_model = send(track(true), true);
+    let muted = Session::compile(muted_model.clone());
+    let (added, reference_added) = anchored_feeds();
+    let run = two_swap_run(
+        &a,
+        &b1,
+        &b2,
+        SWAP_BLOCK + 1,
+        Some(Anchored {
+            feed: &added,
+            anchor_block: FADE_ANCHOR_BLOCK,
+        }),
+        &[&kept, &aux],
+        backend,
+    );
+    let reference = fade_run(
+        &muted,
+        &[],
+        &[&kept, &aux, &reference_added],
+        None,
+        &[
+            unmute_fade(FADE_ANCHOR_BLOCK, ramp),
+            unmute_route(&muted_model, "fade-bus", FADE_ANCHOR_BLOCK, ramp),
+        ],
+        backend,
+    );
+    assert_eq!(
+        first_fade_difference(&run, &reference),
+        None,
+        "{backend:?} (d): a send added before its strip's fire waits for the strip"
+    );
+}
+
+/// Issue #1363 gate 6 on every width. Red if a pre-fader send of an added strip is left unarmed
+/// beside its armed fader (it enters the bus at full level at adoption, a step), or if a send that
+/// a later swap adds before the strip's fire does not wait for the strip.
+#[test]
+fn an_added_strips_pre_fader_send_fades_with_it_on_every_width() {
+    for backend in backends() {
+        an_added_strips_pre_fader_send_fades_with_it(backend);
+    }
+}
+
 // Issue #1392: an added strip's pending fade-in travels with its fader lane across a later swap.
 
 /// The block [`ADDED_SOURCE`] is anchored to in the #1392 cases: three blocks after the swap.
