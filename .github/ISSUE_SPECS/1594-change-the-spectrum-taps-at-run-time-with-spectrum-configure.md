@@ -302,3 +302,17 @@ Attempt 2 (after the attempt-1 verdict, FAIL):
 - A non-superseding monitor rebuild two blocks into a 4,000-sample send move on a following route
   renders bit-equal to a twin that never configures (`a_monitor_rebuild_keeps_a_live_send_move_on_a_
   following_route`).
+
+Attempt-2 fold (root, after PASS):
+
+- A superseding monitor rebuild inherits the transaction outcome terms only when it covers a
+  revision the plan it succeeds has not published (`revision > holder.revision_gate.last_published()`).
+  A configure that supersedes another monitor candidate at the watermark's revision carries no edit;
+  inheriting there made its held claim a fallback that the next live revision reported. Row:
+  `a_configure_that_supersedes_a_monitor_candidate_reports_no_fallback`, red on the attempt-2 gate
+  and on the `|| monitor` mutant, green with the fold.
+- The R6 session row's excess over `SpectrumService::RETAINED_BYTES` is 51 bytes: one
+  `SpectrumInventoryRow` (48 bytes on a 64-bit target) and the 3 bytes of the target ID `eq0`, both
+  charged by `PlanStateInventory::retained_bytes`; no pairing row, since the predecessor had no
+  capture. The row keeps a 1 KiB ceiling because that layout is host-core's private one.
+

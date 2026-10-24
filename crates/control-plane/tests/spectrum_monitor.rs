@@ -1602,8 +1602,12 @@ fn a_configure_that_supersedes_a_fallback_edit_reports_the_fallback() {
 
 /// #1594 R6. Turns red if a plan with spectrum captures does not charge the session's spectrum
 /// service and analysis: the running plan's control-retained bytes grow by
-/// `SpectrumService::RETAINED_BYTES` plus the few bytes of the plan's own spectrum rows (a ceiling
-/// of 1 KiB) when a configure adds a tap, and fall back when a configure removes every tap.
+/// `SpectrumService::RETAINED_BYTES` plus the plan inventory's own spectrum row when a configure
+/// adds a tap, and fall back when a configure removes every tap. The row is 51 bytes here (one
+/// `SpectrumInventoryRow`, 48 bytes on a 64-bit target, plus the 3 bytes of `eq0`, and no pairing
+/// row, since the predecessor had no capture); it is host-core's private layout, so the check is a
+/// 1 KiB ceiling over the service's bytes, which no inventory row of one tap approaches and which
+/// stays far below the service's own size, so a missing charge cannot pass.
 #[test]
 fn a_plan_with_spectrum_charges_the_service_once() {
     let mut rig = Rig::new(None);
@@ -1673,4 +1677,51 @@ fn a_monitor_rebuild_keeps_a_live_send_move_on_a_following_route() {
         "the plan was adopted"
     );
     assert!(moved, "the send move is audible");
+}
+
+/// #1594 attempt-2 fold. Turns red if a configure that supersedes another monitor candidate
+/// inherits a transaction's outcome terms: during a ramping send move on a following route (live,
+/// at revision r, which the watermark has reached), a configure is superseded by a second one
+/// before render adopts it. The second covers no new revision, so its claim must be `EXACT`; the
+/// next live edit's revision r + 1 then reports no transition fallback.
+#[test]
+fn a_configure_that_supersedes_a_monitor_candidate_reports_no_fallback() {
+    let mut rig = Rig::of(&follow_document(), None);
+    for _ in 0..3 {
+        rig.block();
+    }
+    let send_move = [SessionEdit::SetControl {
+        expected_effect: None,
+        address: session::ControlAddress {
+            owner: session::Owner::Route(id("eq0-b")),
+            section: session::Section::Own,
+            control: 1,
+            lane: session::ParameterChannel::Both,
+        },
+        value: -6.0,
+        ramp_samples: Some(4_000),
+    }];
+    assert_eq!(rig.apply(&send_move), Ok(EditPath::Live));
+    rig.block();
+    let revision = rig.session.test_controller().session().revision().0;
+    assert_eq!(rig.watermark().revision, revision);
+    assert!(rig.configure(&single_request()).expect("first").rebuild);
+    assert!(
+        rig.configure(&collection_as_request(None))
+            .expect("second")
+            .rebuild
+    );
+    assert_eq!(
+        rig.session.test_pending_providers().len(),
+        1,
+        "the first was superseded"
+    );
+    rig.until_promoted();
+    rig.live_fader(-3.0);
+    rig.block();
+    rig.block();
+    let after = rig.watermark();
+    assert_eq!(after.revision, revision + 1);
+    assert_eq!(after.transition_fallback, 0, "no false fallback");
+    assert_eq!(after.outcome_flags, engine::realtime::OUTCOME_EXACT);
 }

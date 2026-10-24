@@ -3105,8 +3105,16 @@ where
         // #1594 (attempt 2): a monitor rebuild that supersedes a withdrawn candidate A carries A's
         // edits against the plan A succeeds, so its join can carry a following route as a
         // transaction that supersedes A would: it takes the same outcome terms. A monitor rebuild
-        // on the newest plan has an equal model and carries no route change.
-        let transaction = matches!(kind, Rebuild::Transaction(_)) || (monitor && superseding);
+        // on the newest plan has an equal model and carries no route change. It inherits only when
+        // it covers a revision the plan it succeeds has not published: a withdrawn monitor
+        // candidate at the same revision carried no edit, and a claim at a revision the watermark
+        // already reached would pass its outcome to the next advance.
+        let carries_withdrawn_edits = monitor
+            && superseding
+            && self
+                .kept_holder()
+                .is_some_and(|holder| revision > holder.revision_gate.last_published());
+        let transaction = matches!(kind, Rebuild::Transaction(_)) || carries_withdrawn_edits;
         let send_fallback = transaction
             && follow_into_following
             && (follow_retarget_ramp > 0
@@ -3129,7 +3137,7 @@ where
                 follow_retarget_ramp.max(send_landing_ramp(next))
             }
             Rebuild::Transaction(_) => follow_retarget_ramp,
-            Rebuild::Monitor { model, .. } if superseding => {
+            Rebuild::Monitor { model, .. } if carries_withdrawn_edits => {
                 if follow_loses_a_curve || send_fallback {
                     follow_retarget_ramp.max(send_landing_ramp(model.normalized_model()))
                 } else {
