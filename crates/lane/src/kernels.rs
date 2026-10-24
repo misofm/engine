@@ -771,8 +771,13 @@ fn svf_cascade_skewed_form<
     // body's operations, in its order, on the input the skew hands it.
     macro_rules! step {
         ($i:expr, $stream:expr, $section:expr) => {{
-            let (stream, section) = ($stream, $section);
-            let base = ($i - section) * width;
+            step_at!(($i - $section) * width, $stream, $section);
+        }};
+    }
+    // The step on the frame at word offset `$base`.
+    macro_rules! step_at {
+        ($base:expr, $stream:expr, $section:expr) => {{
+            let (base, stream, section) = ($base, $stream, $section);
             let x = if section == 0 {
                 L::load(&io[stream][base..base + width])
             } else {
@@ -808,12 +813,14 @@ fn svf_cascade_skewed_form<
             }
         }
     }
-    for i in D - 1..frames {
+    let mut base = (D - 1) * width;
+    while base < span {
         for stream in 0..S {
             for section in (0..D).rev() {
-                step!(i, stream, section);
+                step_at!(base - section * width, stream, section);
             }
         }
+        base += width;
     }
     for i in frames..frames + D - 1 {
         for stream in 0..S {
