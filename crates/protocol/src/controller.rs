@@ -27,10 +27,10 @@ use crate::{
     ProtocolQueues, QueueReport, ReliablePayload, ReliableSlot, RequestId, ResponseGetRequest,
     ResponseResult, SampleTime, SessionCommitted, SessionEdit, SessionReplaceRequest,
     SessionRevision, SessionSnapshot, SessionStore, SessionStoreError, SpectrumCaptureReply,
-    SpectrumCaptureRequest, SpectrumConfigureRequest, SpectrumConfigured, StatusCode,
-    SuccessResponsePayload, TelemetryConfiguration, TelemetryKey, TelemetryRecord,
-    TransactionApplied, TransportSetRequest, TransportSnapshot, TransportStateEvent,
-    TypedEventFrame, TypedNonOkResponseFrame, TypedSuccessResponseFrame,
+    SpectrumCaptureRequest, SpectrumConfigureRequest, SpectrumConfigured, SpectrumStreamReply,
+    SpectrumStreamRequest, StatusCode, SuccessResponsePayload, TelemetryConfiguration,
+    TelemetryKey, TelemetryRecord, TransactionApplied, TransportSetRequest, TransportSnapshot,
+    TransportStateEvent, TypedEventFrame, TypedNonOkResponseFrame, TypedSuccessResponseFrame,
 };
 #[cfg(any(test, feature = "test-support"))]
 use crate::{
@@ -152,8 +152,8 @@ pub enum DocumentReplaceRefusal {
 /// Eager retained collection capacities for controller/provider configuration state.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ControllerRetainedCapacity {
-    /// Meter handles retained independently by the controller and provider.
-    pub meter_handles: usize,
+    /// Meter table entries retained independently by the controller and provider.
+    pub meters: usize,
     /// Counter identifiers retained independently by the controller and provider.
     pub counter_ids: usize,
 }
@@ -165,17 +165,18 @@ pub struct ControllerResourceAllocationError;
 fn retained_telemetry_configuration(
     capacity: ControllerRetainedCapacity,
 ) -> Result<TelemetryConfiguration, ControllerResourceAllocationError> {
-    let mut meter_handles = Vec::new();
-    meter_handles
-        .try_reserve_exact(capacity.meter_handles)
+    let mut meters = Vec::new();
+    meters
+        .try_reserve_exact(capacity.meters)
         .map_err(|_| ControllerResourceAllocationError)?;
     let mut counter_ids = Vec::new();
     counter_ids
         .try_reserve_exact(capacity.counter_ids)
         .map_err(|_| ControllerResourceAllocationError)?;
     Ok(TelemetryConfiguration {
-        meter_handles,
+        meters,
         meter_period_blocks: 0,
+        meter_window_blocks: None,
         counter_ids,
         counter_period_blocks: 0,
         diagnostics_enabled: false,
@@ -200,6 +201,10 @@ pub struct ProviderFeatures {
     /// `OBSERVATION_ENDED` (#1584): a host that keeps observation subscriptions tells its
     /// subscribers when one ends. It rides the session family, so it needs `session_events`.
     pub observation_events: bool,
+    /// `SPECTRUM_CONFIGURE`, `SPECTRUM_CAPTURE` and `SPECTRUM_STREAM` (capability flag bit 16;
+    /// #1594 D10, #1595 D8): a host whose session serves the spectrum reads on its own transport
+    /// advertises the three together.
+    pub spectrum: bool,
 }
 
 impl ProviderFeatures {
@@ -214,6 +219,7 @@ impl ProviderFeatures {
         session_events: true,
         transport_events: true,
         observation_events: true,
+        spectrum: true,
     };
     /// Disable every optional provider and event family.
     pub const NONE: Self = Self {
@@ -226,6 +232,7 @@ impl ProviderFeatures {
         session_events: false,
         transport_events: false,
         observation_events: false,
+        spectrum: false,
     };
 }
 
@@ -693,11 +700,60 @@ pub trait ControlProvider {
     /// Persist and echo one complete typed endpoint-local telemetry configuration idempotently.
     ///
     /// A provider refuses a configuration it can never serve with a typed error and changes
-    /// nothing (#1351 D2): a counter ID it does not report is [`ParameterProviderError::NotFound`].
+    /// nothing (#1351 D2): a counter ID it does not report is [`ParameterProviderError::NotFound`];
+    /// a meter table it cannot serve is refused with its code and the entry it names (#1583 D3).
+    /// The controller has already refused a strip entry the committed model does not have, and
+    /// writes the echo's meter window from [`Self::meter_window_blocks`].
     fn telemetry_configure(
         &mut self,
         configuration: TelemetryConfiguration,
-    ) -> Result<TelemetryConfiguration, ParameterProviderError>;
+    ) -> Result<TelemetryConfiguration, TelemetryRefusal>;
+    /// The provider's meter window in blocks, or `None` when it has no meter delivery (#1583 D4).
+    fn meter_window_blocks(&self) -> Option<core::num::NonZeroU32>;
+}
+
+/// A provider's refusal of a `TELEMETRY_CONFIGURE` (#1351 D2, #1583 D3): the typed error, and the
+/// diagnostic the response carries. The refusal changes nothing.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct TelemetryRefusal {
+    /// The typed error, which sets the response status.
+    pub error: ParameterProviderError,
+    /// The dotted diagnostic code, such as `meter.period`; `None` for `protocol.failure`.
+    pub code: Option<&'static str>,
+    /// What the diagnostic's path names.
+    pub path: TelemetryRefusalPath,
+}
+
+/// What a [`TelemetryRefusal`]'s diagnostic path names.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TelemetryRefusalPath {
+    /// Nothing: an empty path.
+    None,
+    /// The meter table entry at this zero-based index (`meters[i]`).
+    Meter(usize),
+    /// The meter period (`meter_period_blocks`).
+    MeterPeriod,
+}
+
+/// The span of one closed meter window a `METER_BATCH` reports (#1583 D2).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct MeterWindowSpan {
+    /// The window's first sample.
+    pub first_sample: SampleTime,
+    /// One past the window's last sample: the batch's `observed_sample`.
+    pub end_sample: SampleTime,
+    /// The window's sequence since the accepted configuration, from `1`.
+    pub window_sequence: u64,
+}
+
+impl From<ParameterProviderError> for TelemetryRefusal {
+    fn from(error: ParameterProviderError) -> Self {
+        Self {
+            error,
+            code: None,
+            path: TelemetryRefusalPath::None,
+        }
+    }
 }
 
 /// A provider's refusal of a `RESPONSE_GET`: the status and the diagnostic code the response
@@ -723,6 +779,9 @@ pub enum ParameterProviderError {
     ReplayExpired,
     /// The provider's bounded catalog or page limit was exceeded.
     LimitExceeded,
+    /// The request breaks a rule the provider owns, such as a meter period that is not a whole
+    /// number of its meter windows (#1583 D3).
+    InvalidField,
 }
 
 /// Small deterministic provider suitable for protocol conformance fixtures.
@@ -764,8 +823,9 @@ impl Default for MockProvider {
             diagnostics: Vec::new(),
             transport_state: TransportState::Stopped,
             telemetry_configuration: TelemetryConfiguration {
-                meter_handles: Vec::new(),
+                meters: Vec::new(),
                 meter_period_blocks: 0,
+                meter_window_blocks: None,
                 counter_ids: Vec::new(),
                 counter_period_blocks: 0,
                 diagnostics_enabled: false,
@@ -993,11 +1053,10 @@ impl ControlProvider for MockProvider {
     fn telemetry_configure(
         &mut self,
         configuration: TelemetryConfiguration,
-    ) -> Result<TelemetryConfiguration, ParameterProviderError> {
-        self.telemetry_configuration.meter_handles.clear();
+    ) -> Result<TelemetryConfiguration, TelemetryRefusal> {
         self.telemetry_configuration
-            .meter_handles
-            .extend_from_slice(&configuration.meter_handles);
+            .meters
+            .clone_from(&configuration.meters);
         self.telemetry_configuration.counter_ids.clear();
         self.telemetry_configuration
             .counter_ids
@@ -1008,6 +1067,10 @@ impl ControlProvider for MockProvider {
         self.telemetry_configuration.minimum_diagnostic_severity =
             configuration.minimum_diagnostic_severity;
         Ok(configuration)
+    }
+    /// The fixture's meter delivery has a one-block window (#1583 D4).
+    fn meter_window_blocks(&self) -> Option<core::num::NonZeroU32> {
+        Some(core::num::NonZeroU32::MIN)
     }
 }
 
@@ -1061,6 +1124,11 @@ pub enum ControlCommand<'a> {
     SpectrumCapture {
         request: SpectrumCaptureRequest,
     },
+    /// `SPECTRUM_STREAM` (#1595): executed by the session, refused here as
+    /// [`Self::SpectrumConfigure`] is.
+    SpectrumStream {
+        request: SpectrumStreamRequest,
+    },
 }
 
 impl ControlCommand<'_> {
@@ -1090,6 +1158,7 @@ impl ControlCommand<'_> {
             Self::SessionReplace { .. } => MessageId::SessionReplace,
             Self::SpectrumConfigure { .. } => MessageId::SpectrumConfigure,
             Self::SpectrumCapture { .. } => MessageId::SpectrumCapture,
+            Self::SpectrumStream { .. } => MessageId::SpectrumStream,
         }
     }
 }
@@ -1122,7 +1191,7 @@ pub struct ControllerResponse {
 
 #[derive(Clone, Copy)]
 struct CapabilitySet {
-    commands: [u16; 13],
+    commands: [u16; 16],
     command_len: u8,
     events: [u16; 6],
     event_len: u8,
@@ -1245,12 +1314,14 @@ impl PreparedImmediateCommandFrame {
 
 /// The decoded payload of a command the session executes (#1594 D9). One variant per such
 /// command.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum SessionCommand {
     /// `SPECTRUM_CONFIGURE`.
     SpectrumConfigure(SpectrumConfigureRequest),
     /// `SPECTRUM_CAPTURE` (#1595).
     SpectrumCapture(SpectrumCaptureRequest),
+    /// `SPECTRUM_STREAM` (#1595).
+    SpectrumStream(SpectrumStreamRequest),
 }
 
 /// The success reply of a command the session executed. A reply borrows what it carries (a
@@ -1261,6 +1332,8 @@ pub enum SessionCommandReply<'a> {
     SpectrumConfigured(SpectrumConfigured),
     /// The `SPECTRUM_CAPTURE` reply.
     SpectrumCaptured(SpectrumCaptureReply<'a>),
+    /// The `SPECTRUM_STREAM` reply.
+    SpectrumStreamed(SpectrumStreamReply<'a>),
 }
 
 /// A command the session executes, decoded and checked, whose replay entry is planned against
@@ -1517,7 +1590,7 @@ enum PendingTelemetryEvent {
     None,
     Meter {
         revision: SessionRevision,
-        observed_sample: SampleTime,
+        window: MeterWindowSpan,
         len: u16,
         records: [MeterRecord; crate::MAXIMUM_TELEMETRY_PAGE_RECORDS],
     },
@@ -1559,6 +1632,9 @@ pub struct ProtocolController<P: ControlProvider> {
     config: ProtocolControllerConfig,
     next_reliable_event_sequence: u64,
     telemetry_configuration: TelemetryConfiguration,
+    /// How many `TELEMETRY_CONFIGURE` commands this endpoint accepted (#1583 D5): a host that
+    /// serves meter batches restarts their sequence when it moves.
+    telemetry_generation: u64,
     diagnostic_event_slots: Box<[RetainedDiagnosticSlot]>,
     /// Prepared storage for the keys of queued `OBSERVATION_ENDED` events (#1584 D6a): one cell
     /// more than the reliable queue has slots, because one popped event stays pending in
@@ -1606,6 +1682,7 @@ impl<P: ControlProvider> ProtocolController<P> {
             config,
             next_reliable_event_sequence: 1,
             telemetry_configuration: retained_telemetry_configuration(capacity)?,
+            telemetry_generation: 0,
             diagnostic_event_slots: diagnostics.into_boxed_slice(),
             observation_ended_cells: observation_ended_cells.into_boxed_slice(),
             pending_reliable_event: None,
@@ -1620,7 +1697,7 @@ impl<P: ControlProvider> ProtocolController<P> {
     #[must_use]
     pub fn retained_configuration_capacity(&self) -> ControllerRetainedCapacity {
         ControllerRetainedCapacity {
-            meter_handles: self.telemetry_configuration.meter_handles.capacity(),
+            meters: self.telemetry_configuration.meters.capacity(),
             counter_ids: self.telemetry_configuration.counter_ids.capacity(),
         }
     }
@@ -1674,7 +1751,7 @@ impl<P: ControlProvider> ProtocolController<P> {
             codec,
             config,
             ControllerRetainedCapacity {
-                meter_handles: 0,
+                meters: 0,
                 counter_ids: 0,
             },
         )
@@ -1820,6 +1897,9 @@ impl<P: ControlProvider> ProtocolController<P> {
             }
             DecodedCommandPayload::SpectrumCapture(request) => {
                 ControlCommand::SpectrumCapture { request }
+            }
+            DecodedCommandPayload::SpectrumStream(request) => {
+                ControlCommand::SpectrumStream { request }
             }
         };
         Ok(self.process(ControllerRequest {
@@ -2048,7 +2128,7 @@ impl<P: ControlProvider> ProtocolController<P> {
     ) -> Result<PreparedCommandFrame, CommandFrameProcessError> {
         if matches!(
             header.message_id,
-            MessageId::SpectrumConfigure | MessageId::SpectrumCapture
+            MessageId::SpectrumConfigure | MessageId::SpectrumCapture | MessageId::SpectrumStream
         ) {
             return self.prepare_session_command(input, scratch, output_capacity, header);
         }
@@ -2111,6 +2191,9 @@ impl<P: ControlProvider> ProtocolController<P> {
                 }
                 DecodedCommandPayload::SpectrumCapture(request) => {
                     SessionCommand::SpectrumCapture(request)
+                }
+                DecodedCommandPayload::SpectrumStream(request) => {
+                    SessionCommand::SpectrumStream(request)
                 }
                 _ => {
                     let outcome = refusal(self, StatusCode::Internal);
@@ -2195,38 +2278,56 @@ impl<P: ControlProvider> ProtocolController<P> {
                 debug_assert_eq!(value.revision, self.session.revision().0);
                 Body::SpectrumConfigured(value)
             }
-            // A capture reply borrows its planes, so it is encoded here rather than held as a
+            // A read's reply borrows its planes, so it is encoded here rather than held as a
             // body; a reply the codec refuses answers `INTERNAL` as an encoder fault does.
             SessionCommandReply::SpectrumCaptured(value) => {
-                let frame = TypedSuccessResponseFrame {
-                    request_id: prepared.request_id,
-                    revision: self.session.revision(),
-                    payload: SuccessResponsePayload::SpectrumCaptured(value),
-                };
-                return self.complete_session_encoded(prepared, output, |controller, output| {
-                    match controller
-                        .codec
-                        .encode_success_response_frame_into(&frame, output)
-                    {
-                        Err(EncodeError::OutputTooSmall { required }) => {
-                            Err(EncodeError::OutputTooSmall { required })
-                        }
-                        Err(_) => {
-                            let fallback = controller.encode_failure_outcome();
-                            controller.encode_outcome_into(
-                                MessageId::SpectrumCapture,
-                                frame.request_id,
-                                fallback,
-                                output,
-                            )
-                        }
-                        Ok(written) => Ok(written),
-                    }
-                });
+                return self.complete_session_borrowed(
+                    prepared,
+                    SuccessResponsePayload::SpectrumCaptured(value),
+                    output,
+                );
+            }
+            SessionCommandReply::SpectrumStreamed(value) => {
+                return self.complete_session_borrowed(
+                    prepared,
+                    SuccessResponsePayload::SpectrumStreamed(value),
+                    output,
+                );
             }
         };
         let outcome = self.ok(body);
         self.complete_session_outcome(prepared, outcome, output)
+    }
+
+    /// Encode a success `payload` that borrows the session's words straight into `output`, then
+    /// record it for replay; a payload the codec refuses answers `INTERNAL`.
+    fn complete_session_borrowed(
+        &mut self,
+        prepared: PreparedSessionCommand,
+        payload: SuccessResponsePayload<'_>,
+        output: &mut [u8],
+    ) -> Result<usize, CommandFrameProcessError> {
+        let message_id = prepared.message_id;
+        let frame = TypedSuccessResponseFrame {
+            request_id: prepared.request_id,
+            revision: self.session.revision(),
+            payload,
+        };
+        self.complete_session_encoded(prepared, output, |controller, output| {
+            match controller
+                .codec
+                .encode_success_response_frame_into(&frame, output)
+            {
+                Err(EncodeError::OutputTooSmall { required }) => {
+                    Err(EncodeError::OutputTooSmall { required })
+                }
+                Err(_) => {
+                    let fallback = controller.encode_failure_outcome();
+                    controller.encode_outcome_into(message_id, frame.request_id, fallback, output)
+                }
+                Ok(written) => Ok(written),
+            }
+        })
     }
 
     /// Complete a command the session refused (#1594 D9) with `status` and the one diagnostic
@@ -3080,6 +3181,9 @@ impl<P: ControlProvider> ProtocolController<P> {
             DecodedCommandPayload::SpectrumCapture(request) => {
                 ControlCommand::SpectrumCapture { request }
             }
+            DecodedCommandPayload::SpectrumStream(request) => {
+                ControlCommand::SpectrumStream { request }
+            }
         };
         self.execute(&ControllerRequest {
             request_id: header.request_id,
@@ -3353,12 +3457,19 @@ impl<P: ControlProvider> ProtocolController<P> {
         &self.telemetry_configuration
     }
 
-    /// Stage one mock/control-only meter batch for explicitly configured lossy event egress.
-    /// This does not create production meters or touch a render plan.
+    /// How many `TELEMETRY_CONFIGURE` commands the endpoint accepted (#1583 D5). An exact replay
+    /// answers from the cache and does not move it.
+    #[must_use]
+    pub const fn telemetry_configuration_generation(&self) -> u64 {
+        self.telemetry_generation
+    }
+
+    /// Stage the meter batch of one closed meter window for configured lossy event egress
+    /// (#1583 D2). Every record's handle is at most the meter table's length.
     pub fn stage_meter_batch_event(
         &mut self,
         revision: SessionRevision,
-        observed_sample: SampleTime,
+        window: MeterWindowSpan,
         records: &[MeterRecord],
     ) -> Result<(), EventEgressError> {
         if self.structural_outstanding() {
@@ -3367,23 +3478,24 @@ impl<P: ControlProvider> ProtocolController<P> {
             ));
         }
         if !self.config.provider_features.meters
-            || self.telemetry_configuration.meter_handles.is_empty()
+            || self.telemetry_configuration.meters.is_empty()
             || self.telemetry_configuration.meter_period_blocks == 0
         {
             return Err(EventEgressError::Disabled);
         }
         self.codec
             .encoded_meter_batch_len(MeterBatch {
-                observed_sample,
+                observed_sample: window.end_sample,
+                first_sample: window.first_sample,
+                window_sequence: window.window_sequence,
                 records,
             })
             .map_err(EventEgressError::Encode)?;
-        if records.iter().any(|record| {
-            !self
-                .telemetry_configuration
-                .meter_handles
-                .contains(&record.handle)
-        }) {
+        let table = self.telemetry_configuration.meters.len();
+        if records
+            .iter()
+            .any(|record| usize::try_from(record.handle).map_or(true, |handle| handle > table))
+        {
             return Err(EventEgressError::Encode(EncodeError::LimitExceeded));
         }
         for record in records {
@@ -3393,7 +3505,9 @@ impl<P: ControlProvider> ProtocolController<P> {
                     handle: record.handle,
                     component: record.component as u16,
                 },
-                observed_sample,
+                observed_sample: window.end_sample,
+                first_sample: window.first_sample,
+                window_sequence: window.window_sequence,
                 flags: record.flags,
                 value: record.value,
             });
@@ -3536,14 +3650,16 @@ impl<P: ControlProvider> ProtocolController<P> {
             PendingTelemetryEvent::None => return Ok(None),
             PendingTelemetryEvent::Meter {
                 revision,
-                observed_sample,
+                window,
                 len,
                 records,
             } => self.codec.encode_event_frame_into(
                 &TypedEventFrame {
                     revision: *revision,
                     payload: EventPayload::MeterBatch(MeterBatch {
-                        observed_sample: *observed_sample,
+                        observed_sample: window.end_sample,
+                        first_sample: window.first_sample,
+                        window_sequence: window.window_sequence,
                         records: &records[..usize::from(*len)],
                     }),
                 },
@@ -3658,7 +3774,11 @@ impl<P: ControlProvider> ProtocolController<P> {
             .or_else(|| self.queues.try_dequeue_telemetry().ok())
         {
             let revision = first.key.revision;
-            let observed_sample = first.observed_sample;
+            let window = MeterWindowSpan {
+                first_sample: first.first_sample,
+                end_sample: first.observed_sample,
+                window_sequence: first.window_sequence,
+            };
             let mut records = [EMPTY_METER_RECORD; crate::MAXIMUM_TELEMETRY_PAGE_RECORDS];
             records[0] = MeterRecord {
                 handle: first.key.handle,
@@ -3675,7 +3795,11 @@ impl<P: ControlProvider> ProtocolController<P> {
                 let Some(next) = self.queues.try_dequeue_telemetry().ok() else {
                     break;
                 };
-                if next.key.revision != revision || next.observed_sample != observed_sample {
+                // #1583 D2: one batch is one window of one revision.
+                if next.key.revision != revision
+                    || next.observed_sample != window.end_sample
+                    || next.window_sequence != window.window_sequence
+                {
                     self.pending_meter_record = Some(next);
                     break;
                 }
@@ -3693,7 +3817,7 @@ impl<P: ControlProvider> ProtocolController<P> {
             }
             self.pending_telemetry_event = PendingTelemetryEvent::Meter {
                 revision,
-                observed_sample,
+                window,
                 len: u16::try_from(len).expect("fixed telemetry batch length"),
                 records,
             };
@@ -3856,9 +3980,9 @@ impl<P: ControlProvider> ProtocolController<P> {
                 Ok(_) => self.non_ok(StatusCode::Internal, None),
             },
             // The session executes it (#1594 D9); this path has none.
-            ControlCommand::SpectrumConfigure { .. } | ControlCommand::SpectrumCapture { .. } => {
-                self.non_ok(StatusCode::Unavailable, None)
-            }
+            ControlCommand::SpectrumConfigure { .. }
+            | ControlCommand::SpectrumCapture { .. }
+            | ControlCommand::SpectrumStream { .. } => self.non_ok(StatusCode::Unavailable, None),
             ControlCommand::ControlListGet { request } => {
                 match self.provider.control_list(request) {
                     Ok(page) => match self.fit_control_list(page) {
@@ -3920,15 +4044,32 @@ impl<P: ControlProvider> ProtocolController<P> {
                 self.ok(Body::Transport(snapshot))
             }
             ControlCommand::TelemetryConfigure { configuration } => {
-                let configured = match self.provider.telemetry_configure(configuration.clone()) {
+                // #1583 D3: a strip entry names a strip of the committed model, checked before
+                // the provider sees the table.
+                let model = self.session.compiled().normalized_model();
+                if let Some(index) = configuration.meters.iter().position(|entry| {
+                    matches!(&entry.target, crate::MeterTarget::Strip(id)
+                        if !model.strips().any(|strip| strip.id.as_str() == &**id))
+                }) {
+                    return self.telemetry_refusal_outcome(TelemetryRefusal {
+                        error: ParameterProviderError::NotFound,
+                        code: Some("meter.strip.unknown"),
+                        path: TelemetryRefusalPath::Meter(index),
+                    });
+                }
+                let mut configured = match self.provider.telemetry_configure(configuration.clone())
+                {
                     Ok(configured) => configured,
                     // A refused configuration changes nothing: the stored one stays (#1351 D2).
-                    Err(error) => return self.non_ok(status_for_parameter(error), None),
+                    Err(refusal) => return self.telemetry_refusal_outcome(refusal),
                 };
-                self.telemetry_configuration.meter_handles.clear();
+                // #1583 D4: the echo carries the provider's meter window.
+                configured.meter_window_blocks = self.provider.meter_window_blocks();
                 self.telemetry_configuration
-                    .meter_handles
-                    .extend_from_slice(&configured.meter_handles);
+                    .meters
+                    .clone_from(&configured.meters);
+                self.telemetry_configuration.meter_window_blocks = configured.meter_window_blocks;
+                self.telemetry_generation = self.telemetry_generation.saturating_add(1);
                 self.telemetry_configuration.counter_ids.clear();
                 self.telemetry_configuration
                     .counter_ids
@@ -4118,6 +4259,40 @@ impl<P: ControlProvider> ProtocolController<P> {
 
     /// The outcome of a `RESPONSE_GET` refusal: its status and one error diagnostic that carries
     /// its code.
+    /// The outcome of a refused `TELEMETRY_CONFIGURE` (#1583 D3): its status, and its code and
+    /// path when it names one.
+    fn telemetry_refusal_outcome(&self, refusal: TelemetryRefusal) -> Outcome {
+        let Some(code) = refusal.code else {
+            return self.non_ok(status_for_parameter(refusal.error), None);
+        };
+        let path = match refusal.path {
+            TelemetryRefusalPath::None => Vec::new(),
+            TelemetryRefusalPath::Meter(index) => vec![
+                crate::PathSegment::Field("meters".to_owned()),
+                crate::PathSegment::Index(index as u64),
+            ],
+            TelemetryRefusalPath::MeterPeriod => {
+                vec![crate::PathSegment::Field("meter_period_blocks".to_owned())]
+            }
+        };
+        self.non_ok_value(
+            status_for_parameter(refusal.error),
+            NonOkResponse {
+                diagnostics: vec![Diagnostic {
+                    code: code.to_owned(),
+                    severity: crate::DiagnosticSeverity::Error,
+                    path,
+                    detail: None,
+                    operation_index: None,
+                    sample_time: None,
+                    provider_sequence: None,
+                }],
+                omitted_diagnostics: 0,
+                backpressure: None,
+            },
+        )
+    }
+
     fn response_error_outcome(&self, error: ResponseProviderError) -> Outcome {
         self.non_ok_value(
             error.status,
@@ -4260,12 +4435,11 @@ impl<P: ControlProvider> ProtocolController<P> {
         let features = self.config.provider_features;
         let session_transactions =
             features.session_events && self.config.maximum_transaction_edits != 0;
-        let mut commands = [0_u16; 13];
+        let mut commands = [0_u16; 16];
         let mut command_len = 0_usize;
-        // `0x000f`, `0x0011` and `0x0012` are claimed by open specs and never advertised until
-        // they land. `0x0010` is served by a host session and not advertised until #1595 sets
-        // its capability bit (#1594 R3).
-        for id in (1_u16..=14).chain([0x0013]) {
+        // `0x000f` is claimed by an open spec and never advertised until it lands. The three
+        // spectrum commands are listed together, with bit 16, or not at all (#1595 D8).
+        for id in (1_u16..=14).chain([0x0010, 0x0011, 0x0012, 0x0013]) {
             let enabled = match id {
                 // The retired IDs are never advertised.
                 id if crate::RETIRED_MESSAGE_IDS.contains(&id) => false,
@@ -4276,6 +4450,7 @@ impl<P: ControlProvider> ProtocolController<P> {
                 11 => features.diagnostics,
                 12 | 13 => features.controls,
                 14 => features.response,
+                0x0010..=0x0012 => features.spectrum,
                 0x0013 => session_transactions && self.config.document_replace.is_some(),
                 _ => true,
             };
@@ -4330,6 +4505,9 @@ impl<P: ControlProvider> ProtocolController<P> {
         }
         if features.response {
             flags |= 1 << 14;
+        }
+        if features.spectrum {
+            flags |= CapabilityFlags::SPECTRUM.0;
         }
         CapabilitySet {
             commands,
@@ -4593,6 +4771,7 @@ fn status_for_parameter(error: ParameterProviderError) -> StatusCode {
         ParameterProviderError::Unavailable => StatusCode::Unavailable,
         ParameterProviderError::ReplayExpired => StatusCode::ReplayExpired,
         ParameterProviderError::LimitExceeded => StatusCode::LimitExceeded,
+        ParameterProviderError::InvalidField => StatusCode::InvalidField,
     }
 }
 

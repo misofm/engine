@@ -482,37 +482,65 @@ fn an_empty_session_boots_and_renders_silence_without_allocating() {
                 && rows.iter().all(|row| !row.contains("owner_kind: Strip")),
             "{rate} Hz: only the session owns rows: {rows:?}"
         );
-        // The render-peak meter of an empty mixer reads silence: configure it, render, and read
-        // the batch the service step stages (the service step arms the peak scan before the blocks).
-        let meter = protocol::TelemetryConfiguration {
-            meter_handles: vec![1],
-            meter_period_blocks: 1,
+        // The output meter of an empty mixer reads silence (#1583): configure the output's peak at
+        // the window the echo names, render one window past the activation, and read the batch
+        // the service step stages.
+        let probe = protocol::TelemetryConfiguration {
+            meters: Vec::new(),
+            meter_period_blocks: 0,
+            meter_window_blocks: None,
             counter_ids: Vec::new(),
             counter_period_blocks: 0,
             diagnostics_enabled: false,
             minimum_diagnostic_severity: protocol::DiagnosticSeverity::Info,
         };
-        let reply = host.send(
-            CommandPayload::TelemetryConfigure(&meter),
-            ExpectedRevision::Exact(SessionRevision(model.revision)),
-        );
-        let mut fields = [0_u16; 64];
-        let DecodedTypedResponseFrame::Success { header, .. } = ProtocolCodec::default()
-            .decode_typed_response(&reply, &mut DecodeScratch::new(&mut fields))
-            .expect("telemetry reply")
-        else {
-            panic!("{rate} Hz: the meter configuration is refused")
+        let window = |reply: &[u8]| {
+            let mut fields = [0_u16; 64];
+            match ProtocolCodec::default()
+                .decode_typed_response(reply, &mut DecodeScratch::new(&mut fields))
+                .expect("telemetry reply")
+            {
+                DecodedTypedResponseFrame::Success {
+                    payload: protocol::DecodedSuccessResponsePayload::TelemetryConfiguration(echo),
+                    ..
+                } => echo
+                    .meter_window_blocks
+                    .expect("the C ABI has a meter window"),
+                _ => panic!("{rate} Hz: the telemetry configuration is refused"),
+            }
         };
-        assert_eq!(header.status, StatusCode::Ok);
-        // SAFETY: The session is live and used by this thread alone.
-        assert_eq!(unsafe { miso_engine_v1_service(host.session) }, RESULT_OK);
-        for block in 4..6 {
+        let blocks = window(&host.send(
+            CommandPayload::TelemetryConfigure(&probe),
+            ExpectedRevision::Exact(SessionRevision(model.revision)),
+        ))
+        .get();
+        let meter = protocol::TelemetryConfiguration {
+            meters: vec![protocol::MeterEntry {
+                target: protocol::MeterTarget::Output,
+                metric: protocol::MeterMetric::Peak,
+            }],
+            meter_period_blocks: blocks,
+            ..probe
+        };
+        assert_eq!(
+            window(&host.send(
+                CommandPayload::TelemetryConfigure(&meter),
+                ExpectedRevision::Exact(SessionRevision(model.revision)),
+            ))
+            .get(),
+            blocks
+        );
+        // Four blocks rendered: the meter opens at the window grid's first boundary after them.
+        let first = 4_u64.div_ceil(u64::from(blocks)) * u64::from(blocks);
+        for block in 4..first + u64::from(blocks) {
             let _ = host.render(block);
         }
+        // SAFETY: The session is live and used by this thread alone.
+        assert_eq!(unsafe { miso_engine_v1_service(host.session) }, RESULT_OK);
         let peaks = host.meter_peaks();
         assert!(
-            !peaks.is_empty() && peaks.iter().all(|peak| *peak == 0.0),
-            "{rate} Hz: the meter reads silence: {peaks:?}"
+            peaks.len() == 2 && peaks.iter().all(|peak| *peak == 0.0),
+            "{rate} Hz: the meter reads silence, left and right: {peaks:?}"
         );
         let (again_epoch, again_rows) = host.control_list();
         assert_eq!((epoch, &rows), (again_epoch, &again_rows));

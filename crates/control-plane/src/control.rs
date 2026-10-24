@@ -332,6 +332,70 @@ fn reply_fits(
         .is_ok_and(|bytes| u64::try_from(bytes).is_ok_and(|bytes| bytes <= limit))
 }
 
+/// Whether a ready `SPECTRUM_STREAM` reply of an entry of `channels` whose identity is
+/// `target_id_bytes` long fits a session frame limit of `limit` bytes (#1595 D5, R3), as
+/// [`reply_fits`] measures a capture.
+fn stream_reply_fits(
+    channels: protocol::ParameterChannel,
+    target_id_bytes: usize,
+    limit: u64,
+) -> bool {
+    protocol::ProtocolCodec::default()
+        .spectrum_stream_ready_frame_len(channels, target_id_bytes)
+        .is_ok_and(|bytes| u64::try_from(bytes).is_ok_and(|bytes| bytes <= limit))
+}
+
+/// #1595 R6: whether a session frame limit of `limit` bytes carries the reads every accepted tap
+/// must have, for a tap of `channels` whose identity is `target_id_bytes` long: a one-plane
+/// one-shot read without the window, and a stream read of the tap's own channels (the entry fixes
+/// them; the stream reply also carries more scalar fields). A tap that fails would answer
+/// `LIMIT_EXCEEDED` on every one-plane read, or on every stream read.
+fn tap_fits(channels: protocol::ParameterChannel, target_id_bytes: usize, limit: u64) -> bool {
+    reply_fits(
+        protocol::ParameterChannel::Left,
+        false,
+        target_id_bytes,
+        limit,
+    ) && stream_reply_fits(channels, target_id_bytes, limit)
+}
+
+/// #1595 R6 on a boot configuration: whether every tap of `preparation` passes [`tap_fits`].
+pub(crate) fn preparation_fits(preparation: &host_core::SpectrumPreparation, limit: u64) -> bool {
+    match preparation {
+        host_core::SpectrumPreparation::Single(request) => tap_fits(
+            protocol_channels(request.channels),
+            spectrum_target_id(&request.target).len(),
+            limit,
+        ),
+        host_core::SpectrumPreparation::Collection(request) => {
+            request.entries.iter().all(|entry| {
+                tap_fits(
+                    protocol_channels(entry.channels),
+                    spectrum_target_id(&entry.target).len(),
+                    limit,
+                )
+            })
+        }
+    }
+}
+
+const fn protocol_target_kind(target: &host_core::SpectrumTarget) -> protocol::SpectrumTargetKind {
+    match target {
+        host_core::SpectrumTarget::TrackPostInputBuiltins(_) => {
+            protocol::SpectrumTargetKind::TrackPostInput
+        }
+        host_core::SpectrumTarget::TrackPostMatrix(_) => protocol::SpectrumTargetKind::TrackPostPan,
+        host_core::SpectrumTarget::Output(_) => protocol::SpectrumTargetKind::Output,
+    }
+}
+
+/// What a `SPECTRUM_STREAM` did (#1595 D3): the stream's metadata after it, with the analysis
+/// facts, and whether the monitor's result holds the bins of a ready read.
+struct StreamOutcome {
+    metadata: host_core::SpectrumStreamMetadata,
+    ready: bool,
+}
+
 /// The analyzed window of a ready read: `result`'s words, borrowed until the reply is encoded,
 /// and with `include_window` the popped window's planes of its mask.
 fn capture_window<'a>(
@@ -351,15 +415,7 @@ fn capture_window<'a>(
     );
     let plane = |held: bool, words: &'a [f32]| held.then_some(Cow::Borrowed(words));
     protocol::SpectrumCaptureWindow {
-        target_kind: match target {
-            host_core::SpectrumTarget::TrackPostInputBuiltins(_) => {
-                protocol::SpectrumTargetKind::TrackPostInput
-            }
-            host_core::SpectrumTarget::TrackPostMatrix(_) => {
-                protocol::SpectrumTargetKind::TrackPostPan
-            }
-            host_core::SpectrumTarget::Output(_) => protocol::SpectrumTargetKind::Output,
-        },
+        target_kind: protocol_target_kind(target),
         target_id: Cow::Borrowed(spectrum_target_id(target)),
         channels: protocol_channels(result.channels),
         sample_rate_hz: result.sample_rate_hz,
@@ -375,6 +431,25 @@ fn capture_window<'a>(
         right_db: plane(right, &result.right_dbfs),
         left_window: plane(left && include_window, &snapshot.window.left),
         right_window: plane(right && include_window, &snapshot.window.right),
+    }
+}
+
+/// The smoothed bins of a ready stream read: `result`'s words, borrowed until the reply is
+/// encoded.
+fn stream_bins(result: &host_core::SpectrumAnalysisResult) -> protocol::SpectrumStreamBins<'_> {
+    use std::borrow::Cow;
+    let left = matches!(
+        result.channels,
+        host_core::SpectrumChannels::Left | host_core::SpectrumChannels::Stereo
+    );
+    let right = matches!(
+        result.channels,
+        host_core::SpectrumChannels::Right | host_core::SpectrumChannels::Stereo
+    );
+    protocol::SpectrumStreamBins {
+        frequencies_hz: Cow::Borrowed(&result.frequencies_hz),
+        left_db: left.then_some(Cow::Borrowed(&result.left_dbfs)),
+        right_db: right.then_some(Cow::Borrowed(&result.right_dbfs)),
     }
 }
 
@@ -973,8 +1048,67 @@ pub struct SessionState<A: ControlAdapter> {
     /// configuration.
     pub(crate) spectrum: crate::spectrum::SpectrumMonitor,
     /// The output meter's reader and gate (#1581 D4) until the adapter takes them: the browser's
-    /// render half does; the C ABI's control half keeps them here for #1583.
+    /// render half does. `None` from boot when the session serves the meter batches itself
+    /// ([`Self::meters`]).
     pub(crate) output_meter: Option<(host_core::OutputPeakReader, host_core::OutputPeakGate)>,
+    /// The session's meter delivery when its control plane serves the meter batches (#1583 D5,
+    /// R2: the C ABI's), built at boot over the output meter's reader and a requested gate.
+    pub(crate) meters: Option<SessionMeters>,
+}
+
+/// The meter delivery a control plane serves (#1583 D5): the output meter's delivery, with no
+/// strip consumer until #1587 (R1), the fold of its frames into batches, and the configuration
+/// the two were last set for.
+pub(crate) struct SessionMeters {
+    delivery: host_core::MeterDelivery,
+    fold: host_core::meters::MeterBatchFold,
+    /// The meter window in blocks, which the provider echoes and the period divides.
+    window_blocks: core::num::NonZeroU32,
+    /// The controller's telemetry generation the delivery's level and the fold were set for.
+    generation: u64,
+    /// The windows of completed batches the lossy lane refused to stage.
+    unstaged: u64,
+}
+
+impl SessionMeters {
+    pub(crate) fn new(
+        delivery: host_core::MeterDelivery,
+        window_blocks: core::num::NonZeroU32,
+    ) -> Self {
+        Self {
+            delivery,
+            fold: host_core::meters::MeterBatchFold::new(core::num::NonZeroU32::MIN),
+            window_blocks,
+            generation: 0,
+            unstaged: 0,
+        }
+    }
+
+    /// Every closed meter window that never reached a `METER_BATCH` (#1583 D5): the output
+    /// windows render dropped at a full queue, the windows of partial batches the fold discarded
+    /// (at a gap, or when a nonempty configuration replaced the one it folded for), and the
+    /// windows of batches the lane refused. When a configure empties the table, neither the
+    /// windows the delivery pops unread nor the open partial batch are counted: the client turned
+    /// the meters off.
+    ///
+    /// `unstaged` is defensive: on the C ABI no service step can see a refusal. The step runs at
+    /// the start of every session call, before a structural token exists (none outlives its
+    /// call), so `stage_meter_batch_event` is never refused as structural-outstanding; the level
+    /// is on only with a nonempty table, which is not `Disabled`; and the two records of the
+    /// output entry always encode.
+    fn windows_lost(&self) -> u64 {
+        self.delivery
+            .output_dropped_windows()
+            .saturating_add(self.fold.discarded_windows())
+            .saturating_add(self.unstaged)
+    }
+}
+
+/// The C ABI's delivery has no strip meter until #1587, so it visits no gain-reduction tap.
+struct NoGainReductionTaps;
+
+impl host_core::GainReductionTaps for NoGainReductionTaps {
+    fn for_each_tap(&mut self, _visit: &mut impl FnMut(host_core::TapView<'_>)) {}
 }
 
 /// Every live send move (a following route's record with a ramp, written by a live commit or by a
@@ -1806,19 +1940,106 @@ where
         take_test_fault_state(phase)
     }
 
-    /// Republish the render thread's peak-scan gate from the accepted telemetry configuration.
-    ///
-    /// Issue #163 phase 4 item 2. Called wherever the endpoint's telemetry configuration can have
-    /// just changed, which is every path that reaches this control state: an accepted
-    /// `ConfigureTelemetry` arrives inside `command`, and a plan swap re-reads it here. The flag
-    /// only ever lags by the width of one concurrent render, and `publish_render_observation`
-    /// marks such a block unmeasured rather than letting it publish a fabricated `0.0`.
-    pub(crate) fn refresh_render_peak_gate(&self) {
+    /// Set the meter delivery's level and the batch fold for the accepted telemetry configuration
+    /// once per accepted `TELEMETRY_CONFIGURE` (#1583 D5): a nonempty table turns the level on
+    /// from the next block, an empty one off, and the fold restarts with
+    /// `meter_period_blocks / meter_window_blocks` windows per batch and sequence `1` next. The
+    /// level writes the requested gate, which render applies before its next block. An exact
+    /// replay answers from the cache and changes nothing here.
+    pub(crate) fn sync_meter_configuration(&mut self) {
+        let generation = self.controller.telemetry_configuration_generation();
+        let Some(meters) = self.meters.as_mut() else {
+            return;
+        };
+        if meters.generation == generation {
+            return;
+        }
+        meters.generation = generation;
         let telemetry = self.controller.telemetry_configuration();
-        let observed = !telemetry.meter_handles.is_empty() && telemetry.meter_period_blocks != 0;
-        self.shared
-            .render_peak_observed
-            .store(observed, Ordering::Relaxed);
+        let on = !telemetry.meters.is_empty() && telemetry.meter_period_blocks != 0;
+        let windows =
+            core::num::NonZeroU32::new(telemetry.meter_period_blocks / meters.window_blocks.get())
+                .unwrap_or(core::num::NonZeroU32::MIN);
+        // One turn-off rule: an empty table owes the client nothing, so neither the open partial
+        // batch nor the windows the delivery pops unread are counted lost.
+        if !on {
+            meters.fold.drop_partial();
+        }
+        meters.fold.restart(windows);
+        let next_sample = self.shared.render_sample.load(Ordering::Acquire);
+        meters.delivery.set_level(on, next_sample);
+    }
+
+    /// Stage one `METER_BATCH` per batch the delivery's closed windows complete (#1583 D5): the
+    /// delivery publishes at most one frame per poll, so the loop polls until it publishes none,
+    /// bounded by the window queue's depth and one more. Records follow the table: the output's
+    /// peak entry gives its left and right peak, `VALID` when the batch's output peak covered its
+    /// span and `CLIPPED` above `1.0`; no other entry is served until #1587.
+    fn stage_meter_batches(&mut self, revision: protocol::SessionRevision) {
+        /// `METER_BATCH` record flags (registry): valid and clipped.
+        const VALID: u16 = 1;
+        const CLIPPED: u16 = 1 << 1;
+        let Some(meters) = self.meters.as_mut() else {
+            return;
+        };
+        let next_sample = self.shared.render_sample.load(Ordering::Acquire);
+        for _ in 0..=host_core::METER_QUEUE_DEPTH {
+            let Some(frame) = meters
+                .delivery
+                .poll(&mut [], &mut NoGainReductionTaps, next_sample)
+            else {
+                break;
+            };
+            let Some(batch) = meters.fold.push(frame) else {
+                continue;
+            };
+            let handle = self
+                .controller
+                .telemetry_configuration()
+                .meters
+                .iter()
+                .position(|entry| {
+                    entry.target == protocol::MeterTarget::Output
+                        && entry.metric == protocol::MeterMetric::Peak
+                })
+                .and_then(|index| u32::try_from(index + 1).ok());
+            let Some(handle) = handle else {
+                continue;
+            };
+            let record = |component, value: f32| {
+                let mut flags = 0;
+                if batch.output_valid {
+                    flags |= VALID;
+                    if value > 1.0 {
+                        flags |= CLIPPED;
+                    }
+                }
+                protocol::MeterRecord {
+                    handle,
+                    component,
+                    flags,
+                    value: if batch.output_valid { value } else { 0.0 },
+                }
+            };
+            let records = [
+                record(protocol::MeterComponent::Left, batch.output_peak[0]),
+                record(protocol::MeterComponent::Right, batch.output_peak[1]),
+            ];
+            let span = protocol::MeterWindowSpan {
+                first_sample: protocol::SampleTime(batch.first_sample),
+                end_sample: protocol::SampleTime(batch.end_sample),
+                window_sequence: batch.sequence,
+            };
+            if self
+                .controller
+                .stage_meter_batch_event(revision, span, &records)
+                .is_err()
+            {
+                meters.unstaged = meters
+                    .unstaged
+                    .saturating_add(u64::from(meters.fold.windows_per_batch()));
+            }
+        }
     }
 
     /// Stages the `COUNTER_SNAPSHOT` event once render has completed at least the configured
@@ -1859,7 +2080,7 @@ where
     }
 
     pub(crate) fn collect_render_activity(&mut self) {
-        self.refresh_render_peak_gate();
+        self.sync_meter_configuration();
         let sequence = self.shared.render_sequence.load(Ordering::Acquire);
         // While no counter snapshot is configured the baseline follows render, so a
         // configuration counts its period from the call that accepted it, never from the first
@@ -1875,34 +2096,9 @@ where
         }
         self.observed_render_sequence = sequence;
         let sample = self.shared.render_sample.load(Ordering::Acquire);
-        let peak = f32::from_bits(self.shared.render_peak_bits.load(Ordering::Acquire));
         let observed_sample = protocol::SampleTime(sample);
         let revision = self.controller.session().revision();
-        // A `NaN` peak is the render thread saying it did not measure this block, which happens
-        // for exactly one block when telemetry is configured concurrently with a render. Staging
-        // it would publish a peak of `0.0` that no sample ever produced; dropping it costs one
-        // record on the lane that is documented to coalesce and drop.
-        let meter_len = if peak.is_nan() {
-            0
-        } else {
-            self.controller
-                .telemetry_configuration()
-                .meter_handles
-                .len()
-        };
-        for index in 0..meter_len {
-            let handle = self.controller.telemetry_configuration().meter_handles[index];
-            let _ = self.controller.stage_meter_batch_event(
-                revision,
-                observed_sample,
-                &[protocol::MeterRecord {
-                    handle,
-                    component: protocol::MeterComponent::Left,
-                    flags: 1,
-                    value: peak,
-                }],
-            );
-        }
+        self.stage_meter_batches(revision);
         self.stage_counter_snapshot(sequence, observed_sample, revision);
         let diagnostics_enabled = {
             let configuration = self.controller.telemetry_configuration();
@@ -2002,9 +2198,9 @@ where
                 .report(protocol::QueueKind::Telemetry),
             telemetry_counters: self.controller.queues().telemetry_counters(),
             retained_capacities: [
-                controller.meter_handles,
+                controller.meters,
                 controller.counter_ids,
-                provider.meter_handles,
+                provider.meters,
                 provider.counter_ids,
                 provider_counters,
                 replay.0,
@@ -2129,9 +2325,9 @@ where
         let (provider, provider_counters) = self.controller.provider().retained_capacities();
         let replay = self.controller.replay().retained_storage_capacities();
         [
-            controller.meter_handles,
+            controller.meters,
             controller.counter_ids,
-            provider.meter_handles,
+            provider.meters,
             provider.counter_ids,
             provider_counters,
             replay.0,
@@ -2486,9 +2682,10 @@ where
     ///
     /// **Bounded (D3).** Every retired plan holds one retirement credit, the credits number the
     /// retirement queue's capacity, and only a publication -- never this step -- reserves one, so
-    /// one call reclaims at most that capacity of plans. It stages at most one render observation,
-    /// never loops on render progress and never waits, so its cost does not grow with the time
-    /// since the last call.
+    /// one call reclaims at most that capacity of plans. It stages at most one render observation
+    /// and at most one meter batch per closed window the meter queue holds (#1583: its depth and
+    /// one), never loops on render progress and never waits, so its cost does not grow with the
+    /// time since the last call.
     ///
     /// **Pending candidates (D7).** Nothing here takes a pending candidate: it stays in its
     /// mailbox cell, with its plan, epoch, revision gate and retirement credit, until render adopts
@@ -2509,8 +2706,9 @@ where
 
     /// Sets every counter the provider serves from a source outside it (#1348 D8): the
     /// controller's telemetry counters, the session's `live_values_superseded` count (#1312
-    /// D8), its `strips_restarted` (#1768) and `source_frames_discarded` (#1699) counts and the
-    /// render-side `live_block_errors` (#1521 D3) and `source_underrun_blocks` (#1537) mirrors.
+    /// D8), its `strips_restarted` (#1768), `source_frames_discarded` (#1699) and
+    /// `meter_windows_lost` (#1583 D5) counts and the render-side `live_block_errors` (#1521 D3)
+    /// and `source_underrun_blocks` (#1537) mirrors.
     /// A counter added later joins this refresh, never a single control call.
     fn refresh_provider_counters(&mut self) {
         let telemetry_counters = self.controller.queues().telemetry_counters();
@@ -2519,6 +2717,7 @@ where
         let errors = self.shared.live_block_errors.load(Ordering::Acquire);
         let underruns = self.shared.source_underrun_blocks.load(Ordering::Acquire);
         let discarded = self.source_frames_discarded;
+        let meter_windows_lost = self.meters.as_ref().map_or(0, SessionMeters::windows_lost);
         let provider = self.controller.provider_mut();
         provider.set_telemetry_counters(telemetry_counters);
         provider.set_live_values_superseded(superseded);
@@ -2526,6 +2725,7 @@ where
         provider.set_live_block_errors(errors);
         provider.set_source_underrun_blocks(underruns);
         provider.set_source_frames_discarded(discarded);
+        provider.set_meter_windows_lost(meter_windows_lost);
     }
 
     /// Runs one control command frame. A success returns the response's length in the response
@@ -2595,9 +2795,14 @@ where
         }
         .map_err(map_command_process_error)?;
         match prepared {
-            PreparedCommandFrame::Immediate(response) => response
-                .write_into(&mut self.response_scratch)
-                .map_err(map_encode_error),
+            PreparedCommandFrame::Immediate(response) => {
+                let written = response
+                    .write_into(&mut self.response_scratch)
+                    .map_err(map_encode_error);
+                // #1583 D5: an accepted `TELEMETRY_CONFIGURE` sets the meter level and the fold.
+                self.sync_meter_configuration();
+                written
+            }
             // #1594 D9: a command the session executes.
             PreparedCommandFrame::Session(prepared) => self.session_command(*prepared),
             PreparedCommandFrame::Structural(prepared) => {
@@ -2852,6 +3057,10 @@ where
                 let outcome = self.spectrum_capture(request);
                 return self.complete_spectrum_capture(prepared, outcome);
             }
+            protocol::SessionCommand::SpectrumStream(request) => {
+                let outcome = self.spectrum_stream(request);
+                return self.complete_spectrum_stream(prepared, outcome);
+            }
         };
         let outcome = self.spectrum_configure(request);
         match outcome {
@@ -2940,6 +3149,203 @@ where
             .map_err(map_command_process_error)
     }
 
+    /// Completes a `SPECTRUM_STREAM` with its reply or its refusal, as
+    /// [`Self::complete_spectrum_capture`] completes a capture. A ready reply borrows the
+    /// monitor's result until it is encoded.
+    fn complete_spectrum_stream(
+        &mut self,
+        prepared: protocol::PreparedSessionCommand,
+        outcome: Result<StreamOutcome, SpectrumRefusal>,
+    ) -> Result<usize, CommandError> {
+        let outcome = match outcome {
+            Ok(outcome) => outcome,
+            Err(SpectrumRefusal::Reply(status, code)) => {
+                return self
+                    .controller
+                    .complete_session_command_refused(
+                        prepared,
+                        status,
+                        &code,
+                        &mut self.response_scratch,
+                    )
+                    .map_err(map_command_process_error);
+            }
+            Err(SpectrumRefusal::Error(error)) => {
+                drop(prepared);
+                return Err(error);
+            }
+        };
+        let monitor = &self.spectrum;
+        let service = monitor.service();
+        let metadata = &outcome.metadata;
+        let status = u8::try_from(metadata.status.code())
+            .ok()
+            .and_then(|code| protocol::SpectrumStreamStatus::from_code(code).ok());
+        let bins = match (outcome.ready, monitor.result()) {
+            (false, _) => None,
+            (true, Some(result)) => Some(stream_bins(result)),
+            (true, None) => None,
+        };
+        let (Some(status), Some(service)) = (status, service) else {
+            drop(prepared);
+            return Err(CommandError::Internal);
+        };
+        if outcome.ready && bins.is_none() {
+            drop(prepared);
+            return Err(CommandError::Internal);
+        }
+        let target = service
+            .target()
+            .zip(service.channels())
+            .map(|(target, channels)| protocol::SpectrumStreamTarget {
+                target_kind: protocol_target_kind(target),
+                target_id: std::borrow::Cow::Borrowed(spectrum_target_id(target)),
+                channels: protocol_channels(channels),
+            });
+        let reply = protocol::SpectrumStreamReply {
+            adopted_epoch: monitor.adopted_epoch(),
+            selection_epoch: service.selection_epoch(),
+            status,
+            target,
+            sample_rate_hz: metadata.sample_rate_hz,
+            quantum_frames: metadata.quantum_frames,
+            hop_frames: metadata.hop_frames,
+            capture_epoch: metadata.capture_epoch,
+            sequence: metadata.sequence,
+            dropped_captures: metadata.dropped_captures,
+            windows: metadata.windows,
+            captured_sample: metadata.captured_sample,
+            end_sample: metadata.end_sample,
+            analysis_epoch: metadata.analysis_epoch,
+            history_start_sample: metadata.history_start_sample,
+            smoothing_ms: metadata.smoothing_ms,
+            source_underrun: metadata.source_underrun,
+            bins,
+        };
+        self.controller
+            .complete_session_command(
+                prepared,
+                protocol::SessionCommandReply::SpectrumStreamed(reply),
+                &mut self.response_scratch,
+            )
+            .map_err(map_command_process_error)
+    }
+
+    /// `SPECTRUM_STREAM` (#1595 D3-D6) on the monitor's service and analysis, on this control
+    /// thread: start, select, reset and stop answer the stream's metadata after the operation; a
+    /// read answers its status (`inactive`, `warming`, `pending`, `gap`, `failed`, `stopped` or
+    /// `ready`, none a refusal), and a ready read analyzes the service's held window with the
+    /// stream's smoothing (`SpectrumAnalysis::analyze_stream_into`) into the monitor's one
+    /// result. Every refusal is the service's error with its status (D6).
+    ///
+    /// **Acked-batch question for a stream: can a reply acknowledge a window it did not deliver,
+    /// or lose a drop count? No.** R6 admits only entries whose stream read fits the session's
+    /// frame limit, at boot and at configure. In depth, a read also measures the frame a ready
+    /// reply of the selected entry takes (D5) before it reads and refuses `LIMIT_EXCEEDED`
+    /// (`spectrum.frame`) when the limit cannot carry it: such a read pops no window and consumes
+    /// no `gap` or `failed` status. A `gap` reply carries
+    /// `dropped_captures`, the windows the bounded queue dropped in the epoch. As for a capture,
+    /// the output is reserved for the frame limit before the session runs and the reply is
+    /// recorded for replay in the call that writes it. The one consume-then-fail path is an
+    /// analyzer refusal of a popped window (`WindowInvalid`, `UNAVAILABLE`), as for a capture.
+    fn spectrum_stream(
+        &mut self,
+        request: &protocol::SpectrumStreamRequest,
+    ) -> Result<StreamOutcome, SpectrumRefusal> {
+        let limit = self.limits.maximum_control_frame_bytes;
+        let Some(parts) = self.spectrum.read_parts() else {
+            return Err(spectrum_service_refusal(
+                host_core::SpectrumServiceError::Unprepared,
+            ));
+        };
+        let crate::spectrum::ReadParts {
+            service,
+            analysis,
+            one_shot,
+        } = parts;
+        match request {
+            protocol::SpectrumStreamRequest::Start { smoothing_ms } => {
+                let smoothing = host_core::spectrum_smoothing(*smoothing_ms)
+                    .map_err(spectrum_service_refusal)?;
+                service
+                    .start_stream(smoothing, Some(&mut *analysis))
+                    .map_err(spectrum_service_refusal)?;
+            }
+            protocol::SpectrumStreamRequest::Select {
+                target_kind,
+                target_id,
+                channels,
+                smoothing_ms,
+            } => {
+                let target =
+                    host_core::spectrum_target_ref(u32::from(target_kind.code()), target_id)
+                        .map_err(|error| {
+                            SpectrumRefusal::reply(protocol::StatusCode::InvalidField, error.code())
+                        })?;
+                let smoothing = smoothing_ms
+                    .map(host_core::spectrum_smoothing)
+                    .transpose()
+                    .map_err(spectrum_service_refusal)?;
+                service
+                    .select_target(
+                        target,
+                        spectrum_channels(*channels),
+                        smoothing,
+                        Some(&mut *analysis),
+                    )
+                    .map_err(spectrum_service_refusal)?;
+            }
+            protocol::SpectrumStreamRequest::Read => {
+                // D5, defence in depth: R6 (at boot and at configure) already admits only entries
+                // whose stream read fits, so this refusal guards the rule rather than a known path;
+                // a read that did not fit must still pop no window and consume no status.
+                if let (Some(target), Some(channels)) = (service.target(), service.channels())
+                    && !stream_reply_fits(
+                        protocol_channels(channels),
+                        spectrum_target_id(target).len(),
+                        limit,
+                    )
+                {
+                    return Err(SpectrumRefusal::reply(
+                        protocol::StatusCode::LimitExceeded,
+                        "spectrum.frame",
+                    ));
+                }
+                service
+                    .read_stream(Some(&mut *analysis))
+                    .map_err(spectrum_service_refusal)?;
+                if let Some(window) = service.stream_window() {
+                    let mut metadata = *service.stream_metadata();
+                    analysis
+                        .analyze_stream_into(window, &mut one_shot.result, &mut metadata)
+                        .map_err(spectrum_service_refusal)?;
+                    return Ok(StreamOutcome {
+                        metadata,
+                        ready: true,
+                    });
+                }
+            }
+            protocol::SpectrumStreamRequest::Reset => {
+                analysis.reset_stream().map_err(spectrum_service_refusal)?;
+            }
+            protocol::SpectrumStreamRequest::Stop => service.stop_stream(Some(&mut *analysis)),
+        }
+        // The service's metadata with the analysis's facts: a reset changes only the analysis.
+        // Only a read delivers a window, so a reply to anything else is never `ready`: after a
+        // ready read, a reset discards the window at hand, and the stream runs with none queued
+        // for this reader (`pending`) until the next read.
+        let mut metadata = *service.stream_metadata();
+        metadata.analysis_epoch = analysis.analysis_epoch();
+        metadata.history_start_sample = analysis.history_start_sample();
+        if metadata.status == host_core::SpectrumStreamStatus::Ready {
+            metadata.status = host_core::SpectrumStreamStatus::Pending;
+        }
+        Ok(StreamOutcome {
+            metadata,
+            ready: false,
+        })
+    }
+
     /// `SPECTRUM_CAPTURE` (#1595 D4-D6) on the monitor's service, on this control thread: arm,
     /// cancel and select answer `done`; a read answers `pending` or analyzes the window it pops
     /// into the monitor's one result (`SpectrumAnalysis::analyze_into`). Every refusal is the
@@ -2957,12 +3363,12 @@ where
         request: &protocol::SpectrumCaptureRequest,
     ) -> Result<CaptureOutcome, SpectrumRefusal> {
         let limit = self.limits.maximum_control_frame_bytes;
-        let Some(parts) = self.spectrum.capture_parts() else {
+        let Some(parts) = self.spectrum.read_parts() else {
             return Err(spectrum_service_refusal(
                 host_core::SpectrumServiceError::Unprepared,
             ));
         };
-        let crate::spectrum::CaptureParts {
+        let crate::spectrum::ReadParts {
             service,
             analysis,
             one_shot,
@@ -3083,17 +3489,15 @@ where
                 ));
             }
         }
-        // #1595 R6: a tap whose one-plane read (without the window) the session's frame limit
-        // cannot carry would answer `LIMIT_EXCEEDED` on every read; it is refused here.
+        // #1595 R6: a tap whose one-plane one-shot read (without the window) or whose stream read
+        // (of the tap's channels) the session's frame limit cannot carry would answer
+        // `LIMIT_EXCEEDED` on every such read; it is refused here.
         let limit = self.limits.maximum_control_frame_bytes;
-        if request.entries.iter().any(|entry| {
-            !reply_fits(
-                protocol::ParameterChannel::Left,
-                false,
-                entry.target_id.len(),
-                limit,
-            )
-        }) {
+        if request
+            .entries
+            .iter()
+            .any(|entry| !tap_fits(entry.channels, entry.target_id.len(), limit))
+        {
             return Err(SpectrumRefusal::reply(
                 StatusCode::LimitExceeded,
                 "spectrum.frame",

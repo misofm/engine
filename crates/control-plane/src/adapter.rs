@@ -30,6 +30,21 @@ pub trait ControlAdapter {
     /// write the same queues, and one queue must never have two writers. Its plans must carry an
     /// observation queue for every declared tap.
     const OBSERVE_EDIT: bool = false;
+    /// Whether the session owns a meter delivery that the control plane serves (#1583 D3-D5, R2):
+    /// `TELEMETRY_CONFIGURE` then accepts a meter table, its echo carries the meter window, and the
+    /// service step stages one `METER_BATCH` per completed batch of the output meter's windows,
+    /// whose gate a relay applies on the render thread. An adapter that keeps the default refuses
+    /// every meter entry with `meter.unavailable` and takes the output meter's reader and gate
+    /// itself (`take_output_meter`): the browser until #1588.
+    const METER_DELIVERY: bool = false;
+    /// Whether the session advertises the spectrum commands (#1595 R2): `SPECTRUM_CONFIGURE`,
+    /// `SPECTRUM_CAPTURE` and `SPECTRUM_STREAM` with capability bit 16
+    /// (`ProviderFeatures::spectrum`).
+    /// Every session serves the three, and every boot refuses a spectrum configuration with a tap
+    /// no read can carry within the frame limit (`spectrum.frame`, #1595 R6); an adapter that
+    /// keeps the default lists none of them, for a host that reads spectrum through another
+    /// surface (the browser until #1596).
+    const SPECTRUM: bool = false;
 }
 
 /// Plain compile limits (#1309 D3): every numeric field of the C ABI's `CompileLimits`, with the

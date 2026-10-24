@@ -15,10 +15,11 @@ use protocol::{
     ControlScope, ControlSection, ControlSectionHeader, ControlStatePage, ControlStateRecord,
     ControlTaper, ControllerRetainedCapacity, CounterId, CounterSnapshot, CounterValue,
     CountersRequest, Diagnostic, DiagnosticSeverity, DiagnosticsPage, DiagnosticsRequest,
-    EnumChoice, ParameterChannel, ParameterProviderError, ParameterUnit as ProtocolUnit,
-    ResponseConfiguration, ResponseCurves, ResponseGetRequest, ResponseGrid, ResponseProviderError,
-    ResponseResult, ResponseTarget, SampleTime, StatusCode, TelemetryConfiguration,
-    TelemetryCounters, TransportSetRequest, TransportSnapshot, TransportState,
+    EnumChoice, MeterMetric, MeterTarget, ParameterChannel, ParameterProviderError,
+    ParameterUnit as ProtocolUnit, ResponseConfiguration, ResponseCurves, ResponseGetRequest,
+    ResponseGrid, ResponseProviderError, ResponseResult, ResponseTarget, SampleTime, StatusCode,
+    TelemetryConfiguration, TelemetryCounters, TelemetryRefusal, TelemetryRefusalPath,
+    TransportSetRequest, TransportSnapshot, TransportState,
 };
 use session::{EffectIdentity, SessionModel, StripKind};
 
@@ -31,9 +32,10 @@ use crate::response::{
 
 /// The counters the provider serves, in ascending ID order (#1351 D1): the two telemetry
 /// counters, `live_values_superseded` (#1312 D8), `transition_reprepare_refusals` (D6),
-/// `strips_restarted` (#1768), `live_block_errors` (#1521), `source_underrun_blocks` (#1537) and
-/// `source_frames_discarded` (#1699). Each reads 0 from construction.
-const SERVED_COUNTERS: [CounterId; 8] = [
+/// `strips_restarted` (#1768), `live_block_errors` (#1521), `source_underrun_blocks` (#1537),
+/// `source_frames_discarded` (#1699) and `meter_windows_lost` (#1583 D5). Each reads 0 from
+/// construction.
+const SERVED_COUNTERS: [CounterId; 9] = [
     CounterId::TelemetryCoalesced,
     CounterId::TelemetryDropped,
     CounterId::LiveValuesSuperseded,
@@ -42,6 +44,7 @@ const SERVED_COUNTERS: [CounterId; 8] = [
     CounterId::LiveBlockErrors,
     CounterId::SourceUnderrunBlocks,
     CounterId::SourceFramesDiscarded,
+    CounterId::MeterWindowsLost,
 ];
 
 /// The slots the provider's counter snapshot keeps even when the controller retains fewer IDs.
@@ -344,6 +347,9 @@ pub struct SessionControlProvider {
     /// The most reply frame bytes a `RESPONSE_GET` may answer: the smaller of the endpoint's
     /// frame bound and the replay cache's response bound.
     maximum_reply_bytes: usize,
+    /// The meter window in blocks of the host's meter delivery, or `None` while the host has none
+    /// (#1583 D4): the browser until #1588.
+    meter_window_blocks: Option<core::num::NonZeroU32>,
 }
 
 impl SessionControlProvider {
@@ -407,6 +413,7 @@ impl SessionControlProvider {
             transport_state: TransportState::Stopped,
             telemetry_configuration: retained_telemetry(retained)?,
             maximum_reply_bytes,
+            meter_window_blocks: None,
         };
         provider
             .counter_snapshot
@@ -610,6 +617,23 @@ impl SessionControlProvider {
         );
     }
 
+    /// Record the session's lost meter windows (#1583 D5): the windows the meter delivery lost
+    /// and the partial batches its fold discarded, none of which reached a `METER_BATCH`.
+    pub fn set_meter_windows_lost(&mut self, count: u64) {
+        set_counter(
+            &mut self.counter_snapshot,
+            CounterId::MeterWindowsLost,
+            count,
+        );
+    }
+
+    /// Give the provider the host's meter delivery window in blocks (#1583 D4, R2): a host with a
+    /// meter delivery sets it once at boot; until then the provider has none and refuses any meter
+    /// entry.
+    pub fn set_meter_window_blocks(&mut self, blocks: Option<core::num::NonZeroU32>) {
+        self.meter_window_blocks = blocks;
+    }
+
     /// Update one preallocated C-ABI render-diagnostic projection.
     pub fn set_render_diagnostic(&mut self, slot: usize, sample: u64, sequence: u64, live: bool) {
         let Some(diagnostic) = self.diagnostics.get_mut(slot) else {
@@ -625,7 +649,7 @@ impl SessionControlProvider {
     pub fn retained_capacities(&self) -> (ControllerRetainedCapacity, usize) {
         (
             ControllerRetainedCapacity {
-                meter_handles: self.telemetry_configuration.meter_handles.capacity(),
+                meters: self.telemetry_configuration.meters.capacity(),
                 counter_ids: self.telemetry_configuration.counter_ids.capacity(),
             },
             self.counter_snapshot.capacity(),
@@ -1294,7 +1318,7 @@ impl ControlProvider for SessionControlProvider {
     fn telemetry_configure(
         &mut self,
         configuration: TelemetryConfiguration,
-    ) -> Result<TelemetryConfiguration, ParameterProviderError> {
+    ) -> Result<TelemetryConfiguration, TelemetryRefusal> {
         // A counter this provider does not serve can never report; refuse it before anything
         // changes (#1351 D2).
         if configuration
@@ -1302,12 +1326,12 @@ impl ControlProvider for SessionControlProvider {
             .iter()
             .any(|id| !SERVED_COUNTERS.contains(id))
         {
-            return Err(ParameterProviderError::NotFound);
+            return Err(ParameterProviderError::NotFound.into());
         }
-        self.telemetry_configuration.meter_handles.clear();
+        refuse_meter_table(&configuration, self.meter_window_blocks)?;
         self.telemetry_configuration
-            .meter_handles
-            .extend_from_slice(&configuration.meter_handles);
+            .meters
+            .clone_from(&configuration.meters);
         self.telemetry_configuration.counter_ids.clear();
         self.telemetry_configuration
             .counter_ids
@@ -1319,6 +1343,62 @@ impl ControlProvider for SessionControlProvider {
             configuration.minimum_diagnostic_severity;
         Ok(configuration)
     }
+
+    fn meter_window_blocks(&self) -> Option<core::num::NonZeroU32> {
+        self.meter_window_blocks
+    }
+}
+
+/// The meter table rules this provider owns (#1583 D3), in order: with no meter delivery any
+/// entry is `meter.unavailable`; the period must be a positive multiple of the window
+/// (`meter.period`); then, until #1587, the first gain-reduction entry is
+/// `meter.gain_reduction.unavailable` and the first strip peak entry `meter.strip.unavailable`.
+/// An empty table is always served.
+fn refuse_meter_table(
+    configuration: &TelemetryConfiguration,
+    window: Option<core::num::NonZeroU32>,
+) -> Result<(), TelemetryRefusal> {
+    if configuration.meters.is_empty() {
+        return Ok(());
+    }
+    let refuse = |error, code, path| {
+        Err(TelemetryRefusal {
+            error,
+            code: Some(code),
+            path,
+        })
+    };
+    let Some(window) = window else {
+        return refuse(
+            ParameterProviderError::Unavailable,
+            "meter.unavailable",
+            TelemetryRefusalPath::Meter(0),
+        );
+    };
+    if configuration.meter_period_blocks == 0
+        || !configuration
+            .meter_period_blocks
+            .is_multiple_of(window.get())
+    {
+        return refuse(
+            ParameterProviderError::InvalidField,
+            "meter.period",
+            TelemetryRefusalPath::MeterPeriod,
+        );
+    }
+    for (index, entry) in configuration.meters.iter().enumerate() {
+        let code = match (&entry.target, entry.metric) {
+            (_, MeterMetric::GainReduction) => "meter.gain_reduction.unavailable",
+            (MeterTarget::Strip(_), MeterMetric::Peak) => "meter.strip.unavailable",
+            (MeterTarget::Output, MeterMetric::Peak) => continue,
+        };
+        return refuse(
+            ParameterProviderError::Unavailable,
+            code,
+            TelemetryRefusalPath::Meter(index),
+        );
+    }
+    Ok(())
 }
 
 /// The most owners a staged live commit reads before it builds a
@@ -2369,17 +2449,18 @@ const fn ramp_row(value: LiveRampRow) -> ControlRampRow {
 fn retained_telemetry(
     retained: ControllerRetainedCapacity,
 ) -> Result<TelemetryConfiguration, SessionControlProviderError> {
-    let mut meter_handles = Vec::new();
-    meter_handles
-        .try_reserve_exact(retained.meter_handles)
+    let mut meters = Vec::new();
+    meters
+        .try_reserve_exact(retained.meters)
         .map_err(|_| SessionControlProviderError)?;
     let mut counter_ids = Vec::new();
     counter_ids
         .try_reserve_exact(retained.counter_ids)
         .map_err(|_| SessionControlProviderError)?;
     Ok(TelemetryConfiguration {
-        meter_handles,
+        meters,
         meter_period_blocks: 0,
+        meter_window_blocks: None,
         counter_ids,
         counter_period_blocks: 0,
         diagnostics_enabled: false,
@@ -3290,7 +3371,7 @@ mod tests {
             1,
             sample_source,
             ControllerRetainedCapacity {
-                meter_handles: 4,
+                meters: 4,
                 counter_ids: 0,
             },
             2,
@@ -3822,6 +3903,7 @@ mod tests {
         provider.set_live_block_errors(17);
         provider.set_source_underrun_blocks(19);
         provider.set_source_frames_discarded(23);
+        provider.set_meter_windows_lost(29);
         let counters = provider
             .counters(&CountersRequest {
                 all: true,
@@ -3846,7 +3928,9 @@ mod tests {
         assert_eq!(counters.values[6].value, 19);
         assert_eq!(counters.values[7].id, CounterId::SourceFramesDiscarded);
         assert_eq!(counters.values[7].value, 23);
-        assert_eq!(counters.values.len(), 8);
+        assert_eq!(counters.values[8].id, CounterId::MeterWindowsLost);
+        assert_eq!(counters.values[8].value, 29);
+        assert_eq!(counters.values.len(), 9);
         assert_eq!(provider.retained_capacities().1, counter_capacity);
 
         provider.set_render_diagnostic(0, 256, 3, true);

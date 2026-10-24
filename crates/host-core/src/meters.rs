@@ -75,6 +75,41 @@ impl OutputPeakGate {
     }
 }
 
+/// The render half of a requested output gate (#1583): a host whose meter delivery runs on a
+/// control thread hands the delivery the [`OutputPeakGate`] of [`output_peak_gate_relay`], which
+/// writes only a *requested* gate word, and keeps this relay with the output meter on the render
+/// thread. [`Self::apply`] copies a changed request into the meter's own gate once, before a block,
+/// so the gate moves only on the render thread and between blocks, and the strip meters and the
+/// output meter judge every block by the one gate value.
+///
+/// The relay is the gate's one writer, and it applies a request only when the request *changes*:
+/// a render-side move of the gate (#1587a: the adoption block of a swap that carried no strip
+/// meter) is a relay method that writes the gate and leaves `applied` as it is, so an unchanged
+/// request never undoes it, and the control thread's next request (its `align` at the adoption
+/// sample) supersedes it.
+pub struct OutputPeakGateRelay {
+    requested: Arc<AtomicU64>,
+    gate: OutputPeakGate,
+    /// The request the relay last copied into the gate.
+    applied: u64,
+}
+
+/// A requested gate over the output meter's `gate` (#1583): the [`OutputPeakGate`] a control-thread
+/// delivery writes (a request word that starts inactive) and the [`OutputPeakGateRelay`] the render
+/// thread applies it with. Allocates one shared word; call it on a control thread.
+#[must_use]
+pub fn output_peak_gate_relay(gate: OutputPeakGate) -> (OutputPeakGate, OutputPeakGateRelay) {
+    let requested = Arc::new(AtomicU64::new(INACTIVE));
+    (
+        OutputPeakGate(Arc::clone(&requested)),
+        OutputPeakGateRelay {
+            requested,
+            gate,
+            applied: INACTIVE,
+        },
+    )
+}
+
 /// The reading half of the output meter (#1581 D3): the closed windows, oldest first, and how many
 /// closed windows a full queue dropped.
 pub struct OutputPeakReader {
@@ -156,6 +191,19 @@ fn output_peak_queue_depth() -> NonZeroUsize {
 }
 
 // REALTIME_POLICY_BEGIN: #1581 D3, the output meter's render half.
+impl OutputPeakGateRelay {
+    /// Copy a changed gate request into the output meter's gate (#1583): one `Acquire` load, and
+    /// one `Release` store when the request moved since the last call. Call it on the render thread
+    /// before a block, before [`OutputPeakObserver::admits`].
+    pub fn apply(&mut self) {
+        let requested = self.requested.load(Ordering::Acquire);
+        if requested != self.applied {
+            self.applied = requested;
+            self.gate.0.store(requested, Ordering::Release);
+        }
+    }
+}
+
 impl OutputPeakObserver {
     /// Whether [`Self::observe`] would fold the block that starts at `first_sample` (#882): the
     /// gate is active and the block starts at or after it. One `Acquire` load; the render thread's
@@ -748,6 +796,13 @@ impl MeterDelivery {
         self.folded_windows
     }
 
+    /// How many closed output windows render dropped because the queue was full: the reader's
+    /// monotone count, never reset (#1583 D5).
+    #[must_use]
+    pub fn output_dropped_windows(&self) -> u64 {
+        self.output.dropped_windows()
+    }
+
     #[cfg(feature = "test-support")]
     #[doc(hidden)]
     pub fn test_only_set_loss_count(&mut self, losses: u64) {
@@ -1307,6 +1362,125 @@ impl MeterDelivery {
     }
 }
 // REALTIME_POLICY_END
+
+/// One completed meter batch (#1583 D5): `windows` consecutive published frames folded into one
+/// span, with its sequence in the fold.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct MeterBatchWindow {
+    /// The first frame's first sample.
+    pub first_sample: u64,
+    /// The last frame's end sample.
+    pub end_sample: u64,
+    /// The batch's sequence since the fold last restarted, from `1`.
+    pub sequence: u64,
+    /// The output's left and right peaks: the frames' maxima.
+    pub output_peak: [f32; 2],
+    /// Whether every folded frame's output peak covered exactly its span
+    /// ([`MeterValidity::OUTPUT`]).
+    pub output_valid: bool,
+}
+
+/// The fold of a meter delivery's published frames into meter batches (#1583 D5; shared with
+/// #1587 and #1588): `windows_per_batch` consecutive frames make one batch. The peaks are the
+/// maxima, the span is the first frame's start to the last frame's end, and a gap between two
+/// frames (a frame whose start is not the previous one's end, or of another delivery generation)
+/// discards the partial batch and counts its windows in [`Self::discarded_windows`]. Allocates
+/// nothing.
+#[derive(Clone, Debug)]
+pub struct MeterBatchFold {
+    windows_per_batch: u32,
+    folded: u32,
+    first_sample: u64,
+    end_sample: u64,
+    generation: u64,
+    output_peak: [f32; 2],
+    output_valid: bool,
+    sequence: u64,
+    discarded: u64,
+}
+
+impl MeterBatchFold {
+    /// A fold of `windows_per_batch` frames per batch, with no frame folded and sequence 0.
+    #[must_use]
+    pub const fn new(windows_per_batch: NonZeroU32) -> Self {
+        Self {
+            windows_per_batch: windows_per_batch.get(),
+            folded: 0,
+            first_sample: 0,
+            end_sample: 0,
+            generation: 0,
+            output_peak: [0.0; 2],
+            output_valid: true,
+            sequence: 0,
+            discarded: 0,
+        }
+    }
+
+    /// Start again with `windows_per_batch` frames per batch (an accepted configuration): the
+    /// partial batch is discarded and counted, and the next batch is sequence `1`.
+    pub fn restart(&mut self, windows_per_batch: NonZeroU32) {
+        self.discard();
+        self.windows_per_batch = windows_per_batch.get();
+        self.sequence = 0;
+    }
+
+    /// The frames one batch folds.
+    #[must_use]
+    pub const fn windows_per_batch(&self) -> u32 {
+        self.windows_per_batch
+    }
+
+    /// The windows of partial batches discarded so far: monotone.
+    #[must_use]
+    pub const fn discarded_windows(&self) -> u64 {
+        self.discarded
+    }
+
+    /// Fold one published `frame`. Returns the batch it completes, if any.
+    pub fn push(&mut self, frame: &MeterFrame) -> Option<MeterBatchWindow> {
+        if self.folded != 0
+            && (frame.generation != self.generation || frame.first_sample != self.end_sample)
+        {
+            self.discard();
+        }
+        if self.folded == 0 {
+            self.first_sample = frame.first_sample;
+            self.generation = frame.generation;
+            self.output_peak = [0.0; 2];
+            self.output_valid = true;
+        }
+        self.output_peak = [
+            self.output_peak[0].max(frame.output_peak[0]),
+            self.output_peak[1].max(frame.output_peak[1]),
+        ];
+        self.output_valid &= frame.validity.contains(MeterValidity::OUTPUT);
+        self.end_sample = frame.end_sample;
+        self.folded = self.folded.saturating_add(frame.windows.max(1));
+        if self.folded < self.windows_per_batch {
+            return None;
+        }
+        self.folded = 0;
+        self.sequence = self.sequence.saturating_add(1);
+        Some(MeterBatchWindow {
+            first_sample: self.first_sample,
+            end_sample: self.end_sample,
+            sequence: self.sequence,
+            output_peak: self.output_peak,
+            output_valid: self.output_valid,
+        })
+    }
+
+    /// Drop the partial batch without counting it: the meters were turned off, so its windows are
+    /// owed to no one. The next [`Self::restart`] then discards nothing.
+    pub fn drop_partial(&mut self) {
+        self.folded = 0;
+    }
+
+    fn discard(&mut self) {
+        self.discarded = self.discarded.saturating_add(u64::from(self.folded));
+        self.folded = 0;
+    }
+}
 
 /// The strip meters every live-control preparation builds (issue #1581 D1): one per strip, in
 /// [`SessionModel::strips`] order, each a post-matrix left and right sample peak.

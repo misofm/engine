@@ -211,8 +211,10 @@ step first, in place of the parts each ran before; a call refused for its argume
 #1348 only `submit_command` refreshed the counters and the source
 calls staged no telemetry. The step reclaims at most the retirement queue's capacity of plans,
 because each retired plan holds one of that many retirement credits and only a publication
-reserves one; it stages at most one render observation, never waits for render and never loops on
-its progress, so its cost does not grow with the time since the last call. It commits and
+reserves one; it stages at most one render observation and at most one meter batch per closed
+meter window the output meter's queue holds (its depth, eight, and one more; #1583), never waits
+for render and never loops on its progress, so its cost does not grow with the time since the last
+call. It commits and
 acknowledges nothing, adds no queue, and never takes or drops a pending candidate: a scheduled
 candidate stays in its mailbox cell until render adopts it, and its provider is promoted only
 after. So an ack cannot precede a drop through it. Results: `OK`; a null session
@@ -424,16 +426,39 @@ response would exceed the endpoint's response bound (the page then is not the en
 `AUTOMATION_ENQUEUE` (`0x0006`) is retired (#1627): the C ABI refuses a frame under that ID at decode (`INVALID_ARGUMENT`, nothing written and no state moved), and `CAPABILITIES_GET` lists no command `0x0006`, clears flag bit 5 and has no capability fields 9, 12, 19 and 20 (23 fields). Sample-timed changes are stored automation edits. Current/effective sample reads the active
 plan's existing release/acquire next-sample publication, while transport remains endpoint-local.
 Protocol telemetry counters and the existing bounded CAPI render-diagnostic slots feed the
-provider's counter and diagnostic pages. The eight provider-owned counters (the two telemetry
+provider's counter and diagnostic pages. The nine provider-owned counters (the two telemetry
 counters `TELEMETRY_COALESCED` 5 and `TELEMETRY_DROPPED` 6, `LIVE_VALUES_SUPERSEDED` 16, #1312 D8,
 `TRANSITION_REPREPARE_REFUSALS` 17, #1351 D6, `STRIPS_RESTARTED` 18, #1768,
-`LIVE_BLOCK_ERRORS` 19, #1521, `SOURCE_UNDERRUN_BLOCKS` 20, #1537, and `SOURCE_FRAMES_DISCARDED`
-21, #1699) retain an independent eight-slot minimum even when the frame-derived telemetry
-configuration capacity is smaller. Canceled automation (counter 12) retired with the automation
+`LIVE_BLOCK_ERRORS` 19, #1521, `SOURCE_UNDERRUN_BLOCKS` 20, #1537, `SOURCE_FRAMES_DISCARDED`
+21, #1699, and `METER_WINDOWS_LOST` 22, #1583) retain an independent nine-slot minimum even when
+the frame-derived telemetry configuration capacity is smaller. Canceled automation (counter 12) retired with the automation
 queue (#1629).
 
-**Served counters and the counter snapshot (#1351).** The provider serves exactly those eight
-counters, each at 0 from construction, so `COUNTERS_GET` with `all` returns all eight and a read of
+**Meter batches (#1583, decision 17 C1/C9/C13).** `TELEMETRY_CONFIGURE` takes a meter table of
+stable targets: entry `i` (handle `i + 1`) is the output or a strip by its ID, with a metric (peak
+or gain reduction). A handle is the table's, so a structural commit never moves it. The C ABI
+session owns one meter delivery from boot over the session's output meter, with no strip consumer
+until #1587, and its echo carries the meter window in blocks (`meter_window_blocks`, host-core's
+default of about 32 ms: 12 blocks at 48 kHz and 128 frames). A nonempty table turns the meter
+level on from the next block and an empty one off: the control plane writes a requested gate word,
+and the plan's relay copies it into the output meter's gate on the render thread before a block,
+so the gate moves only between blocks and the render call stays allocation-, lock- and
+syscall-free. The configure is all or nothing: an unknown strip is `NOT_FOUND`
+`meter.strip.unknown` (`meters[i]`); a period that is not a positive multiple of the window is
+`INVALID_FIELD` `meter.period`; and, until #1587, a gain-reduction entry and a strip peak entry are
+`UNAVAILABLE` (`meter.gain_reduction.unavailable`, `meter.strip.unavailable`), so the table holds
+at most the output's peak. Each `METER_BATCH` is `meter_period_blocks / meter_window_blocks`
+consecutive windows: `first_sample` is the first window's start, `observed_sample` the last one's
+end, `window_sequence` counts batches from 1 after each accepted configure, and the output peak
+entry gives a left and a right record, each the windows' maximum, `VALID`, and `CLIPPED` above
+1.0. The lossy lane holds one batch whole (two telemetry slots). `METER_WINDOWS_LOST` counts every
+closed window that reached no batch: the windows render dropped at a full meter queue (eight), the
+windows of a partial batch a gap discarded or a later configure replaced, and the windows of a
+batch the lane refused to stage; the sequence never skips. A coalesced batch is counted by
+`TELEMETRY_COALESCED`, as any lossy record. The per-block render peak (#1570a) is gone (#1583 D6).
+
+**Served counters and the counter snapshot (#1351).** The provider serves exactly those nine
+counters, each at 0 from construction, so `COUNTERS_GET` with `all` returns all nine and a read of
 any of them is never `NOT_FOUND`. `STRIPS_RESTARTED` adds, for each replacement plan render
 adopted, the strips that plan started at rest, each once; the control plane adds it when it
 promotes the adopted plan, so a withdrawn candidate adds nothing (#1768). `LIVE_BLOCK_ERRORS`
@@ -1209,8 +1234,8 @@ claims are `crates/control-plane/tests/spectrum_monitor.rs`.
 
 `SPECTRUM_CAPTURE` (`0011`) crosses `miso_engine_v1_submit_command` to the same core path, with no
 new C symbol or struct: arm, read, cancel and select on the session's spectrum service, and a ready
-read analyzed into dB bins on the calling control thread. The capability report does not list
-`0011` until the second slice sets bit 16. A read the session's frame limit cannot carry is refused
+read analyzed into dB bins on the calling control thread. The second slice lists it, with
+bit 16. A read the session's frame limit cannot carry is refused
 `LIMIT_EXCEEDED` (`spectrum.frame`) before it pops the window, and a configure refuses a tap no
 one-plane read can carry, so a C ABI host that reads spectrum compiles with
 `maximum_control_frame_bytes` of at least 8,496 bytes (12,608 for stereo reads, 29,008 with the
@@ -1218,6 +1243,21 @@ window). The session's capi retained bytes also charge the one analysis result a
 (`SpectrumAnalysisResult`, beside the service and analysis). The gate is the same
 `runtime::spectrum_tests::spectrum_commands_cross_the_c_abi_to_the_session` at a 65,536-byte frame
 limit; the core claims are `crates/control-plane/tests/spectrum_monitor.rs`.
+
+## Issue 1595 spectrum stream (slice b)
+
+`SPECTRUM_STREAM` (`0012`) crosses `miso_engine_v1_submit_command` to the same core path, with no
+new C symbol or struct: start, select, read, reset and stop on the session's spectrum service and
+analysis, and a ready read analyzed with the stream's smoothing on the calling control thread. The
+C ABI's capability report now lists `0010`, `0011` and `0012` and sets flag bit 16 (the adapter's
+`ControlAdapter::SPECTRUM`); the browser lists none until #1596. A configure (and a boot) refuses
+a tap whose stream read of its own channels cannot fit the frame limit (`spectrum.frame`), so a C
+ABI host that reads spectrum compiles with `maximum_control_frame_bytes` of at least 8,576 bytes
+for a one-plane tap (12,688 for a stereo tap, 29,008 for a one-shot read of both sides with the
+window); a stream read also measures its reply before it reads, in depth. The capability vectors pinned in
+`crates/capi/src/runtime/tests.rs` re-pin for the three IDs and bit 16. The gate is
+`runtime::spectrum_tests::spectrum_commands_cross_the_c_abi_to_the_session` (the capability report
+and one ready stream read); the core claims are `crates/control-plane/tests/spectrum_monitor.rs`.
 
 ## Issue 1584 observation subscriptions
 

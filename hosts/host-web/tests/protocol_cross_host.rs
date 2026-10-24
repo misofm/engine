@@ -576,9 +576,10 @@ impl Legs {
     }
 }
 
-/// The `CAPABILITIES_GET` reply `reply` with `added` appended to its command list, re-encoded by
-/// the codec so every length field matches. The browser's list must not hold an added ID already.
-fn capabilities_plus(reply: &[u8], added: &[u16]) -> Vec<u8> {
+/// The `CAPABILITIES_GET` reply `reply` with `added` merged into its ascending command list and
+/// `flags` set, re-encoded by the codec so every length field matches. The browser's list must not
+/// hold an added ID already.
+fn capabilities_plus(reply: &[u8], added: &[u16], flags: u64) -> Vec<u8> {
     let codec = protocol::ProtocolCodec::default();
     let mut fields = [0_u16; 64];
     let protocol::DecodedTypedResponseFrame::Success {
@@ -601,6 +602,7 @@ fn capabilities_plus(reply: &[u8], added: &[u16]) -> Vec<u8> {
     let mut commands = ids(value.supported_commands);
     assert!(added.iter().all(|id| !commands.contains(id)));
     commands.extend_from_slice(added);
+    commands.sort_unstable();
     let events = ids(value.supported_events);
     let capabilities = protocol::Capabilities {
         minimum_version: value.minimum_version,
@@ -623,7 +625,7 @@ fn capabilities_plus(reply: &[u8], added: &[u16]) -> Vec<u8> {
         maximum_transaction_edits: value.maximum_transaction_edits,
         supported_commands: &commands,
         supported_events: &events,
-        flags: value.flags,
+        flags: protocol::CapabilityFlags(value.flags.0 | flags),
     };
     let mut out = vec![0_u8; reply.len() + 64];
     let length = codec
@@ -650,6 +652,8 @@ fn the_browser_and_the_c_abi_give_the_same_bytes_for_one_script() {
     // 1. CAPABILITIES_GET. #1697 removes this exception: until the browser has a document
     // transport, the C ABI's reply is the browser's plus exactly the `SESSION_REPLACE` (`0x0013`)
     // entry of the command list (#1386, root decision), and every other step stays byte-equal.
+    // #1596 removes the second: until the browser reads spectrum through the frames, the C ABI
+    // also lists the three spectrum commands (`0x0010`-`0x0012`) with flag bit 16 (#1595 R2).
     let request = legs.next();
     let bytes = frame(
         request,
@@ -660,14 +664,18 @@ fn the_browser_and_the_c_abi_give_the_same_bytes_for_one_script() {
     let (c_result, c_reply) = legs.c.send(&bytes);
     assert_eq!(browser_result, c_result, "1 capabilities: the result codes");
     assert_eq!(
-        capabilities_plus(&browser_reply, &[]),
+        capabilities_plus(&browser_reply, &[], 0),
         browser_reply,
         "1 capabilities: the browser's reply re-encodes to itself"
     );
     assert_eq!(
-        capabilities_plus(&browser_reply, &[0x0013]),
+        capabilities_plus(
+            &browser_reply,
+            &[0x0010, 0x0011, 0x0012, 0x0013],
+            protocol::CapabilityFlags::SPECTRUM.0
+        ),
         c_reply,
-        "1 capabilities: the C ABI's reply is the browser's plus exactly 0x0013"
+        "1 capabilities: the C ABI's reply is the browser's plus exactly 0x0010-0x0013 and bit 16"
     );
 
     // 2. SESSION_SNAPSHOT_GET at offset 0 with 64 bytes, then continuation pages until eof.
@@ -715,18 +723,56 @@ fn the_browser_and_the_c_abi_give_the_same_bytes_for_one_script() {
     );
     legs.drain("after 4");
 
-    // 5. TELEMETRY_CONFIGURE: meter handle 1 and LIVE_VALUES_SUPERSEDED at period 1, diagnostics
-    // on at Info.
-    legs.command(
-        "5 telemetry",
+    // 5. TELEMETRY_CONFIGURE: no meter, LIVE_VALUES_SUPERSEDED at period 1, diagnostics on at
+    // Info. #1583 D4: the C ABI's echo carries its meter window (field 8) and the browser's none,
+    // until #1588 gives the browser a meter delivery; every other field and the header agree.
+    let request = legs.next();
+    let configure = frame(
+        request,
+        ExpectedRevision::Exact(SessionRevision(legs.revision)),
         CommandPayload::TelemetryConfigure(&TelemetryConfiguration {
-            meter_handles: vec![1],
-            meter_period_blocks: 1,
+            // #1583: an empty meter table; #1588 puts a meter entry back.
+            meters: Vec::new(),
+            meter_period_blocks: 0,
+            meter_window_blocks: None,
             counter_ids: vec![CounterId::LiveValuesSuperseded],
             counter_period_blocks: 1,
             diagnostics_enabled: true,
             minimum_diagnostic_severity: DiagnosticSeverity::Info,
         }),
+    );
+    let (browser_result, browser_echo) = legs.browser.send(&configure);
+    let (c_result, c_echo) = legs.c.send(&configure);
+    assert_eq!(browser_result, c_result, "5 telemetry: the result codes");
+    let echo = |reply: &[u8]| {
+        let mut fields = [0_u16; 64];
+        match ProtocolCodec::default()
+            .decode_typed_response(reply, &mut protocol::DecodeScratch::new(&mut fields))
+            .expect("5 telemetry: a reply")
+        {
+            protocol::DecodedTypedResponseFrame::Success {
+                header,
+                payload: protocol::DecodedSuccessResponsePayload::TelemetryConfiguration(value),
+            } => ((header.request_id, header.revision, header.status), value),
+            _ => panic!("5 telemetry: a telemetry echo"),
+        }
+    };
+    let (browser_header, browser_value) = echo(&browser_echo);
+    let (c_header, c_value) = echo(&c_echo);
+    assert_eq!(browser_header, c_header, "5 telemetry: the reply headers");
+    assert_eq!(browser_value.meter_window_blocks, None);
+    assert_eq!(
+        c_value.meter_window_blocks,
+        core::num::NonZeroU32::new(12),
+        "the C ABI's window at 48 kHz and 128 frames"
+    );
+    assert_eq!(
+        TelemetryConfiguration {
+            meter_window_blocks: None,
+            ..c_value
+        },
+        browser_value,
+        "5 telemetry: every other field"
     );
     legs.drain("after 5");
 
@@ -825,8 +871,9 @@ fn the_browser_and_the_c_abi_give_the_same_bytes_for_one_script() {
 
     legs.drain("at the end");
 
-    // The browser leg published every kind of protocol event, and the C ABI leg's equal sequence
-    // says the same.
+    // The browser leg published every kind of protocol event it serves, and the C ABI leg's equal
+    // sequence says the same. `METER_BATCH` is not one until #1588 gives the browser a meter
+    // delivery (#1583, step 5).
     let kinds: Vec<u16> = legs.events[0]
         .iter()
         .map(|(_, event)| event_message(event))
@@ -834,12 +881,15 @@ fn the_browser_and_the_c_abi_give_the_same_bytes_for_one_script() {
     for (name, message) in [
         ("SESSION_COMMITTED", MESSAGE_SESSION_COMMITTED),
         ("TRANSPORT_STATE", MESSAGE_TRANSPORT_STATE),
-        ("METER_BATCH", MESSAGE_METER_BATCH),
         ("COUNTER_SNAPSHOT", MESSAGE_COUNTER_SNAPSHOT),
         ("DIAGNOSTIC", MESSAGE_DIAGNOSTIC),
     ] {
         assert!(kinds.contains(&message), "no {name} event in {kinds:04x?}");
     }
+    assert!(
+        !kinds.contains(&MESSAGE_METER_BATCH),
+        "a METER_BATCH with no meter table in {kinds:04x?}"
+    );
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -923,8 +973,11 @@ fn telemetry_frame(request: u64, revision: u64) -> Vec<u8> {
         request,
         ExpectedRevision::Exact(SessionRevision(revision)),
         CommandPayload::TelemetryConfigure(&TelemetryConfiguration {
-            meter_handles: vec![1],
-            meter_period_blocks: 1,
+            // #1583: an empty meter table; the browser has no meter delivery until #1588, which
+            // puts a meter entry back.
+            meters: Vec::new(),
+            meter_period_blocks: 0,
+            meter_window_blocks: None,
             counter_ids: vec![CounterId::LiveValuesSuperseded],
             counter_period_blocks: 1,
             diagnostics_enabled: true,
