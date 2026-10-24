@@ -153,7 +153,10 @@ pub use live_delta::{
 };
 #[cfg(all(feature = "control-provider", feature = "test-support"))]
 pub use live_delta::{take_fast_classification_count, take_lowered_owner_count};
-pub use meters::{default_meter_window_blocks, meter_selection};
+pub use meters::{
+    METER_QUEUE_DEPTH, OutputPeakGate, OutputPeakObserver, OutputPeakReader, OutputPeakWindow,
+    default_meter_window_blocks, meter_selection, output_peak_meter, output_peak_queue_payload,
+};
 pub use prepare::{
     GraphJumpLengthProducer, GraphJumpLengths, HostLiveControlHandles, HostLiveControlRequest,
     HostLiveLanes, HostMeterRequest, HostPrepareCaps, HostPrepareReport, HostShapePolicy,
@@ -279,6 +282,9 @@ pub use builtins_compiler::{session_structural_symmetry, track_mono_source};
 /// so a host that pushes `classify_live_delta`'s records names them without depending on
 /// `builtins-compiler` or `builtins`.
 pub use builtins::BuiltinLaneSelector;
+/// One meter's consumer (`HostLiveControlHandles::meters`), re-exported so a host that keeps them,
+/// as the C ABI does per provider epoch (#1581 D6), names the type.
+pub use builtins_compiler::MeterConsumer;
 /// One strip's live-control producers (`HostLiveControlHandles::strip_controls`), re-exported so a
 /// host that keeps them, as the C ABI does per provider epoch (#1256 D3), names the type without
 /// depending on `builtins-compiler`.
