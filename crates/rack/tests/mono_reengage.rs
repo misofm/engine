@@ -51,6 +51,9 @@ struct Matrix {
     coefficients: [f32; 4],
 }
 impl BankStage for Matrix {
+    fn retained_bytes(&self) -> u64 {
+        0
+    }
     fn process(&mut self, block: BankBlock<'_>) -> Result<(), RenderError> {
         let [ll, lr, rl, rr] = self.coefficients;
         for (left, right) in block.left.iter_mut().zip(block.right.iter_mut()) {
@@ -178,6 +181,9 @@ impl Recursive {
     }
 }
 impl BankStage for Recursive {
+    fn retained_bytes(&self) -> u64 {
+        engine::realtime::retained::arc(&self.0)
+    }
     fn process(&mut self, block: BankBlock<'_>) -> Result<(), RenderError> {
         let mut core = self.core();
         for frame in 0..block.frames as usize {
@@ -565,6 +571,9 @@ fn an_earned_agreement_proof_re_engages_a_chain_the_witness_could_not() {
 /// dual body and witness, without `process_mono` or `supports_mono_collapse`.
 struct DualOnly(Recursive);
 impl BankStage for DualOnly {
+    fn retained_bytes(&self) -> u64 {
+        self.0.retained_bytes()
+    }
     fn process(&mut self, block: BankBlock<'_>) -> Result<(), RenderError> {
         self.0.process(block)
     }
@@ -750,6 +759,9 @@ fn an_asymmetric_input_window_declines_and_waits_for_a_proof() {
 /// A stateless one-plane gain that is always at rest, so a silent block skips whole.
 struct RestingGain;
 impl BankStage for RestingGain {
+    fn retained_bytes(&self) -> u64 {
+        0
+    }
     fn process(&mut self, block: BankBlock<'_>) -> Result<(), RenderError> {
         block.left.iter_mut().for_each(|word| *word *= 0.5);
         block.right.iter_mut().for_each(|word| *word *= 0.5);

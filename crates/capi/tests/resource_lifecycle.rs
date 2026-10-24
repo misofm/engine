@@ -732,15 +732,19 @@ fn freed_by_drop<T>(value: T) -> u64 {
 
 /// What each owner the host-core half hands capi retains, observed by dropping it.
 ///
-/// The drop order is the attribution: the effect, strip and source producers go first, so a ring
-/// the producers share with the plan is freed -- and counted -- with the plan that renders from
-/// it, and the producers' own bytes are their tables, IDs and (an EQ's) owners alone.
+/// The drop order is the attribution: the effect, strip, source and meter consumers go first, so
+/// a ring or cell the producers share with the plan is freed -- and counted -- with the plan that
+/// renders from it, and the producers' own bytes are their tables, IDs and (an EQ's) owners alone.
+/// The plan drops after every owner that shares an allocation it walks; the inventory drops after
+/// the plan because it, not the plan, charges the fade-arm flags the two share.
 struct HostOwners {
     routes: u64,
     effects: u64,
     strips: u64,
     sources: u64,
     catalog: u64,
+    /// The meter consumers' vector and IDs: their rings are the plan's.
+    meters: u64,
     plan: u64,
     store: u64,
     /// The plan's state inventory (#1272 D1), which capi keeps with the plan's source producers
@@ -758,6 +762,8 @@ struct CompileObservation {
     /// Bytes the replayed host-core half left live, and the same bytes owner by owner.
     host_live: u64,
     owners: HostOwners,
+    /// `PreparedRenderPlan::retained_bytes`, walked before any owner dropped (#1074).
+    plan_walk: u64,
     /// `strip_control_table_bytes` at the compiled session's strip count and strip ID bytes.
     strip_table_charge: u64,
     /// The observation rows that are bounds, not allocations (#1584 D6a): the cells' event heap,
@@ -824,14 +830,15 @@ fn observe_compile(document: &str, compile_limits: &CompileLimits) -> CompileObs
         inventory,
         control_catalog,
     } = prepared;
+    let plan_walk = plan.retained_bytes();
     let owners = HostOwners {
         routes: freed_by_drop(routes),
         effects: freed_by_drop(effects),
         strips: freed_by_drop(strips),
         sources: freed_by_drop(sources),
         catalog: freed_by_drop(control_catalog),
-        // The meter consumers' vector, IDs and rings are builtins' rows, as the plan's are.
-        plan: freed_by_drop((meters, plan)),
+        meters: freed_by_drop(meters),
+        plan: freed_by_drop(plan),
         store: freed_by_drop(store),
         inventory: freed_by_drop(inventory),
     };
@@ -841,11 +848,12 @@ fn observe_compile(document: &str, compile_limits: &CompileLimits) -> CompileObs
             + owners.strips
             + owners.sources
             + owners.catalog
+            + owners.meters
             + owners.plan
             + owners.store
             + owners.inventory,
         host_live,
-        "the eight owners hold every byte the host-core half retains"
+        "the nine owners hold every byte the host-core half retains"
     );
     CompileObservation {
         report,
@@ -854,6 +862,7 @@ fn observe_compile(document: &str, compile_limits: &CompileLimits) -> CompileObs
         compile_live,
         host_live,
         owners,
+        plan_walk,
         strip_table_charge,
         observation_reserve,
         monitor_and_ramps,
@@ -923,18 +932,13 @@ impl CompileObservation {
     ///   the EQ fixture, 2 on the browser identity fixture). The canonical JSON's spare capacity
     ///   (16,056 bytes on the EQ fixture before #1060 attempt 2 shrank it) was invisible to the
     ///   charge and is red here.
-    /// * The prepared plan is bounded by its engine rows. Those rows are the graph compiler's
-    ///   admission estimate, which charges the preparation, not only what the bound plan keeps:
-    ///   the compile-time graph metadata, bank scratch per slot where a merged chain keeps one
-    ///   slot's, and #511's and #936's reservations at their bound. The slack, eight lanes / four,
-    ///   is 128,317 / 128,405 bytes on the EQ fixture and 12,233 / 8,109 on the browser identity
-    ///   fixture, so an uncharged plan allocation smaller than that is not seen here: an uncharged
-    ///   16-word-per-unit table in the graph runtime (1,808 bytes on the EQ fixture) stays green,
-    ///   and the same table at 2,048 words per unit is red. Seeing the small one needs per-owner
-    ///   attribution inside the prepared plan -- a retained-bytes walk over the bound runtime, as
-    ///   `observation_retained_bytes` already is for its lanes -- which no public API exposes.
-    ///   That is a successor to #1060 (root files it; the spec's attempt-2 evidence names it).
-    ///   Builtins have their own allocator oracle (`builtins-compiler/tests/allocation_tracker.rs`).
+    /// * The prepared plan is exact by its walk (#1074): `PreparedRenderPlan::retained_bytes`,
+    ///   read before any owner dropped, equals the bytes dropping the plan frees. The walk names
+    ///   every heap owner the plan holds, at capacity, and charges each shared allocation it
+    ///   renders from (rings, cells) once, in full; the producers drop first, so those free with
+    ///   the plan. An owner the walk misses, or spare capacity it under-reports, is red. The walk
+    ///   and the meter consumers' vector and IDs together stay within the engine rows, the graph
+    ///   compiler's admission estimate, which charges the preparation and so may exceed them.
     fn assert_host_owners_are_charged(&self, label: &str) {
         let owners = &self.owners;
         assert_eq!(
@@ -982,20 +986,28 @@ impl CompileObservation {
             + report.effect_scalar_state_bytes
             + report.effect_scalar_scratch_bytes
             + report.builtin_retained_payload_bytes;
+        assert_eq!(
+            owners.plan, self.plan_walk,
+            "{label}: dropping the prepared plan freed {} bytes; its retained-bytes walk names {}",
+            owners.plan, self.plan_walk
+        );
         assert!(
-            owners.plan <= engine_rows,
-            "{label}: the prepared plan retains {} bytes, above its charged engine rows \
-             {engine_rows}",
-            owners.plan
+            self.plan_walk + owners.meters <= engine_rows,
+            "{label}: the prepared plan ({} walked) and the meter consumers ({}) retain more than \
+             their charged engine rows {engine_rows}",
+            self.plan_walk,
+            owners.meters
         );
         println!(
-            "{label}: capi {} observed; store {} of {}; plan {} of {} (slack {})",
+            "{label}: capi {} observed; store {} of {}; plan {} walked, {} freed; meters {}; \
+             engine rows {}",
             self.report.capi_retained_bytes,
             owners.store,
             self.model.compiled_model_bytes,
+            self.plan_walk,
             owners.plan,
-            engine_rows,
-            engine_rows - owners.plan
+            owners.meters,
+            engine_rows
         );
     }
 }
@@ -1014,6 +1026,9 @@ fn capi_retained_bytes_charge_every_byte_the_compile_retains() {
         // #1256 MINOR-1, folded into #1258: submix strips and a route into a submix, so the strip
         // table's submix entries and the C ABI's lane selection (no route lanes) are observed.
         ("routed submix", two_track_routed_submix_session()),
+        // #1074: every registered native effect as an insert, so each effect's own walk is
+        // observed. The de-esser is not in the native registry on this tree, so no session names it.
+        ("every native insert", every_native_insert_session()),
     ] {
         let observed = observe_compile(&document, &limits());
         observed.assert_capi_retained_bytes_are_complete(label, &limits());
@@ -3525,6 +3540,42 @@ fn two_track_three_submix_session() -> String {
 /// [`two_track_three_submix_session`] with the first track routed through `bus0` to the main
 /// output: three submix strips beside two tracks, and one route into a submix, the route kind that
 /// would get a live lane if the C ABI selected route lanes (`HostLiveLanes::routes`).
+/// #1074: three tracks of the nine-track fixture, an empty console, and every native effect the
+/// registry carries as an insert, with no automation.
+fn every_native_insert_session() -> String {
+    let mut model = session::parse_session_json(SESSION).expect("fixture");
+    model.console.pre_insert.clear();
+    model.console.post_insert.clear();
+    model.tracks.truncate(3);
+    let kept: Vec<StableId> = model.tracks.iter().map(|track| track.id.clone()).collect();
+    model.routes.retain(|route| {
+        matches!(&route.source, session::RouteSource::Track { track_id, .. } if kept.contains(track_id))
+    });
+    let inserts: [&[&str]; 3] = [
+        &["parametric-eq", "compressor", "gate-expander"],
+        &["delay", "multiband-compressor"],
+        &["true-peak-limiter", "transient-shaper", "soft-clip"],
+    ];
+    for (track, effects) in model.tracks.iter_mut().zip(inserts) {
+        track.console.clear();
+        track.inserts.effects = effects
+            .iter()
+            .map(|name| session::Effect {
+                id: StableId::parse(name).expect("effect ID"),
+                identity: session::EffectIdentity::Native {
+                    effect_id: StableId::parse(&format!("miso.{name}")).expect("native ID"),
+                },
+                quality: session::EffectQuality::Normal,
+                bypass: false,
+                link_mode: session::LinkMode::DualMono,
+                params: Vec::new(),
+                sidechain: session::SidechainDeclaration::None,
+            })
+            .collect();
+    }
+    session::canonical_session_json(&model).expect("canonical session")
+}
+
 fn two_track_routed_submix_session() -> String {
     let mut model =
         session::parse_session_json(&two_track_three_submix_session()).expect("submix session");

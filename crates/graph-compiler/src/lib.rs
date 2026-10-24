@@ -596,6 +596,10 @@ mod tests {
 
     struct IdentityBinding;
     impl GraphRuntimeProcessor for IdentityBinding {
+        fn retained_bytes(&self) -> u64 {
+            0
+        }
+
         fn process(
             &mut self,
             _block: GraphBindingBlock<'_>,
@@ -606,6 +610,10 @@ mod tests {
 
     struct ImpulseBinding;
     impl GraphRuntimeProcessor for ImpulseBinding {
+        fn retained_bytes(&self) -> u64 {
+            0
+        }
+
         fn process(
             &mut self,
             block: GraphBindingBlock<'_>,
@@ -623,6 +631,10 @@ mod tests {
         right: f32,
     }
     impl GraphRuntimeProcessor for AsymmetricTrackImpulseBinding {
+        fn retained_bytes(&self) -> u64 {
+            0
+        }
+
         fn process(
             &mut self,
             block: GraphBindingBlock<'_>,
@@ -648,6 +660,10 @@ mod tests {
         right: f32,
     }
     impl GraphRuntimeProcessor for SustainedTrackBinding {
+        fn retained_bytes(&self) -> u64 {
+            0
+        }
+
         fn process(
             &mut self,
             block: GraphBindingBlock<'_>,
@@ -685,6 +701,10 @@ mod tests {
         right: f32,
     }
     impl GraphRuntimeProcessor for LimiterReleaseImpulseBinding {
+        fn retained_bytes(&self) -> u64 {
+            0
+        }
+
         fn process(
             &mut self,
             block: GraphBindingBlock<'_>,
@@ -706,6 +726,10 @@ mod tests {
         right: f32,
     }
     impl GraphRuntimeProcessor for MultibandReleaseBinding {
+        fn retained_bytes(&self) -> u64 {
+            0
+        }
+
         fn process(
             &mut self,
             block: GraphBindingBlock<'_>,
@@ -745,6 +769,10 @@ mod tests {
         right: f32,
     }
     impl GraphRuntimeProcessor for DelayImpulseBinding {
+        fn retained_bytes(&self) -> u64 {
+            0
+        }
+
         fn process(
             &mut self,
             block: GraphBindingBlock<'_>,
@@ -759,6 +787,10 @@ mod tests {
         }
     }
     impl GraphRuntimeProcessor for TransientShaperBinding {
+        fn retained_bytes(&self) -> u64 {
+            0
+        }
+
         fn process(
             &mut self,
             block: GraphBindingBlock<'_>,
@@ -774,6 +806,10 @@ mod tests {
         }
     }
     impl GraphRuntimeProcessor for SoftClipImpulseBinding {
+        fn retained_bytes(&self) -> u64 {
+            0
+        }
+
         fn process(
             &mut self,
             block: GraphBindingBlock<'_>,
@@ -1661,6 +1697,11 @@ mod tests {
         observed_post_bank_audio: Arc<AtomicBool>,
     }
     impl GraphRuntimeObserver for OrderedPostBankObserver {
+        fn retained_bytes(&self) -> u64 {
+            effect_contract::retained::arc(&self.order)
+                + effect_contract::retained::arc(&self.observed_post_bank_audio)
+        }
+
         fn observe(
             &mut self,
             block: GraphObservationBlock<'_>,
@@ -1685,6 +1726,11 @@ mod tests {
         observed_post_bank_audio: Arc<AtomicBool>,
     }
     impl GraphRuntimeObserver for RepeatedOrderedPostBankObserver {
+        fn retained_bytes(&self) -> u64 {
+            effect_contract::retained::arc(&self.order)
+                + effect_contract::retained::arc(&self.observed_post_bank_audio)
+        }
+
         fn observe(
             &mut self,
             block: GraphObservationBlock<'_>,
@@ -5467,6 +5513,14 @@ mod tests {
     /// Records every rendered sample of one observed node, bit for bit.
     struct BitRecorder(BitSink);
     impl GraphRuntimeObserver for BitRecorder {
+        fn retained_bytes(&self) -> u64 {
+            effect_contract::retained::arc(&self.0)
+                + self
+                    .0
+                    .lock()
+                    .map_or(0, |v| effect_contract::retained::vec(&v))
+        }
+
         fn observe(
             &mut self,
             block: GraphObservationBlock<'_>,
@@ -8929,6 +8983,12 @@ mod tests {
         }
     }
     impl PreparedNativeEffectBank for CountedBank {
+        fn retained_bytes(&self) -> u64 {
+            core::mem::size_of_val(&*self.inner) as u64
+                + self.inner.retained_bytes()
+                + effect_contract::retained::arc(&self.live)
+        }
+
         fn reset(&mut self, kind: effect_contract::ResetKind) {
             self.inner.reset(kind);
         }
@@ -10514,6 +10574,10 @@ mod tests {
             frames: u64,
         }
         impl GraphRuntimeObserver for FailOnce {
+            fn retained_bytes(&self) -> u64 {
+                0
+            }
+
             fn observe(
                 &mut self,
                 block: GraphObservationBlock<'_>,
@@ -10531,6 +10595,11 @@ mod tests {
             first: Arc<AtomicU64>,
         }
         impl GraphRuntimeObserver for Order {
+            fn retained_bytes(&self) -> u64 {
+                effect_contract::retained::arc(&self.sequence)
+                    + effect_contract::retained::arc(&self.first)
+            }
+
             fn observe(
                 &mut self,
                 _block: GraphObservationBlock<'_>,

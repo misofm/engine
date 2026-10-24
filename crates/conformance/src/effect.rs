@@ -278,6 +278,10 @@ struct DualAccumulatorDelayBank {
     lanes: [DualAccumulatorDelay; 8],
 }
 impl PreparedNativeEffectBank for DualAccumulatorDelayBank {
+    fn retained_bytes(&self) -> u64 {
+        0
+    }
+
     fn reset(&mut self, kind: ResetKind) {
         for lane in &mut self.lanes[..self.width.lanes() as usize] {
             lane.reset(kind);
@@ -386,6 +390,10 @@ impl DualAccumulatorDelay {
     }
 }
 impl PreparedNativeEffect for DualAccumulatorDelay {
+    fn retained_bytes(&self) -> u64 {
+        0
+    }
+
     fn reset(&mut self, kind: ResetKind) {
         self.delay = [[0.0; 3]; 2];
         self.accumulator = [0.0; 2];

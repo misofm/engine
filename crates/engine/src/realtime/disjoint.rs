@@ -44,6 +44,12 @@ pub type ArenaStereoPair<'a> = ((&'a mut [f32], &'a mut [f32]), (&'a [f32], &'a 
 pub type ArenaStereoPlanes<'a> = (&'a mut [f32], &'a mut [f32]);
 
 impl DisjointArena {
+    /// The heap bytes the arena retains (#1074): its cell storage. Control thread only;
+    /// exclusive of the arena value itself.
+    #[must_use]
+    pub fn retained_bytes(&self) -> u64 {
+        super::plan::retained::slice(&self.cells)
+    }
     /// Allocate zeroed planar storage on the control thread.
     ///
     /// Buffer `0` is reserved for silence; writable buffers have IDs `1..=writable_buffers`.

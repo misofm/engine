@@ -1387,6 +1387,11 @@ struct LaneRestore {
 }
 
 impl<const CONNECTED: bool> PreparedNativeEffect for PreparedGate<f32, CONNECTED> {
+    /// Every field is inline: this instance owns no heap (#1074).
+    fn retained_bytes(&self) -> u64 {
+        0
+    }
+
     fn reset(&mut self, kind: ResetKind) {
         PreparedGate::reset(self, kind);
     }
@@ -1465,6 +1470,11 @@ fn checked_track(track_index: u32, width: usize) -> Result<usize, StatePayloadEr
 macro_rules! bank_impl {
     ($lane:ty) => {
         impl PreparedNativeEffectBank for PreparedGate<$lane, false> {
+            /// Every field is inline: this instance owns no heap (#1074).
+            fn retained_bytes(&self) -> u64 {
+                0
+            }
+
             fn observe_resident_bank(&self, tap_index: u32, out: &mut [ObservationSample]) -> bool {
                 let lanes = <$lane as Lane>::WIDTH;
                 if tap_index != 0 || out.len() != lanes {
@@ -1634,7 +1644,9 @@ impl<L: Lane> PreparedGate<L, false> {
                 state.hysteresis.hold,
             ]);
             for (chunk, ramp) in all[7..]
-                .chunks_exact_mut(4)
+                .as_chunks_mut::<4>()
+                .0
+                .iter_mut()
                 .zip(state.ramps.iter().chain(&state.rates))
             {
                 chunk.copy_from_slice(&ramp_words(ramp));
@@ -1686,7 +1698,7 @@ impl<L: Lane> PreparedGate<L, false> {
         let link = effect_contract::exchange_lane_link_word(self.lane_link(lane), link_bytes);
         self.set_lane_link(lane, link);
         let words = self.defaults[lane].iter_mut().flatten();
-        for (value, chunk) in words.zip(values_bytes.chunks_exact_mut(4)) {
+        for (value, chunk) in words.zip(values_bytes.as_chunks_mut::<4>().0.iter_mut()) {
             let mut incoming = [0_u8; 4];
             incoming.copy_from_slice(chunk);
             chunk.copy_from_slice(&value.to_bits().to_le_bytes());

@@ -2141,6 +2141,10 @@ mod tail_bound_count_tests {
     }
     struct Processor;
     impl PreparedNativeEffect for Processor {
+        fn retained_bytes(&self) -> u64 {
+            0
+        }
+
         fn reset(&mut self, _: ResetKind) {}
         fn process(&mut self, _: EffectProcessBlock<'_>) -> ProcessReport {
             ProcessReport::default()
