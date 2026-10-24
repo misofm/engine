@@ -40,7 +40,10 @@ use effect_runtime::bank::{
 use effect_runtime::params::{ParameterSpec, is_negative_zero, normalize_zero};
 use effect_runtime::ramp::LinearRamp;
 use effect_runtime::state_payload as payload;
-use lane::kernels::halfband::{HALFBAND63_LIVE_ROWS as LIVE_ROWS, HALFBAND63_POS_MASK as POS_MASK};
+use lane::kernels::halfband::{
+    HALFBAND63_EVEN, HALFBAND63_EVEN_TAPS, HALFBAND63_LIVE_ROWS as LIVE_ROWS,
+    HALFBAND63_POS_MASK as POS_MASK,
+};
 use lane::{Backend, Lane};
 use math::db_to_gain_f32;
 
@@ -245,15 +248,139 @@ const fn quality(rate: u32) -> effect_contract::QualityDescriptor {
     }
 }
 
-/// This effect's tail, tail over every peak and exact-rest bound, the one place they are stated
-/// (decision 15 D15-4(b), #1377 D1). Today's declared tail, with no exact-rest bound yet and so no
-/// finite tail over every peak (#1377 D4); #1376 derives the bounds from the designer.
+/// `(1 + u)^count`, the relative growth of `count` rounded operations.
+fn rounding_factor(count: u32) -> f64 {
+    (0..count).fold(1.0, |factor, _| {
+        factor * (1.0 + effect_runtime::tail::ROUNDOFF)
+    })
+}
+
+/// The tail `T` beyond the latency, in samples (#1376 D1), from the half-band layout.
+///
+/// With the input zero from sample `N` on, the last non-zero `X` is `X[N-1]`. The interpolator
+/// reads `X[n-1] .. X[n-30]` ([`HALFBAND63_EVEN_TAPS`] ages), so the last non-zero `e` is
+/// `e[N-1+30]`; the decimator reads `e[n-1] .. e[n-30]`, so the last non-zero wet sample is at
+/// `N - 1 + 60`. The odd phase reads `X[n-31]` and the dry path `x[n-31]` ([`kernel::DRY_DELAY`]),
+/// both zero from `N + 31`. The output is therefore exactly `+-0.0` from
+/// `N + max(2 * 30, 31) = N + 60`, which is `N + latency + 29`.
+const fn tail_samples() -> u64 {
+    let wet = 2 * HALFBAND63_EVEN_TAPS;
+    let last = if wet > kernel::DRY_DELAY {
+        wet
+    } else {
+        kernel::DRY_DELAY
+    };
+    (last - kernel::DRY_DELAY) as u64
+}
+
+/// The exact-rest bound `R` beyond the latency, in samples (#1376 D2), from the ring layout.
+///
+/// The histories are FIR delay lines of [`LIVE_ROWS`] live rows (each mirrored), and the ramps
+/// hold no input-driven state, so `Z` is the reset state: every row of every history `+0.0`. The
+/// predicate is the one [`Channel::rest_lanes`] pins (`PreparedNativeEffectBank::lanes_at_rest`):
+/// every row, mirrors included, not only the ages a payload carries. A row written at sample `n`
+/// is overwritten by the push at `n + 32`. The last non-zero `X` and `dry` pushes are at `N - 1`,
+/// so those rings are all `+0.0` from `N + 32`; the last non-zero `e` push is at `N - 1 + 30`, so
+/// the `e` ring is all `+0.0` from `N + 30 + 32 = N + 62`, which is `N + latency + 31`. It is the
+/// same for both peak cases: no word's reach depends on the input's size, only on its last
+/// non-zero sample. (Counting the 30 ages the payload carries instead of the 32 rows would state
+/// 29, two samples before the predicate can hold.)
+const fn rest_samples() -> u64 {
+    let e_ring = HALFBAND63_EVEN_TAPS + LIVE_ROWS;
+    let last = if e_ring > LIVE_ROWS {
+        e_ring
+    } else {
+        LIVE_ROWS
+    };
+    (last - kernel::DRY_DELAY) as u64
+}
+
+/// `l1e = sum |h[2k]|` over the 30 even taps, in exact `f64` (every tap is an `f32`, and their
+/// binades span fewer than 29 bits, so the sum has no rounding).
+fn even_tap_l1() -> f64 {
+    HALFBAND63_EVEN.iter().map(|tap| f64::from(tap.abs())).sum()
+}
+
+/// Rounded operations on the longest path from an input sample to an output sample: the drive
+/// product, the interpolator's 30 tap products and 30 sums, the odd phase's halving (exact unless
+/// subnormal), the decimator's 31 products (30 taps
+/// and the centre) and 31 sums, and the five output operations (`1 - mix`, the two mix products,
+/// their sum and the output gain). Counting the sums that start from `+0.0` (which are exact) keeps
+/// the count an upper bound.
+const ROUNDED_OPERATIONS: u32 = 1 + 30 + 30 + 1 + 31 + 31 + 5;
+
+/// `G_p = G_t` in millibels (#1376 D4): the output law is `y = g_out ((1 - mix) d + mix wet)`, or
+/// the dry word `d = x[n-31]` on the identity arms, with `X = 2 g_drive x`, `e = cubic(u)`.
+///
+/// The cubic shrinks magnitudes, `|cubic(u)| <= |u|` (its Lipschitz constant is `1` and
+/// `cubic(0) = 0`; the clamp `+-2/3` is below `|u|` wherever it acts, and the rounded polynomial
+/// `fl(u - p2)` with `p2` of the sign of `u` and `|p2| <= |u| / 3` cannot exceed `|u|`), and the
+/// flushes only shrink. So `|u| <= l1e max|X|`, `|e| <= |u|`, the odd phase is at most
+/// `|0.5 X|`, and `|wet| <= (l1e^2 + 1/4) max|X| = 2 g_drive (l1e^2 + 1/4) max|x|`, with `l1e` the
+/// even taps' `l1` norm ([`even_tap_l1`]) and the centre tap `1/2`. Mixed with the dry word,
+/// `|y| <= g_out max(1, 2 g_drive (l1e^2 + 1/4)) max|x| (1 + u)^k`, `k` the
+/// [`ROUNDED_OPERATIONS`] on any path, at the domain's largest drive and output words (every ramp
+/// word stays inside its converted domain). The wet bound uses the cubic's Lipschitz constant, not
+/// its clamp, so it is linear in the input: the soft clip's words are fixed designs, an input after
+/// silence meets the same operator, and `G_t = G_p`. The `+-2/3` clamp would give an absolute
+/// bound, which H1 cannot carry, so it is not used.
+fn peak_gain_millibels() -> Option<i32> {
+    let drive = f64::from(converted_domain(0)?.1);
+    let output = f64::from(converted_domain(1)?.1);
+    let l1e = even_tap_l1();
+    let wet = 2.0 * drive * (l1e * l1e + 0.25);
+    let gain = output * wet.max(1.0) * rounding_factor(ROUNDED_OPERATIONS);
+    Some(math::tail::ceil_millibels(
+        gain,
+        math::tail::Rounding::Computed,
+    ))
+}
+
+/// `sigma_p = sigma_t` in millibels (#1376 D4, #1379 H3): one [`math::tail::UNDERFLOW`] per
+/// rounded operation ([`ROUNDED_OPERATIONS`]), each carried to the output by at most the gain of
+/// the operations after it: two half-band stages of `l1` norm at most `l1e + 1/2` (the even taps
+/// and the centre), the mix (at most `1`) and the output word, so at most
+/// `g_out max(1, l1e + 1/2)^2 (1 + u)^k`. An error made before the drive product does not exist:
+/// the drive product is the first rounded operation.
+fn flush_stall_millibels() -> Option<i32> {
+    let output = f64::from(converted_domain(1)?.1);
+    let stage = (even_tap_l1() + 0.5).max(1.0);
+    let carried = output * stage * stage * rounding_factor(ROUNDED_OPERATIONS);
+    Some(math::tail::ceil_millibels(
+        f64::from(ROUNDED_OPERATIONS) * math::tail::UNDERFLOW * carried,
+        math::tail::Rounding::Computed,
+    ))
+}
+
+/// This effect's tail, tail over every peak, exact-rest bound and composition values, the one place
+/// they are stated (decision 15 D15-4(b), #1377 D1, #1376).
+///
+/// * **Tail** [`tail_samples`] (`29`), decay `0`: the output is exactly zero from there.
+/// * **Rest** [`rest_samples`] (`31`), for both peak cases; **tail over every peak**
+///   `max(T, R) = 31`.
+/// * **Composition** [`peak_gain_millibels`] and [`flush_stall_millibels`].
 fn tail_and_rest(_sample_rate: u32, _quality: EffectQuality) -> effect_contract::NodeTailBound {
+    let (Some(gain), Some(stall)) = (peak_gain_millibels(), flush_stall_millibels()) else {
+        return effect_contract::NodeTailBound::UNBOUNDED;
+    };
+    let tail = tail_samples();
+    let rest = rest_samples();
+    let gain = effect_contract::PeakGain::Millibels(gain);
+    let stall = effect_contract::FlushStall::Level(stall);
     effect_contract::NodeTailBound {
-        tail: TailSamples::Finite(29),
-        tail_every_peak: TailSamples::Infinite,
-        rest: effect_contract::RestBound::Unstated,
-        composition: effect_contract::CompositionBound::Unstated,
+        tail: TailSamples::Finite(tail),
+        tail_every_peak: TailSamples::Finite(tail.max(rest)),
+        rest: effect_contract::RestBound::Bounded(effect_contract::RestSamples {
+            peak_plus_24_dbfs: rest,
+            any_sanitized_input: rest,
+        }),
+        composition: effect_contract::CompositionBound::Stated {
+            decay: effect_contract::TailDecay(0),
+            peak_gain: gain,
+            tail_gain: gain,
+            peak_stall: stall,
+            tail_stall: stall,
+        },
     }
 }
 

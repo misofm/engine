@@ -167,15 +167,130 @@ const fn quality(sample_rate: u32) -> effect_contract::QualityDescriptor {
     }
 }
 
-/// This effect's tail, tail over every peak and exact-rest bound, the one place they are stated
-/// (decision 15 D15-4(b), #1377 D1). Today's declared tail, with no exact-rest bound yet and so no
-/// finite tail over every peak (#1377 D4); #1376 derives the bounds from the designer.
-fn tail_and_rest(_sample_rate: u32, _quality: EffectQuality) -> effect_contract::NodeTailBound {
+/// The fast tier's gain error, in dB: `fast_gain_from_db` is within this of `10^(g/20)` for every
+/// `g` in `[-160, 24]` dB, the bound `crates/math/tests/f1_fast_db_bounds.rs` proves by an
+/// exhaustive sweep (at most `7.431e-6` dB on `[-160, 0]` and `2.183e-6` dB on `[0, 24]`). The
+/// applied gain's argument, the clamped shape, lies in `[-18, 18]` dB. The same value as the
+/// compressor's, declared here because `math::fast_db` is sealed (#1376).
+const FAST_GAIN_ERROR_DB: f64 = 1.0e-5;
+
+/// `(1 + u)^count`, the relative growth of `count` rounded operations.
+fn rounding_factor(count: u32) -> f64 {
+    (0..count).fold(1.0, |factor, _| {
+        factor * (1.0 + effect_runtime::tail::ROUNDOFF)
+    })
+}
+
+/// The largest value either envelope word can hold for a detector of at most `peak`, as an `f32`
+/// rounded up (#1376 D2).
+///
+/// With `U` the smallest `f32` at or above `peak`, every link mode's detector is at most `U`
+/// (`abs`, `max`, and `fl(0.5 |l| + 0.5 |r|)`, whose halvings are exact and whose sum is at most
+/// `fl(U) = U`). A follower step is `e' = fl(fl(c e) + fl(k u))` with `c + k = 1` exactly (each `k`
+/// is `1 - c`, exact for `c` in `[1/2, 1]`), so for `e <= M` and `u <= U`,
+/// `e' <= (c M + k U) (1 + u)^2 = (M - k (M - U)) (1 + u)^2`. With `M = U (1 + 3 u / k_min)`,
+/// `k_min = 1 - c` of the slowest of the four coefficients, the right side is at most `M` whenever
+/// `k_min >= 6 u (1 + u)`, which every launch rate meets by four decades. The words start at
+/// `+0.0`, so `M` bounds them over every history. (A subnormal product adds at most `2^-150`
+/// absolutely, far under `k_min (M - U)`.)
+fn follower_distance_max(row: [f32; 4], peak: f64) -> Option<f32> {
+    let k_min = row
+        .iter()
+        .map(|c| 1.0 - f64::from(*c))
+        .fold(f64::INFINITY, f64::min);
+    let u = effect_runtime::tail::ROUNDOFF;
+    if k_min < 6.0 * u * (1.0 + u) {
+        return None;
+    }
+    let bound = peak * (1.0 + 3.0 * u / k_min);
+    // Round up to `f32`, then one `f32` ulp more: `U` exceeds `peak` by less than one ulp, and
+    // the `f64` product's own rounding is far smaller.
+    let mut word = bound as f32;
+    if f64::from(word) < bound {
+        word = f32::from_bits(word.to_bits() + 1);
+    }
+    let word = f32::from_bits(word.to_bits() + 1);
+    word.is_normal().then_some(word)
+}
+
+/// The exact-rest bound `R` at `sample_rate` for every input of peak at most `peak` (#1376 D2),
+/// or `None` when it does not exist (D3).
+///
+/// **Quantifier.** `R` holds when both input planes are exactly zero from the first silent sample
+/// `M` on. With a zero detector both followers take the release arm (`0 > e` is false for
+/// `e >= +0.0`), so each word is the pole form `e' = snap(fl(c e))` at its release retention, which
+/// [`effect_runtime::tail::pole_follower_rest_samples`] bounds from [`follower_distance_max`]. The
+/// D3 condition holds: the slowest retention, the 100 ms slow release at 96 kHz, is
+/// `1 - 1.04e-4`, far below `1 - 2^-24`. The rest state `Z` is the reset state (both followers
+/// `+0.0`); ramp words are parameter state, not signal state, and the latency is zero, so `R` is
+/// the larger of the two words' bounds. The coefficients are frozen per rate, so no ramp or
+/// parameter changes them.
+fn rest_samples(sample_rate: u32, peak: f64) -> Option<u64> {
+    let row = coefficient_row(sample_rate)?;
+    let distance = follower_distance_max(row, peak)?;
+    let snap = effect_runtime::tail::RestSnap::Below(FOLLOWER_REST);
+    // Pin order: fast attack, fast release, slow attack, slow release.
+    let fast = effect_runtime::tail::pole_follower_rest_samples(row[1], distance, snap)?;
+    let slow = effect_runtime::tail::pole_follower_rest_samples(row[3], distance, snap)?;
+    Some(fast.max(slow))
+}
+
+/// `G_p = G_t` in millibels (#1376 D4): the output law is `fma(mix, x g - x, x)` on the shaped arm,
+/// or `x` on the identity arms, with `0 < g = fast_gain_from_db(shape)`, `shape` clamped to
+/// `+-SHAPE_LIMIT_DB` and `mix` in `[0, 1]`. Through the four rounded operations (multiply,
+/// subtract, and `Lane::fma`'s separate multiply and add), `|y| <= max(1, g) |x| (1 + u)^4`, and
+/// `g <= 10^((SHAPE_LIMIT_DB + FAST_GAIN_ERROR_DB) / 20)`. After silence the output is the same
+/// law of the current input, so `G_t = G_p`.
+fn peak_gain_millibels() -> i32 {
+    let gain = math::db_to_gain(f64::from(SHAPE_LIMIT_DB) + FAST_GAIN_ERROR_DB);
+    math::tail::ceil_millibels(gain * rounding_factor(4), math::tail::Rounding::Computed)
+}
+
+/// `sigma_p = sigma_t` in millibels (#1376 D4, #1379 H3): the underflow allowance of the output's
+/// chain, one [`math::tail::UNDERFLOW`] per rounded operation (four), each carried by at most
+/// `(1 + u)^3` through the operations after it (the mix is at most `1`).
+fn flush_stall_millibels() -> i32 {
+    math::tail::ceil_millibels(
+        4.0 * math::tail::UNDERFLOW * rounding_factor(3),
+        math::tail::Rounding::Computed,
+    )
+}
+
+/// This effect's tail, tail over every peak, exact-rest bound and composition values, the one place
+/// they are stated (decision 15 D15-4(b), #1377 D1, #1376).
+///
+/// * **Tail `Finite(0)`, decay `0`** (#1376 D1): every output arm is the current input `x`, or
+///   `gain_mix_step(x, gain, mix)` of it with a finite gain: the shaper holds no audio history and
+///   has zero latency, so the output is exactly `+-0.0` from the first zero input sample.
+/// * **Rest** [`rest_samples`] at the two peak cases, `10^(24/20)` and every sanitized input
+///   (`|x| < 1e30`); **tail over every peak** the larger, an upper bound of `max(0, R(P*))`.
+/// * **Composition** [`peak_gain_millibels`] and [`flush_stall_millibels`].
+///
+/// A rate the bound cannot cover states no bound.
+fn tail_and_rest(sample_rate: u32, _quality: EffectQuality) -> effect_contract::NodeTailBound {
+    let rest = (
+        rest_samples(sample_rate, math::db_to_gain(24.0)),
+        rest_samples(sample_rate, f64::from(1.0e30_f32)),
+    );
+    let (Some(peak_plus_24_dbfs), Some(any_sanitized_input)) = rest else {
+        return effect_contract::NodeTailBound::UNBOUNDED;
+    };
+    let gain = effect_contract::PeakGain::Millibels(peak_gain_millibels());
+    let stall = effect_contract::FlushStall::Level(flush_stall_millibels());
     effect_contract::NodeTailBound {
         tail: TailSamples::Finite(0),
-        tail_every_peak: TailSamples::Infinite,
-        rest: effect_contract::RestBound::Unstated,
-        composition: effect_contract::CompositionBound::Unstated,
+        tail_every_peak: TailSamples::Finite(peak_plus_24_dbfs.max(any_sanitized_input)),
+        rest: effect_contract::RestBound::Bounded(effect_contract::RestSamples {
+            peak_plus_24_dbfs,
+            any_sanitized_input,
+        }),
+        composition: effect_contract::CompositionBound::Stated {
+            decay: effect_contract::TailDecay(0),
+            peak_gain: gain,
+            tail_gain: gain,
+            peak_stall: stall,
+            tail_stall: stall,
+        },
     }
 }
 

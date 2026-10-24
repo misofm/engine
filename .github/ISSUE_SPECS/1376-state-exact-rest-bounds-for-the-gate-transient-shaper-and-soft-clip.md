@@ -115,3 +115,34 @@ three.
   (#1379), never before it: `main` must never report a plan tail that is not certified.
 - *Report a zero tail beyond latency for the compressor and the true-peak limiter* (#1375), for the
   helper
+
+## Evidence and decision record (attempt 1, 2026-10-24, on #1375's f20fd389b)
+
+- **Scope note decisions taken (root).** Two tranches; the shared run-grouped walker in
+  `effect_runtime::tail` serves three entry points; `FAST_GAIN_ERROR_DB = 1e-5` re-declared per
+  crate with the F1 citation; the soft clip's D4 includes the drive; the soft clip's `R` counts the
+  32-row ring; the gate's `Z` is the stall word (D2 amendment below). Paths beyond the spec list,
+  from the scope note: `crates/effect-runtime/src/tail.rs`, `crates/transient-shaper/src/corpus.rs`
+  (the metadata literal now reads `tail_and_rest`), `.github/workflows/qualification.yml` (one line).
+- **Helper.** #1375 shipped `rate_follower_rest_samples`, not D2's `one_pole_rest_samples`. The
+  walker is factored into `magnitude_walk` over an exact weight `P / 2^Q`; the rate form passes
+  `c (1 - u)`, the new `pole_follower_rest_samples` passes `1 - c` (exact, Sterbenz). No value of
+  the compressor or limiter moved.
+- **Transient shaper (D1, D2, D4).** Tail `Finite(0)` confirmed by reading (`select(identity, x,
+  gain_mix_step(x, g, mix))` of the current input). With a zero detector each follower is
+  `snap(fl(c e))` at its release retention, snapped `Below(FOLLOWER_REST = 1e-12)`; `Z` is the reset
+  state. Distance: the input peak `U` inflated to `U (1 + 3 u / k_min)` (a convex-step invariant
+  proved in the doc comment). D3: slowest retention `1 - 1.04e-4`. Stated `R` (+24 dBFS / any
+  sanitized input) at 44.1 / 48 / 88.2 / 96 kHz: 134,039 / 426,481; 145,892 / 464,191;
+  268,101 / 853,016; 291,723 / 928,173, each equal to the brute force of the slow word. Gate 2 in
+  release, three link modes and a ramp in flight: rest at most 904,192 against 928,173 (96 kHz).
+  `G_p = G_t = 1,801` mB (`10^((18 + 1e-5)/20) (1 + u)^4`: the scope note's `(1 + u)^3` undercounts
+  `gain_mix_step`'s four roundings); `sigma = 4 UNDERFLOW (1 + u)^3 = -74,655` mB. Measured largest
+  `|y| / max|x|` 7.9411 against 7.9433.
+- **Soft clip (D1, D2, D4).** `T = max(2 * 30, 31) - 31 = 29` stands. `R = 30 + 32 - 31 = 31`: the
+  last non-zero `e` push is 30 samples after the input stops and the 32-row ring clears 32 pushes
+  later; gate 2 judges it with `lanes_at_rest` on a bank and the payload against `Z`
+  (`tail_every_peak = 31`). `G_p = G_t = 7,025` mB: `g_out max(1, 2 g_drive (l1e^2 + 1/4))
+  (1 + u)^129` at the +36 dB drive and +24 dB output words (the spec's D4 omitted the drive; the
+  centre tap is carried exactly instead of folding it into `l1(h)^2`); `sigma = 129 UNDERFLOW g_out
+  (l1e + 1/2)^2 (1 + u)^129 = -68,344` mB. Measured largest `|y| / max|x|` 16.99 against 2,243.

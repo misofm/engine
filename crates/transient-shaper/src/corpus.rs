@@ -34,7 +34,7 @@ use lane::{Lane, Simd4};
 use crate::{PARAMETER_COUNT, RAMP_SAMPLES, Shaper, TRANSIENT_SHAPER_DESCRIPTOR, coefficient_row};
 use effect_contract::{
     EffectQuality, LatencySamples, LinkMode, PreparedEffectMetadata, PreparedPorts,
-    PreparedSidechainPort, StatePayloadSizes, TailSamples,
+    PreparedSidechainPort, StatePayloadSizes,
 };
 
 /// Independent tracks in every case; a multiple of the widest backend.
@@ -187,6 +187,7 @@ pub fn run_case(case: usize, width: usize, out: &mut [u32]) {
 /// case, never bypassed.
 fn metadata(case: usize) -> PreparedEffectMetadata {
     let quality = TRANSIENT_SHAPER_DESCRIPTOR.qualities[1];
+    let bound = (TRANSIENT_SHAPER_DESCRIPTOR.tail_and_rest)(48_000, EffectQuality::Normal);
     PreparedEffectMetadata {
         descriptor: &TRANSIENT_SHAPER_DESCRIPTOR,
         sample_rate: 48_000,
@@ -202,10 +203,10 @@ fn metadata(case: usize) -> PreparedEffectMetadata {
             sidechain: PreparedSidechainPort::None,
         },
         latency: LatencySamples(0),
-        tail: TailSamples::Finite(0),
-        tail_every_peak: TailSamples::Infinite,
-        rest: effect_contract::RestBound::Unstated,
-        composition: effect_contract::CompositionBound::Unstated,
+        tail: bound.tail,
+        tail_every_peak: bound.tail_every_peak,
+        rest: bound.rest,
+        composition: bound.composition,
         state_sizes: StatePayloadSizes {
             common_bytes: 0,
             left_bytes: crate::LANE_STATE_BYTES,
