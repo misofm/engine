@@ -2542,6 +2542,100 @@ fn delay_lane(ring: &mut [f32], cursor: &mut usize, block: &mut [f32]) {
         offset += take;
     }
 }
+
+// #1402 D2: the fill of a successor's line at adoption (lemma L2, L3). A line at rest is filled by
+// pushing a stream of parts into it, oldest first: the predecessor's pending words (`pending`),
+// for L3 the predecessor's claim pending, then the prime in any chunking. The line then holds the
+// last `λ'` words of the stream, its oldest at its cursor, with `+0.0` only where the stream is
+// shorter than the line (L2's N case). #1355's adoption step is the caller.
+
+impl TrackDelayLine {
+    /// Each lane's pending words in age order, oldest first, as two slices: the ring from the
+    /// cursor, then the ring before it (#1402 D2).
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "#1355's adoption step calls it")
+    )]
+    pub(crate) fn pending(&self) -> [[&[f32]; 2]; 2] {
+        [
+            ring_pending(&self.left, self.left_cursor),
+            ring_pending(&self.right, self.right_cursor),
+        ]
+    }
+
+    /// Push `left` and `right` into the lanes' rings, oldest first, each at its own cursor
+    /// (#1402 D2): one part of a fill. Allocation-free; at most two slice copies per lane.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "#1355's adoption step calls it")
+    )]
+    pub(crate) fn push(&mut self, left: &[f32], right: &[f32]) {
+        ring_push(&mut self.left, &mut self.left_cursor, left);
+        ring_push(&mut self.right, &mut self.right_cursor, right);
+    }
+}
+
+impl CompensationDelay {
+    /// Each channel's pending words in age order, oldest first, as two slices (#1402 D2, L3).
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "#1355's adoption step calls it")
+    )]
+    pub(crate) fn pending(&self) -> [[&[f32]; 2]; 2] {
+        [
+            ring_pending(&self.left, self.cursor),
+            ring_pending(&self.right, self.cursor),
+        ]
+    }
+
+    /// Push `left` and `right`, one part of a fill (#1402 D2, L3), into the two rings, which share
+    /// one cursor: the two parts are equally long. Allocation-free.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "#1355's adoption step calls it")
+    )]
+    pub(crate) fn push(&mut self, left: &[f32], right: &[f32]) {
+        debug_assert_eq!(left.len(), right.len());
+        let mut left_cursor = self.cursor;
+        ring_push(&mut self.left, &mut left_cursor, left);
+        ring_push(&mut self.right, &mut self.cursor, right);
+        debug_assert_eq!(left_cursor, self.cursor);
+    }
+}
+
+/// A ring's words in age order from `cursor`, its oldest: `ring[cursor..]`, then `ring[..cursor]`.
+fn ring_pending(ring: &[f32], cursor: usize) -> [&[f32]; 2] {
+    let (newer, older) = ring.split_at(cursor);
+    [older, newer]
+}
+
+/// Push `words` into `ring` at `cursor`, its oldest word, and advance the cursor past them
+/// (#1402 D2): the ring then holds, oldest first from the cursor, its newest `ring.len() -
+/// words.len()` words and then `words`, or only the last `ring.len()` of `words` when they are
+/// at least as many. No `%` and no per-sample loop: at most two slice copies.
+fn ring_push(ring: &mut [f32], cursor: &mut usize, words: &[f32]) {
+    let length = ring.len();
+    if length == 0 {
+        return;
+    }
+    // Only the last `length` words can stay; pushing exactly `length` words leaves the cursor
+    // where it stood, so the skipped words do not move it.
+    let (count, words) = if words.len() >= length {
+        (0, &words[words.len() - length..])
+    } else {
+        (words.len(), words)
+    };
+    let first = core::cmp::min(words.len(), length - *cursor);
+    ring[*cursor..*cursor + first].copy_from_slice(&words[..first]);
+    let rest = words.len() - first;
+    ring[..rest].copy_from_slice(&words[first..]);
+    let advanced = *cursor + count;
+    *cursor = if advanced >= length {
+        advanced - length
+    } else {
+        advanced
+    };
+}
 // REALTIME_POLICY_END
 
 /// What an op does to its reduced output.
@@ -13498,6 +13592,163 @@ mod tests {
             "a lane outside the mask starts at rest"
         );
         assert_ne!(right, twin_right);
+    }
+
+    /// #1402 D2 (gate 2). A line at rest, filled by pushing parts, emits the last `λ'` words of
+    /// their concatenation, `+0.0` first where the stream is short: lemma L2's C (`λ -> λ + P`), R
+    /// (`λ -> λ`) and N (an added line, `λ' > P`) cases on both lanes of a track's line, and L3 on
+    /// an edge line (the predecessor's edge pending, its claim pending, then the prime). Each at
+    /// every predecessor cursor, with the predecessor's line part filled and part wrapped, and the
+    /// prime in two chunkings.
+    ///
+    /// Red mutation: #1283 D4's head-aligned copy (the pending words, then `+0.0` where the prime
+    /// belongs), the pending slices swapped, or a cursor the push does not advance.
+    #[test]
+    fn a_filled_line_emits_the_last_words_of_its_parts() {
+        const P: usize = 8;
+        let sample = |t: usize, lane: usize| (t + 1) as f32 * 0.25 + lane as f32 * 1_000.0;
+        let prime = |lane: usize| -> Vec<f32> { (0..P).map(|t| -sample(t, lane)).collect() };
+        // `taken` frames of `sample` through a fresh line: its pending words are the last of
+        // `+0.0`s and those frames.
+        let fed = |line: &mut dyn FnMut(&mut [f32], &mut [f32]), taken: usize, from: usize| {
+            let mut time = 0;
+            for take in [3, 1, 5, 2].iter().cycle() {
+                if time == taken {
+                    break;
+                }
+                let take = core::cmp::min(*take, taken - time);
+                let mut left: Vec<f32> = (time..time + take).map(|t| sample(from + t, 0)).collect();
+                let mut right: Vec<f32> =
+                    (time..time + take).map(|t| sample(from + t, 1)).collect();
+                line(&mut left, &mut right);
+                time += take;
+            }
+        };
+        let last = |stream: &[f32], length: usize| -> Vec<u32> {
+            let pad = length.saturating_sub(stream.len());
+            core::iter::repeat_n(0.0f32, pad)
+                .chain(stream[stream.len() - (length - pad)..].iter().copied())
+                .map(f32::to_bits)
+                .collect()
+        };
+        let stream = |length: usize, taken: usize, from: usize, lane: usize| -> Vec<f32> {
+            let fed: Vec<f32> = (0..taken).map(|t| sample(from + t, lane)).collect();
+            let pad = length.saturating_sub(fed.len());
+            core::iter::repeat_n(0.0f32, pad)
+                .chain(fed[fed.len() - (length - pad)..].iter().copied())
+                .collect()
+        };
+        // A line's content in age order: feed it as many `+0.0` frames as it is long.
+        let emitted = |line: &mut dyn FnMut(&mut [f32], &mut [f32]), length: [usize; 2]| {
+            let mut planes = [vec![0.0f32; length[0]], vec![0.0f32; length[1]]];
+            let longest = length[0].max(length[1]);
+            planes[0].resize(longest, 0.0);
+            planes[1].resize(longest, 0.0);
+            let [left, right] = &mut planes;
+            line(left, right);
+            [0, 1].map(|lane| {
+                planes[lane][..length[lane]]
+                    .iter()
+                    .map(|word| word.to_bits())
+                    .collect::<Vec<u32>>()
+            })
+        };
+        let chunkings: [&[usize]; 2] = [&[P], &[3, 1, 4]];
+        // C, R and N on a track line whose lanes are 5 and 7 long.
+        let lanes = [5_usize, 7];
+        for (case, grow) in [("C", Some(P)), ("R", Some(0)), ("N", None)] {
+            for taken in 0..2 * lanes[1] + 3 {
+                for chunks in chunkings {
+                    let mut before = TrackDelayLine::new(lanes[0], lanes[1]);
+                    fed(&mut |l, r| before.process(l, r), taken, 0);
+                    let length = match grow {
+                        Some(grow) => lanes.map(|lane| lane + grow),
+                        None => [P + 3, P + 5],
+                    };
+                    let mut after = TrackDelayLine::new(length[0], length[1]);
+                    if grow.is_some() {
+                        let [left, right] = before.pending();
+                        after.push(left[0], right[0]);
+                        after.push(left[1], right[1]);
+                    }
+                    let primes = [prime(0), prime(1)];
+                    let mut offset = 0;
+                    for &chunk in chunks {
+                        after.push(
+                            &primes[0][offset..offset + chunk],
+                            &primes[1][offset..offset + chunk],
+                        );
+                        offset += chunk;
+                    }
+                    let got = emitted(&mut |l, r| after.process(l, r), length);
+                    for lane in 0..2 {
+                        let mut parts = if grow.is_some() {
+                            stream(lanes[lane], taken, 0, lane)
+                        } else {
+                            Vec::new()
+                        };
+                        parts.extend_from_slice(&primes[lane]);
+                        assert_eq!(
+                            got[lane],
+                            last(&parts, length[lane]),
+                            "{case}: taken {taken}, chunks {chunks:?}, lane {lane}"
+                        );
+                    }
+                }
+            }
+        }
+        // L3: an edge line of 6 and a claim line of 4 on each lane, into an edge line grown by
+        // the claim and `P`.
+        let (edge, claim) = (6_usize, 4_usize);
+        for taken in 0..2 * edge + 3 {
+            for chunks in chunkings {
+                let mut before = CompensationDelay::new(edge);
+                fed(
+                    &mut |l, r| {
+                        let source = (l.to_vec(), r.to_vec());
+                        before.process_from((&source.0, &source.1), (l, r));
+                    },
+                    taken,
+                    0,
+                );
+                let mut claim_line = TrackDelayLine::new(claim, claim);
+                fed(&mut |l, r| claim_line.process(l, r), taken + 1, 500);
+                let length = edge + claim + P;
+                let mut after = CompensationDelay::new(length);
+                let [left, right] = before.pending();
+                after.push(left[0], right[0]);
+                after.push(left[1], right[1]);
+                let [left, right] = claim_line.pending();
+                after.push(left[0], right[0]);
+                after.push(left[1], right[1]);
+                let primes = [prime(0), prime(1)];
+                let mut offset = 0;
+                for &chunk in chunks {
+                    after.push(
+                        &primes[0][offset..offset + chunk],
+                        &primes[1][offset..offset + chunk],
+                    );
+                    offset += chunk;
+                }
+                let got = emitted(
+                    &mut |l, r| {
+                        let source = (l.to_vec(), r.to_vec());
+                        after.process_from((&source.0, &source.1), (l, r));
+                    },
+                    [length; 2],
+                );
+                for lane in 0..2 {
+                    let mut parts = stream(edge, taken, 0, lane);
+                    parts.extend(stream(claim, taken + 1, 500, lane));
+                    parts.extend_from_slice(&primes[lane]);
+                    assert_eq!(
+                        got[lane],
+                        last(&parts, length),
+                        "L3: taken {taken}, chunks {chunks:?}, lane {lane}"
+                    );
+                }
+            }
+        }
     }
 
     // -----------------------------------------------------------------------------------------

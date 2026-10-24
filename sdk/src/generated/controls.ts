@@ -1669,6 +1669,461 @@ export const CONTROLS = deepFreeze(
         "automatable": false
       }
     },
+    "miso.de-esser": {
+      "bypass": {
+        "control": 0,
+        "name": "bypass",
+        "displayName": "Bypass",
+        "displayUnit": "",
+        "unit": "linear",
+        "kind": "toggle",
+        "minimum": 0,
+        "maximum": 1,
+        "disabledValue": null,
+        "default": 0,
+        "taper": "stepped",
+        "step": {
+          "unit": "index",
+          "size": "1",
+          "precision": 0,
+          "ladder": {
+            "xs": 1,
+            "sm": 3,
+            "md": 5,
+            "lg": 10,
+            "xl": 30
+          }
+        },
+        "choices": [],
+        "ramp": "fixed",
+        "scope": "model",
+        "family": "effect",
+        "lanes": "shared",
+        "class": "live",
+        "reason": null,
+        "reasonIssue": null,
+        "reopen": null,
+        "automatable": true
+      },
+      "parameters": [
+        {
+          "control": 1,
+          "name": "frequency_hz",
+          "displayName": "frequency",
+          "displayUnit": "Hz",
+          "unit": "hz",
+          "kind": "continuous",
+          "minimum": 1000,
+          "maximum": 16000,
+          "disabledValue": null,
+          "default": 6500,
+          "taper": "logarithmic",
+          "step": {
+            "unit": "cents",
+            "size": "20",
+            "precision": 3,
+            "ladder": {
+              "xs": 1,
+              "sm": 3,
+              "md": 5,
+              "lg": 10,
+              "xl": 30
+            }
+          },
+          "choices": [],
+          "ramp": "fixed",
+          "scope": "model",
+          "family": "effect",
+          "lanes": "perLane",
+          "class": "live",
+          "reason": null,
+          "reasonIssue": null,
+          "reopen": null,
+          "automatable": true
+        },
+        {
+          "control": 2,
+          "name": "q",
+          "displayName": "Q",
+          "displayUnit": "Q",
+          "unit": "ratio",
+          "kind": "continuous",
+          "minimum": 0.5,
+          "maximum": 8,
+          "disabledValue": null,
+          "default": 2,
+          "taper": "logarithmic",
+          "step": {
+            "unit": "ratio",
+            "size": "1.02",
+            "precision": 8,
+            "ladder": {
+              "xs": 1,
+              "sm": 3,
+              "md": 5,
+              "lg": 10,
+              "xl": 30
+            }
+          },
+          "choices": [],
+          "ramp": "fixed",
+          "scope": "model",
+          "family": "effect",
+          "lanes": "perLane",
+          "class": "live",
+          "reason": null,
+          "reasonIssue": null,
+          "reopen": null,
+          "automatable": true
+        },
+        {
+          "control": 3,
+          "name": "threshold_db",
+          "displayName": "threshold",
+          "displayUnit": "dB",
+          "unit": "db",
+          "kind": "continuous",
+          "minimum": -60,
+          "maximum": 0,
+          "disabledValue": null,
+          "default": -20,
+          "taper": "decibel",
+          "step": {
+            "unit": "absolute",
+            "size": "0.1",
+            "precision": 1,
+            "ladder": {
+              "xs": 1,
+              "sm": 3,
+              "md": 5,
+              "lg": 10,
+              "xl": 30
+            }
+          },
+          "choices": [],
+          "ramp": "fixed",
+          "scope": "model",
+          "family": "effect",
+          "lanes": "perLane",
+          "class": "live",
+          "reason": null,
+          "reasonIssue": null,
+          "reopen": null,
+          "automatable": true
+        },
+        {
+          "control": 4,
+          "name": "ratio",
+          "displayName": "ratio",
+          "displayUnit": "ratio",
+          "unit": "ratio",
+          "kind": "continuous",
+          "minimum": 1,
+          "maximum": 20,
+          "disabledValue": null,
+          "default": 4,
+          "taper": "logarithmic",
+          "step": {
+            "unit": "ratio",
+            "size": "1.02",
+            "precision": 8,
+            "ladder": {
+              "xs": 1,
+              "sm": 3,
+              "md": 5,
+              "lg": 10,
+              "xl": 30
+            }
+          },
+          "choices": [],
+          "ramp": "fixed",
+          "scope": "model",
+          "family": "effect",
+          "lanes": "perLane",
+          "class": "live",
+          "reason": null,
+          "reasonIssue": null,
+          "reopen": null,
+          "automatable": true
+        },
+        {
+          "control": 5,
+          "name": "range_db",
+          "displayName": "range",
+          "displayUnit": "dB",
+          "unit": "db",
+          "kind": "continuous",
+          "minimum": 0,
+          "maximum": 40,
+          "disabledValue": null,
+          "default": 20,
+          "taper": "decibel",
+          "step": {
+            "unit": "absolute",
+            "size": "0.1",
+            "precision": 1,
+            "ladder": {
+              "xs": 1,
+              "sm": 3,
+              "md": 5,
+              "lg": 10,
+              "xl": 30
+            }
+          },
+          "choices": [],
+          "ramp": "fixed",
+          "scope": "model",
+          "family": "effect",
+          "lanes": "perLane",
+          "class": "live",
+          "reason": null,
+          "reasonIssue": null,
+          "reopen": null,
+          "automatable": true
+        },
+        {
+          "control": 6,
+          "name": "attack_ms",
+          "displayName": "attack",
+          "displayUnit": "ms",
+          "unit": "milliseconds",
+          "kind": "continuous",
+          "minimum": 0.1,
+          "maximum": 50,
+          "disabledValue": null,
+          "default": 1,
+          "taper": "logarithmic",
+          "step": {
+            "unit": "ratio",
+            "size": "1.02",
+            "precision": 3,
+            "ladder": {
+              "xs": 1,
+              "sm": 3,
+              "md": 5,
+              "lg": 10,
+              "xl": 30
+            }
+          },
+          "choices": [],
+          "ramp": "fixed",
+          "scope": "model",
+          "family": "effect",
+          "lanes": "perLane",
+          "class": "live",
+          "reason": null,
+          "reasonIssue": null,
+          "reopen": null,
+          "automatable": true
+        },
+        {
+          "control": 7,
+          "name": "release_ms",
+          "displayName": "release",
+          "displayUnit": "ms",
+          "unit": "milliseconds",
+          "kind": "continuous",
+          "minimum": 5,
+          "maximum": 500,
+          "disabledValue": null,
+          "default": 50,
+          "taper": "logarithmic",
+          "step": {
+            "unit": "ratio",
+            "size": "1.02",
+            "precision": 3,
+            "ladder": {
+              "xs": 1,
+              "sm": 3,
+              "md": 5,
+              "lg": 10,
+              "xl": 30
+            }
+          },
+          "choices": [],
+          "ramp": "fixed",
+          "scope": "model",
+          "family": "effect",
+          "lanes": "perLane",
+          "class": "live",
+          "reason": null,
+          "reasonIssue": null,
+          "reopen": null,
+          "automatable": true
+        },
+        {
+          "control": 8,
+          "name": "mode",
+          "displayName": "mode",
+          "displayUnit": "type",
+          "unit": "linear",
+          "kind": "enumeration",
+          "minimum": 1,
+          "maximum": 2,
+          "disabledValue": null,
+          "default": 2,
+          "taper": "stepped",
+          "step": {
+            "unit": "index",
+            "size": "1",
+            "precision": 0,
+            "ladder": {
+              "xs": 1,
+              "sm": 3,
+              "md": 5,
+              "lg": 10,
+              "xl": 30
+            }
+          },
+          "choices": [
+            {
+              "value": 1,
+              "label": "wideband"
+            },
+            {
+              "value": 2,
+              "label": "split"
+            }
+          ],
+          "ramp": "fixed",
+          "scope": "model",
+          "family": "effect",
+          "lanes": "perLane",
+          "class": "live",
+          "reason": null,
+          "reasonIssue": null,
+          "reopen": null,
+          "automatable": true
+        },
+        {
+          "control": 9,
+          "name": "detector",
+          "displayName": "detector",
+          "displayUnit": "type",
+          "unit": "linear",
+          "kind": "enumeration",
+          "minimum": 1,
+          "maximum": 2,
+          "disabledValue": null,
+          "default": 1,
+          "taper": "stepped",
+          "step": {
+            "unit": "index",
+            "size": "1",
+            "precision": 0,
+            "ladder": {
+              "xs": 1,
+              "sm": 3,
+              "md": 5,
+              "lg": 10,
+              "xl": 30
+            }
+          },
+          "choices": [
+            {
+              "value": 1,
+              "label": "band"
+            },
+            {
+              "value": 2,
+              "label": "high"
+            }
+          ],
+          "ramp": "fixed",
+          "scope": "model",
+          "family": "effect",
+          "lanes": "perLane",
+          "class": "live",
+          "reason": null,
+          "reasonIssue": null,
+          "reopen": null,
+          "automatable": true
+        },
+        {
+          "control": 10,
+          "name": "listen",
+          "displayName": "listen",
+          "displayUnit": "on/off",
+          "unit": "linear",
+          "kind": "toggle",
+          "minimum": 0,
+          "maximum": 1,
+          "disabledValue": null,
+          "default": 0,
+          "taper": "stepped",
+          "step": {
+            "unit": "index",
+            "size": "1",
+            "precision": 0,
+            "ladder": {
+              "xs": 1,
+              "sm": 3,
+              "md": 5,
+              "lg": 10,
+              "xl": 30
+            }
+          },
+          "choices": [],
+          "ramp": "fixed",
+          "scope": "model",
+          "family": "effect",
+          "lanes": "perLane",
+          "class": "live",
+          "reason": null,
+          "reasonIssue": null,
+          "reopen": null,
+          "automatable": true
+        }
+      ],
+      "linkMode": {
+        "control": 2147483648,
+        "name": "link_mode",
+        "displayName": "Link Mode",
+        "displayUnit": "",
+        "unit": "linear",
+        "kind": "enumeration",
+        "minimum": 1,
+        "maximum": 3,
+        "disabledValue": null,
+        "default": 1,
+        "taper": "stepped",
+        "step": {
+          "unit": "index",
+          "size": "1",
+          "precision": 0,
+          "ladder": {
+            "xs": 1,
+            "sm": 3,
+            "md": 5,
+            "lg": 10,
+            "xl": 30
+          }
+        },
+        "choices": [
+          {
+            "value": 1,
+            "label": "dual_mono"
+          },
+          {
+            "value": 2,
+            "label": "maximum"
+          },
+          {
+            "value": 3,
+            "label": "average"
+          }
+        ],
+        "ramp": "fixed",
+        "scope": "model",
+        "family": "effect",
+        "lanes": "shared",
+        "class": "rebuildOnly",
+        "reason": "optimisation",
+        "reasonIssue": null,
+        "reopen": "decision 15 E2, #1368-#1371",
+        "automatable": false
+      }
+    },
     "miso.delay": {
       "bypass": {
         "control": 0,
