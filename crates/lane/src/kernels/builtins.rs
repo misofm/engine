@@ -83,18 +83,22 @@ pub fn no_lanes<L: Lane>() -> L::Mask {
     L::zero().lt(L::zero())
 }
 
+/// Each lane's index as an `f32`, for [`lanes_below`]: `LANE_INDEX[i] == i as f32`, exact.
+const LANE_INDEX: [f32; 8] = [0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0];
+
 /// A mask set in the lanes whose index is below `count`.
 ///
 /// Control-plane only: this is how a partially populated bank marks its padding lanes once, at
 /// preparation. `count` may be any value in `0..=L::WIDTH`.
+///
+/// The mask is one ordered compare of a splat of `count` against the lane indices, with no
+/// scalar loop: a loop that stores one constant `f32` per lane is what LLVM's loop-idiom pass
+/// turns into `bl _memset_pattern16` on Apple targets (#1018).
 #[inline(always)]
 pub fn lanes_below<L: Lane>(count: usize) -> L::Mask {
     debug_assert!(count <= L::WIDTH);
-    let mut flags = [0.0_f32; 64];
-    for flag in flags.iter_mut().take(count) {
-        *flag = 1.0;
-    }
-    L::load(&flags[..L::WIDTH]).gt(L::zero())
+    // `count <= L::WIDTH <= 8`, so the `f32` conversion is exact.
+    L::splat(count as f32).gt(L::load(&LANE_INDEX[..L::WIDTH]))
 }
 
 /// A mask built from one flag per lane; a lane is set where its flag is non-zero.

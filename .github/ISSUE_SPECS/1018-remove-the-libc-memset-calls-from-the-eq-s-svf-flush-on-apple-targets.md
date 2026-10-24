@@ -71,3 +71,24 @@ off.
   records what remains and why, those rows stay this issue's, and this issue stays open.
 - #1451 owns the cause, the fix and the builtins constants only. *Undo the iOS memset ratchet
   workarounds once splats are free* (#1452, Stream G, after #1451) undoes the earlier ratchet workarounds.
+
+## Evidence record (2026-10-24, closing slice)
+
+Scope note: the last two #1018 rows, `builtins` 4 and `lane` 1, all preparation code. Root
+decisions: #1018 closes when its own rows are gone; the `host-core` row is #1595's control-thread
+row and stays. Gate 3 (V8 isolates, Wasm spill gate) does not apply: no render kernel changed.
+
+- Fix. `builtins`' four `[[1.0_f32; MAX_BANK_LANES]; 2]` unit fills (`InputStage::new`,
+  `FaderStage::new`, `FaderRampStage::new` x2) copy the compile-time constant `UNIT_WORDS`.
+  `lane::kernels::builtins::lanes_below` is one ordered compare,
+  `L::splat(count as f32).gt(L::load(&LANE_INDEX[..L::WIDTH]))`, with no store loop. The same
+  words and the same mask on every target: class A.
+- Gate 1, `ios-asm-memset-pattern16` (the ratchet section of `scripts/check-cross-targets.sh`, on
+  the post-LTO `capi` iOS staticlib), with the two rows deleted. Red on the unchanged code:
+  `builtins: 4 memset_pattern16 calls and no row`, `lane: 1 ... and no row` (calls in
+  `prepare_sections`, `FaderMuteRampBuiltins::new`, and `BuiltinInputBank::new`,
+  `BuiltinFaderBank::new`, `lanes_below` inlined into `builtins-compiler`'s `lower_strip_banks`).
+  Green after the fix: no `builtins` or `lane` call; `host-core` 4, under its #1595 ceiling of 5.
+- Gate 2. `cargo test -p builtins -p lane -p builtins-compiler -p host-core`: 573 passed, 0 failed
+  (console digests and mask tests unchanged).
+- Gate 4. The `docs/TARGET_MATRIX.md` register entry is removed.
