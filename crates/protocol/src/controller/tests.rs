@@ -313,10 +313,10 @@ fn public_b1b_uses_exactly_the_typed_reader_passes_and_replays_identical_bytes()
     // deleting opcodes 0x0006/0x0102/0x0104, #1094 appended `SetConsole` and
     // `SetTrackConsole`, #1241 the VCA edits and #1553 `SetControl`, and decision 17 (#1561)
     // retired thirteen value ops, and #1678 appended a second `SetControl` (an insert row with an
-    // expected effect), so the boundary this row exists to probe is now 35. A smaller number still
-    // refuses, but it stops being a boundary.
-    assert_eq!(conformance::complete_all_opcode_fixture().len(), 36);
-    limited.config.maximum_transaction_edits = 35;
+    // expected effect), and #1584 appended `Observe`, so the boundary this row exists to probe is
+    // now 36. A smaller number still refuses, but it stops being a boundary.
+    assert_eq!(conformance::complete_all_opcode_fixture().len(), 37);
+    limited.config.maximum_transaction_edits = 36;
     assert_eq!(
         limited.process_b1b_btlv(
             &transaction.bytes,

@@ -385,6 +385,21 @@ pub struct HostLiveControlRequest {
     pub observation_taps: u32,
 }
 
+/// The most observation taps any launch native effect declares (#1584 D7): the
+/// [`HostLiveControlRequest::observation_taps`] that binds an observation queue slot for every
+/// declared tap of every effect. A host whose control plane serves the `Observe` edit asks for it.
+/// `0` when the registry failed to build (no effect then prepares).
+#[must_use]
+pub fn launch_maximum_observation_taps() -> u32 {
+    effect_compiler::launch_native_effect_registry().map_or(0, |registry| {
+        registry
+            .descriptors()
+            .map(|descriptor| u32::try_from(descriptor.observations.len()).unwrap_or(u32::MAX))
+            .max()
+            .unwrap_or(0)
+    })
+}
+
 impl Default for HostLiveControlRequest {
     fn default() -> Self {
         Self {

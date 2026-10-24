@@ -74,7 +74,8 @@ pub use live_lanes::{LiveLanes, live_lanes};
 pub use live_ramps::LiveRamps;
 pub use mask::mask_values;
 pub use observation::{
-    ObservationBinding, ObservationBindings, ObservationChange, TapKey, TapSection,
+    MAXIMUM_OBSERVATION_WINDOW_BLOCKS, ObservationBinding, ObservationBindings, ObservationChange,
+    ObserveError, ObserveWrite, TapKey, TapSection, observe_tap, observe_target,
 };
 pub use owner_edits::{OwnerEditError, OwnerEdits};
 pub use registry::{
