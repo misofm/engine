@@ -190,6 +190,14 @@ re-pin in #1585a.
   position, which names another plan's producer between a commit and its adoption. Gate 4's three
   browser tests pass with their original assertions; `selected_observation_reads_...` adds a
   `Pending` read after the arm's block.
+- **Cost note (weekly optimisation, not work now).** `observation_issued_tag` resolves the key by
+  a linear walk over the newest plan's producers for each selected read: selections x effects
+  per read, no allocation.
+- **Stated limit, for #1585b and #1587b.** The meter frame's gain-reduction fold
+  (`WebGainReductionTaps`) reads the slot's arm state and ignores the tag, so while a re-arm is
+  queued it folds the previous arm's window for at most one block (the block that drains the
+  re-arm restarts the window). #1587b's C ABI fold must decide the same point, so both hosts fold
+  the same bytes.
 - **D6.** Deleted: `PlanShape::{observation_armed, observation_arm_samples,
   observation_commanded, reader_slots}`, `note_observe`, `record_observe`, `carry_tap_state` and
   its loop, the forward loop, `SessionState::observation_forwarded` and its accessor, and

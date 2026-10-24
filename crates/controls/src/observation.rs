@@ -292,17 +292,35 @@ impl ObservationBindings {
     /// Arm `key` with `window_blocks`, replacing any earlier window. An existing binding keeps its
     /// subscriber count; a new one has one.
     pub fn set(&mut self, key: TapKey, window_blocks: u32) {
+        self.set_at(key, window_blocks);
+    }
+
+    /// [`Self::set`], and the binding's tag is `arm_tag`, the tag of the record that armed it
+    /// (#1585 D4). The key moves in once.
+    pub fn set_tagged(&mut self, key: TapKey, window_blocks: u32, arm_tag: u64) {
+        let index = self.set_at(key, window_blocks);
+        self.bindings[index].arm_tag = arm_tag;
+    }
+
+    /// [`Self::set`], returning the binding's index.
+    fn set_at(&mut self, key: TapKey, window_blocks: u32) -> usize {
         match self.search(&key) {
-            Ok(index) => self.bindings[index].window_blocks = window_blocks,
-            Err(index) => self.bindings.insert(
-                index,
-                ObservationBinding {
-                    key,
-                    window_blocks,
-                    refs: 1,
-                    arm_tag: 0,
-                },
-            ),
+            Ok(index) => {
+                self.bindings[index].window_blocks = window_blocks;
+                index
+            }
+            Err(index) => {
+                self.bindings.insert(
+                    index,
+                    ObservationBinding {
+                        key,
+                        window_blocks,
+                        refs: 1,
+                        arm_tag: 0,
+                    },
+                );
+                index
+            }
         }
     }
 

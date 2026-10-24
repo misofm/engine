@@ -5338,10 +5338,7 @@ where
                 };
                 match arm {
                     PendingArm::None => {}
-                    PendingArm::Arm(window) => {
-                        self.observation.set(key.clone(), window);
-                        self.observation.set_arm_tag(&key, arm_tag);
-                    }
+                    PendingArm::Arm(window) => self.observation.set_tagged(key, window, arm_tag),
                     PendingArm::Disarm => {
                         self.observation.clear(&key);
                     }
