@@ -47,8 +47,7 @@ three separate mechanisms, each where its hazard is:
   lane, on each channel whose own output failed. A channel zeroed only because its partner failed
   is not counted, and a collapsed mono block duplicates the left count into the right (#1073). In
   a bank, every launch effect recovers only the failing lane and reports it alone (#1089-#1092),
-  so a lane's fault never moves a bank-mate's bits. The one exception is the multiband, whose
-  bank still zeroes and resets every lane; it therefore keeps a prepared session bypass (#1100).
+  so a lane's fault never moves a bank-mate's bits; the multiband does the same since #1340.
 * **Input sanitisation** — once per track per block at the track input stage, never inside an
   effect.
 
@@ -59,9 +58,8 @@ bypass is not prepared (issue #1087): `effect-compiler` prepares an effect that 
 enabled and carries the bypass as per-lane state to the rack's latency-preserving shunt
 (`BypassShunt`), which copies the same delayed dry words into exactly the bypassed lanes, so a
 bypassed track keeps its bank. The delay, which never banks, lowers its bypass too and renders a
-per-node shunt (issue #1339). One effect keeps its session bypass as a prepared one
-(`effect_compiler::lowers_session_bypass`): the multiband compressor, whose whole-bank D7
-recovery would let a bypassed lane silence its bank-mates (issue #1100).
+per-node shunt (issue #1339), and the multiband compressor, whose D7 recovery is per lane, lowers
+it as well (issue #1340): no session effect keeps a prepared bypass.
 
 A live bypass change crossfades (#1341). The bypass cell holds the bypass and the crossfade's ramp
 length in samples as one unit (`BypassSwitch`; the `Bypass(bool)` record is the same write with a

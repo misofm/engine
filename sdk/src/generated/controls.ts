@@ -2246,11 +2246,11 @@ export const CONTROLS = deepFreeze(
         "scope": "model",
         "family": "effect",
         "lanes": "shared",
-        "class": "rebuildOnly",
-        "reason": "ruledLiveNotBuilt",
-        "reasonIssue": 1340,
-        "reopen": "#1340 gives the multiband compressor a live bypass shunt; its last step flips the row",
-        "automatable": false
+        "class": "live",
+        "reason": null,
+        "reasonIssue": null,
+        "reopen": null,
+        "automatable": true
       },
       "parameters": [
         {

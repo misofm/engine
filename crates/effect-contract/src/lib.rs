@@ -1473,11 +1473,9 @@ pub struct PreparedEffectMetadata {
 /// Every session effect whose bypass is lowered is therefore prepared with `bypass = false`, and
 /// every key the cohort planner compares for it carries `bypass: false`: mixed-bypass cohorts share
 /// one key and bind one bank. The delay, whose factory never binds a bank
-/// (`NEVER_BANKED_EFFECTS`), lowers its bypass too and renders a per-node shunt (issue #1339). One
-/// effect keeps its prepared bypass (`effect_compiler::lowers_session_bypass`): the multiband
-/// compressor (`PREPARED_BYPASS_EFFECTS`, issue #1100), whose whole-bank D7 recovery would let a
-/// bypassed lane silence its enabled bank-mates. A mixed-bypass multiband cohort therefore declines
-/// a bank, as before #1087.
+/// (`NEVER_BANKED_EFFECTS`), lowers its bypass too and renders a per-node shunt (issue #1339), and
+/// the multiband compressor, whose D7 recovery is per lane, lowers it and banks a mixed-bypass
+/// cohort (issue #1340): no session effect keeps a prepared bypass.
 ///
 /// # Why the prepared field stays in the key
 ///

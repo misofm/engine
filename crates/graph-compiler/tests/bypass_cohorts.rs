@@ -4,8 +4,9 @@
 //! `EffectProgramKey`, so a bypassed track left its cohort. It now lowers to a prepared
 //! `bypass = false` plus a bypassed lane on the rack's latency-preserving shunt, so a cohort binds
 //! one bank per slot whatever mix of its tracks is bypassed. The delay, which never banks, lowers
-//! its bypass too and renders a per-node shunt (issue #1339, its gate 1 below); the multiband
-//! (issue #1100, gate 3 below) keeps its prepared bypass.
+//! its bypass too and renders a per-node shunt (issue #1339, its gate 1 below), and the multiband,
+//! whose bank recovers per lane, lowers it and banks a mixed cohort (issue #1340, gates 2 and 3
+//! below).
 //!
 //! "Today's render" is reconstructed here exactly: every lowered entry is prepared again with the
 //! session's bypass as its prepared flag and without a lane, which is what
@@ -21,12 +22,12 @@
 
 use builtins_compiler::{BuiltinCompileCaps, prepare_session_builtins};
 use effect_compiler::{
-    EffectCompileCaps, EffectPreparedSession, PREPARED_BYPASS_EFFECTS,
-    launch_native_effect_registry, prepare_native_session_effects,
+    EffectCompileCaps, EffectPreparedSession, launch_native_effect_registry,
+    prepare_native_session_effects,
 };
 use effect_contract::{
-    BankWidth, EffectControlLane, EffectProcessBlock, PreparedNativeEffect, ProcessReport,
-    ResetKind, StatePayloadError, StatePayloadInput, StatePayloadOutput,
+    BankWidth, EffectProcessBlock, PreparedNativeEffect, ProcessReport, ResetKind,
+    StatePayloadError, StatePayloadInput, StatePayloadOutput,
 };
 use engine::realtime::{PlanarBufferMut, RenderError, RenderIo, RenderTime};
 use graph::{
@@ -274,29 +275,6 @@ enum Lowering {
     Session,
     /// [`todays_lowering`]: every session bypass a prepared bypass, as before #1087.
     Today,
-    /// [`p1_lowering`]: every session bypass lowered to a shunt, as #1087 left it.
-    P1,
-}
-
-/// Rebuilds #1087's lowering for the effects that keep a prepared bypass since #1100
-/// (`effect_compiler::PREPARED_BYPASS_EFFECTS`): prepared enabled, with a bypassed channel-less
-/// lane, so a bypassed instance shares its enabled neighbours' bank again.
-fn p1_lowering(effects: &mut EffectPreparedSession) {
-    for entry in &mut effects.entries {
-        let id = entry.factory.descriptor().id.as_str();
-        if !entry.initial_bypass || !PREPARED_BYPASS_EFFECTS.contains(&id) {
-            continue;
-        }
-        assert!(entry.metadata.bypass && entry.control.is_none());
-        entry.bank_preparation.bypass = false;
-        let prepared = entry
-            .factory
-            .prepare(entry.bank_preparation.request())
-            .expect("the same request, prepared enabled");
-        entry.processor = prepared.processor;
-        entry.metadata = prepared.metadata;
-        entry.control = Some(Box::new(EffectControlLane::without_channel(true)));
-    }
 }
 
 /// Compile `model` at `dispatch` with `lowering`, and render it with `feed(track)` on each track.
@@ -309,7 +287,6 @@ fn render_with(
     render_prepared(model, dispatch, feed, &mut |effects| match lowering {
         Lowering::Session => {}
         Lowering::Today => todays_lowering(effects),
-        Lowering::P1 => p1_lowering(effects),
     })
 }
 
@@ -742,21 +719,14 @@ fn multiband_console(tracks: usize, mask: u64) -> SessionModel {
     model
 }
 
-/// Issue #1100, gate 3: a session bypass on the multiband stays a prepared bypass, so a mixed
-/// bypass cohort declines a bank exactly as it did before #1087, and renders the bits #1087's
-/// lowering renders at music levels.
+/// Issue #1340, gate 2: a session bypass on the multiband lowers to a bypassed lane, so a mixed
+/// bypass cohort binds one bank per `lanes()` tracks, and renders the bits of today's prepared
+/// bypass ([`todays_lowering`]) and of `Scalar` at music levels.
 ///
-/// The multiband's bank recovery (D7) is still whole-bank, so it is not lowered until the slice
-/// that makes it console-eligible gives it per-lane recovery (`PREPARED_BYPASS_EFFECTS`). A
-/// bypassed instance is prepared `bypass = true` with no lane, and its program key differs from an
-/// enabled one's: no bound bank mixes the two, and at eight lanes, where neither half of this
-/// cohort fills a bank, nothing binds. #1087's lowering, rebuilt here, banks the whole cohort; at
-/// music levels, where no recovery fires, both render the same words, and so does `Scalar`.
-///
-/// Red mutations: drop the multiband from `PREPARED_BYPASS_EFFECTS` -> the bypassed instances are
-/// prepared enabled and the cohort banks mixed.
+/// Red mutations: keep the multiband's prepared bypass -> its bypassed entries are prepared
+/// bypassed, their program key differs and the mixed cohort binds no bank.
 #[test]
-fn a_mixed_bypass_multiband_cohort_keeps_its_prepared_bypass() {
+fn a_mixed_bypass_multiband_cohort_binds_one_bank() {
     const TRACKS: usize = 8;
     const MASK: u64 = 0b0110_1001;
     let model = multiband_console(TRACKS, MASK);
@@ -776,48 +746,101 @@ fn a_mixed_bypass_multiband_cohort_keeps_its_prepared_bypass() {
         let index: u32 = entry.track_id[2..].parse().expect("chNN");
         let bypassed = MASK >> index & 1 == 1;
         assert_eq!(entry.initial_bypass, bypassed);
-        assert_eq!(
-            entry.metadata.bypass, bypassed,
-            "{}: the session bypass is the prepared one",
+        assert!(
+            !entry.metadata.bypass,
+            "{}: every instance is prepared enabled",
             entry.track_id
         );
-        assert!(
-            entry.control.is_none(),
-            "{}: no lane carries a multiband bypass",
+        assert_eq!(
+            entry
+                .control
+                .as_deref()
+                .map(|lane| !lane.has_channel() && lane.bypassed()),
+            bypassed.then_some(true),
+            "{}: a bypassed instance's bit rides a channel-less lane",
             entry.track_id
         );
     }
-    let kept = render_with(&model, Backend::current(), Lowering::Session, &|_| {
+    let lowered = render_with(&model, Backend::current(), Lowering::Session, &|_| {
         Feed::Music
     });
-    for bank in &kept.banks {
-        let bypassed = bank
-            .iter()
-            .filter(|(track, _)| MASK >> track[2..].parse::<u32>().expect("chNN") & 1 == 1)
-            .count();
-        assert!(
-            bypassed == 0 || bypassed == bank.len(),
-            "a bound multiband bank mixes bypassed and enabled lanes: {bank:?}"
-        );
-    }
-    if lanes() == TRACKS {
-        assert!(
-            kept.banks.is_empty(),
-            "neither half of the cohort fills an eight-lane bank"
-        );
-    }
-    let lowered = render_with(&model, Backend::current(), Lowering::P1, &|_| Feed::Music);
     assert_eq!(
         lowered.banks.len(),
         TRACKS / lanes(),
-        "#1087's lowering banks the whole mixed cohort"
+        "the mixed cohort binds one bank per lane width"
     );
+    let today = render_with(&model, Backend::current(), Lowering::Today, &|_| {
+        Feed::Music
+    });
     let scalar = render_with(&model, Backend::Scalar, Lowering::Session, &|_| Feed::Music);
-    assert_same_bits("multiband against #1087's lowering", &kept, &lowered);
-    assert_same_bits("multiband at Scalar", &scalar, &kept);
+    assert_same_bits("multiband against a prepared bypass", &lowered, &today);
+    assert_same_bits("multiband at Scalar", &scalar, &lowered);
     assert!(
-        kept.output.iter().any(|word| f32::from_bits(*word) != 0.0),
+        lowered
+            .output
+            .iter()
+            .any(|word| f32::from_bits(*word) != 0.0),
         "the render is audible"
+    );
+}
+
+/// Issue #1340, gate 3: a hot bypassed multiband lane inside a bound mixed bank moves none of its
+/// bank-mates' bits.
+///
+/// Track 0 is bypassed and fed [`Feed::Hot`], which trips its wet path's block-boundary check
+/// (D7); its bank-mates are fed music. Every other track's taps equal the same cohort with track 0
+/// fed music too. With the whole-bank recovery back (D1 reverted), the hot lane zeroes its
+/// bank-mates' blocks and this turns red. That the feed trips D7 is shown at `Scalar`, where track
+/// 0 renders per node through [`CountRecoveries`]: banking never changes a lane's bits, so its
+/// lane in the bank trips on the same blocks.
+#[test]
+fn a_hot_bypassed_multiband_lane_leaves_its_bank_mates_bits_unchanged() {
+    const TRACKS: usize = 8;
+    const MASK: u64 = 0b0110_1001;
+    const HOT: u32 = 0;
+    let model = multiband_console(TRACKS, MASK);
+    let hot = render_with(&model, Backend::current(), Lowering::Session, &|track| {
+        if track == HOT { Feed::Hot } else { Feed::Music }
+    });
+    let calm = render_with(&model, Backend::current(), Lowering::Session, &|_| {
+        Feed::Music
+    });
+    assert_eq!(
+        hot.banks.len(),
+        TRACKS / lanes(),
+        "the hot lane's cohort binds mixed"
+    );
+    let mut compared = 0;
+    for (key, words) in &hot.nodes {
+        if key.0 == format!("ch{HOT:02}") {
+            continue;
+        }
+        assert_eq!(
+            folded(words),
+            folded(&calm.nodes[key]),
+            "{key:?}: a bank-mate of the hot bypassed lane moved"
+        );
+        compared += 1;
+    }
+    assert_eq!(compared, 2 * (TRACKS - 1));
+    let recovered = Arc::new(AtomicU64::new(0));
+    let feed = |track| if track == HOT { Feed::Hot } else { Feed::Music };
+    render_prepared(&model, Backend::Scalar, &feed, &mut |effects| {
+        let entry = effects
+            .entries
+            .iter_mut()
+            .find(|entry| entry.track_id == format!("ch{HOT:02}"))
+            .expect("the hot track's multiband");
+        assert!(entry.initial_bypass && !entry.metadata.bypass);
+        let inner = std::mem::replace(&mut entry.processor, Box::new(Inert));
+        entry.processor = Box::new(CountRecoveries {
+            inner,
+            recovered: Arc::clone(&recovered),
+        });
+    });
+    assert!(
+        recovered.load(Ordering::Relaxed) >= 1,
+        "Feed::Hot never tripped the bypassed lane's D7, so the case proves nothing"
     );
 }
 
@@ -865,7 +888,7 @@ impl PreparedNativeEffect for CountRecoveries {
 /// and the per-node shunt copies the dry block over it. Every track stage and the session output
 /// must equal the same session with the insert removed, at the host's width and at `Scalar`.
 ///
-/// Red mutations: keep the delay's prepared bypass (`lowers_session_bypass` false for it) -> the
+/// Red mutations: keep the delay's prepared bypass -> the
 /// lowering precondition (`!entry.metadata.bypass`) fails, and with that precondition removed the
 /// bit assertion fails, because its D7 zeroes the tripped dry blocks; build no per-node shunt for
 /// a never-banked effect -> the wet runaway reaches the output.

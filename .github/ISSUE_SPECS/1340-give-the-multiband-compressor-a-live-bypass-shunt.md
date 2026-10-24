@@ -245,3 +245,46 @@ bits. This closes decision 14's F4 for the multiband compressor.
   this slice lifts (D8).
 
 **Decision 17 amendment (2026-10-13).** The multiband compressor's bypass is the control row at control `0` of its effect section, `RebuildOnly(RuledLiveNotBuilt { issue: 1340 })` (#1549), so lifting it is a rebuild on the C ABI (#1554). Last step of this issue: flip that row to `Live`; no protocol or host code.
+
+## Evidence and decision record (attempt 1, 2026-10-24)
+
+Scope note `scope/1340.md` (Fable) and root's decisions govern where they differ from the text above:
+
+- **Gate 7 moves to #1830**, the stateless click-harness successor #1339 named (root (a)); this
+  slice adds no harness rows. #1830's spec is root's to amend.
+- **D3 as it stands on `main`.** `LiveRebuild::PreparedBypass` and the browser/SDK refusals were
+  already gone ("one control abstraction"). What remained and is deleted: `PREPARED_BYPASS_EFFECTS`,
+  `lowers_session_bypass`, the `RebuildOnly(Correctness)` branch in host-core's
+  `effect_records`, and the decision-17 row (`RuledLiveNotBuilt { issue: 1340 }` is now `Live`).
+  `bypass_descriptor` takes no effect ID any more, so its one caller in
+  `crates/controls/src/tables.rs` drops the argument (one token, outside the listed paths).
+- **D1.** `Instance::finish` recovers per lane with `Side::discontinuity_reset_lane` (the crate's
+  `set_lane_value`, root (b)): the lane's four crossover words, both smoother words and its
+  silence clock go to `+0.0`, and its ramps snap. `LinearRamp::snap` writes `step = 0.0` (`+0.0`),
+  so #893's `rest_lanes` lets a recovered lane rest.
+- **Bit move.** Only on a D7-tripped bank block: neighbours are no longer zeroed and a bypassed
+  lane passes dry (decision 12, decision 15 E4). `crates/multiband-compressor/src/corpus_digests.in`
+  is unchanged and `wasm-gates`' `g5_native_digests_match_pins` is green: no corpus case trips a
+  multiband bank.
+- **Response snapshot (root (c)).** A lone multiband insert renders per node as a
+  `LiveControlEffect`, whose snapshot reads `live.control.bypassed()`; the test is kept as
+  `a_per_node_effect_snapshot_reports_its_session_bypass`.
+- **Gate 6 (successor swap).** The prepared-bypass restart leg has no subject left; the test is
+  `a_lifted_bypass_carries_across_a_rebuild_at_every_width`, one loop over the delay and the
+  multiband.
+- **The kernel's prepared bypass (verifier fold).** The other launch effects keep a
+  factory-level prepared bypass as part of the effect contract (D4; conformance's latency-bypass
+  fault reads it), so the multiband keeps its `BYPASS` path, now reachable only by a direct factory
+  request; the three `lib.rs` docs that said it cannot change now say it is fixed at preparation
+  and that a session bypass is the rack's shunt.
+- **Red mutations:** `tests/MUTATIONS.md` rows 1340-M1 to M3, all RED.
+- **The walk's reach (root ruling, `in_place_commit.rs` authorized).** The multiband bypass row
+  joining the live-only pool shifted the walk's seeded draws, and at its seed no `link_mode` edit
+  reached a full commit (`no full commit of link_mode`; one draw in 2,600 cases, not committed).
+  The seed is not changed. The walk now gives every row kind a deterministic first appearance:
+  per session, one committed one-edit transaction per row name of the control list (a value other
+  than the committed one, no ramp) and one structural edit, then the unchanged random tail. It
+  asserts after that prelude that `matrix_mode`, `fader_ms`, `link_mode` and `<structural>` took
+  the full path; the end-of-walk full-row loop, which only repeated it, is deleted. With the
+  prelude, 6 full `link_mode` commits, 1 of them the first appearance (the rich session's one
+  link-mode row).

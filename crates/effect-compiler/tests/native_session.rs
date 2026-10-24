@@ -454,19 +454,19 @@ fn entry<'a>(
 
 /// Issue #1087: a session bypass lowers to an enabled effect plus a bypassed channel-less lane,
 /// so a bypassed instance shares its enabled neighbours' program key. Since #1339 the delay, which
-/// never banks, lowers its bypass too and renders a per-node shunt. Since #1100 the multiband,
-/// whose bank recovery is still whole-bank, keeps its prepared bypass.
+/// never banks, lowers its bypass too and renders a per-node shunt; since #1340 the multiband,
+/// whose bank recovers per lane, lowers it as well.
 ///
 /// Red mutations: prepare with `bypass: effect.bypass` again -> the bypassed EQ's program key
 /// differs from the enabled one's; drop the channel-less lane -> nothing carries the bypass to the
-/// rack's shunt; key the lowering on `NEVER_BANKED_EFFECTS` again -> the delay's bypass is
-/// prepared; lower the multiband too -> its prepared bypass is gone.
+/// rack's shunt; keep a prepared bypass for the delay or the multiband -> its entry is prepared
+/// bypassed.
 #[test]
 fn a_session_bypass_lowers_to_an_enabled_effect_and_a_bypassed_lane() {
     let registry = launch_native_effect_registry().expect("launch registry");
     let prepared =
         prepare_native_session_effects(&bypassed_console(), registry, caps()).expect("prepared");
-    for effect in ["eq", "limiter", "delay"] {
+    for effect in ["eq", "limiter", "delay", "multiband"] {
         let bypassed = entry(&prepared, "ch00", effect);
         let enabled = entry(&prepared, "ch01", effect);
         assert!(bypassed.initial_bypass && !enabled.initial_bypass);
@@ -487,38 +487,6 @@ fn a_session_bypass_lowers_to_an_enabled_effect_and_a_bypassed_lane() {
         );
     }
     assert_eq!(effect_compiler::NEVER_BANKED_EFFECTS, ["miso.delay"]);
-    let multiband = entry(&prepared, "ch00", "multiband");
-    assert!(
-        multiband.initial_bypass && multiband.metadata.bypass && multiband.bank_preparation.bypass,
-        "the multiband keeps its prepared bypass (#1100)"
-    );
-    assert!(
-        multiband.control.is_none(),
-        "no lane carries a multiband bypass"
-    );
-    assert!(!entry(&prepared, "ch01", "multiband").metadata.bypass);
-    assert_eq!(
-        effect_compiler::PREPARED_BYPASS_EFFECTS,
-        ["miso.multiband-compressor"]
-    );
-    let lowered: Vec<&str> = registry
-        .descriptors()
-        .map(|descriptor| descriptor.id.as_str())
-        .filter(|id| effect_compiler::lowers_session_bypass(id))
-        .collect();
-    assert_eq!(
-        lowered,
-        [
-            "miso.compressor",
-            "miso.delay",
-            "miso.gate-expander",
-            "miso.parametric-eq",
-            "miso.soft-clip",
-            "miso.transient-shaper",
-            "miso.true-peak-limiter",
-        ],
-        "every launch effect but the multiband lowers its session bypass"
-    );
 }
 
 /// Issue #1087: a live-control lane starts from the session bypass, not the prepared one.

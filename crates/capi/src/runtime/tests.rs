@@ -3926,8 +3926,7 @@ fn bare_parity_session(track_count: usize, sample_rate_hz: u32) -> String {
 /// The ten-track parity session with mixed effect cohorts (#1263 verdict NIT 3): an enabled
 /// compressor insert on the first and sixth tracks, and a bypassed delay and a bypassed multiband
 /// compressor insert on the second. Only an enabled non-EQ effect tells a non-target lane seeded
-/// bypassed apart, and the multiband keeps its prepared bypass (the delay's is a lane since
-/// #1339).
+/// bypassed apart; both bypasses ride lanes (#1339, #1340).
 fn mixed_effect_parity_session(sample_rate_hz: u32) -> String {
     let mut model = parse_session_json(&generated_parity_session(10, sample_rate_hz))
         .expect("accepted parity session");
