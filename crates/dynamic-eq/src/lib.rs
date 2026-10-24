@@ -492,19 +492,20 @@ const fn observation(id: u32, display_name: &'static str) -> ObservationDescript
         id: ObservationTapId(id),
         display_name,
         display_unit: "dB",
-        kind: ObservationKind::GainReductionDb,
+        kind: ObservationKind::GainChangeDb,
         unit: ParameterUnit::Db,
         cost: ObservationCost::Resident,
         cadence: ObservationCadence::PerBlock,
-        fold: ObservationFold::PeakMagnitude,
+        fold: ObservationFold::PeakSigned,
         channels: ObservationChannels::PerLane,
-        minimum: 0.0,
+        minimum: -RANGE_MAX_DB,
         maximum: RANGE_MAX_DB,
     }
 }
 
-/// One tap per band: the smoother's own change word, negative for a cut, positive for a boost
-/// (the declared fold publishes its magnitude).
+/// One tap per band: the smoother's own change word, negative for a cut, positive for a boost.
+/// It is a signed gain change (#1918): the `PeakSigned` fold keeps the sign, so an upward band
+/// reads as a boost, never as a reduction (#17 S2).
 pub const DYNAMIC_EQ_OBSERVATIONS: [ObservationDescriptor; BANDS] = [
     observation(1, "Band 1 Gain Change"),
     observation(2, "Band 2 Gain Change"),
@@ -986,17 +987,36 @@ impl<L: Lane, const CONNECTED: bool> DynamicEq<L, CONNECTED> {
 
     /// Points every ramp of one lane and channel whose design moved at its new design (#1409: the
     /// clamped walk keeps every word between its start and its target).
+    ///
+    /// A band's nine filter words ([`DESIGN_WORDS`]: the bell's `c1, a2, a3, m1, k A^2` and the
+    /// detector's `c1, a2, a3, 1/Q`) move as one design: when any of them moves, all nine restart
+    /// together from their current values, so every SVF triple the kernel loads is a convex
+    /// combination of the current point and the new design, which is contractive
+    /// (`effect_runtime::svf::transition_norm` is convex in the words). Skipping a word whose
+    /// design bits did not move would leave it on its old schedule and the triple off that chord
+    /// (#1928, the #1372a finding: a one-ulp frequency nudge can keep `a2`'s bits and move `c1`'s
+    /// or `a3`'s).
     #[inline(never)]
     fn retarget(&mut self, channel: usize, lane: usize) {
         let designs = targets(&self.values[lane][channel], self.sample_rate);
         let mut words = lane_words(&self.state[channel], lane);
-        for (chunk, design) in words[SIGNAL_WORDS..]
+        let target = |words: &[f32; CHAN_WORDS], ramp: usize| words[SIGNAL_WORDS + ramp * 4 + 1];
+        let design_moved: [bool; BANDS] = core::array::from_fn(|band| {
+            DESIGN_WORDS.iter().any(|&index| {
+                let ramp = band * BAND_RAMPS + index;
+                target(&words, ramp).to_bits() != designs[ramp].to_bits()
+            })
+        });
+        for (ramp, (chunk, design)) in words[SIGNAL_WORDS..]
             .as_chunks_mut::<4>()
             .0
             .iter_mut()
             .zip(designs)
+            .enumerate()
         {
-            if chunk[1].to_bits() == design.to_bits() {
+            let restart =
+                design_moved[ramp / BAND_RAMPS] && DESIGN_WORDS.contains(&(ramp % BAND_RAMPS));
+            if !restart && chunk[1].to_bits() == design.to_bits() {
                 continue;
             }
             let mut ramp = LinearRamp {
