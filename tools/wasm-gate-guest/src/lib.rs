@@ -217,11 +217,14 @@ pub extern "C" fn miso_gate_meter_block_probe(seed: u32) -> u32 {
 /// Word `word` (0..8) of the little-endian SHA-256 digest of `case` at `width`.
 ///
 /// Traps on an out-of-range argument, which the host reports as a failure rather than a mismatch.
+/// The word is bounded before the offset multiply, so no 32-bit wrap can turn a large word into an
+/// in-range one.
 #[unsafe(no_mangle)]
 pub extern "C" fn miso_gate_digest_word(case: u32, width: u32, word: u32) -> u32 {
     let digest = digest(case, width);
-    let offset = (word as usize) * 4;
-    assert!(offset + 4 <= digest.len(), "digest word out of range");
+    let word = usize::try_from(word).expect("digest word out of range");
+    assert!(word < digest.len() / 4, "digest word out of range");
+    let offset = word * 4;
     u32::from_le_bytes([
         digest[offset],
         digest[offset + 1],

@@ -20,3 +20,10 @@ A future bounded brief must reject every out-of-range u32 word before offset ari
 ## Decision record
 
 Recorded 2026-10-01 from the requested GPT-6.1 Sol xhigh worker B and root source review. This is a specific documented-contract follow-up, not an owner API-design question. Housekeeping #1149 remains a separate comment-only cleanup and does not claim this gap fixed.
+
+## Attempt 1 evidence (2026-10-24)
+
+- Fix: `miso_gate_digest_word` checks `word < digest.len() / 4` before `offset = word * 4` (root decision R1).
+- Probe: `Guest::out_of_range_words_trap` in `tools/wasm-gates/src/lib.rs`, called by `wasm_report` after the valid comparisons and the three mismatch counters (R2, R3). It fails the leg unless words 8 and `0x4000_0000` of case 0, width 0 both trap. No new test file, flag, script or CI edit; the report schema is unchanged.
+- Red on the reverted guest hunk (PR evidence): `scripts/run-wasm-gates.sh --without-v8-spill --without-native` exited 1 with `wasm gate failure: guest returned 0x225e65a7 for out-of-range digest word 0x40000000 instead of trapping` (word 8 trapped; the wrap word returned word 0).
+- Green with the fix: `scripts/run-wasm-gates.sh --without-v8-spill` exited 0; native 153 cases / 379 comparisons, wasm simd128 153 cases / 266 comparisons, all mismatch counters 0.
