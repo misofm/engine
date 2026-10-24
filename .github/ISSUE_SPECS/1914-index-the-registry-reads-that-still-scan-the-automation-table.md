@@ -33,6 +33,15 @@ Route both readers through the #1710 `AutomationIndex` / `ModelView` reads that 
   fader on the right (only a VCA ride reaches it). No existing `get` test reads a strip fader with
   a hand offset.
 
+- D4 (root, from the verifier's MINOR, 2026-10-24; adds `crates/controls/src/{diff.rs,lib.rs}`
+  and `crates/host-core/src/live_delta.rs`): `changed_rows` resolved each named row twice through
+  the scanning wrapper, so a value transaction of k fader or VCA offset rows cost
+  O(k x entries). New `pub fn changed_rows_in(current: ModelView, next: ModelView, ..)`;
+  `changed_rows` is its whole-view wrapper. `classify_rows` builds `AutomationIndex::of` of
+  `current` and of `view.owners()` once per transaction and calls `changed_rows_in`. The owners
+  model is the small model of the edited owners for an edited view and the whole next model for a
+  whole one, so its index costs what that table holds.
+
 ## Evidence (attempt 1)
 
 - Class A (one time, PR evidence): `automation_diagnostics` output, the full control listing and
@@ -46,3 +55,10 @@ Route both readers through the #1710 `AutomationIndex` / `ModelView` reads that 
   strips.
 - Mutants on the D3 row: `strip::resolve` keying the mute entries, and swapping the lanes, both
   turn it red; the wrong-row mutant turns no other `controls` or `host-core` test red.
+- D4 class A (one time, PR evidence): the `LiveDelta` (Debug) of a 513-row value transaction
+  (512 `fader_db` writes, `left` or `both`, and the VCA `offset_db`) on #1710's generated session
+  at 1024 tracks is byte-equal at base and branch, on the whole path (`classify_live_edit`) and the
+  in-place path (`OwnerEdits` + `classify_live_staged`); both take the fast path.
+- D4 descriptive timing (the same transaction, the set loop and the dump included, release, one
+  warmup, two rounds, `flock -x`): whole 28.21/28.03 ms at base, 22.73/22.87 ms on the branch;
+  in place 26.32/26.27 ms at base, 23.33/23.35 ms on the branch.
