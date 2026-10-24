@@ -36,3 +36,23 @@ One assertion in #1763's quiet-slot test form per new skip: it turns red when a 
 ## Dependencies
 
 #1763 and #1765 merged.
+
+## Decision and evidence record
+
+### Scope decisions (root, 2026-10-24)
+
+- **Step 1 and gate 1 retired** (the app-shape split arms). Measured reason: the app-shape gap is inside the round-to-round spread since #1107. opt8-1072 reads the app shape at +0.52 / +1.93 %, opt6-1107-fix at +0.70 / +0.38 %, and the fader/matrix arm alone moves from -0.48 to +1.45 us between rounds of one run, so a lane-group split cannot resolve sub-1 us groups on this host. This also removes the path overlap with #1783 (`tools/bench`, `tools/console-workload`, `scripts/`), which are no longer authorized here.
+- **Item 3 retired** (the observation-queue word). A bank-level "non-empty" word needs a producer-side store in `crates/effect-contract/src/live.rs` and a new cross-thread protocol, for a gain below the noise floor (one `available_at_entry` Acquire load per effect lane per block). The owner's rule is that small gains do not justify fragile machinery. No successor.
+- **Gate 4's 2 % line is reporting, not the close condition.** The no-lane row itself moves about 0.7-1.3 us between rounds.
+- Class A: no rendered bit moves, no summation order changes, no effect kernel changes.
+
+### Implementation (item 2)
+
+`BuiltinBankProcessor`, `FaderBankProcessor` and `MatrixBankProcessor` (`crates/builtins-compiler/src/lib.rs`) carry `quiet_at: Option<u64>`. Each reader's `apply_latest` returns `Ok(true)` when its `DirtyReader::pending` was 0. A block drain that walks every lane and finds every lane quiet marks the snapshot's publication. The next block drain under the same publication skips the lane walk (`quiet_walk_skips`); `LiveSnapshot::ALL` never skips. The fader's `read_fader_offsets` still runs every block. The mark is cleared by `swap_builtin_lanes` (both banks), lane adoption and the carry drains (`drain_for_carry`, `apply_pending`).
+
+Exactness is #1763's argument: a write at or below publication `S` is stored and marked before `S` is published, so the marking walk under `S` saw it; a write above `S` waits in its dirty word or the deferred mask for the first block under a newer publication, which walks. `CarryMarks::begin` already ran in the marking walk, so a skipped walk changes no carried count. The clears on swap and adoption are defensive: on reachable paths a swapped or adopted reader has nothing pending at or below the current publication either, but the mark is a fact about this bank's readers, and these methods change the readers.
+
+### Evidence (attempt 1)
+
+- Test: one assertion block added to `a_drain_applies_the_newest_value_its_snapshot_covers_and_counts_the_rest` (two blocks under one publication, then a monitor write, a new publication under the same revision, applies at the next block; a write between two `ALL` blocks applies at the second). Mutants: mark compared by revision, red; `ALL` check removed from the skip, red.
+- The processors grow by `Option<u64>`, so `fixtures/graph/v1/direct-route.resources.json` and `fixtures/graph/MANIFEST.tsv` change (`builtin_bank_bytes` 7223 -> 7255, plan bytes 75191 -> 75223). `fixtures/graph` is outside this issue's authorized paths; see the hand-back.
