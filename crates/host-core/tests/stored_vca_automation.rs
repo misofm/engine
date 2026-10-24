@@ -1136,12 +1136,14 @@ fn added_removed_and_changed_vca_mute_entries_carry_the_member_stage() {
             }
         }
     }
-    // #1864: the member keeps its own unchanged mute entry, `va`'s mute entry changes, and the
-    // successor adds a (statically muted) track ahead of the member, so the member's position in
-    // the committed model (0) is not its index in the new one (1). Its lane must not continue the
-    // VCA cursor: the own table alone is the same.
+    // #1864: the member keeps its own unchanged mute entry (flat open, so the composed mute is the
+    // VCA curve's), `va`'s mute entry changes, and the successor adds a (statically muted) track
+    // ahead of the member, so the member's position in the committed model (0) is not its index in
+    // the new one (1). Its lane must not continue the VCA cursor although its own table is the
+    // same: the swapped output equals, on every sample, the same swap without the own entry (a
+    // VCA-only lane, which repositions).
     for quantum in [128, 100] {
-        let session = |curve: (f32, &[(u64, f32)]), ahead: bool| {
+        let session = |curve: (f32, &[(u64, f32)]), ahead: bool, own: bool| {
             let mut model = plain(2, quantum);
             let member = model.tracks[1].id.clone();
             model.tracks[0].fader.left_mute = true;
@@ -1153,9 +1155,9 @@ fn added_removed_and_changed_vca_mute_entries_carry_the_member_stage() {
                 });
             }
             model.vcas = vec![vca("va", vec![member.clone()])];
-            model.automation = vec![
-                vca_mute_steps("va", curve.0, curve.1),
-                flat(
+            model.automation = vec![vca_mute_steps("va", curve.0, curve.1)];
+            if own {
+                model.automation.push(flat(
                     "own-mute",
                     Owner::Strip(member),
                     Section::Builtins,
@@ -1163,12 +1165,14 @@ fn added_removed_and_changed_vca_mute_entries_carry_the_member_stage() {
                     ParameterChannel::Both,
                     0.0,
                     ParameterUnit::Linear,
-                ),
-            ];
+                ));
+            }
             normalized(&model)
         };
-        let a = session((0.0, &[(3_000, 1.0)]), false);
-        let b = session((0.0, &[(500, 1.0), (2_600, 0.0)]), true);
+        let (old, new): ((f32, &[(u64, f32)]), (f32, &[(u64, f32)])) =
+            ((0.0, &[(3_000, 1.0)]), (0.0, &[(500, 1.0), (2_600, 0.0)]));
+        let (a, b) = (session(old, false, true), session(new, true, true));
+        let (a_vca, b_vca) = (session(old, false, false), session(new, true, false));
         let q = quantum as usize;
         let frames = 4_096_usize.div_ceil(q) * q;
         let pcm = carry_pcm(frames);
@@ -1180,9 +1184,15 @@ fn added_removed_and_changed_vca_mute_entries_carry_the_member_stage() {
         for backend in bank_backends() {
             let what = format!("own entry kept, strip ahead, {backend:?}, quantum {quantum}");
             let fresh = carry_run(&b, None, backend, &pcm, frames, &none).out;
+            let vca_only = carry_run(&a_vca, Some((&b_vca, &a_vca)), backend, &pcm, frames, &none);
             let swapped = carry_run(&a, Some((&b, &a)), backend, &pcm, frames, &none);
             assert_eq!(swapped.swap_allocations, (0, 0), "{what}: the swap block");
+            assert!(swapped.restarted.is_empty(), "{what}: the strip carries");
             for plane in 0..2 {
+                assert!(
+                    same_bits(&swapped.out[plane], &vca_only.out[plane]),
+                    "{what}: plane {plane} repositions as the VCA-only lane does"
+                );
                 assert!(
                     same_bits(&swapped.out[plane][settled..], &fresh[plane][settled..]),
                     "{what}: plane {plane} from the first block boundary after the ramp"
