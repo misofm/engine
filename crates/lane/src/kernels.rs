@@ -114,7 +114,9 @@ fn stream_planes<L: Lane, R: RestThresholds<L>, const S: usize>(
 ///
 /// [`svf_cascade_skewed_form`] keeps its indexed form: walked the same way, its steady-state loop
 /// let LLVM unroll the mono pair by two and gave the armed mono pair a carried stack slot in V8
-/// (issue #1454's record), so its per-frame bounds branches stay.
+/// (issue #1454's record), so its per-frame bounds branches stay. A `chunks_exact` walk, whose
+/// trip count is exact, was unrolled the same way (issue #1905). That loop runs on one word offset
+/// instead, which is both its exit test and its index.
 #[inline(always)]
 fn frames_left<L: Lane, const S: usize, const ARMED: bool>(
     io: &[&mut [f32]; S],
@@ -774,6 +776,10 @@ fn svf_cascade_skewed_form<
     debug_assert!(io.iter().all(|block| block.len() == span));
     // Truncating once, outside the loops. The `base..base + width` indexing below still carries a
     // bounds branch per step, which LLVM cannot remove; [`frames_left`] says why it stays here.
+    // The steady-state loop's one induction variable is the word offset `base` of its newest
+    // frame, which is also its exit test (issue #1905): indexed by an iteration count `i` with
+    // `(i - section) * width` products, LLVM 22 (Rust 1.99.1) kept a second counter beside the
+    // offset, and in the armed mono pair V8 then carried a general-purpose word in a stack slot.
     let io = io.map(|block| &mut block[..span]);
     let rest = rest.map(|plane| if ARMED { &plane[..span] } else { plane });
     let mut state = *s;
@@ -789,7 +795,7 @@ fn svf_cascade_skewed_form<
             step_at!(($i - $section) * width, $stream, $section);
         }};
     }
-    // The step on the frame at word offset `$base`.
+    // The step on the frame at word offset `$base`, the frame `i - section` of iteration `i`.
     macro_rules! step_at {
         ($base:expr, $stream:expr, $section:expr) => {{
             let (base, stream, section) = ($base, $stream, $section);
