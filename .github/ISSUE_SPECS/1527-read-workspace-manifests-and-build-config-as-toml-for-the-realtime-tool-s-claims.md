@@ -487,3 +487,45 @@ records any difference in the Attempt record.
   `cargo run --locked --release -q -p realtime-policy` still passes (the awk gate is deleted by #1446)
   on the real tree, and `cargo fmt --check` and `cargo clippy -p realtime-policy --all-targets -- -D warnings`
   exit 0.
+
+## Scope split (root, 2026-10-24)
+
+Rule (iv), the doctest rule, and every `tools/realtime-policy/**` change it needed moved to #1831 ("Hold doctests to
+the realtime-policy tool's claims (#1527 rule iv)"). This issue keeps D1, D2, D4/(iii), (i), (ii), D5, D6 and the
+limits sentence, all in Python and shell; the tool gets doc comments in `src/walk.rs` only (no `toml` crate, no
+`src/manifest.rs`, no `Cargo.toml` change). Root moved #1528 D4 (`hosts/host-web/Cargo.toml` `[lib] path` absent or
+exactly `src/lib.rs`) here. Root also added the `scripts/lib/gate.sh` preflight to `scripts/test-workspace-policy.sh`
+and the removal of `scripts/test-gate-lib.sh`'s named exclusion of it (from #1512). The `.github/ISSUE_SPECS/1438-*.md`
+path is void (closed); the limits sentence (D7) is in the `SCAN_ROOTS` doc comment.
+
+## Attempt 1 record (2026-10-24, branch `codex/batch-b13-1527`)
+
+- D3: #1519 landed, so this extends its `manifest_target_checker`, renamed `manifest_checker`: one `python3 -c`
+  pass, one parse per manifest and config, status 3 for every violation, every other status a gate failure. The
+  awk `sysroot-dependency-scan` is deleted; `retired-scan` is untouched. `SCAN_ROOTS` is read from `walk.rs` like
+  `SKIPPED_DIRECTORIES`, failing closed (status 1) when either is absent.
+- Decisions taken: skipped names compare ignoring case; scan roots compare exactly (case-sensitive), which is
+  stricter than "ignoring case" (`Crates/x` is refused; the walk on a case-sensitive file system would not read it).
+  Containment checks the written components, the lexical path and the `realpath`, by component. Member globs
+  expand with `include_hidden` (Cargo's glob matches a leading dot). D5 (b) applies under any key whose name holds
+  `rustflags`/`rustdocflags` (so `[env] RUSTFLAGS = { value = .. }` too); D5 (c) is the top-level `include`. D5 and
+  D6 normalize text by lowercasing and `_` -> `-`, so the two words have one spelling each; both scripts build them
+  from fragments, and the D6 rule has no exemption for them (it caught one whole word in a self-test comment).
+- (i) uses `git ls-files --cached -z` (index only); the non-git fixture uses the existing `find` set.
+- `test-gate-lib.sh` now runs the missing-rg row on `test-workspace-policy.sh` (28 scripts, was 27). It cannot
+  recurse: under the rg-less PATH the self-test stops at its preflight, and `test-gate-lib.sh` itself would stop
+  at its own. The self-skip row of `test-gate-lib.sh` stays.
+- Real tree (gate 1): `workspace policy: ok`. Re-measured: 45 tracked manifests (spec: 43), 42 root members (spec:
+  40), 47 dependency `path` keys (36 root `[workspace.dependencies]`, 9 `docs/handoffs/.../measure`, 2 `fuzz`), no
+  glob, `patch` or `replace`; 1 config file; 0 tracked skipped-component paths under the roots; 0 words under
+  `.github/workflows` and `scripts`; 0 refusals.
+- Replay (gate 4, scratch): the reader refuses all 23 manifests of
+  `/home/bl/misofm/submix-verdicts/evidence/1442-attempt3/manifest/` by the dependency-key finding.
+- Self-tests: table rows in `scripts/test-workspace-policy.sh` (`row`, `expect_failure_with_rows`), one group per
+  rule with its test-value sentence in the comment; the four `mutate_sysroot_*` cases are folded into the D1 rows;
+  accepted lookalikes are one function per group. Two fault rows cover the cached listing.
+- Mutations (PR evidence, one copy each, 35 + the preflight): every mutant turned its own row red first, and the
+  real tree stayed green except where the mutant itself refuses a real form (members applied to `fuzz`, a
+  substring placement test refusing `crates/target-smoke`, refusing every path-less target). Refusing every
+  path-less target first reds the sysroot lookalike row (its path-less `[[bin]] test = false`), not the target-name
+  lookalike row. The substring placement mutant first reds `skipped-components` (wrong directory named).
