@@ -441,9 +441,11 @@ fn every_padded_bank_renders_its_members_per_node_bits() {
 /// control that the plant trips), that lane alone is zeroed and charged one left block. Planted in
 /// the last padded lane (against the caller's `+0.0` duty, to reach the case), that lane is zeroed,
 /// nothing is charged, and the next block it writes `+0.0` again, so its state recovered. Either
-/// way every other lane keeps the bits of an unplanted control bank.
+/// way every other lane keeps the bits of an unplanted control bank. Each case runs twice: as dual
+/// blocks, and as collapsed blocks (`process_bank_mono`, issue #1871) on members whose right values
+/// equal their left ones and on identical planes, where a failed active lane counts on both channels.
 ///
-/// Red if the D7 charge mask is missing (the padded lane is charged), if a padded lane's failure is
+/// Red if the D7 charge mask is missing on either body (the padded lane is charged), if a padded lane's failure is
 /// not recovered (it writes NaN on), or if recovery reaches a bank-mate.
 #[test]
 fn a_planted_nonfinite_state_in_a_padded_lane_recovers_uncharged() {
@@ -453,14 +455,36 @@ fn a_planted_nonfinite_state_in_a_padded_lane_recovers_uncharged() {
         let members = lanes - 2;
         let mask = prefix_mask(width, members);
         let mut draw = Draw::new(0x1893_0002 + lanes as u64);
-        let values: Vec<Values> = (0..members).map(|_| draw_values(&mut draw)).collect();
-        let requests: Vec<PrepareEffectRequest<'_>> = (0..lanes)
-            .map(|lane| request(&values[lane.min(members - 1)], 48_000, LinkMode::DualMono))
+        let drawn: Vec<Values> = (0..members).map(|_| draw_values(&mut draw)).collect();
+        // The collapsed arm's members have each right value equal to its left one, so the bank's
+        // channels agree and the collapsed block is the one the rack would run.
+        let symmetric: Vec<Values> = drawn
+            .iter()
+            .map(|values| {
+                let mut values = *values;
+                for slot in (1..values.len()).step_by(2) {
+                    values[slot].value = values[slot - 1].value;
+                }
+                values
+            })
             .collect();
-        for (target, padded) in [(members - 1, false), (lanes - 1, true)] {
-            let context = format!("{width:?}: NaN in lane {target} (padded {padded})");
+        for (target, padded, mono) in [
+            (members - 1, false, false),
+            (lanes - 1, true, false),
+            (members - 1, false, true),
+            (lanes - 1, true, true),
+        ] {
+            let values = if mono { &symmetric } else { &drawn };
+            let requests: Vec<PrepareEffectRequest<'_>> = (0..lanes)
+                .map(|lane| request(&values[lane.min(members - 1)], 48_000, LinkMode::DualMono))
+                .collect();
+            let context = format!("{width:?}: NaN in lane {target} (padded {padded}, mono {mono})");
             let mut bank = bind(width, &requests, &mask);
             let mut control = bind(width, &requests, &mask);
+            assert!(
+                !mono || bank.channels_agree(),
+                "{context}: the channels agree"
+            );
             let offsets = vec![0_u32; lanes + 1];
             for block in 0..4 {
                 let mut input = Draw::new(block as u64);
@@ -472,6 +496,9 @@ fn a_planted_nonfinite_state_in_a_padded_lane_recovers_uncharged() {
                         right[frame * lanes + lane] = input.noise(0.7);
                     }
                 }
+                if mono {
+                    right.clone_from(&left);
+                }
                 let (mut control_left, mut control_right) = (left.clone(), right.clone());
                 let planted = block == 2;
                 if planted {
@@ -482,33 +509,40 @@ fn a_planted_nonfinite_state_in_a_padded_lane_recovers_uncharged() {
                 let run = |bank: &mut dyn PreparedNativeEffectBank,
                            left: &mut [f32],
                            right: &mut [f32]| {
-                    bank.process_bank(
-                        EffectBankProcessBlock::new(
-                            left,
-                            right,
-                            None,
-                            FRAMES as u32,
-                            width,
-                            (block * FRAMES) as u64,
-                            &[],
-                            &offsets,
-                            QUANTUM,
-                        )
-                        .expect("a well-shaped bank block"),
+                    let block = EffectBankProcessBlock::new(
+                        left,
+                        right,
+                        None,
+                        FRAMES as u32,
+                        width,
+                        (block * FRAMES) as u64,
+                        &[],
+                        &offsets,
+                        QUANTUM,
                     )
+                    .expect("a well-shaped bank block");
+                    if mono {
+                        bank.process_bank_mono(block)
+                    } else {
+                        bank.process_bank(block)
+                    }
                 };
                 let report = run(bank.as_mut(), &mut left, &mut right);
                 let mut expected = run(control.as_mut(), &mut control_left, &mut control_right);
                 if planted && !padded {
+                    // A collapsed failure counts on both channels: the right plane is the left.
                     expected.reports[target].nonfinite_left_blocks += 1;
+                    expected.reports[target].nonfinite_right_blocks += u64::from(mono);
                 }
                 assert_eq!(report, expected, "{context}: block {block}: the reports");
                 for lane in (0..lanes).filter(|lane| *lane != target) {
                     for frame in 0..FRAMES {
                         let at = frame * lanes + lane;
+                        // A collapsed block never writes the right plane.
+                        let right_of = |plane: &[f32]| if mono { 0 } else { plane[at].to_bits() };
                         assert_eq!(
-                            (left[at].to_bits(), right[at].to_bits()),
-                            (control_left[at].to_bits(), control_right[at].to_bits()),
+                            (left[at].to_bits(), right_of(&right)),
+                            (control_left[at].to_bits(), right_of(&control_right)),
                             "{context}: block {block}: bank-mate {lane} frame {frame} moved"
                         );
                     }
@@ -516,7 +550,7 @@ fn a_planted_nonfinite_state_in_a_padded_lane_recovers_uncharged() {
                 if planted || (padded && block > 2) {
                     assert!(
                         (0..FRAMES).all(|frame| left[frame * lanes + target].to_bits() == 0
-                            && right[frame * lanes + target].to_bits() == 0),
+                            && (mono || right[frame * lanes + target].to_bits() == 0)),
                         "{context}: block {block}: lane {target} is not +0.0 on both channels"
                     );
                 }
