@@ -699,7 +699,8 @@ export interface MisoWebBootOptions {
   /// size; the command staging now exists exactly when `liveControlObservationTaps !== 0n`, and the
   /// main-realm host's bound on commands in flight is `maximumCommandRecords` (issue #1565).
   reserved1: bigint;
-  /// Meter window in render blocks, or `0n` to bind no meter observer at all (issue 137).
+  /// Meter window in render blocks, or `0n` for the engine's default window with no delivery
+  /// (issues 137, 1581).
   liveControlMeterBlocks: bigint;
   /// Maximum declared observation taps to bind per effect, or `0n` for none at all (issue 143).
   ///
