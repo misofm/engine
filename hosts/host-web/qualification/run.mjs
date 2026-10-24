@@ -72,7 +72,8 @@ const MUTATIONS = [
   // Issue #1571b: a browser answer that is not the headless engine's, a reliable event lost or out
   // of order, a lossy event that is not the headless engine's event of its block, and a refusal that
   // is not the core's.
-  "sdk-protocol-answers", "sdk-protocol-reliable", "sdk-protocol-lossy", "sdk-protocol-refusal",
+  "sdk-protocol-answers", "sdk-protocol-reliable", "sdk-protocol-lossy", "sdk-protocol-lossy-none",
+  "sdk-protocol-refusal",
 ];
 
 // The total time the page may take, from the first evaluate to the result, clicks included. A page
@@ -581,7 +582,8 @@ const PROTOCOL_LOSSY_KINDS = new Set(["meterBatch", "counterSnapshot", "diagnost
  * in its order (the edit's `sessionCommitted`, then `transportState` playing). The browser reads its
  * events once per message and its lossy lane holds one event (root's tranche-b note), so a block's
  * lossy telemetry may be replaced before it is read: each lossy event that arrived must be the
- * headless engine's event of the same block, in the headless order, and none is required.
+ * headless engine's event of the same block, in the headless order. Only one is required, since the
+ * last block's telemetry is not replaced.
  */
 function validateSdkProtocol(browserName, protocol) {
   const json = (value) => JSON.stringify(value);
@@ -624,7 +626,9 @@ function validateSdkProtocol(browserName, protocol) {
     at += 1;
     return true;
   });
-  gate(browserName, "sdk-protocol-lossy", ordered
+  // The render's last block has no later block to replace its telemetry, so a run that received no
+  // lossy event at all read none: it proves nothing about their decoding.
+  gate(browserName, "sdk-protocol-lossy", ordered && lossy.length > 0
     && reference.filter((event) => PROTOCOL_LOSSY_KINDS.has(event.kind)).length === 3 * protocol.blocks,
   `a lossy event is not the headless engine's event of its block, in order: ${json({ browser: lossy, headless: reference })}`);
 }
@@ -1128,6 +1132,10 @@ function mutate(result, mutation) {
   if (mutation === "sdk-protocol-lossy") {
     // A lossy event of no block the headless engine rendered.
     copy.sdkResponse.protocol.browser.events.push({ kind: "counterSnapshot", observedSample: "1", values: [] });
+  }
+  if (mutation === "sdk-protocol-lossy-none") {
+    copy.sdkResponse.protocol.browser.events = copy.sdkResponse.protocol.browser.events
+      .filter((event) => event.kind === "sessionCommitted" || event.kind === "transportState");
   }
   if (mutation === "sdk-protocol-refusal") copy.sdkResponse.protocol.browser.answers.refusal.code = "usage";
   if (mutation === "render-allocations") copy.renderAllocations[0].count = 1;

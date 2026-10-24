@@ -28,8 +28,9 @@ export function protocolPlain(value) {
  * Run the sequence on `engine` (either SDK engine): subscribe to `onEvent`, read the capabilities,
  * configure the telemetry, make one fader edit (`edit`), read the transport, start it, read it
  * again, read the counter and the retained diagnostics, ask for a refused diagnostics page, render
- * (`render`), and read the transport once more. The browser reads its events once per message it
- * handles, so that last call reads the ones the render queued. Returns the answers and the events,
+ * (`render`), and read the transport twice more. The browser reads its events once per message it
+ * handles, after the reply: the first of these calls reads the ones the render queued, and the
+ * second one's reply arrives after them. Returns the answers and the events,
  * in JSON.
  */
 export async function protocolCalls(engine, edit, render) {
@@ -53,6 +54,9 @@ export async function protocolCalls(engine, edit, render) {
     }
     await render();
     const after = await engine.transport();
+    // The worklet posts a message's events after its reply, on the same port: the reply to one more
+    // call arrives after the events the call above read.
+    await engine.transport();
     return protocolPlain({
       editRevision: edited.revision,
       answers: { capabilities, telemetry, stopped, playing, transport, counters, diagnostics, refusal },
