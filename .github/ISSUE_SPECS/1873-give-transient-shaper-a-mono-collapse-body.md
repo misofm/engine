@@ -55,3 +55,16 @@ Only mono source files get dual-mono processing; no content detection.
   `process_bank_mono` 352 / 0; both ceilings 0.10 (the old 0.38 row was 4 x the M2 786 / 72
   body). Expected-resources rows unchanged. `--kernel-min` stays 13 (29 kernels now), as #973,
   #1871 and #1872 left it.
+* CI fold (root ruling, 2026-10-24): PR #1912's qualification failed on x86 and AArch64 in
+  `graph-compiler`'s `every_console_slot_binds_banked_at_every_track_count`: `ch00` pooled
+  `MonoSymmetricAtPrepare`, expected `Stereo`. Cause: its `every_effect` console holds all six
+  console-eligible effects and was marked not collapsible only because the shaper's witness
+  declined (the default `false`). With #1873 every eligible effect has a witness, so mono tracks
+  pool mono-symmetric there too. This is the intended outcome. Root ruled the claim changed and
+  authorized `crates/graph-compiler/src/tests/console_banking.rs`: the `collapsible` flag is
+  removed (mono iff the feed is mono, on both consoles). The old row's other claim, a mono track
+  whose `DESIGNED` witness declines pools Stereo, had no other holder in graph-compiler or rack
+  (only host-core's collapse counters, which do not read the class). The new
+  `a_mono_track_whose_witness_declines_pools_as_stereo` holds it: a mono track with an asymmetric
+  console EQ gain pools Stereo beside a symmetric mono track. It is red when the compile ignores
+  the effects' witnesses (`DESIGNED` forced true in `compile.rs`).
