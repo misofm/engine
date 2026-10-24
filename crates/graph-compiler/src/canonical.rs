@@ -153,6 +153,10 @@ pub(crate) fn bound_text(bound: &NodeTailBound) -> String {
             "{}\t{}",
             samples.peak_plus_24_dbfs, samples.any_sanitized_input
         ),
+        RestBound::FixedPoint(samples) => format!(
+            "fixed_point {}\tfixed_point {}",
+            samples.peak_plus_24_dbfs, samples.any_sanitized_input
+        ),
         RestBound::Unstated => "unstated\tunstated".to_owned(),
     };
     let gain = |gain: PeakGain| match gain {

@@ -308,13 +308,27 @@ fn compile(
         }
     }
     .expect("builtins prepare");
-    let registry = NativeEffectRegistry::new([
-        Box::new(DualAccumulatorDelayFactory::correct()) as Box<dyn NativeEffectFactory>
-    ])
-    .expect("registry");
+    // The conformance mock (C7) has its own registry; every other session prepares through the
+    // launch registry.
+    let mock = model.tracks.iter().any(|track| {
+        track.inserts.effects.iter().any(|effect| {
+            matches!(&effect.identity, EffectIdentity::Native { effect_id }
+                if effect_id.as_str() == "conformance.delay")
+        })
+    });
+    let owned;
+    let registry: &NativeEffectRegistry = if mock {
+        owned = NativeEffectRegistry::new([
+            Box::new(DualAccumulatorDelayFactory::correct()) as Box<dyn NativeEffectFactory>
+        ])
+        .expect("registry");
+        &owned
+    } else {
+        effect_compiler::launch_native_effect_registry().expect("launch registry")
+    };
     let effects = prepare_native_session_effects(
         &session,
-        &registry,
+        registry,
         EffectCompileCaps {
             maximum_total_state_bytes: 1 << 20,
             maximum_scratch_bytes: 1 << 20,
@@ -652,7 +666,7 @@ fn enumerate(artifact: &PreparedGraphBuiltinsArtifact) -> Rule {
             let plus_24 = f64::from(builtins::checked_fader_gain(24.0).expect("domain"))
                 .min(math::pow(10.0, 1.2));
             let rest_of = |node: usize| {
-                let RestBound::Bounded(rest) = spec.nodes[node].bound.rest else {
+                let Some(rest) = spec.nodes[node].bound.rest.samples() else {
                     unreachable!("C3's sessions state every rest")
                 };
                 let quiet = match floor {
@@ -923,6 +937,44 @@ fn an_unstated_node_makes_the_graph_tail_infinite() {
             output_flush_floor: FlushFloor::Unstated,
         }
     );
+}
+
+/// #1376's `FixedPoint` rest composes as a rest (exact `+-0.0` output from `R` on): a plan whose
+/// only recursive node is the gate/expander, which states one, reports a finite every-peak tail
+/// equal to the enumeration. Red if the rest branch reads only `Bounded`.
+#[test]
+fn a_fixed_point_rest_composes_as_a_rest() {
+    let mut model = base(0.0, 0.0, 0.0);
+    model
+        .routes
+        .push(route("to-main", from_track("vocal"), into_output()));
+    model.tracks[0].inserts.effects.push(Effect {
+        id: sid("gate"),
+        identity: EffectIdentity::Native {
+            effect_id: sid("miso.gate-expander"),
+        },
+        quality: EffectQuality::Normal,
+        bypass: false,
+        link_mode: LinkMode::DualMono,
+        params: Vec::new(),
+        sidechain: SidechainDeclaration::None,
+    });
+    let artifact = compile(&model, FIXED, InputLanes::None, u64::MAX).expect("compiles");
+    assert!(
+        artifact
+            .graph()
+            .spec
+            .nodes
+            .iter()
+            .any(|node| matches!(node.bound.rest, RestBound::FixedPoint(_)))
+    );
+    let rule = Rule::of(artifact.report());
+    assert_eq!(rule, enumerate(&artifact));
+    assert!(matches!(rule.output_flush_floor, FlushFloor::Millibels(_)));
+    assert!(matches!(
+        rule.output_tail_every_peak,
+        TailSamples::Finite(_)
+    ));
 }
 
 /// C13 (a): the cap checks the reported value. Red if it checks only `output_tail`.

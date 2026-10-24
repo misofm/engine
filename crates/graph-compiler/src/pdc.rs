@@ -424,7 +424,9 @@ pub(crate) fn compose(
                 if !reaches[node] {
                     continue;
                 }
-                let RestBound::Bounded(samples) = table.node(node).bound.rest else {
+                // `Bounded` and `FixedPoint` both bound exact `+-0.0` output from `R` on, which is
+                // all step 7 reads (#1376); only `Unstated` states none.
+                let Some(samples) = table.node(node).bound.rest.samples() else {
                     // Step 8: an `Unstated` rest that reaches the output, with a floor not `Zero`.
                     return Ok(Composed {
                         output_tail: TailSamples::Finite(output_tail),
