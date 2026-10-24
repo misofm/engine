@@ -126,3 +126,34 @@ seqlock is still guarded by both modules' existing torn-read tests.
 - Root ruling B15-R1 (2026-10-15, recorded in #1316): #1316 lands first and creates the shared
   `crates/engine/src/realtime/seqlock.rs`. This slice's D3 then moves `observe.rs` onto that module
   and does not create a second one; `seqlock.rs` is no longer new here.
+
+## Amendment (scope note and root rulings R1-R4, 2026-10-24)
+
+- D1 premise corrected: since #1502 the mailbox carries no revision. R1: control stamps the
+  candidate's structural revision on the candidate payload (`PlanReplacementReservation::
+  set_revision`, called in `control.rs` beside the gate's `publish(revision)`, through
+  `control-plane/src/plan.rs`'s reservation wrapper); `enter_block` passes it to `note_claim`.
+  Nothing reads the outgoing plan's gate at displacement. An unset payload revision is `0`; a
+  settle then covers no span and still counts its `superseded`, as an advance does.
+- R2: `seqlock.rs` publishes and reads on `PublishedWords<N>` itself; `ObservationSlot` is
+  `{ words: PublishedWords<5>, consumed }`, still one `Arc` allocation. `observe.rs`'s own
+  counter, publish, read loop and `MAXIMUM_READ_ATTEMPTS` are gone; the E11 reason for 64
+  attempts is now on `seqlock::MAXIMUM_READ_ATTEMPTS`.
+- R3: one `u64` counter (reason on `seqlock.rs`: a `u32` wraps in about 130 days at 48 kHz/128
+  and a reader stalled exactly 2^32 publications would accept a torn record).
+- R4: `observation_slot_retained_bytes` 48 -> 56 (counter 8, five words 40, `consumed` 8). Every
+  consumer is a formula; nothing is re-pinned. `watermark_retained_bytes` does not move.
+
+## Evidence (attempt 1, 2026-10-24)
+
+- Gate 1: `watermark::tests::two_claims_between_advances_complete_each_span_with_its_own_outcome`
+  passes; red under M17 (pending overwritten, no settle) and under the merge (settle with the
+  newer claim's outcome).
+- Gate 2: with the shared close storing the counter before the words, `seqlock`'s
+  `a_read_is_one_whole_publication_or_busy`, `seqlock_loom_a_read_is_one_whole_record_or_busy`
+  (`--cfg loom`) and `observation_transport`'s `a_million_windows_are_read_whole_and_in_order` go
+  red. The watermark's own torn-read test moved to `seqlock.rs` with #1316.
+- Gate 3: engine, effect-contract, control-plane (`test-support`), capi and host-core tests pass;
+  `realtime policy: ok (192 marked regions in 34 files)`, no new region; `audit capi`
+  allocations 0, syscalls 0, `pcm_digest` `bffc21e857b5e134` (the value #1303 recorded on main);
+  workspace policy, fmt, clippy `-D warnings`, rustdoc `-D warnings`, aarch64 `--tests` pass.
