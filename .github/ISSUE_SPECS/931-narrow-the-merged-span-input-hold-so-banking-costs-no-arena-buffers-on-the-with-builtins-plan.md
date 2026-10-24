@@ -25,3 +25,10 @@ No change to cohort merging (#202), to bank eligibility, or to any kernel. No be
 ## Dependencies
 
 After "Lower identity-bound track stages as aliases" (#925), which records the measurement.
+
+## Decision record (attempt 1, 2026-10-24)
+
+- Scope note accepted with root choice (A): release keyed on render position. As built, `render_bounds` gives each op `earliest` (first op of its chainable group) and `latest` (first op of its own bank); a freed slot goes to op `p` only if every op that touched its previous value has `latest < earliest[p]`, or `latest == earliest[p]` with `p` outside the group's opening bank (a later chain slot, which reaches the arena only through the run's final scatter). This is stricter than the scope note's `exec(p) >= exec(o)`: a declined merge can start a later bank's run after a reader the predicted rule thought was earlier, so the reader bound is the reader's own bank, not its group.
+- Gate 1 measured: console fixture with builtins, banked 256 -> 193, equal to the bank-unaware colouring (`the_banked_console_arena_equals_the_bank_unaware_arena`, red at 256 vs 193 on base).
+- Zero divergence held in the merged arms of both random corpora and in the two window tests; `assert_no_slot_is_recycled_inside_a_bank_window` now asserts the recycler renders in a later run. Re-pinned corpus measurements: redirected lanes 1669 -> 1737, narrow-arm divergences 885 -> 1015.
+- Open: `graph-compiler/tests/live_routes.rs::no_live_route_folds` goes red. The denser colouring gives the session Output the slot of `t1-bus`, and `runtime::foldable_lane` declines a fold when `producer_op.output == program.output || route_op.output == program.output` (a slot-coincidence clause of the kind #916 removed from `chains_into`). The fix is in `crates/graph/src/runtime.rs`, outside this issue's paths; it needs a root decision.
