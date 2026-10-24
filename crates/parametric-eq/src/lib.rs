@@ -3191,6 +3191,12 @@ struct PreparedParametricEq<L: Lane, const W: usize> {
     /// next `quiet` block writing nothing and advancing the clocks is bit-identical to running the
     /// kernel.
     silent_fixed_point: bool,
+    /// Whether a collapsed block ([`render_mono`](Self::render_mono)) has rendered since the last
+    /// disengage copy ([`desymmetrize`](Self::desymmetrize)), which alone clears it (#1894). While
+    /// it is set the right channel is frozen and stale, so the rest mask reads the left channel
+    /// alone and a skipped block advances the left silence counter alone: the effect contract's
+    /// collapsed-bank rule (`PreparedNativeEffectBank::lanes_at_rest`). A reset leaves it alone.
+    collapsed: bool,
     /// The two channels' rest planes ([`silence_block`], issue #1328 amendment A9): one threshold
     /// word per lane per frame of the prepared quantum, allocated once at preparation. Written from
     /// the input before any section runs and read by every section of that channel. Held here
@@ -3245,9 +3251,14 @@ const fn all_lanes<const W: usize>() -> u32 {
 }
 
 impl<L: Lane, const W: usize> PreparedParametricEq<L, W> {
-    /// The rest mask of both channels ([`Channel::rest_lanes`], issue #1745): `left & right`.
+    /// The rest mask of both channels ([`Channel::rest_lanes`], issue #1745): `left & right`, or
+    /// the left channel's alone while [`collapsed`](Self::collapsed) (#1894).
     fn lanes_at_rest(&self) -> u32 {
-        self.left.rest_lanes() & self.right.rest_lanes()
+        if self.collapsed {
+            self.left.rest_lanes()
+        } else {
+            self.left.rest_lanes() & self.right.rest_lanes()
+        }
     }
 
     /// The channel's sample rate, as the design functions take it.
@@ -3418,6 +3429,8 @@ impl<L: Lane, const W: usize> PreparedParametricEq<L, W> {
     #[inline(always)]
     fn render_mono(&mut self, left: &mut [f32], frames: usize) -> [[bool; MAX_LANES]; 2] {
         let mut failures = [[false; MAX_LANES]; 2];
+        // From here until the disengage copy the right channel is frozen and stale.
+        self.collapsed = true;
         let words = frames * W;
         let stationary = self.left.no_ramp_in_flight();
         let quiet = stationary && block_is_positive_zero(&left[..words]);
@@ -3446,7 +3459,7 @@ impl<L: Lane, const W: usize> PreparedParametricEq<L, W> {
         }
         // The collapsed body's claim reads the left channel alone: the right one is frozen at the
         // collapse, and the counterfactual right channel is the left one.
-        self.silent_fixed_point = quiet && self.left.rest_lanes() == all_lanes::<W>();
+        self.silent_fixed_point = quiet && self.lanes_at_rest() == all_lanes::<W>();
         failures
     }
 
@@ -3487,6 +3500,7 @@ impl<L: Lane, const W: usize> PreparedParametricEq<L, W> {
         self.right.identity = self.left.identity;
         self.right.dry = self.left.dry;
         self.right.silence = self.left.silence;
+        self.collapsed = false;
     }
 
     fn reset_state(&mut self, kind: ResetKind) {
@@ -3660,6 +3674,7 @@ fn prepare_width<L: Lane, const W: usize>(
         active: core::array::from_fn(|lane| active_mask.get(lane).copied().unwrap_or(false)),
         // Nothing has been observed yet, so nothing is claimed.
         silent_fixed_point: false,
+        collapsed: false,
         rest: [
             vec![0.0; metadata.quantum as usize * W].into_boxed_slice(),
             vec![0.0; metadata.quantum as usize * W].into_boxed_slice(),
@@ -4098,7 +4113,8 @@ impl<L: Lane, const W: usize> PreparedNativeEffectBank for PreparedParametricEq<
         true
     }
 
-    /// Both channels' [`Channel::rest_lanes`]. The clocks are the two silence counters; a
+    /// Both channels' [`Channel::rest_lanes`], or the left channel's alone on a collapsed bank
+    /// (#1894). The clocks are the two silence counters; a
     /// prepared bypass is not read (the predicate on state is sound with it too: a bypassed bank
     /// moves no word and passes its `+0.0` input through).
     fn lanes_at_rest(&self) -> u32 {
@@ -4118,10 +4134,9 @@ impl<L: Lane, const W: usize> PreparedNativeEffectBank for PreparedParametricEq<
     /// `silent_fixed_point`, so a mask that covers the whole bank sets it too. The contract's
     /// caller skips a bank whole and always passes that mask; a partial mask, which it never
     /// passes, still advances exactly its own lanes and leaves the flag to the render of the
-    /// other lanes. A collapsed bank's render advances only the
-    /// left counter; its right channel is dead until the disengage copies the left one over it
-    /// ([`desymmetrize`](PreparedParametricEq::desymmetrize)), so advancing it too moves no word
-    /// that is read.
+    /// other lanes. A collapsed bank's render advances only the left counter, and so does this
+    /// (#1894): its right channel is frozen until the disengage copies the left one over it
+    /// ([`desymmetrize`](PreparedParametricEq::desymmetrize)).
     fn advance_clocks(&mut self, lanes: u32, frames: u32) {
         let bank = all_lanes::<W>();
         let bits = lanes & bank;
@@ -4136,7 +4151,8 @@ impl<L: Lane, const W: usize> PreparedNativeEffectBank for PreparedParametricEq<
             return;
         }
         let mask = lanes_mask::<L>(bits);
-        for channel in [&mut self.left, &mut self.right] {
+        let live = if self.collapsed { 1 } else { 2 };
+        for channel in [&mut self.left, &mut self.right].into_iter().take(live) {
             let mut advanced = channel.silence;
             silence_advance(&mut advanced, frames as usize);
             channel.silence = L::select(mask, advanced, channel.silence);

@@ -17,6 +17,7 @@ use effect_contract::{
     LinkMode, NativeEffectFactory, ParameterChannel, PreparedNativeEffect, StatePayloadSizes,
 };
 use effect_runtime::ramp::LinearRamp;
+use effect_runtime::svf::{RAMP_PATH_NORM_TOLERANCE, transition_norm};
 use lane::Lane;
 use lane::kernels::{SvfState, svf_step};
 use multiband_compressor::{
@@ -180,10 +181,19 @@ fn largest_step(output: &[f32], window: core::ops::Range<usize>) -> f32 {
 }
 
 /// Gate 2: a crossover glide keeps the band sum the first stage's all-pass at every sample, and is
-/// no rougher than the static renders at its two ends.
+/// no rougher than the static renders at its two ends, and a retarget mid-glide restarts its three
+/// words together (#1928).
+///
+/// The words `c1, a2, a3` are safe on a ramp only as a triple: the straight line between two
+/// designs is contractive at every point, a triple whose words sit at different fractions of
+/// different ramps need not be. A one-ulp crossover nudge can keep one word's design bits and move
+/// the others', so a retarget that skips a word with unchanged target bits leaves that word on its
+/// old schedule while the others restart.
 ///
 /// Test value: words assigned at once instead of ramped (a click), or a second stage fed other
-/// words than the first, turns it red; no other test moves the crossover while it plays.
+/// words than the first, turns it red; no other test moves the crossover while it plays. A
+/// retarget that restarts only the words whose target bits moved turns leg (c) red; no other
+/// test retargets the crossover mid-glide.
 #[test]
 fn a_crossover_glide_stays_the_all_pass_and_adds_no_click() {
     let start = SPAN_BLOCK * BLOCK;
@@ -227,6 +237,96 @@ fn a_crossover_glide_stays_the_all_pass_and_adds_no_click() {
             moving / still
         );
     }
+    // (c) From 200 Hz, a glide to about 1 kHz, then a one-ulp nudge 32 samples into its 64: every
+    // later triple lies on the chord from the nudge point to the new design (each word at one
+    // common fraction of its way), stays contractive, and settles on the design's bits.
+    let (target, nudged) = nudge_pair();
+    let (mut effect, sizes) = unity(200.0);
+    let words = |effect: &dyn PreparedNativeEffect| -> [f32; 3] {
+        let left = snapshot(effect, sizes).1;
+        core::array::from_fn(|index| {
+            f32::from_le_bytes(word(&left, CROSSOVER_WORD + index * RAMP_WORDS))
+        })
+    };
+    let frame = |effect: &mut dyn PreparedNativeEffect, n: usize, value: Option<f32>| {
+        let (mut left, mut right) = ([sine(n)], [sine(n)]);
+        let spans = value.map_or_else(Vec::new, |value| {
+            vec![
+                point(0, ParameterChannel::Left, n as u64, value),
+                point(0, ParameterChannel::Right, n as u64, value),
+            ]
+        });
+        process(
+            effect,
+            &mut left,
+            &mut right,
+            n as u64,
+            &spans,
+            BLOCK as u32,
+        );
+    };
+    frame(effect.as_mut(), 0, Some(target));
+    for n in 1..32 {
+        frame(effect.as_mut(), n, None);
+    }
+    let start = words(effect.as_ref());
+    let end = design_lr4_words(RATE, nudged);
+    let first = design_lr4_words(RATE, target);
+    for kept in (0..3).filter(|&index| first[index].to_bits() == end[index].to_bits()) {
+        assert_ne!(
+            start[kept].to_bits(),
+            first[kept].to_bits(),
+            "the nudge lands mid-glide"
+        );
+    }
+    frame(effect.as_mut(), 32, Some(nudged));
+    for n in 33..128 {
+        let now = words(effect.as_ref());
+        let norm = transition_norm(now[0], now[1], now[2]);
+        assert!(
+            norm <= RAMP_PATH_NORM_TOLERANCE,
+            "frame {n}: words {now:?} have norm {norm}"
+        );
+        let fractions: Vec<f64> = (0..3)
+            .filter(|&index| start[index] != end[index])
+            .map(|index| {
+                f64::from(now[index] - start[index]) / f64::from(end[index] - start[index])
+            })
+            .collect();
+        let (low, high) = fractions
+            .iter()
+            .fold((f64::MAX, f64::MIN), |(low, high), &f| {
+                (low.min(f), high.max(f))
+            });
+        assert!(
+            high - low <= 1.0e-3,
+            "frame {n}: words {now:?} are off the chord from {start:?} to {end:?} \
+             (fractions {fractions:?})"
+        );
+        frame(effect.as_mut(), n, None);
+    }
+    assert_eq!(
+        words(effect.as_ref()).map(f32::to_bits),
+        end.map(f32::to_bits)
+    );
+}
+
+/// A crossover near 1 kHz whose one-ulp successor keeps one word's design bits and moves another's.
+fn nudge_pair() -> (f32, f32) {
+    let mut crossover = 1_000.0_f32;
+    for _ in 0..1 << 20 {
+        let next = crossover.next_up();
+        let (from, to) = (
+            design_lr4_words(RATE, crossover),
+            design_lr4_words(RATE, next),
+        );
+        let same = (0..3).filter(|&index| from[index].to_bits() == to[index].to_bits());
+        if (1..3).contains(&same.count()) {
+            return (crossover, next);
+        }
+        crossover = next;
+    }
+    panic!("no nudge pair near 1 kHz");
 }
 
 /// Word offset of the first crossover word ramp in a channel's payload, and the ramp's width.

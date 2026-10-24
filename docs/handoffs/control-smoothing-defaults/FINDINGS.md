@@ -686,6 +686,90 @@ the margin the bound's limit needs: even 18 dB worse than the emulation (0.1 ms 
 under it out of band, where a 10 ms glide (CTR margin 10.8-12.3 dB) would pass it by 5.7-7.2 dB,
 close to a 5 ms mute's click.
 
+#### 9.5.1 The gate-expander, the transient shaper and the true-peak limiter (#1430)
+
+**Method.** 9.5's emulation, unchanged (the same crossfade, ramps 0, 2, 5, 10, 20 and 50 ms, both
+directions, the four launch rates), with one change: the reference programme is the input delayed by
+the effect's latency (the shunt's dry signal, as in 9.4), because the limiter's lookahead delays
+both planes; for the compressor that delay is zero and `link_glide.csv` is unchanged. Each effect
+is at its 9.4 setting, prepared once with `dual_mono` and once with `maximum`: the gate (threshold
+-6 dBFS, ratio 20, range 80 dB, no hysteresis, attack 1 ms, hold 20 ms, release 50 ms) on
+`bass-kick`, where only the linked bass lane opens on the kick; the transient shaper (attack
++50 %) on `bass-kick` and `mix-wide`; the limiter at its defaults (release 100 ms, lookahead 5 ms),
+ceiling set for 6.0 dB peak reduction under `maximum` (-6.88 dBTP on `bass-kick`, -7.92 to -8.00 on
+`mix-wide`). Rows: `data/link_glide_effects.csv`. Every row's `step_db` is -26.3 to -16.1 dB, above
+the -40 dB floor, so no row is vacuous. Link and unlink agree to 0.00 dB. Two four-rate `live` runs
+and two `measure` runs (on `7dbc6a161`) reproduce every file byte for byte; the new file and the
+other committed files are unchanged, except the three files whose drift #1830 recorded (9.7), with
+the same 45, 21 and 31 moved rows.
+
+**Results**, 48 kHz (`bass-kick`: OOB / CTR; `mix-wide`: HF splatter; the range is over the four
+rates at 20 ms):
+
+| effect, material | step dB | 0 ms | 20 ms | 20 ms, four rates |
+|---|---:|---:|---:|---:|
+| gate, bass-kick | -16.5 | -65.8 / +40.5 | -115.6 / -9.5 | -115.6 to -108.6 / -9.5 to -0.1 |
+| transient shaper, bass-kick | -26.2 | -61.8 / +44.6 | -110.3 / -4.9 | -110.3 to -108.5 / -4.9 to -3.9 |
+| transient shaper, mix-wide | -18.6 | -47.8 | -82.4 | -82.4 to -79.6 |
+| limiter, bass-kick | -18.2 | -52.9 / +49.9 | -100.6 / -0.1 | -101.8 to -100.6 / -1.8 to +1.2 |
+| limiter, mix-wide | -20.0 | -45.5 | -88.1 | -88.4 to -85.0 |
+
+At 20 ms, over the four rates, against the 10 ms mute (`mute_click.csv`; the bass's for `bass-kick`,
+the mix's for `mix-wide`, as 9.5): the gate is 31.6-38.3 dB under it out of band, 25.8-34.1 dB on
+the worst event and 19.2-27.8 dB in CTR; the transient shaper 31.4-33.0, 29.0-29.7 and 22.3-23.2 dB
+on `bass-kick` and 23.1-25.6 dB in HF splatter on `mix-wide`; the limiter 23.3-24.8, 24.5-25.0 and
+17.9-20.8 dB on `bass-kick` and 28.2-31.2 dB in HF splatter on `mix-wide`. At 20 ms no event is
+above the threshold in quiet but one limiter event at 44.1 kHz (of 10).
+
+**D3, the bound.** 9.5's argument is that the real glide's gain corners reach the output only
+through the effect's own smoother, which at 1.5 kHz removes more than the static curve can steepen
+the glide. The steepening is the largest slope of the gain along a linear detector blend over its
+mean slope; for a curve `gain ~ detector^p` and a channel ratio `rho` it is
+`|p| (rho - 1) / |rho^p - 1|` (at the start) or `|p| rho^(p - 1) (rho - 1) / |rho^p - 1|` (at the
+end), whichever is larger, quoted below at 20 dB (`rho` = 10).
+
+- *Transient shaper.* Its followers are frozen (fast 0.5 ms / 20 ms, slow 10 ms / 100 ms), so there
+  is no shorter attack to bound. Its gain is `(fast / slow)^A` (`A` = 0.5), so `p` = 0.5 and the
+  steepening is about 2.1 (6 dB), at the start; the fast attack divides the corners at 1.5 kHz by
+  `2 pi f tau`, about 4.7 (13 dB), and its 20 ms release (the unlink direction, a falling detector)
+  by about 190 (45 dB), so the bound holds in both directions. Not assessed: the glide is itself
+  a level rise on the detector, which the shaper boosts like any transient (at most `A` times the
+  contrast, clamped). That bump follows the ramp and the 10 ms slow attack, so it lies in band, but
+  no measure here reads it.
+- *Limiter.* Its gain is `limit / P` on the linked peak (`p` = -1, steepening about 10, 20 dB, at
+  the start),
+  reached through the sliding minimum and the box ramp of `Wb = clamp(L + 1, 32, N + 1)` samples,
+  whose response at 1.5 kHz is at most `1 / (pi f Wb / fs)`: about 24 (27 dB) at the default 5 ms
+  lookahead, which covers the 20 dB. The unlink direction (a falling detector, a rising gain) goes
+  through the 100 ms release. At shorter lookaheads it does not cover it: at 0 ms (`Wb` = 32
+  samples) the real glide can exceed the emulation by about 9 dB at 44.1 kHz and 16 dB at 96 kHz.
+- *Gate.* Not bounded, and no ramp key governs its worst case. Below the threshold its gain is the
+  detector to the power `ratio - 1` (`p` = 19 here; steepening about 17, 25 dB, at the end, the
+  same with the 80 dB range clamp, against the 1 ms attack's cover of about 9.4, 19 dB, at 1.5 kHz, and
+  less at shorter attacks), and a link change that moves a lane across the threshold opens the lane
+  at the crossing instant through the gate's own attack (1 ms by default, 0.1 ms at least). On a
+  transient (the kick here) the crossing is set by the programme, whatever the ramp length: a
+  longer ramp moves the instant, not the edge. On a sustained detector the blend itself crosses
+  the threshold, and with 20 dB of channel difference the curve moves the gain over about 40 % of
+  the ramp, so there the ramp length does count. The emulation, a fade
+  between a closed and an open lane, does not contain that edge. The gate rows above are the
+  emulation's values only (the root narrowing of the #1430 spec).
+
+**D4, the answer.** `faderMs` (20 ms) is right for the transient shaper and the limiter, which is
+the key #1054 D3 and `LiveRampRow::LinkGlide` already give; the evidence moves no key or value.
+At 20 ms the shaper's emulated click sits 22.3 dB or more under the 10 ms mute's in CTR and 23.1 dB
+or more in HF splatter, where the bound holds; the limiter's sits 17.9 dB or more
+under it (CTR, `bass-kick`), as the compressor's does (16.8 dB, 9.5), at the default lookahead,
+where the bound holds; the claim is made at that lookahead only. At 0 ms lookahead nothing was
+measured: an extrapolation, subtracting the bound's estimated excess there (about 9 dB at
+44.1 kHz, 16 dB at 96 kHz) from the default lookahead's measured margins, leaves 3.6 dB or more of
+CTR margin at 20 ms (17.9 dB at 44.1 kHz, 19.6 dB at 96 kHz) and 1.8 dB or none at 10 ms (10.8 and
+10.5 dB): the same reason for `faderMs` over `muteMs` as 9.5 gives, not a measured result. The gate has no answer from this method: its emulated rows (step -16.1 to
+-16.5 dB) pass the 10 ms mute by 19 dB or more, but the bound does not hold, and the click at a
+threshold crossing on a transient is the gate's own attack, which no ramp length changes. The gate
+has no answer: this subsection gives #1370 and #1371 no key or value for it, and a measurement of
+the real #1370 glide on the gate, or #1370's listening item, is the only check (9.7).
+
 ### 9.6 Listening (D3): block P for polarity (Amendment 1), no other contrast
 
 Root's ruling of 2026-10-05 on #1055 adds polarity trials to `listening/PREREGISTRATION.md` as
@@ -752,9 +836,11 @@ Not verified:
 - the real #1341 crossfade and #1370 glide (both are emulated; their issues' gates test the
   kernels, and no #1370 gate measures a click);
 - the link bound below about 1 ms of attack (9.5);
-- the link glide of the gate-expander, the transient shaper and the true-peak limiter: only the
-  compressor was measured and bounded, and the bound does not carry to the gate's steep curve and
-  threshold crossing as it stands (9.5); #1370's listening item is the only check on them;
+- the link glide of the gate-expander: #1430 measured the emulation for the gate, the transient
+  shaper and the limiter (9.5.1) and bounded the shaper's and the limiter's (the limiter at its
+  default lookahead; at 0 ms the real glide can exceed the emulation by about 9-16 dB), but the
+  gate's steep curve and threshold crossing are not bounded and no ramp key governs the crossing;
+  #1370's listening item, or a measurement of the real glide, is the only check on the gate;
 - whether a polarity flip's dip through zero (at the default 20 ms: 10 ms below -6 dB, 2 ms below
   -20 dB, silent at the midpoint; 9.2) is heard as a dip on an exposed sustained note. The click
   measures do not assess it. Amendment 1's block P now asks it in #1388's session (preregistered

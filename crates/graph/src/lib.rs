@@ -1990,8 +1990,8 @@ pub struct GraphPreparedEffectBank {
     /// `false` on every padded lane after them (issue #1088). It is the mask the effect's factory
     /// was bound with (`effect_contract::PrepareEffectBankRequest::active_mask`) and the mask the
     /// rack chain gathers and scatters by, so a padded lane is never read from or written to a
-    /// track. A full bank is all `true`, and every shipped plan binds only full banks until a group
-    /// asks for padding (`graph_compiler`'s padding policy).
+    /// track. A full bank is all `true`. `graph_compiler`'s padding policy pads every partial
+    /// console group and every partial insert group from a per-width member threshold (#888).
     pub active_mask: Box<[bool]>,
     pub processor: Box<dyn effect_contract::PreparedNativeEffectBank>,
     /// The bank's width and shared program key, from its bind result (issue #1461).
@@ -4005,15 +4005,21 @@ pub struct GraphNodeObserverBinding {
     observer: Box<dyn GraphRuntimeObserver>,
     /// [`GraphRuntimeObserver::accepts_block_end`], read once here and never at render.
     block_end: bool,
+    /// Whether this is a strip meter binding (#882): its observer's
+    /// [`GraphRuntimeObserver::carry_kind`] is [`ObserverKind::Meter`], read once here. Render
+    /// skips such a binding in a block whose strip meter level is off.
+    meter: bool,
 }
 impl GraphNodeObserverBinding {
     pub fn new(node: GraphNodeId, handle: u64, observer: Box<dyn GraphRuntimeObserver>) -> Self {
         let block_end = observer.accepts_block_end();
+        let meter = observer.carry_kind() == Some(ObserverKind::Meter);
         Self {
             node,
             handle,
             observer,
             block_end,
+            meter,
         }
     }
 }
@@ -4157,6 +4163,10 @@ struct GraphExecutor {
     /// allocation once, whatever number of stages and routes clone it. Control-only: render never
     /// reads it. `None` for a plan without stored automation.
     automation_program: Option<std::sync::Arc<automation::Program>>,
+    /// The strip meter level of the next block (#882), stored by
+    /// [`PreparedPlanExecutor::set_strip_meter_level`]; `true` until a host sets it. Render skips
+    /// every strip meter binding, and the bank meter passes only they read, while it is `false`.
+    strip_meters: bool,
 }
 
 /// Next graph executor identity; identities start at 1, so zero never names a plan.
@@ -5967,6 +5977,7 @@ impl GraphExecutor {
             fade_arm_carry: Box::default(),
             fade_fired: GraphFadeArmWatch::default(),
             automation_program: None,
+            strip_meters: true,
         }
     }
 }
@@ -6288,6 +6299,11 @@ impl PreparedPlanExecutor for GraphExecutor {
     fn begin_live_block(&mut self, snapshot: LiveSnapshot) {
         self.live_snapshot = Some(snapshot);
     }
+
+    /// Keep the block's strip meter level for `observe_unit` (#882): a store of one byte.
+    fn set_strip_meter_level(&mut self, on: bool) {
+        self.strip_meters = on;
+    }
     // REALTIME_POLICY_END
 
     // REALTIME_POLICY_BEGIN
@@ -6349,7 +6365,9 @@ impl PreparedPlanExecutor for GraphExecutor {
             fade_arm_carry: _,
             fade_fired,
             automation_program: _,
+            strip_meters,
         } = self;
+        let strip_meters = *strip_meters;
         // One block's snapshot: taken here, so the next block cannot reuse it.
         let Some(live) = live_snapshot.take() else {
             return Err(RenderError::InvalidEnvelope);
@@ -6458,9 +6476,13 @@ impl PreparedPlanExecutor for GraphExecutor {
                 host.silence();
                 return Err(error);
             }
-            if let Err(error) =
-                runtime.observe_unit(unit, time.absolute_sample, source_validity, &host)
-            {
+            if let Err(error) = runtime.observe_unit(
+                unit,
+                time.absolute_sample,
+                source_validity,
+                &host,
+                strip_meters,
+            ) {
                 runtime.invalidate_observers_after_failure(time.absolute_sample);
                 host.silence();
                 return Err(error);

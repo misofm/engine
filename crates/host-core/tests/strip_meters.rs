@@ -687,3 +687,134 @@ fn seven_bus_meters_render_without_allocating() {
     }
     drop(handles);
 }
+
+/// Renders `BLOCKS` quanta of `document` with the strip meter level off for the first `off`
+/// blocks and on after, and returns each meter's snapshot words, `[meter][window]`, from the
+/// blocks with the level on, and the `[sample-peak passes, full meter passes, block peak merges]`
+/// those blocks ran. Every block with the level off must move no counter and queue no snapshot.
+fn gated(
+    document: &str,
+    feeds: &[(&str, &[Vec<f32>; 2])],
+    meters: &[HostMeterRequest],
+    off: usize,
+) -> (Vec<Vec<Vec<u64>>>, [u64; 3]) {
+    let (mut prepared, mut handles) = prepare_selected(document, meters);
+    let counters = || {
+        [
+            graph::test_only_bank_sample_peak_passes(),
+            graph::test_only_bank_meter_passes(),
+            builtins::test_only_block_peak_merges(),
+        ]
+    };
+    let mut words = vec![Vec::new(); meters.len()];
+    let mut on = [0_u64; 3];
+    for block in 0..BLOCKS {
+        prepared.plan.set_strip_meter_level(block >= off);
+        submit(&mut prepared, feeds, block);
+        let before = counters();
+        let mut samples = [0.0_f32; QUANTUM * 2];
+        prepared
+            .plan
+            .render(
+                engine::realtime::RenderIo {
+                    output: engine::realtime::PlanarBufferMut::try_new(
+                        &mut samples,
+                        2,
+                        QUANTUM,
+                        QUANTUM,
+                    )
+                    .expect("output planes"),
+                },
+                engine::realtime::RenderTime {
+                    absolute_sample: (block * QUANTUM) as u64,
+                },
+            )
+            .expect("render");
+        let after = counters();
+        if block < off {
+            assert_eq!(
+                after, before,
+                "block {block}: a meter pass ran with the level off"
+            );
+        } else {
+            for (sum, (after, before)) in on.iter_mut().zip(after.iter().zip(before)) {
+                *sum += after - before;
+            }
+        }
+        for (index, meter) in handles.meters.iter_mut().enumerate() {
+            while let Ok(snapshot) = meter.consumer.try_pop() {
+                assert!(
+                    block >= off,
+                    "block {block}: meter {index} published with the level off"
+                );
+                words[index].push(snapshot_words(&snapshot));
+            }
+        }
+    }
+    (words, on)
+}
+
+/// #882 gate 1: on the bus session, with and without console slots, post-matrix `SAMPLE_PEAK`
+/// meters on every strip (the production meter) and one full meter without a held peak: while the strip meter level
+/// is off, no bank peak pass, full meter pass or block peak merge runs and no snapshot is queued;
+/// once it is on at block `OFF`, every window's words equal the always-on run's window of the
+/// same block, its sequence counted from the first metered block. The always-on run moves every
+/// counter, so the off-run's zero is a skip.
+///
+/// Test value: red if a strip meter pass, merge or snapshot runs with the level off, or if the
+/// windows resumed after it differ from the always-on fold.
+#[test]
+fn strip_meters_do_no_work_with_the_level_off_and_resume_with_the_always_on_words() {
+    const OFF: usize = 3;
+    for console in [no_console(), desk_console()] {
+        let pair = pair(&mut Draw::new(5), &console);
+        let peak = |strip: &str| HostMeterRequest {
+            strip_id: strip.into(),
+            tap: MeterTap::PostMatrix,
+            metrics: MeterMetricSet::SAMPLE_PEAK,
+        };
+        let meters = [
+            peak("t0"),
+            peak("t1"),
+            peak("t2"),
+            peak("bus"),
+            // A full meter without the held peak, the one metric that keeps every earlier block.
+            HostMeterRequest {
+                strip_id: "t1".into(),
+                tap: MeterTap::PostFader,
+                metrics: MeterMetricSet::from_bits_retain(
+                    MeterMetricSet::ALL.bits() & !MeterMetricSet::HELD_PEAK.bits(),
+                ),
+            },
+        ];
+        let feeds: Vec<(&str, &[Vec<f32>; 2])> = pair
+            .bus_feeds
+            .iter()
+            .map(|(id, planes)| (id.as_str(), planes))
+            .collect();
+        let (always, always_counts) = gated(&pair.bus, &feeds, &meters, 0);
+        assert!(
+            always_counts.iter().all(|&count| count > 0),
+            "the always-on run takes every meter path: {always_counts:?}"
+        );
+        let (resumed, _) = gated(&pair.bus, &feeds, &meters, OFF);
+        for (index, (resumed, always)) in resumed.iter().zip(&always).enumerate() {
+            assert_eq!(
+                resumed.len(),
+                BLOCKS - OFF,
+                "meter {index}: one window per block"
+            );
+            for (window, words) in resumed.iter().enumerate() {
+                let mut words = words.clone();
+                // `window_sequence`, counted from the first metered block.
+                words[3] += OFF as u64;
+                assert_eq!(
+                    words,
+                    always[window + OFF],
+                    "meter {index}: window {} differs from the always-on run",
+                    window + OFF
+                );
+            }
+        }
+    }
+}

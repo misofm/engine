@@ -842,6 +842,13 @@ fn a_carried_strip_meter_keeps_its_reader_across_a_c_abi_rebuild() {
     model.routes.truncate(2);
     let document = session::canonical_session_json(&model).expect("two-strip session");
     let mut children = compile_children(&document, limits()).expect("children");
+    // #882: strip meters observe only the blocks the output meter's gate admits, so the level is
+    // on from block 0 (the gate's role until #1583 wires `TELEMETRY_CONFIGURE` to it).
+    let (_reader, gate) = children
+        .session
+        .take_output_meter()
+        .expect("the output meter");
+    gate.activate(0);
     let window = u64::from(host_core::default_meter_window_blocks(48_000, 128).get());
     // Feeds one block ahead and renders `blocks` blocks from `first`; every submit runs the
     // service step first.
