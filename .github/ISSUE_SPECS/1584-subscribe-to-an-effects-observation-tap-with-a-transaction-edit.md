@@ -663,3 +663,17 @@ browser. No browser row moved past its ceiling and no exact row moved (`check-br
 fresh build: green, self-test 43 red mutations); no other host test pinned the old value. `capi` (195), `engine`,
 `effect-contract`, `host-core --all-features` and `host-web --features test-support` (211) pass; `realtime_policy`
 ok; audit `pcm_digest` `bffc21e857b5e134`; `lint-checks.sh --self-tests` passes.
+
+## Fold (batch 13 review, PASS)
+
+- **T2 across supersession** (MAJOR): `an_observe_on_a_superseded_candidate_reaches_its_replacement` (control-plane):
+  an arm of the carried `comp3` queued on a candidate that a second structural transaction supersedes reaches the
+  replacement and publishes from its adoption block; with the second transaction re-arming `comp3` (window 8) the
+  forward carries the bound state and the transaction's own record is skipped. Red with `slot.queued = true` removed
+  from the T2 push loop (stayed green before this test), and red with the dedupe skip removed.
+- **Race** (MINOR): the race counts `Observe` commits apart (`Kind::Observe`) and asserts all ten committed every
+  run, so arms and disarms alternate.
+- **Subscriber count** (NIT): an arm at `u32::MAX` subscribers is refused `observation.subscribers` (checked add).
+- **Evidence, not measured:** C ABI plans now carry an observation queue for every tapped effect, so render checks
+  an (empty) observe queue per such effect per block; no descriptive comparison was run (no cheap paired run exists
+  for it in this slice). The audit `pcm_digest` is unchanged.
