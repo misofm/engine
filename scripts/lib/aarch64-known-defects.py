@@ -78,7 +78,7 @@ TEST_ROWS: dict[str, list[tuple[str, str, str, str, str]]] = {
 # `analyze_stream_into` and 2 to `analyze_continuous` (their floor-filled bin arrays). All are
 # control-thread spectrum analysis, never render. #1595b removed them: the fills were dead stores
 # (zero fills now) and the analysis writes straight into its result, so host-core has 0 calls
-# (4 on main before the slice) and no row.
+# (main's row was 5, measured 4 before the slice) and no row.
 IOS_MEMSET_CEILINGS: dict[str, tuple[str, int]] = {}
 
 

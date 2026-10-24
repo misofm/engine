@@ -1225,12 +1225,11 @@ limit; the core claims are `crates/control-plane/tests/spectrum_monitor.rs`.
 new C symbol or struct: start, select, read, reset and stop on the session's spectrum service and
 analysis, and a ready read analyzed with the stream's smoothing on the calling control thread. The
 C ABI's capability report now lists `0010`, `0011` and `0012` and sets flag bit 16 (the adapter's
-`ControlAdapter::SPECTRUM`); the browser lists none until #1596. A stream read the frame limit
-cannot carry (the selected entry's channels fix its size) is refused `LIMIT_EXCEEDED`
-(`spectrum.frame`) before it pops a window or consumes a `gap`, and a configure refuses a tap whose
-one-plane stream read cannot fit, so a C ABI host that reads spectrum compiles with
-`maximum_control_frame_bytes` of at least 8,576 bytes (12,688 to stream a stereo entry, 29,008
-for a one-shot read of both sides with the window). The capability vectors pinned in
+`ControlAdapter::SPECTRUM`); the browser lists none until #1596. A configure (and a boot) refuses
+a tap whose stream read of its own channels cannot fit the frame limit (`spectrum.frame`), so a C
+ABI host that reads spectrum compiles with `maximum_control_frame_bytes` of at least 8,576 bytes
+for a one-plane tap (12,688 for a stereo tap, 29,008 for a one-shot read of both sides with the
+window); a stream read also measures its reply before it reads, in depth. The capability vectors pinned in
 `crates/capi/src/runtime/tests.rs` re-pin for the three IDs and bit 16. The gate is
 `runtime::spectrum_tests::spectrum_commands_cross_the_c_abi_to_the_session` (the capability report
 and one ready stream read); the core claims are `crates/control-plane/tests/spectrum_monitor.rs`.

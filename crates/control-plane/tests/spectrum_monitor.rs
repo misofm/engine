@@ -48,15 +48,6 @@ impl ControlAdapter for Adapter {
     const ADAPTER_ALLOCATIONS: &'static [u64] = &[];
 }
 
-/// [`Adapter`] advertising the spectrum reads, as the C ABI's does (#1595 R2): its boot runs R6.
-struct Advertised;
-
-impl ControlAdapter for Advertised {
-    type Row = PlanResources;
-    const ADAPTER_ALLOCATIONS: &'static [u64] = &[];
-    const SPECTRUM: bool = true;
-}
-
 /// The C ABI's preparation: host-core's one session entry.
 struct Preparer;
 
@@ -2459,16 +2450,15 @@ fn a_stream_read_follows_the_core_machine() {
     assert_eq!(stopped.status, StreamStatus::Stopped);
 }
 
-/// #1595 gate 3 (stream) and R6. Turns red if a stream read pops a window or consumes a `gap` it
-/// then fails to deliver, or R6 measures a tap's reads wrongly. On a session that does not
-/// advertise the spectrum reads (so its boot runs no R6) and whose frame limit is 12,288 bytes, a
-/// stereo `eq0` stream whose queue dropped two windows answers a read `LIMIT_EXCEEDED`
-/// `spectrum.frame` (its ready reply is 12,688 bytes), and the core's next read is still that
-/// `gap` with both drops. R6 refuses a `Left` tap one byte below its stream read (8,576 bytes,
-/// above the one-shot read's 8,496) and a stereo tap one byte below its two-plane stream read, by
-/// a configure and, on an advertising session, by a boot, and accepts each at its size.
+/// #1595 gate 3 (stream) and R6. Turns red if a stream read loses a drop count or R6 measures a
+/// tap's reads wrongly. On a session whose frame limit is exactly a stereo stream read (12,688
+/// bytes), a stereo `eq0` stream whose queue dropped two windows answers a read `gap` with both
+/// drops, and the next read `ready`. R6 refuses a `Left` tap one byte below its stream read
+/// (8,576 bytes, above the one-shot read's 8,496) and a stereo tap one byte below its two-plane
+/// stream read, by a configure and by a boot, and accepts each at its size. (The read's own size
+/// preflight is defence in depth: R6 leaves it no accepted entry to refuse.)
 #[test]
-fn a_stream_read_the_frame_cannot_carry_consumes_nothing() {
+fn a_stream_read_at_the_frame_limit_delivers_its_gap() {
     let codec = ProtocolCodec::default();
     let size = |bytes: Result<usize, protocol::EncodeError>| {
         u64::try_from(bytes.expect("a ready frame")).expect("a size")
@@ -2476,20 +2466,24 @@ fn a_stream_read_the_frame_cannot_carry_consumes_nothing() {
     let stereo = size(codec.spectrum_stream_ready_frame_len(ParameterChannel::Both, 3));
     let one_plane = size(codec.spectrum_stream_ready_frame_len(ParameterChannel::Left, 3));
     let one_shot = size(codec.spectrum_capture_ready_frame_len(ParameterChannel::Left, false, 3));
-    assert!(one_shot < one_plane && one_plane < 12_288 && 12_288 < stereo);
+    assert!(one_shot < one_plane && one_plane < stereo);
     let at = |limit: u64| ControlLimits {
         maximum_control_frame_bytes: limit,
         ..limits()
     };
-    let mut rig = Rig::limited(SESSION, Some(configuration()), at(12_288));
+    let mut rig = Rig::limited(SESSION, Some(configuration()), at(stereo));
     assert_eq!(
         rig.stream(&StreamRequest::Start { smoothing_ms: 0.0 })
             .map(|reply| reply.status),
         Ok(StreamStatus::Warming)
     );
     let mut blocks = 0;
-    while rig.read_stream().status != SpectrumStreamStatus::Ready {
+    loop {
         rig.block();
+        let reply = rig.stream(&StreamRequest::Read).expect("read");
+        if reply.status == StreamStatus::Ready {
+            break;
+        }
         blocks += 1;
         assert!(blocks < 64, "the stream reads ready");
     }
@@ -2497,12 +2491,14 @@ fn a_stream_read_the_frame_cannot_carry_consumes_nothing() {
     for _ in 0..3 * hop / QUANTUM as u32 {
         rig.block();
     }
-    assert_eq!(
-        rig.stream(&StreamRequest::Read),
-        Err((StatusCode::LimitExceeded, "spectrum.frame".to_owned()))
-    );
-    assert_eq!(rig.read_stream().status, SpectrumStreamStatus::Gap);
-    assert_eq!(rig.service().stream_metadata().dropped_captures, 2);
+    let gap = rig.stream(&StreamRequest::Read).expect("gap");
+    assert_eq!((gap.status, gap.dropped_captures), (StreamStatus::Gap, 2));
+    rig.block();
+    let mut after = rig.stream(&StreamRequest::Read).expect("after the gap");
+    while after.status != StreamStatus::Ready {
+        rig.block();
+        after = rig.stream(&StreamRequest::Read).expect("after the gap");
+    }
 
     let left = SpectrumConfigureRequest {
         entries: vec![entry(
@@ -2520,7 +2516,7 @@ fn a_stream_read_the_frame_cannot_carry_consumes_nothing() {
         assert!(exact.configure(request).is_ok(), "{fits}");
     }
     let boot = |limit| {
-        compile_children::<Advertised>(
+        compile_children::<Adapter>(
             SESSION,
             at(limit),
             Box::new(Preparer),

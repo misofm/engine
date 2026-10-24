@@ -414,7 +414,7 @@ Attempt 2 (root rulings on the verifier's FAIL, 2026-10-24):
   through the window (29,008 bytes); gate 3 (stream) keeps its size-refused `gap` on a session
   that does not advertise (its boot runs no R6) and checks R6 at each tap's exact size and one
   byte below, by configure and by an advertising boot (test adapter `Advertised`).
-- **iOS memset (MAJOR), blocked on one reader.** With the ruled host-core change (dead floor fills
+- **Superseded by the next bullet.** **iOS memset (MAJOR), blocked on one reader.** With the ruled host-core change (dead floor fills
   to zero; `analyze_into` and `analyze_stream_into` write straight into `out`; the unrequested
   plane is unspecified) the shipped capi iOS library has 0 `memset_pattern16` calls charged to
   host-core (the ratchet asks to delete the row). The C ABI encoder and the browser read only
@@ -430,5 +430,12 @@ Attempt 2 (root rulings on the verifier's FAIL, 2026-10-24):
   bits do not move (gates 2 and 4 compare them word for word). The assertion that an unrequested
   plane holds the floor (`crates/host-core/tests/spectrum_service.rs`) is deleted, because the
   ruling removes that claim; the test's other assertions stay. The host-core iOS
-  `memset_pattern16` count is 0 (4 on main before this slice, 10 in attempt 1), so its row is
-  deleted; the `builtins` and `lane` rows stay for #1957.
+  `memset_pattern16` count is 0 (main's row was 5, measured 4 before this slice; 10 in attempt
+  1), so its row is deleted. #1018 deleted the `builtins` and `lane` rows, so the iOS memset table
+  is empty.
+- **Fold after the attempt-2 PASS (root).** R6 runs at every boot, not only an advertising
+  adapter's: every session serves the three commands. The browser's 16 KiB limit never fails it.
+  The stream read's own size preflight is defence in depth (R6 admits no entry it would refuse);
+  gate 3 (stream) is now `a_stream_read_at_the_frame_limit_delivers_its_gap`: at exactly the
+  stereo stream size a `gap` read delivers both drops, and R6 is checked at each tap's size and one
+  byte below, by configure and by boot.

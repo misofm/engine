@@ -1614,16 +1614,14 @@ where
         .map_err(prepare_failure)?;
     let store =
         SessionStore::new(model, compile_caps).map_err(|value| session_diagnostics(&value))?;
-    // #1595 R6 at boot: an adapter that advertises the spectrum reads refuses a tap no read can
-    // carry within the frame limit, as `SPECTRUM_CONFIGURE` does.
-    if A::SPECTRUM
-        && spectrum.as_ref().is_some_and(|configuration| {
-            !crate::control::preparation_fits(
-                &configuration.preparation,
-                limits.maximum_control_frame_bytes,
-            )
-        })
-    {
+    // #1595 R6 at boot: every session serves the spectrum reads, so a boot refuses a tap no read
+    // can carry within the frame limit, as `SPECTRUM_CONFIGURE` does.
+    if spectrum.as_ref().is_some_and(|configuration| {
+        !crate::control::preparation_fits(
+            &configuration.preparation,
+            limits.maximum_control_frame_bytes,
+        )
+    }) {
         return Err(CompileFailure::Diagnostics(b"spectrum.frame\t$\n".to_vec()));
     }
     // #1312 D2: the session's `live_values_superseded` count, one for every plan it prepares.

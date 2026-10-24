@@ -3109,10 +3109,11 @@ where
     /// result. Every refusal is the service's error with its status (D6).
     ///
     /// **Acked-batch question for a stream: can a reply acknowledge a window it did not deliver,
-    /// or lose a drop count? No.** Before it reads, a read measures the frame a ready reply of
-    /// the selected entry takes (D5) and refuses `LIMIT_EXCEEDED` (`spectrum.frame`) when the
-    /// session's frame limit cannot carry it: the read pops no window and consumes no `gap` or
-    /// `failed` status, so the next read that fits reports them. A `gap` reply carries
+    /// or lose a drop count? No.** R6 admits only entries whose stream read fits the session's
+    /// frame limit, at boot and at configure. In depth, a read also measures the frame a ready
+    /// reply of the selected entry takes (D5) before it reads and refuses `LIMIT_EXCEEDED`
+    /// (`spectrum.frame`) when the limit cannot carry it: such a read pops no window and consumes
+    /// no `gap` or `failed` status. A `gap` reply carries
     /// `dropped_captures`, the windows the bounded queue dropped in the epoch. As for a capture,
     /// the output is reserved for the frame limit before the session runs and the reply is
     /// recorded for replay in the call that writes it. The one consume-then-fail path is an
@@ -3165,8 +3166,9 @@ where
                     .map_err(spectrum_service_refusal)?;
             }
             protocol::SpectrumStreamRequest::Read => {
-                // D5: the frame a ready reply of the selected entry takes must fit the session's
-                // limit before the read pops a window or consumes a status.
+                // D5, defence in depth: R6 (at boot and at configure) already admits only entries
+                // whose stream read fits, so this refusal guards the rule rather than a known path;
+                // a read that did not fit must still pop no window and consume no status.
                 if let (Some(target), Some(channels)) = (service.target(), service.channels())
                     && !stream_reply_fits(
                         protocol_channels(channels),

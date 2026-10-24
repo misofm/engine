@@ -33,10 +33,10 @@ pub trait ControlAdapter {
     /// Whether the session advertises the spectrum commands (#1595 R2): `SPECTRUM_CONFIGURE`,
     /// `SPECTRUM_CAPTURE` and `SPECTRUM_STREAM` with capability bit 16
     /// (`ProviderFeatures::spectrum`).
-    /// Every session serves the three; an adapter that keeps the default lists none of them, for a
-    /// host that reads spectrum through another surface (the browser until #1596). An adapter that
-    /// advertises them also refuses, at boot, a spectrum configuration with a tap no read can
-    /// carry within the frame limit (`spectrum.frame`), as `SPECTRUM_CONFIGURE` does (#1595 R6).
+    /// Every session serves the three, and every boot refuses a spectrum configuration with a tap
+    /// no read can carry within the frame limit (`spectrum.frame`, #1595 R6); an adapter that
+    /// keeps the default lists none of them, for a host that reads spectrum through another
+    /// surface (the browser until #1596).
     const SPECTRUM: bool = false;
 }
 
