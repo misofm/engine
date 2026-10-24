@@ -3,9 +3,10 @@
 //! Three properties, each stated as something that must hold for **every** observed window rather
 //! than as an average over a run:
 //!
-//! 1. **Whole windows only.** A window is published as seven words behind an odd/even counter. A
-//!    reader either sees one publication or retries; it never sees the left lane of window `n` with
-//!    the right lane of window `n + 1`. The stress below makes every field a pure function of the
+//! 1. **Whole windows only.** A window and the tap's arm state are published as eight words behind
+//!    an odd/even counter (#1585 D2). A reader either sees one publication or retries; it never
+//!    sees the left lane of window `n` with the right lane of window `n + 1`, nor a window with
+//!    another publication's arm state. The stress below makes every field a pure function of the
 //!    sequence number, so a torn read is arithmetically detectable rather than merely unlikely.
 //! 2. **Non-decreasing sequences, and a counted gap.** A conflating cell drops by design. What it
 //!    may not do is go backwards, and what it must do is let the reader *count* what it missed.
@@ -20,7 +21,7 @@ use std::sync::{Arc, Barrier};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use engine::realtime::{ObservationReader, ObservationWindow, observation_slot};
+use engine::realtime::{ObservationReader, ObservationState, ObservationWindow, observation_slot};
 
 /// One million windows, which is the eval's number.
 const WINDOWS: u64 = 1_000_000;
@@ -39,6 +40,23 @@ fn window(sequence: u64) -> ObservationWindow {
 
 fn consistent(observed: ObservationWindow) -> bool {
     observed == window(observed.sequence)
+}
+
+/// The arm state the stress writer publishes after window `tag`: every word derived from the tag.
+fn arm(tag: u64) -> (bool, u64, u64) {
+    (tag % 2 == 1, tag.wrapping_mul(128), tag)
+}
+
+/// Whether a state is one publication of the stress writer (#1585 gate 3): it publishes window `n`
+/// and then arm `n`, so a whole record pairs window `n` with arm `n - 1` or arm `n`, and an arm
+/// state is a pure function of its tag.
+fn consistent_state(state: ObservationState) -> bool {
+    let Some(observed) = state.window else {
+        return (state.armed, state.arm_sample, state.arm_tag) == arm(0);
+    };
+    consistent(observed)
+        && (state.arm_tag == observed.sequence || state.arm_tag + 1 == observed.sequence)
+        && (state.armed, state.arm_sample, state.arm_tag) == arm(state.arm_tag)
 }
 
 #[derive(Default)]
@@ -131,6 +149,8 @@ fn a_million_windows_are_read_whole_and_in_order() {
         writer_barrier.wait();
         for sequence in 1..=WINDOWS {
             publisher.publish(window(sequence));
+            let (armed, arm_sample, arm_tag) = arm(sequence);
+            publisher.publish_arm(armed, arm_sample, arm_tag);
         }
         publisher.consumed_sequence()
     });
@@ -143,9 +163,14 @@ fn a_million_windows_are_read_whole_and_in_order() {
     let mut polls = 0_u32;
     let mut checked_newest = 0;
     let mut checked_at = Instant::now();
+    // States whose window and arm words came from two publications.
+    let mut mixed = 0_u64;
     while !done.load(Ordering::Acquire) {
-        if let Some(observed) = reader.read() {
-            account_read(&reader, observed, &mut accounting);
+        if let Some(state) = reader.read_state() {
+            mixed += u64::from(!consistent_state(state));
+            if let Some(observed) = state.window {
+                account_read(&reader, observed, &mut accounting);
+            }
         }
         polls = polls.wrapping_add(1);
         if polls.is_multiple_of(STALL_CHECK_POLLS) {
@@ -170,6 +195,17 @@ fn a_million_windows_are_read_whole_and_in_order() {
         accounting.torn, 0,
         "{} of {} reads were torn",
         accounting.torn, accounting.reads
+    );
+    assert_eq!(
+        mixed, 0,
+        "{mixed} states paired a window with another publication's arm state"
+    );
+    assert_eq!(
+        reader
+            .read_state()
+            .map(|state| (state.armed, state.arm_sample, state.arm_tag)),
+        Some(arm(WINDOWS)),
+        "a quiescent state is the last arm"
     );
     assert_eq!(
         accounting.regressions, 0,
@@ -204,6 +240,11 @@ fn a_million_windows_are_read_whole_and_in_order() {
 fn a_stalled_reader_resumes_on_the_newest_window_with_a_counted_gap() {
     let (publisher, reader) = observation_slot();
     assert_eq!(reader.read(), None, "nothing published is absent, not zero");
+    assert_eq!(
+        reader.read_state(),
+        Some(ObservationState::default()),
+        "before any arm a tap is unarmed, at sample 0 with tag 0"
+    );
 
     publisher.publish(window(1));
     let first = reader.read().expect("first window");

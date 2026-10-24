@@ -18,6 +18,7 @@ pub(super) fn write_effect(
         tap_index,
         armed,
         window_blocks,
+        ..
     } = record
     {
         producer

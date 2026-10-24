@@ -509,6 +509,7 @@ fn push(console: &mut Console, channel: usize, record: EffectControlRecord) {
         tap_index,
         armed,
         window_blocks,
+        ..
     } = record
     {
         producer
@@ -552,6 +553,7 @@ fn run(backend: Backend) -> Run {
                 tap_index: 0,
                 armed: true,
                 window_blocks: 1,
+                arm_tag: 0,
             },
         );
     }

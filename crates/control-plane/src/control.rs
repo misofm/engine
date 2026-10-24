@@ -961,10 +961,6 @@ pub struct SessionState<A: ControlAdapter> {
     /// The most observation slots any committed plan has had; the ended-event cells and the
     /// binding table are charged for it (#1676 D2).
     pub(crate) observation_slots_high_water: usize,
-    /// The observation records the last rebuild queued again on the plan it published, taken
-    /// from the candidate it superseded (#1310, root ruling B15-Q4); empty after a rebuild that
-    /// superseded nothing.
-    pub(crate) observation_forwarded: Vec<ObservationForward>,
     /// The live send moves that may still ramp, as one conservative window (root ruling B19-R7,
     /// the B17-R14 pattern; #1718 deletes it): `None` when none may.
     pub(crate) send_moves: Option<SendMoveWindow>,
@@ -1304,11 +1300,8 @@ fn tap_key_of(
 }
 
 /// One observation record a superseded candidate's queue held, as it is queued again on its
-/// replacement's matching instance (#1310, root ruling B15-Q4).
-///
-/// A host that keeps its own copy of each plan's armed taps reads them through
-/// [`SessionState::observation_forwarded`] and copies them onto the replacement's copy, as it does
-/// for a record it admitted itself.
+/// replacement's matching instance (#1310, root ruling B15-Q4). No host mirrors it: render
+/// publishes each tap's arm state in its slot when it drains the record (#1585 D3).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ObservationForward {
     /// The replacement's effect producer, a position in [`SessionState::effect_producers`].
@@ -3939,8 +3932,6 @@ where
                 slot.queued = true;
             }
         }
-        // A move: the list was built before the commit.
-        self.observation_forwarded = forwards;
         // #1593 D4: the configuration the successor was prepared with is the session's from now
         // on; its epoch is the one the candidate's captures report at promotion.
         let configured_epoch = self.spectrum.commit(spectrum_configuration);
@@ -5306,16 +5297,6 @@ where
     #[must_use]
     pub fn master_strip(&self) -> Option<&session::StableId> {
         self.monitor.master()
-    }
-
-    /// The observation records the last rebuild queued again on the plan it published, from the
-    /// unadopted candidate it superseded (#1310, root ruling B15-Q4), each with the tap's bound state.
-    /// Read right after a structural command publishes a plan; empty when it superseded nothing.
-    /// A host that mirrors each plan's armed taps copies these onto the new plan's mirror, as for a
-    /// record it admitted: the plan arms them at its first block, whatever its carry brings.
-    #[must_use]
-    pub fn observation_forwarded(&self) -> &[ObservationForward] {
-        &self.observation_forwarded
     }
 
     /// The taps the host has armed (#1584 D6a), for a test or an adapter that reports them.

@@ -284,6 +284,7 @@ impl World {
             tap_index,
             armed,
             window_blocks,
+            ..
         } = record
         {
             self.writers[lane]
@@ -489,6 +490,7 @@ const fn observe(armed: bool) -> EffectControlRecord {
         tap_index: 0,
         armed,
         window_blocks: 1,
+        arm_tag: 0,
     }
 }
 

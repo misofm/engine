@@ -131,6 +131,9 @@ pub enum EffectControlRecord {
         armed: bool,
         /// Render blocks per published window, or `0` for the plan's default.
         window_blocks: u32,
+        /// The tag of the edit this record carries out, which render publishes in the tap's slot
+        /// with its arm state (#1585 D1, D3); `0` means no tag.
+        arm_tag: u64,
     },
     /// Set this instance's live bypass, with the crossfade ramp that carries it.
     ///
@@ -558,6 +561,8 @@ impl EffectCellWriter {
                 tap_index,
                 armed,
                 window_blocks,
+                // #1585a: no writer issues a tag yet; #1585b passes the edit's.
+                arm_tag: 0,
             })
             .map_err(ObservePushError::Full)
     }
@@ -1476,11 +1481,12 @@ pub fn apply_observe(
         tap_index,
         armed,
         window_blocks,
+        arm_tag,
     } = record
     else {
         return false;
     };
-    observation.is_some_and(|lane| lane.arm(tap_index, armed, window_blocks, first_sample))
+    observation.is_some_and(|lane| lane.arm(tap_index, armed, window_blocks, first_sample, arm_tag))
 }
 // REALTIME_POLICY_END
 
@@ -1510,6 +1516,11 @@ struct ObservationTap {
     /// [`ObservationLane::disarm_all`]. Part of the tap's state, so [`ObservationLane::swap_state`]
     /// moves it with the rest and a carried tap's own state replaces it whole.
     start_pending: bool,
+    /// The first sample of the block that applied the tap's last arm or disarm, as its slot
+    /// publishes it (#1585 R2). A prepared arm's is set by its first accumulated block.
+    arm_sample: u64,
+    /// The tag of the record that last armed or disarmed the tap, `0` for none (#1585 R2).
+    arm_tag: u64,
     /// Blocks per published window; never zero once armed.
     window_blocks: u32,
     blocks: u32,
@@ -1541,8 +1552,8 @@ pub struct ObservationLane {
     /// every tap. The publish gate runs on the render thread once per driven effect (or once per
     /// bank slot) per block, so a walk there would make the level-2 zero cost O(taps) exactly
     /// where #143 promises one predicted branch. `armed` on the tap stays the authority for what
-    /// a tap *does*; this is only a redundant count of it, and `arm`/`disarm_all` are the only
-    /// two writers of either.
+    /// a tap *does*; this is only a redundant count of it, and `set_arm` (behind `arm` and
+    /// `arm_prepared`) and `disarm_all` are the only two writers of either.
     armed_count: u32,
 }
 
@@ -1568,6 +1579,8 @@ impl ObservationLane {
                 fold: descriptor.fold,
                 armed: false,
                 start_pending: false,
+                arm_sample: 0,
+                arm_tag: 0,
                 window_blocks: default_window_blocks,
                 blocks: 0,
                 first_sample: 0,
@@ -1633,20 +1646,39 @@ impl ObservationLane {
     /// drained the record -- the exact `applied_at_sample` the subscription was acknowledged with.
     /// A re-arm is idempotent except that the newer `window_blocks` wins and the window restarts,
     /// so a consumer never folds two different window lengths into one reading.
+    ///
+    /// The tap's slot publishes the new arm state, `armed` at `first_sample` with `arm_tag`, in one
+    /// publication (#1585 D3): render is the one writer of a tap's arm state, and this is where it
+    /// writes it. The window the slot holds is kept.
     pub fn arm(
         &mut self,
         tap_index: u32,
         armed: bool,
         window_blocks: u32,
         first_sample: u64,
+        arm_tag: u64,
     ) -> bool {
-        let default = self.default_window_blocks;
-        let Some(tap) = usize::try_from(tap_index)
-            .ok()
-            .and_then(|index| self.taps.get_mut(index))
-        else {
+        let Some(tap) = self.set_arm(tap_index, armed, window_blocks, first_sample, arm_tag) else {
             return false;
         };
+        tap.publisher.publish_arm(armed, first_sample, arm_tag);
+        true
+    }
+
+    /// Set tap `tap_index`'s arm state and restart its window at `first_sample`, publishing
+    /// nothing; `None` for an index this lane has no tap for.
+    fn set_arm(
+        &mut self,
+        tap_index: u32,
+        armed: bool,
+        window_blocks: u32,
+        first_sample: u64,
+        arm_tag: u64,
+    ) -> Option<&mut ObservationTap> {
+        let default = self.default_window_blocks;
+        let tap = usize::try_from(tap_index)
+            .ok()
+            .and_then(|index| self.taps.get_mut(index))?;
         // Maintained across the transition, not recomputed: a re-arm of an already-armed tap is
         // idempotent here exactly as it is for `armed` itself.
         match (tap.armed, armed) {
@@ -1656,6 +1688,8 @@ impl ObservationLane {
         }
         tap.armed = armed;
         tap.start_pending = false;
+        tap.arm_sample = first_sample;
+        tap.arm_tag = arm_tag;
         tap.window_blocks = if window_blocks == 0 {
             default
         } else {
@@ -1666,7 +1700,7 @@ impl ObservationLane {
         tap.end_sample = first_sample;
         tap.peak_left = 0.0;
         tap.peak_right = 0.0;
-        true
+        Some(tap)
     }
 
     /// Arm `tap_index` at preparation, before the plan has rendered a block (#1584 D6a).
@@ -1681,16 +1715,16 @@ impl ObservationLane {
     ///
     /// A zero `window_blocks` means the lane's default, as in [`Self::arm`]. Returns `false` for an
     /// index this lane has no tap for. Off the render thread, before the plan is published.
+    ///
+    /// The slot publishes nothing here: render is the one writer of a tap's arm state (#1585 D3),
+    /// so the tap's first accumulated block publishes it armed at that block's first sample. Until
+    /// that block a reader sees the slot unarmed (#1585 R4).
     pub fn arm_prepared(&mut self, tap_index: u32, window_blocks: u32) -> bool {
-        if !self.arm(tap_index, true, window_blocks, 0) {
+        // #1585a: no tag yet; #1585b passes the binding's.
+        let Some(tap) = self.set_arm(tap_index, true, window_blocks, 0, 0) else {
             return false;
-        }
-        if let Some(tap) = usize::try_from(tap_index)
-            .ok()
-            .and_then(|index| self.taps.get_mut(index))
-        {
-            tap.start_pending = true;
-        }
+        };
+        tap.start_pending = true;
         true
     }
 
@@ -1699,6 +1733,9 @@ impl ObservationLane {
     /// A plan replacement drops subscriptions because the plan they addressed is gone; the app
     /// re-subscribes against the new plan. Disarming here is the same operation an explicit
     /// unsubscribe performs, so there is one code path and one meaning.
+    ///
+    /// The slots publish nothing (#1585 R2): this runs on a retired plan's lanes, whose slots no
+    /// live reader reads, and only render writes a tap's arm state.
     pub fn disarm_all(&mut self) {
         self.armed_count = 0;
         for tap in self.taps.iter_mut() {
@@ -1789,6 +1826,10 @@ impl ObservationLane {
         if tap.start_pending {
             tap.start_pending = false;
             tap.first_sample = first_sample;
+            // #1585 R2: the prepared arm's state reaches its slot here, from render, as a record's
+            // would at the block that drained it.
+            tap.arm_sample = first_sample;
+            tap.publisher.publish_arm(true, tap.arm_sample, tap.arm_tag);
         }
         // `first_sample` is otherwise **not** taken from the block. It was set when the tap was
         // armed and it is set again to `end_sample` when a window closes, so consecutive windows

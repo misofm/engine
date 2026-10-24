@@ -499,7 +499,7 @@ impl World {
                     ObservationLane::new(&TAPS, vec![first, second], 2).expect("taps");
                 // Every other strip has its first tap armed at preparation.
                 if (chain * lanes + lane).is_multiple_of(2) {
-                    observation.arm(0, true, 2, 0);
+                    observation.arm(0, true, 2, 0, 0);
                 }
                 observations.push(Some(observation));
             }
