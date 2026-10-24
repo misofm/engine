@@ -88,6 +88,9 @@ impl ControlAdapter for CapiAdapter {
     const OBSERVE_EDIT: bool = true;
     /// The control plane serves the C ABI's meter batches from its own delivery (#1583 R2).
     const METER_DELIVERY: bool = true;
+    /// The C ABI reads spectrum through `miso_engine_v1_submit_command` (#1595 R1, R2): its
+    /// sessions advertise the three spectrum commands and capability bit 16.
+    const SPECTRUM: bool = true;
 }
 
 /// capi's preparation (issue #1400 D3): the live request with observation capacity for every

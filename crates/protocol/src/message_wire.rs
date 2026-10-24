@@ -58,7 +58,10 @@ impl CapabilityFlags {
     pub const B4_BASE: Self = Self(((1 << 15) - 1) & !(1 << 5));
     /// Reliable session-committed event support.
     pub const SESSION_EVENT_STREAM: Self = Self(1 << 12);
-    const KNOWN: u64 = ((1 << 15) - 1) & !(1 << 5);
+    /// The spectrum commands `SPECTRUM_CONFIGURE`, `SPECTRUM_CAPTURE` and `SPECTRUM_STREAM`
+    /// (#1594 D10, #1595 D8): set exactly when all three are listed.
+    pub const SPECTRUM: Self = Self(1 << 16);
+    const KNOWN: u64 = (((1 << 15) - 1) & !(1 << 5)) | Self::SPECTRUM.0;
 }
 
 /// All 23 fields of a successful `CAPABILITIES_GET` response.
@@ -417,13 +420,14 @@ pub(crate) use response::{write_response_request, write_response_result};
 mod spectrum;
 pub use spectrum::{
     SPECTRUM_CAPTURE_BIN_COUNT, SPECTRUM_CAPTURE_WINDOW_FRAMES, SPECTRUM_HOP_FRAMES,
-    SPECTRUM_TARGET_ID_MAXIMUM_BYTES, SpectrumCaptureReply, SpectrumCaptureRequest,
-    SpectrumCaptureStatus, SpectrumCaptureWindow, SpectrumConfigureRequest, SpectrumConfigured,
-    SpectrumEntry, SpectrumForm, SpectrumTargetKind,
+    SPECTRUM_SMOOTHING_MAXIMUM_MS, SPECTRUM_TARGET_ID_MAXIMUM_BYTES, SpectrumCaptureReply,
+    SpectrumCaptureRequest, SpectrumCaptureStatus, SpectrumCaptureWindow, SpectrumConfigureRequest,
+    SpectrumConfigured, SpectrumEntry, SpectrumForm, SpectrumStreamBins, SpectrumStreamReply,
+    SpectrumStreamRequest, SpectrumStreamStatus, SpectrumStreamTarget, SpectrumTargetKind,
 };
 pub(crate) use spectrum::{
     write_spectrum_capture_reply, write_spectrum_capture_request, write_spectrum_configure_request,
-    write_spectrum_configured,
+    write_spectrum_configured, write_spectrum_stream_reply, write_spectrum_stream_request,
 };
 
 control_code_table! {
@@ -4455,6 +4459,11 @@ fn check_capabilities_invariants(value: CapabilityInvariantView<'_>) -> Result<(
         || ((value.flags.0 & CapabilityFlags::SESSION_EVENT_STREAM.0 != 0) != session_family)
         || ((value.flags.0 & (1 << 13) != 0) != (has_command(0x0008) && has_event(0x8010)))
         || ((value.flags.0 & (1 << 14) != 0) != has_command(0x000e))
+        // The three spectrum commands are listed together or not at all, and bit 16 says so
+        // (#1594 D10, #1595 D8a).
+        || ((value.flags.0 & CapabilityFlags::SPECTRUM.0 != 0) != has_command(0x0010))
+        || (has_command(0x0010) != has_command(0x0011))
+        || (has_command(0x0010) != has_command(0x0012))
         // `SESSION_REPLACE` rides the session family and has no flag bit of its own (#1386).
         || (has_command(0x0013) && !session_family)
         || (has_command(0x0003) != has_event(0x8001))
@@ -4476,9 +4485,10 @@ fn allocated_id(id: u16, event: bool) -> bool {
             && !crate::wire::is_retired_message_id(id)
     } else {
         // `0x0004`, `0x0005` and `0x0006` are retired: never allocated again, never advertised.
-        // `0x0010` is `SPECTRUM_CONFIGURE` (#1594), `0x0011` is `SPECTRUM_CAPTURE` (#1595) and
-        // `0x0013` is `SESSION_REPLACE` (#1386); `0x000f` and `0x0012` are claimed, not allocated.
-        matches!(id, 1..=14 | 0x0010 | 0x0011 | 0x0013) && !crate::wire::is_retired_message_id(id)
+        // `0x0010` is `SPECTRUM_CONFIGURE` (#1594), `0x0011` and `0x0012` are `SPECTRUM_CAPTURE`
+        // and `SPECTRUM_STREAM` (#1595) and `0x0013` is `SESSION_REPLACE` (#1386); `0x000f` is
+        // claimed, not allocated.
+        matches!(id, 1..=14 | 0x0010..=0x0013) && !crate::wire::is_retired_message_id(id)
     }
 }
 

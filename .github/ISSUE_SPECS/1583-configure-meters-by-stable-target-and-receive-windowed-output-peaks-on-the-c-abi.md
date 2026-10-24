@@ -308,3 +308,7 @@ Tests (each recorded red on a mutant, then green):
   #1570a per-block peak test (`plan.rs`, D6) and the output half of the #1581 C ABI meter test
   (superseded by gates 3 and 7). The #1348/#1351 service-step tests now probe with the windowed
   meter or with counters.
+- Re-pin after #1595b (#1963): on the merged tree `COMPLETE_SCHEMA_HASH` moves `c146e8fad0b26299`
+  -> `480ffcf546bea7fb`. A frame-by-frame dump of the corpus against main's: only
+  `command.telemetry_configure`, `response.telemetry` and `event.meter_batch` differ; the 51
+  others are byte-equal. 54 frames.

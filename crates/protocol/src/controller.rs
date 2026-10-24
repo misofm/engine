@@ -27,10 +27,10 @@ use crate::{
     ProtocolQueues, QueueReport, ReliablePayload, ReliableSlot, RequestId, ResponseGetRequest,
     ResponseResult, SampleTime, SessionCommitted, SessionEdit, SessionReplaceRequest,
     SessionRevision, SessionSnapshot, SessionStore, SessionStoreError, SpectrumCaptureReply,
-    SpectrumCaptureRequest, SpectrumConfigureRequest, SpectrumConfigured, StatusCode,
-    SuccessResponsePayload, TelemetryConfiguration, TelemetryKey, TelemetryRecord,
-    TransactionApplied, TransportSetRequest, TransportSnapshot, TransportStateEvent,
-    TypedEventFrame, TypedNonOkResponseFrame, TypedSuccessResponseFrame,
+    SpectrumCaptureRequest, SpectrumConfigureRequest, SpectrumConfigured, SpectrumStreamReply,
+    SpectrumStreamRequest, StatusCode, SuccessResponsePayload, TelemetryConfiguration,
+    TelemetryKey, TelemetryRecord, TransactionApplied, TransportSetRequest, TransportSnapshot,
+    TransportStateEvent, TypedEventFrame, TypedNonOkResponseFrame, TypedSuccessResponseFrame,
 };
 #[cfg(any(test, feature = "test-support"))]
 use crate::{
@@ -201,6 +201,10 @@ pub struct ProviderFeatures {
     /// `OBSERVATION_ENDED` (#1584): a host that keeps observation subscriptions tells its
     /// subscribers when one ends. It rides the session family, so it needs `session_events`.
     pub observation_events: bool,
+    /// `SPECTRUM_CONFIGURE`, `SPECTRUM_CAPTURE` and `SPECTRUM_STREAM` (capability flag bit 16;
+    /// #1594 D10, #1595 D8): a host whose session serves the spectrum reads on its own transport
+    /// advertises the three together.
+    pub spectrum: bool,
 }
 
 impl ProviderFeatures {
@@ -215,6 +219,7 @@ impl ProviderFeatures {
         session_events: true,
         transport_events: true,
         observation_events: true,
+        spectrum: true,
     };
     /// Disable every optional provider and event family.
     pub const NONE: Self = Self {
@@ -227,6 +232,7 @@ impl ProviderFeatures {
         session_events: false,
         transport_events: false,
         observation_events: false,
+        spectrum: false,
     };
 }
 
@@ -1118,6 +1124,11 @@ pub enum ControlCommand<'a> {
     SpectrumCapture {
         request: SpectrumCaptureRequest,
     },
+    /// `SPECTRUM_STREAM` (#1595): executed by the session, refused here as
+    /// [`Self::SpectrumConfigure`] is.
+    SpectrumStream {
+        request: SpectrumStreamRequest,
+    },
 }
 
 impl ControlCommand<'_> {
@@ -1147,6 +1158,7 @@ impl ControlCommand<'_> {
             Self::SessionReplace { .. } => MessageId::SessionReplace,
             Self::SpectrumConfigure { .. } => MessageId::SpectrumConfigure,
             Self::SpectrumCapture { .. } => MessageId::SpectrumCapture,
+            Self::SpectrumStream { .. } => MessageId::SpectrumStream,
         }
     }
 }
@@ -1179,7 +1191,7 @@ pub struct ControllerResponse {
 
 #[derive(Clone, Copy)]
 struct CapabilitySet {
-    commands: [u16; 13],
+    commands: [u16; 16],
     command_len: u8,
     events: [u16; 6],
     event_len: u8,
@@ -1302,12 +1314,14 @@ impl PreparedImmediateCommandFrame {
 
 /// The decoded payload of a command the session executes (#1594 D9). One variant per such
 /// command.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum SessionCommand {
     /// `SPECTRUM_CONFIGURE`.
     SpectrumConfigure(SpectrumConfigureRequest),
     /// `SPECTRUM_CAPTURE` (#1595).
     SpectrumCapture(SpectrumCaptureRequest),
+    /// `SPECTRUM_STREAM` (#1595).
+    SpectrumStream(SpectrumStreamRequest),
 }
 
 /// The success reply of a command the session executed. A reply borrows what it carries (a
@@ -1318,6 +1332,8 @@ pub enum SessionCommandReply<'a> {
     SpectrumConfigured(SpectrumConfigured),
     /// The `SPECTRUM_CAPTURE` reply.
     SpectrumCaptured(SpectrumCaptureReply<'a>),
+    /// The `SPECTRUM_STREAM` reply.
+    SpectrumStreamed(SpectrumStreamReply<'a>),
 }
 
 /// A command the session executes, decoded and checked, whose replay entry is planned against
@@ -1882,6 +1898,9 @@ impl<P: ControlProvider> ProtocolController<P> {
             DecodedCommandPayload::SpectrumCapture(request) => {
                 ControlCommand::SpectrumCapture { request }
             }
+            DecodedCommandPayload::SpectrumStream(request) => {
+                ControlCommand::SpectrumStream { request }
+            }
         };
         Ok(self.process(ControllerRequest {
             request_id: header.request_id,
@@ -2109,7 +2128,7 @@ impl<P: ControlProvider> ProtocolController<P> {
     ) -> Result<PreparedCommandFrame, CommandFrameProcessError> {
         if matches!(
             header.message_id,
-            MessageId::SpectrumConfigure | MessageId::SpectrumCapture
+            MessageId::SpectrumConfigure | MessageId::SpectrumCapture | MessageId::SpectrumStream
         ) {
             return self.prepare_session_command(input, scratch, output_capacity, header);
         }
@@ -2172,6 +2191,9 @@ impl<P: ControlProvider> ProtocolController<P> {
                 }
                 DecodedCommandPayload::SpectrumCapture(request) => {
                     SessionCommand::SpectrumCapture(request)
+                }
+                DecodedCommandPayload::SpectrumStream(request) => {
+                    SessionCommand::SpectrumStream(request)
                 }
                 _ => {
                     let outcome = refusal(self, StatusCode::Internal);
@@ -2256,38 +2278,56 @@ impl<P: ControlProvider> ProtocolController<P> {
                 debug_assert_eq!(value.revision, self.session.revision().0);
                 Body::SpectrumConfigured(value)
             }
-            // A capture reply borrows its planes, so it is encoded here rather than held as a
+            // A read's reply borrows its planes, so it is encoded here rather than held as a
             // body; a reply the codec refuses answers `INTERNAL` as an encoder fault does.
             SessionCommandReply::SpectrumCaptured(value) => {
-                let frame = TypedSuccessResponseFrame {
-                    request_id: prepared.request_id,
-                    revision: self.session.revision(),
-                    payload: SuccessResponsePayload::SpectrumCaptured(value),
-                };
-                return self.complete_session_encoded(prepared, output, |controller, output| {
-                    match controller
-                        .codec
-                        .encode_success_response_frame_into(&frame, output)
-                    {
-                        Err(EncodeError::OutputTooSmall { required }) => {
-                            Err(EncodeError::OutputTooSmall { required })
-                        }
-                        Err(_) => {
-                            let fallback = controller.encode_failure_outcome();
-                            controller.encode_outcome_into(
-                                MessageId::SpectrumCapture,
-                                frame.request_id,
-                                fallback,
-                                output,
-                            )
-                        }
-                        Ok(written) => Ok(written),
-                    }
-                });
+                return self.complete_session_borrowed(
+                    prepared,
+                    SuccessResponsePayload::SpectrumCaptured(value),
+                    output,
+                );
+            }
+            SessionCommandReply::SpectrumStreamed(value) => {
+                return self.complete_session_borrowed(
+                    prepared,
+                    SuccessResponsePayload::SpectrumStreamed(value),
+                    output,
+                );
             }
         };
         let outcome = self.ok(body);
         self.complete_session_outcome(prepared, outcome, output)
+    }
+
+    /// Encode a success `payload` that borrows the session's words straight into `output`, then
+    /// record it for replay; a payload the codec refuses answers `INTERNAL`.
+    fn complete_session_borrowed(
+        &mut self,
+        prepared: PreparedSessionCommand,
+        payload: SuccessResponsePayload<'_>,
+        output: &mut [u8],
+    ) -> Result<usize, CommandFrameProcessError> {
+        let message_id = prepared.message_id;
+        let frame = TypedSuccessResponseFrame {
+            request_id: prepared.request_id,
+            revision: self.session.revision(),
+            payload,
+        };
+        self.complete_session_encoded(prepared, output, |controller, output| {
+            match controller
+                .codec
+                .encode_success_response_frame_into(&frame, output)
+            {
+                Err(EncodeError::OutputTooSmall { required }) => {
+                    Err(EncodeError::OutputTooSmall { required })
+                }
+                Err(_) => {
+                    let fallback = controller.encode_failure_outcome();
+                    controller.encode_outcome_into(message_id, frame.request_id, fallback, output)
+                }
+                Ok(written) => Ok(written),
+            }
+        })
     }
 
     /// Complete a command the session refused (#1594 D9) with `status` and the one diagnostic
@@ -3141,6 +3181,9 @@ impl<P: ControlProvider> ProtocolController<P> {
             DecodedCommandPayload::SpectrumCapture(request) => {
                 ControlCommand::SpectrumCapture { request }
             }
+            DecodedCommandPayload::SpectrumStream(request) => {
+                ControlCommand::SpectrumStream { request }
+            }
         };
         self.execute(&ControllerRequest {
             request_id: header.request_id,
@@ -3937,9 +3980,9 @@ impl<P: ControlProvider> ProtocolController<P> {
                 Ok(_) => self.non_ok(StatusCode::Internal, None),
             },
             // The session executes it (#1594 D9); this path has none.
-            ControlCommand::SpectrumConfigure { .. } | ControlCommand::SpectrumCapture { .. } => {
-                self.non_ok(StatusCode::Unavailable, None)
-            }
+            ControlCommand::SpectrumConfigure { .. }
+            | ControlCommand::SpectrumCapture { .. }
+            | ControlCommand::SpectrumStream { .. } => self.non_ok(StatusCode::Unavailable, None),
             ControlCommand::ControlListGet { request } => {
                 match self.provider.control_list(request) {
                     Ok(page) => match self.fit_control_list(page) {
@@ -4392,12 +4435,11 @@ impl<P: ControlProvider> ProtocolController<P> {
         let features = self.config.provider_features;
         let session_transactions =
             features.session_events && self.config.maximum_transaction_edits != 0;
-        let mut commands = [0_u16; 13];
+        let mut commands = [0_u16; 16];
         let mut command_len = 0_usize;
-        // `0x000f`, `0x0011` and `0x0012` are claimed by open specs and never advertised until
-        // they land. `0x0010` is served by a host session and not advertised until #1595 sets
-        // its capability bit (#1594 R3).
-        for id in (1_u16..=14).chain([0x0013]) {
+        // `0x000f` is claimed by an open spec and never advertised until it lands. The three
+        // spectrum commands are listed together, with bit 16, or not at all (#1595 D8).
+        for id in (1_u16..=14).chain([0x0010, 0x0011, 0x0012, 0x0013]) {
             let enabled = match id {
                 // The retired IDs are never advertised.
                 id if crate::RETIRED_MESSAGE_IDS.contains(&id) => false,
@@ -4408,6 +4450,7 @@ impl<P: ControlProvider> ProtocolController<P> {
                 11 => features.diagnostics,
                 12 | 13 => features.controls,
                 14 => features.response,
+                0x0010..=0x0012 => features.spectrum,
                 0x0013 => session_transactions && self.config.document_replace.is_some(),
                 _ => true,
             };
@@ -4462,6 +4505,9 @@ impl<P: ControlProvider> ProtocolController<P> {
         }
         if features.response {
             flags |= 1 << 14;
+        }
+        if features.spectrum {
+            flags |= CapabilityFlags::SPECTRUM.0;
         }
         CapabilitySet {
             commands,

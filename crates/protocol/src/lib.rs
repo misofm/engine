@@ -32,12 +32,13 @@ pub use message_wire::{
     RESPONSE_BYPASS_CONTROL, ResponseConfiguration, ResponseConfigurationKind, ResponseCurves,
     ResponseGetRequest, ResponseGrid, ResponseOverride, ResponseResult, ResponseTarget,
     SESSION_REPLACE_DIGEST_BYTES, SPECTRUM_CAPTURE_BIN_COUNT, SPECTRUM_CAPTURE_WINDOW_FRAMES,
-    SPECTRUM_HOP_FRAMES, SPECTRUM_TARGET_ID_MAXIMUM_BYTES, SessionCommitted, SessionReplaceRequest,
-    SessionSnapshot, SessionSnapshotRequest, SpectrumCaptureReply, SpectrumCaptureRequest,
-    SpectrumCaptureStatus, SpectrumCaptureWindow, SpectrumConfigureRequest, SpectrumConfigured,
-    SpectrumEntry, SpectrumForm, SpectrumTargetKind, TelemetryConfiguration, TransactionApplied,
-    TransportSetRequest, TransportSnapshot, TransportState, TransportStateEvent,
-    response_result_encoded_len,
+    SPECTRUM_HOP_FRAMES, SPECTRUM_SMOOTHING_MAXIMUM_MS, SPECTRUM_TARGET_ID_MAXIMUM_BYTES,
+    SessionCommitted, SessionReplaceRequest, SessionSnapshot, SessionSnapshotRequest,
+    SpectrumCaptureReply, SpectrumCaptureRequest, SpectrumCaptureStatus, SpectrumCaptureWindow,
+    SpectrumConfigureRequest, SpectrumConfigured, SpectrumEntry, SpectrumForm, SpectrumStreamBins,
+    SpectrumStreamReply, SpectrumStreamRequest, SpectrumStreamStatus, SpectrumStreamTarget,
+    SpectrumTargetKind, TelemetryConfiguration, TransactionApplied, TransportSetRequest,
+    TransportSnapshot, TransportState, TransportStateEvent, response_result_encoded_len,
 };
 /// The control core's address types, to name the address of a [`SessionEdit::SetControl`] and of a
 /// [`SessionEdit::Observe`].
