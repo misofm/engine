@@ -228,3 +228,35 @@ Commands: `cargo test --locked -p host-core --all-features`,
   74,752 and `builtin_retained_payload_bytes` 259,968 -> 334,720. An earlier invocation fed the
   48,000-frame source past its end and so mostly timed silence (8.9 / 14.7 us per block); it is
   discarded as a harness defect.
+- **T2 (attempt 1, 2026-10-24).** `OutputPeakObserver`, `OutputPeakReader`, `OutputPeakGate`,
+  `OutputPeakWindow`, `output_peak_meter` and `METER_QUEUE_DEPTH` are in `host-core/src/meters.rs`
+  (D3). The fold is `meter_sample_peak_block` at the build's own width (`BankWidth::for_backend`,
+  the native banks' idiom, so only that width is instantiated), then the lanes' maximum and the
+  tail with the same kernel at `f32`. A window also closes on a gate change: the observer keeps the
+  gate value it opened under, so a deactivate-activate pair between two blocks discards the open
+  window. `PlanState` owns the observer (D4); the session keeps the reader and gate
+  (`take_output_meter`). The output window is `RuntimePreparer::meter_window_blocks` blocks, a new
+  default method that returns `0` (the core default); capi keeps the default, and T3 makes the
+  browser return its boot word so both meters tile one grid. `ProviderEpoch::meters` keeps each
+  plan's consumers (D6): builtins already charges the vector and rings in
+  `builtin_meter_payload_bytes`, so no row is added for them.
+- **Caps (T2, the root ruling made true).** `prepare_caps` gives the plan's meters what the output
+  meter leaves: one stream, `METER_QUEUE_DEPTH` items and its bytes (two `Arc<AtomicU64>`, the
+  queue header and slots). Caps below that share refuse before preparation with builtins' own
+  diagnostics (`$.meter_requests` for streams, `$.builtin_compile_caps` for items and bytes). The
+  same bytes are fixed control rows (`capi_resources`): a recorded conservative double charge, as
+  #1256 D4's.
+- **T2 reader and worklet evidence.** The reader hands out its queue (`windows_mut`) and the
+  dropped count; it has no pop of its own, so each owner pops under its own drain bound
+  (`available_at_entry`, the realtime-policy rule). The worklet render closure is unchanged in
+  `call_indirect` sites and passes the kernel-shape and allocation gates, but
+  `OutputPeakObserver::observe` is a new trap owner: it inlines the engine SPSC producer's checked
+  slot index (`slots[local]`, unreachable by the cursor invariant), the same site
+  `RealtimePlanOwner::enter_block` is admitted for. Admitting it needs
+  `--trap-owner 18OutputPeakObserver7observe` in `scripts/check-web-audioworklet.sh`, outside
+  T2's paths; with that one argument (a scratch-worktree probe) the whole worklet check passes.
+- **Successor obligations (T2 verdict).** T3: the browser overrides
+  `RuntimePreparer::meter_window_blocks` with its boot word, so its output windows tile its strip
+  meters' grid. #1583: the C ABI exposes `OutputPeakReader::dropped_windows()` beside the windows.
+  The worklet gate pins `OutputPeakObserver::observe` to its one trap site
+  (`--trap-owner 18OutputPeakObserver7observe=1`).

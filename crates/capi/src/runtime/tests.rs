@@ -687,10 +687,12 @@ fn render_parity_shape(track_count: usize, sample_rate_hz: u32) {
     }
 }
 
-/// The caller's meter caps bound the core's strip meters (#1581 D2): one stream per strip. A cap
-/// of one stream refuses a session of more strips, with the builtin compiler's own diagnostic.
+/// The caller's meter caps bound every meter stream (#1581, root caps ruling): one per strip plus
+/// the output. A cap of one stream per strip refuses the session, with the builtin compiler's own
+/// diagnostic, and one more stream admits it.
 ///
-/// Test value: red if the core's meters escape the caller's caps, or if the refusal loses its code.
+/// Test value: red if the core's strip meters or its output meter escape the caller's caps, or if
+/// the refusal loses its code.
 #[test]
 fn a_meter_cap_below_the_strip_count_is_refused() {
     let strips = parse_session_json(SESSION)
@@ -699,15 +701,125 @@ fn a_meter_cap_below_the_strip_count_is_refused() {
         .count();
     assert!(strips > 1, "the reference session has several strips");
     let mut small = limits();
-    small.maximum_meter_streams = 1;
+    small.maximum_meter_streams = strips as u64;
     let failure = compile_children(SESSION, small)
         .err()
-        .expect("one meter stream cannot meter every strip");
+        .expect("one meter stream per strip leaves none for the output");
     let diagnostics = String::from_utf8_lossy(&failure.diagnostics);
     assert!(
         diagnostics.contains("builtin.resource.limit\t$.meter_requests"),
         "{diagnostics}"
     );
+    small.maximum_meter_streams += 1;
+    assert!(
+        compile_children(SESSION, small).is_ok(),
+        "strips plus the output fit"
+    );
+}
+
+/// #1581 gates 6 and 7 on the C ABI: a two-strip plan's provider epoch keeps one post-matrix meter
+/// consumer per strip, in strip order, and its resource row counts their bytes; and with the
+/// session's output gate active, the C ABI render call meters the output without one allocation
+/// or free, in windows that tile from the activation sample and peak as a scalar fold of the
+/// rendered planes.
+///
+/// Test value: red if the C ABI still drops its meter handles, if its render call passes the output
+/// meter the wrong planes or samples, or if the output meter allocates on render.
+#[test]
+fn a_c_abi_plan_keeps_its_strip_meters_and_meters_its_output_without_allocating() {
+    bench_support::alloc::assert_installed();
+    let mut model = stateless_session(48_000);
+    model.tracks.truncate(2);
+    model.routes.truncate(2);
+    assert!(model.submixes.is_empty());
+    let document = session::canonical_session_json(&model).expect("two-strip session");
+    let mut children = compile_children(&document, limits()).expect("children");
+    let meters: Vec<(String, builtins::MeterTap)> = children
+        .session
+        .test_providers()
+        .test_meters()
+        .iter()
+        .map(|meter| (meter.track_id.to_string(), meter.tap))
+        .collect();
+    let strips: Vec<(String, builtins::MeterTap)> = model
+        .strips()
+        .map(|strip| (strip.id.as_str().to_owned(), builtins::MeterTap::PostMatrix))
+        .collect();
+    assert_eq!(meters, strips, "one post-matrix meter per strip");
+    assert!(children.plan.resources().builtin_meter_payload_bytes > 0);
+
+    let (mut reader, gate) = children
+        .session
+        .take_output_meter()
+        .expect("the output meter");
+    assert!(
+        children.session.take_output_meter().is_none(),
+        "handed out once"
+    );
+    let window = u64::from(host_core::default_meter_window_blocks(48_000, 128).get()) * 128;
+    let session = Box::into_raw(Box::new(crate::Session::new(
+        children.session,
+        children.session_error,
+    )));
+    let plan = Box::into_raw(Box::new(crate::Plan::new(children.plan)));
+    // A warm-up block before the activation, so process statics are warm and nothing is metered.
+    let (left, right) = continuity_block(0, 0);
+    submit_c(session, 1, 0, 48_000, &left, &right, false);
+    render_c(plan, 0);
+    gate.activate(128);
+    let blocks = 2 * window / 128 + 1;
+    let mut rendered = Vec::new();
+    for block in 1..=blocks {
+        let (left, right) = continuity_block(block, 0);
+        submit_c(session, 1, block * 128, 48_000, &left, &right, false);
+        let mut pcm = vec![f32::NAN; 256];
+        let output = crate::PlanarOutput {
+            struct_size: crate::PLANAR_OUTPUT_SIZE,
+            channels: 2,
+            samples: pcm.as_mut_ptr(),
+            sample_capacity: pcm.len() as u64,
+            frames: 128,
+            plane_stride_samples: 128,
+            reserved: [0; 2],
+        };
+        let mark = bench_support::alloc::current_thread_counters();
+        let result = crate::ffi::test_render(plan, block * 128, &output);
+        let used = bench_support::alloc::current_thread_delta_since(mark);
+        assert_eq!(result, crate::RESULT_OK);
+        assert_eq!(
+            (used.allocations, used.deallocations),
+            (0, 0),
+            "block {block} allocated or freed"
+        );
+        rendered.push(pcm);
+    }
+    let fold = |plane: usize, start: u64, end: u64| {
+        (start..end).fold(0.0_f32, |peak, sample| {
+            let pcm = &rendered[(sample / 128 - 1) as usize];
+            let magnitude = pcm[plane * 128 + (sample % 128) as usize].abs();
+            let magnitude = if (f32::MIN_POSITIVE..f32::INFINITY).contains(&magnitude) {
+                magnitude
+            } else {
+                0.0
+            };
+            if magnitude > peak { magnitude } else { peak }
+        })
+    };
+    let mut start = 128;
+    for _ in 0..2 {
+        let measured = reader.windows_mut().try_pop().expect("a closed window");
+        assert_eq!(
+            (measured.start_sample, measured.end_sample),
+            (start, start + window)
+        );
+        let peak = [0, 1].map(|plane| fold(plane, start, start + window));
+        assert!(peak[0] > 0.0 && peak[1] > 0.0, "the source plays");
+        assert_eq!(measured.peak.map(f32::to_bits), peak.map(f32::to_bits));
+        start += window;
+    }
+    assert!(reader.windows_mut().try_pop().is_err());
+    crate::ffi::test_plan_destroy(plan);
+    crate::ffi::test_session_destroy(session);
 }
 
 #[test]
