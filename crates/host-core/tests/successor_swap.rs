@@ -7767,6 +7767,8 @@ mod meter_carry {
         streams: BTreeMap<Key, Vec<MeterSnapshot>>,
         /// The successor's carry record after the swap block ([`Reader::Paired`] only).
         carries: Vec<ObserverCarry>,
+        /// The successor's preparation-time pairing list (#1674 R1).
+        pairing: Vec<ObserverCarry>,
     }
 
     fn drain(consumers: &mut [MeterConsumer], streams: &mut BTreeMap<Key, Vec<MeterSnapshot>>) {
@@ -7860,6 +7862,7 @@ mod meter_carry {
         let PreparedHost {
             mut plan,
             sources: mut b_sources,
+            inventory: b_inventory,
             ..
         } = b_prepared;
         plan.take_revision_gate()
@@ -7898,6 +7901,7 @@ mod meter_carry {
             blocks,
             streams,
             carries,
+            pairing: b_inventory.observer_pairing().to_vec(),
         }
     }
 
@@ -8047,6 +8051,10 @@ mod meter_carry {
                 run.carries.len(),
                 a_meters.len(),
                 "one record per carried meter"
+            );
+            assert_eq!(
+                run.pairing, run.carries,
+                "#1674 R1: the preparation-time list names the swap block's record"
             );
             for carry in &run.carries {
                 assert_eq!(carry.kind, ObserverKind::Meter);

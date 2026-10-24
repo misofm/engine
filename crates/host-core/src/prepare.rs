@@ -837,6 +837,9 @@ pub struct PlanStateInventory {
     spectrum_collection: bool,
     /// The captures this plan takes over from its predecessor (#1395 D3), built at preparation.
     spectrum_pairing: Box<[crate::spectrum::SpectrumPair]>,
+    /// The meters and taps this plan takes over from its predecessor (#1674 R1), built at
+    /// preparation.
+    observer_pairing: Box<[engine::realtime::ObserverCarry]>,
     /// One row per compensation line of the plan (#1283 D1), sorted by edge ID.
     delay_lines: Box<[graph::GraphDelayLine]>,
     /// One row per strip input alignment line of the plan (#1284 D1), sorted by strip ID.
@@ -1093,6 +1096,18 @@ impl PlanStateInventory {
         &self.spectrum_pairing
     }
 
+    /// The meter readers and effect observation readers this plan takes over from the plan it was
+    /// prepared to displace (#1674 R1): the records the control side pairs its readers by at
+    /// promotion, with [`pair_carried_meters`] and [`pair_carried_observations`], when the
+    /// adoption carried. Built at preparation from the meter and tap moves, in the order of the
+    /// swap block's record (the meters', then the taps'), so it names exactly the entries that
+    /// record names: observer and effect carries are all or nothing. Empty for a plan prepared
+    /// without a predecessor or one that carries no meter or tap.
+    #[must_use]
+    pub fn observer_pairing(&self) -> &[engine::realtime::ObserverCarry] {
+        &self.observer_pairing
+    }
+
     /// Compensation line rows, one per delayed edge of the plan (#1283).
     #[must_use]
     pub fn delay_line_count(&self) -> usize {
@@ -1160,6 +1175,7 @@ impl PlanStateInventory {
             spectrum: Box::default(),
             spectrum_collection: false,
             spectrum_pairing: Box::default(),
+            observer_pairing: Box::default(),
             delay_lines: Box::default(),
             strip_delays: Box::default(),
             live_routes: Box::default(),
@@ -1198,6 +1214,7 @@ impl PlanStateInventory {
             spectrum: Box::default(),
             spectrum_collection: false,
             spectrum_pairing: Box::default(),
+            observer_pairing: Box::default(),
             delay_lines: Box::default(),
             strip_delays: Box::default(),
             live_routes: Box::default(),
@@ -1308,6 +1325,7 @@ impl PlanStateInventory {
                 + core::mem::size_of_val::<[ObservationInventoryRow]>(&self.observations)
                 + core::mem::size_of_val::<[SpectrumInventoryRow]>(&self.spectrum)
                 + core::mem::size_of_val::<[crate::spectrum::SpectrumPair]>(&self.spectrum_pairing)
+                + core::mem::size_of_val::<[engine::realtime::ObserverCarry]>(&self.observer_pairing)
                 + core::mem::size_of_val::<[graph::GraphDelayLine]>(&self.delay_lines)
                 + core::mem::size_of_val::<[graph::GraphStripDelayLine]>(&self.strip_delays)
                 + core::mem::size_of_val::<[graph::GraphLiveRoute]>(&self.live_routes)
@@ -3527,6 +3545,26 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
         }
         fade_arm_rows.sort_unstable_by(|left, right| left.id.cmp(&right.id));
     }
+    // #1674 R1: the readers the control side pairs at promotion, in the swap block's record
+    // order (the meters' moves, then the taps'), read before the moves go to the plan.
+    let observer_pairing: Box<[engine::realtime::ObserverCarry]> = meter_carry
+        .moves
+        .iter()
+        .map(|step| engine::realtime::ObserverCarry {
+            kind: step.kind,
+            successor: step.successor_entry,
+            predecessor: step.predecessor_entry,
+        })
+        .chain(
+            observation_carry
+                .iter()
+                .map(|tap| engine::realtime::ObserverCarry {
+                    kind: engine::realtime::ObserverKind::Observation,
+                    successor: tap.successor_entry,
+                    predecessor: tap.predecessor_entry,
+                }),
+        )
+        .collect();
     if !effect_carry.moves.is_empty() {
         graph::install_effect_carry(&mut plan, effect_carry.moves, effect_carry_scratch_bytes)
             .map_err(|_| graph_failure("host.carry.install"))?;
@@ -3614,6 +3652,7 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
         spectrum: spectrum_rows.into_boxed_slice(),
         spectrum_collection,
         spectrum_pairing: spectrum_carry.pairing.into_boxed_slice(),
+        observer_pairing,
         delay_lines: delay_lines.into_boxed_slice(),
         strip_delays: strip_delays.into_boxed_slice(),
         live_routes: live_routes.into_boxed_slice(),
@@ -7300,6 +7339,7 @@ mod tests {
             spectrum: Box::default(),
             spectrum_collection: false,
             spectrum_pairing: Box::default(),
+            observer_pairing: Box::default(),
             delay_lines: Box::default(),
             strip_delays: Box::default(),
             live_routes: Box::default(),
