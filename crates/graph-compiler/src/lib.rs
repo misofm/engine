@@ -7342,8 +7342,11 @@ mod tests {
     /// lowering that silently depended on rack identity. The pair is keyless, since a console slot
     /// takes no sidechain, so every compressor is bankable in both.
     ///
-    /// The one thing placement decides is the remainder's width (#1098): a console slot binds it
-    /// as one padded bank, and an insert renders it per node.
+    /// The one thing placement decides is the remainder's width (#1098): a console slot always
+    /// binds it as one padded bank, and an insert does so only from the insert padding threshold
+    /// (#888) and renders it per node below it. Ten tracks leave a remainder of two at either
+    /// width: below the threshold (three) at eight lanes, at it (two) at four, so there the two
+    /// placements bind the same banks.
     #[test]
     fn rack_placement_changes_the_bank_but_never_the_samples() {
         let (simd1_model, dynamic_model) = keyless_compressor_placements();
@@ -7359,17 +7362,20 @@ mod tests {
             assert_eq!(cohorts.groups_in(empty).count(), 0, "{empty:?}");
         }
 
-        let lanes = BankWidth::for_backend(host_dispatch())
-            .expect("a vector host")
-            .lanes() as usize;
-        let (console_banks, insert_banks) = (10_usize.div_ceil(lanes), 10 / lanes);
+        let width = BankWidth::for_backend(host_dispatch()).expect("a vector host");
+        let lanes = width.lanes() as usize;
+        let insert_pads = 10 % lanes >= crate::banks::min_padded_insert_members(width);
+        let (console_banks, insert_banks) = (
+            10_usize.div_ceil(lanes),
+            10 / lanes + usize::from(insert_pads),
+        );
         assert_eq!(
             [
                 simd1.graph().prepared_bank_count(),
                 dynamic.graph().prepared_bank_count()
             ],
             [console_banks, insert_banks],
-            "a console slot pads its remainder into one more bank; an insert does not"
+            "a console slot pads its remainder into one more bank; an insert only from the threshold"
         );
         assert_eq!(
             [
@@ -7384,8 +7390,8 @@ mod tests {
                     .scalar_in(RackLocation::Dynamic)
                     .len()
             ],
-            [0, 10 % lanes],
-            "only the insert remainder renders per node"
+            [0, if insert_pads { 0 } else { 10 % lanes }],
+            "only an insert remainder below the threshold renders per node"
         );
         assert_eq!(
             simd1.report().output_latency,
@@ -7401,7 +7407,9 @@ mod tests {
         // snapshot taken under one restores under the other. The runtime buffers agree per bank
         // too once the console's padded bank's `+0.0` plane (#887) is set aside: the chain's
         // staging is the same at either placement.
-        let zero_planes = u64::from(10 % lanes != 0) * u64::from(simd1.envelope().quantum.0) * 4;
+        let zero_plane = u64::from(simd1.envelope().quantum.0) * 4;
+        let zero_planes = u64::from(10 % lanes != 0) * zero_plane;
+        let insert_zero_planes = u64::from(insert_pads) * zero_plane;
         for (simd1_bytes, dynamic_bytes) in [
             (
                 simd1.report().estimate.effect_bank_scratch_bytes,
@@ -7409,7 +7417,7 @@ mod tests {
             ),
             (
                 simd1.report().estimate.effect_bank_runtime_buffer_bytes - zero_planes,
-                dynamic.report().estimate.effect_bank_runtime_buffer_bytes,
+                dynamic.report().estimate.effect_bank_runtime_buffer_bytes - insert_zero_planes,
             ),
         ] {
             assert_eq!(
@@ -8521,15 +8529,16 @@ mod tests {
 
     /// Issue #971's over-demotion gate: a mono track that fills a cohort anywhere stays mono.
     ///
-    /// `2 * lanes` tracks of the mono fixture: the even ones mono, the odd ones stereo, and the
-    /// even ones in the upper half without their `simd2` limiter. The mono tracks fill one `simd1`
-    /// cohort (EQ, compressor) whose strip chain collapses, while their `simd2` limiters form a
-    /// partial group of `lanes / 2`. Keyed by the whole `(simd1, dynamic, simd2)` program, the
-    /// mono tracks are two partial groups of `lanes / 2`, so the brief's first rule moved all of
-    /// them to the stereo pool: the collapse went from one armed chain to none, and no bank was
-    /// gained, because the limiter remainder still strands among the stereo tracks. #971's rule
-    /// moves a track only when **every** effect group it sits in is a partial mono group, so here
-    /// it moves none.
+    /// `2 * lanes` tracks of the mono fixture: the even ones mono, the odd ones stereo, and every
+    /// even one but `ch00` without its `simd2` limiter. The mono tracks fill one `simd1` cohort
+    /// (EQ, compressor) whose strip chain collapses, while `ch00`'s `simd2` limiter is a partial
+    /// group of one, below the insert padding threshold (#888). Keyed by the whole
+    /// `(simd1, dynamic, simd2)` program, `ch00` is a partial group of one, so the brief's first
+    /// rule moved it to the stereo pool: its collapse was lost, and no bank was gained, because the
+    /// limiter remainder still strands among the stereo tracks. #971's rule moves a track only when
+    /// **every** effect group it sits in is a partial mono group, so here it moves none. (Before
+    /// #888 the lower half's mono tracks all kept the limiter; that `lanes / 2` remainder now pads
+    /// and strands nobody under either rule.)
     ///
     /// The bank-gain check that follows the rule would refuse the brief's move here as well,
     /// since it binds no more banks, so this session gates the rule only without the check.
@@ -8548,7 +8557,7 @@ mod tests {
         for (index, (track, chain)) in model.tracks.iter_mut().zip(chains.iter_mut()).enumerate() {
             if !index.is_multiple_of(2) {
                 track.right_source_channel = 1;
-            } else if index >= lanes {
+            } else if index > 0 {
                 chain[2].clear();
             }
         }
@@ -8579,7 +8588,8 @@ mod tests {
     /// Issue #971: moving the mono remainder is declined when the stereo pool cannot use it.
     ///
     /// `2 * lanes` stereo tracks carry one `simd1` effect each, the first `lanes` an EQ and the
-    /// rest a compressor, and `lanes / 2` mono tracks carry both. The mono tracks strand in the
+    /// rest a compressor, and one mono track carries both (one, below the insert padding threshold
+    /// at either width, #888; `lanes / 2` would pad and strand nothing). The mono track strands in the
     /// trial plan, but in the stereo pool their longer program would lead one cohort over every
     /// stereo track (a one-slot program is a subsequence of it), whose banks then mix EQ lanes with
     /// compressor lanes: one bank bound where the trial bound two. The move is kept only when the
@@ -8593,7 +8603,7 @@ mod tests {
         };
         let lanes = width.lanes() as usize;
         let registry = launch_native_effect_registry().expect("launch registry");
-        let mono_count = lanes / 2;
+        let mono_count = 1;
         let mut model = mono_fixture_with_tracks(2 * lanes + mono_count);
         let mut chains = lowered_chains(&model);
         for (index, (track, chain)) in model.tracks.iter_mut().zip(chains.iter_mut()).enumerate() {
@@ -8635,13 +8645,14 @@ mod tests {
 
     /// Issues #971 and #1002: a move that binds exactly as many banks as it loses is not kept.
     ///
-    /// `lanes / 2` mono tracks carry `simd1: [eq, comp]`; `W` stereo tracks carry `[eq]` and
-    /// then `1.5 W` carry `[comp]`. The trial binds 2 banks: the stereo EQ cohort and the first
-    /// stereo compressor cohort. Moved, the mono tracks' longer program leads one stereo cohort
-    /// over all of them, in id order: the mono tracks and half the EQ tracks bind an EQ bank, the
-    /// next group mixes EQ and compressor lanes and binds nothing, and the last full group binds
-    /// a compressor bank. That is 2 banks gained against the 2 the trial bound in groups the move
-    /// changed, so the move is not kept. The lost banks sit in trial groups after the first
+    /// One mono track carries `simd1: [eq, comp]`; `W` stereo tracks carry `[eq]` and then
+    /// `W + k - 1` carry `[comp]`, where `k` is the insert padding threshold (#888), so the
+    /// trial's compressor remainder of `k - 1` stays unbound. The trial binds 2 banks: the stereo
+    /// EQ cohort and the first stereo compressor cohort. Moved, the mono track's longer program
+    /// leads one stereo cohort over all of them, in id order: the mono track and `W - 1` EQ tracks
+    /// bind an EQ bank, the next group mixes EQ and compressor lanes and binds nothing, and the
+    /// last group, `k` compressors, binds a padded compressor bank. That is 2 banks gained against
+    /// the 2 the trial bound in groups the move changed, so the move is not kept. The lost banks sit in trial groups after the first
     /// vanished one (the mono partial group, which binds nothing), so this is the gate on
     /// #1002's count of the trial's vanished groups, and on the strict comparison.
     #[test]
@@ -8651,7 +8662,8 @@ mod tests {
         };
         let lanes = width.lanes() as usize;
         let registry = launch_native_effect_registry().expect("launch registry");
-        let (eq_only, comp_only, mono_count) = (lanes, lanes + lanes / 2, lanes / 2);
+        let k = crate::banks::min_padded_insert_members(width);
+        let (eq_only, comp_only, mono_count) = (lanes, lanes + k - 1, 1);
         let stereo = eq_only + comp_only;
         let mut model = mono_fixture_with_tracks(stereo + mono_count);
         let mut chains = lowered_chains(&model);
@@ -8694,11 +8706,14 @@ mod tests {
     /// pools go red. (Sol's attempt-1 verdict gave this test.)
     ///
     /// * V (`ch00`): mono, no effect. The rule never moves it, so its builtin banks stay mono.
-    /// * P (`ch01..=ch{2W}`): `W + 1` mono and `W - 1` stereo tracks, with only `inserts: [comp]`.
-    ///   The last mono one strands in the trial and completes the stereo cohort, for one more bank.
+    /// * P (`ch01..=ch{W+k}`): `W + 1` mono and `k - 1` stereo tracks, with only
+    ///   `inserts: [comp]`, where `k` is the insert padding threshold (#888). The last mono one
+    ///   strands in the trial and lifts the stereo remainder to `k` members, which pads, for one
+    ///   more bank.
     /// * T (the next `2W`): the over-demotion session: even mono, odd stereo, `simd1: [eq, comp]`,
-    ///   and the limiter on every stereo track and on the lower half's mono tracks. The rule moves
-    ///   none of them, because their `simd1` cohort is full.
+    ///   and the limiter on every stereo track and on T's first mono track only (a mono limiter
+    ///   remainder of one, below `k`). The rule moves none of them, because their `simd1` cohort
+    ///   is full.
     ///
     /// Red, at 8 and 4 lanes, with the check kept, under: no move; the brief's per-program rule
     /// (T's mono tracks move and the whole set is accepted); the global prototype (the set is
@@ -8712,7 +8727,8 @@ mod tests {
         };
         let lanes = width.lanes() as usize;
         let registry = launch_native_effect_registry().expect("launch registry");
-        let (p, t) = (2 * lanes, 2 * lanes);
+        let k = crate::banks::min_padded_insert_members(width);
+        let (p, t) = (lanes + k, 2 * lanes);
         let mut model = mono_fixture_with_tracks(1 + p + t);
         let comp = model.lower_track(&model.tracks[1]).pre_insert[1].clone();
         let mut chains = lowered_chains(&model);
@@ -8732,7 +8748,7 @@ mod tests {
                 let local = index - 1 - p;
                 if !local.is_multiple_of(2) {
                     track.right_source_channel = 1;
-                } else if local >= lanes {
+                } else if local > 0 {
                     chain[2].clear();
                 }
             }
@@ -9095,11 +9111,12 @@ mod tests {
 
     /// Issue #1001: a factory error while binding the re-plan keeps the unmoved plan.
     ///
-    /// The session is `ch00` mono and `ch01..ch{W-1}` stereo, each carrying only
-    /// `inserts: [comp]`, and the compressor's bank bind always errors (Sol's #971 attempt-2
-    /// session). The trial plan has no full group, so it never calls the bind. Moving the
-    /// stranded `ch00` completes the stereo group, so the re-plan does call it and gets the
-    /// error. The re-plan is speculative, so the compile must go on with the unmoved plan: it
+    /// The session is `ch00` mono and `ch01..ch{k-1}` stereo, each carrying only
+    /// `inserts: [comp]`, where `k` is the insert padding threshold (#888), and the compressor's
+    /// bank bind always errors (Sol's #971 attempt-2 session). The trial plan has no group that
+    /// binds (its stereo remainder is below `k`), so it never calls the bind. Moving the stranded
+    /// `ch00` lifts the stereo group to `k` members, which pads, so the re-plan does call it and
+    /// gets the error. The re-plan is speculative, so the compile must go on with the unmoved plan: it
     /// compiles at both bank widths, `ch00` stays mono, and it renders the bits and the chain
     /// shape of the plan with the move disabled. Here that plan is the bank-free registry's:
     /// there the re-plan binds nothing, so the move is refused.
@@ -9110,10 +9127,8 @@ mod tests {
     fn a_replan_that_fails_to_bind_keeps_the_unmoved_plan() {
         const BLOCKS: u64 = 12;
         let session = |dispatch: Backend| {
-            let lanes = BankWidth::for_backend(dispatch)
-                .expect("a vector dispatch")
-                .lanes() as usize;
-            dynamic_compressor_session(lanes, 0)
+            let width = BankWidth::for_backend(dispatch).expect("a vector dispatch");
+            dynamic_compressor_session(crate::banks::min_padded_insert_members(width), 0)
         };
         let mono: BTreeSet<String> = ["ch00".to_owned()].into();
         // Both widths are compiled before anything is asserted, so a refusal names every width it
@@ -9179,11 +9194,12 @@ mod tests {
 
     /// Issue #1001: a re-plan that fails part way leaves nothing of itself behind.
     ///
-    /// `2W` tracks carry only `inserts: [comp]`. `ch{W-1}` is mono and the rest stereo. The last
-    /// track's compressor carries a marker threshold, and the bank bind errors only on a group
-    /// holding the marker. The trial binds the stereo cohort `ch00..=ch{W}` without `ch{W-1}`,
-    /// and the marked track sits in its partial remainder, which is never bound. Moving the mono
-    /// track re-plans the stereo pool as two full groups, and both differ from every trial group,
+    /// `W + k` tracks carry only `inserts: [comp]`, where `k` is the insert padding threshold
+    /// (#888). `ch{W-1}` is mono and the rest stereo. The last track's compressor carries a marker
+    /// threshold, and the bank bind errors only on a group holding the marker. The trial binds the
+    /// stereo cohort `ch00..=ch{W}` without `ch{W-1}`, and the marked track sits in its partial
+    /// remainder of `k - 1`, below `k`, which is never bound. Moving the mono track re-plans the
+    /// stereo pool as a full group and a padded group of `k`, both differing from every trial group,
     /// so the re-plan binds both (issue #1002 binds only changed groups). It binds the first,
     /// `ch00..ch{W-1}`, before the second, which holds the marker, errors. The compile keeps the
     /// trial: its one bank, its pools (the mono track still mono), and no bank of the failed
@@ -9200,8 +9216,9 @@ mod tests {
         };
         let lanes = width.lanes() as usize;
         let mono_index = lanes - 1;
-        let mut model = dynamic_compressor_session(2 * lanes, mono_index);
-        let threshold = model.tracks[2 * lanes - 1].inserts.effects[0]
+        let count = lanes + crate::banks::min_padded_insert_members(width);
+        let mut model = dynamic_compressor_session(count, mono_index);
+        let threshold = model.tracks[count - 1].inserts.effects[0]
             .params
             .iter_mut()
             .find(|param| param.parameter_id == 1)
@@ -9419,9 +9436,12 @@ mod tests {
     /// ordered by `order_members`. The two coincide on the intended fixture only because every
     /// track there carries every rack.
     ///
-    /// Empty four tracks' `simd1` and `simd2` racks and they stop coinciding: the effect cohorts
-    /// slide by four tracks, so builtin bank `{ch00..ch07}` no longer feeds effect bank
-    /// `{ch00..ch07}` -- it feeds four lanes of one effect bank and four of another.
+    /// Empty `W - 1` tracks' `simd1` and `simd2` racks and they stop coinciding: the effect cohorts
+    /// slide by `W - 1` tracks, so builtin bank `{ch00..ch07}` no longer feeds effect bank
+    /// `{ch00..ch07}` -- it feeds one lane of one effect bank and seven of another (at eight lanes).
+    /// `W - 1` bare tracks leave a one-track stripped remainder, which stays below the insert
+    /// padding threshold (#888) at both widths, so it renders per node and its downstream builtin
+    /// chain takes the silent skip G5 counts.
     /// `runtime::chains_into` proves the pairing lane by lane on the lowered program, so every
     /// `builtins -> EQ` merge is declined, while the effect banks, which do still align with each
     /// other, keep fusing. The plan is correct either way; it is only slower.
@@ -9439,12 +9459,15 @@ mod tests {
         let cohorts = 64 / lanes;
         let mut ragged = parse_session_json(CONSOLE_SIXTY_FOUR_TRACK_INTENDED_FIXTURE)
             .expect("intended fixture");
-        // Half a bank's worth of tracks lose their whole effect strip, which is what slides every
-        // effect cohort out of step with the builtin banks. A console slot runs on every track
-        // (decision 12), so the strip every other track keeps is its inserts: `[eq, comp,
-        // limiter]`, one chain where the console fixture has two.
+        // `W - 1` tracks lose their whole effect strip, which is what slides every effect cohort
+        // out of step with the builtin banks. A console slot runs on every track (decision 12),
+        // so the strip every other track keeps is its inserts: `[eq, comp, limiter]`, one chain
+        // where the console fixture has two. The one-track stripped remainder is below the insert
+        // padding threshold (#888); a remainder that pads would join the full cohorts, whose
+        // limiters are not at rest within `BLOCKS`, and leave no chain to skip.
+        let bare = lanes - 1;
         let mut chains = lowered_chains(&ragged);
-        for chain in chains.iter_mut().take((lanes / 2) as usize) {
+        for chain in chains.iter_mut().take(bare as usize) {
             chain[0].clear();
             chain[2].clear();
         }
@@ -9461,9 +9484,9 @@ mod tests {
         // point of the fixture. Every track's post-input node sits at one dependency level, so the
         // post-input stage banks all 64 into `cohorts` groups. The fader and the matrix sit one
         // level *later for a track that carries a strip than for a bare one*, so each of those two
-        // stages splits into the 60 stripped tracks (`8` groups: seven full and a four-member tail)
-        // plus the four bare ones (`1` group) -- nine apiece.
-        let strip_stage_groups = (64 - lanes / 2).div_ceil(lanes) + 1;
+        // stages splits into the `64 - bare` stripped tracks (57 at eight lanes: seven full groups
+        // and a one-member tail) plus the bare ones (`1` group) -- nine apiece.
+        let strip_stage_groups = (64 - bare).div_ceil(lanes) + 1;
         assert_eq!(
             builtin_slots,
             cohorts + 2 * strip_stage_groups,
@@ -9478,12 +9501,13 @@ mod tests {
             BLOCKS * chains,
             "G5 holds however little fuses"
         );
-        // The derivation. 60 tracks carry the strip, so each effect rack binds
-        // `60 / lanes` full cohorts and strands the remainder in a padded group that never binds:
+        // The derivation. `64 - bare` tracks carry the strip, so each effect rack binds
+        // `(64 - bare) / lanes` full cohorts and leaves a one-track remainder below the insert
+        // padding threshold (#888), which renders per node:
         // 7 EQ + 7 compressor + 7 limiter slots at eight lanes. Those three still align with each
         // other, so each cohort fuses into one chain. None of them aligns with a builtin bank, so
         // all `cohorts` builtin banks stay chains of their own.
-        let strip_cohorts = (64 - lanes / 2) / lanes;
+        let strip_cohorts = (64 - bare) / lanes;
         assert_eq!(
             effect_slots,
             3 * strip_cohorts,
@@ -9491,7 +9515,7 @@ mod tests {
         );
         // The derivation, continued. `strip_cohorts` of the fader groups hold exactly the tracks a
         // full effect cohort holds, so those chains run the whole strip; the two remaining fader
-        // groups -- the stranded stripped tail and the four bare tracks -- have no effect bank to
+        // groups -- the per-node stripped tail and the bare tracks -- have no effect bank to
         // join and fuse only into their own matrix group. The post-input banks join nothing, for
         // the reason they never did: their lane sets do not line up with any effect bank's.
         assert_eq!(
@@ -9504,8 +9528,9 @@ mod tests {
             chains > cohorts,
             "a misaligned session must realise more than the aligned one chain per cohort"
         );
-        // Half a bank's lanes take the redirect here -- four at the eight-lane launch width, two on
-        // a four-lane (AArch64 NEON) build (#1017), one per bare track -- and the number matters
+        // One lane takes the redirect here, at either width -- one per track of the per-node
+        // stripped tail, `(64 - bare) % lanes` (with half a bank of bare tracks it was four at
+        // eight lanes and two at four, #1017, which also equalled the bare count) -- and the number matters
         // less than the fact that it is neither 0 nor 64. It is what makes the intended fixture's
         // *zero* a statement about that fixture rather than about dead code: on a session whose
         // stages line up, every chain ends in a buffer its consumer already reads in place and no
@@ -9514,7 +9539,7 @@ mod tests {
         // same lowered program.
         assert_eq!(
             redirects,
-            lanes / 2,
+            (64 - bare) % lanes,
             "the scatter redirect is decided per lane on the lowered program, so a session whose \
              lane sets never line up still takes the lanes that qualify"
         );
@@ -9524,7 +9549,7 @@ mod tests {
         );
         let scalar_artifact = compile_console_oracle(&ragged, 2_051, &[]);
         let (scalar_pcm, ..) = render_console_builtins_blocks(scalar_artifact, BLOCKS, Vec::new());
-        assert_pcm_bits_equal(&pcm, &scalar_pcm, "64-track strip with four bare tracks");
+        assert_pcm_bits_equal(&pcm, &scalar_pcm, "64-track strip with W - 1 bare tracks");
         assert!(
             pcm.iter().flatten().any(|sample| *sample != 0.0),
             "the misaligned strip rendered audio"

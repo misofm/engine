@@ -1026,31 +1026,33 @@ fn a_console_group_a_factory_declines_fails_the_compile() {
 /// Gate 4, #971 under padding: a mono track that carries a console slot is never pooled as stereo,
 /// even where moving it would fill a stereo insert group.
 ///
-/// `ch00..=ch{W}` are mono and `ch{W+1}..` stereo, `W - 1` of them. Every track carries the
+/// `ch00..=ch{W}` are mono and `ch{W+1}..` stereo, `k - 1` of them, where `k` is the insert padding
+/// threshold (#888), so the stereo insert remainder binds nothing. Every track carries the
 /// limiter as its console slot and the same two inserts, EQ then compressor. Under #971's rule as
 /// it stood, `ch{W}` strands -- every group it sits in is a partial mono one -- and moving it
-/// completes the stereo insert group, two banks, at the price of one padded limiter bank, so the
+/// lifts the stereo insert group to `k` members, which pads, two banks, at the price of one padded limiter bank, so the
 /// move bound more banks and was kept, and the mono track lost its collapse. Since #1098 a console
 /// group always binds, so a track that carries a console slot banks somewhere and is never
 /// stranded (`banks::stranded_mono_tracks`): `ch{W}` stays mono in a padded limiter bank, the
 /// insert remainders render per node, and the session binds five banks at any width.
 ///
 /// The console-free counterpart keeps #971: the same chain as inserts alone, where the stranded
-/// track banks nowhere, moves `ch{W}` to the stereo pool and binds both insert groups, six banks.
+/// track banks nowhere, moves `ch{W}` to the stereo pool and binds both insert groups (the stereo
+/// one padded), six banks.
 ///
 /// Red if a padded console group strands its members again (`ch{W}` moves and six banks bind), or
 /// if the demotion is retired for console-free sessions too (`ch{W}` stays mono there).
 #[test]
 fn a_console_track_is_never_pooled_as_stereo_to_fill_a_bank() {
     const BLOCKS: u64 = 12;
-    let lanes = BankWidth::for_backend(host_dispatch())
-        .expect("a vector host")
-        .lanes() as usize;
+    let width = BankWidth::for_backend(host_dispatch()).expect("a vector host");
+    let lanes = width.lanes() as usize;
+    let k = crate::banks::min_padded_insert_members(width);
     let console = Console {
         pre: Vec::new(),
         post: vec![Kind::Limiter],
     };
-    let tracks: Vec<TrackShape> = (0..2 * lanes)
+    let tracks: Vec<TrackShape> = (0..lanes + k)
         .map(|index| TrackShape {
             feed: Feed {
                 gain: 2.0,
