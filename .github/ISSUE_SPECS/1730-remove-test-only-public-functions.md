@@ -20,3 +20,9 @@ Either delete it with the tests that only test it, or name the product caller th
 
 1. A workspace grep shows that `read_block` and `validate_output_shape` are gone, or the issue names the product caller that keeps them.
 2. `cargo test --workspace --all-features` and `scripts/check-workspace-policy.sh` are green.
+
+## Decision record
+
+- 2026-10-24 (attempt 1, root decisions R1-R4 of the scope note): deleted `PcmSourceConsumer::read_block` and `validate_output_shape`. No product caller exists (workspace grep: crates, hosts, sdk, tools, fuzz, scripts; no fuzz target, ABI symbol or wire format names them), so no issue is opened. No `read_block_at` or other public function replaces them.
+- The seven tests that called `read_block` keep their claims through the product read path: `begin_block_at(first_sample)` + `copy_channel` per plane + `end_block`, via the `#[cfg(test)]` helper `read_at` (the randomized differential keeps its own running source-read sample). `a_clockless_consumer_reports_consecutive_quanta` tests the clockless clock, so it calls `begin_block()` instead. A plain seek applies the same under both clocks, so no assertion changed. No test is deleted and none is added. The two `validate_output_shape` error branches had no asserting test (survivor m42034).
+- Follow-up: open #1350 D4 shrinks after this to making `begin_block` and `SeekClock::Now` test-only; root amends the #1350 spec.
