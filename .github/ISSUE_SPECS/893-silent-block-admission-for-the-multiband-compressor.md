@@ -48,5 +48,6 @@ None.
 ## Evidence (attempt 1)
 
 - Class A: a one-time digest over bank output and every track payload (W4 and W8, three link modes, bypass on and off, default and 5 ms releases; schedules with signal, long silence, a point, `-0.0` and `1e-40` blocks) is identical before and after; the fast path was taken more than 80,000 times in that run. Not committed.
+- Class A after the #1338 merge: the same digest, with crossover points during signal and then rest added to the schedule, is identical on origin/main 40e3b61e9 and branch head 80c300822 (24 configurations). Not committed.
 - Driver reach: W4 claims 16,789, earned 6,666; W8 claims 45,588, earned 22,845. Red with the default `lanes_at_rest` (`earned == 0`).
 
