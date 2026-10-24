@@ -166,3 +166,47 @@ tracks, input filters, an EQ insert and an EQ console slot:
 ## Supersedes and shrinks
 
 - None.
+
+## Decision and evidence record (attempt 1, 2026-10-24, against `main` 506196ce5)
+
+- **Anchors moved.** `PlanState::render` `crates/control-plane/src/plan.rs:355`; owner capture
+  `RealtimePlanOwner::copy_response_snapshot` `crates/engine/src/realtime/plan_exchange.rs:1031`;
+  `compile_children` `compile.rs:1589`; the epoch push `control.rs:3952`; `service` `control.rs:2501`.
+- **Root decisions applied (scope note R1-R6).** `after_block` runs at the end of `render`'s `Ok`
+  path, after the epoch store. The client has three states (`Idle`, `InFlight`, `Delivered`);
+  `release` is a no-op outside `Delivered`. One joint accessor,
+  `ProtocolController::provider_and_session_mut`. Three test functions instead of five.
+- **D4 correction.** The spec says no control-plane path withdraws a published candidate. That is
+  wrong today: #1310 supersession withdraws one (`control.rs` `withdraw_pending_candidate`). The
+  epoch rule holds anyway: a refused supersession republishes the candidate with its own epoch
+  (`PlanPublisher::republish`), and a committed one publishes a newer epoch through the push that
+  sets the newest epoch. A job armed at the withdrawn epoch then turns `Stale` and is armed again.
+- **Realtime.** `after_block` and the collector's `ResponseSnapshotSink` impl are in
+  `REALTIME_POLICY` regions; so is the client's one reply pop (the tool's rule for a `try_pop`
+  outside the control-side allowlist). A held slot is filled through `Option::replace` and the
+  `None` it displaces is forgotten, so no drop of a job is reachable on render.
+- **Resources.** The channel's two queues are charged in `capi_resources`'s fixed aggregate rows
+  (`host_core::response_capture_retained_bytes`); capi's completeness oracle saw the 544 bytes
+  uncharged before. An armed job is a control-side transient (allocated by `arm`, freed by `poll`)
+  and is not charged.
+- **Browser call-graph gate.** `scripts/check-web-audioworklet.sh` fails on two pins, outside this
+  issue's paths: `ResponseCaptureServer::after_block` is a new trap owner with 2 sites (the
+  inlined SPSC `slots[...]` index of its pop and push, the class `enter_block` is admitted for),
+  and `RealtimePlanOwner::copy_response_snapshot` is a new `call_indirect` site (1: the
+  executor's `copy_response_snapshot` through `Box<dyn PreparedPlanExecutor>`). No allocation or
+  drop glue is reachable. Root decides the pin edits.
+
+### Test value (`crates/control-plane/tests/response_capture.rs`)
+
+- `capture_follows_newest_plan` (gates 1, 3, 4): red if the render step captures before the block,
+  if a replacement's epoch is not recorded, if a reply is dropped or delivered twice, or if a
+  refused request leaves a tag or a pending state behind.
+- `capture_reads_applied_values` (gate 2): red if the step reads the values held before the
+  block's live snapshot instead of the applied targets after it.
+- `render_step_allocates_nothing` (gate 5, the root comment): red if the render step, the
+  collector's copy or the job's move allocates or frees on render, or a job is lost.
+
+Red first, each mutant restored by `git checkout`: step before the block (gates 1-3 and 2 red);
+no newest-epoch record at the push (follows red); a refusal that takes a tag (follows red);
+`Delivered` read as `Idle` (follows red); render drops a finished job (all three red); the sink
+allocates its track ID (allocates red only).
