@@ -299,6 +299,7 @@ Applied in the issue's worktree on the attempt-1 commit, run with
 | `desymmetrize` keeps the right `hysteresis` (copies every other `GateState` word) | `src/lib.rs` | RED: `channels_agree` false after the copy; with that assert removed, `DualMono block 24 track 0: right state` (the hold countdown word, mid-hold) |
 | the collapsed step passes `L::zero()` as the partner detector instead of the left word | `src/kernel.rs` | RED: `Average block 4 track 3: left state` |
 | the `DESIGNED` witness omits the two rate ramps | `src/lib.rs` | RED: `the_witness_declines_on_exactly_the_asymmetric_lane` (parameter 4, attack) |
+| `channels_bit_equal` compares `gain_db` in place of `hysteresis.hold` (review fold) | `src/lib.rs` | RED: `DualMono: after different L and R words` (the channels differ in the hold countdown alone) |
 
 Not run, and equivalent by construction: the collapsed link computed as `|p|`. `0.5|p| + 0.5|p|`
 differs from `|p|` only where `0.5|p|` rounds, a subnormal `|p|`, and the detector clamps every
