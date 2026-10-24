@@ -4,7 +4,7 @@
 //! Every compiled value here -- `output_tail`, `output_tail_every_peak` and `P*_graph` -- is
 //! recomputed by [`enumerate`], which evaluates H4's rule from the plan's own per-node values by
 //! explicitly enumerating every path to the output, with no code shared with the compiler's
-//! `pdc.rs`. The real-kernel gates (C1, C2, C5's impulse, C6, C11 (b)) are host-core's
+//! `pdc.rs`. The real-kernel gates (C1, C2, C6, C11 (b)) are host-core's
 //! `tail_composition.rs`.
 
 use std::collections::BTreeMap;
@@ -205,6 +205,33 @@ fn c4(tracks: usize) -> SessionModel {
     model
         .routes
         .push(route("bus-main", from_submix("bus"), into_output()));
+    model
+}
+
+/// C6's first design at `rate` (Amendment 1 H5): the 1 kHz input LPF, HPF off, trim 0 dB, every
+/// downstream gain at 0 dB (fader, identity matrix, one 0 dB identity route).
+fn c6(rate: u32) -> SessionModel {
+    let mut model = base(0.0, 1_000.0, 0.0);
+    model.sample_rate_hz = rate;
+    let track = &mut model.tracks[0];
+    track.fader.left_db = 0.0;
+    track.fader.right_db = 0.0;
+    track.matrix_or_pan = MatrixOrPan::Matrix {
+        ll: 1.0,
+        lr: 0.0,
+        rl: 0.0,
+        rr: 1.0,
+        smoothing_samples: 0,
+    };
+    let mut to_main = route("to-main", from_track("vocal"), into_output());
+    to_main.gain_db = 0.0;
+    to_main.channel_matrix = ChannelMatrix {
+        ll: 1.0,
+        lr: 0.0,
+        rl: 0.0,
+        rr: 1.0,
+    };
+    model.routes.push(to_main);
     model
 }
 
@@ -673,9 +700,11 @@ fn recomputed(model: &SessionModel, liveness: GainLiveness, inputs: InputLanes) 
     compiled
 }
 
-/// C3: the compiled values equal the enumeration for C1, C2, C4, C5 and C11's sessions under both
-/// selections, and for a live track into a live submix (every strip with a live input lane, whose
-/// `G_t` is below its `G_p`).
+/// C3: the compiled values equal the enumeration for C1, C2, C4, C5, C6 (every launch rate) and
+/// C11's sessions under both selections, and for a live track into a live submix (every strip
+/// with a live input lane, whose `G_t` is below its `G_p`). Red for a rule that drops a path, a
+/// decay term, the `n_p` term, the clamp, the stall's cross term or its downstream gain, uses peak
+/// gains downstream, rounds a millibel down, or takes the maximum of the stalls.
 #[test]
 fn compiled_tail_values_equal_the_enumerated_rule() {
     let mut c11 = c1();
@@ -684,7 +713,8 @@ fn compiled_tail_values_equal_the_enumerated_rule() {
     let mut c5 = c1();
     c5.tracks[0].builtins.left.delay_samples = 1_000;
     c5.tracks[0].builtins.right.delay_samples = 1_000;
-    for model in [c1(), c2(), c4(1), c4(2), c5, c11] {
+    let c6s = [44_100, 48_000, 88_200, 96_000].map(c6);
+    for model in [c1(), c2(), c4(1), c4(2), c5, c11].into_iter().chain(c6s) {
         for liveness in [FIXED, LIVE] {
             let rule = recomputed(&model, liveness, InputLanes::None);
             assert!(matches!(rule.output_flush_floor, FlushFloor::Millibels(_)));

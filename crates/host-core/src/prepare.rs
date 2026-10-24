@@ -273,8 +273,11 @@ pub struct HostPrepareReport {
     pub effect_count: u64,
     /// Compiled output latency in samples.
     pub latency_samples: u64,
-    /// Compiled output tail.
-    pub output_tail: TailSamples,
+    /// The plan's reported output tail: the graph's `output_tail_every_peak` (#1379 Amendment 1
+    /// H4, H10), from which the output is below `P * 10^(-144/20)` for every graph input peak `P`
+    /// at or above the graph's flush floor and exactly `+-0.0` below it. It is never the graph's
+    /// decay value `output_tail`, which holds only at or above that floor.
+    pub output_tail_every_peak: TailSamples,
     /// Graph plus plan bytes, excluding the compiled session model.
     pub graph_session_plus_plan_bytes: u64,
     /// Incremental plan bytes.
@@ -2948,7 +2951,7 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
     let mut follow_route_controls = follow_route_controls;
     // #1285 D4: the floored output arrival, the one the plan renders.
     let output_latency = artifact.report().output_latency;
-    let output_tail = artifact.report().output_tail;
+    let output_tail_every_peak = artifact.report().output_tail_every_peak;
     let input_floors: Box<[(graph::GraphNodeId, u64)]> = artifact
         .report()
         .input_arrivals
@@ -3633,7 +3636,7 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
         route_count,
         effect_count,
         latency_samples: output_latency.0,
-        output_tail,
+        output_tail_every_peak,
         graph_session_plus_plan_bytes: graph_resources.session_plus_plan_bytes,
         graph_incremental_plan_bytes: graph_resources.incremental_plan_bytes,
         graph_metadata_bytes: graph_resources.graph_metadata_bytes,

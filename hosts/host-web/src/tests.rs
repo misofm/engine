@@ -8980,7 +8980,7 @@ mod structural_apply {
         assert_eq!(boot.latency_samples, row.latency_samples);
         assert_eq!(
             (boot.tail_kind, boot.tail_samples),
-            control_plane::tail_words(row.output_tail)
+            control_plane::tail_words(row.output_tail_every_peak)
         );
 
         for _ in 0..APPLY_BEFORE {

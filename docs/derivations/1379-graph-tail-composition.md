@@ -928,7 +928,7 @@ refusal. `graph.tail.limit` checks `output_tail_every_peak` (Q7).
 path (C3, over C1, C2, C4, C5 and C11's sessions under both selections and a live track into a live
 submix), and holds C4 (fan-in), C5 (strip delay), C7 (`Unstated` wins), C11 (a) and C13 (a, b);
 C13 (c) is `an_overflowing_millibel_sum_is_a_diagnostic` beside the helper. The real-kernel gates
-(C1, C2, C5's impulse, C6, C11 (b)) are `crates/host-core/tests/tail_composition.rs`.
+(C1, C2, C6, C11 (b)) are `crates/host-core/tests/tail_composition.rs`.
 
 ## Citations
 

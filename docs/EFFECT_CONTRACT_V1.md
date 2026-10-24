@@ -97,9 +97,9 @@ the control thread at preparation and never pinned:
 * **`TailSamples` -- `T_decay`, the tail.** `|y[n]| < P * eps` for every `n >= N + latency + T`,
   for every input peak `P >= P*`. `P*`, the node's **flush floor**, is the smallest peak for which
   the `f32` kernel's absolute deviation near the per-word state flush (`lane::FLUSH_EPS`) fits the
-  `-144 dB` budget; below it the output is no longer relative to `P`. PDC composes `T_decay` along
-  a path, and every tail report uses it (the C ABI and browser reports, #1261, #1262). `Infinite`
-  states no bound and remains for nodes whose bound has not been derived (#1378 retires it).
+  `-144 dB` budget; below it the output is no longer relative to `P`. The graph extent composes
+  `T_decay` through every gain on a path (#1379, below). `Infinite` states no bound and remains for
+  nodes whose bound has not been derived (#1378 retires it).
 * **The tail over every peak -- `T_rest = max(T_decay, R(P*))`, named `tail_every_peak`** (a
   `TailSamples`, beside `tail` wherever `tail` is stated: `NodeTailBound`, which
   `builtins-compiler`'s prepared session keeps per strip beside its tail,
@@ -114,6 +114,21 @@ the control thread at preparation and never pinned:
   signal-state word equals, under `f32` `==`, the node's rest state `Z` (a fixed point of the
   zero-input step; for the builtin input section the reset state, every integrator `+0.0`). Silence
   skipping (#1107) uses this bound: it holds for every input up to its stated peak.
+
+**The graph extent (#1379 Amendment 1 H4).** The graph compiler composes every node's bound, with
+its composition values (below), through each gain between the nodes: a fader, matrix, send or
+summing node states its prepared gain when nothing can change it after preparation and its domain
+maximum when a live lane or stored automation can, and a strip's delay line counts its length
+(`docs/derivations/1379-graph-tail-composition.md`, "The graph extent"). The plan states three
+values (`GraphCompileReport`): `output_tail`, from which the output is below `P * eps` for every
+graph input peak `P` at or above the graph's flush floor `P*_graph` (`output_flush_floor`); and
+`output_tail_every_peak >= output_tail`, from which the output is below `P * eps` at or above the
+floor and exactly `+-0.0` below it. Hosts report `output_tail_every_peak` (host-core's
+`output_tail_every_peak`, the C ABI's `tail_samples`, the browser's plan-latency record; decision 15
+D15-4(b) as amended by #1379 H10): a live graph's floor can sit near or above full scale, where
+`output_tail` would certify nothing. A node from which the output is reachable and whose tail is
+`Infinite` or whose composition is `Unstated` makes both values `Infinite`. The cap
+`maximum_finite_tail_samples` refuses on `output_tail_every_peak` (`graph.tail.limit`).
 
 Every node, a native effect or a builtin input section, states its bound in one struct,
 `effect_contract::NodeTailBound { tail, tail_every_peak, rest, composition }` (#1379 Amendment 1

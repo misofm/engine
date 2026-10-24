@@ -191,18 +191,110 @@ fn render(host: &mut PreparedHost, planes: &[Vec<f32>; 2]) -> Vec<u32> {
     bits
 }
 
+/// The plan's reported tail as the graph compile states it for `model` with the gain selection
+/// `liveness` and, when `input_lanes`, every strip's live input lane (#1379 C8): the value C3
+/// (`graph-compiler`'s `tail_composition.rs`) recomputes by enumeration.
+fn graph_tail(
+    model: &SessionModel,
+    liveness: graph_compiler::GainLiveness,
+    input_lanes: bool,
+) -> TailSamples {
+    let compiled = compile(model);
+    let builtin_caps = builtins_compiler::BuiltinCompileCaps {
+        maximum_total_state_bytes: u64::MAX,
+        maximum_total_retained_payload_bytes: u64::MAX,
+        maximum_total_meter_items: u64::MAX,
+        maximum_total_meter_bytes: u64::MAX,
+        maximum_single_allocation_bytes: u64::MAX,
+        maximum_meter_streams: u64::MAX,
+        maximum_period_frames: u32::MAX,
+        maximum_peak_hold_frames: u32::MAX,
+        maximum_smoothing_samples: u32::MAX,
+    };
+    let requests: Vec<_> = if input_lanes {
+        compiled
+            .normalized_model()
+            .strips()
+            .map(|strip| builtins_compiler::TrackControlRequest {
+                track_id: strip.id.as_str().to_owned(),
+                superseded: builtins_compiler::LiveValuesSuperseded::default(),
+                input_lane: true,
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+    let effective = controls::effective(
+        compiled.normalized_model(),
+        &controls::MonitorOverlay::default(),
+    );
+    let builtins = builtins_compiler::prepare_session_builtins_with_live_controls(
+        &compiled,
+        &effective,
+        &[],
+        &requests,
+        builtin_caps,
+    )
+    .expect("builtins");
+    let effects = effect_compiler::prepare_native_session_effects(
+        &compiled,
+        effect_compiler::launch_native_effect_registry().expect("registry"),
+        effect_compiler::EffectCompileCaps {
+            maximum_total_state_bytes: u64::MAX,
+            maximum_scratch_bytes: u64::MAX,
+            maximum_automation_spans_per_block: 128,
+        },
+    )
+    .expect("effects");
+    let artifact = graph_compiler::GraphCompiler::compile_with_builtins(
+        graph_compiler::GraphBuiltinsCompileRequest {
+            plan_id: 1,
+            effects,
+            builtins,
+            caps: graph::GraphCompileCaps {
+                maximum_nodes: u64::MAX,
+                maximum_edges: u64::MAX,
+                maximum_schedule_items: u64::MAX,
+                maximum_dependency_levels: u64::MAX,
+                maximum_audio_buffer_samples: u64::MAX,
+                maximum_delay_samples_per_edge: u64::MAX,
+                maximum_total_delay_samples: u64::MAX,
+                maximum_graph_bytes: u64::MAX,
+                maximum_plan_bytes: u64::MAX,
+                maximum_single_allocation_bytes: u64::MAX,
+                maximum_finite_tail_samples: u64::MAX,
+            },
+            dispatch: graph_compiler::Backend::current(),
+            input_floors: Default::default(),
+            gain_liveness: liveness,
+        },
+    )
+    .unwrap_or_else(|_| panic!("graph compile"));
+    let report = artifact.report();
+    eprintln!(
+        "C8 at {} Hz: output_tail {:?}, output_tail_every_peak {:?}, floor {:?}",
+        compiled.sample_rate().0,
+        report.output_tail,
+        report.output_tail_every_peak,
+        report.output_flush_floor
+    );
+    report.output_tail_every_peak
+}
+
 /// Gate 1(a). Red if a fader-and-matrix request still attaches the input lane (the plain
 /// session's tail becomes infinite), attaches effect or route lanes, or changes a rendered bit.
+/// #1379 C8: red if the fader-and-matrix plan reports the live input bound's composition instead
+/// of the prepared design's, or if `ALL`'s selection drops a live lane's domain maximum.
 #[test]
 fn fader_and_matrix_lanes_attach_nothing_else_and_render_the_lanes_free_bits() {
     // The precondition the tail half rests on: the plain session's lanes-free tail is finite,
     // and the EQ fixture's is not (the EQ's own bound is #1372's slice).
     assert!(matches!(
-        lanes_free(&plain_fixture()).report.output_tail,
+        lanes_free(&plain_fixture()).report.output_tail_every_peak,
         TailSamples::Finite(_)
     ));
     assert_eq!(
-        lanes_free(&eq_fixture()).report.output_tail,
+        lanes_free(&eq_fixture()).report.output_tail_every_peak,
         TailSamples::Infinite
     );
     for model in [eq_fixture(), plain_fixture()] {
@@ -221,7 +313,19 @@ fn fader_and_matrix_lanes_attach_nothing_else_and_render_the_lanes_free_bits() {
         assert!(handles.effect_controls.is_empty());
         assert!(handles.route_controls.is_empty());
         assert!(handles.effect_observations.is_empty());
-        assert_eq!(live.report.output_tail, reference.report.output_tail);
+        // #1379 C8: the fader and matrix lanes are live, so their nodes state their domain
+        // maxima; every input section keeps its prepared design (no input lane).
+        assert_eq!(
+            live.report.output_tail_every_peak,
+            graph_tail(
+                &model,
+                graph_compiler::GainLiveness {
+                    strip_fader_matrix: true,
+                    routes_into_submixes: false,
+                },
+                false,
+            )
+        );
         assert_eq!(
             live.report.latency_samples,
             reference.report.latency_samples
@@ -229,9 +333,9 @@ fn fader_and_matrix_lanes_attach_nothing_else_and_render_the_lanes_free_bits() {
         assert_eq!(render(&mut live, &planes), render(&mut reference, &planes));
     }
     // The tail rule is what the selection changes: under every lane the same plain session's
-    // strips carry the input lane, so each reports the live bound at the session's rate (#1329
-    // D5, D7) instead of its disabled filters' zero. The deepest path crosses two strips, the
-    // last track and the unity bus, and PDC adds node tails along a path (D8).
+    // strips carry the input lane, so each states the live bound at the session's rate (#1329
+    // D5, D7) instead of its disabled filters' zero, and the route into the bus is live: the
+    // graph composes them through every gain at its domain maximum (#1379 H3, H4).
     let (all, handles) = with_lanes(&plain_fixture(), HostLiveLanes::ALL);
     assert!(
         handles
@@ -244,14 +348,16 @@ fn fader_and_matrix_lanes_attach_nothing_else_and_render_the_lanes_free_bits() {
         1,
         "the route into the bus is live under ALL"
     );
-    let live = match builtins::input_section_live_bound(all.report.sample_rate_hz)
-        .expect("launch rate")
-        .tail
-    {
-        TailSamples::Finite(samples) => samples,
-        TailSamples::Infinite => panic!("the live bound is finite at a launch rate"),
-    };
-    assert_eq!(all.report.output_tail, TailSamples::Finite(2 * live));
+    let expected = graph_tail(
+        &plain_fixture(),
+        graph_compiler::GainLiveness {
+            strip_fader_matrix: true,
+            routes_into_submixes: true,
+        },
+        true,
+    );
+    assert!(matches!(expected, TailSamples::Finite(_)));
+    assert_eq!(all.report.output_tail_every_peak, expected);
 }
 
 /// Gate 1(b). Red if the lanes are attached but no longer drained by the banks.

@@ -3975,7 +3975,7 @@ fn assert_live_lanes_render_like_lanes_free(document: &str, label: &str, expect_
 
     // Same latency and tail as the lanes-free plan.
     let resources = c.plan.resources();
-    let (tail_kind, tail_samples) = control_plane::tail_words(host.output_tail);
+    let (tail_kind, tail_samples) = control_plane::tail_words(host.output_tail_every_peak);
     if expect_finite {
         assert_eq!(
             tail_kind, TAIL_FINITE,
@@ -4022,7 +4022,7 @@ fn assert_live_lanes_render_like_lanes_free(document: &str, label: &str, expect_
     );
     assert_eq!(
         (resources.tail_kind, resources.tail_samples),
-        control_plane::tail_words(without_effects.output_tail),
+        control_plane::tail_words(without_effects.output_tail_every_peak),
         "{label}: tail without effect lanes"
     );
 

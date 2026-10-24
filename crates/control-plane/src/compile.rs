@@ -1255,7 +1255,7 @@ pub(crate) fn prepare_runtime<A: ControlAdapter>(
             source_count: host.source_count,
             track_count: host.track_count,
             latency_samples: host.latency_samples,
-            output_tail: host.output_tail,
+            output_tail_every_peak: host.output_tail_every_peak,
             // The carry program's bytes are the plan's own allocation that the host-core row does
             // not count. The plan's revision gate is in the host-core row (#1502 D1), shared with
             // the browser.
@@ -1530,7 +1530,7 @@ mod admission_tests {
                 source_count: 1,
                 track_count: 1,
                 latency_samples: 0,
-                output_tail: TailSamples::Finite(0),
+                output_tail_every_peak: TailSamples::Finite(0),
                 graph_session_plus_plan_bytes: base,
                 graph_incremental_plan_bytes: 0,
                 graph_metadata_bytes: 0,
