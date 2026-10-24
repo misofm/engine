@@ -565,6 +565,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "de-esser"
+version = "0.1.0"
+dependencies = [
+ "bench-support",
+ "conformance",
+ "dsp-reference",
+ "effect-contract",
+ "effect-runtime",
+ "lane",
+ "math",
+ "parametric-eq",
+]
+
+[[package]]
 name = "decoded-char"
 version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -650,6 +664,7 @@ dependencies = [
 name = "effect-runtime"
 version = "0.1.0"
 dependencies = [
+ "dsp-reference",
  "effect-contract",
  "engine",
  "lane",
