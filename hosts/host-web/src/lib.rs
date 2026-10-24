@@ -6367,6 +6367,8 @@ struct ShapeRows {
     frame_bytes: u64,
     /// The core meter frame's per-strip tables (#1582 D2).
     core_frame_bytes: u64,
+    /// The largest of those tables, a single allocation.
+    core_frame_largest: u64,
 }
 
 impl PlanShape {
@@ -6491,6 +6493,16 @@ impl PlanShape {
             .ok()?
             .checked_mul(size_of::<f32>() as u64)?;
         let core_frame_bytes = u64::try_from(self.core_frame.heap_bytes()).ok()?;
+        let core_frame_largest = u64::try_from(
+            size_of_val::<[[f32; 2]]>(&self.core_frame.strip_peaks)
+                .max(size_of_val::<[f32]>(
+                    &self.core_frame.strip_gain_reduction_db,
+                ))
+                .max(size_of_val::<[bool]>(
+                    &self.core_frame.strip_gain_reduction_present,
+                )),
+        )
+        .ok()?;
         Some(ShapeRows {
             arm_table_bytes,
             arm_sample_bytes,
@@ -6500,6 +6512,7 @@ impl PlanShape {
             carried_bytes,
             frame_bytes,
             core_frame_bytes,
+            core_frame_largest,
         })
     }
 
@@ -6521,7 +6534,8 @@ impl PlanShape {
             .max(rows.pending_bytes)
             .max(rows.remaining_bytes)
             .max(rows.carried_bytes)
-            .max(rows.frame_bytes);
+            .max(rows.frame_bytes)
+            .max(rows.core_frame_largest);
         Some((total, largest))
     }
 }
@@ -6736,7 +6750,8 @@ fn compile_ready(
         .max(pending_meter_bytes)
         .max(remaining_meter_bytes)
         .max(carried_meter_bytes)
-        .max(frame_meter_bytes);
+        .max(rows.frame_bytes)
+        .max(rows.core_frame_largest);
     report.largest_named_allocation_bytes = report
         .largest_named_allocation_bytes
         .max(report.largest_bridge_allocation_bytes);

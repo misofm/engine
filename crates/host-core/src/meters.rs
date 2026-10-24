@@ -432,6 +432,7 @@ pub fn fold_gain_reduction(
     frame.validity = if observed_any {
         frame.validity.union(MeterValidity::GAIN_REDUCTION)
     } else {
+        // The browser sets `validity` afresh before each fold; T2's `MeterDelivery` reuses it.
         MeterValidity(frame.validity.0 & !MeterValidity::GAIN_REDUCTION.0)
     };
 }
