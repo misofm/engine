@@ -4221,6 +4221,8 @@ fn resolve_delay_carry(
 ) -> Vec<graph::GraphDelayMove> {
     let same_source = |node: &graph::GraphNodeId| match node {
         graph::GraphNodeId::TrackStage { track_id, .. } => same_strip(track_id.as_str()),
+        // A strip's main edge into an effect with a late key starts at the strip's own node.
+        graph::GraphNodeId::Effect(effect) => same_strip(effect.track_id.as_str()),
         _ => true,
     };
     own.iter()
