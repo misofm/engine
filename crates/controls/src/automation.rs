@@ -16,6 +16,7 @@ use crate::error::ControlError;
 use crate::lane::Side;
 use crate::registry::resolve;
 use crate::vca::{VCA_MUTE, VCA_OFFSET_DB};
+use crate::view::ModelView;
 use session::Lane;
 use std::collections::BTreeMap;
 
@@ -195,9 +196,18 @@ pub fn automation_diagnostics(model: &SessionModel, sample_rate: u32) -> Vec<Con
         }
         faulted[index] = diagnostics.len() > before;
     }
-    for strip in model.strips() {
+    // #1864: the filter entries are looked up per strip from one pass over the table, not two scans
+    // per strip and lane.
+    let filters = filter_entries(model);
+    for strip in model.strips().filter(|_| !filters.is_empty()) {
         for side in [Side::Left, Side::Right] {
-            if let Some(diagnostic) = input_filter_order(model, &strip, side, &faulted) {
+            let entry = |control: u32| {
+                filters
+                    .get(&(strip.id, control))
+                    .and_then(|lanes| side.pick(lanes[0], lanes[1]))
+            };
+            let entries = (entry(HPF_HZ), entry(LPF_HZ));
+            if let Some(diagnostic) = input_filter_order(&strip, side, entries, &faulted) {
                 // A `both` entry on two lanes whose static values match fails both lanes at one
                 // segment: one fault, reported once.
                 if !diagnostics.contains(&diagnostic) {
@@ -207,6 +217,35 @@ pub fn automation_diagnostics(model: &SessionModel, sample_rate: u32) -> Vec<Con
         }
     }
     diagnostics
+}
+
+/// A stored entry on a strip's HPF or LPF row with its index in the automation table.
+type FilterEntry<'a> = Option<(usize, &'a Automation)>;
+
+/// Per strip ID and filter row (`HPF_HZ`, `LPF_HZ`), the entry that drives each lane
+/// (`[left, right]`), from one pass over `model`'s table (#1864): the first entry in table order on
+/// the strip's builtin row whose lane is the lane or `both`. Empty when no entry is on a filter
+/// row.
+fn filter_entries(model: &SessionModel) -> BTreeMap<(&StableId, u32), [FilterEntry<'_>; 2]> {
+    let mut filters: BTreeMap<(&StableId, u32), [FilterEntry<'_>; 2]> = BTreeMap::new();
+    for (index, automation) in model.automation.iter().enumerate() {
+        let target = &automation.target;
+        let Owner::Strip(owner) = &target.owner else {
+            continue;
+        };
+        if target.section != Section::Builtins
+            || (target.control != HPF_HZ && target.control != LPF_HZ)
+        {
+            continue;
+        }
+        let driven = filters.entry((owner, target.control)).or_default();
+        for (at, lane) in [Lane::Left, Lane::Right].into_iter().enumerate() {
+            if drives(target.lane, lane) && driven[at].is_none() {
+                driven[at] = Some((index, automation));
+            }
+        }
+    }
+    filters
 }
 
 /// Whether `address` is a strip's static HPF or LPF and `model` stores automation on either filter
@@ -613,6 +652,8 @@ pub struct AutomationIndex<'a> {
     lanes: BTreeMap<(RenderedRow, &'a StableId), [Option<&'a Automation>; 2]>,
     /// Whether some entry is on a VCA `mute` row ([`vca_mute_row`]).
     any_vca_mute: bool,
+    /// Whether some entry is on a VCA `offset_db` row ([`vca_offset_row`], #1864).
+    any_vca_offset: bool,
 }
 
 impl<'a> AutomationIndex<'a> {
@@ -621,12 +662,16 @@ impl<'a> AutomationIndex<'a> {
     pub fn of(model: &'a SessionModel) -> Self {
         let mut lanes: BTreeMap<_, [Option<&'a Automation>; 2]> = BTreeMap::new();
         let mut any_vca_mute = false;
+        let mut any_vca_offset = false;
         for automation in &model.automation {
             let target = &automation.target;
             let key = match &target.owner {
                 Owner::Strip(id) if fader_row(target) => (RenderedRow::Fader, id),
                 Owner::Strip(id) if mute_row(target) => (RenderedRow::Mute, id),
-                Owner::Vca(id) if vca_offset_row(target) => (RenderedRow::VcaOffset, id),
+                Owner::Vca(id) if vca_offset_row(target) => {
+                    any_vca_offset = true;
+                    (RenderedRow::VcaOffset, id)
+                }
                 Owner::Vca(id) if vca_mute_row(target) => {
                     any_vca_mute = true;
                     (RenderedRow::VcaMute, id)
@@ -644,6 +689,7 @@ impl<'a> AutomationIndex<'a> {
             model,
             lanes,
             any_vca_mute,
+            any_vca_offset,
         }
     }
 
@@ -709,6 +755,13 @@ impl<'a> AutomationIndex<'a> {
     #[must_use]
     pub const fn any_vca_mute(&self) -> bool {
         self.any_vca_mute
+    }
+
+    /// Whether some entry of the indexed table is on a VCA `offset_db` row ([`vca_offset_row`],
+    /// #1864).
+    #[must_use]
+    pub const fn any_vca_offset(&self) -> bool {
+        self.any_vca_offset
     }
 }
 
@@ -867,18 +920,19 @@ fn same_segments(before: &Automation, after: &Automation) -> bool {
 /// carried cell is repositioned in its own table at adoption. #1655 D6: a fader event lane
 /// continues when its own table and each reaching automated VCA `offset_db` table (in ascending
 /// VCA ID) are the same set, bit for bit (a lane with no own entry in either model included).
+///
+/// It scans both tables and computes the strip's VCA reach in each model; a caller that asks for
+/// many strips reads [`continued_fader_lanes_in`] (#1864).
 #[must_use]
 pub fn continued_fader_lanes(
     current: &SessionModel,
     next: &SessionModel,
     strip: &StableId,
 ) -> [bool; 2] {
-    continued_lanes(
-        current,
-        next,
+    continued_fader_lanes_in(
+        (ModelView::whole(current), &current.vca_reach_of(strip)),
+        (ModelView::whole(next), &next.vca_reach_of(strip)),
         strip,
-        fader_automation,
-        vca_offset_automation,
     )
 }
 
@@ -892,7 +946,46 @@ pub fn continued_mute_lanes(
     next: &SessionModel,
     strip: &StableId,
 ) -> [bool; 2] {
-    continued_lanes(current, next, strip, mute_automation, vca_mute_automation)
+    continued_mute_lanes_in(
+        (ModelView::whole(current), &current.vca_reach_of(strip)),
+        (ModelView::whole(next), &next.vca_reach_of(strip)),
+        strip,
+    )
+}
+
+/// [`continued_fader_lanes`] read through views (#1864): `current` and `next` are each a model
+/// with the strip's VCA reach there (its entry of [`SessionModel::vca_reach`], indices into that
+/// model's `vcas`). Lookups when the views are [`ModelView::indexed`], so a successor's strip join
+/// and route loop cost `O(log entries)` per strip, not a scan of both tables.
+#[must_use]
+pub fn continued_fader_lanes_in(
+    current: (ModelView<'_>, &[usize]),
+    next: (ModelView<'_>, &[usize]),
+    strip: &StableId,
+) -> [bool; 2] {
+    continued_lanes(
+        current,
+        next,
+        strip,
+        |view, strip| view.fader_automation(strip),
+        |view, vca| view.vca_automation(vca),
+    )
+}
+
+/// [`continued_mute_lanes`] read through views, as [`continued_fader_lanes_in`] (#1864).
+#[must_use]
+pub fn continued_mute_lanes_in(
+    current: (ModelView<'_>, &[usize]),
+    next: (ModelView<'_>, &[usize]),
+    strip: &StableId,
+) -> [bool; 2] {
+    continued_lanes(
+        current,
+        next,
+        strip,
+        |view, strip| view.mute_automation(strip),
+        |view, vca| view.vca_mute_automation(vca),
+    )
 }
 
 /// The curves of one event lane in one model: its own entry, and each reaching VCA's entry on the
@@ -904,26 +997,24 @@ type LaneCurves<'a> = (Option<&'a Automation>, Vec<(&'a str, &'a Automation)>);
 /// reaching VCAs with an entry on the lane (`vca_entries`, by the rule of [`fader_event_lanes`])
 /// are the same VCAs, in ascending VCA ID, each with the same segments, and the lane has a curve.
 /// With no VCA row automated in either model this is the own-entry rule alone, as before #1655.
+/// Each model comes with the strip's VCA reach there.
 fn continued_lanes<'a>(
-    current: &'a SessionModel,
-    next: &'a SessionModel,
+    current: (ModelView<'a>, &[usize]),
+    next: (ModelView<'a>, &[usize]),
     strip: &StableId,
-    entries: fn(&'a SessionModel, &StableId) -> [Option<&'a Automation>; 2],
-    vca_entries: fn(&'a SessionModel, &StableId) -> [Option<&'a Automation>; 2],
+    entries: impl Fn(&ModelView<'a>, &StableId) -> [Option<&'a Automation>; 2],
+    vca_entries: impl Fn(&ModelView<'a>, &StableId) -> [Option<&'a Automation>; 2],
 ) -> [bool; 2] {
-    if current.automation.is_empty() || next.automation.is_empty() {
+    if current.0.structure().automation.is_empty() || next.0.structure().automation.is_empty() {
         return [false; 2];
     }
-    let curves = |model: &'a SessionModel| -> [LaneCurves<'a>; 2] {
-        let own = entries(model, strip);
+    let curves = |(view, reach): (ModelView<'a>, &[usize])| -> [LaneCurves<'a>; 2] {
+        let own = entries(&view, strip);
         let mut vcas = [Vec::new(), Vec::new()];
-        if model.automation.iter().any(|entry| vca_row(&entry.target)) {
-            for vca in model
-                .vca_reach_of(strip)
-                .into_iter()
-                .filter_map(|index| model.vcas.get(index))
-            {
-                let driven = vca_entries(model, &vca.id);
+        if view.any_vca_row() {
+            let model = view.structure();
+            for vca in reach.iter().filter_map(|&index| model.vcas.get(index)) {
+                let driven = vca_entries(&view, &vca.id);
                 for (lane, curves) in vcas.iter_mut().enumerate() {
                     if let Some(entry) = driven[lane] {
                         curves.push((vca.id.as_str(), entry));
@@ -1093,25 +1184,16 @@ fn ordered(hpf: Piece, (a, b): (u64, u64), lpf: Piece, (c, d): (u64, u64)) -> bo
 ///
 /// A constant "off" (`0`) on either side leaves its pairs unchecked.
 ///
-/// It reads only `model`, so a classifier can run it on a candidate model. Entries with their own
-/// fault (`faulted`) are not read: their curves may touch "off" inside a ramp.
+/// It reads only the model's entries, so a classifier can run it on a candidate model: `entries`
+/// are the HPF and the LPF entry that drive the strip's lane `side`, each with its index in the
+/// table ([`filter_entries`]). Entries with their own fault (`faulted`) are not read: their curves
+/// may touch "off" inside a ramp.
 fn input_filter_order(
-    model: &SessionModel,
     strip: &StripRef<'_>,
     side: Side,
+    (hpf_entry, lpf_entry): (FilterEntry<'_>, FilterEntry<'_>),
     faulted: &[bool],
 ) -> Option<ControlDiagnostic> {
-    let lane = side.pick(&Lane::Left, &Lane::Right);
-    let entry = |control: u32| {
-        model.automation.iter().enumerate().find(|(_, automation)| {
-            let target = &automation.target;
-            matches!(&target.owner, Owner::Strip(owner) if owner == strip.id)
-                && target.section == Section::Builtins
-                && target.control == control
-                && (target.lane == *lane || target.lane == Lane::Both)
-        })
-    };
-    let (hpf_entry, lpf_entry) = (entry(HPF_HZ), entry(LPF_HZ));
     if hpf_entry.is_none() && lpf_entry.is_none() {
         return None;
     }
