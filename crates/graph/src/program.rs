@@ -419,6 +419,57 @@ fn render_bounds(
     (stamp(groups), stamp(banks))
 }
 
+/// Released physical slots and the position each was released at, for pass 2's `take`.
+///
+/// A min-tree over slot ids: each node holds the lowest release position below it, so the lowest
+/// slot released at or before a given position is found in one descent (issue #931). A slot not
+/// currently released holds `usize::MAX`.
+struct ReleasedSlots {
+    leaves: usize,
+    lowest: Vec<usize>,
+}
+
+impl ReleasedSlots {
+    fn new(capacity: usize) -> Self {
+        let leaves = capacity.max(1).next_power_of_two();
+        Self {
+            leaves,
+            lowest: vec![usize::MAX; 2 * leaves],
+        }
+    }
+
+    fn set(&mut self, slot: u32, position: usize) {
+        let mut node = self.leaves + slot as usize;
+        self.lowest[node] = position;
+        while node > 1 {
+            node /= 2;
+            self.lowest[node] = self.lowest[2 * node].min(self.lowest[2 * node + 1]);
+        }
+    }
+
+    fn release(&mut self, slot: u32, position: usize) {
+        self.set(slot, position);
+    }
+
+    /// Remove and return the lowest slot released at or before `limit`.
+    fn take_lowest_at_or_below(&mut self, limit: usize) -> Option<u32> {
+        if self.lowest[1] > limit {
+            return None;
+        }
+        let mut node = 1;
+        while node < self.leaves {
+            node = if self.lowest[2 * node] <= limit {
+                2 * node
+            } else {
+                2 * node + 1
+            };
+        }
+        let slot = u32::try_from(node - self.leaves).ok()?;
+        self.set(slot, usize::MAX);
+        Some(slot)
+    }
+}
+
 /// One logical buffer's lifetime, in op indices.
 struct Lifetime {
     def_op: usize,
@@ -814,55 +865,32 @@ fn lower_with(
             *release = (*release).max(latest[op_index]);
         }
     }
-    // `floor[i]` is the earliest render position of any op from `i` on: a slot whose release
-    // position is below it is free for every op still to be coloured.
-    let mut floor = vec![usize::MAX; ops.len() + 1];
-    for op_index in (0..ops.len()).rev() {
-        floor[op_index] = floor[op_index + 1].min(earliest[op_index]);
-    }
     let mut physical = vec![u32::MAX; lifetimes.len()];
-    // Slots every remaining op may take.
-    let mut free: std::collections::BTreeSet<u32> = std::collections::BTreeSet::new();
-    // Slots only an op rendering after their release position may take, keyed by that position.
-    // Without banks every op's bounds are its own index and nothing ever waits here.
-    let mut pending: std::collections::BTreeSet<(usize, u32)> = std::collections::BTreeSet::new();
+    // Every released slot, keyed by its release position. A slot can only be taken once per
+    // `take`, and one is taken per allocated logical buffer or staging scratch, so this bounds the
+    // arena.
+    let mut released = ReleasedSlots::new(lifetimes.len() + delay_specs.len());
     let mut next_physical = 0u32;
     let mut staging_release: Vec<u32> = Vec::new();
-    // The smallest slot an op may take: the lowest free slot, or a lower pending one the op may
-    // have (see `render_bounds`): one released before the op's run can start, or -- for an op
-    // outside its group's first bank -- released at exactly that start.
-    let take = |free: &mut std::collections::BTreeSet<u32>,
-                pending: &mut std::collections::BTreeSet<(usize, u32)>,
+    // The smallest slot an op may take (see `render_bounds`): one released before the op's run
+    // can start, or -- for an op outside its group's first bank -- released at exactly that start.
+    // Without banks every op's bounds are its own index, every released slot qualifies, and this
+    // is the lowest free slot, as it always was.
+    let take = |released: &mut ReleasedSlots,
                 next: &mut u32,
                 (renders_from, behind_head): (usize, bool)|
      -> u32 {
-        let bound = if behind_head {
-            core::ops::Bound::Included((renders_from, u32::MAX))
+        let limit = if behind_head {
+            Some(renders_from)
         } else {
-            core::ops::Bound::Excluded((renders_from, 0))
+            renders_from.checked_sub(1)
         };
-        let waiting = pending
-            .range((core::ops::Bound::Unbounded, bound))
-            .min_by_key(|(_, slot)| *slot)
-            .copied();
-        match (free.first().copied(), waiting) {
-            (Some(slot), Some((_, other))) if slot < other => {
-                free.remove(&slot);
-                slot
-            }
-            (_, Some(entry)) => {
-                pending.remove(&entry);
-                entry.1
-            }
-            (Some(slot), None) => {
-                free.remove(&slot);
-                slot
-            }
-            (None, None) => {
-                let buffer = *next;
-                *next += 1;
-                buffer
-            }
+        if let Some(slot) = limit.and_then(|limit| released.take_lowest_at_or_below(limit)) {
+            slot
+        } else {
+            let buffer = *next;
+            *next += 1;
+            buffer
         }
     };
     for op_index in 0..ops.len() {
@@ -873,8 +901,8 @@ fn lower_with(
             // dedication is. A staging scratch belongs to the op that filled it, so it retires
             // with that op's outputs and is released after that op's run.
             //
-            // A slot whose previous value a bank or a merged chain may still touch after some
-            // op still to be coloured has already rendered waits in `pending` (#169, #931).
+            // A slot whose previous value a bank or a merged chain may still touch is released
+            // at the latest position that touch can render at (#169, #931).
             let staged = latest[op_index - 1];
             let retired = expire[op_index - 1]
                 .drain(..)
@@ -882,18 +910,7 @@ fn lower_with(
                 .map(|buffer| (release_after[buffer as usize], physical[buffer as usize]))
                 .chain(staging_release.drain(..).map(|slot| (staged, slot)));
             for (release, slot) in retired {
-                if release < floor[op_index] {
-                    free.insert(slot);
-                } else {
-                    pending.insert((release, slot));
-                }
-            }
-            while let Some(&(release, slot)) = pending.first() {
-                if release >= floor[op_index] {
-                    break;
-                }
-                pending.pop_first();
-                free.insert(slot);
+                released.release(slot, release);
             }
         }
         let renders_from = (earliest[op_index], latest[op_index] > earliest[op_index]);
@@ -901,7 +918,7 @@ fn lower_with(
         let (first, last) = ops[op_index].inputs;
         for input in &mut inputs[first as usize..last as usize] {
             if let Some(delay) = &mut input.delay {
-                let buffer = take(&mut free, &mut pending, &mut next_physical, renders_from);
+                let buffer = take(&mut released, &mut next_physical, renders_from);
                 delay.staging = BufferRef(buffer);
                 staging_release.push(buffer);
             }
@@ -911,14 +928,13 @@ fn lower_with(
             .as_mut()
             .and_then(|side| side.delay.as_mut())
         {
-            let buffer = take(&mut free, &mut pending, &mut next_physical, renders_from);
+            let buffer = take(&mut released, &mut next_physical, renders_from);
             delay.staging = BufferRef(buffer);
             staging_release.push(buffer);
         }
         let output = ops[op_index].output.0;
         if lifetimes[output as usize].def_op == op_index && physical[output as usize] == u32::MAX {
-            physical[output as usize] =
-                take(&mut free, &mut pending, &mut next_physical, renders_from);
+            physical[output as usize] = take(&mut released, &mut next_physical, renders_from);
         }
         ops[op_index].output = BufferRef(physical[output as usize]);
     }
