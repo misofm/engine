@@ -25,8 +25,9 @@ use host_core::{
 };
 use protocol::{
     CommandPayload, DecodeScratch, DecodedSuccessResponsePayload, DecodedTypedResponseFrame,
-    EditPath, ExpectedRevision, ProtocolCodec, RequestId, SessionEdit, SessionSnapshotRequest,
-    TypedCommandFrame,
+    EditPath, ExpectedRevision, ParameterChannel, ProtocolCodec, RequestId, SessionEdit,
+    SessionSnapshotRequest, SpectrumConfigureRequest, SpectrumConfigured, SpectrumEntry,
+    SpectrumForm, SpectrumTargetKind, StatusCode, TypedCommandFrame,
 };
 use session::{
     RouteDestination, RouteSource, SessionModel, StableId, Submix, canonical_session_json,
@@ -240,6 +241,87 @@ impl Rig {
             .is_some()
         {}
         path
+    }
+
+    /// Send one `SPECTRUM_CONFIGURE` (#1594): its reply, or the refusal's status and code.
+    fn configure(
+        &mut self,
+        request: &SpectrumConfigureRequest,
+    ) -> Result<SpectrumConfigured, (StatusCode, String)> {
+        self.request += 1;
+        let codec = ProtocolCodec::default();
+        let frame = TypedCommandFrame {
+            request_id: RequestId::new(self.request).expect("nonzero request"),
+            expected_revision: ExpectedRevision::Any,
+            payload: CommandPayload::SpectrumConfigure(request),
+        };
+        let mut bytes = vec![0_u8; codec.limits().max_frame_bytes];
+        let length = codec
+            .encode_command_frame_into(&frame, &mut bytes)
+            .expect("configure command");
+        let length = self
+            .session
+            .command(&bytes[..length], 65_536)
+            .expect("a configure answers a frame");
+        let mut fields = [0_u16; 64];
+        match codec
+            .decode_typed_response(
+                self.session.command_response(length),
+                &mut DecodeScratch::new(&mut fields),
+            )
+            .expect("a configure response")
+        {
+            DecodedTypedResponseFrame::Success {
+                header,
+                payload: DecodedSuccessResponsePayload::SpectrumConfigured(reply),
+            } => {
+                assert_eq!(header.revision.0, reply.revision);
+                Ok(reply)
+            }
+            DecodedTypedResponseFrame::NonOk { header, payload } => {
+                Err((header.status, payload.diagnostics[0].code.clone()))
+            }
+            DecodedTypedResponseFrame::Success { .. } => panic!("another success payload"),
+        }
+    }
+
+    /// Commit `value` on `eq0`'s left fader as one live transaction.
+    fn live_fader(&mut self, value: f32) {
+        let edit = SessionEdit::SetControl {
+            expected_effect: None,
+            address: session::ControlAddress {
+                owner: session::Owner::Strip(id("eq0")),
+                section: session::Section::Builtins,
+                control: 5,
+                lane: session::ParameterChannel::Left,
+            },
+            value,
+            ramp_samples: None,
+        };
+        assert_eq!(self.apply(&[edit]), Ok(EditPath::Live));
+    }
+
+    /// The plan's applied-revision watermark.
+    fn watermark(&self) -> engine::realtime::PlanWatermark {
+        self.plan
+            .queries()
+            .watermark()
+            .expect("an untorn watermark")
+    }
+
+    /// The session's spectrum state: configuration, both epochs, and the pending plans' epochs.
+    fn spectrum_state(&self) -> (Option<SpectrumConfiguration>, u64, u64, Vec<u64>) {
+        let monitor = self.session.test_spectrum();
+        (
+            monitor.configuration().cloned(),
+            monitor.configured_epoch(),
+            monitor.adopted_epoch(),
+            self.session
+                .test_pending_providers()
+                .iter()
+                .map(control_plane::ProviderEpoch::test_epoch)
+                .collect(),
+        )
     }
 
     /// Commit `edits` as one rebuild transaction; gate 5: it advances the revision by one.
@@ -891,4 +973,501 @@ fn an_observer_is_never_carried_onto_a_strip_of_another_kind() {
             .is_some(),
         "the submix's tap completes a window"
     );
+}
+
+/// The fixture document at committed revision `revision`.
+fn at_revision(revision: u64) -> String {
+    let document = SESSION.replacen(
+        "\"revision\": \"42\"",
+        &format!("\"revision\": \"{revision}\""),
+        1,
+    );
+    assert_ne!(document, SESSION);
+    document
+}
+
+/// A `SPECTRUM_CONFIGURE` request entry.
+fn entry(kind: SpectrumTargetKind, target: &str, channels: ParameterChannel) -> SpectrumEntry {
+    SpectrumEntry {
+        target_kind: kind,
+        target_id: target.to_owned(),
+        channels,
+    }
+}
+
+/// A collection request of `entries` at exactly the budget its captures retain.
+fn collection_request(
+    entries: Vec<SpectrumEntry>,
+    hop_frames: Option<u32>,
+) -> SpectrumConfigureRequest {
+    let prepared: Vec<SpectrumCaptureCollectionEntry> = entries
+        .iter()
+        .map(|entry| SpectrumCaptureCollectionEntry {
+            target: match entry.target_kind {
+                SpectrumTargetKind::TrackPostInput => {
+                    SpectrumTarget::TrackPostInputBuiltins(entry.target_id.as_str().into())
+                }
+                SpectrumTargetKind::TrackPostPan => {
+                    SpectrumTarget::TrackPostMatrix(entry.target_id.as_str().into())
+                }
+                SpectrumTargetKind::Output => {
+                    SpectrumTarget::Output(entry.target_id.as_str().into())
+                }
+            },
+            channels: match entry.channels {
+                ParameterChannel::Left => SpectrumChannels::Left,
+                ParameterChannel::Right => SpectrumChannels::Right,
+                ParameterChannel::Both => SpectrumChannels::Stereo,
+            },
+        })
+        .collect();
+    let maximum_capture_bytes = if prepared.is_empty() {
+        0
+    } else {
+        spectrum_capture_collection_resources(&prepared)
+            .expect("collection resources")
+            .retained_bytes
+    };
+    SpectrumConfigureRequest {
+        form: SpectrumForm::Collection,
+        entries,
+        maximum_capture_bytes,
+        hop_frames,
+    }
+}
+
+/// `request()` as a `SPECTRUM_CONFIGURE`: `eq0`'s post-pan tap, both channels, single form.
+fn single_request() -> SpectrumConfigureRequest {
+    SpectrumConfigureRequest {
+        form: SpectrumForm::Single,
+        entries: vec![entry(
+            SpectrumTargetKind::TrackPostPan,
+            "eq0",
+            ParameterChannel::Both,
+        )],
+        maximum_capture_bytes: request().maximum_capture_bytes,
+        hop_frames: None,
+    }
+}
+
+/// `collection()` as a `SPECTRUM_CONFIGURE`.
+fn collection_as_request(hop_frames: Option<u32>) -> SpectrumConfigureRequest {
+    collection_request(
+        vec![
+            entry(
+                SpectrumTargetKind::TrackPostPan,
+                "eq0",
+                ParameterChannel::Both,
+            ),
+            entry(
+                SpectrumTargetKind::TrackPostInput,
+                "eq1",
+                ParameterChannel::Left,
+            ),
+        ],
+        hop_frames,
+    )
+}
+
+/// #1594 gate 2 (scope gate 3). Turns red if any gate still refuses the unchanged revision 0: on a
+/// session booted with no taps, at revision 0, a single `eq0` configure answers `revision` 0,
+/// `rebuild` and a plan epoch; after the promotion the adopted epoch is the configured one, and a
+/// window armed then equals, bit for bit, the reference's window armed at the same frame.
+#[test]
+fn a_configure_at_revision_zero_reads_the_reference_window() {
+    let mut rig = Rig::of(&at_revision(0), None);
+    assert_eq!(rig.session.test_controller().session().revision().0, 0);
+    rig.block();
+    let reply = rig.configure(&single_request()).expect("configure");
+    assert_eq!(reply.revision, 0);
+    assert!(reply.rebuild);
+    assert_eq!(
+        reply.plan_epoch,
+        rig.session
+            .test_pending_providers()
+            .last()
+            .map(control_plane::ProviderEpoch::test_epoch)
+    );
+    assert_eq!((reply.configured_epoch, reply.adopted_epoch), (1, 0));
+    rig.until_promoted();
+    let monitor = rig.session.test_spectrum();
+    assert_eq!(monitor.configuration(), Some(&configuration()));
+    assert_eq!(
+        (monitor.configured_epoch(), monitor.adopted_epoch()),
+        (1, 1)
+    );
+    assert_eq!(rig.session.test_controller().session().revision().0, 0);
+    let mut reference = Reference::new();
+    while reference.frame < rig.frame {
+        reference.block();
+    }
+    let got: SpectrumSnapshot = one_window!(rig.service(), rig.block());
+    let want: SpectrumSnapshot = one_window!(reference.service, reference.block());
+    assert_eq!(got.window.first_sample, want.window.first_sample);
+    assert!(
+        got.window.left.iter().any(|sample| *sample != 0.0),
+        "signal"
+    );
+    for (got, want) in [
+        (&got.window.left, &want.window.left),
+        (&got.window.right, &want.window.right),
+    ] {
+        assert!(
+            got.iter()
+                .zip(want)
+                .all(|(got, want)| got.to_bits() == want.to_bits())
+        );
+    }
+}
+
+/// #1594 gate 3 (scope gate 4). Turns red if a monitor rebuild moves the watermark or leaks its
+/// claim: at revision 5, a configure's plan is adopted with the watermark unchanged in every field,
+/// and the next live fader edit advances it to 6 with `OUTCOME_EXACT`, `exact` one more and no
+/// fallback or supersession.
+#[test]
+fn a_monitor_rebuild_keeps_the_watermark_exact() {
+    let mut rig = Rig::of(&at_revision(2), None);
+    for value in 1..=3 {
+        rig.live_fader(-f32::from(u8::try_from(value).expect("small")));
+        rig.block();
+    }
+    rig.block();
+    let before = rig.watermark();
+    assert_eq!(before.revision, 5);
+    let reply = rig.configure(&single_request()).expect("configure");
+    assert_eq!(reply.revision, 5);
+    assert!(reply.rebuild);
+    rig.until_promoted();
+    rig.block();
+    assert_eq!(
+        rig.watermark(),
+        before,
+        "a monitor rebuild moves no watermark field"
+    );
+    rig.live_fader(-6.0);
+    rig.block();
+    rig.block();
+    let after = rig.watermark();
+    assert_eq!(after.revision, 6);
+    assert_eq!(after.outcome_flags, engine::realtime::OUTCOME_EXACT);
+    assert_eq!(after.exact, before.exact + 1);
+    assert_eq!(after.transition_fallback, 0);
+    assert_eq!(after.superseded, 0);
+}
+
+/// The windows of a stream's reads, one per sequence number.
+fn windows(reads: &[Read]) -> Vec<SpectrumContinuousWindow> {
+    let mut out: Vec<SpectrumContinuousWindow> = Vec::new();
+    for window in reads.iter().filter_map(|read| read.window) {
+        if out
+            .last()
+            .is_none_or(|last| last.sequence != window.sequence)
+        {
+            out.push(window);
+        }
+    }
+    out
+}
+
+fn spacings(windows: &[SpectrumContinuousWindow]) -> Vec<u64> {
+    windows
+        .windows(2)
+        .map(|pair| pair[1].first_sample - pair[0].first_sample)
+        .collect()
+}
+
+/// #1594 gate 4 (scope gate 5). Turns red if a no-op or a hop change publishes a plan, or a hop
+/// change restarts a stream: the same configuration again answers `rebuild` false with the epochs
+/// unchanged; a hop of 1024 answers `rebuild` false with both epochs one more and nothing pending;
+/// the running stream keeps the default 2048-frame spacing and its epochs, and a stream started
+/// after it publishes windows 1024 frames apart.
+#[test]
+fn an_equal_or_hop_only_configure_publishes_no_plan() {
+    let eq0 = SpectrumTarget::TrackPostMatrix("eq0".into());
+    let mut rig = Rig::new(Some(collection()));
+    rig.select(&eq0, SpectrumChannels::Stereo);
+    rig.start_stream();
+    let mut reads = Vec::new();
+    for _ in 0..40 {
+        rig.block();
+        reads.push(rig.read_stream());
+    }
+    let same = rig.configure(&collection_as_request(None)).expect("same");
+    assert_eq!(
+        (
+            same.rebuild,
+            same.plan_epoch,
+            same.configured_epoch,
+            same.adopted_epoch
+        ),
+        (false, None, 1, 1)
+    );
+    let hop = rig
+        .configure(&collection_as_request(Some(1024)))
+        .expect("hop only");
+    assert_eq!(
+        (
+            hop.rebuild,
+            hop.plan_epoch,
+            hop.configured_epoch,
+            hop.adopted_epoch
+        ),
+        (false, None, 2, 2)
+    );
+    assert!(rig.session.test_pending_providers().is_empty(), "no plan");
+    for _ in 0..40 {
+        rig.block();
+        reads.push(rig.read_stream());
+    }
+    assert_continuous(&reads);
+    let running = spacings(&windows(&reads));
+    assert!(running.len() >= 4);
+    assert!(
+        running.iter().all(|spacing| *spacing == 2_048),
+        "{running:?}"
+    );
+
+    let (service, analysis) = rig
+        .session
+        .test_spectrum_mut()
+        .service_and_analysis_mut()
+        .expect("a service");
+    service.stop_stream(Some(analysis));
+    rig.start_stream();
+    let mut next = Vec::new();
+    for _ in 0..80 {
+        rig.block();
+        next.push(rig.read_stream());
+    }
+    let restarted = spacings(&windows(&next));
+    assert!(restarted.len() >= 4);
+    assert!(
+        restarted.iter().all(|spacing| *spacing == 1_024),
+        "{restarted:?}"
+    );
+}
+
+/// #1594 gate 5 (scope gate 6), with the render allocation check of every block. Turns red if a
+/// kept tap restarts or a removed tap stays: from a one-entry collection on `eq0` with a running
+/// stream, adding `eq1` keeps `eq0`'s stream continuous; keeping only `eq1` ends it (`Inactive`);
+/// an empty collection with budget 0 removes the service and leaves the next plan no observer;
+/// and a configure after that removal makes a new service whose arm completes a window.
+#[test]
+fn a_configure_keeps_adds_and_removes_taps() {
+    let eq0 = SpectrumTarget::TrackPostMatrix("eq0".into());
+    let only_eq0 = collection_request(
+        vec![entry(
+            SpectrumTargetKind::TrackPostPan,
+            "eq0",
+            ParameterChannel::Both,
+        )],
+        None,
+    );
+    let mut rig = Rig::new(None);
+    rig.configure(&only_eq0).expect("boot taps");
+    rig.until_promoted();
+    rig.select(&eq0, SpectrumChannels::Stereo);
+    rig.start_stream();
+    let mut reads = Vec::new();
+    for _ in 0..30 {
+        rig.block();
+        reads.push(rig.read_stream());
+    }
+    let added = rig
+        .configure(&collection_as_request(None))
+        .expect("add eq1");
+    assert!(added.rebuild);
+    for _ in 0..30 {
+        rig.block();
+        reads.push(rig.read_stream());
+    }
+    assert!(rig.session.test_pending_providers().is_empty());
+    assert_continuous(&reads);
+    assert_eq!(
+        rig.session.test_spectrum().adopted_epoch(),
+        added.configured_epoch
+    );
+
+    let only_eq1 = collection_request(
+        vec![entry(
+            SpectrumTargetKind::TrackPostInput,
+            "eq1",
+            ParameterChannel::Left,
+        )],
+        None,
+    );
+    assert!(rig.configure(&only_eq1).expect("keep eq1").rebuild);
+    rig.until_promoted();
+    assert_eq!(rig.read_stream().status, SpectrumStreamStatus::Inactive);
+
+    let none = collection_request(Vec::new(), None);
+    let removed = rig.configure(&none).expect("remove every tap");
+    assert!(removed.rebuild);
+    rig.until_promoted();
+    let monitor = rig.session.test_spectrum();
+    assert!(monitor.configuration().is_none());
+    assert!(monitor.service().is_none() && monitor.analysis().is_none());
+    assert_eq!(monitor.adopted_epoch(), removed.configured_epoch);
+    assert!(
+        rig.session
+            .test_providers()
+            .test_inventory()
+            .spectrum_pairing()
+            .is_empty(),
+        "the running plan has no spectrum observer"
+    );
+
+    let again = rig.configure(&single_request()).expect("configure again");
+    assert!(again.rebuild);
+    rig.until_promoted();
+    let window: SpectrumSnapshot = one_window!(rig.service(), rig.block());
+    assert!(window.window.left.iter().any(|sample| *sample != 0.0));
+}
+
+/// #1594 gate 6 (scope gate 7). Turns red if a refused configure writes anything, or a supersession
+/// loses an acknowledged edit: an unknown target, a duplicate entry and a budget below what the
+/// captures retain are refused with their status and code, and the configuration, both epochs,
+/// the pending plans and the watermark are unchanged; a configure over a pending structural
+/// candidate supersedes it, and the edit's revision completes `EXACT` at the adoption.
+#[test]
+fn a_refused_configure_changes_nothing_and_a_pending_edit_is_superseded() {
+    let mut rig = Rig::new(Some(collection()));
+    rig.block();
+    rig.block();
+    let state = rig.spectrum_state();
+    let watermark = rig.watermark();
+    let mut unknown = collection_as_request(None);
+    unknown.entries[1].target_id = "nobody".to_owned();
+    let mut duplicate = collection_as_request(None);
+    duplicate.entries[1] = duplicate.entries[0].clone();
+    let mut short = collection_as_request(Some(512));
+    short.maximum_capture_bytes -= 1;
+    for (request, status, code) in [
+        (&unknown, StatusCode::NotFound, "spectrum.target.unknown"),
+        (
+            &duplicate,
+            StatusCode::ValidationFailed,
+            "spectrum.duplicate",
+        ),
+        (
+            &short,
+            StatusCode::LimitExceeded,
+            "spectrum.budget.retained",
+        ),
+    ] {
+        assert_eq!(rig.configure(request), Err((status, code.to_owned())));
+        assert!(
+            rig.spectrum_state() == state,
+            "{code} changed the spectrum state"
+        );
+        assert_eq!(rig.watermark(), watermark, "{code}");
+    }
+
+    rig.rebuild(&add_muted_track());
+    let revision = rig.session.test_controller().session().revision().0;
+    assert_eq!(
+        rig.session.test_pending_providers().len(),
+        1,
+        "a pending candidate"
+    );
+    let reply = rig.configure(&single_request()).expect("supersede");
+    assert!(reply.rebuild && reply.revision == revision);
+    assert_eq!(
+        rig.session.test_pending_providers().len(),
+        1,
+        "the candidate was superseded"
+    );
+    rig.until_promoted();
+    rig.block();
+    let after = rig.watermark();
+    assert_eq!(after.revision, revision);
+    assert_eq!(after.outcome_flags, engine::realtime::OUTCOME_EXACT);
+    assert_eq!(after.exact, watermark.exact + 1);
+    assert_eq!((after.transition_fallback, after.superseded), (0, 0));
+    assert_eq!(
+        rig.session.test_spectrum().configuration(),
+        Some(&configuration())
+    );
+}
+
+/// #1594 gate 8 (scope gate 8). Turns red if a monitor rebuild allocates on the render thread or
+/// races into an internal error: while another thread renders, the control thread alternates two
+/// configurations 40 times (each a rebuild); every render call allocates and frees nothing, and
+/// every configure answers a reply.
+#[test]
+fn alternating_configures_against_a_rendering_thread_allocate_nothing_on_render() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    bench_support::alloc::assert_installed();
+    let Rig {
+        mut session,
+        mut plan,
+        ..
+    } = Rig::new(None);
+    let done = AtomicBool::new(false);
+    let mut request = 0_u64;
+    std::thread::scope(|scope| {
+        let done = &done;
+        let render = scope.spawn(move || {
+            let mut frame = 0_u64;
+            let mut samples = [0.0_f32; QUANTUM * 2];
+            while !done.load(Ordering::Acquire) {
+                let output =
+                    engine::realtime::PlanarBufferMut::try_new(&mut samples, 2, QUANTUM, QUANTUM)
+                        .expect("output planes");
+                let mark = bench_support::alloc::current_thread_counters();
+                plan.render(frame, output).expect("render block");
+                let used = bench_support::alloc::current_thread_delta_since(mark);
+                if frame >= 2 * QUANTUM as u64 {
+                    assert_eq!(
+                        (used.allocations, used.deallocations),
+                        (0, 0),
+                        "frame {frame}"
+                    );
+                }
+                frame += QUANTUM as u64;
+                std::thread::yield_now();
+            }
+            frame
+        });
+        let codec = ProtocolCodec::default();
+        let requests = [single_request(), collection_as_request(None)];
+        for index in 0..40 {
+            request += 1;
+            let frame = TypedCommandFrame {
+                request_id: RequestId::new(request).expect("nonzero request"),
+                expected_revision: ExpectedRevision::Any,
+                payload: CommandPayload::SpectrumConfigure(&requests[index % 2]),
+            };
+            let mut bytes = vec![0_u8; codec.limits().max_frame_bytes];
+            let length = codec
+                .encode_command_frame_into(&frame, &mut bytes)
+                .expect("configure command");
+            let length = loop {
+                match session.command(&bytes[..length], 65_536) {
+                    Ok(length) => break length,
+                    Err(control_plane::CommandError::Backpressure) => {
+                        session.service().expect("service step");
+                        std::thread::yield_now();
+                    }
+                    Err(error) => panic!("configure {index}: {error:?}"),
+                }
+            };
+            let mut fields = [0_u16; 64];
+            assert!(matches!(
+                codec
+                    .decode_typed_response(
+                        session.command_response(length),
+                        &mut DecodeScratch::new(&mut fields),
+                    )
+                    .expect("a configure response"),
+                DecodedTypedResponseFrame::Success {
+                    payload: DecodedSuccessResponsePayload::SpectrumConfigured(_),
+                    ..
+                }
+            ));
+            session.service().expect("service step");
+        }
+        done.store(true, Ordering::Release);
+        assert!(render.join().expect("render thread") > 0);
+    });
 }

@@ -1445,6 +1445,12 @@ pub struct SuccessorBase<'a> {
     /// continuity constraint. `false` is the neutral value: a successor continues its
     /// predecessor.
     pub discontinuity: bool,
+    /// The successor is a monitor rebuild at the unchanged committed revision (#1594 D6, R1):
+    /// only the session's spectrum taps differ from the predecessor, so `committed` is the model
+    /// the successor is prepared from and `revision` is the committed revision, which may be 0
+    /// (`0..=GATE_REVISION_MAX`). Such a successor has no carry retarget to stamp; a preparation
+    /// that finds one refuses with `host.successor.monitor`. `false` is the neutral value.
+    pub unchanged_revision: bool,
 }
 
 impl<'a> SuccessorBase<'a> {
@@ -1467,6 +1473,7 @@ impl<'a> SuccessorBase<'a> {
             monitor: MonitorBase::NONE,
             observation: &NO_OBSERVATION,
             discontinuity: false,
+            unchanged_revision: false,
         }
     }
 }
@@ -2055,7 +2062,11 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
     let live_controls = live_controls.unwrap_or(&default_request);
     // #1277 D10: a successor commits as a revision its own gate can stamp. Checked before this
     // preparation allocates anything.
-    if successor.is_some_and(|base| !(1..=GATE_REVISION_MAX).contains(&base.revision)) {
+    // #1594 D6: a monitor rebuild stays at the committed revision, which may be 0.
+    if successor.is_some_and(|base| {
+        let lowest = u64::from(!base.unchanged_revision);
+        !(lowest..=GATE_REVISION_MAX).contains(&base.revision)
+    }) {
         return Err(successor_revision_refusal());
     }
     // #1323 D3: at a host-declared discontinuity the successor joins against its predecessor's
@@ -3689,6 +3700,14 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
             && route_carry.retargets.is_empty()
             && carried_inputs.iter().all(|join| join.retarget.is_empty()),
     ) {
+        // #1594 D6: a monitor rebuild's model equals its predecessor's base, so nothing retargets;
+        // a retarget would need a revision the commit never publishes.
+        if base.unchanged_revision {
+            return Err(PrepareDiagnostics::fixed(
+                PrepareRejection::Session,
+                "host.successor.monitor",
+            ));
+        }
         let Some(Ok(stamp)) = plan.stamp_held_gate(base.revision) else {
             return Err(successor_revision_refusal());
         };

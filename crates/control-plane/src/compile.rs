@@ -1412,7 +1412,7 @@ pub(crate) fn prepare_runtime<A: ControlAdapter>(
     // exactly one entry per request and charges it in `builtin_meter_payload_bytes`, with each
     // consumer's ring, so the boxed slice does not reallocate and is not charged again here.
     let meters = meters.into_boxed_slice();
-    let capi = prepared_capi_resources::<A>(
+    let mut capi = prepared_capi_resources::<A>(
         compiled,
         &prepared.control_catalog,
         &prepared.inventory,
@@ -1421,6 +1421,15 @@ pub(crate) fn prepare_runtime<A: ControlAdapter>(
         observation_resources(&effects, observation_slots_high_water)?,
         limits,
     )?;
+    // #1594 R6: a plan with spectrum captures has a session spectrum service and analysis beside
+    // it (made at boot or at the promotion that installs the first captures), charged here, with
+    // the plan, so the admission of the configure that creates them sees them.
+    if spectrum.is_some() {
+        capi.active_retained = capi
+            .active_retained
+            .checked_add(host_core::SpectrumService::RETAINED_BYTES)
+            .ok_or_else(|| failure(ResourceFault::Arithmetic))?;
+    }
     if capi.active_retained > limits.maximum_control_retained_bytes
         || capi.largest > limits.maximum_named_allocation_bytes
     {
