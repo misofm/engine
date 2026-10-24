@@ -1136,6 +1136,12 @@ impl PlanStateInventory {
         self.delay_lines.len()
     }
 
+    /// Compensation line rows, sorted by edge ID (#1283; read for a strip transition's `C`, #1325).
+    #[must_use]
+    pub fn delay_lines(&self) -> &[graph::GraphDelayLine] {
+        &self.delay_lines
+    }
+
     /// Strip input alignment line rows, one per strip that declares a `delay_samples` (#1284).
     #[must_use]
     pub fn strip_delay_count(&self) -> usize {
