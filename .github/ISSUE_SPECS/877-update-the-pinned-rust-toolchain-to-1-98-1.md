@@ -102,4 +102,10 @@ The scope note (`scope/877.md`) wins for paths and decisions; these changes over
   `EXPECTED_WORKLET_SHA256`, `release_pin`) and re-records the three browsers once.
 - **For later toolchain bumps.** The V8 spill gate is its own `artifact-gates` step;
   `scripts/check-web-audioworklet.sh` does not run it. Run it on the named twin with every bump.
+- **Resumed after #1905 (main `3f6c057e9`).** The V8 spill gate passes every row on the 1.99.1
+  named twin. Re-pinned once to `18340e81346ad82d41de6d3d7f7dd554c029a61f6ceca7222eccf74a6c40c93d`
+  (pin, `EXPECTED_WORKLET_SHA256`, `release_pin`); three browsers re-recorded once on candidate
+  `b16116272` (Chromium 151.0.7922.34, Firefox 153.0, WebKit 26.5). The 37 console digests and the
+  preflight digests of this branch (1.99.1) equal `origin/main`'s (1.97.1). Main's new
+  `crates/de-esser` brought 9 more `chunks_exact` sites, rewritten the same way.
 
