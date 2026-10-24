@@ -4402,6 +4402,26 @@ fn quiet_mark(snapshot: LiveSnapshot, every_lane_quiet: bool) -> Option<u64> {
     every_lane_quiet.then_some(snapshot.publication())
 }
 
+/// Test-only: which builtin bank skipped a lane walk (issue #1778).
+#[cfg(any(test, feature = "test-support"))]
+#[derive(Clone, Copy)]
+enum QuietBank {
+    Input,
+    Fader,
+    Matrix,
+}
+
+/// Test-only: count one skipped lane walk of `bank` on this thread. Allocation-free: a copy in
+/// and out of a fixed array. Not compiled into a release artifact.
+#[cfg(any(test, feature = "test-support"))]
+fn test_only_count_quiet_skip(bank: QuietBank) {
+    QUIET_WALK_SKIPS.with(|cell| {
+        let mut counts = cell.get();
+        counts[bank as usize] = counts[bank as usize].saturating_add(1);
+        cell.set(counts);
+    });
+}
+
 /// Whether bit `lane` of `lanes` is set. A bank has at most [`MAXIMUM_BANK_LANES`] lanes.
 const fn lane_selected(lanes: u8, lane: usize) -> bool {
     debug_assert!(lane < MAXIMUM_BANK_LANES);
@@ -4582,6 +4602,8 @@ impl GraphPreparedBuiltinBankProcessor for BuiltinBankProcessor {
     ) -> Result<(), RenderError> {
         let _ = first_sample;
         if quiet_walk_skips(self.quiet_at, snapshot) {
+            #[cfg(any(test, feature = "test-support"))]
+            test_only_count_quiet_skip(QuietBank::Input);
             return Ok(());
         }
         self.drain_controls(snapshot, EVERY_LANE, false)
@@ -5023,7 +5045,6 @@ impl FaderBankProcessor {
         self.frames_processed = self.frames_processed.saturating_add(u64::from(frames));
         took
     }
-    // REALTIME_POLICY_END
 
     /// The block drain under `snapshot`: the body of `begin_block`.
     fn drain(&mut self, snapshot: LiveSnapshot) -> Result<(), RenderError> {
@@ -5035,6 +5056,8 @@ impl FaderBankProcessor {
             ..
         } = self;
         let result = if quiet_walk_skips(*quiet_at, snapshot) {
+            #[cfg(any(test, feature = "test-support"))]
+            test_only_count_quiet_skip(QuietBank::Fader);
             Ok(())
         } else {
             let drained = drain_fader_controls(bank, controls, automation, snapshot, EVERY_LANE);
@@ -5050,7 +5073,6 @@ impl FaderBankProcessor {
     /// block drain with [`LiveSnapshot::ALL`], the same code (#1312 D6). The plan-swap carry calls
     /// it on a quiescent predecessor, for the lanes it exports (#1277); no production render path
     /// takes `ALL`.
-    // REALTIME_POLICY_BEGIN
     ///
     /// Each carried automated lane's offsets cells are read the same way (#1648 D2, U3 fold):
     /// the newest record is kept for the successor's first block, which applies it
@@ -5472,9 +5494,12 @@ struct MatrixBankProcessor {
 }
 
 impl MatrixBankProcessor {
+    // REALTIME_POLICY_BEGIN
     /// The block drain under `snapshot`: the body of `begin_block`.
     fn drain(&mut self, snapshot: LiveSnapshot) -> Result<(), RenderError> {
         if quiet_walk_skips(self.quiet_at, snapshot) {
+            #[cfg(any(test, feature = "test-support"))]
+            test_only_count_quiet_skip(QuietBank::Matrix);
             return Ok(());
         }
         let Self {
@@ -5489,7 +5514,6 @@ impl MatrixBankProcessor {
     }
 
     /// The matrix cells' counterpart of [`FaderBankProcessor::apply_pending`].
-    // REALTIME_POLICY_BEGIN
     fn apply_pending(&mut self, lanes: u8) -> Result<(), RenderError> {
         let Self {
             bank,
@@ -5767,6 +5791,17 @@ impl TestOnlyWriteGate for TestOnlyGate {
 #[cfg(any(test, feature = "test-support"))]
 thread_local! {
     static FADER_MATRIX_LIVE_WITNESS: std::cell::Cell<[u64; 2]> = const { std::cell::Cell::new([0; 2]) };
+    /// Issue #1778: the lane walks this thread's input, fader and matrix banks skipped.
+    static QUIET_WALK_SKIPS: std::cell::Cell<[u64; 3]> = const { std::cell::Cell::new([0; 3]) };
+}
+
+/// Test-only (#1778): take the lane walks this thread's input, fader and matrix banks skipped
+/// since the last take, in that order.
+#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
+#[must_use]
+pub fn test_only_take_quiet_walk_skips() -> [u64; 3] {
+    QUIET_WALK_SKIPS.with(|cell| cell.replace([0; 3]))
 }
 
 #[cfg(any(test, feature = "test-support"))]
@@ -11892,6 +11927,7 @@ mod tests {
         );
         // Nothing is pending now.
         let settled = builtins::test_support::fader_bank_lane_words(&processor.bank, 0);
+        let _ = test_only_take_quiet_walk_skips();
         processor.begin_block(0, gate.snapshot()).unwrap();
         assert_eq!(
             builtins::test_support::fader_bank_lane_words(&processor.bank, 0),
@@ -11901,8 +11937,14 @@ mod tests {
         // publication skips it. A monitor write is a new publication under the same revision
         // (#1603), and the first block under it applies it; a `LiveSnapshot::ALL` block (the
         // carry's) never skips, so a write published between two of them is applied by the second.
-        // Red if the quiet mark is compared by revision, or honoured under `ALL`.
+        // Red if the quiet mark is compared by revision, or honoured under `ALL`, or if the
+        // second block walks (the skip never fires).
         processor.begin_block(0, gate.snapshot()).unwrap();
+        assert_eq!(
+            test_only_take_quiet_walk_skips(),
+            [0, 1, 0],
+            "the second block under one publication skipped the fader walk"
+        );
         let revision = gate.snapshot().revision();
         let key = {
             let stamp = gate.pin.stamp_monitor(revision).expect("a monitor stamp");
@@ -11936,6 +11978,11 @@ mod tests {
         assert!(
             monitored != settled && after_all != monitored,
             "the monitor write applied under its publication and the write under `ALL`"
+        );
+        assert_eq!(
+            test_only_take_quiet_walk_skips(),
+            [0, 0, 0],
+            "`ALL` never skips"
         );
     }
 
@@ -11991,6 +12038,12 @@ mod tests {
             after_thirty,
             "the later write applied in the block whose snapshot covers it"
         );
+        // Issue #1778: a block that finds nothing pending marks the publication, and the next
+        // block under it skips the walk.
+        let _ = test_only_take_quiet_walk_skips();
+        processor.begin_block(0, gate.snapshot()).unwrap();
+        processor.begin_block(0, gate.snapshot()).unwrap();
+        assert_eq!(test_only_take_quiet_walk_skips(), [0, 0, 1]);
     }
 
     /// #1651 D1: the mute cells follow every fader cell in the plan's one program, so the fader
@@ -13911,6 +13964,12 @@ mod tests {
                 "{backend:?}: the second block applied revision 2"
             );
             assert_eq!(superseded.get(), 0, "no value was replaced unread");
+            // Issue #1778: a block that finds nothing pending marks the publication, and the
+            // next block under it skips the walk.
+            let _ = test_only_take_quiet_walk_skips();
+            processor.begin_block(128, second).expect("a quiet block");
+            processor.begin_block(192, second).expect("a skipped block");
+            assert_eq!(test_only_take_quiet_walk_skips(), [1, 0, 0], "{backend:?}");
         }
     }
 
