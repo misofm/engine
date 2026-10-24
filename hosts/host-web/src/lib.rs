@@ -568,11 +568,12 @@ pub enum ObservationReadChannels {
 /// Availability of one selected observation at the time of a read.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum ObservationReadStatus {
-    /// The tap is armed, but no complete window has been published yet.
+    /// The tap's last subscription has not been applied by render yet, or it is armed and no
+    /// complete window has been published since its arm (#1585 D4).
     #[default]
     Pending,
-    /// The tap exists, but render has it disarmed: no block has applied an arm yet, or the last
-    /// one it applied disarmed it (#1585 D3).
+    /// The tap exists, and its last subscription is a disarm that render has applied, or it has
+    /// none (#1585 D3, D4). A disarm render has not applied yet reads [`Self::Pending`].
     Unarmed,
     /// A complete resident window was read without consuming it.
     Ready,
@@ -4419,24 +4420,36 @@ fn read_observation_values(
         .zip(observed.reader)
         .and_then(|(companions, reader)| companions.effect_observations.get(reader as usize))
         .ok_or(ObservationReadError::Unsupported)?;
-    // #1585 D6: the arm state and the window are one read of the tap's slot, which render writes;
-    // a torn read reads as unarmed.
+    // #1585 D4, D6: the arm state and the window are one read of the tap's slot, which render
+    // writes. The tap is pending while render has not applied the last record the control plane
+    // queued for it (its slot publishes a lower tag than the one issued: tags are monotone) and
+    // while every attempt of the read tore; otherwise the slot's state is the answer.
+    let issued = observed
+        .descriptor
+        .observations
+        .get(tap_index)
+        .map_or(0, |declared| {
+            ready.control.observation_issued_tag(&ObservationKeyRef {
+                strip_id: observed.track_id.as_bytes(),
+                rack: observed.address.rack,
+                effect_id: observed.effect_id.as_bytes(),
+                tap_id: declared.id.0,
+            })
+        });
     let state = handle
         .readers
         .get(tap_index)
         .and_then(engine::realtime::ObservationReader::read_state)
-        .unwrap_or_default();
-    let armed = state.armed;
-    let window = state
-        .window
-        .filter(|_| armed)
-        .and_then(|window| window_since_arm(window, state.arm_sample));
-    let status = if !armed {
-        ObservationReadStatus::Unarmed
-    } else if window.is_some() {
-        ObservationReadStatus::Ready
-    } else {
-        ObservationReadStatus::Pending
+        .filter(|state| state.arm_tag >= issued);
+    let window = state.filter(|state| state.armed).and_then(|state| {
+        state
+            .window
+            .and_then(|window| window_since_arm(window, state.arm_sample))
+    });
+    let status = match state {
+        Some(state) if !state.armed => ObservationReadStatus::Unarmed,
+        _ if window.is_some() => ObservationReadStatus::Ready,
+        _ => ObservationReadStatus::Pending,
     };
     let (left, right) = match (status, window, selection.channels) {
         (ObservationReadStatus::Ready, Some(window), ObservationReadChannels::Left) => {

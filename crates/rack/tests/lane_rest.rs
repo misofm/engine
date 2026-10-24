@@ -288,7 +288,7 @@ impl World {
         } = record
         {
             self.writers[lane]
-                .try_push_observe(tap_index, armed, window_blocks)
+                .try_push_observe(tap_index, armed, window_blocks, 0)
                 .expect("room");
             return;
         }

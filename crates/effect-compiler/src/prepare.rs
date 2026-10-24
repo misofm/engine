@@ -759,14 +759,17 @@ impl EffectControlProducer {
     /// # Errors
     ///
     /// [`ObservePushError`], with nothing queued.
+    ///
+    /// `arm_tag` is the edit's tag (#1585 D4), `0` for none; render publishes it with the arm.
     pub fn try_push_observe(
         &mut self,
         tap_index: u32,
         armed: bool,
         window_blocks: u32,
+        arm_tag: u64,
     ) -> Result<(), ObservePushError> {
         self.writer
-            .try_push_observe(tap_index, armed, window_blocks)
+            .try_push_observe(tap_index, armed, window_blocks, arm_tag)
     }
 
     /// The observation queue's capacity: the number of taps the effect declares, `0` for a lane
@@ -1739,6 +1742,9 @@ pub struct ObservationArm<'a> {
     pub tap_id: u32,
     /// The window length in blocks; `0` is the plan's meter window.
     pub window_blocks: u32,
+    /// The tag of the record that armed the tap (#1585 D4), which the plan's first block publishes
+    /// with the arm; `0` for none.
+    pub arm_tag: u64,
 }
 
 /// Attach observation capacity to every prepared effect that declares at least one tap.
@@ -1771,14 +1777,14 @@ pub fn attach_effect_observation(
 ) -> Result<Vec<EffectObservationHandle>, EffectDiagnosticSet> {
     let declared = declared_live_addresses(&prepared.session);
     // The arms by instance, so each entry finds its own in one lookup.
-    // (strip, console, instance ID) -> (tap ID, window blocks) of each armed tap.
-    type ArmedTaps<'a> = BTreeMap<(&'a str, bool, &'a str), Vec<(u32, u32)>>;
+    // (strip, console, instance ID) -> (tap ID, window blocks, arm tag) of each armed tap.
+    type ArmedTaps<'a> = BTreeMap<(&'a str, bool, &'a str), Vec<(u32, u32, u64)>>;
     let mut armed = ArmedTaps::new();
     for arm in arms {
         armed
             .entry((arm.strip_id, arm.console, arm.effect_id))
             .or_default()
-            .push((arm.tap_id, arm.window_blocks));
+            .push((arm.tap_id, arm.window_blocks, arm.arm_tag));
     }
     let mut handles = Vec::new();
     let mut diagnostics = Vec::new();
@@ -1828,14 +1834,14 @@ pub fn attach_effect_observation(
         let console = !matches!(entry.rack, EffectRack::Dynamic);
         if let Some(taps) = armed.get(&(entry.track_id.as_str(), console, entry.effect_id.as_str()))
         {
-            for &(tap_id, window) in taps {
+            for &(tap_id, window, arm_tag) in taps {
                 if let Some(index) = descriptor
                     .observations
                     .iter()
                     .position(|tap| tap.id.0 == tap_id)
                     && let Ok(index) = u32::try_from(index)
                 {
-                    lane.arm_prepared(index, window);
+                    lane.arm_prepared(index, window, arm_tag);
                 }
             }
         }

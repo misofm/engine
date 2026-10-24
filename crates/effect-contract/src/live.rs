@@ -549,11 +549,15 @@ impl EffectCellWriter {
     /// queue holds as many records as the effect has taps. Nothing is queued: the host checks the
     /// room of a whole submission before it writes anything, so an acked batch is never partly
     /// queued.
+    ///
+    /// `arm_tag` is the tag the control plane issued for the edit (#1585 D4), `0` for none: render
+    /// publishes it with the tap's arm state when it drains the record.
     pub fn try_push_observe(
         &mut self,
         tap_index: u32,
         armed: bool,
         window_blocks: u32,
+        arm_tag: u64,
     ) -> Result<(), ObservePushError> {
         let queue = self.observe.as_mut().ok_or(ObservePushError::Unbound)?;
         queue
@@ -561,8 +565,7 @@ impl EffectCellWriter {
                 tap_index,
                 armed,
                 window_blocks,
-                // #1585a: no writer issues a tag yet; #1585b passes the edit's.
-                arm_tag: 0,
+                arm_tag,
             })
             .map_err(ObservePushError::Full)
     }
@@ -1516,8 +1519,13 @@ struct ObservationTap {
     /// [`ObservationLane::disarm_all`]. Part of the tap's state, so [`ObservationLane::swap_state`]
     /// moves it with the rest and a carried tap's own state replaces it whole.
     start_pending: bool,
+    /// Armed at preparation and not yet published in the slot (#1585 R2): the block drain that
+    /// precedes the plan's first block publishes it ([`ObservationLane::publish_prepared_arms`]),
+    /// before any silence skip or resident read can pass the tap by. Cleared by that drain, by
+    /// [`ObservationLane::arm`] and by [`ObservationLane::disarm_all`].
+    arm_unpublished: bool,
     /// The first sample of the block that applied the tap's last arm or disarm, as its slot
-    /// publishes it (#1585 R2). A prepared arm's is set by its first accumulated block.
+    /// publishes it (#1585 R2). A prepared arm's is set by the plan's first block drain.
     arm_sample: u64,
     /// The tag of the record that last armed or disarmed the tap, `0` for none (#1585 R2).
     arm_tag: u64,
@@ -1555,6 +1563,10 @@ pub struct ObservationLane {
     /// a tap *does*; this is only a redundant count of it, and `set_arm` (behind `arm` and
     /// `arm_prepared`) and `disarm_all` are the only two writers of either.
     armed_count: u32,
+    /// Whether a tap of this lane may hold a prepared arm its slot has not published (#1585 R2),
+    /// so [`publish_prepared_arms`](Self::publish_prepared_arms) is one load on every block after
+    /// the first. Set by `arm_prepared`, cleared by that publication and by `disarm_all`.
+    arms_unpublished: bool,
 }
 
 impl ObservationLane {
@@ -1579,6 +1591,7 @@ impl ObservationLane {
                 fold: descriptor.fold,
                 armed: false,
                 start_pending: false,
+                arm_unpublished: false,
                 arm_sample: 0,
                 arm_tag: 0,
                 window_blocks: default_window_blocks,
@@ -1595,6 +1608,7 @@ impl ObservationLane {
             default_window_blocks,
             // Every tap is built unarmed, so the count starts where they do.
             armed_count: 0,
+            arms_unpublished: false,
         })
     }
 
@@ -1688,6 +1702,7 @@ impl ObservationLane {
         }
         tap.armed = armed;
         tap.start_pending = false;
+        tap.arm_unpublished = false;
         tap.arm_sample = first_sample;
         tap.arm_tag = arm_tag;
         tap.window_blocks = if window_blocks == 0 {
@@ -1717,14 +1732,17 @@ impl ObservationLane {
     /// index this lane has no tap for. Off the render thread, before the plan is published.
     ///
     /// The slot publishes nothing here: render is the one writer of a tap's arm state (#1585 D3),
-    /// so the tap's first accumulated block publishes it armed at that block's first sample. Until
-    /// that block a reader sees the slot unarmed (#1585 R4).
-    pub fn arm_prepared(&mut self, tap_index: u32, window_blocks: u32) -> bool {
-        // #1585a: no tag yet; #1585b passes the binding's.
-        let Some(tap) = self.set_arm(tap_index, true, window_blocks, 0, 0) else {
+    /// so the drain at the top of the plan's first block publishes it armed at that block's first
+    /// sample with `arm_tag`, the tag of the binding it was prepared from
+    /// ([`Self::publish_prepared_arms`]). Until that block the slot holds no arm, and a reader that
+    /// knows the tag it expects reports the tap pending.
+    pub fn arm_prepared(&mut self, tap_index: u32, window_blocks: u32, arm_tag: u64) -> bool {
+        let Some(tap) = self.set_arm(tap_index, true, window_blocks, 0, arm_tag) else {
             return false;
         };
         tap.start_pending = true;
+        tap.arm_unpublished = true;
+        self.arms_unpublished = true;
         true
     }
 
@@ -1734,13 +1752,16 @@ impl ObservationLane {
     /// re-subscribes against the new plan. Disarming here is the same operation an explicit
     /// unsubscribe performs, so there is one code path and one meaning.
     ///
-    /// The slots publish nothing (#1585 R2): this runs on a retired plan's lanes, whose slots no
-    /// live reader reads, and only render writes a tap's arm state.
+    /// The slots publish nothing (#1585 R2): only render writes a tap's arm state, and no
+    /// production path calls this; only tests do, directly or through
+    /// `rack::BankSlot::disarm_observations`.
     pub fn disarm_all(&mut self) {
         self.armed_count = 0;
+        self.arms_unpublished = false;
         for tap in self.taps.iter_mut() {
             tap.armed = false;
             tap.start_pending = false;
+            tap.arm_unpublished = false;
             tap.blocks = 0;
             tap.peak_left = 0.0;
             tap.peak_right = 0.0;
@@ -1788,7 +1809,27 @@ impl ObservationLane {
         }
         core::mem::swap(&mut self.taps, &mut other.taps);
         core::mem::swap(&mut self.armed_count, &mut other.armed_count);
+        core::mem::swap(&mut self.arms_unpublished, &mut other.arms_unpublished);
         true
+    }
+
+    /// Publish every prepared arm this lane's slots do not hold yet (#1585 R2): armed at
+    /// `first_sample`, the first sample of the block whose drain calls it, with the tag the arm was
+    /// prepared with, as the drain of a record at that block would. The block drain calls it before
+    /// it applies any record, so a record of the same block overwrites it as a later record does.
+    /// It runs in the drain, which no silence skip or resident read bypasses. One load on every
+    /// block after the first; a bounded walk over the taps once.
+    pub fn publish_prepared_arms(&mut self, first_sample: u64) {
+        if !core::mem::take(&mut self.arms_unpublished) {
+            return;
+        }
+        for tap in self.taps.iter_mut() {
+            if core::mem::take(&mut tap.arm_unpublished) {
+                tap.arm_sample = first_sample;
+                tap.publisher
+                    .publish_arm(tap.armed, first_sample, tap.arm_tag);
+            }
+        }
     }
 
     /// Whether tap `tap_index` should be read for this block at all.
@@ -1826,10 +1867,6 @@ impl ObservationLane {
         if tap.start_pending {
             tap.start_pending = false;
             tap.first_sample = first_sample;
-            // #1585 R2: the prepared arm's state reaches its slot here, from render, as a record's
-            // would at the block that drained it.
-            tap.arm_sample = first_sample;
-            tap.publisher.publish_arm(true, tap.arm_sample, tap.arm_tag);
         }
         // `first_sample` is otherwise **not** taken from the block. It was set when the tap was
         // armed and it is set again to `end_sample` when a window closes, so consecutive windows

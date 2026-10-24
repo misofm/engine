@@ -227,6 +227,10 @@ pub struct ObservationBinding {
     /// removes one, and the binding goes at `0`. An absolute [`ObservationBindings::set`] (the
     /// browser's observe kinds 7 and 8) gives a new binding one and keeps an existing one's.
     pub refs: u32,
+    /// The tag of the record that last armed the tap (#1585 D4), which a successor's prepared arm
+    /// publishes; `0` until the control plane that queued the record sets it
+    /// ([`ObservationBindings::set_arm_tag`]).
+    pub arm_tag: u64,
 }
 
 /// The taps a host has armed, sorted by key.
@@ -296,6 +300,7 @@ impl ObservationBindings {
                     key,
                     window_blocks,
                     refs: 1,
+                    arm_tag: 0,
                 },
             ),
         }
@@ -325,6 +330,7 @@ impl ObservationBindings {
                         key: key.clone(),
                         window_blocks,
                         refs: 1,
+                        arm_tag: 0,
                     },
                 );
                 Ok(())
@@ -379,6 +385,18 @@ impl ObservationBindings {
             .collect()
     }
 
+    /// Set the tag of the record that armed `key` (#1585 D4). Returns whether `key` is armed; an
+    /// unarmed key keeps no tag.
+    pub fn set_arm_tag(&mut self, key: &TapKey, arm_tag: u64) -> bool {
+        match self.search(key) {
+            Ok(index) => {
+                self.bindings[index].arm_tag = arm_tag;
+                true
+            }
+            Err(_) => false,
+        }
+    }
+
     /// Disarm `key`. Returns whether it was armed.
     pub fn clear(&mut self, key: &TapKey) -> bool {
         match self.search(key) {
@@ -395,7 +413,21 @@ impl ObservationBindings {
     /// allocates nothing, so a caller that holds only borrowed IDs can ask.
     #[must_use]
     pub fn is_armed_by_parts(&self, strip: &str, console: bool, effect: &str, tap_id: u32) -> bool {
-        self.bindings.iter().any(|binding| {
+        self.binding_by_parts(strip, console, effect, tap_id)
+            .is_some()
+    }
+
+    /// The binding of the tap named by its parts, as [`Self::is_armed_by_parts`] names it, or
+    /// `None` when it is not armed. Allocates nothing.
+    #[must_use]
+    pub fn binding_by_parts(
+        &self,
+        strip: &str,
+        console: bool,
+        effect: &str,
+        tap_id: u32,
+    ) -> Option<&ObservationBinding> {
+        self.bindings.iter().find(|binding| {
             let key = &binding.key;
             key.tap_id == tap_id
                 && key.strip.as_str() == strip

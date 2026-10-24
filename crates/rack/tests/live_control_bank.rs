@@ -981,15 +981,15 @@ fn each_lanes_subscriptions_reach_that_lanes_taps_in_order() {
     assert_eq!(stage.observation_tap_counts(), (5, 0));
     // Lane 0 arms its second tap. Lane 1 names a second tap it does not declare. Lane 2 arms its
     // first tap, disarms it and arms its second (in that order). Lane 3 has no state at all.
-    writers[0].try_push_observe(1, true, 0).expect("room");
-    writers[1].try_push_observe(1, true, 0).expect("room");
-    writers[2].try_push_observe(0, true, 0).expect("room");
-    writers[2].try_push_observe(0, false, 0).expect("room");
+    writers[0].try_push_observe(1, true, 0, 0).expect("room");
+    writers[1].try_push_observe(1, true, 0, 0).expect("room");
+    writers[2].try_push_observe(0, true, 0, 0).expect("room");
+    writers[2].try_push_observe(0, false, 0, 0).expect("room");
     assert!(
-        writers[2].try_push_observe(1, true, 0).is_err(),
+        writers[2].try_push_observe(1, true, 0, 0).is_err(),
         "a queue holds one slot per declared tap: the third record is refused, not dropped later"
     );
-    writers[3].try_push_observe(0, true, 0).expect("room");
+    writers[3].try_push_observe(0, true, 0, 0).expect("room");
     stage.begin_block(0, LiveSnapshot::ALL).expect("drain");
     assert_eq!(
         stage.observation_tap_counts(),

@@ -1745,7 +1745,7 @@ impl SessionRuntime {
         for producer in &mut self.controls {
             for tap_index in 0..producer.descriptor.observations.len() as u32 {
                 producer
-                    .try_push_observe(tap_index, true, WINDOW_BLOCKS)
+                    .try_push_observe(tap_index, true, WINDOW_BLOCKS, 0)
                     .expect("room in the observation queue");
             }
         }

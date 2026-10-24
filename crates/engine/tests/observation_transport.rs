@@ -240,11 +240,6 @@ fn a_million_windows_are_read_whole_and_in_order() {
 fn a_stalled_reader_resumes_on_the_newest_window_with_a_counted_gap() {
     let (publisher, reader) = observation_slot();
     assert_eq!(reader.read(), None, "nothing published is absent, not zero");
-    assert_eq!(
-        reader.read_state(),
-        Some(ObservationState::default()),
-        "before any arm a tap is unarmed, at sample 0 with tag 0"
-    );
 
     publisher.publish(window(1));
     let first = reader.read().expect("first window");

@@ -1796,6 +1796,7 @@ where
         observation_wire: observation_wire(limits.maximum_control_frame_bytes)?,
         observation_armed_bytes: 0,
         observation_slots_high_water: 0,
+        next_arm_tag: 1,
         send_moves: None,
         spectrum,
         output_meter: Some((output_reader, output_gate)),

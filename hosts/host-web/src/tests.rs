@@ -4191,22 +4191,23 @@ fn selected_observation_reads_are_bounded_stable_and_non_consuming() {
         RESULT_OK,
         "the existing observe command remains the only arming path"
     );
-    // #1585 D3, R4: the read reports what render applied, and no block has drained the arm yet.
-    let queued = host
-        .read_observations(&[selection])
-        .expect("queued selected read");
-    assert_eq!(queued.len(), 1);
-    assert_eq!(queued[0].status, ObservationReadStatus::Unarmed);
-    assert_eq!(queued[0].window, None);
-    assert_eq!(queued[0].native_effect_id, "miso.compressor");
-    assert_eq!(queued[0].descriptor.display_unit, "dB");
-
-    feed_and_render_tracks(&mut host, 0, 0.0);
     let pending = host
         .read_observations(&[selection])
         .expect("pending selected read");
+    assert_eq!(pending.len(), 1);
     assert_eq!(pending[0].status, ObservationReadStatus::Pending);
     assert_eq!(pending[0].window, None);
+    assert_eq!(pending[0].native_effect_id, "miso.compressor");
+    assert_eq!(pending[0].descriptor.display_unit, "dB");
+
+    // #1585 D4: render has applied the arm (its slot publishes the issued tag) and no window has
+    // closed yet.
+    feed_and_render_tracks(&mut host, 0, 0.0);
+    let applied = host
+        .read_observations(&[selection])
+        .expect("applied selected read");
+    assert_eq!(applied[0].status, ObservationReadStatus::Pending);
+    assert_eq!(applied[0].window, None);
     feed_and_render_tracks(&mut host, 1, 0.0);
     let expected = {
         let ready = host.ready.as_ref().expect("ready ownership");
@@ -4233,16 +4234,16 @@ fn selected_observation_reads_are_bounded_stable_and_non_consuming() {
         expected.first_sample
     );
 
-    // A re-arm is admitted before the next render block, and the reader still retains the prior
-    // resident cell. Until a block drains the re-arm the previous arm is the one in effect (#1585
-    // D3, R4), so its window still reads. (A subscription to an armed tap is the re-arm: it
-    // restarts the window, and the effect's one-slot queue holds just it.)
+    // A re-arm is admitted before the next render block, but the reader still retains the prior
+    // resident cell. That old publication is before the admitted application sample and must not
+    // look ready while a replacement window is being built. (A subscription to an armed tap is
+    // the re-arm: it restarts the window, and the effect's one-slot queue holds just it.)
     assert_eq!(observe(&mut host, 0, 1, 0, 1, 2, true), RESULT_OK);
-    let rearm_queued = host
+    let rearmed_pending = host
         .read_observations(&[selection])
-        .expect("re-arm queued selected read");
-    assert_eq!(rearm_queued[0].status, ObservationReadStatus::Ready);
-    assert_eq!(rearm_queued[0].window, Some(expected));
+        .expect("re-arm pending selected read");
+    assert_eq!(rearmed_pending[0].status, ObservationReadStatus::Pending);
+    assert_eq!(rearmed_pending[0].window, None);
 
     // A second observed effect is read in the same caller-ordered batch. Both rows are sourced
     // from their own resident cells, and neither selected read consumes the publication.
