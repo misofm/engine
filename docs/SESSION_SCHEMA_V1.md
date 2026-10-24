@@ -228,7 +228,7 @@ fader/mute -> pan/matrix -> routes`.
 `miso.parametric-eq`, `miso.compressor`, `miso.gate-expander`, `miso.soft-clip`,
 `miso.transient-shaper` and `miso.true-peak-limiter`. The delay never banks, and the multiband
 compressor is excluded until #1069 closes. The de-esser is an insert only until the owner rules
-on its console eligibility (#15 S3). The schema checks the identity's syntax only; the list
+on its console eligibility (#1920). The schema checks the identity's syntax only; the list
 is enforced where native identities resolve, by effect preparation, which refuses any other slot
 with `console.slot.ineligible_effect` at `$.console.<section>[slot=<id>].identity`.
 

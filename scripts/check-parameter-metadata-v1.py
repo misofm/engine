@@ -119,7 +119,7 @@ PORT_LAYOUTS = {1: "dualMonoPlanar"}
 # surface silently.
 LAUNCH_PORT_IDS = {"mainInput": "main-in", "mainOutput": "main-out", "sidechainInput": "sidechain-in"}
 LAUNCH_PORT_REQUIRED = {"mainInput": True, "mainOutput": True, "sidechainInput": False}
-# Exactly two launch effects declare a sidechain input. An effect that gained or lost one without
+# Exactly three launch effects declare a sidechain input. An effect that gained or lost one without
 # this list moving is drift between the engine and every consumer that authors against the table.
 SIDECHAIN_EFFECTS = {"miso.compressor", "miso.de-esser", "miso.gate-expander"}
 

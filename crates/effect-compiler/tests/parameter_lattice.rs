@@ -180,7 +180,7 @@ fn every_log_row_steps_geometrically_and_every_linear_row_arithmetically() {
             // comparison of the first and last generated gaps separates them decisively. The
             // declared min/max/default are skipped: an intrinsic maximum just above the last
             // generated point leaves a gap narrower than any generated one (the de-esser's Q,
-            // 0.5 to 8, ends 7.9987, 8).
+            // 0.5 to 8, ends 7.99821205, 8).
             let generated: Vec<f64> = points
                 .iter()
                 .filter(|point| !point.intrinsic)

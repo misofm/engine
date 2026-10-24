@@ -264,9 +264,10 @@ fn build_launch_native_effect_registry() -> Result<NativeEffectRegistry, Registr
 /// A console slot always banks, so it must be an effect whose homogeneous bank kernel the console
 /// can rely on: the parametric EQ, compressor, gate/expander, soft-clip, transient shaper and
 /// true-peak limiter. The delay never banks. The multiband compressor is excluded until #1069
-/// closes, and the de-esser until the owner rules on its eligibility (#15 S3). Anything else is refused with `console.slot.ineligible_effect` where native identities
-/// resolve, in [`prepare_native_session_effects`]; the session schema refuses a third-party slot
-/// before this runs.
+/// closes, and the de-esser until the owner rules on its eligibility (#1920). Anything else is
+/// refused with `console.slot.ineligible_effect` where native identities resolve, in
+/// [`prepare_native_session_effects`]; the session schema refuses a third-party slot before this
+/// runs.
 pub const CONSOLE_ELIGIBLE_EFFECTS: [&str; 6] = [
     "miso.parametric-eq",
     "miso.compressor",

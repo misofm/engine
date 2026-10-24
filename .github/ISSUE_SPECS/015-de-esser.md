@@ -141,8 +141,11 @@ Evidence (48 kHz, this worktree):
   whose wet state (SVF integrators) alone failed D7 zeroed its dry output, where the graph's
   shunt passes it. `finish_block` now zeroes a bypassed lane only when its output fails; the state
   is still recovered and counted. Red before the change, green after.
-- `parameter_lattice`'s geometric-step check now skips intrinsic points: the de-esser's Q
-  (0.5-8) ends 7.9987, 8, a gap below the first generated one.
+- `parameter_lattice`'s geometric-step check now skips intrinsic points. The binding lattice law
+  (`crates/effect-contract/src/step.rs:7-12`, #239 ruling 5461507633 section B) allows the
+  endpoint and default detents one irregular adjacency; the de-esser's Q (0.5-8) ends
+  7.99821205 -> 8, gap 0.0018, below the first generated gap. Every geometric row of the nine
+  effects ends on a clamp; only this one exposed the old rule.
 - `observation_identity`: the de-esser was born with its tap, so its contract is 1.0 (no bump).
 - `console-workload` `paired_spans`: the de-esser is collapse-capable, so it joins the
   collapse-capable set and carries an A3 row (every link mode, 10 live PerLane parameters, 97

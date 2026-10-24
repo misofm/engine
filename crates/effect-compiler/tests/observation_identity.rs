@@ -9,6 +9,14 @@
 use effect_compiler::launch_native_effect_registry;
 use effect_contract::ObservationCost;
 
+/// The four effects that gained their tap in #143, a `contract_minor` bump to 1.
+const TAP_ADDED_BY_143: [&str; 4] = [
+    "miso.compressor",
+    "miso.gate-expander",
+    "miso.multiband-compressor",
+    "miso.true-peak-limiter",
+];
+
 /// The five effects that declare a tap.
 const DYNAMICS: [&str; 5] = [
     "miso.compressor",
@@ -29,20 +37,20 @@ fn a_declared_tap_moves_contract_minor_and_leaves_the_state_layout_alone() {
             "{}: only the dynamics effects declare a tap",
             descriptor.id
         );
+        // A tap added to a shipped descriptor is a *semantic* addition, so #143 moved its
+        // `contract_minor`. No state word changed -- the tap reads state that was already there --
+        // so `state_layout_version` did not (`launch_native_state_layouts_are_v1`). Every other
+        // effect, the de-esser (#15, born with its tap) included, is at 1.0.
+        let bumped = TAP_ADDED_BY_143.contains(&descriptor.id.as_str());
+        assert_eq!(
+            descriptor.contract_minor,
+            u16::from(bumped),
+            "{}: only #143's added taps are a minor bump",
+            descriptor.id
+        );
         if !dynamics {
             continue;
         }
-        // The menu is a *semantic* addition to the descriptor, so `contract_minor` moves. No state
-        // word changed -- the tap reads state that was already there -- so `state_layout_version`
-        // does not (`launch_native_state_layouts_are_v1`).
-        // The de-esser (#15) was born with its tap, so its contract is 1.0: there was no bump.
-        let born_with_tap = descriptor.id.as_str() == "miso.de-esser";
-        assert_eq!(
-            descriptor.contract_minor,
-            u16::from(!born_with_tap),
-            "{}: declaring the first tap is a minor bump",
-            descriptor.id
-        );
         assert_eq!(descriptor.observations.len(), 1, "{}", descriptor.id);
         let tap = descriptor.observations[0];
         assert_eq!(tap.id.0, 1, "{}", descriptor.id);
