@@ -447,7 +447,8 @@ fn a_lead_off_the_quantum_is_refused() {
 }
 
 /// Gate 2: a post-fader send from latent X into bus S restarts X whole, and S, T and the output
-/// lead by 512, with S unchanged and with a limiter on S.
+/// lead by 512, with S unchanged and with a limiter on S. X's fader and pre-fader owners do not
+/// carry (scope R6).
 #[test]
 fn a_send_into_a_bus_from_a_latent_track_restarts_the_track() {
     for bus_limiter in [false, true] {
@@ -478,8 +479,19 @@ fn a_send_into_a_bus_from_a_latent_track_restarts_the_track() {
             (LEAD, &names(&["x"])[..]),
             "bus limiter {bus_limiter}"
         );
-        let w = edit.warm(&lead);
+        let mut w = edit.warm(&lead);
         assert_eq!(restarted(&w), ["x"], "bus limiter {bus_limiter}");
+        // Scope R6: the warm program moves none of X's pre-fader owners (its input section and
+        // its limiter) and not its fader; everything else the ordinary successor carries, it
+        // carries.
+        let mut ordinary = edit.prepare(edit.base()).expect("ordinary");
+        assert!(ordinary.restarted_strips().is_empty());
+        let [sources, inputs, strips, effects] = graph::test_only_carry_counts(&mut ordinary.plan);
+        assert_eq!(
+            graph::test_only_carry_counts(&mut w.plan),
+            [sources, inputs - 1, strips - 1, effects - 1],
+            "bus limiter {bus_limiter}"
+        );
         let mut carried = stages("s", TrackStage::Input);
         carried.extend(stages("t", TrackStage::Input));
         carried.push(output());
