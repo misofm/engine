@@ -8207,7 +8207,9 @@ mod meter_carry {
                 "{backend:?}: every track meter carries, the submix's do not"
             );
             assert!(
-                run.carries.iter().all(|carry| carry.successor >= TAPS.len()),
+                run.carries
+                    .iter()
+                    .all(|carry| carry.successor >= TAPS.len()),
                 "{backend:?}: no record names the submix's readers"
             );
             for tap in TAPS {

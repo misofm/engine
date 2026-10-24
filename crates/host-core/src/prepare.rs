@@ -2455,6 +2455,7 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
             &base.inventory.meters,
             &requested_meter_owners(selected_meters),
             MeterConfigKey::of(&meter_config),
+            |id| same_strip_id_kind(base.committed, model, id),
         ),
         None => false,
     };
@@ -3338,7 +3339,9 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
         "every meter has an observer"
     );
     let meter_carry = match successor {
-        Some(base) => resolve_meter_carry(&base.inventory.meters, &meter_rows),
+        Some(base) => resolve_meter_carry(&base.inventory.meters, &meter_rows, |id| {
+            same_strip_id_kind(base.committed, compiled.normalized_model(), id)
+        }),
         None => MeterCarry::default(),
     };
     // Issue #1395 D1: this plan's own spectrum captures, in capture order: the inventory its
@@ -3552,7 +3555,9 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
         .ok_or_else(|| graph_failure("host.inventory.identity"))?;
     delay_lines.sort_unstable_by(|left, right| left.edge.cmp(&right.edge));
     let delay_carry = match successor {
-        Some(base) => resolve_delay_carry(&base.inventory.delay_lines, &delay_lines),
+        Some(base) => resolve_delay_carry(&base.inventory.delay_lines, &delay_lines, |id| {
+            same_strip_id_kind(base.committed, compiled.normalized_model(), id)
+        }),
         None => Vec::new(),
     };
     let delay_carry_bytes = graph::delay_carry_retained_bytes(delay_carry.len())
@@ -3976,18 +3981,23 @@ fn requested_meter_config(
     })
 }
 
-/// Whether any of `owners` has a meter in `predecessor` with its key and `config` (#1327 D1).
+/// Whether any of `owners` has a meter in `predecessor` with its key and `config` (#1327 D1) on a
+/// strip `same_strip` says is of one kind in both plans' models (#1891), as
+/// [`resolve_meter_carry`] pairs them.
 fn meters_may_carry(
     predecessor: &[MeterInventoryRow],
     owners: &[(&str, MeterTap, MeterMetricSet)],
     config: MeterConfigKey,
+    same_strip: impl Fn(&str) -> bool,
 ) -> bool {
     let keys: BTreeSet<(&str, MeterTap, MeterMetricSet)> = predecessor
         .iter()
         .filter(|row| row.config == config)
         .map(|row| (row.id.as_ref(), row.tap, row.metrics))
         .collect();
-    owners.iter().any(|owner| keys.contains(owner))
+    owners
+        .iter()
+        .any(|owner| same_strip(owner.0) && keys.contains(owner))
 }
 
 /// What a successor's preparation takes from the meters of its predecessor (#1327).
@@ -4000,10 +4010,16 @@ struct MeterCarry {
 /// Join the successor's meter rows `own` with the predecessor's (#1327 D1, D6).
 ///
 /// A meter carries when its strip ID, tap, metric set and configuration equal a predecessor
-/// meter's; two meters of one key pair in reader order. Every other meter is fresh, and a fresh
-/// meter whose configuration equals a carried one's joins the window grid of the first such
-/// carried meter, the one with the lowest successor entry (D6).
-fn resolve_meter_carry(predecessor: &[MeterInventoryRow], own: &[MeterInventoryRow]) -> MeterCarry {
+/// meter's and `same_strip` says its ID names a strip of one kind in both plans' models (#1891: a
+/// track ID reused by a submix is another strip); two meters of one key pair in reader order.
+/// Every other meter is fresh, and a fresh meter whose configuration equals a carried one's joins
+/// the window grid of the first such carried meter, the one with the lowest successor entry (D6):
+/// a grid, not state, so a strip of another kind joins it too.
+fn resolve_meter_carry(
+    predecessor: &[MeterInventoryRow],
+    own: &[MeterInventoryRow],
+    same_strip: impl Fn(&str) -> bool,
+) -> MeterCarry {
     let mut available: BTreeMap<(&str, MeterTap, MeterMetricSet), Vec<&MeterInventoryRow>> =
         BTreeMap::new();
     for row in predecessor {
@@ -4022,9 +4038,13 @@ fn resolve_meter_carry(predecessor: &[MeterInventoryRow], own: &[MeterInventoryR
     let mut ordered: Vec<&MeterInventoryRow> = own.iter().collect();
     ordered.sort_unstable_by_key(|row| row.entry);
     for row in ordered {
-        let taken = available
-            .get_mut(&(row.id.as_ref(), row.tap, row.metrics))
-            .and_then(Vec::pop);
+        let taken = if same_strip(row.id.as_ref()) {
+            available
+                .get_mut(&(row.id.as_ref(), row.tap, row.metrics))
+                .and_then(Vec::pop)
+        } else {
+            None
+        };
         match taken {
             Some(before) if before.config == row.config => {
                 carry.moves.push(graph::GraphObserverMove {
@@ -4060,9 +4080,33 @@ struct SpectrumCarry {
     pairing: Vec<crate::spectrum::SpectrumPair>,
 }
 
+/// The strip `id` names in `model`, a normalized model (tracks and submixes each in canonical ID
+/// order): a track, a submix or none (#1593 T2b, #1891).
+fn strip_kind_of<'m>(model: &'m SessionModel, id: &str) -> Option<StripKind<'m>> {
+    if let Ok(index) = model
+        .tracks
+        .binary_search_by(|track| track.id.as_str().cmp(id))
+    {
+        return Some(StripKind::Track(&model.tracks[index]));
+    }
+    model
+        .submixes
+        .binary_search_by(|submix| submix.id.as_str().cmp(id))
+        .ok()
+        .map(|index| StripKind::Submix(&model.submixes[index]))
+}
+
+/// Whether `id` names a strip of one kind in `before` and `after` (#1593 T2b, #1891): a track in
+/// both, a submix in both, or neither in both. An ID that a transaction moved from a track to a
+/// submix (or back) names another strip, so no state keyed by the ID alone may carry onto it:
+/// not a spectrum capture, a meter or a route's compensation line.
+fn same_strip_id_kind(before: &SessionModel, after: &SessionModel, id: &str) -> bool {
+    let kind = |model| strip_kind_of(model, id).map(|kind| core::mem::discriminant(&kind));
+    kind(before) == kind(after)
+}
+
 /// Whether `target`'s ID names a strip of one kind in `before` and `after` (#1593 T2b): a track
-/// tap's ID is a track in both or a submix in both. An ID that a transaction moved from a track to
-/// a submix (or back) names another strip, so its observer must not carry. An output target is
+/// tap's ID is a track in both or a submix in both ([`same_strip_id_kind`]). An output target is
 /// always the same kind.
 fn same_strip_kind(
     target: &crate::spectrum::SpectrumTarget,
@@ -4070,18 +4114,9 @@ fn same_strip_kind(
     after: &SessionModel,
 ) -> bool {
     use crate::spectrum::SpectrumTarget;
-    let kind = |model: &SessionModel, id: &str| {
-        if model.tracks.iter().any(|track| track.id.as_str() == id) {
-            Some(false)
-        } else if model.submixes.iter().any(|submix| submix.id.as_str() == id) {
-            Some(true)
-        } else {
-            None
-        }
-    };
     match target {
         SpectrumTarget::TrackPostInputBuiltins(id) | SpectrumTarget::TrackPostMatrix(id) => {
-            kind(before, id) == kind(after, id)
+            same_strip_id_kind(before, after, id)
         }
         SpectrumTarget::Output(_) => true,
     }
@@ -4173,11 +4208,22 @@ fn resolve_observation_carry(
 /// edge ID. A line has no live value, so there is no retarget; a re-pointed route has other
 /// endpoints, so its line starts at rest and nothing about its strip changes. Lines of other
 /// lengths carry too: the swap block aligns their heads (D4).
+///
+/// The graph names a submix's stage as it names a track's (`TrackStage`), so a route whose
+/// source or destination strip changed kind under one ID keeps its endpoints: its line carries
+/// only if `same_strip` passes the ID of each `TrackStage` endpoint (#1891). Other endpoints
+/// pass.
 fn resolve_delay_carry(
     predecessor: &[graph::GraphDelayLine],
     own: &[graph::GraphDelayLine],
+    same_strip: impl Fn(&str) -> bool,
 ) -> Vec<graph::GraphDelayMove> {
+    let same_node = |node: &graph::GraphNodeId| match node {
+        graph::GraphNodeId::TrackStage { track_id, .. } => same_strip(track_id.as_str()),
+        _ => true,
+    };
     own.iter()
+        .filter(|line| same_node(&line.source) && same_node(&line.destination))
         .filter_map(|line| {
             let index = predecessor
                 .binary_search_by(|earlier| earlier.edge.cmp(&line.edge))
@@ -7300,7 +7346,7 @@ mod tests {
         ];
         before.sort_by(|l, r| l.edge.cmp(&r.edge));
         own.sort_by(|l, r| l.edge.cmp(&r.edge));
-        let moves = super::resolve_delay_carry(&before, &own);
+        let moves = super::resolve_delay_carry(&before, &own, |_| true);
         let mut moves: Vec<(u32, u32)> = moves
             .iter()
             .map(|step| (step.successor, step.predecessor))
