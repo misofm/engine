@@ -206,7 +206,7 @@ tracks, input filters, an EQ insert and an EQ console slot:
 - `render_step_allocates_nothing` (gate 5, the root comment): red if the render step, the
   collector's copy or the job's move allocates or frees on render, or a job is lost.
 
-Red first, each mutant restored by `git checkout`: step before the block (gates 1-3 and 2 red);
+Red first, each mutant restored by `git checkout`: step before the block (follows and applied red);
 no newest-epoch record at the push (follows red); a refusal that takes a tag (follows red);
 `Delivered` read as `Idle` (follows red); render drops a finished job (all three red); the sink
 allocates its track ID (allocates red only).
