@@ -2582,7 +2582,8 @@ where
             capi: prospective_capi,
             revision_gate,
             // #1593 T2b pairs the successor's captures at promotion; until then they drop here,
-            // on the control thread, and the service reads the running plan's.
+            // on the control thread. The service keeps the running plan's readers: a carried
+            // observer goes on reading through them, and one that did not carry stays pending.
             spectrum: _,
         } = prepared_runtime;
         // #1652 U2a fold 2 (MAJOR-A; #1713 deletes it): read before the inventory moves into the

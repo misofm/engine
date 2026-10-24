@@ -239,3 +239,14 @@ through `test_spectrum_mut()`.
   tone (`math` is not a control-plane dev-dependency). No capi test-support constructor with a
   configuration: no capi test reads spectrum until #1595 (R1), so it would be dead code.
   `hosts/host-web/src/tests.rs` takes the trait's new argument at its two direct `prepare` calls.
+- T2a verdict fold, root: the D1 deviation (`analysis` as `Option`, made with the service) is
+  accepted; it is consistent with D6 (a `None` configuration has no service).
+- Note for T2b: in T2a a structural edit on a configured session drops the successor's captures
+  and never calls `adopt_successor`. No host passes a configuration yet, so the path is not
+  reachable, but a kept target that does not carry would leave an armed capture pending forever.
+  T2b calls `adopt_successor` there, so T1's `Dropped` answers it, and extends gate 5 over its
+  transactions.
+- Note for #1594: when capi passes a configuration, capi's exact retained-bytes ledger must charge
+  the service's boxed stream window (about 16 KiB) and the analysis's boxed analyzer.
+- Note for T3: decide `adopted_epoch` for a configuration whose preparer returns no captures
+  (the browser's, until #1596).
