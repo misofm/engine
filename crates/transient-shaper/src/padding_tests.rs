@@ -279,7 +279,8 @@ struct Padded<'a> {
     members: &'a [Values],
     clone_of: usize,
     rate: u32,
-    link: LinkMode,
+    /// Each member's link mode (issue #1368): members of one bank may differ.
+    links: &'a [LinkMode],
 }
 
 impl Padded<'_> {
@@ -307,8 +308,8 @@ impl Padded<'_> {
         let requests: Vec<PrepareEffectRequest<'_>> = lanes
             .iter()
             .map(|member| {
-                let values = &self.members[member.unwrap_or(self.clone_of)];
-                request(values, self.rate, self.link)
+                let member = member.unwrap_or(self.clone_of);
+                request(&self.members[member], self.rate, self.links[member])
             })
             .collect();
         bind(self.width, &requests, self.mask)
@@ -330,7 +331,8 @@ fn render(padded: &Padded<'_>, blocks: &[Block], context: &str) -> Vec<Vec<u32>>
     let prepared: Vec<PreparedEffect> = padded
         .members
         .iter()
-        .map(|values| scalar(request(values, padded.rate, padded.link)))
+        .zip(padded.links)
+        .map(|(values, &link)| scalar(request(values, padded.rate, link)))
         .collect();
     let sizes = prepared[0].metadata.state_sizes;
     let mut scalars: Vec<Box<dyn PreparedNativeEffect>> = prepared
@@ -340,7 +342,11 @@ fn render(padded: &Padded<'_>, blocks: &[Block], context: &str) -> Vec<Vec<u32>>
     // Gate 3's padded-lane clause (P2a verdict, L4): fed `+0.0`, a padded lane keeps its state
     // finite and at rest, block after block. "At rest" is an idle track's state: the state of a
     // scalar instance of the member the lane clones, fed `+0.0` and no automation.
-    let idle_request = request(&padded.members[padded.clone_of], padded.rate, padded.link);
+    let idle_request = request(
+        &padded.members[padded.clone_of],
+        padded.rate,
+        padded.links[padded.clone_of],
+    );
     let rest = payload_of(scalar(idle_request).processor.as_ref(), sizes);
     let mut idle: Vec<Option<Box<dyn PreparedNativeEffect>>> = lanes
         .iter()
@@ -561,24 +567,35 @@ fn random_blocks(draw: &mut Draw, members: usize, count: usize) -> Vec<Block> {
 // Gate 1: a padded bank renders its members' per-node bits
 // ---------------------------------------------------------------------------------------------
 
-/// Gate 1 on random parameters, automation and input: every active count `1..W` at both widths,
+/// Gate 1 on random parameters, automation and input: every active count `1..=W` at both widths,
 /// every link mode and every launch rate, members first as the planner lays them out.
 ///
 /// Red if a padded lane is bound as zeros, runs a padded lane's automation, lets a padded lane's
 /// recovery or report reach an active lane, or restores the #1088 decline (the bank does not bind).
+/// Members mix link modes (issue #1368), so it is also red if a lane takes another lane's mode,
+/// and the mixed-link arm is counted: red if a bank whose lanes share one mode (one member, its
+/// padding at the first member's mode, D5) takes it, or a mixed bank does not.
 #[test]
 fn every_padded_bank_renders_its_members_per_node_bits() {
     let mut cases = 0;
     for &width in WIDTHS {
         let lanes = width.lanes() as usize;
-        for members in 1..lanes {
-            for (index, link) in LINKS.into_iter().enumerate() {
+        for members in 1..=lanes {
+            for index in 0..LINKS.len() {
                 let seed = (lanes * 100 + members * 10 + index) as u64;
+                // Issue #1368: member `m` takes the mode `m` places after `LINKS[index]`, so a bank of two
+                // or more members mixes modes and a full bank is bound as well as a padded one.
+                let links: Vec<LinkMode> = (0..members)
+                    .map(|member| LINKS[(index + member) % LINKS.len()])
+                    .collect();
                 let mut draw = Draw::new(seed);
                 let rate = RATES[draw.below(RATES.len())];
                 let values: Vec<Values> = (0..members).map(|_| draw.values()).collect();
                 let blocks = random_blocks(&mut draw, members, 10);
                 let mask = prefix_mask(width, members);
+                let context =
+                    format!("{width:?} {members} members {links:?} {rate} Hz seed {seed}");
+                MIXED_LINK_BLOCKS.with(|blocks| blocks.set(0));
                 render(
                     &Padded {
                         width,
@@ -586,17 +603,23 @@ fn every_padded_bank_renders_its_members_per_node_bits() {
                         members: &values,
                         clone_of: 0,
                         rate,
-                        link,
+                        links: &links,
                     },
                     &blocks,
-                    &format!("{width:?} {members} members {link:?} {rate} Hz seed {seed}"),
+                    &context,
+                );
+                let mixed_blocks = MIXED_LINK_BLOCKS.with(core::cell::Cell::get);
+                assert_eq!(
+                    mixed_blocks > 0,
+                    members > 1,
+                    "{context}: {mixed_blocks} blocks took the mixed-link arm"
                 );
                 cases += 1;
             }
         }
     }
-    let padded_counts: usize = WIDTHS.iter().map(|width| width.lanes() as usize - 1).sum();
-    assert_eq!(cases, padded_counts * LINKS.len());
+    let member_counts: usize = WIDTHS.iter().map(|width| width.lanes() as usize).sum();
+    assert_eq!(cases, member_counts * LINKS.len());
 }
 
 /// The conformance PCM fixtures, in their rows' order.
@@ -666,7 +689,9 @@ fn padded_banks_render_the_fixtures_per_node() {
                     played += length;
                 }
                 let mask = prefix_mask(width, members);
-                let link = LINKS[(index + members) % LINKS.len()];
+                let links: Vec<LinkMode> = (0..members)
+                    .map(|member| LINKS[(index + members + member) % LINKS.len()])
+                    .collect();
                 render(
                     &Padded {
                         width,
@@ -674,10 +699,10 @@ fn padded_banks_render_the_fixtures_per_node() {
                         members: &values,
                         clone_of: 0,
                         rate: fixture.rate().0,
-                        link,
+                        links: &links,
                     },
                     &blocks,
-                    &format!("fixture {index} {width:?} {members} members {link:?}"),
+                    &format!("fixture {index} {width:?} {members} members {links:?}"),
                 );
             }
         }
@@ -721,7 +746,9 @@ fn active_lanes_do_not_depend_on_the_clone_source() {
                 }));
             }
             let blocks = random_blocks(&mut draw, members, 8);
-            let link = LINKS[index % LINKS.len()];
+            let links: Vec<LinkMode> = (0..members)
+                .map(|member| LINKS[(index + member) % LINKS.len()])
+                .collect();
             let mut reference: Option<Vec<Vec<u32>>> = None;
             for clone_of in 0..members {
                 let outputs = render(
@@ -731,7 +758,7 @@ fn active_lanes_do_not_depend_on_the_clone_source() {
                         members: &values,
                         clone_of,
                         rate: 48_000,
-                        link,
+                        links: &links,
                     },
                     &blocks,
                     &format!("{width:?} mask {mask:?} clone of member {clone_of}"),
