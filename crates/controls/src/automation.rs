@@ -196,9 +196,18 @@ pub fn automation_diagnostics(model: &SessionModel, sample_rate: u32) -> Vec<Con
         }
         faulted[index] = diagnostics.len() > before;
     }
-    for strip in model.strips() {
+    // #1864: the filter entries are looked up per strip from one pass over the table, not two scans
+    // per strip and lane.
+    let filters = filter_entries(model);
+    for strip in model.strips().filter(|_| !filters.is_empty()) {
         for side in [Side::Left, Side::Right] {
-            if let Some(diagnostic) = input_filter_order(model, &strip, side, &faulted) {
+            let entry = |control: u32| {
+                filters
+                    .get(&(strip.id, control))
+                    .and_then(|lanes| side.pick(lanes[0], lanes[1]))
+            };
+            let entries = (entry(HPF_HZ), entry(LPF_HZ));
+            if let Some(diagnostic) = input_filter_order(&strip, side, entries, &faulted) {
                 // A `both` entry on two lanes whose static values match fails both lanes at one
                 // segment: one fault, reported once.
                 if !diagnostics.contains(&diagnostic) {
@@ -208,6 +217,35 @@ pub fn automation_diagnostics(model: &SessionModel, sample_rate: u32) -> Vec<Con
         }
     }
     diagnostics
+}
+
+/// A stored entry on a strip's HPF or LPF row with its index in the automation table.
+type FilterEntry<'a> = Option<(usize, &'a Automation)>;
+
+/// Per strip ID and filter row (`HPF_HZ`, `LPF_HZ`), the entry that drives each lane
+/// (`[left, right]`), from one pass over `model`'s table (#1864): the first entry in table order on
+/// the strip's builtin row whose lane is the lane or `both`. Empty when no entry is on a filter
+/// row.
+fn filter_entries(model: &SessionModel) -> BTreeMap<(&StableId, u32), [FilterEntry<'_>; 2]> {
+    let mut filters: BTreeMap<(&StableId, u32), [FilterEntry<'_>; 2]> = BTreeMap::new();
+    for (index, automation) in model.automation.iter().enumerate() {
+        let target = &automation.target;
+        let Owner::Strip(owner) = &target.owner else {
+            continue;
+        };
+        if target.section != Section::Builtins
+            || (target.control != HPF_HZ && target.control != LPF_HZ)
+        {
+            continue;
+        }
+        let driven = filters.entry((owner, target.control)).or_default();
+        for (at, lane) in [Lane::Left, Lane::Right].into_iter().enumerate() {
+            if drives(target.lane, lane) && driven[at].is_none() {
+                driven[at] = Some((index, automation));
+            }
+        }
+    }
+    filters
 }
 
 /// Whether `address` is a strip's static HPF or LPF and `model` stores automation on either filter
@@ -1146,25 +1184,16 @@ fn ordered(hpf: Piece, (a, b): (u64, u64), lpf: Piece, (c, d): (u64, u64)) -> bo
 ///
 /// A constant "off" (`0`) on either side leaves its pairs unchecked.
 ///
-/// It reads only `model`, so a classifier can run it on a candidate model. Entries with their own
-/// fault (`faulted`) are not read: their curves may touch "off" inside a ramp.
+/// It reads only the model's entries, so a classifier can run it on a candidate model: `entries`
+/// are the HPF and the LPF entry that drive the strip's lane `side`, each with its index in the
+/// table ([`filter_entries`]). Entries with their own fault (`faulted`) are not read: their curves
+/// may touch "off" inside a ramp.
 fn input_filter_order(
-    model: &SessionModel,
     strip: &StripRef<'_>,
     side: Side,
+    (hpf_entry, lpf_entry): (FilterEntry<'_>, FilterEntry<'_>),
     faulted: &[bool],
 ) -> Option<ControlDiagnostic> {
-    let lane = side.pick(&Lane::Left, &Lane::Right);
-    let entry = |control: u32| {
-        model.automation.iter().enumerate().find(|(_, automation)| {
-            let target = &automation.target;
-            matches!(&target.owner, Owner::Strip(owner) if owner == strip.id)
-                && target.section == Section::Builtins
-                && target.control == control
-                && (target.lane == *lane || target.lane == Lane::Both)
-        })
-    };
-    let (hpf_entry, lpf_entry) = (entry(HPF_HZ), entry(LPF_HZ));
     if hpf_entry.is_none() && lpf_entry.is_none() {
         return None;
     }
