@@ -750,6 +750,23 @@ and restored with `git checkout`.
 Reverting the whole runtime change (the #970 rule alone) reddens the graph-compiler test: `[24, 2]`
 armed against the expected `[48, 4]`.
 
+## Issue #1899 -- a later chain arms across a per-node effect op
+
+Debug profile, AVX2 host. Each mutant was applied to the committed branch, run against graph-compiler
+`console_banking` and host-core `--test collapse_arming`, and restored with `git checkout`.
+
+| # | mutation | file | test | result |
+|---|---|---|---|---|
+| 1899-1 | admission drops the sidechain clause (`op.sidechain.is_none()`) | `graph/src/runtime.rs` `input_producer_table` | graph-compiler `a_chain_behind_a_sidechained_per_node_effect_is_not_armed_on_it` | RED, 1 of 10: the later chain is armed; with that assertion removed, `ch00's bits differ from the per-node oracle's`. |
+| 1899-2 | the op's fact is this block's input and words alone (the sticky `&& *agree` dropped) | `graph/src/runtime.rs` `Runtime::execute` | graph-compiler `a_chain_behind_a_per_node_effect_whose_channels_parted_stays_dual` | RED, 1 of 10: `ch00's bits differ`. Green on every host-core probe: no launch effect bank proves `channels_agree`, so a later chain whose input term failed once never re-engages there. |
+| 1899-3 | an op producer answers `true` (its fact unread) | `graph/src/runtime.rs` `Runtime::execute` | host-core `an_asymmetric_per_node_delay_between_chains_renders_the_dual_bits`; graph-compiler `a_chain_behind_a_per_node_effect_whose_channels_parted_stays_dual` | RED, 1 of 8 and 1 of 10. |
+
+Since #1899, 987-1 (arm every bank chain on the join) reddens only
+`a_chain_behind_a_sidechained_per_node_effect_is_not_armed_on_it`: the later chains of the host-core
+probes now have producer rows, so the join arms them either way. Dropping the effect-kind clause
+from admission is not red anywhere: no production per-node op of another kind feeds a mono chain
+(a route, sum or `SumDelay` feeds a bus; a per-node strip builtin exists only in test builds).
+
 ## TA1 policy cut (2026-10-18): tests these rows name that no longer exist or no longer assert it
 
 The owner-approved test policy cut (`.github/ISSUE_SPECS/1722-delete-digest-type-size-and-unrun-tests.md`)
