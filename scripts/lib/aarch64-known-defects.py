@@ -76,10 +76,11 @@ TEST_ROWS: dict[str, list[tuple[str, str, str, str, str]]] = {
 # `SpectrumAnalysis::analyze_stream_into` (and `SpectrumAnalyzer::analyze_continuous` in it) on the
 # same thread, and LTO regroups the inlining: 10 calls, 4 charged to `analyze_into`, 4 to
 # `analyze_stream_into` and 2 to `analyze_continuous` (their floor-filled bin arrays). All are
-# control-thread spectrum analysis, never render.
+# control-thread spectrum analysis, never render. #1595b removed them: the fills were dead stores
+# (zero fills now) and the analysis writes straight into its result, so host-core has 0 calls
+# (4 on main before the slice) and no row.
 IOS_MEMSET_CEILINGS: dict[str, tuple[str, int]] = {
     "builtins": ("1018", 4),
-    "host-core": ("1595", 10),
     "lane": ("1018", 1),
 }
 

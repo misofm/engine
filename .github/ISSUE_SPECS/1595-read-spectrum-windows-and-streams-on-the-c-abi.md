@@ -421,3 +421,14 @@ Attempt 2 (root rulings on the verifier's FAIL, 2026-10-24):
   requested planes, but `crates/host-core/tests/spectrum_service.rs:527-532` reads the unrequested
   plane and asserts it is the floor (the old contract), so the ruling's stop rule applies: the
   change is not committed, and the `host-core` row stays at 10.
+- **iOS memset, done (root authorized, 2026-10-24).** The plane contract of
+  `SpectrumAnalysisResult` changes: a plane outside `channels` is not read and its contents are
+  unspecified (it held the floor). The floor fills of `SpectrumAnalyzer::analyze` and
+  `analyze_continuous` were dead stores and are zero fills; `analyze_into` and
+  `analyze_stream_into` write straight into `out` (no staging arrays or copies; a refusal still
+  leaves `out` unchanged, since the analyzer writes only after its last `Err`). Requested planes'
+  bits do not move (gates 2 and 4 compare them word for word). The assertion that an unrequested
+  plane holds the floor (`crates/host-core/tests/spectrum_service.rs`) is deleted, because the
+  ruling removes that claim; the test's other assertions stay. The host-core iOS
+  `memset_pattern16` count is 0 (4 on main before this slice, 10 in attempt 1), so its row is
+  deleted; the `builtins` and `lane` rows stay for #1957.
