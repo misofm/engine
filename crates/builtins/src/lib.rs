@@ -5670,9 +5670,9 @@ pub fn checked_fader_gain(db: f32) -> Result<f32, BuiltinParameterError> {
 /// Validates one live `trim_db` against the declared domain and converts it to a coefficient.
 ///
 /// The domain is `trim_db`'s own in `BUILTIN_PARAMETER_DESCRIPTORS` -- the same `[-144, 24]`
-/// `fader_db` carries -- so a live move is admitted on exactly the terms a declared one is. Sharing this with preparation
-/// is what keeps the two from drifting, which is the argument [`checked_fader_gain`] makes for the
-/// fader.
+/// `fader_db` carries -- so a live move is admitted on exactly the terms a declared one is.
+/// Sharing this with preparation is what keeps the two from drifting, which is the argument
+/// [`checked_fader_gain`] makes for the fader.
 ///
 /// The result is a **magnitude**: the polarity sign is applied by the caller, because
 /// `polarity_invert` is its own parameter with its own command kind and a trim move must not
