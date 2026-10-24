@@ -41,7 +41,7 @@ refuses `ident(..)` in a token tree only when the macro call itself stands in a 
   and macro token trees included), to a fixpoint. In a `const`/`static` initializer, a field name of
   a struct literal (`meters: true`) and a field read (`.meters` with no `( .. )`) do not count:
   without that filter the real tree's `meters` field cascaded through `ALL`, `SPEC` and `_` into
-  hundreds of consts and 20 false findings.
+  hundreds of consts and at least 20 false findings.
 - **D4. One refused case per form** in `tools/realtime-policy` tests: assignment, deferred `let`,
   `const`, `static`, loop in tokens, closure in tokens, path value in tokens. A case where a local of
   the same name shadows a set name stays accepted. Root: two grouped tests in
