@@ -8971,6 +8971,67 @@ fn strip_delays_and_a_send_ramp_cross_the_swap_on_every_width() {
     }
 }
 
+/// #1391: [`send_session`] with `eq0`'s route into the output taken from its `pre_fader` tap, so it
+/// has a live lane, and the cases' send records written to it. Red if the swap's route join keeps
+/// only routes into a submix: B's lane then starts at its prepared value, and the level steps at
+/// the swap block instead of finishing the ramp.
+fn a_pre_fader_output_ramp_crosses_the_swap(backend: Backend) {
+    const DIRECT: &str = "eq0-main";
+    // The tap moves after B's muted track copies `eq0`'s route, so that copy stays `post_pan`
+    // and silent.
+    let pre_fader = |mut model: SessionModel| {
+        let route = route_mut(&mut model, DIRECT);
+        let RouteSource::Track { track_id, .. } = route.source.clone() else {
+            panic!("a track route");
+        };
+        route.source = RouteSource::Track {
+            track_id,
+            tap: session::SendTap::PreFader,
+        };
+        model
+    };
+    let a = Session::compile(pre_fader(send_session(false)));
+    let b = Session::compile(pre_fader(with_muted_output_track(send_session(false))));
+    let feed = Feed::new(SOURCE, 1);
+    let writes: Vec<EffectWrite> = send_writes()
+        .into_iter()
+        .map(|mut write| {
+            if let EffectValue::SendGain { route, .. } = &mut write.value {
+                *route = DIRECT;
+            }
+            write
+        })
+        .collect();
+    let probe = LivePlan::fresh(&a, backend).prepared;
+    assert_eq!(
+        probe.inventory.live_route_count(),
+        4,
+        "the three sends into bus1 and the pre-fader route into the output"
+    );
+    drop(probe);
+    let reference = effect_run(&b, None, &feed, &writes, &[], backend);
+    let run = effect_run(&a, Some((&b, &a.model)), &feed, &writes, &[], backend);
+    assert_clean_swap(&run, &format!("{backend:?}"));
+    assert_eq!(
+        first_effect_difference(&run, &reference),
+        None,
+        "{backend:?}: the pre-fader output route's ramp carries across the swap"
+    );
+    let unmoved = effect_run(&b, None, &feed, &[], &[], backend);
+    assert_ne!(
+        unmoved.blocks[SWAP_BLOCK + 1],
+        reference.blocks[SWAP_BLOCK + 1],
+        "{backend:?}: the ramp is in flight after the swap block"
+    );
+}
+
+#[test]
+fn a_pre_fader_output_ramp_crosses_the_swap_on_every_width() {
+    for backend in backends() {
+        a_pre_fader_output_ramp_crosses_the_swap(backend);
+    }
+}
+
 /// The left and the right plane of one rendered block.
 fn lane_planes(bits: &[u32]) -> (&[u32], &[u32]) {
     bits.split_at(QUANTUM)
