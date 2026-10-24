@@ -725,7 +725,22 @@ fn svf_cascade_skewed_impl<
     output: M,
 ) {
     if frames < D {
-        svf_cascade_interleaved_impl(io, frames, c, s, rest, output, &mut Unobserved);
+        // Fewer frames than sections: the interleaved body, one exact frame per call, so every
+        // call's frame loop runs once and leaves no loop of its own (issue #1905: LLVM 22 kept the
+        // whole-block call's walk as a second copy of the depth-2 armed loop).
+        let mut io = io;
+        for frame in 0..frames {
+            let base = frame * L::WIDTH;
+            svf_cascade_interleaved_impl(
+                io.each_mut().map(|block| &mut block[base..base + L::WIDTH]),
+                1,
+                c,
+                s,
+                rest.map(|plane| plane.skip(base)),
+                &output,
+                &mut Unobserved,
+            );
+        }
         return;
     }
     match stream_planes(&rest) {
@@ -836,6 +851,13 @@ fn svf_cascade_skewed_form<
 /// while the two masked output policies add only their required bitwise selection.
 trait SvfOutput<L: Lane> {
     fn choose(&self, dry: L, wet: L, stream: usize, section: usize) -> L;
+}
+
+impl<L: Lane, M: SvfOutput<L>> SvfOutput<L> for &M {
+    #[inline(always)]
+    fn choose(&self, dry: L, wet: L, stream: usize, section: usize) -> L {
+        (**self).choose(dry, wet, stream, section)
+    }
 }
 
 struct UnmaskedOutput;
