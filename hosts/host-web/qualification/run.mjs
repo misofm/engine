@@ -8,6 +8,9 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { chromium, firefox, webkit } from "playwright";
 import { renderMatrix } from "./generate-matrix.mjs";
 import { checkSessionIdentities } from "./session-identities.mjs";
+import {
+  classifyStallSignature, qualificationConstants, requestFailure, unsubscribeFailures,
+} from "./qualification.js";
 import { ARTIFACT_NAMES, exactArtifacts, startQualificationServer } from "./server.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -35,6 +38,8 @@ const MUTATIONS = [
   // a run whose armed tap published nothing, which is exactly what a browser that lost the
   // transport would produce.
   "observation-armed", "observation-disarmed", "observation-identity", "observation-window",
+  // Issue #1535 D9: a never-armed run that received no frame proves nothing.
+  "observation-disarmed-empty",
   "sdk-observation-window-reversed", "sdk-observation-window-malformed",
   "sdk-response", "sdk-observation", "sdk-spectrum", "sdk-spectrum-hop-missing",
   "sdk-spectrum-hop-wrong", "sdk-spectrum-recovery-loss",
@@ -319,11 +324,18 @@ function validate(browserName, result) {
   gate(browserName, "observation-window", observation?.armed?.firstSampleMonotonic === true
     && observation?.armed?.windowsTile === true,
   "observation windows did not advance monotonically and tile");
-  // A tap that was never armed publishes none. (That an unsubscribe stops a tap's reading is the
-  // Rust test `a_withdrawn_tap_leaves_the_first_polled_frame_and_only_its_own_reading`'s, #1345
-  // Amendment 7.)
-  gate(browserName, "observation-disarmed", observation?.disarmed?.maximumTrackGrDb === 0,
-    "a tap that was never armed published a reduction");
+  // A tap that was never armed publishes none, over at least one frame (#1535 D9).
+  gate(browserName, "observation-disarmed", observation?.disarmed?.maximumTrackGrDb === 0
+    && observation?.disarmed?.frames >= 1,
+  `a tap that was never armed published a reduction, or the run received no frame: ${JSON.stringify(observation?.disarmed)}`);
+  // Issue #1535: on one real AudioContext, an acknowledged unsubscribe stops the tap's reduction in
+  // every later frame, while at least 48 later frames still carry the fed signal. The message lists
+  // the failed checks (`unsubscribeFailures`, D5) first. Low-peak frames are reported, never failed
+  // (root ruling R1).
+  const unsubscribe = observation?.unsubscribe;
+  const unsubscribeFailed = unsubscribeFailures(unsubscribe);
+  gate(browserName, "observation-unsubscribe", unsubscribeFailed.length === 0,
+    `${unsubscribeFailed.join(", ")}: ${JSON.stringify(unsubscribe ?? null)}`);
   gate(browserName, "observation-identity", observation?.identicalAudio === true,
     "arming a declared tap moved a rendered sample");
   // Every real `AudioContext.resume()` ran inside a trusted click (the page counts them, split by
@@ -332,11 +344,11 @@ function validate(browserName, result) {
   const resumes = result.resumes;
   gate(browserName, "resume-clicks", resumes?.direct === 0
     && Number.isInteger(resumes?.declared)
-    && resumes.declared === (result.sdkResponse === null ? 0 : 2)
+    && resumes.declared === (result.sdkResponse === null ? 1 : 3)
     && resumes.inClick === resumes.declared
     && resumes.planned === resumes.declared
     && resumes.clicksPerformed === resumes.declared,
-  `a real AudioContext was resumed outside a trusted click, the page did not declare the two SDK clicks (none without the SDK), or the harness did not click exactly the declared controls: ${JSON.stringify(resumes)}`);
+  `a real AudioContext was resumed outside a trusted click, the page did not declare its one unsubscribe click (plus the two SDK clicks when the SDK runs), or the harness did not click exactly the declared controls: ${JSON.stringify(resumes)}`);
 
   const stall = result.stall;
   // #137 E6: the frozen stall requirements are unchanged, and they are now met with the control
@@ -377,7 +389,7 @@ function validate(browserName, result) {
   // executor does behind its `call_indirect`, which the static gate cannot see.
   const allocations = result.renderAllocations;
   gate(browserName, "render-allocations", Array.isArray(allocations)
-    && allocations.length === 13
+    && allocations.length === 14
     && allocations.every((row) => typeof row?.workload === "string" && row.count === 0),
   `a worklet instance allocated on its render thread: ${JSON.stringify(allocations)}`);
   if (result.sdkResponse !== null) validateSdkResponse(browserName, result.sdkResponse);
@@ -939,6 +951,7 @@ function mutate(result, mutation) {
   // Issue #143 E12's named red mutation: `observationArmed = 0`.
   if (mutation === "observation-armed") copy.observation.armed.maximumTrackGrDb = 0;
   if (mutation === "observation-disarmed") copy.observation.disarmed.maximumTrackGrDb = 1;
+  if (mutation === "observation-disarmed-empty") copy.observation.disarmed.frames = 0;
   if (mutation === "observation-identity") copy.observation.identicalAudio = false;
   if (mutation === "resume-clicks-direct") copy.resumes.direct = 1;
   if (mutation === "resume-clicks-missing") copy.resumes.clicksPerformed -= 1;
@@ -1025,6 +1038,98 @@ function mutate(result, mutation) {
   if (mutation === "page-errors-window") copy.pageErrors.window.push("unhandledrejection: Error: planted");
   if (mutation === "page-errors-missing") delete copy.pageErrors;
   return copy;
+}
+
+/// Issue #1535 D5: one row per named check of `unsubscribeFailures`, each a green run at the bounds
+/// (four armed frames, 48 signal frames, 40 sources in flight) with one field moved past its bound,
+/// and the R1 row: low-peak frames after the acknowledgement fail nothing. Then the request-failure
+/// form a refused host request reaches the page in (D3.1).
+function unsubscribeFailureProofs() {
+  const green = {
+    contextStateBeforeBoot: "suspended",
+    meterLeaseResult: 0,
+    subscribeResult: 0,
+    armedFrames: 4,
+    armedMaximumTrackGrDb: 5.2,
+    renderedAfterSubscribe: "3",
+    renderedBeforeUnsubscribe: "4",
+    unsubscribeResult: 0,
+    unsubscribeBindings: 0,
+    framesAfterAcknowledgement: 60,
+    maximumTrackGrDbAfterAcknowledgement: 0,
+    signalShortfall: false,
+    signalFramesAfterAcknowledgement: 48,
+    lowPeakFramesAfterAcknowledgement: 0,
+    minimumPeakAfterAcknowledgement: 0.27,
+    feedBehind: null,
+    sourceExhausted: null,
+    maximumSourcesInFlight: 40,
+  };
+  const rows = [
+    ["green", {}, []],
+    ["R1 dropout", { lowPeakFramesAfterAcknowledgement: 3, minimumPeakAfterAcknowledgement: 0 }, []],
+    ["context", { contextStateBeforeBoot: "running" }, ["context"]],
+    ["armed frames", { armedFrames: 3 }, ["armed"]],
+    ["armed reduction", { armedMaximumTrackGrDb: 0 }, ["armed"]],
+    ["render-between", { renderedBeforeUnsubscribe: "3" }, ["render-between"]],
+    ["unsubscribe-ack", { unsubscribeBindings: 1 }, ["unsubscribe-ack"]],
+    ["reduction", { maximumTrackGrDbAfterAcknowledgement: 1 }, ["reduction"]],
+    ["reduction, no frame (D9)", { framesAfterAcknowledgement: 0 }, ["reduction"]],
+    ["shortfall frames", { signalFramesAfterAcknowledgement: 47 }, ["shortfall"]],
+    ["shortfall flag", { signalShortfall: true }, ["shortfall"]],
+    ["shortfall, source exhausted", { sourceExhausted: { renderBlock: 481, fed: 512 } }, ["shortfall"]],
+    ["feed in flight", { maximumSourcesInFlight: 41 }, ["feed"]],
+    ["feed behind", { feedBehind: { block: 20, renderBlock: 21 } }, ["feed"]],
+  ];
+  for (const [name, change, expected] of rows) {
+    assert.deepEqual(unsubscribeFailures({ ...green, ...change }), expected,
+      `observation-unsubscribe: table row "${name}"`);
+  }
+  // A feed that stops at the acknowledgement cannot supply the signal frames from the ring alone.
+  assert(qualificationConstants.unsubscribeSignalFrames > qualificationConstants.ringBlocks,
+    "observation-unsubscribe: the signal-frame count does not exceed the ring depth");
+  const refused = requestFailure("status", "status", { status: 1, source: 3 },
+    Object.freeze({ tag: "miso.error.v1", requestId: 0, result: 6 })).message;
+  for (const part of ["at status", "kind=status", "\"result\":6", "\"requestId\":0", "{\"status\":1,\"source\":3}"]) {
+    assert(refused.includes(part), `request-failure: ${part} missing from ${refused}`);
+  }
+  assert(!refused.includes("[object Object]"), `request-failure: ${refused}`);
+  assert(requestFailure("observe", "observe", {}, new Error("x")).message.endsWith("cause=x"),
+    "request-failure: an Error cause lost its message");
+}
+
+/// The stall signature (`classifyStallSignature`, root ruling 2026-10-12) is `full` only when all of
+/// its conditions hold. A full record is held full, and each condition removed alone, from an
+/// otherwise full record, must give `full: false`, so a record missing any one condition can never
+/// be listed as an exemption.
+function stallSignatureProofs() {
+  const sample = (requestId) => ({
+    contextState: "running",
+    currentTime: 0.021333333333333333,
+    status: { requestId, lastResult: 0, renderedQuanta: 8n },
+  });
+  const full = { atResume: sample(39), atTimeout: sample(2282), repliesSent: 3, replyIds: [40, 100, 2282] };
+  const signature = classifyStallSignature(full);
+  assert.equal(signature.full, true, "stall-signature: the full record was not classified full");
+  assert.deepEqual(signature.replyIds, [40, 2282]);
+  assert.equal(signature.repliesAnswered, 3);
+  const without = {
+    "context state not running at the timeout": { atTimeout: { ...sample(2282), contextState: "suspended" } },
+    "context state not running at the resume": { atResume: { ...sample(39), contextState: "interrupted" } },
+    "currentTime moved": { atTimeout: { ...sample(2282), currentTime: 0.0426 } },
+    "renderedQuanta moved": { atTimeout: { ...sample(2282), status: { ...sample(2282).status, renderedQuanta: 9n } } },
+    "one status reply": { replyIds: [2282] },
+    "no status reply": { replyIds: [] },
+    "last result not 0": { atTimeout: { ...sample(2282), status: { ...sample(2282).status, lastResult: 6 } } },
+    "timeout sample unanswered": { atTimeout: null },
+  };
+  for (const [missing, change] of Object.entries(without)) {
+    assert.equal(
+      classifyStallSignature({ ...full, ...change }).full,
+      false,
+      `stall-signature: a record without ${missing} was classified full`,
+    );
+  }
 }
 
 function mutationProofs(browserName, result) {
@@ -1258,6 +1363,12 @@ async function qualifyBrowser(browserName, engine, origin, proveMutations, sdkEn
       result.resumes.planned = plan.length;
       result.resumes.clicksPerformed = clicksPerformed;
     }
+    const stallSignature = result.qualificationError?.value?.stallSignature;
+    if (stallSignature !== undefined) {
+      // A bounded render wait timed out. The signature is what classifies the failure (full means a
+      // context that said "running" and rendered nothing while the processor still answered).
+      process.stdout.write(`${browserName}: stall-signature: ${JSON.stringify(stallSignature)}\n`);
+    }
     gate(browserName, "browser-execution", result.qualificationError === undefined,
       `${JSON.stringify(result.qualificationError, (_key, value) => (typeof value === "bigint" ? `${value}n` : value))}${diagnostics.length === 0 ? "" : `; ${diagnostics.join("; ")}`}`);
     if (errorRead.kind === "timeout") {
@@ -1272,6 +1383,20 @@ async function qualifyBrowser(browserName, engine, origin, proveMutations, sdkEn
       // Issue #1333 D3: the per-instance counts the render-allocations gate just held to zero.
       process.stdout.write(`${browserName}: render-allocations: ${result.renderAllocations
         .map((row) => `${row.workload}=${row.count}`).join(" ")}\n`);
+    }
+    const unsubscribe = result.observation?.unsubscribe;
+    if (unsubscribe !== undefined) {
+      // Issue #1535: what the observation-unsubscribe gate just held, with the dropouts it reports
+      // and never fails (root ruling R1).
+      process.stdout.write(`${browserName}: observation-unsubscribe: ${JSON.stringify({
+        framesAfterAcknowledgement: unsubscribe.framesAfterAcknowledgement,
+        signalFramesAfterAcknowledgement: unsubscribe.signalFramesAfterAcknowledgement,
+        lowPeakFramesAfterAcknowledgement: unsubscribe.lowPeakFramesAfterAcknowledgement,
+        minimumPeakAfterAcknowledgement: unsubscribe.minimumPeakAfterAcknowledgement,
+        armedFrames: unsubscribe.armedFrames,
+        fedBlocks: unsubscribe.fedBlocks,
+        maximumSourcesInFlight: unsubscribe.maximumSourcesInFlight,
+      })}\n`);
     }
     if (Array.isArray(result.sdkResponse?.renderAllocations)) {
       // Issue #1476 D4: the per-SDK-instance counts the sdk-render-allocations gate just held to zero.
@@ -1342,6 +1467,10 @@ async function main() {
   if (proveMutations) {
     const served = await artifactSetProofs(artifacts);
     process.stdout.write(`artifact set: the exact ${served}-file shipped set is pinned\n`);
+    unsubscribeFailureProofs();
+    stallSignatureProofs();
+    process.stdout.write("observation-unsubscribe: each named check is red past its bound; a dropout fails nothing\n");
+    process.stdout.write("stall signature: each missing condition gives full=false\n");
   }
 
   // Issue #1061: `--check-matrix` holds each browser's floor and outcome, the Playwright version

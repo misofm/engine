@@ -15,6 +15,7 @@
 use super::super::Ctx;
 use super::super::facts::{POP, Use, UseKind};
 use super::super::names::bare;
+use super::super::place::is_assign_op;
 use super::super::scope::nearest;
 use super::super::shapes::{Place, simple_path};
 use super::super::tree::{Node, Step, Via, pos};
@@ -403,20 +404,4 @@ fn plain_deref_read(at: &[Step<'_>], used: &Use, each: &syn::ExprForLoop) -> boo
             }
             (node, _) => node.macro_call().is_none(),
         })
-}
-
-fn is_assign_op(op: &syn::BinOp) -> bool {
-    matches!(
-        op,
-        syn::BinOp::AddAssign(_)
-            | syn::BinOp::SubAssign(_)
-            | syn::BinOp::MulAssign(_)
-            | syn::BinOp::DivAssign(_)
-            | syn::BinOp::RemAssign(_)
-            | syn::BinOp::BitXorAssign(_)
-            | syn::BinOp::BitAndAssign(_)
-            | syn::BinOp::BitOrAssign(_)
-            | syn::BinOp::ShlAssign(_)
-            | syn::BinOp::ShrAssign(_)
-    )
 }

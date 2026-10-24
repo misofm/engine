@@ -366,7 +366,56 @@ the named exceptions of #1345 Amendments 5 and 6 again.
 
 ## Attempt record
 
-- Attempt 1: not started.
+- **Attempt 1 (2026-10-24, base `40e3b61e9`).** Written against today's API, not applied from the
+  saved patch (it does not apply: `qualification.js` and `run.mjs` moved; its subscription used
+  `trackIndex`/`effectIndex`, #1677 addresses taps by `stripId`/`rack`/`effectId`; its session
+  lacked `control_smoothing`). Unmutated tree, one unloaded run each, Playwright 1.62.1,
+  `--sdk-root --check-matrix --self-test-mutations`: green in Chromium 151.0.7922.34, Firefox 153.0
+  and WebKit 26.5 (`resume-clicks` 3); without the SDK green in Firefox and WebKit
+  (`resume-clicks` 1). Per browser (`observation-unsubscribe:` line): signal frames after the
+  acknowledgement 48 / 49 / 49, frames after it 48 / 63 / 55, low-peak frames 0, minimum peak
+  0.0815, `maximumSourcesInFlight` 32. `render-allocations`: all fourteen rows 0 in every browser,
+  `observation-unsubscribe=0`; `sdk-render-allocations` rows all 0.
+- **Attempt 1 reds on the unmutated tree (verifier MAJOR, recorded, not retried away).** Two Firefox
+  153.0 runs of attempt 1 were red, both with the PulseAudio socket at a 113-character path (over
+  the 108-byte `sun_path` limit, so no sink existed):
+  - without the SDK (`n-firefox.log`): `observation-unsubscribe qualification failed: resume
+    timeout at the armed tap to render (click) after 10000 ms: state=suspended currentTime=0`;
+  - with the SDK (`r-firefox.log`): `spectrum collection audio resume timed out (gesture=true,
+    state=suspended)`, before the new run.
+  `main` (`40e3b61e9`) with the same socket path was red in Firefox with the second message
+  (`base-firefox.log`), and green once the socket path was short (`base-firefox2.log`). Chromium
+  and WebKit were green under both socket paths. Logs: `scratchpad/b1535/`.
+- **Attempt 2 (verifier MINOR and NITs).** When the feed would pass the end of the source, the D4
+  wait now ends and the run returns `sourceExhausted`, which the gate names `shortfall` (one more
+  node table row). Before this it was a thrown `Error`, which the gate reported as
+  `browser-execution`. The peak-floor comment gives the measured minimum, 0.0815.
+  Final tree, one unloaded run each with the CI command and a short socket path: green in
+  Chromium, Firefox and WebKit (signal frames 49 / 48 / 48, low-peak frames 0, all
+  `render-allocations` rows 0).
+
+## Decision record (root, 2026-10-24)
+
+- **Scope reduction accepted** (owner rulings "tests overboard" and feature sprint). Kept: the
+  run (D2, D3.1-2, D3.4-6, D4), `unsubscribeFailures` (D5), the gate and its fourteenth
+  `render-allocations` row, `resume-clicks` `1 : 3`, D9, `unsubscribe-session.json` from today's
+  observation grammar, the matrix sentence, one `MUTATIONS.md` section.
+- **One node proof replaces** gate 2's seven result mutations and gate 4's
+  `requestFailureProofs()`: a table over `unsubscribeFailures` (one row per D5 name at its bound,
+  one R1 row expecting `[]`), the constant relation 48 > 40, and the `requestFailure` form.
+  `classifyStallSignature` and `stallSignatureProofs()` are restored (D4 needs stall vs shortfall).
+- **Moved to #1605** with gate 8: page mutations (d) and (e) (gate 3) and source mutations M1-M3
+  (gate 6). `runUnsubscribePageMutation` and `unsubscribeVerdict` are not added: nothing calls them.
+- **D3.3 dropped**: the host shares one in-flight status read (S2 landed), so the page needs no
+  `statusRead`.
+- **The gate keeps its one trusted-click resume** (root ruling, 2026-10-24, option (a)). The
+  attempt-1 Firefox reds came from a test setup with no sink: `main` failed the same way under the
+  long socket path and passed under a short one. With a real sink the gate was green in all three
+  branch Firefox runs: attempt 1 once with the SDK and once without, attempt 2 once with the SDK on
+  the final tree (numbers above). The implementer's earlier report said "five"; that was a miscount. A future resume timeout on the required Firefox row is a new finding, with its own issue.
+  It is not #1522, whose symptom differs.
+- The reduction is checked on every frame received after the acknowledgement up to the dispose;
+  the signal and low-peak counts on the frames of the D4 wait, while the feed runs.
 
 ## Root rulings (2026-10-13)
 

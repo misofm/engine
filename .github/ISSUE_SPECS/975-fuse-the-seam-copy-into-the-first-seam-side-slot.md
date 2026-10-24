@@ -47,3 +47,37 @@ used by between-render-calls delivery).
 
 Changing the matrix arithmetic (`ll*l + lr*r` stays two products even when `l == r`).
 
+
+## Decision record (2026-10-24, attempt 1)
+
+- Scope (root, from the scope note): the seam is in `BankChain::run` (`crates/rack/src/lib.rs`,
+  `if collapse` after the prefix loop); the seam-side slots are the graph's `BuiltinStage` around
+  `FaderBankProcessor` and `MatrixBankProcessor` (`crates/builtins-compiler/src/lib.rs`). Authorized
+  paths add `crates/lane/src/kernels/builtins.rs` and `crates/graph` (trait default and the
+  `BuiltinStage` forward). The "fused fader-matrix stage" gate is void: #1767 removed that stage and
+  `make_fader_matrix`.
+- Design: `BankStage::process_from_left` (and the same default on
+  `GraphPreparedBuiltinBankProcessor`) copies the left plane into the right one, calls `process`
+  and returns `Ok(false)`; an override that writes the right plane itself returns `Ok(true)`. The
+  chain gives the seam to the first seam-side slot with an active lane and copies itself when no
+  seam-side slot runs. `BankChain::seam_copies` counts collapsed blocks that still copied.
+- The fader takes it when its right channel is settled and, on an automated bank, when no stored
+  event lands inside the block (`process_with` then renders `process`). Otherwise copy, then the
+  existing body. One new lane kernel, `gain_mute_block_from`, shares one `#[inline(always)]` frame
+  body with `gain_mute_block`, so the arithmetic and order are the same by construction. Class A.
+- Attempt 2: the matrix keeps the trait default (copy, then `process`), because a matrix-first
+  collapsed chain does not occur in production. Every banked strip binds all three builtin stages
+  (input, fader, matrix: "banked on all three stages or on none", `lower_strip_banks`); the graph
+  fuses a chain only along a single producer-to-consumer edge (`chains_into`), and the matrix's
+  only producer is the fader, so a chain that holds the matrix and an upstream prefix holds the
+  fader directly before it; `collapse_prefix_of` collapses only when every slot has the chain's
+  active lanes, so that fader slot always runs. A break between fader and matrix (an observer on
+  the fader) leaves the matrix in a chain with no upstream prefix, which never collapses. Attempt 1's
+  matrix override and its two kernels were untested dead code and are removed.
+- Evidence (PR, not committed): 64-block release digests of every `WORKLOADS` row and the ring row
+  at Simd8 and Simd4, plus a fader ride on `sixty_four_track_console` and `_mono`, identical before
+  and after. With temporary counters: `sixty_four_track_console_mono` at Simd8 renders 512
+  collapsed blocks with 0 seam copies (`_half_mono` 256 / 0). At Simd4 dispatch on this AVX2 host
+  the console folds into per-node inserts, so the collapsed chain holds no seam-side slot and every
+  collapsed block takes the chain's own copy (1024 / 1024). A native four-lane build banks its
+  effects, so its chain is expected to have the Simd8 shape; not measured here (no AArch64 host).

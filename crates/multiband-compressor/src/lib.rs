@@ -49,7 +49,7 @@ use effect_contract::{
     StatePayloadError, StatePayloadInput, StatePayloadOutput, StatePayloadSizes, TailSamples,
     expected_prepared_metadata,
 };
-use effect_runtime::bank::{self, NonFiniteReport};
+use effect_runtime::bank::{self, NonFiniteReport, block_is_positive_zero, positive_zero_lanes};
 use effect_runtime::dynamics::{GainComputerCoef, gain_delta_db, knee_coefficients};
 use effect_runtime::envelope::retention_coefficient;
 use effect_runtime::params::{ParameterSpec, normalize_zero, parameter_value_valid};
@@ -59,12 +59,16 @@ use effect_runtime::state_payload::{
     write_f32, write_ramp, write_u32,
 };
 use effect_runtime::svf::{RAMP_PATH_NORM_TOLERANCE, transition_norm};
-use lane::kernels::{SvfState, ramp_toward, silence_skip_block, svf_state_held, svf_step_when};
+use lane::kernels::{
+    SvfState, ramp_toward, silence_advance, silence_skip_block, svf_state_held, svf_step_when,
+};
 use lane::{Lane, flush};
 use lane::{silence_armable_holding, silence_step};
 use math::fast_db::{fast_gain_from_db, fast_level_db};
 
 pub mod corpus;
+#[cfg(test)]
+mod rest_tests;
 mod shim;
 #[cfg(test)]
 mod split;
@@ -768,6 +772,7 @@ struct SegmentPlan {
 }
 
 /// Everything one channel of one bank owns.
+#[cfg_attr(test, derive(Clone))]
 struct Side<L: Lane, const W: usize> {
     filter: Lr4State<L>,
     /// The run of exactly-zero input frames per lane: this channel's silence counter, which arms
@@ -840,6 +845,51 @@ impl<L: Lane, const W: usize> Side<L, W> {
         )
     }
 
+    /// The lanes of this channel at exact rest (issue #893, the contract's
+    /// `PreparedNativeEffectBank::lanes_at_rest`): the four crossover words and both bands'
+    /// smoother words exactly `+0.0`, and every ramp of the lane's track settled.
+    ///
+    /// The list is every word a block carries forward but the silence counter, which is a clock:
+    /// on `+0.0` input it advances to `min(run + frames, 2^24)` whatever the signal was
+    /// ([`silence_step`] and [`silence_skip_block`] agree there). Why each pinned word is a fixed
+    /// point of one `+0.0` block that writes `+0.0`:
+    ///
+    /// * **Crossover.** Both stages' `ic1`/`ic2` at `+0.0` with `+0.0` input give `v1 = +0.0` and
+    ///   `+0.0` taps; the all-pass is `fma(-2k, +0.0, +0.0) = -0.0 + +0.0 = +0.0`, and
+    ///   `high = +0.0 - +0.0 = +0.0`. Armed or not, the flush keeps `+0.0`.
+    /// * **Smoother.** Each band's detector floors at -160 dB, below every threshold, so the
+    ///   target is `+0.0`; the branching smoother from `+0.0` to `+0.0` stays `+0.0`, and
+    ///   `flush(+0.0) = +0.0`. The applied gain is finite, so each band writes `+0.0 * g = +0.0`.
+    /// * **Ramps.** `remaining == 0` with a `+0.0` step is the flat path, which moves no ramp word
+    ///   ([`Instance::flat_path_is_identity`]); a ramp in flight clears its track's bit.
+    ///
+    /// A plain `flush` brings each smoother word to `+0.0` (the compressor's rest snap is not
+    /// adopted here: that would move rendered bits). The crossover and coefficient words are ramps
+    /// (issue #1338), so the settled-ramp rule covers them.
+    /// One vector pass per word answers every lane.
+    fn rest_lanes(&self) -> u32 {
+        let mut mask = positive_zero_lanes(self.filter.a.ic1)
+            & positive_zero_lanes(self.filter.a.ic2)
+            & positive_zero_lanes(self.filter.b.ic1)
+            & positive_zero_lanes(self.filter.b.ic2)
+            & positive_zero_lanes(self.gain_db[LOW_BAND])
+            & positive_zero_lanes(self.gain_db[HIGH_BAND]);
+        for (track, ramps) in self.ramps.iter().enumerate() {
+            if ramps
+                .iter()
+                .any(|ramp| ramp.remaining != 0 || ramp.step.to_bits() != 0)
+            {
+                mask &= !(1 << track);
+            }
+        }
+        mask
+    }
+
+    /// `true` when no ramp of any track of this channel has samples left to produce.
+    fn no_ramp_in_flight(&self) -> bool {
+        self.ramps.iter().flatten().all(|ramp| ramp.remaining == 0)
+    }
+
     /// Clears history. Coefficients and parameters are deliberately untouched.
     fn discontinuity_reset(&mut self) {
         self.filter = Lr4State::default();
@@ -873,6 +923,7 @@ impl<L: Lane, const W: usize> Side<L, W> {
 }
 
 /// One prepared bank of `W` tracks: the whole effect, at one width.
+#[cfg_attr(test, derive(Clone))]
 struct Instance<L: Lane, const W: usize> {
     sample_rate: u32,
     bypass: bool,
@@ -1825,6 +1876,54 @@ struct PreparedMultibandCompressorBank<L: Lane, const W: usize> {
     /// The prepared state payload sizes, read by `snapshot_track_state_payload`.
     state_sizes: StatePayloadSizes,
     instance: Instance<L, W>,
+    /// Issue #893: the bank is at a silent fixed point. Earned at the end of a rendered block
+    /// whose input was exact `+0.0` with no ramp in flight, when every lane is at rest
+    /// ([`Side::rest_lanes`]) on both channels, or by [`advance_clocks`] over the whole bank;
+    /// withdrawn by every automation block, reset and restore. While it stands, the next quiet
+    /// block is the same block again: every lane stays at rest and writes `+0.0`, so
+    /// `process_bank` advances the clocks and returns. The prepared bypass cannot change, so the
+    /// claim never spans two kernel paths.
+    ///
+    /// [`advance_clocks`]: PreparedNativeEffectBank::advance_clocks
+    silent_fixed_point: bool,
+}
+
+/// The mask with every lane of a `W`-lane bank set.
+const fn all_lanes<const W: usize>() -> u32 {
+    if W >= 32 { u32::MAX } else { (1 << W) - 1 }
+}
+
+/// The lane mask whose lane `l` is set when bit `l` of `bits` is.
+fn lanes_mask<L: Lane>(bits: u32) -> L::Mask {
+    let mut flags = [0.0_f32; 8];
+    for (lane, flag) in flags.iter_mut().enumerate().take(L::WIDTH) {
+        if bits & (1 << lane) != 0 {
+            *flag = -1.0;
+        }
+    }
+    L::load(&flags[..L::WIDTH]).lt(L::zero())
+}
+
+impl<L: Lane, const W: usize> Instance<L, W> {
+    /// Both channels' [`Side::rest_lanes`].
+    fn lanes_at_rest(&self) -> u32 {
+        self.sides[0].rest_lanes() & self.sides[1].rest_lanes()
+    }
+
+    /// Advances the silence counters of the lanes in `bits` over `frames` frames of `+0.0`, as a
+    /// rendered block would: `min(run + frames, 2^24)`. A prepared bypass freezes the counters
+    /// with the filter, so it advances nothing.
+    fn advance_silence(&mut self, bits: u32, frames: usize) {
+        if self.bypass || bits == 0 {
+            return;
+        }
+        let mask = lanes_mask::<L>(bits);
+        for side in &mut self.sides {
+            let mut advanced = side.silence;
+            silence_advance(&mut advanced, frames);
+            side.silence = L::select(mask, advanced, side.silence);
+        }
+    }
 }
 
 fn initial_defaults(
@@ -1904,6 +2003,7 @@ fn prepare_bank<L: Lane, const W: usize>(
             automation_capacity: metadata.automation_capacity,
             state_sizes: metadata.state_sizes,
             instance,
+            silent_fixed_point: false,
         }),
         metadata: PreparedBankMetadata {
             width: request.width,
@@ -2026,7 +2126,33 @@ impl<L: Lane, const W: usize> PreparedNativeEffectBank for PreparedMultibandComp
     }
 
     fn reset(&mut self, kind: ResetKind) {
+        self.silent_fixed_point = false;
         self.instance.reset(kind);
+    }
+
+    /// Issue #893: [`Side::rest_lanes`] on both channels.
+    fn lanes_at_rest(&self) -> u32 {
+        self.instance.lanes_at_rest()
+    }
+
+    /// Issue #893: the clocks are the two channels' silence counters and nothing else
+    /// ([`Side::rest_lanes`]). A masked lane takes `min(run + frames, 2^24)` on both channels,
+    /// which is what a rendered `+0.0` block leaves; a prepared bypass freezes the counters, so it
+    /// advances nothing. A rendered quiet block after which every lane is at rest earns
+    /// `silent_fixed_point`, so a mask that covers the whole bank earns it too.
+    fn advance_clocks(&mut self, lanes_mask: u32, frames: u32) {
+        let bank = all_lanes::<W>();
+        let bits = lanes_mask & bank;
+        debug_assert_eq!(bits, lanes_mask, "a lane past the bank");
+        debug_assert_eq!(
+            self.instance.lanes_at_rest() & bits,
+            bits,
+            "a lane not at rest"
+        );
+        self.instance.advance_silence(bits, frames as usize);
+        if bits == bank {
+            self.silent_fixed_point = true;
+        }
     }
 
     fn process_bank(&mut self, block: EffectBankProcessBlock<'_>) -> BankProcessReport {
@@ -2036,6 +2162,11 @@ impl<L: Lane, const W: usize> PreparedNativeEffectBank for PreparedMultibandComp
         // facts that belong to this instance rather than to the block.
         if block.width != self.width || block.sidechain.is_some() {
             return report;
+        }
+        // An automation span can start a ramp or move a word; the next settled quiet block
+        // re-earns the claim.
+        if !block.automation.is_empty() {
+            self.silent_fixed_point = false;
         }
         for track in 0..W {
             let start = block.automation_offsets[track] as usize;
@@ -2048,13 +2179,30 @@ impl<L: Lane, const W: usize> PreparedNativeEffectBank for PreparedMultibandComp
                 &mut report.reports[track],
             );
         }
+        let frames = block.frames as usize;
+        let words = frames * W;
+        // Issue #893, whole-bank: no ramp in flight on either channel (no sidechain, and the
+        // bypass is prepared, so neither can differ from the block that earned the claim) and
+        // both input planes exactly `+0.0`. `-0.0` and subnormal words are not quiet.
+        let quiet = self.instance.sides[0].no_ramp_in_flight()
+            && self.instance.sides[1].no_ramp_in_flight()
+            && block_is_positive_zero(&block.left[..words])
+            && block_is_positive_zero(&block.right[..words]);
+        if quiet && self.silent_fixed_point {
+            // Every lane is at rest and the planes already hold the `+0.0` the kernel would
+            // write; the kernel would move no word but the silence counters, and no lane fails
+            // the boundary check on `+0.0`.
+            self.instance.advance_silence(all_lanes::<W>(), frames);
+            return report;
+        }
         render::<L, W, false>(
             &mut self.instance,
             block.left,
             block.right,
-            block.frames as usize,
+            frames,
             &mut report.reports,
         );
+        self.silent_fixed_point = quiet && self.instance.lanes_at_rest() == all_lanes::<W>();
         report
     }
 
@@ -2075,6 +2223,8 @@ impl<L: Lane, const W: usize> PreparedNativeEffectBank for PreparedMultibandComp
         input: StatePayloadInput<'_>,
     ) -> Result<(), StatePayloadError> {
         let track = checked_track(track_index, W)?;
+        // A restore can write any state word, so the claim goes whatever the result.
+        self.silent_fixed_point = false;
         self.instance.restore(track, state_layout_version, input)
     }
     // REALTIME_POLICY_END
