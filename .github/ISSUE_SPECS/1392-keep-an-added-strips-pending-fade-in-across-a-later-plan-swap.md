@@ -191,7 +191,7 @@ and gets no entry (#1324's case).
   copied `Done` leaves the pending count.
 - `FaderChannelState.armed` was added by #1288 and is exported and imported there.
 - **Split.** The route half (D1 route rows, D2 route re-arm, D6 route-op armed flag, gate 4) waits
-  for #1363. Root files it as a successor: *Keep an added route's pending fade-in across a later
+  for #1363. Root filed it as #1877: *Keep an added route's pending fade-in across a later
   plan swap*, blocked by #1363.
 - The fused-form gate rows are retired by #1767. Gate 5's allocation count is measured in gate 1's
   own run over both swap blocks.
