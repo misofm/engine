@@ -27,3 +27,20 @@ block it played in, and the timeline value that block started at. The underrun a
 
 - #1641 and #1642. The first slice that needs a host reader of the timeline position (for example
   the browser SDK `seek` of #1644, or an automation reader such as #1647).
+
+## Decision record (attempt 1, 2026-10-24)
+
+- Host form (root): the reserved ID `$timeline` in the existing `seek_report` call on both hosts;
+  no new symbol. `host_core::source::TIMELINE_SEEK_REPORT_ID`. A stable ID starts with `a`-`z`, so
+  `$timeline` never names a source. `submit`, `seek` and `seek_at` refuse it as `source.id.unknown`.
+- D1: `SourceTimeline::prepare` makes one 5-word seqlock record; `TimelineProducer::seek_report`
+  reads it; `TimelineConsumer` holds the writer (`None` when vacant) and its published copy.
+- D2: `advance` publishes `(generation, source-read sample, timeline sample, 0, 0)` when a new
+  generation is in effect, so a primed and a rendered block both count, as for a ring.
+- D3: `adopt_from` swaps the writer and the published copy with the command queue.
+- D4: `TimelineResourceReport::seek_report_bytes` (one allocation, also its largest row). A
+  vacant timeline charges it as carried, so `source_overhead + carried == fresh` holds. Browser
+  `sourceOverheadBytes` is 3042 of its 3264 ceiling: no ceiling moved.
+- Path note: `crates/host-core/tests/successor_swap.rs`'s carried-bytes helper adds the record
+  (its exact carried-bytes equalities need it). The browser export's doc comment
+  (`hosts/host-web/src/ffi.rs`) is not in the authorized paths, so it is not changed.

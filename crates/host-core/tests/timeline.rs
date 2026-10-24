@@ -29,8 +29,8 @@ use engine::QuantumFrames;
 use engine::realtime::{CarryOutcome, PlanarBufferMut, PreparedRenderPlan, RenderIo};
 use graph_compiler::Backend;
 use host_core::{
-    PlanStateInventory, PreparedHost, SourceControlSet, SourceSubmission, SuccessorBase,
-    test_only_prepare_host_runtime_successor_on, test_only_set_source_read_offset,
+    PlanStateInventory, PreparedHost, SourceControlError, SourceControlSet, SourceSubmission,
+    SuccessorBase, test_only_prepare_host_runtime_successor_on, test_only_set_source_read_offset,
     test_only_timeline_at,
 };
 use session::{
@@ -39,7 +39,7 @@ use session::{
 };
 use source::{
     PcmSourceRing, PcmSourceRingConfig, SourceCommand, SourceFrame, SourceGeneration,
-    SourceTimeline, TimelineProducer,
+    SourceSeekReport, SourceTimeline, TimelineProducer,
 };
 use successor::{QUANTUM, SUCCESSOR_REVISION, Session, caps};
 
@@ -254,10 +254,28 @@ fn render_in_step(
         .collect()
 }
 
+/// The timeline's seek report under the reserved ID both hosts pass through (#1704 D5).
+fn timeline_report(sources: &SourceControlSet) -> Result<SourceSeekReport, SourceControlError> {
+    sources.seek_report(b"$timeline")
+}
+
+/// The report the timeline publishes at the block a generation first plays in (#1704 D2).
+fn timeline_landed(generation: u64, first_sample: u64, timeline: u64) -> SourceSeekReport {
+    SourceSeekReport {
+        generation,
+        first_sample,
+        source_frame: timeline,
+        ..SourceSeekReport::default()
+    }
+}
+
 /// Gate 1.
 ///
 /// Test value: red if the timeline observes a seek one block before or after a source given the
-/// same seek (an automation curve would sit one quantum off its audio), or ignores the anchor.
+/// same seek (an automation curve would sit one quantum off its audio), or ignores the anchor;
+/// or (#1704) if the timeline's seek report is never published, is stamped on the wrong block or
+/// value, disagrees with the source's report for the same seek, or the reserved ID reaches the
+/// timeline through a source seek.
 #[test]
 fn a_source_and_the_timeline_given_the_same_seeks_read_the_same_frame_in_every_block() {
     let session = Session::compile(one_track());
@@ -289,7 +307,19 @@ fn a_source_and_the_timeline_given_the_same_seeks_read_the_same_frame_in_every_b
     let jump = (ANCHOR_BLOCK - SEEK_BLOCK) as usize;
     assert_eq!(frames[jump - 1], ((ANCHOR_BLOCK - 1) * Q) as i64);
     assert_eq!(frames[jump], ANCHORED_FRAME as i64);
+    let landed = timeline_report(&host.sources).expect("timeline report");
+    assert_eq!(landed, timeline_landed(2, anchor, ANCHORED_FRAME));
+    let source = host
+        .sources
+        .seek_report(SOURCE.as_bytes())
+        .expect("source report");
+    assert_eq!(
+        (source.generation, source.first_sample, source.source_frame),
+        (landed.generation, landed.first_sample, landed.source_frame),
+        "the source and the timeline report the same landing"
+    );
 
+    let plain_sample = host.plan.next_absolute_sample();
     seek_both(
         &mut host.sources,
         SourceCommand::Seek {
@@ -306,6 +336,15 @@ fn a_source_and_the_timeline_given_the_same_seeks_read_the_same_frame_in_every_b
     assert_eq!(
         frames[0], PLAIN_FRAME as i64,
         "a plain seek lands in the next block"
+    );
+    assert_eq!(
+        timeline_report(&host.sources),
+        Ok(timeline_landed(3, plain_sample, PLAIN_FRAME))
+    );
+    // The timeline is seeked by the session seek alone.
+    assert_eq!(
+        host.sources.seek(b"$timeline", 4, 0),
+        Err(SourceControlError::UnknownSource)
     );
 }
 
@@ -385,6 +424,8 @@ fn a_rebuild_carries_the_timeline_its_history_and_its_producer() {
         (SOUGHT + 4 * Q) as i64,
         "the predecessor played the seek"
     );
+    let last = timeline_report(&predecessor.sources).expect("predecessor report");
+    assert_eq!(last, timeline_landed(2, 20 * Q, SOUGHT));
 
     assert_eq!(
         hand_over(&mut successor, &mut predecessor),
@@ -408,6 +449,13 @@ fn a_rebuild_carries_the_timeline_its_history_and_its_producer() {
             "successor block {block}"
         );
     }
+    // #1704 D3: the record moved with the timeline; its writer and its published copy too, so
+    // the successor's blocks of the same generation leave the predecessor's words.
+    assert_eq!(timeline_report(&successor.sources), Ok(last));
+    assert_eq!(
+        timeline_report(&predecessor.sources),
+        Err(SourceControlError::Vacated)
+    );
     // The producer moved: the predecessor's set holds none, and a seek through the successor's
     // set (its generation strictly above the predecessor's last) reaches the carried consumer.
     assert!(predecessor.sources.test_only_timeline_producer().is_none());
@@ -421,14 +469,18 @@ fn a_rebuild_carries_the_timeline_its_history_and_its_producer() {
         .expect("a seek through the successor's set");
     let sample = render(&mut successor.plan).sample;
     assert_eq!(timeline(&mut successor.plan, sample), (7 * Q) as i64);
+    assert_eq!(
+        timeline_report(&successor.sources),
+        Ok(timeline_landed(3, sample, 7 * Q))
+    );
 }
 
-/// The command queue a successor's carried timeline brings (#1641 D7): a successor that carries no
-/// ring carries exactly these source bytes.
+/// The command queue and seek-report record a successor's carried timeline brings (#1641 D7,
+/// #1704 D4): a successor that carries no ring carries exactly these source bytes.
 fn timeline_queue_bytes() -> u64 {
-    SourceTimeline::resource_report(QuantumFrames(QUANTUM as u32), NonZeroUsize::MIN)
-        .expect("timeline report")
-        .command_queue_bytes
+    let report = SourceTimeline::resource_report(QuantumFrames(QUANTUM as u32), NonZeroUsize::MIN)
+        .expect("timeline report");
+    report.command_queue_bytes + report.seek_report_bytes
 }
 
 /// Gate 2 with nothing else carried (batch 16a fold M2): the successor changes the source's

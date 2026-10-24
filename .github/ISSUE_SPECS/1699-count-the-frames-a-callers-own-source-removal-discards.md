@@ -40,3 +40,28 @@ mirrors, `crates/capi/include/miso_engine_v1.h`, `hosts/host-web/src/`, tests ne
 ## Dependencies
 
 #1310 (on main with batch 15a).
+
+## Root decisions (2026-10-24, from the scope note)
+
+- **R1.** Counter `SOURCE_FRAMES_DISCARDED = 21`. It counts a source the caller's transaction
+  removed **or redeclared**: both discard the old ring with its plan, by the same mechanism.
+- **R2.** Stale-generation blocks still queued count (accepted, never read).
+- **R3.** Not counted: session destroy, a withdrawn candidate's own rings (a fed fresh ring is
+  refused, so 0 by construction), frames render played.
+- **R4.** The unit is frames (`TransferBlock::frames`; a short end block counts its real frames).
+- **Paths.** The scope note's list replaces this spec's. Gate 1's "two rates" is one rate: frames
+  are rate-independent. Gate 4 has no new test: render gains no code.
+
+## Attempt record
+
+- Attempt 1. At a swap the successor moves every carried consumer out of the predecessor, so every
+  occupied source entry a retired plan still holds is a removed or redeclared source.
+  `SessionState::synchronize_plan_epochs` adds `retired_plan.unread_source_frames()` before the
+  drop (control thread); `PcmSourceConsumer::unread_frames` sums the pending block and the queued
+  blocks (`peek`, no pop). `refresh_provider_counters` copies the count; host-core serves 8
+  counters. One path past the scope note: `crates/control-plane/src/compile.rs`, the
+  `SessionState` constructor's new field (one line; the struct cannot compile without it).
+- Render gains no call: the AudioWorklet gate passes with the pinned render indirect sites (8).
+- Mutants (each red, then restored): pending block left out (unit test 6 != 10); every block
+  counted as a whole quantum (12 != 10); the add in `synchronize_plan_epochs` removed (host-web
+  0 != 256, C ABI 0 != 128).

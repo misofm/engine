@@ -585,6 +585,12 @@ pub struct SessionState<A: ControlAdapter> {
     /// withdrawn candidate adds nothing; the control plane copies it into the provider's counters
     /// with `live_values_superseded`. Render does not touch it.
     pub(crate) strips_restarted: u64,
+    /// The session's `source_frames_discarded` count (#1699 D1): the accepted source frames
+    /// render never read because the caller's transaction removed or redeclared their source.
+    /// [`Self::synchronize_plan_epochs`] adds each retired plan's unread frames before the plan is
+    /// dropped (a carried ring left that plan's entry vacant, so it adds 0); session destroy adds
+    /// nothing. Monotone, saturating, never reset. Render does not touch it.
+    pub(crate) source_frames_discarded: u64,
     /// `u16` scratch the protocol decoder writes field offsets into. It is exactly
     /// `max_frame_bytes / 2` entries; the odd trailing byte of an odd frame limit used to buy a
     /// one-byte box that nothing ever read (audit F7).
@@ -1898,6 +1904,11 @@ where
         #[cfg(not(feature = "test-support"))]
         let hold = false;
         while !hold && let Ok((retired_epoch, retired_plan)) = self.retirer.try_reclaim() {
+            // #1699 D1/D3: a source the successor carried left a vacant entry, so what the
+            // retired plan still holds unread is a removed or redeclared source's discarded PCM.
+            self.source_frames_discarded = self
+                .source_frames_discarded
+                .saturating_add(retired_plan.unread_source_frames());
             drop(ObservedRetiredPlan::new(retired_plan));
             if retired_epoch.0 == self.providers.epoch {
                 let replacement = self
@@ -2032,21 +2043,23 @@ where
 
     /// Sets every counter the provider serves from a source outside it (#1348 D8): the
     /// controller's telemetry counters, the session's `live_values_superseded` count (#1312
-    /// D8), its `strips_restarted` count (#1768) and the render-side `live_block_errors` (#1521
-    /// D3) and `source_underrun_blocks` (#1537) mirrors. A counter added later joins this refresh,
-    /// never a single control call.
+    /// D8), its `strips_restarted` (#1768) and `source_frames_discarded` (#1699) counts and the
+    /// render-side `live_block_errors` (#1521 D3) and `source_underrun_blocks` (#1537) mirrors.
+    /// A counter added later joins this refresh, never a single control call.
     fn refresh_provider_counters(&mut self) {
         let telemetry_counters = self.controller.queues().telemetry_counters();
         let superseded = self.live_values_superseded.get();
         let restarted = self.strips_restarted;
         let errors = self.shared.live_block_errors.load(Ordering::Acquire);
         let underruns = self.shared.source_underrun_blocks.load(Ordering::Acquire);
+        let discarded = self.source_frames_discarded;
         let provider = self.controller.provider_mut();
         provider.set_telemetry_counters(telemetry_counters);
         provider.set_live_values_superseded(superseded);
         provider.set_strips_restarted(restarted);
         provider.set_live_block_errors(errors);
         provider.set_source_underrun_blocks(underruns);
+        provider.set_source_frames_discarded(discarded);
     }
 
     /// Runs one control command frame. A success returns the response's length in the response
@@ -2062,6 +2075,24 @@ where
     /// preparation's) saves and restores the canonical word. Render never calls this: it pins its
     /// own environment.
     pub fn command(&mut self, request: &[u8], output_capacity: u64) -> Result<usize, CommandError> {
+        self.command_with_document(request, &[], output_capacity)
+    }
+
+    /// [`Self::command`] with the document a `SESSION_REPLACE` frame names (#1386 D3), borrowed for
+    /// this call only: nothing here or in the controller keeps it. Every command reaches this one
+    /// path; `document` is read only by a `SESSION_REPLACE`, after its replay preflight, its
+    /// exact-revision check and its output reservation. The controller's document hook checks its
+    /// length (against the frame and against `maximum_document_bytes`), its SHA-256, parses it
+    /// and diffs it against the committed model ([`crate::replace_document`]); the edits then
+    /// take this function's transaction path exactly: the live commit or the rebuild, the rate and quantum
+    /// refusal, the plan admission and the `SESSION_COMMITTED` event. A document equal to the
+    /// committed model answers `EditPath::Unchanged` and commits nothing.
+    pub fn command_with_document(
+        &mut self,
+        request: &[u8],
+        document: &[u8],
+        output_capacity: u64,
+    ) -> Result<usize, CommandError> {
         let _canonical = lane::CanonicalFpEnv::enter();
         self.service()?;
         let output_capacity = usize::try_from(output_capacity).unwrap_or(usize::MAX);
@@ -2073,11 +2104,15 @@ where
         let in_place = true;
         let mut scratch = DecodeScratch::new(&mut self.decode_fields);
         let prepared = if in_place {
-            self.controller
-                .prepare_command_frame_in_place(request, &mut scratch, output_capacity)
+            self.controller.prepare_command_frame_in_place(
+                request,
+                document,
+                &mut scratch,
+                output_capacity,
+            )
         } else {
             self.controller
-                .prepare_command_frame(request, &mut scratch, output_capacity)
+                .prepare_command_frame(request, document, &mut scratch, output_capacity)
         }
         .map_err(map_command_process_error)?;
         match prepared {

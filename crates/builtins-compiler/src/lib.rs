@@ -4899,6 +4899,65 @@ pub fn test_only_take_fader_lane_times() -> (Vec<TestOnlyFaderLaneTime>, bool) {
 }
 
 impl FaderBankProcessor {
+    // REALTIME_POLICY_BEGIN
+    /// One block: the body of `process` and, with `from_left`, of `process_from_left` (issue
+    /// #975), whose right input is the left plane and whose `right` is output only. Returns
+    /// whether the bank wrote the right plane from the left one; otherwise, with `from_left`, the
+    /// left plane is copied into the right one and the block renders as `process` renders it.
+    fn render(
+        &mut self,
+        left: &mut [f32],
+        right: &mut [f32],
+        frames: u32,
+        first_sample: u64,
+        from_left: bool,
+    ) -> bool {
+        let Self {
+            bank, automation, ..
+        } = self;
+        let took = if automation.is_empty() {
+            let took = from_left && bank.process_from_left(left, right, frames);
+            if !took {
+                if from_left {
+                    right.copy_from_slice(left);
+                }
+                bank.process(left, right, frames);
+            }
+            took
+        } else {
+            // #1647 D1.3-D1.5: the automated lanes' events, through the stage's timed path.
+            let mut driver = FaderEventDriver::new(
+                automated_lanes(automation),
+                frames,
+                first_sample,
+                bank_hold(bank),
+            );
+            // A block with no operation inside it renders exactly `process` (`process_with`'s
+            // contract), so only such a block takes the from-left body.
+            let took = from_left
+                && builtins::FaderOperationSource::next_offset(&mut driver)
+                    .is_none_or(|offset| offset >= frames)
+                && bank.process_from_left(left, right, frames);
+            if !took {
+                if from_left {
+                    right.copy_from_slice(left);
+                }
+                // A stop is unreachable: after `apply(offset)` every cursor has consumed its event
+                // and cut at `offset`, a piece's events rise strictly and a second piece starts at
+                // `E + 1`, so the next offset is above it. A stop (a broken source contract) fails
+                // the stage's own `debug_assert`; in release the block's rest renders with the
+                // gains held and `finish` advances every cell through the block, no panic.
+                let _ = bank.process_with(left, right, frames, &mut driver);
+            }
+            driver.finish();
+            took
+        };
+        self.process_calls = self.process_calls.saturating_add(1);
+        self.frames_processed = self.frames_processed.saturating_add(u64::from(frames));
+        took
+    }
+    // REALTIME_POLICY_END
+
     /// The block drain under `snapshot`: the body of `begin_block`.
     fn drain(&mut self, snapshot: LiveSnapshot) -> Result<(), RenderError> {
         let Self {
@@ -5204,30 +5263,20 @@ impl GraphPreparedBuiltinBankProcessor for FaderBankProcessor {
         frames: u32,
         first_sample: u64,
     ) -> Result<(), RenderError> {
-        let Self {
-            bank, automation, ..
-        } = self;
-        if automation.is_empty() {
-            bank.process(left, right, frames);
-        } else {
-            // #1647 D1.3-D1.5: the automated lanes' events, through the stage's timed path.
-            let mut driver = FaderEventDriver::new(
-                automated_lanes(automation),
-                frames,
-                first_sample,
-                bank_hold(bank),
-            );
-            // A stop is unreachable: after `apply(offset)` every cursor has consumed its event and
-            // cut at `offset`, a piece's events rise strictly and a second piece starts at
-            // `E + 1`, so the next offset is above it. A stop (a broken source contract) fails the
-            // stage's own `debug_assert`; in release the block's rest renders with the gains held
-            // and `finish` advances every cell through the block, no panic.
-            let _ = bank.process_with(left, right, frames, &mut driver);
-            driver.finish();
-        }
-        self.process_calls = self.process_calls.saturating_add(1);
-        self.frames_processed = self.frames_processed.saturating_add(u64::from(frames));
+        self.render(left, right, frames, first_sample, false);
         Ok(())
+    }
+
+    /// The seam on a collapsed block (issue #975): the bank writes the right plane from the left
+    /// one on a block with no right-channel ramp and no timed operation inside it.
+    fn process_from_left(
+        &mut self,
+        left: &mut [f32],
+        right: &mut [f32],
+        frames: u32,
+        first_sample: u64,
+    ) -> Result<bool, RenderError> {
+        Ok(self.render(left, right, frames, first_sample, true))
     }
 
     fn qualification_counters(&self) -> [u64; 2] {
@@ -15360,5 +15409,72 @@ mod tests {
             "the slotless refusal ran in all four Simd4 passes"
         );
         swaps
+    }
+
+    /// Issue #975: on a collapsed chain the real fader bank takes the seam -- it writes the right
+    /// plane from the left one, so the chain copies nothing -- on every settled block, an
+    /// automated bank's with no event in the block included, and takes the copy on a block where
+    /// a right-channel lane ramps or a stored event lands; every strip's output is the unarmed
+    /// (dual) twin's either way.
+    ///
+    /// Red if the fader stops taking the seam (`BuiltinStage`'s forward, the processor's
+    /// override, the bank's or the stage's from-left body dropped: the copies come back), or takes
+    /// it on a ramping block.
+    #[cfg(feature = "test-support")]
+    #[test]
+    fn a_settled_fader_takes_the_seam_and_a_ramping_one_copies() {
+        const TRACKS: usize = 13;
+        for backend in input_test_backends() {
+            let compiled = lane_swap_session(TRACKS, true, 128);
+            let mut rig = lane_swap_rig(&compiled, backend, true);
+            let mut twin = lane_swap_rig(&compiled, backend, false);
+            assert!(
+                rig.automated_lanes(0).contains(&1),
+                "{backend:?}: an automated bank"
+            );
+            let mut rng = LaneSwapRng(0x975);
+            for block in 0..4 {
+                // Block 2: one right-channel fader ramp on strip 0's chain.
+                if block == 2 {
+                    let ramp = [(
+                        0,
+                        LaneSwapWrite::Fader(TrackFaderRecord::FaderDb {
+                            lanes: BuiltinLaneSelector::Right,
+                            db: -6.0,
+                            smoothing_samples: 64,
+                        }),
+                    )];
+                    rig.write(&ramp);
+                    twin.write(&ramp);
+                }
+                let inputs = (0..TRACKS)
+                    .map(|_| {
+                        let left = (0..rig.frames)
+                            .map(|_| rng.within(-0.8, 0.8))
+                            .collect::<Vec<_>>();
+                        [left.clone(), left]
+                    })
+                    .collect::<Vec<_>>();
+                assert!(
+                    rig.block(&inputs) == twin.block(&inputs),
+                    "{backend:?}: block {block}"
+                );
+                // Strip 5's stored fader ride moves inside every block: its chain copies on each.
+                let (ramped, riding) = (rig.position[0].0, rig.position[5].0);
+                for (index, chain) in rig.chains.iter().enumerate() {
+                    assert!(chain.is_collapsed(), "{backend:?}: chain {index} collapsed");
+                    let copies = if index == riding {
+                        block + 1
+                    } else {
+                        u64::from(block >= 2 && index == ramped)
+                    };
+                    assert_eq!(
+                        chain.seam_copies(),
+                        copies,
+                        "{backend:?}: block {block}, chain {index}"
+                    );
+                }
+            }
+        }
     }
 }

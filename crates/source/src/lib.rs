@@ -2087,6 +2087,24 @@ impl PcmSourceConsumer {
         }
     }
 
+    /// The accepted frames render has not read (#1699 D1): the frames of the popped-but-unplayed
+    /// pending block plus those of every block still queued, a stale-generation block included
+    /// (R2). The played block is read already and does not count. Pops nothing. Control thread,
+    /// once the consumer's plan is retired: the count it is summed into is
+    /// `SOURCE_FRAMES_DISCARDED`.
+    #[must_use]
+    pub fn unread_frames(&self) -> u64 {
+        let pending = self
+            .current
+            .as_ref()
+            .map_or(0, |block| u64::from(block.frames));
+        (0..self.data_consumer.available_at_entry())
+            .map_while(|index| self.data_consumer.peek(index))
+            .fold(pending, |total, block| {
+                total.saturating_add(u64::from(block.frames))
+            })
+    }
+
     // REALTIME_POLICY_BEGIN
     /// Publish the ring's seek report if this block changed it (#1316 D3): a new generation in
     /// effect (the ring's first block, or one a seek applied at) takes this block's
@@ -2425,6 +2443,10 @@ pub struct TimelineResourceReport {
     pub command_queue_largest_allocation_bytes: u64,
     /// The history allocation: `16 * K` bytes.
     pub history_bytes: u64,
+    /// The timeline's seek-report record (#1704 D4): one shared allocation, a ring's
+    /// `seek_report_bytes` formula, so it is also its own largest-allocation row. A vacant
+    /// timeline's record arrives with its carry, as its command queue does.
+    pub seek_report_bytes: u64,
 }
 
 /// Prepared timeline constructor: the session's playhead as a source consumer with no PCM and no
@@ -2448,12 +2470,15 @@ impl SourceTimeline {
         )
         .map_err(|_| PcmSourceRingError::PlatformSizeLimit)?;
         let queue_largest = largest_queue_allocation::<SourceCommand>(NonZeroUsize::MIN)?;
+        let seek_report = u64::try_from(published_words_retained_bytes::<SEEK_REPORT_WORDS>())
+            .map_err(|_| PcmSourceRingError::PlatformSizeLimit)?;
         Ok(TimelineResourceReport {
             history_blocks: u64::try_from(history_blocks.get())
                 .map_err(|_| PcmSourceRingError::PlatformSizeLimit)?,
             command_queue_bytes: command_queue,
             command_queue_largest_allocation_bytes: queue_largest,
             history_bytes: history,
+            seek_report_bytes: seek_report,
         })
     }
 
@@ -2472,14 +2497,18 @@ impl SourceTimeline {
         let (command_producer, command_consumer) =
             bounded_spsc(NonZeroUsize::MIN, QueueGeneration(initial_generation.0))
                 .map_err(map_spsc_error)?;
+        // Generation 0 until the first block, as a ring's (#1704 D1).
+        let (seek_report_writer, seek_report_reader) =
+            published_words(SourceSeekReport::default().to_words());
         let consumer = TimelineConsumer::with_history(
             quantum_frames,
             history_blocks,
-            Some(command_consumer),
+            Some((command_consumer, seek_report_writer)),
             published.clone(),
         )?;
         Ok((
             TimelineProducer {
+                seek_report: seek_report_reader,
                 seek: SeekProducer {
                     command_producer,
                     active_generation: initial_generation,
@@ -2494,11 +2523,12 @@ impl SourceTimeline {
     }
 
     /// Allocate a vacant timeline (#1641 D3): its own history of `history_blocks` entries and no
-    /// command queue, for a successor plan that carries its predecessor's timeline at the swap
-    /// block. Until a carry fills it, it advances from timeline sample 0 and observes no seek, so
-    /// render stays defined. Its report's command-queue rows name the queue the carry brings,
-    /// which the successor does not allocate. `published` is the session's published generation
-    /// (#1642 B16-R2), the word of the timeline the carry brings. Control thread only.
+    /// command queue and no seek-report record (#1704 D3), for a successor plan that carries its
+    /// predecessor's timeline at the swap block. Until a carry fills it, it advances from timeline
+    /// sample 0 and observes no seek, so render stays defined. Its report's command-queue and
+    /// seek-report rows name the queue and record the carry brings, which the successor does not
+    /// allocate. `published` is the session's published generation (#1642 B16-R2), the word of
+    /// the timeline the carry brings. Control thread only.
     pub fn prepare_vacant(
         quantum_frames: QuantumFrames,
         history_blocks: NonZeroUsize,
@@ -2516,6 +2546,8 @@ impl SourceTimeline {
 /// multiple, a frame at most [`TIMELINE_SAMPLE_LIMIT`], one slot. Control thread only.
 pub struct TimelineProducer {
     seek: SeekProducer,
+    /// The timeline's seek report (#1704 D1); its consumer is the only writer.
+    seek_report: PublishedWordsReader<SEEK_REPORT_WORDS>,
 }
 
 impl TimelineProducer {
@@ -2537,6 +2569,18 @@ impl TimelineProducer {
     #[must_use]
     pub const fn active_generation(&self) -> SourceGeneration {
         self.seek.active_generation
+    }
+
+    /// The timeline's seek report as render last published it (#1704), in a ring's form: the
+    /// generation in effect (`0` before the first block), the source-read sample of the first
+    /// block it played in, and the timeline sample that block started at; the underrun and held
+    /// counts are always `0`. Bounded retries, then [`SourceSeekReportBusy`]. Any thread; it
+    /// never waits for render.
+    pub fn seek_report(&self) -> Result<SourceSeekReport, SourceSeekReportBusy> {
+        self.seek_report
+            .read()
+            .map(SourceSeekReport::from_words)
+            .map_err(|_| SourceSeekReportBusy)
     }
 }
 
@@ -2561,6 +2605,11 @@ pub struct TimelineConsumer {
     seek: SeekState,
     /// `None` while vacant (#1641 D3): a successor's timeline before its carry.
     command_consumer: Option<Consumer<SourceCommand>>,
+    /// The timeline's seek report (#1704 D1): this consumer is its only writer. `None` while
+    /// vacant; a carry moves it with the command queue (D3).
+    seek_report: Option<PublishedWordsWriter<SEEK_REPORT_WORDS>>,
+    /// What the seek report holds; render is its only writer, so it never loads it back.
+    published_seek_report: SourceSeekReport,
     quantum_frames: u32,
     /// The timeline sample of the next block.
     position: u64,
@@ -2585,9 +2634,13 @@ impl TimelineConsumer {
     fn with_history(
         quantum_frames: QuantumFrames,
         history_blocks: NonZeroUsize,
-        command_consumer: Option<Consumer<SourceCommand>>,
+        endpoints: Option<(
+            Consumer<SourceCommand>,
+            PublishedWordsWriter<SEEK_REPORT_WORDS>,
+        )>,
         published: PublishedGeneration,
     ) -> Result<Self, PcmSourceRingError> {
+        let (command_consumer, seek_report) = endpoints.unzip();
         let mut history = Vec::new();
         history
             .try_reserve_exact(history_blocks.get())
@@ -2596,6 +2649,8 @@ impl TimelineConsumer {
         Ok(Self {
             seek: SeekState::new(SourceGeneration(1)),
             command_consumer,
+            seek_report,
+            published_seek_report: SourceSeekReport::default(),
             quantum_frames: quantum_frames.0,
             position: 0,
             history: history.into_boxed_slice(),
@@ -2692,7 +2747,8 @@ impl TimelineConsumer {
     }
 
     /// Take `predecessor`'s timeline at a carry (#1641 D3): swap the seek state, the command
-    /// consumer and the position, and copy the predecessor's newest history entries into this
+    /// consumer, the seek-report writer and its published copy (#1704 D3) and the position, and
+    /// copy the predecessor's newest history entries into this
     /// timeline's own history. Nothing is allocated or freed; the predecessor is left vacant.
     /// Both timelines have the same quantum.
     fn adopt_from(&mut self, predecessor: &mut Self) {
@@ -2701,12 +2757,32 @@ impl TimelineConsumer {
             &mut self.command_consumer,
             &mut predecessor.command_consumer,
         );
+        core::mem::swap(&mut self.seek_report, &mut predecessor.seek_report);
+        core::mem::swap(
+            &mut self.published_seek_report,
+            &mut predecessor.published_seek_report,
+        );
         core::mem::swap(&mut self.position, &mut predecessor.position);
         self.copy_history_from(predecessor);
     }
 
-    /// Record `(source_read_sample, position)` and advance one quantum.
+    /// Record `(source_read_sample, position)`, publish the seek report if a new generation is
+    /// in effect (#1704 D2), and advance one quantum. A primed and a rendered block both count as
+    /// played, as for a ring's report. A vacant timeline publishes nothing.
     fn advance(&mut self, source_read_sample: u64) {
+        let generation = self.seek.active_generation.0;
+        if self.published_seek_report.generation != generation
+            && let Some(writer) = self.seek_report.as_mut()
+        {
+            let report = SourceSeekReport {
+                generation,
+                first_sample: source_read_sample,
+                source_frame: self.position,
+                ..SourceSeekReport::default()
+            };
+            self.published_seek_report = report;
+            writer.publish(&report.to_words());
+        }
         self.record(TimelineEntry {
             source_read_sample,
             timeline: self.position,
@@ -3245,6 +3321,16 @@ impl GraphPreparedSourceSetDriver for SourceGraphSourceSetDriver {
         written
     }
 
+    /// A vacant entry contributes 0: its ring moved to the successor.
+    fn unread_source_frames(&self) -> u64 {
+        self.sources
+            .iter()
+            .filter_map(|source| source.consumer.as_ref())
+            .fold(0, |total, consumer| {
+                total.saturating_add(consumer.unread_frames())
+            })
+    }
+
     fn as_any_mut(&mut self) -> Option<&mut dyn core::any::Any> {
         Some(self)
     }
@@ -3442,9 +3528,10 @@ impl SourceGraphSourceSetDriver {
 /// is the session's, not this set's: no row of the report counts it.
 ///
 /// The timeline's fixed bytes join the set's overhead and largest allocation (#1641 D7): its
-/// history, and for an occupied timeline its command queue. A vacant timeline's queue arrives
-/// with its carry, so its host counts it with the carried source overhead. The consumer value is
-/// inline in the driver, whose own allocation already counts it.
+/// history, and for an occupied timeline its command queue and its seek-report record (#1704 D4).
+/// A vacant timeline's queue and record arrive with its carry, so its host counts them with the
+/// carried source overhead. The consumer value is inline in the driver, whose own allocation
+/// already counts it.
 pub fn prepare_session_graph_source_set(
     envelope: engine::realtime::RenderEnvelope,
     sources: Vec<SourceGraphSource>,
@@ -3473,8 +3560,11 @@ pub fn prepare_session_graph_source_set(
     if !timeline.is_vacant() {
         overhead = overhead
             .checked_add(timeline_report.command_queue_bytes)
+            .and_then(|bytes| bytes.checked_add(timeline_report.seek_report_bytes))
             .ok_or(SourceGraphSourceSetError::ArithmeticOverflow)?;
-        largest = largest.max(timeline_report.command_queue_largest_allocation_bytes);
+        largest = largest
+            .max(timeline_report.command_queue_largest_allocation_bytes)
+            .max(timeline_report.seek_report_bytes);
     }
     let mut entries = Vec::with_capacity(sources.len());
     for source in sources {
@@ -3894,6 +3984,39 @@ mod tests {
         assert!(report.end_of_region);
         assert_eq!(report.copied_frames, 0);
         assert_eq!(report.underrun_frames, 0, "past the end is not an underrun");
+    }
+
+    /// #1699 D1. Red if `unread_frames` misses the popped-but-unplayed pending block, counts a
+    /// short end block as a whole quantum, or counts a block render already played.
+    #[test]
+    fn unread_frames_count_the_pending_and_queued_blocks_not_the_played_one() {
+        let (producer, mut consumer, _) = session_ring(config(1, 4, 16)).unwrap();
+        let mut host = producer.into_host_chunk_provider(RATE);
+        host.submit(chunk(1, 0, &[&[1.0; 4]], 4, false)).unwrap();
+        assert_eq!(consumer.unread_frames(), 4);
+        let (output, _) = render_at(&mut consumer, 0);
+        assert_eq!(output, [1.0; 4]);
+        assert_eq!(consumer.unread_frames(), 0, "the played block is read");
+        host.try_seek(seek_at(2, 100, 8)).unwrap();
+        host.submit(chunk(2, 100, &[&[2.0; 4]], 4, false)).unwrap();
+        host.submit(chunk(2, 104, &[&[2.0; 4]], 4, false)).unwrap();
+        host.submit(chunk(2, 108, &[&[2.0, 2.0]], 2, true)).unwrap();
+        // The held seek's first block is popped and pending; two blocks stay queued.
+        let (_, report) = render_at(&mut consumer, 4);
+        assert_eq!(report.held_frames, 4);
+        assert_eq!(consumer.unread_frames(), 4 + 4 + 2);
+        let (output, _) = render_at(&mut consumer, 8);
+        assert_eq!(output, [2.0; 4]);
+        assert_eq!(consumer.unread_frames(), 4 + 2);
+        // R2: a further seek replaces generation 2; its two queued blocks are stale but still
+        // accepted and unread, and they count with the new generation's first block.
+        host.try_seek(SourceCommand::Seek {
+            generation: SourceGeneration(3),
+            frame: SourceFrame(200),
+        })
+        .unwrap();
+        host.submit(chunk(3, 200, &[&[3.0; 4]], 4, false)).unwrap();
+        assert_eq!(consumer.unread_frames(), 4 + 2 + 4);
     }
 
     /// #1274 MINOR-1. Red if an on-time apply keeps the primed block without noting the region

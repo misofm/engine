@@ -51,16 +51,16 @@ fn carry_counts(prepared: &mut host_core::PreparedHost) -> [usize; 4] {
     graph::test_only_carry_counts(&mut prepared.plan)
 }
 
-/// The command queue a successor's carried timeline brings (#1641 D7): every successor's carried
-/// source bytes hold it, as they hold a carried ring's overhead, so a successor that carries no
-/// ring still carries these bytes.
+/// The command queue and seek-report record a successor's carried timeline brings (#1641 D7,
+/// #1704 D4): every successor's carried source bytes hold them, as they hold a carried ring's
+/// overhead, so a successor that carries no ring still carries these bytes.
 fn timeline_queue_bytes() -> u64 {
-    source::SourceTimeline::resource_report(
+    let report = source::SourceTimeline::resource_report(
         engine::QuantumFrames(QUANTUM as u32),
         core::num::NonZeroUsize::MIN,
     )
-    .expect("timeline report")
-    .command_queue_bytes
+    .expect("timeline report");
+    report.command_queue_bytes + report.seek_report_bytes
 }
 
 fn id(value: &str) -> StableId {

@@ -187,8 +187,35 @@ pub fn zero_lanes_block<L: Lane>(io: &mut [f32], frames: usize, m: L::Mask) {
 pub fn gain_mute_block<L: Lane>(io: &mut [f32], frames: usize, gain: L, mute: L::Mask) {
     debug_assert_eq!(io.len(), frames * L::WIDTH);
     for frame in io.chunks_exact_mut(L::WIDTH) {
-        L::load(frame).mul(gain).andnot(mute).store(frame);
+        gain_mute_frame(L::load(frame), gain, mute).store(frame);
     }
+}
+
+/// [`gain_mute_block`] out of place: `dst = andnot(src * gain, mute)`, `src` unchanged (issue
+/// #975: a collapsed chain's fader writes its right plane from the left one, so the seam copies
+/// nothing). One frame body with [`gain_mute_block`], so the bits are the same by construction.
+#[inline(always)]
+pub fn gain_mute_block_from<L: Lane>(
+    src: &[f32],
+    dst: &mut [f32],
+    frames: usize,
+    gain: L,
+    mute: L::Mask,
+) {
+    debug_assert_eq!(src.len(), frames * L::WIDTH);
+    debug_assert_eq!(dst.len(), frames * L::WIDTH);
+    for (from, to) in src
+        .chunks_exact(L::WIDTH)
+        .zip(dst.chunks_exact_mut(L::WIDTH))
+    {
+        gain_mute_frame(L::load(from), gain, mute).store(to);
+    }
+}
+
+/// The frame body of [`gain_mute_block`] and [`gain_mute_block_from`]: `andnot(x * gain, mute)`.
+#[inline(always)]
+fn gain_mute_frame<L: Lane>(x: L, gain: L, mute: L::Mask) -> L {
+    x.mul(gain).andnot(mute)
 }
 
 /// One D11 ramp update that never passes its target (issue #1408).

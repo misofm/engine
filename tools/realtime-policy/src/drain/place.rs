@@ -30,13 +30,14 @@
 //! (`self.next_queue().try_pop()`, counted as `self.next_queue().available_at_entry()`) is
 //! compared by spelling only: the method can return another queue on each call, which this rule
 //! does not read either. Neither does it read a place reached through an
-//! alias taken before the count. #1418 reuses this rule for the base of a selecting loop.
+//! alias taken before the count. #1418 holds the roots of every selecting outer loop to this rule
+//! over the loop's body ([`super::select`]).
 
 use super::Ctx;
 use super::facts::UseKind;
 use super::names::bare;
 use super::scope::{Binding, nearest};
-use super::shapes::{Root, RootKind, Seg};
+use super::shapes::{Place, Root, RootKind, Seg};
 use super::tree::{Node, Pos, Step, Via};
 
 /// Whether no use of `root`, bound by `binding`, in `from..to` replaces the place it starts.
@@ -47,14 +48,35 @@ pub(super) fn untouched<'f>(
     from: Pos,
     to: Pos,
 ) -> bool {
+    untouched_except(ctx, root, binding, from, to, &[])
+}
+
+/// [`untouched`], with the uses at `own` left out: the reads of the rule that asks (#1418: the
+/// root of a selecting loop's rebinding initializer, or of its collection).
+pub(super) fn untouched_except<'f>(
+    ctx: &Ctx<'f>,
+    root: &Root,
+    binding: &Binding<'f>,
+    from: Pos,
+    to: Pos,
+    own: &[Pos],
+) -> bool {
+    // The receiver's own index expressions, by step of its place.
+    let receiver_steps = ctx.tree.descend(root.at);
+    let (_, _, receiver_indexes) = climb(&receiver_steps);
     ctx.facts.uses_in(&root.name, from, to).iter().all(|used| {
+        if used.kind == UseKind::Path && own.contains(&used.pos) {
+            return true;
+        }
         // A mention in a macro's token tree can be anything the macro makes of it.
         if used.kind != UseKind::Path {
             return false;
         }
         let steps = ctx.tree.descend(used.pos);
         match nearest(&steps, &root.name) {
-            Some(found) if found.same(binding) => allowed(&steps, used.pos, root),
+            Some(found) if found.same(binding) => {
+                allowed(&steps, used.pos, root, &receiver_indexes)
+            }
             // Another binding of the name, or none: not this place.
             _ => true,
         }
@@ -62,7 +84,13 @@ pub(super) fn untouched<'f>(
 }
 
 /// Whether the use of the root at `at`, at the end of `steps`, leaves the place alone.
-fn allowed(steps: &[Step<'_>], at: Pos, root: &Root) -> bool {
+/// `receiver_indexes` are the index expressions of the receiver's own place, by step.
+fn allowed(
+    steps: &[Step<'_>],
+    at: Pos,
+    root: &Root,
+    receiver_indexes: &[Option<&syn::Expr>],
+) -> bool {
     if steps
         .iter()
         .any(|step| matches!(step.node, Node::Expr(syn::Expr::Closure(_))))
@@ -80,30 +108,7 @@ fn allowed(steps: &[Step<'_>], at: Pos, root: &Root) -> bool {
     if super::shapes::simple_path(path).is_none_or(|(_, found)| found != at) {
         return false;
     }
-    // The place above the use: climb the `.field`, `[..]` and `*` steps.
-    let mut top = steps.len() - 1;
-    let mut fields = Vec::new();
-    while top >= 1 {
-        let (node, via) = (steps[top - 1].node, steps[top - 1].via);
-        match (node, via) {
-            (Node::Expr(syn::Expr::Field(field)), Some(Via::Operand(0))) => {
-                fields.push(match &field.member {
-                    syn::Member::Named(name) => Seg::Field(bare(name)),
-                    syn::Member::Unnamed(index) => Seg::Field(format!("#{}", index.index)),
-                });
-            }
-            (Node::Expr(syn::Expr::Index(_)), Some(Via::Operand(0))) => fields.push(Seg::Index),
-            (
-                Node::Expr(syn::Expr::Unary(syn::ExprUnary {
-                    op: syn::UnOp::Deref(_),
-                    ..
-                })),
-                Some(Via::Operand(0)),
-            ) => {}
-            _ => break,
-        }
-        top -= 1;
-    }
+    let (top, fields, indexes) = climb(steps);
     if leaves(&fields, &root.path) {
         return true;
     }
@@ -124,12 +129,80 @@ fn allowed(steps: &[Step<'_>], at: Pos, root: &Root) -> bool {
         // A method call through auto-ref: the stated limit, except on the collection that the
         // receiver indexes (`self.queues.swap(0, 1)` beside `self.queues[0]`), which reorders
         // the queues under the index.
+        // A method call on a place that indexes by anything but the receiver's own index
+        // (`controls[..].swap(0, 1)`, `controls[0..2].swap(0, 1)` beside `controls[lane]`)
+        // reorders the queues under the index too (#1418 R3).
         (Node::Expr(syn::Expr::MethodCall(_)), Some(Via::Operand(0))) => {
-            root.kind == RootKind::Index || !indexed_next(&fields, &root.path)
+            root.kind == RootKind::Index
+                || (!indexed_next(&fields, &root.path) && own_indexes(&indexes, receiver_indexes))
         }
         // An index place may be read by value; the queue's root may not.
         _ => root.kind == RootKind::Index,
     }
+}
+
+/// The place above the path use that ends `steps`: climb the `.field`, `[..]` and `*` steps. The
+/// index of the parent node, the place's steps, and each step's index expression (`None` for a
+/// field).
+fn climb<'f>(steps: &[Step<'f>]) -> (usize, Vec<Seg>, Vec<Option<&'f syn::Expr>>) {
+    let mut top = steps.len().saturating_sub(1);
+    let mut fields = Vec::new();
+    let mut indexes = Vec::new();
+    while top >= 1 {
+        let (node, via) = (steps[top - 1].node, steps[top - 1].via);
+        match (node, via) {
+            (Node::Expr(syn::Expr::Field(field)), Some(Via::Operand(0))) => {
+                fields.push(match &field.member {
+                    syn::Member::Named(name) => Seg::Field(bare(name)),
+                    syn::Member::Unnamed(index) => Seg::Field(format!("#{}", index.index)),
+                });
+                indexes.push(None);
+            }
+            (Node::Expr(syn::Expr::Index(index)), Some(Via::Operand(0))) => {
+                fields.push(Seg::Index);
+                indexes.push(Some(&*index.index));
+            }
+            (
+                Node::Expr(syn::Expr::Unary(syn::ExprUnary {
+                    op: syn::UnOp::Deref(_),
+                    ..
+                })),
+                Some(Via::Operand(0)),
+            ) => {}
+            _ => break,
+        }
+        top -= 1;
+    }
+    (top, fields, indexes)
+}
+
+/// Whether every index step of a place is the receiver's own index at that step, spelled the same:
+/// the same integer literal or the same [`Place`]. A range or any other expression is not.
+fn own_indexes(place: &[Option<&syn::Expr>], receiver: &[Option<&syn::Expr>]) -> bool {
+    place.iter().enumerate().all(|(at, index)| {
+        let Some(index) = index else {
+            return true;
+        };
+        let Some(Some(own)) = receiver.get(at) else {
+            return false;
+        };
+        match (index, own) {
+            (
+                syn::Expr::Lit(syn::ExprLit {
+                    lit: syn::Lit::Int(a),
+                    ..
+                }),
+                syn::Expr::Lit(syn::ExprLit {
+                    lit: syn::Lit::Int(b),
+                    ..
+                }),
+            ) => a.base10_digits() == b.base10_digits() && a.suffix() == b.suffix(),
+            _ => matches!(
+                (Place::of(index), Place::of(own)),
+                (Some(a), Some(b)) if a.spelled_like(&b)
+            ),
+        }
+    })
 }
 
 /// Whether `place` is a prefix of the receiver's path that an index step of it directly follows.
@@ -146,7 +219,8 @@ fn leaves(place: &[Seg], receiver: &[Seg]) -> bool {
         .any(|pair| matches!(pair, (Seg::Field(a), Seg::Field(b)) if a != b))
 }
 
-fn is_assign_op(op: &syn::BinOp) -> bool {
+/// Whether `op` is a compound assignment (`+=`, `-=`, ..), which replaces its left operand.
+pub(super) fn is_assign_op(op: &syn::BinOp) -> bool {
     matches!(
         op,
         syn::BinOp::AddAssign(_)
