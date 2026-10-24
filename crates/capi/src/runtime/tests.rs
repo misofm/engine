@@ -826,8 +826,8 @@ fn a_c_abi_plan_keeps_its_strip_meters_and_meters_its_output_without_allocating(
 
 /// #1674 gate 1: across a carried C ABI rebuild (a muted track whose ID sorts first), the strip
 /// meter consumer the running epoch holds for the old strip 0, now strip 1, is the one it held
-/// before: its queued window stays, and the window the carried observer publishes after the swap
-/// continues its sequence on it.
+/// before: the window that opened on the predecessor and closes on the successor arrives on it.
+/// (A strip queue holds one window and nothing pops it, so the window spans the swap.)
 ///
 /// Test value: red if the promoted epoch keeps the successor's fresh consumer for a carried strip,
 /// whose producer the swap block moved into the retiring plan; no other test reads the C ABI's
@@ -875,17 +875,24 @@ fn a_carried_strip_meter_keeps_its_reader_across_a_c_abi_rebuild() {
                 .expect("render");
         }
     };
-    // The queued windows of `meter`, peeked in order.
-    let windows = |meter: &host_core::MeterConsumer| -> Vec<u64> {
+    // The queued windows of `meter`, peeked in order: (sequence, start, end).
+    let windows = |meter: &host_core::MeterConsumer| -> Vec<(u64, u64, u64)> {
         (0..)
             .map_while(|index| meter.consumer.peek(index))
-            .map(|snapshot| snapshot.window_sequence)
+            .map(|snapshot| {
+                (
+                    snapshot.window_sequence,
+                    snapshot.start_sample,
+                    snapshot.end_sample,
+                )
+            })
             .collect()
     };
-    run(&mut children, 0, window + 1);
+    let swap = window / 2;
+    run(&mut children, 0, swap);
     let meter = &children.session.test_providers().test_meters()[0];
     let strip = meter.track_id.clone();
-    assert_eq!(windows(meter), [0], "one window closed before the rebuild");
+    assert!(windows(meter).is_empty(), "window 0 is open at the rebuild");
 
     let transaction = command_bytes_at_revision(
         1,
@@ -896,7 +903,7 @@ fn a_carried_strip_meter_keeps_its_reader_across_a_c_abi_rebuild() {
         .session
         .command(&transaction, 4_096)
         .expect("the rebuild commits");
-    run(&mut children, window + 1, window + 1);
+    run(&mut children, swap, window - swap + 1);
     children.session.service().expect("service");
     assert_eq!(children.session.test_providers().test_epoch(), 1);
     assert!(children.session.test_pending_providers().is_empty());
@@ -904,8 +911,8 @@ fn a_carried_strip_meter_keeps_its_reader_across_a_c_abi_rebuild() {
     assert_eq!(meter.track_id, strip, "the old strip 0 is strip 1");
     assert_eq!(
         windows(meter),
-        [0, 1],
-        "the reader the epoch held keeps window 0 and receives window 1 of the carried observer"
+        [(0, 0, window * 128)],
+        "the reader the epoch held receives the carried window 0, opened before the swap"
     );
 }
 
