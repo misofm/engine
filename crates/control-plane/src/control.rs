@@ -2085,7 +2085,6 @@ where
                     hop,
                     epoch,
                 )),
-                }
                 other => other,
             };
             let mut previous = core::mem::replace(&mut self.providers, next);
