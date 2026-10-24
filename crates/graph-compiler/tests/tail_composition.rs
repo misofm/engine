@@ -358,7 +358,7 @@ fn compile(
 const FIXED: GainLiveness = GainLiveness::FIXED;
 const LIVE: GainLiveness = GainLiveness {
     strip_fader_matrix: true,
-    routes_into_submixes: true,
+    routes: true,
 };
 
 /// What [`enumerate`] computes: H4's three values.
@@ -743,10 +743,11 @@ fn compiled_tail_values_equal_the_enumerated_rule() {
 }
 
 /// C11 (a): without a live lane the fader states its prepared gain, with one the domain maximum; a
-/// fader or mute lane driven by stored automation is live under every selection; a live route into
-/// a submix states the route domain's maximum and a fixed one its prepared row. Red if a live fader
-/// or send states its prepared value, a fixed one its domain maximum, or an automated lane is taken
-/// as fixed.
+/// fader or mute lane driven by stored automation is live under every selection; a live route (into
+/// a submix, or into the output from before the fader, #1391) states the route domain's maximum and
+/// a fixed one its prepared row. Red if a live fader or route states its prepared value (a tail
+/// computed from a pre-fader output route's constant), a fixed one its domain maximum, or an
+/// automated lane is taken as fixed.
 #[test]
 fn a_live_fader_states_its_domain_maximum_and_a_fixed_one_its_prepared_gain() {
     let mut model = c1();
@@ -824,7 +825,7 @@ fn a_live_fader_states_its_domain_maximum_and_a_fixed_one_its_prepared_gain() {
     muted.automation.push(entry(6, ParameterUnit::Linear, 1.0));
     assert_eq!(fader_gain_of(&muted), expected(-24.0));
 
-    // A route into a submix: live under `routes_into_submixes`, the fold of +24 dB and 1.0 with
+    // A route into a submix: live under `routes`, the fold of +24 dB and 1.0 with
     // the 2x2's rounding; fixed, its prepared row (here -6 dB with ones).
     let mut sends = c2();
     sends
@@ -860,6 +861,38 @@ fn a_live_fader_states_its_domain_maximum_and_a_fixed_one_its_prepared_gain() {
     };
     assert_eq!(send_gain(LIVE), route_expected(24.0));
     assert_eq!(send_gain(FIXED), route_expected(-6.0));
+
+    // #1391: a route into the output from before its strip's fader rides a lane too, so it states
+    // the live bound; from `post_pan` it keeps its prepared row.
+    let output_gain = |tap, liveness| {
+        let mut model = c2();
+        let route = model
+            .routes
+            .iter_mut()
+            .find(|route| route.id.as_str() == "bus-main")
+            .expect("the bus route");
+        route.gain_db = -6.0;
+        route.source = RouteSource::Submix {
+            submix_id: sid("bus"),
+            tap,
+        };
+        let artifact = compile(&model, liveness, InputLanes::None, u64::MAX).expect("compiles");
+        let node = artifact
+            .graph()
+            .spec
+            .nodes
+            .iter()
+            .find(|node| {
+                matches!(&node.id, graph::GraphNodeId::Route { route_id }
+                    if route_id.as_str() == "bus-main")
+            })
+            .expect("route node")
+            .bound;
+        stated(&node).expect("stated").1
+    };
+    assert_eq!(output_gain(SendTap::PreFader, LIVE), route_expected(24.0));
+    assert_eq!(output_gain(SendTap::PreFader, FIXED), route_expected(-6.0));
+    assert_eq!(output_gain(SendTap::PostPan, LIVE), route_expected(-6.0));
 }
 
 /// C4: with every gain at its maximum the submix sum's fan-in moves each track section across a

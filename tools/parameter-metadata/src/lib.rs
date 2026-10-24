@@ -368,8 +368,10 @@ fn controls_object(out: &mut String, registry: &effect_contract::NativeEffectReg
 /// One row of a table as one line of JSON.
 ///
 /// The fields that depend on the rate are emitted per launch rate when they differ across the four
-/// (`maximum`); the fields that depend on a route's destination are emitted per case
-/// (`intoSubmix`, `intoOutput`), each case carrying the class and whether the row applies.
+/// (`maximum`); the fields that depend on a route's destination and tap are emitted per case
+/// (`intoSubmix`; `intoOutputBeforeFader`, a route into the output from a tap before the fader,
+/// #1391; `intoOutput`, from `post_fader` or `post_pan`), each case carrying the class and whether
+/// the row applies.
 fn control_row(out: &mut String, row: &TableRow) {
     let descriptor = &row.descriptor;
     append!(
@@ -445,9 +447,11 @@ fn control_row(out: &mut String, row: &TableRow) {
             controls::Lanes::Shared => "shared",
         },
     );
-    if let Some(output) = row.into_output {
+    if let (Some(output), Some(before_fader)) = (row.into_output, row.into_output_before_fader) {
         out.push_str(", \"intoSubmix\": ");
         class_case(out, descriptor, descriptor.class, true);
+        out.push_str(", \"intoOutputBeforeFader\": ");
+        class_case(out, descriptor, before_fader.class, before_fader.active);
         out.push_str(", \"intoOutput\": ");
         class_case(out, descriptor, output.class, output.active);
     } else {

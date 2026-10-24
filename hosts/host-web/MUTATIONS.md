@@ -595,3 +595,61 @@ unmutated result, so the throw is `<browser>: page-errors:`. All three red in th
 Not run in this slice (sprint mode, root 2026-10-24): P1 (the B2 order restored in
 `sdk-response-entry.ts`), P2 (P1 without the `addInitScript` channel) and the 5 loaded WebKit runs
 (spec gate 4). They move to #1605 "Post-sprint qualification of decision 15's heavy gates".
+
+## Issue #1535 — observation unsubscribe on a real AudioContext (2026-10-24)
+
+Gate `observation-unsubscribe` in `qualification/run.mjs` on `unsubscribeFailures`
+(`qualification/qualification.js`, D5), over `runObservationUnsubscribeRun`: one real
+`AudioContext`, one trusted-click resume, `unsubscribe-session.json` (512 blocks). Unmutated tree:
+green in Chromium 151.0.7922.34, Firefox 153.0 and WebKit 26.5 (Playwright 1.62.1), one unloaded
+run each with `--sdk-root --check-matrix --self-test-mutations` (`resume-clicks` 3), and in
+Firefox and WebKit without the SDK (`resume-clicks` 1). This replaces the gate #1345 Amendment 7
+removed (the history rows above).
+
+Reds on the unmutated tree: two Firefox 153.0 runs failed while the PulseAudio socket path was too
+long (113 characters), so there was no sink. Without the SDK: `resume timeout at the armed tap to
+render (click) after 10000 ms: state=suspended`. With the SDK: `spectrum collection audio resume
+timed out (gesture=true, state=suspended)`. `main` was red the same way under that path and green
+with a short one (spec, Attempt record).
+
+### Node proof (`--self-test-mutations`, no browser)
+
+`unsubscribeFailureProofs()` holds `unsubscribeFailures` to a table: a green run at the bounds (four
+armed frames, 48 signal frames, 40 sources in flight) gives `[]`, three low-peak frames with minimum
+peak 0 give `[]` (root ruling R1), and each row below gives exactly its named failure. It also
+asserts `UNSUBSCRIBE_SIGNAL_FRAMES` (48) > `RING_BLOCKS` (40), and that `requestFailure` names the
+step, the kind, the counts and a refusal record's `result`/`requestId`, never `[object Object]`.
+
+| Row | Change | Named failure |
+|---|---|---|
+| context | `contextStateBeforeBoot = "running"` | `context` |
+| armed frames / armed reduction | `armedFrames = 3` / `armedMaximumTrackGrDb = 0` | `armed` |
+| render-between | `renderedBeforeUnsubscribe = renderedAfterSubscribe` | `render-between` |
+| unsubscribe-ack | `unsubscribeBindings = 1` | `unsubscribe-ack` |
+| reduction / no frame (D9) | `maximumTrackGrDbAfterAcknowledgement = 1` / `framesAfterAcknowledgement = 0` | `reduction` |
+| shortfall frames / flag | `signalFramesAfterAcknowledgement = 47` / `signalShortfall = true` | `shortfall` |
+| shortfall, source exhausted | `sourceExhausted = { renderBlock: 481, fed: 512 }` | `shortfall` |
+| feed in flight / behind | `maximumSourcesInFlight = 41` / `feedBehind = { block: 20, renderBlock: 21 }` | `feed` |
+
+Source mutations of the proof, run once each and reverted (PR evidence):
+
+| Mutation | Observed red |
+|---|---|
+| drop the `signalShortfall !== false` term of `shortfall` | table row "shortfall flag" |
+| `UNSUBSCRIBE_SIGNAL_FRAMES = 16` | table row "shortfall frames" |
+| `requestFailure` formats a record as `String(cause)` | `request-failure: "result":6 missing ... cause=[object Object]` |
+
+### Result mutation (`--self-test-mutations`)
+
+| Where | Mutation | Observed red |
+|---|---|---|
+| `observation-disarmed-empty` | `observation.disarmed.frames = 0` | `observation-disarmed` (D9) |
+
+`stallSignatureProofs()` is restored unchanged from the saved patch.
+
+### Moved to #1605 (sprint mode, root 2026-10-24)
+
+The seven result-field mutations and `requestFailureProofs()` of the spec are replaced by the node
+proof above. Page mutations (d) `skip-unsubscribe` and (e) `feed-ends-at-boundary`, and source
+mutations M1-M3 (spec gate 6), are not run in this slice; they move to "Post-sprint qualification
+of decision 15's heavy gates" (#1605) with the loaded acceptance (gate 8).
