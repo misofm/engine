@@ -555,9 +555,22 @@ impl<L: Lane> LimiterCoef<L> {
 
     /// Sets lane `lane`'s link mode and re-derives the mask and the all-`Maximum` leg.
     /// Allocation-free and panic-free, so the render-time lane swap may call it (issue #1747).
-    fn set_lane_link(&mut self, lane: usize, link: LinkMode) {
+    ///
+    /// `active` is the bank's member mask. D5 holds after a swap too: every padded lane re-takes
+    /// the first active lane's mode, so a bank whose members became all `Maximum` regains the
+    /// #990 linked pair. A padded lane's output is discarded, so this moves no member's bit.
+    fn set_lane_link(&mut self, lane: usize, link: LinkMode, active: u32) {
         if let Some(slot) = self.links.get_mut(lane) {
             *slot = link;
+        }
+        let first = active.trailing_zeros() as usize;
+        if first < L::WIDTH {
+            let mode = self.links[first];
+            for (padded, slot) in self.links.iter_mut().enumerate().take(L::WIDTH) {
+                if active & (1 << padded) == 0 {
+                    *slot = mode;
+                }
+            }
         }
         self.derive_link();
     }
@@ -3815,7 +3828,7 @@ impl<L: Lane> LimiterCore<L> {
     /// `Maximum` never takes the #990 linked pair.
     fn with_lane_links(mut self, links: &[LinkMode]) -> Self {
         for (lane, &link) in links.iter().enumerate().take(L::WIDTH) {
-            self.coefficients.set_lane_link(lane, link);
+            self.coefficients.set_lane_link(lane, link, self.active);
         }
         self
     }
@@ -4693,7 +4706,7 @@ impl<L: Lane> LimiterCore<L> {
         let (values_bytes, link_bytes) = bytes.split_at_mut(2 * PARAMETER_COUNT * 4);
         let link =
             effect_contract::exchange_lane_link_word(self.coefficients.links[lane], link_bytes);
-        self.coefficients.set_lane_link(lane, link);
+        self.coefficients.set_lane_link(lane, link, self.active);
         let (left_bytes, right_bytes) = values_bytes.split_at_mut(PARAMETER_COUNT * 4);
         for (values, side) in [
             (&mut self.left_defaults[lane], left_bytes),
@@ -6563,6 +6576,82 @@ mod tests {
                     }
                 }
             }
+        }
+
+        // D5 (issue #1368): a padded lane takes the first member's mode at bind and again after
+        // a lane swap, so a padded bank of `Maximum` members on one window keeps the #990 linked
+        // pair. Red if a padded lane keeps its request's (or its bind-time) mode.
+        for (width, backend, lanes) in BankWidth::ALL
+            .iter()
+            .map(|&width| (width, width.backend(), width.lanes() as usize))
+            .filter(|&(_, _, lanes)| lanes <= Backend::current().width())
+        {
+            let tracks = fixture_tracks(lanes);
+            let members = lanes - 1;
+            let mask: Vec<bool> = (0..lanes).map(|lane| lane < members).collect();
+            let bind = |links: &[LinkMode]| {
+                let requests: Vec<PrepareEffectRequest<'_>> = tracks
+                    .iter()
+                    .zip(links)
+                    .map(|(values, &link_mode)| {
+                        let mut request = request(values);
+                        request.link_mode = link_mode;
+                        request
+                    })
+                    .collect();
+                TruePeakLimiterFactory
+                    .bind_homogeneous_bank(PrepareEffectBankRequest {
+                        backend,
+                        width,
+                        requests: &requests,
+                        active_mask: &mask,
+                    })
+                    .expect("bank binding")
+                    .expect("bank available")
+            };
+            let engages = |bank: &mut PreparedEffectBank| {
+                let mut noise = Noise(0x1368_0000 + lanes as u64);
+                let mut left: Vec<f32> = (0..128 * lanes)
+                    .map(|frame| {
+                        if frame % lanes < members {
+                            noise.next() * 3.0
+                        } else {
+                            0.0
+                        }
+                    })
+                    .collect();
+                let mut right = left.clone();
+                let before = LINKED_ENGAGEMENTS.with(Cell::get);
+                process_bank(
+                    bank.processor.as_mut(),
+                    &mut left,
+                    &mut right,
+                    width,
+                    128,
+                    0,
+                );
+                LINKED_ENGAGEMENTS.with(Cell::get) != before
+            };
+            // Members all `Maximum`, the padded request at `DualMono`: the pair links.
+            let mut links = vec![M; lanes];
+            links[lanes - 1] = D;
+            assert!(engages(&mut bind(&links)), "W{lanes}: padded Maximum bank");
+            // Member 0 at `DualMono`, so the padded lane binds at `DualMono`; a swap then gives
+            // member 0 `Maximum`, and the padded lane must follow it for the pair to link.
+            links[0] = D;
+            let mut bank = bind(&links);
+            let (left, right) = initial_defaults(&tracks[0]).expect("defaults");
+            let mut bytes: Vec<u8> = left
+                .iter()
+                .chain(right.iter())
+                .flat_map(|value| value.to_bits().to_le_bytes())
+                .chain((M as u32).to_le_bytes())
+                .collect();
+            assert!(bank.processor.exchange_lane_defaults(0, &mut bytes));
+            assert!(
+                engages(&mut bank),
+                "W{lanes}: padded bank after a swap made it uniform"
+            );
         }
     }
 

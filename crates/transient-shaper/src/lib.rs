@@ -721,8 +721,21 @@ impl<L: Lane, const W: usize> Shaper<L, W> {
 
     /// Sets lane `lane`'s link mode and re-derives the masks and the arm (issue #1368).
     /// Allocation-free, so the render-time lane swap may call it.
+    ///
+    /// D5 holds after the swap too: every padded lane re-takes the first active lane's mode, so a
+    /// bank whose members became uniform leaves the mixed arm. A padded lane's output is
+    /// discarded, so this moves no member's bit.
     fn set_lane_link(&mut self, lane: usize, link: LinkMode) {
         self.links[lane] = link;
+        let first = self.active.trailing_zeros() as usize;
+        if first < W {
+            let mode = self.links[first];
+            for (padded, slot) in self.links.iter_mut().enumerate() {
+                if self.active & (1 << padded) == 0 {
+                    *slot = mode;
+                }
+            }
+        }
         self.link_lanes = LinkLanes::new(&self.links);
     }
 
