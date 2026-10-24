@@ -653,3 +653,96 @@ fn a_collapsible_prefix_before_an_incompatible_slot_collapses_exactly() {
         "a partially collapsed chain renders the dual chain's bits"
     );
 }
+
+/// A chain whose per-block input term is down (issue #987) renders dual for that window, and the
+/// window is an *episode*: the chain does not re-engage when the term comes back over channels the
+/// unequal inputs drove apart, only after an agreement proof.
+///
+/// Blocks 4..8 feed unequal planes with `set_input_symmetric(false)`; every stage word stays
+/// symmetric, so the witness alone would still say "collapse". From block 8 the planes are equal
+/// again with the term up. The recursive states still differ, so the chain must decline, until
+/// the difference has decayed to nothing and [`BankStage::channels_agree`] proves it.
+///
+/// # Red mutations
+///
+/// Drop `self.input_symmetric` from the dispatch's `armed` and the window collapses over unequal
+/// planes: the right plane is the left one, and the bit comparison fails. Drop the
+/// `!self.input_symmetric` clause from the agreement maintenance and the disengage copy's
+/// agreement survives the window, so block 8 re-engages on separated states: the bit comparison
+/// fails again.
+#[test]
+fn an_asymmetric_input_window_declines_and_waits_for_a_proof() {
+    let stage = Recursive::new([0.5, 0.5]);
+    let oracle_stage = Recursive::new([0.5, 0.5]);
+    let mut chain = recursive_chain(&stage);
+    let mut oracle = recursive_chain(&oracle_stage);
+    oracle.force_mono_collapse_off(true);
+
+    let mut observed = Vec::new();
+    let mut expected = Vec::new();
+    for block in 0..40_u64 {
+        let asymmetric = (4..8).contains(&block);
+        let input = || {
+            let mut planes = finite_planes(4, 8, block);
+            if asymmetric {
+                for plane in &mut planes.right {
+                    plane.iter_mut().for_each(|word| *word *= 0.75);
+                }
+            }
+            planes
+        };
+        chain.set_input_symmetric(!asymmetric);
+        oracle.set_input_symmetric(!asymmetric);
+        let mut planes = input();
+        let mut oracle_planes = input();
+        chain
+            .run(&mut planes, 8, block * 8, LiveSnapshot::ALL)
+            .expect("render");
+        oracle
+            .run(&mut oracle_planes, 8, block * 8, LiveSnapshot::ALL)
+            .expect("render");
+        assert!(
+            !chain.planes_identical(),
+            "block {block}: a seam-side slot ran, so the planes are not identical by construction"
+        );
+        if block == 8 {
+            assert!(
+                !stage.core().states_agree(),
+                "the window must have separated the channels, or the decline proves nothing"
+            );
+            assert_eq!(
+                chain.collapses(),
+                4,
+                "neither the window nor the first equal-input block after it collapsed"
+            );
+            assert!(!chain.collapse_channels_agree());
+        }
+        for lane in 0..4 {
+            for frame in 0..8 {
+                observed.push((
+                    planes.left[lane][frame].to_bits(),
+                    planes.right[lane][frame].to_bits(),
+                ));
+                expected.push((
+                    oracle_planes.left[lane][frame].to_bits(),
+                    oracle_planes.right[lane][frame].to_bits(),
+                ));
+            }
+        }
+    }
+
+    assert_eq!(
+        chain.collapse_transitions(),
+        [1, 1, 1],
+        "one disengage, one re-engage, and it took a proof"
+    );
+    assert!(
+        chain.collapses() > 4,
+        "the chain collapsed again after the proof"
+    );
+    assert_eq!(oracle.collapses(), 0);
+    assert_eq!(
+        observed, expected,
+        "an asymmetric-input window renders the never-collapsed bits"
+    );
+}
