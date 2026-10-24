@@ -576,10 +576,11 @@ fn every_padded_bank_renders_its_members_per_node_bits() {
     for &width in WIDTHS {
         let lanes = width.lanes() as usize;
         for members in 1..=lanes {
-            for (index, link) in LINKS.into_iter().enumerate() {
+            for index in 0..LINKS.len() {
                 let seed = (lanes * 100 + members * 10 + index) as u64;
-                // Issue #1368: member `m` takes the mode `m` places after `link`, so a bank of two
-                // or more members mixes modes and a full bank is bound as well as a padded one.
+                // Issue #1368: member `m` takes the mode `m` places after `LINKS[index]`, so a
+                // bank of two or more members mixes modes, and a full bank binds as well as a
+                // padded one.
                 let links: Vec<LinkMode> = (0..members)
                     .map(|member| LINKS[(index + member) % LINKS.len()])
                     .collect();

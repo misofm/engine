@@ -141,3 +141,24 @@ the foundation for a per-strip console link override (#1369) and a live link swi
 
 Stream A's carry slices #1279 and #1280 for these four crates land first (decision 15's stream
 order), so this slice rebases on their payload code instead of racing it.
+
+## Decision record
+
+- **2026-10-24, split (root).** The slice ships in two tranches, as the hazard allows:
+  **1368a** is D1, D2, the gate-expander and the compressor; **1368b** is the transient shaper and
+  the true-peak limiter. Until 1368b lands, `lane_link` is `true` for `miso.compressor` and
+  `miso.gate-expander` only: a descriptor may set it only when its bank kernel reads the link per
+  lane, so the shaper and the limiter keep the real mode in their key and render as today.
+- **2026-10-24, D1 shape (root).** Option A, the self-describing descriptor field, not an id-keyed
+  list beside `program_key`: each effect describes itself (#1340 removed the analogous
+  `PREPARED_BYPASS_EFFECTS` list). `EffectDescriptor` has no `Default`, so each full literal gained
+  `lane_link: false` (19 literals in 18 files; the `..base` literals need no edit).
+- **1368a facts.** Gate-expander: the link words were already per-lane; the bank now sets each
+  lane's `link_max`/`link_avg` from its member's mode (`with_lane_links`). Compressor: the kernel's
+  `link: LinkMode` parameters became one `kernel::Links<L>` record (per-lane `linked`/`averaged`
+  masks plus the all-DualMono reduction that picks the #984 `abs` arm), built once at bind from
+  each member's mode. D5: a padded lane takes the first member's mode in both effects. A uniform
+  bank has the masks a single-mode instance had, so no bit moves.
+- **Forced edit outside the list.** `crates/conformance/src/randomized.rs`: its heterogeneous-cohort
+  draw treated a member at another link mode as another program; for a `lane_link` effect it is now
+  expected to bank.
