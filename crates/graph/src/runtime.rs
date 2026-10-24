@@ -1025,14 +1025,27 @@ pub(crate) struct LiveRoute {
     delayed: bool,
     /// The route's index in the plan's [`RouteActivity`]: canonical route-ID order.
     route: u32,
-    control: Box<crate::RouteControlLane>,
+    /// The route's live lane; `None` for a transition route (#1363 D2): a route a plan swap adds
+    /// that has no lane in this plan, bound live only so its fade-in can ramp it.
+    control: Option<Box<crate::RouteControlLane>>,
+    /// The fade-in a plan swap armed (#1363 D3), until it fires: the route then waits silent.
+    armed: Option<RouteArm>,
+}
+
+/// An armed route's fade-in (#1363 D3): the target and mute it fires to, and the fade's length.
+/// A record that arrives before the fire replaces the target and mute only.
+#[derive(Clone, Copy, Debug)]
+struct RouteArm {
+    target: [f32; 4],
+    mute: bool,
+    ramp_samples: u32,
 }
 
 impl LiveRoute {
     pub(crate) fn new(
         prepared: [f32; 4],
         mute: bool,
-        control: Box<crate::RouteControlLane>,
+        control: Option<Box<crate::RouteControlLane>>,
     ) -> Self {
         Self {
             ramp: IndexedRamp::settled(prepared),
@@ -1041,7 +1054,27 @@ impl LiveRoute {
             delayed: false,
             route: u32::MAX,
             control,
+            armed: None,
         }
+    }
+
+    /// Arm the fade-in of a route a plan swap adds during playback (#1363 D3), off the render
+    /// thread, before the plan is published: the route keeps its prepared target and mute to
+    /// fire to and waits settled at `[+0.0; 4]`, muted. A route the session mutes arms nothing.
+    /// Returns whether it armed.
+    pub(crate) fn arm_fade_in(&mut self, ramp_samples: u32) -> bool {
+        if self.mute || self.armed.is_some() {
+            return false;
+        }
+        self.armed = Some(RouteArm {
+            target: self.ramp.target,
+            mute: false,
+            ramp_samples,
+        });
+        self.ramp = IndexedRamp::settled([0.0; 4]);
+        self.position = 0;
+        self.mute = true;
+        true
     }
 
     /// #1347 D3: read the route's cell under the block's snapshot `S` and, if it holds a value not
@@ -1057,6 +1090,15 @@ impl LiveRoute {
     fn apply_pending(&mut self, snapshot: LiveSnapshot) -> usize {
         let mut applied = 0;
         if let Some(record) = self.read_record(snapshot) {
+            applied = 1;
+            // #1363 D3: an armed route keeps waiting silent; the record retargets its fire.
+            if let Some(arm) = self.armed.as_mut() {
+                arm.target = record.target();
+                arm.mute = record.mute();
+                #[cfg(any(test, feature = "test-support"))]
+                test_only_count_route_drained(self.route as usize, applied, snapshot);
+                return applied;
+            }
             self.ramp = IndexedRamp::new(
                 self.ramp.coefficients_at(self.position),
                 record.target(),
@@ -1064,18 +1106,34 @@ impl LiveRoute {
             );
             self.mute = record.mute();
             self.position = 0;
-            applied = 1;
         }
         #[cfg(any(test, feature = "test-support"))]
         test_only_count_route_drained(self.route as usize, applied, snapshot);
         applied
     }
 
+    /// Fire the armed fade-in at this block boundary (#1363 D3): from the coefficients the route
+    /// is at (`[+0.0; 4]`) to the armed target over the armed length, exactly the retarget a
+    /// live unmute record runs. The executor calls it before the route's op runs, so the block's
+    /// own live value drains after it. A route not armed is left alone. Render-thread code:
+    /// allocation-, lock- and syscall-free.
+    pub(crate) fn fire_fade_in(&mut self) {
+        if let Some(arm) = self.armed.take() {
+            self.ramp = IndexedRamp::new(
+                self.ramp.coefficients_at(self.position),
+                arm.target,
+                arm.ramp_samples,
+            );
+            self.mute = arm.mute;
+            self.position = 0;
+        }
+    }
+
     /// The cell's newest value not applied before, under `snapshot` (#1347 D3, #1312 D1, D2), the
     /// one read [`Self::apply_pending`] and [`Self::apply_pending_heard`] share.
     #[inline]
     fn read_record(&mut self, snapshot: LiveSnapshot) -> Option<crate::RouteControlRecord> {
-        let control = &mut *self.control;
+        let control = &mut **self.control.as_mut()?;
         if control.dirty.pending(&control.lane.dirty) & 1 == 0 {
             return None;
         }
@@ -4546,9 +4604,12 @@ impl NodeKind {
             }
             // The control lane's `superseded` counter is the host's, shared by every lane and
             // outliving the plan: not charged here (#1074).
-            Self::LiveRoute(route) => boxed(&**route)
-                .saturating_add(boxed(&*route.control))
-                .saturating_add(arc(&route.control.lane)),
+            // A transition route (#1363 D2) holds no lane.
+            Self::LiveRoute(route) => {
+                boxed(&**route).saturating_add(route.control.as_deref().map_or(0, |control| {
+                    boxed(control).saturating_add(arc(&control.lane))
+                }))
+            }
             Self::LiveFollowRoute(route) => boxed(&**route)
                 .saturating_add(boxed(&*route.control))
                 .saturating_add(arc(&route.control.lane))
@@ -6620,6 +6681,10 @@ fn carry_route(
     let (ramps, mute, follow) = match from {
         CarriedRoute::Six(from) => {
             from.apply_pending(LiveSnapshot::ALL);
+            // #1363: a fade-in armed in the displaced plan and not fired yet fires at the swap,
+            // so the successor never takes a route that waits for a fire it does not hold (the
+            // arm itself carries with #1877).
+            from.fire_fade_in();
             if let CarriedRoute::Six(into) = into {
                 into.adopt(from);
                 return false;
@@ -7206,6 +7271,29 @@ impl crate::runtime::Runtime {
                     || !is_follow_route_unit(&predecessor.units, step.predecessor)
                     || is_follow_route_unit(&self.units, step.successor))
         }) && slots.next().is_none()
+    }
+
+    /// Whether runtime unit `unit` holds a six-word live route's op (#1363 D3), the one kind a
+    /// route fade arm targets. Allocation-free.
+    pub(crate) fn has_six_word_route(&self, unit: u32) -> bool {
+        matches!(
+            self.units.get(unit as usize),
+            Some(RuntimeUnit::Op(op)) if matches!(op.kind, NodeKind::LiveRoute(_))
+        )
+    }
+
+    /// Arm the fade-in of the six-word live route in unit `unit` (#1363 D3,
+    /// [`LiveRoute::arm_fade_in`]), off the render thread. Returns whether it armed.
+    pub(crate) fn arm_route_fade_in(&mut self, unit: u32, ramp_samples: u32) -> bool {
+        live_route_mut(&mut self.units, unit).is_some_and(|live| live.arm_fade_in(ramp_samples))
+    }
+
+    /// Fire the armed fade-in of the six-word live route in unit `unit` (#1363 D3,
+    /// [`LiveRoute::fire_fade_in`]). Render-thread code: allocation-, lock- and syscall-free.
+    pub(crate) fn fire_route_fade_in(&mut self, unit: u32) {
+        if let Some(live) = live_route_mut(&mut self.units, unit) {
+            live.fire_fade_in();
+        }
     }
 
     /// Run the live-send section of a carry program at the swap block (#1284 D2, #1652 D3): for
@@ -7923,8 +8011,9 @@ pub(crate) struct RuntimeParts {
     /// node. Empty for a plan with no observation capacity, so `node_kind` hands out `None`.
     effect_observations: BTreeMap<crate::EffectNodeId, Box<ObservationLane>>,
     /// Issue #1220 D6: live-route lanes by route node, taken by `node_kind` for that route's op.
-    /// Empty for a plan without route controls, so every route binds `NodeKind::Route`.
-    route_controls: BTreeMap<GraphNodeId, Box<crate::RouteControlLane>>,
+    /// Empty for a plan without route controls, so every route binds `NodeKind::Route`. A
+    /// transition route (#1363 D2) has an entry with no lane: it binds live all the same.
+    route_controls: BTreeMap<GraphNodeId, Option<Box<crate::RouteControlLane>>>,
     /// #1652b: following-route lanes and their sources by route node, taken by `node_kind` for
     /// that route's op. Empty for a plan with no following route.
     follow_route_controls: BTreeMap<
@@ -8162,6 +8251,8 @@ impl RuntimeParts {
                 )))
             } else {
                 match self.route_controls.remove(node) {
+                    // #1363 D2: a transition route's entry holds no lane; it binds live all
+                    // the same, so its fade-in can ramp it, and it never folds.
                     None => NodeKind::Route(prepared),
                     Some(control) => NodeKind::LiveRoute(Box::new(LiveRoute::new(
                         prepared,
@@ -9136,7 +9227,7 @@ fn live_route_rows(
     units: &[RuntimeUnit],
     route_gates: &[(GraphNodeId, RouteGate)],
 ) -> Vec<crate::GraphLiveRoute> {
-    units
+    let mut rows = units
         .iter()
         .enumerate()
         .filter_map(|(unit, owner)| {
@@ -9160,7 +9251,10 @@ fn live_route_rows(
                 automated,
             })
         })
-        .collect()
+        .collect::<Vec<_>>();
+    // Exact length, so a plan's charge can name it (#1363 D2: one row per transition route).
+    rows.shrink_to_fit();
+    rows
 }
 
 /// Issue #1217 D5: the executor's [`RouteActivity`], or `None` when no route gate silences.
@@ -17371,13 +17465,13 @@ mod tests {
         let installed = executor
             .install_fade_arms(vec![
                 crate::GraphFadeArm {
-                    fader: fader("track00"),
+                    target: crate::GraphFadeTarget::Fader(fader("track00")),
                     source: Some(input),
                     delay_samples: 200,
                     ramp_samples: 64,
                 },
                 crate::GraphFadeArm {
-                    fader: fader("track01"),
+                    target: crate::GraphFadeTarget::Fader(fader("track01")),
                     source: None,
                     delay_samples: 0,
                     ramp_samples: 64,
@@ -18547,7 +18641,7 @@ mod follow_route_op_tests {
                 };
                 let (gate, pin) = RevisionGate::pair(0);
                 Self {
-                    route: Box::new(LiveRoute::new(prepared, mute, control)),
+                    route: Box::new(LiveRoute::new(prepared, mute, Some(control))),
                     producer,
                     gate,
                     pin,
@@ -18598,6 +18692,97 @@ mod follow_route_op_tests {
             let (mut left, mut right) = input(AFTER);
             route_mix_ramp_block::<FrameLane>(&mut left, &mut right, &ramp, BEFORE as u32);
             bits((&left, &right))
+        }
+
+        /// #1363 D3, the arm law: a record that an armed route reads before its fire replaces only
+        /// the target the fire goes to. The route stays silent (inactive, its ramp settled at
+        /// `[+0.0; 4]`) until the fire, which ramps from `[+0.0; 4]` to the record's target over the
+        /// armed length, not the record's own; its block is that ramp's, bit for bit.
+        ///
+        /// Test value: red if a live edit lifts the arm early (the record retargets the ramp and
+        /// the route mixes before its fire), if the fire forgets the record (it ramps to the
+        /// prepared target), or if it forgets a muting record's mute (the route mixes on).
+        #[test]
+        fn a_record_before_an_armed_routes_fire_retargets_the_fire_only() {
+            const ARMED: u32 = 64;
+            let mut route = Six::new(gated(OPEN, [false; 2]), false);
+            assert!(route.route.arm_fade_in(ARMED), "an open route arms");
+            let moved = gated(MOVED, [false; 2]);
+            route.write(moved, RECORD_RAMP);
+            let (mut left, mut right) = input(AFTER);
+            assert!(
+                !route.block(&mut left, &mut right),
+                "an armed route that read a record still waits silent"
+            );
+            assert_eq!(
+                route.route.ramp.coefficients_at(route.route.position),
+                [0.0; 4]
+            );
+            route.route.fire_fade_in();
+            let (mut left, mut right) = input(AFTER);
+            assert!(route.block(&mut left, &mut right), "the fired route mixes");
+            let (mut want_left, mut want_right) = input(AFTER);
+            route_mix_ramp_block::<FrameLane>(
+                &mut want_left,
+                &mut want_right,
+                &IndexedRamp::new([0.0; 4], moved, ARMED),
+                0,
+            );
+            assert_eq!(
+                bits((&left, &right)),
+                bits((&want_left, &want_right)),
+                "the fire ramps from rest to the record's target over the armed length"
+            );
+            // A muting record before the fire: the fire keeps the route muted, so once its ramp
+            // has run the route is inactive (it is never unmuted).
+            let mut muted = Six::new(gated(OPEN, [false; 2]), false);
+            assert!(muted.route.arm_fade_in(ARMED));
+            muted.revision += 1;
+            let record = RouteControlRecord::new([0.0; 4], true, RECORD_RAMP).expect("record");
+            muted
+                .producer
+                .write(muted.pin.stamp(muted.revision).expect("stamp"), record);
+            muted.pin.publish(&muted.gate, muted.revision);
+            let (mut left, mut right) = input(AFTER);
+            assert!(!muted.block(&mut left, &mut right), "it waits silent");
+            muted.route.fire_fade_in();
+            for _ in 0..2 {
+                let (mut left, mut right) = input(AFTER);
+                muted.block(&mut left, &mut right);
+            }
+            let (mut left, mut right) = input(AFTER);
+            assert!(
+                !muted.block(&mut left, &mut right),
+                "a route muted before its fire stays muted after it"
+            );
+        }
+
+        /// #1363: a route whose armed fade-in has not fired when a later swap displaces its plan
+        /// fires at that swap: the successor takes the fade's ramp from rest, so it never holds a
+        /// route that waits silent for a fire its own table does not hold.
+        ///
+        /// Test value: red if the carry copies the waiting route's silence into the successor,
+        /// which then stays silent for good (no successor entry fires it).
+        #[test]
+        fn an_armed_route_a_swap_displaces_fires_at_the_swap() {
+            let mut from = Six::new(gated(OPEN, [false; 2]), false);
+            assert!(from.route.arm_fade_in(RECORD_RAMP));
+            let mut into = Six::new(gated(OPEN, [false; 2]), false);
+            carry_route(
+                CarriedRoute::Six(&mut into.route),
+                CarriedRoute::Six(&mut from.route),
+                None,
+            );
+            let (mut left, mut right) = input(AFTER);
+            assert!(into.block(&mut left, &mut right), "the successor mixes");
+            let (mut want_left, mut want_right) = input(AFTER);
+            route_mix_ramp_block::<FrameLane>(
+                &mut want_left,
+                &mut want_right,
+                &IndexedRamp::new([0.0; 4], gated(OPEN, [false; 2]), RECORD_RAMP),
+                0,
+            );
+            assert_eq!(bits((&left, &right)), bits((&want_left, &want_right)));
         }
 
         /// Gate 4 (six -> seven, the rebuild adds an automated mute to the source). (a) With the
