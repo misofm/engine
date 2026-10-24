@@ -154,3 +154,62 @@ and #1534 gate 3's worklet commands.
 ## Supersedes and shrinks
 
 - None.
+
+## Decision record: slice #1585a (2026-10-24)
+
+Split by root (scope note, R1-R4 accepted): #1585a is the arm state in the slot and the browser
+deletion; #1585b is the tags (D4, D5, D7, gate 2, the hash re-pin). Amendments, in force for
+#1585a:
+
+- **R1.** `ObservationSlot` holds one eight-word seqlock record: five window words, then `armed`,
+  `arm_sample`, `arm_tag`. `publish` and `publish_arm` each take the writer's own words
+  (`PublishedWords::writer_words`, a plain writer-side read), change their part and publish all
+  eight. The slot grows 56 -> 80 bytes (allocation 72 -> 96), charged through
+  `observation_slot_retained_bytes()`.
+- **R2.** `ObservationTap` keeps `arm_sample` and `arm_tag`. `arm_prepared` publishes nothing;
+  the tap's first accumulated block publishes it armed at that block's first sample.
+  `disarm_all` publishes nothing. A disarm publishes `armed == false` at its block's first sample.
+- **D1/D3 in #1585a.** `Observe` carries `arm_tag: u64`; every writer passes `0`
+  (`try_push_observe`, `arm_prepared`). `ArmedTap` reads as `effect_compiler::ObservationArm`;
+  its tag is #1585b.
+- **R4, wider than filed.** Render is the one writer, so every read between a record's admission
+  and the block that drains it reports what render last applied, not only a prepared arm's read
+  between adoption and its first block. The browser's selected read reports a queued arm as
+  `Unarmed` (was `Pending`) and a queued re-arm as `Ready` with the previous arm's window (was
+  `Pending`). No meter byte moves: the meter fold runs in `process()` after the block's drain.
+  Gate 4's `selected_observation_reads_are_bounded_stable_and_non_consuming` therefore changes
+  those two assertions (and adds the `Pending` read after the arm's block); the other two gate-4
+  tests pass unchanged. Root to confirm.
+- **D6.** Deleted: `PlanShape::{observation_armed, observation_arm_samples,
+  observation_commanded, reader_slots}`, `note_observe`, `record_observe`, `carry_tap_state` and
+  its loop, the forward loop, `SessionState::observation_forwarded` and its accessor, and
+  `EffectObservationHandle::armed_taps` (its one reader was the browser). The bridge rows charge
+  the dense instance tables without the arm samples.
+- **Paths.** Beyond the scope note's list, compile-forced mechanical edits only: `arm_tag: 0` or
+  `..` at `Observe` sites in `effect-contract/src/symmetry.rs`, `host-core/src/limiter_linked_session.rs`,
+  `host-core/tests/{support/mod.rs,symmetry_witness.rs}`, `rack/tests/{lane_rest.rs,lane_swap.rs,live_control_bank.rs}`;
+  gate 3 extends the slot stress test where it lives, `crates/engine/tests/observation_transport.rs`.
+
+### Evidence
+
+- Gate 1: `render_publishes_each_taps_arm_state_on_every_leg` (host-core `effect_observation.rs`),
+  console bank, dynamic bank and per-node legs. Test value: red if the arm state is written
+  anywhere but render, if the record's drain does not publish it, or if a bank lane or the
+  per-node path publishes another sample than its block's. Red on: `arm` not publishing; `arm`
+  publishing `first_sample + 1`; the rack drain passing `first_sample + 1` to lanes 1..W.
+- Prepared arm (R2, R4): two assertions in `a_plan_replacement_keeps_the_subscriptions_the_host_armed`.
+  Red on: the first block not publishing the prepared arm; `arm_prepared` publishing off render.
+- Gate 3: `a_million_windows_are_read_whole_and_in_order` publishes window `n` then arm `n` and
+  reads `read_state`. Test value: red if a read pairs a window with another publication's arm
+  state. Red on `read_state` taking the arm words from a second read (3,902 / 7,971 / 20,561
+  mixed states in three runs).
+- Gate 5: the existing measured tests pass (`a_bus_observation_admits_and_renders_without_allocating`,
+  `bus_meters_render_and_poll_without_allocating`, `the_tap_swap_block_allocates_and_frees_nothing`);
+  `realtime-policy` ok.
+- Tests deleted: `the_browsers_armed_bits_are_the_mask_host_core_prepared` (#1679; the mask it
+  compares is gone) and `a_tap_command_admitted_at_sample_zero_survives_the_hand_over` (it
+  defended `observation_commanded` in the deleted hand-over; the render-side order of a carried
+  arm and the successor's disarm is #1280's `pending_observe_records_are_applied_at_the_carry`).
+- capi nine-track reference budgets: the fixture's EQs declare no tap, so only
+  `capi_retained_bytes` moves, 197,471 -> 197,447 (-24, the deleted forward `Vec`); every
+  ceiling stands.
