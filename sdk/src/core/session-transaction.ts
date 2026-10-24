@@ -12,6 +12,7 @@ import {
   f32,
   field,
   nested,
+  requireU32,
   requireU64,
   text,
   u16,
@@ -22,15 +23,29 @@ import { MisoUsageError } from "./errors.ts";
 import {
   SessionBuilder,
   builderContext,
+  normalizeConsoleEntries,
+  normalizeInsert,
+  normalizeInserts,
+  normalizeSidechain,
   normalizeSource,
   normalizeTrack,
+  quality,
   resolveLanes,
+  retargetInsert,
   stableId,
   trackSourceRef,
 } from "./session.ts";
 import type { ConsoleSlotEntry, ModelRecord, ModelValue, SourceEntry } from "./session.ts";
 import { CODE, fail, freeze } from "../internal/validation.ts";
-import type { SourceSpec, TrackSourceSpec, TrackSpec } from "./types.ts";
+import type { EffectId } from "../generated/catalog.ts";
+import type {
+  ConsoleEntrySpec,
+  EffectDecl,
+  SidechainSpec,
+  SourceSpec,
+  TrackSourceSpec,
+  TrackSpec,
+} from "./types.ts";
 
 /**
  * The SDK's encoder of structural session edits: a typed transaction builder over a base
@@ -57,6 +72,21 @@ import type { SourceSpec, TrackSourceSpec, TrackSpec } from "./types.ts";
  * `SET_CONTROL` queue does (#1563 D4). Live values are not edited here: a value is one
  * `SET_CONTROL` (decision 17).
  *
+ * # Strip edits
+ *
+ * The rack and effect edits address a strip -- a track, or a submix of the base session -- and
+ * its `inserts`, the only rack a strip edits: the engine refuses `builtins` (no effects) and
+ * `console` (session-level slots), so the methods take no rack name and always write `inserts`.
+ * An insert is named by its stable ID on the strip (`effect()`'s `slotId`), never by its native
+ * effect ID. The builder keeps each strip's working inserts, so a later edit sees an earlier one.
+ *
+ * `setTrackConsole` gives a strip its console entries after the console's slot set changed. The
+ * engine accepts it only after an earlier `SetConsole` of the same transaction changed the console
+ * (`session.edit.value_op_retired`, #1561 D3); a console knob's value is a `SET_CONTROL`. This
+ * builder has no `setConsole` yet (#1385), so `setTrackConsole` is refused here, after its
+ * arguments are validated, until a console-changing edit precedes it. It is the one method that
+ * takes `{ rampSamples }`, written as the optional `ramp_samples` field only when given.
+ *
  * `sdk/test/transaction-evals.mjs` compares these bytes to the codec's re-encoding of them and
  * the store's snapshot after them to a `SessionBuilder` declaring the result
  * (`hosts/host-web/examples/sdk_transaction_oracle.rs`).
@@ -69,6 +99,17 @@ const OP_SET_SOURCE_CONTENT = 0x0103;
 const OP_UPSERT_TRACK = 0x0200;
 const OP_REMOVE_TRACK = 0x0201;
 const OP_SET_TRACK_SOURCE_ASSIGNMENT = 0x0202;
+const OP_SET_TRACK_RACK = 0x0204;
+const OP_PUT_TRACK_EFFECT = 0x0205;
+const OP_REMOVE_TRACK_EFFECT = 0x0206;
+const OP_SET_TRACK_EFFECT_ORDER = 0x0207;
+const OP_SET_EFFECT_IDENTITY = 0x0208;
+const OP_SET_EFFECT_QUALITY = 0x0209;
+const OP_SET_EFFECT_SIDECHAIN = 0x020c;
+const OP_SET_TRACK_CONSOLE = 0x0211;
+
+/** `RackName::Inserts`'s wire code (`schema::parameter_rack_wire`). */
+const RACK_INSERTS = 2;
 
 // The protocol's enum codes: `SourceBitDepth::wire`, `enum_quality`, `enum_link`, `enum_tap`, and
 // `schema::parameter_{channel,unit}_wire`. Each is the token's 1-based declaration order.
@@ -111,7 +152,41 @@ export type SessionEditSpec =
     readonly kind: "setTrackSourceAssignment";
     readonly trackId: string;
     readonly source: TrackSourceSpec;
+  }
+  | { readonly kind: "setTrackRack"; readonly trackId: string; readonly inserts: readonly EffectDecl[] }
+  | {
+    readonly kind: "putTrackEffect";
+    readonly trackId: string;
+    readonly finalPosition: number;
+    readonly effect: EffectDecl;
+  }
+  | { readonly kind: "removeTrackEffect"; readonly trackId: string; readonly slotId: string }
+  | { readonly kind: "setTrackEffectOrder"; readonly trackId: string; readonly slotIds: readonly string[] }
+  | {
+    readonly kind: "setEffectIdentity";
+    readonly trackId: string;
+    readonly slotId: string;
+    readonly effectId: EffectId;
+  }
+  | {
+    readonly kind: "setEffectQuality";
+    readonly trackId: string;
+    readonly slotId: string;
+    readonly quality: "normal";
+  }
+  | {
+    readonly kind: "setEffectSidechain";
+    readonly trackId: string;
+    readonly slotId: string;
+    readonly sidechain: SidechainSpec | null;
+  }
+  | {
+    readonly kind: "setTrackConsole";
+    readonly trackId: string;
+    readonly console: readonly ConsoleEntrySpec[];
+    readonly rampSamples?: number;
   };
+
 
 /**
  * A built session transaction: its edits in order and their encoding, without the request ID and
@@ -142,6 +217,13 @@ interface BuilderState {
   readonly sources: ReadonlyMap<string, SourceEntry>;
   /** The track IDs after the edits so far. */
   readonly tracks: ReadonlySet<string>;
+  /** Each strip's (track's or submix's) insert records after the edits so far, by strip ID. */
+  readonly strips: ReadonlyMap<string, readonly ModelRecord[]>;
+  /**
+   * Whether an earlier edit changed the console's slot set, which opens `setTrackConsole`.
+   * Always false until the builder can edit the console (#1385).
+   */
+  readonly consoleChanged: boolean;
   readonly edits: readonly { readonly spec: SessionEditSpec; readonly bytes: Uint8Array }[];
 }
 
@@ -224,7 +306,7 @@ export class TransactionBuilder {
       { kind: "upsertTrack", trackId, track: { ...spec } },
       OP_UPSERT_TRACK,
       [message(1, trackFields(record))],
-      { tracks },
+      { tracks, strips: this.#withInserts(trackId, records((record.inserts as ModelRecord).effects)) },
     );
   }
 
@@ -233,7 +315,9 @@ export class TransactionBuilder {
     this.#declaredTrack(trackId, `removeTrack("${String(trackId)}")`);
     const tracks = new Set(this.#state.tracks);
     tracks.delete(trackId);
-    return this.#next({ kind: "removeTrack", trackId }, OP_REMOVE_TRACK, [utf8(1, trackId)], { tracks });
+    const strips = new Map(this.#state.strips);
+    strips.delete(trackId);
+    return this.#next({ kind: "removeTrack", trackId }, OP_REMOVE_TRACK, [utf8(1, trackId)], { tracks, strips });
   }
 
   /**
@@ -257,6 +341,190 @@ export class TransactionBuilder {
       },
       OP_SET_TRACK_SOURCE_ASSIGNMENT,
       [utf8(1, trackId), utf8(2, reference.id), byte(3, lanes.left), byte(4, lanes.right)],
+      {},
+    );
+  }
+
+  /** Replace a strip's whole `inserts` rack, validated as a track's `inserts` are. */
+  setTrackRack(trackId: string, inserts: readonly EffectDecl[]): TransactionBuilder {
+    const path = `setTrackRack("${String(trackId)}")`;
+    this.#strip(trackId, path);
+    if (!Array.isArray(inserts)) fail(`${path}.inserts`, "expected an array of effect() declarations");
+    const effects = normalizeInserts(inserts, `${path}.inserts`);
+    return this.#next(
+      { kind: "setTrackRack", trackId, inserts: [...inserts] },
+      OP_SET_TRACK_RACK,
+      [
+        utf8(1, trackId),
+        byte(2, RACK_INSERTS),
+        message(3, effects.map((effect) => message(1, effectFields(effect)))),
+      ],
+      { strips: this.#withInserts(trackId, effects) },
+    );
+  }
+
+  /**
+   * Insert an effect into a strip's `inserts` at `finalPosition`, after removing the insert with
+   * the same ID if there is one (a move or a replacement). The effect must carry its `slotId`: a
+   * position-derived ID could name, and so replace, another insert.
+   */
+  putTrackEffect(trackId: string, finalPosition: number, effect: EffectDecl): TransactionBuilder {
+    const path = `putTrackEffect("${String(trackId)}")`;
+    const current = this.#strip(trackId, path);
+    if (effect === null || typeof effect !== "object") {
+      fail(`${path}.effect`, "expected an effect declaration from effect()");
+    }
+    if (effect.slotId === undefined) {
+      fail(`${path}.effect.slotId`, "a put effect names its insert ID with effect(..., { slotId })");
+    }
+    const insert = normalizeInsert(effect, effect.slotId, `${path}.effect`);
+    const position = requireU32(finalPosition, `${path}.finalPosition`);
+    const remaining = current.filter((entry) => entry.id !== insert.id);
+    if (position > remaining.length) {
+      fail(
+        `${path}.finalPosition`,
+        `${position} is past the end of the ${remaining.length} other inserts`,
+        "session.edit.invalid_final_position",
+      );
+    }
+    const effects = [...remaining.slice(0, position), insert, ...remaining.slice(position)];
+    return this.#next(
+      { kind: "putTrackEffect", trackId, finalPosition: position, effect },
+      OP_PUT_TRACK_EFFECT,
+      [utf8(1, trackId), byte(2, RACK_INSERTS), word(3, position), message(4, effectFields(insert))],
+      { strips: this.#withInserts(trackId, effects) },
+    );
+  }
+
+  /** Remove one insert from a strip by its ID. */
+  removeTrackEffect(trackId: string, slotId: string): TransactionBuilder {
+    const path = `removeTrackEffect("${String(trackId)}")`;
+    const current = this.#strip(trackId, path);
+    this.#insert(current, slotId, path);
+    return this.#next(
+      { kind: "removeTrackEffect", trackId, slotId },
+      OP_REMOVE_TRACK_EFFECT,
+      [utf8(1, trackId), byte(2, RACK_INSERTS), utf8(3, slotId)],
+      { strips: this.#withInserts(trackId, current.filter((entry) => entry.id !== slotId)) },
+    );
+  }
+
+  /** Reorder a strip's inserts: `slotIds` is an exact permutation of its insert IDs. */
+  setTrackEffectOrder(trackId: string, slotIds: readonly string[]): TransactionBuilder {
+    const path = `setTrackEffectOrder("${String(trackId)}")`;
+    const current = this.#strip(trackId, path);
+    if (!Array.isArray(slotIds)) fail(`${path}.slotIds`, "expected an array of insert IDs");
+    const ids: string[] = slotIds.map((id, index) => stableId(id, `${path}.slotIds[${index}]`));
+    const byId = new Map(current.map((entry) => [entry.id, entry] as const));
+    if (ids.length !== current.length || new Set(ids).size !== ids.length || ids.some((id) => !byId.has(id))) {
+      fail(
+        `${path}.slotIds`,
+        `expected each of the strip's inserts exactly once: ${current.map((entry) => String(entry.id)).join(", ") || "none"}`,
+        "session.edit.invalid_effect_order",
+      );
+    }
+    return this.#next(
+      { kind: "setTrackEffectOrder", trackId, slotIds: ids },
+      OP_SET_TRACK_EFFECT_ORDER,
+      [utf8(1, trackId), byte(2, RACK_INSERTS), ...ids.map((id) => utf8(3, id))],
+      { strips: this.#withInserts(trackId, ids.map((id) => byId.get(id) as ModelRecord)) },
+    );
+  }
+
+  /**
+   * Run another native effect in an insert, keeping its ID, bypass, link mode, parameters and
+   * sidechain. Refused unless each of those is valid for the new effect.
+   */
+  setEffectIdentity(trackId: string, slotId: string, effectId: EffectId): TransactionBuilder {
+    const path = `setEffectIdentity("${String(trackId)}", "${String(slotId)}")`;
+    const current = this.#strip(trackId, path);
+    const insert = retargetInsert(this.#insert(current, slotId, path), effectId, `${path}.effectId`);
+    return this.#effectEdit(
+      { kind: "setEffectIdentity", trackId, slotId, effectId },
+      OP_SET_EFFECT_IDENTITY,
+      current,
+      insert,
+      message(4, identityFields(insert)),
+    );
+  }
+
+  /** Set an insert's quality. Launch native effects publish only `normal`. */
+  setEffectQuality(trackId: string, slotId: string, value: "normal"): TransactionBuilder {
+    const path = `setEffectQuality("${String(trackId)}", "${String(slotId)}")`;
+    const current = this.#strip(trackId, path);
+    const found = this.#insert(current, slotId, path);
+    const normalized = quality(value, `${path}.quality`);
+    const insert = freeze({ ...found, quality: normalized });
+    return this.#effectEdit(
+      { kind: "setEffectQuality", trackId, slotId, quality: normalized },
+      OP_SET_EFFECT_QUALITY,
+      current,
+      insert,
+      code(4, QUALITY_CODES, normalized),
+    );
+  }
+
+  /** Route an insert's sidechain, as `effect()`'s `sidechain` option, or clear it with `null`. */
+  setEffectSidechain(trackId: string, slotId: string, sidechain: SidechainSpec | null): TransactionBuilder {
+    const path = `setEffectSidechain("${String(trackId)}", "${String(slotId)}")`;
+    const current = this.#strip(trackId, path);
+    const found = this.#insert(current, slotId, path);
+    const effectId = String(record(found.identity).effect_id);
+    const normalized = sidechain === null
+      ? freeze({ kind: "none" })
+      : normalizeSidechain(effectId, sidechain, `${path}.sidechain`);
+    const insert = freeze({ ...found, sidechain: normalized });
+    return this.#effectEdit(
+      { kind: "setEffectSidechain", trackId, slotId, sidechain: sidechain === null ? null : { ...sidechain } },
+      OP_SET_EFFECT_SIDECHAIN,
+      current,
+      insert,
+      message(4, sidechainFields(normalized)),
+    );
+  }
+
+  /**
+   * Give a strip its console entries, one per slot in slot order, after an earlier edit of this
+   * transaction changed the console's slot set. Without one the engine refuses it
+   * (`session.edit.value_op_retired`), and so does this builder: a console knob's value is a
+   * `SET_CONTROL`. `rampSamples`, when given, is the edit's own ramp length: an integer in
+   * `[0, 2^32 - 1]`, `0` a step; absent is the session's default ramp. The engine refuses a length
+   * above one second at the session's rate.
+   */
+  setTrackConsole(
+    trackId: string,
+    console: readonly ConsoleEntrySpec[],
+    options: { readonly rampSamples?: number } = {},
+  ): TransactionBuilder {
+    const path = `setTrackConsole("${String(trackId)}")`;
+    this.#strip(trackId, path);
+    if (!Array.isArray(console)) fail(`${path}.console`, "expected an array of console entries in slot order");
+    const entries = normalizeConsoleEntries(console, this.#state.slots, `${path}.console`);
+    if (options === null || typeof options !== "object") fail(`${path}.options`, "expected { rampSamples? }");
+    const rampSamples = options.rampSamples === undefined
+      ? undefined
+      : requireU32(options.rampSamples, `${path}.rampSamples`);
+    if (!this.#state.consoleChanged) {
+      fail(
+        path,
+        "a strip's console entries change only after the same transaction changes the console's "
+          + "slots; set a console knob with SET_CONTROL",
+        "session.edit.value_op_retired",
+      );
+    }
+    return this.#next(
+      {
+        kind: "setTrackConsole",
+        trackId,
+        console: [...console],
+        ...(rampSamples === undefined ? {} : { rampSamples }),
+      },
+      OP_SET_TRACK_CONSOLE,
+      [
+        utf8(1, trackId),
+        ...entries.map((entry) => message(2, consoleEntryFields(entry))),
+        ...(rampSamples === undefined ? [] : [field(3, WIRE_U32, false, u32(rampSamples))]),
+      ],
       {},
     );
   }
@@ -286,11 +554,50 @@ export class TransactionBuilder {
     }
   }
 
+  /** A declared strip's working inserts: a track's, or a base submix's. */
+  #strip(trackId: string, path: string): readonly ModelRecord[] {
+    const inserts = typeof trackId === "string" ? this.#state.strips.get(trackId) : undefined;
+    if (inserts === undefined) {
+      fail(`${path}.id`, `'${String(trackId)}' is not a declared track or submix`, CODE.missingEntity);
+    }
+    return inserts;
+  }
+
+  #insert(inserts: readonly ModelRecord[], slotId: string, path: string): ModelRecord {
+    const found = typeof slotId === "string" ? inserts.find((entry) => entry.id === slotId) : undefined;
+    if (found === undefined) {
+      fail(`${path}.slotId`, `'${String(slotId)}' is not an insert of this strip`, "session.edit.not_found");
+    }
+    return found;
+  }
+
+  #withInserts(trackId: string, inserts: readonly ModelRecord[]): ReadonlyMap<string, readonly ModelRecord[]> {
+    const strips = new Map(this.#state.strips);
+    strips.set(trackId, Object.freeze([...inserts]));
+    return strips;
+  }
+
+  /** `SetEffectIdentity`, `SetEffectQuality`, `SetEffectSidechain`: the prefix, then `value`. */
+  #effectEdit(
+    spec: Extract<SessionEditSpec, { readonly slotId: string }>,
+    opcode: number,
+    current: readonly ModelRecord[],
+    insert: ModelRecord,
+    value: Uint8Array,
+  ): TransactionBuilder {
+    return this.#next(
+      spec,
+      opcode,
+      [utf8(1, spec.trackId), byte(2, RACK_INSERTS), utf8(3, spec.slotId), value],
+      { strips: this.#withInserts(spec.trackId, current.map((entry) => (entry.id === insert.id ? insert : entry))) },
+    );
+  }
+
   #next(
     spec: SessionEditSpec,
     opcode: number,
     payload: readonly Uint8Array[],
-    update: Partial<Pick<BuilderState, "sources" | "tracks">>,
+    update: Partial<Pick<BuilderState, "sources" | "tracks" | "strips">>,
   ): TransactionBuilder {
     const bytes = nested(1, true, [field(1, WIRE_U16, true, u16(opcode)), nested(2, true, payload)]);
     return new TransactionBuilder(Object.freeze({
@@ -313,12 +620,21 @@ export function transaction(base: SessionBuilder): TransactionBuilder {
     throw new MisoUsageError("transaction() takes the SessionBuilder of the session it edits");
   }
   const context = builderContext(base);
+  const model = base.toJSON();
+  const strips = new Map<string, readonly ModelRecord[]>(
+    [...model.tracks, ...model.submixes].map((strip) => [
+      String(strip.id),
+      records(record(strip.inserts).effects),
+    ] as const),
+  );
   return new TransactionBuilder(Object.freeze({
     sampleRateHz: context.sampleRateHz,
     slots: context.slots,
     otherGraphIds: context.otherGraphIds,
     sources: new Map(context.sources.map((entry) => [entry.id, entry] as const)),
     tracks: new Set(context.tracks.map((entry) => entry.id)),
+    strips,
+    consoleChanged: false,
     edits: Object.freeze([]),
   }));
 }
@@ -428,16 +744,20 @@ function builtinsFields(builtins: ModelRecord): Uint8Array[] {
 }
 
 function effectFields(effect: ModelRecord): Uint8Array[] {
-  const identity = record(effect.identity);
   return [
     utf8(1, effect.id),
-    message(2, [byte(1, IDENTITY_NATIVE), utf8(2, identity.effect_id)]),
+    message(2, identityFields(effect)),
     code(3, QUALITY_CODES, effect.quality),
     boolean(4, effect.bypass),
     code(5, LINK_MODE_CODES, effect.link_mode),
     ...records(effect.params).map((param) => message(6, paramFields(param))),
     message(7, sidechainFields(record(effect.sidechain))),
   ];
+}
+
+/** `tx_identity`: a launch insert is always a native effect. */
+function identityFields(effect: ModelRecord): Uint8Array[] {
+  return [byte(1, IDENTITY_NATIVE), utf8(2, record(effect.identity).effect_id)];
 }
 
 function paramFields(param: ModelRecord): Uint8Array[] {
