@@ -599,6 +599,14 @@ sealed records under `artifacts/` keep every plumbing number taken before the re
 reduction that job 3's fold removed from every banked row — and they are history, not a standing
 row.
 
+**Note, 2026-10-24 (issue #965).** Issue #965 fed every console row through a prepared source set
+and retired `sixty_four_track_gain_pan_only`, the bound-feed twin of `gain_pan_ring` (a processor
+per track input, which no host binds). The present-tense claims about `gain_pan_only` below and
+above in this section (the identity pair and the shared 22-lane-op inventory, ~574-585, and the
+undeclared control, ~603) no longer hold for that row: `sixty_four_track_gain_pan_ring` now holds
+them, and the undeclared 47-lane-op control is `sixty_four_track_builtins_only −
+sixty_four_track_gain_pan_ring`.
+
 **The control that does subtract cleanly** stays available and undeclared:
 `sixty_four_track_builtins_only − sixty_four_track_gain_pan_only` is 69 − 22 = 47 lane-ops (61
 under issue #1328's amendment A8), the two 24-op SVF sections less the single `add(+0.0)` the elided run composes to, over two rows that

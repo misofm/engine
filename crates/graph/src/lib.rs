@@ -2234,6 +2234,22 @@ pub trait GraphPreparedBuiltinBankProcessor: Send + Any {
     fn advance_builtin_clocks(&mut self, lanes_mask: u32, frames: u32) {
         let _ = (lanes_mask, frames);
     }
+    /// Arm the fade-in of fader lane `lane`, a strip a plan swap adds during playback (issue #1288
+    /// D2): each channel the session does not mute becomes a settled mute that
+    /// [`Self::fire_fade_in`] unmutes. Called by [`install_fade_arms`], off the render thread,
+    /// before the plan is published. Returns whether any channel was armed; the default arms
+    /// nothing.
+    fn arm_fade_in(&mut self, lane: usize) -> bool {
+        let _ = lane;
+        false
+    }
+    /// Fire lane `lane`'s armed fade-in over `ramp_samples` at this block boundary (issue #1288
+    /// D3): the executor calls it before the lane's unit runs, so the block's own live values
+    /// drain after it. Render-thread code: allocation-, lock- and syscall-free and bounded. The
+    /// default does nothing.
+    fn fire_fade_in(&mut self, lane: usize, ramp_samples: u32) {
+        let _ = (lane, ramp_samples);
+    }
     /// Take the floored input arrival `a(n)` of each member, in lane order (#1647a, R17-2):
     /// `arrivals[l]` is lane `l`'s, and a lane past the slice is padding. The graph compiler calls
     /// it once, off the render thread, at the end of `compile_with_builtins`, from
@@ -3959,6 +3975,18 @@ struct GraphExecutor {
     /// The plan's jump-length cell reader (#1639 D2), attached after bind by
     /// [`attach_jump_lengths`]; `None` for a plan with no cell.
     jump_lengths: Option<Box<JumpLengthReader>>,
+    /// The fade-in arms of the strips this plan adds during playback (issue #1288 D3), installed
+    /// before publication by [`install_fade_arms`]; empty (and never allocated) when none.
+    fade_arms: Box<[FadeArm]>,
+    /// How many of [`Self::fade_arms`] have not fired: render tests this one integer per block.
+    fade_arms_pending: u32,
+    /// The fade-arm section of the hand-over (issue #1392 D3); empty (and never allocated) when
+    /// no arm carries.
+    fade_arm_carry: Box<[GraphFadeArmPair]>,
+    /// One flag per entry of [`Self::fade_arms`], set by render when the entry is `Done` (issue
+    /// #1392, root ruling of attempt 2), shared with the plan's inventory so a successor drops a
+    /// fired arm's row instead of carrying it.
+    fade_fired: GraphFadeArmWatch,
 }
 
 /// Next graph executor identity; identities start at 1, so zero never names a plan.
@@ -4197,6 +4225,340 @@ pub fn install_builtin_strip_carry(
     moves.sort_unstable_by_key(|step| (step.predecessor, step.owner));
     executor.carry_strips = moves.into_boxed_slice();
     Ok(())
+}
+
+/// One strip a plan swap adds during playback, whose fader lane fades in from its first played
+/// block (issue #1288 D1-D5).
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct GraphFadeArm {
+    /// The strip's fader lane in the plan the arm is installed in.
+    pub fader: GraphLaneLocation,
+    /// The strip's input node when it is a track that reads a source claim; `None` for a submix
+    /// (or a track the source set does not claim), whose fade waits for no source.
+    pub source: Option<GraphNodeId>,
+    /// `D`: the samples from the strip's input to its fader that start at rest (latent nodes and
+    /// compensation lines), which emit zeros once the source plays.
+    pub delay_samples: u32,
+    /// The fade's length: the session mute ramp.
+    pub ramp_samples: u32,
+}
+
+/// Where one installed fade arm is (issue #1288 D3).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum FadeArmState {
+    /// The source has not played a block in this plan yet.
+    Waiting,
+    /// The fade fires at the first block that starts at or after this sample.
+    FireAt(u64),
+    /// Fired.
+    Done,
+}
+
+/// One installed fade arm (issue #1288 D3): plain data, sized at installation.
+#[derive(Clone, Copy, Debug)]
+struct FadeArm {
+    fader: GraphLaneLocation,
+    /// The source-set claim index the fade waits for; `None` fires on the first block.
+    claim: Option<usize>,
+    delay_samples: u32,
+    ramp_samples: u32,
+    state: FadeArmState,
+}
+
+/// The bytes [`install_fade_arms`] and [`install_fade_arm_carry`] retain for a table of `arms`
+/// arms and `pairs` carried ones, for the plan's resource charge (issues #1288 D7, #1392 D8);
+/// `None` on overflow.
+#[must_use]
+pub fn fade_arm_table_bytes(arms: usize, pairs: usize) -> Option<u64> {
+    arms.checked_mul(
+        core::mem::size_of::<FadeArm>() + core::mem::size_of::<core::sync::atomic::AtomicBool>(),
+    )
+    .and_then(|bytes| {
+        pairs
+            .checked_mul(core::mem::size_of::<GraphFadeArmPair>())
+            .and_then(|pair_bytes| bytes.checked_add(pair_bytes))
+    })
+    // The watch's `Arc` header (issue #1392).
+    .and_then(|bytes| bytes.checked_add(if arms == 0 { 0 } else { WATCH_HEADER_BYTES }))
+    .and_then(|bytes| u64::try_from(bytes).ok())
+}
+
+/// Arm the fade-in of each strip in `arms` and install the table this plan fires them from
+/// (issue #1288 D2, D3), off the render thread, before publication; it replaces any earlier
+/// table. Each lane is armed now, so the plan's first block already renders it muted. A strip
+/// the session mutes on both channels arms nothing and gets no entry. Returns, for each arm in
+/// order, the index of its entry in the table, or `None` when it armed nothing: the index a
+/// successor's [`GraphFadeArmPair::predecessor`] names (#1392); and the watch render sets each
+/// entry's flag in when it fires.
+///
+/// A source node that is not one of the source set's claims, and every source of a driver that
+/// does not lend its played planes, waits for nothing: that fade fires at the first block.
+///
+/// Refused, arming nothing, when the plan is not a graph plan, a fader location is not a
+/// populated lane of a fader bank, or a location repeats.
+pub fn install_fade_arms(
+    plan: &mut PreparedRenderPlan,
+    arms: Vec<GraphFadeArm>,
+) -> Result<(Vec<Option<u32>>, GraphFadeArmWatch), GraphCarryInstallError> {
+    plan.executor_any_mut()
+        .and_then(|any| any.downcast_mut::<GraphExecutor>())
+        .ok_or(GraphCarryInstallError::NotAGraphPlan)?
+        .install_fade_arms(arms)
+}
+
+impl GraphExecutor {
+    /// [`install_fade_arms`] on a bound executor.
+    fn install_fade_arms(
+        &mut self,
+        arms: Vec<GraphFadeArm>,
+    ) -> Result<(Vec<Option<u32>>, GraphFadeArmWatch), GraphCarryInstallError> {
+        for (index, arm) in arms.iter().enumerate() {
+            if !self
+                .runtime
+                .has_strip_lane(BuiltinStripOwner::Fader, arm.fader)
+            {
+                return Err(GraphCarryInstallError::StripLaneOutOfRange);
+            }
+            if arms[..index]
+                .iter()
+                .any(|earlier| earlier.fader == arm.fader)
+            {
+                return Err(GraphCarryInstallError::DuplicateStripLane);
+            }
+        }
+        let lends_planes = self
+            .source_set
+            .as_ref()
+            .is_some_and(|set| set.driver.provides_played_planes());
+        let mut table = Vec::with_capacity(arms.len());
+        let mut entries = Vec::with_capacity(arms.len());
+        for arm in arms {
+            let armed = runtime::strip_lane_mut(
+                &mut self.runtime.units,
+                BuiltinStripOwner::Fader,
+                arm.fader,
+            )
+            .and_then(|(chain, slot, lane)| {
+                runtime::builtin_processor_mut(chain, slot).map(|processor| (processor, lane))
+            })
+            .is_some_and(|(processor, lane)| processor.arm_fade_in(lane));
+            if !armed {
+                entries.push(None);
+                continue;
+            }
+            entries.push(u32::try_from(table.len()).ok());
+            let claim = arm
+                .source
+                .as_ref()
+                .filter(|_| lends_planes)
+                .and_then(|node| {
+                    self.source_set
+                        .as_ref()
+                        .and_then(|set| set.claims().iter().position(|claim| claim.node == *node))
+                });
+            table.push(FadeArm {
+                fader: arm.fader,
+                claim,
+                delay_samples: arm.delay_samples,
+                ramp_samples: arm.ramp_samples,
+                state: FadeArmState::Waiting,
+            });
+        }
+        self.fade_arms_pending = u32::try_from(table.len()).unwrap_or(u32::MAX);
+        self.fade_fired = GraphFadeArmWatch::new(table.len());
+        self.fade_arms = table.into_boxed_slice();
+        Ok((entries, self.fade_fired.clone()))
+    }
+
+    /// [`install_fade_arm_carry`] on a bound executor.
+    fn install_fade_arm_carry(
+        &mut self,
+        pairs: Vec<GraphFadeArmPair>,
+    ) -> Result<(), GraphCarryInstallError> {
+        if self.carry.is_none() {
+            return Err(GraphCarryInstallError::NoStripCarryProgram);
+        }
+        for (index, pair) in pairs.iter().enumerate() {
+            if pair.successor as usize >= self.fade_arms.len() {
+                return Err(GraphCarryInstallError::StripLaneOutOfRange);
+            }
+            if pairs[..index].iter().any(|earlier| {
+                earlier.successor == pair.successor || earlier.predecessor == pair.predecessor
+            }) {
+                return Err(GraphCarryInstallError::DuplicateStripLane);
+            }
+        }
+        self.fade_arm_carry = pairs.into_boxed_slice();
+        Ok(())
+    }
+}
+
+/// Which entries of a plan's fade table have fired (issue #1392, root ruling of attempt 2): one
+/// flag per entry, set by render (a release store, no lock) and read by the control thread, which
+/// drops a fired arm's inventory row so a successor neither carries nor re-arms it. A flag read
+/// clear while render fires the entry only costs a re-armed entry that its carry copies `Done`.
+#[derive(Clone, Debug, Default)]
+pub struct GraphFadeArmWatch(std::sync::Arc<[core::sync::atomic::AtomicBool]>);
+
+impl GraphFadeArmWatch {
+    fn new(entries: usize) -> Self {
+        Self(
+            (0..entries)
+                .map(|_| core::sync::atomic::AtomicBool::new(false))
+                .collect(),
+        )
+    }
+
+    // REALTIME_POLICY_BEGIN
+    /// Mark `entry` fired. Render-thread code: one atomic store.
+    fn set(&self, entry: usize) {
+        if let Some(flag) = self.0.get(entry) {
+            flag.store(true, core::sync::atomic::Ordering::Release);
+        }
+    }
+    // REALTIME_POLICY_END
+
+    /// Whether `entry` has fired; `false` past the table.
+    #[must_use]
+    pub fn fired(&self, entry: u32) -> bool {
+        self.0
+            .get(entry as usize)
+            .is_some_and(|flag| flag.load(core::sync::atomic::Ordering::Acquire))
+    }
+
+    /// Heap bytes the watch holds: its flags and the shared allocation's two reference counts;
+    /// none for the empty watch of a plan with no arm.
+    #[must_use]
+    pub fn heap_bytes(&self) -> usize {
+        match self.0.len() {
+            0 => 0,
+            _ => {
+                core::mem::size_of_val::<[core::sync::atomic::AtomicBool]>(&self.0)
+                    + WATCH_HEADER_BYTES
+            }
+        }
+    }
+}
+
+/// The strong and weak counts at the head of an `Arc` allocation.
+const WATCH_HEADER_BYTES: usize = 2 * core::mem::size_of::<usize>();
+
+/// Two watches are equal when they are one table.
+impl PartialEq for GraphFadeArmWatch {
+    fn eq(&self, other: &Self) -> bool {
+        std::sync::Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+
+impl Eq for GraphFadeArmWatch {}
+
+/// One fade arm a successor takes from the plan it displaces (issue #1392 D3): entry
+/// `predecessor` of that plan's table hands its render state to entry `successor` of this one.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct GraphFadeArmPair {
+    /// The entry in this plan's table, as [`install_fade_arms`] returned it.
+    pub successor: u32,
+    /// The entry in the displaced plan's table, as its own [`install_fade_arms`] returned it.
+    pub predecessor: u32,
+}
+
+/// Install the fade-arm section of the hand-over (issue #1392 D3), after the plan's
+/// [`install_fade_arms`] and its [`GraphCarryProgram`]: at the swap block each pair's successor
+/// entry takes its predecessor entry's state, so a waiting fade keeps waiting with its
+/// predecessor's progress, a scheduled one keeps its sample, and a fired one stays fired.
+///
+/// Refused, installing nothing, when the plan is not a graph plan, has no carry program, a
+/// successor entry is past the table, or an entry repeats. A predecessor entry past that plan's
+/// table is skipped at the swap block (its successor entry waits afresh).
+pub fn install_fade_arm_carry(
+    plan: &mut PreparedRenderPlan,
+    pairs: Vec<GraphFadeArmPair>,
+) -> Result<(), GraphCarryInstallError> {
+    plan.executor_any_mut()
+        .and_then(|any| any.downcast_mut::<GraphExecutor>())
+        .ok_or(GraphCarryInstallError::NotAGraphPlan)?
+        .install_fade_arm_carry(pairs)
+}
+
+// REALTIME_POLICY_BEGIN
+/// Copy each carried fade arm's state from the displaced plan's table (issue #1392 D3, D8): a
+/// copied `Done` leaves the pending count. Bounded by `pairs`; allocation-free.
+fn carry_fade_arms(
+    arms: &mut [FadeArm],
+    pending: &mut u32,
+    fired: &GraphFadeArmWatch,
+    predecessor: &[FadeArm],
+    pairs: &[GraphFadeArmPair],
+) {
+    for pair in pairs {
+        let (Some(own), Some(from)) = (
+            arms.get_mut(pair.successor as usize),
+            predecessor.get(pair.predecessor as usize),
+        ) else {
+            continue;
+        };
+        if own.state != FadeArmState::Done && from.state == FadeArmState::Done {
+            *pending = pending.saturating_sub(1);
+            fired.set(pair.successor as usize);
+        }
+        own.state = from.state;
+    }
+}
+// REALTIME_POLICY_END
+
+// REALTIME_POLICY_BEGIN
+/// Advance every pending fade arm at the block that starts at `block_start` (issue #1288 D3):
+/// a waiting arm whose source played this block (or that waits for none) is scheduled
+/// `delay_samples` later, and an arm whose sample has come fires its lane's fade-in. Bounded by
+/// the table; allocation-free.
+fn step_fade_arms(
+    runtime: &mut runtime::Runtime,
+    arms: &mut [FadeArm],
+    pending: &mut u32,
+    fired: &GraphFadeArmWatch,
+    block_start: u64,
+    sources: Option<&dyn GraphSourcePlanes>,
+) {
+    for (entry, arm) in arms.iter_mut().enumerate() {
+        if arm.state == FadeArmState::Waiting {
+            let played = arm
+                .claim
+                .is_none_or(|claim| sources.is_some_and(|set| set.played_planes(claim).is_some()));
+            if played {
+                arm.state =
+                    FadeArmState::FireAt(block_start.saturating_add(u64::from(arm.delay_samples)));
+            }
+        }
+        if let FadeArmState::FireAt(at) = arm.state
+            && at <= block_start
+        {
+            if let Some((chain, slot, lane)) =
+                runtime::strip_lane_mut(&mut runtime.units, BuiltinStripOwner::Fader, arm.fader)
+                && let Some(processor) = runtime::builtin_processor_mut(chain, slot)
+            {
+                processor.fire_fade_in(lane, arm.ramp_samples);
+            }
+            arm.state = FadeArmState::Done;
+            *pending = pending.saturating_sub(1);
+            fired.set(entry);
+        }
+    }
+}
+// REALTIME_POLICY_END
+
+/// Test-only (issue #1288): `(delay_samples, ramp_samples)` of each installed fade arm, in
+/// installation order; `None` for any other plan.
+#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
+pub fn test_only_fade_arms(plan: &mut PreparedRenderPlan) -> Option<Vec<(u32, u32)>> {
+    let executor = plan.executor_any_mut()?.downcast_mut::<GraphExecutor>()?;
+    Some(
+        executor
+            .fade_arms
+            .iter()
+            .map(|arm| (arm.delay_samples, arm.ramp_samples))
+            .collect(),
+    )
 }
 
 pub use rack::{EffectLaneKind, EffectLaneLayout};
@@ -5430,6 +5792,10 @@ impl GraphExecutor {
             bind_identities,
             live_snapshot: None,
             jump_lengths: None,
+            fade_arms: Box::default(),
+            fade_arms_pending: 0,
+            fade_arm_carry: Box::default(),
+            fade_fired: GraphFadeArmWatch::default(),
         }
     }
 }
@@ -5566,6 +5932,16 @@ impl PreparedPlanExecutor for GraphExecutor {
             .carry_input_lanes(&mut predecessor.runtime, &self.carry_inputs);
         self.runtime
             .carry_strip_lanes(&mut predecessor.runtime, &self.carry_strips);
+        // Issue #1392 D3: after the lane import, each carried fade arm takes its render state.
+        if !self.fade_arm_carry.is_empty() {
+            carry_fade_arms(
+                &mut self.fade_arms,
+                &mut self.fade_arms_pending,
+                &self.fade_fired,
+                &predecessor.fade_arms,
+                &self.fade_arm_carry,
+            );
+        }
         self.runtime
             .carry_delay_lines(&mut predecessor.runtime, &self.carry_delays);
         self.runtime
@@ -5708,6 +6084,10 @@ impl PreparedPlanExecutor for GraphExecutor {
             bind_identities: _,
             live_snapshot,
             jump_lengths,
+            fade_arms,
+            fade_arms_pending,
+            fade_arm_carry: _,
+            fade_fired,
         } = self;
         // One block's snapshot: taken here, so the next block cannot reuse it.
         let Some(live) = live_snapshot.take() else {
@@ -5772,6 +6152,18 @@ impl PreparedPlanExecutor for GraphExecutor {
                 .as_ref()
                 .map(|set| &*set.driver as &dyn GraphPreparedSourceSetDriver),
         );
+        // Issue #1288 D3: an added strip's fade-in fires at this block boundary, before any unit
+        // runs; one integer test when no arm is pending.
+        if *fade_arms_pending != 0 {
+            step_fade_arms(
+                runtime,
+                fade_arms,
+                fade_arms_pending,
+                fade_fired,
+                time.absolute_sample,
+                sources,
+            );
+        }
         // #1652 D3: a six-word successor of a following predecessor compares at its first block,
         // under this block's snapshot and jump lengths, before its op runs.
         if let Some(checks) = route_checks.as_deref_mut()

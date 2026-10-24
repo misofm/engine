@@ -393,7 +393,12 @@ extern "C" {
  * host needs to decode generation g from F and submit it (a few quanta); call
  * miso_engine_v1_source_seek_at(id, g, F, A), where g is above the source's generation (2 for a
  * just-added source) and F is the source frame the playing stems read at A; then submit g from F.
- * Until A the stem renders silence; from A it plays F on. If g's PCM is not queued when the block
+ * Until A the stem renders silence; from A it plays F on. A track the transaction added fades in
+ * from the first block its stem plays (A here) over the session mute ramp (control_smoothing
+ * mute_ms), D samples later when latent effects or delay compensation sit between the track's
+ * input and its fader, so it never enters as a step (#1288); a muted channel stays muted, a mute
+ * the host sends before the fade cancels it, and an unmute (the track is unmuted already) leaves
+ * the fade waiting. If g's PCM is not queued when the block
  * at A renders, the seek applies there anyway: the blocks without PCM count as underrun frames,
  * and PCM that falls behind the read position is discarded. A playing stem's seek report gives
  * that frame: a stem whose report reads (generation, s, f) reads source frame f + (A - s) at A,

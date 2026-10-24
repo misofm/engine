@@ -249,7 +249,7 @@ pub(crate) fn floor_row(workload: Workload) -> Option<FloorRow> {
         // row: every builtin section on this one is the prepared identity, and the prepared
         // identity is elided rather than executed. Its class-A arithmetic is what is left --
         // sanitisation, one identity add, the boundary scan, the fader, the pan and the routing.
-        // The two rows that share the identity inventory, and share it on purpose. `gain_pan_only`
+        // The two rows that share the identity inventory, and share it on purpose. `gain_pan_ring`
         // asks for the fixture's real fader trims and pan positions where `dispatch_only` asks for
         // 0 dB and a pan of `left = right = 1.0`, and the inventory does not move. `gain_mute_block`
         // has no identity arm. The settled matrix has had one data-dependent path since issue #944
@@ -264,16 +264,12 @@ pub(crate) fn floor_row(workload: Workload) -> Option<FloorRow> {
             control: None,
             basis: "docs/rulings/effect-floor-accounting.md: builtins, identity",
         },
-        // The driver-fed twin (issue #928, re-based onto this session by #956) is the same session
-        // with its track inputs claimed by a prepared source set, so it requires the same
-        // arithmetic: moving a frozen block into the graph is a copy, not a lane-op, whichever feed
-        // does it, and the production feed does not even copy -- each claim is gathered in place.
-        // Both rows are costed at the identity inventory, the floor of the table, and neither names
-        // a control nor is anybody's: a subtraction between the two feeds would publish the bound
-        // feed's copies as an isolate against a floor that has no copy in it. The driver-fed row
-        // is the native pure-path target, so its own `percent_of_floor` is the number the
-        // pure-path work reads.
-        Workload::SixtyFourTrackGainPanOnly | Workload::SixtyFourTrackGainPanRing => FloorRow {
+        // The gain/pan row is costed at the identity inventory, the floor of the table: its track
+        // inputs are claimed by a prepared source set and each claim is gathered in place, so
+        // feeding a frozen block into the graph adds no lane-op. It names no control and is
+        // nobody's. It is the native pure-path target, so its own `percent_of_floor` is the
+        // number the pure-path work reads.
+        Workload::SixtyFourTrackGainPanRing => FloorRow {
             lane_ops: BUILTINS_IDENTITY_LANE_OPS,
             width_factor: full,
             control: None,
@@ -549,7 +545,7 @@ input as $rust |
     ///
     /// Both halves matter. If some row were ever costed below the identity inventory, this table
     /// would be claiming a session can render with less than the arithmetic the D7 policy, the
-    /// fader, the pan and the routing require of every block; and if `gain_pan_only` ever stopped
+    /// fader, the pan and the routing require of every block; and if `gain_pan_ring` ever stopped
     /// matching `dispatch_only`, the claim that a 0 dB fader and the row's settled pan cost what
     /// real trims and pans cost would have been quietly abandoned in the table rather than argued
     /// in the ruling. The builtins-less plumbing row that used to anchor the first half was
@@ -567,7 +563,7 @@ input as $rust |
                 workload.kind()
             );
         }
-        let gain_pan = floor_row(Workload::SixtyFourTrackGainPanOnly).expect("a derived row");
+        let gain_pan = floor_row(Workload::SixtyFourTrackGainPanRing).expect("a derived row");
         assert_eq!(identity.basis, gain_pan.basis);
         assert!(
             (identity.cycles_per_lane_sample() - gain_pan.cycles_per_lane_sample()).abs() < 1.0e-9
@@ -578,45 +574,6 @@ input as $rust |
                 .abs()
                 < 1.0e-12
         );
-    }
-
-    /// The driver-fed gain/pan row (issues #928 and #956) is costed at the identity inventory
-    /// exactly, and it isolates nothing.
-    ///
-    /// Equal to its bound twin's floor, never below it: the floor-of-the-table test above holds
-    /// with `>=`, and this pins that the second row at that inventory is the gain/pan row's
-    /// arithmetic restated -- same basis, same cycles -- rather than a new, cheaper inventory. And
-    /// like its twin it names no control and nothing names either of them: a feed change is not
-    /// an arithmetic change, so a subtraction between the two feeds would publish the bound feed's
-    /// copies as an isolate against a floor that has no copy in it.
-    #[test]
-    fn the_driver_fed_gain_pan_row_is_costed_at_the_identity_inventory_and_isolates_nothing() {
-        let gain_pan = floor_row(Workload::SixtyFourTrackGainPanOnly).expect("a derived row");
-        let ring = floor_row(Workload::SixtyFourTrackGainPanRing).expect("a derived row");
-        assert_eq!(ring.basis, gain_pan.basis);
-        assert_eq!(
-            ring.basis,
-            "docs/rulings/effect-floor-accounting.md: builtins, identity"
-        );
-        assert!(
-            (ring.cycles_per_lane_sample() - gain_pan.cycles_per_lane_sample()).abs() < 1.0e-12
-        );
-        assert!(
-            (ring.cycles_per_lane_sample()
-                - BUILTINS_IDENTITY_LANE_OPS / (BANK_WIDTH * OPS_PER_CYCLE))
-                .abs()
-                < 1.0e-12
-        );
-        assert!(ring.control.is_none() && gain_pan.control.is_none());
-        for workload in native_session_rows() {
-            let control = floor_row(workload).and_then(|row| row.control);
-            assert!(
-                control != Some(Workload::SixtyFourTrackGainPanRing)
-                    && control != Some(Workload::SixtyFourTrackGainPanOnly),
-                "{} isolates against a gain/pan row",
-                workload.kind()
-            );
-        }
     }
 
     /// The three mono rows are the standing console row's inventory, restated for their fixture.

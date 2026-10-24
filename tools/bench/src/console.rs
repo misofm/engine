@@ -240,14 +240,6 @@ use lane::Backend;
 const OBSERVATIONS: usize = 1_000;
 const ISSUE: u32 = 149;
 
-/// The bound-feed gain/pan row and its driver-fed twin (issue #928, re-based onto the gain/pan
-/// session by #956): one session, one frozen tone, two feeds. Their digests must agree, and the run
-/// asserts it before it emits either record. The driver-fed row is the native pure-path target.
-const GAIN_PAN_FEED_PAIR: [Workload; 2] = [
-    Workload::SixtyFourTrackGainPanOnly,
-    Workload::SixtyFourTrackGainPanRing,
-];
-
 /// The standing console row and its metered twin (issue #881): one session, prepared once through
 /// the `Concurrent` entry with no meter and once with its meter set. A meter observes and never
 /// changes signal flow, so their digests must agree, and the run asserts it before it emits either
@@ -305,10 +297,9 @@ pub(crate) fn main() {
     // the rule #163 item 0c already states for the decomposition itself. Emission is untimed, and
     // its order is unchanged.
     let clock = CoreClock::from_runner(metadata);
-    // Every `native_session_rows()` row: the standing rows, then the driver-fed rows (issue #928),
+    // Every `native_session_rows()` row: the standing rows, then the gain/pan row (issue #956),
     // the metered row (issue #881), the bus-and-send row (issue #1227) and the console-strip rows
-    // (issue #1085). `WORKLOADS` carries only the standing rows, because the wasm arm addresses
-    // them by index. One list, so the floor subtraction below finds a control wherever it sits.
+    // (issue #1085). One list, so the floor subtraction below finds a control wherever it sits.
     let rows: Vec<Workload> = native_session_rows().collect();
     let sessions: Vec<SessionMeasurement> =
         rows.iter().copied().map(SessionMeasurement::run).collect();
@@ -324,15 +315,8 @@ pub(crate) fn main() {
             .map(|index| &sessions[index].output_sha256)
             .expect("both rows of the pair are measured")
     };
-    // The class-A statement of the driver-fed row, asserted in-run like the facility arms' before
-    // a number is published: the two feeds deliver the same frozen words, so the two gain/pan
-    // rows render the same bits. A difference is a harness defect, never a finding.
-    let [bound, driver_fed] = GAIN_PAN_FEED_PAIR.map(digest_of);
-    assert_eq!(
-        driver_fed, bound,
-        "the driver-fed gain/pan row rendered different output from the bound-feed row"
-    );
-    // And the metered row's (issue #881): a meter observes, so the metered console renders the
+    // The class-A statement of the metered row (issue #881), asserted in-run like the facility
+    // arms' before a number is published: a meter observes, so the metered console renders the
     // standing console's bits.
     let [unmetered, metered] = METERED_PAIR.map(digest_of);
     assert_eq!(
@@ -1666,8 +1650,9 @@ impl MonoMeasurement {
         // The prepared half of that evidence, counted over the lanes the premise is about: the
         // track lanes of the bank chains, the only units the collapse acts on. The whole census
         // (`symmetry_counters`) also counts every single op -- on this fixture the 64 track
-        // `Input` ops (a host processor, so declined) and the `main-out` identity (symmetric,
-        // naming no track, nothing upstream of the seam). The premise used to read the census's
+        // `Input` ops (source-set claims since issue #965, the engine's symmetric source-input
+        // kind) and the `main-out` identity (symmetric, naming no track, nothing upstream of the
+        // seam). The premise used to read the census's
         // eligible half, which equalled this count only while that output declined too; issue
         // #221 rebound it as the engine's identity and the premise failed at `65 != 64` (issue
         // #911). `bank_symmetry_counters` names what it excludes, and `chain_shape.rs` pins every
@@ -3205,96 +3190,75 @@ mod tests {
         }
     }
 
-    /// Issue #928, re-based onto the gain/pan session by #956: the driver-fed gain/pan row, run
-    /// short through the real subject, renders the bound-feed row's bits with no forbidden
-    /// operation, prints its record with its feed, and the record validator pins that feed.
+    /// Issues #928, #956 and #965: the gain/pan row, run short through the real subject, renders
+    /// with no forbidden operation, prints its record with its feed, and the record validator pins
+    /// that feed.
     ///
     /// The same `SessionMeasurement` the runner's run takes, over eight timed blocks instead of a
-    /// thousand (`cargo test -p bench the_driver_fed_gain_pan_row -- --nocapture` prints the
-    /// record). Its timings are not to be read, and its `observations` field says eight, which the
-    /// validator refuses as a frozen measurement -- so the validator is asked about the two
-    /// records with that one field set to the frozen count, and then with the feed removed or
-    /// swapped. `render_total_forbidden_operations` is the realtime audit of the render path, the
-    /// driver's `begin_block` and `copy_track_input` included, and the audited allocator would
-    /// have aborted this process on an allocation inside it.
+    /// thousand (`cargo test -p bench the_gain_pan_row_prints -- --nocapture` prints the record).
+    /// Its timings are not to be read, and its `observations` field says eight, which the
+    /// validator refuses as a frozen measurement -- so the validator is asked about the record
+    /// with that one field set to the frozen count, and then with the feed removed or set to the
+    /// retired `bound` feed. `render_total_forbidden_operations` is the realtime audit of the
+    /// render path, the source-set driver included, and the audited allocator would have aborted
+    /// this process on an allocation inside it.
     ///
-    /// Red mutations: emit the feed of the other row, or drop `source_feed` from the format string
-    /// -- the feed assertions fail; drop `source_feed` from `session_keys` in the validator
-    /// library -- the removed-feed cases are accepted; unpin the per-kind feed -- the swapped-feed
-    /// cases are accepted.
+    /// Red mutations: drop `source_feed` from the format string -- the feed assertions fail; drop
+    /// `source_feed` from `session_keys` in the validator library -- the removed-feed case is
+    /// accepted; unpin the feed -- the `bound` case is accepted.
     #[test]
-    fn the_driver_fed_gain_pan_row_prints_its_feed_and_the_validator_pins_it() {
-        let measured = GAIN_PAN_FEED_PAIR
-            .map(|workload| SessionMeasurement::run_for(workload, SHORT_RUN_OBSERVATIONS));
+    fn the_gain_pan_row_prints_its_feed_and_the_validator_pins_it() {
+        let workload = Workload::SixtyFourTrackGainPanRing;
+        let measured = SessionMeasurement::run_for(workload, SHORT_RUN_OBSERVATIONS);
+        assert_eq!(measured.render_errors, 0);
         assert_eq!(
-            measured[1].output_sha256, measured[0].output_sha256,
-            "the driver-fed row must render the bound-feed row's bits"
+            measured.audit.total(),
+            0,
+            "a forbidden operation on the render path"
         );
-        for (workload, measurement) in GAIN_PAN_FEED_PAIR.iter().zip(&measured) {
-            assert_eq!(measurement.render_errors, 0, "{}", workload.kind());
-            assert_eq!(
-                measurement.audit.total(),
-                0,
-                "{}: a forbidden operation on the render path",
-                workload.kind()
-            );
-        }
-        let [bound, ring] = [0, 1].map(|index| {
-            measured[index].record(
-                GAIN_PAN_FEED_PAIR[index],
-                1,
-                Backend::current(),
-                Metadata::gather(),
-                None,
-                None,
-            )
-        });
-        println!("{ring}");
-        for (record, feed) in [(&bound, "bound"), (&ring, "played_planes")] {
-            assert_eq!(
-                record.matches("\"source_feed\":").count(),
-                1,
-                "the feed is stated exactly once"
-            );
-            assert!(
-                record.contains(&format!("\"source_feed\":\"{feed}\",")),
-                "the record must state the {feed} feed"
-            );
-            assert!(
-                record.contains(&format!("\"observations\":{SHORT_RUN_OBSERVATIONS},")),
-                "a shortened run must say it was shortened"
-            );
-        }
+        let record = measured.record(
+            workload,
+            1,
+            Backend::current(),
+            Metadata::gather(),
+            None,
+            None,
+        );
+        println!("{record}");
+        assert_eq!(
+            record.matches("\"source_feed\":").count(),
+            1,
+            "the feed is stated exactly once"
+        );
         assert!(
-            ring.contains("\"workload_kind\":\"sixty_four_track_gain_pan_ring\","),
-            "the driver-fed row names itself"
+            record.contains("\"source_feed\":\"played_planes\","),
+            "the record must state the played-planes feed"
+        );
+        assert!(
+            record.contains(&format!("\"observations\":{SHORT_RUN_OBSERVATIONS},")),
+            "a shortened run must say it was shortened"
+        );
+        assert!(
+            record.contains("\"workload_kind\":\"sixty_four_track_gain_pan_ring\","),
+            "the row names itself"
         );
 
         let frozen = ".observations = 1000";
         assert!(
-            !record_validator_accepts(&ring, "."),
+            !record_validator_accepts(&record, "."),
             "a shortened run must not pass for the frozen one"
         );
-        for record in [&bound, &ring] {
-            assert!(
-                record_validator_accepts(record, frozen),
-                "the record at the frozen count"
-            );
-            assert!(
-                !record_validator_accepts(record, &format!("{frozen} | del(.source_feed)")),
-                "a record missing source_feed"
-            );
-        }
         assert!(
-            !record_validator_accepts(&ring, &format!("{frozen} | .source_feed = \"bound\"")),
-            "a driver-fed row claiming the bound feed"
+            record_validator_accepts(&record, frozen),
+            "the record at the frozen count"
         );
         assert!(
-            !record_validator_accepts(
-                &bound,
-                &format!("{frozen} | .source_feed = \"played_planes\"")
-            ),
-            "the bound-feed row claiming the driver's feed"
+            !record_validator_accepts(&record, &format!("{frozen} | del(.source_feed)")),
+            "a record missing source_feed"
+        );
+        assert!(
+            !record_validator_accepts(&record, &format!("{frozen} | .source_feed = \"bound\"")),
+            "a record claiming the retired bound feed"
         );
     }
 

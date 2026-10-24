@@ -3061,6 +3061,8 @@ struct FaderChannelState {
     muted: bool,
     /// Whether a mute or unmute ramp is in flight (issue #1638 D2).
     mute_ramp: bool,
+    /// Whether the lane waits, muted, for the fade-in a plan swap armed (issue #1288 D2).
+    armed: bool,
 }
 
 /// One matrix bank lane's whole state: what a plan swap hands from the predecessor's lane to the
@@ -3170,6 +3172,10 @@ pub(crate) struct FaderRampStage<L: Lane> {
     /// [`Self::reset`]. While it is set, or while the lane is muted, the lane's gain is *held*: a
     /// timed gain operation only remembers the gain.
     mute_ramp: [[bool; MAX_BANK_LANES]; 2],
+    /// Whether each lane waits, muted, for the fade-in a plan swap armed, `[channel][lane]` (issue
+    /// #1288 D2). Set only by [`Self::arm_fade_in`]; cleared by [`Self::fire_fade_in`] and by a
+    /// mute on the channel, so a user's mute wins over the fade. An unmute while armed leaves it.
+    armed: [[bool; MAX_BANK_LANES]; 2],
 }
 
 /// Largest ramp countdown that is exact in `f32`.
@@ -3216,7 +3222,43 @@ impl<L: Lane> FaderRampStage<L> {
             muted,
             remaining: [[0; MAX_BANK_LANES]; 2],
             mute_ramp: [[false; MAX_BANK_LANES]; 2],
+            armed: [[false; MAX_BANK_LANES]; 2],
         }
+    }
+
+    /// Arms the fade-in of one lane that a plan swap adds during playback (issue #1288 D2), on the
+    /// control thread before the plan is published. Each channel that is not muted becomes muted
+    /// at once -- the settled exact `+0.0` a prepared mute is, its fader gain remembered -- and
+    /// armed; a channel the session mutes is left as it is. Returns whether any channel was armed.
+    fn arm_fade_in(&mut self, lane: usize) -> bool {
+        let mut armed = false;
+        for channel in 0..2 {
+            if !self.muted[channel][lane] {
+                self.mute_channel(lane, channel, true, 0);
+                self.armed[channel][lane] = true;
+                armed = true;
+            }
+        }
+        armed
+    }
+
+    // REALTIME_POLICY_BEGIN
+    /// Fires one lane's armed fade-in (issue #1288 D2): each armed channel is disarmed and unmuted
+    /// over `ramp_samples`, exactly the unmute [`Self::set_mute`] runs. A channel that is not
+    /// armed is not touched, so a lane the user muted after the arm stays muted.
+    fn fire_fade_in(&mut self, lane: usize, ramp_samples: u32) {
+        for channel in 0..2 {
+            if self.armed[channel][lane] {
+                self.armed[channel][lane] = false;
+                self.mute_channel(lane, channel, false, ramp_samples);
+            }
+        }
+    }
+    // REALTIME_POLICY_END
+
+    /// Whether one lane and channel waits for an armed fade-in (issue #1288 D2).
+    const fn is_armed(&self, lane: usize, channel: usize) -> bool {
+        self.armed[channel][lane]
     }
 
     /// Recomputes one channel's mute mask from the per-lane flags.
@@ -3301,7 +3343,18 @@ impl<L: Lane> FaderRampStage<L> {
     /// batch 13b ruling): no retarget, and the mute ramp flag and the ramp's remaining frames stay
     /// as they were. So a repeated mute never restarts a fader ramp in flight or a mute ramp, and
     /// never holds the gain for a window.
+    ///
+    /// An armed channel (issue #1288 D2, root ruling of attempt 2) takes a mute as the end of its
+    /// arm, before that early return, so it stays muted for good; it takes an unmute as a no-op
+    /// that keeps the arm: the model already holds the lane unmuted, and the fade is how it gets
+    /// there, so a redundant unmute before the source plays cannot turn the fade into a step.
     fn mute_channel(&mut self, lane: usize, channel: usize, muted: bool, smoothing_samples: u32) {
+        if self.armed[channel][lane] {
+            if !muted {
+                return;
+            }
+            self.armed[channel][lane] = false;
+        }
         if self.muted[channel][lane] == muted {
             return;
         }
@@ -3559,6 +3612,7 @@ impl<L: Lane> FaderRampStage<L> {
                 fader_gain: self.fader_gain[channel][lane],
                 muted: self.muted[channel][lane],
                 mute_ramp: self.mute_ramp[channel][lane],
+                armed: self.armed[channel][lane],
             }),
         }
     }
@@ -3581,6 +3635,7 @@ impl<L: Lane> FaderRampStage<L> {
             self.fader_gain[channel][lane] = carried.fader_gain;
             self.muted[channel][lane] = carried.muted;
             self.mute_ramp[channel][lane] = carried.mute_ramp;
+            self.armed[channel][lane] = carried.armed;
             self.sync_mute(channel);
         }
     }
@@ -4887,6 +4942,45 @@ impl BuiltinFaderBank {
         Ok(())
     }
 
+    /// Arms member lane `lane`'s fade-in (issue #1288 D2): on the control thread, before the plan
+    /// is published, each channel the session does not mute becomes a settled mute (exact `+0.0`,
+    /// its fader gain remembered) that [`Self::fire_fade_in`] unmutes. Returns whether any channel
+    /// was armed; `false` when both are muted.
+    ///
+    /// # Errors
+    ///
+    /// [`BuiltinParameterError::LaneLength`] when `lane` is not a populated member.
+    pub fn arm_fade_in(&mut self, lane: usize) -> Result<bool, BuiltinParameterError> {
+        if lane >= self.members {
+            return Err(BuiltinParameterError::LaneLength);
+        }
+        Ok(per_width!(FaderStageKernel(stage) in &mut self.stage => stage.arm_fade_in(lane)))
+    }
+
+    // REALTIME_POLICY_BEGIN
+    /// Fires member lane `lane`'s armed fade-in at a block boundary (issue #1288 D2): each channel
+    /// still armed unmutes over `ramp_samples`, exactly as [`Self::set_mute`] unmutes it. A
+    /// channel a mute change disarmed, and a lane that is not a member, are left alone.
+    /// Allocation-free.
+    pub fn fire_fade_in(&mut self, lane: usize, ramp_samples: u32) {
+        if lane < self.members {
+            per_width!(FaderStageKernel(stage) in &mut self.stage => {
+                stage.fire_fade_in(lane, ramp_samples);
+            });
+        }
+    }
+    // REALTIME_POLICY_END
+
+    /// Whether member lane `lane` waits for an armed fade-in on `channel` (`0` left, `1` right).
+    /// `None` for a padding lane or a channel above `1`.
+    #[must_use]
+    pub fn is_armed(&self, lane: usize, channel: usize) -> Option<bool> {
+        if lane >= self.members || channel > 1 {
+            return None;
+        }
+        Some(per_width!(FaderStageKernel(stage) in &self.stage => stage.is_armed(lane, channel)))
+    }
+
     /// Renders one AoSoA block of `frames * width.lanes()` samples per channel.
     ///
     /// The shape is fixed by the prepared plan and validated there, so it is a `debug_assert`
@@ -5590,6 +5684,30 @@ impl FaderMuteRampBuiltins {
     /// Set or clear one or both lanes' mute, as a retarget of the same gain.
     pub fn set_mute(&mut self, lanes: BuiltinLaneSelector, muted: bool, smoothing_samples: u32) {
         self.stage.set_mute(0, lanes, muted, smoothing_samples);
+    }
+
+    /// Arms the fade-in of both lanes (issue #1288 D2), as [`BuiltinFaderBank::arm_fade_in`]
+    /// arms a bank lane. Returns whether any lane was armed.
+    pub fn arm_fade_in(&mut self) -> bool {
+        self.stage.arm_fade_in(0)
+    }
+
+    // REALTIME_POLICY_BEGIN
+    /// Fires the armed fade-in (issue #1288 D2), as [`BuiltinFaderBank::fire_fade_in`] fires a
+    /// bank lane's.
+    pub fn fire_fade_in(&mut self, ramp_samples: u32) {
+        self.stage.fire_fade_in(0, ramp_samples);
+    }
+    // REALTIME_POLICY_END
+
+    /// Whether one lane (`0` left, `1` right) waits for an armed fade-in. `None` for a lane above
+    /// `1`.
+    #[must_use]
+    pub const fn is_armed(&self, lane: usize) -> Option<bool> {
+        if lane > 1 {
+            return None;
+        }
+        Some(self.stage.is_armed(0, lane))
     }
 
     /// The settled gain of one lane, for tests and control-plane readback.
