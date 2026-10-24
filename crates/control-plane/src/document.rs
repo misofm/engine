@@ -74,10 +74,12 @@ pub fn replace(
     let text = core::str::from_utf8(document)
         .map_err(|_| refused(StatusCode::ValidationFailed, DOCUMENT_UTF8))?;
     let parsed = session::parse_session_json(text).map_err(DocumentReplaceRefusal::Invalid)?;
-    let next = session::compile_session(&parsed, request.committed.caps())
+    // The boot's own compile entry (`compile_children` builds its store the same way), under the
+    // committed caps: the one compile pipeline, never a second call into it (#1309 D10).
+    let next = protocol::SessionStore::new(parsed, request.committed.caps())
         .map_err(DocumentReplaceRefusal::Invalid)?;
     let committed = request.committed.compiled().normalized_model();
-    let next = next.normalized_model();
+    let next = next.compiled().normalized_model();
     let edits = diff(committed, next);
     if edits.is_empty() && same_smoothing(committed.control_smoothing, next.control_smoothing) {
         return Ok(DocumentDiff::Unchanged);
