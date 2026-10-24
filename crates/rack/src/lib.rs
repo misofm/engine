@@ -279,7 +279,7 @@ fn tile_gather<const W: usize>(
         for (row, plane) in rows.iter_mut().zip(planes.iter()) {
             row.copy_from_slice(&plane[base..base + W]);
         }
-        for (chunk, row) in block.chunks_exact_mut(W).zip(transpose(rows)) {
+        for (chunk, row) in block.as_chunks_mut::<W>().0.iter_mut().zip(transpose(rows)) {
             chunk.copy_from_slice(&row);
         }
     }
@@ -304,7 +304,7 @@ fn tile_scatter<const W: usize>(
     for (tile, block) in source.chunks_exact(W * W).enumerate() {
         let base = tile * W;
         let mut rows = [[0.0_f32; W]; W];
-        for (row, chunk) in rows.iter_mut().zip(block.chunks_exact(W)) {
+        for (row, chunk) in rows.iter_mut().zip(block.as_chunks::<W>().0.iter()) {
             row.copy_from_slice(chunk);
         }
         for (lane, row) in transpose(rows).into_iter().enumerate() {
@@ -326,7 +326,7 @@ fn tile_scatter_direct_plane<const W: usize>(
     for (tile, block) in source[..tiled * W].chunks_exact(W * W).enumerate() {
         let base = tile * W;
         let mut rows = [[0.0_f32; W]; W];
-        for (row, chunk) in rows.iter_mut().zip(block.chunks_exact(W)) {
+        for (row, chunk) in rows.iter_mut().zip(block.as_chunks::<W>().0.iter()) {
             row.copy_from_slice(chunk);
         }
         for ((left, right), row) in destinations.iter_mut().zip(transpose(rows)) {

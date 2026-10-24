@@ -497,7 +497,7 @@ fn chan_words<L: Lane>(s: &Chan<L>) -> [L; CHAN_WORDS] {
     words[..7].copy_from_slice(&[
         s.main.ic1, s.main.ic2, s.side.ic1, s.side.ic2, s.run, s.side_run, s.gain_db,
     ]);
-    for (chunk, ramp) in words[7..].chunks_exact_mut(4).zip(&s.ramps) {
+    for (chunk, ramp) in words[7..].as_chunks_mut::<4>().0.iter_mut().zip(&s.ramps) {
         chunk.copy_from_slice(&[ramp.current, ramp.target, ramp.step, ramp.remaining]);
     }
     words
@@ -508,7 +508,7 @@ fn chan_from_words<L: Lane>(words: &[L; CHAN_WORDS]) -> Chan<L> {
     let mut s = Chan::default();
     [s.main.ic1, s.main.ic2, s.side.ic1, s.side.ic2] = [words[0], words[1], words[2], words[3]];
     [s.run, s.side_run, s.gain_db] = [words[4], words[5], words[6]];
-    for (ramp, chunk) in s.ramps.iter_mut().zip(words[7..].chunks_exact(4)) {
+    for (ramp, chunk) in s.ramps.iter_mut().zip(words[7..].as_chunks::<4>().0.iter()) {
         [ramp.current, ramp.target, ramp.step, ramp.remaining] =
             [chunk[0], chunk[1], chunk[2], chunk[3]];
     }
@@ -634,7 +634,7 @@ impl<L: Lane, const CONNECTED: bool> DeEsser<L, CONNECTED> {
         self.values[lane][channel] = self.defaults[lane][channel];
         let mut words = [0.0_f32; CHAN_WORDS];
         let designs = targets(&self.values[lane][channel], self.sample_rate);
-        for (chunk, design) in words[7..].chunks_exact_mut(4).zip(designs) {
+        for (chunk, design) in words[7..].as_chunks_mut::<4>().0.iter_mut().zip(designs) {
             chunk[..2].copy_from_slice(&[design, design]);
         }
         set_lane_words(&mut self.state[channel], lane, &words);
@@ -645,7 +645,7 @@ impl<L: Lane, const CONNECTED: bool> DeEsser<L, CONNECTED> {
     fn reset_lane_discontinuity(&mut self, channel: usize, lane: usize) {
         let mut words = lane_words(&self.state[channel], lane);
         words[..7].fill(0.0);
-        for chunk in words[7..].chunks_exact_mut(4) {
+        for chunk in words[7..].as_chunks_mut::<4>().0.iter_mut() {
             chunk[0] = chunk[1];
             chunk[2..].fill(0.0);
         }
@@ -718,7 +718,7 @@ impl<L: Lane, const CONNECTED: bool> DeEsser<L, CONNECTED> {
     fn retarget(&mut self, channel: usize, lane: usize) {
         let designs = targets(&self.values[lane][channel], self.sample_rate);
         let mut words = lane_words(&self.state[channel], lane);
-        for (chunk, design) in words[7..].chunks_exact_mut(4).zip(designs) {
+        for (chunk, design) in words[7..].as_chunks_mut::<4>().0.iter_mut().zip(designs) {
             if chunk[1].to_bits() == design.to_bits() {
                 continue;
             }
@@ -1013,7 +1013,7 @@ impl<L: Lane, const CONNECTED: bool> DeEsser<L, CONNECTED> {
             return Err(state_error("effect.state.signal"));
         }
         let designs = targets(&values, self.sample_rate);
-        for (index, chunk) in words[7..].chunks_exact(4).enumerate() {
+        for (index, chunk) in words[7..].as_chunks::<4>().0.iter().enumerate() {
             let ramp = LinearRamp {
                 current: chunk[0],
                 target: chunk[1],
@@ -1053,7 +1053,12 @@ impl<L: Lane, const CONNECTED: bool> DeEsser<L, CONNECTED> {
         for (channel, (words, values)) in parsed.iter().enumerate() {
             set_lane_words(&mut self.state[channel], lane, words);
             self.values[lane][channel] = *values;
-            if words[7..].chunks_exact(4).any(|chunk| chunk[3] != 0.0) {
+            if words[7..]
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .any(|chunk| chunk[3] != 0.0)
+            {
                 self.ramp_frames_left = self.ramp_frames_left.max(RAMP_SAMPLES);
             }
         }
@@ -1178,7 +1183,7 @@ impl<L: Lane> DeEsser<L, false> {
         for (value, chunk) in self.defaults[lane]
             .iter_mut()
             .flatten()
-            .zip(values.chunks_exact_mut(4))
+            .zip(values.as_chunks_mut::<4>().0.iter_mut())
         {
             let incoming = f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
             chunk.copy_from_slice(&value.to_le_bytes());
@@ -1301,7 +1306,7 @@ fn initial_defaults(
         return Err(invalid);
     }
     let mut defaults = [[0.0; PARAMETER_COUNT]; 2];
-    for (index, pair) in values.chunks_exact(2).enumerate() {
+    for (index, pair) in values.as_chunks::<2>().0.iter().enumerate() {
         for (channel, (value, expected)) in pair
             .iter()
             .zip([ParameterChannel::Left, ParameterChannel::Right])

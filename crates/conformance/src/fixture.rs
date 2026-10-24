@@ -105,8 +105,10 @@ impl PcmFixture {
             return Err(FixtureError::CrcMismatch);
         }
         let samples = bytes[HEADER_LEN..]
-            .chunks_exact(4)
-            .map(|word| f32::from_bits(u32::from_le_bytes(word.try_into().expect("exact chunk"))))
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|word| f32::from_bits(u32::from_le_bytes(*word)))
             .collect();
         Ok(Self {
             rate,

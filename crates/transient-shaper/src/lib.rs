@@ -1686,7 +1686,7 @@ impl<L: Lane, const W: usize> PreparedTransientShaperBank<L, W> {
         let words = shaper.left.defaults[lane]
             .iter_mut()
             .chain(shaper.right.defaults[lane].iter_mut());
-        for (value, chunk) in words.zip(values_bytes.chunks_exact_mut(4)) {
+        for (value, chunk) in words.zip(values_bytes.as_chunks_mut::<4>().0.iter_mut()) {
             let mut incoming = [0_u8; 4];
             incoming.copy_from_slice(chunk);
             chunk.copy_from_slice(&value.to_bits().to_le_bytes());

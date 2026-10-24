@@ -563,11 +563,11 @@ fn assert_pcm_fixture(output: &[f32; QUANTUM * 2]) {
         ACCEPTED_GRAPH_PCM.len(),
         output.len() * core::mem::size_of::<f32>()
     );
-    for (sample, expected) in output.iter().zip(ACCEPTED_GRAPH_PCM.chunks_exact(4)) {
-        assert_eq!(
-            sample.to_bits(),
-            u32::from_le_bytes(expected.try_into().expect("word"))
-        );
+    for (sample, expected) in output
+        .iter()
+        .zip(ACCEPTED_GRAPH_PCM.as_chunks::<4>().0.iter())
+    {
+        assert_eq!(sample.to_bits(), u32::from_le_bytes(*expected));
     }
 }
 
