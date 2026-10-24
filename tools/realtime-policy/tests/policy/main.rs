@@ -7,6 +7,7 @@ mod binary;
 mod boundary;
 mod calls;
 mod common;
+mod doctests;
 mod drain;
 mod forbidden;
 mod markers;
