@@ -190,8 +190,8 @@ extern "C" {
  *
  * Spectrum taps (issue 1594). SPECTRUM_CONFIGURE (message ID 0x0010) through
  * miso_engine_v1_submit_command sets, changes or removes the session's spectrum taps while it
- * plays. No C symbol or struct is added, and until issue 1595 sets its capability bit no
- * capability report lists the command. The taps are monitor state: the command changes no
+ * plays. No C symbol or struct is added; the capability report lists it with the spectrum reads
+ * and capability flag bit 16 (issue 1595). The taps are monitor state: the command changes no
  * revision and no saved state and emits no SESSION_COMMITTED. The same configuration again
  * changes nothing; a change of only the hop or the byte budget prepares no plan; any other change
  * prepares a replacement plan at the unchanged committed revision, in which taps that stay keep
@@ -203,21 +203,26 @@ extern "C" {
  * spectrum.budget.retained, spectrum.budget, spectrum.target.id) and changes nothing. An exact
  * replay of the request returns the same bytes and prepares nothing.
  *
- * Spectrum reads (issue 1595). SPECTRUM_CAPTURE (message ID 0x0011) through
- * miso_engine_v1_submit_command arms, reads, cancels or selects the one-shot spectrum window. No C
- * symbol or struct is added, and until the issue's second slice sets capability bit 16 no
- * capability report lists the command. Arm, cancel and select answer done; a read answers pending
- * until 2048 frames have rendered since the arm, then ready with the window analyzed into 1025 dB
- * bins (and, when asked, the raw 2048-frame planes). The analysis runs on the thread that calls
- * miso_engine_v1_submit_command, never in render. A read never consumes a window it cannot
- * deliver: one whose reply exceeds the session's maximum_control_frame_bytes is refused
- * LIMIT_EXCEEDED (spectrum.frame) and leaves the window queued, and SPECTRUM_CONFIGURE refuses a
- * tap whose one-plane read the frame limit cannot carry (8496 bytes for an identity of up to 8
- * bytes; 12608 for both planes; 29008 with both raw planes). A refusal is a typed non-OK
- * response whose one error diagnostic carries the service's code (spectrum.unprepared,
+ * Spectrum reads (issue 1595). SPECTRUM_CAPTURE (message ID 0x0011) and SPECTRUM_STREAM (0x0012)
+ * through miso_engine_v1_submit_command read the one-shot window and the continuous stream. No C
+ * symbol or struct is added. The capability report lists 0x0010, 0x0011 and 0x0012 together and
+ * sets capability flag bit 16. A capture's arm, cancel and select answer done; a read answers
+ * pending until 2048 frames have rendered since the arm, then ready with the window analyzed into
+ * 1025 dB bins (and, when asked, the raw 2048-frame planes). A stream's start, select, reset and
+ * stop answer the stream's metadata; a read answers its status (inactive, warming, pending, gap
+ * with the count of dropped windows, failed, stopped, none of them a refusal) or ready with the
+ * held window analyzed with the stream's smoothing. The analysis runs on the thread that calls
+ * miso_engine_v1_submit_command, never in render. A read never consumes what it cannot deliver:
+ * one whose ready reply exceeds the session's maximum_control_frame_bytes is refused
+ * LIMIT_EXCEEDED (spectrum.frame) and leaves the window, and a stream's gap, queued; a stream
+ * read's size is fixed by the selected entry's channels. SPECTRUM_CONFIGURE refuses a tap whose
+ * one-plane read the frame limit cannot carry (8576 bytes for an identity of up to 8 bytes; 12688
+ * to stream or read both planes; 29008 for both raw planes). A refusal is a typed non-OK response
+ * whose one error diagnostic carries the service's code (spectrum.unprepared,
  * spectrum.entry.unknown, spectrum.busy, spectrum.capture.dropped, spectrum.not_armed,
- * spectrum.channels, spectrum.select.single and others) and changes nothing. An exact replay of a
- * read returns the same bytes and pops nothing; a host gives each read a new request ID.
+ * spectrum.channels, spectrum.select.single, spectrum.stream.active, spectrum.stream.inactive and
+ * others) and changes nothing. An exact replay of a read returns the same bytes and pops nothing;
+ * a host gives each read a new request ID.
  *
  * Completion (issue 1314). miso_engine_v1_submit_command is synchronous only for what can fail:
  * it validates and classifies the transaction, prepares a replacement plan and reserves its
