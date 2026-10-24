@@ -567,11 +567,14 @@ printf '%s
 # Each export's own symbol is the only admitted trap owner: the bounded SPSC endpoints inline
 # their checked slot indexing into the caller, and that index is unreachable by the queue's own
 # cursor invariant. The allocation half of the gate is not relaxed at all -- an allocator, a
-# deallocator or drop glue in either closure still fails.
+# deallocator or drop glue in either closure still fails. Issue #1582 R3: the meter poll's fold is
+# the core's `MeterDelivery::poll` (never inlined into the export), so it is the poll's one admitted
+# owner, pinned at its three sites: the strip meters' `try_pop`, and the output meter's `try_pop`
+# and `peek`, each the ring's checked `slots[..]` index. The export itself may hold none.
 printf '%s
 ' "$named_disassembly" |
   python3 -B "$callgraph" --callgraph miso_engine_web_v1_meter_poll \
-    --trap-owner 22AudioWorkletEngineHost11poll_meters --render-thread || exit 1
+    --trap-owner 13MeterDelivery4poll=3 --render-thread || exit 1
 # `command_submit` runs in `port.onmessage`, not in `process()`, and since #1565A it carries only
 # the observation subscribe and unsubscribe records (the value kinds are deleted; every value goes
 # through `control_command`). The engine's rule for the control path is "never allocate on the

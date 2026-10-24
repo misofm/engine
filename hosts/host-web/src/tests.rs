@@ -1,5 +1,6 @@
 use core::mem::{offset_of, size_of, size_of_val};
 
+use builtins::MeterSnapshot;
 use host_core::SpectrumSmoothingConfig;
 // #1582 D3: the strip word's conversion and fold moved into the core under these names.
 use host_core::meters::{
@@ -912,7 +913,7 @@ fn observation_staging_resource_is_exact_for_the_taps_off_and_on_modes() {
             "no effect additions"
         );
         assert_eq!(
-            ready.shape.meter_pending.len(),
+            ready.meters.tables().meter_count(),
             ready.shape.tracks.len() + ready.shape.submixes.len(),
             "{name}: one meter per strip"
         );
@@ -3379,6 +3380,8 @@ fn meter_delayed_poll_delivers_each_queued_window_with_its_own_peak() {
     assert_eq!(*host.meter_header(), partial_header);
 }
 
+// It plants a window through host-core's `test-support` writers.
+#[cfg(feature = "test-support")]
 #[test]
 fn meter_invalid_master_rejects_transactionally_then_recovers_with_loss() {
     let mut host = live_control_host(128, 1);
@@ -3393,7 +3396,8 @@ fn meter_invalid_master_rejects_transactionally_then_recovers_with_loss() {
         host.ready
             .as_mut()
             .expect("ready")
-            .output_reader
+            .meters
+            .test_only_output_mut()
             .windows_mut()
             .try_pop()
             .ok()
@@ -3415,6 +3419,8 @@ fn meter_invalid_master_rejects_transactionally_then_recovers_with_loss() {
     assert_ne!(host.meter_header().reserved[1] & METER_VALID_LOSS, 0);
 }
 
+// It plants a window through host-core's `test-support` writers.
+#[cfg(feature = "test-support")]
 #[test]
 fn meter_producer_reset_starts_a_fresh_delivery_epoch() {
     let mut host = live_control_host(128, 1);
@@ -3434,7 +3440,7 @@ fn meter_producer_reset_starts_a_fresh_delivery_epoch() {
     for (meter, pending) in companions
         .meters
         .iter_mut()
-        .zip(ready.shape.meter_pending.iter_mut())
+        .zip(ready.meters.test_only_pending_mut().iter_mut())
     {
         let mut snapshot = meter.consumer.try_pop().expect("queued snapshot");
         snapshot.reset_generation = snapshot.reset_generation.saturating_add(1);
@@ -3838,7 +3844,7 @@ fn a_bus_session_boots_live_controlled_and_files_every_bus_effect() {
         "no producer slot beyond the strips'"
     );
     assert_eq!(
-        ready.shape.core_frame.strip_gain_reduction_present.len(),
+        ready.meters.frame().strip_gain_reduction_present.len(),
         strips.len()
     );
 }
@@ -3941,7 +3947,7 @@ fn meter_gap_on_one_meter_leaves_no_backlog_at_one_block_windows() {
         companions
             .meters
             .iter()
-            .zip(ready.shape.meter_pending.iter())
+            .zip(ready.meters.tables().pending().iter())
             .map(|(meter, pending)| {
                 meter.consumer.available_at_entry() + usize::from(pending.is_some())
             })
@@ -4137,7 +4143,12 @@ fn bus_meters_render_and_poll_without_allocating() {
     );
     // #1581 gate 7: the measured block folds the core output meter, whose gate the lease opened.
     assert!(
-        host.ready.as_ref().expect("ready").output_gate_from <= host.status.next_absolute_sample,
+        host.ready
+            .as_ref()
+            .expect("ready")
+            .meters
+            .output_gate_from()
+            <= host.status.next_absolute_sample,
         "the output meter's gate is open for the measured block"
     );
     let ((render, windows), allocations, deallocations) =
@@ -8680,7 +8691,7 @@ mod structural_apply {
     }
 
     fn meter_loss(rig: &Rig) -> u64 {
-        rig.host.ready.as_ref().expect("ready").meter_loss_count
+        rig.host.ready.as_ref().expect("ready").meters.loss_count()
     }
 
     /// Telemetry is dropped only with a count. The windows the predecessor closed before a swap
@@ -8708,10 +8719,11 @@ mod structural_apply {
             .ready
             .as_mut()
             .expect("ready")
+            .meters
             .output_windows_queued() as u64;
         assert!(waiting > 0, "the render side closed windows nobody polled");
         let ready = rig.host.ready.as_mut().expect("ready");
-        ready.meter_loss_count = 5;
+        ready.meters.test_only_set_loss_count(5);
         let base = rig.host.committed_revision();
         assert_eq!(
             rig.apply(&add_muted_track(&model, ADDED), 1),
@@ -9379,7 +9391,7 @@ mod structural_apply {
             .try_pop()
             .expect("a closed strip window");
         snapshot.reset_generation = snapshot.reset_generation.saturating_add(1);
-        ready.shape.meter_pending[0] = Some(snapshot);
+        ready.meters.test_only_pending_mut()[0] = Some(snapshot);
         assert_eq!(rig.host.poll_meters(), 0, "the reset group is refused");
         let frames = published(&mut rig, 12 * WINDOW);
         assert!(!frames.is_empty(), "a producer reset recovers");
