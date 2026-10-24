@@ -88,3 +88,22 @@ Scope note `scratchpad/opt/scope/1074.md` (Fable, against main 9e99df434) govern
 - D16 (root): #15 S1 merged first, so this branch adds the method to `crates/de-esser/src` (impl only):
   both the per-node and the bank `DeEsser` own no heap (every field, `Coef` and `Chan` included, is
   inline) and return 0.
+
+## Fold after the verifier's PASS
+
+- A fifth capi row, "every native insert" (three tracks of the EQ fixture; inserts parametric-eq,
+  compressor, gate-expander / delay, multiband-compressor / true-peak-limiter, transient-shaper,
+  soft-clip; defaults, no automation): walk == freed, 927,078 bytes; every other owner equality holds.
+  The de-esser is left out: it is not in the native registry on this tree (`effect-compiler`'s factory
+  list), so no session can name it yet. Test value: a heap owner that the compressor, gate, delay,
+  multiband, limiter or transient shaper walk misses or over-counts turns this row red; before it, no
+  committed test caught that.
+- Mutant (PR evidence, restored): drop `+ slice(&self.main_ring)` from the limiter's `ChannelState`
+  walk; the new row goes red: "every native insert: dropping the prepared plan freed 927078 bytes; its
+  retained-bytes walk names 923190".
+- Successor (root files it): the automation walkers stay uncovered until host-core charges
+  `FaderCells.offsets` (`crates/builtins-compiler/src/lib.rs:301`), which `strip_control_table_bytes`
+  (`crates/host-core/src/prepare.rs:645-651`) leaves out. That successor's gate is the
+  builtins-automation capi row this attempt dropped (strip producers 1,016 freed vs 936 charged).
+- The control-only spsc walkers now sit outside the REALTIME_POLICY region; `PcmSourceConsumer`'s walk
+  says it counts queued transfer blocks, so only a quiescent walk means anything.
