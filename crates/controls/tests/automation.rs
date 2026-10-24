@@ -1179,8 +1179,9 @@ fn event_lanes_take_the_own_entry_and_every_reaching_vca_ride() {
     // mixed strip and VCA table with a `both` mute entry and a later second ride of a driven lane.
     {
         use controls::{
-            AutomationIndex, automated_fader_lanes, mute_automation, vca_mute_automation,
-            vca_mute_row, vca_offset_automation,
+            AutomationIndex, ModelView, automated_fader_lanes, continued_fader_lanes,
+            continued_fader_lanes_in, continued_mute_lanes, continued_mute_lanes_in,
+            mute_automation, vca_mute_automation, vca_mute_row, vca_offset_automation,
         };
         let mut mixed = model.clone();
         mixed.automation.push(one(
@@ -1225,6 +1226,36 @@ fn event_lanes_take_the_own_entry_and_every_reaching_vca_ride() {
                             .automation
                             .iter()
                             .any(|entry| vca_mute_row(&entry.target)),
+                    ),
+                );
+            }
+        }
+        // #1864: the continued lanes through indexed views and `vca_reach` slices, as the scans
+        // give, on every pair of these tables, a moved VCA ride and a member leaving its VCA.
+        let mut moved = model.clone();
+        moved.automation[0].segments[0].end_value = -9.0;
+        let mut left = model.clone();
+        left.vcas
+            .iter_mut()
+            .for_each(|vca| vca.members.retain(|m| m.as_str() != "vocal"));
+        let tables = [&model, &mixed, &moved, &left];
+        let indices = tables.map(AutomationIndex::of);
+        let reaches = tables.map(SessionModel::vca_reach);
+        for (a, b) in (0..4).flat_map(|a| (0..4).map(move |b| (a, b))) {
+            let view = |at: usize| ModelView::whole(tables[at]).indexed(&indices[at]);
+            for (strip, at) in model.strips().map(|strip| strip.id.clone()).zip(0..) {
+                let (before, after) = (
+                    (view(a), &reaches[a][at][..]),
+                    (view(b), &reaches[b][at][..]),
+                );
+                assert_eq!(
+                    (
+                        continued_fader_lanes_in(before, after, &strip),
+                        continued_mute_lanes_in(before, after, &strip),
+                    ),
+                    (
+                        continued_fader_lanes(tables[a], tables[b], &strip),
+                        continued_mute_lanes(tables[a], tables[b], &strip),
                     ),
                 );
             }

@@ -725,6 +725,12 @@ fn classify_rows<'a>(
                 ramps,
                 edit_ramps,
                 solo_ramp: monitor.ramp,
+                // #1864: both models' reads, so that the rules look the VCA offset entries up
+                // once an edit reaches more owners than a scan is cheaper for (#1710).
+                automation: [
+                    AutomationReads::lazy(current, STAGE_INDEX_OWNERS),
+                    AutomationReads::lazy(view.structure(), STAGE_INDEX_OWNERS),
+                ],
             },
             monitor,
             seeds,
@@ -1171,9 +1177,8 @@ struct LocalStrip {
 /// rules of [`EffectiveDiff`], computed for the strips whose own level, VCA, solo or following send
 /// moved and for nothing else. A strip or send it does not hold has unchanged effective values.
 struct LocalDiff<'a> {
+    /// The rules, with where the event lanes of the post-change model are read from (#1844).
     rules: LevelRules<'a>,
-    /// Where the event lanes of the post-change model are read from (#1844).
-    automation: AutomationReads<'a>,
     /// Ascending by strip index.
     strips: Vec<LocalStrip>,
     /// Ascending by route index: the gate per source lane in `[current, next]`.
@@ -1185,7 +1190,7 @@ impl<'a> LocalDiff<'a> {
     fn new(rules: LevelRules<'a>, monitor: MonitorBase<'_>, seeds: LocalSeeds) -> Option<Self> {
         let (current, view) = (rules.current, rules.next);
         let next = view.structure();
-        let automation = AutomationReads::lazy(next, STAGE_INDEX_OWNERS);
+        let automation = &rules.automation[1];
         let strip_count = next.tracks.len() + next.submixes.len();
         let any_before = controls::any_solo_in(current, monitor.committed);
         let any_after = controls::any_solo_in(next, monitor.next);
@@ -1280,7 +1285,6 @@ impl<'a> LocalDiff<'a> {
         }
         Some(Self {
             rules,
-            automation,
             strips,
             routes,
         })
@@ -1356,7 +1360,7 @@ impl LevelDiff for LocalDiff<'_> {
             &strip.after,
             [change.own_before, change.own_after],
             self.rules.lengths(&change),
-            || FaderEventLanes::of(self.automation.view(), change.id, change.reach),
+            || FaderEventLanes::of(self.rules.automation[1].view(), change.id, change.reach),
         )
     }
 
@@ -1387,7 +1391,7 @@ impl LevelDiff for LocalDiff<'_> {
     }
 
     fn automation(&self) -> ModelView<'_> {
-        self.automation.view()
+        self.rules.automation[1].view()
     }
 }
 

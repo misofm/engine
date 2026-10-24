@@ -16,6 +16,7 @@ use crate::error::ControlError;
 use crate::lane::Side;
 use crate::registry::resolve;
 use crate::vca::{VCA_MUTE, VCA_OFFSET_DB};
+use crate::view::ModelView;
 use session::Lane;
 use std::collections::BTreeMap;
 
@@ -613,6 +614,8 @@ pub struct AutomationIndex<'a> {
     lanes: BTreeMap<(RenderedRow, &'a StableId), [Option<&'a Automation>; 2]>,
     /// Whether some entry is on a VCA `mute` row ([`vca_mute_row`]).
     any_vca_mute: bool,
+    /// Whether some entry is on a VCA `offset_db` row ([`vca_offset_row`], #1864).
+    any_vca_offset: bool,
 }
 
 impl<'a> AutomationIndex<'a> {
@@ -621,12 +624,16 @@ impl<'a> AutomationIndex<'a> {
     pub fn of(model: &'a SessionModel) -> Self {
         let mut lanes: BTreeMap<_, [Option<&'a Automation>; 2]> = BTreeMap::new();
         let mut any_vca_mute = false;
+        let mut any_vca_offset = false;
         for automation in &model.automation {
             let target = &automation.target;
             let key = match &target.owner {
                 Owner::Strip(id) if fader_row(target) => (RenderedRow::Fader, id),
                 Owner::Strip(id) if mute_row(target) => (RenderedRow::Mute, id),
-                Owner::Vca(id) if vca_offset_row(target) => (RenderedRow::VcaOffset, id),
+                Owner::Vca(id) if vca_offset_row(target) => {
+                    any_vca_offset = true;
+                    (RenderedRow::VcaOffset, id)
+                }
                 Owner::Vca(id) if vca_mute_row(target) => {
                     any_vca_mute = true;
                     (RenderedRow::VcaMute, id)
@@ -644,6 +651,7 @@ impl<'a> AutomationIndex<'a> {
             model,
             lanes,
             any_vca_mute,
+            any_vca_offset,
         }
     }
 
@@ -709,6 +717,13 @@ impl<'a> AutomationIndex<'a> {
     #[must_use]
     pub const fn any_vca_mute(&self) -> bool {
         self.any_vca_mute
+    }
+
+    /// Whether some entry of the indexed table is on a VCA `offset_db` row ([`vca_offset_row`],
+    /// #1864).
+    #[must_use]
+    pub const fn any_vca_offset(&self) -> bool {
+        self.any_vca_offset
     }
 }
 
@@ -867,18 +882,19 @@ fn same_segments(before: &Automation, after: &Automation) -> bool {
 /// carried cell is repositioned in its own table at adoption. #1655 D6: a fader event lane
 /// continues when its own table and each reaching automated VCA `offset_db` table (in ascending
 /// VCA ID) are the same set, bit for bit (a lane with no own entry in either model included).
+///
+/// It scans both tables and computes the strip's VCA reach in each model; a caller that asks for
+/// many strips reads [`continued_fader_lanes_in`] (#1864).
 #[must_use]
 pub fn continued_fader_lanes(
     current: &SessionModel,
     next: &SessionModel,
     strip: &StableId,
 ) -> [bool; 2] {
-    continued_lanes(
-        current,
-        next,
+    continued_fader_lanes_in(
+        (ModelView::whole(current), &current.vca_reach_of(strip)),
+        (ModelView::whole(next), &next.vca_reach_of(strip)),
         strip,
-        fader_automation,
-        vca_offset_automation,
     )
 }
 
@@ -892,7 +908,46 @@ pub fn continued_mute_lanes(
     next: &SessionModel,
     strip: &StableId,
 ) -> [bool; 2] {
-    continued_lanes(current, next, strip, mute_automation, vca_mute_automation)
+    continued_mute_lanes_in(
+        (ModelView::whole(current), &current.vca_reach_of(strip)),
+        (ModelView::whole(next), &next.vca_reach_of(strip)),
+        strip,
+    )
+}
+
+/// [`continued_fader_lanes`] read through views (#1864): `current` and `next` are each a model
+/// with the strip's VCA reach there (its entry of [`SessionModel::vca_reach`], indices into that
+/// model's `vcas`). Lookups when the views are [`ModelView::indexed`], so a successor's strip join
+/// and route loop cost `O(log entries)` per strip, not a scan of both tables.
+#[must_use]
+pub fn continued_fader_lanes_in(
+    current: (ModelView<'_>, &[usize]),
+    next: (ModelView<'_>, &[usize]),
+    strip: &StableId,
+) -> [bool; 2] {
+    continued_lanes(
+        current,
+        next,
+        strip,
+        |view, strip| view.fader_automation(strip),
+        |view, vca| view.vca_automation(vca),
+    )
+}
+
+/// [`continued_mute_lanes`] read through views, as [`continued_fader_lanes_in`] (#1864).
+#[must_use]
+pub fn continued_mute_lanes_in(
+    current: (ModelView<'_>, &[usize]),
+    next: (ModelView<'_>, &[usize]),
+    strip: &StableId,
+) -> [bool; 2] {
+    continued_lanes(
+        current,
+        next,
+        strip,
+        |view, strip| view.mute_automation(strip),
+        |view, vca| view.vca_mute_automation(vca),
+    )
 }
 
 /// The curves of one event lane in one model: its own entry, and each reaching VCA's entry on the
@@ -904,26 +959,24 @@ type LaneCurves<'a> = (Option<&'a Automation>, Vec<(&'a str, &'a Automation)>);
 /// reaching VCAs with an entry on the lane (`vca_entries`, by the rule of [`fader_event_lanes`])
 /// are the same VCAs, in ascending VCA ID, each with the same segments, and the lane has a curve.
 /// With no VCA row automated in either model this is the own-entry rule alone, as before #1655.
+/// Each model comes with the strip's VCA reach there.
 fn continued_lanes<'a>(
-    current: &'a SessionModel,
-    next: &'a SessionModel,
+    current: (ModelView<'a>, &[usize]),
+    next: (ModelView<'a>, &[usize]),
     strip: &StableId,
-    entries: fn(&'a SessionModel, &StableId) -> [Option<&'a Automation>; 2],
-    vca_entries: fn(&'a SessionModel, &StableId) -> [Option<&'a Automation>; 2],
+    entries: impl Fn(&ModelView<'a>, &StableId) -> [Option<&'a Automation>; 2],
+    vca_entries: impl Fn(&ModelView<'a>, &StableId) -> [Option<&'a Automation>; 2],
 ) -> [bool; 2] {
-    if current.automation.is_empty() || next.automation.is_empty() {
+    if current.0.structure().automation.is_empty() || next.0.structure().automation.is_empty() {
         return [false; 2];
     }
-    let curves = |model: &'a SessionModel| -> [LaneCurves<'a>; 2] {
-        let own = entries(model, strip);
+    let curves = |(view, reach): (ModelView<'a>, &[usize])| -> [LaneCurves<'a>; 2] {
+        let own = entries(&view, strip);
         let mut vcas = [Vec::new(), Vec::new()];
-        if model.automation.iter().any(|entry| vca_row(&entry.target)) {
-            for vca in model
-                .vca_reach_of(strip)
-                .into_iter()
-                .filter_map(|index| model.vcas.get(index))
-            {
-                let driven = vca_entries(model, &vca.id);
+        if view.any_vca_row() {
+            let model = view.structure();
+            for vca in reach.iter().filter_map(|&index| model.vcas.get(index)) {
+                let driven = vca_entries(&view, &vca.id);
                 for (lane, curves) in vcas.iter_mut().enumerate() {
                     if let Some(entry) = driven[lane] {
                         curves.push((vca.id.as_str(), entry));
