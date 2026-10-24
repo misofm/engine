@@ -14,7 +14,6 @@ conformance::randomized_effect_test!(
     seeds: 8,
     blocks: 24,
     craft: None,
-    known: &[],
     banks_natively: true,
     witness: true,
 );

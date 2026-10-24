@@ -37,7 +37,6 @@ conformance::randomized_effect_test!(
     seeds: 24,
     blocks: 24,
     craft: None,
-    known: &[],
     banks_natively: true,
     witness: true,
     in_flight: Some(ramp_in_flight),

@@ -87,15 +87,6 @@ pub struct Payload {
 /// matter to it -- for the compressor, in-flight ramps whose channels differ in exactly one field.
 pub type Craft = fn(&mut Draw, &PreparedEffectMetadata, &mut Payload) -> Option<bool>;
 
-/// A defect this differential found, carried by name until the issue that owns it lands.
-///
-/// Each one narrows the generator exactly where the defect lives and nowhere else, so the rest of
-/// the gate keeps running per pull request; the owning crate keeps an `#[ignore]`d twin of its
-/// test without the narrowing as the defect's reproducer. No defect is carried today (#1070's
-/// bind order was the last), so the enum is empty and every differential runs at full strength.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum Known {}
-
 /// One effect's randomized differential.
 pub struct EffectDifferential<'a> {
     /// The registry that admitted the factory under test ([`admit`]): every request the
@@ -113,8 +104,6 @@ pub struct EffectDifferential<'a> {
     pub blocks: usize,
     /// The effect's payload crafting, if it has one.
     pub craft: Option<Craft>,
-    /// The known defects this run narrows around; empty for the full-strength gate.
-    pub known: &'a [Known],
     /// Whether the effect banks at the width this build executes (every launch effect but the
     /// delay, which renders per node everywhere). A bank that stops binding natively is then red
     /// rather than a quiet fall back to scalar instances.
@@ -2713,14 +2702,14 @@ pub fn assert_d7_reports(factory: Box<dyn NativeEffectFactory>) {
 #[macro_export]
 macro_rules! randomized_effect_test {
     ($name:ident, $factory:expr, seeds: $seeds:expr, blocks: $blocks:expr, craft: $craft:expr,
-     known: $known:expr, banks_natively: $banks:expr, witness: $witness:expr $(,)?) => {
+     banks_natively: $banks:expr, witness: $witness:expr $(,)?) => {
         $crate::randomized_effect_test!(
-            $name, $factory, seeds: $seeds, blocks: $blocks, craft: $craft, known: $known,
+            $name, $factory, seeds: $seeds, blocks: $blocks, craft: $craft,
             banks_natively: $banks, witness: $witness, in_flight: None,
         );
     };
     ($name:ident, $factory:expr, seeds: $seeds:expr, blocks: $blocks:expr, craft: $craft:expr,
-     known: $known:expr, banks_natively: $banks:expr, witness: $witness:expr,
+     banks_natively: $banks:expr, witness: $witness:expr,
      in_flight: $in_flight:expr $(,)?) => {
         #[test]
         fn $name() {
@@ -2740,7 +2729,6 @@ macro_rules! randomized_effect_test {
                 seeds: $seeds,
                 blocks: $blocks,
                 craft: $craft,
-                known: $known,
                 banks_natively: $banks,
                 witness: $witness,
                 in_flight: $in_flight,

@@ -25,7 +25,7 @@ pub use protocol_corpus::{
     console_session_fixture, retired_code_rows,
 };
 pub use randomized::{
-    Craft, DifferentialCoverage, EffectDifferential, Known, Payload, admit, assert_d7_reports,
+    Craft, DifferentialCoverage, EffectDifferential, Payload, admit, assert_d7_reports,
     assert_reached, d7_report_violations, run_effect_differential, tail_bound_for_request,
     tail_bound_of,
 };
