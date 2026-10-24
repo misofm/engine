@@ -219,19 +219,18 @@ fn the_boot_alias_table_is_exactly_the_three_alias_constants() {
 #[test]
 fn the_document_carries_its_whole_schema_and_the_engine_s_offsets() {
     let document = render();
-    assert!(document.contains(&format!("\"schema\": \"{SCHEMA}\"")));
-    for export in STAGING_SEQUENCE {
-        assert!(
-            document.contains(&format!("\"{export}\"")),
-            "the staging sequence names {export}"
-        );
-    }
-    for phase in ERROR_PHASES {
-        assert!(
-            document.contains(&format!("\"{phase}\"")),
-            "the phase vocabulary names {phase}"
-        );
-    }
+    let json = parse(&document);
+    assert_eq!(json["schema"], SCHEMA);
+    assert_eq!(
+        json["stagingSequence"],
+        serde_json::json!(STAGING_SEQUENCE),
+        "the staging sequence is the four boot exports, in call order"
+    );
+    assert_eq!(
+        json["errorPhases"],
+        serde_json::json!(ERROR_PHASES),
+        "the phase vocabulary is the six phases, in order"
+    );
     assert_eq!(
         field_offset(&document, "bootOptions", "requireSampleRateHz"),
         8

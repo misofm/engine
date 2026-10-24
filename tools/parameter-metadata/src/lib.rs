@@ -82,7 +82,7 @@ macro_rules! append {
 
 /// JSON emission for the SDK documents (#382).
 ///
-/// The documents are `Serialize` models written by `serde_json`'s standard pretty printer, so
+/// The documents are `Serialize` models written by `serde_json` as compact JSON, so
 /// escaping, separators, nesting and whitespace are the serializer's, never a hand-placed comma.
 /// [`Num`] writes a finite `f32` in [`super::number`]'s spelling through a raw value, so a
 /// number's bytes never depend on the serializer's float printer.
@@ -115,10 +115,9 @@ mod json {
         }
     }
 
-    /// Write `value` as a pretty-printed document with a trailing newline.
+    /// Write `value` as one line of compact JSON with a trailing newline.
     pub(crate) fn document<T: Serialize>(value: &T) -> String {
-        let mut text =
-            serde_json::to_string_pretty(value).expect("an in-memory JSON write cannot fail");
+        let mut text = serde_json::to_string(value).expect("an in-memory JSON write cannot fail");
         text.push('\n');
         text
     }

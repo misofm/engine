@@ -15,7 +15,8 @@ Do not claim before launch without an owner comment here.
 - Pulled forward by the backlog sprint (owner goal of 2026-10-24); the launch hold is discharged.
 - Root decisions: byte identity of every generated document, no re-pin; part 2 is one assertion
   in an existing gate, not a generated constants prelude. No new test.
-- Emission: `Serialize` models (serde derive) written by `serde_json`'s standard pretty printer.
+- Emission: `Serialize` models (serde derive) written by `serde_json` as compact JSON
+  (`to_string` plus a trailing newline).
   `preserve_order` is not used: struct field order is the schema order, and the feature would
   unify into every workspace `serde_json` user. `raw_value` carries each `f32` in `number()`'s
   spelling. New direct dependency `serde =1.0.228` (already in `Cargo.lock`; one lock line).
@@ -26,15 +27,20 @@ Do not claim before launch without an owner comment here.
   generated documents. The verifier's minor finding on non-string keys in that formatter goes
   away with it. The tests that scanned the old line layout (`tests/abi_layout.rs`,
   `tests/round_trip.rs`) now read the parsed JSON; their claims are unchanged.
+- Second change (root): the pretty print made the shipped metadata 54 % larger, a real cost for the
+  browser SDK, so both documents are compact JSON: no formatter at all and the smallest asset. The
+  regeneration check guards these generated files, not a human diff.
 - Part 2: `scripts/check-web-audioworklet.sh` requires each shipped JS file to declare
   `COMMAND_RECORD_BYTES` exactly once, equal to the shipped layout's `commandRecord.bytes`.
 
 ## Evidence
 
-- Whitespace-only re-pin: each old and new document, parsed with keys in order and numbers kept as
-  text, is equal. Bytes: `miso-engine-v1-parameter-metadata.json` 217,854 -> 335,632;
+- Whitespace-only re-pin: each document on main and its compact successor, parsed with keys in
+  order and numbers kept as text, are equal. Bytes (main, pretty, compact):
+  `miso-engine-v1-parameter-metadata.json` 217,854 / 335,632 / 171,526;
   `miso-engine-v1-abi-layout.json` and `scripts/fixtures/abi-layout-v1-self-test.json`
-  27,915 -> 39,863; session keys and response frame unchanged. `sdk/src/generated` is unchanged;
-  the built artifact's two JSON documents equal `sdk/assets`.
+  27,915 / 39,863 / 21,804. Session keys and response frame are unchanged; `sdk/src/generated` is
+  unchanged; the built artifact's two JSON documents equal `sdk/assets`. Both schema gates'
+  self-tests mutate the parsed value, so they apply to compact JSON unchanged.
 - Red first: `COMMAND_RECORD_BYTES = 273` in the worklet JS (tree and artifact) passes the gate
   before the assertion and fails it after; the same mutant in the host JS fails it too.
