@@ -239,8 +239,7 @@ pub fn reference_gate_expander_process(
         link,
         main,
         sidechain,
-        None,
-        None,
+        (None, None),
     )
 }
 
@@ -272,8 +271,7 @@ pub fn reference_gate_expander_process_with_link_glide(
         link,
         main,
         None,
-        None,
-        Some(glide),
+        (None, Some(glide)),
     )
 }
 
@@ -315,8 +313,7 @@ pub fn reference_gate_expander_process_with_timing_change(
         link,
         main,
         None,
-        Some(change),
-        None,
+        (Some(change), None),
     )
 }
 
@@ -330,8 +327,10 @@ fn process(
     link: ReferenceGateLink,
     main: (&[f64], &[f64]),
     sidechain: Option<(&[f64], &[f64])>,
-    change: Option<ReferenceGateTimingChange>,
-    mut glide: Option<ReferenceGateLinkGlide>,
+    (change, mut glide): (
+        Option<ReferenceGateTimingChange>,
+        Option<ReferenceGateLinkGlide>,
+    ),
 ) -> Result<ReferenceGateTrace, ReferenceGateExpanderError> {
     let frames = main.0.len();
     if main.1.len() != frames

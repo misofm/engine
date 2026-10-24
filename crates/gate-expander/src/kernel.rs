@@ -549,7 +549,7 @@ mod glide_law_tests {
                     // lane clear of its partner's non-finite word.
                     if frame % 3 == SAMPLES % 3 {
                         for (lane, word) in partner.iter_mut().enumerate() {
-                            *word = if (frame as usize + lane) % 2 == 0 {
+                            *word = if (frame as usize + lane).is_multiple_of(2) {
                                 f32::INFINITY
                             } else {
                                 f32::NAN

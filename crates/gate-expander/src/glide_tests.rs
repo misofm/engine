@@ -154,8 +154,14 @@ fn oracle_values() -> Values {
 /// Square waves 20 dB apart, the sign flipping every eight samples: the left at -30 dBFS, open
 /// under every mode, and the right at -50 dBFS, closed alone and opened by either link.
 fn oracle_signals() -> (Vec<f32>, Vec<f32>) {
-    let (loud, quiet) = (0.031_622_777_f32, 0.003_162_277_7_f32);
-    let sign = |frame: usize| if (frame / 8) % 2 == 0 { 1.0 } else { -1.0 };
+    let (loud, quiet) = (0.031_622_78_f32, 0.003_162_278_f32);
+    let sign = |frame: usize| {
+        if (frame / 8).is_multiple_of(2) {
+            1.0
+        } else {
+            -1.0
+        }
+    };
     (
         (0..FRAMES).map(|frame| sign(frame) * loud).collect(),
         (0..FRAMES).map(|frame| sign(frame) * quiet).collect(),
@@ -221,7 +227,7 @@ fn deviation(rendered: &[f32], gain_db: &[f64], dry: &[f64], phase: &[ReferenceG
                 "frame {frame}"
             );
         }
-        let applied = 20.0 * (f64::from(rendered[frame]).abs() / dry[frame].abs()).log10();
+        let applied = 20.0 * math::log10(f64::from(rendered[frame]).abs() / dry[frame].abs());
         worst = worst.max((applied - gain_db[frame]).abs());
     }
     worst
