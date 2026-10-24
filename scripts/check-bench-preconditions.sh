@@ -133,6 +133,38 @@ bench_other_siblings() {
     printf '%s' "${out[*]-}"
 }
 
+# The live-producer row's core (#938): the highest CPU that shares `cpu`'s L3 and is neither `cpu`
+# nor one of its SMT siblings, from `cpu`'s `thread_siblings_list` and its L3 `shared_cpu_list`
+# texts. Highest for the reason `bench_highest_cpu` gives. Fails when no CPU qualifies: the row is
+# then refused, never run with its producer on the render core or its sibling.
+bench_producer_cpu() {
+    local cpu=$1 siblings_text=$2 l3_text=$3 siblings l3 candidate chosen=
+    siblings=" $(bench_expand_cpu_list "$siblings_text") " || return 1
+    l3=$(bench_expand_cpu_list "$l3_text") || return 1
+    [[ "$siblings" == *" $cpu "* && " $l3 " == *" $cpu "* ]] || return 1
+    for candidate in $l3; do
+        [[ "$siblings" == *" $candidate "* ]] || chosen=$candidate
+    done
+    [[ -n "$chosen" ]] || return 1
+    printf '%s' "$chosen"
+}
+
+# `bench_producer_cpu` over the topology the kernel exports for `cpu` under `sysfs` (default
+# `/sys/devices/system/cpu`): its `topology/thread_siblings_list` and the `shared_cpu_list` of its
+# cache index whose `level` is 3. Fails when either is unreadable or no CPU qualifies.
+bench_read_producer_cpu() {
+    local cpu=$1 sysfs=${2:-/sys/devices/system/cpu} index l3_path=
+    local base="$sysfs/cpu$cpu"
+    [[ -r "$base/topology/thread_siblings_list" ]] || return 1
+    for index in "$base"/cache/index*; do
+        [[ -r "$index/level" && "$(< "$index/level")" == 3 ]] || continue
+        l3_path="$index/shared_cpu_list"
+        break
+    done
+    [[ -n "$l3_path" && -r "$l3_path" ]] || return 1
+    bench_producer_cpu "$cpu" "$(< "$base/topology/thread_siblings_list")" "$(< "$l3_path")"
+}
+
 # ---------------------------------------------------------------------------------------------
 # Self-test: every predicate driven to both verdicts.
 # ---------------------------------------------------------------------------------------------
@@ -208,6 +240,32 @@ cpu7 100 0 5 1000 0 0 0 0 0 0'
     expect 'a core with no sibling names none' "$(equals "$(bench_other_siblings 7 '7')" '')"
     expect 'a sibling range excludes the pinned cpu' \
         "$(equals "$(bench_other_siblings 6 '6-7')" '7')"
+
+    expect 'the producer core shares the L3 and is not the SMT sibling' \
+        "$(equals "$(bench_producer_cpu 31 '15,31' '12-15,28-31')" '30')"
+    expect 'the producer core skips a sibling that sorts highest' \
+        "$(equals "$(bench_producer_cpu 15 '15,31' '12-15,28-31')" '30')"
+    expect 'a core with no SMT sibling may take any other core of its L3' \
+        "$(equals "$(bench_producer_cpu 3 '3' '0-3')" '2')"
+    expect 'an L3 holding only the core and its sibling has no producer core' \
+        "$(yes_no bench_producer_cpu 31 '15,31' '15,31' | sed 's/^ok$/no/;s/^no$/ok/')"
+    expect 'an L3 list that omits the core itself is refused' \
+        "$(yes_no bench_producer_cpu 31 '15,31' '0-3' | sed 's/^ok$/no/;s/^no$/ok/')"
+    expect 'a malformed L3 list is refused' \
+        "$(yes_no bench_producer_cpu 31 '15,31' 'cache' | sed 's/^ok$/no/;s/^no$/ok/')"
+    local sysfs
+    sysfs=$(mktemp -d)
+    mkdir -p "$sysfs/cpu31/topology" "$sysfs/cpu31/cache/index2" "$sysfs/cpu31/cache/index3"
+    printf '15,31\n' >"$sysfs/cpu31/topology/thread_siblings_list"
+    printf '2\n' >"$sysfs/cpu31/cache/index2/level"
+    printf '15,31\n' >"$sysfs/cpu31/cache/index2/shared_cpu_list"
+    printf '3\n' >"$sysfs/cpu31/cache/index3/level"
+    printf '12-15,28-31\n' >"$sysfs/cpu31/cache/index3/shared_cpu_list"
+    expect 'the producer core is read from the level-3 cache, not the L2' \
+        "$(equals "$(bench_read_producer_cpu 31 "$sysfs")" '30')"
+    expect 'a host that exports no topology has no producer core' \
+        "$(yes_no bench_read_producer_cpu 7 "$sysfs" | sed 's/^ok$/no/;s/^no$/ok/')"
+    rm -rf -- "$sysfs"
 
     if [[ "$failures" != 0 ]]; then
         printf 'bench preconditions: %s FAILED case(s)\n' "$failures" >&2

@@ -225,7 +225,7 @@ use console_workload::mixing_automation::{
 };
 use console_workload::{
     BypassCensus, LaneGroup, ObservationArm, PlanConfig, QUANTUM, SAMPLE_RATE_HZ, SessionRuntime,
-    WINDOW_BLOCKS, Workload, native_session_rows,
+    SourceFeed, WINDOW_BLOCKS, Workload, native_session_rows,
 };
 use effect_compiler::launch_native_effect_registry;
 use effect_contract::{
@@ -247,6 +247,14 @@ const ISSUE: u32 = 149;
 const METERED_PAIR: [Workload; 2] = [
     Workload::SixtyFourTrackConsole,
     Workload::SixtyFourTrackConsoleMetered,
+];
+
+/// The gain/pan ring row and its live-producer twin (issue #938): one plan, fed by a frozen driver
+/// and by a producer thread writing the same words into production rings. Their digests must agree,
+/// and the run asserts it before it emits either record.
+const LIVE_PAIR: [Workload; 2] = [
+    Workload::SixtyFourTrackGainPanRing,
+    Workload::SixtyFourTrackGainPanLive,
 ];
 
 /// The session rows whose record states the bypass their compiled session carries (issue #1085):
@@ -290,6 +298,10 @@ pub(crate) fn main() {
     // Feature detection ends here, before every timed observation.
     let backend = Backend::current();
     let metadata = &Metadata::gather();
+    // Issue #938: this thread renders every row, pinned to the runner's core before any plan is
+    // built; the live row's producer goes to the one other core of the process mask.
+    let placement = affinity::Placement::pin_render_thread(metadata);
+    placement.refuse_unplaced_producer(metadata);
 
     // Every workload is measured before any record is emitted. A decomposition row's floor
     // columns subtract the control row the floor table names, and a subtraction between two rows
@@ -301,8 +313,10 @@ pub(crate) fn main() {
     // the metered row (issue #881), the bus-and-send row (issue #1227) and the console-strip rows
     // (issue #1085). One list, so the floor subtraction below finds a control wherever it sits.
     let rows: Vec<Workload> = native_session_rows().collect();
-    let sessions: Vec<SessionMeasurement> =
-        rows.iter().copied().map(SessionMeasurement::run).collect();
+    let sessions: Vec<SessionMeasurement> = rows
+        .iter()
+        .map(|workload| SessionMeasurement::run(*workload, &placement))
+        .collect();
     // Issue #1758: the standing console prepared with the product's lanes, timed by the session
     // rows' own loop straight after them, and issue #1763's lane-group arms. Emitted last.
     let product_lanes: Vec<ProductLanesMeasurement> = PRODUCT_LANE_ARMS
@@ -322,6 +336,14 @@ pub(crate) fn main() {
     assert_eq!(
         metered, unmetered,
         "the metered console row rendered different output: a meter changed the signal"
+    );
+    // And the live row's (issue #938): its producer submits the ring row's frozen words into
+    // production rings, so it renders the ring row's bits. A difference is a feed defect, and the
+    // row would publish the cost of other input under its name.
+    let [ring, live] = LIVE_PAIR.map(digest_of);
+    assert_eq!(
+        live, ring,
+        "the live-producer row rendered different output from the ring row"
     );
     // And the sparse row's (issue #1085): half its inputs are silent, so it renders neither the
     // all-active row's bits nor the idle row's. Either equality means the feed never reached the
@@ -448,6 +470,33 @@ struct SessionMeasurement {
     meters: Option<MeteredEvidence>,
     /// The app shape's bypass census (issue #1085), read at bind, and `None` on every other row.
     bypass: Option<BypassCensus>,
+    /// The live row's producer placement and underruns (issue #938), and `None` on every other
+    /// row, whose record is unchanged.
+    live: Option<LiveEvidence>,
+}
+
+/// What the live-producer row states beside its timing (issue #938).
+struct LiveEvidence {
+    /// The core the producer thread was pinned to, or `None` when it was not pinned.
+    producer_cpu: Option<usize>,
+    /// Where that core sits relative to the render core ([`affinity::Placement::name`]).
+    placement: &'static str,
+    /// Missing in-region frames over every ring, warmup and timed blocks together.
+    underruns: u64,
+}
+
+impl LiveEvidence {
+    /// The live row's producer group, with the trailing comma a splice needs.
+    fn record_fields(&self) -> String {
+        format!(
+            "\"producer_cpu\":{cpu},\"producer_placement\":\"{placement}\",\"underruns\":{underruns},",
+            cpu = self
+                .producer_cpu
+                .map_or_else(|| "null".to_owned(), |cpu| cpu.to_string()),
+            placement = self.placement,
+            underruns = self.underruns,
+        )
+    }
 }
 
 /// What the metered console row states beside its timing (issue #881).
@@ -477,15 +526,44 @@ struct MeteredEvidence {
 }
 
 impl SessionMeasurement {
-    fn run(workload: Workload) -> Self {
-        Self::run_for(workload, OBSERVATIONS)
+    /// One session row of the runner's run, its live producer (issue #938) on `placement`'s core.
+    fn run(workload: Workload, placement: &affinity::Placement) -> Self {
+        Self::run_placed(workload, placement, OBSERVATIONS)
     }
 
-    /// [`SessionMeasurement::run`] over `observations` timed blocks. Only the unit test below
-    /// passes anything but [`OBSERVATIONS`], and the record it produces says so in its
+    /// [`SessionMeasurement::run`] over `observations` timed blocks with an unpinned producer.
+    /// Only the unit tests below call it, and the record it produces says so in its
     /// `observations` field, which the validator pins to the frozen count.
+    #[cfg(test)]
     fn run_for(workload: Workload, observations: usize) -> Self {
-        Self::run_prepared(workload, &mut SessionRuntime::new(workload), observations)
+        Self::run_placed(workload, &affinity::Placement::UNPINNED, observations)
+    }
+
+    /// [`SessionMeasurement::run`] over `observations` timed blocks.
+    ///
+    /// The live row (issue #938) starts its producer here, pinned by `placement`, before the
+    /// warmup and the clock, and joins it after the last timed block; its record states where the
+    /// producer ran and how many frames its rings underran.
+    fn run_placed(
+        workload: Workload,
+        placement: &affinity::Placement,
+        observations: usize,
+    ) -> Self {
+        let mut runtime = SessionRuntime::new(workload);
+        let live = workload.source_feed() == SourceFeed::LiveProducer;
+        if live {
+            runtime.start_live_producer(placement.producer_pin());
+        }
+        let mut measured = Self::run_prepared(workload, &mut runtime, observations);
+        if live {
+            let report = runtime.finish_live_producer();
+            measured.live = Some(LiveEvidence {
+                producer_cpu: placement.producer_cpu,
+                placement: placement.name,
+                underruns: report.underrun_frames,
+            });
+        }
+        measured
     }
 
     /// The timed loop of every session row, over a runtime the caller prepared: one block of the
@@ -508,11 +586,15 @@ impl SessionMeasurement {
         // Untimed settling. Only the idle row asks for any, and it asks for a lot: see
         // `Workload::warmup_blocks`.
         for observation in 0..workload.warmup_blocks() {
+            runtime.await_live_feed(observation as u64);
             let _ = runtime.render(observation as u64);
         }
         audit::warm_up();
         audit::reset();
         for observation in 0..observations {
+            // Issue #938: the live row's rings hold this block and more before the clock starts.
+            // A no-op on every other row.
+            runtime.await_live_feed(observation as u64);
             // The timed region is one block of the production render entry and nothing else. The
             // output identity is taken outside it, which `timing::timed` enforces structurally.
             let (elapsed_ns, result) = timing::timed(|| runtime.render(observation as u64));
@@ -537,6 +619,7 @@ impl SessionMeasurement {
             render_errors,
             meters,
             bypass,
+            live: None,
         }
     }
 
@@ -572,7 +655,7 @@ impl SessionMeasurement {
                 "\"p95_ns_per_block\":{p95_ns},\"p99_ns_per_block\":{p99_ns},",
                 "\"max_ns_per_block\":{max_ns},\"output_sha256\":\"{digest}\",",
                 "\"render_errors\":{errors},\"render_total_forbidden_operations\":{forbidden},",
-                "{meters}{bypass}{floor}{metadata}",
+                "{meters}{bypass}{live}{floor}{metadata}",
                 "\"descriptive_only\":true,",
                 "\"statistical_method\":\"nearest-rank percentiles over per-block nanoseconds; ",
                 "one warmup pass and two measured rounds; descriptive only; no threshold\"}}"
@@ -620,6 +703,11 @@ impl SessionMeasurement {
                     census.bypassed_tracks
                 )
             }),
+            // Issue #938: the live row's producer group. Empty on every other row.
+            live = self
+                .live
+                .as_ref()
+                .map_or_else(String::new, LiveEvidence::record_fields),
             // Issue #184's floor accounting. The whole group is absent when the runner had no
             // performance counter to measure the pinned core's clock with, which is the shape
             // every sealed record already has and is what makes the columns additive.
@@ -2904,6 +2992,203 @@ fn backend_name(backend: Backend) -> &'static str {
     }
 }
 
+/// Where the bench's render thread and the live row's producer thread run (issue #938).
+///
+/// The runner pins the process with `taskset`; this module pins each thread inside it. The render
+/// thread (the one that runs `main`, and so renders every row) goes to the runner's core,
+/// `MISO_ENGINE_BENCH_CPU_AFFINITY`, and the producer to the one other core of the process mask
+/// the runner launched it with. The placement is then read from the kernel's topology rather than
+/// taken on trust: `same_ccd` is a core that shares the render core's L3 and is not its SMT
+/// sibling, the production placement the row measures.
+///
+/// Thread pinning is Linux-only, and so is this module's body: on any other target the bench pins
+/// nothing and names the placement `unsupported_platform`, which a controlled run refuses. That is
+/// a property of this tool, never of the engine.
+mod affinity {
+    use bench_support::metadata::Metadata;
+
+    /// The render core and the producer core, and where the second sits relative to the first.
+    pub(crate) struct Placement {
+        /// The producer thread's core, or `None` when the producer is not pinned.
+        pub(crate) producer_cpu: Option<usize>,
+        /// `same_ccd`, `smt_sibling`, `other_l3`, `same_cpu`, `topology_unavailable`,
+        /// `no_producer_cpu`, `unpinned` or `unsupported_platform`.
+        pub(crate) name: &'static str,
+    }
+
+    impl Placement {
+        /// No core named: the render thread stays where it is and the producer runs unpinned.
+        #[cfg(test)]
+        pub(crate) const UNPINNED: Self = Self {
+            producer_cpu: None,
+            name: "unpinned",
+        };
+
+        /// Pins the calling thread to the runner's core and chooses the producer's core: the
+        /// process mask, read before the pin, less the render core, when exactly one core is left.
+        ///
+        /// Without a runner core (an uncontrolled run) nothing is pinned and the placement is
+        /// `unpinned`.
+        ///
+        /// # Panics
+        ///
+        /// Panics if the runner named a core the kernel refuses to pin this thread to, or if the
+        /// thread is not running there afterwards.
+        pub(crate) fn pin_render_thread(metadata: &Metadata) -> Self {
+            let render_cpu = metadata
+                .var("MISO_ENGINE_BENCH_CPU_AFFINITY")
+                .ok()
+                .and_then(|cpu| cpu.parse::<usize>().ok());
+            imp::pin_render_thread(render_cpu)
+        }
+
+        /// The closure the live producer thread runs first: pins it to the producer core, or does
+        /// nothing when the producer is not pinned.
+        pub(crate) fn producer_pin(&self) -> impl FnOnce() + Send + 'static {
+            let cpu = self.producer_cpu;
+            move || {
+                if let Some(cpu) = cpu {
+                    imp::pin_this_thread(cpu);
+                }
+            }
+        }
+
+        /// Refuses, before anything is timed, a controlled run whose producer is not on a core of
+        /// the render core's L3 other than its SMT sibling ([`Placement::refusal`]).
+        ///
+        /// # Panics
+        ///
+        /// Panics with the refusal when the run is controlled and the placement is not `same_ccd`.
+        pub(crate) fn refuse_unplaced_producer(&self, metadata: &Metadata) {
+            let controlled = metadata
+                .var("MISO_ENGINE_BENCH_MEASUREMENT_CONTROL")
+                .is_ok_and(|control| control == "controlled");
+            if let Some(refusal) = self.refusal(controlled) {
+                panic!("{refusal}");
+            }
+        }
+
+        /// The refusal of a run whose producer placement it cannot publish, or `None`.
+        ///
+        /// A controlled number for a producer on the render core itself, or on its sibling, or
+        /// with no core of its own, would measure another placement under the row's name, so a
+        /// controlled run admits `same_ccd` alone. An uncontrolled run states its placement and the
+        /// validator reads it.
+        pub(crate) fn refusal(&self, controlled: bool) -> Option<String> {
+            (controlled && self.name != "same_ccd").then(|| {
+                format!(
+                    "refusing the run (live-producer row placement): producer placement {} (a \
+                     controlled run needs the process mask to hold the render core and one core \
+                     that shares its L3 and is not its SMT sibling)",
+                    self.name
+                )
+            })
+        }
+    }
+
+    /// The cores of a kernel CPU list such as `12-15,28-31`, or `None` if it does not parse.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    pub(crate) fn parse_cpu_list(list: &str) -> Option<Vec<usize>> {
+        let mut cpus = Vec::new();
+        for part in list.trim().split(',') {
+            match part.split_once('-') {
+                Some((first, last)) => {
+                    let (first, last) = (first.parse().ok()?, last.parse::<usize>().ok()?);
+                    if first > last {
+                        return None;
+                    }
+                    cpus.extend(first..=last);
+                }
+                None => cpus.push(part.parse().ok()?),
+            }
+        }
+        Some(cpus)
+    }
+
+    #[cfg(target_os = "linux")]
+    mod imp {
+        use super::{Placement, parse_cpu_list};
+        use rustix::thread::{CpuSet, sched_getaffinity, sched_getcpu, sched_setaffinity};
+
+        pub(super) fn pin_render_thread(render_cpu: Option<usize>) -> Placement {
+            let Some(render_cpu) = render_cpu else {
+                return Placement {
+                    producer_cpu: None,
+                    name: "unpinned",
+                };
+            };
+            let mask = sched_getaffinity(None).expect("the process affinity mask");
+            let others: Vec<usize> = (0..CpuSet::MAX_CPU)
+                .filter(|&cpu| cpu != render_cpu && mask.is_set(cpu))
+                .collect();
+            pin_this_thread(render_cpu);
+            match others.as_slice() {
+                [producer_cpu] => Placement {
+                    producer_cpu: Some(*producer_cpu),
+                    name: classify(render_cpu, *producer_cpu),
+                },
+                _ => Placement {
+                    producer_cpu: None,
+                    name: "no_producer_cpu",
+                },
+            }
+        }
+
+        pub(super) fn pin_this_thread(cpu: usize) {
+            let mut set = CpuSet::new();
+            set.set(cpu);
+            sched_setaffinity(None, &set)
+                .unwrap_or_else(|error| panic!("pinning a bench thread to cpu {cpu}: {error}"));
+            // The kernel moves the calling thread before `sched_setaffinity` returns.
+            assert_eq!(
+                sched_getcpu(),
+                cpu,
+                "a bench thread is not running on its core"
+            );
+        }
+
+        /// Where `producer` sits relative to `render`, read from sysfs.
+        fn classify(render: usize, producer: usize) -> &'static str {
+            let read = |path: String| std::fs::read_to_string(path).ok();
+            let cpu = format!("/sys/devices/system/cpu/cpu{render}");
+            let siblings = read(format!("{cpu}/topology/thread_siblings_list"))
+                .and_then(|list| parse_cpu_list(&list));
+            let l3 = (0..16)
+                .find(|index| {
+                    read(format!("{cpu}/cache/index{index}/level"))
+                        .as_deref()
+                        .map(str::trim)
+                        == Some("3")
+                })
+                .and_then(|index| read(format!("{cpu}/cache/index{index}/shared_cpu_list")))
+                .and_then(|list| parse_cpu_list(&list));
+            match (siblings, l3) {
+                _ if producer == render => "same_cpu",
+                (Some(siblings), _) if siblings.contains(&producer) => "smt_sibling",
+                (Some(_), Some(l3)) if l3.contains(&producer) => "same_ccd",
+                (Some(_), Some(_)) => "other_l3",
+                _ => "topology_unavailable",
+            }
+        }
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    mod imp {
+        use super::Placement;
+
+        pub(super) fn pin_render_thread(_render_cpu: Option<usize>) -> Placement {
+            Placement {
+                producer_cpu: None,
+                name: "unsupported_platform",
+            }
+        }
+
+        pub(super) fn pin_this_thread(_cpu: usize) {
+            unreachable!("no producer core is chosen on this platform");
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3260,6 +3545,84 @@ mod tests {
             !record_validator_accepts(&record, &format!("{frozen} | .source_feed = \"bound\"")),
             "a record claiming the retired bound feed"
         );
+    }
+
+    /// Issue #938: the live-producer row, run short through the real subject with its producer
+    /// started and joined by `SessionMeasurement`, renders with no forbidden operation and no
+    /// underrun, prints its producer group once, and the record validator accepts it at the frozen
+    /// count. Its bits against the ring row's are `console-workload`'s claim, not this test's.
+    ///
+    /// The producer is unpinned here (a test has no runner core), so the record states
+    /// `unpinned` and no core, which the validator accepts only off a controlled run. The
+    /// validator's own mutations of the group are `scripts/test-console-benchmark.sh`'s.
+    ///
+    /// Red mutations: drop `{live}` from the format string -- the group assertions fail; skip
+    /// `start_live_producer` in `run_placed` -- the producer is not running and the run panics.
+    #[test]
+    fn the_live_producer_row_prints_its_producer_group() {
+        let live = Workload::SixtyFourTrackGainPanLive;
+        let measured = SessionMeasurement::run_for(live, SHORT_RUN_OBSERVATIONS);
+        assert_eq!(measured.render_errors, 0);
+        assert_eq!(
+            measured.audit.total(),
+            0,
+            "a forbidden operation on the render path"
+        );
+        let record = measured.record(live, 1, Backend::current(), Metadata::gather(), None, None);
+        println!("{record}");
+        assert!(
+            record.contains(
+                "\"producer_cpu\":null,\"producer_placement\":\"unpinned\",\"underruns\":0,"
+            ),
+            "the producer group, stated once: {record}"
+        );
+        assert_eq!(record.matches("\"underruns\":").count(), 1);
+        assert!(record.contains("\"source_feed\":\"live_producer\","));
+        assert!(
+            record_validator_accepts(&record, ".observations = 1000"),
+            "the record at the frozen count"
+        );
+    }
+
+    /// Issue #938: a controlled run admits a producer on another core of the render core's L3
+    /// alone; every other placement the bench can name is refused before timing, by name, and an
+    /// uncontrolled run is never refused for its placement.
+    #[test]
+    fn a_controlled_run_refuses_every_producer_placement_but_same_ccd() {
+        let placed = |name| affinity::Placement {
+            producer_cpu: None,
+            name,
+        };
+        assert_eq!(placed("same_ccd").refusal(true), None);
+        for name in [
+            "smt_sibling",
+            "other_l3",
+            "same_cpu",
+            "topology_unavailable",
+            "no_producer_cpu",
+            "unpinned",
+            "unsupported_platform",
+        ] {
+            let refusal = placed(name)
+                .refusal(true)
+                .expect("a controlled run refuses");
+            assert!(refusal.contains(name), "{refusal}");
+            assert_eq!(placed(name).refusal(false), None, "{name}");
+        }
+    }
+
+    /// Issue #938: the bench reads the kernel's CPU lists, ranges and single cores alike, and
+    /// refuses a list it cannot read rather than guessing a core set.
+    #[test]
+    fn the_cpu_list_parser_reads_ranges_and_single_cores() {
+        assert_eq!(
+            affinity::parse_cpu_list("12-15,28-31\n"),
+            Some(vec![12, 13, 14, 15, 28, 29, 30, 31])
+        );
+        assert_eq!(affinity::parse_cpu_list("15,31"), Some(vec![15, 31]));
+        assert_eq!(affinity::parse_cpu_list("7"), Some(vec![7]));
+        assert_eq!(affinity::parse_cpu_list("3-1"), None);
+        assert_eq!(affinity::parse_cpu_list("a-3"), None);
     }
 
     /// Issue #881: the metered console row, run short through the real subject, renders the

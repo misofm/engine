@@ -40,3 +40,16 @@ Carry an exact per-chain "input is symmetric" fact from the producing chain's ow
 
 - 987a: `crates/rack/tests/mono_reengage.rs` `an_asymmetric_input_window_declines_and_waits_for_a_proof`; mutants in
   `crates/rack/tests/MUTATIONS.md` (issue #987).
+- 987b: `crates/graph/src/runtime.rs` `input_producer_table` (bind) and `Runtime::execute` (per block);
+  test `crates/graph-compiler/src/tests/console_banking.rs`
+  `a_later_mono_chain_arms_on_its_producers_and_renders_the_dual_bits` (`[48, 4]` armed, `[24, 2]` on
+  the #970 rule alone); mutants 987-1..3 in `crates/graph/tests/MUTATIONS.md`. One-time digest of
+  every `native_session_rows()` workload, armed and forced off, 256 blocks after warm-up, base
+  `0f8641cd3` against the branch: all 30 digests and collapse counters identical (no standing row
+  has a later mono chain, as the scope note said).
+- 987b follow-up (root, after the PASS verdict; paths `tools/console-workload/tests/chain_shape.rs`,
+  `crates/rack/src/lib.rs` and `crates/host-core/tests/collapse_arming.rs` authorized for docs/literal):
+  `PlanUnitEligibility.armed_on_input` added (`Runtime::armed_on_input`: a producer row and the join armed
+  it), asserted in the graph-compiler test; the producer table's buffer-match and unfolded-lane clauses are
+  `debug_assert!`s (unreachable: `scatter_target` never redirects into a bank member, and a folded lane's
+  only reader is a retired route op); stale #970-only docs in rack and `collapse_arming.rs` updated.
