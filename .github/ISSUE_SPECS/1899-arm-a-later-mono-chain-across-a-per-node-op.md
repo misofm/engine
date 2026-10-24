@@ -61,8 +61,10 @@ Op table (slice item 1), verified on main `c6e295947`:
   "arming on this block's words alone". The case only the sticky bit catches is an op whose input
   was unequal and is equal again while its state still differs: the producer chain's silent skip
   (`resident_zero`) after an asymmetric episode.
-- `Identity` with one input between two banks of one track: not admitted (no production lowering
-  was found to emit one between chains; recorded, not chased).
+- `Identity` with one input between two banks of one track: **moot**. The only identity stages
+  inside a strip are the alias candidates `PostSimd1`, `PostDynamic` and `PostSimd2PreFader`
+  (`program::is_alias_candidate`), and `lower` elides each one that has one undelayed main input
+  and no sidechain; one that keeps its op has a PDC-delayed input, which admission excludes.
 
 ## Evidence
 
