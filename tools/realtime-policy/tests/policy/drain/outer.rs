@@ -189,6 +189,39 @@ fn the_finite_outer_loops_pass() {
     each_row(rows, |name, text| accepts(name, &text));
 }
 
+/// #1418 D1 (MINOR-2): the walk has no depth cap. A 64-link rebinding chain and a 60-level nest of
+/// distinctly named bank loops each give one answer.
+#[test]
+fn deep_selecting_chains_pass() {
+    let links: String = (0..63)
+        .map(|_| "        let control = &mut control;\n")
+        .collect();
+    let chain = format!(
+        "fn drain(controls: &mut [Consumer<Record>; 2]) {{\n    for lane in 0..2 {{\n        let control = &mut controls[lane];\n{links}{}    }}\n}}",
+        counted_drain("")
+    );
+    let mut nest = format!(
+        "        for control in &mut b59.controls {{\n{}        }}\n",
+        counted_drain("")
+    );
+    for level in (0..60).rev() {
+        let outer = if level == 0 {
+            "cfg".to_owned()
+        } else {
+            format!("b{}", level - 1)
+        };
+        nest = format!("    for b{level} in &mut {outer}.banks {{\n{nest}    }}\n");
+    }
+    let nest = format!("fn drain({CONFIG_MUT}) {{\n{nest}}}");
+    each_row(
+        [
+            ("outer-64-link-chain", chain),
+            ("outer-60-level-nest", nest),
+        ],
+        |name, text| accepts(name, &text),
+    );
+}
+
 /// #1418 D1: a finite loop around a counted drain that can drain one queue on more than one pass is
 /// refused. One row per way the loop can fail to select, or let the selected queue move.
 #[test]
