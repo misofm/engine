@@ -159,10 +159,13 @@ lane* (#1371) connects it to edits.
   is the lane's own commits the glide; one of another mode (today's plan-swap carry into a
   successor prepared with a new mode) leaves the lane's own mode at rest, as before the glide.
 
-- **Gate ramp clock (attempt 2).** A parameter or rate retarget raises the gate's bank clock
-  to at least 64 samples (`max`), never lowers it: before, `= RAMP_SAMPLES` cut a longer glide
-  (its weights froze mid-flight, at 4,608 samples left in the verifier's probe). Bits are
-  unchanged for every block without a glide: before #1370 the clock never held more than 64.
+- **Gate ramp clock (attempt 2).** A parameter retarget (`apply_automation`) and a rate
+  retarget (`retime_rate`) each raise the gate's bank clock to at least 64 samples (`max`), never
+  lower it: before, `= RAMP_SAMPLES` cut a longer glide (its weights froze mid-flight, at 4,608
+  samples left in the verifier's probe). The oracle's 4,800-sample case sends both a threshold
+  span (re-sent at its value) and an attack span on every lane in one block, and is red with
+  either site alone reverted to `= RAMP_SAMPLES`: `apply_automation` red, `retime_rate` red. Bits
+  are unchanged for every block without a glide: before #1370 the clock never held more than 64.
 - **Collapsed body.** It has no glide test of its own: on a collapsed lane `L = R`, so the three
   link laws, and every blend of them, give the same level.
 - **Known limit for #1371.** A mid-glide plan-swap carry into a successor prepared at another
@@ -175,9 +178,9 @@ lane* (#1371) connects it to edits.
 - `glide_tests::a_glide_tracks_the_f64_blend_into_the_target_law` (both effects, f32/Simd4/Simd8):
   a blend with its weights swapped, a glide the ramping prefix does not cover, or a retarget that
   leaves the old masks renders away from the `f64` model. Its longer glide crossed by a parameter
-  ramp on every lane (gate 4,800 samples with an attack change, compressor 300 with a makeup
-  ramp) turns red on a parameter retarget that cuts the glide (the gate's clock, red on the
-  pre-fix code), and its compressor sidechain leg on a glide that skips the sidechain body; each
+  ramp on every lane (gate 4,800 samples with a threshold and an attack span, compressor 300 with
+  a makeup ramp) turns red on a parameter or rate retarget that cuts the glide (the gate's clock,
+  red at each site), and its compressor sidechain leg on a glide that skips the sidechain body; each
   case also asserts the glide arrives exactly.
 - `glide_tests::an_out_of_range_glide_is_refused_and_changes_nothing` (both): a dropped `2^24`
   bound, or a padded lane or scalar track 1 accepted, returns `true` or moves a payload word.
