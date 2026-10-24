@@ -310,8 +310,9 @@ for script in "$root"/scripts/*.sh; do
     case "$name" in
         # This script: running it here would recurse.
         test-gate-lib.sh) continue ;;
-        # sources gate.sh after its first rg (line ~848); moving that line belongs to #1527/#1528,
-        # which own the file this round. It also runs this script, so it would recurse.
+        # It does not source gate.sh (it only copies it) and calls rg directly; converting it
+        # belongs to #1527, which owns the file this round. It also runs this script, so it
+        # would recurse.
         test-workspace-policy.sh) continue ;;
     esac
     grep -qE '^([^#]*[^[:alnum:]_.#-])?rg( |$)' "$script" || continue

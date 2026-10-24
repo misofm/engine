@@ -52,6 +52,6 @@ A CI or local gate whose command needs a tool that is absent (for example `rg`) 
   `check-unfused-seal.sh` links `gate.sh` beside its self-test mutant copy.
 - G1: `scripts/test-gate-lib.sh` finds every `scripts/*.sh` with an `rg` call, runs it with no
   arguments under a PATH without `rg`, and requires exit 2 and exactly "<script> requires rg" (27
-  scripts). Exclusions: itself (recursion) and `test-workspace-policy.sh`, which sources `gate.sh` after
-  its first `rg`; moving that line belongs to #1527/#1528.
+  scripts). Exclusions: itself (recursion) and `test-workspace-policy.sh`, which does not source `gate.sh` (it only copies it) and calls `rg`
+  directly; converting it belongs to #1527, which owns that file this round (root note on #1527).
 - Attempt 1 (2026-10-24): G1 and G2 pass locally (see the attempt report).
