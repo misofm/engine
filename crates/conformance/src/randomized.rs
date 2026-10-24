@@ -1619,7 +1619,7 @@ impl Targets {
         }
     }
 
-    /// Draws a candidate that moves one to three of `lane`'s continuous values (both channels of
+    /// Draws a candidate that moves one to three of `lane`'s live values (both channels of
     /// a per-lane value on a mono scenario), prepares it off the audited scope, and applies every
     /// target to every receiver inside one. They must accept or refuse together. Returns whether
     /// an accepted target's words differ from the words the lane was known to be heading for --
@@ -1640,15 +1640,18 @@ impl Targets {
         let mut candidate = self.candidates[lane].clone();
         let parameter_of =
             |entry: &InitialParameterValue| &descriptor.parameters[entry.parameter_index as usize];
-        let continuous: Vec<usize> = (0..candidate.len())
-            .filter(|&index| parameter_of(&candidate[index]).domain == ParameterDomain::Continuous)
+        // Every live row: Boolean and Enumeration rows whose rate is `Block` too (#1337).
+        let live: Vec<usize> = (0..candidate.len())
+            .filter(|&index| {
+                parameter_of(&candidate[index]).automation_rate == AutomationRate::Block
+            })
             .collect();
-        if continuous.is_empty() {
+        if live.is_empty() {
             return false;
         }
         let mut changed = vec![false; candidate.len()];
         for _ in 0..=draw.below(3) {
-            let index = draw.pick(&continuous);
+            let index = draw.pick(&live);
             let parameter = parameter_of(&candidate[index]);
             let value = draw_value(draw, parameter);
             candidate[index].value = value;
