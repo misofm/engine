@@ -771,8 +771,8 @@ Root decisions R1-R3 of 2026-10-24 and the scope note govern; where they differ 
 (paths, case volume), they win.
 
 **Real tree, re-measured on `2abeb2a38`.** Marked counted drains with an outer loop:
-`crates/rack/src/lib.rs:2392` (`drain_observe_queues`, #1816: pattern root of
-`self.observe_queues.iter_mut()`) and `crates/host-core/src/spectrum.rs:1201` (`cancel_except`:
+`crates/rack/src/lib.rs:2400` (`drain_observe_queues`, #1816: pattern root of
+`self.observe_queues.iter_mut()`) and `crates/host-core/src/spectrum.rs:1200` (`cancel_except`:
 element slot of `.iter_mut().enumerate()`). `hosts/host-web/src/lib.rs` `poll_meters` is the
 per-queue form. The builtins-compiler fader, matrix and input drains are gone (cell slices).
 `crates/effect-contract/src/live.rs:1380` has no outer loop. All pass unchanged:
