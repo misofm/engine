@@ -98,7 +98,7 @@ which now also owns `RACKS`); `encodeLaneEdits` checks every edit before it allo
 `sdk/test/writer-evals.mjs` refuses `rack` `257`, `1.5` and `0` through `encodeLaneEdits` and `257`
 through `stage`.
 
-**Open (attempt 1).** The `unknownRack` row of `sdk/test/structure-evals.mjs` ("a key the plan does
-not have is refused with its typed reason") submits `rack: 0` through the SDK to reach the core's
-`unknownRack`; the SDK now refuses it first with `MisoUsageError`, so that row is red. It is the only
-test of the core's `unknownRack` reason; the file is outside the scope note's paths. Root decides.
+**Core `unknownRack` coverage (root, 2026-10-24, option b).** C ABI callers can still send rack `0`,
+so the core's refusal stays covered: the `unknownRack` row of `sdk/test/structure-evals.mjs` ("a key
+the plan does not have is refused with its typed reason") now sends a raw record with rack byte `0`
+through `engine.submitCommands`, past the SDK encoder, and still expects the core's `unknownRack`.
