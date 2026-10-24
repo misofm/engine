@@ -19,3 +19,31 @@ After #1871, #1872 and #1873 merge (same files).
 ## Paths
 
 The mono-collapse effects' `src/lib.rs` and tests, `crates/effect-contract/src/lib.rs` (doc), this spec.
+
+## Decision record
+
+- Scope (root, 2026-10-24, from the scope note): two PRs under this issue. PR 1: the effect-contract
+  doc, builtins input stage, parametric-eq, compressor, gate-expander, multiband-compressor and two
+  rack doc passages. PR 2: soft-clip, transient-shaper, true-peak-limiter, de-esser, dynamic-eq.
+- Rule (root revises its own #1107 D3 reading, stated once in `PreparedNativeEffectBank::lanes_at_rest`):
+  each stage holds a `collapsed` flag, set by its rendered mono body and cleared only by its
+  disengage copy. While set, `lanes_at_rest` answers from the left channel and `advance_clocks`
+  advances the left clocks only. No trait change; the rack needs no code change. Class A.
+
+## PR 1 record (attempt 1)
+
+- Five stages carry the flag: builtins `InputStage` (already had it; now read by the predicate and
+  the silence-counter advance), EQ, compressor, gate (`rest_lanes`) and multiband (`Instance`;
+  `advance_silence` takes `live_sides()`). Two test-module struct literals (`rest_tests.rs` in EQ
+  and gate) gained the field.
+- Gate per crate, in its existing `tests/mono_collapse.rs`: dual signal, collapsed signal,
+  collapsed `+0.0` until `lanes_at_rest() == all`, `advance_clocks` for three blocks the reference
+  renders, disengage, payload (builtins: state and silence words) and dual-block bit compare
+  against the never-collapsed bank. Mutant "AND the frozen right again": red in all five crates
+  (the rest bound is never reached). Mutant "advance no counter": red in builtins, EQ, multiband.
+- Class A A/B (PR evidence, scratch harness on the compiled-plan path of
+  `graph-compiler/tests/silent_bank_skip.rs`, since `console-workload` cannot feed a silent span
+  after a signal span): mono bank dual with signal for 30 blocks (collapse forced off), collapsed
+  signal to block 60, then silence to block 400. Output digest identical on main and branch
+  (`dee65cc39e65c522`), skip-vs-forbidden bit-equal every block on both; silent skips 400 on main,
+  672 on the branch.
