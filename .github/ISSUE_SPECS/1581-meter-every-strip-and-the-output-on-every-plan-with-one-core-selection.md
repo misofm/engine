@@ -260,3 +260,21 @@ Commands: `cargo test --locked -p host-core --all-features`,
   meters' grid. #1583: the C ABI exposes `OutputPeakReader::dropped_windows()` beside the windows.
   The worklet gate pins `OutputPeakObserver::observe` to its one trap site
   (`--trap-owner 18OutputPeakObserver7observe=1`).
+- **T3 (attempt 1, 2026-10-24).** The browser master ring and `meter_sample_magnitude` are gone
+  (D5). The host takes the reader and gate at boot (`take_output_meter`); `set_meter_lease`
+  activates the gate at `meter_activation_sample` and deactivates it on release; the producer-reset
+  poll and a swap that carries no meter move it to their restart sample, so the output windows
+  restart with the strip meters (a moved gate discards the open window).
+  `WebRuntimePreparer::meter_window_blocks` returns the boot word. The lease stays refused for the
+  boot word `0` (the worklet JavaScript derives `metersAttached` from that word, outside T3's
+  paths); the d.ts sentence says what `0n` now binds. A reset's queued windows are popped unread:
+  at once on a lease change and a producer reset, and by the next poll after a swap (the render
+  export pops nothing). A full queue's drops are folded into `meter_loss_count` by the poll.
+  Stated limit: a swap that carries no meter while all eight output slots hold unpolled windows
+  drops a one-block adoption window (counted), where the old ring had room.
+- **T3 worklet shape.** The poll reads the output windows in place and pops them at one site
+  after its fold, so `Consumer<OutputPeakWindow>::peek` and `try_pop` inline once into
+  `AudioWorkletEngineHost::poll_meters`, its one admitted owner: no new trap owner, no script
+  change. The master ring's 8 x 32 bridge bytes leave the bridge rows (the output meter's are in the
+  control plane's retained row since T2); `check-browser-expected-resources.py` agrees with no
+  re-pin.
