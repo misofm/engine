@@ -3261,6 +3261,18 @@ impl RuntimeUnit {
         self.final_slot_accepts(|observer| observer.accepts_sample_peak())
     }
 
+    /// Whether every observer binding of this unit is a strip meter (#882), so a block whose
+    /// strip meter level is off dispatches none of them. Bind-time only; a unit without observers
+    /// answers `true`, which [`UnitObservation::of`] ignores.
+    fn meters_only(&self) -> bool {
+        match self {
+            Self::Op(op) => op.observers.iter().all(|observer| observer.meter),
+            Self::Bank { members, .. } => members
+                .iter()
+                .all(|member| member.observers.iter().all(|observer| observer.meter)),
+        }
+    }
+
     /// Whether `observe_unit` runs this unit's banked full meter pass (issue #950): a bank some
     /// final-slot member of which holds an observer that accepts it. Bind-time only, on the same
     /// terms as [`Self::accepts_sample_peak`].
@@ -4129,64 +4141,70 @@ impl UnitBanking {
 }
 
 /// What `Runtime::observe_unit` dispatches for one unit, fixed at bind: nothing, its observers,
-/// or its observers after one of the bank's meter passes (issues #900, #943 and #950).
+/// or its observers after one of the bank's meter passes (issues #900, #943 and #950), and whether
+/// every one of them is a strip meter (#882).
 ///
-/// One byte for three facts, because the second and third each imply the first -- a final-slot
-/// observer that accepts a pass is an observer -- and because a second `bool` beside `observed`
-/// did not fit `UnitIdentity`'s padding on 32-bit targets: there the row's four flag bytes already
-/// fill the only slack, and a fifth grew the row from 20 to 24 bytes on wasm32.
+/// One byte of bits, because the pass bits each imply `OBSERVED` -- a final-slot observer that
+/// accepts a pass is an observer -- and because a second field beside it did not fit
+/// `UnitIdentity`'s padding on 32-bit targets: there the row's four flag bytes already fill the
+/// only slack, and a fifth grew the row from 20 to 24 bytes on wasm32.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub(crate) enum UnitObservation {
-    /// No op of the unit holds an observer: `observe_unit` returns at once.
-    #[default]
-    Unobserved,
-    /// Some op holds an observer, and no final-slot observer accepts a bank pass.
-    Observed,
-    /// A bank some final-slot member of which holds an observer that accepts the sample peak, and
-    /// none of whose final-slot observers accepts the full meter pass.
-    ObservedWithPeak,
-    /// A bank some final-slot member of which holds an observer that accepts the full meter pass,
-    /// and none of whose final-slot observers accepts the sample peak.
-    ObservedWithMeter,
-    /// A bank whose final slot has an observer that accepts the full meter pass and one that
-    /// accepts the sample peak: the full pass runs when it can, and the sample-peak pass otherwise.
-    ObservedWithPeakAndMeter,
-}
+pub(crate) struct UnitObservation(u8);
 
 impl UnitObservation {
-    /// The row for a unit that holds observers (`observed`) and whose final slot accepts the peak
-    /// (`sample_peak`) and the full meter pass (`banked_meter`); a pass alone, which no real unit
-    /// has, is still unobserved.
-    const fn of(observed: bool, sample_peak: bool, banked_meter: bool) -> Self {
-        match (observed, sample_peak, banked_meter) {
-            (false, _, _) => Self::Unobserved,
-            (true, false, false) => Self::Observed,
-            (true, true, false) => Self::ObservedWithPeak,
-            (true, false, true) => Self::ObservedWithMeter,
-            (true, true, true) => Self::ObservedWithPeakAndMeter,
+    /// No op of the unit holds an observer: `observe_unit` returns at once.
+    pub(crate) const UNOBSERVED: Self = Self(0);
+    /// Some op holds an observer.
+    const OBSERVED: u8 = 1;
+    /// A bank some final-slot member of which holds an observer that accepts the sample peak.
+    const PEAK: u8 = 1 << 1;
+    /// A bank some final-slot member of which holds an observer that accepts the full meter pass;
+    /// with `PEAK` too, the full pass runs when it can, and the sample-peak pass otherwise.
+    const METER: u8 = 1 << 2;
+    /// Every observer of the unit is a strip meter binding (#882): with the strip meter level
+    /// off, `observe_unit` returns at once.
+    const METERS_ONLY: u8 = 1 << 3;
+
+    /// The row for a unit that holds observers (`observed`), whose final slot accepts the peak
+    /// (`sample_peak`) and the full meter pass (`banked_meter`), and all of whose observers are
+    /// strip meters (`meters_only`); a pass or `meters_only` alone, which no real unit has, is
+    /// still unobserved.
+    const fn of(observed: bool, sample_peak: bool, banked_meter: bool, meters_only: bool) -> Self {
+        if !observed {
+            return Self::UNOBSERVED;
         }
+        let mut bits = Self::OBSERVED;
+        if sample_peak {
+            bits |= Self::PEAK;
+        }
+        if banked_meter {
+            bits |= Self::METER;
+        }
+        if meters_only {
+            bits |= Self::METERS_ONLY;
+        }
+        Self(bits)
     }
 
     /// Whether `observe_unit` dispatches this unit's observers at all.
     const fn observed(self) -> bool {
-        !matches!(self, Self::Unobserved)
+        self.0 & Self::OBSERVED != 0
     }
 
     /// Whether this unit runs the banked sample-peak pass before its observers, when its full
     /// meter pass does not run.
     const fn sample_peak(self) -> bool {
-        matches!(
-            self,
-            Self::ObservedWithPeak | Self::ObservedWithPeakAndMeter
-        )
+        self.0 & Self::PEAK != 0
     }
 
     /// Whether this unit runs the banked full meter pass before its observers.
     const fn banked_meter(self) -> bool {
-        matches!(
-            self,
-            Self::ObservedWithMeter | Self::ObservedWithPeakAndMeter
-        )
+        self.0 & Self::METER != 0
+    }
+
+    /// Whether every observer of this unit is a strip meter binding (#882).
+    const fn meters_only(self) -> bool {
+        self.0 & Self::METERS_ONLY != 0
     }
 }
 
@@ -4715,6 +4733,7 @@ impl Runtime {
                 unit.has_observers(),
                 unit.accepts_sample_peak(),
                 unit.accepts_banked_meter(),
+                unit.meters_only(),
             );
         }
         let widest = units
@@ -5014,12 +5033,18 @@ impl Runtime {
     /// GraphExecutor calls this only after this unit successfully executes in this block.
     ///
     /// `host` is the block's [`HostMaster`], which the Output op's observers read (issue #916).
+    ///
+    /// `strip_meters` is the block's strip meter level (#882). With it off, no strip meter
+    /// binding observes: a unit whose every observer is one returns at once, the bank's meter
+    /// passes do not run (only meters accept them; any other observer that did would read its
+    /// samples instead, so it stays correct), and every other observer runs unchanged.
     pub(crate) fn observe_unit(
         &mut self,
         index: usize,
         first_sample: u64,
         validity: GraphObservationValidity,
         host: &HostMaster<'_>,
+        strip_meters: bool,
     ) -> Result<(), RenderError> {
         // Issue #900: a unit bound without any observer has nothing to dispatch and the walk
         // below has no other production effect, so one bind-time flag answers it. `execute` has
@@ -5028,14 +5053,14 @@ impl Runtime {
         let observed = observation.observed();
         #[cfg(test)]
         let observed = observed || TEST_ONLY_OBSERVER_SKIP_DISABLED.with(std::cell::Cell::get);
-        if !observed {
+        if !observed || (!strip_meters && observation.meters_only()) {
             return Ok(());
         }
-        let sample_peak = observation.sample_peak();
+        let sample_peak = strip_meters && observation.sample_peak();
         #[cfg(any(test, feature = "test-support"))]
         let sample_peak =
             sample_peak && !TEST_ONLY_BANK_SAMPLE_PEAK_DECLINED.with(std::cell::Cell::get);
-        let banked_meter = observation.banked_meter();
+        let banked_meter = strip_meters && observation.banked_meter();
         #[cfg(any(test, feature = "test-support"))]
         let banked_meter =
             banked_meter && !TEST_ONLY_BANK_METER_DECLINED.with(std::cell::Cell::get);
@@ -5043,11 +5068,19 @@ impl Runtime {
         let Self { arena, units, .. } = self;
         match &mut units[index] {
             RuntimeUnit::Op(op) if output => {
-                observe_output(op, host.planes(), first_sample, validity)
+                observe_output(op, host.planes(), first_sample, validity, strip_meters)
             }
-            RuntimeUnit::Op(op) => {
-                observe(op, arena, first_sample, None, false, validity, None, None)
-            }
+            RuntimeUnit::Op(op) => observe(
+                op,
+                arena,
+                first_sample,
+                None,
+                false,
+                validity,
+                None,
+                None,
+                strip_meters,
+            ),
             RuntimeUnit::Bank {
                 members,
                 lanes,
@@ -5148,6 +5181,7 @@ impl Runtime {
                         validity,
                         peak,
                         meter,
+                        strip_meters,
                     )?;
                 }
                 Ok(())
@@ -5774,9 +5808,11 @@ fn bank_meter_pass(
 ///
 /// `sample_peak` and `meter` are this member's lane of the bank's meter passes (issues #943 and
 /// #950), `None` for every member but a final one whose unit ran a pass this block.
+/// `strip_meters` off skips every strip meter binding (#882).
 #[expect(
     clippy::too_many_arguments,
-    reason = "issue #950 adds the banked meter lane beside issue #943's banked peak"
+    reason = "issue #950 adds the banked meter lane beside issue #943's banked peak, #882 the \
+              block's strip meter level"
 )]
 fn observe(
     op: &mut RuntimeOp,
@@ -5787,6 +5823,7 @@ fn observe(
     validity: GraphObservationValidity,
     sample_peak: Option<[f32; 2]>,
     meter: Option<crate::GraphBankedMeterLane>,
+    strip_meters: bool,
 ) -> Result<(), RenderError> {
     #[cfg(test)]
     TEST_ONLY_OBSERVE_CALLS.with(|calls| calls.set(calls.get() + 1));
@@ -5796,6 +5833,9 @@ fn observe(
         resident.filter(|_| !TEST_ONLY_METER_RESIDENT_DISABLED.with(std::cell::Cell::get));
     let mut planar = false;
     for observer in op.observers.iter_mut() {
+        if observer.meter && !strip_meters {
+            continue;
+        }
         #[cfg(any(test, feature = "test-support"))]
         test_only_observation_dispatch_observer_access();
         if let Some(lane) = resident {
@@ -5867,11 +5907,15 @@ fn observe_output(
     planes: (&[f32], &[f32]),
     first_sample: u64,
     validity: GraphObservationValidity,
+    strip_meters: bool,
 ) -> Result<(), RenderError> {
     #[cfg(test)]
     TEST_ONLY_OBSERVE_CALLS.with(|calls| calls.set(calls.get() + 1));
     let mut planar = false;
     for observer in op.observers.iter_mut() {
+        if observer.meter && !strip_meters {
+            continue;
+        }
         #[cfg(any(test, feature = "test-support"))]
         test_only_observation_dispatch_observer_access();
         observe_output_one(observer, planes, first_sample, validity, &mut planar)?;
@@ -8889,7 +8933,7 @@ pub(crate) fn build_sequential(
                 banking: UnitBanking::of(!membership.is_empty(), gathers_track_input),
                 resident_input: false,
                 // Derived from the finished unit by the runtime constructor.
-                observation: UnitObservation::Unobserved,
+                observation: UnitObservation::UNOBSERVED,
                 source_lanes: 0,
                 stages: u32::try_from(stages).unwrap_or(u32::MAX),
                 upstream_of_seam_stages: u32::try_from(
@@ -11272,7 +11316,7 @@ mod tests {
             vec![UnitIdentity {
                 banking: UnitBanking::Plain,
                 resident_input: false,
-                observation: UnitObservation::Unobserved,
+                observation: UnitObservation::UNOBSERVED,
                 source_lanes: 0,
                 stages: 1,
                 upstream_of_seam_stages: 1,
@@ -11365,7 +11409,7 @@ mod tests {
             vec![UnitIdentity {
                 banking: UnitBanking::Plain,
                 resident_input: false,
-                observation: UnitObservation::Unobserved,
+                observation: UnitObservation::UNOBSERVED,
                 source_lanes: 0,
                 stages: 1,
                 upstream_of_seam_stages: 1,
@@ -11496,6 +11540,7 @@ mod tests {
                 GraphObservationValidity::CLEAR,
                 None,
                 None,
+                true,
             );
             let take = accepts
                 .iter()
@@ -11557,7 +11602,7 @@ mod tests {
         let identity = |population| UnitIdentity {
             banking: UnitBanking::Bank,
             resident_input: false,
-            observation: UnitObservation::Unobserved,
+            observation: UnitObservation::UNOBSERVED,
             source_lanes: 0,
             stages: 1,
             upstream_of_seam_stages: 1,
@@ -11748,7 +11793,7 @@ mod tests {
         let row = |observed| UnitIdentity {
             banking: UnitBanking::Plain,
             resident_input: false,
-            observation: UnitObservation::of(observed, false, false),
+            observation: UnitObservation::of(observed, false, false, false),
             source_lanes: 0,
             stages: 1,
             upstream_of_seam_stages: 0,
@@ -11796,7 +11841,7 @@ mod tests {
                 test_only_observation_dispatch_reset();
                 visits.store(0, Ordering::Relaxed);
                 assert_eq!(
-                    runtime.observe_unit(unit, 5, GraphObservationValidity::CLEAR, &host),
+                    runtime.observe_unit(unit, 5, GraphObservationValidity::CLEAR, &host, true),
                     Ok(())
                 );
                 let [observers, members] = test_only_observation_dispatch_counts();
@@ -11813,6 +11858,120 @@ mod tests {
             }
         }
         test_only_observe_calls_reset(false);
+    }
+
+    /// #882: with the strip meter level off, no strip meter binding observes and every other
+    /// observer still does. A unit whose every observer is a meter is skipped before its walk (no
+    /// `observe` call); a unit that also holds a tap walks, visits the tap and skips the meter;
+    /// with the level on, every observer observes.
+    ///
+    /// Test value: red if the level skips a tap beside a meter, if a meters-only unit still walks
+    /// its members with the level off, or if a meter observes with it off.
+    #[test]
+    fn strip_meter_level_off_skips_meter_bindings_and_keeps_every_other_observer() {
+        struct Visit(Arc<AtomicUsize>, bool);
+        impl crate::GraphRuntimeObserver for Visit {
+            fn retained_bytes(&self) -> u64 {
+                engine::realtime::retained::arc(&self.0)
+            }
+            fn observe(&mut self, _block: GraphObservationBlock<'_>) -> Result<(), RenderError> {
+                self.0.fetch_add(1, Ordering::Relaxed);
+                Ok(())
+            }
+            fn carry_kind(&self) -> Option<engine::realtime::ObserverKind> {
+                self.1.then_some(engine::realtime::ObserverKind::Meter)
+            }
+        }
+        let meters = Arc::new(AtomicUsize::new(0));
+        let taps = Arc::new(AtomicUsize::new(0));
+        // `kinds[i]` is whether observer `i` is a meter.
+        let observers = |kinds: &[bool]| -> Box<[GraphNodeObserverBinding]> {
+            kinds
+                .iter()
+                .enumerate()
+                .map(|(handle, &meter)| {
+                    let count = if meter { &meters } else { &taps };
+                    GraphNodeObserverBinding::new(
+                        GraphNodeId::Output {
+                            output_id: crate::StableGraphId::parse("out").expect("id"),
+                        },
+                        handle as u64,
+                        Box::new(Visit(Arc::clone(count), meter)),
+                    )
+                })
+                .collect()
+        };
+        let op = |observers| RuntimeOp {
+            inputs: Box::new([]),
+            staged: Box::new([]),
+            sidechain: None,
+            output: ARENA_BASE,
+            kind: NodeKind::BankMember,
+            observers,
+        };
+        let bank = RuntimeUnit::Bank {
+            members: (0..4)
+                .map(|member| op(observers(if member == 3 { &[true] } else { &[] })))
+                .collect(),
+            lanes: 4,
+            chain: BankChain::new(
+                AoSoaScratch::new(effect_contract::BankWidth::Four, 2).expect("scratch"),
+                Box::new([true; 4]),
+                vec![],
+            )
+            .expect("chain"),
+            fold: Box::new([]),
+            master: FoldTarget::Arena(0),
+        };
+        let row = || UnitIdentity {
+            banking: UnitBanking::Plain,
+            resident_input: false,
+            observation: UnitObservation::UNOBSERVED,
+            source_lanes: 0,
+            stages: 1,
+            upstream_of_seam_stages: 0,
+            lane_tracks: Box::new([]),
+        };
+        let mut runtime = Runtime::new(
+            stereo_arena(2, 1),
+            Vec::new(),
+            Vec::new(),
+            vec![
+                RuntimeUnit::Op(op(observers(&[true, false, true]))),
+                RuntimeUnit::Op(op(observers(&[true, true]))),
+                bank,
+            ],
+            vec![row(), row(), row()],
+            Vec::new(),
+            0,
+            0,
+        );
+        // Per unit: [observe calls, meter visits, tap visits].
+        for (level, expected) in [
+            (false, [[1, 0, 1], [0, 0, 0], [0, 0, 0]]),
+            (true, [[1, 2, 1], [1, 2, 0], [4, 1, 0]]),
+        ] {
+            let (mut left, mut right) = ([0.0_f32; 2], [0.0_f32; 2]);
+            let host = HostMaster::new(&mut left, &mut right, 2).expect("host planes");
+            for (unit, expected) in expected.into_iter().enumerate() {
+                test_only_observe_calls_reset(false);
+                meters.store(0, Ordering::Relaxed);
+                taps.store(0, Ordering::Relaxed);
+                assert_eq!(
+                    runtime.observe_unit(unit, 5, GraphObservationValidity::CLEAR, &host, level),
+                    Ok(())
+                );
+                assert_eq!(
+                    [
+                        test_only_observe_calls(),
+                        meters.load(Ordering::Relaxed) as u64,
+                        taps.load(Ordering::Relaxed) as u64,
+                    ],
+                    expected,
+                    "unit {unit}, level {level}"
+                );
+            }
+        }
     }
 
     struct AddingOwner(Arc<AtomicUsize>);
@@ -15228,7 +15387,7 @@ mod tests {
                 )
                 .expect("oracle unit");
             runtime
-                .observe_unit(unit, first_sample, validity, &host)
+                .observe_unit(unit, first_sample, validity, &host, true)
                 .expect("oracle observer");
         }
         // The executor's end-of-block copy, exactly as it stood before issue #916.

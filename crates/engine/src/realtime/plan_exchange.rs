@@ -51,8 +51,8 @@ use super::{Consumer, GATE_REVISION_MAX, Producer, QueueEmpty, QueueGeneration, 
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct PlanEpoch(pub u64);
 use super::{
-    CarryOutcome, PlanRevisionGate, PreparedRenderPlan, RenderError, RenderIo, RenderReport,
-    RenderTime,
+    CarryOutcome, ObserverKind, PlanRevisionGate, PreparedRenderPlan, RenderError, RenderIo,
+    RenderReport, RenderTime,
 };
 use core::{
     alloc::Layout,
@@ -200,6 +200,13 @@ pub struct RealtimePlanOwner {
     watermark: WatermarkWriter,
     /// The clock record render stores after each rendered block (#1396 D4).
     clocks: Arc<PlanClocks>,
+    /// The strip meter level every block's active plan renders with (#882), `true` by default.
+    /// Kept on the owner, not the plan, so an adopted successor inherits it.
+    strip_meters: bool,
+    /// The strip meter level of a block that adopts a successor which carried no strip meter
+    /// (#882), `true` by default: such a swap restarts the host's meter grid at its adoption
+    /// block, so the host's level for that block can differ from [`Self::strip_meters`].
+    strip_meters_at_restart: bool,
     _not_sync: Cell<()>,
 }
 /// Fixed report proving which complete plan owned a rendered block.
@@ -505,6 +512,8 @@ fn plan_exchange_inner(
             source_underrun_blocks: 0,
             watermark: watermark_writer,
             clocks,
+            strip_meters: true,
+            strip_meters_at_restart: true,
             _not_sync: Cell::new(()),
         },
         PlanRetirer {
@@ -835,6 +844,39 @@ impl RealtimePlanOwner {
     pub const fn source_underrun_blocks(&self) -> u64 {
         self.source_underrun_blocks
     }
+    /// Set the strip meter level the next blocks render with (#882): the active plan receives it
+    /// at each block after the adoption decision, so a successor adopted at a later block renders
+    /// with it too. `false` skips every strip meter observer
+    /// ([`PreparedRenderPlan::set_strip_meter_level`]). One store; called between blocks by the
+    /// plan's owner.
+    pub fn set_strip_meter_level(&mut self, on: bool) {
+        self.strip_meters = on;
+    }
+    /// Set the strip meter level of a block that applies a swap whose successor carried no strip
+    /// meter ([`ObserverKind::Meter`] in its [`PreparedRenderPlan::observer_carries`], #882). Such
+    /// a successor's meters open their first window at the adoption block, and a host restarts
+    /// its meter grid there, so that block follows this level instead of
+    /// [`Self::set_strip_meter_level`]'s. One store; called between blocks by the plan's owner.
+    pub fn set_strip_meter_level_at_restart(&mut self, on: bool) {
+        self.strip_meters_at_restart = on;
+    }
+    /// The strip meter level of the block that just entered with `swap`: the restart level when
+    /// the swap applied and its successor carried no strip meter, the steady level otherwise. A
+    /// walk of the successor's carries only on a swap block, bounded by them.
+    fn strip_meter_level(&self, swap: SwapOutcome) -> bool {
+        if swap == SwapOutcome::Applied
+            && !self
+                .active
+                .1
+                .observer_carries()
+                .iter()
+                .any(|carry| carry.kind == ObserverKind::Meter)
+        {
+            self.strip_meters_at_restart
+        } else {
+            self.strip_meters
+        }
+    }
     /// The block-boundary adoption decision for the block that starts at `block_start`: one
     /// `Acquire` load and, only if a cell is `Full`, the claim rule (#1311 D2), then one
     /// compare-and-swap that claims it.
@@ -910,7 +952,10 @@ impl RealtimePlanOwner {
         &mut self,
         io: RenderIo<'_>,
         time: RenderTime,
+        swap: SwapOutcome,
     ) -> Result<(RenderReport, Option<PlanWatermark>), RenderError> {
+        let strip_meters = self.strip_meter_level(swap);
+        self.active.1.set_strip_meter_level(strip_meters);
         match self.active.1.render_inner(io, time) {
             Ok(render) => {
                 let watermark = self
@@ -962,7 +1007,8 @@ impl RealtimePlanOwner {
             if absolute_sample != expected {
                 return Err(RenderError::TimeDiscontinuity { expected });
             }
-            let (render, watermark) = self.render_active(io, RenderTime { absolute_sample })?;
+            let (render, watermark) =
+                self.render_active(io, RenderTime { absolute_sample }, swap)?;
             Ok(RealtimeRenderReport {
                 swap,
                 carry,
@@ -1003,7 +1049,7 @@ impl RealtimePlanOwner {
             // The host's explicit time, not the plan's own clock, is the block's start.
             let (swap, carry) = self.enter_block(time.absolute_sample);
             let active_epoch = self.active.0;
-            let (render, watermark) = self.render_active(io, time)?;
+            let (render, watermark) = self.render_active(io, time, swap)?;
             Ok(RealtimeRenderReport {
                 swap,
                 carry,

@@ -2,6 +2,29 @@
 
 **Rescoped by owner decision 11 (2026-09-29, `docs/rulings/engine-footprint-2026-09-29.md`) and by decision 17 (2026-10-13).** #1080 removed the controlled observer policy. Since #1581, every plan on every host carries one post-matrix sample-peak meter per strip, and the meter level (the browser's lease, the C ABI's `TELEMETRY_CONFIGURE` table) is one core value (#1582, #1588 `MeterLevel`). The goal is unchanged and now covers both hosts: a block rendered with the level off does no per-strip meter work; class A: with the level on, every published value is unchanged. The mechanism is the core level, read by render once per block, as #1581's output meter gate already does; no controlled-activation protocol. First read the per-block cost that #1581 records (its D7); if the saving is not worth a branch in render, close this issue with that measurement. Otherwise it is sequenced right after #1582.
 
+## Slice (scope note of 2026-10-24, root rulings R1 and R2; supersedes the original slice and gates)
+
+- **engine:** `PreparedRenderPlan` and `RealtimePlanOwner` carry a render-thread-exclusive strip meter level, default `true` (R2: a plan with no host policy meters every block, so every direct-render test is unchanged), with `set_strip_meter_level`. `PreparedPlanExecutor::set_strip_meter_level` (default no-op) receives it once per block before `begin_live_block`. The owner keeps it, so an adopted successor inherits it.
+- **graph:** `GraphNodeObserverBinding` records `meter` (`carry_kind() == Some(ObserverKind::Meter)`) at bind; `UnitObservation` is now one byte of bits with a `METERS_ONLY` bit (the `UnitIdentityWithoutFlags` size assertion holds). With the level off, a meters-only unit returns at once, the bank sample-peak and full meter passes do not run, and `observe` / `observe_output` skip meter bindings; taps and spectrum observe unchanged; `block_end_observers` is untouched.
+- **control-plane:** `PlanState::render` sets the level per block from `OutputPeakObserver::admits(first_sample)` (the output gate's own rule), so strip and output meters observe the same blocks.
+- **builtins, host-web:** no change.
+
+## Decision record
+
+- **R1 (root).** With the level on from boot, every published value is bit-identical (class A: no arithmetic change, fewer passes). After a level transition the first frame's `loss_count` no longer counts the off period's stale groups and drops, which is the correct count (decision 15). In the event no host-web test needed a change: every browser meter test passed unchanged.
+- **R2 (root).** Default `true`; the control plane decides per block. A field on `RenderIo`/`RenderTime` and a session-level gate were rejected.
+- **D1 (attempt 1, implementer): the restart block.** The scope's one rule (`admits(first_sample)` before the block) disagreed with the output meter on one case, found by the existing `an_uncarried_swap_restarts_the_output_meter_at_its_adoption_block`: a lease waiting for its activation when a swap that carries no strip meter adopts. `MeterDelivery::adopt` then moves the gate to the adoption block after render and before the output meter observes it, so the output meter observed the adoption block and the strip meters did not; their windows started one block later and never paired with the output windows again. Fix, in the authorized paths: the owner keeps a second level, `set_strip_meter_level_at_restart`, which it uses for a block that applies a swap whose successor's `observer_carries` hold no `ObserverKind::Meter`; `PlanState::render` sets it from `OutputPeakObserver::admits_restart_block()` (`gate != INACTIVE`, the rule `adopt` applies). One extra load per block on the control-plane side; a walk of the carries only on a swap block.
+- **D2.** A meter that selects `HELD_PEAK` keeps every block it observed in its held peak, so after an off period its held peak restarts from the resumed block. No production meter selects it (every strip meter is `SAMPLE_PEAK`); gate 1's full meter selects everything else.
+- **D3.** The C ABI's meter-carry test (`a_carried_strip_meter_keeps_its_reader_across_a_c_abi_rebuild`) now activates the output gate at 0: until #1583 wires `TELEMETRY_CONFIGURE` to the gate, C ABI strip meters stay dark, which is the product rule (nothing reads them before #1587).
+- **Before number:** #1581 D7 measured the strip meter work at +6.3 us/block (+6.5 %) on the 64-strip console session. No committed timing test.
+
+## Gates (attempt 1)
+
+1. host-core `strip_meters.rs` `strip_meters_do_no_work_with_the_level_off_and_resume_with_the_always_on_words`: with the level off, the bank peak and full meter passes and the block peak merges do not move and no snapshot is queued; from block N on, every word equals the always-on run's (sequence counted from block N); without and with console slots.
+2. control-plane `plan.rs` `the_strip_meter_level_follows_the_output_meter_gate_per_block`: the executor's level equals the gate's answer per block.
+3. graph `runtime.rs` `strip_meter_level_off_skips_meter_bindings_and_keeps_every_other_observer`: a tap beside a meter still observes; a meters-only unit does not walk.
+4. Existing: the host-web, capi and control-plane tests pass (the restart case is the existing host-web swap test); realtime-policy; fmt, clippy, aarch64 check, lint checks; `check-web-audioworklet.sh`.
+
 The original body follows for its evidence; its references to the controlled policy are superseded.
 
 <!-- original title: Bind web console meters through the controlled observer policy -->

@@ -357,6 +357,14 @@ impl<A: ControlAdapter> PlanState<A> {
         absolute_sample: u64,
         output: PlanarBufferMut<'_>,
     ) -> Result<Option<PlanWatermark>, RenderError> {
+        // #882: the strip meters observe exactly the blocks the output meter does, by its gate's
+        // own rule, so a block rendered with the meter level off does no strip meter work. A block
+        // that adopts a successor carrying no strip meter restarts the grid there, by the gate's
+        // restart rule.
+        self.owner
+            .set_strip_meter_level(self.output_meter.admits(absolute_sample));
+        self.owner
+            .set_strip_meter_level_at_restart(self.output_meter.admits_restart_block());
         let report = match self
             .owner
             .render_contiguous(RenderIo { output }, absolute_sample)
@@ -479,6 +487,13 @@ mod tests {
     }
 
     fn test_state() -> PlanState<TestAdapter> {
+        test_state_with(Box::new(FailAfterSnapshot)).0
+    }
+
+    /// A one-channel, two-frame plan rendering through `executor`, with its output meter's gate.
+    fn test_state_with(
+        executor: Box<dyn PreparedPlanExecutor>,
+    ) -> (PlanState<TestAdapter>, host_core::OutputPeakGate) {
         let plan = PreparedRenderPlan::prepare_with_executor(
             PrepareRenderPlan {
                 plan_id: 1,
@@ -489,7 +504,7 @@ mod tests {
                 },
                 scratch: &[],
             },
-            Box::new(FailAfterSnapshot),
+            executor,
         )
         .expect("plan");
         let (publisher, owner, _retirer) = plan_exchange(
@@ -511,9 +526,64 @@ mod tests {
             source_underrun_blocks: AtomicU64::new(0),
             watermark: publisher.watermark_reader(),
         });
-        let (output_meter, _reader, _gate) =
+        let (output_meter, _reader, gate) =
             host_core::output_peak_meter(core::num::NonZeroU32::MIN).expect("output meter");
-        PlanState::<TestAdapter>::new(owner, shared, output_meter)
+        (
+            PlanState::<TestAdapter>::new(owner, shared, output_meter),
+            gate,
+        )
+    }
+
+    /// Records the strip meter level each block hands it, and renders silence.
+    struct RecordLevel(Arc<Mutex<Vec<bool>>>);
+
+    impl PreparedPlanExecutor for RecordLevel {
+        fn retained_bytes(&self) -> u64 {
+            0
+        }
+        fn set_strip_meter_level(&mut self, on: bool) {
+            self.0.lock().expect("levels").push(on);
+        }
+        fn render(
+            &mut self,
+            _arena: &mut BufferArena,
+            _output: PlanarBufferMut<'_>,
+            _time: RenderTime,
+        ) -> Result<ExecutorBlockReport, RenderError> {
+            Ok(ExecutorBlockReport::default())
+        }
+    }
+
+    /// #882 gate 2: the executor's strip meter level is the output meter gate's answer for the
+    /// same block: off while the gate is inactive, off for a block before the activation sample,
+    /// on from it, and off again once the gate shuts.
+    ///
+    /// Test value: red if `PlanState::render` hands the executor a level other than the output
+    /// gate's rule for the block (inverted, off by one block, never set, or set after render).
+    #[test]
+    fn the_strip_meter_level_follows_the_output_meter_gate_per_block() {
+        let levels = Arc::new(Mutex::new(Vec::new()));
+        let (mut state, gate) = test_state_with(Box::new(RecordLevel(Arc::clone(&levels))));
+        let mut block = |sample: u64| {
+            let mut output = [0.0_f32; 2];
+            state
+                .render(
+                    sample,
+                    PlanarBufferMut::try_new(&mut output, 1, 2, 2).expect("output"),
+                )
+                .expect("render");
+        };
+        block(0);
+        gate.activate(4);
+        block(2);
+        block(4);
+        block(6);
+        gate.deactivate();
+        block(8);
+        assert_eq!(
+            *levels.lock().expect("levels"),
+            [false, false, true, true, false]
+        );
     }
 
     /// #1570a D3: an armed observer publishes the largest absolute sample over both planes, and an
