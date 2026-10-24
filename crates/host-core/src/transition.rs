@@ -503,6 +503,28 @@ mod tests {
         }
     }
 
+    fn limiter(name: &str) -> session::Effect {
+        session::Effect {
+            id: id(name),
+            identity: session::EffectIdentity::Native {
+                effect_id: id("miso.true-peak-limiter"),
+            },
+            quality: session::EffectQuality::Normal,
+            bypass: false,
+            link_mode: session::LinkMode::Maximum,
+            params: Vec::new(),
+            sidechain: session::SidechainDeclaration::None,
+        }
+    }
+
+    fn compile(model: &SessionModel) -> session::CompiledSession {
+        compile_host_model(
+            model,
+            caps().compile_caps(model.sources.len()).expect("caps"),
+        )
+        .expect("compiles")
+    }
+
     /// Tracks `a` (a true-peak limiter insert), `b` and `c` into the output; `b` and `c` each
     /// have a `pre_fader` send into submix `r`; each track reads its own source.
     fn model() -> SessionModel {
@@ -545,17 +567,7 @@ mod tests {
                 model.routes.push(send);
             }
         }
-        model.tracks[0].inserts.effects.push(session::Effect {
-            id: id("lim"),
-            identity: session::EffectIdentity::Native {
-                effect_id: id("miso.true-peak-limiter"),
-            },
-            quality: session::EffectQuality::Normal,
-            bypass: false,
-            link_mode: session::LinkMode::Maximum,
-            params: Vec::new(),
-            sidechain: session::SidechainDeclaration::None,
-        });
+        model.tracks[0].inserts.effects.push(limiter("lim"));
         model.submixes = vec![session::Submix::unity(id("r"), &model.console)];
         let mut r_main = fixture.routes[0].clone();
         r_main.id = id("r-main");
@@ -660,5 +672,61 @@ mod tests {
             "S is kept until the caller raises it"
         );
         assert!(joined.has_strip("b") && joined.has_strip("c"));
+
+        // `C` adds a route's two lines. `a` carries two limiters and `b` one, so the output
+        // arrives at `2L` and `b-main`'s route node at `L`. Re-pointing `b-main` to `b`'s input
+        // tap (arrival 0) in a successor keeps the route node floored at `L` (#1285): its
+        // source edge gets a line of `L` and its destination edge one of `L`, `2L` in all.
+        let mut two = model();
+        two.tracks[0].inserts.effects.push(limiter("lim-2"));
+        two.tracks[1].inserts.effects.push(limiter("lim-b"));
+        let first = compile(&two);
+        let p0 = crate::prepare::prepare_host_runtime(&first, &caps()).expect("prepares");
+        let mut repointed = first.normalized_model().clone();
+        for route in &mut repointed.routes {
+            if route.id.as_str() == "b-main" {
+                route.source = RouteSource::Track {
+                    track_id: id("b"),
+                    tap: SendTap::Input,
+                };
+            }
+        }
+        let second = compile(&repointed);
+        let p1 = crate::prepare::prepare_host_runtime_successor(
+            &second,
+            &caps(),
+            SuccessorBase::new(&p0.inventory, first.normalized_model(), 2),
+        )
+        .expect("the successor prepares");
+        let b_lines = p1
+            .inventory
+            .delay_lines()
+            .iter()
+            .filter(|line| match &line.edge {
+                graph::GraphEdgeId::RouteSource { route_id }
+                | graph::GraphEdgeId::RouteDestination { route_id } => {
+                    route_id.as_str() == "b-main"
+                }
+                _ => false,
+            })
+            .count();
+        assert_eq!(b_lines, 2, "b-main has a line on each of its edges");
+        let committed = second.normalized_model();
+        let mut next = committed.clone();
+        next.tracks.retain(|track| track.id.as_str() != "b");
+        next.routes
+            .retain(|route| !route.id.as_str().starts_with("b-"));
+        next.sources.retain(|source| source.id.as_str() != "src-b");
+        let transition = plan_strip_transition(
+            &SuccessorBase::new(&p1.inventory, committed, 3),
+            &DuckOverlay::new(),
+            &next,
+        )
+        .expect("b's transition");
+        assert_eq!(
+            transition.compensation(),
+            p1.report.latency_samples,
+            "C is the sum of b-main's two lines"
+        );
     }
 }
