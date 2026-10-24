@@ -657,12 +657,14 @@ interface NormalizedOptions {
   readonly controlSmoothing: ModelRecord;
 }
 
-interface SourceEntry {
+/** @internal */
+export interface SourceEntry {
   readonly id: string;
   readonly spec: SourceSpec;
 }
 
-interface TrackEntry {
+/** @internal */
+export interface TrackEntry {
   readonly id: string;
   readonly spec: TrackSpec;
 }
@@ -680,8 +682,8 @@ interface VcaEntry {
   readonly members: readonly string[];
 }
 
-/** One validated console slot, in the session's slot order. */
-interface ConsoleSlotEntry {
+/** One validated console slot, in the session's slot order. @internal */
+export interface ConsoleSlotEntry {
   readonly slot: string;
   readonly section: "pre_insert" | "post_insert";
   readonly effectId: ConsoleEffectId;
@@ -702,9 +704,49 @@ interface BuilderState {
   readonly automation: readonly AutomationSpec[];
 }
 
+/**
+ * What a builder has declared that an edit of it is validated against (#1383): the rate, the
+ * sources, the console slots, the tracks, and the other graph IDs (submixes, VCAs, outputs).
+ * @internal
+ */
+export interface BuilderContext {
+  readonly sampleRateHz: SessionSampleRateHz;
+  readonly sources: readonly SourceEntry[];
+  readonly slots: readonly ConsoleSlotEntry[];
+  readonly tracks: readonly TrackEntry[];
+  readonly otherGraphIds: ReadonlySet<string>;
+}
+
+let readContext: (builder: SessionBuilder) => BuilderContext;
+
+/**
+ * The declarations of `builder`, for the transaction builder that edits it.
+ * @internal
+ */
+export function builderContext(builder: SessionBuilder): BuilderContext {
+  return readContext(builder);
+}
+
 export class SessionBuilder {
   readonly #state: BuilderState;
   #model: SessionModel | undefined;
+
+  static {
+    readContext = (builder) => {
+      const state = builder.#state;
+      return {
+        sampleRateHz: state.options.sampleRateHz,
+        sources: state.sources,
+        slots: state.console ?? [],
+        tracks: state.tracks,
+        otherGraphIds: new Set([
+          ...state.submixes.map((entry) => entry.id),
+          ...state.vcas.map((entry) => entry.id),
+          ...state.outputs,
+        ]),
+      };
+    };
+  }
 
   constructor(state: BuilderState) {
     this.#state = state;
@@ -717,19 +759,7 @@ export class SessionBuilder {
     if (this.#state.sources.some((entry) => entry.id === id)) {
       fail(`${path}.id`, "a source with this ID is already declared");
     }
-    if (spec === null || typeof spec !== "object") fail(path, "expected a source specification");
-    // The engine's own limit, from its generated ABI constants: a source is mono or stereo.
-    const maximumChannels = ABI_LAYOUT.constants.maximumSourceChannels;
-    if (!Number.isInteger(spec.channels) || spec.channels < 1 || spec.channels > maximumChannels) {
-      fail(`${path}.channels`, `a V1 source has 1 to ${maximumChannels} channels (mono or stereo)`);
-    }
-    if (spec.bitDepth !== 16 && spec.bitDepth !== 24 && spec.bitDepth !== "32f") {
-      fail(`${path}.bitDepth`, 'expected the token 16, 24 or "32f"');
-    }
-    if (u64(spec.frames, `${path}.frames`) === 0n) fail(`${path}.frames`, "expected a nonzero frame count");
-    if (typeof spec.content !== "string" || !CONTENT_IDENTITY.test(spec.content)) {
-      fail(`${path}.content`, "source content must match blake3:[0-9a-f]{64}");
-    }
+    normalizeSource(id, spec, path);
     return this.#next({
       sources: [...this.#state.sources, freeze({ id, spec: { ...spec } })],
     });
@@ -1064,13 +1094,43 @@ export function session(options: SessionOptions): SessionBuilder {
 // -------------------------------------------------------------------------------------------
 
 /**
+ * One source's normalized record, refusing what the engine refuses in a source declaration. Shared
+ * by `SessionBuilder.source` and the transaction builder's source edits (#1383).
+ * @internal
+ */
+export function normalizeSource(id: string, spec: SourceSpec, path: string): ModelRecord {
+  if (spec === null || typeof spec !== "object") fail(path, "expected a source specification");
+  // The engine's own limit, from its generated ABI constants: a source is mono or stereo.
+  const maximumChannels = ABI_LAYOUT.constants.maximumSourceChannels;
+  if (!Number.isInteger(spec.channels) || spec.channels < 1 || spec.channels > maximumChannels) {
+    fail(`${path}.channels`, `a V1 source has 1 to ${maximumChannels} channels (mono or stereo)`);
+  }
+  if (spec.bitDepth !== 16 && spec.bitDepth !== 24 && spec.bitDepth !== "32f") {
+    fail(`${path}.bitDepth`, 'expected the token 16, 24 or "32f"');
+  }
+  const frames = u64(spec.frames, `${path}.frames`);
+  if (frames === 0n) fail(`${path}.frames`, "expected a nonzero frame count");
+  if (typeof spec.content !== "string" || !CONTENT_IDENTITY.test(spec.content)) {
+    fail(`${path}.content`, "source content must match blake3:[0-9a-f]{64}");
+  }
+  return freeze({
+    id,
+    content: spec.content,
+    channels: spec.channels,
+    bit_depth: spec.bitDepth,
+    frames: frames.toString(),
+  });
+}
+
+/**
  * Read a track's source reference without yet knowing the source's channel count.
  *
  * The bare-string form leaves both lanes open, because "the whole source" means lane 0 for a mono
  * source and lanes 0/1 for a dual-mono one, and only the declaration knows which. `resolveLanes`
  * closes them once the source is in hand.
  */
-function trackSourceRef(
+/** @internal */
+export function trackSourceRef(
   source: TrackSpec["source"],
   path: string,
 ): { readonly id: string; readonly left: number | undefined; readonly right: number | undefined } {
@@ -1083,7 +1143,8 @@ function trackSourceRef(
   return { id: stableId(source.id, `${path}.id`), left: source.left, right: source.right };
 }
 
-function resolveLanes(
+/** @internal */
+export function resolveLanes(
   reference: { readonly left: number | undefined; readonly right: number | undefined },
   channels: number,
   path: string,
@@ -1634,7 +1695,12 @@ function normalizeAutomationOffset(raw: AutomationSpec["offset"], path: string):
   });
 }
 
-function normalizeTrack(
+/**
+ * One track's normalized record against the session's sources, console slots and rate. Shared by
+ * the session builder and the transaction builder's `upsertTrack` (#1383).
+ * @internal
+ */
+export function normalizeTrack(
   entry: TrackEntry,
   sources: readonly SourceEntry[],
   slots: readonly ConsoleSlotEntry[],
@@ -1642,6 +1708,8 @@ function normalizeTrack(
 ): ModelRecord {
   const path = `track("${entry.id}")`;
   const spec = entry.spec;
+  if (spec === null || typeof spec !== "object") fail(path, "expected a track specification");
+  knownKeys(spec, TRACK_KEYS, path, "a track");
   const reference = trackSourceRef(spec.source, `${path}.source`);
   const source = sources.find((candidate) => candidate.id === reference.id);
   if (source === undefined) fail(`${path}.source`, `'${reference.id}' is not a declared source`);
@@ -1689,13 +1757,7 @@ function normalizeSubmix(
 function normalize(state: BuilderState): SessionModel {
   const options = state.options;
   const sources = state.sources
-    .map(({ id, spec }) => freeze({
-      id,
-      content: spec.content,
-      channels: spec.channels,
-      bit_depth: spec.bitDepth,
-      frames: u64(spec.frames, `source("${id}").frames`).toString(),
-    }))
+    .map(({ id, spec }) => normalizeSource(id, spec, `source("${id}")`))
     .sort(byId);
   const slots = state.console ?? [];
   const tracks = state.tracks

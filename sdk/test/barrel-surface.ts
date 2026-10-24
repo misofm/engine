@@ -37,6 +37,7 @@ import * as browserResponse from "../src/browser/response.ts";
 import * as hostMirror from "../src/browser/host-mirror.ts";
 import * as lattice from "../src/core/lattice.ts";
 import * as writer from "../src/core/writer.ts";
+import * as sessionTransaction from "../src/core/session-transaction.ts";
 
 /** Declaration identity, not assignability: `Exact<A, B>` is false when either side is wider. */
 type Exact<A, B> =
@@ -148,6 +149,32 @@ type NoHeadlessCanonicalSessionJson = typeof headlessBarrel.canonicalSessionJson
 // @ts-expect-error canonicalSessionJson is intentionally not a public browser declaration
 type NoBrowserCanonicalSessionJson = typeof browserBarrel.canonicalSessionJson;
 
+// --- core/session-transaction.ts: the transaction builder on every entry (#1383 D5) ----------
+//
+// The builder's types are the module's on all three barrels, and the session normalizers it shares
+// with `SessionBuilder` and its frame encoder (stamped at send, #1296) stay off every barrel.
+
+type RootTransactionFn = Assert<Exact<typeof barrel.transaction, typeof sessionTransaction.transaction>>;
+type RootTransactionBuilder =
+  Assert<Exact<barrel.TransactionBuilder, sessionTransaction.TransactionBuilder>>;
+type RootSessionTransaction =
+  Assert<Exact<barrel.SessionTransaction, sessionTransaction.SessionTransaction>>;
+type RootSessionEditSpec = Assert<Exact<barrel.SessionEditSpec, sessionTransaction.SessionEditSpec>>;
+type BrowserTransactionFn =
+  Assert<Exact<typeof browserBarrel.transaction, typeof sessionTransaction.transaction>>;
+type BrowserSessionTransaction =
+  Assert<Exact<browserBarrel.SessionTransaction, sessionTransaction.SessionTransaction>>;
+type HeadlessTransactionFn =
+  Assert<Exact<typeof headlessBarrel.transaction, typeof sessionTransaction.transaction>>;
+type HeadlessSessionEditSpec =
+  Assert<Exact<headlessBarrel.SessionEditSpec, sessionTransaction.SessionEditSpec>>;
+// @ts-expect-error the transaction encoder is stamped at send and is not public
+type NoRootEncodeSessionTransaction = typeof barrel.encodeSessionTransaction;
+// @ts-expect-error the session normalizers are internal to the two builders
+type NoRootNormalizeTrack = typeof barrel.normalizeTrack;
+// @ts-expect-error the session normalizers are internal to the two builders
+type NoRootBuilderContext = typeof barrel.builderContext;
+
 export type BarrelSurfacePins = [
   AgentCatalogFn,
   AgentParameterFn,
@@ -195,6 +222,17 @@ export type BarrelSurfacePins = [
   NoRootCanonicalSessionJson,
   NoHeadlessCanonicalSessionJson,
   NoBrowserCanonicalSessionJson,
+  RootTransactionFn,
+  RootTransactionBuilder,
+  RootSessionTransaction,
+  RootSessionEditSpec,
+  BrowserTransactionFn,
+  BrowserSessionTransaction,
+  HeadlessTransactionFn,
+  HeadlessSessionEditSpec,
+  NoRootEncodeSessionTransaction,
+  NoRootNormalizeTrack,
+  NoRootBuilderContext,
 ];
 
 

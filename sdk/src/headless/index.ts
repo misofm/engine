@@ -141,3 +141,5 @@ export {
 export type { ErrorPhase, MisoDiagnostic, MisoErrorCode, SdkTimeoutCode } from "../core/errors.ts";
 export { assertSameSession, effect, session, SessionBuilder } from "../core/session.ts";
 export type { SessionLike, SessionModel, SessionOptions } from "../core/session.ts";
+export { TransactionBuilder, transaction } from "../core/session-transaction.ts";
+export type { SessionEditSpec, SessionTransaction } from "../core/session-transaction.ts";
