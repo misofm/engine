@@ -584,8 +584,9 @@ impl BankStage for DualOnly {
 /// # Red mutations
 ///
 /// Conjoin the decision's witness over every slot again (`lane_symmetry_bank(self.slots.len())`
-/// in `run_with_input`'s dispatch) and `collapses()` is 0. Do the same in the maintenance step
-/// only and the chain never re-engages: `collapses()` is 24 and the triple is `[1, 0, 0]`.
+/// in `run_with_input`'s dispatch) and the triple is `[0, 0, 0]`: it never collapses. Do the same
+/// in the maintenance step only and the window clears the invariant, so the re-engage needs an
+/// agreement proof: the triple is `[1, 1, 1]`.
 #[test]
 fn a_collapsible_prefix_before_an_incompatible_slot_collapses_exactly() {
     let build = || {
