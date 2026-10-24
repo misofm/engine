@@ -162,23 +162,28 @@ impl Corpus {
     /// The independent scalar reference: see the module documentation.
     fn scalar_reference(&self, store: bool) -> ([f32; FRAMES], [f32; FRAMES]) {
         let mut master = self.prior;
-        for frame in 0..FRAMES {
-            let routed = |lane: usize| -> [f32; 2] {
-                let [ll, lr, rl, rr] = self.constants[lane];
-                let (l, r) = (self.samples[lane][0][frame], self.samples[lane][1][frame]);
-                let (left_product, right_product) = (ll * l, rl * l);
-                [lr * r + left_product, rr * r + right_product]
-            };
-            for plane in 0..2 {
+        let routed = |lane: usize, plane: usize, frame: usize| -> f32 {
+            let [ll, lr, rl, rr] = self.constants[lane];
+            let (l, r) = (self.samples[lane][0][frame], self.samples[lane][1][frame]);
+            if plane == 0 {
+                let product = ll * l;
+                lr * r + product
+            } else {
+                let product = rl * l;
+                rr * r + product
+            }
+        };
+        for (plane, words) in master.iter_mut().enumerate() {
+            for (frame, word) in words.iter_mut().enumerate() {
                 let mut sum = if store {
-                    routed(0)[plane]
+                    routed(0, plane, frame)
                 } else {
-                    master[plane][frame] + routed(0)[plane]
+                    *word + routed(0, plane, frame)
                 };
                 for lane in 1..LANES {
-                    sum += routed(lane)[plane];
+                    sum += routed(lane, plane, frame);
                 }
-                master[plane][frame] = sum;
+                *word = sum;
             }
         }
         (master[0], master[1])
