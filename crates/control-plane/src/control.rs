@@ -1011,9 +1011,16 @@ impl SessionMeters {
 
     /// Every closed meter window that never reached a `METER_BATCH` (#1583 D5): the output
     /// windows render dropped at a full queue, the windows of partial batches the fold discarded
-    /// (at a gap, or when a configuration replaced the one it folded for), and the windows of
-    /// batches the lane refused. A window the delivery pops unread when the level turns off was
-    /// measured for a table the client has emptied, and is not counted.
+    /// (at a gap, or when a nonempty configuration replaced the one it folded for), and the
+    /// windows of batches the lane refused. When a configure empties the table, neither the
+    /// windows the delivery pops unread nor the open partial batch are counted: the client turned
+    /// the meters off.
+    ///
+    /// `unstaged` is defensive: on the C ABI no service step can see a refusal. The step runs at
+    /// the start of every session call, before a structural token exists (none outlives its
+    /// call), so `stage_meter_batch_event` is never refused as structural-outstanding; the level
+    /// is on only with a nonempty table, which is not `Disabled`; and the two records of the
+    /// output entry always encode.
     fn windows_lost(&self) -> u64 {
         self.delivery
             .output_dropped_windows()
@@ -1878,6 +1885,11 @@ where
         let windows =
             core::num::NonZeroU32::new(telemetry.meter_period_blocks / meters.window_blocks.get())
                 .unwrap_or(core::num::NonZeroU32::MIN);
+        // One turn-off rule: an empty table owes the client nothing, so neither the open partial
+        // batch nor the windows the delivery pops unread are counted lost.
+        if !on {
+            meters.fold.drop_partial();
+        }
         meters.fold.restart(windows);
         let next_sample = self.shared.render_sample.load(Ordering::Acquire);
         meters.delivery.set_level(on, next_sample);

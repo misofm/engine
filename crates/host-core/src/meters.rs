@@ -1470,6 +1470,12 @@ impl MeterBatchFold {
         })
     }
 
+    /// Drop the partial batch without counting it: the meters were turned off, so its windows are
+    /// owed to no one. The next [`Self::restart`] then discards nothing.
+    pub fn drop_partial(&mut self) {
+        self.folded = 0;
+    }
+
     fn discard(&mut self) {
         self.discarded = self.discarded.saturating_add(u64::from(self.folded));
         self.folded = 0;

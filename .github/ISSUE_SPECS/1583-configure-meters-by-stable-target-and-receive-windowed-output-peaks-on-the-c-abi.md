@@ -166,7 +166,7 @@ channel.
 Commands: `cargo test --locked -p protocol --all-features`, `cargo test --locked -p conformance`,
 `cargo test --locked -p host-core --all-features`,
 `cargo test --locked -p control-plane --features test-support`, `cargo test --locked -p capi`,
-`cargo test --locked -p host-web --test protocol_cross_host`,
+`cargo test --locked -p host-web --features test-support --test protocol_cross_host`,
 `cargo build --locked --release -p audit -p capi && target/release/audit capi`.
 
 1. **Wire.** Round trips of a table with each target and metric and of a batch with its span;
@@ -248,18 +248,28 @@ Commands: `cargo test --locked -p protocol --all-features`, `cargo test --locked
   requested-gate word and the plan an `OutputPeakGateRelay`, which `PlanState::render` applies
   once before each block (before `admits`). The relay is the gate's one writer and applies a
   request only when it changes, so #1587a's render-side move at an uncarried swap is a relay method
-  that an unchanged request never undoes. The browser keeps the direct gate (its delivery runs
-  between its own blocks). An accepted configure is seen through
+  that an unchanged request never undoes. The browser keeps the direct gate: root confirmed
+  (verifier round) that the gate-word constraint is the C ABI's, and the browser's delivery runs
+  on its render thread between blocks, so its direct gate already moves only there. An accepted configure is seen through
   `ProtocolController::telemetry_configuration_generation` (an exact replay does not move it).
 - D5 lost windows, amended: `MeterWindowsLost` = the output reader's dropped-window count + the
   fold's discarded partial-batch windows + the windows of batches the lane refused to stage. The
   delivery's `loss_count` is not used: it counts a dropped window once at the drop and once more as
-  the gap at the next frame, so gate 5's "exactly" would fail. A window the delivery pops unread
-  when the table is emptied is not counted (the client turned the meters off).
+  the gap at the next frame, so gate 5's "exactly" would fail. One turn-off rule: when a configure
+  empties the table, neither the windows the delivery pops unread nor the fold's open partial batch
+  are counted (the client turned the meters off); a nonempty reconfigure counts its partial. The
+  `unstaged` term is defensive: no C ABI service step can see a refused staging (the step runs
+  before any structural token exists, the level is on only with a nonempty table, and the output
+  entry's two records always encode). `MeterWindowsLost` is not a full loss count of what the
+  client receives: with one window per batch and a service cadence longer than two windows,
+  the later batches of one step coalesce in the two-slot lane (counted by `TELEMETRY_COALESCED`),
+  and the received `window_sequence` skips.
 - The lossy lane had one telemetry slot, so a batch's right record was always dropped beside its
   left. `protocol_queue_config` now gives it two (one output batch whole); the capabilities report
   telemetry slots 2 on both hosts. #1587 sizes it for strip entries (and must note that a frame
-  carries at most 256 records).
+  carries at most 256 records). `TELEMETRY_SLOTS = 2` also sizes the counter-snapshot lane, so a
+  two-counter snapshot now arrives whole on both hosts: a change against this spec's non-goal
+  ("no change to counter snapshots beyond the new counter"), made on purpose.
 - Gate 6 against D4: the step 5 echo cannot be byte-identical, because the C ABI's echo carries its
   window (field 8) and the browser's does not. `protocol_cross_host` step 5 compares the headers
   and every other field and checks the C window is 12; every other step stays byte-identical.
@@ -286,7 +296,8 @@ Tests (each recorded red on a mutant, then green):
   replaced defect (one combined peak labelled left), a fold that keeps only the last window, or a
   structural commit that restarts the sequence. Red on all three mutants.
 - capi `lost_meter_windows_are_counted_and_the_sequence_does_not_skip` (gate 5): red if a dropped
-  window or a discarded partial batch is not counted. Red on each term removed.
+  window or a discarded partial batch is not counted, or if a turn-off counts its open partial
+  batch. Red on each term removed, and on the turn-off counting its partial (lost 4, not 3).
 - capi `resource_lifecycle` race (gate 7, an existing test with a table configured): red if the
   output meter or the gate relay allocates on render. Red on an allocation at window close and in
   the relay's apply.

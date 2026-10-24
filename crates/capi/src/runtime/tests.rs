@@ -5550,10 +5550,11 @@ fn the_output_meter_batch_is_two_windows_of_each_planes_own_peak() {
 /// eight. With three windows per batch, the first service stages batches 1 and 2 (windows 1-6),
 /// render dropped window 9, and the next window's gap discards the partial batch of windows 7
 /// and 8: `METER_WINDOWS_LOST` counts exactly those three windows, and the next batch, windows
-/// 10-12, is sequence 3.
+/// 10-12, is sequence 3. Emptying the table with window 13 folded counts nothing more.
 ///
 /// Test value: red if a dropped window or a discarded partial batch is not counted (or counted
-/// twice), or if the sequence skips over the lost windows or a batch spans the gap.
+/// twice), if the sequence skips over the lost windows or a batch spans the gap, or if a turn-off
+/// counts its open partial batch as lost.
 #[test]
 fn lost_meter_windows_are_counted_and_the_sequence_does_not_skip() {
     let (c_session, c_plan) = boxed_c_children(SESSION);
@@ -5590,6 +5591,21 @@ fn lost_meter_windows_are_counted_and_the_sequence_does_not_skip() {
         meter_windows_lost_c(c_session, 3),
         3,
         "windows 7 to 9 reached no batch"
+    );
+    // A turn-off with a batch open (window 13 of 13-15) counts nothing: the client emptied the
+    // table.
+    for block in 12 * window..13 * window {
+        render_c(c_plan, block);
+    }
+    assert_eq!(crate::ffi::test_service(c_session), crate::RESULT_OK);
+    assert_eq!(
+        configure_meters_c(c_session, 4, Vec::new(), 0),
+        (StatusCode::Ok, None)
+    );
+    assert_eq!(
+        meter_windows_lost_c(c_session, 5),
+        3,
+        "the turn-off loses nothing"
     );
     crate::ffi::test_plan_destroy(c_plan);
     crate::ffi::test_session_destroy(c_session);
