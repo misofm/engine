@@ -282,10 +282,36 @@ fn the_kernel_meets_the_stated_tail_and_rests_by_the_stated_bound() {
 
 /// T3: the smoother word's stated rest against its brute-force count. The word
 /// `flush(fl(fl(c y) + 0))` from `-100` dB at the slowest release's own coefficient reaches `+0.0`
-/// in `B` steps; the stated count `R_s` (at the retention two ulps above it) satisfies
-/// `B <= R_s <= B + B / 20`.
+/// in `B` steps; the stated count `R_s`, at the largest retention `smoother_retention_max` scans
+/// (at every launch rate that is the slowest design's coefficient itself, so `R_s = B`), satisfies
+/// `B <= R_s <= B + B / 20`. The 5 % allowance would also accept a retention one ulp high
+/// (about 2.7 % at 88.2 kHz): sound, only looser.
+///
+/// The scan's premise, `|expf(x) - exp(x)| <= 2^-24` on `[1/2, 1)`, is checked exhaustively in
+/// release over every `f32` argument a legal release time gives at a launch rate
+/// (`x = -1 / fl(fl(t 0.001) fs)`, `t` in `[5, 5000]` ms), against the `f64` `exp`; debug checks the
+/// 48 kHz scan window alone.
 #[test]
 fn the_smoother_rest_is_the_word_count_from_its_largest_distance() {
+    let argument = |ms: f32, rate: u32| -1.0 / (ms * 0.001 * rate as f32);
+    let (lowest, highest) = if cfg!(debug_assertions) {
+        let top = argument(maximum(4), 48_000);
+        (f64::from(top) - 1.0 / 2_097_152.0, top)
+    } else {
+        (
+            f64::from(argument(minimum(4), 44_100)),
+            argument(maximum(4), 96_000),
+        )
+    };
+    let mut x = highest;
+    let mut checked = 0_u64;
+    while f64::from(x) >= lowest {
+        let error = (f64::from(math::expf(x)) - math::exp(f64::from(x))).abs();
+        assert!(error <= 1.0 / 16_777_216.0, "expf({x:e}) errs by {error:e}");
+        checked += 1;
+        x = f32::from_bits(x.to_bits() + 1);
+    }
+    eprintln!("expf within 2^-24 of exp at {checked} arguments");
     for &rate in rates() {
         let c = effect_runtime::envelope::retention_coefficient(maximum(4), rate);
         let mut y = -100.0_f32;

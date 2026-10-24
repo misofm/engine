@@ -119,7 +119,9 @@ pub fn output_gain() -> f64 {
 /// legal time `t <= 5000` ms, or a ramp word between two such (#1409); that is
 /// `clamp(expf(x), 0, 1)` with `x = -1 / fl(fl(t 0.001) fs)`, which does not decrease with `t`, so
 /// `x <= x_max`, the slowest release's. `expf` is not proven monotone, but it is within one ulp of
-/// `exp` (`math`'s crate note; `2^-24` on `[1/2, 1)`, where every launch-rate value lies). For
+/// `exp` (`math`'s crate note: the vendored rust-lang/libm `expf`, FreeBSD's `e_expf.c`;
+/// `2^-24` on `[1/2, 1)`, where every launch-rate value lies; `tests/tail_contract.rs` T3 checks
+/// it exhaustively over every legal release argument at the launch rates). For
 /// `x < x_max - delta`, `delta = 2^-21`: `expf(x) <= exp(x) + 2^-24 < exp(x_max) - 2^-22 + 2^-24
 /// <= expf(x_max) - 2^-23` (`exp(x_max) >= 1/2`, so `exp(x_max) (1 - e^-delta) > 2^-22`). So the
 /// largest value is `expf` of one of the `f32` arguments in `[x_max - delta, x_max]`, all of which
