@@ -887,7 +887,8 @@ fn live_controls_cost_the_standing_sessions_no_fold() {
 
 /// Three tracks and two buses; the sends into the buses are declared `zz-send`, `mm-send`,
 /// `aa-send`, the routes into the output between and after them: `t0-main` from `post_pan`,
-/// `t2-pf` from `pre_fader`, `t1-direct` from `input` and each bus's `input` tap.
+/// `t1-post` from `post_fader`, `t2-pf` from `pre_fader`, `t1-direct` from `input` and each bus's
+/// `input` tap.
 fn out_of_order() -> SessionModel {
     let (mut model, source, track) = empty_session(48_000);
     for id in ["t0", "t1", "t2"] {
@@ -902,6 +903,7 @@ fn out_of_order() -> SessionModel {
         to_output("t2-pf", tap("t2", SendTap::PreFader)),
         bus_to_output("bus-a"),
         to_output("t1-direct", tap("t1", SendTap::Input)),
+        to_output("t1-post", tap("t1", SendTap::PostFader)),
     ];
     add_buses(&mut model, &["bus-b", "bus-a"]);
     model
@@ -926,7 +928,8 @@ fn live_send_handles_are_in_canonical_route_order() {
         .map(RouteControlProducer::route_id)
         .collect();
     // #1391: the routes into the output from before the fader (`bus-*-main` from the buses'
-    // `input` tap, `t1-direct`, `t2-pf`) have lanes too; `t0-main` (`post_pan`) never has one.
+    // `input` tap, `t1-direct`, `t2-pf`) have lanes too; `t0-main` (`post_pan`) and `t1-post`
+    // (`post_fader`) never have one.
     assert_eq!(
         ids,
         [
