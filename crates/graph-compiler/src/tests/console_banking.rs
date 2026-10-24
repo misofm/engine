@@ -29,6 +29,8 @@ enum Kind {
     Transient,
     Limiter,
     Multiband,
+    /// Not console-eligible: an insert that banks nowhere and so renders per node (issue #1899).
+    Delay,
 }
 
 const ELIGIBLE: [Kind; 7] = [
@@ -51,6 +53,7 @@ impl Kind {
             Self::Transient => "miso.transient-shaper",
             Self::Limiter => "miso.true-peak-limiter",
             Self::Multiband => "miso.multiband-compressor",
+            Self::Delay => "miso.delay",
         }
     }
     const fn name(self) -> &'static str {
@@ -62,6 +65,7 @@ impl Kind {
             Self::Transient => "transient",
             Self::Limiter => "limiter",
             Self::Multiband => "multiband",
+            Self::Delay => "delay",
         }
     }
 }
@@ -1187,13 +1191,16 @@ fn inserts_at_mixed_link_modes_share_one_bank_per_slot() {
 ///
 /// Sixteen tracks on the collapse-capable console (EQ and compressor, then the limiter), every
 /// fourth one stereo; the even tracks carry a banked EQ insert, so their strip is three chains
-/// (the `pre_insert` chain, the insert chain and the `post_insert` chain) and every odd track's is
-/// one. Armed and forced off, every track's post-matrix bits and the session output agree, the
+/// (the `pre_insert` chain, the insert chain and the `post_insert` chain), and the odd tracks a
+/// delay insert, which banks nowhere, so theirs is two chains around a per-node op (issue #1899).
+/// Armed and forced off, every track's post-matrix bits and the session output agree, the
 /// forced-off arm never collapses, and every collapsible chain whose lanes are all mono -- the
-/// later ones included -- is armed and collapses on every block; no stereo chain is armed.
+/// later ones included, behind a bank or behind the symmetric delay -- is armed and collapses on
+/// every block; no stereo chain is armed.
 ///
 /// Red if a later chain stays unarmed (the #970 rule alone arms only the chains that gather the
-/// input), or if the producer table or the per-block term drops a lane whose producer collapsed.
+/// input; the #987 table alone gives the chain behind the delay no row), or if the producer table
+/// or the per-block term drops a lane whose producer collapsed.
 #[test]
 fn a_later_mono_chain_arms_on_its_producers_and_renders_the_dual_bits() {
     let console = Console {
@@ -1210,7 +1217,7 @@ fn a_later_mono_chain_arms_on_its_producers_and_renders_the_dual_bits() {
             inserts: if index % 2 == 0 {
                 vec![Kind::Eq]
             } else {
-                Vec::new()
+                vec![Kind::Delay]
             },
             bypass: vec![false; console.slots()],
             variant: index % VARIANTS.len(),
@@ -1218,6 +1225,15 @@ fn a_later_mono_chain_arms_on_its_producers_and_renders_the_dual_bits() {
         .collect();
     let model = console_session(&console, &tracks);
     let compile = || compile_at(&model, host_dispatch()).expect("compile");
+    assert_eq!(
+        compile()
+            .report()
+            .rack_cohorts
+            .scalar_in(RackLocation::Dynamic)
+            .len(),
+        8,
+        "every odd track's delay renders per node"
+    );
     let armed = render_arm(compile(), &tracks, 12, false);
     let dual = render_arm(compile(), &tracks, 12, true);
     assert_eq!(dual.collapse[0], 0, "the forced-off arm never collapses");

@@ -19,3 +19,51 @@ Class A: no rendered bit moves. Owner rule kept: arm only when the consumer's ow
 ## Paths
 
 `crates/graph/src/runtime.rs`, `crates/graph-compiler` tests, `crates/host-core/tests/collapse_arming.rs`, this spec.
+
+## Narrowed outcome (scope note of 2026-10-24, root decisions R1-R3)
+
+Only a per-node **insert effect** (`NodeKind::Effect`, `NodeKind::LiveControlEffect`) can sit between
+two chains of one track in production. The later chain behind such an op is armed on it, and
+collapses on a block exactly when the op's sticky agreement fact holds.
+
+## Decision record
+
+Op table (slice item 1), verified on main `c6e295947`:
+
+| op | L == R in maps to L == R out? | decision |
+|---|---|---|
+| `TrackDelay` | iff the two lanes declare the same delay (`channels_agree`) | **moot**: it is the track's input node (no graph inputs), never between chains; its fact is already in `SOURCE` (`session_structural_symmetry`). |
+| per-node pan / 2x2 matrix | `Route([m00,m01,m10,m11])` maps L == R to L == R iff `(m00 == m10 && m01 == m11) \|\| (m00 == m11 && m01 == m10)` bitwise; a live route also needs equal ramp state | **moot**: the per-node strip triple exists only in test builds (`builtins-compiler` `strip_bindings`, `cfg(test-support)`); in production the strip builtins and console slots always bank. |
+| route, sum (`Identity` of a submix `Input`), `SumDelay` | n/a | **excluded**: the consumer is a bus, never collapse-eligible (`mono_source` is tracks only); the owner rule "arm only when the consumer's own tracks are eligible" holds. |
+| per-node insert effect | iff the designed words are bit-equal L/R (`channel_symmetry()` with the live terms), the input planes are identical, **and** the L/R state is bit-identical | **implemented** (below). |
+
+- R1: scope is the per-node native-effect op only.
+- R2: the state term is a sticky per-op bit with reset-only recovery: `channels_agree[op] &&= input
+  && op.kind.channel_symmetry().preserves_channel_agreement()` after every block the op renders,
+  seeded at bind from the op's prepared witness. `preserves_channel_agreement` (every term but
+  `UNBYPASSED`) and not `eligible`: a live-bypassed per-node instance still runs its processor on
+  both channels and mixes one scalar crossfade, so equal input over equal state stays equal (the
+  same argument as `ChannelSymmetryWitness::AGREEING`). No proof-based recovery (an effect-contract
+  L/R state comparison) in this slice. Nothing in a plan resets it: there is no runtime-level effect
+  reset in `crates/graph`.
+- R3: on a plan swap, a per-node successor that takes a per-node predecessor's instance
+  (`move_from`) takes the predecessor's fact with it (`false` if nothing maintained it there); one
+  that takes a bank lane's payload gets `false`, since a lane has no per-instance fact. Follow-up:
+  carry the bank chain's agreement into the instance.
+- Admission (`input_producer_table`): a plain unit holding one per-node effect op with one input,
+  no sidechain and no staging, whose input is an admissible producer's output of the same track
+  (a same-track bank final lane, or recursively another admitted op), gets a one-producer row; a
+  bank consumer's lane may now name such an op. Op rows that no bank row reaches are pruned, so a
+  stereo or bus-only path maintains nothing. `channels_agree` is one bind-allocated `Box<[bool]>`
+  per runtime (empty when no op is admitted); render reads and writes it in place.
+- The host-core probe uses an upstream episode, not a write on the op itself: every live
+  one-channel write clears the op's own `LIVE` term for the rest of the plan, which already masks
+  "arming on this block's words alone". The case only the sticky bit catches is an op whose input
+  was unequal and is equal again while its state still differs: the producer chain's silent skip
+  (`resident_zero`) after an asymmetric episode.
+- `Identity` with one input between two banks of one track: not admitted (no production lowering
+  was found to emit one between chains; recorded, not chased).
+
+## Evidence
+
+(filled in below as gates run)
