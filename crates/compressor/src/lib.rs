@@ -678,7 +678,7 @@ impl<L: Lane> Instance<L> {
         left_defaults: &[[f32; PARAMETER_COUNT]; MAX_WIDTH],
         right_defaults: &[[f32; PARAMETER_COUNT]; MAX_WIDTH],
     ) -> Self {
-        Self {
+        let mut instance = Self {
             sample_rate: metadata.sample_rate,
             bypass: metadata.bypass,
             link_modes: *links,
@@ -690,8 +690,44 @@ impl<L: Lane> Instance<L> {
             silent_fixed_point: false,
             collapsed: false,
             silent_bypass: metadata.bypass,
+        };
+        instance.rest_links();
+        instance
+    }
+
+    /// Seats every lane's link weights at rest at its mode, on both channels (issue #1370 D2).
+    fn rest_links(&mut self) {
+        for lane in 0..L::WIDTH {
+            let mode = self.link_modes[lane];
+            self.left.rest_link(lane, mode);
+            self.right.rest_link(lane, mode);
         }
     }
+
+    // REALTIME_POLICY_BEGIN: #1370, a link glide is retargeted at a block boundary.
+    /// Glides lane `lane`'s detector link to `mode` over `samples` samples (issue #1370 D1-D3).
+    ///
+    /// The lane's mode becomes `mode` at once, and with it the masks the prepared law reads, so a
+    /// glide that arrives lands on `mode`'s own law; the weights carry the transition. The mode is
+    /// the one a full reset keeps and a lane swap moves. `false`, changing nothing, for a lane
+    /// past the width, a mode the descriptor does not support or a glide longer than
+    /// `LINK_GLIDE_MAX_SAMPLES`; the caller checks padding.
+    fn retarget_link(&mut self, lane: usize, mode: LinkMode, samples: u32) -> bool {
+        if lane >= L::WIDTH
+            || !COMPRESSOR_DESCRIPTOR.supported_link_modes.contains(mode)
+            || samples > effect_contract::LINK_GLIDE_MAX_SAMPLES
+        {
+            return false;
+        }
+        self.link_modes[lane] = mode;
+        self.links = kernel::Links::per_lane(&self.link_modes);
+        self.left.retarget_link(lane, mode, samples);
+        self.right.retarget_link(lane, mode, samples);
+        // A glide moves the detector, so a silent claim earned under the old law goes.
+        self.silent_fixed_point = false;
+        true
+    }
+    // REALTIME_POLICY_END
 
     fn reset(&mut self, kind: ResetKind) {
         // A reset changes the recursive word and ramps, so any silent fixed-point claim goes.
@@ -701,6 +737,7 @@ impl<L: Lane> Instance<L> {
             ResetKind::FullToDefaults => {
                 self.left.full_reset(rate);
                 self.right.full_reset(rate);
+                self.rest_links();
             }
             ResetKind::DiscontinuityKeepParameters => {
                 self.left.discontinuity_reset(rate);
@@ -877,11 +914,25 @@ impl<L: Lane> Instance<L> {
             input.right.len(),
             self.state_sizes,
         )?;
-        state::validate_channel(input.left)?;
-        state::validate_channel(input.right)?;
+        let link_left = state::validate_channel(input.left)?;
+        let link_right = state::validate_channel(input.right)?;
+        if link_left != link_right {
+            return Err(StatePayloadError {
+                code: "effect.state.link",
+            });
+        }
+        // Issue #1370 D6: the weights land only under the mode they glide to. A payload taken
+        // under another mode (the plan-swap carry into a successor prepared with a new mode)
+        // leaves the lane's own mode at rest, as before the glide existed.
+        let carried = link_left == self.link_modes[lane];
         let rate = self.sample_rate;
-        state::commit_channel(input.left, &mut self.left, lane, rate);
-        state::commit_channel(input.right, &mut self.right, lane, rate);
+        state::commit_channel(input.left, &mut self.left, lane, rate, carried);
+        state::commit_channel(input.right, &mut self.right, lane, rate, carried);
+        if !carried {
+            let mode = self.link_modes[lane];
+            self.left.rest_link(lane, mode);
+            self.right.rest_link(lane, mode);
+        }
         // A restore writes the recursive word and coefficients from a payload this instance never
         // rendered, so any standing claim is void. Withdrawn only here, after the commit: a
         // refused restore returns above without writing a word, so the claim it leaves is as
@@ -904,6 +955,11 @@ impl<L: Lane> Instance<L> {
         self.link_modes[lane] =
             effect_contract::exchange_lane_link_word(self.link_modes[lane], link_bytes);
         self.links = kernel::Links::per_lane(&self.link_modes);
+        // The weights rest at the incoming mode; the swap's payload restore then brings a glide
+        // in flight with it (issue #1370 D6).
+        let mode = self.link_modes[lane];
+        self.left.rest_link(lane, mode);
+        self.right.rest_link(lane, mode);
         let (left_bytes, right_bytes) = values_bytes.split_at_mut(PARAMETER_COUNT * 4);
         for (values, side) in [
             (&mut self.left.defaults[lane], left_bytes),
@@ -978,8 +1034,13 @@ impl<L: Lane> Instance<L> {
                 return false;
             }
         }
-        for slot in 0..2 {
-            let (l, r) = (&left.rate_ramps[slot][lane], &right.rate_ramps[slot][lane]);
+        for (l, r) in left
+            .rate_ramps
+            .iter()
+            .chain(&left.link_ramps)
+            .zip(right.rate_ramps.iter().chain(&right.link_ramps))
+        {
+            let (l, r) = (&l[lane], &r[lane]);
             if l.current.to_bits() != r.current.to_bits()
                 || l.target.to_bits() != r.target.to_bits()
                 || l.step.to_bits() != r.step.to_bits()
@@ -1222,6 +1283,10 @@ impl PreparedNativeEffect for PreparedCompressor {
         self.instance.designed_channel_symmetry(0)
     }
 
+    fn retarget_link(&mut self, track: usize, mode: LinkMode, samples: u32) -> bool {
+        track == 0 && self.instance.retarget_link(0, mode, samples)
+    }
+
     /// Applies a compressor target by zero-based descriptor index.
     ///
     /// Indices 0 through 6 are the threshold dB, ratio, knee dB, attack milliseconds, release
@@ -1374,6 +1439,13 @@ impl<L: Lane> PreparedNativeEffectBank for PreparedCompressorBank<L> {
 
     fn lane_channel_symmetry(&self, lane: usize) -> bool {
         self.instance.designed_channel_symmetry(lane)
+    }
+
+    /// A padded lane carries no track, so it takes no glide.
+    fn retarget_link(&mut self, track: usize, mode: LinkMode, samples: u32) -> bool {
+        track < L::WIDTH
+            && self.active & (1 << track) != 0
+            && self.instance.retarget_link(track, mode, samples)
     }
 
     /// Issue #1745: `kernel::Channel::rest_lanes` on both channels, padded lanes included; on the
@@ -1716,7 +1788,7 @@ mod witness_tests {
             },
             initial_values: &values,
             limits: PrepareEffectLimits {
-                maximum_total_state_bytes: 296,
+                maximum_total_state_bytes: 360,
                 maximum_scratch_bytes: 64,
                 maximum_automation_spans_per_block: 16,
             },

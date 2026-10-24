@@ -155,7 +155,8 @@ fn malformed_raw_payloads_reject_transactionally_in_scalar_and_bank_hooks() {
         )
         .expect_err("final right-channel word must be validated")
         .code,
-        "effect.state.parameter"
+        // The final word is the `w_avg` glide's countdown (issue #1370 D6).
+        "effect.state.link"
     );
     assert_eq!(
         snapshot_track(bank.as_ref(), 0),

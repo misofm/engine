@@ -732,6 +732,39 @@ pub fn exchange_lane_link_word(link: LinkMode, word: &mut [u8]) -> LinkMode {
         .unwrap_or(LinkMode::DualMono)
 }
 // REALTIME_POLICY_END
+
+/// The longest detector link glide, in samples, that
+/// [`PreparedNativeEffect::retarget_link`] and [`PreparedNativeEffectBank::retarget_link`] accept
+/// (issue #1370): `2^24`, the largest count a kernel's `f32` countdown holds exactly. About 175 s
+/// at 96 kHz, far past any session ramp key.
+pub const LINK_GLIDE_MAX_SAMPLES: u32 = 1 << 24;
+
+/// The two detector link weights a lane rests at in `mode` (issue #1370 D2): `[w_link, w_avg]`,
+/// where `w_link` is `0` for own (dual mono) and `1` for the linked combination, and `w_avg` is
+/// `0` for maximum and `1` for average. Dual mono rests at `[0, 0]`, maximum at `[1, 0]`, average
+/// at `[1, 1]`. A gliding lane's detector is `combined = max + w_avg * (avg - max)`,
+/// `d = own + w_link * (combined - own)`.
+#[must_use]
+pub const fn link_glide_weights(mode: LinkMode) -> [f32; 2] {
+    match mode {
+        LinkMode::DualMono => [0.0, 0.0],
+        LinkMode::Maximum => [1.0, 0.0],
+        LinkMode::Average => [1.0, 1.0],
+    }
+}
+
+/// The mode whose rest weights are exactly `weights` ([`link_glide_weights`]), by raw bits, or
+/// `None` for any other pair (`-0.0` included). A state payload decodes a lane's mode from its
+/// glide targets with it.
+#[must_use]
+pub fn link_glide_mode(weights: [f32; 2]) -> Option<LinkMode> {
+    [LinkMode::DualMono, LinkMode::Maximum, LinkMode::Average]
+        .into_iter()
+        .find(|mode| {
+            let rest = link_glide_weights(*mode);
+            rest[0].to_bits() == weights[0].to_bits() && rest[1].to_bits() == weights[1].to_bits()
+        })
+}
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct StatePayloadSizes {
     pub common_bytes: u32,
@@ -2368,6 +2401,26 @@ pub trait PreparedNativeEffect: Send {
     fn channel_symmetry(&self) -> bool {
         false
     }
+
+    /// Glides the instance's detector link to `mode` over `samples` samples (issue #1370 D1).
+    ///
+    /// The lane holds two linear weights per channel, `w_link` and `w_avg`
+    /// ([`link_glide_weights`]); this call points both at `mode`'s rest weights from the words in
+    /// force (a glide in flight continues from where it is), and `samples == 0` steps them. While
+    /// a weight moves, the lane's detector is the blend `combined = max + w_avg * (avg - max)`,
+    /// `d = own + w_link * (combined - own)`, and from the frame the glide arrives it is `mode`'s
+    /// own law, bit for bit. It applies from the next frame the effect renders.
+    ///
+    /// Returns `false`, changing nothing, when the descriptor's
+    /// [`lane_link`](EffectDescriptor::lane_link) is false, `mode` is not in its
+    /// [`supported_link_modes`](EffectDescriptor::supported_link_modes), `track` is not `0`, or
+    /// `samples` exceeds [`LINK_GLIDE_MAX_SAMPLES`]. The default refuses.
+    ///
+    /// Render-safe: no allocation, no lock, bounded by the lane count.
+    fn retarget_link(&mut self, track: usize, mode: LinkMode, samples: u32) -> bool {
+        let _ = (track, mode, samples);
+        false
+    }
 }
 /// A bound homogeneous bank: the part of a bound bank that render owns.
 ///
@@ -2811,6 +2864,28 @@ pub trait PreparedNativeEffectBank: Send {
     /// lock-free and bounded by the defaults size.
     fn exchange_lane_defaults(&mut self, lane: usize, bytes: &mut [u8]) -> bool {
         let _ = (lane, bytes);
+        false
+    }
+
+    /// Glides lane `track`'s detector link to `mode` over `samples` samples (issue #1370 D1).
+    ///
+    /// The lane holds two linear weights per channel, `w_link` and `w_avg`
+    /// ([`link_glide_weights`]); this call points both at `mode`'s rest weights from the words in
+    /// force (a glide in flight continues from where it is), and `samples == 0` steps them. While
+    /// a weight moves, the lane's detector is the blend `combined = max + w_avg * (avg - max)`,
+    /// `d = own + w_link * (combined - own)`, and from the frame the glide arrives it is `mode`'s
+    /// own law, bit for bit. A bank-mate's bits do not move. It applies from the next frame the
+    /// effect renders.
+    ///
+    /// Returns `false`, changing nothing, when the descriptor's
+    /// [`lane_link`](EffectDescriptor::lane_link) is false, `mode` is not in its
+    /// [`supported_link_modes`](EffectDescriptor::supported_link_modes), `track` is out of range
+    /// (or, on a bank, a padded lane), or `samples` exceeds [`LINK_GLIDE_MAX_SAMPLES`]. The
+    /// default refuses.
+    ///
+    /// Render-safe: no allocation, no lock, bounded by the lane count.
+    fn retarget_link(&mut self, track: usize, mode: LinkMode, samples: u32) -> bool {
+        let _ = (track, mode, samples);
         false
     }
 }
