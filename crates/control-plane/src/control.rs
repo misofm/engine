@@ -1281,6 +1281,75 @@ pub(crate) fn observation_forwards(
     Ok(forwards)
 }
 
+/// The records of a structural transaction's `Observe` edits on its successor's producers (#1584
+/// T2): each net record's tap resolved by its stable key among `successor`, skipping a tap with no
+/// queue slot there (the transaction removed its target) and a tap a forward in `forwards` already
+/// re-queues with its bound state.
+///
+/// # Errors
+///
+/// [`CommandError::Internal`] if a successor queue lacks the room, which cannot happen: its queue
+/// is fresh, holds one record per declared tap, and at most one record per tap is queued between
+/// the forwards and these. [`CommandError::CompileRejected`] if the list cannot be allocated.
+fn observe_successor_pushes(
+    writes: &[controls::ObserveWrite],
+    successor: &[host_core::EffectControlProducer],
+    forwards: &[ObservationForward],
+) -> Result<Vec<ObservationForward>, CommandError> {
+    let mut pushes = Vec::new();
+    pushes
+        .try_reserve_exact(writes.len())
+        .map_err(|_| CommandError::CompileRejected(failure(ResourceFault::Allocation)))?;
+    for write in writes {
+        let key = observation_key_ref(&write.key);
+        let target = successor
+            .iter()
+            .enumerate()
+            .find_map(|(position, producer)| {
+                if producer.address.rack != key.rack
+                    || producer.track_id.as_bytes() != key.strip_id
+                    || producer.effect_id.as_bytes() != key.effect_id
+                {
+                    return None;
+                }
+                let tap = producer
+                    .descriptor
+                    .observations
+                    .iter()
+                    .position(|declared| declared.id.0 == key.tap_id)
+                    .filter(|tap| *tap < producer.observe_capacity())?;
+                Some((position, u32::try_from(tap).ok()?))
+            });
+        let Some((position, tap_index)) = target else {
+            continue;
+        };
+        if forwards
+            .iter()
+            .any(|forward| forward.position == position && forward.tap_index == tap_index)
+        {
+            continue;
+        }
+        pushes.push(ObservationForward {
+            position,
+            tap_index,
+            armed: write.armed,
+            window_blocks: write.window_blocks,
+        });
+    }
+    for push in &pushes {
+        let needed = forwards
+            .iter()
+            .chain(&pushes)
+            .filter(|other| other.position == push.position)
+            .count();
+        if needed > successor[push.position].observe_available_capacity() {
+            debug_assert!(false, "a fresh observation queue holds one record per tap");
+            return Err(CommandError::Internal);
+        }
+    }
+    Ok(pushes)
+}
+
 /// The wire key of an ended binding.
 fn ended_key(key: &controls::TapKey) -> protocol::ObservationTapKey {
     protocol::ObservationTapKey {
@@ -2468,15 +2537,6 @@ where
                 if !(1..=engine::realtime::GATE_REVISION_MAX).contains(&revision) {
                     return Err(CommandError::Internal);
                 }
-                // #1584 T1 checkpoint: a structural transaction's `Observe` edits are T2's.
-                if prepared
-                    .get()
-                    .prospective_session()
-                    .observe_bindings()
-                    .is_some()
-                {
-                    return Err(CommandError::Internal);
-                }
                 // #1559 D9: the successor renders under the overlay the transaction leaves, and
                 // its carry joins the effective values under both overlays.
                 let monitor_change = self.monitor.after(
@@ -2495,8 +2555,14 @@ where
                 // backpressure and nothing has changed (the acked-batch rule: a subscription is
                 // never dropped without its event). An event over one control frame can never
                 // be sent, so it is a resource refusal, not backpressure.
-                let observation_change = self
-                    .observation
+                // #1584 T2: the table the transaction's `Observe` edits leave, when it holds any, so
+                // the successor's prepared arms are the post-transaction subscriptions and a target
+                // the same transaction removes is ended, not armed.
+                let observation_change = prepared
+                    .get()
+                    .prospective_session()
+                    .observe_bindings()
+                    .unwrap_or(&self.observation)
                     .after(
                         prepared
                             .get()
@@ -3346,6 +3412,22 @@ where
             )?,
             _ => Vec::new(),
         };
+        // #1584 T2: the records of this transaction's `Observe` edits, queued on the successor's
+        // own fresh queues and never on the predecessor's, so a refused rebuild leaves no record
+        // anywhere. A tap the successor carries takes its predecessor's state at the swap and then
+        // drains the record (a new arm arms it, a disarm disarms it, a window change re-arms it); a
+        // tap it starts is armed from the bindings already, and the record arms it at the same
+        // block. A record a forward above already carries the bound state for is not queued twice,
+        // and one whose target the transaction removed has no successor tap and is skipped (its
+        // binding ended with the event).
+        let observe_pushes = match &kind {
+            Rebuild::Transaction(prepared) => observe_successor_pushes(
+                prepared.get().prospective_session().observe_writes(),
+                &candidate_provider.effects,
+                &forwards,
+            )?,
+            Rebuild::Discontinuity(_) | Rebuild::Monitor { .. } => Vec::new(),
+        };
         let epoch = reservation.epoch();
         candidate_provider.epoch = epoch;
         let mut reports = self
@@ -3545,6 +3627,16 @@ where
                 .expect("the room for every forwarded record was checked before the commit");
             let first = slots.0[forward.position];
             if let Some(slot) = slots.1.get_mut((first + forward.tap_index) as usize) {
+                slot.queued = true;
+            }
+        }
+        // #1584 T2: the transaction's own records, likewise, their room checked before the commit.
+        for push in &observe_pushes {
+            candidate_provider.effects[push.position]
+                .try_push_observe(push.tap_index, push.armed, push.window_blocks)
+                .expect("the room for every observe record was checked before the commit");
+            let first = slots.0[push.position];
+            if let Some(slot) = slots.1.get_mut((first + push.tap_index) as usize) {
                 slot.queued = true;
             }
         }

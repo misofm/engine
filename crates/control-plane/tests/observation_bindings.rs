@@ -491,6 +491,27 @@ fn a_removed_effect_ends_its_binding_with_an_event() {
         };
         assert_eq!(event.event_sequence, commit.event_sequence + 1, "{what}");
     }
+    // #1584 gate 4: the binding ended with its effect for good. The compressor put back under its
+    // ID is not subscribed, so a disarm is `observation.not_subscribed` and queues nothing.
+    let mut rig = Rig::new();
+    rig.subscribe("comp1");
+    rig.apply(&[remove_insert("comp1")]).expect("a removal");
+    rig.drain();
+    let mut back = put_compressor("comp1", "comp");
+    if let SessionEdit::PutTrackEffect { final_position, .. } = &mut back {
+        *final_position = 0;
+    }
+    assert_eq!(
+        rig.transact(&[back]),
+        Reply::Applied(protocol::EditPath::Rebuild),
+        "the compressor put back"
+    );
+    assert!(rig.session.observation_bindings().is_empty());
+    assert_eq!(
+        rig.transact(&[observe("comp1", false, WINDOW_BLOCKS)]),
+        refused("observation.not_subscribed", 0)
+    );
+    assert_eq!(rig.queued("comp1"), 0);
 }
 
 /// The room for the end event is checked with the commit's own event before anything changes (the
@@ -1537,6 +1558,12 @@ impl Rig {
 
     /// The newest window `strip`'s `comp` insert's gain-reduction reader holds.
     fn window(&self, strip: &str) -> Option<engine::realtime::ObservationWindow> {
+        self.window_at(strip, 0)
+    }
+
+    /// The newest window the gain-reduction reader of `strip`'s insert at `index` holds, on the
+    /// newest plan.
+    fn window_at(&self, strip: &str, index: u32) -> Option<engine::realtime::ObservationWindow> {
         self.session
             .test_pending_providers()
             .last()
@@ -1544,7 +1571,7 @@ impl Rig {
             .test_observations()
             .iter()
             .find(|handle| {
-                &*handle.track_id == strip && handle.address == LiveEffectAddress::insert(0)
+                &*handle.track_id == strip && handle.address == LiveEffectAddress::insert(index)
             })
             .expect("the insert's readers")
             .readers[0]
@@ -1763,4 +1790,96 @@ fn a_full_queue_refuses_the_disarm_with_backpressure_and_changes_nothing() {
     );
     assert_eq!(rig.queued("comp1"), 2);
     assert!(rig.session.observation_bindings().is_empty());
+}
+
+/// #1584 gate 4 (T2): an `Observe` in a structural transaction. With `comp1` subscribed (window 4)
+/// and five blocks rendered, one transaction adds a compressor `comp-b` to `comp2` (a rebuild),
+/// subscribes it, and subscribes `comp3`'s tap, which the successor carries unarmed: the reply is
+/// `rebuild`; the new tap's first window and `comp3`'s both open at the adoption block (the carried
+/// tap only by the record queued on the successor); and the carried `comp1` keeps its four-block
+/// grid from block 0 with no restart at the adoption block. The same edit before the effect it
+/// names is refused at the `Observe`, which is checked at its place in the transaction.
+///
+/// Red if a mixed transaction drops a subscription (a carried tap takes its predecessor's unarmed
+/// state, so only a record on the successor arms it), restarts the carried tap, or accepts a record
+/// for a target that does not exist yet.
+#[test]
+fn an_observe_in_a_structural_transaction_arms_the_new_effect_and_keeps_the_carried_one() {
+    let mut rig = Rig::new();
+    assert_eq!(
+        rig.transact(&[observe("comp1", true, WINDOW_BLOCKS)]),
+        Reply::Applied(protocol::EditPath::Monitor)
+    );
+    rig.render_blocks(5);
+    let carried = rig.window("comp1").expect("the first window");
+    assert_eq!((carried.sequence, carried.first_sample), (1, 0));
+    // The edit before the effect it names: refused at the edit, nothing changes.
+    let revision = rig.revision();
+    assert_eq!(
+        rig.transact(&[
+            observe_tap("comp2", "comp-b", 1, true, WINDOW_BLOCKS),
+            put_compressor("comp2", "comp-b"),
+        ]),
+        refused("observation.address.unknown", 0)
+    );
+    assert_eq!(rig.revision(), revision);
+    assert_eq!(
+        rig.transact(&[
+            put_compressor("comp2", "comp-b"),
+            observe_tap("comp2", "comp-b", 1, true, WINDOW_BLOCKS),
+            observe("comp3", true, WINDOW_BLOCKS),
+        ]),
+        Reply::Applied(protocol::EditPath::Rebuild)
+    );
+    assert_eq!(rig.revision(), revision + 1);
+    let new_key = TapKey {
+        strip: StableId::parse("comp2").expect("strip"),
+        section: TapSection::Inserts(StableId::parse("comp-b").expect("insert")),
+        tap_id: 1,
+    };
+    assert_eq!(
+        rig.session.observation_bindings().window_of(&new_key),
+        Some(WINDOW_BLOCKS)
+    );
+    // The swap block (block 5) adopts the successor, then three more: one window each.
+    let adopted_at = rig.block * 128;
+    rig.render_blocks(4);
+    let fresh = rig.window_at("comp2", 1).expect("the new tap's window");
+    assert_eq!(
+        (fresh.sequence, fresh.first_sample, fresh.blocks),
+        (1, adopted_at, WINDOW_BLOCKS),
+        "the new tap is armed from the adoption block"
+    );
+    rig.render_blocks(4);
+    // A carried tap keeps its publisher (#1327 D2), so its windows go on in the reader of the
+    // predecessor's epoch, the running epoch until the successor is promoted.
+    assert_eq!(
+        rig.session.test_pending_providers().len(),
+        1,
+        "not promoted yet"
+    );
+    let running = |strip: &str| {
+        rig.session
+            .test_providers()
+            .test_observations()
+            .iter()
+            .find(|handle| {
+                &*handle.track_id == strip && handle.address == LiveEffectAddress::insert(0)
+            })
+            .expect("the carried tap's reader")
+            .readers[0]
+            .read()
+    };
+    let armed = running("comp3").expect("the carried tap the transaction subscribed");
+    assert_eq!(
+        (armed.sequence, armed.first_sample, armed.blocks),
+        (2, adopted_at + 4 * 128, WINDOW_BLOCKS),
+        "the record on the successor arms the carried tap at the adoption block"
+    );
+    let carried = running("comp1").expect("the carried tap's window");
+    assert_eq!(
+        (carried.sequence, carried.first_sample, carried.blocks),
+        (3, 8 * 128, WINDOW_BLOCKS),
+        "the carried tap keeps its grid: no restart at the adoption block"
+    );
 }
