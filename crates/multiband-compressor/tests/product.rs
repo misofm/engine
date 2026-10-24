@@ -1137,7 +1137,7 @@ fn bank_requests_are_validated_before_any_fallback() {
     // A track whose program key differs falls back to scalar rather than silently binding.
     let mut other = sets.clone();
     let mut mixed = other.iter().map(|set| request(set)).collect::<Vec<_>>();
-    mixed[2] = request_with(&other[2], LinkMode::Maximum, 128, false);
+    mixed[2] = request_with(&other[2], LinkMode::DualMono, 128, true);
     assert!(
         factory
             .bind_homogeneous_bank(PrepareEffectBankRequest {
