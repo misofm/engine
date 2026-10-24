@@ -57,16 +57,18 @@ Single feature branch `codex/rust-1-98-1`, checkpoint-committed locally, pushed 
 The scope note (`scope/877.md`) wins for paths and decisions; these changes over the body above follow it.
 
 - **Target 1.99.1**, not 1.98.1: 1.98.1 was stale. PR #878 is superseded; root closes it.
-- **Lints.** Workspace clippy under 1.99.1 fired only `chunks_exact_to_as_chunks` (allowed once in
-  `Cargo.toml` for the whole workspace: 58 const-sized sites in 18 crates, none in `crates/lane`) and rustc's `deprecated` on `Atomic*::fetch_update` (renamed
+- **Lints.** Workspace clippy under 1.99.1 fired only `chunks_exact_to_as_chunks` (58 const-sized sites in 18 crates, none in
+  `crates/lane`; by root ruling each is rewritten as `as_chunks::<N>()` with the remainder handled
+  as before, and no allow remains) and rustc's `deprecated` on `Atomic*::fetch_update` (renamed
   `try_update`; three sites in `crates/protocol` and `crates/host-core`, the same method). The lint
   groups carry `priority = -1`. No other allow.
 - **Pins.** Between releases (`docs/RELEASE.md`, "Between releases") only the pin file moves:
   `EXPECTED_WORKLET_SHA256` and `test-npm-publish-modes.py`'s `release_pin` stay the 0.4.3
   release's, and the release checks do not fire. `npm-publish.yml`'s `RUSTUP_TOOLCHAIN` and step
   name move to 1.99.1; the npm audit normalizes exactly those two literals back to its 1.97.1 hash.
-- **Repin.** AudioWorklet module under 1.99.1: `81fa52ee9a58074b6750ff5f038229a8b0c609d10afcece6c2d974f8c9fb5cff`
-  (the same tree under 1.97.1 builds `cfd36a3e…`).
+- **Repin.** AudioWorklet module under 1.99.1 at base `eb792c949`: `81fa52ee…` (the same tree under
+  1.97.1 builds `cfd36a3e…`). After the `as_chunks` rewrite and the merge of `origin/main`:
+  `5c75d2df0ce3c0f2d4b1642ba803c87e900141ca3672eab5bb2e4bf898075fa6`, re-recorded on three browsers.
 - **No bit moved.** The 37 native console bench rows' `output_sha256` and the mixing-automation
   preflight digests are equal under 1.97.1 and 1.99.1 (AVX2 host, PR evidence); release lane,
   math, wasm-gates, console-workload, conformance and dsp-reference tests and the fixture gates pass.
@@ -84,3 +86,7 @@ The scope note (`scope/877.md`) wins for paths and decisions; these changes over
   symbol, with a reason each; an exempt function is not counted toward K, and an entry that
   matches no function fails. The one entry is `decode_track`. Self-test rows d4-d6; a partly
   scalarized `InputStage::process` (vector 504 / scalar 1008) in a disassembly copy fails.
+  The pre-existing gap this exposed -- a render kernel the wasm build fully scalarises (vector 0)
+  is skipped as an arithmetic-free helper, on `main` too -- is successor #1889.
+- **No bit moved after the rewrite.** The 37 console digests and the preflight digests equal the
+  1.99.1 pre-rewrite run; the release tests above pass again.
