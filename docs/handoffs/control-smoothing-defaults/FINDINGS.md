@@ -698,7 +698,10 @@ is at its 9.4 setting, prepared once with `dual_mono` and once with `maximum`: t
 +50 %) on `bass-kick` and `mix-wide`; the limiter at its defaults (release 100 ms, lookahead 5 ms),
 ceiling set for 6.0 dB peak reduction under `maximum` (-6.88 dBTP on `bass-kick`, -7.92 to -8.00 on
 `mix-wide`). Rows: `data/link_glide_effects.csv`. Every row's `step_db` is -26.3 to -16.1 dB, above
-the -40 dB floor, so no row is vacuous. Link and unlink agree to 0.00 dB.
+the -40 dB floor, so no row is vacuous. Link and unlink agree to 0.00 dB. Two four-rate `live` runs
+and two `measure` runs (on `7dbc6a161`) reproduce every file byte for byte; the new file and the
+other committed files are unchanged, except the three files whose drift #1830 recorded (9.7), with
+the same 45, 21 and 31 moved rows.
 
 **Results**, 48 kHz (`bass-kick`: OOB / CTR; `mix-wide`: HF splatter; the range is over the four
 rates at 20 ms):

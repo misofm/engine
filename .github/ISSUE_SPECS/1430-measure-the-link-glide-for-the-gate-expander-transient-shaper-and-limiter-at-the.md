@@ -142,3 +142,9 @@ lane* (#1371) use its answer.
 - **Result (FINDINGS 9.5.1).** No vacuous row (`step_db` -26.3 to -16.1 dB). `faderMs` is right for
   the transient shaper and the limiter (at its default lookahead); the gate has no answer from the
   emulation, and no ramp key governs its threshold crossing. No key change for root.
+- **Gates.** Harness tests in release, offline: 22 pass; clippy `-D warnings` clean. Two four-rate
+  `live` and two `measure` runs on `7dbc6a161`: all twelve CSVs reproduce byte for byte between the
+  runs (34 min wall time for the four runs). Against the committed files, all are equal except
+  `fader_drag.csv`, `pan_drag.csv` and `law_transfer.csv`, #1830's recorded drift (45, 21 and 31
+  rows, unchanged). `check-workspace-policy.sh`, `check-env-vocabulary.sh`,
+  `check-dsp-research.sh` and the stream's lint script pass.
