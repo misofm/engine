@@ -5750,7 +5750,7 @@ pub fn test_only_builtin_processor_mut(
 // REALTIME_POLICY_BEGIN
 /// The builtin bank processor slot `slot` of `chain` holds, if that slot is a builtin stage
 /// (issue #1276 D3). Allocation-free: a slot borrow and two downcasts.
-fn builtin_processor_mut(
+pub(crate) fn builtin_processor_mut(
     chain: &mut BankChain,
     slot: usize,
 ) -> Option<&mut dyn GraphPreparedBuiltinBankProcessor> {
@@ -5837,7 +5837,7 @@ fn input_lane_mut(
 
 /// The populated lane at `at` of a builtin bank that holds `owner`'s strip state: its chain, slot
 /// and lane (issue #1277 D1).
-fn strip_lane_mut(
+pub(crate) fn strip_lane_mut(
     units: &mut [crate::runtime::RuntimeUnit],
     owner: crate::BuiltinStripOwner,
     at: crate::GraphLaneLocation,
@@ -15656,6 +15656,8 @@ mod tests {
         /// `channels * frames` words: this block's played planes.
         planes: Vec<f32>,
         played: bool,
+        /// Every block before this one is an underrun.
+        played_from_block: usize,
     }
 
     impl PlayedSource {
@@ -15666,6 +15668,7 @@ mod tests {
                 mapping,
                 planes: vec![0.0; channels * frames as usize],
                 played: false,
+                played_from_block: 0,
             }
         }
 
@@ -15682,6 +15685,7 @@ mod tests {
         fn begin_block(&mut self, first_sample: u64, frames: u32) -> Result<(), RenderError> {
             let block = (first_sample / u64::from(frames)) as usize;
             let played = match PLAYED_SCRIPT[block % PLAYED_SCRIPT.len()] {
+                _ if block < self.played_from_block => None,
                 PlayedBlock::Full => Some(self.frames),
                 PlayedBlock::Short(played) => Some(played.min(self.frames - 1)),
                 PlayedBlock::Underrun => None,
@@ -15775,6 +15779,10 @@ mod tests {
         /// inputs: clause (b) binds it in place with no reader, and the colouring hands its freed
         /// slot to a later op.
         dead: bool,
+        /// Every block before this one is an underrun (issue #1288): the source first plays here.
+        played_from_block: usize,
+        /// Each bank is a [`FadeProbe`] fader bank instead of a [`CrossTilt`] (issue #1288).
+        fade_probe: bool,
     }
 
     impl SourceShape {
@@ -15793,6 +15801,8 @@ mod tests {
                 routed: None,
                 aliased: None,
                 dead: false,
+                played_from_block: 0,
+                fade_probe: false,
             }
         }
 
@@ -15978,7 +15988,14 @@ mod tests {
             .map(|cohort| GraphPreparedBuiltinBank {
                 backend,
                 members: cohort.to_vec().into_boxed_slice(),
-                processor: Box::new(CrossTilt),
+                processor: if shape.fade_probe {
+                    Box::new(FadeProbe {
+                        lanes: cohort.len(),
+                        fired: 0,
+                    }) as Box<dyn GraphPreparedBuiltinBankProcessor>
+                } else {
+                    Box::new(CrossTilt)
+                },
                 scratch: AoSoaScratch::new(shape.width, shape.frames).expect("scratch"),
             })
             .collect();
@@ -16122,7 +16139,10 @@ mod tests {
                 total_engine_owned_bytes: 0,
                 largest_allocation_bytes: 0,
             },
-            Box::new(PlayedSource::new(shape.frames, shape.mapping())),
+            Box::new(PlayedSource {
+                played_from_block: shape.played_from_block,
+                ..PlayedSource::new(shape.frames, shape.mapping())
+            }),
         );
         (
             plan,
@@ -16218,6 +16238,124 @@ mod tests {
                 executor.runtime.scatter_redirects(),
             ],
         }
+    }
+
+    thread_local! {
+        /// Issue #1288: the first sample of each block a [`FadeProbe`] lane fired before.
+        static FADE_FIRES: core::cell::RefCell<Vec<(usize, u64)>> =
+            const { core::cell::RefCell::new(Vec::new()) };
+    }
+
+    /// A fader bank that records its fires (issue #1288): it holds fader strip lanes, arms every
+    /// lane, and at its next block records each lane fired since the last one.
+    struct FadeProbe {
+        lanes: usize,
+        /// Lanes fired since the last block, bit `n` for lane `n`.
+        fired: u32,
+    }
+
+    impl GraphPreparedBuiltinBankProcessor for FadeProbe {
+        fn as_any(&self) -> &dyn Any {
+            self
+        }
+        fn into_any(self: Box<Self>) -> Box<dyn Any> {
+            self
+        }
+        fn carried_strip_lanes(&self) -> Option<(crate::BuiltinStripStage, usize)> {
+            Some((crate::BuiltinStripStage::Fader, self.lanes))
+        }
+        fn arm_fade_in(&mut self, _: usize) -> bool {
+            true
+        }
+        fn fire_fade_in(&mut self, lane: usize, _: u32) {
+            self.fired |= 1 << lane;
+        }
+        fn process(
+            &mut self,
+            _: &mut [f32],
+            _: &mut [f32],
+            _: u32,
+            first_sample: u64,
+        ) -> Result<(), RenderError> {
+            for lane in 0..self.lanes {
+                if self.fired & (1 << lane) != 0 {
+                    FADE_FIRES.with(|fires| fires.borrow_mut().push((lane, first_sample)));
+                }
+            }
+            self.fired = 0;
+            Ok(())
+        }
+    }
+
+    /// Issue #1288 gate 2: an added track whose source first plays at block 5 (sample 640) with
+    /// `D = 200` fires its fade at the block that starts at 896 (the first at or after 840), on its
+    /// own lane only, once; a submix arm (no source) fires at the first block.
+    ///
+    /// Red if the fire ignores `D` (640) or rounds it down (768), or ignores the played block (0).
+    #[test]
+    fn a_fade_arm_fires_at_the_first_block_after_its_first_played_block_plus_d() {
+        let shape = SourceShape {
+            stages: &[TrackStage::PostFader],
+            meters: &[],
+            played_from_block: 5,
+            fade_probe: true,
+            ..SourceShape::banked(BankWidth::Four, 2, 128)
+        };
+        let (plan, bindings, source_set) = source_fixture_parts(shape, &Published::default());
+        let (mut executor, _) = bind_executor(plan, bindings, Some(source_set));
+        let lanes = executor.runtime.builtin_strip_lanes();
+        let fader = |track: &str| {
+            lanes
+                .iter()
+                .find(|(id, lane)| {
+                    id.as_ref() == track && lane.owner == crate::BuiltinStripOwner::Fader
+                })
+                .map(|(_, lane)| lane.location)
+                .expect("a fader lane")
+        };
+        let input = GraphNodeId::TrackStage {
+            track_id: crate::StableGraphId::parse("track00").expect("stable id"),
+            stage: TrackStage::Input,
+        };
+        let installed = executor
+            .install_fade_arms(vec![
+                crate::GraphFadeArm {
+                    fader: fader("track00"),
+                    source: Some(input),
+                    delay_samples: 200,
+                    ramp_samples: 64,
+                },
+                crate::GraphFadeArm {
+                    fader: fader("track01"),
+                    source: None,
+                    delay_samples: 0,
+                    ramp_samples: 64,
+                },
+            ])
+            .expect("installed");
+        assert_eq!(installed.0, vec![Some(0), Some(1)]);
+        FADE_FIRES.with(|fires| fires.borrow_mut().clear());
+        for block in 0..10_u64 {
+            let mut storage = vec![0.0_f32; 2 * 128];
+            render_host(
+                &mut executor,
+                engine::realtime::PlanarBufferMut::try_new(&mut storage, 2, 128, 128)
+                    .expect("host output"),
+                block * 128,
+            )
+            .expect("render");
+        }
+        let lane = |track: &str| usize::from(fader(track).lane);
+        assert_eq!(
+            FADE_FIRES.with(|fires| fires.borrow().clone()),
+            vec![(lane("track01"), 0), (lane("track00"), 896)],
+            "the submix arm fires at once, the track's at 896"
+        );
+        assert_eq!(executor.fade_arms_pending, 0, "both arms are done");
+        assert!(
+            installed.1.fired(0) && installed.1.fired(1),
+            "the watch saw both fire"
+        );
     }
 
     /// Issue #918 gate 1: each source shape and the claims it binds on the copy.

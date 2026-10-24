@@ -12,6 +12,8 @@ export class FakeOpfsBackend {
     this.writeBlocker = options.writeBlocker
     this.closeBlocker = options.closeBlocker
     this.abortBlocker = options.abortBlocker
+    this.removeEntryBlocker = options.removeEntryBlocker
+    this.entriesBlocker = options.entriesBlocker
   }
 
   get usage() {
@@ -95,6 +97,7 @@ class FakeDirectoryHandle {
   }
 
   async removeEntry(name, options = {}) {
+    await this.backend.removeEntryBlocker?.({ name })
     const child = this.node.entries.get(name)
     if (child === undefined) throw domError("NotFoundError", `${name} is absent`)
     if (child.kind === "directory" && child.entries.size !== 0 && !options.recursive) {
@@ -104,6 +107,7 @@ class FakeDirectoryHandle {
   }
 
   async *entries() {
+    await this.backend.entriesBlocker?.({ node: this.node })
     for (const [name, node] of Array.from(this.node.entries.entries())) {
       yield [
         name,

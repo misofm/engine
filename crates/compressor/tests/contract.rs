@@ -727,7 +727,7 @@ fn a_padded_request_binds_after_every_lane_is_validated() {
     );
 
     let mut foreign = requests.clone();
-    foreign[lanes - 1].link_mode = LinkMode::Maximum;
+    foreign[lanes - 1].bypass = true;
     assert!(
         bind(backend, width, &foreign, &prefix(lanes - 1, lanes))
             .expect("a well-formed request")

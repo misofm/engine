@@ -92,6 +92,7 @@ const fn descriptor(id: &'static str) -> EffectDescriptor {
         contract_minor: 0,
         state_layout_version: 1,
         supported_link_modes: LinkModeSet::DUAL_MONO,
+        lane_link: false,
         parameters: &[],
         ports: &PORTS,
         qualities: &QUALITIES,
