@@ -27,6 +27,7 @@ fn epoch(base: PlanResourceReport, terms: &Terms) -> LiveEpochResources {
             epoch_retained: terms.epoch_retained,
             prepared_protocol_retained: terms.prepared_protocol,
             largest: terms.capi_largest,
+            edit_ramps: 0,
         },
         carried: control_plane::CarriedSourceBytes::default(),
     }
