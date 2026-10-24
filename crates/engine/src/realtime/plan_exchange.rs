@@ -941,7 +941,8 @@ impl RealtimePlanOwner {
     /// [`PreparedRenderPlan::copy_response_snapshot`] on the active plan, naming that plan.
     ///
     /// Valid between blocks, on the thread that renders (#1577 calls it after a block): it
-    /// allocates nothing and neither renders, advances the clock nor adopts a successor. The
+    /// allocates nothing itself (the sink owns all storage) and neither renders, advances the
+    /// clock nor adopts a successor. The
     /// returned `active_epoch` is the epoch of the plan whose retained values were copied.
     ///
     /// # Errors

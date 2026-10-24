@@ -143,3 +143,5 @@ Commands: `cargo test --locked -p host-core`, `cargo test --locked -p engine`,
 - Gate 3 is one assertion in `the_non_contiguous_render_reports_the_hand_over` (every block, before
   and after the swap); the failed-render refusal is the plan's own (`mod.rs` response tests), not
   repeated at the owner.
+
+- Root note (2026-10-24, verifier MINOR): a foreign-strip `querySnapshot` now fails inside the analysis with `invalidArgument` (`responseError(RESULT_INVALID_ARGUMENT)`) instead of `abiMismatch` (`invalidPayload`) from `#withCaptureMetadata`; that SDK check (`sdk/src/core/live-response.ts`) cannot fire on this path until #1579/#1580 delete it. The realtime-policy region now covers `copy_response_snapshot`'s wrapper only, not its callees; #1577 must count allocations on the real browser sink before it calls it on the render thread.
