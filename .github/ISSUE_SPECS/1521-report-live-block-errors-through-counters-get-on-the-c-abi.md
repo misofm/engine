@@ -158,7 +158,7 @@ All anchors are on `main` at `8c0deee2c`.
 - **Browser: no browser code.** #1381 closed: host-web renders through `PlanState::render` and its
   session is `control_plane::SessionState`, so the mirror store and the service-step refresh run in
   the browser too, and both hosts serve the counter from the one host-core served set (one control
-  abstraction). A browser render error is still terminal (`STATE_FAILED`), so its value is 0 or 1.
+  abstraction). A browser render error is still terminal (`STATE_FAILED`), so the browser reports it as the failure `web.render.rejected`; while the host accepts control calls the counter reads 0.
   No browser parity row: the value is 0 on both hosts in a correct build and gate 1 proves
   mirror-to-wire. No change to `WebStatus`, `WebPlanWatermark`, any JS, `.d.ts` or SDK mirror.
 - A watermark outcome flag (D5) or a word in `miso_engine_v1_watermark` (D9).
