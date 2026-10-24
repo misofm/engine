@@ -75,9 +75,16 @@ Scope note `scope/887.md` and root's decisions supersede the slice above where t
   lane's plane, and an inactive scratch lane is `+0.0` at the start of every block (the scalar
   path left it stale).
 - **Staging for every chain.** `staging_left/right` (`2 * W * quantum * 4` bytes) are now
-  allocated for a partial chain too. The compile estimate already charged them for every bound
-  bank (`effect_bank_runtime_buffer_bytes`, `graph-compiler/src/banks.rs`); the zero plane's
-  `4 * quantum` bytes are not in that estimate (see the evidence below).
+  allocated for a partial chain too.
+- **Every retained byte is charged** (root, 2026-10-24, authorizing the paths outside the slice).
+  `effect_bank_resource` already charged staging and now adds a padded bank's zero plane to
+  `effect_bank_runtime_buffer_bytes`; `builtin_bank_resource` now charges every builtin bank's
+  staging (never charged before, full banks included) and a padded bank's zero plane in
+  `builtin_bank_scratch_bytes`. Pinned by `a_padded_bank_charges_member_metadata_per_active_member`
+  and `builtin_bank_resource_charges_two_planes_and_actual_members`; the exact construction
+  allocations are `allocation_tracker.rs`'s. Re-pinned by the +10 % rule: the browser identity
+  fixture's two graph plan rows (35,648 -> 49,280 / 49,536), capi's reference-session graph and
+  builtin-scratch rows (reasons in `resource_lifecycle.rs`), and the `direct-route` graph fixture.
 - **Scatter.** The direct-plane scatter now also requires a full bank in the chain itself, not
   only in the provider. The staged path copies out, or folds, only active lanes. Resident
   acquisition copies the whole block on every bank.

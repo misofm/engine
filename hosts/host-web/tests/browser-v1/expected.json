@@ -71,8 +71,8 @@
         "sourceTotalBytes": "4352",
         "sourceOverheadBytes": "3264",
         "builtinRetainedBytes": "6720",
-        "graphSessionPlusPlanBytes": "35648",
-        "graphIncrementalPlanBytes": "35648",
+        "graphSessionPlusPlanBytes": "49536",
+        "graphIncrementalPlanBytes": "49280",
         "graphMetadataBytes": "4608"
       },
       "results": {

@@ -204,13 +204,15 @@ pub struct GraphResourceEstimate {
     pub effect_bank_count: u64,
     /// Exact two-plane (L and R) AoSoA scratch payload retained by native-effect banks.
     pub effect_bank_scratch_bytes: u64,
-    /// Exact additional per-member output buffers required while a bank is gathered/scattered.
+    /// Exact additional buffers a native-effect bank's chain owns to gather and scatter: two
+    /// lane-major staging planes, and a padded bank's `quantum`-word `+0.0` plane (issue #887).
     pub effect_bank_runtime_buffer_bytes: u64,
     /// Checked bank/member metadata retained before render-plan binding.
     pub effect_bank_metadata_bytes: u64,
     /// Exact prepared post-input builtin bank payload retained by the graph.
     pub builtin_bank_bytes: u64,
-    /// Exact AoSoA scratch payload retained by post-input builtin banks.
+    /// Exact `f32` plane payload retained by post-input builtin banks: two AoSoA scratch planes
+    /// and the chain's two staging planes per bank, and a padded bank's `+0.0` plane (issue #887).
     pub builtin_bank_scratch_bytes: u64,
     /// Number of retained post-input builtin banks.  The last bank of a dependency level may
     /// be padded with identity lanes, so a bank holds `1..=width.lanes()` members.
