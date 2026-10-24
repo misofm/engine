@@ -45,16 +45,25 @@ impl RuntimePreparer for Preparer {
         compiled: &CompiledSession,
         caps: &HostPrepareCaps,
         lanes: HostLiveLanes,
+        _spectrum: Option<&host_core::SpectrumPreparation>,
         successor: Option<SuccessorBase<'_>>,
         superseded: &LiveValuesSuperseded,
-    ) -> Result<(PreparedHost, HostLiveControlHandles), PrepareDiagnostics> {
+    ) -> Result<
+        (
+            PreparedHost,
+            HostLiveControlHandles,
+            Option<host_core::PreparedSpectrumCaptures>,
+        ),
+        PrepareDiagnostics,
+    > {
         let live = HostLiveControlRequest::default();
-        match successor {
+        let (host, handles) = match successor {
             Some(base) => prepare_host_runtime_with_live_lanes_successor(
                 compiled, caps, &live, lanes, base, superseded,
             ),
             None => prepare_host_runtime_with_live_lanes(compiled, caps, &live, lanes, superseded),
-        }
+        }?;
+        Ok((host, handles, None))
     }
 }
 
@@ -91,8 +100,13 @@ fn limits(maximum_document_bytes: u64) -> ControlLimits {
 }
 
 fn boot(document: &str, maximum_document_bytes: u64) -> CompiledChildren<Adapter> {
-    compile_children::<Adapter>(document, limits(maximum_document_bytes), Box::new(Preparer))
-        .expect("boot compile")
+    compile_children::<Adapter>(
+        document,
+        limits(maximum_document_bytes),
+        Box::new(Preparer),
+        None,
+    )
+    .expect("boot compile")
 }
 
 fn model(document: &str) -> SessionModel {
