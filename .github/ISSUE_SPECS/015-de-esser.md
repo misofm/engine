@@ -128,3 +128,24 @@ Evidence (48 kHz, this worktree):
   two link modes and listen on alternate lanes, plus a scalar instance, 400 blocks with silences of
   10,240 frames (armed and unarmable segments both occur): 3,686,400 output bytes identical before
   (b75d18b6e) and after the `armable` change.
+
+## S2 attempt 1 (2026-10-24): registry and consumer wiring (insert only)
+
+- `miso.de-esser` is the ninth launch factory (`effect-compiler`, registry order last). Root
+  decision: insert only at launch; it is not on decision 12's console list until the owner rules
+  (S3). Wired: `check-effect-runtime-policy.sh` boundary, `SIDECHAIN_EFFECTS`, the SDK assets and
+  codegen, `EFFECT_LINK_MODES` (all three modes), `SESSION_SCHEMA_V1.md` (ports, eligibility),
+  the `qualification.yml` DSP job `-p` and workspace `--exclude` lists, and every test row that
+  enumerates the registry (counts 8 -> 9, ports 18 -> 21, taps 4 -> 5, quality rows 32 -> 36).
+- Defect found by `bypass_shunt_identity` (per-node leg, Extreme level): a prepared-bypass lane
+  whose wet state (SVF integrators) alone failed D7 zeroed its dry output, where the graph's
+  shunt passes it. `finish_block` now zeroes a bypassed lane only when its output fails; the state
+  is still recovered and counted. Red before the change, green after.
+- `parameter_lattice`'s geometric-step check now skips intrinsic points: the de-esser's Q
+  (0.5-8) ends 7.9987, 8, a gap below the first generated one.
+- `observation_identity`: the de-esser was born with its tap, so its contract is 1.0 (no bump).
+- No new test: the de-esser rides the existing per-effect rows (`parameter-metadata` round trip
+  boots every registry effect as an insert and renders it on the web host; the SDK
+  `console-evals` boot each catalog effect at every link mode and hear its bypass lifted).
+- Browser budgets unmoved (`check-browser-expected-resources.py`, `check-web-audioworklet.sh`
+  boot high-water gate both green; no re-pin).
