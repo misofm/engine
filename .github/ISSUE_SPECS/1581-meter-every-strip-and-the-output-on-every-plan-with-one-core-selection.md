@@ -278,3 +278,13 @@ Commands: `cargo test --locked -p host-core --all-features`,
   change. The master ring's 8 x 32 bridge bytes leave the bridge rows (the output meter's are in the
   control plane's retained row since T2); `check-browser-expected-resources.py` agrees with no
   re-pin.
+- **T3 verdict fold (root, 2026-10-24).** MAJOR, already on main: the lease and the producer reset
+  activated on the absolute `sample % period` grid, while the strip meters tile from their plan's
+  first block. After an uncarried swap at an off-grid block, a lease cycle published nothing, with
+  loss word 0. Now `ReadyOwnership::meter_grid_origin` (boot 0; the adoption block of each swap
+  that carries no meter) is the one origin, and `next_meter_boundary` rounds up on it for both
+  activations. Red first (`e5b188ae6`): lease row, and the producer-reset row red alone under a
+  probe. The two loss counts are exact now: the added-strip swap (`5 + 2 * strips + waiting + 1`)
+  and saturation (`4` from the first frame, `4 + 4 + 1` at the end). The uncarried test queues one
+  window before the swap, so the unread-discard mutant (`*output_pops = 0`) is red. No resource
+  or digest moved.
