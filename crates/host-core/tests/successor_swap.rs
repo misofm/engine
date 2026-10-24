@@ -6096,12 +6096,22 @@ fn pending_observe_swap(
 
 /// The acknowledged Observe records in the retired queues -- one subscribe, and every queue full --
 /// at the build's own width, `Backend::current()`, on a full bank of insert lanes: a console effect
-/// bank binds only at the width its build executes (#1017).
+/// bank binds only at the width its build executes (#1017). Then the same records of per-node
+/// instances that carry to per-node instances (#1816): a group one lane short of a bank on both
+/// sides of the swap.
 #[test]
 fn pending_observe_records_are_applied_at_the_carry_at_the_build_width() {
     let backend = Backend::current();
+    let (short, _) = short_and_full(Insert::Compressor, backend);
     for pending in [PendingObserve::OneSubscribe, PendingObserve::FullQueues] {
         pending_observe_records_are_applied_at_the_carry(backend, backend.width(), pending);
+        pending_observe_swap(
+            backend,
+            short.clone(),
+            short.clone(),
+            pending,
+            Some((true, true)),
+        );
     }
 }
 

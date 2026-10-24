@@ -7045,7 +7045,9 @@ impl crate::runtime::Runtime {
         // is applied to its tap now, as its next block would have (#1280 D3). The first loop
         // marked every moved predecessor instance; one walk over its units now runs each marked
         // instance's own drain loop (#1816).
-        predecessor.carry_observes(predecessor_next_sample);
+        if !moves.is_empty() {
+            predecessor.carry_observes(predecessor_next_sample);
+        }
         node_refused
     }
 
