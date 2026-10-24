@@ -894,7 +894,10 @@ impl<L: Lane> Instance<L> {
             (&mut self.left.defaults[lane], left_bytes),
             (&mut self.right.defaults[lane], right_bytes),
         ] {
-            for (value, word) in values.iter_mut().zip(side.chunks_exact_mut(4)) {
+            for (value, word) in values
+                .iter_mut()
+                .zip(side.as_chunks_mut::<4>().0.iter_mut())
+            {
                 let incoming =
                     f32::from_bits(u32::from_le_bytes([word[0], word[1], word[2], word[3]]));
                 word.copy_from_slice(&value.to_bits().to_le_bytes());
@@ -1195,6 +1198,11 @@ impl NativeEffectFactory for CompressorFactory {
 }
 
 impl PreparedNativeEffect for PreparedCompressor {
+    /// Every field is inline: this instance owns no heap (#1074).
+    fn retained_bytes(&self) -> u64 {
+        0
+    }
+
     fn channel_symmetry(&self) -> bool {
         self.instance.designed_channel_symmetry(0)
     }
@@ -1344,6 +1352,11 @@ impl PreparedNativeEffect for PreparedCompressor {
 }
 
 impl<L: Lane> PreparedNativeEffectBank for PreparedCompressorBank<L> {
+    /// Every field is inline: this instance owns no heap (#1074).
+    fn retained_bytes(&self) -> u64 {
+        0
+    }
+
     fn lane_channel_symmetry(&self, lane: usize) -> bool {
         self.instance.designed_channel_symmetry(lane)
     }

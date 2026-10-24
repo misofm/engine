@@ -517,6 +517,9 @@ fn generated() -> Vec<(String, Vec<u8>)> {
 
 struct FixtureSource;
 impl GraphRuntimeProcessor for FixtureSource {
+    fn retained_bytes(&self) -> u64 {
+        0
+    }
     fn process(&mut self, block: GraphBindingBlock<'_>) -> Result<(), RenderError> {
         for (index, (left, right)) in block
             .left
@@ -532,6 +535,9 @@ impl GraphRuntimeProcessor for FixtureSource {
 
 struct FixtureIdentity;
 impl GraphRuntimeProcessor for FixtureIdentity {
+    fn retained_bytes(&self) -> u64 {
+        0
+    }
     fn process(&mut self, _block: GraphBindingBlock<'_>) -> Result<(), RenderError> {
         Ok(())
     }
@@ -2636,14 +2642,15 @@ fn verify_pcm_words(root: &Path, path: &str, expected: &[u32]) -> Result<(), Str
 
 fn read_pcm_words(root: &Path, path: &str) -> Result<Vec<u32>, String> {
     let bytes = read_regular_file(&root.join(path), path)?;
-    let chunks = bytes.chunks_exact(4);
-    if !chunks.remainder().is_empty() || bytes.len() % 8 != 0 {
+    let (chunks, remainder) = bytes.as_chunks::<4>();
+    if !remainder.is_empty() || bytes.len() % 8 != 0 {
         return Err(format!(
             "PCM is not a planar dual-mono f32le payload: {path}"
         ));
     }
     Ok(chunks
-        .map(|chunk| u32::from_le_bytes(chunk.try_into().expect("fixed f32 word")))
+        .iter()
+        .map(|chunk| u32::from_le_bytes(*chunk))
         .collect())
 }
 

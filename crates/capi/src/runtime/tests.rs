@@ -75,7 +75,9 @@ fn pinned_hex(value: &str) -> Vec<u8> {
     assert!(value.len().is_multiple_of(2));
     value
         .as_bytes()
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .map(|pair| {
             let digit = |value: u8| match value {
                 b'0'..=b'9' => value - b'0',
@@ -3306,7 +3308,9 @@ fn the_retired_automation_command_is_refused_at_decode_and_not_advertised() {
     };
     let ids = |bytes: &[u8]| {
         bytes
-            .chunks_exact(2)
+            .as_chunks::<2>()
+            .0
+            .iter()
             .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
             .collect::<Vec<_>>()
     };

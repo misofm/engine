@@ -62,6 +62,9 @@ impl Played {
 }
 
 impl GraphPreparedSourceSetDriver for Played {
+    fn retained_bytes(&self) -> u64 {
+        engine::realtime::retained::vec(&self.planes) + engine::realtime::retained::arc(&self.calls)
+    }
     fn claim_count(&self) -> usize {
         LANES
     }
@@ -70,7 +73,13 @@ impl GraphPreparedSourceSetDriver for Played {
         let block = first_sample / u64::from(frames);
         self.played = block % UNDERRUN_EVERY != UNDERRUN_EVERY - 1;
         if self.played {
-            for (channel, plane) in self.planes.chunks_exact_mut(FRAMES as usize).enumerate() {
+            for (channel, plane) in self
+                .planes
+                .as_chunks_mut::<{ FRAMES as usize }>()
+                .0
+                .iter_mut()
+                .enumerate()
+            {
                 for (frame, word) in plane.iter_mut().enumerate() {
                     let value = (block as usize * 31 + channel * 7 + frame) % 97;
                     *word = (value as f32 - 48.0) * 0.0625;
@@ -116,6 +125,9 @@ impl GraphPreparedSourceSetDriver for Played {
 /// A builtin bank that mixes its two planes, so a swapped or misread plane shows in the bits.
 struct Tilt;
 impl GraphPreparedBuiltinBankProcessor for Tilt {
+    fn retained_bytes(&self) -> u64 {
+        0
+    }
     fn as_any(&self) -> &dyn std::any::Any {
         self
     }

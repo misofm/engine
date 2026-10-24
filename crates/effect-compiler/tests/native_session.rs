@@ -122,6 +122,10 @@ impl NativeEffectFactory for Factory {
 /// The double's processor reads no prepared value, so it holds none (issue #1461).
 struct Processor;
 impl PreparedNativeEffect for Processor {
+    fn retained_bytes(&self) -> u64 {
+        0
+    }
+
     fn reset(&mut self, _: ResetKind) {}
     fn process(&mut self, _: EffectProcessBlock<'_>) -> ProcessReport {
         ProcessReport::default()

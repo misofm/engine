@@ -37,7 +37,7 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
-  RUSTUP_TOOLCHAIN: 1.97.1
+  RUSTUP_TOOLCHAIN: 1.99.1
 
 jobs:
   route:
@@ -110,8 +110,8 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Install pinned Rust toolchain and Wasm standard library
         run: |
-          rustup toolchain install 1.97.1 --profile minimal
-          rustup target add --toolchain 1.97.1 wasm32-unknown-unknown
+          rustup toolchain install 1.99.1 --profile minimal
+          rustup target add --toolchain 1.99.1 wasm32-unknown-unknown
       # Built exactly once here; every consumer downloads it and checks it against this job's
       # `sha256` output, so every artifact gate in the run reads exactly these bytes. #1044: the
       # parameter metadata and ABI layout are generated exactly once too, here, and `closure_sha256`
@@ -175,8 +175,8 @@ jobs:
           fetch-depth: 0
       - name: Install pinned Rust toolchain and Wasm standard library
         run: |
-          rustup toolchain install 1.97.1 --profile minimal
-          rustup target add --toolchain 1.97.1 wasm32-unknown-unknown
+          rustup toolchain install 1.99.1 --profile minimal
+          rustup target add --toolchain 1.99.1 wasm32-unknown-unknown
       # The twin: this commit again, from another checkout path and with another CARGO_HOME, the
       # two roots rustc could embed. `artifact` built from $GITHUB_WORKSPACE with the runner's.
       - name: Rebuild the module from another checkout path and CARGO_HOME
@@ -246,8 +246,8 @@ jobs:
       # parameter_metadata_lattice_oracle`, `cargo run -p host-web --example sdk_render_oracle`).
       - name: Install pinned Rust toolchain and Wasm standard library
         run: |
-          rustup toolchain install 1.97.1 --profile minimal
-          rustup target add --toolchain 1.97.1 wasm32-unknown-unknown
+          rustup toolchain install 1.99.1 --profile minimal
+          rustup target add --toolchain 1.99.1 wasm32-unknown-unknown
       - name: Install SDK dependencies
         working-directory: sdk
         run: npm ci --no-audit --no-fund --prefer-offline
@@ -316,8 +316,8 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Install pinned Rust toolchain and wabt
         run: |
-          rustup toolchain install 1.97.1 --profile minimal
-          rustup target add --toolchain 1.97.1 wasm32-unknown-unknown
+          rustup toolchain install 1.99.1 --profile minimal
+          rustup target add --toolchain 1.99.1 wasm32-unknown-unknown
           sudo apt-get update
           sudo apt-get install -y ripgrep wabt
       - name: Download shipped artifact
@@ -495,7 +495,7 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Install pinned Rust toolchain
         run: |
-          rustup toolchain install 1.97.1 --profile minimal --component clippy --component rustfmt
+          rustup toolchain install 1.99.1 --profile minimal --component clippy --component rustfmt
           sudo apt-get update
           sudo apt-get install -y ripgrep
       - name: Hydrate locked Cargo dependencies
@@ -644,7 +644,7 @@ jobs:
           shared-key: test-debug-a
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Install pinned Rust toolchain
-        run: rustup toolchain install 1.97.1 --profile minimal
+        run: rustup toolchain install 1.99.1 --profile minimal
       - name: Compile builtins-compiler tests with default features
         run: cargo test --locked -p builtins-compiler --no-run
       # Every DSP crate moves to test-debug-b; audit/bench/console-workload/wasm-* move to
@@ -692,7 +692,7 @@ jobs:
           shared-key: test-debug-b
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Install pinned Rust toolchain
-        run: rustup toolchain install 1.97.1 --profile minimal
+        run: rustup toolchain install 1.99.1 --profile minimal
       # Explicit --features, as in test-debug-a: a local reproduction names the same features.
       # parametric-eq and builtins test-support turn on gated pass-count and peak-merge assertions
       # inside tests that run either way; nothing in this package set forwards them (#1021).
@@ -730,7 +730,7 @@ jobs:
           shared-key: test-release
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Install pinned Rust toolchain
-        run: rustup toolchain install 1.97.1 --profile minimal
+        run: rustup toolchain install 1.99.1 --profile minimal
       # wasm-gates' G5 test `g5_native_digests_match_pins` is the one native owner of every
       # cross-target digest corpus (#1048); wasm-guests leaves the script's native leg to it.
       - name: Lane and math gates (G1-G4, G6, P1, M1-M3) and wasm-gates G5/G6 in release
@@ -809,7 +809,7 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Install pinned Rust toolchain and strace
         run: |
-          rustup toolchain install 1.97.1 --profile minimal
+          rustup toolchain install 1.99.1 --profile minimal
           sudo apt-get update
           sudo apt-get install -y ripgrep strace
       # One release build backs every audit/trace/probe/fixture/capi/determinism step below,
@@ -963,8 +963,8 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Install pinned Rust toolchain, Wasm standard library, and wabt
         run: |
-          rustup toolchain install 1.97.1 --profile minimal
-          rustup target add --toolchain 1.97.1 wasm32-unknown-unknown
+          rustup toolchain install 1.99.1 --profile minimal
+          rustup target add --toolchain 1.99.1 wasm32-unknown-unknown
           sudo apt-get update
           sudo apt-get install -y ripgrep wabt
       # Builds its own wasmtime runner rather than depending on test-release, so nothing
@@ -1020,8 +1020,8 @@ jobs:
       # checked and linted for both, and their iOS release assembly is scanned (#1018).
       - name: Install pinned Rust toolchain, cross targets, and ripgrep
         run: |
-          rustup toolchain install 1.97.1 --profile minimal --component clippy
-          rustup target add --toolchain 1.97.1 wasm32-unknown-unknown armv7-linux-androideabi aarch64-apple-ios aarch64-linux-android
+          rustup toolchain install 1.99.1 --profile minimal --component clippy
+          rustup target add --toolchain 1.99.1 wasm32-unknown-unknown armv7-linux-androideabi aarch64-apple-ios aarch64-linux-android
           sudo apt-get update
           sudo apt-get install -y ripgrep
       # #1499: the shipped iOS and Android staticlibs are built with fat LTO by
@@ -1059,7 +1059,7 @@ jobs:
             echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
             export PATH="$HOME/.cargo/bin:$PATH"
           fi
-          rustup toolchain install 1.97.1 --profile minimal
+          rustup toolchain install 1.99.1 --profile minimal
           sudo apt-get update
           sudo apt-get install -y ripgrep
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
@@ -1086,7 +1086,7 @@ jobs:
             echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
             export PATH="$HOME/.cargo/bin:$PATH"
           fi
-          rustup toolchain install 1.97.1 --profile minimal
+          rustup toolchain install 1.99.1 --profile minimal
           sudo apt-get update
           sudo apt-get install -y ripgrep
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
@@ -1118,7 +1118,7 @@ jobs:
           shared-key: release-shape
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Install pinned Rust toolchain
-        run: rustup toolchain install 1.97.1 --profile minimal
+        run: rustup toolchain install 1.99.1 --profile minimal
       # cargo-metadata asserts the cdylib/staticlib set is exactly {capi, host-web,
       # wasm-gate-guest} and [profile.release].panic == "abort".
       - name: Release shape policy

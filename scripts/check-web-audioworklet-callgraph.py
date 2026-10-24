@@ -78,9 +78,9 @@ Modes
     Assert the artifact still computes in the vector family, and in four lanes only. Four rules,
     none of which is a raw op-count minimum:
 
-    1. **Roster presence.** Each of the twelve named kernels in `KERNEL_ROSTER` -- the
+    1. **Roster presence.** Each of the thirteen named kernels in `KERNEL_ROSTER` -- the
        `process_bank`/`process_section`/`process_block` bodies of the shipped effect library and
-       the live route's indexed-ramp mix (#1220); the thirteenth, the collapsed limiter's, is held
+       the live route's indexed-ramp mix (#1220); the fourteenth, the collapsed limiter's, is held
        by the forwarding rule below -- must match exactly
        one arithmetic-carrying function. A kernel that vanished, that was renamed, or that
        de-vectorised so completely it stopped carrying `f32x4` arithmetic at all fails here.
@@ -91,7 +91,12 @@ Modes
        while moving arithmetic out of the vector family and into the scalar family fails it.
     3. **Kernel count.** At least `K` functions matching `REGEX` carry `f32x4.{mul,add,sub,div}`
        arithmetic, each using strictly more vector than scalar `f32` arithmetic. `K` is a
-       **ratchet**: when a wave adds kernels, raise it. It never drops.
+       **ratchet**: when a wave adds kernels, raise it. It never drops. The one exception is a
+       control-thread function pinned in `CONTROL_THREAD_EXEMPT`, by its name without the mangling
+       hash and with its reason: it is neither held to dominance nor counted. An entry that names
+       no function in the module fails, so the table cannot outlive its function. The render
+       export reaches its kernels through `call_indirect`, so the direct-call closure cannot tell
+       a render kernel from control code; a reviewed table can (#877).
     4. **No eight lanes (issue #1110).** No function name in the module may spell an eight-lane
        instantiation (`EIGHT_LANE`). The browser runs four lanes only, and since #1110 the wasm
        build has no eight-lane type, so a name that carries one means eight lanes came back to
@@ -241,7 +246,7 @@ EIGHT_LANE = re.compile(r"(?:f32|f64|u32|i32)x8|(?i:simd8)|transpose_tile_8")
 
 # The smallest scalar budget any kernel gets, in instructions.
 #
-# Eleven of the thirteen roster kernels -- the twelve `KERNEL_ROSTER` rows and the collapsed
+# Twelve of the fourteen roster kernels -- the thirteen `KERNEL_ROSTER` rows and the collapsed
 # limiter's kernel -- currently emit *zero* scalar `f32` arithmetic, so a ceiling
 # expressed purely as a multiple of `vector` would be exactly zero for them: a single scalar
 # coefficient load introduced by an ordinary refactor would fail the gate. Eight instructions is
@@ -264,7 +269,8 @@ SCALAR_SLACK = 8
 #   (multiband-compressor f32x8 was 2560 / 20; #1110 removed eight lanes from the browser build)
 #   multiband-compressor f32x4   2527 /  0   ratio 0        (dual; 2527 / 20 before #1871, codegen)
 #   multiband-compressor f32x4   1389 /  0   ratio 0        (collapsed, #1871)
-#   transient-shaper     f32x4    786 / 72   ratio 0.0916
+#   transient-shaper     f32x4    700 /  0   ratio 0        (dual; 786 / 72 at M2, codegen)
+#   transient-shaper     f32x4    352 /  0   ratio 0        (collapsed, #1873)
 #   true-peak-limiter    f32x4    448 /  0   ratio 0        (dual)
 #   compressor           f32x4    267 /  0   ratio 0        (dual)
 #   true-peak-limiter    f32x4    224 /  0   ratio 0        (collapsed)
@@ -291,8 +297,9 @@ SCALAR_SLACK = 8
 # ## What mono-collapse M2 did to this roster, and why the limiter has a forwarding rule
 #
 # The collapse gave the compressor, the true-peak limiter and the parametric EQ a **second** block
-# body each, #973 gave the gate/expander one and #1871 the multiband compressor one: a one-plane
-# variant a bank chain runs when every lane of its cohort is collapse-eligible. All five survive
+# body each, #973 gave the gate/expander one, #1871 the multiband compressor one and #1873 the
+# transient shaper one: a one-plane
+# variant a bank chain runs when every lane of its cohort is collapse-eligible. All six survive
 # monomorphisation as their own symbols, so `compressor.*4wide6f32x4` (and at #973
 # `gate_expander.*4wide6f32x4`; the multiband row was already pinned to its `process_bank` by #893)
 # went from one match to two and the roster failed exactly as
@@ -317,7 +324,8 @@ SCALAR_SLACK = 8
 # vanished, not as a row that grew.
 #
 # Each collapsed body carries about **half** its dual sibling's vector arithmetic (138 against 267,
-# 224 against 448, 84 against 168, 82 against 162, 1389 against 2527) and zero scalar arithmetic,
+# 224 against 448, 84 against 168, 82 against 162, 1389 against 2527, 352 against 700) and zero
+# scalar arithmetic,
 # which is what a correct one-plane variant looks like from here.
 KERNEL_ROSTER: tuple[tuple[str, str, float], ...] = (
     # #893: named by its `process_bank` body, as the EQ rows are, because the bank's
@@ -332,14 +340,22 @@ KERNEL_ROSTER: tuple[tuple[str, str, float], ...] = (
         r"multiband_compressor.*4wide6f32x4.*17process_bank_mono",
         0.10,
     ),
-    # #1368b: pinned to the block body. The per-lane link grew the bank's constructor
-    # (`Shaper::<f32x4>::new`), which LLVM now outlines with the follower coefficients' four
-    # control-side `f32x4.sub`; it is not a render kernel, and the generic shape rule still
-    # checks it. The body went 522 -> 700 vector operations, 0 scalar: the mixed-link arm.
+    # #1368b: the per-lane link grew the bank's constructor (`Shaper::<f32x4>::new`), which LLVM
+    # outlines with the follower coefficients' four control-side `f32x4.sub`; it is not a render
+    # kernel, and the generic shape rule still checks it. The body went 522 -> 700 vector
+    # operations, 0 scalar: the mixed-link arm. #1873: the block body is `#[inline(always)]` into
+    # the bank's `process_bank` and `process_bank_mono`, so the rows pin those (700 / 0 and
+    # 352 / 0); the ceiling is the derivation's floor, 4 x 0 floored at 0.10 (it was 0.38, four
+    # times the 786 / 72 body's ratio).
     (
-        "transient-shaper f32x4",
-        r"transient_shaper.*Shaper.*4wide6f32x4.*13process_block",
-        0.38,
+        "transient-shaper f32x4 dual",
+        r"transient_shaper.*27PreparedTransientShaperBank.*4wide6f32x4.*12process_bank",
+        0.10,
+    ),
+    (
+        "transient-shaper f32x4 collapsed",
+        r"transient_shaper.*27PreparedTransientShaperBank.*4wide6f32x4.*17process_bank_mono",
+        0.10,
     ),
     ("gate-expander f32x4 dual", r"gate_expander.*4wide6f32x4.*12process_bank", 0.10),
     (
@@ -591,6 +607,17 @@ def check_render_thread(
     return failures
 
 
+# Issue #877: control-thread functions whose lane-generic name matches the kernel pattern, by
+# name without the mangling hash (`unhashed`), with the reason each is not a render kernel. A new
+# entry is a review that no render path calls the function; an entry that matches nothing fails.
+CONTROL_THREAD_EXEMPT: dict[str, str] = {
+    "_RNvMs2_Cs_13parametric_eqINtB5_7ChannelNtNtCs_4wide6f32x4_5f32x4Kj4_E12decode_trackB5_": (
+        "control-thread state decode; LLVM 22 partly vectorizes its ramp check (#877); no render "
+        "path calls it"
+    ),
+}
+
+
 def kernel_arithmetic(
     functions: dict[int, Function], pattern: str
 ) -> list[tuple[Function, int, int]]:
@@ -613,10 +640,29 @@ def check_kernel_shape(
     pattern: str,
     minimum: int,
     roster: tuple[tuple[str, str, float], ...] = KERNEL_ROSTER,
+    exempt: dict[str, str] | None = None,
 ) -> int:
-    """The per-kernel shape gate that replaced the raw `--simd-floor` total (#163 phase 0e)."""
+    """The per-kernel shape gate that replaced the raw `--simd-floor` total (#163 phase 0e).
+
+    `exempt` is a `CONTROL_THREAD_EXEMPT`-shaped table (#877); `None` exempts nothing.
+    """
     failures = 0
-    kernels = kernel_arithmetic(functions, pattern)
+    exempt = exempt or {}
+    names = {unhashed(function.name) for function in functions.values()}
+    for name, reason in exempt.items():
+        if name not in names:
+            failures += 1
+            print(
+                f"FAIL kernel exemption {name}: matches no function in the module. Delete the "
+                f"stale entry ({reason}).",
+                file=sys.stderr,
+            )
+    kernels = []
+    for function, vector, scalar in kernel_arithmetic(functions, pattern):
+        if unhashed(function.name) in exempt:
+            print(f"  exempt control-thread vector={vector} scalar={scalar} {function.name}")
+            continue
+        kernels.append((function, vector, scalar))
     for function, vector, scalar in kernels:
         if vector <= scalar:
             failures += 1
@@ -1131,6 +1177,41 @@ def self_test() -> int:
         check_kernel_shape(parse(scalarized), "render_next", 1, SELF_TEST_ROSTER) == 1,
     )
 
+    # (d4) issue #877: a pinned control-thread function with vector <= scalar is exempt, and is
+    # not counted toward K.
+    decode = (
+        "_RNvMs2_Csb6SUMLvW3Nv_13parametric_eqINtB5_7ChannelNtNtCsgmSSuZlKkZ2_4wide6f32x4_5f32x4"
+        "Kj4_E12decode_trackB5_"
+    )
+    control = VALID_SHAPE + synthetic_kernel(decode, vector=1, scalar=4, index=2)
+    pinned = {unhashed(decode): "control-thread state decode"}
+    expect(
+        "(d4) exempted control-thread function passes",
+        check_kernel_shape(parse(control), "render_next|decode_track", 1, SELF_TEST_ROSTER,
+                           exempt=pinned) == 0,
+    )
+    expect(
+        "(d4) an exempted function does not count toward K",
+        check_kernel_shape(parse(control), "render_next|decode_track", 2, SELF_TEST_ROSTER,
+                           exempt=pinned) == 1,
+    )
+    # (d5) the same scalar shape in a function the table does not name fails.
+    expect(
+        "(d5) non-exempt function with vector <= scalar fails",
+        check_kernel_shape(parse(control), "render_next|decode_track", 1, SELF_TEST_ROSTER,
+                           exempt={}) == 1,
+    )
+    # (d6) a stale entry, one that names no function in the module, fails on its own.
+    expect(
+        "(d6) stale exemption entry fails",
+        check_kernel_shape(parse(VALID_SHAPE), "render_next", 1, SELF_TEST_ROSTER,
+                           exempt={"no_such_function": "stale"}) == 1,
+    )
+    expect(
+        "(d6) the shipped table's entries are hash-free",
+        all(unhashed(name) == name for name in CONTROL_THREAD_EXEMPT),
+    )
+
     # (d3) a vector-typed helper with no arithmetic is not counted as a kernel.
     helper = VALID_SHAPE + (
         "000030 func[2] <_RINv_soft_clip16write_lane_words4wide6f32x4E>:\n"
@@ -1293,7 +1374,9 @@ def main() -> int:
     if args.kernel_shape:
         if args.kernel_pattern is None or args.kernel_min is None:
             parser.error("--kernel-shape requires --kernel-pattern and --kernel-min")
-        failures += check_kernel_shape(functions, args.kernel_pattern, args.kernel_min)
+        failures += check_kernel_shape(
+            functions, args.kernel_pattern, args.kernel_min, exempt=CONTROL_THREAD_EXEMPT
+        )
         failures += check_limiter_forwarding(functions)
         failures += check_no_eight_lanes(functions)
     return 1 if failures else 0

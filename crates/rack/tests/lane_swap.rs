@@ -140,7 +140,7 @@ impl Channel {
             self.remaining,
             self.pole.to_bits(),
         ];
-        for (chunk, word) in out.chunks_exact_mut(4).zip(words) {
+        for (chunk, word) in out.as_chunks_mut::<4>().0.iter_mut().zip(words) {
             chunk.copy_from_slice(&word.to_le_bytes());
         }
     }
@@ -227,6 +227,10 @@ impl StripBank {
 }
 
 impl PreparedNativeEffectBank for StripBank {
+    fn retained_bytes(&self) -> u64 {
+        engine::realtime::retained::vec(&self.lanes)
+            + engine::realtime::retained::arc(&self.defaults)
+    }
     fn reset(&mut self, _kind: ResetKind) {}
 
     fn process_bank(&mut self, block: EffectBankProcessBlock<'_>) -> BankProcessReport {

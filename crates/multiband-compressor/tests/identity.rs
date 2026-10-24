@@ -64,13 +64,15 @@ fn assert_populated(
 }
 
 fn state_populated(section: &[u8]) -> bool {
-    let word_populated = |word: &[u8]| {
+    let word_populated = |word: &[u8; 4]| {
         let bits = u32::from_le_bytes([word[0], word[1], word[2], word[3]]);
         bits != 0 && bits != 0x8000_0000
     };
     [1..3, 43..47].into_iter().any(|range| {
         section[range.start * 4..range.end * 4]
-            .chunks_exact(4)
+            .as_chunks::<4>()
+            .0
+            .iter()
             .any(word_populated)
     })
 }

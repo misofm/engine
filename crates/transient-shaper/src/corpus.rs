@@ -244,7 +244,7 @@ fn run<L: Lane, const W: usize>(case: usize, out: &mut [u32]) {
                     right[frame * W + lane] = signals[base + lane].1[block * BLOCK + frame];
                 }
             }
-            shaper.process_block(&mut left, &mut right, BLOCK);
+            shaper.process_block::<false>(&mut left, &mut right, BLOCK);
             for frame in 0..BLOCK {
                 for lane in 0..W {
                     let slot = (base + lane) * WORDS_PER_LANE + block * BLOCK + frame;

@@ -53,6 +53,9 @@ struct Source {
     mono: bool,
 }
 impl GraphRuntimeProcessor for Source {
+    fn retained_bytes(&self) -> u64 {
+        0
+    }
     fn process(&mut self, block: GraphBindingBlock<'_>) -> Result<(), RenderError> {
         for (frame, (left, right)) in block
             .left
@@ -111,6 +114,9 @@ impl Stage {
     }
 }
 impl GraphPreparedBuiltinBankProcessor for Stage {
+    fn retained_bytes(&self) -> u64 {
+        engine::realtime::retained::arc(&self.probe)
+    }
     fn as_any(&self) -> &dyn std::any::Any {
         self
     }
@@ -167,6 +173,9 @@ impl GraphPreparedBuiltinBankProcessor for Stage {
     }
 }
 impl GraphRuntimeProcessor for Stage {
+    fn retained_bytes(&self) -> u64 {
+        engine::realtime::retained::arc(&self.probe)
+    }
     fn process(&mut self, block: GraphBindingBlock<'_>) -> Result<(), RenderError> {
         GraphPreparedBuiltinBankProcessor::begin_block(
             self,
@@ -185,6 +194,9 @@ struct Observer {
 }
 /// Declines the resident view (the trait's default), so every block it sees is planar.
 impl GraphRuntimeObserver for Observer {
+    fn retained_bytes(&self) -> u64 {
+        engine::realtime::retained::arc(&self.probe)
+    }
     fn observe(&mut self, block: GraphObservationBlock<'_>) -> Result<(), RenderError> {
         self.probe.event(3 + self.ordinal as u64);
         for (channel, plane) in [block.left, block.right].into_iter().enumerate() {

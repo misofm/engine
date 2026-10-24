@@ -1771,6 +1771,41 @@ enum CommandObservation {
 }
 
 impl PcmSourceConsumer {
+    /// The heap bytes this consumer retains (#1074), exclusive of itself: its three rings in
+    /// full (the host's endpoints drop first), every transfer block it or its two block rings
+    /// hold now (box and PCM), its seek-report record and its prime flag. Not the session's
+    /// published generation, which the session owns. A block the host's producer
+    /// holds is the host's. Control thread only.
+    ///
+    /// It counts the transfer blocks queued in the two block rings at the moment it reads their
+    /// cursors, so only a quiescent walk is meaningful: no block in flight between the host's
+    /// producer and this consumer (no submit, pop or recycle racing it). A block that moves while
+    /// the walk reads can be counted on both sides or on neither.
+    pub(crate) fn retained_bytes(&self) -> u64 {
+        use engine::realtime::retained::arc;
+        let samples = u64::from(self.channel_count).saturating_mul(u64::from(self.quantum_frames));
+        let block = (size_of::<TransferBlock>() as u64)
+            .saturating_add(samples.saturating_mul(size_of::<f32>() as u64));
+        let held = [
+            &self.current,
+            &self.played,
+            &self.retained_idle,
+            &self.deferred_recycle,
+        ]
+        .into_iter()
+        .filter(|slot| slot.is_some())
+        .count();
+        let blocks = held
+            .saturating_add(self.data_consumer.queued_len())
+            .saturating_add(self.recycle_producer.queued_len());
+        self.data_consumer
+            .retained_bytes()
+            .saturating_add(self.recycle_producer.retained_bytes())
+            .saturating_add(self.command_consumer.retained_bytes())
+            .saturating_add((blocks as u64).saturating_mul(block))
+            .saturating_add(self.seek_report.retained_bytes())
+            .saturating_add(arc(&self.prime_required))
+    }
     /// Apply an already-admitted seek on the exclusive consumer owner between blocks.
     /// Recycles stale storage and retains current-generation PCM without consuming a frame.
     /// Producers still only enqueue commands; this is not a shared controller handle.
@@ -2629,6 +2664,21 @@ pub struct TimelineConsumer {
 }
 
 impl TimelineConsumer {
+    /// The heap bytes this timeline retains (#1074): its command ring and seek-report record in
+    /// full and its history. Not the session's published generation, which the session owns.
+    /// Control thread only.
+    fn retained_bytes(&self) -> u64 {
+        use engine::realtime::retained::slice;
+        self.command_consumer
+            .as_ref()
+            .map_or(0, engine::realtime::Consumer::retained_bytes)
+            .saturating_add(
+                self.seek_report
+                    .as_ref()
+                    .map_or(0, |writer| writer.retained_bytes()),
+            )
+            .saturating_add(slice(&self.history))
+    }
     /// A timeline at generation 1, timeline sample 0, with an empty history of `history_blocks`
     /// entries. Control thread only.
     fn with_history(
@@ -3158,6 +3208,33 @@ fn source_set_retained_resources(
 }
 
 impl GraphPreparedSourceSetDriver for SourceGraphSourceSetDriver {
+    /// The timeline, each source's consumer, and the source and mapping tables with the
+    /// mappings' node IDs (#1074). Not the session's published generation: the session owns it
+    /// and outlives every plan (host-core's plan inventory holds and charges it).
+    fn retained_bytes(&self) -> u64 {
+        use engine::realtime::retained::slice;
+        let sources = self
+            .sources
+            .iter()
+            .fold(slice(&self.sources), |total, source| {
+                total.saturating_add(
+                    source
+                        .consumer
+                        .as_ref()
+                        .map_or(0, PcmSourceConsumer::retained_bytes),
+                )
+            });
+        let mappings = self
+            .mappings
+            .iter()
+            .fold(slice(&self.mappings), |total, mapping| {
+                total.saturating_add(mapping.node.retained_bytes())
+            });
+        self.timeline
+            .retained_bytes()
+            .saturating_add(sources)
+            .saturating_add(mappings)
+    }
     fn can_prepare_source_seek(&self, source_index: usize) -> bool {
         self.sources
             .get(source_index)
@@ -5059,6 +5136,9 @@ mod tests {
 
         struct Noop;
         impl GraphRuntimeProcessor for Noop {
+            fn retained_bytes(&self) -> u64 {
+                0
+            }
             fn process(
                 &mut self,
                 _block: graph::GraphBindingBlock<'_>,
@@ -5070,6 +5150,9 @@ mod tests {
         /// The last block's source facts: bit 0 underrun, bit 1 generation change, bit 2 seen.
         struct Validity(Arc<AtomicU8>);
         impl GraphRuntimeObserver for Validity {
+            fn retained_bytes(&self) -> u64 {
+                engine::realtime::retained::arc(&self.0)
+            }
             fn observe(
                 &mut self,
                 _block: GraphObservationBlock<'_>,
@@ -5906,6 +5989,9 @@ mod tests {
         fn a_source_swap_refuses_every_unswappable_pair_and_moves_nothing() {
             struct Foreign;
             impl GraphPreparedSourceSetDriver for Foreign {
+                fn retained_bytes(&self) -> u64 {
+                    0
+                }
                 fn claim_count(&self) -> usize {
                     0
                 }

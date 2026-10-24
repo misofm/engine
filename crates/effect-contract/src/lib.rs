@@ -639,6 +639,9 @@ macro_rules! match_bank_width {
     };
 }
 
+/// Byte arithmetic for `retained_bytes` walks (#1074): the engine's one implementation.
+pub use engine::realtime::retained;
+
 /// Not public API: the lane types [`match_bank_width!`] names, so that its callers need not.
 #[doc(hidden)]
 pub mod __private {
@@ -2176,6 +2179,12 @@ pub enum ParameterAccessError {
 pub trait PreparedNativeEffect: Send {
     fn reset(&mut self, kind: ResetKind);
     fn process(&mut self, block: EffectProcessBlock<'_>) -> ProcessReport;
+    /// The heap bytes this value retains (#1074), exclusive of the value itself: every `Box`,
+    /// `Vec`, `String` and `Arc` allocation reachable through its fields, a `Vec` or `String` at
+    /// its capacity, an `Arc`'s allocation in full whoever else holds it. Whoever boxes the value
+    /// adds `size_of_val` for the box. Computed from capacities on the control thread, never on
+    /// the render path. Required, so a new owner cannot under-report by default.
+    fn retained_bytes(&self) -> u64;
 
     /// Read one declared [`ObservationCost::Resident`] tap into `out` (issue #143 D2).
     ///
@@ -2348,6 +2357,12 @@ pub trait PreparedNativeEffect: Send {
 pub trait PreparedNativeEffectBank: Send {
     fn reset(&mut self, kind: ResetKind);
     fn process_bank(&mut self, block: EffectBankProcessBlock<'_>) -> BankProcessReport;
+    /// The heap bytes this value retains (#1074), exclusive of the value itself: every `Box`,
+    /// `Vec`, `String` and `Arc` allocation reachable through its fields, a `Vec` or `String` at
+    /// its capacity, an `Arc`'s allocation in full whoever else holds it. Whoever boxes the value
+    /// adds `size_of_val` for the box. Computed from capacities on the control thread, never on
+    /// the render path. Required, so a new owner cannot under-report by default.
+    fn retained_bytes(&self) -> u64;
 
     /// Applies one already-prepared target to one bank lane at a block boundary.
     ///
@@ -2604,13 +2619,14 @@ pub trait PreparedNativeEffectBank: Send {
     ///
     /// # Which shipped effects implement this, and why most do not
     ///
-    /// Three launch effects implement it. **`gate-expander`** (issue #973): its whole per-channel
+    /// Four launch effects implement it. **`gate-expander`** (issue #973): its whole per-channel
     /// state is 31 lane words (four coefficients, the envelope, two hysteresis words and 24 ramp
     /// words). **`multiband-compressor`** (issue #1871): seven lane words and 17 ramps per track.
     /// **`soft-clip`** (issue #1872): 195 lane words (three state words and three 64-row
-    /// histories), its cursor and its ramps. Each compares every word its disengage copy moves and
-    /// needs no fixed point. Every other launch effect takes the declining default, and that is a
-    /// decision rather than an omission. Within one plan the channel-symmetry witness can go from
+    /// histories), its cursor and its ramps. **`transient-shaper`** (issue #1873): fourteen words
+    /// per lane (two envelope words and three ramps). Each compares every word its disengage copy
+    /// moves and needs no fixed point. Every other launch effect takes the declining default, and
+    /// that is a decision rather than an omission. Within one plan the channel-symmetry witness can go from
     /// holding to not holding and back for exactly one term:
     /// [`UNBYPASSED`](crate::ChannelSymmetryWitness::UNBYPASSED), which
     /// `ChannelSymmetryWitness::admit` restores on `Bypass(false)`. `LIVE` has no restoring arm,
@@ -2621,10 +2637,10 @@ pub trait PreparedNativeEffectBank: Send {
     /// agreement and the answer would change anything: `rack::BankChain` recovers every reachable
     /// case through the disengage copy instead.
     ///
-    /// The gate's, the multiband's and the soft clip's answers are cheap and sound, not needed:
-    /// they change nothing in any session that can be built today. Reading each other crate's rest
-    /// state is what settles that it *would* be implementable, and the reading is worth recording
-    /// because it is not uniform:
+    /// The gate's, the multiband's, the soft clip's and the shaper's answers are cheap and sound,
+    /// not needed: they change nothing in any session that can be built today. Reading each other
+    /// crate's rest state is what settles that it *would* be implementable, and the reading is
+    /// worth recording because it is not uniform:
     ///
     /// * **`parametric-eq`** and the builtin input chain have no delay lines at all --
     ///   two integrator words per section -- so their whole per-channel state is a few hundred
