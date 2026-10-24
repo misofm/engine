@@ -3977,6 +3977,9 @@ struct GraphExecutor {
     fade_arms: Box<[FadeArm]>,
     /// How many of [`Self::fade_arms`] have not fired: render tests this one integer per block.
     fade_arms_pending: u32,
+    /// The fade-arm section of the hand-over (issue #1392 D3); empty (and never allocated) when
+    /// no arm carries.
+    fade_arm_carry: Box<[GraphFadeArmPair]>,
 }
 
 /// Next graph executor identity; identities start at 1, so zero never names a plan.
@@ -4255,20 +4258,26 @@ struct FadeArm {
     state: FadeArmState,
 }
 
-/// The bytes [`install_fade_arms`] retains for a table of `count` arms, for the plan's resource
-/// charge (issue #1288 D7); `None` on overflow.
+/// The bytes [`install_fade_arms`] and [`install_fade_arm_carry`] retain for a table of `arms`
+/// arms and `pairs` carried ones, for the plan's resource charge (issues #1288 D7, #1392 D8);
+/// `None` on overflow.
 #[must_use]
-pub fn fade_arm_table_bytes(count: usize) -> Option<u64> {
-    count
-        .checked_mul(core::mem::size_of::<FadeArm>())
+pub fn fade_arm_table_bytes(arms: usize, pairs: usize) -> Option<u64> {
+    arms.checked_mul(core::mem::size_of::<FadeArm>())
+        .and_then(|bytes| {
+            pairs
+                .checked_mul(core::mem::size_of::<GraphFadeArmPair>())
+                .and_then(|pair_bytes| bytes.checked_add(pair_bytes))
+        })
         .and_then(|bytes| u64::try_from(bytes).ok())
 }
 
 /// Arm the fade-in of each strip in `arms` and install the table this plan fires them from
 /// (issue #1288 D2, D3), off the render thread, before publication; it replaces any earlier
 /// table. Each lane is armed now, so the plan's first block already renders it muted. A strip
-/// the session mutes on both channels arms nothing and gets no entry. Returns how many entries
-/// were installed.
+/// the session mutes on both channels arms nothing and gets no entry. Returns, for each arm in
+/// order, the index of its entry in the table, or `None` when it armed nothing: the index a
+/// successor's [`GraphFadeArmPair::predecessor`] names (#1392).
 ///
 /// A source node that is not one of the source set's claims, and every source of a driver that
 /// does not lend its played planes, waits for nothing: that fade fires at the first block.
@@ -4278,7 +4287,7 @@ pub fn fade_arm_table_bytes(count: usize) -> Option<u64> {
 pub fn install_fade_arms(
     plan: &mut PreparedRenderPlan,
     arms: Vec<GraphFadeArm>,
-) -> Result<usize, GraphCarryInstallError> {
+) -> Result<Vec<Option<u32>>, GraphCarryInstallError> {
     plan.executor_any_mut()
         .and_then(|any| any.downcast_mut::<GraphExecutor>())
         .ok_or(GraphCarryInstallError::NotAGraphPlan)?
@@ -4290,7 +4299,7 @@ impl GraphExecutor {
     fn install_fade_arms(
         &mut self,
         arms: Vec<GraphFadeArm>,
-    ) -> Result<usize, GraphCarryInstallError> {
+    ) -> Result<Vec<Option<u32>>, GraphCarryInstallError> {
         for (index, arm) in arms.iter().enumerate() {
             if !self
                 .runtime
@@ -4310,19 +4319,22 @@ impl GraphExecutor {
             .as_ref()
             .is_some_and(|set| set.driver.provides_played_planes());
         let mut table = Vec::with_capacity(arms.len());
+        let mut entries = Vec::with_capacity(arms.len());
         for arm in arms {
-            let Some((chain, slot, lane)) = runtime::strip_lane_mut(
+            let armed = runtime::strip_lane_mut(
                 &mut self.runtime.units,
                 BuiltinStripOwner::Fader,
                 arm.fader,
-            ) else {
-                continue;
-            };
-            let armed = runtime::builtin_processor_mut(chain, slot)
-                .is_some_and(|processor| processor.arm_fade_in(lane));
+            )
+            .and_then(|(chain, slot, lane)| {
+                runtime::builtin_processor_mut(chain, slot).map(|processor| (processor, lane))
+            })
+            .is_some_and(|(processor, lane)| processor.arm_fade_in(lane));
             if !armed {
+                entries.push(None);
                 continue;
             }
+            entries.push(u32::try_from(table.len()).ok());
             let claim = arm
                 .source
                 .as_ref()
@@ -4342,9 +4354,83 @@ impl GraphExecutor {
         }
         self.fade_arms_pending = u32::try_from(table.len()).unwrap_or(u32::MAX);
         self.fade_arms = table.into_boxed_slice();
-        Ok(self.fade_arms.len())
+        Ok(entries)
+    }
+
+    /// [`install_fade_arm_carry`] on a bound executor.
+    fn install_fade_arm_carry(
+        &mut self,
+        pairs: Vec<GraphFadeArmPair>,
+    ) -> Result<(), GraphCarryInstallError> {
+        if self.carry.is_none() {
+            return Err(GraphCarryInstallError::NoStripCarryProgram);
+        }
+        for (index, pair) in pairs.iter().enumerate() {
+            if pair.successor as usize >= self.fade_arms.len() {
+                return Err(GraphCarryInstallError::StripLaneOutOfRange);
+            }
+            if pairs[..index].iter().any(|earlier| {
+                earlier.successor == pair.successor || earlier.predecessor == pair.predecessor
+            }) {
+                return Err(GraphCarryInstallError::DuplicateStripLane);
+            }
+        }
+        self.fade_arm_carry = pairs.into_boxed_slice();
+        Ok(())
     }
 }
+
+/// One fade arm a successor takes from the plan it displaces (issue #1392 D3): entry
+/// `predecessor` of that plan's table hands its render state to entry `successor` of this one.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct GraphFadeArmPair {
+    /// The entry in this plan's table, as [`install_fade_arms`] returned it.
+    pub successor: u32,
+    /// The entry in the displaced plan's table, as its own [`install_fade_arms`] returned it.
+    pub predecessor: u32,
+}
+
+/// Install the fade-arm section of the hand-over (issue #1392 D3), after the plan's
+/// [`install_fade_arms`] and its [`GraphCarryProgram`]: at the swap block each pair's successor
+/// entry takes its predecessor entry's state, so a waiting fade keeps waiting with its
+/// predecessor's progress, a scheduled one keeps its sample, and a fired one stays fired.
+///
+/// Refused, installing nothing, when the plan is not a graph plan, has no carry program, a
+/// successor entry is past the table, or an entry repeats. A predecessor entry past that plan's
+/// table is skipped at the swap block (its successor entry waits afresh).
+pub fn install_fade_arm_carry(
+    plan: &mut PreparedRenderPlan,
+    pairs: Vec<GraphFadeArmPair>,
+) -> Result<(), GraphCarryInstallError> {
+    plan.executor_any_mut()
+        .and_then(|any| any.downcast_mut::<GraphExecutor>())
+        .ok_or(GraphCarryInstallError::NotAGraphPlan)?
+        .install_fade_arm_carry(pairs)
+}
+
+// REALTIME_POLICY_BEGIN
+/// Copy each carried fade arm's state from the displaced plan's table (issue #1392 D3, D8): a
+/// copied `Done` leaves the pending count. Bounded by `pairs`; allocation-free.
+fn carry_fade_arms(
+    arms: &mut [FadeArm],
+    pending: &mut u32,
+    predecessor: &[FadeArm],
+    pairs: &[GraphFadeArmPair],
+) {
+    for pair in pairs {
+        let (Some(own), Some(from)) = (
+            arms.get_mut(pair.successor as usize),
+            predecessor.get(pair.predecessor as usize),
+        ) else {
+            continue;
+        };
+        if own.state != FadeArmState::Done && from.state == FadeArmState::Done {
+            *pending = pending.saturating_sub(1);
+        }
+        own.state = from.state;
+    }
+}
+// REALTIME_POLICY_END
 
 // REALTIME_POLICY_BEGIN
 /// Advance every pending fade arm at the block that starts at `block_start` (issue #1288 D3):
@@ -5632,6 +5718,7 @@ impl GraphExecutor {
             jump_lengths: None,
             fade_arms: Box::default(),
             fade_arms_pending: 0,
+            fade_arm_carry: Box::default(),
         }
     }
 }
@@ -5768,6 +5855,15 @@ impl PreparedPlanExecutor for GraphExecutor {
             .carry_input_lanes(&mut predecessor.runtime, &self.carry_inputs);
         self.runtime
             .carry_strip_lanes(&mut predecessor.runtime, &self.carry_strips);
+        // Issue #1392 D3: after the lane import, each carried fade arm takes its render state.
+        if !self.fade_arm_carry.is_empty() {
+            carry_fade_arms(
+                &mut self.fade_arms,
+                &mut self.fade_arms_pending,
+                &predecessor.fade_arms,
+                &self.fade_arm_carry,
+            );
+        }
         self.runtime
             .carry_delay_lines(&mut predecessor.runtime, &self.carry_delays);
         self.runtime
@@ -5912,6 +6008,7 @@ impl PreparedPlanExecutor for GraphExecutor {
             jump_lengths,
             fade_arms,
             fade_arms_pending,
+            fade_arm_carry: _,
         } = self;
         // One block's snapshot: taken here, so the next block cannot reuse it.
         let Some(live) = live_snapshot.take() else {

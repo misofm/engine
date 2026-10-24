@@ -125,7 +125,10 @@ its fader (zero for a plain track), then unmutes over the session mute ramp, bit
 fresh session with the track muted and given a live unmute at that block
 (`host-core`'s `an_added_track_fades_in_from_its_first_played_block_on_every_width`). A channel
 the session mutes is not armed, a host mute or unmute before the fire replaces it, and a declared
-discontinuity arms nothing. Strips the transaction did not add are untouched. The frozen exported set is now 15
+discontinuity arms nothing. Strips the transaction did not add are untouched. A later structural
+transaction adopted before the fade has run keeps it (#1392): while the strip's fader lane carries,
+a waiting fade keeps waiting, a scheduled one keeps its render sample, and a fired one never runs
+again (`host-core`'s `a_pending_fade_survives_a_second_swap_on_every_width`). The frozen exported set is now 15
 `miso_engine_v1_*` definitions (`scripts/check-capi-abi.sh`, whose self-test refuses a library
 where the new symbol is only an undefined reference: its `nm` wrapper drops the symbol from a
 defined-only listing and shows it as `U` otherwise, so the case also fails if the checker stops

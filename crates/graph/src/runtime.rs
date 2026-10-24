@@ -16333,7 +16333,7 @@ mod tests {
                 },
             ])
             .expect("installed");
-        assert_eq!(installed, 2);
+        assert_eq!(installed, vec![Some(0), Some(1)]);
         FADE_FIRES.with(|fires| fires.borrow_mut().clear());
         for block in 0..10_u64 {
             let mut storage = vec![0.0_f32; 2 * 128];

@@ -3104,22 +3104,40 @@ fn with_fade_track(
     model
 }
 
-/// What a fade run rendered: every block's bits, the successor's fade arms (`(D, ramp)`), and the
-/// render thread's `(allocations, reallocations, deallocations)` over the hand-over and every
-/// successor block.
+/// What a fade run rendered: every block's bits, the first successor's fade arms (`(D, ramp)`),
+/// each successor's `restarted_strips()`, and the render thread's `(allocations, reallocations,
+/// deallocations)` over every hand-over and every block from the first swap on.
 struct FadeRun {
     blocks: Vec<Vec<u32>>,
     arms: Vec<(u32, u32)>,
+    restarted: Vec<Vec<Box<str>>>,
     allocator: (u64, u64, u64),
 }
 
-/// Render `a` with live controls, fed `feeds` one block ahead; with a `swap`, prepare
-/// `(successor, committed)` at [`SWAP_BLOCK`], adopt it directly and render on. `writes` go to the
-/// plan rendering their block. Without a swap this is the reference: `a` fresh from frame 0.
+/// One structural swap of a [`fade_run`]: before block `block` renders, `to` is prepared as the
+/// running plan's successor, with `committed` (the running plan's model) as its base, and adopted.
+struct FadeSwap<'a> {
+    block: usize,
+    to: &'a Session,
+    committed: &'a SessionModel,
+}
+
+/// A source a [`fade_run`]'s first successor adds and the host starts with
+/// `seek_at(id, 2, A, A)` (#1288 gate 4(b)) before the first successor's first block, then feeds
+/// from `A`.
+struct Anchored<'a> {
+    feed: &'a Feed,
+    anchor_block: usize,
+}
+
+/// Render `a` with live controls, fed `feeds` (generation 1) one block ahead, and adopt each of
+/// `swaps` directly at its block. `writes` go to the plan rendering their block. Without swaps
+/// this is a reference: `a` fresh from frame 0.
 fn fade_run(
     a: &Session,
-    swap: Option<(&Session, &SessionModel)>,
+    swaps: &[FadeSwap<'_>],
     feeds: &[&Feed],
+    anchored: Option<Anchored<'_>>,
     writes: &[CellWrite],
     backend: Backend,
 ) -> FadeRun {
@@ -3127,39 +3145,59 @@ fn fade_run(
     let rate = a.compiled.sample_rate().0;
     let mut plan = CellPlan::fresh(a, backend);
     let mut arms = Vec::new();
+    let mut restarted = Vec::new();
     let mut allocator = (0, 0, 0);
+    let mut add = |delta: bench_alloc::Counters| {
+        allocator.0 += delta.allocations;
+        allocator.1 += delta.reallocations;
+        allocator.2 += delta.deallocations;
+    };
     for feed in feeds {
         feed.submit(&mut plan.live.prepared.sources, rate, 0);
     }
     let mut blocks = Vec::with_capacity(BLOCKS);
     for block in 0..BLOCKS {
-        if let (SWAP_BLOCK, Some((to, committed))) = (block, swap) {
+        if let Some(swap) = swaps.iter().find(|swap| swap.block == block) {
+            let first = arms.is_empty() && restarted.is_empty();
             let mut successor = CellPlan::successor(
-                to,
+                swap.to,
                 &plan.live.prepared.inventory,
-                committed,
+                swap.committed,
                 &EditRamps::new(),
                 backend,
             );
-            arms = graph::test_only_fade_arms(&mut successor.live.prepared.plan)
-                .expect("a graph plan");
-            assert_eq!(
-                successor
-                    .live
-                    .prepared
-                    .sources
-                    .adopt_persisting(&mut plan.live.prepared.sources),
-                feeds.len()
-            );
+            if first {
+                arms = graph::test_only_fade_arms(&mut successor.live.prepared.plan)
+                    .expect("a graph plan");
+            }
+            restarted.push(successor.live.prepared.restarted_strips().to_vec());
+            successor
+                .live
+                .prepared
+                .sources
+                .adopt_persisting(&mut plan.live.prepared.sources);
+            if first && let Some(anchored) = &anchored {
+                let anchor = (anchored.anchor_block * QUANTUM) as u64;
+                let sources = &mut successor.live.prepared.sources;
+                sources
+                    .seek_at(anchored.feed.id.as_bytes(), 2, anchor, anchor)
+                    .expect("anchored seek");
+                submit_blocks(
+                    sources,
+                    anchored.feed.id,
+                    anchored.feed,
+                    2,
+                    anchored.anchor_block..BLOCKS,
+                );
+            }
             let mark = bench_alloc::current_thread_counters();
             let carry = successor
                 .live
                 .prepared
                 .plan
                 .adopt_predecessor_plan(&mut plan.live.prepared.plan);
-            let delta = bench_alloc::current_thread_delta_since(mark);
-            allocator = (delta.allocations, delta.reallocations, delta.deallocations);
-            assert_eq!(carry, CarryOutcome::Carried, "the swap block");
+            add(bench_alloc::current_thread_delta_since(mark));
+            assert_eq!(carry, CarryOutcome::Carried, "the swap at block {block}");
             plan = successor;
         }
         plan.write_block(writes, block);
@@ -3172,18 +3210,33 @@ fn fade_run(
         let mark = bench_alloc::current_thread_counters();
         plan.live.render_into(&mut output, QUANTUM);
         let delta = bench_alloc::current_thread_delta_since(mark);
-        if swap.is_some() && block >= SWAP_BLOCK {
-            allocator.0 += delta.allocations;
-            allocator.1 += delta.reallocations;
-            allocator.2 += delta.deallocations;
+        if swaps.first().is_some_and(|swap| block >= swap.block) {
+            add(delta);
         }
         blocks.push(output.iter().map(|sample| sample.to_bits()).collect());
     }
     FadeRun {
         blocks,
         arms,
+        restarted,
         allocator,
     }
+}
+
+/// The unmute a fade reference writes to [`FADE_TRACK`] before block `block`, over `ramp`.
+fn unmute_fade(block: usize, ramp: u32) -> CellWrite {
+    CellWrite {
+        block,
+        strip: FADE_TRACK,
+        record: CellRecord::Fader(mute_both(false, ramp)),
+    }
+}
+
+fn first_fade_difference(left: &FadeRun, right: &FadeRun) -> Option<usize> {
+    left.blocks
+        .iter()
+        .zip(&right.blocks)
+        .position(|(left, right)| left != right)
 }
 
 /// Issue #1288 gates 3, 4(a), 4(c) and 6 at one width: B adds [`FADE_TRACK`] (a) on the playing
@@ -3195,12 +3248,7 @@ fn fade_run(
 fn an_added_track_fades_in_from_its_first_played_block(backend: Backend) {
     let ramp = LiveRamps::for_session(&fade_base()).mute_samples;
     assert!(ramp > 0, "the session mute ramp is not a step");
-    let swap_sample = (SWAP_BLOCK * QUANTUM) as u32;
-    let kept = Feed::new(SOURCE, 1);
-    let aux_feed = Feed::new(AUX_SOURCE, 2);
-    let aux = spliced(AUX_SOURCE, &aux_feed, |block| {
-        (block >= SWAP_BLOCK).then_some(block)
-    });
+    let (kept, aux) = fade_feeds();
     let a = Session::compile(fade_base());
     for (case, source, limited, delay) in [
         ("(a) a playing source", SOURCE, false, 0_u32),
@@ -3208,13 +3256,14 @@ fn an_added_track_fades_in_from_its_first_played_block(backend: Backend) {
     ] {
         let b = Session::compile(with_fade_track(fade_base(), source, limited, false));
         let muted = Session::compile(with_fade_track(fade_base(), source, limited, true));
-        let fire_block = (swap_sample + delay).div_ceil(QUANTUM as u32) as usize;
-        let unmute = |block: usize| CellWrite {
-            block,
-            strip: FADE_TRACK,
-            record: CellRecord::Fader(mute_both(false, ramp)),
-        };
-        let run = fade_run(&a, Some((&b, &a.model)), &[&kept, &aux], &[], backend);
+        let fire_block = ((SWAP_BLOCK * QUANTUM) as u32 + delay).div_ceil(QUANTUM as u32) as usize;
+        let swap = [FadeSwap {
+            block: SWAP_BLOCK,
+            to: &b,
+            committed: &a.model,
+        }];
+        let feeds = [&kept, &aux];
+        let run = fade_run(&a, &swap, &feeds, None, &[], backend);
         assert_eq!(
             run.arms,
             vec![(delay, ramp)],
@@ -3225,22 +3274,26 @@ fn an_added_track_fades_in_from_its_first_played_block(backend: Backend) {
             (0, 0, 0),
             "{backend:?} {case}: allocator calls"
         );
-        let reference = fade_run(&muted, None, &[&kept, &aux], &[unmute(fire_block)], backend);
-        let difference = run
-            .blocks
-            .iter()
-            .zip(&reference.blocks)
-            .position(|(left, right)| left != right);
+        let reference = fade_run(
+            &muted,
+            &[],
+            &feeds,
+            None,
+            &[unmute_fade(fire_block, ramp)],
+            backend,
+        );
         assert_eq!(
-            difference, None,
+            first_fade_difference(&run, &reference),
+            None,
             "{backend:?} {case}: every block equals the reference"
         );
         // The oracle can fail: a fade one block early is different bits.
         let early = fade_run(
             &muted,
+            &[],
+            &feeds,
             None,
-            &[&kept, &aux],
-            &[unmute(fire_block - 1)],
+            &[unmute_fade(fire_block - 1, ramp)],
             backend,
         );
         assert_ne!(
@@ -3248,6 +3301,15 @@ fn an_added_track_fades_in_from_its_first_played_block(backend: Backend) {
             "{backend:?} {case}: the fire block is observable"
         );
     }
+}
+
+/// [`SOURCE`]'s feed, and [`AUX_SOURCE`]'s: exact zeros before [`SWAP_BLOCK`], audio from it.
+fn fade_feeds() -> (Feed, Feed) {
+    let aux = Feed::new(AUX_SOURCE, 2);
+    let aux = spliced(AUX_SOURCE, &aux, |block| {
+        (block >= SWAP_BLOCK).then_some(block)
+    });
+    (Feed::new(SOURCE, 1), aux)
 }
 
 /// Issue #1288 gates 3, 4 and 6 on every width. Red if every strip dips at the swap, if the added
@@ -3258,6 +3320,235 @@ fn an_added_track_fades_in_from_its_first_played_block_on_every_width() {
     for backend in backends() {
         an_added_track_fades_in_from_its_first_played_block(backend);
     }
+}
+
+// Issue #1392: an added strip's pending fade-in travels with its fader lane across a later swap.
+
+/// The block [`ADDED_SOURCE`] is anchored to in the #1392 cases: three blocks after the swap.
+const FADE_ANCHOR_BLOCK: usize = SWAP_BLOCK + 3;
+
+/// [`fade_base`] plus [`ADDED_SOURCE`] and [`FADE_TRACK`] on it.
+fn anchored_fade_model(muted: bool) -> SessionModel {
+    let mut model = fade_base();
+    add_source(&mut model, ADDED_SOURCE);
+    with_fade_track(model, ADDED_SOURCE, false, muted)
+}
+
+/// [`ADDED_SOURCE`]'s feed in the swapped run, and the reference's: exact zeros before
+/// [`FADE_ANCHOR_BLOCK`], the same blocks from it.
+fn anchored_feeds() -> (Feed, Feed) {
+    let added = Feed::new(ADDED_SOURCE, 3);
+    let reference = spliced(ADDED_SOURCE, &added, |block| {
+        (block >= FADE_ANCHOR_BLOCK).then_some(block)
+    });
+    (added, reference)
+}
+
+/// The two-swap run of the #1392 cases: `b1` at [`SWAP_BLOCK`], `b2` at `second`.
+fn two_swap_run(
+    a: &Session,
+    b1: &Session,
+    b2: &Session,
+    second: usize,
+    anchored: Option<Anchored<'_>>,
+    feeds: &[&Feed],
+    backend: Backend,
+) -> FadeRun {
+    let swaps = [
+        FadeSwap {
+            block: SWAP_BLOCK,
+            to: b1,
+            committed: &a.model,
+        },
+        FadeSwap {
+            block: second,
+            to: b2,
+            committed: &b1.model,
+        },
+    ];
+    fade_run(a, &swaps, feeds, anchored, &[], backend)
+}
+
+/// Issue #1392 gates 1 and 5 at one width. (b) The added track waits for its anchored source at
+/// block 9 while a second transaction (a muted track) is adopted at block 7: the carried entry
+/// keeps waiting and fires at the anchor. (c) The added limited track's source plays from block 6,
+/// so its fade is scheduled for sample 1254 (block 10); the second swap at block 8 keeps that
+/// sample. Each run equals the post-edit session with the track muted, given a live unmute at the
+/// one-swap fire block; neither swap block allocates or frees.
+fn a_pending_fade_survives_a_second_swap(backend: Backend) {
+    let ramp = LiveRamps::for_session(&fade_base()).mute_samples;
+    let (kept, aux) = fade_feeds();
+    let a = Session::compile(fade_base());
+    // (b) Waiting.
+    let (added, reference_added) = anchored_feeds();
+    let b1 = Session::compile(anchored_fade_model(false));
+    let b2 = Session::compile(with_muted_track(anchored_fade_model(false)));
+    let muted = Session::compile(with_muted_track(anchored_fade_model(true)));
+    let anchored = Anchored {
+        feed: &added,
+        anchor_block: FADE_ANCHOR_BLOCK,
+    };
+    let run = two_swap_run(
+        &a,
+        &b1,
+        &b2,
+        SWAP_BLOCK + 1,
+        Some(anchored),
+        &[&kept, &aux],
+        backend,
+    );
+    let reference = fade_run(
+        &muted,
+        &[],
+        &[&kept, &aux, &reference_added],
+        None,
+        &[unmute_fade(FADE_ANCHOR_BLOCK, ramp)],
+        backend,
+    );
+    assert_eq!(
+        first_fade_difference(&run, &reference),
+        None,
+        "{backend:?} (b): a waiting fade fires at the anchor after a second swap"
+    );
+    assert_eq!(run.allocator, (0, 0, 0), "{backend:?} (b): allocator calls");
+    // (c) FireAt.
+    let limited = |muted: bool| with_fade_track(fade_base(), AUX_SOURCE, true, muted);
+    let b1 = Session::compile(limited(false));
+    let b2 = Session::compile(with_muted_track(limited(false)));
+    let muted = Session::compile(with_muted_track(limited(true)));
+    let fire_block = (SWAP_BLOCK * QUANTUM + 486).div_ceil(QUANTUM);
+    let run = two_swap_run(&a, &b1, &b2, SWAP_BLOCK + 2, None, &[&kept, &aux], backend);
+    let reference = fade_run(
+        &muted,
+        &[],
+        &[&kept, &aux],
+        None,
+        &[unmute_fade(fire_block, ramp)],
+        backend,
+    );
+    assert_eq!(
+        first_fade_difference(&run, &reference),
+        None,
+        "{backend:?} (c): a scheduled fade keeps its sample across a second swap"
+    );
+    assert_eq!(run.allocator, (0, 0, 0), "{backend:?} (c): allocator calls");
+}
+
+/// Issue #1392 gates 1 and 5 on every width. Red if the successor does not re-arm from the
+/// inventory (the stem enters at full gain), restarts a carried `FireAt` as `Waiting` (the fade
+/// fires `D` late), or allocates at either swap block.
+#[test]
+fn a_pending_fade_survives_a_second_swap_on_every_width() {
+    for backend in backends() {
+        a_pending_fade_survives_a_second_swap(backend);
+    }
+}
+
+/// Issue #1392 gate 2 at one width: the added track on the playing [`SOURCE`] fires at the swap
+/// block; a second transaction adopted mid-ramp (block 7) or after the ramp (block 10) leaves the
+/// run equal to the one-swap fade: no second dip.
+fn a_fired_fade_does_not_repeat(backend: Backend) {
+    let ramp = LiveRamps::for_session(&fade_base()).mute_samples;
+    assert!(
+        ramp as usize > QUANTUM && SWAP_BLOCK * QUANTUM + (ramp as usize) < 10 * QUANTUM,
+        "block 7 is inside the ramp and block 10 after it"
+    );
+    let (kept, aux) = fade_feeds();
+    let a = Session::compile(fade_base());
+    let b1 = Session::compile(with_fade_track(fade_base(), SOURCE, false, false));
+    let b2 = Session::compile(with_muted_track(with_fade_track(
+        fade_base(),
+        SOURCE,
+        false,
+        false,
+    )));
+    let muted = Session::compile(with_muted_track(with_fade_track(
+        fade_base(),
+        SOURCE,
+        false,
+        true,
+    )));
+    let reference = fade_run(
+        &muted,
+        &[],
+        &[&kept, &aux],
+        None,
+        &[unmute_fade(SWAP_BLOCK, ramp)],
+        backend,
+    );
+    for second in [SWAP_BLOCK + 1, 10] {
+        let run = two_swap_run(&a, &b1, &b2, second, None, &[&kept, &aux], backend);
+        assert_eq!(
+            first_fade_difference(&run, &reference),
+            None,
+            "{backend:?}: a second swap at block {second} repeats no fade"
+        );
+    }
+}
+
+/// Issue #1392 gate 2 on every width. Red if the lane import leaves `armed` set or the carried
+/// entry is not copied `Done` (the playing strip is muted and fades in again).
+#[test]
+fn a_fired_fade_does_not_repeat_on_every_width() {
+    for backend in backends() {
+        a_fired_fade_does_not_repeat(backend);
+    }
+}
+
+/// Issue #1392 gate 3 (root's reading of D5): the second transaction adds a transparent insert to
+/// the added track while its fade waits for the anchor. The strip restarts for its chain
+/// (`restarted_strips()` lists it) but its fader lane carries, armed, so its entry carries too and
+/// the fade still fires at the anchor: the run equals the post-edit session with the track muted
+/// and unmuted live there. Red if a restarted strip drops its entry while its lane imports
+/// `armed` (a mute that never lifts).
+#[test]
+fn a_chain_restarted_strip_still_fades() {
+    let backend = Backend::current();
+    let ramp = LiveRamps::for_session(&fade_base()).mute_samples;
+    let (kept, aux) = fade_feeds();
+    let (added, reference_added) = anchored_feeds();
+    let with_insert = |muted: bool| {
+        let mut model = anchored_fade_model(muted);
+        track_mut(&mut model, FADE_TRACK)
+            .inserts
+            .effects
+            .push(transparent_insert());
+        model
+    };
+    let a = Session::compile(fade_base());
+    let b1 = Session::compile(anchored_fade_model(false));
+    let b2 = Session::compile(with_insert(false));
+    let muted = Session::compile(with_insert(true));
+    let anchored = Anchored {
+        feed: &added,
+        anchor_block: FADE_ANCHOR_BLOCK,
+    };
+    let run = two_swap_run(
+        &a,
+        &b1,
+        &b2,
+        SWAP_BLOCK + 1,
+        Some(anchored),
+        &[&kept, &aux],
+        backend,
+    );
+    assert!(
+        run.restarted[1].iter().any(|id| &**id == FADE_TRACK),
+        "the insert restarts the strip"
+    );
+    let reference = fade_run(
+        &muted,
+        &[],
+        &[&kept, &aux, &reference_added],
+        None,
+        &[unmute_fade(FADE_ANCHOR_BLOCK, ramp)],
+        backend,
+    );
+    assert_eq!(
+        first_fade_difference(&run, &reference),
+        None,
+        "the restarted strip still fades in at the anchor"
+    );
 }
 
 /// Issue #1288 D4 (gate 4(d) on the control thread): an added track whose compressor is keyed
