@@ -2044,8 +2044,9 @@ impl ReadyOwnership {
                 // block is observed: an active lease restarts here, and a moved gate discards the
                 // window the output meter has open.
                 if meters.lease {
-                    let from = (*meters.activation).max(first_sample);
-                    self.align_meters(meters, from);
+                    // The lease was taken at or before this block and the new grid starts here,
+                    // so this block is the first clean boundary, even for a lease still pending.
+                    self.align_meters(meters, first_sample);
                 }
             }
             // The tables hold the admissions made against the plan before it rendered; the block

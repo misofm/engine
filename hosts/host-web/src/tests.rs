@@ -9279,7 +9279,8 @@ mod structural_apply {
 
         // A lease still waiting for its activation when the swap adopts: taken at block 1 (its
         // activation, block 3, on the boot grid), and the first track adopted at block 1. The
-        // activation follows the new grid, so the first frame is [4, 7).
+        // activation moves to the new grid's origin, so the first frame, strips and master paired,
+        // is [1, 4).
         let mut rig = Rig::boot(&empty, options, None);
         assert_eq!(rig.host.render_next(), RESULT_OK);
         assert_eq!(rig.host.set_meter_lease(true), RESULT_OK);
@@ -9293,8 +9294,13 @@ mod structural_apply {
         let frames = published(&mut rig, 12 * WINDOW);
         assert_eq!(
             frames.first().copied(),
-            Some((1 + WINDOW) * quantum),
+            Some(quantum),
             "a pending lease publishes from the new grid's first boundary: {frames:?}"
+        );
+        assert_eq!(
+            rig.host.meter_header().track_count,
+            1,
+            "the frames pair the strip with the master"
         );
         assert!(
             frames
