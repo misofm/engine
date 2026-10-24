@@ -54,6 +54,17 @@ fn one_race_at_a_time() -> MutexGuard<'static, ()> {
 /// the blocks the race renders.
 const WEDGE_BLOCKS: u64 = 256;
 
+/// Render blocks the plan-swap race keeps running after its last admission while no control call
+/// has yet overlapped a render call (#1405): on one CPU the two threads alternate, so an overlap
+/// needs a preemption inside a render call, and the swaps alone render too few blocks to be sure
+/// of one.
+const OVERLAP_BLOCKS: u64 = 4_096;
+
+/// The control thread's sleep between steps once every swap is admitted (#1405). Its timer wakeup
+/// can preempt the render thread inside a render call; a `yield_now` cannot, because under EEVDF
+/// each yield moves the yielding thread's deadline later.
+const OVERLAP_SLEEP: std::time::Duration = std::time::Duration::from_micros(50);
+
 fn limits() -> CompileLimits {
     CompileLimits {
         struct_size: COMPILE_LIMITS_SIZE,
@@ -282,9 +293,14 @@ struct Control<'a> {
     plan_address: usize,
     model: session::SessionModel,
     swaps: u64,
+    /// The rendered blocks within which every swap must be admitted: no transaction is offered
+    /// at or after it, so the race's extension never admits a late swap.
+    admission_bound: u64,
     rendered: &'a AtomicU64,
     in_render: &'a AtomicBool,
     done: &'a AtomicBool,
+    /// Set with [`Control::is_done`]: every swap is admitted, or the race failed.
+    swapped: &'a AtomicBool,
     response: [u8; 4_096],
     event: [u8; 4_096],
     fields: [u16; 64],
@@ -293,6 +309,8 @@ struct Control<'a> {
     request: Vec<u8>,
     admitted: u64,
     overlapped: u64,
+    /// The rendered-block count when a control call first overlapped a render call.
+    first_overlap: Option<u64>,
     failure: Option<String>,
     admission_block: u64,
     next_frame: u64,
@@ -308,12 +326,25 @@ struct Control<'a> {
 }
 
 impl Control<'_> {
+    /// Whether every swap is admitted (or the race failed). The race goes on after this.
     fn is_done(&self) -> bool {
         self.admitted == self.swaps || self.failure.is_some()
     }
 
+    /// Whether the race is over (#1405): every swap is admitted and either a control call has
+    /// overlapped a render call or [`OVERLAP_BLOCKS`] blocks have rendered since the last
+    /// admission, or the race failed.
+    fn race_over(&self) -> bool {
+        self.failure.is_some()
+            || (self.is_done()
+                && (self.overlapped > 0
+                    || self.rendered.load(Ordering::Acquire)
+                        >= self.admission_block + OVERLAP_BLOCKS))
+    }
+
     fn fail(&mut self, failure: String) {
         self.failure = Some(failure);
+        self.swapped.store(true, Ordering::Release);
         self.done.store(true, Ordering::Release);
     }
 
@@ -361,7 +392,7 @@ impl Control<'_> {
     }
 
     fn step_feeding(&mut self, feed: bool) {
-        if self.is_done() {
+        if self.done.load(Ordering::Acquire) {
             return;
         }
         let admitted = self.admitted;
@@ -379,14 +410,30 @@ impl Control<'_> {
                     "dequeue lane {lane} after {admitted} swaps: {code}"
                 ));
             }
-            self.overlapped += u64::from(overlapping && self.in_render.load(Ordering::SeqCst));
+            if overlapping && self.in_render.load(Ordering::SeqCst) {
+                self.overlapped += 1;
+                self.first_overlap
+                    .get_or_insert_with(|| self.rendered.load(Ordering::Acquire));
+            }
         }
         let code = query(self.plan_address);
         if code != RESULT_OK {
             return self.fail(format!("plan resources after {admitted} swaps: {code}"));
         }
+        // Every swap is admitted: keep feeding, dequeuing and querying until the race is over.
+        if self.is_done() {
+            if self.race_over() {
+                self.done.store(true, Ordering::Release);
+            }
+            return;
+        }
         // The block in flight at admission may predate the publication; the next one swaps.
         let blocks = self.rendered.load(Ordering::Acquire);
+        if blocks >= self.admission_bound {
+            // Out of blocks with swaps left: end the race; "every swap admitted" then fails.
+            self.done.store(true, Ordering::Release);
+            return;
+        }
         if !self.back_to_back && blocks < self.admission_block + 2 {
             return;
         }
@@ -445,6 +492,9 @@ impl Control<'_> {
                     counters.candidate_superseded,
                 );
                 if self.is_done() {
+                    self.swapped.store(true, Ordering::Release);
+                }
+                if self.race_over() {
                     self.done.store(true, Ordering::Release);
                 }
             }
@@ -460,9 +510,34 @@ impl Control<'_> {
     /// Whether the next block has its source PCM queued, or the race is over. Only a render
     /// drains the ring, so PCM queued here is still there when the render starts.
     fn ready(&self) -> bool {
-        self.done.load(Ordering::Acquire)
+        self.is_done()
+            || self.done.load(Ordering::Acquire)
             || self.next_frame >= (self.rendered.load(Ordering::Acquire) + 1) * u64::from(QUANTUM)
     }
+}
+
+/// Runs the control side on a scoped thread, unlocked, while `render` renders on this thread, until
+/// the race is over or `render` returns. Between steps the control thread yields while edits
+/// remain and sleeps [`OVERLAP_SLEEP`] once every swap is admitted (#1405).
+fn race_unpaced(control: &mut Control<'_>, render: impl FnOnce()) {
+    let halt = AtomicBool::new(false);
+    std::thread::scope(|scope| {
+        let halt = &halt;
+        let done = control.done;
+        scope.spawn(move || {
+            while !halt.load(Ordering::Acquire) && !done.load(Ordering::Acquire) {
+                control.step();
+                if control.is_done() {
+                    std::thread::sleep(OVERLAP_SLEEP);
+                } else {
+                    std::thread::yield_now();
+                }
+            }
+        });
+        // Stops the control thread however `render` returns, so a failed assertion cannot hang.
+        let _halt = StopOnDrop(halt);
+        render();
+    });
 }
 
 /// Issue #1042 (`docs/handoffs/live-control-2026-09-28/VERIFY.md`, F1): control calls, and
@@ -517,17 +592,26 @@ fn race_plan_swaps(swaps: u64, readers: usize, back_to_back: bool) {
     let stop = AtomicBool::new(false);
     let in_render = AtomicBool::new(false);
     let done = AtomicBool::new(false);
+    let swapped = AtomicBool::new(false);
     let rendered = AtomicU64::new(0);
     let fed_frames = AtomicU64::new(0);
     let request = track_command(1, 42, &model, true);
+    // Every swap needs two blocks, and a healthy one is never backpressured for longer than
+    // `WEDGE_BLOCKS`; blocks after the race ends render nothing. The bound also holds the
+    // `OVERLAP_BLOCKS` after the last admission, which the unpaced loop adds; no swap is admitted
+    // after it.
+    let admission_bound = swaps * (WEDGE_BLOCKS + 2);
+    let block_bound = usize::try_from(admission_bound).expect("block bound");
     let mut control = Control {
         session_address: session as usize,
         plan_address,
         model,
         swaps,
+        admission_bound,
         rendered: &rendered,
         in_render: &in_render,
         done: &done,
+        swapped: &swapped,
         response: [0; 4_096],
         event: [0; 4_096],
         fields: [0; 64],
@@ -536,6 +620,7 @@ fn race_plan_swaps(swaps: u64, readers: usize, back_to_back: bool) {
         request,
         admitted: 0,
         overlapped: 0,
+        first_overlap: None,
         failure: None,
         admission_block: 0,
         next_frame: 0,
@@ -555,9 +640,7 @@ fn race_plan_swaps(swaps: u64, readers: usize, back_to_back: bool) {
         plane_stride_samples: QUANTUM,
         reserved: [0; 2],
     };
-    // Every swap needs two blocks, and a healthy one is never backpressured for longer than
-    // `WEDGE_BLOCKS`; blocks after the race ends render nothing.
-    let block_bound = usize::try_from(swaps * (WEDGE_BLOCKS + 2)).expect("block bound");
+    let overlap_bound = usize::try_from(OVERLAP_BLOCKS + 2).expect("overlap bound");
     let polled = std::thread::scope(|scope| {
         let pollers = (0..readers)
             .map(|_| {
@@ -599,21 +682,11 @@ fn race_plan_swaps(swaps: u64, readers: usize, back_to_back: bool) {
             );
             rendered.store(block + 1, Ordering::Release);
         };
-        if back_to_back {
-            // #1310 gate 5: the control thread runs unlocked, so a block renders whenever its PCM
-            // is queued, concurrently with a command: render may adopt a candidate before the
-            // command's service step (an ordinary rebuild), between it and the withdrawal
-            // (`Taken`), or not before it (`Withdrawn`).
-            let control = &mut control;
-            let stop = &stop;
-            let producer = scope.spawn(move || {
-                while !stop.load(Ordering::Acquire) && !control.is_done() {
-                    control.step();
-                    std::thread::yield_now();
-                }
-            });
+        // Renders each block once the unlocked control thread has queued its PCM, until the race
+        // is over or `blocks` blocks have been tried.
+        let render_fed = |blocks: usize| {
             let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
-            for _ in 0..block_bound {
+            for _ in 0..blocks {
                 if done.load(Ordering::Acquire) {
                     break;
                 }
@@ -629,16 +702,34 @@ fn race_plan_swaps(swaps: u64, readers: usize, back_to_back: bool) {
                 }
                 render_next();
             }
-            stop.store(true, Ordering::Release);
-            producer.join().expect("control thread");
+        };
+        if back_to_back {
+            // #1310 gate 5: the control thread runs unlocked, so a block renders whenever its PCM
+            // is queued, concurrently with a command: render may adopt a candidate before the
+            // command's service step (an ordinary rebuild), between it and the withdrawal
+            // (`Taken`), or not before it (`Withdrawn`).
+            race_unpaced(&mut control, || render_fed(block_bound + overlap_bound));
         } else {
+            // The paced race until every swap is admitted; after that it renders nothing, and the
+            // unpaced, sleeping race below runs until the race is over (#1405).
             render_while_producing(
                 block_bound,
                 &mut control,
-                |control| control.step(),
+                |control| {
+                    if !control.is_done() {
+                        control.step();
+                    }
+                },
                 |control| control.ready(),
-                |_| render_next(),
+                |_| {
+                    if !swapped.load(Ordering::Acquire) {
+                        render_next();
+                    }
+                },
             );
+            if control.is_done() {
+                race_unpaced(&mut control, || render_fed(overlap_bound));
+            }
         }
         drop(stop_readers);
         pollers
@@ -723,6 +814,11 @@ fn race_plan_swaps(swaps: u64, readers: usize, back_to_back: bool) {
         miso_engine_v1_session_destroy(session);
         miso_engine_v1_plan_destroy(plan);
     }
+    println!(
+        "{swaps} swaps: {} overlaps, the first at block {:?}; last admission at block {}, \
+         {blocks} blocks",
+        control.overlapped, control.first_overlap, control.admission_block
+    );
     assert_eq!(last_render, RESULT_OK, "render refused the last block");
     for (reader, (queries, failure)) in polled.iter().enumerate() {
         assert_eq!(
@@ -775,6 +871,16 @@ fn race_plan_swaps(swaps: u64, readers: usize, back_to_back: bool) {
         "vacuous: {} source blocks fed across {swaps} swaps",
         control.fed_blocks
     );
+    // The guard defends a dequeue inside some render call of the race: one of the swaps' renders,
+    // the render that adopts the last swap, or one of the few renders after it. It does not prove
+    // a dequeue inside a plan-swapping render; main never proved that either. #1405: after the
+    // last admission the race keeps rendering, feeding and dequeuing until a control call overlaps
+    // a render call or `OVERLAP_BLOCKS` blocks have rendered, with the control thread sleeping
+    // `OVERLAP_SLEEP` between steps. On correct code this fails only if no timer wakeup of the
+    // control thread preempts the render thread inside a render call across those 4096 blocks. A
+    // yielding control thread did not suffice on one CPU: a vacuous run stayed vacuous for all
+    // 4096 blocks (57 of 150 pinned runs), so the chance of an overlap belongs to a whole run, not
+    // to each block.
     assert!(
         control.overlapped > 0,
         "vacuous: no control call overlapped a render call"

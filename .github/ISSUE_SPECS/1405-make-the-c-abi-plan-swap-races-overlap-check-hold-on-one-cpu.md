@@ -43,9 +43,11 @@ All 111 failures were this assertion, at `:572`. In the same iterations, the `ca
 
 ## Decisions (for the brief to confirm)
 
-- **D1. Do not weaken the guard.** It defends the #1042 F1 coverage: a control call that falls
-  inside a plan-swapping render call. Deleting it, or skipping it below two CPUs, would let the
-  race go vacuous silently.
+- **D1. Do not weaken the guard.** It defends a dequeue inside some render call of the race:
+  one of the swaps' renders, the render that adopts the last swap, or one of the few renders after
+  it. It does not prove a dequeue inside a plan-swapping render (#1042 F1's window), and main never
+  proved that either (verifier finding, 2026-10-24). Deleting the guard, or skipping it below two
+  CPUs, would let the race go vacuous silently.
 - **D2. Candidate shapes, to be decided in the brief:**
   - (a) After the planned swaps, keep racing (more blocks, more control steps, and further swaps
     if needed) until `overlapped > 0`, within a stated bound. Fail only at that bound.
@@ -86,3 +88,119 @@ because a single CPU was not preempted at the right moment.
 ## Dependencies
 
 - None. It may land before or after #1404.
+
+## Decision and evidence record (attempt 1, 2026-10-24)
+
+- **D2 = (a)** (root, from the scope note). Separate "swaps admitted" (`Control::is_done`) from
+  "race over" (`Control::race_over`). `done` is stored only when every swap is admitted and either
+  `overlapped > 0` or `OVERLAP_BLOCKS = 4096` blocks have rendered since the last admission (or the
+  race failed). Feeding, both dequeues and the query go on after the last swap. The change covers
+  all three callers: `race_plan_swaps(24, 0, false)`, `(200, 2, false)` and `(64, 0, true)`.
+- **Gate 1 count (root decision):** 50 invocations per test, not 200.
+- **Gate 1 result: FAIL.** Debug binary, 150 invocations (50 per test), 6 lanes on CPUs 26-31,
+  each pinned with `taskset` to one CPU shared with one busy loop.
+  - 24 swaps: 31/50 pass.
+  - 200 swaps, 2 readers: 50/50 pass.
+  - 64 back to back: 3/50 pass.
+  - Failures: 57 at the overlap assertion, after exactly 4096 more blocks with 0 overlaps. 9 at
+    #1310's `withdrawn > 0 && taken > 0` assertion, a separate scheduler-dependent guard.
+  - Passing runs: median 2 overlaps (24 swaps), 12 (200 swaps), 2 (back to back). The first
+    overlap came at most 1336 blocks after the last admission.
+- **Finding: the probability argument does not hold.** A vacuous run stays vacuous for 4096 more
+  blocks, so the overlap chance is a property of the whole run, not an independent chance per
+  block. A likely cause, not proven: under EEVDF (kernel 6.8) each `yield_now` pushes the yielding
+  thread's virtual deadline forward. In the paced mode the control thread yields after every step,
+  and the render thread renders back to back while PCM is queued. When a tick preempts the render
+  thread inside a render call, the busy loop or the render thread is picked before the control
+  thread. The control thread then runs only when the render thread yields, which is never inside
+  a render call.
+- **Diagnostic, not committed:** in the back-to-back loop, a 50 us `sleep` replaced `yield_now`
+  after the last admission. Of 22 pinned runs, every run that reached the overlap assertion passed
+  it (2 overlaps each). The failing runs failed #1310's `taken > 0` assertion instead. The paced
+  mode's yield is in `bench_support::producer`, which is outside this issue's paths.
+- **Gate 2 (PR evidence): PASS.** With `in_render.store(true, ..)` commented out, each test failed
+  with "vacuous: no control call overlapped a render call" after 4096 blocks past its last
+  admission (4146, 4510 and 4160 blocks, in 5.2 s, 9.0 s and 2.8 s). The line is restored.
+
+## Root decisions for attempt 2 (2026-10-24)
+
+- The attempt 1 evidence stands. The e^-65 argument was invalid, because a vacuous run stays
+  vacuous. The likely reason is that under EEVDF each `yield_now` moves the yielding control
+  thread's deadline later, so a tick that preempts the render thread mid-call does not hand the CPU
+  to the control thread.
+- **D2 = (a) plus a sleeping control thread.** `OVERLAP_BLOCKS` and `race_over` stay. After the
+  last admission, the paced race stops rendering, and `race_unpaced` runs the control side
+  unlocked: feed, dequeue, query, then `sleep(OVERLAP_SLEEP = 50 us)`, until the race is over.
+  The back-to-back mode uses the same loop: `yield_now` while edits remain, the sleep after that.
+  `tools/bench-support` is unchanged.
+- **#1310's `withdrawn > 0 && taken > 0` guard (third caller) is folded into the race's end.**
+  Implementer finding: these outcomes are counted only inside a command's withdrawal
+  (`crates/control-plane/src/control.rs`, `withdraw_pending_candidate`), so they cannot change
+  after the last admission. The fold is therefore in `is_done`: back to back, `swaps` is a floor.
+  The race admits further edits, in pairs to end on the boot model, until both outcomes are seen
+  or `edits_bound = 2 * swaps` (128) edits are admitted.
+
+## Attempt 2 evidence
+
+- **Gate 1: FAIL, 1 of 150.** Same harness as attempt 1: 6 lanes on CPUs 26-31, each pinned to
+  one CPU with one busy loop.
+  - 24 swaps: 50/50 pass.
+  - 200 swaps, 2 readers: 50/50 pass.
+  - 64 back to back: 49/50 pass.
+  - The overlap guard passed in all 150 runs.
+  - The one failure was the #1310 guard, after the full bound: "128 edits ... 71 withdrawn,
+    0 taken". So `Taken`, too, is a per-run property on one CPU, and more edits do not rescue it.
+  - Per-run overlap counts for passing runs were not captured: the lane script matched the
+    attempt 1 print. The gate was not rerun.
+- Gates 2 and 3 were not run for attempt 2: root's instruction was to stop if gate 1 fails.
+
+## Root decisions for attempt 3 (2026-10-24)
+
+- **#1310's `withdrawn > 0 && taken > 0` guard is split out.** It is a different claim with a
+  different cause: a `Taken` needs render to start a block inside a command. Root files it as its
+  own issue. Attempt 2's growth of the back-to-back race (`swaps` as a floor, `edits_bound`) is
+  reverted, so the third caller keeps that guard exactly as it is on `main`. The overlap shape
+  stays: `OVERLAP_BLOCKS`, `race_over`, `race_unpaced` and `OVERLAP_SLEEP`.
+- **Gate 1, restated:** 50 pinned runs per test, with 0 overlap-guard failures. Failures of the
+  #1310 guard are evidence for its own issue, not #1405 failures.
+
+## Attempt 3 evidence
+
+- **Gate 1: PASS.** Debug binary, 150 runs (50 per test), 6 lanes on CPUs 26-31, each pinned to
+  one CPU shared with one busy loop. No run had 0 overlaps. The first overlap was at most 3 blocks
+  after the last admission, never near half of `OVERLAP_BLOCKS`. Negative values mean the first
+  overlap came before the last admission.
+
+  | Test | Overlap guard | Overlaps (min/median/max) | First overlap minus last admission (min/median/max) |
+  |---|---|---|---|
+  | 24 swaps | 50/50 | 2 / 2 / 40 | -49 / -12 / 2 |
+  | 200 swaps, 2 readers | 50/50 | 2 / 10 / 44 | -397 / -363 / 3 |
+  | 64 back to back | 50/50 | 2 / 2 / 2 | 0 / 0 / 1 |
+
+- **Evidence for the split #1310 issue:** the back-to-back test failed 3 of 50 runs at #1310's
+  guard: "32/33/37 withdrawn and 0 taken over 64 back-to-back edits". Each of these runs had 2
+  overlaps. 0 runs had 0 withdrawn.
+- **Gate 2: PASS (PR evidence, one run each).** With `in_render.store(true, ..)` commented out,
+  each test failed with "vacuous: no control call overlapped a render call" after 4096 blocks
+  past its last admission (4146, 4509 and 4160 blocks, in 4.9 s, 8.6 s and 2.7 s). The line is
+  restored.
+- **Gate 3: PASS.**
+  - `cargo fmt --all -- --check`.
+  - `cargo clippy --locked --workspace --all-targets --all-features -- -D warnings`.
+  - `cargo run --locked --release -q -p realtime-policy` (192 regions in 34 files) and
+    `cargo test --locked -p realtime-policy`.
+  - `scripts/check-workspace-policy.sh` and `scripts/test-workspace-policy.sh`.
+  - `cargo check --locked --target aarch64-unknown-linux-gnu --tests -p capi`.
+  - `cargo test --locked -p capi --test plan_swap_race`: 4 passed.
+
+## Review fold (attempt 3 verifier MINORs, 2026-10-24)
+
+- D1 and the assertion comment now state what the guard defends: a dequeue inside some render
+  call of the race, not necessarily a plan-swapping one.
+- The verifier's diagnostic (18 pinned runs, `scratchpad/opt/g1405/verify/diag.txt`) tracked
+  which renders adopted a swap. In 8 of the 18 runs, no counted overlap fell in an adopting
+  render: 4 of 6 for 24 swaps, 2 of 6 for 200 swaps and 2 of 6 back to back.
+- The admission bound is kept. No transaction is offered once `swaps * (WEDGE_BLOCKS + 2)` blocks
+  have rendered: the race then ends, and "every swap admitted within the block bound" fails. The
+  paced mode runs `race_unpaced` only when every swap is admitted. So the extension never admits
+  a late swap.
