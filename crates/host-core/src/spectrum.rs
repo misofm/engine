@@ -4261,11 +4261,11 @@ mod tests {
 
     /// #1618 gate 2: a window held behind a stale record when the plan swaps, on a capture that
     /// does not carry. The held window died with its observer, so no block end will ever publish
-    /// it: the service settles the arm, the read answers `CaptureInvalid` (not `Pending` forever),
-    /// the generation carries over, and a new arm completes on the successor's observer, whose
-    /// window a record of the old generation cannot be mistaken for.
+    /// it: the service drops the arm, the read answers `Dropped` once (#1593 D6; not `Pending`
+    /// forever), the generation carries over, and a new arm completes on the successor's
+    /// observer, whose window a record of the old generation cannot be mistaken for.
     #[test]
-    fn a_window_held_behind_a_stale_record_settles_invalid_when_the_plan_swaps() {
+    fn a_window_held_behind_a_stale_record_is_dropped_when_the_plan_swaps() {
         use crate::{PreparedSpectrumCaptures, SpectrumService, SpectrumServiceError};
 
         let (mut observer, capture) = one_shot_pair(SpectrumChannels::Left);
@@ -4299,9 +4299,9 @@ mod tests {
         assert!(
             matches!(
                 service.read(SpectrumChannels::Left),
-                Err(SpectrumServiceError::CaptureInvalid)
+                Err(SpectrumServiceError::Dropped)
             ),
-            "settled, not pending forever"
+            "dropped, not pending forever"
         );
         // The refusal is read once; the generation is the old arm's, so the next arm is its
         // successor and completes on the new observer.

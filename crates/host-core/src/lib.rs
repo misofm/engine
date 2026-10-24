@@ -169,6 +169,7 @@ pub use prepare::{
     prepare_host_runtime_with_live_controls_and_spectrum_collection_successor,
     prepare_host_runtime_with_live_controls_and_spectrum_successor,
     prepare_host_runtime_with_live_controls_successor, prepare_host_runtime_with_live_lanes,
+    prepare_host_runtime_with_live_lanes_and_spectrum,
     prepare_host_runtime_with_live_lanes_successor, prepare_host_runtime_with_selected_meters,
     prepare_host_runtime_with_selected_meters_successor, prepare_host_runtime_with_spectrum,
     prepare_host_runtime_with_spectrum_collection, prepare_host_session,
@@ -219,9 +220,10 @@ pub use spectrum_service::{
     PreparedSpectrumCaptures, SPECTRUM_CHANNEL_BOTH, SPECTRUM_CHANNEL_LEFT, SPECTRUM_CHANNEL_RIGHT,
     SPECTRUM_MAXIMUM_CAPTURE_BYTES, SPECTRUM_MAXIMUM_ID_BYTES, SPECTRUM_TARGET_OUTPUT,
     SPECTRUM_TARGET_TRACK_POST_INPUT, SPECTRUM_TARGET_TRACK_POST_PAN, SpectrumAnalysis,
-    SpectrumAnalysisResult, SpectrumPreparation, SpectrumRequestError, SpectrumService,
-    SpectrumServiceError, SpectrumSnapshot, SpectrumStreamMetadata, SpectrumStreamStatus,
-    spectrum_channels_from_raw, spectrum_smoothing, spectrum_target_kind, spectrum_target_ref,
+    SpectrumAnalysisResult, SpectrumConfiguration, SpectrumPreparation, SpectrumRequestError,
+    SpectrumService, SpectrumServiceError, SpectrumSnapshot, SpectrumStreamMetadata,
+    SpectrumStreamStatus, spectrum_channels_from_raw, spectrum_smoothing, spectrum_target_kind,
+    spectrum_target_ref,
 };
 
 /// The control-side half of one prepared effect's live-control channel (issue #140 A).

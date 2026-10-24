@@ -208,3 +208,20 @@ through `test_spectrum_mut()`.
 ## Supersedes and shrinks
 
 - Amends #1401 D4, #1400 D1 and D5, and #1395 D5 (see the amendment entries).
+
+## Decision record
+
+- 2026-10-24, root: split into T1 (host-core types, the one entry, `Dropped`), T2a (monitor,
+  trait, first plan, `CapiPreparer`), T2b (drop rule, promotion pairing) and T3 (browser passes
+  its configuration; the four old spectrum entries are deleted). Gates 1-6 live in
+  `crates/control-plane/tests/spectrum_monitor.rs`; no capi spectrum test until #1595.
+- T1: the entry takes no `bound_cache`: `InputBoundCache` no longer exists on `main`, so its
+  signature is D3's without it. The four `*_with_live_controls_and_spectrum*` entries and
+  `prepare_host_runtime_with_spectrum*` clone their borrowed request into a
+  `SpectrumPreparation` until T3 deletes or folds them (control thread only).
+- T1, D6: `Dropped` answers any caller arm a swap did not carry, single or collection, once, on
+  the next one-shot read; the arm is released at promotion. It replaces #1618's
+  `CaptureInvalid` (single) and `NotArmed` (collection) answers there, so their tests in
+  `src/spectrum.rs` and `tests/successor_swap.rs` change their expectation, and host-web maps it
+  to `RESULT_WRONG_STATE` (R3; the match is exhaustive). A single capture's generation still
+  carries over, so the next arm is a later generation.
