@@ -216,3 +216,29 @@ Commands: `cargo test --locked -p protocol --all-features`, `cargo test --locked
 
 - Supersedes, with #1581 and #1587, *Report each configured meter handle's own meter in the C ABI
   meter batch* (#1352); see the amendment line.
+
+## Decision record (attempt 1, 2026-10-24)
+
+- Root accepted the scope note's R1-R5: the C ABI's delivery is output-only (`MeterTables::new(0, 0)`,
+  an empty consumer slice); "has a meter delivery" is `ControlAdapter::METER_DELIVERY` (capi true,
+  web false); the period is checked against the plan's window in blocks; `MeterWindowsLost = 22`;
+  #1352 closes as superseded when this merges (root does the GitHub part). No browser `src/` change:
+  the core fold already publishes output-only windows (#1682), so D5's browser sentence is void.
+- Root constraint: the output meter gate moves only on the render thread, between blocks. The
+  control plane writes a requested-gate word and render applies it at a block boundary; #1587a
+  moves the gate for an uncarried swap through the same word.
+- T1 facts. The provider's refusal carries its code and path: `telemetry_configure` returns
+  `Result<_, TelemetryRefusal { error, code, path }>` (`From<ParameterProviderError>` keeps the
+  counter refusal as before); D3 names a code per refusal, which a bare `ParameterProviderError`
+  cannot carry. The period refusal's path is `meter_period_blocks`; an entry refusal's is
+  `meters[i]` (zero-based). The codec has two decoders, `decode_telemetry_configuration` (a command:
+  field 8 refused) and `decode_telemetry_configuration_echo`; the controller writes the echo's
+  window from `ControlProvider::meter_window_blocks`. `ControllerRetainedCapacity::meter_handles` is
+  now `meters`, capped at 256, and the boot allocation rows charge `MeterEntry` x 256 per copy.
+- Paths beyond the list, all mechanical consequences of the wire change: `sdk/test/fixtures/
+  protocol-messages.json` (blessed by `sdk_message_fixture.rs`), `scripts/check-protocol-wasm-parity.sh`
+  and `docs/CONTROL_PROTOCOL_CONFORMANCE.md` (the hash pin's other spellings, as every re-pin edits),
+  and the `protocol_cross_host` kinds check (no `METER_BATCH` on the browser until #1588).
+- Not edited, needs root: `hosts/host-web/qualification/run.mjs` still expects a `meterBatch` per
+  block (`PROTOCOL_LOSSY_KINDS`, `3 * protocol.blocks`); with step 5's empty table it must drop
+  `meterBatch` and expect `2 * protocol.blocks`.

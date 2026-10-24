@@ -386,6 +386,7 @@ pub(crate) fn capi_resources<A: ControlAdapter>(
     let maximum_configuration_items = usize::try_from(limits.maximum_control_frame_bytes)
         .map_err(|_| failure(ResourceFault::Platform))?
         / size_of::<u16>();
+    let maximum_meter_entries = protocol::MAXIMUM_METER_ENTRIES.min(maximum_configuration_items);
     let fixed_allocation_rows = [
         checked_byte_layout(limits.maximum_diagnostic_bytes)?,
         checked_byte_layout(limits.maximum_control_frame_bytes)?,
@@ -427,11 +428,12 @@ pub(crate) fn capi_resources<A: ControlAdapter>(
         checked_layout::<crate::control::ObservationBatchCount>(observation.producers)?,
         checked_layout::<RenderDiagnosticSlot>(RENDER_DIAGNOSTIC_SLOTS)?,
         checked_layout::<u8>(RENDER_DIAGNOSTIC_CODE.len() * RENDER_DIAGNOSTIC_SLOTS)?,
-        // ProtocolController and SessionControlProvider each retain their own telemetry config.
-        checked_layout::<u32>(maximum_configuration_items)?,
+        // ProtocolController and SessionControlProvider each retain their own telemetry config:
+        // a meter table of at most 256 entries (#1583 D2) and the counter IDs.
+        checked_layout::<protocol::MeterEntry>(maximum_meter_entries)?,
         checked_layout::<protocol::CounterId>(maximum_configuration_items)?,
         provider.fixed_retained_bytes,
-        checked_layout::<u32>(maximum_configuration_items)?,
+        checked_layout::<protocol::MeterEntry>(maximum_meter_entries)?,
         checked_layout::<protocol::CounterId>(maximum_configuration_items)?,
         // #1398 D1: the pending and retired provider lists, and the report table.
         checked_layout::<ProviderEpoch>(PENDING_PROVIDERS)?,
@@ -967,7 +969,9 @@ pub(crate) fn controller_retained_capacity(
         .map_err(|_| failure(ResourceFault::Platform))?;
     let maximum_tlvs = control_bytes / size_of::<u16>();
     Ok(ControllerRetainedCapacity {
-        meter_handles: maximum_tlvs,
+        // #1583 D2: a meter table holds at most 256 entries, whatever the frame could carry; the
+        // allocation rows charge the same count.
+        meters: protocol::MAXIMUM_METER_ENTRIES.min(maximum_tlvs),
         counter_ids: maximum_tlvs,
     })
 }

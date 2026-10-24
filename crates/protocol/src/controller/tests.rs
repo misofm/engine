@@ -364,17 +364,21 @@ fn egress_controller(
     )
 }
 
+/// Configure counters and diagnostics through `TELEMETRY_CONFIGURE`, then install a meter table of
+/// `meters` entries (handles `1..=meters`) beside it. The table is written in place: its entries
+/// name strips the fixture's model does not have, and the egress tests read only the handles.
 fn configure_event_egress(
     controller: &mut ProtocolController<MockProvider>,
     request_id: u64,
-    meter_handles: Vec<u32>,
+    meters: usize,
     counter_ids: Vec<crate::CounterId>,
     diagnostics_enabled: bool,
 ) -> TelemetryConfiguration {
-    let configuration = TelemetryConfiguration {
-        meter_period_blocks: if meter_handles.is_empty() { 0 } else { 1 },
+    let mut configuration = TelemetryConfiguration {
+        meters: Vec::new(),
+        meter_period_blocks: 0,
+        meter_window_blocks: None,
         counter_period_blocks: if counter_ids.is_empty() { 0 } else { 1 },
-        meter_handles,
         counter_ids,
         diagnostics_enabled,
         minimum_diagnostic_severity: crate::DiagnosticSeverity::Info,
@@ -388,8 +392,26 @@ fn configure_event_egress(
         },
     });
     assert_eq!(response.status, StatusCode::Ok);
+    configuration.meter_window_blocks = Some(core::num::NonZeroU32::MIN);
     assert_eq!(controller.telemetry_configuration, configuration);
+    configuration.meters = (0..meters)
+        .map(|index| crate::MeterEntry {
+            target: crate::MeterTarget::Strip(format!("meter-{index}").into()),
+            metric: crate::MeterMetric::Peak,
+        })
+        .collect();
+    configuration.meter_period_blocks = u32::from(meters != 0);
+    controller.telemetry_configuration = configuration.clone();
     configuration
+}
+
+/// One closed meter window: `[first, end)`, the first window of its configuration.
+fn window(first: u64, end: u64) -> crate::MeterWindowSpan {
+    crate::MeterWindowSpan {
+        first_sample: SampleTime(first),
+        end_sample: SampleTime(end),
+        window_sequence: 1,
+    }
 }
 
 /// The handle of the one automatable control row of the fixture list.
@@ -526,8 +548,12 @@ fn full_frame_ingress_dispatches_every_registered_command_through_typed_frames()
         owner: None,
     };
     let telemetry = TelemetryConfiguration {
-        meter_handles: vec![1],
+        meters: vec![crate::MeterEntry {
+            target: crate::MeterTarget::Output,
+            metric: crate::MeterMetric::Peak,
+        }],
         meter_period_blocks: 1,
+        meter_window_blocks: None,
         counter_ids: vec![crate::CounterId::ControlCommandBackpressure],
         counter_period_blocks: 1,
         diagnostics_enabled: false,
@@ -3054,8 +3080,12 @@ fn b3b1_btlv_telemetry_echo_and_counters_are_typed_and_nondestructive() {
     }
     let codec = ProtocolCodec::default();
     let configuration = TelemetryConfiguration {
-        meter_handles: vec![1],
+        meters: vec![crate::MeterEntry {
+            target: crate::MeterTarget::Output,
+            metric: crate::MeterMetric::Peak,
+        }],
         meter_period_blocks: 4,
+        meter_window_blocks: None,
         counter_ids: vec![crate::CounterId::ControlCommandBackpressure],
         counter_period_blocks: 8,
         diagnostics_enabled: false,
@@ -3084,9 +3114,13 @@ fn b3b1_btlv_telemetry_echo_and_counters_are_typed_and_nondestructive() {
         )
         .expect("configure");
     assert_eq!(first.status, StatusCode::Ok);
+    // #1583 D4: the echo adds the provider's meter window.
     assert_eq!(
-        codec.decode_telemetry_configuration(first.payload(), 6),
-        Ok(configuration.clone())
+        codec.decode_telemetry_configuration_echo(first.payload(), 7),
+        Ok(TelemetryConfiguration {
+            meter_window_blocks: Some(core::num::NonZeroU32::MIN),
+            ..configuration.clone()
+        })
     );
     assert_eq!(controller.provider().telemetry_configuration, configuration);
     let second = controller
@@ -3782,12 +3816,11 @@ fn c2b2_event_egress_emits_all_five_schema_closed_full_frames() {
     let codec = ProtocolCodec::default();
     let mut controller = egress_controller(4, 256);
     let revision = controller.session().revision();
-    let meter_handles = (1_u32..=256).collect::<Vec<_>>();
     let counter_ids = vec![
         crate::CounterId::ControlCommandBackpressure,
         crate::CounterId::TelemetryCoalesced,
     ];
-    configure_event_egress(&mut controller, 1, meter_handles, counter_ids, true);
+    configure_event_egress(&mut controller, 1, 256, counter_ids, true);
 
     let committed = ReliableSlot::session_committed(revision, 1, id(9), SessionRevision(6), 2);
     let transport = ReliableSlot::transport_state(
@@ -3832,7 +3865,7 @@ fn c2b2_event_egress_emits_all_five_schema_closed_full_frames() {
         })
         .collect::<Vec<_>>();
     controller
-        .stage_meter_batch_event(revision, SampleTime(24), &meter_records)
+        .stage_meter_batch_event(revision, window(12, 24), &meter_records)
         .expect("meters");
     let counters = CounterSnapshot {
         observed_sample: SampleTime(24),
@@ -3901,6 +3934,8 @@ fn c2b2_event_egress_emits_all_five_schema_closed_full_frames() {
         revision,
         payload: EventPayload::MeterBatch(MeterBatch {
             observed_sample: SampleTime(24),
+            first_sample: SampleTime(12),
+            window_sequence: 1,
             records: &meter_records,
         }),
     };
@@ -3934,7 +3969,7 @@ fn counter_egress_splits_nonascending_staged_snapshots_without_stalling() {
     let revision = controller.session().revision();
     let high = crate::CounterId::TelemetryCoalesced;
     let low = crate::CounterId::ControlCommandBackpressure;
-    configure_event_egress(&mut controller, 1, Vec::new(), vec![low, high], false);
+    configure_event_egress(&mut controller, 1, 0, vec![low, high], false);
     for (id, value) in [(high, 5_u64), (low, 1_u64)] {
         controller
             .stage_counter_snapshot_event(
@@ -4021,7 +4056,7 @@ fn c2b2_short_buffers_retain_pending_reliable_order_and_diagnostic_storage() {
         MessageId::TransportState
     );
 
-    configure_event_egress(&mut controller, 2, Vec::new(), Vec::new(), true);
+    configure_event_egress(&mut controller, 2, 0, Vec::new(), true);
     let diagnostic = DiagnosticEvent {
         diagnostic: retained_diagnostic(99, crate::DiagnosticSeverity::Info),
     };
@@ -4045,11 +4080,11 @@ fn c2b2_short_buffers_retain_pending_reliable_order_and_diagnostic_storage() {
 
     let mut lossy = egress_controller(1, 1);
     let lossy_revision = lossy.session().revision();
-    configure_event_egress(&mut lossy, 1, vec![1], Vec::new(), false);
+    configure_event_egress(&mut lossy, 1, 1, Vec::new(), false);
     lossy
         .stage_meter_batch_event(
             lossy_revision,
-            SampleTime(4),
+            window(0, 4),
             &[MeterRecord {
                 handle: 1,
                 component: crate::MeterComponent::Left,
@@ -4087,7 +4122,7 @@ fn c2b2_disabled_configuration_emits_nothing_and_reliable_full_returns_original(
     assert_eq!(
         controller.stage_meter_batch_event(
             revision,
-            SampleTime(0),
+            window(0, 1),
             &[MeterRecord {
                 handle: 1,
                 component: crate::MeterComponent::Left,

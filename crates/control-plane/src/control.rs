@@ -1815,7 +1815,7 @@ where
     /// marks such a block unmeasured rather than letting it publish a fabricated `0.0`.
     pub(crate) fn refresh_render_peak_gate(&self) {
         let telemetry = self.controller.telemetry_configuration();
-        let observed = !telemetry.meter_handles.is_empty() && telemetry.meter_period_blocks != 0;
+        let observed = !telemetry.meters.is_empty() && telemetry.meter_period_blocks != 0;
         self.shared
             .render_peak_observed
             .store(observed, Ordering::Relaxed);
@@ -1875,34 +1875,8 @@ where
         }
         self.observed_render_sequence = sequence;
         let sample = self.shared.render_sample.load(Ordering::Acquire);
-        let peak = f32::from_bits(self.shared.render_peak_bits.load(Ordering::Acquire));
         let observed_sample = protocol::SampleTime(sample);
         let revision = self.controller.session().revision();
-        // A `NaN` peak is the render thread saying it did not measure this block, which happens
-        // for exactly one block when telemetry is configured concurrently with a render. Staging
-        // it would publish a peak of `0.0` that no sample ever produced; dropping it costs one
-        // record on the lane that is documented to coalesce and drop.
-        let meter_len = if peak.is_nan() {
-            0
-        } else {
-            self.controller
-                .telemetry_configuration()
-                .meter_handles
-                .len()
-        };
-        for index in 0..meter_len {
-            let handle = self.controller.telemetry_configuration().meter_handles[index];
-            let _ = self.controller.stage_meter_batch_event(
-                revision,
-                observed_sample,
-                &[protocol::MeterRecord {
-                    handle,
-                    component: protocol::MeterComponent::Left,
-                    flags: 1,
-                    value: peak,
-                }],
-            );
-        }
         self.stage_counter_snapshot(sequence, observed_sample, revision);
         let diagnostics_enabled = {
             let configuration = self.controller.telemetry_configuration();
@@ -2002,9 +1976,9 @@ where
                 .report(protocol::QueueKind::Telemetry),
             telemetry_counters: self.controller.queues().telemetry_counters(),
             retained_capacities: [
-                controller.meter_handles,
+                controller.meters,
                 controller.counter_ids,
-                provider.meter_handles,
+                provider.meters,
                 provider.counter_ids,
                 provider_counters,
                 replay.0,
@@ -2129,9 +2103,9 @@ where
         let (provider, provider_counters) = self.controller.provider().retained_capacities();
         let replay = self.controller.replay().retained_storage_capacities();
         [
-            controller.meter_handles,
+            controller.meters,
             controller.counter_ids,
-            provider.meter_handles,
+            provider.meters,
             provider.counter_ids,
             provider_counters,
             replay.0,

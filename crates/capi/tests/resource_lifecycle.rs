@@ -659,7 +659,7 @@ impl HostHalf {
         host_core::SessionControlProvider::resource_report(
             &self.prepared.control_catalog,
             protocol::ControllerRetainedCapacity {
-                meter_handles: 0,
+                meters: 0,
                 counter_ids: 0,
             },
             0,
@@ -1764,8 +1764,9 @@ fn render_diagnostic_egress_reuses_eager_capi_storage_without_allocation() {
         required_bytes: 0,
     };
     let configuration = protocol::TelemetryConfiguration {
-        meter_handles: Vec::new(),
+        meters: Vec::new(),
         meter_period_blocks: 0,
+        meter_window_blocks: None,
         counter_ids: Vec::new(),
         counter_period_blocks: 0,
         diagnostics_enabled: true,

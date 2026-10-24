@@ -485,8 +485,12 @@ fn an_empty_session_boots_and_renders_silence_without_allocating() {
         // The render-peak meter of an empty mixer reads silence: configure it, render, and read
         // the batch the service step stages (the service step arms the peak scan before the blocks).
         let meter = protocol::TelemetryConfiguration {
-            meter_handles: vec![1],
+            meters: vec![protocol::MeterEntry {
+                target: protocol::MeterTarget::Output,
+                metric: protocol::MeterMetric::Peak,
+            }],
             meter_period_blocks: 1,
+            meter_window_blocks: None,
             counter_ids: Vec::new(),
             counter_period_blocks: 0,
             diagnostics_enabled: false,

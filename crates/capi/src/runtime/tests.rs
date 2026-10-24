@@ -3464,8 +3464,9 @@ fn all_five_event_families_cross_c_dequeue_with_exact_oracle_bytes() {
     let eager_capacities = crate::ffi::test_retained_capacities(c_session);
     let revision = SessionRevision(42);
     let configuration = protocol::TelemetryConfiguration {
-        meter_handles: vec![1],
+        meters: output_peak_table(1),
         meter_period_blocks: 1,
+        meter_window_blocks: None,
         counter_ids: Vec::new(),
         counter_period_blocks: 0,
         diagnostics_enabled: true,
@@ -3534,8 +3535,9 @@ fn all_five_event_families_cross_c_dequeue_with_exact_oracle_bytes() {
     );
 
     let quiet_meter_configuration = protocol::TelemetryConfiguration {
-        meter_handles: vec![1],
+        meters: output_peak_table(1),
         meter_period_blocks: 1,
+        meter_window_blocks: None,
         counter_ids: Vec::new(),
         counter_period_blocks: 0,
         diagnostics_enabled: false,
@@ -3555,8 +3557,9 @@ fn all_five_event_families_cross_c_dequeue_with_exact_oracle_bytes() {
         crate::RESULT_OK
     );
     let expanded_meter_configuration = protocol::TelemetryConfiguration {
-        meter_handles: vec![1, 2],
+        meters: output_peak_table(2),
         meter_period_blocks: 1,
+        meter_window_blocks: None,
         counter_ids: Vec::new(),
         counter_period_blocks: 0,
         diagnostics_enabled: false,
@@ -3592,8 +3595,9 @@ fn all_five_event_families_cross_c_dequeue_with_exact_oracle_bytes() {
     }
 
     let counter_configuration = protocol::TelemetryConfiguration {
-        meter_handles: Vec::new(),
+        meters: Vec::new(),
         meter_period_blocks: 0,
+        meter_window_blocks: None,
         counter_ids: vec![protocol::CounterId::TelemetryDropped],
         counter_period_blocks: 1,
         diagnostics_enabled: false,
@@ -3961,8 +3965,9 @@ fn capi_controller_dispatches_every_advertised_command_family() {
         protocol::MessageId::TransportSet
     );
     let telemetry = protocol::TelemetryConfiguration {
-        meter_handles: Vec::new(),
+        meters: Vec::new(),
         meter_period_blocks: 0,
+        meter_window_blocks: None,
         counter_ids: Vec::new(),
         counter_period_blocks: 0,
         diagnostics_enabled: false,
@@ -4911,8 +4916,9 @@ fn rebuild_command(request_id: u64, revision: u64, tag: u8) -> Vec<u8> {
 /// configured at the fixture's initial revision.
 fn meter_telemetry(request_id: u64, meter_handles: Vec<u32>) -> Vec<u8> {
     let configuration = protocol::TelemetryConfiguration {
-        meter_handles,
+        meters: output_peak_table(meter_handles.len()),
         meter_period_blocks: 1,
+        meter_window_blocks: None,
         counter_ids: Vec::new(),
         counter_period_blocks: 0,
         diagnostics_enabled: false,
@@ -4923,6 +4929,20 @@ fn meter_telemetry(request_id: u64, meter_handles: Vec<u32>) -> Vec<u8> {
         ExpectedRevision::Exact(SessionRevision(42)),
         protocol::CommandPayload::TelemetryConfigure(&configuration),
     )
+}
+
+/// T1 stand-in (#1583): a table of the output's peak, then strip peaks of the fixture's strips.
+fn output_peak_table(entries: usize) -> Vec<protocol::MeterEntry> {
+    (0..entries)
+        .map(|index| protocol::MeterEntry {
+            target: if index == 0 {
+                protocol::MeterTarget::Output
+            } else {
+                protocol::MeterTarget::Strip(format!("strip-{index}").into())
+            },
+            metric: protocol::MeterMetric::Peak,
+        })
+        .collect()
 }
 
 /// One 128-frame block of silence for `fixture-source` through the exported submit entry point.
@@ -5119,8 +5139,9 @@ pub(super) fn counter_telemetry_for(
     counter_period_blocks: u32,
 ) -> Vec<u8> {
     let configuration = protocol::TelemetryConfiguration {
-        meter_handles: Vec::new(),
+        meters: Vec::new(),
         meter_period_blocks: 0,
+        meter_window_blocks: None,
         counter_ids,
         counter_period_blocks,
         diagnostics_enabled: false,
@@ -5143,7 +5164,8 @@ fn counter_telemetry(
 ) -> Vec<u8> {
     let configuration = protocol::TelemetryConfiguration {
         meter_period_blocks: u32::from(!meters.is_empty()),
-        meter_handles: meters,
+        meters: output_peak_table(meters.len()),
+        meter_window_blocks: None,
         counter_ids,
         counter_period_blocks,
         diagnostics_enabled: false,
