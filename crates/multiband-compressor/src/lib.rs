@@ -961,6 +961,13 @@ struct Instance<L: Lane, const W: usize> {
     nonfinite: NonFiniteReport,
     /// Index 0 is the left channel, index 1 the right.
     sides: [Side<L, W>; 2],
+    /// Whether a collapsed block (`process_bank_mono`, past its shape guards) has run since the
+    /// last disengage copy ([`desymmetrize`](Self::desymmetrize)), which alone clears it (#1894).
+    /// While it is set the right side is frozen and stale, so
+    /// [`lanes_at_rest`](Self::lanes_at_rest) reads the left side alone and a skipped block
+    /// advances the left silence counter alone: the effect contract's collapsed-bank rule. A reset
+    /// leaves it alone.
+    collapsed: bool,
 }
 
 impl<L: Lane, const W: usize> Instance<L, W> {
@@ -980,6 +987,7 @@ impl<L: Lane, const W: usize> Instance<L, W> {
                 Side::new(left, metadata.sample_rate)?,
                 Side::new(right, metadata.sample_rate)?,
             ],
+            collapsed: false,
         })
     }
 
@@ -2076,17 +2084,29 @@ fn lanes_mask<L: Lane>(bits: u32) -> L::Mask {
 }
 
 impl<L: Lane, const W: usize> Instance<L, W> {
-    /// Both channels' [`Side::rest_lanes`].
+    /// Both channels' [`Side::rest_lanes`], or the left side's alone while
+    /// [`collapsed`](Self::collapsed) (#1894).
     fn lanes_at_rest(&self) -> u32 {
-        self.sides[0].rest_lanes() & self.sides[1].rest_lanes()
+        if self.collapsed {
+            self.sides[0].rest_lanes()
+        } else {
+            self.sides[0].rest_lanes() & self.sides[1].rest_lanes()
+        }
+    }
+
+    /// The sides a rendered `+0.0` block advances: the left alone while
+    /// [`collapsed`](Self::collapsed), both otherwise (#1894).
+    fn live_sides(&self) -> usize {
+        if self.collapsed { 1 } else { 2 }
     }
 
     /// Advances the silence counters of the lanes in `bits` over `frames` frames of `+0.0`, as a
     /// rendered block would: `min(run + frames, 2^24)`. A prepared bypass (a direct factory
     /// request's; a session bypass is the rack's shunt, #1340) freezes the counters with the
-    /// filter, so it advances nothing.
+    /// filter, so it advances nothing. A collapsed bank advances the left side alone, as its
+    /// rendered block would (#1894).
     fn advance_silence(&mut self, bits: u32, frames: usize) {
-        self.advance_silence_sides(bits, frames, 2);
+        self.advance_silence_sides(bits, frames, self.live_sides());
     }
 
     /// [`advance_silence`](Self::advance_silence) on the first `sides` sides: a collapsed block's
@@ -2150,6 +2170,7 @@ impl<L: Lane, const W: usize> Instance<L, W> {
         right.silence = left.silence;
         right.gain_db = left.gain_db;
         right.ramps = left.ramps;
+        self.collapsed = false;
     }
 
     /// [`PreparedNativeEffectBank::channels_agree`] (issue #1871): every word
@@ -2434,14 +2455,15 @@ impl<L: Lane, const W: usize> PreparedNativeEffectBank for PreparedMultibandComp
         self.instance.reset(kind);
     }
 
-    /// Issue #893: [`Side::rest_lanes`] on both channels.
+    /// Issue #893: [`Side::rest_lanes`] on both channels; the left side alone on a collapsed bank
+    /// (#1894).
     fn lanes_at_rest(&self) -> u32 {
         self.instance.lanes_at_rest()
     }
 
     /// Issue #893: the clocks are the two channels' silence counters and nothing else
-    /// ([`Side::rest_lanes`]). A masked lane takes `min(run + frames, 2^24)` on both channels,
-    /// which is what a rendered `+0.0` block leaves; a prepared bypass freezes the counters, so it
+    /// ([`Side::rest_lanes`]). A masked lane takes `min(run + frames, 2^24)` on both channels (on
+    /// the left alone on a collapsed bank, #1894), which is what a rendered `+0.0` block leaves; a prepared bypass freezes the counters, so it
     /// advances nothing. A rendered quiet block after which every lane is at rest earns
     /// `silent_fixed_point`, so a mask that covers the whole bank earns it too.
     fn advance_clocks(&mut self, lanes_mask: u32, frames: u32) {
@@ -2530,6 +2552,10 @@ impl<L: Lane, const W: usize> PreparedMultibandCompressorBank<L, W> {
         // facts that belong to this instance rather than to the block.
         if block.width != self.width || block.sidechain.is_some() {
             return report;
+        }
+        if MONO {
+            // From here until the disengage copy the right side is frozen and stale.
+            self.instance.collapsed = true;
         }
         // An automation span can start a ramp or move a word; the next settled quiet block
         // re-earns the claim.
