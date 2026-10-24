@@ -636,8 +636,8 @@ CONTROL_THREAD_EXEMPT: dict[str, str] = {
 # (`unhashed`), with the stage each renders. `kernel_arithmetic` skips a function with no `f32x4`
 # arithmetic as a helper, so a kernel that LLVM or a source change scalarises in full would leave
 # the K count with nothing red; rule 5 holds each entry present (exactly one function) and
-# vector-carrying. Measured on the 1.99.1 named twin of shipped module 47e9c699 (#877): these are
-# all the kernels rule 3 counts. A vanished entry is answered by a reviewed edit, with evidence
+# vector-carrying. Measured on the 1.99.1 named twin of shipped module 8e0e4e79 (main after
+# #1922 and #1925): these are all the kernels rule 3 counts. A vanished entry is answered by a reviewed edit, with evidence
 # that its arithmetic moved into a kernel this table or the roster still holds, never by
 # deleting the row silently (the INDIRECT_SITES policy). A counted kernel that is neither here
 # nor in `CONTROL_THREAD_EXEMPT` fails, so a change that adds a kernel adds its row.
@@ -664,11 +664,11 @@ RENDER_KERNELS: dict[str, str] = {
         "live bypass crossfade of a per-node insert",
     "_RINvMs8_NtCs_15effect_contract4liveNtB6_11BypassShunt14crossfade_bankNtNtCs_4wide6f32x4_5f32x4ECs_4rack":
         "live bypass crossfade of a banked console slot or insert",
-    "_RNvXs9_Cs_13parametric_eqINtB5_20PreparedParametricEqNtNtCs_4wide6f32x4_5f32x4Kj4_ENtCs_15effect_contract24PreparedNativeEffectBank12process_bankB5_":
+    "_RNvXsa_Cs_13parametric_eqINtB5_20PreparedParametricEqNtNtCs_4wide6f32x4_5f32x4Kj4_ENtCs_15effect_contract24PreparedNativeEffectBank12process_bankB5_":
         "parametric EQ bank, stereo body",
-    "_RNvXs9_Cs_13parametric_eqINtB5_20PreparedParametricEqNtNtCs_4wide6f32x4_5f32x4Kj4_ENtCs_15effect_contract24PreparedNativeEffectBank17process_bank_monoB5_":
+    "_RNvXsa_Cs_13parametric_eqINtB5_20PreparedParametricEqNtNtCs_4wide6f32x4_5f32x4Kj4_ENtCs_15effect_contract24PreparedNativeEffectBank17process_bank_monoB5_":
         "parametric EQ bank, mono-collapsed body",
-    "_RNvXs9_Cs_13parametric_eqINtB5_20PreparedParametricEqNtNtCs_4wide6f32x4_5f32x4Kj4_ENtCs_15effect_contract24PreparedNativeEffectBank14advance_clocksB5_":
+    "_RNvXsa_Cs_13parametric_eqINtB5_20PreparedParametricEqNtNtCs_4wide6f32x4_5f32x4Kj4_ENtCs_15effect_contract24PreparedNativeEffectBank14advance_clocksB5_":
         "parametric EQ ramp clocks on a skipped silent block",
     "_RNvMs1_Cs_13parametric_eqINtB5_7ChannelNtNtCs_4wide6f32x4_5f32x4Kj4_E10rest_lanesB5_":
         "parametric EQ rest test of the silence skip",
@@ -698,6 +698,16 @@ RENDER_KERNELS: dict[str, str] = {
         "transient shaper bank, stereo body",
     "_RNvXs5_Cs_16transient_shaperINtB5_27PreparedTransientShaperBankNtNtCs_4wide6f32x4_5f32x4Kj4_ENtCs_15effect_contract24PreparedNativeEffectBank17process_bank_monoB5_":
         "transient shaper bank, mono-collapsed body",
+    "_RNCINvMCs_8de_esserINtB5_7DeEsserNtNtCs_4wide6f32x4_5f32x4Kb0_E9run_blockKB1h_E0B5_":
+        "de-esser block body, stereo (`run_block::<false>`'s inner closure)",
+    "_RNCINvMCs_8de_esserINtB5_7DeEsserNtNtCs_4wide6f32x4_5f32x4Kb0_E9run_blockKb1_E0B5_":
+        "de-esser block body, mono-collapsed (`run_block::<true>`'s inner closure)",
+    "_RNvXs7_Cs_8de_esserINtB5_7DeEsserNtNtCs_4wide6f32x4_5f32x4Kb0_ENtCs_15effect_contract24PreparedNativeEffectBank12process_bank":
+        "de-esser bank, stereo entry",
+    "_RNvXs7_Cs_8de_esserINtB5_7DeEsserNtNtCs_4wide6f32x4_5f32x4Kb0_ENtCs_15effect_contract24PreparedNativeEffectBank17process_bank_mono":
+        "de-esser bank, mono-collapsed entry",
+    "_RNvXs7_Cs_8de_esserINtB5_7DeEsserNtNtCs_4wide6f32x4_5f32x4Kb0_ENtCs_15effect_contract24PreparedNativeEffectBank14advance_clocks":
+        "de-esser ramp clocks on a skipped silent block",
 }
 
 
