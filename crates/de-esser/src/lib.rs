@@ -714,12 +714,31 @@ impl<L: Lane, const CONNECTED: bool> DeEsser<L, CONNECTED> {
 
     /// Points every ramp of one lane and channel whose design moved at its new design (#1409: the
     /// clamped walk keeps every word between its start and its target).
+    ///
+    /// The three SVF words `c1, a2, a3` move as one triple: when any of their designs moves, all
+    /// three restart together from their current values, so every triple the kernel loads is a
+    /// convex combination of the current point and the new design, which is contractive
+    /// (`effect_runtime::svf::transition_norm` is convex in the words). Skipping a word whose
+    /// design bits did not move would leave it on its old schedule and the triple off that chord
+    /// (the #1372a finding: a one-ulp frequency nudge can keep `a2`'s bits and move `c1`'s or
+    /// `a3`'s).
     #[inline(never)]
     fn retarget(&mut self, channel: usize, lane: usize) {
         let designs = targets(&self.values[lane][channel], self.sample_rate);
         let mut words = lane_words(&self.state[channel], lane);
-        for (chunk, design) in words[7..].as_chunks_mut::<4>().0.iter_mut().zip(designs) {
-            if chunk[1].to_bits() == design.to_bits() {
+        let svf = C1..C1 + 3;
+        let svf_moved = svf
+            .clone()
+            .any(|ramp| words[7 + ramp * 4 + 1].to_bits() != designs[ramp].to_bits());
+        for (ramp, (chunk, design)) in words[7..]
+            .as_chunks_mut::<4>()
+            .0
+            .iter_mut()
+            .zip(designs)
+            .enumerate()
+        {
+            let restart = svf_moved && svf.contains(&ramp);
+            if !restart && chunk[1].to_bits() == design.to_bits() {
                 continue;
             }
             let mut ramp = LinearRamp {

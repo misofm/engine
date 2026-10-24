@@ -155,3 +155,10 @@ Evidence (48 kHz, this worktree):
   `console-evals` boot each catalog effect at every link mode and hear its bypass lifted).
 - Browser budgets unmoved (`check-browser-expected-resources.py`, `check-web-audioworklet.sh`
   boot high-water gate both green; no re-pin).
+- SVF chord fix (#1372a verifier finding): `retarget` skipped a ramp whose design bits did not
+  move, so a mid-ramp one-ulp frequency nudge that keeps `a2`'s bits left `a2` on its old schedule
+  while `c1` and `a3` restarted; off-chord triples are not contractive (spectral radius up to 1.36
+  at the extreme). When any SVF design word moves, the three words now restart together from
+  their current values, so every loaded triple is a convex combination of the current point and
+  the new design. `tests/svf_chord.rs` is red before the change (frame 33: fractions 1/64, 2/64,
+  1/64) and green after. Class A: the de-esser is not registered on main, so no shipped bit moves.
