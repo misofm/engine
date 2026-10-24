@@ -33,6 +33,20 @@ import { createDefaultHost, BrowserBootError } from "./default-host.ts";
 import { createBrowserControlListTransport, createBrowserLiveControls, createBrowserStripOrders } from "./live-controls.ts";
 import { readControlList, readControlState } from "../core/control-list.ts";
 import type { ControlList, ControlListFilter, ControlState } from "../core/control-list.ts";
+import { controlCallFailure, encodeRevisionProbe } from "../core/control-frame.ts";
+import { ProtocolClient, decodeProtocolEvent } from "../core/protocol-messages.ts";
+import type {
+  CommittedDocument,
+  CounterName,
+  CounterSnapshot,
+  DiagnosticsPage,
+  DiagnosticsQuery,
+  EngineCapabilities,
+  ProtocolEvent,
+  TelemetryConfiguration,
+  TransportRequest,
+  TransportSnapshot,
+} from "../core/protocol-messages.ts";
 import { createTrackResponse } from "./response.ts";
 import type { BrowserTrackResponse } from "./response.ts";
 import { createSpectrum } from "./response.ts";
@@ -241,6 +255,47 @@ export interface BrowserEngine<Context extends AudioContextLike = DefaultAudioCo
    */
   controlState(list: ControlList, options?: Pick<ControlListFilter, "pageLimit">): Promise<ControlState>;
   /**
+   * The core's capabilities (`CAPABILITIES_GET`, #1571 D3), posted to the host's `control` message.
+   * `supportedCommands` differs per host.
+   */
+  capabilities(): Promise<EngineCapabilities>;
+  /**
+   * The canonical committed session document and its revision (`SESSION_SNAPSHOT_GET` pages,
+   * #1571 D3), in pages the host's 16 KiB frame limit holds. A session that changes between pages
+   * starts the read again, at most three times.
+   */
+  committedDocument(): Promise<CommittedDocument>;
+  /** The transport's state and the sample it is effective at (`TRANSPORT_GET`). */
+  transport(): Promise<TransportSnapshot>;
+  /**
+   * Start or stop the transport (`TRANSPORT_SET`) at the committed revision, which a revision probe
+   * reads from the core first; resolves to the new state.
+   */
+  setTransport(request: TransportRequest): Promise<TransportSnapshot>;
+  /**
+   * Replace the telemetry configuration (`TELEMETRY_CONFIGURE`) at the committed revision; resolves
+   * to the configuration the core applied. The meters, counters and diagnostics it names arrive as
+   * `onEvent` events.
+   */
+  configureTelemetry(configuration: TelemetryConfiguration): Promise<TelemetryConfiguration>;
+  /** The named counters, or every counter the core serves when `ids` is absent (`COUNTERS_GET`). */
+  counters(ids?: readonly CounterName[]): Promise<CounterSnapshot>;
+  /** One page of the core's retained diagnostics (`DIAGNOSTICS_GET`); defaults `0n`, 64 and `"info"`. */
+  diagnostics(query?: DiagnosticsQuery): Promise<DiagnosticsPage>;
+  /**
+   * Subscribe to the protocol events, decoded (#1571 D4): `sessionCommitted`, `transportState`,
+   * `observationEnded`, `meterBatch`, `counterSnapshot` and `diagnostic`, in engine order. The
+   * events are the frames `host.onControlEvent` delivers, decoded with the headless engine's code.
+   * The worklet reads its events once per message it handles, and its lossy lane holds one event,
+   * so a reliable event (`sessionCommitted`, `transportState`, `observationEnded`) always arrives,
+   * while a block's lossy telemetry (`meterBatch`, `counterSnapshot`, `diagnostic`) can be replaced
+   * by a later block's before it is read. An event that arrives with no listener at all is dropped
+   * and counted in `host.discardedControlEvents`. A listener that throws, or a frame that does not
+   * decode, is reported asynchronously and does not stop the other listeners. Returns the
+   * unsubscribe function.
+   */
+  onEvent(listener: (event: ProtocolEvent) => void): () => void;
+  /**
    * Dispose the worklet host, then close its context. Safe to call more than once.
    *
    * Each step that can hang waits at most 10 s. A step that does not settle rejects `close()` with
@@ -249,6 +304,19 @@ export interface BrowserEngine<Context extends AudioContextLike = DefaultAudioCo
    * close is not run again: every later call returns the same promise.
    */
   close(): Promise<void>;
+}
+
+/**
+ * Report a listener's error outside the host's dispatch, as an event target does: `reportError`
+ * where the global has one, otherwise an uncaught throw from a microtask.
+ */
+function reportListenerError(error: unknown): void {
+  const report = (globalThis as { reportError?: (error: unknown) => void }).reportError;
+  queueMicrotask(typeof report === "function"
+    ? () => report.call(globalThis, error)
+    : () => {
+      throw error;
+    });
 }
 
 function documentBytes(document: CreateEngineOptions["document"]): Uint8Array<ArrayBuffer> {
@@ -1390,6 +1458,31 @@ export async function createEngine(options: CreateEngineOptions): Promise<Browse
         spectrumPending = false;
       }
     };
+    // The protocol calls (#1571 D2) share the host's one request-ID allocator, the transaction
+    // queue's. The host exposes the committed revision only in a reply, so `TRANSPORT_SET` and
+    // `TELEMETRY_CONFIGURE` read it with a revision probe, which also sees another sender's commit.
+    let protocol: Promise<ProtocolClient> | undefined;
+    const protocolClient = (): Promise<ProtocolClient> => {
+      if (protocol !== undefined) return protocol;
+      const created = (async () => {
+        const { send, requestIds } = await createBrowserControlListTransport(host);
+        return new ProtocolClient({
+          send,
+          requestIds,
+          committedRevision: async () => {
+            const reply = await host.control(encodeRevisionProbe(requestIds.next()));
+            if (reply.result !== 0) throw controlCallFailure(reply.result, reply.response);
+            return reply.revision;
+          },
+        });
+      })();
+      protocol = created;
+      // A failed queue probe is not remembered; the next call probes again.
+      created.catch(() => {
+        if (protocol === created) protocol = undefined;
+      });
+      return created;
+    };
     return Object.freeze({
       shape,
       context,
@@ -1411,6 +1504,28 @@ export async function createEngine(options: CreateEngineOptions): Promise<Browse
         readControlList(await createBrowserControlListTransport(host), filter),
       controlState: async (list: ControlList, options?: Pick<ControlListFilter, "pageLimit">) =>
         readControlState(await createBrowserControlListTransport(host), list, options),
+      capabilities: async () => (await protocolClient()).capabilities(),
+      committedDocument: async () => (await protocolClient()).committedDocument(),
+      transport: async () => (await protocolClient()).transport(),
+      setTransport: async (request: TransportRequest) => (await protocolClient()).setTransport(request),
+      configureTelemetry: async (configuration: TelemetryConfiguration) =>
+        (await protocolClient()).configureTelemetry(configuration),
+      counters: async (ids?: readonly CounterName[]) => (await protocolClient()).counters(ids),
+      diagnostics: async (query?: DiagnosticsQuery) => (await protocolClient()).diagnostics(query),
+      onEvent: (listener: (event: ProtocolEvent) => void) => {
+        if (typeof listener !== "function") {
+          throw new MisoUsageError("an event listener must be a function");
+        }
+        return host.onControlEvent((event) => {
+          // The host calls its listeners in turn from the port's message handler: a throw here
+          // would skip the listeners after this one, so it is reported outside the call instead.
+          try {
+            listener(decodeProtocolEvent(event.frame));
+          } catch (error: unknown) {
+            reportListenerError(error);
+          }
+        });
+      },
       close: () => {
         closed = true;
         measurementFeeds.close();
