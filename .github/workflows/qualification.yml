@@ -1022,6 +1022,11 @@ jobs:
           rustup target add --toolchain 1.97.1 wasm32-unknown-unknown armv7-linux-androideabi aarch64-apple-ios aarch64-linux-android
           sudo apt-get update
           sudo apt-get install -y ripgrep
+      # #1499: the shipped iOS and Android staticlibs are built with fat LTO by
+      # build-capi-release.sh, which judges each archive it builds; check-cross-targets.sh below
+      # builds both through it. This hermetic self-test proves the judge refuses a non-LTO archive.
+      - name: Fat-LTO C ABI release build gate self-test
+        run: bash scripts/build-capi-release.sh --self-test
       # Replaces check-parametric-eq-targets.sh's and check-builtins-targets.sh's cargo halves with
       # one script, one cached target dir per triple (WP-3 contract). The render-contract rg half
       # moved to lint.
