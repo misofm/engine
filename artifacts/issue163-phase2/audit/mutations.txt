@@ -1,0 +1,21 @@
+# Unfused multiply-add audit (issue #163 phase 2 step 2)
+
+f32 unit roundoff u = 2^-24 = 5.960464e-8
+mode = mutations, sweep frames = 200000, sustained frames = 1000000
+
+## Red mutations
+
+Each row perturbs one unfused site by exactly one representable step and re-runs the measurement the clean row bounds. Detection is by trajectory digest, which flips on a single perturbed bit anywhere in the run; the two bound columns show how far the perturbation moved the quoted maximum. RED means the mutation was detected.
+
+  mutation                      clean (dBFS) mutant (dBFS)    digest identity  verdict
+  F1 svf_step d1  +1 ulp             -123.09       -120.69   differs    holds  RED (detected)
+  F1 svf_step d2  +1 ulp             -123.09       -122.22   differs    holds  RED (detected)
+  F2 svf output mix +1 ulp           -123.09       -123.14   differs    holds  RED (detected)
+  F3 one_pole y'  +1 ulp             -162.56       -108.69   differs    holds  RED (detected)
+  F4 gain_mix_step +1 ulp            -144.49       -138.47   differs    holds  RED (detected)
+  F5 matrix row   +1 ulp             -138.47       -132.45   differs    holds  RED (detected)
+  F4 mix=0 identity broken           -144.49       -144.49   differs   broken  RED (detected)
+  F3 c=0 identity broken             -162.56       -162.56   differs   broken  RED (detected)
+
+  every mutation detected: yes
+
