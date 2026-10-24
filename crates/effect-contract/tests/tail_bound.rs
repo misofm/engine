@@ -320,6 +320,24 @@ fn max_states_a_composition_only_when_both_channels_state_one() {
     };
     assert_eq!(left_channel.max(right_channel), componentwise);
     assert_eq!(right_channel.max(left_channel), componentwise);
+    // A history-dependent rest on either side makes the combined rest one too (#1376 root option
+    // (a)): the larger values, but only a fixed point is claimed.
+    let fixed_channel = NodeTailBound {
+        rest: RestBound::FixedPoint(RestSamples {
+            peak_plus_24_dbfs: 25,
+            any_sanitized_input: 60,
+        }),
+        ..right_channel
+    };
+    let fixed = NodeTailBound {
+        rest: RestBound::FixedPoint(RestSamples {
+            peak_plus_24_dbfs: 30,
+            any_sanitized_input: 60,
+        }),
+        ..componentwise
+    };
+    assert_eq!(left_channel.max(fixed_channel), fixed);
+    assert_eq!(fixed_channel.max(left_channel), fixed);
     // An infinite tail or an unstated rest on either side absorbs.
     assert_eq!(left.max(NodeTailBound::UNBOUNDED), NodeTailBound::UNBOUNDED);
     assert_eq!(NodeTailBound::UNBOUNDED.max(left), NodeTailBound::UNBOUNDED);

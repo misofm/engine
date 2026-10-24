@@ -1017,7 +1017,7 @@ mod metadata_mismatch_tests {
         ("rest", |m| {
             m.rest = match m.rest {
                 RestBound::Unstated => RestBound::Bounded(RestSamples::ZERO),
-                RestBound::Bounded(_) => RestBound::Unstated,
+                RestBound::Bounded(_) | RestBound::FixedPoint(_) => RestBound::Unstated,
             };
         }),
         ("composition", |m| {
