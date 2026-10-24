@@ -17,12 +17,29 @@
 //!
 //! Preparation allocates the instance and fixed control state only. `process` and `process_bank`
 //! touch no audio history, take no lock, make no syscall and call no platform libm.
+//!
+//! # Live attack, hold and release (#1336)
+//!
+//! All seven parameters are live block-rate values. Threshold, ratio, range and hysteresis ramp
+//! their value over 64 samples. Attack and release commit their time at once and ramp the one-pole
+//! coefficient instead: from the coefficient in effect `c0` to the design
+//! `c1 = 1 - exp(-1000 / (t fs))` (`effect_runtime::envelope::attack_release_coefficient`, the
+//! convention of Giannoulis, Massberg and Reiss, JAES 2012), `c[k] = ramp_toward(c[k-1],
+//! (c1 - c0) / 64, c1)` and `c[64] = c1` exactly, as the compressor's coefficient ramps do. The
+//! envelope `g[n] = flush(g[n-1] + c[n] (C[n] - g[n-1]))` is a one-pole with `0 < c < 2`, and every
+//! `c[k]` lies between the two designs, inside `[5.0e-6, 0.203]` over the launch domains and rates,
+//! so it is stable and never overshoots its target: a change makes no step a fixed design would not
+//! make. Hold is an integer count that moves no sample: a change takes effect at once and keeps
+//! the hold window's start (`PreparedGate::retime_hold`). A record costs at most two vendored
+//! `exp` calls on the block's control side; a coefficient ramp in flight costs two lane selects and
+//! adds per sample. The coefficient is a normal number, so its step is normal or zero, the envelope
+//! keeps its flush, and a non-finite gain still trips the lane-local D7 recovery. The state payload
+//! carries both coefficient ramps, so a ramp in flight crosses a plan swap bit-exactly.
 #![allow(missing_docs)]
 
 pub mod corpus;
 pub mod kernel;
 
-use effect_contract::control::{PreparedReason, RebuildReason};
 use effect_contract::{
     AutomationRate, BankProcessReport, BankWidth, EffectBankProcessBlock, EffectDescriptor,
     EffectPrepareError, EffectProcessBlock, EffectQuality, InitialParameterValue, LatencySamples,
@@ -45,12 +62,14 @@ use effect_runtime::ramp::LinearRamp;
 use effect_runtime::state_payload as payload;
 use lane::{Backend, Lane, Simd4};
 
-use kernel::{GateArgs, GateCoef, GateState, MAX_WIDTH, RAMP_COUNT, gate_block};
+use kernel::{GateArgs, GateCoef, GateState, MAX_WIDTH, RAMP_COUNT, RATE_COUNT, gate_block};
 
 const PARAMETER_COUNT: usize = 7;
 
-/// Effect-owned words at the front of each channel section of the state payload.
-const STATE_LANE_HEADER_WORDS: usize = 22;
+/// Effect-owned words at the front of each channel section of the state payload: gain, open flag,
+/// hold countdown, the three times, four parameter ramp quadruples and two rate ramp quadruples
+/// (#1336 D6).
+const STATE_LANE_HEADER_WORDS: usize = 30;
 
 /// Samples every smoothed parameter takes to reach a new target, from the descriptor.
 const RAMP_SAMPLES: u32 = 64;
@@ -136,13 +155,6 @@ const fn parameter(
     }
 }
 
-/// Why the attack, hold and release are prepared: decision 15 E2 makes them live and #1336 builds
-/// that, so the row is rebuild-only until then (decision 17, D1).
-const TIMING_REASON: Option<PreparedReason> = Some(PreparedReason {
-    reason: RebuildReason::RuledLiveNotBuilt { issue: 1336 },
-    reopen: "#1336 makes the gate's attack, hold and release live; its last step flips the row",
-});
-
 /// Frozen V1 gate/expander parameters. Descriptor position and stable numeric ID agree.
 pub const GATE_EXPANDER_PARAMETERS: [ParameterDescriptor; PARAMETER_COUNT] = [
     parameter(
@@ -201,57 +213,48 @@ pub const GATE_EXPANDER_PARAMETERS: [ParameterDescriptor; PARAMETER_COUNT] = [
         SmoothingRule::Linear,
         64,
     ),
-    ParameterDescriptor {
-        prepared_reason: TIMING_REASON,
-        ..parameter(
-            5,
-            "attack_ms",
-            "attack",
-            "ms",
-            ParameterUnit::Milliseconds,
-            0.1,
-            50.0,
-            1.0,
-            ParameterMapping::Logarithmic,
-            AutomationRate::None,
-            SmoothingRule::None,
-            0,
-        )
-    },
-    ParameterDescriptor {
-        prepared_reason: TIMING_REASON,
-        ..parameter(
-            6,
-            "hold_ms",
-            "hold",
-            "ms",
-            ParameterUnit::Milliseconds,
-            0.0,
-            1000.0,
-            100.0,
-            ParameterMapping::Linear,
-            AutomationRate::None,
-            SmoothingRule::None,
-            0,
-        )
-    },
-    ParameterDescriptor {
-        prepared_reason: TIMING_REASON,
-        ..parameter(
-            7,
-            "release_ms",
-            "release",
-            "ms",
-            ParameterUnit::Milliseconds,
-            5.0,
-            2000.0,
-            100.0,
-            ParameterMapping::Logarithmic,
-            AutomationRate::None,
-            SmoothingRule::None,
-            0,
-        )
-    },
+    parameter(
+        5,
+        "attack_ms",
+        "attack",
+        "ms",
+        ParameterUnit::Milliseconds,
+        0.1,
+        50.0,
+        1.0,
+        ParameterMapping::Logarithmic,
+        AutomationRate::Block,
+        SmoothingRule::Linear,
+        64,
+    ),
+    parameter(
+        6,
+        "hold_ms",
+        "hold",
+        "ms",
+        ParameterUnit::Milliseconds,
+        0.0,
+        1000.0,
+        100.0,
+        ParameterMapping::Linear,
+        AutomationRate::Block,
+        SmoothingRule::None,
+        0,
+    ),
+    parameter(
+        7,
+        "release_ms",
+        "release",
+        "ms",
+        ParameterUnit::Milliseconds,
+        5.0,
+        2000.0,
+        100.0,
+        ParameterMapping::Logarithmic,
+        AutomationRate::Block,
+        SmoothingRule::Linear,
+        64,
+    ),
 ];
 
 const PORTS: [PortDescriptor; 3] = [
@@ -275,7 +278,7 @@ const PORTS: [PortDescriptor; 3] = [
     },
 ];
 
-/// Causal quality resources: 22 words per channel, the common two-word codec header and no delay.
+/// Causal quality resources: 30 words per channel, the common two-word codec header and no delay.
 const fn quality(sample_rate: u32) -> effect_contract::QualityDescriptor {
     let per_lane = (STATE_LANE_HEADER_WORDS as u32) * 4;
     let common = payload::HEADER_WORDS * payload::WORD_BYTES as u32;
@@ -327,7 +330,9 @@ fn slowest_attack_rate(sample_rate: u32) -> f32 {
 /// the re-arm threshold (at least `-80 - 24` dB), so no reload happens: an open gate holds for at
 /// most its hold count, at most `rounded_samples(1000 ms)`, and then closes with `hold = +0.0`;
 /// a closed gate always has `hold = +0.0` (closing needs it, and only an opening reloads it). A
-/// ramp in flight at `M` settles within 64 samples, under every rate's longest hold. From then on
+/// ramp in flight at `M` settles within 64 samples, under every rate's longest hold; that includes
+/// an attack or release coefficient ramp (#1336), whose every word lies between two designs, both
+/// at or above the slowest rate's, so the walk bounds below still hold. From then on
 /// the target `t = min(max((ratio - 1)(-160 - threshold), -range), 0)` is one fixed word.
 ///
 /// Closed, the gain word walks toward `t` and stops on a word whose step rounds away. Two cases:
@@ -588,8 +593,6 @@ impl<L: Lane, const CONNECTED: bool> PreparedGate<L, CONNECTED> {
             bank_width,
             defaults,
             coef: [GateCoef {
-                attack: L::zero(),
-                release: L::zero(),
                 hold_samples: L::zero(),
                 bypass: L::splat(if metadata.bypass { 1.0 } else { 0.0 }),
                 link_max: L::splat(f32::from(u8::from(metadata.link_mode == LinkMode::Maximum))),
@@ -632,32 +635,28 @@ impl<L: Lane, const CONNECTED: bool> PreparedGate<L, CONNECTED> {
         lane_set(&mut self.state[channel].gain_db, lane, 0.0);
         lane_set(&mut self.state[channel].hysteresis.open, lane, OPEN_WORD);
         lane_set(&mut self.state[channel].hysteresis.hold, lane, hold);
-        for (index, ramp) in self.state[channel].ramps.iter_mut().enumerate() {
-            lane_set(&mut ramp.current, lane, values[index]);
-            lane_set(&mut ramp.target, lane, values[index]);
+        let rates = [
+            attack_release_coefficient(values[4], self.sample_rate),
+            attack_release_coefficient(values[6], self.sample_rate),
+        ];
+        let state = &mut self.state[channel];
+        let resting = values[..RAMP_COUNT].iter().chain(&rates);
+        for (ramp, &value) in state.ramps.iter_mut().chain(&mut state.rates).zip(resting) {
+            lane_set(&mut ramp.current, lane, value);
+            lane_set(&mut ramp.target, lane, value);
             lane_set(&mut ramp.step, lane, 0.0);
             lane_set(&mut ramp.remaining, lane, 0.0);
         }
         Some(())
     }
 
-    // REALTIME_POLICY_BEGIN: #1278 D3, a restore commit re-derives the timing coefficients.
-    /// Recomputes one lane's hold count and one-pole coefficients from its timing.
+    // REALTIME_POLICY_BEGIN: #1278 D3, a restore commit re-derives the hold count.
+    /// Recomputes one lane's hold count from its timing. The attack and release coefficients are
+    /// state (`GateState::rates`, #1336 D2): seeding designs them and a restore commits them as
+    /// written.
     fn rederive_lane(&mut self, channel: usize, lane: usize) -> Option<()> {
-        let timing = self.timing[lane][channel];
-        let sample_rate = self.sample_rate;
-        let hold = rounded_samples(timing.hold_ms, sample_rate)?;
+        let hold = rounded_samples(self.timing[lane][channel].hold_ms, self.sample_rate)?;
         lane_set(&mut self.coef[channel].hold_samples, lane, hold as f32);
-        lane_set(
-            &mut self.coef[channel].attack,
-            lane,
-            attack_release_coefficient(timing.attack_ms, sample_rate),
-        );
-        lane_set(
-            &mut self.coef[channel].release,
-            lane,
-            attack_release_coefficient(timing.release_ms, sample_rate),
-        );
         Some(())
     }
     // REALTIME_POLICY_END
@@ -676,7 +675,8 @@ impl<L: Lane, const CONNECTED: bool> PreparedGate<L, CONNECTED> {
         lane_set(&mut self.state[channel].gain_db, lane, 0.0);
         lane_set(&mut self.state[channel].hysteresis.open, lane, OPEN_WORD);
         lane_set(&mut self.state[channel].hysteresis.hold, lane, hold);
-        for ramp in &mut self.state[channel].ramps {
+        let state = &mut self.state[channel];
+        for ramp in state.ramps.iter_mut().chain(&mut state.rates) {
             let target = lane_get(ramp.target, lane);
             lane_set(&mut ramp.current, lane, target);
             lane_set(&mut ramp.step, lane, 0.0);
@@ -700,7 +700,9 @@ impl<L: Lane, const CONNECTED: bool> PreparedGate<L, CONNECTED> {
 
     /// Validates one block's automation spans for one lane and points its ramps at the accepted
     /// values. The division that D11 permits happens exactly here, in
-    /// `LinearRamp::set_target`.
+    /// `LinearRamp::set_target`. A time span (#1336) commits the time and retargets its
+    /// coefficient ramp ([`retime_rate`](Self::retime_rate)) or applies the hold rule
+    /// ([`retime_hold`](Self::retime_hold)).
     fn apply_automation(
         &mut self,
         spans: &[PreparedAutomationSpan],
@@ -708,7 +710,7 @@ impl<L: Lane, const CONNECTED: bool> PreparedGate<L, CONNECTED> {
         lane: usize,
         report: &mut ProcessReport,
     ) {
-        let mut pending = [[None; RAMP_COUNT]; 2];
+        let mut pending = [[None; PARAMETER_COUNT]; 2];
         let mut last_order = None;
         for (span_index, span) in spans.iter().enumerate() {
             let channel = match span.channel {
@@ -729,7 +731,7 @@ impl<L: Lane, const CONNECTED: bool> PreparedGate<L, CONNECTED> {
                 continue;
             };
             let valid = span_index < self.automation_capacity as usize
-                && parameter_index < RAMP_COUNT
+                && parameter_index < PARAMETER_COUNT
                 && span.sample == first_sample
                 && parameter_value_valid(&GATE_SPECS[parameter_index], span.value)
                 && last_order.is_none_or(|previous| order > previous)
@@ -744,6 +746,15 @@ impl<L: Lane, const CONNECTED: bool> PreparedGate<L, CONNECTED> {
         for (channel, targets) in pending.iter().enumerate() {
             for (index, target) in targets.iter().enumerate() {
                 let Some(value) = *target else { continue };
+                match index {
+                    4 => self.retime_rate(channel, lane, 0, value),
+                    5 => self.retime_hold(channel, lane, value),
+                    6 => self.retime_rate(channel, lane, 1, value),
+                    _ => {}
+                }
+                if index >= RAMP_COUNT {
+                    continue;
+                }
                 let slot = &mut self.state[channel].ramps[index];
                 let mut ramp = LinearRamp {
                     current: lane_get(slot.current, lane),
@@ -759,6 +770,68 @@ impl<L: Lane, const CONNECTED: bool> PreparedGate<L, CONNECTED> {
                 self.ramp_frames_left = RAMP_SAMPLES;
             }
         }
+    }
+
+    /// Commits an attack (`slot` 0) or release (`slot` 1) time for one lane and channel and
+    /// retargets that lane's coefficient ramp (#1336 D2, D3).
+    ///
+    /// The time does not ramp: `timing` holds the committed time, and the coefficient moves from
+    /// the value in effect, `c0` (mid-ramp included), to the design `c1 = 1 - exp(-1000 / (t fs))`
+    /// in [`RAMP_SAMPLES`] samples, `c[k] = ramp_toward(c[k-1], (c1 - c0) / 64, c1)` and
+    /// `c[64] = c1` exactly. Every `c[k]` lies in `[min(c0, c1), max(c0, c1)]` (the #1409 clamp),
+    /// inside the launch interval `[RATE_MIN, RATE_MAX]`, so the one-pole stays stable and the
+    /// envelope never overshoots. Two vendored `math` exps per record, on the block's control
+    /// side, as the compressor pays (D9). Out of line so the scalar `exp` stays out of
+    /// `process_bank`.
+    #[inline(never)]
+    fn retime_rate(&mut self, channel: usize, lane: usize, slot: usize, milliseconds: f32) {
+        let timing = &mut self.timing[lane][channel];
+        if slot == 0 {
+            timing.attack_ms = milliseconds;
+        } else {
+            timing.release_ms = milliseconds;
+        }
+        let design = attack_release_coefficient(milliseconds, self.sample_rate);
+        let rate = &mut self.state[channel].rates[slot];
+        let mut ramp = LinearRamp {
+            current: lane_get(rate.current, lane),
+            target: lane_get(rate.target, lane),
+            step: lane_get(rate.step, lane),
+            remaining: lane_get(rate.remaining, lane) as u32,
+        };
+        ramp.set_target(design, RAMP_SAMPLES);
+        lane_set(&mut rate.current, lane, ramp.current);
+        lane_set(&mut rate.target, lane, ramp.target);
+        lane_set(&mut rate.step, lane, ramp.step);
+        lane_set(&mut rate.remaining, lane, ramp.remaining as f32);
+        self.ramp_frames_left = RAMP_SAMPLES;
+    }
+
+    /// Commits a hold time for one lane and channel (#1336 D4): the window keeps its start.
+    ///
+    /// With `H0` the hold count in effect, `H1 = rounded_samples(h, fs)` and `r` the countdown, an
+    /// open lane takes `r' = max(0, r + H1 - H0)`, the countdown its last reload would have left
+    /// had it used `H1` (so `r' <= H1`, as `r <= H0`), and a closed lane `r' = min(r, H1)`. The next
+    /// reload uses `H1`. Every value is an integer below `2^24`, so the `f32` words are exact. Hold
+    /// moves no sample value itself, so it takes effect at once, with no ramp: the release one-pole
+    /// already smooths the close it times.
+    fn retime_hold(&mut self, channel: usize, lane: usize, milliseconds: f32) {
+        // In the validated domain at a launch rate the count always exists.
+        let Some(next) = rounded_samples(milliseconds, self.sample_rate) else {
+            return;
+        };
+        self.timing[lane][channel].hold_ms = milliseconds;
+        let next = next as f32;
+        let previous = lane_get(self.coef[channel].hold_samples, lane);
+        let state = &mut self.state[channel];
+        let countdown = lane_get(state.hysteresis.hold, lane);
+        let countdown = if lane_get(state.hysteresis.open, lane) > 0.0 {
+            (countdown + next - previous).max(0.0)
+        } else {
+            countdown.min(next)
+        };
+        lane_set(&mut state.hysteresis.hold, lane, countdown);
+        lane_set(&mut self.coef[channel].hold_samples, lane, next);
     }
 
     /// Runs one block through the kernel and applies the D7 boundary policy.
@@ -948,6 +1021,13 @@ impl<L: Lane, const CONNECTED: bool> PreparedGate<L, CONNECTED> {
             payload::write_f32(bytes, word + 2, lane_get(ramp.step, lane));
             payload::write_f32(bytes, word + 3, lane_get(ramp.remaining, lane));
         }
+        for (index, rate) in state.rates.iter().enumerate() {
+            let word = STATE_RATE_WORD + index * 4;
+            payload::write_f32(bytes, word, lane_get(rate.current, lane));
+            payload::write_f32(bytes, word + 1, lane_get(rate.target, lane));
+            payload::write_f32(bytes, word + 2, lane_get(rate.step, lane));
+            payload::write_f32(bytes, word + 3, lane_get(rate.remaining, lane));
+        }
     }
 
     fn snapshot_lane(
@@ -1035,12 +1115,45 @@ impl<L: Lane, const CONNECTED: bool> PreparedGate<L, CONNECTED> {
             }
             *ramp = [current, target, step, remaining];
         }
+        // #1336 D6: each coefficient ramp is aimed at the design of its committed time, bit for
+        // bit, its path stays inside the launch interval, and a resting one is at its target.
+        let mut rates = [[0.0_f32; 4]; RATE_COUNT];
+        for (index, (rate, milliseconds)) in rates
+            .iter_mut()
+            .zip([timing.attack_ms, timing.release_ms])
+            .enumerate()
+        {
+            let word = STATE_RATE_WORD + index * 4;
+            let current = payload::read_f32(bytes, word);
+            let target = payload::read_f32(bytes, word + 1);
+            let step = payload::read_f32(bytes, word + 2);
+            let remaining = payload::read_f32(bytes, word + 3);
+            let design = attack_release_coefficient(milliseconds, self.sample_rate);
+            let valid = target.to_bits() == design.to_bits()
+                && integral_within(remaining, RAMP_SAMPLES as f32)
+                && (remaining != 0.0 || current.to_bits() == target.to_bits())
+                && payload::ramp_path_inside(
+                    LinearRamp {
+                        current,
+                        target,
+                        step,
+                        remaining: remaining as u32,
+                    },
+                    (RATE_MIN, RATE_MAX),
+                    RAMP_SAMPLES,
+                );
+            if !valid {
+                return Err(state_error("effect.state.parameter"));
+            }
+            *rate = [current, target, step, remaining];
+        }
         Ok(LaneRestore {
             gain_db: normalize_zero(gain_db),
             open,
             hold,
             timing,
             ramps,
+            rates,
         })
     }
 
@@ -1063,7 +1176,18 @@ impl<L: Lane, const CONNECTED: bool> PreparedGate<L, CONNECTED> {
             lane_set(&mut ramp.step, lane, parsed.ramps[index][2]);
             lane_set(&mut ramp.remaining, lane, parsed.ramps[index][3]);
         }
-        if parsed.ramps.iter().any(|ramp| ramp[3] != 0.0) {
+        for (index, rate) in self.state[channel].rates.iter_mut().enumerate() {
+            lane_set(&mut rate.current, lane, parsed.rates[index][0]);
+            lane_set(&mut rate.target, lane, parsed.rates[index][1]);
+            lane_set(&mut rate.step, lane, parsed.rates[index][2]);
+            lane_set(&mut rate.remaining, lane, parsed.rates[index][3]);
+        }
+        if parsed
+            .ramps
+            .iter()
+            .chain(&parsed.rates)
+            .any(|ramp| ramp[3] != 0.0)
+        {
             self.ramp_frames_left = self.ramp_frames_left.max(RAMP_SAMPLES);
         }
         Ok(())
@@ -1096,6 +1220,19 @@ impl<L: Lane, const CONNECTED: bool> PreparedGate<L, CONNECTED> {
 /// Word index of the first ramp quadruple in a channel section.
 const STATE_RAMP_WORD: usize = 6;
 
+/// Word index of the first coefficient ramp quadruple (attack, then release) in a channel section
+/// (#1336 D6).
+const STATE_RATE_WORD: usize = STATE_RAMP_WORD + RAMP_COUNT * 4;
+
+/// The launch interval of a one-pole rate coefficient (#1336 D3): every design over the attack
+/// and release domains at every launch rate lies inside it, and so does every word of a ramp
+/// between two designs. The extremes, measured over the domains: the 2000 ms release at 96 kHz,
+/// whose `f32` design `1 - expf(-1 / tau)` is `87 * 2^-24 = 5.1856e-6` (the exact value
+/// `5.2083e-6` rounds down onto the `2^-24` grid of `expf` in `[1/2, 1)`), and the 0.1 ms attack
+/// at 44.1 kHz, `0.2028858`.
+const RATE_MIN: f32 = 5.0e-6;
+const RATE_MAX: f32 = 0.203;
+
 /// One validated channel section, held on the stack until both channels have been accepted.
 struct LaneRestore {
     gain_db: f32,
@@ -1103,6 +1240,7 @@ struct LaneRestore {
     hold: f32,
     timing: LaneTiming,
     ramps: [[f32; 4]; RAMP_COUNT],
+    rates: [[f32; 4]; RATE_COUNT],
 }
 
 impl<const CONNECTED: bool> PreparedNativeEffect for PreparedGate<f32, CONNECTED> {
@@ -1573,7 +1711,7 @@ mod tests {
         for (index, descriptor) in GATE_EXPANDER_PARAMETERS.iter().enumerate() {
             assert_eq!(
                 descriptor.smoothing_samples,
-                if index < RAMP_COUNT { RAMP_SAMPLES } else { 0 },
+                if index == 5 { 0 } else { RAMP_SAMPLES },
                 "smoothing {index}"
             );
         }

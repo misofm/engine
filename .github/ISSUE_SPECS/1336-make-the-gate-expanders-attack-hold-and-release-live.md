@@ -201,3 +201,29 @@ the same track rendered alone.
 - *Carry live-controlled effect lanes across a plan swap* (#1280)
 
 **Decision 17 amendment (2026-10-13).** The three parameters carry `prepared_reason: RuledLiveNotBuilt { issue: 1336 }` (#1549). Last step of this issue: set their `automation_rate` to `Block`, remove the reason, and assert that their control rows are `Live`; the list, validator, classifier, both hosts and the SDK follow from the row, with no host or protocol code.
+
+## Attempt 1 record (2026-10-24)
+
+- **Scope-note corrections applied (root).** `channel_at_rest` refuses a lane whose rate ramp has
+  `remaining != 0`; restore commits the rate words as written; section 22 -> 30 words (88 -> 120
+  bytes per channel, total 184 -> 248, header data words 44 -> 60).
+- **D3/D6 interval corrected.** The `f32` design of the 2000 ms release at 96 kHz is
+  `87 * 2^-24 = 5.1856e-6`, below the spec's `5.2e-6` (the exact `5.2083e-6` rounds down onto the
+  `2^-24` grid of `expf`); measured over the domains at every launch rate, the designs span
+  `[5.1856e-6, 0.2028858]`. The payload interval is `[5.0e-6, 0.203]` (`RATE_MIN`, `RATE_MAX`).
+  The lane-swap test refused the engine's own payload with `5.2e-6`.
+- **Restore is stricter for rates:** a resting rate ramp must hold `current == target` by bits
+  (the engine never holds another resting word).
+- **Gate placement.** Gates 1 and 2: `tests/live_timing.rs`; gate 3:
+  `tests/oracle.rs::oracle_pcm_with_a_live_timing_change_within_derived_tolerance`; gate 5:
+  `tests/state.rs::a_coefficient_ramp_in_flight_survives_a_carry`. The reference is
+  `dsp_reference::reference_gate_expander_process_with_timing_change`.
+- **Paths outside the list, forced:** `crates/gate-expander/src/corpus.rs` and
+  `src/rest_tests.rs` build a `GateCoef`/`GateState` by hand (the spec's hazard);
+  `crates/dsp-reference/src/lib.rs` re-exports the new reference; `sdk/src/generated/controls.ts`
+  is regenerated output.
+- **No bit moved (PR evidence, not a committed test).** A scratch digest of 79 static scenarios
+  (every corpus case at f32/Simd4/native; per rate x link x 6 seeds: scalar renders in 37- and
+  128-frame blocks with parameter ramps, a restore, both resets, and a native bank with ramps)
+  is identical before and after.
+- **Listening pass (D11): not done** by the implementer; it needs a person.

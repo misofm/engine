@@ -45,9 +45,9 @@ fn descriptor_and_exact_zero_latency_resources_are_frozen() {
             TailSamples::Finite(0)
         );
         assert_eq!(quality.maximum_state.common_bytes, 8);
-        assert_eq!(quality.maximum_state.left_bytes, 88);
-        assert_eq!(quality.maximum_state.right_bytes, 88);
-        assert_eq!(quality.maximum_state.total(), Some(184));
+        assert_eq!(quality.maximum_state.left_bytes, 120);
+        assert_eq!(quality.maximum_state.right_bytes, 120);
+        assert_eq!(quality.maximum_state.total(), Some(248));
         assert_eq!(quality.scratch_fixed_bytes, 64);
         assert_eq!(quality.scratch_bytes_per_frame, 0);
     }
@@ -90,24 +90,24 @@ fn exact_state_and_scratch_caps_prepare_and_one_byte_below_rejects() {
             "scratch cap at {} Hz",
             quality.sample_rate
         );
-        assert_eq!(quality.maximum_state.total(), Some(184));
+        assert_eq!(quality.maximum_state.total(), Some(248));
     }
 }
 
 #[test]
-fn payload_header_is_version_one_and_forty_four_words_and_restore_is_transactional() {
+fn payload_header_is_version_one_and_sixty_words_and_restore_is_transactional() {
     let values = initial_values();
     let mut effect = prepare(request(&values));
     let (common, left, right) = snapshot(&effect);
     assert_eq!(common.len(), 8);
-    assert_eq!(left.len(), 88);
-    assert_eq!(right.len(), 88);
+    assert_eq!(left.len(), 120);
+    assert_eq!(right.len(), 120);
     assert_eq!(word(&common, 0), 1);
-    assert_eq!(word(&common, 1), 44);
+    assert_eq!(word(&common, 1), 60);
 
     let mut malformed = right.clone();
     let before = (common, left, right);
-    malformed[87] = 0x7f;
+    malformed[119] = 0x7f;
     let sizes = effect.metadata.state_sizes;
     let input = StatePayloadInput::new(&before.0, &before.1, &malformed, sizes).expect("sizes");
     assert!(

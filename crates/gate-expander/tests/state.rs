@@ -200,7 +200,7 @@ fn old_lengths_and_one_byte_short_payloads_reject_scalar_and_bank() {
                     .is_err(),
                 "old raw bank payload at {rate} Hz"
             );
-            assert_eq!(sizes.left_bytes, 88);
+            assert_eq!(sizes.left_bytes, 120);
         }
         let mut short_left = vec![0; sizes.left_bytes as usize - 1];
         let mut short_right = vec![0; sizes.right_bytes as usize];
@@ -234,7 +234,7 @@ fn malformed_final_right_word_leaves_both_channels_unchanged() {
     let before = snapshot(&effect);
     assert_ne!(word(&before.1, 0), 0, "rollback witness has live gain");
     let mut right = before.2.clone();
-    right[87] = 0xff;
+    right[119] = 0xff;
     let sizes = effect.metadata.state_sizes;
     let input = StatePayloadInput::new(&before.0, &before.1, &right, sizes).unwrap();
     assert!(
@@ -277,7 +277,7 @@ fn malformed_final_right_word_leaves_both_channels_unchanged() {
         .collect();
     assert!(state_before.iter().any(|payload| word(&payload.1, 0) != 0));
     let mut malformed_right = state_before[3].2.clone();
-    malformed_right[87] = 0xff;
+    malformed_right[119] = 0xff;
     let sizes = target.metadata.program_key.state_sizes;
     assert!(
         target
@@ -680,4 +680,91 @@ fn a_subnormal_gain_word_is_refused() {
         "effect.state.gain"
     );
     assert_eq!(snapshot(&effect), saved);
+}
+
+/// #1336 gate 5: an attack coefficient ramp snapshotted 10 frames in and restored into a fresh
+/// instance, at every launch rate, renders bit for bit as the lane that was never carried; a rate
+/// target one ulp off the design of its time word is refused and changes nothing.
+///
+/// Test value: a restore that re-derives the coefficient from the time (and so drops the ramp in
+/// flight), or that does not arm the ramping segment for a rate-only ramp, moves bits and turns it
+/// red; so does a restore that accepts a coefficient the time word does not design.
+#[test]
+fn a_coefficient_ramp_in_flight_survives_a_carry() {
+    const ATTACK_TARGET_WORD: usize = 23;
+    for rate in [44_100, 48_000, 88_200, 96_000] {
+        let values = active_values();
+        let mut donor = prepare(support::request_at_rate(&values, rate));
+        let spans = [
+            effect_contract::ParameterChannel::Left,
+            effect_contract::ParameterChannel::Right,
+        ]
+        .map(|channel| PreparedAutomationSpan {
+            channel,
+            parameter_index: 4,
+            sample: 0,
+            value: 50.0,
+        });
+        let mut left = noise(501, 10, 0.4);
+        let mut right = noise(502, 10, 0.4);
+        render_scalar_sidechain(&mut donor, &mut left, &mut right, None, 10, &spans, 0);
+        let saved = snapshot(&donor);
+        assert_eq!(
+            f32::from_le_bytes(saved.1[100..104].try_into().unwrap()),
+            54.0,
+            "{rate} Hz: 54 frames left"
+        );
+        let sizes = donor.metadata.state_sizes;
+        let mut carried = prepare(support::request_at_rate(&values, rate));
+        carried
+            .processor
+            .restore_state_payload(
+                STATE_LAYOUT_VERSION,
+                StatePayloadInput::new(&saved.0, &saved.1, &saved.2, sizes).expect("sizes"),
+            )
+            .expect("own snapshot");
+        let source = noise(503, 200, 0.4);
+        let (mut donor_left, mut donor_right) = (source.clone(), source.clone());
+        let (mut carried_left, mut carried_right) = (source.clone(), source);
+        render_scalar_sidechain(
+            &mut donor,
+            &mut donor_left,
+            &mut donor_right,
+            None,
+            64,
+            &[],
+            10,
+        );
+        render_scalar_sidechain(
+            &mut carried,
+            &mut carried_left,
+            &mut carried_right,
+            None,
+            64,
+            &[],
+            10,
+        );
+        assert_bits_eq(&carried_left, &donor_left, &format!("{rate} Hz left"));
+        assert_bits_eq(&carried_right, &donor_right, &format!("{rate} Hz right"));
+
+        let before = snapshot(&carried);
+        let at = ATTACK_TARGET_WORD * 4;
+        let mut off = saved.1.clone();
+        let target = f32::from_le_bytes(off[at..at + 4].try_into().unwrap());
+        off[at..at + 4].copy_from_slice(&target.next_up().to_le_bytes());
+        let input = StatePayloadInput::new(&saved.0, &off, &saved.2, sizes).expect("sizes");
+        assert_eq!(
+            carried
+                .processor
+                .restore_state_payload(STATE_LAYOUT_VERSION, input)
+                .expect_err("a target one ulp off its design")
+                .code,
+            "effect.state.parameter"
+        );
+        assert_eq!(
+            snapshot(&carried),
+            before,
+            "{rate} Hz: the refused restore changes nothing"
+        );
+    }
 }
