@@ -89,3 +89,10 @@ Work from this body. A test that greps source is refused; each new test answers 
 - Mutations (each alone, reverted): `render_lock_cfg_split.diff` -> native red `[0,0,0]`, wasm red `[0,0,0]`. Allocator predicate `all(target_family = "wasm", test)` -> wasm red `[0,0,0]`, native green. Drop the item's `cfg(feature)` -> the default build fails (`-D unreachable-pub`); dropping it on the `pub use` too -> the build succeeds, the digest moves (`11ca6398..`) and `check-web-audioworklet.sh` is red: unexpected export `miso_engine_web_v1_render_lock_probe`.
 - CI time: the probe build is cold in its own target directory, 27 s locally (32 cores). On CI the same cold module build (the identity job's rebuild step at the base run) took 40 s, plus about 5 s for the wasm target install: `artifact-gates` goes from about 1 m 45 s to about 2 m 30 s, so `timeout-minutes: 10` stays.
 - Not in scope, seen: `cargo clippy -p host-web --all-targets -- -D warnings` without `test-support` is red at base on `tests/control_parity.rs` `c_latency` (dead code); with `test-support` or `--all-features` it is clean.
+
+## Attempt 2 record (2026-10-24)
+
+- Root amendment to D3: the probe body is `drop(black_box(Box::new(inside)))`, so the optimizer cannot remove the alloc/free pair.
+- The probe features now go before `--target`, so the cargo line still ends `-p host-web` (the anchor `test-artifact-evidence-leak.sh` reads). The probe target directory is absolute when the output path is relative.
+- Native `[0, 2, 2]` and wasm `[0,2,2]` green again. The wasm proof ran with a relative output path from a cwd outside the repo.
+- Open: `scripts/test-test-support-ci.py` :20-24 pins the whole test-debug-a `--features` string, so it is red after the D3 CI edit. The fix is one line (add `host-web/render-lock-probe,` after `host-web/test-support,`), but that path is not authorized.

@@ -83,7 +83,7 @@ if [[ -n $named_dir && "$(cd "$named_dir" && pwd -P)" == "$(cd "$output_dir" && 
 fi
 
 if [[ $mode == probe ]]; then
-  simd_target=$output_dir/target
+  simd_target="$(cd "$output_dir" && pwd -P)/target"
   mkdir -- "$simd_target"
 else
   simd_target=$(mktemp -d)
@@ -129,7 +129,7 @@ remap="--remap-path-prefix=$cargo_home=/cargo --remap-path-prefix=$repo_root=/re
 (
   cd "$repo_root"
   CARGO_TARGET_DIR="$simd_target" RUSTFLAGS="-C target-feature=+simd128 $strip_flag $remap" \
-    cargo build --locked --release --target wasm32-unknown-unknown -p host-web ${features[@]+"${features[@]}"}
+    cargo build --locked --release ${features[@]+"${features[@]}"} --target wasm32-unknown-unknown -p host-web
 )
 
 if [[ $mode == probe ]]; then
