@@ -1416,9 +1416,9 @@ fn the_first_refresh_puts_a_render_changed_counter_in_the_next_snapshot() {
 }
 
 /// Issue #1521 gate 1: the session's `live_block_errors` mirror reaches `COUNTERS_GET` and a
-/// configured `COUNTER_SNAPSHOT`. A fresh session serves `LIVE_BLOCK_ERRORS` at 0; after five blocks, a store of 3 through the plan's own `queries` (D6's seam) is
-/// what the session reads, so the plan and the session share one mirror and the service step copies
-/// it. No valid plan reaches a counted error block, so the seam stands in for render's store.
+/// configured `COUNTER_SNAPSHOT`. A fresh session serves `LIVE_BLOCK_ERRORS` at 0; after five
+/// blocks, a store of 3 through the plan's own `queries` (D6's seam) is what the session reads, so
+/// the plan and the session share one mirror and the service step copies it. No valid plan reaches a counted error block, so the seam stands in for render's store.
 ///
 /// Test value: red if the service step never copies the mirror into the provider, copies another
 /// source (the render sequence 5 or the carry count 0 instead of 3), or the counter is missing
