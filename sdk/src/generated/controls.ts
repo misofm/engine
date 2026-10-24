@@ -2690,11 +2690,11 @@ export const CONTROLS = deepFreeze(
           "scope": "model",
           "family": "effect",
           "lanes": "perLane",
-          "class": "rebuildOnly",
-          "reason": "ruledLiveNotBuilt",
-          "reasonIssue": 1337,
-          "reopen": "#1337 makes a parametric EQ band's enabled and kind live; its last step flips the rows",
-          "automatable": false
+          "class": "live",
+          "reason": null,
+          "reasonIssue": null,
+          "reopen": null,
+          "automatable": true
         },
         {
           "control": 2,
@@ -2750,11 +2750,11 @@ export const CONTROLS = deepFreeze(
           "scope": "model",
           "family": "effect",
           "lanes": "perLane",
-          "class": "rebuildOnly",
-          "reason": "ruledLiveNotBuilt",
-          "reasonIssue": 1337,
-          "reopen": "#1337 makes a parametric EQ band's enabled and kind live; its last step flips the rows",
-          "automatable": false
+          "class": "live",
+          "reason": null,
+          "reasonIssue": null,
+          "reopen": null,
+          "automatable": true
         },
         {
           "control": 3,
@@ -2925,11 +2925,11 @@ export const CONTROLS = deepFreeze(
           "scope": "model",
           "family": "effect",
           "lanes": "perLane",
-          "class": "rebuildOnly",
-          "reason": "ruledLiveNotBuilt",
-          "reasonIssue": 1337,
-          "reopen": "#1337 makes a parametric EQ band's enabled and kind live; its last step flips the rows",
-          "automatable": false
+          "class": "live",
+          "reason": null,
+          "reasonIssue": null,
+          "reopen": null,
+          "automatable": true
         },
         {
           "control": 18,
@@ -2985,11 +2985,11 @@ export const CONTROLS = deepFreeze(
           "scope": "model",
           "family": "effect",
           "lanes": "perLane",
-          "class": "rebuildOnly",
-          "reason": "ruledLiveNotBuilt",
-          "reasonIssue": 1337,
-          "reopen": "#1337 makes a parametric EQ band's enabled and kind live; its last step flips the rows",
-          "automatable": false
+          "class": "live",
+          "reason": null,
+          "reasonIssue": null,
+          "reopen": null,
+          "automatable": true
         },
         {
           "control": 19,
@@ -3160,11 +3160,11 @@ export const CONTROLS = deepFreeze(
           "scope": "model",
           "family": "effect",
           "lanes": "perLane",
-          "class": "rebuildOnly",
-          "reason": "ruledLiveNotBuilt",
-          "reasonIssue": 1337,
-          "reopen": "#1337 makes a parametric EQ band's enabled and kind live; its last step flips the rows",
-          "automatable": false
+          "class": "live",
+          "reason": null,
+          "reasonIssue": null,
+          "reopen": null,
+          "automatable": true
         },
         {
           "control": 34,
@@ -3220,11 +3220,11 @@ export const CONTROLS = deepFreeze(
           "scope": "model",
           "family": "effect",
           "lanes": "perLane",
-          "class": "rebuildOnly",
-          "reason": "ruledLiveNotBuilt",
-          "reasonIssue": 1337,
-          "reopen": "#1337 makes a parametric EQ band's enabled and kind live; its last step flips the rows",
-          "automatable": false
+          "class": "live",
+          "reason": null,
+          "reasonIssue": null,
+          "reopen": null,
+          "automatable": true
         },
         {
           "control": 35,
@@ -3395,11 +3395,11 @@ export const CONTROLS = deepFreeze(
           "scope": "model",
           "family": "effect",
           "lanes": "perLane",
-          "class": "rebuildOnly",
-          "reason": "ruledLiveNotBuilt",
-          "reasonIssue": 1337,
-          "reopen": "#1337 makes a parametric EQ band's enabled and kind live; its last step flips the rows",
-          "automatable": false
+          "class": "live",
+          "reason": null,
+          "reasonIssue": null,
+          "reopen": null,
+          "automatable": true
         },
         {
           "control": 50,
@@ -3455,11 +3455,11 @@ export const CONTROLS = deepFreeze(
           "scope": "model",
           "family": "effect",
           "lanes": "perLane",
-          "class": "rebuildOnly",
-          "reason": "ruledLiveNotBuilt",
-          "reasonIssue": 1337,
-          "reopen": "#1337 makes a parametric EQ band's enabled and kind live; its last step flips the rows",
-          "automatable": false
+          "class": "live",
+          "reason": null,
+          "reasonIssue": null,
+          "reopen": null,
+          "automatable": true
         },
         {
           "control": 51,
