@@ -68,8 +68,14 @@ TEST_ROWS: dict[str, list[tuple[str, str, str, str, str]]] = {
 # `builtins-compiler`) and `lane` 1 (`kernels::builtins::lanes_below`'s flag fill, inlined into
 # `builtins-compiler`). The pre-link rows of `host-core` (4, the spectrum arrays) and `soft-clip`
 # (1, the test corpus) were code that LTO removes: no iPhone app links it.
+#
+# #1595 links host-core's spectrum analysis into the C ABI (`SPECTRUM_CAPTURE` analyzes a window
+# on the thread that calls `miso_engine_v1_submit_command`), so 5 of its floor and table fills
+# come back: `SpectrumAnalysis::new`, `SpectrumAnalysis::analyze_into` and
+# `SpectrumAnalyzer::analyze`. All are control-thread spectrum analysis, never render.
 IOS_MEMSET_CEILINGS: dict[str, tuple[str, int]] = {
     "builtins": ("1018", 4),
+    "host-core": ("1595", 5),
     "lane": ("1018", 1),
 }
 

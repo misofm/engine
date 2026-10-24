@@ -6,9 +6,9 @@
 //! analysis that smooths its stream.
 
 use host_core::{
-    PreparedSpectrumCaptures, SPECTRUM_WINDOW_FRAMES, SpectrumAnalysis, SpectrumAnalysisResult,
-    SpectrumChannels, SpectrumConfiguration, SpectrumHop, SpectrumPair, SpectrumService,
-    SpectrumSnapshot, SpectrumWindow,
+    PreparedSpectrumCaptures, SPECTRUM_BIN_COUNT, SPECTRUM_WINDOW_FRAMES, SpectrumAnalysis,
+    SpectrumAnalysisResult, SpectrumChannels, SpectrumConfiguration, SpectrumHop, SpectrumPair,
+    SpectrumService, SpectrumSnapshot, SpectrumWindow,
 };
 
 /// The bytes a session's spectrum monitor retains beside a plan's captures (#1594 R6, #1595 R7):
@@ -29,9 +29,22 @@ pub(crate) struct OneShot {
 }
 
 impl OneShot {
+    /// All zero: the slot is read only after a read has written all of it, and a zero fill
+    /// lowers to a plain `memset`, not the iOS `memset_pattern16` call a floor fill makes (#1018).
     fn boxed() -> Box<Self> {
         Box::new(Self {
-            result: SpectrumAnalysisResult::new(),
+            result: SpectrumAnalysisResult {
+                target_kind: 0,
+                channels: SpectrumChannels::Left,
+                sample_rate_hz: 0,
+                captured_sample: 0,
+                end_sample: 0,
+                token: 0,
+                source_underrun: false,
+                frequencies_hz: [0.0; SPECTRUM_BIN_COUNT],
+                left_dbfs: [0.0; SPECTRUM_BIN_COUNT],
+                right_dbfs: [0.0; SPECTRUM_BIN_COUNT],
+            },
             snapshot: SpectrumSnapshot {
                 window: SpectrumWindow {
                     left: [0.0; SPECTRUM_WINDOW_FRAMES],
