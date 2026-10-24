@@ -73,21 +73,10 @@ pub struct OutputPeakReader {
 }
 
 impl OutputPeakReader {
-    /// The oldest closed window, left in the queue.
-    #[must_use]
-    pub fn peek(&self) -> Option<&OutputPeakWindow> {
-        self.windows.peek(0)
-    }
-
-    /// Take the oldest closed window.
-    pub fn try_pop(&mut self) -> Option<OutputPeakWindow> {
-        self.windows.try_pop().ok()
-    }
-
-    /// How many closed windows the queue holds now.
-    #[must_use]
-    pub fn available(&self) -> usize {
-        self.windows.available_at_entry()
+    /// The queue of closed windows, oldest first. The reader's owner pops it where it reads the
+    /// windows, under its own drain bound (`available_at_entry`) when that is a render thread.
+    pub fn windows_mut(&mut self) -> &mut Consumer<OutputPeakWindow> {
+        &mut self.windows
     }
 
     /// How many closed windows render dropped because the queue was full: monotone, never reset.

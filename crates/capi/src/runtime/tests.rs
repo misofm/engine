@@ -807,7 +807,7 @@ fn a_c_abi_plan_keeps_its_strip_meters_and_meters_its_output_without_allocating(
     };
     let mut start = 128;
     for _ in 0..2 {
-        let measured = reader.try_pop().expect("a closed window");
+        let measured = reader.windows_mut().try_pop().expect("a closed window");
         assert_eq!(
             (measured.start_sample, measured.end_sample),
             (start, start + window)
@@ -817,7 +817,7 @@ fn a_c_abi_plan_keeps_its_strip_meters_and_meters_its_output_without_allocating(
         assert_eq!(measured.peak.map(f32::to_bits), peak.map(f32::to_bits));
         start += window;
     }
-    assert!(reader.try_pop().is_none());
+    assert!(reader.windows_mut().try_pop().is_err());
     crate::ffi::test_plan_destroy(plan);
     crate::ffi::test_session_destroy(session);
 }

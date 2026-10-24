@@ -354,7 +354,7 @@ fn output_windows_tile_and_peak_as_the_scalar_fold() {
             let first = block * quantum as u64;
             let [left, right] = output_block(first, quantum);
             observer.observe(&left, &right, first, first + quantum as u64);
-            while let Some(window) = reader.try_pop() {
+            while let Ok(window) = reader.windows_mut().try_pop() {
                 assert_eq!(window.start_sample, expected_start, "{quantum}: no gap");
                 let frames = window.end_sample - window.start_sample;
                 assert!(
@@ -399,7 +399,11 @@ fn an_inactive_output_gate_folds_nothing() {
     for _ in 0..4 {
         observe(&loud);
     }
-    assert_eq!(reader.available(), 0, "an inactive gate closes no window");
+    assert_eq!(
+        reader.windows_mut().available_at_entry(),
+        0,
+        "an inactive gate closes no window"
+    );
     // Activated mid-block: the block that straddles the activation sample is not observed.
     gate.activate(4 * QUANTUM + 1);
     observe(&loud);
@@ -411,12 +415,15 @@ fn an_inactive_output_gate_folds_nothing() {
     gate.activate(4 * QUANTUM + 1);
     observe(&quiet);
     observe(&quiet);
-    let window = reader.try_pop().expect("one window after reactivation");
+    let window = reader
+        .windows_mut()
+        .try_pop()
+        .expect("one window after reactivation");
     assert_eq!(
         (window.start_sample, window.end_sample, window.peak),
         (7 * QUANTUM, 9 * QUANTUM, [0.125, 0.125])
     );
-    assert!(reader.try_pop().is_none());
+    assert!(reader.windows_mut().try_pop().is_err());
 }
 
 /// #1581 gate 3. A full queue keeps the oldest windows, drops each newer one and counts it.
@@ -436,7 +443,7 @@ fn a_full_output_queue_drops_the_newest_window_and_counts_it() {
         observer.observe(&block, &block, index * QUANTUM, (index + 1) * QUANTUM);
     }
     assert_eq!(reader.dropped_windows(), 2);
-    let starts: Vec<u64> = core::iter::from_fn(|| reader.try_pop())
+    let starts: Vec<u64> = core::iter::from_fn(|| reader.windows_mut().try_pop().ok())
         .map(|window| window.start_sample)
         .collect();
     assert_eq!(
