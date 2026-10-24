@@ -220,14 +220,15 @@ impl ReferenceTruePeakLimiter {
     ///
     /// # Errors
     ///
-    /// [`ReferenceTruePeakLimiterError::InvalidInput`] if the rate or any parameter is outside the
-    /// frozen launch domain.
+    /// [`ReferenceTruePeakLimiterError::InvalidInput`] if the rate is not exactly 44 100, 48 000,
+    /// 88 200 or 96 000 Hz (owner ruling R5), or if any parameter is outside the frozen launch
+    /// domain.
     pub fn new(
         sample_rate_hz: f64,
         parameters: ReferenceTruePeakLimiterParameters,
     ) -> Result<Self, ReferenceTruePeakLimiterError> {
-        if !sample_rate_hz.is_finite()
-            || sample_rate_hz <= 0.0
+        if !matches!(sample_rate_hz as u32, 44_100 | 48_000 | 88_200 | 96_000)
+            || sample_rate_hz != f64::from(sample_rate_hz as u32)
             || !parameters.ceiling_db.is_finite()
             || !(-24.0..=0.0).contains(&parameters.ceiling_db)
             || !parameters.release_ms.is_finite()
@@ -238,9 +239,6 @@ impl ReferenceTruePeakLimiter {
             return Err(ReferenceTruePeakLimiterError::InvalidInput);
         }
         let n = (sample_rate_hz / 100.0) as usize;
-        if n == 0 {
-            return Err(ReferenceTruePeakLimiterError::InvalidInput);
-        }
         let latency = n + REFERENCE_FIR_ALIGNMENT;
         let ring_length = n + 1;
         let lookahead =
@@ -482,5 +480,14 @@ mod tests {
             ReferenceTruePeakLimiter::new(48_000.0, parameters(11.0)),
             Err(ReferenceTruePeakLimiterError::InvalidInput)
         ));
+        for rate in [1_000.0, 48_000.5, f64::MAX] {
+            assert!(matches!(
+                ReferenceTruePeakLimiter::new(rate, parameters(5.0)),
+                Err(ReferenceTruePeakLimiterError::InvalidInput)
+            ));
+        }
+        for rate in [44_100.0, 48_000.0, 88_200.0, 96_000.0] {
+            assert!(ReferenceTruePeakLimiter::new(rate, parameters(5.0)).is_ok());
+        }
     }
 }

@@ -16,4 +16,17 @@ A minimal constructor regression must prove typed refusal without panic at the d
 
 ## Evidence / authorization
 
-Finding supplied by worker B (requested GPT-6.1 Sol xhigh), independently checked by root Sol on2026-10-01 during #1141. No fix, runtime reproducer or implementation attempt is authorized by this finding record. A bounded Sol brief must freeze the rate-domain decision and gates before a later attempt. This is a correctness follow-up, not an owner API design question.
+Finding supplied by worker B (requested GPT-6.1 Sol xhigh), independently checked by root Sol on 2026-10-01 during #1141. No fix, runtime reproducer or implementation attempt is authorized by this finding record. A bounded Sol brief must freeze the rate-domain decision and gates before a later attempt. This is a correctness follow-up, not an owner API design question.
+
+## Decision record (attempt 1, 2026-10-24)
+
+- Rate domain (root decision, from the scope note): exactly 44 100, 48 000, 88 200 and 96 000 Hz
+  (owner ruling R5), checked in the same form as `dsp-reference/src/delay.rs`
+  (`matches!(rate as u32, ...)` and an integral-value check). Every caller uses these rates. The
+  module law already assumes `R <= 961`.
+- With the guard, `n` is 441..=960, so the `n == 0` branch was dead and was deleted. No checked
+  arithmetic was added (it would be dead). The law, coefficients, latency and ramp windows did not change.
+- Regression: `out_of_domain_construction_is_rejected` has rows `1_000.0` and `f64::MAX` (must be
+  `InvalidInput`) and one positive row for the four launch rates. No new test function.
+- Red on the reverted guard (debug): the `1_000.0` row panics in `clamp` (reversed bounds); with
+  only the `f64::MAX` row, `n + 6` panics with "attempt to add with overflow". Green with the fix.
