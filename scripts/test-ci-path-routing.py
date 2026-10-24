@@ -861,6 +861,30 @@ def test_generated_once_mutations(checker) -> None:
                      "          fi\n")
         mutation_fails(replaced_after(hermetic, owner + emptiness, emptiness + owner),
                        "#1429 emptiness check moved before the owner command")
+        # #1435 put the SDK qualify step in #1429's shape; GUARDED_OWNER_STEPS holds it the same way.
+        # Each deletion leaves the five SDK commands verbatim: red when the step loses pipefail,
+        # its private TMPDIR, its cleanup, the compile-cache opt-out, or the emptiness check.
+        sdk_step = "      - name: Qualify the SDK package against the shared artifact\n"
+        for line in (
+            "          set -o pipefail\n",
+            '          scratch="$(mktemp -d "$RUNNER_TEMP/sdk-qualify-tmp.XXXXXX")"\n',
+            "          trap 'rm -rf -- \"$scratch\"' EXIT\n",
+            '          export TMPDIR="$scratch"\n',
+            "          export NODE_DISABLE_COMPILE_CACHE=1\n",
+            "          leftover=\"$(find \"$scratch\" -mindepth 1 -maxdepth 1 -printf '%f\\n' "
+            "| LC_ALL=C sort)\"\n",
+            '          if [[ -n "$leftover" ]]; then\n',
+            "            exit 1\n",
+        ):
+            mutation_fails(replaced_after(sdk_step, line, ""), f"#1435 guard line deleted: {line!r}")
+        # Red when the SDK step swallows a failing SDK command; the sdk job owns no #1044 claim, so
+        # only the guarded-step mask check sees it.
+        sdk_first = "          bash scripts/check-sdk-generated.sh target/ci/qualification-artifacts\n"
+        mutation_fails(replaced_after(sdk_step, sdk_first, "          set +e\n" + sdk_first),
+                       "SDK qualify step masked by set +e")
+        # Red when the sdk job turns every failure of its guarded step into a pass.
+        mutation_fails(key_on_job("sdk", "continue-on-error: true"),
+                       "continue-on-error: true on the sdk job")
         # Issue #1434 D2: each construct keeps every owner command verbatim and lets a failing one
         # pass; red when an owner step swallows its own failure, which the presence check accepts.
         effect = ("      - name: Effect runtime dependency-boundary and fixture policy and mutation "

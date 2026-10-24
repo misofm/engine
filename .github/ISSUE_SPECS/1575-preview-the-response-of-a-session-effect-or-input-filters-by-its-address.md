@@ -33,7 +33,7 @@ Both hosts get it through `RESPONSE_GET`; nothing is prepared or kept between re
 - **Today's preparation path** (`prepare_response_preview`, `crates/host-core/src/response.rs:502`)
   starts from the descriptor defaults and applies overrides (`apply_overrides`, `:588`).
 - **#774 planned a retained catalog** of prepared bindings with handles and generations
-  (`.github/ISSUE_SPECS/774-bind-requested-session-responses-by-stable-target-ids-with-engine-owned-grids.md`).
+  (`f4e1f01c0:.github/ISSUE_SPECS/774-bind-requested-session-responses-by-stable-target-ids-with-engine-owned-grids.md`).
   It is paused and not on `main`.
 
 ## Decisions frozen for this slice
