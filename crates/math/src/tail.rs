@@ -118,6 +118,25 @@ pub const R_INV_NORM: f64 = 1.847_759_065_022_573_6;
 /// `kappa = ||R||_2 ||R^-1||_2 = 1 + sqrt(2)`, rounded up.
 const KAPPA: f64 = 2.414_213_562_373_095_5;
 
+/// A state norm's conversion constants (issue #1372): `from_words` bounds the norm of a state by
+/// its 2-norm, `to_words` the 2-norm (so every word's magnitude) by its norm, and `kappa` bounds
+/// their product. The `V`-norm's are [`V_CONVERSION`]; a [`hull::HullNorm`] states its own.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Conversion {
+    from_words: f64,
+    to_words: f64,
+    kappa: f64,
+}
+
+/// The `V`-norm's conversion constants, `||R||_2`, `||R^-1||_2` and `kappa`.
+const V_CONVERSION: Conversion = Conversion {
+    from_words: R_NORM,
+    to_words: R_INV_NORM,
+    kappa: KAPPA,
+};
+
+pub mod hull;
+
 /// The relative inflation applied to a computed constant, and to every step of a propagation, so
 /// that the `f64` rounding of that one evaluation cannot make it optimistic: `2^-30`, far above the
 /// few `f64` units of roundoff (`2^-53` each) one evaluation of a short, non-cancelling expression
@@ -341,6 +360,12 @@ pub fn word_box_norm(box_: [f64; 3]) -> f64 {
 /// (Amendment 2).
 #[must_use]
 pub fn state_rounding(words: [f64; 3], q: f64, beta: f64) -> (f64, f64) {
+    state_rounding_in(words, q, beta, &V_CONVERSION)
+}
+
+/// [`state_rounding`] in the norm whose conversion constants are `norm` (issue #1372): the same
+/// componentwise count, carried into that norm by its `from_words`, `to_words` and `kappa`.
+fn state_rounding_in(words: [f64; 3], q: f64, beta: f64, norm: &Conversion) -> (f64, f64) {
     let [c1, a2, a3] = words.map(f64::abs);
     let k = 1.0 + U;
     let gamma2 = 2.0 * U / (1.0 - 2.0 * U);
@@ -350,9 +375,10 @@ pub fn state_rounding(words: [f64; 3], q: f64, beta: f64) -> (f64, f64) {
         [2.0 * k * gamma2 * a2, 2.0 * k * gamma3 * a3],
     ];
     let input = [2.0 * k * gamma3 * a2, 2.0 * k * gamma3 * a3];
-    let mu_state = R_NORM * spectral_norm_bound(state, [[0.0; 2]; 2]) * R_INV_NORM + KAPPA * U * q;
-    let mu_input =
-        R_NORM * crate::sqrt(input[0] * input[0] + input[1] * input[1]) + KAPPA * U * beta;
+    let mu_state = norm.from_words * spectral_norm_bound(state, [[0.0; 2]; 2]) * norm.to_words
+        + norm.kappa * U * q;
+    let mu_input = norm.from_words * crate::sqrt(input[0] * input[0] + input[1] * input[1])
+        + norm.kappa * U * beta;
     (mu_state * SLACK, mu_input * SLACK)
 }
 
@@ -364,6 +390,11 @@ pub fn state_rounding(words: [f64; 3], q: f64, beta: f64) -> (f64, f64) {
 /// `gamma2 |m2 v2|` and `gamma3 |m0 x|`.
 #[must_use]
 pub fn output_rounding(words: &SvfWords) -> (f64, f64) {
+    output_rounding_in(words, &V_CONVERSION)
+}
+
+/// [`output_rounding`] in the norm whose conversion constants are `norm` (issue #1372).
+fn output_rounding_in(words: &SvfWords, norm: &Conversion) -> (f64, f64) {
     let (c1, a2, a3) = (words.c1.abs(), words.a2.abs(), words.a3.abs());
     let (one_c1, one_a3) = ((1.0 - words.c1).abs(), (1.0 - words.a3).abs());
     let (m0, m1, m2) = (words.m0.abs(), words.m1.abs(), words.m2.abs());
@@ -388,7 +419,7 @@ pub fn output_rounding(words: &SvfWords) -> (f64, f64) {
             + gamma3 * m1 * v1_magnitude[i]
             + gamma2 * m2 * v2_magnitude[i]
     });
-    let omega_state = crate::sqrt(w[0] * w[0] + w[1] * w[1]) * R_INV_NORM;
+    let omega_state = crate::sqrt(w[0] * w[0] + w[1] * w[1]) * norm.to_words;
     let omega_input = w[2] + gamma3 * m0;
     (omega_state * SLACK, omega_input * SLACK)
 }
@@ -475,7 +506,12 @@ impl FlushLaw {
     /// The `V`-norm of the largest per-step absolute perturbation of one section's state: the
     /// per-word flush (`< flush_eps` per word) plus the underflow allowance.
     fn per_step(&self) -> f64 {
-        R_NORM * core::f64::consts::SQRT_2 * (self.flush_eps + UNDERFLOW_PER_STEP) * SLACK
+        self.per_step_in(&V_CONVERSION)
+    }
+
+    /// [`Self::per_step`] in the norm whose conversion constants are `norm` (issue #1372).
+    fn per_step_in(&self, norm: &Conversion) -> f64 {
+        norm.from_words * core::f64::consts::SQRT_2 * (self.flush_eps + UNDERFLOW_PER_STEP) * SLACK
     }
 }
 
@@ -491,6 +527,10 @@ pub enum TailBoundError {
     Horizon,
     /// A caller's constant is not finite and non-negative ([`FirstSectionRow`]).
     Invalid,
+    /// A section's words can ramp toward the identity section ([`hull::HullSection`], issue
+    /// #1372): no hull bound is stated for it (`docs/derivations/1372-parametric-eq-tail-and-rest.md`,
+    /// "The identity is out of scope").
+    IdentityReachable,
 }
 
 /// A certified tail and exact-rest bound, in samples beyond latency (#1329 D1, D2, Amendment 3).
@@ -865,7 +905,8 @@ fn free_decay_frames(z0: f64, rho: f64, f: f64, limit: f64) -> Option<u64> {
 }
 
 /// Exact rest, section by section, from the kernel state bounds `z` at the input's end (frame
-/// `N`): returns `R`, the frames from `N` after which every section is at rest.
+/// `N`): returns `R`, the frames from `N` after which every section is at rest. `z` and the
+/// envelope are in the norm whose conversion constants are `norm`.
 ///
 /// The first `ramp_frames` frames use each section's `rho_ramp`, later frames `rho_settled`. A
 /// section `k` rests once its state bound, as per-word magnitudes (`||R^-1|| z_k`), is below
@@ -876,10 +917,11 @@ fn rest_frames(
     z: &[f64],
     law: &FlushLaw,
     ramp_frames: u64,
+    norm: &Conversion,
 ) -> Result<u64, TailBoundError> {
-    let f = law.per_step();
+    let f = law.per_step_in(norm);
     let k = sections.len();
-    let limit = law.rest_eps / R_INV_NORM;
+    let limit = law.rest_eps / norm.to_words;
     let ramp: Vec<f64> = sections.iter().map(|s| s.rho_ramp).collect();
     let settled: Vec<f64> = sections.iter().map(|s| s.rho_settled).collect();
     let mut state: Vec<f64> = z.iter().copied().chain([1.0]).collect();
@@ -3744,9 +3786,9 @@ fn fixed_cascade_walk(
                 })
                 .collect()
         };
-        let rest_star = rest_frames(&envelopes, &kernel_state(p_star), law, 0)?;
-        let rest_peak = rest_frames(&envelopes, &kernel_state(peaks[0]), law, 0)?;
-        let rest_any = rest_frames(&envelopes, &kernel_state(peaks[1]), law, 0)?;
+        let rest_star = rest_frames(&envelopes, &kernel_state(p_star), law, 0, &V_CONVERSION)?;
+        let rest_peak = rest_frames(&envelopes, &kernel_state(peaks[0]), law, 0, &V_CONVERSION)?;
+        let rest_any = rest_frames(&envelopes, &kernel_state(peaks[1]), law, 0, &V_CONVERSION)?;
 
         // #1465: the composition values (`docs/derivations/1379-graph-tail-composition.md`). Each
         // half's state is carried to `T` by powers of its step when its anchor is at or before
