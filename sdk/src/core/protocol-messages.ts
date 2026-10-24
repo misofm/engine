@@ -10,10 +10,10 @@ import {
   WIRE_U32,
   WIRE_U64,
   WIRE_U8,
-  WIRE_UTF8,
   commandFrame,
   concat,
-  decodeRefusalBody,
+  decodeProtocolDiagnostic,
+  decodeRefusalFields,
   decodeResponseEnvelope,
   encodeRevisionProbe,
   field,
@@ -500,14 +500,6 @@ function readBool(fields: readonly RawField[], id: number): boolean {
   return value === 1;
 }
 
-function readText(row: RawField): string {
-  try {
-    return DECODER.decode(row.value);
-  } catch {
-    throw malformed(`field ${row.id} is not UTF-8`);
-  }
-}
-
 function packed(row: RawField, width: 2 | 4): number[] {
   if (row.value.length % width !== 0) throw malformed(`field ${row.id} is not a packed list`);
   const view = new DataView(row.value.buffer, row.value.byteOffset, row.value.byteLength);
@@ -535,42 +527,6 @@ function nested(row: RawField): RawField[] {
   return nestedFields(row.value);
 }
 
-function decodePathSegment(row: RawField): DiagnosticPathSegment {
-  const fields = nested(row);
-  const tag = readU8(fields, 1);
-  const name = only(fields, 2, WIRE_UTF8);
-  const index = scalar(fields, 3, WIRE_U64, 8);
-  const stable = only(fields, 4, WIRE_UTF8);
-  if (tag === 1 && name !== undefined && index === undefined && stable === undefined) {
-    return Object.freeze({ kind: "field", field: readText(name) });
-  }
-  if (tag === 2 && name === undefined && index !== undefined && stable === undefined) {
-    return Object.freeze({ kind: "index", index: index.getBigUint64(0, true) });
-  }
-  if (tag === 3 && name === undefined && index === undefined && stable !== undefined) {
-    return Object.freeze({ kind: "stableId", stableId: readText(stable) });
-  }
-  throw malformed("a diagnostic path segment is invalid");
-}
-
-/** Decode one `Diagnostic` message, every field it carries. @internal */
-export function decodeProtocolDiagnostic(row: RawField): ProtocolDiagnostic {
-  const fields = nested(row);
-  const detail = only(fields, 4, WIRE_UTF8);
-  const operationIndex = scalar(fields, 5, WIRE_U32, 4);
-  const sampleTime = scalar(fields, 6, WIRE_U64, 8);
-  const providerSequence = scalar(fields, 7, WIRE_U64, 8);
-  return Object.freeze({
-    code: readText(need(fields, 1, WIRE_UTF8)),
-    severity: named(SEVERITY_NAMES, readU8(fields, 2), "severity"),
-    path: Object.freeze(fields.filter((candidate) => candidate.id === 3).map(decodePathSegment)),
-    ...(detail === undefined ? {} : { detail: readText(detail) }),
-    ...(operationIndex === undefined ? {} : { operationIndex: operationIndex.getUint32(0, true) }),
-    ...(sampleTime === undefined ? {} : { sampleTime: sampleTime.getBigUint64(0, true) }),
-    ...(providerSequence === undefined ? {} : { providerSequence: providerSequence.getBigUint64(0, true) }),
-  });
-}
-
 function decodeReply<T>(
   bytes: Uint8Array,
   message: number,
@@ -578,13 +534,13 @@ function decodeReply<T>(
 ): ProtocolReply<T> {
   const { requestId, status, revision, fields } = decodeResponseEnvelope(bytes, message);
   if (status === "ok") return Object.freeze({ ok: true, requestId, revision, value: body(fields) });
-  const { omittedDiagnostics, backpressure } = decodeRefusalBody(fields);
+  const { diagnostics, omittedDiagnostics, backpressure } = decodeRefusalFields(fields);
   return Object.freeze({
     ok: false,
     requestId,
     revision,
     status,
-    diagnostics: Object.freeze(fields.filter((row) => row.id === 1).map(decodeProtocolDiagnostic)),
+    diagnostics,
     omittedDiagnostics,
     ...(backpressure === undefined ? {} : { backpressure }),
   });

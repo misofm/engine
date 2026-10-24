@@ -199,7 +199,8 @@ browsers, both page modes). The issue closes only after b (decision 17, C13).
 - Counter names: the Rust fixture lists every `CounterId` the codec accepts (found by decoding, with
   an exhaustive name match), and the eval holds the SDK's `COUNTER_IDS` equal to it. No codegen
   asset exists for the protocol registry, and adding one needs a Rust tool outside this issue's
-  paths, so `generate.mjs` is not changed.
+  paths, so `generate.mjs` is not changed. Root ratified this replacement of D3's generated names
+  (fixture list plus eval equality) on 2026-10-24, after attempt 1's verification.
 - `committedDocument()` pages at `min(65,536, maximumFrameBytes - 104)` bytes, rounded down to 8:
   the browser host's frame limit is 16 KiB, so 65,536-byte pages cannot fit in one reply.
 - The headless engine reads events after every `render()` too (D4): the lossy lane holds one event,
@@ -215,3 +216,13 @@ browsers, both page modes). The issue closes only after b (decision 17, C13).
 (`capi.render.activity`), `meterBatch` and `counterSnapshot`. `diagnostics({ limit: 0 })` is
 refused by the core with status `malformed_frame` and code `protocol.failure`. `counters()` (all)
 returns the eight counters the core serves, not all sixteen IDs.
+
+**Tranche b note (root, 2026-10-24).** The browser drains events once per message, and its lossy
+lane holds one event, so a block's lossy telemetry can be replaced before it is read. b's browser
+row asserts that the reliable events arrive in order and decode correctly; it must not assert that
+every block's lossy events arrive. The headless engine's extra per-block service call (about 1.5 µs
+offline) is a weekly-pass item, not changed here.
+
+**One diagnostic decoder.** `decodeProtocolDiagnostic` in `control-frame.ts` is the SDK's one decoder
+of the `Diagnostic` message; `decodeRefusalFields` decodes each refusal diagnostic once, and the
+control refusal's `decodeRefusalBody` maps those values.

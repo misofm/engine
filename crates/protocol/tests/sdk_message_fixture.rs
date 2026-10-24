@@ -182,7 +182,7 @@ fn counter_ids() -> Vec<CounterId> {
         + 8;
     let codec = ProtocolCodec::default();
     let mut found = Vec::new();
-    for code in 0_u32..=1024 {
+    for code in 0..=u32::from(u16::MAX) {
         let mut frame = template.clone();
         frame[at..at + 4].copy_from_slice(&code.to_le_bytes());
         let mut ids = [0_u16; 64];

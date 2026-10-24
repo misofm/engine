@@ -401,8 +401,11 @@ export class OfflineEngine {
    * Subscribe to the protocol events of the engine's control plane (#1570b): `{ lane, frame }` for
    * each event, in arrival order, `lane` `0` for the reliable lane and `1` for the lossy lane. The
    * engine is read for events after every control frame, because a commit queues two and the next
-   * commit waits for them to be read; an event that arrives with no listener is dropped and counted
-   * in `discardedControlEvents`. A listener that throws never loses the reply of the frame that
+   * commit waits for them to be read, and after every `render()`, because a block queues its
+   * telemetry and the lossy lane holds one event. An event that arrives with no listener is dropped
+   * and counted in `discardedControlEvents` as it is read: with no listener, each block's lossy
+   * telemetry is dropped after that block, so a listener subscribed later does not receive the last
+   * block's lossy event. A listener that throws never loses the reply of the frame that
    * produced the event: the throw is counted in `controlListenerFailures` and reported
    * asynchronously. Returns the unsubscribe function.
    */

@@ -1419,8 +1419,10 @@ export class WasmBoundary {
    * Subscribe to the protocol events of the engine's control plane (#1570b): every listener gets
    * `{ lane, frame }` for each event the engine queued, in arrival order, where `lane` is `0` for the
    * reliable lane and `1` for the lossy lane and `frame` is the event frame the engine encoded,
-   * unchanged. Events are read after each control frame; one that arrives while no listener is
-   * subscribed is dropped and counted in `discardedControlEvents`. An event is not the ack of a
+   * unchanged. Events are read after each control frame and after each `render()`; one that arrives
+   * while no listener is subscribed is dropped and counted in `discardedControlEvents` as it is read.
+   * With no listener, each block's lossy telemetry is therefore dropped after that block, and a
+   * listener subscribed later does not receive the last block's lossy event. An event is not the ack of a
    * command (its reply is), so a drop changes no engine state. Returns the unsubscribe function.
    */
   onControlEvent(listener: (event: ControlEvent) => void): () => void {
