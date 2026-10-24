@@ -1698,7 +1698,8 @@ mod tests {
     }
     impl GraphRuntimeObserver for OrderedPostBankObserver {
         fn retained_bytes(&self) -> u64 {
-            effect_contract::retained::arc(&self.order) + effect_contract::retained::arc(&self.observed_post_bank_audio)
+            effect_contract::retained::arc(&self.order)
+                + effect_contract::retained::arc(&self.observed_post_bank_audio)
         }
 
         fn observe(
@@ -1726,7 +1727,8 @@ mod tests {
     }
     impl GraphRuntimeObserver for RepeatedOrderedPostBankObserver {
         fn retained_bytes(&self) -> u64 {
-            effect_contract::retained::arc(&self.order) + effect_contract::retained::arc(&self.observed_post_bank_audio)
+            effect_contract::retained::arc(&self.order)
+                + effect_contract::retained::arc(&self.observed_post_bank_audio)
         }
 
         fn observe(
@@ -5512,7 +5514,11 @@ mod tests {
     struct BitRecorder(BitSink);
     impl GraphRuntimeObserver for BitRecorder {
         fn retained_bytes(&self) -> u64 {
-            effect_contract::retained::arc(&self.0) + self.0.lock().map_or(0, |v| effect_contract::retained::vec(&v))
+            effect_contract::retained::arc(&self.0)
+                + self
+                    .0
+                    .lock()
+                    .map_or(0, |v| effect_contract::retained::vec(&v))
         }
 
         fn observe(
@@ -8978,7 +8984,9 @@ mod tests {
     }
     impl PreparedNativeEffectBank for CountedBank {
         fn retained_bytes(&self) -> u64 {
-            core::mem::size_of_val(&*self.inner) as u64 + self.inner.retained_bytes() + effect_contract::retained::arc(&self.live)
+            core::mem::size_of_val(&*self.inner) as u64
+                + self.inner.retained_bytes()
+                + effect_contract::retained::arc(&self.live)
         }
 
         fn reset(&mut self, kind: effect_contract::ResetKind) {
@@ -10588,7 +10596,8 @@ mod tests {
         }
         impl GraphRuntimeObserver for Order {
             fn retained_bytes(&self) -> u64 {
-                effect_contract::retained::arc(&self.sequence) + effect_contract::retained::arc(&self.first)
+                effect_contract::retained::arc(&self.sequence)
+                    + effect_contract::retained::arc(&self.first)
             }
 
             fn observe(

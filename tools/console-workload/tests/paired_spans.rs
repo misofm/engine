@@ -306,7 +306,10 @@ impl SharedBank {
 
 impl PreparedNativeEffectBank for SharedBank {
     fn retained_bytes(&self) -> u64 {
-        effect_contract::retained::arc(&self.0) + self.0.lock().map_or(0, |s| core::mem::size_of_val(&*s.bank) as u64 + s.bank.retained_bytes())
+        effect_contract::retained::arc(&self.0)
+            + self.0.lock().map_or(0, |s| {
+                core::mem::size_of_val(&*s.bank) as u64 + s.bank.retained_bytes()
+            })
     }
 
     fn reset(&mut self, kind: ResetKind) {

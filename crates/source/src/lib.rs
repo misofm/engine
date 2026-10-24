@@ -1774,7 +1774,7 @@ impl PcmSourceConsumer {
     /// The heap bytes this consumer retains (#1074), exclusive of itself: its three rings in
     /// full (the host's endpoints drop first), every transfer block it or its two block rings
     /// hold now (box and PCM), its seek-report record and its prime flag. Not the session's
-    /// published generation, which its set's driver charges once. A block the host's producer
+    /// published generation, which the session owns. A block the host's producer
     /// holds is the host's. Control thread only.
     pub(crate) fn retained_bytes(&self) -> u64 {
         use engine::realtime::retained::arc;
@@ -2660,8 +2660,8 @@ pub struct TimelineConsumer {
 
 impl TimelineConsumer {
     /// The heap bytes this timeline retains (#1074): its command ring and seek-report record in
-    /// full and its history. Not the session's published generation, which the set's driver
-    /// charges once. Control thread only.
+    /// full and its history. Not the session's published generation, which the session owns.
+    /// Control thread only.
     fn retained_bytes(&self) -> u64 {
         use engine::realtime::retained::slice;
         self.command_consumer
@@ -3203,10 +3203,11 @@ fn source_set_retained_resources(
 }
 
 impl GraphPreparedSourceSetDriver for SourceGraphSourceSetDriver {
-    /// The timeline, each source's consumer, the source and mapping tables with the mappings'
-    /// node IDs, and the session's published generation, once (#1074).
+    /// The timeline, each source's consumer, and the source and mapping tables with the
+    /// mappings' node IDs (#1074). Not the session's published generation: the session owns it
+    /// and outlives every plan (host-core's plan inventory holds and charges it).
     fn retained_bytes(&self) -> u64 {
-        use engine::realtime::retained::{arc, slice};
+        use engine::realtime::retained::slice;
         let sources = self
             .sources
             .iter()
@@ -3228,7 +3229,6 @@ impl GraphPreparedSourceSetDriver for SourceGraphSourceSetDriver {
             .retained_bytes()
             .saturating_add(sources)
             .saturating_add(mappings)
-            .saturating_add(arc::<AtomicU64>())
     }
     fn can_prepare_source_seek(&self, source_index: usize) -> bool {
         self.sources

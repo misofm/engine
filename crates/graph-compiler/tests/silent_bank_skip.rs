@@ -302,7 +302,11 @@ impl GraphRuntimeProcessor for Identity {
 struct Capture(Arc<Mutex<Vec<u32>>>);
 impl GraphRuntimeObserver for Capture {
     fn retained_bytes(&self) -> u64 {
-        effect_contract::retained::arc(&self.0) + self.0.lock().map_or(0, |v| effect_contract::retained::vec(&v))
+        effect_contract::retained::arc(&self.0)
+            + self
+                .0
+                .lock()
+                .map_or(0, |v| effect_contract::retained::vec(&v))
     }
 
     fn observe(&mut self, block: GraphObservationBlock<'_>) -> Result<(), RenderError> {

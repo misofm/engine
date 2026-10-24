@@ -64,3 +64,15 @@ Scope note `scratchpad/opt/scope/1074.md` (Fable, against main 9e99df434) govern
   row (`inventory_retained_bytes`) already charges it. It is charged once, there: the plan walk charges
   it zero and the capi oracle drops the inventory after the plan. Every other owner drops before the
   plan.
+- D15: the session's `PublishedGeneration` Arc that the source driver holds is held and charged by the
+  plan state inventory and outlives the plan; the driver's walk charges it zero (D14's rule).
+
+## Evidence (attempt 1)
+
+- Gate 1, `cargo test --locked -p capi --test resource_lifecycle` (x86-64, 8 lanes): 10 passed. Walked
+  == freed by drop, bytes: EQ nine-track 220,484 (meters 675, engine rows 443,361); soft-clip nine-track
+  184,051 (675, 406,251); browser identity 44,793 (77, 84,423); routed submix 140,033 (376, 269,988).
+- Root condition 2 (automation coverage): `fixtures/session/v1/builtins-automation.json` as a fifth
+  row holds the plan equality (96,771 == 96,771) but is red on a pre-existing host-core gap outside
+  this issue: the strip producer table retains 1,016 bytes against `strip_control_table_bytes` 936 on an
+  automated session. The row is not kept; it needs that host-core charge fixed first (successor).

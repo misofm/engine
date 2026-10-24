@@ -2889,7 +2889,9 @@ mod lane_swap_tests {
         }
 
         fn retained_bytes(&self) -> u64 {
-            self.defaults.as_ref().map_or(0, |d| d.iter().map(crate::retained::vec).sum())
+            self.defaults
+                .as_ref()
+                .map_or(0, |d| d.iter().map(crate::retained::vec).sum())
         }
 
         fn snapshot_track_state_payload(

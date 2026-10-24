@@ -7806,9 +7806,12 @@ impl<R> PreparedBuiltinsGraphArtifact<R> {
         meter_consumers: Vec<MeterConsumer>,
         automation_program: Option<Arc<automation::Program>>,
     ) -> PreparedBuiltinsGraphBound {
+        // No error path is left here: `bind` has consumed the artifact. Neither refusal can occur:
+        // `plan` is the graph plan `bind` just built (not `NotAGraphPlan`) and nothing has attached
+        // a program to it yet (not `AlreadyAttached`).
         if let Some(program) = automation_program {
             graph::attach_automation_program(&mut plan, program)
-                .expect("a freshly bound graph plan takes its one automation program");
+                .expect("a freshly bound graph plan is a graph plan with no program attached");
         }
         PreparedBuiltinsGraphBound {
             track_controls,
@@ -9002,7 +9005,12 @@ impl LaneFaderAutomation {
             .iter()
             .flatten()
             .map(AutomatedFaderCell::retained_bytes)
-            .chain(self.mute.iter().flatten().map(AutomatedMuteCell::retained_bytes))
+            .chain(
+                self.mute
+                    .iter()
+                    .flatten()
+                    .map(AutomatedMuteCell::retained_bytes),
+            )
             .sum()
     }
 }
@@ -9323,8 +9331,7 @@ struct LiveControlFaderProcessor {
 #[cfg(any(test, feature = "test-support"))]
 impl GraphRuntimeProcessor for LiveControlFaderProcessor {
     fn retained_bytes(&self) -> u64 {
-        self.control.retained_bytes()
-            + self.automation.as_deref().map_or(0, boxed_automation_bytes)
+        self.control.retained_bytes() + self.automation.as_deref().map_or(0, boxed_automation_bytes)
     }
 
     fn process(&mut self, block: GraphBindingBlock<'_>) -> Result<(), RenderError> {
@@ -10598,7 +10605,11 @@ mod tests {
 
     impl GraphRuntimeObserver for Capture {
         fn retained_bytes(&self) -> u64 {
-            effect_contract::retained::arc(&self.0) + self.0.lock().map_or(0, |v| effect_contract::retained::vec(&v))
+            effect_contract::retained::arc(&self.0)
+                + self
+                    .0
+                    .lock()
+                    .map_or(0, |v| effect_contract::retained::vec(&v))
         }
 
         fn observe(&mut self, block: GraphObservationBlock<'_>) -> Result<(), RenderError> {

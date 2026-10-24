@@ -248,7 +248,11 @@ impl GraphRuntimeProcessor for Identity {
 struct Capture(Arc<Mutex<Vec<u32>>>);
 impl GraphRuntimeObserver for Capture {
     fn retained_bytes(&self) -> u64 {
-        effect_contract::retained::arc(&self.0) + self.0.lock().map_or(0, |v| effect_contract::retained::vec(&v))
+        effect_contract::retained::arc(&self.0)
+            + self
+                .0
+                .lock()
+                .map_or(0, |v| effect_contract::retained::vec(&v))
     }
 
     fn observe(&mut self, block: GraphObservationBlock<'_>) -> Result<(), RenderError> {
@@ -863,7 +867,9 @@ struct CountRecoveries {
 }
 impl PreparedNativeEffect for CountRecoveries {
     fn retained_bytes(&self) -> u64 {
-        core::mem::size_of_val(&*self.inner) as u64 + self.inner.retained_bytes() + effect_contract::retained::arc(&self.recovered)
+        core::mem::size_of_val(&*self.inner) as u64
+            + self.inner.retained_bytes()
+            + effect_contract::retained::arc(&self.recovered)
     }
 
     fn reset(&mut self, kind: ResetKind) {
