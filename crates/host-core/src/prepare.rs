@@ -2895,6 +2895,27 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
     {
         return Err(graph_failure("host.route_control.attach"));
     }
+    // #1391 decision 1: the graph keys its six-word lanes on the stage before the fader and the
+    // model its live rows on `controls::route_rows_live`. The two must name the same routes: every
+    // live route that does not follow, in canonical route-ID order, and no other.
+    if six_word {
+        let mut expected: Vec<&str> = model
+            .routes
+            .iter()
+            .filter(|route| {
+                controls::route_rows_live(route) && !follows_automated_mute(model, route)
+            })
+            .map(|route| route.id.as_str())
+            .collect();
+        expected.sort_unstable();
+        if !graph_route_controls
+            .iter()
+            .map(|producer| &*producer.route_id)
+            .eq(expected)
+        {
+            return Err(graph_failure("host.route_control.attach"));
+        }
+    }
     let route_control_resources =
         graph::route_control_resources(&graph_route_controls, &follow_route_controls);
     // The producers in canonical route-ID order; a carried send's retarget is written through them.

@@ -194,3 +194,16 @@ its master already does not fold.
   (decision 14 rule 4).
 - **Swap carry.** `a_pre_fader_output_ramp_crosses_the_swap_on_every_width` (successor_swap) is red
   on a `join_routes` that keeps only routes into a submix (first difference at block 6).
+- **Lane set tied to the rows.** Preparation refuses with `host.route_control.attach` when the
+  six-word producers are not exactly the routes with `route_rows_live` that do not follow, in
+  route-ID order (scope note decision 1). Control thread only; it allocates one ID list.
+- **Paths outside the scope note, all root-authorized (2026-10-24):**
+  `crates/controls/src/tables.rs`, `crates/controls/src/live_lanes.rs`,
+  `crates/controls/tests/tables.rs`, `crates/graph-compiler/src/compile.rs`,
+  `crates/graph-compiler/src/lib.rs`, `crates/graph-compiler/tests/live_routes.rs`,
+  `crates/graph-compiler/tests/tail_composition.rs`, `crates/host-core/tests/live_lanes.rs`,
+  `crates/host-core/tests/tail_composition.rs`, `crates/host-core/tests/successor_swap.rs`,
+  `tools/console-workload/src/lib.rs`, `tools/parameter-metadata/src/lib.rs`,
+  `tools/parameter-metadata/tests/round_trip.rs`,
+  `sdk/assets/miso-engine-v1-parameter-metadata.json`, `sdk/src/generated/controls.ts`,
+  `sdk/codegen/generate.mjs`, `sdk/test/control-builders-evals.mjs`.

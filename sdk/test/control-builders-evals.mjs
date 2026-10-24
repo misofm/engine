@@ -29,7 +29,10 @@ const TABLES = {
 };
 
 function derived(row) {
-  const classes = row.class !== undefined ? [row.class] : [row.intoSubmix.class, row.intoOutput.class];
+  const classes =
+    row.class !== undefined
+      ? [row.class]
+      : [row.intoSubmix.class, row.intoOutputBeforeFader.class, row.intoOutput.class];
   return classes.every((rowClass) => rowClass === "derived");
 }
 
