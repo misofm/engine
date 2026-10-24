@@ -532,18 +532,18 @@ record, on the one coefficient) ramps over the polarity record's length; with th
 
 **Method.** For each launch effect (every one has a shunt: the delay since #1339 and the multiband
 compressor since #1340, `effect_compiler::EffectPreparedEntry::initial_bypass`; both measured by
-#1830), the effect's own scalar instance renders the material from its first frame (wet), and the engine's `BypassShunt` gives the
-latency-matched dry signal. The switch lands at the materials' event blocks and is emulated with
-#1341's law: `out = dry + (wet - dry) * m(k)`, `m` word 0 of an `IndexedRamp`, frame `f` of the
-applying block at `k = f + 1`, one `f32` subtract, multiply and add, both ends exact copies; 0 ms is
-today's whole-block step. A constant gain moves nothing, so the click is the splatter of
-`m (wet - dry)`; OOB, CTR and HF splatter are read on it, relative to the dry programme
-(`src/live_rows.rs`). `mute-reference` rows crossfade the programme to silence under the same
-measure. They reproduce `mute_click.csv` (bypass against its mute rows, unbypass against its unmute
-rows) within 0.01 dB on splatter and HF splatter, and within 0.20 dB on OOB (48 kHz, bass, unbypass,
-20 ms: -83.39 against -83.19 dB), 0.09 dB on worst OOB and 0.12 dB on CTR: above the edge
-`mute_click.csv` reads the output `y`, which also holds the source's own floor and frame leakage,
-and these rows read the splatter `c`, which does not.
+#1830), the effect's own scalar instance renders the material from its first frame (wet), and the
+engine's `BypassShunt` gives the latency-matched dry signal. The switch lands at the materials'
+event blocks and is emulated with #1341's law: `out = dry + (wet - dry) * m(k)`, `m` word 0 of an
+`IndexedRamp`, frame `f` of the applying block at `k = f + 1`, one `f32` subtract, multiply and add,
+both ends exact copies; 0 ms is today's whole-block step. A constant gain moves nothing, so the
+click is the splatter of `m (wet - dry)`; OOB, CTR and HF splatter are read on it, relative to the
+dry programme (`src/live_rows.rs`). `mute-reference` rows crossfade the programme to silence under
+the same measure. They reproduce `mute_click.csv` (bypass against its mute rows, unbypass against
+its unmute rows) within 0.01 dB on splatter and HF splatter, and within 0.20 dB on OOB (48 kHz,
+bass, unbypass, 20 ms: -83.39 against -83.19 dB), 0.09 dB on worst OOB and 0.12 dB on CTR: above the
+edge `mute_click.csv` reads the output `y`, which also holds the source's own floor and frame
+leakage, and these rows read the splatter `c`, which does not.
 
 **Representative settings** (calibrated per material and rate; values in the CSV's `setting`):
 compressor at its defaults (ratio 4, knee 6 dB, attack 10 ms, release 100 ms, no makeup), threshold
@@ -608,19 +608,19 @@ transient shaper's kick switches fall in the body, after its attack boost has de
 
 **Answer.** `muteMs` is the right key and 10 ms the right default. A bypass toggle is a switch
 between two latency-matched versions of one programme, and its crossfade clicks like a mute of the
-same length scaled by the size of the change; every representative setting changes the programme
-by at most a mute's step (steps of -0.8 to -15 dB), so at 10 ms its click is at most a 10 ms mute's,
+same length scaled by the size of the change; every representative setting changes the programme by
+at most a mute's step (steps of -0.8 to -15 dB), so at 10 ms its click is at most a 10 ms mute's,
 the criterion that set `muteMs` (section 1). The one exception is the multiband on the mix, 1.5 to
 2.2 dB above the 10 ms mute's in HF splatter from its crossover all-pass and still under the 5 ms
-mute's (above); no ramp length removes a phase difference, so it does not move the key or the
-value. Over the four rates the 10 ms crossfade's click is 36.8-41.4 dB below today's step out of
-band on the bass and kick and 26.2-40.8 dB below it in the mix's HF splatter (48 kHz: 37.0-41.4 and
-27.9-40.8 dB; the lowest, 26.2 dB, is the transient shaper on the mix at 44.1 kHz). The transient shaper on the kick is apart: its switches fall in the body,
-where its step is -60.3 to -62.5 dB and today's click is already -105.7 to -107.3 dB out of band, so
-the crossfade lowers it by only 10.2-11.2 dB. A setting that changes the level by more than a mute
-does (an EQ boost above +6 dB, or large makeup gain) clicks more in proportion to its step, as a
-hand-switched bypass would, and the crossfade still removes the same 36.8-41.4 dB of today's step out
-of band.
+mute's (above); no ramp length removes a phase difference, so it does not move the key or the value.
+Over the four rates the 10 ms crossfade's click is 36.8-41.4 dB below today's step out of band on
+the bass and kick and 26.2-40.8 dB below it in the mix's HF splatter (48 kHz: 37.0-41.4 and
+27.9-40.8 dB; the lowest, 26.2 dB, is the transient shaper on the mix at 44.1 kHz). The transient
+shaper on the kick is apart: its switches fall in the body, where its step is -60.3 to -62.5 dB and
+today's click is already -105.7 to -107.3 dB out of band, so the crossfade lowers it by only
+10.2-11.2 dB. A setting that changes the level by more than a mute does (an EQ boost above +6 dB, or
+large makeup gain) clicks more in proportion to its step, as a hand-switched bypass would, and the
+crossfade still removes the same 36.8-41.4 dB of today's step out of band.
 
 ### 9.5 The detector link glide (question 6): `faderMs`, 20 ms
 
@@ -740,11 +740,12 @@ reran both commands at all four rates. The repair moves nothing: `bypass_crossfa
 committed ones, and the six older effects' bypass rows are unchanged beside the two new ones. Three
 files have moved since they were committed, and are not refolded here: `fader_drag.csv` (45 of 432
 rows), `pan_drag.csv` (21 of 144) and `law_transfer.csv` (31 of 484, both drag cases). Every moved
-row is a 30 or 60 Hz drag with a ramp of 10 ms or more, where the hand retargets a running ramp;
-the largest change is 1.0 dB on one HF splatter cell (96 kHz kick, 800 ms at 30 Hz, 50 ms: -76.10
-to -77.10 dB), every other dB cell moves 0.14 dB or less and `law_transfer.csv`'s largest
-coefficient difference by 1.4e-5. A figure quoted from these files may differ in its last digit;
-no conclusion of sections 5 or 9.3 rests on a change that small. The new `live` output reproduces byte for byte over two four-rate runs.
+row is a 30 or 60 Hz drag with a ramp of 10 ms or more, where the hand retargets a running ramp; the
+largest change is 1.0 dB on one HF splatter cell (96 kHz kick, 800 ms at 30 Hz, 50 ms: -76.10 to
+-77.10 dB), every other dB cell moves 0.14 dB or less and `law_transfer.csv`'s largest coefficient
+difference by 1.4e-5. A figure quoted from these files may differ in its last digit; no conclusion
+of sections 5 or 9.3 rests on a change that small. The new `live` output reproduces byte for byte
+over two four-rate runs.
 
 Not verified:
 

@@ -32,3 +32,8 @@ Add the delay's live bypass to the harness's live rows and run it once. Record t
 - Gate 1, multiband: below on every measure but the mix's HF splatter, where it is +0.82 to +2.33 dB above at 2-20 ms (48 kHz, 10 ms: +1.72 dB; 0 ms: 4.6-6.3 dB under). Reason: the crossover's all-pass is in antiphase with the input at 1 kHz, so `wet - dry` there is up to twice the programme. A one-off 48 kHz run with both ratios at 1 (the all-pass alone, not committed) gives +2.30/+1.86/+2.18/+2.17 dB at 2/5/10/20 ms, at least the calibrated excess. At 10 ms the multiband's click stays 2.7-3.6 dB under the 5 ms mute's. Recorded in FINDINGS 9.4. Making the shunt's dry phase-match the all-pass would move rendered bits (class B) and is not done here.
 - `cargo test --release --offline` in `measure/`: 21 passed (the effects test now also checks the multiband calibration lands within 0.01 dB). A mutant reading the observation with the wrong sign turns it red.
 - Two four-rate `live` runs of the final harness are byte-identical (cmp), PR evidence only.
+
+## Verifier record (attempt 1: PASS, no blockers, no majors)
+
+- Limit: the calibration test drives a steady 220 Hz tone, so only one band compresses; it does not check that both bands receive the shared threshold. The CSV's `setting` column shows both overrides at one value.
+- The multiband's HF excess over the mute reference (crossover all-pass) goes to the owner as a class-B question; root files it as its own issue. Nothing here changes a rendered bit.
