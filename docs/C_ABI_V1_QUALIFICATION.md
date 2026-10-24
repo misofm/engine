@@ -271,6 +271,30 @@ seek publishes nothing; an accepted one publishes exactly one successor and appl
 waiting replacement; an anchored one publishes none) and the parity row
 `control_parity::a_plain_session_seek_declares_and_an_anchored_one_does_not_alike_on_both_hosts`.
 
+A host replaces the whole session with a document while it plays through
+`miso_engine_v1_submit_document_command(session, request, request_bytes, document,
+document_bytes, response)` (#1386), an in-place V1 amendment: one new exported symbol, announced by
+`MISO_ENGINE_V1_FEATURE_SESSION_REPLACE` (bit 11, 2048) in the capability report, whose feature
+mask grows to 4095; no struct, size or `ABI_VERSION` changes. It is `miso_engine_v1_submit_command`'s
+contract plus a document borrowed for the call only, under `compile_session`'s pointer-plus-length
+rule (a null `document` with a nonzero `document_bytes` is `INVALID_ARGUMENT`); both exports run one
+body into `control_plane::SessionState::command_with_document`, the one core path both hosts call,
+and `submit_command` passes no document. The `SESSION_REPLACE` frame (`0013`) names the document by
+its length and SHA-256; the control plane checks both, bounds it by the compile limits'
+`maximum_document_bytes` (never by the control frame), parses and compiles it as a boot would, and
+commits its diff as the one transaction it is (`docs/CONTROL_PROTOCOL_SEMANTICS.md`, "Session
+replace"). A document refusal is a non-OK reply frame with `RESULT_OK`. The library keeps nothing of
+the document. The frozen exported set is now 22 `miso_engine_v1_*` definitions; `abi_smoke.c`
+checks the bit against the queried mask and calls the symbol with a null session for
+`INVALID_ARGUMENT`, `header_smoke.cpp` pins the bit inside the mask and the signature, and
+`audit protocol` encodes one `SESSION_REPLACE` frame caller-buffer. The gates: `capi`
+`tests/session_replace.rs` (the export renders the blocks, reply and event of the equal
+`SESSION_TRANSACTION_APPLY` on a twin, for a rebuild, a live change and an identical document; a
+null document is refused and a retry through `submit_command` answers the cached reply; a document
+more than four times the 16 KiB frame commits, and a large live replace leaves exactly the live
+bytes the equal transaction leaves on a twin, so 0 bytes of the document stay) and the parity row
+`control_parity::a_session_replace_without_its_document_is_refused_alike_on_both_hosts`.
+
 The seek contract in the header (#1317, decision 15 D15-12) states, from the code, the source-read
 clock and its origin (0 at compile, one quantum per render call, continued by a swapped-in plan),
 the plain and the anchored seek, how to choose the anchor, held behaviour (queued PCM of the

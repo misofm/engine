@@ -7086,3 +7086,68 @@ fn the_automation_fixture_renders_alike_on_both_hosts_across_one_session_seek() 
         assert_eq!(b[plane..], c[plane..], "block {block}: right plane bits");
     }
 }
+
+/// #1386 gate 6 (the refusal row of part a): a `SESSION_REPLACE` frame sent with no document
+/// beside it, through the browser's `control_command` and the C ABI's `submit_command`, gets the
+/// same reply bytes on both hosts (the core's `session.replace.document_length`), and changes
+/// neither host's control rows, document or rendered blocks. The browser's document transport is
+/// #1697's.
+///
+/// Test value: red if either host runs replace code of its own (another reply, another code), or
+/// if a host commits anything for a frame whose document never came.
+#[test]
+fn a_session_replace_without_its_document_is_refused_alike_on_both_hosts() {
+    use sha2::{Digest, Sha256};
+    for rate in [44_100, 48_000] {
+        let model = model_at(rate);
+        let mut next = model.clone();
+        next.tracks[0].fader.left_db = -3.0;
+        let document = canonical_session_json(&next).expect("a valid document");
+        let mut browser = Rig::new(&model);
+        let mut c_abi = CAbi::new(&model);
+        same_blocks(&mut browser, &mut c_abi, 0..2, "before the replace");
+        let before_b = dump(|payload, expected| browser.command(payload, expected));
+        let before_c = dump(|payload, expected| c_abi.send(payload, expected));
+        assert_eq!(before_b, before_c);
+        // One request ID above both hosts' frontiers: the browser's encoder is advanced to it and
+        // the C ABI's allocator set to it, so both hosts see the same frame bytes and their later
+        // requests stay new.
+        let payload = || {
+            CommandPayload::SessionReplace(protocol::SessionReplaceRequest {
+                document_bytes: u32::try_from(document.len()).expect("length"),
+                document_sha256: Sha256::digest(document.as_bytes()).into(),
+            })
+        };
+        let expected = ExpectedRevision::Exact(SessionRevision(browser.revision));
+        let frame = loop {
+            let frame = browser.encode(payload(), expected);
+            let request = u64::from_le_bytes(frame[24..32].try_into().expect("request ID"));
+            if request > c_abi.request {
+                c_abi.request = request;
+                break frame;
+            }
+        };
+        let (b_code, b_reply) = browser.send_frame(&frame);
+        let (c_code, c_reply) = c_abi.send_raw(&frame);
+        assert_eq!(
+            (b_code, c_code),
+            (0, C_RESULT_OK),
+            "{rate} Hz: both entries answer"
+        );
+        assert_eq!(b_reply, c_reply, "{rate} Hz: the same reply bytes");
+        assert!(matches!(
+            decode_verdict(&c_reply),
+            Verdict::Refused { codes, .. } if codes == ["session.replace.document_length"]
+        ));
+        let after_b = dump(|payload, expected| browser.command(payload, expected));
+        assert_eq!(
+            after_b.1, before_b.1,
+            "{rate} Hz: the document is unchanged"
+        );
+        assert_eq!(
+            after_b,
+            dump(|payload, expected| c_abi.send(payload, expected))
+        );
+        same_blocks(&mut browser, &mut c_abi, 2..6, "after the refusal");
+    }
+}

@@ -321,7 +321,7 @@ impl Endpoint {
         let frame = self.next_frame;
         self.next_frame += u64::from(QUANTUM);
         let left: Vec<f32> = (0..QUANTUM)
-            .map(|i| ((frame + u64::from(i)) as f32 * 0.013).sin() * 0.5)
+            .map(|i| ((frame + u64::from(i)) % 97) as f32 / 97.0 - 0.5)
             .collect();
         let right: Vec<f32> = left.iter().map(|sample| -sample * 0.75).collect();
         let planes = [left.as_ptr(), right.as_ptr()];

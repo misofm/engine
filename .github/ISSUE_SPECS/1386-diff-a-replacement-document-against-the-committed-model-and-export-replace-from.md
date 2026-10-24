@@ -635,10 +635,27 @@ still open.
 - **Re-pin.** `COMPLETE_SCHEMA_HASH` `5cab2cf3b4e4767f` -> `c85b2a0dff5d2a92`, 48 frames
   (`command.session_replace`, `response.session_replace` with `unchanged`, and `0x0013` in the
   capabilities response), in every spelling.
-- **Open for a2 (blocks merging a1 alone).** The C ABI endpoint is built by `compile_children`,
-  so it now advertises `0x0013`. Three tests in `crates/capi/src/runtime/tests.rs` pin the
-  capabilities reply bytes and fail until re-pinned:
-  `all_five_event_families_cross_c_dequeue_with_exact_oracle_bytes`,
-  `capi_controller_dispatches_every_advertised_command_family` and
-  `exported_c_replay_revision_event_and_publication_pressure_statuses_are_exact`. That file is on
-  neither tranche's path list; a2 needs it added. host-web's suite passes unchanged.
+- **C ABI capability pins (root-authorized for a2).** The C ABI endpoint is built by
+  `compile_children`, so it advertises `0x0013`; two capability-reply pins in
+  `crates/capi/src/runtime/tests.rs` move by exactly two bytes (field 25's length 0x16 -> 0x18 and
+  the ID in the former padding). The dispatcher test needs no `0x0013` row: it does not iterate
+  the advertised list.
+
+## Evidence and decisions, tranche a2 (attempt 1, 2026-10-24; root: a1 and a2 land as one PR)
+
+- `miso_engine_v1_submit_document_command` and `miso_engine_v1_submit_command` share one body
+  (`submit`) into `command_with_document`; `submit_command` passes no document. A null document
+  with a nonzero length is `INVALID_ARGUMENT`; the document's own bound is the control plane's
+  typed reply, so only the platform slice cap applies at the ABI.
+- `FEATURE_SESSION_REPLACE = 1 << 11`, mask 4095 (abi.rs, header, `abi_smoke.c`,
+  `header_smoke.cpp`); the export list in `check-capi-abi.sh` (22 symbols); one frame in
+  `audit protocol`.
+- `crates/capi/tests/session_replace.rs` holds the ABI rows only: twin-transaction parity (reply,
+  event and 8 rendered blocks each for a rebuild, a live change and an identical document), the
+  null document, the no-document retry through `submit_command`, and a 70 KiB-plus document
+  (four times the 16 KiB frame, 96 edits) whose large live replace leaves exactly the live bytes
+  (`bench_support::alloc` thread counters) of the equal transaction on a twin.
+- `hosts/host-web/tests/control_parity.rs` gains the gate-6 refusal row at 44.1 and 48 kHz.
+- Paths outside the listed a2 set, needed by the change: `crates/capi/Cargo.toml` (`sha2` as a
+  dev-dependency, for the frame digest in the test) and `crates/capi/tests/c/header_smoke.cpp`
+  (the bit and the signature, the header twin of `abi_smoke.c`).
