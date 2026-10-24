@@ -188,6 +188,17 @@ fn range((start, len): (u32, u32)) -> core::ops::Range<usize> {
 }
 // REALTIME_POLICY_END
 
+impl Program {
+    /// The heap this program retains, exclusive of itself (#1074): its three flat arrays, from
+    /// their lengths. Its owner charges the `Arc` that holds it. Control side.
+    #[must_use]
+    pub const fn retained_bytes(&self) -> u64 {
+        (size_of_val::<[Segment]>(&self.segments)
+            + size_of_val::<[i64]>(&self.discontinuities)
+            + size_of_val::<[CellRecord]>(&self.cells)) as u64
+    }
+}
+
 /// Builds a [`Program`] from cell descriptions.
 #[derive(Clone, Copy, Debug)]
 pub struct ProgramBuilder;

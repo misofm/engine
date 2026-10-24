@@ -2654,6 +2654,10 @@ impl FrozenSourceDriver {
 // REALTIME_POLICY_BEGIN
 // The five methods below run on the render thread: no allocation, lock, syscall or panic path.
 impl GraphPreparedSourceSetDriver for FrozenSourceDriver {
+    fn retained_bytes(&self) -> u64 {
+        effect_contract::retained::slice(&self.claims)
+    }
+
     fn claim_count(&self) -> usize {
         self.claims.len()
     }

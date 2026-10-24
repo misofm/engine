@@ -6097,6 +6097,15 @@ pub struct MeterAccumulator {
     producer: Producer<MeterSnapshot>,
 }
 
+impl MeterAccumulator {
+    /// The heap this meter retains, exclusive of itself (#1074): its snapshot ring, charged in
+    /// full although the host holds the other end. Every other field is inline. Control side.
+    #[must_use]
+    pub fn retained_bytes(&self) -> u64 {
+        self.producer.retained_bytes()
+    }
+}
+
 /// Where a meter's open window sits on the sample grid (#1327 D6): the first sample of the open
 /// window (`None` before the first observation), the frames it has already taken in, and the
 /// sequence number its snapshot will carry.

@@ -23,6 +23,10 @@ const SESSION: &str = include_str!("../../../fixtures/session/v1/parametric-eq-n
 /// A bound source that writes nothing: the binding's audio is not this file's concern.
 struct Silent;
 impl GraphRuntimeProcessor for Silent {
+    fn retained_bytes(&self) -> u64 {
+        0
+    }
+
     fn process(&mut self, _block: GraphBindingBlock<'_>) -> Result<(), RenderError> {
         Ok(())
     }

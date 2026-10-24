@@ -169,6 +169,10 @@ struct TrackSource {
     feed: Feed,
 }
 impl GraphRuntimeProcessor for TrackSource {
+    fn retained_bytes(&self) -> u64 {
+        0
+    }
+
     fn process(&mut self, block: GraphBindingBlock<'_>) -> Result<(), RenderError> {
         let frames = block.left.len().max(1) as u64;
         for (index, (left, right)) in block
@@ -231,6 +235,10 @@ impl GraphRuntimeProcessor for TrackSource {
 
 struct Identity;
 impl GraphRuntimeProcessor for Identity {
+    fn retained_bytes(&self) -> u64 {
+        0
+    }
+
     fn process(&mut self, _block: GraphBindingBlock<'_>) -> Result<(), RenderError> {
         Ok(())
     }
@@ -239,6 +247,14 @@ impl GraphRuntimeProcessor for Identity {
 /// Records every observed word, per node.
 struct Capture(Arc<Mutex<Vec<u32>>>);
 impl GraphRuntimeObserver for Capture {
+    fn retained_bytes(&self) -> u64 {
+        effect_contract::retained::arc(&self.0)
+            + self
+                .0
+                .lock()
+                .map_or(0, |v| effect_contract::retained::vec(&v))
+    }
+
     fn observe(&mut self, block: GraphObservationBlock<'_>) -> Result<(), RenderError> {
         let mut sink = self.0.lock().expect("capture");
         sink.extend(block.left.iter().map(|sample| sample.to_bits()));
@@ -850,6 +866,12 @@ struct CountRecoveries {
     recovered: Arc<AtomicU64>,
 }
 impl PreparedNativeEffect for CountRecoveries {
+    fn retained_bytes(&self) -> u64 {
+        core::mem::size_of_val(&*self.inner) as u64
+            + self.inner.retained_bytes()
+            + effect_contract::retained::arc(&self.recovered)
+    }
+
     fn reset(&mut self, kind: ResetKind) {
         self.inner.reset(kind);
     }
@@ -959,6 +981,10 @@ fn a_bypassed_delay_passes_its_dry_block_when_its_ring_trips() {
 /// A placeholder processor that lives only while [`CountRecoveries`] takes the real one.
 struct Inert;
 impl PreparedNativeEffect for Inert {
+    fn retained_bytes(&self) -> u64 {
+        0
+    }
+
     fn reset(&mut self, _kind: ResetKind) {}
     fn process(&mut self, _block: EffectProcessBlock<'_>) -> ProcessReport {
         ProcessReport::default()

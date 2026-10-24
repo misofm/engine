@@ -122,6 +122,52 @@ pub enum GraphPortKind {
     MainOutput = 2,
     SidechainInput = 3,
 }
+impl StableGraphId {
+    /// The heap bytes the ID's text retains, at its capacity (#1074).
+    #[must_use]
+    pub fn retained_bytes(&self) -> u64 {
+        u64::try_from(self.0.capacity()).unwrap_or(u64::MAX)
+    }
+}
+impl EffectNodeId {
+    /// The heap bytes the ID's two texts retain (#1074).
+    #[must_use]
+    pub fn retained_bytes(&self) -> u64 {
+        self.track_id
+            .retained_bytes()
+            .saturating_add(self.effect_id.retained_bytes())
+    }
+}
+impl GraphNodeId {
+    /// The heap bytes the ID retains (#1074): its texts, and a compensation delay's boxed edge.
+    #[must_use]
+    pub fn retained_bytes(&self) -> u64 {
+        match self {
+            Self::TrackStage { track_id: id, .. }
+            | Self::Route { route_id: id }
+            | Self::Submix { submix_id: id }
+            | Self::Output { output_id: id } => id.retained_bytes(),
+            Self::Effect(effect) => effect.retained_bytes(),
+            Self::CompensationDelay { edge_id } => engine::realtime::retained::boxed(&**edge_id)
+                .saturating_add(edge_id.retained_bytes()),
+        }
+    }
+}
+impl GraphEdgeId {
+    /// The heap bytes the ID retains (#1074): its texts, at capacity.
+    #[must_use]
+    pub fn retained_bytes(&self) -> u64 {
+        match self {
+            Self::TrackMain { target } => target.retained_bytes(),
+            Self::RouteSource { route_id } | Self::RouteDestination { route_id } => {
+                route_id.retained_bytes()
+            }
+            Self::EffectSidechain { effect, port } => effect
+                .retained_bytes()
+                .saturating_add(u64::try_from(port.capacity()).unwrap_or(u64::MAX)),
+        }
+    }
+}
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct GraphPortId {
     pub node: GraphNodeId,
@@ -1800,6 +1846,39 @@ impl GraphJumpLengthProducer {
     }
 }
 
+/// Why [`attach_automation_program`] refused.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum GraphAutomationProgramError {
+    /// The plan is not a graph plan.
+    NotAGraphPlan,
+    /// The plan holds its program already.
+    AlreadyAttached,
+}
+
+/// Give a bound graph plan a handle on the stored-automation program its stages and routes
+/// read (#1074), so [`PreparedRenderPlan::retained_bytes`] charges that one shared allocation
+/// once, at the plan: no per-stage or per-route clone charges it. Off the render thread, before
+/// publication; render never reads the handle.
+///
+/// # Errors
+///
+/// [`GraphAutomationProgramError::NotAGraphPlan`] for a plan another executor renders, and
+/// [`GraphAutomationProgramError::AlreadyAttached`] for a second call on one plan.
+pub fn attach_automation_program(
+    plan: &mut PreparedRenderPlan,
+    program: std::sync::Arc<automation::Program>,
+) -> Result<(), GraphAutomationProgramError> {
+    let executor = plan
+        .executor_any_mut()
+        .and_then(|any| any.downcast_mut::<GraphExecutor>())
+        .ok_or(GraphAutomationProgramError::NotAGraphPlan)?;
+    if executor.automation_program.is_some() {
+        return Err(GraphAutomationProgramError::AlreadyAttached);
+    }
+    executor.automation_program = Some(program);
+    Ok(())
+}
+
 /// Why [`attach_jump_lengths`] refused.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum GraphJumpLengthError {
@@ -2063,6 +2142,12 @@ pub type BuiltinProcessor = Box<dyn GraphPreparedBuiltinBankProcessor>;
 pub trait GraphPreparedBuiltinBankProcessor: Send + Any {
     fn as_any(&self) -> &dyn Any;
     fn into_any(self: Box<Self>) -> Box<dyn Any>;
+    /// The heap bytes this value retains (#1074), exclusive of the value itself: every `Box`,
+    /// `Vec`, `String` and `Arc` allocation reachable through its fields, a `Vec` or `String` at
+    /// its capacity, an `Arc`'s allocation in full whoever else holds it. Whoever boxes the value
+    /// adds `size_of_val` for the box. Computed from capacities on the control thread, never on
+    /// the render path. Required, so a new owner cannot under-report by default.
+    fn retained_bytes(&self) -> u64;
     /// This processor as mutable `Any`, so [`Self::adopt_input_lane`] can downcast a predecessor
     /// processor to its own concrete type at a plan swap (issue #1276 D3). `None` (the default)
     /// offers nothing.
@@ -3255,6 +3340,12 @@ impl GraphSourceSetResourceReport {
 /// Implementors own prepared source consumers and source-plane storage. The graph invokes this
 /// only on its coordinator before ordinary nodes or native dependency waves begin.
 pub trait GraphPreparedSourceSetDriver: Send {
+    /// The heap bytes this value retains (#1074), exclusive of the value itself: every `Box`,
+    /// `Vec`, `String` and `Arc` allocation reachable through its fields, a `Vec` or `String` at
+    /// its capacity, an `Arc`'s allocation in full whoever else holds it. Whoever boxes the value
+    /// adds `size_of_val` for the box. Computed from capacities on the control thread, never on
+    /// the render path. Required, so a new owner cannot under-report by default.
+    fn retained_bytes(&self) -> u64;
     fn can_prepare_source_seek(&self, _source_index: usize) -> bool {
         false
     }
@@ -3566,6 +3657,12 @@ pub struct GraphBindingBlock<'a> {
     pub live_snapshot: LiveSnapshot,
 }
 pub trait GraphRuntimeProcessor: Send + Any {
+    /// The heap bytes this value retains (#1074), exclusive of the value itself: every `Box`,
+    /// `Vec`, `String` and `Arc` allocation reachable through its fields, a `Vec` or `String` at
+    /// its capacity, an `Arc`'s allocation in full whoever else holds it. Whoever boxes the value
+    /// adds `size_of_val` for the box. Computed from capacities on the control thread, never on
+    /// the render path. Required, so a new owner cannot under-report by default.
+    fn retained_bytes(&self) -> u64;
     /// Process one block in place.
     ///
     /// # The contract for a node with no graph inputs (issue #218)
@@ -3706,6 +3803,12 @@ pub struct GraphBankedMeterLane {
 }
 /// A bounded observer invoked after its node has completed.
 pub trait GraphRuntimeObserver: Send {
+    /// The heap bytes this value retains (#1074), exclusive of the value itself: every `Box`,
+    /// `Vec`, `String` and `Arc` allocation reachable through its fields, a `Vec` or `String` at
+    /// its capacity, an `Arc`'s allocation in full whoever else holds it. Whoever boxes the value
+    /// adds `size_of_val` for the box. Computed from capacities on the control thread, never on
+    /// the render path. Required, so a new owner cannot under-report by default.
+    fn retained_bytes(&self) -> u64;
     fn observe(&mut self, block: GraphObservationBlock<'_>) -> Result<(), RenderError>;
 
     /// Observe one planar block with source validity facts from the same render boundary.
@@ -3987,6 +4090,11 @@ struct GraphExecutor {
     /// #1392, root ruling of attempt 2), shared with the plan's inventory so a successor drops a
     /// fired arm's row instead of carrying it.
     fade_fired: GraphFadeArmWatch,
+    /// The session's stored-automation program (#1074), attached at bind by
+    /// [`attach_automation_program`] so the plan's retained-bytes walk charges its one shared
+    /// allocation once, whatever number of stages and routes clone it. Control-only: render never
+    /// reads it. `None` for a plan without stored automation.
+    automation_program: Option<std::sync::Arc<automation::Program>>,
 }
 
 /// Next graph executor identity; identities start at 1, so zero never names a plan.
@@ -5796,11 +5904,101 @@ impl GraphExecutor {
             fade_arms_pending: 0,
             fade_arm_carry: Box::default(),
             fade_fired: GraphFadeArmWatch::default(),
+            automation_program: None,
         }
     }
 }
 
 impl PreparedPlanExecutor for GraphExecutor {
+    /// The bound graph's heap (#1074): the runtime ([`runtime::Runtime::retained_bytes`]), the
+    /// source set (claims and the driver's box and heap), the dispatch and carry tables, the
+    /// observer section, the bind-identity vectors (at capacity), the jump-length reader's box
+    /// and cell `Arc`, the fade arms, and the stored-automation program's shared `Arc` in full,
+    /// once ([`attach_automation_program`]). Not charged: the fired flags' `Arc`, which the
+    /// host's plan inventory holds and charges (`GraphFadeArmWatch::heap_bytes`) and frees after
+    /// the plan, and each control lane's `superseded` counter, the host's, shared by every lane
+    /// and outliving the plan.
+    fn retained_bytes(&self) -> u64 {
+        use engine::realtime::retained::{arc, boxed, slice, str, vec};
+        let program = self.automation_program.as_ref().map_or(0, |program| {
+            arc(program).saturating_add(program.retained_bytes())
+        });
+        let source_set = self.source_set.as_ref().map_or(0, |set| {
+            set.claims
+                .iter()
+                .fold(slice(&set.claims), |total, claim| {
+                    total.saturating_add(claim.node.retained_bytes())
+                })
+                .saturating_add(
+                    u64::try_from(core::mem::size_of_val(&*set.driver))
+                        .unwrap_or(u64::MAX)
+                        .saturating_add(set.driver.retained_bytes()),
+                )
+        });
+        let carry = self
+            .carry
+            .as_ref()
+            .map_or(0, GraphCarryProgram::retained_bytes);
+        let observer_carry = self.observer_carry.as_deref().map_or(0, |program| {
+            boxed(program)
+                .saturating_add(slice(&program.moves))
+                .saturating_add(slice(&program.joins))
+                .saturating_add(slice(&program.taps))
+                .saturating_add(slice(&program.record))
+        });
+        let route_checks = self.route_checks.as_deref().map_or(0, |checks| {
+            boxed(checks).saturating_add(slice(&checks.slots))
+        });
+        let compensation_lines =
+            self.compensation_lines
+                .iter()
+                .fold(vec(&self.compensation_lines), |total, line| {
+                    total
+                        .saturating_add(line.edge.retained_bytes())
+                        .saturating_add(line.source.retained_bytes())
+                        .saturating_add(line.destination.retained_bytes())
+                });
+        let identities = &self.bind_identities;
+        let strip_delays = identities
+            .strip_delays
+            .iter()
+            .fold(vec(&identities.strip_delays), |total, line| {
+                total.saturating_add(str(&line.strip))
+            });
+        let live_routes = identities
+            .live_routes
+            .iter()
+            .fold(vec(&identities.live_routes), |total, route| {
+                total.saturating_add(str(&route.route_id))
+            });
+        let jump_lengths = self
+            .jump_lengths
+            .as_deref()
+            .map_or(0, |reader| boxed(reader).saturating_add(arc(&reader.lane)));
+        self.runtime
+            .retained_bytes()
+            .saturating_add(source_set)
+            .saturating_add(slice(&self.source_input_buffers))
+            .saturating_add(slice(&self.active_units))
+            .saturating_add(carry)
+            .saturating_add(slice(&self.carry_inputs))
+            .saturating_add(slice(&self.carry_strips))
+            .saturating_add(slice(&self.carry_effects))
+            .saturating_add(slice(&self.carry_scratch))
+            .saturating_add(observer_carry)
+            .saturating_add(slice(&self.carry_delays))
+            .saturating_add(compensation_lines)
+            .saturating_add(slice(&self.carry_strip_delays))
+            .saturating_add(slice(&self.carry_routes))
+            .saturating_add(route_checks)
+            .saturating_add(strip_delays)
+            .saturating_add(live_routes)
+            .saturating_add(jump_lengths)
+            .saturating_add(slice(&self.fade_arms))
+            .saturating_add(slice(&self.fade_arm_carry))
+            .saturating_add(program)
+    }
+
     fn as_any_mut(&mut self) -> Option<&mut dyn Any> {
         Some(self)
     }
@@ -6088,6 +6286,7 @@ impl PreparedPlanExecutor for GraphExecutor {
             fade_arms_pending,
             fade_arm_carry: _,
             fade_fired,
+            automation_program: _,
         } = self;
         // One block's snapshot: taken here, so the next block cannot reuse it.
         let Some(live) = live_snapshot.take() else {
@@ -6346,6 +6545,9 @@ mod tests {
 
     struct Noop;
     impl GraphRuntimeProcessor for Noop {
+        fn retained_bytes(&self) -> u64 {
+            0
+        }
         fn process(&mut self, _block: GraphBindingBlock<'_>) -> Result<(), RenderError> {
             Ok(())
         }
@@ -6366,6 +6568,9 @@ mod tests {
         lane: u32,
     }
     impl GraphRuntimeProcessor for ThreeBlockConstant {
+        fn retained_bytes(&self) -> u64 {
+            0
+        }
         fn process(&mut self, block: GraphBindingBlock<'_>) -> Result<(), RenderError> {
             let scale = (block.first_sample + 1) as f32;
             block.left.fill(scale * (self.lane + 1) as f32);
@@ -6379,6 +6584,9 @@ mod tests {
         calls: u64,
     }
     impl GraphPreparedBuiltinBankProcessor for CountingIdentityBuiltin {
+        fn retained_bytes(&self) -> u64 {
+            0
+        }
         fn as_any(&self) -> &dyn Any {
             self
         }
@@ -6406,6 +6614,9 @@ mod tests {
         order: Arc<AtomicU64>,
     }
     impl GraphRuntimeObserver for W4OrderObserver {
+        fn retained_bytes(&self) -> u64 {
+            engine::realtime::retained::arc(&self.order)
+        }
         fn observe(&mut self, block: GraphObservationBlock<'_>) -> Result<(), RenderError> {
             let expected_order = block.first_sample * 4 + self.lane;
             assert_eq!(
@@ -6424,6 +6635,9 @@ mod tests {
         claims: usize,
     }
     impl GraphPreparedSourceSetDriver for SilentSourceSetDriver {
+        fn retained_bytes(&self) -> u64 {
+            0
+        }
         fn claim_count(&self) -> usize {
             self.claims
         }
@@ -6444,6 +6658,9 @@ mod tests {
         }
     }
     impl GraphRuntimeProcessor for OneShotSource {
+        fn retained_bytes(&self) -> u64 {
+            0
+        }
         fn process(&mut self, block: GraphBindingBlock<'_>) -> Result<(), RenderError> {
             block.left.fill(0.0);
             block.right.fill(0.0);
@@ -6515,6 +6732,9 @@ mod tests {
     /// Reads no prepared value, so holds none (issue #1461).
     struct SidechainSum;
     impl PreparedNativeEffect for SidechainSum {
+        fn retained_bytes(&self) -> u64 {
+            0
+        }
         fn reset(&mut self, _kind: ResetKind) {}
         fn process(&mut self, block: EffectProcessBlock<'_>) -> ProcessReport {
             let (side_left, side_right) = block.sidechain.expect("fixture sidechain");
@@ -6539,6 +6759,9 @@ mod tests {
         }
     }
     impl GraphRuntimeProcessor for FixedSource {
+        fn retained_bytes(&self) -> u64 {
+            0
+        }
         fn process(&mut self, block: GraphBindingBlock<'_>) -> Result<(), RenderError> {
             block.left.copy_from_slice(&self.left);
             block.right.copy_from_slice(&self.right);
@@ -7141,6 +7364,11 @@ mod tests {
         }
     }
     impl GraphPreparedSourceSetDriver for RecoverySource {
+        fn retained_bytes(&self) -> u64 {
+            engine::realtime::retained::arc(&self.begins)
+                + engine::realtime::retained::arc(&self.copies)
+                + engine::realtime::retained::arc(&self.drops)
+        }
         fn claim_count(&self) -> usize {
             1
         }
@@ -7867,6 +8095,9 @@ mod tests {
     fn identity_binding_acknowledges_without_a_processor() {
         struct Constant;
         impl GraphRuntimeProcessor for Constant {
+            fn retained_bytes(&self) -> u64 {
+                0
+            }
             fn process(&mut self, block: GraphBindingBlock<'_>) -> Result<(), RenderError> {
                 block.left.fill(0.25);
                 block.right.fill(-0.5);
@@ -7957,6 +8188,9 @@ mod tests {
     /// Reads no prepared value, so holds none (issue #1461).
     struct OptionalSidechainSum;
     impl PreparedNativeEffect for OptionalSidechainSum {
+        fn retained_bytes(&self) -> u64 {
+            0
+        }
         fn reset(&mut self, _kind: ResetKind) {}
         fn process(&mut self, block: EffectProcessBlock<'_>) -> ProcessReport {
             match block.sidechain {
@@ -8003,6 +8237,9 @@ mod tests {
         state: u32,
     }
     impl GraphRuntimeProcessor for SeededSource {
+        fn retained_bytes(&self) -> u64 {
+            0
+        }
         fn process(&mut self, block: GraphBindingBlock<'_>) -> Result<(), RenderError> {
             for frame in 0..block.left.len() {
                 self.state = self
@@ -8024,6 +8261,9 @@ mod tests {
         right: f32,
     }
     impl GraphRuntimeProcessor for Recursive {
+        fn retained_bytes(&self) -> u64 {
+            0
+        }
         fn process(&mut self, block: GraphBindingBlock<'_>) -> Result<(), RenderError> {
             for frame in 0..block.left.len() {
                 self.left = lane::softfma::unfused_multiply_add_via_f64(
@@ -8507,6 +8747,9 @@ mod tests {
     /// runs: a tap attached to the wrong op reads the scaled value.
     struct Scale(f32);
     impl GraphRuntimeProcessor for Scale {
+        fn retained_bytes(&self) -> u64 {
+            0
+        }
         fn process(&mut self, block: GraphBindingBlock<'_>) -> Result<(), RenderError> {
             for sample in block.left.iter_mut().chain(block.right.iter_mut()) {
                 *sample *= self.0;
@@ -8518,6 +8761,9 @@ mod tests {
     /// Records what an observer saw, so a tap on an elided stage can be checked.
     struct TapRecorder(Arc<AtomicU64>, Arc<std::sync::Mutex<Vec<u32>>>);
     impl GraphRuntimeObserver for TapRecorder {
+        fn retained_bytes(&self) -> u64 {
+            engine::realtime::retained::arc(&self.0) + engine::realtime::retained::arc(&self.1)
+        }
         fn observe(&mut self, block: GraphObservationBlock<'_>) -> Result<(), RenderError> {
             self.0.fetch_add(1, Ordering::SeqCst);
             let mut sink = self.1.lock().expect("tap sink");
@@ -8808,6 +9054,10 @@ mod tests {
         cursor: usize,
     }
     impl GraphRuntimeProcessor for PlaneSource {
+        fn retained_bytes(&self) -> u64 {
+            engine::realtime::retained::vec(&self.left)
+                + engine::realtime::retained::vec(&self.right)
+        }
         fn process(&mut self, block: GraphBindingBlock<'_>) -> Result<(), RenderError> {
             let frames = block.left.len();
             block
@@ -9026,6 +9276,9 @@ mod tests {
         log: Arc<std::sync::Mutex<Vec<ObservationRow>>>,
     }
     impl GraphRuntimeObserver for LoggingObserver {
+        fn retained_bytes(&self) -> u64 {
+            engine::realtime::retained::arc(&self.log)
+        }
         fn observe(&mut self, block: GraphObservationBlock<'_>) -> Result<(), RenderError> {
             let bits = |plane: &[f32]| -> Vec<u32> { plane.iter().map(|x| x.to_bits()).collect() };
             self.log.lock().expect("observation log").push((
@@ -9379,6 +9632,9 @@ mod tests {
         }
     }
     impl PreparedNativeEffect for LiveGain {
+        fn retained_bytes(&self) -> u64 {
+            engine::realtime::retained::vec(&self.line)
+        }
         fn reset(&mut self, _kind: ResetKind) {}
         fn process(&mut self, block: EffectProcessBlock<'_>) -> ProcessReport {
             let mut report = ProcessReport::default();
@@ -9605,6 +9861,9 @@ mod tests {
     /// effect is exactly the divergence the rule exists to prevent.
     struct SampleIndexSource;
     impl GraphRuntimeProcessor for SampleIndexSource {
+        fn retained_bytes(&self) -> u64 {
+            0
+        }
         fn process(&mut self, block: GraphBindingBlock<'_>) -> Result<(), RenderError> {
             for frame in 0..block.left.len() {
                 let value = (block.first_sample as usize + frame) as f32;
@@ -10499,6 +10758,9 @@ mod tests {
         const FRAMES: usize = 5;
         struct Lender(Vec<f32>);
         impl GraphPreparedSourceSetDriver for Lender {
+            fn retained_bytes(&self) -> u64 {
+                engine::realtime::retained::vec(&self.0)
+            }
             fn claim_count(&self) -> usize {
                 2
             }

@@ -40,6 +40,15 @@ pub struct BufferArena {
 }
 
 impl BufferArena {
+    /// The heap bytes the arena retains (#1074): its storage, offset and spec tables. Control
+    /// thread only; exclusive of the arena value itself.
+    #[must_use]
+    pub fn retained_bytes(&self) -> u64 {
+        use super::plan::retained::slice;
+        slice(&self.storage)
+            .saturating_add(slice(&self.offsets))
+            .saturating_add(slice(&self.specs))
+    }
     /// Preallocate all buffer planes with checked arithmetic.
     pub fn try_new(specs: &[PlanarBufferSpec]) -> Result<Self, BufferArenaError> {
         let mut total = 0usize;

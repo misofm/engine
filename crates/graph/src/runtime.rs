@@ -4256,6 +4256,204 @@ pub(crate) struct Runtime {
     input_producers: Box<[Box<[u32]>]>,
 }
 
+// The plan's retained-bytes walk (#1074): control thread only, from lengths and capacities, never
+// called on the render path. Each method is the heap its value owns, exclusive of the value.
+
+fn boxed_dyn_bytes<T: ?Sized>(value: &T, own: u64) -> u64 {
+    u64::try_from(core::mem::size_of_val(value))
+        .unwrap_or(u64::MAX)
+        .saturating_add(own)
+}
+
+impl Runtime {
+    /// The heap bytes the runtime retains (#1074): its arena, every boxed table, and each unit's,
+    /// delay line's, identity row's and response binding's own heap.
+    pub(crate) fn retained_bytes(&self) -> u64 {
+        use engine::realtime::retained::{slice, str};
+        let delays = self
+            .delays
+            .iter()
+            .fold(slice(&self.delays), |total, delay| {
+                total.saturating_add(delay.retained_bytes())
+            });
+        let track_delays = self
+            .track_delays
+            .iter()
+            .fold(slice(&self.track_delays), |total, line| {
+                total.saturating_add(line.retained_bytes())
+            });
+        let units = self.units.iter().fold(slice(&self.units), |total, unit| {
+            total.saturating_add(unit.retained_bytes())
+        });
+        let identity = self
+            .identity
+            .iter()
+            .fold(slice(&self.identity), |total, row| {
+                row.lane_tracks.iter().fold(
+                    total.saturating_add(slice(&row.lane_tracks)),
+                    |total, track| total.saturating_add(str(track)),
+                )
+            });
+        let bindings =
+            self.response_bindings
+                .iter()
+                .fold(slice(&self.response_bindings), |total, binding| {
+                    total
+                        .saturating_add(str(&binding.track_id))
+                        .saturating_add(str(&binding.native_id))
+                        .saturating_add(str(&binding.stable_id))
+                });
+        let route_activity = self.route_activity.as_deref().map_or(0, |activity| {
+            engine::realtime::retained::boxed(activity)
+                .saturating_add(slice(&activity.active))
+                .saturating_add(slice(&activity.units))
+                .saturating_add(slice(&activity.destinations))
+                .saturating_add(slice(&activity.inputs))
+                .saturating_add(slice(&activity.from))
+        });
+        let input_producers = self
+            .input_producers
+            .iter()
+            .fold(slice(&self.input_producers), |total, row| {
+                total.saturating_add(slice(row))
+            });
+        self.arena
+            .retained_bytes()
+            .saturating_add(delays)
+            .saturating_add(track_delays)
+            .saturating_add(units)
+            .saturating_add(identity)
+            .saturating_add(bindings)
+            .saturating_add(slice(&self.bank_inputs))
+            .saturating_add(slice(&self.bank_outputs))
+            .saturating_add(slice(&self.source_plane_of_buffer))
+            .saturating_add(route_activity)
+            .saturating_add(slice(&self.block_end_units))
+            .saturating_add(input_producers)
+    }
+}
+
+impl CompensationDelay {
+    /// Its two lanes' rings (#1074).
+    pub(crate) fn retained_bytes(&self) -> u64 {
+        use engine::realtime::retained::slice;
+        slice(&self.left).saturating_add(slice(&self.right))
+    }
+}
+
+impl TrackDelayLine {
+    /// Its two lanes' rings (#1074).
+    pub(crate) fn retained_bytes(&self) -> u64 {
+        use engine::realtime::retained::slice;
+        slice(&self.left).saturating_add(slice(&self.right))
+    }
+}
+
+impl RuntimeUnit {
+    /// A plain unit's op, or a bank's member ops, chain and fold table (#1074).
+    pub(crate) fn retained_bytes(&self) -> u64 {
+        use engine::realtime::retained::slice;
+        match self {
+            Self::Op(op) => op.retained_bytes(),
+            Self::Bank {
+                members,
+                chain,
+                fold,
+                ..
+            } => members
+                .iter()
+                .fold(slice(members), |total, member| {
+                    total.saturating_add(member.retained_bytes())
+                })
+                .saturating_add(chain.retained_bytes())
+                .saturating_add(slice(fold)),
+        }
+    }
+}
+
+impl RuntimeOp {
+    /// Its input, staging and observer tables, each observer's box, and its node's heap (#1074).
+    pub(crate) fn retained_bytes(&self) -> u64 {
+        use engine::realtime::retained::slice;
+        let observers = self
+            .observers
+            .iter()
+            .fold(slice(&self.observers), |total, binding| {
+                total
+                    .saturating_add(binding.node.retained_bytes())
+                    .saturating_add(boxed_dyn_bytes(
+                        &*binding.observer,
+                        binding.observer.retained_bytes(),
+                    ))
+            });
+        slice(&self.inputs)
+            .saturating_add(slice(&self.staged))
+            .saturating_add(observers)
+            .saturating_add(self.kind.retained_bytes())
+    }
+}
+
+impl NodeKind {
+    /// The heap one node owns (#1074): a bound processor's or an effect's box and its own heap,
+    /// a live-control effect's box, control lane, span window, shunt and observation lane, a live
+    /// route's box and control lane (its cell `Arc` in full: the plan is that cell's last owner
+    /// once the host's producer drops), and a following route's cursors.
+    pub(crate) fn retained_bytes(&self) -> u64 {
+        use engine::realtime::retained::{arc, boxed, slice};
+        match self {
+            Self::Identity
+            | Self::SourceInput
+            | Self::TrackDelay { .. }
+            | Self::SumDelay { .. }
+            | Self::Route(_)
+            | Self::BankMember => 0,
+            Self::Bound(processor) => boxed_dyn_bytes(&**processor, processor.retained_bytes()),
+            Self::Effect(node) => node.retained_bytes(),
+            Self::LiveControlEffect(live) => {
+                let observation = live.observation.as_deref().map_or(0, |lane| {
+                    boxed(lane)
+                        .saturating_add(u64::try_from(lane.retained_bytes()).unwrap_or(u64::MAX))
+                });
+                boxed(&**live)
+                    .saturating_add(live.effect.retained_bytes())
+                    .saturating_add(boxed(&*live.control))
+                    .saturating_add(live.control.retained_bytes())
+                    .saturating_add(slice(&live.spans))
+                    .saturating_add(live.shunt.retained_bytes())
+                    .saturating_add(observation)
+            }
+            // The control lane's `superseded` counter is the host's, shared by every lane and
+            // outliving the plan: not charged here (#1074).
+            Self::LiveRoute(route) => boxed(&**route)
+                .saturating_add(boxed(&*route.control))
+                .saturating_add(arc(&route.control.lane)),
+            Self::LiveFollowRoute(route) => boxed(&**route)
+                .saturating_add(boxed(&*route.control))
+                .saturating_add(arc(&route.control.lane))
+                .saturating_add(route.follow.retained_bytes()),
+        }
+    }
+}
+
+impl EffectNode {
+    /// The effect's box and its own heap (#1074).
+    pub(crate) fn retained_bytes(&self) -> u64 {
+        boxed_dyn_bytes(&*self.processor, self.processor.retained_bytes())
+    }
+}
+
+impl FollowCursors {
+    /// Each column's two composed walks (#1074). Not the program: its `Arc` is one allocation the
+    /// whole plan shares, so no per-route clone charges it.
+    fn retained_bytes(&self) -> u64 {
+        self.columns.iter().flatten().fold(0_u64, |total, column| {
+            total
+                .saturating_add(column.walk.retained_bytes())
+                .saturating_add(column.probe.retained_bytes())
+        })
+    }
+}
+
 impl Runtime {
     /// Lanes whose scatter this bind pointed at their consumer's buffer (issue #202 rec 3).
     pub(crate) const fn scatter_redirects(&self) -> u64 {
@@ -5658,6 +5856,9 @@ use crate::{
 /// Adapter that lets a compiler-owned builtin bank act as a chain slot.
 struct BuiltinStage(Box<dyn GraphPreparedBuiltinBankProcessor>);
 impl BankStage for BuiltinStage {
+    fn retained_bytes(&self) -> u64 {
+        boxed_dyn_bytes(&*self.0, self.0.retained_bytes())
+    }
     // REALTIME_POLICY_BEGIN
     fn process(&mut self, block: BankBlock<'_>) -> Result<(), RenderError> {
         self.0
@@ -7413,6 +7614,9 @@ pub fn test_only_prepare_bank_chain_inputs(
 ) -> TestOnlyBankChainInputs {
     struct IdentityStage;
     impl BankStage for IdentityStage {
+        fn retained_bytes(&self) -> u64 {
+            0
+        }
         fn process(&mut self, _block: BankBlock<'_>) -> Result<(), RenderError> {
             Ok(())
         }
@@ -10766,6 +10970,9 @@ mod tests {
     fn runtime_response_capture_uses_declared_owner_mapping_and_opaque_sink() {
         struct Owner;
         impl GraphRuntimeProcessor for Owner {
+            fn retained_bytes(&self) -> u64 {
+                0
+            }
             fn process(&mut self, _block: GraphBindingBlock<'_>) -> Result<(), RenderError> {
                 Ok(())
             }
@@ -10896,6 +11103,9 @@ mod tests {
     fn declared_response_provider_refuses_unsupported_hook() {
         struct DecliningOwner;
         impl GraphRuntimeProcessor for DecliningOwner {
+            fn retained_bytes(&self) -> u64 {
+                0
+            }
             fn process(&mut self, _block: GraphBindingBlock<'_>) -> Result<(), RenderError> {
                 Ok(())
             }
@@ -10968,6 +11178,9 @@ mod tests {
             trace: Arc<std::sync::Mutex<Vec<(u64, bool)>>>,
         }
         impl crate::GraphRuntimeObserver for Observer {
+            fn retained_bytes(&self) -> u64 {
+                engine::realtime::retained::arc(&self.trace)
+            }
             fn observe(&mut self, block: GraphObservationBlock<'_>) -> Result<(), RenderError> {
                 self.trace.lock().unwrap().push((self.handle, false));
                 assert_eq!(block.left, &[7.0; 3]);
@@ -11267,6 +11480,9 @@ mod tests {
     fn observed_flag_is_derived_at_construction_and_skips_only_unobserved_units() {
         struct Visit(Arc<AtomicUsize>);
         impl crate::GraphRuntimeObserver for Visit {
+            fn retained_bytes(&self) -> u64 {
+                engine::realtime::retained::arc(&self.0)
+            }
             fn observe(&mut self, _block: GraphObservationBlock<'_>) -> Result<(), RenderError> {
                 self.0.fetch_add(1, Ordering::Relaxed);
                 Ok(())
@@ -11380,6 +11596,9 @@ mod tests {
 
     struct AddingOwner(Arc<AtomicUsize>);
     impl GraphPreparedBuiltinBankProcessor for AddingOwner {
+        fn retained_bytes(&self) -> u64 {
+            engine::realtime::retained::arc(&self.0)
+        }
         fn as_any(&self) -> &dyn Any {
             self
         }
@@ -11402,6 +11621,9 @@ mod tests {
     }
     struct DoublingOwner(Arc<AtomicUsize>);
     impl GraphPreparedBuiltinBankProcessor for DoublingOwner {
+        fn retained_bytes(&self) -> u64 {
+            engine::realtime::retained::arc(&self.0)
+        }
         fn as_any(&self) -> &dyn Any {
             self
         }
@@ -11426,6 +11648,9 @@ mod tests {
     /// A builtin bank that drains live lanes `mask` (bit `n` is lane `n`).
     struct LiveLaneBank(u8);
     impl GraphPreparedBuiltinBankProcessor for LiveLaneBank {
+        fn retained_bytes(&self) -> u64 {
+            0
+        }
         fn as_any(&self) -> &dyn Any {
             self
         }
@@ -11463,6 +11688,9 @@ mod tests {
     /// A builtin bank at rest on `.0`, recording every clock advance it is handed.
     struct RestingBank(u32, Arc<std::sync::Mutex<Vec<(u32, u32)>>>);
     impl GraphPreparedBuiltinBankProcessor for RestingBank {
+        fn retained_bytes(&self) -> u64 {
+            engine::realtime::retained::arc(&self.1)
+        }
         fn as_any(&self) -> &dyn Any {
             self
         }
@@ -12359,6 +12587,9 @@ mod tests {
         let _canonical = lane::fpenv::CanonicalFpEnv::enter();
         struct Identity;
         impl BankStage for Identity {
+            fn retained_bytes(&self) -> u64 {
+                0
+            }
             fn process(&mut self, _block: BankBlock<'_>) -> Result<(), RenderError> {
                 Ok(())
             }
@@ -12839,6 +13070,9 @@ mod tests {
         /// A host source that writes every word it is handed, as the contract requires.
         struct Fill(f32);
         impl crate::GraphRuntimeProcessor for Fill {
+            fn retained_bytes(&self) -> u64 {
+                0
+            }
             fn process(&mut self, block: GraphBindingBlock<'_>) -> Result<(), RenderError> {
                 block.left.fill(self.0);
                 block.right.fill(-self.0);
@@ -13322,6 +13556,9 @@ mod tests {
     }
 
     impl crate::GraphRuntimeObserver for WordMeter {
+        fn retained_bytes(&self) -> u64 {
+            engine::realtime::retained::arc(&self.published)
+        }
         fn observe(&mut self, block: GraphObservationBlock<'_>) -> Result<(), RenderError> {
             self.publish(block.first_sample, block.left, block.right);
             Ok(())
@@ -13352,6 +13589,9 @@ mod tests {
     struct NoiseInput(u32);
 
     impl GraphRuntimeProcessor for NoiseInput {
+        fn retained_bytes(&self) -> u64 {
+            0
+        }
         fn process(&mut self, block: GraphBindingBlock<'_>) -> Result<(), RenderError> {
             let mut state = (self.0 + 1).wrapping_mul(0x9e37_79b9)
                 ^ (block.first_sample as u32).wrapping_mul(0x85eb_ca6b);
@@ -13367,6 +13607,9 @@ mod tests {
     struct CrossTilt;
 
     impl GraphPreparedBuiltinBankProcessor for CrossTilt {
+        fn retained_bytes(&self) -> u64 {
+            0
+        }
         fn as_any(&self) -> &dyn Any {
             self
         }
@@ -13395,6 +13638,9 @@ mod tests {
     }
 
     impl GraphPreparedBuiltinBankProcessor for FailingTilt {
+        fn retained_bytes(&self) -> u64 {
+            0
+        }
         fn as_any(&self) -> &dyn Any {
             self
         }
@@ -13976,6 +14222,9 @@ mod tests {
     struct ScalarTilt;
 
     impl GraphRuntimeProcessor for ScalarTilt {
+        fn retained_bytes(&self) -> u64 {
+            0
+        }
         fn process(&mut self, block: GraphBindingBlock<'_>) -> Result<(), RenderError> {
             for (left, right) in block.left.iter_mut().zip(block.right.iter_mut()) {
                 let (a, b) = (*left, *right);
@@ -15025,6 +15274,9 @@ mod tests {
     }
 
     impl crate::GraphRuntimeObserver for FailingObserver {
+        fn retained_bytes(&self) -> u64 {
+            0
+        }
         fn observe(&mut self, block: GraphObservationBlock<'_>) -> Result<(), RenderError> {
             if block.first_sample >= self.from_sample {
                 return Err(RenderError::InvalidEnvelope);
@@ -15042,6 +15294,9 @@ mod tests {
     }
 
     impl crate::GraphPreparedSourceSetDriver for FailingSource {
+        fn retained_bytes(&self) -> u64 {
+            0
+        }
         fn claim_count(&self) -> usize {
             1
         }
@@ -15369,6 +15624,11 @@ mod tests {
         }
 
         impl crate::GraphRuntimeObserver for BlockEnd {
+            fn retained_bytes(&self) -> u64 {
+                engine::realtime::retained::arc(&self.sequence)
+                    + engine::realtime::retained::arc(&self.calls)
+                    + engine::realtime::retained::arc(&self.last_stamp)
+            }
             fn observe(&mut self, block: GraphObservationBlock<'_>) -> Result<(), RenderError> {
                 if block.first_sample >= self.fail_from {
                     return Err(RenderError::InvalidEnvelope);
@@ -15844,6 +16104,10 @@ mod tests {
     }
 
     impl crate::GraphPreparedSourceSetDriver for PlayedSource {
+        fn retained_bytes(&self) -> u64 {
+            engine::realtime::retained::vec(&self.mapping)
+                + engine::realtime::retained::vec(&self.planes)
+        }
         fn claim_count(&self) -> usize {
             self.mapping.len()
         }
@@ -16421,6 +16685,9 @@ mod tests {
     }
 
     impl GraphPreparedBuiltinBankProcessor for FadeProbe {
+        fn retained_bytes(&self) -> u64 {
+            0
+        }
         fn as_any(&self) -> &dyn Any {
             self
         }
@@ -17214,6 +17481,9 @@ mod follow_route_op_tests {
     }
 
     impl GraphPreparedSourceSetDriver for Timeline {
+        fn retained_bytes(&self) -> u64 {
+            0
+        }
         fn claim_count(&self) -> usize {
             0
         }
@@ -18419,6 +18689,9 @@ mod follow_curve_tests {
     struct Timeline;
 
     impl GraphPreparedSourceSetDriver for Timeline {
+        fn retained_bytes(&self) -> u64 {
+            0
+        }
         fn claim_count(&self) -> usize {
             0
         }
@@ -18897,6 +19170,9 @@ mod follow_curve_tests {
     }
 
     impl GraphPreparedSourceSetDriver for Seeking {
+        fn retained_bytes(&self) -> u64 {
+            0
+        }
         fn claim_count(&self) -> usize {
             0
         }

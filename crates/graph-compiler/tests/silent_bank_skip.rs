@@ -248,6 +248,10 @@ struct TrackSource {
 }
 
 impl GraphRuntimeProcessor for TrackSource {
+    fn retained_bytes(&self) -> u64 {
+        effect_contract::retained::arc(&self.schedule)
+    }
+
     fn process(&mut self, block: GraphBindingBlock<'_>) -> Result<(), RenderError> {
         let frames = block.left.len() as u64;
         let kind = self.schedule[(block.first_sample / frames) as usize];
@@ -286,6 +290,10 @@ impl GraphRuntimeProcessor for TrackSource {
 
 struct Identity;
 impl GraphRuntimeProcessor for Identity {
+    fn retained_bytes(&self) -> u64 {
+        0
+    }
+
     fn process(&mut self, _block: GraphBindingBlock<'_>) -> Result<(), RenderError> {
         Ok(())
     }
@@ -293,6 +301,14 @@ impl GraphRuntimeProcessor for Identity {
 
 struct Capture(Arc<Mutex<Vec<u32>>>);
 impl GraphRuntimeObserver for Capture {
+    fn retained_bytes(&self) -> u64 {
+        effect_contract::retained::arc(&self.0)
+            + self
+                .0
+                .lock()
+                .map_or(0, |v| effect_contract::retained::vec(&v))
+    }
+
     fn observe(&mut self, block: GraphObservationBlock<'_>) -> Result<(), RenderError> {
         let mut sink = self.0.lock().expect("capture");
         sink.extend(block.left.iter().map(|sample| sample.to_bits()));

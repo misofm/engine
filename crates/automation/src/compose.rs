@@ -233,6 +233,13 @@ impl<T: Composable> Composed<T> {
         cursors.saturating_mul(size_of::<ComposeCursor>())
     }
 
+    /// The heap this output retains, exclusive of itself (#1074): its cursor table, from its
+    /// length. Control side.
+    #[must_use]
+    pub const fn retained_bytes(&self) -> u64 {
+        Self::bytes(self.cursors.len()) as u64
+    }
+
     /// The output over `cells` (each a cell of `program` and its kind), whose ramps complete under
     /// `completion`. Every cursor is seeded with its curve's first `start_value` (the value a
     /// prepared stage holds); the output has no target until [`Self::seed`]. Control side: it
