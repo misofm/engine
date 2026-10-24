@@ -44,6 +44,37 @@ impl DuckOverlay {
         }
     }
 
+    /// The most an overlay of a plan of a session with `strips` strips, `routes` routes and
+    /// `sources` sources can retain, whose IDs total `strip_id_bytes`, `route_id_bytes` and
+    /// `source_id_bytes` (#1325): the three ID vectors at those counts and one copy of each ID's
+    /// text. An overlay names only that plan's strips, routes and sources, each once, and its
+    /// vectors are kept at their length. A ceiling of the session's shape, not of its edits.
+    #[must_use]
+    pub fn retained_ceiling(
+        [strips, routes, sources]: [usize; 3],
+        [strip_id_bytes, route_id_bytes, source_id_bytes]: [usize; 3],
+    ) -> Option<usize> {
+        strips
+            .checked_add(routes)?
+            .checked_add(sources)?
+            .checked_mul(size_of::<Box<str>>())?
+            .checked_add(strip_id_bytes)?
+            .checked_add(route_id_bytes)?
+            .checked_add(source_id_bytes)
+    }
+
+    /// The heap bytes the overlay retains: its three vectors at their capacity and their ID text.
+    #[must_use]
+    pub fn retained_bytes(&self) -> usize {
+        [&self.strips, &self.routes, &self.sources]
+            .into_iter()
+            .map(|ids| {
+                ids.capacity() * size_of::<Box<str>>()
+                    + ids.iter().map(|id| id.len()).sum::<usize>()
+            })
+            .sum()
+    }
+
     /// Whether the overlay holds nothing.
     #[must_use]
     pub fn is_empty(&self) -> bool {
@@ -147,6 +178,8 @@ fn merged(left: &[Box<str>], right: &[Box<str>]) -> Vec<Box<str>> {
     let mut out: Vec<Box<str>> = left.iter().chain(right).cloned().collect();
     out.sort_unstable();
     out.dedup();
+    // At its length, so the overlay holds no more than `DuckOverlay::retained_ceiling` charges.
+    out.shrink_to_fit();
     out
 }
 
@@ -289,6 +322,7 @@ fn sorted_ids<'a>(ids: impl Iterator<Item = &'a str>) -> Vec<Box<str>> {
     let mut out: Vec<Box<str>> = ids.map(Box::from).collect();
     out.sort_unstable();
     out.dedup();
+    out.shrink_to_fit();
     out
 }
 
@@ -602,6 +636,24 @@ mod tests {
             "both of b's channels mute over N"
         );
         let joined = overlay.joined(&transition);
+        // The overlay stays inside the row the control plane charges for it at the plan's model.
+        let ids = |ids: &mut dyn Iterator<Item = &StableId>| {
+            ids.fold((0, 0), |(count, bytes), id| {
+                (count + 1, bytes + id.as_str().len())
+            })
+        };
+        let (strips, strip_bytes) = ids(&mut committed.strips().map(|strip| strip.id));
+        let (routes, route_bytes) = ids(&mut committed.routes.iter().map(|route| &route.id));
+        let (sources, source_bytes) = ids(&mut committed.sources.iter().map(|source| &source.id));
+        let ceiling = DuckOverlay::retained_ceiling(
+            [strips, routes, sources],
+            [strip_bytes, route_bytes, source_bytes],
+        )
+        .expect("the ceiling");
+        assert!(
+            joined.retained_bytes() <= ceiling,
+            "the overlay is within its charge"
+        );
         assert_eq!(
             joined.not_before(),
             Some(4_096),
