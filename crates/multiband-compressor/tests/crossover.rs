@@ -271,6 +271,14 @@ fn a_crossover_glide_stays_the_all_pass_and_adds_no_click() {
     }
     let start = words(effect.as_ref());
     let end = design_lr4_words(RATE, nudged);
+    let first = design_lr4_words(RATE, target);
+    for kept in (0..3).filter(|&index| first[index].to_bits() == end[index].to_bits()) {
+        assert_ne!(
+            start[kept].to_bits(),
+            first[kept].to_bits(),
+            "the nudge lands mid-glide"
+        );
+    }
     frame(effect.as_mut(), 32, Some(nudged));
     for n in 33..128 {
         let now = words(effect.as_ref());
@@ -306,7 +314,7 @@ fn a_crossover_glide_stays_the_all_pass_and_adds_no_click() {
 /// A crossover near 1 kHz whose one-ulp successor keeps one word's design bits and moves another's.
 fn nudge_pair() -> (f32, f32) {
     let mut crossover = 1_000.0_f32;
-    loop {
+    for _ in 0..1 << 20 {
         let next = crossover.next_up();
         let (from, to) = (
             design_lr4_words(RATE, crossover),
@@ -318,6 +326,7 @@ fn nudge_pair() -> (f32, f32) {
         }
         crossover = next;
     }
+    panic!("no nudge pair near 1 kHz");
 }
 
 /// Word offset of the first crossover word ramp in a channel's payload, and the ramp's width.

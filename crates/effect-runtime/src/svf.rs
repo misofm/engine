@@ -54,10 +54,10 @@ pub const NORM_TOLERANCE: f64 = 1.0 + 1.0 / 4_194_304.0;
 /// EQ's `2^-6`). With an `N`-sample ramp the induction below needs `2^-22 + (N + 1) * 2^-23` inside
 /// the bound, which holds up to about 2,000 samples, but the 30-fold margin and the growth figure
 /// below are for 64; a consumer with another ramp re-derives them. The words also ramp in
-/// lockstep: every retarget restarts all the words of a design together from their current values,
-/// so the walk stays on one chord between two designs; a retarget that restarts only the words
-/// whose target bits moved puts the words at different fractions of different ramps, off any
-/// chord, where the convexity argument below does not hold (#1928).
+/// lockstep: every retarget restarts or freezes all the words of a design together from their
+/// current values, so the walk stays on one chord between two designs; a retarget that restarts
+/// only the words whose target bits moved puts the words at different fractions of different
+/// ramps, off any chord, where the convexity argument below does not hold (#1928).
 ///
 /// The bound is derived, at every rate and through any chain of retargets. The norm `f` of the
 /// transition matrix is convex in the words (the matrix is affine in them) and Lipschitz with
