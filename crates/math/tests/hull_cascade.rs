@@ -303,10 +303,38 @@ fn random_cascade(
 /// Gate a1 (the cascade): for seeded random cascades of hull sections, every fixed member of the
 /// hulls (an admitted history) has its worst-sign output `S(m + 1)` at `N + m` below the
 /// bound's level from the bound's crossings on, for every decade checked; random switching
-/// histories with worst-sign-like inputs stay below too; and a section whose words can reach the
-/// identity is refused.
+/// histories with worst-sign-like inputs stay below too; a cascade whose second section is driven
+/// by the first's feedthrough alone is covered; and a section whose words can reach the identity
+/// is refused.
 #[test]
 fn cascade_bound_covers_every_hull_member() {
+    // The feedthrough row: section 1 passes only its input (`m = (1, 0, 0)`, so its
+    // `output_state` is zero), so all of section 2's drive is section 1's feedthrough.
+    {
+        let hulls = [vec![design(0.05, 1.0)], vec![design(0.05, 0.1)]];
+        let mixes = [[1.0, 0.0, 0.0], [0.0, 0.0, 1.0]];
+        let every: Vec<[f64; 3]> = hulls.iter().flatten().copied().collect();
+        let certificate = common_lyapunov(&every, [0.0; 3]).expect("a certificate");
+        let (norm, q) = (certificate.norm, certificate.contraction);
+        let sections: Vec<HullSection> = hulls
+            .iter()
+            .zip(&mixes)
+            .map(|(vertices, mix)| HullSection {
+                envelope: envelope(&norm, q, vertices, *mix),
+                identity_reachable: false,
+            })
+            .collect();
+        let crossing =
+            hull_cascade_crossing(&sections, &norm, 1.0, &LAW, 0, 0).expect("a crossing") as usize;
+        let words = [hulls[0][0], hulls[1][0]];
+        let suffix = suffix_sums(&words, &mixes, 4 * crossing + 64);
+        assert!(
+            suffix[crossing + 1] < TAIL_FLOOR / 2.0,
+            "feedthrough row: S({}) = {}",
+            crossing + 1,
+            suffix[crossing + 1]
+        );
+    }
     let mut rng = Rng(0x1372_a002);
     for cascade in 0..32 {
         let rate = RATES[cascade % 4];

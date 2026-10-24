@@ -187,3 +187,19 @@ decision R4: the identity-vertex argument does not close, so no uniform hull bou
 - Evidence, not a gate: a 25 x 25 `(g, k)` grid hull over the whole EQ domain certifies
   `q = 0.99999095` at 48 kHz, with `l12 ~ k_min / 2`. The extreme's `T / T_b` under that hull is
   1.032 at 44.1 and 48 kHz, far inside R3's factor of 2.
+
+### 1372a attempt 2 (verifier FAIL on attempt 1; the math module itself was sound)
+
+- Added a feedthrough row to `cascade_bound_covers_every_hull_member`: two one-vertex sections
+  at `g = 0.05`, `k = 1.0` and `k = 0.1`, with section 1's mix `(1, 0, 0)` and section 2's
+  `(0, 0, 1)`. Removing `section.output_input * v` from `invariant` turns it red.
+- Caller obligation, restated in the derivation and `HullSection`: every word triple the kernel
+  can load under its own per-word ramp and retarget rule must lie in hull + margin. The state
+  rounding is taken at word magnitudes that are suprema over hull + margin. `identity_reachable`
+  is the caller's attestation, and each caller crate tests its own claim.
+- The de-esser qualifies only with the joint retarget of all three SVF words. At 6172dc4e6,
+  `lib.rs:723` skipped a word whose target bits were unchanged; root's fix is in PR #1922.
+  `effect_runtime::svf::RAMP_PATH_NORM_TOLERANCE` makes the same lockstep assumption, and root
+  files an issue for the parametric EQ.
+- The margin box for `f32` ramp walks and retarget restarts cites the bounded-excess inductions
+  of `multiband-compressor/src/tail.rs` and `RAMP_PATH_NORM_TOLERANCE`.

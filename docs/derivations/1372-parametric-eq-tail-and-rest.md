@@ -52,14 +52,43 @@ no pinned table moves.
 For a fixed `L`, `w -> ||L A(w) L^-1||_2` is a norm of an affine map, so it is convex in `w`. Over
 the convex hull of the designed words `{w_j}`, it is largest at some `w_j`. A word within a
 per-word box `|e_i| <= m_i` of the hull adds at most `sup_box 2 ||L N(e) L^-1||_2`. That term is
-convex in `e`, so it is largest at one of the box's eight corners. A ramp word lies on a chord
-between two words it can hold, so it is a hull point, and its `f32` rounding goes into the box. So:
+convex in `e`, so it is largest at one of the box's eight corners. So:
 
 ```text
 q = max_j ||A(w_j)||_Q + sup_box 2 ||N(e)||_Q
 ```
 
-bounds `||A(w)||_Q` for every word the section can load (`HullNorm::contraction`). The scope note
+bounds `||A(w)||_Q` for every word in hull + margin (`HullNorm::contraction`).
+
+### The caller's obligation: every loadable word lies in hull + margin
+
+The bound covers a section only if **every word triple the kernel can load, under its own
+per-word ramp and retarget rule, lies in hull + margin**. Nothing in `math::tail::hull` checks
+this. The caller derives it for its kernel and tests it in its own crate.
+
+A ramp that moves `(c1, a2, a3)` in lockstep along one line between two held triples stays on a
+chord of the hull. A kernel that ramps the words separately (for example, it skips a word whose
+target bits are unchanged, so that word holds while the others move) can load a triple that
+mixes coordinates of two designs. Such a triple is not a convex combination of the designs and
+can lie outside the hull by far more than any rounding box.
+
+The margin for a lockstep `f32` walk with retarget restarts comes from a bounded-excess
+induction. Two existing derivations already state it:
+
+* `crates/multiband-compressor/src/tail.rs` (`crossover_envelope`'s "Words"). A 64-step iterated
+  ramp `w = fl(w + s)` with `s = fl(t - c) / 64` (exact, since 64 is a power of two) is within
+  `j h + (j / 64) |t - c| u` of its chord point after `j` frames (`h` is a design's half-ulp box).
+  A retarget restarts from the word in force, and carries that start's distance `E` from the hull
+  with weight `1 - j/64`. So `E = 64 h (1 + 3u) + u |t - c|` is a fixed point, and every loadable
+  word is within `E + h` per word of the hull of the exact designs.
+* `effect_runtime::svf::RAMP_PATH_NORM_TOLERANCE` (#1278). The same induction on the norm: a walk
+  that starts at excess `E` stays below `1 + E` whenever `E >= 2^-22 + 65 * 4 * 2^-25`, through
+  any chain of retargets.
+
+Both assume a lockstep ramp of at most 64 samples with a power-of-two step. A caller whose kernel
+meets those premises can use the per-word box `E + h` as `margin`. The state rounding
+(`HullNorm::state_rounding`) increases in each word's magnitude, so it must be evaluated at word
+magnitudes that are suprema over hull + box, not at the vertices alone. The scope note
 calls this a vertex check; it is the convex-hull form of D2. With `adj(L) = [[l22, -l12], [0, 1]]`:
 
 ```text
@@ -145,6 +174,8 @@ in that zone without limit. At 48 kHz with 1-frame blocks, the worst-case roundi
 (about `64 u`) exceeds the exact decay (about `0.5 (1 - q)`). A section whose words can ramp toward
 the identity has no certified peak-relative bound before `N`. `HullSection::identity_reachable`
 states this precondition, and the bound refuses such a section (`TailBoundError::IdentityReachable`).
+`identity_reachable` is the caller's attestation: the module cannot decide it from the hull, and
+each caller crate must test its own claim against its kernel's enable, kind and retarget rules.
 A hull that holds the identity vertex is also refused, because `common_lyapunov` cannot certify
 `q < 1` for it.
 
@@ -155,15 +186,20 @@ block size. At 2-frame blocks its cycle balance is within about 20%.
 Which callers qualify (read at `main` 6172dc4e6 and PR #1919's head 5316681de):
 
 * **De-esser** (`crates/de-esser/src/lib.rs`, `targets`): the SVF words are always the EQ's 0 dB
-  high-pass design at the committed frequency and Q, and they ramp between two such designs. The
-  mode, detector and listen switches crossfade the output arms, not the SVF words. It has no
-  enable or kind ramp, so it never reaches the identity. **It qualifies.**
+  high-pass design at the committed frequency and Q. The mode, detector and listen switches
+  crossfade the output arms, not the SVF words. It has no enable or kind ramp, so it never reaches
+  the identity. But at 6172dc4e6 its retarget skipped a word whose target bits were unchanged
+  (`lib.rs:723`), so `(c1, a2, a3)` did not move in lockstep and the hull premise failed. **It
+  qualifies only with the joint retarget of all three SVF words**, which root's fix in PR #1922
+  makes before the de-esser is registered.
 * **Dynamic EQ** (PR #1919, `crates/dynamic-eq/src/lib.rs`, `band_design`): a disabled band's
   design is `[0.0; 9]`, and "a disabled band ramps its six filter words to the parametric EQ's
   identity section". Its words reach the identity, so **it does not qualify**. It stays
   `UNBOUNDED`.
 * **Parametric EQ**: a live kind or enable change ramps toward `EqSvfWords::IDENTITY` (#1337 D3).
-  It does not qualify. It keeps its declaration until the owner rules.
+  It does not qualify. It keeps its declaration until the owner rules. Its ramp-path tolerance
+  (`effect_runtime::svf::RAMP_PATH_NORM_TOLERANCE`) makes the same lockstep assumption. Root
+  files an issue to check it against the EQ's per-word ramp.
 
 ## Gates (part 1)
 
@@ -196,6 +232,6 @@ Which callers qualify (read at `main` 6172dc4e6 and PR #1919's head 5316681de):
   `n60 = ln(10^-3) / ln r`.
 - [SHORTEN-NARENDRA] R. N. Shorten and K. S. Narendra, "Necessary and sufficient conditions for
   the existence of a common quadratic Lyapunov function for a finite number of stable second
-  order linear time-invariant systems", *Int. J. Adaptive Control and Signal Processing* 16
-  (2002/2003): the existence question for 2x2 systems, which the vertex certificate here sidesteps
+  order linear time-invariant systems", *Int. J. Adaptive Control and Signal Processing*
+  16(10):709-728, 2002: the existence question for 2x2 systems, which the vertex certificate here sidesteps
   by checking a found norm.

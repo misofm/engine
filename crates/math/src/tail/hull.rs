@@ -350,6 +350,13 @@ pub struct HullSection {
     /// Whether a control history can ramp this section's words toward the identity section (an
     /// enable or kind change that ramps to `c1 = a2 = a3 = 0`). Such a section is refused
     /// ([`TailBoundError::IdentityReachable`]): no hull bound covers it.
+    ///
+    /// This is the caller's attestation, not decided from the hull: the module cannot see the
+    /// kernel's enable, kind and retarget rules, so each caller crate tests its own claim. The
+    /// envelope carries the companion obligation: every word triple the kernel can load under its
+    /// own per-word ramp and retarget rule lies in hull + margin, and the state rounding is taken
+    /// at word magnitudes that are suprema over hull + margin (the derivation's "The caller's
+    /// obligation").
     pub identity_reachable: bool,
 }
 
