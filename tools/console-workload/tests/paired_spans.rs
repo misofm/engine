@@ -63,6 +63,11 @@ const QUEUE: usize = 16;
 const EQ: &str = "miso.parametric-eq";
 const COMPRESSOR: &str = "miso.compressor";
 const LIMITER: &str = "miso.true-peak-limiter";
+/// Collapse-capable since #973. Its pairing evidence is Part 2's twin test (every live `PerLane`
+/// parameter, #1336's attack, hold and release included) and its own crate's collapsed-against-dual
+/// transition test (`gate-expander`'s `tests/mono_collapse.rs`); it is not yet an [`Fx`] of the
+/// chained differential.
+const GATE: &str = "miso.gate-expander";
 
 /// `band-1-gain`, `band-1-frequency` of the EQ; `threshold`, `ratio`, `attack` of the compressor;
 /// `ceiling`, `release` of the limiter. Descriptor indices, not wire ids.
@@ -1589,13 +1594,14 @@ fn permutations<T: Copy>(atoms: &[T]) -> Vec<Vec<T>> {
     out
 }
 
-/// The set of effects that can sit in a collapse-eligible cohort is exactly [`Fx`], and none of
-/// them declares a `Shared` automatable parameter.
+/// The set of effects that can sit in a collapse-eligible cohort is exactly [`Fx`] and [`GATE`],
+/// and none of them declares a `Shared` automatable parameter.
 ///
 /// The first half keeps the differential's coverage honest: an effect that gains a one-plane body
 /// joins the collapse, and with it the pairing rule's obligation, so it has to join [`Fx`] and the
-/// scenarios above. The second half is why a `Shared` parameter needs no scenario on the collapsed
-/// path: none of the three has one. (A `Shared` parameter's `Left` or `Right` span is refused on
+/// scenarios above, or carry its A3 evidence as [`GATE`] does (Part 2's twin test pins it
+/// collapse-capable). The second half is why a `Shared` parameter needs no scenario on the
+/// collapsed path: none of the four has one. (A `Shared` parameter's `Left` or `Right` span is refused on
 /// both channels by every launch effect, so a twin on one would move nothing either way; the
 /// drain-level suite covers the `Both` interleavings.)
 #[test]
@@ -1640,7 +1646,12 @@ fn every_collapse_capable_launch_effect_is_one_of_these() {
         }
     }
     capable.sort();
-    let mut expected = vec![EQ.to_owned(), COMPRESSOR.to_owned(), LIMITER.to_owned()];
+    let mut expected = vec![
+        EQ.to_owned(),
+        COMPRESSOR.to_owned(),
+        LIMITER.to_owned(),
+        GATE.to_owned(),
+    ];
     expected.sort();
     assert_eq!(capable, expected);
 }
@@ -1942,6 +1953,17 @@ fn every_launch_effect_applies_a_twin_pair_with_channel_symmetric_validity() {
             .any(|line| line.contains(LIMITER) && line.contains("collapse-capable")),
         "{covered:?}"
     );
+    // #973: the gate's A3 obligation. Every link mode it supports binds a collapse-capable bank
+    // and takes the twin pairs on every live PerLane parameter.
+    for mode in [LinkMode::DualMono, LinkMode::Maximum, LinkMode::Average] {
+        assert!(
+            covered.iter().any(|line| {
+                line.starts_with(&format!("{GATE} (bank, collapse-capable, {mode:?})"))
+                    && line.contains("7 live PerLane parameters")
+            }),
+            "{GATE} {mode:?}: {covered:?}"
+        );
+    }
 }
 
 /// Issue #1012: the per-node staging-window bound the pairing rule rests on, refused at
