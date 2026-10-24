@@ -346,7 +346,7 @@ fn a_monitor_write_on_a_pending_candidate_applies_at_adoption_with_its_revision(
             PlanAdoption::NoEarlierThan((adopt * quantum) as u64),
         )
         .expect("room")
-        .commit();
+        .commit(model_revision);
 
     for block in 0..=at {
         submit(&mut sources, &planes, quantum, block);

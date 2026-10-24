@@ -74,7 +74,7 @@ pub(crate) fn main() {
     )
     .expect("graph plan exchange");
     publisher
-        .publish(prepared_graph(7, Some(Arc::clone(&drops))))
+        .publish(prepared_graph(7, Some(Arc::clone(&drops))), 0)
         .unwrap_or_else(|_| panic!("first graph replacement must publish"));
 
     enum RetirementCommand {
@@ -148,7 +148,7 @@ pub(crate) fn main() {
     // with its own epoch once it is published again.
     assert_eq!(
         publisher
-            .publish(candidate)
+            .publish(candidate, 0)
             .unwrap_or_else(|_| panic!("plan 8 must publish after reclamation")),
         PlanEpoch(2)
     );

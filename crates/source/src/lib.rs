@@ -5236,7 +5236,7 @@ mod tests {
                     if let Some(program) = (program.take().expect("program"))(identity) {
                         graph::install_carry_program(&mut plan, program).expect("install");
                     }
-                    assert!(publisher.publish(plan).is_ok());
+                    assert!(publisher.publish(plan, 0).is_ok());
                 }
                 let mut output = [f32::NAN; 2 * FRAMES as usize];
                 let sample = owner.next_absolute_sample();

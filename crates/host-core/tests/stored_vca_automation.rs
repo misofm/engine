@@ -936,7 +936,7 @@ fn carry_run(
             publisher
                 .reserve_replacement(plan, engine::realtime::PlanAdoption::Next)
                 .unwrap_or_else(|_| panic!("reserve the successor"))
-                .commit();
+                .commit(revision);
             successor = Some((next_sources, next_handles, next_gate));
         }
         let at = block * quantum;

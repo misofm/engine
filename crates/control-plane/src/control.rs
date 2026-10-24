@@ -2973,8 +2973,10 @@ where
             reports.retain(|(row, _)| *row != donor_epoch);
         }
         reports.push((epoch, A::Row::from(resources)));
-        // #1310 D5 step 4: B is published only now, owning every donated ring and record.
-        reservation.commit();
+        // #1310 D5 step 4: B is published only now, owning every donated ring and record. Its
+        // payload carries the revision its gate carries, for the watermark's claim settle (#1482
+        // R1).
+        reservation.commit(revision);
         drop(reports);
         #[cfg(feature = "test-support")]
         {

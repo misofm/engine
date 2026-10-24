@@ -18,6 +18,17 @@
 //! `&mut self`. A reader that sees an odd counter, or a different counter before and after its
 //! loads, retries, at most [`MAXIMUM_READ_ATTEMPTS`] times. There is no `unsafe` here: this module
 //! is inside the realtime root that `tools/realtime-policy` holds to its approved-unsafe list.
+//!
+//! An owner that embeds a [`PublishedWords`] in its own shared allocation (an observation slot,
+//! #1482) calls the record's crate-private publish and read directly, and keeps the single-writer
+//! discipline by ownership: its one publisher handle is not `Clone`.
+//!
+//! # The counter's width
+//!
+//! The counter is a `u64` (#1482 R3). At one publication per block it cannot wrap in a session's
+//! lifetime, whereas a `u32` wraps in about 130 days at 48 kHz and 128-frame blocks, and a reader
+//! stalled across exactly 2^32 publications would then accept a torn record. A `u64` costs the
+//! writer the same two stores.
 
 use core::sync::atomic::AtomicUsize;
 
@@ -26,8 +37,16 @@ use core::sync::atomic::AtomicUsize;
 use super::spsc::sync::{Arc, AtomicU64, Ordering, fence};
 
 /// The bound on one read's attempts. It keeps a read provably finite while a writer publishing in
-/// a tight loop still lets the reader through. A production writer publishes at most once per
-/// render block, so a read retries only when it lands inside one record store.
+/// a tight loop still lets the reader through.
+///
+/// A production writer publishes at most once per render block (an observation slot once per
+/// closed window), so a read retries only when it lands inside one record store, which is
+/// vanishingly rare. The number is set for the *stress* case instead: #143's `E11` runs a writer
+/// that publishes continuously in a tight loop, and at four attempts that measured a 50% give-up
+/// rate, because four reads of a record are comparable in length to the store they race.
+/// Sixty-four took the measured give-up rate to zero there while keeping the loop provably
+/// finite, which is what the bound is for. A reader is never on the render thread, so a retry
+/// costs a render block nothing.
 pub const MAXIMUM_READ_ATTEMPTS: usize = 64;
 
 /// The attempts one read takes. Under `--cfg loom` it is two, so `seqlock_loom` can explore every
@@ -66,10 +85,7 @@ pub struct PublishedWordsReader<const N: usize> {
 pub fn published_words<const N: usize>(
     initial: [u64; N],
 ) -> (PublishedWordsWriter<N>, PublishedWordsReader<N>) {
-    let record = Arc::new(PublishedWords {
-        sequence_lock: AtomicU64::new(0),
-        words: initial.map(AtomicU64::new),
-    });
+    let record = Arc::new(PublishedWords::new(initial));
     let reader = PublishedWordsReader {
         record: Arc::clone(&record),
     };
@@ -89,47 +105,75 @@ pub fn published_words_retained_bytes<const N: usize>() -> usize {
     core::alloc::Layout::new::<SharedAllocation<N>>().size()
 }
 
+impl<const N: usize> PublishedWords<N> {
+    /// A record holding `initial` with an even counter, for an owner that embeds it in its own
+    /// shared allocation. Call it on a control thread.
+    pub(crate) fn new(initial: [u64; N]) -> Self {
+        Self {
+            sequence_lock: AtomicU64::new(0),
+            words: initial.map(AtomicU64::new),
+        }
+    }
+}
+
 // REALTIME_POLICY_BEGIN
+impl<const N: usize> PublishedWords<N> {
+    /// Overwrite the record with `words`. Wait-free: two counter stores and `N` word stores.
+    ///
+    /// The caller is the record's only writer: [`PublishedWordsWriter`] by `&mut self`, an
+    /// embedding owner by its one non-`Clone` publisher handle.
+    #[inline]
+    pub(crate) fn publish(&self, words: &[u64; N]) {
+        let opening = self.sequence_lock.load(Ordering::Relaxed).wrapping_add(1);
+        self.sequence_lock.store(opening, Ordering::Relaxed);
+        // Keeps the word stores below from being observed before the counter went odd.
+        fence(Ordering::Release);
+        for (cell, word) in self.words.iter().zip(words) {
+            cell.store(*word, Ordering::Relaxed);
+        }
+        self.sequence_lock
+            .store(opening.wrapping_add(1), Ordering::Release);
+    }
+}
+
 impl<const N: usize> PublishedWordsWriter<N> {
     /// Overwrite the record with `words`. Wait-free: two counter stores and `N` word stores.
     #[inline]
     pub fn publish(&mut self, words: &[u64; N]) {
-        let record = &*self.record;
-        let opening = record.sequence_lock.load(Ordering::Relaxed).wrapping_add(1);
-        record.sequence_lock.store(opening, Ordering::Relaxed);
-        // Keeps the word stores below from being observed before the counter went odd.
-        fence(Ordering::Release);
-        for (cell, word) in record.words.iter().zip(words) {
-            cell.store(*word, Ordering::Relaxed);
-        }
-        record
-            .sequence_lock
-            .store(opening.wrapping_add(1), Ordering::Release);
+        self.record.publish(words);
     }
 }
 // REALTIME_POLICY_END
+
+impl<const N: usize> PublishedWords<N> {
+    /// The newest whole record, or [`PublishedWordsBusy`] if every one of the bounded attempts
+    /// landed inside a publication. Never a partial record: the words are taken between two equal
+    /// even counter reads, so what comes back is exactly one publication.
+    pub(crate) fn read(&self) -> Result<[u64; N], PublishedWordsBusy> {
+        for _ in 0..READ_ATTEMPTS {
+            let before = self.sequence_lock.load(Ordering::Acquire);
+            if !before.is_multiple_of(2) {
+                continue;
+            }
+            let mut words = [0_u64; N];
+            for (word, cell) in words.iter_mut().zip(&self.words) {
+                *word = cell.load(Ordering::Relaxed);
+            }
+            fence(Ordering::Acquire);
+            if self.sequence_lock.load(Ordering::Relaxed) == before {
+                return Ok(words);
+            }
+        }
+        Err(PublishedWordsBusy)
+    }
+}
 
 impl<const N: usize> PublishedWordsReader<N> {
     /// The newest whole record, or [`PublishedWordsBusy`] if every one of the bounded attempts
     /// landed inside a publication. Never a partial record: the words are taken between two equal
     /// even counter reads, so what comes back is exactly one publication.
     pub fn read(&self) -> Result<[u64; N], PublishedWordsBusy> {
-        let record = &*self.record;
-        for _ in 0..READ_ATTEMPTS {
-            let before = record.sequence_lock.load(Ordering::Acquire);
-            if !before.is_multiple_of(2) {
-                continue;
-            }
-            let mut words = [0_u64; N];
-            for (word, cell) in words.iter_mut().zip(&record.words) {
-                *word = cell.load(Ordering::Relaxed);
-            }
-            fence(Ordering::Acquire);
-            if record.sequence_lock.load(Ordering::Relaxed) == before {
-                return Ok(words);
-            }
-        }
-        Err(PublishedWordsBusy)
+        self.record.read()
     }
 }
 

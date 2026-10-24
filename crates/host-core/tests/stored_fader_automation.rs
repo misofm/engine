@@ -3012,7 +3012,7 @@ fn level_move_run_muted(
             publisher
                 .reserve_replacement(plan, engine::realtime::PlanAdoption::Next)
                 .unwrap_or_else(|_| panic!("reserve the successor"))
-                .commit();
+                .commit(revision);
             successor_sources = Some(next_sources);
         }
         for &(_, (offsets_sum, smoothing_samples)) in moves.iter().filter(|(at, _)| *at == block) {

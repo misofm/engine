@@ -54,7 +54,7 @@ fn a_plan_with_an_attachment_renders_and_swaps_with_zero_allocator_calls() {
     )
     .expect("exchange");
     publisher
-        .publish(plan(2))
+        .publish(plan(2), 0)
         .unwrap_or_else(|_| panic!("publish"));
     bench_alloc::assert_installed();
 

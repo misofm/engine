@@ -9,13 +9,12 @@
 //! A conflating cell has exactly one answer: the writer overwrites, always, in bounded time, and
 //! the reader takes whatever is there. Nothing is queued, so nothing can back up.
 //!
-//! # The seqlock, spelled in safe Rust
+//! # The seqlock
 //!
-//! Every published field is its own atomic word and the whole window is fenced by an odd/even
-//! sequence counter: the writer makes it odd, stores the fields, makes it even; a reader that sees
-//! an odd counter, or a different counter before and after, retries. There is no `UnsafeCell` and
-//! no `unsafe` block, which matters because this module is inside the realtime root that
-//! `tools/realtime-policy` holds to its approved-unsafe list.
+//! A window travels as five `u64` words through the engine's one single-writer seqlock
+//! (`seqlock.rs`, #1482 D3), embedded in the slot so the slot stays one allocation. The publisher
+//! is the record's only writer by ownership: it is not `Clone`. A read is bounded to
+//! `seqlock::MAXIMUM_READ_ATTEMPTS` attempts and reports absence when every one tore.
 //!
 //! Under `wasm32-unknown-unknown` without the `atomics` target feature -- the browser-local
 //! fallback the AudioWorklet ships -- every operation below lowers to a plain load or store (the
@@ -29,8 +28,10 @@
 //! `sequence - consumed_sequence - 1` is the exact number of windows that were overwritten -- which
 //! turns "the meter froze" from an invisible failure into a counted one.
 
-use core::sync::atomic::{AtomicU32, AtomicU64, Ordering, fence};
+use core::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+
+use super::seqlock::PublishedWords;
 
 /// One closed observation window: what a consumer reads, and the only thing that crosses.
 ///
@@ -58,30 +59,41 @@ pub struct ObservationWindow {
     pub right: f32,
 }
 
-/// Bounded retries before a read gives up and reports absence.
-///
-/// In production a writer publishes once per closed window -- once per `window_blocks` render
-/// blocks -- so a retry needs the read to land inside one seven-word store and is vanishingly
-/// rare. The number is set for the *stress* case instead: `E11` runs a writer that publishes
-/// continuously in a tight loop, and at four attempts that measured a 50% give-up rate, because
-/// four six-word reads are comparable in length to the store they are racing. Sixty-four takes the
-/// measured give-up rate to zero there while keeping the loop provably finite, which is what the
-/// bound is actually for. A reader is never on the render thread, so a retry costs a render block
-/// nothing.
-const MAXIMUM_READ_ATTEMPTS: usize = 64;
+/// The words of one window in the shared record: `first_sample`, `end_sample`, `sequence`,
+/// `blocks`, and the two lanes' `f32::to_bits` (left high, right low), so every published value is
+/// exact and `-0.0` survives.
+const WINDOW_WORDS: usize = 5;
+
+impl ObservationWindow {
+    const fn to_words(self) -> [u64; WINDOW_WORDS] {
+        [
+            self.first_sample,
+            self.end_sample,
+            self.sequence,
+            self.blocks as u64,
+            ((self.left.to_bits() as u64) << 32) | self.right.to_bits() as u64,
+        ]
+    }
+
+    #[allow(clippy::cast_possible_truncation)] // `blocks` and each lane were published as 32 bits.
+    const fn from_words(words: [u64; WINDOW_WORDS]) -> Self {
+        let [first_sample, end_sample, sequence, blocks, lanes] = words;
+        Self {
+            first_sample,
+            end_sample,
+            sequence,
+            blocks: blocks as u32,
+            left: f32::from_bits((lanes >> 32) as u32),
+            right: f32::from_bits(lanes as u32),
+        }
+    }
+}
 
 /// The shared conflating cell. Not constructed directly: [`observation_slot`] makes the pair.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct ObservationSlot {
-    /// Odd while a publication is in flight, even between them.
-    sequence_lock: AtomicU32,
-    first_sample: AtomicU64,
-    end_sample: AtomicU64,
-    sequence: AtomicU64,
-    blocks: AtomicU32,
-    /// `f32::to_bits`, so the published word is exact and `-0.0` survives.
-    left: AtomicU32,
-    right: AtomicU32,
+    /// The published window, in `ObservationWindow::to_words` order.
+    words: PublishedWords<WINDOW_WORDS>,
     /// The reader's own single-writer word.
     consumed: AtomicU64,
 }
@@ -89,7 +101,9 @@ pub struct ObservationSlot {
 /// Exact engine-owned retained payload of one observation slot.
 ///
 /// The cell is one allocation shared by the two endpoints; the endpoints themselves are one
-/// pointer each and are counted by whatever owns them.
+/// pointer each and are counted by whatever owns them. 56 bytes since #1482: the seqlock's `u64`
+/// counter, five window words and the reader's `consumed` word (48 before, with a `u32` counter
+/// and seven narrower fields).
 #[must_use]
 pub const fn observation_slot_retained_bytes() -> usize {
     core::mem::size_of::<ObservationSlot>()
@@ -110,7 +124,10 @@ pub struct ObservationReader {
 /// Build one conflating slot and its two endpoints. The only allocation this module makes.
 #[must_use]
 pub fn observation_slot() -> (ObservationPublisher, ObservationReader) {
-    let slot = Arc::new(ObservationSlot::default());
+    let slot = Arc::new(ObservationSlot {
+        words: PublishedWords::new(ObservationWindow::default().to_words()),
+        consumed: AtomicU64::new(0),
+    });
     let reader = Arc::clone(&slot);
     (
         ObservationPublisher { slot },
@@ -120,36 +137,12 @@ pub fn observation_slot() -> (ObservationPublisher, ObservationReader) {
 
 // REALTIME_POLICY_BEGIN
 impl ObservationPublisher {
-    /// Overwrite the cell with `window`. Wait-free: seven stores and two counter stores.
+    /// Overwrite the cell with `window`. Wait-free: five word stores and two counter stores.
     ///
     /// Latest wins, always. There is no full, no backpressure and no return value, because there
     /// is no outcome a render thread could act on.
     pub fn publish(&self, window: ObservationWindow) {
-        let opening = self
-            .slot
-            .sequence_lock
-            .load(Ordering::Relaxed)
-            .wrapping_add(1);
-        self.slot.sequence_lock.store(opening, Ordering::Relaxed);
-        // Keeps the field stores below from being observed before the counter went odd.
-        fence(Ordering::Release);
-        self.slot
-            .first_sample
-            .store(window.first_sample, Ordering::Relaxed);
-        self.slot
-            .end_sample
-            .store(window.end_sample, Ordering::Relaxed);
-        self.slot.sequence.store(window.sequence, Ordering::Relaxed);
-        self.slot.blocks.store(window.blocks, Ordering::Relaxed);
-        self.slot
-            .left
-            .store(window.left.to_bits(), Ordering::Relaxed);
-        self.slot
-            .right
-            .store(window.right.to_bits(), Ordering::Relaxed);
-        self.slot
-            .sequence_lock
-            .store(opening.wrapping_add(1), Ordering::Release);
+        self.slot.words.publish(&window.to_words());
     }
 
     /// The newest window sequence the reader says it has consumed. One load.
@@ -167,25 +160,8 @@ impl ObservationReader {
     /// comes back is exactly one publication.
     #[must_use]
     pub fn read(&self) -> Option<ObservationWindow> {
-        for _ in 0..MAXIMUM_READ_ATTEMPTS {
-            let before = self.slot.sequence_lock.load(Ordering::Acquire);
-            if !before.is_multiple_of(2) {
-                continue;
-            }
-            let window = ObservationWindow {
-                first_sample: self.slot.first_sample.load(Ordering::Relaxed),
-                end_sample: self.slot.end_sample.load(Ordering::Relaxed),
-                sequence: self.slot.sequence.load(Ordering::Relaxed),
-                blocks: self.slot.blocks.load(Ordering::Relaxed),
-                left: f32::from_bits(self.slot.left.load(Ordering::Relaxed)),
-                right: f32::from_bits(self.slot.right.load(Ordering::Relaxed)),
-            };
-            fence(Ordering::Acquire);
-            if self.slot.sequence_lock.load(Ordering::Relaxed) == before {
-                return (window.sequence != 0).then_some(window);
-            }
-        }
-        None
+        let window = ObservationWindow::from_words(self.slot.words.read().ok()?);
+        (window.sequence != 0).then_some(window)
     }
 
     /// Record that everything up to and including `sequence` has been consumed.

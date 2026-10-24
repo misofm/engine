@@ -299,7 +299,7 @@ mod tests {
             };
             if let Some(offset) = swap {
                 let _ = publisher
-                    .publish(offset_plan(block + 2, offset))
+                    .publish(offset_plan(block + 2, offset), 0)
                     .map_err(|_| "publish")
                     .expect("publish");
             }
@@ -381,7 +381,7 @@ mod tests {
             .reserve_replacement(prepared(2), PlanAdoption::Next)
             .expect("complete reservation");
         assert_eq!(reservation.epoch(), PlanEpoch(1));
-        assert_eq!(reservation.commit(), PlanEpoch(1));
+        assert_eq!(reservation.commit(0), PlanEpoch(1));
         assert_eq!(render_once(&mut realtime, 0).swap, SwapOutcome::Applied);
         assert_eq!(realtime.active_plan_id(), 2);
 
@@ -396,7 +396,7 @@ mod tests {
             .reserve_replacement(prepared(3), PlanAdoption::Next)
             .expect("reclaimed credit");
         assert_eq!(reservation.epoch(), PlanEpoch(2));
-        reservation.commit();
+        reservation.commit(0);
         assert_eq!(render_once(&mut realtime, 2).swap, SwapOutcome::Applied);
         assert_eq!(realtime.active_plan_id(), 3);
     }
@@ -423,7 +423,7 @@ mod tests {
         let replacement = publisher
             .reserve_replacement(prepared(3), PlanAdoption::Next)
             .expect("drop released credits");
-        assert_eq!(replacement.commit(), PlanEpoch(1));
+        assert_eq!(replacement.commit(0), PlanEpoch(1));
         assert_eq!(render_once(&mut realtime, 2).active_epoch, PlanEpoch(1));
     }
 
@@ -453,7 +453,7 @@ mod tests {
         publisher
             .reserve_replacement(prepared(2), PlanAdoption::Next)
             .expect("first")
-            .commit();
+            .commit(0);
         // The mailbox holds one published candidate: a second waits for render's claim, even
         // with a retirement credit free.
         assert!(matches!(
@@ -466,7 +466,7 @@ mod tests {
         publisher
             .reserve_replacement(prepared(3), PlanAdoption::Next)
             .expect("second")
-            .commit();
+            .commit(0);
         assert_eq!(render_once(&mut realtime, 2).render.plan_id, 3);
         assert_eq!(retirer.try_reclaim().expect("initial").0, PlanEpoch(0));
         assert_eq!(retirer.try_reclaim().expect("second").0, PlanEpoch(1));
@@ -492,7 +492,10 @@ mod tests {
         let (mut publisher, mut realtime, mut retirer) =
             plan_exchange(prepared(1), one_retirement()).expect("exchange");
         assert_eq!(publisher.free_retirement_credits(), 1);
-        assert!(matches!(publisher.publish(prepared(2)), Ok(PlanEpoch(1))));
+        assert!(matches!(
+            publisher.publish(prepared(2), 0),
+            Ok(PlanEpoch(1))
+        ));
         assert_eq!(publisher.free_retirement_credits(), 0);
 
         let candidate = withdrawn(&mut publisher);
@@ -523,7 +526,10 @@ mod tests {
         assert_eq!(retirer.try_reclaim().expect("plan one").0, PlanEpoch(0));
         assert_eq!(publisher.free_retirement_credits(), 1);
         // The next publication takes the next epoch: republication consumed none.
-        assert!(matches!(publisher.publish(prepared(3)), Ok(PlanEpoch(2))));
+        assert!(matches!(
+            publisher.publish(prepared(3), 0),
+            Ok(PlanEpoch(2))
+        ));
     }
 
     /// #1343 gate 1: once render has claimed the candidate, withdrawal reports `Taken` and the
@@ -532,7 +538,7 @@ mod tests {
     fn withdrawal_after_render_claimed_reports_taken() {
         let (mut publisher, mut realtime, mut retirer) =
             plan_exchange(prepared(1), one_retirement()).expect("exchange");
-        assert!(publisher.publish(prepared(2)).is_ok());
+        assert!(publisher.publish(prepared(2), 0).is_ok());
         assert_eq!(render_once(&mut realtime, 0).swap, SwapOutcome::Applied);
         assert!(matches!(publisher.withdraw(), Withdrawal::Taken));
         assert_eq!(
@@ -553,7 +559,7 @@ mod tests {
         let (mut publisher, mut realtime, _retirer) =
             plan_exchange(prepared(1), one_retirement()).expect("exchange");
         assert!(matches!(publisher.withdraw(), Withdrawal::Nothing));
-        assert!(publisher.publish(prepared(2)).is_ok());
+        assert!(publisher.publish(prepared(2), 0).is_ok());
         let candidate = withdrawn(&mut publisher);
         assert!(matches!(publisher.withdraw(), Withdrawal::Nothing));
         drop(candidate);
@@ -566,7 +572,10 @@ mod tests {
     }
 
     fn withdrawn_then_given_up(publisher: &mut PlanPublisher) -> PreparedRenderPlan {
-        assert!(matches!(publisher.publish(prepared(3)), Ok(PlanEpoch(2))));
+        assert!(matches!(
+            publisher.publish(prepared(3), 0),
+            Ok(PlanEpoch(2))
+        ));
         withdrawn(publisher).into_plan()
     }
 
@@ -583,11 +592,11 @@ mod tests {
         )
         .expect("exchange");
         assert_eq!(publisher.mailbox_cell_states(), [Active, Empty]);
-        assert!(publisher.publish(prepared(2)).is_ok());
+        assert!(publisher.publish(prepared(2), 0).is_ok());
         assert_eq!(publisher.mailbox_cell_states(), [Active, Full]);
         assert_eq!(render_once(&mut realtime, 0).render.plan_id, 2);
         assert_eq!(publisher.mailbox_cell_states(), [Empty, Active]);
-        assert!(publisher.publish(prepared(3)).is_ok());
+        assert!(publisher.publish(prepared(3), 0).is_ok());
         assert_eq!(publisher.mailbox_cell_states(), [Full, Active]);
         let report = render_once(&mut realtime, 2);
         assert_eq!(
@@ -609,10 +618,10 @@ mod tests {
         use MailboxCellState::{Active, Empty};
         let (mut publisher, mut realtime, mut retirer) =
             plan_exchange(prepared(1), one_retirement()).expect("exchange");
-        assert!(publisher.publish(prepared(2)).is_ok());
+        assert!(publisher.publish(prepared(2), 0).is_ok());
         assert_eq!(render_once(&mut realtime, 0).swap, SwapOutcome::Applied);
         assert_eq!(publisher.free_retirement_credits(), 0);
-        let returned = match publisher.publish(prepared(3)) {
+        let returned = match publisher.publish(prepared(3), 0) {
             Err(PublishError::Full(returned)) => returned,
             _ => panic!("a credit-less publication must fail Full"),
         };
@@ -623,7 +632,7 @@ mod tests {
 
         let _ = retirer.try_reclaim().expect("plan one");
         assert_eq!(publisher.free_retirement_credits(), 1);
-        assert!(matches!(publisher.publish(returned), Ok(PlanEpoch(2))));
+        assert!(matches!(publisher.publish(returned, 0), Ok(PlanEpoch(2))));
         let report = render_once(&mut realtime, 4);
         assert_eq!(
             (report.swap, report.active_epoch, report.render.plan_id),
@@ -719,7 +728,7 @@ mod tests {
             publisher
                 .reserve_replacement(plan, PlanAdoption::Next)
                 .expect("room")
-                .commit();
+                .commit(revision);
             gate
         }
 
@@ -807,7 +816,7 @@ mod tests {
                 .reserve_replacement(plan, PlanAdoption::Next)
                 .expect("room");
             reservation.set_superseded(2);
-            reservation.commit();
+            reservation.commit(a + 3);
             assert_eq!(block(&mut realtime, 0).swap, SwapOutcome::Applied);
             let adopted = read(&publisher);
             assert_eq!(
@@ -841,7 +850,7 @@ mod tests {
                 .reserve_replacement(plan, PlanAdoption::Next)
                 .expect("room");
             reservation.set_outcome(CandidateOutcome::TransitionFallback);
-            reservation.commit();
+            reservation.commit(b + 2);
             let candidate = withdrawn(&mut publisher);
             let _ = publisher.republish(candidate);
             assert_eq!(block(&mut realtime, 2).swap, SwapOutcome::Applied);
@@ -979,7 +988,7 @@ mod tests {
             publisher
                 .reserve_replacement(plan, PlanAdoption::Next)
                 .expect("room")
-                .commit();
+                .commit(5);
             // The running plan's gate moves while B is published; B's block must not see it.
             first_gate.publish(3);
             assert_eq!(block(&mut realtime, 2).swap, SwapOutcome::Applied);
@@ -1265,7 +1274,7 @@ mod tests {
                             if let Ok(reservation) =
                                 publisher.reserve_replacement(plan, PlanAdoption::Next)
                             {
-                                reservation.commit();
+                                reservation.commit(revision + 1);
                                 newest = candidate;
                                 revision += 1;
                                 publication = 1;
@@ -1565,7 +1574,7 @@ mod tests {
             publisher
                 .reserve_replacement(plan, adoption)
                 .expect("room")
-                .commit();
+                .commit(0);
         }
 
         /// Render the block at `sample` and return `(swap, plan that rendered it)`.
@@ -1903,7 +1912,7 @@ mod tests {
         let publisher_thread = std::thread::spawn(move || {
             for mut candidate in replacements {
                 loop {
-                    match publisher.publish(candidate) {
+                    match publisher.publish(candidate, 0) {
                         Ok(_) => break,
                         Err(PublishError::Full(returned)) => {
                             candidate = returned;
@@ -2165,7 +2174,7 @@ mod tests {
                     publisher
                         .reserve_replacement(oscillator(1, carry, &hooks), PlanAdoption::Next)
                         .expect("reserve")
-                        .commit();
+                        .commit(0);
                 }
                 let (output, report) = owner_block(&mut owner);
                 blocks.push(output);
@@ -2183,7 +2192,7 @@ mod tests {
             publisher
                 .reserve_replacement(oscillator(1, true, &hooks), PlanAdoption::Next)
                 .expect("reserve")
-                .commit();
+                .commit(0);
             let (output, report) = owner_block(&mut owner);
             assert_eq!(report.carry, CarryOutcome::PredecessorMismatch);
             assert_eq!(output, reference()[0]);
@@ -2202,7 +2211,7 @@ mod tests {
             publisher
                 .reserve_replacement(oscillator(1, true, &hooks), PlanAdoption::Next)
                 .expect("reserve")
-                .commit();
+                .commit(0);
             drop(owner);
             assert_eq!(hooks.load(Ordering::Relaxed), 0);
         }
@@ -2229,7 +2238,7 @@ mod tests {
                     publisher
                         .reserve_replacement(oscillator(1, true, &hooks), PlanAdoption::Next)
                         .expect("reserve")
-                        .commit();
+                        .commit(0);
                 }
                 let before = capture_epoch(&mut owner);
                 let mut output = [0.0_f32; FRAMES as usize];

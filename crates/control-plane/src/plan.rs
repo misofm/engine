@@ -216,11 +216,12 @@ impl<'a> ObservedReservation<'a> {
             .set_outcome(outcome);
     }
 
-    pub(crate) fn commit(mut self) {
+    /// Publish the candidate with its own structural revision (#1482 R1).
+    pub(crate) fn commit(mut self, revision: u64) {
         self.inner
             .take()
             .expect("reservation commits once")
-            .commit();
+            .commit(revision);
         #[cfg(feature = "test-support")]
         update_test_owners(|owners| {
             owners.candidate_plan_published += 1;

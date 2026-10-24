@@ -264,7 +264,7 @@ fn run_audit() {
         assert_pcm_fixture(&output);
         let first_meter_values =
             drain_fixture(&mut initial_meters, ACCEPTED_GRAPH_METERS, "A fixture");
-        let first_epoch = match publisher.publish(applied) {
+        let first_epoch = match publisher.publish(applied, 0) {
             Ok(epoch) => epoch,
             Err(_) => panic!("B publication"),
         };
@@ -295,7 +295,7 @@ fn run_audit() {
 
         // Withdraw and republish: C is published, taken back before any render, and adopted
         // with its own epoch once it is published again.
-        let c_epoch = match publisher.publish(refused) {
+        let c_epoch = match publisher.publish(refused, 0) {
             Ok(epoch) => epoch,
             Err(_) => panic!("C publication after reclamation"),
         };
@@ -914,7 +914,7 @@ mod tests {
             let _stop = StopOnDrop(stop_ref);
             await_worker(&worker_ended, "readiness", || ready.load(Ordering::Acquire));
 
-            let b_epoch = match publisher.publish(applied) {
+            let b_epoch = match publisher.publish(applied, 0) {
                 Ok(epoch) => epoch,
                 Err(_) => panic!("publish B"),
             };

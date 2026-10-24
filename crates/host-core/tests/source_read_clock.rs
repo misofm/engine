@@ -199,7 +199,7 @@ fn run(offset: u64, anchor: Option<u64>, swap: Swap) -> (Vec<Vec<u32>>, Vec<(u64
             publisher
                 .reserve_replacement(next.plan, PlanAdoption::Next)
                 .unwrap_or_else(|_| panic!("reserve the successor"))
-                .commit();
+                .commit(SUCCESSOR_REVISION);
             successor_sources = Some(next.sources);
         }
         if anchor.is_none() && block + 1 < BLOCKS {

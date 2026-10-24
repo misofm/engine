@@ -13,8 +13,9 @@
 //! a reservation or an [`UnadoptedCandidate`]. So a claimed candidate always finds retirement room,
 //! and render never defers a swap.
 //!
-//! Every candidate also carries its `superseded` count and its outcome (#1314 D1). Its revisions
-//! live on the candidate's own revision gate (#1502 D1), which travels inside the plan: the
+//! Every candidate also carries its structural revision (#1482 R1), its `superseded` count and
+//! its outcome (#1314 D1) in its payload. Its revisions live on the candidate's own revision gate
+//! (#1502 D1), which travels inside the plan: the
 //! control thread publishes each committed revision on the gate of the plan that carries its
 //! content (`PlanRevisionGate::publish`), and render takes each block's live snapshot from the
 //! gate of the plan it runs and advances the applied-revision watermark (`watermark.rs`) to it
@@ -154,12 +155,15 @@ impl Drop for RetirementCredit {
     }
 }
 
-/// A published candidate's payload. `superseded` and `outcome` are written only before
-/// publication, so they travel in the payload; its revisions are on the plan's own gate.
+/// A published candidate's payload. `revision`, `superseded` and `outcome` are written only before
+/// publication, so they travel in the payload; its revisions are on the plan's own gate, and
+/// `revision` is the structural one control stamped there, which the watermark's claim settle
+/// reads (#1482 R1).
 struct PublishedPlan {
     epoch: PlanEpoch,
     plan: PreparedRenderPlan,
     credit: RetirementCredit,
+    revision: u64,
     superseded: u64,
     outcome: CandidateOutcome,
 }
@@ -281,6 +285,7 @@ pub struct UnadoptedCandidate {
     epoch: PlanEpoch,
     plan: PreparedRenderPlan,
     credit: RetirementCredit,
+    revision: u64,
     superseded: u64,
     outcome: CandidateOutcome,
     adoption: PlanAdoption,
@@ -521,11 +526,16 @@ fn publish_into(
 impl PlanPublisher {
     /// Reserve, then commit, an exact-envelope candidate for adoption at the next block
     /// ([`PlanAdoption::Next`]); the epoch is consumed only on success. It fails `Full` while a
-    /// published candidate is unclaimed or no retirement credit is free.
+    /// published candidate is unclaimed or no retirement credit is free. `revision` is the
+    /// candidate's own structural revision, as [`PlanReplacementReservation::commit`] takes it.
     #[allow(clippy::result_large_err)] // Ownership-preserving backpressure is the public contract.
-    pub fn publish(&mut self, plan: PreparedRenderPlan) -> Result<PlanEpoch, PublishError> {
+    pub fn publish(
+        &mut self,
+        plan: PreparedRenderPlan,
+        revision: u64,
+    ) -> Result<PlanEpoch, PublishError> {
         match self.reserve_replacement(plan, PlanAdoption::Next) {
-            Ok(reservation) => Ok(reservation.commit()),
+            Ok(reservation) => Ok(reservation.commit(revision)),
             Err(
                 PlanReplacementReservationError::PublicationFull(plan)
                 | PlanReplacementReservationError::RetirementFull(plan),
@@ -611,6 +621,7 @@ impl PlanPublisher {
                     epoch,
                     plan,
                     credit,
+                    revision,
                     superseded,
                     outcome,
                 },
@@ -619,6 +630,7 @@ impl PlanPublisher {
                 epoch,
                 plan,
                 credit,
+                revision,
                 superseded,
                 outcome,
                 adoption,
@@ -658,6 +670,7 @@ impl PlanPublisher {
                 epoch,
                 plan: candidate.plan,
                 credit: candidate.credit,
+                revision: candidate.revision,
                 superseded: candidate.superseded,
                 outcome: candidate.outcome,
             },
@@ -721,7 +734,12 @@ impl PlanReplacementReservation<'_> {
     /// Publish the bound complete candidate. All fallible checks and the credit were taken by the
     /// reservation, so this is a bounded move into the `Empty` cell plus one `Release`
     /// compare-and-swap that cannot fail.
-    pub fn commit(self) -> PlanEpoch {
+    ///
+    /// `revision` is the candidate's own structural revision, the one the control plane
+    /// publishes on its gate (#1482 R1). It travels in the payload: when render claims a newer
+    /// candidate before the watermark advances past this one, the revisions up to it complete
+    /// with this candidate's outcome.
+    pub fn commit(self, revision: u64) -> PlanEpoch {
         let Self {
             publication,
             next_epoch,
@@ -739,6 +757,7 @@ impl PlanReplacementReservation<'_> {
                 epoch,
                 plan,
                 credit,
+                revision,
                 superseded,
                 outcome,
             },
@@ -841,13 +860,14 @@ impl RealtimePlanOwner {
             epoch,
             plan,
             credit,
+            revision,
             superseded,
             outcome,
         }) = self.publication.claim(observed)
         else {
             return (SwapOutcome::None, CarryOutcome::NotRequested);
         };
-        self.watermark.note_claim(superseded, outcome);
+        self.watermark.note_claim(revision, superseded, outcome);
         let old_epoch = self.active.0;
         let continuing = self.active.1.next_absolute_sample();
         let mut old = core::mem::replace(&mut self.active, (epoch, plan));

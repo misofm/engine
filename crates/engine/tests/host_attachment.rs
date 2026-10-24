@@ -95,7 +95,7 @@ fn render_and_swap_never_touch_the_attachment_and_retirement_drops_it_off_render
     )
     .expect("exchange");
     publisher
-        .publish(successor)
+        .publish(successor, 0)
         .unwrap_or_else(|_| panic!("publish"));
 
     let render_thread = std::thread::current().id();

@@ -677,7 +677,7 @@ fn anchored_swap_run(
     publisher
         .reserve_replacement(prepared.plan, engine::realtime::PlanAdoption::Next)
         .unwrap_or_else(|_| panic!("reserve the successor"))
-        .commit();
+        .commit(0);
     let anchor = (anchor_block * QUANTUM) as u64;
     for block in SWAP_BLOCK..BLOCKS {
         if block + 1 < BLOCKS {
@@ -7084,7 +7084,7 @@ mod meter_carry {
         publisher
             .reserve_replacement(plan, PlanAdoption::Next)
             .unwrap_or_else(|_| panic!("reserve the successor"))
-            .commit();
+            .commit(SUCCESSOR_REVISION);
         for block in SWAP_BLOCK..BLOCKS {
             if block + 1 < BLOCKS {
                 feed.submit(&mut b_sources, rate, block + 1);
@@ -9568,7 +9568,7 @@ mod spectrum_carry {
         publisher
             .reserve_replacement(plan, PlanAdoption::Next)
             .unwrap_or_else(|_| panic!("reserve the successor"))
-            .commit();
+            .commit(SUCCESSOR_REVISION);
         // From the swap on the host acts on the successor's collection, in the successor's terms.
         driver.script = b_request.script();
         let mut b_capture = Some(b_capture);
