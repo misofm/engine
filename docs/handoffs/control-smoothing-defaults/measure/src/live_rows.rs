@@ -13,6 +13,8 @@
 //!   signal and each shunted effect's wet output, with the effects' own kernels.
 //! * `link_glide.csv`: the same crossfade between the compressor's `dual_mono` and `maximum`
 //!   outputs, the emulation of #1370's detector blend.
+//! * `link_glide_effects.csv`: the same emulation for the gate-expander, the transient shaper and
+//!   the true-peak limiter (#1430), with an `effect` column.
 //!
 //! A crossfade is `y = dry + m (wet - dry)`: the dry plane times a constant and the difference
 //! `d = wet - dry` times the ramp `m`. A constant gain moves nothing, so the click is the splatter
@@ -21,8 +23,8 @@
 //! `d` is the programme, this is the out-of-band energy of `y` that `mute_click.csv` reports, to
 //! within frame leakage; the `mute-reference` rows show the two agree), `splatter_db` all of it, and
 //! `hf_splatter_db` its 1.5-20 kHz part against the programme's own 1.5-20 kHz energy. Ratios are
-//! relative to the reference programme: the effect's latency-matched input (the dry signal), or for
-//! the link glide the compressor's input.
+//! relative to the reference programme: the effect's latency-matched input (the dry signal; for
+//! the link glide the input delayed by the effect's latency, which for the compressor is zero).
 
 use std::fmt::Write as _;
 use std::fs;
@@ -54,7 +56,7 @@ pub const TRANSFER_RAMPS_MS: [f32; 11] =
 /// grid, so the two channels' kicks alternate and the channels are uncorrelated.
 const WIDE_OFFSET_S: f64 = 0.37;
 
-const FILES: [(&str, &str); 4] = [
+const FILES: [(&str, &str); 5] = [
     (
         "polarity_click.csv",
         "rate_hz,material,transition,ramp_ms,ramp_samples,events,splatter_db,hf_splatter_db,oob_db,\
@@ -78,6 +80,21 @@ const FILES: [(&str, &str); 4] = [
          step_db,splatter_db,hf_splatter_db,oob_db,oob_worst_db,oob_edge_hz,ctr_max_db,\
          events_above_threshold",
     ),
+    (
+        "link_glide_effects.csv",
+        "rate_hz,effect,material,channel_correlation,setting,transition,ramp_ms,ramp_samples,\
+         events,step_db,splatter_db,hf_splatter_db,oob_db,oob_worst_db,oob_edge_hz,ctr_max_db,\
+         events_above_threshold",
+    ),
+];
+
+/// #1430's link-glide effects and the materials on which a link change moves each one's gain
+/// (spec D2): the gate on `bass-kick`, where only the linked bass lane opens on the kick; the
+/// transient shaper and the limiter on `bass-kick` and `mix-wide`.
+const LINK_EFFECTS: [(Effect, &[&str]); 3] = [
+    (Effect::Gate, &["bass-kick"]),
+    (Effect::TransientShaper, &["bass-kick", "mix-wide"]),
+    (Effect::Limiter, &["bass-kick", "mix-wide"]),
 ];
 
 // ---- question 4: polarity ------------------------------------------------------------------
@@ -664,21 +681,33 @@ fn link_material(rate: u32, name: &'static str, mats: &[Material]) -> Material {
 
 const LINK_TRANSITIONS: [(&str, Toward); 2] = [("link", Toward::Wet), ("unlink", Toward::Dry)];
 
-/// The compressor at 6 dB of gain reduction (under `maximum`) switching between `dual_mono` (the
-/// crossfade's dry plane) and `maximum` (its wet plane).
-fn link_glide(rate: u32, name: &'static str, mats: &[Material]) -> String {
+/// The reference programme of a link glide: the input delayed by the effect's latency, the
+/// alignment of both planes (each a render of the same prepared effect, so each carries that
+/// latency), as the bypass rows' shunt dry signal is.
+fn link_reference(setting: &Setting, rate: u32, source: &Stereo) -> Stereo {
+    shunt_dry(source, setting.latency(rate))
+}
+
+/// `effect` at its representative setting (the compressor and the limiter calibrated to 6 dB of
+/// peak gain reduction under `maximum`) switching between `dual_mono` (the crossfade's dry plane)
+/// and `maximum` (its wet plane). The compressor's rows (`link_glide.csv`) carry no `effect`
+/// column; every other effect's (`link_glide_effects.csv`) do.
+fn link_glide(rate: u32, effect: Effect, name: &'static str, mats: &[Material]) -> String {
     let mut out = String::new();
     let m = link_material(rate, name, mats);
-    let maximum = Setting::calibrate(Effect::Compressor, rate, &m.source, LinkMode::Maximum);
+    let maximum = Setting::calibrate(effect, rate, &m.source, LinkMode::Maximum);
     let dual = Setting {
         link: LinkMode::DualMono,
         ..maximum.clone()
     };
-    assert_eq!(maximum.latency(rate), 0, "the compressor adds no latency");
+    if effect == Effect::Compressor {
+        assert_eq!(maximum.latency(rate), 0, "the compressor adds no latency");
+    }
     let wet = maximum.render(rate, &m.source);
     let dry = dual.render(rate, &m.source);
+    let reference = link_reference(&maximum, rate, &m.source);
     let pair = Pair {
-        reference: &m.source,
+        reference: &reference,
         dry: &dry,
         wet: &wet,
     };
@@ -691,16 +720,26 @@ fn link_glide(rate: u32, name: &'static str, mats: &[Material]) -> String {
         &LINK_TRANSITIONS,
         &LINK_RAMPS_MS,
     );
-    let setting = maximum.describe().replace(
-        &format!("link={}", link_name(LinkMode::Maximum)),
-        "link=dual_mono<->maximum",
-    );
+    let glide = "link=dual_mono<->maximum";
+    let described = maximum.describe();
+    let setting = if effect == Effect::Compressor {
+        described.replace(&format!("link={}", link_name(LinkMode::Maximum)), glide)
+    } else if described.is_empty() {
+        glide.to_owned()
+    } else {
+        format!("{described} {glide}")
+    };
+    let prefix = if effect == Effect::Compressor {
+        String::new()
+    } else {
+        format!("{},", effect.name())
+    };
     for row in &rows {
         let (oob, worst, edge, ctr, above) = oob_columns(row, m.oob_hz);
         let _ = writeln!(
             out,
-            "{rate},{},{correlation:.3},{setting},{},{},{},{},{},{},{},{oob},{worst},{edge},{ctr},\
-             {above}",
+            "{rate},{prefix}{},{correlation:.3},{setting},{},{},{},{},{},{},{},{oob},{worst},\
+             {edge},{ctr},{above}",
             m.name,
             row.transition,
             row.ms,
@@ -753,7 +792,20 @@ pub fn run(out_dir: &Path, rates: &[u32]) {
             }
         }
         for (mi, name) in ["mix", "mix-wide", "bass-kick"].into_iter().enumerate() {
-            jobs.push((3, order(mi), Box::new(move || link_glide(rate, name, mats))));
+            jobs.push((
+                3,
+                order(mi),
+                Box::new(move || link_glide(rate, Effect::Compressor, name, mats)),
+            ));
+        }
+        for (ei, (effect, names)) in LINK_EFFECTS.into_iter().enumerate() {
+            for (mi, &name) in names.iter().enumerate() {
+                jobs.push((
+                    4,
+                    order(ei * 10 + mi),
+                    Box::new(move || link_glide(rate, effect, name, mats)),
+                ));
+            }
         }
     }
     // The crossfade jobs are the longest; starting them first keeps the pool busy.
@@ -765,6 +817,64 @@ pub fn run(out_dir: &Path, rates: &[u32]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A link glide's reference is aligned with both planes: for the limiter, whose lookahead
+    /// delays both renders, it is the input delayed by that latency sample for sample; for the
+    /// compressor (no latency) it is the input itself. A reference that passed the undelayed
+    /// input would misalign the limiter's rows with its planes.
+    #[test]
+    fn the_link_reference_is_the_latency_matched_input() {
+        let rate = 48_000;
+        let frames = 8 * QUANTUM + 37;
+        let tone = |f: f64, a: f64| -> Vec<f32> {
+            (0..frames)
+                .map(|i| {
+                    (a * (std::f64::consts::TAU * f * i as f64 / f64::from(rate)).sin()) as f32
+                })
+                .collect()
+        };
+        let source = Stereo {
+            left: tone(220.0, 0.9),
+            right: tone(330.0, 0.4),
+        };
+        let limiter = Setting {
+            effect: Effect::Limiter,
+            overrides: vec![("ceiling", -6.0)],
+            link: LinkMode::Maximum,
+        };
+        let latency = limiter.latency(rate);
+        assert!(latency > 0, "the limiter has a lookahead");
+        let reference = link_reference(&limiter, rate, &source);
+        for i in 0..frames {
+            let want = |x: &[f32]| if i < latency { 0.0 } else { x[i - latency] };
+            assert_eq!(
+                reference.left[i].to_bits(),
+                want(&source.left).to_bits(),
+                "left {i}"
+            );
+            assert_eq!(
+                reference.right[i].to_bits(),
+                want(&source.right).to_bits(),
+                "right {i}"
+            );
+        }
+        let compressor = Setting::calibrate(Effect::Compressor, rate, &source, LinkMode::Maximum);
+        let reference = link_reference(&compressor, rate, &source);
+        assert!(
+            reference
+                .left
+                .iter()
+                .zip(&source.left)
+                .all(|(a, b)| a.to_bits() == b.to_bits())
+        );
+        assert!(
+            reference
+                .right
+                .iter()
+                .zip(&source.right)
+                .all(|(a, b)| a.to_bits() == b.to_bits())
+        );
+    }
 
     /// The route probe is the shipped kernel's law: every ramping frame is `IndexedRamp`'s
     /// `c(k)`, `k` counted from the applying block's first frame, and the route ends exactly on
