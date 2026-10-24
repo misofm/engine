@@ -221,6 +221,23 @@ pub struct InsertedDelay {
     pub edge_id: GraphEdgeId,
     pub samples: LatencySamples,
 }
+/// A source-claim compensation line (#1287 D1): a floor on a track's `Input` node (#1285 D1)
+/// raises that node's input arrival, and a track's `Input` reads its source through a claim, not
+/// through a graph edge, so the compiler realises the raise as a line of `samples` on both lanes
+/// of the claim. A submix's `Input` never has one: the routes into it carry its compensation.
+///
+/// This is a report row. The compiler lowers the line by adding `samples` to both lanes of the
+/// node's [`PreparedTrackDelay`] entry (creating it when the session declared no delay), so it runs
+/// on the track-delay line and kernel (`runtime::TrackDelayLine`, `pdc_delay_block`). Unlike a
+/// declared track delay it is compensation: its samples count in `total_delay_samples` and the PDC
+/// caps. Empty for every plan compiled without floors.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SourceClaimLine {
+    /// The track's `TrackStage::Input` node.
+    pub node: GraphNodeId,
+    /// The line's length on each lane: the node's floored arrival minus its incoming arrival (0).
+    pub samples: LatencySamples,
+}
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ReductionRecord {
     pub node: GraphNodeId,
@@ -706,6 +723,9 @@ pub struct PreparedGraphPlan {
     /// Issue #210 phase 2: input-side track alignment, one entry per delayed track. Empty on every
     /// session that declared no delay.
     track_delays: Vec<PreparedTrackDelay>,
+    /// #1287 D1: the source-claim lines folded into `track_delays`, in node order. Empty for every
+    /// plan compiled without floors.
+    source_claim_lines: Vec<SourceClaimLine>,
     effects: Vec<GraphPreparedEffect>,
     /// Issue #140 A: one entry per effect live controls drive. Empty for every session that
     /// asked for no live controls, which is what keeps the runtime on its byte-identical path.
@@ -2496,6 +2516,22 @@ impl PreparedGraphPlan {
         &self.track_delays
     }
 
+    /// The source-claim lines this plan's `track_delays` include, in node order (#1287 D1).
+    ///
+    /// Empty for every plan compiled without floors.
+    #[must_use]
+    pub fn source_claim_lines(&self) -> &[SourceClaimLine] {
+        &self.source_claim_lines
+    }
+
+    /// Record the source-claim lines the compiler folded into this plan's `track_delays`
+    /// (#1287 D1). A report only: the lowering reads `track_delays`, so this changes no program.
+    #[must_use]
+    pub fn with_source_claim_lines(mut self, lines: Vec<SourceClaimLine>) -> Self {
+        self.source_claim_lines = lines;
+        self
+    }
+
     fn has_valid_structural_layout(&self) -> bool {
         let graph_nodes: BTreeSet<_> = self.spec.nodes.iter().map(|node| &node.id).collect();
         if graph_nodes.len() != self.spec.nodes.len() {
@@ -2980,6 +3016,7 @@ impl PreparedGraphPlan {
             required_bindings: parts.required_bindings,
             routes: parts.routes,
             track_delays: parts.track_delays,
+            source_claim_lines: Vec::new(),
             effects: parts.effects,
             effect_controls: parts.effect_controls,
             effect_observations: parts.effect_observations,
