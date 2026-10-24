@@ -50,6 +50,10 @@ Three deliverables on top of PR-a's live
 - Mutants (each restored, `git diff` clean):
   - gate 3: `RAMP_PATH_NORM_TOLERANCE` tightened to `NORM_TOLERANCE` turns it red (44.1 kHz,
     18 kHz, -24 dB, Q 0.1, HPF -> bell): the grid reaches ramp words beyond a settled design's bound.
+  - gate 3, review fold: the retarget walk is pinned to the lane at frame 49 too. The verifier's
+    mutant (`start_ramp` takes `current` from the old target, not the coefficient) turns that pin
+    red (44.1 kHz, 20 Hz, -24 dB, Q 0.1, disabled -> bell -> next). The first walk is checked
+    whole on purpose: without a retarget the lane renders all 64 word sets.
   - gate 1: `section_touched` ignoring a general band's kind field (`control.rs`) turns it red
     (in-crate, `bank.rs` `live_enable_and_family_edits_stay_on_their_lane` also does); host-core
     `apply_edit` dropping Boolean/Enumeration edits turns it red (with the HPF-enable C ABI row).
