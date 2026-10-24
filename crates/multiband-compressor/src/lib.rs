@@ -1913,8 +1913,9 @@ struct PreparedMultibandCompressorBank<L: Lane, const W: usize> {
     /// ([`Side::rest_lanes`]) on both channels, or by [`advance_clocks`] over the whole bank;
     /// withdrawn by every automation block, reset and restore. While it stands, the next quiet
     /// block is the same block again: every lane stays at rest and writes `+0.0`, so
-    /// `process_bank` advances the clocks and returns. The prepared bypass cannot change, so the
-    /// claim never spans two kernel paths.
+    /// `process_bank` advances the clocks and returns. The prepared bypass is fixed at preparation
+    /// (only a direct factory request sets it; a session bypass is the rack's shunt and never
+    /// reaches this kernel, #1340), so the claim never spans two kernel paths.
     ///
     /// [`advance_clocks`]: PreparedNativeEffectBank::advance_clocks
     silent_fixed_point: bool,
@@ -1943,8 +1944,9 @@ impl<L: Lane, const W: usize> Instance<L, W> {
     }
 
     /// Advances the silence counters of the lanes in `bits` over `frames` frames of `+0.0`, as a
-    /// rendered block would: `min(run + frames, 2^24)`. A prepared bypass freezes the counters
-    /// with the filter, so it advances nothing.
+    /// rendered block would: `min(run + frames, 2^24)`. A prepared bypass (a direct factory
+    /// request's; a session bypass is the rack's shunt, #1340) freezes the counters with the
+    /// filter, so it advances nothing.
     fn advance_silence(&mut self, bits: u32, frames: usize) {
         if self.bypass || bits == 0 {
             return;
@@ -2214,7 +2216,8 @@ impl<L: Lane, const W: usize> PreparedNativeEffectBank for PreparedMultibandComp
         let frames = block.frames as usize;
         let words = frames * W;
         // Issue #893, whole-bank: no ramp in flight on either channel (no sidechain, and the
-        // bypass is prepared, so neither can differ from the block that earned the claim) and
+        // prepared bypass is fixed at preparation -- a session bypass is the rack's shunt, #1340
+        // -- so neither can differ from the block that earned the claim) and
         // both input planes exactly `+0.0`. `-0.0` and subnormal words are not quiet.
         let quiet = self.instance.sides[0].no_ramp_in_flight()
             && self.instance.sides[1].no_ramp_in_flight()

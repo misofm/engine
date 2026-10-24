@@ -272,6 +272,11 @@ Scope note `scope/1340.md` (Fable) and root's decisions govern where they differ
 - **Gate 6 (successor swap).** The prepared-bypass restart leg has no subject left; the test is
   `a_lifted_bypass_carries_across_a_rebuild_at_every_width`, one loop over the delay and the
   multiband.
+- **The kernel's prepared bypass (verifier fold).** The other launch effects keep a
+  factory-level prepared bypass as part of the effect contract (D4; conformance's latency-bypass
+  fault reads it), so the multiband keeps its `BYPASS` path, now reachable only by a direct factory
+  request; the three `lib.rs` docs that said it cannot change now say it is fixed at preparation
+  and that a session bypass is the rack's shunt.
 - **Red mutations:** `tests/MUTATIONS.md` rows 1340-M1 to M3, all RED.
 - **The walk's reach (root ruling, `in_place_commit.rs` authorized).** The multiband bypass row
   joining the live-only pool shifted the walk's seeded draws, and at its seed no `link_mode` edit
@@ -280,5 +285,6 @@ Scope note `scope/1340.md` (Fable) and root's decisions govern where they differ
   per session, one committed one-edit transaction per row name of the control list (a value other
   than the committed one, no ramp) and one structural edit, then the unchanged random tail. It
   asserts after that prelude that `matrix_mode`, `fader_ms`, `link_mode` and `<structural>` took
-  the full path, and keeps the end-of-walk assertions. Now 6 full `link_mode` commits, 1 of them
-  the first appearance (the rich session's one link-mode row).
+  the full path; the end-of-walk full-row loop, which only repeated it, is deleted. With the
+  prelude, 6 full `link_mode` commits, 1 of them the first appearance (the rich session's one
+  link-mode row).

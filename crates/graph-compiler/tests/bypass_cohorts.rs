@@ -790,7 +790,9 @@ fn a_mixed_bypass_multiband_cohort_binds_one_bank() {
 /// Track 0 is bypassed and fed [`Feed::Hot`], which trips its wet path's block-boundary check
 /// (D7); its bank-mates are fed music. Every other track's taps equal the same cohort with track 0
 /// fed music too. With the whole-bank recovery back (D1 reverted), the hot lane zeroes its
-/// bank-mates' blocks and this turns red.
+/// bank-mates' blocks and this turns red. That the feed trips D7 is shown at `Scalar`, where track
+/// 0 renders per node through [`CountRecoveries`]: banking never changes a lane's bits, so its
+/// lane in the bank trips on the same blocks.
 #[test]
 fn a_hot_bypassed_multiband_lane_leaves_its_bank_mates_bits_unchanged() {
     const TRACKS: usize = 8;
@@ -821,6 +823,25 @@ fn a_hot_bypassed_multiband_lane_leaves_its_bank_mates_bits_unchanged() {
         compared += 1;
     }
     assert_eq!(compared, 2 * (TRACKS - 1));
+    let recovered = Arc::new(AtomicU64::new(0));
+    let feed = |track| if track == HOT { Feed::Hot } else { Feed::Music };
+    render_prepared(&model, Backend::Scalar, &feed, &mut |effects| {
+        let entry = effects
+            .entries
+            .iter_mut()
+            .find(|entry| entry.track_id == format!("ch{HOT:02}"))
+            .expect("the hot track's multiband");
+        assert!(entry.initial_bypass && !entry.metadata.bypass);
+        let inner = std::mem::replace(&mut entry.processor, Box::new(Inert));
+        entry.processor = Box::new(CountRecoveries {
+            inner,
+            recovered: Arc::clone(&recovered),
+        });
+    });
+    assert!(
+        recovered.load(Ordering::Relaxed) >= 1,
+        "Feed::Hot never tripped the bypassed lane's D7, so the case proves nothing"
+    );
 }
 
 /// Wraps a prepared effect and adds up the blocks its block-boundary check (D7) recovered.

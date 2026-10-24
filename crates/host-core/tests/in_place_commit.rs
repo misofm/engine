@@ -42,8 +42,6 @@ struct Tally {
     /// Row names the in-place commits wrote, and those the full path took.
     in_place_rows: BTreeSet<&'static str>,
     full_rows: BTreeSet<&'static str>,
-    /// Transactions the full path took that wrote a `link_mode` row.
-    full_link_mode: usize,
     /// Verdicts of the full classifier for the transactions committed in place.
     live_with_records: usize,
     /// In-place stages that wrote values only, and those that built the whole catalog.
@@ -216,13 +214,11 @@ impl Pair {
                 }
                 None => {
                     tally.full_at_classification += 1;
-                    tally.full_link_mode += usize::from(names.contains(&"link_mode"));
                     tally.full_rows.extend(names);
                 }
             }
         } else {
             tally.full_at_preparation += 1;
-            tally.full_link_mode += usize::from(names.contains(&"link_mode"));
             tally.full_rows.extend(names);
         }
         // A transaction the host drops before it commits leaves the store as it was.
@@ -378,7 +374,6 @@ fn a_random_walk_of_transactions_commits_as_the_full_path_does() {
             "no first-appearance full commit of {row}"
         );
     }
-    let first_link_mode = tally.full_link_mode;
     let mut cases = 0_usize;
     while cases < 2_600 {
         let at = usize::from(cases % 6 == 5);
@@ -402,8 +397,8 @@ fn a_random_walk_of_transactions_commits_as_the_full_path_does() {
     );
     assert!(tally.live_with_records > 400, "{}", tally.live_with_records);
     println!(
-        "staged values {} full {}; full link_mode commits {} ({first_link_mode} first appearances)",
-        tally.staged_values, tally.staged_full, tally.full_link_mode
+        "staged values {} full {}",
+        tally.staged_values, tally.staged_full
     );
     assert!(
         tally.staged_values > 8 * tally.staged_full,
@@ -432,15 +427,12 @@ fn a_random_walk_of_transactions_commits_as_the_full_path_does() {
             "no in-place commit of {row}"
         );
     }
-    for row in ["matrix_mode", "fader_ms", "link_mode", "<structural>"] {
-        assert!(tally.full_rows.contains(row), "no full commit of {row}");
-    }
 }
 
 /// One transaction per row name of `pair`'s control list, of one edit on the first row with that
 /// name (in list order), with a value its domain accepts other than the committed one and no
-/// ramp, and one structural edit: the
-/// deterministic first appearance of every row kind before the walk's random tail.
+/// ramp, and one structural edit: the deterministic first appearance of every row kind before the
+/// walk's random tail.
 fn first_appearances(pair: &Pair) -> Vec<(Vec<SessionEdit>, Vec<&'static str>)> {
     let model = pair.full.compiled().normalized_model();
     let mut draw = Draw(0x1340_1340_1340_1341);

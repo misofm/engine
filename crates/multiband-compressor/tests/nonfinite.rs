@@ -198,9 +198,9 @@ fn the_boundary_is_the_shared_limit() {
 ///
 /// Lane 3 gets a `NaN` at frame 5 of block 0, then exact zeros on both channels for the rest of
 /// the block (so its silence clock has run), and a threshold point whose 64-sample ramp is still
-/// running when the 32-frame block fails. Its block is `+0.0` on both channels and charged once; right after it, its
-/// state is exactly a fresh scalar instance's at the ramp's target, and its later blocks are
-/// that instance's render. Every other lane is bit-identical to the same bank without the `NaN`.
+/// running when the 32-frame block fails. Its block is `+0.0` on both channels and charged once;
+/// right after it, its state is exactly a fresh scalar instance's at the ramp's target, and its
+/// later blocks are that instance's render. Every other lane is bit-identical to the same bank without the `NaN`.
 #[test]
 fn a_failing_bank_lane_recovers_alone() {
     const BLOCKS: usize = 6;

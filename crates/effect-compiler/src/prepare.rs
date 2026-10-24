@@ -42,9 +42,10 @@ pub struct EffectPreparedEntry {
     pub bank_preparation: EffectBankPreparation,
     /// The session's `bypass` for this instance (issue #1087).
     ///
-    /// It is lowered to per-lane shunt state: the effect is prepared with `bypass = false`, so a bypassed and an enabled instance of one
-    /// effect share one `EffectProgramKey` and one bank, and this bit is the initial state of the
-    /// instance's [`EffectControlLane`], and so of the rack's latency-preserving shunt. A bypassed
+    /// It is lowered to per-lane shunt state: the effect is prepared with `bypass = false`, so a
+    /// bypassed and an enabled instance of one effect share one `EffectProgramKey` and one bank,
+    /// and this bit is the initial state of the instance's [`EffectControlLane`], and so of the
+    /// rack's latency-preserving shunt. A bypassed
     /// instance runs its wet path and emits its input delayed by its declared latency. It also
     /// seeds a live-control lane ([`attach_effect_live_controls`]) for every effect.
     pub initial_bypass: bool,
