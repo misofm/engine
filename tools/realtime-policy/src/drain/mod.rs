@@ -26,9 +26,12 @@
 //!   (a stated limit of root decision R1; see [`place`]).
 //! - **Outer loops (D1)** are in [`outer`] and [`select`]: every other loop around a counted drain,
 //!   inside its region, must be finite ([`outer`]) and must select the queue, a different one on
-//!   each pass, and keep it in place for the pass ([`select`], #1418 D1, R3). The loops of a
-//!   per-queue form are judged by [`outer`] alone: each pop there is bounded by its own queue's
-//!   counter, however many passes run. **Attributes and items (D2, D9)** are in [`count`], [`outer`], [`per_queue`]
+//!   each pass, and keep it in place for the pass ([`select`], #1418 D1, R3). The loops that
+//!   enclose a per-queue form's set loop are judged the same way, on the form's queue collection
+//!   `<Q>` (#1851): a loop that runs the whole form twice on one set of queues pops each of them
+//!   twice its count. The form's pass count loop, between its set loop and its pass loop, is
+//!   judged by [`outer`] alone: each pop there is bounded by its own queue's counter, however
+//!   many passes run. **Attributes and items (D2, D9)** are in [`count`], [`outer`], [`per_queue`]
 //!   and [`items`]: a count binding under a `cfg`-family attribute, and an item of any kind
 //!   (`const`, `static`, `struct`, `enum`, `union`, `fn`, `type`, `trait`, `mod`, or a `use`) that
 //!   declares the name of any binding a rule read to bound the pop, anywhere in that binding's
@@ -326,11 +329,11 @@ fn bounded<'f>(ctx: &Ctx<'f>, site: &PopSite) -> bool {
     }
     if let Some(counted) = count::bounds(ctx, &steps, at) {
         // #1418 D1: and every one of them drains a different queue on each pass.
-        return select::selects(ctx, &steps, top, at, &counted)
+        return select::selects(ctx, &steps, top, at, counted.receiver)
             && pops_the_counted_queue(ctx, &steps, at, &counted)
             && !shadowed_by_an_item(ctx, &steps);
     }
-    per_queue::bounds(ctx, &steps, at, site) && !shadowed_by_an_item(ctx, &steps)
+    per_queue::bounds(ctx, &steps, top, at, site) && !shadowed_by_an_item(ctx, &steps)
 }
 
 /// #1426 D1, D2: whether the pop at the end of `steps`, in the body of the counted loop at
@@ -370,20 +373,9 @@ fn pops_the_counted_queue<'f>(
     ) else {
         return false;
     };
-    let outermost = (0..=at)
-        .find(|&i| {
-            steps[i].node.is_loop()
-                && ctx
-                    .tree
-                    .extent(steps[i].node)
-                    .is_some_and(|extent| extent.core >= counted.start)
-        })
-        .unwrap_or(at);
-    let Some(end) = ctx
-        .tree
-        .extent(steps[outermost].node)
-        .map(|extent| extent.end)
-    else {
+    // The window ends with the counted loop: a loop around it that starts after the count cannot
+    // select the counted receiver, so [`select::selects`] has already refused it (#1851).
+    let Some(end) = ctx.tree.extent(steps[at].node).map(|extent| extent.end) else {
         return false;
     };
     counted_roots.len() == popped_roots.len()

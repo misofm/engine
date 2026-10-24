@@ -311,7 +311,7 @@ pub const TRANSIENT_SHAPER_DESCRIPTOR: EffectDescriptor = EffectDescriptor {
     // identity (AGENTS.md), and nothing persists a payload (R6b).
     state_layout_version: 1,
     supported_link_modes: LinkModeSet::ALL,
-    lane_link: false,
+    lane_link: true,
     parameters: &TRANSIENT_SHAPER_PARAMETERS,
     ports: &PORTS,
     qualities: &QUALITIES,
@@ -357,6 +357,9 @@ thread_local! {
     /// While set, the silent fast path is refused and every block runs the kernel: the control
     /// arm of the fast-path differential and the rest probe's fork.
     static SILENT_FORBIDDEN: core::cell::Cell<bool> = const { core::cell::Cell::new(false) };
+    /// Blocks rendered by the mixed-link select arm (issue #1368 D4), counted once per block: a
+    /// bank whose lanes share one mode must never take it.
+    static MIXED_LINK_BLOCKS: core::cell::Cell<usize> = const { core::cell::Cell::new(0) };
 }
 
 /// Whether the silent fast path may skip this block. Production has no switch: always `true`.
@@ -375,6 +378,48 @@ fn silent_allowed() -> bool {
 const LINK_DUAL_MONO: u8 = 0;
 const LINK_MAXIMUM: u8 = 1;
 const LINK_AVERAGE: u8 = 2;
+/// The bank's lanes do not share one mode (issue #1368 D4): each lane selects its own law.
+const LINK_MIXED: u8 = 3;
+
+/// Each lane's detector link mode as select masks (issue #1368 D3), and the arm the lanes pick.
+///
+/// `linked` is set on a lane at `Maximum` or `Average`, `averaged` on a lane at `Average`. `arm`
+/// is the const arm of the lanes' one shared mode, or [`LINK_MIXED`] when they differ; it is
+/// derived from the masks' modes only, never from data.
+#[derive(Clone, Copy)]
+struct LinkLanes<L: Lane> {
+    linked: L::Mask,
+    averaged: L::Mask,
+    arm: u8,
+}
+
+impl<L: Lane> LinkLanes<L> {
+    /// `links[lane]` is lane `lane`'s mode. Allocation-free and panic-free, so a render-time lane
+    /// swap may rebuild it (issue #1747).
+    fn new(links: &[LinkMode]) -> Self {
+        debug_assert_eq!(links.len(), L::WIDTH);
+        let mut linked = [0.0_f32; 8];
+        let mut averaged = [0.0_f32; 8];
+        for (lane, link) in links.iter().enumerate().take(L::WIDTH) {
+            linked[lane] = f32::from(u8::from(*link != LinkMode::DualMono));
+            averaged[lane] = f32::from(u8::from(*link == LinkMode::Average));
+        }
+        let arm = match links.first() {
+            Some(first) if links.iter().all(|link| link == first) => match first {
+                LinkMode::DualMono => LINK_DUAL_MONO,
+                LinkMode::Maximum => LINK_MAXIMUM,
+                LinkMode::Average => LINK_AVERAGE,
+            },
+            _ => LINK_MIXED,
+        };
+        let zero = L::zero();
+        Self {
+            linked: L::load(&linked).gt(zero),
+            averaged: L::load(&averaged).gt(zero),
+            arm,
+        }
+    }
+}
 
 /// Scalar factory entry point for the transient shaper.
 #[derive(Clone, Copy, Debug, Default)]
@@ -437,11 +482,25 @@ struct Params<L: Lane> {
 /// `Average` is `0.5 * l + 0.5 * r` — two products and a sum. Keep this order even where scaling
 /// by one half makes `0.5 * (l + r)` produce the same bits; overflow and subnormal rounding can
 /// distinguish the expressions.
+///
+/// [`LINK_MIXED`] (issue #1368 D4) computes both linked words in that same order and selects,
+/// per lane, the word of the lane's own mode from `lanes`, so each lane's bits are the const arm's
+/// of its mode. The const arms do not read `lanes`.
 #[inline(always)]
-fn link<L: Lane, const LINK: u8>(left: L, right: L) -> (L, L) {
+fn link<L: Lane, const LINK: u8>(left: L, right: L, lanes: &LinkLanes<L>) -> (L, L) {
     let left = left.abs();
     let right = right.abs();
     match LINK {
+        LINK_MIXED => {
+            let maximum = left.max(right);
+            let half = L::splat(0.5);
+            let average = half.mul(left).add(half.mul(right));
+            let value = L::select(lanes.averaged, average, maximum);
+            (
+                L::select(lanes.linked, value, left),
+                L::select(lanes.linked, value, right),
+            )
+        }
         LINK_MAXIMUM => {
             let value = left.max(right);
             (value, value)
@@ -529,9 +588,10 @@ fn step<L: Lane, const LINK: u8>(
     pl: &Params<L>,
     pr: &Params<L>,
     bypass: L::Mask,
+    lanes: &LinkLanes<L>,
 ) {
     let (xl, xr) = (L::load(fl), L::load(fr));
-    let (ul, ur) = link::<L, LINK>(xl, xr);
+    let (ul, ur) = link::<L, LINK>(xl, xr, lanes);
     frame(xl, ul, c, el, pl, bypass).store(fl);
     frame(xr, ur, c, er, pr, bypass).store(fr);
 }
@@ -619,8 +679,10 @@ struct Shaper<L: Lane, const W: usize> {
     right: Ramps<W>,
     /// The session's bypass, read by `run`.
     bypass: bool,
-    /// The prepared detector-link mode, read by `process_block`.
-    link_mode: LinkMode,
+    /// Each lane's prepared detector-link mode (issue #1368), read by the lane swap.
+    links: [LinkMode; W],
+    /// `links` as masks and the arm they pick, read by `process_block`.
+    link_lanes: LinkLanes<L>,
     /// The prepared automation span capacity, read by `apply_automation`.
     automation_capacity: u32,
     /// The prepared state payload sizes, read by the snapshot and restore length checks.
@@ -648,12 +710,33 @@ impl<L: Lane, const W: usize> Shaper<L, W> {
             left: Ramps::new(left),
             right: Ramps::new(right),
             bypass: metadata.bypass,
-            link_mode: metadata.link_mode,
+            links: [metadata.link_mode; W],
+            link_lanes: LinkLanes::new(&[metadata.link_mode; W]),
             automation_capacity: metadata.automation_capacity,
             state_sizes: metadata.state_sizes,
             nonfinite: NonFiniteReport::new(),
             active: (1 << W) - 1,
         }
+    }
+
+    /// Sets lane `lane`'s link mode and re-derives the masks and the arm (issue #1368).
+    /// Allocation-free, so the render-time lane swap may call it.
+    ///
+    /// D5 holds after the swap too: every padded lane re-takes the first active lane's mode, so a
+    /// bank whose members became uniform leaves the mixed arm. A padded lane's output is
+    /// discarded, so this moves no member's bit.
+    fn set_lane_link(&mut self, lane: usize, link: LinkMode) {
+        self.links[lane] = link;
+        let first = self.active.trailing_zeros() as usize;
+        if first < W {
+            let mode = self.links[first];
+            for (padded, slot) in self.links.iter_mut().enumerate() {
+                if self.active & (1 << padded) == 0 {
+                    *slot = mode;
+                }
+            }
+        }
+        self.link_lanes = LinkLanes::new(&self.links);
     }
 
     fn reset(&mut self, kind: ResetKind) {
@@ -699,10 +782,15 @@ impl<L: Lane, const W: usize> Shaper<L, W> {
             SILENT_ADMISSIONS.with(|blocks| blocks.set(blocks.get() + 1));
             return [0, 0];
         }
-        match self.link_mode {
-            LinkMode::DualMono => self.run::<LINK_DUAL_MONO>(left, right, frames),
-            LinkMode::Maximum => self.run::<LINK_MAXIMUM>(left, right, frames),
-            LinkMode::Average => self.run::<LINK_AVERAGE>(left, right, frames),
+        match self.link_lanes.arm {
+            LINK_DUAL_MONO => self.run::<LINK_DUAL_MONO>(left, right, frames),
+            LINK_MAXIMUM => self.run::<LINK_MAXIMUM>(left, right, frames),
+            LINK_AVERAGE => self.run::<LINK_AVERAGE>(left, right, frames),
+            _ => {
+                #[cfg(test)]
+                MIXED_LINK_BLOCKS.with(|blocks| blocks.set(blocks.get() + 1));
+                self.run::<LINK_MIXED>(left, right, frames);
+            }
         }
         if check_block::<L>(left) && check_block::<L>(right) {
             return [0, 0];
@@ -798,6 +886,7 @@ impl<L: Lane, const W: usize> Shaper<L, W> {
     #[inline(always)]
     fn run<const LINK: u8>(&mut self, left: &mut [f32], right: &mut [f32], frames: usize) {
         let bypass = L::splat(if self.bypass { 1.0 } else { 0.0 }).gt(L::zero());
+        let lanes = self.link_lanes;
         let prefix = frames.min(self.left.prefix().max(self.right.prefix()));
         let split = prefix * L::WIDTH;
         let (head_left, tail_left) = left.split_at_mut(split);
@@ -819,6 +908,7 @@ impl<L: Lane, const W: usize> Shaper<L, W> {
                 &pl,
                 &pr,
                 bypass,
+                &lanes,
             );
         }
         let pl = self.left.current::<L>();
@@ -836,6 +926,7 @@ impl<L: Lane, const W: usize> Shaper<L, W> {
                 &pl,
                 &pr,
                 bypass,
+                &lanes,
             );
         }
         self.left_env = el;
@@ -1193,11 +1284,18 @@ fn bind<L: Lane, const W: usize, const NATIVE_ONLY: bool>(
     let (first_left, first_right) = initial_defaults(first.initial_values)?;
     let mut left = [first_left; W];
     let mut right = [first_right; W];
+    // Issue #1368: the key carries no link mode (`lane_link`), so each lane takes its own
+    // member's mode, and a padded lane takes the first member's (D5), so padding never forces the
+    // mixed arm.
+    let mut links = [metadata.link_mode; W];
     let mut same_program = true;
     for (track, item) in request.requests.iter().copied().enumerate().skip(1) {
         let candidate = expected_prepared_metadata(factory.descriptor(), item)?;
         if candidate.program_key() != metadata.program_key() {
             same_program = false;
+        }
+        if request.active_mask[track] {
+            links[track] = candidate.link_mode;
         }
         let (item_left, item_right) = initial_defaults(item.initial_values)?;
         left[track] = item_left;
@@ -1211,6 +1309,8 @@ fn bind<L: Lane, const W: usize, const NATIVE_ONLY: bool>(
         return Ok(None);
     }
     let mut shaper = Shaper::new(&metadata, row, left, right);
+    shaper.links = links;
+    shaper.link_lanes = LinkLanes::new(&links);
     shaper.active = request
         .active_mask
         .iter()
@@ -1341,24 +1441,30 @@ impl<L: Lane, const W: usize> PreparedNativeEffectBank for PreparedTransientShap
     }
 }
 
-/// One lane's prepared defaults in bytes: every parameter of both channels, one `f32` each.
-const LANE_DEFAULT_BYTES: usize = 2 * PARAMETER_COUNT * 4;
+/// One lane's prepared defaults in bytes: every parameter of both channels, one `f32` each, then
+/// the lane's link mode (issue #1368).
+const LANE_DEFAULT_BYTES: usize = 2 * PARAMETER_COUNT * 4 + 4;
 
 // REALTIME_POLICY_BEGIN: #1747, the prepared defaults move with a render-time lane swap.
 impl<L: Lane, const W: usize> PreparedTransientShaperBank<L, W> {
     /// [`PreparedNativeEffectBank::exchange_lane_defaults`]: lane `lane`'s left
     /// `Ramps::defaults` row then its right one, each parameter in descriptor order as
-    /// little-endian `f32` bits. They are the shaper's only prepared per-lane values: a full reset
-    /// rebuilds the lane's ramps from them. The D7 recovery clears envelopes and reads no default.
+    /// little-endian `f32` bits, then the lane's link mode as one word (issue #1368,
+    /// `effect_contract::exchange_lane_link_word`). They are the shaper's only prepared per-lane
+    /// values: a full reset rebuilds the lane's ramps from the rows, and the link masks and the
+    /// arm are re-derived from the modes. The D7 recovery clears envelopes and reads no default.
     fn exchange_defaults(&mut self, lane: usize, bytes: &mut [u8]) -> bool {
         if lane >= W || bytes.len() != LANE_DEFAULT_BYTES {
             return false;
         }
         let shaper = &mut self.shaper;
+        let (values_bytes, link_bytes) = bytes.split_at_mut(2 * PARAMETER_COUNT * 4);
+        let link = effect_contract::exchange_lane_link_word(shaper.links[lane], link_bytes);
+        shaper.set_lane_link(lane, link);
         let words = shaper.left.defaults[lane]
             .iter_mut()
             .chain(shaper.right.defaults[lane].iter_mut());
-        for (value, chunk) in words.zip(bytes.chunks_exact_mut(4)) {
+        for (value, chunk) in words.zip(values_bytes.chunks_exact_mut(4)) {
             let mut incoming = [0_u8; 4];
             incoming.copy_from_slice(chunk);
             chunk.copy_from_slice(&value.to_bits().to_le_bytes());

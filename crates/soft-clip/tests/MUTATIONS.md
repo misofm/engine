@@ -109,3 +109,14 @@ mutation and the defect are the same edit. Both reset kinds are now inside the m
 
 * The wasm leg of the corpus (`tools/wasm-gates`) is exercised by
   `scripts/run-wasm-gates.sh`; its own mutations live in that crate's `MUTATIONS.md`.
+
+## Mono collapse (#1872)
+
+Applied in the issue's worktree on the attempt-1 commit, run with
+`cargo test --locked -p soft-clip --all-features --test mono_collapse`, and reverted.
+
+| mutation | file | result |
+|---|---|---|
+| `desymmetrize` skips `history.pos` | `src/lib.rs` | RED: `a_collapsed_bank_spares_the_right_plane_and_its_copy_makes_the_channels_agree` (`after the copy`) |
+| `desymmetrize` copies the first 32 rows of `x`, `e` and `dry` only, not their mirrors | `src/lib.rs` | RED: `a_collapsed_bank_spares_the_right_plane_and_its_copy_makes_the_channels_agree` (`after the copy`) |
+| `channels_bit_equal` omits the `e` ring | `src/lib.rs` | RED: `the_word_lists_are_complete_and_the_witness_declines_on_exactly_the_asymmetric_lane` (`word {e age}: channels_agree`) |

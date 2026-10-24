@@ -407,7 +407,7 @@ pub const TRUE_PEAK_LIMITER_DESCRIPTOR: EffectDescriptor = EffectDescriptor {
         Some(value) => value,
         None => panic!("frozen link bits"),
     },
-    lane_link: false,
+    lane_link: true,
     parameters: &TRUE_PEAK_LIMITER_PARAMETERS,
     ports: &PORTS,
     qualities: &QUALITIES,
@@ -521,26 +521,72 @@ impl LaneShape {
 struct LimiterCoef<L: Lane> {
     /// The Annex-2 table, tap-major then phase, splatted once at preparation.
     fir: [[L; 4]; HISTORY_WORDS],
-    /// `true` when the prepared link mode is [`LinkMode::Maximum`].
-    link_max: bool,
+    /// Each lane's prepared link mode (issue #1368): only `[..L::WIDTH]` is read. A bank holds the
+    /// mode per lane, so a render-time lane swap moves it with the lane's defaults.
+    links: [LinkMode; MAXIMUM_WIDTH],
+    /// The peak-link select mask: set on each lane whose mode is [`LinkMode::Maximum`].
+    link: L::Mask,
+    /// `true` when every lane's mode is [`LinkMode::Maximum`]: the first leg of the #990
+    /// linked-pair decision, which a bank whose lanes mix modes never takes (issue #1368 D4).
+    link_all: bool,
     /// `true` when the whole effect is bypassed; the delay and every ring still advance.
     bypass: bool,
 }
 
 impl<L: Lane> LimiterCoef<L> {
-    /// Splats the frozen table and records the two prepared booleans.
-    fn new(link_max: bool, bypass: bool) -> Self {
+    /// Splats the frozen table, records the bypass and sets every lane to `link`.
+    fn new(link: LinkMode, bypass: bool) -> Self {
         let mut fir = [[L::zero(); 4]; HISTORY_WORDS];
         for (tap, row) in fir.iter_mut().enumerate() {
             for (phase, value) in row.iter_mut().enumerate() {
                 *value = L::splat(ANNEX2_FIR[tap][phase]);
             }
         }
-        Self {
+        let mut coef = Self {
             fir,
-            link_max,
+            links: [link; MAXIMUM_WIDTH],
+            link: L::zero().eq(L::zero()),
+            link_all: true,
             bypass,
+        };
+        coef.derive_link();
+        coef
+    }
+
+    /// Sets lane `lane`'s link mode and re-derives the mask and the all-`Maximum` leg.
+    /// Allocation-free and panic-free, so the render-time lane swap may call it (issue #1747).
+    ///
+    /// `active` is the bank's member mask. D5 holds after a swap too: every padded lane re-takes
+    /// the first active lane's mode, so a bank whose members became all `Maximum` regains the
+    /// #990 linked pair. A padded lane's output is discarded, so this moves no member's bit.
+    fn set_lane_link(&mut self, lane: usize, link: LinkMode, active: u32) {
+        if let Some(slot) = self.links.get_mut(lane) {
+            *slot = link;
         }
+        let first = active.trailing_zeros() as usize;
+        if first < L::WIDTH {
+            let mode = self.links[first];
+            for (padded, slot) in self.links.iter_mut().enumerate().take(L::WIDTH) {
+                if active & (1 << padded) == 0 {
+                    *slot = mode;
+                }
+            }
+        }
+        self.derive_link();
+    }
+
+    /// `link` and `link_all` from `links[..L::WIDTH]`. A uniform bank gets the mask the
+    /// single-mode body used to build from one boolean (all lanes or none), so no bit moves.
+    fn derive_link(&mut self) {
+        let mut words = [0.0_f32; MAXIMUM_WIDTH];
+        let mut all = true;
+        for (word, link) in words.iter_mut().zip(self.links.iter()).take(L::WIDTH) {
+            let maximum = *link == LinkMode::Maximum;
+            *word = f32::from(u8::from(maximum));
+            all &= maximum;
+        }
+        self.link = L::load(&words).gt(L::zero());
+        self.link_all = all;
     }
 }
 
@@ -1050,7 +1096,8 @@ fn ramp_words_agree(left: &LinearRamp, right: &LinearRamp) -> bool {
 /// sample and the box term leaving the running sum) and all four words of each of the two ramps
 /// (the `limit` and `release` coefficients). Nothing else designed reaches steps 1-6 of
 /// [`channel_frame_uniform`]: `lookahead_ms` is what `LaneShape` was derived from and is never read
-/// by a rendered block, and the link and bypass booleans are one per bank.
+/// by a rendered block, and the link mask and the bypass boolean are shared by both channels (the link per lane, issue
+/// #1368; the bypass per bank).
 ///
 /// Bit compares throughout, never tolerances: the licence this grants is "the two gain paths run
 /// the same operations on the same operands", which a tolerance cannot state. About ninety word
@@ -2869,7 +2916,8 @@ fn limiter_block<L: Lane>(
 
 /// [`limiter_block`] with the linked-pair decision of issue #990.
 ///
-/// `linked` is the caller's statement that the pair is linked (`LinkMode::Maximum`), that its
+/// `linked` is the caller's statement that the pair is linked (every lane at `LinkMode::Maximum`,
+/// issue #1368), that its
 /// designed words agree on every lane ([`designed_gain_agree`]) and that its gain words agree (the
 /// `gain_linked` record). A uniform cohort then renders its gain path once
 /// ([`linked_frame_uniform`]); a cohort that is not uniform renders the per-lane body, which needs
@@ -3004,7 +3052,7 @@ fn limiter_block_per_lane<const DISPATCH: u8, L: Lane>(
     observe_dispatch::<DISPATCH>(DispatchRoute::DualPerLane);
     let all = L::zero().eq(L::zero());
     let none = L::mask_not(all);
-    let link = if coef.link_max { all } else { none };
+    let link = coef.link;
     let bypass = if coef.bypass { all } else { none };
     let mut main_cursor = cursors.main as usize;
     let mut ring_cursor = cursors.ring as usize;
@@ -3211,7 +3259,7 @@ fn limiter_block_uniform<const DISPATCH: u8, L: Lane>(
     }
     let all = L::zero().eq(L::zero());
     let none = L::mask_not(all);
-    let link = if coef.link_max { all } else { none };
+    let link = coef.link;
     let bypass = if coef.bypass { all } else { none };
     let ring = shape.ring;
     let main = shape.main;
@@ -3717,7 +3765,8 @@ struct LimiterCore<L: Lane> {
     ///   from equal operands. The silent fast path keeps it too: it advances each channel's phase
     ///   by a function of that phase and the lane's window, and at silent rest the box sum *is* the
     ///   window, so equal box sums mean equal windows.
-    /// * **Cleared** by a dual block under `DualMono` or with a designed word apart on any lane, by
+    /// * **Cleared** by a dual block with any lane at `DualMono` (issue #1368: the mode is per
+    ///   lane, and the record is one per bank) or with a designed word apart on any lane, by
     ///   every collapsed block (only the left channel advances), and by a restore whose comparison
     ///   fails. Once cleared it stays cleared until one of the three establishing events: a pair
     ///   whose designed words come back together has no proof its gain words did.
@@ -3745,10 +3794,7 @@ impl<L: Lane> LimiterCore<L> {
         let right = ChannelState::new::<L>(width, &shape, &right_defaults, rate);
         let gain_linked = lane_shapes_agree(&left, &right);
         Some(Self {
-            coefficients: LimiterCoef::new(
-                matches!(metadata.link_mode, LinkMode::Maximum),
-                metadata.bypass,
-            ),
+            coefficients: LimiterCoef::new(metadata.link_mode, metadata.bypass),
             left,
             right,
             cursors: Cursors::default(),
@@ -3773,6 +3819,17 @@ impl<L: Lane> LimiterCore<L> {
     fn with_active_lanes(mut self, active: u32) -> Self {
         debug_assert!(active != 0 && active & !every_lane(L::WIDTH) == 0);
         self.active = active;
+        self
+    }
+
+    /// Sets each lane's link mode from its own member's (issue #1368 D3): `links[lane]` is the
+    /// mode of the request bound to `lane`. The peak link selects per lane, so a lane renders its
+    /// own mode's bits whatever its bank-mates' modes are; a bank whose lanes are not all
+    /// `Maximum` never takes the #990 linked pair.
+    fn with_lane_links(mut self, links: &[LinkMode]) -> Self {
+        for (lane, &link) in links.iter().enumerate().take(L::WIDTH) {
+            self.coefficients.set_lane_link(lane, link, self.active);
+        }
         self
     }
 
@@ -3868,9 +3925,9 @@ impl<L: Lane> LimiterCore<L> {
             return [0, 0];
         }
         // Issue #990: the whole-block linked-pair decision, and the record it leaves. A block that
-        // renders under `Maximum` with every designed word agreeing leaves agreeing gain words
+        // renders with every lane at `Maximum` (issue #1368) and every designed word agreeing leaves agreeing gain words
         // behind whichever body runs it, so the record after the block is exactly the decision.
-        let linked = self.coefficients.link_max
+        let linked = self.coefficients.link_all
             && self.gain_linked
             && designed_gain_agree(&self.left, &self.right);
         self.gain_linked = linked;
@@ -3998,7 +4055,7 @@ impl<L: Lane> LimiterCore<L> {
         frames: usize,
     ) {
         // The oracle never links, and keeps the record honest for a core it drives.
-        self.gain_linked = self.coefficients.link_max
+        self.gain_linked = self.coefficients.link_all
             && self.gain_linked
             && designed_gain_agree(&self.left, &self.right);
         limiter_block_runtime_oracle::<L>(
@@ -4180,7 +4237,7 @@ impl<L: Lane> LimiterCore<L> {
         let whole = lanes == every_lane(L::WIDTH);
         let bypass_held = self.silent_bypass == self.coefficients.bypass;
         if !(self.silent_fixed_point && bypass_held) {
-            self.gain_linked = self.coefficients.link_max
+            self.gain_linked = self.coefficients.link_all
                 && self.gain_linked
                 && designed_gain_agree(&self.left, &self.right);
             self.silent_fixed_point = bypass_held;
@@ -4631,9 +4688,13 @@ impl<L: Lane> LimiterCore<L> {
     }
 
     /// Exchanges lane `lane`'s prepared defaults with `bytes` in place (issue #1747): the left
-    /// channel's three parameter values, then the right's, each `f32` little-endian. The defaults
-    /// are what `reset(FullToDefaults)` and the D7 recovery re-seed a lane from; nothing else in
-    /// the core changes. `false`, changing nothing, for a lane out of range or a wrong length.
+    /// channel's three parameter values, then the right's, each `f32` little-endian, then the
+    /// lane's link mode as one word (issue #1368, `effect_contract::exchange_lane_link_word`). The
+    /// values are what `reset(FullToDefaults)` and the D7 recovery re-seed a lane from, and the
+    /// mode re-derives the link mask and the all-`Maximum` leg; nothing else in the core changes.
+    /// The #990 record needs no update: it is a statement about gain words, and the linked-pair
+    /// decision re-reads the all-`Maximum` leg every block. `false`, changing nothing, for a lane
+    /// out of range or a wrong length.
     fn exchange_lane_defaults(&mut self, lane: usize, bytes: &mut [u8]) -> bool {
         if lane >= L::WIDTH
             || lane >= self.left_defaults.len()
@@ -4642,7 +4703,11 @@ impl<L: Lane> LimiterCore<L> {
         {
             return false;
         }
-        let (left_bytes, right_bytes) = bytes.split_at_mut(PARAMETER_COUNT * 4);
+        let (values_bytes, link_bytes) = bytes.split_at_mut(2 * PARAMETER_COUNT * 4);
+        let link =
+            effect_contract::exchange_lane_link_word(self.coefficients.links[lane], link_bytes);
+        self.coefficients.set_lane_link(lane, link, self.active);
+        let (left_bytes, right_bytes) = values_bytes.split_at_mut(PARAMETER_COUNT * 4);
         for (values, side) in [
             (&mut self.left_defaults[lane], left_bytes),
             (&mut self.right_defaults[lane], right_bytes),
@@ -4658,8 +4723,9 @@ impl<L: Lane> LimiterCore<L> {
     }
 }
 
-/// The bytes of one lane's prepared defaults: both channels' parameter values (issue #1747).
-const LANE_DEFAULT_BYTES: usize = 2 * PARAMETER_COUNT * 4;
+/// The bytes of one lane's prepared defaults: both channels' parameter values (issue #1747), then
+/// the lane's link mode (issue #1368).
+const LANE_DEFAULT_BYTES: usize = 2 * PARAMETER_COUNT * 4 + 4;
 
 // REALTIME_POLICY_END
 
@@ -4727,11 +4793,20 @@ impl NativeEffectFactory for TruePeakLimiterFactory {
         let metadata = expected_prepared_metadata(self.descriptor(), first)?;
         let mut left_defaults = Vec::with_capacity(request.requests.len());
         let mut right_defaults = Vec::with_capacity(request.requests.len());
+        // Issue #1368: the key carries no link mode (`lane_link`), so each lane takes its own
+        // member's mode, and a padded lane takes the first member's (D5): padding never takes a
+        // bank of `Maximum` members off the #990 linked pair.
+        let mut links = [metadata.link_mode; MAXIMUM_WIDTH];
         let mut same_program = true;
-        for member in request.requests.iter().copied() {
+        for (lane, member) in request.requests.iter().copied().enumerate() {
             let candidate = expected_prepared_metadata(self.descriptor(), member)?;
             if candidate.program_key() != metadata.program_key() {
                 same_program = false;
+            }
+            if request.active_mask[lane]
+                && let Some(slot) = links.get_mut(lane)
+            {
+                *slot = candidate.link_mode;
             }
             let (left, right) = initial_defaults(member.initial_values)?;
             left_defaults.push(left);
@@ -4772,6 +4847,7 @@ impl NativeEffectFactory for TruePeakLimiterFactory {
                         .ok_or(EffectPrepareError {
                             code: "effect.parameter.initial",
                         })?
+                        .with_lane_links(&links)
                         .with_active_lanes(active),
                 })
             });
@@ -4809,8 +4885,9 @@ impl NativeEffectFactory for TruePeakLimiterFactory {
 ///   is caught by the `RESTORED` term, not this one.
 /// * `left_defaults` / `right_defaults` -- control-plane reset values the kernel never reads; a
 ///   `FullToDefaults` that made the channels disagree lands in the four words above.
-/// * `Cursors` and `LimiterCoef` (the FIR table, `link_max`, `bypass`) -- one per **bank**, shared
-///   by both channels, so they cannot be asymmetric. `link_max` in particular is the reason the
+/// * `Cursors` and `LimiterCoef` (the FIR table, the link mask, `bypass`) -- one per **bank**, or
+///   per lane for the link (issue #1368), shared by both channels, so they cannot be asymmetric.
+///   The link in particular is the reason the
 ///   seam sits where it does: `linked = peak_right.max(peak_left)` on two identical words is
 ///   `max(p, p) = p` bit-exactly.
 impl<L: Lane> LimiterCore<L> {
@@ -5155,7 +5232,7 @@ fn limiter_block_per_lane_mono<const DISPATCH: u8, L: Lane>(
     observe_dispatch::<DISPATCH>(DispatchRoute::MonoPerLane);
     let all = L::zero().eq(L::zero());
     let none = L::mask_not(all);
-    let link = if coef.link_max { all } else { none };
+    let link = coef.link;
     let bypass = if coef.bypass { all } else { none };
     let mut main_cursor = cursors.main as usize;
     let mut ring_cursor = cursors.ring as usize;
@@ -5235,7 +5312,7 @@ fn limiter_block_uniform_mono<const DISPATCH: u8, L: Lane>(
     observe_dispatch::<DISPATCH>(DispatchRoute::MonoUniform);
     let all = L::zero().eq(L::zero());
     let none = L::mask_not(all);
-    let link = if coef.link_max { all } else { none };
+    let link = coef.link;
     let bypass = if coef.bypass { all } else { none };
     let ring = shape.ring;
     let main = shape.main;
@@ -5493,9 +5570,20 @@ mod tests {
         width: BankWidth,
         backend: Backend,
     ) -> PreparedEffectBank {
+        bank_for_links(values, &vec![link_mode; values.len()], width, backend)
+    }
+
+    /// [`bank_for`] with member `k` at its own link mode `links[k]` (issue #1368).
+    fn bank_for_links(
+        values: &[[InitialParameterValue; PARAMETER_COUNT * 2]],
+        links: &[LinkMode],
+        width: BankWidth,
+        backend: Backend,
+    ) -> PreparedEffectBank {
         let requests: Vec<PrepareEffectRequest<'_>> = values
             .iter()
-            .map(|values| {
+            .zip(links)
+            .map(|(values, &link_mode)| {
                 let mut request = request(values);
                 request.link_mode = link_mode;
                 request
@@ -5574,7 +5662,7 @@ mod tests {
     /// (`+0.0` accumulator). The render path's seedless form is held to it by E1b.
     #[test]
     fn phase_outputs_match_the_frozen_scalar_order() {
-        let coefficients = LimiterCoef::<f32>::new(false, false);
+        let coefficients = LimiterCoef::<f32>::new(LinkMode::DualMono, false);
         let mut history = [0.0_f32; HISTORY_WORDS];
         let mut kernel_history = History::<f32>::zero();
         let mut noise = Noise(0x5150_0090_0001);
@@ -5737,7 +5825,7 @@ mod tests {
     /// One width of E1b. Streams are packed `L::WIDTH` to a bank, one per lane, and a lane whose
     /// stream has ended is fed `+0.0`.
     fn seedless_peaks_match_the_seeded_order<L: Lane>() -> SeedlessCounts {
-        let fir = LimiterCoef::<L>::new(false, false).fir;
+        let fir = LimiterCoef::<L>::new(LinkMode::DualMono, false).fir;
         let streams = seedless_streams();
         let mut counts = SeedlessCounts::default();
         for (group, bank) in streams.chunks(L::WIDTH).enumerate() {
@@ -5876,7 +5964,7 @@ mod tests {
     /// E2: the frozen table and the phase outputs against the independent `f64` oracle.
     #[test]
     fn bs1770_annex2_conformance_is_unchanged() {
-        let coefficients = LimiterCoef::<f32>::new(false, false);
+        let coefficients = LimiterCoef::<f32>::new(LinkMode::DualMono, false);
         for tap in 0..HISTORY_WORDS {
             let mut unit = [0.0_f64; HISTORY_WORDS];
             unit[tap] = 1.0;
@@ -5993,7 +6081,7 @@ mod tests {
         const SHORT_SPAN: usize = 7;
         const SENTINEL: f32 = -12_345.25;
 
-        let coefficients = LimiterCoef::<L>::new(false, false);
+        let coefficients = LimiterCoef::<L>::new(LinkMode::DualMono, false);
         let mut noise = Noise(0x6210_6100 ^ L::WIDTH as u64);
         let input: Vec<f32> = (0..TOTAL_FRAMES * L::WIDTH)
             .map(|_| noise.next() * 0.75)
@@ -6377,13 +6465,26 @@ mod tests {
     }
 
     /// E8: one body, three widths; PCM, per-track payload bytes and reports agree by `to_bits`.
+    ///
+    /// Issue #1368: the tracks of a bank mix link modes as well as sharing one, on tracks of
+    /// different lookaheads (the per-lane body) and on the console fixture's tracks (one window:
+    /// the uniform body). Red if a lane takes another lane's mode. The #990 linked pair is
+    /// counted: red if a uniform bank whose lanes are all `Maximum` does not take it, or a bank
+    /// with any `DualMono` lane does (it would link that lane's channels).
     #[test]
     fn lane_identity_holds_across_widths() {
+        use LinkMode::{DualMono as D, Maximum as M};
         let lookaheads = [0.0_f32, 5.0, 10.0, 2.0, 7.0, 10.0, 0.0, 5.0];
         let ceilings = [-1.0_f32, -6.0, -12.0, -3.0, -1.0, -24.0, -6.0, -2.0];
-        let tracks: Vec<[InitialParameterValue; PARAMETER_COUNT * 2]> = (0..8)
+        let varied: Vec<[InitialParameterValue; PARAMETER_COUNT * 2]> = (0..8)
             .map(|track| values_with(ceilings[track], 100.0, lookaheads[track]))
             .collect();
+        let patterns: [[LinkMode; 8]; 4] = [
+            [D; 8],
+            [M; 8],
+            [D, M, D, M, D, M, D, M],
+            [M, M, D, M, M, D, M, M],
+        ];
         let frames = 640_usize;
         let mut inputs = Vec::new();
         for track in 0..8 {
@@ -6393,76 +6494,164 @@ mod tests {
             inputs.push((left, right));
         }
 
-        for link in [LinkMode::DualMono, LinkMode::Maximum] {
-            let mut scalar_out = Vec::new();
-            let mut scalar_state = Vec::new();
-            for track in 0..8 {
-                let mut preparation = request(&tracks[track]);
-                preparation.link_mode = link;
-                let mut effect = TruePeakLimiterFactory
-                    .prepare(preparation)
-                    .expect("prepare");
-                let mut left = inputs[track].0.clone();
-                let mut right = inputs[track].1.clone();
-                render(&mut effect, &mut left, &mut right, 128);
-                scalar_state.push(snapshot(&effect));
-                scalar_out.push((left, right));
-            }
+        for (uniform, tracks) in [(false, varied), (true, fixture_tracks(8))] {
+            for links in patterns {
+                let link = &links;
+                let mut scalar_out = Vec::new();
+                let mut scalar_state = Vec::new();
+                for track in 0..8 {
+                    let mut preparation = request(&tracks[track]);
+                    preparation.link_mode = links[track];
+                    let mut effect = TruePeakLimiterFactory
+                        .prepare(preparation)
+                        .expect("prepare");
+                    let mut left = inputs[track].0.clone();
+                    let mut right = inputs[track].1.clone();
+                    render(&mut effect, &mut left, &mut right, 128);
+                    scalar_state.push(snapshot(&effect));
+                    scalar_out.push((left, right));
+                }
 
-            // Every width this build binds: a bank wider than the backend declines, so a 4-lane
-            // (NEON/simd128) build checks W4 and the 8-lane (AVX2) build checks W4 and W8.
-            for (width, backend, lanes) in BankWidth::ALL
-                .iter()
-                .map(|&width| (width, width.backend(), width.lanes() as usize))
-                .filter(|&(_, _, lanes)| lanes <= Backend::current().width())
-            {
-                for group in 0..8 / lanes {
-                    let members: Vec<_> = (0..lanes)
-                        .map(|lane| tracks[group * lanes + lane])
-                        .collect();
-                    let mut bank = bank_for(&members, link, width, backend);
-                    let mut left = vec![0.0_f32; frames * lanes];
-                    let mut right = vec![0.0_f32; frames * lanes];
-                    for frame in 0..frames {
-                        for lane in 0..lanes {
-                            left[frame * lanes + lane] = inputs[group * lanes + lane].0[frame];
-                            right[frame * lanes + lane] = inputs[group * lanes + lane].1[frame];
-                        }
-                    }
-                    for block in 0..frames / 128 {
-                        let start = block * 128 * lanes;
-                        let end = start + 128 * lanes;
-                        process_bank(
-                            bank.processor.as_mut(),
-                            &mut left[start..end],
-                            &mut right[start..end],
-                            width,
-                            128,
-                            (block * 128) as u64,
-                        );
-                    }
-                    for lane in 0..lanes {
-                        let track = group * lanes + lane;
+                // Every width this build binds: a bank wider than the backend declines, so a 4-lane
+                // (NEON/simd128) build checks W4 and the 8-lane (AVX2) build checks W4 and W8.
+                for (width, backend, lanes) in BankWidth::ALL
+                    .iter()
+                    .map(|&width| (width, width.backend(), width.lanes() as usize))
+                    .filter(|&(_, _, lanes)| lanes <= Backend::current().width())
+                {
+                    for group in 0..8 / lanes {
+                        let members: Vec<_> = (0..lanes)
+                            .map(|lane| tracks[group * lanes + lane])
+                            .collect();
+                        let group_links = &links[group * lanes..(group + 1) * lanes];
+                        let mut bank = bank_for_links(&members, group_links, width, backend);
+                        let engaged_before = LINKED_ENGAGEMENTS.with(Cell::get);
+                        let mut left = vec![0.0_f32; frames * lanes];
+                        let mut right = vec![0.0_f32; frames * lanes];
                         for frame in 0..frames {
-                            assert_eq!(
-                                left[frame * lanes + lane].to_bits(),
-                                scalar_out[track].0[frame].to_bits(),
-                                "{link:?} W{lanes} left track {track} frame {frame}"
-                            );
-                            assert_eq!(
-                                right[frame * lanes + lane].to_bits(),
-                                scalar_out[track].1[frame].to_bits(),
-                                "{link:?} W{lanes} right track {track} frame {frame}"
+                            for lane in 0..lanes {
+                                left[frame * lanes + lane] = inputs[group * lanes + lane].0[frame];
+                                right[frame * lanes + lane] = inputs[group * lanes + lane].1[frame];
+                            }
+                        }
+                        for block in 0..frames / 128 {
+                            let start = block * 128 * lanes;
+                            let end = start + 128 * lanes;
+                            process_bank(
+                                bank.processor.as_mut(),
+                                &mut left[start..end],
+                                &mut right[start..end],
+                                width,
+                                128,
+                                (block * 128) as u64,
                             );
                         }
+                        let engaged = LINKED_ENGAGEMENTS.with(Cell::get) != engaged_before;
+                        let all_maximum = group_links.iter().all(|link| *link == M);
                         assert_eq!(
-                            snapshot_track(&bank, lane as u32),
-                            scalar_state[track],
-                            "{link:?} W{lanes} payload track {track}"
+                            engaged,
+                            uniform && all_maximum,
+                            "{link:?} W{lanes} uniform {uniform} group {group}: linked pair"
                         );
+                        for lane in 0..lanes {
+                            let track = group * lanes + lane;
+                            for frame in 0..frames {
+                                assert_eq!(
+                                    left[frame * lanes + lane].to_bits(),
+                                    scalar_out[track].0[frame].to_bits(),
+                                    "{link:?} W{lanes} left track {track} frame {frame}"
+                                );
+                                assert_eq!(
+                                    right[frame * lanes + lane].to_bits(),
+                                    scalar_out[track].1[frame].to_bits(),
+                                    "{link:?} W{lanes} right track {track} frame {frame}"
+                                );
+                            }
+                            assert_eq!(
+                                snapshot_track(&bank, lane as u32),
+                                scalar_state[track],
+                                "{link:?} W{lanes} payload track {track}"
+                            );
+                        }
                     }
                 }
             }
+        }
+
+        // D5 (issue #1368): a padded lane takes the first member's mode at bind and again after
+        // a lane swap, so a padded bank of `Maximum` members on one window keeps the #990 linked
+        // pair. Red if a padded lane keeps its request's (or its bind-time) mode.
+        for (width, backend, lanes) in BankWidth::ALL
+            .iter()
+            .map(|&width| (width, width.backend(), width.lanes() as usize))
+            .filter(|&(_, _, lanes)| lanes <= Backend::current().width())
+        {
+            let tracks = fixture_tracks(lanes);
+            let members = lanes - 1;
+            let mask: Vec<bool> = (0..lanes).map(|lane| lane < members).collect();
+            let bind = |links: &[LinkMode]| {
+                let requests: Vec<PrepareEffectRequest<'_>> = tracks
+                    .iter()
+                    .zip(links)
+                    .map(|(values, &link_mode)| {
+                        let mut request = request(values);
+                        request.link_mode = link_mode;
+                        request
+                    })
+                    .collect();
+                TruePeakLimiterFactory
+                    .bind_homogeneous_bank(PrepareEffectBankRequest {
+                        backend,
+                        width,
+                        requests: &requests,
+                        active_mask: &mask,
+                    })
+                    .expect("bank binding")
+                    .expect("bank available")
+            };
+            let engages = |bank: &mut PreparedEffectBank| {
+                let mut noise = Noise(0x1368_0000 + lanes as u64);
+                let mut left: Vec<f32> = (0..128 * lanes)
+                    .map(|frame| {
+                        if frame % lanes < members {
+                            noise.next() * 3.0
+                        } else {
+                            0.0
+                        }
+                    })
+                    .collect();
+                let mut right = left.clone();
+                let before = LINKED_ENGAGEMENTS.with(Cell::get);
+                process_bank(
+                    bank.processor.as_mut(),
+                    &mut left,
+                    &mut right,
+                    width,
+                    128,
+                    0,
+                );
+                LINKED_ENGAGEMENTS.with(Cell::get) != before
+            };
+            // Members all `Maximum`, the padded request at `DualMono`: the pair links.
+            let mut links = vec![M; lanes];
+            links[lanes - 1] = D;
+            assert!(engages(&mut bind(&links)), "W{lanes}: padded Maximum bank");
+            // Member 0 at `DualMono`, so the padded lane binds at `DualMono`; a swap then gives
+            // member 0 `Maximum`, and the padded lane must follow it for the pair to link.
+            links[0] = D;
+            let mut bank = bind(&links);
+            let (left, right) = initial_defaults(&tracks[0]).expect("defaults");
+            let mut bytes: Vec<u8> = left
+                .iter()
+                .chain(right.iter())
+                .flat_map(|value| value.to_bits().to_le_bytes())
+                .chain((M as u32).to_le_bytes())
+                .collect();
+            assert!(bank.processor.exchange_lane_defaults(0, &mut bytes));
+            assert!(
+                engages(&mut bank),
+                "W{lanes}: padded bank after a swap made it uniform"
+            );
         }
     }
 
@@ -8295,7 +8484,7 @@ mod tests {
         // `Ok(None)` every other effect gives, so the tracks render as scalar instances instead
         // of failing the session compile.
         let mut heterogeneous: Vec<PrepareEffectRequest<'_>> = requests.clone();
-        heterogeneous[3].link_mode = LinkMode::Maximum;
+        heterogeneous[3].bypass = true;
         let heterogeneous =
             TruePeakLimiterFactory.bind_homogeneous_bank(PrepareEffectBankRequest {
                 backend,
@@ -8397,12 +8586,22 @@ mod tests {
                 // A padded lane of another program is not a clone, and a cohort of two programs
                 // is one this artifact declines rather than binds.
                 let mut foreign = requests.clone();
-                foreign[lanes - 1].link_mode = LinkMode::Maximum;
+                foreign[lanes - 1].bypass = true;
                 assert!(
                     bind(&foreign, &mask)
                         .expect("a foreign clone is well formed")
                         .is_none(),
                     "{label}: a foreign clone declines"
+                );
+                // Issue #1368: the link mode is per lane and not in the key, so a lane at another
+                // mode is the same program.
+                let mut other_link = requests.clone();
+                other_link[lanes - 1].link_mode = LinkMode::Maximum;
+                assert!(
+                    bind(&other_link, &mask)
+                        .expect("a well-formed request")
+                        .is_some(),
+                    "{label}: a lane that differs only by link mode shares the bank"
                 );
                 for malformed_lane in 0..lanes {
                     let role = if malformed_lane < members {
@@ -9285,7 +9484,7 @@ mod tests {
         let mut hot_right = HotChannel::<L>::load(right);
         let all = L::zero().eq(L::zero());
         let none = L::mask_not(all);
-        let link = if coef.link_max { all } else { none };
+        let link = coef.link;
         let bypass = if coef.bypass { all } else { none };
         let mut scratch = [0.0; MAXIMUM_WIDTH];
         for frame in 0..frames {
