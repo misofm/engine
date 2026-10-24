@@ -2,6 +2,8 @@
 //! or removes the spectrum taps of a running session, and the reply that names the configuration
 //! it set and the plan that carries it. `SPECTRUM_CAPTURE` (`0x0011`, #1595 D2): one operation on
 //! the one-shot window, and the reply that carries the analyzed window when it is ready.
+//! `SPECTRUM_STREAM` (`0x0012`, #1595 D3): one operation on the continuous stream, and the reply
+//! that carries the stream's metadata and, when a window is ready, its smoothed bins.
 //!
 //! The codec owns the code tables and the form's entry count: a value outside a table, an identity
 //! that is empty or longer than [`SPECTRUM_TARGET_ID_MAXIMUM_BYTES`], a hop outside
@@ -18,10 +20,10 @@ use super::{
 };
 use crate::{
     DecodeError, EncodeError, ProtocolCodec,
-    btlv::{CountSink, Sink, SliceSink},
+    btlv::{CountSink, Sink, SliceSink, read_f64},
     schema::{
         self, spectrum_capture_reply, spectrum_capture_request, spectrum_configure_request,
-        spectrum_configured, spectrum_entry,
+        spectrum_configured, spectrum_entry, spectrum_stream_reply, spectrum_stream_request,
     },
 };
 
@@ -906,6 +908,545 @@ impl ProtocolCodec {
             }),
         };
         self.encoded_spectrum_capture_reply_len(&reply)?
+            .checked_add(crate::OUTER_HEADER_BYTES)
+            .ok_or(EncodeError::LimitExceeded)
+    }
+}
+
+/// The longest stream smoothing, in milliseconds (#1592; #1595 D3). A smoothing is finite and
+/// from 0 through this.
+pub const SPECTRUM_SMOOTHING_MAXIMUM_MS: f64 = 10_000.0;
+
+/// One `SPECTRUM_STREAM` operation (#1595 D3).
+#[derive(Clone, Debug, PartialEq)]
+pub enum SpectrumStreamRequest {
+    /// Start the stream on the selected entry.
+    Start {
+        /// The smoothing duration in milliseconds.
+        smoothing_ms: f64,
+    },
+    /// Select one exact entry of a collection: the plain selection without a stream, the
+    /// stream's restarting selection with one.
+    Select {
+        /// The boundary the entry observes.
+        target_kind: SpectrumTargetKind,
+        /// The strip or output it observes, by stable ID.
+        target_id: String,
+        /// The entry's planes.
+        channels: ParameterChannel,
+        /// A new smoothing for the running stream; `None` keeps it.
+        smoothing_ms: Option<f64>,
+    },
+    /// Read the stream once: its status, and with `ready` the smoothed window.
+    Read,
+    /// Reset the smoothing history without stopping the stream.
+    Reset,
+    /// Stop the stream.
+    Stop,
+}
+
+impl SpectrumStreamRequest {
+    const fn op(&self) -> u8 {
+        match self {
+            Self::Start { .. } => 1,
+            Self::Select { .. } => 2,
+            Self::Read => 3,
+            Self::Reset => 4,
+            Self::Stop => 5,
+        }
+    }
+}
+
+control_code_table! {
+    /// The status of the stream in a `SPECTRUM_STREAM` reply: #1592 D1's codes. None is a
+    /// refusal.
+    SpectrumStreamStatus {
+        /// No stream has run, or a read found it not running.
+        Inactive = 0,
+        /// The stream runs and has not observed a complete first window.
+        Warming = 1,
+        /// The stream runs and no completed window is queued.
+        Pending = 2,
+        /// The bounded queue dropped completed windows: `dropped_captures` counts them.
+        Gap = 3,
+        /// A discontinuity or a failed render reset the stream history.
+        Failed = 4,
+        /// The stream was stopped after a successful start.
+        Stopped = 5,
+        /// A completed window was read: the reply carries its bins.
+        Ready = 6,
+    }
+}
+
+/// The selected entry a `SPECTRUM_STREAM` reply names.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SpectrumStreamTarget<'a> {
+    /// The boundary the entry observes.
+    pub target_kind: SpectrumTargetKind,
+    /// The strip or output it observes, by stable ID.
+    pub target_id: Cow<'a, str>,
+    /// The entry's planes.
+    pub channels: ParameterChannel,
+}
+
+/// The smoothed bins of a ready `SPECTRUM_STREAM` read: [`SPECTRUM_CAPTURE_BIN_COUNT`] words each.
+/// They borrow the session's analysis when it encodes and own their words when decoded.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SpectrumStreamBins<'a> {
+    /// The frequency axis in hertz.
+    pub frequencies_hz: Cow<'a, [f32]>,
+    /// The left amplitude in dBFS, present exactly when the entry holds left.
+    pub left_db: Option<Cow<'a, [f32]>>,
+    /// The right amplitude in dBFS, present exactly when the entry holds right.
+    pub right_db: Option<Cow<'a, [f32]>>,
+}
+
+/// The success reply of a `SPECTRUM_STREAM`: the epochs and the stream's metadata after the
+/// operation (#1592's `SpectrumStreamMetadata`), and with `ready` the bins.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SpectrumStreamReply<'a> {
+    /// The epoch of the configuration the running plan carries.
+    pub adopted_epoch: u64,
+    /// The service's selection epoch, zero on a single configuration.
+    pub selection_epoch: u64,
+    /// The state of the stream.
+    pub status: SpectrumStreamStatus,
+    /// The selected entry; `None` without a selection (target kind and channels `0` on the wire).
+    pub target: Option<SpectrumStreamTarget<'a>>,
+    /// The stream rate.
+    pub sample_rate_hz: u32,
+    /// The render quantum.
+    pub quantum_frames: u32,
+    /// The sample-clock spacing of scheduled windows.
+    pub hop_frames: u32,
+    /// The capture epoch; a discontinuity starts a new one.
+    pub capture_epoch: u64,
+    /// The zero-based window sequence within the capture epoch.
+    pub sequence: u64,
+    /// Complete windows the bounded queue dropped in this capture epoch.
+    pub dropped_captures: u64,
+    /// The windows of this capture epoch so far.
+    pub windows: u64,
+    /// Absolute sample at the start of the last window.
+    pub captured_sample: u64,
+    /// Exclusive absolute sample at the end of the last window.
+    pub end_sample: u64,
+    /// The epoch of the smoothing history.
+    pub analysis_epoch: u64,
+    /// The first sample the smoothing history holds, zero when it is empty.
+    pub history_start_sample: u64,
+    /// The smoothing duration in milliseconds.
+    pub smoothing_ms: f64,
+    /// Whether a source underrun was known while the last window was captured.
+    pub source_underrun: bool,
+    /// The smoothed bins: present exactly when `status` is `Ready`.
+    pub bins: Option<SpectrumStreamBins<'a>>,
+}
+
+fn smoothing_is_valid(smoothing_ms: f64) -> bool {
+    smoothing_ms.is_finite() && (0.0..=SPECTRUM_SMOOTHING_MAXIMUM_MS).contains(&smoothing_ms)
+}
+
+fn stream_request_is_valid(limits: crate::ProtocolLimits, value: &SpectrumStreamRequest) -> bool {
+    match value {
+        SpectrumStreamRequest::Start { smoothing_ms } => smoothing_is_valid(*smoothing_ms),
+        SpectrumStreamRequest::Select {
+            target_id,
+            smoothing_ms,
+            ..
+        } => {
+            capture_target_is_valid(limits, target_id)
+                && smoothing_ms.is_none_or(smoothing_is_valid)
+        }
+        SpectrumStreamRequest::Read
+        | SpectrumStreamRequest::Reset
+        | SpectrumStreamRequest::Stop => true,
+    }
+}
+
+fn stream_reply_is_valid(limits: crate::ProtocolLimits, value: &SpectrumStreamReply<'_>) -> bool {
+    let target_valid = value
+        .target
+        .as_ref()
+        .is_none_or(|target| capture_target_is_valid(limits, &target.target_id));
+    let shape_valid = match (&value.bins, &value.target) {
+        (Some(bins), Some(target)) => {
+            value.status == SpectrumStreamStatus::Ready
+                && value
+                    .captured_sample
+                    .checked_add(u64::from(SPECTRUM_CAPTURE_WINDOW_FRAMES))
+                    == Some(value.end_sample)
+                && value.sequence.checked_add(1) == Some(value.windows)
+                && plane_is_valid(Some(&bins.frequencies_hz), true, SPECTRUM_CAPTURE_BIN_COUNT)
+                && plane_is_valid(
+                    bins.left_db.as_deref(),
+                    holds_left(target.channels),
+                    SPECTRUM_CAPTURE_BIN_COUNT,
+                )
+                && plane_is_valid(
+                    bins.right_db.as_deref(),
+                    holds_right(target.channels),
+                    SPECTRUM_CAPTURE_BIN_COUNT,
+                )
+        }
+        (Some(_), None) => false,
+        (None, _) => value.status != SpectrumStreamStatus::Ready,
+    };
+    target_valid && shape_valid && smoothing_is_valid(value.smoothing_ms)
+}
+
+pub(crate) fn write_spectrum_stream_request(
+    sink: &mut dyn Sink,
+    value: &SpectrumStreamRequest,
+) -> Result<(), EncodeError> {
+    use spectrum_stream_request as r;
+    if !stream_request_is_valid(sink.limits(), value) {
+        return Err(EncodeError::InvalidField);
+    }
+    let (smoothing, target) = match value {
+        SpectrumStreamRequest::Start { smoothing_ms } => (Some(*smoothing_ms), None),
+        SpectrumStreamRequest::Select {
+            target_kind,
+            target_id,
+            channels,
+            smoothing_ms,
+        } => (
+            *smoothing_ms,
+            Some((*target_kind, target_id.as_str(), *channels)),
+        ),
+        SpectrumStreamRequest::Read
+        | SpectrumStreamRequest::Reset
+        | SpectrumStreamRequest::Stop => (None, None),
+    };
+    let count = r::SPEC.field_count(&[
+        (r::SMOOTHING_MS, usize::from(smoothing.is_some())),
+        (r::TARGET_KIND, usize::from(target.is_some())),
+        (r::TARGET_ID, usize::from(target.is_some())),
+        (r::CHANNELS, usize::from(target.is_some())),
+    ])?;
+    sink.check_field_count(count)?;
+    write_spec!(sink, r::OP, &[value.op()])?;
+    if let Some(smoothing_ms) = smoothing {
+        write_spec!(sink, r::SMOOTHING_MS, &smoothing_ms.to_le_bytes())?;
+    }
+    if let Some((kind, id, channels)) = target {
+        write_spec!(sink, r::TARGET_KIND, &[kind.code()])?;
+        write_spec!(sink, r::TARGET_ID, id.as_bytes())?;
+        write_spec!(
+            sink,
+            r::CHANNELS,
+            &[schema::parameter_channel_wire(channels)]
+        )?;
+    }
+    Ok(())
+}
+
+fn decode_spectrum_stream_request(
+    codec: &ProtocolCodec,
+    message: Message<'_>,
+) -> Result<SpectrumStreamRequest, DecodeError> {
+    use spectrum_stream_request as r;
+    let limits = codec.limits();
+    let message = message.schema_spec(&r::SPEC)?;
+    let op = read_u8(one_spec!(message, r::OP)?)?;
+    let smoothing_ms = optional_spec!(message, r::SMOOTHING_MS)?
+        .map(read_f64)
+        .transpose()?;
+    let target_kind = optional_spec!(message, r::TARGET_KIND)?
+        .map(|value| SpectrumTargetKind::from_code(read_u8(value)?))
+        .transpose()?;
+    let target_id = optional_spec!(message, r::TARGET_ID)?
+        .map(|value| read_string_within(limits, value))
+        .transpose()?;
+    let channels = optional_spec!(message, r::CHANNELS)?
+        .map(|value| {
+            schema::parameter_channel_from_wire(read_u8(value)?)
+                .map_err(|_| DecodeError::InvalidField)
+        })
+        .transpose()?;
+    // Every presence rule of D3: a field outside its operation is `INVALID_FIELD`.
+    let value = match (op, smoothing_ms, target_kind, target_id, channels) {
+        (1, Some(smoothing_ms), None, None, None) => SpectrumStreamRequest::Start { smoothing_ms },
+        (2, smoothing_ms, Some(target_kind), Some(target_id), Some(channels)) => {
+            SpectrumStreamRequest::Select {
+                target_kind,
+                target_id: target_id.to_owned(),
+                channels,
+                smoothing_ms,
+            }
+        }
+        (3, None, None, None, None) => SpectrumStreamRequest::Read,
+        (4, None, None, None, None) => SpectrumStreamRequest::Reset,
+        (5, None, None, None, None) => SpectrumStreamRequest::Stop,
+        _ => return Err(DecodeError::InvalidField),
+    };
+    if !stream_request_is_valid(limits, &value) {
+        return Err(DecodeError::InvalidField);
+    }
+    Ok(value)
+}
+
+pub(crate) fn write_spectrum_stream_reply(
+    sink: &mut dyn Sink,
+    value: &SpectrumStreamReply<'_>,
+) -> Result<(), EncodeError> {
+    use spectrum_stream_reply as r;
+    if !stream_reply_is_valid(sink.limits(), value) {
+        return Err(EncodeError::InvalidField);
+    }
+    let bins = value.bins.as_ref();
+    let count = r::SPEC.field_count(&[
+        (r::TARGET_ID, usize::from(value.target.is_some())),
+        (r::FREQUENCIES_HZ, usize::from(bins.is_some())),
+        (
+            r::LEFT_DB,
+            usize::from(bins.is_some_and(|bins| bins.left_db.is_some())),
+        ),
+        (
+            r::RIGHT_DB,
+            usize::from(bins.is_some_and(|bins| bins.right_db.is_some())),
+        ),
+    ])?;
+    sink.check_field_count(count)?;
+    write_spec!(sink, r::ADOPTED_EPOCH, &value.adopted_epoch.to_le_bytes())?;
+    write_spec!(
+        sink,
+        r::SELECTION_EPOCH,
+        &value.selection_epoch.to_le_bytes()
+    )?;
+    write_spec!(sink, r::STATUS, &[value.status.code()])?;
+    let target = value.target.as_ref();
+    write_spec!(
+        sink,
+        r::TARGET_KIND,
+        &[target.map_or(0, |target| target.target_kind.code())]
+    )?;
+    if let Some(target) = target {
+        write_spec!(sink, r::TARGET_ID, target.target_id.as_bytes())?;
+    }
+    write_spec!(
+        sink,
+        r::CHANNELS,
+        &[target.map_or(0, |target| schema::parameter_channel_wire(target.channels))]
+    )?;
+    write_spec!(sink, r::SAMPLE_RATE_HZ, &value.sample_rate_hz.to_le_bytes())?;
+    write_spec!(sink, r::QUANTUM_FRAMES, &value.quantum_frames.to_le_bytes())?;
+    write_spec!(sink, r::HOP_FRAMES, &value.hop_frames.to_le_bytes())?;
+    for (spec, word) in [
+        (r::CAPTURE_EPOCH, value.capture_epoch),
+        (r::SEQUENCE, value.sequence),
+        (r::DROPPED_CAPTURES, value.dropped_captures),
+        (r::WINDOWS, value.windows),
+        (r::CAPTURED_SAMPLE, value.captured_sample),
+        (r::END_SAMPLE, value.end_sample),
+        (r::ANALYSIS_EPOCH, value.analysis_epoch),
+        (r::HISTORY_START_SAMPLE, value.history_start_sample),
+    ] {
+        write_spec!(sink, spec, &word.to_le_bytes())?;
+    }
+    write_spec!(sink, r::SMOOTHING_MS, &value.smoothing_ms.to_le_bytes())?;
+    write_spec!(sink, r::SOURCE_UNDERRUN, &[u8::from(value.source_underrun)])?;
+    let Some(bins) = bins else {
+        return Ok(());
+    };
+    write_packed(sink, r::FREQUENCIES_HZ, &bins.frequencies_hz)?;
+    for (spec, plane) in [(r::LEFT_DB, &bins.left_db), (r::RIGHT_DB, &bins.right_db)] {
+        if let Some(plane) = plane {
+            write_packed(sink, spec, plane)?;
+        }
+    }
+    Ok(())
+}
+
+fn decode_spectrum_stream_reply(
+    codec: &ProtocolCodec,
+    message: Message<'_>,
+) -> Result<SpectrumStreamReply<'static>, DecodeError> {
+    use spectrum_stream_reply as r;
+    let limits = codec.limits();
+    let message = message.schema_spec(&r::SPEC)?;
+    let status = SpectrumStreamStatus::from_code(read_u8(one_spec!(message, r::STATUS)?)?)?;
+    let kind = read_u8(one_spec!(message, r::TARGET_KIND)?)?;
+    let target_id = optional_spec!(message, r::TARGET_ID)?
+        .map(|value| read_string_within(limits, value))
+        .transpose()?;
+    let channels = read_u8(one_spec!(message, r::CHANNELS)?)?;
+    // Without a selection the kind and the channels are `0` and the identity is absent.
+    let target = match (kind, target_id, channels) {
+        (0, None, 0) => None,
+        (0, _, _) | (_, None, _) => return Err(DecodeError::InvalidField),
+        (kind, Some(target_id), channels) => Some(SpectrumStreamTarget {
+            target_kind: SpectrumTargetKind::from_code(kind)?,
+            target_id: Cow::Owned(target_id.to_owned()),
+            channels: schema::parameter_channel_from_wire(channels)
+                .map_err(|_| DecodeError::InvalidField)?,
+        }),
+    };
+    let word = |spec: schema::FieldSpec| read_u64(one_spec!(message, spec)?);
+    let plane = |spec: schema::FieldSpec| {
+        optional_spec!(message, spec)?
+            .map(|value| read_packed(value).map(Cow::Owned))
+            .transpose()
+    };
+    let bins = match plane(r::FREQUENCIES_HZ)? {
+        Some(frequencies_hz) => Some(SpectrumStreamBins {
+            frequencies_hz,
+            left_db: plane(r::LEFT_DB)?,
+            right_db: plane(r::RIGHT_DB)?,
+        }),
+        None => {
+            // A reply without the axis carries no plane.
+            if plane(r::LEFT_DB)?.is_some() || plane(r::RIGHT_DB)?.is_some() {
+                return Err(DecodeError::InvalidField);
+            }
+            None
+        }
+    };
+    let value = SpectrumStreamReply {
+        adopted_epoch: word(r::ADOPTED_EPOCH)?,
+        selection_epoch: word(r::SELECTION_EPOCH)?,
+        status,
+        target,
+        sample_rate_hz: read_u32(one_spec!(message, r::SAMPLE_RATE_HZ)?)?,
+        quantum_frames: read_u32(one_spec!(message, r::QUANTUM_FRAMES)?)?,
+        hop_frames: read_u32(one_spec!(message, r::HOP_FRAMES)?)?,
+        capture_epoch: word(r::CAPTURE_EPOCH)?,
+        sequence: word(r::SEQUENCE)?,
+        dropped_captures: word(r::DROPPED_CAPTURES)?,
+        windows: word(r::WINDOWS)?,
+        captured_sample: word(r::CAPTURED_SAMPLE)?,
+        end_sample: word(r::END_SAMPLE)?,
+        analysis_epoch: word(r::ANALYSIS_EPOCH)?,
+        history_start_sample: word(r::HISTORY_START_SAMPLE)?,
+        smoothing_ms: read_f64(one_spec!(message, r::SMOOTHING_MS)?)?,
+        source_underrun: read_bool(one_spec!(message, r::SOURCE_UNDERRUN)?)?,
+        bins,
+    };
+    if !stream_reply_is_valid(limits, &value) {
+        return Err(DecodeError::InvalidField);
+    }
+    Ok(value)
+}
+
+impl ProtocolCodec {
+    /// Return the exact caller-buffer size of a `SPECTRUM_STREAM` request.
+    pub fn encoded_spectrum_stream_request_len(
+        &self,
+        value: &SpectrumStreamRequest,
+    ) -> Result<usize, EncodeError> {
+        let mut sink = CountSink::new(self.limits());
+        write_spectrum_stream_request(&mut sink, value)?;
+        checked_sink_len(self, &mut sink)
+    }
+
+    /// Encode a `SPECTRUM_STREAM` request without allocation.
+    pub fn encode_spectrum_stream_request(
+        &self,
+        value: &SpectrumStreamRequest,
+        output: &mut [u8],
+    ) -> Result<usize, EncodeError> {
+        let required = self.encoded_spectrum_stream_request_len(value)?;
+        if output.len() < required {
+            return Err(EncodeError::OutputTooSmall { required });
+        }
+        let mut writer = SliceSink::new(output, self.limits());
+        write_spectrum_stream_request(&mut writer, value)?;
+        checked_writer_len(&writer, required)
+    }
+
+    /// Strictly decode a `SPECTRUM_STREAM` request.
+    pub fn decode_spectrum_stream_request(
+        &self,
+        payload: &[u8],
+        count: u32,
+    ) -> Result<SpectrumStreamRequest, DecodeError> {
+        decode_spectrum_stream_request(self, Message::top_level(payload, count, self.limits())?)
+    }
+
+    /// Return the exact caller-buffer size of a `SPECTRUM_STREAM` reply.
+    pub fn encoded_spectrum_stream_reply_len(
+        &self,
+        value: &SpectrumStreamReply<'_>,
+    ) -> Result<usize, EncodeError> {
+        let mut sink = CountSink::new(self.limits());
+        write_spectrum_stream_reply(&mut sink, value)?;
+        checked_sink_len(self, &mut sink)
+    }
+
+    /// Encode a `SPECTRUM_STREAM` reply without allocation.
+    pub fn encode_spectrum_stream_reply(
+        &self,
+        value: &SpectrumStreamReply<'_>,
+        output: &mut [u8],
+    ) -> Result<usize, EncodeError> {
+        let required = self.encoded_spectrum_stream_reply_len(value)?;
+        if output.len() < required {
+            return Err(EncodeError::OutputTooSmall { required });
+        }
+        let mut writer = SliceSink::new(output, self.limits());
+        write_spectrum_stream_reply(&mut writer, value)?;
+        checked_writer_len(&writer, required)
+    }
+
+    /// Strictly decode a `SPECTRUM_STREAM` reply.
+    pub fn decode_spectrum_stream_reply(
+        &self,
+        payload: &[u8],
+        count: u32,
+    ) -> Result<SpectrumStreamReply<'static>, DecodeError> {
+        decode_spectrum_stream_reply(self, Message::top_level(payload, count, self.limits())?)
+    }
+
+    /// The complete response frame, in bytes, of a ready `SPECTRUM_STREAM` read of an entry of
+    /// `channels` whose identity is `target_id_bytes` long (#1595 D5, R3), as
+    /// [`Self::spectrum_capture_ready_frame_len`] measures a capture: by the encoder itself, so the
+    /// number cannot drift from it, and exact, since every other field has a fixed width.
+    /// Allocates nothing.
+    ///
+    /// # Errors
+    ///
+    /// [`EncodeError::InvalidField`] for an identity of 0 or more than
+    /// [`SPECTRUM_TARGET_ID_MAXIMUM_BYTES`] bytes; [`EncodeError::LimitExceeded`] when the payload
+    /// exceeds this codec's frame limit.
+    pub fn spectrum_stream_ready_frame_len(
+        &self,
+        channels: ParameterChannel,
+        target_id_bytes: usize,
+    ) -> Result<usize, EncodeError> {
+        let target_id = MEASURE_ID
+            .get(..target_id_bytes)
+            .ok_or(EncodeError::InvalidField)?;
+        let bins = &MEASURE_ZEROS[..SPECTRUM_CAPTURE_BIN_COUNT as usize];
+        let plane = |held: bool| held.then_some(Cow::Borrowed(bins));
+        let reply = SpectrumStreamReply {
+            adopted_epoch: 0,
+            selection_epoch: 0,
+            status: SpectrumStreamStatus::Ready,
+            target: Some(SpectrumStreamTarget {
+                target_kind: SpectrumTargetKind::Output,
+                target_id: Cow::Borrowed(target_id),
+                channels,
+            }),
+            sample_rate_hz: 0,
+            quantum_frames: 0,
+            hop_frames: 0,
+            capture_epoch: 0,
+            sequence: 0,
+            dropped_captures: 0,
+            windows: 1,
+            captured_sample: 0,
+            end_sample: u64::from(SPECTRUM_CAPTURE_WINDOW_FRAMES),
+            analysis_epoch: 0,
+            history_start_sample: 0,
+            smoothing_ms: 0.0,
+            source_underrun: false,
+            bins: Some(SpectrumStreamBins {
+                frequencies_hz: Cow::Borrowed(bins),
+                left_db: plane(holds_left(channels)),
+                right_db: plane(holds_right(channels)),
+            }),
+        };
+        self.encoded_spectrum_stream_reply_len(&reply)?
             .checked_add(crate::OUTER_HEADER_BYTES)
             .ok_or(EncodeError::LimitExceeded)
     }

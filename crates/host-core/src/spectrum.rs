@@ -2980,8 +2980,10 @@ impl SpectrumAnalyzer {
         let mut scratch = SpectrumAnalysisScratch::default();
         let (left_requested, right_requested) =
             self.prepare_analysis(window, sample_rate_hz, output, &mut scratch)?;
-        let mut left_dbfs = [SPECTRUM_FLOOR_DB; SPECTRUM_BIN_COUNT];
-        let mut right_dbfs = [SPECTRUM_FLOOR_DB; SPECTRUM_BIN_COUNT];
+        // A requested plane's bins are all written below or the call returns `Err`; an unrequested
+        // plane has no output to copy into (`validate_analysis_request`), so no fill is read.
+        let mut left_dbfs = [0.0; SPECTRUM_BIN_COUNT];
+        let mut right_dbfs = [0.0; SPECTRUM_BIN_COUNT];
         for bin in 0..SPECTRUM_BIN_COUNT {
             if left_requested {
                 left_dbfs[bin] = amplitude_db(scratch.left_amplitudes[bin])?;
@@ -3071,8 +3073,10 @@ impl SpectrumAnalyzer {
 
         let mut next_left_power = history.left_power;
         let mut next_right_power = history.right_power;
-        let mut left_dbfs = [SPECTRUM_FLOOR_DB; SPECTRUM_BIN_COUNT];
-        let mut right_dbfs = [SPECTRUM_FLOOR_DB; SPECTRUM_BIN_COUNT];
+        // A requested plane's bins are all written below or the call returns `Err`; an unrequested
+        // plane has no output to copy into (`validate_analysis_request`), so no fill is read.
+        let mut left_dbfs = [0.0; SPECTRUM_BIN_COUNT];
+        let mut right_dbfs = [0.0; SPECTRUM_BIN_COUNT];
         for bin in 0..SPECTRUM_BIN_COUNT {
             if left_requested {
                 let power = scratch.left_amplitudes[bin] * scratch.left_amplitudes[bin];
