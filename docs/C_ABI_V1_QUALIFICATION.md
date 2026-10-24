@@ -372,7 +372,8 @@ counters `TELEMETRY_COALESCED` 5 and `TELEMETRY_DROPPED` 6, `LIVE_VALUES_SUPERSE
 `TRANSITION_REPREPARE_REFUSALS` 17, #1351 D6, `STRIPS_RESTARTED` 18, #1768,
 `LIVE_BLOCK_ERRORS` 19, #1521, `SOURCE_UNDERRUN_BLOCKS` 20, #1537, and `SOURCE_FRAMES_DISCARDED`
 21, #1699) retain an independent eight-slot minimum even when the frame-derived telemetry
-configuration capacity is smaller. Canceled automation (counter 12) retired with the automation queue (#1629).
+configuration capacity is smaller. Canceled automation (counter 12) retired with the automation
+queue (#1629).
 
 **Served counters and the counter snapshot (#1351).** The provider serves exactly those eight
 counters, each at 0 from construction, so `COUNTERS_GET` with `all` returns all eight and a read of
