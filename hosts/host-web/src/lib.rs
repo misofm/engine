@@ -5992,9 +5992,19 @@ impl control_plane::RuntimePreparer for WebRuntimePreparer {
         compiled: &CompiledSession,
         caps: &HostPrepareCaps,
         lanes: HostLiveLanes,
+        // #1593 T3 takes the request from here; until then the preparer holds its own, keeps its
+        // capture in the render companions and returns none.
+        _spectrum: Option<&host_core::SpectrumPreparation>,
         successor: Option<SuccessorBase<'_>>,
         superseded: &host_core::LiveValuesSuperseded,
-    ) -> Result<(PreparedHost, host_core::HostLiveControlHandles), PrepareDiagnostics> {
+    ) -> Result<
+        (
+            PreparedHost,
+            host_core::HostLiveControlHandles,
+            Option<host_core::PreparedSpectrumCaptures>,
+        ),
+        PrepareDiagnostics,
+    > {
         let boot = successor.is_none();
         let prepared = self.prepare_plan(compiled, caps, lanes, successor, superseded, boot);
         if let (Err(failure), Some(record)) = (&prepared, &self.record)
@@ -6002,7 +6012,7 @@ impl control_plane::RuntimePreparer for WebRuntimePreparer {
         {
             record.rejection = Some(failure.kind());
         }
-        prepared
+        prepared.map(|(host, handles)| (host, handles, None))
     }
 
     /// The boot word (#1581 T2 obligation), so the session's output meter closes its windows on
@@ -6680,7 +6690,7 @@ fn compile_ready(
     let control_plane::CompiledChildren {
         session: mut control,
         mut plan,
-    } = control_plane::compile_children::<WebAdapter>(document, limits, Box::new(preparer))
+    } = control_plane::compile_children::<WebAdapter>(document, limits, Box::new(preparer), None)
         .map_err(|failure| boot_refusal(&failure, &record))?;
     let (engine, live_values_superseded, shape, spectrum_boot) = {
         let mut record = record
