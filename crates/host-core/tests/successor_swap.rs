@@ -10278,12 +10278,9 @@ mod spectrum_carry {
         HostLiveControlRequest, HostLiveLanes, LiveValuesSuperseded, PreparedHost,
         PreparedSpectrumCaptures, SpectrumCaptureCollectionEntry, SpectrumCaptureCollectionRequest,
         SpectrumCaptureRequest, SpectrumChannels, SpectrumContinuousWindow, SpectrumHop,
-        SpectrumPair, SpectrumService, SpectrumServiceError, SpectrumSmoothingConfig,
-        SpectrumSnapshot, SpectrumStreamStatus, SpectrumTarget, SuccessorBase,
-        prepare_host_runtime_with_live_controls_and_spectrum,
-        prepare_host_runtime_with_live_controls_and_spectrum_collection,
-        prepare_host_runtime_with_live_controls_and_spectrum_collection_successor,
-        prepare_host_runtime_with_live_controls_and_spectrum_successor,
+        SpectrumPair, SpectrumPreparation, SpectrumService, SpectrumServiceError,
+        SpectrumSmoothingConfig, SpectrumSnapshot, SpectrumStreamStatus, SpectrumTarget,
+        SuccessorBase, prepare_host_runtime_with_live_lanes_and_spectrum,
         spectrum_capture_collection_resources, spectrum_capture_resources_for,
     };
 
@@ -10343,27 +10340,17 @@ mod spectrum_carry {
         ) -> (PreparedHost, PreparedSpectrumCaptures) {
             let live = HostLiveControlRequest::default();
             let superseded = LiveValuesSuperseded::default();
-            let (host, _handles, capture) = match base {
-                None => prepare_host_runtime_with_live_controls_and_spectrum(
-                    &session.compiled,
-                    &caps(),
-                    &live,
-                    self,
-                    HostLiveLanes::ALL,
-                    &superseded,
-                ),
-                Some(base) => prepare_host_runtime_with_live_controls_and_spectrum_successor(
-                    &session.compiled,
-                    &caps(),
-                    &live,
-                    self,
-                    HostLiveLanes::ALL,
-                    &superseded,
-                    base,
-                ),
-            }
+            let (host, _handles, captures) = prepare_host_runtime_with_live_lanes_and_spectrum(
+                &session.compiled,
+                &caps(),
+                &live,
+                HostLiveLanes::ALL,
+                Some(&SpectrumPreparation::Single(self.clone())),
+                base,
+                &superseded,
+            )
             .unwrap_or_else(|failure| panic!("prepare: {failure:?}"));
-            (host, capture.into())
+            (host, captures.expect("the captures"))
         }
     }
 
@@ -10381,29 +10368,17 @@ mod spectrum_carry {
         ) -> (PreparedHost, PreparedSpectrumCaptures) {
             let live = HostLiveControlRequest::default();
             let superseded = LiveValuesSuperseded::default();
-            let (host, _handles, capture) = match base {
-                None => prepare_host_runtime_with_live_controls_and_spectrum_collection(
-                    &session.compiled,
-                    &caps(),
-                    &live,
-                    &self.request,
-                    HostLiveLanes::ALL,
-                    &superseded,
-                ),
-                Some(base) => {
-                    prepare_host_runtime_with_live_controls_and_spectrum_collection_successor(
-                        &session.compiled,
-                        &caps(),
-                        &live,
-                        &self.request,
-                        HostLiveLanes::ALL,
-                        &superseded,
-                        base,
-                    )
-                }
-            }
+            let (host, _handles, captures) = prepare_host_runtime_with_live_lanes_and_spectrum(
+                &session.compiled,
+                &caps(),
+                &live,
+                HostLiveLanes::ALL,
+                Some(&SpectrumPreparation::Collection(self.request.clone())),
+                base,
+                &superseded,
+            )
             .unwrap_or_else(|failure| panic!("prepare: {failure:?}"));
-            (host, capture.into())
+            (host, captures.expect("the captures"))
         }
 
         fn script(&self) -> Script {

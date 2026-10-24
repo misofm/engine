@@ -1745,150 +1745,6 @@ pub fn prepare_host_runtime_with_live_lanes_and_spectrum(
     )
 }
 
-/// Prepare a host with live-control handles and one selected, fixed-size spectrum observer.
-///
-/// Meter configuration remains part of [`HostLiveControlRequest`], so this entry keeps the
-/// live-control, meter and spectrum resources in one transactional preparation boundary.
-///
-/// `superseded` is the session's `live_values_superseded` count, as in
-/// [`prepare_host_runtime_with_live_lanes`].
-pub fn prepare_host_runtime_with_live_controls_and_spectrum(
-    compiled: &CompiledSession,
-    caps: &HostPrepareCaps,
-    live_controls: &HostLiveControlRequest,
-    spectrum: &SpectrumCaptureRequest,
-    lanes: HostLiveLanes,
-    superseded: &LiveValuesSuperseded,
-) -> Result<(PreparedHost, HostLiveControlHandles, SpectrumCapture), PrepareDiagnostics> {
-    let (prepared, handles, capture) = prepare_host_runtime_with_live_controls_policy_and_spectrum(
-        compiled,
-        caps,
-        Some(live_controls),
-        None,
-        Backend::current(),
-        Some(&SpectrumPreparation::Single(spectrum.clone())),
-        None,
-        lanes,
-        Some(superseded),
-    )?;
-    let capture = match capture.ok_or_else(|| resource("host.spectrum.capture"))? {
-        PreparedSpectrumCaptures::Single(capture) => capture,
-        PreparedSpectrumCaptures::Collection(_) => {
-            return Err(resource("host.spectrum.capture"));
-        }
-    };
-    Ok((prepared, handles, capture))
-}
-
-/// Prepare a host with live-control handles and several atomically selectable spectrum observers.
-///
-/// `superseded` is the session's `live_values_superseded` count, as in
-/// [`prepare_host_runtime_with_live_lanes`].
-pub fn prepare_host_runtime_with_live_controls_and_spectrum_collection(
-    compiled: &CompiledSession,
-    caps: &HostPrepareCaps,
-    live_controls: &HostLiveControlRequest,
-    spectrum: &SpectrumCaptureCollectionRequest,
-    lanes: HostLiveLanes,
-    superseded: &LiveValuesSuperseded,
-) -> Result<
-    (
-        PreparedHost,
-        HostLiveControlHandles,
-        SpectrumCaptureCollection,
-    ),
-    PrepareDiagnostics,
-> {
-    let (prepared, handles, capture) = prepare_host_runtime_with_live_controls_policy_and_spectrum(
-        compiled,
-        caps,
-        Some(live_controls),
-        None,
-        Backend::current(),
-        Some(&SpectrumPreparation::Collection(spectrum.clone())),
-        None,
-        lanes,
-        Some(superseded),
-    )?;
-    let capture = match capture.ok_or_else(|| resource("host.spectrum.capture"))? {
-        PreparedSpectrumCaptures::Collection(capture) => capture,
-        PreparedSpectrumCaptures::Single(_) => return Err(resource("host.spectrum.capture")),
-    };
-    Ok((prepared, handles, capture))
-}
-
-/// [`prepare_host_runtime_with_live_controls_and_spectrum`] for a successor of a running plan
-/// (issue #1401 D1): every source `base` left unchanged is prepared vacant for the carry program
-/// exactly as in [`prepare_host_runtime_successor`], and control delivery is concurrent.
-///
-/// The successor gets a fresh capture, sized and validated as at boot and allocated here, on the
-/// control thread; carrying capture state across the swap is #1395. A spectrum target the
-/// successor does not have is refused with `host.spectrum.target`, before anything of `base` moves.
-pub fn prepare_host_runtime_with_live_controls_and_spectrum_successor(
-    compiled: &CompiledSession,
-    caps: &HostPrepareCaps,
-    live_controls: &HostLiveControlRequest,
-    spectrum: &SpectrumCaptureRequest,
-    lanes: HostLiveLanes,
-    superseded: &LiveValuesSuperseded,
-    base: SuccessorBase<'_>,
-) -> Result<(PreparedHost, HostLiveControlHandles, SpectrumCapture), PrepareDiagnostics> {
-    let (prepared, handles, capture) = prepare_host_runtime_with_live_controls_policy_and_spectrum(
-        compiled,
-        caps,
-        Some(live_controls),
-        None,
-        Backend::current(),
-        Some(&SpectrumPreparation::Single(spectrum.clone())),
-        Some(base),
-        lanes,
-        Some(superseded),
-    )?;
-    let capture = match capture.ok_or_else(|| resource("host.spectrum.capture"))? {
-        PreparedSpectrumCaptures::Single(capture) => capture,
-        PreparedSpectrumCaptures::Collection(_) => {
-            return Err(resource("host.spectrum.capture"));
-        }
-    };
-    Ok((prepared, handles, capture))
-}
-
-/// [`prepare_host_runtime_with_live_controls_and_spectrum_collection`] for a successor of a
-/// running plan: see [`prepare_host_runtime_with_live_controls_and_spectrum_successor`].
-pub fn prepare_host_runtime_with_live_controls_and_spectrum_collection_successor(
-    compiled: &CompiledSession,
-    caps: &HostPrepareCaps,
-    live_controls: &HostLiveControlRequest,
-    spectrum: &SpectrumCaptureCollectionRequest,
-    lanes: HostLiveLanes,
-    superseded: &LiveValuesSuperseded,
-    base: SuccessorBase<'_>,
-) -> Result<
-    (
-        PreparedHost,
-        HostLiveControlHandles,
-        SpectrumCaptureCollection,
-    ),
-    PrepareDiagnostics,
-> {
-    let (prepared, handles, capture) = prepare_host_runtime_with_live_controls_policy_and_spectrum(
-        compiled,
-        caps,
-        Some(live_controls),
-        None,
-        Backend::current(),
-        Some(&SpectrumPreparation::Collection(spectrum.clone())),
-        Some(base),
-        lanes,
-        Some(superseded),
-    )?;
-    let capture = match capture.ok_or_else(|| resource("host.spectrum.capture"))? {
-        PreparedSpectrumCaptures::Collection(capture) => capture,
-        PreparedSpectrumCaptures::Single(_) => return Err(resource("host.spectrum.capture")),
-    };
-    Ok((prepared, handles, capture))
-}
-
 /// Prepare a successor of a running plan (issue #1272 D2).
 ///
 /// Exactly [`prepare_host_runtime`], except that every source the transaction left unchanged
@@ -2407,7 +2263,7 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
     let committed_automation = successor.map(|base| controls::AutomationIndex::of(base.committed));
     // The effective values of both models, computed once: the strip join and the send join read
     // the same rules (#1558 D1).
-    let effective = successor
+    let level_diff = successor
         .zip(committed_automation.as_ref())
         .map(|(base, committed)| {
             EffectiveDiff::new(
@@ -2422,7 +2278,7 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
                 ],
             )
         });
-    let strip_joins: Vec<StripJoin<'_>> = match (successor, &effective) {
+    let strip_joins: Vec<StripJoin<'_>> = match (successor, &level_diff) {
         (Some(base), Some(diff)) => {
             join_strips(base.committed, model, live_strips, base.edit_ramps, diff)
         }
@@ -2435,7 +2291,7 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
         None => Vec::new(),
         Some(base) => join_strip_delays(base.committed, model),
     };
-    let route_joins: Vec<RouteJoin<'_>> = match (successor, &effective) {
+    let route_joins: Vec<RouteJoin<'_>> = match (successor, &level_diff) {
         (Some(base), Some(diff)) => join_routes(base.committed, model, base.edit_ramps, diff),
         _ => Vec::new(),
     };
@@ -2852,9 +2708,13 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
         let flags = follow_route_flags(route, effective.strips[source].mute, automated);
         // #1655 D6: a source lane whose own and reaching VCA mute tables continue carries its
         // VCA mute cursors verbatim.
-        let continued_vca = successor.map_or([false; 2], |base| {
-            controls::continued_mute_lanes(base.committed, model, route_source_id(route))
-        });
+        let continued_vca =
+            successor
+                .zip(level_diff.as_ref())
+                .map_or([false; 2], |(base, diff)| {
+                    let id = route_source_id(route);
+                    diff.continued_mute_lanes(controls::strip_index(base.committed, id), source, id)
+                });
         follow_cells.push((
             route.id.as_str(),
             (program, cells, vca_mutes, flags, continued_vca),
@@ -4917,12 +4777,15 @@ pub(crate) struct StripChange<'s> {
 /// The ramp rules of the level and gate records of two models (decision 17, C6 step 4; #1558 D7;
 /// #1559 D7): which length a record takes. Written once; [`EffectiveDiff`] (every strip) and the
 /// classifier's local diff (the strips an edit reaches) both ask it.
-#[derive(Clone, Copy)]
 pub(crate) struct LevelRules<'a> {
     pub(crate) current: &'a SessionModel,
     /// The model after the change, read through a view so that a transaction of values need not
     /// build it (#1613).
     pub(crate) next: controls::ModelView<'a>,
+    /// Where the automation entries of `[current, next]` are read from (#1844, #1864): the VCA
+    /// offset entries of [`Self::vca_offset_moved`], and the event lanes of the diff that owns the
+    /// rules.
+    pub(crate) automation: [AutomationReads<'a>; 2],
     pub(crate) ramps: LiveRamps,
     pub(crate) edit_ramps: &'a EditRamps,
     /// The ramp length of a mute record that only the overlay change produced (#1559 D7).
@@ -5045,8 +4908,9 @@ impl LevelRules<'_> {
         let offset = |entries: [Option<&session::Automation>; 2]| {
             entries[lane].map(|entry| [entry.offset.left_db, entry.offset.right_db][lane].to_bits())
         };
-        offset(controls::vca_offset_automation(self.current, vca))
-            != offset(self.next.vca_automation(vca))
+        let [current, next] = &self.automation;
+        offset(current.view().vca_automation(vca))
+            != offset(next.view_of(self.next).vca_automation(vca))
     }
 
     /// The ramp length of a route record whose gate changed (#1558 D7): the route's own `mute` or
@@ -5099,9 +4963,10 @@ pub(crate) struct EffectiveDiff<'a> {
     /// Per strip of each model, whether the solo term of its mute holds ([`controls::solo_term`]).
     solo_before: Vec<bool>,
     solo_after: Vec<bool>,
-    /// Where the event lanes of `current` and of `next` are read from (#1844).
-    automation: [AutomationReads<'a>; 2],
 }
+
+/// One model read for its automation entries, with one strip's VCA reach there (#1864).
+type ReachRead<'r> = (controls::ModelView<'r>, &'r [usize]);
 
 /// Where a diff reads the automation entries of one model's rendered rows from (#1844): the
 /// [`controls::AutomationIndex`] its caller built once, or the model's table, scanned per read
@@ -5146,19 +5011,24 @@ impl<'a> AutomationReads<'a> {
     /// The model, read whole, for one read: indexed when the caller built the index or once the
     /// reads pass the threshold.
     pub(crate) fn view(&self) -> controls::ModelView<'_> {
-        let whole = controls::ModelView::whole(self.model);
+        self.view_of(controls::ModelView::whole(self.model))
+    }
+
+    /// `base`, a view whose committed model is this one (an edited view of it among them, #1864),
+    /// for one read, indexed as [`Self::view`] is.
+    pub(crate) fn view_of<'v>(&'v self, base: controls::ModelView<'v>) -> controls::ModelView<'v> {
         if let Some(index) = self.built {
-            return whole.indexed(index);
+            return base.indexed(index);
         }
         let reads = self.reads.get().saturating_add(1);
         self.reads.set(reads);
         if reads > self.threshold {
-            whole.indexed(
+            base.indexed(
                 self.lazy
                     .get_or_init(|| controls::AutomationIndex::of(self.model)),
             )
         } else {
-            whole
+            base
         }
     }
 }
@@ -5192,6 +5062,7 @@ impl<'a> EffectiveDiff<'a> {
                 ramps,
                 edit_ramps,
                 solo_ramp: monitor.ramp,
+                automation,
             },
             before: controls::effective(current, monitor.committed),
             after: controls::effective(next, monitor.next),
@@ -5199,13 +5070,50 @@ impl<'a> EffectiveDiff<'a> {
             reach_before: current.vca_reach(),
             solo_before: solo_terms(current, monitor.committed),
             solo_after: solo_terms(next, monitor.next),
-            automation,
         }
+    }
+
+    /// The continued fader and mute lanes of strip `id` ([`controls::continued_fader_lanes`],
+    /// [`controls::continued_mute_lanes`]), at `before` in `current` (`None` when `current` has
+    /// no strip `id`) and `after` in `next`: lookups through both models' reads and the reaches
+    /// computed once, not two table scans and two reach walks per strip (#1864).
+    pub(crate) fn continued_lanes(
+        &self,
+        before: Option<usize>,
+        after: usize,
+        id: &session::StableId,
+    ) -> [[bool; 2]; 2] {
+        let [current, next] = self.continued_reads(before, after);
+        [
+            controls::continued_fader_lanes_in(current, next, id),
+            controls::continued_mute_lanes_in(current, next, id),
+        ]
+    }
+
+    /// The mute half of [`Self::continued_lanes`], for a following route's source.
+    pub(crate) fn continued_mute_lanes(
+        &self,
+        before: Option<usize>,
+        after: usize,
+        id: &session::StableId,
+    ) -> [bool; 2] {
+        let [current, next] = self.continued_reads(before, after);
+        controls::continued_mute_lanes_in(current, next, id)
+    }
+
+    /// Both models' reads with the strip's reach in each, for [`Self::continued_lanes`].
+    fn continued_reads(&self, before: Option<usize>, after: usize) -> [ReachRead<'_>; 2] {
+        let [current, next] = &self.rules.automation;
+        let reach_before = before.map_or(&[][..], |before| &self.reach_before[before]);
+        [
+            (current.view(), reach_before),
+            (next.view(), &self.reach[after][..]),
+        ]
     }
 
     /// The post-change model, read for its automation entries (#1844).
     pub(crate) fn automation(&self) -> controls::ModelView<'_> {
-        self.automation[1].view()
+        self.rules.automation[1].view()
     }
 
     /// What the ramp rules read about the strip at `before` in `current` and `after` in `next`.
@@ -5288,7 +5196,7 @@ impl<'a> EffectiveDiff<'a> {
         let mut level = self.strip_level_records(before, after)?;
         let records = &mut level.fader;
         let change = self.change(before, after);
-        let [before_reads, next_reads] = &self.automation;
+        let [before_reads, next_reads] = &self.rules.automation;
         let lost =
             |lanes: [bool; 2], kept: [bool; 2]| [0, 1].map(|lane| lanes[lane] && !kept[lane]);
         // #1655 D6: an event lane (an own curve, or a reaching automated VCA's) that the change
@@ -6141,8 +6049,7 @@ fn join_strips<'a>(
             Ok(Some(_)) if !matrix_live => FamilyJoin::Prepared,
             Ok(Some(record)) => FamilyJoin::Live(record),
         };
-        let continued = controls::continued_fader_lanes(committed, model, strip.id);
-        let continued_mute = controls::continued_mute_lanes(committed, model, strip.id);
+        let [continued, continued_mute] = diff.continued_lanes(Some(position), index, strip.id);
         let continued_cells = u8::from(continued[0])
             | (u8::from(continued[1]) << 1)
             | (u8::from(continued_mute[0]) << 2)
