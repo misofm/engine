@@ -648,6 +648,12 @@ struct DynamicEq<L: Lane, const CONNECTED: bool> {
     ramp_frames_left: u32,
     /// Bit `l` set when lane `l` carries a member (issue #1092).
     active: u32,
+    /// Whether a collapsed block (`run_block::<true>`) has rendered since the last disengage copy
+    /// (`desymmetrize_channels`), which alone clears it (#1894). While it is set the right channel
+    /// is frozen and stale, so [`rest_lanes`](Self::rest_lanes) reads the left channel alone and a
+    /// skipped block advances the left channel's silence clocks alone, as the collapsed silent
+    /// path does: the effect contract's collapsed-bank rule.
+    collapsed: bool,
 }
 
 fn lane_get<L: Lane>(value: L, lane: usize) -> f32 {
@@ -819,6 +825,7 @@ impl<L: Lane, const CONNECTED: bool> DynamicEq<L, CONNECTED> {
             state: [Chan::default(); 2],
             ramp_frames_left: 0,
             active: all_lanes(L::WIDTH),
+            collapsed: false,
         };
         for channel in 0..2 {
             for lane in 0..L::WIDTH {
@@ -1060,6 +1067,10 @@ impl<L: Lane, const CONNECTED: bool> DynamicEq<L, CONNECTED> {
         frames: usize,
         reports: &mut [ProcessReport; MAX_WIDTH],
     ) {
+        if MONO {
+            // From here until the disengage copy the right channel is frozen and stale.
+            self.collapsed = true;
+        }
         let smoothed = (self.ramp_frames_left as usize).min(frames);
         self.ramp_frames_left -= smoothed as u32;
         if self.silent_block::<MONO>(left, right, sidechain) {
@@ -1168,9 +1179,14 @@ impl<L: Lane, const CONNECTED: bool> DynamicEq<L, CONNECTED> {
             && self.rest_lanes() == all
     }
 
-    /// The lanes at exact rest on both channels (`PreparedNativeEffectBank::lanes_at_rest`).
+    /// The lanes at exact rest on both channels (`PreparedNativeEffectBank::lanes_at_rest`), or
+    /// on the left channel alone while [`collapsed`](Self::collapsed) (#1894).
     fn rest_lanes(&self) -> u32 {
-        self.channel_rest_lanes(0) & self.channel_rest_lanes(1)
+        if self.collapsed {
+            self.channel_rest_lanes(0)
+        } else {
+            self.channel_rest_lanes(0) & self.channel_rest_lanes(1)
+        }
     }
 
     /// The lanes of one channel at exact rest: every band's SVF integrators and gain word `+0.0`
@@ -1604,6 +1620,7 @@ macro_rules! bank_impl {
             fn desymmetrize_channels(&mut self) {
                 self.state[1] = self.state[0];
                 self.coef[1] = self.coef[0];
+                self.collapsed = false;
             }
 
             fn channels_agree(&self) -> bool {
@@ -1635,7 +1652,9 @@ macro_rules! bank_impl {
             fn advance_clocks(&mut self, lanes_mask: u32, frames: u32) {
                 debug_assert_eq!(lanes_mask & !self.rest_lanes(), 0, "a lane not at rest");
                 self.ramp_frames_left = self.ramp_frames_left.saturating_sub(frames);
-                self.advance_clocks_masked(lanes_mask, frames as usize, 2);
+                // A collapsed bank's right clocks are frozen, as the collapsed block leaves them.
+                let channels = if self.collapsed { 1 } else { 2 };
+                self.advance_clocks_masked(lanes_mask, frames as usize, channels);
             }
             // REALTIME_POLICY_END
 
