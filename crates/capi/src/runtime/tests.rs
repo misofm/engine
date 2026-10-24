@@ -824,6 +824,107 @@ fn a_c_abi_plan_keeps_its_strip_meters_and_meters_its_output_without_allocating(
     crate::ffi::test_session_destroy(session);
 }
 
+/// #1674 gate 1: across a carried C ABI rebuild (a muted track whose ID sorts first), the strip
+/// meter consumer the running epoch holds for the old strip 0, now strip 1, is the one it held
+/// before: the window that opened on the predecessor and closes on the successor arrives on it.
+/// (A strip queue holds one window and nothing pops it, so the window spans the swap.)
+///
+/// Test value: red if the promoted epoch keeps the successor's fresh consumer for a carried strip,
+/// whose producer the swap block moved into the retiring plan; no other test reads the C ABI's
+/// strip consumers across a rebuild.
+#[test]
+fn a_carried_strip_meter_keeps_its_reader_across_a_c_abi_rebuild() {
+    let mut model = stateless_session(48_000);
+    model.tracks.truncate(2);
+    model.routes.truncate(2);
+    let document = session::canonical_session_json(&model).expect("two-strip session");
+    let mut children = compile_children(&document, limits()).expect("children");
+    let window = u64::from(host_core::default_meter_window_blocks(48_000, 128).get());
+    // Feeds one block ahead and renders `blocks` blocks from `first`; every submit runs the
+    // service step first.
+    let run = |children: &mut super::CompiledChildren, first: u64, blocks: u64| {
+        let mut feed = |frame: u64| {
+            let (left, right) = continuity_block(frame, 0);
+            children
+                .session
+                .submit(
+                    b"fixture-source",
+                    SourceSubmission {
+                        generation: 1,
+                        start_frame: frame * 128,
+                        sample_rate_hz: 48_000,
+                        planes: &[&left, &right],
+                        frames: 128,
+                        end_of_region: false,
+                    },
+                )
+                .expect("submit");
+        };
+        if first == 0 {
+            feed(0);
+        }
+        for block in first..first + blocks {
+            feed(block + 1);
+            let mut pcm = [0.0_f32; 256];
+            children
+                .plan
+                .render(
+                    block * 128,
+                    PlanarBufferMut::try_new(&mut pcm, 2, 128, 128).expect("output"),
+                )
+                .expect("render");
+        }
+    };
+    // The queued windows of `meter`, peeked in order: (sequence, start, end).
+    let windows = |meter: &host_core::MeterConsumer| -> Vec<(u64, u64, u64)> {
+        (0..)
+            .map_while(|index| meter.consumer.peek(index))
+            .map(|snapshot| {
+                (
+                    snapshot.window_sequence,
+                    snapshot.start_sample,
+                    snapshot.end_sample,
+                )
+            })
+            .collect()
+    };
+    let swap = window / 2;
+    run(&mut children, 0, swap);
+    let meter = &children.session.test_providers().test_meters()[0];
+    let strip = meter.track_id.clone();
+    assert!(windows(meter).is_empty(), "window 0 is open at the rebuild");
+
+    let transaction = command_bytes_at_revision(
+        1,
+        ExpectedRevision::Exact(SessionRevision(42)),
+        protocol::CommandPayload::SessionTransactionApply(&add_muted_track(&model, "a-muted")),
+    );
+    children
+        .session
+        .command(&transaction, 4_096)
+        .expect("the rebuild commits");
+    run(&mut children, swap, window - swap + 1);
+    children.session.service().expect("service");
+    assert_eq!(children.session.test_providers().test_epoch(), 1);
+    assert!(children.session.test_pending_providers().is_empty());
+    let meter = &children.session.test_providers().test_meters()[1];
+    assert_eq!(meter.track_id, strip, "the old strip 0 is strip 1");
+    assert_eq!(
+        windows(meter),
+        [(0, 0, window * 128)],
+        "the reader the epoch held receives the carried window 0, opened before the swap"
+    );
+    let snapshot = meter.consumer.peek(0).expect("window 0");
+    assert_eq!(
+        (
+            snapshot.cumulative_dropped_snapshots,
+            snapshot.cumulative_discontinuities
+        ),
+        (0, 0),
+        "no loss is counted across the swap"
+    );
+}
+
 #[test]
 fn ring_zero_derives_from_the_document_and_matches_the_explicit_value() {
     let model = parse_session_json(SESSION).expect("session");
