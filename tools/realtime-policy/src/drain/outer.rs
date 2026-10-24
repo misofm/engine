@@ -35,11 +35,11 @@ use super::tree::{Node, Step, pos};
 pub(super) fn finite<'f>(ctx: &Ctx<'f>, steps: &[Step<'f>], at: usize) -> bool {
     match steps[at].node {
         Node::Expr(syn::Expr::ForLoop(each)) => {
-            count::bounds(ctx, steps, at)
+            count::bounds(ctx, steps, at).is_some()
                 || range_to_a_bound(&each.expr)
                 || collection(ctx, steps, at, each)
         }
-        Node::Expr(syn::Expr::While(_)) => count::bounds(ctx, steps, at),
+        Node::Expr(syn::Expr::While(_)) => count::bounds(ctx, steps, at).is_some(),
         _ => false,
     }
 }

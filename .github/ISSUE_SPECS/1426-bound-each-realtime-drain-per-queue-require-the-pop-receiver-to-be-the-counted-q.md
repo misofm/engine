@@ -333,3 +333,28 @@ Tool slice B2a (#1442) withdraws `.map(<path>)` as a function-value position (it
 - The `live.rs:366` rewrite to a direct `try_pop()` call belongs to #1345 (its D8 carries the pointer).
 (Placement: where this spec elsewhere spells the `.map(Consumer::try_pop)` pop of `stage` (the Problem's live.rs notes, the
 `stage` twin and "Still accepted", mutation (b)), that spelling is superseded by this amendment.)
+
+## Amendment 3 (root decision R1, 2026-10-24; implementation record)
+
+Restated against `tools/realtime-policy/src/drain/` (the awk gate is retired). Authorized paths are
+narrowed to `src/drain/{count.rs,mod.rs,shapes.rs,outer.rs,place.rs}`, `tests/policy/drain/{receiver.rs,indirect.rs,mod.rs}`,
+the probe `a2-v/v04` and this spec.
+
+- **Mechanism.** `count::bounds` returns `Option<Counted>` (the counted receiver and the start of the count: its `let`,
+  through the one alias, or the loop header). `mod.rs::pops_the_counted_queue` applies D2 (`<recv>.try_pop()` only),
+  D1.1 (`shapes::same_receiver`), D1.2 (every root, the receiver's and each index place's, resolves to the same binding
+  through `Ctx::binding_of_path`) and D1.3 (`place::untouched` over `[count start, loop end)`). Per-queue pops are not
+  judged by D1.
+- **R1: item 3 is narrowed to direct written replacements of the place.** Refused: an assignment or compound
+  assignment target, an explicit `&mut`/`&raw mut`, a by-value use of the queue root or a prefix (argument, `let`,
+  scrutinee, field, operand), a `let`/pattern rebinding (D1.2), any mention in a macro token tree other than a trusted
+  `debug_assert!`, or in a closure. Accepted: a method call through auto-ref on the receiver or a prefix
+  (`self.data_consumer.peek(0)`, `self.settle_block(..)`), a shared `&`, and a field path that leaves the receiver, in
+  any position. The auto-ref allowance is a stated limit (module doc of `place.rs`), the family of root's 2026-10-24
+  ruling on the call rule (#1544). Item 3 as first written would refuse `source/src/lib.rs` acquire and
+  `spectrum.rs:658`.
+- **Real tree (D3).** On `424348076` before and after: `ok (192 marked regions in 34 files)`.
+- **Tests.** The eight rows are one `each_row` test (`tests/policy/drain/receiver.rs`); all eight are red with the
+  parent's `src/` and nothing else changes. Folded: the accepted `callee-in-a-counted-loop` row of `indirect.rs`
+  (D2 refuses it; `pop-receiver-unreadable-call` holds the claim). Probe `a2-v/v04` popped `control` under a count of
+  another receiver; its pop now names the counted receiver (it keeps its wrapped-header claim).

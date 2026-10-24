@@ -15,6 +15,12 @@
 //!   other node is not reached, and an unreached pop is refused.
 //! - **Pops (D5), counts (D6), reads (D7) and the bounding loop (D8)** are in [`facts`], [`count`]
 //!   and [`shapes`]; D8b's per-queue form is [`per_queue`].
+//! - **The counted queue (#1426 D1, D2).** A pop that a counted loop bounds pops the receiver the
+//!   loop counts: it is spelled `<recv>.try_pop()` (any other spelling is refused), `<recv>` is
+//!   the counted receiver token for token, each of its roots resolves to the count's binding, and
+//!   no written replacement of its place stands between the count and the end of the loop
+//!   ([`place`]). A method call through auto-ref on the receiver or a prefix of it is not read
+//!   (a stated limit of root decision R1; see [`place`]).
 //! - **Outer loops (D1)** are in [`outer`]: every other loop around a pop, inside its region,
 //!   must be finite. **Attributes and items (D2, D9)** are in [`count`], [`outer`], [`per_queue`]
 //!   and [`items`]: a count binding under a `cfg`-family attribute, and an item of any kind
@@ -128,6 +134,7 @@ mod items;
 mod names;
 mod outer;
 mod per_queue;
+mod place;
 mod scope;
 mod shapes;
 mod tree;
@@ -310,8 +317,67 @@ fn bounded<'f>(ctx: &Ctx<'f>, site: &PopSite) -> bool {
     if !(top..at).all(|outer| !steps[outer].node.is_loop() || outer::finite(ctx, &steps, outer)) {
         return false;
     }
-    (count::bounds(ctx, &steps, at) || per_queue::bounds(ctx, &steps, at, site))
-        && !shadowed_by_an_item(ctx, &steps)
+    if let Some(counted) = count::bounds(ctx, &steps, at) {
+        return pops_the_counted_queue(ctx, &steps, at, &counted)
+            && !shadowed_by_an_item(ctx, &steps);
+    }
+    per_queue::bounds(ctx, &steps, at, site) && !shadowed_by_an_item(ctx, &steps)
+}
+
+/// #1426 D1, D2: whether the pop at the end of `steps`, in the body of the counted loop at
+/// `steps[at]`, pops the receiver that the loop counts, and nothing replaces that receiver's place
+/// between the count and the end of the loop.
+///
+/// - **D2.** The pop is `<recv>.try_pop()`. A callee (`Consumer::try_pop(control)`) or a receiver
+///   outside the count's grammar (`(control).try_pop()`) cannot be read, and is refused.
+/// - **D1.1.** `<recv>` is the counted receiver, token for token.
+/// - **D1.2.** Each root of the two (the receiver's own root, and the root of each index place)
+///   resolves to the same binding through the one resolver, so a `let` or a pattern that rebinds a
+///   root between the count and the pop is refused.
+/// - **D1.3.** No use of a root between the count and the end of the loop replaces its place
+///   ([`place`]).
+fn pops_the_counted_queue<'f>(
+    ctx: &Ctx<'f>,
+    steps: &[Step<'f>],
+    at: usize,
+    counted: &count::Counted<'f>,
+) -> bool {
+    let Some(Step {
+        node: Node::Expr(syn::Expr::MethodCall(pop)),
+        ..
+    }) = steps.last()
+    else {
+        return false;
+    };
+    if bare(&pop.method) != facts::POP || pop.turbofish.is_some() || !pop.args.is_empty() {
+        return false;
+    }
+    if !shapes::same_receiver(counted.receiver, &pop.receiver) {
+        return false;
+    }
+    let (Some(counted_roots), Some(popped_roots)) = (
+        shapes::receiver_roots(counted.receiver),
+        shapes::receiver_roots(&pop.receiver),
+    ) else {
+        return false;
+    };
+    let Some(end) = ctx.tree.extent(steps[at].node).map(|extent| extent.end) else {
+        return false;
+    };
+    counted_roots.len() == popped_roots.len()
+        && counted_roots
+            .iter()
+            .zip(&popped_roots)
+            .all(|(first, second)| {
+                let (Some(counted_binding), Some(popped_binding)) = (
+                    ctx.binding_of_path(&first.name, first.at),
+                    ctx.binding_of_path(&second.name, second.at),
+                ) else {
+                    return false;
+                };
+                counted_binding.same(&popped_binding)
+                    && place::untouched(ctx, first, &counted_binding, counted.start, end)
+            })
 }
 
 /// D9, D10: whether an item, a macro or an attribute can rebind a name that the rules read.
