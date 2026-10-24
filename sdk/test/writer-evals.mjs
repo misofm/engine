@@ -409,6 +409,14 @@ describe("the writer contract -- coalescing and escalation", () => {
     assert.throws(() => encodeLaneEdits([edit("x".repeat(128), "comp")]), MisoUsageError);
     assert.throws(() => encodeLaneEdits([edit("kick", "é".repeat(64))]), MisoUsageError);
     assert.equal(encodeLaneEdits([edit("x".repeat(127), "y".repeat(127))]).byteLength, ABI_LAYOUT.commandRecord.bytes);
+    // A rack the record may not carry is refused, never wrapped onto another rack (#1542).
+    for (const rack of [257, 1.5, 0, 255]) {
+      assert.throws(() => encodeLaneEdits([edit("kick", "comp"), { ...edit("kick", "comp"), rack }]), MisoUsageError);
+    }
+    assert.throws(
+      () => new LiveControlWriter({ submit: () => assert.fail("not reached") }).stage({ ...edit("kick", "comp"), rack: 257 }),
+      MisoUsageError,
+    );
     // Two taps that differ in the strip, the effect or the tap do not coalesce into one record.
     const sent = [];
     const writer = new LiveControlWriter({

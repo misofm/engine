@@ -20,6 +20,8 @@ import { decodeControlReply } from "../src/core/control-frame.ts";
 import { ObservationSubscriptionOwner } from "../src/core/observation-subscriptions.ts";
 import { decodeObservationEnded } from "../src/core/observation-ended.ts";
 import { MisoControlRefusal } from "../src/core/errors.ts";
+import { encodeLaneEdits } from "../src/core/writer.ts";
+import { ABI_LAYOUT } from "../src/generated/abi.ts";
 import { createOfflineEngine } from "../src/headless/engine.ts";
 import { structuralFrame } from "./control-support.mjs";
 import { engineHost, moduleBytes, ramp } from "./support.mjs";
@@ -563,11 +565,19 @@ describe("#1677 -- an observation record names its tap by stable key", () => {
         ["unknownTrack", controls.edit.track("no-such-strip").insert("multi", "miso.multiband-compressor")
           .observe("Gain Reduction", true, 2)],
         ["unknownTap", observationEdit(true, { stripId: "t3", rack: "inserts", effectId: "multi", tapId: 99 }, 2)],
-        ["unknownRack", { ...known, rack: 0 }],
       ];
-      for (const [reasonName, bad] of refusals) {
+      // The SDK refuses a rack it cannot spell before submission (#1542), so the core's own
+      // `unknownRack` is reached the way a C ABI caller reaches it: a raw record, rack byte 0.
+      const rawRack = encodeLaneEdits([known, known]);
+      rawRack[ABI_LAYOUT.commandRecord.bytes
+        + ABI_LAYOUT.commandRecord.fields.find((row) => row.name === "rack").offset] = 0;
+      const submits = [
+        ...refusals.map(([reasonName, bad]) => [reasonName, () => controls.submit(known, bad)]),
+        ["unknownRack", () => engine.submitCommands(rawRack, 2)],
+      ];
+      for (const [reasonName, submit] of submits) {
         // The valid record rides in front of the refused one: the batch is one transaction.
-        const report = await controls.submit(known, bad);
+        const report = await submit();
         assert.equal(report.ok, false, reasonName);
         assert.equal(report.reasonName, reasonName);
         assert.equal(report.rejectedIndex, 1, `${reasonName} names the record that broke the rule`);

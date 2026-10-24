@@ -9,6 +9,7 @@ import { EngineLiveControls } from "../core/live-controls.ts";
 import type { LiveControlBeforeSubmit } from "../core/live-controls.ts";
 import { resultName } from "../core/errors.ts";
 import type { SessionLike } from "../core/session.ts";
+import { checkLaneEdit } from "../internal/lane-edit.ts";
 import type { LaneEdit } from "../core/writer.ts";
 import type {
   MisoAudioWorkletHost,
@@ -23,6 +24,7 @@ function kindValue(name: LaneEdit["kind"]): MisoCommandKind {
 }
 
 function browserCommand(edit: LaneEdit): MisoCommand {
+  checkLaneEdit(edit);
   return {
     kind: kindValue(edit.kind),
     rack: edit.rack,
