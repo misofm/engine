@@ -1,8 +1,8 @@
 //! Large-session estimation and transactional compiler-boundary checks.
 
 use session::{
-    CompileCaps, DiagnosticCode, StableId, compile_session, estimate_session_resources,
-    parse_session_json,
+    CompileCaps, DiagnosticCode, SessionModel, StableId, canonical_session_json, compile_session,
+    estimate_session_resources, parse_session_json,
 };
 
 const EXAMPLE: &str = include_str!("../../../fixtures/session/v1/canonical.json");
@@ -18,8 +18,9 @@ fn caps() -> CompileCaps {
     }
 }
 
-#[test]
-fn compiles_65_537_tracks_without_a_product_track_limit() {
+/// The fixture's first track 65,537 times, one past the former 65,536 boundary, with the
+/// fixture's route and automation moved onto `track-0`.
+fn scale_model() -> SessionModel {
     let mut session = parse_session_json(EXAMPLE).expect("fixture parses");
     let template = session.tracks[0].clone();
     session.tracks.clear();
@@ -35,7 +36,12 @@ fn compiles_65_537_tracks_without_a_product_track_limit() {
     };
     session.automation[0].target.owner =
         session::Owner::Strip(StableId::parse("track-0").expect("generated automation entity ID"));
+    session
+}
 
+#[test]
+fn compiles_65_537_tracks_without_a_product_track_limit() {
+    let session = scale_model();
     let estimate =
         estimate_session_resources(&session).expect("large estimate uses checked arithmetic");
     assert_eq!(estimate.track_count, 65_537);
@@ -53,6 +59,29 @@ fn compiles_65_537_tracks_without_a_product_track_limit() {
             .diagnostics()
             .iter()
             .all(|diagnostic| diagnostic.code == DiagnosticCode::ResourceLimitExceeded)
+    );
+}
+
+/// Issue #1079: the canonical writer and the parser hold a 65,537-track document (about 94 MB),
+/// the size a session reaches before any compile. Release-only: debug parse alone takes ~19 s.
+#[test]
+#[ignore = "release-mode scale gate; runs nightly"]
+fn parses_a_65_537_track_document_back_to_its_canonical_model() {
+    let session = scale_model();
+    let document = canonical_session_json(&session).expect("the scale model is canonical");
+    let parsed = parse_session_json(&document).expect("a 65,537-track document parses");
+    assert_eq!(parsed.tracks.len(), 65_537);
+    assert!(
+        parsed
+            .tracks
+            .iter()
+            .any(|track| track.id.as_str() == "track-65536"),
+        "the last generated track survives the round trip"
+    );
+    assert_eq!(
+        canonical_session_json(&parsed).expect("canonical"),
+        document,
+        "the document is a canonical round trip"
     );
 }
 
