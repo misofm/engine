@@ -21,6 +21,7 @@ de-esser.workspace = true
 engine = { workspace = true, features = ["realtime-audit"] }
 delay.workspace = true
 dsp-reference.workspace = true
+dynamic-eq.workspace = true
 # `test-support`: the builtins-graph and fixture audits admit the conformance delay as a console
 # slot through `prepare_native_session_effects_with_console_eligibility` (#1093 verdict L2).
 effect-compiler = { workspace = true, features = ["test-support"] }

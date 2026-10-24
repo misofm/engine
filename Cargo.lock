@@ -87,6 +87,7 @@ dependencies = [
  "de-esser",
  "delay",
  "dsp-reference",
+ "dynamic-eq",
  "effect-compiler",
  "effect-contract",
  "engine",

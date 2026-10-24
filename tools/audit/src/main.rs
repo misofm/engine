@@ -12,6 +12,7 @@ mod capi;
 mod compressor;
 mod de_esser;
 mod delay;
+mod dynamic_eq;
 mod fixture_builtins;
 mod fixture_builtins_listening;
 mod gate_expander;
@@ -31,6 +32,7 @@ const SUBJECTS: &[&str] = &[
     "compressor",
     "de-esser",
     "delay",
+    "dynamic-eq",
     "fixture-builtins",
     "fixture-builtins-listening",
     "gate-expander",
@@ -51,6 +53,7 @@ fn run_subject(subject: &str) {
         "compressor" => compressor::main(),
         "de-esser" => de_esser::main(),
         "delay" => delay::main(),
+        "dynamic-eq" => dynamic_eq::main(),
         "fixture-builtins" => fixture_builtins::main(),
         "fixture-builtins-listening" => fixture_builtins_listening::main(),
         "gate-expander" => gate_expander::main(),

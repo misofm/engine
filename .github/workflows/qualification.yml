@@ -907,6 +907,11 @@ jobs:
           ./target/release/audit de-esser | tee target/de-esser-audit.json
           grep -q '"total_violations":0' target/de-esser-audit.json
           grep -q '"bank_available":true' target/de-esser-audit.json
+      - name: Dynamic EQ realtime audit (100,000 blocks, W8 bank and connected scalar)
+        run: |
+          ./target/release/audit dynamic-eq | tee target/dynamic-eq-audit.json
+          grep -q '"total_violations":0' target/dynamic-eq-audit.json
+          grep -q '"bank_available":true' target/dynamic-eq-audit.json
       - name: Builtins realtime audit (1,000,000 blocks, direct chain and graph)
         run: |
           bash scripts/trace-builtins-audit.sh target/release/audit
