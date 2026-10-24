@@ -6653,7 +6653,7 @@ fn unread_values_and_a_live_bypass_cross_the_swap_at_every_width() {
 /// (its ring and feedback tail) and applies the committed bypass as a lane record over the
 /// session's bypass crossfade. A runs the delay bypassed; B lifts it and adds the muted track.
 /// Nothing restarts, and every block equals A lifting the bypass live at the swap block.
-fn a_prepared_bypass_change_restarts_its_strip(backend: Backend) {
+fn a_prepared_bypass_change_restarts_its_strip_and_a_live_one_carries(backend: Backend) {
     let what = format!("{backend:?}");
     let (a, _) = tail_pair();
     let mut b_model = tail_session();
@@ -6730,9 +6730,9 @@ fn a_prepared_bypass_change_restarts_its_strip(backend: Backend) {
 }
 
 #[test]
-fn a_prepared_bypass_change_restarts_its_strip_at_every_width() {
+fn a_prepared_bypass_change_restarts_its_strip_and_a_live_one_carries_at_every_width() {
     for backend in backends() {
-        a_prepared_bypass_change_restarts_its_strip(backend);
+        a_prepared_bypass_change_restarts_its_strip_and_a_live_one_carries(backend);
     }
 }
 

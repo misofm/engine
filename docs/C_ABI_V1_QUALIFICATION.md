@@ -668,8 +668,8 @@ model's delta (`host_core::classify_live_delta`, #1053 D1), never by its opcodes
 - **Live effect parameters (#1264, #1265).** A track's console-slot entry or insert whose
   `params` change only in live parameters, parametric EQ values included, is live too; see
   "Value-only effect parameter edits" and "Value-only parametric EQ edits" below. So is a
-  bypass change on one, except the delay's and the multiband compressor's; see "Value-only effect
-  bypass edits" below.
+  bypass change on one, except the multiband compressor's; see "Value-only effect bypass edits"
+  below.
 - **Rebuild.** Everything else replaces the plan exactly as before: a fader dB outside
   `[-144, 24]` or a pan/matrix the setter refuses (reported as `COMPILE_REJECTED` with the
   preparation diagnostic a rebuild gives), and every other field.

@@ -5446,7 +5446,7 @@ pub enum LiveRebuild {
     /// A control whose row is rebuild-only changes, for the reason its row states (decision 17,
     /// C3). This replaces the former `Prepared` and `PreparedBypass`: an effect parameter the plan
     /// keeps prepared (an EQ band's `enabled` and `kind` among them, decision 14 F2), the bypass
-    /// of the delay and the multiband compressor (decision 14 F4), an input value, a route value.
+    /// of the multiband compressor (decision 14 F4), an input value, a route value.
     RebuildOnly(RebuildReason),
     /// The stored automation changes and one of `next`'s automations names a row that its rule
     /// refuses ([`controls::automation_diagnostics`] is not empty, #1566 D6, decision 15 E1). The
@@ -5470,9 +5470,9 @@ pub enum LiveRebuild {
 /// `Ok(None)` is no difference in any value the plan keeps. `Ok(Some(_))` is a live difference:
 /// the bypass of an effect that lowers it to a lane shunt, and each `Block`-rate parameter whose
 /// resolved value bits change. `Err` is a prepared difference: another structure (identity,
-/// quality, sidechain or link mode), a rebuild-only row (the delay and the multiband compressor
-/// bypass, a parameter that is not `Block`-rate), a parameter that does not resolve, or a ramp
-/// that the indexed law refuses.
+/// quality, sidechain or link mode), a rebuild-only row (the multiband compressor bypass, a
+/// parameter that is not `Block`-rate), a parameter that does not resolve, or a ramp that the
+/// indexed law refuses.
 pub(crate) fn effect_instance_records(
     before: &Effect,
     after: &Effect,

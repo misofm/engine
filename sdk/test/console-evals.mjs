@@ -1018,9 +1018,9 @@ function oneInsert(effectId, bypassed) {
 describe("a live bypass edit is a SET_CONTROL on control 0 of the instance (#1563B)", () => {
   test("lifting a session bypass reaches the render, live or by a plan rebuild", async () => {
     // The SDK holds no list of effects that keep a prepared bypass any more (#1563 D3): it sends
-    // the lift and the core judges it. The core lifts it live on most effects, and on the two that
-    // keep a prepared bypass, the delay and the multiband, as a plan rebuild that the browser module
-    // now prepares and publishes like the C ABI does (#1562b). Either way the render is the
+    // the lift and the core judges it. The core lifts it live on most effects, and on the one that
+    // keeps a prepared bypass, the multiband (the delay's is live since #1339), as a plan rebuild
+    // that the browser module now prepares and publishes like the C ABI does (#1562b). Either way the render is the
     // unbypassed session's.
     // Red mutation: a core that acknowledges the lift of any effect and renders the bypassed session.
     assert.deepEqual(Object.keys(AUDIBLE).sort(), CATALOG.effects.map((row) => row.id).sort());

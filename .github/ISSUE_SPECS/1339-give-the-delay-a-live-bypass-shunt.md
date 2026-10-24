@@ -257,8 +257,11 @@ key on `lowers_session_bypass` and on the registry row.
 - **Gate 6** rewritten in place: the multiband leg keeps the restart claim; the delay leg lifts the
   bypass in a rebuild, restarts nothing, and equals A lifting it live at the swap block.
 - **Gate 8 split** (root, 2026-10-24): the standalone click harness is not run in this slice. #1341
-  proved the bypass crossfade law for every shunt, and the delay has no latency line. It is a
-  stateless successor for root to number.
-- **Left for root:** the doc comments of `crates/host-core/src/prepare.rs` (`LiveRebuild::RebuildOnly`
-  and `effect_instance_records`) and the `response.rs` test doc still name the delay's prepared
-  bypass; `crates/host-core/src/*` is outside this slice's paths.
+  proved the bypass crossfade law for every shunt, and the delay has no latency line. Root files
+  the click-harness successor: #TBD (placeholder, root fills in the number).
+- **Verifier fold (root-authorized, 2026-10-24):** `host-core`'s
+  `a_per_node_effect_snapshot_reports_its_prepared_bypass` now uses the multiband (red at `true`
+  when the `NodeKind::Effect` arm drops `prepared_bypass`); the delay is dropped from the
+  prepared-bypass sentences in `host-core/src/prepare.rs`, `rack/src/lib.rs`,
+  `capi/src/runtime/tests.rs`, `sdk/test/console-evals.mjs`, `docs/C_ABI_V1_QUALIFICATION.md` and
+  `docs/CONTROL_PROTOCOL_SEMANTICS.md`.

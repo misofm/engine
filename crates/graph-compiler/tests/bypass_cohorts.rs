@@ -865,9 +865,10 @@ impl PreparedNativeEffect for CountRecoveries {
 /// and the per-node shunt copies the dry block over it. Every track stage and the session output
 /// must equal the same session with the insert removed, at the host's width and at `Scalar`.
 ///
-/// Red mutations: keep the delay's prepared bypass (`lowers_session_bypass` false for it) -> its
-/// D7 zeroes the tripped dry blocks; build no per-node shunt for a never-banked effect -> the
-/// wet runaway reaches the output.
+/// Red mutations: keep the delay's prepared bypass (`lowers_session_bypass` false for it) -> the
+/// lowering precondition (`!entry.metadata.bypass`) fails, and with that precondition removed the
+/// bit assertion fails, because its D7 zeroes the tripped dry blocks; build no per-node shunt for
+/// a never-banked effect -> the wet runaway reaches the output.
 #[test]
 fn a_bypassed_delay_passes_its_dry_block_when_its_ring_trips() {
     use session::{EffectParam, EffectQuality, LinkMode, ParameterChannel, ParameterUnit};
