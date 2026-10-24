@@ -2915,7 +2915,7 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
             .routes
             .iter()
             .filter(|route| {
-                controls::route_rows_live(route) && !follows_automated_mute(model, route)
+                controls::route_rows_live(route) && !follows_automated_mute(view, route)
             })
             .map(|route| route.id.as_str())
             .collect();
