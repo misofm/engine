@@ -325,7 +325,9 @@ pub(crate) fn capi_resources<A: ControlAdapter>(
     // accumulator also charges the producer vector itself (`add_vector_layout::<
     // TrackControlProducer>`), so that vector is charged twice, here against the capi cap and
     // there against the builtin cap: #1256 D4's recorded, conservative double charge. Removing
-    // either side is a deliberate decision, not a cleanup.
+    // either side is a deliberate decision, not a cleanup. Each producer's own heap owners (the
+    // automated faders' offsets-writer boxes, #1916) are charged here only, through the producers'
+    // `retained_heap_bytes`.
     //
     // The effect producer table and its owned payload (#1263 D3) are the epoch's too: capi keeps
     // the producers, and with them each parametric EQ's prepared-target owner. host-core walks
@@ -505,6 +507,7 @@ pub(crate) fn prepared_capi_resources<A: ControlAdapter>(
     route_controls: host_core::RouteControlResources,
     observation: ObservationResources,
     limits: ControlLimits,
+    strip_heap_bytes: u64,
 ) -> Result<CapiResources, CompileFailure> {
     let source_id_bytes =
         compiled
@@ -537,7 +540,7 @@ pub(crate) fn prepared_capi_resources<A: ControlAdapter>(
         limits,
         compiled.source_count(),
         source_id_bytes,
-        host_core::strip_control_table_bytes(strip_count, strip_id_bytes)
+        host_core::strip_control_table_bytes(strip_count, strip_id_bytes, strip_heap_bytes)
             .ok_or_else(|| failure(ResourceFault::Arithmetic))?,
         provider,
         inventory.retained_bytes(),
@@ -1411,6 +1414,13 @@ pub(crate) fn prepare_runtime<A: ControlAdapter>(
             "host.jump_lengths.attach",
         ))
     })?;
+    // #1916: the producers' own heap owners, summed before the table is boxed, for the strip
+    // table's charge.
+    let strip_heap_bytes = strip_controls
+        .iter()
+        .map(host_core::TrackControlProducer::retained_heap_bytes)
+        .try_fold(0_u64, u64::checked_add)
+        .ok_or_else(|| failure(ResourceFault::Arithmetic))?;
     let strips = StripLanes {
         controls: strip_controls.into_boxed_slice(),
         track_count,
@@ -1436,6 +1446,7 @@ pub(crate) fn prepare_runtime<A: ControlAdapter>(
         prepared.report.route_control_resources,
         observation_resources(&effects, observation_slots_high_water)?,
         limits,
+        strip_heap_bytes,
     )?;
     // #1594 R6: a plan with spectrum captures has a session spectrum service and analysis beside
     // it (made at boot or at the promotion that installs the first captures), charged here, with

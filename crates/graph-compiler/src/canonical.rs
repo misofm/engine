@@ -213,6 +213,7 @@ pub(crate) struct CanonicalParts<'a> {
     pub(crate) routes: &'a [RouteTiming],
     pub(crate) route_transforms: &'a [PreparedRoute],
     pub(crate) delays: &'a [InsertedDelay],
+    pub(crate) claim_lines: &'a [SourceClaimLine],
     pub(crate) reductions: &'a [ReductionRecord],
     pub(crate) buffers: &'a [BufferAssignment],
     pub(crate) estimate: &'a GraphResourceEstimate,
@@ -258,6 +259,7 @@ pub(crate) fn canonical_parts<'a>(
         routes: &graph.route_timings,
         route_transforms: graph.routes(),
         delays: &graph.inserted_delays,
+        claim_lines: graph.source_claim_lines(),
         reductions,
         buffers: &graph.buffer_assignments,
         estimate: &report.semantic_estimate,
@@ -300,6 +302,15 @@ pub(crate) fn write_canonical(out: &mut impl core::fmt::Write, parts: CanonicalP
             node_text(&delay.node),
             edge_text(&delay.edge_id),
             delay.samples.0
+        );
+    }
+    // #1287 D1: a plan compiled without floors has no line, so its text is unchanged.
+    for line in parts.claim_lines {
+        let _ = writeln!(
+            out,
+            "claim-line\t{}\t{}",
+            node_text(&line.node),
+            line.samples.0
         );
     }
     for (index, node) in parts.schedule.iter().enumerate() {
@@ -409,17 +420,27 @@ pub(crate) fn write_canonical(out: &mut impl core::fmt::Write, parts: CanonicalP
         estimate.session_plus_plan_bytes
     );
 }
-pub(crate) fn dot(nodes: &[GraphNode], edges: &[GraphEdge], delays: &[InsertedDelay]) -> String {
+pub(crate) fn dot(
+    nodes: &[GraphNode],
+    edges: &[GraphEdge],
+    delays: &[InsertedDelay],
+    claim_lines: &[SourceClaimLine],
+) -> String {
     let mut text = String::from("digraph miso_engine_graph_v1 {\n");
     for node in nodes {
         let id = dot_escape(&node_text(&node.id));
-        let label = dot_escape(&format!(
+        let mut label = format!(
             "{}|{}|latency={}|tail={}",
             node_text(&node.id),
             node_kind_token(&node.id),
             node.latency.0,
             tail_text(node.bound.tail)
-        ));
+        );
+        // #1287 D1: only a node with a source-claim line gets the field.
+        if let Ok(index) = claim_lines.binary_search_by(|line| line.node.cmp(&node.id)) {
+            label.push_str(&format!("|claim={}", claim_lines[index].samples.0));
+        }
+        let label = dot_escape(&label);
         text.push_str(&format!("  \"{id}\" [label=\"{label}\"];\n"));
     }
     let delay_by_edge: BTreeMap<_, _> =

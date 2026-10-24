@@ -187,6 +187,7 @@ export const CONSOLE_ELIGIBLE_EFFECTS: readonly ConsoleEffectId[] = Object.freez
   "miso.soft-clip",
   "miso.transient-shaper",
   "miso.true-peak-limiter",
+  "miso.multiband-compressor",
 ]);
 
 /** The keys a track specification may carry. The retired `simd1`, `dynamic` and `simd2` refuse. */
@@ -1423,7 +1424,7 @@ export function normalizeInsert(decl: EffectDecl, id: unknown, where: string): M
  *
  * The refusals are the engine's: a key a slot does not have (`sidechain`, `bypass`, `params`, ...)
  * is `schema.unknown_field`, a slot ID used twice in either section is `id.duplicate`, and an
- * effect off the eligibility list -- the delay, the multiband, anything unknown -- is
+ * effect off the eligibility list -- the delay, anything unknown -- is
  * `console.slot.ineligible_effect`.
  */
 function consoleSlot(

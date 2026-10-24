@@ -4143,6 +4143,24 @@ pub struct TrackControlProducer {
     pub input: Option<InputCells>,
 }
 
+impl TrackControlProducer {
+    /// Bytes of the heap allocations this producer owns beyond its table slot and its `track_id`
+    /// (#1916): today only the boxed offsets-cell writers of an automated strip's fader channels
+    /// (`FaderCells`' offsets box, #1649 D4), which a strip with no fader event lane does not
+    /// allocate. The cells the writers share with the plan are not here; builtins charges them.
+    ///
+    /// A host's strip-table charge (`host_core::strip_control_table_bytes`) sums this over the
+    /// built producers, so a new heap owner of a producer belongs here.
+    #[must_use]
+    pub fn retained_heap_bytes(&self) -> u64 {
+        if self.fader.offsets.is_some() {
+            core::mem::size_of::<[Option<OffsetsWriter>; 2]>() as u64
+        } else {
+            0
+        }
+    }
+}
+
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub struct BuiltinDiagnostic {
     pub code: &'static str,

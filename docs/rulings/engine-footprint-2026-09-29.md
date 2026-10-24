@@ -79,7 +79,8 @@ answered the amendments on 2026-09-29. Ruling:
   transient shaper or true-peak limiter (`miso.parametric-eq`, `miso.compressor`,
   `miso.gate-expander`, `miso.soft-clip`, `miso.transient-shaper`, `miso.true-peak-limiter`). The
   delay never banks. The multiband compressor is excluded until #1069 closes. A compile diagnostic
-  enforces the list (L2, amendment 8).
+  enforces the list (L2, amendment 8). Amendment (2026-10-24, #1893): #1069 closed on 2026-10-23,
+  so the multiband compressor is console-eligible; #1893 gave it the padded bind this list requires.
 - **Silence.** Accepted trade-off: the silent fast path is bank-wide, so one active track keeps its
   bank-mates processing (M4). The baseline measures it with a sparse-activity row; a per-lane
   silence skip is a later issue if the measurement warrants it. An all-lanes-bypassed skip stays

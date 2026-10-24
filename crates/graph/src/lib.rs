@@ -221,6 +221,23 @@ pub struct InsertedDelay {
     pub edge_id: GraphEdgeId,
     pub samples: LatencySamples,
 }
+/// A source-claim compensation line (#1287 D1): a floor on a track's `Input` node (#1285 D1)
+/// raises that node's input arrival, and a track's `Input` reads its source through a claim, not
+/// through a graph edge, so the compiler realises the raise as a line of `samples` on both lanes
+/// of the claim. A submix's `Input` never has one: the routes into it carry its compensation.
+///
+/// This is a report row. The compiler lowers the line by adding `samples` to both lanes of the
+/// node's [`PreparedTrackDelay`] entry (creating it when the session declared no delay), so it runs
+/// on the track-delay line and kernel (`runtime::TrackDelayLine`, `pdc_delay_block`). Unlike a
+/// declared track delay it is compensation: its samples count in `total_delay_samples` and the PDC
+/// caps. Empty for every plan compiled without floors.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SourceClaimLine {
+    /// The track's `TrackStage::Input` node.
+    pub node: GraphNodeId,
+    /// The line's length on each lane: the node's floored arrival minus its incoming arrival (0).
+    pub samples: LatencySamples,
+}
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ReductionRecord {
     pub node: GraphNodeId,
@@ -706,6 +723,9 @@ pub struct PreparedGraphPlan {
     /// Issue #210 phase 2: input-side track alignment, one entry per delayed track. Empty on every
     /// session that declared no delay.
     track_delays: Vec<PreparedTrackDelay>,
+    /// #1287 D1: the source-claim lines folded into `track_delays`, in node order. Empty for every
+    /// plan compiled without floors.
+    source_claim_lines: Vec<SourceClaimLine>,
     effects: Vec<GraphPreparedEffect>,
     /// Issue #140 A: one entry per effect live controls drive. Empty for every session that
     /// asked for no live controls, which is what keeps the runtime on its byte-identical path.
@@ -2496,6 +2516,24 @@ impl PreparedGraphPlan {
         &self.track_delays
     }
 
+    /// The source-claim lines this plan's `track_delays` include, in node order (#1287 D1).
+    ///
+    /// Empty for every plan compiled without floors.
+    #[must_use]
+    pub fn source_claim_lines(&self) -> &[SourceClaimLine] {
+        &self.source_claim_lines
+    }
+
+    /// Record the source-claim lines the compiler folded into this plan's `track_delays`
+    /// (#1287 D1). A report only: the lowering reads `track_delays`, so this changes no program.
+    /// Bind refuses a plan whose lines are out of node order, name a node that is not a track-stage
+    /// `Input` of the graph, or are longer than either lane of that node's track-delay entry.
+    #[must_use]
+    pub fn with_source_claim_lines(mut self, lines: Vec<SourceClaimLine>) -> Self {
+        self.source_claim_lines = lines;
+        self
+    }
+
     fn has_valid_structural_layout(&self) -> bool {
         let graph_nodes: BTreeSet<_> = self.spec.nodes.iter().map(|node| &node.id).collect();
         if graph_nodes.len() != self.spec.nodes.len() {
@@ -2600,7 +2638,30 @@ impl PreparedGraphPlan {
                 return false;
             }
         }
-        true
+        // #1287 D1: every source-claim line, in node order, names a track-stage `Input` node of
+        // the graph whose track-delay entry holds at least the line on both lanes. The lowering
+        // reads `track_delays`, so a row it does not hold would report a line that never runs.
+        let track_delays: BTreeMap<_, _> = self
+            .track_delays
+            .iter()
+            .map(|delay| (&delay.node, [delay.left_samples, delay.right_samples]))
+            .collect();
+        self.source_claim_lines
+            .windows(2)
+            .all(|pair| pair[0].node < pair[1].node)
+            && self.source_claim_lines.iter().all(|line| {
+                matches!(
+                    line.node,
+                    GraphNodeId::TrackStage {
+                        stage: TrackStage::Input,
+                        ..
+                    }
+                ) && line.samples.0 > 0
+                    && graph_nodes.contains(&line.node)
+                    && track_delays.get(&line.node).is_some_and(|lanes| {
+                        lanes.iter().all(|&lane| u64::from(lane) >= line.samples.0)
+                    })
+            })
     }
 
     /// Number of prepared homogeneous banks retained for off-render-selected execution.
@@ -2980,6 +3041,7 @@ impl PreparedGraphPlan {
             required_bindings: parts.required_bindings,
             routes: parts.routes,
             track_delays: parts.track_delays,
+            source_claim_lines: Vec::new(),
             effects: parts.effects,
             effect_controls: parts.effect_controls,
             effect_observations: parts.effect_observations,
@@ -8035,8 +8097,12 @@ mod tests {
 
     #[test]
     fn structural_layout_rejects_node_level_edge_and_bank_corruptions() {
-        for corruption in 0..6 {
-            let (mut graph, bindings, _) = binding_plan();
+        for corruption in 0..9 {
+            let (mut graph, bindings, input) = binding_plan();
+            let line = |node: &GraphNodeId| SourceClaimLine {
+                node: node.clone(),
+                samples: LatencySamples(4),
+            };
             match corruption {
                 0 => {
                     let duplicate = graph.dependency_levels[0].nodes[0].clone();
@@ -8052,6 +8118,22 @@ mod tests {
                 // unsorted spec is a malformed plan: bind refuses it with the same code rather
                 // than lowering against a binary search that cannot find its nodes.
                 5 => graph.spec.nodes.reverse(),
+                // #1287 D1: a source-claim line the track delays do not hold.
+                6 => graph = graph.with_source_claim_lines(vec![line(&input)]),
+                7 => {
+                    graph.track_delays.push(PreparedTrackDelay {
+                        node: input.clone(),
+                        left_samples: 4,
+                        right_samples: 3,
+                    });
+                    graph = graph.with_source_claim_lines(vec![line(&input)]);
+                }
+                8 => {
+                    let output = GraphNodeId::Output {
+                        output_id: StableGraphId::parse("main").expect("ID"),
+                    };
+                    graph = graph.with_source_claim_lines(vec![line(&output)]);
+                }
                 _ => unreachable!(),
             }
             let failure = match graph.bind(bindings) {

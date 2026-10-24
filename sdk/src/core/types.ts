@@ -169,7 +169,8 @@ export type ConsoleEffectId =
   | "miso.gate-expander"
   | "miso.soft-clip"
   | "miso.transient-shaper"
-  | "miso.true-peak-limiter";
+  | "miso.true-peak-limiter"
+  | "miso.multiband-compressor";
 
 /**
  * One session console slot, declared once for every track.
