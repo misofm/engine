@@ -98,7 +98,7 @@ aarch64_row() {
 aarch64_row aarch64-apple-ios
 aarch64_row aarch64-linux-android
 
-# --- known defect #1018, expected failures by crate: `ios-asm-memset-pattern16` -----------------
+# --- `ios-asm-memset-pattern16` (#1018), expected failures by crate ----------------------------
 # On Apple targets LLVM's loop-idiom pass turns a loop that stores one constant `f32` pattern into
 # `bl _memset_pattern16`: a Darwin-only libSystem routine reached through a lazily bound stub, the
 # render-thread call #1018 forbids. (`bzero` and `memcpy` are bounded memory routines the compiler
@@ -114,11 +114,12 @@ aarch64_row aarch64-linux-android
 # crate by the assembly's DWARF inline records (the release profile keeps line tables): to the
 # innermost function holding it that belongs to a product crate, so a fill inlined from `builtins`
 # into `builtins-compiler` stays `builtins`'. Any other reference to `_memset_pattern16` (a tail
-# call `b`, an address load) is refused, so a call cannot leave the count. The 5 calls left are
-# preparation code, none reachable from render (rows in scripts/lib/aarch64-known-defects.py). The
-# judge reads the counts: a row at zero, a count above its ceiling, a crate with calls and no row,
-# calls charged to a crate outside the product closure, or a row for a crate outside it each fail
-# here. The defect reads fixed only when every row is gone. Until #1472 the ratchet read each product crate's
+# call `b`, an address load) is refused, so a call cannot leave the count. #1018 deleted its own
+# rows at 0 (`builtins`' unit fills and `lane`'s `lanes_below`, all preparation code); the row
+# left is `host-core`'s control-thread spectrum fills (#1595; rows in
+# scripts/lib/aarch64-known-defects.py). The judge reads the counts: a row at zero, a count above
+# its ceiling, a crate with calls and no row, calls charged to a crate outside the product closure,
+# or a row for a crate outside it each fail here. Until #1472 the ratchet read each product crate's
 # pre-link rlib assembly; that form counted code that LTO removes (`host-core` 4, `soft-clip` 1)
 # and missed code LTO inlines across crates, and it caught nothing this count does not, since
 # every product crate ships only through `capi`.
@@ -220,4 +221,4 @@ CARGO_TARGET_DIR="$wasm_target_dir" RUSTFLAGS="$wasm_flags" \
 CARGO_TARGET_DIR="$wasm_target_dir" RUSTFLAGS="$wasm_flags" \
     cargo check --quiet --locked --target wasm32-unknown-unknown -p control-plane
 
-printf 'cross-target matrix: PASS (x86-64-v3; aarch64 iOS and Android product crates checked and linted (#1017), ios-asm-memset-pattern16 expected failures (#1018); no eight-lane code in the iOS or Android library (#1112); wasm simd128; armv7 and scalar wasm refused (#1041, #1062); parametric-eq, builtins, effect-compiler rows deduplicated)\n'
+printf 'cross-target matrix: PASS (x86-64-v3; aarch64 iOS and Android product crates checked and linted (#1017), ios-asm-memset-pattern16 ratchet (#1018); no eight-lane code in the iOS or Android library (#1112); wasm simd128; armv7 and scalar wasm refused (#1041, #1062); parametric-eq, builtins, effect-compiler rows deduplicated)\n'

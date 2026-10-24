@@ -959,6 +959,13 @@ fn put_lane<L: Lane>(value: &mut L, lane: usize, word: f32) {
 /// Widest bank this crate builds. `BankWidth` is four or eight (D4).
 const MAX_BANK_LANES: usize = 8;
 
+/// Unit words for both channels of a bank, the padding value of a gain or trim lane.
+///
+/// A compile-time constant copied into place: the array repeat `[[1.0; MAX_BANK_LANES]; 2]` in a
+/// constructor is a store loop of one constant `f32`, which LLVM's loop-idiom pass turns into
+/// `bl _memset_pattern16` on Apple targets (#1018).
+const UNIT_WORDS: [[f32; MAX_BANK_LANES]; 2] = [[1.0; MAX_BANK_LANES]; 2];
+
 #[cfg(test)]
 thread_local! {
     static FILTER_DESIGN_CALLS: Cell<usize> = const { Cell::new(0) };
@@ -1178,7 +1185,7 @@ impl<L: Lane> InputStage<L> {
     fn new(tracks: &[PreparedInputTrack]) -> Self {
         debug_assert!(!tracks.is_empty() && tracks.len() <= L::WIDTH);
         let members = tracks.len().min(L::WIDTH).max(1);
-        let mut trim = [[1.0_f32; MAX_BANK_LANES]; 2];
+        let mut trim = UNIT_WORDS;
         let mut sections = [[SvfSection::IDENTITY; MAX_BANK_LANES]; 4];
         for (lane, track) in tracks.iter().enumerate().take(L::WIDTH) {
             for (channel, input) in [track.left, track.right].into_iter().enumerate() {
@@ -3096,7 +3103,7 @@ pub(crate) struct FaderStage<L: Lane> {
 impl<L: Lane> FaderStage<L> {
     /// Builds the stage from one prepared fader per populated lane and channel.
     fn new(lanes: &[(FaderLane, FaderLane)]) -> Self {
-        let mut gain = [[1.0_f32; MAX_BANK_LANES]; 2];
+        let mut gain = UNIT_WORDS;
         let mut mute = [[0.0_f32; MAX_BANK_LANES]; 2];
         for (lane, pair) in lanes.iter().enumerate().take(L::WIDTH) {
             for (channel, fader) in [pair.0, pair.1].into_iter().enumerate() {
@@ -3195,8 +3202,8 @@ impl<L: Lane> FaderRampStage<L> {
     /// lane starts at gain `0.0` -- its mute is a fader endpoint, not a separate state -- which is
     /// what lets [`Self::set_mute`] unmute by retargeting back to `fader_gain`.
     fn new(lanes: &[(FaderLane, FaderLane)]) -> Self {
-        let mut settled = [[1.0_f32; MAX_BANK_LANES]; 2];
-        let mut fader_gain = [[1.0_f32; MAX_BANK_LANES]; 2];
+        let mut settled = UNIT_WORDS;
+        let mut fader_gain = UNIT_WORDS;
         let mut muted = [[false; MAX_BANK_LANES]; 2];
         let mut flags = [[0.0_f32; MAX_BANK_LANES]; 2];
         for (lane, pair) in lanes.iter().enumerate().take(L::WIDTH) {
