@@ -49,7 +49,8 @@ Authorized paths: `crates/true-peak-limiter/src/lib.rs` and its tests, and this 
 
 - Survivor rule (root, from the scope note): per channel independently, each failed lane takes the
   phase of the lowest lane outside `failed` with the same window; padded lanes count as survivors;
-  no survivor keeps phase 0. Per channel because the collapsed body advances only the left channel
+  no survivor keeps phase 0. The window leg is reachable: bind admits mixed lookaheads in one
+  cohort (`a_mixed_lookahead_cohort_falls_back_bit_identically`), and dropping the leg moves bits. Per channel because the collapsed body advances only the left channel
   (#990). Shape: `ChannelState::align_phase_to_survivor`, called by `LimiterCore::reset_failed_lanes`
   after the per-lane reset loop.
 - Bit-neutral: a cleared lane's `required_ring` and `prefix` are all `1.0`, which is the state of
@@ -59,3 +60,8 @@ Authorized paths: `crates/true-peak-limiter/src/lib.rs` and its tests, and this 
 - Gate 1: a route assertion (`DualUniform` / `MonoUniform`) on every "after" block of
   `a_failed_lane_is_recovered_and_reported_alone_at`, and after a padded lane's recovery. Red on the
   reverted fix (align calls commented out): `left: DualPerLane, right: DualUniform`. No new test.
+- Attempt 2 (verifier FAIL on a test gap): a mixed-lookahead case (member 0 at 1 ms, member 1 at
+  5 ms, `active = 2`, member 0 fails) in the same test, asserting the per-lane route and the twin
+  bits. The mutant `window == window` (window leg dropped) is red: W4 DualMono, block 8, member 0
+  word 107 shipped `0x3ed057d1`, reference `0x3ed057d4`. The repeated `lanes_uniform` assertion in
+  `the_linked_body_engages_exactly_where_the_record_allows` is deleted; its `hot_blocks` check stays.

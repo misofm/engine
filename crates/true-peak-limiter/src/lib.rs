@@ -8874,13 +8874,13 @@ mod tests {
                         for _ in 0..4 {
                             clear_dispatch_observation();
                             run.render(mono, "after");
+                            assert_eq!(
+                                dispatch_observation().route,
+                                uniform,
+                                "{}: uniform body after the padded lane's recovery",
+                                run.label
+                            );
                         }
-                        assert_eq!(
-                            dispatch_observation().route,
-                            uniform,
-                            "{}: uniform body after the padded lane's recovery",
-                            run.label
-                        );
                         assert_eq!(
                             run.bank.nonfinite_report(),
                             NonFiniteReport::new(),
@@ -8923,6 +8923,46 @@ mod tests {
                         run.render(mono, "after");
                     }
                 }
+                // #1102, the window leg of the survivor rule: member 0 looks ahead 1 ms and member
+                // 1 the fixture's 5 ms, and the padded lanes clone member 0. Member 0 fails, so its
+                // phase must come from a lane of its own window, never from member 1; the twin
+                // comparison sees a phase taken across windows. Mixed windows keep the per-lane
+                // body.
+                let mut mixed = members.clone();
+                mixed[0] = linked_values([-0.5, 60.0, 1.0], [-0.5, 60.0, 1.0]);
+                let mut run = PaddedRun::<L>::new(
+                    &mixed,
+                    2,
+                    link,
+                    format!("W{lanes} {link:?} mono {mono}, mixed lookahead: member 0 fails"),
+                );
+                for _ in 0..4 {
+                    run.render(mono, "before");
+                }
+                plant_nonfinite(&mut run.bank, 0, f32::NAN);
+                plant_nonfinite(&mut run.twins[0], 0, f32::NAN);
+                run.render(mono, "failing");
+                assert_eq!(
+                    run.bank.nonfinite_report().nonfinite_lanes,
+                    1,
+                    "{}: reported alone",
+                    run.label
+                );
+                let per_lane = if mono {
+                    DispatchRoute::MonoPerLane
+                } else {
+                    DispatchRoute::DualPerLane
+                };
+                for _ in 0..6 {
+                    clear_dispatch_observation();
+                    run.render(mono, "after");
+                    assert_eq!(
+                        dispatch_observation().route,
+                        per_lane,
+                        "{}: mixed windows keep the per-lane body",
+                        run.label
+                    );
+                }
             }
         }
     }
@@ -8933,7 +8973,8 @@ mod tests {
     /// branch) zeroes and resets the bank-mates; an unmasked report charges the padded lane; a
     /// recovery that skips padded lanes leaves one answering NaN; resetting the shared cursors on
     /// a partial recovery moves every bank-mate's ring reads; a recovered lane left at phase zero
-    /// (no `align_phase_to_survivor`) keeps the bank on the per-lane body (#1102).
+    /// (no `align_phase_to_survivor`) keeps the bank on the per-lane body, and one that takes a
+    /// survivor's phase across windows moves the mixed-lookahead member's bits (#1102).
     #[test]
     fn a_failed_lane_is_recovered_and_reported_alone() {
         lane::each_vector_lane!(|L| a_failed_lane_is_recovered_and_reported_alone_at::<L>());
@@ -10552,10 +10593,6 @@ mod tests {
             assert!(
                 pair.shipped.gain_linked,
                 "{label}: one lane's recovery re-derives the record"
-            );
-            assert!(
-                lanes_uniform(&pair.shipped.left) && lanes_uniform(&pair.shipped.right),
-                "{label}: the recovered lane took its bank-mates' phase"
             );
             assert_eq!(
                 hot_blocks(&mut pair, &mut draw, 3, "after one lane"),
