@@ -709,6 +709,10 @@ pub struct PreparedGraphPlan {
     /// (see `graph_plans_always_lower_to_an_executable_program`), so a plan that cannot lower is
     /// caught where it is built rather than at bind.
     program: Option<program::ExecutionProgram>,
+    /// The compiler's resolved node positions, which every lowering of this plan takes as hints
+    /// (#1749). Empty unless the plan was built by [`new_hinted`](Self::new_hinted); a hint that
+    /// no longer matches the public fields is checked and ignored, so it never changes a lowering.
+    lowering_hint: program::LoweringHint,
     plan_id: u64,
     pub spec: GraphSpec,
     pub sequential_schedule: Vec<GraphNodeId>,
@@ -2984,12 +2988,13 @@ impl PreparedGraphPlan {
     /// served (#959): which nodes are alias candidates is decided by node kind alone (elision also
     /// needs the candidate's input edges to allow it).
     fn lower_from_current_fields(&self) -> Option<program::ExecutionProgram> {
-        program::lower(
+        program::lower_hinted(
             &self.spec,
             &self.sequential_schedule,
             &self.dependency_levels,
             &self.inserted_delays,
             &bank_member_nodes(&self.banks, &self.builtin_banks),
+            &self.lowering_hint,
         )
         .ok()
     }
@@ -3018,6 +3023,11 @@ impl PreparedGraphPlan {
         &self.routes
     }
     pub fn new(parts: PreparedGraphPlanParts) -> Self {
+        Self::new_hinted(parts, program::LoweringHint::default())
+    }
+    /// [`new`](Self::new), keeping the node positions the compiler resolved as hints for every
+    /// lowering of this plan (#1749). The plan is the one `new` builds for every hint.
+    pub fn new_hinted(parts: PreparedGraphPlanParts, lowering_hint: program::LoweringHint) -> Self {
         // #99 F2: the executable program is *derived* from the plan's own spec, schedule, levels,
         // PDC edges and banks, so it cannot disagree with the semantic graph and no caller has to
         // supply or maintain it. `None` means those disagree -- a schedule that is not the
@@ -3029,6 +3039,7 @@ impl PreparedGraphPlan {
         // and `attach_builtin_banks` cannot form different opinions about which fields feed it.
         let mut plan = Self {
             program: None,
+            lowering_hint,
             plan_id: parts.plan_id,
             spec: parts.spec,
             sequential_schedule: parts.sequential_schedule,

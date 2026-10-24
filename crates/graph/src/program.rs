@@ -180,6 +180,45 @@ pub fn node_index(spec: &GraphSpec, id: &GraphNodeId) -> Option<NodeIndex> {
         .and_then(|index| u32::try_from(index).ok())
 }
 
+/// The node positions a compiler already resolved, offered to lowering as hints (#1749).
+///
+/// `schedule[slot]` is the position in `spec.nodes` of the schedule's node at `slot`, and
+/// `ends[edge]` the positions of `spec.edges[edge]`'s source and destination. Lowering takes a
+/// hint only after an equality check against the ID it stands for, and resolves any other ID by
+/// [`node_index`]; `spec.nodes` is checked strictly sorted first, so an accepted hint is the very
+/// index the binary search returns. A hint therefore changes no output and no error, only how
+/// many ID compares lowering makes: a stale, short or empty hint costs the binary searches it
+/// does not answer, nothing more. The default is empty.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct LoweringHint {
+    schedule: Box<[u32]>,
+    ends: Box<[(u32, u32)]>,
+}
+
+impl LoweringHint {
+    /// A hint from a schedule's node positions and each edge's `(source, destination)` positions.
+    #[must_use]
+    pub fn new(schedule: Vec<u32>, ends: Vec<(u32, u32)>) -> Self {
+        Self {
+            schedule: schedule.into_boxed_slice(),
+            ends: ends.into_boxed_slice(),
+        }
+    }
+}
+
+/// `hint` when it names a node whose ID is `id`, otherwise `id`'s binary-searched index.
+fn resolve(spec: &GraphSpec, hint: Option<u32>, id: &GraphNodeId) -> Option<usize> {
+    if let Some(index) = hint
+        && spec
+            .nodes
+            .get(index as usize)
+            .is_some_and(|node| node.id == *id)
+    {
+        return Some(index as usize);
+    }
+    node_index(spec, id).map(|index| index as usize)
+}
+
 /// A stage boundary that carries signal without ever changing it.
 ///
 /// These three are the *internal* rack boundaries. They are never effects, never bank members and
@@ -588,7 +627,28 @@ pub fn lower(
     delays: &[InsertedDelay],
     banks: &[Vec<GraphNodeId>],
 ) -> Result<ExecutionProgram, ProgramError> {
-    lower_with(spec, schedule, levels, delays, banks, true)
+    lower_with(
+        spec,
+        schedule,
+        levels,
+        delays,
+        banks,
+        &LoweringHint::default(),
+        true,
+    )
+}
+
+/// [`lower`], with the node positions a compiler already resolved as hints (#1749). The result,
+/// error included, is [`lower`]'s for every hint; see [`LoweringHint`].
+pub(crate) fn lower_hinted(
+    spec: &GraphSpec,
+    schedule: &[GraphNodeId],
+    levels: &[DependencyLevel],
+    delays: &[InsertedDelay],
+    banks: &[Vec<GraphNodeId>],
+    hint: &LoweringHint,
+) -> Result<ExecutionProgram, ProgramError> {
+    lower_with(spec, schedule, levels, delays, banks, hint, true)
 }
 
 /// [`lower`], with the cohort-chain window union switched off.
@@ -606,7 +666,15 @@ fn lower_with_per_bank_windows(
     delays: &[InsertedDelay],
     banks: &[Vec<GraphNodeId>],
 ) -> Result<ExecutionProgram, ProgramError> {
-    lower_with(spec, schedule, levels, delays, banks, false)
+    lower_with(
+        spec,
+        schedule,
+        levels,
+        delays,
+        banks,
+        &LoweringHint::default(),
+        false,
+    )
 }
 
 #[allow(clippy::too_many_lines)]
@@ -616,6 +684,7 @@ fn lower_with(
     levels: &[DependencyLevel],
     delays: &[InsertedDelay],
     banks: &[Vec<GraphNodeId>],
+    hint: &LoweringHint,
     chain_windows: bool,
 ) -> Result<ExecutionProgram, ProgramError> {
     if spec.nodes.windows(2).any(|pair| pair[0].id >= pair[1].id) {
@@ -625,33 +694,31 @@ fn lower_with(
     if schedule.len() != node_count {
         return Err(ProgramError::ScheduleMismatch);
     }
-    // The schedule is the concatenation of the levels, and each node carries its level.
+    // The schedule is the concatenation of the levels, and each node carries its level. Each
+    // level node is the schedule's node at `cursor`, so its index also gives the node's schedule
+    // position and the interned schedule: one resolution per node (#1749).
     let mut level_of = vec![None; node_count];
+    let mut position = vec![usize::MAX; node_count];
+    let mut order = Vec::with_capacity(node_count);
     let mut cursor = 0usize;
     for level in levels {
         for id in &level.nodes {
             if schedule.get(cursor) != Some(id) {
                 return Err(ProgramError::ScheduleMismatch);
             }
-            let index = node_index(spec, id).ok_or(ProgramError::UnknownNode)? as usize;
+            let index = resolve(spec, hint.schedule.get(cursor).copied(), id)
+                .ok_or(ProgramError::UnknownNode)?;
             if level_of[index].is_some() {
                 return Err(ProgramError::ScheduleMismatch);
             }
             level_of[index] = Some(level.level);
+            position[index] = cursor;
+            order.push(index);
             cursor += 1;
         }
     }
     if cursor != node_count {
         return Err(ProgramError::ScheduleMismatch);
-    }
-
-    // Schedule position per node, and the interned schedule.
-    let mut position = vec![usize::MAX; node_count];
-    let mut order = Vec::with_capacity(node_count);
-    for (slot, id) in schedule.iter().enumerate() {
-        let index = node_index(spec, id).ok_or(ProgramError::UnknownNode)? as usize;
-        position[index] = slot;
-        order.push(index);
     }
 
     let delay_of: std::collections::BTreeMap<&GraphEdgeId, u64> = delays
@@ -665,9 +732,11 @@ fn lower_with(
     let mut side_in: Vec<Option<usize>> = vec![None; node_count];
     let mut ends: Vec<(usize, usize)> = Vec::with_capacity(spec.edges.len());
     for (edge_index, edge) in spec.edges.iter().enumerate() {
-        let source = node_index(spec, &edge.source.node).ok_or(ProgramError::UnknownNode)? as usize;
-        let destination =
-            node_index(spec, &edge.destination.node).ok_or(ProgramError::UnknownNode)? as usize;
+        let hinted = hint.ends.get(edge_index).copied();
+        let source = resolve(spec, hinted.map(|ends| ends.0), &edge.source.node)
+            .ok_or(ProgramError::UnknownNode)?;
+        let destination = resolve(spec, hinted.map(|ends| ends.1), &edge.destination.node)
+            .ok_or(ProgramError::UnknownNode)?;
         ends.push((source, destination));
         if position[source] >= position[destination] {
             return Err(ProgramError::NotTopological);

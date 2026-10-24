@@ -24,6 +24,7 @@ use crate::ids::{
 };
 use crate::pdc::timings;
 use crate::schedule::{Topo, buffer_assignments, cycle_primary_path, cycle_witnesses, topo};
+use graph::program::LoweringHint;
 
 impl GraphCompiler {
     /// The canonical text, its SHA-256 and the Graphviz rendering, produced on demand.
@@ -438,6 +439,24 @@ impl GraphCompiler {
             .iter()
             .map(|&dense| table.id(dense).clone())
             .collect();
+        // #1749: lowering takes these resolved positions as hints instead of binary-searching
+        // every schedule node and edge end again. `NodeTable::new` checked the count fits a u32.
+        let lowering_hint = LoweringHint::new(
+            dense_schedule
+                .iter()
+                .map(|&dense| table.position(dense) as u32)
+                .collect(),
+            table
+                .ends()
+                .iter()
+                .map(|ends| {
+                    (
+                        table.position(ends.source()) as u32,
+                        table.position(ends.destination()) as u32,
+                    )
+                })
+                .collect(),
+        );
         if schedule.len() as u64 > caps.maximum_schedule_items
             || levels.len() as u64 > caps.maximum_dependency_levels
         {
@@ -891,30 +910,33 @@ impl GraphCompiler {
             })
             .cloned()
             .collect();
-        let graph = PreparedGraphPlan::new(PreparedGraphPlanParts {
-            plan_id,
-            spec,
-            sequential_schedule: schedule,
-            dependency_levels: levels,
-            route_timings: timing.routes,
-            inserted_delays: timing.delays,
-            buffer_assignments: buffers,
-            estimate: estimate.clone(),
-            envelope: RenderEnvelope {
-                sample_rate: session.sample_rate(),
-                quantum: session.quantum(),
-                output_channels: core::num::NonZeroUsize::new(2).expect("constant"),
+        let graph = PreparedGraphPlan::new_hinted(
+            PreparedGraphPlanParts {
+                plan_id,
+                spec,
+                sequential_schedule: schedule,
+                dependency_levels: levels,
+                route_timings: timing.routes,
+                inserted_delays: timing.delays,
+                buffer_assignments: buffers,
+                estimate: estimate.clone(),
+                envelope: RenderEnvelope {
+                    sample_rate: session.sample_rate(),
+                    quantum: session.quantum(),
+                    output_channels: core::num::NonZeroUsize::new(2).expect("constant"),
+                },
+                required_bindings,
+                routes: route_transforms,
+                track_delays,
+                effects: effect_nodes,
+                banks,
+                effect_controls,
+                builtin_banks: Vec::new(),
+                observers: Vec::new(),
+                effect_observations,
             },
-            required_bindings,
-            routes: route_transforms,
-            track_delays,
-            effects: effect_nodes,
-            banks,
-            effect_controls,
-            builtin_banks: Vec::new(),
-            observers: Vec::new(),
-            effect_observations,
-        })
+            lowering_hint,
+        )
         .with_source_claim_lines(timing.claim_lines);
         Ok(CompiledGraph {
             pool_classes,
