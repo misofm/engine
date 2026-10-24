@@ -201,3 +201,33 @@ start at rest at the adopted block.
 
 - *Session `controlSmoothing`: configurable ramp lengths for live mute, fader and pan changes*
   (#1054). It merges first and supplies the non-zero session mute ramp `N` the fade runs over.
+
+## Decision record (attempt 1, 2026-10-24)
+
+Root accepted the scope note's slice and decisions 1-5: arm only through the entries that attach
+live lanes; no arm under a declared discontinuity; `D` from PDC's floored input arrivals
+(`a(PostFader) - a(Input)`, plus, for a submix, the largest `a(Input) - a(Route)` of a route into
+it); `armed` added to `FaderChannelState` (export and import carry it, for #1392); the fire is at
+block granularity.
+
+Implementation facts and the changes they forced:
+
+- The arm is a control-thread call, `arm_fade_in`, that `graph::install_fade_arms` makes on each
+  fader lane before publication, not a `FaderLane.armed` field read by the builtins compile. The
+  first adopted block is muted either way; the call needs no new field on `BuiltinParameters` or a
+  compile request. A channel already muted (the session's mute, a VCA's, a followed mute) is not
+  armed, so the per-channel D1 skip is the stage's own state.
+- The fade table addresses fader bank lanes only (`GraphLaneLocation`). Under decision 1 every
+  armed plan binds `FaderBankProcessor`; the per-node `AutomatedFaderProcessor` and the oracle
+  `LiveControlFaderProcessor` are never armed, so no `GraphRuntimeProcessor::fire_fade_in` was
+  added. `FaderMuteRampBuiltins` has `arm_fade_in`/`fire_fade_in` for the kernel gate.
+- A fade line downstream of the fader (a route's compensation line into the output) delays the
+  whole fade and does not eat it, so `D` stops at the fader.
+- Gate 4(c) as written (an added limited track on a playing source) grows the output latency,
+  which is #1287's case; the test gives the base session a muted limited track so the output
+  already arrives at 486, and feeds the added track's source exact zeros before the swap.
+- Gate 4(b) (`seek_at`) is the graph test's first-played-block rule; 4(d) is the control-thread
+  assertion `D == 486`. Gate 6's allocation count is measured inside the fade test's own run.
+- `crates/capi/src/runtime/tests.rs` holds three tests that assert an added stem is bit-identical
+  to the fresh post-edit session from its anchor; with the fade they fail, and the file is outside
+  this slice's paths.

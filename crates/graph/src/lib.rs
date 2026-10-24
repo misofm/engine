@@ -4255,6 +4255,15 @@ struct FadeArm {
     state: FadeArmState,
 }
 
+/// The bytes [`install_fade_arms`] retains for a table of `count` arms, for the plan's resource
+/// charge (issue #1288 D7); `None` on overflow.
+#[must_use]
+pub fn fade_arm_table_bytes(count: usize) -> Option<u64> {
+    count
+        .checked_mul(core::mem::size_of::<FadeArm>())
+        .and_then(|bytes| u64::try_from(bytes).ok())
+}
+
 /// Arm the fade-in of each strip in `arms` and install the table this plan fires them from
 /// (issue #1288 D2, D3), off the render thread, before publication; it replaces any earlier
 /// table. Each lane is armed now, so the plan's first block already renders it muted. A strip
@@ -4375,13 +4384,19 @@ fn step_fade_arms(
 }
 // REALTIME_POLICY_END
 
-/// Test-only (issue #1288): how many of the plan's fade arms have not fired; `None` for any
-/// other plan.
+/// Test-only (issue #1288): `(delay_samples, ramp_samples)` of each installed fade arm, in
+/// installation order; `None` for any other plan.
 #[cfg(any(test, feature = "test-support"))]
 #[doc(hidden)]
-pub fn test_only_pending_fade_arms(plan: &mut PreparedRenderPlan) -> Option<u32> {
+pub fn test_only_fade_arms(plan: &mut PreparedRenderPlan) -> Option<Vec<(u32, u32)>> {
     let executor = plan.executor_any_mut()?.downcast_mut::<GraphExecutor>()?;
-    Some(executor.fade_arms_pending)
+    Some(
+        executor
+            .fade_arms
+            .iter()
+            .map(|arm| (arm.delay_samples, arm.ramp_samples))
+            .collect(),
+    )
 }
 
 pub use rack::{EffectLaneKind, EffectLaneLayout};

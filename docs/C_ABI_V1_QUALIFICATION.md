@@ -118,7 +118,14 @@ transaction returns, the host picks `A` a few quanta past the last rendered bloc
 `seek_at(id, g, F, A)` with `F` the frame the playing stems read at `A`, then submits generation
 `g` from `F`; the stem renders silence until `A` and plays `F` from `A` on, bit-identical to the
 post-edit session compiled fresh and fed that PCM from frame 0 (`runtime::tests`'
-`an_added_c_abi_source_starts_at_its_anchored_render_sample`). The frozen exported set is now 15
+`an_added_c_abi_source_starts_at_its_anchored_render_sample`), except that the added track fades
+in (#1288): its fader holds an exact `+0.0` mute until the first block at or after its first
+played block plus `D`, the samples of latent nodes and compensation lines between its input and
+its fader (zero for a plain track), then unmutes over the session mute ramp, bit-identical to the
+fresh session with the track muted and given a live unmute at that block
+(`host-core`'s `an_added_track_fades_in_from_its_first_played_block_on_every_width`). A channel
+the session mutes is not armed, a host mute or unmute before the fire replaces it, and a declared
+discontinuity arms nothing. Strips the transaction did not add are untouched. The frozen exported set is now 15
 `miso_engine_v1_*` definitions (`scripts/check-capi-abi.sh`, whose self-test refuses a library
 where the new symbol is only an undefined reference: its `nm` wrapper drops the symbol from a
 defined-only listing and shows it as `U` otherwise, so the case also fails if the checker stops

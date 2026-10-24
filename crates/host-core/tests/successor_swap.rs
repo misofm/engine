@@ -3059,6 +3059,252 @@ fn assert_swapped_like(run: &CellRun, reference: &CellRun, what: &str) {
     );
 }
 
+// Issue #1288: a strip a plan swap adds during playback fades in from its first played block,
+// over the session mute ramp, `D` samples late.
+
+/// The track the fade-in cases add.
+const FADE_TRACK: &str = "fade";
+
+/// [`session_a`] plus [`AUX_SOURCE`] and a muted track `aux` on it, so the source persists into
+/// a successor that adds a track on it. `aux` holds a true-peak limiter, so the output already
+/// arrives 486 samples late and an added limited track grows no latency (#1287's case).
+fn fade_base() -> SessionModel {
+    let mut model = session_a();
+    add_source(&mut model, AUX_SOURCE);
+    add_track(&mut model, "eq0", "aux", AUX_SOURCE, true);
+    add_limiter(&mut model, "aux", "lim");
+    model
+}
+
+/// `model` plus [`FADE_TRACK`], a copy of `eq0` on `source`, with a default true-peak limiter
+/// insert when `limited`.
+fn with_fade_track(
+    mut model: SessionModel,
+    source: &str,
+    limited: bool,
+    muted: bool,
+) -> SessionModel {
+    add_track(&mut model, "eq0", FADE_TRACK, source, muted);
+    if limited {
+        track_mut(&mut model, FADE_TRACK)
+            .inserts
+            .effects
+            .push(Effect {
+                id: id("lim"),
+                identity: EffectIdentity::Native {
+                    effect_id: id("miso.true-peak-limiter"),
+                },
+                quality: EffectQuality::Normal,
+                bypass: false,
+                link_mode: LinkMode::Maximum,
+                params: Vec::new(),
+                sidechain: SidechainDeclaration::None,
+            });
+    }
+    model
+}
+
+/// What a fade run rendered: every block's bits, the successor's fade arms (`(D, ramp)`), and the
+/// render thread's `(allocations, reallocations, deallocations)` over the hand-over and every
+/// successor block.
+struct FadeRun {
+    blocks: Vec<Vec<u32>>,
+    arms: Vec<(u32, u32)>,
+    allocator: (u64, u64, u64),
+}
+
+/// Render `a` with live controls, fed `feeds` one block ahead; with a `swap`, prepare
+/// `(successor, committed)` at [`SWAP_BLOCK`], adopt it directly and render on. `writes` go to the
+/// plan rendering their block. Without a swap this is the reference: `a` fresh from frame 0.
+fn fade_run(
+    a: &Session,
+    swap: Option<(&Session, &SessionModel)>,
+    feeds: &[&Feed],
+    writes: &[CellWrite],
+    backend: Backend,
+) -> FadeRun {
+    use bench_support::alloc as bench_alloc;
+    let rate = a.compiled.sample_rate().0;
+    let mut plan = CellPlan::fresh(a, backend);
+    let mut arms = Vec::new();
+    let mut allocator = (0, 0, 0);
+    for feed in feeds {
+        feed.submit(&mut plan.live.prepared.sources, rate, 0);
+    }
+    let mut blocks = Vec::with_capacity(BLOCKS);
+    for block in 0..BLOCKS {
+        if let (SWAP_BLOCK, Some((to, committed))) = (block, swap) {
+            let mut successor = CellPlan::successor(
+                to,
+                &plan.live.prepared.inventory,
+                committed,
+                &EditRamps::new(),
+                backend,
+            );
+            arms = graph::test_only_fade_arms(&mut successor.live.prepared.plan)
+                .expect("a graph plan");
+            assert_eq!(
+                successor
+                    .live
+                    .prepared
+                    .sources
+                    .adopt_persisting(&mut plan.live.prepared.sources),
+                feeds.len()
+            );
+            let mark = bench_alloc::current_thread_counters();
+            let carry = successor
+                .live
+                .prepared
+                .plan
+                .adopt_predecessor_plan(&mut plan.live.prepared.plan);
+            let delta = bench_alloc::current_thread_delta_since(mark);
+            allocator = (delta.allocations, delta.reallocations, delta.deallocations);
+            assert_eq!(carry, CarryOutcome::Carried, "the swap block");
+            plan = successor;
+        }
+        plan.write_block(writes, block);
+        if block + 1 < BLOCKS {
+            for feed in feeds {
+                feed.submit(&mut plan.live.prepared.sources, rate, block + 1);
+            }
+        }
+        let mut output = vec![f32::NAN; QUANTUM * 2];
+        let mark = bench_alloc::current_thread_counters();
+        plan.live.render_into(&mut output, QUANTUM);
+        let delta = bench_alloc::current_thread_delta_since(mark);
+        if swap.is_some() && block >= SWAP_BLOCK {
+            allocator.0 += delta.allocations;
+            allocator.1 += delta.reallocations;
+            allocator.2 += delta.deallocations;
+        }
+        blocks.push(output.iter().map(|sample| sample.to_bits()).collect());
+    }
+    FadeRun {
+        blocks,
+        arms,
+        allocator,
+    }
+}
+
+/// Issue #1288 gates 3, 4(a), 4(c) and 6 at one width: B adds [`FADE_TRACK`] (a) on the playing
+/// [`SOURCE`], `D = 0`, and (c) with a 486-sample true-peak limiter on [`AUX_SOURCE`], fed exact
+/// zeros before the swap, `D = 486`. Every block of the swapped run equals B with the track
+/// muted, rendered fresh from frame 0, given a live unmute over the session mute ramp at the
+/// first block at or after `S + D`: the added track fades in there and every other strip is
+/// untouched. The hand-over and every successor block allocate and free nothing.
+fn an_added_track_fades_in_from_its_first_played_block(backend: Backend) {
+    let ramp = LiveRamps::for_session(&fade_base()).mute_samples;
+    assert!(ramp > 0, "the session mute ramp is not a step");
+    let swap_sample = (SWAP_BLOCK * QUANTUM) as u32;
+    let kept = Feed::new(SOURCE, 1);
+    let aux_feed = Feed::new(AUX_SOURCE, 2);
+    let aux = spliced(AUX_SOURCE, &aux_feed, |block| {
+        (block >= SWAP_BLOCK).then_some(block)
+    });
+    let a = Session::compile(fade_base());
+    for (case, source, limited, delay) in [
+        ("(a) a playing source", SOURCE, false, 0_u32),
+        ("(c) a limiter insert", AUX_SOURCE, true, 486),
+    ] {
+        let b = Session::compile(with_fade_track(fade_base(), source, limited, false));
+        let muted = Session::compile(with_fade_track(fade_base(), source, limited, true));
+        let fire_block = (swap_sample + delay).div_ceil(QUANTUM as u32) as usize;
+        let unmute = |block: usize| CellWrite {
+            block,
+            strip: FADE_TRACK,
+            record: CellRecord::Fader(mute_both(false, ramp)),
+        };
+        let run = fade_run(&a, Some((&b, &a.model)), &[&kept, &aux], &[], backend);
+        assert_eq!(
+            run.arms,
+            vec![(delay, ramp)],
+            "{backend:?} {case}: D and the ramp"
+        );
+        assert_eq!(
+            run.allocator,
+            (0, 0, 0),
+            "{backend:?} {case}: allocator calls"
+        );
+        let reference = fade_run(&muted, None, &[&kept, &aux], &[unmute(fire_block)], backend);
+        let difference = run
+            .blocks
+            .iter()
+            .zip(&reference.blocks)
+            .position(|(left, right)| left != right);
+        assert_eq!(
+            difference, None,
+            "{backend:?} {case}: every block equals the reference"
+        );
+        // The oracle can fail: a fade one block early is different bits.
+        let early = fade_run(
+            &muted,
+            None,
+            &[&kept, &aux],
+            &[unmute(fire_block - 1)],
+            backend,
+        );
+        assert_ne!(
+            early.blocks, reference.blocks,
+            "{backend:?} {case}: the fire block is observable"
+        );
+    }
+}
+
+/// Issue #1288 gates 3, 4 and 6 on every width. Red if every strip dips at the swap, if the added
+/// track enters at full gain, or if its fade runs while its latent insert still emits its at-rest
+/// zeros.
+#[test]
+fn an_added_track_fades_in_from_its_first_played_block_on_every_width() {
+    for backend in backends() {
+        an_added_track_fades_in_from_its_first_played_block(backend);
+    }
+}
+
+/// Issue #1288 D4 (gate 4(d) on the control thread): an added track whose compressor is keyed
+/// from the `pre_fader` tap of a carried track behind a 486-sample true-peak limiter has no latent
+/// node of its own, but PDC puts a 486-sample compensation line on its main path, so its `D` is
+/// 486. Red if `D` counts node latencies only (0 here).
+#[test]
+fn a_late_sidechain_key_delays_the_fade_by_its_compensation_line() {
+    let mut a_model = fade_base();
+    add_limiter(&mut a_model, "eq1", "lim");
+    let a = Session::compile(a_model.clone());
+    let mut b_model = with_fade_track(a_model, SOURCE, false, false);
+    track_mut(&mut b_model, FADE_TRACK)
+        .inserts
+        .effects
+        .push(Effect {
+            id: id("duck"),
+            identity: EffectIdentity::Native {
+                effect_id: id("miso.compressor"),
+            },
+            quality: EffectQuality::Normal,
+            bypass: false,
+            link_mode: LinkMode::Maximum,
+            params: Vec::new(),
+            sidechain: SidechainDeclaration::Routed(session::Sidechain {
+                source: RouteSource::Track {
+                    track_id: id("eq1"),
+                    tap: session::SendTap::PreFader,
+                },
+                port_id: id("sidechain-in"),
+            }),
+        });
+    let b = Session::compile(b_model);
+    let backend = Backend::current();
+    let predecessor = CellPlan::fresh(&a, backend);
+    let mut successor = CellPlan::successor(
+        &b,
+        &predecessor.live.prepared.inventory,
+        &a.model,
+        &EditRamps::new(),
+        backend,
+    );
+    let arms = graph::test_only_fade_arms(&mut successor.live.prepared.plan).expect("a graph plan");
+    assert_eq!(arms.len(), 1, "one added track");
+    assert_eq!(arms[0].0, 486, "D is the key's compensation line");
+}
+
 /// Gate 1: nine tracks with non-unity faders and non-centre pans, plus #1276's input settings; B
 /// adds a muted track whose ID sorts first. Every block of the swapped run equals a fresh B fed
 /// from frame 0, nothing restarts, and all eighteen strip stages move.
