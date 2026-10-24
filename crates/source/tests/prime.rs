@@ -300,8 +300,8 @@ fn readiness_and_sixteen_primes_allocate_nothing() {
 }
 
 /// #1320 D3: a prime reads on the caller's source-read clock, as `begin_block_at` does, even when
-/// that clock jumped since the last block: a clockless block after the window continues it, so a
-/// seek applied there reports the sample after the window on both rings.
+/// that clock jumped since the last block: a seek applied in the block after the prime window
+/// reports the sample after the window on both the primed and the non-primed ring.
 #[test]
 fn the_prime_continues_the_callers_clock_across_a_jump() {
     const JUMPED: u64 = 64 * QUANTUM;
@@ -324,7 +324,11 @@ fn the_prime_continues_the_callers_clock_across_a_jump() {
             frame: SourceFrame(SEEK_FRAME),
         })
         .expect("seek");
-        assert!(consumer.begin_block().generation_changed);
+        assert!(
+            consumer
+                .begin_block_at(JUMPED + u64::from(K) * QUANTUM)
+                .generation_changed
+        );
         reports.push(seek_report(&host));
     }
     assert_eq!(reports[0].first_sample, JUMPED + u64::from(K) * QUANTUM);
