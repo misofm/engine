@@ -7247,8 +7247,8 @@ mod set_control {
                     (SOURCE_FRAMES - 2_000, -6.0),
                 ),
             ];
-            // A table-only rebuild with no live move completes exactly too (bits are not
-            // compared: the split table's values differ from the ride's in `f32` rounding).
+            // A table-only rebuild with no live move completes exactly too (outcome only: its bits
+            // are `a_table_only_rebuild_with_no_move_is_bit_equal`, red until #1716's fix).
             let mut still = Rig::new(&document);
             for _ in 0..4 {
                 still.step();
@@ -7320,6 +7320,56 @@ mod set_control {
                     }
                 }
             }
+        }
+
+        /// #1716 step 0 (red until the fix). Two table-only rebuilds of the riding fader with no
+        /// live move, 5 blocks apart: the ride split in two at sample 10,000 exactly on its line
+        /// (every split-table value equals the ride's in `f32` bits), then the single ride again.
+        /// Every block of the rebuilt rig is bit-equal to the uninterrupted engine's over 44
+        /// blocks, as a plan prepared with either table renders.
+        ///
+        /// Test value: red when a table-only rebuild of an unchanged curve opens with an adoption
+        /// jump that a plan prepared with the new table never makes. At a block's first sample the
+        /// last grid ramp has completed (`G` divides the 128-sample block), so `settle_adoption`
+        /// compares the new curve at `span.start` with the stage's target, which is the old curve
+        /// at `span.start - 1`; on a ride they always differ, and the block opens with a jump over
+        /// `J` = 960 (measured: first difference at block 4, sample 0; at most 1.7e-4, block 7;
+        /// equal again from block 12). No other row compares bits with no move.
+        #[test]
+        #[ignore = "#1716: red until the fix; see spec step 0"]
+        fn a_table_only_rebuild_with_no_move_is_bit_equal() {
+            bench_support::alloc::assert_installed();
+            let document = riding();
+            let track = first_track(&document);
+            let mut rigs = warm(&document);
+            let offset = rigs[0].model().automation[0].offset;
+            send(
+                &mut rigs[0],
+                &[split_ride(&track, (10_000, -12.0), offset)],
+                protocol::EditPath::Rebuild,
+                "split",
+            );
+            let (first, _) = lockstep(&mut rigs, 5);
+            assert_eq!(rigs[0].summary().3, 0, "split: the successor is adopted");
+            assert_eq!(first, None, "split: first difference (block, sample)");
+            let mut whole = entry(
+                &track,
+                vec![segment(
+                    session::AutomationShape::Linear,
+                    (0, SOURCE_FRAMES),
+                    (0.0, -12.0),
+                )],
+            );
+            whole.offset = offset;
+            send(
+                &mut rigs[0],
+                &[SessionEdit::UpsertAutomation { automation: whole }],
+                protocol::EditPath::Rebuild,
+                "whole",
+            );
+            let (first, _) = lockstep(&mut rigs, 39);
+            assert_eq!(rigs[0].summary().3, 0, "whole: the successor is adopted");
+            assert_eq!(first, None, "whole: first difference (block, sample)");
         }
 
         /// [`riding`]'s ride kept up to `at`, then a step to `db` from `at` to the source's end,
