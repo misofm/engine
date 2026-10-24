@@ -362,6 +362,94 @@ fn capability_id_views_reject_order_allocation_and_session_family_identically() 
     assert_parity_rejects(&[1, 2, 6], &events);
     assert_parity_rejects(&commands, &[]);
     assert!(!IdSource::LittleEndian(&[1]).is_strict_allocated(false));
+    // #1386: `SESSION_REPLACE` (`0x0013`) is allocated and rides the session family;
+    // `0x000f`-`0x0012` are claimed by open specs, not allocated.
+    assert!(
+        check_capabilities_invariants(view(
+            IdSource::Native(&[1, 2, 3, 0x0013]),
+            IdSource::Native(&events),
+        ))
+        .is_ok()
+    );
+    assert_parity_rejects(&[1, 2, 3, 0x0010], &events);
+    let without_session = |commands: &'static [u16]| CapabilityInvariantView {
+        maximum_transaction_edits: 0,
+        flags: CapabilityFlags(CapabilityFlags::B1B_BASE.0 & !(1 << 3)),
+        ..view(IdSource::Native(commands), IdSource::Native(&[]))
+    };
+    assert!(check_capabilities_invariants(without_session(&[1, 2])).is_ok());
+    assert_eq!(
+        check_capabilities_invariants(without_session(&[1, 2, 0x0013])),
+        Err(DecodeError::InvalidTlv)
+    );
+}
+
+/// #1386 gate 7: the `SESSION_REPLACE` request round-trips; a missing field, `document_bytes` 0
+/// and a digest that is not 32 bytes are refused.
+#[test]
+fn session_replace_request_round_trips_and_refuses_a_bad_digest() {
+    let codec = codec();
+    let value = crate::SessionReplaceRequest {
+        document_bytes: 70_000,
+        document_sha256: core::array::from_fn(|index| index as u8),
+    };
+    let mut bytes = [0_u8; 64];
+    let written = codec
+        .encode_session_replace_request(value, &mut bytes)
+        .expect("encode");
+    assert_eq!(
+        codec.decode_session_replace_request(&bytes[..written], 2),
+        Ok(value)
+    );
+    assert_eq!(
+        codec.encode_session_replace_request(
+            crate::SessionReplaceRequest {
+                document_bytes: 0,
+                ..value
+            },
+            &mut bytes
+        ),
+        Err(EncodeError::LimitExceeded)
+    );
+    let field = |id: u16, wire: u8, payload: &[u8]| {
+        let mut out = vec![];
+        out.extend_from_slice(&id.to_le_bytes());
+        out.push(wire);
+        // Mandatory: both fields are required.
+        out.push(1);
+        out.extend_from_slice(&u32::try_from(payload.len()).unwrap().to_le_bytes());
+        out.extend_from_slice(payload);
+        while out.len() % 8 != 0 {
+            out.push(0);
+        }
+        out
+    };
+    let length = |bytes: u32| field(1, 3, &bytes.to_le_bytes());
+    let digest = |len: usize| field(2, 10, &vec![7_u8; len]);
+    let frame = |parts: &[Vec<u8>]| parts.concat();
+    assert_eq!(
+        codec.decode_session_replace_request(&frame(&[length(9), digest(32)]), 2),
+        Ok(crate::SessionReplaceRequest {
+            document_bytes: 9,
+            document_sha256: [7; 32],
+        })
+    );
+    for (bad, count, name) in [
+        (frame(&[length(9), digest(31)]), 2, "a 31-byte digest"),
+        (frame(&[length(9), digest(33)]), 2, "a 33-byte digest"),
+        (frame(&[length(0), digest(32)]), 2, "document_bytes 0"),
+        (frame(&[length(9)]), 1, "no digest"),
+        (frame(&[digest(32)]), 1, "no length"),
+    ] {
+        assert!(
+            codec.decode_session_replace_request(&bad, count).is_err(),
+            "{name} must be refused"
+        );
+    }
+    assert_eq!(
+        codec.decode_session_replace_request(&frame(&[length(9), digest(31)]), 2),
+        Err(DecodeError::InvalidField)
+    );
 }
 
 #[test]
@@ -2235,7 +2323,7 @@ fn observation_ended_round_trips_every_key_and_refuses_anything_else() {
     }
 }
 
-/// Issue #1351 gate 4: every registered counter ID, the newest `SOURCE_UNDERRUN_BLOCKS` (#1537)
+/// Issue #1351 gate 4: every registered counter ID, the newest `SOURCE_FRAMES_DISCARDED` (#1699)
 /// included, round-trips through the telemetry configuration; the next ID and the retired IDs
 /// 2 and 11 to 14 (#1629) are refused.
 ///
@@ -2260,8 +2348,9 @@ fn every_counter_id_round_trips_and_the_next_is_refused() {
         CounterId::StripsRestarted,
         CounterId::LiveBlockErrors,
         CounterId::SourceUnderrunBlocks,
+        CounterId::SourceFramesDiscarded,
     ];
-    let allocated = [1_u32, 3, 4, 5, 6, 7, 8, 9, 10, 15, 16, 17, 18, 19, 20];
+    let allocated = [1_u32, 3, 4, 5, 6, 7, 8, 9, 10, 15, 16, 17, 18, 19, 20, 21];
     assert_eq!(
         all.iter().map(|id| *id as u32).collect::<Vec<_>>(),
         allocated,
@@ -2285,7 +2374,7 @@ fn every_counter_id_round_trips_and_the_next_is_refused() {
     );
     // One ID per request, so a refusal cannot come from the sorted-unique rule.
     let single = TelemetryConfiguration {
-        counter_ids: vec![CounterId::SourceUnderrunBlocks],
+        counter_ids: vec![CounterId::SourceFramesDiscarded],
         counter_period_blocks: 3,
         ..configuration
     };
@@ -2293,12 +2382,12 @@ fn every_counter_id_round_trips_and_the_next_is_refused() {
     let len = codec
         .encode_telemetry_configuration(&single, &mut bytes)
         .expect("single");
-    let id_bytes = 20_u32.to_le_bytes();
+    let id_bytes = 21_u32.to_le_bytes();
     let at = bytes[..len]
         .windows(4)
         .position(|window| window == id_bytes)
         .expect("counter ID");
-    for refused_id in [0_u32, 2, 11, 12, 13, 14, 21] {
+    for refused_id in [0_u32, 2, 11, 12, 13, 14, 22] {
         let mut refused = bytes;
         refused[at..at + 4].copy_from_slice(&refused_id.to_le_bytes());
         assert!(
@@ -2946,6 +3035,8 @@ fn transaction_applied_edit_path_is_required_and_refuses_unallocated_codes() {
         (EditPath::ModelOnly, 2),
         (EditPath::Rebuild, 3),
         (EditPath::Monitor, 4),
+        // #1386: a `SESSION_REPLACE` of an identical document.
+        (EditPath::Unchanged, 5),
     ] {
         let value = TransactionApplied {
             applied_operations: 5,
@@ -2965,7 +3056,7 @@ fn transaction_applied_edit_path_is_required_and_refuses_unallocated_codes() {
             Ok(value)
         );
         // Zero and every value above the last allocated code are refused.
-        for bad in [0_u8, 5, 6, 255] {
+        for bad in [0_u8, 6, 7, 255] {
             let mut corrupt = bytes;
             corrupt[written - 8] = bad;
             assert!(

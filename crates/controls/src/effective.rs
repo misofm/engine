@@ -534,44 +534,57 @@ pub(crate) fn model_fader_offsets(model: &SessionModel) -> Vec<[Option<f32>; 2]>
         if offsets.is_empty() {
             offsets = vec![[None; 2]; model.tracks.len() + model.submixes.len()];
         }
-        let lanes: &mut [Option<f32>; 2] = &mut offsets[index];
-        for (lane, (drives, offset)) in [
-            (
-                matches!(target.lane, session::Lane::Left | session::Lane::Both),
-                entry.offset.left_db,
-            ),
-            (
-                matches!(target.lane, session::Lane::Right | session::Lane::Both),
-                entry.offset.right_db,
-            ),
-        ]
-        .into_iter()
-        .enumerate()
-        {
-            if drives && lanes[lane].is_none() {
-                lanes[lane] = Some(offset);
-            }
-        }
+        keep_first_offsets(&mut offsets[index], entry);
     }
     offsets
 }
 
-/// The [`EffectiveInputs::vca_offset`] of every VCA of `model`, by VCA index
-/// ([`crate::vca_offset_automation`]'s rule), or an empty table when no entry is on a VCA
-/// `offset_db` row.
+/// The [`EffectiveInputs::vca_offset`] of every VCA of `model`, by VCA index: one pass over the
+/// automation table ([`crate::vca_offset_automation`]'s rule: the first VCA `offset_db` entry,
+/// [`crate::vca_offset_row`], that drives a lane, #1710), or an empty table when no entry is on a
+/// VCA `offset_db` row.
 fn model_vca_offsets(model: &SessionModel) -> Vec<[Option<f32>; 2]> {
-    if !model
-        .automation
-        .iter()
-        .any(|entry| crate::vca_offset_row(&entry.target))
-    {
-        return Vec::new();
+    let mut offsets = Vec::new();
+    for entry in &model.automation {
+        let target = &entry.target;
+        let session::Owner::Vca(id) = &target.owner else {
+            continue;
+        };
+        if !crate::vca_offset_row(target) {
+            continue;
+        }
+        let Some(index) = crate::view::position(&model.vcas, id, |vca| &vca.id) else {
+            continue;
+        };
+        if offsets.is_empty() {
+            offsets = vec![[None; 2]; model.vcas.len()];
+        }
+        keep_first_offsets(&mut offsets[index], entry);
     }
-    model
-        .vcas
-        .iter()
-        .map(|vca| crate::builtin_rows::fader_offsets(crate::vca_offset_automation(model, &vca.id)))
-        .collect()
+    offsets
+}
+
+/// Give each lane of `lanes` that `entry` drives and that has no offset yet `entry`'s hand-move
+/// offset: the first entry per lane in table order.
+fn keep_first_offsets(lanes: &mut [Option<f32>; 2], entry: &session::Automation) {
+    let lane = entry.target.lane;
+    for (index, (drives, offset)) in [
+        (
+            matches!(lane, session::Lane::Left | session::Lane::Both),
+            entry.offset.left_db,
+        ),
+        (
+            matches!(lane, session::Lane::Right | session::Lane::Both),
+            entry.offset.right_db,
+        ),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        if drives && lanes[index].is_none() {
+            lanes[index] = Some(offset);
+        }
+    }
 }
 
 fn source_id(route: &Route) -> &StableId {

@@ -345,11 +345,11 @@
           "domain": 1, "domainName": "continuous",
           "minimum": 0.1, "maximum": 50.0, "default": 1.0,
           "mapping": 2, "mappingName": "logarithmic",
-          "automationRate": 3, "automationRateName": "none",
+          "automationRate": 2, "automationRateName": "block",
           "channelPolicy": 2, "channelPolicyName": "perLane",
-          "smoothing": 1, "smoothingName": "none", "smoothingSamples": 0,
-          "readable": true, "automatable": false,
-          "liveUpdatable": false,
+          "smoothing": 2, "smoothingName": "linear", "smoothingSamples": 64,
+          "readable": true, "automatable": true,
+          "liveUpdatable": true,
           "enumChoices": [],
           "step": { "unit": "ratio", "size": "1.02", "precision": 3, "ladder": { "xs": 1, "sm": 3, "md": 5, "lg": 10, "xl": 30 } }
         },
@@ -361,11 +361,11 @@
           "domain": 1, "domainName": "continuous",
           "minimum": 0.0, "maximum": 1000.0, "default": 100.0,
           "mapping": 1, "mappingName": "linear",
-          "automationRate": 3, "automationRateName": "none",
+          "automationRate": 2, "automationRateName": "block",
           "channelPolicy": 2, "channelPolicyName": "perLane",
           "smoothing": 1, "smoothingName": "none", "smoothingSamples": 0,
-          "readable": true, "automatable": false,
-          "liveUpdatable": false,
+          "readable": true, "automatable": true,
+          "liveUpdatable": true,
           "enumChoices": [],
           "step": { "unit": "absolute", "size": "0.1", "precision": 1, "ladder": { "xs": 1, "sm": 3, "md": 5, "lg": 10, "xl": 30 } }
         },
@@ -377,11 +377,11 @@
           "domain": 1, "domainName": "continuous",
           "minimum": 5.0, "maximum": 2000.0, "default": 100.0,
           "mapping": 2, "mappingName": "logarithmic",
-          "automationRate": 3, "automationRateName": "none",
+          "automationRate": 2, "automationRateName": "block",
           "channelPolicy": 2, "channelPolicyName": "perLane",
-          "smoothing": 1, "smoothingName": "none", "smoothingSamples": 0,
-          "readable": true, "automatable": false,
-          "liveUpdatable": false,
+          "smoothing": 2, "smoothingName": "linear", "smoothingSamples": 64,
+          "readable": true, "automatable": true,
+          "liveUpdatable": true,
           "enumChoices": [],
           "step": { "unit": "ratio", "size": "1.02", "precision": 3, "ladder": { "xs": 1, "sm": 3, "md": 5, "lg": 10, "xl": 30 } }
         }
@@ -1328,7 +1328,7 @@
         "linkMode": { "control": 2147483648, "name": "link_mode", "displayName": "Link Mode", "displayUnit": "", "unit": "linear", "kind": "enumeration", "minimum": 1.0, "maximum": 3.0, "disabledValue": null, "default": 1.0, "taper": "stepped", "step": { "unit": "index", "size": "1", "precision": 0, "ladder": { "xs": 1, "sm": 3, "md": 5, "lg": 10, "xl": 30 } }, "choices": [{ "value": 1.0, "label": "dual_mono" }, { "value": 2.0, "label": "maximum" }, { "value": 3.0, "label": "average" }], "ramp": "fixed", "scope": "model", "family": "effect", "lanes": "shared", "class": "rebuildOnly", "reason": "optimisation", "reasonIssue": null, "reopen": "decision 15 E2, #1368-#1371", "automatable": false }
       },
       "miso.delay": {
-        "bypass": { "control": 0, "name": "bypass", "displayName": "Bypass", "displayUnit": "", "unit": "linear", "kind": "toggle", "minimum": 0.0, "maximum": 1.0, "disabledValue": null, "default": 0.0, "taper": "stepped", "step": { "unit": "index", "size": "1", "precision": 0, "ladder": { "xs": 1, "sm": 3, "md": 5, "lg": 10, "xl": 30 } }, "choices": [], "ramp": "fixed", "scope": "model", "family": "effect", "lanes": "shared", "class": "rebuildOnly", "reason": "ruledLiveNotBuilt", "reasonIssue": 1339, "reopen": "#1339 gives the delay a live bypass shunt; its last step flips the row", "automatable": false },
+        "bypass": { "control": 0, "name": "bypass", "displayName": "Bypass", "displayUnit": "", "unit": "linear", "kind": "toggle", "minimum": 0.0, "maximum": 1.0, "disabledValue": null, "default": 0.0, "taper": "stepped", "step": { "unit": "index", "size": "1", "precision": 0, "ladder": { "xs": 1, "sm": 3, "md": 5, "lg": 10, "xl": 30 } }, "choices": [], "ramp": "fixed", "scope": "model", "family": "effect", "lanes": "shared", "class": "live", "reason": null, "reasonIssue": null, "reopen": null, "automatable": true },
         "parameters": [
           { "control": 1, "name": "delay_time_ms", "displayName": "delay time", "displayUnit": "ms", "unit": "milliseconds", "kind": "continuous", "minimum": 1.0, "maximum": 2000.0, "disabledValue": null, "default": 250.0, "taper": "linear", "step": { "unit": "absolute", "size": "0.1", "precision": 1, "ladder": { "xs": 1, "sm": 3, "md": 5, "lg": 10, "xl": 30 } }, "choices": [], "ramp": "fixed", "scope": "model", "family": "effect", "lanes": "perLane", "class": "live", "reason": null, "reasonIssue": null, "reopen": null, "automatable": true },
           { "control": 2, "name": "feedback", "displayName": "feedback", "displayUnit": "linear", "unit": "linear", "kind": "continuous", "minimum": -0.95, "maximum": 0.95, "disabledValue": null, "default": 0.35, "taper": "linear", "step": { "unit": "absolute", "size": "0.01", "precision": 2, "ladder": { "xs": 1, "sm": 3, "md": 5, "lg": 10, "xl": 30 } }, "choices": [], "ramp": "fixed", "scope": "model", "family": "effect", "lanes": "perLane", "class": "live", "reason": null, "reasonIssue": null, "reopen": null, "automatable": true },
@@ -1345,9 +1345,9 @@
           { "control": 2, "name": "ratio", "displayName": "ratio", "displayUnit": "ratio", "unit": "ratio", "kind": "continuous", "minimum": 1.0, "maximum": 20.0, "disabledValue": null, "default": 4.0, "taper": "logarithmic", "step": { "unit": "ratio", "size": "1.02", "precision": 8, "ladder": { "xs": 1, "sm": 3, "md": 5, "lg": 10, "xl": 30 } }, "choices": [], "ramp": "fixed", "scope": "model", "family": "effect", "lanes": "perLane", "class": "live", "reason": null, "reasonIssue": null, "reopen": null, "automatable": true },
           { "control": 3, "name": "range_db", "displayName": "range", "displayUnit": "dB", "unit": "db", "kind": "continuous", "minimum": 0.0, "maximum": 96.0, "disabledValue": null, "default": 80.0, "taper": "decibel", "step": { "unit": "absolute", "size": "0.1", "precision": 1, "ladder": { "xs": 1, "sm": 3, "md": 5, "lg": 10, "xl": 30 } }, "choices": [], "ramp": "fixed", "scope": "model", "family": "effect", "lanes": "perLane", "class": "live", "reason": null, "reasonIssue": null, "reopen": null, "automatable": true },
           { "control": 4, "name": "hysteresis_db", "displayName": "hysteresis", "displayUnit": "dB", "unit": "db", "kind": "continuous", "minimum": 0.0, "maximum": 24.0, "disabledValue": null, "default": 6.0, "taper": "decibel", "step": { "unit": "absolute", "size": "0.1", "precision": 1, "ladder": { "xs": 1, "sm": 3, "md": 5, "lg": 10, "xl": 30 } }, "choices": [], "ramp": "fixed", "scope": "model", "family": "effect", "lanes": "perLane", "class": "live", "reason": null, "reasonIssue": null, "reopen": null, "automatable": true },
-          { "control": 5, "name": "attack_ms", "displayName": "attack", "displayUnit": "ms", "unit": "milliseconds", "kind": "continuous", "minimum": 0.1, "maximum": 50.0, "disabledValue": null, "default": 1.0, "taper": "logarithmic", "step": { "unit": "ratio", "size": "1.02", "precision": 3, "ladder": { "xs": 1, "sm": 3, "md": 5, "lg": 10, "xl": 30 } }, "choices": [], "ramp": "fixed", "scope": "model", "family": "effect", "lanes": "perLane", "class": "rebuildOnly", "reason": "ruledLiveNotBuilt", "reasonIssue": 1336, "reopen": "#1336 makes the gate's attack, hold and release live; its last step flips the row", "automatable": false },
-          { "control": 6, "name": "hold_ms", "displayName": "hold", "displayUnit": "ms", "unit": "milliseconds", "kind": "continuous", "minimum": 0.0, "maximum": 1000.0, "disabledValue": null, "default": 100.0, "taper": "linear", "step": { "unit": "absolute", "size": "0.1", "precision": 1, "ladder": { "xs": 1, "sm": 3, "md": 5, "lg": 10, "xl": 30 } }, "choices": [], "ramp": "fixed", "scope": "model", "family": "effect", "lanes": "perLane", "class": "rebuildOnly", "reason": "ruledLiveNotBuilt", "reasonIssue": 1336, "reopen": "#1336 makes the gate's attack, hold and release live; its last step flips the row", "automatable": false },
-          { "control": 7, "name": "release_ms", "displayName": "release", "displayUnit": "ms", "unit": "milliseconds", "kind": "continuous", "minimum": 5.0, "maximum": 2000.0, "disabledValue": null, "default": 100.0, "taper": "logarithmic", "step": { "unit": "ratio", "size": "1.02", "precision": 3, "ladder": { "xs": 1, "sm": 3, "md": 5, "lg": 10, "xl": 30 } }, "choices": [], "ramp": "fixed", "scope": "model", "family": "effect", "lanes": "perLane", "class": "rebuildOnly", "reason": "ruledLiveNotBuilt", "reasonIssue": 1336, "reopen": "#1336 makes the gate's attack, hold and release live; its last step flips the row", "automatable": false }
+          { "control": 5, "name": "attack_ms", "displayName": "attack", "displayUnit": "ms", "unit": "milliseconds", "kind": "continuous", "minimum": 0.1, "maximum": 50.0, "disabledValue": null, "default": 1.0, "taper": "logarithmic", "step": { "unit": "ratio", "size": "1.02", "precision": 3, "ladder": { "xs": 1, "sm": 3, "md": 5, "lg": 10, "xl": 30 } }, "choices": [], "ramp": "fixed", "scope": "model", "family": "effect", "lanes": "perLane", "class": "live", "reason": null, "reasonIssue": null, "reopen": null, "automatable": true },
+          { "control": 6, "name": "hold_ms", "displayName": "hold", "displayUnit": "ms", "unit": "milliseconds", "kind": "continuous", "minimum": 0.0, "maximum": 1000.0, "disabledValue": null, "default": 100.0, "taper": "linear", "step": { "unit": "absolute", "size": "0.1", "precision": 1, "ladder": { "xs": 1, "sm": 3, "md": 5, "lg": 10, "xl": 30 } }, "choices": [], "ramp": "fixed", "scope": "model", "family": "effect", "lanes": "perLane", "class": "live", "reason": null, "reasonIssue": null, "reopen": null, "automatable": true },
+          { "control": 7, "name": "release_ms", "displayName": "release", "displayUnit": "ms", "unit": "milliseconds", "kind": "continuous", "minimum": 5.0, "maximum": 2000.0, "disabledValue": null, "default": 100.0, "taper": "logarithmic", "step": { "unit": "ratio", "size": "1.02", "precision": 3, "ladder": { "xs": 1, "sm": 3, "md": 5, "lg": 10, "xl": 30 } }, "choices": [], "ramp": "fixed", "scope": "model", "family": "effect", "lanes": "perLane", "class": "live", "reason": null, "reasonIssue": null, "reopen": null, "automatable": true }
         ],
         "linkMode": { "control": 2147483648, "name": "link_mode", "displayName": "Link Mode", "displayUnit": "", "unit": "linear", "kind": "enumeration", "minimum": 1.0, "maximum": 3.0, "disabledValue": null, "default": 1.0, "taper": "stepped", "step": { "unit": "index", "size": "1", "precision": 0, "ladder": { "xs": 1, "sm": 3, "md": 5, "lg": 10, "xl": 30 } }, "choices": [{ "value": 1.0, "label": "dual_mono" }, { "value": 2.0, "label": "maximum" }, { "value": 3.0, "label": "average" }], "ramp": "fixed", "scope": "model", "family": "effect", "lanes": "shared", "class": "rebuildOnly", "reason": "optimisation", "reasonIssue": null, "reopen": "decision 15 E2, #1368-#1371", "automatable": false }
       },

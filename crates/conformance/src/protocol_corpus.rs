@@ -931,7 +931,11 @@ pub enum ConformanceDecoder {
 /// #1650b adds the control row's `automated` flag (#1650 D4): `ControlEntry` field 35, written on
 /// every control row, and the list page's live `ratio` row is automated. Re-pinned from
 /// `5eb9ad2ed137f3be`; the frame count stays 46.
-pub const COMPLETE_SCHEMA_HASH: u64 = 0x5cab_2cf3_b4e4_767f;
+/// #1386 adds `SESSION_REPLACE` (`0x0013`): the corpus gains `command.session_replace` (the length
+/// and the 32-byte digest) and `response.session_replace` (`edit_path` `unchanged`, 5), and the
+/// capabilities response lists command `0x0013`. Re-pinned from `5cab2cf3b4e4767f`; the frame
+/// count is 48.
+pub const COMPLETE_SCHEMA_HASH: u64 = 0xc85b_2a0d_ff5d_2a92;
 
 /// Build every command, successful response, registered non-OK status, event, and all-opcode
 /// session transaction using only public typed encoder entry points.
@@ -1076,6 +1080,14 @@ pub fn complete_schema_corpus() -> Vec<ConformanceFrame> {
             minimum_severity: DiagnosticSeverity::Info
         })
     );
+    // #1386: the frame names the document by length and SHA-256 (32 bytes); it carries none.
+    command!(
+        "command.session_replace",
+        CommandPayload::SessionReplace(SessionReplaceRequest {
+            document_bytes: 70_000,
+            document_sha256: core::array::from_fn(|index| u8::try_from(index).unwrap_or(0)),
+        })
+    );
 
     let capabilities = Capabilities {
         minimum_version: ProtocolVersion::V1,
@@ -1096,7 +1108,7 @@ pub fn complete_schema_corpus() -> Vec<ConformanceFrame> {
         maximum_diagnostic_page_items: 256,
         maximum_telemetry_handles: 256,
         maximum_transaction_edits: 64,
-        supported_commands: &[1, 2, 3, 7, 8, 9, 10, 11, 12, 13, 14],
+        supported_commands: &[1, 2, 3, 7, 8, 9, 10, 11, 12, 13, 14, 0x0013],
         supported_events: &[0x8001, 0x8010, 0x8011, 0x8020, 0x8021, 0x8030],
         flags: CapabilityFlags::B4_BASE,
     };
@@ -1139,6 +1151,14 @@ pub fn complete_schema_corpus() -> Vec<ConformanceFrame> {
         SuccessResponsePayload::SessionTransactionApplied(TransactionApplied {
             applied_operations: 1,
             edit_path: EditPath::Monitor
+        })
+    );
+    // #1386: an identical document, so the fifth path (`unchanged`, 5) is covered too.
+    success!(
+        "response.session_replace",
+        SuccessResponsePayload::SessionReplaced(TransactionApplied {
+            applied_operations: 0,
+            edit_path: EditPath::Unchanged
         })
     );
     let (control_page, state_page) = control_corpus_pages();

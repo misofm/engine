@@ -576,6 +576,106 @@ fn drives(entry: Lane, lane: Lane) -> bool {
     entry == lane || entry == Lane::Both
 }
 
+/// The rendered rows whose driving entries [`AutomationIndex`] holds, one per owner.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum RenderedRow {
+    /// A strip's `fader_db` ([`fader_row`]).
+    Fader,
+    /// A strip's `mute` ([`mute_row`]).
+    Mute,
+    /// A VCA's `offset_db` ([`vca_offset_row`]).
+    VcaOffset,
+    /// A VCA's `mute` ([`vca_mute_row`]).
+    VcaMute,
+}
+
+/// The driving entries of every owner's rendered rows, from one pass over a model's automation
+/// table (#1710): per owner and row, the first entry per lane in table order, the rule of
+/// [`fader_automation`], [`mute_automation`], [`vca_offset_automation`] and
+/// [`vca_mute_automation`], which each scan the whole table for one owner.
+///
+/// A caller that reads many owners of one model (a control list, a catalog build or a staged
+/// commit) builds the index once and reads it through [`crate::ModelView::indexed`], so the walk
+/// costs `O(entries)` once and `O(log entries)` per owner, not `O(entries)` per owner. It is a
+/// value of one build, freed with it: `O(entries)` in size, and empty (no allocation) for a model
+/// with no rendered entry.
+#[derive(Clone)]
+pub struct AutomationIndex<'a> {
+    /// The table the index was built from, so a view checks it reads the same model.
+    table: &'a [Automation],
+    lanes: BTreeMap<(RenderedRow, &'a StableId), [Option<&'a Automation>; 2]>,
+}
+
+impl<'a> AutomationIndex<'a> {
+    /// The index of `model`'s automation table.
+    #[must_use]
+    pub fn of(model: &'a SessionModel) -> Self {
+        let mut lanes: BTreeMap<_, [Option<&'a Automation>; 2]> = BTreeMap::new();
+        for automation in &model.automation {
+            let target = &automation.target;
+            let key = match &target.owner {
+                Owner::Strip(id) if fader_row(target) => (RenderedRow::Fader, id),
+                Owner::Strip(id) if mute_row(target) => (RenderedRow::Mute, id),
+                Owner::Vca(id) if vca_offset_row(target) => (RenderedRow::VcaOffset, id),
+                Owner::Vca(id) if vca_mute_row(target) => (RenderedRow::VcaMute, id),
+                _ => continue,
+            };
+            let driven = lanes.entry(key).or_default();
+            for (index, lane) in [Lane::Left, Lane::Right].into_iter().enumerate() {
+                if drives(target.lane, lane) && driven[index].is_none() {
+                    driven[index] = Some(automation);
+                }
+            }
+        }
+        Self {
+            table: &model.automation,
+            lanes,
+        }
+    }
+
+    /// Whether the index was built from `model`'s table.
+    pub(crate) fn is_of(&self, model: &SessionModel) -> bool {
+        core::ptr::eq(self.table, model.automation.as_slice())
+    }
+
+    fn get(&self, row: RenderedRow, owner: &StableId) -> [Option<&'a Automation>; 2] {
+        let lanes: &BTreeMap<(RenderedRow, &StableId), [Option<&'a Automation>; 2]> = &self.lanes;
+        lanes.get(&(row, owner)).copied().unwrap_or_default()
+    }
+
+    /// [`fader_automation`] of strip `strip`.
+    #[must_use]
+    pub fn fader(&self, strip: &StableId) -> [Option<&'a Automation>; 2] {
+        self.get(RenderedRow::Fader, strip)
+    }
+
+    /// [`mute_automation`] of strip `strip`.
+    #[must_use]
+    pub fn mute(&self, strip: &StableId) -> [Option<&'a Automation>; 2] {
+        self.get(RenderedRow::Mute, strip)
+    }
+
+    /// [`vca_offset_automation`] of VCA `vca`.
+    #[must_use]
+    pub fn vca_offset(&self, vca: &StableId) -> [Option<&'a Automation>; 2] {
+        self.get(RenderedRow::VcaOffset, vca)
+    }
+
+    /// [`vca_mute_automation`] of VCA `vca`.
+    #[must_use]
+    pub fn vca_mute(&self, vca: &StableId) -> [Option<&'a Automation>; 2] {
+        self.get(RenderedRow::VcaMute, vca)
+    }
+}
+
+impl core::fmt::Debug for AutomationIndex<'_> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("AutomationIndex")
+            .field("driven_rows", &self.lanes.len())
+            .finish_non_exhaustive()
+    }
+}
+
 /// Whether `model` holds a stored automation that renders ([`automation_row_renders`]) and drives
 /// the cell at `address` (#1648 D3): an entry on the same owner, section and row whose lane drives
 /// the address's lane. A `left` or `right` address names one cell; a `both` address names two,

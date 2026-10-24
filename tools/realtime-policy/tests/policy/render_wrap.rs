@@ -283,3 +283,134 @@ fn a_tree_without_the_host_web_ffi_is_a_finding() {
         &[Class::MissingWebFfi],
     );
 }
+
+/// #1528 D1(a) and D1(c): a listed export whose symbol another function could take. A generic
+/// listed export emits no symbol, and a `no_mangle` function with a listed name outside the top
+/// level of `ffi.rs` is a twin, in any spelling and any place.
+#[test]
+fn a_generic_listed_export_or_a_no_mangle_twin_is_refused() {
+    const RENDER: &str = "pub extern \"C\" fn miso_engine_web_v1_render(handle: u32) -> u32 {";
+    let twin = |attribute: &str| {
+        format!(
+            "{attribute}\npub extern \"C\" fn miso_engine_web_v1_render(handle: u32) -> u32 {{\n    handle\n}}\n"
+        )
+    };
+    let leak = |text: String| -> &'static str { Box::leak(text.into_boxed_str()) };
+    let child = leak(format!(
+        "mod inner {{\n{}}}\n",
+        twin("#[unsafe(no_mangle)]")
+    ));
+    let generic = |signature: &'static str| Edit::ReplaceLine {
+        path: FFI,
+        old: RENDER,
+        new: signature,
+    };
+    let append = |text: &'static str| Edit::Append { path: FFI, text };
+    let cases: Vec<(&str, Vec<Edit>, Vec<Class>)> = vec![
+        (
+            "impl-trait-argument",
+            vec![generic(
+                "pub extern \"C\" fn miso_engine_web_v1_render(handle: impl Into<u32>) -> u32 {",
+            )],
+            vec![Class::GenericWebExport],
+        ),
+        (
+            "impl-trait-nested-return",
+            vec![generic(
+                "pub extern \"C\" fn miso_engine_web_v1_render(handle: u32) -> Option<impl Copy> {",
+            )],
+            vec![Class::GenericWebExport],
+        ),
+        (
+            "type-parameter",
+            vec![generic(
+                "pub extern \"C\" fn miso_engine_web_v1_render<T: Into<u32>>(handle: T) -> u32 {",
+            )],
+            vec![Class::GenericWebExport],
+        ),
+        (
+            "lifetime-parameter",
+            vec![generic(
+                "pub extern \"C\" fn miso_engine_web_v1_render<'a>(handle: &'a u32) -> u32 {",
+            )],
+            vec![Class::GenericWebExport],
+        ),
+        (
+            "where-clause",
+            vec![generic(
+                "pub extern \"C\" fn miso_engine_web_v1_render(handle: u32) -> u32 where u32: Copy {",
+            )],
+            vec![Class::GenericWebExport],
+        ),
+        // The verifier's `generic_command_submit_twin`: the generic original and its child twin.
+        (
+            "generic-original-twin",
+            vec![
+                generic(
+                    "pub extern \"C\" fn miso_engine_web_v1_render(handle: impl Into<u32>) -> u32 {",
+                ),
+                append(child),
+            ],
+            vec![Class::GenericWebExport, Class::ExportTwinOutsideFfi],
+        ),
+        (
+            "child-module-twin",
+            vec![append(child)],
+            vec![Class::ExportTwinOutsideFfi],
+        ),
+        (
+            "impl-block-twin",
+            vec![append(leak(format!(
+                "struct Twin;\nimpl Twin {{\n{}}}\n",
+                twin("#[unsafe(no_mangle)]")
+            )))],
+            vec![Class::ExportTwinOutsideFfi],
+        ),
+        (
+            "trait-twin",
+            vec![append(
+                "trait Twin {\n    #[unsafe(no_mangle)]\n    fn miso_engine_web_v1_render() {}\n}\n",
+            )],
+            vec![Class::ExportTwinOutsideFfi],
+        ),
+        (
+            "cfg-attr-twin",
+            vec![append(leak(format!(
+                "mod inner {{\n{}}}\n",
+                twin("#[cfg_attr(target_family = \"wasm\", unsafe(no_mangle))]")
+            )))],
+            vec![Class::ExportTwinOutsideFfi],
+        ),
+        (
+            "fn-body-twin",
+            vec![append(leak(format!(
+                "fn helper() {{\n{}}}\n",
+                twin("#[unsafe(no_mangle)]")
+            )))],
+            vec![Class::ExportTwinOutsideFfi],
+        ),
+        (
+            "other-file-bare-twin",
+            vec![Edit::Create {
+                path: "hosts/host-web/src/other.rs",
+                text: leak(twin("#[no_mangle]")),
+            }],
+            vec![Class::ExportTwinOutsideFfi],
+        ),
+    ];
+    for (name, edits, expected) in &cases {
+        let report = expect_failure(&format!("twin-{name}"), edits, expected);
+        assert_eq!(
+            naming(&report, "render"),
+            *expected,
+            "{name}: every finding names the export"
+        );
+    }
+    // A function with a listed name and no `no_mangle` exports nothing and is no twin.
+    expect_valid(
+        "twin-not-exported",
+        &[append(
+            "mod inner {\n    pub fn miso_engine_web_v1_render(handle: u32) -> u32 {\n        handle\n    }\n}\n",
+        )],
+    );
+}

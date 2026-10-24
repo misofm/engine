@@ -1,4 +1,5 @@
-//! Issue #1208: a host meters any boundary of a submix strip and designates any strip the master.
+//! Issue #1208: a host meters any boundary of a submix strip. (Gate 3, the master designation by
+//! strip index, left with the boot word in #1689: the master is the strip's `master` row.)
 //!
 //! * **Gate 1, a bus meter equals a track meter.** Three tracks route into a submix `bus` with
 //!   strip `S`; a selected meter at each of `bus`'s seven boundaries reports the snapshot words of
@@ -6,8 +7,6 @@
 //!   contributions. The oracle has no submix at all.
 //! * **Gate 2, the order rules on strips.** A selection mixing a bus and a track comes back in the
 //!   caller's order; an ID that is neither refuses with `builtin.meter.unknown_track`.
-//! * **Gate 3, the master designation on strips.** The last submix can be designated; one past it
-//!   refuses with `host.observation.master_track`.
 //! * **Gate 4, render allocates nothing** with seven bus meters attached.
 
 use core::num::{NonZeroU32, NonZeroUsize};
@@ -20,7 +19,6 @@ use host_core::{
     HostLiveControlHandles, HostLiveControlRequest, HostLiveLanes, HostMeterRequest,
     HostPrepareCaps, HostShapePolicy, PrepareRejection, PreparedHost, SourceSubmission,
     compile_host_session, prepare_host_runtime_with_selected_meters,
-    prepare_host_session_with_live_controls,
 };
 use session::{
     ChannelMatrix, Console, ConsoleEntry, ConsoleSlot, Effect, EffectIdentity, EffectParam,
@@ -627,123 +625,6 @@ fn selected_strip_meters_keep_the_callers_order_and_an_unknown_strip_is_refused(
         .map(|line| line.split('\t').next().unwrap_or_default())
         .collect();
     assert_eq!(codes, ["builtin.meter.unknown_track"], "{text}");
-}
-
-/// Gate 3's session: gate 1's bus session plus a second, unrouted unity submix `aux`, so `T = 3`
-/// and `S = 2`, and a one-past-the-tracks bound is distinguishable from the strip bound.
-fn two_bus_session() -> String {
-    let pair = pair(&mut Draw::new(2), &no_console());
-    let mut model = parse_session_json(&pair.bus).expect("bus session parses");
-    model
-        .submixes
-        .push(Submix::unity(sid("aux"), &model.console));
-    canonical_session_json(&model).expect("two-bus session canonicalizes")
-}
-
-/// Gate 3: with live controls and observation taps, `master_track = T + S - 1` (the last submix)
-/// prepares and is echoed; `T + S` refuses with `host.observation.master_track`.
-///
-/// Red if the designation is still validated against the tracks only (refusing every bus), or
-/// against anything larger than the strip list.
-#[test]
-fn the_last_submix_can_be_designated_master_and_one_past_it_is_refused() {
-    let document = two_bus_session();
-    let request = |master: u32| HostLiveControlRequest {
-        meter_period_frames: NonZeroU32::new(QUANTUM as u32),
-        meter_queue_depth: NonZeroUsize::new(4).expect("meter depth"),
-        meter_tap: MeterTap::PostMatrix,
-        observation_taps: 1,
-        master_track: Some(master),
-    };
-    let (_, _, handles) = prepare_host_session_with_live_controls(&document, &caps(), &request(4))
-        .unwrap_or_else(|failure| {
-            panic!("prepare: {}", String::from_utf8_lossy(failure.as_bytes()))
-        });
-    assert_eq!((handles.track_count, handles.strips.len()), (3, 5));
-    assert_eq!(&*handles.strips[4], "bus");
-    assert_eq!(handles.master_track, Some(4));
-
-    let Err(failure) = prepare_host_session_with_live_controls(&document, &caps(), &request(5))
-    else {
-        panic!("a master one past the strips must be refused");
-    };
-    let text = String::from_utf8_lossy(failure.as_bytes()).into_owned();
-    let codes: Vec<&str> = text
-        .lines()
-        .map(|line| line.split('\t').next().unwrap_or_default())
-        .collect();
-    assert_eq!(codes, ["host.observation.master_track"], "{text}");
-}
-
-/// #1683: a successor's master is the strip its monitor overlay designates, by ID, resolved in the
-/// successor's own strip order: a track added before the bus moves the bus's index and the
-/// designation with it. The boot request's index designates the first plan only; a successor's
-/// request that names one is refused.
-///
-/// Red if a successor reuses the boot index (it would name `aux`, or refuse), ignores the overlay,
-/// or quietly takes a successor request's index over the overlay's designation.
-#[test]
-fn a_successor_takes_its_master_from_the_overlay_by_strip_id() {
-    let document = two_bus_session();
-    let request = |master: Option<u32>| HostLiveControlRequest {
-        meter_period_frames: NonZeroU32::new(QUANTUM as u32),
-        meter_queue_depth: NonZeroUsize::new(4).expect("meter depth"),
-        meter_tap: MeterTap::PostMatrix,
-        observation_taps: 1,
-        master_track: master,
-    };
-    let (compiled, prepared, handles) =
-        prepare_host_session_with_live_controls(&document, &caps(), &request(Some(4)))
-            .unwrap_or_else(|failure| {
-                panic!("prepare: {}", String::from_utf8_lossy(failure.as_bytes()))
-            });
-    assert_eq!(&*handles.strips[4], "bus");
-    assert_eq!(handles.master_track, Some(4));
-
-    // One more track, whose ID sorts first: every submix moves one index on.
-    let mut grown = compiled.normalized_model().clone();
-    let mut added = grown.tracks[0].clone();
-    added.id = sid("a-first");
-    grown.tracks.insert(0, added);
-    let grown_document = canonical_session_json(&grown).expect("grown session canonicalizes");
-    let grown_compiled = compile_host_session(&grown_document, &caps()).expect("grown compiles");
-    let mut overlay = controls::MonitorOverlay::new();
-    overlay.set_master(&sid("bus"), true);
-    let successor = |live: &HostLiveControlRequest, overlay: &controls::MonitorOverlay| {
-        host_core::prepare_host_runtime_with_live_controls_successor(
-            &grown_compiled,
-            &caps(),
-            live,
-            host_core::SuccessorBase {
-                monitor: host_core::MonitorBase {
-                    committed: overlay,
-                    next: overlay,
-                    ramp: None,
-                },
-                ..host_core::SuccessorBase::new(&prepared.inventory, compiled.normalized_model(), 2)
-            },
-        )
-    };
-    let (_, grown_handles) = successor(&request(None), &overlay).unwrap_or_else(|failure| {
-        panic!("successor: {}", String::from_utf8_lossy(failure.as_bytes()))
-    });
-    assert_eq!(&*grown_handles.strips[5], "bus");
-    assert_eq!(grown_handles.master_track, Some(5), "the bus, by ID");
-
-    let (_, undesignated) = successor(&request(None), &controls::MonitorOverlay::new())
-        .unwrap_or_else(|failure| {
-            panic!("successor: {}", String::from_utf8_lossy(failure.as_bytes()))
-        });
-    assert_eq!(undesignated.master_track, None);
-
-    let Err(failure) = successor(&request(Some(4)), &overlay) else {
-        panic!("a successor request that names a master must be refused");
-    };
-    let text = String::from_utf8_lossy(failure.as_bytes()).into_owned();
-    assert!(
-        text.starts_with("host.observation.master_track\t"),
-        "{text}"
-    );
 }
 
 /// Gate 4: with a meter at each of `bus`'s seven boundaries, every render after block 0 allocates

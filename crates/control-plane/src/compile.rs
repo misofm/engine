@@ -25,9 +25,6 @@ pub(crate) struct PreparedRuntime {
     pub(crate) inventory: PlanStateInventory,
     pub(crate) control_catalog: ControlCatalog,
     pub(crate) capi: CapiResources,
-    /// The designated master strip the plan was prepared with, as a strip index (#1683): a first
-    /// plan's seeds the session's monitor overlay; a successor's is its overlay's own.
-    pub(crate) master_track: Option<u32>,
 }
 
 /// A zeroed byte buffer of exactly `bytes` bytes, allocated fallibly.
@@ -1182,7 +1179,6 @@ pub(crate) fn prepare_runtime<A: ControlAdapter>(
         route_controls,
         follow_route_controls,
         jump_lengths,
-        master_track,
         ..
     } = handles;
     // #1639 D1: every prepared plan has a jump-length cell, so a handle set without its writer is
@@ -1286,7 +1282,6 @@ pub(crate) fn prepare_runtime<A: ControlAdapter>(
         inventory: prepared.inventory,
         control_catalog: prepared.control_catalog,
         capi,
-        master_track,
     })
 }
 
@@ -1334,18 +1329,8 @@ where
         &live_values_superseded,
         0,
     )?;
-    // #1683: the boot plan's designated master (the browser's boot word) seeds the overlay, so the
-    // control list, a later write of the row and every successor start from the same designation.
-    let mut monitor = controls::MonitorOverlay::new();
-    if let Some(strip) = runtime.master_track.and_then(|index| {
-        store
-            .compiled()
-            .normalized_model()
-            .strips()
-            .nth(index as usize)
-    }) {
-        monitor.set_master(strip.id, true);
-    }
+    // #1689 D3: a boot designates no master; the app writes the strip's `master` row after boot.
+    let monitor = controls::MonitorOverlay::new();
 
     let control_bytes = usize::try_from(limits.maximum_control_frame_bytes)
         .map_err(|_| failure(ResourceFault::Platform))?;
@@ -1380,7 +1365,6 @@ where
         inventory,
         control_catalog,
         capi,
-        master_track: _,
     } = runtime;
     // #1314 D1, #1502 D5: the initial plan carries the store's initial revision, published on its
     // own gate, and the watermark starts there.
@@ -1433,6 +1417,13 @@ where
             maximum_transaction_edits: maximum_tlvs,
             maximum_response_diagnostics: u16::MAX,
             provider_features: ProviderFeatures::ALL,
+            // #1386 D3: an adapter with a document transport serves `SESSION_REPLACE` through this
+            // one hook, bounded by the boot's document bound (0 is unbounded, as in every zero
+            // control limit); without one the command is unadvertised and `UNAVAILABLE`.
+            document_replace: A::DOCUMENT_TRANSPORT.then_some(protocol::DocumentReplace {
+                replace: crate::document::replace,
+                maximum_document_bytes: limits.maximum_document_bytes,
+            }),
         },
         retained_capacity,
     )
@@ -1462,6 +1453,7 @@ where
         preparer,
         live_values_superseded,
         strips_restarted: 0,
+        source_frames_discarded: 0,
         decode_fields: decode_fields.into_boxed_slice(),
         response_scratch: boxed_zeroed(limits.maximum_control_frame_bytes)?,
         shared: Arc::clone(&shared),

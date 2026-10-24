@@ -284,12 +284,12 @@ function rebuildInstance(wasmModule) {
   u32("sourceRingFrames", SOURCE_RING_FRAMES);
   u32("reserved0", 0);
   u64("maximumMemoryBytes", 0n);
-  // The browser's boot: the retired command-queue word is `reserved1` and must be zero, and
-  // nothing else is attached.
+  // The browser's boot: the retired command-queue and master words are `reserved1` and
+  // `reserved2` and must be zero, and nothing else is attached.
   u64("reserved1", 0n);
   u64("liveControlMeterBlocks", 0n);
   u64("liveControlObservationTaps", 0n);
-  u64("liveControlMasterTrackPlusOne", 0n);
+  u64("reserved2", 0n);
   return e;
 }
 
@@ -835,11 +835,11 @@ function boot(document = mixingDocument) {
   u32("reserved0", 0);
   u64("maximumMemoryBytes", 0n);
   // No meters, observation or master, as the native row prepares its plan (`control: true`,
-  // nothing else); the control plane is always attached, and `reserved1` must be zero.
+  // nothing else); the control plane is always attached, and `reserved1`/`reserved2` must be zero.
   u64("reserved1", 0n);
   u64("liveControlMeterBlocks", 0n);
   u64("liveControlObservationTaps", 0n);
-  u64("liveControlMasterTrackPlusOne", 0n);
+  u64("reserved2", 0n);
   const pointer = e.miso_engine_web_v1_document_ptr(documentBytes.byteLength);
   new Uint8Array(e.memory.buffer, pointer, documentBytes.byteLength).set(documentBytes);
   const handle = e.miso_engine_web_v1_boot(documentBytes.byteLength);

@@ -141,12 +141,15 @@ tap keeps its own cell.
 `masterGrDb` is `null`, never `0`, when no strip was designated or the designated strip published
 no window: `0` would be indistinguishable from "the master is not reducing".
 
-V1 has no structural master bus, so the master reading is a **designation**
-(`live_control_master_track_plus_one`), not a discovery. The word is the designated strip index
-plus one, tracks first, then submixes (issue #1213): `T + j + 1` designates submix `j`, so a mix bus
-whose limiter is observed reports its gain reduction as `masterGrDb`. A command's `trackIndex` is the
-same strip index, so kind 7 at `T + j` arms a bus effect's tap and its reading folds into
-`submixGrDb[j]`.
+V1 has no structural master bus, so the master reading is a **designation**, not a discovery: the
+strip's `master` monitor row (`strip.master(enabled)`, a `SET_CONTROL` that spends no revision,
+issue #1683), held by the core by strip ID, on every host. Any strip can be the master, a submix
+too (issue #1213), so a mix bus whose limiter is observed reports its gain reduction as
+`masterGrDb`; the meter header's `masterTrackPlusOne` names its position in the strip order plus
+one. The browser's boot options carry no master word: issue #1689 retired it, and offset 56 is
+`reserved2`, refused unless zero (`web.options.reserved2`). A command's `trackIndex` is the strip
+index, tracks first, then submixes, so kind 7 at `T + j` arms a bus effect's tap and its reading
+folds into `submixGrDb[j]`.
 
 ## Plan replacement drops subscriptions
 

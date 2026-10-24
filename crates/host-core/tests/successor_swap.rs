@@ -51,16 +51,16 @@ fn carry_counts(prepared: &mut host_core::PreparedHost) -> [usize; 4] {
     graph::test_only_carry_counts(&mut prepared.plan)
 }
 
-/// The command queue a successor's carried timeline brings (#1641 D7): every successor's carried
-/// source bytes hold it, as they hold a carried ring's overhead, so a successor that carries no
-/// ring still carries these bytes.
+/// The command queue and seek-report record a successor's carried timeline brings (#1641 D7,
+/// #1704 D4): every successor's carried source bytes hold them, as they hold a carried ring's
+/// overhead, so a successor that carries no ring still carries these bytes.
 fn timeline_queue_bytes() -> u64 {
-    source::SourceTimeline::resource_report(
+    let report = source::SourceTimeline::resource_report(
         engine::QuantumFrames(QUANTUM as u32),
         core::num::NonZeroUsize::MIN,
     )
-    .expect("timeline report")
-    .command_queue_bytes
+    .expect("timeline report");
+    report.command_queue_bytes + report.seek_report_bytes
 }
 
 fn id(value: &str) -> StableId {
@@ -6655,14 +6655,19 @@ fn unread_values_and_a_live_bypass_cross_the_swap_at_every_width() {
     }
 }
 
-/// Gate 3: a committed bypass change on the delay is a prepared one (the delay lowers no live
-/// bypass), so its owner restarts and its strip, and only it, is in the restart set. The other
-/// two per-node instances still move.
-fn a_prepared_bypass_change_restarts_its_strip(backend: Backend) {
+/// Gate 3: a committed bypass change on the multiband compressor is a prepared one (it lowers no
+/// live bypass until #1340), so its owner restarts and its strip, and only it, is in the restart
+/// set. The other two per-node instances still move.
+///
+/// #1339 D5: the delay's bypass is lane state, so a rebuild that also lifts it carries the delay
+/// (its ring and feedback tail) and applies the committed bypass as a lane record over the
+/// session's bypass crossfade. A runs the delay bypassed; B lifts it and adds the muted track.
+/// Nothing restarts, and every block equals A lifting the bypass live at the swap block.
+fn a_prepared_bypass_change_restarts_its_strip_and_a_live_one_carries(backend: Backend) {
     let what = format!("{backend:?}");
     let (a, _) = tail_pair();
     let mut b_model = tail_session();
-    track_mut(&mut b_model, "eq0").inserts.effects[0].bypass = true;
+    track_mut(&mut b_model, "eq1").inserts.effects[0].bypass = true;
     let b = Session::compile(b_model);
     let feed = tail_feed();
     let run = effect_run_blocks(
@@ -6677,8 +6682,8 @@ fn a_prepared_bypass_change_restarts_its_strip(backend: Backend) {
     assert_clean_swap(&run, &what);
     assert_eq!(
         run.restarted,
-        vec![Box::<str>::from("eq0")],
-        "{what}: exactly the delay's strip restarts"
+        vec![Box::<str>::from("eq1")],
+        "{what}: exactly the multiband's strip restarts"
     );
     assert_eq!(run.payload_bytes, 0, "{what}");
     // The restarted strip starts at rest, so the swapped run is not B rendered from frame 0.
@@ -6688,12 +6693,56 @@ fn a_prepared_bypass_change_restarts_its_strip(backend: Backend) {
         None,
         "{what}: the restarted strip starts at rest"
     );
+
+    // The delay: A bypasses it, B lifts it.
+    let mut a_model = tail_session();
+    track_mut(&mut a_model, "eq0").inserts.effects[0].bypass = true;
+    let a = Session::compile(a_model);
+    let (_, b) = tail_pair();
+    let run = effect_run_blocks(
+        &a,
+        Some((&b, &a.model)),
+        &feed,
+        &[],
+        &[],
+        backend,
+        TAIL_BLOCKS,
+    );
+    assert_clean_swap(&run, &what);
+    assert_eq!(
+        run.restarted,
+        Vec::<Box<str>>::new(),
+        "{what}: the delay's bypass carries"
+    );
+    let ramp = LiveRamps::for_session(&a.model).for_row(LiveRampRow::BypassCrossfade);
+    let lift = EffectWrite {
+        block: SWAP_BLOCK,
+        strip: "eq0",
+        address: LiveEffectAddress::insert(0),
+        value: EffectValue::Bypass(BypassSwitch {
+            bypassed: false,
+            ramp_samples: ramp,
+        }),
+    };
+    let live = effect_run_blocks(&a, None, &feed, &[lift], &[], backend, TAIL_BLOCKS);
+    assert_eq!(
+        first_effect_difference(&run, &live),
+        None,
+        "{what}: the rebuild equals A lifting the delay's bypass live at the swap block"
+    );
+    // Not vacuous: the lift is heard.
+    let kept = effect_run_blocks(&a, None, &feed, &[], &[], backend, TAIL_BLOCKS);
+    assert_ne!(
+        first_effect_difference(&live, &kept),
+        None,
+        "{what}: the lift changes the output"
+    );
 }
 
 #[test]
-fn a_prepared_bypass_change_restarts_its_strip_at_every_width() {
+fn a_prepared_bypass_change_restarts_its_strip_and_a_live_one_carries_at_every_width() {
     for backend in backends() {
-        a_prepared_bypass_change_restarts_its_strip(backend);
+        a_prepared_bypass_change_restarts_its_strip_and_a_live_one_carries(backend);
     }
 }
 

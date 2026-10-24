@@ -258,6 +258,7 @@ dependencies = [
  "lane",
  "protocol",
  "session",
+ "sha2 0.11.0",
  "source",
 ]
 
@@ -343,6 +344,7 @@ dependencies = [
  "lane",
  "protocol",
  "session",
+ "sha2 0.11.0",
  "source",
 ]
 

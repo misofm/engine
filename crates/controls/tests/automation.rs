@@ -1169,6 +1169,36 @@ fn event_lanes_take_the_own_entry_and_every_reaching_vca_ride() {
     assert_eq!(lanes(&model, "vocal"), ([true, true], [true, false]));
     assert_eq!(lanes(&model, "guitar"), ([false; 2], [false; 2]));
 
+    // #1710: the one-pass index gives every owner the entries each scanning reader gives, on this
+    // mixed strip and VCA table with a `both` mute entry and a later second ride of a driven lane.
+    {
+        use controls::{
+            AutomationIndex, mute_automation, vca_mute_automation, vca_offset_automation,
+        };
+        let mut mixed = model.clone();
+        mixed.automation.push(one(
+            "both-mute",
+            strip_builtin("guitar", MUTE, Lane::Both),
+            ParameterUnit::Linear,
+            1.0,
+        ));
+        mixed.automation.push(one(
+            "late",
+            strip_builtin("vocal", FADER_DB, Lane::Both),
+            ParameterUnit::Db,
+            -3.0,
+        ));
+        let index = AutomationIndex::of(&mixed);
+        for strip in mixed.strips().map(|strip| strip.id.clone()) {
+            assert_eq!(index.fader(&strip), fader_automation(&mixed, &strip));
+            assert_eq!(index.mute(&strip), mute_automation(&mixed, &strip));
+        }
+        for vca in mixed.vcas.iter().map(|vca| &vca.id) {
+            assert_eq!(index.vca_offset(vca), vca_offset_automation(&mixed, vca));
+            assert_eq!(index.vca_mute(vca), vca_mute_automation(&mixed, vca));
+        }
+    }
+
     // The strip's own mute entry alone.
     model.automation = vec![one(
         "own-mute",

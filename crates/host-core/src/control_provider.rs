@@ -31,9 +31,9 @@ use crate::response::{
 
 /// The counters the provider serves, in ascending ID order (#1351 D1): the two telemetry
 /// counters, `live_values_superseded` (#1312 D8), `transition_reprepare_refusals` (D6),
-/// `strips_restarted` (#1768), `live_block_errors` (#1521) and `source_underrun_blocks` (#1537).
-/// Each reads 0 from construction.
-const SERVED_COUNTERS: [CounterId; 7] = [
+/// `strips_restarted` (#1768), `live_block_errors` (#1521), `source_underrun_blocks` (#1537) and
+/// `source_frames_discarded` (#1699). Each reads 0 from construction.
+const SERVED_COUNTERS: [CounterId; 8] = [
     CounterId::TelemetryCoalesced,
     CounterId::TelemetryDropped,
     CounterId::LiveValuesSuperseded,
@@ -41,6 +41,7 @@ const SERVED_COUNTERS: [CounterId; 7] = [
     CounterId::StripsRestarted,
     CounterId::LiveBlockErrors,
     CounterId::SourceUnderrunBlocks,
+    CounterId::SourceFramesDiscarded,
 ];
 
 /// The slots the provider's counter snapshot keeps even when the controller retains fewer IDs.
@@ -594,6 +595,17 @@ impl SessionControlProvider {
         set_counter(
             &mut self.counter_snapshot,
             CounterId::SourceUnderrunBlocks,
+            count,
+        );
+    }
+
+    /// Record the session's `source_frames_discarded` count (#1699 D1): the accepted source
+    /// frames render never read because the caller's own transaction removed or redeclared the
+    /// source, summed when the control plane reclaims each retired plan.
+    pub fn set_source_frames_discarded(&mut self, count: u64) {
+        set_counter(
+            &mut self.counter_snapshot,
+            CounterId::SourceFramesDiscarded,
             count,
         );
     }
@@ -1309,6 +1321,12 @@ impl ControlProvider for SessionControlProvider {
     }
 }
 
+/// The most owners a staged live commit reads before it builds a
+/// [`controls::AutomationIndex`] (#1710). Each owner's rows scan the automation table a few
+/// times; the index is one pass plus its map, so it pays only past a few owners. A
+/// 1024-strip, one-owner fader stage measured about 4 % slower with the index built.
+const STAGE_INDEX_OWNERS: usize = 4;
+
 impl ControlCatalog {
     /// Build the catalog of `model` at `sample_rate`: one `controls::list` pass with the owner and
     /// section headers inserted, every allocation reserved up front.
@@ -1327,6 +1345,10 @@ impl ControlCatalog {
         // every table, once to fill them. No pass holds the whole list, so the transient is one
         // owner's rows, not every control of the session's rows at full size (#1400b).
         let effective = controls::effective(model, overlay);
+        // The automation table is walked once, here, and every owner looks its driving entries up
+        // (#1710). The index is O(entries) and freed with the build, as the scratch is.
+        let automation = controls::AutomationIndex::of(model);
+        let view = controls::ModelView::whole(model).indexed(&automation);
         let owner_total = controls::owner_count(model);
         let mut scratch: Vec<controls::ControlRow> = Vec::new();
         let mut listed_count = 0_usize;
@@ -1335,7 +1357,7 @@ impl ControlCatalog {
         let mut section_count = 0_usize;
         for owner in 0..owner_total {
             scratch.clear();
-            controls::owner_rows_with(model, &effective, overlay, owner, sample_rate, &mut scratch);
+            controls::owner_rows_in(view, &effective, overlay, owner, sample_rate, &mut scratch);
             // An owner's rows are contiguous and no two owners share an address, so the first row
             // of an owner's run is the one that opens it.
             let mut previous: Option<&controls::ControlAddress> = None;
@@ -1378,7 +1400,7 @@ impl ControlCatalog {
         let mut effect: Option<&'static EffectDescriptor> = None;
         for owner in 0..owner_total {
             scratch.clear();
-            controls::owner_rows_with(model, &effective, overlay, owner, sample_rate, &mut scratch);
+            controls::owner_rows_in(view, &effective, overlay, owner, sample_rate, &mut scratch);
             let mut previous: Option<&controls::ControlAddress> = None;
             for row in &scratch {
                 let address = &row.address;
@@ -1624,8 +1646,9 @@ impl ControlCatalog {
     ///
     /// # Errors
     ///
-    /// [`SessionControlProviderError`] if an allocation fails or the list outgrows the table
-    /// indices.
+    /// [`SessionControlProviderError`] if a reserved table cannot be allocated or the list
+    /// outgrows the table indices. (The automation index of a stage that reads many owners
+    /// allocates as an ordinary map does, with no fallible path.)
     pub fn stage_live(
         &self,
         next: controls::ModelView<'_>,
@@ -1644,6 +1667,17 @@ impl ControlCatalog {
         }) {
             return Err(SessionControlProviderError);
         }
+        // A stage that reads the automation of more than a few owners walks the committed table
+        // once for all of them (#1710); a one-owner hand move scans it per reader, which is
+        // cheaper than building the index.
+        let reads = delta.changed_owners.len() + delta.derived_owners.as_ref().map_or(0, Vec::len);
+        let automation;
+        let next = if reads > STAGE_INDEX_OWNERS {
+            automation = controls::AutomationIndex::of(next.structure());
+            next.indexed(&automation)
+        } else {
+            next
+        };
         if let Some(staged) = self.stage_values(next, overlay, sample_rate, delta)? {
             #[cfg(any(test, feature = "test-support"))]
             if cfg!(debug_assertions) && VERIFY_STAGES.with(core::cell::Cell::get) {
@@ -3786,6 +3820,7 @@ mod tests {
         provider.set_strips_restarted(5);
         provider.set_live_block_errors(17);
         provider.set_source_underrun_blocks(19);
+        provider.set_source_frames_discarded(23);
         let counters = provider
             .counters(&CountersRequest {
                 all: true,
@@ -3808,7 +3843,9 @@ mod tests {
         assert_eq!(counters.values[5].value, 17);
         assert_eq!(counters.values[6].id, CounterId::SourceUnderrunBlocks);
         assert_eq!(counters.values[6].value, 19);
-        assert_eq!(counters.values.len(), 7);
+        assert_eq!(counters.values[7].id, CounterId::SourceFramesDiscarded);
+        assert_eq!(counters.values[7].value, 23);
+        assert_eq!(counters.values.len(), 8);
         assert_eq!(provider.retained_capacities().1, counter_capacity);
 
         provider.set_render_diagnostic(0, 256, 3, true);

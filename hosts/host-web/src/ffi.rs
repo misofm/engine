@@ -516,7 +516,7 @@ const ZERO_BOOT_OPTIONS: WebBootOptions = WebBootOptions {
     reserved1: 0,
     live_control_meter_blocks: 0,
     live_control_observation_taps: 0,
-    live_control_master_track_plus_one: 0,
+    reserved2: 0,
 };
 
 impl BootStaging {
@@ -3391,6 +3391,11 @@ pub extern "C" fn miso_engine_web_v1_session_seek_at(
 /// source-read sample and source frame of its first block, and the cumulative underrun and held
 /// frames. It runs the control plane's `SessionState::seek_report`, the call the C ABI's
 /// `miso_engine_v1_source_seek_report` runs, so it is control side only.
+///
+/// The reserved source ID `$timeline` (9 bytes) reads the session timeline's report instead
+/// (#1704): its source frame is the timeline sample that block started at, and its underrun and
+/// held counts are 0. Only this call takes it; submit, seek and seek-at refuse it as an unknown
+/// source.
 ///
 /// Results: [`RESULT_OK`]; [`RESULT_INVALID_ARGUMENT`] for a wrong handle, an ID count past the
 /// staging or an unknown source; [`RESULT_BACKPRESSURE`] for a read that landed inside render's

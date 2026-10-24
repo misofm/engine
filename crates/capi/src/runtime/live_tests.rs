@@ -3401,20 +3401,29 @@ fn bypass_crossfade_documents(
 /// bypassed; frames before the commit equal the booted state (W, or D for a lift) and frames from
 /// the ramp's end equal the target (D, or W for a lift), bit for bit.
 /// The ramp blocks render without one allocation (statics warmed). A zero-latency effect (the
-/// compressor) and one with latency (the soft clip, 31 samples) run; a session whose `mute_ms` is 0
-/// steps at the commit's first block.
+/// compressor) and one with latency (the soft clip, 31 samples) run, and the delay, whose bypass is
+/// live since #1339 (an insert only, as it never banks and is not console-eligible); a session
+/// whose `mute_ms` is 0 steps at the commit's first block.
 ///
 /// Test value: red if the C ABI producer forgets the session ramp (the toggle steps, so the first
 /// block is already D), if the record's ramp is another row's (the fader's or pan's length), if a
 /// ramp block allocates, or if a lift ramps from the wrong end or lands off W (the zero-latency lift
-/// is the one the review of #1341a1 found uncovered through the real runtime).
+/// is the one the review of #1341a1 found uncovered through the real runtime). The delay's row is
+/// red if its bypass is still prepared: the lift is refused or rebuilds a plan, or is acked and
+/// renders the prepared bypass (#1339 gate 4).
 #[test]
 fn a_live_bypass_crossfades_over_the_session_mute_ramp_and_lands_on_the_bypassed_control() {
     bench_support::alloc::assert_installed();
-    for effect_id in ["miso.compressor", "miso.soft-clip"] {
+    for effect_id in ["miso.compressor", "miso.soft-clip", "miso.delay"] {
         for hard in [false, true] {
             for lift in [false, true] {
-                for console in [false, true] {
+                // The delay is not console-eligible: it runs as an insert only.
+                let consoles: &[bool] = if effect_id == "miso.delay" {
+                    &[false]
+                } else {
+                    &[false, true]
+                };
+                for &console in consoles {
                     let (document, bypassed_document) = bypass_crossfade_documents(
                         effect_id,
                         hard.then_some(HARD_SWITCH).flatten(),

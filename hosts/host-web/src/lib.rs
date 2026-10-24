@@ -1095,19 +1095,11 @@ pub struct WebBootOptions {
     /// records (kinds 7 and 8): a subscription rides the effect's own observation queue. With zero,
     /// a command submission is `RESULT_UNSUPPORTED` with `COMMAND_REASON_UNSUPPORTED_KIND`.
     pub live_control_observation_taps: u64,
-    /// The designated master strip index (tracks first, then submixes) **plus one**, or `0` for
-    /// none (issue #143 D6). `T + j + 1` designates submix `j` (issue #1213 D5), so a mix bus
-    /// with a limiter can report `masterGrDb`; a value past `T + S` refuses at boot.
-    ///
-    /// Boot v1 has no structural master bus, so `masterGrDb` is a designation rather than a discovery.
-    /// Plus one because zero has to keep meaning "unset" in a word every V1 writer already zeroes.
-    ///
-    /// Two rules stand side by side until a successor retires this word (#1683). The word is
-    /// refused at boot (`web.options.live_controls`) unless `live_control_observation_taps` is
-    /// nonzero. The core's `master` monitor row, written by `SET_CONTROL`, is a designation valid
-    /// on every host with or without observation taps (the C ABI has none); without a tap on the
-    /// strip, `masterGrDb` is `null`. The word seeds that row at boot by the strip's ID.
-    pub live_control_master_track_plus_one: u64,
+    /// Must be zero. This was the master boot word (the designated master strip index plus one)
+    /// until #1689 retired it: the master is the strip's `master` row, written by `SET_CONTROL`
+    /// after boot, as on every host. The offset keeps its place and the word is refused when
+    /// nonzero (`web.options.reserved2`).
+    pub reserved2: u64,
 }
 
 impl WebBootOptions {
@@ -1125,7 +1117,7 @@ impl WebBootOptions {
             reserved1: 0,
             live_control_meter_blocks: 0,
             live_control_observation_taps: 0,
-            live_control_master_track_plus_one: 0,
+            reserved2: 0,
         }
     }
 
@@ -1780,6 +1772,9 @@ impl ReadyOwnership {
                 adoption: None,
                 spectrum: handover,
             });
+            // The replacement's header carries its master word before the rendering plan's header
+            // names it (#1689), so the page never reads the successor without its master.
+            self.sync_master();
             // The rendering plan's header names the newest replacement's, so the page cuts its
             // views over the successor's frame in the handler that committed it (#1290d1).
             if let Some(entry) = self.pending_shapes.last() {
@@ -5363,10 +5358,14 @@ fn validate_options(mut options: WebBootOptions) -> Result<WebBootOptions, BootF
             "web.options.reserved1",
         ));
     }
+    // #1689: the word at offset 56 was the master boot word, reserved the same way.
+    if options.reserved2 != 0 {
+        return Err(BootFailure::fixed(
+            RESULT_REFUSED_OPTIONS,
+            "web.options.reserved2",
+        ));
+    }
     if options.live_control_observation_taps > u64::from(MAXIMUM_OBSERVATION_TAPS)
-        || options.live_control_master_track_plus_one > u64::from(u32::MAX)
-        || (options.live_control_master_track_plus_one != 0
-            && options.live_control_observation_taps == 0)
         || options.live_control_meter_blocks > u64::from(u32::MAX)
     {
         return Err(BootFailure::fixed(
@@ -5984,15 +5983,10 @@ impl WebRuntimePreparer {
         superseded: &host_core::LiveValuesSuperseded,
         boot: bool,
     ) -> Result<(PreparedHost, host_core::HostLiveControlHandles), PrepareDiagnostics> {
-        let mut live_controls = live_control_request(self.options, compiled.quantum().0)
-            .ok_or_else(|| {
+        let live_controls =
+            live_control_request(self.options, compiled.quantum().0).ok_or_else(|| {
                 PrepareDiagnostics::fixed(PrepareRejection::Session, "web.live_controls.config")
             })?;
-        // #1683: the boot word designates the first plan's master only; the core's overlay, which
-        // it seeds, designates every successor's.
-        if successor.is_some() {
-            live_controls.master_track = None;
-        }
         // Observation taps ride the effect lanes (#1254 D2): an app that asked for taps gets the
         // effect lanes whatever the session's live rows chose, as before the control plane chose
         // the lanes, so a session with no effect to observe still boots.
@@ -6018,7 +6012,6 @@ impl WebRuntimePreparer {
             &handles.effect_controls,
             &handles.effect_observations,
             handles.meters.len(),
-            handles.master_track,
         )
         .map_err(|code| {
             let rejection = if code.starts_with("web.resource.") {
@@ -6120,7 +6113,6 @@ fn build_plan_shape(
     producers: &[host_core::EffectControlProducer],
     observations: &[EffectObservationHandle],
     meter_count: usize,
-    master_track: Option<u32>,
 ) -> Result<PlanShape, &'static str> {
     let track_count = model.tracks.len();
     let submix_count = model.submixes.len();
@@ -6254,7 +6246,6 @@ fn build_plan_shape(
         u32::try_from(track_count).map_err(|_| "web.live_controls.effects")?;
     meter_header.submix_count =
         u32::try_from(submix_count).map_err(|_| "web.live_controls.effects")?;
-    meter_header.master_track_plus_one = master_track.map_or(0, |track| track.saturating_add(1));
     meter_header.frame_pointer = address_word(meter_frame.as_ptr());
     for (reader, handle) in observations.iter().enumerate() {
         let Some(strip) = strip_index(&tracks, &submixes, handle.track_id.as_bytes()) else {
@@ -6304,7 +6295,9 @@ fn build_plan_shape(
         observation_armed,
         observation_arm_samples: observation_arm_samples.into_boxed_slice(),
         observation_commanded: zero_u32(total_effects as usize)?,
-        master_track,
+        // #1689: no plan is prepared with a master; `ReadyOwnership::sync_master` points the
+        // shape at the strip the core's `master` row designates after every control command.
+        master_track: None,
         command_wanted: zero_u32(total_effects as usize)?,
         observe_named: zero_u32(total_effects as usize)?,
         in_flight: zero_u32(total_effects as usize)?,
@@ -6890,12 +6883,8 @@ fn live_control_request(
         meter_period_frames,
         meter_queue_depth: NonZeroUsize::new(METER_QUEUE_DEPTH)?,
         meter_tap: MeterTap::PostMatrix,
-        // Issue #143 D3/D6: both are carved browser configuration words, translated once, here.
+        // Issue #143 D3: a carved browser configuration word, translated once, here.
         observation_taps: u32::try_from(options.live_control_observation_taps).ok()?,
-        master_track: match options.live_control_master_track_plus_one {
-            0 => None,
-            value => Some(u32::try_from(value.checked_sub(1)?).ok()?),
-        },
     })
 }
 

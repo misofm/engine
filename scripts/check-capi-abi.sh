@@ -268,6 +268,7 @@ printf '%s\n' \
     miso_engine_v1_source_seek_report \
     miso_engine_v1_source_submit_planar_f32 \
     miso_engine_v1_submit_command \
+    miso_engine_v1_submit_document_command \
     | sort >"$expected_symbols"
 diff -u "$expected_symbols" "$actual_symbols" \
     || fail "exported symbol set differs from frozen ABI V1"

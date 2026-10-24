@@ -38,14 +38,11 @@ pub const BYPASS_CONTROL: u32 = 0;
 /// refuses a descriptor that does).
 pub const LINK_MODE_CONTROL: u32 = 0x8000_0000;
 
-/// The delay's bypass is a prepared bypass until #1339 gives it a live shunt (decision 15 E4).
-const DELAY_BYPASS_ISSUE: u32 = 1339;
 /// The multiband compressor's bypass is a prepared bypass until #1340 (decision 15 E4).
 const MULTIBAND_BYPASS_ISSUE: u32 = 1340;
 /// The multiband compressor's link mode is live once #1367 lands (decision 15 E2).
 const MULTIBAND_LINK_ISSUE: u32 = 1367;
 
-const DELAY_ID: &str = "miso.delay";
 const MULTIBAND_ID: &str = "miso.multiband-compressor";
 
 /// Every link mode with the label a frontend shows, in code order. The choice lists below are
@@ -211,10 +208,6 @@ pub(crate) fn bypass_descriptor(effect_id: &str) -> ControlDescriptor {
         ControlClass::Live
     } else {
         match effect_id {
-            DELAY_ID => ruled_live_not_built(
-                DELAY_BYPASS_ISSUE,
-                "#1339 gives the delay a live bypass shunt; its last step flips the row",
-            ),
             MULTIBAND_ID => ruled_live_not_built(
                 MULTIBAND_BYPASS_ISSUE,
                 "#1340 gives the multiband compressor a live bypass shunt; its last step flips the row",

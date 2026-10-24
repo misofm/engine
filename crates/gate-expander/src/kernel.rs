@@ -13,6 +13,9 @@ use math::fast_db::{fast_gain_from_db, fast_level_db};
 /// Smoothed parameters: threshold, ratio, range and hysteresis, in descriptor order.
 pub const RAMP_COUNT: usize = 4;
 
+/// Ramped one-pole rate coefficients (#1336 D2): attack, then release.
+pub const RATE_COUNT: usize = 2;
+
 /// The widest backend and the length of lane scratch arrays owned by this effect.
 pub const MAX_WIDTH: usize = 8;
 
@@ -51,13 +54,12 @@ impl<L: Lane> GateRamp<L> {
     }
 }
 
-/// Per-channel coefficients and link selection prepared off the render thread.
+/// Per-channel coefficients and link selection, written only by the control plane.
+///
+/// The attack and release coefficients are not here: they ramp, so they are state
+/// ([`GateState::rates`], #1336 D2).
 #[derive(Clone, Copy, Debug)]
 pub struct GateCoef<L: Lane> {
-    /// Attack coefficient.
-    pub attack: L,
-    /// Release coefficient.
-    pub release: L,
     /// Rounded hold length in samples.
     pub hold_samples: L,
     /// `1.0` for bypass, otherwise `+0.0`.
@@ -77,6 +79,9 @@ pub struct GateState<L: Lane> {
     pub hysteresis: HysteresisState<L>,
     /// Threshold, ratio, range and hysteresis ramps.
     pub ramps: [GateRamp<L>; RAMP_COUNT],
+    /// The attack and release one-pole coefficients (#1336 D2): each rests at the design
+    /// `attack_release_coefficient` of its committed time and ramps linearly to a new design.
+    pub rates: [GateRamp<L>; RATE_COUNT],
 }
 
 impl<L: Lane> Default for GateState<L> {
@@ -85,6 +90,7 @@ impl<L: Lane> Default for GateState<L> {
             gain_db: L::zero(),
             hysteresis: HysteresisState::default(),
             ramps: [GateRamp::fixed(L::zero()); RAMP_COUNT],
+            rates: [GateRamp::fixed(L::zero()); RATE_COUNT],
         }
     }
 }
@@ -101,15 +107,11 @@ impl<L: Lane> GateCoef<L> {
     /// Stores only: no arithmetic.
     #[must_use]
     pub fn lanes(&self) -> [GateCoef<f32>; MAX_WIDTH] {
-        let attack = lane_words(self.attack);
-        let release = lane_words(self.release);
         let hold_samples = lane_words(self.hold_samples);
         let bypass = lane_words(self.bypass);
         let link_max = lane_words(self.link_max);
         let link_avg = lane_words(self.link_avg);
         core::array::from_fn(|lane| GateCoef {
-            attack: attack[lane],
-            release: release[lane],
             hold_samples: hold_samples[lane],
             bypass: bypass[lane],
             link_max: link_max[lane],
@@ -126,26 +128,32 @@ impl<L: Lane> GateState<L> {
         let gain_db = lane_words(self.gain_db);
         let open = lane_words(self.hysteresis.open);
         let hold = lane_words(self.hysteresis.hold);
-        let ramps = self.ramps.map(|ramp| {
+        let split = |ramp: GateRamp<L>| {
             [
                 lane_words(ramp.current),
                 lane_words(ramp.target),
                 lane_words(ramp.step),
                 lane_words(ramp.remaining),
             ]
-        });
+        };
+        let ramps = self.ramps.map(split);
+        let rates = self.rates.map(split);
+        let pick = |lane: usize| {
+            move |[current, target, step, remaining]: [[f32; MAX_WIDTH]; 4]| GateRamp {
+                current: current[lane],
+                target: target[lane],
+                step: step[lane],
+                remaining: remaining[lane],
+            }
+        };
         core::array::from_fn(|lane| GateState {
             gain_db: gain_db[lane],
             hysteresis: HysteresisState {
                 open: open[lane],
                 hold: hold[lane],
             },
-            ramps: ramps.map(|[current, target, step, remaining]| GateRamp {
-                current: current[lane],
-                target: target[lane],
-                step: step[lane],
-                remaining: remaining[lane],
-            }),
+            ramps: ramps.map(pick(lane)),
+            rates: rates.map(pick(lane)),
         })
     }
 }
@@ -157,11 +165,13 @@ impl<L: Lane> GateState<L> {
 /// # The words, and why the list is complete
 ///
 /// A channel's state is [`GateState`]: `gain_db`, the hysteresis `open` flag and `hold` countdown,
-/// and the four ramps' `current`, `target`, `step` and `remaining`. [`GateCoef`] is written only by
+/// and the four parameter ramps' and two rate ramps' `current`, `target`, `step` and `remaining`.
+/// [`GateCoef`] is written only by
 /// the control plane (preparation, restore, D7 recovery), never by [`gate_block`]. Nothing else
 /// crosses a block: the gate keeps no audio history.
 ///
-/// * **Every ramp settled** (`remaining == 0`). A settled ramp is an exact no-op under both
+/// * **Every ramp settled** (`remaining == 0`), the attack and release rate ramps included
+///   (#1336): a rate ramp in flight moves its coefficient word every frame. A settled ramp is an exact no-op under both
 ///   `RAMPING` variants (`moving` and `final_sample` are false, so every field is selected back),
 ///   so its four fields are pinned and the frame map does not depend on where `run_block` splits
 ///   the block. A ramp in flight refuses the lane.
@@ -193,7 +203,12 @@ impl<L: Lane> GateState<L> {
 #[inline(never)]
 #[must_use]
 pub fn channel_at_rest(coef: &GateCoef<f32>, state: &GateState<f32>) -> bool {
-    if state.ramps.iter().any(|ramp| ramp.remaining != 0.0) {
+    if state
+        .ramps
+        .iter()
+        .chain(&state.rates)
+        .any(|ramp| ramp.remaining != 0.0)
+    {
         return false;
     }
     let mut next = *state;
@@ -301,7 +316,9 @@ fn channel_step<L: Lane, const RAMPING: bool>(
     let one = L::splat(1.0);
 
     if RAMPING {
-        for ramp in &mut state.ramps {
+        // The parameter ramps and the attack/release coefficient ramps (#1336 D2) advance by one
+        // law. A settled ramp's update selects every field back, an exact no-op.
+        for ramp in state.ramps.iter_mut().chain(state.rates.iter_mut()) {
             let moving = ramp.remaining.gt(zero);
             let final_sample = ramp.remaining.eq(one);
             // Issue #1409: the step added, held inside `[min(current, target), max(current,
@@ -365,7 +382,11 @@ fn channel_step<L: Lane, const RAMPING: bool>(
         .max(range.neg())
         .min(zero);
     let target = L::select(state.hysteresis.open.gt(zero), zero, curve);
-    let rate = L::select(target.gt(state.gain_db), coef.attack, coef.release);
+    let rate = L::select(
+        target.gt(state.gain_db),
+        state.rates[0].current,
+        state.rates[1].current,
+    );
     let gain_db = flush(rate.fma(target.sub(state.gain_db), state.gain_db));
     state.gain_db = gain_db;
     let gain = fast_gain_from_db(gain_db);
