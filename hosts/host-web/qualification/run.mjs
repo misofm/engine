@@ -12,6 +12,7 @@ import {
   classifyStallSignature, qualificationConstants, requestFailure, unsubscribeFailures,
 } from "./qualification.js";
 import { ARTIFACT_NAMES, exactArtifacts, startQualificationServer } from "./server.mjs";
+import { PROTOCOL_BLOCKS, protocolCalls } from "./protocol-calls.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const HOST_WEB = path.dirname(HERE);
@@ -68,6 +69,10 @@ const MUTATIONS = [
   // Issue #1533: a Playwright page error, a page-side unhandled rejection, and a result that
   // `qualifyBrowser` never gave its page-error lists.
   "page-errors", "page-errors-window", "page-errors-missing",
+  // Issue #1571b: a browser answer that is not the headless engine's, a reliable event lost or out
+  // of order, a lossy event that is not the headless engine's event of its block, and a refusal that
+  // is not the core's.
+  "sdk-protocol-answers", "sdk-protocol-reliable", "sdk-protocol-lossy", "sdk-protocol-refusal",
 ];
 
 // The total time the page may take, from the first evaluate to the result, clicks included. A page
@@ -97,6 +102,7 @@ const SDK_RENDER_ALLOCATION_WORKLOADS = Object.freeze([
   "live-bypass:authored-none:live-ins-mid-bypass",
   "live-bypass:authored-desk-hi:live-desk-hi-lift",
   "live-bypass:authored-ins-mid:live-ins-mid-lift",
+  "protocol-messages",
 ]);
 
 function option(name) {
@@ -189,6 +195,43 @@ async function buildSdkBundle(sdkRoot) {
   } catch (error) {
     await rm(bundle, { recursive: true, force: true });
     throw error;
+  }
+}
+
+/**
+ * The headless SDK module of the SDK this run qualifies, chosen as `buildSdkBundle` chooses the
+ * browser bundle's: the built distribution when the selected SDK has one, otherwise the source.
+ */
+async function sdkHeadlessEntry(sdkRoot) {
+  const distribution = path.join(sdkRoot, "dist");
+  const useDistribution = await readdir(distribution).then((entries) => entries.includes("core"), () => false);
+  return pathToFileURL(useDistribution
+    ? path.join(distribution, "headless", "index.js")
+    : path.resolve(HERE, "../../../sdk/src/headless/index.ts")).href;
+}
+
+/**
+ * Issue #1571 gates 2, 3 and 5, the headless half: `protocol-calls.mjs`'s sequence on the headless
+ * SDK engine, booted from the document the page's browser half booted and the served module. The
+ * engine reads its events after each rendered block.
+ */
+async function headlessProtocolReference(headlessEntry, artifacts, protocol) {
+  const { MisoEngineAsset, createOfflineEngine } = await import(headlessEntry);
+  const asset = await MisoEngineAsset.load(await readFile(path.join(path.resolve(artifacts), WASM_ARTIFACT)));
+  const engine = await createOfflineEngine(protocol.document, { asset, sourceRingFrames: protocol.sourceRingFrames });
+  try {
+    return await protocolCalls(
+      engine,
+      async () => {
+        const controls = engine.liveControls();
+        return controls.submit(controls.edit.track("track").faderDb(-3));
+      },
+      async () => {
+        for (let block = 0; block < PROTOCOL_BLOCKS; block += 1) engine.render();
+      },
+    );
+  } finally {
+    engine.dispose();
   }
 }
 
@@ -526,9 +569,70 @@ function validateSdkRenderAllocations(browserName, response) {
       .map((row) => `${row?.workload}=${row?.count}`).join(" ")}`);
 }
 
+const PROTOCOL_RELIABLE_KINDS = new Set(["sessionCommitted", "transportState", "observationEnded"]);
+const PROTOCOL_LOSSY_KINDS = new Set(["meterBatch", "counterSnapshot", "diagnostic"]);
+
+/**
+ * Issue #1571 gates 2, 3 and 5 in the browser. The page made the same calls, in the same order, on
+ * the browser engine and on a headless engine of the same session and asset. Gate 2: every answer
+ * (capabilities, the applied telemetry, the transport before and after `setTransport`, the counter
+ * after one fader edit and the retained diagnostics) is equal. Gate 5: `diagnostics({ limit: 0 })`
+ * is the core's refusal, the same on both. Gate 3: the reliable events are the headless engine's,
+ * in its order (the edit's `sessionCommitted`, then `transportState` playing). The browser reads its
+ * events once per message and its lossy lane holds one event (root's tranche-b note), so a block's
+ * lossy telemetry may be replaced before it is read: each lossy event that arrived must be the
+ * headless engine's event of the same block, in the headless order, and none is required.
+ */
+function validateSdkProtocol(browserName, protocol) {
+  const json = (value) => JSON.stringify(value);
+  const browser = protocol?.browser;
+  const headless = protocol?.headless;
+  gate(browserName, "sdk-protocol-answers", protocol?.blocks === PROTOCOL_BLOCKS, "the page rendered another block count");
+  gate(browserName, "sdk-protocol-answers", browser?.answers !== undefined && headless?.answers !== undefined
+    && json(browser.answers) === json(headless.answers)
+    && json(browser.after) === json(headless.after)
+    && browser.editRevision === headless.editRevision
+    && browser.answers.playing?.state === "playing"
+    && browser.answers.stopped?.state === "stopped"
+    && json(browser.answers.counters?.values?.map((row) => row.id)) === json(["liveValuesSuperseded"])
+    && json(browser.answers.telemetry?.counterIds) === json(["liveValuesSuperseded"]),
+  `the browser's answers are not the headless engine's: ${json({ browser: browser?.answers, headless: headless?.answers })}`);
+  const refusal = browser?.answers?.refusal;
+  gate(browserName, "sdk-protocol-refusal", refusal?.name === "MisoControlRefusal"
+    && typeof refusal.status === "string" && typeof refusal.code === "string"
+    && json(refusal) === json(headless?.answers?.refusal),
+  `diagnostics({ limit: 0 }) is not the core's refusal on both engines: ${json({ browser: refusal, headless: headless?.answers?.refusal })}`);
+  const events = Array.isArray(browser.events) ? browser.events : [];
+  const reference = Array.isArray(headless.events) ? headless.events : [];
+  // The request that caused an event is an endpoint's own ID: the browser reads the committed
+  // revision with a probe before `TRANSPORT_SET`, which draws one ID the headless engine does not.
+  const reliable = (rows) => rows.filter((event) => PROTOCOL_RELIABLE_KINDS.has(event.kind))
+    .map(({ originRequestId: _origin, ...event }) => event);
+  gate(browserName, "sdk-protocol-reliable", events.every((event) =>
+    PROTOCOL_RELIABLE_KINDS.has(event.kind) || PROTOCOL_LOSSY_KINDS.has(event.kind))
+    && json(reliable(events)) === json(reliable(reference))
+    && json(reliable(events).map((event) => event.kind)) === json(["sessionCommitted", "transportState"])
+    && reliable(events)[0].revision === browser.editRevision
+    && reliable(events)[1].state === "playing",
+  `the reliable events are not the headless engine's, in order: ${json({ browser: reliable(events), headless: reliable(reference) })}`);
+  // Each lossy event that arrived is one of the headless engine's, and they keep its order.
+  let at = 0;
+  const lossy = events.filter((event) => PROTOCOL_LOSSY_KINDS.has(event.kind));
+  const ordered = lossy.every((event) => {
+    while (at < reference.length && json(reference[at]) !== json(event)) at += 1;
+    if (at === reference.length) return false;
+    at += 1;
+    return true;
+  });
+  gate(browserName, "sdk-protocol-lossy", ordered
+    && reference.filter((event) => PROTOCOL_LOSSY_KINDS.has(event.kind)).length === 3 * protocol.blocks,
+  `a lossy event is not the headless engine's event of its block, in order: ${json({ browser: lossy, headless: reference })}`);
+}
+
 function validateSdkResponse(browserName, response) {
   validateSdkRenderAllocations(browserName, response);
   validateSdkLiveBypass(browserName, response?.liveBypass);
+  validateSdkProtocol(browserName, response?.protocol);
   gate(browserName, "sdk-response", response?.capabilities?.some(
     (row) => row.owner === "effect" && row.target === "miso.parametric-eq",
   ) === true, "SDK did not expose the generated EQ capability");
@@ -1019,6 +1123,13 @@ function mutate(result, mutation) {
     copy.sdkResponse.liveBypass.blocks.consoleOnLive = copy.sdkResponse.liveBypass.blocks.consoleOff;
   }
   if (mutation === "sdk-live-bypass-address") copy.sdkResponse.liveBypass.consoleAddress = [3, 0];
+  if (mutation === "sdk-protocol-answers") copy.sdkResponse.protocol.browser.answers.capabilities.maximumFrameBytes = "1";
+  if (mutation === "sdk-protocol-reliable") copy.sdkResponse.protocol.browser.events.reverse();
+  if (mutation === "sdk-protocol-lossy") {
+    // A lossy event of no block the headless engine rendered.
+    copy.sdkResponse.protocol.browser.events.push({ kind: "counterSnapshot", observedSample: "1", values: [] });
+  }
+  if (mutation === "sdk-protocol-refusal") copy.sdkResponse.protocol.browser.answers.refusal.code = "usage";
   if (mutation === "render-allocations") copy.renderAllocations[0].count = 1;
   if (mutation === "staging-reads") copy.stagingReads.oneShot.spectrumReadResult = 6;
   const wait = copy.sdkResponse?.observations?.wait;
@@ -1247,7 +1358,7 @@ function normalizedRow(browserName, browserVersion, outcome) {
   };
 }
 
-async function qualifyBrowser(browserName, engine, origin, proveMutations, sdkEnabled) {
+async function qualifyBrowser(browserName, engine, origin, proveMutations, sdkEnabled, protocolReference) {
   const launchOptions = { headless: true };
   if (browserName === "chromium") {
     launchOptions.channel = "chromium";
@@ -1377,6 +1488,10 @@ async function qualifyBrowser(browserName, engine, origin, proveMutations, sdkEn
     if (errorRead.kind === "error") {
       throw new Error(`${browserName}: page-errors: the error read failed: ${errorRead.error?.message ?? String(errorRead.error)}; page diagnostics: ${diagnostics.join("; ")}`);
     }
+    if (result.sdkResponse?.protocol !== undefined) {
+      // #1571: the headless half of the protocol row runs here, in Node, on the page's document.
+      result.sdkResponse.protocol.headless = await protocolReference(result.sdkResponse.protocol);
+    }
     const outcome = validate(browserName, result);
     if (proveMutations) mutationProofs(browserName, result);
     if (Array.isArray(result.renderAllocations)) {
@@ -1402,6 +1517,13 @@ async function qualifyBrowser(browserName, engine, origin, proveMutations, sdkEn
       // Issue #1476 D4: the per-SDK-instance counts the sdk-render-allocations gate just held to zero.
       process.stdout.write(`${browserName}: sdk-render-allocations: ${result.sdkResponse.renderAllocations
         .map((row) => `${row.workload}=${row.count}`).join(" ")}\n`);
+    }
+    const protocol = result.sdkResponse?.protocol;
+    if (protocol?.browser !== undefined) {
+      // #1571b: what the sdk-protocol gates just held, with the lossy events the browser received
+      // (any number may be replaced before they are read, and that fails nothing).
+      const kinds = (events) => events.map((event) => event.kind).join(",");
+      process.stdout.write(`${browserName}: sdk-protocol: browser events ${kinds(protocol.browser.events)}; headless events ${kinds(protocol.headless.events)}\n`);
     }
     process.stdout.write(`${browserName}: all qualification gates passed (${browser.version()})\n`);
     const row = normalizedRow(browserName, browser.version(), outcome);
@@ -1463,6 +1585,7 @@ async function main() {
   // transaction through it (#1563B). `--sdk-root` selects which SDK it comes from, and whether the
   // SDK rows run; without it the repository's own `sdk/` (with its `node_modules`) is bundled.
   const sdkBundle = await buildSdkBundle(path.resolve(sdkRoot ?? path.join(HERE, "../../../sdk")));
+  const headlessEntry = await sdkHeadlessEntry(path.resolve(sdkRoot ?? path.join(HERE, "../../../sdk")));
 
   if (proveMutations) {
     const served = await artifactSetProofs(artifacts);
@@ -1485,7 +1608,8 @@ async function main() {
   try {
     const rows = [];
     for (const browserName of browserNames) {
-      const row = await qualifyBrowser(browserName, ENGINES[browserName], server.origin, proveMutations, sdkRoot !== null);
+      const row = await qualifyBrowser(browserName, ENGINES[browserName], server.origin, proveMutations, sdkRoot !== null,
+        (protocol) => headlessProtocolReference(headlessEntry, artifacts, protocol));
       rows.push(row);
       if (checked !== null) validateCheckedRow(browserName, row, checked);
     }
