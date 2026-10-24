@@ -324,7 +324,7 @@ struct Invariants<L: Lane> {
 
 impl<L: Lane> Invariants<L> {
     #[inline(always)]
-    fn new(link: LinkMode, bypass: bool) -> Self {
+    fn new(links: &Links<L>, bypass: bool) -> Self {
         let zero = L::zero();
         let all = zero.eq(zero);
         let none = L::mask_not(all);
@@ -335,17 +335,51 @@ impl<L: Lane> Invariants<L> {
             level_min: L::splat(LEVEL_MIN_DB),
             level_max: L::splat(LEVEL_MAX_DB),
             reduction_min: L::splat(GAIN_REDUCTION_MIN_DB),
-            linked: if matches!(link, LinkMode::DualMono) {
-                none
-            } else {
-                all
-            },
-            averaged: if matches!(link, LinkMode::Average) {
-                all
-            } else {
-                none
-            },
+            linked: links.linked,
+            averaged: links.averaged,
             bypassed: if bypass { all } else { none },
+        }
+    }
+}
+
+/// Every lane's detector link law (issue #1368 D3): built once, from each lane's own prepared
+/// mode, when the instance or bank is bound, and read by every block.
+///
+/// `linked` is set on a lane whose mode is Maximum or Average and `averaged` on an Average lane,
+/// so `link_frame`'s two bitwise selects give each lane its own mode's words whatever its
+/// bank-mates' modes are. `dual_mono` is the one per-bank reduction (D4): every lane is DualMono,
+/// so the settled bodies take the `abs`-only detector arm (#984), whose bits are `link_frame`'s
+/// under an all-clear `linked` mask. A bank whose lanes share one mode has exactly the masks a
+/// single-mode instance had, so it renders the same bits.
+#[derive(Clone, Copy)]
+pub(crate) struct Links<L: Lane> {
+    linked: L::Mask,
+    averaged: L::Mask,
+    dual_mono: bool,
+}
+
+impl<L: Lane> Links<L> {
+    /// One mode on every lane.
+    pub(crate) fn uniform(link: LinkMode) -> Self {
+        Self::per_lane(&[link; MAX_WIDTH])
+    }
+
+    /// `links[lane]` is lane `lane`'s mode; only `[..L::WIDTH]` is read. Allocation-free and
+    /// panic-free, so a render-time lane swap may rebuild it (issue #1747).
+    pub(crate) fn per_lane(links: &[LinkMode; MAX_WIDTH]) -> Self {
+        let mut linked = [0.0_f32; MAX_WIDTH];
+        let mut averaged = [0.0_f32; MAX_WIDTH];
+        let mut dual_mono = true;
+        for (lane, link) in links.iter().enumerate().take(L::WIDTH) {
+            linked[lane] = f32::from(u8::from(!matches!(link, LinkMode::DualMono)));
+            averaged[lane] = f32::from(u8::from(matches!(link, LinkMode::Average)));
+            dual_mono &= matches!(link, LinkMode::DualMono);
+        }
+        let zero = L::zero();
+        Self {
+            linked: L::load(&linked).gt(zero),
+            averaged: L::load(&averaged).gt(zero),
+            dual_mono,
         }
     }
 }
@@ -495,10 +529,10 @@ fn every_lane<L: Lane>(mask: L::Mask) -> bool {
 /// The settled body's detector for `Detector::Main`: `link_frame`, or on a DualMono instance its
 /// magnitudes alone (issue #984).
 ///
-/// Under DualMono, `Invariants::new` makes `linked` the all-zero mask and `select` is bitwise, so
-/// `link_frame` returns `magnitude`, which is `abs` of the same main word: the arm's bits are
-/// `link_frame`'s for every input, NaN included. The link mode is the prepared, whole-instance
-/// `link_mode`, never data. The arm lives only in the two-pass body's first pass: in a
+/// When every lane is DualMono, [`Links`] makes `linked` the all-zero mask and `select` is
+/// bitwise, so `link_frame` returns `magnitude`, which is `abs` of the same main word: the arm's
+/// bits are `link_frame`'s for every input, NaN included. The arm is chosen from the lanes'
+/// prepared modes (`Links::dual_mono`), never from data; a mixed bank takes `link_frame`. The arm lives only in the two-pass body's first pass: in a
 /// loop that also carries the recurrence it made V8 spill the recurrence and run slower.
 #[inline(always)]
 fn settled_detect<L: Lane, const DUAL_MONO: bool>(
@@ -540,7 +574,7 @@ pub(crate) fn process_block<L: Lane>(
     right: &mut [f32],
     detector: Detector<'_>,
     frames: usize,
-    link: LinkMode,
+    links: &Links<L>,
     bypass: bool,
     sample_rate: u32,
     channels: (&mut Channel<L>, &mut Channel<L>),
@@ -559,7 +593,7 @@ pub(crate) fn process_block<L: Lane>(
                     left,
                     right,
                     ramping,
-                    link,
+                    links,
                     bypass,
                     channel_left,
                     channel_right,
@@ -569,7 +603,7 @@ pub(crate) fn process_block<L: Lane>(
                     left,
                     right,
                     ramping,
-                    link,
+                    links,
                     bypass,
                     channel_left,
                     channel_right,
@@ -582,7 +616,7 @@ pub(crate) fn process_block<L: Lane>(
                 detector,
                 0,
                 ramping,
-                link,
+                links,
                 bypass,
                 sample_rate,
                 channel_left,
@@ -597,7 +631,7 @@ pub(crate) fn process_block<L: Lane>(
                 right,
                 ramping,
                 frames,
-                link,
+                links,
                 bypass,
                 channel_left,
                 channel_right,
@@ -610,7 +644,7 @@ pub(crate) fn process_block<L: Lane>(
                 detector,
                 ramping,
                 frames,
-                link,
+                links,
                 bypass,
                 channel_left,
                 channel_right,
@@ -649,16 +683,16 @@ fn settled_main<L: Lane>(
     right: &mut [f32],
     start: usize,
     end: usize,
-    link: LinkMode,
+    links: &Links<L>,
     bypass: bool,
     channel_left: &mut Channel<L>,
     channel_right: &mut Channel<L>,
 ) {
     let width = L::WIDTH;
-    let invariants = Invariants::<L>::new(link, bypass);
+    let invariants = Invariants::<L>::new(links, bypass);
     let coef_left = Coef::load(&channel_left.words);
     let coef_right = Coef::load(&channel_right.words);
-    let dual_mono = matches!(link, LinkMode::DualMono);
+    let dual_mono = links.dual_mono;
     let wet = !bypass
         && every_lane::<L>(coef_left.wet_identity)
         && every_lane::<L>(coef_right.wet_identity);
@@ -770,13 +804,13 @@ fn settled_sidechain<L: Lane>(
     detector: Detector<'_>,
     start: usize,
     end: usize,
-    link: LinkMode,
+    links: &Links<L>,
     bypass: bool,
     channel_left: &mut Channel<L>,
     channel_right: &mut Channel<L>,
 ) {
     let width = L::WIDTH;
-    let invariants = Invariants::<L>::new(link, bypass);
+    let invariants = Invariants::<L>::new(links, bypass);
     let coef_left = Coef::load(&channel_left.words);
     let coef_right = Coef::load(&channel_right.words);
     let settled = start * width..end * width;
@@ -794,7 +828,7 @@ fn settled_sidechain<L: Lane>(
         channel_left.gain_reduction_db,
         channel_right.gain_reduction_db,
     );
-    if matches!(link, LinkMode::DualMono) {
+    if links.dual_mono {
         settled_frames::<L, true, false>(left, right, source, coefs, &mut gains, &invariants);
     } else {
         settled_frames::<L, false, false>(left, right, source, coefs, &mut gains, &invariants);
@@ -920,14 +954,14 @@ fn frames_loop<L: Lane, const RAMPING: bool>(
     detector: Detector<'_>,
     start: usize,
     end: usize,
-    link: LinkMode,
+    links: &Links<L>,
     bypass: bool,
     sample_rate: u32,
     channel_left: &mut Channel<L>,
     channel_right: &mut Channel<L>,
 ) {
     let width = L::WIDTH;
-    let invariants = Invariants::<L>::new(link, bypass);
+    let invariants = Invariants::<L>::new(links, bypass);
     let mut coef_left = Coef::load(&channel_left.words);
     let mut coef_right = Coef::load(&channel_right.words);
     for frame in start..end {
@@ -1221,16 +1255,16 @@ fn ramping_main<L: Lane>(
     left: &mut [f32],
     right: &mut [f32],
     end: usize,
-    link: LinkMode,
+    links: &Links<L>,
     bypass: bool,
     channel_left: &mut Channel<L>,
     channel_right: &mut Channel<L>,
 ) {
     let width = L::WIDTH;
-    let invariants = Invariants::<L>::new(link, bypass);
+    let invariants = Invariants::<L>::new(links, bypass);
     let mut ramps_left = ChannelRamps::gather(channel_left);
     let mut ramps_right = ChannelRamps::gather(channel_right);
-    let dual_mono = matches!(link, LinkMode::DualMono);
+    let dual_mono = links.dual_mono;
     let wet = !bypass && ramps_left.wet() && ramps_right.wet();
     let left = &mut left[..end * width];
     let right = &mut right[..end * width];
@@ -1280,12 +1314,12 @@ fn ramping_main_scalar<L: Lane>(
     left: &mut [f32],
     right: &mut [f32],
     end: usize,
-    link: LinkMode,
+    links: &Links<L>,
     bypass: bool,
     channel_left: &mut Channel<L>,
     channel_right: &mut Channel<L>,
 ) {
-    ramping_main::<L>(left, right, end, link, bypass, channel_left, channel_right);
+    ramping_main::<L>(left, right, end, links, bypass, channel_left, channel_right);
 }
 
 /// The ramping prefix's two passes over chunks of [`SETTLED_CHUNK`] frames, both channels. The
@@ -1354,14 +1388,14 @@ fn ramping_frames<L: Lane, const DUAL_MONO: bool, const WET: bool>(
 fn ramping_main_mono<L: Lane>(
     left: &mut [f32],
     end: usize,
-    link: LinkMode,
+    links: &Links<L>,
     bypass: bool,
     channel_left: &mut Channel<L>,
 ) {
     let width = L::WIDTH;
-    let invariants = Invariants::<L>::new(link, bypass);
+    let invariants = Invariants::<L>::new(links, bypass);
     let mut ramps = ChannelRamps::gather(channel_left);
-    let dual_mono = matches!(link, LinkMode::DualMono);
+    let dual_mono = links.dual_mono;
     let wet = !bypass && ramps.wet();
     let left = &mut left[..end * width];
     let mut gain = channel_left.gain_reduction_db;
@@ -1433,7 +1467,7 @@ pub(crate) fn process_block_mono<L: Lane>(
     left: &mut [f32],
     detector: Detector<'_>,
     frames: usize,
-    link: LinkMode,
+    links: &Links<L>,
     bypass: bool,
     sample_rate: u32,
     channel_left: &mut Channel<L>,
@@ -1443,14 +1477,14 @@ pub(crate) fn process_block_mono<L: Lane>(
     let ramping = remaining.min(frames);
     if ramping > 0 {
         if let Detector::Main = detector {
-            ramping_main_mono::<L>(left, ramping, link, bypass, channel_left);
+            ramping_main_mono::<L>(left, ramping, links, bypass, channel_left);
         } else {
             frames_loop_mono::<L, true>(
                 left,
                 detector,
                 0,
                 ramping,
-                link,
+                links,
                 bypass,
                 sample_rate,
                 channel_left,
@@ -1460,14 +1494,14 @@ pub(crate) fn process_block_mono<L: Lane>(
     if ramping < frames {
         match detector {
             Detector::Main => {
-                settled_main_mono::<L>(left, ramping, frames, link, bypass, channel_left);
+                settled_main_mono::<L>(left, ramping, frames, links, bypass, channel_left);
             }
             Detector::Silent | Detector::Sidechain(..) => frames_loop_mono::<L, false>(
                 left,
                 detector,
                 ramping,
                 frames,
-                link,
+                links,
                 bypass,
                 sample_rate,
                 channel_left,
@@ -1492,14 +1526,14 @@ fn settled_main_mono<L: Lane>(
     left: &mut [f32],
     start: usize,
     end: usize,
-    link: LinkMode,
+    links: &Links<L>,
     bypass: bool,
     channel_left: &mut Channel<L>,
 ) {
     let width = L::WIDTH;
-    let invariants = Invariants::<L>::new(link, bypass);
+    let invariants = Invariants::<L>::new(links, bypass);
     let coef = Coef::load(&channel_left.words);
-    let dual_mono = matches!(link, LinkMode::DualMono);
+    let dual_mono = links.dual_mono;
     let wet = !bypass && every_lane::<L>(coef.wet_identity);
     let left = &mut left[start * width..end * width];
     let mut gain = channel_left.gain_reduction_db;
@@ -1560,13 +1594,13 @@ fn frames_loop_mono<L: Lane, const RAMPING: bool>(
     detector: Detector<'_>,
     start: usize,
     end: usize,
-    link: LinkMode,
+    links: &Links<L>,
     bypass: bool,
     sample_rate: u32,
     channel_left: &mut Channel<L>,
 ) {
     let width = L::WIDTH;
-    let invariants = Invariants::<L>::new(link, bypass);
+    let invariants = Invariants::<L>::new(links, bypass);
     let mut coef_left = Coef::load(&channel_left.words);
     for frame in start..end {
         if RAMPING {
@@ -1824,7 +1858,7 @@ mod settled_body_tests {
     //! cannot hide a NaN in an accepted block.
 
     use super::{
-        Channel, Detector, RAMPING_DUAL_BLOCKS, RAMPING_MONO_BLOCKS, RAMPING_WET_BLOCKS,
+        Channel, Detector, Links, RAMPING_DUAL_BLOCKS, RAMPING_MONO_BLOCKS, RAMPING_WET_BLOCKS,
         SETTLED_WET_BLOCKS, finish_channel, process_block, process_block_mono,
     };
     use crate::design::{MAX_WIDTH, PARAMETER_COUNT};
@@ -1842,7 +1876,7 @@ mod settled_body_tests {
 
     /// One-frame scheduling reference: settled ramps are holds, so advance them unconditionally.
     mod reference {
-        use super::super::{Channel, Coef, Detector, Invariants, link_frame, one_frame};
+        use super::super::{Channel, Coef, Detector, Invariants, Links, link_frame, one_frame};
         use effect_contract::LinkMode;
         use lane::Lane;
 
@@ -1859,7 +1893,7 @@ mod settled_body_tests {
         ) {
             let (channel_left, channel_right) = channels;
             let width = L::WIDTH;
-            let invariants = Invariants::<L>::new(link, bypass);
+            let invariants = Invariants::<L>::new(&Links::uniform(link), bypass);
             for frame in 0..frames {
                 channel_left.advance_ramps(sample_rate);
                 channel_right.advance_ramps(sample_rate);
@@ -1900,7 +1934,7 @@ mod settled_body_tests {
             channel_left: &mut Channel<L>,
         ) {
             let width = L::WIDTH;
-            let invariants = Invariants::<L>::new(link, bypass);
+            let invariants = Invariants::<L>::new(&Links::uniform(link), bypass);
             for frame in 0..frames {
                 channel_left.advance_ramps(sample_rate);
                 let coef_left = Coef::load(&channel_left.words);
@@ -2450,7 +2484,7 @@ mod settled_body_tests {
                 &mut candidate_right,
                 detector,
                 frames,
-                link,
+                &Links::uniform(link),
                 bypass,
                 self.sample_rate,
                 (&mut self.candidate.0, &mut self.candidate.1),
@@ -2621,7 +2655,7 @@ mod settled_body_tests {
                 &mut candidate,
                 detector,
                 frames,
-                link,
+                &Links::uniform(link),
                 bypass,
                 self.sample_rate,
                 &mut self.candidate,
@@ -2863,7 +2897,7 @@ mod settled_body_tests {
             &mut right,
             Detector::Main,
             frames,
-            LinkMode::DualMono,
+            &Links::uniform(LinkMode::DualMono),
             bypass,
             SAMPLE_RATE,
             (&mut channels.0, &mut channels.1),

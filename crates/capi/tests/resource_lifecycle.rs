@@ -573,6 +573,10 @@ struct HostHalf {
     effects: Box<[host_core::EffectControlProducer]>,
     /// One producer per route into a submix, kept as capi keeps them (#1557 D4).
     routes: Box<[host_core::RouteControlProducer]>,
+    /// One meter consumer per strip, kept as capi keeps them (#1581 D6). builtins charges the
+    /// vector, its IDs and the rings in `builtin_retained_payload_bytes`, so the oracle counts
+    /// them with the plan.
+    meters: Box<[host_core::MeterConsumer]>,
 }
 
 fn host_half(document: &str, compile_limits: &CompileLimits) -> HostHalf {
@@ -621,6 +625,7 @@ fn host_half_counting(
         strip_controls,
         effect_controls,
         route_controls,
+        meters,
         ..
     } = handles;
     HostHalf {
@@ -629,6 +634,7 @@ fn host_half_counting(
         strips: strip_controls.into_boxed_slice(),
         effects: effect_controls.into_boxed_slice(),
         routes: route_controls.into_boxed_slice(),
+        meters: meters.into_boxed_slice(),
     }
 }
 
@@ -788,6 +794,7 @@ fn observe_compile(document: &str, compile_limits: &CompileLimits) -> CompileObs
         strips,
         effects,
         routes,
+        meters,
     } = host;
     let (strip_count, strip_id_bytes) = store
         .compiled()
@@ -823,7 +830,8 @@ fn observe_compile(document: &str, compile_limits: &CompileLimits) -> CompileObs
         strips: freed_by_drop(strips),
         sources: freed_by_drop(sources),
         catalog: freed_by_drop(control_catalog),
-        plan: freed_by_drop(plan),
+        // The meter consumers' vector, IDs and rings are builtins' rows, as the plan's are.
+        plan: freed_by_drop((meters, plan)),
         store: freed_by_drop(store),
         inventory: freed_by_drop(inventory),
     };

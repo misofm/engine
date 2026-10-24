@@ -67,6 +67,7 @@ use crate::spectrum::{
     SpectrumCaptureRequest, SpectrumCaptureResources, SpectrumPrepareError,
     prepare_capture_collection, spectrum_capture_collection_resources,
 };
+use crate::spectrum_service::{PreparedSpectrumCaptures, SpectrumPreparation};
 
 /// The jump lengths a plan's cell holds for `model` (#1639 D1): its `control_smoothing` keys in
 /// samples, the values of [`LiveRamps::for_session`]. Preparation seeds every plan's cell with
@@ -80,17 +81,6 @@ pub fn session_jump_lengths(model: &SessionModel) -> GraphJumpLengths {
         mute_samples: ramps.mute_samples,
         pan_samples: ramps.pan_samples,
     }
-}
-
-#[derive(Clone, Copy)]
-enum SpectrumPreparationRequest<'a> {
-    Single(&'a SpectrumCaptureRequest),
-    Collection(&'a SpectrumCaptureCollectionRequest),
-}
-
-enum PreparedSpectrumCapture {
-    Single(SpectrumCapture),
-    Collection(SpectrumCaptureCollection),
 }
 
 /// The longest producer-thread stall the default source ring hides without an underrun.
@@ -871,6 +861,13 @@ pub struct PlanStateInventory {
     /// present in both, with at least one owner that does not carry. Sorted by strip ID. Empty
     /// for a plan prepared without a predecessor.
     restarted: Box<[Box<str>]>,
+    /// The strips whose fade-in this plan's table holds, sorted by strip ID (issue #1392 D1):
+    /// "this plan armed the strip", not "the fade still waits", which only render knows.
+    fade_arms: Box<[FadeArmInventoryRow]>,
+    /// Which entries of this plan's fade table render has fired (issue #1392, root ruling of
+    /// attempt 2): a successor drops the row of a fired entry, so rows never accumulate and a
+    /// fired fade is neither carried nor re-armed.
+    fade_watch: graph::GraphFadeArmWatch,
     /// The input arrival this plan renders at every node where it is nonzero (#1285 D2): the
     /// floored `max` of PDC, in samples, sorted by node ID. A successor is compiled with these as
     /// its input floors, so no surviving node's latency drops across a structural transaction.
@@ -890,6 +887,16 @@ pub struct PlanStateInventory {
     /// first plan allocates it; a successor takes its predecessor's from this row, so every plan of
     /// one session, and every consumer it carries or creates, is fenced by the same object.
     published_generation: PublishedGeneration,
+}
+
+/// One fade-in entry of a prepared plan's table (issue #1392 D1): the strip and the entry's index,
+/// the index a successor's carry pair names.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct FadeArmInventoryRow {
+    /// The strip ID: a track's or a submix's.
+    pub(crate) id: Box<str>,
+    /// The entry's index in the plan's fade table.
+    pub(crate) entry: u32,
 }
 
 /// One strip stage of a prepared plan, owner key `(strip ID, PostFader)` or `(strip ID,
@@ -1161,6 +1168,8 @@ impl PlanStateInventory {
             follow_loses_a_curve: false,
             follow_retarget_ramp: 0,
             restarted: Box::default(),
+            fade_arms: Box::default(),
+            fade_watch: graph::GraphFadeArmWatch::default(),
             input_floors: Box::default(),
             raised_arrivals: Box::default(),
             // #1396 D2: no read-ahead.
@@ -1197,6 +1206,8 @@ impl PlanStateInventory {
             follow_loses_a_curve: false,
             follow_retarget_ramp: 0,
             restarted: Box::default(),
+            fade_arms: Box::default(),
+            fade_watch: graph::GraphFadeArmWatch::default(),
             input_floors: self.input_floors.clone(),
             raised_arrivals: self.raised_arrivals.clone(),
             source_read_offset: 0,
@@ -1280,6 +1291,8 @@ impl PlanStateInventory {
                 .map(graph::GraphLiveRoute::heap_bytes)
                 .sum::<usize>()
             + self.restarted.iter().map(|id| id.len()).sum::<usize>()
+            + self.fade_arms.iter().map(|row| row.id.len()).sum::<usize>()
+            + self.fade_watch.heap_bytes()
             + self
                 .input_floors
                 .iter()
@@ -1299,6 +1312,7 @@ impl PlanStateInventory {
                 + core::mem::size_of_val::<[graph::GraphStripDelayLine]>(&self.strip_delays)
                 + core::mem::size_of_val::<[graph::GraphLiveRoute]>(&self.live_routes)
                 + core::mem::size_of_val::<[Box<str>]>(&self.restarted)
+                + core::mem::size_of_val::<[FadeArmInventoryRow]>(&self.fade_arms)
                 + core::mem::size_of_val::<[(graph::GraphNodeId, u64)]>(&self.input_floors)
                 + core::mem::size_of_val::<[(graph::GraphNodeId, u64)]>(&self.raised_arrivals)
                 // #1642 B16-R2: the session's published generation, charged where it is held
@@ -1691,6 +1705,46 @@ pub fn prepare_host_runtime_with_live_lanes_successor(
     Ok((prepared, handles))
 }
 
+/// Prepare a host with the selected live lanes and the session's spectrum observers (#1593 D3):
+/// the one entry a session's preparer calls for its first plan (`successor` `None`) and for every
+/// successor (`Some`), with or without spectrum.
+///
+/// `spectrum` `None` prepares exactly [`prepare_host_runtime_with_live_lanes`] or
+/// [`prepare_host_runtime_with_live_lanes_successor`] and returns no captures. `Some` prepares
+/// its observers into the same transaction, sized, validated and allocated here, on the control
+/// thread, and returns their captures; a successor's capture whose key `successor` has carries
+/// its observer across the swap (#1395). A target the plan does not have is refused
+/// `host.spectrum.target`. `superseded` is the session's `live_values_superseded` count, as in
+/// [`prepare_host_runtime_with_live_lanes`].
+pub fn prepare_host_runtime_with_live_lanes_and_spectrum(
+    compiled: &CompiledSession,
+    caps: &HostPrepareCaps,
+    live_controls: &HostLiveControlRequest,
+    lanes: HostLiveLanes,
+    spectrum: Option<&SpectrumPreparation>,
+    successor: Option<SuccessorBase<'_>>,
+    superseded: &LiveValuesSuperseded,
+) -> Result<
+    (
+        PreparedHost,
+        HostLiveControlHandles,
+        Option<PreparedSpectrumCaptures>,
+    ),
+    PrepareDiagnostics,
+> {
+    prepare_host_runtime_with_live_controls_policy_and_spectrum(
+        compiled,
+        caps,
+        Some(live_controls),
+        None,
+        Backend::current(),
+        spectrum,
+        successor,
+        lanes,
+        Some(superseded),
+    )
+}
+
 /// Prepare a host with live-control handles and one selected, fixed-size spectrum observer.
 ///
 /// Meter configuration remains part of [`HostLiveControlRequest`], so this entry keeps the
@@ -1712,14 +1766,14 @@ pub fn prepare_host_runtime_with_live_controls_and_spectrum(
         Some(live_controls),
         None,
         Backend::current(),
-        Some(SpectrumPreparationRequest::Single(spectrum)),
+        Some(&SpectrumPreparation::Single(spectrum.clone())),
         None,
         lanes,
         Some(superseded),
     )?;
     let capture = match capture.ok_or_else(|| resource("host.spectrum.capture"))? {
-        PreparedSpectrumCapture::Single(capture) => capture,
-        PreparedSpectrumCapture::Collection(_) => {
+        PreparedSpectrumCaptures::Single(capture) => capture,
+        PreparedSpectrumCaptures::Collection(_) => {
             return Err(resource("host.spectrum.capture"));
         }
     };
@@ -1751,14 +1805,14 @@ pub fn prepare_host_runtime_with_live_controls_and_spectrum_collection(
         Some(live_controls),
         None,
         Backend::current(),
-        Some(SpectrumPreparationRequest::Collection(spectrum)),
+        Some(&SpectrumPreparation::Collection(spectrum.clone())),
         None,
         lanes,
         Some(superseded),
     )?;
     let capture = match capture.ok_or_else(|| resource("host.spectrum.capture"))? {
-        PreparedSpectrumCapture::Collection(capture) => capture,
-        PreparedSpectrumCapture::Single(_) => return Err(resource("host.spectrum.capture")),
+        PreparedSpectrumCaptures::Collection(capture) => capture,
+        PreparedSpectrumCaptures::Single(_) => return Err(resource("host.spectrum.capture")),
     };
     Ok((prepared, handles, capture))
 }
@@ -1785,14 +1839,14 @@ pub fn prepare_host_runtime_with_live_controls_and_spectrum_successor(
         Some(live_controls),
         None,
         Backend::current(),
-        Some(SpectrumPreparationRequest::Single(spectrum)),
+        Some(&SpectrumPreparation::Single(spectrum.clone())),
         Some(base),
         lanes,
         Some(superseded),
     )?;
     let capture = match capture.ok_or_else(|| resource("host.spectrum.capture"))? {
-        PreparedSpectrumCapture::Single(capture) => capture,
-        PreparedSpectrumCapture::Collection(_) => {
+        PreparedSpectrumCaptures::Single(capture) => capture,
+        PreparedSpectrumCaptures::Collection(_) => {
             return Err(resource("host.spectrum.capture"));
         }
     };
@@ -1823,14 +1877,14 @@ pub fn prepare_host_runtime_with_live_controls_and_spectrum_collection_successor
         Some(live_controls),
         None,
         Backend::current(),
-        Some(SpectrumPreparationRequest::Collection(spectrum)),
+        Some(&SpectrumPreparation::Collection(spectrum.clone())),
         Some(base),
         lanes,
         Some(superseded),
     )?;
     let capture = match capture.ok_or_else(|| resource("host.spectrum.capture"))? {
-        PreparedSpectrumCapture::Collection(capture) => capture,
-        PreparedSpectrumCapture::Single(_) => return Err(resource("host.spectrum.capture")),
+        PreparedSpectrumCaptures::Collection(capture) => capture,
+        PreparedSpectrumCaptures::Single(_) => return Err(resource("host.spectrum.capture")),
     };
     Ok((prepared, handles, capture))
 }
@@ -2073,15 +2127,15 @@ pub fn prepare_host_runtime_with_spectrum(
         None,
         None,
         Backend::current(),
-        Some(SpectrumPreparationRequest::Single(request)),
+        Some(&SpectrumPreparation::Single(request.clone())),
         None,
         HostLiveLanes::ALL,
         None,
     )?;
     debug_assert!(handles.strip_controls.is_empty() && handles.meters.is_empty());
     let capture = match capture.ok_or_else(|| resource("host.spectrum.capture"))? {
-        PreparedSpectrumCapture::Single(capture) => capture,
-        PreparedSpectrumCapture::Collection(_) => {
+        PreparedSpectrumCaptures::Single(capture) => capture,
+        PreparedSpectrumCaptures::Collection(_) => {
             return Err(resource("host.spectrum.capture"));
         }
     };
@@ -2101,14 +2155,14 @@ pub fn prepare_host_runtime_with_spectrum_collection(
             None,
             None,
             Backend::current(),
-            Some(SpectrumPreparationRequest::Collection(request)),
+            Some(&SpectrumPreparation::Collection(request.clone())),
             None,
             HostLiveLanes::ALL,
             None,
         )?;
     let capture = match capture.ok_or_else(|| resource("host.spectrum.capture"))? {
-        PreparedSpectrumCapture::Collection(capture) => capture,
-        PreparedSpectrumCapture::Single(_) => return Err(resource("host.spectrum.capture")),
+        PreparedSpectrumCaptures::Collection(capture) => capture,
+        PreparedSpectrumCaptures::Single(_) => return Err(resource("host.spectrum.capture")),
     };
     Ok((prepared, capture))
 }
@@ -2120,7 +2174,7 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
     live_controls: Option<&HostLiveControlRequest>,
     selected_meters: Option<&[HostMeterRequest]>,
     backend: Backend,
-    spectrum_request: Option<SpectrumPreparationRequest<'_>>,
+    spectrum_request: Option<&SpectrumPreparation>,
     successor: Option<SuccessorBase<'_>>,
     lanes: HostLiveLanes,
     superseded: Option<&LiveValuesSuperseded>,
@@ -2128,7 +2182,7 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
     (
         PreparedHost,
         HostLiveControlHandles,
-        Option<PreparedSpectrumCapture>,
+        Option<PreparedSpectrumCaptures>,
     ),
     PrepareDiagnostics,
 > {
@@ -2408,7 +2462,7 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
     // predecessor's and the two plans run at one rate and quantum; as for meters, this only decides
     // that a program is needed.
     let spectrum_may_carry = match (successor, &spectrum_request) {
-        (Some(base), Some(SpectrumPreparationRequest::Single(request))) => {
+        (Some(base), Some(SpectrumPreparation::Single(request))) => {
             base.inventory.sample_rate_hz == compiled.sample_rate().0
                 && base.inventory.quantum_frames == compiled.quantum().0
                 && !base.inventory.spectrum_collection
@@ -2418,7 +2472,7 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
                     .iter()
                     .any(|row| row.target == request.target && row.channels == request.channels)
         }
-        (Some(base), Some(SpectrumPreparationRequest::Collection(request))) => {
+        (Some(base), Some(SpectrumPreparation::Collection(request))) => {
             base.inventory.sample_rate_hz == compiled.sample_rate().0
                 && base.inventory.quantum_frames == compiled.quantum().0
                 && base.inventory.spectrum_collection
@@ -2973,10 +3027,10 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
     let session_resources = compiled.resource_estimate();
     let spectrum_resources: Option<SpectrumCaptureResources> = match spectrum_request {
         None => None,
-        Some(SpectrumPreparationRequest::Single(request)) => Some(
+        Some(SpectrumPreparation::Single(request)) => Some(
             crate::spectrum::spectrum_capture_resources_for(&request.target),
         ),
-        Some(SpectrumPreparationRequest::Collection(request)) => Some(
+        Some(SpectrumPreparation::Collection(request)) => Some(
             spectrum_capture_collection_resources(&request.entries)
                 .map_err(spectrum_diagnostics)?,
         ),
@@ -3103,7 +3157,7 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
     });
     let (spectrum_observers, spectrum_capture) = match spectrum_request {
         None => (Vec::new(), None),
-        Some(SpectrumPreparationRequest::Single(request)) => {
+        Some(SpectrumPreparation::Single(request)) => {
             let (observer, capture) = crate::spectrum::prepare_capture(
                 request,
                 graph_nodes.as_deref().expect("spectrum graph nodes"),
@@ -3112,10 +3166,10 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
             .map_err(spectrum_diagnostics)?;
             (
                 vec![observer],
-                Some(PreparedSpectrumCapture::Single(capture)),
+                Some(PreparedSpectrumCaptures::Single(capture)),
             )
         }
-        Some(SpectrumPreparationRequest::Collection(request)) => {
+        Some(SpectrumPreparation::Collection(request)) => {
             let (observers, capture) = prepare_capture_collection(
                 request,
                 graph_nodes.as_deref().expect("spectrum graph nodes"),
@@ -3124,7 +3178,7 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
             .map_err(spectrum_diagnostics)?;
             (
                 observers,
-                Some(PreparedSpectrumCapture::Collection(capture)),
+                Some(PreparedSpectrumCaptures::Collection(capture)),
             )
         }
     };
@@ -3310,10 +3364,10 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
         })
     };
     let spectrum_rows: Vec<SpectrumInventoryRow> = match &spectrum_capture {
-        Some(PreparedSpectrumCapture::Single(capture)) => {
+        Some(PreparedSpectrumCaptures::Single(capture)) => {
             vec![spectrum_row(0, capture.target(), capture.channels())?]
         }
-        Some(PreparedSpectrumCapture::Collection(collection)) => (0..collection.len())
+        Some(PreparedSpectrumCaptures::Collection(collection)) => (0..collection.len())
             .map(|entry| {
                 let (target, channels) = collection
                     .entry(entry)
@@ -3325,7 +3379,7 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
     };
     let spectrum_collection = matches!(
         &spectrum_capture,
-        Some(PreparedSpectrumCapture::Collection(_))
+        Some(PreparedSpectrumCaptures::Collection(_))
     );
     let spectrum_carry = match successor {
         Some(base) => resolve_spectrum_carry(
@@ -3357,6 +3411,51 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
         Some(base) => resolve_strip_carry(base.inventory, &strip_joins, &strip_stages, live_strips),
         None => StripCarry::default(),
     };
+    // Issue #1288 D1: a strip the successor adds during playback fades in. Only a plan that
+    // attaches live lanes arms (decision 1: the plain entry binds a fader that cannot fade), and
+    // never at a declared discontinuity (decision 2: every owner restarts, and a seek is not
+    // declicked).
+    // Issue #1392 D2: a strip whose fade entry the predecessor's table holds is armed again, and
+    // takes that entry's render state at the swap block, exactly when its fader lane carries
+    // (D5 as root reads it: a strip restarted for its chain or its matrix still carries the
+    // fader lane, whose import restores the armed bits, so it must keep an entry). Each strip
+    // is paired with the predecessor entry it carries, `None` for an added strip.
+    let fade_strips: Vec<(&str, Option<u32>)> = match successor {
+        Some(base) if attach_live && !base.discontinuity => {
+            let mut strips: Vec<(&str, Option<u32>)> = added_strips(base.committed, model)
+                .into_iter()
+                .map(|id| (id, None))
+                .collect();
+            // A row whose entry render has fired is dropped: the strip's lane imports `armed =
+            // false`, so the successor needs no entry and never fades it again.
+            let watch = &base.inventory.fade_watch;
+            strips.extend(base.inventory.fade_arms.iter().filter_map(|row| {
+                if watch.fired(row.entry) {
+                    return None;
+                }
+                let lane =
+                    strip_stage_row(&strip_stages, &row.id, graph::BuiltinStripOwner::Fader)?;
+                strip_carry
+                    .moves
+                    .iter()
+                    .any(|step| {
+                        step.owner == graph::BuiltinStripOwner::Fader
+                            && step.successor == lane.location
+                    })
+                    .then_some((&*row.id, Some(row.entry)))
+            }));
+            strips
+        }
+        _ => Vec::new(),
+    };
+    let ids: Vec<&str> = fade_strips.iter().map(|(id, _)| *id).collect();
+    let fade_arms = fade_arms_for(model, &ids, &strip_stages, &input_floors);
+    let carried_arms = fade_strips
+        .iter()
+        .filter(|(_, from)| from.is_some())
+        .count();
+    let fade_arm_bytes = graph::fade_arm_table_bytes(fade_arms.len(), carried_arms)
+        .ok_or_else(|| resource("host.resource.arithmetic"))?;
     // The strip moves' table is charged at its exact length: which strips carry is known only
     // once both plans' lanes are, so it is checked here, against the same cap as the rest of the
     // plan, instead of before bind.
@@ -3510,6 +3609,7 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
         .and_then(|bytes| bytes.checked_add(delay_carry_bytes))
         .and_then(|bytes| bytes.checked_add(strip_delay_carry_bytes))
         .and_then(|bytes| bytes.checked_add(route_carry_bytes))
+        .and_then(|bytes| bytes.checked_add(fade_arm_bytes))
         .ok_or_else(|| resource("host.resource.arithmetic"))?
         > caps.maximum_graph_session_plus_plan_bytes
     {
@@ -3518,6 +3618,37 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
     if !strip_carry.moves.is_empty() {
         graph::install_builtin_strip_carry(&mut plan, strip_carry.moves)
             .map_err(|_| graph_failure("host.carry.install"))?;
+    }
+    let mut fade_arm_rows = Vec::new();
+    let mut fade_watch = graph::GraphFadeArmWatch::default();
+    if !fade_arms.is_empty() {
+        let (strips, arms): (Vec<_>, Vec<_>) = fade_arms.into_iter().unzip();
+        let (entries, watch) = graph::install_fade_arms(&mut plan, arms)
+            .map_err(|_| graph_failure("host.fade.install"))?;
+        fade_watch = watch;
+        let mut pairs = Vec::new();
+        for (id, entry) in strips.into_iter().zip(entries) {
+            let Some(entry) = entry else {
+                continue;
+            };
+            if let Some(&(_, Some(predecessor))) =
+                fade_strips.iter().find(|(strip, _)| *strip == id)
+            {
+                pairs.push(graph::GraphFadeArmPair {
+                    successor: entry,
+                    predecessor,
+                });
+            }
+            fade_arm_rows.push(FadeArmInventoryRow {
+                id: id.into(),
+                entry,
+            });
+        }
+        if !pairs.is_empty() {
+            graph::install_fade_arm_carry(&mut plan, pairs)
+                .map_err(|_| graph_failure("host.carry.install"))?;
+        }
+        fade_arm_rows.sort_unstable_by(|left, right| left.id.cmp(&right.id));
     }
     if !effect_carry.moves.is_empty() {
         graph::install_effect_carry(&mut plan, effect_carry.moves, effect_carry_scratch_bytes)
@@ -3614,6 +3745,8 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
         follow_loses_a_curve: route_carry.follow_loses_a_curve,
         follow_retarget_ramp: route_carry.follow_retarget_ramp,
         restarted: restarted.into_boxed_slice(),
+        fade_arms: fade_arm_rows.into_boxed_slice(),
+        fade_watch,
         input_floors,
         raised_arrivals,
         source_read_offset,
@@ -5758,6 +5891,93 @@ fn committed_strip<'a>(
     }
 }
 
+/// The strips of `model` that `committed` has no strip of any kind for (issue #1288 D1): the
+/// strips a successor adds. A strip whose ID `committed` holds as the other kind is an edited
+/// strip (#1324), not an added one.
+fn added_strips<'a>(committed: &SessionModel, model: &'a SessionModel) -> Vec<&'a str> {
+    model
+        .strips()
+        .map(|strip| strip.id.as_str())
+        .filter(|id| !committed_has_strip(committed, id))
+        .collect()
+}
+
+/// The fade arm of each strip of `strips` that has a fader lane in `stages` (sorted by strip ID,
+/// then owner; issue #1288 D1, D4, D5): the one entry the arms of an added strip, a duck-swap (#1324) and a restore over a duck
+/// (#1325) are built through.
+///
+/// `D` is read off PDC's own floored input arrivals (`arrivals`, sorted by node ID; decision 3):
+/// the fader's arrival minus the strip's `Input` arrival is every node latency and compensation
+/// line from the input to the fader, a sidechain's included, since PDC takes each node's arrival
+/// as the maximum over its incoming edges. A submix adds the largest compensation line of a route
+/// into it, the input arrival minus the route's. The fade's length is the session mute ramp.
+fn fade_arms_for<'a>(
+    model: &SessionModel,
+    strips: &[&'a str],
+    stages: &[StripStageInventoryRow],
+    arrivals: &[(GraphNodeId, u64)],
+) -> Vec<(&'a str, graph::GraphFadeArm)> {
+    let arrival = |node: &GraphNodeId| {
+        arrivals
+            .binary_search_by(|(row, _)| row.cmp(node))
+            .map_or(0, |row| arrivals[row].1)
+    };
+    let ramp_samples = LiveRamps::for_session(model).mute_samples;
+    let mut arms = Vec::with_capacity(strips.len());
+    for &id in strips {
+        // `stages` is sorted by strip ID, then owner.
+        let Ok(row) = stages.binary_search_by(|row| {
+            row.id
+                .as_ref()
+                .cmp(id)
+                .then(row.owner.cmp(&graph::BuiltinStripOwner::Fader))
+        }) else {
+            continue;
+        };
+        let row = &stages[row];
+        let Some(track_id) = StableGraphId::parse(id) else {
+            continue;
+        };
+        let node = |stage| GraphNodeId::TrackStage {
+            track_id: track_id.clone(),
+            stage,
+        };
+        let input = node(TrackStage::Input);
+        let input_arrival = arrival(&input);
+        let mut delay = arrival(&node(TrackStage::PostFader)).saturating_sub(input_arrival);
+        let is_track = model
+            .tracks
+            .binary_search_by(|track| track.id.as_str().cmp(id))
+            .is_ok();
+        if !is_track {
+            let into_submix = model
+                .routes
+                .iter()
+                .filter(|route| {
+                    matches!(&route.destination, session::RouteDestination::SubmixInput { submix_id }
+                        if submix_id.as_str() == id)
+                })
+                .filter_map(|route| StableGraphId::parse(route.id.as_str()))
+                .map(|route_id| {
+                    input_arrival.saturating_sub(arrival(&GraphNodeId::Route { route_id }))
+                })
+                .max()
+                .unwrap_or(0);
+            delay = delay.saturating_add(into_submix);
+        }
+        arms.push((
+            id,
+            graph::GraphFadeArm {
+                fader: row.location,
+                source: is_track.then_some(input),
+                delay_samples: u32::try_from(delay).unwrap_or(u32::MAX),
+                ramp_samples,
+            },
+        ));
+    }
+    arms
+}
+
 /// Whether `committed` has a strip of any kind named `id`.
 fn committed_has_strip(committed: &SessionModel, id: &str) -> bool {
     committed
@@ -7080,6 +7300,8 @@ mod tests {
             follow_loses_a_curve: false,
             follow_retarget_ramp: 0,
             restarted: Box::default(),
+            fade_arms: Box::default(),
+            fade_watch: graph::GraphFadeArmWatch::default(),
             input_floors: Box::default(),
             raised_arrivals: Box::default(),
             // #1396 D2: no read-ahead.

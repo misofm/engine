@@ -560,8 +560,13 @@ async function runStructuralApplyQualification(createHost, sessionDocument) {
 /// taken on the empty plan) is the master's two peaks with no track, and no allocator call ran on
 /// the render thread. The second applies the transaction (the frame is the protocol codec's, the
 /// fixture beside the session), feeds the added source before the first quantum, and renders: the
-/// first quantum is the swap block, so the output is the submitted PCM, exactly, computed here and
-/// not read back; the meter frame grows to the strip, and no render-thread allocator call ran.
+/// first quantum is the swap block, where the added track first plays. Issue #1288: a track a swap
+/// adds during playback fades in from its first played block plus `D` (0 here: no latent node
+/// before the fader) over the session mute ramp (`mute_ms` 10 at 48 kHz, 480 frames). So the
+/// output is exact zero before the fire frame, a fade over the ramp (each frame the input scaled by
+/// a gain in `[0, 1]` that never falls, and not the input itself), and then the submitted PCM,
+/// exactly, computed here and not read back; the meter frame grows to the strip, and no
+/// render-thread allocator call ran.
 async function runEmptyBootQualification(createHost, emptyDocument, frameFixture) {
   const boot = async () => {
     const context = new OfflineAudioContext(2, LIVE_CONTROL_FRAMES, SAMPLE_RATE);
@@ -638,12 +643,34 @@ async function runEmptyBootQualification(createHost, emptyDocument, frameFixture
   const grownAllocations = await renderAllocationCount(grown.host);
   await grown.host.dispose();
   const actual = [grownRendered.getChannelData(0), grownRendered.getChannelData(1)];
+  // #1288: the fire frame is the first played block (the swap block, 0) plus D (0), and the fade
+  // runs over the session mute ramp.
+  const fireFrame = 0 * QUANTUM_FRAMES + 0;
+  const rampFrames = Math.floor((10 * SAMPLE_RATE) / 1000 + 0.5);
+  const settled = fireFrame + rampFrames;
   let exact = true;
+  let fadeShaped = true;
+  let faded = false;
   for (let channel = 0; channel < 2; channel += 1) {
+    let gain = 0;
     for (let at = 0; at < LIVE_CONTROL_FRAMES; at += 1) {
-      if (!Object.is(actual[channel][at], input[channel][at])) exact = false;
+      const out = actual[channel][at];
+      const fed = input[channel][at];
+      if (at < fireFrame) {
+        if (!Object.is(out, 0)) fadeShaped = false;
+      } else if (at < settled) {
+        if (!Object.is(out, fed)) faded = true;
+        if (Math.abs(fed) > 1e-6) {
+          const ratio = out / fed;
+          if (!(ratio >= -1e-6 && ratio <= 1 + 1e-6) || ratio < gain - 1e-5) fadeShaped = false;
+          gain = Math.max(gain, ratio);
+        }
+      } else if (!Object.is(out, fed)) {
+        exact = false;
+      }
     }
   }
+  const tail = (planes) => planes.map((channel) => channel.subarray(settled));
   return {
     boot: {
       sources: quietMap.sources.length,
@@ -671,9 +698,12 @@ async function runEmptyBootQualification(createHost, emptyDocument, frameFixture
       finalRevision: grownStatus.appliedRevision.toString(),
       finalSample: grownStatus.appliedSample.toString(),
       exactInputOutput: exact,
+      fadeShaped: fadeShaped && faded,
+      fireFrame,
+      rampFrames,
       heard: nonzero(actual),
-      expectedDigest: await pcmDigest(input, LIVE_CONTROL_FRAMES),
-      renderedDigest: await pcmDigest(actual, LIVE_CONTROL_FRAMES),
+      expectedDigest: await pcmDigest(tail(input), LIVE_CONTROL_FRAMES - settled),
+      renderedDigest: await pcmDigest(tail(actual), LIVE_CONTROL_FRAMES - settled),
       meterFrames: grownFrames.length,
       meterTrackCounts: [...new Set(grownFrames.map((entry) => entry.trackCount))],
       meterWidths: [...new Set(grownFrames.map((entry) => entry.peaks))],

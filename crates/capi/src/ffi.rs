@@ -1236,8 +1236,9 @@ pub unsafe extern "C" fn miso_engine_v1_render_f32_planar(
             };
         match state.render(absolute_sample, render_output) {
             Ok(_) => {
-                // The control plane scans the two planes for an armed observer (#163 phase 4
-                // item 2) and publishes the block's activity.
+                // The control plane's output meter observes the block (#1581 D4), and it scans
+                // the two planes for an armed observer (#163 phase 4 item 2) and publishes the
+                // block's activity.
                 //
                 // SAFETY: `PlanarBufferMut::try_new` proved `2` planes of `frames` samples at
                 // `stride` lie inside the `capacity` initialized, readable elements, and the
@@ -1248,7 +1249,8 @@ pub unsafe extern "C" fn miso_engine_v1_render_f32_planar(
                         core::slice::from_raw_parts(samples_pointer.add(stride), frames),
                     )
                 };
-                state.observe_rendered_block([left, right]);
+                let next_sample = state.owner().next_absolute_sample();
+                state.observe_rendered_block([left, right], absolute_sample, next_sample);
                 error.store(plan_error::NONE, Ordering::Relaxed);
                 RESULT_OK
             }

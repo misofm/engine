@@ -277,3 +277,179 @@ fn every_preparation_entry_meters_every_strip_with_the_core_selection() {
         ),
     );
 }
+
+/// The builtin meter's sanitized magnitude, scalar: `|x|` for a finite, non-subnormal `x`, else
+/// `+0.0` (the browser's `meter_sample_magnitude`).
+fn magnitude(sample: f32) -> f32 {
+    let magnitude = sample.abs();
+    if (f32::MIN_POSITIVE..f32::INFINITY).contains(&magnitude) {
+        magnitude
+    } else {
+        0.0
+    }
+}
+
+/// The sample-serial scalar fold of [`magnitude`] over `samples`, from `+0.0`.
+fn scalar_peak(samples: &[f32]) -> f32 {
+    samples.iter().fold(0.0_f32, |peak, &sample| {
+        let magnitude = magnitude(sample);
+        if magnitude > peak { magnitude } else { peak }
+    })
+}
+
+/// Sample `index` of plane `plane`: a deterministic signal below 0.5 in magnitude, a rare larger
+/// kept sample, and every kind of value the sanitizer drops (NaN, both infinities, the largest
+/// subnormal and a negative one), scattered over lanes and tails.
+fn output_sample(plane: usize, index: u64) -> f32 {
+    let special = [
+        f32::NAN,
+        f32::INFINITY,
+        f32::NEG_INFINITY,
+        f32::from_bits(0x007f_ffff),
+        -f32::from_bits(1),
+    ];
+    let mixed = index
+        .wrapping_mul(0x9e37_79b9_7f4a_7c15)
+        .wrapping_add(plane as u64 * 0x632b_e59b);
+    match mixed % 61 {
+        0..=4 => special[(mixed % 61) as usize],
+        // A kept sample larger than the rest, rarely, so windows differ.
+        5 => {
+            (if index.is_multiple_of(2) {
+                0.75_f32
+            } else {
+                -0.875
+            }) * (1.0 + plane as f32 / 8.0)
+        }
+        _ => ((mixed >> 11) as f32 / (1_u64 << 53) as f32 - 0.5) * 0.9,
+    }
+}
+
+fn output_block(first: u64, frames: usize) -> [Vec<f32>; 2] {
+    [0, 1].map(|plane| {
+        (0..frames as u64)
+            .map(|frame| output_sample(plane, first + frame))
+            .collect()
+    })
+}
+
+/// #1581 gate 3. Windows tile `[start, end)` from the first observed sample with no gap, each at
+/// least the window long and shorter than a window plus a block, and each window's peak pair is
+/// the scalar sample-serial fold of the sanitized rule over its samples, bit for bit, at the
+/// browser's quanta and at an odd block length that leaves a tail after the lanes.
+///
+/// Test value: red if a window leaves a gap or overlaps the next, if a sanitized NaN, infinity or
+/// subnormal reaches a peak, or if the lane fold skips its tail or its upper lanes.
+#[test]
+fn output_windows_tile_and_peak_as_the_scalar_fold() {
+    const WINDOW: u32 = 300;
+    for quantum in [64_usize, 128, 512, 13] {
+        let (mut observer, mut reader, gate) =
+            host_core::output_peak_meter(core::num::NonZeroU32::new(WINDOW).expect("window"))
+                .expect("output meter");
+        gate.activate(0);
+        let mut expected_start = 0_u64;
+        let mut windows = 0;
+        for block in 0..(4 * WINDOW as usize).div_ceil(quantum) as u64 + 1 {
+            let first = block * quantum as u64;
+            let [left, right] = output_block(first, quantum);
+            observer.observe(&left, &right, first, first + quantum as u64);
+            while let Ok(window) = reader.windows_mut().try_pop() {
+                assert_eq!(window.start_sample, expected_start, "{quantum}: no gap");
+                let frames = window.end_sample - window.start_sample;
+                assert!(
+                    frames >= u64::from(WINDOW) && frames < u64::from(WINDOW) + quantum as u64,
+                    "{quantum}: whole blocks, at least the window: {frames}"
+                );
+                let [left, right] = output_block(window.start_sample, frames as usize);
+                assert_eq!(
+                    window.peak.map(f32::to_bits),
+                    [scalar_peak(&left), scalar_peak(&right)].map(f32::to_bits),
+                    "{quantum}: window at {}",
+                    window.start_sample
+                );
+                expected_start = window.end_sample;
+                windows += 1;
+            }
+        }
+        assert!(windows >= 3, "{quantum}: {windows} windows closed");
+        assert_eq!(reader.dropped_windows(), 0);
+    }
+}
+
+/// #1581 gate 3. While the gate is inactive, or before its first sample, a block folds nothing and
+/// closes nothing; deactivation discards the open window, and the next activation opens a clean
+/// one at its first block.
+///
+/// Test value: red if the meter measures while inactive, folds a block that starts before the
+/// activation sample, or carries an open window across a deactivation.
+#[test]
+fn an_inactive_output_gate_folds_nothing() {
+    const QUANTUM: u64 = 64;
+    let (mut observer, mut reader, gate) =
+        host_core::output_peak_meter(core::num::NonZeroU32::new(128).expect("window"))
+            .expect("output meter");
+    let loud = vec![0.5_f32; QUANTUM as usize];
+    let quiet = vec![0.125_f32; QUANTUM as usize];
+    let mut block = 0_u64;
+    let mut observe = |samples: &[f32]| {
+        observer.observe(samples, samples, block * QUANTUM, (block + 1) * QUANTUM);
+        block += 1;
+    };
+    for _ in 0..4 {
+        observe(&loud);
+    }
+    assert_eq!(
+        reader.windows_mut().available_at_entry(),
+        0,
+        "an inactive gate closes no window"
+    );
+    // Activated mid-block: the block that straddles the activation sample is not observed.
+    gate.activate(4 * QUANTUM + 1);
+    observe(&loud);
+    observe(&quiet);
+    // Deactivated with a window open: it is discarded.
+    gate.deactivate();
+    observe(&loud);
+    // The same activation sample again: only the deactivation can have closed the open window.
+    gate.activate(4 * QUANTUM + 1);
+    observe(&quiet);
+    observe(&quiet);
+    let window = reader
+        .windows_mut()
+        .try_pop()
+        .expect("one window after reactivation");
+    assert_eq!(
+        (window.start_sample, window.end_sample, window.peak),
+        (7 * QUANTUM, 9 * QUANTUM, [0.125, 0.125])
+    );
+    assert!(reader.windows_mut().try_pop().is_err());
+}
+
+/// #1581 gate 3. A full queue keeps the oldest windows, drops each newer one and counts it.
+///
+/// Test value: red if a full queue overwrites a queued window, or drops a window without counting
+/// it.
+#[test]
+fn a_full_output_queue_drops_the_newest_window_and_counts_it() {
+    const QUANTUM: u64 = 64;
+    let (mut observer, mut reader, gate) =
+        host_core::output_peak_meter(core::num::NonZeroU32::new(64).expect("window"))
+            .expect("output meter");
+    gate.activate(0);
+    let block = vec![0.25_f32; QUANTUM as usize];
+    let blocks = host_core::METER_QUEUE_DEPTH as u64 + 2;
+    for index in 0..blocks {
+        observer.observe(&block, &block, index * QUANTUM, (index + 1) * QUANTUM);
+    }
+    assert_eq!(reader.dropped_windows(), 2);
+    let starts: Vec<u64> = core::iter::from_fn(|| reader.windows_mut().try_pop().ok())
+        .map(|window| window.start_sample)
+        .collect();
+    assert_eq!(
+        starts,
+        (0..host_core::METER_QUEUE_DEPTH as u64)
+            .map(|index| index * QUANTUM)
+            .collect::<Vec<_>>()
+    );
+}

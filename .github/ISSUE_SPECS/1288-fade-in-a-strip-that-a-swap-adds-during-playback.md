@@ -64,8 +64,9 @@ start at rest at the adopted block.
 - **D2. Arm (builtins).** `FaderLane` gains `armed: bool`. An armed channel is prepared muted
   (settled `+0.0`) and remembers its fader gain. `FaderRampStage` keeps `armed: [[bool; MAX]; 2]`
   and gains `fire_fade_in(lane, ramp_samples)`: for each armed channel of the lane, clear the flag
-  and run the existing `set_mute(.., false, ramp_samples)`. Any `set_mute` on a channel clears its
-  flag first (a user mute wins; a later unmute is an ordinary unmute). A fader record while armed
+  and run the existing `set_mute(.., false, ramp_samples)`. A mute on a channel clears its flag
+  first (a user mute wins); an unmute while armed is a no-op that keeps the arm (root ruling,
+  attempt 2). A fader record while armed
   only updates the remembered gain. `fire_fade_in` on an unarmed lane does nothing.
 - **D3. Fire (graph).** The prepared graph plan holds a fixed table of fade arms, one per armed
   strip: `{ claim: Option<u32>, owner, lane, delay_samples: u32, ramp_samples: u32, state }`, with
@@ -201,3 +202,54 @@ start at rest at the adopted block.
 
 - *Session `controlSmoothing`: configurable ramp lengths for live mute, fader and pan changes*
   (#1054). It merges first and supplies the non-zero session mute ramp `N` the fade runs over.
+
+## Decision record (attempt 1, 2026-10-24)
+
+Root accepted the scope note's slice and decisions 1-5: arm only through the entries that attach
+live lanes; no arm under a declared discontinuity; `D` from PDC's floored input arrivals
+(`a(PostFader) - a(Input)`, plus, for a submix, the largest `a(Input) - a(Route)` of a route into
+it); `armed` added to `FaderChannelState` (export and import carry it, for #1392); the fire is at
+block granularity.
+
+Implementation facts and the changes they forced:
+
+- The arm is a control-thread call, `arm_fade_in`, that `graph::install_fade_arms` makes on each
+  fader lane before publication, not a `FaderLane.armed` field read by the builtins compile. The
+  first adopted block is muted either way; the call needs no new field on `BuiltinParameters` or a
+  compile request. A channel already muted (the session's mute, a VCA's, a followed mute) is not
+  armed, so the per-channel D1 skip is the stage's own state.
+- The fade table addresses fader bank lanes only (`GraphLaneLocation`). Under decision 1 every
+  armed plan binds `FaderBankProcessor`; the per-node `AutomatedFaderProcessor` and the oracle
+  `LiveControlFaderProcessor` are never armed, so no `GraphRuntimeProcessor::fire_fade_in` was
+  added. `FaderMuteRampBuiltins` has `arm_fade_in`/`fire_fade_in` for the kernel gate.
+- A fade line downstream of the fader (a route's compensation line into the output) delays the
+  whole fade and does not eat it, so `D` stops at the fader.
+- Gate 4(c) as written (an added limited track on a playing source) grows the output latency,
+  which is #1287's case; the test gives the base session a muted limited track so the output
+  already arrives at 486, and feeds the added track's source exact zeros before the swap.
+- Gate 4(b) (`seek_at`) is the graph test's first-played-block rule; 4(d) is the control-thread
+  assertion `D == 486`. Gate 6's allocation count is measured inside the fade test's own run.
+- `crates/capi/src/runtime/tests.rs` holds three tests that assert an added stem is bit-identical
+  to the fresh post-edit session from its anchor; with the fade they fail, and the file is outside
+  this slice's paths.
+
+## Attempt 2 (2026-10-24)
+
+- Root ruling on D2: only a mute disarms a channel. An unmute while armed is a no-op that keeps the
+  arm (the model already holds the lane unmuted, and the fade is how it gets there), so a redundant
+  unmute before an anchored source plays cannot turn the fade into a step. Gate 1 covers it.
+- D4 for a submix has its own control-thread assertion
+  (`an_added_submix_delays_its_fade_by_its_longest_route_line`, `D = 486`).
+
+## CI fold (PR #1878)
+
+- `fixtures/graph/v1/direct-route.resources.json`: `builtin_bank_bytes` 7191 -> 7223 and
+  `incremental_plan_bytes`/`session_plus_plan_bytes` 49047 -> 49079, +32 each and nothing else.
+  The fixture has no successor, so no fade table or watch is charged; the +32 is the fader bank's
+  `FaderRampStage::armed` (`[[bool; 8]; 2]`, 16 bytes) rounded up to the stage's 32-byte lane
+  alignment. Regenerated with `graph_fixture --write`.
+- Browser row `empty-boot-first-stem`: the first stem an empty boot adds while playing now fades
+  in, as D1-D5 require. The row asserts exact zero before the fire frame (first played block 0 plus
+  D = 0), a fade over the 480-frame session mute ramp (each frame the input times a gain in
+  `[0, 1]` that never falls, and not the input itself), and the input bit for bit after it (the
+  digest covers the frames after the ramp). The engine is unchanged.

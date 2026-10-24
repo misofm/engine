@@ -52,6 +52,13 @@ pub struct ProviderEpoch {
     /// producers, the cells are `Arc`s shared with the plan's lanes, so the epoch may drop after
     /// its plan, and does: `synchronize_plan_epochs` drops a reclaimed plan before its provider.
     pub(crate) effects: Box<[host_core::EffectControlProducer]>,
+    /// The consumers of this epoch's plan's strip meters (#1581 D6), one per strip in strip order
+    /// (`host_core::meter_selection`). Nothing reads them until #1587; a full strip queue drops
+    /// and counts on the render side. Their rings are `Arc`s shared with the plan's observers, as
+    /// the producers' cells are, so the epoch may drop after its plan. Only the adapters' tests
+    /// read them before #1587.
+    #[cfg_attr(not(feature = "test-support"), allow(dead_code))]
+    pub(crate) meters: Box<[host_core::MeterConsumer]>,
     /// The capi resources this epoch's plan was prepared with (#1257 D4).
     pub(crate) capi: CapiResources,
     /// The handle of this epoch's plan's revision gate (#1502 D1). Control publishes every
@@ -180,6 +187,12 @@ impl ProviderEpoch {
         &self.effects
     }
 
+    /// This epoch's strip meter consumers (#1581 D6).
+    #[cfg(feature = "test-support")]
+    pub fn test_meters(&self) -> &[host_core::MeterConsumer] {
+        &self.meters
+    }
+
     /// Whether this epoch's set holds source `id` vacant (`Some(true)`), holds its producer
     /// (`Some(false)`), or does not hold it (`None`) (#1310 gate 6). It probes with a submission
     /// at a sample rate of 1, which the set refuses before its ring sees it, so nothing changes.
@@ -208,6 +221,7 @@ impl ProviderEpoch {
         inventory: PlanStateInventory,
         strips: StripLanes,
         effects: Box<[host_core::EffectControlProducer]>,
+        meters: Box<[host_core::MeterConsumer]>,
         capi: CapiResources,
         revision_gate: PlanRevisionGate,
     ) -> Self {
@@ -217,6 +231,7 @@ impl ProviderEpoch {
             inventory,
             strips,
             effects,
+            meters,
             capi,
             revision_gate,
             carried: CarriedSourceBytes::default(),
@@ -236,6 +251,7 @@ impl ProviderEpoch {
         carried: CarriedSourceBytes,
         strips: StripLanes,
         effects: Box<[host_core::EffectControlProducer]>,
+        meters: Box<[host_core::MeterConsumer]>,
         capi: CapiResources,
         revision_gate: PlanRevisionGate,
     ) -> Self {
@@ -245,6 +261,7 @@ impl ProviderEpoch {
             inventory,
             strips,
             effects,
+            meters,
             capi,
             revision_gate,
             carried,
@@ -670,6 +687,9 @@ pub struct SessionState<A: ControlAdapter> {
     /// The live send moves that may still ramp, as one conservative window (root ruling B19-R7,
     /// the B17-R14 pattern; #1718 deletes it): `None` when none may.
     pub(crate) send_moves: Option<SendMoveWindow>,
+    /// The output meter's reader and gate (#1581 D4) until the adapter takes them: the browser's
+    /// render half does; the C ABI's control half keeps them here for #1583.
+    pub(crate) output_meter: Option<(host_core::OutputPeakReader, host_core::OutputPeakGate)>,
 }
 
 /// Every live send move (a following route's record with a ramp, written by a live commit or by a
@@ -1736,6 +1756,15 @@ where
         &self.controller
     }
 
+    /// The output meter's reader and gate (#1581 D4), handed out once: `None` on every later call.
+    /// The observer is the plan state's, so the windows the reader returns are the session's
+    /// output over every plan it renders.
+    pub fn take_output_meter(
+        &mut self,
+    ) -> Option<(host_core::OutputPeakReader, host_core::OutputPeakGate)> {
+        self.output_meter.take()
+    }
+
     /// The current provider epoch.
     #[cfg(feature = "test-support")]
     pub fn test_providers(&self) -> &ProviderEpoch {
@@ -2557,6 +2586,7 @@ where
             sources,
             strips,
             effects,
+            meters,
             plan: candidate_plan,
             resources,
             carried,
@@ -2579,6 +2609,7 @@ where
             carried,
             strips,
             effects,
+            meters,
             prospective_capi,
             revision_gate,
         );

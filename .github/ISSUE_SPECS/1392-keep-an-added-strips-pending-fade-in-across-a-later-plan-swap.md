@@ -155,8 +155,9 @@ In `crates/host-core/tests/successor_swap.rs`, quantum 128, `N = 2000`, at `Back
 
 - Gate 1: a successor that does not re-arm from the inventory lets the stem pop in at full gain;
   one that re-arms but restarts a carried `FireAt` as `Waiting` fires `D` late. Either turns it red.
-- Gate 2: a re-arm whose lane import does not clear `armed` (or whose entry is not marked `Done`)
-  mutes a playing strip and fades it in again: a dip. It turns red.
+- Gate 2: a second swap after the fire whose lane import does not overwrite the arm's mute with
+  the carried lane's state (it keeps or re-derives a mute) silences the playing strip after the
+  swap. It turns red.
 - Gate 3: a carried entry on a restarted chain (the predecessor's `D` against a new latency) turns
   it red.
 - Gate 4: a successor that re-arms strips but not routes lets the added route, or the added
@@ -173,3 +174,38 @@ In `crates/host-core/tests/successor_swap.rs`, quantum 128, `N = 2000`, at `Back
   entries).
 - *Carry strip delay lines and live send ramps across a plan swap* (#1284) (route ramp import).
 - *Carry compensation lines across a plan swap* (#1283) (route entry delay, D4).
+
+## Decision record (attempt 1, 2026-10-24)
+
+Root accepted the scope note's strip half with its D5 correction: an arm entry carries if and
+only if the strip's Fader `GraphStripMove` exists. A strip in `restarted_strips()` for its chain or
+its matrix still carries its fader lane, whose import restores the armed bits, so it keeps its
+entry; gate 3 reads "a chain-restarted strip still fades". A fader lane prepared fresh is not armed
+and gets no entry (#1324's case).
+
+- `PlanStateInventory.fade_arms` rows `(strip ID, entry)` are built from the entry indices
+  `graph::install_fade_arms` returns (a strip that arms nothing has none). The successor's arm set
+  is #1288's added strips plus each inventory row whose fader lane carries; each carried entry takes
+  the successor's own `D` and ramp, and `graph::install_fade_arm_carry` pairs (own entry,
+  predecessor entry) for the adoption block, which copies the state after the strip lane import. A
+  copied `Done` leaves the pending count.
+- `FaderChannelState.armed` was added by #1288 and is exported and imported there.
+- **Split.** The route half (D1 route rows, D2 route re-arm, D6 route-op armed flag, gate 4) waits
+  for #1363. Root filed it as #1877: *Keep an added route's pending fade-in across a later
+  plan swap*, blocked by #1363.
+- The fused-form gate rows are retired by #1767. Gate 5's allocation count is measured in gate 1's
+  own run over both swap blocks.
+- `crates/capi/src/runtime/tests.rs`' `a_held_seek_carries_from_a_taken_candidate` is a C ABI
+  two-swap case of gate 1 (b): it fails with the arm left in the first successor and passes with it.
+
+## Attempt 2 (2026-10-24)
+
+- Gate 2 runs without output latency and checks the track is heard from the second swap on; its
+  value is the lane import overwriting the arm's mute (red on `muted = carried.muted || armed`
+  and on an import that returns early for an armed lane).
+- Root ruling: a fired arm's inventory row is dropped. Render sets a per-entry flag
+  (`graph::GraphFadeArmWatch`, a release store) when an entry fires or a carry copies `Done`; the
+  successor skips a row whose flag is set, so a fired strip is neither carried nor re-armed and
+  rows do not accumulate. A flag read clear while render fires the entry costs one re-armed entry
+  whose carry copies `Done`, and the next successor drops it.
+- A carried fader lane whose source still waits but which does not carry (a fresh lane) is #1324's.

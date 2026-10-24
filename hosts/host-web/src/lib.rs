@@ -398,6 +398,7 @@ pub(crate) const fn spectrum_result(error: SpectrumServiceError) -> u32 {
         SpectrumServiceError::Unprepared | SpectrumServiceError::SelectSingle => RESULT_UNSUPPORTED,
         SpectrumServiceError::Busy => RESULT_BACKPRESSURE,
         SpectrumServiceError::NotArmed
+        | SpectrumServiceError::Dropped
         | SpectrumServiceError::StreamActive
         | SpectrumServiceError::StreamInactive => RESULT_WRONG_STATE,
         SpectrumServiceError::CaptureInvalid => RESULT_RENDER_REJECTED,
@@ -3881,7 +3882,11 @@ impl AudioWorkletEngineHost {
                         .get(quantum..)
                         .and_then(|tail| tail.get(..quantum)),
                 ) {
-                    plan.observe_rendered_block([left, right]);
+                    plan.observe_rendered_block(
+                        [left, right],
+                        render_first_sample,
+                        next_absolute_sample,
+                    );
                 }
                 // #1399: the session's count, loaded after the block that added to it, so the
                 // status is never behind the last rendered block.
