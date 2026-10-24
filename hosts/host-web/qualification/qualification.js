@@ -1168,14 +1168,14 @@ async function runObservationUnsubscribeRun(createHost, sessionDocument) {
   const acknowledgedAt = performance.now();
   const acknowledgedAtFrame = frames.length;
   const boundary = (await status("status (boundary)")).renderedQuanta;
-  const signalFrames = () => frames.slice(acknowledgedAtFrame)
-    .filter((frame) => frame.peak > UNSUBSCRIBE_PEAK_FLOOR).length;
+  const signalFrames = (list) => list.filter((frame) => frame.peak > UNSUBSCRIBE_PEAK_FLOOR).length;
   let signalShortfall = false;
   const ended = await renderUntil(
     context,
     async () => {
       requireFeed();
-      return feedBehind !== null || signalFrames() >= UNSUBSCRIBE_SIGNAL_FRAMES;
+      return feedBehind !== null
+        || signalFrames(frames.slice(acknowledgedAtFrame)) >= UNSUBSCRIBE_SIGNAL_FRAMES;
     },
     UNSUBSCRIBE_AFTER_WAIT,
     async () => ({ boundary: String(boundary), ...(await describe()) }),
@@ -1197,6 +1197,9 @@ async function runObservationUnsubscribeRun(createHost, sessionDocument) {
   await request("dispose", "dispose", () => host.dispose());
   await bounded("await", "close", context, () => context.close());
   const maximumGrDb = (list) => list.reduce((highest, frame) => Math.max(highest, frame.trackGrDb), 0);
+  // The reduction is checked on every frame received after the acknowledgement, up to the dispose;
+  // the signal and low-peak counts on the frames of the wait, while the feed ran.
+  const everyAfter = frames.slice(acknowledgedAtFrame);
   const low = afterList.filter((frame) => frame.peak <= UNSUBSCRIBE_PEAK_FLOOR);
   return {
     contextStateBeforeBoot: stateBeforeBoot,
@@ -1210,13 +1213,13 @@ async function runObservationUnsubscribeRun(createHost, sessionDocument) {
     fedBlocks: fed,
     armedFrames: armedList.length,
     armedMaximumTrackGrDb: maximumGrDb(armedList),
-    framesAfterAcknowledgement: afterList.length,
-    signalFramesAfterAcknowledgement: signalFrames(),
-    reducingSignalFramesAfterAcknowledgement: afterList
+    framesAfterAcknowledgement: everyAfter.length,
+    signalFramesAfterAcknowledgement: signalFrames(afterList),
+    reducingSignalFramesAfterAcknowledgement: everyAfter
       .filter((frame) => frame.trackGrDb > 0 && frame.peak > UNSUBSCRIBE_PEAK_FLOOR).length,
     lowPeakFramesAfterAcknowledgement: low.length,
     minimumPeakAfterAcknowledgement: afterList.reduce((lowest, frame) => Math.min(lowest, frame.peak), Infinity),
-    maximumTrackGrDbAfterAcknowledgement: maximumGrDb(afterList),
+    maximumTrackGrDbAfterAcknowledgement: maximumGrDb(everyAfter),
     signalShortfall,
     feedBehind,
     maximumSourcesInFlight,
