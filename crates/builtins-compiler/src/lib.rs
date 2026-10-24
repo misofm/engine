@@ -3443,6 +3443,8 @@ fn prepare_fader_automation(
         return Ok(None);
     }
     let ramp = controls::LiveRamps::for_session(model).for_row(controls::LiveRampRow::VcaOffset);
+    // #1844: one pass over the table; every strip and VCA looks its driving entries up.
+    let index = controls::AutomationIndex::of(model);
     let refuse = |code: &'static str, entry: &session::Automation| {
         diag(code, &format!("$.automation[id={}]", entry.id.as_str()))
     };
@@ -3471,29 +3473,27 @@ fn prepare_fader_automation(
     // VCA cells follow every mute cell, so they are filled in once those exist. Transient.
     let mut composed_faders: Vec<(Box<str>, usize, Vec<usize>)> = Vec::new();
     let mut composed_mutes: Vec<(Box<str>, usize, Vec<usize>)> = Vec::new();
-    // The reaching VCAs (indices) whose `entries` row drives lane `lane`.
-    let reaching = |index: usize,
-                    lane: usize,
-                    entries: for<'m> fn(
-        &'m session::SessionModel,
-        &session::StableId,
-    ) -> [Option<&'m session::Automation>; 2]|
-     -> Vec<usize> {
-        reach_of(index)
+    // The reaching VCAs (indices) whose `mute` (else `offset_db`) row drives lane `lane`.
+    let reaching = |strip: usize, lane: usize, mute: bool| -> Vec<usize> {
+        reach_of(strip)
             .iter()
             .copied()
             .filter(|&vca| {
-                model
-                    .vcas
-                    .get(vca)
-                    .is_some_and(|vca| entries(model, &vca.id)[lane].is_some())
+                model.vcas.get(vca).is_some_and(|vca| {
+                    let entries = if mute {
+                        index.vca_mute(&vca.id)
+                    } else {
+                        index.vca_offset(&vca.id)
+                    };
+                    entries[lane].is_some()
+                })
             })
             .collect()
     };
-    for (index, (strip, values)) in model.strips().zip(effective.strips.iter()).enumerate() {
-        let entries = controls::fader_automation(model, strip.id);
+    for (strip_index, (strip, values)) in model.strips().zip(effective.strips.iter()).enumerate() {
+        let entries = index.fader(strip.id);
         let events = if vca_rows {
-            controls::fader_event_lanes(model, strip.id, reach_of(index))
+            index.fader_event_lanes(strip.id, reach_of(strip_index))
         } else {
             entries.map(|entry| entry.is_some())
         };
@@ -3528,7 +3528,7 @@ fn prepare_fader_automation(
             };
             let offsets_sum = values.offsets_sum[lane];
             let vcas = if vca_rows {
-                reaching(index, lane, controls::vca_offset_automation)
+                reaching(strip_index, lane, false)
             } else {
                 Vec::new()
             };
@@ -3568,10 +3568,10 @@ fn prepare_fader_automation(
         );
     }
     // #1651 D1: the mute cells, after every fader cell.
-    for (index, (strip, values)) in model.strips().zip(effective.strips.iter()).enumerate() {
-        let entries = controls::mute_automation(model, strip.id);
+    for (strip_index, (strip, values)) in model.strips().zip(effective.strips.iter()).enumerate() {
+        let entries = index.mute(strip.id);
         let events = if vca_rows {
-            controls::mute_event_lanes(model, strip.id, reach_of(index))
+            index.mute_event_lanes(strip.id, reach_of(strip_index))
         } else {
             entries.map(|entry| entry.is_some())
         };
@@ -3604,7 +3604,7 @@ fn prepare_fader_automation(
                 None => (None, 0.0),
             };
             if vca_rows {
-                let vcas = reaching(index, lane, controls::vca_mute_automation);
+                let vcas = reaching(strip_index, lane, true);
                 if !vcas.is_empty() {
                     composed_mutes.push((Box::<str>::from(strip.id.as_str()), lane, vcas));
                 }
@@ -3633,17 +3633,11 @@ fn prepare_fader_automation(
     if vca_rows {
         let mut order: Vec<usize> = (0..model.vcas.len()).collect();
         order.sort_by(|&one, &two| model.vcas[one].id.as_str().cmp(model.vcas[two].id.as_str()));
-        for index in order {
-            let vca = &model.vcas[index];
+        for at in order {
+            let vca = &model.vcas[at];
             let rows = [
-                (
-                    controls::vca_offset_automation(model, &vca.id),
-                    controls::FADER_CELL_RULE,
-                ),
-                (
-                    controls::vca_mute_automation(model, &vca.id),
-                    controls::MUTE_CELL_RULE,
-                ),
+                (index.vca_offset(&vca.id), controls::FADER_CELL_RULE),
+                (index.vca_mute(&vca.id), controls::MUTE_CELL_RULE),
             ];
             if rows
                 .iter()
@@ -8509,17 +8503,19 @@ fn resource_plan(
         } else {
             Vec::new()
         };
+        // #1844: one pass over the table; every strip looks its entries up.
+        let automation = controls::AutomationIndex::of(model);
         model
             .strips()
             .enumerate()
             .filter(|(index, strip)| {
                 if vca_rows {
                     let reach = reach.get(*index).map_or(&[][..], Vec::as_slice);
-                    controls::fader_event_lanes(model, strip.id, reach).contains(&true)
+                    automation
+                        .fader_event_lanes(strip.id, reach)
+                        .contains(&true)
                 } else {
-                    controls::fader_automation(model, strip.id)
-                        .iter()
-                        .any(Option::is_some)
+                    automation.fader(strip.id).iter().any(Option::is_some)
                 }
             })
             .map(|(_, strip)| strip.id.as_str())

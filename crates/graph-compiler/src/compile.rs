@@ -1087,6 +1087,8 @@ impl StripGains {
             controls::effective(model, &controls::MonitorOverlay::default())
         };
         let reach = model.vca_reach();
+        // #1844: one pass over the automation table; every strip looks its entries up.
+        let automation = controls::AutomationIndex::of(model);
         let top = builtins::checked_fader_gain(session::FADER_MAXIMUM_DB as f32)
             .expect("+24 dB is inside the fader domain");
         let mut fader = Vec::with_capacity(strips.len());
@@ -1094,8 +1096,8 @@ impl StripGains {
         for (index, strip) in strips.iter().enumerate() {
             let values = effective.strips.get(index).copied().unwrap_or_default();
             let reach = reach.get(index).map_or(&[][..], Vec::as_slice);
-            let fader_events = controls::fader_event_lanes(model, strip.id, reach);
-            let mute_events = controls::mute_event_lanes(model, strip.id, reach);
+            let fader_events = automation.fader_event_lanes(strip.id, reach);
+            let mute_events = automation.mute_event_lanes(strip.id, reach);
             let fixed_mute = !liveness.strip_fader_matrix && mute_events == [false; 2];
             mute_fixed.push(fixed_mute);
             fader.push(core::array::from_fn(|lane| {
