@@ -82,24 +82,13 @@ macro_rules! append {
 
 /// JSON emission for the SDK documents (#382).
 ///
-/// The documents are `Serialize` models written through `serde_json`, so escaping, separators
-/// and nesting are the serializer's, never a hand-placed comma. Only the whitespace is this
-/// module's: the shipped documents keep the layout they were published with, byte for byte.
-///
-/// - A model writes as a *block* by default: one member per line, two spaces per level, like
-///   `serde_json`'s pretty printer. A member whose key is in the document's continuation list stays
-///   on the line of the member before it (`"unit": 5, "unitName": "linear",`).
-/// - [`Inline`] writes its value on one line: `{ "a": 1, "b": [2, 3] }`. [`Tight`] is the same
-///   with a bare comma between array items (`[{ "id": 1 },{ "id": 2 }]`), the spelling the
-///   response descriptor's `sections` shipped with.
-/// - [`Num`] writes a finite `f32` in [`super::number`]'s spelling through a raw value, so a
-///   number's bytes never depend on the serializer's float printer.
+/// The documents are `Serialize` models written by `serde_json`'s standard pretty printer, so
+/// escaping, separators, nesting and whitespace are the serializer's, never a hand-placed comma.
+/// [`Num`] writes a finite `f32` in [`super::number`]'s spelling through a raw value, so a
+/// number's bytes never depend on the serializer's float printer.
 mod json {
-    use std::io;
-
     use serde::ser::{Error as _, SerializeMap as _};
     use serde::{Serialize, Serializer};
-    use serde_json::ser::{CharEscape, CompactFormatter, Formatter};
     use serde_json::value::RawValue;
 
     /// A finite `f32`, spelled by [`super::number`].
@@ -107,25 +96,9 @@ mod json {
 
     impl Serialize for Num {
         fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-            raw::<S>(super::number(self.0))?.serialize(serializer)
-        }
-    }
-
-    /// A value written on one line.
-    pub(crate) struct Inline<T>(pub(crate) T);
-
-    impl<T: Serialize> Serialize for Inline<T> {
-        fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-            one_line(&self.0, ", ", serializer)
-        }
-    }
-
-    /// A value written on one line, array items separated by a bare comma.
-    pub(crate) struct Tight<T>(pub(crate) T);
-
-    impl<T: Serialize> Serialize for Tight<T> {
-        fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-            one_line(&self.0, ",", serializer)
+            RawValue::from_string(super::number(self.0))
+                .map_err(S::Error::custom)?
+                .serialize(serializer)
         }
     }
 
@@ -142,231 +115,12 @@ mod json {
         }
     }
 
-    /// Write `value` as a block document with a trailing newline. `continuations` names the keys
-    /// that stay on the line of the member before them.
-    pub(crate) fn document<T: Serialize>(
-        value: &T,
-        continuations: &'static [&'static str],
-    ) -> String {
-        let formatter = BlockFormatter {
-            indent: 0,
-            has_value: false,
-            continuations,
-            key: None,
-        };
-        let mut bytes = Vec::with_capacity(1 << 16);
-        value
-            .serialize(&mut serde_json::Serializer::with_formatter(
-                &mut bytes, formatter,
-            ))
-            .expect("an in-memory JSON write cannot fail");
-        let mut text = String::from_utf8(bytes).expect("serde_json writes UTF-8");
+    /// Write `value` as a pretty-printed document with a trailing newline.
+    pub(crate) fn document<T: Serialize>(value: &T) -> String {
+        let mut text =
+            serde_json::to_string_pretty(value).expect("an in-memory JSON write cannot fail");
         text.push('\n');
         text
-    }
-
-    fn raw<S: Serializer>(text: String) -> Result<Box<RawValue>, S::Error> {
-        RawValue::from_string(text).map_err(S::Error::custom)
-    }
-
-    fn one_line<T: Serialize, S: Serializer>(
-        value: &T,
-        array_separator: &'static str,
-        serializer: S,
-    ) -> Result<S::Ok, S::Error> {
-        let formatter = InlineFormatter {
-            array_separator,
-            members: Vec::new(),
-        };
-        let mut bytes = Vec::new();
-        value
-            .serialize(&mut serde_json::Serializer::with_formatter(
-                &mut bytes, formatter,
-            ))
-            .map_err(S::Error::custom)?;
-        let text = String::from_utf8(bytes).map_err(S::Error::custom)?;
-        raw::<S>(text)?.serialize(serializer)
-    }
-
-    /// `serde_json`'s pretty layout (two spaces, `": "`), plus same-line continuation keys.
-    ///
-    /// The separator before a key is decided when the key's text arrives, so `begin_object_key`
-    /// only records that a key is pending and `begin_string` defers the key's opening quote.
-    struct BlockFormatter {
-        indent: usize,
-        has_value: bool,
-        continuations: &'static [&'static str],
-        /// `Some(first)` between `begin_object_key` and the key's first byte.
-        key: Option<bool>,
-    }
-
-    impl BlockFormatter {
-        fn newline<W: ?Sized + io::Write>(&self, writer: &mut W) -> io::Result<()> {
-            writer.write_all(b"\n")?;
-            for _ in 0..self.indent {
-                writer.write_all(b"  ")?;
-            }
-            Ok(())
-        }
-
-        fn open_key<W: ?Sized + io::Write>(&mut self, writer: &mut W, key: &str) -> io::Result<()> {
-            if let Some(first) = self.key.take() {
-                if !first && self.continuations.contains(&key) {
-                    writer.write_all(b", ")?;
-                } else {
-                    if !first {
-                        writer.write_all(b",")?;
-                    }
-                    self.newline(writer)?;
-                }
-                writer.write_all(b"\"")?;
-            }
-            Ok(())
-        }
-    }
-
-    impl Formatter for BlockFormatter {
-        fn begin_array<W: ?Sized + io::Write>(&mut self, writer: &mut W) -> io::Result<()> {
-            self.indent += 1;
-            self.has_value = false;
-            writer.write_all(b"[")
-        }
-
-        fn end_array<W: ?Sized + io::Write>(&mut self, writer: &mut W) -> io::Result<()> {
-            self.indent -= 1;
-            if self.has_value {
-                self.newline(writer)?;
-            }
-            writer.write_all(b"]")
-        }
-
-        fn begin_array_value<W: ?Sized + io::Write>(
-            &mut self,
-            writer: &mut W,
-            first: bool,
-        ) -> io::Result<()> {
-            if !first {
-                writer.write_all(b",")?;
-            }
-            self.newline(writer)
-        }
-
-        fn end_array_value<W: ?Sized + io::Write>(&mut self, _writer: &mut W) -> io::Result<()> {
-            self.has_value = true;
-            Ok(())
-        }
-
-        fn begin_object<W: ?Sized + io::Write>(&mut self, writer: &mut W) -> io::Result<()> {
-            self.indent += 1;
-            self.has_value = false;
-            writer.write_all(b"{")
-        }
-
-        fn end_object<W: ?Sized + io::Write>(&mut self, writer: &mut W) -> io::Result<()> {
-            self.indent -= 1;
-            if self.has_value {
-                self.newline(writer)?;
-            }
-            writer.write_all(b"}")
-        }
-
-        fn begin_object_key<W: ?Sized + io::Write>(
-            &mut self,
-            _writer: &mut W,
-            first: bool,
-        ) -> io::Result<()> {
-            self.key = Some(first);
-            Ok(())
-        }
-
-        fn begin_string<W: ?Sized + io::Write>(&mut self, writer: &mut W) -> io::Result<()> {
-            if self.key.is_some() {
-                Ok(())
-            } else {
-                writer.write_all(b"\"")
-            }
-        }
-
-        fn write_string_fragment<W: ?Sized + io::Write>(
-            &mut self,
-            writer: &mut W,
-            fragment: &str,
-        ) -> io::Result<()> {
-            self.open_key(writer, fragment)?;
-            writer.write_all(fragment.as_bytes())
-        }
-
-        fn write_char_escape<W: ?Sized + io::Write>(
-            &mut self,
-            writer: &mut W,
-            char_escape: CharEscape,
-        ) -> io::Result<()> {
-            self.open_key(writer, "")?;
-            CompactFormatter.write_char_escape(writer, char_escape)
-        }
-
-        fn end_string<W: ?Sized + io::Write>(&mut self, writer: &mut W) -> io::Result<()> {
-            self.open_key(writer, "")?;
-            writer.write_all(b"\"")
-        }
-
-        fn begin_object_value<W: ?Sized + io::Write>(&mut self, writer: &mut W) -> io::Result<()> {
-            writer.write_all(b": ")
-        }
-
-        fn end_object_value<W: ?Sized + io::Write>(&mut self, _writer: &mut W) -> io::Result<()> {
-            self.has_value = true;
-            Ok(())
-        }
-    }
-
-    /// One line: `{ "a": 1, "b": 2 }` and `[1, 2]` (or `[1,2]` with a bare-comma separator).
-    struct InlineFormatter {
-        array_separator: &'static str,
-        /// Per open object: whether a member has been written.
-        members: Vec<bool>,
-    }
-
-    impl Formatter for InlineFormatter {
-        fn begin_array_value<W: ?Sized + io::Write>(
-            &mut self,
-            writer: &mut W,
-            first: bool,
-        ) -> io::Result<()> {
-            if first {
-                Ok(())
-            } else {
-                writer.write_all(self.array_separator.as_bytes())
-            }
-        }
-
-        fn begin_object<W: ?Sized + io::Write>(&mut self, writer: &mut W) -> io::Result<()> {
-            self.members.push(false);
-            writer.write_all(b"{")
-        }
-
-        fn end_object<W: ?Sized + io::Write>(&mut self, writer: &mut W) -> io::Result<()> {
-            if self.members.pop() == Some(true) {
-                writer.write_all(b" }")
-            } else {
-                writer.write_all(b"}")
-            }
-        }
-
-        fn begin_object_key<W: ?Sized + io::Write>(
-            &mut self,
-            writer: &mut W,
-            first: bool,
-        ) -> io::Result<()> {
-            if let Some(member) = self.members.last_mut() {
-                *member = true;
-            }
-            writer.write_all(if first { b" " } else { b", " })
-        }
-
-        fn begin_object_value<W: ?Sized + io::Write>(&mut self, writer: &mut W) -> io::Result<()> {
-            writer.write_all(b": ")
-        }
     }
 }
 
@@ -406,7 +160,7 @@ use host_web::{
     COMMAND_REASON_UNKNOWN_TAP, COMMAND_REASON_UNKNOWN_TRACK, COMMAND_REASON_UNSUPPORTED_KIND,
     COMMAND_REASON_WRONG_STATE, COMMAND_RECORD_BYTES, MAXIMUM_COMMAND_RECORDS,
 };
-use json::{Entries, Inline, Num, Tight};
+use json::{Entries, Num};
 use serde::Serialize;
 
 /// The emitted file name, shipped beside the Wasm artifact.
@@ -433,23 +187,6 @@ fn usage() -> ! {
     std::process::exit(2)
 }
 
-/// The keys of a block object that stay on the line of the member before them: the grouped lines
-/// of an effect (`contractMajor`, ...) and of an effect parameter (`unit`, `unitName`, ...).
-const BLOCK_LINE_CONTINUATIONS: &[&str] = &[
-    "contractMinor",
-    "stateLayoutVersion",
-    "unitName",
-    "domainName",
-    "maximum",
-    "default",
-    "mappingName",
-    "automationRateName",
-    "channelPolicyName",
-    "smoothingName",
-    "smoothingSamples",
-    "automatable",
-];
-
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct Document<'a> {
@@ -457,8 +194,8 @@ struct Document<'a> {
     abi_version: u32,
     command_record_bytes: u32,
     maximum_command_records: u32,
-    command_kinds: Vec<Inline<CommandKindRow<'a>>>,
-    command_reasons: Vec<Inline<NamedValue<'a>>>,
+    command_kinds: Vec<CommandKindRow<'a>>,
+    command_reasons: Vec<NamedValue<'a>>,
     observation_vocabularies: ObservationVocabularies<'a>,
     builtins: Builtins<'a>,
     effects: Vec<Effect<'a>>,
@@ -481,25 +218,23 @@ struct NamedValue<'a> {
 
 #[derive(Serialize)]
 struct ObservationVocabularies<'a> {
-    kinds: Inline<Vec<NamedValue<'a>>>,
-    costs: Inline<Vec<NamedValue<'a>>>,
-    cadences: Inline<Vec<NamedValue<'a>>>,
-    folds: Inline<Vec<NamedValue<'a>>>,
-    channels: Inline<Vec<NamedValue<'a>>>,
+    kinds: Vec<NamedValue<'a>>,
+    costs: Vec<NamedValue<'a>>,
+    cadences: Vec<NamedValue<'a>>,
+    folds: Vec<NamedValue<'a>>,
+    channels: Vec<NamedValue<'a>>,
 }
 
 #[derive(Serialize)]
 struct Builtins<'a> {
-    response: Inline<Response<'a>>,
-    parameters: Vec<Inline<BuiltinParameter<'a>>>,
+    response: Response<'a>,
+    parameters: Vec<BuiltinParameter<'a>>,
 }
 
-fn named<'a>(rows: &[(u32, &'a str)]) -> Inline<Vec<NamedValue<'a>>> {
-    Inline(
-        rows.iter()
-            .map(|&(value, name)| NamedValue { value, name })
-            .collect(),
-    )
+fn named<'a>(rows: &[(u32, &'a str)]) -> Vec<NamedValue<'a>> {
+    rows.iter()
+        .map(|&(value, name)| NamedValue { value, name })
+        .collect()
 }
 
 /// Render the whole document. Deterministic: registry order is `EffectId` order.
@@ -548,18 +283,16 @@ pub fn render() -> String {
         maximum_command_records: MAXIMUM_COMMAND_RECORDS,
         command_kinds: kinds
             .iter()
-            .map(|&(value, name, applied, plane)| {
-                Inline(CommandKindRow {
-                    value,
-                    name,
-                    applied,
-                    plane,
-                })
+            .map(|&(value, name, applied, plane)| CommandKindRow {
+                value,
+                name,
+                applied,
+                plane,
             })
             .collect(),
         command_reasons: reasons
             .iter()
-            .map(|&(value, name)| Inline(NamedValue { value, name }))
+            .map(|&(value, name)| NamedValue { value, name })
             .collect(),
         // Issue #143 D1: the observation vocabularies, so a consumer resolves a tap's raw `u32`s
         // the same way it resolves a parameter's -- from this document, never from a hand-written
@@ -588,12 +321,10 @@ pub fn render() -> String {
             ]),
         },
         builtins: Builtins {
-            response: Inline(response_descriptor(
-                builtins::input_filter_response_descriptor(),
-            )),
+            response: response_descriptor(builtins::input_filter_response_descriptor()),
             parameters: BUILTIN_PARAMETER_DESCRIPTORS
                 .iter()
-                .map(|parameter| Inline(builtin_parameter(parameter)))
+                .map(|parameter| builtin_parameter(parameter))
                 .collect(),
         },
         effects: registry
@@ -607,7 +338,7 @@ pub fn render() -> String {
             .collect(),
         controls: controls_object(registry),
     };
-    json::document(&document, BLOCK_LINE_CONTINUATIONS)
+    json::document(&document)
 }
 
 /// The `controls` object (decision 17, slice S2b): the row tables of the `controls` crate, one
@@ -621,11 +352,11 @@ pub fn render() -> String {
 #[serde(rename_all = "camelCase")]
 struct Controls<'a> {
     address: Address<'a>,
-    strip_own: Vec<Inline<ControlRow<'a>>>,
-    builtins: Vec<Inline<ControlRow<'a>>>,
-    route_own: Vec<Inline<ControlRow<'a>>>,
-    vca_own: Vec<Inline<ControlRow<'a>>>,
-    session_own: Vec<Inline<ControlRow<'a>>>,
+    strip_own: Vec<ControlRow<'a>>,
+    builtins: Vec<ControlRow<'a>>,
+    route_own: Vec<ControlRow<'a>>,
+    vca_own: Vec<ControlRow<'a>>,
+    session_own: Vec<ControlRow<'a>>,
     effects: Entries<EffectControls<'a>>,
 }
 
@@ -635,9 +366,9 @@ struct Controls<'a> {
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct Address<'a> {
-    owner_kinds: Inline<Vec<NamedCode<'a>>>,
-    section_kinds: Inline<Vec<NamedCode<'a>>>,
-    lanes: Inline<Vec<NamedCode<'a>>>,
+    owner_kinds: Vec<NamedCode<'a>>,
+    section_kinds: Vec<NamedCode<'a>>,
+    lanes: Vec<NamedCode<'a>>,
 }
 
 #[derive(Serialize)]
@@ -649,24 +380,22 @@ struct NamedCode<'a> {
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct EffectControls<'a> {
-    bypass: Inline<ControlRow<'a>>,
-    parameters: Vec<Inline<ControlRow<'a>>>,
-    link_mode: Option<Inline<ControlRow<'a>>>,
+    bypass: ControlRow<'a>,
+    parameters: Vec<ControlRow<'a>>,
+    link_mode: Option<ControlRow<'a>>,
 }
 
 fn controls_object(registry: &effect_contract::NativeEffectRegistry) -> Controls<'static> {
     let codes = |entries: &[(&'static str, u8)]| {
-        Inline(
-            entries
-                .iter()
-                .map(|&(name, code)| NamedCode { name, code })
-                .collect(),
-        )
+        entries
+            .iter()
+            .map(|&(name, code)| NamedCode { name, code })
+            .collect()
     };
     let rows = |source| {
         table_rows(source)
             .iter()
-            .map(|row| Inline(control_row(row)))
+            .map(|row| control_row(row))
             .collect()
     };
     Controls {
@@ -696,12 +425,9 @@ fn controls_object(registry: &effect_contract::NativeEffectRegistry) -> Controls
                     } = effect_table_rows(descriptor.id.as_str())
                         .expect("a registry effect has rows");
                     let effect = EffectControls {
-                        bypass: Inline(control_row(&bypass)),
-                        parameters: parameters
-                            .iter()
-                            .map(|row| Inline(control_row(row)))
-                            .collect(),
-                        link_mode: link_mode.as_ref().map(|row| Inline(control_row(row))),
+                        bypass: control_row(&bypass),
+                        parameters: parameters.iter().map(|row| control_row(row)).collect(),
+                        link_mode: link_mode.as_ref().map(|row| control_row(row)),
                     };
                     (descriptor.id.as_str().to_owned(), effect)
                 })
@@ -710,7 +436,7 @@ fn controls_object(registry: &effect_contract::NativeEffectRegistry) -> Controls
     }
 }
 
-/// One row of a table, written on one line.
+/// One row of a table.
 ///
 /// The fields that depend on the rate are emitted per launch rate when they differ across the four
 /// (`maximum`); the fields that depend on a route's destination and tap are emitted per case
@@ -984,12 +710,12 @@ struct Effect<'a> {
     /// field an SDK builder could not check before boot: a misspelling parsed, validated, compiled
     /// and then failed preparation with `effect.sidechain.unknown_port`. The engine's refusal is
     /// unmoved; this is what lets an authoring layer refuse the same thing first, by name.
-    ports: Vec<Inline<Port<'a>>>,
+    ports: Vec<Port<'a>>,
     /// Issue #143: never absent. An effect that declares no tap emits `[]`, so a consumer reads one
     /// shape for every effect and "this build has no menu for that effect" is impossible to
     /// confuse with "this document predates observation".
-    observations: Vec<Inline<Observation<'a>>>,
-    response: Option<Inline<Response<'a>>>,
+    observations: Vec<Observation<'a>>,
+    response: Option<Response<'a>>,
 }
 
 fn effect<'a>(
@@ -1006,15 +732,14 @@ fn effect<'a>(
         ports: descriptor
             .ports
             .iter()
-            .map(|port| Inline(effect_port(port)))
+            .map(|port| effect_port(port))
             .collect(),
         observations: descriptor
             .observations
             .iter()
-            .map(|observation| Inline(effect_observation(observation)))
+            .map(|observation| effect_observation(observation))
             .collect(),
-        response: response
-            .map(|factory| Inline(response_descriptor(factory.analysis_descriptor()))),
+        response: response.map(|factory| response_descriptor(factory.analysis_descriptor())),
     }
 }
 
@@ -1034,7 +759,7 @@ struct Response<'a> {
     floor_db: Num,
     total_scope: &'a str,
     bypass: &'a str,
-    sections: Tight<Vec<ResponseSection<'a>>>,
+    sections: Vec<ResponseSection<'a>>,
 }
 
 #[derive(Serialize)]
@@ -1058,16 +783,14 @@ fn response_descriptor(descriptor: &ResponseAnalysisDescriptor) -> Response<'sta
         floor_db: Num(descriptor.floor_db),
         total_scope: response_scope(descriptor.total_scope),
         bypass: response_bypass(descriptor.bypass),
-        sections: Tight(
-            descriptor
-                .sections
-                .iter()
-                .map(|section| ResponseSection {
-                    id: section.id,
-                    name: section.name,
-                })
-                .collect(),
-        ),
+        sections: descriptor
+            .sections
+            .iter()
+            .map(|section| ResponseSection {
+                id: section.id,
+                name: section.name,
+            })
+            .collect(),
     }
 }
 
@@ -1330,9 +1053,9 @@ struct EffectParameter<'a> {
     /// derived from `automatable` rather than written down. A parameter that declares
     /// `AutomationRate::None` has no span the effect would accept and stays `false`.
     live_updatable: bool,
-    enum_choices: Inline<Vec<Choice<'a>>>,
+    enum_choices: Vec<Choice<'a>>,
     /// Issue #242: the lattice declaration this row's legal persisted values are generated from.
-    step: Inline<Step<'a>>,
+    step: Step<'a>,
 }
 
 fn effect_parameter(parameter: &ParameterDescriptor) -> EffectParameter<'static> {
@@ -1359,17 +1082,15 @@ fn effect_parameter(parameter: &ParameterDescriptor) -> EffectParameter<'static>
         readable: parameter.readable,
         automatable: parameter.automatable,
         live_updatable: parameter.automatable,
-        enum_choices: Inline(
-            parameter
-                .enum_choices
-                .iter()
-                .map(|choice| Choice {
-                    value: Num(choice.value),
-                    label: choice.label,
-                })
-                .collect(),
-        ),
-        step: Inline(step_object(parameter.lattice)),
+        enum_choices: parameter
+            .enum_choices
+            .iter()
+            .map(|choice| Choice {
+                value: Num(choice.value),
+                label: choice.label,
+            })
+            .collect(),
+        step: step_object(parameter.lattice),
     }
 }
 

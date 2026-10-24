@@ -26,102 +26,47 @@ use parameter_metadata::abi_layout::{
     ERROR_PHASES, SCHEMA, SOURCE_RING_RESERVE_QUANTA, STAGING_SEQUENCE, render,
 };
 
-/// Minimal parsing: the document is generated, so a test that pulled in a JSON crate would be
-/// testing the crate. These helpers read the exact shapes this generator emits and panic loudly on
-/// anything else, which is itself an assertion that the shape did not change.
-fn structure_body<'a>(document: &'a str, structure: &str) -> &'a str {
-    let marker = format!("\"{structure}\": {{\n");
-    let marker_start = document
-        .find(&marker)
-        .unwrap_or_else(|| panic!("document names structure {structure}"));
-    let indent_start = document[..marker_start]
-        .rfind('\n')
-        .map_or(0, |newline| newline + 1);
-    let indent = &document[indent_start..marker_start];
-    let structure_start = marker_start + marker.len();
-    let close = format!("\n{indent}}}");
-    let structure_end = document[structure_start..]
-        .find(&close)
-        .unwrap_or_else(|| panic!("structure {structure} is closed"));
-    &document[structure_start..structure_start + structure_end]
+/// The document parsed as JSON. Each helper below panics loudly on a missing key, which is itself
+/// an assertion that the schema did not change.
+fn parse(document: &str) -> serde_json::Value {
+    serde_json::from_str(document).expect("the document is JSON")
 }
 
-fn field_entry<'a>(document: &'a str, structure: &str, field: &str) -> (usize, &'a str) {
-    let body = structure_body(document, structure);
-    let row = format!("{{ \"name\": \"{field}\", \"offset\": ");
-    let row_start = body
-        .find(&row)
-        .unwrap_or_else(|| panic!("structure {structure} names field {field}"))
-        + row.len();
-    let type_marker = ", \"type\": \"";
-    let offset_end = body[row_start..]
-        .find(type_marker)
-        .expect("offset is followed by a type")
-        + row_start;
-    let type_start = offset_end + type_marker.len();
-    let type_end = body[type_start..].find('"').expect("type is closed") + type_start;
-    (
-        body[row_start..offset_end]
-            .trim()
-            .parse()
-            .expect("offset is an integer"),
-        &body[type_start..type_end],
-    )
-}
-
+/// A structure's `fields` rows: a member of `structures`, or the top-level `commandRecord`.
 fn field_offset(document: &str, structure: &str, field: &str) -> usize {
-    field_entry(document, structure, field).0
+    let document = parse(document);
+    let block = document["structures"]
+        .get(structure)
+        .or_else(|| document.get(structure))
+        .unwrap_or_else(|| panic!("document names structure {structure}"));
+    let row = block["fields"]
+        .as_array()
+        .expect("a structure has fields")
+        .iter()
+        .find(|row| row["name"] == field)
+        .unwrap_or_else(|| panic!("structure {structure} names field {field}"));
+    usize::try_from(row["offset"].as_u64().expect("offset is an integer")).expect("a usize")
 }
 
-fn named_constants<'a>(document: &'a str, group: &str) -> Vec<(u32, &'a str)> {
-    let key = format!("\"{group}\": [");
-    let start = document
-        .find(&key)
+fn named_constants(document: &str, group: &str) -> Vec<(u32, String)> {
+    parse(document)["constants"][group]
+        .as_array()
         .unwrap_or_else(|| panic!("document names constant group {group}"))
-        + key.len();
-    let end = document[start..].find(']').expect("group is closed") + start;
-    let mut rows = Vec::new();
-    for entry in document[start..end].split("}, ") {
-        let value_key = "\"value\": ";
-        let name_key = "\"name\": \"";
-        let Some(value_start) = entry.find(value_key) else {
-            continue;
-        };
-        let value_start = value_start + value_key.len();
-        let value_end = entry[value_start..].find(',').expect("value then name") + value_start;
-        let name_start = entry.find(name_key).expect("row names a name") + name_key.len();
-        let name_end = entry[name_start..].find('"').expect("name is closed") + name_start;
-        rows.push((
-            entry[value_start..value_end]
-                .trim()
-                .parse()
-                .expect("value is an integer"),
-            &entry[name_start..name_end],
-        ));
-    }
-    rows
+        .iter()
+        .map(|row| {
+            (
+                u32::try_from(row["value"].as_u64().expect("value is an integer")).expect("a u32"),
+                row["name"].as_str().expect("row names a name").to_owned(),
+            )
+        })
+        .collect()
 }
 
-/// Read a scalar, searching from `after` so a key that repeats across blocks (`bytes` appears in
-/// every structure) is read from the block the caller means.
-fn scalar_after(document: &str, after: &str, name: &str) -> u64 {
-    let base = document
-        .find(after)
-        .unwrap_or_else(|| panic!("document names {after}"));
-    let key = format!("\"{name}\": ");
-    let start = document[base..]
-        .find(&key)
-        .unwrap_or_else(|| panic!("document names scalar {name} after {after}"))
-        + base
-        + key.len();
-    let end = start
-        + document[start..]
-            .find([',', '\n', '}'])
-            .expect("scalar is terminated");
-    document[start..end]
-        .trim()
-        .parse()
-        .expect("scalar is an integer")
+/// Read the integer `name` of the top-level object `block`.
+fn scalar(document: &str, block: &str, name: &str) -> u64 {
+    parse(document)[block][name]
+        .as_u64()
+        .unwrap_or_else(|| panic!("document names scalar {name} in {block}"))
 }
 
 /// The emitted command-record offsets decode, on the live engine, to exactly the values written.
@@ -137,7 +82,7 @@ fn scalar_after(document: &str, after: &str, name: &str) -> u64 {
 #[test]
 fn the_emitted_command_record_offsets_are_the_engine_s_own_decode_rule() {
     let document = render();
-    let bytes = scalar_after(&document, "\"commandRecord\": {", "bytes");
+    let bytes = scalar(&document, "commandRecord", "bytes");
     assert_eq!(
         bytes,
         u64::from(COMMAND_RECORD_BYTES),
@@ -199,10 +144,9 @@ fn the_emitted_command_record_offsets_are_the_engine_s_own_decode_rule() {
 #[test]
 fn the_published_source_ring_rule_reproduces_the_engine_derivation() {
     let document = render();
-    let key = "\"sourceRing\": { \"stallToleranceMs\": ";
-    let start = document.find(key).expect("the document names sourceRing") + key.len();
-    let end = document[start..].find(',').expect("two members") + start;
-    let tolerance_ms: u64 = document[start..end].trim().parse().expect("an integer");
+    let tolerance_ms = parse(&document)["constants"]["sourceRing"]["stallToleranceMs"]
+        .as_u64()
+        .expect("the document names sourceRing's tolerance");
     assert_eq!(
         u32::try_from(tolerance_ms).expect("a u32"),
         host_web::SOURCE_STALL_TOLERANCE_MS,
@@ -237,9 +181,18 @@ fn the_boot_alias_table_is_exactly_the_three_alias_constants() {
     assert_eq!(
         aliases,
         vec![
-            (host_web::RESULT_REFUSED_DOCUMENT, "refusedDocument"),
-            (host_web::RESULT_REFUSED_OPTIONS, "refusedOptions"),
-            (host_web::RESULT_REFUSED_LIFECYCLE, "refusedLifecycle"),
+            (
+                host_web::RESULT_REFUSED_DOCUMENT,
+                "refusedDocument".to_owned()
+            ),
+            (
+                host_web::RESULT_REFUSED_OPTIONS,
+                "refusedOptions".to_owned()
+            ),
+            (
+                host_web::RESULT_REFUSED_LIFECYCLE,
+                "refusedLifecycle".to_owned()
+            ),
         ],
         "the alias table is the three boot alias constants, in constant order"
     );
@@ -300,11 +253,11 @@ fn the_document_carries_its_whole_schema_and_the_engine_s_offsets() {
     assert_eq!(field_offset(&document, "status", "sampleRateHz"), 20);
     assert_eq!(field_offset(&document, "status", "quantumFrames"), 24);
     assert_eq!(
-        scalar_after(&document, "\"constants\": {", "maximumDocumentBytes"),
+        scalar(&document, "constants", "maximumDocumentBytes"),
         u64::from(host_web::MAXIMUM_DOCUMENT_BYTES)
     );
     assert_eq!(
-        scalar_after(&document, "\"constants\": {", "defaultMaximumMemoryBytes"),
+        scalar(&document, "constants", "defaultMaximumMemoryBytes"),
         host_web::DEFAULT_MAXIMUM_MEMORY_BYTES
     );
 }

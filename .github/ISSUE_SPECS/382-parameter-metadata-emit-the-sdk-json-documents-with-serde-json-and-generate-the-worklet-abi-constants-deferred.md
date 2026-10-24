@@ -15,18 +15,26 @@ Do not claim before launch without an owner comment here.
 - Pulled forward by the backlog sprint (owner goal of 2026-10-24); the launch hold is discharged.
 - Root decisions: byte identity of every generated document, no re-pin; part 2 is one assertion
   in an existing gate, not a generated constants prelude. No new test.
-- Emission: `Serialize` models (serde derive) written through `serde_json`. `preserve_order` is not
-  used: struct field order is the schema order, and the feature would unify into every workspace
-  `serde_json` user. `raw_value` carries each `f32` in `number()`'s spelling. A small block
-  formatter keeps the shipped whitespace (two-space blocks; a fixed list of continuation keys stays
-  on the line before it; `Inline`/`Tight` values are written on one line). New direct dependency
-  `serde =1.0.228` (already in `Cargo.lock`; one lock line).
+- Emission: `Serialize` models (serde derive) written by `serde_json`'s standard pretty printer.
+  `preserve_order` is not used: struct field order is the schema order, and the feature would
+  unify into every workspace `serde_json` user. `raw_value` carries each `f32` in `number()`'s
+  spelling. New direct dependency `serde =1.0.228` (already in `Cargo.lock`; one lock line).
+- Change of decision (root, after the attempt-1 verifier PASS): attempt 1 kept the bytes with a
+  custom block formatter (continuation keys, one-line wrappers). Nothing pins the asset bytes by
+  digest, and the owner's rule is that fragile machinery is not worth a small gain, so the
+  simpler shape wins: the standard pretty printer and one whitespace-only re-pin of the
+  generated documents. The verifier's minor finding on non-string keys in that formatter goes
+  away with it. The tests that scanned the old line layout (`tests/abi_layout.rs`,
+  `tests/round_trip.rs`) now read the parsed JSON; their claims are unchanged.
 - Part 2: `scripts/check-web-audioworklet.sh` requires each shipped JS file to declare
   `COMMAND_RECORD_BYTES` exactly once, equal to the shipped layout's `commandRecord.bytes`.
 
 ## Evidence
 
-- Both generated documents byte-identical: generator, `scripts/check-sdk-generated.sh`, then
-  `git diff --exit-code sdk` clean; the built artifact's two JSON documents equal `sdk/assets`.
+- Whitespace-only re-pin: each old and new document, parsed with keys in order and numbers kept as
+  text, is equal. Bytes: `miso-engine-v1-parameter-metadata.json` 217,854 -> 335,632;
+  `miso-engine-v1-abi-layout.json` and `scripts/fixtures/abi-layout-v1-self-test.json`
+  27,915 -> 39,863; session keys and response frame unchanged. `sdk/src/generated` is unchanged;
+  the built artifact's two JSON documents equal `sdk/assets`.
 - Red first: `COMMAND_RECORD_BYTES = 273` in the worklet JS (tree and artifact) passes the gate
   before the assertion and fails it after; the same mutant in the host JS fails it too.

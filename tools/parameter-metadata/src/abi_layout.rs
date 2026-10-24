@@ -51,7 +51,7 @@ use core::mem::offset_of;
 
 use serde::Serialize;
 
-use crate::json::{self, Entries, Inline};
+use crate::json::{self, Entries};
 use host_core::RESPONSE_MAXIMUM_POINTS;
 use host_web::{
     ABI_VERSION, BACKEND_SCALAR, BACKEND_SIMD128, BOOT_OPTIONS_BYTES, BUFFER_COMMAND,
@@ -1407,12 +1407,10 @@ pub fn render() -> String {
     ];
 
     let named = |values: &[(u32, &'static str)]| {
-        Inline(
-            values
-                .iter()
-                .map(|&(value, name)| NamedValue { value, name })
-                .collect(),
-        )
+        values
+            .iter()
+            .map(|&(value, name)| NamedValue { value, name })
+            .collect()
     };
     let structure = |bytes: u32, fields: &[Field]| Structure {
         bytes,
@@ -1421,8 +1419,8 @@ pub fn render() -> String {
     let document = Document {
         schema: SCHEMA,
         abi_version: ABI_VERSION,
-        staging_sequence: Inline(&STAGING_SEQUENCE),
-        error_phases: Inline(&ERROR_PHASES),
+        staging_sequence: &STAGING_SEQUENCE,
+        error_phases: &ERROR_PHASES,
         exports: &EXPORTS,
         structures: Entries(
             [
@@ -1613,13 +1611,13 @@ pub fn render() -> String {
             spectrum_bin_count: SPECTRUM_BIN_COUNT,
             maximum_spectrum_id_bytes: SPECTRUM_MAXIMUM_ID_BYTES,
             default_maximum_memory_bytes: DEFAULT_MAXIMUM_MEMORY_BYTES,
-            source_ring: Inline(SourceRing {
+            source_ring: SourceRing {
                 stall_tolerance_ms: SOURCE_STALL_TOLERANCE_MS,
                 reserve_quanta: SOURCE_RING_RESERVE_QUANTA,
-            }),
+            },
         },
     };
-    json::document(&document, &[])
+    json::document(&document)
 }
 
 #[derive(Serialize)]
@@ -1627,8 +1625,8 @@ pub fn render() -> String {
 struct Document<'a> {
     schema: &'a str,
     abi_version: u32,
-    staging_sequence: Inline<&'a [&'a str]>,
-    error_phases: Inline<&'a [&'a str]>,
+    staging_sequence: &'a [&'a str],
+    error_phases: &'a [&'a str],
     exports: &'a [&'a str],
     structures: Entries<Structure<'a>>,
     command_record: CommandRecord<'a>,
@@ -1638,14 +1636,14 @@ struct Document<'a> {
 #[derive(Serialize)]
 struct Structure<'a> {
     bytes: u32,
-    fields: Vec<Inline<FieldRow<'a>>>,
+    fields: Vec<FieldRow<'a>>,
 }
 
 #[derive(Serialize)]
 struct CommandRecord<'a> {
     bytes: u32,
     endianness: &'a str,
-    fields: Vec<Inline<FieldRow<'a>>>,
+    fields: Vec<FieldRow<'a>>,
 }
 
 #[derive(Serialize)]
@@ -1673,24 +1671,24 @@ struct SourceRing {
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct Constants<'a> {
-    result_codes: Inline<Vec<NamedValue<'a>>>,
-    boot_result_aliases: Inline<Vec<NamedValue<'a>>>,
-    states: Inline<Vec<NamedValue<'a>>>,
-    backends: Inline<Vec<NamedValue<'a>>>,
-    buffer_kinds: Inline<Vec<NamedValue<'a>>>,
-    wire_command_kinds: Inline<Vec<NamedValue<'a>>>,
-    command_reasons: Inline<Vec<NamedValue<'a>>>,
-    racks: Inline<Vec<NamedValue<'a>>>,
-    live_response_racks: Inline<Vec<NamedValue<'a>>>,
-    observation_channels: Inline<Vec<NamedValue<'a>>>,
-    observation_statuses: Inline<Vec<NamedValue<'a>>>,
-    response_grids: Inline<Vec<NamedValue<'a>>>,
-    response_channels: Inline<Vec<NamedValue<'a>>>,
-    live_response_modes: Inline<Vec<NamedValue<'a>>>,
-    live_response_meanings: Inline<Vec<NamedValue<'a>>>,
-    spectrum_targets: Inline<Vec<NamedValue<'a>>>,
-    spectrum_channels: Inline<Vec<NamedValue<'a>>>,
-    spectrum_stream_statuses: Inline<Vec<NamedValue<'a>>>,
+    result_codes: Vec<NamedValue<'a>>,
+    boot_result_aliases: Vec<NamedValue<'a>>,
+    states: Vec<NamedValue<'a>>,
+    backends: Vec<NamedValue<'a>>,
+    buffer_kinds: Vec<NamedValue<'a>>,
+    wire_command_kinds: Vec<NamedValue<'a>>,
+    command_reasons: Vec<NamedValue<'a>>,
+    racks: Vec<NamedValue<'a>>,
+    live_response_racks: Vec<NamedValue<'a>>,
+    observation_channels: Vec<NamedValue<'a>>,
+    observation_statuses: Vec<NamedValue<'a>>,
+    response_grids: Vec<NamedValue<'a>>,
+    response_channels: Vec<NamedValue<'a>>,
+    live_response_modes: Vec<NamedValue<'a>>,
+    live_response_meanings: Vec<NamedValue<'a>>,
+    spectrum_targets: Vec<NamedValue<'a>>,
+    spectrum_channels: Vec<NamedValue<'a>>,
+    spectrum_stream_statuses: Vec<NamedValue<'a>>,
     maximum_command_records: u32,
     maximum_document_bytes: u32,
     maximum_source_channels: u32,
@@ -1717,12 +1715,12 @@ struct Constants<'a> {
     spectrum_bin_count: u32,
     maximum_spectrum_id_bytes: usize,
     default_maximum_memory_bytes: u64,
-    source_ring: Inline<SourceRing>,
+    source_ring: SourceRing,
 }
 
-fn field_rows(fields: &[Field]) -> Vec<Inline<FieldRow<'static>>> {
+fn field_rows(fields: &[Field]) -> Vec<FieldRow<'static>> {
     fields
         .iter()
-        .map(|&(name, offset, kind)| Inline(FieldRow { name, offset, kind }))
+        .map(|&(name, offset, kind)| FieldRow { name, offset, kind })
         .collect()
 }
