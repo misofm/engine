@@ -871,6 +871,10 @@ pub struct PlanStateInventory {
     /// The strips whose fade-in this plan's table holds, sorted by strip ID (issue #1392 D1):
     /// "this plan armed the strip", not "the fade still waits", which only render knows.
     fade_arms: Box<[FadeArmInventoryRow]>,
+    /// Which entries of this plan's fade table render has fired (issue #1392, root ruling of
+    /// attempt 2): a successor drops the row of a fired entry, so rows never accumulate and a
+    /// fired fade is neither carried nor re-armed.
+    fade_watch: graph::GraphFadeArmWatch,
     /// The input arrival this plan renders at every node where it is nonzero (#1285 D2): the
     /// floored `max` of PDC, in samples, sorted by node ID. A successor is compiled with these as
     /// its input floors, so no surviving node's latency drops across a structural transaction.
@@ -1172,6 +1176,7 @@ impl PlanStateInventory {
             follow_retarget_ramp: 0,
             restarted: Box::default(),
             fade_arms: Box::default(),
+            fade_watch: graph::GraphFadeArmWatch::default(),
             input_floors: Box::default(),
             raised_arrivals: Box::default(),
             // #1396 D2: no read-ahead.
@@ -1209,6 +1214,7 @@ impl PlanStateInventory {
             follow_retarget_ramp: 0,
             restarted: Box::default(),
             fade_arms: Box::default(),
+            fade_watch: graph::GraphFadeArmWatch::default(),
             input_floors: self.input_floors.clone(),
             raised_arrivals: self.raised_arrivals.clone(),
             source_read_offset: 0,
@@ -1293,6 +1299,7 @@ impl PlanStateInventory {
                 .sum::<usize>()
             + self.restarted.iter().map(|id| id.len()).sum::<usize>()
             + self.fade_arms.iter().map(|row| row.id.len()).sum::<usize>()
+            + self.fade_watch.heap_bytes()
             + self
                 .input_floors
                 .iter()
@@ -3377,7 +3384,13 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
                 .into_iter()
                 .map(|id| (id, None))
                 .collect();
+            // A row whose entry render has fired is dropped: the strip's lane imports `armed =
+            // false`, so the successor needs no entry and never fades it again.
+            let watch = &base.inventory.fade_watch;
             strips.extend(base.inventory.fade_arms.iter().filter_map(|row| {
+                if watch.fired(row.entry) {
+                    return None;
+                }
                 let lane =
                     strip_stage_row(&strip_stages, &row.id, graph::BuiltinStripOwner::Fader)?;
                 strip_carry
@@ -3565,10 +3578,12 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
             .map_err(|_| graph_failure("host.carry.install"))?;
     }
     let mut fade_arm_rows = Vec::new();
+    let mut fade_watch = graph::GraphFadeArmWatch::default();
     if !fade_arms.is_empty() {
         let (strips, arms): (Vec<_>, Vec<_>) = fade_arms.into_iter().unzip();
-        let entries = graph::install_fade_arms(&mut plan, arms)
+        let (entries, watch) = graph::install_fade_arms(&mut plan, arms)
             .map_err(|_| graph_failure("host.fade.install"))?;
+        fade_watch = watch;
         let mut pairs = Vec::new();
         for (id, entry) in strips.into_iter().zip(entries) {
             let Some(entry) = entry else {
@@ -3689,6 +3704,7 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
         follow_retarget_ramp: route_carry.follow_retarget_ramp,
         restarted: restarted.into_boxed_slice(),
         fade_arms: fade_arm_rows.into_boxed_slice(),
+        fade_watch,
         input_floors,
         raised_arrivals,
         source_read_offset,
@@ -7179,6 +7195,7 @@ mod tests {
             follow_retarget_ramp: 0,
             restarted: Box::default(),
             fade_arms: Box::default(),
+            fade_watch: graph::GraphFadeArmWatch::default(),
             input_floors: Box::default(),
             raised_arrivals: Box::default(),
             // #1396 D2: no read-ahead.

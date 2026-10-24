@@ -16333,7 +16333,7 @@ mod tests {
                 },
             ])
             .expect("installed");
-        assert_eq!(installed, vec![Some(0), Some(1)]);
+        assert_eq!(installed.0, vec![Some(0), Some(1)]);
         FADE_FIRES.with(|fires| fires.borrow_mut().clear());
         for block in 0..10_u64 {
             let mut storage = vec![0.0_f32; 2 * 128];
@@ -16352,6 +16352,10 @@ mod tests {
             "the submix arm fires at once, the track's at 896"
         );
         assert_eq!(executor.fade_arms_pending, 0, "both arms are done");
+        assert!(
+            installed.1.fired(0) && installed.1.fired(1),
+            "the watch saw both fire"
+        );
     }
 
     /// Issue #918 gate 1: each source shape and the claims it binds on the copy.

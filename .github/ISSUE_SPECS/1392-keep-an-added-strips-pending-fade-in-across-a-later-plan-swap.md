@@ -155,8 +155,9 @@ In `crates/host-core/tests/successor_swap.rs`, quantum 128, `N = 2000`, at `Back
 
 - Gate 1: a successor that does not re-arm from the inventory lets the stem pop in at full gain;
   one that re-arms but restarts a carried `FireAt` as `Waiting` fires `D` late. Either turns it red.
-- Gate 2: a re-arm whose lane import does not clear `armed` (or whose entry is not marked `Done`)
-  mutes a playing strip and fades it in again: a dip. It turns red.
+- Gate 2: a second swap after the fire whose lane import does not overwrite the arm's mute with
+  the carried lane's state (it keeps or re-derives a mute) silences the playing strip after the
+  swap. It turns red.
 - Gate 3: a carried entry on a restarted chain (the predecessor's `D` against a new latency) turns
   it red.
 - Gate 4: a successor that re-arms strips but not routes lets the added route, or the added
@@ -196,3 +197,15 @@ and gets no entry (#1324's case).
   own run over both swap blocks.
 - `crates/capi/src/runtime/tests.rs`' `a_held_seek_carries_from_a_taken_candidate` is a C ABI
   two-swap case of gate 1 (b): it fails with the arm left in the first successor and passes with it.
+
+## Attempt 2 (2026-10-24)
+
+- Gate 2 runs without output latency and checks the track is heard from the second swap on; its
+  value is the lane import overwriting the arm's mute (red on `muted = carried.muted || armed`
+  and on an import that returns early for an armed lane).
+- Root ruling: a fired arm's inventory row is dropped. Render sets a per-entry flag
+  (`graph::GraphFadeArmWatch`, a release store) when an entry fires or a carry copies `Done`; the
+  successor skips a row whose flag is set, so a fired strip is neither carried nor re-armed and
+  rows do not accumulate. A flag read clear while render fires the entry costs one re-armed entry
+  whose carry copies `Done`, and the next successor drops it.
+- A carried fader lane whose source still waits but which does not carry (a fresh lane) is #1324's.

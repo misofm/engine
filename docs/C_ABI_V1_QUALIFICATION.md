@@ -124,7 +124,8 @@ played block plus `D`, the samples of latent nodes and compensation lines betwee
 its fader (zero for a plain track), then unmutes over the session mute ramp, bit-identical to the
 fresh session with the track muted and given a live unmute at that block
 (`host-core`'s `an_added_track_fades_in_from_its_first_played_block_on_every_width`). A channel
-the session mutes is not armed, a host mute or unmute before the fire replaces it, and a declared
+the session mutes is not armed, a host mute before the fire cancels it (an unmute is a no-op that
+keeps it waiting), and a declared
 discontinuity arms nothing. Strips the transaction did not add are untouched. A later structural
 transaction adopted before the fade has run keeps it (#1392): while the strip's fader lane carries,
 a waiting fade keeps waiting, a scheduled one keeps its render sample, and a fired one never runs

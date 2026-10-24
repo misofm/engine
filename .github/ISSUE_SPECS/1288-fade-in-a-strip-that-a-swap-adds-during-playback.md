@@ -64,8 +64,9 @@ start at rest at the adopted block.
 - **D2. Arm (builtins).** `FaderLane` gains `armed: bool`. An armed channel is prepared muted
   (settled `+0.0`) and remembers its fader gain. `FaderRampStage` keeps `armed: [[bool; MAX]; 2]`
   and gains `fire_fade_in(lane, ramp_samples)`: for each armed channel of the lane, clear the flag
-  and run the existing `set_mute(.., false, ramp_samples)`. Any `set_mute` on a channel clears its
-  flag first (a user mute wins; a later unmute is an ordinary unmute). A fader record while armed
+  and run the existing `set_mute(.., false, ramp_samples)`. A mute on a channel clears its flag
+  first (a user mute wins); an unmute while armed is a no-op that keeps the arm (root ruling,
+  attempt 2). A fader record while armed
   only updates the remembered gain. `fire_fade_in` on an unarmed lane does nothing.
 - **D3. Fire (graph).** The prepared graph plan holds a fixed table of fade arms, one per armed
   strip: `{ claim: Option<u32>, owner, lane, delay_samples: u32, ramp_samples: u32, state }`, with
@@ -231,3 +232,11 @@ Implementation facts and the changes they forced:
 - `crates/capi/src/runtime/tests.rs` holds three tests that assert an added stem is bit-identical
   to the fresh post-edit session from its anchor; with the fade they fail, and the file is outside
   this slice's paths.
+
+## Attempt 2 (2026-10-24)
+
+- Root ruling on D2: only a mute disarms a channel. An unmute while armed is a no-op that keeps the
+  arm (the model already holds the lane unmuted, and the fade is how it gets there), so a redundant
+  unmute before an anchored source plays cannot turn the fade into a step. Gate 1 covers it.
+- D4 for a submix has its own control-thread assertion
+  (`an_added_submix_delays_its_fade_by_its_longest_route_line`, `D = 486`).

@@ -3111,12 +3111,12 @@ fn with_fade_track(
     model
 }
 
-/// What a fade run rendered: every block's bits, the first successor's fade arms (`(D, ramp)`),
+/// What a fade run rendered: every block's bits, each successor's fade arms (`(D, ramp)`),
 /// each successor's `restarted_strips()`, and the render thread's `(allocations, reallocations,
 /// deallocations)` over every hand-over and every block from the first swap on.
 struct FadeRun {
     blocks: Vec<Vec<u32>>,
-    arms: Vec<(u32, u32)>,
+    arms: Vec<Vec<(u32, u32)>>,
     restarted: Vec<Vec<Box<str>>>,
     allocator: (u64, u64, u64),
 }
@@ -3165,7 +3165,7 @@ fn fade_run(
     let mut blocks = Vec::with_capacity(BLOCKS);
     for block in 0..BLOCKS {
         if let Some(swap) = swaps.iter().find(|swap| swap.block == block) {
-            let first = arms.is_empty() && restarted.is_empty();
+            let first = arms.is_empty();
             let mut successor = CellPlan::successor(
                 swap.to,
                 &plan.live.prepared.inventory,
@@ -3173,10 +3173,10 @@ fn fade_run(
                 &EditRamps::new(),
                 backend,
             );
-            if first {
-                arms = graph::test_only_fade_arms(&mut successor.live.prepared.plan)
-                    .expect("a graph plan");
-            }
+            arms.push(
+                graph::test_only_fade_arms(&mut successor.live.prepared.plan)
+                    .expect("a graph plan"),
+            );
             restarted.push(successor.live.prepared.restarted_strips().to_vec());
             successor
                 .live
@@ -3272,7 +3272,7 @@ fn an_added_track_fades_in_from_its_first_played_block(backend: Backend) {
         let feeds = [&kept, &aux];
         let run = fade_run(&a, &swap, &feeds, None, &[], backend);
         assert_eq!(
-            run.arms,
+            run.arms[0],
             vec![(delay, ramp)],
             "{backend:?} {case}: D and the ramp"
         );
@@ -3459,49 +3459,59 @@ fn a_pending_fade_survives_a_second_swap_on_every_width() {
 }
 
 /// Issue #1392 gate 2 at one width: the added track on the playing [`SOURCE`] fires at the swap
-/// block; a second transaction adopted mid-ramp (block 7) or after the ramp (block 10) leaves the
-/// run equal to the one-swap fade: no second dip.
+/// block (no output latency, so the fade is heard at once); a second transaction adopted
+/// mid-ramp (block 7) or after the ramp (block 10) re-arms nothing, since the fired entry's row is
+/// dropped, and its lane import overwrites the arm's mute with the carried, unmuted state: the run
+/// equals the one-swap fade, and the track is heard after the second swap.
 fn a_fired_fade_does_not_repeat(backend: Backend) {
-    let ramp = LiveRamps::for_session(&fade_base()).mute_samples;
+    let ramp = LiveRamps::for_session(&unlimited_fade_base()).mute_samples;
     assert!(
         ramp as usize > QUANTUM && SWAP_BLOCK * QUANTUM + (ramp as usize) < 10 * QUANTUM,
         "block 7 is inside the ramp and block 10 after it"
     );
     let (kept, aux) = fade_feeds();
-    let a = Session::compile(fade_base());
-    let b1 = Session::compile(with_fade_track(fade_base(), SOURCE, false, false));
-    let b2 = Session::compile(with_muted_track(with_fade_track(
-        fade_base(),
-        SOURCE,
-        false,
-        false,
-    )));
-    let muted = Session::compile(with_muted_track(with_fade_track(
-        fade_base(),
-        SOURCE,
-        false,
-        true,
-    )));
+    let feeds = [&kept, &aux];
+    let model = |extra: bool, muted: bool| {
+        let model = with_fade_track(unlimited_fade_base(), SOURCE, false, muted);
+        if extra {
+            with_muted_track(model)
+        } else {
+            model
+        }
+    };
+    let a = Session::compile(unlimited_fade_base());
+    let b1 = Session::compile(model(false, false));
+    let b2 = Session::compile(model(true, false));
+    let muted = Session::compile(model(true, true));
     let reference = fade_run(
         &muted,
         &[],
-        &[&kept, &aux],
+        &feeds,
         None,
         &[unmute_fade(SWAP_BLOCK, ramp)],
         backend,
     );
+    let silent = fade_run(&muted, &[], &feeds, None, &[], backend);
     for second in [SWAP_BLOCK + 1, 10] {
-        let run = two_swap_run(&a, &b1, &b2, second, None, &[&kept, &aux], backend);
+        let run = two_swap_run(&a, &b1, &b2, second, None, &feeds, backend);
+        assert!(
+            run.arms[1].is_empty(),
+            "{backend:?}: a fired fade is not re-armed"
+        );
         assert_eq!(
             first_fade_difference(&run, &reference),
             None,
             "{backend:?}: a second swap at block {second} repeats no fade"
         );
+        assert!(
+            (second..BLOCKS).all(|block| reference.blocks[block] != silent.blocks[block]),
+            "{backend:?}: the track is heard in every block from the second swap at {second}"
+        );
     }
 }
 
-/// Issue #1392 gate 2 on every width. Red if the lane import leaves `armed` set or the carried
-/// entry is not copied `Done` (the playing strip is muted and fades in again).
+/// Issue #1392 gate 2 on every width. Red if the second swap's lane import does not overwrite the
+/// arm's mute with the carried lane's state (the playing strip is muted again after the swap).
 #[test]
 fn a_fired_fade_does_not_repeat_on_every_width() {
     for backend in backends() {
@@ -3578,6 +3588,35 @@ fn assert_audible(muted: &Session, feeds: &[&Feed], reference: &FadeRun, backend
         silent.blocks, reference.blocks,
         "the fade reaches the output"
     );
+}
+
+/// Issue #1288 D4 for a submix, on the control thread: B adds submix `bus` and sends `eq0`
+/// (behind a 486-sample limiter) and `eq1` (no latency) to it. The bus's input sums at 486, so
+/// `eq1`'s route into it gets a 486-sample compensation line that starts at rest; the bus has no
+/// latent node of its own, so its `D` is that line, 486. Red if `D` drops the route compensation
+/// term (0 here).
+#[test]
+fn an_added_submix_delays_its_fade_by_its_longest_route_line() {
+    let mut a_model = fade_base();
+    add_limiter(&mut a_model, "eq0", "lim");
+    let a = Session::compile(a_model.clone());
+    let mut b_model = a_model;
+    add_bus(&mut b_model, "bus");
+    send_route_to(&mut b_model, "eq0", "bus");
+    send_route_to(&mut b_model, "eq1", "bus");
+    let b = Session::compile(b_model);
+    let backend = Backend::current();
+    let predecessor = CellPlan::fresh(&a, backend);
+    let mut successor = CellPlan::successor(
+        &b,
+        &predecessor.live.prepared.inventory,
+        &a.model,
+        &EditRamps::new(),
+        backend,
+    );
+    let arms = graph::test_only_fade_arms(&mut successor.live.prepared.plan).expect("a graph plan");
+    assert_eq!(arms.len(), 1, "one added strip, the bus");
+    assert_eq!(arms[0].0, 486, "D is the bus's longest route line");
 }
 
 /// Issue #1288 D4 (gate 4(d) on the control thread): an added track whose compressor is keyed

@@ -3173,8 +3173,8 @@ pub(crate) struct FaderRampStage<L: Lane> {
     /// timed gain operation only remembers the gain.
     mute_ramp: [[bool; MAX_BANK_LANES]; 2],
     /// Whether each lane waits, muted, for the fade-in a plan swap armed, `[channel][lane]` (issue
-    /// #1288 D2). Set only by [`Self::arm_fade_in`]; cleared by [`Self::fire_fade_in`] and by
-    /// every mute change on the channel, so a user's mute or unmute wins over the fade.
+    /// #1288 D2). Set only by [`Self::arm_fade_in`]; cleared by [`Self::fire_fade_in`] and by a
+    /// mute on the channel, so a user's mute wins over the fade. An unmute while armed leaves it.
     armed: [[bool; MAX_BANK_LANES]; 2],
 }
 
@@ -3245,10 +3245,11 @@ impl<L: Lane> FaderRampStage<L> {
     // REALTIME_POLICY_BEGIN
     /// Fires one lane's armed fade-in (issue #1288 D2): each armed channel is disarmed and unmuted
     /// over `ramp_samples`, exactly the unmute [`Self::set_mute`] runs. A channel that is not
-    /// armed is not touched, so a lane the user muted or unmuted after the arm keeps that state.
+    /// armed is not touched, so a lane the user muted after the arm stays muted.
     fn fire_fade_in(&mut self, lane: usize, ramp_samples: u32) {
         for channel in 0..2 {
             if self.armed[channel][lane] {
+                self.armed[channel][lane] = false;
                 self.mute_channel(lane, channel, false, ramp_samples);
             }
         }
@@ -3343,10 +3344,17 @@ impl<L: Lane> FaderRampStage<L> {
     /// as they were. So a repeated mute never restarts a fader ramp in flight or a mute ramp, and
     /// never holds the gain for a window.
     ///
-    /// Every call disarms the channel first, before that early return (issue #1288 D2): a mute
-    /// while armed keeps the lane muted for good, and an unmute while armed is an ordinary unmute.
+    /// An armed channel (issue #1288 D2, root ruling of attempt 2) takes a mute as the end of its
+    /// arm, before that early return, so it stays muted for good; it takes an unmute as a no-op
+    /// that keeps the arm: the model already holds the lane unmuted, and the fade is how it gets
+    /// there, so a redundant unmute before the source plays cannot turn the fade into a step.
     fn mute_channel(&mut self, lane: usize, channel: usize, muted: bool, smoothing_samples: u32) {
-        self.armed[channel][lane] = false;
+        if self.armed[channel][lane] {
+            if !muted {
+                return;
+            }
+            self.armed[channel][lane] = false;
+        }
         if self.muted[channel][lane] == muted {
             return;
         }

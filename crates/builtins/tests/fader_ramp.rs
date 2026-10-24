@@ -1208,17 +1208,19 @@ fn process_with_operations_never_allocates() {
 }
 
 /// Issue #1288 gate 1: an armed lane is a settled mute (exact `+0.0`) whose fader record is only
-/// remembered; its fire is bit for bit an unmute over the same window at the same block, and a
-/// mute before the fire disarms it, so the fire leaves the lane muted. At both bank widths and on
-/// the scalar track; every other lane of a bank is compared too.
+/// remembered; its fire is bit for bit an unmute over the same window at the same block. A mute
+/// before the fire disarms it, so the fire leaves the lane muted; an unmute before the fire is a
+/// no-op that keeps the arm, so the fire is still the fade. At both bank widths and on the scalar
+/// track; every other lane of a bank is compared too.
 ///
-/// Red if a user mute does not disarm the lane (the fire then unmutes a strip the user muted), or
-/// if the fire is not exactly the unmute (a different ramp or gain).
+/// Red if a user mute does not disarm the lane (the fire then unmutes a strip the user muted), if
+/// an unmute before the fire unmutes the lane at once (a step, not a fade), or if the fire is not
+/// exactly the unmute (a different ramp or gain).
 #[test]
 fn an_armed_fade_in_is_a_held_mute_that_fires_as_an_unmute() {
     const RAMP: u32 = 200;
     for (name, build) in Subject::subjects() {
-        for user_mute in [false, true] {
+        for (user_mute, user_unmute) in [(false, false), (true, false), (false, true)] {
             let (mut subject, mut twin) = (build(), build());
             assert!(subject.arm(), "{name}: an unmuted lane arms");
             assert!(subject.armed(), "{name}: armed");
@@ -1237,6 +1239,12 @@ fn an_armed_fade_in_is_a_held_mute_that_fires_as_an_unmute() {
                     }
                     assert!(!subject.armed(), "{name}: a mute disarms");
                 }
+                if block == 1 && user_unmute {
+                    for &index in indices {
+                        subject.live_mute(index, false, 30);
+                    }
+                    assert!(subject.armed(), "{name}: an unmute keeps the arm");
+                }
                 if block == 2 {
                     subject.fire(RAMP);
                     if !user_mute {
@@ -1250,7 +1258,8 @@ fn an_armed_fade_in_is_a_held_mute_that_fires_as_an_unmute() {
                 let (mut twin_left, mut twin_right) = (left.clone(), right.clone());
                 subject.process(&mut left, &mut right, start);
                 twin.process(&mut twin_left, &mut twin_right, start);
-                let context = format!("{name} user_mute={user_mute} block={block}");
+                let context =
+                    format!("{name} user_mute={user_mute} user_unmute={user_unmute} block={block}");
                 assert_eq!(bits(&left), bits(&twin_left), "left: {context}");
                 assert_eq!(bits(&right), bits(&twin_right), "right: {context}");
                 if block < 2 || user_mute {

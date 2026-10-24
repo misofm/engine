@@ -396,8 +396,9 @@ extern "C" {
  * Until A the stem renders silence; from A it plays F on. A track the transaction added fades in
  * from the first block its stem plays (A here) over the session mute ramp (control_smoothing
  * mute_ms), D samples later when latent effects or delay compensation sit between the track's
- * input and its fader, so it never enters as a step (#1288); a muted channel stays muted, and a
- * mute or unmute the host sends before the fade replaces it. If g's PCM is not queued when the block
+ * input and its fader, so it never enters as a step (#1288); a muted channel stays muted, a mute
+ * the host sends before the fade cancels it, and an unmute (the track is unmuted already) leaves
+ * the fade waiting. If g's PCM is not queued when the block
  * at A renders, the seek applies there anyway: the blocks without PCM count as underrun frames,
  * and PCM that falls behind the read position is discarded. A playing stem's seek report gives
  * that frame: a stem whose report reads (generation, s, f) reads source frame f + (A - s) at A,
