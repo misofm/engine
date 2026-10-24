@@ -58,6 +58,13 @@ the same bits as its per-node instance. Decision 14 F2's last EQ rows (ids 1, 2,
 - **D3. One SVF state through every change.** No change of kind or enable resets or copies state,
   except D4. A kind change on an enabled band ramps `c1, a2, a3, m0, m1, m2` from the words in force
   to the new design over 64 samples. Disable ramps to `IDENTITY`; enable ramps from it.
+  *Why the ramp stays stable:* the state transition matrix `M` is affine in `(c1, a2, a3)`, and
+  the spectral norm is convex, so `||M||_2` along a straight word walk is at most the larger of its
+  two ends. Every enabled design and `IDENTITY` pass `NORM_TOLERANCE`, so every exact walk
+  between them passes it. A retarget in mid-ramp starts from a point inside the convex hull of
+  designed endpoints, and the same bound holds. The one gap is `f32` rounding of the walked words:
+  `RAMP_PATH_NORM_TOLERANCE` is the margin that covers it. PR-b's gate 3 grid must include
+  enable<->family pairs (disabled to each family and back) and at least one mid-ramp retarget.
 - **D4. Re-enable starts from rest.** When a target arrives for a lane whose section words are
   `IDENTITY` to the bit with no ramp in flight, and the new words are not `IDENTITY`, the lane's
   `ic1` and `ic2` in that section are set to `+0.0` (`lane_put` through the lane's mask) before the
@@ -218,5 +225,24 @@ Filters for Musical Applications", DAFx-14. **Latency:** 0. **Tail:** unchanged 
   no prepared EQ subject, and the limiter-lookahead claim is already
   `a_rebuild_only_row_is_a_rebuild_with_its_reason`. `an_automation_on_a_prepared_effect_parameter_needs_a_rebuild`
   is re-subjected on the limiter lookahead.
-- **PR-b (successor, for root to file).** Gate 1 (capi `eq_session` end to end), the gate 3
-  kind-pair contractive-ramp grid, and the listening note.
+- **D4 moves bits on an existing live path.** An HPF or LPF that is disabled live and then
+  enabled live now starts from rest. Before, it resumed its frozen state. This is a fix (gate 4
+  covers the HPF), and no checked-in digest renders that path, so no digest moved.
+- **PR-b (successor, for root to file as a new issue).** Three deliverables on top of PR-a's live
+  EQ band `enabled`/`kind`:
+  1. *C ABI end to end (gate 1).* In `crates/capi/src/runtime/live_tests.rs`, on `eq_session`, one
+     transaction enables band 2 of the console EQ and switches the eq-insert's band 1 from bell to
+     notch. It must commit as live (no plan replacement). After the 64-sample ramp, with both sides
+     driven from silence to a common rest, it must render bit-identical to a fresh plan of the
+     committed model. Red if a host path still classifies the rows as prepared, or if any target
+     refusal remains.
+  2. *Contractive-ramp grid (gate 3)*, in `crates/parametric-eq/tests/`. Use every ordered pair of
+     the 7 band states (disabled and the six families), so enable<->family pairs are included.
+     Grid: frequencies {20, 1000, 18000} Hz, gains {-24, 0, 24} dB, Q {0.1, 0.707, 18}, at each
+     launch rate, plus at least one retarget in mid-ramp. Every word set of the `f32` walk must pass
+     `validate_svf_within(.., RAMP_PATH_NORM_TOLERANCE)` or be `IDENTITY`. For a full-scale noise
+     input, the output must stay finite and below `OUTPUT_MIX_BOUND` times the input peak. The
+     argument is the convexity bound in D3.
+  3. *Listening note* in the PR, before (rebuild) and after (live), on a music stem: a 1 kHz
+     +9 dB bell toggled on and off; the bell switched to a notch; an 80 Hz HPF re-enabled after
+     2 s off.
