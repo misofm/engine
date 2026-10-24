@@ -1851,8 +1851,6 @@ fn route_fold_model(
                     .inputs_of(op)
                     .iter()
                     .any(|input| input.delay.is_some())
-                || program.ops[*producer].output == program.output
-                || op.output == program.output
             {
                 break;
             }

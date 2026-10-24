@@ -9950,9 +9950,12 @@ fn foldable_lane(
     {
         return None;
     }
-    if producer_op.output == program.output || route_op.output == program.output {
-        return None;
-    }
+    // No slot comparison with `program.output` (issue #931, on #916's reasoning): the host reads
+    // no arena buffer -- the Output op is picked by node and writes the host's planes
+    // (`output_op`, `HostMaster`), and `output_value_is_read` refuses any read of its slot after
+    // it. The Output is dedicated storage, so neither the last slot's nor the route's *live*
+    // buffer can be its slot; the comparison only matched a slot the colouring handed the Output
+    // after these retired, and declined a sound fold by coincidence.
     // A post-matrix observer on the last slot reads the chain's resident final lane instead of
     // the member buffer the fold stops writing (issue #885). The route has no such stand-in: its
     // output is mixed straight into the master and never exists on its own.
@@ -13830,8 +13833,8 @@ mod tests {
     /// renders after them, and its dedicated last slot redirects its scatter into the fader. Three
     /// dangling pad strips (`Input -> PostFader`, bound, read by nothing) take the three lowest
     /// arena slots and free them before the bus allocates, so the bus -- and the session output in
-    /// place on it -- lands on slots no track uses: `foldable_lane` declines a lane that shares the
-    /// session output's slot, and without the pads the colouring hands the output a track's.
+    /// place on it -- lands on slots no track uses; without the pads the colouring hands the output
+    /// a track's (`HostShape::SubmixOnATrackSlot`), which `foldable_lane` declined until #931.
     fn folded_bus_plan(fold_declined: bool) -> engine::realtime::PreparedRenderPlan {
         let (plan, bindings) = folded_bus_parts(3, None);
         test_only_set_route_fold_declined(fold_declined);
@@ -14471,8 +14474,10 @@ mod tests {
         /// scatter into its fader, and the Output's one input is the bus route. The Output's slot
         /// is a pad's.
         Submix,
-        /// The bus plan with no pads: nothing folds, and the Output's slot is a track's input
-        /// slot, which the tracks' bank gathers and whose route runs in place on it.
+        /// The bus plan with no pads: the Output's slot is a track's input slot, which the tracks'
+        /// bank gathers and whose route runs in place on it. The tracks still fold: since issue
+        /// #931 `foldable_lane` makes no slot comparison with the session output, so this is the
+        /// shape that holds a fold over a recycled Output slot to the oracle's bits.
         SubmixOnATrackSlot,
         /// One track, its route folded into the Output: a fan-in-one master that only stores.
         OneRouteFolded,
@@ -14507,7 +14512,7 @@ mod tests {
                 Self::Folded(..) => [64, 0],
                 Self::Unfolded | Self::OneRouteUnfolded | Self::BankIntoOutput => [0, 0],
                 Self::Submix => [4, 1],
-                Self::SubmixOnATrackSlot => [0, 1],
+                Self::SubmixOnATrackSlot => [4, 1],
                 Self::OneRouteFolded => [1, 0],
             }
         }
