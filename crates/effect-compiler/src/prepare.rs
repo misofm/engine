@@ -39,7 +39,7 @@ pub struct EffectPreparedEntry {
     ///
     /// Its `bypass` is `false` for every effect whose session bypass is lowered to
     /// [`Self::initial_bypass`] (issue #1087), and the session's bypass for an effect in
-    /// [`NEVER_BANKED_EFFECTS`] or [`PREPARED_BYPASS_EFFECTS`] ([`lowers_session_bypass`]).
+    /// [`PREPARED_BYPASS_EFFECTS`] ([`lowers_session_bypass`]).
     pub bank_preparation: EffectBankPreparation,
     /// The session's `bypass` for this instance (issue #1087).
     ///
@@ -278,13 +278,12 @@ pub const CONSOLE_ELIGIBLE_EFFECTS: [&str; 6] = [
 
 /// Launch effects whose factory binds no homogeneous bank at any width (issue #1087).
 ///
-/// A session bypass is lowered to per-lane shunt state so that a bypassed track keeps its effect
-/// bank, except on the effects this list and [`PREPARED_BYPASS_EFFECTS`] name
-/// ([`lowers_session_bypass`]). An effect that never banks has no bank to keep, so its session bypass stays a prepared
-/// bypass and it renders the per-node path it always did. For the delay that is also the only
-/// exact choice: its block-boundary check (D7) reads its ring and damping state as well as its
-/// output, so on a block where a runaway feedback ring trips it, its prepared bypass zeroes the dry
-/// block, which a shunt would pass through unchanged.
+/// This list says only that the effect declines a bank; it does not decide its bypass. A session
+/// bypass on a never-banked effect is lowered to per-lane shunt state like any other
+/// ([`lowers_session_bypass`], issue #1339), and the effect renders per node as a live-control
+/// effect whose shunt emits the dry block while it is bypassed. The delay's block-boundary check
+/// (D7) still runs on its wet path when a runaway feedback ring trips it, and the shunt then
+/// passes the dry block instead of the zeros a prepared bypass emitted (decision 15 E4).
 ///
 /// `graph-compiler`'s `bypass_shunt_identity` test holds this list to exactly the launch factories
 /// that decline a well-formed bank at the host's width.
@@ -307,11 +306,11 @@ pub const NEVER_BANKED_EFFECTS: [&str; 1] = ["miso.delay"];
 pub const PREPARED_BYPASS_EFFECTS: [&str; 1] = ["miso.multiband-compressor"];
 
 /// Whether a session bypass on `effect_id` is lowered to per-lane shunt state (issue #1087), or
-/// stays a prepared bypass: for an effect that never banks, or one in
-/// [`PREPARED_BYPASS_EFFECTS`].
+/// stays a prepared bypass: for an effect in [`PREPARED_BYPASS_EFFECTS`]. An effect in
+/// [`NEVER_BANKED_EFFECTS`] lowers its bypass too (issue #1339).
 #[must_use]
 pub fn lowers_session_bypass(effect_id: &str) -> bool {
-    !NEVER_BANKED_EFFECTS.contains(&effect_id) && !PREPARED_BYPASS_EFFECTS.contains(&effect_id)
+    !PREPARED_BYPASS_EFFECTS.contains(&effect_id)
 }
 
 pub fn prepare_native_session_effects(
@@ -494,11 +493,12 @@ fn prepare_with_console_eligibility(
                     }
                 };
                 // Issue #1087: a session's bypass is per-lane shunt state, not a prepared
-                // program. An effect that can bank is prepared enabled, so it shares its program
+                // program. The effect is prepared enabled, so a banking effect shares its program
                 // key and its bank with every enabled instance, and the bit rides the instance's
-                // control lane to the rack's shunt, which emits the latency-matched dry signal for
-                // this lane. An effect that never banks keeps its prepared bypass, and so does one
-                // whose bank recovery is still whole-bank (issue #1100).
+                // control lane to the shunt, which emits the latency-matched dry signal for this
+                // lane. An effect that never banks lowers it too and renders per node (issue
+                // #1339); only one whose bank recovery is still whole-bank keeps its prepared
+                // bypass (issue #1100).
                 let lowered = lowers_session_bypass(effect_id.as_str());
                 let bank_preparation = EffectBankPreparation {
                     sample_rate: session.sample_rate().0,
@@ -1675,8 +1675,8 @@ pub fn attach_effect_live_controls(
         };
         // Seeded from the session's bypass, not the prepared one: an effect whose bypass is
         // lowered is prepared enabled (issue #1087), and this lane replaces the channel-less
-        // lane that carried the same bit. For the delay and the multiband (`lowers_session_bypass`
-        // is false) the prepared bypass stays in force, so a live toggle cannot lift it.
+        // lane that carried the same bit. For the multiband (`lowers_session_bypass` is false)
+        // the prepared bypass stays in force, so a live toggle cannot lift it.
         let Some((writer, lane)) = effect_control_lane(
             EffectLaneSpec {
                 shape,
