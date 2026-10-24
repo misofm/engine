@@ -308,12 +308,10 @@ converted=0
 for script in "$root"/scripts/*.sh; do
     name=${script##*/}
     case "$name" in
-        # This script: running it here would recurse.
+        # This script: running it here would recurse. test-workspace-policy.sh runs this script
+        # last, but under this PATH it stops at its own preflight, and even past it this script
+        # would stop at its gate.sh preflight, so it cannot recurse.
         test-gate-lib.sh) continue ;;
-        # It does not source gate.sh (it only copies it) and calls rg directly; converting it
-        # belongs to #1527, which owns the file this round. It also runs this script, so it
-        # would recurse.
-        test-workspace-policy.sh) continue ;;
     esac
     grep -qE '^([^#]*[^[:alnum:]_.#-])?rg( |$)' "$script" || continue
     output=$(cd "$scratch" && timeout 60 env PATH="$nobin" "$BASH" "$script" </dev/null 2>&1 >/dev/null) && rc=0 || rc=$?
