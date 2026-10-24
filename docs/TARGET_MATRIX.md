@@ -7,7 +7,7 @@ The session model and its semantics do not vary by Cargo feature or target capab
 | --- | --- | --- | --- |
 | Native x86-64 (tooling and tests) | `x86_64-unknown-linux-gnu` | Not a shipped product target. Pinned x86-64-v3 (#83 D4): `.cargo/config.toml` gives every `x86_64` build AVX2 and FMA, so `lane::Backend::current()` is `Simd8`, a compile-time constant. No runtime detection or dispatch. `lane` refuses to compile without both features, and `lane::attest_host()` refuses at boot on a CPU that lacks them. | `lint`: the `-avx2,-fma` and `+avx2,-fma` probes must fail with `requires x86-64-v3`; the `+avx2,+fma` probe compiles, with a cfg assertion. `lint`, `test-debug-a`, `test-debug-b`, `test-release` and `audit-native` run on this target. |
 | ARM64 Android | `aarch64-linux-android` (arm64-v8a) | Product target (#1017). NEON `Simd4`, a compile-time constant; FPCR pinned per render block. | `cross-target`: the product crates checked with `--all-targets --all-features` and linted with clippy `-D warnings`; the shipped artifact, the fat-LTO `capi` staticlib, built by `scripts/build-capi-release.sh aarch64-linux-android staticlib <out-dir>`, which refuses a non-LTO archive (#1499). `aarch64-debug`/`aarch64-release`: tests on `ubuntu-24.04-arm`. |
-| ARM64 iOS | `aarch64-apple-ios` | Product target (#1017). As Android. | `cross-target`: the same check and clippy rows, and the release-assembly scan `ios-asm-memset-pattern16` of the shipped artifact, the post-LTO `capi` staticlib built by `scripts/build-capi-release.sh aarch64-apple-ios staticlib <out-dir>` (#1499), charged per product crate (expected failures per crate until #1018). Tests run on the Linux arm64 legs; see "Native AArch64" below. |
+| ARM64 iOS | `aarch64-apple-ios` | Product target (#1017). As Android. | `cross-target`: the same check and clippy rows, and the release-assembly scan `ios-asm-memset-pattern16` of the shipped artifact, the post-LTO `capi` staticlib built by `scripts/build-capi-release.sh aarch64-apple-ios staticlib <out-dir>` (#1499), charged per product crate: a crate with no row in `scripts/lib/aarch64-known-defects.py` ships no `memset_pattern16` call (#1018). Tests run on the Linux arm64 legs; see "Native AArch64" below. |
 | Refused | `armv7-linux-androideabi` (armeabi-v7a), `i686-*`, ILP32 ABIs, `wasm32-unknown-unknown` without `simd128`, and every other unlisted target | Refused at compile time by `lane` (#1041, #1062). | `scripts/check-cross-targets.sh` refusal rows on `armv7-linux-androideabi` and on `wasm32-unknown-unknown` with `-simd128`. |
 | Browser Wasm | `wasm32-unknown-unknown` with `+simd128` | One shipped AudioWorklet artifact, `miso-engine-v1-audio-worklet.simd128.wasm` (W4-D1), built by `scripts/build-web-audioworklet.sh`. `Simd4`, a compile-time constant. Four-lane processing uses multiply plus add; relaxed SIMD and FMA assumptions are forbidden. The host refuses a browser without `simd128` with a typed `miso.unsupported.v1` error. `lane` refuses a wasm32 build without `simd128` at compile time (#1062). | `artifact` builds the module once; `artifact-gates` (`check-web-audioworklet.sh`) and `browser` (Chromium, Firefox, WebKit) qualify that module. |
 
@@ -125,8 +125,8 @@ What qualifies the target:
   is skipped by exact name in the main run and then run alone. There it must fail as that one test,
   with the row's reason in its panic: the AArch64 digest or assertion text the defect produces. A
   pass, another panic or another reason fails the leg. The iOS memset rows are per-crate ceilings:
-  a crate at zero, a crate above its ceiling, and a crate with calls but no row each fail. See the
-  register below.
+  a crate at zero, a crate above its ceiling, and a crate with calls but no row each fail. Their
+  history is in that file.
 
 **Why Linux arm64 and not also macOS arm64.** The Linux runner exercises the AArch64 code that
 differs from x86 (NEON, FPCR, the fold behind LANE-3), and a public repository pays nothing for
@@ -175,39 +175,6 @@ AArch64 legs. Each open entry is an expected failure, by name:
   `admitted_blocks_render_the_base_bits_without_selects` are ordinary passing tests in
   `aarch64-debug`, with no expected-failure rows. (#1049 had deleted the compressor's
   `scenario_{981,983,985,995}` pins, and their rows, as dominated.)
-- **Darwin `memset_pattern16` in render (#1018).** On Apple targets LLVM's loop-idiom pass
-  rewrites a loop that stores one constant `f32` pattern into `llvm.experimental.memset.pattern`,
-  which only Darwin lowers to `bl _memset_pattern16`, a libc call. #1017 counted 3,494 calls across
-  ten product crates in `aarch64-apple-ios` release assembly on Rust 1.97.1; #1112, #1328 and its
-  follow-ups lowered that to 2,122. #1451 found the cause of nearly all of them: `wide`'s `splat`
-  is `transmute([elem; N])`, rustc lowers that array repeat to a store loop, and every
-  `Lane::splat` and `Lane::zero` inlined into a kernel became such a loop. `lane` now builds its
-  splats from array literals (`crates/lane/src/wide_impl.rs`), which reach LLVM with no loop:
-  2,122 -> 16 calls, and the rows of `compressor`, `gate-expander`, `graph`,
-  `multiband-compressor`, `parametric-eq` and `transient-shaper` were deleted at zero. #1456
-  deleted the `true-peak-limiter` row (6 -> 0): its `clear_runtime`, which runs at a reset and on a
-  failed block, writes its `1.0` words as whole lane vectors with two planes per loop.
-
-  Those counts read each product crate's pre-link rlib assembly. Since #1472 the ratchet counts
-  the library an iPhone app links: `capi`'s `aarch64-apple-ios` release staticlib after the
-  release profile's fat LTO, one module with every shipped function after cross-crate inlining,
-  built by `scripts/build-capi-release.sh`, the command that builds the shipped archive (#1499).
-  Each call is charged to the innermost function holding it that belongs to a product crate,
-  read from the assembly's DWARF inline records. That form counts 5 calls, all preparation code
-  reached from `builtins-compiler`'s `into_graph_artifact_with_banks` and `builtins`'
-  constructors; the pre-link rows of `host-core` (its spectrum arrays) and `soft-clip` (its test
-  corpus) were code that no app links:
-
-  | crate | calls | where |
-  |---|---|---|
-  | `builtins` | 4 | preparation constructors: `BuiltinChain::new`, `FaderMuteRampBuiltins::new`, and `BuiltinInputBank::new` and `BuiltinFaderBank::new` inlined into `builtins-compiler` |
-  | `lane` | 1 | `kernels::builtins::lanes_below`'s flag fill, inlined into `builtins-compiler` |
-
-  None of these is reachable from render. #1018 stays open for these rows. There is no effect on
-  `x86_64`, Linux AArch64 or `wasm32`. The expected failures are `ios-asm-memset-pattern16`, one
-  row per crate with its count as a ceiling, in `scripts/lib/aarch64-known-defects.py`, counted
-  and judged by `scripts/check-cross-targets.sh`, which scans the same post-LTO assembly for
-  eight-lane code (#1112).
 - **Resolved by #1017: tests that assumed eight lanes.** The seven test-only warnings
   (`host-core/tests/fp_environment.rs`, `lane/tests/fp_env.rs`) and the tests that asserted or
   returned on `Backend::current() == Simd8` (listed in

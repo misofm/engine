@@ -3426,6 +3426,7 @@ impl AudioWorkletEngineHost {
         {
             publish_web_meter_frame(
                 ready.meters.frame(),
+                ready.shape.master_track,
                 &mut ready.shape.meter_frame,
                 &mut ready.shape.meter_header,
             );
@@ -3925,12 +3926,9 @@ impl AudioWorkletEngineHost {
             #[cfg(test)]
             scans: 0,
         };
-        let published = ready.meters.poll(
-            &mut companions.meters,
-            &mut taps,
-            shape.master_track,
-            next_sample,
-        );
+        let published = ready
+            .meters
+            .poll(&mut companions.meters, &mut taps, next_sample);
         #[cfg(test)]
         {
             ready.meter_effect_scan_count =
@@ -3940,7 +3938,12 @@ impl AudioWorkletEngineHost {
             return 0;
         };
         // R4: one copy per published window.
-        publish_web_meter_frame(frame, &mut shape.meter_frame, &mut shape.meter_header);
+        publish_web_meter_frame(
+            frame,
+            shape.master_track,
+            &mut shape.meter_frame,
+            &mut shape.meter_header,
+        );
         frame.windows
     }
     // REALTIME_POLICY_END
@@ -4468,14 +4471,21 @@ impl GainReductionTaps for WebGainReductionTaps<'_> {
 /// Copy the core frame into the page's frame words and header (#1582 D4), the layout of
 /// [`PlanShape::meter_frame`]: every strip's peak pair, tracks then submixes (issue #1209 D1, so
 /// the master follows the last submix rather than the last track), the master's, every strip's
-/// gain-reduction word, then the master's (`0.0` when absent). Bounded by the strip count.
-fn publish_web_meter_frame(frame: &MeterFrame, words: &mut [f32], header: &mut WebMeterHeader) {
+/// gain-reduction word, then the master's ([`MeterFrame::master_gain_reduction`] of `master`, the
+/// plan's master strip; `0.0` when absent). Bounded by the strip count.
+fn publish_web_meter_frame(
+    frame: &MeterFrame,
+    master: Option<u32>,
+    words: &mut [f32],
+    header: &mut WebMeterHeader,
+) {
     let mut slots = words.iter_mut();
     // The source goes first in each zip, so its end leaves the next slot unconsumed.
     for (peak, slot) in frame.strip_peaks.iter().flatten().zip(&mut slots) {
         *slot = *peak;
     }
-    let master_gain = frame.designated_gain_reduction_db.unwrap_or(0.0);
+    let master_reading = frame.master_gain_reduction(master);
+    let master_gain = master_reading.unwrap_or(0.0);
     let tail = frame
         .output_peak
         .iter()
@@ -4486,7 +4496,7 @@ fn publish_web_meter_frame(frame: &MeterFrame, words: &mut [f32], header: &mut W
     }
     header.windows = frame.windows;
     header.sequence = frame.sequence;
-    header.master_gr_present = u32::from(frame.designated_gain_reduction_db.is_some());
+    header.master_gr_present = u32::from(master_reading.is_some());
     header.first_sample = frame.first_sample;
     header.end_sample = frame.end_sample;
     header.reserved[0] = frame.generation;
