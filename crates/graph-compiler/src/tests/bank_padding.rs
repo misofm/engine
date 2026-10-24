@@ -3,9 +3,10 @@
 //!
 //! Every console group is padded (S2), so a console remainder binds as one padded bank. An insert
 //! remainder is padded from a per-width member threshold (issues #888 and #889) and renders per
-//! node below it (decision 12, as refined by #888). The factory here is a test double over each launch effect: it validates the
-//! request, checks the padding contract's clone clause, logs the mask it was asked for, and then
-//! hands the request unchanged to the launch effect, which binds its own padded bank (P2b-P2e).
+//! node below it (decision 12, as refined by #888). The factory here is a test double over each
+//! launch effect: it validates the request, checks the padding contract's clone clause, logs the
+//! mask it was asked for, and then hands the request unchanged to the launch effect, which binds
+//! its own padded bank (P2b-P2e).
 
 use super::*;
 use crate::banks::effect_bank_resource;
@@ -194,12 +195,12 @@ fn bound_effect_banks(
 ///   compiled at the test-only `Scalar` oracle, where nothing banks.
 ///
 /// Red if console groups stop padding; if insert groups pad below `k` members or not from it (the
-/// insert threshold is written out here, not read from the planner); if a padded lane is fed zeros or
-/// defaults instead of a clone; if the bound bank's mask or members disagree with the group; if the
-/// estimate refuses a partial mask (the compile fails); or if the rack gathers or scatters a padded
-/// lane -- the graph runtime hands the chain one plane per member, so a planted scatter of lane
-/// `members` indexes past them and the render panics, and a lane swapped with a padded one moves a
-/// track's bits.
+/// insert threshold is written out here, not read from the planner); if a padded lane is fed zeros
+/// or defaults instead of a clone; if the bound bank's mask or members disagree with the group; if
+/// the estimate refuses a partial mask (the compile fails); or if the rack gathers or scatters a
+/// padded lane -- the graph runtime hands the chain one plane per member, so a planted scatter of
+/// lane `members` indexes past them and the render panics, and a lane swapped with a padded one
+/// moves a track's bits.
 #[test]
 fn a_console_remainder_always_pads_and_an_insert_remainder_pads_from_k_members() {
     let width = BankWidth::for_backend(host_dispatch()).expect("a vector host");

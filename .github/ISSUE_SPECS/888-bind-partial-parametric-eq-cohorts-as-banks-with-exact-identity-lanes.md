@@ -68,7 +68,8 @@ console effects with per-track inserts*) splits this issue's two halves.
 Narrowed to the planner policy, one PR for #888 and #889 (root scope note).
 
 - **Absent-member lanes: delivered as policy.** The mechanism shipped in P2a-P2e, #887 and #1893.
-  `banks::pads(group, width)` is now `console OR active_count() >= min_padded_insert_members(width)`.
+  `banks::pads(group, width)` is now
+  `console OR active_count() >= min_padded_insert_members(width)`.
   The planner constant is W=4: 2 and W=8: 3 (root decision). It comes from the H5 arithmetic
   (`docs/handoffs/console-strip-2026-09-29/VERIFY.md`, H5): a padded eight-lane bank of three
   slots costs about 9.3 µs and a per-node track about 4.2 µs, so padding wins from three members
@@ -113,8 +114,12 @@ Narrowed to the planner policy, one PR for #888 and #889 (root scope note).
     the claim is the bank count. Ten tracks leave a remainder of 2, which pads at W=4 and stays
     per node at W=8; the expected banks, the per-node count and the zero-plane bytes are derived
     from the threshold.
-  - The randomized per-node-bits oracle now also asserts that the sweep reaches a padded insert
-    bank.
+  - The randomized per-node-bits oracle: most tracks of every seed take a shared two-slot
+    insert chain that cycles through every kind that can pad an insert cohort (the console
+    eligibility list and the de-esser, registered by #1922). The sweep asserts at least one
+    padded insert bank per kind (24 seeds: [7, 4, 8, 8, 3, 6, 5, 6] for EQ, compressor, gate,
+    soft clip, transient, limiter, multiband, de-esser). The dynamic EQ joins when #17 S2
+    registers it.
   - `tests/bypass_resources.rs` `a_mixed_session_bypass_renders_without_allocating`: the insert
     legs use nine tracks, a one-track remainder at either width, so a bypassed instance still
     renders per node. With thirteen tracks, W=8 would pad its five-track remainder. The console

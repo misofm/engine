@@ -613,12 +613,12 @@ impl Drop for RestoreMode {
 /// per node. One track is below the insert padding threshold at either width (#888: two at four
 /// lanes, three at eight), so the remainder stays per node; with thirteen tracks, eight lanes would
 /// pad its five-track remainder and leave no bypassed instance per node. Then thirteen tracks with
-/// the strip as the console, at the host's width, where every slot binds and the remainder is a padded bank (#1098): no instance renders
-/// per node, and the padded banks carry bypassed lanes. Each slot bypasses a different mix of
-/// tracks, so every leg that binds a bank has bypassed lanes in it, and every inserts leg has
-/// bypassed instances per node. The counters are this thread's, so another test's allocations
-/// cannot reach them; the audited allocator counts in `Count` mode, so an allocation inside the
-/// render scope is reported here rather than aborting the process.
+/// the strip as the console, at the host's width, where every slot binds and the remainder is a
+/// padded bank (#1098): no instance renders per node, and the padded banks carry bypassed lanes.
+/// Each slot bypasses a different mix of tracks, so every leg that binds a bank has bypassed lanes
+/// in it, and every inserts leg has bypassed instances per node. The counters are this thread's, so
+/// another test's allocations cannot reach them; the audited allocator counts in `Count` mode, so
+/// an allocation inside the render scope is reported here rather than aborting the process.
 ///
 /// Red mutation: `black_box(Vec::<u8>::with_capacity(1))` in `BypassShunt::capture` -> every leg
 /// counts allocations.

@@ -7375,7 +7375,7 @@ mod tests {
                 dynamic.graph().prepared_bank_count()
             ],
             [console_banks, insert_banks],
-            "a console slot pads its remainder into one more bank; an insert only from the threshold"
+            "a console slot pads its remainder into one more bank; an insert from k members"
         );
         assert_eq!(
             [
@@ -8589,8 +8589,8 @@ mod tests {
     ///
     /// `2 * lanes` stereo tracks carry one `simd1` effect each, the first `lanes` an EQ and the
     /// rest a compressor, and one mono track carries both (one, below the insert padding threshold
-    /// at either width, #888; `lanes / 2` would pad and strand nothing). The mono track strands in the
-    /// trial plan, but in the stereo pool their longer program would lead one cohort over every
+    /// at either width, #888; `lanes / 2` would pad and strand nothing). The mono track strands in
+    /// the trial plan, but in the stereo pool their longer program would lead one cohort over every
     /// stereo track (a one-slot program is a subsequence of it), whose banks then mix EQ lanes with
     /// compressor lanes: one bank bound where the trial bound two. The move is kept only when the
     /// factories bind more effect banks for it than for the trial, so here the mono tracks stay
@@ -8646,15 +8646,15 @@ mod tests {
     /// Issues #971 and #1002: a move that binds exactly as many banks as it loses is not kept.
     ///
     /// One mono track carries `simd1: [eq, comp]`; `W` stereo tracks carry `[eq]` and then
-    /// `W + k - 1` carry `[comp]`, where `k` is the insert padding threshold (#888), so the
-    /// trial's compressor remainder of `k - 1` stays unbound. The trial binds 2 banks: the stereo
-    /// EQ cohort and the first stereo compressor cohort. Moved, the mono track's longer program
-    /// leads one stereo cohort over all of them, in id order: the mono track and `W - 1` EQ tracks
-    /// bind an EQ bank, the next group mixes EQ and compressor lanes and binds nothing, and the
-    /// last group, `k` compressors, binds a padded compressor bank. That is 2 banks gained against
-    /// the 2 the trial bound in groups the move changed, so the move is not kept. The lost banks sit in trial groups after the first
-    /// vanished one (the mono partial group, which binds nothing), so this is the gate on
-    /// #1002's count of the trial's vanished groups, and on the strict comparison.
+    /// `W + k - 1` carry `[comp]`, where `k` is the insert padding threshold (#888), so the trial's
+    /// compressor remainder of `k - 1` stays unbound. The trial binds 2 banks: the stereo EQ cohort
+    /// and the first stereo compressor cohort. Moved, the mono track's longer program leads one
+    /// stereo cohort over all of them, in id order: the mono track and `W - 1` EQ tracks bind an EQ
+    /// bank, the next group mixes EQ and compressor lanes and binds nothing, and the last group,
+    /// `k` compressors, binds a padded compressor bank. That is 2 banks gained against the 2 the
+    /// trial bound in groups the move changed, so the move is not kept. The lost banks sit in trial
+    /// groups after the first vanished one (the mono partial group, which binds nothing), so this
+    /// is the gate on #1002's count of the trial's vanished groups, and on the strict comparison.
     #[test]
     fn a_move_that_binds_as_many_banks_as_it_loses_is_not_kept() {
         let Some(width) = BankWidth::for_backend(host_dispatch()) else {
@@ -9111,15 +9111,15 @@ mod tests {
 
     /// Issue #1001: a factory error while binding the re-plan keeps the unmoved plan.
     ///
-    /// The session is `ch00` mono and `ch01..ch{k-1}` stereo, each carrying only
-    /// `inserts: [comp]`, where `k` is the insert padding threshold (#888), and the compressor's
-    /// bank bind always errors (Sol's #971 attempt-2 session). The trial plan has no group that
-    /// binds (its stereo remainder is below `k`), so it never calls the bind. Moving the stranded
-    /// `ch00` lifts the stereo group to `k` members, which pads, so the re-plan does call it and
-    /// gets the error. The re-plan is speculative, so the compile must go on with the unmoved plan: it
-    /// compiles at both bank widths, `ch00` stays mono, and it renders the bits and the chain
-    /// shape of the plan with the move disabled. Here that plan is the bank-free registry's:
-    /// there the re-plan binds nothing, so the move is refused.
+    /// The session is `ch00` mono and `ch01..ch{k-1}` stereo, each carrying only `inserts: [comp]`,
+    /// where `k` is the insert padding threshold (#888), and the compressor's bank bind always
+    /// errors (Sol's #971 attempt-2 session). The trial plan has no group that binds (its stereo
+    /// remainder is below `k`), so it never calls the bind. Moving the stranded `ch00` lifts the
+    /// stereo group to `k` members, which pads, so the re-plan does call it and gets the error. The
+    /// re-plan is speculative, so the compile must go on with the unmoved plan: it compiles at both
+    /// bank widths, `ch00` stays mono, and it renders the bits and the chain shape of the plan with
+    /// the move disabled. Here that plan is the bank-free registry's: there the re-plan binds
+    /// nothing, so the move is refused.
     ///
     /// Red mutation: restore `?` on the re-plan bind, and the compile is refused with the
     /// factory's code at both widths.
@@ -9199,10 +9199,10 @@ mod tests {
     /// threshold, and the bank bind errors only on a group holding the marker. The trial binds the
     /// stereo cohort `ch00..=ch{W}` without `ch{W-1}`, and the marked track sits in its partial
     /// remainder of `k - 1`, below `k`, which is never bound. Moving the mono track re-plans the
-    /// stereo pool as a full group and a padded group of `k`, both differing from every trial group,
-    /// so the re-plan binds both (issue #1002 binds only changed groups). It binds the first,
-    /// `ch00..ch{W-1}`, before the second, which holds the marker, errors. The compile keeps the
-    /// trial: its one bank, its pools (the mono track still mono), and no bank of the failed
+    /// stereo pool as a full group and a padded group of `k`, both differing from every trial
+    /// group, so the re-plan binds both (issue #1002 binds only changed groups). It binds the
+    /// first, `ch00..ch{W-1}`, before the second, which holds the marker, errors. The compile keeps
+    /// the trial: its one bank, its pools (the mono track still mono), and no bank of the failed
     /// re-plan alive once the compile returns. Dropping the artifact then drops the last bank.
     ///
     /// At the host width only: the real compressor binds a bank only at the width the build
@@ -9438,13 +9438,13 @@ mod tests {
     ///
     /// Empty `W - 1` tracks' `simd1` and `simd2` racks and they stop coinciding: the effect cohorts
     /// slide by `W - 1` tracks, so builtin bank `{ch00..ch07}` no longer feeds effect bank
-    /// `{ch00..ch07}` -- it feeds one lane of one effect bank and seven of another (at eight lanes).
-    /// `W - 1` bare tracks leave a one-track stripped remainder, which stays below the insert
-    /// padding threshold (#888) at both widths, so it renders per node and its downstream builtin
-    /// chain takes the silent skip G5 counts.
-    /// `runtime::chains_into` proves the pairing lane by lane on the lowered program, so every
-    /// `builtins -> EQ` merge is declined, while the effect banks, which do still align with each
-    /// other, keep fusing. The plan is correct either way; it is only slower.
+    /// `{ch00..ch07}` -- it feeds one lane of one effect bank and seven of another (at eight
+    /// lanes). `W - 1` bare tracks leave a one-track stripped remainder, which stays below the
+    /// insert padding threshold (#888) at both widths, so it renders per node and its downstream
+    /// builtin chain takes the silent skip G5 counts. `runtime::chains_into` proves the pairing
+    /// lane by lane on the lowered program, so every `builtins -> EQ` merge is declined, while the
+    /// effect banks, which do still align with each other, keep fusing. The plan is correct either
+    /// way; it is only slower.
     ///
     /// This is the test that would catch a "merge" that silently never fires, because it asserts
     /// counts on both sides of the alignment. A digest comparison cannot: the session renders the
@@ -9530,11 +9530,11 @@ mod tests {
         );
         // One lane takes the redirect here, at either width -- one per track of the per-node
         // stripped tail, `(64 - bare) % lanes` (with half a bank of bare tracks it was four at
-        // eight lanes and two at four, #1017, which also equalled the bare count) -- and the number matters
-        // less than the fact that it is neither 0 nor 64. It is what makes the intended fixture's
-        // *zero* a statement about that fixture rather than about dead code: on a session whose
-        // stages line up, every chain ends in a buffer its consumer already reads in place and no
-        // lane needs redirecting; on this one, where they deliberately do not, the per-lane
+        // eight lanes and two at four, #1017, which also equalled the bare count) -- and the number
+        // matters less than the fact that it is neither 0 nor 64. It is what makes the intended
+        // fixture's *zero* a statement about that fixture rather than about dead code: on a session
+        // whose stages line up, every chain ends in a buffer its consumer already reads in place
+        // and no lane needs redirecting; on this one, where they deliberately do not, the per-lane
         // decision still fires. Both readings come from the same `scatter_target` clauses over the
         // same lowered program.
         assert_eq!(
