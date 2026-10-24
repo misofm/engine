@@ -1632,6 +1632,12 @@ struct ReadyOwnership {
     output_discard: usize,
     /// The reader's dropped-window count already folded into `meter_loss_count`.
     output_dropped_seen: u64,
+    /// The first sample of the strip meters' window grid (#1581 D5): the strip meters tile
+    /// `[origin + k * period, ..)` from the block their plan first rendered, the boot block or the
+    /// adoption block of the last swap that carried no meter (a carried swap keeps the grid). Every
+    /// activation, the lease's and a producer reset's, is a boundary of this grid, so the output
+    /// meter's windows and the strips' are one grid.
+    meter_grid_origin: u64,
     /// Host publication generation, advanced on lease transitions and detected producer resets.
     meter_generation: u64,
     /// Losses and rejected stale/mismatched windows waiting to be reported in the next complete
@@ -2021,6 +2027,7 @@ impl ReadyOwnership {
                 self.reset_meter_delivery(false);
                 self.meter_loss_count = lost;
                 self.meter_generation = self.meter_generation.saturating_add(1);
+                self.meter_grid_origin = first_sample;
                 // The restarted strip meters open their first window at this block, so the output
                 // meter does too (#1581 D5): a gate moved to this block discards the window it has
                 // open before the block is observed. A gate not yet reached opens nothing, so it
@@ -3571,6 +3578,8 @@ impl AudioWorkletEngineHost {
         self.record(RESULT_OK)
     }
 
+    /// The first boundary at or after `sample` of the strip meters' window grid
+    /// ([`ReadyOwnership::meter_grid_origin`]), the one grid the output meter's gate opens on.
     fn next_meter_boundary(&self, sample: u64) -> u64 {
         let Some(period) = self
             .options
@@ -3580,7 +3589,14 @@ impl AudioWorkletEngineHost {
         else {
             return sample;
         };
-        let remainder = sample % period;
+        let origin = self
+            .ready
+            .as_ref()
+            .map_or(0, |ready| ready.meter_grid_origin);
+        if sample <= origin {
+            return origin;
+        }
+        let remainder = (sample - origin) % period;
         sample.saturating_add(if remainder == 0 {
             0
         } else {
@@ -6860,6 +6876,8 @@ fn compile_ready(
         output_gate_from: u64::MAX,
         output_discard: 0,
         output_dropped_seen: 0,
+        // The boot plan's first block is the session's sample 0.
+        meter_grid_origin: 0,
         meter_generation: 0,
         meter_loss_count: 0,
         meter_snapshot_drops_seen: 0,
