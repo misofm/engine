@@ -747,8 +747,11 @@ end), whichever is larger, quoted below at 20 dB (`rho` = 10).
   detector to the power `ratio - 1` (`p` = 19 here; steepening about 17, 25 dB, at the end, the
   same with the 80 dB range clamp, against the 1 ms attack's cover of about 9.4, 19 dB, at 1.5 kHz, and
   less at shorter attacks), and a link change that moves a lane across the threshold opens the lane
-  at the crossing instant through the gate's own attack (1 ms by default, 0.1 ms at least),
-  whatever the ramp length: a longer ramp moves the instant, not the edge. The emulation, a fade
+  at the crossing instant through the gate's own attack (1 ms by default, 0.1 ms at least). On a
+  transient (the kick here) the crossing is set by the programme, whatever the ramp length: a
+  longer ramp moves the instant, not the edge. On a sustained detector the blend itself crosses
+  the threshold, and with 20 dB of channel difference the curve moves the gain over about 40 % of
+  the ramp, so there the ramp length does count. The emulation, a fade
   between a closed and an open lane, does not contain that edge. The gate rows above are the
   emulation's values only (the root narrowing of the #1430 spec).
 
@@ -757,14 +760,15 @@ the key #1054 D3 and `LiveRampRow::LinkGlide` already give; the evidence moves n
 At 20 ms the shaper's emulated click sits 22.3 dB or more under the 10 ms mute's in CTR and 23.1 dB
 or more in HF splatter, where the bound holds; the limiter's sits 17.9 dB or more
 under it (CTR, `bass-kick`), as the compressor's does (16.8 dB, 9.5), at the default lookahead,
-where the bound holds. At 0 ms lookahead the bound's excess (about 9 dB at 44.1 kHz, 16 dB at
-96 kHz) would leave 3.6 dB or more of CTR margin at 20 ms (17.9 dB at 44.1 kHz, 19.6 dB at 96 kHz),
-while at 10 ms (10.8 and 10.5 dB) it would leave 1.8 dB and none: the same reason for `faderMs`
-over `muteMs` as 9.5 gives. The gate has no answer from this method: its emulated rows (step -16.1 to
+where the bound holds; the claim is made at that lookahead only. At 0 ms lookahead nothing was
+measured: an extrapolation, subtracting the bound's estimated excess there (about 9 dB at
+44.1 kHz, 16 dB at 96 kHz) from the default lookahead's measured margins, leaves 3.6 dB or more of
+CTR margin at 20 ms (17.9 dB at 44.1 kHz, 19.6 dB at 96 kHz) and 1.8 dB or none at 10 ms (10.8 and
+10.5 dB): the same reason for `faderMs` over `muteMs` as 9.5 gives, not a measured result. The gate has no answer from this method: its emulated rows (step -16.1 to
 -16.5 dB) pass the 10 ms mute by 19 dB or more, but the bound does not hold, and the click at a
-threshold crossing is the gate's own attack, which no ramp length changes. `faderMs` is therefore
-not contradicted for the gate and no other key would help it; a measurement of the real #1370
-glide on the gate, or #1370's listening item, is the only check (9.7).
+threshold crossing on a transient is the gate's own attack, which no ramp length changes. The gate
+has no answer: this subsection gives #1370 and #1371 no key or value for it, and a measurement of
+the real #1370 glide on the gate, or #1370's listening item, is the only check (9.7).
 
 ### 9.6 Listening (D3): block P for polarity (Amendment 1), no other contrast
 

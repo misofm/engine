@@ -140,11 +140,17 @@ lane* (#1371) use its answer.
   compressor only. New test `the_link_reference_is_the_latency_matched_input`; mutant
   (`link_reference` returns the undelayed source) turns it red.
 - **Result (FINDINGS 9.5.1).** No vacuous row (`step_db` -26.3 to -16.1 dB). `faderMs` is right for
-  the transient shaper and the limiter (at its default lookahead); the gate has no answer from the
-  emulation, and no ramp key governs its threshold crossing. No key change for root.
+  the transient shaper, and for the limiter at its default 5 ms lookahead, the only lookahead
+  measured; the 0 ms lookahead margins in D4 are an extrapolation, not a claim. The gate has no
+  answer: the bound does not hold, and on a transient no ramp key governs its threshold crossing.
+  No key changes, so #1371's spec need not cite 9.5.1.
 - **Gates.** Harness tests in release, offline: 22 pass; clippy `-D warnings` clean. Two four-rate
   `live` and two `measure` runs on `7dbc6a161`: all twelve CSVs reproduce byte for byte between the
   runs (34 min wall time for the four runs). Against the committed files, all are equal except
   `fader_drag.csv`, `pan_drag.csv` and `law_transfer.csv`, #1830's recorded drift (45, 21 and 31
   rows, unchanged). `check-workspace-policy.sh`, `check-env-vocabulary.sh`,
   `check-dsp-research.sh` and the stream's lint script pass.
+- **Fold (root verdict PASS, three minors).** D4 labels the 0 ms lookahead margins an
+  extrapolation and states the gate has no answer; the gate bullet narrows "whatever the ramp
+  length" to transient crossings. The test now reads the reference from `link_planes`, the planes
+  `link_glide` measures; mutant (`link_planes` passes the undelayed source) red, restored.
