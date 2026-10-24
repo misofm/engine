@@ -192,11 +192,18 @@ tracked_paths() {
         capture git-list git ls-files -z --cached --others --exclude-standard
         (( CAPTURE_STATUS == 0 )) || execution_failure 'git tracked-path listing' "$CAPTURE_STATUS" "$CAPTURE_OUT" "$CAPTURE_ERR"
         local nul_file="$CAPTURE_OUT"
+        # #1527 (i): the index only. An untracked file depends on the checkout; CI checks out
+        # tracked files.
+        capture git-cached-list git ls-files --cached -z
+        (( CAPTURE_STATUS == 0 )) || execution_failure 'git cached-path listing' "$CAPTURE_STATUS" "$CAPTURE_OUT" "$CAPTURE_ERR"
+        CACHED_PATHS_NUL="$CAPTURE_OUT"
     elif (( classify_status == 128 )) && [[ -z "${GIT_DIR+x}" && -z "${GIT_WORK_TREE+x}" &&
         "$(<"$CAPTURE_OUT")" == '' && "$(<"$CAPTURE_ERR")" == 'fatal: not a git repository (or any of the parent directories): .git' ]]; then
         capture fallback-list find . -type f -not -path './.git/*' -not -path './target/*' -print0
         (( CAPTURE_STATUS == 0 )) || execution_failure 'fallback tracked-path find' "$CAPTURE_STATUS" "$CAPTURE_OUT" "$CAPTURE_ERR"
         local nul_file="$CAPTURE_OUT"
+        # A tree without git has no index: every file is the cached set.
+        CACHED_PATHS_NUL="$CAPTURE_OUT"
     else
         execution_failure 'git repository classification' "$classify_status" "$CAPTURE_OUT" "$CAPTURE_ERR"
     fi
@@ -261,32 +268,6 @@ while IFS= read -r manifest_path; do
     }' "$manifest_path"
     (( CAPTURE_STATUS == 0 )) || execution_failure "comment stripping $manifest_path" "$CAPTURE_STATUS" "$CAPTURE_OUT" "$CAPTURE_ERR"
     stripped_manifest="$CAPTURE_OUT"
-    # This rule is partial; see #1527. The line-based reader does not read inline tables, dotted keys, spaced
-    # header dots, quoted table names or escaped keys; #1527 replaces it with a TOML reader.
-    # #1442 (root Amendment 4): a dependency key `core`, `std` or `alloc` (or a table header
-    # `[dependencies.core]`) makes Cargo pass `--extern core=..`, which redirects the prelude's
-    # `core` for the whole crate. The package-name rule above does not see it. Only dependency
-    # tables are read: `test = false` in a `[[bin]]` table is no dependency.
-    capture sysroot-dependency-scan awk '
-        /^[[:space:]]*\[/ {
-            header = $0
-            sub(/^[[:space:]]*\[+[[:space:]]*/, "", header)
-            sub(/[[:space:]]*\]+[[:space:]]*$/, "", header)
-            in_dependencies = (header ~ /(^|\.)(dev-|build-)?dependencies$/)
-            if (header ~ /(^|\.)(dev-|build-)?dependencies\.["\x27]?(core|std|alloc)["\x27]?$/) {
-                printf "%d: %s\n", NR, $0
-            }
-            next
-        }
-        in_dependencies && /^[[:space:]]*["\x27]?(core|std|alloc)["\x27]?[[:space:]]*[.=]/ {
-            printf "%d: %s\n", NR, $0
-        }
-    ' "$stripped_manifest"
-    (( CAPTURE_STATUS == 0 )) || execution_failure "sysroot dependency scan $manifest_path" "$CAPTURE_STATUS" "$CAPTURE_OUT" "$CAPTURE_ERR"
-    if [[ -s "$CAPTURE_OUT" ]]; then
-        printf '%s\n' "$(<"$CAPTURE_OUT")" >&2
-        fail "dependency key 'core', 'std' or 'alloc' redirects the sysroot crate and is forbidden: $manifest_path"
-    fi
     capture retired-scan rg -n "$retired_delivery_codec_pattern" "$stripped_manifest"
     case "$CAPTURE_STATUS" in
       0) printf '%s\n' "$(<"$CAPTURE_OUT")" >&2; fail "retired delivery-codec Cargo identity is forbidden: $manifest_path";;
@@ -295,31 +276,84 @@ while IFS= read -r manifest_path; do
     esac
 done <"$tracked_manifest_paths"
 
-# #1519 (root Amendment 2): rustc also reads source named by a Cargo target: `path =` under `[lib]`,
-# `[[bin]]`, `[[test]]`, `[[example]]` and `[[bench]]`, and `build =` under `[package]`. The
-# realtime-policy walk reads only the files under `crates`, `hosts` and `tools`, and skips the
-# directories it lists in `SKIPPED_DIRECTORIES` (tools/realtime-policy/src/walk.rs), so a target
-# path must be relative, stay inside its package directory (no `..`) and name no skipped directory
-# (compared ignoring case, for case-insensitive file systems). A TOML parser reads the manifests, so
-# an inline table (`lib = { path = ".." }`), a dotted key or an array of inline tables is read as the
-# table it is. The skipped names are read from walk.rs itself, so the rule follows it by
-# construction; the read fails closed if the constant cannot be found. Status 3 is a violation; any
-# other non-zero status (an unreadable constant, a Python error) is an execution failure.
-manifest_target_checker=$(cat <<'PY'
+# One TOML reader for every rule about what Cargo reads (#1519 root Amendment 2; #1527; #1528 D4).
+# The realtime-policy walk reads the `.rs` files under the directories `SCAN_ROOTS` lists and skips
+# the ones `SKIPPED_DIRECTORIES` lists (tools/realtime-policy/src/walk.rs); both are read from
+# walk.rs, and the read fails closed if either constant cannot be found. Python's `tomllib` reads
+# each manifest and build configuration the way Cargo does, so an inline table, a dotted key, a
+# spaced or quoted header and an escaped key are read as what they are. Rules:
+# - Target paths (#1519): `path =` under `[lib]`, `[[bin]]`, `[[test]]`, `[[example]]` and
+#   `[[bench]]`, and `[package] build =`, are relative, inside the package (no `..`) and name no
+#   skipped directory. A path-less `[[bin]]`, `[[test]]`, `[[example]]` or `[[bench]]` whose `name`
+#   is a skipped word is refused: Cargo then picks `src/bin/<name>/` and the like (#1527 (ii)).
+#   `hosts/host-web/Cargo.toml` `[lib] path` is absent or exactly `src/lib.rs` (#1528 D4).
+# - Dependency keys (#1442 root Amendment 4, #1527 D1): a key `core`, `std` or `alloc` (after `-`
+#   becomes `_`) in any dependency table makes Cargo pass `--extern core=..`, which redirects the
+#   prelude's `core` for the whole crate; a `package =` rename to one of them is refused too.
+# - Containment (#1527 D4/(iii)): every root-workspace member and every dependency `path` (every
+#   dependency table, `[patch.*]`, `[replace]`) of every tracked manifest resolves, lexically and
+#   through symlinks, to a directory under a scan root and through no skipped directory.
+# - Placement (#1527 (i)): no tracked (index-only) path under a scan root has a skipped directory
+#   component.
+# - Build configuration (#1527 D5): every `.cargo/config` or `.cargo/config.toml`, at any depth, must
+#   parse, and has no crate attribute or bootstrap word, no `@` argument file in a flag key and no
+#   `include`. The ISA-pin rule below is separate and unchanged.
+# - Workflows and scripts (#1527 D6): no file under `.github/workflows/` or `scripts/` holds the
+#   crate attribute or bootstrap word. This file and its self-test build both words from fragments.
+# The rules judge written forms; a word assembled at run time, a generated flag file, and a
+# `$CARGO_HOME` configuration or `RUSTFLAGS` set outside the repository are not read (#1527 D7).
+# `tomllib` (Python 3.11+) is imported unconditionally (#1527 D2). Status 3 is a violation; any
+# other non-zero status (a missing interpreter or module, an unreadable constant) is an execution
+# failure of the gate.
+manifest_checker=$(cat <<'PY'
+import glob
+import os
 import re
 import sys
 import tomllib
 
-walk_source, manifest_list = sys.argv[1], sys.argv[2]
-
+walk_source, manifest_list, path_list, cached_nul = sys.argv[1:5]
 with open(walk_source, encoding="utf-8") as handle:
-    constant = re.search(r"const\s+SKIPPED_DIRECTORIES\b[^=]*=\s*\[(.*?)\]\s*;", handle.read(), re.S)
-skipped = [name.lower() for name in re.findall(r'"([^"]+)"', constant.group(1))] if constant else []
-if not skipped:
-    sys.exit(f"cannot read SKIPPED_DIRECTORIES from {walk_source}")  # status 1: not a violation
+    walk_text = handle.read()
 
 
-def refusal(value):
+def constant(name):
+    found = re.search(r"const\s+" + name + r"\b[^=]*=\s*\[(.*?)\]\s*;", walk_text, re.S)
+    values = re.findall(r'"([^"]+)"', found.group(1)) if found else []
+    if not values:
+        sys.exit(f"cannot read {name} from {walk_source}")  # status 1: not a violation
+    return values
+
+
+skipped = [name.lower() for name in constant("SKIPPED_DIRECTORIES")]
+roots = constant("SCAN_ROOTS")
+# Built from fragments, so this file does not hold the words it refuses.
+FORBIDDEN_WORDS = ("crate-" "attr", "rustc-" "bootstrap")
+SYSROOT = {"core", "std", "alloc"}
+DEPENDENCY_TABLES = ("dependencies", "dev-dependencies", "dev_dependencies",
+                     "build-dependencies", "build_dependencies")
+lexical_base = os.path.abspath(".")
+real_base = os.path.realpath(".")
+bad = []
+
+
+def lines(path):
+    with open(path, encoding="utf-8") as handle:
+        return [line.rstrip("\n") for line in handle if line.strip()]
+
+
+manifests = lines(manifest_list)
+all_paths = lines(path_list)
+with open(cached_nul, "rb") as handle:
+    cached = [entry.decode("utf-8", "surrogateescape").removeprefix("./")
+              for entry in handle.read().split(b"\0") if entry]
+
+
+def components(path):
+    return [part for part in re.split(r"[/\\]", path) if part not in ("", ".")]
+
+
+def target_refusal(value):
     if not isinstance(value, str) or not value:
         return "is not a non-empty string"
     if value.startswith(("/", "\\")) or re.match(r"[A-Za-z]:", value):
@@ -332,16 +366,77 @@ def refusal(value):
     return None
 
 
-bad = []
-with open(manifest_list, encoding="utf-8") as handle:
-    manifests = [line.rstrip("\n") for line in handle if line.strip()]
+def placement_refusal(directory, value):
+    """Where a member or dependency `path` lands: under a scan root, through no skipped name."""
+    if not isinstance(value, str) or not value:
+        return "is not a non-empty string"
+    for component in components(value):
+        if component.lower() in skipped:
+            return f"names the directory '{component}', which the realtime walk skips"
+    joined = os.path.join(directory, value)
+    for kind, base, resolved in (("lexical", lexical_base, os.path.normpath(os.path.abspath(joined))),
+                                 ("real", real_base, os.path.realpath(joined))):
+        parts = os.path.relpath(resolved, base).split(os.sep)
+        if parts[0] == "..":
+            return f"resolves ({kind}) outside the repository"
+        if parts[0] not in roots:
+            return f"resolves ({kind}) to '{'/'.join(parts)}', outside the scan roots {roots}"
+        for part in parts:
+            if part.lower() in skipped:
+                return f"resolves ({kind}) through '{part}', which the realtime walk skips"
+    return None
+
+
+def dependency_tables(manifest, data):
+    """Every (label, table) that Cargo reads as dependencies, with its `target.<cfg>` copies."""
+    found = [(name, data[name]) for name in DEPENDENCY_TABLES if name in data]
+
+    def under_target(label, table):
+        for key, value in table.items():
+            if not isinstance(value, dict):
+                continue
+            if key in DEPENDENCY_TABLES:
+                found.append((f"{label}.{key}", value))
+            under_target(f"{label}.{key}", value)
+
+    target = data.get("target", {})
+    if isinstance(target, dict):
+        under_target("target", target)
+    else:
+        bad.append(f"{manifest}: [target] is not a table")
+    workspace = data.get("workspace", {})
+    if isinstance(workspace, dict) and "dependencies" in workspace:
+        found.append(("workspace.dependencies", workspace["dependencies"]))
+    return found
+
+
+def check_dependencies(manifest, directory, label, table, names):
+    if not isinstance(table, dict):
+        bad.append(f"{manifest}: [{label}] is not a table")
+        return
+    for key, value in table.items():
+        if names and key.replace("-", "_") in SYSROOT:
+            bad.append(f"{manifest}: dependency key '{key}' in [{label}] redirects the sysroot crate")
+        if isinstance(value, str):
+            continue
+        if not isinstance(value, dict):
+            bad.append(f"{manifest}: dependency '{key}' in [{label}] is not a string or a table")
+            continue
+        package = value.get("package")
+        if names and isinstance(package, str) and package.replace("-", "_") in SYSROOT:
+            bad.append(f"{manifest}: dependency '{key}' in [{label}] renames package '{package}', a sysroot crate name")
+        if "path" in value and (why := placement_refusal(directory, value["path"])):
+            bad.append(f"{manifest}: dependency '{key}' in [{label}] path = {value['path']!r} {why}")
+
+
 for manifest in manifests:
     try:
         with open(manifest, "rb") as handle:
             data = tomllib.load(handle)
-    except (OSError, tomllib.TOMLDecodeError) as error:
+    except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError) as error:
         bad.append(f"{manifest}: cannot be read as TOML: {error}")
         continue
+    directory = os.path.dirname(manifest) or "."
     targets = []
     if "lib" in data:
         targets.append(("lib", data["lib"]))
@@ -354,25 +449,120 @@ for manifest in manifests:
     for kind, table in targets:
         if not isinstance(table, dict):
             bad.append(f"{manifest}: [{kind}] is not a table")
-        elif "path" in table and (why := refusal(table["path"])):
-            bad.append(f"{manifest}: [{kind}] path = {table['path']!r} {why}")
+        elif "path" in table:
+            if why := target_refusal(table["path"]):
+                bad.append(f"{manifest}: [{kind}] path = {table['path']!r} {why}")
+        elif kind != "lib" and isinstance(table.get("name"), str) and table["name"].lower() in skipped:
+            bad.append(f"{manifest}: [[{kind}]] name = {table['name']!r} has no path, so Cargo reads a directory the realtime walk skips")
+    if manifest == "hosts/host-web/Cargo.toml" and isinstance(data.get("lib"), dict) \
+            and "path" in data["lib"] and data["lib"]["path"] != "src/lib.rs":
+        bad.append(f"{manifest}: [lib] path = {data['lib']['path']!r} must be absent or exactly 'src/lib.rs'")
     package = data.get("package", {})
     if not isinstance(package, dict):
         bad.append(f"{manifest}: [package] is not a table")
-    elif "build" in package and not isinstance(package["build"], bool) and (why := refusal(package["build"])):
+    elif "build" in package and not isinstance(package["build"], bool) and (why := target_refusal(package["build"])):
         bad.append(f"{manifest}: [package] build = {package['build']!r} {why}")
+    for label, table in dependency_tables(manifest, data):
+        check_dependencies(manifest, directory, label, table, names=True)
+    patch = data.get("patch", {})
+    if not isinstance(patch, dict):
+        bad.append(f"{manifest}: [patch] is not a table")
+    else:
+        for registry, table in patch.items():
+            check_dependencies(manifest, directory, f"patch.{registry}", table, names=False)
+    if "replace" in data:
+        check_dependencies(manifest, directory, "replace", data["replace"], names=False)
+    workspace = data.get("workspace", {})
+    if not isinstance(workspace, dict):
+        bad.append(f"{manifest}: [workspace] is not a table")
+    elif manifest == "Cargo.toml" and "members" in workspace:
+        # The root workspace only: another manifest's own `[workspace]` (fuzz) is not this build.
+        members = workspace["members"]
+        if not isinstance(members, list):
+            bad.append(f"{manifest}: [workspace] members is not an array")
+            members = []
+        for member in members:
+            if not isinstance(member, str) or not member:
+                bad.append(f"{manifest}: workspace member {member!r} is not a non-empty string")
+                continue
+            expanded = [member]
+            if any(character in member for character in "*?["):
+                # Cargo's glob matches a leading dot too.
+                expanded = sorted(glob.glob(member, recursive=True, include_hidden=True))
+            for entry in expanded:
+                if why := placement_refusal(".", entry):
+                    bad.append(f"{manifest}: workspace member {entry!r} (from {member!r}) {why}")
+
+for path in cached:
+    parts = components(path)
+    if len(parts) > 1 and parts[0] in roots:
+        for part in parts[1:-1]:
+            if part.lower() in skipped:
+                bad.append(f"{path}: tracked path under a scan root has the directory '{part}', which the realtime walk skips")
+                break
+
+
+def normalized(text):
+    return text.lower().replace("_", "-")
+
+
+def config_strings(value, flags=False):
+    """Every (string, in_flags) in a config value, keys included; `in_flags` is true under a key
+    that names rustc or rustdoc flags (`rustflags`, `[env] RUSTFLAGS`, `CARGO_ENCODED_RUSTFLAGS`)."""
+    if isinstance(value, str):
+        yield value, flags
+    elif isinstance(value, list):
+        for item in value:
+            yield from config_strings(item, flags)
+    elif isinstance(value, dict):
+        for name, item in value.items():
+            yield name, False
+            yield from config_strings(item, flags or any(word in name.lower() for word in ("rustflags", "rustdocflags")))
+
+
+for path in all_paths:
+    parts = path.split("/")
+    if len(parts) < 2 or parts[-2] != ".cargo" or parts[-1] not in ("config", "config.toml"):
+        continue
+    try:
+        with open(path, "rb") as handle:
+            config = tomllib.load(handle)
+    except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError) as error:
+        bad.append(f"{path}: Cargo configuration cannot be read as TOML: {error}")
+        continue
+    if "include" in config:
+        bad.append(f"{path}: Cargo configuration 'include' reads a file this gate does not")
+    for text, in_flags in config_strings(config):
+        if any(word in normalized(text) for word in FORBIDDEN_WORDS):
+            bad.append(f"{path}: Cargo configuration {text!r} injects a crate attribute or unlocks unstable rustc")
+        if in_flags and any(token.startswith("@") for token in re.split(r"[\s\x1f]+", text)):
+            bad.append(f"{path}: Cargo configuration flag {text!r} reads a rustc argument file")
+
+for path in all_paths:
+    if not path.startswith((".github/workflows/", "scripts/")):
+        continue
+    try:
+        with open(path, "rb") as handle:
+            text = handle.read().decode("utf-8", "replace")
+    except OSError as error:
+        bad.append(f"{path}: cannot be read: {error}")
+        continue
+    if any(word in normalized(text) for word in FORBIDDEN_WORDS):
+        bad.append(f"{path}: names a crate attribute or bootstrap flag word, which can inject a crate attribute or unlock unstable rustc")
+
 if bad:
     print("\n".join(bad))
     sys.exit(3)
 PY
 )
-capture manifest-target-paths python3 -c "$manifest_target_checker" \
-    "$script_directory/../tools/realtime-policy/src/walk.rs" "$tracked_manifest_paths"
+capture manifest-policy python3 -c "$manifest_checker" \
+    "$script_directory/../tools/realtime-policy/src/walk.rs" "$tracked_manifest_paths" \
+    "$TRACKED_ALL_PATHS_OUT" "$CACHED_PATHS_NUL"
 case "$CAPTURE_STATUS" in
   0) ;;
   3) printf '%s\n' "$(<"$CAPTURE_OUT")" >&2
-     fail "a Cargo target path (path under lib, bin, test, example or bench; package build) must be relative, inside its package directory, with no '..' component and no component the realtime walk skips";;
-  *) execution_failure 'manifest target path scan' "$CAPTURE_STATUS" "$CAPTURE_OUT" "$CAPTURE_ERR";;
+     fail "a Cargo manifest, Cargo configuration, workflow or script lets rustc build source the realtime walk does not read (target paths, dependency keys and paths, members, skipped directories, build flags); see the findings above";;
+  *) execution_failure 'manifest policy scan' "$CAPTURE_STATUS" "$CAPTURE_OUT" "$CAPTURE_ERR";;
 esac
 
 scan_forbidden "retired delivery-codec Cargo identity is forbidden in the lockfile" \

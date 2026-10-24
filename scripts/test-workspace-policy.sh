@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Mutation tests proving that the workspace-policy guard rejects each protected failure class.
 set -euo pipefail
+source "$(dirname "${BASH_SOURCE[0]}")/lib/gate.sh"
 
 script_directory="$(cd "$(dirname "$0")" && pwd)"
 policy_script="$script_directory/check-workspace-policy.sh"
@@ -361,38 +362,6 @@ mutate_sysroot_collision() {
     printf '//! fixture\n' >"$root/crates/core/src/lib.rs"
 }
 
-# #1442 (root Amendment 4): a dependency key (or a `[dependencies.core]` header) named `core`,
-# `std` or `alloc` makes Cargo pass `--extern core=..` and redirects the prelude's `core`. The
-# package-name rule does not see a dependency key. Each form is a separate mutation, so none hides
-# behind another.
-mutate_sysroot_dependency_key() {
-    local root="$1"
-    printf '\n[dependencies]\ncore = { package = "spin", version = "0.9" }\n' \
-        >>"$root/crates/library/Cargo.toml"
-}
-
-mutate_sysroot_dependency_header() {
-    local root="$1"
-    printf '\n[dependencies.std]\npackage = "spin"\nversion = "0.9"\n' \
-        >>"$root/crates/library/Cargo.toml"
-}
-
-mutate_sysroot_dev_dependency_dotted_key() {
-    local root="$1"
-    printf '\n[target.\x27cfg(unix)\x27.dev-dependencies]\nalloc.package = "spin"\n' \
-        >>"$root/crates/library/Cargo.toml"
-}
-
-mutate_sysroot_workspace_dependency() {
-    local root="$1"
-    printf '\n[workspace.dependencies]\n"core" = { package = "spin", version = "0.9" }\n' \
-        >>"$root/Cargo.toml"
-    mkdir -p "$root/crates/nested"
-    cp "$root/crates/library/Cargo.toml" "$root/crates/nested/Cargo.toml"
-    sed -i 's/library/nested/g' "$root/crates/nested/Cargo.toml"
-    printf '\n[dependencies]\ncore = { workspace = true }\n' >>"$root/crates/nested/Cargo.toml"
-}
-
 # #1519 (root Amendment 2): a Cargo target path that leaves the package directory or names a
 # directory the realtime walk skips makes rustc read source the walk does not. One mutation per
 # table kind, each with a different violation, so a check that handles one kind cannot cover
@@ -472,8 +441,8 @@ allow_target_path_lookalikes() {
 }
 
 # Names that only look like the rule's: a `test = false` target flag (as `fuzz/Cargo.toml` has), a
-# dependency whose name starts with `core`, a `core` mention in a comment and a key outside every
-# dependency table must all pass.
+# dependency whose name starts with `core`, a `core` mention in a comment, a `core` feature, an
+# ordinary target dependency and a key outside every dependency table must all pass.
 allow_sysroot_lookalikes() {
     local root="$1"
     create_valid_fixture "$root"
@@ -490,8 +459,178 @@ allow_sysroot_lookalikes() {
         '[dependencies]' \
         'core_affinity = "0.8"' \
         'standard = "1"' \
+        '' \
+        "[target.'cfg(unix)'.dependencies]" \
+        'ordinary = "1"' \
+        >>"$root/crates/library/Cargo.toml"
+    sed -i 's/^default = \[\]$/default = []\ncore = []/' "$root/crates/library/Cargo.toml"
+    bash "$policy_script" "$root" >/dev/null
+}
+
+# #1527: the manifest checker reads every manifest and Cargo configuration as TOML. A row writes
+# (`write`) or appends (`append`) one file and names the finding it must produce, so a row that a
+# different rule rejects fails as the wrong reason. The words the build-flag rules refuse are built
+# from fragments, so this file does not hold them.
+attr_word="crate-""attr"
+attr_word_underscore="crate_""attr"
+bootstrap_word="RUSTC_""BOOTSTRAP"
+library_head=$'[package]\nname = "library"\nlicense.workspace = true\n'
+
+plant() {
+    local mode="$1" file="$2" content="$3" root="$4"
+    mkdir -p "$(dirname "$root/$file")"
+    if [[ "$mode" == append ]]; then
+        printf '\n%s' "$content" >>"$root/$file"
+    else
+        printf '%s' "$content" >"$root/$file"
+    fi
+}
+
+row() {
+    local name="$1" expected="$2"
+    shift 2
+    expect_failure_with_message "$name" "$expected" plant "$@"
+}
+
+# Symlinks whose real path leaves the scan roots while the written path stays inside them.
+plant_symlinked_paths() {
+    local root="$1"
+    mkdir -p "$root/vendor/real"
+    ln -s ../vendor/real "$root/crates/link"
+    printf '%s\n' '' '[dependencies]' 'linked = { path = "../link" }' >>"$root/crates/library/Cargo.toml"
+    printf '%s\n' '[workspace]' 'members = ["crates/link"]' '' '[workspace.package]' \
+        'license = "FSL-1.1-ALv2"' >"$root/Cargo.toml"
+}
+
+# (i): five tracked shapes with a skipped directory component, Cargo's autodiscovery shapes among
+# them, in the non-git fallback set.
+plant_skipped_components() {
+    local root="$1" file
+    for file in crates/library/node_modules/x/lib.rs hosts/binary/Target/y.rs tools/t/src/target/a.rs \
+        crates/library/src/bin/target/main.rs crates/library/tests/node_modules/main.rs; do
+        mkdir -p "$root/${file%/*}"
+        printf 'fn main() {}\n' >"$root/$file"
+    done
+}
+
+plant_tracked_skipped() {
+    mkdir -p "$1/crates/library/target"
+    printf 'fn main() {}\n' >"$1/crates/library/target/x.rs"
+    git -C "$1" init -q
+    git -C "$1" add .
+}
+
+plant_untracked_skipped() {
+    git -C "$1" init -q
+    git -C "$1" add .
+    mkdir -p "$1/crates/library/target"
+    printf 'fn main() {}\n' >"$1/crates/library/target/x.rs"
+}
+
+# (ii): a path-less target whose name is a skipped word, in each target kind. The `[[bin]]` sits in
+# fuzz/Cargo.toml, outside the bin-name rule of the package roots.
+plant_skipped_target_names() {
+    local root="$1" kind
+    printf '%s\n' '' '[[bin]]' 'name = "target"' >>"$root/fuzz/Cargo.toml"
+    for kind in test example bench; do
+        printf '%s\n' '' "[[$kind]]" 'name = "Node_Modules"' >>"$root/crates/library/Cargo.toml"
+    done
+}
+
+# Accepted lookalikes, one function per rule group, so a rule that over-matches turns only its own
+# group's row red.
+allow_containment_lookalikes() {
+    local root="$1"
+    create_valid_fixture "$root"
+    printf '%s\n' '[workspace]' 'members = ["crates/library", "hosts/*"]' '' \
+        '[workspace.dependencies]' 'library = { path = "crates/library" }' '' \
+        '[workspace.package]' 'license = "FSL-1.1-ALv2"' >"$root/Cargo.toml"
+    printf '%s\n' '' '[workspace]' 'members = ["."]' '' '[dependencies]' \
+        'library = { path = "../crates/library" }' >>"$root/fuzz/Cargo.toml"
+    printf '%s\n' '' '[dependencies]' 'binary = { path = "../../hosts/binary" }' \
+        'sibling = { path = "../../crates/sibling" }' '' \
+        '[target.'"'cfg(unix)'"'.dev-dependencies]' 'probe = { path = "../../tools/probe" }' \
         >>"$root/crates/library/Cargo.toml"
     bash "$policy_script" "$root" >/dev/null
+}
+
+allow_placement_lookalikes() {
+    local root="$1" file
+    create_valid_fixture "$root"
+    for file in crates/target-smoke/src/lib.rs crates/library/node_modules_old/x.rs crates/library/src/target.rs \
+        target/x.rs; do
+        mkdir -p "$root/${file%/*}"
+        printf '//! fixture\n' >"$root/$file"
+    done
+    bash "$policy_script" "$root" >/dev/null
+}
+
+allow_target_name_lookalikes() {
+    local root="$1"
+    create_valid_fixture "$root"
+    printf '%s\n' '' '[[bin]]' 'name = "tgt"' >>"$root/fuzz/Cargo.toml"
+    printf '%s\n' '' '[[test]]' 'name = "m1_exhaustive"' >>"$root/crates/library/Cargo.toml"
+    bash "$policy_script" "$root" >/dev/null
+}
+
+write_host_web() {
+    local root="$1"
+    shift
+    mkdir -p "$root/hosts/host-web/src"
+    printf '//! fixture\n' >"$root/hosts/host-web/src/lib.rs"
+    printf '%s\n' "$@" '[package]' 'name = "host-web"' 'license.workspace = true' >"$root/hosts/host-web/Cargo.toml"
+}
+
+allow_host_web_lib_path() {
+    local root="$1"
+    create_valid_fixture "$root"
+    write_host_web "$root" 'lib = { name = "host_web", path = "src/lib.rs" }'
+    bash "$policy_script" "$root" >/dev/null
+    write_host_web "$root"
+    bash "$policy_script" "$root" >/dev/null
+}
+
+allow_build_flag_lookalikes() {
+    local root="$1"
+    create_valid_fixture "$root"
+    mkdir -p "$root/scripts" "$root/.github/workflows" "$root/crates/library/.cargo"
+    printf '%s\n' 'RUSTFLAGS="-C target-feature=+simd128" cargo build  # a crate attribute is not set here' \
+        >"$root/scripts/build.sh"
+    printf '%s\n' 'env:' '  RUSTDOCFLAGS: -D warnings' >"$root/.github/workflows/docs.yml"
+    printf '%s\n' '[env]' 'MISO_NOTE = "an @ sign outside a flag key"' >"$root/crates/library/.cargo/config.toml"
+    bash "$policy_script" "$root" >/dev/null
+}
+
+# D2: a `python3` that cannot import `tomllib` (as below Python 3.11) fails the gate itself; it
+# never reads as a clean scan.
+assert_python_without_tomllib_fails() {
+    local root="$scratch_root/python-without-tomllib" shim="$scratch_root/shim-python" real output rc
+    real="$(command -v python3)"
+    create_valid_fixture "$root"
+    mkdir -p "$shim"
+    printf '%s\n' '#!/usr/bin/env bash' '[[ "$1" == -c ]] || exit 99' 'code=$2; shift 2' \
+        "exec '$real' -c 'import sys; sys.modules[\"tomllib\"] = None; exec(sys.argv.pop(1))' \"\$code\" \"\$@\"" \
+        >"$shim/python3"
+    chmod +x "$shim/python3"
+    output="$(PATH="$shim:$PATH" bash "$policy_script" "$root" 2>&1)" && rc=0 || rc=$?
+    [[ "$rc" -ne 0 && "$output" == *'manifest policy scan failed (status 1)'* && "$output" == *tomllib* ]] || {
+        printf 'python without tomllib was not a gate failure (rc=%s): %s\n' "$rc" "$output" >&2; exit 1;
+    }
+}
+
+# A walk.rs without SCAN_ROOTS fails the gate; the roots are never assumed.
+assert_missing_scan_roots_fails() {
+    local copy="$scratch_root/no-scan-roots" root="$scratch_root/no-scan-roots-fixture" output rc
+    mkdir -p "$copy/scripts/lib" "$copy/tools/realtime-policy/src"
+    cp "$policy_script" "$copy/scripts/check-workspace-policy.sh"
+    cp "$script_directory/lib/gate.sh" "$copy/scripts/lib/gate.sh"
+    sed 's/const SCAN_ROOTS/const SCAN_ROOTZ/' "$script_directory/../tools/realtime-policy/src/walk.rs" \
+        >"$copy/tools/realtime-policy/src/walk.rs"
+    create_valid_fixture "$root"
+    output="$(bash "$copy/scripts/check-workspace-policy.sh" "$root" 2>&1)" && rc=0 || rc=$?
+    [[ "$rc" -ne 0 && "$output" == *'cannot read SCAN_ROOTS'* && "$output" == *'failed (status 1)'* ]] || {
+        printf 'missing SCAN_ROOTS was not a gate failure (rc=%s): %s\n' "$rc" "$output" >&2; exit 1;
+    }
 }
 
 # Issue #356/#359: the delivery-codec boundary folded from check-delivery-codec-boundary.py.
@@ -656,14 +795,6 @@ expect_failure host-package-prefix mutate_host_package_prefix
 expect_failure host-nested-directory-mismatch mutate_host_nested_directory_mismatch
 expect_failure sysroot-collision mutate_sysroot_collision
 expect_failure prelude-collision mutate_prelude_collision
-expect_failure_with_message sysroot-dependency-key \
-    "dependency key 'core', 'std' or 'alloc'" mutate_sysroot_dependency_key
-expect_failure_with_message sysroot-dependency-header \
-    "dependency key 'core', 'std' or 'alloc'" mutate_sysroot_dependency_header
-expect_failure_with_message sysroot-dev-dependency-dotted-key \
-    "dependency key 'core', 'std' or 'alloc'" mutate_sysroot_dev_dependency_dotted_key
-expect_failure_with_message sysroot-workspace-dependency \
-    "dependency key 'core', 'std' or 'alloc'" mutate_sysroot_workspace_dependency
 expect_failure_with_message target-path-lib "has a '..' component" mutate_target_path_lib
 expect_failure_with_message target-path-bin "names the directory 'target'" mutate_target_path_bin
 expect_failure_with_message target-path-test "is not a relative path" mutate_target_path_test
@@ -671,6 +802,146 @@ expect_failure_with_message target-path-example "names the directory 'node_modul
     mutate_target_path_example
 expect_failure_with_message target-path-bench "names the directory 'Target'" mutate_target_path_bench
 expect_failure_with_message target-path-build "[package] build = '../build.rs'" mutate_target_path_build
+# D1: a dependency key `core`, `std` or `alloc`, in every written form and every table kind.
+# Test value: a key the line reader let pass (inline table, dotted key, spaced or quoted header,
+# escape), or a table kind or depth the reader skips, redirects the prelude's sysroot crate.
+row dep-plain "dependency key 'core' in [dependencies]" append crates/library/Cargo.toml \
+    $'[dependencies]\ncore = { package = "spin", version = "0.9" }\n'
+row dep-subtable-header "dependency key 'std' in [dependencies]" append crates/library/Cargo.toml \
+    $'[dependencies.std]\npackage = "spin"\n'
+row dep-inline-root "dependency key 'core' in [dependencies]" write crates/library/Cargo.toml \
+    $'dependencies = { core = { package = "spin", version = "0.9" } }\n'"$library_head"
+row dep-inline-target "dependency key 'std' in [target.cfg(unix).dependencies]" append crates/library/Cargo.toml \
+    $'[target.\'cfg(unix)\']\ndependencies = { std = "1" }\n'
+row dep-dotted "dependency key 'core' in [dependencies]" write crates/library/Cargo.toml \
+    $'dependencies.core = "1"\n'"$library_head"
+row dep-dotted-target "dependency key 'alloc' in [target.cfg(unix).dependencies]" write crates/library/Cargo.toml \
+    $'target.\'cfg(unix)\'.dependencies.alloc.package = "spin"\n'"$library_head"
+row dep-spaced-header "dependency key 'core' in [dependencies]" append crates/library/Cargo.toml \
+    $'[ dependencies . core ]\nversion = "1"\n'
+row dep-spaced-target "dependency key 'alloc' in [target.cfg(unix).dependencies]" append crates/library/Cargo.toml \
+    $'[target . \'cfg(unix)\' . dependencies]\nalloc = "1"\n'
+row dep-quoted-header "dependency key 'std' in [dependencies]" append crates/library/Cargo.toml \
+    $'["dependencies"]\nstd = "1"\n'
+row dep-quoted-subtable "dependency key 'core' in [dependencies]" append crates/library/Cargo.toml \
+    $'["dependencies".core]\nversion = "1"\n'
+row dep-escaped-key "dependency key 'core' in [dependencies]" append crates/library/Cargo.toml \
+    $'[dependencies]\n"\\u0063ore" = "1"\n'
+row dep-escaped-table "dependency key 'std' in [dependencies]" append crates/library/Cargo.toml \
+    $'["dep\\u0065ndencies"]\nstd = "1"\n'
+row dep-dev "dependency key 'std' in [dev-dependencies]" append crates/library/Cargo.toml \
+    $'[dev-dependencies]\nstd = "1"\n'
+row dep-build "dependency key 'alloc' in [build-dependencies]" append crates/library/Cargo.toml \
+    $'[build-dependencies]\nalloc = "1"\n'
+row dep-dev-underscore "dependency key 'core' in [dev_dependencies]" append crates/library/Cargo.toml \
+    $'[dev_dependencies]\ncore = "1"\n'
+row dep-build-underscore "dependency key 'core' in [build_dependencies]" append crates/library/Cargo.toml \
+    $'[build_dependencies]\ncore = "1"\n'
+row dep-target-dev "dependency key 'alloc' in [target.cfg(unix).dev-dependencies]" append crates/library/Cargo.toml \
+    $'[target.\'cfg(unix)\'.dev-dependencies]\nalloc.package = "spin"\n'
+row dep-workspace "dependency key 'core' in [workspace.dependencies]" append Cargo.toml \
+    $'[workspace.dependencies]\n"core" = { package = "spin", version = "0.9" }\n'
+row dep-deep-manifest "crates/a/b/Cargo.toml: dependency key 'core' in [dependencies]" write crates/a/b/Cargo.toml \
+    $'[package]\nname = "b"\nlicense.workspace = true\n\n[dependencies]\ncore = "1"\n'
+row dep-package-rename "dependency 'x' in [dependencies] renames package 'core'" append crates/library/Cargo.toml \
+    $'[dependencies]\nx = { package = "core", version = "1" }\n'
+row dep-not-toml "crates/library/Cargo.toml: cannot be read as TOML" append crates/library/Cargo.toml \
+    $'[dependencies\n'
+row dep-not-table "[dependencies] is not a table" write crates/library/Cargo.toml \
+    $'dependencies = 1\n'"$library_head"
+
+# D4/(iii): every member and dependency path resolves under the scan roots, through no skipped
+# directory. Test value: a member or path dependency outside the roots (the 1442 std-probe shape)
+# makes rustc compile source the walk never reads, and no other rule sees the manifest edge.
+row path-dependencies "dependency 'fakestd' in [dependencies] path = '../../vendor/fakestd' resolves (lexical) to 'vendor/fakestd'" \
+    append crates/library/Cargo.toml $'[dependencies]\nfakestd = { path = "../../vendor/fakestd" }\n'
+row path-target-build "dependency 'fakestd' in [target.cfg(unix).build-dependencies] path" \
+    append crates/library/Cargo.toml $'[target.\'cfg(unix)\'.build-dependencies]\nfakestd = { path = "../../vendor/fakestd" }\n'
+row path-patch "dependency 'fakestd' in [patch.crates-io] path" \
+    append crates/library/Cargo.toml $'[patch.crates-io]\nfakestd = { path = "../../vendor/fakestd" }\n'
+row path-replace "dependency 'fakestd:1.0.0' in [replace] path" \
+    append crates/library/Cargo.toml $'[replace]\n"fakestd:1.0.0" = { path = "../../vendor/fakestd" }\n'
+row path-workspace "dependency 'fakestd' in [workspace.dependencies] path = 'vendor/fakestd'" \
+    append Cargo.toml $'[workspace.dependencies]\nfakestd = { path = "vendor/fakestd" }\n'
+row path-outside-roots-manifest "fuzz/Cargo.toml: dependency 'fakestd' in [dependencies] path" \
+    append fuzz/Cargo.toml $'[dependencies]\nfakestd = { path = "../vendor/fakestd" }\n'
+row path-through-target "path = '../../crates/foo/target/lib' names the directory 'target'" \
+    append crates/library/Cargo.toml $'[dependencies]\nfoo = { path = "../../crates/foo/target/lib" }\n'
+row path-through-node-modules "path = '../sibling/node_modules/x' names the directory 'node_modules'" \
+    append crates/library/Cargo.toml $'[dependencies]\nx = { path = "../sibling/node_modules/x" }\n'
+row path-prefix-lookalike "resolves (lexical) to 'crates-old/x', outside the scan roots" \
+    append crates/library/Cargo.toml $'[dependencies]\nx = { path = "../../crates-old/x" }\n'
+row member-outside "workspace member '../outside' (from '../outside') resolves (lexical) outside the repository" \
+    write Cargo.toml $'[workspace]\nmembers = ["../outside"]\n\n[workspace.package]\nlicense = "FSL-1.1-ALv2"\n'
+row member-glob "workspace member 'fuzz' (from '*')" \
+    write Cargo.toml $'[workspace]\nmembers = ["*"]\n\n[workspace.package]\nlicense = "FSL-1.1-ALv2"\n'
+row member-not-array "[workspace] members is not an array" \
+    write Cargo.toml $'[workspace]\nmembers = "crates/library"\n\n[workspace.package]\nlicense = "FSL-1.1-ALv2"\n'
+expect_failure_with_rows symlinked-paths plant_symlinked_paths \
+    "dependency 'linked' in [dependencies] path = '../link' resolves (real) to 'vendor/real'" \
+    "workspace member 'crates/link' (from 'crates/link') resolves (real) to 'vendor/real'"
+assert_missing_scan_roots_fails
+
+# (i): a tracked path under a scan root with a skipped directory component. Test value: a rule that
+# reads only `.rs` mod paths or the walk's own list lets rustc build a tracked file the walk never
+# reads (a target path or Cargo autodiscovery). The untracked row: a rule built on the
+# tracked-or-untracked list refuses a developer's local build directory and passes in CI.
+expect_failure_with_rows skipped-components plant_skipped_components \
+    "crates/library/node_modules/x/lib.rs: tracked path under a scan root has the directory 'node_modules'" \
+    "hosts/binary/Target/y.rs: tracked path under a scan root has the directory 'Target'" \
+    "tools/t/src/target/a.rs: tracked path" "crates/library/src/bin/target/main.rs: tracked path" \
+    "crates/library/tests/node_modules/main.rs: tracked path"
+expect_git_failure_with_message tracked-skipped \
+    "crates/library/target/x.rs: tracked path under a scan root" plant_tracked_skipped
+expect_git_success untracked-skipped plant_untracked_skipped
+
+# (ii): a path-less target whose name is a skipped word. Test value: a reader that checks only
+# `path =` keys accepts a target whose implied path Cargo chooses (`src/bin/target.rs`), not written.
+expect_failure_with_rows skipped-target-names plant_skipped_target_names \
+    "fuzz/Cargo.toml: [[bin]] name = 'target' has no path" "[[test]] name = 'Node_Modules' has no path" \
+    "[[example]] name = 'Node_Modules' has no path" "[[bench]] name = 'Node_Modules' has no path"
+
+# #1528 D4: the host-web crate root stays `src/lib.rs`. Test value: a moved crate root makes the
+# tool read a file that does not ship.
+row host-web-lib-path "hosts/host-web/Cargo.toml: [lib] path = 'src/other.rs' must be absent or exactly 'src/lib.rs'" \
+    write hosts/host-web/Cargo.toml $'[package]\nname = "host-web"\nlicense.workspace = true\n\n[lib]\nname = "host_web"\npath = "src/other.rs"\n'
+row host-web-lib-inline "[lib] path = './src/lib.rs' must be absent or exactly 'src/lib.rs'" \
+    write hosts/host-web/Cargo.toml $'lib = { name = "host_web", path = "./src/lib.rs" }\n[package]\nname = "host-web"\nlicense.workspace = true\n'
+
+# D5: a Cargo configuration file, at any depth. Test value: a crate-attribute flag, an argument file
+# or an `include` in a config file that the ISA `rg` line never matches injects a crate attribute.
+row config-flag-array "injects a crate attribute" write .cargo/config.toml \
+    "[target.'cfg(unix)']"$'\n'"rustflags = [\"-Z\", \"$attr_word=feature(x)\"]"$'\n'
+row config-flag-string "injects a crate attribute" write .cargo/config.toml \
+    $'[build]\n'"rustflags = \"-Z$attr_word=no_std\""$'\n'
+row config-env-underscore "injects a crate attribute" write .cargo/config.toml \
+    $'[env]\n'"RUSTFLAGS = \"-Z${attr_word_underscore^^}=x\""$'\n'
+row config-rustdocflags "injects a crate attribute" write .cargo/config.toml \
+    $'[build]\n'"rustdocflags = [\"-Z$attr_word=x\"]"$'\n'
+row config-env-bootstrap "injects a crate attribute or unlocks unstable rustc" write .cargo/config.toml \
+    $'[env]\n'"$bootstrap_word = \"1\""$'\n'
+row config-argument-file "flag '@args.txt' reads a rustc argument file" write .cargo/config.toml \
+    $'[build]\nrustflags = ["@args.txt"]\n'
+row config-env-argument-file "flag '@args.txt' reads a rustc argument file" write .cargo/config.toml \
+    $'[env]\nRUSTFLAGS = { value = "@args.txt", force = true }\n'
+row config-include "'include' reads a file this gate does not" write .cargo/config.toml \
+    $'include = ["../elsewhere.toml"]\n'
+row config-not-toml ".cargo/config.toml: Cargo configuration cannot be read as TOML" write .cargo/config.toml \
+    $'[build\n'
+row config-nested "crates/x/.cargo/config: Cargo configuration" write crates/x/.cargo/config \
+    $'include = ["../elsewhere.toml"]\n'
+
+# D6: the words in a workflow or script, on any line. Test value: a flag assembled in a shell
+# variable and passed later, which a rule limited to `RUSTFLAGS` lines misses.
+row workflow-word ".github/workflows/x.yml: names a crate attribute or bootstrap flag word" write .github/workflows/x.yml \
+    $'env:\n'"  RUSTFLAGS: -Z$attr_word=feature(x)"$'\n'
+row script-variable "scripts/x.sh: names a crate attribute or bootstrap flag word" write scripts/x.sh \
+    "flags=\"-Z$attr_word=x\""$'\nRUSTFLAGS="$flags" cargo build\n'
+row script-bootstrap "scripts/y.sh: names a crate attribute or bootstrap flag word" write scripts/y.sh \
+    "export $bootstrap_word=1"$'\n'
+
+# D2. Test value: an interpreter without `tomllib` that silently passes.
+assert_python_without_tomllib_fails
 expect_failure retired-manifest-package-name mutate_retired_manifest_package_name
 expect_failure retired-stub-directory mutate_retired_stub_directory
 expect_failure retired-manifest-dependency mutate_retired_manifest_dependency
@@ -740,6 +1011,11 @@ allow_host_valid "$scratch_root/host-valid"
 allow_retired_name_in_comment "$scratch_root/retired-name-comment"
 allow_sysroot_lookalikes "$scratch_root/sysroot-lookalikes"
 allow_target_path_lookalikes "$scratch_root/target-path-lookalikes"
+allow_containment_lookalikes "$scratch_root/containment-lookalikes"
+allow_placement_lookalikes "$scratch_root/placement-lookalikes"
+allow_target_name_lookalikes "$scratch_root/target-name-lookalikes"
+allow_host_web_lib_path "$scratch_root/host-web-lib-path"
+allow_build_flag_lookalikes "$scratch_root/build-flag-lookalikes"
 
 # Issue #404's finite producer table. Each row names one external stage and injects exit 73 after
 # either no output or the real tool's complete, policy-valid output. Unselected calls always run
@@ -863,6 +1139,8 @@ fault_cases=(
  'git-classify-valid|git|rev-parse --is-inside-work-tree|1|complete|git repository classification failed'
  'git-list|git|ls-files -z|1|complete|git tracked-path listing failed'
  'git-list-empty|git|ls-files -z|1|empty|git tracked-path listing failed'
+ 'git-list-cached|git|ls-files --cached -z|1|complete|git cached-path listing failed'
+ 'git-list-cached-empty|git|ls-files --cached -z|1|empty|git cached-path listing failed'
  'fallback-list|find|-type f -not -path ./.git/*|1|complete|fallback tracked-path find failed'
  'fallback-list-empty|find|-type f -not -path ./.git/*|1|empty|fallback tracked-path find failed'
  'nul-convert|tr|\0|1|complete|tracked-path NUL conversion failed'

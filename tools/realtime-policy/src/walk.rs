@@ -8,14 +8,19 @@ use std::path::{Path, PathBuf};
 
 use crate::report::{Class, Finding};
 
-/// The directories the walk visits under the workspace root.
+/// The directories the walk visits under the workspace root. The manifest rules of
+/// `scripts/check-workspace-policy.sh` read this constant: every root-workspace member and every
+/// dependency `path` of every tracked manifest must resolve under one of these directories (#1527).
+/// Those rules judge written forms only: a word assembled at run time, a flag file a script
+/// generates, and a `$CARGO_HOME` configuration or `RUSTFLAGS` set outside the repository are not
+/// read (#1527 D7).
 pub(crate) const SCAN_ROOTS: [&str; 3] = ["crates", "hosts", "tools"];
 
 /// The only directories the walk skips, at any depth. The walk reads no .rs file under these
-/// directories. #1519 D1 (d) refuses a `mod` item that reaches them; Cargo target autodiscovery,
-/// `[[bin]] name` without `path`, and dependency or member paths that reach them are staged for
-/// #1527 (#1438 limit 3). The manifest-target-path rule of `scripts/check-workspace-policy.sh`
-/// reads this constant.
+/// directories. #1519 D1 (d) refuses a `mod` item that reaches them. The manifest rules of
+/// `scripts/check-workspace-policy.sh` read this constant and refuse a target path, a dependency or
+/// member path, a tracked path under the scan roots, and a path-less `[[bin]]`, `[[test]]`,
+/// `[[example]]` or `[[bench]]` name that reaches them (#1519, #1527).
 pub(crate) const SKIPPED_DIRECTORIES: [&str; 2] = ["target", "node_modules"];
 
 /// A `.rs` file found by the walk.
