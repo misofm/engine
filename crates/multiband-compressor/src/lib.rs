@@ -2296,7 +2296,7 @@ impl PreparedNativeEffect for PreparedMultibandCompressor {
         self.instance.reset(kind);
     }
 
-    /// Issue #1871: [`Instance::designed_channel_symmetry`] on lane 0.
+    /// Issue #1871: `Instance::designed_channel_symmetry` on lane 0.
     fn channel_symmetry(&self) -> bool {
         self.instance.designed_channel_symmetry(0)
     }
@@ -2389,7 +2389,7 @@ impl<L: Lane, const W: usize> PreparedNativeEffectBank for PreparedMultibandComp
         self.process_bank_inner::<false>(block)
     }
 
-    /// Issue #1871: [`Instance::designed_channel_symmetry`].
+    /// Issue #1871: `Instance::designed_channel_symmetry`.
     fn lane_channel_symmetry(&self, lane: usize) -> bool {
         self.instance.designed_channel_symmetry(lane)
     }

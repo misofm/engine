@@ -23,3 +23,28 @@ A mono track whose chain holds `miso.multiband-compressor` can mono-collapse lik
 ## Owner rule
 
 Only mono source files get dual-mono processing; no content detection.
+
+## Decision and evidence record (attempt 1, 2026-10-24)
+
+* Scope note `scope/1871.md` accepted by root; its path list replaces the spec's. Exact in all
+  three link modes: the collapsed body calls `link_levels::<LINK>(own, own)` in the dual order.
+* Kernel: one body, `run_segment::<.., ARMABLE, MONO>` / `process_block::<.., MONO>` /
+  `render_body::<.., MONO>` (`render` is its dual instantiation, so `corpus.rs` and `split.rs` are
+  unchanged). `MONO` plans, snaps, arms, counts silence and writes ramps back on side 0 only; the
+  right plane and side 1 are never read or written.
+* D7 collapsed (`finish_mono`): the left plane decides; a failed lane is zeroed on the left and
+  reset on both sides, and counts one block on each channel.
+* `process_bank_inner::<MONO>` (`#[inline(always)]`) serves `process_bank` and
+  `process_bank_mono`. #893's silent path: `quiet`, the fixed-point skip's silence advance and the
+  re-earned claim read the left plane and side 0. A claim earned collapsed holds on the next dual
+  block because the disengage copies the resting left side first.
+* `desymmetrize_channels` copies `Side.{filter, silence, gain_db, ramps}`; `channels_agree`
+  compares those words bit for bit. `lane_channel_symmetry` and the scalar `channel_symmetry`
+  compare the 17 ramps' four words. The randomized differential runs with `witness: true`.
+* Class A (PR evidence, not committed): every console `*output_sha256` (42 digest fields of one
+  untimed `bench console` warmup run) is identical on base `e68454874` and on this branch; the
+  committed corpus digests (`cross_target_digest`) are unchanged.
+* Wasm: shipped module 4,569,236 B on base, 4,603,306 B on the branch (+34,070 B, +0.75 %; the
+  `MONO` monomorphs). `process_bank` keeps 2,527 `f32x4` operations (scalar 20 on base, 0 on the
+  branch, codegen); `process_bank_mono` is 1,389 / 0, a new pinned roster row. Every
+  browser expected-resources row is unchanged against base, so nothing is re-pinned.
