@@ -2097,7 +2097,8 @@ fn a_read_the_frame_cannot_carry_consumes_nothing() {
 
 /// #1595 gate 6 (one-shot). Turns red if a refusal writes service state or maps to a status
 /// outside D6's table: each refusal answers its status and code, and the next valid call behaves
-/// as if the refused one never ran.
+/// as if the refused one never ran. #1944: red if a `Busy` refusal names the replay cache, or no
+/// record, instead of the arm slot (capacity 1, occupancy 1).
 #[test]
 fn each_capture_refusal_answers_its_status_and_changes_nothing() {
     let refusal = |status, code: &str| Err((status, code.to_owned()));
@@ -2123,9 +2124,32 @@ fn each_capture_refusal_answers_its_status_and_changes_nothing() {
         refusal(StatusCode::ValidationFailed, "spectrum.select.single")
     );
     rig.capture(&ARM).expect("arm");
+    rig.request += 1;
+    let busy = rig.capture_frame(rig.request, &ARM);
     assert_eq!(
-        rig.capture(&ARM),
+        decode_capture(&busy),
         refusal(StatusCode::Backpressure, "spectrum.busy")
+    );
+    // #1944: the record names the one-shot arm slot, not the replay cache.
+    let mut fields = [0_u16; 64];
+    let DecodedTypedResponseFrame::NonOk { payload, .. } = ProtocolCodec::default()
+        .decode_typed_response(&busy, &mut DecodeScratch::new(&mut fields))
+        .expect("a capture response")
+    else {
+        panic!("a non-OK reply");
+    };
+    assert_eq!(
+        payload.backpressure,
+        Some(protocol::Backpressure {
+            queue_kind: protocol::BackpressureQueueKind::SpectrumArm,
+            capacity: 1,
+            occupancy: 1,
+            requested_items: 1,
+            generation: None,
+            retry_boundary: None,
+            requested_bytes: None,
+            available_bytes: None,
+        })
     );
     for _ in 0..SPECTRUM_WINDOW_FRAMES / QUANTUM {
         rig.block();
