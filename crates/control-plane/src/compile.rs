@@ -250,6 +250,7 @@ pub(crate) fn capi_resources<A: ControlAdapter>(
     effect_controls: host_core::EffectControlResources,
     route_controls: host_core::RouteControlResources,
     observation: ObservationResources,
+    monitor: MonitorRows,
 ) -> Result<CapiResources, CompileFailure> {
     let queue_config = protocol_queue_config(limits)?;
     let queue = ProtocolQueues::resource_report_for_config(queue_config)
@@ -318,6 +319,13 @@ pub(crate) fn capi_resources<A: ControlAdapter>(
         strip_table_bytes,
         effect_row,
         route_row,
+        // #1696 D3: the monitor overlay and the edit-ramp table, at this epoch's model bounds. The
+        // newest epoch's rows cover the committed overlay; an older epoch's cover the kept base a
+        // successor displaced from it (`KeptBase`, whose model is that epoch's). The transients
+        // (`MonitorOverlay::after`'s result until its commit, `merged_ramps`' clone) are the same
+        // rows one commit ahead and are not charged twice.
+        monitor.overlay,
+        monitor.edit_ramps,
     ];
     let ObservationReserve {
         ended_event,
@@ -413,23 +421,28 @@ pub(crate) fn capi_resources<A: ControlAdapter>(
     // allocations, so feeding the whole row overstates the largest single allocation when that
     // row is the maximum. The error only ever refuses earlier.
     // The effect row is several allocations; its own largest one stands for it.
-    let largest = [control_table_row, source_id_row, strip_table_bytes]
-        .into_iter()
-        .chain([
-            effect_controls.largest_allocation_bytes(),
-            route_controls.largest_allocation_bytes,
-        ])
-        .chain(fixed_allocation_rows)
-        .chain(adapter_allocation_rows.iter().copied())
-        .chain(prepared_protocol_allocation_rows)
-        .chain([
-            queue.largest_allocation_bytes,
-            replay.largest_allocation_bytes,
-            exchange.largest_allocation_bytes,
-            provider.largest_allocation_bytes,
-        ])
-        .max()
-        .unwrap_or(0);
+    let largest = [
+        control_table_row,
+        source_id_row,
+        strip_table_bytes,
+        monitor.overlay_vector,
+    ]
+    .into_iter()
+    .chain([
+        effect_controls.largest_allocation_bytes(),
+        route_controls.largest_allocation_bytes,
+    ])
+    .chain(fixed_allocation_rows)
+    .chain(adapter_allocation_rows.iter().copied())
+    .chain(prepared_protocol_allocation_rows)
+    .chain([
+        queue.largest_allocation_bytes,
+        replay.largest_allocation_bytes,
+        exchange.largest_allocation_bytes,
+        provider.largest_allocation_bytes,
+    ])
+    .max()
+    .unwrap_or(0);
     Ok(CapiResources {
         active_retained,
         epoch_retained,
@@ -474,6 +487,7 @@ pub(crate) fn prepared_capi_resources<A: ControlAdapter>(
         RENDER_DIAGNOSTIC_SLOTS,
     )
     .map_err(|_| failure(ResourceFault::Arithmetic))?;
+    let monitor = monitor_rows(compiled.normalized_model())?;
     capi_resources::<A>(
         limits,
         compiled.source_count(),
@@ -485,7 +499,75 @@ pub(crate) fn prepared_capi_resources<A: ControlAdapter>(
         effect_controls,
         route_controls,
         observation,
+        monitor,
     )
+}
+
+/// The monitor overlay's and the edit-ramp table's rows of one epoch (#1696 D1-D3), bounded by
+/// the epoch's model, never by its edits.
+#[derive(Clone, Copy)]
+pub(crate) struct MonitorRows {
+    /// `controls::MonitorOverlay::retained_ceiling`: the solo vector at its reserve, the soloed
+    /// IDs' text and the master's.
+    pub(crate) overlay: u64,
+    /// The solo vector alone, one allocation, for the largest-allocation check.
+    pub(crate) overlay_vector: u64,
+    /// `session::EditRamps::retained_ceiling` of the model's strips, routes and VCAs.
+    pub(crate) edit_ramps: u64,
+}
+
+/// The summed text of `ids`.
+fn id_text_bytes<'a>(
+    ids: impl Iterator<Item = &'a session::StableId>,
+) -> Result<usize, CompileFailure> {
+    ids.into_iter()
+        .try_fold(0_usize, |total, id| total.checked_add(id.as_str().len()))
+        .ok_or_else(|| failure(ResourceFault::Arithmetic))
+}
+
+pub(crate) fn monitor_rows(model: &session::SessionModel) -> Result<MonitorRows, CompileFailure> {
+    let arithmetic = || failure(ResourceFault::Arithmetic);
+    let strips = model.strips().count();
+    let strip_id_bytes = id_text_bytes(model.strips().map(|strip| &*strip.id))?;
+    let longest_strip_id = model
+        .strips()
+        .map(|strip| strip.id.as_str().len())
+        .max()
+        .unwrap_or(0);
+    let route_id_bytes = id_text_bytes(model.routes.iter().map(|route| &route.id))?;
+    let vca_id_bytes = id_text_bytes(model.vcas.iter().map(|vca| &vca.id))?;
+    let to_bytes =
+        |bytes: usize| u64::try_from(bytes).map_err(|_| failure(ResourceFault::Platform));
+    Ok(MonitorRows {
+        overlay: to_bytes(
+            controls::MonitorOverlay::retained_ceiling(strips, strip_id_bytes, longest_strip_id)
+                .ok_or_else(arithmetic)?,
+        )?,
+        overlay_vector: checked_layout::<session::StableId>(strips)?,
+        edit_ramps: to_bytes(
+            session::EditRamps::retained_ceiling(
+                strips,
+                model.routes.len(),
+                model.vcas.len(),
+                strip_id_bytes,
+                route_id_bytes,
+                vca_id_bytes,
+            )
+            .ok_or_else(arithmetic)?,
+        )?,
+    })
+}
+
+/// The monitor overlay's and the edit-ramp table's rows of `model`, summed (#1696), so the C
+/// ABI's oracle can hold `capi_retained_bytes` to them.
+///
+/// # Errors
+///
+/// The arithmetic overflowed.
+#[cfg(feature = "test-support")]
+pub fn monitor_and_ramp_bytes(model: &session::SessionModel) -> Result<u64, CompileFailure> {
+    let rows = monitor_rows(model)?;
+    checked_sum(&[rows.overlay, rows.edit_ramps])
 }
 
 /// What a plan's observation subscriptions retain (#1584 D6a).

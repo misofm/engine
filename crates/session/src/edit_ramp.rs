@@ -208,11 +208,78 @@ impl EditRamps {
             .collect()
     }
 
+    /// The bytes a ramp table can retain on a session of `strips` strips, `routes` routes and
+    /// `vcas` VCA groups whose IDs total `strip_id_bytes`, `route_id_bytes` and `vca_id_bytes`
+    /// (#1696 D1, D2): a ceiling of the session's shape, never of its edits, or `None` on overflow.
+    ///
+    /// The bound: a key is `(owner, row)` over the session's owners -- five rows per strip, three
+    /// per route, two per VCA and the console's one -- and [`Self::set`] keeps a key in exactly one
+    /// of `entries` and `unset`, so the two hold at most that many keys together; `cleared` holds
+    /// at most one owner per strip, route, VCA and the console. Each key and each cleared owner
+    /// owns one copy of its owner's ID text. A B-tree node other than the root holds at least five
+    /// keys (std's node: B = 6, eleven keys, twelve edges), so `n` keys sit in at most
+    /// `1 + (n - 1) / 5` nodes, each charged at the internal node's layout.
+    #[must_use]
+    pub fn retained_ceiling(
+        strips: usize,
+        routes: usize,
+        vcas: usize,
+        strip_id_bytes: usize,
+        route_id_bytes: usize,
+        vca_id_bytes: usize,
+    ) -> Option<usize> {
+        let keys = strips
+            .checked_mul(5)?
+            .checked_add(routes.checked_mul(3)?)?
+            .checked_add(vcas.checked_mul(2)?)?
+            .checked_add(1)?;
+        let owners = strips
+            .checked_add(routes)?
+            .checked_add(vcas)?
+            .checked_add(1)?;
+        let key_text = strip_id_bytes
+            .checked_mul(5)?
+            .checked_add(route_id_bytes.checked_mul(3)?)?
+            .checked_add(vca_id_bytes.checked_mul(2)?)?;
+        let owner_text = strip_id_bytes
+            .checked_add(route_id_bytes)?
+            .checked_add(vca_id_bytes)?;
+        // `entries` and `unset` share the keys: each is one root plus a node per five more keys,
+        // so together at most two roots and `keys / 5` nodes, at the map's (larger) node.
+        let key_nodes = 2 + keys / B_TREE_MIN_KEYS;
+        let owner_nodes = 1 + (owners - 1) / B_TREE_MIN_KEYS;
+        key_nodes
+            .checked_mul(b_tree_node_ceiling::<Key, u32>())?
+            .checked_add(key_text)?
+            .checked_add(owner_nodes.checked_mul(b_tree_node_ceiling::<Owner, ()>())?)?
+            .checked_add(owner_text)
+    }
+
     /// Whether the transaction recorded no length at all.
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }
+}
+
+/// The fewest keys a B-tree node other than the root holds: std's `B - 1` for `B = 6`.
+const B_TREE_MIN_KEYS: usize = 5;
+/// The keys and values a std B-tree node holds.
+const B_TREE_CAPACITY: usize = 11;
+
+const fn align_up(bytes: usize, align: usize) -> usize {
+    bytes.div_ceil(align) * align
+}
+
+/// One std B-tree internal node of `K` keys and `V` values, a ceiling of every node of the tree:
+/// the `#[repr(C)]` leaf (the parent pointer, the parent index and the length, then eleven keys and
+/// eleven values) and the twelve child edges after it.
+const fn b_tree_node_ceiling<K, V>() -> usize {
+    let word = size_of::<usize>();
+    let header = word + 2 * size_of::<u16>();
+    let keys = align_up(header, align_of::<K>()) + B_TREE_CAPACITY * size_of::<K>();
+    let values = align_up(keys, align_of::<V>()) + B_TREE_CAPACITY * size_of::<V>();
+    align_up(values, word) + (B_TREE_CAPACITY + 1) * word
 }
 
 #[cfg(test)]
@@ -249,5 +316,98 @@ mod tests {
             ]
         );
         assert!(EditRamps::new().is_untouched());
+    }
+
+    /// #1696 gate 1: a ramp table filled to every row of every owner -- with lengths, then half
+    /// with no length, then every owner rewritten whole and filled again through an overlay --
+    /// never retains more than [`EditRamps::retained_ceiling`] of the session's shape. Red when a
+    /// B-tree node layout or an ID clone the ceiling does not account for lets a full table
+    /// out-grow the row the control cap admits.
+    #[test]
+    fn a_full_ramp_table_stays_within_its_ceiling() {
+        use bench_support::alloc::{
+            assert_installed, current_thread_peak, current_thread_peak_reset,
+        };
+        const STRIP: [EditRampRow; 5] = [
+            EditRampRow::Fader,
+            EditRampRow::Mute,
+            EditRampRow::Matrix,
+            EditRampRow::Input,
+            EditRampRow::Link,
+        ];
+        const ROUTE: [EditRampRow; 3] = [
+            EditRampRow::RouteGain,
+            EditRampRow::RouteMute,
+            EditRampRow::RouteMatrix,
+        ];
+        const VCA: [EditRampRow; 2] = [EditRampRow::VcaFader, EditRampRow::VcaMute];
+        assert_installed();
+        let named = |prefix: &str, count: usize, width: usize| -> Vec<StableId> {
+            (0..count)
+                .map(|index| id(&format!("{prefix}-{index:0width$}")))
+                .collect()
+        };
+        for (strips, routes, vcas, width) in [(1, 0, 0, 1), (3, 2, 1, 4), (40, 30, 7, 60)] {
+            let strip_ids = named("strip", strips, width);
+            let route_ids = named("route", routes, width);
+            let vca_ids = named("vca", vcas, width);
+            let text = |ids: &[StableId]| ids.iter().map(|id| id.as_str().len()).sum::<usize>();
+            let ceiling = EditRamps::retained_ceiling(
+                strips,
+                routes,
+                vcas,
+                text(&strip_ids),
+                text(&route_ids),
+                text(&vca_ids),
+            )
+            .expect("the ceiling fits");
+            let mut rows: Vec<(EditRampTarget, EditRampRow)> = Vec::new();
+            let targets = strip_ids
+                .iter()
+                .map(|id| (EditRampTarget::Strip(id.clone()), &STRIP[..]))
+                .chain(
+                    route_ids
+                        .iter()
+                        .map(|id| (EditRampTarget::Route(id.clone()), &ROUTE[..])),
+                )
+                .chain(
+                    vca_ids
+                        .iter()
+                        .map(|id| (EditRampTarget::Vca(id.clone()), &VCA[..])),
+                )
+                .chain([(EditRampTarget::Console, &[EditRampRow::Link][..])]);
+            for (target, owned) in targets {
+                rows.extend(owned.iter().map(|row| (target.clone(), *row)));
+            }
+
+            current_thread_peak_reset();
+            let mut ramps = EditRamps::new();
+            for (target, row) in &rows {
+                ramps.set(target, *row, Some(7));
+            }
+            let full = current_thread_peak().live_bytes;
+            for (target, row) in rows.iter().step_by(2) {
+                ramps.set(target, *row, None);
+            }
+            let split = current_thread_peak().live_bytes;
+            let mut later = EditRamps::new();
+            for (target, _) in &rows {
+                later.clear_target(target);
+            }
+            for (index, (target, row)) in rows.iter().enumerate() {
+                later.set(target, *row, (index % 3 != 0).then_some(9));
+            }
+            ramps.overlay(&later);
+            drop(later);
+            let rewritten = current_thread_peak().live_bytes;
+            for (phase, live) in [("full", full), ("split", split), ("rewritten", rewritten)] {
+                assert!(
+                    live <= ceiling as u64,
+                    "{strips} strips, {routes} routes, {vcas} VCAs, {phase}: {live} bytes live, \
+                     above the ceiling {ceiling}"
+                );
+            }
+            drop(ramps);
+        }
     }
 }

@@ -174,3 +174,33 @@ Half a day.
 ## Decision record: #1696
 
 To be filled by the implementer. The bounds decision goes first.
+
+Attempt 1 (implementer, 2026-10-24, on `main` a97b522be; stopped for a root ruling):
+
+- D1-D4 of the scope note taken as ruled. Built: `MonitorOverlay::retained_ceiling` and a reserve
+  in `after` (the solo vector is built at `next`'s strip count and a solo of a strip `next` lacks is
+  skipped, so it never reallocates); `EditRamps::retained_ceiling` (std B-tree node layout, at least
+  five keys per non-root node); two `epoch_rows` (`monitor.overlay`, `monitor.edit_ramps`) from
+  `monitor_rows(model)` in `prepared_capi_resources`; the overlay vector joins `largest`. The boot
+  seed keeps `MonitorOverlay::new()`: every commit replaces it with `after`'s reserved result, so a
+  boot reserve would only allocate bytes no write uses.
+- Re-anchor: #1386's `SESSION_REPLACE` keeps nothing of the document between transactions
+  (`document.rs`); no new retained structure.
+- `capi_retained_bytes` on the reference session: 168,818 -> 180,970 (+12,152), over 175,296;
+  ceiling raised to 199,104 (+10 %, rounded to 64).
+- **Open (root ruling needed).** D1/D3 do not hold for the kept base:
+  1. A kept base's `edit_ramps` are the successor's (and later live commits') ramps, so their keys
+     are bounded by the newest committed model, not by the model of the epoch that holds them; a
+     structural commit that adds strips makes the older epoch's row too small.
+  2. `cleared` keeps every owner an upsert or a removal named (`protocol/src/model.rs:518-543`), and
+     `merged_ramps` unions them across every commit while a successor is pending. A kept base's
+     `cleared` is only ever the earlier side of `overlay` (never read), but it grows with VCA (or
+     strip) churn while render stalls: no model bounds it.
+  3. A live commit that adds a VCA changes the ramp bound, but the newest epoch's row follows only
+     the catalog (`follow_catalog`), so the report differs from a rebuild's
+     (`capi/src/runtime/live_tests.rs` `a_vca_added_live_is_charged_for_the_catalog_it_adds`: 203,945
+     against 205,019, red on this checkpoint).
+  Candidate fix (needs `control.rs` beyond the scope note, and touches what the kept ramps hold):
+  drop `cleared` from a kept base (it is never read there) or prune it to the committed model's
+  owners at each merge; charge the ramp row at the newest committed model on the newest epoch (the
+  kept ramps' real bound) and let it follow a live commit as the catalog does.

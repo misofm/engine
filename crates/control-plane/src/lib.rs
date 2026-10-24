@@ -83,8 +83,8 @@ pub use source::SourceSeekReport;
 #[cfg(feature = "test-support")]
 pub use compile::{
     CapiResources, CarriedSourceBytes, CompiledModelAdmission, LiveCatalogAdmission,
-    LiveEpochResources, observation_binding_table_bytes, observation_reserve_bytes, prepare_caps,
-    validate_live_peak,
+    LiveEpochResources, monitor_and_ramp_bytes, observation_binding_table_bytes,
+    observation_reserve_bytes, prepare_caps, validate_live_peak,
 };
 #[cfg(feature = "test-support")]
 pub use control::{
