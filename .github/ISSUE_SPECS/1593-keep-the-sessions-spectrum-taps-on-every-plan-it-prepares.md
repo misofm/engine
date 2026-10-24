@@ -250,3 +250,18 @@ through `test_spectrum_mut()`.
   the service's boxed stream window (about 16 KiB) and the analysis's boxed analyzer.
 - Note for T3: decide `adopted_epoch` for a configuration whose preparer returns no captures
   (the browser's, until #1596).
+- T2b: the structural arm prepares the successor with `retain_present` over the prospective
+  model and stores it (advancing `configured_epoch` when it differs) only beside the candidate
+  push. `ProviderEpoch::spectrum` holds the candidate's captures and configuration epoch; the
+  pairing list is the candidate's own `inventory.spectrum_pairing()` (no copy). Promotion calls
+  `adopt_successor` with `carried = true` (D5), or removes the service for a `None`
+  configuration; what it displaces is parked in the retired epoch and dropped with it, on the
+  control thread. A `host.spectrum.target` refusal of a successor answers `CommandError::Internal`.
+  Gates 2-6 are in `tests/spectrum_monitor.rs`; gate 4 also refuses at `ProtocolCommit` (after the
+  successor was prepared), the case that tells a drop stored before the commit.
+- T2b finding (open, outside T2b's paths): the T1 kind-reuse note is a live defect. One
+  transaction that removes track `eq1` and adds submix `eq1` keeps the `TrackPostMatrix("eq1")`
+  entry (D4), and host-core's `resolve_spectrum_carry` (`prepare.rs`) pairs on target equality
+  alone, so the track's observer and stream carry onto the submix. The reproducer
+  `an_observer_is_never_carried_onto_a_strip_of_another_kind` is committed `#[ignore]`, red. The
+  fix compares the strip kind of a track tap's ID in the base model and the successor's model.

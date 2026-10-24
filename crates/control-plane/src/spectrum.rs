@@ -6,7 +6,7 @@
 //! analysis that smooths its stream.
 
 use host_core::{
-    PreparedSpectrumCaptures, SpectrumAnalysis, SpectrumConfiguration, SpectrumPreparation,
+    PreparedSpectrumCaptures, SpectrumAnalysis, SpectrumConfiguration, SpectrumPair,
     SpectrumService,
 };
 
@@ -25,6 +25,39 @@ pub struct SpectrumMonitor {
     service: Option<SpectrumService>,
     /// The stream's one analysis, made with the service.
     analysis: Option<SpectrumAnalysis>,
+    /// The session's rate and quantum, for a service a promotion makes.
+    sample_rate_hz: u32,
+    quantum_frames: u32,
+}
+
+/// The spectrum half of one provider epoch (#1593 D5).
+#[derive(Default)]
+pub(crate) enum EpochSpectrum {
+    /// Nothing: the boot epoch, or an epoch whose promotion displaced nothing.
+    #[default]
+    None,
+    /// A candidate's captures (`None` when it was prepared with no configuration) and the
+    /// configuration epoch they were prepared for. Its promotion installs them in the service,
+    /// paired by the candidate's own pairing list
+    /// ([`host_core::PlanStateInventory::spectrum_pairing`]).
+    Candidate {
+        captures: Option<PreparedSpectrumCaptures>,
+        epoch: u64,
+    },
+    /// What the promotion of this epoch's successor displaced: dropped with the parked epoch,
+    /// on the control thread, when its plan is reclaimed.
+    Displaced(
+        #[allow(dead_code, reason = "held only to be dropped with the parked epoch")]
+        SpectrumDisplaced,
+    ),
+}
+
+/// The captures, or the whole service, a promotion displaced (#1593 D6).
+pub(crate) struct SpectrumDisplaced {
+    #[allow(dead_code, reason = "held only to be dropped with the parked epoch")]
+    captures: Option<PreparedSpectrumCaptures>,
+    #[allow(dead_code, reason = "held only to be dropped with the parked epoch")]
+    service: Option<(SpectrumService, Option<SpectrumAnalysis>)>,
 }
 
 impl SpectrumMonitor {
@@ -50,14 +83,77 @@ impl SpectrumMonitor {
             adopted_epoch: epoch,
             service,
             analysis,
+            sample_rate_hz,
+            quantum_frames,
         }
     }
 
-    /// The preparation every plan the session prepares carries, or `None`.
-    pub(crate) fn preparation(&self) -> Option<&SpectrumPreparation> {
+    /// The configuration a structural successor of `model` is prepared with (#1593 D4): every
+    /// entry whose target `model` still has, or `None`. Nothing is stored: the session stores it
+    /// with [`Self::commit`] after the protocol commit. Allocates the kept entries' copy.
+    pub(crate) fn successor_configuration(
+        &self,
+        model: &session::SessionModel,
+    ) -> Option<SpectrumConfiguration> {
         self.configuration
             .as_ref()
-            .map(|configuration| &configuration.preparation)
+            .and_then(|configuration| configuration.retain_present(model))
+    }
+
+    /// Store a committed successor's configuration (#1593 D4), beside the candidate push: the
+    /// configuration epoch advances by one when it differs. Returns the epoch the successor's
+    /// captures were prepared for. Allocates nothing.
+    pub(crate) fn commit(&mut self, configuration: Option<SpectrumConfiguration>) -> u64 {
+        if configuration != self.configuration {
+            self.configured_epoch = self.configured_epoch.saturating_add(1);
+            self.configuration = configuration;
+        }
+        self.configured_epoch
+    }
+
+    /// Install a promoted candidate's captures (#1593 D5, D6), on the control thread after render
+    /// adopted its plan: the service pairs every capture `pairing` names (the observers the swap
+    /// block moved) and settles the others; with no captures the service is removed, so every
+    /// read answers `Unprepared`. `adopted_epoch` becomes `epoch`. Returns what it displaced, for
+    /// the caller to drop off the audio thread.
+    ///
+    /// The session publishes a candidate only against the plan render runs, so the adoption
+    /// carries by construction (as the source producers' `adopt_persisting` relies on).
+    pub(crate) fn adopt(
+        &mut self,
+        captures: Option<PreparedSpectrumCaptures>,
+        pairing: &[SpectrumPair],
+        epoch: u64,
+    ) -> SpectrumDisplaced {
+        self.adopted_epoch = epoch;
+        let Some(captures) = captures else {
+            let service = self.service.take().map(|service| (service, self.analysis.take()));
+            return SpectrumDisplaced {
+                captures: None,
+                service,
+            };
+        };
+        let Some(service) = self.service.as_mut() else {
+            // A configuration made after boot (#1594): the first captures make the service.
+            self.service = Some(SpectrumService::new(
+                captures,
+                self.sample_rate_hz,
+                self.quantum_frames,
+                self.configuration
+                    .as_ref()
+                    .and_then(|configuration| configuration.hop),
+            ));
+            self.analysis = Some(SpectrumAnalysis::new());
+            return SpectrumDisplaced {
+                captures: None,
+                service: None,
+            };
+        };
+        let displaced = service.adopt_successor(captures, pairing, true, self.analysis.as_mut());
+        SpectrumDisplaced {
+            captures: Some(displaced),
+            service: None,
+        }
     }
 
     /// The session's configuration, or `None`.
