@@ -479,7 +479,7 @@ fn a_collapsed_bank_that_falls_silent_is_at_rest_and_skips_exactly() {
     let bits = |plane: &[f32]| plane.iter().map(|word| word.to_bits()).collect::<Vec<_>>();
     let values = support::values_with(&[(0, -30.0), (1, 4.0)]);
     let requests: Vec<_> = (0..lanes)
-        .map(|_| request_linked(&values, LinkMode::Average))
+        .map(|_| request_linked(&values, LinkMode::DualMono))
         .collect();
     let mut mixed = support::bind_bank(&requests).expect("mixed bank");
     let mut never = support::bind_bank(&requests).expect("reference bank");
@@ -553,7 +553,8 @@ fn a_collapsed_bank_that_falls_silent_is_at_rest_and_skips_exactly() {
     }
     // The flag the disengage clears: one dual block whose left plane is `+0.0` and whose right
     // carries signal moves the right channel off rest, so no lane may answer at rest. A flag left
-    // set answers from the rested left channel and the right tail would be skipped.
+    // set answers from the rested left channel and the right tail would be skipped. The bank is
+    // dual mono because a linked detector would move the left channel too and hide that.
     for bank in [&mut mixed, &mut never] {
         let mut left = vec![0.0; FRAMES * lanes];
         let mut right = vec![0.25; FRAMES * lanes];
