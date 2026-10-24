@@ -380,3 +380,39 @@ mod aarch64 {
         );
     }
 }
+
+/// The attestation's decision, fed the words conforming hardware never produces (issue #1729).
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+#[test]
+fn the_attestation_refuses_an_unpinned_readback_and_an_unrestored_word() {
+    use lane::fpenv::{
+        FpEnvironmentFailure, FpEnvironmentRejection, canonical_fp_control_word,
+        judge_fp_environment,
+    };
+    let canonical = canonical_fp_control_word();
+    // `!canonical` differs in control bits on both arches: x86 `!0x1F80 & 0xFFC0` is `0xE040`, and
+    // every FPCR bit is a control bit.
+    let other = !canonical;
+    assert_eq!(
+        judge_fp_environment(canonical, canonical, canonical),
+        Ok(())
+    );
+    assert_eq!(
+        judge_fp_environment(canonical, other, canonical),
+        Err(FpEnvironmentRejection {
+            observed: canonical,
+            readback: other,
+            failure: FpEnvironmentFailure::CanonicalWordRefused,
+        }),
+        "a readback without the canonical control bits must refuse the canonical half"
+    );
+    assert_eq!(
+        judge_fp_environment(canonical, canonical, other),
+        Err(FpEnvironmentRejection {
+            observed: canonical,
+            readback: other,
+            failure: FpEnvironmentFailure::RestoreRefused,
+        }),
+        "an unrestored caller word must refuse the restore half and report the restored word"
+    );
+}
