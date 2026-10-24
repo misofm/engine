@@ -266,7 +266,7 @@ Commands: `cargo test --locked -p protocol --all-features`, `cargo test --locked
   lost) and no refusal stages a batch.
 - Paths beyond the list (T2): `crates/capi/src/runtime/mod.rs` (`METER_DELIVERY = true`, R2) and
   `crates/control-plane/src/lib.rs` (an import D6 left unused). `crates/capi/src/ffi.rs` needed no
-  change. #1690a's `designated` argument is passed as `None`, not grown.
+  change. The poll follows #1690a (merged before hand-back: no `designated` argument).
 - Limits: the race-allocation gate (7) applies one gate request under the counters (the configure
   before the race); the strip-ID text of a configured table (at most 256 x 127 bytes per copy) is
   allocated at configure time and is not in the boot resource rows; an SDK eval gate 3 run needs a

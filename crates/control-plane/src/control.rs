@@ -1897,10 +1897,9 @@ where
         };
         let next_sample = self.shared.render_sample.load(Ordering::Acquire);
         for _ in 0..=host_core::METER_QUEUE_DEPTH {
-            let Some(frame) =
-                meters
-                    .delivery
-                    .poll(&mut [], &mut NoGainReductionTaps, None, next_sample)
+            let Some(frame) = meters
+                .delivery
+                .poll(&mut [], &mut NoGainReductionTaps, next_sample)
             else {
                 break;
             };
