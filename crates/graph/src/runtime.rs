@@ -8841,18 +8841,25 @@ pub(crate) fn build_sequential(
     // into the host's planes. That is one block copy, the one the end-of-block copy used to make on
     // the redirected path. No compiled session reaches this shape: a strip's last slot feeds its
     // fader, and a route stands between every track and the output.
-    let redirects: Vec<ScatterRedirect> = scatter_redirects(program, &parts.membership, &run_units)
-        .into_iter()
-        .filter(|(run, _, _)| !folded_runs.contains(run))
-        .filter(|(_, _, consumer)| Some(*consumer) != output_op)
-        .collect();
+    // One dataflow walk serves the redirect pass and every unit below (issue #967).
+    let (readers, first_producer) = op_dataflow(program);
+    let redirects: Vec<ScatterRedirect> = scatter_redirects(
+        program,
+        &parts.membership,
+        &run_units,
+        &readers,
+        &first_producer,
+    )
+    .into_iter()
+    .filter(|(run, _, _)| !folded_runs.contains(run))
+    .filter(|(_, _, consumer)| Some(*consumer) != output_op)
+    .collect();
     #[cfg(any(test, feature = "test-support"))]
     let redirects = if SCATTER_REDIRECT_DECLINED.with(std::cell::Cell::get) {
         Vec::new()
     } else {
         redirects
     };
-    let (readers, first_producer) = op_dataflow(program);
     let mut units = Vec::with_capacity(run_units.len());
     // The bind-time half of the collapse-eligibility query, one row per emitted unit. Built here
     // rather than by a later walk because this is the only place the unit's ops and the spec's
@@ -9973,6 +9980,13 @@ type ScatterRedirect = (usize, usize, usize);
 ///   slot -- declines. The chain's own ops are excluded because they all run *before* the scatter:
 ///   the first slot's reductions are the gather, and no later slot's op is executed at all.
 ///
+///   The check is one lookup per lane rather than a walk of the range (issue #967). The ops that
+///   name each buffer are indexed once per call, in schedule order, by [`ops_naming_each_buffer`];
+///   a lane binary-searches the consumer's buffer's list for `[chain's first op, consumer's op)`
+///   and declines if any op in that slice is not one of the chain's. That is the same set of ops
+///   the walk tested, so the answer is the same, and the bind stays linear when one route per
+///   track puts the consumer a track count of ops after the chain's first op.
+///
 ///   Ops outside that range cannot be a hazard. One before the chain's first op belongs to a unit
 ///   emitted at or before that op, so it has already run. One at or after the consumer's op that
 ///   names the buffer is a legitimate reader of the value the consumer produces, and a bank that
@@ -9981,8 +9995,10 @@ fn scatter_redirects(
     program: &ExecutionProgram,
     bank_membership: &BankMembership,
     run_units: &[(Vec<Membership>, Vec<usize>)],
+    readers: &[Vec<usize>],
+    first_producer: &[Option<usize>],
 ) -> Vec<ScatterRedirect> {
-    let (readers, first_producer) = op_dataflow(program);
+    let namers = ops_naming_each_buffer(program);
     let mut redirects = Vec::new();
     for (run, (membership, ops)) in run_units.iter().enumerate() {
         if membership.is_empty() || ops.is_empty() {
@@ -9993,6 +10009,9 @@ fn scatter_redirects(
         let Some(first_op) = ops.iter().min().copied() else {
             continue;
         };
+        // The chain's own ops, sorted, so the in-between clause asks membership in `O(log)`.
+        let mut sorted_run = ops.clone();
+        sorted_run.sort_unstable();
         let mut chain: Vec<(usize, Option<usize>)> = Vec::with_capacity(lanes);
         for lane in 0..lanes {
             let producer = ops[last + lane];
@@ -10001,9 +10020,10 @@ fn scatter_redirects(
                 scatter_target(
                     program,
                     bank_membership,
-                    &readers,
-                    &first_producer,
-                    ops,
+                    readers,
+                    first_producer,
+                    &namers,
+                    &sorted_run,
                     first_op,
                     producer,
                 ),
@@ -10107,12 +10127,17 @@ fn scatter_redirects(
 ///
 /// The consumer whose buffer one lane's scatter may land in, or `None`. See [`scatter_redirects`]
 /// for what each clause is defending.
+///
+/// `namers` is [`ops_naming_each_buffer`] of `program`, and `sorted_run` is the chain's ops in
+/// ascending order.
+#[allow(clippy::too_many_arguments)]
 fn scatter_target(
     program: &ExecutionProgram,
     membership: &BankMembership,
     readers: &[Vec<usize>],
     first_producer: &[Option<usize>],
-    run: &[usize],
+    namers: &[Vec<usize>],
+    sorted_run: &[usize],
     first_op: usize,
     producer: usize,
 ) -> Option<usize> {
@@ -10135,27 +10160,59 @@ fn scatter_target(
     if membership.contains_key(&consumer_op.node) {
         return None;
     }
-    let target = consumer_op.output;
-    for (index, op) in program.ops.iter().enumerate().take(consumer).skip(first_op) {
-        if run.contains(&index) {
-            continue;
-        }
-        if op_names_buffer(program, op, target) {
-            return None;
-        }
+    // Every op in `[first_op, consumer)` that names the consumer's buffer, in schedule order.
+    let named = namers
+        .get(consumer_op.output.0 as usize)
+        .map_or(&[][..], Vec::as_slice);
+    let from = named.partition_point(|&index| index < first_op);
+    let to = named.partition_point(|&index| index < consumer);
+    if named
+        .get(from..to)
+        .unwrap_or_default()
+        .iter()
+        .any(|index| sorted_run.binary_search(index).is_err())
+    {
+        return None;
     }
     Some(consumer)
+}
+
+/// Every buffer `op` mentions: its output, each main input, its sidechain, and the staging slot of
+/// each input that has one. A buffer may appear more than once.
+fn buffers_named_by<'a>(
+    program: &'a ExecutionProgram,
+    op: &'a Op,
+) -> impl Iterator<Item = crate::program::BufferRef> + 'a {
+    let inputs = program.inputs_of(op).iter().chain(op.sidechain.as_ref());
+    core::iter::once(op.output).chain(inputs.flat_map(|input| {
+        core::iter::once(input.buffer).chain(input.delay.map(|delay| delay.staging))
+    }))
 }
 
 /// Whether `op` mentions `buffer` at all: as its output, a main input, a sidechain, or the staging
 /// slot of either.
 fn op_names_buffer(program: &ExecutionProgram, op: &Op, buffer: crate::program::BufferRef) -> bool {
-    let staging_or_buffer = |input: &crate::program::InputRef| {
-        input.buffer == buffer || input.delay.is_some_and(|delay| delay.staging == buffer)
-    };
-    op.output == buffer
-        || program.inputs_of(op).iter().any(staging_or_buffer)
-        || op.sidechain.as_ref().is_some_and(staging_or_buffer)
+    buffers_named_by(program, op).any(|named| named == buffer)
+}
+
+/// For each buffer, the ops that name it in the sense of [`op_names_buffer`], ascending and each
+/// op once (issue #967). Built in one walk of the schedule, so its size is the program's total
+/// buffer mentions.
+fn ops_naming_each_buffer(program: &ExecutionProgram) -> Vec<Vec<usize>> {
+    let mut namers: Vec<Vec<usize>> = vec![Vec::new(); program.buffers as usize];
+    for (index, op) in program.ops.iter().enumerate() {
+        for buffer in buffers_named_by(program, op) {
+            let slot = buffer.0 as usize;
+            if slot >= namers.len() {
+                namers.resize_with(slot + 1, Vec::new);
+            }
+            // An op's mentions are visited together, so a repeat is always the list's last entry.
+            if namers[slot].last() != Some(&index) {
+                namers[slot].push(index);
+            }
+        }
+    }
+    namers
 }
 
 /// The **runtime's own** scatter-redirect decision, driven over a program that has no bindings.
@@ -10205,10 +10262,17 @@ pub(crate) fn scatter_redirects_over_program(
             (membership, run.iter().flatten().copied().collect())
         })
         .collect();
-    scatter_redirects(program, &bank_membership, &run_units)
-        .into_iter()
-        .map(|(run, member, consumer)| (run_units[run].1[member], consumer))
-        .collect()
+    let (readers, first_producer) = op_dataflow(program);
+    scatter_redirects(
+        program,
+        &bank_membership,
+        &run_units,
+        &readers,
+        &first_producer,
+    )
+    .into_iter()
+    .map(|(run, member, consumer)| (run_units[run].1[member], consumer))
+    .collect()
 }
 
 /// Point each admitted lane's scatter at its consumer's buffer and neutralise the consumer's

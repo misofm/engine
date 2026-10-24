@@ -994,6 +994,7 @@ const AUDIBLE = Object.freeze({
   "miso.compressor": { threshold: -40, ratio: 8 },
   "miso.de-esser": { threshold: -60, ratio: 20, range: 40 },
   "miso.delay": { "delay time": 2, mix: 0.5 },
+  "miso.dynamic-eq": { "band 1 gain": 6, "band 1 threshold": -60, "band 1 ratio": 20 },
   "miso.gate-expander": { threshold: -3, ratio: 20, hold: 0, hysteresis: 0, release: 5 },
   "miso.multiband-compressor": { low_threshold: -40, low_ratio: 8, high_threshold: -40, high_ratio: 8 },
   "miso.parametric-eq": { "band-1-enabled": true, "band-1-gain": 9, "band-1-frequency": 1_000 },
