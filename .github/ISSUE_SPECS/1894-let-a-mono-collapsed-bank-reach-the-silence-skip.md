@@ -52,3 +52,24 @@ The mono-collapse effects' `src/lib.rs` and tests, `crates/effect-contract/src/l
   `collapsed = false` in desymmetrize": red in all five crates (builtins by its dual-after-mono
   debug assertion). The compressor gate runs dual mono: an Average-linked detector moved the left
   channel too and hid the stuck flag.
+
+## PR 2 record (attempt 1)
+
+- Five more stages carry the flag, set by the rendered mono body and cleared only by the disengage
+  copy: soft clip (`SoftClip`; a skip advances the left cursor alone), transient shaper (`Shaper`;
+  no clocks), de-esser and dynamic EQ (`advance_clocks_masked(.., 1)` while collapsed), and the
+  true-peak limiter (`LimiterCore`: the scan, the #182 S2 claim's ramp legs and the phase advance
+  read the left channel alone). No effect was left out: in each, every right word the predicate
+  reads is stale while collapsed and overwritten by the copy, so no rendered bit moves (class A).
+  `transient-shaper/src/rest_tests.rs` gained the field in its struct literal (outside the named
+  paths, as PR 1's two `rest_tests.rs`).
+- Gate per crate, the PR 1 form, in `tests/mono_collapse.rs` (de-esser, dynamic EQ: `tests/bank.rs`).
+  The limiter's run carries one ceiling and release retarget while collapsed, so the right ramps
+  freeze in flight. Mutants: "AND the frozen right" red in soft clip, shaper, de-esser, dynamic EQ;
+  in the limiter only both legs together (scan and claim) are red, since the claim is the scan's
+  cached answer. "Skip advances no clock" red in de-esser, dynamic EQ, limiter (phase); green in
+  soft clip, whose cursor no payload word or output bit can see on a ring of `+0.0`. "Disengage
+  keeps the flag" red in all five.
+- Class A on the compiled-plan path: `graph-compiler/tests/silent_bank_skip.rs` gate 1 (skip allowed
+  against forbidden, bit-equal every block) runs the limiter in its collapsed console bank and
+  passes. No main-against-branch digest was taken for PR 2.
