@@ -280,7 +280,7 @@ Scoped against `f89dc1d60`. Single mode (decision 17); the Worker routing is #13
   handler skips the push) were each red.
 - **Companion row (1294a).** The worklet calls `watermark_read` after construction, so the hermetic
   suite requires a `wrapped: false` row for it in `tools/realtime-policy/render-thread-exports.json`
-  (handler `pushWatermark`). That path was not authorized for this slice; root adds it.
+  (handler `pushWatermark`). Root authorized the path on 2026-10-24; the row is its own commit.
 - The shipped module is unchanged (JS-only change): the release pin
   (`miso-engine-v1-audio-worklet-artifact.sha256`) is the module's digest, so it does not move, and
   `check-web-audioworklet.sh`'s export list already has both watermark exports.
