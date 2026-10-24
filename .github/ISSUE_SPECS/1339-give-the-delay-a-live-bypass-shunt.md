@@ -231,3 +231,33 @@ the lift is heard with the tail already in place.
   which lands after this one.
 
 **Decision 17 amendment (2026-10-13).** The delay's bypass is the control row at control `0` of its effect section, `RebuildOnly(RuledLiveNotBuilt { issue: 1339 })` (#1549), so lifting it is a rebuild on the C ABI (#1554). Last step of this issue: flip that row to `Live`; no protocol or host code.
+
+## Evidence and decision record (attempt 1, 2026-10-24)
+
+Scope note (root, 2026-10-24) supersedes the paths above where they differ: the "one control
+abstraction" work removed `LiveRebuild::PreparedBypass`, the SDK's `PREPARED_BYPASS_EFFECTS` and
+the browser's own refusal test, so no host, `sdk/src/core` or `sdk/test` file changes. The hosts
+key on `lowers_session_bypass` and on the registry row.
+
+- **D1/D2 landed.** `lowers_session_bypass(id) = !PREPARED_BYPASS_EFFECTS.contains(&id)`;
+  `NEVER_BANKED_EFFECTS` still `["miso.delay"]`, its doc now says only "declines a bank". The
+  delay's bypass control row is `Live` (the `DELAY_ID` arm of `controls::effect_rows` removed; the
+  multiband arm stays for #1340). SDK metadata regenerated with `codegen/assets.mjs` and
+  `codegen/generate.mjs`: the delay's bypass row is now `class: live, automatable: true`, like every
+  other live bypass.
+- **D4, a stated bit move (decision 15 E4).** A bypassed delay now emits its dry block on a block
+  where its ring or damping state trips D7, where the prepared bypass emitted zeros. Gate 1 pins it.
+  No checked-in digest moved in the gates run.
+- **Gate 3** folded: `a_prepared_bypass_change_needs_a_rebuild` loops over the multiband only; the
+  live classification of a lowered bypass is the #1266 tests' claim, so no new classifier test.
+- **Gate 4** folded into #1341's C ABI crossfade test (delay as an insert only; it is not
+  console-eligible). **Gate 5** is the parity script's row 43, now `live`. Both hosts are compared
+  bit for bit through the crossfade there.
+- **Gate 6** rewritten in place: the multiband leg keeps the restart claim; the delay leg lifts the
+  bypass in a rebuild, restarts nothing, and equals A lifting it live at the swap block.
+- **Gate 8 split** (root, 2026-10-24): the standalone click harness is not run in this slice. #1341
+  proved the bypass crossfade law for every shunt, and the delay has no latency line. It is a
+  stateless successor for root to number.
+- **Left for root:** the doc comments of `crates/host-core/src/prepare.rs` (`LiveRebuild::RebuildOnly`
+  and `effect_instance_records`) and the `response.rs` test doc still name the delay's prepared
+  bypass; `crates/host-core/src/*` is outside this slice's paths.

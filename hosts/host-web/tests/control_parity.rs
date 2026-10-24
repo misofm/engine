@@ -15,10 +15,10 @@
 //! `CONTROL_STATE_GET` and the `SESSION_SNAPSHOT_GET` bytes are byte-identical. The whole run
 //! repeats at 44.1, 48, 88.2 and 96 kHz. The script holds the edits that take the rebuild arm (a
 //! route into the output, the prepared bypass of the multiband compressor, and `delay_samples`;
-//! the delay's bypass is live since #1339): the browser prepares and publishes the successor like the C ABI does, and the
-//! two hosts answer the same bytes and render the same bits across the swap (#1562b). No launch
-//! effect declares an audio-rate parameter, so that row of the batch 7 amendment has no edit to
-//! script.
+//! the delay's bypass is live since #1339): the browser prepares and publishes the successor like
+//! the C ABI does, and the two hosts answer the same bytes and render the same bits across the swap
+//! (#1562b). No launch effect declares an audio-rate parameter, so that row of the batch 7
+//! amendment has no edit to script.
 //!
 //! It absorbs #1364 gate 3 (the edits carry no per-edit ramp, so each host resolves the session's
 //! own length, and one pan carries a window of its own while another does not) and #1399 (a fader,

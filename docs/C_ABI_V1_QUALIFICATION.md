@@ -914,10 +914,11 @@ the rack's latency-preserving bypass shunt (decision 14).
   the per-node path renders for that lane (#1341a2), so where the session places the effect never
   moves a rendered bit. The browser edits through the same core, so it crossfades alike
   (`hosts/host-web/tests/control_parity.rs`); #1393 is superseded.
-- **Prepared, so a rebuild.** A bypass change, in either direction, on the delay or the multiband
-  compressor: their session bypass is prepared into the effect, not lowered to the lane
+- **Prepared, so a rebuild.** A bypass change, in either direction, on the multiband
+  compressor: its session bypass is prepared into the effect, not lowered to the lane
   (`effect_compiler::lowers_session_bypass`), so a live record would be acked and never heard
-  (decision 14, F4). A submix strip's bypass stays a rebuild too, as every submix value does.
+  (decision 14, F4). The delay's bypass is live since #1339. A submix strip's bypass stays a
+  rebuild too, as every submix value does.
 - **No ack before a drop.** The bypass record passes its producer's preflight before the first
   cell write, and nothing after it can fail.
 - **Equal to a rebuild, on the gate fixture.** The wet path keeps running, so the switched
