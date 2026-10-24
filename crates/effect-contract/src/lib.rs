@@ -639,6 +639,9 @@ macro_rules! match_bank_width {
     };
 }
 
+/// Byte arithmetic for `retained_bytes` walks (#1074): the engine's one implementation.
+pub use engine::realtime::retained;
+
 /// Not public API: the lane types [`match_bank_width!`] names, so that its callers need not.
 #[doc(hidden)]
 pub mod __private {
@@ -2176,6 +2179,12 @@ pub enum ParameterAccessError {
 pub trait PreparedNativeEffect: Send {
     fn reset(&mut self, kind: ResetKind);
     fn process(&mut self, block: EffectProcessBlock<'_>) -> ProcessReport;
+    /// The heap bytes this value retains (#1074), exclusive of the value itself: every `Box`,
+    /// `Vec`, `String` and `Arc` allocation reachable through its fields, a `Vec` or `String` at
+    /// its capacity, an `Arc`'s allocation in full whoever else holds it. Whoever boxes the value
+    /// adds `size_of_val` for the box. Computed from capacities on the control thread, never on
+    /// the render path. Required, so a new owner cannot under-report by default.
+    fn retained_bytes(&self) -> u64;
 
     /// Read one declared [`ObservationCost::Resident`] tap into `out` (issue #143 D2).
     ///
@@ -2348,6 +2357,12 @@ pub trait PreparedNativeEffect: Send {
 pub trait PreparedNativeEffectBank: Send {
     fn reset(&mut self, kind: ResetKind);
     fn process_bank(&mut self, block: EffectBankProcessBlock<'_>) -> BankProcessReport;
+    /// The heap bytes this value retains (#1074), exclusive of the value itself: every `Box`,
+    /// `Vec`, `String` and `Arc` allocation reachable through its fields, a `Vec` or `String` at
+    /// its capacity, an `Arc`'s allocation in full whoever else holds it. Whoever boxes the value
+    /// adds `size_of_val` for the box. Computed from capacities on the control thread, never on
+    /// the render path. Required, so a new owner cannot under-report by default.
+    fn retained_bytes(&self) -> u64;
 
     /// Applies one already-prepared target to one bank lane at a block boundary.
     ///

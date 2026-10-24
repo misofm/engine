@@ -1497,6 +1497,11 @@ fn bind<L: Lane, const W: usize, const NATIVE_ONLY: bool>(
 }
 
 impl PreparedNativeEffect for PreparedTransientShaper {
+    /// Every field is inline: this instance owns no heap (#1074).
+    fn retained_bytes(&self) -> u64 {
+        0
+    }
+
     fn reset(&mut self, kind: ResetKind) {
         self.0.reset(kind);
     }
@@ -1545,6 +1550,11 @@ impl PreparedNativeEffect for PreparedTransientShaper {
 }
 
 impl<L: Lane, const W: usize> PreparedNativeEffectBank for PreparedTransientShaperBank<L, W> {
+    /// Every field is inline: this instance owns no heap (#1074).
+    fn retained_bytes(&self) -> u64 {
+        0
+    }
+
     fn reset(&mut self, kind: ResetKind) {
         self.shaper.reset(kind);
     }

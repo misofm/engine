@@ -189,6 +189,10 @@ fn compiles_65_537_tracks_or_rejects_only_a_configured_resource() {
 struct Constant;
 
 impl GraphRuntimeProcessor for Constant {
+    fn retained_bytes(&self) -> u64 {
+        0
+    }
+
     fn process(&mut self, block: GraphBindingBlock<'_>) -> Result<(), RenderError> {
         block.left.fill(1.0);
         block.right.fill(2.0);
@@ -200,6 +204,10 @@ impl GraphRuntimeProcessor for Constant {
 struct IdentityBank;
 
 impl GraphPreparedBuiltinBankProcessor for IdentityBank {
+    fn retained_bytes(&self) -> u64 {
+        0
+    }
+
     fn as_any(&self) -> &dyn std::any::Any {
         self
     }

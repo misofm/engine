@@ -85,6 +85,11 @@ struct ExternalSource {
 }
 
 impl GraphRuntimeProcessor for ExternalSource {
+    fn retained_bytes(&self) -> u64 {
+        self.drops
+            .as_ref()
+            .map_or(0, engine::realtime::retained::arc)
+    }
     fn process(&mut self, block: GraphBindingBlock<'_>) -> Result<(), RenderError> {
         for (index, (left, right)) in block
             .left
@@ -116,6 +121,9 @@ impl Drop for ExternalSource {
 struct ExternalOutput;
 
 impl GraphRuntimeProcessor for ExternalOutput {
+    fn retained_bytes(&self) -> u64 {
+        0
+    }
     fn process(&mut self, _block: GraphBindingBlock<'_>) -> Result<(), RenderError> {
         Ok(())
     }
