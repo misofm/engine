@@ -166,3 +166,31 @@ Commands: `cargo test --locked -p host-core --all-features`,
   words after every poll) gives byte-identical output on `97d1796ff` and on the branch (sha256
   `b35cbfbe...a9c1`, 90 lines). No meter test was edited. The meter-poll export's call graph keeps
   one trap owner, `poll_meters`.
+- **T2 record (attempt 1).** `host_core::meters` now holds `MeterTables` (per plan: pending,
+  remaining, carried-from and the typed frame; `new(meter_count, strip_count)`, two counts because a
+  plan bound with meter word `0` has strips and no meters), `MeterCarry` and `MeterDelivery`
+  (`new(output, gate, window_frames, tables)`, `set_level`, `align`, `adopt`, `poll`, `frame`). The
+  level, generation, loss count, output reader, gate and discard, grid origin and activation left
+  `ReadyOwnership` and the host; `PlanShape` keeps `meter_tables: Option<MeterTables>` (`None`
+  while the plan renders: the delivery holds them), its frame and header views and the successor
+  pointers. Shape changes from R1, recorded here: `adopt(&mut successor, carries, carried, sample)`
+  swaps the tables in place (the retired ones come back in `successor`, then move to the retired
+  shape by a second swap, so no drop runs on the render thread), and `carries` is an iterator, so
+  the browser maps its `CarriedReader`s without a buffer; `poll` also takes `next_sample`, the
+  producer reset's realignment point. On `Some` the browser copies the frame (R4); after a real
+  `set_level` it copies the cleared frame, which writes the bytes the old reset wrote. R3: `poll` is
+  `#[inline(never)]`, so the meter-poll export's one trap owner is `MeterDelivery::poll`, pinned at
+  its three SPSC slot-index sites (strip `try_pop`, output `try_pop` and `peek`), not one; the
+  export holds none. The fold borrows the consumers as a field place (`StripMeters`) because the
+  realtime policy's per-queue drain form names its queue collection as one, and keeps the name
+  `fold_meter_windows`: the policy's call rule matches by name, and a popping `fold` made an
+  unrelated `.fold(..)` in `crates/rack` read as a popping call. Tests: helpers that read a moved
+  field now read it through the delivery (`tables()`, `frame()`, `loss_count()`,
+  `output_gate_from()`, `output_windows_queued()`, and `test_only_*` writers, gated on
+  `test-support`, for the three tests that plant a snapshot or a loss; the two such browser tests
+  outside `structural_apply` carry the same gate); no assertion was edited. One new test,
+  `a_level_off_shuts_the_output_gate` (red on the mutant that leaves the gate open; the
+  idempotence half was dropped, `meter_lease_reacquisition_waits_for_a_clean_boundary` holds it). Evidence: the T1 byte run (scenarios A, B; sha256 `b35cbfbe...a9c1`) plus a
+  scenario C (an uncarried swap from an empty boot, a lease release and re-take, a producer reset;
+  88 lines, sha256 `846e4329...e811`) is byte-identical on `c80aa2fba` and on the branch.
+  `check-browser-expected-resources.py` agrees with no `expected.json` change.
