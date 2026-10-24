@@ -8908,15 +8908,16 @@ mod structural_apply {
         (model, rig)
     }
 
-    /// #1683 review fold: the master is the core's `master` row of its strip, held by ID. A live
-    /// `SET_CONTROL` of another row and then a rebuild that adds a track whose ID sorts first
-    /// leave the row on `t1`, listed in the control list, and move the header's index with it.
+    /// #1683 review fold: the master is the core's `master` row of its strip. A live `SET_CONTROL`
+    /// of another row leaves the row on `t1`, listed in the control list, and the header's index
+    /// unmoved. (A rebuild that moves the strip's index is
+    /// `a_master_designated_after_an_empty_boot_reads_as_its_strips_own_word`'s.)
     ///
     /// Test value: red if a live write of another row moves or clears the designation, or if the
-    /// control list stops listing the master's row across the live write or the rebuild.
+    /// control list stops listing the master's row.
     #[test]
-    fn a_row_designated_master_follows_its_strip_through_a_live_write_and_a_rebuild() {
-        let (model, mut rig) = row_designated(1);
+    fn a_row_designated_master_survives_a_live_write_of_another_row() {
+        let (_, mut rig) = row_designated(1);
         assert_eq!(rig.host.meter_header().master_track_plus_one, 2);
         assert_eq!(rig.listed_masters(2), ["t1"]);
 
@@ -8945,35 +8946,6 @@ mod structural_apply {
         assert_eq!(rig.host.render_next(), RESULT_OK);
         assert_eq!(rig.host.meter_header().master_track_plus_one, 2);
         assert_eq!(rig.listed_masters(1_001), ["t1"]);
-
-        let mut track = model.tracks[0].clone();
-        let mut route = model.routes[0].clone();
-        track.id = StableId::parse("a0").expect("a track ID");
-        route.id = StableId::parse("a0-main").expect("a route ID");
-        let RouteSource::Track { track_id, .. } = &mut route.source else {
-            panic!("the fixture routes a track")
-        };
-        *track_id = track.id.clone();
-        assert!(matches!(
-            rig.apply(
-                &[
-                    SessionEdit::UpsertTrack { track },
-                    SessionEdit::UpsertRoute { route },
-                ],
-                2_000
-            ),
-            Outcome::Applied {
-                path: EditPath::Rebuild,
-                ..
-            }
-        ));
-        assert_eq!(rig.host.render_next(), RESULT_OK, "the rebuild is adopted");
-        assert_eq!(
-            rig.host.meter_header().master_track_plus_one,
-            3,
-            "t1 is strip 2 now, and still the master"
-        );
-        assert_eq!(rig.listed_masters(2_001), ["t1"]);
     }
 
     /// #1683 review fold: a rebuild that removes the master strip ends the designation in the

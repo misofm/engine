@@ -41,6 +41,12 @@ export function toWebBootOptions(options: BootOptions): MisoWebBootOptions {
     BigInt(nonNegative(name, value ?? 0));
 
   const liveControls = options.liveControls;
+  // Issue #1689: the retired master boot word is refused, never ignored, for an untyped caller.
+  if ((liveControls as { masterTrackPlusOne?: unknown } | undefined)?.masterTrackPlusOne !== undefined) {
+    throw new MisoUsageError(
+      "liveControls.masterTrackPlusOne was retired (issue #1689): designate the master after boot with strip.master(true)",
+    );
+  }
   const observationTaps = word("liveControls.observationTaps", liveControls?.observationTaps);
   const spectrumHopFrames = validateBrowserSpectrumHopFrames(options.spectrumHopFrames) ?? 0;
 

@@ -162,6 +162,12 @@ export function writeBootOptions(
   pointer: number,
   options: BootOptions,
 ): Uint8Array {
+  // Issue #1689: the retired master boot word is refused, never ignored, for an untyped caller.
+  if ((options.liveControls as { masterTrackPlusOne?: unknown } | undefined)?.masterTrackPlusOne !== undefined) {
+    throw new MisoUsageError(
+      "liveControls.masterTrackPlusOne was retired (issue #1689): designate the master after boot with strip.master(true)",
+    );
+  }
   const bytes = structBytes("bootOptions");
   if (pointer === 0) {
     throw new MisoUsageError("the engine returned a null boot options pointer");

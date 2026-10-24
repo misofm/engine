@@ -1772,6 +1772,9 @@ impl ReadyOwnership {
                 adoption: None,
                 spectrum: handover,
             });
+            // The replacement's header carries its master word before the rendering plan's header
+            // names it (#1689), so the page never reads the successor without its master.
+            self.sync_master();
             // The rendering plan's header names the newest replacement's, so the page cuts its
             // views over the successor's frame in the handler that committed it (#1290d1).
             if let Some(entry) = self.pending_shapes.last() {

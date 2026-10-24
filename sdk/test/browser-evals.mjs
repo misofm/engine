@@ -13,7 +13,7 @@ import { before, describe, test } from "node:test";
 
 import { MisoEngineAsset } from "../src/core/asset.ts";
 import { StructView } from "../src/core/abi.ts";
-import { MisoEngineError } from "../src/core/errors.ts";
+import { MisoEngineError, MisoUsageError } from "../src/core/errors.ts";
 import { ABI_LAYOUT } from "../src/generated/abi.ts";
 import {
   POLICY_WORDS,
@@ -188,16 +188,22 @@ describe("finding 3 -- the scratch and worklet boots agree on every policy word"
 
   test("reserved1 and reserved2 stay zero whatever live controls the caller sets", () => {
     // Offset 32 was the live-command queue size and offset 56 the master boot word (#1689); the
-    // host now refuses a nonzero word. Red if the writer ever puts a policy value back into either,
-    // or a caller's leftover `masterTrackPlusOne` reaches offset 56.
-    const { scratch, worklet } = bootOptionsAgree(
-      { ...POLICY, liveControls: { ...POLICY.liveControls, masterTrackPlusOne: 1 } },
-      PHYSICAL,
-    );
+    // host now refuses a nonzero word. Red if the writer ever puts a policy value back into either.
+    const { scratch, worklet } = bootOptionsAgree(POLICY, PHYSICAL);
     for (const word of ["reserved1", "reserved2"]) {
       assert.equal(wordAt(scratch, word), 0n, `scratch ${word}`);
       assert.equal(wordAt(worklet, word), 0n, `worklet ${word}`);
     }
+  });
+
+  test("a caller's retired masterTrackPlusOne is refused and points to strip.master", () => {
+    // Issue #1689, root decision: refused, never ignored. Red if an untyped caller's leftover word
+    // is silently dropped (its app would boot with no master and never be told).
+    const stale = { ...POLICY, liveControls: { ...POLICY.liveControls, masterTrackPlusOne: 1 } };
+    assert.throws(
+      () => bootOptionsAgree(stale, PHYSICAL),
+      (error) => error instanceof MisoUsageError && /strip\.master\(true\)/.test(error.message),
+    );
   });
 });
 

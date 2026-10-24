@@ -561,7 +561,7 @@ export interface MisoMeterFrame {
   /// `null` when the designated strip has none.
   readonly trackGrDb: Float32Array;
   /// The designated master strip's own folded reading, or `null` (issue 143 D6). The master is the
-  /// strip whose `master` monitor row is on (issue 1683), or the boot word's strip until one is set.
+  /// strip whose `master` monitor row is on (issue 1683).
   ///
   /// `null` -- never `0` -- when no strip was designated or the designated strip published no
   /// window, because `0` would be indistinguishable from "the master is not reducing".
