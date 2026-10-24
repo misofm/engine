@@ -19,7 +19,7 @@ use crate::estimate::{effect_control_resource, estimate_fits_platform, resource_
 use crate::ids::{
     NodeTable, PreparedEffectIndex, add_main_edge, add_node, add_route_destination_edge,
     add_route_source_edge, diag, effect_path, gid, into_effects, port, ports_for,
-    prepared_effect_node, route_destination_node, route_source_node, route_transform, route_values,
+    prepared_effect_node, route_destination_node, route_source_node, route_values,
     sidechain_matches, stages, track_node,
 };
 use crate::pdc::timings;
@@ -1164,12 +1164,14 @@ impl StripGains {
     ) -> NodeTailBound {
         let into_submix = matches!(route.destination, RouteDestination::SubmixInput { .. });
         if self.liveness.routes_into_submixes && into_submix {
-            let top = route_transform(
-                session::ROUTE_GAIN_DB_MAXIMUM,
-                [session::ROUTE_COEFFICIENT_MAGNITUDE_MAXIMUM; 4],
-            )
-            .expect("the route domain's maxima fold");
-            return mix_bound(largest_row(gated_route_coefficients(&top, RouteGate::OPEN)));
+            // Every coefficient folds to the same word, `gain * coefficient` at the domain's
+            // maxima (`gated_route_coefficients`' product: normal, so never flushed), and a row is
+            // two of them. Spelled as one scalar, not a four-word array, so the iOS build emits no
+            // `memset_pattern16` (#1018).
+            let word = math::db_to_gain_f32(session::ROUTE_GAIN_DB_MAXIMUM)
+                * session::ROUTE_COEFFICIENT_MAGNITUDE_MAXIMUM;
+            let word = f64::from(word.abs());
+            return mix_bound(inflate(word + word));
         }
         let source = match &route.source {
             RouteSource::Track { track_id, .. } => track_id,
