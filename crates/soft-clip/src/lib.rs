@@ -1174,6 +1174,12 @@ struct SoftClip<L: Lane> {
     /// it takes no automation, and D7 recovers it without charging it (the padding contract on
     /// `PrepareEffectBankRequest`). Every lane of a scalar instance and of a full bank is active.
     active: u32,
+    /// Whether a collapsed block (`process::<true>`) has rendered since the last disengage copy
+    /// ([`desymmetrize`](Self::desymmetrize)), which alone clears it (#1894). While it is set the
+    /// right channel is frozen and stale, so [`lanes_at_rest`](Self::lanes_at_rest) reads the left
+    /// channel alone and a skipped block advances the left cursor alone, as the collapsed silent
+    /// path does: the effect contract's collapsed-bank rule.
+    collapsed: bool,
 }
 
 impl<L: Lane> SoftClip<L> {
@@ -1194,6 +1200,7 @@ impl<L: Lane> SoftClip<L> {
             right,
             nonfinite: NonFiniteReport::new(),
             active: (1 << L::WIDTH) - 1,
+            collapsed: false,
         }
     }
 
@@ -1249,6 +1256,10 @@ impl<L: Lane> SoftClip<L> {
         let allowed = !silent_forbidden();
         #[cfg(not(test))]
         let allowed = true;
+        if MONO {
+            // From here until the disengage copy the right channel is frozen and stale.
+            self.collapsed = true;
+        }
         let silent = if MONO {
             block_is_positive_zero(left) && self.left.rest_lanes() == all_lanes::<L>()
         } else {
@@ -1286,10 +1297,15 @@ impl<L: Lane> SoftClip<L> {
         [failed[0] & charged, failed[1] & charged]
     }
 
-    /// The lanes at exact rest on both channels (`PreparedNativeEffectBank::lanes_at_rest`): see
+    /// The lanes at exact rest on both channels (`PreparedNativeEffectBank::lanes_at_rest`), or
+    /// on the left channel alone while [`collapsed`](Self::collapsed) (#1894): see
     /// [`Channel::rest_lanes`] for the words pinned, why the list is complete, and the one clock.
     fn lanes_at_rest(&self) -> u32 {
-        self.left.rest_lanes() & self.right.rest_lanes()
+        if self.collapsed {
+            self.left.rest_lanes()
+        } else {
+            self.left.rest_lanes() & self.right.rest_lanes()
+        }
     }
 
     /// The D7 recovery, one lane at a time (issue #1092; decision 12's coupling rule).
@@ -1344,6 +1360,7 @@ impl<L: Lane> SoftClip<L> {
         right.history.e.copy_from_slice(&left.history.e);
         right.history.dry.copy_from_slice(&left.history.dry);
         right.ramps.copy_from_slice(&left.ramps);
+        self.collapsed = false;
     }
 
     /// `PreparedNativeEffectBank::channels_agree` (issue #1872): every word
@@ -1456,7 +1473,8 @@ struct PreparedSoftClipBank<L: Lane> {
 /// The bank's one clock, advanced for a skipped block (issue #1747).
 impl<L: Lane> PreparedSoftClipBank<L> {
     /// Advances the bank's shared history position `pos` on both channels by `frames`, exactly as
-    /// one rendered block of `frames` frames of `+0.0` input would.
+    /// one rendered block of `frames` frames of `+0.0` input would; on the left channel alone on
+    /// a collapsed bank, as the collapsed block would (#1894).
     ///
     /// `pos` is the soft clip's only clock: the kernel advances it once per frame by
     /// `history_advance`, a step of one modulo the 32 live rows, whatever the signal. Nothing else
@@ -1481,7 +1499,9 @@ impl<L: Lane> PreparedSoftClipBank<L> {
             "a lane not at rest"
         );
         self.inner.left.advance_cursor(frames as usize);
-        self.inner.right.advance_cursor(frames as usize);
+        if !self.inner.collapsed {
+            self.inner.right.advance_cursor(frames as usize);
+        }
     }
 }
 
@@ -1724,7 +1744,8 @@ impl<L: Lane> PreparedNativeEffectBank for PreparedSoftClipBank<L> {
         self.inner.channels_bit_equal()
     }
 
-    /// Issue #1746: [`Channel::rest_lanes`] on both channels, padded lanes included.
+    /// Issue #1746: [`Channel::rest_lanes`] on both channels, padded lanes included; on the left
+    /// channel alone on a collapsed bank (#1894).
     fn lanes_at_rest(&self) -> u32 {
         self.inner.lanes_at_rest()
     }

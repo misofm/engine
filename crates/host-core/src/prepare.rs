@@ -2845,45 +2845,79 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
     // its seven-word lane on every plan, whatever the live options, and no six-word lane. A plan
     // with neither binds exactly what it bound before.
     let six_word = attach_live && lanes.routes;
-    let (graph_route_controls, follow_route_controls) = if six_word || !follow_cells.is_empty() {
-        let arrivals = artifact.report().input_arrivals.clone();
-        let mut sources: BTreeMap<&str, _> = follow_cells.into_iter().collect();
-        artifact
-            .attach_route_live_controls_following(&live_superseded, six_word, |route_id| {
-                let (program, cells, vca_mutes, flags, continued_vca) =
-                    sources.remove(route_id.as_str())?;
-                let node = GraphNodeId::Route {
-                    route_id: route_id.clone(),
-                };
-                graph::GraphFollowRouteSource::new(
-                    program,
-                    cells,
-                    vca_mutes,
-                    graph::floored_input_arrival(&arrivals, &node),
-                    follow_route_jumps,
-                    flags,
-                )
-                .map(|source| source.with_continued_vca_mutes(continued_vca))
-            })
-            .map_err(|error| match error {
-                graph::GraphRouteControlError::AlreadyAttached
-                | graph::GraphRouteControlError::BoundRoute
-                | graph::GraphRouteControlError::CursorTable(_) => {
-                    graph_failure("host.route_control.attach")
-                }
-            })
-            .and_then(|attached| {
-                // Every following route is a route into a submix, so the attach asks for each
-                // source once, and `new` refuses none (its cells are the program's).
-                if sources.is_empty() {
-                    Ok(attached)
-                } else {
-                    Err(graph_failure("host.route_control.attach"))
-                }
-            })?
-    } else {
-        (Vec::new(), Vec::new())
+    // Issue #1363 D1 (a), (c): the routes this successor adds during playback fade in, on the
+    // same terms as #1288's strips (a plan that attaches live lanes, never at a declared
+    // discontinuity). Each one this plan gives no lane binds as a transition route (D2).
+    let route_fades: Vec<RouteFade<'_>> = match successor {
+        Some(base) if attach_live && !base.discontinuity => {
+            let added = added_strips(base.committed, model);
+            let watch = &base.inventory.fade_watch;
+            let waiting: Vec<&str> = base
+                .inventory
+                .fade_arms
+                .iter()
+                .filter(|row| !watch.fired(row.entry))
+                .map(|row| &*row.id)
+                .collect();
+            added_route_fades(base.committed, model, view, &added, &waiting)
+        }
+        _ => Vec::new(),
     };
+    let transition: Vec<StableGraphId> = route_fades
+        .iter()
+        .filter(|fade| !(six_word && controls::route_rows_live(fade.route)))
+        .filter_map(|fade| StableGraphId::parse(fade.route.id.as_str()))
+        .collect();
+    let (graph_route_controls, follow_route_controls, transition_routes) =
+        if six_word || !follow_cells.is_empty() || !transition.is_empty() {
+            let arrivals = artifact.report().input_arrivals.clone();
+            let mut sources: BTreeMap<&str, _> = follow_cells.into_iter().collect();
+            artifact
+                .attach_route_live_controls_following(
+                    &live_superseded,
+                    six_word,
+                    &transition,
+                    |route_id| {
+                        let (program, cells, vca_mutes, flags, continued_vca) =
+                            sources.remove(route_id.as_str())?;
+                        let node = GraphNodeId::Route {
+                            route_id: route_id.clone(),
+                        };
+                        graph::GraphFollowRouteSource::new(
+                            program,
+                            cells,
+                            vca_mutes,
+                            graph::floored_input_arrival(&arrivals, &node),
+                            follow_route_jumps,
+                            flags,
+                        )
+                        .map(|source| source.with_continued_vca_mutes(continued_vca))
+                    },
+                )
+                .map_err(|error| match error {
+                    graph::GraphRouteControlError::AlreadyAttached
+                    | graph::GraphRouteControlError::BoundRoute
+                    | graph::GraphRouteControlError::CursorTable(_)
+                    | graph::GraphRouteControlError::UnknownTransitionRoute => {
+                        graph_failure("host.route_control.attach")
+                    }
+                })
+                .and_then(|attached| {
+                    // Every following route is a route into a submix, so the attach asks for each
+                    // source once, and `new` refuses none (its cells are the program's).
+                    if sources.is_empty() {
+                        Ok(attached)
+                    } else {
+                        Err(graph_failure("host.route_control.attach"))
+                    }
+                })?
+        } else {
+            (
+                Vec::new(),
+                Vec::new(),
+                graph::GraphTransitionRoutes::default(),
+            )
+        };
     if follow_route_controls.len()
         != model
             .routes
@@ -2915,7 +2949,8 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
         }
     }
     let route_control_resources =
-        graph::route_control_resources(&graph_route_controls, &follow_route_controls);
+        graph::route_control_resources(&graph_route_controls, &follow_route_controls)
+            .with_transition_routes(&transition_routes);
     // The producers in canonical route-ID order; a carried send's retarget is written through them.
     let mut route_controls: Vec<RouteControlProducer> = graph_route_controls
         .into_iter()
@@ -3389,8 +3424,10 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
         .iter()
         .filter(|(_, from)| from.is_some())
         .count();
-    let fade_arm_bytes = graph::fade_arm_table_bytes(fade_arms.len(), carried_arms)
-        .ok_or_else(|| resource("host.resource.arithmetic"))?;
+    // #1363 D3: the route arms join the strips' table after them, one entry each.
+    let fade_arm_bytes =
+        graph::fade_arm_table_bytes(fade_arms.len() + route_fades.len(), carried_arms)
+            .ok_or_else(|| resource("host.resource.arithmetic"))?;
     // The strip moves' table is charged at its exact length: which strips carry is known only
     // once both plans' lanes are, so it is checked here, against the same cap as the rest of the
     // plan, instead of before bind.
@@ -3556,10 +3593,21 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
         graph::install_builtin_strip_carry(&mut plan, strip_carry.moves)
             .map_err(|_| graph_failure("host.carry.install"))?;
     }
+    // Issue #1363 D3: each added route's arm, on its live route op; the routes take no inventory
+    // row, so a later successor neither carries nor re-arms them.
+    let route_arms = route_fade_arms(
+        model,
+        &route_fades,
+        &live_routes,
+        &delay_lines,
+        &input_floors,
+    )
+    .ok_or_else(|| graph_failure("host.fade.install"))?;
     let mut fade_arm_rows = Vec::new();
     let mut fade_watch = graph::GraphFadeArmWatch::default();
-    if !fade_arms.is_empty() {
-        let (strips, arms): (Vec<_>, Vec<_>) = fade_arms.into_iter().unzip();
+    if !fade_arms.is_empty() || !route_arms.is_empty() {
+        let (strips, mut arms): (Vec<_>, Vec<_>) = fade_arms.into_iter().unzip();
+        arms.extend(route_arms);
         let (entries, watch) = graph::install_fade_arms(&mut plan, arms)
             .map_err(|_| graph_failure("host.fade.install"))?;
         fade_watch = watch;
@@ -5983,6 +6031,163 @@ fn added_strips<'a>(committed: &SessionModel, model: &'a SessionModel) -> Vec<&'
         .collect()
 }
 
+/// One route a successor arms to fade in (#1363 D1 (a), (c)), and the strip whose fade the
+/// route's fire waits for: its source strip when that strip's fader is armed too (it is added, or
+/// it holds an unfired fade entry of the predecessor), else `None`.
+struct RouteFade<'a> {
+    route: &'a session::Route,
+    strip: Option<&'a str>,
+}
+
+/// The routes of `model` a successor arms to fade in (#1363 D1 (a), (c)), in `model`'s route
+/// order: (a) a route `committed` does not hold whose source strip and destination it does
+/// hold, and (c) a route out of an added strip whose tap precedes the fader. A route from a
+/// strip whose fader is armed (`added`, or `waiting`: a strip with an unfired predecessor entry)
+/// and whose tap follows the fader takes none (the fader's fade shapes it), and neither does a
+/// route whose destination strip is added (its fader's fade does), a route the session mutes
+/// (it arms nothing), or a following route ([`follows_automated_mute`], which binds no six-word
+/// op). A tap before an armed fader waits for that strip's fade.
+fn added_route_fades<'a>(
+    committed: &SessionModel,
+    model: &'a SessionModel,
+    view: controls::ModelView<'_>,
+    added: &[&str],
+    waiting: &[&str],
+) -> Vec<RouteFade<'a>> {
+    let known: BTreeSet<&str> = committed
+        .routes
+        .iter()
+        .map(|route| route.id.as_str())
+        .collect();
+    let mut fades = Vec::new();
+    for route in &model.routes {
+        if route.mute || follows_automated_mute(view, route) {
+            continue;
+        }
+        let (source, tap) = match &route.source {
+            session::RouteSource::Track { track_id, tap } => (track_id.as_str(), *tap),
+            session::RouteSource::Submix { submix_id, tap } => (submix_id.as_str(), *tap),
+        };
+        let destination_known = match &route.destination {
+            session::RouteDestination::SubmixInput { submix_id } => {
+                if added.contains(&submix_id.as_str()) {
+                    continue;
+                }
+                committed_has_strip(committed, submix_id.as_str())
+            }
+            session::RouteDestination::OutputInput { output_id } => committed
+                .outputs
+                .iter()
+                .any(|output| output.id.as_str() == output_id.as_str()),
+        };
+        let armed_source = added.contains(&source) || waiting.contains(&source);
+        let fade = if added.contains(&source) {
+            // (c): a send of an added strip, from a tap before its fader.
+            tap.precedes_fader()
+        } else {
+            // (a): an added route between two strips that keep playing.
+            !known.contains(route.id.as_str())
+                && destination_known
+                && (!armed_source || tap.precedes_fader())
+        };
+        if fade {
+            fades.push(RouteFade {
+                route,
+                strip: armed_source.then_some(source),
+            });
+        }
+    }
+    fades
+}
+
+/// The fade arm of each route of `fades` (#1363 D3, D6): its target is its six-word live route's
+/// unit in `live_routes` (sorted by route ID); `None` when one has no such row (preparation then
+/// fails: every route of `fades` binds one).
+///
+/// `D` is the samples before the route's own op that start at rest: for a route out of a strip
+/// whose fader is armed, the route's input arrival minus the strip's `Input` arrival (every node
+/// latency and compensation line from the input to the tap and the route's source-edge line,
+/// [`fade_arms_for`]'s rule, with a submix's largest route line into it), and its claim is the
+/// strip's; for a route from a strip that keeps playing, only its source-edge line (in
+/// `delay_lines`, sorted by edge), whose source is warm. A route's destination-edge line sits
+/// after its op: the fade enters it, so it delays the fade as a whole and is not waited for. The
+/// fade's length is the session mute ramp.
+fn route_fade_arms(
+    model: &SessionModel,
+    fades: &[RouteFade<'_>],
+    live_routes: &[graph::GraphLiveRoute],
+    delay_lines: &[graph::GraphDelayLine],
+    arrivals: &[(GraphNodeId, u64)],
+) -> Option<Vec<graph::GraphFadeArm>> {
+    let arrival = |node: &GraphNodeId| {
+        arrivals
+            .binary_search_by(|(row, _)| row.cmp(node))
+            .map_or(0, |row| arrivals[row].1)
+    };
+    let ramp_samples = LiveRamps::for_session(model).mute_samples;
+    let mut arms = Vec::with_capacity(fades.len());
+    for fade in fades {
+        let row = live_routes
+            .binary_search_by(|row| (*row.route_id).cmp(fade.route.id.as_str()))
+            .ok()
+            .map(|index| &live_routes[index])
+            .filter(|row| !row.following)?;
+        let route_id = StableGraphId::parse(fade.route.id.as_str())?;
+        let route_node = GraphNodeId::Route {
+            route_id: route_id.clone(),
+        };
+        let (source, delay) = match fade.strip {
+            Some(strip) => {
+                let strip_id = StableGraphId::parse(strip)?;
+                let input = GraphNodeId::TrackStage {
+                    track_id: strip_id,
+                    stage: TrackStage::Input,
+                };
+                let input_arrival = arrival(&input);
+                let mut delay = arrival(&route_node).saturating_sub(input_arrival);
+                let is_track = model
+                    .tracks
+                    .binary_search_by(|track| track.id.as_str().cmp(strip))
+                    .is_ok();
+                if !is_track {
+                    delay = delay.saturating_add(
+                        model
+                            .routes
+                            .iter()
+                            .filter(|route| {
+                                matches!(&route.destination,
+                                    session::RouteDestination::SubmixInput { submix_id }
+                                        if submix_id.as_str() == strip)
+                            })
+                            .filter_map(|route| StableGraphId::parse(route.id.as_str()))
+                            .map(|route_id| {
+                                input_arrival
+                                    .saturating_sub(arrival(&GraphNodeId::Route { route_id }))
+                            })
+                            .max()
+                            .unwrap_or(0),
+                    );
+                }
+                (is_track.then_some(input), delay)
+            }
+            None => {
+                let edge = graph::GraphEdgeId::RouteSource { route_id };
+                let line = delay_lines
+                    .binary_search_by(|line| line.edge.cmp(&edge))
+                    .map_or(0, |index| delay_lines[index].samples);
+                (None, line)
+            }
+        };
+        arms.push(graph::GraphFadeArm {
+            target: graph::GraphFadeTarget::Route(row.unit),
+            source,
+            delay_samples: u32::try_from(delay).unwrap_or(u32::MAX),
+            ramp_samples,
+        });
+    }
+    Some(arms)
+}
+
 /// The fade arm of each strip of `strips` that has a fader lane in `stages` (sorted by strip ID,
 /// then owner; issue #1288 D1, D4, D5): the one entry the arms of an added strip, a duck-swap (#1324) and a restore over a duck
 /// (#1325) are built through.
@@ -6049,7 +6254,7 @@ fn fade_arms_for<'a>(
         arms.push((
             id,
             graph::GraphFadeArm {
-                fader: row.location,
+                target: graph::GraphFadeTarget::Fader(row.location),
                 source: is_track.then_some(input),
                 delay_samples: u32::try_from(delay).unwrap_or(u32::MAX),
                 ramp_samples,

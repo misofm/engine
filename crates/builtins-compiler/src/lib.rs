@@ -7837,22 +7837,26 @@ impl<R> PreparedBuiltinsGraphArtifact<R> {
     /// [`Self::attach_route_live_controls`] with following routes (#1652c): delegates to
     /// [`PreparedGraphPlan::attach_route_controls_following`], which gives every route into a
     /// submix that `following` names a seven-word lane, and the others a six-word lane when
-    /// `six_word` is set. Returns the six-word and the seven-word producers, each in canonical
-    /// route-ID order.
+    /// `six_word` is set, and binds each route of `transition` that gets no lane as a transition
+    /// route (#1363 D2). Returns the six-word and the seven-word producers, each in canonical
+    /// route-ID order, and the transition routes' charge.
+    #[allow(clippy::type_complexity)]
     pub fn attach_route_live_controls_following(
         &mut self,
         superseded: &LiveValuesSuperseded,
         six_word: bool,
+        transition: &[graph::StableGraphId],
         following: impl FnMut(&graph::StableGraphId) -> Option<graph::GraphFollowRouteSource>,
     ) -> Result<
         (
             Vec<graph::GraphRouteControlProducer>,
             Vec<graph::GraphFollowRouteControlProducer>,
+            graph::GraphTransitionRoutes,
         ),
         graph::GraphRouteControlError,
     > {
         self.graph
-            .attach_route_controls_following(superseded, six_word, following)
+            .attach_route_controls_following(superseded, six_word, transition, following)
     }
 
     /// Ordinary external nodes required in addition to compiler-owned builtin processors.
