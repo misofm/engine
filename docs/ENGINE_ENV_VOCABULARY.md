@@ -111,6 +111,10 @@ Written to stdout by an audit binary immediately outside its armed render scope,
 | `MISO_ENGINE_DELAY_RT_END` | delay audit: disarmed. |
 | `MISO_ENGINE_GATE_EXPANDER_RT_BEGIN` | gate/expander audit: armed. |
 | `MISO_ENGINE_GATE_EXPANDER_RT_END` | gate/expander audit: disarmed. |
+| `MISO_ENGINE_DE_ESSER_RT_BEGIN` | de-esser audit: armed. |
+| `MISO_ENGINE_DE_ESSER_RT_END` | de-esser audit: disarmed. |
+| `MISO_ENGINE_DYNAMIC_EQ_RT_BEGIN` | dynamic-EQ audit: armed. |
+| `MISO_ENGINE_DYNAMIC_EQ_RT_END` | dynamic-EQ audit: disarmed. |
 
 
 ## Subject switches
