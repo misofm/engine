@@ -13,6 +13,7 @@ members = [
     "crates/compressor",
     "crates/multiband-compressor",
     "crates/gate-expander",
+    "crates/de-esser",
     "crates/true-peak-limiter",
     "crates/soft-clip",
     "crates/transient-shaper",
@@ -72,6 +73,7 @@ parametric-eq = { path = "crates/parametric-eq", version = "0.1.0" }
 compressor = { path = "crates/compressor", version = "0.1.0" }
 multiband-compressor = { path = "crates/multiband-compressor", version = "0.1.0" }
 gate-expander = { path = "crates/gate-expander", version = "0.1.0" }
+de-esser = { path = "crates/de-esser", version = "0.1.0" }
 true-peak-limiter = { path = "crates/true-peak-limiter", version = "0.1.0" }
 soft-clip = { path = "crates/soft-clip", version = "0.1.0" }
 transient-shaper = { path = "crates/transient-shaper", version = "0.1.0" }

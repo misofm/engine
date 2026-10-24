@@ -1301,11 +1301,24 @@ const REDUCED_MONO_SIMD4_BANKS: usize = 1;
 /// misaligned. The #966 misaligned-compressor case is the four `console_less_eqs` tests' and the
 /// #970 later-chain case `host-core`'s `collapse_arming.rs`'s; this one stays a bind-and-render
 /// regression over the reduced mono desk.
+///
+/// Since #1872 the soft clip's witness holds, so `t11` and `t13` (symmetric inputs) are
+/// mono-class, and the session has no console, so #971's demotion decides their pool: it moves
+/// them to the stereo pool only when the re-plan **binds** more banks, a count of the banks this
+/// build's factories bind. At the build's own width that is the plan above, where the move binds
+/// the compressor bank. At a width the build does not execute nothing binds, the move is not kept,
+/// and the stereo group `t0, t14, t18, t6` has a misaligned compressor (`t0` runs the EQ first).
+/// So here, unlike the console tests, the misaligned count is asserted at the native width only.
 #[test]
 fn the_reduced_mono_console_from_the_970_probe_binds_at_every_width() {
     let name = "reduced mono console from the #970 probe";
     let (outcomes, _) = assert_binds_and_renders_the_scalar_bits(name, &reduced_mono_console());
-    misaligned_slots(name, &outcomes, [0, 0]);
+    assert_eq!(
+        outcomes[native_index() + 1].misaligned_slots,
+        0,
+        "{name}: misaligned planned slots at {:?}",
+        Backend::current()
+    );
     native_bank_count(name, &outcomes, REDUCED_MONO_SIMD4_BANKS, 0);
 }
 

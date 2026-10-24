@@ -12,7 +12,9 @@ mod biquad;
 mod block;
 pub mod class_a;
 mod compressor;
+mod de_esser;
 mod delay;
+mod dynamic_band;
 mod gate_expander;
 mod lr4;
 mod parametric_eq;
@@ -34,7 +36,12 @@ pub use block::{F64PlanarBuffer, ReferenceBlockError};
 pub use compressor::{
     ReferenceCompressorError, ReferenceCompressorParameters, ReferencePeakCompressor,
 };
+pub use de_esser::{ReferenceDeEsser, ReferenceDeEsserOutput};
 pub use delay::{ReferenceDelayError, ReferenceDelayPair, ReferenceDelayParameters};
+pub use dynamic_band::{
+    ReferenceBandTap, ReferenceDynamicBand, ReferenceDynamicBandLaw, ReferenceRbjBiquad,
+    reference_level_db,
+};
 pub use gate_expander::{
     ReferenceGateExpanderError, ReferenceGateExpanderParameters, ReferenceGateLink,
     ReferenceGatePhase, ReferenceGateTiming, ReferenceGateTimingChange, ReferenceGateTrace,

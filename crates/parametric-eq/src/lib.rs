@@ -976,6 +976,16 @@ fn validate_svf_within(words: EqSvfWords, norm_bound: f64) -> Result<(), EqDesig
     Ok(())
 }
 
+/// The production ramp-path predicate (#1859 grid): `validate_svf_within` at [`RAMP_PATH_NORM_TOLERANCE`].
+#[cfg(feature = "test-support")]
+#[must_use]
+pub fn test_only_ramp_word_is_admissible(words: EqSvfWords) -> bool {
+    validate_svf_within(words, RAMP_PATH_NORM_TOLERANCE).is_ok()
+}
+/// The output-mix word bound the ramp predicate applies (test builds only).
+#[cfg(feature = "test-support")]
+pub const TEST_ONLY_OUTPUT_MIX_BOUND: f32 = OUTPUT_MIX_BOUND;
+
 /// `true` if `value` is inside the domain of numeric field `field` (0 frequency, 1 gain, 2 Q,
 /// 3 shelf slope), using the shared descriptor validator rather than a fourth copy of the ranges.
 fn numeric_value_valid(field: usize, value: f32) -> bool {

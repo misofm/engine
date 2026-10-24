@@ -8,8 +8,10 @@
 //! with counter i (4), its body is the guard, the decrement and one pop of the counted queue (5),
 //! and nothing in the window between the loops writes the counters or replaces the queues (6).
 //!
-//! The loops around the form, the pass count loop between the loops included, are judged by
-//! [`super::outer`] like the loops around any other drain.
+//! The loops around the form, the pass count loop between the loops included, are judged finite
+//! by [`super::outer`] like the loops around any other drain. The loops that enclose the set loop
+//! must also select `<Q>`, a different collection on each pass, and keep it in place
+//! ([`super::select`], #1851); the pass count loop need not.
 
 mod window;
 
@@ -21,7 +23,15 @@ use super::shapes::{Place, is_int, method, method0, path_name, uncapped};
 use super::tree::{Node, Pos, Step, Via, pos};
 
 /// Whether the pop `site`, in the innermost loop `steps[at]`, is bounded by a D8b form.
-pub(super) fn bounds<'f>(ctx: &Ctx<'f>, steps: &[Step<'f>], at: usize, site: &PopSite) -> bool {
+/// `top` is the step of the region's outermost node: the loops of `steps[top..]` that enclose the
+/// set loop must select the form's `<Q>`.
+pub(super) fn bounds<'f>(
+    ctx: &Ctx<'f>,
+    steps: &[Step<'f>],
+    top: usize,
+    at: usize,
+    site: &PopSite,
+) -> bool {
     let Node::Expr(syn::Expr::ForLoop(pass)) = steps[at].node else {
         return false;
     };
@@ -37,11 +47,12 @@ pub(super) fn bounds<'f>(ctx: &Ctx<'f>, steps: &[Step<'f>], at: usize, site: &Po
             each: pass,
             at,
             q: &header.q,
+            queues: header.queues,
             k: &header.zips[index],
             r: &names[0],
             c: &names[index + 1],
         };
-        let held = form.holds(ctx, steps, site);
+        let held = form.holds(ctx, steps, top, site);
         // A form that does not hold read nothing (D10).
         if !held {
             ctx.rewind(mark);
@@ -53,6 +64,8 @@ pub(super) fn bounds<'f>(ctx: &Ctx<'f>, steps: &[Step<'f>], at: usize, site: &Po
 /// A pass loop's iterator: `<Q>.iter_mut().zip(&mut <fields>)..`.
 struct PassHeader<'f> {
     q: Place<'f>,
+    /// `<Q>` as written: the receiver of `.iter_mut()`.
+    queues: &'f syn::Expr,
     /// The `.zip(&mut <fields>)` steps, innermost first.
     zips: Vec<Place<'f>>,
 }
@@ -75,6 +88,7 @@ impl<'f> PassHeader<'f> {
         let base = method0(current, "iter_mut")?;
         Some(Self {
             q: fields_place(&base.receiver)?,
+            queues: &base.receiver,
             zips,
         })
     }
@@ -219,13 +233,15 @@ struct Pass<'a, 'f> {
     each: &'f syn::ExprForLoop,
     at: usize,
     q: &'a Place<'f>,
+    /// `<Q>` as written, where the select walk starts.
+    queues: &'f syn::Expr,
     k: &'a Place<'f>,
     r: &'a str,
     c: &'a str,
 }
 
 impl<'f> Pass<'_, 'f> {
-    fn holds(&self, ctx: &Ctx<'f>, steps: &[Step<'f>], site: &PopSite) -> bool {
+    fn holds(&self, ctx: &Ctx<'f>, steps: &[Step<'f>], top: usize, site: &PopSite) -> bool {
         let Some((block_at, set)) = self.pair(steps) else {
             return false;
         };
@@ -259,7 +275,10 @@ impl<'f> Pass<'_, 'f> {
         if !own(&set.r, set.r_at) || !own(&set.c, set.c_at) {
             return false;
         }
-        let held = self.body_holds(ctx, steps, site, &set)
+        // #1851: every loop that encloses the set loop drains a different `<Q>` on each pass; a
+        // loop that does not runs the whole form again on the same queues.
+        let held = super::select::selects(ctx, steps, top, block_at, self.queues)
+            && self.body_holds(ctx, steps, site, &set)
             && window::holds(
                 self,
                 ctx,

@@ -1226,7 +1226,19 @@ impl<L: Lane> SoftClip<L> {
     /// D7 check would pass, so the block reports `[0, 0]` as a rendered one does. The one word a
     /// rendered block would still move is each channel's cursor, which is advanced here. Bit tests
     /// and integer arithmetic only.
-    fn process(
+    ///
+    /// # The collapsed body (issue #1872)
+    ///
+    /// `MONO` renders the left channel alone, on the left plane alone: `right` is never read or
+    /// written (a collapsed block passes it empty), and the right channel's words are left exactly
+    /// as they were, for [`desymmetrize`](Self::desymmetrize) to replace. The silent fast path
+    /// reads the left plane and the left channel's rest only and advances the left cursor only,
+    /// because a collapsed bank's counterfactual right channel is its left one. A lane that fails
+    /// the D7 check on the left plane is recovered on **both** channels and reported on both, as
+    /// the dual block on `L == R` fails both planes in the same lanes; the right recovery is
+    /// overwritten by the disengage copy, and is kept so that the right words never hold a state
+    /// no dual run could reach.
+    fn process<const MONO: bool>(
         &mut self,
         left: &mut [f32],
         right: &mut [f32],
@@ -1237,18 +1249,31 @@ impl<L: Lane> SoftClip<L> {
         let allowed = !silent_forbidden();
         #[cfg(not(test))]
         let allowed = true;
-        if allowed
-            && block_is_positive_zero(left)
-            && block_is_positive_zero(right)
-            && self.lanes_at_rest() == all_lanes::<L>()
-        {
+        let silent = if MONO {
+            block_is_positive_zero(left) && self.left.rest_lanes() == all_lanes::<L>()
+        } else {
+            block_is_positive_zero(left)
+                && block_is_positive_zero(right)
+                && self.lanes_at_rest() == all_lanes::<L>()
+        };
+        if allowed && silent {
             #[cfg(test)]
             admitted_silent();
             self.left.advance_cursor(frames);
-            self.right.advance_cursor(frames);
+            if !MONO {
+                self.right.advance_cursor(frames);
+            }
             return [0, 0];
         }
         self.left.process(left, frames, bypass);
+        if MONO {
+            if check_block::<L>(left) {
+                return [0, 0];
+            }
+            let failed = nonfinite_lane_mask::<L>(left);
+            let charged = self.recover_lanes(left, &mut [], failed);
+            return [failed & charged; 2];
+        }
         self.right.process(right, frames, bypass);
         if check_block::<L>(left) && check_block::<L>(right) {
             return [0, 0];
@@ -1277,6 +1302,7 @@ impl<L: Lane> SoftClip<L> {
     /// and charged its bank-mates.
     ///
     /// A padded lane is recovered like any other, so it stays at rest, but it is never charged.
+    /// A collapsed block passes `right` empty; both channels' words are still recovered.
     /// Returns the charged lanes; when there are any, the bank's `nonfinite_blocks` advances by one
     /// -- a *block*, never a sample -- and `nonfinite_lanes` records them.
     fn recover_lanes(&mut self, left: &mut [f32], right: &mut [f32], failed: u32) -> u32 {
@@ -1301,6 +1327,97 @@ impl<L: Lane> SoftClip<L> {
         }
         charged
     }
+
+    /// The collapse's disengage copy (issue #1872): the left channel's whole render state onto
+    /// the right, every lane. That is every word [`Channel::process`] reads per channel: the
+    /// three [`SoftClipState`] words, the history cursor `pos`, the whole `x`, `e` and `dry`
+    /// rings (all 64 rows: the rings are double-written and the taps read both copies), and the
+    /// ramps, every field. In place, by `copy_from_slice` of equal lengths: no allocation.
+    ///
+    /// `left_defaults` and `right_defaults` are not copied: they are each channel's own prepared
+    /// values, which the kernel never reads (a full reset, preparation-side, re-seeds from them).
+    fn desymmetrize(&mut self) {
+        let (left, right) = (&self.left, &mut self.right);
+        right.state = left.state;
+        right.history.pos = left.history.pos;
+        right.history.x.copy_from_slice(&left.history.x);
+        right.history.e.copy_from_slice(&left.history.e);
+        right.history.dry.copy_from_slice(&left.history.dry);
+        right.ramps.copy_from_slice(&left.ramps);
+    }
+
+    /// `PreparedNativeEffectBank::channels_agree` (issue #1872): every word
+    /// [`desymmetrize`](Self::desymmetrize) copies compares bit-equal between the channels, on
+    /// every lane. The whole per-channel state is `3 * 64 + 3` lane words plus the cursor and the
+    /// ramps (about 1.6k words at eight lanes), small enough to compare outright, as the
+    /// contract's cost rule allows; it is asked only inside a recovery window.
+    fn channels_bit_equal(&self) -> bool {
+        let (left, right) = (&self.left, &self.right);
+        let same_words = |a: &[f32], b: &[f32]| {
+            a.len() == b.len() && a.iter().zip(b).all(|(a, b)| a.to_bits() == b.to_bits())
+        };
+        (0..L::WIDTH).all(|lane| same_state_lane(left, right, lane))
+            && left.history.pos == right.history.pos
+            && same_words(&left.history.x, &right.history.x)
+            && same_words(&left.history.e, &right.history.e)
+            && same_words(&left.history.dry, &right.history.dry)
+            && left.ramps.len() == right.ramps.len()
+            && left
+                .ramps
+                .iter()
+                .flatten()
+                .zip(right.ramps.iter().flatten())
+                .all(|(a, b)| same_ramp_bits(a, b))
+    }
+
+    /// The `DESIGNED` term of the channel-symmetry witness for `lane` (issue #1872): whether every
+    /// per-channel word [`Channel::process`] reads that is not running state compares bit-equal
+    /// between the two channels.
+    ///
+    /// # The word list, and why it is exactly this
+    ///
+    /// Per channel the kernel reads the lane's three ramps (`ramps[lane]`, all four fields each:
+    /// `remaining` decides whether a ramp moves, when it snaps and where a segment ends, and
+    /// `current`, `target` and `step` are what it moves; [`SoftClipCoef`] is derived from them per
+    /// segment) and the lane's three [`SoftClipState`] words (`drive`, `output`, `mix`), the ramps'
+    /// current of record. Twelve ramp words and three state words.
+    ///
+    /// Deliberately excluded:
+    ///
+    /// * `history.pos` and the `x`, `e` and `dry` rings: running state, which the induction the
+    ///   witness states carries.
+    /// * `left_defaults` and `right_defaults`: prepared values the kernel never loads.
+    /// * `bypass`, `automation_capacity`, `active`: whole-instance. There are no link words: the
+    ///   descriptor offers `DualMono` only.
+    ///
+    /// Raw bits, so `+0.0` against `-0.0` declines. A lane past the width declines.
+    fn designed_channel_symmetry(&self, lane: usize) -> bool {
+        if lane >= L::WIDTH {
+            return false;
+        }
+        let (left, right) = (&self.left, &self.right);
+        left.ramps[lane]
+            .iter()
+            .zip(&right.ramps[lane])
+            .all(|(a, b)| same_ramp_bits(a, b))
+            && same_state_lane(left, right, lane)
+    }
+}
+
+/// Whether two ramps hold the same four words, raw bits (issue #1872).
+fn same_ramp_bits(a: &LinearRamp, b: &LinearRamp) -> bool {
+    a.current.to_bits() == b.current.to_bits()
+        && a.target.to_bits() == b.target.to_bits()
+        && a.step.to_bits() == b.step.to_bits()
+        && a.remaining == b.remaining
+}
+
+/// Whether lane `lane` of two channels holds the same three [`SoftClipState`] words, raw bits.
+fn same_state_lane<L: Lane>(left: &Channel<L>, right: &Channel<L>, lane: usize) -> bool {
+    (0..PARAMETER_COUNT).all(|parameter| {
+        lane_of(left.state.field(parameter), lane).to_bits()
+            == lane_of(right.state.field(parameter), lane).to_bits()
+    })
 }
 
 /// A prepared scalar soft-clip dual-mono instance.
@@ -1512,7 +1629,9 @@ impl PreparedNativeEffect for PreparedSoftClip {
         );
         let bypass = self.inner.bypass;
         // One block on each channel whose output failed, never its frames (D7, #1073).
-        let [left, right] = self.inner.process(block.left, block.right, frames, bypass);
+        let [left, right] = self
+            .inner
+            .process::<false>(block.left, block.right, frames, bypass);
         report.nonfinite_left_blocks = report
             .nonfinite_left_blocks
             .saturating_add(u64::from(left & 1));
@@ -1544,6 +1663,11 @@ impl PreparedNativeEffect for PreparedSoftClip {
         )
     }
     // REALTIME_POLICY_END
+
+    /// Issue #1872: [`SoftClip::designed_channel_symmetry`] on lane 0.
+    fn channel_symmetry(&self) -> bool {
+        self.inner.designed_channel_symmetry(0)
+    }
 }
 
 impl<L: Lane> PreparedNativeEffectBank for PreparedSoftClipBank<L> {
@@ -1552,44 +1676,28 @@ impl<L: Lane> PreparedNativeEffectBank for PreparedSoftClipBank<L> {
     }
 
     fn process_bank(&mut self, block: EffectBankProcessBlock<'_>) -> BankProcessReport {
-        let mut report = BankProcessReport::empty(self.width);
-        if !bank_block_matches(&block, self.width, self.quantum)
-            || L::WIDTH != self.width.lanes() as usize
-        {
-            return report;
-        }
-        for lane in 0..L::WIDTH {
-            // A padded lane carries no track, so no span is its to apply (issue #1092).
-            if self.inner.active & (1 << lane) == 0 {
-                continue;
-            }
-            let start = block.automation_offsets[lane] as usize;
-            let end = block.automation_offsets[lane + 1] as usize;
-            apply_automation(
-                &block.automation[start..end],
-                self.inner.automation_capacity,
-                block.first_sample,
-                lane,
-                &mut self.inner.left,
-                &mut self.inner.right,
-                &mut report.reports[lane],
-            );
-        }
-        let frames = block.frames as usize;
-        let bypass = self.inner.bypass;
-        // Only the lanes that failed are charged, never a bank-mate or a padded lane (issue
-        // #1092). Each is charged as its scalar instance charges itself: one block on each
-        // channel whose own output failed, never the block's frames (D7, #1073).
-        let [left, right] = self.inner.process(block.left, block.right, frames, bypass);
-        for (lane, lane_report) in report.reports.iter_mut().enumerate().take(L::WIDTH) {
-            lane_report.nonfinite_left_blocks = lane_report
-                .nonfinite_left_blocks
-                .saturating_add(u64::from((left >> lane) & 1));
-            lane_report.nonfinite_right_blocks = lane_report
-                .nonfinite_right_blocks
-                .saturating_add(u64::from((right >> lane) & 1));
-        }
-        report
+        self.process_bank_inner::<false>(block)
+    }
+
+    /// Issue #1872: [`SoftClip::designed_channel_symmetry`].
+    fn lane_channel_symmetry(&self, lane: usize) -> bool {
+        self.inner.designed_channel_symmetry(lane)
+    }
+
+    fn supports_mono_collapse(&self) -> bool {
+        true
+    }
+
+    fn process_bank_mono(&mut self, block: EffectBankProcessBlock<'_>) -> BankProcessReport {
+        self.process_bank_inner::<true>(block)
+    }
+
+    fn desymmetrize_channels(&mut self) {
+        self.inner.desymmetrize();
+    }
+
+    fn channels_agree(&self) -> bool {
+        self.inner.channels_bit_equal()
     }
 
     /// Issue #1746: [`Channel::rest_lanes`] on both channels, padded lanes included.
@@ -1634,6 +1742,63 @@ impl<L: Lane> PreparedNativeEffectBank for PreparedSoftClipBank<L> {
 
     fn exchange_lane_defaults(&mut self, lane: usize, bytes: &mut [u8]) -> bool {
         self.exchange_defaults(lane, bytes)
+    }
+}
+
+impl<L: Lane> PreparedSoftClipBank<L> {
+    /// The one bank body, dual or collapsed (issue #1872).
+    ///
+    /// `MONO` chooses the render body and nothing else: the guards, the automation drain (both
+    /// channels' spans, as a dual block takes them) and the report are the same statements in the
+    /// same order. A collapsed block hands the kernel no right plane, so the right plane is never
+    /// read or written. Inlined into `process_bank` and `process_bank_mono`; the arithmetic stays
+    /// in the one `#[inline(never)]` [`Channel::process`].
+    #[inline(always)]
+    fn process_bank_inner<const MONO: bool>(
+        &mut self,
+        block: EffectBankProcessBlock<'_>,
+    ) -> BankProcessReport {
+        let mut report = BankProcessReport::empty(self.width);
+        if !bank_block_matches(&block, self.width, self.quantum)
+            || L::WIDTH != self.width.lanes() as usize
+        {
+            return report;
+        }
+        for lane in 0..L::WIDTH {
+            // A padded lane carries no track, so no span is its to apply (issue #1092).
+            if self.inner.active & (1 << lane) == 0 {
+                continue;
+            }
+            let start = block.automation_offsets[lane] as usize;
+            let end = block.automation_offsets[lane + 1] as usize;
+            apply_automation(
+                &block.automation[start..end],
+                self.inner.automation_capacity,
+                block.first_sample,
+                lane,
+                &mut self.inner.left,
+                &mut self.inner.right,
+                &mut report.reports[lane],
+            );
+        }
+        let frames = block.frames as usize;
+        let bypass = self.inner.bypass;
+        // Only the lanes that failed are charged, never a bank-mate or a padded lane (issue
+        // #1092). Each is charged as its scalar instance charges itself: one block on each
+        // channel whose own output failed, never the block's frames (D7, #1073).
+        let right_plane = if MONO { &mut [][..] } else { block.right };
+        let [left, right] = self
+            .inner
+            .process::<MONO>(block.left, right_plane, frames, bypass);
+        for (lane, lane_report) in report.reports.iter_mut().enumerate().take(L::WIDTH) {
+            lane_report.nonfinite_left_blocks = lane_report
+                .nonfinite_left_blocks
+                .saturating_add(u64::from((left >> lane) & 1));
+            lane_report.nonfinite_right_blocks = lane_report
+                .nonfinite_right_blocks
+                .saturating_add(u64::from((right >> lane) & 1));
+        }
+        report
     }
 }
 
