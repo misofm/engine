@@ -187,8 +187,19 @@ tracks, input filters, an EQ insert and an EQ console slot:
   `None` it displaces is forgotten, so no drop of a job is reachable on render.
 - **Resources.** The channel's two queues are charged in `capi_resources`'s fixed aggregate rows
   (`host_core::response_capture_retained_bytes`); capi's completeness oracle saw the 544 bytes
-  uncharged before. An armed job is a control-side transient (allocated by `arm`, freed by `poll`)
-  and is not charged.
+  uncharged before. Attempt 2 (root ruling, the #1325a rule: a control-side heap owner that
+  outlives a call is charged at the model's bounds): one armed job and one delivered result are
+  charged in the same rows (`host_core::response_capture_ceiling_bytes`, through
+  `control_plane::response_capture_bytes`): the strip with the most owners (input filters, every
+  console slot, the most inserts any strip has) with three 127-byte identities and two
+  six-section arrays per owner plus the strip ID, and a 4,096-point result (frequencies, left,
+  right) with its members. The bound is the committed model's, not `maximum_effects`: the browser
+  runs with `maximum_effects = u64::MAX`, so a cap bound cannot be represented there. It is
+  52,076 bytes for the nine-track fixture; capi's reference ceiling moves 212,288 -> 275,584
+  (measured 250,475, plus 10 %). capi's completeness oracle adds the row as a bound;
+  `a_capture_at_the_bound_stays_within_its_charge` holds a capture at the bound within it.
+  Stated limit: the row follows the newest committed model, so a request armed under the model a
+  rebuild displaced is bounded by that model, which the row charged until the rebuild.
 - **Browser call-graph gate.** `scripts/check-web-audioworklet.sh` fails on two pins, outside this
   issue's paths: `ResponseCaptureServer::after_block` is a new trap owner with 2 sites (the
   inlined SPSC `slots[...]` index of its pop and push, the class `enter_block` is admitted for),
@@ -204,17 +215,33 @@ tracks, input filters, an EQ insert and an EQ console slot:
   `slots[local]` index (`crates/engine/src/realtime/spsc.rs`), which every SPSC user inlines, so
   removing them is an engine change outside this issue.
 
+- **Reachability (attempt 2 correction).** The keep branch (active epoch below the job's) is
+  reachable: through the C ABI's cross-thread order, and on one thread through
+  `SessionState::test_set_next_adoption(PlanAdoption::NoEarlierThan(..))`, which
+  `capture_follows_newest_plan` now drives. Only the full-reply-push branch is unreachable: the
+  channel holds one job, and the client pushes a request only when it holds no reply, so the
+  reply queue is empty whenever render pushes.
+
 ### Test value (`crates/control-plane/tests/response_capture.rs`)
 
-- `capture_follows_newest_plan` (gates 1, 3, 4): red if the render step captures before the block,
+- `capture_follows_newest_plan` (gates 1, 3, 4): red if the render step captures from a plan older
+  than the job's epoch (the keep branch: a rebuild adopted 4 blocks later, with no allocation on
+  any block, the swap block included), if it captures before the block,
   if a replacement's epoch is not recorded, if a reply is dropped or delivered twice, or if a
-  refused request leaves a tag or a pending state behind.
+  refused request leaves a tag or a pending state behind, or checks a pending capture before an
+  unknown strip.
 - `capture_reads_applied_values` (gate 2): red if the step reads the values held before the
   block's live snapshot instead of the applied targets after it.
 - `render_step_allocates_nothing` (gate 5, the root comment): red if the render step, the
-  collector's copy or the job's move allocates or frees on render, or a job is lost.
+  collector's copy or the job's move allocates or frees on render, or a job is lost; a structural
+  push between an arm and its render drives the stale path under the count.
+- `a_capture_at_the_bound_stays_within_its_charge`: red if the charge leaves out a part of the
+  job or of the result that persists across calls.
 
 Red first, each mutant restored by `git checkout`: step before the block (follows and applied red);
 no newest-epoch record at the push (follows red); a refusal that takes a tag (follows red);
 `Delivered` read as `Idle` (follows red); render drops a finished job (all three red); the sink
-allocates its track ID (allocates red only).
+allocates its track ID (allocates red only). Attempt 2: the keep branch deleted (follows red:
+delivered at sample 128, before the adoption at 640); `Pending` checked before `UnknownStrip`
+(follows red); a stale job armed again at its old epoch (follows and allocates red); the curves
+left out of the charge (bound red: delivered 49,455 bytes against a 4,199-byte charge).

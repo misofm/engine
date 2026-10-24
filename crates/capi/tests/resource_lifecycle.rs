@@ -1348,6 +1348,12 @@ impl Budget {
 /// row does not depend on the lane width), above the 175,296 ceiling, so the ceiling is 192,972
 /// plus 10 %, rounded up to 64: 212,269.2 -> 212,288.
 ///
+/// #1577 charges the response capture: its channel's two queues (544 bytes) and, at the model's
+/// bounds, one armed job and one delivered result (52,076 bytes for this session: two owners and a
+/// 4,096-point result's three curves). `capi_retained_bytes` measured 197,855 before and 250,475
+/// after (x86-64; the row does not depend on the lane width), above the 212,288 ceiling, so the
+/// ceiling is 250,475 plus 10 %, rounded up to 64: 275,522.5 -> 275,584.
+///
 /// #887 (batch 13) tiles the gather and scatter of padded banks, a structural move: every bank
 /// chain now owns two lane-major staging planes, and a padded chain a `quantum`-word `+0.0` plane,
 /// and the estimates charge both (builtin banks had never been charged their staging). The
@@ -1469,8 +1475,8 @@ const REFERENCE_BUDGETS: [Budget; 19] = [
     Budget {
         row: "capi_retained_bytes",
         value: |report| report.capi_retained_bytes,
-        eight_lanes: 212_288,
-        four_lanes: 212_288,
+        eight_lanes: 275_584,
+        four_lanes: 275_584,
     },
     Budget {
         row: "largest_named_allocation_bytes",
