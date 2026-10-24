@@ -3004,6 +3004,81 @@ fn finite_source_boundary_requires_only_the_actual_final_marker() {
     }
 }
 
+/// Issue #1537 gate 1: `COUNTERS_GET` through the browser's control entry reports
+/// `SOURCE_UNDERRUN_BLOCKS`, the rendered blocks in which a source played zeros because the host
+/// had not delivered PCM it owed. Each case feeds blocks 0 and 1, then renders two blocks with
+/// nothing submitted, and reads the counter at boot and after each render's service step. With an
+/// eight-block source the two starved blocks count (`[0, 0, 1, 2]`); with a two-block source
+/// block 1 ends the region, so the next two blocks are past its end and count nothing.
+///
+/// Test value: red if the count never moves, counts every block, counts the previous block's
+/// flag or a stale plan's, or counts silence past the end of a region as starvation; no other
+/// test reads an underrun count from a host.
+#[test]
+fn the_counters_get_reply_counts_each_block_a_source_underran() {
+    use protocol::{
+        CommandPayload, CounterId, CountersRequest, DecodeScratch, DecodedSuccessResponsePayload,
+        DecodedTypedResponseFrame, ExpectedRevision, ProtocolCodec, RequestId, TypedCommandFrame,
+    };
+    fn underrun_blocks(host: &mut AudioWorkletEngineHost, request: u64) -> u64 {
+        assert_eq!(host.service(None), RESULT_OK);
+        let codec = ProtocolCodec::default();
+        let mut bytes = vec![0_u8; codec.limits().max_frame_bytes];
+        let length = codec
+            .encode_command_frame_into(
+                &TypedCommandFrame {
+                    request_id: RequestId::new(request).expect("nonzero request"),
+                    expected_revision: ExpectedRevision::Any,
+                    payload: CommandPayload::CountersGet(&CountersRequest {
+                        all: false,
+                        ids: vec![CounterId::SourceUnderrunBlocks as u32],
+                    }),
+                },
+                &mut bytes,
+            )
+            .expect("a counters frame");
+        let staged = u32::try_from(length).expect("frame length");
+        host.control_request_mut(staged)
+            .expect("the control request staging")[..length]
+            .copy_from_slice(&bytes[..length]);
+        assert_eq!(host.control_command(staged, None), RESULT_OK);
+        let mut fields = [0_u16; 64];
+        let DecodedTypedResponseFrame::Success {
+            payload: DecodedSuccessResponsePayload::CounterSnapshot(snapshot),
+            ..
+        } = codec
+            .decode_typed_response(
+                host.control_response(),
+                &mut DecodeScratch::new(&mut fields),
+            )
+            .expect("a counters response")
+        else {
+            panic!("expected a counter snapshot")
+        };
+        assert_eq!(snapshot.values.len(), 1);
+        assert_eq!(snapshot.values[0].id, CounterId::SourceUnderrunBlocks);
+        snapshot.values[0].value
+    }
+    for (source_blocks, expected) in [(8_u64, [0_u64, 0, 1, 2]), (2, [0, 0, 0, 0])] {
+        let mut host = meter_tail_host_for_blocks(48_000, 128, 32, source_blocks);
+        assert_eq!(
+            underrun_blocks(&mut host, 1),
+            0,
+            "{source_blocks} blocks: boot"
+        );
+        let mut seen = [0_u64; 4];
+        for (block, count) in (0_u64..).zip(seen.iter_mut()) {
+            if block < 2 {
+                feed_and_render_finite_source(&mut host, block, source_blocks, 0.25);
+            } else {
+                assert_eq!(host.render_next(), RESULT_OK);
+            }
+            *count = underrun_blocks(&mut host, block + 2);
+        }
+        assert_eq!(seen, expected, "{source_blocks}-block source");
+    }
+}
+
 #[test]
 fn meter_delayed_poll_delivers_each_queued_window_with_its_own_peak() {
     let mut host = live_control_host(128, 2);
