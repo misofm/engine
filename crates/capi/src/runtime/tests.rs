@@ -824,6 +824,91 @@ fn a_c_abi_plan_keeps_its_strip_meters_and_meters_its_output_without_allocating(
     crate::ffi::test_session_destroy(session);
 }
 
+/// #1674 gate 1: across a carried C ABI rebuild (a muted track whose ID sorts first), the strip
+/// meter consumer the running epoch holds for the old strip 0, now strip 1, is the one it held
+/// before: its queued window stays, and the window the carried observer publishes after the swap
+/// continues its sequence on it.
+///
+/// Test value: red if the promoted epoch keeps the successor's fresh consumer for a carried strip,
+/// whose producer the swap block moved into the retiring plan; no other test reads the C ABI's
+/// strip consumers across a rebuild.
+#[test]
+fn a_carried_strip_meter_keeps_its_reader_across_a_c_abi_rebuild() {
+    let mut model = stateless_session(48_000);
+    model.tracks.truncate(2);
+    model.routes.truncate(2);
+    let document = session::canonical_session_json(&model).expect("two-strip session");
+    let mut children = compile_children(&document, limits()).expect("children");
+    let window = u64::from(host_core::default_meter_window_blocks(48_000, 128).get());
+    // Feeds one block ahead and renders `blocks` blocks from `first`; every submit runs the
+    // service step first.
+    let run = |children: &mut super::CompiledChildren, first: u64, blocks: u64| {
+        let mut feed = |frame: u64| {
+            let (left, right) = continuity_block(frame, 0);
+            children
+                .session
+                .submit(
+                    b"fixture-source",
+                    SourceSubmission {
+                        generation: 1,
+                        start_frame: frame * 128,
+                        sample_rate_hz: 48_000,
+                        planes: &[&left, &right],
+                        frames: 128,
+                        end_of_region: false,
+                    },
+                )
+                .expect("submit");
+        };
+        if first == 0 {
+            feed(0);
+        }
+        for block in first..first + blocks {
+            feed(block + 1);
+            let mut pcm = [0.0_f32; 256];
+            children
+                .plan
+                .render(
+                    block * 128,
+                    PlanarBufferMut::try_new(&mut pcm, 2, 128, 128).expect("output"),
+                )
+                .expect("render");
+        }
+    };
+    // The queued windows of `meter`, peeked in order.
+    let windows = |meter: &host_core::MeterConsumer| -> Vec<u64> {
+        (0..)
+            .map_while(|index| meter.consumer.peek(index))
+            .map(|snapshot| snapshot.window_sequence)
+            .collect()
+    };
+    run(&mut children, 0, window + 1);
+    let meter = &children.session.test_providers().test_meters()[0];
+    let strip = meter.track_id.clone();
+    assert_eq!(windows(meter), [0], "one window closed before the rebuild");
+
+    let transaction = command_bytes_at_revision(
+        1,
+        ExpectedRevision::Exact(SessionRevision(42)),
+        protocol::CommandPayload::SessionTransactionApply(&add_muted_track(&model, "a-muted")),
+    );
+    children
+        .session
+        .command(&transaction, 4_096)
+        .expect("the rebuild commits");
+    run(&mut children, window + 1, window + 1);
+    children.session.service().expect("service");
+    assert_eq!(children.session.test_providers().test_epoch(), 1);
+    assert!(children.session.test_pending_providers().is_empty());
+    let meter = &children.session.test_providers().test_meters()[1];
+    assert_eq!(meter.track_id, strip, "the old strip 0 is strip 1");
+    assert_eq!(
+        windows(meter),
+        [0, 1],
+        "the reader the epoch held keeps window 0 and receives window 1 of the carried observer"
+    );
+}
+
 #[test]
 fn ring_zero_derives_from_the_document_and_matches_the_explicit_value() {
     let model = parse_session_json(SESSION).expect("session");
