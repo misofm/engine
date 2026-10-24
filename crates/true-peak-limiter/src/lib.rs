@@ -866,6 +866,29 @@ impl ChannelState {
             *phase = ((*phase as usize + frames % window) % window) as u32;
         }
     }
+
+    /// Gives lane `lane`, just cleared by a partial D7 recovery, the van Herk phase of the lowest
+    /// lane outside `failed` with the same window (issue #1102), so the bank passes the phase leg
+    /// of [`lanes_uniform`] again from the next block. With no such lane the phase stays zero.
+    ///
+    /// Bit-neutral: a cleared lane's `required_ring` is all `1.0` and its `prefix` is `1.0`. The
+    /// backward pass over `1.0`s writes `1.0` and a running minimum of `1.0`s is `1.0`, so the
+    /// cleared state is the state of every phase; and every required gain lies in `(0, 1]`, so a
+    /// window minimum that also covers some of those `1.0`s is the minimum of the real gains alone,
+    /// whatever position the van Herk block starts at. A padded lane counts as a survivor: it
+    /// renders in the same body as the members.
+    ///
+    /// Per channel, because the collapsed body advances the left channel only (#990), so the two
+    /// channels' survivor phases may differ.
+    fn align_phase_to_survivor(&mut self, lane: usize, failed: u32) {
+        debug_assert!(failed & (1 << lane) != 0);
+        let window = self.lane[lane].window;
+        if let Some(survivor) = (0..self.width)
+            .find(|&other| failed & (1 << other) == 0 && self.lane[other].window == window)
+        {
+            self.phase[lane] = self.phase[survivor];
+        }
+    }
 }
 
 /// The lane mask naming every lane of a `width`-lane instance or bank.
@@ -3849,8 +3872,9 @@ impl<L: Lane> LimiterCore<L> {
     ///   fail keeps every word, so its bits are the bits it renders per node: banking couples the
     ///   lanes' cost, never their bits. The cursors are shared and stay where they are, which is
     ///   bit-neutral for the reset lane (see [`ChannelState::clear_lane_runtime`]). The reset lane
-    ///   restarts at phase zero, so the bank renders the per-lane body until the next whole reset;
-    ///   that is cost, and only after a bug report.
+    ///   then takes the van Herk phase of a surviving lane with its window, per channel
+    ///   ([`ChannelState::align_phase_to_survivor`], #1102), which is bit-neutral too, so the bank
+    ///   returns to the uniform body from the next block.
     ///
     /// The #990 record is the caller's to restate, because the dual and the collapsed body state
     /// it differently.
@@ -3880,6 +3904,11 @@ impl<L: Lane> LimiterCore<L> {
                 .reset_lane_to_defaults(lane, &shape, &self.left_defaults[lane], rate);
             self.right
                 .reset_lane_to_defaults(lane, &shape, &self.right_defaults[lane], rate);
+        }
+        // After every failed lane is cleared, so a survivor is never a lane still to be reset.
+        for lane in (0..L::WIDTH).filter(|lane| failed & (1 << lane) != 0) {
+            self.left.align_phase_to_survivor(lane, failed);
+            self.right.align_phase_to_survivor(lane, failed);
         }
         false
     }
@@ -8569,11 +8598,22 @@ mod tests {
         }
     }
 
-    /// Plants a NaN in `lane`'s recursive word on both channels: non-finite state, which the next
-    /// block carries to the output and the §4.4 check catches.
-    fn plant_nonfinite<L: Lane>(core: &mut LimiterCore<L>, lane: usize) {
-        core.left.reduction[lane] = f32::NAN;
-        core.right.reduction[lane] = f32::NAN;
+    /// Plants `value` (a NaN or an infinity) in `lane`'s recursive word on both channels:
+    /// non-finite state, which the next block carries to the output and the §4.4 check catches.
+    fn plant_nonfinite<L: Lane>(core: &mut LimiterCore<L>, lane: usize, value: f32) {
+        debug_assert!(!value.is_finite());
+        core.left.reduction[lane] = value;
+        core.right.reduction[lane] = value;
+    }
+
+    /// The non-finite word [`plant_nonfinite`] plants for member `member`: NaN and `+inf` by turns,
+    /// so both kinds of trip reach the recovery.
+    fn trip_of(member: usize) -> f32 {
+        if member.is_multiple_of(2) {
+            f32::NAN
+        } else {
+            f32::INFINITY
+        }
     }
 
     /// A padded core of `L::WIDTH` lanes and the scalar twin of each member, driven block by block.
@@ -8760,6 +8800,11 @@ mod tests {
                     let label = |case: &str| {
                         format!("W{lanes} {link:?} mono {mono}, {active} active: {case}")
                     };
+                    let uniform = if mono {
+                        DispatchRoute::MonoUniform
+                    } else {
+                        DispatchRoute::DualUniform
+                    };
                     let mut targets = vec![0, active - 1];
                     targets.dedup();
                     for target in targets {
@@ -8774,8 +8819,8 @@ mod tests {
                         }
                         let mut running = run.bank.cursors;
                         running.advance(128, &shape);
-                        plant_nonfinite(&mut run.bank, target);
-                        plant_nonfinite(&mut run.twins[target], 0);
+                        plant_nonfinite(&mut run.bank, target, trip_of(target));
+                        plant_nonfinite(&mut run.twins[target], 0, trip_of(target));
                         run.render(mono, "failing");
                         assert_eq!(
                             run.bank.nonfinite_report(),
@@ -8803,7 +8848,16 @@ mod tests {
                         };
                         assert_eq!(run.bank.cursors, cursors, "{}: cursors", run.label);
                         for _ in 0..6 {
+                            clear_dispatch_observation();
                             run.render(mono, "after");
+                            // #1102: the recovered lane took a survivor's phase, so the bank is
+                            // back on its uniform body.
+                            assert_eq!(
+                                dispatch_observation().route,
+                                uniform,
+                                "{}: uniform body after the recovery",
+                                run.label
+                            );
                         }
                     }
                     if active < lanes {
@@ -8816,10 +8870,17 @@ mod tests {
                         for _ in 0..4 {
                             run.render(mono, "before");
                         }
-                        plant_nonfinite(&mut run.bank, lanes - 1);
+                        plant_nonfinite(&mut run.bank, lanes - 1, f32::NAN);
                         for _ in 0..4 {
+                            clear_dispatch_observation();
                             run.render(mono, "after");
                         }
+                        assert_eq!(
+                            dispatch_observation().route,
+                            uniform,
+                            "{}: uniform body after the padded lane's recovery",
+                            run.label
+                        );
                         assert_eq!(
                             run.bank.nonfinite_report(),
                             NonFiniteReport::new(),
@@ -8839,8 +8900,8 @@ mod tests {
                         run.render(mono, "before");
                     }
                     for member in 0..active {
-                        plant_nonfinite(&mut run.bank, member);
-                        plant_nonfinite(&mut run.twins[member], 0);
+                        plant_nonfinite(&mut run.bank, member, trip_of(member));
+                        plant_nonfinite(&mut run.twins[member], 0, trip_of(member));
                     }
                     run.render(mono, "failing");
                     assert_eq!(
@@ -8871,7 +8932,8 @@ mod tests {
     /// Red mutations: the old whole-bank recovery (`reset_failed_lanes` always takes its first
     /// branch) zeroes and resets the bank-mates; an unmasked report charges the padded lane; a
     /// recovery that skips padded lanes leaves one answering NaN; resetting the shared cursors on
-    /// a partial recovery moves every bank-mate's ring reads.
+    /// a partial recovery moves every bank-mate's ring reads; a recovered lane left at phase zero
+    /// (no `align_phase_to_survivor`) keeps the bank on the per-lane body (#1102).
     #[test]
     fn a_failed_lane_is_recovered_and_reported_alone() {
         lane::each_vector_lane!(|L| a_failed_lane_is_recovered_and_reported_alone_at::<L>());
@@ -10460,10 +10522,10 @@ mod tests {
         );
 
         // #1091: the recovery of the one failed lane of a bank re-derives the record from the
-        // words, which agree again once the retargeted lane is back on its defaults. The linked
-        // body itself waits: the recovered lane restarts its van Herk phase, so the bank renders
-        // the per-lane body, which never links, until a whole reset brings the phases together.
-        // At `W = 1` the one lane is every lane, which is the case above.
+        // words, which agree again once the retargeted lane is back on its defaults. The recovered
+        // lane takes its bank-mates' van Herk phase (#1102), so the bank is uniform again and the
+        // linked body engages from the next block. At `W = 1` the one lane is every lane, which is
+        // the case above.
         if L::WIDTH > 1 {
             let mut pair = fresh(LinkMode::Maximum, &fixture, "one lane non-finite");
             assert_eq!(hot_blocks(&mut pair, &mut draw, 1, "before"), 1);
@@ -10492,11 +10554,14 @@ mod tests {
                 "{label}: one lane's recovery re-derives the record"
             );
             assert!(
-                !lanes_uniform(&pair.shipped.left),
-                "{label}: the recovered lane restarted its phase"
+                lanes_uniform(&pair.shipped.left) && lanes_uniform(&pair.shipped.right),
+                "{label}: the recovered lane took its bank-mates' phase"
             );
-            // Still the reference kernel's bits, block by block, on the per-lane body.
-            hot_blocks(&mut pair, &mut draw, 3, "after one lane");
+            assert_eq!(
+                hot_blocks(&mut pair, &mut draw, 3, "after one lane"),
+                3,
+                "{label}: after one lane's §4.4"
+            );
         }
 
         // ceiling retarget at 30, unlinked from the left-only release retarget at 60, linked

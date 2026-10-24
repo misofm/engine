@@ -7,7 +7,8 @@ performance issue: it moves no rendered bit.
 
 Since #1091 a true-peak limiter bank recovers from a failing block (D7) one lane at a time. The
 recovered lane's van Herk window restarts at phase 0, while its bank-mates keep their phase. The
-bank then fails its uniform-body test (`crates/true-peak-limiter/src/lib.rs:3665`, `:3691-3696`)
+bank then fails its uniform-body test (`lanes_uniform` in `crates/true-peak-limiter/src/lib.rs`,
+phase leg; taken in `limiter_block` and the collapsed body)
 and runs the per-lane body until a whole reset: `reset()`, every member failing in the same
 block, or a re-preparation. In steady playback that is indefinitely.
 
@@ -43,3 +44,18 @@ Authorized paths: `crates/true-peak-limiter/src/lib.rs` and its tests, and this 
 
 - No change to D7 detection or reporting.
 - No benchmark: the cost ratio above is the evidence.
+
+## Decision and evidence record (attempt 1, 2026-10-24)
+
+- Survivor rule (root, from the scope note): per channel independently, each failed lane takes the
+  phase of the lowest lane outside `failed` with the same window; padded lanes count as survivors;
+  no survivor keeps phase 0. Per channel because the collapsed body advances only the left channel
+  (#990). Shape: `ChannelState::align_phase_to_survivor`, called by `LimiterCore::reset_failed_lanes`
+  after the per-lane reset loop.
+- Bit-neutral: a cleared lane's `required_ring` and `prefix` are all `1.0`, which is the state of
+  every phase, and required gains lie in `(0, 1]`. Gate 2 is the existing `PaddedRun::render` twin
+  comparison (W4/W8, both links, dual and collapsed); `plant_nonfinite` now plants NaN and `+inf`
+  by member parity.
+- Gate 1: a route assertion (`DualUniform` / `MonoUniform`) on every "after" block of
+  `a_failed_lane_is_recovered_and_reported_alone_at`, and after a padded lane's recovery. Red on the
+  reverted fix (align calls commented out): `left: DualPerLane, right: DualUniform`. No new test.
