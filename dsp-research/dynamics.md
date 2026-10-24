@@ -41,6 +41,22 @@ further). The slow 100 ms release dominates: 145,892 samples at 48 kHz for a +24
 composition gain is 1,801 mB (the +18 dB shape clamp, the fast tier's `1e-5` dB and four
 roundings); the flush stall is four underflows, -74,655 mB.
 
+The gate/expander (#1376) has zero latency and states a zero tail: its output is the current input
+or that times the gain. It does not rest at zero. With zero input the level clamps to -160 dB, the
+gate holds for at most its hold count and closes, and the gain word releases toward the curve's
+silent target `t` (at most the range) but never reaches it: it stops at the first word whose rate
+step rounds away, the *stall word*, up to about 0.74 dB short of `t` at 2,000 ms and 96 kHz. That
+word is the rest state's gain (with the gate closed and the hold at zero), and it is the same from
+every history with the same parameters: near the end every step moves one word, so every walk
+passes the same words, and none jumps past the first stall. `effect_runtime::tail::rate_follower_stall_samples`
+bounds the walk over every target and every release coefficient of the domain; the slowest targets
+sit just above a power of two, where the walk ends on the finer grid. `R` is the longest hold plus
+that walk: 602,859 samples at 48 kHz (12.6 s), 0.27 % above the longest walk measured. A parameter
+edit that leaves the word deeper than the stall word is a recorded limit: the word stops on its own
+fixed point, accepted by `lanes_at_rest`, not equal to the rest state; a snap to the target would
+remove it and is a rendered-bit change. The composition gain is 1 mB (0 dB, the fast tier's `1e-5`
+dB and one rounding) for every sidechain input; the flush stall is one underflow, -75,859 mB.
+
 ## Units, mappings, automation and smoothing
 
 Threshold/makeup/range use dB, times use ms, ratio is dimensionless, detector mode and curve family are enums. Every automated parameter names its smoothing and update rate.

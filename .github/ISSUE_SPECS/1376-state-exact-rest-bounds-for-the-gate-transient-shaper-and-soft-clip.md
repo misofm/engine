@@ -146,3 +146,31 @@ three.
   (1 + u)^129` at the +36 dB drive and +24 dB output words (the spec's D4 omitted the drive; the
   centre tap is carried exactly instead of folding it into `l1(h)^2`); `sigma = 129 UNDERFLOW g_out
   (l1e + 1/2)^2 (1 + u)^129 = -68,344` mB. Measured largest `|y| / max|x|` 16.99 against 2,243.
+- **Gate D2 amendment (root, scope note).** The spec's premise that the gain smoother reaches
+  `-range` is false: `flush(fma(c, t - e, e))` stops at the first word whose step rounds away, the
+  stall word `w*` (measured 0.74 dB short of a 96 dB range at 96 kHz). `Z = (gain = w*, open = +0.0,
+  hold = +0.0)`. `w*` is the same for every start in `[w*, 0]` (every history with fixed
+  parameters): near the end each step moves one word and no step from farther away lands past the
+  first stall (derivation in `rate_follower_stall_samples`; gate 2's three histories and the helper
+  test's three starts per target). **Recorded limit:** an edit (range, ratio, threshold, a ramp in
+  flight) that leaves the word below `w*` rests on its own fixed point, which `lanes_at_rest`
+  accepts but which is not word-equal to `Z`. **Owner question (not blocking, class B):** snap the
+  gain word to its target within a stated epsilon, so `Z` is unique for every history and the gate
+  lands on `-range`.
+- **Gate bound.** `rate_follower_stall_samples` bounds the walk from `+0.0` for every target and
+  every release coefficient: majorant integer walks per target class (B: a target just above a
+  power of two, whose walk ends on the finer grid; M: mid; A: high in its binade), coefficient
+  brackets of 2 % above the slowest, and a coarse bound above them. `c_min` is the 2,000 ms design
+  less `2^-24` (`expf` is within one ulp, and every release coefficient is a multiple of `2^-24`).
+  `R = H_max + K` (`H_max` = 1,000 ms, above the 64-sample ramp): 44.1 / 48 / 88.2 / 96 kHz:
+  562,206 (walk 518,106, longest brute force 516,751), 602,859 (554,859 / 553,347), 1,006,672
+  (918,472 / 914,783), 1,082,844 (986,844 / 982,616): within 0.43 %. The class B target is the
+  maximum: its stall word is `-32.0` exactly in gate 2. Cost: 1.6-3.3 ms per rate in release.
+  `G_p = G_t = 1` mB (`10^(1e-5/20) (1 + u)`), `sigma = UNDERFLOW = -75,859` mB, for every
+  sidechain input.
+- **No rendered bit moved.** No kernel, coefficient or latency changed; the corpus metadata reads
+  `tail_and_rest`.
+- **Tests.** One `tests/tail_contract.rs` per effect (gates 1+3, 2, 4; the soft clip folds the tail
+  and rest recompute into gate 1); helper tests in `effect_runtime::tail` (pole bound, pole stall,
+  stall bound and uniqueness at faster coefficients). #1784's `rest_tests.rs` stay. The three crates
+  join #1375's release `tail_contract` step in `qualification.yml`.
