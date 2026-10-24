@@ -2032,6 +2032,10 @@ pub enum BuiltinStripStage {
 
 impl BuiltinStripStage {
     /// Whether a bank of this kind holds `owner`'s lanes.
+    ///
+    /// Each stage holds exactly one owner, so one bank's carried strip moves share one owner: the
+    /// carry drain (`carried_strip_lane_mask`, `carry_strip_lanes`) relies on this and has no owner
+    /// filter (#1538). A stage that holds two owners must restore that filter.
     #[must_use]
     pub const fn holds(self, owner: BuiltinStripOwner) -> bool {
         matches!(
