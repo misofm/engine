@@ -579,10 +579,10 @@ typedef struct miso_engine_v1_compile_limits {
     uint64_t maximum_capi_retained_bytes;
     uint64_t maximum_named_allocation_bytes;
     /* Every plan carries the engine's meters (#1581): one post-matrix sample-peak meter stream
-       per strip (tracks and submixes) and one for the output. These three caps bound them like
-       any other meter, so they must admit one meter stream per strip plus the output, at the
-       default window of about 32 ms; a cap below that refuses the compile with
-       MISO_ENGINE_V1_COMPILE_REJECTED and the diagnostic builtin.resource.limit
+       per strip (tracks and submixes) and, from #1581's second slice, one for the output. These
+       three caps bound them like any other meter, so they must admit one meter stream per strip
+       plus the output, at the default window of about 32 ms; a cap below that refuses the
+       compile with MISO_ENGINE_V1_COMPILE_REJECTED and the diagnostic builtin.resource.limit
        $.meter_requests. */
     uint64_t maximum_meter_streams;
     uint64_t maximum_meter_items;

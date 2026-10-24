@@ -2,8 +2,8 @@
 //!
 //! `HostLiveControlHandles::strips` is the addressing authority: the tracks in canonical ID order,
 //! then the submixes in canonical ID order. The builtin control producers (`strip_controls`) are
-//! parallel to every strip (issue #1211 D1), and a submix's effects get a live channel and an observation handle exactly as a track's do (D5
-//! removed the K1 interim).
+//! parallel to every strip (issue #1211 D1), and a submix's effects get a live channel and an
+//! observation handle exactly as a track's do (D5 removed the K1 interim).
 
 use core::num::NonZeroUsize;
 
@@ -73,8 +73,8 @@ fn document() -> String {
 }
 
 /// Red if a submix lands inside the track prefix (or the strips stop being tracks-then-submixes),
-/// if the builtin controls stop being parallel to the strips (issue #1211 D1), or if a bus effect stays without a live channel or an observation
-/// handle.
+/// if the builtin controls stop being parallel to the strips (issue #1211 D1), or if a bus effect
+/// stays without a live channel or an observation handle.
 #[test]
 fn handles_list_tracks_then_submixes_and_file_bus_effects() {
     let (_, _, handles) = prepare_host_session_with_live_controls(

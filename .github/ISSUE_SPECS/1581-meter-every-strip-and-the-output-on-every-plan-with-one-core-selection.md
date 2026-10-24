@@ -121,6 +121,11 @@ browser session that boots with a spectrum capture now reports its submix peaks;
 - `hosts/host-web/src/{lib.rs,tests.rs}` (the meter list, the master ring, the boot-word comment).
 - `hosts/host-web/web/miso-engine-v1-audio-worklet-host.d.ts`, `sdk/src/browser/shipped-host.d.ts`
   (the `liveControlMeterBlocks === 0n` sentence only, byte-identical twins).
+- Added by the root meter-cap ruling (T1, 2026-10-24): `crates/capi/tests/*`,
+  `crates/capi/tests/c/abi_smoke.c`, `crates/capi/include/miso_engine_v1.h` (the meter-cap
+  comment), `crates/control-plane/tests/*`, `crates/host-core/src/limiter_linked_session.rs`,
+  `hosts/host-web/tests/control_parity.rs`, `hosts/host-web/tests/browser-v1/expected.json`,
+  `tools/audit/src/capi.rs` and `docs/C_ABI_V1_QUALIFICATION.md`.
 
 ## Non-goals
 
@@ -217,7 +222,9 @@ Commands: `cargo test --locked -p host-core --all-features`,
 - **D7 evidence (#882).** `console-sixty-four-track-intended.json` (64 strips, source fed for the
   whole run), C ABI lanes, release x86-64 AVX2, 2,000 blocks a round, one warmup and two rounds,
   arms alternated: no meters 96,883 / 97,275 ns per block, the 64 core strip meters 103,400 /
-  103,281 ns per block (about +6.3 us, +6.5 %). Retained: `builtin_meter_payload_bytes` 0 ->
+  103,281 ns per block (about +6.3 us, +6.5 %). That is about 2-3x a pure scan floor (about
+  2.3 us, estimated); the likely cause is the single-accumulator `max` latency or the per-meter
+  window bookkeeping, not investigated. So #882 must not read +6.5 % as the kernel's floor. Retained: `builtin_meter_payload_bytes` 0 ->
   74,752 and `builtin_retained_payload_bytes` 259,968 -> 334,720. An earlier invocation fed the
   48,000-frame source past its end and so mostly timed silence (8.9 / 14.7 us per block); it is
   discarded as a harness defect.
