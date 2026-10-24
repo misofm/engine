@@ -418,7 +418,7 @@ type OpsFor = Box<dyn Fn(usize) -> Vec<Timed>>;
 /// The three users of the stage, behind one shape so every gate runs on each of them.
 enum Subject {
     Bank(Box<BuiltinFaderBank>),
-    Scalar(FaderMuteRampBuiltins),
+    Scalar(Box<FaderMuteRampBuiltins>),
 }
 
 struct Source<'a> {
@@ -456,10 +456,10 @@ impl Subject {
         subjects.push((
             "scalar",
             Box::new(|| {
-                Self::Scalar(
+                Self::Scalar(Box::new(
                     FaderMuteRampBuiltins::new(parameters(-2.0, -5.0, false, false))
                         .expect("fader"),
-                )
+                ))
             }),
         ));
         subjects
@@ -512,6 +512,34 @@ impl Subject {
             Self::Scalar(track) => track.apply_fader_operation(channels, operation),
         }
         .expect("a valid operation");
+    }
+
+    /// Arms lane `0`'s fade-in: lane `0` of a bank, both channels of the scalar track.
+    fn arm(&mut self) -> bool {
+        match self {
+            Self::Bank(bank) => bank.arm_fade_in(0).expect("member lane"),
+            Self::Scalar(track) => track.arm_fade_in(),
+        }
+    }
+
+    fn fire(&mut self, ramp: u32) {
+        match self {
+            Self::Bank(bank) => bank.fire_fade_in(0, ramp),
+            Self::Scalar(track) => track.fire_fade_in(ramp),
+        }
+    }
+
+    /// Whether lane `0` is armed on its left channel.
+    fn armed(&self) -> bool {
+        match self {
+            Self::Bank(bank) => bank.is_armed(0, 0).expect("member lane"),
+            Self::Scalar(track) => track.is_armed(0).expect("a channel"),
+        }
+    }
+
+    /// Every index whose address covers what [`Self::arm`] arms.
+    fn armed_indices(&self) -> &'static [usize] {
+        if self.scalar() { &[0, 1] } else { &[0] }
     }
 
     fn held(&self, index: usize) -> bool {
@@ -1176,5 +1204,64 @@ fn process_with_operations_never_allocates() {
         let delta = current_thread_delta_since(mark);
         assert_eq!(delta.allocations, 0, "{name}: allocations");
         assert_eq!(delta.deallocations, 0, "{name}: frees");
+    }
+}
+
+/// Issue #1288 gate 1: an armed lane is a settled mute (exact `+0.0`) whose fader record is only
+/// remembered; its fire is bit for bit an unmute over the same window at the same block, and a
+/// mute before the fire disarms it, so the fire leaves the lane muted. At both bank widths and on
+/// the scalar track; every other lane of a bank is compared too.
+///
+/// Red if a user mute does not disarm the lane (the fire then unmutes a strip the user muted), or
+/// if the fire is not exactly the unmute (a different ramp or gain).
+#[test]
+fn an_armed_fade_in_is_a_held_mute_that_fires_as_an_unmute() {
+    const RAMP: u32 = 200;
+    for (name, build) in Subject::subjects() {
+        for user_mute in [false, true] {
+            let (mut subject, mut twin) = (build(), build());
+            assert!(subject.arm(), "{name}: an unmuted lane arms");
+            assert!(subject.armed(), "{name}: armed");
+            let indices = subject.armed_indices();
+            for &index in indices {
+                twin.live_mute(index, true, 0);
+                // A fader record while armed is only remembered, as on a muted lane.
+                subject.live_gain(index, -9.0, 50);
+                twin.live_gain(index, -9.0, 50);
+            }
+            let width = subject.width();
+            for block in 0..5 {
+                if block == 1 && user_mute {
+                    for &index in indices {
+                        subject.live_mute(index, true, 30);
+                    }
+                    assert!(!subject.armed(), "{name}: a mute disarms");
+                }
+                if block == 2 {
+                    subject.fire(RAMP);
+                    if !user_mute {
+                        for &index in indices {
+                            twin.live_mute(index, false, RAMP);
+                        }
+                    }
+                }
+                let start = (block * 128) as u64;
+                let (mut left, mut right) = signal(128, width, block);
+                let (mut twin_left, mut twin_right) = (left.clone(), right.clone());
+                subject.process(&mut left, &mut right, start);
+                twin.process(&mut twin_left, &mut twin_right, start);
+                let context = format!("{name} user_mute={user_mute} block={block}");
+                assert_eq!(bits(&left), bits(&twin_left), "left: {context}");
+                assert_eq!(bits(&right), bits(&twin_right), "right: {context}");
+                if block < 2 || user_mute {
+                    for plane in [&left, &right] {
+                        for frame in 0..128 {
+                            assert_eq!(plane[frame * width].to_bits(), 0, "exact +0.0: {context}");
+                        }
+                    }
+                }
+            }
+            assert!(!subject.armed(), "{name}: the fire disarms");
+        }
     }
 }

@@ -5235,6 +5235,17 @@ impl GraphPreparedBuiltinBankProcessor for FaderBankProcessor {
     fn live_lanes(&self) -> u8 {
         live_lane_mask(self.controls.iter().map(Option::is_some))
     }
+    /// Issue #1288 D2: [`BuiltinFaderBank::arm_fade_in`]; `false` for a lane past the bank.
+    fn arm_fade_in(&mut self, lane: usize) -> bool {
+        self.bank.arm_fade_in(lane).unwrap_or(false)
+    }
+    // REALTIME_POLICY_BEGIN
+    /// Issue #1288 D3: [`BuiltinFaderBank::fire_fade_in`], at the block boundary before this
+    /// block's drain.
+    fn fire_fade_in(&mut self, lane: usize, ramp_samples: u32) {
+        self.bank.fire_fade_in(lane, ramp_samples);
+    }
+    // REALTIME_POLICY_END
     // REALTIME_POLICY_BEGIN
     /// The fader bank's own rest mask ([`BuiltinFaderBank::lanes_at_rest`]) minus every lane
     /// that holds stored automation (issue #1781). The drain applies every live value readable
