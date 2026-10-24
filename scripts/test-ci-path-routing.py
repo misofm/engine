@@ -876,8 +876,20 @@ def test_generated_once_mutations(checker) -> None:
             ("          (\n" + first + "          ) &\n", "a trailing &"),
         ):
             mutation_fails(replaced_after(effect, first, new), f"lint owner masked by {what}")
-        mutation_fails(replaced_after(effect, last, "          exit 0\n" + last),
-                       "lint owner step exits 0 before its last owner command")
+        mutation_fails(replaced_after(effect, last, "          trap 'exit 0' EXIT\n" + last),
+                       "lint owner step exits 0 (from a trap) before its last owner command")
+        mutation_fails(replaced_after(effect, first,
+                                      "          {\n" + first + "          } && echo ok\n"),
+                       "lint owner masked by a group closed into &&")
+        mutation_fails(replaced_after(effect, first, "          !\n" + first),
+                       "lint owner masked by a lone !")
+        # An unnamed step (`- run:` on the item line) is still an owner step.
+        mutation_fails(replaced_after("\n  audit-native:\n",
+                                      "      - name: Realtime source policy (tools/realtime-policy)\n"
+                                      "        run: ./target/release/realtime_policy\n",
+                                      "      - run: ./target/release/realtime_policy\n"
+                                      "        continue-on-error: true\n"),
+                       "continue-on-error: true on an unnamed audit-native owner step")
         # A single-line owner turned into a block that masks it.
         realtime = "        run: ./target/release/realtime_policy\n"
         mutation_fails(replaced_after("\n  audit-native:\n", realtime,
@@ -924,6 +936,11 @@ def test_generated_once_mutations(checker) -> None:
              "a feature dropped from test-debug-b's doctest step"),
             (replaced_after(doc_b, "cargo test --locked --doc", "cargo test --locked --lib"),
              "test-debug-b's doctest step runs --lib instead of --doc"),
+            (replaced_after(doc_a, "--workspace --doc", "--workspace --doc --all-features"),
+             "--all-features on test-debug-a's doctest step only"),
+            (replaced_after(debug_a, "--workspace --all-targets",
+                            "--workspace --all-targets --no-default-features"),
+             "--no-default-features on test-debug-a's debug tests only"),
             (replaced_after(doc_a, doc_a, doc_a + "        if: false\n"),
              "test-debug-a's doctest step made conditional"),
         ):
@@ -935,6 +952,12 @@ def test_generated_once_mutations(checker) -> None:
         workflow_mutation_passes(
             replaced_after(doc_a, corpus, "--exclude wasm-gate-corpus --exclude foo \\\n", both),
             "--exclude foo on both twins")
+        # The same flag on both twins passes too.
+        flagged = replaced_after(debug_a, "--workspace --all-targets",
+                                 "--workspace --all-targets --all-features")
+        workflow_mutation_passes(
+            replaced_after(doc_a, "--workspace --doc", "--workspace --doc --all-features", flagged),
+            "--all-features on both twins")
         # Issue #1434 A2-D2 (#1446): red when tools/realtime-policy's own suite leaves its only
         # run, including the edit to both twins that A1-D2 passes by design.
         excluded = "--exclude wasm-gate-corpus --exclude realtime-policy \\\n"

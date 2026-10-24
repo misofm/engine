@@ -801,8 +801,15 @@ FAILURE_MASKS = (
     ("|| true", re.compile(r"\|\|\s*true\b")),
     ("|| :", re.compile(r"\|\|\s*:(?:\s|;|$)")),
     ("a trailing &", re.compile(r"(?<!&)&\s*$")),
+    # Fail-closed for cheap forms: a group or subshell closed into `||`/`&&`, and a condition,
+    # loop or negation keyword alone on its line, each of which can run a command unchecked.
+    ("a group closed into || or &&", re.compile(r"^[})]\s*(?:\|\||&&)")),
+    ("a lone if, while, until or !", re.compile(r"^(?:if|while|until|!)$")),
 )
-EXIT_ZERO = re.compile(r"\bexit(?:\s+0)?\s*(?:$|[;&|)}])")
+# `exit 0` anywhere, and a bare `exit` unless a `||` before it passes a failure on (`cmd || exit`).
+# The quote characters catch `trap 'exit 0' EXIT`.
+EXIT_ZERO = re.compile(r"\bexit\s+0\s*(?:$|[;&|)}'\"])")
+BARE_EXIT = re.compile(r"\bexit\s*(?:$|[;&|)}'\"])")
 CONTINUE_ON_ERROR_STEP = re.compile(r"['\"]?continue-on-error['\"]?\s*:")
 CONTINUE_ON_ERROR_JOB = re.compile(r"^    ['\"]?continue-on-error['\"]?\s*:", re.MULTILINE)
 
@@ -832,7 +839,9 @@ def check_unmasked_step(where: str, step: str, commands: tuple[str, ...], issue:
                     f"(`{line}`, {issue})")
     last = max((index for index, line in enumerate(lines) if line in commands), default=-1)
     for line in lines[:max(last, 0)]:
-        require(EXIT_ZERO.search(line) is None,
+        bare = BARE_EXIT.search(line)
+        require(EXIT_ZERO.search(line) is None
+                and (bare is None or "||" in line[:bare.start()]),
                 f"qualification.yml: {where} must not `exit 0` before its last command (`{line}`, "
                 f"{issue})")
 
@@ -941,9 +950,12 @@ def check_qualification_doctest_twins(text: str) -> None:
         (_, (_, (twin_rest, twin_values))), (doctest_step, (line, (rest, values))) = shapes
         check_unmasked_step(f"{job_name}'s doctest step \"{doctest_name}\"", doctest_step,
                             (line,), "#1422, #1434")
-        expected = ["cargo", "test", "--locked", "--doc"]
-        if "--workspace" in twin_rest:
-            expected.append("--workspace")
+        # The doctest command is its twin's with `--all-targets` turned into `--doc`: a flag on one
+        # step only (`--all-features`, `--no-default-features`, ...) is a difference.
+        require("--all-targets" in twin_rest,
+                f"qualification.yml: {job_name}'s step \"{twin_name}\" must run --all-targets "
+                "(#1422: its doctest twin is derived from it)")
+        expected = ["--doc" if word == "--all-targets" else word for word in twin_rest]
         require(sorted(rest) == sorted(expected),
                 f"qualification.yml: {job_name}'s doctest step \"{doctest_name}\" must be "
                 f"`{' '.join(expected)}` plus its twin's packages and features, not "
