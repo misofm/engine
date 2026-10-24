@@ -136,15 +136,18 @@ banks* (#1368) and *Ramp a lane's detector link between modes* (#1370) with it.
 - **Lane swap.** The multiband declares no prepared lane defaults (`lane_default_bytes` is the
   default `None`), so `swap_bank_lanes` refuses it and no link word has to travel. The template's
   `exchange_lane_defaults` link word therefore does not apply here; a multiband lane swap is its
-  own capability, outside this slice.
+  own capability, outside this slice. Once 1367b adds a lane swap or a live link, the per-lane
+  masks must move with the lane (re-derived from the lane's mode, padded lanes re-taking the first
+  active member's), as #1368b's `set_lane_link` does.
 - **Tests (extended, none new).** `padding_tests::every_padded_bank_renders_its_members_per_node_bits`
   gives each member its own link mode (random arm drawn, fixture arm rotated, blocks of 128/37/1,
   every width): red when a mixed bank links a DualMono lane, or when bind ignores the members'
   modes. `shim::the_shims_are_width_independent` adds two mixed banks: red on the same link
-  mutant. `product.rs` now declines a bank on a differing bypass and binds one that differs only by
-  link mode.
+  mutant. New lib test `padding_keeps_the_members_uniform_link_arm`: a uniform `Maximum` bank
+  padded with a `DualMono` request keeps the `LINK_MAXIMUM` arm; red when bind drops the
+  `active_mask` guard. `product.rs`'s key-differs decline now uses a differing bypass.
 - **Class A.** Committed corpus digests pass. One untimed `bench console` warmup at base
   `c6e295947` and at this branch: all 52 digest fields over 37 records identical.
 - **Web roster.** The rows stay pinned to `process_bank` / `process_bank_mono` and pass at their
   0.10 ceilings: dual 3464 / 0 (was 2527 / 0), collapsed 1862 / 0 (was 1389 / 0), the mixed arm's
-  body. No row changed.
+  body. No row or ceiling changed; the derivation comment's counts are updated (root authorized).

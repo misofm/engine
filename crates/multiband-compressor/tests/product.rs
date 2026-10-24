@@ -1149,21 +1149,6 @@ fn bank_requests_are_validated_before_any_fallback() {
             .expect("legal request")
             .is_none()
     );
-    // Issue #1367 D1: the link mode is per lane and not in the key, so a track that differs only
-    // by link mode shares the bank.
-    mixed[2] = request_with(&other[2], LinkMode::Maximum, 128, false);
-    assert!(
-        factory
-            .bind_homogeneous_bank(PrepareEffectBankRequest {
-                backend: backend_for(BankWidth::Four),
-                width: BankWidth::Four,
-                requests: &mixed,
-                active_mask: BankWidth::Four.full_mask(),
-            })
-            .expect("legal request")
-            .is_some(),
-        "a track that differs only by link mode shares the bank"
-    );
     other[0][0].value = 1_000.0;
 
     for &width in BankWidth::ALL {

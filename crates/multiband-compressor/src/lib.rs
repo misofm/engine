@@ -1111,8 +1111,8 @@ fn band_target<L: Lane>(level: L, threshold: L, inv_ratio_minus_one: L, knee: (f
 /// with the near word read twice: `link_levels::<LINK>(own, own)` is `|p|`, `max(|p|, |p|)` or
 /// `0.5|p| + 0.5|p|` in the dual order, so the near output and state are the dual block's bits on
 /// `L == R`, in every link mode; the mixed arm selects among those same words per lane, so a
-/// collapsed lane's link partner is its own `L == R` pair at its own mode. A const parameter and never a runtime flag, so the dual body
-/// keeps its own symbol (the roster's M2 lesson).
+/// collapsed lane's link partner is its own `L == R` pair at its own mode. A const parameter and
+/// never a runtime flag, so the dual body keeps its own symbol (the roster's M2 lesson).
 #[inline(always)]
 #[allow(clippy::too_many_arguments)]
 fn run_segment<
@@ -2225,10 +2225,12 @@ const PREPARE_FAILED: EffectPrepareError = EffectPrepareError {
     code: "effect.prepare.failed",
 };
 
-fn prepare_bank<L: Lane, const W: usize>(
+/// The bound instance of `request` and its first member's metadata, or `None` when the members
+/// are not one program: [`prepare_bank`] without the box.
+fn bind_instance<L: Lane, const W: usize>(
     factory: &MultibandCompressorFactory,
     request: PrepareEffectBankRequest<'_>,
-) -> Result<Option<PreparedEffectBank>, EffectPrepareError> {
+) -> Result<Option<(Instance<L, W>, PreparedEffectMetadata)>, EffectPrepareError> {
     let first = request
         .requests
         .first()
@@ -2274,6 +2276,16 @@ fn prepare_bank<L: Lane, const W: usize>(
         .enumerate()
         .filter(|(_, active)| **active)
         .fold(0, |mask, (lane, _)| mask | (1 << lane));
+    Ok(Some((instance, metadata)))
+}
+
+fn prepare_bank<L: Lane, const W: usize>(
+    factory: &MultibandCompressorFactory,
+    request: PrepareEffectBankRequest<'_>,
+) -> Result<Option<PreparedEffectBank>, EffectPrepareError> {
+    let Some((instance, metadata)) = bind_instance::<L, W>(factory, request)? else {
+        return Ok(None);
+    };
     Ok(Some(PreparedEffectBank {
         processor: Box::new(PreparedMultibandCompressorBank::<L, W> {
             width: request.width,

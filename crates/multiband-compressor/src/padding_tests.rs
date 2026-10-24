@@ -345,8 +345,9 @@ const FIXTURES: [&[u8]; 7] = [
 /// Every active lane of a padded bank renders its track's per-node bits.
 ///
 /// Random arm: per width, drawn seeds each bind `1..lanes` members at a drawn rate, each member at
-/// its own drawn link mode (issue #1367: a bank mixes modes), with drawn parameters, input profiles (hostile words included, so D7 trips on active lanes) and
-/// automation, the padded lanes cloning a member drawn per seed. Fixture arm: each conformance PCM
+/// its own drawn link mode (issue #1367: a bank mixes modes), with drawn parameters, input
+/// profiles (hostile words included, so D7 trips on active lanes) and automation, the padded lanes
+/// cloning a member drawn per seed. Fixture arm: each conformance PCM
 /// fixture at its own rate, every padded member count at every width, member `k` reading the
 /// fixture from frame `29k` on at its own level and at the link mode `k` places after member 0's
 /// (so every bank of two or more members mixes modes), played twice over in blocks of 128, 37
@@ -354,9 +355,9 @@ const FIXTURES: [&[u8]; 7] = [
 ///
 /// Red if a padded lane's state or a bank-wide decision (the silent fixed point, the rest claim)
 /// moves an active lane's bit, if an active lane reads a clone's parameters or renders at another
-/// lane's link mode (a mixed bank that links a DualMono lane, an arm taken from one lane's mode), if a padded lane takes
-/// automation or reports, if a padded lane has a payload, or if the #1088 decline returns (the bank
-/// does not bind).
+/// lane's link mode (a mixed bank that links a DualMono lane, an arm taken from one lane's mode),
+/// if a padded lane takes automation or reports, if a padded lane has a payload, or if the #1088
+/// decline returns (the bank does not bind).
 #[test]
 fn every_padded_bank_renders_its_members_per_node_bits() {
     for &width in BankWidth::ALL {
@@ -568,5 +569,36 @@ fn a_planted_nonfinite_state_in_a_padded_lane_recovers_uncharged() {
                 }
             }
         }
+    }
+}
+
+/// Issue #1367 D1: a padded lane takes the first member's link mode, whatever its request says, so
+/// padding never forces the mixed arm: members at `Maximum` padded with a request at another mode
+/// keep the uniform `LINK_MAXIMUM` arm, at every width.
+///
+/// Red if bind reads a padded lane's own mode (the `active_mask` guard dropped).
+#[test]
+fn padding_keeps_the_members_uniform_link_arm() {
+    fn arm<L: Lane, const W: usize>(width: BankWidth) -> u8 {
+        let values = draw_values(&mut Draw::new(0x1367));
+        let mask = prefix_mask(width, W - 1);
+        let mut requests = vec![request(&values, 48_000, LinkMode::Maximum); W];
+        requests[W - 1] = request(&values, 48_000, LinkMode::DualMono);
+        let request = PrepareEffectBankRequest {
+            backend: width.backend(),
+            width,
+            requests: &requests,
+            active_mask: &mask,
+        };
+        bind_instance::<L, W>(&MultibandCompressorFactory, request)
+            .expect("a padded request is well formed")
+            .expect("one program")
+            .0
+            .link_lanes
+            .arm
+    }
+    for &width in BankWidth::ALL {
+        let arm = effect_contract::match_bank_width!(width, |L, N| arm::<L, N>(width));
+        assert_eq!(arm, LINK_MAXIMUM, "{width:?}");
     }
 }
