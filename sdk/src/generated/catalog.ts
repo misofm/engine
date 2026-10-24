@@ -852,6 +852,452 @@ export const CATALOG = deepFreeze(
       "response": null
     },
     {
+      "id": "miso.de-esser",
+      "displayName": "De-esser",
+      "contractMajor": 1,
+      "contractMinor": 0,
+      "stateLayoutVersion": 1,
+      "parameters": [
+        {
+          "id": 1,
+          "name": "frequency",
+          "displayUnit": "Hz",
+          "unit": 2,
+          "unitName": "hz",
+          "domain": 1,
+          "domainName": "continuous",
+          "minimum": 1000,
+          "maximum": 16000,
+          "default": 6500,
+          "mapping": 2,
+          "mappingName": "logarithmic",
+          "automationRate": 2,
+          "automationRateName": "block",
+          "channelPolicy": 2,
+          "channelPolicyName": "perLane",
+          "smoothing": 2,
+          "smoothingName": "linear",
+          "smoothingSamples": 64,
+          "readable": true,
+          "automatable": true,
+          "liveUpdatable": true,
+          "enumChoices": [],
+          "step": {
+            "unit": "cents",
+            "size": "20",
+            "precision": 3,
+            "ladder": {
+              "xs": 1,
+              "sm": 3,
+              "md": 5,
+              "lg": 10,
+              "xl": 30
+            }
+          }
+        },
+        {
+          "id": 2,
+          "name": "Q",
+          "displayUnit": "Q",
+          "unit": 6,
+          "unitName": "ratio",
+          "domain": 1,
+          "domainName": "continuous",
+          "minimum": 0.5,
+          "maximum": 8,
+          "default": 2,
+          "mapping": 2,
+          "mappingName": "logarithmic",
+          "automationRate": 2,
+          "automationRateName": "block",
+          "channelPolicy": 2,
+          "channelPolicyName": "perLane",
+          "smoothing": 2,
+          "smoothingName": "linear",
+          "smoothingSamples": 64,
+          "readable": true,
+          "automatable": true,
+          "liveUpdatable": true,
+          "enumChoices": [],
+          "step": {
+            "unit": "ratio",
+            "size": "1.02",
+            "precision": 8,
+            "ladder": {
+              "xs": 1,
+              "sm": 3,
+              "md": 5,
+              "lg": 10,
+              "xl": 30
+            }
+          }
+        },
+        {
+          "id": 3,
+          "name": "threshold",
+          "displayUnit": "dB",
+          "unit": 1,
+          "unitName": "db",
+          "domain": 1,
+          "domainName": "continuous",
+          "minimum": -60,
+          "maximum": 0,
+          "default": -20,
+          "mapping": 1,
+          "mappingName": "linear",
+          "automationRate": 2,
+          "automationRateName": "block",
+          "channelPolicy": 2,
+          "channelPolicyName": "perLane",
+          "smoothing": 2,
+          "smoothingName": "linear",
+          "smoothingSamples": 64,
+          "readable": true,
+          "automatable": true,
+          "liveUpdatable": true,
+          "enumChoices": [],
+          "step": {
+            "unit": "absolute",
+            "size": "0.1",
+            "precision": 1,
+            "ladder": {
+              "xs": 1,
+              "sm": 3,
+              "md": 5,
+              "lg": 10,
+              "xl": 30
+            }
+          }
+        },
+        {
+          "id": 4,
+          "name": "ratio",
+          "displayUnit": "ratio",
+          "unit": 6,
+          "unitName": "ratio",
+          "domain": 1,
+          "domainName": "continuous",
+          "minimum": 1,
+          "maximum": 20,
+          "default": 4,
+          "mapping": 2,
+          "mappingName": "logarithmic",
+          "automationRate": 2,
+          "automationRateName": "block",
+          "channelPolicy": 2,
+          "channelPolicyName": "perLane",
+          "smoothing": 2,
+          "smoothingName": "linear",
+          "smoothingSamples": 64,
+          "readable": true,
+          "automatable": true,
+          "liveUpdatable": true,
+          "enumChoices": [],
+          "step": {
+            "unit": "ratio",
+            "size": "1.02",
+            "precision": 8,
+            "ladder": {
+              "xs": 1,
+              "sm": 3,
+              "md": 5,
+              "lg": 10,
+              "xl": 30
+            }
+          }
+        },
+        {
+          "id": 5,
+          "name": "range",
+          "displayUnit": "dB",
+          "unit": 1,
+          "unitName": "db",
+          "domain": 1,
+          "domainName": "continuous",
+          "minimum": 0,
+          "maximum": 40,
+          "default": 20,
+          "mapping": 1,
+          "mappingName": "linear",
+          "automationRate": 2,
+          "automationRateName": "block",
+          "channelPolicy": 2,
+          "channelPolicyName": "perLane",
+          "smoothing": 2,
+          "smoothingName": "linear",
+          "smoothingSamples": 64,
+          "readable": true,
+          "automatable": true,
+          "liveUpdatable": true,
+          "enumChoices": [],
+          "step": {
+            "unit": "absolute",
+            "size": "0.1",
+            "precision": 1,
+            "ladder": {
+              "xs": 1,
+              "sm": 3,
+              "md": 5,
+              "lg": 10,
+              "xl": 30
+            }
+          }
+        },
+        {
+          "id": 6,
+          "name": "attack",
+          "displayUnit": "ms",
+          "unit": 3,
+          "unitName": "milliseconds",
+          "domain": 1,
+          "domainName": "continuous",
+          "minimum": 0.1,
+          "maximum": 50,
+          "default": 1,
+          "mapping": 2,
+          "mappingName": "logarithmic",
+          "automationRate": 2,
+          "automationRateName": "block",
+          "channelPolicy": 2,
+          "channelPolicyName": "perLane",
+          "smoothing": 2,
+          "smoothingName": "linear",
+          "smoothingSamples": 64,
+          "readable": true,
+          "automatable": true,
+          "liveUpdatable": true,
+          "enumChoices": [],
+          "step": {
+            "unit": "ratio",
+            "size": "1.02",
+            "precision": 3,
+            "ladder": {
+              "xs": 1,
+              "sm": 3,
+              "md": 5,
+              "lg": 10,
+              "xl": 30
+            }
+          }
+        },
+        {
+          "id": 7,
+          "name": "release",
+          "displayUnit": "ms",
+          "unit": 3,
+          "unitName": "milliseconds",
+          "domain": 1,
+          "domainName": "continuous",
+          "minimum": 5,
+          "maximum": 500,
+          "default": 50,
+          "mapping": 2,
+          "mappingName": "logarithmic",
+          "automationRate": 2,
+          "automationRateName": "block",
+          "channelPolicy": 2,
+          "channelPolicyName": "perLane",
+          "smoothing": 2,
+          "smoothingName": "linear",
+          "smoothingSamples": 64,
+          "readable": true,
+          "automatable": true,
+          "liveUpdatable": true,
+          "enumChoices": [],
+          "step": {
+            "unit": "ratio",
+            "size": "1.02",
+            "precision": 3,
+            "ladder": {
+              "xs": 1,
+              "sm": 3,
+              "md": 5,
+              "lg": 10,
+              "xl": 30
+            }
+          }
+        },
+        {
+          "id": 8,
+          "name": "mode",
+          "displayUnit": "type",
+          "unit": 5,
+          "unitName": "linear",
+          "domain": 3,
+          "domainName": "enumeration",
+          "minimum": null,
+          "maximum": null,
+          "default": 2,
+          "mapping": 4,
+          "mappingName": "stepped",
+          "automationRate": 2,
+          "automationRateName": "block",
+          "channelPolicy": 2,
+          "channelPolicyName": "perLane",
+          "smoothing": 2,
+          "smoothingName": "linear",
+          "smoothingSamples": 64,
+          "readable": true,
+          "automatable": true,
+          "liveUpdatable": true,
+          "enumChoices": [
+            {
+              "value": 1,
+              "label": "wideband"
+            },
+            {
+              "value": 2,
+              "label": "split"
+            }
+          ],
+          "step": {
+            "unit": "index",
+            "size": "1",
+            "precision": 0,
+            "ladder": {
+              "xs": 1,
+              "sm": 3,
+              "md": 5,
+              "lg": 10,
+              "xl": 30
+            }
+          }
+        },
+        {
+          "id": 9,
+          "name": "detector",
+          "displayUnit": "type",
+          "unit": 5,
+          "unitName": "linear",
+          "domain": 3,
+          "domainName": "enumeration",
+          "minimum": null,
+          "maximum": null,
+          "default": 1,
+          "mapping": 4,
+          "mappingName": "stepped",
+          "automationRate": 2,
+          "automationRateName": "block",
+          "channelPolicy": 2,
+          "channelPolicyName": "perLane",
+          "smoothing": 2,
+          "smoothingName": "linear",
+          "smoothingSamples": 64,
+          "readable": true,
+          "automatable": true,
+          "liveUpdatable": true,
+          "enumChoices": [
+            {
+              "value": 1,
+              "label": "band"
+            },
+            {
+              "value": 2,
+              "label": "high"
+            }
+          ],
+          "step": {
+            "unit": "index",
+            "size": "1",
+            "precision": 0,
+            "ladder": {
+              "xs": 1,
+              "sm": 3,
+              "md": 5,
+              "lg": 10,
+              "xl": 30
+            }
+          }
+        },
+        {
+          "id": 10,
+          "name": "listen",
+          "displayUnit": "on/off",
+          "unit": 5,
+          "unitName": "linear",
+          "domain": 2,
+          "domainName": "boolean",
+          "minimum": null,
+          "maximum": null,
+          "default": 0,
+          "mapping": 4,
+          "mappingName": "stepped",
+          "automationRate": 2,
+          "automationRateName": "block",
+          "channelPolicy": 2,
+          "channelPolicyName": "perLane",
+          "smoothing": 2,
+          "smoothingName": "linear",
+          "smoothingSamples": 64,
+          "readable": true,
+          "automatable": true,
+          "liveUpdatable": true,
+          "enumChoices": [],
+          "step": {
+            "unit": "index",
+            "size": "1",
+            "precision": 0,
+            "ladder": {
+              "xs": 1,
+              "sm": 3,
+              "md": 5,
+              "lg": 10,
+              "xl": 30
+            }
+          }
+        }
+      ],
+      "ports": [
+        {
+          "id": "main-in",
+          "role": 1,
+          "roleName": "mainInput",
+          "required": true,
+          "layout": 1,
+          "layoutName": "dualMonoPlanar"
+        },
+        {
+          "id": "main-out",
+          "role": 2,
+          "roleName": "mainOutput",
+          "required": true,
+          "layout": 1,
+          "layoutName": "dualMonoPlanar"
+        },
+        {
+          "id": "sidechain-in",
+          "role": 3,
+          "roleName": "sidechainInput",
+          "required": false,
+          "layout": 1,
+          "layoutName": "dualMonoPlanar"
+        }
+      ],
+      "observations": [
+        {
+          "id": 1,
+          "name": "Gain Reduction",
+          "displayUnit": "dB",
+          "kind": 1,
+          "kindName": "gainReductionDb",
+          "unit": 1,
+          "unitName": "db",
+          "cost": 1,
+          "costName": "resident",
+          "cadence": 1,
+          "cadenceName": "perBlock",
+          "fold": 2,
+          "foldName": "peakMagnitude",
+          "channels": 2,
+          "channelsName": "perLane",
+          "minimum": 0,
+          "maximum": 100,
+          "subscribable": true
+        }
+      ],
+      "response": null
+    },
+    {
       "id": "miso.delay",
       "displayName": "Dual-Mono / Ping-Pong Delay",
       "contractMajor": 1,

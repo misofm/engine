@@ -660,7 +660,7 @@ fn every_launch_effect_is_prepared_with_a_window_for_all_its_live_cells() {
         checked += 1;
         with_many_cells += usize::from(cells > 1);
     }
-    assert_eq!(checked, 8, "the eight launch effects");
+    assert_eq!(checked, 9, "the nine launch effects");
     assert!(with_many_cells > 0);
 }
 

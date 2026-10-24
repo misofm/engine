@@ -177,11 +177,20 @@ fn every_log_row_steps_geometrically_and_every_linear_row_arithmetically() {
         if matches!(expected, StepUnit::Cents | StepUnit::Ratio) {
             let points = parameter_lattice_points(parameter).expect("lattice");
             // A geometric row's spacings widen with value; an arithmetic one's do not. One
-            // comparison of the first and last generated gaps separates them decisively.
-            let low: f64 = points[0].canonical.parse().expect("decimal");
-            let next: f64 = points[1].canonical.parse().expect("decimal");
-            let high: f64 = points[points.len() - 2].canonical.parse().expect("decimal");
-            let top: f64 = points[points.len() - 1].canonical.parse().expect("decimal");
+            // comparison of the first and last generated gaps separates them decisively. The
+            // declared min/max/default are skipped: an intrinsic maximum just above the last
+            // generated point leaves a gap narrower than any generated one (the de-esser's Q,
+            // 0.5 to 8, ends 7.9987, 8).
+            let generated: Vec<f64> = points
+                .iter()
+                .filter(|point| !point.intrinsic)
+                .map(|point| point.canonical.parse().expect("decimal"))
+                .collect();
+            let (low, next) = (generated[0], generated[1]);
+            let (high, top) = (
+                generated[generated.len() - 2],
+                generated[generated.len() - 1],
+            );
             assert!(
                 (top - high) > (next - low),
                 "{where_}: a logarithmic row must not step in equal units"

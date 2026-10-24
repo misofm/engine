@@ -121,7 +121,7 @@ LAUNCH_PORT_IDS = {"mainInput": "main-in", "mainOutput": "main-out", "sidechainI
 LAUNCH_PORT_REQUIRED = {"mainInput": True, "mainOutput": True, "sidechainInput": False}
 # Exactly two launch effects declare a sidechain input. An effect that gained or lost one without
 # this list moving is drift between the engine and every consumer that authors against the table.
-SIDECHAIN_EFFECTS = {"miso.compressor", "miso.gate-expander"}
+SIDECHAIN_EFFECTS = {"miso.compressor", "miso.de-esser", "miso.gate-expander"}
 
 RESPONSE_KEYS = {
     "id", "name", "axisUnit", "unit", "amplitudeReference", "channels", "mode", "cadence",

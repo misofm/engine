@@ -1,6 +1,6 @@
 //! Issue #143 P1 / R7: which launch descriptors declare an observation tap, and what that moved.
 //!
-//! Four descriptors declare a tap. Nothing else does. Both claims are read from the static
+//! Five descriptors declare a tap. Nothing else does. Both claims are read from the static
 //! `effect-contract` descriptors the launch registry carries. The byte accounting of the
 //! descriptor wire that once sat beside them went with the wire (#1037, owner ruling R6).
 
@@ -9,9 +9,10 @@
 use effect_compiler::launch_native_effect_registry;
 use effect_contract::ObservationCost;
 
-/// The four effects that declare a tap.
-const DYNAMICS: [&str; 4] = [
+/// The five effects that declare a tap.
+const DYNAMICS: [&str; 5] = [
     "miso.compressor",
+    "miso.de-esser",
     "miso.gate-expander",
     "miso.multiband-compressor",
     "miso.true-peak-limiter",
@@ -34,8 +35,11 @@ fn a_declared_tap_moves_contract_minor_and_leaves_the_state_layout_alone() {
         // The menu is a *semantic* addition to the descriptor, so `contract_minor` moves. No state
         // word changed -- the tap reads state that was already there -- so `state_layout_version`
         // does not (`launch_native_state_layouts_are_v1`).
+        // The de-esser (#15) was born with its tap, so its contract is 1.0: there was no bump.
+        let born_with_tap = descriptor.id.as_str() == "miso.de-esser";
         assert_eq!(
-            descriptor.contract_minor, 1,
+            descriptor.contract_minor,
+            u16::from(!born_with_tap),
             "{}: declaring the first tap is a minor bump",
             descriptor.id
         );

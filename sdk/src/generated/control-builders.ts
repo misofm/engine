@@ -399,6 +399,76 @@ export const EFFECT_PARAMETER_ROWS: Readonly<Record<string, Readonly<Record<stri
         "choices": []
       }
     },
+    "miso.de-esser": {
+      "frequency": {
+        "control": "frequency_hz",
+        "kind": "continuous",
+        "choices": []
+      },
+      "Q": {
+        "control": "q",
+        "kind": "continuous",
+        "choices": []
+      },
+      "threshold": {
+        "control": "threshold_db",
+        "kind": "continuous",
+        "choices": []
+      },
+      "ratio": {
+        "control": "ratio",
+        "kind": "continuous",
+        "choices": []
+      },
+      "range": {
+        "control": "range_db",
+        "kind": "continuous",
+        "choices": []
+      },
+      "attack": {
+        "control": "attack_ms",
+        "kind": "continuous",
+        "choices": []
+      },
+      "release": {
+        "control": "release_ms",
+        "kind": "continuous",
+        "choices": []
+      },
+      "mode": {
+        "control": "mode",
+        "kind": "enumeration",
+        "choices": [
+          [
+            "wideband",
+            1
+          ],
+          [
+            "split",
+            2
+          ]
+        ]
+      },
+      "detector": {
+        "control": "detector",
+        "kind": "enumeration",
+        "choices": [
+          [
+            "band",
+            1
+          ],
+          [
+            "high",
+            2
+          ]
+        ]
+      },
+      "listen": {
+        "control": "listen",
+        "kind": "boolean",
+        "choices": []
+      }
+    },
     "miso.delay": {
       "delay time": {
         "control": "delay_time_ms",
@@ -848,6 +918,23 @@ export const EFFECT_LINK_MODE_ROWS: Readonly<Record<string, {
         ]
       ]
     },
+    "miso.de-esser": {
+      "control": "link_mode",
+      "choices": [
+        [
+          "dual_mono",
+          1
+        ],
+        [
+          "maximum",
+          2
+        ],
+        [
+          "average",
+          3
+        ]
+      ]
+    },
     "miso.gate-expander": {
       "control": "link_mode",
       "choices": [
@@ -917,6 +1004,7 @@ export const EFFECT_LINK_MODE_ROWS: Readonly<Record<string, {
 /** The link mode labels of an effect; `never` for an effect with no choice of it. */
 export type EffectLinkModeLabel<E extends EffectId> =
     E extends "miso.compressor" ? "dual_mono" | "maximum" | "average" :
+    E extends "miso.de-esser" ? "dual_mono" | "maximum" | "average" :
     E extends "miso.gate-expander" ? "dual_mono" | "maximum" | "average" :
     E extends "miso.multiband-compressor" ? "dual_mono" | "maximum" | "average" :
     E extends "miso.transient-shaper" ? "dual_mono" | "maximum" | "average" :

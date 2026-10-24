@@ -638,6 +638,7 @@ version = "0.1.0"
 dependencies = [
  "builtins",
  "compressor",
+ "de-esser",
  "delay",
  "effect-contract",
  "engine",

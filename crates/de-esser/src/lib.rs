@@ -910,10 +910,18 @@ impl<L: Lane, const CONNECTED: bool> DeEsser<L, CONNECTED> {
             if check_block::<L>(block) && check_block::<L>(words) {
                 continue;
             }
-            let failed = nonfinite_lane_mask::<L>(block) | nonfinite_lane_mask::<L>(words);
+            let output_failed = nonfinite_lane_mask::<L>(block);
+            let failed = output_failed | nonfinite_lane_mask::<L>(words);
             for lane in (0..width).filter(|lane| failed & (1 << lane) != 0) {
-                for frame in 0..frames {
-                    block[frame * width + lane] = 0.0;
+                // A prepared-bypass lane emits its dry input, which is inside the D7 domain, so a
+                // failure of the wet state alone recovers the state and keeps that output: the
+                // lane renders what the graph's bypass shunt renders (#15 S2,
+                // `bypass_shunt_identity`).
+                let bypassed = lane_get(self.coef[channel].bypass, lane) > 0.0;
+                if output_failed & (1 << lane) != 0 || !bypassed {
+                    for frame in 0..frames {
+                        block[frame * width + lane] = 0.0;
+                    }
                 }
                 for recovered in if MONO { 0..2 } else { channel..channel + 1 } {
                     self.reset_lane_full(recovered, lane);
