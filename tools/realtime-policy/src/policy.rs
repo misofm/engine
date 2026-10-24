@@ -27,7 +27,11 @@ const RENDER_THREAD_EXPORTS: &str = include_str!("../render-thread-exports.json"
 /// publishes the meter frame through, after each message, to cut the views over a replacement
 /// plan's frame in advance. It reads one address and allocates nothing; it is never inside
 /// `process()` or a render-locked window.
-const UNWRAPPED_EXPORTS: [&str; 11] = [
+///
+/// Issue #1294a adds `watermark_read`: the worklet's message handler copies the applied-revision
+/// watermark into its fixed record after each service step, outside `process()` and every
+/// render-locked window.
+const UNWRAPPED_EXPORTS: [&str; 12] = [
     "dispose",
     "render_allocation_count",
     "service",
@@ -39,6 +43,7 @@ const UNWRAPPED_EXPORTS: [&str; 11] = [
     "control_response_bytes",
     "control_revision",
     "meter_header_ptr",
+    "watermark_read",
 ];
 
 /// One entry of the control-side allowlist (#1443 D3): a function whose `try_pop` calls run on a

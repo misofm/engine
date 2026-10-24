@@ -98,7 +98,9 @@ const ALL_COMMAND_RESPONSE_VECTORS: [&str; 10] = [
     // #1595 re-pin: the C ABI advertises the spectrum commands (`0x0010`-`0x0012`) and flag bit 16:
     // field 25's length is 0x1e (two padding bytes follow), the payload 0x190 (was 0x188) and the
     // flags 0x17fdf.
-    "4d49534f43544c000100000030000200010000009001000001000000000000002a00000000000000170000000000000001000201020000000100000000000000020002010200000000000000000000000300020102000000010000000000000004000201020000000000000000000000050004010800000000100000000000000600030104000000000800000000000007000401080000000010000000000000080001010100000004000000000000000a0004010800000001000000000000000b0004010800000000100000000000000d0004010800000001000000000000000e0004010800000002000000000000000f0004010800000001000000000000001000040108000000100000000000000011000401080000000020000000000000120004010800000000100000000000001500020102000000000100000000000016000201020000000001000000000000170002010200000000010000000000001800030104000000000800000000000019000c011e0000000100020003000700080009000a000b000c000d000e00100011001200130000001a000c010c000000018010801180208021803080000000001b00040108000000df7f010000000000",
+    // #1583 re-pin: the lossy lane holds one meter batch whole, two records: telemetry slots
+    // (field 15) is 2, was 1.
+    "4d49534f43544c000100000030000200010000009001000001000000000000002a00000000000000170000000000000001000201020000000100000000000000020002010200000000000000000000000300020102000000010000000000000004000201020000000000000000000000050004010800000000100000000000000600030104000000000800000000000007000401080000000010000000000000080001010100000004000000000000000a0004010800000001000000000000000b0004010800000000100000000000000d0004010800000001000000000000000e0004010800000002000000000000000f0004010800000002000000000000001000040108000000100000000000000011000401080000000020000000000000120004010800000000100000000000001500020102000000000100000000000016000201020000000001000000000000170002010200000000010000000000001800030104000000000800000000000019000c011e0000000100020003000700080009000a000b000c000d000e00100011001200130000001a000c010c000000018010801180208021803080000000001b00040108000000df7f010000000000",
     // #338 re-pin: canonical JSON snapshot bytes were 16,712 (0x4148), beginning with `{`.
     // #1093 re-pin: 13,729 (0x35a1) after the fixture moved to decision 12's console shape.
     // #1216 re-pin: 13,918 (0x365e), route field `mute` added, value false (21 bytes, 9 routes).
@@ -117,7 +119,9 @@ const ALL_COMMAND_RESPONSE_VECTORS: [&str; 10] = [
     // position, field 2: two fields, payload length 0x20 (was 0x30).
     "4d49534f43544c000100000030000200070000002000000005000000000000002a0000000000000002000000000000000100010101000000010000000000000003000401080000000000000000000000",
     "4d49534f43544c000100000030000200080000002000000006000000000000002a0000000000000002000000000000000100010101000000020000000000000003000401080000000000000000000000",
-    "4d49534f43544c000100000030000200090000005000000007000000000000002a00000000000000060000000000000001000d01000000000200030104000000000000000000000003000d0100000000040003010400000000000000000000000500080101000000000000000000000006000101010000000100000000000000",
+    // #1583 re-pin: the telemetry echo drops the retired meter handles (field 1) and carries the
+    // C ABI's meter window, 12 blocks (field 8): the length 0x50 became 0x58, six fields still.
+    "4d49534f43544c000100000030000200090000005800000007000000000000002a0000000000000006000000000000000200030104000000000000000000000003000d010000000004000301040000000000000000000000050008010100000000000000000000000600010101000000010000000000000008000300040000000c00000000000000",
     // #1312 re-pin: the counter snapshot gains `LIVE_VALUES_SUPERSEDED` (id 16), value 0, as a
     // third value (a 40-byte `CounterValue` message): the length 0x70 became 0xa0 and the
     // frame's TLV count 3 became 4.
@@ -135,7 +139,10 @@ const ALL_COMMAND_RESPONSE_VECTORS: [&str; 10] = [
     // #1699 re-pin: the served set gains `SOURCE_FRAMES_DISCARDED` (id 21), value 0, as a ninth
     // value (a 40-byte `CounterValue` message): the length 0x160 became 0x190 and the TLV count 8
     // became 9.
-    "4d49534f43544c0001000000300002000a0000009001000008000000000000002a0000000000000009000000000000000100040108000000000000000000000002000b01280000000200000000000000010003010400000005000000000000000200040108000000000000000000000002000b01280000000200000000000000010003010400000006000000000000000200040108000000000000000000000002000b01280000000200000000000000010003010400000010000000000000000200040108000000000000000000000002000b01280000000200000000000000010003010400000011000000000000000200040108000000000000000000000002000b01280000000200000000000000010003010400000012000000000000000200040108000000000000000000000002000b01280000000200000000000000010003010400000013000000000000000200040108000000000000000000000002000b01280000000200000000000000010003010400000014000000000000000200040108000000000000000000000002000b012800000002000000000000000100030104000000150000000000000002000401080000000000000000000000",
+    // #1583 re-pin: the served set gains `METER_WINDOWS_LOST` (id 22), value 0, as a tenth value
+    // (a 40-byte `CounterValue` message): the length 0x190 became 0x1c0 and the TLV count 9
+    // became 10.
+    "4d49534f43544c0001000000300002000a000000c001000008000000000000002a000000000000000a000000000000000100040108000000000000000000000002000b01280000000200000000000000010003010400000005000000000000000200040108000000000000000000000002000b01280000000200000000000000010003010400000006000000000000000200040108000000000000000000000002000b01280000000200000000000000010003010400000010000000000000000200040108000000000000000000000002000b01280000000200000000000000010003010400000011000000000000000200040108000000000000000000000002000b01280000000200000000000000010003010400000012000000000000000200040108000000000000000000000002000b01280000000200000000000000010003010400000013000000000000000200040108000000000000000000000002000b01280000000200000000000000010003010400000014000000000000000200040108000000000000000000000002000b01280000000200000000000000010003010400000015000000000000000200040108000000000000000000000002000b012800000002000000000000000100030104000000160000000000000002000401080000000000000000000000",
     "4d49534f43544c0001000000300002000b0000002000000009000000000000002a0000000000000002000000000000000100040108000000000000000000000002000801010000000100000000000000",
     "4d49534f43544c00010000003000020003000000200000000a000000000000002b0000000000000002000000000000000100030104000000010000000000000002000101010000000300000000000000",
 ];
@@ -722,16 +729,14 @@ fn a_meter_cap_below_the_strip_count_is_refused() {
     );
 }
 
-/// #1581 gates 6 and 7 on the C ABI: a two-strip plan's provider epoch keeps one post-matrix meter
-/// consumer per strip, in strip order, and its resource row counts their bytes; and with the
-/// session's output gate active, the C ABI render call meters the output without one allocation
-/// or free, in windows that tile from the activation sample and peak as a scalar fold of the
-/// rendered planes.
+/// #1581 gate 6 on the C ABI: a two-strip plan's provider epoch keeps one post-matrix meter
+/// consumer per strip, in strip order, and its resource row counts their bytes. (Gate 7, the
+/// output meter on the C ABI render call, is #1583's windowed-output-peaks test and the race
+/// test's allocation count.)
 ///
-/// Test value: red if the C ABI still drops its meter handles, if its render call passes the output
-/// meter the wrong planes or samples, or if the output meter allocates on render.
+/// Test value: red if the C ABI still drops its meter handles.
 #[test]
-fn a_c_abi_plan_keeps_its_strip_meters_and_meters_its_output_without_allocating() {
+fn a_c_abi_plan_keeps_its_strip_meters() {
     bench_support::alloc::assert_installed();
     let mut model = stateless_session(48_000);
     model.tracks.truncate(2);
@@ -753,78 +758,8 @@ fn a_c_abi_plan_keeps_its_strip_meters_and_meters_its_output_without_allocating(
     assert_eq!(meters, strips, "one post-matrix meter per strip");
     assert!(children.plan.resources().builtin_meter_payload_bytes > 0);
 
-    let (mut reader, gate) = children
-        .session
-        .take_output_meter()
-        .expect("the output meter");
-    assert!(
-        children.session.take_output_meter().is_none(),
-        "handed out once"
-    );
-    let window = u64::from(host_core::default_meter_window_blocks(48_000, 128).get()) * 128;
-    let session = Box::into_raw(Box::new(crate::Session::new(
-        children.session,
-        children.session_error,
-    )));
-    let plan = Box::into_raw(Box::new(crate::Plan::new(children.plan)));
-    // A warm-up block before the activation, so process statics are warm and nothing is metered.
-    let (left, right) = continuity_block(0, 0);
-    submit_c(session, 1, 0, 48_000, &left, &right, false);
-    render_c(plan, 0);
-    gate.activate(128);
-    let blocks = 2 * window / 128 + 1;
-    let mut rendered = Vec::new();
-    for block in 1..=blocks {
-        let (left, right) = continuity_block(block, 0);
-        submit_c(session, 1, block * 128, 48_000, &left, &right, false);
-        let mut pcm = vec![f32::NAN; 256];
-        let output = crate::PlanarOutput {
-            struct_size: crate::PLANAR_OUTPUT_SIZE,
-            channels: 2,
-            samples: pcm.as_mut_ptr(),
-            sample_capacity: pcm.len() as u64,
-            frames: 128,
-            plane_stride_samples: 128,
-            reserved: [0; 2],
-        };
-        let mark = bench_support::alloc::current_thread_counters();
-        let result = crate::ffi::test_render(plan, block * 128, &output);
-        let used = bench_support::alloc::current_thread_delta_since(mark);
-        assert_eq!(result, crate::RESULT_OK);
-        assert_eq!(
-            (used.allocations, used.deallocations),
-            (0, 0),
-            "block {block} allocated or freed"
-        );
-        rendered.push(pcm);
-    }
-    let fold = |plane: usize, start: u64, end: u64| {
-        (start..end).fold(0.0_f32, |peak, sample| {
-            let pcm = &rendered[(sample / 128 - 1) as usize];
-            let magnitude = pcm[plane * 128 + (sample % 128) as usize].abs();
-            let magnitude = if (f32::MIN_POSITIVE..f32::INFINITY).contains(&magnitude) {
-                magnitude
-            } else {
-                0.0
-            };
-            if magnitude > peak { magnitude } else { peak }
-        })
-    };
-    let mut start = 128;
-    for _ in 0..2 {
-        let measured = reader.windows_mut().try_pop().expect("a closed window");
-        assert_eq!(
-            (measured.start_sample, measured.end_sample),
-            (start, start + window)
-        );
-        let peak = [0, 1].map(|plane| fold(plane, start, start + window));
-        assert!(peak[0] > 0.0 && peak[1] > 0.0, "the source plays");
-        assert_eq!(measured.peak.map(f32::to_bits), peak.map(f32::to_bits));
-        start += window;
-    }
-    assert!(reader.windows_mut().try_pop().is_err());
-    crate::ffi::test_plan_destroy(plan);
-    crate::ffi::test_session_destroy(session);
+    // #1583: the session owns the output meter's delivery from boot; the adapter takes nothing.
+    assert!(children.session.take_output_meter().is_none());
 }
 
 /// #1674 gate 1: across a carried C ABI rebuild (a muted track whose ID sorts first), the strip
@@ -843,12 +778,12 @@ fn a_carried_strip_meter_keeps_its_reader_across_a_c_abi_rebuild() {
     let document = session::canonical_session_json(&model).expect("two-strip session");
     let mut children = compile_children(&document, limits()).expect("children");
     // #882: strip meters observe only the blocks the output meter's gate admits, so the level is
-    // on from block 0 (the gate's role until #1583 wires `TELEMETRY_CONFIGURE` to it).
-    let (_reader, gate) = children
+    // on from block 0: a meter table configured before any render (#1583).
+    let configure = meter_telemetry(1, 1);
+    children
         .session
-        .take_output_meter()
-        .expect("the output meter");
-    gate.activate(0);
+        .command(&configure, 4_096)
+        .expect("the meter table is accepted");
     let window = u64::from(host_core::default_meter_window_blocks(48_000, 128).get());
     // Feeds one block ahead and renders `blocks` blocks from `first`; every submit runs the
     // service step first.
@@ -905,7 +840,7 @@ fn a_carried_strip_meter_keeps_its_reader_across_a_c_abi_rebuild() {
     assert!(windows(meter).is_empty(), "window 0 is open at the rebuild");
 
     let transaction = command_bytes_at_revision(
-        1,
+        2,
         ExpectedRevision::Exact(SessionRevision(42)),
         protocol::CommandPayload::SessionTransactionApply(&add_muted_track(&model, "a-muted")),
     );
@@ -3506,17 +3441,23 @@ fn the_retired_automation_command_is_refused_at_decode_and_not_advertised() {
 /// capabilities record lists it.
 #[test]
 fn all_five_event_families_cross_c_dequeue_with_exact_oracle_bytes() {
+    // #1583 re-pin: the three meter configurations are the output's peak at a 12-block period
+    // (the window), so each echo carries the period 12, the one table entry (field 7) and the
+    // window 12 (field 8), and no retired field 1; the third is the second again, not a two-entry
+    // table. The counter configuration's echo carries the window and no field 1. The meter
+    // events are two windows' batches, and the counter snapshot follows them at sample 3200 with
+    // `TELEMETRY_DROPPED` 0: the two-slot lossy lane drops nothing.
     const RESPONSES: [&str; 7] = [
-        "4d49534f43544c000100000030000200090000005800000001000000000000002a00000000000000060000000000000001000d010400000001000000000000000200030104000000010000000000000003000d0100000000040003010400000000000000000000000500080101000000010000000000000006000101010000000100000000000000",
+        "4d49534f43544c000100000030000200090000008800000001000000000000002a00000000000000070000000000000002000301040000000c0000000000000003000d010000000004000301040000000000000000000000050008010100000001000000000000000600010101000000010000000000000007000b00280000000200000000000000010001010100000001000000000000000300010101000000010000000000000008000300040000000c00000000000000",
         // #1635 re-pin: the transport snapshot drops the retired position (field 2).
         "4d49534f43544c000100000030000200080000002000000002000000000000002a0000000000000002000000000000000100010101000000020000000000000003000401080000000000000000000000",
         "4d49534f43544c000100000030000200030000002000000004000000000000002b0000000000000002000000000000000100030104000000010000000000000002000101010000000200000000000000",
-        "4d49534f43544c000100000030000200090000005800000005000000000000002b00000000000000060000000000000001000d010400000001000000000000000200030104000000010000000000000003000d0100000000040003010400000000000000000000000500080101000000000000000000000006000101010000000100000000000000",
-        "4d49534f43544c000100000030000200090000005800000006000000000000002b00000000000000060000000000000001000d010800000001000000020000000200030104000000010000000000000003000d0100000000040003010400000000000000000000000500080101000000000000000000000006000101010000000100000000000000",
+        "4d49534f43544c000100000030000200090000008800000005000000000000002b00000000000000070000000000000002000301040000000c0000000000000003000d010000000004000301040000000000000000000000050008010100000000000000000000000600010101000000010000000000000007000b00280000000200000000000000010001010100000001000000000000000300010101000000010000000000000008000300040000000c00000000000000",
+        "4d49534f43544c000100000030000200090000008800000006000000000000002b00000000000000070000000000000002000301040000000c0000000000000003000d010000000004000301040000000000000000000000050008010100000000000000000000000600010101000000010000000000000007000b00280000000200000000000000010001010100000001000000000000000300010101000000010000000000000008000300040000000c00000000000000",
         // #1386 re-pin: the capabilities command list adds `0x0013`, as above; #1595 adds the
         // spectrum commands and bit 16, as above.
-        "4d49534f43544c000100000030000200010000009001000007000000000000002b00000000000000170000000000000001000201020000000100000000000000020002010200000000000000000000000300020102000000010000000000000004000201020000000000000000000000050004010800000000100000000000000600030104000000000800000000000007000401080000000010000000000000080001010100000004000000000000000a0004010800000001000000000000000b0004010800000000100000000000000d0004010800000001000000000000000e0004010800000002000000000000000f0004010800000001000000000000001000040108000000100000000000000011000401080000000020000000000000120004010800000000100000000000001500020102000000000100000000000016000201020000000001000000000000170002010200000000010000000000001800030104000000000800000000000019000c011e0000000100020003000700080009000a000b000c000d000e00100011001200130000001a000c010c000000018010801180208021803080000000001b00040108000000df7f010000000000",
-        "4d49534f43544c000100000030000200090000005800000008000000000000002b00000000000000060000000000000001000d01000000000200030104000000000000000000000003000d01040000000600000000000000040003010400000001000000000000000500080101000000000000000000000006000101010000000100000000000000",
+        "4d49534f43544c000100000030000200010000009001000007000000000000002b00000000000000170000000000000001000201020000000100000000000000020002010200000000000000000000000300020102000000010000000000000004000201020000000000000000000000050004010800000000100000000000000600030104000000000800000000000007000401080000000010000000000000080001010100000004000000000000000a0004010800000001000000000000000b0004010800000000100000000000000d0004010800000001000000000000000e0004010800000002000000000000000f0004010800000002000000000000001000040108000000100000000000000011000401080000000020000000000000120004010800000000100000000000001500020102000000000100000000000016000201020000000001000000000000170002010200000000010000000000001800030104000000000800000000000019000c011e0000000100020003000700080009000a000b000c000d000e00100011001200130000001a000c010c000000018010801180208021803080000000001b00040108000000df7f010000000000",
+        "4d49534f43544c000100000030000200090000006000000008000000000000002b0000000000000006000000000000000200030104000000000000000000000003000d0104000000060000000000000004000301040000000100000000000000050008010100000000000000000000000600010101000000010000000000000008000300040000000c00000000000000",
     ];
     const EVENTS: [&str; 6] = [
         // #1635 re-pin: the `TRANSPORT_STATE` event drops the retired position (field 3): four
@@ -3524,16 +3465,23 @@ fn all_five_event_families_cross_c_dequeue_with_exact_oracle_bytes() {
         "4d49534f43544c000100000030000300108000004000000000000000000000002a00000000000000040000000000000001000401080000000100000000000000020001010100000002000000000000000400040108000000000000000000000005000400080000000200000000000000",
         "4d49534f43544c000100000030000300018000004000000000000000000000002b000000000000000400000000000000010004010800000002000000000000000200040108000000040000000000000003000401080000002a0000000000000004000301040000000100000000000000",
         "4d49534f43544c000100000030000300308000006000000000000000000000002b00000000000000010000000000000001000b015800000004000000000000000100090114000000636170692e72656e6465722e616374697669747900000000020001010100000001000000000000000600040008000000800000000000000007000400080000000100000000000000",
-        "4d49534f43544c000100000030000300208000004800000000000000000000002b00000000000000040000000000000001000401080000008000000000000000020002010200000001000000000000000300020102000000100000000000000004000a011000000001000000010001000000000000000000",
-        "4d49534f43544c000100000030000300208000004800000000000000000000002b00000000000000040000000000000001000401080000008001000000000000020002010200000001000000000000000300020102000000100000000000000004000a011000000001000000010001000000000000000000",
-        "4d49534f43544c000100000030000300218000004000000000000000000000002b0000000000000002000000000000000100040108000000000200000000000002000b012800000002000000000000000100030104000000060000000000000002000401080000000100000000000000",
+        // #1583 re-pin: the output's peak over the first meter window, `[0, 1536)`, sequence 1:
+        // two records (left, right; valid, silence), and fields 5 and 6 carry the span's start and
+        // the sequence.
+        "4d49534f43544c000100000030000300208000007800000000000000000000002b00000000000000060000000000000001000401080000000006000000000000020002010200000002000000000000000300020102000000100000000000000004000a012000000001000000010001000000000000000000010000000200010000000000000000000500040108000000000000000000000006000401080000000100000000000000",
+        // The second window, `[1536, 3072)`, sequence 2.
+        "4d49534f43544c000100000030000300208000007800000000000000000000002b0000000000000006000000000000000100040108000000000c000000000000020002010200000002000000000000000300020102000000100000000000000004000a012000000001000000010001000000000000000000010000000200010000000000000000000500040108000000000600000000000006000401080000000200000000000000",
+        "4d49534f43544c000100000030000300218000004000000000000000000000002b0000000000000002000000000000000100040108000000800c00000000000002000b012800000002000000000000000100030104000000060000000000000002000401080000000000000000000000",
     ];
     let (c_session, c_plan) = boxed_c_children(SESSION);
     let eager_capacities = crate::ffi::test_retained_capacities(c_session);
     let revision = SessionRevision(42);
+    // #1583: the output's peak, one batch per meter window.
+    let window = fixture_window_blocks();
     let configuration = protocol::TelemetryConfiguration {
-        meter_handles: vec![1],
-        meter_period_blocks: 1,
+        meters: vec![output_peak_entry()],
+        meter_period_blocks: u32::try_from(window).expect("period"),
+        meter_window_blocks: None,
         counter_ids: Vec::new(),
         counter_period_blocks: 0,
         diagnostics_enabled: true,
@@ -3602,12 +3550,8 @@ fn all_five_event_families_cross_c_dequeue_with_exact_oracle_bytes() {
     );
 
     let quiet_meter_configuration = protocol::TelemetryConfiguration {
-        meter_handles: vec![1],
-        meter_period_blocks: 1,
-        counter_ids: Vec::new(),
-        counter_period_blocks: 0,
         diagnostics_enabled: false,
-        minimum_diagnostic_severity: protocol::DiagnosticSeverity::Info,
+        ..configuration.clone()
     };
     let disable_diagnostics = command_bytes_at_revision(
         5,
@@ -3618,41 +3562,35 @@ fn all_five_event_families_cross_c_dequeue_with_exact_oracle_bytes() {
         command_c(c_session, &disable_diagnostics),
         (crate::RESULT_OK, pinned_hex(RESPONSES[3]))
     );
-    assert_eq!(
-        crate::ffi::test_render(c_plan, 128, &output),
-        crate::RESULT_OK
-    );
-    let expanded_meter_configuration = protocol::TelemetryConfiguration {
-        meter_handles: vec![1, 2],
-        meter_period_blocks: 1,
-        counter_ids: Vec::new(),
-        counter_period_blocks: 0,
-        diagnostics_enabled: false,
-        minimum_diagnostic_severity: protocol::DiagnosticSeverity::Info,
-    };
-    let expand_meters = command_bytes_at_revision(
+    // #1583: two meter windows from the configuration's sample 0, the output's peak of each.
+    for block in 1..2 * window {
+        assert_eq!(
+            crate::ffi::test_render(c_plan, block * 128, &output),
+            crate::RESULT_OK
+        );
+    }
+    // The next command's service step stages the two windows' batches (sequences 1 and 2); the
+    // configure itself, the same table, then restarts the sequence and keeps the level on.
+    let same_meters = command_bytes_at_revision(
         6,
         ExpectedRevision::Exact(SessionRevision(43)),
-        protocol::CommandPayload::TelemetryConfigure(&expanded_meter_configuration),
+        protocol::CommandPayload::TelemetryConfigure(&quiet_meter_configuration),
     );
     assert_eq!(
-        command_c(c_session, &expand_meters),
+        command_c(c_session, &same_meters),
         (crate::RESULT_OK, pinned_hex(RESPONSES[4]))
     );
+    let nothing_new = command_bytes(7, protocol::CommandPayload::CapabilitiesGet);
     assert_eq!(
-        crate::ffi::test_render(c_plan, 256, &output),
-        crate::RESULT_OK
-    );
-    let collect_third_render = command_bytes(7, protocol::CommandPayload::CapabilitiesGet);
-    assert_eq!(
-        command_c(c_session, &collect_third_render),
+        command_c(c_session, &nothing_new),
         (crate::RESULT_OK, pinned_hex(RESPONSES[5]))
     );
+    // The lossy lane holds the two batches whole: nothing coalesced or dropped.
     assert_eq!(
         crate::ffi::test_telemetry_counters(c_session),
         protocol::TelemetryCounters {
-            telemetry_coalesced: 1,
-            telemetry_dropped: 1,
+            telemetry_coalesced: 0,
+            telemetry_dropped: 0,
         }
     );
     for event in &EVENTS[3..=4] {
@@ -3660,8 +3598,9 @@ fn all_five_event_families_cross_c_dequeue_with_exact_oracle_bytes() {
     }
 
     let counter_configuration = protocol::TelemetryConfiguration {
-        meter_handles: Vec::new(),
+        meters: Vec::new(),
         meter_period_blocks: 0,
+        meter_window_blocks: None,
         counter_ids: vec![protocol::CounterId::TelemetryDropped],
         counter_period_blocks: 1,
         diagnostics_enabled: false,
@@ -3677,7 +3616,7 @@ fn all_five_event_families_cross_c_dequeue_with_exact_oracle_bytes() {
         (crate::RESULT_OK, pinned_hex(RESPONSES[6]))
     );
     assert_eq!(
-        crate::ffi::test_render(c_plan, 384, &output),
+        crate::ffi::test_render(c_plan, 2 * window * 128, &output),
         crate::RESULT_OK
     );
     event_c_exact_retry(c_session, crate::EVENT_LANE_LOSSY, &pinned_hex(EVENTS[5]));
@@ -4029,8 +3968,9 @@ fn capi_controller_dispatches_every_advertised_command_family() {
         protocol::MessageId::TransportSet
     );
     let telemetry = protocol::TelemetryConfiguration {
-        meter_handles: Vec::new(),
+        meters: Vec::new(),
         meter_period_blocks: 0,
+        meter_window_blocks: None,
         counter_ids: Vec::new(),
         counter_period_blocks: 0,
         diagnostics_enabled: false,
@@ -4975,12 +4915,26 @@ fn rebuild_command(request_id: u64, revision: u64, tag: u8) -> Vec<u8> {
     )
 }
 
-/// Telemetry that stages one render-peak meter record per meter handle per observed render,
-/// configured at the fixture's initial revision.
-fn meter_telemetry(request_id: u64, meter_handles: Vec<u32>) -> Vec<u8> {
+/// The meter window of the 48 kHz, 128-frame fixture, in blocks (#1581 D2): 12.
+fn fixture_window_blocks() -> u64 {
+    u64::from(host_core::default_meter_window_blocks(48_000, 128).get())
+}
+
+/// The output's peak, the one meter entry the C ABI serves before #1587 (#1583 D3).
+fn output_peak_entry() -> protocol::MeterEntry {
+    protocol::MeterEntry {
+        target: protocol::MeterTarget::Output,
+        metric: protocol::MeterMetric::Peak,
+    }
+}
+
+/// Telemetry that stages one meter batch of the output's peak per meter window (one batch of
+/// `windows` windows each), configured at the fixture's initial revision.
+fn meter_telemetry(request_id: u64, windows: u64) -> Vec<u8> {
     let configuration = protocol::TelemetryConfiguration {
-        meter_handles,
-        meter_period_blocks: 1,
+        meters: vec![output_peak_entry()],
+        meter_period_blocks: u32::try_from(windows * fixture_window_blocks()).expect("period"),
+        meter_window_blocks: None,
         counter_ids: Vec::new(),
         counter_period_blocks: 0,
         diagnostics_enabled: false,
@@ -5056,8 +5010,9 @@ fn service_alone_reclaims_the_retired_plan_and_promotes_its_successor() {
     crate::ffi::test_session_destroy(c_session);
 }
 
-/// Issue #1348 gate 2: a source submission runs the whole service step first: with a meter handle
-/// configured, it disposes of the retired plan and stages the swap block's render-peak record.
+/// Issue #1348 gate 2: a source submission runs the whole service step first: with the output's
+/// meter configured, it disposes of the retired plan and stages the meter batch of the window the
+/// swap block began.
 ///
 /// Test value: red if a control call skips the telemetry half of the step, as the source submit
 /// did before #1348 (only `command` and `dequeue_event` staged render telemetry).
@@ -5066,14 +5021,17 @@ fn a_source_submit_services_the_session_first() {
     crate::ffi::test_reset_lifecycle_observer();
     let (c_session, c_plan) = boxed_c_children(SESSION);
     assert_eq!(
-        command_c(c_session, &meter_telemetry(1, vec![1])).0,
+        command_c(c_session, &meter_telemetry(1, 1)).0,
         crate::RESULT_OK
     );
     assert_eq!(
         command_c(c_session, &rebuild_command(2, 42, 0x01)).0,
         crate::RESULT_OK
     );
-    render_c(c_plan, 0);
+    // The swap block and the rest of the first meter window.
+    for block in 0..fixture_window_blocks() {
+        render_c(c_plan, block);
+    }
     let before = crate::ffi::test_lifecycle_counters();
     let telemetry_before = crate::ffi::test_transaction_snapshot(c_session).telemetry;
 
@@ -5092,8 +5050,8 @@ fn a_source_submit_services_the_session_first() {
     let telemetry_after = crate::ffi::test_transaction_snapshot(c_session).telemetry;
     assert_eq!(
         telemetry_after.occupancy,
-        telemetry_before.occupancy + 1,
-        "the submit's service step stages the swap block's render-peak record"
+        telemetry_before.occupancy + 2,
+        "the submit's service step stages the window's left and right records"
     );
     let (result, event) = event_c(c_session, crate::EVENT_LANE_LOSSY);
     assert_eq!(result, crate::RESULT_OK);
@@ -5122,13 +5080,24 @@ fn a_source_submit_services_the_session_first() {
 #[test]
 fn every_control_call_refreshes_the_provider_counters() {
     let (c_session, c_plan) = boxed_c_children(SESSION);
-    // Two meter records per observed render overflow the lossy lane's room for one stream.
+    // Three counter records per observed render overflow the lossy lane's two slots.
     assert_eq!(
-        command_c(c_session, &meter_telemetry(1, vec![1, 2])).0,
+        command_c(
+            c_session,
+            &counter_telemetry(
+                1,
+                vec![
+                    protocol::CounterId::TelemetryCoalesced,
+                    protocol::CounterId::TelemetryDropped,
+                    protocol::CounterId::LiveValuesSuperseded,
+                ],
+                1,
+                false
+            )
+        )
+        .0,
         crate::RESULT_OK
     );
-    // Arm the render-peak gate the configuration enabled.
-    assert_eq!(crate::ffi::test_service(c_session), crate::RESULT_OK);
     let provider_dropped = |session: *mut crate::Session| {
         crate::ffi::test_provider_counters(session)
             .iter()
@@ -5187,8 +5156,9 @@ pub(super) fn counter_telemetry_for(
     counter_period_blocks: u32,
 ) -> Vec<u8> {
     let configuration = protocol::TelemetryConfiguration {
-        meter_handles: Vec::new(),
+        meters: Vec::new(),
         meter_period_blocks: 0,
+        meter_window_blocks: None,
         counter_ids,
         counter_period_blocks,
         diagnostics_enabled: false,
@@ -5201,17 +5171,26 @@ pub(super) fn counter_telemetry_for(
     )
 }
 
-/// A `TELEMETRY_CONFIGURE` command for the counter snapshot (and, when `meters` is not empty, the
-/// meter batch), at the fixture's revision 42.
+/// A `TELEMETRY_CONFIGURE` command for the counter snapshot (and, when `meters` is set, the output's
+/// meter batch, one per window), at the fixture's revision 42.
 fn counter_telemetry(
     request_id: u64,
     counter_ids: Vec<protocol::CounterId>,
     counter_period_blocks: u32,
-    meters: Vec<u32>,
+    meters: bool,
 ) -> Vec<u8> {
     let configuration = protocol::TelemetryConfiguration {
-        meter_period_blocks: u32::from(!meters.is_empty()),
-        meter_handles: meters,
+        meter_period_blocks: if meters {
+            u32::try_from(fixture_window_blocks()).expect("period")
+        } else {
+            0
+        },
+        meters: if meters {
+            vec![output_peak_entry()]
+        } else {
+            Vec::new()
+        },
+        meter_window_blocks: None,
         counter_ids,
         counter_period_blocks,
         diagnostics_enabled: false,
@@ -5307,15 +5286,12 @@ fn a_counter_snapshot_carries_each_configured_counters_own_value() {
     let ids = [
         protocol::CounterId::TelemetryCoalesced,
         protocol::CounterId::TelemetryDropped,
+        protocol::CounterId::LiveValuesSuperseded,
     ];
     let (c_session, c_plan) = boxed_c_children(SESSION);
-    // Two meter records and the snapshot per observed render overflow the lossy lane's room.
+    // A snapshot of three counters per observed render overflows the lossy lane's two slots.
     assert_eq!(
-        command_c(
-            c_session,
-            &counter_telemetry(1, ids.to_vec(), 1, vec![1, 2])
-        )
-        .0,
+        command_c(c_session, &counter_telemetry(1, ids.to_vec(), 1, false)).0,
         crate::RESULT_OK
     );
     assert_eq!(crate::ffi::test_service(c_session), crate::RESULT_OK);
@@ -5363,6 +5339,346 @@ fn a_counter_snapshot_carries_each_configured_counters_own_value() {
     crate::ffi::test_session_destroy(c_session);
 }
 
+/// One `TELEMETRY_CONFIGURE` of `meters` at `period` blocks (no counter, no diagnostic), at
+/// revision 42, through the C command path: the status and, when refused, the one diagnostic's
+/// code and path.
+fn configure_meters_c(
+    session: *mut crate::Session,
+    request_id: u64,
+    meters: Vec<protocol::MeterEntry>,
+    period: u64,
+) -> (StatusCode, Option<(String, Vec<protocol::PathSegment>)>) {
+    let configuration = protocol::TelemetryConfiguration {
+        meters,
+        meter_period_blocks: u32::try_from(period).expect("period"),
+        meter_window_blocks: None,
+        counter_ids: Vec::new(),
+        counter_period_blocks: 0,
+        diagnostics_enabled: false,
+        minimum_diagnostic_severity: protocol::DiagnosticSeverity::Info,
+    };
+    let request = command_bytes_at_revision(
+        request_id,
+        ExpectedRevision::Exact(SessionRevision(42)),
+        protocol::CommandPayload::TelemetryConfigure(&configuration),
+    );
+    let (result, response) = command_c(session, &request);
+    assert_eq!(result, crate::RESULT_OK);
+    let mut fields = [0_u16; 64];
+    match ProtocolCodec::default()
+        .decode_typed_response(&response, &mut DecodeScratch::new(&mut fields))
+        .expect("telemetry response")
+    {
+        protocol::DecodedTypedResponseFrame::Success { header, .. } => (header.status, None),
+        protocol::DecodedTypedResponseFrame::NonOk { header, payload } => {
+            let [diagnostic] = payload.diagnostics.as_slice() else {
+                panic!("one diagnostic: {payload:?}")
+            };
+            (
+                header.status,
+                Some((diagnostic.code.clone(), diagnostic.path.clone())),
+            )
+        }
+    }
+}
+
+/// One dequeued `METER_BATCH`: `(first_sample, end_sample, window_sequence, records)`.
+type MeterBatchRow = (u64, u64, u64, Vec<protocol::MeterRecord>);
+
+/// Every `METER_BATCH` on the lossy lane, in order; other lossy events are dropped.
+fn meter_batches_c(session: *mut crate::Session) -> Vec<MeterBatchRow> {
+    let mut batches = Vec::new();
+    loop {
+        let (result, event) = event_c(session, crate::EVENT_LANE_LOSSY);
+        assert_eq!(result, crate::RESULT_OK);
+        if event.is_empty() {
+            return batches;
+        }
+        let mut fields = [0_u16; 64];
+        if let protocol::DecodedTypedEventFrame {
+            payload: protocol::DecodedEventPayload::MeterBatch(batch),
+            ..
+        } = ProtocolCodec::default()
+            .decode_typed_event(&event, &mut DecodeScratch::new(&mut fields))
+            .expect("lossy event")
+        {
+            batches.push((
+                batch.first_sample.0,
+                batch.observed_sample.0,
+                batch.window_sequence,
+                (0..usize::from(batch.count))
+                    .map(|index| batch.record(index).expect("meter record"))
+                    .collect(),
+            ));
+        }
+    }
+}
+
+/// The `METER_WINDOWS_LOST` counter, through `COUNTERS_GET`.
+fn meter_windows_lost_c(session: *mut crate::Session, request_id: u64) -> u64 {
+    counters_get_c(
+        session,
+        request_id,
+        &[protocol::CounterId::MeterWindowsLost],
+    )
+    .expect("served counter")[0]
+        .value
+}
+
+/// #1583 gate 2: each refused meter table is typed (status, code, path) and changes nothing: no
+/// batch is staged, and the configuration accepted before keeps its fold, so its first batch
+/// still spans from sample 0 and no window is counted lost.
+///
+/// Test value: red if a refused configure is half stored (the controller stores the table, or the
+/// level or the fold restarts on a refusal, which discards the open batch) or answers untyped.
+#[test]
+fn a_refused_meter_table_is_typed_and_changes_nothing() {
+    let (c_session, c_plan) = boxed_c_children(SESSION);
+    let window = fixture_window_blocks();
+    let strip = |id: &str, metric| protocol::MeterEntry {
+        target: protocol::MeterTarget::Strip(id.into()),
+        metric,
+    };
+    assert_eq!(
+        configure_meters_c(c_session, 1, vec![output_peak_entry()], 2 * window),
+        (StatusCode::Ok, None)
+    );
+    // One of the batch's two windows is folded before the refusals.
+    for block in 0..window {
+        render_c(c_plan, block);
+    }
+    assert_eq!(crate::ffi::test_service(c_session), crate::RESULT_OK);
+    let path = |index| {
+        vec![
+            protocol::PathSegment::Field("meters".to_owned()),
+            protocol::PathSegment::Index(index),
+        ]
+    };
+    let refusals = [
+        (
+            vec![
+                output_peak_entry(),
+                strip("nobody", protocol::MeterMetric::Peak),
+            ],
+            2 * window,
+            StatusCode::NotFound,
+            "meter.strip.unknown",
+            path(1),
+        ),
+        (
+            vec![output_peak_entry()],
+            5,
+            StatusCode::InvalidField,
+            "meter.period",
+            vec![protocol::PathSegment::Field(
+                "meter_period_blocks".to_owned(),
+            )],
+        ),
+        (
+            vec![
+                output_peak_entry(),
+                strip("eq0", protocol::MeterMetric::GainReduction),
+            ],
+            window,
+            StatusCode::Unavailable,
+            "meter.gain_reduction.unavailable",
+            path(1),
+        ),
+        (
+            vec![strip("eq0", protocol::MeterMetric::Peak)],
+            window,
+            StatusCode::Unavailable,
+            "meter.strip.unavailable",
+            path(0),
+        ),
+    ];
+    for (request, (meters, period, status, code, at)) in (2..).zip(refusals) {
+        assert_eq!(
+            configure_meters_c(c_session, request, meters, period),
+            (status, Some((code.to_owned(), at))),
+            "{code}"
+        );
+        assert!(meter_batches_c(c_session).is_empty(), "{code}: no batch");
+    }
+    for block in window..2 * window {
+        render_c(c_plan, block);
+    }
+    assert_eq!(crate::ffi::test_service(c_session), crate::RESULT_OK);
+    let batches = meter_batches_c(c_session);
+    assert_eq!(
+        batches
+            .iter()
+            .map(|(first, end, sequence, _)| (*first, *end, *sequence))
+            .collect::<Vec<_>>(),
+        [(0, 2 * window * 128, 1)],
+        "the accepted table's first batch, whole"
+    );
+    assert_eq!(meter_windows_lost_c(c_session, 100), 0);
+    crate::ffi::test_plan_destroy(c_plan);
+    crate::ffi::test_session_destroy(c_session);
+}
+
+/// #1583 gates 3 and 4: with the output's peak at twice the window, each batch is two windows:
+/// its span is the first window's start to the second's end, its sequence counts from 1, and its
+/// left and right records are the two windows' maxima of each output plane, `VALID`, with
+/// `CLIPPED` on a plane above 1.0. A track added between two batches does not move the handle,
+/// the span rule or the sequence.
+///
+/// Test value: red on the defect #1583 replaces (one combined block peak per handle, labelled
+/// left), if the fold loses a window's peak (the left peak is the second window's, the right the
+/// first's), if a plane's peak lands on the other plane, or if a structural commit renumbers the
+/// handle or restarts the sequence.
+#[test]
+fn the_output_meter_batch_is_two_windows_of_each_planes_own_peak() {
+    // One track at unity into the output: its identity matrix sends each plane to its own side.
+    let mut model = stateless_session(48_000);
+    model.tracks.truncate(1);
+    model.routes.truncate(1);
+    model.tracks[0].matrix_or_pan = session::MatrixOrPan::Matrix {
+        ll: 1.0,
+        lr: 0.0,
+        rl: 0.0,
+        rr: 1.0,
+        smoothing_samples: 16,
+    };
+    let document = session::canonical_session_json(&model).expect("one-track session");
+    let (c_session, c_plan) = boxed_c_children(&document);
+    let window = fixture_window_blocks();
+    assert_eq!(
+        configure_meters_c(c_session, 1, vec![output_peak_entry()], 2 * window),
+        (StatusCode::Ok, None)
+    );
+    // Window `w`'s left and right peaks, each at one sample of the window's third block.
+    let peaks = [[0.5_f32, 0.25], [0.75, 0.125], [1.5, 0.5], [0.25, 0.375]];
+    let feed = |block: u64| {
+        let peak = peaks[(block / window) as usize];
+        let mut left = [0.0625_f32; 128];
+        let mut right = [-0.0625_f32; 128];
+        if block % window == 2 {
+            left[17] = -peak[0];
+            right[90] = peak[1];
+        }
+        submit_c(c_session, 1, block * 128, 48_000, &left, &right, false);
+        render_c(c_plan, block);
+    };
+    for block in 0..2 * window {
+        feed(block);
+    }
+    assert_eq!(crate::ffi::test_service(c_session), crate::RESULT_OK);
+    let record = |component, flags, value| protocol::MeterRecord {
+        handle: 1,
+        component,
+        flags,
+        value,
+    };
+    assert_eq!(
+        meter_batches_c(c_session),
+        [(
+            0,
+            2 * window * 128,
+            1,
+            vec![
+                record(protocol::MeterComponent::Left, 1, 0.75),
+                record(protocol::MeterComponent::Right, 1, 0.25),
+            ]
+        )]
+    );
+    // Gate 4: a structural commit between the batches.
+    let transaction = command_bytes_at_revision(
+        2,
+        ExpectedRevision::Exact(SessionRevision(42)),
+        protocol::CommandPayload::SessionTransactionApply(&add_muted_track(&model, "a-muted")),
+    );
+    let (result, response) = command_c(c_session, &transaction);
+    assert_eq!(
+        (result, response_status(&response)),
+        (crate::RESULT_OK, StatusCode::Ok)
+    );
+    for block in 2 * window..4 * window {
+        feed(block);
+    }
+    assert_eq!(crate::ffi::test_service(c_session), crate::RESULT_OK);
+    assert_eq!(
+        meter_batches_c(c_session),
+        [(
+            2 * window * 128,
+            4 * window * 128,
+            2,
+            vec![
+                record(protocol::MeterComponent::Left, 1 | 2, 1.5),
+                record(protocol::MeterComponent::Right, 1, 0.5),
+            ]
+        )]
+    );
+    crate::ffi::test_plan_destroy(c_plan);
+    crate::ffi::test_session_destroy(c_session);
+}
+
+/// #1583 gate 5: nine windows rendered with no service call overflow the output meter's queue of
+/// eight. With three windows per batch, the first service stages batches 1 and 2 (windows 1-6),
+/// render dropped window 9, and the next window's gap discards the partial batch of windows 7
+/// and 8: `METER_WINDOWS_LOST` counts exactly those three windows, and the next batch, windows
+/// 10-12, is sequence 3. Emptying the table with window 13 folded counts nothing more.
+///
+/// Test value: red if a dropped window or a discarded partial batch is not counted (or counted
+/// twice), if the sequence skips over the lost windows or a batch spans the gap, or if a turn-off
+/// counts its open partial batch as lost.
+#[test]
+fn lost_meter_windows_are_counted_and_the_sequence_does_not_skip() {
+    let (c_session, c_plan) = boxed_c_children(SESSION);
+    let window = fixture_window_blocks();
+    assert_eq!(
+        configure_meters_c(c_session, 1, vec![output_peak_entry()], 3 * window),
+        (StatusCode::Ok, None)
+    );
+    // No source submit: a submit runs the service step.
+    for block in 0..9 * window {
+        render_c(c_plan, block);
+    }
+    assert_eq!(crate::ffi::test_service(c_session), crate::RESULT_OK);
+    let spans = |batches: Vec<MeterBatchRow>| {
+        batches
+            .into_iter()
+            .map(|(first, end, sequence, _)| {
+                (first / (window * 128), end / (window * 128), sequence)
+            })
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(spans(meter_batches_c(c_session)), [(0, 3, 1), (3, 6, 2)]);
+    assert_eq!(
+        meter_windows_lost_c(c_session, 2),
+        1,
+        "window 9 was dropped"
+    );
+    for block in 9 * window..12 * window {
+        render_c(c_plan, block);
+    }
+    assert_eq!(crate::ffi::test_service(c_session), crate::RESULT_OK);
+    assert_eq!(spans(meter_batches_c(c_session)), [(9, 12, 3)]);
+    assert_eq!(
+        meter_windows_lost_c(c_session, 3),
+        3,
+        "windows 7 to 9 reached no batch"
+    );
+    // A turn-off with a batch open (window 13 of 13-15) counts nothing: the client emptied the
+    // table.
+    for block in 12 * window..13 * window {
+        render_c(c_plan, block);
+    }
+    assert_eq!(crate::ffi::test_service(c_session), crate::RESULT_OK);
+    assert_eq!(
+        configure_meters_c(c_session, 4, Vec::new(), 0),
+        (StatusCode::Ok, None)
+    );
+    assert_eq!(
+        meter_windows_lost_c(c_session, 5),
+        3,
+        "the turn-off loses nothing"
+    );
+    crate::ffi::test_plan_destroy(c_plan);
+    crate::ffi::test_session_destroy(c_session);
+}
+
 /// Issue #1351 gate 2 (D4): with period 4 a snapshot is staged once render has completed four
 /// blocks since the last one, and not before.
 ///
@@ -5374,12 +5690,7 @@ fn a_counter_snapshot_waits_for_its_configured_period() {
     assert_eq!(
         command_c(
             c_session,
-            &counter_telemetry(
-                1,
-                vec![protocol::CounterId::TelemetryDropped],
-                4,
-                Vec::new()
-            )
+            &counter_telemetry(1, vec![protocol::CounterId::TelemetryDropped], 4, false)
         )
         .0,
         crate::RESULT_OK
@@ -5420,10 +5731,7 @@ fn a_counter_snapshot_waits_for_its_configured_period() {
 fn configuring_an_unserved_counter_is_refused_and_changes_nothing() {
     let (c_session, c_plan) = boxed_c_children(SESSION);
     let served = vec![protocol::CounterId::TelemetryDropped];
-    let (result, response) = command_c(
-        c_session,
-        &counter_telemetry(1, served.clone(), 1, Vec::new()),
-    );
+    let (result, response) = command_c(c_session, &counter_telemetry(1, served.clone(), 1, false));
     assert_eq!(
         (result, response_status(&response)),
         (crate::RESULT_OK, StatusCode::Ok)
@@ -5436,7 +5744,7 @@ fn configuring_an_unserved_counter_is_refused_and_changes_nothing() {
         protocol::CounterId::ControlCommandBackpressure,
     ] {
         request += 1;
-        let refused = counter_telemetry(request, vec![unserved], 1, vec![1]);
+        let refused = counter_telemetry(request, vec![unserved], 1, true);
         let (result, response) = command_c(c_session, &refused);
         assert_eq!(result, crate::RESULT_OK);
         assert_eq!(
@@ -5585,14 +5893,19 @@ fn service_with_nothing_pending_changes_nothing() {
     assert_eq!(crate::ffi::test_lifecycle_counters(), lifecycle);
 
     assert_eq!(
-        command_c(c_session, &meter_telemetry(1, vec![1])).0,
+        command_c(c_session, &meter_telemetry(1, 1)).0,
         crate::RESULT_OK
     );
     assert_eq!(crate::ffi::test_service(c_session), crate::RESULT_OK);
-    render_c(c_plan, 0);
+    for block in 0..fixture_window_blocks() {
+        render_c(c_plan, block);
+    }
     assert_eq!(crate::ffi::test_service(c_session), crate::RESULT_OK);
     let settled = crate::ffi::test_transaction_snapshot(c_session);
-    assert_eq!(settled.telemetry.occupancy, 1, "one observation staged");
+    assert_eq!(
+        settled.telemetry.occupancy, 2,
+        "one meter batch staged, left and right"
+    );
     let counters = crate::ffi::test_owner_counters(c_session);
     for _ in 0..1_000 {
         assert_eq!(crate::ffi::test_service(c_session), crate::RESULT_OK);
