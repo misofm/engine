@@ -694,6 +694,94 @@ pub(crate) mod spectrum_configured {
     };
 }
 
+/// `SPECTRUM_CAPTURE` (`0x0011`, #1595 D2): one operation on the one-shot window.
+pub(crate) mod spectrum_capture_request {
+    use super::*;
+    /// Arm `1`, read `2`, cancel `3`, select `4`.
+    pub(crate) const OP: FieldSpec = FieldSpec::req(1, Wire::U8);
+    /// Read and select only: left `1`, right `2`, both `3`.
+    pub(crate) const CHANNELS: FieldSpec = FieldSpec::opt(2, Wire::U8);
+    /// Select only: #1594 D2's target kind codes.
+    pub(crate) const TARGET_KIND: FieldSpec = FieldSpec::opt(3, Wire::U8);
+    /// Select only.
+    pub(crate) const TARGET_ID: FieldSpec = FieldSpec::opt(4, Wire::Utf8);
+    /// Read only; absent is false.
+    pub(crate) const INCLUDE_WINDOW: FieldSpec = FieldSpec::opt(5, Wire::Bool);
+    pub(crate) static SPEC: MessageSpec = MessageSpec {
+        name: "SpectrumCaptureRequest",
+        fields: &[OP, CHANNELS, TARGET_KIND, TARGET_ID, INCLUDE_WINDOW],
+    };
+}
+
+/// The `SPECTRUM_CAPTURE` reply (#1595 D2): the epochs and the status, and with `ready` the
+/// analyzed window.
+pub(crate) mod spectrum_capture_reply {
+    use super::*;
+    pub(crate) const ADOPTED_EPOCH: FieldSpec = FieldSpec::req(1, Wire::U64);
+    pub(crate) const SELECTION_EPOCH: FieldSpec = FieldSpec::req(2, Wire::U64);
+    /// Done `1`, pending `2`, ready `3`.
+    pub(crate) const STATUS: FieldSpec = FieldSpec::req(3, Wire::U8);
+    pub(crate) const TARGET_KIND: FieldSpec = FieldSpec::opt(4, Wire::U8);
+    pub(crate) const TARGET_ID: FieldSpec = FieldSpec::opt(5, Wire::Utf8);
+    pub(crate) const CHANNELS: FieldSpec = FieldSpec::opt(6, Wire::U8);
+    pub(crate) const SAMPLE_RATE_HZ: FieldSpec = FieldSpec::opt(7, Wire::U32);
+    pub(crate) const WINDOW_FRAMES: FieldSpec = FieldSpec::opt(8, Wire::U32);
+    pub(crate) const BIN_COUNT: FieldSpec = FieldSpec::opt(9, Wire::U32);
+    pub(crate) const FLOOR_DB: FieldSpec = FieldSpec::opt(10, Wire::F32);
+    pub(crate) const CAPTURED_SAMPLE: FieldSpec = FieldSpec::opt(11, Wire::U64);
+    pub(crate) const END_SAMPLE: FieldSpec = FieldSpec::opt(12, Wire::U64);
+    pub(crate) const SNAPSHOT_TOKEN: FieldSpec = FieldSpec::opt(13, Wire::U64);
+    pub(crate) const SOURCE_UNDERRUN: FieldSpec = FieldSpec::opt(14, Wire::Bool);
+    pub(crate) const FREQUENCIES_HZ: FieldSpec = FieldSpec::opt(15, Wire::PackedF32);
+    pub(crate) const LEFT_DB: FieldSpec = FieldSpec::opt(16, Wire::PackedF32);
+    pub(crate) const RIGHT_DB: FieldSpec = FieldSpec::opt(17, Wire::PackedF32);
+    pub(crate) const LEFT_WINDOW: FieldSpec = FieldSpec::opt(18, Wire::PackedF32);
+    pub(crate) const RIGHT_WINDOW: FieldSpec = FieldSpec::opt(19, Wire::PackedF32);
+    /// Every field a ready reply adds, in tag order.
+    pub(crate) const READY: [FieldSpec; 16] = [
+        TARGET_KIND,
+        TARGET_ID,
+        CHANNELS,
+        SAMPLE_RATE_HZ,
+        WINDOW_FRAMES,
+        BIN_COUNT,
+        FLOOR_DB,
+        CAPTURED_SAMPLE,
+        END_SAMPLE,
+        SNAPSHOT_TOKEN,
+        SOURCE_UNDERRUN,
+        FREQUENCIES_HZ,
+        LEFT_DB,
+        RIGHT_DB,
+        LEFT_WINDOW,
+        RIGHT_WINDOW,
+    ];
+    pub(crate) static SPEC: MessageSpec = MessageSpec {
+        name: "SpectrumCaptureReply",
+        fields: &[
+            ADOPTED_EPOCH,
+            SELECTION_EPOCH,
+            STATUS,
+            TARGET_KIND,
+            TARGET_ID,
+            CHANNELS,
+            SAMPLE_RATE_HZ,
+            WINDOW_FRAMES,
+            BIN_COUNT,
+            FLOOR_DB,
+            CAPTURED_SAMPLE,
+            END_SAMPLE,
+            SNAPSHOT_TOKEN,
+            SOURCE_UNDERRUN,
+            FREQUENCIES_HZ,
+            LEFT_DB,
+            RIGHT_DB,
+            LEFT_WINDOW,
+            RIGHT_WINDOW,
+        ],
+    };
+}
+
 pub(crate) mod transport_get {
     use super::MessageSpec;
     pub(crate) static SPEC: MessageSpec = MessageSpec {
@@ -1954,6 +2042,8 @@ mod tests {
             &spectrum_entry::SPEC,
             &spectrum_configure_request::SPEC,
             &spectrum_configured::SPEC,
+            &spectrum_capture_request::SPEC,
+            &spectrum_capture_reply::SPEC,
             &transport_get::SPEC,
             &transport_set::SPEC,
             &transport_set::RETIRED,

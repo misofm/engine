@@ -124,12 +124,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "dynamic-eq"
+version = "0.1.0"
+dependencies = [
+ "effect-contract",
+ "effect-runtime",
+ "engine",
+ "lane",
+ "math",
+ "parametric-eq",
+]
+
+[[package]]
 name = "effect-compiler"
 version = "0.1.0"
 dependencies = [
  "compressor",
  "de-esser",
  "delay",
+ "dynamic-eq",
  "effect-contract",
  "engine",
  "gate-expander",

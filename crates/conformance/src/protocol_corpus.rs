@@ -952,7 +952,12 @@ pub enum ConformanceDecoder {
 /// insert's tap with a window of four blocks (37 edits). Only `command.session_transaction_apply`
 /// moves; the 49 other frames are byte-equal. Re-pinned from `26579fcd7f959310`; the frame count
 /// stays 50.
-pub const COMPLETE_SCHEMA_HASH: u64 = 0xa3d6_a9dd_7219_5701;
+/// #1595 adds `SPECTRUM_CAPTURE` (`0x0011`): the corpus gains `command.spectrum_capture` (a read of
+/// both planes with the raw window) and `response.spectrum_captured` (a ready one-plane read). The
+/// capability registry does not list `0x0011` until #1595's second slice. The 50 earlier frames
+/// are byte-equal: their hash is the old pin. Re-pinned from `a3d6a9dd72195701`; the frame count
+/// is 52.
+pub const COMPLETE_SCHEMA_HASH: u64 = 0xc7e0_1036_2827_dab3;
 
 /// Build every command, successful response, registered non-OK status, event, and all-opcode
 /// session transaction using only public typed encoder entry points.
@@ -1056,6 +1061,7 @@ pub fn complete_schema_corpus() -> Vec<ConformanceFrame> {
                             | CommandPayload::ControlStateGet(_)
                             | CommandPayload::ResponseGet(_)
                             | CommandPayload::SpectrumConfigure(_)
+                            | CommandPayload::SpectrumCapture(_)
                             | CommandPayload::TransportGet
                             | CommandPayload::CountersGet(_)
                             | CommandPayload::DiagnosticsGet(_)
@@ -1127,6 +1133,14 @@ pub fn complete_schema_corpus() -> Vec<ConformanceFrame> {
     command!(
         "command.spectrum_configure",
         CommandPayload::SpectrumConfigure(&spectrum_request)
+    );
+    // #1595: a read of both planes with the raw window, so the optional field is present.
+    command!(
+        "command.spectrum_capture",
+        CommandPayload::SpectrumCapture(&SpectrumCaptureRequest::Read {
+            channels: ParameterChannel::Both,
+            include_window: true,
+        })
     );
 
     let capabilities = Capabilities {
@@ -1241,6 +1255,39 @@ pub fn complete_schema_corpus() -> Vec<ConformanceFrame> {
             adopted_epoch: 2,
             rebuild: true,
             plan_epoch: Some(3),
+        })
+    );
+    // #1595: a ready one-plane read without the window: the smallest ready reply.
+    let frequencies: Vec<f32> = (0..SPECTRUM_CAPTURE_BIN_COUNT)
+        .map(|bin| f32::from(u16::try_from(bin).unwrap_or(0)) * 23.4375)
+        .collect();
+    let left_db: Vec<f32> = (0..SPECTRUM_CAPTURE_BIN_COUNT)
+        .map(|bin| -f32::from(u16::try_from(bin % 120).unwrap_or(0)))
+        .collect();
+    success!(
+        "response.spectrum_captured",
+        SuccessResponsePayload::SpectrumCaptured(SpectrumCaptureReply {
+            adopted_epoch: 3,
+            selection_epoch: 2,
+            status: SpectrumCaptureStatus::Ready,
+            window: Some(SpectrumCaptureWindow {
+                target_kind: SpectrumTargetKind::TrackPostPan,
+                target_id: "vocal".into(),
+                channels: ParameterChannel::Left,
+                sample_rate_hz: 48_000,
+                window_frames: SPECTRUM_CAPTURE_WINDOW_FRAMES,
+                bin_count: SPECTRUM_CAPTURE_BIN_COUNT,
+                floor_db: -120.0,
+                captured_sample: 96_000,
+                end_sample: 98_048,
+                snapshot_token: 2,
+                source_underrun: false,
+                frequencies_hz: frequencies.as_slice().into(),
+                left_db: Some(left_db.as_slice().into()),
+                right_db: None,
+                left_window: None,
+                right_window: None,
+            }),
         })
     );
     success!(

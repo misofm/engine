@@ -855,9 +855,10 @@ fn race_plan_swaps(swaps: u64, readers: usize, back_to_back: bool) {
             [f32::from_bits(twin[0]), f32::from_bits(twin[128])],
         );
         println!("{swaps} back-to-back edits: {withdrawn} withdrawn, {taken} taken");
+        // `taken` is the run's record only: see the back-to-back caller's doc (#1803).
         assert!(
-            withdrawn > 0 && taken > 0,
-            "vacuous: {withdrawn} withdrawn and {taken} taken over {swaps} back-to-back edits"
+            withdrawn > 0,
+            "vacuous: {withdrawn} withdrawn ({taken} taken) over {swaps} back-to-back edits"
         );
     } else {
         assert_eq!(
@@ -1481,13 +1482,22 @@ fn a_two_strip_transaction_lands_in_one_block_and_the_watermark_names_it() {
 /// #1310 gate 5: a control thread submitting 64 structural edits back to back while a render
 /// thread renders. Each edit lands while the last candidate is pending or just adopted: every
 /// submit commits (`RESULT_OK`, never `RESULT_BACKPRESSURE`), the run withdraws and supersedes some
-/// candidates and finds others taken by render first, and after quiescence the plan renders what a
-/// fresh plan of the final model renders.
+/// candidates, and after quiescence the plan renders what a fresh plan of the final model renders.
 ///
-/// Test value: red if a structural edit behind a pending candidate is refused, if the withdrawal
-/// races render's claim into a lost or doubly owned plan (a failed render, a carry count that
-/// misses a swap, or output other than the twin's), or if the run never reaches one of the two
-/// outcomes it is judged by.
+/// The run is judged by `Withdrawn` (at least one, each one superseded), the carry counts and the
+/// settled twin. A `Taken` outcome needs render's claim to land between the command's service step
+/// and its `withdraw()`, a window of microseconds that on one CPU only a preemption opens, so the
+/// run prints its `Taken` count and does not assert it (#1803). The claim that a taken candidate is
+/// found and promoted has deterministic owners that drive that interleaving directly:
+/// `a_displaced_plan_not_yet_reclaimed_is_charged_after_a_taken_promotion` in
+/// `crates/capi/src/runtime/supersede_tests.rs` (`candidate_taken == 1`, through
+/// `control_plane::test_hold_reclamation`) and `withdrawal_after_render_claimed_reports_taken` in
+/// `crates/engine/src/realtime/mod.rs` (the exchange level).
+///
+/// Test value: red if a structural edit behind a pending candidate is refused or can never
+/// withdraw it (supersession dead), or if the withdrawal races render's claim into a lost or
+/// doubly owned plan (a failed render, a carry count that misses a swap, or output other than the
+/// twin's).
 #[test]
 fn structural_edits_back_to_back_supersede_or_swap_and_never_backpressure() {
     race_plan_swaps(64, 0, true);

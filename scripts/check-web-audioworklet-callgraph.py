@@ -78,9 +78,10 @@ Modes
     Assert the artifact still computes in the vector family, and in four lanes only. Five rules,
     none of which is a raw op-count minimum:
 
-    1. **Roster presence.** Each of the thirteen named kernels in `KERNEL_ROSTER` -- the
-       `process_bank`/`process_section`/`process_block` bodies of the shipped effect library and
-       the live route's indexed-ramp mix (#1220); the fourteenth, the collapsed limiter's, is held
+    1. **Roster presence.** Each of the fifteen named kernels in `KERNEL_ROSTER` -- the
+       `process_bank`/`process_section`/`process_block`/`run_block` bodies of the shipped effect
+       library and the live route's indexed-ramp mix (#1220); the sixteenth, the collapsed
+       limiter's, is held
        by the forwarding rule below -- must match exactly
        one arithmetic-carrying function. A kernel that vanished, that was renamed, or that
        de-vectorised so completely it stopped carrying `f32x4` arithmetic at all fails here.
@@ -256,7 +257,7 @@ EIGHT_LANE = re.compile(r"(?:f32|f64|u32|i32)x8|(?i:simd8)|transpose_tile_8")
 
 # The smallest scalar budget any kernel gets, in instructions.
 #
-# Twelve of the fourteen roster kernels -- the thirteen `KERNEL_ROSTER` rows and the collapsed
+# Fourteen of the sixteen roster kernels -- the fifteen `KERNEL_ROSTER` rows and the collapsed
 # limiter's kernel -- currently emit *zero* scalar `f32` arithmetic, so a ceiling
 # expressed purely as a multiple of `vector` would be exactly zero for them: a single scalar
 # coefficient load introduced by an ordinary refactor would fail the gate. Eight instructions is
@@ -291,6 +292,8 @@ SCALAR_SLACK = 8
 #   parametric-eq        f32x4     84 /  0   ratio 0        (collapsed)
 #   soft-clip            f32x4     25 /  0   ratio 0
 #   route-mix-ramp       f32x4     22 /  0   ratio 0        (#1220; row added by its verdict NIT-1)
+#   dynamic-eq           f32x4    626 /  0   ratio 0        (dual, #17 S2)
+#   dynamic-eq           f32x4    316 /  0   ratio 0        (collapsed, #17 S2)
 #
 # Each ceiling is **four times the measured ratio, floored at 0.10**. Four times, because that is
 # the factor by which a *partial* de-vectorisation would have to stay below to escape: converting
@@ -404,6 +407,19 @@ KERNEL_ROSTER: tuple[tuple[str, str, float], ...] = (
     (
         "route-mix-ramp f32x4",
         r"lane7kernels20route_mix_ramp_block.*4wide6f32x4",
+        0.10,
+    ),
+    # #17 S2: the dynamic EQ's block bodies are `run_block::<MONO>`'s inner closures (the bank's
+    # `process_bank` and `process_bank_mono` only forward): `KB` is the back-reference to the
+    # `false` const, `Kb1_` the literal `true`. Measured 626 / 0 and 316 / 0 on the named twin.
+    (
+        "dynamic-eq f32x4 dual",
+        r"dynamic_eq.*9DynamicEq.*4wide6f32x4.*9run_blockKB",
+        0.10,
+    ),
+    (
+        "dynamic-eq f32x4 collapsed",
+        r"dynamic_eq.*9DynamicEq.*4wide6f32x4.*9run_blockKb1_",
         0.10,
     ),
 )
@@ -772,6 +788,19 @@ RENDER_KERNELS: dict[str, str] = {
         "de-esser bank, mono-collapsed entry",
     "_RNvXCs_8de_esserINtB_7DeEsserNtNtCs_4wide6f32x4_5f32x4Kb0_ENtCs_15effect_contract24PreparedNativeEffectBank14advance_clocks":
         "de-esser ramp clocks on a skipped silent block",
+    "_RINvCs_10dynamic_eq14set_lane_wordsNtNtCs_4wide6f32x4_5f32x4EB_":
+        "dynamic EQ per-lane word write: a live record's retarget in the block, a restore at the "
+        "plan swap",
+    "_RNCINvMCs_10dynamic_eqINtB_9DynamicEqNtNtCs_4wide6f32x4_5f32x4Kb0_E9run_blockKB_E0B_":
+        "dynamic EQ block body, stereo (`run_block::<false>`'s inner closure)",
+    "_RNCINvMCs_10dynamic_eqINtB_9DynamicEqNtNtCs_4wide6f32x4_5f32x4Kb0_E9run_blockKb1_E0B_":
+        "dynamic EQ block body, mono-collapsed (`run_block::<true>`'s inner closure)",
+    "_RNvXCs_10dynamic_eqINtB_9DynamicEqNtNtCs_4wide6f32x4_5f32x4Kb0_ENtCs_15effect_contract24PreparedNativeEffectBank12process_bank":
+        "dynamic EQ bank, stereo entry",
+    "_RNvXCs_10dynamic_eqINtB_9DynamicEqNtNtCs_4wide6f32x4_5f32x4Kb0_ENtCs_15effect_contract24PreparedNativeEffectBank17process_bank_mono":
+        "dynamic EQ bank, mono-collapsed entry",
+    "_RNvXCs_10dynamic_eqINtB_9DynamicEqNtNtCs_4wide6f32x4_5f32x4Kb0_ENtCs_15effect_contract24PreparedNativeEffectBank14advance_clocks":
+        "dynamic EQ ramp clocks on a skipped silent block",
 }
 
 

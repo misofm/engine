@@ -177,15 +177,19 @@ never folds a window from before the release into one after it.
 
 ## What ships in V1
 
-`miso.compressor`, `miso.gate-expander`, `miso.multiband-compressor` and `miso.true-peak-limiter`
-each declare exactly one tap: id `1`, "Gain Reduction", `Resident`, `PerBlock`, `PeakMagnitude`,
+`miso.compressor`, `miso.de-esser`, `miso.gate-expander`, `miso.multiband-compressor` and
+`miso.true-peak-limiter` each declare exactly one tap: id `1`, "Gain Reduction", `Resident`, `PerBlock`, `PeakMagnitude`,
 `PerLane`, `0 .. 100`. The multiband's is a single aggregate — the **deeper** of its two bands,
 because the bands are applied to disjoint parts of the spectrum and adding them would report a
 reduction the signal never received. Per-band taps are an additive follow-up that needs no wire,
 contract or transport change to arrive.
 
-The dynamic EQ is the first declarer of the signed kind; its declaration arrives with its
-registration (#17).
+`miso.dynamic-eq` declares four taps, one per band: ids `1` to `4`, "Band N Gain Change" (N = 1
+to 4), `GainChangeDb`, `Resident`, `PerBlock`, `PeakSigned`, `PerLane`, `-24 .. 24` dB. It is the
+first declarer of the signed kind (#1918), so an upward band reads as a boost, not as a reduction
+(#17). It is also the first effect with more than one tap: the boot's per-effect cap
+(`live_control_observation_taps`, the SDK's `liveControls.observationTaps`) must be at least `4`
+for a session that holds it, because a cap below an effect's tap count refuses the boot with
+`effect.observation.taps`.
 
-No computed tap ships. No other effect declares a tap, and every one of their descriptors is
-byte-for-byte unmoved.
+No computed tap ships. The other launch effects declare no tap.

@@ -26,7 +26,8 @@ use host_core::{
 use protocol::{
     CommandPayload, DecodeScratch, DecodedSuccessResponsePayload, DecodedTypedResponseFrame,
     EditPath, ExpectedRevision, ParameterChannel, ProtocolCodec, RequestId, SessionEdit,
-    SessionSnapshotRequest, SpectrumConfigureRequest, SpectrumConfigured, SpectrumEntry,
+    SessionSnapshotRequest, SpectrumCaptureReply, SpectrumCaptureRequest as CaptureRequest,
+    SpectrumCaptureStatus, SpectrumConfigureRequest, SpectrumConfigured, SpectrumEntry,
     SpectrumForm, SpectrumTargetKind, StatusCode, TypedCommandFrame,
 };
 use session::{
@@ -166,8 +167,16 @@ impl Rig {
     }
 
     fn of(document: &str, spectrum: Option<SpectrumConfiguration>) -> Self {
+        Self::limited(document, spectrum, limits())
+    }
+
+    fn limited(
+        document: &str,
+        spectrum: Option<SpectrumConfiguration>,
+        limits: ControlLimits,
+    ) -> Self {
         let CompiledChildren { session, plan } =
-            compile_children::<Adapter>(document, limits(), Box::new(Preparer), spectrum)
+            compile_children::<Adapter>(document, limits, Box::new(Preparer), spectrum)
                 .expect("boot compile");
         Self {
             session,
@@ -287,6 +296,35 @@ impl Rig {
             }
             DecodedTypedResponseFrame::Success { .. } => panic!("another success payload"),
         }
+    }
+
+    /// Send one `SPECTRUM_CAPTURE` (#1595) as request `request_id`: the response frame's bytes.
+    fn capture_frame(&mut self, request_id: u64, request: &CaptureRequest) -> Vec<u8> {
+        let codec = ProtocolCodec::default();
+        let frame = TypedCommandFrame {
+            request_id: RequestId::new(request_id).expect("nonzero request"),
+            expected_revision: ExpectedRevision::Any,
+            payload: CommandPayload::SpectrumCapture(request),
+        };
+        let mut bytes = vec![0_u8; codec.limits().max_frame_bytes];
+        let length = codec
+            .encode_command_frame_into(&frame, &mut bytes)
+            .expect("capture command");
+        let length = self
+            .session
+            .command(&bytes[..length], 65_536)
+            .expect("a capture answers a frame");
+        self.session.command_response(length).to_vec()
+    }
+
+    /// Send one `SPECTRUM_CAPTURE` as a new request: its reply, or the refusal's status and code.
+    fn capture(
+        &mut self,
+        request: &CaptureRequest,
+    ) -> Result<SpectrumCaptureReply<'static>, (StatusCode, String)> {
+        self.request += 1;
+        let frame = self.capture_frame(self.request, request);
+        decode_capture(&frame)
     }
 
     /// Commit `value` on `eq0`'s left fader as one live transaction.
@@ -437,6 +475,27 @@ impl Rig {
     }
 }
 
+/// A `SPECTRUM_CAPTURE` response frame: its reply, or the refusal's status and code.
+fn decode_capture(frame: &[u8]) -> Result<SpectrumCaptureReply<'static>, (StatusCode, String)> {
+    let mut fields = [0_u16; 64];
+    match ProtocolCodec::default()
+        .decode_typed_response(frame, &mut DecodeScratch::new(&mut fields))
+        .expect("a capture response")
+    {
+        DecodedTypedResponseFrame::Success {
+            header,
+            payload: DecodedSuccessResponsePayload::SpectrumCaptured(reply),
+        } => {
+            assert_eq!(header.message_id, protocol::MessageId::SpectrumCapture);
+            Ok(reply)
+        }
+        DecodedTypedResponseFrame::NonOk { header, payload } => {
+            Err((header.status, payload.diagnostics[0].code.clone()))
+        }
+        DecodedTypedResponseFrame::Success { .. } => panic!("another success payload"),
+    }
+}
+
 /// One stream read: its status, epochs and window.
 #[derive(Clone, Copy)]
 struct Read {
@@ -456,10 +515,14 @@ struct Reference {
 
 impl Reference {
     fn new() -> Self {
+        Self::of(&request())
+    }
+
+    fn of(request: &SpectrumCaptureRequest) -> Self {
         let caps = prepare_caps(limits());
         let compiled = compile_host_session(SESSION, &caps).expect("compiled fixture");
         let (host, capture) =
-            prepare_host_runtime_with_spectrum(&compiled, &caps, &request()).expect("reference");
+            prepare_host_runtime_with_spectrum(&compiled, &caps, request).expect("reference");
         let (render, sources, _) = host.start_render_session().expect("start render");
         Self {
             render,
@@ -1429,10 +1492,12 @@ fn a_refused_configure_changes_nothing_and_a_pending_edit_is_superseded() {
     );
 }
 
-/// #1594 gate 8 (scope gate 8). Turns red if a monitor rebuild allocates on the render thread or
-/// races into an internal error: while another thread renders, the control thread alternates two
-/// configurations 40 times (each a rebuild); every render call allocates and frees nothing, and
-/// every configure answers a reply.
+/// #1594 gate 8 (scope gate 8) and #1595 gate 8. Turns red if a monitor rebuild or a spectrum
+/// read allocates on the render thread or races into an internal error: while another thread
+/// renders, the control thread alternates two configurations 40 times (each a rebuild) and sends
+/// 25 `SPECTRUM_CAPTURE` operations after each (1,000 in all: arms, reads with and without the
+/// window, cancels); every render call allocates and frees nothing, every configure answers a
+/// reply and no capture answers `INTERNAL`.
 #[test]
 fn alternating_configures_against_a_rendering_thread_allocate_nothing_on_render() {
     use std::sync::atomic::{AtomicBool, Ordering};
@@ -1444,6 +1509,7 @@ fn alternating_configures_against_a_rendering_thread_allocate_nothing_on_render(
     } = Rig::new(None);
     let done = AtomicBool::new(false);
     let mut request = 0_u64;
+    let mut ready = 0_u32;
     std::thread::scope(|scope| {
         let done = &done;
         let render = scope.spawn(move || {
@@ -1505,7 +1571,53 @@ fn alternating_configures_against_a_rendering_thread_allocate_nothing_on_render(
                 }
             ));
             session.service().expect("service step");
+            // The collection has no selection: the first operation selects `eq0`, whose select
+            // arms it for nobody, so the caller cancels before it arms its own.
+            let select = CaptureRequest::Select {
+                target_kind: SpectrumTargetKind::TrackPostPan,
+                target_id: "eq0".to_owned(),
+                channels: ParameterChannel::Both,
+            };
+            let mut next = if index % 2 == 1 {
+                select
+            } else {
+                CaptureRequest::Arm
+            };
+            for capture in 0..25 {
+                request += 1;
+                let frame = TypedCommandFrame {
+                    request_id: RequestId::new(request).expect("nonzero request"),
+                    expected_revision: ExpectedRevision::Any,
+                    payload: CommandPayload::SpectrumCapture(&next),
+                };
+                let length = codec
+                    .encode_command_frame_into(&frame, &mut bytes)
+                    .expect("capture command");
+                let length = session
+                    .command(&bytes[..length], 65_536)
+                    .unwrap_or_else(|error| panic!("capture {index}.{capture}: {error:?}"));
+                let reply = decode_capture(session.command_response(length));
+                next = match (&next, reply) {
+                    (_, Err((status, code))) => {
+                        assert_ne!(status, StatusCode::Internal, "{code}");
+                        CaptureRequest::Cancel
+                    }
+                    (CaptureRequest::Select { .. }, Ok(_)) => CaptureRequest::Cancel,
+                    (CaptureRequest::Cancel, Ok(_)) => CaptureRequest::Arm,
+                    (_, Ok(reply)) if reply.status == SpectrumCaptureStatus::Ready => {
+                        ready += 1;
+                        CaptureRequest::Arm
+                    }
+                    (_, Ok(_)) => CaptureRequest::Read {
+                        channels: ParameterChannel::Both,
+                        include_window: capture % 2 == 0,
+                    },
+                };
+                session.service().expect("service step");
+                std::thread::sleep(std::time::Duration::from_micros(200));
+            }
         }
+        assert!(ready > 0, "some reads analyzed a window");
         done.store(true, Ordering::Release);
         assert!(render.join().expect("render thread") > 0);
     });
@@ -1600,14 +1712,14 @@ fn a_configure_that_supersedes_a_fallback_edit_reports_the_fallback() {
     assert_eq!(after.outcome_flags, twin.watermark().outcome_flags);
 }
 
-/// #1594 R6. Turns red if a plan with spectrum captures does not charge the session's spectrum
-/// service and analysis: the running plan's control-retained bytes grow by
-/// `SpectrumService::RETAINED_BYTES` plus the plan inventory's own spectrum row when a configure
-/// adds a tap, and fall back when a configure removes every tap, to the boot plan's bytes plus
-/// the pairing rows of the meters the plan carries (#1674 R1). The row is 51 bytes here (one
-/// `SpectrumInventoryRow`, 48 bytes on a 64-bit target, plus the 3 bytes of `eq0`, and no pairing
-/// row, since the predecessor had no capture); it is host-core's private layout, so the check is a
-/// 1 KiB ceiling over the service's bytes, which no inventory row of one tap approaches and which
+/// #1594 R6, #1595 R7. Turns red if a plan with spectrum captures does not charge the session's
+/// spectrum service, analysis and one-shot slot: the running plan's control-retained bytes grow
+/// by `SpectrumService::RETAINED_BYTES`, one `SpectrumAnalysisResult` and one `SpectrumSnapshot`
+/// plus the plan inventory's own spectrum row when a configure adds a tap, and fall back when a
+/// configure removes every tap, to the boot plan's bytes plus the pairing rows of the meters the
+/// plan carries (#1674 R1). The row is 51 bytes here (one `SpectrumInventoryRow`, 48 bytes on a
+/// 64-bit target, plus the 3 bytes of `eq0`, and no pairing row, since the predecessor had no
+/// capture); it is host-core's private layout, so the check is a 1 KiB ceiling over the service's bytes, which no inventory row of one tap approaches and which
 /// stays far below the service's own size, so a missing charge cannot pass.
 #[test]
 fn a_plan_with_spectrum_charges_the_service_once() {
@@ -1618,8 +1730,11 @@ fn a_plan_with_spectrum_charges_the_service_once() {
     rig.configure(&single_request()).expect("add a tap");
     rig.until_promoted();
     let grown = bytes(&rig) - before;
+    let monitor = SpectrumService::RETAINED_BYTES
+        + core::mem::size_of::<host_core::SpectrumAnalysisResult>() as u64
+        + core::mem::size_of::<SpectrumSnapshot>() as u64;
     assert!(
-        (SpectrumService::RETAINED_BYTES..SpectrumService::RETAINED_BYTES + 1_024).contains(&grown),
+        (monitor..monitor + 1_024).contains(&grown),
         "the service is charged once: {grown}"
     );
     rig.configure(&collection_request(Vec::new(), None))
@@ -1733,4 +1848,348 @@ fn a_configure_that_supersedes_a_monitor_candidate_reports_no_fallback() {
     assert_eq!(after.revision, revision + 1);
     assert_eq!(after.transition_fallback, 0, "no false fallback");
     assert_eq!(after.outcome_flags, engine::realtime::OUTCOME_EXACT);
+}
+
+const ARM: CaptureRequest = CaptureRequest::Arm;
+
+const fn read(channels: ParameterChannel, include_window: bool) -> CaptureRequest {
+    CaptureRequest::Read {
+        channels,
+        include_window,
+    }
+}
+
+fn select(kind: SpectrumTargetKind, target: &str, channels: ParameterChannel) -> CaptureRequest {
+    CaptureRequest::Select {
+        target_kind: kind,
+        target_id: target.to_owned(),
+        channels,
+    }
+}
+
+fn same_words(got: &[f32], want: &[f32]) -> bool {
+    got.len() == want.len()
+        && got
+            .iter()
+            .zip(want)
+            .all(|(got, want)| got.to_bits() == want.to_bits())
+}
+
+/// The reply status and, when ready, the window's token and first sample.
+fn status_of(reply: &SpectrumCaptureReply<'_>) -> (SpectrumCaptureStatus, Option<(u64, u64)>) {
+    (
+        reply.status,
+        reply
+            .window
+            .as_ref()
+            .map(|window| (window.snapshot_token, window.captured_sample)),
+    )
+}
+
+/// #1595 gate 2. Turns red if the C ABI's read path analyzes, labels or counts a window
+/// differently from the core: on the single `(eq0 post-input, Stereo)` session (a boundary the
+/// tone reaches at full level), `arm` is done, a read is pending until 2,048 frames have rendered,
+/// then ready with token 1. The second round is token 2, and its bins equal word for word
+/// `SpectrumAnalysis::analyze_into` of the reference window (`prepare_host_runtime_with_spectrum`
+/// fed the same PCM from frame 0, read the same way), its raw planes equal that window, and its
+/// labels are the window's.
+#[test]
+fn a_capture_read_returns_the_reference_analysis() {
+    let target = SpectrumTarget::TrackPostInputBuiltins("eq0".into());
+    let tap = SpectrumCaptureRequest {
+        maximum_capture_bytes: spectrum_capture_resources_for(&target).retained_bytes,
+        target,
+        channels: SpectrumChannels::Stereo,
+    };
+    let mut rig = Rig::new(Some(SpectrumConfiguration {
+        preparation: SpectrumPreparation::Single(tap.clone()),
+        hop: None,
+    }));
+    let done = rig.capture(&ARM).expect("arm");
+    assert_eq!(
+        (done.status, done.adopted_epoch, done.selection_epoch),
+        (SpectrumCaptureStatus::Done, 1, 0)
+    );
+    for _ in 0..SPECTRUM_WINDOW_FRAMES / QUANTUM {
+        assert_eq!(
+            status_of(
+                &rig.capture(&read(ParameterChannel::Left, false))
+                    .expect("read")
+            ),
+            (SpectrumCaptureStatus::Pending, None)
+        );
+        rig.block();
+    }
+    let first = rig
+        .capture(&read(ParameterChannel::Left, false))
+        .expect("read");
+    assert_eq!(
+        status_of(&first),
+        (SpectrumCaptureStatus::Ready, Some((1, 0)))
+    );
+    let first = first.window.expect("a ready window");
+    assert!(first.right_db.is_none() && first.left_window.is_none());
+
+    rig.capture(&ARM).expect("arm again");
+    for _ in 0..SPECTRUM_WINDOW_FRAMES / QUANTUM {
+        rig.block();
+    }
+    let ready = rig
+        .capture(&read(ParameterChannel::Both, true))
+        .expect("read");
+    let mut reference = Reference::of(&tap);
+    let _: SpectrumSnapshot = one_window!(reference.service, reference.block());
+    let snapshot: SpectrumSnapshot = one_window!(reference.service, reference.block());
+    let mut want = host_core::SpectrumAnalysisResult::new();
+    host_core::SpectrumAnalysis::new()
+        .analyze_into(&snapshot, &mut want)
+        .expect("reference analysis");
+    assert!(
+        want.left_dbfs.iter().any(|bin| *bin > -60.0),
+        "a spectrum of signal"
+    );
+    let window = ready.window.as_ref().expect("a ready window");
+    assert_eq!(ready.status, SpectrumCaptureStatus::Ready);
+    assert_eq!(
+        (
+            window.target_kind,
+            window.target_id.as_ref(),
+            window.channels,
+            window.sample_rate_hz,
+            window.captured_sample,
+            window.end_sample,
+            window.snapshot_token,
+            window.source_underrun,
+        ),
+        (
+            SpectrumTargetKind::TrackPostInput,
+            "eq0",
+            ParameterChannel::Both,
+            want.sample_rate_hz,
+            want.captured_sample,
+            want.end_sample,
+            2,
+            want.source_underrun,
+        )
+    );
+    assert_eq!(want.token, 2);
+    assert_eq!((window.window_frames, window.bin_count), (2_048, 1_025));
+    assert_eq!(window.floor_db, -120.0);
+    assert!(same_words(&window.frequencies_hz, &want.frequencies_hz));
+    assert!(same_words(
+        window.left_db.as_deref().expect("left"),
+        &want.left_dbfs
+    ));
+    assert!(same_words(
+        window.right_db.as_deref().expect("right"),
+        &want.right_dbfs
+    ));
+    assert!(same_words(
+        window.left_window.as_deref().expect("left"),
+        &snapshot.window.left
+    ));
+    assert!(same_words(
+        window.right_window.as_deref().expect("right"),
+        &snapshot.window.right
+    ));
+}
+
+/// #1595 gate 3 (one-shot) and R6. Turns red if a read pops a window it then fails to deliver,
+/// or a configure measures a tap's one-plane read wrongly: on a session whose frame limit is
+/// 12,288 bytes, a ready stereo read (12,608 bytes) and a `Left` read with its window (16,696
+/// bytes) each answer `LIMIT_EXCEEDED` `spectrum.frame`, and a `Left` read (8,496 bytes) then
+/// returns that same window (token 1, frame 0). A configure of the tap is accepted there (its
+/// one-plane read fits) and refused `LIMIT_EXCEEDED` `spectrum.frame` at 8,192 bytes, setting
+/// nothing.
+#[test]
+fn a_read_the_frame_cannot_carry_consumes_nothing() {
+    let mut rig = Rig::limited(
+        SESSION,
+        Some(configuration()),
+        ControlLimits {
+            maximum_control_frame_bytes: 12_288,
+            ..limits()
+        },
+    );
+    rig.capture(&ARM).expect("arm");
+    for _ in 0..SPECTRUM_WINDOW_FRAMES / QUANTUM {
+        rig.block();
+    }
+    assert_eq!(
+        rig.capture(&read(ParameterChannel::Both, false)),
+        Err((StatusCode::LimitExceeded, "spectrum.frame".to_owned()))
+    );
+    assert_eq!(
+        rig.capture(&read(ParameterChannel::Left, true)),
+        Err((StatusCode::LimitExceeded, "spectrum.frame".to_owned()))
+    );
+    assert_eq!(
+        status_of(
+            &rig.capture(&read(ParameterChannel::Left, false))
+                .expect("read")
+        ),
+        (SpectrumCaptureStatus::Ready, Some((1, 0)))
+    );
+    assert!(
+        rig.configure(&single_request()).is_ok(),
+        "a tap whose one-plane read fits is accepted"
+    );
+
+    let mut small = Rig::limited(
+        SESSION,
+        None,
+        ControlLimits {
+            maximum_control_frame_bytes: 8_192,
+            ..limits()
+        },
+    );
+    small.block();
+    assert_eq!(
+        small.configure(&single_request()),
+        Err((StatusCode::LimitExceeded, "spectrum.frame".to_owned()))
+    );
+    assert_eq!(small.spectrum_state(), (None, 0, 0, Vec::new()));
+}
+
+/// #1595 gate 6 (one-shot). Turns red if a refusal writes service state or maps to a status
+/// outside D6's table: each refusal answers its status and code, and the next valid call behaves
+/// as if the refused one never ran.
+#[test]
+fn each_capture_refusal_answers_its_status_and_changes_nothing() {
+    let refusal = |status, code: &str| Err((status, code.to_owned()));
+    // `Unprepared`: no taps.
+    let mut bare = Rig::new(None);
+    assert_eq!(
+        bare.capture(&ARM),
+        refusal(StatusCode::NotFound, "spectrum.unprepared")
+    );
+
+    // On a single tap: `NotArmed`, `SelectSingle`, then `Busy`.
+    let mut rig = Rig::new(Some(configuration()));
+    assert_eq!(
+        rig.capture(&read(ParameterChannel::Both, false)),
+        refusal(StatusCode::ValidationFailed, "spectrum.not_armed")
+    );
+    assert_eq!(
+        rig.capture(&select(
+            SpectrumTargetKind::TrackPostPan,
+            "eq0",
+            ParameterChannel::Both
+        )),
+        refusal(StatusCode::ValidationFailed, "spectrum.select.single")
+    );
+    rig.capture(&ARM).expect("arm");
+    assert_eq!(
+        rig.capture(&ARM),
+        refusal(StatusCode::Backpressure, "spectrum.busy")
+    );
+    for _ in 0..SPECTRUM_WINDOW_FRAMES / QUANTUM {
+        rig.block();
+    }
+    assert_eq!(
+        status_of(
+            &rig.capture(&read(ParameterChannel::Both, false))
+                .expect("read")
+        ),
+        (SpectrumCaptureStatus::Ready, Some((1, 0))),
+        "the refused arm left the caller's"
+    );
+
+    // On a collection: `UnknownEntry`, `Channels`, `Busy` on a select, `Dropped`.
+    let mut rig = Rig::new(Some(collection()));
+    rig.block();
+    assert_eq!(
+        rig.capture(&select(
+            SpectrumTargetKind::TrackPostPan,
+            "eq1",
+            ParameterChannel::Both
+        )),
+        refusal(StatusCode::NotFound, "spectrum.entry.unknown")
+    );
+    assert_eq!(
+        rig.capture(&select(
+            SpectrumTargetKind::TrackPostInput,
+            "eq1",
+            ParameterChannel::Left
+        ))
+        .map(|reply| (reply.status, reply.selection_epoch)),
+        Ok((SpectrumCaptureStatus::Done, 1)),
+        "the refused select changed no selection epoch"
+    );
+    // The select armed the entry for nobody; the caller cancels it and arms its own.
+    rig.capture(&CaptureRequest::Cancel).expect("cancel");
+    rig.capture(&ARM).expect("arm");
+    assert_eq!(
+        rig.capture(&select(
+            SpectrumTargetKind::TrackPostPan,
+            "eq0",
+            ParameterChannel::Both
+        )),
+        refusal(StatusCode::Backpressure, "spectrum.busy")
+    );
+    for _ in 0..SPECTRUM_WINDOW_FRAMES / QUANTUM {
+        rig.block();
+    }
+    assert_eq!(
+        rig.capture(&read(ParameterChannel::Both, false)),
+        refusal(StatusCode::ValidationFailed, "spectrum.channels")
+    );
+    let ready = rig
+        .capture(&read(ParameterChannel::Left, false))
+        .expect("read");
+    let window = ready.window.expect("the window the refusals left");
+    assert_eq!(
+        (window.target_id.as_ref(), window.snapshot_token),
+        ("eq1", 1)
+    );
+    rig.capture(&ARM).expect("arm");
+    rig.block();
+    rig.rebuild(&remove_track("eq1"));
+    rig.until_promoted();
+    assert_eq!(
+        rig.capture(&read(ParameterChannel::Left, false)),
+        refusal(StatusCode::Unavailable, "spectrum.capture.dropped")
+    );
+    assert_eq!(
+        rig.capture(&select(
+            SpectrumTargetKind::TrackPostPan,
+            "eq0",
+            ParameterChannel::Both
+        ))
+        .map(|reply| reply.status),
+        Ok(SpectrumCaptureStatus::Done)
+    );
+}
+
+/// #1595 gate 7. Turns red if a replayed read pops again: after a second window is complete, the
+/// exact replay of the first ready read returns the same bytes, and the next new read returns the
+/// second window (token 2, frame 2,048): the replay consumed nothing.
+#[test]
+fn a_replayed_read_returns_its_bytes_and_pops_nothing() {
+    let mut rig = Rig::new(Some(configuration()));
+    rig.capture(&ARM).expect("arm");
+    for _ in 0..SPECTRUM_WINDOW_FRAMES / QUANTUM {
+        rig.block();
+    }
+    let request = read(ParameterChannel::Both, false);
+    rig.request += 1;
+    let id = rig.request;
+    let first = rig.capture_frame(id, &request);
+    assert_eq!(
+        decode_capture(&first).expect("ready").status,
+        SpectrumCaptureStatus::Ready
+    );
+    rig.capture(&ARM).expect("arm again");
+    for _ in 0..SPECTRUM_WINDOW_FRAMES / QUANTUM {
+        rig.block();
+    }
+    assert_eq!(
+        rig.capture_frame(id, &request),
+        first,
+        "the replay is the recorded reply"
+    );
+    assert_eq!(
+        status_of(&rig.capture(&request).expect("read")),
+        (SpectrumCaptureStatus::Ready, Some((2, 2_048)))
+    );
 }
