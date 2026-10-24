@@ -10,6 +10,7 @@ mod builtins_fixture_check;
 mod builtins_graph;
 mod capi;
 mod compressor;
+mod de_esser;
 mod delay;
 mod fixture_builtins;
 mod fixture_builtins_listening;
@@ -28,6 +29,7 @@ const SUBJECTS: &[&str] = &[
     "builtins-graph",
     "capi",
     "compressor",
+    "de-esser",
     "delay",
     "fixture-builtins",
     "fixture-builtins-listening",
@@ -47,6 +49,7 @@ fn run_subject(subject: &str) {
         "builtins-graph" => builtins_graph::main(),
         "capi" => capi::main(),
         "compressor" => compressor::main(),
+        "de-esser" => de_esser::main(),
         "delay" => delay::main(),
         "fixture-builtins" => fixture_builtins::main(),
         "fixture-builtins-listening" => fixture_builtins_listening::main(),

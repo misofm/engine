@@ -84,6 +84,7 @@ dependencies = [
  "capi",
  "compressor",
  "conformance",
+ "de-esser",
  "delay",
  "dsp-reference",
  "effect-compiler",

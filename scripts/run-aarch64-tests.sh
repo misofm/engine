@@ -201,5 +201,10 @@ rg -qF '"total_violations":0' "$binary_dir/aarch64-gate-expander-audit.json" ||
     fail 'audit gate-expander reported violations'
 rg -qF '"bank_available":true' "$binary_dir/aarch64-gate-expander-audit.json" ||
     fail 'audit gate-expander bound no bank at the native width'
+"${audit[@]}" de-esser | tee "$binary_dir/aarch64-de-esser-audit.json"
+rg -qF '"total_violations":0' "$binary_dir/aarch64-de-esser-audit.json" ||
+    fail 'audit de-esser reported violations'
+rg -qF '"bank_available":true' "$binary_dir/aarch64-de-esser-audit.json" ||
+    fail 'audit de-esser bound no bank at the native width'
 
 printf 'aarch64 release leg: PASS (%d expected failures)\n' "${#rows[@]}"

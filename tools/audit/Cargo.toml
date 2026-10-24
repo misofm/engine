@@ -17,6 +17,7 @@ builtins-compiler.workspace = true
 capi.workspace = true
 compressor.workspace = true
 conformance.workspace = true
+de-esser.workspace = true
 engine = { workspace = true, features = ["realtime-audit"] }
 delay.workspace = true
 dsp-reference.workspace = true

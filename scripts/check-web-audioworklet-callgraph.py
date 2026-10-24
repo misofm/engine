@@ -78,9 +78,9 @@ Modes
     Assert the artifact still computes in the vector family, and in four lanes only. Five rules,
     none of which is a raw op-count minimum:
 
-    1. **Roster presence.** Each of the fifteen named kernels in `KERNEL_ROSTER` -- the
+    1. **Roster presence.** Each of the nineteen named kernels in `KERNEL_ROSTER` -- the
        `process_bank`/`process_section`/`process_block`/`run_block` bodies of the shipped effect
-       library and the live route's indexed-ramp mix (#1220); the sixteenth, the collapsed
+       library and the live route's indexed-ramp mix (#1220); the twentieth, the collapsed
        limiter's, is held
        by the forwarding rule below -- must match exactly
        one arithmetic-carrying function. A kernel that vanished, that was renamed, or that
@@ -257,7 +257,7 @@ EIGHT_LANE = re.compile(r"(?:f32|f64|u32|i32)x8|(?i:simd8)|transpose_tile_8")
 
 # The smallest scalar budget any kernel gets, in instructions.
 #
-# Fourteen of the sixteen roster kernels -- the fifteen `KERNEL_ROSTER` rows and the collapsed
+# Eighteen of the twenty roster kernels -- the nineteen `KERNEL_ROSTER` rows and the collapsed
 # limiter's kernel -- currently emit *zero* scalar `f32` arithmetic, so a ceiling
 # expressed purely as a multiple of `vector` would be exactly zero for them: a single scalar
 # coefficient load introduced by an ordinary refactor would fail the gate. Eight instructions is
@@ -294,6 +294,8 @@ SCALAR_SLACK = 8
 #   route-mix-ramp       f32x4     22 /  0   ratio 0        (#1220; row added by its verdict NIT-1)
 #   dynamic-eq           f32x4    626 /  0   ratio 0        (dual, #17 S2)
 #   dynamic-eq           f32x4    316 /  0   ratio 0        (collapsed, #17 S2)
+#   de-esser             f32x4    561 /  0   ratio 0        (dual, #1920)
+#   de-esser             f32x4    283 /  0   ratio 0        (collapsed, #1920)
 #
 # Each ceiling is **four times the measured ratio, floored at 0.10**. Four times, because that is
 # the factor by which a *partial* de-vectorisation would have to stay below to escape: converting
@@ -420,6 +422,18 @@ KERNEL_ROSTER: tuple[tuple[str, str, float], ...] = (
     (
         "dynamic-eq f32x4 collapsed",
         r"dynamic_eq.*9DynamicEq.*4wide6f32x4.*9run_blockKb1_",
+        0.10,
+    ),
+    # #1920: the de-esser has the dynamic EQ's shape, `run_block::<MONO>`'s inner closures behind
+    # forwarding bank entries. Measured 561 / 0 and 283 / 0 on the named twin.
+    (
+        "de-esser f32x4 dual",
+        r"de_esser.*7DeEsser.*4wide6f32x4.*9run_blockKB",
+        0.10,
+    ),
+    (
+        "de-esser f32x4 collapsed",
+        r"de_esser.*7DeEsser.*4wide6f32x4.*9run_blockKb1_",
         0.10,
     ),
 )
