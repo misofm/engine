@@ -37,11 +37,12 @@ The bench unit test turns red when a row's record drifts from its validator; no 
 - Record names: `sixty_four_track_console_toggle` (input `odd_tracks_toggle_8_blocks`) and `sixty_four_track_console_one_per_bank` (input `one_track_per_bank`). Both are synthetic, on the standing fixture, with no warmup and no floor (`not_derived`, as the sparse row).
 - The frozen driver holds a second preallocated block per claim for a toggling input and picks the phase in `begin_block` from the block's first source sample; render only selects between two slices. The graph reads `played_planes` per block (`ArenaMembers::gather_planes`), so the phase reaches every gather.
 - Validator: 78 records, 50 `console_session` records (two rows times two rounds; the brief's "46 -> 48" counted rows, not records). Digest rules only: toggle != console and != sparse; one-per-bank != console and != idle. V8: `web_documents_valid` takes six documents, positions 4 and 5 pinned.
+- The new rows in `scripts/test-console-benchmark.sh` are the validator's own mutation coverage (one accept and one foreign-input reject per row, plus the aggregate digest rules), not a second test of the subject. The bench run also asserts in-run, before any record is emitted, that the toggle row renders neither the all-active nor the sparse row's bits (`TOGGLE_TRIPLE`).
 - Paths: `tools/bench/src/floor.rs` and `scripts/operator/{run,preflight}-console-benchmark.sh` changed as consequences (the floor match is exhaustive; the runner and preflight pin the record count).
 
 ### Stated limit
 
-After real signal the standing console's compressor needs about 620 blocks to rest (#1784: 79,200 samples). With a half period of 8 blocks no toggling lane ever rests, so the toggle row cannot thrash a packer: it measures the activity test under flipping input and, after #1782, that the packer adds nothing on lanes that never rest. A row that cycles rest needs a period above the rest bound, which a 1,000-block run cannot cycle meaningfully.
+After real signal the standing console's compressor needs about 620 blocks to rest (#1784: 79,200 samples). With a half period of 8 blocks no toggling lane ever rests, so the toggle row cannot thrash a packer: it measures the activity test under flipping input and, after #1782, that the packer adds nothing on lanes that never rest. A row that cycles rest needs a period above the rest bound, which a 1,000-block run cannot cycle meaningfully. No gate holds the one-per-bank row's width keying: a constant 4 would also pass at Simd8 (every eight-lane bank would then hold two active lanes), so the pattern rests on `InputSignal::OneTrackPerBank` as written.
 
 ## Evidence (descriptive; nothing tuned)
 

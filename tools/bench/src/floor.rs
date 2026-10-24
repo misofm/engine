@@ -184,7 +184,6 @@ pub(crate) fn floor_row(workload: Workload) -> Option<FloorRow> {
         | Workload::SixteenTrackStrip
         | Workload::SixtyFourTrackAppShape
         | Workload::SixtyFourTrackConsoleSparse
-        // The packing rows (#1783): their silent lanes are arithmetic no inventory counts.
         | Workload::SixtyFourTrackConsoleToggle
         | Workload::SixtyFourTrackConsoleOnePerBank => return None,
         Workload::NineTrackRaggedStrip => FloorRow {

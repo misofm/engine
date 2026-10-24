@@ -269,6 +269,15 @@ const SPARSE_TRIPLE: [Workload; 3] = [
     Workload::SixtyFourTrackConsoleSparse,
 ];
 
+/// The toggle row (issue #1783): the standing console with its odd tracks toggling between
+/// silence and the tone, read against the same session with every track active and with the odd
+/// tracks always silent.
+const TOGGLE_TRIPLE: [Workload; 3] = [
+    Workload::SixtyFourTrackConsole,
+    Workload::SixtyFourTrackConsoleSparse,
+    Workload::SixtyFourTrackConsoleToggle,
+];
+
 /// The bus-and-send row and the standing console row whose tracks it carries (issue #1227): one
 /// set of tracks, feeding the output directly on one row and through buses and sends on the other.
 /// Their digests must differ, and the run asserts it before it emits either record: an equality
@@ -353,6 +362,14 @@ pub(crate) fn main() {
     assert!(
         sparse != active && sparse != idle,
         "the sparse-activity row rendered the all-active or the idle row's output"
+    );
+    // And the toggle row's (issue #1783): its odd tracks spend half the run silent and half on
+    // the tone, so it renders neither the all-active row's bits nor the sparse row's. An equality
+    // with the sparse row means the driver never toggled.
+    let [active, sparse, toggle] = TOGGLE_TRIPLE.map(digest_of);
+    assert!(
+        toggle != active && toggle != sparse,
+        "the toggle row rendered the all-active or the sparse row's output"
     );
     // And the bus-and-send row's (issue #1227): its tracks feed buses and sends, so it does not
     // render the standing console's bits. An equality means its fixture never reached the plan.

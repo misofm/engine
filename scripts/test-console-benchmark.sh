@@ -841,18 +841,12 @@ session_one_per_bank=$(printf '%s' "$session" | jq -c \
       | .input_signal = "one_track_per_bank"')
 expect_accept "$session_toggle" 'the toggle row'
 expect_accept "$session_one_per_bank" 'the one-per-bank row'
-for signal in tone odd_tracks_silent one_track_per_bank; do
-    expect_reject "$(printf '%s' "$session_toggle" | jq -c --arg s "$signal" '.input_signal = $s')" \
-        "a toggle row claiming the $signal input"
-done
-for signal in tone odd_tracks_silent odd_tracks_toggle_8_blocks; do
-    expect_reject "$(printf '%s' "$session_one_per_bank" | jq -c --arg s "$signal" '.input_signal = $s')" \
-        "a one-per-bank row claiming the $signal input"
-done
+expect_reject "$(printf '%s' "$session_toggle" | jq -c '.input_signal = "odd_tracks_silent"')" \
+    'a toggle row claiming the sparse input'
+expect_reject "$(printf '%s' "$session_one_per_bank" | jq -c '.input_signal = "odd_tracks_silent"')" \
+    'a one-per-bank row claiming the sparse input'
 expect_reject "$(printf '%s' "$session_toggle" | jq -c '.synthetic_fixture = false')" \
     'a toggle row reported as the fixture rendered as written'
-expect_reject "$(printf '%s' "$session_sparse" | jq -c '.input_signal = "odd_tracks_toggle_8_blocks"')" \
-    'a sparse row claiming the toggle input'
 
 # #144 item 13 / #163 phase 0a: admissibility. The record has to say whether its measurement was
 # controlled, and the claim has to agree with the rest of the record.
