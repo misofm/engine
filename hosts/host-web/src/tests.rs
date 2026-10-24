@@ -9276,6 +9276,32 @@ mod structural_apply {
                 .all(|start| (start / quantum - ADOPTION).is_multiple_of(WINDOW)),
             "on the adoption grid: {frames:?}"
         );
+
+        // A lease still waiting for its activation when the swap adopts: taken at block 1 (its
+        // activation, block 3, on the boot grid), and the first track adopted at block 1. The
+        // activation follows the new grid, so the first frame is [4, 7).
+        let mut rig = Rig::boot(&empty, options, None);
+        assert_eq!(rig.host.render_next(), RESULT_OK);
+        assert_eq!(rig.host.set_meter_lease(true), RESULT_OK);
+        assert!(matches!(
+            rig.apply(&edits, 1),
+            Outcome::Applied {
+                path: EditPath::Rebuild,
+                ..
+            }
+        ));
+        let frames = published(&mut rig, 12 * WINDOW);
+        assert_eq!(
+            frames.first().copied(),
+            Some((1 + WINDOW) * quantum),
+            "a pending lease publishes from the new grid's first boundary: {frames:?}"
+        );
+        assert!(
+            frames
+                .iter()
+                .all(|start| (start / quantum - 1).is_multiple_of(WINDOW)),
+            "on the adoption grid: {frames:?}"
+        );
     }
 
     impl Rig {
