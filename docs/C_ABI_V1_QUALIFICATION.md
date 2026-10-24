@@ -74,8 +74,9 @@ read position. The source's producer moves to the replacement's source set right
 commit succeeds, which is the last fallible step, so a refused transaction moves nothing. From the
 commit on, `miso_engine_v1_source_submit_planar_f32` and `miso_engine_v1_source_seek` address the
 newest committed session: a host keeps feeding an unchanged source contiguously and must not reseek
-it. A removed source is refused as `source.id.unknown`, and PCM already accepted for it is discarded
-with its plan. An added source starts at generation 1, frame 0, until the host seeks it. A source
+it. A removed source keeps feeding the running plan until the replacement is adopted (#1325, below)
+and is refused as `source.id.unknown` from then on; PCM accepted for it that render has not read
+is discarded with the running plan. An added source starts at generation 1, frame 0, until the host seeks it. A source
 whose declaration the transaction changed restarts the same way, in a new ring at generation 1,
 frame 0; PCM accepted for it before the commit is discarded with its plan, so the host restarts
 its feed. For a session whose unchanged paths hold no DSP state, the output across the swap is
@@ -84,6 +85,21 @@ bit-identical to the post-edit session compiled fresh and fed the same PCM from 
 resource report counts the rings it carries and its carry program, as the plan will own them once
 active; the double-live admission counts a carried ring once, with the plan it displaces; and
 capi's epoch row charges the state inventory each epoch keeps.
+
+A transaction that removes a track or a submix removes it in two phases (#1325, decision 15
+D15-9). Phase 1, before the command returns OK and after every fallible step: the strip's fader is
+muted on both channels on the running plan with the session's `mute_ms` ramp `N`, and so is each
+route out of it whose tap precedes the fader; the writes are the records a value-only transaction
+making those mutes would write, under a gate publication that spends no revision. Phase 2: the
+replacement is published to adopt no earlier than `S = ceil_q(p + q + N + C)`, where `p` is the
+render clock read after the writes, `q` the quantum and `C` the longest compensation line, in the
+running plan, of a route out of a removed strip. The watermark reports the revision first at `S`,
+as `EXACT`. Until the adoption a removed source's submissions and seeks go to the running plan's
+producer, so the fade plays the PCM the host feeds; from the adoption on they are refused as
+`source.id.unknown`. A later structural transaction before `S` writes no second mute for a strip or
+route already ducked and inherits `S`. A transaction before `S` that restores a removed strip or
+source is refused as `BACKPRESSURE` until #1325b. `crates/capi/tests/strip_transitions.rs` holds
+the gates.
 
 Submix strips are editable through the same `SESSION_TRANSACTION_APPLY` transactions as track
 strips: opcodes `0203`-`0211` take a submix ID as their strip ID (#1204). Every such transaction is

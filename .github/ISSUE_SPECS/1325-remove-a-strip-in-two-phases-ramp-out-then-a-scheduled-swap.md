@@ -276,3 +276,90 @@ two render calls, so the ramp starts at `p`).
   a withdrawn candidate is the running plan P0's own inventory
   (`PlanStateInventory::across_withdrawn`), with its source rows filtered to those that A carried
   vacant. The restored source's carry program, the producer check and the adoption are unchanged.
+
+## Decision record, slice 1325a (2026-10-24)
+
+Slice 1325a implements D1-D5, D7, D8 and the overlay *record* of D6; slice 1325b does D6's restore
+and gate 4. Checked against `origin/main` `068742aba`.
+
+- **The 1325b boundary.** A transaction during phase 1 whose model holds a strip or a source of
+  the running plan's duck overlay (a restore) is refused as `CommandError::Backpressure` before
+  anything is prepared, so the caller republishes the withdrawn candidate. Without the base overlay
+  of 1325b the restored strip would carry its ducked fader and stay muted. Once the watermark
+  reports the removal, the same edit is an added strip (#1288). 1325b removes the refusal and the
+  retry in `crates/capi/tests/plan_swap_race.rs` (`Control::restore_retries`) that depends on it.
+- **D2 records come from the classifier.** `plan_strip_transition` classifies the running plan's
+  base model with the overlay applied against the same with the new mutes
+  (`classify_live_delta_with_monitor`, ramps `LiveRamps::for_session(next)`, no edit ramps, the
+  base's monitor overlay on both sides). The records are what a value-only transaction making the
+  same mutes writes, so gate 1's reference is exact, a strip or route already in the overlay gets
+  no record (no second write), and a following route gets its seven-word record. A route out of a
+  ducked strip is muted only if its tap precedes the fader: muting a `post_fader`/`post_pan` route
+  into the output is rebuild-only (`RebuildOnly(Optimisation)`), and the fader mute reaches it.
+- **D7 signature.** `plan_strip_transition(base: &SuccessorBase, overlay: &DuckOverlay, next:
+  &SessionModel) -> Result<StripTransition, StripTransitionError>`. The `successor: &PreparedHost`
+  argument is left out until #1324 adds `restarted_strips()` to the duck set. `S` is not a field:
+  `p` is read after the writes, so `StripTransition::not_before(p, q)` returns it, and the overlay
+  keeps it (`DuckOverlay::raise_not_before`, the maximum of its own and the new one). An error is an
+  invariant fault (`Internal`), before anything is reserved.
+- **Adoption and `p` (R1).** The reservation is taken with the classification's adoption as
+  before; after the commit, the producer moves, the D2 writes and the `p` read,
+  `PlanReplacementReservation::set_adoption(NoEarlierThan(S))` replaces it. Because the reservation
+  borrows the publisher, `p` is read through a new `PlanReplacementReservation::render_clock`
+  (the same `Acquire` load as `PlanPublisher::render_clock`).
+- **Stamp (R2).** The writes go to the running plan's cells under
+  `stamp_monitor(last_published)` on its gate, checked as the last fallible step before the commit
+  and taken again (same key) after it, then `publish_key`. The gate never publishes `r`.
+- **Which rebuilds inherit `S`.** A transaction and a monitor rebuild that supersede a candidate in
+  phase 1 inherit the overlay's `S` (`NoEarlierThan`). A declared discontinuity ducks nothing and
+  stays `Next` (#1323 D2: it need not continue the running plan's output); the overlay stays in the
+  running epoch's kept base, so a transaction that later supersedes the discontinuity successor
+  inherits `S` again.
+- **D4 routing (R5).** `submit`, `seek` and `seek_at` (and their unserviced forms) look the source
+  up in the kept holder's overlay first (one binary search, no allocation, no lock) and go to that
+  epoch's producers on a hit. `session_seek` and `seek_report` are unchanged.
+- **`C`.** The rows of `PlanStateInventory::delay_lines` whose edge is a route's `RouteSource` or
+  `RouteDestination` edge; a route's two lines add. Root approved a read-only accessor
+  `PlanStateInventory::delay_lines` in `prepare.rs` for this (the field was private).
+- **Paths outside the scope note, root-approved.** `crates/host-core/src/prepare.rs` (the
+  accessor, nothing else). Seven test files whose tests encoded the old contract (a removal adopted
+  at the next block, a removed source refused and discarded at the commit):
+  `crates/capi/src/runtime/tests.rs` (helpers `feed_and_render_until_direct`/`_c`; five tests render
+  until the watermark reports the removal, and the D4 checks move after the adoption with both
+  sides asserted), `crates/capi/src/runtime/supersede_tests.rs` (renders until the adoption),
+  `crates/capi/tests/empty_boot.rs` (silence after the adoption), `crates/capi/tests/plan_swap_race.rs`
+  (the race accepts BACKPRESSURE only on an add of `a-race` while its removal is committed and the
+  watermark, read before the submit, has not reported it; it retries once the watermark has; the
+  race ends only once the last revision is adopted, and the withdrawal count adds the retries),
+  `crates/control-plane/tests/spectrum_monitor.rs` (the promotion bound), `hosts/host-web/src/tests.rs`
+  (the discard count: none before `S`, two blocks after it) and `hosts/host-web/tests/control_parity.rs`
+  (render until the adoption). Both hosts change: the browser runs the same control-plane rebuild.
+
+### Gates and test value (1325a)
+
+- `crates/capi/tests/strip_transitions.rs::a_removed_strip_ramps_out_then_leaves_at_s` (gates 1, 2,
+  6): red if a removal still cuts at the swap, if `S` lacks `+ q` or `C`, if a pre-fader send is
+  left unducked, if the watermark reports the removal before `S` or with another outcome, if the
+  removed source is retired at the commit (refused phase-1 submits), or if a block from the commit
+  through the adoption allocates on the render thread.
+- `...::a_supersession_in_phase_one_keeps_s_and_the_feed` (gates 3, 5): red if a superseding
+  candidate drops the inherited `S`, if a second transaction writes a second mute for an overlay
+  strip, or if the producer of a source removed across a withdrawn candidate is not returned to the
+  running epoch (#1310 D5 step 5).
+- `host_core::transition::tests::a_transition_ducks_the_removed_strips_outside_the_overlay`: red if
+  the duck set includes an overlay strip, if `C` is not the route's compensation line, or if a
+  route whose tap follows the fader is muted.
+- Mutants, each recorded red (committed tree, restored with `git checkout` and `touch`): adoption
+  left `Next`; `S` without `+ q`; `S` without `C`; no route records; source routing off; no `S`
+  inheritance; no overlay exclusion and no overlay applied (second write); #1310 D5 step 5 removed;
+  an allocation in `PlanAdoption::admits` (the test process aborts); and, on the unit test, no
+  overlay exclusion, `C` = 0, and post-fader routes muted.
+
+### Stated limits (1325a)
+
+- A removed strip that is already silent (muted long before) still waits for `S`: the control plane
+  cannot know that its route lines are empty.
+- The overlay is not charged in the replacement admission; it holds IDs only.
+- `submit_unserviced` (the browser's `process()` path) after render adopted the successor but before
+  the next service step still routes a removed source to the retiring plan's producer: the PCM is
+  accepted and then discarded with that plan, as D4 documents for PCM queued past `S`.

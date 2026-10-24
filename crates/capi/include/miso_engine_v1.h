@@ -315,9 +315,23 @@ extern "C" {
  * the plan keeps every source it leaves unchanged playing: the source keeps its ring, its
  * generation and its read position, so the host neither seeks nor refills it, and must not reseek
  * it. From the moment the command returns OK, source submissions and seeks address the newest
- * committed session, whether or not its plan has been swapped in yet. A source the transaction
- * removed is refused as "source.id.unknown"; PCM already accepted for it is discarded with its
- * plan. A source the transaction added starts at generation 1, frame 0, until the host seeks it.
+ * committed session, whether or not its plan has been swapped in yet, with one exception: a source
+ * the transaction removed (issue 1325).
+ *
+ * Removing a strip in two phases (issue 1325). A transaction that removes a track or a submix
+ * does not cut it at the swap. Phase 1: before the command returns OK, the strip's fader is muted
+ * on both channels on the running plan with the session's mute_ms ramp N, and so is each of its
+ * routes whose tap precedes the fader. Phase 2: the replacement plan is adopted no earlier than
+ * S = ceil_q(p + q + N + C), where p is the render clock after the mutes were written, q the
+ * render quantum and C the longest compensation delay of a route out of a removed strip. The
+ * watermark reports the transaction's revision first at S. Until then a source the transaction
+ * removed still feeds the running plan: its submissions and seeks are accepted and its PCM plays
+ * the fade, so the host keeps feeding it. From the adoption on it is refused as
+ * "source.id.unknown", and PCM accepted for it that render has not read is discarded with the
+ * running plan. A later transaction before S writes no second fade for a strip already fading,
+ * and its replacement is adopted no earlier than the same S. A transaction before S that restores
+ * a removed strip or source is refused as BACKPRESSURE; retry it once the watermark reports the
+ * removal. A source the transaction added starts at generation 1, frame 0, until the host seeks it.
  * A source whose declaration the transaction changed restarts like an added one: in a new ring at
  * generation 1, frame 0, with the PCM accepted for it before the command discarded with its plan;
  * the host restarts its feed.
@@ -478,7 +492,8 @@ extern "C" {
  * replacement. A source that the transaction added or changed restarts in a new ring at
  * generation 1, frame 0, with its seek report at generation 0: a seek held or queued on the old
  * ring is discarded with it, and the host seeks the new one after the command returns OK. A seek
- * on a source that the transaction removed is refused as "source.id.unknown".
+ * on a source that the transaction removed is accepted until the replacement is adopted and
+ * refused as "source.id.unknown" from then on (issue 1325).
  *
  * Far past anchors. An anchor that render has already passed is not refused. The seek applies no
  * later than the first block that begins after the call returns, at source frame F plus the
