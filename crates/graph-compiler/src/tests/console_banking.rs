@@ -306,9 +306,53 @@ fn render_arm(
     blocks: u64,
     forced_off: bool,
 ) -> Rendered {
-    let envelope = artifact.envelope();
-    let frames = envelope.quantum.0 as usize;
+    let frames = artifact.envelope().quantum.0 as usize;
     let blocks = blocks.max(artifact.report().output_latency.0.div_ceil(frames as u64) + 4);
+    let (mut plan, sinks) = bind_arm(artifact, tracks, forced_off);
+    let mut output = Vec::new();
+    let mut pcm = vec![0.0_f32; frames * 2];
+    for block in 0..blocks {
+        plan.render(
+            RenderIo {
+                output: PlanarBufferMut::try_new(&mut pcm, 2, frames, frames).expect("output"),
+            },
+            RenderTime {
+                absolute_sample: block * frames as u64,
+            },
+        )
+        .expect("render");
+        output.extend(pcm.iter().map(|sample| folded(*sample)));
+    }
+    let collapse = plan.bank_collapse_counters();
+    let units = plan.unit_eligibility();
+    drop(plan);
+    Rendered {
+        collapse,
+        units,
+        blocks,
+        output,
+        tracks: sinks
+            .iter()
+            .map(|sink| {
+                sink.lock()
+                    .expect("recorder")
+                    .iter()
+                    .flat_map(|(left, right)| [left, right])
+                    .map(|bits| folded(f32::from_bits(*bits)))
+                    .collect()
+            })
+            .collect(),
+    }
+}
+
+/// Bind `artifact` as [`render_arm`] does, armed (or forced off) and not yet rendered: the plan and
+/// each track's post-matrix recorder.
+fn bind_arm(
+    artifact: PreparedGraphBuiltinsArtifact,
+    tracks: &[TrackShape],
+    forced_off: bool,
+) -> (PreparedRenderPlan, Vec<BitSink>) {
+    let envelope = artifact.envelope();
     let index_of = |track_id: &str| -> usize {
         track_id
             .strip_prefix("ch")
@@ -356,40 +400,7 @@ fn render_arm(
         .plan;
     plan.arm_mono_collapse(&|track: &str| !tracks[index_of(track)].feed.stereo);
     plan.force_mono_collapse_off(forced_off);
-    let mut output = Vec::new();
-    let mut pcm = vec![0.0_f32; frames * 2];
-    for block in 0..blocks {
-        plan.render(
-            RenderIo {
-                output: PlanarBufferMut::try_new(&mut pcm, 2, frames, frames).expect("output"),
-            },
-            RenderTime {
-                absolute_sample: block * frames as u64,
-            },
-        )
-        .expect("render");
-        output.extend(pcm.iter().map(|sample| folded(*sample)));
-    }
-    let collapse = plan.bank_collapse_counters();
-    let units = plan.unit_eligibility();
-    drop(plan);
-    Rendered {
-        collapse,
-        units,
-        blocks,
-        output,
-        tracks: sinks
-            .iter()
-            .map(|sink| {
-                sink.lock()
-                    .expect("recorder")
-                    .iter()
-                    .flat_map(|(left, right)| [left, right])
-                    .map(|bits| folded(f32::from_bits(*bits)))
-                    .collect()
-            })
-            .collect(),
-    }
+    (plan, sinks)
 }
 
 /// Every track's bits, and the output's, are the oracle's; `what` names the case.
@@ -1569,5 +1580,203 @@ fn a_chain_behind_a_sidechained_per_node_effect_is_not_armed_on_it() {
         &armed,
         &dual,
         "a chain behind a keyed compressor, armed against dual",
+    );
+}
+
+/// [`try_compile_console_model_at`] at the host's width, with every delay insert given a live
+/// control lane, so it binds as a live-controlled per-node instance a plan swap can move.
+fn compile_with_live_delays(
+    model: &session::SessionModel,
+    registry: &NativeEffectRegistry,
+) -> PreparedGraphBuiltinsArtifact {
+    let session = compile_session(
+        model,
+        CompileCaps {
+            max_compiled_model_bytes: u64::MAX,
+            max_requested_runtime_bytes: u64::MAX,
+            max_single_allocation_bytes: u64::MAX,
+            max_queue_items: u64::MAX,
+            max_source_ring_frames: u64::MAX,
+            max_source_ring_bytes: u64::MAX,
+        },
+    )
+    .expect("compiled console model");
+    let builtins = prepare_session_builtins(
+        &session,
+        &[],
+        BuiltinCompileCaps {
+            maximum_total_state_bytes: u64::MAX,
+            maximum_total_retained_payload_bytes: u64::MAX,
+            maximum_total_meter_items: u64::MAX,
+            maximum_total_meter_bytes: u64::MAX,
+            maximum_single_allocation_bytes: u64::MAX,
+            maximum_meter_streams: u64::MAX,
+            maximum_period_frames: u32::MAX,
+            maximum_peak_hold_frames: u32::MAX,
+            maximum_smoothing_samples: u32::MAX,
+        },
+    )
+    .expect("prepared console builtins");
+    let mut effects = prepare_native_session_effects(
+        &session,
+        registry,
+        EffectCompileCaps {
+            maximum_total_state_bytes: 1 << 22,
+            maximum_scratch_bytes: 1 << 20,
+            maximum_automation_spans_per_block: 32,
+        },
+    )
+    .expect("prepared console effects");
+    for entry in effects
+        .entries
+        .iter_mut()
+        .filter(|entry| entry.factory.descriptor().id.as_str() == Kind::Delay.native_id())
+    {
+        let (_writer, lane) = effect_contract::effect_control_lane(
+            effect_contract::EffectLaneSpec {
+                shape: effect_contract::EffectLaneShape::from_descriptor(
+                    entry.factory.descriptor(),
+                    0,
+                ),
+                bypass: entry.initial_bypass,
+                observation_depth: 0,
+            },
+            &engine::realtime::LiveValuesSuperseded::new(),
+        )
+        .expect("a lane");
+        entry.control = Some(Box::new(lane));
+    }
+    GraphCompiler::compile_with_builtins(GraphBuiltinsCompileRequest {
+        input_floors: Default::default(),
+        dispatch: host_dispatch(),
+        plan_id: 1_899,
+        effects,
+        builtins,
+        caps: integration_caps(),
+        gain_liveness: crate::GainLiveness::FIXED,
+    })
+    .unwrap_or_else(|failure| panic!("compile: {:?}", failure.diagnostics))
+}
+
+/// Issue #1899 R3, the swap carry: a per-node instance's agreement fact travels with its state.
+///
+/// The sticky rig's session (`[EQ] -> live-controlled delay (5 ms, per node) -> [gate]`, the delay
+/// an [`EpisodeEffect`], the gate a [`PassBank`]), rendered by a predecessor plan through
+/// [`EPISODE`] and two blocks past it, then by a successor that takes every delay instance by
+/// pointer (`LiveControlEffect::move_from`) and nothing else. The successor's later chains are
+/// fresh, so they agree and would collapse at once; the delay's line holds the episode's echo, so
+/// the successor must start from the predecessor's `false`. Armed and forced off render the same
+/// bits.
+///
+/// Red if the carry hands the successor `true` (node to node, or lane to node): the fresh later
+/// chain collapses on the swap block and copies the left echo over the right one.
+#[test]
+fn a_swap_carries_a_per_node_effects_agreement_with_its_state() {
+    const SWAP: u64 = 6;
+    const BLOCKS: u64 = 12;
+    let (console, tracks) = split_strip_tracks(8, Kind::Delay);
+    let mut model = console_session(&console, &tracks);
+    for track in &mut model.tracks {
+        track.inserts.effects[0].params = vec![EffectParam {
+            parameter_id: 1,
+            channel: ParameterChannel::Both,
+            unit: ParameterUnit::Milliseconds,
+            value: 5.0,
+        }];
+    }
+    let registry = double_registry(Role::Episode);
+    // Each track's post-matrix bits over the predecessor's blocks, then the successor's.
+    let run = |forced_off: bool| -> Vec<Vec<u32>> {
+        let (mut before, before_sinks) = bind_arm(
+            compile_with_live_delays(&model, &registry),
+            &tracks,
+            forced_off,
+        );
+        let (mut after, after_sinks) = bind_arm(
+            compile_with_live_delays(&model, &registry),
+            &tracks,
+            forced_off,
+        );
+        let lanes = |plan: &mut PreparedRenderPlan| {
+            graph::bank_effect_lanes(plan)
+                .expect("a graph plan")
+                .into_iter()
+                .filter(|(_, lane)| matches!(lane.location, graph::GraphEffectSite::Node(_)))
+                .collect::<BTreeMap<_, _>>()
+        };
+        let predecessor = lanes(&mut before);
+        let moves: Vec<_> = lanes(&mut after)
+            .into_iter()
+            .map(|(key, lane)| graph::GraphEffectMove {
+                successor: lane.location,
+                predecessor: predecessor[&key].location,
+            })
+            .collect();
+        assert_eq!(moves.len(), tracks.len(), "every delay instance moves");
+        graph::install_carry_program(
+            &mut after,
+            graph::GraphCarryProgram {
+                predecessor: graph::plan_identity(&mut before).expect("a graph plan"),
+                sources: Box::default(),
+                timeline: false,
+            },
+        )
+        .expect("carry program");
+        graph::install_effect_carry(&mut after, moves, 0).expect("effect carry");
+        let frames = after.envelope().quantum.0 as usize;
+        let mut pcm = vec![0.0_f32; frames * 2];
+        let mut block = |plan: &mut PreparedRenderPlan, index: u64| {
+            plan.render(
+                RenderIo {
+                    output: PlanarBufferMut::try_new(&mut pcm, 2, frames, frames).expect("output"),
+                },
+                RenderTime {
+                    absolute_sample: index * frames as u64,
+                },
+            )
+            .expect("render");
+        };
+        for index in 0..SWAP {
+            block(&mut before, index);
+        }
+        assert_eq!(
+            after.adopt_predecessor_plan(&mut before),
+            engine::realtime::CarryOutcome::Carried
+        );
+        for index in SWAP..BLOCKS {
+            block(&mut after, index);
+        }
+        drop((before, after));
+        before_sinks
+            .iter()
+            .zip(&after_sinks)
+            .map(|(before, after)| {
+                let mut bits: Vec<u32> = Vec::new();
+                for sink in [before, after] {
+                    bits.extend(
+                        sink.lock()
+                            .expect("recorder")
+                            .iter()
+                            .flat_map(|(left, right)| [*left, *right]),
+                    );
+                }
+                bits
+            })
+            .collect()
+    };
+    let (armed, dual) = (run(false), run(true));
+    let frames = armed[0].len() / BLOCKS as usize;
+    let swap = SWAP as usize * frames;
+    assert!(
+        dual[0][swap..swap + frames]
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .any(|[left, right]| left != right),
+        "the carried delay echoes the episode into one plane on the swap block"
+    );
+    assert!(
+        armed == dual,
+        "the swapped render, armed against forced off"
     );
 }
