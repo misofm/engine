@@ -77,11 +77,20 @@ First measure, then change only what the measurement names. Run the #1384 gate 6
 - **After (`e54b112dc`), same workload, per boot 23.48 ms (-6.6 %):** `lower` whole 1125 us
   (4.79 %); level and schedule loops 54 us (0.23 %); edge loop 134 us (0.57 %); the other sites
   unchanged within noise.
-- **Gate 2 (no bit moved; PR evidence).** `sdk_render_oracle 64 < F`, base `068742aba` and branch
+- **#1384 gate 4 (no bit moved; PR evidence).** `sdk_render_oracle 64 < F`, base `068742aba` and branch
   `e54b112dc`, built in separate scratch target dirs: equal digests for all four:
   `parametric-eq-nine-track.json` `2938bb78...f1f5c8`, `console-sixty-four-track.json`
   `fa320199...03e9244c`, `console-sixty-four-track-app.json` `ac23bd04...888430cf`,
   `console-sixty-four-track-sends.json` `bcf300dd...35d94768`. (Two differ from #1384's record
   because `main` moved since; base equals branch.)
-- **No new test**, as scoped: the change is a representation change under the existing `topo`,
-  lowering and compile-shape tests, and the gate-2 digests.
+- **Merged head.** After merging `origin/main` (`b476e8c59`), the merged head `7c052ee7a` was
+  checked the same way against `b476e8c59`: the four #1384 gate-4 digests are equal
+  (`gate4-merged.txt` in the stream scratchpad).
+- **Test (verifier fold).** `a_wrong_lowering_hint_changes_no_program_and_no_bind` (graph crate)
+  builds the two-node binding plan with `new_hinted` and a permuted hint, then with an
+  out-of-range hint, and asserts `program()` and the bind result equal the `new()` plan's.
+  Test value: it turns red if lowering takes a hint without checking that it names the node's ID
+  (a defect no other test catches, because every compiled plan's hint is correct); recorded red
+  on that mutant (`.is_some_and(|node| node.id == *id)` -> `.is_some()`).
+- The change is otherwise a representation change under the existing `topo`, lowering and
+  compile-shape tests and the #1384 gate-4 digests.
