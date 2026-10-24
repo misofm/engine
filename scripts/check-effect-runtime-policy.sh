@@ -48,6 +48,10 @@ done
 # mechanical sweep of all nine effect crates. That is a coordinated cross-crate change, not a
 # contract cleanup, and #95 hands it over with the counts pinned here so it cannot drift first.
 #
+# #15 S1 raised `state_error` (the structural contract/runtime error bridge above) and
+# `apply_automation` (effect-runtime has no shared span pass; each effect's pass commits into its
+# own ramp layout, so a shared one is the #95 sweep, not one effect's change) by one each.
+#
 #   pattern                          count  owner
 duplicated_helper_manifest() {
     cat <<'MANIFEST'
@@ -70,8 +74,8 @@ fn\s+map_normalized\(                    0  95
 fn\s+inverse_map_normalized\(            0  95
 fn\s+parameter_value_valid\(             3  95
 fn\s+validate_state_lengths\(            2  95
-fn\s+state_error\(                       6  95
-fn\s+apply_automation\(                  4  95
+fn\s+state_error\(                       7  95
+fn\s+apply_automation\(                  5  95
 fn\s+discontinuity_reset\(               4  95
 MANIFEST
 }

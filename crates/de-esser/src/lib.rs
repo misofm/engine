@@ -140,6 +140,8 @@ const MODE_CHOICES: [EnumChoice; 2] = [
     },
 ];
 
+/// The detector choices. The selected tap is also the band the split arm cuts and the listen arm
+/// plays, so split mode with the high-pass detector is a dynamic high cut.
 const DETECTOR_CHOICES: [EnumChoice; 2] = [
     EnumChoice {
         value: 1.0,
@@ -527,6 +529,10 @@ fn set_lane_words<L: Lane>(s: &mut Chan<L>, lane: usize, values: &[f32; CHAN_WOR
     *s = chan_from_words(&words);
 }
 
+const fn state_error(code: &'static str) -> StatePayloadError {
+    StatePayloadError { code }
+}
+
 fn codec_error(error: payload::StatePayloadError) -> StatePayloadError {
     StatePayloadError { code: error.code }
 }
@@ -662,7 +668,7 @@ impl<L: Lane, const CONNECTED: bool> DeEsser<L, CONNECTED> {
 
     /// Validates one block's spans for one lane, commits the accepted values and retargets the
     /// ramps whose design moved. The one division D11 permits happens in `LinearRamp::set_target`.
-    fn take_spans(
+    fn apply_automation(
         &mut self,
         spans: &[PreparedAutomationSpan],
         first_sample: u64,
@@ -957,9 +963,7 @@ impl<L: Lane, const CONNECTED: bool> DeEsser<L, CONNECTED> {
         for (index, value) in values.iter_mut().enumerate() {
             *value = read(7 + index);
             if is_negative_zero(*value) || !parameter_value_valid(&SPECS[index], *value) {
-                return Err(StatePayloadError {
-                    code: "effect.state.parameter",
-                });
+                return Err(state_error("effect.state.parameter"));
             }
         }
         let mut words = [0.0_f32; CHAN_WORDS];
@@ -978,9 +982,7 @@ impl<L: Lane, const CONNECTED: bool> DeEsser<L, CONNECTED> {
             || !(-40.0..=0.0).contains(&gain)
             || is_negative_zero(gain)
         {
-            return Err(StatePayloadError {
-                code: "effect.state.signal",
-            });
+            return Err(state_error("effect.state.signal"));
         }
         let designs = targets(&values, self.sample_rate);
         for (index, chunk) in words[7..].chunks_exact(4).enumerate() {
@@ -995,17 +997,13 @@ impl<L: Lane, const CONNECTED: bool> DeEsser<L, CONNECTED> {
                 && (chunk[3] != 0.0 || chunk[0].to_bits() == chunk[1].to_bits())
                 && payload::ramp_path_inside(ramp, WORD_BOUNDS[index], RAMP_SAMPLES);
             if !valid {
-                return Err(StatePayloadError {
-                    code: "effect.state.parameter",
-                });
+                return Err(state_error("effect.state.parameter"));
             }
         }
         let current = |index: usize| words[7 + index * 4];
         if transition_norm(current(C1), current(C1 + 1), current(C1 + 2)) > RAMP_PATH_NORM_TOLERANCE
         {
-            return Err(StatePayloadError {
-                code: "effect.state.parameter",
-            });
+            return Err(state_error("effect.state.parameter"));
         }
         Ok((words, values))
     }
@@ -1017,9 +1015,7 @@ impl<L: Lane, const CONNECTED: bool> DeEsser<L, CONNECTED> {
         input: &StatePayloadInput<'_>,
     ) -> Result<(), StatePayloadError> {
         if state_layout_version != STATE_LAYOUT_VERSION {
-            return Err(StatePayloadError {
-                code: "effect.state.version",
-            });
+            return Err(state_error("effect.state.version"));
         }
         let layout = self.layout();
         let lengths = (input.common.len(), input.left.len(), input.right.len());
@@ -1045,7 +1041,7 @@ impl<const CONNECTED: bool> PreparedNativeEffect for DeEsser<f32, CONNECTED> {
 
     fn process(&mut self, block: EffectProcessBlock<'_>) -> ProcessReport {
         let mut reports = [ProcessReport::default(); MAX_WIDTH];
-        self.take_spans(block.automation, block.first_sample, 0, &mut reports[0]);
+        self.apply_automation(block.automation, block.first_sample, 0, &mut reports[0]);
         let frames = block.frames();
         let sidechain = if CONNECTED { block.sidechain } else { None };
         self.run_block::<false>(block.left, block.right, sidechain, frames, &mut reports);
@@ -1088,9 +1084,7 @@ fn checked_track(track_index: u32, width: usize) -> Result<usize, StatePayloadEr
     usize::try_from(track_index)
         .ok()
         .filter(|&track| track < width)
-        .ok_or(StatePayloadError {
-            code: "effect.state.track",
-        })
+        .ok_or(state_error("effect.state.track"))
 }
 
 /// One lane's prepared defaults in bytes: every parameter of both channels, then the link mode.
@@ -1116,7 +1110,7 @@ impl<L: Lane> DeEsser<L, false> {
             let start = block.automation_offsets[track] as usize;
             let end = block.automation_offsets[track + 1] as usize;
             let spans = &block.automation[start..end];
-            self.take_spans(spans, block.first_sample, track, lane_report);
+            self.apply_automation(spans, block.first_sample, track, lane_report);
         }
         let frames = block.frames as usize;
         self.run_block::<MONO>(block.left, block.right, None, frames, &mut reports);

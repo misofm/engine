@@ -73,19 +73,23 @@ Decisions (root unless marked):
 - Implementer: the smoother is the rate form `G' = snap(G + c (t - G))` (the gate's, with the
   #1336 coefficient ramps), attack while `|t| > |G|`; the snap is the compressor's plateau edge
   `5.38e-7` dB (#1784 B1), without which a 500 ms release rests after about 25 s.
-- Implementer, **for root review**: the tail is `NodeTailBound::UNBOUNDED`, not the scope note's
-  `rate_follower_rest_samples` bound. The split and listen arms carry the SVF's ring-out, so a
-  follower bound alone under-declares; the certified live-SVF bound with variable Q is #1372's
-  derivation (the EQ states `UNBOUNDED`-equivalent today). The tail-contract gate is replaced by
-  `tests/rest.rs` (exact rest is reached; a skip equals a render). #1378 must count this effect.
+- Tail (root ruling, accepted): `NodeTailBound::UNBOUNDED`. The split and listen arms carry the
+  SVF ring-out, so a follower bound alone under-declares. Reopening condition: when #1372 lands the
+  certified bound for a live, Q-variable SVF, this effect states its bound from it, and #1378
+  (retire the Infinite tail) counts this effect. `tests/rest.rs` replaces the tail-contract gate.
 - Implementer: the "nominal region" of the 0.1 dB gate is computed, not the note's "1 octave at
   Q >= 1": 3.72 / 2.75 / 1.83 / 1.08 / 0.58 octaves from the centre at Q 0.5 / 1 / 2 / 4 / 8, for
   any range up to 40 dB (`dsp-research/de-esser.md`).
-- Implementer, **for root review**: the span-validation method is named `take_spans`, and the
-  payload error is built inline. `scripts/check-effect-runtime-policy.sh`'s #95 ratchet pins
-  `fn apply_automation(` at 4 and `fn state_error(` at 6, and that script is outside S1's paths.
-  The method is the same per-effect span pass the ratchet counts; root decides whether to bump the
-  rows and rename it.
+- #95 ratchet (root ruling): effect-runtime has no shared span pass (`effect_contract::valid_runtime_span`
+  is the contract's whole-block law, which a drop-and-count effect cannot call), and each effect's
+  pass commits into its own ramp layout, so a shared one would be the #95 sweep across the effects.
+  The de-esser keeps the real names `apply_automation` and `state_error`, and
+  `scripts/check-effect-runtime-policy.sh` raises those two rows by one each (to 5 and 7), with the reason.
+- Selected tap (root, accepted): split mode with the high-pass detector is a dynamic high cut;
+  stated on the detector parameter's doc.
+- Gain snap in the shared module (root, accepted): class A. Only `effect_runtime::dynamic_band` has
+  it; the compressor, gate and multiband code is unchanged against main 82024d367 (`git diff` empty),
+  so no shipped bit moves.
 - Production size: about 1,650 lines (`lib.rs` 1,378, `kernel.rs` 277, `dynamic_band.rs` 138),
   over the 2026-08-23 comment's 600. The bulk is the contract surfaces the shipped effects carry
   (descriptor table, state payload and its validation, bank, collapse, rest, clocks, lane-defaults
