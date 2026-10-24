@@ -68,6 +68,8 @@ use math::fast_db::{fast_gain_from_db, fast_level_db};
 
 pub mod corpus;
 #[cfg(test)]
+mod padding_tests;
+#[cfg(test)]
 mod rest_tests;
 mod shim;
 #[cfg(test)]
@@ -945,6 +947,10 @@ struct Instance<L: Lane, const W: usize> {
     sample_rate: u32,
     bypass: bool,
     link: LinkMode,
+    /// The active lanes (issue #1893): bit `l` is set when lane `l` carries a member. A padded
+    /// lane (a clear bit) renders like any lane, a clone fed `+0.0`, but is never charged or
+    /// reported (decision 12's padding contract) and takes no automation.
+    active: u32,
     nonfinite: NonFiniteReport,
     /// Index 0 is the left channel, index 1 the right.
     sides: [Side<L, W>; 2],
@@ -961,6 +967,7 @@ impl<L: Lane, const W: usize> Instance<L, W> {
             sample_rate: metadata.sample_rate,
             bypass: metadata.bypass,
             link: metadata.link_mode,
+            active: all_lanes::<W>(),
             nonfinite: NonFiniteReport::new(),
             sides: [
                 Side::new(left, metadata.sample_rate)?,
@@ -1555,6 +1562,8 @@ impl<L: Lane, const W: usize> Instance<L, W> {
             bank::nonfinite_lane_mask::<L>(right),
         ];
         let lanes = failed[0] | failed[1];
+        // Every failed lane recovers, a padded one too, so it stays finite and at rest; only an
+        // active lane is charged (issue #1893).
         for track in 0..W {
             if lanes & (1 << track) == 0 {
                 continue;
@@ -1569,16 +1578,7 @@ impl<L: Lane, const W: usize> Instance<L, W> {
                 side.discontinuity_reset_lane(track);
             }
         }
-        self.nonfinite.nonfinite_lanes = lanes;
-        self.nonfinite.nonfinite_blocks = self.nonfinite.nonfinite_blocks.saturating_add(1);
-        for (track, report) in reports.iter_mut().enumerate().take(W) {
-            report.nonfinite_left_blocks = report
-                .nonfinite_left_blocks
-                .saturating_add(u64::from((failed[0] >> track) & 1));
-            report.nonfinite_right_blocks = report
-                .nonfinite_right_blocks
-                .saturating_add(u64::from((failed[1] >> track) & 1));
-        }
+        self.charge(failed[0], failed[1], reports);
     }
 
     /// [`finish`](Self::finish) for a collapsed block (issue #1871): the left plane alone
@@ -1603,12 +1603,27 @@ impl<L: Lane, const W: usize> Instance<L, W> {
                 side.discontinuity_reset_lane(track);
             }
         }
+        self.charge(lanes, lanes, reports);
+    }
+
+    /// Charges a rejected block's failed lanes, the active ones only (issue #1893): a padded
+    /// lane's failure is recovered by the caller but never counted or reported. A block whose
+    /// failures are all on padded lanes leaves the counters as they were.
+    fn charge(&mut self, left: u32, right: u32, reports: &mut [ProcessReport]) {
+        let (left, right) = (left & self.active, right & self.active);
+        let lanes = left | right;
+        if lanes == 0 {
+            return;
+        }
         self.nonfinite.nonfinite_lanes = lanes;
         self.nonfinite.nonfinite_blocks = self.nonfinite.nonfinite_blocks.saturating_add(1);
         for (track, report) in reports.iter_mut().enumerate().take(W) {
-            let failed = u64::from((lanes >> track) & 1);
-            report.nonfinite_left_blocks = report.nonfinite_left_blocks.saturating_add(failed);
-            report.nonfinite_right_blocks = report.nonfinite_right_blocks.saturating_add(failed);
+            report.nonfinite_left_blocks = report
+                .nonfinite_left_blocks
+                .saturating_add(u64::from((left >> track) & 1));
+            report.nonfinite_right_blocks = report
+                .nonfinite_right_blocks
+                .saturating_add(u64::from((right >> track) & 1));
         }
     }
 
@@ -2216,16 +2231,20 @@ fn prepare_bank<L: Lane, const W: usize>(
         left[track] = track_left;
         right[track] = track_right;
     }
-    // Issue #1088: the multiband is not padded until #1069 closes (decision 12, "Eligibility"), so a
-    // request with a padded lane is declined after every member is validated, never bound: binding
-    // it would run the clone lanes as real tracks.
-    if request.is_padded() {
-        return Ok(None);
-    }
     if !same_program {
         return Ok(None);
     }
-    let instance = Instance::<L, W>::new(left, right, metadata).ok_or(PREPARE_FAILED)?;
+    // Issue #1893: a padded request binds (decision 12). Its padded lanes are the contract's clones
+    // fed `+0.0`; they run the same kernel, and no bank-wide decision reads them in a way that can
+    // move an active lane's bits, because a clone fed `+0.0` rests like any lane. `active` keeps
+    // them out of every charge, report, automation and payload.
+    let mut instance = Instance::<L, W>::new(left, right, metadata).ok_or(PREPARE_FAILED)?;
+    instance.active = request
+        .active_mask
+        .iter()
+        .enumerate()
+        .filter(|(_, active)| **active)
+        .fold(0, |mask, (lane, _)| mask | (1 << lane));
     Ok(Some(PreparedEffectBank {
         processor: Box::new(PreparedMultibandCompressorBank::<L, W> {
             width: request.width,
@@ -2420,7 +2439,7 @@ impl<L: Lane, const W: usize> PreparedNativeEffectBank for PreparedMultibandComp
         track_index: u32,
         output: StatePayloadOutput<'_>,
     ) -> Result<(), StatePayloadError> {
-        let track = checked_track(track_index, W)?;
+        let track = checked_track(track_index, W, self.instance.active)?;
         self.instance.snapshot(track, output, self.state_sizes)
     }
 
@@ -2430,7 +2449,7 @@ impl<L: Lane, const W: usize> PreparedNativeEffectBank for PreparedMultibandComp
         state_layout_version: u32,
         input: StatePayloadInput<'_>,
     ) -> Result<(), StatePayloadError> {
-        let track = checked_track(track_index, W)?;
+        let track = checked_track(track_index, W, self.instance.active)?;
         // A restore can write any state word, so the claim goes whatever the result.
         self.silent_fixed_point = false;
         self.instance.restore(track, state_layout_version, input)
@@ -2467,6 +2486,10 @@ impl<L: Lane, const W: usize> PreparedMultibandCompressorBank<L, W> {
             self.silent_fixed_point = false;
         }
         for track in 0..W {
+            // The planner gives a padded lane no span; one that arrives is not its to apply.
+            if self.instance.active & (1 << track) == 0 {
+                continue;
+            }
             let start = block.automation_offsets[track] as usize;
             let end = block.automation_offsets[track + 1] as usize;
             self.instance.apply_automation(
@@ -2513,9 +2536,11 @@ impl<L: Lane, const W: usize> PreparedMultibandCompressorBank<L, W> {
     }
 }
 
-fn checked_track(track_index: u32, width: usize) -> Result<usize, StatePayloadError> {
+/// A lane past the width and a padded lane (a clear bit of `active`, issue #1893) are both not a
+/// track: neither has a payload to snapshot or restore.
+fn checked_track(track_index: u32, width: usize, active: u32) -> Result<usize, StatePayloadError> {
     let track = usize::try_from(track_index).map_err(|_| state_error("effect.state.track"))?;
-    if track >= width {
+    if track >= width || active & (1 << track) == 0 {
         return Err(state_error("effect.state.track"));
     }
     Ok(track)
