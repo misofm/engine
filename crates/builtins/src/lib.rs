@@ -62,7 +62,7 @@ use lane::{
         builtins::{
             GainMuteRamp, InputChainCoef, InputChainPlan, InputChainState, InputTrimRamp,
             Matrix2x2Coef, Matrix2x2Ramp, fader_matrix_block, fader_matrix_block_without_identity,
-            gain_mute_block, gain_mute_ramp_block, input_chain_block_elided,
+            gain_mute_block, gain_mute_block_from, gain_mute_ramp_block, input_chain_block_elided,
             input_chain_block_mono_elided, input_chain_plan, input_chain_ramp_block_elided,
             input_chain_ramp_block_filter, input_chain_ramp_block_filter_mono,
             input_chain_ramp_block_mono_elided, lanes_below, mask_from_flags, matrix2x2_block,
@@ -3400,6 +3400,25 @@ impl<L: Lane> FaderRampStage<L> {
         self.process_plane(1, right, frames);
     }
 
+    /// [`Self::process`] for a block whose right input is its left plane (issue #975), when the
+    /// right channel is settled: the right plane is written from the left one by
+    /// [`gain_mute_block_from`], then the left plane runs [`Self::process_plane`] in place. The
+    /// channels share no state, so the order does not matter, and each frame is the frame body
+    /// [`Self::process`] runs on the same words. Returns `false`, having written nothing, when a
+    /// right-channel lane is ramping: the caller copies the left plane and calls [`Self::process`].
+    fn process_from_left(&mut self, left: &mut [f32], right: &mut [f32], frames: usize) -> bool {
+        if self.remaining[1]
+            .iter()
+            .take(L::WIDTH)
+            .any(|&remaining| remaining != 0)
+        {
+            return false;
+        }
+        gain_mute_block_from::<L>(left, right, frames, self.ramp[1].current, self.ramp[1].mute);
+        self.process_plane(0, left, frames);
+        true
+    }
+
     /// Ends each channel's ramp window of `ramp_frames[channel]` frames, in one pass over that
     /// channel's lane words; a channel whose window is `0` ran no ramp and is not touched.
     ///
@@ -4885,6 +4904,19 @@ impl BuiltinFaderBank {
             stage.process(left, right, frames);
         });
         BuiltinProcessReport::default()
+    }
+
+    /// [`Self::process`] for a block whose right input is its left plane: a collapsed chain's
+    /// first seam-side stage (issue #975). `right` is output only. Bit for bit what copying `left`
+    /// into `right` and calling [`Self::process`] renders. Returns `false`, having written
+    /// nothing, when a right-channel lane is ramping; the caller then does exactly that.
+    pub fn process_from_left(&mut self, left: &mut [f32], right: &mut [f32], frames: u32) -> bool {
+        let frames = frames as usize;
+        debug_assert_eq!(left.len(), frames * self.width.lanes() as usize);
+        debug_assert_eq!(right.len(), frames * self.width.lanes() as usize);
+        per_width!(FaderStageKernel(stage) in &mut self.stage => {
+            stage.process_from_left(left, right, frames)
+        })
     }
 
     // REALTIME_POLICY_BEGIN
