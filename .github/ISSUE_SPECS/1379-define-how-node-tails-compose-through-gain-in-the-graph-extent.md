@@ -896,3 +896,11 @@ stored automation at the +24 dB word under `FIXED`, and a muted strip with mute 
 `Zero`; mutants 1379-13 to 1379-15 (`MUTATIONS.md`) are red. `console-workload` passes the strip
 liveness it attaches. Left for #1487/#1468: `product_bound` states one underflow stall even for an
 exact power-of-two product (sound; a tightening only).
+
+**Batch integration (#1375, #1376, #1379; rebased onto `origin/main` `f4e1f01c0`).** #1376's
+`RestBound::FixedPoint` composes as a rest (`pdc.rs` reads `RestBound::samples()`; a gate-only plan
+reports a finite every-peak tail, red on the `Bounded`-only pattern); the canonical `tail` row writes
+it as `fixed_point <R>` (no fixture moves: no fixture holds a fixed-point node). With every launch
+effect stated, a console session of stated effects reports an every-peak tail above 10,000,000, so
+graph-compiler's unit-test `integration_caps` cap is unbounded, as on every host. `test-release`
+runs host-core's `tail_composition` (root-authorized).

@@ -2063,7 +2063,10 @@ mod tests {
             maximum_graph_bytes: 10_000_000,
             maximum_plan_bytes: 100_000_000,
             maximum_single_allocation_bytes: 10_000_000,
-            maximum_finite_tail_samples: 10_000_000,
+            // #1379: the reported tail is the every-peak extent through every gain, which passes
+            // 10,000,000 for a console session of stated effects; no test here is about the cap
+            // (`tests/tail_composition.rs` holds it), so it is unbounded as on every host.
+            maximum_finite_tail_samples: u64::MAX,
         }
     }
 
