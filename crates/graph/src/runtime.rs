@@ -9055,7 +9055,9 @@ fn gathers_only(member: &RuntimeOp, buffer: u32) -> bool {
 /// reader, which frees it at once; with builtins every input has a reader, so no compiled plan does
 /// that. A hand-built plan may schedule an input anywhere, and a value that dies before the input
 /// op may then take its slot and overwrite the copied words, where a marked gather reads the played
-/// block. No clause guards that shape. Issue #927's clause (e) guarded it for the fused Output
+/// block. When that value is another claim, bind refuses the plan with
+/// `graph.scheduler.source_slot` (issue #932: no two claims share a buffer). When it is a value no
+/// claim owns, no clause guards that shape. Issue #927's clause (e) guarded it for the fused Output
 /// read alone, and went with that read (issue #957).
 fn source_plane_table(
     program: &ExecutionProgram,
