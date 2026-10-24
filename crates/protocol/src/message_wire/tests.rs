@@ -4178,8 +4178,8 @@ fn stream_ready(channels: ParameterChannel) -> SpectrumStreamReply<'static> {
 /// (with and without a selection; ready with each channel mask) round-trip exactly, and the
 /// frame-limit measure equals the encoded frame of each ready shape. Every presence rule of D3, an
 /// operation or a status outside its table, a smoothing of 10,001 ms or NaN, planes that disagree
-/// with `channels`, a 1,024-bin plane, a ready reply without a selection and a selection without
-/// its identity are refused as `INVALID_FIELD`, on encode where the typed value can say it and on
+/// with `channels`, a 1,024-bin plane, a ready reply without a selection, a selection without its
+/// identity and a ready window count that is not `sequence + 1` are refused as `INVALID_FIELD`, on encode where the typed value can say it and on
 /// decode.
 ///
 /// Red if the codec admits a contradictory stream request or a reply of the wrong shape in either
@@ -4394,8 +4394,13 @@ fn spectrum_stream_round_trips_and_refuses_malformed_frames_both_ways() {
     // Wire refusals.
     let both = encode_reply(&stream_ready(ParameterChannel::Both));
     let left = encode_reply(&stream_ready(ParameterChannel::Left));
-    let rules: [(&str, &Vec<u8>, Edit); 9] = [
+    let rules: [(&str, &Vec<u8>, Edit); 10] = [
         ("status 7", &left, Box::new(|f| set(f, 3, &[7]))),
+        (
+            "windows not sequence + 1",
+            &left,
+            Box::new(|f| set(f, 13, &4_u64.to_le_bytes())),
+        ),
         (
             "a pending reply with bins",
             &left,
