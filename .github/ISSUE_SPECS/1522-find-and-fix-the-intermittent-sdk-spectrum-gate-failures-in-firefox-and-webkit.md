@@ -267,9 +267,9 @@ exported trees.
   defect, not this flake. Every recorded spectrum failure came from the 32-CPU development box,
   most under artificial load.
 - **R1 (root).** The slice is D2 only. After it lands, #1522 closes (the close text was rewritten
-  when the verifier found a candidate cause; see the Attempt record). D1, D4, the fix
-  (deliverable 3) and gates 1-3 (cause, reproduction, soak) are not done; they come back with the
-  next red `sdk-spectrum-*` log.
+  when the verifier found a candidate cause; see the Attempt record). A browser reproduction (D4, gate 2) and the
+  soak (gate 3) are not done, and the collection failure has no named cause; they come back with
+  the next red `sdk-spectrum-*` log.
 - **R2 (root).** Amendment 1's paired M-vs-B matrix is dropped as moot: #1345's batch 3 merged
   2026-10-13 and `main` has not flaked since.
 
