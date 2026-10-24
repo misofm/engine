@@ -202,10 +202,12 @@ fn render(plan: &mut PreparedRenderPlan, output: &mut [f32; QUANTUM * 2], first_
     .expect("render");
 }
 
-/// Twelve tracks: `rack00`..`rack09` carry a two-slot SIMD-1 chain `[delay-leading (bypassed),
-/// delay-main]`, except `rack02` and `rack05`, which carry only `delay-main`; `fallback10` and
-/// `fallback11` carry `delay-main` with a connected sidechain. The rack depths differ, so the
-/// fader and matrix stages straddle two dependency levels.
+/// Twelve tracks: `rack00`..`rack08` carry a two-slot SIMD-1 chain `[delay-leading (bypassed),
+/// delay-main]`, except `rack02`, which carries only `delay-main`; `fallback09`..`fallback11`
+/// carry `delay-main` with a connected sidechain. The rack depths differ, so the fader and matrix
+/// stages straddle two dependency levels. One subsequence track leaves a one-member remainder at
+/// either width, below the insert padding threshold (#888), so it renders per node; two would pad
+/// at four lanes.
 fn mixed_twelve_track_session() -> CompiledSession {
     let mut model = parse_session_json(SESSION).expect("canonical session");
     let template = model.tracks[0].clone();
@@ -214,10 +216,10 @@ fn mixed_twelve_track_session() -> CompiledSession {
     model.tracks = (0..12)
         .map(|index| {
             let mut track = template.clone();
-            let track_id = if index < 10 {
+            let track_id = if index < 9 {
                 format!("rack{index:02}")
             } else {
-                format!("fallback{index}")
+                format!("fallback{index:02}")
             };
             track.id = stable(&track_id);
             let lane = index as f32;
@@ -240,7 +242,7 @@ fn mixed_twelve_track_session() -> CompiledSession {
                 value: 0.75 + index as f32 * 0.031_25,
             }];
             effect.bypass = false;
-            effect.sidechain = if index < 10 {
+            effect.sidechain = if index < 9 {
                 SidechainDeclaration::None
             } else {
                 SidechainDeclaration::Routed(Sidechain {
@@ -253,7 +255,7 @@ fn mixed_twelve_track_session() -> CompiledSession {
             };
             // Per-track chains of different depths, and keyed ones, are inserts: a console slot
             // runs on every track and takes no sidechain (decision 12).
-            track.inserts.effects = if matches!(index, 2 | 5) || index >= 10 {
+            track.inserts.effects = if index == 2 || index >= 9 {
                 vec![effect]
             } else {
                 let mut leading = effect.clone();
@@ -327,8 +329,8 @@ fn mixed_rack_depths_bank_every_stage_and_leave_subsequences_and_sidechains_scal
         }
 
         // One cohort for the two-slot chain. The eight tracks that carry all of it fill the full
-        // groups and bind one bank per slot; the two subsequence tracks land in the unbound
-        // remainder and render per node, beside the two connected-sidechain fallbacks.
+        // groups and bind one bank per slot; the subsequence track lands in the unbound one-member
+        // remainder and renders per node, beside the three connected-sidechain fallbacks.
         let cohorts = &artifact.report().rack_cohorts;
         assert_eq!(cohorts.dispatch, dispatch);
         let bound_groups: Vec<_> = cohorts.bound_groups_in(RackLocation::Dynamic).collect();
@@ -355,7 +357,7 @@ fn mixed_rack_depths_bank_every_stage_and_leave_subsequences_and_sidechains_scal
             bound_slots
                 .iter()
                 .flat_map(|bound| &bound.members)
-                .all(|member| !matches!(member.track_id.as_str(), "rack02" | "rack05")),
+                .all(|member| member.track_id.as_str() != "rack02"),
             "{dispatch:?}: a subsequence track joined a bound bank"
         );
         assert_eq!(
@@ -371,7 +373,7 @@ fn mixed_rack_depths_bank_every_stage_and_leave_subsequences_and_sidechains_scal
         scalar.sort_unstable();
         assert_eq!(
             scalar,
-            ["fallback10", "fallback11", "rack02", "rack05"],
+            ["fallback09", "fallback10", "fallback11", "rack02"],
             "{dispatch:?}: compatible scalar tail and connected-sidechain fallbacks"
         );
 
