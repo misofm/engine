@@ -25,6 +25,7 @@ pub fn complete_all_opcode_fixture() -> Vec<SessionEdit> {
     track.console = vec![session::ConsoleEntry {
         slot: StableId::parse("desk-eq").expect("literal stable ID"),
         bypass: true,
+        link_mode: session::ConsoleLinkMode::Slot,
         params: effect.params.clone(),
     }];
     let route = session.routes[0].clone();
@@ -71,6 +72,7 @@ pub fn complete_all_opcode_fixture() -> Vec<SessionEdit> {
     track_console.push(ConsoleEntry {
         slot: id("desk-limit"),
         bypass: false,
+        link_mode: session::ConsoleLinkMode::Slot,
         params: Vec::new(),
     });
     vec![
@@ -303,6 +305,7 @@ pub fn console_session_fixture() -> SessionModel {
     session.tracks[0].console = vec![ConsoleEntry {
         slot,
         bypass: false,
+        link_mode: session::ConsoleLinkMode::Slot,
         params: insert.params,
     }];
     session
@@ -962,7 +965,10 @@ pub enum ConformanceDecoder {
 /// one-plane read). The static capabilities frame lists none of the three spectrum commands, which
 /// the bit-16 invariant allows. The 52 earlier frames are byte-equal: their hash is the old pin.
 /// Re-pinned from `c7e010362827dab3`; the frame count is 54.
-pub const COMPLETE_SCHEMA_HASH: u64 = 0xc146_e8fa_d0b2_6299;
+/// #1369 appends the console entry's required `LINK_MODE` (field 4, `slot` 1 to `average` 4), so
+/// every console entry of the transaction carries it. Only `command.session_transaction_apply`
+/// moves; the 53 other frames are byte-equal. Re-pinned from `c146e8fad0b26299`; the frame count stays 54.
+pub const COMPLETE_SCHEMA_HASH: u64 = 0x973f_7ad6_87fc_39da;
 
 /// Build every command, successful response, registered non-OK status, event, and all-opcode
 /// session transaction using only public typed encoder entry points.

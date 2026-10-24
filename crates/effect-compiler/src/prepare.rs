@@ -9,7 +9,7 @@ use effect_contract::{
 };
 use engine::realtime::{LiveStamp, LiveValuesSuperseded, ObservationReader, observation_slot};
 use session::{
-    CompiledSession, EffectIdentity, LinkMode as SessionLinkMode,
+    CompiledSession, ConsoleLinkMode, EffectIdentity, LinkMode as SessionLinkMode,
     ParameterChannel as SessionChannel, ParameterUnit as SessionUnit, SidechainDeclaration,
 };
 use std::collections::BTreeMap;
@@ -363,13 +363,34 @@ fn prepare_with_console_eligibility(
         let lowered = model.lower_strip(&strip);
         let strip_path = strip.path_prefix();
         let [pre_insert, inserts, post_insert] = lowered.in_chain_order();
-        for (rack, effects) in [
-            (EffectRack::Simd1, pre_insert),
-            (EffectRack::Dynamic, inserts),
-            (EffectRack::Simd2, post_insert),
+        let pre_slots = model.console.pre_insert.len();
+        for (rack, effects, console_slots) in [
+            (
+                EffectRack::Simd1,
+                pre_insert,
+                Some((0, &model.console.pre_insert)),
+            ),
+            (EffectRack::Dynamic, inserts, None),
+            (
+                EffectRack::Simd2,
+                post_insert,
+                Some((pre_slots, &model.console.post_insert)),
+            ),
         ] {
-            for effect in effects {
+            for (index, effect) in effects.iter().enumerate() {
                 let path = format!("{strip_path}.effects[id={}]", effect.id);
+                // #1369 D2: a console entry that overrides its slot's link mode is diagnosed at the
+                // entry's own `link_mode`; an entry on `slot` keeps the effect path.
+                let console_override = console_slots.and_then(|(offset, slots)| {
+                    let entry = strip.console.get(offset + index)?;
+                    let declared = slots.get(index)?.link_mode;
+                    (entry.link_mode != ConsoleLinkMode::Slot).then(|| {
+                        (
+                            format!("{strip_path}.console[slot={}].link_mode", entry.slot),
+                            declared,
+                        )
+                    })
+                });
                 let EffectIdentity::Native { effect_id } = &effect.identity else {
                     diagnostics.push(EffectDiagnostic {
                         code: "effect.third_party.unavailable_at_launch",
@@ -398,7 +419,20 @@ fn prepare_with_console_eligibility(
                 if !descriptor.supported_link_modes.contains(link_mode) {
                     diagnostics.push(EffectDiagnostic {
                         code: "effect.link_mode.unsupported",
-                        path,
+                        path: console_override.map_or(path, |(entry_path, _)| entry_path),
+                    });
+                    continue;
+                }
+                // #1369 R3: an effect whose bank does not hold the link mode per lane would split
+                // the slot's bank into two cohorts on a differing override, and a console slot
+                // binds one bank (decision 12). Refused until that effect holds it per lane.
+                if let Some((entry_path, declared)) = &console_override
+                    && effect.link_mode != *declared
+                    && !descriptor.lane_link
+                {
+                    diagnostics.push(EffectDiagnostic {
+                        code: "console.link_mode.override_unbanked",
+                        path: entry_path.clone(),
                     });
                     continue;
                 }

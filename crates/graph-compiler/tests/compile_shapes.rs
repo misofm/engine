@@ -499,6 +499,7 @@ fn seven_tap_artifact() -> PreparedGraphBuiltinsArtifact {
     let entry = |name: &str| ConsoleEntry {
         slot: stable(name),
         bypass: delay.bypass,
+        link_mode: session::ConsoleLinkMode::Slot,
         params: Vec::new(),
     };
     model.console.pre_insert = vec![slot("simd1-delay")];

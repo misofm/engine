@@ -53,7 +53,7 @@ value's grammar, validation, diagnostic code and canonical spelling are the
 track's, verbatim: neither `pan` nor `matrix` is `schema.missing_field`, both is
 `schema.wrong_type`, and an unknown key is `schema.unknown_field`. Diagnostics use index paths, for
 example `$.submixes[0].fader.left_db`. `Submix::unity(id, console)` is the transparent strip:
-identity input section, one `{ slot, bypass: true, params: [] }` entry per declared console slot in
+identity input section, one `{ slot, bypass: true, link_mode: "slot", params: [] }` entry per declared console slot in
 slot order, no inserts, an unmuted 0 dB fader and the identity matrix with no smoothing; a bypassed
 entry is transparent and still pays its slot's latency. A submix sums the routes that target it,
 left to right in route-ID order, and then runs its strip on that sum exactly as a track runs its
@@ -203,14 +203,25 @@ link mode every strip runs it at. A console slot takes no sidechain -- a keyed e
 slot's `identity`. Either section may be empty, and an empty section costs nothing.
 
 Every strip carries every slot: every track's and every submix's (#1202) `console` array holds
-exactly one `{ slot, bypass, params }` entry per slot, in the session's slot order (`pre_insert`,
-then `post_insert`), never canonical ID order. The entry carries only that strip's knobs; `id`,
-`identity`, `quality`, `link_mode` and `sidechain` refuse there as `schema.unknown_field`. An entry
+exactly one `{ slot, bypass, link_mode, params }` entry per slot, in the session's slot order
+(`pre_insert`, then `post_insert`), never canonical ID order. The entry carries only that strip's
+knobs; `id`, `identity`, `quality` and `sidechain` refuse there as `schema.unknown_field`. An entry
 naming an undeclared slot refuses as `reference.missing_entity`, a repeated one as `id.duplicate`,
 one out of slot order as `console.entry_order` (each at the entry's `slot`), and a strip without an
 entry for a declared slot as `console.entry_missing` (at the strip's `console`), at the strip's
 index path (`$.tracks[<i>]` or `$.submixes[<i>]`). Entry `params` follow the effect-parameter
 rules and canonicalize by `(parameter_id, channel)`.
+
+**A strip's link mode (#1369, decision 13 Q1).** The entry's required `link_mode` is `slot`,
+`dual_mono`, `maximum` or `average`. `slot` runs the slot's declared mode; any other token overrides
+it on that strip only. A resolved mode the slot's effect does not support refuses at preparation
+with `effect.link_mode.unsupported` at the entry's own path
+(`$.tracks[id=<id>].console[slot=<slot>].link_mode`, or the submix strip's prefix); an entry on
+`slot` whose slot declares an unsupported mode refuses at the lowered effect, as before. An
+override that differs from the slot's mode on an effect whose bank does not hold the link mode per
+lane (the multiband compressor today) refuses with `console.link_mode.override_unbanked` at the
+same path, because that strip would leave the slot's one bank. The strip still binds the slot's
+one bank.
 
 **Latency grows with bus depth.** A console slot's latency is paid on every strip that carries it,
 bypassed or not, so a signal that passes through a track and then `n` nested buses pays a latent
@@ -247,9 +258,9 @@ renders per node.
 
 **Class A by lowering.** Internally, `pre_insert` lowers to the graph's first rack
 (`RackId::Simd1`), a track's `inserts` to the second (`Dynamic`) and `post_insert` to the third
-(`Simd2`). Each console entry lowers to an ordinary effect whose ID is the slot, whose identity,
-quality and link mode are the slot's, whose bypass and params are the strip's, and whose sidechain
-is `none` (`SessionModel::lower_strip`). A session equivalent to a pre-decision-12 one therefore
+(`Simd2`). Each console entry lowers to an ordinary effect whose ID is the slot, whose identity and
+quality are the slot's, whose link mode is the entry's resolved against the slot's, whose bypass
+and params are the strip's, and whose sidechain is `none` (`SessionModel::lower_strip`). A session equivalent to a pre-decision-12 one therefore
 compiles to the identical graph, including the sealed `MISO-GRAPH-V1` canonical text, and renders
 the identical bits. The internal names `RackId`, `TrackStage`, `MeterTap` and `RackLocation` are
 unchanged.
@@ -259,7 +270,8 @@ each refuses as `schema.unknown_field` at the track, never read as its successor
 model's field registry keeps every ID: track field 7 is now `inserts` (was `dynamic`), fields 6
 (`simd1`) and 8 (`simd2`) are retired and never reallocated, and `console` is appended as root
 field 15 and track field 11, with registries of its own for the slot declaration (`slot` 1,
-`identity` 2, `quality` 3, `link_mode` 4) and the track entry (`slot` 1, `bypass` 2, `params` 3).
+`identity` 2, `quality` 3, `link_mode` 4) and the track entry (`slot` 1, `bypass` 2, `params` 3,
+and `link_mode` 4, appended by #1369 and written after `bypass` in canonical key order).
 
 An automation target is a control address (#1566, decision 17 C2): the plain address the control
 list uses (fields 1 to 6), as a record tagged by `section`, with the keys `owner` (`strip`, `route` or `vca`;

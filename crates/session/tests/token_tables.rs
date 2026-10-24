@@ -1,8 +1,8 @@
 //! Exhaustive public closed-token table contract tests.
 
 use session::{
-    AutomationShape, EffectQuality, LinkMode, ParameterChannel, ParameterUnit, RenderMode,
-    SampleFormat, SendTap, SourceBitDepth,
+    AutomationShape, ConsoleLinkMode, EffectQuality, LinkMode, ParameterChannel, ParameterUnit,
+    RenderMode, SampleFormat, SendTap, SourceBitDepth,
 };
 
 macro_rules! assert_map {
@@ -25,6 +25,7 @@ fn all_closed_tokens_round_trip_in_declaration_and_wire_order() {
     assert_map!(SampleFormat);
     assert_map!(EffectQuality);
     assert_map!(LinkMode);
+    assert_map!(ConsoleLinkMode);
     assert_map!(ParameterChannel);
     assert_map!(ParameterUnit);
     assert_map!(SendTap);

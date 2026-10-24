@@ -7,7 +7,7 @@ schemas. Optional/boundary values are represented by the transaction's nested fi
 transport-event origin, empty valid pages, and the typed backpressure variant.
 
 The canonical sequence is FNV-1a-64 over each stable frame label followed by its frame bytes:
-`c146e8fad0b26299`, pinned once as `COMPLETE_SCHEMA_HASH`. Native mutation, each typed fuzz
+`973f7ad687fc39da`, pinned once as `COMPLETE_SCHEMA_HASH`. Native mutation, each typed fuzz
 decoder, and scalar/simd128 Wasm execution all consume this same public fixture source.
 
 Issue #787 re-pinned this value after the transaction's two same-length source-identity spellings
@@ -116,3 +116,7 @@ adds `command.spectrum_stream` (a select with a smoothing) and `response.spectru
 ready one-plane read). The capabilities response lists none of the three spectrum commands and
 leaves bit 16 clear, which the invariant allows. The 52 earlier frames are byte-equal (their hash
 is the old pin). The frame count is 54.
+
+Issue #1369 re-pinned it from `c146e8fad0b26299`: the console entry appends its required field 4,
+`LINK_MODE` (`slot` 1, `dual_mono` 2, `maximum` 3, `average` 4), so the transaction's console
+entries carry it. The 53 other frames are byte-equal. The frame count stays 54.

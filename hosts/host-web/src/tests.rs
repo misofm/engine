@@ -3694,6 +3694,7 @@ fn bus_effect_host(quantum: u32) -> AudioWorkletEngineHost {
             .map(|slot| session::ConsoleEntry {
                 slot: slot.slot.clone(),
                 bypass: false,
+                link_mode: session::ConsoleLinkMode::Slot,
                 params: Vec::new(),
             })
             .collect();
@@ -8967,6 +8968,7 @@ mod structural_apply {
             .map(|slot| session::ConsoleEntry {
                 slot: slot.slot.clone(),
                 bypass: false,
+                link_mode: session::ConsoleLinkMode::Slot,
                 params: Vec::new(),
             })
             .collect();

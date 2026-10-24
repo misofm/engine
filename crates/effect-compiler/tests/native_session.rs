@@ -359,6 +359,7 @@ fn console_slots_accept_exactly_the_eligible_native_effects() {
         model.tracks[0].console.push(session::ConsoleEntry {
             slot: session::StableId::parse("desk").expect("slot"),
             bypass: false,
+            link_mode: session::ConsoleLinkMode::Slot,
             params: Vec::new(),
         });
         compile_model(&model).expect("the console session compiles")
@@ -686,4 +687,155 @@ fn an_entry_whose_capacity_is_below_its_live_cells_is_refused_at_attach() {
     .expect("a window of one span cannot hold the compressor's cells");
     assert_eq!(refusal.0[0].code, "effect.control.capacity");
     assert!(prepared.entries[0].control.is_none());
+}
+
+/// #1369 gate 2: a console entry's override is checked as the mode it resolves to, at the entry's
+/// own path, on a track and on a submix strip: `maximum` on the EQ slot and `average` on the
+/// limiter slot refuse with `effect.link_mode.unsupported`, while `maximum` on the compressor slot
+/// prepares at `maximum` with the slot left at `dual_mono`.
+///
+/// Red if the check reads the slot's declared mode instead of the resolved one (both overrides
+/// then prepare), or if the refusal keeps the lowered effect's path.
+#[test]
+fn a_console_link_override_is_checked_as_resolved_at_the_entry() {
+    let registry = launch_native_effect_registry().expect("launch registry");
+    let generous = EffectCompileCaps {
+        maximum_total_state_bytes: 1 << 34,
+        maximum_scratch_bytes: 1 << 34,
+        maximum_automation_spans_per_block: 32,
+    };
+    let fixture = || {
+        parse_session_json(include_str!(
+            "../../../fixtures/session/v1/console-sixty-four-track-sends.json"
+        ))
+        .expect("sends fixture")
+    };
+    let mut model = fixture();
+    let track = model.tracks[3].id.clone();
+    let submix = model.submixes[1].id.clone();
+    for console in [&mut model.tracks[3].console, &mut model.submixes[1].console] {
+        assert_eq!(
+            console.iter().map(|e| e.slot.as_str()).collect::<Vec<_>>(),
+            ["eq", "comp", "limiter"]
+        );
+        console[0].link_mode = session::ConsoleLinkMode::Maximum;
+        console[1].link_mode = session::ConsoleLinkMode::Maximum;
+        console[2].link_mode = session::ConsoleLinkMode::Average;
+    }
+    let session = compile_model(&model).expect("the override session compiles");
+    let diagnostics = prepare_native_session_effects(&session, registry, generous)
+        .err()
+        .expect("unsupported overrides refuse");
+    let mut want = Vec::new();
+    for strip in [
+        format!("$.tracks[id={track}]"),
+        format!("$.submixes[id={submix}]"),
+    ] {
+        for slot in ["eq", "limiter"] {
+            want.push(format!("{strip}.console[slot={slot}].link_mode"));
+        }
+    }
+    want.sort();
+    let mut got = diagnostics
+        .0
+        .iter()
+        .map(|d| {
+            assert_eq!(d.code, "effect.link_mode.unsupported", "{}", d.path);
+            d.path.clone()
+        })
+        .collect::<Vec<_>>();
+    got.sort();
+    assert_eq!(got, want);
+
+    let mut model = fixture();
+    model.tracks[3].console[1].link_mode = session::ConsoleLinkMode::Maximum;
+    let session = compile_model(&model).expect("the supported override compiles");
+    let prepared = prepare_native_session_effects(&session, registry, generous)
+        .unwrap_or_else(|d| panic!("a supported override prepares: {:?}", d.0));
+    let mode = |strip: &str| {
+        prepared
+            .entries
+            .iter()
+            .find(|e| e.track_id == strip && e.effect_id == "comp")
+            .expect("comp entry")
+            .metadata
+            .link_mode
+    };
+    assert_eq!(mode(track.as_str()), LinkMode::Maximum);
+    assert_eq!(mode(model.tracks[4].id.as_str()), LinkMode::DualMono);
+}
+
+/// A console-eligible identity whose bank does not hold the link mode per lane, but which admits
+/// every mode: no launch effect is that today (#1367a), so a double stands in for one.
+static UNBANKED_LINK: EffectDescriptor = EffectDescriptor {
+    id: match EffectId::new("miso.compressor") {
+        Ok(id) => id,
+        Err(_) => panic!("valid ID"),
+    },
+    supported_link_modes: LinkModeSet::ALL,
+    lane_link: false,
+    ..DESCRIPTOR
+};
+
+/// #1369 R3 (gate 3): on an effect whose bank does not hold the link mode per lane, an entry that
+/// overrides its slot to another mode refuses with `console.link_mode.override_unbanked` at the
+/// entry, and an override equal to the slot's mode prepares.
+///
+/// Red without the guard: the overridden strip would form a second cohort and split the slot's
+/// one bank (decision 12).
+#[test]
+fn an_override_on_an_unbanked_link_effect_refuses() {
+    let registry = NativeEffectRegistry::new([
+        Box::new(Factory(&UNBANKED_LINK)) as Box<dyn NativeEffectFactory>
+    ])
+    .unwrap();
+    let session = |link_mode| {
+        let mut model =
+            parse_session_json(include_str!("../../../fixtures/session/v1/canonical.json"))
+                .expect("canonical session fixture");
+        model.tracks[0].inserts.effects.clear();
+        model.automation.clear();
+        model.console.pre_insert.push(session::ConsoleSlot {
+            slot: session::StableId::parse("desk").expect("slot"),
+            identity: session::EffectIdentity::Native {
+                effect_id: session::StableId::parse("miso.compressor").expect("effect ID"),
+            },
+            quality: session::EffectQuality::Normal,
+            link_mode: session::LinkMode::DualMono,
+        });
+        model.tracks[0].console.push(session::ConsoleEntry {
+            slot: session::StableId::parse("desk").expect("slot"),
+            bypass: false,
+            link_mode,
+            params: Vec::new(),
+        });
+        compile_model(&model).expect("the console session compiles")
+    };
+    for link_mode in [
+        session::ConsoleLinkMode::Slot,
+        session::ConsoleLinkMode::DualMono,
+    ] {
+        prepare_native_session_effects(&session(link_mode), &registry, caps())
+            .unwrap_or_else(|d| panic!("{link_mode:?} prepares: {:?}", d.0));
+    }
+    let track = parse_session_json(include_str!("../../../fixtures/session/v1/canonical.json"))
+        .expect("fixture")
+        .tracks[0]
+        .id
+        .clone();
+    for link_mode in [
+        session::ConsoleLinkMode::Maximum,
+        session::ConsoleLinkMode::Average,
+    ] {
+        let diagnostics = prepare_native_session_effects(&session(link_mode), &registry, caps())
+            .err()
+            .unwrap_or_else(|| panic!("{link_mode:?} refuses"));
+        assert_eq!(
+            diagnostics.0,
+            [effect_compiler::EffectDiagnostic {
+                code: "console.link_mode.override_unbanked",
+                path: format!("$.tracks[id={track}].console[slot=desk].link_mode"),
+            }]
+        );
+    }
 }
