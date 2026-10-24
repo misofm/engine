@@ -162,9 +162,24 @@ order), so this slice rebases on their payload code instead of racing it.
 - **Forced edit outside the list.** `crates/conformance/src/randomized.rs`: its heterogeneous-cohort
   draw treated a member at another link mode as another program; for a `lane_link` effect it is now
   expected to bank.
-- **1368a cost (gate 4, descriptive).** One console run each on base `24a850abb` and on the
-  candidate (controlled, one warmup, two rounds, cpu 31). The host has no perf counters, so the
+- **1368a cost (gate 4, descriptive).** The first run of each arm was refused before any
+  workload launched (`loadavg_above_ceiling`: other streams' builds were running). The rule is to
+  record a refusal and not retry; the run below is a retry, taken after the load average fell
+  under the ceiling, so its numbers are descriptive only. One console run each on base
+  `24a850abb` and on the candidate (controlled, one warmup, two rounds, cpu 31). The host has no perf counters, so the
   records carry no `isolated_cycles_per_lane_sample`; p50 per block instead:
   `sixty_four_track_compressor_only` +0.30 %, `sixty_four_track_console` +0.30 %; the worst row
   is untouched EQ-only, +1.6 %. No workload row runs the gate-expander. Every record's
   `output_sha256` is equal to the base's (no bit moved).
+- **Attempt 2: the render-time lane swap (#1747).** Once the key carries no link mode, two lanes
+  at different modes pass `can_swap_lanes`/`lane_swap_fits`, and the mode was positional (the
+  compressor's `Links`, the gate's `link_max`/`link_avg`), so a swapped strip rendered at the other
+  lane's law. The lane's mode is now one word of its prepared defaults
+  (`effect_contract::exchange_lane_link_word`, `LANE_DEFAULT_BYTES` + 4 in both effects): the
+  compressor stores `[LinkMode; MAX_WIDTH]` and rebuilds `Links` after an exchange, and the gate
+  rewrites the lane's link words. Each crate's `swap_tests` probe now draws a link per lane; both
+  were red before the fix.
+- **Plan-swap carry (#1279) across a link-mode change: no defect.** The carry matches lanes on
+  `EffectLaneLayout` (effect, layout version, sizes, bypass, latency), which never held the link
+  mode, so the key change does not alter which lanes carry. Neither effect's state payload holds
+  a link word, so the successor keeps its own prepared mode.

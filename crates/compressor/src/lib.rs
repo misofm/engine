@@ -641,7 +641,10 @@ struct Instance<L: Lane> {
     sample_rate: u32,
     /// The prepared bypass flag, which selects the kernel's dry path.
     bypass: bool,
-    /// Every lane's prepared detector link law (issue #1368 D3).
+    /// Every lane's prepared detector link mode (issue #1368 D3). A lane's mode is one of its
+    /// prepared defaults: a render-time lane swap moves it with the lane.
+    link_modes: [LinkMode; MAX_WIDTH],
+    /// The link law `link_modes` gives, which the kernel reads; rebuilt whenever a mode moves.
     links: kernel::Links<L>,
     /// The prepared automation capacity: a span at or past it is invalid.
     automation_capacity: u32,
@@ -672,7 +675,8 @@ impl<L: Lane> Instance<L> {
         Self {
             sample_rate: metadata.sample_rate,
             bypass: metadata.bypass,
-            links: kernel::Links::per_lane(&links[..L::WIDTH]),
+            link_modes: *links,
+            links: kernel::Links::per_lane(links),
             automation_capacity: metadata.automation_capacity,
             state_sizes: metadata.state_sizes,
             left: Channel::new(left_defaults, metadata.sample_rate),
@@ -872,14 +876,20 @@ impl<L: Lane> Instance<L> {
     }
 
     /// Exchanges lane `lane`'s prepared defaults with `bytes` in place (issue #1747): the left
-    /// channel's seven preparation values, then the right's, each `f32` little-endian. They are
-    /// what `full_reset` re-seeds a lane from; no state word changes. `false`, changing nothing,
-    /// for a lane out of range or a wrong length.
+    /// channel's seven preparation values, then the right's, each `f32` little-endian, then the
+    /// lane's link mode as one word (issue #1368, `effect_contract::exchange_lane_link_word`). The values are
+    /// what `full_reset` re-seeds a lane from; the mode is the lane's link law, which is rebuilt
+    /// from it. No state word changes. `false`, changing nothing, for a lane out of range or a
+    /// wrong length.
     fn exchange_lane_defaults(&mut self, lane: usize, bytes: &mut [u8]) -> bool {
         if lane >= L::WIDTH || bytes.len() != LANE_DEFAULT_BYTES {
             return false;
         }
-        let (left_bytes, right_bytes) = bytes.split_at_mut(PARAMETER_COUNT * 4);
+        let (values_bytes, link_bytes) = bytes.split_at_mut(2 * PARAMETER_COUNT * 4);
+        self.link_modes[lane] =
+            effect_contract::exchange_lane_link_word(self.link_modes[lane], link_bytes);
+        self.links = kernel::Links::per_lane(&self.link_modes);
+        let (left_bytes, right_bytes) = values_bytes.split_at_mut(PARAMETER_COUNT * 4);
         for (values, side) in [
             (&mut self.left.defaults[lane], left_bytes),
             (&mut self.right.defaults[lane], right_bytes),
@@ -896,8 +906,9 @@ impl<L: Lane> Instance<L> {
     // REALTIME_POLICY_END
 }
 
-/// The bytes of one lane's prepared defaults: both channels' preparation values (issue #1747).
-const LANE_DEFAULT_BYTES: usize = 2 * PARAMETER_COUNT * 4;
+/// The bytes of one lane's prepared defaults: both channels' preparation values (issue #1747) and
+/// the lane's link mode (issue #1368).
+const LANE_DEFAULT_BYTES: usize = 2 * PARAMETER_COUNT * 4 + 4;
 
 /// The `DESIGNED` term of the channel-symmetry witness, over the compressor's own kernel read
 /// surface.

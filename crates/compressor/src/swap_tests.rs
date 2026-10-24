@@ -8,17 +8,20 @@
 //! word (it only sets the bank flag `silent_fixed_point` on a whole-bank mask), so only the lane
 //! swap is tested here.
 
-use super::padding_tests::{LINKS, RATES, Values, bind, draw_values, lane_requests, width_of};
+use super::padding_tests::{
+    LINKS, RATES, Values, bind, draw_values, mixed_lane_requests, width_of,
+};
 use super::*;
 use conformance::swap_probe::{self, Automate, Automation, Probe};
 use dsp_reference::randomized::{Draw, Profile};
 use effect_runtime::state_payload::{RAMP_WORDS, read_ramp};
 
-/// Two full banks of random per-lane values at one rate and link.
+/// Two full banks of random per-lane values and link modes at one rate.
 struct CompressorProbe<L: Lane> {
     members: [Vec<Values>; 2],
     rate: u32,
-    link: LinkMode,
+    /// Each lane's link mode (issue #1368): a swapped lane must take its mode with it.
+    links: [Vec<LinkMode>; 2],
     sizes: StatePayloadSizes,
     /// One stream per strip.
     feeds: Vec<Draw>,
@@ -30,18 +33,23 @@ impl<L: Lane + 'static> CompressorProbe<L> {
         let lanes = L::WIDTH;
         let mut draw = Draw::new(seed);
         let rate = draw.pick(&RATES);
-        let link = draw.pick(&LINKS);
         let members: [Vec<Values>; 2] =
             core::array::from_fn(|_| (0..lanes).map(|_| draw_values(&mut draw, false)).collect());
+        let links: [Vec<LinkMode>; 2] =
+            core::array::from_fn(|_| (0..lanes).map(|_| draw.pick(&LINKS)).collect());
         let sizes = CompressorFactory
-            .prepare(super::padding_tests::request(&members[0][0], rate, link))
+            .prepare(super::padding_tests::request(
+                &members[0][0],
+                rate,
+                links[0][0],
+            ))
             .expect("a member prepares")
             .metadata
             .state_sizes;
         Self {
             members,
             rate,
-            link,
+            links,
             sizes,
             feeds: (0..2 * lanes)
                 .map(|strip| Draw::new(seed ^ (0x1747_0000 + strip as u64)))
@@ -74,7 +82,13 @@ impl<L: Lane + 'static> Probe for CompressorProbe<L> {
 
     fn bind(&mut self, which: usize) -> Box<dyn PreparedNativeEffectBank> {
         let mask = vec![true; L::WIDTH];
-        let requests = lane_requests(&self.members[which], &mask, 0, self.rate, self.link);
+        let requests = mixed_lane_requests(
+            &self.members[which],
+            &mask,
+            0,
+            self.rate,
+            &self.links[which],
+        );
         Box::new(bind::<L>(&requests, &mask))
     }
 

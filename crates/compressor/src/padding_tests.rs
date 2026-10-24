@@ -135,7 +135,7 @@ pub(super) fn lane_requests<'a>(
 
 /// [`lane_requests`] with member `k` at its own link mode `links[k]` (issue #1368); a padded lane
 /// is the clone source's request, link mode included.
-fn mixed_lane_requests<'a>(
+pub(super) fn mixed_lane_requests<'a>(
     members: &'a [Values],
     mask: &[bool],
     clone_of: usize,

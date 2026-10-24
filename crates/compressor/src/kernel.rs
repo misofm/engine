@@ -361,23 +361,25 @@ pub(crate) struct Links<L: Lane> {
 impl<L: Lane> Links<L> {
     /// One mode on every lane.
     pub(crate) fn uniform(link: LinkMode) -> Self {
-        Self::per_lane(&[link; MAX_WIDTH][..L::WIDTH])
+        Self::per_lane(&[link; MAX_WIDTH])
     }
 
-    /// `links[lane]` is lane `lane`'s mode; `links` has exactly `L::WIDTH` entries.
-    pub(crate) fn per_lane(links: &[LinkMode]) -> Self {
-        assert_eq!(links.len(), L::WIDTH, "one link mode per lane");
+    /// `links[lane]` is lane `lane`'s mode; only `[..L::WIDTH]` is read. Allocation-free and
+    /// panic-free, so a render-time lane swap may rebuild it (issue #1747).
+    pub(crate) fn per_lane(links: &[LinkMode; MAX_WIDTH]) -> Self {
         let mut linked = [0.0_f32; MAX_WIDTH];
         let mut averaged = [0.0_f32; MAX_WIDTH];
-        for (lane, link) in links.iter().enumerate() {
+        let mut dual_mono = true;
+        for (lane, link) in links.iter().enumerate().take(L::WIDTH) {
             linked[lane] = f32::from(u8::from(!matches!(link, LinkMode::DualMono)));
             averaged[lane] = f32::from(u8::from(matches!(link, LinkMode::Average)));
+            dual_mono &= matches!(link, LinkMode::DualMono);
         }
         let zero = L::zero();
         Self {
             linked: L::load(&linked).gt(zero),
             averaged: L::load(&averaged).gt(zero),
-            dual_mono: links.iter().all(|link| matches!(link, LinkMode::DualMono)),
+            dual_mono,
         }
     }
 }

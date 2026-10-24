@@ -33,12 +33,13 @@ fn draw_values(draw: &mut Draw) -> Vec<InitialParameterValue> {
         .collect()
 }
 
-/// Two full banks of random per-lane values at one rate and link.
+/// Two full banks of random per-lane values and link modes at one rate.
 struct GateProbe {
     width: BankWidth,
     members: [Vec<Vec<InitialParameterValue>>; 2],
     rate: u32,
-    link: LinkMode,
+    /// Each lane's link mode (issue #1368): a swapped lane must take its mode with it.
+    links: [Vec<LinkMode>; 2],
     sizes: StatePayloadSizes,
     /// One stream per strip.
     feeds: Vec<Draw>,
@@ -49,11 +50,12 @@ impl GateProbe {
         let lanes = width.lanes() as usize;
         let mut draw = Draw::new(seed);
         let rate = draw.pick(&RATES);
-        let link = draw.pick(&LINKS);
         let members: [Vec<Vec<InitialParameterValue>>; 2] =
             core::array::from_fn(|_| (0..lanes).map(|_| draw_values(&mut draw)).collect());
+        let links: [Vec<LinkMode>; 2] =
+            core::array::from_fn(|_| (0..lanes).map(|_| draw.pick(&LINKS)).collect());
         let sizes = GateExpanderFactory
-            .prepare(request(&members[0][0], rate, link))
+            .prepare(request(&members[0][0], rate, links[0][0]))
             .expect("a member prepares")
             .metadata
             .state_sizes;
@@ -61,7 +63,7 @@ impl GateProbe {
             width,
             members,
             rate,
-            link,
+            links,
             sizes,
             feeds: (0..2 * lanes)
                 .map(|strip| Draw::new(seed ^ (0x1747_0000 + strip as u64)))
@@ -95,7 +97,8 @@ impl Probe for GateProbe {
         let mask = vec![true; self.lanes()];
         let requests: Vec<_> = self.members[which]
             .iter()
-            .map(|values| request(values, self.rate, self.link))
+            .zip(&self.links[which])
+            .map(|(values, &link)| request(values, self.rate, link))
             .collect();
         bind_bank::<false>(PrepareEffectBankRequest {
             backend: self.width.backend(),

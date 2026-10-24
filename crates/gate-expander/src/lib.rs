@@ -617,20 +617,30 @@ impl<L: Lane, const CONNECTED: bool> PreparedGate<L, CONNECTED> {
     /// lane, so a lane renders its own mode's bits whatever its bank-mates' modes are.
     fn with_lane_links(mut self, links: &[LinkMode]) -> Self {
         for (lane, &link) in links.iter().enumerate().take(L::WIDTH) {
-            for coef in &mut self.coef {
-                lane_set(
-                    &mut coef.link_max,
-                    lane,
-                    f32::from(u8::from(link == LinkMode::Maximum)),
-                );
-                lane_set(
-                    &mut coef.link_avg,
-                    lane,
-                    f32::from(u8::from(link == LinkMode::Average)),
-                );
-            }
+            self.set_lane_link(lane, link);
         }
         self
+    }
+
+    /// Lane `lane`'s link words on both channels, from `link`.
+    fn set_lane_link(&mut self, lane: usize, link: LinkMode) {
+        for coef in &mut self.coef {
+            let maximum = f32::from(u8::from(link == LinkMode::Maximum));
+            let average = f32::from(u8::from(link == LinkMode::Average));
+            lane_set(&mut coef.link_max, lane, maximum);
+            lane_set(&mut coef.link_avg, lane, average);
+        }
+    }
+
+    /// The mode lane `lane`'s link words select (the left channel's; both hold the same).
+    fn lane_link(&self, lane: usize) -> LinkMode {
+        if lane_get(self.coef[0].link_max, lane) > 0.0 {
+            LinkMode::Maximum
+        } else if lane_get(self.coef[0].link_avg, lane) > 0.0 {
+            LinkMode::Average
+        } else {
+            LinkMode::DualMono
+        }
     }
 
     /// Marks the lanes of `active` as the bank's members and every other lane as padded.
@@ -1656,21 +1666,27 @@ impl<L: Lane> PreparedGate<L, false> {
 }
 // REALTIME_POLICY_END
 
-/// One lane's prepared defaults in bytes: every parameter of both channels, one `f32` each.
-const LANE_DEFAULT_BYTES: usize = 2 * PARAMETER_COUNT * 4;
+/// One lane's prepared defaults in bytes: every parameter of both channels, one `f32` each, then
+/// the lane's link mode (issue #1368).
+const LANE_DEFAULT_BYTES: usize = 2 * PARAMETER_COUNT * 4 + 4;
 
 // REALTIME_POLICY_BEGIN: #1747, the prepared defaults move with a render-time lane swap.
 impl<L: Lane> PreparedGate<L, false> {
     /// [`PreparedNativeEffectBank::exchange_lane_defaults`]: lane `lane`'s `defaults` row, left
-    /// then right, each parameter in descriptor order as little-endian `f32` bits. The row is the
-    /// gate's only prepared per-lane value: `reset_lane_full` (a full reset and the D7 recovery)
-    /// re-seeds the lane from it, and every other per-lane word is payload or derived from it.
+    /// then right, each parameter in descriptor order as little-endian `f32` bits, then the lane's
+    /// link mode as one word (issue #1368, `effect_contract::exchange_lane_link_word`). The row
+    /// and the mode are the gate's prepared per-lane values: `reset_lane_full` (a full reset and
+    /// the D7 recovery) re-seeds the lane from the row, the link words are set from the mode, and
+    /// every other per-lane word is payload or derived from the row.
     fn exchange_defaults(&mut self, lane: usize, bytes: &mut [u8]) -> bool {
         if lane >= L::WIDTH || bytes.len() != LANE_DEFAULT_BYTES {
             return false;
         }
+        let (values_bytes, link_bytes) = bytes.split_at_mut(2 * PARAMETER_COUNT * 4);
+        let link = effect_contract::exchange_lane_link_word(self.lane_link(lane), link_bytes);
+        self.set_lane_link(lane, link);
         let words = self.defaults[lane].iter_mut().flatten();
-        for (value, chunk) in words.zip(bytes.chunks_exact_mut(4)) {
+        for (value, chunk) in words.zip(values_bytes.chunks_exact_mut(4)) {
             let mut incoming = [0_u8; 4];
             incoming.copy_from_slice(chunk);
             chunk.copy_from_slice(&value.to_bits().to_le_bytes());

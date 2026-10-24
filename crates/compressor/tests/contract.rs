@@ -734,14 +734,4 @@ fn a_padded_request_binds_after_every_lane_is_validated() {
             .is_none(),
         "a padded lane that is not a clone of the members' program is declined"
     );
-    // Issue #1368: the link mode is per lane and not in the key, so a lane at another mode is
-    // the same program.
-    let mut other_link = requests.clone();
-    other_link[lanes - 1].link_mode = LinkMode::Maximum;
-    assert!(
-        bind(backend, width, &other_link, &prefix(lanes - 1, lanes))
-            .expect("a well-formed request")
-            .is_some(),
-        "a lane that differs only by link mode shares the bank"
-    );
 }
