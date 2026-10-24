@@ -156,6 +156,8 @@ pub fn check(workspace_root: &Path, policy: &Policy) -> Report {
     }
     web_host::scan_modules(&web_files, &mut findings);
     web_host::scan_export_names(&web_files, &mut findings);
+    render_wrap::scan_twins(&web_files, policy, &mut findings);
+    web_host::scan_render_lock(&web_files, &mut findings);
     if files < policy.marked_files_floor {
         findings.push(Finding::bare(Class::MarkedFileFloor(
             policy.marked_files_floor,
