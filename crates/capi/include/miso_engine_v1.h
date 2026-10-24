@@ -721,6 +721,9 @@ uint32_t miso_engine_v1_source_seek_at(miso_engine_v1_session *session,
                                        uint64_t generation,
                                        uint64_t source_frame,
                                        uint64_t anchor_sample);
+/* The reserved source_id "$timeline" (9 bytes) reads the session timeline's seek report: its
+ * source_frame is the timeline sample that block started at, and its underrun and held counts are
+ * 0. Only this call takes it; submit, seek and seek_at refuse it as an unknown source. */
 uint32_t miso_engine_v1_source_seek_report(miso_engine_v1_session *session,
                                            const uint8_t *source_id,
                                            uint64_t source_id_bytes,
