@@ -138,3 +138,37 @@ transaction format.
 ## Amendment (decision 17, root 2026-10-13)
 
 **Order (root Q7).** This slice lands after #1563.
+
+## Scope split and decisions (root, 2026-10-24; supersedes D1-D5 where they differ)
+
+- **Split.** 1383a (this branch): the BTLV primitives, every entity encoder a track nests, the
+  oracle, the source and track methods and their evals. 1383b (later stream): `setTrackRack`,
+  `putTrackEffect`, `removeTrackEffect`, `setTrackEffectOrder`, `setEffectIdentity`,
+  `setEffectQuality`, `setEffectSidechain`, `setTrackConsole` (with `rampSamples`), on the same
+  encoders and oracle.
+- **Decision-17 drift.** D2's `setTrackBuiltins`, `setTrackFader`, `setTrackMatrixOrPan`,
+  `setEffectBypass`, `setEffectLinkMode`, `upsertEffectParam` and `removeEffectParam` are gone: a
+  value is one `SET_CONTROL` (#1561). 14 methods remain; only `setTrackConsole` keeps `rampSamples`.
+- **D2 builder.** `transaction(base: SessionBuilder)`, not `transaction(expectedRevision)`: a track
+  is validated against the base's rate, sources and console slots. The builder keeps a working
+  source and track list, so a later edit sees an earlier one of the same transaction. It is
+  immutable, as `SessionBuilder` is.
+- **D1/D3 frame.** `SessionTransaction = { edits, payload, fieldCount }`. The request ID and the
+  expected revision are stamped at send by `encodeSessionTransaction(tx, { requestId,
+  expectedRevision })` (`@internal`, for #1296) through `control-frame.ts`'s `commandFrame`, as
+  #1563's queue does. No baked `bytes`, no request ID rewritten in place. The module is
+  `sdk/src/core/session-transaction.ts`.
+- **One validator.** Edits encode the normalized record of `session.ts`'s own normalizers
+  (`normalizeSource`, extracted from `SessionBuilder.source`; `normalizeTrack`, which now also
+  refuses unknown track keys; `trackSourceRef`; `resolveLanes`; `builderContext`), exported
+  `@internal`. The root barrel now names `core/session.ts`'s public exports instead of
+  `export *`, so those internals stay off it; `barrel-surface.ts` pins both.
+- **D4 oracle.** Frames on stdin back to back, applied in order to one store; one JSON line per
+  frame: `{"bytes", "ok"}`, `{"bytes", "refused"}` or `{"decode"}`. `protocol` was already a
+  dev-dependency; no `Cargo.toml` change.
+- **D5.** `transaction`, `TransactionBuilder`, `SessionTransaction`, `SessionEditSpec` on the root,
+  browser and headless entries (headless exports `session()` too).
+- **Gate 3 in 1383a.** Empty, unknown effect, undeclared source, fader out of domain, removing an
+  undeclared source. The `rampSamples` refusal is 1383b's.
+- **Open owner-level note (not blocking).** After #1386 an "edit the builder, `replaceSession`"
+  shape could supersede this encoder; the typed builder stays as ruled (D15-11).

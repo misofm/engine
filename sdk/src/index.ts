@@ -63,7 +63,28 @@ export type {
   SpectrumSubscriptionReceipt,
   SpectrumSubscriptionRequest,
 } from "./core/observation-subscriptions.ts";
-export * from "./core/session.ts";
+// Named, not `export *`: `core/session.ts` also exports the `@internal` normalizers the
+// transaction builder shares (#1383), which are not public API.
+export {
+  CONSOLE_ELIGIBLE_EFFECTS,
+  EFFECT_LINK_MODES,
+  SessionBuilder,
+  assertSameSession,
+  effect,
+  parameterRows,
+  parameterWireRows,
+  session,
+} from "./core/session.ts";
+export type {
+  ControlSmoothingOptions,
+  ModelRecord,
+  ModelValue,
+  SessionLike,
+  SessionModel,
+  SessionOptions,
+} from "./core/session.ts";
+export { TransactionBuilder, transaction } from "./core/session-transaction.ts";
+export type { SessionEditSpec, SessionTransaction } from "./core/session-transaction.ts";
 export * from "./core/writer.ts";
 export type * from "./core/types.ts";
 
