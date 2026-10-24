@@ -99,3 +99,6 @@ block holds unsafe or include!, report to root before refusing it.
 - Real tree (release tool, temporary count print, not committed): 38 compiled blocks, 4 with unsafe
   (`crates/lane/src/fpenv.rs:185`, `:256`, `:322`, `crates/lane/src/softfma.rs:132`, all allowlisted),
   0 refusals; `realtime policy: ok (193 marked regions in 34 files)`.
+- Mutants (each restored by `git checkout`): the rule switched off (the parent's behaviour) turns the
+  unsafe, include and unlexable tests red (gate 2: every refused row is accepted without the rule); the
+  allowlist ignored turns the allowlisted test red; the `>` marker unrecognized turns the unsafe test red.
