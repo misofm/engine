@@ -1087,6 +1087,14 @@ fn band_target<L: Lane>(level: L, threshold: L, inv_ratio_minus_one: L, knee: (f
 /// for the joint term to zero (`lane::silence_armable_holding`), and `flush_pair(n1, n2, +0.0)` is
 /// `(flush(n1), flush(n2))`. A bypassed segment runs neither; [`process_block`] gives it
 /// `ARMABLE = true` as a compile-time constant, so its unarmed arm is dead code.
+///
+/// `MONO` (issue #1871) renders a collapsed track: `left` holds both channels and `right` is the
+/// ungathered scratch, never read or written. Only the near side's state and `segments[0]` move;
+/// the far side and `segments[1]` are left as they are. Every cross-channel term is the dual one
+/// with the near word read twice: `link_levels::<LINK>(own, own)` is `|p|`, `max(|p|, |p|)` or
+/// `0.5|p| + 0.5|p|` in the dual order, so the near output and state are the dual block's bits on
+/// `L == R`, in every link mode. A const parameter and never a runtime flag, so the dual body
+/// keeps its own symbol (the roster's M2 lesson).
 #[inline(always)]
 #[allow(clippy::too_many_arguments)]
 fn run_segment<
@@ -1096,6 +1104,7 @@ fn run_segment<
     const BYPASS: bool,
     const RAMPING: bool,
     const ARMABLE: bool,
+    const MONO: bool,
 >(
     sides: &mut [Side<L, W>; 2],
     left: &mut [f32],
@@ -1115,20 +1124,20 @@ fn run_segment<
     let mut gain_far = far.gain_db;
     // On a flat segment no word moves, so the coefficients are derived once, here; on a ramped
     // one they are derived again every frame from the frame's own advanced words below.
-    let mut coefficients = [
-        frame_coefficients(&segments[0]),
-        frame_coefficients(&segments[1]),
-    ];
-    let mut split = [
-        crossover_coefficients(&segments[0]),
-        crossover_coefficients(&segments[1]),
-    ];
+    // A collapsed segment derives the near side's words only; the far copies are never read.
+    let sides_moving = if MONO { 1 } else { 2 };
+    let mut coefficients = [frame_coefficients(&segments[0]); 2];
+    let mut split = [crossover_coefficients(&segments[0]); 2];
+    if !MONO {
+        coefficients[1] = frame_coefficients(&segments[1]);
+        split[1] = crossover_coefficients(&segments[1]);
+    }
     for frame in 0..frames {
         if RAMPING {
             for index in 0..RAMP_SLOTS {
                 // Issue #1409: the step added, held inside `[min(current, target),
                 // max(current, target)]`, so no word passes its target.
-                for segment in segments.iter_mut() {
+                for segment in segments.iter_mut().take(sides_moving) {
                     segment.current[index] = ramp_toward(
                         segment.current[index],
                         segment.step[index],
@@ -1138,35 +1147,40 @@ fn run_segment<
             }
             // Issue #1069: the ratio and the two time coefficients take the value of this frame,
             // after its step, the same convention as threshold and makeup.
-            coefficients = [
-                frame_coefficients(&segments[0]),
-                frame_coefficients(&segments[1]),
-            ];
+            coefficients[0] = frame_coefficients(&segments[0]);
             // Issue #1338: the split's words likewise, never cached at the segment's start.
-            split = [
-                crossover_coefficients(&segments[0]),
-                crossover_coefficients(&segments[1]),
-            ];
+            split[0] = crossover_coefficients(&segments[0]);
+            if !MONO {
+                coefficients[1] = frame_coefficients(&segments[1]);
+                split[1] = crossover_coefficients(&segments[1]);
+            }
         }
         let input_near = L::load(&left[frame * W..]);
-        let input_far = L::load(&right[frame * W..]);
         if BYPASS {
             input_near.store(&mut left[frame * W..]);
-            input_far.store(&mut right[frame * W..]);
+            if !MONO {
+                L::load(&right[frame * W..]).store(&mut right[frame * W..]);
+            }
             continue;
         }
-        let (rest_near, rest_far) = if ARMABLE {
-            (
-                silence_step(input_near, &mut silence_near, armed_after),
-                silence_step(input_far, &mut silence_far, armed_after),
-            )
+        let rest_near = if ARMABLE {
+            silence_step(input_near, &mut silence_near, armed_after)
         } else {
-            (L::zero(), L::zero())
+            L::zero()
         };
         let (low_near, high_near) =
             lr4_step_when(ARMABLE, input_near, rest_near, &split[0], &mut filter_near);
-        let (low_far, high_far) =
-            lr4_step_when(ARMABLE, input_far, rest_far, &split[1], &mut filter_far);
+        let (low_far, high_far) = if MONO {
+            (low_near, high_near)
+        } else {
+            let input_far = L::load(&right[frame * W..]);
+            let rest_far = if ARMABLE {
+                silence_step(input_far, &mut silence_far, armed_after)
+            } else {
+                L::zero()
+            };
+            lr4_step_when(ARMABLE, input_far, rest_far, &split[1], &mut filter_far)
+        };
         let (linked_near_low, linked_far_low) = link_levels::<L, LINK>(low_near, low_far);
         let (linked_near_high, linked_far_high) = link_levels::<L, LINK>(high_near, high_far);
 
@@ -1184,6 +1198,13 @@ fn run_segment<
             &coefficients[0][HIGH_BAND],
             &mut gain_near[HIGH_BAND],
         );
+        let output_near = low_near
+            .mul(amplitude_near_low)
+            .add(high_near.mul(amplitude_near_high));
+        output_near.store(&mut left[frame * W..]);
+        if MONO {
+            continue;
+        }
         let amplitude_far_low = band_amplitude(
             linked_far_low,
             segments[1].current[0],
@@ -1199,21 +1220,19 @@ fn run_segment<
             &mut gain_far[HIGH_BAND],
         );
 
-        let output_near = low_near
-            .mul(amplitude_near_low)
-            .add(high_near.mul(amplitude_near_high));
         let output_far = low_far
             .mul(amplitude_far_low)
             .add(high_far.mul(amplitude_far_high));
-        output_near.store(&mut left[frame * W..]);
         output_far.store(&mut right[frame * W..]);
     }
     near.filter = filter_near;
-    far.filter = filter_far;
     near.silence = silence_near;
-    far.silence = silence_far;
     near.gain_db = gain_near;
-    far.gain_db = gain_far;
+    if !MONO {
+        far.filter = filter_far;
+        far.silence = silence_far;
+        far.gain_db = gain_far;
+    }
 }
 
 /// Splits the block at ramp arrivals and runs each segment, ramped or flat.
@@ -1222,6 +1241,10 @@ fn run_segment<
 /// own bit-identity test sets it to reproduce exactly what this function did before the split
 /// existed, so "split on versus split off" is a real comparison of two rendered buffers and two
 /// state snapshots rather than an argument.
+///
+/// `MONO` (issue #1871) plans, arms, counts silence and writes ramps back on the left side only:
+/// on a collapsed track the right side is the left one by the witness's induction, so the left
+/// side's plan is the dual plan, and the right side stays exactly as the collapse found it.
 #[inline(always)]
 fn process_block<
     L: Lane,
@@ -1229,6 +1252,7 @@ fn process_block<
     const LINK: u8,
     const BYPASS: bool,
     const FORCE_RAMPING: bool,
+    const MONO: bool,
 >(
     instance: &mut Instance<L, W>,
     left: &mut [f32],
@@ -1240,9 +1264,17 @@ fn process_block<
     let armed_after = L::splat(lane::silence_frames(sample_rate) as f32);
     let mut position = 0;
     while position < frames {
-        let plan = instance.plan_segment(frames - position);
+        let plan = instance.plan_segment::<MONO>(frames - position);
         let length = plan.frames;
-        let mut segments = [instance.sides[0].segment(), instance.sides[1].segment()];
+        let near = instance.sides[0].segment();
+        let mut segments = [
+            near,
+            if MONO {
+                near
+            } else {
+                instance.sides[1].segment()
+            },
+        ];
         // A bypassed instance runs no crossover and freezes the silence counters with the filter
         // (issue #1328, amendment A9). Otherwise the joint flush's arithmetic runs only on a
         // segment it can act on (issue #1455, [`Side::arms`]); on every other segment each side's
@@ -1250,25 +1282,31 @@ fn process_block<
         // and the frame loop runs the unarmed form.
         let armable = BYPASS
             || instance.sides[0].arms(length, armed_after)
-            || instance.sides[1].arms(length, armed_after);
+            || (!MONO && instance.sides[1].arms(length, armed_after));
         if !armable {
             silence_skip_block(
                 &left[position * W..(position + length) * W],
                 length,
                 &mut instance.sides[0].silence,
             );
-            silence_skip_block(
-                &right[position * W..(position + length) * W],
-                length,
-                &mut instance.sides[1].silence,
-            );
+            if !MONO {
+                silence_skip_block(
+                    &right[position * W..(position + length) * W],
+                    length,
+                    &mut instance.sides[1].silence,
+                );
+            }
         }
         macro_rules! segment {
             ($ramping:literal, $armable:literal) => {
-                run_segment::<L, W, LINK, BYPASS, $ramping, $armable>(
+                run_segment::<L, W, LINK, BYPASS, $ramping, $armable, MONO>(
                     &mut instance.sides,
                     &mut left[position * W..(position + length) * W],
-                    &mut right[position * W..(position + length) * W],
+                    if MONO {
+                        &mut [][..]
+                    } else {
+                        &mut right[position * W..(position + length) * W]
+                    },
                     length,
                     &mut segments,
                     armed_after,
@@ -1283,10 +1321,12 @@ fn process_block<
             }
             let advanced = length as u32;
             instance.sides[0].store_segment(&segments[0], advanced);
-            instance.sides[1].store_segment(&segments[1], advanced);
+            if !MONO {
+                instance.sides[1].store_segment(&segments[1], advanced);
+            }
         } else {
             #[cfg(debug_assertions)]
-            assert!(instance.flat_path_is_identity());
+            assert!(instance.flat_sides_are_identity(if MONO { 1 } else { 2 }));
             if armable {
                 segment!(false, true);
             } else {
@@ -1313,29 +1353,47 @@ fn render<L: Lane, const W: usize, const FORCE_RAMPING: bool>(
     frames: usize,
     reports: &mut [ProcessReport],
 ) {
+    render_body::<L, W, FORCE_RAMPING, false>(instance, left, right, frames, reports);
+}
+
+/// [`render`] with the collapse's `MONO` switch (issue #1871): at `true` the block is the
+/// collapsed one, `right` is never read or written, and the D7 check is
+/// [`Instance::finish_mono`].
+#[inline(always)]
+fn render_body<L: Lane, const W: usize, const FORCE_RAMPING: bool, const MONO: bool>(
+    instance: &mut Instance<L, W>,
+    left: &mut [f32],
+    right: &mut [f32],
+    frames: usize,
+    reports: &mut [ProcessReport],
+) {
     match (instance.link, instance.bypass) {
         (LinkMode::DualMono, false) => {
-            process_block::<L, W, LINK_DUAL_MONO, false, FORCE_RAMPING>(
+            process_block::<L, W, LINK_DUAL_MONO, false, FORCE_RAMPING, MONO>(
                 instance, left, right, frames,
             );
         }
         (LinkMode::Maximum, false) => {
-            process_block::<L, W, LINK_MAXIMUM, false, FORCE_RAMPING>(
+            process_block::<L, W, LINK_MAXIMUM, false, FORCE_RAMPING, MONO>(
                 instance, left, right, frames,
             );
         }
         (LinkMode::Average, false) => {
-            process_block::<L, W, LINK_AVERAGE, false, FORCE_RAMPING>(
+            process_block::<L, W, LINK_AVERAGE, false, FORCE_RAMPING, MONO>(
                 instance, left, right, frames,
             );
         }
         (_, true) => {
-            process_block::<L, W, LINK_DUAL_MONO, true, FORCE_RAMPING>(
+            process_block::<L, W, LINK_DUAL_MONO, true, FORCE_RAMPING, MONO>(
                 instance, left, right, frames,
             );
         }
     }
-    instance.finish(left, right, reports);
+    if MONO {
+        instance.finish_mono(left, reports);
+    } else {
+        instance.finish(left, right, reports);
+    }
 }
 
 impl<L: Lane, const W: usize> Side<L, W> {
@@ -1411,8 +1469,12 @@ impl<L: Lane, const W: usize> Instance<L, W> {
     /// on a ramped segment, coefficients included, is advanced and read frame by frame, so a
     /// boundary set by another lane's arrival or by the host's block end only splits a run of
     /// identical per-frame arithmetic.
-    fn plan_segment(&mut self, budget: usize) -> SegmentPlan {
-        for side in &mut self.sides {
+    ///
+    /// `MONO` (issue #1871) snaps and scans the left side alone: a collapsed block leaves the
+    /// right side as the collapse found it, and on the dual run it is the left one.
+    fn plan_segment<const MONO: bool>(&mut self, budget: usize) -> SegmentPlan {
+        let sides = if MONO { 1 } else { 2 };
+        for side in self.sides.iter_mut().take(sides) {
             for track in 0..W {
                 for ramp in &mut side.ramps[track] {
                     if ramp.remaining == 1 {
@@ -1423,7 +1485,7 @@ impl<L: Lane, const W: usize> Instance<L, W> {
         }
         let mut length = budget;
         let mut ramping = false;
-        for side in &self.sides {
+        for side in self.sides.iter().take(sides) {
             for track in 0..W {
                 for ramp in &side.ramps[track] {
                     if ramp.remaining > 0 {
@@ -1448,10 +1510,17 @@ impl<L: Lane, const W: usize> Instance<L, W> {
     /// excludes `-0.0` (it would become `+0.0`) and the non-finite values (a NaN is quieted by the
     /// addition). Those are the same two exclusions `LinearRamp::stationary_at` carries, for the
     /// same reason.
-    #[cfg(any(debug_assertions, test))]
+    #[cfg(test)]
     fn flat_path_is_identity(&self) -> bool {
+        self.flat_sides_are_identity(2)
+    }
+
+    /// [`flat_path_is_identity`](Self::flat_path_is_identity) on the first `sides` sides: a
+    /// collapsed block (issue #1871) runs the left side's ramps alone.
+    #[cfg(any(debug_assertions, test))]
+    fn flat_sides_are_identity(&self, sides: usize) -> bool {
         const NEGATIVE_ZERO: u32 = 0x8000_0000;
-        self.sides.iter().all(|side| {
+        self.sides.iter().take(sides).all(|side| {
             side.ramps[..W].iter().flatten().all(|ramp| {
                 ramp.remaining == 0
                     && ramp.step.to_bits() == 0
@@ -1505,6 +1574,37 @@ impl<L: Lane, const W: usize> Instance<L, W> {
             report.nonfinite_right_blocks = report
                 .nonfinite_right_blocks
                 .saturating_add(u64::from((failed[1] >> track) & 1));
+        }
+    }
+
+    /// [`finish`](Self::finish) for a collapsed block (issue #1871): the left plane alone
+    /// decides, as the dual block on `L == R` fails the same lanes on both channels. A failed
+    /// lane's left words are zeroed and its history is cleared on **both** sides, which is what
+    /// the dual block does; the right side's words are then the copy's to replace. Each failed
+    /// lane counts one block on each channel, because the right plane the seam writes is this
+    /// left plane.
+    fn finish_mono(&mut self, left: &mut [f32], reports: &mut [ProcessReport]) {
+        if bank::check_block::<L>(left) {
+            return;
+        }
+        let lanes = bank::nonfinite_lane_mask::<L>(left);
+        for track in 0..W {
+            if lanes & (1 << track) == 0 {
+                continue;
+            }
+            for word in left.iter_mut().skip(track).step_by(W) {
+                *word = 0.0;
+            }
+            for side in &mut self.sides {
+                side.discontinuity_reset_lane(track);
+            }
+        }
+        self.nonfinite.nonfinite_lanes = lanes;
+        self.nonfinite.nonfinite_blocks = self.nonfinite.nonfinite_blocks.saturating_add(1);
+        for (track, report) in reports.iter_mut().enumerate().take(W) {
+            let failed = u64::from((lanes >> track) & 1);
+            report.nonfinite_left_blocks = report.nonfinite_left_blocks.saturating_add(failed);
+            report.nonfinite_right_blocks = report.nonfinite_right_blocks.saturating_add(failed);
         }
     }
 
@@ -1947,16 +2047,108 @@ impl<L: Lane, const W: usize> Instance<L, W> {
     /// request's; a session bypass is the rack's shunt, #1340) freezes the counters with the
     /// filter, so it advances nothing.
     fn advance_silence(&mut self, bits: u32, frames: usize) {
+        self.advance_silence_sides(bits, frames, 2);
+    }
+
+    /// [`advance_silence`](Self::advance_silence) on the first `sides` sides: a collapsed block's
+    /// fixed-point skip (issue #1871) advances the left side alone, as its rendered block would.
+    fn advance_silence_sides(&mut self, bits: u32, frames: usize, sides: usize) {
         if self.bypass || bits == 0 {
             return;
         }
         let mask = lanes_mask::<L>(bits);
-        for side in &mut self.sides {
+        for side in self.sides.iter_mut().take(sides) {
             let mut advanced = side.silence;
             silence_advance(&mut advanced, frames);
             side.silence = L::select(mask, advanced, side.silence);
         }
     }
+}
+
+impl<L: Lane, const W: usize> Instance<L, W> {
+    /// The `DESIGNED` term of the channel-symmetry witness for `lane` (issue #1871): whether every
+    /// per-channel word the kernel reads that is not running state compares bit-equal between the
+    /// two channels.
+    ///
+    /// # The word list, and why it is exactly this
+    ///
+    /// [`run_segment`] and [`process_block`] read per channel a [`Side`]'s `filter`, `silence`,
+    /// `gain_db` and `ramps`, and nothing else. The first three are running state, which the
+    /// induction the witness states carries. The designed words are the seventeen ramps of the
+    /// lane's track ([`RAMP_SLOTS`]: ten parameter, four rate and three crossover word ramps), all
+    /// four fields each: `remaining` decides whether a ramp moves and when it snaps (and so where
+    /// a segment ends), and `current`, `step` and `target` are what it moves and where it stops.
+    ///
+    /// Deliberately excluded: `prepared_rates`, `prepared_designed`, `crossover_hz` and
+    /// `defaults`, which the kernel never loads (a reset or a span that made the channels disagree
+    /// shows in the ramps); and `sample_rate`, `bypass` and `link`, which are whole-instance.
+    ///
+    /// Raw bits, so `+0.0` against `-0.0` declines. A lane past the width declines.
+    fn designed_channel_symmetry(&self, lane: usize) -> bool {
+        if lane >= W {
+            return false;
+        }
+        let [left, right] = &self.sides;
+        left.ramps[lane]
+            .iter()
+            .zip(&right.ramps[lane])
+            .all(|(l, r)| ramp_bits(l) == ramp_bits(r))
+    }
+
+    /// The collapse's disengage copy (issue #1871): the left side's whole per-channel render state
+    /// onto the right, every lane. That is every per-channel word [`run_segment`] and
+    /// [`process_block`] read: the crossover state, the silence counter (so the right's joint
+    /// flush arms on the dual run's frame), both smoother words and the seventeen ramps of every
+    /// track, which a collapsed block advanced on the left alone.
+    ///
+    /// `prepared_rates`, `prepared_designed`, `crossover_hz` and `defaults` are not copied: they
+    /// are each channel's own control-side values, which a collapsed block's automation updates
+    /// on both channels as a dual block would, and which no render reads.
+    fn desymmetrize(&mut self) {
+        let [left, right] = &mut self.sides;
+        right.filter = left.filter;
+        right.silence = left.silence;
+        right.gain_db = left.gain_db;
+        right.ramps = left.ramps;
+    }
+
+    /// [`PreparedNativeEffectBank::channels_agree`] (issue #1871): every word
+    /// [`desymmetrize`](Self::desymmetrize) copies compares bit-equal between the channels, on
+    /// every lane: seven lane words (four crossover, the silence counter, two smoother words)
+    /// and the seventeen ramps' four words per track. Small enough to compare outright; no fixed
+    /// point is needed.
+    fn channels_bit_equal(&self) -> bool {
+        let words = |side: &Side<L, W>| {
+            [
+                side.filter.a.ic1,
+                side.filter.a.ic2,
+                side.filter.b.ic1,
+                side.filter.b.ic2,
+                side.silence,
+                side.gain_db[LOW_BAND],
+                side.gain_db[HIGH_BAND],
+            ]
+        };
+        let [left, right] = &self.sides;
+        words(left).iter().zip(&words(right)).all(|(l, r)| {
+            (0..W).all(|lane| lane_value(*l, lane).to_bits() == lane_value(*r, lane).to_bits())
+        }) && left
+            .ramps
+            .iter()
+            .flatten()
+            .zip(right.ramps.iter().flatten())
+            .all(|(l, r)| ramp_bits(l) == ramp_bits(r))
+    }
+}
+
+/// A ramp's four words as raw bits, for the witness and the agreement test.
+fn ramp_bits(ramp: &LinearRamp) -> [u32; 4] {
+    [
+        ramp.current.to_bits(),
+        ramp.target.to_bits(),
+        ramp.step.to_bits(),
+        ramp.remaining,
+    ]
 }
 
 fn initial_defaults(
@@ -2104,6 +2296,11 @@ impl PreparedNativeEffect for PreparedMultibandCompressor {
         self.instance.reset(kind);
     }
 
+    /// Issue #1871: [`Instance::designed_channel_symmetry`] on lane 0.
+    fn channel_symmetry(&self) -> bool {
+        self.instance.designed_channel_symmetry(0)
+    }
+
     fn process(&mut self, block: EffectProcessBlock<'_>) -> ProcessReport {
         let mut report = ProcessReport::default();
         self.instance.apply_automation(
@@ -2189,6 +2386,70 @@ impl<L: Lane, const W: usize> PreparedNativeEffectBank for PreparedMultibandComp
     }
 
     fn process_bank(&mut self, block: EffectBankProcessBlock<'_>) -> BankProcessReport {
+        self.process_bank_inner::<false>(block)
+    }
+
+    /// Issue #1871: [`Instance::designed_channel_symmetry`].
+    fn lane_channel_symmetry(&self, lane: usize) -> bool {
+        self.instance.designed_channel_symmetry(lane)
+    }
+
+    fn supports_mono_collapse(&self) -> bool {
+        true
+    }
+
+    fn process_bank_mono(&mut self, block: EffectBankProcessBlock<'_>) -> BankProcessReport {
+        self.process_bank_inner::<true>(block)
+    }
+
+    fn desymmetrize_channels(&mut self) {
+        self.instance.desymmetrize();
+    }
+
+    fn channels_agree(&self) -> bool {
+        self.instance.channels_bit_equal()
+    }
+
+    // REALTIME_POLICY_BEGIN: #1278 D3, the payload calls run in the plan-swap block.
+    fn snapshot_track_state_payload(
+        &self,
+        track_index: u32,
+        output: StatePayloadOutput<'_>,
+    ) -> Result<(), StatePayloadError> {
+        let track = checked_track(track_index, W)?;
+        self.instance.snapshot(track, output, self.state_sizes)
+    }
+
+    fn restore_track_state_payload(
+        &mut self,
+        track_index: u32,
+        state_layout_version: u32,
+        input: StatePayloadInput<'_>,
+    ) -> Result<(), StatePayloadError> {
+        let track = checked_track(track_index, W)?;
+        // A restore can write any state word, so the claim goes whatever the result.
+        self.silent_fixed_point = false;
+        self.instance.restore(track, state_layout_version, input)
+    }
+    // REALTIME_POLICY_END
+}
+
+impl<L: Lane, const W: usize> PreparedMultibandCompressorBank<L, W> {
+    /// The one bank body, dual or collapsed (issue #1871).
+    ///
+    /// `MONO` chooses the render body and the sides the silent path reads, nothing else: the
+    /// guards, the automation drain (both channels' spans, as a dual block takes them) and the
+    /// reports are the same statements in the same order. A collapsed block's quiet test, its
+    /// fixed-point skip and the claim it re-earns read the left plane and the left side, which is
+    /// the dual predicate on `L == R` with the right conjunct restated as the left one. A claim
+    /// earned collapsed holds on a dual block too, because a disengage copies the resting left
+    /// side onto the right before the first one. Inlined into each caller so the dual and the
+    /// collapsed body stay two symbols, `process_bank` and `process_bank_mono`.
+    #[inline(always)]
+    fn process_bank_inner<const MONO: bool>(
+        &mut self,
+        block: EffectBankProcessBlock<'_>,
+    ) -> BankProcessReport {
         let mut report = BankProcessReport::empty(self.width);
         // `EffectBankProcessBlock::new` has already validated the block's shape, its automation
         // offsets and its frame count against the quantum (#94 F11); what is left is the two
@@ -2219,49 +2480,33 @@ impl<L: Lane, const W: usize> PreparedNativeEffectBank for PreparedMultibandComp
         // -- so neither can differ from the block that earned the claim) and
         // both input planes exactly `+0.0`. `-0.0` and subnormal words are not quiet.
         let quiet = self.instance.sides[0].no_ramp_in_flight()
-            && self.instance.sides[1].no_ramp_in_flight()
+            && (MONO || self.instance.sides[1].no_ramp_in_flight())
             && block_is_positive_zero(&block.left[..words])
-            && block_is_positive_zero(&block.right[..words]);
+            && (MONO || block_is_positive_zero(&block.right[..words]));
+        let sides = if MONO { 1 } else { 2 };
         if quiet && self.silent_fixed_point {
             // Every lane is at rest and the planes already hold the `+0.0` the kernel would
             // write; the kernel would move no word but the silence counters, and no lane fails
             // the boundary check on `+0.0`.
-            self.instance.advance_silence(all_lanes::<W>(), frames);
+            self.instance
+                .advance_silence_sides(all_lanes::<W>(), frames, sides);
             return report;
         }
-        render::<L, W, false>(
+        render_body::<L, W, false, MONO>(
             &mut self.instance,
             block.left,
             block.right,
             frames,
             &mut report.reports,
         );
-        self.silent_fixed_point = quiet && self.instance.lanes_at_rest() == all_lanes::<W>();
+        let at_rest = if MONO {
+            self.instance.sides[0].rest_lanes()
+        } else {
+            self.instance.lanes_at_rest()
+        };
+        self.silent_fixed_point = quiet && at_rest == all_lanes::<W>();
         report
     }
-
-    // REALTIME_POLICY_BEGIN: #1278 D3, the payload calls run in the plan-swap block.
-    fn snapshot_track_state_payload(
-        &self,
-        track_index: u32,
-        output: StatePayloadOutput<'_>,
-    ) -> Result<(), StatePayloadError> {
-        let track = checked_track(track_index, W)?;
-        self.instance.snapshot(track, output, self.state_sizes)
-    }
-
-    fn restore_track_state_payload(
-        &mut self,
-        track_index: u32,
-        state_layout_version: u32,
-        input: StatePayloadInput<'_>,
-    ) -> Result<(), StatePayloadError> {
-        let track = checked_track(track_index, W)?;
-        // A restore can write any state word, so the claim goes whatever the result.
-        self.silent_fixed_point = false;
-        self.instance.restore(track, state_layout_version, input)
-    }
-    // REALTIME_POLICY_END
 }
 
 fn checked_track(track_index: u32, width: usize) -> Result<usize, StatePayloadError> {
