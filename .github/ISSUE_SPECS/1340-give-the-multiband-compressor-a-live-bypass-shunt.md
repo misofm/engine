@@ -273,9 +273,12 @@ Scope note `scope/1340.md` (Fable) and root's decisions govern where they differ
   `a_lifted_bypass_carries_across_a_rebuild_at_every_width`, one loop over the delay and the
   multiband.
 - **Red mutations:** `tests/MUTATIONS.md` rows 1340-M1 to M3, all RED.
-- **Open: `host-core/tests/in_place_commit.rs::a_random_walk_of_transactions_commits_as_the_full_path_does`
-  fails** (`no full commit of link_mode`). The multiband bypass row now enters the walk's
-  live-only pool, which shifts the seeded draw stream; at seed `0x9E37_79B9_7F4A_7C15` the walk
-  draws a `link_mode` edit once in 2,600 cases and that transaction does not commit. The generator's
-  reach of the rebuild-only link-mode row was already marginal. The file is outside this slice's
-  paths; root decides the fix.
+- **The walk's reach (root ruling, `in_place_commit.rs` authorized).** The multiband bypass row
+  joining the live-only pool shifted the walk's seeded draws, and at its seed no `link_mode` edit
+  reached a full commit (`no full commit of link_mode`; one draw in 2,600 cases, not committed).
+  The seed is not changed. The walk now gives every row kind a deterministic first appearance:
+  per session, one committed one-edit transaction per row name of the control list (a value other
+  than the committed one, no ramp) and one structural edit, then the unchanged random tail. It
+  asserts after that prelude that `matrix_mode`, `fader_ms`, `link_mode` and `<structural>` took
+  the full path, and keeps the end-of-walk assertions. Now 6 full `link_mode` commits, 1 of them
+  the first appearance (the rich session's one link-mode row).
