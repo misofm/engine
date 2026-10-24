@@ -177,8 +177,6 @@ fn prepare<L: Lane>(case: usize, group: usize, channel: usize) -> (GateCoef<L>, 
     }
     let link = |mode: usize| L::splat(f32::from(u8::from(case == mode)));
     let coef = GateCoef {
-        attack: L::load(&attack[..width]),
-        release: L::load(&release[..width]),
         hold_samples: L::load(&hold[..width]),
         bypass: L::zero(),
         link_max: link(1),
@@ -191,6 +189,10 @@ fn prepare<L: Lane>(case: usize, group: usize, channel: usize) -> (GateCoef<L>, 
             hold: coef.hold_samples,
         },
         ramps: [GateRamp::fixed(L::zero()); RAMP_COUNT],
+        rates: [
+            GateRamp::fixed(L::load(&attack[..width])),
+            GateRamp::fixed(L::load(&release[..width])),
+        ],
     };
     for (index, ramp) in state.ramps.iter_mut().enumerate() {
         let current = L::load(&resting[index][..width]);

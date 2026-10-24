@@ -2254,6 +2254,21 @@ pub trait GraphPreparedBuiltinBankProcessor: Send + Any {
         frames: u32,
         first_sample: u64,
     ) -> Result<(), RenderError>;
+    /// [`Self::process`] for a block whose right input is its left plane, forwarded from
+    /// `rack::BankStage::process_from_left` with that method's contract (issue #975): `right` is
+    /// output only, `Ok(true)` when the bank wrote it from `left` itself, `Ok(false)` when it
+    /// copied `left` into it first, as this default does.
+    fn process_from_left(
+        &mut self,
+        left: &mut [f32],
+        right: &mut [f32],
+        frames: u32,
+        first_sample: u64,
+    ) -> Result<bool, RenderError> {
+        right.copy_from_slice(left);
+        self.process(left, right, frames, first_sample)?;
+        Ok(false)
+    }
     /// Copy one bank member's retained response words without advancing render state.
     fn copy_response_snapshot_lane(
         &self,
@@ -3215,6 +3230,13 @@ pub trait GraphPreparedSourceSetDriver: Send {
         GraphObservationValidity::CLEAR
     }
     fn copy_after_disarm_telemetry(&self, _output: &mut [u64]) -> usize {
+        0
+    }
+    /// The accepted source frames still in this driver's occupied rings that render never read
+    /// (#1699 D1). Control thread only, once the plan is retired: a source the successor carried
+    /// left a vacant entry here, so what remains is exactly the removed or redeclared sources'
+    /// discarded PCM. The default (no rings) is 0.
+    fn unread_source_frames(&self) -> u64 {
         0
     }
     /// Whether [`Self::played_planes`] lends this driver's played block (issue #918).
@@ -5874,6 +5896,12 @@ impl PreparedPlanExecutor for GraphExecutor {
         self.runtime.units.iter().fold(0_u64, |total, unit| {
             total.saturating_add(unit.observation_retained_bytes() as u64)
         })
+    }
+
+    fn unread_source_frames(&self) -> u64 {
+        self.source_set
+            .as_ref()
+            .map_or(0, |set| set.driver.unread_source_frames())
     }
 }
 

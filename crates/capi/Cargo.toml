@@ -38,6 +38,8 @@ graph = { workspace = true, features = ["test-support"] }
 # The tests write control values by row name (`control_core::{row_address, fader_edits, ...}`).
 protocol = { workspace = true, features = ["test-support"] }
 session.workspace = true
+# #1386: the `SESSION_REPLACE` frame's document digest, for the session-replace test only.
+sha2.workspace = true
 source.workspace = true
 
 [lints]

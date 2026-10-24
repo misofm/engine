@@ -3039,13 +3039,14 @@ fn prepared_reason(effect_id: &str, parameter_id: u32) -> RebuildReason {
         .reason
 }
 
-/// #1264 gate 1(d), #1265 gate 1(c). Red if a parameter the plan keeps prepared -- a gate/expander
-/// attack, or an EQ band's `enabled` or `kind` (`automation_rate` `None`, decision 14 F2) -- is
-/// classified live: the edit would be acked and the effect would never apply it.
+/// #1264 gate 1(d), #1265 gate 1(c), #1336. Red if a parameter the plan keeps prepared -- an EQ
+/// band's `enabled` or `kind` (`automation_rate` `None`, decision 14 F2) -- is classified live:
+/// the edit would be acked and the effect would never apply it; or if the gate/expander's attack,
+/// live since #1336, is not one record per lane.
 #[test]
 fn prepared_parameter_changes_need_a_rebuild() {
     let current = with_effects();
-    // Gate/expander attack (ID 5).
+    // Gate/expander attack (ID 5, index 4) is live.
     assert_eq!(
         classify_effects(&current, |next| {
             inserts(next, 1).push(param(
@@ -3055,17 +3056,14 @@ fn prepared_parameter_changes_need_a_rebuild() {
                 10.0,
             ));
         }),
-        Err(LiveRebuild::RebuildOnly(prepared_reason(
-            "miso.gate-expander",
-            5
-        )))
-    );
-    // The gate's threshold (ID 1) is live.
-    assert!(
-        classify_effects(&current, |next| {
-            inserts(next, 1).push(param(1, ParameterChannel::Both, ParameterUnit::Db, -50.0));
-        })
-        .is_ok()
+        Ok((
+            Vec::new(),
+            vec![(
+                track_id(&current, 0),
+                LiveEffectAddress::insert(1),
+                vec![record(4, Lane::Left, 10.0), record(4, Lane::Right, 10.0)]
+            )]
+        ))
     );
     // EQ band 1 `enabled` (ID 1) and `kind` (ID 2, a low shelf), each beside a live gain.
     for prepared in [

@@ -25,10 +25,11 @@ use crate::{
     EditPath, EncodeError, EventPayload, ExpectedRevision, MessageId, MeterBatch, MeterRecord,
     NonOkResponse, ObservationEnded, ObservationTapKey, PreparedSessionTransaction, ProtocolCodec,
     ProtocolQueues, QueueReport, ReliablePayload, ReliableSlot, RequestId, ResponseGetRequest,
-    ResponseResult, SampleTime, SessionCommitted, SessionEdit, SessionRevision, SessionSnapshot,
-    SessionStore, SessionStoreError, StatusCode, SuccessResponsePayload, TelemetryConfiguration,
-    TelemetryKey, TelemetryRecord, TransactionApplied, TransportSetRequest, TransportSnapshot,
-    TransportStateEvent, TypedEventFrame, TypedNonOkResponseFrame, TypedSuccessResponseFrame,
+    ResponseResult, SampleTime, SessionCommitted, SessionEdit, SessionReplaceRequest,
+    SessionRevision, SessionSnapshot, SessionStore, SessionStoreError, StatusCode,
+    SuccessResponsePayload, TelemetryConfiguration, TelemetryKey, TelemetryRecord,
+    TransactionApplied, TransportSetRequest, TransportSnapshot, TransportStateEvent,
+    TypedEventFrame, TypedNonOkResponseFrame, TypedSuccessResponseFrame,
 };
 #[cfg(any(test, feature = "test-support"))]
 use crate::{
@@ -67,6 +68,84 @@ pub struct ProtocolControllerConfig {
     pub maximum_response_diagnostics: u16,
     /// Typed provider/event enablement used for capability construction and dispatch.
     pub provider_features: ProviderFeatures,
+    /// The `SESSION_REPLACE` document hook (#1386): `None` refuses the command as `UNAVAILABLE`
+    /// and leaves it unadvertised. It also needs session transactions.
+    pub document_replace: Option<DocumentReplace>,
+}
+
+/// The `SESSION_REPLACE` document hook (#1386 D3): the function that checks, parses and diffs
+/// the document a host passes beside the frame, and the document byte bound it applies. The
+/// protocol crate holds no parse, diff or hash code: the control plane sets this.
+#[derive(Clone, Copy, Debug)]
+pub struct DocumentReplace {
+    /// The check, parse and diff.
+    pub replace: DocumentReplaceFn,
+    /// The most bytes a document may hold; 0 is unbounded (as every other zero bound of the
+    /// control plane's limits).
+    pub maximum_document_bytes: u64,
+}
+
+impl PartialEq for DocumentReplace {
+    fn eq(&self, other: &Self) -> bool {
+        // A function's address is not a stable identity; compare it as the address it is.
+        core::ptr::fn_addr_eq(self.replace, other.replace)
+            && self.maximum_document_bytes == other.maximum_document_bytes
+    }
+}
+
+impl Eq for DocumentReplace {}
+
+/// The `SESSION_REPLACE` check, parse and diff (#1386 D3). It runs on the control thread, after
+/// the replay preflight, the exact-revision check and the output reservation, and before the
+/// edit-count check and the preparation. It keeps nothing of the document.
+pub type DocumentReplaceFn =
+    fn(DocumentReplaceRequest<'_>) -> Result<DocumentDiff, DocumentReplaceRefusal>;
+
+/// What [`DocumentReplaceFn`] reads: the committed store, the borrowed document, the frame's two
+/// fields and the byte bound.
+#[derive(Clone, Copy)]
+pub struct DocumentReplaceRequest<'a> {
+    /// The committed session and the caps it compiles under.
+    pub committed: &'a SessionStore,
+    /// The document the host passed beside the frame, borrowed for this call only; empty when
+    /// the host passed none.
+    pub document: &'a [u8],
+    /// The frame's `document-bytes` and `document-sha256`.
+    pub request: SessionReplaceRequest,
+    /// [`DocumentReplace::maximum_document_bytes`].
+    pub maximum_document_bytes: u64,
+}
+
+/// The diff of a replacement document against the committed model.
+#[derive(Clone, Debug, PartialEq)]
+pub enum DocumentDiff {
+    /// The document is the committed model, bit for bit (the revision aside): the reply is OK
+    /// with [`EditPath::Unchanged`] and nothing commits.
+    Unchanged,
+    /// The edits that turn the committed model into the document, and the document's
+    /// `control_smoothing`, which the replace's preparation applies after the edits
+    /// ([`SessionStore::prepare_replacement`]).
+    Changed {
+        /// One edit per differing entity, in the diff's order; may be empty when only the
+        /// smoothing differs.
+        edits: Vec<SessionEdit>,
+        /// The document's `control_smoothing` (`None` is the session default).
+        control_smoothing: Option<session::ControlSmoothing>,
+    },
+}
+
+/// A refusal of the document, before anything is prepared (#1386 D4).
+#[derive(Clone, Debug, PartialEq)]
+pub enum DocumentReplaceRefusal {
+    /// A refusal with one diagnostic code.
+    Refused {
+        /// The response status.
+        status: StatusCode,
+        /// The one diagnostic's code.
+        code: &'static str,
+    },
+    /// The document does not parse or validate: `VALIDATION_FAILED` with these diagnostics.
+    Invalid(session::DiagnosticSet),
 }
 
 /// Eager retained collection capacities for controller/provider configuration state.
@@ -155,6 +234,7 @@ impl Default for ProtocolControllerConfig {
             maximum_transaction_edits: 1024,
             maximum_response_diagnostics: 256,
             provider_features: ProviderFeatures::ALL,
+            document_replace: None,
         }
     }
 }
@@ -963,6 +1043,12 @@ pub enum ControlCommand<'a> {
     ResponseGet {
         request: ResponseGetRequest,
     },
+    /// `SESSION_REPLACE` without a document: [`ProtocolController::process`] has no document to
+    /// pass, so it is refused as a document of the wrong length. A host passes the document
+    /// through [`ProtocolController::prepare_command_frame`].
+    SessionReplace {
+        request: SessionReplaceRequest,
+    },
 }
 
 impl ControlCommand<'_> {
@@ -970,6 +1056,7 @@ impl ControlCommand<'_> {
         matches!(
             self,
             Self::SessionTransactionApply { .. }
+                | Self::SessionReplace { .. }
                 | Self::TransportSet { .. }
                 | Self::TelemetryConfigure { .. }
         )
@@ -988,6 +1075,7 @@ impl ControlCommand<'_> {
             Self::ControlListGet { .. } => MessageId::ControlListGet,
             Self::ControlStateGet { .. } => MessageId::ControlStateGet,
             Self::ResponseGet { .. } => MessageId::ResponseGet,
+            Self::SessionReplace { .. } => MessageId::SessionReplace,
         }
     }
 }
@@ -1020,7 +1108,7 @@ pub struct ControllerResponse {
 
 #[derive(Clone, Copy)]
 struct CapabilitySet {
-    commands: [u16; 12],
+    commands: [u16; 13],
     command_len: u8,
     events: [u16; 6],
     event_len: u8,
@@ -1148,6 +1236,8 @@ enum Preparation {
 }
 
 struct StructuralCommandPlan {
+    /// `SESSION_TRANSACTION_APPLY` or `SESSION_REPLACE`: the reply's message ID.
+    message_id: MessageId,
     request_id: RequestId,
     previous_revision: SessionRevision,
     prospective_session: PreparedSessionTransaction,
@@ -1175,6 +1265,8 @@ enum StructuralCommandDisposition {
 pub struct PreparedStructuralCommand {
     owner: Arc<AtomicU64>,
     generation: u64,
+    /// `SESSION_TRANSACTION_APPLY` or `SESSION_REPLACE`: the reply's message ID.
+    message_id: MessageId,
     request_id: RequestId,
     previous_revision: SessionRevision,
     prospective_session: Option<PreparedSessionTransaction>,
@@ -1637,6 +1729,9 @@ impl<P: ControlProvider> ProtocolController<P> {
                 ControlCommand::ControlStateGet { request }
             }
             DecodedCommandPayload::ResponseGet(request) => ControlCommand::ResponseGet { request },
+            DecodedCommandPayload::SessionReplace(request) => {
+                ControlCommand::SessionReplace { request }
+            }
         };
         Ok(self.process(ControllerRequest {
             request_id: header.request_id,
@@ -1670,8 +1765,11 @@ impl<P: ControlProvider> ProtocolController<P> {
             .map_err(CommandFrameProcessError::Uncorrelatable)?;
         // The one-call path has no host to apply a monitor write to: it refuses solo, as it always
         // did, rather than acknowledge a write nobody applies.
+        // The one-call path carries no document: a `SESSION_REPLACE` here is refused as a
+        // document of the wrong length.
         match self.plan_structural_command(
             input,
+            &[],
             scratch,
             output.len(),
             header,
@@ -1692,9 +1790,14 @@ impl<P: ControlProvider> ProtocolController<P> {
 
     /// Prepare one complete command. Valid structural commands return an invisible affine token;
     /// every other accepted decision completes through the byte-identical one-call machinery.
+    ///
+    /// `document` is the document a `SESSION_REPLACE` names (#1386 D3), borrowed for this call
+    /// only and kept nowhere; empty for every other command, and for a host that passed none. A
+    /// replayed request answers its cached reply before the document is read.
     pub fn prepare_command_frame(
         &mut self,
         input: &[u8],
+        document: &[u8],
         scratch: &mut DecodeScratch<'_>,
         output_capacity: usize,
     ) -> Result<PreparedCommandFrame, CommandFrameProcessError> {
@@ -1708,6 +1811,7 @@ impl<P: ControlProvider> ProtocolController<P> {
         // The prepared path hands the token to a host that owns a monitor overlay (#1559).
         self.prepare_command_frame_with(
             input,
+            document,
             scratch,
             output_capacity,
             header,
@@ -1727,6 +1831,7 @@ impl<P: ControlProvider> ProtocolController<P> {
     pub fn prepare_command_frame_in_place(
         &mut self,
         input: &[u8],
+        document: &[u8],
         scratch: &mut DecodeScratch<'_>,
         output_capacity: usize,
     ) -> Result<PreparedCommandFrame, CommandFrameProcessError> {
@@ -1739,6 +1844,7 @@ impl<P: ControlProvider> ProtocolController<P> {
             .map_err(CommandFrameProcessError::Uncorrelatable)?;
         self.prepare_command_frame_with(
             input,
+            document,
             scratch,
             output_capacity,
             header,
@@ -1773,12 +1879,20 @@ impl<P: ControlProvider> ProtocolController<P> {
     fn prepare_command_frame_with(
         &mut self,
         input: &[u8],
+        document: &[u8],
         scratch: &mut DecodeScratch<'_>,
         output_capacity: usize,
         header: CommandHeader,
         preparation: Preparation,
     ) -> Result<PreparedCommandFrame, CommandFrameProcessError> {
-        match self.plan_structural_command(input, scratch, output_capacity, header, preparation)? {
+        match self.plan_structural_command(
+            input,
+            document,
+            scratch,
+            output_capacity,
+            header,
+            preparation,
+        )? {
             StructuralCommandDisposition::Legacy => {
                 self.process_immediate_command(input, scratch, output_capacity)
             }
@@ -1804,10 +1918,13 @@ impl<P: ControlProvider> ProtocolController<P> {
         let response_frame = TypedSuccessResponseFrame {
             request_id: header.request_id,
             revision,
-            payload: SuccessResponsePayload::SessionTransactionApplied(TransactionApplied {
-                applied_operations: plan.applied_operations,
-                edit_path: EditPath::ModelOnly,
-            }),
+            payload: applied_payload(
+                plan.message_id,
+                TransactionApplied {
+                    applied_operations: plan.applied_operations,
+                    edit_path: EditPath::ModelOnly,
+                },
+            ),
         };
         // The frame staging holds exactly the measured response: the final frame (the same fields
         // with the edit path the host reports) has the same length, so nothing larger is staged.
@@ -1872,6 +1989,7 @@ impl<P: ControlProvider> ProtocolController<P> {
         Ok(PreparedStructuralCommand {
             owner: Arc::clone(&self.structural_generation),
             generation,
+            message_id: plan.message_id,
             request_id: plan.request_id,
             previous_revision: plan.previous_revision,
             prospective_session: Some(plan.prospective_session),
@@ -1890,13 +2008,18 @@ impl<P: ControlProvider> ProtocolController<P> {
     fn plan_structural_command(
         &self,
         input: &[u8],
+        document: &[u8],
         scratch: &mut DecodeScratch<'_>,
         output_capacity: usize,
         header: CommandHeader,
         preparation: Preparation,
     ) -> Result<StructuralCommandDisposition, CommandFrameProcessError> {
         let monitor = preparation != Preparation::Whole;
-        if header.message_id != MessageId::SessionTransactionApply {
+        // #1386 D3: a `SESSION_REPLACE` takes this one path with a transaction: the same replay
+        // preflight, exact-revision check and output reservation, then the document hook, then
+        // the same edit-count check and preparation.
+        let replace = header.message_id == MessageId::SessionReplace;
+        if header.message_id != MessageId::SessionTransactionApply && !replace {
             return Ok(StructuralCommandDisposition::Legacy);
         }
         let is_new_request = self.replay.is_new_request(header.request_id);
@@ -1910,6 +2033,7 @@ impl<P: ControlProvider> ProtocolController<P> {
         }
         if !self.config.provider_features.session_events
             || self.config.maximum_transaction_edits == 0
+            || (replace && self.config.document_replace.is_none())
             || !matches!(header.expected_revision, ExpectedRevision::Exact(_))
             || matches!(
                 header.expected_revision,
@@ -1934,13 +2058,41 @@ impl<P: ControlProvider> ProtocolController<P> {
                 });
             }
         };
-        let DecodedCommandPayload::SessionTransactionApply(edits) = decoded.payload else {
-            return Ok(StructuralCommandDisposition::Immediate {
-                replay_plan,
-                outcome: self.non_ok(StatusCode::Internal, None),
-            });
+        let (edits, replacement) = match decoded.payload {
+            DecodedCommandPayload::SessionTransactionApply(edits) => (edits, None),
+            DecodedCommandPayload::SessionReplace(request) => {
+                match self.diff_document(request, document) {
+                    Ok(DocumentDiff::Changed {
+                        edits,
+                        control_smoothing,
+                    }) => (edits, Some(control_smoothing)),
+                    // Nothing changed: OK at the committed revision, no event, no candidate.
+                    Ok(DocumentDiff::Unchanged) => {
+                        return Ok(StructuralCommandDisposition::Immediate {
+                            replay_plan,
+                            outcome: self.ok(Body::TransactionApplied(TransactionApplied {
+                                applied_operations: 0,
+                                edit_path: EditPath::Unchanged,
+                            })),
+                        });
+                    }
+                    Err(refusal) => {
+                        return Ok(StructuralCommandDisposition::Immediate {
+                            replay_plan,
+                            outcome: self.document_refusal_outcome(refusal),
+                        });
+                    }
+                }
+            }
+            _ => {
+                return Ok(StructuralCommandDisposition::Immediate {
+                    replay_plan,
+                    outcome: self.non_ok(StatusCode::Internal, None),
+                });
+            }
         };
-        if edits.is_empty() {
+        // A replace whose only change is the smoothing holds no edit; a transaction must.
+        if edits.is_empty() && replacement.is_none() {
             return Ok(StructuralCommandDisposition::Immediate {
                 replay_plan,
                 outcome: self.non_ok(StatusCode::InvalidField, None),
@@ -1955,7 +2107,9 @@ impl<P: ControlProvider> ProtocolController<P> {
         // A transaction of monitor writes changes no revision and emits no event, so it needs no
         // event room (#1559 D4). Any other commit reserves its `SESSION_COMMITTED` and nothing
         // else: a revision change cancels nothing (#1628).
-        let monitor_only = monitor && crate::model::is_monitor_transaction(&edits);
+        // A replace never writes a monitor row (a document carries no solo).
+        let monitor_only =
+            replacement.is_none() && monitor && crate::model::is_monitor_transaction(&edits);
         let required_events = usize::from(!monitor_only);
         let event_report = self.queues.report(crate::QueueKind::ReliableEvent);
         if required_events
@@ -1987,14 +2141,19 @@ impl<P: ControlProvider> ProtocolController<P> {
                 });
             }
         };
-        let prepared_transaction = match preparation {
-            Preparation::Whole => self
+        let prepared_transaction = match (replacement, preparation) {
+            (Some(control_smoothing), _) => self.session.prepare_replacement(
+                header.expected_revision,
+                &edits,
+                control_smoothing,
+            ),
+            (None, Preparation::Whole) => self
                 .session
                 .prepare_transaction(header.expected_revision, &edits),
-            Preparation::Monitor => self
+            (None, Preparation::Monitor) => self
                 .session
                 .prepare_transaction_with_monitor(header.expected_revision, &edits),
-            Preparation::InPlace => self
+            (None, Preparation::InPlace) => self
                 .session
                 .prepare_transaction_in_place(header.expected_revision, &edits),
         };
@@ -2011,10 +2170,13 @@ impl<P: ControlProvider> ProtocolController<P> {
         let response_frame = TypedSuccessResponseFrame {
             request_id: header.request_id,
             revision,
-            payload: SuccessResponsePayload::SessionTransactionApplied(TransactionApplied {
-                applied_operations,
-                edit_path: EditPath::ModelOnly,
-            }),
+            payload: applied_payload(
+                header.message_id,
+                TransactionApplied {
+                    applied_operations,
+                    edit_path: EditPath::ModelOnly,
+                },
+            ),
         };
         let response_measure = match self.codec.measure_success_response_frame(&response_frame) {
             Ok(measure) => measure,
@@ -2043,6 +2205,7 @@ impl<P: ControlProvider> ProtocolController<P> {
         }
         Ok(StructuralCommandDisposition::Structural(
             StructuralCommandPlan {
+                message_id: header.message_id,
                 request_id: header.request_id,
                 previous_revision: self.session.revision(),
                 prospective_session,
@@ -2066,10 +2229,13 @@ impl<P: ControlProvider> ProtocolController<P> {
         let response_frame = TypedSuccessResponseFrame {
             request_id: header.request_id,
             revision,
-            payload: SuccessResponsePayload::SessionTransactionApplied(TransactionApplied {
-                applied_operations: plan.applied_operations,
-                edit_path: EditPath::ModelOnly,
-            }),
+            payload: applied_payload(
+                plan.message_id,
+                TransactionApplied {
+                    applied_operations: plan.applied_operations,
+                    edit_path: EditPath::ModelOnly,
+                },
+            ),
         };
         let written = self
             .codec
@@ -2347,10 +2513,13 @@ impl<P: ControlProvider> ProtocolController<P> {
         let final_frame = TypedSuccessResponseFrame {
             request_id: prepared.request_id,
             revision: response_revision,
-            payload: SuccessResponsePayload::SessionTransactionApplied(TransactionApplied {
-                applied_operations: prepared.applied_operations,
-                edit_path: path,
-            }),
+            payload: applied_payload(
+                prepared.message_id,
+                TransactionApplied {
+                    applied_operations: prepared.applied_operations,
+                    edit_path: path,
+                },
+            ),
         };
         let written = self
             .codec
@@ -2511,6 +2680,9 @@ impl<P: ControlProvider> ProtocolController<P> {
                 ControlCommand::ControlStateGet { request }
             }
             DecodedCommandPayload::ResponseGet(request) => ControlCommand::ResponseGet { request },
+            DecodedCommandPayload::SessionReplace(request) => {
+                ControlCommand::SessionReplace { request }
+            }
         };
         self.execute(&ControllerRequest {
             request_id: header.request_id,
@@ -2585,6 +2757,9 @@ impl<P: ControlProvider> ProtocolController<P> {
             }
             (MessageId::SessionTransactionApply, Body::TransactionApplied(value)) => {
                 encode_success!(SuccessResponsePayload::SessionTransactionApplied(value))
+            }
+            (MessageId::SessionReplace, Body::TransactionApplied(value)) => {
+                encode_success!(SuccessResponsePayload::SessionReplaced(value))
             }
             (MessageId::TransportGet, Body::Transport(value)) => {
                 encode_success!(SuccessResponsePayload::TransportGetSnapshot(value))
@@ -3169,6 +3344,11 @@ impl<P: ControlProvider> ProtocolController<P> {
             ControlCommand::SessionTransactionApply { .. } => {
                 features.session_events && self.config.maximum_transaction_edits != 0
             }
+            ControlCommand::SessionReplace { .. } => {
+                features.session_events
+                    && self.config.maximum_transaction_edits != 0
+                    && self.config.document_replace.is_some()
+            }
             ControlCommand::ControlListGet { .. } | ControlCommand::ControlStateGet { .. } => {
                 features.controls
             }
@@ -3268,6 +3448,13 @@ impl<P: ControlProvider> ProtocolController<P> {
                     }
                 }
             }
+            // This path carries no document (`process`, or a request the prepared path handed
+            // back): the hook refuses it as a document of the wrong length. A document that
+            // somehow diffed here would have no preparation to go to.
+            ControlCommand::SessionReplace { request } => match self.diff_document(*request, &[]) {
+                Err(refusal) => self.document_refusal_outcome(refusal),
+                Ok(_) => self.non_ok(StatusCode::Internal, None),
+            },
             ControlCommand::ControlListGet { request } => {
                 match self.provider.control_list(request) {
                     Ok(page) => match self.fit_control_list(page) {
@@ -3615,6 +3802,48 @@ impl<P: ControlProvider> ProtocolController<P> {
         )
     }
 
+    /// Run the `SESSION_REPLACE` document hook (#1386 D3) against the committed store, before
+    /// anything is prepared; [`Self::document_refusal_outcome`] answers a refusal (D4).
+    fn diff_document(
+        &self,
+        request: SessionReplaceRequest,
+        document: &[u8],
+    ) -> Result<DocumentDiff, DocumentReplaceRefusal> {
+        let Some(hook) = self.config.document_replace else {
+            return Err(DocumentReplaceRefusal::Refused {
+                status: StatusCode::Unavailable,
+                code: "protocol.failure",
+            });
+        };
+        (hook.replace)(DocumentReplaceRequest {
+            committed: &self.session,
+            document,
+            request,
+            maximum_document_bytes: hook.maximum_document_bytes,
+        })
+    }
+
+    /// The outcome of a document refusal: its status with one diagnostic that carries its code,
+    /// or `VALIDATION_FAILED` with the session's diagnostics (no edit caused them).
+    fn document_refusal_outcome(&self, refusal: DocumentReplaceRefusal) -> Outcome {
+        match refusal {
+            DocumentReplaceRefusal::Refused { status, code } => {
+                self.response_error_outcome(ResponseProviderError { status, code })
+            }
+            DocumentReplaceRefusal::Invalid(diagnostics) => {
+                let diagnostics: Vec<Diagnostic> = diagnostics
+                    .diagnostics()
+                    .iter()
+                    .map(|diagnostic| session_diagnostic_to_protocol(diagnostic, None))
+                    .collect();
+                self.non_ok_value(
+                    StatusCode::ValidationFailed,
+                    self.bounded_non_ok_diagnostics(&diagnostics),
+                )
+            }
+        }
+    }
+
     fn transaction_error_outcome(&self, error: &SessionStoreError) -> Outcome {
         let status = status_for_transaction(error);
         let diagnostics = transaction_error_diagnostics(error);
@@ -3627,9 +3856,10 @@ impl<P: ControlProvider> ProtocolController<P> {
         let features = self.config.provider_features;
         let session_transactions =
             features.session_events && self.config.maximum_transaction_edits != 0;
-        let mut commands = [0_u16; 12];
+        let mut commands = [0_u16; 13];
         let mut command_len = 0_usize;
-        for id in 1_u16..=14 {
+        // `0x000f`-`0x0012` are claimed by open specs and never advertised until they land.
+        for id in (1_u16..=14).chain([0x0013]) {
             let enabled = match id {
                 // The retired IDs are never advertised.
                 id if crate::RETIRED_MESSAGE_IDS.contains(&id) => false,
@@ -3640,6 +3870,7 @@ impl<P: ControlProvider> ProtocolController<P> {
                 11 => features.diagnostics,
                 12 | 13 => features.controls,
                 14 => features.response,
+                0x0013 => session_transactions && self.config.document_replace.is_some(),
                 _ => true,
             };
             if enabled {
@@ -3830,7 +4061,7 @@ fn transaction_error_diagnostics(error: &SessionStoreError) -> Vec<Diagnostic> {
         } => diagnostics
             .diagnostics()
             .iter()
-            .map(|diagnostic| session_diagnostic_to_protocol(diagnostic, *operation_index))
+            .map(|diagnostic| session_diagnostic_to_protocol(diagnostic, Some(*operation_index)))
             .collect(),
         SessionStoreError::Edit {
             operation_index,
@@ -3874,9 +4105,24 @@ fn transaction_error_diagnostics(error: &SessionStoreError) -> Vec<Diagnostic> {
     }
 }
 
+/// The reply payload of a structural command: `SESSION_REPLACE` (#1386) answers the
+/// transaction's fields under its own message ID.
+fn applied_payload(
+    message_id: MessageId,
+    value: TransactionApplied,
+) -> SuccessResponsePayload<'static> {
+    if message_id == MessageId::SessionReplace {
+        SuccessResponsePayload::SessionReplaced(value)
+    } else {
+        SuccessResponsePayload::SessionTransactionApplied(value)
+    }
+}
+
+/// A session diagnostic on the wire; `operation_index` is `None` for a replace document's own
+/// diagnostics, which no edit caused.
 fn session_diagnostic_to_protocol(
     diagnostic: &session::Diagnostic,
-    operation_index: usize,
+    operation_index: Option<usize>,
 ) -> Diagnostic {
     Diagnostic {
         code: diagnostic.code.as_str().to_owned(),
@@ -3888,10 +4134,9 @@ fn session_diagnostic_to_protocol(
             .map(session_path_segment_to_protocol)
             .collect(),
         detail: Some(diagnostic.message.clone()),
-        operation_index: Some(
-            u32::try_from(operation_index)
-                .expect("controller bounds every session operation index to u32"),
-        ),
+        operation_index: operation_index.map(|index| {
+            u32::try_from(index).expect("controller bounds every session operation index to u32")
+        }),
         sample_time: None,
         provider_sequence: None,
     }

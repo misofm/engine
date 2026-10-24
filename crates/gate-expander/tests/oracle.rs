@@ -16,6 +16,10 @@
 //!   preceding subtraction contributes at most another `ulp(48)` to the accumulated error.
 //!   The 1 ms attack has a larger `b`, and therefore a smaller accumulated bound.
 //! * `fast_gain_from_db` is qualified below `7.431e-6 dB` on negative gain values, again by F1.
+//! * The changed-timing render (#1336) adds the `f32` coefficient ramp, within a few ulp of the
+//!   reference's `f64` linear ramp, a relative error far below the state-addition term. Its changed
+//!   attack (20 ms, `b = 1.04e-3`) is faster than the 100 ms release, so the slowest rate and the
+//!   `0.0184 dB` bound above stand.
 //!
 //! Total under the unchanged `0.02 dB` limit asserted below.
 
@@ -23,9 +27,11 @@ mod support;
 
 use dsp_reference::{
     ReferenceGateExpanderParameters, ReferenceGateLink, ReferenceGatePhase, ReferenceGateTiming,
-    reference_gate_expander_process,
+    ReferenceGateTimingChange, reference_gate_expander_process,
+    reference_gate_expander_process_with_timing_change,
 };
 use effect_contract::LinkMode;
+use effect_contract::{ParameterChannel, PreparedAutomationSpan};
 use support::{
     NATIVE_LANES, Values, initial_values, native_width, prepare, prepare_bank_native,
     render_scalar, request, set_parameter, track_of,
@@ -95,6 +101,39 @@ fn corpus_signals() -> (Vec<f32>, Vec<f32>) {
 }
 
 fn reference(link: LinkMode, left: &[f32], right: &[f32]) -> dsp_reference::ReferenceGateTrace {
+    reference_with(link, left, right, None)
+}
+
+/// The live timing change of the changed-timing oracle (#1336 gate 3): 20 frames before the
+/// burst onset at frame 9,600, with the gate closed, the attack goes from 1 to 20 ms (its
+/// coefficient ramp is in flight as the gate opens) and the hold from 5 to 50 ms (the opening
+/// reloads the new count, so the burst end at 14,400 closes 45 ms later).
+const CHANGE_FRAME: usize = 9_580;
+const CHANGED_ATTACK_MS: f32 = 20.0;
+const CHANGED_HOLD_MS: f32 = 50.0;
+
+fn change_spans() -> Vec<PreparedAutomationSpan> {
+    [(4, CHANGED_ATTACK_MS), (5, CHANGED_HOLD_MS)]
+        .into_iter()
+        .flat_map(|(parameter_index, value)| {
+            [ParameterChannel::Left, ParameterChannel::Right].map(|channel| {
+                PreparedAutomationSpan {
+                    channel,
+                    parameter_index,
+                    sample: CHANGE_FRAME as u64,
+                    value,
+                }
+            })
+        })
+        .collect()
+}
+
+fn reference_with(
+    link: LinkMode,
+    left: &[f32],
+    right: &[f32],
+    change: Option<usize>,
+) -> dsp_reference::ReferenceGateTrace {
     let parameters = ReferenceGateExpanderParameters {
         threshold_db: f64::from(THRESHOLD),
         ratio: f64::from(RATIO),
@@ -113,6 +152,25 @@ fn reference(link: LinkMode, left: &[f32], right: &[f32]) -> dsp_reference::Refe
     };
     let left: Vec<f64> = left.iter().map(|&x| f64::from(x)).collect();
     let right: Vec<f64> = right.iter().map(|&x| f64::from(x)).collect();
+    if let Some(frame) = change {
+        let changed = ReferenceGateTiming {
+            attack_ms: f64::from(CHANGED_ATTACK_MS),
+            hold_ms: f64::from(CHANGED_HOLD_MS),
+            ..timing
+        };
+        return reference_gate_expander_process_with_timing_change(
+            (parameters, parameters),
+            (f64::from(HYSTERESIS), f64::from(HYSTERESIS)),
+            (timing, timing),
+            link,
+            (&left, &right),
+            ReferenceGateTimingChange {
+                frame,
+                timing: (changed, changed),
+            },
+        )
+        .expect("reference render");
+    }
     reference_gate_expander_process(
         parameters,
         parameters,
@@ -281,5 +339,126 @@ fn oracle_pcm_within_derived_tolerance_native_bank() {
                 &format!("{link:?} W{NATIVE_LANES} track {track} right"),
             );
         }
+    }
+}
+
+/// #1336 gate 3: an attack and a hold change mid-render agree with the `f64` reference's D3
+/// coefficient ramp and D4 hold rule inside the same tolerance, scalar and at the native bank
+/// width, and they audibly differ from the unchanged render (so the comparison is not vacuous).
+///
+/// Test value: an attack record that retargets the release ramp (a wrong rate direction), a
+/// coefficient that never moves, or a hold rule other than the reference's turns it red.
+#[test]
+fn oracle_pcm_with_a_live_timing_change_within_derived_tolerance() {
+    let (source_left, source_right) = corpus_signals();
+    let link = LinkMode::DualMono;
+    let trace = reference_with(link, &source_left, &source_right, Some(CHANGE_FRAME));
+    let unchanged = reference(link, &source_left, &source_right);
+    let moved = trace
+        .gain_db_left
+        .iter()
+        .zip(&unchanged.gain_db_left)
+        .filter(|(a, b)| (*a - *b).abs() > 1.0)
+        .count();
+    assert!(
+        moved > 100,
+        "the change moves the reference by more than 1 dB on {moved} frames"
+    );
+
+    let mut effect = prepare(request(&corpus_values()));
+    let (mut left, mut right) = (source_left.clone(), source_right.clone());
+    let (head_left, tail_left) = left.split_at_mut(CHANGE_FRAME);
+    let (head_right, tail_right) = right.split_at_mut(CHANGE_FRAME);
+    render_scalar(&mut effect, head_left, head_right, 128);
+    let report = support::render_scalar_sidechain(
+        &mut effect,
+        tail_left,
+        tail_right,
+        None,
+        128,
+        &change_spans(),
+        CHANGE_FRAME as u64,
+    );
+    assert_eq!(report.invalid_spans, 0);
+    for (rendered, gain, dry, phase, channel) in [
+        (
+            &left,
+            &trace.gain_db_left,
+            &trace.dry_left,
+            &trace.phase_left,
+            "left",
+        ),
+        (
+            &right,
+            &trace.gain_db_right,
+            &trace.dry_right,
+            &trace.phase_right,
+            "right",
+        ),
+    ] {
+        compare(
+            rendered,
+            gain,
+            dry,
+            phase,
+            &format!("changed scalar {channel}"),
+        );
+    }
+
+    let mut bank =
+        prepare_bank_native(&[corpus_values(); 8], link).expect("the build's own width binds");
+    let mut left = support::packed(&[source_left.as_slice(); NATIVE_LANES]);
+    let mut right = support::packed(&[source_right.as_slice(); NATIVE_LANES]);
+    let one = change_spans();
+    let spans: Vec<_> = (0..NATIVE_LANES)
+        .flat_map(|_| one.iter().copied())
+        .collect();
+    let offsets: Vec<u32> = (0..=NATIVE_LANES)
+        .map(|lane| (lane * one.len()) as u32)
+        .collect();
+    let empty = [0_u32; NATIVE_LANES + 1];
+    let mut start = 0;
+    while start < FRAMES {
+        let mut end = (start + 128).min(FRAMES);
+        if start < CHANGE_FRAME && end > CHANGE_FRAME {
+            end = CHANGE_FRAME;
+        }
+        let (automation, offsets) = if start == CHANGE_FRAME {
+            (spans.as_slice(), offsets.as_slice())
+        } else {
+            (&[][..], &empty[..])
+        };
+        let report = bank.processor.process_bank(
+            effect_contract::EffectBankProcessBlock::new(
+                &mut left[start * NATIVE_LANES..end * NATIVE_LANES],
+                &mut right[start * NATIVE_LANES..end * NATIVE_LANES],
+                None,
+                (end - start) as u32,
+                native_width(),
+                start as u64,
+                automation,
+                offsets,
+                128,
+            )
+            .expect("bank block"),
+        );
+        assert!(report.reports.iter().all(|r| r.invalid_spans == 0));
+        start = end;
+    }
+    for track in 0..NATIVE_LANES {
+        compare(
+            &track_of(&left, track, NATIVE_LANES),
+            &trace.gain_db_left,
+            &trace.dry_left,
+            &trace.phase_left,
+            &format!("changed W{NATIVE_LANES} track {track} left"),
+        );
+        compare(
+            &track_of(&right, track, NATIVE_LANES),
+            &trace.gain_db_right,
+            &trace.dry_right,
+            &trace.phase_right,
+            &format!("changed W{NATIVE_LANES} track {track} right"),
+        );
     }
 }
