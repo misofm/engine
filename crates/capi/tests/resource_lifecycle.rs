@@ -788,6 +788,11 @@ struct CompileObservation {
     /// `control_plane::monitor_and_ramp_bytes` over the compiled model: bounds, not allocations,
     /// since a boot solos nothing and keeps no ramp.
     monitor_and_ramps: u64,
+    /// The response capture's armed job and delivered result (#1577), from
+    /// `control_plane::response_capture_bytes` over the compiled model: a bound, not an
+    /// allocation, since a boot arms nothing. `response_capture.rs` in control-plane holds a
+    /// capture at the bound within it.
+    response_capture: u64,
 }
 
 fn observe_compile(document: &str, compile_limits: &CompileLimits) -> CompileObservation {
@@ -842,6 +847,10 @@ fn observe_compile(document: &str, compile_limits: &CompileLimits) -> CompileObs
         control_plane::monitor_and_ramp_bytes(store.compiled().normalized_model())
             .expect("the monitor and ramp rows");
     let monitor_and_ramps = overlay_row + ramp_row;
+    let response_capture =
+        control_plane::response_capture_bytes(store.compiled().normalized_model())
+            .expect("the response capture row")
+            .total_bytes;
     let host_core::PreparedHost {
         plan,
         sources,
@@ -887,6 +896,7 @@ fn observe_compile(document: &str, compile_limits: &CompileLimits) -> CompileObs
         strip_table_charge,
         observation_reserve,
         monitor_and_ramps,
+        response_capture,
     }
 }
 
@@ -933,13 +943,14 @@ impl CompileObservation {
                 + self.owners.observations
                 + self.observation_reserve
                 + self.monitor_and_ramps
+                + self.response_capture
                 + decode_field_rounding,
             self.report.capi_retained_bytes,
             "{label}: capi's own allocations + the effect producers + the strip producers + the \
              source producers + the parameter catalog + the plan state inventory + the \
              observation readers + the decode-field rounding, all observed (left; the send producers' row is the graph \
-             function's total, and the observation reserve and the monitor and ramp rows are the control \
-             plane's bounds), against \
+             function's total, and the observation reserve, the monitor and ramp rows and the response \
+             capture row are the control plane's bounds), against \
              `capi_retained_bytes` (right)"
         );
     }

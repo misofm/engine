@@ -192,8 +192,8 @@ pub fn response_capture_channel()
 }
 
 /// The bytes the channel's two queues retain, ring headers and slots, as a resource report
-/// charges them. An armed job is the control side's transient, allocated by `arm` and freed by
-/// `poll`, and is not part of it.
+/// charges them. The armed job and the delivered result are charged apart, at the model's bounds
+/// ([`response_capture_ceiling_bytes`]).
 ///
 /// # Errors
 ///
@@ -208,6 +208,66 @@ pub fn response_capture_retained_bytes() -> Result<u64, ResponseCaptureSetupErro
         .and_then(|bytes| bytes.checked_mul(2))
         .and_then(|bytes| u64::try_from(bytes).ok())
         .ok_or(ResponseCaptureSetupError)
+}
+
+/// The heap bytes the capture's control-side owners can hold under `model`, which outlive a
+/// call: one armed job and one delivered result, each at the model's bounds. The job lives from
+/// `arm` until `poll` takes its reply (and again while a stale job is armed again); the result
+/// from `poll` until the host takes it, which `release` follows. Both are charged, since a host
+/// may hold a result while it arms nothing but a later request is refused until `release`.
+///
+/// The largest job is the strip with the most owners: its input filters, every console slot and
+/// the most inserts any strip of `model` has, each with three identities of
+/// [`session::STABLE_ID_MAXIMUM_BYTES`] and two six-section arrays, plus the job's box and its
+/// strip ID. The largest result composes that many members, each with two identities, over
+/// [`crate::RESPONSE_MAXIMUM_POINTS`] points of frequencies and of both curves, plus its strip ID.
+///
+/// `None` when a product overflows.
+#[must_use]
+pub fn response_capture_ceiling_bytes(model: &SessionModel) -> Option<ResponseCaptureCeiling> {
+    let inserts = model
+        .strips()
+        .map(|strip| strip.inserts.effects.len())
+        .max()
+        .unwrap_or(0);
+    let owners = model
+        .console
+        .slots()
+        .count()
+        .checked_add(1)?
+        .checked_add(inserts)?;
+    let owner_table = crate::response::collector_heap_bytes(owners, 0)?;
+    let job = size_of::<ResponseCaptureJob>()
+        .checked_add(IDENTITY_BYTES)?
+        .checked_add(crate::response::collector_heap_bytes(
+            owners,
+            IDENTITY_BYTES,
+        )?)?;
+    let curve = crate::RESPONSE_MAXIMUM_POINTS.checked_mul(size_of::<f32>())?;
+    let member_table = size_of::<crate::ResponseMember>().checked_mul(owners)?;
+    let members = IDENTITY_BYTES
+        .checked_mul(2)?
+        .checked_mul(owners)?
+        .checked_add(member_table)?;
+    let ready = IDENTITY_BYTES
+        .checked_add(curve.checked_mul(3)?)?
+        .checked_add(members)?;
+    Some(ResponseCaptureCeiling {
+        total_bytes: u64::try_from(job.checked_add(ready)?).ok()?,
+        largest_allocation_bytes: u64::try_from(
+            owner_table.max(curve).max(member_table).max(IDENTITY_BYTES),
+        )
+        .ok()?,
+    })
+}
+
+/// [`response_capture_ceiling_bytes`]'s charge.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ResponseCaptureCeiling {
+    /// Every byte one armed job and one delivered result can hold.
+    pub total_bytes: u64,
+    /// The largest single allocation among them.
+    pub largest_allocation_bytes: u64,
 }
 
 /// The number of owners `strip_id` has in `model` (its input filters, every console slot and its

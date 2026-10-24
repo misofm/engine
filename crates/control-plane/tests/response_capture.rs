@@ -493,3 +493,54 @@ fn render_step_allocates_nothing() {
     }
     assert_eq!(delivered, 50, "every armed capture is delivered");
 }
+
+/// #1577 attempt 2 (root ruling on the charge): a capture at the session's bounds stays within
+/// `response_capture_bytes`. `eq0` has the most owners (its input filters, the console slot and
+/// the one insert), and the grid is the largest accepted one, both sides. The bytes left live
+/// after `arm` (the job) and after the `service` that delivers it (the held result, the job freed)
+/// are each within the charge.
+///
+/// Test value: red if the charge leaves out a part of the job or of the result that persists
+/// across calls (the curves, the members, the collector's table or its identities).
+#[test]
+fn a_capture_at_the_bound_stays_within_its_charge() {
+    bench_support::alloc::assert_installed();
+    let mut rig = Rig::new(None);
+    rig.block();
+    rig.session.service().expect("service");
+    let model = session::parse_session_json(&document(None).0).expect("model");
+    let charge = control_plane::response_capture_bytes(&model)
+        .expect("the charge")
+        .total_bytes;
+    let live = |used: bench_support::alloc::Counters| used.requested_bytes - used.released_bytes;
+    let mark = bench_support::alloc::current_thread_counters();
+    rig.session
+        .test_arm_track_response(
+            "eq0",
+            ResponsePreviewGrid::Logarithmic {
+                points: host_core::RESPONSE_MAXIMUM_POINTS,
+                minimum_hz: 20.0,
+                maximum_hz: 20_000.0,
+            },
+            ResponseChannels::Both,
+        )
+        .expect("arm");
+    let armed = live(bench_support::alloc::current_thread_delta_since(mark));
+    rig.block();
+    rig.session.service().expect("service");
+    let delivered = live(bench_support::alloc::current_thread_delta_since(mark));
+    assert!(
+        armed <= charge && delivered <= charge,
+        "armed {armed} and delivered {delivered} bytes, charged {charge}"
+    );
+    assert_eq!(
+        rig.session
+            .test_take_track_response()
+            .expect("delivered")
+            .result
+            .expect("a track response")
+            .frequencies_hz
+            .len(),
+        host_core::RESPONSE_MAXIMUM_POINTS
+    );
+}

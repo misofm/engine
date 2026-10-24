@@ -291,6 +291,7 @@ pub(crate) fn capi_resources<A: ControlAdapter>(
     route_controls: host_core::RouteControlResources,
     observation: ObservationResources,
     monitor: MonitorRows,
+    response_capture: host_core::ResponseCaptureCeiling,
 ) -> Result<CapiResources, CompileFailure> {
     let queue_config = protocol_queue_config(limits)?;
     let queue = ProtocolQueues::resource_report_for_config(queue_config)
@@ -448,6 +449,9 @@ pub(crate) fn capi_resources<A: ControlAdapter>(
         // #1577 D2: the response capture channel's two queues.
         host_core::response_capture_retained_bytes()
             .map_err(|_| failure(ResourceFault::Arithmetic))?,
+        // #1577 (root ruling, attempt 2): one armed job and one delivered result, which outlive a
+        // call, at the model's bounds (`host_core::response_capture_ceiling_bytes`).
+        response_capture.total_bytes,
     ];
     // The affine token (#1615): the response frame it stages (the measured length, never more than
     // a control frame), its own layout, and a copy of the request the commit writes into the
@@ -496,6 +500,7 @@ pub(crate) fn capi_resources<A: ControlAdapter>(
         replay.largest_allocation_bytes,
         exchange.largest_allocation_bytes,
         provider.largest_allocation_bytes,
+        response_capture.largest_allocation_bytes,
     ])
     .max()
     .unwrap_or(0);
@@ -559,7 +564,24 @@ pub(crate) fn prepared_capi_resources<A: ControlAdapter>(
         route_controls,
         observation,
         monitor,
+        response_capture_bytes(compiled.normalized_model())?,
     )
+}
+
+/// The response capture's control-side charge under `model` (#1577):
+/// [`host_core::response_capture_ceiling_bytes`], a bound and not an allocation.
+///
+/// Public only to the adapters' tests, under `test-support`; crate-private otherwise.
+///
+/// # Errors
+///
+/// An arithmetic fault when the bound cannot be represented.
+#[cfg_attr(not(feature = "test-support"), allow(unreachable_pub))]
+pub fn response_capture_bytes(
+    model: &session::SessionModel,
+) -> Result<host_core::ResponseCaptureCeiling, CompileFailure> {
+    host_core::response_capture_ceiling_bytes(model)
+        .ok_or_else(|| failure(ResourceFault::Arithmetic))
 }
 
 /// The monitor overlay's and the edit-ramp table's rows of one epoch (#1696 D1-D3), bounded by

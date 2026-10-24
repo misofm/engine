@@ -618,6 +618,18 @@ struct CollectorOwner {
     right_len: usize,
 }
 
+/// The heap bytes [`ResponseSnapshotCollector::new`] allocates for `maximum_owners` owners with
+/// `maximum_identity_bytes`-byte identities: the owner table and three identity strings per owner
+/// (#1577's charge).
+pub(crate) fn collector_heap_bytes(
+    maximum_owners: usize,
+    maximum_identity_bytes: usize,
+) -> Option<usize> {
+    size_of::<CollectorOwner>()
+        .checked_add(maximum_identity_bytes.checked_mul(3)?)?
+        .checked_mul(maximum_owners)
+}
+
 impl ResponseSnapshotCollector {
     /// Allocate bounded worker-side storage for one capture.
     #[must_use]
