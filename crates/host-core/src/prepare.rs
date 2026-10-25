@@ -7828,8 +7828,9 @@ pub(crate) fn submix_input_is_quiet(
 /// starts at rest at `S`, so it adds its consumer, a track's or a submix's. Otherwise a submix's
 /// `input` tap adds its consumer only when the sidechain's line changes length (`before` is the
 /// predecessor's lines, `after` the successor's) and the submix's input is not quiet
-/// ([`submix_input_is_quiet`]). Console slots have no sidechain.
-fn close_over_sidechains(
+/// ([`submix_input_is_quiet`]). Console slots have no sidechain. The one closure rule: the
+/// preparation, `warm_lead` and the transition's duck set ([`crate::grown_strips`]) all run it.
+pub(crate) fn close_over_sidechains(
     committed: &SessionModel,
     model: &SessionModel,
     before: &[graph::GraphDelayLine],
