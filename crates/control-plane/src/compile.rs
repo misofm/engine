@@ -1210,6 +1210,17 @@ pub(crate) fn validate_replacement_peak(
                     .saturating_sub(newest.capi.spectrum_service),
             )
         })
+        // #1577: the response capture is charged once per session, at its owner high-water; a
+        // capture armed under the committed model is sized by the candidate's row, which can be
+        // larger than the newest's.
+        .and_then(|value| {
+            value.checked_add(
+                prospective
+                    .capi
+                    .response_capture
+                    .saturating_sub(newest.capi.response_capture),
+            )
+        })
         .ok_or_else(arithmetic)?;
     if capi_peak > limits.maximum_control_retained_bytes {
         return Err(failure(ResourceFault::Limit));
