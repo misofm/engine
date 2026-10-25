@@ -203,6 +203,12 @@ no reserved (or `RES0`) bit, and names the guard or write-back that restores the
   C calls themselves (engine create and destroy, compile, command submit, session and plan
   destroy), each with the handle and storage contract stated beside it; it installs no allocator
   and calls no render entry.
+- `crates/capi/tests/response_strip.rs` (#1578): sends a strip `RESPONSE_GET` through the
+  exported `miso_engine_v1_submit_command` and reads its `RESPONSE_READY` through
+  `miso_engine_v1_dequeue_event`, and compares the curves with the core's own. Its unsafe is the
+  C calls themselves (engine create and destroy, compile, command submit, render, service, event
+  dequeue, session and plan destroy), each with the handle and storage contract stated beside it;
+  it installs no allocator.
 - `crates/capi/tests/session_replace.rs` (#1386): sends `SESSION_REPLACE` through the exported
   `miso_engine_v1_submit_document_command` and the equal transaction through
   `miso_engine_v1_submit_command` on a twin, and compares replies, events and rendered blocks.
