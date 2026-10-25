@@ -6761,6 +6761,16 @@ mod observation_alias_tests {
     }
 
     fn stage_spectrum_markers() -> (usize, usize, WebSpectrumStreamMetadata, AnalysisState) {
+        // The staged analysis runs a stream, so the live session runs one too (#1596): a staging
+        // stream the session does not run ends at the next use of the staging.
+        LIVE_HOST.with(|slot| {
+            slot.borrow_mut()
+                .as_mut()
+                .expect("a live host")
+                .host
+                .start_spectrum_stream(SpectrumSmoothingConfig::default(), None)
+                .expect("the session's stream starts");
+        });
         with_spectrum_staging(|slot| {
             let mut staging = slot.borrow_mut();
             staging.capture_len = 17;
