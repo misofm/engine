@@ -180,3 +180,21 @@ Commands: `cargo test --locked -p host-core --all-features`,
   arithmetic only, no allocation.
 - **Root ruling 4.** The re-exports in `host-core/src/lib.rs` and `control-plane/src/lib.rs` are
   accepted.
+- **Tests (#1587a).** One per claim:
+  - `strip_and_output_meter_batches_are_each_entrys_own_peak_across_rebuilds` (capi; rewrites
+    #1583's gate-3 test, gates 1, 3, 4): red if a record carries another strip's or the output's
+    peak, a strip resolves by position or against a retired epoch, adoption drops carried windows
+    or restarts the sequence, an absent strip reports a stale value, or a returned strip moves its
+    handle. The reference is offline and exact (power-of-two gains). A returned strip fades in
+    over its first window, so that batch reads its second window.
+  - `an_uncarried_rebuild_restarts_the_meter_grid_at_its_adoption_block` (capi): red if render
+    does not restart the gate at an uncarried swap or the control thread's adoption asks for
+    another value.
+  - `a_gate_request_behind_its_block_opens_on_the_next_grid_boundary` (host-core): red if the
+    relay copies a request behind its block into the gate (root ruling 3).
+  - `a_meter_table_past_one_batch_of_records_is_refused_at_its_first_extra_entry` (host-core):
+    red if the records bound is missing or off by one.
+  - Gate 5: the render race's table gains two strip entries; red if strip meters or adoption
+    allocate on render. The withdrawn-candidate assertion sits in
+    `a_removed_sources_producer_returns_to_the_running_epoch`.
+  - Deleted: the `meter.strip.unavailable` row of the capi refusal test (the refusal is gone).
