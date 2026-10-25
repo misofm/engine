@@ -36,3 +36,30 @@ Decide, and record, whether the AArch64 targets need explicit flags; if none, sa
 
 ## Paths
 `scripts/build-capi-release.sh`, this spec.
+
+## Decision record (attempt 1, 2026-10-25)
+- Root R1: after the preflight, before `cargo rustc`, the script unsets `CARGO_ENCODED_RUSTFLAGS`,
+  `RUSTFLAGS`, `CARGO_BUILD_RUSTFLAGS` and every `CARGO_TARGET_*_RUSTFLAGS`. The `cargo rustc` line
+  keeps its spelling (`docs/C_ABI_V1_QUALIFICATION.md:16` quotes its shape; no script greps it).
+- Root R2: it also unsets every `CARGO_PROFILE_RELEASE_*`: the manifest's release profile is the
+  shipped profile. No CI job that runs this script sets one (nightly's `CARGO_PROFILE_RELEASE_LTO`
+  job runs `run-release-workspace-tests.sh`, not this script).
+- Root R3: unset, never refuse.
+- AArch64: no explicit flags. NEON is in the `aarch64-apple-ios` and `aarch64-linux-android`
+  baselines and `lane` keys on `target_feature = "neon"`.
+- Stated limit: this issue covers the flag environment only. A `build.rustflags` or
+  `[profile.release]` in a caller's own `~/.cargo/config.toml`, and `CARGO_BUILD_TARGET`,
+  `RUSTC_WRAPPER`, `CARGO_BUILD_RUSTC_WRAPPER`, `RUSTC_WORKSPACE_WRAPPER` and `CARGO_BUILD_RUSTC`,
+  still apply.
+- Self-test (attempt 2): `build-flag-env` puts a stub `cargo` on PATH that records its environment
+  and fails. It exports `RUSTFLAGS`, `CARGO_ENCODED_RUSTFLAGS`, `CARGO_BUILD_RUSTFLAGS`, `CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS`,
+  `CARGO_PROFILE_RELEASE_OPT_LEVEL`, `CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER` and
+  `CARGO_TARGET_DIR`. It expects the "cargo rustc failed" refusal, then checks that cargo got none of
+  the first five and both of the last two. It is red on three mutants: unset block removed, pattern
+  narrowed (no `CARGO_TARGET_*_RUSTFLAGS`), pattern widened to `CARGO_TARGET_*`. Attempt 1's
+  `preflight-with-rustflags` case is gone, because the preflight reads no flag variable.
+- PR evidence (host staticlib, x86-64, separate scratch `CARGO_TARGET_DIR`s): with
+  `RUSTFLAGS='-C target-feature=+avx2,+fma -C target-cpu=native'` and, separately,
+  `CARGO_ENCODED_RUSTFLAGS=$'-C\x1fopt-level=1'` exported, `libcapi.a` is byte-identical to the clean
+  build (sha256 `044ad68e...bb8a9`). At base `609ccf399` the first gives a different archive
+  (`7b00b0c0...ad74`) and the second fails at `lane`'s `compile_error!`.
