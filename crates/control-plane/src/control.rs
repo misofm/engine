@@ -4726,7 +4726,8 @@ where
                     #[cfg(feature = "test-support")]
                     update_test_owners(|owners| owners.candidate_republished += 1);
                 }
-                self.primed = Some(record);
+                // W's record stays: the withdrawal of the epoch it names keeps it.
+                debug_assert_eq!(self.primed, Some(record));
                 self.transition_reprepare_refusals =
                     self.transition_reprepare_refusals.saturating_add(1);
                 debug_assert!(
