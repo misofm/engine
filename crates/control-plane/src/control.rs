@@ -4831,32 +4831,38 @@ where
         // displaces. A declared discontinuity need not continue the running plan's output
         // (#1323 D2): it ducks nothing and is adopted at the next block. Everything phase 1 needs
         // is built here, before anything is reserved or committed.
-        let transition = if declared {
+        // #1325 D7: after preparation, the pure transition step against the plan the successor
+        // displaces. A declared discontinuity need not continue the running plan's output
+        // (#1323 D2): it ducks nothing and is adopted at the next block. Everything phase 1 needs
+        // is built here, before anything is reserved or committed.
+        let plan_transition = |restarted: &[Box<str>]| {
+            host_core::plan_strip_transition(&base, duck, prospective.normalized_model(), restarted)
+                .map_err(|_| CommandError::Internal)
+        };
+        let mut transition = if declared {
             None
         } else {
-            Some(
-                host_core::plan_strip_transition(
-                    &base,
-                    duck,
-                    prospective.normalized_model(),
-                    // #1324 D4: the strips the successor restarts duck-swap.
-                    prepared_runtime.inventory.restarted_strips(),
-                )
-                .map_err(|_| CommandError::Internal)?,
-            )
+            // #1324 D4: the strips the successor restarts duck-swap.
+            Some(plan_transition(
+                prepared_runtime.inventory.restarted_strips(),
+            )?)
         };
         let quantum = prospective.normalized_model().quantum_frames;
-        // #1403 D2: with the session's warm bounds, the edit is classified against the plan it
-        // displaces, from the ordinary successor's inventory (#1354a ruling 1). A growth whose
-        // duck set is empty -- it removes no strip, no phase 1 is pending, and nothing restarts
-        // (the ordinary join's restarts and the lead's whole restarts are the warm successor's
-        // `restarted_strips()`, #1354 D4) -- is prepared warm, admitted with the reprepare peak
-        // and published `Primed`. Every other answer takes today's path until #1397.
+        // #1403 D2, #1397 D1: with the session's warm bounds, the edit is classified against the
+        // plan it displaces, from the ordinary successor's inventory (#1354a ruling 1), unless a
+        // phase 1 of an earlier transaction still ducks a strip on that plan (that edit keeps
+        // today's path). A `Warm` answer is prepared with its lead (#1354 D4), so the lead's
+        // whole restarts join the successor's `restarted_strips()`, and the transition is planned
+        // again over that set: the duck set is the strips the edit removes plus every strip the
+        // warm successor restarts (#1324 D4), and each restarted strip is restarted whole and
+        // armed by the preparation (#1324 D2-D3). With `lead_samples > 0` it is admitted with the
+        // reprepare peak and published `Primed`, no earlier than the duck's `S` when it ducks a
+        // strip. With `lead_samples == 0` there is no lead and no prime: it is an ordinary
+        // duck-swap, admitted at the single peak and published as one.
         let mut warm_lead_blocks = None;
-        if let (Some(config), Some(transition)) = (self.warm, transition.as_ref())
-            && !transition.ducks()
-            && duck.is_empty()
-            && prepared_runtime.inventory.restarted_strips().is_empty()
+        if let Some(config) = self.warm
+            && transition.is_some()
+            && duck.strips().is_empty()
         {
             let decision = host_core::warm_lead(
                 prospective,
@@ -4866,10 +4872,7 @@ where
                 &config,
             )
             .map_err(|diagnostics| spectrum_invariant(prepare_failure(diagnostics)))?;
-            if let host_core::WarmDecision::Warm(lead) = decision
-                && lead.lead_samples > 0
-                && lead.restart_whole.is_empty()
-            {
+            if let host_core::WarmDecision::Warm(lead) = decision {
                 let lead_blocks = u32::try_from(lead.lead_samples / u64::from(quantum))
                     .map_err(|_| CommandError::Internal)?;
                 drop(prepared_runtime);
@@ -4877,11 +4880,12 @@ where
                     warm: Some(&lead),
                     ..base
                 })?;
-                if !prepared_runtime.inventory.restarted_strips().is_empty() {
-                    debug_assert!(false, "#1354 D4: a warm successor restarts exactly R");
-                    return Err(CommandError::Internal);
+                transition = Some(plan_transition(
+                    prepared_runtime.inventory.restarted_strips(),
+                )?);
+                if lead.lead_samples > 0 {
+                    warm_lead_blocks = Some(lead_blocks);
                 }
-                warm_lead_blocks = Some(lead_blocks);
             }
         }
         let next_duck = transition
@@ -5341,7 +5345,7 @@ where
         // and before its set takes any producer or donated ring: each entry it holds vacant is
         // then a ring it carries from the plan it displaces, whose producer is still in that
         // plan's set, or, across a withdrawn candidate, in the withdrawn candidate's.
-        let primed = warm_lead_blocks.map(|lead_blocks| {
+        let mut primed = warm_lead_blocks.map(|lead_blocks| {
             let (running, withdrawn_sources) = if superseding {
                 let len = self.pending_providers.len();
                 // A superseding rebuild holds the withdrawn candidate as its newest pending
@@ -5483,18 +5487,15 @@ where
                     .render_clock();
                 next_duck.raise_not_before(transition.not_before(p, quantum));
             }
-            // #1403 D2 (root ruling, attempt 2): the duck set is the removed and restarted
-            // strips, so a warm candidate's transition removes at most sources no strip read; its
-            // overlay keeps them (their calls go to the running plan until the adoption) and its
-            // schedule stays `Primed`.
+            // #1397 D1: a warm candidate whose transition ducks a strip stays `Primed`, no earlier
+            // than `S`; one whose overlay holds only removed sources no strip read keeps its
+            // render-clock `not_before`, which is never earlier. Every other candidate waits for
+            // `S` as a two-phase removal or a duck-swap does.
             if let Some(not_before) = next_duck.not_before() {
-                debug_assert!(warm_lead_blocks.is_none() || not_before == 0);
-                if warm_lead_blocks.is_none() {
-                    reservation
-                        .inner
-                        .as_mut()
-                        .expect("reservation is live")
-                        .set_adoption(PlanAdoption::NoEarlierThan(not_before));
+                let reservation = reservation.inner.as_mut().expect("reservation is live");
+                match primed.as_mut() {
+                    Some(record) => record.hold_until(reservation, not_before),
+                    None => reservation.set_adoption(PlanAdoption::NoEarlierThan(not_before)),
                 }
             }
             let held = self
@@ -8012,8 +8013,9 @@ mod tests {
             const ADAPTER_ALLOCATIONS: &'static [u64] = &[];
         }
 
-        /// The C ABI's own preparation: host-core's live-lanes entries.
-        struct Preparer;
+        /// The C ABI's own preparation: host-core's live-lanes entries; or, on an explicit bank
+        /// width, host-core's width seam (#1272 D2), which attaches every live lane.
+        struct Preparer(Option<lane::Backend>);
 
         impl RuntimePreparer for Preparer {
             fn prepare(
@@ -8033,13 +8035,23 @@ mod tests {
                 PrepareDiagnostics,
             > {
                 let live = HostLiveControlRequest::default();
-                let (host, handles) = match successor {
-                    Some(base) => prepare_host_runtime_with_live_lanes_successor(
+                let (host, handles) = match (self.0, successor) {
+                    (None, Some(base)) => prepare_host_runtime_with_live_lanes_successor(
                         compiled, caps, &live, lanes, base, superseded,
                     ),
-                    None => prepare_host_runtime_with_live_lanes(
+                    (None, None) => prepare_host_runtime_with_live_lanes(
                         compiled, caps, &live, lanes, superseded,
                     ),
+                    (Some(backend), Some(base)) => {
+                        host_core::test_only_prepare_host_runtime_with_live_controls_successor_on(
+                            compiled, caps, &live, base, backend,
+                        )
+                    }
+                    (Some(backend), None) => {
+                        host_core::test_only_prepare_host_runtime_with_live_controls_on(
+                            compiled, caps, &live, backend,
+                        )
+                    }
                 }?;
                 Ok((host, handles, None))
             }
@@ -8207,6 +8219,8 @@ mod tests {
             feeds: Vec<(&'static str, [Vec<f32>; 2], u64)>,
             /// Blocks the feed keeps past the next block's source-read sample.
             ahead: u64,
+            /// A source fed no frame at or past the given frame.
+            stop_at: Option<(&'static str, u64)>,
             /// Each rendered block's output bits, and the epoch render published after it.
             blocks: Vec<Vec<u32>>,
             epochs: Vec<u64>,
@@ -8238,12 +8252,22 @@ mod tests {
             }
 
             fn boot(warm: Option<WarmConfig>, limits: ControlLimits, model: &SessionModel) -> Self {
+                Self::boot_on(warm, limits, model, None)
+            }
+
+            /// [`Self::boot`], prepared on `backend`'s bank width when it is `Some`.
+            fn boot_on(
+                warm: Option<WarmConfig>,
+                limits: ControlLimits,
+                model: &SessionModel,
+                backend: Option<lane::Backend>,
+            ) -> Self {
                 super::super::test_reset_lifecycle_observer();
                 let document = session::canonical_session_json(model).expect("canonical");
                 let children = compile_children_warm::<Adapter>(
                     &document,
                     limits,
-                    Box::new(Preparer),
+                    Box::new(Preparer(backend)),
                     None,
                     warm,
                 )
@@ -8259,6 +8283,7 @@ mod tests {
                     at: 0,
                     feeds: vec![(SOURCE, pcm(7), 0), (AUX, pcm(11), 0)],
                     ahead: AHEAD,
+                    stop_at: None,
                     blocks: Vec::new(),
                     epochs: Vec::new(),
                 }
@@ -8271,6 +8296,10 @@ mod tests {
                     let read = self.children.session.test_source_read_clock();
                     let until = read + (self.ahead + 1) * QUANTUM;
                     for (id, planes, next) in &mut self.feeds {
+                        let until = match self.stop_at {
+                            Some((stopped, frame)) if stopped == *id => until.min(frame),
+                            _ => until,
+                        };
                         while *next < until {
                             let range = *next as usize..(*next + QUANTUM) as usize;
                             self.children
@@ -8396,6 +8425,13 @@ mod tests {
             }
         }
 
+        /// `S = ceil_q(p + q + N + C)` (#1325 D3) of a duck published at render clock `p` on A,
+        /// whose route lines are all 0 samples long (`C = 0`), with A's mute ramp `N`.
+        fn duck_sample(p: u64) -> u64 {
+            let n = u64::from(session_a().control_smoothing_samples().mute);
+            (p + QUANTUM + n).div_ceil(QUANTUM) * QUANTUM
+        }
+
         /// The first block whose bits differ between two runs, if any.
         fn first_divergence(left: &Rig, right: &Rig) -> Option<usize> {
             assert_eq!(left.blocks.len(), right.blocks.len());
@@ -8502,6 +8538,91 @@ mod tests {
             assert_eq!(first_divergence(&rig, &continued), None, "A continued");
         }
 
+        /// #1397 gates 1 and 2, a latent insert on an audible strip, on both bank widths: a
+        /// true-peak limiter added to track 1 grows the output's arrival and restarts track 1, so
+        /// the edit is published `Primed` no earlier than the duck's `S`, and with every source
+        /// fed ahead from the start it is adopted at exactly the block that starts at `S`. Every
+        /// block before track 1's fire block (the first at or after the adoption plus the
+        /// limiter's latency `D`) equals A with track 1 live-muted at the edit's block; from it,
+        /// for 64 blocks, the output is the sum of the same swap on A with track 2 muted and that
+        /// reference; the adoption reports `EXACT`.
+        ///
+        /// Test value: an adoption before the duck has settled moves the output before the fire;
+        /// a fire at the adoption instead of `D` later differs early; a carried track 2 that
+        /// drifts after the fire, or a track 1 left out or counted twice, breaks the sum.
+        #[test]
+        fn a_latent_insert_on_an_audible_strip_is_duck_swapped_warm() {
+            const AFTER: usize = 64;
+            /// The true-peak limiter's latency at 48 kHz, `D` of track 1's fade.
+            const LIMITER: u64 = 486;
+            let mut limited = session_a().tracks[0].clone();
+            limited.inserts.effects = vec![limiter("limiter-0")];
+            let edit = [SessionEdit::UpsertTrack { track: limited }];
+            let mut quiet = session_a();
+            let eq1 = quiet
+                .tracks
+                .iter_mut()
+                .find(|track| track.id.as_str() == "eq1")
+                .expect("eq1");
+            eq1.fader.left_mute = true;
+            eq1.fader.right_mute = true;
+            for &backend in lane::Backend::VECTOR {
+                let boot = |model: &SessionModel| {
+                    let mut rig = Rig::boot_on(Some(CONFIG), limits(), model, Some(backend));
+                    rig.render(BEFORE);
+                    rig
+                };
+                let swap = |model: &SessionModel| {
+                    let mut rig = boot(model);
+                    let s = duck_sample(rig.children.session.test_render_clock());
+                    assert_eq!(
+                        rig.rebuild(&edit),
+                        PlanAdoption::Primed {
+                            not_before: s,
+                            lead_blocks: 4
+                        },
+                        "{backend:?}"
+                    );
+                    (rig, s)
+                };
+                let (mut swapped, s) = swap(&session_a());
+                let (mut alone, _) = swap(&quiet);
+                let mut reference = boot(&session_a());
+                assert!(matches!(
+                    reference.transact(&[builtin("eq0", 6, 1.0)]),
+                    Ok(EditPath::Live)
+                ));
+                let s_block = usize::try_from(s / QUANTUM).expect("block");
+                let fire = usize::try_from((s + LIMITER).div_ceil(QUANTUM)).expect("block");
+                for rig in [&mut swapped, &mut alone, &mut reference] {
+                    rig.render(fire + AFTER - BEFORE);
+                }
+                assert_eq!(swapped.swaps(), [s_block], "{backend:?}: adopted at S");
+                let watermark = swapped
+                    .children
+                    .plan
+                    .queries()
+                    .watermark()
+                    .expect("watermark");
+                assert_eq!(watermark.outcome_flags, OUTCOME_EXACT, "{backend:?}");
+                assert_eq!(
+                    first_divergence(&swapped, &reference),
+                    Some(fire),
+                    "{backend:?}: the reference until the fire"
+                );
+                for block in fire..fire + AFTER {
+                    let sum: Vec<u32> = alone.blocks[block]
+                        .iter()
+                        .zip(&reference.blocks[block])
+                        .map(|(&left, &right)| {
+                            (f32::from_bits(left) + f32::from_bits(right)).to_bits()
+                        })
+                        .collect();
+                    assert_eq!(swapped.blocks[block], sum, "{backend:?}: block {block}");
+                }
+            }
+        }
+
         /// Gate 1, the admission: a warm candidate C is admitted against the reprepare peak. With
         /// the effect-state cap at `R + 2C - 1` the growth is refused before commit with that
         /// cap's diagnostic, and nothing is published; at `R + 2C` it is published `Primed`.
@@ -8550,22 +8671,34 @@ mod tests {
             }
         }
 
-        /// Gate 2, routing on the duck set: the growth with track 2's removal ducks track 2, so
-        /// it takes today's two-phase removal, published `NoEarlierThan(S)` with no record, and
-        /// no block before `S` differs from A continued with track 2 live-muted at the same
-        /// block. Test value: a classifier that routes on `restarted_strips()` alone publishes
-        /// it `Primed` at the render clock, and track 2 stops dead at the adoption block.
+        /// Gate 2, routing on the duck set (rewritten by #1397 D1, deliverable 5): the growth with
+        /// track 2's removal ducks track 2, so it is published `Primed` no earlier than the duck's
+        /// `S`, its record names its epoch, and no block before `S` differs from A continued with
+        /// track 2 live-muted at the same block. Test value: a classifier that routes on
+        /// `restarted_strips()` alone publishes it at the render clock, and one that takes today's
+        /// path publishes it `NoEarlierThan(S)` with no record, so no deadline step can find it.
         #[test]
-        fn a_growth_that_removes_a_strip_takes_the_two_phase_removal() {
+        fn a_growth_that_removes_a_strip_is_primed_at_the_ducks_sample() {
             let mut rig = Rig::new(Some(CONFIG));
             rig.render(BEFORE);
             let mut edits = growth();
             edits.extend(remove_track("eq1"));
-            let adoption = rig.rebuild(&edits);
-            let PlanAdoption::NoEarlierThan(s) = adoption else {
-                panic!("published {adoption:?}")
-            };
-            assert_eq!(rig.primed(), None);
+            let s = duck_sample(rig.children.session.test_render_clock());
+            assert_eq!(
+                rig.rebuild(&edits),
+                PlanAdoption::Primed {
+                    not_before: s,
+                    lead_blocks: 4
+                }
+            );
+            assert_eq!(
+                rig.primed(),
+                Some(PrimedCandidate {
+                    epoch: rig.children.session.newest_plan_epoch(),
+                    not_before: s,
+                    lead_blocks: 4,
+                })
+            );
             let s_block = usize::try_from(s / QUANTUM).expect("block");
             assert!(s_block > BEFORE);
             rig.render(s_block - BEFORE);
@@ -8579,7 +8712,7 @@ mod tests {
             assert_eq!(first_divergence(&rig, &continued), None);
 
             // The growth while phase 1 of a removal is pending inherits the overlay's `S`: today's
-            // path, with no record (#1403 D2's empty inherited overlay).
+            // path, with no record (#1397 D1: an inherited overlay that ducks a strip).
             let mut rig = Rig::new(Some(CONFIG));
             rig.render(BEFORE);
             let PlanAdoption::NoEarlierThan(s) = rig.rebuild(&remove_track("eq1")) else {
@@ -8640,14 +8773,27 @@ mod tests {
             edits.push(SessionEdit::RemoveSource {
                 source_id: sid(AUX),
             });
-            let PlanAdoption::NoEarlierThan(s) = rig.rebuild(&edits) else {
-                panic!("a two-phase removal")
-            };
+            // #1397 D1 and gate 5: B still grows over A and ducks track 2, so it is `Primed` no
+            // earlier than the duck's `S`. `aux-source` is fed exactly the frames A renders up to
+            // `S` and none past them, the carried source its prime: B's publication cleared the
+            // flag W set on the removed source's ring, so B is adopted at `S`, and up to it and
+            // for 64 blocks on, the output is A continued with track 2 live-muted at the same
+            // block. A `publish_primed` that leaves the withdrawn candidate's flags alone keeps
+            // B waiting for frames the host never sends.
+            let s = duck_sample(rig.children.session.test_render_clock());
+            assert_eq!(
+                rig.rebuild(&edits),
+                PlanAdoption::Primed {
+                    not_before: s,
+                    lead_blocks: 4
+                }
+            );
             let s_block = usize::try_from(s / QUANTUM).expect("block");
+            rig.stop_at = Some((AUX, s));
+            rig.ahead = AHEAD;
             rig.render(s_block - rig.blocks.len());
             assert!(rig.swaps().is_empty(), "A renders until S");
             assert_eq!(rig.underruns(), 0, "A plays the removed source's frames");
-            rig.feeds.truncate(1);
             rig.render(1);
             assert_eq!(rig.swaps(), [s_block]);
             let watermark = rig.children.plan.queries().watermark().expect("watermark");
@@ -8655,7 +8801,16 @@ mod tests {
                 (watermark.outcome_flags, watermark.superseded),
                 (OUTCOME_EXACT | OUTCOME_SUPERSEDED, 1)
             );
+            rig.render(63);
             assert_eq!(rig.underruns(), 0);
+            let mut continued = Rig::new(None);
+            continued.render(BEFORE + 1);
+            assert!(matches!(
+                continued.transact(&[builtin("eq1", 6, 1.0)]),
+                Ok(EditPath::Live)
+            ));
+            continued.render(rig.blocks.len() - BEFORE - 1);
+            assert_eq!(first_divergence(&rig, &continued), None, "A continued");
 
             // A declared stop.
             let mut rig = Rig::new(Some(CONFIG));
@@ -8770,6 +8925,31 @@ mod tests {
             assert!(
                 matches!(rig.rebuild(&plain_b), PlanAdoption::Primed { .. }),
                 "B fits beside R and W, and twice beside R"
+            );
+
+            // A warm B superseding a W whose overlay holds only a removed source no track read
+            // (#1397 D1, #1403 NIT-1): the overlay ducks no strip, so B is warm and recorded.
+            let mut rig = Rig::with_unused(Some(CONFIG));
+            rig.ahead = 1;
+            rig.render(BEFORE);
+            let mut edits = growth();
+            edits.push(SessionEdit::RemoveSource {
+                source_id: sid(UNUSED),
+            });
+            rig.rebuild(&edits);
+            rig.render(1);
+            let render_clock = rig.children.session.test_render_clock();
+            assert_eq!(
+                rig.rebuild(&plain_b),
+                PlanAdoption::Primed {
+                    not_before: render_clock,
+                    lead_blocks: 4
+                },
+                "B over a source-only overlay"
+            );
+            assert_eq!(
+                rig.primed().map(|record| record.epoch),
+                Some(rig.children.session.newest_plan_epoch())
             );
 
             // A declared stop.

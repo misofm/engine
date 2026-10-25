@@ -1,6 +1,6 @@
-//! Publish a warm successor `Primed` from the control plane (issue #1403 D3, D4).
+//! Publish a warm successor `Primed` from the control plane (issue #1403 D3, D4; #1397 D1).
 //!
-//! A latency-growing structural edit that ducks no strip is prepared warm (#1354) and published
+//! A latency-growing structural edit is prepared warm (#1354) and published
 //! [`PlanAdoption::Primed`]: render adopts it at the first block at or past `not_before` at which
 //! the running plan reports itself ready for the prime (#1311, #1355). Readiness asks the
 //! `prime_required` flag of each ring the running plan renders (#1320 D4), so the publication
@@ -18,10 +18,37 @@ use crate::source::SourceControlSet;
 pub struct PrimedCandidate {
     /// The candidate's plan epoch.
     pub epoch: u64,
-    /// The earliest block start that may adopt it: the render clock read at publication.
+    /// The earliest block start that may adopt it: the render clock read at publication, or the
+    /// duck's `S` when the transaction ducks strips ([`Self::hold_until`]).
     pub not_before: u64,
     /// The prime its adopting block runs, in blocks: `P / q`.
     pub lead_blocks: u32,
+}
+
+impl PrimedCandidate {
+    /// Hold the candidate until the block that starts at `not_before` too (#1397 D1): a warm
+    /// candidate whose transaction ducks strips is adopted at the first ready block at or after
+    /// the duck's `S` (#1325 D3), so every ducked strip and every route line out of it holds only
+    /// `+0.0` when render adopts it. Raises [`Self::not_before`] to `not_before` (never lowers it)
+    /// and sets the reservation's adoption to `Primed` with the result. Call it after
+    /// [`publish_primed`], on the same reservation, before the commit. Control thread only;
+    /// allocation-free.
+    pub fn hold_until(
+        &mut self,
+        reservation: &mut PlanReplacementReservation<'_>,
+        not_before: u64,
+    ) {
+        debug_assert_eq!(
+            reservation.epoch().0,
+            self.epoch,
+            "the record names this candidate"
+        );
+        self.not_before = self.not_before.max(not_before);
+        reservation.set_adoption(PlanAdoption::Primed {
+            not_before: self.not_before,
+            lead_blocks: self.lead_blocks,
+        });
+    }
 }
 
 /// Write the `prime_required` flags of a warm candidate W and schedule its reservation

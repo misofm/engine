@@ -233,7 +233,11 @@ fn sorted_ids<'a>(ids: impl Iterator<Item = &'a str>) -> Vec<Box<str>> {
 /// (`base.inventory`), keyed by the route's two edges, which add, over every route out of a
 /// ducked strip: a restarted strip's route lines must empty before `S` as a removed strip's do.
 /// A sidechain line from a ducked strip's tap is not counted, and a carried effect keyed from a
-/// restarted strip's tap before the fader still steps at `S`: both are #1324b's.
+/// restarted strip's tap before the fader still steps at `S`: both are #1324b's. **Limit
+/// (#1397a):** a warm successor whose transaction ducks strips is published `Primed` no earlier
+/// than this `S` (#1397 D1), so the same holds for it: a `post_fader` or `post_pan` sidechain line
+/// out of a ducked strip into a carried node that the warm successor shortens can drop the line's
+/// last nonzero samples at the adoption, until #1397b counts that line in `C`.
 ///
 /// Control thread only: it clones the base model twice and allocates the lists.
 ///
