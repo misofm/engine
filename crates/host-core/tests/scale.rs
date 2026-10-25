@@ -4,10 +4,10 @@
 //! Per PR (#1078): a plain 65,537-track session goes through every preparation stage before the
 //! builtin compile and is refused only by the configured builtin cap.
 //!
-//! Release-only nightly row (#1079, #1947): the prepare compiles, lays out, binds and attaches live controls to
-//! 65,537 tracks, each with its own source, a fader automation and a send into one of 64 submixes;
-//! every 8th track carries a sidechained compressor, one VCA holds every track and a second holds
-//! `track-9999`. Only the two rendered tracks' sends are open.
+//! Release-only nightly row (#1079, #1947): the prepare compiles, lays out, binds and attaches
+//! live controls to 65,537 tracks, each with its own source, a fader automation and a send into one
+//! of 64 submixes; every 8th track carries a sidechained compressor, one VCA holds every track and
+//! a second holds `track-9999`. Only the two rendered tracks' sends are open.
 
 use std::time::{Duration, Instant};
 
@@ -407,10 +407,13 @@ fn prepares_a_65_537_track_kitchen_sink_session_live_attached() {
 }
 
 /// Issue #1078: a plain 65,537-track session (the fixture's first track, no console slot, no
-/// insert, no automation, one output route) compiles and goes through host preparation's count
-/// checks, shape validation, effective-value composition and meter/control requests; only the
-/// configured builtin cap (`maximum_builtin_retained_bytes = 1`) refuses it, before the expensive
-/// builtin and graph compile. About 2.3 s in debug on x86 (2026-10-25), so it runs per PR.
+/// insert, no automation, one output route; all tracks share one source) compiles and goes through
+/// host-core's count and shape checks and effective-value composition, then the builtin compiler's
+/// per-strip domain preflight and resource plan, where the configured builtin cap
+/// (`maximum_builtin_retained_bytes = 1`) refuses it before the builtin and graph compile. The
+/// plain entry builds no meter or control requests; the source mapping is built but consumed only
+/// after the cap. Debug x86 with CI's unified `control-provider,test-support` features: about 4.5-6.6 s
+/// (2026-10-25, load about 10-11); AArch64 estimate 9-13 s. It runs per PR.
 #[test]
 fn prepares_65_537_tracks_until_the_configured_builtin_cap() {
     let started = Instant::now();
