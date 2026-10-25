@@ -124,6 +124,27 @@ fn fader_edit(db: f32) -> [SessionEdit; 1] {
     }]
 }
 
+/// A structural transaction: a muted copy of the fixture's track, whose ID sorts before it, and
+/// its route to the output.
+fn added_muted_track() -> [SessionEdit; 2] {
+    const ADDED: &str = "added";
+    let model = parse_session_json(SESSION).expect("the fixture parses");
+    let mut track = model.tracks[0].clone();
+    track.id = StableId::parse(ADDED).expect("track ID");
+    track.fader.left_mute = true;
+    track.fader.right_mute = true;
+    let mut route = model.routes[0].clone();
+    route.id = StableId::parse(&format!("{ADDED}-main")).expect("route ID");
+    let session::RouteSource::Track { track_id, .. } = &mut route.source else {
+        panic!("a track route")
+    };
+    *track_id = track.id.clone();
+    [
+        SessionEdit::UpsertTrack { track },
+        SessionEdit::UpsertRoute { route },
+    ]
+}
+
 /// The message ID of an event frame, after checking it is an event frame.
 fn event_message(event: &[u8]) -> u16 {
     assert_eq!(event[14], 3, "an event frame");
@@ -533,12 +554,12 @@ struct Legs {
 
 impl Legs {
     fn new() -> Self {
-        let browser = Browser::new(8_192);
+        let browser = Browser::new(16_384);
         let limits = browser
             .host
             .control_limits_for_test()
             .expect("the control half's limits");
-        let c = CAbi::new(8_192, limits);
+        let c = CAbi::new(16_384, limits);
         let revision = browser.host.committed_revision();
         Self {
             browser,
@@ -796,9 +817,28 @@ fn the_browser_and_the_c_abi_give_the_same_bytes_for_one_script() {
     legs.revision = revision;
     legs.drain("after 7");
 
-    // 8. Two meter batches' render blocks, with a service step and a drain after each, so every
-    // `METER_BATCH` is compared where it is staged.
-    for block in 0..2 * u64::from(METER_PERIOD_BLOCKS) {
+    // 8. Three meter batches' render blocks, with a service step and a drain after each, so every
+    // `METER_BATCH` is compared where it is staged. After the first batch a structural
+    // transaction adds a muted track whose ID sorts first, so the batches after its adoption come
+    // from the successor plan's ring with the metered track at another strip index (#1588 D3).
+    for block in 0..3 * u64::from(METER_PERIOD_BLOCKS) {
+        if block == u64::from(METER_PERIOD_BLOCKS) {
+            let request = legs.next();
+            let edits = added_muted_track();
+            let response = legs.both(
+                "8 structural transaction",
+                &frame(
+                    request,
+                    ExpectedRevision::Exact(SessionRevision(legs.revision)),
+                    CommandPayload::SessionTransactionApply(&edits),
+                ),
+            );
+            let Verdict::Applied { revision, .. } = decode_verdict(&response) else {
+                panic!("the structural transaction is refused")
+            };
+            legs.revision = revision;
+            legs.drain("after 8's structural transaction");
+        }
         legs.block(block);
         legs.drain(&format!("after block {block}"));
     }
@@ -864,7 +904,7 @@ fn the_browser_and_the_c_abi_give_the_same_bytes_for_one_script() {
     legs.drain("at the end");
 
     // The browser leg published every kind of protocol event it serves, and the C ABI leg's equal
-    // sequence says the same: step 8's two meter batches among them (#1588 gate 1).
+    // sequence says the same: step 8's three meter batches among them (#1588 gate 1).
     let kinds: Vec<u16> = legs.events[0]
         .iter()
         .map(|(_, event)| event_message(event))
@@ -882,8 +922,8 @@ fn the_browser_and_the_c_abi_give_the_same_bytes_for_one_script() {
             .iter()
             .filter(|&&message| message == MESSAGE_METER_BATCH)
             .count(),
-        2,
-        "step 8's two METER_BATCH events in {kinds:04x?}"
+        3,
+        "step 8's three METER_BATCH events in {kinds:04x?}"
     );
 }
 
@@ -1017,6 +1057,7 @@ fn the_render_call_never_allocates_with_telemetry_configured() {
     browser.drain();
     browser.service();
     let host = std::cell::RefCell::new(browser);
+    let served = Cell::new(0_usize);
     assert_render_never_allocates(
         "browser",
         |block| host.borrow_mut().feed(block),
@@ -1024,8 +1065,20 @@ fn the_render_call_never_allocates_with_telemetry_configured() {
         || {
             let mut browser = host.borrow_mut();
             browser.service();
-            browser.drain();
+            let batches = browser
+                .drain()
+                .iter()
+                .filter(|(_, event)| event_message(event) == MESSAGE_METER_BATCH)
+                .count();
+            served.set(served.get() + batches);
         },
+    );
+    // The first batch closes at block `METER_PERIOD_BLOCKS - 1`, after the warm-up, so every
+    // batch served came from the measured blocks' ring pushes.
+    const _: () = assert!(METER_PERIOD_BLOCKS as u64 > WARM_BLOCKS);
+    assert!(
+        served.get() >= 1,
+        "vacuous: the measured blocks served no METER_BATCH"
     );
 
     let limits = host
