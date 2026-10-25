@@ -1,26 +1,29 @@
-//! Issues #1079 and #1947: host preparation, as the C ABI's preparer runs it (live controls
-//! attached), holds a kitchen-sink session above the former 65,536-track boundary.
+//! Issues #1078, #1079 and #1947: host preparation holds sessions above the former 65,536-track
+//! boundary.
 //!
-//! Release-only nightly row: the prepare compiles, lays out, binds and attaches live controls to
-//! 65,537 tracks, each with its own source, a fader automation and a send into one of 64 submixes;
-//! every 8th track carries a sidechained compressor, one VCA holds every track and a second holds
-//! `track-9999`. Only the two rendered tracks' sends are open.
+//! Per PR (#1078): a plain 65,537-track session goes through every preparation stage before the
+//! builtin compile and is refused only by the configured builtin cap.
+//!
+//! Release-only nightly row (#1079, #1947): the prepare compiles, lays out, binds and attaches
+//! live controls to 65,537 tracks, each with its own source, a fader automation and a send into one
+//! of 64 submixes; every 8th track carries a sidechained compressor, one VCA holds every track and
+//! a second holds `track-9999`. Only the two rendered tracks' sends are open.
 
 use std::time::{Duration, Instant};
 
 use engine::realtime::{PlanarBufferMut, RenderIo, RenderTime};
 use host_core::{
     HostLiveControlHandles, HostLiveControlRequest, HostLiveLanes, HostPrepareCaps,
-    HostShapePolicy, LiveEffectAddress, LiveValuesSuperseded, PreparedHost, SourceSubmission,
-    compile_host_session, launch_maximum_observation_taps,
+    HostShapePolicy, LiveEffectAddress, LiveValuesSuperseded, PrepareRejection, PreparedHost,
+    SourceSubmission, compile_host_session, launch_maximum_observation_taps, prepare_host_runtime,
     prepare_host_runtime_with_live_lanes_and_spectrum, strip_position,
 };
 use session::{
-    Automation, AutomationOffset, AutomationSegment, AutomationShape, ChannelMatrix,
-    ControlAddress, DualMonoFader, Effect, EffectIdentity, EffectQuality, LinkMode, Owner,
+    Automation, AutomationOffset, AutomationSegment, AutomationShape, ChannelMatrix, CompileCaps,
+    Console, ControlAddress, DualMonoFader, Effect, EffectIdentity, EffectQuality, LinkMode, Owner,
     ParameterChannel, ParameterUnit, Route, RouteDestination, RouteSource, Section, SendTap,
     SessionModel, Sidechain, SidechainDeclaration, StableId, Submix, Vca, canonical_session_json,
-    parse_session_json,
+    compile_session, parse_session_json,
 };
 
 const EXAMPLE: &str = include_str!("../../../fixtures/session/v1/parametric-eq-nine-track.json");
@@ -401,4 +404,74 @@ fn prepares_a_65_537_track_kitchen_sink_session_live_attached() {
         "the kitchen-sink build, prepare and render took {elapsed:?}, over {BOUND:?}: a per-track \
          path has gone superlinear"
     );
+}
+
+/// Issue #1078: a plain 65,537-track session (the fixture's first track, no console slot, no
+/// insert, no automation, one output route; all tracks share one source) compiles and goes through
+/// host-core's count and shape checks and effective-value composition, then the builtin compiler's
+/// per-strip domain preflight and resource plan, where the configured builtin cap
+/// (`maximum_builtin_retained_bytes = 1`) refuses it before the builtin and graph compile. The
+/// plain entry builds no meter or control requests; the source mapping is built but consumed only
+/// after the cap. Debug x86 with CI's unified `control-provider,test-support` features: about
+/// 4.5-6.6 s (2026-10-25, load about 10-11); AArch64 estimate 9-13 s. It runs per PR.
+#[test]
+fn prepares_65_537_tracks_until_the_configured_builtin_cap() {
+    let started = Instant::now();
+    let mut model: SessionModel = parse_session_json(EXAMPLE).expect("fixture parses");
+    model.console = Console {
+        pre_insert: Vec::new(),
+        post_insert: Vec::new(),
+    };
+    let mut template = model.tracks[0].clone();
+    template.console.clear();
+    template.inserts.effects.clear();
+    model.automation.clear();
+    model.submixes.clear();
+    model.vcas.clear();
+    model.tracks = (0..TRACKS)
+        .map(|index| {
+            let mut track = template.clone();
+            track.id = id(&format!("track-{index}"));
+            track
+        })
+        .collect();
+    model.routes = vec![route(
+        "track-0-main",
+        post_fader(0),
+        RouteDestination::OutputInput {
+            output_id: id("main-out"),
+        },
+    )];
+    let compiled = compile_session(
+        &model,
+        CompileCaps {
+            max_compiled_model_bytes: u64::MAX,
+            max_requested_runtime_bytes: u64::MAX,
+            max_single_allocation_bytes: u64::MAX,
+            max_queue_items: u64::MAX,
+            max_source_ring_frames: u64::MAX,
+            max_source_ring_bytes: u64::MAX,
+        },
+    )
+    .expect("the 65,537-track session compiles");
+    let failure = prepare_host_runtime(
+        &compiled,
+        &HostPrepareCaps {
+            maximum_builtin_retained_bytes: 1,
+            ..caps()
+        },
+    )
+    .map(|_| ())
+    .expect_err("the configured builtin cap refuses");
+    eprintln!(
+        "#1078 65,537-track prepare refused after {:?}",
+        started.elapsed()
+    );
+    assert_eq!(
+        failure.as_bytes(),
+        b"builtin.resource.limit\t$.builtin_compile_caps\n",
+        "{}",
+        String::from_utf8_lossy(failure.as_bytes())
+    );
+    assert_eq!(failure.kind(), PrepareRejection::Builtin);
 }

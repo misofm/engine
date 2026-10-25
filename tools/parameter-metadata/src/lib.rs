@@ -382,6 +382,7 @@ struct EffectControls<'a> {
     bypass: ControlRow<'a>,
     parameters: Vec<ControlRow<'a>>,
     link_mode: Option<ControlRow<'a>>,
+    console_link_mode: Option<ControlRow<'a>>,
 }
 
 fn controls_object(registry: &effect_contract::NativeEffectRegistry) -> Controls<'static> {
@@ -421,12 +422,14 @@ fn controls_object(registry: &effect_contract::NativeEffectRegistry) -> Controls
                         bypass,
                         parameters,
                         link_mode,
+                        console_link_mode,
                     } = effect_table_rows(descriptor.id.as_str())
                         .expect("a registry effect has rows");
                     let effect = EffectControls {
                         bypass: control_row(&bypass),
                         parameters: parameters.iter().map(|row| control_row(row)).collect(),
                         link_mode: link_mode.as_ref().map(|row| control_row(row)),
+                        console_link_mode: console_link_mode.as_ref().map(|row| control_row(row)),
                     };
                     (descriptor.id.as_str().to_owned(), effect)
                 })

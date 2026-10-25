@@ -459,7 +459,9 @@ fn a_glide_moves_no_bank_mates_bit_and_allocates_nothing() {
             let modes: Vec<LinkMode> = (0..lanes)
                 .map(|lane| LINKS[(lane + seed as usize) % LINKS.len()])
                 .collect();
-            let target = LINKS[(seed as usize + 1) % LINKS.len()];
+            // Neither lane 0's mode nor lane 1's, so a retarget that reaches a bank-mate moves it
+            // (#1969).
+            let target = LINKS[(seed as usize + 2) % LINKS.len()];
             let requests: Vec<_> = members
                 .iter()
                 .zip(&modes)

@@ -62,7 +62,8 @@ export const sharedLeft: ControlAddress = {
   control: "mute",
   lane: "left",
 };
-// A console slot has a bypass and parameters but no link mode; an insert has the link mode.
+// An insert and a console entry of an effect with a choice of link modes both have the link-mode
+// row (#1369); an effect with one mode has none.
 export const insertLinkMode: ControlAddress<"miso.compressor"> = {
   owner: { kind: "strip", id: "drums" },
   section: { kind: "inserts", effect: "comp" },
@@ -77,8 +78,14 @@ export const consoleBypass: ControlAddress<"miso.compressor"> = {
 };
 export const consoleLinkMode: ControlAddress<"miso.compressor"> = {
   owner: { kind: "strip", id: "drums" },
-  // @ts-expect-error a console slot has no link-mode row
   section: { kind: "console", slot: "glue" },
+  control: "link_mode",
+  lane: "both",
+};
+export const consoleEqLinkMode: ControlAddress<"miso.parametric-eq"> = {
+  owner: { kind: "strip", id: "drums" },
+  section: { kind: "console", slot: "tone" },
+  // @ts-expect-error the EQ has one link mode, so its console entry has no link-mode row
   control: "link_mode",
   lane: "both",
 };
