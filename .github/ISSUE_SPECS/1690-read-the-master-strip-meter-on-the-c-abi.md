@@ -256,3 +256,6 @@ The issue splits in two slices.
   (an extension would be a test with no defect to catch). The SDK's hand decoder
   (`sdk/src/core/protocol-messages.ts`) does not yet decode target 3; the browser refuses meter
   tables until #1588b, and the SDK table call is a later issue (non-goal).
+- **Re-pin (gate 7).** After #2024 (#1578) merged (main `9d7bbb887`), the corpus's telemetry table
+  gains `{master, gain reduction}`: `COMPLETE_SCHEMA_HASH` `cb8db815ed0103a0` -> `dea650f7e506833e`,
+  59 frames still; only `command.telemetry_configure` and `response.telemetry` move.
