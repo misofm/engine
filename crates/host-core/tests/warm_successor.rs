@@ -1209,10 +1209,13 @@ fn growth_rebuild_growth_continues_its_predecessor() {
 
 /// Gate 3: track 1 (muted) keys track 2's compressor from its `input` tap; a limiter inserted on
 /// track 1 restarts it and leaves track 2 carried, whose sidechain line from track 1 grows by
-/// `P`. The output equals A continued. Both bank widths.
+/// `P`. The output equals A continued. Second shape: the same edit after a first growth (a muted
+/// limiter track), so track 1 holds a claim line of `P` it keeps: the sidechain line takes the
+/// head of its stream (that claim line's pending words) and track 1's line its tail (the prime).
+/// Both bank widths.
 #[test]
 fn an_input_tap_sidechain_from_a_restarted_track_continues() {
-    let a = || {
+    let a = |grown: bool| {
         let mut model = empty();
         muted_track(&mut model, "t1", Vec::new());
         to_output(&mut model, "t1");
@@ -1222,22 +1225,39 @@ fn an_input_tap_sidechain_from_a_restarted_track_continues() {
             vec![keyed_compressor(from_track("t1", SendTap::Input))],
         );
         to_output(&mut model, "t2");
+        if grown {
+            muted_track(&mut model, "t3", vec![limiter()]);
+            to_output(&mut model, "t3");
+        }
         model
     };
-    let mut b = a();
-    *inserts(&mut b, "t1") = vec![limiter()];
-    let (a, b) = (Session::compile(finish(a())), Session::compile(finish(b)));
+    let edit = |grown: bool| {
+        let mut b = a(grown);
+        *inserts(&mut b, "t1") = vec![limiter()];
+        Session::compile(finish(b))
+    };
+    let start = Session::compile(finish(a(false)));
     for &backend in Backend::VECTOR {
-        let caps = gate_caps();
-        let mut swapped = alone(&a, &caps, backend, AHEAD);
-        swapped.render(BEFORE);
-        assert_eq!(swapped.grow(&b, &CONFIG), LEAD);
-        assert_eq!(restarted_ids(&swapped.inventory), ["t1"]);
-        swapped.render(AFTER);
-        assert_eq!(swapped.swap_blocks(), [BEFORE]);
-        let mut continued = alone(&a, &caps, backend, AHEAD);
-        continued.render(BEFORE + AFTER);
-        assert_eq!(first_divergence(&swapped, &continued), None, "{backend:?}");
+        for grown in [false, true] {
+            let caps = gate_caps();
+            let mut swapped = alone(&start, &caps, backend, AHEAD);
+            swapped.render(BEFORE);
+            if grown {
+                assert_eq!(swapped.grow(&Session::compile(finish(a(true))), &CONFIG), LEAD);
+                swapped.render(AFTER);
+            }
+            assert_eq!(swapped.grow(&edit(grown), &CONFIG), LEAD);
+            assert_eq!(restarted_ids(&swapped.inventory), ["t1"]);
+            swapped.render(AFTER);
+            assert_eq!(swapped.swap_blocks().len(), 1 + usize::from(grown));
+            let mut continued = alone(&start, &caps, backend, AHEAD);
+            continued.render(swapped.blocks.len());
+            assert_eq!(
+                first_divergence(&swapped, &continued),
+                None,
+                "{backend:?}, after a growth: {grown}"
+            );
+        }
     }
 }
 
