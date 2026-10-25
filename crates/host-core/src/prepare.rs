@@ -182,8 +182,9 @@ pub struct WarmLead {
     /// The strips the lead restarts whole (every node of the strip), sorted by ID. An added
     /// strip is never listed.
     pub restart_whole: Box<[String]>,
-    /// The strips the ordinary successor's carry join restarts (#1354a ruling 2): with
-    /// `restart_whole`, the set `R` the floors are derived from. Sorted.
+    /// `R`'s join part (#1354a ruling 2, #1354b): the strips the ordinary successor's carry join
+    /// restarts and the strips D2 step 2 adds on the lead's compile. With `restart_whole`, the set
+    /// `R` the floors are derived from; the warm successor restarts each. Sorted.
     restarted: Box<[Box<str>]>,
     /// D3's exact byte count.
     prime_bytes: u64,
@@ -191,11 +192,10 @@ pub struct WarmLead {
 
 impl WarmLead {
     /// The bytes render writes and reads in the adoption block to prime this lead (#1354 D3):
-    /// `4 · (P · Σ channels(s)` over the carried sources `+ Σ 2 · λ'` over every source-claim
-    /// line the prime's fill writes`)`. **Limit (#1354b):** the L3 term is not counted yet: the
-    /// fill writes every `input`-tap sidechain line from a restarted track into a carried node
-    /// (#1355 D5), and those words are left out, so the count is exact only for a successor with
-    /// no such line.
+    /// `4 · (P · Σ channels(s)` over the carried sources `+` the words the prime's fill writes
+    /// into every source-claim line (L2) and every `input`-tap sidechain line from a restarted
+    /// track into a carried node (L3, #1354b)`)`. Exact: the warm successor reports the same
+    /// count over its own lines ([`PreparedHost::prime_bytes`]).
     #[must_use]
     pub const fn prime_bytes(&self) -> u64 {
         self.prime_bytes
@@ -2216,10 +2216,8 @@ fn source_carries(
 /// a lane that grew by the lead takes its whole ring (the predecessor's pending words, then the
 /// lead), and a lane that moves takes the lead, up to its ring. An added track's line, a line on a
 /// source that does not carry, and a restarted lane take nothing. `before` is the predecessor's
-/// strip delay rows, sorted by strip ID. `None` on overflow.
-///
-/// **Limit (#1354b).** The `Input`-tap sidechain lines (L3) the fill writes are not counted; D3's
-/// L3 term is #1354b's.
+/// strip delay rows, sorted by strip ID. `None` on overflow. D3's L3 term is
+/// [`sidechain_fill_words`]'s.
 fn prime_bytes_of(
     lead: u64,
     channels: u64,
@@ -2269,17 +2267,23 @@ fn prime_bytes_of(
 /// graph once per pass and changes no queue (D5).
 ///
 /// `ordinary` is the inventory of the ordinary successor of `base` prepared from `compiled` with
-/// the host's own entry (#1354a ruling 1): its [`PlanStateInventory::restarted_strips`] is `R`'s
-/// join part and its [`PlanStateInventory::input_floors`] are step 3's arrivals. A host prepares it
-/// anyway, as the answer to [`WarmDecision::Ordinary`].
+/// the host's own entry (#1354a ruling 1): its [`PlanStateInventory::restarted_strips`] starts
+/// `R`'s join part and its [`PlanStateInventory::input_floors`] are step 3's arrivals. A host
+/// prepares it anyway, as the answer to [`WarmDecision::Ordinary`].
+///
+/// Step 2 (#1354b) runs on each pass's compile, before C1 is checked: the strips the lead's strip
+/// delay join restarts (a track re-pointed to a source that does not carry, whose claim line
+/// grows) and #1324 D1's sidechain closure over `R` (the strips restarted whole included) join
+/// `R`'s join part. On the lead's compile the closure's submix `input`-tap rule is step 6's M1
+/// rule: the sidechain line changes length exactly when the stage misses `a(n) + P`. A strip that
+/// joins `R` only on a lead's compile makes the answer `Warm` even when `P` falls to 0 (an ordinary
+/// rebuild that duck-swaps it).
 ///
 /// At a declared discontinuity nothing leads, so the answer is [`WarmDecision::Ordinary`].
 ///
-/// **Limits of this slice (#1354b).** Step 2's sidechain closure holds for `R`'s join part only:
-/// `ordinary`'s restart set is closed over the sidechain edges (#1324 D1). A consumer keyed from a
-/// strip step 6 restarts whole is not in `R` when the floors are derived (the successor restarts
-/// it after them, with its floor `a + P`), step 6's submix `input`-tap rule is not applied, and no
-/// L3 line is primed.
+/// It reads `base.committed`, not the model with [`SuccessorBase::duck`] applied: the overlay
+/// changes only mutes, which nothing here reads. A later reader of mutes must use the overlaid
+/// model, as preparation does.
 ///
 /// # Errors
 ///
@@ -2307,16 +2311,24 @@ pub fn warm_lead(
         .strips()
         .map(|strip| strip.id.as_str())
         .collect();
+    let rings = carried_rings(compiled, caps, &base);
+    let carried: BTreeSet<&str> = rings.iter().map(|(row, _)| &*row.id).collect();
+    let delay_joins = join_strip_delays(base.committed, model, &carried);
+    // `R`'s join part: the ordinary successor's restart set, then every strip step 2 and the
+    // lead's strip delay join add. A strip enters it, and `whole`, at most once.
+    let mut joined: BTreeSet<&str> = ordinary
+        .restarted_strips()
+        .iter()
+        .filter_map(|id| predecessor_strips.get(&**id).copied())
+        .collect();
+    let ordinary_set = joined.clone();
     let mut whole: BTreeSet<&str> = BTreeSet::new();
-    // Each pass adds a strip to `whole` or returns, so the loop ends within the strip count.
-    let passes = predecessor_strips.len() + 1;
+    // Each pass adds a strip to `joined` or to `whole`, or returns, so the loop ends within twice
+    // the strip count.
+    let passes = 2 * predecessor_strips.len() + 1;
     let mut found = None;
     for _ in 0..passes {
-        let restart = WarmRestart::new(
-            model,
-            ordinary.restarted_strips().iter().map(|id| &**id),
-            whole.iter().copied(),
-        );
+        let restart = WarmRestart::new(model, joined.iter().copied(), whole.iter().copied());
         // Step 3: `Δ` over C, from the ordinary successor's arrivals.
         let delta = predecessor
             .iter()
@@ -2324,15 +2336,35 @@ pub fn warm_lead(
             .map(|node| arrival_in(ordinary_arrivals, node).saturating_sub(arrival_in(a, node)))
             .max()
             .unwrap_or(0);
-        // Step 4.
+        // Step 4, with step 2 at `P = 0`: the lead's compile is the ordinary successor's.
         if delta == 0 {
-            return Ok(if whole.is_empty() {
+            let before = &base.inventory.strip_delays;
+            let after = |id: &str| {
+                ordinary
+                    .strip_delays
+                    .binary_search_by(|row| (*row.strip).cmp(id))
+                    .ok()
+                    .map(|index| ordinary.strip_delays[index].samples)
+            };
+            let added = close_warm_restart(
+                &base,
+                model,
+                &ordinary.delay_lines,
+                delay_restarted(&delay_joins, before, after, 0),
+                &joined,
+                &whole,
+            );
+            if !added.is_empty() {
+                joined.extend(added);
+                continue;
+            }
+            return Ok(if whole.is_empty() && joined == ordinary_set {
                 WarmDecision::Ordinary
             } else {
                 WarmDecision::Warm(WarmLead {
                     lead_samples: 0,
                     restart_whole: whole.iter().map(|id| (*id).to_owned()).collect(),
-                    restarted: ordinary.restarted_strips().into(),
+                    restarted: joined.iter().map(|id| Box::from(*id)).collect(),
                     prime_bytes: 0,
                 })
             });
@@ -2346,9 +2378,33 @@ pub fn warm_lead(
         let artifact = compile_for_arrivals(compiled, caps, base.monitor.next, floors)?;
         let arrivals = artifact_arrivals(&artifact);
         let graph = artifact.graph();
+        // Step 2 on the lead's compile: the strips its strip delay join restarts (a track's claim
+        // line that grows on a source that does not carry, #1354b), and the sidechain closure
+        // with the submix `input`-tap rule (M1) over its lines, join `R` before C1 is checked.
+        let lines = compiled_sidechain_lines(graph);
+        let after = |id: &str| {
+            let node = claim_node(id);
+            graph
+                .track_delays()
+                .iter()
+                .find(|row| row.node == node)
+                .map(|row| [row.left_samples, row.right_samples])
+        };
+        let added = close_warm_restart(
+            &base,
+            model,
+            &lines,
+            delay_restarted(&delay_joins, &base.inventory.strip_delays, after, lead),
+            &joined,
+            &whole,
+        );
+        if !added.is_empty() {
+            joined.extend(added);
+            continue;
+        }
         // Step 6, C1.
         let Some(late) = first_late_node(graph, &arrivals, a, &predecessor, &restart, lead) else {
-            found = Some((lead, artifact));
+            found = Some((lead, artifact, lines));
             break;
         };
         let reached = walk_back(
@@ -2382,8 +2438,11 @@ pub fn warm_lead(
             return Ok(WarmDecision::Unavailable(WarmUnavailable::Misaligned));
         }
     }
-    let Some((lead, artifact)) = found else {
-        debug_assert!(false, "#1354 D2: the walk ends within the strip count");
+    let Some((lead, artifact, lines)) = found else {
+        debug_assert!(
+            false,
+            "#1354 D2: the walk ends within twice the strip count"
+        );
         return Err(warm_invariant());
     };
     // Step 7, C3: the lead.
@@ -2399,16 +2458,16 @@ pub fn warm_lead(
         compiled.sample_rate().0,
         compiled.quantum().0,
     ));
-    let rings = carried_rings(compiled, caps, &base);
     if rings
         .iter()
         .any(|(row, _)| row.ring.frame_capacity.saturating_sub(stall) < lead + quantum)
     {
         return Ok(WarmDecision::Unavailable(WarmUnavailable::LeadBound));
     }
-    // Step 8, C3: the prime.
+    // Step 8, C3: the prime, its claim lines (L2) and its `input`-tap sidechain lines (L3).
     let channels = rings.iter().map(|(_, channels)| u64::from(*channels)).sum();
-    let carried: BTreeSet<&str> = rings.iter().map(|(row, _)| &*row.id).collect();
+    let restarted: BTreeSet<&str> = joined.union(&whole).copied().collect();
+    let fills = sidechain_fills(&base, &lines, &delay_joins, &restarted);
     let prime_bytes = prime_bytes_of(
         lead,
         channels,
@@ -2418,6 +2477,11 @@ pub fn warm_lead(
         &base.inventory.strip_delays,
         artifact.graph().track_delays(),
     )
+    .and_then(|bytes| {
+        sidechain_fill_words(&base, &lines, &fills, lead)?
+            .checked_mul(4)?
+            .checked_add(bytes)
+    })
     .ok_or_else(|| resource("host.resource.arithmetic"))?;
     if prime_bytes > config.prime_bytes_max {
         return Ok(WarmDecision::Unavailable(WarmUnavailable::PrimeBudget));
@@ -2426,9 +2490,138 @@ pub fn warm_lead(
     Ok(WarmDecision::Warm(WarmLead {
         lead_samples: lead,
         restart_whole: whole.iter().map(|id| (*id).to_owned()).collect(),
-        restarted: ordinary.restarted_strips().into(),
+        restarted: joined.iter().map(|id| Box::from(*id)).collect(),
         prime_bytes,
     }))
+}
+
+/// D2 step 2 on one compile of the warm successor (#1354b): the strips that join `R`'s join part.
+/// The compile's strip delay join restarts `delay_restarted` (sorted); #1324 D1's sidechain
+/// closure ([`close_over_sidechains`], the rule preparation applies after its joins) then runs
+/// over `R` (`joined`, `whole` and `delay_restarted`) with the compile's sidechain lines `after`
+/// against the predecessor's. On the lead's compile a submix `input`-tap line changes length
+/// exactly when the stage arrives at `a(n) + g` with `g ≠ P`, so the closure is step 6's M1 rule
+/// too. Returns the strips of the predecessor it adds, outside `joined` and `whole`.
+fn close_warm_restart<'m>(
+    base: &SuccessorBase<'_>,
+    model: &'m SessionModel,
+    after: &[graph::GraphDelayLine],
+    delay_restarted: Vec<Box<str>>,
+    joined: &BTreeSet<&str>,
+    whole: &BTreeSet<&str>,
+) -> Vec<&'m str> {
+    let mut set: Vec<Box<str>> = joined
+        .iter()
+        .chain(whole)
+        .map(|id| Box::from(*id))
+        .chain(delay_restarted.iter().cloned())
+        .collect();
+    set.sort_unstable();
+    set.dedup();
+    close_over_sidechains(
+        base.committed,
+        model,
+        &base.inventory.delay_lines,
+        after,
+        &delay_restarted,
+        &mut set,
+    );
+    model
+        .strips()
+        .map(|strip| strip.id.as_str())
+        .filter(|id| set.binary_search_by(|held| (**held).cmp(id)).is_ok())
+        .filter(|id| !joined.contains(id) && !whole.contains(id))
+        .filter(|id| committed_has_strip(base.committed, id))
+        .collect()
+}
+
+/// The strips the strip delay join restarts ([`strip_delay_restarts`]), sorted: `before` is the
+/// predecessor's strip delay rows (sorted by strip ID) and `after` a strip's lane rings in the
+/// successor, `None` when it holds no line.
+fn delay_restarted(
+    joins: &[StripDelayJoin<'_>],
+    before: &[graph::GraphStripDelayLine],
+    after: impl Fn(&str) -> Option<[u32; 2]>,
+    lead: u64,
+) -> Vec<Box<str>> {
+    let mut restarted: Vec<Box<str>> = joins
+        .iter()
+        .filter(|join| {
+            let earlier = before
+                .binary_search_by(|row| (*row.strip).cmp(join.id))
+                .ok()
+                .map(|index| before[index].samples);
+            strip_delay_restarts(join, earlier, after(join.id), lead)
+        })
+        .map(|join| Box::from(join.id))
+        .collect();
+    restarted.sort_unstable();
+    restarted
+}
+
+/// The sidechain compensation lines of a compiled, unbound graph, from its inserted delays (the
+/// lines its program lowers, one per delayed edge), each with its edge's endpoints. `line` is the
+/// row's index in the result: a bound plan's lines are read after bind
+/// ([`graph::take_compensation_lines`]), so these rows serve [`warm_lead`]'s closure and its L3
+/// count only.
+fn compiled_sidechain_lines(graph: &graph::PreparedGraphPlan) -> Vec<graph::GraphDelayLine> {
+    graph
+        .inserted_delays
+        .iter()
+        .filter(|delay| matches!(delay.edge_id, graph::GraphEdgeId::EffectSidechain { .. }))
+        .filter_map(|delay| {
+            let edge = graph
+                .spec
+                .edges
+                .iter()
+                .find(|edge| edge.id == delay.edge_id)?;
+            Some((edge, delay.samples.0))
+        })
+        .zip(0_u32..)
+        .map(|((edge, samples), line)| graph::GraphDelayLine {
+            edge: edge.id.clone(),
+            source: edge.source.node.clone(),
+            destination: edge.destination.node.clone(),
+            line,
+            samples,
+        })
+        .collect()
+}
+
+/// D3's L3 term, in words (#1354b): what the prime's fill writes into each `input`-tap sidechain
+/// line of `fills` (lines of `lines`). Each channel of a line of length `λ'` takes the head of the
+/// stream the predecessor's consumer would have heard, up to `λ'`: the predecessor's pending words
+/// of the same edge, then the source track's claim pending on that lane, then the `lead` words of
+/// the prime (#1355 D5). `None` on overflow.
+fn sidechain_fill_words(
+    base: &SuccessorBase<'_>,
+    lines: &[graph::GraphDelayLine],
+    fills: &[graph::GraphSidechainFill],
+    lead: u64,
+) -> Option<u64> {
+    let mut words = 0_u64;
+    for fill in fills {
+        let length = lines.iter().find(|line| line.line == fill.line)?.samples;
+        let edge = fill.predecessor.map_or(0, |line| {
+            base.inventory
+                .delay_lines
+                .iter()
+                .find(|earlier| earlier.line == line)
+                .map_or(0, |earlier| earlier.samples)
+        });
+        let claim = fill.claim_line.map_or([0; 2], |line| {
+            base.inventory
+                .strip_delays
+                .iter()
+                .find(|row| row.line == line)
+                .map_or([0; 2], |row| row.samples)
+        });
+        for pending in claim {
+            let available = edge.checked_add(u64::from(pending))?.checked_add(lead)?;
+            words = words.checked_add(length.min(available))?;
+        }
+    }
+    Some(words)
 }
 
 /// D2 step 6's walk from the late carried node `late`, whose lead arrival is `target`: back from
@@ -4481,20 +4674,21 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
     restarted.extend(delay_restarted.iter().cloned());
     restarted.sort_unstable();
     restarted.dedup();
-    if let (Some(lead), Some(restart)) = (warm, &warm_restart) {
-        // #1354a ruling 2: the join restarts no strip outside the lead's `R`; a strip restarted
-        // whole is listed whatever its owners did.
-        if restarted
-            .iter()
-            .any(|id| !restart.whole.contains(&**id) && lead.restarted.binary_search(id).is_err())
-        {
-            return Err(warm_invariant());
-        }
+    if let Some(lead) = warm {
+        // #1354a ruling 2, #1354b: every strip of the lead's `R` restarts, its join part (whose
+        // floors are its arrivals) whatever this join did, and a strip restarted whole whatever
+        // its owners did.
         restarted.extend(
-            lead.restart_whole
+            lead.restarted
                 .iter()
                 .filter(|id| committed_has_strip(model, id))
-                .map(|id| Box::<str>::from(id.as_str())),
+                .cloned()
+                .chain(
+                    lead.restart_whole
+                        .iter()
+                        .filter(|id| committed_has_strip(model, id))
+                        .map(|id| Box::<str>::from(id.as_str())),
+                ),
         );
         restarted.sort_unstable();
         restarted.dedup();
@@ -4514,8 +4708,8 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
     }
     // #1324 D1: a carried effect keyed from a restarted strip's tap behind a restarted owner
     // would read the old chain until `S` and the restarted chain's at-rest output after it, so
-    // its strip joins the set, until no strip is added. After the warm check: the lead's `R` is
-    // the ordinary successor's set, which this closure already closed.
+    // its strip joins the set, until no strip is added. A warm lead's `R` is closed already
+    // (`warm_lead`'s step 2 runs this rule on the same compile).
     if let Some(base) = successor {
         close_over_sidechains(
             base.committed,
@@ -4525,6 +4719,15 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
             &delay_restarted,
             &mut restarted,
         );
+    }
+    // #1354a ruling 2: neither the joins nor the closure restart a strip outside the lead's `R`,
+    // whose floors are derived from it.
+    if let (Some(lead), Some(restart)) = (warm, &warm_restart)
+        && restarted
+            .iter()
+            .any(|id| !restart.whole.contains(&**id) && lead.restarted.binary_search(id).is_err())
+    {
+        return Err(warm_invariant());
     }
     let restart = StripRestart::new(model, restarted.iter().map(|id| &**id));
     let carried_input_count = carried_inputs.len();
@@ -4768,6 +4971,15 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
             sidechain_fills(&base, &delay_lines, &delay_joins, &restarted)
         }
         _ => Vec::new(),
+    };
+    // D3's L3 term (#1354b): the words the prime writes into those lines.
+    let warm_prime_bytes = match (successor, warm) {
+        (Some(base), Some(lead)) if lead.lead_samples != 0 => {
+            sidechain_fill_words(&base, &delay_lines, &sidechain_fills, lead.lead_samples)
+                .and_then(|words| words.checked_mul(4)?.checked_add(warm_prime_bytes))
+                .ok_or_else(|| resource("host.resource.arithmetic"))?
+        }
+        _ => warm_prime_bytes,
     };
     let prime_carry_bytes =
         graph::prime_carry_retained_bytes(strip_delay_carry.fills.len(), sidechain_fills.len())
@@ -7852,6 +8064,44 @@ fn strip_delay_lanes(equal: u8, before: Option<[u32; 2]>, after: [u32; 2], lead:
     (moved, grown)
 }
 
+/// The lanes of strip `join`'s line in the successor (`after`, its lane rings) that hold pending
+/// samples worth carrying: a nonempty ring on a lane whose declared delay is equal in both models.
+fn needed_lanes(join: &StripDelayJoin<'_>, after: Option<[u32; 2]>) -> u8 {
+    after.map_or(0, |after| {
+        [graph::STRIP_DELAY_LEFT, graph::STRIP_DELAY_RIGHT]
+            .into_iter()
+            .zip(after)
+            .filter(|&(bit, samples)| join.equal & bit != 0 && samples != 0)
+            .fold(0, |mask, (bit, _)| mask | bit)
+    })
+}
+
+/// Whether the strip delay join restarts strip `join` (#1284 D1, #1354a ruling 3): a lane's
+/// declared delay changed, or a needed lane ([`needed_lanes`]) can neither move nor grow by
+/// exactly `lead` (its ring changed otherwise, the predecessor holds no line for it, or the strip
+/// reads another source). `before` and `after` are the strip's lane rings in the predecessor and
+/// the successor, `None` for a plan that holds no line for it. [`resolve_strip_delay_carry`] and
+/// [`warm_lead`] (on the lead's compile, before bind) read this one rule.
+fn strip_delay_restarts(
+    join: &StripDelayJoin<'_>,
+    before: Option<[u32; 2]>,
+    after: Option<[u32; 2]>,
+    lead: u64,
+) -> bool {
+    if join.equal != graph::STRIP_DELAY_LEFT | graph::STRIP_DELAY_RIGHT {
+        return true;
+    }
+    let needed = needed_lanes(join, after);
+    match (after, join.same_source) {
+        _ if needed == 0 => false,
+        (Some(after), true) => {
+            let (moved, grown) = strip_delay_lanes(join.equal, before, after, lead);
+            moved | grown != needed
+        }
+        _ => true,
+    }
+}
+
 /// The line half of the strip delay join (#1284 D1, #1402 D1): a lane carries when its
 /// `delay_samples` is the same in both models, the strip reads the same source, and both plans
 /// hold the strip's line with rings of one length on that lane. A lane is needed by its ring, not
@@ -7880,52 +8130,44 @@ fn resolve_strip_delay_carry(
     };
     let mut carry = StripDelayCarry::default();
     for join in joins {
-        let both = graph::STRIP_DELAY_LEFT | graph::STRIP_DELAY_RIGHT;
-        let mut restarts = join.equal != both;
+        let after = row(own, join.id);
+        let before = row(predecessor, join.id);
+        let restarts = strip_delay_restarts(
+            join,
+            before.as_ref().map(|before| before.samples),
+            after.as_ref().map(|after| after.samples),
+            lead,
+        );
         // A lane whose ring is empty in the successor has nothing to take; a lane of a line the
         // predecessor never had, or of a strip that reads another source, starts at rest.
-        let after = row(own, join.id);
-        let needed = after.as_ref().map_or(0, |after| {
-            [graph::STRIP_DELAY_LEFT, graph::STRIP_DELAY_RIGHT]
-                .into_iter()
-                .zip(after.samples)
-                .filter(|&(bit, samples)| join.equal & bit != 0 && samples != 0)
-                .fold(0, |mask, (bit, _)| mask | bit)
-        });
-        if needed != 0 {
-            match (after, join.same_source) {
-                (Some(after), true) => {
-                    let before = row(predecessor, join.id);
-                    let (moved, grown) = strip_delay_lanes(
-                        join.equal,
-                        before.as_ref().map(|before| before.samples),
-                        after.samples,
-                        lead,
-                    );
-                    restarts |= moved | grown != needed;
-                    if let Some(before) = &before
-                        && moved != 0
-                    {
-                        carry.moves.push(graph::GraphStripDelayMove {
-                            successor: after.line,
-                            predecessor: before.line,
-                            lanes: moved,
-                        });
-                    }
-                    // #1355 D5: a warm successor's track line on a moved source takes the prime
-                    // on every lane that continues, and the predecessor's pending words first on
-                    // the lanes that grew.
-                    if lead != 0 && join.track && moved | grown != 0 {
-                        carry.fills.push(graph::GraphClaimFill {
-                            line: after.line,
-                            claim: claim_node(join.id),
-                            predecessor: before.as_ref().map(|before| before.line),
-                            pending_lanes: grown & !moved,
-                            lanes: moved | grown,
-                        });
-                    }
-                }
-                _ => restarts = true,
+        let needed = needed_lanes(join, after.as_ref().map(|after| after.samples));
+        if let (Some(after), true) = (after.filter(|_| needed != 0), join.same_source) {
+            let (moved, grown) = strip_delay_lanes(
+                join.equal,
+                before.as_ref().map(|before| before.samples),
+                after.samples,
+                lead,
+            );
+            if let Some(before) = &before
+                && moved != 0
+            {
+                carry.moves.push(graph::GraphStripDelayMove {
+                    successor: after.line,
+                    predecessor: before.line,
+                    lanes: moved,
+                });
+            }
+            // #1355 D5: a warm successor's track line on a moved source takes the prime on every
+            // lane that continues, and the predecessor's pending words first on the lanes that
+            // grew.
+            if lead != 0 && join.track && moved | grown != 0 {
+                carry.fills.push(graph::GraphClaimFill {
+                    line: after.line,
+                    claim: claim_node(join.id),
+                    predecessor: before.as_ref().map(|before| before.line),
+                    pending_lanes: grown & !moved,
+                    lanes: moved | grown,
+                });
             }
         }
         if restarts {

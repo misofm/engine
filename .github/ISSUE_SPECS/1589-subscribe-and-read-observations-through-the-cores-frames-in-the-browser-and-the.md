@@ -152,3 +152,33 @@ Commands: `cargo test --locked -p host-web --all-features`, `cargo test --locked
 ## Supersedes and shrinks
 
 - None.
+
+## Decision record
+
+- **Split (scope note, 2026-10-25).** #1589a: the browser's session serves `Observe` and
+  `OBSERVATION_READ` (D1, D6, gate 1). #1589b: the SDK on frames (D3-D5; gates 2, 3, 5, 6). #1589c:
+  kinds 7 and 8 deleted (D2; gate 4). Order a -> b -> c.
+- **R1 (root).** The boot word `live_control_observation_taps` keeps its meaning until #1590 D5;
+  D1's "capacity for every declared tap" is #1590's. #1589a: the session serves the edit and the
+  read only when the browser's preparer binds a queue for every declared tap
+  (`RuntimePreparer::observation_queues`: a nonzero word). Preparation refuses an effect that
+  declares more taps than the word (`effect.observation.taps`), so a nonzero word binds every
+  declared tap of every plan. Otherwise `Observe` is refused `observation.unavailable` and
+  neither `0x000f` nor bit 15 is advertised: with the word `0` the live path would have answered an
+  internal fault and the rebuild path would have acknowledged a subscription no queue holds.
+- **R2 (root).** One `ObservationIndex` per plan, the epoch's; #1586a's `PlanShape` copy is deleted,
+  and its bytes move to the control plane's row. The browser's preparer keeps its readers in its
+  plan's `RenderCompanions` (D1: the render half pairs them at the swap block and folds their gain
+  reduction), so `prepare_runtime` builds the epoch's index over that list
+  (`RuntimePreparer::kept_observations`). The browser's control entry lends the active plan's
+  readers with that plan's epoch (`SessionState::command_with_plan_observations`), and the kept read
+  exports read through `SessionState::observation_index(epoch)` for the epoch of the rendering
+  plan, so an index and its readers are always one plan's.
+- **Carried readers (#1674, #1587b).** The C ABI pairs its epoch's readers at promotion from the swap
+  record. The browser does not need that: its readers live in the plan and its own swap hook
+  (`RenderCompanions::adopt_predecessor`) pairs them in the swap block, so a carried tap's reader is
+  the one render publishes to from the adoption block on; the core read reads those readers, so a
+  carried tap does not read `Pending` after a rebuild.
+- **Gate 1 (D6).** `protocol_cross_host.rs`'s one-script gate runs on the observation fixture with
+  taps for every declared tap and gains steps 16-18 (one `Observe` arm, two blocks, one
+  `OBSERVATION_READ`, a ready row); step 1's exception loses `0x000f` and bit 15.

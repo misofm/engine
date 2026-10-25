@@ -50,6 +50,7 @@ import type {
   TransportSnapshot,
 } from "../core/protocol-messages.ts";
 import { createTrackResponse } from "./response.ts";
+import { isResponseReady } from "../core/response-frame.ts";
 import type { BrowserTrackResponse } from "./response.ts";
 import {
   parseTrackResponseState,
@@ -1293,6 +1294,8 @@ export async function createEngine(options: CreateEngineOptions): Promise<Browse
         return host.onControlEvent((event) => {
           // The host calls its listeners in turn from the port's message handler: a throw here
           // would skip the listeners after this one, so it is reported outside the call instead.
+          // A `RESPONSE_READY` answers a track response query, which reads it (#1579a).
+          if (isResponseReady(event.frame)) return;
           try {
             const decoded = decodeProtocolEvent(event.frame);
             // Another sender's commit is seen here too (#1296 root R2).

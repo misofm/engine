@@ -2100,10 +2100,10 @@ mod tests {
     }
 
     /// #1584 D7a: an `Observe` edit needs a host that serves it. The one-call preparation, a
-    /// monitor preparation with no binding table and one whose host does not serve the edit (the
-    /// browser until #1589) each refuse it `observation.unavailable` at its own index, before its
-    /// target is looked up; a host that serves it gets the target check (the canonical fixture's
-    /// track has no insert `eq1`).
+    /// monitor preparation with no binding table and one whose host's adapter does not serve the
+    /// edit each refuse it `observation.unavailable` at its own index, before its target is looked
+    /// up; a host that serves it gets the target check (the canonical fixture's track has no insert
+    /// `eq1`).
     ///
     /// Red if a host without the edit acknowledges a subscription nobody queues, or if a second
     /// writer of a browser observation queue could arm through the core.
