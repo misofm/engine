@@ -527,8 +527,8 @@ fn live(used: bench_support::alloc::Counters) -> u64 {
 /// the same capture armed by a strip `RESPONSE_GET` and delivered by `service` as its
 /// `RESPONSE_READY` event, held in the controller's cell, stays within `result_bytes` too.
 ///
-/// Test value (#1578): red if the charge leaves out the event's member table, which the conversion
-/// allocates while the result's is still held, or any part of the event the cell keeps.
+/// Test value (#1578): red if the event path holds more than the result's charge, for example a
+/// delivery that keeps the result beside its event.
 #[test]
 fn a_capture_at_the_bound_stays_within_its_charge() {
     bench_support::alloc::assert_installed();
