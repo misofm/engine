@@ -16,7 +16,10 @@ import { describe, test } from "node:test";
 
 import {
   decodeControlReply,
+  decodeObservationReadReply,
   encodeControlTransaction,
+  encodeObservationRead,
+  encodeObserveTransaction,
 } from "../src/core/control-frame.ts";
 import { MisoEngineError, MisoUsageError } from "../src/core/errors.ts";
 import {
@@ -27,6 +30,12 @@ import {
 } from "../src/core/spectrum-frame.ts";
 
 const HEADER_BYTES = 48;
+
+/** #1589b: the Rust codec's `Observe` and `OBSERVATION_READ` frames (`crates/protocol/tests/observation_frames.rs`). */
+const OBSERVATION_FIXTURE = JSON.parse(await readFile(
+  new URL("../../crates/protocol/tests/fixtures/observation-frames.json", import.meta.url),
+  "utf8",
+));
 
 const FIXTURE = JSON.parse(await readFile(
   new URL("../../crates/protocol/tests/fixtures/set-control-frames.json", import.meta.url),
@@ -348,6 +357,61 @@ describe("the spectrum codec equals the protocol codec's frames (#1596 gate 1)",
         assert.equal(decoded.status, expect.status);
         assert.equal(decoded.diagnostics[0]?.code, expect.code);
       }
+    });
+  }
+});
+
+/** A binary32 word as the fixture's `leftBits`/`rightBits` spell it, or `null`. */
+function bitsOf(value) {
+  if (value === undefined) return null;
+  const view = new DataView(new ArrayBuffer(4));
+  view.setFloat32(0, value, true);
+  return view.getUint32(0, true).toString(16).padStart(8, "0");
+}
+
+describe("the observation codec equals the protocol codec's frames (#1589b)", () => {
+  for (const command of OBSERVATION_FIXTURE.commands) {
+    test(`encode ${command.name}`, () => {
+      const { request } = command;
+      const bytes = request.op === "apply"
+        ? encodeObserveTransaction({
+          requestId: BigInt(command.requestId),
+          expectedRevision: BigInt(request.expectedRevision),
+          edits: request.edits,
+        })
+        : encodeObservationRead(BigInt(command.requestId), request.selections);
+      assert.equal(hexOf(bytes), command.hex);
+    });
+  }
+
+  for (const reply of OBSERVATION_FIXTURE.replies) {
+    test(`decode ${reply.name}`, () => {
+      const { expect } = reply;
+      const decoded = decodeObservationReadReply(bytesOf(reply.hex));
+      assert.equal(decoded.requestId, BigInt(expect.requestId));
+      assert.equal(decoded.revision, BigInt(expect.revision));
+      assert.equal(decoded.ok, expect.ok);
+      if (!expect.ok) {
+        assert.equal(decoded.status, expect.status);
+        assert.equal(decoded.diagnostics[0]?.code, expect.code);
+        return;
+      }
+      assert.equal(decoded.value.observedSample, BigInt(expect.observedSample));
+      assert.deepEqual(decoded.value.rows.map((row) => ({
+        status: row.status,
+        armed: row.armed,
+        armSample: row.armSample.toString(),
+        armTag: row.armTag.toString(),
+        window: row.window === undefined ? null : {
+          firstSample: row.window.firstSample.toString(),
+          endSample: row.window.endSample.toString(),
+          sequence: row.window.sequence.toString(),
+          blocks: row.window.blocks,
+        },
+        leftBits: bitsOf(row.left),
+        rightBits: bitsOf(row.right),
+        unit: row.unit,
+      })), expect.rows);
     });
   }
 });
