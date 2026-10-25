@@ -369,6 +369,116 @@ fn a_refused_replacement_restores_the_withdrawn_candidate() {
     }
 }
 
+/// #2010: a rebuild that panics after it withdrew the pending candidate restores it before the
+/// panic leaves the control plane. T1 is pending; T2 panics inside its rebuild after the withdrawal
+/// (the C ABI's `catch_result` turns the panic into `RESULT_INTERNAL`). The candidate is
+/// republished, render adopts it, T3 commits and is adopted, and a session seek reaches the
+/// running plan: every block, the seek's included, equals a run that never saw T2, and every fed
+/// block is accepted (no `source.backpressure`).
+///
+/// Test value: red if the panic drops the withdrawn candidate: T1's acked revision then never
+/// renders, T3 promotes the lost epoch as adopted, and the rings the producers feed after the seek
+/// are not the ones render reads, so they fill.
+#[test]
+fn a_rebuild_that_panics_after_the_withdrawal_restores_the_candidate() {
+    let model = stateless_session(48_000);
+    let first = add_source_track(&model);
+    let second = [put(&model, 1, compressor())];
+    let third = add_track(&model, "tc");
+    // Submits block `block` of both sources under seek generation `generation`.
+    let feed = |children: &mut CompiledChildren, generation: u64, block: u64| {
+        for (salt, id) in [FIXTURE, ADDED].into_iter().enumerate() {
+            let (left, right) = crate::runtime::tests::continuity_block(block, salt as u64);
+            let report = children
+                .session
+                .submit(
+                    id,
+                    SourceSubmission {
+                        generation,
+                        start_frame: block * 128,
+                        sample_rate_hz: 48_000,
+                        planes: &[&left, &right],
+                        frames: 128,
+                        end_of_region: false,
+                    },
+                )
+                .unwrap_or_else(|error| panic!("block {block}: {:?}", error.report()));
+            assert_eq!(report.accepted_frames, 128, "block {block}");
+        }
+    };
+    let run = |panics: bool| {
+        control_plane::test_reset_lifecycle_observer();
+        let mut children = compile(&model, limits());
+        submit_direct(&mut children, &[FIXTURE], 0);
+        render_direct(&mut children, 0);
+        commit(&mut children, 1, 42, &first);
+        submit_direct(&mut children, &[ADDED], 0);
+        submit_direct(&mut children, &[FIXTURE, ADDED], 1);
+        if panics {
+            let epoch = children.session.test_pending_providers()[0].test_epoch();
+            children.session.test_set_structural_faults([
+                Some(TestStructuralFaultPhase::PanicAfterWithdrawal),
+                None,
+            ]);
+            let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                children
+                    .session
+                    .command(&transaction(2, 43, &second), 4_096)
+            }));
+            assert!(caught.is_err(), "T2 panics");
+            let counters = children.session.test_owner_counters();
+            assert_eq!(
+                (counters.candidate_withdrawn, counters.candidate_republished),
+                (1, 1),
+                "the withdrawn candidate is republished"
+            );
+            assert_eq!(revision(&children), 43, "the revision is T1's");
+            assert_eq!(
+                children.session.test_pending_providers()[0].test_epoch(),
+                epoch,
+                "T1's candidate stays pending with its own epoch"
+            );
+        }
+        let (mut blocks, next) =
+            feed_and_render_until_direct(&mut children, &[FIXTURE, ADDED], 1, 43);
+        commit(&mut children, 3, 43, &third);
+        let (more, next) = feed_and_render_until_direct(&mut children, &[FIXTURE, ADDED], next, 44);
+        blocks.extend(more);
+        // A plain session seek back to the start, then more blocks than a ring holds.
+        children
+            .session
+            .session_seek(2, 0, None)
+            .unwrap_or_else(|error| panic!("seek: {error:?}"));
+        feed(&mut children, 2, 0);
+        for block in 0..16 {
+            feed(&mut children, 2, block + 1);
+            blocks.push(render_direct(&mut children, next + block));
+        }
+        children.session.service().expect("service");
+        assert!(children.session.test_pending_providers().is_empty());
+        drop(children);
+        assert_balanced(
+            if panics { "panicked" } else { "reference" },
+            control_plane::test_lifecycle_counters(),
+        );
+        blocks
+    };
+    let reference = run(false);
+    let panicked = run(true);
+    assert!(
+        reference
+            .last()
+            .expect("blocks")
+            .iter()
+            .any(|sample| *sample != 0.0),
+        "the compared blocks play"
+    );
+    assert_eq!(reference.len(), panicked.len(), "the same block count");
+    for (block, (actual, expected)) in panicked.iter().zip(&reference).enumerate() {
+        assert_eq!(bits(actual), bits(expected), "block {block}");
+    }
+}
+
 /// A plan's graph bytes and its compiled model's bytes.
 type GraphRow = (u64, u64);
 
