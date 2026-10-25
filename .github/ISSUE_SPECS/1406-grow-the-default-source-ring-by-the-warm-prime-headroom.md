@@ -104,9 +104,15 @@ engine, the published ABI layout, the SDK and the browser host derive the same r
     region. The `% quantumFrames == 0` checks at `boot-evals.mjs:85`, `builder-evals.mjs:297` and
     `render-evals.mjs:150-154` stay. `boot-evals.mjs:318` and `browser-evals.mjs:276` have none,
     and none is added: their literal is itself a whole number of quanta.
-  - The browser host's in-flight bound with a zero override applies D3's rule from the ABI layout
-    it already loads (`preparedAbiLayout`, `miso-engine-v1-audio-worklet-host.js:1720`), not a
-    private copy: 57 quanta at 48 kHz and quantum 128, and 110 at quantum 64. The existing case at
+  - The browser host's in-flight bound is the ring the engine resolved, read back, never derived
+    in JavaScript (root ruling, 2026-10-25: the host no longer loads the ABI layout since #1565A).
+    The additive export `miso_engine_web_v1_resolved_source_ring_frames(handle) -> u32` returns
+    the boot's resolved ring (zero without a live handle), stored by a `source_ring_frames` field
+    and getter on `AudioWorkletEngineHost` (`hosts/host-web/src/lib.rs`). The worklet reads it
+    after boot and posts it as `sourceRingFrames` in `miso.ready.v1`; the host's ready validation
+    requires it (a u32, not zero, a whole number of quanta) and bounds each source by it in quanta:
+    57 at 48 kHz and quantum 128, and 110 at quantum 64 with a zero override. The SDK's
+    `WasmBoundary.shape()` reads the same export. The existing case at
     `scripts/test-web-audioworklet.mjs:1103-1128` is updated to 110 held chunks, the 111th
     refused and start frame 111 after they settle.
   - The two `.d.ts` comments, `MUTATIONS.md:7` (its expected value) and section 3 of
@@ -159,10 +165,16 @@ engine, the published ABI layout, the SDK and the browser host derive the same r
 - `sdk/test/boot-evals.mjs`, `sdk/test/browser-evals.mjs`, `sdk/test/builder-evals.mjs` (the ring
   assertions and the comment at `boot-evals.mjs:83` only), `sdk/test/render-evals.mjs` (the
   quanta assertion only)
-- `hosts/host-web/web/miso-engine-v1-audio-worklet-host.js` (the in-flight bound only),
-  `hosts/host-web/web/miso-engine-v1-audio-worklet-host.d.ts` and
+- `hosts/host-web/web/miso-engine-v1-audio-worklet-host.js` (the in-flight bound and the ready
+  message's validation), `hosts/host-web/web/miso-engine-v1-audio-worklet.js` (the ready message's
+  `sourceRingFrames`), `hosts/host-web/web/miso-engine-v1-audio-worklet-host.d.ts` and
   `sdk/src/browser/shipped-host.d.ts` (the ring comments only), `scripts/test-web-audioworklet.mjs`
-  (gate 4's case at `:1103-1128` only)
+  (gate 4's case, the fake node's ready message and the fake exports' ring export)
+- `hosts/host-web/src/ffi.rs` (the `miso_engine_web_v1_resolved_source_ring_frames` export and its
+  test), `hosts/host-web/src/lib.rs` (the resolved-ring field and getter),
+  `scripts/check-web-audioworklet.sh` (the frozen export list only)
+- `sdk/src/core/boundary.ts` (`shape()`'s ring readback), `sdk/src/browser/policy.ts` (none needed),
+  `sdk/test/boot-evals.mjs` (the override-ring assertion)
 - `hosts/host-web/src/tests.rs` (`default_ring_covers_stall_tolerance` (deleted by TA4) and the doc comment of
   `ring_prefill_survives_stall` only), `hosts/host-web/MUTATIONS.md` (rows 7 and 8 only)
 - `hosts/host-web/src/lib.rs` (the doc comment of the ring override field only),
@@ -268,8 +280,9 @@ engine, the published ABI layout, the SDK and the browser host derive the same r
   benchmark and derivation prose, D5's label rename and the regenerated matrix. `MUTATIONS.md`
   row 7's test was deleted by TA4: the row now names the test that catches its mutant today
   (`host-core`'s `default_ring_adds_the_largest_prime_and_a_quantum_to_the_stall_ring`), re-run
-  red; row 8 re-run red on the `stall_quanta == 38` assertion. The browser module's bytes do not
-  change (no Rust changes); the browser matrix is not re-recorded (#1334), only its label renamed.
+  red; row 8 re-run red on the `stall_quanta == 38` assertion. ~~The browser module's bytes do not
+  change (no Rust changes)~~ (superseded by the export below: they change); the browser matrix is
+  not re-recorded (#1334), only its label renamed.
 - **2026-10-25, 1406b host bound (root ruling: option c, one additive export).** The engine
   reports the ring it resolved: `miso_engine_web_v1_resolved_source_ring_frames(handle) -> u32` (zero
   without a live handle). The worklet reads it after boot and posts `sourceRingFrames` in
@@ -281,3 +294,9 @@ engine, the published ABI layout, the SDK and the browser host derive the same r
   `check-session-map-shape.py` holds that family without a name exception. Gate 4 holds 110 chunks at 48 kHz / 64 and refuses the 111th; red
   when the host keeps the old rule (77), adds a private `+ 1`, or the export drops a quantum
   (the ffi test). The browser module's bytes change; the matrix is not re-recorded (#1334).
+- **2026-10-25, review fold.** `WasmBoundary.shape()` reported `defaultSourceRingFrames` even after
+  an override boot (1,280 reported as 7,296; `boot-evals.mjs` eval 1 (a), red before the fix). It
+  now reads the export. `defaultSourceRingFrames` stays: it is a public headless export
+  (`sdk/src/headless/index.ts`) for sizing a producer before boot, and `render-evals.mjs` checks the
+  engine's reported ring against it. `qualification.js`'s `DEFAULT_RING_FRAMES` is renamed
+  `STALL_RING_FRAMES`.

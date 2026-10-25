@@ -4,7 +4,6 @@ import type { CommandReasonName } from "../generated/catalog.ts";
 import {
   StructView,
   constantValue,
-  defaultSourceRingFrames,
   structBytes,
   writeBootOptions,
 } from "./abi.ts";
@@ -220,7 +219,7 @@ function snapshotBootOptions(options: BootOptions): BootSnapshot {
 export interface SessionShape {
   readonly sampleRateHz: number;
   readonly quantumFrames: number;
-  /** The ring the engine derived, from the published rule applied to the reported shape. */
+  /** The ring the engine resolved at boot, read back through its export (#1406b). */
   readonly sourceRingFrames: number;
   readonly backend: "scalar" | "simd128";
   readonly sources: readonly SourceShape[];
@@ -556,9 +555,9 @@ export class WasmBoundary {
     return Object.freeze({
       sampleRateHz,
       quantumFrames,
-      // The ring is an input word with no readback export, so it is *derived* from the rule the
-      // generated document publishes, applied to the shape the boot just reported.
-      sourceRingFrames: defaultSourceRingFrames(sampleRateHz, quantumFrames),
+      // The ring the boot resolved, read back from the engine (#1406b): an override as given, or on
+      // a zero override the engine's default ring.
+      sourceRingFrames: Number(this.#exports.miso_engine_web_v1_resolved_source_ring_frames(handle)),
       backend: backendValue === constantValue("backends", "simd128") ? "simd128" : "scalar",
       sources: Object.freeze(sources),
       tracks,
