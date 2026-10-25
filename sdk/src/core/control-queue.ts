@@ -227,6 +227,8 @@ export class ControlTransactionQueue {
   readonly #limits: ControlLimits | undefined;
   readonly #readRevision: (() => bigint | PromiseLike<bigint>) | undefined;
   #revision: bigint;
+  /** The newest revision `noteCommit` reported in this session; 0 until it is called. */
+  #noted = 0n;
   /** The batch being staged, which the next transaction sends. */
   #next: Batch | undefined;
   /** The batch whose transaction is in flight. */
@@ -264,6 +266,20 @@ export class ControlTransactionQueue {
   /** The last committed revision the queue saw. */
   get revision(): bigint {
     return this.#revision;
+  }
+
+  /**
+   * A commit was made beside the queue, by the engine that owns it (a structural `apply`, a
+   * `replaceSession`, #1389): the queue's next transaction expects `revision`. Revisions only grow
+   * within a session, so an older one changes nothing. A conflict with any other writer is still
+   * refused by the core and reported, never retried.
+   */
+  noteCommit(revision: bigint): void {
+    if (typeof revision !== "bigint" || revision < 0n) {
+      throw new MisoUsageError("revision must be a non-negative bigint: the core's committed revision");
+    }
+    if (revision > this.#noted) this.#noted = revision;
+    if (revision > this.#revision) this.#revision = revision;
   }
 
   /**
@@ -399,6 +415,7 @@ export class ControlTransactionQueue {
     }
     this.#epoch += 1;
     this.#revision = revision;
+    this.#noted = 0n;
     this.#rejectNext(new MisoUsageError("the session was replaced before the staged edits were sent"));
   }
 
@@ -512,7 +529,8 @@ export class ControlTransactionQueue {
           continue;
         }
         const sameSession = epoch === this.#epoch;
-        if (sameSession) this.#revision = reply.revision;
+        // A commit noted beside the queue while this transaction flew may be newer than its reply.
+        if (sameSession) this.#revision = reply.revision > this.#noted ? reply.revision : this.#noted;
         if (reply.applied !== undefined) {
           const report = Object.freeze({
             ok: true as const,

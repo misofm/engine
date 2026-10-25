@@ -141,6 +141,52 @@ producer. `seekSource()` changes the source generation; stale chunks cannot sati
 subscriptions. Use `loadBundledEngineAsset()` and the `asset` option to share one compiled module
 across engines.
 
+### Edit a headless session
+
+`engine.apply(tx)` sends one structural transaction built with `transaction(base)...build()`.
+`engine.replaceSession(document)` sends a full document, and the engine compares it with the
+committed session to make one transaction. Each call resolves with `{ revision, path }`:
+
+- `live`: the running plan ramps to the new values from the next block.
+- `model_only`: the committed session changed, but render has nothing different to do.
+- `rebuild`: a new plan replaces the running plan at the next `render()`. Sources keep playing,
+  and unchanged nodes keep their state.
+- `unchanged` (`replaceSession` only): the document is the committed session. Nothing is
+  committed, and the revision stays the same.
+
+A refusal rejects, and nothing is committed. `engine.revision` is the committed revision.
+`engine.applied(revision)` resolves with the watermark `{ revision, sample, outcome }` when that
+revision is audible. `sample` is the first sample of the block where the revision took effect. The
+engine reads the watermark after each `render()`, so `applied` stays pending until you call
+`render()`. `engine.watermark()` reads the watermark immediately.
+
+```ts
+import { transaction } from "@misofm/engine/headless";
+import type { OfflineEngine, SessionBuilder, TransactionBuilder } from "@misofm/engine/headless";
+
+type TrackSpec = Parameters<TransactionBuilder["upsertTrack"]>[1];
+
+// `upsertTrack` writes the whole track record. Pass the track's full spec from `base` and change
+// only its fader, so that the edit stays a live fader move.
+export async function lowerTrack(
+  engine: OfflineEngine,
+  base: SessionBuilder,
+  trackId: string,
+  spec: TrackSpec,
+) {
+  const edit = transaction(base)
+    .upsertTrack(trackId, { ...spec, fader: { ...spec.fader, leftDb: -6, rightDb: -6 } })
+    .build();
+  const { revision, path } = await engine.apply(edit);
+  const audible = engine.applied(revision);
+  engine.render(); // Submit the source PCM for this block first, as for every block.
+  return { path, firstSample: (await audible).sample };
+}
+```
+
+`replaceSession()` is an edit. `loadSession()` is a reboot: every source starts again from its first
+frame, `revision` goes back to `0`, and each pending `applied` rejects.
+
 ## Play in the browser
 
 `createEngine()` scratch-boots in a Worker, learns the session's shape, verifies the `AudioContext`
@@ -189,6 +235,66 @@ must enforce that restriction at their ingest boundary.
 The npm hosts both execute Wasm. Native and mobile applications must integrate the separate
 Rust/C-ABI host layer and platform audio callbacks; this package supplies no native binaries or
 mobile audio-device adapter.
+
+### Edit a playing session
+
+The browser engine edits a playing session with the same calls as the headless engine.
+`engine.apply(tx)` sends one structural transaction built with `transaction(base)...build()`.
+`engine.replaceSession(document)` is a convenience: it sends a full document, and the engine
+compares it with the committed session to make one transaction. Each call resolves with
+`{ revision, path }` when the control plane commits:
+
+- `live`: the running plan ramps to the new values from the next block.
+- `model_only`: the committed session changed, but render has nothing different to do.
+- `rebuild`: a new plan replaces the running plan at a later block boundary.
+- `unchanged` (`replaceSession` only): the document is the committed session. Nothing is
+  committed, and the revision stays the same.
+
+A refusal rejects, and nothing is committed. The SDK does not send a refused edit again: if
+another commit came first, the core refuses the edit with `revision_conflict`, and you build the
+edit again on the new session. `engine.revision` is the newest committed revision that the engine
+saw.
+
+A committed revision is pending until the audio has it. `engine.applied(revision)` resolves with
+the watermark `{ revision, sample, outcome }` that the worklet posts when the revision is in
+effect. `sample` is the first render sample of that block. `outcome.exact` is set when the
+revisions completed as committed, `outcome.transitionFallback` when a new plan could not start
+warm and the swap used the transition, and `outcome.superseded` when a newer commit replaced a
+plan before render adopted it. `applied` stays pending while the context does not render (for
+example, while it is suspended), and it rejects at `engine.close()`. `engine.watermark()` returns
+the newest watermark immediately.
+
+Across a `rebuild`, every source keeps playing and every unchanged node keeps its state. A node
+that the edit adds or changes starts from rest; `engine.counters(["stripsRestarted"])` counts each
+strip that a swap started at rest. After a committed `replaceSession`, `engine.liveControls()`
+binds to the new document.
+
+On a page without cross-origin isolation, the worklet's message handler prepares a `rebuild` on
+the audio thread. The audio thread is blocked while it prepares, and
+`(await engine.host.status()).blockingRebuilds` counts each blocking rebuild.
+
+```ts
+import { transaction } from "@misofm/engine/browser";
+import type { BrowserEngine, TransactionBuilder } from "@misofm/engine/browser";
+import type { SessionBuilder } from "@misofm/engine";
+
+type TrackSpec = Parameters<TransactionBuilder["upsertTrack"]>[1];
+
+// Pass the track's full spec from `base` and change only its fader, so that the edit stays live.
+export async function lowerTrack(
+  engine: BrowserEngine,
+  base: SessionBuilder,
+  trackId: string,
+  spec: TrackSpec,
+) {
+  const edit = transaction(base)
+    .upsertTrack(trackId, { ...spec, fader: { ...spec.fader, leftDb: -6, rightDb: -6 } })
+    .build();
+  const { revision, path } = await engine.apply(edit);
+  const { sample } = await engine.applied(revision);
+  return { path, firstSample: sample };
+}
+```
 
 ## Change a mix and read the core's answer
 

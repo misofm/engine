@@ -1,0 +1,175 @@
+{
+  "schema_version": 1,
+  "session_id": "web-browser-one-track",
+  "revision": "1",
+  "sample_rate_hz": 48000,
+  "quantum_frames": 128,
+  "render_profile": {
+    "id": "native",
+    "mode": "single_thread"
+  },
+  "output_profile": {
+    "id": "main",
+    "channels": 2,
+    "sample_format": "f32_planar"
+  },
+  "sources": [
+    {
+      "id": "fixture-source",
+      "content": "blake3:6ce0c6f4220b52e88b9915b492af5c92549318c00560b12ecc0543778db5b82d",
+      "channels": 2,
+      "bit_depth": "32f",
+      "frames": "256"
+    }
+  ],
+  "console": {
+    "pre_insert": [],
+    "post_insert": []
+  },
+  "submixes": [],
+  "vcas": [],
+  "control_smoothing": {
+    "kind": "default"
+  },
+  "outputs": [
+    {
+      "id": "main-out"
+    }
+  ],
+  "routes": [
+    {
+      "id": "track-eq-main",
+      "source": {
+        "kind": "track",
+        "track_id": "track-eq",
+        "tap": "post_pan"
+      },
+      "destination": {
+        "kind": "output_input",
+        "output_id": "main-out"
+      },
+      "channel_matrix": {
+        "ll": 1.0,
+        "lr": 0.0,
+        "rl": 0.0,
+        "rr": 1.0
+      },
+      "gain_db": 0.0,
+      "mute": false,
+      "follows_mute": false
+    },
+    {
+      "id": "track-main",
+      "source": {
+        "kind": "track",
+        "track_id": "track",
+        "tap": "post_pan"
+      },
+      "destination": {
+        "kind": "output_input",
+        "output_id": "main-out"
+      },
+      "channel_matrix": {
+        "ll": 1.0,
+        "lr": 0.0,
+        "rl": 0.0,
+        "rr": 1.0
+      },
+      "gain_db": 0.0,
+      "mute": false,
+      "follows_mute": false
+    }
+  ],
+  "automation": [],
+  "tracks": [
+    {
+      "id": "track",
+      "source_id": "fixture-source",
+      "left_source_channel": 0,
+      "right_source_channel": 1,
+      "builtins": {
+        "left": {
+          "polarity_invert": false,
+          "trim_db": 0.0,
+          "hpf_hz": 0.0,
+          "lpf_hz": 0.0,
+          "delay_samples": 0
+        },
+        "right": {
+          "polarity_invert": false,
+          "trim_db": 0.0,
+          "hpf_hz": 0.0,
+          "lpf_hz": 0.0,
+          "delay_samples": 0
+        }
+      },
+      "console": [],
+      "inserts": {
+        "effects": []
+      },
+      "fader": {
+        "left_db": 0.0,
+        "right_db": 0.0,
+        "left_mute": false,
+        "right_mute": false
+      },
+      "pan": {
+        "left": -1.0,
+        "right": 1.0,
+        "smoothing_samples": 0
+      }
+    },
+    {
+      "id": "track-eq",
+      "source_id": "fixture-source",
+      "left_source_channel": 0,
+      "right_source_channel": 1,
+      "builtins": {
+        "left": {
+          "polarity_invert": false,
+          "trim_db": 0.0,
+          "hpf_hz": 0.0,
+          "lpf_hz": 0.0,
+          "delay_samples": 0
+        },
+        "right": {
+          "polarity_invert": false,
+          "trim_db": 0.0,
+          "hpf_hz": 0.0,
+          "lpf_hz": 0.0,
+          "delay_samples": 0
+        }
+      },
+      "console": [],
+      "inserts": {
+        "effects": [
+          {
+            "id": "eq",
+            "identity": {
+              "kind": "native",
+              "effect_id": "miso.parametric-eq"
+            },
+            "quality": "normal",
+            "bypass": false,
+            "link_mode": "dual_mono",
+            "params": [],
+            "sidechain": {
+              "kind": "none"
+            }
+          }
+        ]
+      },
+      "fader": {
+        "left_db": -6.0,
+        "right_db": -6.0,
+        "left_mute": false,
+        "right_mute": false
+      },
+      "pan": {
+        "left": -1.0,
+        "right": 1.0,
+        "smoothing_samples": 0
+      }
+    }
+  ]
+}

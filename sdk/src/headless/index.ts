@@ -188,3 +188,4 @@ export { assertSameSession, effect, session, SessionBuilder } from "../core/sess
 export type { SessionLike, SessionModel, SessionOptions } from "../core/session.ts";
 export { TransactionBuilder, transaction } from "../core/session-transaction.ts";
 export type { SessionEditSpec, SessionTransaction } from "../core/session-transaction.ts";
+export type { EditOutcome, EditPath, WatermarkSnapshot } from "../core/session-edit.ts";

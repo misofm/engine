@@ -896,6 +896,35 @@ export interface MisoSessionSeekReply {
   readonly generation: bigint;
 }
 
+/// @internal An anchored source seek (issue 1297a): `sourceFrame` enters the graph in the block
+/// that starts at absolute render sample `anchorSample`, a quantum multiple.
+export interface MisoSeekAtRequest {
+  sourceId: string;
+  generation: bigint;
+  sourceFrame: bigint;
+  anchorSample: bigint;
+}
+
+/// @internal Where a source landed after its newest seek (issue 1297a), the C ABI seek report's
+/// words: the generation in effect (`0n` until its ring rendered a block), the source-read sample
+/// and source frame of that generation's first block, and the cumulative underrun and held frames.
+export interface MisoSeekReport {
+  readonly generation: bigint;
+  readonly firstSample: bigint;
+  readonly sourceFrame: bigint;
+  readonly cumulativeUnderrunFrames: bigint;
+  readonly cumulativeHeldFrames: bigint;
+}
+
+/// @internal The reply to one seek report read (issue 1297a): the engine's result and, for `0`,
+/// the report; `null` otherwise.
+export interface MisoSeekReportReply {
+  readonly tag: "miso.seek-report.v1";
+  readonly requestId: number;
+  readonly result: number;
+  readonly report: MisoSeekReport | null;
+}
+
 export interface MisoAudioWorkletHost {
   readonly node: AudioWorkletNode;
   readonly backend: MisoWebBackend;
@@ -905,6 +934,13 @@ export interface MisoAudioWorkletHost {
   /// Seeks source content while absolute render time remains continuous. Meter peak windows can
   /// straddle this content discontinuity; the seek does not advance the meter generation.
   seekSource(request: MisoSeekRequest): Promise<MisoAck>;
+  /// @internal Seek one source at an anchor sample (issue 1297a); the worklet's message handler
+  /// applies it, never `process()`. It resolves with the engine's result. It shares the per-source
+  /// bound with `seekSource`: a second unsettled seek of a source rejects locally with result `6`.
+  seekSourceAt(request: MisoSeekAtRequest): Promise<MisoAck>;
+  /// @internal Read one source's seek report (issue 1297a); `$timeline` reads the timeline's. One
+  /// read of a source may be unsettled at a time; a second rejects locally with result `6`.
+  seekReport(sourceId: string): Promise<MisoSeekReportReply>;
   /// @internal Seek the timeline and every source under one new generation, all or nothing
   /// (issue 1644 D1). A plain seek (no `anchorSample`) declares the discontinuity in the same
   /// call; an anchored one keeps continuity. Reposition the PCM producers only after a `0` result,

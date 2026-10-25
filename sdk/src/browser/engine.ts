@@ -34,6 +34,11 @@ import { createBrowserControlListTransport, createBrowserControlQueue, createBro
 import { readControlList, readControlState } from "../core/control-list.ts";
 import type { ControlList, ControlListFilter, ControlState } from "../core/control-list.ts";
 import { ProtocolClient, decodeProtocolEvent } from "../core/protocol-messages.ts";
+import { AppliedLedger, watermarkSnapshot } from "../core/session-edit.ts";
+import type { EditOutcome, WatermarkSnapshot } from "../core/session-edit.ts";
+import type { SessionTransaction } from "../core/session-transaction.ts";
+import { controlCallFailure } from "../core/control-frame.ts";
+import type { ControlTransactionQueue } from "../core/control-queue.ts";
 import type {
   CommittedDocument,
   CounterName,
@@ -331,6 +336,47 @@ export interface BrowserEngine<Context extends AudioContextLike = DefaultAudioCo
    * `MisoUsageError` before anything is sent.
    */
   seek(frame: bigint, options?: BrowserSeekOptions): Promise<{ readonly generation: bigint }>;
+  /**
+   * Apply one structural transaction (`transaction(base)...build()`) at the committed revision
+   * (#1296 D1), and resolve with the revision it committed and the path the core chose: `live` (the
+   * running plan ramps to the new values), `model_only` (nothing renders differently) or `rebuild`
+   * (a successor plan, adopted at a later block, with every unchanged source and node playing on).
+   * It resolves at the commit; `applied(revision)` resolves when the audio has it. A refusal the
+   * core reports rejects with `MisoControlRefusal`, a refused call (a new sample rate:
+   * `reprepareRequired`) with `MisoEngineError`; neither commits. A stale revision (another commit
+   * landed first) is refused `revision_conflict` and is not retried. On a page without cross-origin
+   * isolation a `rebuild` runs in the worklet's message handler and blocks the audio thread for
+   * the rebuild; `host.status()` counts each one in `blockingRebuilds`.
+   */
+  apply(transaction: SessionTransaction): Promise<EditOutcome>;
+  /**
+   * Replace the session with `document` (#1296 D1): the core diffs it against the committed model
+   * into one transaction, so it is an edit, not a reboot: sources keep playing and unchanged nodes
+   * keep their state. Resolves as `apply` does, or with `unchanged` (the revision that stays) when
+   * the document equals the committed model. A `{ toJson() }` session is sent as its canonical
+   * text; bytes or a string are sent as given, up to the boot's 1 MiB document bound. After a
+   * committed replace, `liveControls()` binds to `document`; a refused replace changes nothing.
+   */
+  replaceSession(document: Uint8Array | string | { toJson(): string }): Promise<EditOutcome>;
+  /**
+   * The newest committed session revision this engine has seen: from the replies of its own calls,
+   * its live controls' transactions, `sessionCommitted` events it decoded for `onEvent` and the
+   * watermark. It is never read from the host on access.
+   */
+  readonly revision: bigint;
+  /**
+   * The newest applied-revision watermark the worklet posted (`{ revision: 0n, sample: 0n }`,
+   * exact, before the first): which committed revision is audible, since which render sample.
+   */
+  watermark(): WatermarkSnapshot;
+  /**
+   * Resolve with the first watermark that covers `revision`: the revision is in effect, with every
+   * revision before it, from the snapshot's `sample` (D15-17). It settles from the worklet's
+   * watermark posts, never at the commit, so it stays pending while the context renders nothing.
+   * A revision above the one the core reports committed (probed when it is above `revision`)
+   * rejects with `MisoUsageError`, and so does every pending one at `close()`.
+   */
+  applied(revision: bigint): Promise<WatermarkSnapshot>;
   /**
    * Dispose the worklet host, then close its context. Safe to call more than once.
    *
@@ -765,6 +811,40 @@ export async function createEngine(options: CreateEngineOptions): Promise<Browse
     // Issue #1644 D3: the largest generation a session seek of this object has used; every source
     // and the timeline start at 1.
     let highestSeekGeneration = 1n;
+    // Issue #1296: the session edits. `liveSession` and `liveDocument` are what `liveControls()`
+    // binds to: the booted document until a committed `replaceSession` names another.
+    let liveSession: SessionBuilder | undefined = options.document instanceof SessionBuilder ? options.document : undefined;
+    let liveDocument: Uint8Array = bootedDocument;
+    // The newest committed revision a reply, the queue, an event or the watermark showed this page.
+    let seenRevision = 0n;
+    // This host's one transaction queue once a call resolved it: the engine tells it every revision
+    // a frame sent beside it reported (#1389 root ruling (b)), and reads its revision.
+    let editQueue: ControlTransactionQueue | undefined;
+    const noteRevision = (revision: bigint): void => {
+      if (revision > seenRevision) seenRevision = revision;
+    };
+    const committedRevision = (): bigint => {
+      // Folded into `seenRevision`, so the value read never goes back.
+      noteRevision(editQueue?.revision ?? 0n);
+      return seenRevision;
+    };
+    // The watermark is state the worklet posts only when it changes; the boot record is
+    // `(0, 0, EXACT)` and is not posted, so it is this page's first snapshot.
+    let latestWatermark = watermarkSnapshot(0n, 0n, 1n);
+    const appliedLedger = new AppliedLedger();
+    appliedLedger.settle(latestWatermark);
+    // Subscribed at boot, before any frame that can commit is sent, so no post is missed. A host
+    // from `createHost` that has no `onWatermark` (a stand-in) cannot report completion:
+    // `applied()` then rejects `unsupported` instead of waiting forever.
+    const watermarkHost = typeof host.onWatermark === "function";
+    const stopWatermark = watermarkHost
+      ? host.onWatermark((posted) => {
+        if (closed) return;
+        latestWatermark = watermarkSnapshot(posted.revision, posted.sample, posted.outcome);
+        noteRevision(latestWatermark.revision);
+        appliedLedger.settle(latestWatermark);
+      })
+      : () => undefined;
     // Issue #1210 D5: meter frames and observation bindings carry strip indices, the tracks then
     // the submixes. The order is the core's control list (#1564 D5), read again whenever its
     // structure epoch moves, and kept by epoch (#1562b): the plan that renders keeps naming its
@@ -836,9 +916,10 @@ export async function createEngine(options: CreateEngineOptions): Promise<Browse
       if (semanticLiveControls === undefined) {
         const pending: Promise<EngineLiveControls> = createBrowserLiveControls(host, (edits, managed) =>
           observationSubscriptions?.beforeLiveControlSubmit(edits, managed),
-        options.document instanceof SessionBuilder ? options.document : undefined,
-        bootedDocument);
+        liveSession,
+        liveDocument);
         semanticLiveControls = pending;
+        pending.then((controls) => { editQueue = controls.queue; }, () => undefined);
         // A probe that failed is not the answer for good: the next call asks the host again.
         pending.catch(() => {
           if (semanticLiveControls === pending) semanticLiveControls = undefined;
@@ -1506,10 +1587,22 @@ export async function createEngine(options: CreateEngineOptions): Promise<Browse
       const created = (async () => {
         // The queue's own revision probe (`readCommittedRevision`): the browser has one probe.
         const queue = await createBrowserControlQueue(host);
-        const { send, requestIds } = await createBrowserControlListTransport(host);
+        editQueue = queue;
         return new ProtocolClient({
-          send,
-          requestIds,
+          // Every frame of these calls goes beside the queue, so the queue is told the revision its
+          // reply reports in the continuation of that reply (#1389 root ruling (b)): an `apply`
+          // would otherwise make the queue's next `SET_CONTROL` expect an old revision. A live
+          // control frame sent while an edit's reply is still in flight is refused
+          // `revision_conflict`, and the queue takes the new revision from that refusal's reply
+          // (no lock, no retry: #1389 R3).
+          send: async (frame, document) => {
+            const reply = await host.control(frame, document);
+            queue.noteCommit(reply.revision);
+            if (reply.result !== 0) throw controlCallFailure(reply.result, reply.response);
+            return reply.response;
+          },
+          // The host's one allocator, the queue's: the engine's replay cache refuses a reused ID.
+          requestIds: queue.requestIds,
           committedRevision: async () => {
             const revision = await queue.readCommittedRevision();
             if (revision === undefined) throw new MisoEngineError("the browser queue cannot read the committed revision", { phase: "lifecycle", code: "internal" });
@@ -1561,7 +1654,10 @@ export async function createEngine(options: CreateEngineOptions): Promise<Browse
           // The host calls its listeners in turn from the port's message handler: a throw here
           // would skip the listeners after this one, so it is reported outside the call instead.
           try {
-            listener(decodeProtocolEvent(event.frame));
+            const decoded = decodeProtocolEvent(event.frame);
+            // Another sender's commit is seen here too (#1296 root R2).
+            if (decoded.kind === "sessionCommitted") noteRevision(decoded.revision);
+            listener(decoded);
           } catch (error: unknown) {
             reportListenerError(error);
           }
@@ -1609,8 +1705,61 @@ export async function createEngine(options: CreateEngineOptions): Promise<Browse
         }
         return Object.freeze({ generation });
       },
+      apply: async (transaction: SessionTransaction) => {
+        if (closed) throw new MisoUsageError("the browser engine is closed");
+        return (await protocolClient()).applyTransaction(transaction);
+      },
+      replaceSession: async (replacement: CreateEngineOptions["document"]) => {
+        if (closed) throw new MisoUsageError("the browser engine is closed");
+        const bytes = documentBytes(replacement);
+        const outcome = await (await protocolClient()).replaceSession(bytes);
+        // The committed model is now `replacement`'s: the next `liveControls()` binds to it. A
+        // refusal threw above and rebinds nothing.
+        liveSession = replacement instanceof SessionBuilder ? replacement : undefined;
+        liveDocument = bytes;
+        semanticLiveControls = undefined;
+        return outcome;
+      },
+      get revision(): bigint {
+        return committedRevision();
+      },
+      watermark: () => latestWatermark,
+      applied: (revision: bigint): Promise<WatermarkSnapshot> => {
+        if (typeof revision !== "bigint" || revision < 0n) {
+          return Promise.reject(new MisoUsageError("applied() takes a non-negative bigint revision"));
+        }
+        if (closed) return Promise.reject(new MisoUsageError("the browser engine is closed"));
+        if (!watermarkHost) {
+          return Promise.reject(new MisoEngineError("the browser host posts no applied-revision watermark", {
+            phase: "lifecycle",
+            code: "unsupported",
+            result: constantValue("resultCodes", "unsupported"),
+            diagnostics: [{ code: "sdk.host.member", path: "onWatermark" }],
+          }));
+        }
+        if (revision <= committedRevision()) return appliedLedger.applied(revision);
+        // Above every revision this page saw: another sender may have committed it unseen (no
+        // `onEvent` listener, no render yet), so ask the core before refusing.
+        return (async () => {
+          const queue = editQueue ?? await createBrowserControlQueue(host);
+          editQueue = queue;
+          const probed = await queue.readCommittedRevision();
+          if (probed !== undefined) noteRevision(probed);
+          const committed = committedRevision();
+          if (revision > committed) {
+            throw new MisoUsageError(
+              `revision ${revision} is not committed; the committed revision is ${committed}`,
+            );
+          }
+          if (closed) throw new MisoUsageError("the browser engine is closed");
+          return appliedLedger.applied(revision);
+        })();
+      },
       close: () => {
         closed = true;
+        stopWatermark();
+        appliedLedger.rejectAll(new MisoUsageError("the browser engine is closed"));
+        editQueue?.close();
         measurementFeeds.close();
         observationSubscriptions?.invalidate(true);
         // Edits staged for the host are rejected and no new one is accepted; a transaction already
