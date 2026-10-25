@@ -51,8 +51,22 @@ impl ReferenceDynamicEqBand {
 
     /// One sample of the main input `x` and the sidechain input `side`: `(output, change in dB)`.
     pub fn process(&mut self, x: f64, side: f64) -> (f64, f64) {
+        let (band, detector) = self.taps(x, side);
+        self.finish(x, band, detector)
+    }
+
+    /// The first half of one sample: the bell's band-pass word and the channel's own detector
+    /// word, on `x` or, external, on `side`.
+    pub fn taps(&mut self, x: f64, side: f64) -> (f64, f64) {
         let band = self.main.process(x);
         let detector = self.detector.process(if self.external { side } else { x });
+        (band, detector)
+    }
+
+    /// The second half of one sample, from the bell's `band` word and the detector word
+    /// `detector` the gain law reads (the channel's own for dual mono; a linked pair's blend,
+    /// issue #1969): `(output, change in dB)`.
+    pub fn finish(&mut self, x: f64, band: f64, detector: f64) -> (f64, f64) {
         let change = self.band.step(reference_level_db(detector));
         let gain = 10.0_f64.powf(change / 20.0);
         (x + (self.static_gain * gain - 1.0) * band, change)
