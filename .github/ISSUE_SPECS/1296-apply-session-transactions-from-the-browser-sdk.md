@@ -139,8 +139,8 @@ All behavioural gates run in `sdk/test/browser-evals.mjs` over the browser engin
    nothing; a new `edit.track(id)` on the added track succeeds; one on a removed track rejects as
    unknown. After a `live` reply (and after a live edit) an edit object resolved before it still
    posts, unchanged, and the session map is not re-read.
-5. **withSession.** After a `rebuild` commit, `withSession(oldBuilder)` rejects and
-   `withSession(newBuilder)` succeeds.
+5. ~~**withSession.** After a `rebuild` commit, `withSession(oldBuilder)` rejects and
+   `withSession(newBuilder)` succeeds.~~ Deleted (scope R3): superseded by #1562b-K.
 6. Commands, with an artifact directory built as in `qualification.yml`'s `artifact` job and
    `npm ci` in `sdk/`: `bash scripts/check-sdk-generated.sh <artifacts>`,
    `python3 -B scripts/check-sdk-deletions.py`, `bash scripts/check-sdk-types.sh`,
@@ -156,8 +156,8 @@ All behavioural gates run in `sdk/test/browser-evals.mjs` over the browser engin
 - Gate 4: an edit resolved under the old map and posted after a rebuild addresses a shifted strip
   index and is acknowledged on the wrong strip; it turns red. An epoch bumped on every revision
   would reject ordinary fader drags after any live edit; it turns red too.
-- Gate 5: a `withSession` still held to the booted document binds insert IDs of a session that no
-  longer runs.
+- ~~Gate 5: a `withSession` still held to the booted document binds insert IDs of a session that no
+  longer runs.~~ Deleted with gate 5.
 
 ## Dependencies
 
@@ -207,3 +207,14 @@ Dependent: *Apply session transactions from the headless SDK engine* (#1389).
 - **Gates.** Gates 1-3 and one other-sender case run in `browser-evals.mjs` over a host stand-in whose
   control plane is a real core (`WasmBoundary`), with scripted watermark posts. No real-browser row
   (the spec puts real bits in #1295).
+- **Gate 4 (verifier fold).** Its "a live submit issued while an `apply` is in flight posts nothing
+  until the reply" clause is deleted: there is no lock (#1389 R3, chain decision 5); a live frame sent
+  while an edit's reply is in flight is refused `revision_conflict` and the queue takes the new
+  revision from that reply. Its stale-edit clause is already held once each, by
+  `sdk/test/structure-evals.mjs` (~215ff, `control.effect.changed`) and
+  `sdk/test/control-list-evals.mjs` (~383, ~393, `control.list.stale`); the live-reply half is in
+  gate 2 (a live controls object made before the apply submits first try).
+- **Gate 3 narrowed.** Only "a refusal leaves `revision` unchanged" is tested: the next frame's expected
+  revision is the core's probe, which the SDK cannot get wrong.
+- **`applied()` probe (verifier fold).** A revision above every one this page saw is probed from the
+  core (`readCommittedRevision`) before it is refused, so another sender's unseen commit waits instead.

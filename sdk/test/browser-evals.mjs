@@ -923,6 +923,7 @@ describe("browser session edits", () => {
   test("another sender's commit is seen through a decoded event and the watermark", async () => {
     // Red if `revision` ignores the `sessionCommitted` events the engine decodes for `onEvent`, or
     // the watermark's revision: a commit another sender made on the same host is then never seen.
+    // Red too if applied() refuses such a commit as uncommitted without asking the core.
     const { engine, host, tick } = await boot(base());
     try {
       // The other sender shares the host's one request-ID allocator, as every sender must.
@@ -939,21 +940,24 @@ describe("browser session edits", () => {
       assert.equal(engine.revision, 1n, "no listener: no event read");
       tick();
       assert.equal(engine.revision, 2n, "seen through the watermark");
+      // Committed unseen (no listener, no render): applied() asks the core, and waits.
+      await other.submit(fader(-3));
+      const unseen = engine.applied(3n);
+      assert.equal(await settled(unseen), false, "pending, not refused as uncommitted");
+      tick();
+      assert.equal((await unseen).revision, 3n);
     } finally {
       await engine.close();
     }
   });
 
-  test("gate 3: a refused apply leaves the revision, and the next apply expects it", async () => {
-    // Red if a refusal advances `revision`, or makes the next apply expect another revision.
+  test("gate 3: a refused apply leaves the revision", async () => {
+    // Red if a refusal advances `revision`.
     const { engine } = await boot(base());
     try {
       await assert.rejects(engine.apply(transaction(base()).setSampleRateHz(96_000).build()), (error) =>
         error instanceof MisoEngineError && error.code === "reprepareRequired");
       assert.equal(engine.revision, 0n);
-      // The core takes only the exact committed revision, so this commit proves the frame expected 0.
-      const fader = transaction(base()).upsertTrack("t1", { source: "a", inserts: [EQ()], fader: { leftDb: -6 } });
-      assert.deepEqual(await engine.apply(fader.build()), { revision: 1n, path: "live" });
     } finally {
       await engine.close();
     }

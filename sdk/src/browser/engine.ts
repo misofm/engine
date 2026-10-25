@@ -373,8 +373,8 @@ export interface BrowserEngine<Context extends AudioContextLike = DefaultAudioCo
    * Resolve with the first watermark that covers `revision`: the revision is in effect, with every
    * revision before it, from the snapshot's `sample` (D15-17). It settles from the worklet's
    * watermark posts, never at the commit, so it stays pending while the context renders nothing.
-   * A revision above `revision` rejects with `MisoUsageError`, and so does every pending one at
-   * `close()`.
+   * A revision above the one the core reports committed (probed when it is above `revision`)
+   * rejects with `MisoUsageError`, and so does every pending one at `close()`.
    */
   applied(revision: bigint): Promise<WatermarkSnapshot>;
   /**
@@ -824,8 +824,9 @@ export async function createEngine(options: CreateEngineOptions): Promise<Browse
       if (revision > seenRevision) seenRevision = revision;
     };
     const committedRevision = (): bigint => {
-      const queued = editQueue?.revision ?? 0n;
-      return queued > seenRevision ? queued : seenRevision;
+      // Folded into `seenRevision`, so the value read never goes back.
+      noteRevision(editQueue?.revision ?? 0n);
+      return seenRevision;
     };
     // The watermark is state the worklet posts only when it changes; the boot record is
     // `(0, 0, EXACT)` and is not posted, so it is this page's first snapshot.
@@ -1589,9 +1590,11 @@ export async function createEngine(options: CreateEngineOptions): Promise<Browse
         editQueue = queue;
         return new ProtocolClient({
           // Every frame of these calls goes beside the queue, so the queue is told the revision its
-          // reply reports in the continuation of that reply, before any later frame is sent
-          // (#1389 root ruling (b)): an `apply` would otherwise make the queue's next `SET_CONTROL`
-          // expect an old revision and be refused.
+          // reply reports in the continuation of that reply (#1389 root ruling (b)): an `apply`
+          // would otherwise make the queue's next `SET_CONTROL` expect an old revision. A live
+          // control frame sent while an edit's reply is still in flight is refused
+          // `revision_conflict`, and the queue takes the new revision from that refusal's reply
+          // (no lock, no retry: #1389 R3).
           send: async (frame, document) => {
             const reply = await host.control(frame, document);
             queue.noteCommit(reply.revision);
@@ -1734,13 +1737,23 @@ export async function createEngine(options: CreateEngineOptions): Promise<Browse
             diagnostics: [{ code: "sdk.host.member", path: "onWatermark" }],
           }));
         }
-        const committed = committedRevision();
-        if (revision > committed) {
-          return Promise.reject(new MisoUsageError(
-            `revision ${revision} is not committed; the newest committed revision this engine has seen is ${committed}`,
-          ));
-        }
-        return appliedLedger.applied(revision);
+        if (revision <= committedRevision()) return appliedLedger.applied(revision);
+        // Above every revision this page saw: another sender may have committed it unseen (no
+        // `onEvent` listener, no render yet), so ask the core before refusing.
+        return (async () => {
+          const queue = editQueue ?? await createBrowserControlQueue(host);
+          editQueue = queue;
+          const probed = await queue.readCommittedRevision();
+          if (probed !== undefined) noteRevision(probed);
+          const committed = committedRevision();
+          if (revision > committed) {
+            throw new MisoUsageError(
+              `revision ${revision} is not committed; the committed revision is ${committed}`,
+            );
+          }
+          if (closed) throw new MisoUsageError("the browser engine is closed");
+          return appliedLedger.applied(revision);
+        })();
       },
       close: () => {
         closed = true;
