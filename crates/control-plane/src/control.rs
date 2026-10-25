@@ -76,7 +76,18 @@ pub struct ProviderEpoch {
     /// `Observe` edit armed publishes. Empty for a host whose preparer keeps them itself (the
     /// browser's). Their slots are `Arc`s shared with the plan's lanes, as the meters' rings are.
     /// `OBSERVATION_READ` reads them through [`Self::observation_index`] (#1586 D6).
+    /// The meter delivery's gain reduction reads them too (#1587b).
     pub(crate) observations: Box<[host_core::EffectObservationHandle]>,
+    /// Each observation handle's strip (#1587b), in `observations` order: its frame strip by
+    /// [`strip_meter_index`], the rule a meter entry's strip resolves by, `u32::MAX` for none;
+    /// built with the plan.
+    pub(crate) observation_strips: Box<[u32]>,
+    /// The observation readers the swap block that adopted this epoch's plan carried (#1587b),
+    /// shared with the plan's attachment; `None` for a host whose preparer keeps its readers.
+    pub(crate) carried_taps: Option<std::sync::Arc<CarriedTaps>>,
+    /// The epoch this one displaced, while their observation readers wait to be paired: this
+    /// epoch was promoted before render wrote `carried_taps` ([`CarriedTaps`]'s three states).
+    pub(crate) observations_pending: Option<u64>,
     /// The plan's effect instances by stable key, with each one's position in
     /// [`Self::observations`] (#1586 D3, R1): built with the epoch, on the control thread, so a
     /// read resolves a stable address without allocating. Empty for a host whose preparer keeps
@@ -712,6 +723,9 @@ impl ProviderEpoch {
             meter_frames: None,
             meter_frame_producer: None,
             observations: Box::default(),
+            observation_strips: Box::default(),
+            carried_taps: None,
+            observations_pending: None,
             observation_index: host_core::observation::ObservationIndex::default(),
             capi,
             revision_gate,
@@ -735,14 +749,19 @@ impl ProviderEpoch {
         self
     }
 
-    /// This epoch with its plan's observation readers (#1584 D7) and their index (#1586 D6).
+    /// This epoch with its plan's observation readers (#1584 D7), their index (#1586 D6), their
+    /// strips and the record of the ones its swap block carries (#1587b).
     pub(crate) fn with_observations(
         mut self,
         observations: Box<[host_core::EffectObservationHandle]>,
         observation_index: host_core::observation::ObservationIndex,
+        observation_strips: Box<[u32]>,
+        carried_taps: Option<std::sync::Arc<CarriedTaps>>,
     ) -> Self {
         self.observations = observations;
         self.observation_index = observation_index;
+        self.observation_strips = observation_strips;
+        self.carried_taps = carried_taps;
         self
     }
 
@@ -768,6 +787,9 @@ impl ProviderEpoch {
             meter_frames: None,
             meter_frame_producer: None,
             observations: Box::default(),
+            observation_strips: Box::default(),
+            carried_taps: None,
+            observations_pending: None,
             observation_index: host_core::observation::ObservationIndex::default(),
             capi,
             revision_gate,
@@ -1389,8 +1411,8 @@ impl MeterBatches {
 
     /// Resolve every entry of `table` against `meters`, the meter readers of the epoch whose
     /// frames are folded (`PlanStateInventory::meter_targets`: meter `i` is the frame's strip `i`;
-    /// `None` when no epoch held is that one, and then no entry has a strip): a strip's peak entry
-    /// reads the first post-matrix sample-peak meter of its strip, so a caller selection (a
+    /// `None` when no epoch held is that one, and then no entry has a strip): a strip's peak or gain
+    /// reduction entry (#1587b) reads the first post-matrix sample-peak meter of its strip, so a caller selection (a
     /// subset, another order, several taps on one strip) never reads another meter's peak. Then
     /// size the folds to the table. The folds keep their
     /// values: they are indexed by table entry, so a batch an adoption interrupts goes on folding
@@ -1402,20 +1424,14 @@ impl MeterBatches {
         meters: Option<&host_core::PlanStateInventory>,
     ) {
         self.resolution.clear();
-        self.resolution.extend(table.iter().map(|entry| {
-            match (&entry.target, entry.metric) {
-                (protocol::MeterTarget::Strip(id), protocol::MeterMetric::Peak) => meters?
-                    .meter_targets()
-                    .find(|&(_, strip, tap, metrics)| {
-                        strip == &**id
-                            && tap == host_core::MeterTap::PostMatrix
-                            && metrics.contains(host_core::MeterMetricSet::SAMPLE_PEAK)
-                    })
-                    .map(|(index, ..)| index)
-                    .and_then(|index| u32::try_from(index).ok()),
-                _ => None,
-            }
-        }));
+        self.resolution.extend(
+            table
+                .iter()
+                .map(|entry| match (&entry.target, entry.metric) {
+                    (protocol::MeterTarget::Strip(id), _) => strip_meter_index(meters?, id),
+                    _ => None,
+                }),
+        );
         self.folds.resize(
             self.resolution.len(),
             host_core::meters::StripPeakFold::START,
@@ -1427,11 +1443,13 @@ impl MeterBatches {
     /// another epoch than the last one resolved resolves the entries against `epochs`' strips of
     /// its epoch first (#1588 D3).
     ///
-    /// Records follow the table (D3), two per entry: the output's peak entry gives the batch's
-    /// left and right output peak, `VALID` when the output peak covered the batch's span; a strip's
-    /// peak entry gives its strip's left and right peak, the maxima over the batch's frames,
-    /// `VALID` when every frame had the strip; `CLIPPED` marks a valid value above `1.0`, and a
-    /// value that is not valid is `0.0` with flags `0`. An accepted table needs at most
+    /// Records follow the table (D3): the output's peak entry gives the batch's left and right
+    /// output peak, `VALID` when the output peak covered the batch's span; a strip's peak entry
+    /// gives its strip's left and right peak, the maxima over the batch's frames, `VALID` when
+    /// every frame had the strip; `CLIPPED` marks a valid peak above `1.0`. A strip's gain
+    /// reduction entry gives one `Aggregate` record (#1587b), the last frame's reading that is
+    /// present, `VALID` when any frame's is: only an armed tap's window from at or after its arm
+    /// sample is a reading. A value that is not valid is `0.0` with flags `0`. An accepted table needs at most
     /// [`host_core::MAXIMUM_METER_BATCH_RECORDS`] records, so the records stay on the stack.
     fn stage(
         &mut self,
@@ -1474,8 +1492,21 @@ impl MeterBatches {
                 (protocol::MeterTarget::Strip(_), protocol::MeterMetric::Peak) => {
                     (fold.present, fold.peak)
                 }
-                // Refused at the configure until #1587b.
-                (_, protocol::MeterMetric::GainReduction) => continue,
+                // #1587b D3: one aggregate record, never clipped. The wire refuses an output
+                // gain-reduction entry.
+                (_, protocol::MeterMetric::GainReduction) => {
+                    if let Some(slot) = records.get_mut(count) {
+                        let valid = fold.gain_reduction_present;
+                        *slot = protocol::MeterRecord {
+                            handle,
+                            component: protocol::MeterComponent::Aggregate,
+                            flags: if valid { VALID } else { 0 },
+                            value: if valid { fold.gain_reduction_db } else { 0.0 },
+                        };
+                        count += 1;
+                    }
+                    continue;
+                }
             };
             for (component, value) in [
                 (protocol::MeterComponent::Left, peak[0]),
@@ -1519,6 +1550,21 @@ impl MeterBatches {
     }
 }
 
+/// The frame strip of strip `id` in a plan whose inventory is `meters`: the index of its first
+/// post-matrix sample-peak meter (`PlanStateInventory::meter_targets`), or `None`. The one rule
+/// for a meter entry's strip (#1588 D3) and an observation tap's (#1587b), so both read the same
+/// frame strip.
+pub(crate) fn strip_meter_index(meters: &host_core::PlanStateInventory, id: &str) -> Option<u32> {
+    meters
+        .meter_targets()
+        .find(|&(_, strip, tap, metrics)| {
+            strip == id
+                && tap == host_core::MeterTap::PostMatrix
+                && metrics.contains(host_core::MeterMetricSet::SAMPLE_PEAK)
+        })
+        .and_then(|(index, ..)| u32::try_from(index).ok())
+}
+
 /// The provider epochs a session holds: the running one, the parked ones and the pending ones.
 struct ProviderEpochs<'a> {
     current: &'a ProviderEpoch,
@@ -1542,11 +1588,177 @@ impl<'a> ProviderEpochs<'a> {
     }
 }
 
-/// The C ABI's delivery reads no gain-reduction tap until #1587b.
-struct NoGainReductionTaps;
+/// The observation reader pairs the swap block that adopted a plan carried (#1674's observation
+/// half, #1587b): the swap record's [`engine::realtime::ObserverKind::Observation`] entries,
+/// which render copies here in that block ([`CarriedTapsAttachment`]) and the control thread
+/// reads when it promotes the plan's epoch. The record is what actually carried: a tap enters it
+/// only when its effect's restore succeeded at the swap, which preparation cannot know (#1674 R1).
+///
+/// Sized at preparation, one pair per observation handle of the plan (a successor handle is
+/// paired at most once), so render writes into storage it never grows. A plan is adopted at most
+/// once, so the pairs are written once; `count` is stored last, with `Release`.
+///
+/// **Three states (#1587b attempt 4).** `count` starts at [`Self::UNWRITTEN`]: render has not run
+/// the plan's swap block. Render claims a candidate a little before it carries into it
+/// (`plan_exchange`'s claim, then `carry_from`), and the control thread promotes a claimed
+/// candidate (`withdraw_pending_candidate`) without waiting, so a promotion can find the record
+/// unwritten. It then marks the epoch's pairing pending (`ProviderEpoch::observations_pending`),
+/// and later steps settle it:
+/// - **Early read.** Each service step reads `count` with `Acquire`; once it is written, that
+///   load synchronizes with render's `Release` store, after the pairs, so the pairs read whole.
+/// - **Reclaim fallback.** Render retires the displaced plan into the retirement queue only after
+///   the carry returned (or after a swap whose hook never ran: a plan with no attachment), and the
+///   control thread's reclaim takes it from the queue, which orders the hook before the reclaim.
+///   A record still unwritten there means nothing carried, and the mark clears.
+///
+/// While the mark stands the epoch's readers are the successor's own, which no carried tap
+/// publishes to: the strip shows no reading, never a wrong one.
+pub(crate) struct CarriedTaps {
+    pairs: Box<[[core::sync::atomic::AtomicU32; 2]]>,
+    count: core::sync::atomic::AtomicU32,
+}
 
-impl host_core::GainReductionTaps for NoGainReductionTaps {
-    fn for_each_tap(&mut self, _visit: &mut impl FnMut(host_core::TapView<'_>)) {}
+impl CarriedTaps {
+    /// Room for `handles` pairs. Allocates; control thread.
+    pub(crate) fn new(handles: usize) -> Result<Self, std::collections::TryReserveError> {
+        let mut pairs = Vec::new();
+        pairs.try_reserve_exact(handles)?;
+        pairs.resize_with(handles, || {
+            [
+                core::sync::atomic::AtomicU32::new(0),
+                core::sync::atomic::AtomicU32::new(0),
+            ]
+        });
+        Ok(Self {
+            pairs: pairs.into_boxed_slice(),
+            count: core::sync::atomic::AtomicU32::new(Self::UNWRITTEN),
+        })
+    }
+
+    /// The heap a record of `handles` pairs holds with its attachment: the attachment's box, the
+    /// shared allocation (its two counts and the record) and the pairs.
+    pub(crate) fn retained_bytes(handles: usize) -> Option<usize> {
+        handles
+            .checked_mul(size_of::<[core::sync::atomic::AtomicU32; 2]>())?
+            .checked_add(size_of::<CarriedTapsAttachment>())?
+            .checked_add(2 * size_of::<usize>() + size_of::<Self>())
+    }
+
+    /// `count` before render ran the plan's swap block.
+    const UNWRITTEN: u32 = u32::MAX;
+
+    /// The carried pairs, as carry records, or `None` while render has not written the record.
+    /// Allocates nothing.
+    fn carries(&self) -> Option<impl Iterator<Item = engine::realtime::ObserverCarry> + '_> {
+        let count = self.count.load(Ordering::Acquire);
+        if count == Self::UNWRITTEN {
+            return None;
+        }
+        Some(
+            self.pairs
+                .iter()
+                .take(count as usize)
+                .map(|[successor, predecessor]| engine::realtime::ObserverCarry {
+                    kind: engine::realtime::ObserverKind::Observation,
+                    successor: successor.load(Ordering::Relaxed) as usize,
+                    predecessor: predecessor.load(Ordering::Relaxed) as usize,
+                }),
+        )
+    }
+}
+
+/// Pair `successor`'s observation readers with `predecessor`'s from `successor`'s carry record
+/// (#1587b), if render has written it; returns whether the pairing is settled. An unwritten
+/// record leaves it pending: [`SessionState::settle_observation_pairings`] settles it once the
+/// record is written, or as nothing carried once the predecessor's epoch is gone.
+fn pair_observations(successor: &mut ProviderEpoch, predecessor: &mut ProviderEpoch) -> bool {
+    let Some(record) = successor.carried_taps.as_deref() else {
+        return true;
+    };
+    let Some(carries) = record.carries() else {
+        return false;
+    };
+    // One record at a time: `pair_carried_observations` takes a slice, and the record's pairs
+    // are atomics, so collecting them would allocate; a one-element slice per pair does not.
+    for carry in carries {
+        host_core::pair_carried_observations(
+            &mut successor.observations,
+            &mut predecessor.observations,
+            core::slice::from_ref(&carry),
+        );
+    }
+    true
+}
+
+/// The C ABI plan's host attachment (#1587b): the plan's [`CarriedTaps`], shared with its
+/// provider epoch.
+pub(crate) struct CarriedTapsAttachment(pub(crate) std::sync::Arc<CarriedTaps>);
+
+impl engine::realtime::HostAttachment for CarriedTapsAttachment {
+    fn as_any_mut(&mut self) -> &mut dyn core::any::Any {
+        self
+    }
+
+    // REALTIME_POLICY_BEGIN: #1587b, the swap block's carried observation readers.
+    /// Copy the swap record's observation entries into the plan's [`CarriedTaps`]. Render thread,
+    /// in the swap block: atomic stores into storage sized at preparation; an entry past it, or
+    /// whose index does not fit a `u32`, is skipped.
+    fn adopt_predecessor(
+        &mut self,
+        _predecessor: &mut dyn engine::realtime::HostAttachment,
+        carries: &[engine::realtime::ObserverCarry],
+    ) {
+        let record = &*self.0;
+        let mut written = 0_u32;
+        let mut slots = record.pairs.iter();
+        for carry in carries {
+            if carry.kind != engine::realtime::ObserverKind::Observation {
+                continue;
+            }
+            let (Ok(successor), Ok(predecessor)) = (
+                u32::try_from(carry.successor),
+                u32::try_from(carry.predecessor),
+            ) else {
+                continue;
+            };
+            let Some([into, from]) = slots.next() else {
+                break;
+            };
+            into.store(successor, Ordering::Relaxed);
+            from.store(predecessor, Ordering::Relaxed);
+            written += 1;
+        }
+        record.count.store(written, Ordering::Release);
+    }
+    // REALTIME_POLICY_END
+}
+
+/// The observation taps of a provider epoch, as the meter delivery's gain reduction reads them
+/// (#1587b): every declared tap of every observed instance, on its instance's strip, with the arm
+/// state render publishes in the tap's slot (#1585 D2). A torn read is an unarmed tap for this
+/// poll.
+struct CapiGainReductionTaps<'a> {
+    observations: &'a [host_core::EffectObservationHandle],
+    strips: &'a [u32],
+}
+
+impl host_core::GainReductionTaps for CapiGainReductionTaps<'_> {
+    fn for_each_tap(&mut self, visit: &mut impl FnMut(host_core::TapView<'_>)) {
+        for (handle, &strip) in self.observations.iter().zip(self.strips) {
+            for (descriptor, reader) in handle.descriptor.observations.iter().zip(&handle.readers) {
+                let (armed, arm_sample) = reader
+                    .read_state()
+                    .map_or((false, 0), |state| (state.armed, state.arm_sample));
+                visit(host_core::TapView {
+                    strip,
+                    descriptor,
+                    reader,
+                    armed,
+                    arm_sample,
+                });
+            }
+        }
+    }
 }
 
 /// Every live send move (a following route's record with a ramp, written by a live commit or by a
@@ -2559,8 +2771,11 @@ where
                 }
                 let next_sample = shared.render_sample.load(Ordering::Acquire);
                 for _ in 0..=host_core::METER_QUEUE_DEPTH {
-                    let Some(frame) =
-                        delivery.poll(&mut providers.meters, &mut NoGainReductionTaps, next_sample)
+                    let mut taps = CapiGainReductionTaps {
+                        observations: &providers.observations,
+                        strips: &providers.observation_strips,
+                    };
+                    let Some(frame) = delivery.poll(&mut providers.meters, &mut taps, next_sample)
                     else {
                         break;
                     };
@@ -2988,6 +3203,19 @@ where
         self.output_meter.take()
     }
 
+    /// Promote the oldest pending candidate now, before render has run its swap block (#1587b):
+    /// what `withdraw_pending_candidate` does for a candidate render has claimed but not yet
+    /// carried into, so a test can render the carry after the promotion.
+    #[cfg(feature = "test-support")]
+    pub fn test_promote_pending_before_carry(&mut self) -> Result<(), CommandError> {
+        let epoch = self
+            .pending_providers
+            .first()
+            .ok_or(CommandError::Internal)?
+            .epoch;
+        self.promote_pending_provider(epoch)
+    }
+
     /// The render half of provider epoch `epoch`'s meter frame ring (#1588 D2), handed out once
     /// for the plan's render half: `None` for an epoch held no more or not yet, and on every later
     /// call. Only a render-half meter fold's plans have one. The running or a pending epoch.
@@ -3246,6 +3474,7 @@ where
                 self.promote_pending_provider(replacement)?;
             }
             self.adopt_meters(retired_epoch.0, adoption_sample);
+            self.settle_observation_pairings();
             // #1588 D4: render filled the reclaimed plan's ring before it retired the plan, so
             // its frames are staged now, while their epoch's strips are still held.
             self.stage_reclaimed_frames();
@@ -3270,6 +3499,7 @@ where
         if active_epoch > self.providers.epoch {
             self.promote_pending_provider(active_epoch)?;
         }
+        self.settle_observation_pairings();
         // #1403 D4: render adopted the warm candidate, or a candidate published after it.
         if self
             .primed
@@ -3295,6 +3525,44 @@ where
                 || pending.iter().any(|provider| provider.epoch == *epoch)
         });
         Ok(())
+    }
+
+    /// Settle the pending observation pairings ([`CarriedTaps`]'s three states), oldest epoch
+    /// first: one whose record render has written pairs as at promotion, and one whose displaced
+    /// epoch is gone (its plan was reclaimed, so the hook has run or never will) settles as
+    /// nothing carried. An epoch whose displaced epoch is itself still pending waits, so the
+    /// readers always pair in adoption order. Run at each reclaim before the parked epoch drops
+    /// (a record written by then pairs), at the end of each service step (after the drop, an
+    /// unwritten one clears) and before each promotion. Bounded by the parked list; allocates
+    /// nothing.
+    fn settle_observation_pairings(&mut self) {
+        for index in 0..=self.retired_providers.len() {
+            let (successor, older) = if index == self.retired_providers.len() {
+                (&mut self.providers, &mut self.retired_providers[..])
+            } else {
+                let (older, rest) = self.retired_providers.split_at_mut(index);
+                let Some(successor) = rest.first_mut() else {
+                    continue;
+                };
+                (successor, older)
+            };
+            let Some(displaced) = successor.observations_pending else {
+                continue;
+            };
+            let settled = match older
+                .iter_mut()
+                .find(|provider| provider.epoch == displaced)
+            {
+                // Its own readers are not paired yet: pairing now would take the wrong ones.
+                Some(predecessor) if predecessor.observations_pending.is_some() => false,
+                Some(predecessor) => pair_observations(successor, predecessor),
+                // The displaced epoch is gone: nothing is left to pair with.
+                None => true,
+            };
+            if settled {
+                successor.observations_pending = None;
+            }
+        }
     }
 
     /// Hand the meter delivery from the plan of `displaced`, whose reclaim this is, to its
@@ -3440,6 +3708,20 @@ where
                 &mut self.providers.meters,
                 next.inventory.meter_pairing(),
             );
+            // #1674's observation half (#1587b): likewise the observation readers of the taps the
+            // swap block carried, from its record (what actually carried), so a carried tap's
+            // reader, and its arm state, follow the tap that renders on. A record render has not
+            // written yet leaves the pairing pending, which a later step settles. The pending
+            // pairings settle first, and `next` waits while the running epoch's own still stands:
+            // the narrow race is render carrying into B's plan and then claiming C's between an
+            // edit's service step and its `withdraw_pending_candidate`, which promotes B and C in
+            // one call. So the readers pair in adoption order without relying on claim order.
+            self.settle_observation_pairings();
+            if self.providers.observations_pending.is_some()
+                || !pair_observations(&mut next, &mut self.providers)
+            {
+                next.observations_pending = Some(self.providers.epoch);
+            }
             let mut previous = core::mem::replace(&mut self.providers, next);
             // Dropped with the parked epoch, when its plan is reclaimed.
             previous.spectrum = displaced;
@@ -4895,6 +5177,8 @@ where
             meter_tables,
             meter_frames,
             observations,
+            observation_strips,
+            carried_taps,
             observation_index,
             plan: candidate_plan,
             resources,
@@ -4927,6 +5211,8 @@ where
         );
         candidate_provider.discontinuity = discontinuity;
         candidate_provider.observations = observations;
+        candidate_provider.observation_strips = observation_strips;
+        candidate_provider.carried_taps = carried_taps;
         candidate_provider.observation_index = observation_index;
         candidate_provider.meter_tables = meter_tables;
         candidate_provider = candidate_provider.with_meter_frames(meter_frames);

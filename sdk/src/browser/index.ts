@@ -112,7 +112,24 @@ export * from "./policy.ts";
 // it is barrel surface rather than a deep import.
 export * from "./host-mirror.ts";
 export * from "./pcm-ring.ts";
-export * from "./pcm-feed.ts";
+// By name: `linkFeedEngine` and `FeedRetirement` are `createEngine`'s seam (#1297b), not public.
+export { PcmFeedError, PcmRunwayError, attachEngineFeed, prepareEngineFeed, waitForPcmRunway } from "./pcm-feed.ts";
+export type {
+  EngineFeed,
+  FeedContext,
+  FeedEngine,
+  FeedNode,
+  FeedNodeOptions,
+  FeedOptions,
+  FeedPort,
+  FeedSource,
+  FeedStart,
+  FeedStartSeek,
+  PcmFeedOperation,
+  PcmRunwayReason,
+  PcmRunwaySource,
+  WaitForPcmRunwayOptions,
+} from "./pcm-feed.ts";
 export { BrowserResponsePreview, createResponsePreview } from "./response.ts";
 export type { BrowserResponsePreviewOptions } from "./response.ts";
 export * from "../core/observation.ts";
