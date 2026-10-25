@@ -438,7 +438,14 @@ impl Control<'_> {
             self.done.store(true, Ordering::Release);
             return;
         }
-        if !self.back_to_back && blocks < self.admission_block + 2 {
+        // Paced, each candidate is adopted before the next edit: two blocks after the admission,
+        // and, since a removal adopts at its scheduled sample after its ramp (#1325), once the
+        // watermark reports it.
+        if !self.back_to_back
+            && (blocks < self.admission_block + 2
+                || watermark_c(self.plan_address)
+                    .is_none_or(|watermark| watermark.revision < self.revision))
+        {
             return;
         }
         let mut output = BytesOut {
