@@ -1157,8 +1157,11 @@ pub struct WebStatus {
     pub sample_rate_hz: u32,
     /// Prepared quantum.
     pub quantum_frames: u32,
-    /// Required zero.
-    pub reserved0: u32,
+    /// The structural commands this instance's control half ran in place of its render half
+    /// (#1290a D6, #1294b), saturating: [`AudioWorkletEngineHost::blocking_rebuilds`], written
+    /// after every control call that may publish a replacement plan. A page without cross-origin
+    /// isolation runs each rebuild in the worklet's message handler, so each one counts here.
+    pub blocking_rebuilds: u32,
     /// Exact next render time.
     pub next_absolute_sample: u64,
     /// Number of successful rendered quanta.
@@ -2243,7 +2246,7 @@ impl AudioWorkletEngineHost {
                 backend,
                 sample_rate_hz: shape.sample_rate_hz,
                 quantum_frames: shape.quantum_frames,
-                reserved0: 0,
+                blocking_rebuilds: 0,
                 next_absolute_sample: 0,
                 rendered_quanta: 0,
                 live_values_superseded: 0,
@@ -2433,7 +2436,9 @@ impl AudioWorkletEngineHost {
             return self.fail(RESULT_INTERNAL, b"web.internal.ready\t$\n");
         };
         let request = &buffers.control_request[..len as usize];
-        match ready.run_command(request, CONTROL_FRAME_BYTES, analysis) {
+        let result = ready.run_command(request, CONTROL_FRAME_BYTES, analysis);
+        self.status.blocking_rebuilds = ready.blocking_rebuilds;
+        match result {
             Ok(length) => {
                 self.control_response = ControlResponse::Frame(length);
                 self.record(RESULT_OK)
@@ -2465,7 +2470,9 @@ impl AudioWorkletEngineHost {
         let Some(ready) = self.ready.as_mut() else {
             return self.fail(RESULT_INTERNAL, b"web.internal.ready\t$\n");
         };
-        match ready.declare_discontinuity(analysis) {
+        let result = ready.declare_discontinuity(analysis);
+        self.status.blocking_rebuilds = ready.blocking_rebuilds;
+        match result {
             Ok(()) => self.record(RESULT_OK),
             Err(error) => self.refuse_control(&error),
         }
@@ -2600,10 +2607,9 @@ impl AudioWorkletEngineHost {
     /// a blocking rebuild that decision 15 accepts only when it is counted and reported. A
     /// refused command, a live command and a command that fails after preparation count nothing.
     ///
-    /// Nothing in production reads it yet: no export and no status word carry it until the
-    /// rewritten browser slices #1293-#1297 wire the host status's `blockingRebuilds` field
-    /// (#1332 D1) to it, and #1295 is the first to read that field (its real-browser gate expects
-    /// exactly one on the non-isolated leg and none on the isolated one).
+    /// The status word [`WebStatus::blocking_rebuilds`] carries it to the page (#1294b), whose
+    /// `miso.status.v1` reply names it `blockingRebuilds`; #1295's real-browser gate expects
+    /// exactly one on the non-isolated leg and none on the isolated one.
     #[must_use]
     pub fn blocking_rebuilds(&self) -> u32 {
         self.ready
@@ -3627,7 +3633,9 @@ impl AudioWorkletEngineHost {
         let Some(ready) = self.ready.as_mut() else {
             return self.record(RESULT_REFUSED_LIFECYCLE);
         };
-        match ready.session_seek(analysis, generation, timeline_frame, anchor_sample) {
+        let result = ready.session_seek(analysis, generation, timeline_frame, anchor_sample);
+        self.status.blocking_rebuilds = ready.blocking_rebuilds;
+        match result {
             Ok(()) => self.record(RESULT_OK),
             Err(SessionSeekFailure::Seek(failure)) => {
                 let code = self.refuse_source(failure);
