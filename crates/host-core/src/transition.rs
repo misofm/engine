@@ -380,6 +380,93 @@ pub fn plan_strip_transition(
     Ok(transition)
 }
 
+/// The transition fallback's duck set (#1397 D2 step 4): every strip of both `committed` (the
+/// predecessor's model, whose plan's inventory is `predecessor`) and `next` whose content timing
+/// moves in `ordinary`, the inventory of `next` compiled as an ordinary successor (#1285 floors, no
+/// lead), sorted by ID. Called on that compile, before any carry join reads it (round-9 M1).
+///
+/// A strip is in the set when a node of it arrives later in `ordinary` than in `predecessor`
+/// (each plan's [`crate::PlanStateInventory::input_floors`], the arrivals it renders), or when an
+/// outgoing compensation line of it (a route's, or its path into the output) changes length: a
+/// line that changes length restarts with a gap. When the output's arrival grows, every strip of
+/// both plans is in the set. An added strip never is: it is #1288's to arm.
+///
+/// **Limit (#1397a):** a sidechain line is not read, and #1324 D1's sidechain closure is not run
+/// over the set: a carried effect keyed from a tap before the fader of a strip in the set is not
+/// added, and a sidechain line that changes length does not add its strip. Both are #1397b's.
+///
+/// Control thread only; it allocates the set.
+#[must_use]
+pub fn grown_strips(
+    predecessor: &crate::PlanStateInventory,
+    committed: &SessionModel,
+    next: &SessionModel,
+    ordinary: &crate::PlanStateInventory,
+) -> Vec<String> {
+    use graph::{GraphEdgeId, GraphNodeId};
+    use std::collections::{BTreeMap, BTreeSet};
+    let routes: BTreeMap<&str, &Route> = committed
+        .routes
+        .iter()
+        .chain(&next.routes)
+        .map(|route| (route.id.as_str(), route))
+        .collect();
+    let owner = |node: &GraphNodeId| -> Option<String> {
+        match node {
+            GraphNodeId::Submix { submix_id } => Some(submix_id.as_str().to_owned()),
+            _ => crate::prepare::strip_owner(&routes, node).map(|(strip, _)| strip.to_owned()),
+        }
+    };
+    let arrival = |floors: &[(GraphNodeId, u64)], node: &GraphNodeId| {
+        floors
+            .binary_search_by(|(held, _)| held.cmp(node))
+            .map_or(0, |index| floors[index].1)
+    };
+    let mut grown: BTreeSet<String> = BTreeSet::new();
+    let mut output_grew = false;
+    for (node, samples) in ordinary.input_floors() {
+        if *samples > arrival(predecessor.input_floors(), node) {
+            if matches!(node, GraphNodeId::Output { .. }) {
+                output_grew = true;
+            } else if let Some(strip) = owner(node) {
+                grown.insert(strip);
+            }
+        }
+    }
+    let lines =
+        |inventory: &crate::PlanStateInventory| -> BTreeMap<GraphEdgeId, (u64, GraphNodeId)> {
+            inventory
+                .delay_lines()
+                .iter()
+                .filter(|line| !matches!(line.edge, GraphEdgeId::EffectSidechain { .. }))
+                .map(|line| (line.edge.clone(), (line.samples, line.source.clone())))
+                .collect()
+        };
+    let (before, after) = (lines(predecessor), lines(ordinary));
+    for (edge, (_, source)) in before.iter().chain(&after) {
+        if before.get(edge).map(|line| line.0) != after.get(edge).map(|line| line.0)
+            && let Some(strip) = owner(source)
+        {
+            grown.insert(strip);
+        }
+    }
+    let in_both = |id: &str| {
+        crate::prepare::committed_has_strip(committed, id)
+            && crate::prepare::committed_has_strip(next, id)
+    };
+    if output_grew {
+        grown.extend(
+            committed
+                .tracks
+                .iter()
+                .map(|track| track.id.as_str())
+                .chain(committed.submixes.iter().map(|submix| submix.id.as_str()))
+                .map(str::to_owned),
+        );
+    }
+    grown.into_iter().filter(|id| in_both(id)).collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::{DuckOverlay, StripTransition, plan_strip_transition};

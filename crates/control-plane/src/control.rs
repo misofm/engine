@@ -270,6 +270,13 @@ enum Rebuild {
         model: Box<CompiledSession>,
         configuration: Option<host_core::SpectrumConfiguration>,
     },
+    /// The transition fallback across a withdrawn `Primed` donor (#1397 D2): the committed model
+    /// (the control plane's own copy) re-prepared as an ordinary successor of the plan the donor
+    /// succeeds, with the duck set as its forced restarts, and published as a duck-swap that
+    /// reports `TRANSITION_FALLBACK`. It carries like a transaction that supersedes the donor and
+    /// commits like a monitor rebuild: nothing is committed and the revision does not change, but
+    /// the candidate's gate is stamped with the committed revision, which the donor carried.
+    Transition { model: Box<CompiledSession> },
 }
 
 /// The edit ramps of a discontinuity successor: no edit gave a row a length (#1323).
@@ -972,6 +979,8 @@ thread_local! {
     static TEST_NEXT_SOURCE_READ_OFFSET: core::cell::Cell<Option<u64>> =
         const { core::cell::Cell::new(None) };
     static FORCE_FULL_PREPARATION: core::cell::Cell<bool> = const { core::cell::Cell::new(false) };
+    /// Whether the next transition re-preparation across a donor refuses (#1397 deliverable 3).
+    static TEST_REFUSE_REPREPARE: core::cell::Cell<bool> = const { core::cell::Cell::new(false) };
     /// Whether the service step leaves displaced plans in the retirement queue (batch 15a review
     /// fold M1): a render preempted between claiming a candidate and retiring the plan it displaced.
     static TEST_HOLD_RECLAMATION: core::cell::Cell<bool> = const { core::cell::Cell::new(false) };
@@ -1040,6 +1049,7 @@ pub fn test_reset_lifecycle_observer() {
     TEST_PUBLISHED_ADOPTION.with(|state| state.set(None));
     TEST_NEXT_SOURCE_READ_OFFSET.with(|state| state.set(None));
     TEST_HOLD_RECLAMATION.with(|state| state.set(false));
+    TEST_REFUSE_REPREPARE.with(|state| state.set(false));
 }
 
 /// Takes the source-read offset [`SessionState::test_set_next_source_read_offset`] scheduled for
@@ -1140,6 +1150,11 @@ pub struct SessionState<A: ControlAdapter> {
     /// withdrawn candidate adds nothing; the control plane copies it into the provider's counters
     /// with `live_values_superseded`. Render does not touch it.
     pub(crate) strips_restarted: u64,
+    /// The session's `transition_reprepare_refusals` count (#1397 D2 step 3): every transition
+    /// re-preparation across a withdrawn donor that was refused, a defect (the donor is kept
+    /// whole and republished). Saturating; copied into the provider's counters with
+    /// `strips_restarted`.
+    pub(crate) transition_reprepare_refusals: u64,
     /// The session's `source_frames_discarded` count (#1699 D1): the accepted source frames
     /// render never read because the caller's transaction removed or redeclared their source.
     /// [`Self::synchronize_plan_epochs`] adds each retired plan's unread frames before the plan is
@@ -2311,6 +2326,19 @@ impl Drop for ObservedPreparedToken {
 /// "re-prepare" result.
 pub const REPREPARE_REQUIRED: &str = "control.apply.reprepare_required";
 
+/// What one transition fallback across the pending `Primed` candidate did (#1397 D2).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum TransitionStep {
+    /// No warm candidate was pending, or render had already adopted it: nothing to do, and its
+    /// record is gone.
+    NotPending,
+    /// The transition was published in the donor's place, `TRANSITION_FALLBACK`.
+    Published,
+    /// The re-preparation was refused (a defect): the donor was republished whole with its record,
+    /// `transition_reprepare_refusals` rose, and its revision stays pending.
+    Refused,
+}
+
 /// Why a control command was refused.
 #[derive(Debug)]
 pub enum CommandError {
@@ -3087,6 +3115,32 @@ where
         TEST_NEXT_ADOPTION.with(|state| state.set(Some(adoption)));
     }
 
+    /// Makes the next transition re-preparation across a donor refuse after its preparation, as
+    /// a defect would, and marks the refusal injected, so #1397 D2 step 3's debug assertion does
+    /// not fire for it (#1397 deliverable 3). Taken once, by that re-preparation on this thread.
+    #[cfg(feature = "test-support")]
+    pub fn test_refuse_next_reprepare(&mut self) {
+        let _ = self;
+        TEST_REFUSE_REPREPARE.with(|state| state.set(true));
+    }
+
+    /// The transition fallback across the pending `Primed` candidate, as #1358's deadline step
+    /// runs it (#1397 D2), for the gates until that step exists.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::fall_back_pending_warm`].
+    #[cfg(feature = "test-support")]
+    pub(crate) fn test_fall_back_to_transition(&mut self) -> Result<TransitionStep, CommandError> {
+        self.fall_back_pending_warm()
+    }
+
+    /// The session's `transition_reprepare_refusals` count (#1397 D2 step 3).
+    #[cfg(feature = "test-support")]
+    pub fn test_transition_reprepare_refusals(&self) -> u64 {
+        self.transition_reprepare_refusals
+    }
+
     /// The adoption the last structural publication on this thread was committed with (#1403
     /// gates), taken once: `None` when nothing was published since the last call.
     #[cfg(feature = "test-support")]
@@ -3548,6 +3602,7 @@ where
         let telemetry_counters = self.controller.queues().telemetry_counters();
         let superseded = self.live_values_superseded.get();
         let restarted = self.strips_restarted;
+        let refusals = self.transition_reprepare_refusals;
         let errors = self.shared.live_block_errors.load(Ordering::Acquire);
         let underruns = self.shared.source_underrun_blocks.load(Ordering::Acquire);
         let discarded = self.source_frames_discarded;
@@ -3560,6 +3615,7 @@ where
         provider.set_telemetry_counters(telemetry_counters);
         provider.set_live_values_superseded(superseded);
         provider.set_strips_restarted(restarted);
+        provider.set_transition_reprepare_refusals(refusals);
         provider.set_live_block_errors(errors);
         provider.set_source_underrun_blocks(underruns);
         provider.set_source_frames_discarded(discarded);
@@ -4587,6 +4643,88 @@ where
         }
     }
 
+    /// The transition fallback across the pending `Primed` candidate W, the donor (#1397 D2): the
+    /// step #1358's deadline step runs once W is not ready by its deadline.
+    ///
+    /// It withdraws W. A `Taken` or `Nothing` withdrawal means render adopted W, and nothing is
+    /// done. A withdrawn W is the donor of [`Rebuild::Transition`]: the committed model is
+    /// re-prepared against the plan W succeeds (#1344 D2), with the duck set as its forced
+    /// restarts, W's added rings are donated only after that preparation succeeds, W drops on this
+    /// thread, and the transition is published with `TRANSITION_FALLBACK`. The cross-plan
+    /// admission is not run again: W's submit admitted this re-preparation with the reprepare
+    /// peak (#1398 D4, #1403).
+    ///
+    /// **A refused re-preparation is a defect (D2 step 3).** W is republished whole, its record is
+    /// set again unchanged, `transition_reprepare_refusals` rises, and a debug assertion fires
+    /// unless the refusal was injected (`test_refuse_next_reprepare`). W's revision stays pending
+    /// and the next step retries. **Acked-batch question (D4): can an ack ever precede a drop?
+    /// No:** W drops only after its replacement is prepared from the committed model, which holds
+    /// every acked edit, and its rings move by a donation checked before anything is published.
+    #[cfg_attr(
+        not(feature = "test-support"),
+        expect(dead_code, reason = "#1358's deadline step is its production caller")
+    )]
+    pub(crate) fn fall_back_pending_warm(&mut self) -> Result<TransitionStep, CommandError> {
+        let Some(record) = self.primed else {
+            return Ok(TransitionStep::NotPending);
+        };
+        if !self.shared.plan_alive.load(Ordering::Acquire) {
+            return Err(CommandError::Backpressure);
+        }
+        let revision = self.controller.session().revision().0;
+        let model = Box::new(self.controller.session().compiled().clone());
+        // The transition renders under the overlay and the subscriptions the donor holds.
+        let monitor_change = self.monitor.after(&[], model.normalized_model());
+        let observation_change = self
+            .observation
+            .after(model.normalized_model())
+            .map_err(|_| CommandError::CompileRejected(failure(ResourceFault::Allocation)))?;
+        if !observation_change.ended.is_empty() {
+            return Err(CommandError::Internal);
+        }
+        let mut withdrawn = self.withdraw_pending_candidate()?;
+        match withdrawn.as_ref() {
+            None => return Ok(TransitionStep::NotPending),
+            Some(candidate) if candidate.epoch().0 != record.epoch => {
+                // A record of another epoch is stale and was dropped with the withdrawal.
+                if let Some(candidate) = withdrawn.take() {
+                    self.publisher.republish(candidate);
+                }
+                return Ok(TransitionStep::NotPending);
+            }
+            Some(_) => {}
+        }
+        #[cfg(feature = "test-support")]
+        let injected = TEST_REFUSE_REPREPARE.with(core::cell::Cell::get);
+        #[cfg(not(feature = "test-support"))]
+        let injected = false;
+        let result = self.rebuild(
+            Rebuild::Transition { model },
+            revision,
+            monitor_change,
+            observation_change,
+            &mut withdrawn,
+        );
+        match result {
+            Ok(_) => Ok(TransitionStep::Published),
+            Err(error) => {
+                if let Some(candidate) = withdrawn.take() {
+                    self.publisher.republish(candidate);
+                    #[cfg(feature = "test-support")]
+                    update_test_owners(|owners| owners.candidate_republished += 1);
+                }
+                self.primed = Some(record);
+                self.transition_reprepare_refusals =
+                    self.transition_reprepare_refusals.saturating_add(1);
+                debug_assert!(
+                    injected,
+                    "#1397 D2 step 3: a transition re-preparation was refused: {error:?}"
+                );
+                Ok(TransitionStep::Refused)
+            }
+        }
+    }
+
     /// Takes back the newest pending candidate if render has not adopted it (#1310 D1). `None`
     /// while nothing is pending, or when render adopted it first (`Taken`), which is the path a
     /// rebuild on the newest plan has always taken.
@@ -4692,18 +4830,24 @@ where
                     .is_some_and(|newest| newest.discontinuity));
         let own_ramps = match &kind {
             Rebuild::Transaction(prepared) => prepared.get().prospective_session().edit_ramps(),
-            Rebuild::Discontinuity(_) | Rebuild::Monitor { .. } => &NO_EDIT_RAMPS,
+            Rebuild::Discontinuity(_) | Rebuild::Monitor { .. } | Rebuild::Transition { .. } => {
+                &NO_EDIT_RAMPS
+            }
         };
         // Whether B writes a monitor row: then its overlay change's ramp is the latest.
         let writes_monitor = match &kind {
             Rebuild::Transaction(prepared) => !prepared.get().monitor_edits().is_empty(),
-            Rebuild::Discontinuity(_) | Rebuild::Monitor { .. } => false,
+            Rebuild::Discontinuity(_) | Rebuild::Monitor { .. } | Rebuild::Transition { .. } => {
+                false
+            }
         };
         // #1594 D6: a monitor rebuild keeps the committed revision, which may be 0. Against the
         // running plan its model is the base's, so nothing retargets; across a withdrawn
         // candidate at a newer revision the base is the older plan's, whose retargets the
         // preparation stamps with that revision as it does for a transaction.
         let monitor = matches!(kind, Rebuild::Monitor { .. });
+        // #1397 D2: the transition fallback across a donor.
+        let fallback = matches!(kind, Rebuild::Transition { .. });
         let unchanged_revision = monitor && (!superseding || revision == 0);
         // The ramp lengths the epoch B succeeds keeps from now on: B's own, or, across a
         // withdrawn candidate, the kept base's with B's laid over them (B wins on a shared row).
@@ -4722,7 +4866,9 @@ where
                 .prospective_session()
                 .compiled()
                 .ok_or(CommandError::Internal)?,
-            Rebuild::Discontinuity(model) | Rebuild::Monitor { model, .. } => &**model,
+            Rebuild::Discontinuity(model)
+            | Rebuild::Monitor { model, .. }
+            | Rebuild::Transition { model } => &**model,
         };
         // #1696 root ruling: a kept base holds only the rows of owners B's model has, and no
         // rewritten targets, so the ramp row of B's model bounds it.
@@ -4860,7 +5006,23 @@ where
         // strip. With `lead_samples == 0` there is no lead and no prime: it is an ordinary
         // duck-swap, admitted at the single peak and published as one.
         let mut warm_lead_blocks = None;
-        if let Some(config) = self.warm
+        // #1397 D2: whether this successor is the transition fallback: at submit (`warm_lead`
+        // answered `Unavailable`) or across a withdrawn donor (`Rebuild::Transition`).
+        let mut transition_fallback = false;
+        let mut replanned = false;
+        let fall_back = |ordinary: PreparedRuntime| {
+            host_core::fall_back_to_transition(
+                base,
+                prospective.normalized_model(),
+                ordinary,
+                |runtime: &PreparedRuntime| &runtime.inventory,
+                &prepare,
+            )
+        };
+        if fallback {
+            prepared_runtime = fall_back(prepared_runtime)?;
+            (transition_fallback, replanned) = (true, true);
+        } else if let Some(config) = self.warm
             && transition.is_some()
             && duck.strips().is_empty()
         {
@@ -4872,21 +5034,41 @@ where
                 &config,
             )
             .map_err(|diagnostics| spectrum_invariant(prepare_failure(diagnostics)))?;
-            if let host_core::WarmDecision::Warm(lead) = decision {
-                let lead_blocks = u32::try_from(lead.lead_samples / u64::from(quantum))
-                    .map_err(|_| CommandError::Internal)?;
-                drop(prepared_runtime);
-                prepared_runtime = prepare(SuccessorBase {
-                    warm: Some(&lead),
-                    ..base
-                })?;
-                transition = Some(plan_transition(
-                    prepared_runtime.inventory.restarted_strips(),
-                )?);
-                if lead.lead_samples > 0 {
-                    warm_lead_blocks = Some(lead_blocks);
+            match decision {
+                host_core::WarmDecision::Warm(lead) => {
+                    let lead_blocks = u32::try_from(lead.lead_samples / u64::from(quantum))
+                        .map_err(|_| CommandError::Internal)?;
+                    drop(prepared_runtime);
+                    prepared_runtime = prepare(SuccessorBase {
+                        warm: Some(&lead),
+                        ..base
+                    })?;
+                    replanned = true;
+                    if lead.lead_samples > 0 {
+                        warm_lead_blocks = Some(lead_blocks);
+                    }
                 }
+                // #1397 D2 at submit, with no donor: a failure refuses the edit before its commit.
+                host_core::WarmDecision::Unavailable(_) => {
+                    prepared_runtime = fall_back(prepared_runtime)?;
+                    (transition_fallback, replanned) = (true, true);
+                }
+                host_core::WarmDecision::Ordinary => {}
             }
+        }
+        // The duck set is the strips the edit removes plus every strip the successor restarts:
+        // the warm successor's (#1397 D1), or the transition's, its forced restarts (D2 step 4).
+        if replanned {
+            transition = Some(plan_transition(
+                prepared_runtime.inventory.restarted_strips(),
+            )?);
+        }
+        // #1397 deliverable 3: the injected refusal of a transition re-preparation, after it.
+        #[cfg(feature = "test-support")]
+        if fallback && TEST_REFUSE_REPREPARE.with(|state| state.replace(false)) {
+            drop(prepared_runtime);
+            drop(kind);
+            return Err(CommandError::Backpressure);
         }
         let next_duck = transition
             .as_ref()
@@ -4987,7 +5169,10 @@ where
             .len()
             .checked_sub(self.pending_providers.len())
             .ok_or(CommandError::Internal)?;
-        if let Err(failure) = admit(held.as_slice(), models.as_slice(), peak(running)) {
+        // #1397 D2: the transition across a donor is not admitted again: the donor's submit
+        // admitted this re-preparation with the reprepare peak, from the same committed model.
+        if !fallback && let Err(failure) = admit(held.as_slice(), models.as_slice(), peak(running))
+        {
             // Batch 15a review fold, item 2: a refusal is permanent only if the edit cannot fit
             // even beside the newest plan alone and the committed model, which is all a retry
             // meets once render has adopted every pending candidate (the plans before it are
@@ -5059,7 +5244,7 @@ where
         // it covers a revision the plan it succeeds has not published: a withdrawn monitor
         // candidate at the same revision carried no edit, and a claim at a revision the watermark
         // already reached would pass its outcome to the next advance.
-        let carries_withdrawn_edits = monitor
+        let carries_withdrawn_edits = (monitor || fallback)
             && superseding
             && self
                 .kept_holder()
@@ -5087,20 +5272,24 @@ where
                 follow_retarget_ramp.max(send_landing_ramp(next))
             }
             Rebuild::Transaction(_) => follow_retarget_ramp,
-            Rebuild::Monitor { model, .. } if carries_withdrawn_edits => {
+            Rebuild::Monitor { model, .. } | Rebuild::Transition { model }
+                if carries_withdrawn_edits =>
+            {
                 if follow_loses_a_curve || send_fallback {
                     follow_retarget_ramp.max(send_landing_ramp(model.normalized_model()))
                 } else {
                     follow_retarget_ramp
                 }
             }
-            Rebuild::Discontinuity(_) | Rebuild::Monitor { .. } => 0,
+            Rebuild::Discontinuity(_) | Rebuild::Monitor { .. } | Rebuild::Transition { .. } => 0,
         };
-        let outcome = if transaction && (follow_into_six_word || send_fallback) {
-            engine::realtime::CandidateOutcome::TransitionFallback
-        } else {
-            engine::realtime::CandidateOutcome::Exact
-        };
+        // #1397 D5: the transition is the one writer of `TRANSITION_FALLBACK` beside these.
+        let outcome =
+            if transition_fallback || (transaction && (follow_into_six_word || send_fallback)) {
+                engine::realtime::CandidateOutcome::TransitionFallback
+            } else {
+                engine::realtime::CandidateOutcome::Exact
+            };
         let reservation = match self
             .publisher
             .reserve_replacement(candidate_plan.take(), adoption)
@@ -5218,14 +5407,18 @@ where
                 &candidate_provider.effects,
                 &mut forwards,
             )?,
-            Rebuild::Discontinuity(_) | Rebuild::Monitor { .. } => Vec::new(),
+            Rebuild::Discontinuity(_) | Rebuild::Monitor { .. } | Rebuild::Transition { .. } => {
+                Vec::new()
+            }
         };
         // #1585 D4: the counter past the tags the preparation issued, installed at the commit.
         let next_arm_tag_after = match &kind {
             Rebuild::Transaction(prepared) => {
                 prepared.get().prospective_session().next_arm_tag_after()
             }
-            Rebuild::Discontinuity(_) | Rebuild::Monitor { .. } => None,
+            Rebuild::Discontinuity(_) | Rebuild::Monitor { .. } | Rebuild::Transition { .. } => {
+                None
+            }
         };
         let epoch = reservation.epoch();
         candidate_provider.epoch = epoch;
@@ -5339,7 +5532,9 @@ where
             // #1323 D4: nothing is committed. The copy of the committed model is the base the
             // epoch this successor displaces keeps (the model that epoch renders), or, across a
             // withdrawn candidate, drops below as a commit's displaced model does.
-            Rebuild::Discontinuity(model) | Rebuild::Monitor { model, .. } => (None, Some(*model)),
+            Rebuild::Discontinuity(model)
+            | Rebuild::Monitor { model, .. }
+            | Rebuild::Transition { model } => (None, Some(*model)),
         };
         // #1403 D3: a warm candidate's flags and `Primed` schedule, after the last fallible step
         // and before its set takes any producer or donated ring: each entry it holds vacant is

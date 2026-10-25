@@ -9,6 +9,9 @@
 
 use engine::realtime::{PlanAdoption, PlanReplacementReservation};
 
+use session::SessionModel;
+
+use crate::prepare::{PlanStateInventory, SuccessorBase};
 use crate::source::SourceControlSet;
 
 /// The record of the one warm candidate published [`PlanAdoption::Primed`] and not yet adopted,
@@ -95,4 +98,41 @@ pub fn publish_primed(
         not_before,
         lead_blocks,
     }
+}
+
+/// The transition fallback's re-preparation (#1397 D2 step 1): the one host-core entry a host
+/// runs when a latency growth cannot be adopted warm, at submit (`warm_lead` answered
+/// `Unavailable`) or after a deadline step withdrew the `Primed` candidate (the donor, #1358 D3).
+///
+/// `ordinary` is the committed model `next` prepared against `base` as an ordinary successor
+/// (#1285 floors, no lead); `inventory` reads its inventory. The duck set is
+/// [`crate::grown_strips`] over that compile, computed before `ordinary` drops and before any
+/// carry join reads it; `prepare` then prepares `next` against `base` with the set as
+/// [`SuccessorBase::forced_restart`], so each strip in it is restarted whole and armed and listed
+/// in the result's `restarted_strips()`, which is the set the transition ducks. Across a
+/// withdrawn donor, `base` is the base of a successor of the plan the donor succeeds (#1344 D2:
+/// its inventory across the withdrawn candidate, and the running epoch's kept model with its duck
+/// overlay), and the host applies the donation only after this returns `Ok` (D2 step 2).
+///
+/// The host publishes the result as a duck-swap with `S` and writes
+/// [`engine::realtime::CandidateOutcome::TransitionFallback`] on its reservation before the
+/// commit (D2 step 5, D5): its publication is the host's one rebuild path. Control thread only.
+///
+/// # Errors
+///
+/// `prepare`'s error, with nothing published: at submit the edit is refused before its commit;
+/// across a donor the host keeps the donor whole (D2 step 3).
+pub fn fall_back_to_transition<T, E>(
+    base: SuccessorBase<'_>,
+    next: &SessionModel,
+    ordinary: T,
+    inventory: fn(&T) -> &PlanStateInventory,
+    prepare: impl FnOnce(SuccessorBase<'_>) -> Result<T, E>,
+) -> Result<T, E> {
+    let grown = crate::grown_strips(base.inventory, base.committed, next, inventory(&ordinary));
+    drop(ordinary);
+    prepare(SuccessorBase {
+        forced_restart: &grown,
+        ..base
+    })
 }
