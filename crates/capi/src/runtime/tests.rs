@@ -5838,6 +5838,120 @@ fn an_uncarried_rebuild_restarts_the_meter_grid_at_its_adoption_block() {
     crate::ffi::test_session_destroy(c_session);
 }
 
+/// Two tracks on one source, a compressor insert (`comp`) on the second only (#1587b).
+fn compressor_pair_session() -> session::SessionModel {
+    let mut model = stateless_session(48_000);
+    model.tracks.truncate(2);
+    model.routes.truncate(2);
+    model.tracks[1].source_id = model.tracks[0].source_id.clone();
+    let protocol::SessionEdit::PutTrackEffect { effect, .. } = put_compressor(&model, 1) else {
+        panic!("an insert edit")
+    };
+    model.tracks[1].inserts.effects.insert(0, effect);
+    model
+}
+
+/// `UpsertTrack` of a muted copy of `model.tracks[index]` named `id`, effects included, and
+/// `UpsertRoute` of its route into the output.
+fn add_muted_copy(
+    model: &session::SessionModel,
+    index: usize,
+    id: &str,
+) -> [protocol::SessionEdit; 2] {
+    let [protocol::SessionEdit::UpsertTrack { mut track }, route] = add_muted_track(model, id)
+    else {
+        panic!("a track and its route")
+    };
+    let copy = model.tracks[index].clone();
+    track.inserts = copy.inserts;
+    track.source_id = copy.source_id;
+    [protocol::SessionEdit::UpsertTrack { track }, route]
+}
+
+/// The `Observe` edit of `track`'s compressor tap (#1587b).
+fn observe_compressor(
+    track: &session::StableId,
+    armed: bool,
+    window_blocks: u32,
+) -> protocol::SessionEdit {
+    protocol::SessionEdit::Observe {
+        strip_id: track.clone(),
+        section: protocol::control_core::TapSection::Inserts(
+            session::StableId::parse("comp").expect("compressor"),
+        ),
+        tap_id: 1,
+        armed,
+        window_blocks,
+    }
+}
+
+/// #1587b attempt 4: a candidate promoted before render's swap block has run (as
+/// `withdraw_pending_candidate` promotes one render has claimed) finds the carry record not yet
+/// written, marks its observation pairing pending, and settles it at the next service step once
+/// render has carried, with reclamation held so the reclaim fallback cannot do it. The rebuild adds
+/// a muted copy of the compressor's track that sorts first, so the carried handle moves from
+/// position 0 to 1. The running epoch's reader then holds the carried tap's windows, its sequence
+/// continuing from before the swap.
+///
+/// Test value: red if a promotion that reads an unwritten record pairs nothing for good (attempt
+/// 3), or if the settle pairs the wrong positions.
+#[test]
+fn a_promotion_before_the_carry_pairs_the_carried_tap_once_render_carries() {
+    let model = compressor_pair_session();
+    let track = model.tracks[1].id.clone();
+    let document = session::canonical_session_json(&model).expect("compressor session");
+    let mut children = compile_children(&document, limits()).expect("children");
+    let window = fixture_window_blocks();
+    let source = model.sources[0].id.as_str().as_bytes().to_vec();
+    command_direct(
+        &mut children,
+        &transaction_at(
+            1,
+            42,
+            &[observe_compressor(
+                &track,
+                true,
+                u32::try_from(window).expect("window"),
+            )],
+        ),
+    );
+    submit_direct(&mut children, &[&source], 0);
+    feed_and_render_direct(&mut children, &[&source], 0, 2 * window);
+    children.session.service().expect("service");
+    let held = |children: &CompiledChildren| {
+        let snapshot = children.session.test_transaction_snapshot();
+        snapshot
+            .observation_windows
+            .iter()
+            .find(|(epoch, strip, _, _)| {
+                *epoch == snapshot.provider_epoch && **strip == *track.as_str()
+            })
+            .expect("the compressor's readers")
+            .3[0]
+            .map(|(sequence, first, ..)| (sequence, first))
+    };
+    let before = held(&children).expect("a window before the rebuild");
+    command_direct(
+        &mut children,
+        &transaction_at(2, 42, &add_muted_copy(&model, 1, "a-muted")),
+    );
+    control_plane::test_hold_reclamation(true);
+    children
+        .session
+        .test_promote_pending_before_carry()
+        .expect("promoted before the carry");
+    feed_and_render_direct(&mut children, &[&source], 2 * window, 2 * window);
+    children.session.service().expect("service");
+    let after = held(&children);
+    control_plane::test_hold_reclamation(false);
+    children.session.service().expect("service");
+    assert_eq!(
+        after,
+        Some((before.0 + 2, 3 * window * 128)),
+        "the carried tap's windows, in the running epoch's reader"
+    );
+}
+
 /// #1587b gate 2: two tracks on one source, a compressor insert on the second only, driven past
 /// its threshold; `{first, gain reduction}` (handle 1) and `{second, gain reduction}` (handle 2)
 /// beside the output's peak, one batch per window. The first track has no tap, so its record is
@@ -5856,16 +5970,9 @@ fn an_uncarried_rebuild_restarts_the_meter_grid_at_its_adoption_block() {
 /// refused.
 #[test]
 fn gain_reduction_records_read_only_windows_since_the_taps_arm() {
-    let mut model = stateless_session(48_000);
-    model.tracks.truncate(2);
-    model.routes.truncate(2);
-    model.tracks[1].source_id = model.tracks[0].source_id.clone();
+    let model = compressor_pair_session();
     let quiet = model.tracks[0].id.clone();
     let track = model.tracks[1].id.clone();
-    let protocol::SessionEdit::PutTrackEffect { effect, .. } = put_compressor(&model, 1) else {
-        panic!("an insert edit")
-    };
-    model.tracks[1].inserts.effects.insert(0, effect);
     let document = session::canonical_session_json(&model).expect("compressor session");
     let (c_session, c_plan) = boxed_c_children(&document);
     let window = fixture_window_blocks();
@@ -5939,9 +6046,13 @@ fn gain_reduction_records_read_only_windows_since_the_taps_arm() {
     // The first sample and reduction of the newest window the session's reader holds.
     let held = || {
         let snapshot = crate::ffi::test_transaction_snapshot(c_session);
-        let [(_, _, _, taps)] = snapshot.observation_windows.as_slice() else {
-            panic!("one observed instance")
-        };
+        let (_, _, _, taps) = snapshot
+            .observation_windows
+            .iter()
+            .find(|(epoch, strip, _, _)| {
+                *epoch == snapshot.provider_epoch && **strip == *track.as_str()
+            })
+            .expect("the compressor's readers");
         let (_, first, _, [left, right]) = taps[0].expect("a published window");
         // The compressor's tap publishes its reduction in decibels, so its strip word is the
         // deeper lane (`strip_reduction_db`; the readings stay inside its declared range).
@@ -5993,11 +6104,12 @@ fn gain_reduction_records_read_only_windows_since_the_taps_arm() {
         (3 * window + window / 2) * 128,
         "the re-armed tap's window"
     );
-    // #1674's observation half: a rebuild that carries the compressor (a muted track whose ID
-    // sorts first, so every strip's position shifts) keeps its armed tap's reading. The promoted
+    // #1674's observation half: a rebuild that carries the compressor (a muted copy of its track,
+    // compressor included, whose ID sorts first, so every strip's position shifts and the
+    // carried reader moves from handle 0 to handle 1) keeps its armed tap's reading. The promoted
     // epoch reads the carried slot, so each window after the swap is `VALID` again.
     assert_eq!(
-        transact_c(c_session, 100, 42, &add_muted_track(&model, "a-muted")),
+        transact_c(c_session, 100, 42, &add_muted_copy(&model, 1, "a-muted")),
         protocol::EditPath::Rebuild
     );
     for later in 5..11 {

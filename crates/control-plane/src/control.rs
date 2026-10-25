@@ -78,6 +78,9 @@ pub struct ProviderEpoch {
     /// The observation readers the swap block that adopted this epoch's plan carried (#1587b),
     /// shared with the plan's attachment; `None` for a host whose preparer keeps its readers.
     pub(crate) carried_taps: Option<std::sync::Arc<CarriedTaps>>,
+    /// The epoch this one displaced, while their observation readers wait to be paired: this
+    /// epoch was promoted before render wrote `carried_taps` ([`CarriedTaps`]'s three states).
+    pub(crate) observations_pending: Option<u64>,
     /// The plan's effect instances by stable key, with each one's position in
     /// [`Self::observations`] (#1586 D3, R1): built with the epoch, on the control thread, so a
     /// read resolves a stable address without allocating. Empty for a host whose preparer keeps
@@ -713,6 +716,7 @@ impl ProviderEpoch {
             observations: Box::default(),
             observation_strips: Box::default(),
             carried_taps: None,
+            observations_pending: None,
             observation_index: host_core::observation::ObservationIndex::default(),
             capi,
             revision_gate,
@@ -765,6 +769,7 @@ impl ProviderEpoch {
             observations: Box::default(),
             observation_strips: Box::default(),
             carried_taps: None,
+            observations_pending: None,
             observation_index: host_core::observation::ObservationIndex::default(),
             capi,
             revision_gate,
@@ -1350,6 +1355,22 @@ fn epoch_meters<'a>(
 /// Sized at preparation, one pair per observation handle of the plan (a successor handle is
 /// paired at most once), so render writes into storage it never grows. A plan is adopted at most
 /// once, so the pairs are written once; `count` is stored last, with `Release`.
+///
+/// **Three states (#1587b attempt 4).** `count` starts at [`Self::UNWRITTEN`]: render has not run
+/// the plan's swap block. Render claims a candidate a little before it carries into it
+/// (`plan_exchange`'s claim, then `carry_from`), and the control thread promotes a claimed
+/// candidate (`withdraw_pending_candidate`) without waiting, so a promotion can find the record
+/// unwritten. It then marks the epoch's pairing pending (`ProviderEpoch::observations_pending`),
+/// and later steps settle it:
+/// - **Early read.** Each service step reads `count` with `Acquire`; once it is written, that
+///   load synchronizes with render's `Release` store, after the pairs, so the pairs read whole.
+/// - **Reclaim fallback.** Render retires the displaced plan into the retirement queue only after
+///   the carry returned (or after a swap whose hook never ran: a plan with no attachment), and the
+///   control thread's reclaim takes it from the queue, which orders the hook before the reclaim.
+///   A record still unwritten there means nothing carried, and the mark clears.
+///
+/// While the mark stands the epoch's readers are the successor's own, which no carried tap
+/// publishes to: the strip shows no reading, never a wrong one.
 pub(crate) struct CarriedTaps {
     pairs: Box<[[core::sync::atomic::AtomicU32; 2]]>,
     count: core::sync::atomic::AtomicU32,
@@ -1368,7 +1389,7 @@ impl CarriedTaps {
         });
         Ok(Self {
             pairs: pairs.into_boxed_slice(),
-            count: core::sync::atomic::AtomicU32::new(0),
+            count: core::sync::atomic::AtomicU32::new(Self::UNWRITTEN),
         })
     }
 
@@ -1381,19 +1402,54 @@ impl CarriedTaps {
             .checked_add(2 * size_of::<usize>() + size_of::<Self>())
     }
 
-    /// The carried pairs, as carry records; empty until render adopted the plan. Allocates
-    /// nothing.
-    fn carries(&self) -> impl Iterator<Item = engine::realtime::ObserverCarry> + '_ {
-        let count = self.count.load(Ordering::Acquire) as usize;
-        self.pairs
-            .iter()
-            .take(count)
-            .map(|[successor, predecessor]| engine::realtime::ObserverCarry {
-                kind: engine::realtime::ObserverKind::Observation,
-                successor: successor.load(Ordering::Relaxed) as usize,
-                predecessor: predecessor.load(Ordering::Relaxed) as usize,
-            })
+    /// `count` before render ran the plan's swap block.
+    const UNWRITTEN: u32 = u32::MAX;
+
+    /// The carried pairs, as carry records, or `None` while render has not written the record.
+    /// Allocates nothing.
+    fn carries(&self) -> Option<impl Iterator<Item = engine::realtime::ObserverCarry> + '_> {
+        let count = self.count.load(Ordering::Acquire);
+        if count == Self::UNWRITTEN {
+            return None;
+        }
+        Some(
+            self.pairs
+                .iter()
+                .take(count as usize)
+                .map(|[successor, predecessor]| engine::realtime::ObserverCarry {
+                    kind: engine::realtime::ObserverKind::Observation,
+                    successor: successor.load(Ordering::Relaxed) as usize,
+                    predecessor: predecessor.load(Ordering::Relaxed) as usize,
+                }),
+        )
     }
+}
+
+/// Pair `successor`'s observation readers with `predecessor`'s from `successor`'s carry record
+/// (#1587b), if render has written it; returns whether the pairing is settled. With `reclaimed`
+/// (the predecessor's plan is reclaimed, so the hook has run or never will) an unwritten record
+/// settles as nothing carried.
+fn pair_observations(
+    successor: &mut ProviderEpoch,
+    predecessor: &mut ProviderEpoch,
+    reclaimed: bool,
+) -> bool {
+    let Some(record) = successor.carried_taps.as_deref() else {
+        return true;
+    };
+    let Some(carries) = record.carries() else {
+        return reclaimed;
+    };
+    // One record at a time: `pair_carried_observations` takes a slice, and the record's pairs
+    // are atomics, so collecting them would allocate; a one-element slice per pair does not.
+    for carry in carries {
+        host_core::pair_carried_observations(
+            &mut successor.observations,
+            &mut predecessor.observations,
+            core::slice::from_ref(&carry),
+        );
+    }
+    true
 }
 
 /// The C ABI plan's host attachment (#1587b): the plan's [`CarriedTaps`], shared with its
@@ -2883,6 +2939,19 @@ where
         self.output_meter.take()
     }
 
+    /// Promote the oldest pending candidate now, before render has run its swap block (#1587b):
+    /// what `withdraw_pending_candidate` does for a candidate render has claimed but not yet
+    /// carried into, so a test can render the carry after the promotion.
+    #[cfg(feature = "test-support")]
+    pub fn test_promote_pending_before_carry(&mut self) -> Result<(), CommandError> {
+        let epoch = self
+            .pending_providers
+            .first()
+            .ok_or(CommandError::Internal)?
+            .epoch;
+        self.promote_pending_provider(epoch)
+    }
+
     /// The current provider epoch.
     #[cfg(feature = "test-support")]
     pub fn test_providers(&self) -> &ProviderEpoch {
@@ -3103,6 +3172,7 @@ where
                 self.promote_pending_provider(replacement)?;
             }
             self.adopt_meters(retired_epoch.0, adoption_sample);
+            self.settle_observation_pairings(Some(retired_epoch.0));
             let index = self
                 .retired_providers
                 .iter()
@@ -3114,6 +3184,7 @@ where
         if active_epoch > self.providers.epoch {
             self.promote_pending_provider(active_epoch)?;
         }
+        self.settle_observation_pairings(None);
 
         // Keep exactly the rows a reader can still ask for: the atomic's (possibly lagging), the
         // current provider's, and every pending candidate's. The atomic is read under the lock,
@@ -3132,6 +3203,40 @@ where
                 || pending.iter().any(|provider| provider.epoch == *epoch)
         });
         Ok(())
+    }
+
+    /// Settle every pending observation pairing whose record render has written, and, when
+    /// `reclaimed` names a parked epoch whose plan was just reclaimed, the one waiting on it
+    /// either way ([`CarriedTaps`]'s three states). A promoted epoch and the parked epoch it
+    /// displaced are paired as at promotion. Bounded by the parked list; allocates nothing.
+    fn settle_observation_pairings(&mut self, reclaimed: Option<u64>) {
+        for index in 0..=self.retired_providers.len() {
+            let (successor, older) = if index == self.retired_providers.len() {
+                (&mut self.providers, &mut self.retired_providers[..])
+            } else {
+                let (older, rest) = self.retired_providers.split_at_mut(index);
+                let Some(successor) = rest.first_mut() else {
+                    continue;
+                };
+                (successor, older)
+            };
+            let Some(displaced) = successor.observations_pending else {
+                continue;
+            };
+            let settled = match older
+                .iter_mut()
+                .find(|provider| provider.epoch == displaced)
+            {
+                Some(predecessor) => {
+                    pair_observations(successor, predecessor, reclaimed == Some(displaced))
+                }
+                // The displaced epoch is gone: nothing is left to pair with.
+                None => true,
+            };
+            if settled {
+                successor.observations_pending = None;
+            }
+        }
     }
 
     /// Hand the meter delivery from the plan of `displaced`, whose reclaim this is, to its
@@ -3279,15 +3384,14 @@ where
             );
             // #1674's observation half (#1587b): likewise the observation readers of the taps the
             // swap block carried, from its record (what actually carried), so a carried tap's
-            // reader, and its arm state, follow the tap that renders on.
-            if let Some(record) = next.carried_taps.as_deref() {
-                for carry in record.carries() {
-                    host_core::pair_carried_observations(
-                        &mut next.observations,
-                        &mut self.providers.observations,
-                        core::slice::from_ref(&carry),
-                    );
-                }
+            // reader, and its arm state, follow the tap that renders on. The running epoch's own
+            // pending pairing settles first: render carried into its plan before it claimed
+            // `next`'s, so the chain pairs in order. A record render has not written yet leaves
+            // the pairing pending, which a later step settles.
+            self.settle_observation_pairings(None);
+            self.providers.observations_pending = None;
+            if !pair_observations(&mut next, &mut self.providers, false) {
+                next.observations_pending = Some(self.providers.epoch);
             }
             let mut previous = core::mem::replace(&mut self.providers, next);
             // Dropped with the parked epoch, when its plan is reclaimed.
