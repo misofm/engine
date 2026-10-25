@@ -498,8 +498,9 @@ impl MeterFrame {
     /// The master strip's gain reduction (#1690 D1): strip `master`'s word when that strip is in
     /// the frame and an armed tap's window folded into it, else `None` -- absent, not zero, when
     /// no strip is the master or the master published nothing (zero reads as "not reducing").
-    /// The browser reads the master's reading through this function; the C ABI reads it through
-    /// the shared gain row of [`MeterBatchFold::push_with_strips`], with the same predicate.
+    /// The browser's lease frame reads it through this function; every `METER_BATCH`, on both
+    /// hosts, reads the shared gain row of [`MeterBatchFold::push_with_strips`], with the same
+    /// predicate.
     #[must_use]
     #[inline]
     pub fn master_gain_reduction(&self, master: Option<u32>) -> Option<f32> {

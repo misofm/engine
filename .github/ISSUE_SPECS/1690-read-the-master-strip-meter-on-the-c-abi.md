@@ -210,7 +210,7 @@ The issue splits in two slices.
   every poll and lease transition (four master choices, a silence/loud run, master moves, a
   disarm/re-arm and a lease toggle; 132 records, 70 with the master present) is the same on the
   base and on the branch (PR evidence, not a committed test).
-- **#1690b (open, blocked by #1587b, so by #1583 and #1585): D2's C ABI half, D3, D5, D6.**
+- **#1690b (done on `codex/batch-b13-1690b`; was blocked by #1587b, so by #1583 and #1585): D2's C ABI half, D3, D5, D6.**
   The C ABI keeps the resolved master index (`Option<u32>`) beside #1587's entry-resolution vector
   in `SessionState`, recomputed at each promotion, after every command and after a `SET_CONTROL` of
   the `master` row; the `Master` target is wire code 3 of #1583's `meter_entry.target`, with its
@@ -250,17 +250,18 @@ The issue splits in two slices.
   `rendered_meters::a_master_moved_while_a_rebuild_waits_leaves_the_rendering_plans_master`
   (control-plane), through the render-half ring: `eq1` master, a waiting rebuild, a live move to
   `eq2`, a configure, then a frame of the rendering plan; red on attempt 1's code (`[0.0]`, absent,
-  for `[3.0]`), green without the move. Not added to the parity row: on the C ABI every call
-  services first, so the rendering plan's closed windows are staged before any later commit and no
-  window of it is staged after the move; the step was green on attempt 1 (the browser polled each
-  block), or diverged for a reason that is not the master (the browser's queued windows read later
-  tap windows when it did not poll). The configure-before-adoption case is in the same test.
+  for `[3.0]`), green without the move. Not added to the parity row: both hosts stage `METER_BATCH`
+  through the same `MeterBatches` and `sync_master_meters`, so a cross-host step cannot
+  discriminate; the claim is tested once, in control-plane, which owns it. The
+  configure-before-adoption case is in the same test.
 - **Not done.** Gate 2 is not needed (root ruling, 2026-10-25): the browser tests #1690a recorded
   and gate 3's quiet-track step cover it. Gate 5 is not extended: the master read runs on the control
   thread, and the race test counts render allocations only, so no master defect can turn it red
   (an extension would be a test with no defect to catch). The SDK's hand decoder
-  (`sdk/src/core/protocol-messages.ts`) does not yet decode target 3; the browser refuses meter
-  tables until #1588b, and the SDK table call is a later issue (non-goal).
+  (`sdk/src/core/protocol-messages.ts`) does not yet decode target 3, and the SDK table call is a
+  later issue (non-goal). With #1588b (#2026) the browser accepts a `{master, gain reduction}`
+  table and serves it through the same staging. Remaining work on #1690 after this slice: the
+  SDK's target-3 decode and its master call (a later issue).
 - **Re-pin (gate 7).** After #2024 (#1578) merged (main `9d7bbb887`), the corpus's telemetry table
   gains `{master, gain reduction}`: `COMPLETE_SCHEMA_HASH` `cb8db815ed0103a0` -> `dea650f7e506833e`,
   59 frames still; only `command.telemetry_configure` and `response.telemetry` move.
