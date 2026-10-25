@@ -670,42 +670,68 @@ fn a_skipping_block_allocates_nothing() {
 
 // ---- Gate 3 (issue #1782a) ----------------------------------------------------------------------
 
-/// Where each track renders in a plan whose one pack group holds tracks `from..TRACKS`, as
-/// `(unit, lane)`: home `(track - from) / W, (track - from) % W` from the group's first unit
-/// until a forced move trades two. A track before `from` is in no group and never moves.
+/// Where each track renders, as `(unit, lane)`, in a plan of [`session`] (`inserts`: with
+/// tracks 0..8 given an EQ insert): home `(track - first) / W, (track - first) % W` from its
+/// group's first unit, `first` being the group's first track, until a forced move trades two;
+/// `None` for a track in no group, which never moves.
+///
+/// The groups, as `(first track, tracks)`, follow from the width. The mono tracks 0..8 and the
+/// stereo tracks 8..20 are one group at eight lanes and two at four (the mono banks are no peers
+/// of the stereo ones there: the arm64 leg's layout). With the insert, tracks 0..8 are one bank
+/// at eight lanes, which is no group, and a group of two banks at four. So the stereo tracks are
+/// a group at both widths, and every move pairs two mono or two stereo tracks.
 struct Placement {
-    at: Vec<(usize, usize)>,
+    at: Vec<Option<(usize, usize)>>,
 }
 
 impl Placement {
     fn of(plan: &PreparedRenderPlan) -> Self {
-        Self::from(plan, 0)
+        Self::new(plan, false)
     }
 
-    fn from(plan: &PreparedRenderPlan, from: usize) -> Self {
+    fn new(plan: &PreparedRenderPlan, inserts: bool) -> Self {
         let groups = graph::test_only_pack_groups(plan);
-        let &[(first, last, width)] = groups.as_slice() else {
-            panic!("one pack group: {groups:?}");
+        let width = groups.first().map_or(0, |group| group.2 as usize);
+        let expected: &[(usize, usize)] = match (width, inserts) {
+            (8, false) => &[(0, TRACKS)],
+            (8, true) => &[(8, TRACKS - 8)],
+            (4, _) => &[(0, 8), (8, TRACKS - 8)],
+            _ => &[],
         };
-        let (first, width) = (first as usize, width as usize);
-        assert!(
-            (last as usize - first + 1) * width >= TRACKS - from,
-            "the group holds tracks {from}..{TRACKS}: {groups:?}"
+        assert_eq!(
+            groups.len(),
+            expected.len(),
+            "the pack groups at {width} lanes: {groups:?}"
         );
-        Self {
-            at: (0..TRACKS)
-                .map(|track| {
-                    let index = track.saturating_sub(from);
-                    (first + index / width, index % width)
-                })
-                .collect(),
+        let mut at = vec![None; TRACKS];
+        for (&(first, last, lanes), &(track, tracks)) in groups.iter().zip(expected) {
+            let (first, lanes) = (first as usize, lanes as usize);
+            let units = last as usize - first + 1;
+            assert_eq!(
+                units,
+                tracks.div_ceil(lanes),
+                "the group of tracks {track}..{}: {groups:?}",
+                track + tracks
+            );
+            for index in 0..tracks {
+                at[track + index] = Some((first + index / lanes, index % lanes));
+            }
         }
+        Self { at }
+    }
+
+    /// Whether track `track` is in a group.
+    fn placed(&self, track: usize) -> bool {
+        self.at[track].is_some()
     }
 
     /// Trade the lanes tracks `x` and `y` render at.
     fn swap(&mut self, plan: &mut PreparedRenderPlan, x: usize, y: usize) {
+        let (Some(a), Some(b)) = (self.at[x], self.at[y]) else {
+            panic!("ch{x:02} and ch{y:02} are in a group");
+        };
         assert!(
-            graph::test_only_swap_bank_lanes(plan, self.at[x], self.at[y]),
+            graph::test_only_swap_bank_lanes(plan, a, b),
             "ch{x:02} at {:?} and ch{y:02} at {:?} trade lanes",
             self.at[x],
             self.at[y]
@@ -882,7 +908,7 @@ fn a_moved_strip_renders_the_bits_of_an_unmoved_one() {
         track.builtins.right.hpf_hz = 100.0 + index as f32;
     }
     eprintln!("layout: one group, the master's first contributor in it");
-    gate_three(&model, 0);
+    gate_three(&model, false);
     // Tracks 0..8 carry an EQ insert, so their bank is no peer of the next: the group is the
     // other banks, and the master's first contributor (ch00, which stores) is an earlier unit
     // outside it. A displaced group's fold then adds onto a live master, which shows any early
@@ -895,12 +921,13 @@ fn a_moved_strip_renders_the_bits_of_an_unmoved_one() {
         track.inserts.effects.push(insert);
     }
     eprintln!("layout: the master's first contributor before the group");
-    gate_three(&model, 8);
+    gate_three(&model, true);
 }
 
-/// Gate 3 over `model`, whose one pack group holds tracks `from..TRACKS`; the moves of tracks
-/// before `from` are left out.
-fn gate_three(model: &SessionModel, from: usize) {
+/// Gate 3 over `model` (`inserts`: tracks 0..8 carry the EQ insert); the moves of a track in no
+/// group are left out, which only the insert layout at eight lanes has (its mono bank is one
+/// unit).
+fn gate_three(model: &SessionModel, inserts: bool) {
     let blocks = 560;
     let schedules = schedules(blocks, 0x1782);
     let mut moved = carried_pair(model, &schedules);
@@ -910,7 +937,7 @@ fn gate_three(model: &SessionModel, from: usize) {
         TRACKS as u64,
         "every track folds into the master"
     );
-    let mut placement = Placement::from(&moved.before.plan, from);
+    let mut placement = Placement::new(&moved.before.plan, inserts);
     let frames = moved.before.frames;
     let mut moved_pcm = vec![0.0_f32; frames * 2];
     let mut home_pcm = vec![0.0_f32; frames * 2];
@@ -926,7 +953,7 @@ fn gate_three(model: &SessionModel, from: usize) {
                     "the successor takes the carry"
                 );
             }
-            placement = Placement::from(&moved.after.plan, from);
+            placement = Placement::new(&moved.after.plan, inserts);
         }
         let (moved_plan, home_plan) = if block < SWAP {
             (&mut moved.before, &mut home.before)
@@ -934,7 +961,7 @@ fn gate_three(model: &SessionModel, from: usize) {
             (&mut moved.after, &mut home.after)
         };
         for &(at, x, y) in &MOVES {
-            if at == block && x >= from && y >= from {
+            if at == block && placement.placed(x) && placement.placed(y) {
                 placement.swap(&mut moved_plan.plan, x, y);
             }
         }
