@@ -397,7 +397,13 @@ effect.metadata.mismatch
 effect.state.invalid
 effect.third_party.unavailable_at_launch
 effect.tail_bound.inconsistent
+console.link_mode.override_unbanked
 ```
+
+`console.link_mode.override_unbanked` refuses, at the entry's `link_mode` path, a console entry
+whose resolved link mode differs from its slot's on an effect that does not hold the mode per lane
+(`lane_link == false`): the override would split the slot's bank (decision 12; #1369 R3). No
+console-eligible launch effect reaches it.
 
 `effect.descriptor.invalid` is raised only by `NativeEffectRegistry::new`, once per effect type
 when its factory enters the registry; `validate_prepare_request` no longer re-validates the

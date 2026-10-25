@@ -1059,8 +1059,8 @@ class MisoAudioWorkletHost {
           : pending.response === "status"
         ? [
           "tag", "requestId", "result", "state", "lastResult", "backend", "sampleRateHz",
-          "quantumFrames", "nextAbsoluteSample", "renderedQuanta", "liveValuesSuperseded",
-          "appliedRevision", "appliedSample", "appliedOutcome", "memoryBytes", "singleModeControlAllocations", "staleViewQuanta",
+          "quantumFrames", "blockingRebuilds", "nextAbsoluteSample", "renderedQuanta",
+          "liveValuesSuperseded", "appliedRevision", "appliedSample", "appliedOutcome", "memoryBytes", "singleModeControlAllocations", "staleViewQuanta",
         ]
         : pending.response === "renderAllocations"
           ? ["tag", "requestId", "result", "count"]
@@ -1168,6 +1168,7 @@ class MisoAudioWorkletHost {
       && validResult(message.lastResult) && message.backend === this.#numericBackend
       && message.sampleRateHz === this.#sampleRateHz
       && message.quantumFrames === this.#quantumFrames
+      && validU32(message.blockingRebuilds)
       && validU64(message.nextAbsoluteSample) && validU64(message.renderedQuanta)
       && validU64(message.liveValuesSuperseded)
       && validU64(message.appliedRevision) && validU64(message.appliedSample)

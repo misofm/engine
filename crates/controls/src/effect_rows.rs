@@ -7,7 +7,9 @@
 //! or an identity the launch registry does not carry has no rows.
 //!
 //! In an effect section the control `0` is the instance's bypass, a parameter row has the
-//! parameter's ID, and an insert with a choice of link modes has [`LINK_MODE_CONTROL`].
+//! parameter's ID, and an instance with a choice of link modes has [`LINK_MODE_CONTROL`]: an
+//! insert's chooses among the effect's modes, and a console entry's among `slot` (the slot's
+//! declared mode, code `0`) and the effect's modes, an override for that strip only (#1369).
 
 use effect_compiler::launch_native_effect_registry;
 use effect_contract::control::PreparedReason;
@@ -17,7 +19,7 @@ use effect_contract::{
     ParameterLattice, ParameterMapping, ParameterUnit, normalize_zero,
 };
 use session::{
-    ConsoleEntry, Effect, EffectIdentity, EffectParam, LinkMode, ParameterChannel,
+    ConsoleEntry, ConsoleLinkMode, Effect, EffectIdentity, EffectParam, LinkMode, ParameterChannel,
     ParameterUnit as SessionUnit, SessionModel, StableId,
 };
 
@@ -34,11 +36,14 @@ use session::{ControlAddress, Lane, Owner, Section};
 /// The control ID of an effect's bypass.
 pub const BYPASS_CONTROL: u32 = 0;
 
-/// The control ID of an insert's link mode. No effect parameter ID reaches it (the registry test
-/// refuses a descriptor that does).
+/// The control ID of an insert's or a console entry's link mode. No effect parameter ID reaches it
+/// (the registry test refuses a descriptor that does).
 pub const LINK_MODE_CONTROL: u32 = 0x8000_0000;
 
 /// The multiband compressor's link mode is live once #1367 lands (decision 15 E2).
+///
+/// A console entry's link mode of any other effect is live once #1371 lands; until then it is
+/// rebuild-only like an insert's (decision 17: a value not live yet).
 const MULTIBAND_LINK_ISSUE: u32 = 1367;
 
 const MULTIBAND_ID: &str = "miso.multiband-compressor";
@@ -78,6 +83,36 @@ const LINK_CHOICES_MAXIMUM: [Choice; 2] = link_choices_of(0b011);
 const LINK_CHOICES_AVERAGE: [Choice; 2] = link_choices_of(0b101);
 const LINK_CHOICES_ALL: [Choice; 3] = link_choices_of(0b111);
 
+/// The code of a console entry's `slot` choice: run the slot's declared mode. No contract link
+/// mode has code `0`.
+const LINK_SLOT_CODE: f32 = 0.0;
+
+/// `choices` after the console entry's `slot` choice.
+const fn with_slot<const N: usize, const M: usize>(choices: [Choice; N]) -> [Choice; M] {
+    let mut out = [Choice {
+        value: LINK_SLOT_CODE,
+        label: "slot",
+    }; M];
+    assert!(M == N + 1, "the slot choice comes first");
+    let mut index = 0;
+    while index < N {
+        out[index + 1] = choices[index];
+        index += 1;
+    }
+    out
+}
+
+const CONSOLE_LINK_CHOICES_MAXIMUM: [Choice; 3] = with_slot(LINK_CHOICES_MAXIMUM);
+const CONSOLE_LINK_CHOICES_AVERAGE: [Choice; 3] = with_slot(LINK_CHOICES_AVERAGE);
+const CONSOLE_LINK_CHOICES_ALL: [Choice; 4] = with_slot(LINK_CHOICES_ALL);
+
+/// Where a link-mode row lives: an insert, or a console entry (which adds the `slot` choice).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum LinkRow {
+    Insert,
+    Console,
+}
+
 /// The launch descriptor of a native effect identity, or `None` for a `cid` effect, an unknown
 /// effect or a registry that failed to build.
 fn contract(identity: &EffectIdentity) -> Option<&'static EffectDescriptor> {
@@ -97,9 +132,10 @@ pub(crate) fn has_rows(identity: &EffectIdentity) -> bool {
     contract(identity).is_some()
 }
 
-/// Whether an insert of `identity` has a link-mode row: the effect supports a choice of modes.
+/// Whether an insert or a console entry of `identity` has a link-mode row: the effect supports a
+/// choice of modes.
 pub(crate) fn has_link_mode_row(identity: &EffectIdentity) -> bool {
-    contract(identity).is_some_and(|descriptor| link_choices(descriptor).is_some())
+    contract(identity).is_some_and(|descriptor| link_choices(descriptor, LinkRow::Insert).is_some())
 }
 
 /// The numeric code of a link mode: the `effect_contract::LinkMode` code.
@@ -117,12 +153,40 @@ fn link_mode_of(code: f32) -> Option<LinkMode> {
         .find(|mode| link_code(*mode) == code)
 }
 
-/// The choices of the link modes an effect supports, or `None` when it supports only one.
-pub(crate) fn link_choices(descriptor: &EffectDescriptor) -> Option<&'static [Choice]> {
-    match descriptor.supported_link_modes.bits() {
-        3 => Some(&LINK_CHOICES_MAXIMUM),
-        5 => Some(&LINK_CHOICES_AVERAGE),
-        7 => Some(&LINK_CHOICES_ALL),
+/// The numeric code of a console entry's link mode: `0` for `slot`, else the override's code.
+fn console_link_code(mode: ConsoleLinkMode) -> f32 {
+    match mode {
+        ConsoleLinkMode::Slot => LINK_SLOT_CODE,
+        ConsoleLinkMode::DualMono => link_code(LinkMode::DualMono),
+        ConsoleLinkMode::Maximum => link_code(LinkMode::Maximum),
+        ConsoleLinkMode::Average => link_code(LinkMode::Average),
+    }
+}
+
+fn console_link_mode_of(code: f32) -> Option<ConsoleLinkMode> {
+    [
+        ConsoleLinkMode::Slot,
+        ConsoleLinkMode::DualMono,
+        ConsoleLinkMode::Maximum,
+        ConsoleLinkMode::Average,
+    ]
+    .into_iter()
+    .find(|mode| console_link_code(*mode) == code)
+}
+
+/// The choices of the link modes an effect supports at `row`, or `None` when it supports only
+/// one: a console entry's list starts with `slot`.
+pub(crate) fn link_choices(
+    descriptor: &EffectDescriptor,
+    row: LinkRow,
+) -> Option<&'static [Choice]> {
+    match (descriptor.supported_link_modes.bits(), row) {
+        (3, LinkRow::Insert) => Some(&LINK_CHOICES_MAXIMUM),
+        (5, LinkRow::Insert) => Some(&LINK_CHOICES_AVERAGE),
+        (7, LinkRow::Insert) => Some(&LINK_CHOICES_ALL),
+        (3, LinkRow::Console) => Some(&CONSOLE_LINK_CHOICES_MAXIMUM),
+        (5, LinkRow::Console) => Some(&CONSOLE_LINK_CHOICES_AVERAGE),
+        (7, LinkRow::Console) => Some(&CONSOLE_LINK_CHOICES_ALL),
         _ => None,
     }
 }
@@ -216,29 +280,36 @@ pub(crate) fn bypass_descriptor() -> ControlDescriptor {
     }
 }
 
-/// The link-mode row of an insert of `effect_id` whose supported modes are `choices`.
+/// The link-mode row at `row` of an instance of `effect_id` whose choices are `choices` (from
+/// [`link_choices`] at the same `row`). Its minimum and default are the first choice: an insert's
+/// `dual_mono`, a console entry's `slot`.
 pub(crate) fn link_mode_descriptor(
     effect_id: &str,
     choices: &'static [Choice],
+    row: LinkRow,
 ) -> ControlDescriptor {
-    let class = if effect_id == MULTIBAND_ID {
-        ruled_live_not_built(
+    let class = match row {
+        _ if effect_id == MULTIBAND_ID => ruled_live_not_built(
             MULTIBAND_LINK_ISSUE,
             "decision 15 E2, #1367 makes the link mode live",
-        )
-    } else {
-        ControlClass::RebuildOnly {
+        ),
+        LinkRow::Insert => ControlClass::RebuildOnly {
             reason: RebuildReason::Optimisation,
             reopen: "decision 15 E2, #1368-#1371",
-        }
+        },
+        LinkRow::Console => ControlClass::RebuildOnly {
+            reason: RebuildReason::Optimisation,
+            reopen: "#1371",
+        },
     };
+    let first = choices.first().map_or(1.0, |choice| choice.value);
     ControlDescriptor {
         name: "link_mode",
         display_name: "Link Mode",
         kind: ControlKind::Enumeration,
-        minimum: 1.0,
-        maximum: choices.last().map_or(1.0, |choice| choice.value),
-        default: 1.0,
+        minimum: first,
+        maximum: choices.last().map_or(first, |choice| choice.value),
+        default: first,
         taper: Taper::Stepped,
         lattice: ParameterLattice::indices(),
         choices,
@@ -270,12 +341,36 @@ fn resolved(params: &[EffectParam], parameter: &ParameterDescriptor, side: Side)
     )
 }
 
+/// An instance's link mode as its row holds it.
+#[derive(Clone, Copy)]
+pub(crate) enum InstanceLink {
+    Insert(LinkMode),
+    Console(ConsoleLinkMode),
+}
+
+impl InstanceLink {
+    const fn row(self) -> LinkRow {
+        match self {
+            Self::Insert(_) => LinkRow::Insert,
+            Self::Console(_) => LinkRow::Console,
+        }
+    }
+
+    fn code(self) -> f32 {
+        match self {
+            Self::Insert(mode) => link_code(mode),
+            Self::Console(mode) => console_link_code(mode),
+        }
+    }
+}
+
 /// One effect instance as a listing sees it.
 pub(crate) struct Instance<'a> {
     pub(crate) identity: &'a EffectIdentity,
     pub(crate) bypass: bool,
-    /// `Some` for an insert; a console slot's link mode is a slot declaration and has no row.
-    pub(crate) link_mode: Option<LinkMode>,
+    /// An insert's link mode, or a console entry's (`slot` or an override); the slot's declared
+    /// mode is a slot declaration and has no row.
+    pub(crate) link_mode: InstanceLink,
     pub(crate) params: &'a [EffectParam],
 }
 
@@ -284,7 +379,7 @@ impl<'a> Instance<'a> {
         Self {
             identity: &effect.identity,
             bypass: effect.bypass,
-            link_mode: Some(effect.link_mode),
+            link_mode: InstanceLink::Insert(effect.link_mode),
             params: &effect.params,
         }
     }
@@ -293,14 +388,14 @@ impl<'a> Instance<'a> {
         Self {
             identity,
             bypass: entry.bypass,
-            link_mode: None,
+            link_mode: InstanceLink::Console(entry.link_mode),
             params: &entry.params,
         }
     }
 }
 
 /// Append the rows of one instance, in order: bypass, the parameters in descriptor order, then the
-/// link mode of an insert with a choice of modes.
+/// link mode of an instance with a choice of modes.
 pub(crate) fn push_rows(
     out: &mut Vec<ControlRow>,
     strip: &StableId,
@@ -330,14 +425,15 @@ pub(crate) fn push_rows(
             |side| resolved(instance.params, parameter, side),
         );
     }
-    if let (Some(mode), Some(choices)) = (instance.link_mode, link_choices(descriptor)) {
+    let link = instance.link_mode;
+    if let Some(choices) = link_choices(descriptor, link.row()) {
         push_control(
             out,
             &owner,
             section,
             LINK_MODE_CONTROL,
-            &link_mode_descriptor(effect_id, choices),
-            |_| link_code(mode),
+            &link_mode_descriptor(effect_id, choices, link.row()),
+            |_| link.code(),
         );
     }
 }
@@ -350,9 +446,10 @@ pub(crate) fn resolve(instance: &Instance<'_>, control: u32) -> Option<Resolved>
     Some(match control {
         BYPASS_CONTROL => Resolved::stored(bypass_descriptor(), |_| toggle(instance.bypass)),
         LINK_MODE_CONTROL => {
-            let (mode, choices) = (instance.link_mode?, link_choices(descriptor)?);
-            Resolved::stored(link_mode_descriptor(effect_id, choices), |_| {
-                link_code(mode)
+            let link = instance.link_mode;
+            let choices = link_choices(descriptor, link.row())?;
+            Resolved::stored(link_mode_descriptor(effect_id, choices, link.row()), |_| {
+                link.code()
             })
         }
         control => {
@@ -379,10 +476,16 @@ pub(crate) const fn session_unit(unit: ParameterUnit) -> SessionUnit {
     }
 }
 
+/// An instance's link mode as a write reaches it.
+enum InstanceLinkMut<'a> {
+    Insert(&'a mut LinkMode),
+    Console(&'a mut ConsoleLinkMode),
+}
+
 /// The parts of one instance that a write reaches.
 struct InstanceMut<'a> {
     bypass: &'a mut bool,
-    link_mode: Option<&'a mut LinkMode>,
+    link_mode: InstanceLinkMut<'a>,
     params: &'a mut Vec<EffectParam>,
 }
 
@@ -471,7 +574,7 @@ fn instance_mut<'a>(
             let entry = console.iter_mut().find(|entry| entry.slot == *slot)?;
             Some(InstanceMut {
                 bypass: &mut entry.bypass,
-                link_mode: None,
+                link_mode: InstanceLinkMut::Console(&mut entry.link_mode),
                 params: &mut entry.params,
             })
         }
@@ -481,7 +584,7 @@ fn instance_mut<'a>(
                 .find(|candidate| candidate.id == *effect)?;
             Some(InstanceMut {
                 bypass: &mut effect.bypass,
-                link_mode: Some(&mut effect.link_mode),
+                link_mode: InstanceLinkMut::Insert(&mut effect.link_mode),
                 params: &mut effect.params,
             })
         }
@@ -506,17 +609,18 @@ pub(crate) fn write(
     let descriptor = identity_of(model, strip, &address.section)
         .and_then(contract)
         .ok_or(ControlError::AddressUnknown)?;
-    let mut instance =
+    let instance =
         instance_mut(model, strip, &address.section).ok_or(ControlError::AddressUnknown)?;
     match address.control {
         BYPASS_CONTROL => *instance.bypass = is_on(value),
-        LINK_MODE_CONTROL => {
-            let target = instance
-                .link_mode
-                .as_deref_mut()
-                .ok_or(ControlError::AddressUnknown)?;
-            *target = link_mode_of(value).ok_or(ControlError::Domain)?;
-        }
+        LINK_MODE_CONTROL => match instance.link_mode {
+            InstanceLinkMut::Insert(target) => {
+                *target = link_mode_of(value).ok_or(ControlError::Domain)?;
+            }
+            InstanceLinkMut::Console(target) => {
+                *target = console_link_mode_of(value).ok_or(ControlError::Domain)?;
+            }
+        },
         control => {
             let parameter = descriptor
                 .parameters

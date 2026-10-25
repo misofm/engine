@@ -466,7 +466,7 @@ export class LiveControlEdits {
  */
 export class EffectEdits<E extends EffectId> extends EffectControlBuilders<E> {
   readonly #stripId: string;
-  readonly #rack: LiveControlRack;
+  protected readonly rack: LiveControlRack;
   readonly #stableId: string | undefined;
   readonly #set: ControlSetter;
   protected readonly effectId: E;
@@ -482,7 +482,7 @@ export class EffectEdits<E extends EffectId> extends EffectControlBuilders<E> {
   ) {
     super();
     this.#stripId = instance.stripId;
-    this.#rack = instance.rack;
+    this.rack = instance.rack;
     this.#stableId = instance.stableId;
     this.effectId = instance.effectId;
     this.#set = set;
@@ -496,7 +496,7 @@ export class EffectEdits<E extends EffectId> extends EffectControlBuilders<E> {
           + `stable ID: ${NO_LAYOUT}`,
       );
     }
-    return this.#rack === "console"
+    return this.rack === "console"
       ? { kind: "console", slot: stable }
       : { kind: "inserts", effect: stable };
   }
@@ -537,7 +537,7 @@ export class EffectEdits<E extends EffectId> extends EffectControlBuilders<E> {
       );
     }
     return observationEdit(armed, {
-      stripId: this.#stripId, rack: this.#rack, effectId: stable, tapId: observation.id,
+      stripId: this.#stripId, rack: this.rack, effectId: stable, tapId: observation.id,
     }, windowBlocks);
   }
 }

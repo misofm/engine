@@ -3318,6 +3318,56 @@ mod tests {
             );
         }
         assert_eq!(model, before, "a response read writes nothing");
+
+        // A console entry's link-mode override `0` (`slot`, #1369) is the slot's declared mode:
+        // the session's EQ slot becomes a `maximum` compressor, whose entry the override passes
+        // the validator and resolves, and the compressor (no response) is then refused as an
+        // effect, not as an override.
+        let mut comp_console = model.clone();
+        let slot = &mut comp_console.console.pre_insert[0];
+        slot.identity = EffectIdentity::Native {
+            effect_id: session::StableId::parse("miso.compressor").expect("effect"),
+        };
+        slot.link_mode = session::LinkMode::Maximum;
+        for track in &mut comp_console.tracks {
+            track.console[0].params.clear();
+        }
+        let slot_override = row(controls::LINK_MODE_CONTROL, ParameterChannel::Both, 0.0);
+        let error = serve_response(
+            1 << 20,
+            &comp_console,
+            &address_request(
+                strip_address("eq1", ControlSection::Console, Some("eq")),
+                vec![slot_override],
+            ),
+        )
+        .expect_err("a compressor has no response");
+        assert_eq!(
+            (error.status, error.code),
+            (StatusCode::Unavailable, "response.effect.unsupported")
+        );
+        let resolved = resolve_response_target(
+            &comp_console,
+            "eq1",
+            ResponseAddressSection::Console("eq"),
+            &[ResponseParameterOverride {
+                parameter_id: controls::LINK_MODE_CONTROL,
+                channel: contract_channel(ParameterChannel::Both),
+                value: 0.0,
+            }],
+            RATE,
+        )
+        .expect("the slot override resolves");
+        assert!(
+            matches!(
+                resolved,
+                crate::ResolvedResponseTarget::Effect {
+                    link_mode: effect_contract::LinkMode::Maximum,
+                    ..
+                }
+            ),
+            "`slot` resolves the slot's declared mode"
+        );
     }
 
     /// #1575 gate 4: an address that names no response owner is refused with its own status and

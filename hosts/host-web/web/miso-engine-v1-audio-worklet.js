@@ -1037,8 +1037,7 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
 
   readStatus() {
     const view = this.statusView;
-    if (view.getUint32(0, true) !== 80 || view.getUint32(4, true) !== ABI_VERSION
-        || view.getUint32(28, true) !== 0) {
+    if (view.getUint32(0, true) !== 80 || view.getUint32(4, true) !== ABI_VERSION) {
       throw new RangeError("Invalid status report");
     }
     return Object.freeze({
@@ -1047,6 +1046,9 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
       backend: view.getUint32(16, true),
       sampleRateHz: view.getUint32(20, true),
       quantumFrames: view.getUint32(24, true),
+      // Issue #1294b: the structural commands this instance rebuilt in its own message handler
+      // (a page without cross-origin isolation), counted by the engine.
+      blockingRebuilds: view.getUint32(28, true),
       nextAbsoluteSample: view.getBigUint64(32, true),
       renderedQuanta: view.getBigUint64(40, true),
       liveValuesSuperseded: view.getBigUint64(48, true),
