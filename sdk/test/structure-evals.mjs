@@ -34,9 +34,54 @@ const OPTIONS = { liveControls: { meterBlocks: 1, observationTaps: 8 } };
 const STRIP = (id) => ({ kind: "strip", id });
 
 let asset;
+/**
+ * The blocks a rebuild that restarts a strip may take before its successor is adopted and fades
+ * in (a duck-swap, #1324a), plus one: `S` waits `q + N + C` after the commit, rounded up to a
+ * block, and the fade fires `D` after `S`. `N` is the session's mute ramp; `C` (a route line) and
+ * `D` (a strip's latency before its fader) are at most the plan's latency `L`, which the boot plan
+ * delays an impulse by: PDC aligns every path to the output.
+ */
+let duckBlocks;
+
+/** The plan latency `L`: the first output sample an impulse on every source at frame 0 reaches. */
+async function measuredLatency() {
+  const engine = await boot();
+  try {
+    const shape = engine.shape();
+    const q = shape.quantumFrames;
+    for (let block = 0; block < 64; block += 1) {
+      for (const source of shape.sources) {
+        engine.submitSource({
+          sourceId: source.id,
+          generation: 1n,
+          startFrame: BigInt(block * q),
+          planes: Array.from({ length: source.channels }, () => {
+            const plane = new Float32Array(q);
+            if (block === 0) plane[0] = 1;
+            return plane;
+          }),
+          endOfRegion: false,
+        });
+      }
+      const { left, right } = engine.render();
+      const first = [...left].findIndex((sample, index) => sample !== 0 || right[index] !== 0);
+      if (first >= 0) return block * q + first;
+    }
+    throw new Error("the impulse reaches the output within 64 blocks");
+  } finally {
+    engine.dispose();
+  }
+}
 
 before(async () => {
   asset = await MisoEngineAsset.load(await moduleBytes());
+  const session = JSON.parse(FIXTURE.session);
+  const smoothing = session.control_smoothing;
+  const muteMs = smoothing?.kind === "default" || smoothing === undefined ? 10 : smoothing.mute_ms;
+  const n = Math.round((muteMs * session.sample_rate_hz) / 1000);
+  const q = session.quantum_frames;
+  const latency = await measuredLatency();
+  duckBlocks = Math.ceil((q + n + latency) / q) + Math.ceil(latency / q) + 1;
 });
 
 const boot = () => createOfflineEngine(FIXTURE.session, { asset, ...OPTIONS });
@@ -65,6 +110,19 @@ function run(engine, from, count) {
     if (frame !== undefined) frames.push(frame);
   }
   return frames;
+}
+
+/**
+ * Blocks from `from`, as `run` renders them, until `reached()` holds after one: a rebuild that
+ * restarts a strip is adopted at its duck-swap's `S`, not at a fixed block (#1324a). Holds within
+ * `duckBlocks + extra` blocks or fails; the next block to render.
+ */
+async function runUntil(engine, from, extra, reached, what) {
+  for (let block = from; block < from + duckBlocks + extra; block += 1) {
+    run(engine, block, 1);
+    if (await reached()) return block + 1;
+  }
+  assert.fail(`${what} within ${duckBlocks + extra} blocks`);
 }
 
 /** Send a structural frame and require the core to take it as a rebuild. */
@@ -355,7 +413,21 @@ describe("#1562b-K -- a managed observation subscription follows a rebuild", () 
       });
       run(engine, 0, 4);
       rebuild(engine, "remove_comp");
-      run(engine, 4, 2);
+      // The removal restarts t1: the plan without `comp` renders from the duck-swap's `S`.
+      await runUntil(
+        engine,
+        4,
+        0,
+        () => {
+          try {
+            engine.readObservations([tap("t1", "inserts", "comp")]);
+            return false;
+          } catch (error) {
+            return /unavailable/.test(error.message);
+          }
+        },
+        "the plan without comp renders",
+      );
       assert.equal(ends.length, 1);
       assert.deepEqual(handle.ended.map((selection) => selection.effectSlotId), ["comp"]);
       // The subscription is ended; asking for the tap again is the core's unavailable.
@@ -401,13 +473,20 @@ describe("#1562b-K -- a managed observation subscription follows a rebuild", () 
       run(engine, 0, 4);
       assert.equal(engine.observationMap().bindings.find((b) => b.effectSlotId === "comp" && b.trackId === "t1").effectIndex, 1);
       rebuild(engine, "remove_eq");
-      run(engine, 4, 4);
-      assert.equal(engine.observationMap().bindings.find((b) => b.effectSlotId === "comp" && b.trackId === "t1").effectIndex, 0);
-      await handle.pump();
+      // The removal restarts t1: a duck-swap, adopted at its `S` (#1324a).
+      const index = () => engine.observationMap().bindings
+        .find((b) => b.effectSlotId === "comp" && b.trackId === "t1").effectIndex;
+      const adopted = await runUntil(engine, 4, 0, () => index() === 0, "the plan that moved comp renders");
+      assert.equal(index(), 0);
+      // The restarted strip's effects start at rest (#1324 D2): the tap opens a fresh window.
+      const next = await runUntil(engine, adopted, 2, async () => {
+        await handle.pump();
+        return handle.readLatest()[0].status === "ready";
+      }, "the moved effect's tap is ready");
       assert.equal(handle.readLatest()[0].status, "ready", "the tap is carried to the moved effect");
       assert.equal(handle.ended.length, 0);
       await handle.close();
-      run(engine, 8, 2);
+      run(engine, next, 2);
       assert.equal(engine.readObservations([tap("t1", "inserts", "comp")])[0].status, "unarmed");
     } finally {
       engine.dispose();
@@ -502,8 +581,11 @@ describe("#1677 -- an observation record names its tap by stable key", () => {
           windowBlocks: 2,
         });
         assert.equal(armed(engine, "limiter"), "unarmed", "the other effect's tap is not armed in its place");
-        run(engine, 4, 6);
-        await handle.pump();
+        // The swap restarts t3: a duck-swap, adopted at its `S` (#1324a).
+        await runUntil(engine, 4, 2, async () => {
+          await handle.pump();
+          return handle.readLatest()[0].status === "ready";
+        }, "multi's tap is ready");
         assert.equal(handle.readLatest()[0].status, "ready");
         assert.notEqual(armed(engine, "multi"), "unarmed", "multi's own tap is armed");
         assert.equal(armed(engine, "limiter"), "unarmed", "limiter's tap is not");
@@ -541,8 +623,11 @@ describe("#1677 -- an observation record names its tap by stable key", () => {
         run(engine, 0, 4);
         rebuild(engine, "swap_t3_multi_and_limiter");
         await handle.update({ selections: [tap("t3", "inserts", "multi")], windowBlocks: 2 });
-        run(engine, 4, 6);
-        await handle.pump();
+        // The swap restarts t3: a duck-swap, adopted at its `S` (#1324a).
+        await runUntil(engine, 4, 2, async () => {
+          await handle.pump();
+          return handle.readLatest()[0].status === "ready";
+        }, "multi's tap is ready");
         assert.equal(handle.readLatest()[0].status, "ready");
         assert.notEqual(armed(engine, "multi"), "unarmed");
         assert.equal(armed(engine, "limiter"), "unarmed", "limiter was released where it is now");
