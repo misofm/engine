@@ -1082,14 +1082,12 @@ fn observation_staging_resource_is_exact_for_the_taps_off_and_on_modes() {
         let meter_delivery_bytes = meter_delivery_bytes
             + strips * (size_of::<[f32; 2]>() + size_of::<f32>() + size_of::<bool>()) as u64;
         let frame_bytes = frame_bytes + meter_delivery_bytes;
-        // The one EQ's dense instance table, its producer-slot word and the IDs it copies, and
-        // its observation index entry with the same IDs again (#1586 D3).
+        // The one EQ's dense instance table, its producer-slot word and the IDs it copies. Its
+        // observation index entry is the epoch's (#1589 R2), in the control plane's row.
         let effect_ids = (model.tracks[0].id.as_str().len()
             + model.console.pre_insert[0].slot.as_str().len()) as u64;
-        let instance_bytes = (size_of::<Option<EffectInstance>>() + 2 * size_of::<u32>()) as u64
-            + effect_ids
-            + size_of::<host_core::observation::ObservationIndexEntry>() as u64
-            + effect_ids;
+        let instance_bytes =
+            (size_of::<Option<EffectInstance>>() + 2 * size_of::<u32>()) as u64 + effect_ids;
         let frame_bytes = frame_bytes + instance_bytes;
         let expected_bridge_metadata = projection
             .report
@@ -4340,14 +4338,14 @@ fn bus_meters_render_and_poll_without_allocating() {
 }
 
 /// The dense effect slot and the tap index one stable selection names, through the plan's
-/// observation index (#1586 D3), so a test reaches the reader the read reads.
+/// observation index (#1586 D3, the epoch's since #1589 R2), so a test reaches the reader the read reads.
 fn resolve_observation(
     ready: &ReadyOwnership,
     selection: &ObservationSelection<'_>,
 ) -> Result<(usize, usize), ObservationReadError> {
     let entry = ready
-        .shape
-        .observation_index
+        .observation_index()
+        .ok_or(ObservationReadError::WrongState)?
         .find(selection.track_id, selection.rack, selection.effect_slot_id)
         .ok_or(ObservationReadError::InvalidSelection)?;
     let handle = entry.handle.ok_or(ObservationReadError::Unsupported)?;
@@ -4734,8 +4732,7 @@ fn observe_key(
 fn armed_mask(host: &mut AudioWorkletEngineHost, strip_id: &str, insert_id: &str) -> Option<u32> {
     let ready = host.ready.as_ref().expect("ready");
     let reader = ready
-        .shape
-        .observation_index
+        .observation_index()?
         .find(strip_id, LiveEffectRack::Inserts, insert_id)?
         .handle?;
     let companions = host
