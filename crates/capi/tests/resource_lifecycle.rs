@@ -1406,9 +1406,10 @@ impl Budget {
 /// above 11,520 and 51,648: 22,591.8 -> 22,592 and 62,696.7 -> 62,720.
 ///
 /// #1587a with #1577 (both on `main`): the meter rows above and the response capture's are
-/// independent and add up. `capi_retained_bytes` measured 312,897 (x86-64, deterministic; 259,662
-/// + 52,620 for the capture, + 615 from other merged rows), above both slices' ceilings (285,632
-/// and 275,584), so the ceiling is 312,897 plus 10 %, rounded up to 64: 344,186.7 -> 344,192.
+/// independent and add up. `capi_retained_bytes` measured 312,897 (x86-64, deterministic: 259,662
+/// plus 52,620 for the capture and 615 from other merged rows), above both slices' ceilings
+/// (285,632 and 275,584), so the ceiling is 312,897 plus 10 %, rounded up to 64: 344,186.7 ->
+/// 344,192.
 const REFERENCE_BUDGETS: [Budget; 19] = [
     Budget {
         row: "graph_session_plus_plan_bytes",
