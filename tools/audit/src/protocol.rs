@@ -216,10 +216,10 @@ fn prepare_corpus() -> Corpus {
     corpus.push_success(TypedSuccessResponseFrame {
         request_id: request_id(12),
         revision: SessionRevision(7),
-        payload: SuccessResponsePayload::SessionTransactionApplied(TransactionApplied {
-            applied_operations: 64,
-            edit_path: EditPath::Live,
-        }),
+        payload: SuccessResponsePayload::SessionTransactionApplied(TransactionApplied::new(
+            64,
+            EditPath::Live,
+        )),
     });
     corpus.push_event(TypedEventFrame {
         revision: SessionRevision(7),
@@ -375,10 +375,10 @@ fn run_audit(corpus: &mut Corpus, egress: &mut EgressCorpus) {
         let response = TypedSuccessResponseFrame {
             request_id: request_id(101),
             revision: SessionRevision(7),
-            payload: SuccessResponsePayload::SessionTransactionApplied(TransactionApplied {
-                applied_operations: 64,
-                edit_path: EditPath::Live,
-            }),
+            payload: SuccessResponsePayload::SessionTransactionApplied(TransactionApplied::new(
+                64,
+                EditPath::Live,
+            )),
         };
         corpus.frame_output.fill(0xa5);
         let response_len = corpus

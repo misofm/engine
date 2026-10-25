@@ -858,9 +858,14 @@ mod controls_object {
                 .collect();
             let declared: Vec<_> = descriptor.parameters.iter().map(|p| p.name).collect();
             assert_eq!(names, declared, "{id} parameter names");
-            match &rows.link_mode {
-                Some(row) => assert_row(&json["linkMode"], row, &format!("{id}/link_mode")),
-                None => assert!(json["linkMode"].is_null(), "{id} has no link-mode row"),
+            for (key, row) in [
+                ("linkMode", &rows.link_mode),
+                ("consoleLinkMode", &rows.console_link_mode),
+            ] {
+                match row {
+                    Some(row) => assert_row(&json[key], row, &format!("{id}/{key}")),
+                    None => assert!(json[key].is_null(), "{id} has no {key} row"),
+                }
             }
         }
     }

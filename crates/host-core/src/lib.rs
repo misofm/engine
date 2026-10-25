@@ -104,6 +104,7 @@ pub mod duck;
 #[cfg(feature = "control-provider")]
 pub mod live_delta;
 pub mod meters;
+pub mod observation;
 pub use control_preparation::{
     EQ_EDIT_CAPACITY, EQ_TARGET_CAPACITY, EQ_VALUE_COUNT, EqTargetEdit, EqTargetPreparer,
     EqTargetPreparerError, INPUT_FILTER_EDIT_CAPACITY, INPUT_FILTER_TARGET_CAPACITY,
