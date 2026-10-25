@@ -105,6 +105,7 @@ pub(crate) fn rich_session(tracks: usize) -> SessionModel {
     template.console.push(ConsoleEntry {
         slot: id("post-clip"),
         bypass: false,
+        link_mode: session::ConsoleLinkMode::Slot,
         params: Vec::new(),
     });
     let route = model.routes[0].clone();

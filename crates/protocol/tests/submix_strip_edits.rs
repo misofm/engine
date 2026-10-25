@@ -25,7 +25,7 @@ use session::{
 };
 
 const BUILTINS: &str = r#"{ "polarity_invert": false, "trim_db": 0.0, "hpf_hz": 20.0, "lpf_hz": 20000.0, "delay_samples": 0 }"#;
-const EQ_ENTRY: &str = r#"{ "slot": "eq", "bypass": false, "params": [ { "parameter_id": 1, "channel": "both", "unit": "db", "value": 0.0 } ] }"#;
+const EQ_ENTRY: &str = r#"{ "slot": "eq", "bypass": false, "link_mode": "slot", "params": [ { "parameter_id": 1, "channel": "both", "unit": "db", "value": 0.0 } ] }"#;
 const INSERTS: &str = r#"{ "effects": [
     { "id": "eq", "identity": { "kind": "native", "effect_id": "miso.parametric-eq" }, "quality": "normal", "bypass": false, "link_mode": "dual_mono", "params": [ { "parameter_id": 1, "channel": "both", "unit": "db", "value": 0.0 } ], "sidechain": { "kind": "none" } },
     { "id": "comp", "identity": { "kind": "native", "effect_id": "miso.compressor" }, "quality": "normal", "bypass": false, "link_mode": "maximum", "params": [], "sidechain": { "kind": "none" } } ] }"#;
@@ -383,6 +383,7 @@ fn cases() -> Vec<Case> {
                     console: vec![ConsoleEntry {
                         slot: id("eq"),
                         bypass: true,
+                        link_mode: session::ConsoleLinkMode::Slot,
                         params: Vec::new(),
                     }],
                     ramp_samples: None,

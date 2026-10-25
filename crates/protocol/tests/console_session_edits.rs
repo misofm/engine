@@ -29,7 +29,7 @@ const EQ_SLOT: &str = r#"{ "slot": "eq", "identity": { "kind": "native", "effect
 const EQ_SLOT_HIGH: &str = r#"{ "slot": "eq", "identity": { "kind": "native", "effect_id": "miso.parametric-eq" }, "quality": "high", "link_mode": "dual_mono" }"#;
 const COMP_SLOT: &str = r#"{ "slot": "comp", "identity": { "kind": "native", "effect_id": "miso.compressor" }, "quality": "normal", "link_mode": "maximum" }"#;
 const LIMIT_SLOT: &str = r#"{ "slot": "limiter", "identity": { "kind": "native", "effect_id": "miso.true-peak-limiter" }, "quality": "high", "link_mode": "maximum" }"#;
-const EQ_ENTRY: &str = r#"{ "slot": "eq", "bypass": false, "params": [ { "parameter_id": 1, "channel": "both", "unit": "db", "value": 0.0 } ] }"#;
+const EQ_ENTRY: &str = r#"{ "slot": "eq", "bypass": false, "link_mode": "slot", "params": [ { "parameter_id": 1, "channel": "both", "unit": "db", "value": 0.0 } ] }"#;
 const EQ_INSERT: &str = r#"{ "id": "eq", "identity": { "kind": "native", "effect_id": "miso.parametric-eq" }, "quality": "normal", "bypass": false, "link_mode": "dual_mono", "params": [ { "parameter_id": 1, "channel": "both", "unit": "db", "value": 0.0 } ], "sidechain": { "kind": "none" } }"#;
 
 /// One strict Session V1 document: `console` is the root console object; `a` and `b` are the two
@@ -165,6 +165,7 @@ fn entry(name: &str, bypass: bool, params: Vec<EffectParam>) -> ConsoleEntry {
     ConsoleEntry {
         slot: id(name),
         bypass,
+        link_mode: session::ConsoleLinkMode::Slot,
         params,
     }
 }
@@ -214,9 +215,9 @@ fn through_the_wire(edits: &[SessionEdit]) -> Vec<SessionEdit> {
 /// the wire, because the committed snapshot then differs from the hand-written document.
 #[test]
 fn every_console_edit_round_trips_to_the_document_the_parser_builds() {
-    let edited = r#"{ "slot": "eq", "bypass": true, "params": [ { "parameter_id": 1, "channel": "both", "unit": "db", "value": 0.0 } ] }"#;
-    let two_params = r#"{ "slot": "eq", "bypass": false, "params": [ { "parameter_id": 1, "channel": "both", "unit": "db", "value": 0.0 }, { "parameter_id": 3, "channel": "left", "unit": "hz", "value": 1000.0 } ] }"#;
-    let limiter = r#"{ "slot": "limiter", "bypass": true, "params": [ { "parameter_id": 3, "channel": "right", "unit": "db", "value": -1.0 } ] }"#;
+    let edited = r#"{ "slot": "eq", "bypass": true, "link_mode": "slot", "params": [ { "parameter_id": 1, "channel": "both", "unit": "db", "value": 0.0 } ] }"#;
+    let two_params = r#"{ "slot": "eq", "bypass": false, "link_mode": "slot", "params": [ { "parameter_id": 1, "channel": "both", "unit": "db", "value": 0.0 }, { "parameter_id": 3, "channel": "left", "unit": "hz", "value": 1000.0 } ] }"#;
+    let limiter = r#"{ "slot": "limiter", "bypass": true, "link_mode": "slot", "params": [ { "parameter_id": 3, "channel": "right", "unit": "db", "value": -1.0 } ] }"#;
     let limiter_entry = entry(
         "limiter",
         true,
@@ -597,11 +598,11 @@ fn a_slot_set_change_that_skips_a_track_refuses_whole() {
                 &console(&[EQ_SLOT, COMP_SLOT], &[]),
                 &entries(&[
                     EQ_ENTRY,
-                    r#"{ "slot": "comp", "bypass": false, "params": [] }"#
+                    r#"{ "slot": "comp", "bypass": false, "link_mode": "slot", "params": [] }"#
                 ]),
                 &entries(&[
                     EQ_ENTRY,
-                    r#"{ "slot": "comp", "bypass": false, "params": [] }"#
+                    r#"{ "slot": "comp", "bypass": false, "link_mode": "slot", "params": [] }"#
                 ]),
             ))
             .expect("parses")

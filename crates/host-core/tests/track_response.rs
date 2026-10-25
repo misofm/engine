@@ -141,11 +141,13 @@ fn snapshot() -> (String, ResponseSnapshot) {
         ConsoleEntry {
             slot: sid("pre-eq"),
             bypass: false,
+            link_mode: session::ConsoleLinkMode::Slot,
             params: eq_params(4.0, true),
         },
         ConsoleEntry {
             slot: sid("post-eq"),
             bypass: false,
+            link_mode: session::ConsoleLinkMode::Slot,
             params: eq_params(-3.0, true),
         },
     ];
