@@ -131,4 +131,8 @@ Half a day.
 - **Companion row (outside the authorized paths).** The worklet calls `replace_document_ptr` after
   construction, so the hermetic suite requires a `wrapped: false` row in
   `tools/realtime-policy/render-thread-exports.json` (handler `readControlCommand`), and the policy
-  tool's `UNWRAPPED_EXPORTS` list must name it (as #1294a's `watermark_read`). Awaiting root.
+  tool's `UNWRAPPED_EXPORTS` list must name it (as #1294a's `watermark_read`). And
+  `hosts/host-web/tests/protocol_cross_host.rs` step 1 pins the capabilities asymmetry ("#1697
+  removes this exception"): with the transport on, the C ABI's reply is the browser's plus only
+  `0x0010`-`0x0012`. The three edits are one patch, not committed, awaiting root's authorization;
+  every gate passes with it applied, and without it the hermetic suite and that test are red.
