@@ -68,3 +68,71 @@ watermark) predates #1325's two-phase machinery. The issue is split:
   re-point not ducked; a re-point not armed.
 - Attempt 2 mutants, each red: `known` without the source check (gate 2 (b)); the duck set's
   `OutputInput => false` (gate 1); `known` without the lane-less rule (gate 2 (c)).
+
+## 1953b decisions (root rulings and implementer facts, 2026-10-25)
+
+- Root: keep the decision-14 / D15-9 master fold; no live lane for output routes. Build the
+  successor-side fading copy; it fires at adoption (`f = 0`). b1 (removal) then b2 (re-point), one
+  checkpoint each. b2 ramps both halves; the 1953a `known` rule is lifted only with the copy.
+- The copy (`prepare.rs` `route_copies`): for a lane-less route of `committed` (not muted) that
+  `next` lacks or re-points, whose source strip `next` keeps as the same kind and that no duck of
+  the transaction silences (duck overlay, transition fallback), the successor compiles `next` plus
+  the old route under a copy ID as a transition route. Only the effects, builtins and graph see the
+  added route; every join, the catalog, the counts and the report read `next`. The copy ID is the
+  old ID plus the fewest `-` that no route of either model (or an earlier copy) holds, so it sorts
+  where the old route sorted (no ID lies between `x` and `x-`).
+- Alias: the copy's node takes the old route's input floor, and its source and destination lines
+  carry from the old route's (same endpoints); its op carries the old route's state when the
+  predecessor gave it a live op (an in-flight transition route, or a kept copy). A copy out of a
+  strip the successor restarts takes no op state and mutes at once (ramp 0): phase 1 ducked the
+  strip, so its tap is silent at the swap.
+- The arm: new `GraphFadeTarget::RouteOut`, `LiveRoute::arm_fade_out` (fires to `[0; 4]`, muted,
+  over the session mute ramp, `D = 0`), and `GraphFadeArm::tail_samples` (the copy's destination
+  line).
+- Retirement: deviation from the scope note's watermark rule. `SuccessorBase` holds no watermark
+  (it is control-plane state, outside this slice's paths), so render sets a second flag on the
+  existing fade watch: an entry *settles* at the first block at or after fire + ramp + tail
+  (`FadeArmState::Settling`). The inventory keeps one row per copy (`RouteCopyRow`: the copy's
+  route and its fade entry); a successor keeps each copy whose entry has not settled, with its fade
+  entry carried by pair (#1392 D3). Acked-batch question: the watch is a level written by render
+  alone, no queue, so nothing is dropped; a flag read clear while render settles the entry only
+  keeps a silent copy for one more plan.
+- #1877 verify gap (root): a lane-less transition route whose entry fired but has not settled, kept
+  unchanged, is re-armed and carried like an unfired one (#1877 D2, D6), so a successor prepared
+  after the fire and adopted mid-ramp continues the ramp instead of folding to its constant.
+- Out of this slice: a value change of a lane-less route (old D1 (b)(2)) still steps; a warm
+  successor (#1354) compiles copies with the lead's floors but has no gate.
+
+## Paths (1953b)
+
+`crates/graph/src/{lib,runtime}.rs`, `crates/host-core/src/prepare.rs`,
+`crates/host-core/tests/successor_swap.rs`, `crates/capi/tests/strip_transitions.rs`, this spec.
+Comment text only, outside the scope note's list: `crates/host-core/src/transition.rs`,
+`crates/capi/include/miso_engine_v1.h`, `docs/C_ABI_V1_QUALIFICATION.md` (the 1953a paragraphs said
+such a route still steps).
+
+## Gates (1953b)
+
+1. `successor_swap`'s
+   `a_removed_or_repointed_lane_less_route_fades_out_through_its_line_on_every_width`, with and
+   without a 486-sample destination line: (a) a removal equals the `pre_fader` reference live-muted
+   at the swap; (b) a second swap prepared after the fire, adopted mid-ramp, keeps the copy; (c) a
+   second swap at block 11 drops a settled copy and keeps one whose line still delivers; (d) a
+   re-point into the bus equals a live mute of the old route and a live unmute of the new one.
+2. `a_pending_route_fade_survives_a_second_swap_on_every_width` (d) gains the swap prepared after
+   the fire (the #1877 gap).
+3. `capi`'s `a_removed_output_route_fades_out_through_its_line`: the C ABI parity row.
+4. `graph`'s `a_fade_arm_fires_at_the_first_block_after_its_first_played_block_plus_d` checks the
+   settled flag after each block.
+
+## Evidence (1953b, attempt 1)
+
+- Tests whose claim changed on purpose: `an_added_submix_delays_its_fade_by_its_longest_route_line`
+  (the two re-pointed lane-less routes now add two copy arms) and
+  `a_repointed_send_fades_in_at_its_new_destination` (its (c), "a re-point from a lane-less route
+  arms nothing", is deleted: gate 1 (d) owns the new claim). Every other existing test passes
+  unchanged.
+- Mutants, each red: no copies; no line alias; no fade pair for a kept copy; no op carry for a
+  copy; tail ignored; settled ignored; no in-flight re-arm (gate 2); settle at fire (gate 4); b2
+  copy only on removal; b2 `known` keeps the lane-less rule. The capi row is red on no copies and
+  on no line alias.
