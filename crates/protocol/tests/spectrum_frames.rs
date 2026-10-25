@@ -533,10 +533,8 @@ fn stream_reply(
             None
         },
     };
-    let target_json = target.map_or_else(
-        || "null".to_owned(),
-        |(kind, id, _)| target_json(kind, id),
-    );
+    let target_json =
+        target.map_or_else(|| "null".to_owned(), |(kind, id, _)| target_json(kind, id));
     let channels = target.map_or_else(
         || "null".to_owned(),
         |(_, _, channels)| format!("\"{}\"", channel_name(channels)),
