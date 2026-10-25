@@ -195,10 +195,12 @@ export interface TransportRequest {
 
 /**
  * One meter table entry (#1583 D1): the session output, or a strip by its stable ID, and the metric.
- * Its handle is its 1-based position in the table.
+ * The master strip (#1690 D3) is the strip the session's master row names; it has no strip ID and
+ * carries gain reduction only. Its handle is its 1-based position in the table.
  */
 export type MeterEntry =
   | { readonly target: "output"; readonly metric: MeterMetricName }
+  | { readonly target: "master"; readonly metric: "gainReduction" }
   | { readonly target: "strip"; readonly stripId: string; readonly metric: MeterMetricName };
 
 /** A meter table entry's metric. */
@@ -468,16 +470,20 @@ export function encodeTelemetryConfigureRequest(request: {
   ]);
 }
 
-/** One meter table entry as its repeated field 7 message: target, the strip ID of a strip, metric. */
+/**
+ * One meter table entry as its repeated field 7 message: target, the strip ID of a strip, metric.
+ * No metric check here: the engine refuses an invalid target and metric pair (`INVALID_FIELD`).
+ */
 function meterEntryField(entry: MeterEntry): Uint8Array {
   if (typeof entry !== "object" || entry === null) throw new MisoUsageError("a meter entry must be an object");
   const metric = field(3, WIRE_U8, true, u8(code(METRIC_CODES, entry.metric, "a meter metric")));
   if (entry.target === "output") return nestedField(7, false, [field(1, WIRE_U8, true, u8(1)), metric]);
+  if (entry.target === "master") return nestedField(7, false, [field(1, WIRE_U8, true, u8(3)), metric]);
   if (entry.target === "strip") {
     if (typeof entry.stripId !== "string") throw new MisoUsageError("a strip meter entry needs a stripId string");
     return nestedField(7, false, [field(1, WIRE_U8, true, u8(2)), field(2, WIRE_UTF8, false, text(entry.stripId)), metric]);
   }
-  throw new MisoUsageError(`a meter target ${String((entry as { target?: unknown }).target)} is not output or strip`);
+  throw new MisoUsageError(`a meter target ${String((entry as { target?: unknown }).target)} is not output, master or strip`);
 }
 
 /** Encode `COUNTERS_GET`: the named counters, in the order given, or every counter when `ids` is absent. */
@@ -661,6 +667,10 @@ function meterEntryOf(row: RawField): MeterEntry {
   const target = readU8(inner, 1);
   const strip = only(inner, 2, WIRE_UTF8);
   if (target === 1 && strip === undefined) return Object.freeze({ target: "output", metric });
+  if (target === 3 && strip === undefined) {
+    if (metric !== "gainReduction") throw malformed("a master meter entry's metric is not gain reduction");
+    return Object.freeze({ target: "master", metric });
+  }
   if (target === 2 && strip !== undefined) {
     let stripId: string;
     try {

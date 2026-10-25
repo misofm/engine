@@ -119,8 +119,8 @@ browser, an invalid record on the C ABI), never `0`.
   formula (`reduction_db`).
 - No master peak. The master has no structural bus; its peak is the strip's own entry.
 - No change to #1683's row, the boot word (#1689) or the browser's lease frame bytes.
-- No SDK API beyond the generated table type; a later issue gives the SDK a `masterGainReduction`
-  call on the batch.
+- No SDK API beyond the generated table type. Root's R1 ruling (2026-10-25) dropped the
+  `masterGainReduction` call on the batch: the app reads the master entry's record by its handle.
 
 ## Objective gates
 
@@ -265,3 +265,21 @@ The issue splits in two slices.
 - **Re-pin (gate 7).** After #2024 (#1578) merged (main `9d7bbb887`), the corpus's telemetry table
   gains `{master, gain reduction}`: `COMPLETE_SCHEMA_HASH` `cb8db815ed0103a0` -> `dea650f7e506833e`,
   59 frames still; only `command.telemetry_configure` and `response.telemetry` move.
+
+### #1690c record (2026-10-25, on main `90090ba09`, after #1690b) -- #1690 is done
+
+- **Scope (root, from the #1690c scope note).** No new SDK call: the master reading is
+  `records[handle - 1]` of a `meterBatch` event, or `masterGrDb` from the lease frame, so a
+  `masterGainReduction` accessor adds surface and no capability (the non-goal stays closed).
+- **Codec.** `MeterEntry` (`sdk/src/core/protocol-messages.ts`) gains
+  `{target: "master"; metric: "gainReduction"}`. The encoder writes field 1 = `u8(3)` and the
+  metric, no field 2, and adds no metric check (the engine's `INVALID_FIELD` is the one rule). The
+  decoder takes code 3 with no strip ID; code 3 with a strip ID stays malformed, and code 3 with
+  peak is malformed too (the engine never echoes it and the type cannot hold it). Both SDK engines
+  reach it through `configureTelemetry`, with no engine-specific code.
+- **Gate.** One fixture row: `full_telemetry()` in `crates/protocol/tests/sdk_message_fixture.rs`
+  gains `{master, gain reduction}`, blessed once (`sdk/test/fixtures/protocol-messages.json`: the
+  `telemetry_configure_full` request and `telemetry_full` reply only). Red on an encoder that
+  writes field 2 for the master (`telemetry_configure_full` encode) and on a decoder that refuses
+  code 3 (`telemetry_full` decode). `COMPLETE_SCHEMA_HASH` does not move (`dea650f7e506833e`).
+- **Done.** #1690 has no remaining work; root closes it at the GitHub sync.
