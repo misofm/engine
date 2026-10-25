@@ -77,8 +77,8 @@ fn an_observe_record_rides_the_observation_queue_and_emits_no_span() {
     let (mut observation, _readers) = lane(4);
 
     rig.commit(&[both(0, 0.25)]).expect("a cell");
-    rig.writer.try_push_observe(0, true, 3).expect("room");
-    rig.writer.try_push_observe(1, true, 0).expect("room");
+    rig.writer.try_push_observe(0, true, 3, 0).expect("room");
+    rig.writer.try_push_observe(1, true, 0, 0).expect("room");
 
     // Exactly one span of capacity: the parameter's cell is the only span a block stages.
     let staged = rig.stage();
@@ -100,7 +100,7 @@ fn an_observe_record_rides_the_observation_queue_and_emits_no_span() {
 #[test]
 fn an_observe_record_against_an_incapable_plan_is_reported_unbound() {
     let mut rig = Rig::new(one_shared_parameter(), 4);
-    rig.writer.try_push_observe(0, true, 1).expect("room");
+    rig.writer.try_push_observe(0, true, 1, 0).expect("room");
     assert_eq!(
         rig.lane.drain_observations(0, None),
         1,
@@ -109,7 +109,7 @@ fn an_observe_record_against_an_incapable_plan_is_reported_unbound() {
 
     // And so is a tap index the menu does not have.
     let (mut observation, _readers) = lane(2);
-    rig.writer.try_push_observe(7, true, 1).expect("room");
+    rig.writer.try_push_observe(7, true, 1, 0).expect("room");
     assert_eq!(rig.lane.drain_observations(0, Some(&mut observation)), 1);
     assert!(!observation.any_armed());
 }
@@ -124,17 +124,18 @@ fn subscriptions_apply_in_order_and_a_full_queue_refuses_the_newest() {
     let mut rig = Rig::new(one_shared_parameter(), 3);
     let (mut observation, _readers) = lane(4);
     assert_eq!(rig.writer.observe_capacity(), 3);
-    rig.writer.try_push_observe(0, true, 2).expect("room");
-    rig.writer.try_push_observe(0, false, 0).expect("room");
-    rig.writer.try_push_observe(0, true, 7).expect("room");
+    rig.writer.try_push_observe(0, true, 2, 0).expect("room");
+    rig.writer.try_push_observe(0, false, 0, 0).expect("room");
+    rig.writer.try_push_observe(0, true, 7, 0).expect("room");
     assert_eq!(rig.writer.observe_available_capacity(), 0);
-    match rig.writer.try_push_observe(1, true, 1) {
+    match rig.writer.try_push_observe(1, true, 1, 0) {
         Err(ObservePushError::Full(full)) => assert_eq!(
             full.value,
             effect_contract::EffectControlRecord::Observe {
                 tap_index: 1,
                 armed: true,
                 window_blocks: 1,
+                arm_tag: 0,
             },
             "the refused record is handed back"
         ),
@@ -156,9 +157,9 @@ fn subscriptions_apply_in_order_and_a_full_queue_refuses_the_newest() {
     );
 
     // The same three records in another order end the other way: order is what decides.
-    rig.writer.try_push_observe(0, true, 5).expect("room");
-    rig.writer.try_push_observe(0, true, 0).expect("room");
-    rig.writer.try_push_observe(0, false, 9).expect("room");
+    rig.writer.try_push_observe(0, true, 5, 0).expect("room");
+    rig.writer.try_push_observe(0, true, 0, 0).expect("room");
+    rig.writer.try_push_observe(0, false, 9, 0).expect("room");
     assert_eq!(rig.lane.drain_observations(0, Some(&mut observation)), 0);
     assert!(
         !observation.is_armed(0),
@@ -176,7 +177,7 @@ fn subscriptions_apply_in_order_and_a_full_queue_refuses_the_newest() {
 fn a_lane_without_an_observation_queue_refuses_a_subscription() {
     let mut rig = Rig::new(one_shared_parameter(), 0);
     assert!(matches!(
-        rig.writer.try_push_observe(0, true, 1),
+        rig.writer.try_push_observe(0, true, 1, 0),
         Err(ObservePushError::Unbound)
     ));
     assert_eq!(rig.writer.observe_capacity(), 0);
@@ -202,7 +203,7 @@ fn an_unarmed_tap_is_never_read_and_publishes_nothing() {
 #[test]
 fn windows_tile_exactly_and_fold_by_the_declared_rule() {
     let (mut observation, readers) = lane(2);
-    observation.arm(0, true, 3, 1_024);
+    observation.arm(0, true, 3, 1_024, 0);
 
     // Three blocks of 128 frames: the deepest magnitude wins, and the sign is folded away.
     let readings = [(-2.0, -1.0), (-9.5, -3.0), (-4.0, -8.25)];
@@ -238,7 +239,7 @@ fn windows_tile_exactly_and_fold_by_the_declared_rule() {
 #[test]
 fn the_latest_fold_publishes_the_last_block_verbatim() {
     let (mut observation, readers) = lane(1);
-    observation.arm(1, true, 2, 0);
+    observation.arm(1, true, 2, 0, 0);
     observation.accumulate(1, sample(-9.0, 9.0), 0, 64);
     observation.accumulate(1, sample(-1.0, 1.0), 64, 64);
     let window = readers[1].read().expect("window");
@@ -255,7 +256,7 @@ fn the_latest_fold_publishes_the_last_block_verbatim() {
 #[test]
 fn the_signed_peak_fold_keeps_the_sign_of_the_largest_magnitude() {
     let (mut observation, readers) = lane(3);
-    observation.arm(2, true, 3, 0);
+    observation.arm(2, true, 3, 0, 0);
     let readings = [(2.0, -1.0), (-9.5, 8.25), (4.0, -3.0)];
     for (index, (left, right)) in readings.into_iter().enumerate() {
         observation.accumulate(2, sample(left, right), index as u64 * 64, 64);
@@ -278,10 +279,10 @@ fn the_signed_peak_fold_keeps_the_sign_of_the_largest_magnitude() {
 #[test]
 fn a_second_subscribe_takes_the_newer_window_length() {
     let (mut observation, readers) = lane(8);
-    observation.arm(0, true, 4, 0);
+    observation.arm(0, true, 4, 0, 0);
     observation.accumulate(0, sample(-3.0, -3.0), 0, 128);
     // Re-subscribe at a shorter window: the half-filled window is abandoned, not published.
-    observation.arm(0, true, 2, 128);
+    observation.arm(0, true, 2, 128, 0);
     assert_eq!(readers[0].read(), None);
     observation.accumulate(0, sample(-1.0, -1.0), 128, 128);
     observation.accumulate(0, sample(-2.0, -2.0), 256, 128);
@@ -295,7 +296,7 @@ fn a_second_subscribe_takes_the_newer_window_length() {
 #[test]
 fn disarming_all_stops_every_tap_without_disturbing_published_windows() {
     let (mut observation, readers) = lane(1);
-    observation.arm(0, true, 1, 0);
+    observation.arm(0, true, 1, 0, 0);
     observation.accumulate(0, sample(-5.0, -5.0), 0, 128);
     let published = readers[0].read().expect("window");
     assert_eq!(published.left, 5.0);
@@ -328,7 +329,7 @@ fn a_lane_refuses_a_publisher_count_that_does_not_match_the_menu() {
 fn a_lane_swap_carries_the_open_window_and_the_publisher() {
     let (mut old, old_readers) = lane(4);
     let (mut fresh, fresh_readers) = lane(8);
-    assert!(old.arm(0, true, 2, 0));
+    assert!(old.arm(0, true, 2, 0, 0));
     old.accumulate(0, sample(-3.0, 1.0), 0, 128);
     assert!(fresh.swap_state(&mut old));
     assert!(fresh.is_armed(0) && fresh.any_armed());
@@ -376,7 +377,7 @@ fn a_lane_swap_refuses_another_menu() {
         publishers.push(observation_slot().0);
     }
     let mut folded = ObservationLane::new(&FOLDED, publishers, 4).expect("lane");
-    assert!(two.arm(0, true, 1, 0));
+    assert!(two.arm(0, true, 1, 0, 0));
     assert!(!two.swap_state(&mut one), "another tap count");
     assert!(!two.swap_state(&mut folded), "another fold at tap 1");
     assert!(two.is_armed(0), "nothing was exchanged");

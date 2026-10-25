@@ -406,6 +406,23 @@ expected_functions=$(grep -vx memory <<<"$expected_exports")
   exit 1
 }
 
+# Issue #382: both shipped JS files hand-type the command record stride, and the worklet reads
+# `records.byteLength / COMMAND_RECORD_BYTES` records. Each file must declare it exactly once, equal
+# to the shipped layout's `commandRecord.bytes`, so a generator change to the record cannot leave
+# either side reading misaligned records.
+python3 -B -c '
+import json, re, sys
+stride = json.load(open(sys.argv[1], encoding="utf-8"))["commandRecord"]["bytes"]
+for path in sys.argv[2:]:
+    text = open(path, encoding="utf-8").read()
+    found = re.findall(r"^const COMMAND_RECORD_BYTES = (\d+);$", text, re.M)
+    if found != [str(stride)]:
+        sys.exit(f"{path}: COMMAND_RECORD_BYTES {found} is not commandRecord.bytes {stride}")
+' "$layout_json" "$main_js" "$worklet_js" || {
+  echo "a shipped JS command record stride is not the ABI layout's" >&2
+  exit 1
+}
+
 for module in "$simd"; do
   metadata=$(wasm-objdump -x "$module")
   exports=$(awk '

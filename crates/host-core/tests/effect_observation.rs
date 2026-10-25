@@ -162,9 +162,15 @@ fn prepare_from(document: &str, leg: Leg) -> Session {
 
 /// Renders `blocks` quanta of the fixture constant and returns the rendered output words.
 fn render(session: &mut Session, blocks: usize) -> Vec<u32> {
+    render_at(session, blocks, LEVEL)
+}
+
+/// Renders `blocks` quanta of the constant `level` (`0.0` is silence) and returns the rendered
+/// output words.
+fn render_at(session: &mut Session, blocks: usize, level: f32) -> Vec<u32> {
     let mut rendered = Vec::with_capacity(blocks * QUANTUM * 2);
-    let left = [LEVEL; QUANTUM];
-    let right = [LEVEL; QUANTUM];
+    let left = [level; QUANTUM];
+    let right = [level; QUANTUM];
     for step in 0..blocks {
         let block = session.block + step;
         session
@@ -203,14 +209,22 @@ fn render(session: &mut Session, blocks: usize) -> Vec<u32> {
 
 /// Arms (or disarms) tap 0 of every observed effect, and returns the sample the change applies at.
 fn subscribe_all(session: &mut Session, armed: bool, window_blocks: u32) -> u64 {
+    subscribe_tagged(session, armed, window_blocks, 0)
+}
+
+/// [`subscribe_all`] with the records tagged `arm_tag`.
+fn subscribe_tagged(session: &mut Session, armed: bool, window_blocks: u32, arm_tag: u64) -> u64 {
     let applied_at = (session.block * QUANTUM) as u64;
     for producer in session.handles.effect_controls.iter_mut() {
         producer
-            .try_push_observe(0, armed, window_blocks)
+            .try_push_observe(0, armed, window_blocks, arm_tag)
             .expect("room in the observation queue");
     }
     applied_at
 }
+
+/// The tag [`bindings_of_all`] gives every binding, which a prepared arm publishes.
+const PREPARED_TAG: u64 = 5;
 
 /// The reader for one track's compressor tap, in whichever rack the fixture declared it.
 fn reader(handles: &HostLiveControlHandles, track: usize) -> &engine::realtime::ObservationReader {
@@ -330,6 +344,94 @@ fn every_observation_leg_renders_the_corpus_to_the_same_bytes() {
                 .expect("a published window");
             assert!(window.left > 0.0, "leg (d) published a real reduction");
         }
+    }
+}
+
+/// #1585 gate 1: render, and only render, publishes each tap's arm state in its slot, on every
+/// publish site: the console bank, the dynamic-rack bank and the per-node path. An arm pushed and
+/// not yet rendered leaves the slot as it was; the block that drains it publishes the tap armed at
+/// that block's first sample, before any window closes, and a disarm publishes it unarmed at its
+/// own block's first sample, each with its record's tag.
+///
+/// Test value: red if the arm state is written anywhere but render, if the record's drain does not
+/// publish it, or if a bank lane or the per-node path publishes another sample than its block's.
+#[test]
+fn render_publishes_each_taps_arm_state_on_every_leg() {
+    use engine::realtime::ObservationState;
+    let request = live_controls(Leg::CapacityUnarmed);
+    for (document, tracks, banked) in [
+        (SESSION, TRACKS, true),
+        (DYNAMIC_BANK_SESSION, TRACKS, true),
+        (DYNAMIC_SESSION, 1, false),
+    ] {
+        let (_session, mut prepared, handles) =
+            prepare_host_session_with_live_controls(document, &caps(), &request).unwrap_or_else(
+                |failure| panic!("prepare: {}", String::from_utf8_lossy(failure.as_bytes())),
+            );
+        assert_eq!(
+            prepared.report.effect_bank_scratch_bytes > 0,
+            banked,
+            "the leg renders through the publish site it names"
+        );
+        let gate = prepared
+            .plan
+            .take_revision_gate()
+            .expect("the plan's gate handle");
+        let mut session = Session {
+            prepared,
+            gate,
+            handles,
+            block: 0,
+        };
+        let states = |session: &Session| -> Vec<ObservationState> {
+            (0..tracks)
+                .map(|track| {
+                    reader(&session.handles, track)
+                        .read_state()
+                        .expect("a quiescent read is whole")
+                })
+                .collect()
+        };
+        let _ = render(&mut session, 3);
+        let unarmed = vec![ObservationState::default(); tracks];
+        assert_eq!(states(&session), unarmed, "no tap is armed before an arm");
+
+        let armed_at = subscribe_tagged(&mut session, true, WINDOW_BLOCKS, 7);
+        assert_ne!(armed_at, 0);
+        assert_eq!(states(&session), unarmed, "a queued arm writes no slot");
+        let _ = render(&mut session, 1);
+        let armed = ObservationState {
+            window: None,
+            armed: true,
+            arm_sample: armed_at,
+            arm_tag: 7,
+        };
+        assert_eq!(
+            states(&session),
+            vec![armed; tracks],
+            "the block that drained the arm published it, at its first sample"
+        );
+
+        let disarmed_at = subscribe_tagged(&mut session, false, 0, 8);
+        assert_eq!(
+            states(&session),
+            vec![armed; tracks],
+            "a queued disarm writes no slot"
+        );
+        let _ = render(&mut session, 1);
+        assert_eq!(
+            states(&session),
+            vec![
+                ObservationState {
+                    window: None,
+                    armed: false,
+                    arm_sample: disarmed_at,
+                    arm_tag: 8,
+                };
+                tracks
+            ],
+            "the block that drained the disarm published it"
+        );
     }
 }
 
@@ -577,14 +679,13 @@ fn bindings_of_all(session: &Session) -> controls::ObservationBindings {
             LiveEffectRack::Console => controls::TapSection::Console(effect),
             LiveEffectRack::Inserts => controls::TapSection::Inserts(effect),
         };
-        bindings.set(
-            controls::TapKey {
-                strip: session::StableId::parse(&handle.track_id).expect("a stable strip ID"),
-                section,
-                tap_id: handle.descriptor.observations[0].id.0,
-            },
-            WINDOW_BLOCKS,
-        );
+        let key = controls::TapKey {
+            strip: session::StableId::parse(&handle.track_id).expect("a stable strip ID"),
+            section,
+            tap_id: handle.descriptor.observations[0].id.0,
+        };
+        bindings.set(key.clone(), WINDOW_BLOCKS);
+        assert!(bindings.set_arm_tag(&key, PREPARED_TAG));
     }
     assert_eq!(bindings.len(), TRACKS);
     bindings
@@ -644,7 +745,26 @@ fn a_plan_replacement_keeps_the_subscriptions_the_host_armed() {
         );
     }
     let opens_at = (kept.block * QUANTUM) as u64;
+    // #1585 R2: render publishes a prepared arm, with its binding's tag, at the plan's first
+    // block; until then the slot holds no arm, which a reader that knows the tag reports pending.
+    assert!(
+        (0..TRACKS).all(|track| !reader(&kept.handles, track)
+            .read_state()
+            .expect("a whole read")
+            .armed),
+        "a prepared arm writes no slot before render"
+    );
     let _ = render(&mut kept, WINDOW_BLOCKS as usize);
+    for track in 0..TRACKS {
+        let state = reader(&kept.handles, track)
+            .read_state()
+            .expect("a whole read");
+        assert_eq!(
+            (state.armed, state.arm_sample, state.arm_tag),
+            (true, opens_at, PREPARED_TAG),
+            "track {track}: the first block published the prepared arm"
+        );
+    }
     assert_eq!(
         kept.prepared.plan.observation_binding_counts()[2],
         TRACKS as u64,
@@ -713,6 +833,28 @@ fn a_plan_replacement_keeps_the_subscriptions_the_host_armed() {
     assert!(after.left > 0.0, "and it publishes again");
     // The retired plan's own readers are untouched by any of this; they simply stop advancing.
     assert_eq!(reader(&first.handles, 3).read(), Some(before));
+
+    // #1585 R2 on a silent strip: the prepared arm is published by the first block's drain, which
+    // no silence skip or resident read passes by, so a replacement whose first block is silence
+    // reads armed after it.
+    let bindings = bindings_of_all(&bare);
+    let mut silent = prepare_successor(
+        &changed,
+        Some((&mut bare, committed.normalized_model())),
+        &bindings,
+    );
+    let silent_at = (silent.block * QUANTUM) as u64;
+    let _ = render_at(&mut silent, 1, 0.0);
+    for track in 0..TRACKS {
+        let state = reader(&silent.handles, track)
+            .read_state()
+            .expect("a whole read");
+        assert_eq!(
+            (state.armed, state.arm_sample, state.arm_tag),
+            (true, silent_at, PREPARED_TAG),
+            "track {track}: a silent first block published the prepared arm"
+        );
+    }
 }
 
 const DYNAMIC_SESSION: &str =
@@ -1032,7 +1174,7 @@ fn observation_cost_classes_are_what_they_claim() {
     );
 
     // Armed: exactly one call per tap per block.
-    lane.arm(0, true, 4, 0);
+    lane.arm(0, true, 4, 0, 0);
     for block in 0..BLOCKS {
         publish(&mut lane, &effect, block * 128, 128);
     }
@@ -1044,7 +1186,7 @@ fn observation_cost_classes_are_what_they_claim() {
 
     // Disarmed again: back to zero, immediately.
     let before = effect.reads.get();
-    lane.arm(0, false, 0, 0);
+    lane.arm(0, false, 0, 0, 0);
     for block in 0..BLOCKS {
         publish(&mut lane, &effect, block * 128, 128);
     }

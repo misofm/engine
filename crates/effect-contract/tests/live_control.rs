@@ -157,6 +157,7 @@ fn a_record_without_a_cell_is_refused_and_writes_nothing() {
             tap_index: 0,
             armed: true,
             window_blocks: 0,
+            arm_tag: 0,
         }]),
         Err(EffectWriteRefusal::Observe),
         "a subscription is a queue record, not a cell"

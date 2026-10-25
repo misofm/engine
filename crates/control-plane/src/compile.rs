@@ -1924,7 +1924,7 @@ where
         observation_armed_bytes: 0,
         observation_slots_high_water: 0,
         capture_owners_high_water: 0,
-        observation_forwarded: Vec::new(),
+        next_arm_tag: 1,
         send_moves: None,
         spectrum,
         output_meter,
