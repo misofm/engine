@@ -1968,11 +1968,13 @@ export async function createMisoAudioWorkletHost(options) {
         const message = event.data;
         if (hasExactFields(
           message,
-          ["tag", "requestId", "result", "backend", "resources", "memoryBytes"],
+          ["tag", "requestId", "result", "backend", "resources", "memoryBytes", "sourceRingFrames"],
         )
             && message.tag === "miso.ready.v1" && message.requestId === 0
             && message.result === RESULT_OK && message.backend === selected.backend
             && Number.isSafeInteger(message.memoryBytes) && message.memoryBytes > 0
+            && validU32(message.sourceRingFrames) && message.sourceRingFrames > 0
+            && message.sourceRingFrames % quantumFrames === 0
             && validResources(
               message.resources,
               selected.backend,
@@ -2001,11 +2003,9 @@ export async function createMisoAudioWorkletHost(options) {
       quantumFrames,
       ready.resources,
       ready.memoryBytes,
-      // The per-source in-flight bound is the ring depth in quanta. A zero override selects the
-      // engine's 100 ms plus two-quanta derivation; this arithmetic mirrors that public rule.
-      (bootOptions.sourceRingFrames === 0
-        ? Math.ceil(sampleRateHz / 10 / quantumFrames) + 2
-        : bootOptions.sourceRingFrames / quantumFrames),
+      // The per-source in-flight bound is the ring depth in quanta: the ring the engine reports it
+      // resolved at boot (issue #1406b), so a zero override gives the engine's own default ring.
+      ready.sourceRingFrames / quantumFrames,
       // Issue #143: the plan's default observation window is the meter window; a subscription that
       // names `windowBlocks: 0` gets it, and the returned map says which one it got.
       Number(bootOptions.liveControlMeterBlocks),

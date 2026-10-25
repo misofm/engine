@@ -1998,6 +1998,9 @@ pub struct SessionSourceShape {
 /// Safe ownership object backing one future AudioWorklet Wasm handle.
 pub struct AudioWorkletEngineHost {
     options: WebBootOptions,
+    /// The per-source ring the boot resolved (issue #1406b): the override, or on a zero override
+    /// [`default_source_ring_frames`] at the session's rate and quantum.
+    source_ring_frames: u32,
     status: WebStatus,
     resources: WebResourceReport,
     command_report: WebCommandReport,
@@ -2184,6 +2187,7 @@ impl AudioWorkletEngineHost {
         let backend = selected_backend();
         Ok(Self {
             options,
+            source_ring_frames,
             status: WebStatus {
                 struct_size: STATUS_BYTES,
                 abi_version: ABI_VERSION,
@@ -2220,6 +2224,14 @@ impl AudioWorkletEngineHost {
     #[must_use]
     pub const fn options(&self) -> &WebBootOptions {
         &self.options
+    }
+
+    /// The per-source ring frames the boot resolved (issue #1406b): what a zero override gives is
+    /// the engine's own default ring, so a host bounds its sources by this value, not by a copy of
+    /// the rule.
+    #[must_use]
+    pub const fn source_ring_frames(&self) -> u32 {
+        self.source_ring_frames
     }
 
     /// Read fixed status without allocation.

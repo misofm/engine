@@ -992,7 +992,11 @@ pub enum ConformanceDecoder {
 /// `response.capabilities` moves (its event list's one padded field gains `0x8040`); with it patched
 /// back and the three new frames filtered out, the 56 earlier frames hash to the old pin.
 /// Re-pinned from `f4c2fe333739f44d`; the frame count is 59.
-pub const COMPLETE_SCHEMA_HASH: u64 = 0xcb8d_b815_ed01_03a0;
+/// #1690 gives the meter table the master target (`3`, no strip ID, gain reduction only):
+/// `command.telemetry_configure` and `response.telemetry` carry a third entry, the master's gain
+/// reduction. Only those two frames move; the 57 others are byte-equal. Re-pinned from
+/// `cb8db815ed0103a0`; the frame count stays 59.
+pub const COMPLETE_SCHEMA_HASH: u64 = 0xdea6_50f7_e506_833e;
 
 /// Build every command, successful response, registered non-OK status, event, and all-opcode
 /// session transaction using only public typed encoder entry points.
@@ -1068,7 +1072,8 @@ pub fn complete_schema_corpus() -> Vec<ConformanceFrame> {
         maximum_capture_bytes: 1 << 18,
         hop_frames: Some(512),
     };
-    // #1583 D1/D2: a meter table with both targets and both metrics; the echo adds the window.
+    // #1583 D1/D2: a meter table with every target and both metrics; the echo adds the window.
+    // #1690 D3: the master's gain reduction, target 3 with no strip ID.
     let telemetry = TelemetryConfiguration {
         meters: vec![
             MeterEntry {
@@ -1077,6 +1082,10 @@ pub fn complete_schema_corpus() -> Vec<ConformanceFrame> {
             },
             MeterEntry {
                 target: MeterTarget::Strip("vocal".into()),
+                metric: MeterMetric::GainReduction,
+            },
+            MeterEntry {
+                target: MeterTarget::Master,
                 metric: MeterMetric::GainReduction,
             },
         ],

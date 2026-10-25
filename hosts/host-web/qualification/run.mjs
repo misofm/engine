@@ -1820,7 +1820,7 @@ async function main() {
         playwrightVersion: PLAYWRIGHT_VERSION,
         platform: "linux-headless",
         artifact: "single shipped simd128 AudioWorklet artifact",
-        defaultRingFrames: 5120,
+        stallRingFrames: 5120,
         minimumStallMs: 100,
         browsers: rows,
       };
