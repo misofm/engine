@@ -3874,7 +3874,10 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
     let route_joins: Vec<RouteJoin<'_>> = match successor {
         Some(base) => {
             let mut joins = route_joins;
-            for fade in route_fades.iter().filter(|fade| fade.carried.is_some()) {
+            for fade in route_fades
+                .iter()
+                .filter(|fade| fade.carried.is_some() && !controls::route_rows_live(fade.route))
+            {
                 let id = fade.route.id.as_str();
                 let unchanged = base
                     .committed
@@ -4638,6 +4641,9 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
                     .find(|fade| fade.route.id.as_str() == route.id.as_str())
                 {
                     fade.strip = Some(source);
+                    // #1877, #1392 D2: a restarted strip's pending entry is replaced by the fresh
+                    // arm, never carried beside it; the send's entry goes with the fader's.
+                    fade.carried = None;
                     continue;
                 }
                 let into_added = matches!(&route.destination,

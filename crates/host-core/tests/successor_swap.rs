@@ -4103,6 +4103,52 @@ fn a_pending_route_fade_survives_a_second_swap(backend: Backend) {
             "{backend:?} {case}: allocator calls"
         );
     }
+    // (e) The second transaction restarts the track (#1324): a transparent insert. Its pending
+    // entries are replaced by fresh arms, the send's with the fader's (#1392 D2), so both wait out
+    // the restarted chain's line. The fresh-arm run: the same swaps, the send added by the second
+    // transaction, so it is armed only afresh.
+    let restarted = |model| {
+        let mut model = send(model);
+        track_mut(&mut model, FADE_TRACK)
+            .inserts
+            .effects
+            .push(transparent_insert());
+        model
+    };
+    let track = with_fade_track(route_fade_base_limited(false), AUX_SOURCE, true, false);
+    let without_send = Session::compile(track.clone());
+    let b2 = Session::compile(restarted(track));
+    let restart = |b1: &Session, second, prepared_at| {
+        let run =
+            two_swap_run_prepared(&a, b1, &b2, (second, prepared_at), None, &feeds, backend);
+        assert!(
+            run.restarted[1].iter().any(|id| &**id == FADE_TRACK),
+            "the insert restarts the strip"
+        );
+        run
+    };
+    for prepared_at in [None, Some(SWAP_BLOCK + 1)] {
+        assert_eq!(
+            first_fade_difference(
+                &restart(&b1, SWAP_BLOCK + 2, prepared_at),
+                &restart(&without_send, SWAP_BLOCK + 2, prepared_at),
+            ),
+            None,
+            "{backend:?} (e) restart before the fire, prepared at {prepared_at:?}: the send \
+             takes the restarted strip's fresh arm"
+        );
+    }
+    // After the fire, a successor prepared after it holds no row for the send and arms it afresh;
+    // one prepared before it must equal that run.
+    assert_eq!(
+        first_fade_difference(
+            &restart(&b1, fire_block + 1, Some(SWAP_BLOCK + 2)),
+            &restart(&b1, fire_block + 1, None),
+        ),
+        None,
+        "{backend:?} (e) restart after the fire, prepared before it: the send's fired entry is \
+         not carried over its fresh arm"
+    );
     // (d) A transition route.
     let aux = Feed::new(AUX_SOURCE, 2);
     let feeds = [&kept, &aux];
