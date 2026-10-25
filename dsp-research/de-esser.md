@@ -126,8 +126,12 @@ design does.
 Output modes: f_c 8 kHz, an 8 kHz burst at the stated peak level from 50 ms to 250 ms over a
 -30 dBFS 1 kHz tone, 24,000 frames. "Held" is the mean change over the burst's last 10 ms (the
 150-250 ms mean is the same to 0.001 dB); the gains are over 150-250 ms. "Curve" is the static
-hard-knee change at the tap's peak level; the detector reads the instantaneous magnitude, so the
-smoother settles about 1 dB short of it. Attack is the first frame after the onset where the
+hard-knee change at the tap's peak level (+6.021 dB at f_c for the high-pass tap). The detector
+reads the instantaneous magnitude of the sampled tap, so the smoother settles short of the curve:
+about 1 dB with the band-pass tap, about 0.17 dB with the high-pass tap. The band-pass shortfall is
+mostly sampling: 8 kHz is fs/6, and the band-pass tap, with 0 degrees of phase at f_c, is sampled
+at `|sin| <= 0.866` (-1.25 dB) and never at its peak; measured from that sampled peak, the
+band-pass shortfall is about 0.02 dB at -14 dBFS (0.09 dB at -6 dBFS). Attack is the first frame after the onset where the
 change reaches 90 % of held, release the first frame after the burst where it falls to 10 %.
 
 | Mode, detector | Burst (dBFS) | Curve | Held | 8 kHz gain | 1 kHz gain | Attack 90 % | Release 10 % |
@@ -135,22 +139,22 @@ change reaches 90 % of held, release the first frame after the burst where it fa
 | split, band-pass | -26 | 0 | 0.000 | +0.000 | +0.000 | none | none |
 | split, band-pass | -14 | -4.500 | -3.538 | -3.538 | -0.008 | 173 (3.60 ms) | 5,527 (115.15 ms) |
 | split, band-pass | -6 | -10.500 | -9.468 | -9.469 | -0.013 | 169 (3.52 ms) | 5,528 (115.17 ms) |
-| split, high-pass (#1984) | -26 | 0 | -0.033 | +0.000 | +0.000 | 831 (17.31 ms) | 5,526 (115.12 ms) |
-| split, high-pass (#1984) | -14 | -9.000 | -8.842 | **+4.202** | +0.072 | 291 (6.06 ms) | 5,528 (115.17 ms) |
-| split, high-pass (#1984) | -6 | -15.000 | -14.842 | **+5.661** | +0.092 | 252 (5.25 ms) | 5,530 (115.21 ms) |
+| split, high-pass (#1984) | -26 | -0.015 | -0.033 | +0.000 | +0.000 | 831 (17.31 ms) | 5,526 (115.12 ms) |
+| split, high-pass (#1984) | -14 | -9.015 | -8.842 | **+4.202** | +0.072 | 291 (6.06 ms) | 5,528 (115.17 ms) |
+| split, high-pass (#1984) | -6 | -15.015 | -14.842 | **+5.661** | +0.092 | 252 (5.25 ms) | 5,530 (115.21 ms) |
 | wideband, band-pass | -26 | 0 | 0.000 | +0.000 | +0.000 | none | none |
 | wideband, band-pass | -14 | -4.500 | -3.538 | -3.538 | -3.538 | 173 (3.60 ms) | 5,527 (115.15 ms) |
 | wideband, band-pass | -6 | -10.500 | -9.468 | -9.469 | -9.468 | 169 (3.52 ms) | 5,528 (115.17 ms) |
-| wideband, high-pass | -26 | 0 | -0.033 | -0.033 | -0.033 | 831 (17.31 ms) | 5,526 (115.12 ms) |
-| wideband, high-pass | -14 | -9.000 | -8.842 | -8.841 | -8.842 | 291 (6.06 ms) | 5,528 (115.17 ms) |
-| wideband, high-pass | -6 | -15.000 | -14.842 | -14.841 | -14.842 | 252 (5.25 ms) | 5,530 (115.21 ms) |
+| wideband, high-pass | -26 | -0.015 | -0.033 | -0.033 | -0.033 | 831 (17.31 ms) | 5,526 (115.12 ms) |
+| wideband, high-pass | -14 | -9.015 | -8.842 | -8.841 | -8.842 | 291 (6.06 ms) | 5,528 (115.17 ms) |
+| wideband, high-pass | -6 | -15.015 | -14.842 | -14.841 | -14.842 | 252 (5.25 ms) | 5,530 (115.21 ms) |
 | listen, band-pass | -26, -14, -6 | as split | as split | +0.000 | -24.820 | as split | as split |
 
 The detector and the change do not depend on the output mode: each detector row gives the same
 change in split, wideband and listen. In split mode with the band-pass detector the 8 kHz gain
 equals the held change and the 1 kHz tone moves at most 0.013 dB; wideband applies the held change
-at every frequency; listen is the band-pass tap (0 dB at f_c and -24.82 dB at 1 kHz, the skirt the first
-table shows). The release matches the one-pole `50 ms * ln 10 = 115.13 ms`; the 90 % attack (3.5 ms with
+at every frequency; listen is the band-pass tap (0 dB at f_c and -24.820 dB at 1 kHz, the cookbook band-pass
+value three octaves below f_c). The release matches the one-pole `50 ms * ln 10 = 115.13 ms`; the 90 % attack (3.5 ms with
 the band-pass tap) is longer than the one-pole `1 ms * ln 10 = 2.30 ms` because the attack branch
 runs only while the instantaneous target exceeds the change, part of each cycle. In the -26 dBFS
 high-pass row the tap's peak is about `-26 + 6.02 = -19.98` dB, a hair over the threshold, hence
