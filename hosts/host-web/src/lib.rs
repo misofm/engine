@@ -1138,8 +1138,11 @@ pub struct WebStatus {
     pub sample_rate_hz: u32,
     /// Prepared quantum.
     pub quantum_frames: u32,
-    /// Required zero.
-    pub reserved0: u32,
+    /// The structural commands this instance's control half ran in place of its render half
+    /// (#1290a D6, #1294b), saturating: [`AudioWorkletEngineHost::blocking_rebuilds`], refreshed
+    /// as every exported call records its result; zero after a dispose. A page without cross-origin
+    /// isolation runs each rebuild in the worklet's message handler, so each one counts here.
+    pub blocking_rebuilds: u32,
     /// Exact next render time.
     pub next_absolute_sample: u64,
     /// Number of successful rendered quanta.
@@ -2212,7 +2215,7 @@ impl AudioWorkletEngineHost {
                 backend,
                 sample_rate_hz: shape.sample_rate_hz,
                 quantum_frames: shape.quantum_frames,
-                reserved0: 0,
+                blocking_rebuilds: 0,
                 next_absolute_sample: 0,
                 rendered_quanta: 0,
                 live_values_superseded: 0,
@@ -2584,10 +2587,9 @@ impl AudioWorkletEngineHost {
     /// a blocking rebuild that decision 15 accepts only when it is counted and reported. A
     /// refused command, a live command and a command that fails after preparation count nothing.
     ///
-    /// Nothing in production reads it yet: no export and no status word carry it until the
-    /// rewritten browser slices #1293-#1297 wire the host status's `blockingRebuilds` field
-    /// (#1332 D1) to it, and #1295 is the first to read that field (its real-browser gate expects
-    /// exactly one on the non-isolated leg and none on the isolated one).
+    /// The status word [`WebStatus::blocking_rebuilds`] carries it to the page (#1294b), whose
+    /// `miso.status.v1` reply names it `blockingRebuilds`; #1295's real-browser gate expects
+    /// exactly one on the non-isolated leg and none on the isolated one.
     #[must_use]
     pub fn blocking_rebuilds(&self) -> u32 {
         self.ready
@@ -3896,8 +3898,12 @@ impl AudioWorkletEngineHost {
         self.record(RESULT_OK)
     }
 
+    /// Every control call returns its result through here, so the status's `blocking_rebuilds`
+    /// word (#1294b) is refreshed in this one place: current after the control call that rebuilt,
+    /// zero after a dispose (the ready half is gone), as [`Self::blocking_rebuilds`] reports.
     fn record(&mut self, code: u32) -> u32 {
         self.status.last_result = code;
+        self.status.blocking_rebuilds = self.blocking_rebuilds();
         code
     }
 

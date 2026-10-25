@@ -304,7 +304,11 @@ fn status_fields() -> [Field; 14] {
             offset_of!(WebStatus, quantum_frames),
             "u32",
         ),
-        ("reserved0", offset_of!(WebStatus, reserved0), "u32"),
+        (
+            "blockingRebuilds",
+            offset_of!(WebStatus, blocking_rebuilds),
+            "u32",
+        ),
         (
             "nextAbsoluteSample",
             offset_of!(WebStatus, next_absolute_sample),

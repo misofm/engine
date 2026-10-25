@@ -1856,7 +1856,8 @@ fn status_watermark(browser: &Rig) -> (u64, u64, u64) {
 /// Test value: red if the browser publishes a rebuild's revision when it commits rather than when
 /// the swap block renders (the words would move before block 3), if the live edit committed behind
 /// a pending rebuild is reported at its own earlier block, or if the swap block's sample or
-/// outcome flags are the browser's own computation and not the plan's.
+/// outcome flags are the browser's own computation and not the plan's; and (#1294b) red if the
+/// status's `blocking_rebuilds` word is not written by the control call that rebuilt.
 #[test]
 fn the_status_words_carry_a_rebuilds_watermark_the_c_abi_reports() {
     for rate in RATES {
@@ -1888,6 +1889,9 @@ fn the_status_words_carry_a_rebuilds_watermark_the_c_abi_reports() {
                 revision
             } if revision == model.revision + 1
         ));
+        // #1294b: the rebuild ran on the instance's own thread, so the page's status word counts
+        // it at once, before any block renders.
+        assert_eq!(browser.host.status().blocking_rebuilds, 1, "{rate} Hz");
         assert_eq!(
             status_watermark(&browser),
             initial,

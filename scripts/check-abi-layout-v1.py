@@ -290,11 +290,12 @@ SEEK_REPORT_FIELDS = [
     "structSize", "reserved0", "generation", "firstSample", "sourceFrame",
     "cumulativeUnderrunFrames", "cumulativeHeldFrames", "reserved",
 ]
-# The status block (#1349 D2): offset 48 `liveValuesSuperseded` (#1399), then the applied-revision
-# watermark words at 56, 64 and 72, and no reserved word.
+# The status block (#1349 D2): offset 28 `blockingRebuilds` (#1294b), offset 48
+# `liveValuesSuperseded` (#1399), then the applied-revision watermark words at 56, 64 and 72, and
+# no reserved word.
 STATUS_FIELDS = [
     "structSize", "abiVersion", "state", "lastResult", "backend", "sampleRateHz",
-    "quantumFrames", "reserved0", "nextAbsoluteSample", "renderedQuanta", "liveValuesSuperseded",
+    "quantumFrames", "blockingRebuilds", "nextAbsoluteSample", "renderedQuanta", "liveValuesSuperseded",
     "watermarkRevision", "watermarkFirstSample", "watermarkOutcomeFlags",
 ]
 STATUS_WATERMARK_OFFSETS = {

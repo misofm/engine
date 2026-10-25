@@ -243,7 +243,7 @@ export const ABI_LAYOUT = deepFreeze(
           "type": "u32"
         },
         {
-          "name": "reserved0",
+          "name": "blockingRebuilds",
           "offset": 28,
           "type": "u32"
         },

@@ -375,15 +375,23 @@ fn success_reply(
     revision: u64,
     path: EditPath,
     applied: u32,
+    (observe_arm_tags, removed_arm_tags): (&[u64], &[u64]),
 ) -> Reply {
     let codec = ProtocolCodec::default();
     let frame = TypedSuccessResponseFrame {
         request_id: RequestId::new(request_id).expect("nonzero"),
         revision: SessionRevision(revision),
         payload: SuccessResponsePayload::SessionTransactionApplied(TransactionApplied {
-            applied_operations: applied,
-            edit_path: path,
+            observe_arm_tags: observe_arm_tags.to_vec(),
+            removed_arm_tags: removed_arm_tags.to_vec(),
+            ..TransactionApplied::new(applied, path)
         }),
+    };
+    let tags = |tags: &[u64]| {
+        tags.iter()
+            .map(|tag| format!("\"{tag}\""))
+            .collect::<Vec<_>>()
+            .join(", ")
     };
     let mut bytes = vec![0_u8; 256];
     let length = codec
@@ -403,8 +411,11 @@ fn success_reply(
         expect: format!(
             "{{ \"requestId\": \"{request_id}\", \"status\": \"ok\", \"revision\": \"{revision}\", \
              \"appliedOperations\": {applied}, \"editPath\": \"{path_name}\", \"editPathCode\": {}, \
+             \"observeArmTags\": [{}], \"removedArmTags\": [{}], \
              \"diagnostics\": [], \"omittedDiagnostics\": 0, \"backpressure\": false }}",
-            path.code()
+            path.code(),
+            tags(observe_arm_tags),
+            tags(removed_arm_tags),
         ),
     }
 }
@@ -446,9 +457,32 @@ fn refusal_reply(
 fn replies() -> Vec<Reply> {
     let validation = (StatusCode::ValidationFailed, "validation_failed");
     vec![
-        success_reply("applied_live", 1, 5, EditPath::Live, 3),
-        success_reply("applied_model_only", 2, 6, EditPath::ModelOnly, 1),
-        success_reply("applied_rebuild", 3, (1 << 40) + 1, EditPath::Rebuild, 12),
+        success_reply("applied_live", 1, 5, EditPath::Live, 3, (&[], &[])),
+        success_reply(
+            "applied_model_only",
+            2,
+            6,
+            EditPath::ModelOnly,
+            1,
+            (&[], &[]),
+        ),
+        success_reply(
+            "applied_rebuild",
+            3,
+            (1 << 40) + 1,
+            EditPath::Rebuild,
+            12,
+            (&[], &[]),
+        ),
+        // #1585 D5: the arm tags of three `Observe` edits and of one ended subscription.
+        success_reply(
+            "applied_with_arm_tags",
+            8,
+            7,
+            EditPath::Rebuild,
+            4,
+            (&[1, 1, (1 << 53) + 1], &[5]),
+        ),
         refusal_reply(
             "control_domain",
             4,
