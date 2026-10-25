@@ -674,6 +674,24 @@ fn the_prime_counts_the_words_its_fill_writes() {
     // One carried stereo source.
     let expected = 4 * (LEAD * 2 + words);
     assert_eq!((lead.prime_bytes(), w.prime_bytes()), (expected, expected));
+
+    // A track that reads another source in the edit takes no prime: gate 1's growth with track
+    // 2 re-pointed to an added source counts track 1's source alone. (Its warm preparation is
+    // refused today, `host.successor.warm_invariant`: #1354a's `R` misses the re-pointed track.)
+    let mut b = two_tracks();
+    *inserts(&mut b, "t1") = vec![limiter()];
+    let mut other = b.sources[0].clone();
+    other.id = sid("other-source");
+    b.sources.push(other);
+    b.sources.sort_by(|left, right| left.id.cmp(&right.id));
+    let t2 = b
+        .tracks
+        .iter_mut()
+        .find(|track| track.id.as_str() == "t2")
+        .expect("track 2");
+    t2.source_id = sid("other-source");
+    let lead = warm(Edit::new(two_tracks(), b).decide(&CONFIG));
+    assert_eq!(lead.prime_bytes(), 4 * (LEAD * 2));
 }
 
 /// Gate 7: a limiter on a bus restarts the bus's carried feeders whole, and the bus after its
