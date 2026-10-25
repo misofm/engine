@@ -29,6 +29,7 @@ fn epoch(base: PlanResourceReport, terms: &Terms) -> LiveEpochResources {
             largest: terms.capi_largest,
             edit_ramps: 0,
             spectrum_service: 0,
+            response_capture: 0,
         },
         carried: control_plane::CarriedSourceBytes::default(),
     }

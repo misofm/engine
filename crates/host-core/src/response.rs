@@ -171,8 +171,9 @@ const INPUT_FILTER_CONTROLS: [u32; 2] = [3, 4];
 /// The values are the committed model's: a builtins section reads its four cutoffs with
 /// [`controls::get`]; a console slot or an insert resolves its entry's parameters with
 /// [`effect_compiler::resolve_initial_values`], the function a rebuild prepares them with, and takes
-/// its quality and link mode from the slot or the insert and its bypass from the entry. The
-/// overrides then replace the values they name.
+/// its quality from the slot or the insert, its link mode from the insert or the entry as the slot
+/// resolves it, and its bypass from the entry. The overrides then replace the values they name; a
+/// console entry's link-mode override `0` (`slot`) names the slot's declared mode.
 ///
 /// # Errors
 ///
@@ -308,11 +309,25 @@ pub fn resolve_response_target(
         .map_err(ResponseQueryError::Committed)?;
     let mut bypass = bypass;
     let mut link_mode = contract_link_mode(link_mode);
+    let slot_link_mode = match section {
+        ResponseAddressSection::Console(slot) => model
+            .console
+            .slots()
+            .find(|candidate| candidate.slot.as_str() == slot)
+            .map(|candidate| candidate.link_mode),
+        _ => None,
+    };
     for row in overrides {
         // The validator has accepted every value: the bypass is exactly 0 or 1 and the link mode
         // one of the effect's codes.
         match row.parameter_id {
             controls::BYPASS_CONTROL => bypass = row.value.to_bits() == 1.0_f32.to_bits(),
+            // A console entry's `slot` (code 0) runs the slot's declared mode (#1369).
+            controls::LINK_MODE_CONTROL if row.value == 0.0 => {
+                link_mode = slot_link_mode.map(contract_link_mode).ok_or(
+                    ResponseQueryError::OverrideControl(controls::ControlError::Domain),
+                )?;
+            }
             controls::LINK_MODE_CONTROL => {
                 link_mode = [LinkMode::DualMono, LinkMode::Maximum, LinkMode::Average]
                     .into_iter()
@@ -618,6 +633,18 @@ struct CollectorOwner {
     right_len: usize,
 }
 
+/// The heap bytes [`ResponseSnapshotCollector::new`] allocates for `maximum_owners` owners with
+/// `maximum_identity_bytes`-byte identities: the owner table and three identity strings per owner
+/// (#1577's charge).
+pub(crate) fn collector_heap_bytes(
+    maximum_owners: usize,
+    maximum_identity_bytes: usize,
+) -> Option<usize> {
+    size_of::<CollectorOwner>()
+        .checked_add(maximum_identity_bytes.checked_mul(3)?)?
+        .checked_mul(maximum_owners)
+}
+
 impl ResponseSnapshotCollector {
     /// Allocate bounded worker-side storage for one capture.
     #[must_use]
@@ -688,6 +715,8 @@ impl ResponseSnapshotCollector {
     }
 }
 
+// REALTIME_POLICY_BEGIN
+// The collector's copy runs on the thread that renders, after a block (#1577).
 impl ResponseSnapshotSink for ResponseSnapshotCollector {
     fn copy_owner(
         &mut self,
@@ -726,6 +755,7 @@ impl ResponseSnapshotSink for ResponseSnapshotCollector {
         Ok(())
     }
 }
+// REALTIME_POLICY_END
 
 /// Caller-owned output for a composed live track subtotal.
 #[derive(Debug)]
@@ -1735,11 +1765,11 @@ pub fn compose_track_response(
     if !(2..=RESPONSE_MAXIMUM_POINTS).contains(&points) {
         return Err(ResponseSnapshotQueryError::InvalidGrid);
     }
-    let members = snapshot
-        .owners
-        .iter()
-        .map(|owner| response_member(strip_id, owner))
-        .collect::<Result<Vec<_>, _>>()?;
+    // Exactly one member per owner, reserved once: #1577 charges the table at that length.
+    let mut members = Vec::with_capacity(snapshot.owners.len());
+    for owner in &snapshot.owners {
+        members.push(response_member(strip_id, owner)?);
+    }
     let mut frequencies_hz = vec![0.0_f32; points];
     let mut left = vec![0.0_f32; points];
     let mut right = vec![0.0_f32; points];

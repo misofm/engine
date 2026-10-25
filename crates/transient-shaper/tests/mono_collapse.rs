@@ -24,10 +24,14 @@ const BLOCKS: usize = 48;
 /// The first dual block: the disengage lands here, with the spans of block 23 (64-sample ramps)
 /// 32 samples from their targets.
 const DISENGAGE: usize = BLOCKS / 2;
-/// Words of one lane's state section: `fast`, `slow`, then each ramp's four words.
-const LANE_WORDS: usize = 14;
+/// Words of one lane's state section: `fast`, `slow`, then each ramp's four words, the three
+/// parameter ramps and the two link weights (issue #1370 D6).
+const LANE_WORDS: usize = 22;
 /// The first designed (ramp) word; the two before it are the envelopes.
 const DESIGNED_FROM: usize = 2;
+/// The two link weights' targets: they name the lane's mode, which both channels of a valid
+/// payload must agree on (a restore refuses channels that do not), so no valid pair differs there.
+const LINK_TARGETS: [usize; 2] = [15, 19];
 
 type Values = [InitialParameterValue; PARAMETER_COUNT * 2];
 
@@ -268,11 +272,15 @@ fn a_collapsed_then_desymmetrized_bank_is_a_never_collapsed_bank() {
 
 /// One lane section from two envelope words and three in-flight ramps `(current, target,
 /// remaining)`, with the step `set_target` would give.
-fn lane_section(envelopes: [f32; 2], ramps: [(f32, f32, u32); PARAMETER_COUNT]) -> Vec<u8> {
+fn lane_section(
+    envelopes: [f32; 2],
+    ramps: [(f32, f32, u32); PARAMETER_COUNT],
+    links: [(f32, f32, u32); 2],
+) -> Vec<u8> {
     let mut bytes = vec![0_u8; LANE_WORDS * 4];
     write_f32(&mut bytes, 0, envelopes[0]);
     write_f32(&mut bytes, 1, envelopes[1]);
-    for (index, (current, target, remaining)) in ramps.into_iter().enumerate() {
+    for (index, (current, target, remaining)) in ramps.into_iter().chain(links).enumerate() {
         let word = DESIGNED_FROM + index * 4;
         write_f32(&mut bytes, word, current);
         write_f32(&mut bytes, word + 1, target);
@@ -282,17 +290,20 @@ fn lane_section(envelopes: [f32; 2], ramps: [(f32, f32, u32); PARAMETER_COUNT]) 
     bytes
 }
 
-/// Two valid lane sections that differ in every one of the fourteen words, every ramp in flight,
-/// so a section taking any one word of `b` into `a` is still a valid restore.
+/// Two valid lane sections that differ in every word but the link targets, every ramp in flight
+/// and both glides landing on dual mono, so a section taking any one word of `b` into `a` is
+/// still a valid restore.
 fn two_sections() -> (Vec<u8>, Vec<u8>) {
     (
         lane_section(
             [0.25, 0.125],
             [(0.5, -0.25, 40), (-0.75, 0.5, 17), (0.5, 0.875, 9)],
+            [(0.5, 0.0, 40), (0.25, 0.0, 20)],
         ),
         lane_section(
             [0.375, 0.0625],
             [(-0.5, 0.75, 33), (0.25, -0.5, 50), (0.125, 0.625, 3)],
+            [(0.75, 0.0, 30), (0.125, 0.0, 8)],
         ),
     )
 }
@@ -325,7 +336,7 @@ fn restore(bank: &mut dyn PreparedNativeEffectBank, track: u32, left: &[u8], rig
 fn the_word_lists_are_complete_and_the_witness_declines_on_exactly_the_asymmetric_lane() {
     let lanes = lanes();
     let (a, b) = two_sections();
-    for word in 0..LANE_WORDS {
+    for word in (0..LANE_WORDS).filter(|word| !LINK_TARGETS.contains(word)) {
         assert_ne!(
             a[word * 4..word * 4 + 4],
             b[word * 4..word * 4 + 4],
@@ -338,7 +349,7 @@ fn the_word_lists_are_complete_and_the_witness_declines_on_exactly_the_asymmetri
     assert!(equal.channels_agree(), "equal channels");
     assert!((0..lanes).all(|lane| equal.lane_channel_symmetry(lane)));
     assert!(!equal.lane_channel_symmetry(lanes));
-    for word in 0..LANE_WORDS {
+    for word in (0..LANE_WORDS).filter(|word| !LINK_TARGETS.contains(word)) {
         let right = with_word(&a, &b, word);
         let mut odd = bank(&[LinkMode::DualMono]);
         restore(odd.as_mut(), track as u32, &a, &right);
@@ -356,7 +367,7 @@ fn the_word_lists_are_complete_and_the_witness_declines_on_exactly_the_asymmetri
     let mut scalar = prepare(&initial_values());
     assert!(scalar.channel_symmetry(), "a symmetric instance");
     assert_eq!(snapshot(scalar.as_ref()).0.len(), LANE_WORDS * 4);
-    for word in 0..LANE_WORDS {
+    for word in (0..LANE_WORDS).filter(|word| !LINK_TARGETS.contains(word)) {
         let right = with_word(&a, &b, word);
         scalar
             .restore_state_payload(

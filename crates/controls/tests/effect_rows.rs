@@ -41,13 +41,8 @@ fn listed(policy: ParameterChannelPolicy) -> &'static [Lane] {
 
 /// The addresses of one effect instance, written out from the contract descriptor and not from the
 /// registry's listing: the bypass, the parameters in descriptor order, then the link mode when the
-/// effect supports more than one.
-fn expected_instance(
-    owner: &Owner,
-    section: &Section,
-    effect: &str,
-    link_mode_row: bool,
-) -> Vec<ControlAddress> {
+/// effect supports more than one (an insert and a console entry alike).
+fn expected_instance(owner: &Owner, section: &Section, effect: &str) -> Vec<ControlAddress> {
     let descriptor = descriptor_of(effect);
     let at = |control, lane| ControlAddress {
         owner: owner.clone(),
@@ -61,7 +56,7 @@ fn expected_instance(
             out.push(at(parameter.id.0, lane));
         }
     }
-    if link_mode_row && descriptor.supported_link_modes.bits().count_ones() > 1 {
+    if descriptor.supported_link_modes.bits().count_ones() > 1 {
         out.push(at(LINK_MODE_CONTROL, Lane::Both));
     }
     out
@@ -79,7 +74,8 @@ fn the_fixture_effect_list_is_the_launch_registry() {
 }
 
 /// Gate 1, shape. Red if an effect parameter, bypass or link mode is not a control, is listed
-/// twice, is out of the ruled order, or a console slot grows a link-mode row.
+/// twice, is out of the ruled order, or a console entry with a choice of link modes lists no
+/// link-mode row.
 #[test]
 fn every_instance_lists_its_bypass_parameters_and_link_mode_once_in_order() {
     let model = effects_fixture();
@@ -87,25 +83,19 @@ fn every_instance_lists_its_bypass_parameters_and_link_mode_once_in_order() {
     for strip in ["vocal", "guitar", "bus"] {
         let owner = Owner::Strip(id(strip));
         // Chain order (ruling C4): the pre-insert slot, the inserts, the post-insert slot.
-        let mut expected = expected_instance(
-            &owner,
-            &Section::Console(id("glue")),
-            "miso.compressor",
-            false,
-        );
+        let mut expected =
+            expected_instance(&owner, &Section::Console(id("glue")), "miso.compressor");
         for effect in LAUNCH_EFFECTS {
             expected.extend(expected_instance(
                 &owner,
                 &Section::Inserts(insert_id(effect)),
                 effect,
-                true,
             ));
         }
         expected.extend(expected_instance(
             &owner,
             &Section::Console(id("ceiling")),
             "miso.true-peak-limiter",
-            false,
         ));
         let actual: Vec<ControlAddress> = all
             .iter()
@@ -528,7 +518,8 @@ fn descriptor_default(parameter: u32) -> f32 {
 
 /// Bypass, link mode and a rebuild-only parameter are written through the same `set`. Red if a
 /// bypass write does not reach the model, a link mode outside the supported set is accepted, a
-/// console slot's link mode is addressable, or a prepared parameter refuses a write.
+/// console entry's link-mode override is not reachable by `set` (decision 17: every value is one
+/// row), or a prepared parameter refuses a write.
 #[test]
 fn bypass_link_mode_and_prepared_rows_are_written_by_set() {
     let mut model = effects_fixture();
@@ -567,16 +558,34 @@ fn bypass_link_mode_and_prepared_rows_are_written_by_set() {
         set(&mut model, &eq_link, 1.0, None, RATE),
         Err(ControlError::AddressUnknown)
     );
-    // A console slot's link mode is a slot declaration, not a row.
-    let console_link = address(
-        Owner::Strip(id("vocal")),
-        Section::Console(id("glue")),
-        LINK_MODE_CONTROL,
-        Lane::Both,
+    // A console entry's link mode is a row (#1369b): `slot` (0) runs the slot's declared mode,
+    // a supported mode overrides it for this strip, and a mode the effect lacks is refused.
+    let console_link = |slot| {
+        address(
+            Owner::Strip(id("vocal")),
+            Section::Console(id(slot)),
+            LINK_MODE_CONTROL,
+            Lane::Both,
+        )
+    };
+    let glue = console_link("glue");
+    set(&mut model, &glue, 2.0, None, RATE).unwrap();
+    assert_eq!(
+        model.tracks[0].console[0].link_mode,
+        session::ConsoleLinkMode::Maximum
     );
     assert_eq!(
-        set(&mut model, &console_link, 1.0, None, RATE),
-        Err(ControlError::AddressUnknown)
+        get(&model, &MonitorOverlay::default(), &glue, RATE),
+        Ok(2.0)
+    );
+    set(&mut model, &glue, 0.0, None, RATE).unwrap();
+    assert_eq!(
+        model.tracks[0].console[0].link_mode,
+        session::ConsoleLinkMode::Slot
+    );
+    assert_eq!(
+        set(&mut model, &console_link("ceiling"), 3.0, None, RATE),
+        Err(ControlError::Domain)
     );
     let console_bypass = address(
         Owner::Strip(id("vocal")),

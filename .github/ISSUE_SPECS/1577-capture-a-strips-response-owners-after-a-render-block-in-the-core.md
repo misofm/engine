@@ -166,3 +166,104 @@ tracks, input filters, an EQ insert and an EQ console slot:
 ## Supersedes and shrinks
 
 - None.
+
+## Decision and evidence record (attempt 1, 2026-10-24, against `main` 506196ce5)
+
+- **Anchors moved.** `PlanState::render` `crates/control-plane/src/plan.rs:355`; owner capture
+  `RealtimePlanOwner::copy_response_snapshot` `crates/engine/src/realtime/plan_exchange.rs:1031`;
+  `compile_children` `compile.rs:1589`; the epoch push `control.rs:3952`; `service` `control.rs:2501`.
+- **Root decisions applied (scope note R1-R6).** `after_block` runs at the end of `render`'s `Ok`
+  path, after the epoch store. The client has three states (`Idle`, `InFlight`, `Delivered`);
+  `release` is a no-op outside `Delivered`. One joint accessor,
+  `ProtocolController::provider_and_session_mut`. Three test functions instead of five.
+- **D4 correction.** The spec says no control-plane path withdraws a published candidate. That is
+  wrong today: #1310 supersession withdraws one (`control.rs` `withdraw_pending_candidate`). The
+  epoch rule holds anyway: a refused supersession republishes the candidate with its own epoch
+  (`PlanPublisher::republish`), and a committed one publishes a newer epoch through the push that
+  sets the newest epoch. A job armed at the withdrawn epoch then turns `Stale` and is armed again.
+- **Realtime.** `after_block` and the collector's `ResponseSnapshotSink` impl are in
+  `REALTIME_POLICY` regions; so is the client's one reply pop (the tool's rule for a `try_pop`
+  outside the control-side allowlist). A held slot is filled through `Option::replace` and the
+  `None` it displaces is forgotten, so no drop of a job is reachable on render.
+- **Resources.** The channel's two queues are charged in `capi_resources`'s fixed aggregate rows
+  (`host_core::response_capture_retained_bytes`); capi's completeness oracle saw the 544 bytes
+  uncharged before. Attempt 2 (root ruling, the #1325a rule: a control-side heap owner that
+  outlives a call is charged at the model's bounds): one armed job and one delivered result are
+  charged in the same rows (`host_core::response_capture_ceiling_bytes`, through
+  `control_plane::response_capture_bytes`): the strip with the most owners (input filters, every
+  console slot, the most inserts any strip has) with three 127-byte identities and two
+  six-section arrays per owner plus the strip ID, and a 4,096-point result (frequencies, left,
+  right) with its members. The bound is the committed model's, not `maximum_effects`: the browser
+  runs with `maximum_effects = u64::MAX`, so a cap bound cannot be represented there. It is
+  52,076 bytes for the nine-track fixture; capi's reference ceiling moves 212,288 -> 275,584
+  (measured 250,475, plus 10 %). capi's completeness oracle adds the row as a bound;
+  `a_capture_at_the_bound_stays_within_its_charge` holds a capture at the bound within it.
+  Attempt 3 (root ruling): the ceiling is taken at the session's owner high-water, the most
+  owners one strip of any committed model of this session has had (`capture_owners_high_water`,
+  the `observation_slots_high_water` precedent: set at boot, raised after each rebuild's commit,
+  passed to every successor's preparation), so a job or result sized under a model a rebuild
+  displaced (deferred adoption, a full retirement queue, a render finishing an older block) stays
+  charged. `ResponseCaptureCeiling` is split into `job_bytes` and `result_bytes`; the result
+  charges two strip IDs (`ResponseReady::strip_id` and `TrackResponse::strip_id`), and
+  `compose_track_response` reserves its member table exactly. Attempt 4: `CapiResources::response_capture` stores the row
+  `capi_resources` charges, and the shrinking test reads it on the pending successor. The nine-track fixture's row is
+  52,203 bytes; capi's reference row measures 248,532 against its 275,584 ceiling after the merge
+  of `main` at attempt 3, so the ceiling stays.
+- **Browser call-graph gate.** `scripts/check-web-audioworklet.sh` fails on two pins, outside this
+  issue's paths: `ResponseCaptureServer::after_block` is a new trap owner with 2 sites (the
+  inlined SPSC `slots[...]` index of its pop and push, the class `enter_block` is admitted for),
+  and `RealtimePlanOwner::copy_response_snapshot` is a new `call_indirect` site (1: the
+  executor's `copy_response_snapshot` through `Box<dyn PreparedPlanExecutor>`). No allocation or
+  drop glue is reachable. Root authorized both pins (2026-10-24, extra paths
+  `scripts/check-web-audioworklet.sh` and `scripts/check-web-audioworklet-callgraph.py`):
+  `--trap-owner 21ResponseCaptureServer11after_block=2` (the SPSC `slots[...]` index of
+  `after_block`'s one pop and one push, `panic_bounds_check`, the same class as `enter_block`),
+  and an `INDIRECT_SITES` row of 1 for `RealtimePlanOwner::copy_response_snapshot` (the capture
+  copies the plan's snapshot through the executor trait object, once per armed job; no
+  allocation, no drop). The two checks are not removed instead: they are the engine SPSC's own
+  `slots[local]` index (`crates/engine/src/realtime/spsc.rs`), which every SPSC user inlines, so
+  removing them is an engine change outside this issue.
+
+- **Reachability (attempt 2 correction).** The keep branch (active epoch below the job's) is
+  reachable: through the C ABI's cross-thread order, and on one thread through
+  `SessionState::test_set_next_adoption(PlanAdoption::NoEarlierThan(..))`, which
+  `capture_follows_newest_plan` now drives. Only the full-reply-push branch is unreachable: the
+  channel holds one job, and the client pushes a request only when it holds no reply, so the
+  reply queue is empty whenever render pushes.
+
+- **Removal after #1325 (attempt 3 merge).** A removal now ducks its strip out and adopts its plan
+  later (`PlanAdoption::NoEarlierThan(S)`), so a capture armed on the running plan before the
+  removal is answered from it, with the strip, as D3 says. `StripRemoved` arises when the job's
+  epoch is never adopted: the test arms on a pending rebuild that the removal then supersedes.
+
+### Test value (`crates/control-plane/tests/response_capture.rs`)
+
+- `capture_follows_newest_plan` (gates 1, 3, 4): red if the render step captures from a plan older
+  than the job's epoch (the keep branch: a rebuild adopted 4 blocks later, with no allocation on
+  any block, the swap block included), if it captures before the block,
+  if a replacement's epoch is not recorded, if a reply is dropped or delivered twice, or if a
+  refused request leaves a tag or a pending state behind, or checks a pending capture before an
+  unknown strip.
+- `capture_reads_applied_values` (gate 2): red if the step reads the values held before the
+  block's live snapshot instead of the applied targets after it.
+- `render_step_allocates_nothing` (gate 5, the root comment): red if the render step, the
+  collector's copy or the job's move allocates or frees on render, or a job is lost; a structural
+  push between an arm and its render drives the stale path under the count.
+- `a_capture_at_the_bound_stays_within_its_charge`: red if the job's charge leaves out a part of
+  the job (the collector's table or its three identities per owner), or the result's leaves out a
+  part of the result that persists across calls.
+- `a_capture_held_across_a_shrinking_rebuild_stays_within_its_charge`: red if the charge follows
+  the newest committed model alone, not the most owners any committed model has had.
+
+Red first, each mutant restored by `git checkout`: step before the block (follows and applied red);
+no newest-epoch record at the push (follows red); a refusal that takes a tag (follows red);
+`Delivered` read as `Idle` (follows red); render drops a finished job (all three red); the sink
+allocates its track ID (allocates red only). Attempt 2: the keep branch deleted (follows red:
+delivered at sample 128, before the adoption at 640); `Pending` checked before `UnknownStrip`
+(follows red); a stale job armed again at its old epoch (follows and allocates red); the curves
+left out of the charge (bound red: delivered 49,455 bytes against a 4,199-byte charge).
+Attempt 3: the high-water ignored (shrinking red: a held job of 5,072 bytes against a 2,177-byte
+job charge); attempt 4: the high-water replaced by 0 at the `prepared_capi_resources` call
+(shrinking red: the pending successor's stored `CapiResources::response_capture` 52,203 against
+the five-owner ceiling 56,028); the member table, the member identities and the collector's 3 x 127 identities left
+out (bound red: a 3,142-byte job against 1,999; shrinking red: 5,072 against 3,167).

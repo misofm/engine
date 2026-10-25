@@ -347,6 +347,8 @@ pub struct SessionControlProvider {
     /// The most reply frame bytes a `RESPONSE_GET` may answer: the smaller of the endpoint's
     /// frame bound and the replay cache's response bound.
     maximum_reply_bytes: usize,
+    /// The control half of the session's response capture (#1577 D4).
+    response_capture: crate::ResponseCaptureClient,
     /// The meter window in blocks of the host's meter delivery, or `None` while the host has none
     /// (#1583 D4): the browser until #1588.
     meter_window_blocks: Option<core::num::NonZeroU32>,
@@ -401,6 +403,7 @@ impl SessionControlProvider {
         retained: ControllerRetainedCapacity,
         diagnostic_capacity: usize,
         maximum_reply_bytes: usize,
+        response_capture: crate::ResponseCaptureClient,
     ) -> Result<Self, SessionControlProviderError> {
         let mut provider = Self {
             sample_source,
@@ -413,6 +416,7 @@ impl SessionControlProvider {
             transport_state: TransportState::Stopped,
             telemetry_configuration: retained_telemetry(retained)?,
             maximum_reply_bytes,
+            response_capture,
             meter_window_blocks: None,
         };
         provider
@@ -445,6 +449,40 @@ impl SessionControlProvider {
             provider.diagnostic_live.push(false);
         }
         Ok(provider)
+    }
+
+    /// Record the newest plan epoch for the response capture (#1577 D4): at boot and whenever a
+    /// replacement plan's epoch is published.
+    pub fn set_newest_plan_epoch(&mut self, epoch: u64) {
+        self.response_capture.set_newest_plan_epoch(epoch);
+    }
+
+    /// Arm one capture of `strip_id`'s response owners ([`crate::ResponseCaptureClient::arm`]).
+    ///
+    /// # Errors
+    ///
+    /// The client's [`crate::ResponseCaptureRefusal`]; a refusal changes nothing.
+    pub fn arm_response_capture(
+        &mut self,
+        model: &session::SessionModel,
+        strip_id: &str,
+        grid: crate::ResponsePreviewGrid,
+        channels: crate::ResponseChannels,
+    ) -> Result<u64, crate::ResponseCaptureRefusal> {
+        self.response_capture.arm(model, strip_id, grid, channels)
+    }
+
+    /// The armed capture's result, once ([`crate::ResponseCaptureClient::poll`]).
+    pub fn poll_response_capture(
+        &mut self,
+        model: &session::SessionModel,
+    ) -> Option<crate::ResponseReady> {
+        self.response_capture.poll(model)
+    }
+
+    /// End a delivered capture ([`crate::ResponseCaptureClient::release`]).
+    pub fn release_response_capture(&mut self) {
+        self.response_capture.release();
     }
 
     /// Publish one fully prepared catalog, committed as session revision `revision`, without
@@ -3280,6 +3318,56 @@ mod tests {
             );
         }
         assert_eq!(model, before, "a response read writes nothing");
+
+        // A console entry's link-mode override `0` (`slot`, #1369) is the slot's declared mode:
+        // the session's EQ slot becomes a `maximum` compressor, whose entry the override passes
+        // the validator and resolves, and the compressor (no response) is then refused as an
+        // effect, not as an override.
+        let mut comp_console = model.clone();
+        let slot = &mut comp_console.console.pre_insert[0];
+        slot.identity = EffectIdentity::Native {
+            effect_id: session::StableId::parse("miso.compressor").expect("effect"),
+        };
+        slot.link_mode = session::LinkMode::Maximum;
+        for track in &mut comp_console.tracks {
+            track.console[0].params.clear();
+        }
+        let slot_override = row(controls::LINK_MODE_CONTROL, ParameterChannel::Both, 0.0);
+        let error = serve_response(
+            1 << 20,
+            &comp_console,
+            &address_request(
+                strip_address("eq1", ControlSection::Console, Some("eq")),
+                vec![slot_override],
+            ),
+        )
+        .expect_err("a compressor has no response");
+        assert_eq!(
+            (error.status, error.code),
+            (StatusCode::Unavailable, "response.effect.unsupported")
+        );
+        let resolved = resolve_response_target(
+            &comp_console,
+            "eq1",
+            ResponseAddressSection::Console("eq"),
+            &[ResponseParameterOverride {
+                parameter_id: controls::LINK_MODE_CONTROL,
+                channel: contract_channel(ParameterChannel::Both),
+                value: 0.0,
+            }],
+            RATE,
+        )
+        .expect("the slot override resolves");
+        assert!(
+            matches!(
+                resolved,
+                crate::ResolvedResponseTarget::Effect {
+                    link_mode: effect_contract::LinkMode::Maximum,
+                    ..
+                }
+            ),
+            "`slot` resolves the slot's declared mode"
+        );
     }
 
     /// #1575 gate 4: an address that names no response owner is refused with its own status and
@@ -3376,6 +3464,9 @@ mod tests {
             },
             2,
             1 << 20,
+            crate::response_capture_channel()
+                .expect("capture channel")
+                .0,
         )
         .expect("provider");
         (provider, clock)

@@ -754,7 +754,7 @@ fn write_success_payload(
         }
         SuccessResponsePayload::SessionTransactionApplied(value)
         | SuccessResponsePayload::SessionReplaced(value) => {
-            crate::message_wire::write_transaction_applied(sink, *value)
+            crate::message_wire::write_transaction_applied(sink, value)
         }
         SuccessResponsePayload::TransportGetSnapshot(value)
         | SuccessResponsePayload::TransportSetSnapshot(value) => {
@@ -1216,10 +1216,7 @@ mod tests {
                     request_id: request_id(),
                     revision: SessionRevision(7),
                     payload: SuccessResponsePayload::SessionTransactionApplied(
-                        TransactionApplied {
-                            applied_operations: 1,
-                            edit_path: crate::EditPath::Live,
-                        },
+                        TransactionApplied::new(1, crate::EditPath::Live),
                     ),
                 },
                 MessageId::SessionTransactionApply,
@@ -1327,10 +1324,10 @@ mod tests {
                 TypedSuccessResponseFrame {
                     request_id: request_id(),
                     revision: SessionRevision(7),
-                    payload: SuccessResponsePayload::SessionReplaced(TransactionApplied {
-                        applied_operations: 0,
-                        edit_path: crate::EditPath::Unchanged,
-                    }),
+                    payload: SuccessResponsePayload::SessionReplaced(TransactionApplied::new(
+                        0,
+                        crate::EditPath::Unchanged,
+                    )),
                 },
                 MessageId::SessionReplace,
             ),

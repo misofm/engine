@@ -12,6 +12,7 @@ use builtins::BuiltinParameterDescriptor;
 use effect_compiler::launch_native_effect_registry;
 
 use crate::descriptor::ControlDescriptor;
+use crate::effect_rows::LinkRow;
 use crate::{ControlClass, builtin_rows, effect_rows, route, session_rows, strip, vca};
 
 /// A row table.
@@ -128,16 +129,20 @@ pub fn table_rows(source: RowSource) -> Vec<TableRow> {
 const FIRST_RATE: u32 = 44_100;
 
 /// The rows of one native effect: its bypass, each parameter in descriptor order, and the link
-/// mode of an insert that supports more than one.
+/// mode of an insert and of a console entry when the effect supports more than one.
 #[derive(Clone, Debug, PartialEq)]
 pub struct EffectTableRows {
     /// The bypass row (control [`crate::BYPASS_CONTROL`]).
     pub bypass: TableRow,
     /// One row per parameter of the effect's descriptor.
     pub parameters: Vec<TableRow>,
-    /// The link-mode row (control [`crate::LINK_MODE_CONTROL`]), or `None` for an effect with one
-    /// link mode. A console slot has no link-mode row, whatever the effect.
+    /// An insert's link-mode row (control [`crate::LINK_MODE_CONTROL`]), or `None` for an effect
+    /// with one link mode.
     pub link_mode: Option<TableRow>,
+    /// A console entry's link-mode row (control [`crate::LINK_MODE_CONTROL`]): `slot` (code `0`,
+    /// the slot's declared mode) and then the insert row's choices; `None` for an effect with one
+    /// link mode (#1369).
+    pub console_link_mode: Option<TableRow>,
 }
 
 /// The rows of the launch effect `effect_id`, or `None` for an ID the launch registry does not
@@ -146,6 +151,14 @@ pub struct EffectTableRows {
 pub fn effect_table_rows(effect_id: &str) -> Option<EffectTableRows> {
     let registry = launch_native_effect_registry().ok()?;
     let descriptor = registry.get_ascii(effect_id)?.descriptor();
+    let link_row = |row| {
+        effect_rows::link_choices(descriptor, row).map(|choices| {
+            TableRow::plain(
+                effect_rows::LINK_MODE_CONTROL,
+                effect_rows::link_mode_descriptor(effect_id, choices, row),
+            )
+        })
+    };
     Some(EffectTableRows {
         bypass: TableRow::plain(
             effect_rows::BYPASS_CONTROL,
@@ -158,11 +171,7 @@ pub fn effect_table_rows(effect_id: &str) -> Option<EffectTableRows> {
                 TableRow::plain(parameter.id.0, effect_rows::parameter_descriptor(parameter))
             })
             .collect(),
-        link_mode: effect_rows::link_choices(descriptor).map(|choices| {
-            TableRow::plain(
-                effect_rows::LINK_MODE_CONTROL,
-                effect_rows::link_mode_descriptor(effect_id, choices),
-            )
-        }),
+        link_mode: link_row(LinkRow::Insert),
+        console_link_mode: link_row(LinkRow::Console),
     })
 }
