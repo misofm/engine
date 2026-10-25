@@ -3,7 +3,7 @@
 
 Owner decision 5 (`docs/rulings/engine-footprint-2026-09-28.md`): every PR builds the shipped
 module and runs every artifact gate against those bytes, and reports whether the module changed;
-only a release change must match the recorded fingerprint and carry a fresh three-browser
+only a release change must match the recorded fingerprint and carry a fresh two-browser
 qualification.
 
 The record: on a push to `main`, `qualification.yml`'s `artifact-record` job (a push-only job that
@@ -46,7 +46,7 @@ This script reads it:
     built bytes; or
   - the change moves `rust-toolchain.toml`'s ``[browser-artifact] channel`` (#1334 D5) and the
     recorded browser qualification does not describe the built bytes: a toolchain bump needs a
-    re-recorded three-browser matrix, as a release does.
+    re-recorded two-browser matrix, as a release does.
     `docs/RELEASE.md` is the procedure.
 
   A failed status lookup (the API, or ``gh`` itself) is an error (exit 2), not CANNOT TELL: it means
@@ -287,7 +287,7 @@ def release_checks(root: pathlib.Path, built: str, toolchain: str) -> tuple[list
 
 
 def qualification_checks(root: pathlib.Path, built: str) -> tuple[list[str], bool]:
-    """`results.json` records a three-browser qualification of the built bytes."""
+    """`results.json` records a two-browser qualification of the built bytes."""
     lines, ok = [], True
     try:
         results = json.loads(show(root, "HEAD", RESULTS) or "null")
@@ -297,7 +297,7 @@ def qualification_checks(root: pathlib.Path, built: str) -> tuple[list[str], boo
     qualified = results.get("wasmSha256")
     candidate = results.get("candidateCommit")
     if qualified == built:
-        lines.append(f"  - `{RESULTS}` records the three-browser qualification of the built bytes")
+        lines.append(f"  - `{RESULTS}` records the two-browser qualification of the built bytes")
     else:
         ok = False
         lines.append(f"  - **FAIL** artifact-lineage: `{RESULTS}` records a qualification of "
@@ -387,7 +387,7 @@ def report(root: pathlib.Path, event: str, before: str, repository: str, built: 
     if moved is not None:
         lines.append(f"- TOOLCHAIN: this change moves `{RUST_TOOLCHAIN}`'s `[browser-artifact] "
                      f"channel` from `{moved[0]}` to `{moved[1]}`, so `{RESULTS}` must record a "
-                     f"three-browser qualification of the built bytes ({RELEASE_DOC}):")
+                     f"two-browser qualification of the built bytes ({RELEASE_DOC}):")
         checked, qualified_ok = qualification_checks(root, built)
         lines += checked
         ok = ok and qualified_ok
@@ -602,17 +602,17 @@ def run_self_test(scratch: pathlib.Path) -> None:
         merge(base, commit(label, **fields))
         case(label, False, (needle,))
     # #1334 D5: a change that moves the browser artifact channel, and is no release, must carry a
-    # three-browser record of the bytes it built; with one it passes.
+    # two-browser record of the bytes it built; with one it passes.
     at(base)
     merge(base, commit("toolchain bump without a record", channel=N2, toolchain=N2))
-    case("channel changed without a three-browser record of the built digest", False,
+    case("channel changed without a two-browser record of the built digest", False,
          (f"TOOLCHAIN: this change moves `rust-toolchain.toml`'s `[browser-artifact] channel` from "
           f"`{N1}` to `{N2}`", "**FAIL** artifact-lineage"), toolchain=N2,
          absent=("RELEASE:",))
     at(base)
     merge(base, commit("toolchain bump recorded", channel=N2, toolchain=N2, qualified=b))
-    case("channel changed with a three-browser record", True,
-         ("TOOLCHAIN: this change moves", "records the three-browser qualification of the built"),
+    case("channel changed with a two-browser record", True,
+         ("TOOLCHAIN: this change moves", "records the two-browser qualification of the built"),
          toolchain=N2)
     for bad in ("A" * 64, "0" * 63, ""):
         try:
@@ -696,7 +696,7 @@ def main() -> int:
         print("web AudioWorklet identity self-test passed: the base's recorded digest (matching, "
               "different, missing, malformed, not success, refused, across documentation), "
               "reproducibility, a toolchain change, seven release mutations and a toolchain "
-              "bump with and without its three-browser record")
+              "bump with and without its two-browser record")
         return 0
     try:
         if args.command == "report":

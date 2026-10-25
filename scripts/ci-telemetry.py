@@ -184,7 +184,7 @@ def self_test() -> None:
             },
             {
                 # A cancelled job with normal timestamps and one recorded step.
-                "name": "browser firefox",
+                "name": "browser webkit",
                 "status": "completed",
                 "conclusion": "cancelled",
                 "created_at": "2026-09-04T00:00:00Z",
@@ -239,7 +239,7 @@ def self_test() -> None:
 
     markdown = render_markdown(rows)
     assert markdown.startswith("| Job | Conclusion |")
-    assert "browser firefox" in markdown
+    assert "browser webkit" in markdown
     assert "Longest job: audit-native (303s total)." in markdown
 
     empty_markdown = render_markdown([])

@@ -36,7 +36,7 @@ Only indexed final files are playable. A move is index-last: decoded bytes are
 hashed while written, the staging file is reopened and fully verified, then a
 successful `FileSystemFileHandle.move(destination, name)` atomically changes
 its name. The P-2 extension observed this exact staging-to-parent move on
-Chromium 151 and Firefox 153. When move is absent or explicitly unsupported,
+Chromium 151. When move is absent or explicitly unsupported,
 the adapter copies to the final name, reopens it, fully hashes it, and inserts
 the index row last. A crash can therefore leave staging or an unindexed final,
 but never a trusted partial; open sweeps both after consulting live Web Locks.
@@ -78,11 +78,11 @@ lock; the replacement then verifies and installs exactly one fresh pin.
 Playback reads use `getFile()` snapshots, never long-lived access handles.
 Where a caller probes sync read-only mode, it trusts only
 `accessHandle.mode === "read-only"`; option acceptance is not evidence because
-Firefox accepts the option while retaining exclusive behavior and WebKit
-ignores `mode` entirely. The existing-file contention contract is deliberately
+WebKit ignores `mode` entirely and another engine may accept the option while
+retaining exclusive behavior. The existing-file contention contract is deliberately
 error-name-agnostic: **any** `createSyncAccessHandle()` rejection declines the
 sync path and falls back to a `getFile()` snapshot. It must never match a named
-exception: WebKit reports `InvalidStateError`, while Chromium and Firefox report
+exception: WebKit reports `InvalidStateError`, while Chromium reports
 `NoModificationAllowedError`. Real-device probes confirm that the fallback can
 read flushed bytes while the writer remains held. A read failure during
 playback releases every ring and reports a typed session error; it never turns

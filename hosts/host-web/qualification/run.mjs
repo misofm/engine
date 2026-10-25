@@ -5,7 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import process from "node:process";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { chromium, firefox, webkit } from "playwright";
+import { chromium, webkit } from "playwright";
 import { renderMatrix } from "./generate-matrix.mjs";
 import { checkSessionIdentities } from "./session-identities.mjs";
 import {
@@ -25,7 +25,9 @@ const CANONICAL_COMMIT = /^[0-9a-f]{40}$/;
 const PLAYWRIGHT_VERSION = JSON.parse(
   await readFile(path.join(HERE, "node_modules", "playwright", "package.json"), "utf8"),
 ).version;
-const ENGINES = { chromium, firefox, webkit };
+// Owner ruling 2026-10-25 (#2092): Chrome and Safari are the supported browsers; Firefox is not
+// qualified, and `--browser firefox` is refused as an unknown browser.
+const ENGINES = { chromium, webkit };
 // Issue #2040: each red mutation and the one gate that must catch it. `mutationProofs` holds the
 // thrown message to `${browserName}: ${gate}:`, so a gate that stops firing turns red even while
 // another gate still throws on the same record. A mutation whose name names a gate names the gate

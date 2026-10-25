@@ -221,10 +221,11 @@ async function runCorpusQualification(createHost, sessionDocument, source) {
       || source?.quantumFrames !== QUANTUM_FRAMES || source?.blocks?.length !== 2) {
     throw new Error("corpus fixture shape mismatch");
   }
-  // Firefox does not expose OfflineAudioContext.suspend. Prefill two bounded fresh contexts and
-  // concatenate the oracle's exact [block 0, block 0, block 1] timeline instead of coordinating
-  // submissions with a main-realm-only API. The resulting 384 frames must still match the one
-  // frozen native digest bit for bit.
+  // The run does not use OfflineAudioContext.suspend (Firefox, no longer a supported browser
+  // since #2092, lacked it; the suspend-free form stays engine-neutral). Prefill two bounded fresh
+  // contexts and concatenate the oracle's exact [block 0, block 0, block 1] timeline instead of
+  // coordinating submissions with a main-realm-only API. The resulting 384 frames must still match
+  // the one frozen native digest bit for bit.
   const first = await renderCorpusSegment(createHost, sessionDocument, [source.blocks[0]]);
   const rest = await renderCorpusSegment(createHost, sessionDocument, source.blocks);
   const pcm = [new Float32Array(CORPUS_FRAMES), new Float32Array(CORPUS_FRAMES)];
@@ -853,7 +854,7 @@ async function runStructuralReplaceQualification(createHost, documentA, document
 /// is the core's `Observe` edit through the host's `control` message (#1589c), built with the SDK's
 /// codec. The engine admits one observation record per tap per render (#1345 D8, D2 Amendments 1
 /// and 2), and an
-/// offline context renders only inside one `startRendering` call (Firefox has no
+/// offline context renders only inside one `startRendering` call (the harness does not use
 /// `OfflineAudioContext.suspend`), so a subscribe followed at once by an unsubscribe is refused with
 /// typed backpressure here. That an unsubscribe stops a tap's reading is proved on a real
 /// `AudioContext` by [`runObservationUnsubscribeRun`] (#1535).
@@ -1031,8 +1032,8 @@ export function requestFailure(step, kind, inFlight, cause) {
 }
 
 /// Fail with `suspend timeout at <step>` unless `context.state` is "suspended" within the bound.
-/// The first `suspend()` of a new context is not awaited (Firefox can create a later context already
-/// running, and the `suspend()` is only a request), so this poll is what keeps the run from going
+/// The first `suspend()` of a new context is not awaited (an engine may create a later context
+/// already running, as Firefox did before #2092, and the `suspend()` is only a request), so this poll is what keeps the run from going
 /// on with a context that is still running. Returns the state it saw, which the run records.
 async function requireSuspended(context, step) {
   const started = performance.now();
@@ -1050,7 +1051,7 @@ async function requireSuspended(context, step) {
 /// Resume `context` with a trusted click on a button this function adds, the way an app must in
 /// Safari: WebKit starts or restarts an `AudioContext` only inside a user activation and otherwise
 /// leaves `resume()` pending. `run.mjs` clicks the button [`resumeClickPlan`] names, a trusted event
-/// in all three browsers. The wait for the click is bounded like every other wait here.
+/// in both supported browsers. The wait for the click is bounded like every other wait here.
 async function resumeThroughClick(context, what) {
   const button = document.createElement("button");
   button.setAttribute("data-qualification-resume", what);

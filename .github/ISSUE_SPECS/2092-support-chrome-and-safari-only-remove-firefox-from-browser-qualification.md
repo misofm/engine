@@ -12,6 +12,15 @@ The browser host's supported engines are Chromium (Chrome) and WebKit (Safari). 
 - AGENTS.md's "three-browser matrix" wording changes only with the owner's approval (agents do not edit AGENTS.md).
 
 ## Gates
-- `qualification.yml` verdict table matches the remaining jobs (its self-test or a dry router run).
-- `npm run qualify -- --check-matrix --self-test-mutations` passes for chromium and webkit; a request for firefox is refused with a clear error.
-- `lint-checks.sh --self-tests` passes.
+- `qualification.yml` verdict table matches the remaining jobs: the matrix job is one `browser` job in the table, and the router has no browser output, so neither changes. The PR's own `qualification` verdict is SUCCESS with two green `browser` legs.
+- `npm run qualify -- --browser <b> --sdk-root sdk --check-matrix --self-test-mutations` passes for chromium and for webkit (no `sdk/dist`); `--browser firefox` is refused with the existing `unknown browser: firefox` error.
+- `node hosts/host-web/qualification/generate-matrix.mjs --check`, `python3 scripts/ci-telemetry.py --self-test`, `python3 scripts/web-audioworklet-identity.py --self-test` and `node scripts/check-stem-store-v1.mjs` pass.
+- The CI lint job's policy scripts pass with their self-tests (the old `lint-checks.sh --self-tests` line named no script in the repository; root ruling R4, 2026-10-25).
+- No new test: the refusal is the existing `unknown browser:` throw.
+
+## Decision record
+- D1 (root R1): the Firefox row of `results.json` is deleted by hand and `BROWSER_DEPLOYMENT_MATRIX.md` is regenerated with `generate-matrix.mjs`; no `--record-matrix`, so `candidateCommit` and `wasmSha256` stay.
+- D2 (root R2): code that served Firefox is feature-detected and engine-neutral (`detectSharedReadOnlyMode`, which WebKit still needs; the suspend-free offline renders; the pending `suspend()`), so it stays; only its comments change.
+- D3 (root R3): the stem-store browser evals default to chromium and webkit; a firefox leg is refused as an unknown leg.
+- D4: `docs/C_ABI_V1_QUALIFICATION.md` keeps its dated Firefox line (a record); `MUTATIONS.md` keeps its recorded Firefox rows and adds one note. Historical handoffs and verdicts stay.
+- D5: AGENTS.md's "re-recorded three-browser matrix" sentence changes only with the owner's approval; root takes the wording to the owner.
