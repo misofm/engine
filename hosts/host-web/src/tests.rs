@@ -6920,6 +6920,32 @@ mod structural_apply {
             assert_eq!(self.host.read_watermark(), RESULT_OK);
             *self.host.watermark()
         }
+
+        /// Steps until the plan applies the committed revision, at least one block: a rebuild
+        /// that restarts a strip is a duck-swap, adopted at its `S`, not at the next block
+        /// (#1324a). The adoption block's first sample.
+        fn step_through_adoption(&mut self) -> u64 {
+            let revision = self.host.committed_revision();
+            let mut blocks = 0;
+            loop {
+                assert!(
+                    blocks < 64,
+                    "revision {revision} is applied within 64 blocks"
+                );
+                self.step();
+                blocks += 1;
+                if self.watermark().revision >= revision {
+                    break;
+                }
+            }
+            let first = self.watermark().first_sample;
+            assert_eq!(
+                first,
+                (self.block - 1) * u64::from(QUANTUM),
+                "the last block adopted it"
+            );
+            first
+        }
     }
 
     fn first_difference(left: &[Vec<u32>], right: &[Vec<u32>]) -> Option<(usize, usize)> {
@@ -8202,7 +8228,8 @@ mod structural_apply {
                 ..
             }
         ));
-        rig.step();
+        // The replacement inherits the first candidate's duck-swap `S` (#1324a, #1325 D6).
+        rig.step_through_adoption();
         assert_eq!(rig.epoch(), 2, "the replacement is adopted");
         assert_eq!(
             armed_mask(&mut rig.host, "track", "comp"),
@@ -8355,9 +8382,9 @@ mod structural_apply {
             },
             "a delay is a rebuild"
         );
-        for _ in 0..2 {
-            rig.step();
-        }
+        // The delay restarts the track: a duck-swap, adopted at its `S` (#1324a).
+        rig.step_through_adoption();
+        rig.step();
         assert_eq!(rig.epoch(), 1);
         assert_eq!(
             rig.host.meter_header().structure_epoch,
@@ -8949,7 +8976,9 @@ mod structural_apply {
     /// its effect, as `observation_armed_taps` reads zero).
     #[test]
     fn a_restarted_effects_subscription_keeps_publishing_windows_on_the_browser() {
-        let model = observed_model();
+        let mut model = observed_model();
+        // The duck-swap's wait for `S` (#1324a) plays past the fixture source's last frame.
+        model.sources[0].frames = 1 << 20;
         let mut rig = Rig::boot(&model, options(), None);
         assert_eq!(rig.host.set_meter_lease(true), RESULT_OK);
         rig.step();
@@ -8987,8 +9016,8 @@ mod structural_apply {
                 revision
             } if revision == base + 1
         ));
-        let adoption_sample = rig.block * u64::from(QUANTUM);
-        rig.step();
+        // The link-mode change restarts the track: a duck-swap, adopted at its `S` (#1324a).
+        let adoption_sample = rig.step_through_adoption();
         assert_eq!(rig.epoch(), 1);
         assert_eq!(
             rig.host.observation_armed_taps(),
@@ -9075,7 +9104,8 @@ mod structural_apply {
                 (base + 1, "ended track Inserts comp 1".to_owned()),
             ]
         );
-        rig.step();
+        // The removal restarts the track: a duck-swap (#1324a).
+        rig.step_through_adoption();
         assert_eq!(rig.epoch(), 1);
         assert_eq!(rig.host.observation_armed_taps(), 0);
         assert!(
@@ -9691,8 +9721,9 @@ mod structural_apply {
             "the record is the active plan's"
         );
 
-        // The first read after the adopting block holds the successor's words.
-        rig.step();
+        // The first read after the adopting block holds the successor's words. The limiter
+        // restarts the track: a duck-swap, adopted at its `S` (#1324a).
+        rig.step_through_adoption();
         assert_eq!(rig.epoch(), 1);
         assert_eq!(rig.host.read_plan_latency(), RESULT_OK);
         assert_eq!(

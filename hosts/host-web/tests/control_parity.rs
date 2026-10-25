@@ -1916,12 +1916,8 @@ fn the_status_words_carry_a_rebuilds_watermark_the_c_abi_reports() {
         );
         assert_eq!(c_abi.watermark(), initial);
 
-        let _ = (browser.step(3), c_abi.step(3));
-        assert_eq!(
-            status_watermark(&browser),
-            c_abi.watermark(),
-            "{rate} Hz: the swap block"
-        );
+        // The delay restarts T1: a duck-swap, adopted at its `S` (#1324a).
+        let swap = step_both_until_applied(&mut browser, &mut c_abi, 3, model.revision + 2);
         let (revision, first_sample, flags) = status_watermark(&browser);
         assert_eq!(
             revision,
@@ -1930,7 +1926,7 @@ fn the_status_words_carry_a_rebuilds_watermark_the_c_abi_reports() {
         );
         assert_eq!(
             first_sample,
-            3 * u64::from(QUANTUM),
+            swap * u64::from(QUANTUM),
             "{rate} Hz: the swap block"
         );
         let _ = flags;
@@ -1941,7 +1937,7 @@ fn the_status_words_carry_a_rebuilds_watermark_the_c_abi_reports() {
             c_abi.watermark(),
             "{rate} Hz: the control-side record"
         );
-        for block in 4..8 {
+        for block in swap + 1..swap + 5 {
             let _ = (browser.step(block), c_abi.step(block));
             assert_eq!(
                 status_watermark(&browser),
@@ -1957,6 +1953,21 @@ fn the_status_words_carry_a_rebuilds_watermark_the_c_abi_reports() {
 fn without_request_id(mut reply: Vec<u8>) -> Vec<u8> {
     reply[24..32].fill(0);
     reply
+}
+
+/// Blocks from `block` on, on both hosts, equal bit for bit and with one status watermark, until
+/// each applies `revision`: a rebuild that restarts a strip is a duck-swap, adopted at its `S`,
+/// not at the next block (#1324a). The adoption block.
+fn step_both_until_applied(browser: &mut Rig, c_abi: &mut CAbi, block: u64, revision: u64) -> u64 {
+    for at in block..block + 64 {
+        let (b, c) = (browser.step(at), c_abi.step(at));
+        assert_eq!(b, c, "block {at}");
+        assert_eq!(status_watermark(browser), c_abi.watermark(), "block {at}");
+        if c_abi.watermark().0 >= revision {
+            return at;
+        }
+    }
+    panic!("revision {revision} is applied within 64 blocks of block {block}");
 }
 
 /// Blocks `range` on both hosts, equal bit for bit.
@@ -4238,8 +4249,9 @@ fn a_rebuild_that_adds_latency_moves_the_plan_latency_alike_on_both_hosts() {
             "{rate} Hz: pending"
         );
         assert_eq!(c_abi.plan_latency(), boot, "{rate} Hz: pending");
-        browser.step(4);
-        c_abi.step(4);
+        // The limiters restart T1: a duck-swap, adopted at its `S` (#1324a).
+        let revision = c_abi.watermark().0 + 1;
+        step_both_until_applied(&mut browser, &mut c_abi, 4, revision);
         let moved = c_abi.plan_latency();
         assert!(
             moved.0 > boot.0,
