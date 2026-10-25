@@ -324,14 +324,6 @@ struct Control<'a> {
     /// The control plane's withdrawal outcomes on this, the control, thread (#1310 D1):
     /// `(withdrawn, taken, superseded)`.
     outcomes: (u64, u64, u64),
-    /// The revision of the last admitted removal of `a-race` (#1325): until the watermark reports
-    /// it, the removed strip ramps out on the running plan, and re-adding it is the 1325a restore
-    /// refusal.
-    removal: Option<u64>,
-    /// How many adds of `a-race` met that refusal.
-    restore_retries: u64,
-    /// How many of those refusals have been retried.
-    retried: u64,
 }
 
 impl Control<'_> {
@@ -456,28 +448,6 @@ impl Control<'_> {
             capacity_bytes: self.response.len() as u64,
             required_bytes: 0,
         };
-        // After a restore refusal the add is retried once the removal is reported adopted.
-        if self.restore_retries > self.retried
-            && let Some(removal) = self.removal
-            && watermark_c(self.plan_address).is_none_or(|watermark| watermark.revision < removal)
-        {
-            return;
-        }
-        self.retried = self.restore_retries;
-        // #1325 (1325a; #1325b deletes this): an add of `a-race` while its removal is committed
-        // and its adoption is not yet reported is a restore during phase 1, refused as
-        // backpressure until 1325b. The watermark is read before the submit: a removal reported
-        // adopted before it promotes at the submit's service step, so a refusal then is a defect.
-        let adding = self.admitted.is_multiple_of(2);
-        let in_phase_one = adding
-            && self.removal.is_some_and(|removal| {
-                let watermark = loop {
-                    if let Some(watermark) = watermark_c(self.plan_address) {
-                        break watermark;
-                    }
-                };
-                watermark.revision < removal
-            });
         // SAFETY: The producer thread is the session's only control caller; buffers are owned.
         let code = unsafe {
             miso_engine_v1_submit_command(
@@ -511,7 +481,6 @@ impl Control<'_> {
                 }
                 self.admitted += 1;
                 self.revision += 1;
-                self.removal = (!adding).then_some(self.revision);
                 self.request_id += 1;
                 self.request = track_command(
                     self.request_id,
@@ -533,10 +502,9 @@ impl Control<'_> {
                     self.done.store(true, Ordering::Release);
                 }
             }
-            // The restore refusal of 1325a, retried at a later step (#1325b deletes this arm).
-            RESULT_BACKPRESSURE if in_phase_one => self.restore_retries += 1,
-            // #1310 gate 5: a structural edit behind a pending candidate supersedes it, so every
-            // other `RESULT_BACKPRESSURE` here fails.
+            // #1310 gate 5: a structural edit behind a pending candidate supersedes it, and an
+            // add of `a-race` during its removal's phase 1 is a restore that commits (#1325 D6),
+            // so any `RESULT_BACKPRESSURE` here fails.
             other => self.fail(format!(
                 "submit after {admitted} swaps and {} blocks: {other}",
                 blocks - self.admission_block
@@ -665,9 +633,6 @@ fn race_plan_swaps(swaps: u64, readers: usize, back_to_back: bool) {
         fed_frames: &fed_frames,
         back_to_back,
         outcomes: (0, 0, 0),
-        removal: None,
-        restore_retries: 0,
-        retried: 0,
     };
 
     let mut pcm = [f32::NAN; 256];
@@ -881,12 +846,9 @@ fn race_plan_swaps(swaps: u64, readers: usize, back_to_back: bool) {
         (control.admitted - superseded, 0),
         "every applied swap carried the source's ring; a superseded candidate never swapped"
     );
-    // A 1325a restore refusal withdraws the pending removal and republishes it (#1325b deletes
-    // the term).
     assert_eq!(
-        withdrawn,
-        superseded + control.restore_retries,
-        "every withdrawn candidate was superseded or republished after a restore refusal"
+        withdrawn, superseded,
+        "every withdrawn candidate was superseded"
     );
     if let Some((raced, twin)) = settled {
         assert!(

@@ -3877,12 +3877,9 @@ where
         // #1696 root ruling: a kept base holds only the rows of owners B's model has, and no
         // rewritten targets, so the ramp row of B's model bounds it.
         kept_ramps.keep_within(prospective.normalized_model());
-        // #1325 D6 (the 1325b boundary): a transaction in phase 1 that restores a strip or a
-        // source the running plan is ramping out is retryable backpressure until #1325b gives the
-        // successor's base the overlay. Prepared against the kept model alone, the restored strip
-        // would carry its ducked fader and stay muted. Nothing has changed yet, so the caller
-        // republishes the withdrawn candidate; once render adopts it the overlay is gone and the
-        // same edit is an added strip (#1288).
+        // #1325 D6: the duck overlay of the running plan's cells while phase 1 runs, empty
+        // outside it. The successor's base composes it, so a strip or source this transaction
+        // restores carries from its ducked state and ramps back in from `S`.
         let duck = if superseding {
             &self
                 .kept_holder()
@@ -3892,17 +3889,6 @@ where
         } else {
             &NO_DUCK
         };
-        {
-            let next = prospective.normalized_model();
-            if next.strips().any(|strip| duck.has_strip(strip.id.as_str()))
-                || next
-                    .sources
-                    .iter()
-                    .any(|source| duck.has_source(source.id.as_str().as_bytes()))
-            {
-                return Err(CommandError::Backpressure);
-            }
-        }
         // #1698 (amending #1310 D2 and #1344 D1): across a withdrawn candidate A, P0's own
         // inventory, with only the source rows A carries from P0, and P0's kept base. An owner B
         // keeps unchanged from P0 carries from P0 as a direct P0 -> B swap carries it; a source A
@@ -3914,11 +3900,11 @@ where
                     .pending_providers
                     .last()
                     .ok_or(CommandError::Internal)?;
-                Some(
-                    holder
-                        .inventory
-                        .across_withdrawn(&donor.inventory, candidate.plan()),
-                )
+                Some(holder.inventory.across_withdrawn_in_phase_one(
+                    &donor.inventory,
+                    candidate.plan(),
+                    duck,
+                ))
             }
             None => None,
         };
@@ -3941,6 +3927,7 @@ where
                 observation: &observation_change.bindings,
                 discontinuity,
                 unchanged_revision,
+                duck,
                 ..SuccessorBase::new(inventory, kept.model.normalized_model(), revision)
             }
         } else {
@@ -4459,6 +4446,19 @@ where
                     .pending_providers
                     .last_mut()
                     .unwrap_or(&mut self.providers);
+                // #1325 D6: a source B restores in phase 1 carries P0's ring, so its producer
+                // moves from P0's set, where phase 1 kept it, into B's. Every other entry B holds
+                // vacant took its producer from A's set above, so only restored ones move here.
+                let restored = candidate_provider
+                    .sources
+                    .adopt_persisting(&mut holder.sources);
+                debug_assert!(
+                    restored
+                        <= transition
+                            .as_ref()
+                            .map_or(0, |transition| transition.restored_sources().len()),
+                    "only a restored source's producer moves from the running plan's set"
+                );
                 if let Some(kept) = holder.kept.as_mut() {
                     kept.edit_ramps = kept_ramps;
                     if monitor_ramp.is_some() {

@@ -157,12 +157,26 @@ impl DuckOverlay {
     /// The overlay after `transition`'s writes join it, with `S` unchanged; the caller sets the
     /// new `S` with [`Self::raise_not_before`] once it has read `p`. Built before the commit, so
     /// the commit only moves it.
+    ///
+    /// A source the transaction restores leaves the overlay (#1325 D6): its producer moves into
+    /// the successor's set with the commit, so a source call for it goes to the newest committed
+    /// session again. A restored strip or route stays: the running plan's cells still hold its
+    /// duck, so a later transaction of the same phase 1 writes it no second ramp, and the
+    /// successor's base keeps composing it.
     #[must_use]
     pub fn joined(&self, transition: &StripTransition) -> Self {
+        let mut sources = merged(&self.sources, &transition.sources);
+        sources.retain(|id| {
+            transition
+                .restored_sources
+                .binary_search_by(|held| (**held).cmp(id))
+                .is_err()
+        });
+        sources.shrink_to_fit();
         Self {
             strips: merged(&self.strips, &transition.strips),
             routes: merged(&self.routes, &transition.routes),
-            sources: merged(&self.sources, &transition.sources),
+            sources,
             not_before: self.not_before,
         }
     }
@@ -222,6 +236,7 @@ pub struct StripTransition {
     routes: Vec<Box<str>>,
     route_records: Vec<SendRecord>,
     sources: Vec<Box<str>>,
+    restored_sources: Vec<Box<str>>,
     strip_records: Vec<DuckStripRecords>,
     ramp: u32,
     compensation: u64,
@@ -250,6 +265,14 @@ impl StripTransition {
     #[must_use]
     pub fn sources(&self) -> &[Box<str>] {
         &self.sources
+    }
+
+    /// The sources of the running plan's [`DuckOverlay`] that the transaction keeps (#1325 D6):
+    /// a restore. Each leaves the overlay ([`DuckOverlay::joined`]); one declared as the running
+    /// plan declares it carries that plan's ring and producer. Sorted.
+    #[must_use]
+    pub fn restored_sources(&self) -> &[Box<str>] {
+        &self.restored_sources
     }
 
     /// The strip records phase 1 writes, in normalized strip order.
@@ -369,11 +392,19 @@ pub fn plan_strip_transition(
                     && !overlay.has_source(id.as_bytes())
             }),
     );
+    let restored_sources = sorted_ids(
+        overlay
+            .sources()
+            .iter()
+            .map(|id| &**id)
+            .filter(|id| next.sources.iter().any(|kept| kept.id.as_str() == *id)),
+    );
     let mut transition = StripTransition {
         strips,
         routes: Vec::new(),
         route_records: Vec::new(),
         sources,
+        restored_sources,
         strip_records: Vec::new(),
         ramp,
         compensation: 0,
@@ -676,6 +707,7 @@ mod tests {
             routes: names(&mut committed.routes.iter().map(|route| &route.id)),
             route_records: Vec::new(),
             sources: names(&mut committed.sources.iter().map(|source| &source.id)),
+            restored_sources: Vec::new(),
             strip_records: Vec::new(),
             ramp: n,
             compensation: 0,
