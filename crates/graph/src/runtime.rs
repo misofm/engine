@@ -1205,7 +1205,9 @@ impl LiveRoute {
     /// (#1284 D2): the ramp, how far into it the route is, and its mute. The caller has applied the
     /// predecessor's pending value ([`Self::apply_pending`] under every snapshot) first, so the successor
     /// continues exactly where the predecessor's next block would have. The lane, the route index
-    /// and the compensation flag stay: they are this plan's own. A bounded copy of three fields.
+    /// and the compensation flag stay: they are this plan's own, and so does its fade-in arm
+    /// (#1877 D6): one this plan's preparation re-armed wins over the displaced arm, which
+    /// [`carry_route`] fires first only when this plan holds none. A bounded copy of three fields.
     fn adopt(&mut self, from: &Self) {
         self.ramp = from.ramp;
         self.position = from.position;
@@ -6797,10 +6799,16 @@ fn carry_route(
     let (ramps, mute, follow) = match from {
         CarriedRoute::Six(from) => {
             from.apply_pending(LiveSnapshot::ALL);
-            // #1363: a fade-in armed in the displaced plan and not fired yet fires at the swap,
-            // so the successor never takes a route that waits for a fire it does not hold (the
-            // arm itself carries with #1877).
-            from.fire_fade_in();
+            // #1877 D6: a successor that re-armed the route holds its own arm (this plan's
+            // target, mute and length) and the displaced entry's render state through its fade
+            // table's pair, so the displaced arm is left unfired and the successor keeps its own.
+            // #1363 D3a stays the fallback: a fade-in armed in the displaced plan and not fired
+            // yet fires at the swap when the successor holds no arm for the route, so the
+            // successor never takes a route that waits for a fire it does not hold.
+            let rearmed = matches!(&into, CarriedRoute::Six(into) if into.armed.is_some());
+            if !rearmed {
+                from.fire_fade_in();
+            }
             if let CarriedRoute::Six(into) = into {
                 into.adopt(from);
                 return false;
