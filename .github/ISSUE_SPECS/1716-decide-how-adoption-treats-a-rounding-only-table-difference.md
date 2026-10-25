@@ -95,3 +95,15 @@ documented, measured choice.
   ramp on a moving ride whose new table equals the stage's target at `start - 1` (old: jump; new: no
   jump). The other 172 jumped on both compares (a real table change), so no other rendered bit moved.
   No test reaches a held stage with no ramp (a settled mute) at a `Reposition`.
+- Held stages keep D (review, 2026-10-25): a settled mute runs no ramp, its grid events are only
+  remembered, so on a grid-aligned block its fader gain is the old curve at `start - 1` too, and the
+  same-node-time compare is the right one.
+- Off-grid limit: D compares at `start - 1` because, when a block starts on the grid, the last grid
+  ramp has just completed there. Off the grid (any C ABI quantum, a seek landing on any frame) a free
+  stage is still in its ramp (the U3 branch), and a held or free stage with no ramp whose target was
+  taken earlier still jumps, as before D: no regression. Root files a successor for the exact rule
+  (compare at the old cell's last ramp completion).
+- Test placement (review MAJOR): the claim is owned by builtins-compiler.
+  `a_carried_composed_lane_renders_the_uninterrupted_bits` runs its swap also with 128-frame blocks
+  (swap at 1,152, on the grid) beside the 100-frame case (1,100, off the grid, U3). The capi row stays
+  as the C ABI's one parity row (the rebuild's `Reposition` classification and `OUTCOME_EXACT`).

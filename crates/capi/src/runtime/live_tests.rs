@@ -7421,12 +7421,15 @@ mod set_control {
         /// watermark advance reports `OUTCOME_EXACT` with no transition fallback.
         ///
         /// Test value: red when a table-only rebuild of an unchanged curve opens with an adoption
-        /// jump that a plan prepared with the new table never makes. At a block's first sample the
-        /// last grid ramp has completed (`G` divides the 128-sample block), so the stage's target
-        /// is the old curve at `span.start - 1`; an adoption that compares the new curve at
-        /// `span.start` with it differs on every ride and opens the block with a jump over
-        /// `J` = 960 (measured on that compare: first difference at block 4, sample 0; at most
-        /// 1.7e-4, block 7; equal again from block 12). No other row compares bits with no move.
+        /// jump that a plan prepared with the new table never makes. When the block starts on the
+        /// grid (here every 128-sample block does), the last grid ramp has just completed, so the
+        /// stage's target is the old curve at `span.start - 1`; an adoption that compares the new
+        /// curve at `span.start` with it differs on every ride and opens the block with a jump
+        /// over `J` = 960 (measured on that compare: first difference at block 4, sample 0; at most
+        /// 1.7e-4, block 7; equal again from block 12). The claim is owned by builtins-compiler's
+        /// `a_carried_composed_lane_renders_the_uninterrupted_bits` (its 128-frame case); this is
+        /// the C ABI's parity row: it adds the C ABI rebuild's `Reposition` classification and
+        /// the watermark's `OUTCOME_EXACT`.
         #[test]
         fn a_table_only_rebuild_with_no_move_is_bit_equal() {
             bench_support::alloc::assert_installed();
