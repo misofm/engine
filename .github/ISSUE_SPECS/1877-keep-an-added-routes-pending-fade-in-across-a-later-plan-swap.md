@@ -62,3 +62,4 @@ the route op files #1363 touches, this spec.
   (`!controls::route_rows_live`).
 - A lane-less transition route that has fired and is in flight across a later swap (the successor
   binds no op for it) existed before this issue; root moves it to #1953b's scope.
+- Stated limit (root, attempt 2 PASS): row (e) covers only a restart before the fire; the clear is one unconditional line, so the order after the fire holds by construction; a later change that carries only `Done` entries would stay green.
