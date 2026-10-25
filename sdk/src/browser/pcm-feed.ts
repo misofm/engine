@@ -499,7 +499,8 @@ export function attachEngineFeed<Context extends FeedContext>(options: FeedOptio
     } else {
       frame = alignedFrame(entry.source.sourceId, alignTo, reference!, await readSeekReport(host, entry.source.sourceId, alignTo), anchorSample);
     }
-    if (state === "closed") throw new PcmFeedError("closed", "Engine feed is closed");
+    // Closed or detached while the reports were read: nothing is published.
+    if (feed.state === "closed") throw new PcmFeedError("closed", "Engine feed is closed");
     if (!live.has(entry.source.sourceId)) return;
     const generation = reserve();
     // The ring's seek is published first: from here the drain reads none of its chunks until the
