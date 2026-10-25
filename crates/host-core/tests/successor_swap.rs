@@ -9238,7 +9238,7 @@ mod observation_carry {
         }
     }
 
-    /// Gate 4, second case: a compressor whose prepared setup changed (its link mode) restarts,
+    /// Gate 4, second case: a compressor whose prepared setup changed (its sidechain) restarts,
     /// and so does its tap: it is not in the record, and its successor reader receives nothing
     /// while every other strip's tap carries.
     fn a_restarted_effect_starts_its_tap_fresh(backend: Backend) {
@@ -9246,7 +9246,7 @@ mod observation_carry {
         let width = bank_width(backend);
         let base = compressor_insert_session(width - 2);
         let mut changed = with_muted_track(base.clone());
-        track_mut(&mut changed, "eq1").inserts.effects[0].link_mode = LinkMode::Average;
+        route_own_sidechain(&mut changed, "eq1");
         let (a, b) = (Session::compile(base), Session::compile(changed));
         let subscribed = strips_of(&a);
         let run = swapped(backend, &a, &b, &subscribed);
@@ -9286,12 +9286,26 @@ mod observation_carry {
         a_restarted_effect_starts_its_tap_fresh(Backend::current());
     }
 
-    /// A compressor insert whose link mode changed restarts, with a base that holds it and a
-    /// successor that is the base plus one track.
+    /// Route strip `strip`'s first insert's sidechain from the strip's own input: a prepared
+    /// change of the instance (a new graph edge), which restarts it.
+    fn route_own_sidechain(model: &mut SessionModel, strip: &str) {
+        track_mut(model, strip).inserts.effects[0].sidechain =
+            SidechainDeclaration::Routed(session::Sidechain {
+                source: RouteSource::Track {
+                    track_id: id(strip),
+                    tap: session::SendTap::Input,
+                },
+                port_id: id("sidechain-in"),
+            });
+    }
+
+    /// A compressor insert whose sidechain declaration changed restarts, with a base that holds it
+    /// and a successor that is the base plus one track. (Its link mode is a live value since
+    /// #1371, so a link change carries.)
     fn restarted_pair(backend: Backend) -> (Session, Session) {
         let base = compressor_insert_session(bank_width(backend) - 2);
         let mut changed = with_muted_track(base.clone());
-        track_mut(&mut changed, "eq1").inserts.effects[0].link_mode = LinkMode::Average;
+        route_own_sidechain(&mut changed, "eq1");
         (Session::compile(base), Session::compile(changed))
     }
 

@@ -3309,7 +3309,7 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
     let chain_joins: Vec<ChainJoin<'_>> = match successor {
         None => Vec::new(),
         // #1354a decision 2: a strip restarted whole starts its effects at rest.
-        Some(base) => join_chains(base.committed, model)
+        Some(base) => join_chains(base.committed, model, base.edit_ramps)
             .into_iter()
             .filter(|join| !restarts_whole(join.id))
             .collect(),
@@ -5522,9 +5522,10 @@ fn strip_stage_row<'a>(
         .map(|index| &rows[index])
 }
 
-/// The per-edit ramp lengths of one strip's four record rows, looked up once from the
+/// The per-edit ramp lengths of one strip's five record rows, looked up once from the
 /// transaction's [`EditRamps`] (#1394 D6): the `(Strip, Fader)`, `(Strip, Mute)`,
-/// `(Strip, Matrix)` and `(Strip, Input)` entries. `None` is "the edit gave no length": the session's applies.
+/// `(Strip, Matrix)`, `(Strip, Input)` and `(Strip, Link)` entries. `None` is "the edit gave no
+/// length": the session's applies.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(crate) struct StripEditRamps {
     fader: Option<u32>,
@@ -5532,6 +5533,10 @@ pub(crate) struct StripEditRamps {
     matrix: Option<u32>,
     /// The input trim and polarity (#1556 D3).
     pub(crate) input: Option<u32>,
+    /// Every link-mode row of the strip's effect instances (#1371 D3): one key per strip, so two
+    /// link writes of one transaction to one strip resolve one length (`ControlError::RampConflict`
+    /// refuses two).
+    pub(crate) link: Option<u32>,
 }
 
 impl StripEditRamps {
@@ -5547,6 +5552,7 @@ impl StripEditRamps {
             mute: edit_ramps.get(&target, EditRampRow::Mute),
             matrix: edit_ramps.get(&target, EditRampRow::Matrix),
             input: edit_ramps.get(&target, EditRampRow::Input),
+            link: edit_ramps.get(&target, EditRampRow::Link),
         }
     }
 }
@@ -6900,9 +6906,12 @@ fn successor_revision_refusal() -> PrepareDiagnostics {
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct EffectInstanceRecords {
     /// One [`EffectControlRecord::Bypass`] first when the bypass changes (it carries the session's
-    /// `mute_ms` crossfade, [`LiveRampRow::BypassCrossfade`], #1341 D1), then one `Parameter`
-    /// record per `(parameter_index, channel)` whose resolved value changes, in descriptor order,
-    /// `Left` before `Right`; never empty. For an instance with `targets` the `Parameter` records
+    /// `mute_ms` crossfade, [`LiveRampRow::BypassCrossfade`], #1341 D1), then one
+    /// [`EffectControlRecord::Link`] when the resolved link mode of an effect on
+    /// [`controls::LIVE_LINK_EFFECTS`] changes (its glide is the edit's link ramp, else
+    /// [`LiveRampRow::LinkGlide`], #1371 D3), then one `Parameter` record per
+    /// `(parameter_index, channel)` whose resolved value changes, in descriptor order, `Left`
+    /// before `Right`; never empty. For an instance with `targets` the `Parameter` records
     /// are its owner's edits, never written as they are.
     pub(crate) records: Vec<EffectControlRecord>,
     /// The targets [`EqTargetPreparer`] designed from the pre-commit values and the records.
@@ -6947,16 +6956,21 @@ pub enum LiveRebuild {
 /// instance, so a difference is live in the carry exactly when it is live on the live path.
 ///
 /// `Ok(None)` is no difference in any value the plan keeps. `Ok(Some(_))` is a live difference:
-/// the bypass of an effect that lowers it to a lane shunt, and each `Block`-rate parameter whose
-/// resolved value bits change. `Err` is a prepared difference: another structure (identity,
-/// quality, sidechain or link mode), a rebuild-only row (the multiband compressor bypass, a
-/// parameter that is not `Block`-rate), a parameter that does not resolve, or a ramp that the
-/// indexed law refuses.
+/// the bypass of an effect that lowers it to a lane shunt, the resolved link mode of an effect on
+/// [`controls::LIVE_LINK_EFFECTS`] (#1371 D4), and each `Block`-rate parameter whose resolved
+/// value bits change. `Err` is a prepared difference: another structure (identity, quality,
+/// sidechain, or the link mode of any other effect), a rebuild-only row (the multiband compressor
+/// bypass, a parameter that is not `Block`-rate), a parameter that does not resolve, or a ramp
+/// that the indexed law refuses.
+///
+/// `link_edit` is the length the transaction gave the strip's link row (`(Strip, Link)`, #1394
+/// D3), or `None` for the session's `fader_ms` ([`LiveRamps::resolve`]).
 pub(crate) fn effect_instance_records(
     before: &Effect,
     after: &Effect,
     sample_rate_hz: u32,
     ramps: LiveRamps,
+    link_edit: Option<u32>,
 ) -> Result<Option<EffectInstanceRecords>, LiveRebuild> {
     if before.id != after.id
         || before.identity != after.identity
@@ -6965,18 +6979,39 @@ pub(crate) fn effect_instance_records(
     {
         return Err(LiveRebuild::Structure);
     }
-    // This lowering carries a bypass and parameters. Any other changed effect row (today the link
-    // mode, whose row is rebuild-only) has no record here, so a live classification of it would be
-    // acked and then dropped: it is a rebuild until its own lowering exists.
-    if before.link_mode != after.link_mode {
-        return Err(LiveRebuild::Structure);
-    }
+    // This lowering carries a bypass, a link mode and parameters. A changed link mode of an effect
+    // whose row is not live has no record here, so a live classification of it would be acked
+    // and then dropped: it is a rebuild (D15-9 duck-swap).
+    let link = if before.link_mode == after.link_mode {
+        None
+    } else {
+        let live = matches!(
+            &after.identity,
+            EffectIdentity::Native { effect_id }
+                if controls::LIVE_LINK_EFFECTS.contains(&effect_id.as_str())
+        );
+        if !live {
+            return Err(LiveRebuild::Structure);
+        }
+        let ramp_samples = ramps.resolve(LiveRampRow::LinkGlide, link_edit);
+        if ramp_samples > effect_contract::LINK_GLIDE_MAX_SAMPLES {
+            return Err(LiveRebuild::Domain);
+        }
+        Some(EffectControlRecord::Link(effect_contract::LinkSwitch {
+            mode: crate::response::contract_link_mode(after.link_mode),
+            ramp_samples,
+        }))
+    };
     let bypass = (before.bypass != after.bypass).then_some(after.bypass);
     let (mut records, targets) = if same_params(&before.params, &after.params) {
         (Vec::new(), None)
     } else {
         parameter_records(before, after, sample_rate_hz)?
     };
+    // Drain order (#1371 D2): bypass, link, parameters.
+    if let Some(link) = link {
+        records.insert(0, link);
+    }
     if let Some(bypassed) = bypass {
         // The bypass crossfade has no per-edit length (#1341 D1): the session's `mute_ms`.
         let ramp_samples = ramps.for_row(LiveRampRow::BypassCrossfade);
@@ -8140,11 +8175,12 @@ fn instance_join(
     after: Option<&session::Effect>,
     sample_rate_hz: u32,
     ramps: LiveRamps,
+    link_edit: Option<u32>,
 ) -> FamilyJoin<EffectInstanceRecords> {
     let (Some(before), Some(after)) = (before, after) else {
         return FamilyJoin::Prepared;
     };
-    match effect_instance_records(before, after, sample_rate_hz, ramps) {
+    match effect_instance_records(before, after, sample_rate_hz, ramps, link_edit) {
         Err(_) => FamilyJoin::Prepared,
         Ok(None) => FamilyJoin::Same,
         Ok(Some(records)) => FamilyJoin::Live(records),
@@ -8158,7 +8194,14 @@ fn instance_join(
 /// An insert added, removed or reordered changes the chain, and an insert present in both models
 /// is recorded as a surviving insert, an owner whose lane the lane half resolves. A strip whose
 /// kind changed has no counterpart: its chain is changed and no slot carries.
-fn join_chains<'a>(committed: &SessionModel, model: &'a SessionModel) -> Vec<ChainJoin<'a>> {
+///
+/// `edit_ramps` gives a live link difference the length the transaction gave the strip's link row
+/// (#1371 D3).
+fn join_chains<'a>(
+    committed: &SessionModel,
+    model: &'a SessionModel,
+    edit_ramps: &EditRamps,
+) -> Vec<ChainJoin<'a>> {
     let committed_slots = console_slots(committed);
     let slots = console_slots(model);
     let console_changed = committed_slots.len() != slots.len()
@@ -8173,6 +8216,7 @@ fn join_chains<'a>(committed: &SessionModel, model: &'a SessionModel) -> Vec<Cha
     let mut joins = Vec::new();
     for strip in model.strips() {
         let id = strip.id.as_str();
+        let link_edit = StripEditRamps::of(edit_ramps, strip.id).link;
         let Some(before) = committed_strip_ref(committed, &strip) else {
             if committed_has_strip(committed, id) {
                 joins.push(ChainJoin {
@@ -8222,6 +8266,7 @@ fn join_chains<'a>(committed: &SessionModel, model: &'a SessionModel) -> Vec<Cha
                             lowered_after.get(position).copied(),
                             sample_rate_hz,
                             ramps,
+                            link_edit,
                         );
                         // A slot at another position has another live address: its live
                         // difference is prepared (the chain changed, so the strip restarts).
@@ -8254,6 +8299,7 @@ fn join_chains<'a>(committed: &SessionModel, model: &'a SessionModel) -> Vec<Cha
                         Some(insert),
                         sample_rate_hz,
                         ramps,
+                        link_edit,
                     );
                     // An insert at another position has another live address: its live
                     // difference is prepared.
@@ -8310,7 +8356,7 @@ fn prepare_effect_retarget(
     let mut records = Vec::new();
     for &record in &instance.records {
         match record {
-            EffectControlRecord::Bypass(_) => {
+            EffectControlRecord::Bypass(_) | EffectControlRecord::Link(_) => {
                 producer.preflight(record).ok()?;
                 records.push(record);
             }

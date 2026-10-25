@@ -366,6 +366,9 @@ impl LiveControlRecord for EffectControlRecord {
             // renders, so it cannot move a designed word.
             Self::Observe { .. } => SymmetryEvent::Preserve,
             Self::Bypass(switch) => SymmetryEvent::Bypass(switch.bypassed),
+            // A link switch glides both channels' detector weights to one target over one window
+            // at one block boundary (#1371), so the channels stay in step.
+            Self::Link(_) => SymmetryEvent::Preserve,
         }
     }
 }

@@ -1658,14 +1658,14 @@ export const CONTROLS = deepFreeze(
             "label": "average"
           }
         ],
-        "ramp": "fixed",
+        "ramp": "linkGlide",
         "scope": "model",
         "family": "effect",
         "lanes": "shared",
-        "class": "rebuildOnly",
-        "reason": "optimisation",
+        "class": "live",
+        "reason": null,
         "reasonIssue": null,
-        "reopen": "decision 15 E2, #1368-#1371",
+        "reopen": null,
         "automatable": false
       },
       "consoleLinkMode": {
@@ -1710,14 +1710,14 @@ export const CONTROLS = deepFreeze(
             "label": "average"
           }
         ],
-        "ramp": "fixed",
+        "ramp": "linkGlide",
         "scope": "model",
         "family": "effect",
         "lanes": "shared",
-        "class": "rebuildOnly",
-        "reason": "optimisation",
+        "class": "live",
+        "reason": null,
         "reasonIssue": null,
-        "reopen": "#1371",
+        "reopen": null,
         "automatable": false
       }
     },
@@ -2165,14 +2165,14 @@ export const CONTROLS = deepFreeze(
             "label": "average"
           }
         ],
-        "ramp": "fixed",
+        "ramp": "linkGlide",
         "scope": "model",
         "family": "effect",
         "lanes": "shared",
-        "class": "rebuildOnly",
-        "reason": "optimisation",
+        "class": "live",
+        "reason": null,
         "reasonIssue": null,
-        "reopen": "decision 15 E2, #1368-#1371",
+        "reopen": null,
         "automatable": false
       },
       "consoleLinkMode": {
@@ -2217,14 +2217,14 @@ export const CONTROLS = deepFreeze(
             "label": "average"
           }
         ],
-        "ramp": "fixed",
+        "ramp": "linkGlide",
         "scope": "model",
         "family": "effect",
         "lanes": "shared",
-        "class": "rebuildOnly",
-        "reason": "optimisation",
+        "class": "live",
+        "reason": null,
         "reasonIssue": null,
-        "reopen": "#1371",
+        "reopen": null,
         "automatable": false
       }
     },
@@ -4272,14 +4272,14 @@ export const CONTROLS = deepFreeze(
             "label": "average"
           }
         ],
-        "ramp": "fixed",
+        "ramp": "linkGlide",
         "scope": "model",
         "family": "effect",
         "lanes": "shared",
-        "class": "rebuildOnly",
-        "reason": "optimisation",
+        "class": "live",
+        "reason": null,
         "reasonIssue": null,
-        "reopen": "decision 15 E2, #1368-#1371",
+        "reopen": null,
         "automatable": false
       },
       "consoleLinkMode": {
@@ -4324,14 +4324,14 @@ export const CONTROLS = deepFreeze(
             "label": "average"
           }
         ],
-        "ramp": "fixed",
+        "ramp": "linkGlide",
         "scope": "model",
         "family": "effect",
         "lanes": "shared",
-        "class": "rebuildOnly",
-        "reason": "optimisation",
+        "class": "live",
+        "reason": null,
         "reasonIssue": null,
-        "reopen": "#1371",
+        "reopen": null,
         "automatable": false
       }
     },
@@ -4656,14 +4656,14 @@ export const CONTROLS = deepFreeze(
             "label": "average"
           }
         ],
-        "ramp": "fixed",
+        "ramp": "linkGlide",
         "scope": "model",
         "family": "effect",
         "lanes": "shared",
-        "class": "rebuildOnly",
-        "reason": "optimisation",
+        "class": "live",
+        "reason": null,
         "reasonIssue": null,
-        "reopen": "decision 15 E2, #1368-#1371",
+        "reopen": null,
         "automatable": false
       },
       "consoleLinkMode": {
@@ -4708,14 +4708,14 @@ export const CONTROLS = deepFreeze(
             "label": "average"
           }
         ],
-        "ramp": "fixed",
+        "ramp": "linkGlide",
         "scope": "model",
         "family": "effect",
         "lanes": "shared",
-        "class": "rebuildOnly",
-        "reason": "optimisation",
+        "class": "live",
+        "reason": null,
         "reasonIssue": null,
-        "reopen": "#1371",
+        "reopen": null,
         "automatable": false
       }
     },
@@ -6761,14 +6761,14 @@ export const CONTROLS = deepFreeze(
             "label": "average"
           }
         ],
-        "ramp": "fixed",
+        "ramp": "linkGlide",
         "scope": "model",
         "family": "effect",
         "lanes": "shared",
-        "class": "rebuildOnly",
-        "reason": "optimisation",
+        "class": "live",
+        "reason": null,
         "reasonIssue": null,
-        "reopen": "decision 15 E2, #1368-#1371",
+        "reopen": null,
         "automatable": false
       },
       "consoleLinkMode": {
@@ -6813,14 +6813,14 @@ export const CONTROLS = deepFreeze(
             "label": "average"
           }
         ],
-        "ramp": "fixed",
+        "ramp": "linkGlide",
         "scope": "model",
         "family": "effect",
         "lanes": "shared",
-        "class": "rebuildOnly",
-        "reason": "optimisation",
+        "class": "live",
+        "reason": null,
         "reasonIssue": null,
-        "reopen": "#1371",
+        "reopen": null,
         "automatable": false
       }
     },
@@ -7001,14 +7001,14 @@ export const CONTROLS = deepFreeze(
             "label": "maximum"
           }
         ],
-        "ramp": "fixed",
+        "ramp": "linkGlide",
         "scope": "model",
         "family": "effect",
         "lanes": "shared",
-        "class": "rebuildOnly",
-        "reason": "optimisation",
+        "class": "live",
+        "reason": null,
         "reasonIssue": null,
-        "reopen": "decision 15 E2, #1368-#1371",
+        "reopen": null,
         "automatable": false
       },
       "consoleLinkMode": {
@@ -7049,14 +7049,14 @@ export const CONTROLS = deepFreeze(
             "label": "maximum"
           }
         ],
-        "ramp": "fixed",
+        "ramp": "linkGlide",
         "scope": "model",
         "family": "effect",
         "lanes": "shared",
-        "class": "rebuildOnly",
-        "reason": "optimisation",
+        "class": "live",
+        "reason": null,
         "reasonIssue": null,
-        "reopen": "#1371",
+        "reopen": null,
         "automatable": false
       }
     }

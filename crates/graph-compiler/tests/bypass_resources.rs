@@ -503,6 +503,7 @@ fn a_lanes_own_accounting_is_what_the_allocator_sees() {
                     ),
                     bypass: false,
                     observation_depth: depth,
+                    link: None,
                 },
                 &superseded,
             )
