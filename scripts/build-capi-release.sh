@@ -190,11 +190,12 @@ self_test() {
     chmod +x "$scratch/bin/cargo"
     expect build-flag-env fail 'cargo rustc failed for host staticlib' \
         env PATH="$scratch/bin:$PATH" RUSTFLAGS='-C opt-level=1' \
+        CARGO_ENCODED_RUSTFLAGS='-Copt-level=1' CARGO_BUILD_RUSTFLAGS='-C opt-level=1' \
         CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS='-C opt-level=1' \
         CARGO_PROFILE_RELEASE_OPT_LEVEL=1 CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER=cc \
         CARGO_TARGET_DIR="$scratch/target" bash "$self" host staticlib "$scratch/stub-out"
     local leaked kept
-    leaked="$(grep -E '^(RUSTFLAGS|CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS|CARGO_PROFILE_RELEASE_OPT_LEVEL)=' \
+    leaked="$(grep -E '^(RUSTFLAGS|CARGO_ENCODED_RUSTFLAGS|CARGO_BUILD_RUSTFLAGS|CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS|CARGO_PROFILE_RELEASE_OPT_LEVEL)=' \
         "$scratch/cargo-env" || true)"
     [[ -z "$leaked" ]] || { printf 'self-test build-flag-env: cargo got %s\n' "$leaked" >&2; return 1; }
     kept="$(grep -cE '^(CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER=cc|CARGO_TARGET_DIR='"$scratch"'/target)$' \
