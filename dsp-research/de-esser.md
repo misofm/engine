@@ -99,6 +99,73 @@ Deterministic in-test signals only (no corpus, per the 2026-08-23 issue comment)
 -6 dBFS on a 24,000-sample period (1,000,000 samples), the same burst over a -30 dBFS 1 kHz tone, a
 7 kHz burst over the 1 kHz tone, and xorshift noise for the bank and rest tests.
 
+**Measured response (#1921 O1).** One run of a throwaway harness (not committed) on
+`tests/support` at `origin/main` 4448e90b3, `cargo test --release -p de-esser`, scalar instance,
+48 kHz, dual mono, both channels equal (their output and change words are bit-equal). Every
+parameter not named is the default (Q 2, threshold -20 dB, ratio 4, range 20 dB, attack 1 ms,
+release 50 ms). The change is the resident Gain Reduction observation (the change word `G`), read
+after each one-frame block; output gains are DFT-bin ratios against the dry input.
+
+Detector taps, read through listen (`y = f`), unit impulse, 65,536 frames, Q 2, in dB; the
+difference to the cookbook band-pass (0 dB peak) and high-pass at the same f_c and Q is at most
+`2.9e-6` dB at all 18 points:
+
+| f_c | Tap | -1 octave | f_c | +1 octave |
+|---|---|---|---|---|
+| 4 kHz | band-pass | -10.226 | +0.000 | -10.946 |
+| 4 kHz | high-pass | -10.378 | +6.021 | +1.743 |
+| 6.5 kHz | band-pass | -10.612 | +0.000 | -12.780 |
+| 6.5 kHz | high-pass | -11.027 | +6.021 | +1.257 |
+| 10 kHz | band-pass | -11.530 | +0.000 | -19.435 |
+| 10 kHz | high-pass | -12.593 | +6.021 | +0.325 |
+
+The high-pass tap peaks at `20 log10 Q = +6.02` dB at f_c, so with it the detector reads the band
+6 dB hotter than the band-pass does. The +1 octave column narrows toward Nyquist as the bilinear
+design does.
+
+Output modes: f_c 8 kHz, an 8 kHz burst at the stated peak level from 50 ms to 250 ms over a
+-30 dBFS 1 kHz tone, 24,000 frames. "Held" is the mean change over the burst's last 10 ms (the
+150-250 ms mean is the same to 0.001 dB); the gains are over 150-250 ms. "Curve" is the static
+hard-knee change at the tap's peak level (+6.021 dB at f_c for the high-pass tap). The detector
+reads the instantaneous magnitude of the sampled tap, so the smoother settles short of the curve:
+about 1 dB with the band-pass tap, about 0.17 dB with the high-pass tap. The band-pass shortfall is
+mostly sampling: 8 kHz is fs/6, and the band-pass tap, with 0 degrees of phase at f_c, is sampled
+at `|sin| <= 0.866` (-1.25 dB) and never at its peak; measured from that sampled peak, the
+band-pass shortfall is about 0.02 dB at -14 dBFS (0.09 dB at -6 dBFS). Attack is the first frame after the onset where the
+change reaches 90 % of held, release the first frame after the burst where it falls to 10 %.
+
+| Mode, detector | Burst (dBFS) | Curve | Held | 8 kHz gain | 1 kHz gain | Attack 90 % | Release 10 % |
+|---|---|---|---|---|---|---|---|
+| split, band-pass | -26 | 0 | 0.000 | +0.000 | +0.000 | none | none |
+| split, band-pass | -14 | -4.500 | -3.538 | -3.538 | -0.008 | 173 (3.60 ms) | 5,527 (115.15 ms) |
+| split, band-pass | -6 | -10.500 | -9.468 | -9.469 | -0.013 | 169 (3.52 ms) | 5,528 (115.17 ms) |
+| split, high-pass (#1984) | -26 | -0.015 | -0.033 | +0.000 | +0.000 | 831 (17.31 ms) | 5,526 (115.12 ms) |
+| split, high-pass (#1984) | -14 | -9.015 | -8.842 | **+4.202** | +0.072 | 291 (6.06 ms) | 5,528 (115.17 ms) |
+| split, high-pass (#1984) | -6 | -15.015 | -14.842 | **+5.661** | +0.092 | 252 (5.25 ms) | 5,530 (115.21 ms) |
+| wideband, band-pass | -26 | 0 | 0.000 | +0.000 | +0.000 | none | none |
+| wideband, band-pass | -14 | -4.500 | -3.538 | -3.538 | -3.538 | 173 (3.60 ms) | 5,527 (115.15 ms) |
+| wideband, band-pass | -6 | -10.500 | -9.468 | -9.469 | -9.468 | 169 (3.52 ms) | 5,528 (115.17 ms) |
+| wideband, high-pass | -26 | -0.015 | -0.033 | -0.033 | -0.033 | 831 (17.31 ms) | 5,526 (115.12 ms) |
+| wideband, high-pass | -14 | -9.015 | -8.842 | -8.841 | -8.842 | 291 (6.06 ms) | 5,528 (115.17 ms) |
+| wideband, high-pass | -6 | -15.015 | -14.842 | -14.841 | -14.842 | 252 (5.25 ms) | 5,530 (115.21 ms) |
+| listen, band-pass | -26, -14, -6 | as split | as split | +0.000 | -24.820 | as split | as split |
+
+The detector and the change do not depend on the output mode: each detector row gives the same
+change in split, wideband and listen. In split mode with the band-pass detector the 8 kHz gain
+equals the held change and the 1 kHz tone moves at most 0.013 dB; wideband applies the held change
+at every frequency; listen is the band-pass tap (0 dB at f_c and -24.820 dB at 1 kHz, the cookbook band-pass
+value three octaves below f_c). The release matches the one-pole `50 ms * ln 10 = 115.13 ms`; the 90 % attack (3.5 ms with
+the band-pass tap) is longer than the one-pole `1 ms * ln 10 = 2.30 ms` because the attack branch
+runs only while the instantaneous target exceeds the change, part of each cycle. In the -26 dBFS
+high-pass row the tap's peak is about `-26 + 6.02 = -19.98` dB, a hair over the threshold, hence
+its small, slow change.
+
+**Split with the high-pass detector boosts (#1984, class B, open owner question).** The two bold
+cells are not a cut: `y = x - (1 - g) h` with `h = jQ` at f_c gives
+`|1 - (1 - g) jQ| = +5.66` dB at the -14.842 dB change, as measured. #1984 proposes a complementary
+high split; the three "split, high-pass" rows are re-recorded by #1984's implementer after the
+owner's ruling. Every other row stays valid.
+
 ## Objective tests and tolerances
 
 `effect-runtime/tests/dynamic_band.rs`: the band step against the oracle, change within 0.1 dB per
@@ -112,11 +179,14 @@ automation and every link mode; collapsed then desymmetrized bank bit-equal to a
 ## Benchmark plan
 
 None in S1 (not registered, so no production path runs it). A console record of
-`isolated_cycles_per_lane_sample` and its class-A floor is a stateless successor (S5).
+`isolated_cycles_per_lane_sample` and its class-A floor is an owner item, not #1921's: no
+post-limiter effect has a floor row, and the measured column needs a controlled console record
+with a core clock, which this host does not produce (#1921 decision record).
 
 ## Listening protocol or evidence
 
-Not yet: a blinded vocal listening record (folds into #26) is a stateless successor (S5).
+Not yet: a blinded vocal listening session needs a person; it is an owner item (#1921 decision
+record), in one packet with the dynamic EQ's if the owner wants it.
 
 ## Primary and official sources
 
@@ -139,5 +209,8 @@ Not yet: a blinded vocal listening record (folds into #26) is a stateless succes
 
 - The certified tail and exact-rest bound of a live, Q-variable SVF (#1372's derivation); until
   then the descriptor is `UNBOUNDED`, which #1378 must retire.
-- Registry and consumer wiring (S2), banking surfaces and console eligibility (S3), lookahead (S4),
-  fixtures, plots, benchmark and listening (S5).
+- Registry and consumer wiring (S2), banking surfaces and console eligibility (S3), lookahead (S4);
+  the measured response tables are recorded (#1921 O1, Fixtures); the floor row and blinded
+  listening are owner items.
+- Split mode with the high-pass detector boosts at and below f_c instead of cutting (#1984, class
+  B, awaiting the owner's ruling); its Fixtures rows are re-recorded after the fix.
