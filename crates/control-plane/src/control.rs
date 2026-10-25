@@ -5874,8 +5874,10 @@ where
             for &record in &instance.records {
                 match record {
                     // Written on every instance, the EQ's too; the record carries the session's
-                    // crossfade ramp (#1341 D1).
-                    effect_contract::EffectControlRecord::Bypass(_) => {
+                    // crossfade ramp (#1341 D1). A link switch (#1371) is written as it is; no
+                    // target owner has a link cell, so its producer refuses one.
+                    effect_contract::EffectControlRecord::Bypass(_)
+                    | effect_contract::EffectControlRecord::Link(_) => {
                         if producer.preflight(record).is_err() {
                             return LiveCommit::Done(Err(CommandError::Internal));
                         }

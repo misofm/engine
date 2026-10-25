@@ -984,7 +984,16 @@ and compares the resolved values bit by bit.
   `automation_rate` is `None` (for example the gate/expander's attack, hold and release, and a
   parametric EQ band's `enabled` and `kind`). The parametric EQ's live parameters ride prepared
   targets; see "Value-only parametric EQ edits" below.
-- **Rebuild for everything else about an effect**: identity, quality, link mode, a prepared bypass
+- **Live link mode (#1371).** A changed link mode of an insert, or of a console entry's override,
+  of an effect on `controls::LIVE_LINK_EFFECTS` (the compressor, gate/expander, transient
+  shaper, true-peak limiter, de-esser and dynamic EQ): one write to the instance's link cell,
+  which the stage that owns the processor hands to `retarget_link` at the block boundary, so the
+  lane's detector glides to the new mode over the `SET_CONTROL`'s own ramp, else the session's
+  `fader_ms` (`LiveRamps::link_samples`). A replacement plan that lands during the glide
+  continues it to its target. A console slot's declared mode stays a structural edit (decision
+  17 C5).
+- **Rebuild for everything else about an effect**: identity, quality, the link mode of any other
+  effect (the multiband compressor's until #1367), a prepared bypass
   (#1266, below), sidechain, the insert order and the console slot set, any effect on a submix
   strip, and `params` that preparation refuses (reported as `COMPILE_REJECTED` with the
   preparation diagnostic).

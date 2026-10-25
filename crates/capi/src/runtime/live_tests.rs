@@ -9552,6 +9552,346 @@ fn each_observe_reply_names_the_arm_tag_of_its_record() {
     );
 }
 
+/// `tracks` tracks of the parity session with a compressor console slot `glue` after its EQ, at the
+/// slot's `dual_mono`, every entry on `slot` with a -40 dB threshold so the detector law is heard,
+/// and on the first track a compressor insert `duck` whose sidechain is the track's own input, so
+/// it renders per node (a connected sidechain never banks), at the same threshold (#1371).
+fn link_session(tracks: usize) -> String {
+    let base = if tracks == 1 {
+        long_session(1, 48_000)
+    } else {
+        long_session(10, 48_000)
+    };
+    with_model(&base, |model| {
+        model.tracks.truncate(tracks);
+        let kept: Vec<StableId> = model.tracks.iter().map(|track| track.id.clone()).collect();
+        model.routes.retain(
+            |route| matches!(&route.source, RouteSource::Track { track_id, .. } if kept.contains(track_id)),
+        );
+        let glue = StableId::parse("glue").expect("slot ID");
+        let threshold = session::EffectParam {
+            parameter_id: 1,
+            channel: session::ParameterChannel::Both,
+            unit: session::ParameterUnit::Db,
+            value: -40.0,
+        };
+        model.console.pre_insert.push(session::ConsoleSlot {
+            slot: glue.clone(),
+            identity: session::EffectIdentity::Native {
+                effect_id: StableId::parse("miso.compressor").expect("compressor ID"),
+            },
+            quality: session::EffectQuality::Normal,
+            link_mode: session::LinkMode::DualMono,
+        });
+        let position = model.console.pre_insert.len() - 1;
+        for track in &mut model.tracks {
+            track.console.insert(
+                position,
+                session::ConsoleEntry {
+                    slot: glue.clone(),
+                    bypass: false,
+                    link_mode: session::ConsoleLinkMode::Slot,
+                    params: vec![threshold.clone()],
+                },
+            );
+        }
+        let first = model.tracks[0].id.clone();
+        model.tracks[0].inserts.effects.push(session::Effect {
+            id: StableId::parse("duck").expect("insert ID"),
+            identity: session::EffectIdentity::Native {
+                effect_id: StableId::parse("miso.compressor").expect("compressor ID"),
+            },
+            quality: session::EffectQuality::Normal,
+            bypass: false,
+            link_mode: session::LinkMode::DualMono,
+            params: vec![threshold.clone()],
+            sidechain: session::SidechainDeclaration::Routed(session::Sidechain {
+                source: RouteSource::Track {
+                    track_id: first,
+                    tap: session::SendTap::Input,
+                },
+                port_id: StableId::parse("sidechain-in").expect("port ID"),
+            }),
+        });
+    })
+}
+
+/// A `SET_CONTROL` of strip `track_id`'s `glue` entry's link-mode row to `code` (`0` slot, then
+/// the `effect_contract::LinkMode` codes), with the edit's own glide `ramp`.
+fn link_edit(track_id: &str, code: f32, ramp: Option<u32>) -> SessionEdit {
+    link_edit_at(
+        track_id,
+        protocol::control_core::Section::Console(StableId::parse("glue").expect("slot ID")),
+        code,
+        ramp,
+    )
+}
+
+/// [`link_edit`] of the instance at `section`.
+fn link_edit_at(
+    track_id: &str,
+    section: protocol::control_core::Section,
+    code: f32,
+    ramp: Option<u32>,
+) -> SessionEdit {
+    SessionEdit::set_control(
+        protocol::control_core::ControlAddress {
+            owner: protocol::control_core::Owner::Strip(
+                StableId::parse(track_id).expect("track ID"),
+            ),
+            section,
+            control: protocol::control_core::LINK_MODE_CONTROL,
+            lane: protocol::control_core::Lane::Both,
+        },
+        code,
+        ramp,
+    )
+}
+
+fn glide(
+    mode: effect_contract::LinkMode,
+    ramp_samples: u32,
+) -> effect_contract::EffectControlRecord {
+    effect_contract::EffectControlRecord::Link(effect_contract::LinkSwitch { mode, ramp_samples })
+}
+
+/// #1371 gates 2 and 5. A committed link change commits one revision and prepares no plan, on a
+/// console entry's override (a banked lane) and on an insert that renders per node; from the next
+/// block the C ABI plan renders what a host-core plan with every live lane renders when its lane's
+/// link cell takes the same switch at the same block, the output differs from an unedited run,
+/// and the block that applies the switch allocates nothing.
+///
+/// Test value: red if the link row still rebuilds, if a drained switch never reaches
+/// `retarget_link` on a bank stage or on a per-node instance (acked and never heard: the output
+/// equals the unedited run), if the C ABI writes another mode, glide or instance than the cell the
+/// lane reference takes, or if applying a switch allocates on the render thread.
+#[test]
+fn a_link_change_glides_live_and_is_heard() {
+    let document = link_session(2);
+    let id = |text| StableId::parse(text).expect("an ID");
+    let console = || protocol::control_core::Section::Console(id("glue"));
+    let insert = || protocol::control_core::Section::Inserts(id("duck"));
+    for (label, section, instance, code, mode) in [
+        (
+            "console override",
+            console(),
+            "glue",
+            3.0,
+            effect_contract::LinkMode::Average,
+        ),
+        (
+            "per-node insert",
+            insert(),
+            "duck",
+            2.0,
+            effect_contract::LinkMode::Maximum,
+        ),
+    ] {
+        let mut rig = Rig::new(&document);
+        let mut lanes = LaneReference::new(&document);
+        let mut unedited = Reference::new(&document);
+        let warm_up = window(rig.latency(), 0, rig.quantum);
+        for block in 0..warm_up {
+            let live = rig.step();
+            assert_eq!(
+                bits(&live),
+                bits(&lanes.reference.step()),
+                "{label}: warm-up {block}"
+            );
+            unedited.step();
+        }
+        let (revision, _, epoch, _) = rig.summary();
+        assert_eq!(
+            rig.apply(&[link_edit_at("eq0", section, code, Some(256))]),
+            crate::RESULT_OK,
+            "{label}"
+        );
+        assert_eq!(
+            {
+                let (after, _, after_epoch, pending) = rig.summary();
+                (after, after_epoch, pending)
+            },
+            (revision + 1, epoch, 0),
+            "{label}: the change commits one revision and prepares no plan"
+        );
+        lanes.write("eq0", instance, glide(mode, 256));
+        let mut audible = false;
+        for block in 0..12 {
+            let (live, used) = rig.step_counted();
+            if block == 0 {
+                assert_eq!(
+                    (used.allocations, used.deallocations, used.reallocations),
+                    (0, 0, 0),
+                    "{label}: the block that applies the switch"
+                );
+            }
+            assert_eq!(
+                bits(&live),
+                bits(&lanes.reference.step()),
+                "{label}: block {block}"
+            );
+            audible |= bits(&live) != bits(&unedited.step());
+        }
+        assert!(audible, "{label}: the change changes the output");
+    }
+}
+
+/// #1371 gate 3. A paused host sends forty transactions, each changing the first track's `glue`
+/// override (cycling `maximum`, `average`, `dual_mono`), and every one is `RESULT_OK` with no plan
+/// prepared. The next blocks equal a twin that made only the last edit, and
+/// `LIVE_VALUES_SUPERSEDED` grows by exactly 39 (one link cell, 39 writes replaced unread). A
+/// transaction with a link change refused at its last fallible step writes no cell and leaves the
+/// model as it was.
+///
+/// Test value: red if a link value rides a bounded queue (an edit refused for room) or rebuilds,
+/// if the supersession count is not one per replaced link write, or if a link cell is written
+/// before a later check of its transaction can still refuse it (an ack could precede a drop).
+#[test]
+fn forty_link_edits_before_one_block_are_all_accepted_and_the_last_is_heard() {
+    let document = link_session(2);
+    let mut rig = Rig::new(&document);
+    let mut twin = Rig::new(&document);
+    rig.step();
+    twin.step();
+    let code = |edit: usize| [2.0, 3.0, 1.0][edit % 3];
+    for edit in 0..40 {
+        assert_eq!(
+            rig.apply(&[link_edit("eq0", code(edit), None)]),
+            crate::RESULT_OK,
+            "edit {edit}"
+        );
+    }
+    assert_eq!(rig.summary().3, 0, "no edit prepared a plan");
+    assert_eq!(effect_writes(&rig, Epoch::Current, "eq0", "glue")[1], 40);
+    assert_eq!(
+        twin.apply(&[link_edit("eq0", code(39), None)]),
+        crate::RESULT_OK
+    );
+    let before = rig.counter(protocol::CounterId::LiveValuesSuperseded);
+    for block in 0..12 {
+        assert_eq!(bits(&rig.step()), bits(&twin.step()), "block {block}");
+    }
+    assert_eq!(
+        rig.counter(protocol::CounterId::LiveValuesSuperseded) - before,
+        39
+    );
+
+    // A link change refused after every preflight, at the commit's last fallible step.
+    let state = refusal_state(&rig);
+    let cells = effect_writes(&rig, Epoch::Current, "eq0", "glue");
+    crate::ffi::test_set_structural_faults(
+        rig.session,
+        [Some(TestStructuralFaultPhase::BeforeLivePush), None],
+    );
+    assert_eq!(
+        rig.apply(&[link_edit("eq0", 3.0, None)]),
+        crate::RESULT_BACKPRESSURE
+    );
+    assert_eq!(refusal_state(&rig), state);
+    assert_eq!(effect_writes(&rig, Epoch::Current, "eq0", "glue"), cells);
+    assert_eq!(rig.apply(&[link_edit("eq0", 3.0, None)]), crate::RESULT_OK);
+    assert_eq!(
+        effect_writes(&rig, Epoch::Current, "eq0", "glue")[1],
+        cells[1] + 1
+    );
+}
+
+/// #1371 D2, the same-mode rule. While `eq0`'s `glue` lane glides to `average` over 768 frames, two
+/// transactions before the next block write `maximum` and then `average`: the newest write is the
+/// mode the lane already heads for, so the glide goes on untouched, bit for bit what a twin that
+/// made only the first edit renders.
+///
+/// Test value: red if a block that reads a switch to the lane's own target retargets it anyway
+/// (the glide restarts its timeline from where it is, a different curve).
+#[test]
+fn a_change_and_its_reversal_before_a_block_leave_the_glide_be() {
+    let document = link_session(2);
+    let mut rig = Rig::new(&document);
+    let mut twin = Rig::new(&document);
+    for _ in 0..window(rig.latency(), 0, rig.quantum) {
+        assert_eq!(bits(&rig.step()), bits(&twin.step()), "warm-up");
+    }
+    let first = link_edit("eq0", 3.0, Some(768));
+    assert_eq!(rig.apply(std::slice::from_ref(&first)), crate::RESULT_OK);
+    assert_eq!(twin.apply(std::slice::from_ref(&first)), crate::RESULT_OK);
+    assert_eq!(bits(&rig.step()), bits(&twin.step()), "the glide begins");
+    assert_eq!(rig.apply(&[link_edit("eq0", 2.0, None)]), crate::RESULT_OK);
+    assert_eq!(rig.apply(&[link_edit("eq0", 3.0, None)]), crate::RESULT_OK);
+    for block in 0..10 {
+        assert_eq!(bits(&rig.step()), bits(&twin.step()), "block {block}");
+    }
+}
+
+/// #1371 gate 4 (D6, root's mid-glide ruling). A rebuild that adds a muted track, whose ID sorts
+/// first so the carried lane moves, lands while `eq0`'s `glue` lane glides to `average` over 768
+/// frames: (a) the glide was applied a block before the swap, (b) the link edit is still unread
+/// when the rebuild commits, (c) the link edit rides the rebuilding transaction. In every case
+/// the swapped run renders bit for bit what a twin that only made the link edit renders.
+///
+/// Test value: red if the successor, prepared at the committed mode, seats it at rest and drops
+/// the glide in flight, or seats the committed mode before the predecessor's unread or the
+/// rebuild's own switch can glide to it (a step), or if the carry forgets the unread switch.
+#[test]
+fn a_rebuild_mid_glide_carries_the_glide_to_its_target() {
+    let document = link_session(1);
+    let model = parse_session_json(&document).expect("model");
+    let structural = super::tests::add_muted_track(&model, "a-muted");
+    let edit = link_edit("eq0", 3.0, Some(768));
+    for case in ["applied", "unread", "same transaction"] {
+        let mut rig = Rig::new(&document);
+        let mut twin = Rig::new(&document);
+        for _ in 0..window(rig.latency(), 0, rig.quantum) {
+            assert_eq!(bits(&rig.step()), bits(&twin.step()), "{case}: warm-up");
+        }
+        assert_eq!(
+            twin.apply(std::slice::from_ref(&edit)),
+            crate::RESULT_OK,
+            "{case}"
+        );
+        match case {
+            "applied" => {
+                assert_eq!(
+                    rig.apply(std::slice::from_ref(&edit)),
+                    crate::RESULT_OK,
+                    "{case}"
+                );
+                assert_eq!(
+                    bits(&rig.step()),
+                    bits(&twin.step()),
+                    "{case}: glide begins"
+                );
+                assert_eq!(rig.apply(&structural), crate::RESULT_OK, "{case}");
+            }
+            "unread" => {
+                assert_eq!(
+                    rig.apply(std::slice::from_ref(&edit)),
+                    crate::RESULT_OK,
+                    "{case}"
+                );
+                assert_eq!(rig.apply(&structural), crate::RESULT_OK, "{case}");
+            }
+            _ => {
+                let mut edits = vec![edit.clone()];
+                edits.extend(structural.iter().cloned());
+                assert_eq!(rig.apply(&edits), crate::RESULT_OK, "{case}");
+            }
+        }
+        assert_eq!(rig.summary().3, 1, "{case}: the transaction rebuilds");
+        for block in 0..10 {
+            assert_eq!(
+                bits(&rig.step()),
+                bits(&twin.step()),
+                "{case}: block {block}"
+            );
+        }
+        assert_eq!(
+            crate::ffi::test_plan_carry_counts(rig.plan).0,
+            1,
+            "{case}: one swap"
+        );
+    }
+}
+
 // --- OBSERVATION_READ (#1586b) ---
 
 /// A frame limit a 256-row `OBSERVATION_READ` reply fits (the default fixture's 4,096 bytes carry
