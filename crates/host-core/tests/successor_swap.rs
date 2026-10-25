@@ -11129,13 +11129,14 @@ fn a_repointed_send_fades_in_at_its_new_destination(backend: Backend) {
     let in_flight = [send(SWAP_BLOCK - 2, -9.0, false, LONG_RAMP)];
     // (a) another destination; (b) the same destination from another tap: `known`'s source and
     // tap check.
-    let repoints: [(&str, &dyn Fn(&mut session::Route)); 2] = [
-        ("(a) to bus2", &|route| {
+    type Repoint = fn(&mut session::Route);
+    let repoints: [(&str, Repoint); 2] = [
+        ("(a) to bus2", |route| {
             route.destination = session::RouteDestination::SubmixInput {
                 submix_id: id("bus2"),
             };
         }),
-        ("(b) from pre_fader", &|route| {
+        ("(b) from pre_fader", |route| {
             let RouteSource::Track { track_id, tap } = route.source.clone() else {
                 panic!("a track route");
             };
