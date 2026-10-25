@@ -347,6 +347,11 @@ export class TrackResponseRequester {
    * may carry a tag to hold, so the requester keeps listening and the next query waits for it.
    */
   #holdPending: Promise<void> | undefined;
+  /**
+   * The tags of the events read while `#holdPending` is set: the timed-out query's event may come
+   * before its late reply, and the tag that reply carries is then not held.
+   */
+  #lateSeen = new Set<bigint>();
   /** Events of the running query read before its tag was known. */
   #seen = new Map<bigint, ResponseReadyEvent>();
   /** The first `RESPONSE_READY` the running query could not decode. */
@@ -384,6 +389,7 @@ export class TrackResponseRequester {
     this.#orphan?.release();
     this.#orphan = undefined;
     this.#holdPending = undefined;
+    this.#lateSeen.clear();
     this.#unsubscribe?.();
     this.#unsubscribe = undefined;
   }
@@ -418,6 +424,7 @@ export class TrackResponseRequester {
       return;
     }
     if (ready === undefined) return;
+    if (this.#holdPending !== undefined) this.#lateSeen.add(ready.requestTag);
     const orphan = this.#orphan;
     if (orphan !== undefined && ready.requestTag === orphan.tag) {
       // The answer to a query that timed out: dropped, and the capture slot is free again.
@@ -432,6 +439,8 @@ export class TrackResponseRequester {
   }
 
   #hold(tag: bigint): void {
+    // Its event was already read (it came before the late reply): the capture slot is free.
+    if (this.#lateSeen.delete(tag)) return;
     let release!: () => void;
     let fail!: (error: Error) => void;
     const released = new Promise<void>((resolve, reject) => {
@@ -489,7 +498,10 @@ export class TrackResponseRequester {
             })
             .catch(() => undefined)
             .finally(() => {
-              if (this.#holdPending === pending) this.#holdPending = undefined;
+              if (this.#holdPending === pending) {
+                this.#holdPending = undefined;
+                this.#lateSeen.clear();
+              }
               this.#quiet();
             });
           this.#holdPending = pending;

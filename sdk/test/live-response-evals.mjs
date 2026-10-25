@@ -263,6 +263,25 @@ test("a tag reply after the deadline is held, and the next query waits for its e
   assert.equal((await second).snapshotToken, 8n);
   await ticks();
   assert.equal(listeners.size, 0, "idle again: no listener left");
+
+  // The timed-out query's event can come before its late reply. Test value: red if the requester
+  // then holds the tag and waits for an event it has already read, so every later query stalls.
+  const third = requester.query(request);
+  const fourth = requester.query({ ...request, responseLimits: { requestDeadlineMs: 2_000 } });
+  await assert.rejects(third, /exceeded its deadline/);
+  await ticks();
+  assert.equal(replies.length, 3);
+  emit(9n);
+  await ticks();
+  replies[2].resolve(tagReply(replies[2].requestId, 9n));
+  await ticks();
+  assert.equal(replies.length, 4, "the event was read first: nothing is held");
+  replies[3].resolve(tagReply(replies[3].requestId, 10n));
+  await ticks();
+  emit(10n);
+  assert.equal((await fourth).snapshotToken, 10n);
+  await ticks();
+  assert.equal(listeners.size, 0, "idle again: no listener left");
 });
 
 // #1579 gate 1, the headless and browser legs. Test value: red if the headless engine or the
