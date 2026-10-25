@@ -712,7 +712,7 @@ impl Placement {
 /// strips cross between the stereo banks and the padded one, moves land inside a window where every
 /// bank skips (230..360) and inside the padded bank's (400..530), and the successor is moved after
 /// it took the carry.
-const MOVES: [(u64, usize, usize); 11] = [
+const MOVES: [(u64, usize, usize); 13] = [
     (0, 0, 5),
     (0, 9, 17),
     (0, 12, 16),
@@ -722,6 +722,8 @@ const MOVES: [(u64, usize, usize); 11] = [
     (250, 17, 19),
     (250, 9, 17),
     (410, 5, 0),
+    (440, 8, 9),
+    (440, 8, 10),
     (480, 1, 6),
     (480, 13, 18),
 ];

@@ -9807,11 +9807,20 @@ impl Runtime {
 
     /// Take every displaced pack group back to the identity map (issue #1782a): the plan carry's
     /// predecessor (and successor) side, whose move tables name a strip by the location bind gave
-    /// it and drain a bank's lanes together. A bounded series of [`Self::swap_bank_lanes`], one per
-    /// strip at most; nothing at all under the identity.
+    /// it and drain a bank's lanes together. A bounded series of [`Self::swap_bank_lanes`], at most
+    /// one per strip; nothing at all under the identity.
     ///
-    /// `false` when a move back refused, which a move out makes impossible short of a defect; the
-    /// map then still names where each strip is, and the caller carries nothing.
+    /// Position `P` is fixed by trading it with the position that holds `P`'s home strip. That
+    /// trade can refuse after legal moves, because a fader bank's automation fit is one-way: an
+    /// automated strip goes into a bank with automation slots and never into one without
+    /// (`automation_swap_fits`). Only the strip leaving `P` can be refused (the strip arriving is
+    /// coming home), so it is automated, `P`'s bank has slots, and the trade that sends that
+    /// occupant to its own home instead fits: it goes home, and whatever it displaces lands in
+    /// `P`'s bank, which has slots. Each trade puts one strip home, so the walk ends.
+    ///
+    /// `false` when both trades refuse, which the argument above rules out short of a defect (or a
+    /// refusal this argument does not cover); the map then still names where each strip is, and
+    /// the caller carries nothing.
     pub(crate) fn restore_home_lanes(&mut self) -> bool {
         for group in 0..self.lane_map.groups.len() {
             let pack = self.lane_map.groups[group];
@@ -9822,13 +9831,20 @@ impl Runtime {
             let first = pack.first as usize;
             let base = pack.base as usize;
             let span = (pack.last as usize - first + 1) * width;
+            let unit_lane = |position: usize| (first + position / width, position % width);
             for position in 0..span {
-                while self.lane_map.home[base + position] as usize != position {
+                loop {
+                    let occupant = self.lane_map.home[base + position] as usize;
+                    if occupant == position {
+                        break;
+                    }
                     let holder = self.lane_map.at[base + position] as usize;
-                    let unit_lane = |position: usize| (first + position / width, position % width);
                     if self
                         .swap_bank_lanes(unit_lane(position), unit_lane(holder))
                         .is_err()
+                        && self
+                            .swap_bank_lanes(unit_lane(position), unit_lane(occupant))
+                            .is_err()
                     {
                         return false;
                     }
