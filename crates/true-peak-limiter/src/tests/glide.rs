@@ -449,98 +449,6 @@ fn no_switch_puts_a_sample_over_the_ceiling() {
     println!("worst true-peak margin over every switch: {worst:+.4} dB");
 }
 
-/// **Gate 4 (D5).** On a uniform bank at `DualMono`, lane 0 switches into `Maximum` over 4,800
-/// samples, and while it glides every bank-mate switches over 64: no block takes the #990
-/// linked pair until lane 0's glide has ended and both gain rings have been rewritten (`N + R`
-/// frames), and the linked pair runs again within one block of that, and on every block after.
-/// Every block's output and state are bit-identical to the reference per-frame kernel's, which
-/// never links, and the record never stands over disagreeing gain words (`LinkedPair::compare`).
-/// At every width the build has.
-///
-/// The fixture is hot noise on both channels and one `+19 dBFS` burst after the glide, timed so
-/// its attack runs while the rings finish their rewrite. The re-derivation is exact, so it can
-/// only return the pair over agreeing words, and the recursive reduction word `d` re-agrees only
-/// where both channels take the attack arm on one frame: on stationary noise alone it stayed one
-/// lane apart for at least 1,920 frames past the countdown at `W8` (#1370b's decision record).
-/// The burst is that attack.
-///
-/// Mid-glide, a NaN on every lane fails the §4.4 check and resets the whole bank, which states
-/// the record from the cleared words and leaves the glide in flight (the D7 recovery keeps it):
-/// the glide's next frames must clear it again, or the frames after them would link over the
-/// words the glide pulled apart.
-#[test]
-fn the_linked_pair_returns_once_the_rings_are_rewritten() {
-    fn check<L: Lane>() {
-        const LONG: u32 = 4_800;
-        const SHORT: u32 = 64;
-        const SWITCH: usize = 10;
-        const MATES: usize = 20;
-        const BLOCKS: usize = 200;
-        /// Frame 5,808: lane 0's glide ends at frame 5,280, and `2 Wb = 482` at 5 ms.
-        const BURST: usize = 121;
-        /// Frame 1,440: its NaN leaves the delay line at about frame 1,926, inside lane 0's glide.
-        const POISON: usize = 30;
-        let tracks = vec![values_with(CEILING, RELEASE, LOOKAHEAD); L::WIDTH];
-        let label = format!("W{}", L::WIDTH);
-        let mut pair = LinkedPair::<L>::new(&tracks, LinkMode::DualMono, false, RATE, label);
-        let shape = Shape::new(RATE).expect("a shape");
-        let rewritten = SWITCH * BLOCK + LONG as usize + shape.n + shape.ring;
-        let mut noise = Noise(0x1370_b004);
-        let mut first_engaged = None;
-        for block in 0..BLOCKS {
-            if block == SWITCH {
-                for core in [&mut pair.shipped, &mut pair.oracle] {
-                    assert!(core.retarget_link(0, LinkMode::Maximum, LONG));
-                }
-            }
-            if block == MATES {
-                for core in [&mut pair.shipped, &mut pair.oracle] {
-                    for lane in 1..L::WIDTH {
-                        assert!(core.retarget_link(lane, LinkMode::Maximum, SHORT));
-                    }
-                }
-            }
-            let words = BLOCK * L::WIDTH;
-            // The burst: past the glide's end by `2 Wb`, so the box sums already agree when its
-            // required gain enters the window `N - Wb` frames later, and the attack it drives
-            // spans the countdown's end.
-            let gain = if block == BURST { 9.0 } else { 2.0 };
-            let mut left: Vec<f32> = (0..words).map(|_| noise.next() * gain).collect();
-            let right: Vec<f32> = (0..words).map(|_| noise.next() * gain).collect();
-            if block == POISON {
-                left[..L::WIDTH].fill(f32::NAN);
-            }
-            let engaged = pair.dual(
-                &left,
-                &right,
-                &no_spans(L::WIDTH),
-                &format!("block {block}"),
-            );
-            if engaged {
-                assert!(
-                    block * BLOCK >= rewritten,
-                    "W{} block {block}: linked before the rings were rewritten",
-                    L::WIDTH
-                );
-                first_engaged.get_or_insert(block);
-            } else if let Some(first) = first_engaged {
-                panic!(
-                    "W{} block {block}: the linked pair left again after block {first}",
-                    L::WIDTH
-                );
-            }
-        }
-        let first = first_engaged.expect("the linked pair never returned");
-        assert!(
-            first * BLOCK <= rewritten + BLOCK,
-            "W{}: the linked pair returned at block {first}, not within a block of frame \
-             {rewritten}",
-            L::WIDTH
-        );
-    }
-    lane::each_lane!(|L| check::<L>());
-}
-
 /// **Gates 2 and 6.** A full bank of distinct members at mixed modes, where lane 0 glides while
 /// its bank-mates rest or ramp the ceiling and the release: every other lane renders bit for bit
 /// as its own scalar instance, and the retarget and the switching blocks allocate and free
@@ -868,8 +776,80 @@ fn a_glide_lands_on_its_target_law_and_a_resting_lane_never_leaves_its_own() {
 /// (`process_block_mono`) that are the left plane of a core fed `L == R`, bit for bit, and after
 /// the disengage copy the two cores render and hold the same words: a collapsed block advances
 /// the glide as the dual one does. At every width the build has.
+///
+/// And a glide in flight is never quiet: on a core holding the silent rest claim, a glide
+/// started on `+0.0` input moves its weights on every block, dual and collapsed, as a twin whose
+/// claim is withdrawn before every block (so it renders every block), and arrives on its frame.
 #[test]
 fn a_collapsed_block_advances_a_glide_as_the_dual_block_on_equal_channels() {
+    fn silent<L: Lane>(mono: bool) {
+        const GLIDE: u32 = 300;
+        let tracks = vec![values_with(CEILING, RELEASE, LOOKAHEAD); L::WIDTH];
+        let core = || linked_core::<L>(&tracks, LinkMode::DualMono, false, RATE);
+        let (mut fast, mut slow) = (core(), core());
+        let render = |core: &mut LimiterCore<L>, withdraw: bool| {
+            if withdraw {
+                core.silent_fixed_point = false;
+            }
+            let mut left = vec![0.0_f32; BLOCK * L::WIDTH];
+            if mono {
+                core.process_block_mono(&mut left, BLOCK);
+            } else {
+                let mut right = left.clone();
+                core.process_block(&mut left, &mut right, BLOCK);
+            }
+        };
+        let link_bits = |core: &LimiterCore<L>| -> Vec<u32> {
+            let channels = if mono {
+                vec![&core.left]
+            } else {
+                vec![&core.left, &core.right]
+            };
+            channels
+                .into_iter()
+                .flat_map(|channel| channel.link[..L::WIDTH].iter())
+                .flat_map(|ramp| {
+                    [
+                        ramp.current.to_bits(),
+                        ramp.target.to_bits(),
+                        ramp.step.to_bits(),
+                        ramp.remaining,
+                    ]
+                })
+                .collect()
+        };
+        for _ in 0..4 {
+            render(&mut fast, false);
+            render(&mut slow, true);
+        }
+        assert!(
+            fast.silent_engagements() > 0,
+            "the rest claim holds before the glide"
+        );
+        for core in [&mut fast, &mut slow] {
+            assert!(core.retarget_link(0, LinkMode::Maximum, GLIDE));
+        }
+        for block in 1..=8_u32 {
+            render(&mut fast, false);
+            render(&mut slow, true);
+            let context = format!("W{} mono {mono} block {block}", L::WIDTH);
+            assert_eq!(
+                link_bits(&fast),
+                link_bits(&slow),
+                "{context}: a skipped glide"
+            );
+            assert_eq!(
+                fast.left.link[0].remaining,
+                GLIDE.saturating_sub(block * BLOCK as u32),
+                "{context}: the glide's countdown"
+            );
+        }
+        assert_eq!(
+            fast.left.link[0],
+            LinearRamp::fixed(1.0),
+            "the glide arrived"
+        );
+    }
     fn check<L: Lane>() {
         let tracks = vec![values_with(CEILING, RELEASE, LOOKAHEAD); L::WIDTH];
         let core = || linked_core::<L>(&tracks, LinkMode::DualMono, false, RATE);
@@ -906,70 +886,95 @@ fn a_collapsed_block_advances_a_glide_as_the_dual_block_on_equal_channels() {
             state_bits(&dual),
             "the glide arrived alike"
         );
+        silent::<L>(false);
+        silent::<L>(true);
     }
     lane::each_lane!(|L| check::<L>());
 }
 
-/// **Gate 4, stationary material (D5 as ruled, 2026-10-25).** A uniform bank at `DualMono`
-/// switches every lane into `Maximum` over 64 samples on `+6 dBFS` stationary noise on both
-/// channels, with no burst: the reduction word `d` can stay apart past the countdown, so the
-/// record is re-established by the per-block watch of the `W` reduction words once the rings
-/// agree, within `WATCH_BOUND` frames of the countdown's end, and every block's bits and state
-/// equal the reference kernel's (`LinkedPair::dual`). Under a single check at the countdown's end
-/// the `W8` bank never relinks (red on that code).
+/// **Gate 4 (D5, as ruled 2026-10-25).** On a uniform bank at `DualMono`, on `+6 dBFS`
+/// stationary noise on both channels with no burst, lane 0 switches into `Maximum` over 4,800
+/// samples; while it glides every bank-mate switches over 64 (a countdown written without `max`
+/// would end inside lane 0's glide), and a NaN on every lane fails the §4.4 check and resets the
+/// whole bank, which states the record from the cleared words while the glide continues (the
+/// glide's blocks must clear it again). Then:
+///
+/// * no block takes the #990 linked pair before lane 0's glide plus `N + R` frames;
+/// * the record returns within `WATCH_BOUND` frames of that, through the per-block watch of the
+///   `W` reduction words (`d` can stay apart past the countdown on stationary material: a single
+///   check at its end never relinked here), and the pair links on every block after;
+/// * every block's output and state equal the reference kernel's, which never links, and the
+///   record never stands over disagreeing gain words (`LinkedPair::compare`).
+///
+/// At every width the build has.
 #[test]
-fn the_linked_pair_returns_on_stationary_material() {
+fn the_linked_pair_returns_once_the_words_agree() {
     fn check<L: Lane>() {
+        const LONG: u32 = 4_800;
+        const SHORT: u32 = 64;
         const SWITCH: usize = 10;
-        const GLIDE: u32 = 64;
-        const BLOCKS: usize = 200;
-        /// 100 ms at 48 kHz. Measured on this fixture: the record returned 2,191 (W1), 847 (W4)
-        /// and 2,047 (W8) frames after the countdown; a single check at its end never did.
+        const MATES: usize = 20;
+        /// Frame 1,440: its NaN leaves the delay line at about frame 1,926, inside lane 0's glide.
+        const POISON: usize = 30;
+        const BLOCKS: usize = 300;
+        /// 100 ms at 48 kHz. Measured on this fixture: the pair returned 47 (W1), 47 (W4) and
+        /// 1,247 (W8) frames after the countdown.
         const WATCH_BOUND: usize = 4_800;
         let tracks = vec![values_with(CEILING, RELEASE, LOOKAHEAD); L::WIDTH];
-        let label = format!("W{} stationary", L::WIDTH);
+        let label = format!("W{}", L::WIDTH);
         let mut pair = LinkedPair::<L>::new(&tracks, LinkMode::DualMono, false, RATE, label);
         let shape = Shape::new(RATE).expect("a shape");
-        let countdown = SWITCH * BLOCK + GLIDE as usize + shape.n + shape.ring;
+        let countdown = SWITCH * BLOCK + LONG as usize + shape.n + shape.ring;
         let mut noise = Noise(0x1370_b006);
-        let mut relinked = None;
+        let mut first_engaged = None;
         for block in 0..BLOCKS {
             if block == SWITCH {
                 for core in [&mut pair.shipped, &mut pair.oracle] {
-                    for lane in 0..L::WIDTH {
-                        assert!(core.retarget_link(lane, LinkMode::Maximum, GLIDE));
+                    assert!(core.retarget_link(0, LinkMode::Maximum, LONG));
+                }
+            }
+            if block == MATES {
+                for core in [&mut pair.shipped, &mut pair.oracle] {
+                    for lane in 1..L::WIDTH {
+                        assert!(core.retarget_link(lane, LinkMode::Maximum, SHORT));
                     }
                 }
             }
             let words = BLOCK * L::WIDTH;
-            let left: Vec<f32> = (0..words).map(|_| noise.next() * 2.0).collect();
+            let mut left: Vec<f32> = (0..words).map(|_| noise.next() * 2.0).collect();
             let right: Vec<f32> = (0..words).map(|_| noise.next() * 2.0).collect();
-            pair.dual(
+            if block == POISON {
+                left[..L::WIDTH].fill(f32::NAN);
+            }
+            let engaged = pair.dual(
                 &left,
                 &right,
                 &no_spans(L::WIDTH),
                 &format!("block {block}"),
             );
-            let end = (block + 1) * BLOCK;
-            if block >= SWITCH && end < countdown {
+            if engaged {
                 assert!(
-                    !pair.shipped.gain_linked,
-                    "block {block}: linked before the rewrite"
+                    block * BLOCK >= countdown,
+                    "W{} block {block}: linked before the rings were rewritten",
+                    L::WIDTH
+                );
+                first_engaged.get_or_insert(block);
+            } else if let Some(first) = first_engaged {
+                panic!(
+                    "W{} block {block}: the linked pair left again after block {first}",
+                    L::WIDTH
                 );
             }
-            if pair.shipped.gain_linked && block >= SWITCH {
-                relinked.get_or_insert(end);
-            }
         }
-        let relinked = relinked.expect("the record never returned");
+        let first = first_engaged.expect("the linked pair never returned") * BLOCK;
         println!(
-            "W{}: record re-established {} frames after the countdown",
+            "W{}: the linked pair returned {} frames after the countdown",
             L::WIDTH,
-            relinked - countdown
+            first - countdown
         );
         assert!(
-            relinked <= countdown + WATCH_BOUND,
-            "W{}: re-established at frame {relinked}, past the bound",
+            first <= countdown + WATCH_BOUND,
+            "W{}: returned at frame {first}, past the bound",
             L::WIDTH
         );
     }
