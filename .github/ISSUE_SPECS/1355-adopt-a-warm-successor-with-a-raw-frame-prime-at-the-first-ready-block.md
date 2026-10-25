@@ -311,3 +311,31 @@ aborts); no grown-line pending (gates 2, 3); rebuild re-creates track lines at r
 grown lanes not filled (gates 1-4); count of whole rings (count test); count of non-carried
 tracks (count test). **Not red:** a prime labelled one block late (the timeline history and seek
 report labels): PCM is sequential in the ring, so no gate here sees the label. Known gap.
+
+## Decision record (attempt 2, 2026-10-25)
+
+- **A warm successor displaced before its first block (MAJOR-1, root ruling (a)).** Render can
+  adopt W in a call it then refuses (`render_contiguous` at the wrong sample: the clock decides the
+  adoption, then `TimeDiscontinuity`), so W never renders and its prime stays pending; the next
+  successor C took W's lines and rings without it, and the output shifted by `P` for good.
+  `PreparedPlanExecutor::adopt_predecessor` now takes `block_start`, the sample of the block the
+  successor renders first, which is the block the predecessor would have rendered first:
+  `enter_block` passes its block start (the clock on `render_contiguous`, the host's time on
+  `render`), `adopt_predecessor_plan` the predecessor's clock. C's carry replays W's pending prime
+  at `block_start + O_W` before any check reads or any move takes W's lines and sources (the
+  pattern #1652 MINOR-2 uses for route comparisons). The first block and the carry share
+  `replay_prime`. A predecessor with no source set primes nothing, as in render.
+- **Gate 4's held seek runs after one growth (MAJOR-2)**, so `O = P` and readiness reads the window
+  at `S + O`. A source-read sample `X` is heard at render sample `X` on either plan, so A continued
+  takes the same absolute anchor, and its feed (`O` behind) is topped up to the anchor before the
+  seek so the old generation has no gap.
+- **`WarmLead::prime_bytes` (MINOR-1).** The L3 term is live debt now: the fill writes L3 lines and
+  the count leaves them out. Recorded in #1354's notes for 1354b; the budget is unchanged here.
+
+Test value (attempt 2):
+- `a_warm_successor_displaced_before_its_first_block_keeps_its_prime`: a carry that takes a
+  never-rendered warm predecessor's lines and rings without running its pending prime shifts every
+  carried track by `P` from C's adoption on. Red on the fix's revert (both widths; first
+  divergence at block 6, C's adoption).
+- Gate 4 (held seek after a growth): a readiness check at `S` instead of `S + O` misses a seek
+  anchored inside `[S + O, S + O + P + q)` and adopts before it applies.

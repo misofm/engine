@@ -177,8 +177,10 @@ pub struct WarmLead {
 impl WarmLead {
     /// The bytes render writes and reads in the adoption block to prime this lead (#1354 D3):
     /// `4 · (P · Σ channels(s)` over the carried sources `+ Σ 2 · λ'` over every source-claim
-    /// line of the successor`)`. Exact. No L3 line (an `input`-tap line from a restarted strip,
-    /// #1354b) exists in this slice, so that term is empty.
+    /// line the prime's fill writes`)`. **Limit (#1354b):** the L3 term is not counted yet: the
+    /// fill writes every `input`-tap sidechain line from a restarted track into a carried node
+    /// (#1355 D5), and those words are left out, so the count is exact only for a successor with
+    /// no such line.
     #[must_use]
     pub const fn prime_bytes(&self) -> u64 {
         self.prime_bytes

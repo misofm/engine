@@ -342,8 +342,16 @@ pub trait PreparedPlanExecutor: Send {
     /// **Afterwards.** The predecessor is pushed to retirement after this returns and is reclaimed
     /// off the render thread; it never renders again, so state may be moved out of it.
     ///
+    /// **`block_start`.** The absolute sample of the block this plan renders first: the block
+    /// `predecessor` would have rendered next. A predecessor that has not rendered its own first
+    /// block yet may still hold work that block would have done, and this is its sample.
+    ///
     /// The default takes nothing and reports [`CarryOutcome::NotRequested`].
-    fn adopt_predecessor(&mut self, _predecessor: &mut dyn PreparedPlanExecutor) -> CarryOutcome {
+    fn adopt_predecessor(
+        &mut self,
+        _predecessor: &mut dyn PreparedPlanExecutor,
+        _block_start: u64,
+    ) -> CarryOutcome {
         CarryOutcome::NotRequested
     }
     /// The observers this plan took from its predecessor in the block that applied its swap
@@ -1417,8 +1425,9 @@ impl PreparedRenderPlan {
         if self.program.envelope != predecessor.program.envelope {
             return CarryOutcome::PredecessorMismatch;
         }
-        self.adopt_absolute_sample(predecessor.next_absolute_sample);
-        super::audit::in_render_scope(|| self.carry_from(predecessor))
+        let block_start = predecessor.next_absolute_sample;
+        self.adopt_absolute_sample(block_start);
+        super::audit::in_render_scope(|| self.carry_from(predecessor, block_start))
     }
 
     /// This plan's executor as `Any` ([`PreparedPlanExecutor::as_any_mut`]), so the crate that
@@ -1457,13 +1466,16 @@ impl PreparedRenderPlan {
 
     /// Run the executor hand-over from `predecessor`, if both plans have executors, then the
     /// attachment hand-over ([`HostAttachment::adopt_predecessor`]), if both plans have an
-    /// attachment, with the successor executor's observer carries.
-    pub(crate) fn carry_from(&mut self, predecessor: &mut Self) -> CarryOutcome {
+    /// attachment, with the successor executor's observer carries. `block_start` is the sample
+    /// of the block this plan renders first.
+    pub(crate) fn carry_from(&mut self, predecessor: &mut Self, block_start: u64) -> CarryOutcome {
         let outcome = match (
             self.executor.as_deref_mut(),
             predecessor.executor.as_deref_mut(),
         ) {
-            (Some(successor), Some(predecessor)) => successor.adopt_predecessor(predecessor),
+            (Some(successor), Some(predecessor)) => {
+                successor.adopt_predecessor(predecessor, block_start)
+            }
             _ => CarryOutcome::NotRequested,
         };
         let carries = self

@@ -399,12 +399,12 @@ extern "C" {
  * The source-read clock (issues 1275, 1316). A seek that names a block names it on the plan's
  * source-read clock: the absolute sample of source time the block reads. It is equal to the
  * render clock until a plan that reads its sources ahead of it is adopted (a warm successor, issue
- * 1355); no call publishes one in this version (issue 1403). A plan's clock is 0 at compile. Each miso_engine_v1_render_f32_planar
- * call must pass the clock's value as absolute_sample, renders one quantum and advances the clock
- * by one quantum; a call at another sample renders nothing, moves nothing and returns
- * MISO_ENGINE_V1_RENDER_REJECTED with "render.time.discontinuity". A plan that a structural
- * transaction swaps in continues the clock of the plan it replaces, so an anchor stays valid
- * across a swap.
+ * 1355); no call publishes one in this version (issue 1403). A plan's clock is 0 at compile.
+ * Each miso_engine_v1_render_f32_planar call must pass the clock's value as absolute_sample,
+ * renders one quantum and advances the clock by one quantum; a call at another sample renders
+ * nothing, moves nothing and returns MISO_ENGINE_V1_RENDER_REJECTED with
+ * "render.time.discontinuity". A plan that a structural transaction swaps in continues the clock
+ * of the plan it replaces, so an anchor stays valid across a swap.
  *
  * Seek. miso_engine_v1_source_seek(id, g, F) makes generation g play from source frame F. It
  * takes effect no later than the first block that begins after the call returns; the PCM of the

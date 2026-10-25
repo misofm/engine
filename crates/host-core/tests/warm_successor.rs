@@ -1126,6 +1126,36 @@ impl Stream {
         self.publish(host, &b.model, PlanAdoption::Next);
     }
 
+    /// A render call at the wrong sample: render adopts the due candidate at the block boundary,
+    /// then refuses the call, so the adopted plan renders nothing (#1652 MINOR-2's path).
+    fn refused_call(&mut self) {
+        let read = self.read();
+        self.feeder.top_up(&mut self.sources, read);
+        let mut output = [f32::NAN; QUANTUM as usize * 2];
+        let wrong = self.owner.next_absolute_sample() + 1;
+        let refused = self.owner.render_contiguous(
+            engine::realtime::RenderIo {
+                output: engine::realtime::PlanarBufferMut::try_new(
+                    &mut output,
+                    2,
+                    QUANTUM as usize,
+                    QUANTUM as usize,
+                )
+                .expect("output"),
+            },
+            wrong,
+        );
+        assert!(
+            matches!(
+                refused,
+                Err(engine::realtime::RenderError::TimeDiscontinuity { .. })
+            ),
+            "the call is refused after the boundary: {refused:?}"
+        );
+        assert!(self.retirer.try_reclaim().is_ok(), "the candidate was adopted");
+        self.offset = self.pending.take().expect("a pending candidate");
+    }
+
     /// The block the newest swap applied at.
     fn swap_blocks(&self) -> Vec<usize> {
         self.blocks
@@ -1367,6 +1397,37 @@ fn an_input_tap_sidechain_from_a_restarted_track_continues() {
     }
 }
 
+/// A warm successor displaced before its first block (#1355 MAJOR-1): render adopts W in a call
+/// it then refuses, so W renders nothing, and the ordinary successor C, prepared from W's
+/// inventory, displaces it at the next block. C's carry replays W's pending prime at C's
+/// adoption block before it takes W's lines and sources, so the output equals A continued.
+/// Both bank widths.
+#[test]
+fn a_warm_successor_displaced_before_its_first_block_keeps_its_prime() {
+    let a = Session::compile(finish(two_tracks()));
+    let mut b = two_tracks();
+    muted_track(&mut b, "t3", vec![limiter()]);
+    to_output(&mut b, "t3");
+    let mut c = b.clone();
+    muted_track(&mut c, "t4", Vec::new());
+    to_output(&mut c, "t4");
+    let (b, c) = (Session::compile(finish(b)), Session::compile(finish(c)));
+    for &backend in Backend::VECTOR {
+        let caps = gate_caps();
+        let mut swapped = alone(&a, &caps, backend, AHEAD);
+        swapped.render(BEFORE);
+        assert_eq!(swapped.grow(&b, &CONFIG), LEAD);
+        swapped.refused_call();
+        assert_eq!(swapped.offset, LEAD);
+        swapped.rebuild(&c);
+        swapped.render(AFTER);
+        assert_eq!(swapped.swap_blocks(), [BEFORE], "{backend:?}: C adopted at once");
+        let mut continued = alone(&a, &caps, backend, AHEAD);
+        continued.render(BEFORE + AFTER);
+        assert_eq!(first_divergence(&swapped, &continued), None, "{backend:?}");
+    }
+}
+
 fn restarted_ids(inventory: &host_core::PlanStateInventory) -> Vec<&str> {
     inventory
         .restarted_strips()
@@ -1379,14 +1440,22 @@ fn restarted_ids(inventory: &host_core::PlanStateInventory) -> Vec<&str> {
 /// past the block, not `P + q`) W is not adopted and the output equals A continued; once the
 /// frames arrive, W is adopted at the next block. A `seek_at` anchored inside the prime window
 /// holds the adoption until the block after the seek applied, and the output equals A continued
-/// with the same seek.
+/// with the same seek. The seek case runs after a first growth, so the running plan's offset `O`
+/// is `P` and the window `[S + O, S + O + P + q)` is read at `S + O`, not at `S`.
 #[test]
 fn a_warm_successor_waits_for_every_carried_ring_and_a_held_seek() {
     let a = Session::compile(finish(two_tracks()));
     let mut b = two_tracks();
     muted_track(&mut b, "t3", vec![limiter()]);
     to_output(&mut b, "t3");
-    let b = Session::compile(finish(b));
+    let mut c = b.clone();
+    muted_track(&mut c, "t4", vec![limiter(), {
+        let mut second = limiter();
+        second.id = sid("limiter-2");
+        second
+    }]);
+    to_output(&mut c, "t4");
+    let (b, c) = (Session::compile(finish(b)), Session::compile(finish(c)));
     let caps = gate_caps();
     let backend = backend();
     let k = LEAD / QUANTUM;
@@ -1408,26 +1477,36 @@ fn a_warm_successor_waits_for_every_carried_ring_and_a_held_seek() {
     continued.render(AFTER);
     assert_eq!(first_divergence(&swapped, &continued), None, "withheld");
 
-    // A seek anchored two blocks on, inside the window `[S + O, S + O + P + q)`.
-    let seek = |stream: &mut Stream| {
-        let anchor = stream.read() + 2 * QUANTUM;
+    // A seek anchored two blocks past the running plan's read, inside the window
+    // `[S + O, S + O + P + q)`. A source-read sample `X` is heard at render sample `X` on either
+    // plan (`O` ahead, then `O` late in the claim lines), so A continued takes the same anchor;
+    // its feed, `O` behind, is first topped up to the anchor so the old generation has no gap.
+    let seek = |stream: &mut Stream, anchor: u64| {
+        let ahead = stream.feeder.ahead;
+        stream
+            .feeder
+            .top_up(&mut stream.sources, anchor.saturating_sub(ahead));
         stream
             .feeder
             .seek_at(&mut stream.sources, 2, 40 * QUANTUM, anchor);
     };
     let mut swapped = alone(&a, &caps, backend, AHEAD);
     swapped.render(BEFORE);
-    seek(&mut swapped);
     swapped.grow(&b, &CONFIG);
+    swapped.render(AFTER);
+    assert_eq!(swapped.offset, LEAD);
+    let anchor = swapped.read() + 2 * QUANTUM;
+    seek(&mut swapped, anchor);
+    swapped.grow(&c, &CONFIG);
     swapped.render(AFTER);
     assert_eq!(
         swapped.swap_blocks(),
-        [BEFORE + 3],
+        [BEFORE, BEFORE + AFTER + 3],
         "adopted at the block after the seek applied"
     );
     let mut continued = alone(&a, &caps, backend, AHEAD);
-    continued.render(BEFORE);
-    seek(&mut continued);
+    continued.render(BEFORE + AFTER);
+    seek(&mut continued, anchor);
     continued.render(AFTER);
     assert_eq!(first_divergence(&swapped, &continued), None, "held seek");
 }

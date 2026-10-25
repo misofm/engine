@@ -6022,6 +6022,28 @@ fn run_prime(
         }
     }
 }
+
+/// A warm plan's pending prime (#1355 D5), for its first block's source-read sample
+/// `source_read_sample` (`S + O`, its offset including its lead): the prime starts its lead
+/// before it, where its predecessor would have read, so the plan's sources then begin at
+/// `S + O`. Run once, by the plan's first block or, for a plan displaced before that block, by its
+/// successor's carry (#1355 MAJOR-1).
+#[allow(clippy::too_many_arguments)]
+fn replay_prime(
+    runtime: &mut runtime::Runtime,
+    set: &mut GraphPreparedSourceSet,
+    moves: &[(u32, u32)],
+    blocks: u32,
+    source_read_sample: u64,
+    claims: &[ClaimFillRow],
+    sidechains: &mut [SidechainFillRow],
+) {
+    let lead = u64::from(blocks) * u64::from(set.envelope.quantum.0);
+    match source_read_sample.checked_sub(lead) {
+        Some(first) => run_prime(runtime, set, moves, blocks, first, claims, sidechains),
+        None => debug_assert!(false, "#1355 D1: a warm offset includes its lead"),
+    }
+}
 // REALTIME_POLICY_END
 
 /// Install the live-send section of the hand-over this graph plan runs when it displaces its
@@ -6625,8 +6647,12 @@ impl PreparedPlanExecutor for GraphExecutor {
     ///
     /// A warm successor ([`install_prime_carry`], #1355 D5) also pushes the predecessor's pending
     /// words into the lines its prime fills, and its first block replays the prime.
-    fn adopt_predecessor(&mut self, predecessor: &mut dyn PreparedPlanExecutor) -> CarryOutcome {
-        let outcome = self.take_predecessor(predecessor);
+    fn adopt_predecessor(
+        &mut self,
+        predecessor: &mut dyn PreparedPlanExecutor,
+        block_start: u64,
+    ) -> CarryOutcome {
+        let outcome = self.take_predecessor(predecessor, block_start);
         // #1355 D5: a warm successor is prepared against the plan render runs, so its carry, and
         // with it its prime, cannot be refused.
         debug_assert!(
@@ -6781,19 +6807,15 @@ impl PreparedPlanExecutor for GraphExecutor {
             // its predecessor would have read (`S + O`, its own offset less the lead), so its
             // sources then begin at `S + O + P`.
             if core::mem::take(prime_pending) {
-                let lead = u64::from(*prime_blocks) * u64::from(source_set.envelope.quantum.0);
-                match source_read_sample.checked_sub(lead) {
-                    Some(first) => run_prime(
-                        runtime,
-                        source_set,
-                        carry.as_ref().map_or(&[][..], |program| &program.sources),
-                        *prime_blocks,
-                        first,
-                        prime_claims,
-                        prime_sidechains,
-                    ),
-                    None => debug_assert!(false, "#1355 D1: a warm offset includes its lead"),
-                }
+                replay_prime(
+                    runtime,
+                    source_set,
+                    carry.as_ref().map_or(&[][..], |program| &program.sources),
+                    *prime_blocks,
+                    source_read_sample,
+                    prime_claims,
+                    prime_sidechains,
+                );
             }
             if let Err(error) =
                 source_set.begin_block(source_read_sample, source_set.envelope.quantum.0)
@@ -7014,7 +7036,11 @@ impl PreparedPlanExecutor for GraphExecutor {
 impl GraphExecutor {
     // REALTIME_POLICY_BEGIN
     /// The hand-over [`PreparedPlanExecutor::adopt_predecessor`] documents.
-    fn take_predecessor(&mut self, predecessor: &mut dyn PreparedPlanExecutor) -> CarryOutcome {
+    fn take_predecessor(
+        &mut self,
+        predecessor: &mut dyn PreparedPlanExecutor,
+        block_start: u64,
+    ) -> CarryOutcome {
         let Some(program) = self.carry.as_ref() else {
             return CarryOutcome::NotRequested;
         };
@@ -7048,6 +7074,28 @@ impl GraphExecutor {
                 &mut checks.slots,
                 LiveSnapshot::ALL,
                 lengths,
+            );
+        }
+        // #1355 MAJOR-1: likewise a warm predecessor displaced before its first block still owes
+        // its prime. Replay it at this block, the one it would have rendered first, before its
+        // lines and sources are read or taken, so this plan carries the lines and ring positions
+        // that block would have left. (The source set's absence leaves nothing to prime, as in
+        // render.)
+        if core::mem::take(&mut predecessor.prime_pending)
+            && let Some(set) = predecessor.source_set.as_mut()
+            && let Some(source_read_sample) = block_start.checked_add(predecessor.source_read_offset)
+        {
+            replay_prime(
+                &mut predecessor.runtime,
+                set,
+                predecessor
+                    .carry
+                    .as_ref()
+                    .map_or(&[][..], |program| &program.sources),
+                predecessor.prime_blocks,
+                source_read_sample,
+                &predecessor.prime_claims,
+                &mut predecessor.prime_sidechains,
             );
         }
         // Issue #1276: every builtin-input move must resolve before anything moves, so a refused
