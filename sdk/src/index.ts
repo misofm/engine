@@ -21,6 +21,7 @@ export type {
 export type {
   SpectrumCollection,
   SpectrumCollectionEntry,
+  SpectrumConfigured,
   SpectrumLimits,
   SpectrumQuery,
   SpectrumResult,

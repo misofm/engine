@@ -43,6 +43,30 @@ export interface SpectrumCollection {
   readonly maximumCaptureBytes: number;
 }
 
+/** The stream hops a spectrum configuration may name, in frames. */
+export type SpectrumHopFrames = 256 | 512 | 1024 | 2048;
+
+/** What `configureSpectrum` sends beside the taps. */
+export interface SpectrumConfigureOptions {
+  /** The explicit stream hop in frames; absent for the session shape's default cadence. */
+  readonly hopFrames?: SpectrumHopFrames;
+}
+
+/**
+ * The core's answer to `configureSpectrum` (`SPECTRUM_CONFIGURE`, #1594 D3; #1596 D5). The new
+ * taps are in effect once a spectrum reply reports `adoptedEpoch === configuredEpoch`.
+ */
+export interface SpectrumConfigured {
+  /** The epoch of the configuration now set. */
+  readonly configuredEpoch: bigint;
+  /** The epoch of the configuration the running plan carries. */
+  readonly adoptedEpoch: bigint;
+  /** Whether the command prepared a replacement plan: it is adopted at a later render block. */
+  readonly rebuild: boolean;
+  /** The epoch of that plan, present exactly when `rebuild` is true. */
+  readonly planEpoch?: bigint;
+}
+
 /** The owned result of one completed spectrum query. */
 export interface SpectrumResult {
   readonly target: SpectrumTarget;
@@ -56,6 +80,10 @@ export interface SpectrumResult {
   readonly rightDb?: Float32Array;
   readonly capturedSample: bigint;
   readonly endSample: bigint;
+  /**
+   * The host-scoped monotonic token of a one-shot window, from 1. A stream reply carries no token
+   * (#1595 D3), so a stream result reports its window count in the capture epoch (`windows`).
+   */
   readonly snapshotToken: bigint;
   /** True when any source in the graph underran during this captured window. */
   readonly graphSourceUnderrun: boolean;
@@ -173,11 +201,6 @@ function channelValue(channel: Channel | undefined): number {
   throw new MisoUsageError("channels must be left, right, or both");
 }
 
-/** Numeric channel mask used by the generated host bridge. Internal SDK transport helper. */
-export function spectrumChannelsRaw(channel: Channel | undefined): number {
-  return channelValue(channel);
-}
-
 function channelName(raw: number): Channel {
   if (raw === value(CHANNELS, "left")) return "left";
   if (raw === value(CHANNELS, "right")) return "right";
@@ -200,11 +223,6 @@ function targetValue(target: SpectrumTarget): number {
   }
 }
 
-/** Numeric target kind used by the generated host bridge. Internal SDK transport helper. */
-export function spectrumTargetRaw(target: SpectrumTarget): number {
-  return targetValue(target);
-}
-
 function targetId(target: SpectrumTarget): string {
   if (target === null || typeof target !== "object") {
     throw new MisoUsageError("spectrum target must be an object");
@@ -225,11 +243,6 @@ function targetId(target: SpectrumTarget): string {
     throw new MisoUsageError("spectrum target identity must be a nonempty string");
   }
   return id;
-}
-
-/** Stable target identity used by the generated host bridge. Internal SDK transport helper. */
-export function spectrumTargetId(target: SpectrumTarget): string {
-  return targetId(target);
 }
 
 function copyTarget(target: SpectrumTarget): SpectrumTarget {
