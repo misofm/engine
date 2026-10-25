@@ -3654,6 +3654,66 @@ mod tests {
         (provider, clock)
     }
 
+    /// #1578 D3: a strip `RESPONSE_GET` meets the core's checks, the session-rate rule, the
+    /// strip and its event bound before it arms; each refusal arms nothing, so the first request
+    /// that passes is tag 1; that one answers its tag, and the next, while the capture is in
+    /// flight, is `BACKPRESSURE` `response.capture.pending`.
+    ///
+    /// Test value: red if a refused strip request arms a capture (leaving a tag no event will
+    /// answer), if the event bound is not checked against `maximum_reply_bytes` before arming, or if
+    /// a refusal maps to the wrong status or code.
+    #[test]
+    fn a_strip_request_is_checked_before_it_arms() {
+        let model = nine_track();
+        let (mut provider, _clock) = provider_of(&model);
+        let strip = |strip: &str| ResponseGetRequest {
+            target: ResponseTarget::Strip(strip.to_owned()),
+            ..response_request()
+        };
+        let mut refusal = |request: &ResponseGetRequest| {
+            let error = provider.response_get(&model, request).expect_err("refused");
+            (error.status, error.code)
+        };
+        let mut points = strip("eq0");
+        points.points = 1;
+        assert_eq!(
+            refusal(&points),
+            (StatusCode::InvalidField, "response.points")
+        );
+        let mut rate = strip("eq0");
+        rate.sample_rate_hz = Some(RATE);
+        assert_eq!(
+            refusal(&rate),
+            (StatusCode::InvalidField, "response.rate.session")
+        );
+        assert_eq!(
+            refusal(&strip("nope")),
+            (StatusCode::NotFound, "control.address.unknown")
+        );
+        let mut small = strip("eq0");
+        let owners = crate::response_capture::strip_owners(&model, "eq0").expect("eq0");
+        let bound = protocol::response_ready_encoded_bound(64, ParameterChannel::Both, owners)
+            .expect("a bound");
+        small.maximum_reply_bytes = Some(u32::try_from(bound - 1).expect("bound"));
+        assert_eq!(
+            refusal(&small),
+            (StatusCode::LimitExceeded, "response.reply_too_large")
+        );
+        small.maximum_reply_bytes = Some(u32::try_from(bound).expect("bound"));
+        assert_eq!(
+            provider.response_get(&model, &small),
+            Ok(ResponseResult::Tag(1)),
+            "a bound that fits arms tag 1: no refusal armed"
+        );
+        let error = provider
+            .response_get(&model, &strip("eq1"))
+            .expect_err("pending");
+        assert_eq!(
+            (error.status, error.code),
+            (StatusCode::Backpressure, "response.capture.pending")
+        );
+    }
+
     fn page(
         provider: &mut SessionControlProvider,
         epoch: u64,

@@ -1,0 +1,631 @@
+//! #1578: a strip `RESPONSE_GET` through the exported C ABI answers a tag, and the strip's curve
+//! arrives as one `RESPONSE_READY` event through `miso_engine_v1_dequeue_event`.
+//!
+//! The session is the nine-track EQ fixture cut to two tracks at 48 kHz (1 MiB frame limit):
+//! `eq0` has asymmetric input filters, the EQ console slot `eq`, an EQ insert and a compressor
+//! insert (no linear response); `eq1` is the fixture's plain strip.
+
+#![allow(unsafe_code)]
+
+use core::ptr;
+
+use capi::*;
+use host_core::{
+    HostPrepareCaps, HostShapePolicy, ResponseChannels, ResponsePreviewGrid,
+    ResponseSnapshotCollector, TrackResponse, compile_host_session, compose_track_response,
+    prepare_host_runtime,
+};
+use protocol::{
+    BackpressureQueueKind, CommandPayload, DecodeScratch, DecodedEventPayload,
+    DecodedSuccessResponsePayload, DecodedTypedResponseFrame, ExpectedRevision, ParameterChannel,
+    ProtocolCodec, RequestId, ResponseGetRequest, ResponseGrid, ResponseMemberKind,
+    ResponseMemberSection, ResponseReady, ResponseReadyOutcome, ResponseResult, ResponseTarget,
+    SessionEdit, SessionRevision, StatusCode, TypedCommandFrame,
+};
+use session::{Effect, EffectIdentity, EffectQuality, LinkMode, SidechainDeclaration, StableId};
+
+const SESSION: &str = include_str!("../../../fixtures/session/v1/parametric-eq-nine-track.json");
+const FRAME_BYTES: u64 = 1 << 20;
+const QUANTUM: usize = 128;
+const POINTS: u32 = 64;
+/// More blocks than any adoption of these edits takes.
+const BLOCKS: usize = 256;
+
+fn sid(text: &str) -> StableId {
+    StableId::parse(text).expect("stable ID")
+}
+
+fn effect(name: &str, effect_id: &str, params: Vec<session::EffectParam>) -> Effect {
+    Effect {
+        id: sid(name),
+        identity: EffectIdentity::Native {
+            effect_id: sid(effect_id),
+        },
+        quality: EffectQuality::Normal,
+        bypass: false,
+        link_mode: LinkMode::DualMono,
+        params,
+        sidechain: SidechainDeclaration::None,
+    }
+}
+
+/// The two-track session and its revision.
+fn document() -> (String, u64) {
+    let mut model = session::parse_session_json(SESSION).expect("fixture");
+    model.tracks.truncate(2);
+    let kept: Vec<_> = model.tracks.iter().map(|track| track.id.clone()).collect();
+    model.routes.retain(|route| {
+        matches!(&route.source, session::RouteSource::Track { track_id, .. } if kept.contains(track_id))
+    });
+    let eq_params = model.tracks[0].console[0].params.clone();
+    let track = &mut model.tracks[0];
+    track.builtins.left.hpf_hz = 80.0;
+    track.builtins.left.lpf_hz = 12_000.0;
+    track.builtins.right.hpf_hz = 160.0;
+    track.builtins.right.lpf_hz = 6_000.0;
+    track.inserts.effects = vec![
+        effect("eq-insert", "miso.parametric-eq", eq_params),
+        effect("comp", "miso.compressor", Vec::new()),
+    ];
+    (
+        session::canonical_session_json(&model).expect("canonical"),
+        model.revision,
+    )
+}
+
+fn limits() -> CompileLimits {
+    CompileLimits {
+        struct_size: COMPILE_LIMITS_SIZE,
+        source_ring_frames: 1_024,
+        maximum_automation_spans_per_block: 128,
+        reserved0: 0,
+        maximum_document_bytes: 1_000_000,
+        maximum_diagnostic_bytes: 4_096,
+        maximum_tracks: 100,
+        maximum_sources: 100,
+        maximum_routes: 100,
+        maximum_effects: 100,
+        maximum_graph_session_plus_plan_bytes: 100_000_000,
+        maximum_source_total_bytes: 10_000_000,
+        maximum_source_overhead_bytes: 10_000_000,
+        maximum_effect_state_bytes: 100_000_000,
+        maximum_effect_scratch_bytes: 100_000_000,
+        maximum_builtin_retained_bytes: 100_000_000,
+        maximum_capi_retained_bytes: 1 << 30,
+        maximum_named_allocation_bytes: 1 << 30,
+        maximum_meter_streams: 4_096,
+        maximum_meter_items: 1 << 20,
+        maximum_meter_bytes: 1 << 26,
+        maximum_control_frame_bytes: FRAME_BYTES,
+        maximum_replay_bytes: FRAME_BYTES * 16,
+        maximum_replay_entries: 64,
+        maximum_submixes: 0,
+        maximum_vcas: 0,
+        reserved: [0; 2],
+    }
+}
+
+/// What one submitted command answered.
+#[derive(Debug, PartialEq)]
+enum Reply {
+    Tag(u64),
+    Refused {
+        status: StatusCode,
+        code: String,
+        backpressure: Option<protocol::Backpressure>,
+    },
+    Other,
+}
+
+/// One compiled session, its plan, and the host's clock.
+struct Host {
+    session: *mut Session,
+    plan: *mut Plan,
+    next_request: u64,
+    revision: u64,
+    at: u64,
+}
+
+impl Host {
+    fn new(document: &str, revision: u64) -> Self {
+        let config = EngineConfig {
+            struct_size: ENGINE_CONFIG_SIZE,
+            abi_version: ABI_VERSION,
+            reserved: [0; 4],
+        };
+        let mut engine = ptr::null_mut();
+        let mut session = ptr::null_mut();
+        let mut plan = ptr::null_mut();
+        let mut storage = [0_u8; 4_096];
+        let mut diagnostics = BytesOut {
+            struct_size: BYTES_OUT_SIZE,
+            reserved0: 0,
+            data: storage.as_mut_ptr(),
+            capacity_bytes: storage.len() as u64,
+            required_bytes: 0,
+        };
+        let compile_limits = limits();
+        // SAFETY: Every descriptor and output location remains live for the complete call.
+        unsafe {
+            assert_eq!(
+                miso_engine_v1_engine_create(&config, &mut engine),
+                RESULT_OK
+            );
+            assert_eq!(
+                miso_engine_v1_compile_session(
+                    engine,
+                    document.as_ptr(),
+                    document.len() as u64,
+                    &compile_limits,
+                    &mut diagnostics,
+                    &mut session,
+                    &mut plan,
+                ),
+                RESULT_OK,
+                "{}",
+                String::from_utf8_lossy(&storage[..diagnostics.required_bytes as usize])
+            );
+            miso_engine_v1_engine_destroy(engine);
+        }
+        Self {
+            session,
+            plan,
+            next_request: 1,
+            revision,
+            at: 0,
+        }
+    }
+
+    fn frame(&mut self, expected: ExpectedRevision, payload: CommandPayload<'_>) -> Vec<u8> {
+        let request_id = RequestId::new(self.next_request).expect("request ID");
+        self.next_request += 1;
+        let mut bytes = vec![0_u8; 1 << 16];
+        let length = ProtocolCodec::default()
+            .encode_command_frame_into(
+                &TypedCommandFrame {
+                    request_id,
+                    expected_revision: expected,
+                    payload,
+                },
+                &mut bytes,
+            )
+            .expect("command frame");
+        bytes.truncate(length);
+        bytes
+    }
+
+    fn submit(&self, request: &[u8]) -> Vec<u8> {
+        let mut response = vec![0_u8; FRAME_BYTES as usize];
+        let mut output = BytesOut {
+            struct_size: BYTES_OUT_SIZE,
+            reserved0: 0,
+            data: response.as_mut_ptr(),
+            capacity_bytes: response.len() as u64,
+            required_bytes: 0,
+        };
+        // SAFETY: The session is live and used by this thread alone; both buffers are complete.
+        let code = unsafe {
+            miso_engine_v1_submit_command(
+                self.session,
+                request.as_ptr(),
+                request.len() as u64,
+                &mut output,
+            )
+        };
+        assert_eq!(code, RESULT_OK);
+        response.truncate(output.required_bytes as usize);
+        response
+    }
+
+    /// A strip `RESPONSE_GET` of `strip`: its frame and its reply.
+    fn ask(&mut self, strip: &str) -> (Vec<u8>, Reply) {
+        let request = strip_request(strip);
+        let bytes = self.frame(ExpectedRevision::Any, CommandPayload::ResponseGet(&request));
+        let reply = decode(&self.submit(&bytes));
+        (bytes, reply)
+    }
+
+    /// Commit `edits` as one transaction; `false` when it is refused.
+    fn transact(&mut self, edits: &[SessionEdit]) -> bool {
+        let bytes = self.frame(
+            ExpectedRevision::Exact(SessionRevision(self.revision)),
+            CommandPayload::SessionTransactionApply(edits),
+        );
+        let response = self.submit(&bytes);
+        let mut fields = [0_u16; 1024];
+        match ProtocolCodec::default()
+            .decode_typed_response(&response, &mut DecodeScratch::new(&mut fields))
+            .expect("a transaction response")
+        {
+            DecodedTypedResponseFrame::Success { .. } => {
+                self.revision += 1;
+                true
+            }
+            DecodedTypedResponseFrame::NonOk { header, .. } => {
+                assert_eq!(header.status, StatusCode::Backpressure, "only backpressure");
+                false
+            }
+        }
+    }
+
+    fn render(&mut self) {
+        let mut pcm = [0.0_f32; QUANTUM * 2];
+        let output = PlanarOutput {
+            struct_size: PLANAR_OUTPUT_SIZE,
+            channels: 2,
+            samples: pcm.as_mut_ptr(),
+            sample_capacity: pcm.len() as u64,
+            frames: QUANTUM as u32,
+            plane_stride_samples: QUANTUM as u32,
+            reserved: [0; 2],
+        };
+        // SAFETY: `plan` is live and `output` describes `pcm`.
+        let code = unsafe { miso_engine_v1_render_f32_planar(self.plan, self.at, &output) };
+        assert_eq!(code, RESULT_OK);
+        self.at += QUANTUM as u64;
+        // SAFETY: `session` is live and used by this thread alone.
+        assert_eq!(unsafe { miso_engine_v1_service(self.session) }, RESULT_OK);
+    }
+
+    /// Drain the reliable lane: the `RESPONSE_READY` events it held, in order, and the number of
+    /// other events.
+    fn drain(&mut self) -> (Vec<ResponseReady>, usize) {
+        let mut storage = vec![0_u8; FRAME_BYTES as usize];
+        let mut ready = Vec::new();
+        let mut others = 0;
+        loop {
+            let mut event = BytesOut {
+                struct_size: BYTES_OUT_SIZE,
+                reserved0: 0,
+                data: storage.as_mut_ptr(),
+                capacity_bytes: storage.len() as u64,
+                required_bytes: 0,
+            };
+            // SAFETY: `session` is live and used by this thread alone.
+            let code = unsafe {
+                miso_engine_v1_dequeue_event(self.session, EVENT_LANE_RELIABLE, &mut event)
+            };
+            assert_eq!(code, RESULT_OK);
+            if event.required_bytes == 0 {
+                return (ready, others);
+            }
+            let mut fields = [0_u16; 1024];
+            let decoded = ProtocolCodec::default()
+                .decode_typed_event(
+                    &storage[..event.required_bytes as usize],
+                    &mut DecodeScratch::new(&mut fields),
+                )
+                .expect("a reliable event");
+            match decoded.payload {
+                DecodedEventPayload::ResponseReady(value) => ready.push(value),
+                _ => others += 1,
+            }
+        }
+    }
+
+    /// Render and service up to `blocks` blocks, draining after each; every `RESPONSE_READY`.
+    fn run(&mut self, blocks: usize) -> Vec<ResponseReady> {
+        let mut ready = Vec::new();
+        for _ in 0..blocks {
+            self.render();
+            ready.extend(self.drain().0);
+        }
+        ready
+    }
+}
+
+impl Drop for Host {
+    fn drop(&mut self) {
+        // SAFETY: These are the exact live handles `miso_engine_v1_compile_session` returned,
+        // destroyed once.
+        unsafe {
+            miso_engine_v1_session_destroy(self.session);
+            miso_engine_v1_plan_destroy(self.plan);
+        }
+    }
+}
+
+fn strip_request(strip: &str) -> ResponseGetRequest {
+    ResponseGetRequest {
+        target: ResponseTarget::Strip(strip.to_owned()),
+        grid: ResponseGrid::Logarithmic,
+        points: POINTS,
+        minimum_hz: 20.0,
+        maximum_hz: 20_000.0,
+        channels: ParameterChannel::Both,
+        sections: false,
+        overrides: Vec::new(),
+        configuration_id: None,
+        sample_rate_hz: None,
+        quantum_frames: None,
+        maximum_prepared_bytes: None,
+        maximum_state_bytes: None,
+        maximum_scratch_bytes: None,
+        maximum_automation_spans: None,
+        maximum_reply_bytes: None,
+    }
+}
+
+fn decode(response: &[u8]) -> Reply {
+    let mut fields = [0_u16; 1024];
+    match ProtocolCodec::default()
+        .decode_typed_response(response, &mut DecodeScratch::new(&mut fields))
+        .expect("a typed response")
+    {
+        DecodedTypedResponseFrame::Success {
+            payload: DecodedSuccessResponsePayload::ResponseResult(ResponseResult::Tag(tag)),
+            ..
+        } => Reply::Tag(tag),
+        DecodedTypedResponseFrame::NonOk { header, payload } => Reply::Refused {
+            status: header.status,
+            code: payload.diagnostics[0].code.clone(),
+            backpressure: payload.backpressure,
+        },
+        DecodedTypedResponseFrame::Success { .. } => Reply::Other,
+    }
+}
+
+/// The core's own composition of `strip` from a host prepared from `document`.
+fn composed(document: &str, strip: &str) -> TrackResponse {
+    let caps = HostPrepareCaps {
+        shape: HostShapePolicy::AnyLaunchRate,
+        source_ring_frames: 1_024,
+        maximum_automation_spans_per_block: 128,
+        maximum_tracks: 16,
+        maximum_submixes: 16,
+        maximum_vcas: 16,
+        maximum_vca_reach_pairs: u64::MAX,
+        maximum_sources: 16,
+        maximum_routes: 16,
+        maximum_effects: 16,
+        maximum_graph_session_plus_plan_bytes: 1_000_000_000,
+        maximum_source_total_bytes: 100_000_000,
+        maximum_source_overhead_bytes: 100_000_000,
+        maximum_effect_state_bytes: 1_000_000_000,
+        maximum_effect_scratch_bytes: 1_000_000_000,
+        maximum_builtin_retained_bytes: 1_000_000_000,
+        maximum_named_allocation_bytes: 1_000_000_000,
+        maximum_meter_streams: 64,
+        maximum_meter_items: 1 << 16,
+        maximum_meter_bytes: 1 << 24,
+    };
+    let compiled = compile_host_session(document, &caps).expect("compile");
+    let mut host = prepare_host_runtime(&compiled, &caps).expect("prepare");
+    let mut collector = ResponseSnapshotCollector::new(
+        48_000,
+        8,
+        effect_contract::RESPONSE_SNAPSHOT_MAXIMUM_SECTIONS,
+        127,
+    );
+    let capture = host
+        .copy_response_snapshot(strip, &mut collector)
+        .expect("a capture");
+    compose_track_response(
+        strip,
+        &collector.finish(capture),
+        ResponsePreviewGrid::Logarithmic {
+            points: POINTS as usize,
+            minimum_hz: 20.0,
+            maximum_hz: 20_000.0,
+        },
+        ResponseChannels::Both,
+    )
+    .expect("a composition")
+}
+
+fn bits(values: &[f32]) -> Vec<u32> {
+    values.iter().map(|value| value.to_bits()).collect()
+}
+
+fn add_insert(track: &str, name: &str, position: u32) -> SessionEdit {
+    SessionEdit::PutTrackEffect {
+        track_id: sid(track),
+        rack_name: session::RackName::Inserts,
+        final_position: position,
+        effect: effect(name, "miso.compressor", Vec::new()),
+    }
+}
+
+/// Gates 1 and 3, with the acked-batch lens across a rebuild and a supersession: a strip request
+/// answers tag 1 and no event before a render; after one render and `service`, exactly one
+/// `RESPONSE_READY` with tag 1, outcome `OK`, four members in signal order (builtins, the console
+/// slot, the EQ insert, the compressor with kind 3) and curves bit-equal to the core's composition
+/// of a host prepared from the same document. A request armed before a rebuild that adds an insert
+/// gets one event, from the plan that holds it. A request on `eq1` armed on a pending rebuild that
+/// a removal of `eq1` then supersedes gets one event, `NOT_FOUND` `response.strip.removed`. No tag
+/// gets a second event.
+///
+/// Test value: red if the C ABI's curve or owner list differs from the core's composition (the
+/// event's mapping of D5 included), if the event arrives before the plan has rendered, if a request
+/// whose strip a superseding edit removed is never answered, or if a rebuild leaves a tag without
+/// its event or with two.
+#[test]
+fn end_to_end_then_removed_strip() {
+    let (document, revision) = document();
+    let mut host = Host::new(&document, revision);
+    assert_eq!(host.ask("eq0").1, Reply::Tag(1));
+    assert_eq!(host.drain().0, Vec::new(), "no event before a render");
+
+    let ready = host.run(1);
+    assert_eq!(ready.len(), 1, "one event after one render and service");
+    let event = &ready[0];
+    assert_eq!((event.request_tag, &*event.strip_id), (1, "eq0"));
+    let ResponseReadyOutcome::Ready(capture) = &event.outcome else {
+        panic!("a capture: {:?}", event.outcome);
+    };
+    let expected = composed(&document, "eq0");
+    assert_eq!(
+        (capture.sample_rate_hz, capture.floor_db.to_bits()),
+        (expected.sample_rate_hz, expected.floor_db.to_bits())
+    );
+    assert_eq!(
+        bits(&capture.frequencies_hz),
+        bits(&expected.frequencies_hz)
+    );
+    assert_eq!(
+        capture.left_db.as_deref().map(bits),
+        expected.left_db.as_deref().map(bits)
+    );
+    assert_eq!(
+        capture.right_db.as_deref().map(bits),
+        expected.right_db.as_deref().map(bits)
+    );
+    assert_ne!(
+        capture.left_db, capture.right_db,
+        "the asymmetric input filters reach both sides"
+    );
+    assert_eq!(capture.excluded_count, expected.excluded_count);
+    let sections: Vec<_> = capture
+        .members
+        .iter()
+        .map(|member| (member.section.clone(), member.kind))
+        .collect();
+    assert_eq!(
+        sections,
+        vec![
+            (
+                ResponseMemberSection::Builtins,
+                ResponseMemberKind::InputFilters
+            ),
+            (
+                ResponseMemberSection::Console("eq".to_owned()),
+                ResponseMemberKind::ParametricEq
+            ),
+            (
+                ResponseMemberSection::Inserts("eq-insert".to_owned()),
+                ResponseMemberKind::ParametricEq
+            ),
+            (
+                ResponseMemberSection::Inserts("comp".to_owned()),
+                ResponseMemberKind::Unavailable
+            ),
+        ]
+    );
+    for (member, core) in capture.members.iter().zip(&expected.members) {
+        assert_eq!(
+            (
+                &*member.effect,
+                member.bypassed,
+                member.enabled_left,
+                member.enabled_right,
+                member.section_count
+            ),
+            (
+                &*core.native_id,
+                core.bypassed,
+                core.enabled_left,
+                core.enabled_right,
+                core.section_count
+            )
+        );
+    }
+    assert_eq!(host.run(4), Vec::new(), "one event per tag");
+
+    // Armed before a rebuild that adds an insert: answered once, from the plan that holds it.
+    assert_eq!(host.ask("eq0").1, Reply::Tag(2));
+    assert!(host.transact(&[add_insert("eq0", "comp-late", 2)]));
+    let ready = host.run(BLOCKS);
+    assert_eq!(ready.len(), 1, "one event across the rebuild");
+    let ResponseReadyOutcome::Ready(capture) = &ready[0].outcome else {
+        panic!("a capture: {:?}", ready[0].outcome);
+    };
+    assert_eq!(ready[0].request_tag, 2);
+    assert!(
+        capture
+            .members
+            .iter()
+            .any(|member| member.section == ResponseMemberSection::Inserts("comp-late".into())),
+        "the capture is the rebuilt plan's"
+    );
+
+    // Armed on a pending rebuild that a removal of the strip supersedes.
+    assert!(host.transact(&[add_insert("eq1", "comp-1", 0)]));
+    assert_eq!(host.ask("eq1").1, Reply::Tag(3));
+    assert!(host.transact(&[
+        SessionEdit::RemoveRoute {
+            route_id: sid("eq1-main"),
+        },
+        SessionEdit::RemoveTrack {
+            track_id: sid("eq1"),
+        },
+    ]));
+    let ready = host.run(BLOCKS);
+    assert_eq!(ready.len(), 1, "one event for the removed strip");
+    assert_eq!(
+        (ready[0].request_tag, &*ready[0].strip_id, &ready[0].outcome),
+        (
+            3,
+            "eq1",
+            &ResponseReadyOutcome::Refused {
+                status: StatusCode::NotFound,
+                diagnostic: "response.strip.removed".to_owned(),
+            }
+        )
+    );
+}
+
+/// Gates 2 and 5: while a capture is in flight a second strip request is `BACKPRESSURE`
+/// `response.capture.pending` with the capture-slot record; with the reliable event queue full of
+/// session events the host has not dequeued, the completed capture is held across renders and
+/// services, and once the host drains the queue exactly one `RESPONSE_READY` arrives. The same
+/// request ID and bytes then replay the same tag and produce no second event, and the next request
+/// is tag 2 (the replay armed nothing; the delivered capture was released). The session is
+/// destroyed with a capture in flight.
+///
+/// Test value: red if an acked request can lose its event (a full queue drops it), two captures
+/// run at once, a replay arms a second capture, or a delivered capture is never released.
+#[test]
+fn one_in_flight_none_lost_and_replay() {
+    let (document, revision) = document();
+    let mut host = Host::new(&document, revision);
+    let (first, reply) = host.ask("eq0");
+    assert_eq!(reply, Reply::Tag(1));
+    let refused = Reply::Refused {
+        status: StatusCode::Backpressure,
+        code: "response.capture.pending".to_owned(),
+        backpressure: Some(protocol::Backpressure {
+            queue_kind: BackpressureQueueKind::ResponseCapture,
+            capacity: 1,
+            occupancy: 1,
+            requested_items: 1,
+            generation: None,
+            retry_boundary: None,
+            requested_bytes: None,
+            available_bytes: None,
+        }),
+    };
+    assert_eq!(host.ask("eq1").1, refused, "one capture in flight");
+
+    // Fill the reliable event queue with commits the host does not dequeue.
+    let mut commits = 0;
+    while host.transact(&[SessionEdit::SetSessionId {
+        session_id: sid(&format!("full-{commits}")),
+    }]) {
+        commits += 1;
+        assert!(commits < 64, "the reliable event queue fills");
+    }
+    assert!(commits > 0, "the queue took at least one commit");
+    for _ in 0..4 {
+        host.render();
+    }
+    assert_eq!(
+        host.ask("eq1").1,
+        refused,
+        "the held result is still in flight"
+    );
+    let (ready, others) = host.drain();
+    assert_eq!(others, commits, "every commit's event, none lost");
+    assert_eq!(
+        ready.len(),
+        1,
+        "the held capture arrives once the queue drains"
+    );
+    assert_eq!(ready[0].request_tag, 1);
+    assert!(matches!(ready[0].outcome, ResponseReadyOutcome::Ready(_)));
+
+    // Gate 5: the same ID and bytes replay tag 1 and arm nothing.
+    assert_eq!(decode(&host.submit(&first)), Reply::Tag(1));
+    assert_eq!(host.run(4), Vec::new(), "a replay arms nothing");
+    assert_eq!(host.ask("eq1").1, Reply::Tag(2), "released after delivery");
+    // Destroyed with tag 2 in flight: nothing more is owed by a session that no longer exists.
+}
