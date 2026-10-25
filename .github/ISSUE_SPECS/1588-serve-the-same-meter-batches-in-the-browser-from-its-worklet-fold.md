@@ -171,3 +171,38 @@ and #1534 gate 3's worklet commands.
   booted with a meter window (red with the constant flipped early). The render-half mode runs
   today through the control plane's own test adapter (`rendered_meters`).
 - **Bytes.** No rendered bit, lease-frame byte, browser reply or schema hash moved.
+- **#1588b attempt 1 (2026-10-25), browser half landed.** `WebAdapter::METER_DELIVERY` is on in
+  the commit that lands the push. Each `PlanShape` carries its plan's ring producer
+  (`PlanMeterRing`, taken at boot and at each published rebuild), so the adoption block swaps it
+  with the tables; the adoption fills `MeterFrame::plan_epoch` (`set_plan_epoch`), and the push
+  debug-asserts it against the ring's epoch. `ReadyOwnership` holds the `MeterLevel` and the word
+  it last applied; the lease export sets `LEASE` and applies the word at once, so a lease alone
+  moves the level exactly as before (gate 3: #1582's tests unchanged).
+- **D1 placement amended (implementer, for review).** The render half applies the word before
+  each block (`render_next`, from the block's first sample), not at the poll. Reason: the C ABI's
+  requested gate applies before the next block; a poll-time application is one block late, so a
+  configure on a grid boundary opens a window later and the batches differ (gate 1 red, mutant
+  recorded). The lease export still applies at once.
+- **Telemetry alone folds in the render export.** The worklet polls only under its lease
+  (`process()`: `if (this.meterLease) this.postMeterFrame()`, pinned by
+  `check-web-audioworklet.sh`'s process policy), so with the table alone `render_next` runs the
+  same fold (`poll_meter_delivery`) after its block. No JS or export change.
+- **D5 amended.** Both hosts refuse a gain-reduction entry `meter.gain_reduction.unavailable`
+  until #1587b, so step 5's table is `[{output, peak}, {strip track, peak}]` at period
+  `2 x 12`; the browser leg boots with the default meter window; step 8 renders two batches
+  (48 blocks) and drains after each block. Steps 1 and 5 have no meter exception left.
+- **The shipped artifact's call-graph gate: three edits outside #1588b's paths (root authorized,
+  2026-10-25; landed).**
+  `check-web-audioworklet.sh` is red on this branch: (1) `MeterFrameProducer::publish_frame`
+  (host-core, #1588a) drops the `Box` of its unreachable `try_push` refusal, so the render and
+  `meter_poll` closures reach `__rust_dealloc`; forgetting the refusal removes it; (2) the render
+  export's trap owners gain `MeterDelivery::poll=3`, `MeterDelivery::begin_generation=1` and
+  `MeterFrameProducer::publish_frame=2`, and `meter_poll`'s gains `publish_frame=2`; (3)
+  `INDIRECT_SITES` pins `render_next` at 4 (the inlined fold's downcast pair). With the three
+  edits applied in a scratch tree the gate and `check-sdk-headless.sh` (640 pass) are green.
+  Each admitted site is an engine SPSC `slots[cursor]` bounds check, bounded by
+  `wrap_increment(cursor, slots_len)`; the script comments name each one.
+- **D5 restored after #1587b.** With #1587b on main both hosts serve a gain-reduction entry, so
+  step 5's table is D5's own: `[{output, peak}, {strip track, peak}, {strip track, gain
+  reduction}]`. Step 8 adds a structural rebuild between its first two batches (verifier
+  MINOR-1); #1596a's step 16 continues from step 8's last block.
