@@ -28,3 +28,23 @@ One row per item. Lines are at ad5c7ae86.
 - Every test has a one-sentence test-value answer naming the defect.
 - Item 7: the decision is in the PR body. If (a), the crate and tool still build, and `lattice_oracle` output stays byte-identical to its pre-change output (one-time PR evidence, not a committed test).
 - The qualification `lint` job steps pass on the branch.
+
+## Decision record
+
+- 2026-10-25, root (from the scope note): item 6 is **declined**. The mutant changes only the
+  `word=` index in an error message; Ok/Err is unchanged, so it guards no product behaviour, and a
+  test for it is the test overload the owner ruled against (2026-10-17).
+- 2026-10-25, root: item 7 takes option (a), delete the dead `ExactDecimal` machinery. The engine
+  matches no document text (session values are `f32`); the SDK owns spelling equivalence.
+- 2026-10-25, implementer: item 7 is **not done in attempt 1**. Deleting
+  `lattice_index_for_decimal` also breaks `crates/effect-compiler/tests/parameter_lattice.rs`
+  (eight call sites), which the scope note did not list. Its `member` helper matches
+  `format!("{value}")` against canonical renderings such as `10.000`, so an exact
+  canonical-string match does not replace it, and the pan and rate-keyed cutoff tests there assert
+  the `NearestLatticeValues` refusal brackets. Rewriting them is a test-design change in a crate
+  outside the authorized paths, so it goes back to root.
+- 2026-10-25, implementer, item 3 finding: `apply_session_edit` refuses a same-length order with a
+  duplicated ID (`[a, a]` on `[a, b]`), but only in the reorder loop, after `mem::take` has
+  emptied the rack, so the refused call leaves the rack empty. The store applies edits to a
+  candidate that it discards on refusal (`model.rs` `apply_session_edit(&mut candidate, ...)`), so
+  no committed session changes. The new test asserts the refusal only for that case.
