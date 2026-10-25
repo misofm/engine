@@ -491,9 +491,17 @@ in-place test red with it). Left for root: any other panic inside a rebuild afte
 still drops the withdrawn candidate in a host that catches panics (a panic-safety question for
 #1310's withdraw-then-rebuild order).
 
-**Still red, not fixed.** SDK `structure-evals.mjs` (headless check, 6 failures: lines 347, 394,
-497, 534, browser and headless): they render fixed block counts after a restarting rebuild. The
-headless SDK exposes no applied-revision watermark (`EngineStatus` drops the status struct's
-`watermarkRevision`), so an eval-only helper cannot wait on it; it needs that field exposed in
-`sdk/src/core/boundary.ts`, or root's ruling on another signal.
+**SDK evals.** `sdk/test/structure-evals.mjs` waits a duck-swap out with one bounded helper,
+`runUntil`: it renders until the state the test then asserts holds, within `duckBlocks` blocks
+(`ceil((q + N + L)/q) + ceil(L/q) + 1`, `N` the session's mute ramp, `L` the plan latency measured
+by an impulse, which bounds `C` and `D`), plus the tap's window where a fresh arm must publish.
+
+**An input section the live path refuses is no click.** Every value the live input path refuses
+(trim outside -144..24 dB, a cutoff outside its range, a high-pass at or above its low-pass) is
+refused by the successor's own preparation with the same rules (`builtins::prepare_input_track`,
+the same SVF design), so the rebuild is refused and the running plan plays on. The other branches
+that restart an input section (a rate or control-kind change) are refused by both hosts or occur
+only on a plain plan, which has no duck and no arm. Listing such strips in `restarted_strips()`
+was tried: it changes only plain plans (three host-core tests restart their strips whole, with no
+duck to cover it) and nothing a live host renders, so it was not kept.
 
