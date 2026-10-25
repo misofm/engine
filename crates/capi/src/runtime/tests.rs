@@ -880,7 +880,7 @@ fn a_carried_strip_meter_keeps_its_reader_across_a_c_abi_rebuild() {
 fn ring_zero_derives_from_the_document_and_matches_the_explicit_value() {
     let model = parse_session_json(SESSION).expect("session");
     let derived = host_core::default_source_ring_frames(model.sample_rate_hz, model.quantum_frames);
-    assert_eq!(derived, 5_120);
+    assert_eq!(derived, 7_296);
 
     let mut zero = limits();
     zero.source_ring_frames = 0;

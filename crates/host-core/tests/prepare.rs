@@ -8,8 +8,8 @@ use builtins::{MeterMetricSet, MeterTap};
 use host_core::{
     HostLiveControlRequest, HostLiveLanes, HostMeterRequest, HostPrepareCaps, HostPrepareReport,
     HostShapePolicy, LAUNCH_SAMPLE_RATES, LiveValuesSuperseded, PrepareRejection,
-    SOURCE_STALL_TOLERANCE_MS, SourceControlError, SourceSubmission, compile_host_session,
-    control_table_bytes, default_source_ring_frames, diagnostic_lines, prepare_host_runtime,
+    SourceControlError, SourceSubmission, compile_host_session, control_table_bytes,
+    default_source_ring_frames, diagnostic_lines, prepare_host_runtime,
     prepare_host_runtime_with_live_controls, prepare_host_runtime_with_live_lanes,
     prepare_host_runtime_with_selected_meters, prepare_host_session, source_id_arena_bytes,
 };
@@ -582,21 +582,22 @@ fn session_validation_owns_the_launch_rate_set() {
     }
 }
 
-/// The shared derivation is pinned across every launch tier and includes the adversarial 127-frame
-/// quantum from the boot brief.
+/// #1406 D2: the default ring is the stall ring plus the largest warm-successor prime plus one
+/// quantum, at every launch rate at quantum 128 and at the boot brief's adversarial 96 kHz /
+/// 127-frame shape. The cross with ten quanta is the published rule's test
+/// (`tools/parameter-metadata/tests/abi_layout.rs`).
+///
+/// Red mutation: take `p_max_samples` at quantum 128 for every quantum -> 96 kHz / 127 is 14,129,
+/// not 14,097.
 #[test]
-fn default_ring_derivation_covers_the_stall_and_two_in_flight_quanta() {
-    for rate in LAUNCH_SAMPLE_RATES {
-        let rate = rate.0;
-        for quantum in [64_u32, 127, 128, 4_096] {
-            let frames = default_source_ring_frames(rate, quantum);
-            assert_ne!(frames, 0);
-            assert_eq!(frames % quantum, 0);
-            let stall = u64::from(rate) * u64::from(SOURCE_STALL_TOLERANCE_MS) / 1_000;
-            assert!(u64::from(frames) >= stall + 2 * u64::from(quantum));
-        }
-    }
-    assert_eq!(default_source_ring_frames(96_000, 127), 9_906);
+fn default_ring_adds_the_largest_prime_and_a_quantum_to_the_stall_ring() {
+    let at_128 = LAUNCH_SAMPLE_RATES.map(|rate| default_source_ring_frames(rate.0, 128));
+    assert_eq!(at_128, [6_912, 7_296, 12_800, 14_080]);
+    assert_eq!(
+        default_source_ring_frames(96_000, 127),
+        14_097,
+        "111 quanta of 127"
+    );
 }
 
 /// The `Send + !Sync` half of the crate-level `# Host callback contract (V1)`.
