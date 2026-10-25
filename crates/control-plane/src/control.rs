@@ -1238,8 +1238,11 @@ impl SessionMeters {
     }
 
     /// Resolve every entry of `table` against `consumers`, the strip meters of the epoch whose
-    /// tables the delivery holds (one per strip, in the frame's strip order), and reset the folds.
-    /// A table never holds more entries than were reserved, so this allocates nothing.
+    /// tables the delivery holds (one per strip, in the frame's strip order), and size the folds
+    /// to the table. The folds keep their values: they are indexed by table entry, so a batch an
+    /// adoption interrupts goes on folding into them, and `push_with_strips` resets them at a
+    /// batch's first frame. A table never holds more entries than were reserved, so this
+    /// allocates nothing.
     fn resolve(&mut self, table: &[protocol::MeterEntry], consumers: &[host_core::MeterConsumer]) {
         self.resolution.clear();
         self.resolution.extend(table.iter().map(|entry| {
@@ -1251,7 +1254,6 @@ impl SessionMeters {
                 _ => None,
             }
         }));
-        self.folds.clear();
         self.folds.resize(
             self.resolution.len(),
             host_core::meters::StripPeakFold::START,
@@ -1268,8 +1270,10 @@ impl SessionMeters {
     /// `unstaged` is defensive: on the C ABI no service step can see a refusal. The step runs at
     /// the start of every session call, before a structural token exists (none outlives its
     /// call), so `stage_meter_batch_event` is never refused as structural-outstanding; the level
-    /// is on only with a nonempty table, which is not `Disabled`; and the two records of the
-    /// output entry always encode.
+    /// is on only with a nonempty table, which is not `Disabled`; and an accepted table's batch
+    /// encodes, because the provider checks the 256-record bound at the configure
+    /// (`meter.records`, #1587a). A stage that is refused all the same counts its batch's windows
+    /// here.
     fn windows_lost(&self) -> u64 {
         self.delivery
             .output_dropped_windows()

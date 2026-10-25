@@ -185,7 +185,9 @@ Commands: `cargo test --locked -p host-core --all-features`,
     #1583's gate-3 test, gates 1, 3, 4): red if a record carries another strip's or the output's
     peak, a strip resolves by position or against a retired epoch, adoption drops carried windows
     or restarts the sequence, an absent strip reports a stale value, or a returned strip moves its
-    handle. The reference is offline and exact (power-of-two gains). A returned strip fades in
+    handle. Attempt 2 (verifier B1): the carried rebuild is adopted in the middle of a batch; red
+    on attempt 1, where `resolve` cleared the folds at every adoption (eq0 Left 0.25 flags 1, want
+    1.5 flags 3). The folds now keep their values across a re-resolution. The reference is offline and exact (power-of-two gains). A returned strip fades in
     over its first window, so that batch reads its second window.
   - `an_uncarried_rebuild_restarts_the_meter_grid_at_its_adoption_block` (capi): red if render
     does not restart the gate at an uncarried swap or the control thread's adoption asks for
@@ -195,6 +197,7 @@ Commands: `cargo test --locked -p host-core --all-features`,
   - `a_meter_table_past_one_batch_of_records_is_refused_at_its_first_extra_entry` (host-core):
     red if the records bound is missing or off by one.
   - Gate 5: the render race's table gains two strip entries; red if strip meters or adoption
-    allocate on render. The withdrawn-candidate assertion sits in
-    `a_removed_sources_producer_returns_to_the_running_epoch`.
+    allocate on render. (Root's condition 1 asked for a withdrawn-candidate assertion; the
+    verifier found no defect it catches before "A's epoch is dropped" does, so it was removed in
+    attempt 2.)
   - Deleted: the `meter.strip.unavailable` row of the capi refusal test (the refusal is gone).

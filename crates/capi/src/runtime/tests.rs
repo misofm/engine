@@ -5560,14 +5560,15 @@ fn strip_meter_session() -> session::SessionModel {
 /// first window's start to the second's end, its sequence counts from 1, and each entry's left and
 /// right records are its own strip's post-matrix maxima of each plane over the batch, `VALID`, with
 /// `CLIPPED` above 1.0 (`strip_meter_session`'s exact gains are the offline reference). Across
-/// three rebuilds, the batches stay consecutive and nothing is lost: a muted track that sorts first
-/// shifts every strip's position but no handle; while `eq1` is removed its records have flags 0
+/// three rebuilds, the batches stay consecutive and nothing is lost: a muted track that sorts first,
+/// adopted in the middle of a batch, shifts every strip's position but no handle; while `eq1` is removed its records have flags 0
 /// (and `bus`, fed by nothing, is a valid 0); when `eq1` returns it is `VALID` again under handle 2.
 ///
 /// Test value: red on the defect #1583 replaced (one combined block peak per handle), if a record
 /// carries another strip's or the output's peak (a strip resolved by position, or a frame folded
 /// against the retired epoch's strips after a rebuild), if a plane lands on the other plane, if the
-/// fold loses a window's peak, if adoption drops the carried windows or restarts the sequence, if
+/// fold loses a window's peak, if adoption drops the carried windows, the peaks a batch folded
+/// before a swap in its middle, or restarts the sequence, if
 /// an absent strip reports a stale value as valid, or if a returned strip moves its handle.
 #[test]
 fn strip_and_output_meter_batches_are_each_entrys_own_peak_across_rebuilds() {
@@ -5690,9 +5691,19 @@ fn strip_and_output_meter_batches_are_each_entrys_own_peak_across_rebuilds() {
         );
     };
     batch(0, true);
-    // Gate 3: a rebuild by a muted track whose ID sorts first, so every strip's position shifts.
+    // Gate 3: a rebuild by a muted track whose ID sorts first, so every strip's position shifts,
+    // adopted in the middle of a batch: the batch's first window is folded before the swap, its
+    // second after it.
+    let render_window = |index: u64| {
+        for block in index * window..(index + 1) * window {
+            feed(block);
+        }
+        assert_eq!(crate::ffi::test_service(c_session), crate::RESULT_OK);
+        meter_batches_c(c_session)
+    };
+    assert_eq!(render_window(2), [], "half a batch");
     commit(2, &add_muted_track(&model, "a-muted"));
-    batch(1, true);
+    assert_eq!(render_window(3), [expected(1, true)], "batch 1");
     // Gate 4: `eq1` and its send removed, then returned.
     commit(3, &remove_track("eq1"));
     // While `eq1` ramps out, `bus` and the output carry its tail; `eq0` and the absent `eq1` are
