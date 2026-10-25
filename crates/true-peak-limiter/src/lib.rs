@@ -4083,11 +4083,13 @@ impl<L: Lane> LimiterCore<L> {
         self.relink_frames = self
             .relink_frames
             .saturating_sub(u32::try_from(frames).unwrap_or(u32::MAX));
-        if self.relink_frames == 0 && !self.collapsed && !self.gain_linked {
-            if gain_rings_agree(&self.left, &self.right) {
-                self.gain_linked = reduction_agrees(&self.left, &self.right);
-                self.relink_watch = !self.gain_linked;
-            }
+        if self.relink_frames == 0
+            && !self.collapsed
+            && !self.gain_linked
+            && gain_rings_agree(&self.left, &self.right)
+        {
+            self.gain_linked = reduction_agrees(&self.left, &self.right);
+            self.relink_watch = !self.gain_linked;
         }
     }
 
