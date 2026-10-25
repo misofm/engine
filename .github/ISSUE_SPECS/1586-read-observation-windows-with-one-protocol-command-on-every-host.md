@@ -299,3 +299,14 @@ change and no hash re-pin in #1586a.
   21,149 for the row table and the epoch's index), under the unchanged 344,192 ceiling (root:
   a ceiling is raised only when a row goes over it), recorded in `resource_lifecycle.rs`.
 - The schema hash stays `f4c2fe333739f44d`.
+
+### PASS fold (verifier MINORs 1-2, NITs 3-4)
+
+- `PreparedObservationRead` keeps an FNV-1a 64 digest of the prepared request (with its length
+  and ID); a completion with any other bytes answers `Internal` before the replay cache is
+  touched. `an_observation_read_completes_only_with_its_own_request` (protocol): red on the check
+  disabled and on the digest compare removed.
+- `an_observation_read_refuses_a_bad_batch_whole` adds a raw 257-selection frame through the C
+  ABI: a typed `INVALID_FIELD` that replays. Red on a prepare that skips its decode check.
+- The race arms the compressor's tap once before it starts, with the race's own window; the
+  redundant warm-up read in gate 1 is gone.
