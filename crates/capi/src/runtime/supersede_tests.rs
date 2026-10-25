@@ -380,10 +380,11 @@ fn a_refused_replacement_restores_the_withdrawn_candidate() {
 /// renders, T3 promotes the lost epoch as adopted, and the rings the producers feed after the seek
 /// are not the ones render reads, so they fill.
 ///
-/// #2044: the same run with T2 panicking where the rebuild publishes the primed schedule, its
-/// last step that can panic before the candidate is taken. Red if that step (or any later one that
-/// can panic) runs after the protocol commit: the controller then holds T2's revision and model
-/// while T1's candidate renders.
+/// #2044: the same run with T2 panicking just after the rebuild publishes the primed schedule,
+/// before its commit: red if that publication (or any later step that can panic) runs after the
+/// protocol commit, because the controller then holds T2's revision and model while T1's
+/// candidate renders. Then a rebuild that withdrew nothing panics there: red if the report lock is
+/// held across that stretch, because the panic poisons it and the session never services again.
 #[test]
 fn a_rebuild_that_panics_after_the_withdrawal_restores_the_candidate() {
     let model = stateless_session(48_000);
@@ -500,6 +501,30 @@ fn a_rebuild_that_panics_after_the_withdrawal_restores_the_candidate() {
             assert_eq!(bits(actual), bits(expected), "{phase:?}: block {block}");
         }
     }
+    // A rebuild that withdrew nothing and panics before its commit leaves no lock poisoned: the
+    // session services, reports its resources and commits the same edit next.
+    control_plane::test_reset_lifecycle_observer();
+    let mut children = compile(&model, limits());
+    submit_direct(&mut children, &[FIXTURE], 0);
+    render_direct(&mut children, 0);
+    children.session.test_set_structural_faults([
+        Some(TestStructuralFaultPhase::PanicAtPrimedPublication),
+        None,
+    ]);
+    let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        children.session.command(&transaction(1, 42, &first), 4_096)
+    }));
+    assert!(caught.is_err(), "T1 panics");
+    assert_eq!(revision(&children), 42, "nothing was committed");
+    children.session.service().expect("the session services");
+    let _ = children.plan.resources();
+    commit(&mut children, 2, 42, &first);
+    submit_direct(&mut children, &[ADDED], 0);
+    submit_direct(&mut children, &[FIXTURE, ADDED], 1);
+    feed_and_render_until_direct(&mut children, &[FIXTURE, ADDED], 1, 43);
+    children.session.service().expect("service");
+    drop(children);
+    assert_balanced("withdrew nothing", control_plane::test_lifecycle_counters());
 }
 
 /// A plan's graph bytes and its compiled model's bytes.

@@ -870,8 +870,9 @@ pub enum TestStructuralFaultPhase {
     /// A panic inside a rebuild, after the pending candidate was withdrawn and the successor
     /// prepared, before admission (#2010).
     PanicAfterWithdrawal,
-    /// A panic where a rebuild publishes a warm candidate's `Primed` schedule, standing in for
-    /// that step's `expect` (#2044): the last step that can panic before the candidate is taken.
+    /// A panic just after a rebuild publishes a warm candidate's `Primed` schedule, before the
+    /// protocol commit (#2044): it stands in for every step there that can panic (that
+    /// publication's `expect`, the commit's own), the last before the candidate is taken.
     PanicAtPrimedPublication,
 }
 
@@ -5245,20 +5246,47 @@ where
             )
         }));
         if let Some(candidate) = withdrawn.take() {
+            // #2044: a panic after the successor's `publish_primed` wrote its prime flags (the
+            // protocol commit's own steps) leaves the flags of the rings the candidate carries
+            // as the successor set them. A `Primed` candidate is judged by them, so they are set
+            // again from the candidate's own carry before it is republished.
+            if result.is_err()
+                && self
+                    .primed
+                    .is_some_and(|record| record.epoch == candidate.epoch().0)
+            {
+                self.restore_prime_flags();
+            }
             self.publisher.republish(candidate);
             #[cfg(feature = "test-support")]
             update_test_owners(|owners| owners.candidate_republished += 1);
-            // #2044: the rebuild holds the report lock from its capacity check to the publication,
-            // so a panic in that stretch before the commit poisons it, and every later service
-            // would refuse. The candidate is still here, so the panic came before the take, and
-            // the rebuild writes the table only after the take: it holds the rows it held before
-            // the call, and the poison is cleared. A no-op when nothing panicked or the lock was
-            // not held.
-            if result.is_err() {
-                self.shared.reports.clear_poison();
-            }
         }
         result.unwrap_or_else(|payload| std::panic::resume_unwind(payload))
+    }
+
+    /// Sets the prime flags of the newest pending candidate's carry again, as its own
+    /// `publish_primed` set them (#1403 D3, #2044), before it is republished after a panic.
+    ///
+    /// Its publication moved every producer it held vacant in from the epoch it succeeds, which
+    /// then holds those entries vacant. So the candidate carries exactly the rings whose
+    /// producers it holds and whose IDs that epoch holds vacant (a redeclared source's entry
+    /// there keeps its own producer); every producer that epoch still holds is of a ring the
+    /// candidate does not carry. No allocation.
+    fn restore_prime_flags(&self) {
+        let len = self.pending_providers.len();
+        let Some(candidate) = self.pending_providers.last() else {
+            return;
+        };
+        let holder = match len {
+            0 | 1 => &self.providers,
+            _ => &self.pending_providers[len - 2],
+        };
+        holder
+            .sources
+            .set_prime_flags(|id| candidate.sources.holds_vacant(id));
+        candidate
+            .sources
+            .set_prime_flags(|id| holder.sources.holds_vacant(id));
     }
 
     /// The transition fallback across the pending `Primed` candidate W, the donor (#1397 D2): the
@@ -6065,29 +6093,33 @@ where
         };
         let epoch = reservation.epoch();
         candidate_provider.epoch = epoch;
-        let mut reports = self
-            .shared
-            .reports
-            .lock()
-            .map_err(|_| CommandError::Internal)?;
         // #1398 D3: the report table and the pending list hold every row a candidate can meet
         // (#1398 D1), so a full one is an accounting fault. A superseded candidate's row and
-        // entry leave before B's arrive (#1310 D5).
-        let freed = usize::from(superseding);
-        if reports.len().saturating_sub(freed) >= reports.capacity()
-            || self.pending_providers.len().saturating_sub(freed)
-                >= self.pending_providers.capacity()
+        // entry leave before B's arrive (#1310 D5). #2044: the lock is held for this check only,
+        // so no step that can panic before the commit runs under it, and is taken again for the
+        // row's push after the take; only the control plane writes the table (through `&mut
+        // self`), so the check still holds there.
         {
-            debug_assert!(
-                false,
-                "#1398 D1 sizes the report table and the pending list"
-            );
-            return Err(CommandError::Internal);
+            let reports = self
+                .shared
+                .reports
+                .lock()
+                .map_err(|_| CommandError::Internal)?;
+            let freed = usize::from(superseding);
+            if reports.len().saturating_sub(freed) >= reports.capacity()
+                || self.pending_providers.len().saturating_sub(freed)
+                    >= self.pending_providers.capacity()
+            {
+                debug_assert!(
+                    false,
+                    "#1398 D1 sizes the report table and the pending list"
+                );
+                return Err(CommandError::Internal);
+            }
         }
 
         #[cfg(feature = "test-support")]
         if take_test_fault_state(TestStructuralFaultPhase::BeforeProtocolCommit) {
-            drop(reports);
             drop(reservation);
             drop(candidate_provider);
             drop(kind);
@@ -6104,7 +6136,6 @@ where
         // #1594 D6: a monitor rebuild takes no stamp: it spends no revision, and the committed
         // one may be 0, which a gate never stamps.
         if !monitor && candidate_provider.revision_gate.stamp(revision).is_err() {
-            drop(reports);
             drop(reservation);
             drop(candidate_provider);
             drop(kind);
@@ -6118,7 +6149,6 @@ where
             &observation_change.bindings,
             self.observation_wire,
         ) else {
-            drop(reports);
             drop(reservation);
             drop(candidate_provider);
             drop(kind);
@@ -6167,13 +6197,10 @@ where
         // candidate, in the withdrawn candidate's. It sets the prime flags of rings render reads,
         // so it runs after the last refusal: the commit below cannot refuse once its predicate
         // passed above, with no controller write between. #2044: it runs before the protocol
-        // commit, as the last step that can panic, so a panic here (its `expect`, which fires
-        // before any flag is set) leaves the controller as it was and republishes the withdrawn
-        // candidate (#2010).
-        #[cfg(feature = "test-support")]
-        if take_test_fault_state(TestStructuralFaultPhase::PanicAtPrimedPublication) {
-            panic!("test fault: a rebuild panics where it publishes the primed schedule");
-        }
+        // commit, so a panic here or in the commit (no lock is held) leaves the controller as it
+        // was and republishes the withdrawn candidate (#2010). Its flags are then the
+        // successor's: `rebuild_withdrawn` sets a `Primed` candidate's again before it republishes
+        // it (`restore_prime_flags`).
         let mut primed = warm_lead_blocks.map(|lead_blocks| {
             let (running, withdrawn_sources) = if superseding {
                 let len = self.pending_providers.len();
@@ -6199,6 +6226,10 @@ where
                 lead_blocks,
             )
         });
+        #[cfg(feature = "test-support")]
+        if take_test_fault_state(TestStructuralFaultPhase::PanicAtPrimedPublication) {
+            panic!("test fault: a rebuild panics after it publishes the primed schedule");
+        }
         let (committed, displaced) = match kind {
             Rebuild::Transaction(prepared) => {
                 // #1313 D2: a transaction that takes this arm is a rebuild, whatever else it holds.
@@ -6208,8 +6239,9 @@ where
                 // #1310 D3: the model the commit displaced, never one committed in place (#1613).
                 // `take_displaced` is `Option::take`, the one step between the commit and the
                 // candidate's take (#2044), and it cannot panic. It is `Some`: the preparation
-                // refused a token without a compilation (`compiled().ok_or`), and a compiled
-                // token always displaces the committed model.
+                // refused a token without a compilation (`compiled().ok_or`), a compiled token
+                // always displaces the committed model, and a monitor-only token, which displaces
+                // none, never takes this arm: it commits live (`commit_live`, #1603 D7).
                 let displaced = committed.take_displaced();
                 (Some(committed), displaced)
             }
@@ -6460,6 +6492,16 @@ where
             // transaction on an overflow, so the count is `Some` here.
             .unwrap_or(usize::MAX),
         );
+        // #2044: the report lock again, held to the publication so the row is in the table
+        // before render can adopt B. A poisoned lock is taken as it is: only the control plane
+        // writes the table (through `&mut self`), and no write of it can stop half done; every
+        // other holder only reads it (`active_resources`, the admissions' reads), so a panic that
+        // poisoned it left the rows whole. The step after the take must not fail.
+        let mut reports = self
+            .shared
+            .reports
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         if let Some((_, donor)) = superseded.as_ref() {
             // #1310 D5 step 6: A's report row leaves; `retain` shrinks in place.
             let donor_epoch = donor.epoch;
