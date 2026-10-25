@@ -188,6 +188,26 @@ impl WarmLead {
     }
 }
 
+#[cfg(feature = "test-support")]
+impl WarmLead {
+    /// Test-support seam (#1397a): the lead [`warm_lead`] answers when the strips it restarts
+    /// whole confine a growth (`Warm` with `lead_samples == 0`), for the edit whose ordinary
+    /// successor's inventory is `ordinary`, so a host can gate its routing of that answer on a
+    /// session family where no edit reaches it. `restart_whole` is sorted by the seam.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn test_only_zero_lead(ordinary: &PlanStateInventory, restart_whole: &[&str]) -> Self {
+        let mut whole: Vec<String> = restart_whole.iter().map(|id| (*id).to_owned()).collect();
+        whole.sort_unstable();
+        Self {
+            lead_samples: 0,
+            restart_whole: whole.into_boxed_slice(),
+            restarted: ordinary.restarted_strips().into(),
+            prime_bytes: 0,
+        }
+    }
+}
+
 /// What [`warm_lead`] answers for a structural edit (#1354 D1).
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum WarmDecision {

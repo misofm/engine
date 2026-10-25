@@ -981,6 +981,10 @@ thread_local! {
     static FORCE_FULL_PREPARATION: core::cell::Cell<bool> = const { core::cell::Cell::new(false) };
     /// Whether the next transition re-preparation across a donor refuses (#1397 deliverable 3).
     static TEST_REFUSE_REPREPARE: core::cell::Cell<bool> = const { core::cell::Cell::new(false) };
+    /// The strips the next `warm_lead` answer restarts whole with a zero lead, in place of the
+    /// answer itself (#1397a: no edit of the gates' session family reaches that answer).
+    static TEST_NEXT_ZERO_LEAD: core::cell::RefCell<Option<Vec<&'static str>>> =
+        const { core::cell::RefCell::new(None) };
     /// Whether the service step leaves displaced plans in the retirement queue (batch 15a review
     /// fold M1): a render preempted between claiming a candidate and retiring the plan it displaced.
     static TEST_HOLD_RECLAMATION: core::cell::Cell<bool> = const { core::cell::Cell::new(false) };
@@ -1050,6 +1054,7 @@ pub fn test_reset_lifecycle_observer() {
     TEST_NEXT_SOURCE_READ_OFFSET.with(|state| state.set(None));
     TEST_HOLD_RECLAMATION.with(|state| state.set(false));
     TEST_REFUSE_REPREPARE.with(|state| state.set(false));
+    TEST_NEXT_ZERO_LEAD.with(|state| state.replace(None));
 }
 
 /// Takes the source-read offset [`SessionState::test_set_next_source_read_offset`] scheduled for
@@ -3124,6 +3129,14 @@ where
         TEST_REFUSE_REPREPARE.with(|state| state.set(true));
     }
 
+    /// Makes the next `warm_lead` answer on this thread `Warm` with a zero lead that restarts
+    /// `restart_whole` (#1397 D1's second arm), whatever the edit (#1397a). Taken once.
+    #[cfg(feature = "test-support")]
+    pub fn test_set_next_zero_lead(&mut self, restart_whole: Vec<&'static str>) {
+        let _ = self;
+        TEST_NEXT_ZERO_LEAD.with(|state| state.replace(Some(restart_whole)));
+    }
+
     /// The transition fallback across the pending `Primed` candidate, as #1358's deadline step
     /// runs it (#1397 D2), for the gates until that step exists.
     ///
@@ -5034,6 +5047,13 @@ where
                 &config,
             )
             .map_err(|diagnostics| spectrum_invariant(prepare_failure(diagnostics)))?;
+            #[cfg(feature = "test-support")]
+            let decision = match TEST_NEXT_ZERO_LEAD.with(|state| state.borrow_mut().take()) {
+                Some(whole) => host_core::WarmDecision::Warm(
+                    host_core::WarmLead::test_only_zero_lead(&prepared_runtime.inventory, &whole),
+                ),
+                None => decision,
+            };
             match decision {
                 host_core::WarmDecision::Warm(lead) => {
                     let lead_blocks = u32::try_from(lead.lead_samples / u64::from(quantum))
@@ -8157,14 +8177,15 @@ mod tests {
     /// continued" is A rendered on with no growth and the same live commands, bit for bit.
     #[cfg(feature = "test-support")]
     mod warm_successor {
-        use super::super::CommandError;
+        use super::super::{CommandError, TransitionStep};
         use crate::EventLane;
         use crate::{
             CompiledChildren, ControlAdapter, ControlLimits, PlanResources, RuntimePreparer,
             compile_children_warm,
         };
         use engine::realtime::{
-            OUTCOME_EXACT, OUTCOME_SUPERSEDED, PlanAdoption, PlanarBufferMut, RenderError,
+            OUTCOME_EXACT, OUTCOME_SUPERSEDED, OUTCOME_TRANSITION_FALLBACK, PlanAdoption,
+            PlanarBufferMut, RenderError,
         };
         use host_core::{
             CompiledSession, HostLiveControlHandles, HostLiveControlRequest, HostLiveLanes,
@@ -8333,6 +8354,16 @@ mod tests {
                 link_mode: LinkMode::Maximum,
                 params: Vec::new(),
                 sidechain: SidechainDeclaration::None,
+            }
+        }
+
+        /// A compressor insert `id` at its defaults: no latency.
+        fn compressor(id: &str) -> Effect {
+            Effect {
+                identity: EffectIdentity::Native {
+                    effect_id: sid("miso.compressor"),
+                },
+                ..limiter(id)
             }
         }
 
@@ -8816,6 +8847,244 @@ mod tests {
                     assert_eq!(swapped.blocks[block], sum, "{backend:?}: block {block}");
                 }
             }
+        }
+
+        /// #1397 gate 3, the transition at submit. A holds a compressor on track 2; the edit adds a
+        /// true-peak limiter to track 1 with `P_MAX` one quantum below `P`, so `warm_lead` answers
+        /// `LeadBound`. The edit commits as a rebuild, `grown_strips` names both tracks (the
+        /// output's arrival grows) and so does the successor's `restarted_strips()`, and it is
+        /// published `NoEarlierThan(S)` with no record. Up to `S` every block equals A with both
+        /// tracks live-muted at the edit's block; from `S` every block equals a fresh plan of the
+        /// edited session with both tracks muted, fed from frame `S`, and live-unmuted at their
+        /// fire blocks (track 2 at once, track 1 the limiter's latency later). The adoption reports
+        /// `TRANSITION_FALLBACK` and `transition_fallback` counts its revision.
+        ///
+        /// Test value: a bound that refuses the edit, a transition reported `EXACT`, a duck set
+        /// without track 2, or a successor that carries track 2 (its compressor's envelope or its
+        /// ducked fader) breaks the references.
+        #[test]
+        fn a_growth_past_the_bound_takes_the_transition_at_submit() {
+            const AFTER: usize = 64;
+            const LIMITER: u64 = 486;
+            let bound = WarmConfig {
+                p_max: LEAD - QUANTUM,
+                prime_bytes_max: u64::MAX,
+            };
+            let mut a = session_a();
+            a.tracks[1].inserts.effects = vec![compressor("comp")];
+            let mut b = a.clone();
+            b.tracks[0].inserts.effects = vec![limiter("limiter-0")];
+            let edit = [SessionEdit::UpsertTrack {
+                track: b.tracks[0].clone(),
+            }];
+            let mut rig = Rig::boot(Some(bound), limits(), &a);
+            rig.render(BEFORE);
+            let s = duck_sample(rig.children.session.test_render_clock());
+            assert_eq!(rig.rebuild(&edit), PlanAdoption::NoEarlierThan(s));
+            assert_eq!(rig.primed(), None);
+            // Track 1's limiter restarts it; only `grown_strips` adds track 2.
+            let newest = rig
+                .children
+                .session
+                .pending_providers
+                .last()
+                .expect("the transition");
+            assert_eq!(
+                newest
+                    .inventory
+                    .restarted_strips()
+                    .iter()
+                    .map(|id| &**id)
+                    .collect::<Vec<_>>(),
+                ["eq0", "eq1"]
+            );
+            let s_block = usize::try_from(s / QUANTUM).expect("block");
+            let fire = usize::try_from(LIMITER.div_ceil(QUANTUM)).expect("blocks");
+            let total = s_block + fire + AFTER;
+            rig.render(total - BEFORE);
+            assert_eq!(rig.swaps(), [s_block]);
+            let watermark = rig.children.plan.queries().watermark().expect("watermark");
+            assert_eq!(
+                (watermark.outcome_flags, watermark.transition_fallback),
+                (OUTCOME_TRANSITION_FALLBACK, 1)
+            );
+            let mut reference = Rig::boot(None, limits(), &a);
+            reference.render(BEFORE);
+            assert!(matches!(
+                reference.transact(&[builtin("eq0", 6, 1.0), builtin("eq1", 6, 1.0)]),
+                Ok(EditPath::Live)
+            ));
+            reference.render(s_block - BEFORE);
+            assert_eq!(
+                rig.blocks[..s_block],
+                reference.blocks[..],
+                "A with both tracks live-muted until S"
+            );
+            let mut muted = b.clone();
+            for track in &mut muted.tracks {
+                track.fader.left_mute = true;
+                track.fader.right_mute = true;
+            }
+            let mut fresh = Rig::boot(None, limits(), &muted);
+            let offset = usize::try_from(s).expect("frames");
+            for (_, planes, _) in &mut fresh.feeds {
+                for plane in planes.iter_mut() {
+                    plane.drain(..offset);
+                }
+            }
+            for block in 0..fire + AFTER {
+                for (track, at) in [("eq1", 0), ("eq0", fire)] {
+                    if block == at {
+                        assert!(matches!(
+                            fresh.transact(&[builtin(track, 6, 0.0)]),
+                            Ok(EditPath::Live)
+                        ));
+                    }
+                }
+                fresh.render(1);
+            }
+            assert_eq!(
+                rig.blocks[s_block..],
+                fresh.blocks[..],
+                "a fresh plan of the edit from S"
+            );
+        }
+
+        /// #1397 D1's second arm: a `Warm` answer with a zero lead (injected: the restarts confine
+        /// a growth, and this session family reaches no such edit) is prepared with its lead, so
+        /// its whole restart, track 2, joins the successor's `restarted_strips()` and ducks; it is
+        /// published as an ordinary duck-swap, `NoEarlierThan(S)` with no record, and no block
+        /// before `S` differs from A with track 2 live-muted; its adoption reports `EXACT`.
+        ///
+        /// Test value: a zero lead published `Primed` (no prime to run), or a transition not
+        /// planned again over the warm successor's restarts (track 2 restarted unducked, published
+        /// `Next`), is red.
+        #[test]
+        fn a_zero_lead_is_published_as_an_ordinary_duck_swap() {
+            let mut rig = Rig::new(Some(CONFIG));
+            rig.render(BEFORE);
+            let s = duck_sample(rig.children.session.test_render_clock());
+            rig.children.session.test_set_next_zero_lead(vec!["eq1"]);
+            assert_eq!(
+                rig.rebuild(&muted_track("t4", 0)),
+                PlanAdoption::NoEarlierThan(s)
+            );
+            assert_eq!(rig.primed(), None);
+            let newest = rig
+                .children
+                .session
+                .pending_providers
+                .last()
+                .expect("the successor");
+            assert_eq!(&*newest.inventory.restarted_strips(), [Box::from("eq1")]);
+            let s_block = usize::try_from(s / QUANTUM).expect("block");
+            rig.render(s_block + 1 - BEFORE);
+            assert_eq!(rig.swaps(), [s_block]);
+            let watermark = rig.children.plan.queries().watermark().expect("watermark");
+            assert_eq!(watermark.outcome_flags, OUTCOME_EXACT);
+            let mut reference = Rig::new(None);
+            reference.render(BEFORE);
+            assert!(matches!(
+                reference.transact(&[builtin("eq1", 6, 1.0)]),
+                Ok(EditPath::Live)
+            ));
+            reference.render(s_block - BEFORE);
+            assert_eq!(rig.blocks[..s_block], reference.blocks[..]);
+        }
+
+        /// #1397 gate 4, the transition across a donor. W (the growth, plus a source `c` fed from
+        /// frame 0 and an audible track on it) waits `Primed`, frames withheld. A fallback with
+        /// the injected refusal counts one `transition_reprepare_refusals`, keeps W pending with
+        /// its record, and W is not adopted. The next fallback publishes the transition
+        /// `NoEarlierThan(S)` and drops the record; a structural edit refused while it waits
+        /// republishes it. Adopted at `S`, it completes W's revision as `TRANSITION_FALLBACK`,
+        /// with `c` played from the donor's ring and no underrun.
+        ///
+        /// Test value: a refusal that drops the revision or the donor leaves nothing to adopt or
+        /// no record to retry from; a fallback that drops the donor before preparing loses `c`'s
+        /// acked frames (an underrun); a republish that resets the word reports `EXACT`.
+        #[test]
+        fn a_transition_across_a_donor_survives_a_refusal() {
+            let mut rig = Rig::new(Some(CONFIG));
+            rig.ahead = 1;
+            rig.render(BEFORE);
+            let model = session_a();
+            let template = model.sources[0].clone();
+            let source = Source {
+                id: sid("c-source"),
+                content: template.content.replace("7e94", "0c0c"),
+                ..template
+            };
+            let mut track: Track = model.tracks[0].clone();
+            track.id = sid("tc");
+            track.source_id = sid("c-source");
+            let mut route = model.routes[0].clone();
+            route.id = sid("tc-main");
+            let RouteSource::Track { track_id, .. } = &mut route.source else {
+                panic!("a track route")
+            };
+            *track_id = track.id.clone();
+            let mut edits = growth();
+            edits.extend([
+                SessionEdit::UpsertSource { source },
+                SessionEdit::UpsertTrack { track },
+                SessionEdit::UpsertRoute { route },
+            ]);
+            assert!(matches!(rig.rebuild(&edits), PlanAdoption::Primed { .. }));
+            rig.feeds.push(("c-source", pcm(17), 0));
+            let record = rig.primed().expect("W's record");
+            let revision = rig
+                .children
+                .session
+                .test_controller()
+                .session()
+                .revision()
+                .0;
+            rig.render(1);
+
+            rig.children.session.test_refuse_next_reprepare();
+            assert_eq!(
+                rig.children.session.test_fall_back_to_transition().ok(),
+                Some(TransitionStep::Refused)
+            );
+            assert_eq!(rig.children.session.test_transition_reprepare_refusals(), 1);
+            assert_eq!(rig.primed(), Some(record), "W keeps its record");
+            assert_eq!(rig.children.session.newest_plan_epoch(), record.epoch);
+            rig.render(1);
+            assert!(rig.swaps().is_empty(), "W is still pending, unready");
+
+            assert_eq!(
+                rig.children.session.test_fall_back_to_transition().ok(),
+                Some(TransitionStep::Published)
+            );
+            let Some(PlanAdoption::NoEarlierThan(s)) =
+                rig.children.session.test_take_published_adoption()
+            else {
+                panic!("the transition is a duck-swap")
+            };
+            assert_eq!(rig.primed(), None);
+            // A structural edit refused while the transition waits (#1310 D4).
+            let held = rig.children.session.held_epochs().expect("held");
+            let cap = rig.children.session.limits.maximum_effect_state_bytes;
+            rig.children.session.limits.maximum_effect_state_bytes = held
+                .as_slice()
+                .iter()
+                .map(|epoch| epoch.report.effect_scalar_state_bytes)
+                .sum();
+            drop(held);
+            assert!(rig.transact(&muted_track("t4", 2)).is_err(), "B is refused");
+            rig.children.session.limits.maximum_effect_state_bytes = cap;
+
+            rig.ahead = AHEAD;
+            let s_block = usize::try_from(s / QUANTUM).expect("block");
+            rig.render(s_block + 8 - rig.blocks.len());
+            assert_eq!(rig.swaps(), [s_block]);
+            let watermark = rig.children.plan.queries().watermark().expect("watermark");
+            assert_eq!(
+                (watermark.revision, watermark.outcome_flags),
+                (revision, OUTCOME_TRANSITION_FALLBACK)
+            );
+            assert_eq!(rig.underruns(), 0, "c plays from the donor's ring");
         }
 
         /// Gate 1, the admission: a warm candidate C is admitted against the reprepare peak. With
