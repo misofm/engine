@@ -483,10 +483,17 @@ function wrapEngineProcessor(Base) {
         // already moved this source, so its own seek at the same generation is refused as stale,
         // and the ring would stall for good. That one refusal is the seek applied. The source is
         // always asked first: one that the session seek did not move (a source a later plan
-        // added) accepts the seek, and every other refusal is handled as before.
+        // added) accepts the seek, and every other refusal is handled as before. A per-source
+        // seek at g+1 that reaches the engine by another path (a `miso.seek.v1` message) between
+        // a session seek at g and this ring's epoch at g also makes the epoch's seek stale, and
+        // the epoch is consumed too. The source is then at g+1: the ring's chunks at g are
+        // refused as stale and counted in REFUSED, and its PCM at g+1 is the job of whoever
+        // sought g+1. Without the rule this ring would stall on the seek instead. A ring seek
+        // at g+1 itself supersedes the epoch at g (one seek slot) and is asked as usual. The
+        // words compare as unsigned 64-bit, as `releaseStaleSharedSlots` reads them.
         if (
           result === RESULT_INVALID_ARGUMENT &&
-          requested === this.lastSessionSeekGeneration &&
+          BigInt.asUintN(64, requested) === this.lastSessionSeekGeneration &&
           this.refusedAsStaleGeneration()
         ) {
           result = RESULT_OK

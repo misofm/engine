@@ -1263,4 +1263,95 @@ mod tests {
             .seek_session(2, 0, None)
             .expect("every entry occupied");
     }
+
+    /// #1644 D2: the browser feed drain tells a stale-generation refusal from every other
+    /// `invalidArgument` by the first bytes of the session diagnostic, so no other code may begin
+    /// with `source.generation.stale` or be a proper prefix of it. `slot` is an exhaustive match,
+    /// so a new variant does not compile until it is listed here.
+    #[test]
+    fn no_other_diagnostic_collides_with_the_stale_generation_code() {
+        use SourceControlError as E;
+        const fn slot(error: SourceControlError) -> usize {
+            match error {
+                E::UnknownSource => 0,
+                E::RegionOverflow => 1,
+                E::OutsideRegion => 2,
+                E::EndOfRegionMismatch => 3,
+                E::GenerationZero => 4,
+                E::Chunk(HostChunkError::WrongSampleRate { .. }) => 5,
+                E::Chunk(HostChunkError::StaleGeneration { .. }) => 6,
+                E::Chunk(HostChunkError::ChannelCount { .. }) => 7,
+                E::Chunk(HostChunkError::PlaneLength { .. }) => 8,
+                E::Chunk(HostChunkError::FrameCount { .. }) => 9,
+                E::Chunk(HostChunkError::NonContiguous { .. }) => 10,
+                E::Chunk(HostChunkError::EndOfRegionAlreadySubmitted) => 11,
+                E::Chunk(HostChunkError::Full { .. }) => 12,
+                E::Chunk(HostChunkError::InternalInvariant) => 13,
+                E::Seek(SourceSeekError::GenerationZero) => 14,
+                E::Seek(SourceSeekError::GenerationNotStrictlyIncreasing { .. }) => 15,
+                E::Seek(SourceSeekError::Backpressure { .. }) => 16,
+                E::Seek(SourceSeekError::AnchorUnaligned) => 17,
+                E::Seek(SourceSeekError::FrameOutOfRange) => 18,
+                E::InvalidId => 19,
+                E::Vacated => 20,
+                E::ReportBusy => 21,
+            }
+        }
+        let generation = SourceGeneration(1);
+        let frame = SourceFrame(0);
+        let every = [
+            E::UnknownSource,
+            E::RegionOverflow,
+            E::OutsideRegion,
+            E::EndOfRegionMismatch,
+            E::GenerationZero,
+            E::Chunk(HostChunkError::WrongSampleRate {
+                expected: SampleRateHz(48_000),
+                actual: SampleRateHz(44_100),
+            }),
+            E::Chunk(HostChunkError::StaleGeneration {
+                active: generation,
+                submitted: generation,
+            }),
+            E::Chunk(HostChunkError::ChannelCount {
+                expected: 2,
+                actual: 1,
+            }),
+            E::Chunk(HostChunkError::PlaneLength { expected_frames: 4 }),
+            E::Chunk(HostChunkError::FrameCount {
+                quantum_frames: 4,
+                submitted_frames: 3,
+                end_of_region: false,
+            }),
+            E::Chunk(HostChunkError::NonContiguous {
+                expected: frame,
+                actual: frame,
+            }),
+            E::Chunk(HostChunkError::EndOfRegionAlreadySubmitted),
+            E::Chunk(HostChunkError::Full { full_count: 1 }),
+            E::Chunk(HostChunkError::InternalInvariant),
+            E::Seek(SourceSeekError::GenerationZero),
+            E::Seek(SourceSeekError::GenerationNotStrictlyIncreasing {
+                active: generation,
+                requested: generation,
+            }),
+            E::Seek(SourceSeekError::Backpressure { full_count: 1 }),
+            E::Seek(SourceSeekError::AnchorUnaligned),
+            E::Seek(SourceSeekError::FrameOutOfRange),
+            E::InvalidId,
+            E::Vacated,
+            E::ReportBusy,
+        ];
+        let slots: Vec<usize> = every.iter().map(|error| slot(*error)).collect();
+        assert_eq!(slots, (0..every.len()).collect::<Vec<_>>(), "every variant once, in order");
+        const STALE: &str = "source.generation.stale";
+        for error in every {
+            let code = error.diagnostic();
+            if code == STALE {
+                continue;
+            }
+            assert!(!code.starts_with(STALE), "{error:?} begins with the stale code: {code}");
+            assert!(!STALE.starts_with(code), "{error:?} is a prefix of the stale code: {code}");
+        }
+    }
 }
