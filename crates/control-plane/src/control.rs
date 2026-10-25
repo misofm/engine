@@ -2333,7 +2333,7 @@ pub const REPREPARE_REQUIRED: &str = "control.apply.reprepare_required";
 
 /// What one transition fallback across the pending `Primed` candidate did (#1397 D2).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum TransitionStep {
+pub enum TransitionStep {
     /// No warm candidate was pending, or render had already adopted it: nothing to do, and its
     /// record is gone.
     NotPending,
@@ -3144,7 +3144,7 @@ where
     ///
     /// As [`Self::fall_back_pending_warm`].
     #[cfg(feature = "test-support")]
-    pub(crate) fn test_fall_back_to_transition(&mut self) -> Result<TransitionStep, CommandError> {
+    pub fn test_fall_back_to_transition(&mut self) -> Result<TransitionStep, CommandError> {
         self.fall_back_pending_warm()
     }
 
@@ -5030,7 +5030,7 @@ where
                 prospective.normalized_model(),
                 ordinary,
                 |runtime: &PreparedRuntime| &runtime.inventory,
-                &prepare,
+                prepare,
             )
         };
         if fallback {
@@ -8977,7 +8977,7 @@ mod tests {
                 .pending_providers
                 .last()
                 .expect("the successor");
-            assert_eq!(&*newest.inventory.restarted_strips(), [Box::from("eq1")]);
+            assert_eq!(newest.inventory.restarted_strips(), [Box::from("eq1")]);
             let s_block = usize::try_from(s / QUANTUM).expect("block");
             rig.render(s_block + 1 - BEFORE);
             assert_eq!(rig.swaps(), [s_block]);
@@ -9072,7 +9072,6 @@ mod tests {
                 .iter()
                 .map(|epoch| epoch.report.effect_scalar_state_bytes)
                 .sum();
-            drop(held);
             assert!(rig.transact(&muted_track("t4", 2)).is_err(), "B is refused");
             rig.children.session.limits.maximum_effect_state_bytes = cap;
 
