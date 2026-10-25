@@ -131,13 +131,16 @@ dependencies = [
  "builtins-compiler",
  "conformance",
  "console-workload",
+ "controls",
  "effect-compiler",
  "effect-contract",
  "engine",
  "graph",
  "graph-compiler",
+ "host-core",
  "lane",
  "rustix",
+ "session",
  "sha2 0.11.0",
 ]
 

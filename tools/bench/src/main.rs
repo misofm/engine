@@ -10,14 +10,16 @@ use std::process::Command;
 mod console;
 mod effect_contract;
 mod floor;
+mod swap;
 
 const INTERNAL_SUBJECT: &str = "ENGINE_V1_INTERNAL_BENCH_SUBJECT";
-const SUBJECTS: &[&str] = &["console", "effect-contract"];
+const SUBJECTS: &[&str] = &["console", "effect-contract", "swap"];
 
 fn run_subject(subject: &str) {
     match subject {
         "console" => console::main(),
         "effect-contract" => effect_contract::main(),
+        "swap" => swap::main(),
         _ => unreachable!("dispatcher validates internal subjects"),
     }
 }
