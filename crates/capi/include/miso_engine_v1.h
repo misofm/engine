@@ -421,7 +421,8 @@ extern "C" {
  * the running plan over N, C counts its compensation delay, and the replacement is adopted no
  * earlier than S. A re-pointed route is a removal plus an addition: from S it fades in at its new
  * destination as an added route does, and its source strip plays on. A post_fader or post_pan
- * route into an output still stops at once at the swap.
+ * route into an output still stops at once at the swap, and a route re-pointed from one still
+ * steps on both sides: it stops at once at its old destination and enters at once at its new one.
  *
  * Duck-swapping a strip whose state cannot continue (issue 1324). A transaction whose
  * replacement restarts a strip it keeps -- an insert added, removed or reordered, delay_samples, a

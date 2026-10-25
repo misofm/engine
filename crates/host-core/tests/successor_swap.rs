@@ -11088,7 +11088,8 @@ fn a_changed_lane_delay_restarts_only_its_lane_on_every_width() {
 }
 
 /// Gate 2b, #1953a (D15-9: a re-point is a removal plus an addition): B re-points the send
-/// [`SEND`] from `bus1` to `bus2` (no submix has a delay and the buses hold no state, so the
+/// [`SEND`] (a) from `bus1` to `bus2`, or (b) to `bus1` from its `pre_fader` tap (no submix has a
+/// delay and the buses hold no state, so the
 /// route's ramp is the only memory) while A's cells hold a gain ramp on it in flight.
 /// `restarted_strips()` is empty: the re-pointed send's source strip `eq3` keeps its state. The
 /// successor arms the send as an added route (`D = 0`, the session mute ramp), and every block from
@@ -11125,24 +11126,32 @@ fn a_repointed_send_fades_in_at_its_new_destination(backend: Backend) {
         }
     };
     let in_flight = [send(SWAP_BLOCK - 2, -9.0, false, LONG_RAMP)];
-    let repoint = |muted| {
-        let mut model = with_muted_output_track(a_model.clone());
-        let route = route_mut(&mut model, SEND);
-        route.destination = session::RouteDestination::SubmixInput {
-            submix_id: id("bus2"),
-        };
-        route.mute = muted;
-        model
-    };
+    // (a) another destination; (b) the same destination from another tap: `known`'s source and
+    // tap check.
+    let repoints: [(&str, &dyn Fn(&mut session::Route)); 2] = [
+        ("(a) to bus2", &|route| {
+            route.destination = session::RouteDestination::SubmixInput {
+                submix_id: id("bus2"),
+            };
+        }),
+        ("(b) from pre_fader", &|route| {
+            let RouteSource::Track { track_id, tap } = route.source.clone() else {
+                panic!("a track route");
+            };
+            assert_ne!(tap, session::SendTap::PreFader, "the tap moves");
+            route.source = RouteSource::Track {
+                track_id,
+                tap: session::SendTap::PreFader,
+            };
+        }),
+    ];
     // The control keeps the send where it was.
     let kept_model = with_muted_output_track(a_model.clone());
-    let (a, b, muted, kept) = (
+    let (a, kept) = (
         Session::compile(a_model.clone()),
-        Session::compile(repoint(false)),
-        Session::compile(repoint(true)),
         Session::compile(kept_model),
     );
-    let swap_to = |to| {
+    let swap_to = |to: &Session| {
         fade_run(
             &a,
             &[FadeSwap {
@@ -11157,36 +11166,57 @@ fn a_repointed_send_fades_in_at_its_new_destination(backend: Backend) {
             backend,
         )
     };
-    let run = swap_to(&b);
-    assert_eq!(
-        run.restarted[0],
-        Vec::<Box<str>>::new(),
-        "{backend:?}: the re-pointed send's source strip keeps its state"
-    );
-    assert_eq!(run.arms[0], vec![(0, ramp)], "{backend:?}: D and the ramp");
-    assert_eq!(run.allocator, (0, 0, 0), "{backend:?}: allocator calls");
-    let reference = |block| {
-        fade_run(
-            &muted,
-            &[],
-            &[&feed],
-            None,
-            &[send(block, template.gain_db, false, ramp)],
-            backend,
-        )
-    };
-    let at_swap = reference(SWAP_BLOCK);
-    for block in SWAP_BLOCK..BLOCKS {
+    for (case, change) in repoints {
+        let repoint = |muted| {
+            let mut model = with_muted_output_track(a_model.clone());
+            let route = route_mut(&mut model, SEND);
+            change(route);
+            route.mute = muted;
+            model
+        };
+        let (b, muted) = (
+            Session::compile(repoint(false)),
+            Session::compile(repoint(true)),
+        );
+        let run = swap_to(&b);
         assert_eq!(
-            run.blocks[block], at_swap.blocks[block],
-            "{backend:?}: block {block}: the re-pointed send fades in from the swap block"
+            run.restarted[0],
+            Vec::<Box<str>>::new(),
+            "{backend:?} {case}: the re-pointed send's source strip keeps its state"
+        );
+        assert_eq!(
+            run.arms[0],
+            vec![(0, ramp)],
+            "{backend:?} {case}: D and the ramp"
+        );
+        assert_eq!(
+            run.allocator,
+            (0, 0, 0),
+            "{backend:?} {case}: allocator calls"
+        );
+        let reference = |block| {
+            fade_run(
+                &muted,
+                &[],
+                &[&feed],
+                None,
+                &[send(block, template.gain_db, false, ramp)],
+                backend,
+            )
+        };
+        let at_swap = reference(SWAP_BLOCK);
+        for block in SWAP_BLOCK..BLOCKS {
+            assert_eq!(
+                run.blocks[block], at_swap.blocks[block],
+                "{backend:?} {case}: block {block}: the re-pointed send fades in from the swap"
+            );
+        }
+        assert_ne!(
+            reference(SWAP_BLOCK + 1).blocks[SWAP_BLOCK],
+            at_swap.blocks[SWAP_BLOCK],
+            "{backend:?} {case}: the fire block is observable"
         );
     }
-    assert_ne!(
-        reference(SWAP_BLOCK + 1).blocks[SWAP_BLOCK],
-        at_swap.blocks[SWAP_BLOCK],
-        "{backend:?}: the fire block is observable"
-    );
     let carried = swap_to(&kept);
     let unmoved = fade_run(&kept, &[], &[&feed], None, &[], backend);
     assert_ne!(

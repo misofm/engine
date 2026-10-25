@@ -254,8 +254,8 @@ fn sorted_ids<'a>(ids: impl Iterator<Item = &'a str>) -> Vec<Box<str>> {
 /// longest route line into the submix when D1's exemption keeps the consumer carried (#1324 D4):
 /// a line the successor shortens then drops only exact `+0.0` at `S`. A carried effect keyed from
 /// a restarted strip's other taps is no case: its strip is restarted too (D1's closure).
-/// A warm successor whose transaction ducks strips is published `Primed` no earlier than this
-/// `S` (#1397 D1), so the same holds for it.
+/// A warm successor whose transaction ducks strips or routes is published `Primed` no earlier
+/// than this `S` (#1397 D1), so the same holds for it.
 ///
 /// Control thread only: it clones the base model twice and allocates the lists.
 ///
@@ -926,6 +926,22 @@ mod tests {
         // `b-main` (`post_pan` into the output) keeps the fold and ducks nothing.
         let mut limited_c = model();
         limited_c.tracks[2].inserts.effects.push(limiter("lim-c"));
+        // And `b-pre`, `b`'s `pre_fader` route into the output: a lane, and a line of `L`.
+        let mut pre = limited_c
+            .routes
+            .iter()
+            .find(|route| route.id.as_str() == "b-main")
+            .expect("b-main")
+            .clone();
+        pre.id = id("b-pre");
+        pre.source = RouteSource::Track {
+            track_id: id("b"),
+            tap: SendTap::PreFader,
+        };
+        limited_c.routes.push(pre);
+        limited_c
+            .routes
+            .sort_by(|left, right| left.id.as_str().cmp(right.id.as_str()));
         let compiled = compile(&limited_c);
         let prepared = crate::prepare::prepare_host_runtime(&compiled, &caps()).expect("prepares");
         let committed = compiled.normalized_model();
@@ -961,6 +977,14 @@ mod tests {
                 "{case}: C is b-send's line"
             );
         }
+        let into_output = without(&|next| next.routes.retain(|route| route.id.as_str() != "b-pre"));
+        assert_eq!(
+            into_output.routes(),
+            [Box::<str>::from("b-pre")],
+            "a pre-fader route into the output ducks alone"
+        );
+        assert!(into_output.strips().is_empty());
+        assert_eq!(into_output.compensation(), latency, "C is b-pre's line");
         let lane_less = without(&|next| next.routes.retain(|route| route.id.as_str() != "b-main"));
         assert!(!lane_less.ducks(), "a lane-less route keeps the fold");
     }

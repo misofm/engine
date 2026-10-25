@@ -7605,7 +7605,9 @@ struct RouteFade<'a> {
 
 /// The routes of `model` a successor arms to fade in (#1363 D1 (a), (c)), in `model`'s route
 /// order: (a) a route `committed` does not hold, or holds under its ID with another source, tap
-/// or destination (a re-point, #1953a), whose source strip and destination it does hold, and (c) a route out of an added strip whose tap precedes the fader. A route from a
+/// or destination and a lane (a re-point, #1953a: a re-point from a lane-less route still steps on
+/// both sides until 1953b), whose source strip and destination it does hold, and (c) a route out
+/// of an added strip whose tap precedes the fader. A route from a
 /// strip whose fader is armed (`added`, or `waiting`: a strip with an unfired predecessor entry)
 /// and whose tap follows the fader takes none (the fader's fade shapes it), and neither does a
 /// route whose destination strip is added (its fader's fade does), a route the session mutes
@@ -7625,12 +7627,21 @@ fn added_route_fades<'a>(
     waiting_routes: &[(&str, u32)],
 ) -> Vec<RouteFade<'a>> {
     // #1953a (D15-9): a route `committed` holds under the same ID with another source, tap or
-    // destination is a removal plus an addition, so it is not known: it arms as added.
-    let known = |route: &session::Route| {
+    // destination is a removal plus an addition, so it is not known: it arms as added. One whose
+    // old route has no lane is still known: its removal half cannot ramp in phase 1, so both
+    // halves keep stepping until 1953b, never a fade in after a step out.
+    let same_endpoints = |route: &session::Route| {
         committed.routes.iter().any(|before| {
             before.id == route.id
                 && before.source == route.source
                 && before.destination == route.destination
+        })
+    };
+    let known = |route: &session::Route| {
+        committed.routes.iter().any(|before| {
+            before.id == route.id
+                && (!controls::route_rows_live(before)
+                    || (before.source == route.source && before.destination == route.destination))
         })
     };
     let mut fades = Vec::new();
@@ -7658,7 +7669,7 @@ fn added_route_fades<'a>(
         let carried = waiting_routes
             .iter()
             .find(|(id, _)| *id == route.id.as_str())
-            .filter(|_| known(route))
+            .filter(|_| same_endpoints(route))
             .map(|&(_, entry)| entry);
         let fade = if carried.is_some() {
             // #1877 D2: an armed route that keeps its endpoints, armed again.
