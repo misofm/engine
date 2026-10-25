@@ -1063,15 +1063,18 @@ impl LiveRoute {
 
     /// Arm the fade-in of a route a plan swap adds during playback (#1363 D3), off the render
     /// thread, before the plan is published: the route keeps its prepared target and mute to
-    /// fire to and waits settled at `[+0.0; 4]`, muted. A route the session mutes arms nothing.
-    /// Returns whether it armed.
+    /// fire to and waits settled at `[+0.0; 4]`, muted. A route the session mutes arms too
+    /// (#2069): its mute is a live value whose prepared state is muted, so its fire goes to
+    /// `[+0.0; 4]`, muted, which an unmute record read before the fire retargets, as any record
+    /// retargets an armed route's fire. Only a route already armed arms nothing. Returns whether
+    /// it armed.
     pub(crate) fn arm_fade_in(&mut self, ramp_samples: u32) -> bool {
-        if self.mute || self.armed.is_some() {
+        if self.armed.is_some() {
             return false;
         }
         self.armed = Some(RouteArm {
             target: self.ramp.target,
-            mute: false,
+            mute: self.mute,
             ramp_samples,
         });
         self.ramp = IndexedRamp::settled([0.0; 4]);
@@ -1135,10 +1138,16 @@ impl LiveRoute {
     /// at (`[+0.0; 4]` for a fade-in) to the armed target over the armed length, exactly the
     /// retarget a live unmute record runs; a fading copy's fade-out (#1953b) ramps to silence the
     /// same way, as a live mute record would. The executor calls it before the route's op runs,
-    /// so the block's own live value drains after it. A route not armed is left alone.
+    /// so the block's own live value drains after it. A route not armed is left alone. A fade-in
+    /// that fires to a mute (#2069: a route the session mutes, or a muting record before the
+    /// fire) ramps nowhere: the route waits settled at `[+0.0; 4]`, muted, and stays so, inactive
+    /// (a fading copy is never muted while it waits, so its fade-out always ramps).
     /// Render-thread code: allocation-, lock- and syscall-free.
     pub(crate) fn fire_fade_in(&mut self) {
         if let Some(arm) = self.armed.take() {
+            if self.mute && arm.mute {
+                return;
+            }
             self.ramp = IndexedRamp::new(
                 self.ramp.coefficients_at(self.position),
                 arm.target,
@@ -1723,11 +1732,13 @@ impl LiveFollowRoute {
 
     /// Arm the fade-in of a following route a plan swap restarts or adds during playback (#2011,
     /// #1363 D3), off the render thread, before the plan is published: both column ramps wait
-    /// settled at `[+0.0; 4]`, muted. A route its prepared gate mutes (`flags.mute`) arms nothing;
-    /// a curve that silences it now does not refuse the arm (R2: a curve that opens during the
-    /// wait must not let the route through before the fire). Returns whether it armed.
+    /// settled at `[+0.0; 4]`, muted. A route its prepared gate mutes (`flags.mute`) arms too
+    /// (#2069): its fire composes with the flags it holds then, so an unmute record before the
+    /// fire opens it at the fire and a fire with the mute still set ramps nowhere. A curve that
+    /// silences it now does not refuse the arm either (R2: a curve that opens during the wait
+    /// must not let the route through before the fire). Returns whether it armed.
     pub(crate) fn arm_fade_in(&mut self, ramp_samples: u32) -> bool {
-        if self.flags.mute || self.armed.is_some() {
+        if self.armed.is_some() {
             return false;
         }
         self.armed = Some(FollowRouteArm {
@@ -19583,7 +19594,18 @@ mod follow_route_op_tests {
             arrival: u64,
             transform: RouteTransform,
         ) -> Self {
-            let source = mute_source(lanes, arrival);
+            Self::with_mute(lanes, arrival, transform, false)
+        }
+
+        /// [`Self::new`] with the route's own prepared mute `mute` in its seeded flags.
+        fn with_mute(
+            lanes: [Option<&[automation::Segment]>; 2],
+            arrival: u64,
+            transform: RouteTransform,
+            mute: bool,
+        ) -> Self {
+            let mut source = mute_source(lanes, arrival);
+            source.flags.mute = mute;
             let (binding, producer) = crate::follow_route_control_pair(
                 &StableGraphId::parse("send").expect("ID"),
                 &LiveValuesSuperseded::new(),
@@ -19611,9 +19633,13 @@ mod follow_route_op_tests {
 
         /// Write and publish one record: `transform`, the source's own flags, over `length`.
         fn write(&mut self, transform: RouteTransform, length: u32) {
+            self.write_flags(transform, self.route.flags, length);
+        }
+
+        /// [`Self::write`] with the flags `flags`.
+        fn write_flags(&mut self, transform: RouteTransform, flags: RouteFollowFlags, length: u32) {
             self.revision += 1;
-            let record =
-                FollowRouteControlRecord::new(transform, self.route.flags, length).expect("record");
+            let record = FollowRouteControlRecord::new(transform, flags, length).expect("record");
             self.producer
                 .write(self.pin.stamp(self.revision).expect("stamp"), record);
             self.pin.publish(&self.gate, self.revision);
@@ -19922,38 +19948,59 @@ mod follow_route_op_tests {
     /// inactive), and a curve event that opens it during the wait moves no coefficient: every
     /// waiting block's output is zero, and the fire then ramps from rest to the open target.
     ///
+    /// #2069: the same holds for a route its prepared gate mutes (`flags.mute`), armed all the
+    /// same, that a record unmutes before the fire: the record retargets the fire only, which
+    /// then opens it exactly as it opens the unmuted route.
+    ///
     /// Test value: red if a curve event inside a delayed armed route's mix retargets its column
     /// ramps (the route is heard before its fire), which the undelayed host-core gate cannot
-    /// reach since an undelayed armed route never mixes.
+    /// reach since an undelayed armed route never mixes; or if a route muted at preparation
+    /// arms nothing (#2069: the unmute record then opens it at once, over its own ramp).
     #[test]
     fn a_delayed_armed_route_stays_silent_through_a_curve_that_opens() {
         let opens = steps(&[0, FIRST + 64], &[1.0, 0.0], 1 << 20);
-        let mut route = Fixture::new([Some(&opens), Some(&opens)], 0, OPEN);
-        route.route.delayed = true;
-        assert!(route.route.arm_fade_in(RECORD_RAMP));
-        for block in 0..2_u64 {
-            let (mut left, mut right) = input(128);
-            assert!(route.block(FIRST + block * 128, None, &mut left, &mut right));
+        let mut expected_left_right = None;
+        for muted in [false, true] {
+            let mut route = Fixture::with_mute([Some(&opens), Some(&opens)], 0, OPEN, muted);
+            route.route.delayed = true;
             assert!(
-                left.iter().chain(&right).all(|&sample| sample == 0.0),
-                "block {block}: silent while armed"
+                route.route.arm_fade_in(RECORD_RAMP),
+                "muted {muted}: it arms"
+            );
+            if muted {
+                let open = RouteFollowFlags {
+                    mute: false,
+                    ..route.route.flags
+                };
+                route.write_flags(OPEN, open, 0);
+            }
+            for block in 0..2_u64 {
+                let (mut left, mut right) = input(128);
+                assert!(route.block(FIRST + block * 128, None, &mut left, &mut right));
+                assert!(
+                    left.iter().chain(&right).all(|&sample| sample == 0.0),
+                    "muted {muted}, block {block}: silent while armed"
+                );
+            }
+            route.route.fire_fade_in();
+            let (mut left, mut right) = input(128);
+            assert!(route.block(FIRST + 256, None, &mut left, &mut right));
+            let expected = expected_left_right.get_or_insert_with(|| {
+                let (mut expected_left, mut expected_right) = input(128);
+                route_mix_ramp_block::<FrameLane>(
+                    &mut expected_left,
+                    &mut expected_right,
+                    &IndexedRamp::new([0.0; 4], gated(OPEN, [false; 2]), RECORD_RAMP),
+                    0,
+                );
+                bits((&expected_left, &expected_right))
+            });
+            assert_eq!(
+                &bits((&left, &right)),
+                expected,
+                "muted {muted}: the fire ramps from rest to the open target"
             );
         }
-        route.route.fire_fade_in();
-        let (mut left, mut right) = input(128);
-        assert!(route.block(FIRST + 256, None, &mut left, &mut right));
-        let (mut expected_left, mut expected_right) = input(128);
-        route_mix_ramp_block::<FrameLane>(
-            &mut expected_left,
-            &mut expected_right,
-            &IndexedRamp::new([0.0; 4], gated(OPEN, [false; 2]), RECORD_RAMP),
-            0,
-        );
-        assert_eq!(
-            bits((&left, &right)),
-            bits((&expected_left, &expected_right)),
-            "the fire ramps from rest to the open target"
-        );
     }
 
     /// #2011: a fire that comes before a fresh route's first block runs in that block before its
@@ -20093,7 +20140,10 @@ mod follow_route_op_tests {
         ///
         /// Test value: red if a live edit lifts the arm early (the record retargets the ramp and
         /// the route mixes before its fire), if the fire forgets the record (it ramps to the
-        /// prepared target), or if it forgets a muting record's mute (the route mixes on).
+        /// prepared target), or if it forgets a muting record's mute (the route mixes on); or
+        /// (#2069) if a route the session mutes arms nothing (an unmute record then opens it at
+        /// once, over its own ramp), or if a fire to a mute ramps from rest to rest (the route
+        /// mixes zeros for the fade's length).
         #[test]
         fn a_record_before_an_armed_routes_fire_retargets_the_fire_only() {
             const ARMED: u32 = 64;
@@ -20146,6 +20196,30 @@ mod follow_route_op_tests {
             assert!(
                 !muted.block(&mut left, &mut right),
                 "a route muted before its fire stays muted after it"
+            );
+            // #2069: a route the session mutes arms too; an unmute record before the fire opens it
+            // at the fire, over the armed length, bit for bit as the open route above. Unmuted by
+            // nothing, its fire ramps nowhere: it is inactive in the block the fire runs in.
+            let mut unmuted = Six::new([0.0; 4], true);
+            assert!(unmuted.route.arm_fade_in(ARMED), "a muted route arms");
+            unmuted.write(moved, RECORD_RAMP);
+            let (mut left, mut right) = input(AFTER);
+            assert!(!unmuted.block(&mut left, &mut right), "it waits silent");
+            unmuted.route.fire_fade_in();
+            let (mut left, mut right) = input(AFTER);
+            assert!(unmuted.block(&mut left, &mut right));
+            assert_eq!(
+                bits((&left, &right)),
+                bits((&want_left, &want_right)),
+                "an unmute before the fire opens a muted route at the fire, over the fade"
+            );
+            let mut still = Six::new([0.0; 4], true);
+            assert!(still.route.arm_fade_in(ARMED));
+            still.route.fire_fade_in();
+            let (mut left, mut right) = input(AFTER);
+            assert!(
+                !still.block(&mut left, &mut right),
+                "a muted route's fire with no unmute ramps nowhere"
             );
         }
 

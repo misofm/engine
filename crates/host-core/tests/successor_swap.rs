@@ -3584,6 +3584,15 @@ fn an_added_route_fades_in_after_its_line_fills(backend: Backend) {
             (0, 0, 0),
             "{backend:?} {case}: allocator calls"
         );
+        // #2069: the route added muted arms too when its mute is live (a lane: (a)), so an
+        // unmute before its fire opens it at the fire; with no lane ((b)) nothing can unmute it
+        // before the fire, and it arms nothing.
+        let lane = case.starts_with("(a)");
+        assert_eq!(
+            swap_to(&Session::compile(added(post, true))).arms[0],
+            if lane { vec![(0, ramp)] } else { Vec::new() },
+            "{backend:?} {case}: a route added muted arms only when its mute is live"
+        );
         let muted_model = added(reference_tap, true);
         let muted = Session::compile(muted_model.clone());
         let reference = |block| {
@@ -3630,7 +3639,9 @@ fn an_added_route_fades_in_after_its_line_fills(backend: Backend) {
 }
 
 /// Issue #1363 gates 1, 3 and 8 on every width. Red if an added route enters at a step at the
-/// swap, if a route with no lane still folds and steps, or if the arm moves a neighbour's bits.
+/// swap, if a route with no lane still folds and steps, or if the arm moves a neighbour's bits;
+/// or (#2069) if preparation skips a muted added route with a lane (no arm: an unmute before the
+/// fire opens it at once) or arms a muted one with none.
 #[test]
 fn an_added_route_fades_in_after_its_line_fills_on_every_width() {
     for backend in backends() {
