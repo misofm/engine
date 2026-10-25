@@ -1567,20 +1567,24 @@ async function runStagingReadRun(createHost, sessionDocument) {
   // capture runs in a render step, so the request goes out before the context renders.
   const { requestTrackResponseThroughSdk } = await import("/sdk/sdk-response-client.js");
   const response = await requestTrackResponseThroughSdk(host, "track");
-  await context.startRendering();
-  const observation = await host.readObservations({
-    selections: [{ trackIndex: 0, rack: 1, effectIndex: 0, tapId: OBSERVATION_TAP_ID, channels: 3 }],
-  });
-  run.observationReadResult = observation.result;
-  run.observationRows = observation.rows.length;
-  const ready = await response.ready(TRACK_RESPONSE_WAIT_MS);
-  run.trackResponse = {
-    result: response.result,
-    replyStatus: response.status,
-    events: ready.events,
-    tagged: ready.tagged,
-    status: ready.status,
-  };
+  try {
+    await context.startRendering();
+    const observation = await host.readObservations({
+      selections: [{ trackIndex: 0, rack: 1, effectIndex: 0, tapId: OBSERVATION_TAP_ID, channels: 3 }],
+    });
+    run.observationReadResult = observation.result;
+    run.observationRows = observation.rows.length;
+    const ready = await response.ready(TRACK_RESPONSE_WAIT_MS);
+    run.trackResponse = {
+      result: response.result,
+      replyStatus: response.status,
+      events: ready.events,
+      tagged: ready.tagged,
+      status: ready.status,
+    };
+  } finally {
+    response.stop();
+  }
   run.renderAllocations = await renderAllocationCount(host);
   await host.dispose();
   return run;

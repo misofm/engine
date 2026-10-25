@@ -2962,9 +2962,11 @@ export async function readTracksThroughSdk(host: MisoAudioWorkletHost): Promise<
  * SDK's frame encoder and posted as the host's `control` message with the host's one request-ID
  * allocator. The capture runs in a render step, so the caller renders and then calls `ready`, which
  * reads the reliable lane's `RESPONSE_READY` events until one carries the reply's tag or
- * `deadlineMs` passes. Each wait step sends a `status` message, after whose reply the worklet posts
- * the events it drained. Returns the reply's status and tag, and from `ready` every
- * `RESPONSE_READY` read and the status of the one with the tag.
+ * `deadlineMs` passes, then drains once more, so a duplicate answer is counted too. Each wait step
+ * sends a `status` message, after whose reply the worklet posts the events it drained. Returns the
+ * reply's status and tag; `ready` returns every `RESPONSE_READY` read, the ones with the tag and
+ * the first one's status. The event listener lives until `stop`, which the caller calls in a
+ * `finally` (`ready` calls it too); a throw before this function returns stops it here.
  */
 export async function requestTrackResponseThroughSdk(
   host: MisoAudioWorkletHost,
@@ -2977,6 +2979,7 @@ export async function requestTrackResponseThroughSdk(
     readonly tagged: number;
     readonly status: string | null;
   }>;
+  readonly stop: () => void;
 }> {
   const events: { readonly tag: bigint; readonly status: string }[] = [];
   const stop = host.onControlEvent((event) => {
@@ -2984,34 +2987,46 @@ export async function requestTrackResponseThroughSdk(
     const ready = decodeResponseReady(event.frame);
     if (ready !== undefined) events.push({ tag: ready.requestTag, status: ready.status });
   });
-  const queue = await createBrowserControlQueue(host);
-  const frame = encodeStripResponseRequest({
-    requestId: queue.requestIds.next(),
-    stripId,
-    grid: "linear",
-    points: 5,
-    minimumHz: 20,
-    maximumHz: 20_000,
-    channels: "both",
-  });
-  const reply = await host.control(frame);
-  queue.noteCommit(reply.revision);
-  const tag = reply.result === 0 ? decodeResponseTagReply(reply.response) : undefined;
-  return {
-    result: reply.result,
-    status: tag === undefined ? null : tag.ok ? "ok" : tag.status,
-    ready: async (deadlineMs) => {
-      const end = performance.now() + deadlineMs;
-      const tagged = () => tag?.ok === true ? events.filter((event) => event.tag === tag.tag) : [];
-      while (tagged().length === 0 && performance.now() < end) {
-        await host.status();
-        await new Promise<void>((resolve) => { setTimeout(resolve, 5); });
-      }
-      stop();
-      const matching = tagged();
-      return { events: events.length, tagged: matching.length, status: matching[0]?.status ?? null };
-    },
-  };
+  try {
+    const queue = await createBrowserControlQueue(host);
+    const frame = encodeStripResponseRequest({
+      requestId: queue.requestIds.next(),
+      stripId,
+      grid: "linear",
+      points: 5,
+      minimumHz: 20,
+      maximumHz: 20_000,
+      channels: "both",
+    });
+    const reply = await host.control(frame);
+    queue.noteCommit(reply.revision);
+    const tag = reply.result === 0 ? decodeResponseTagReply(reply.response) : undefined;
+    const tagged = () => tag?.ok === true ? events.filter((event) => event.tag === tag.tag) : [];
+    return {
+      result: reply.result,
+      status: tag === undefined ? null : tag.ok ? "ok" : tag.status,
+      ready: async (deadlineMs) => {
+        try {
+          const end = performance.now() + deadlineMs;
+          while (tagged().length === 0 && performance.now() < end) {
+            await host.status();
+            await new Promise<void>((resolve) => { setTimeout(resolve, 5); });
+          }
+          // One more round trip: an event the worklet queued with the first is posted before this
+          // reply, so a second answer to the same tag is counted rather than missed.
+          await host.status();
+        } finally {
+          stop();
+        }
+        const matching = tagged();
+        return { events: events.length, tagged: matching.length, status: matching[0]?.status ?? null };
+      },
+      stop,
+    };
+  } catch (error) {
+    stop();
+    throw error;
+  }
 }
 
 export async function runSdkResponseQualification(): Promise<Record<string, unknown>> {
