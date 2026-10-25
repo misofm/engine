@@ -196,3 +196,66 @@ lane* (#1371) connects it to edits.
 - `glide_tests::a_lane_snapshotted_mid_glide_continues_bit_for_bit_and_forged_weights_are_refused`
   (both, gate 5): a restore that drops the weights, adopts them under another mode, keeps a prior
   glide, or admits a weight outside `[0, 1]` turns it red.
+
+## Decision record (1370b, 2026-10-25)
+
+- **Transient shaper (D2-D3, D6).** Each channel's lane holds `w_link` and `w_avg` as
+  `LinearRamp`s beside its parameter ramps (`Ramps::links`); the glide rides the ramp prefix
+  (`Ramps::prefix` counts the weights). A block with a glide in flight renders that prefix through
+  one glide body (`Shaper::run_glide`, outside the four per-arm `run`s): the weights are gathered
+  as vectors, each lane's detector is the `LINK_MIXED` select form, and a lane still in flight
+  takes the blend. The rest of the block, and every block with no glide, renders through the arm
+  as before. Payload 14 -> 22 words per channel (`LINK_WORD = 14`); the 1370a restore rule and
+  refusals (`effect.state.link`; a settled weight must also hold its target). No bank clock: the
+  prefix is read from the ramps, so no parameter span can cut a glide.
+- **True-peak limiter (D2-D4, D6).** One weight per channel (`ChannelState::link`, inline, no
+  heap); the payload gains its quadruple after the history (`LANE_HEADER_WORDS` 27 -> 31, lane
+  words `3N + 39`). The glide's frames of a block render through the per-lane body with a `GLIDE`
+  const (`limiter_block_glide`, ramping dispatch, which is the identity on a resting ramp) and the
+  rest of the block through today's dispatch. `glide_peak`: `P = own + w_link * (max - own)`, the
+  select form on resting and arriving lanes. D4 holds by construction (`max - own >= 0`, so the
+  blend is at least `own`). The collapsed body has the same `GLIDE` const (`max(p, p)`, the dual
+  body's bits on `L == R`). A glide in flight is never quiet and never at rest.
+- **D5 as built, and a finding against its "once".** A switch (a retarget that changes the mode
+  or leaves a weight in flight, or a restore that brings a glide) clears `gain_linked` and raises
+  `relink_frames` with `max` to the glide plus `N + R`, not `R`: a box term at frame `n` reads
+  `r[n-N ..]`, so the box ring is rewritten under the new law only `N + R - 1` frames after the
+  glide. Every rendered, skipped (`advance_clocks`) or silent frame counts it down; at zero on a
+  dual path, `gain_state_agrees` re-derives the record once. Every block with a glide in flight
+  also clears the record: a whole-bank D7 reset mid-glide restates it from cleared words while
+  the glide continues (gate 4 crosses that reset).
+  **Finding:** the reduction word `d` is recursive, and on stationary hot material it does not
+  re-agree within any ring count: measured on `+6 dBFS` noise on both channels at W8, one lane's
+  `d` stayed apart from block 130 to past block 169 (1,920 frames after the countdown), while the
+  rings, prefix and box sums agreed. With the "once" rule such a bank keeps the per-lane body
+  until the next reset, restore or disengage (a cost, never a wrong bit). Gate 4 therefore uses a
+  burst after the glide whose attack makes `d` agree before the check. Root ruling wanted: keep
+  "once", or watch the `W` reduction words per block after a passed ring check (the rings stay
+  equal under all-`Maximum` lanes, since steps 1-5 do not read `d`).
+- **Not built here:** no bank clock exists in either effect that a parameter or rate retarget
+  writes; the 4,800-sample oracle cases still cross a parameter span (shaper: attack amount;
+  limiter: ceiling and release) on every lane.
+
+## Test value (1370b)
+
+- `glide_tests::a_glide_tracks_the_f64_blend_into_the_target_law` (shaper; scalar, Simd4, Simd8):
+  swapped weights, a prefix that ignores the weights, or a retarget that keeps the old masks
+  renders away from the `f64` shaper fed the reference blend. Limiter twin
+  (`tests::glide::...`): a skipped glide prefix or kept old mask leaves the `f64` limiter.
+- `tests::glide::no_switch_puts_a_sample_over_the_ceiling` (limiter, gate 3): a blend that can
+  fall below a channel's own peak (red: blending toward the partner's peak) puts a sample over
+  the ceiling.
+- `tests::glide::the_linked_pair_returns_once_the_rings_are_rewritten` (gate 4): a countdown
+  written without `max`, one that covers `R` and not `N + R`, a missing re-derivation, or a glide
+  block that does not clear the record (after the D7 reset) is red.
+- `a_glide_moves_no_bank_mates_bit_and_allocates_nothing` (both, gates 2 and 6): a retarget that
+  reaches other lanes or a heap call moves a bank-mate's bit or the counter.
+- `a_lane_snapshotted_mid_glide_continues_bit_for_bit_and_forged_weights_are_refused` (both,
+  gate 5): a restore that drops the weights or adopts them under another mode is red; forged
+  words are refused.
+- `an_out_of_range_glide_is_refused...` (both; the limiter also refuses `Average`): a padded lane
+  or a dropped `2^24` bound accepted is red.
+- `a_glide_lands_on_its_target_law_and_a_resting_lane_never_leaves_its_own` (both): a blend on
+  resting or arriving lanes turns a hostile partner word into a NaN.
+- `a_collapsed_block_advances_a_glide_as_the_dual_block_on_equal_channels` (both): a collapsed
+  block that skips the glide parts from the dual block on `L == R`.

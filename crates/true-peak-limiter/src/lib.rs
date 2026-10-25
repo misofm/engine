@@ -728,6 +728,7 @@ impl ChannelState {
     /// | `prefix`, `box_sum`, `phase` | the uniform body's three van Herk registers, written back once per block. |
     /// | `limit`, `release` | all four fields of each ramp: only the collapsed channel's were advanced. |
     /// | `lookahead_ms`, `lane` | the window shape `segment` and `LaneShape` read. Not moved by a rendered block, and copied anyway, because "whole per-channel state" is the rule that survives a later field being added. |
+    /// | `link` | the link weight (#1370): a collapsed glide block advanced the left channel's. |
     ///
     /// `width` is a preparation shape both channels share and is asserted rather than copied.
     /// # Which entries are individually gated, and which are here by the rule
@@ -953,6 +954,7 @@ impl ChannelState {
     /// | `prefix` | exactly `1.0` |
     /// | `box_sum` | exactly the lane's window `Wb` |
     /// | `limit`, `release` | no window open and `current` bit-equal to `target` |
+    /// | `link` | no glide in flight (#1370) |
     ///
     /// `lookahead_ms` and `lane` are preparation words a rendered block never writes. With these
     /// words at rest a `+0.0` frame writes `r = 1.0` over a `1.0`, takes a window minimum of
@@ -3906,8 +3908,10 @@ struct LimiterCore<L: Lane> {
     ///   window, so equal box sums mean equal windows.
     /// * **Cleared** by a dual block with any lane at `DualMono` (issue #1368: the mode is per
     ///   lane, and the record is one per bank) or with a designed word apart on any lane, by
-    ///   every collapsed block (only the left channel advances), and by a restore whose comparison
-    ///   fails. Once cleared it stays cleared until one of the three establishing events: a pair
+    ///   every collapsed block (only the left channel advances), by a restore whose comparison
+    ///   fails, and by a link switch and every block with a glide in flight (issue #1370 D5: a
+    ///   glide's per-channel peaks differ). After a switch, the end of
+    ///   [`relink_frames`](Self::relink_frames) re-derives it from the words, once. Once cleared it stays cleared until one of the three establishing events: a pair
     ///   whose designed words come back together has no proof its gain words did.
     gain_linked: bool,
     /// Issue #1370 D5: frames until the #990 record is re-derived after a link switch.

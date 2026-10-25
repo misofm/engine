@@ -1124,7 +1124,8 @@ impl<L: Lane, const W: usize> Shaper<L, W> {
     /// leaves every state word of the lane bit-identical and writes `+0.0` on both planes.
     ///
     /// A lane's state words are, per channel, the two envelope words `fast` and `slow` and the
-    /// four fields of each of the three parameter ramps: the fourteen-word payload. `Ramps::defaults`
+    /// four fields of each of the three parameter ramps and the two link weights (#1370): the
+    /// twenty-two-word payload. `Ramps::defaults`
     /// is a reset value the kernel never reads, and the coefficients, bypass and link mode are
     /// prepared constants. Pinned, per lane and per channel:
     ///
@@ -1392,8 +1393,8 @@ impl<L: Lane, const W: usize> Shaper<L, W> {
 
     /// `PreparedNativeEffectBank::channels_agree` (issue #1873): every word
     /// [`desymmetrize`](Self::desymmetrize) copies compares bit-equal between the channels, on
-    /// every lane: the two envelope words and the twelve ramp words, fourteen per lane, compared
-    /// outright.
+    /// every lane: the two envelope words, the twelve parameter ramp words and the eight link
+    /// weight words (#1370), twenty-two per lane, compared outright.
     fn channels_bit_equal(&self) -> bool {
         same_lane_bits(self.left_env.fast, self.right_env.fast, W)
             && same_lane_bits(self.left_env.slow, self.right_env.slow, W)
@@ -1526,7 +1527,7 @@ fn same_ramp_bits(a: &LinearRamp, b: &LinearRamp) -> bool {
         && a.remaining == b.remaining
 }
 
-/// Writes one lane's fourteen state words into a payload section.
+/// Writes one lane's twenty-two state words into a payload section.
 fn write_lane<L: Lane, const W: usize>(
     bytes: &mut [u8],
     env: &Env<L>,
@@ -1557,7 +1558,7 @@ struct LaneWords {
     mode: LinkMode,
 }
 
-/// Validates and decodes one lane's fourteen state words, reading the payload bytes in place.
+/// Validates and decodes one lane's twenty-two state words, reading the payload bytes in place.
 ///
 /// Each ramp is read whole, its step included (#1278 D2a), and its every remaining value is
 /// checked against the parameter's strict domain (`ramp_path_inside`): the clamped law keeps every
