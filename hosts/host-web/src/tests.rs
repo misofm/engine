@@ -4500,7 +4500,7 @@ fn bus_meters_render_and_poll_without_allocating() {
         "the output meter's gate is open for the measured block"
     );
     let ((render, windows), allocations, deallocations) =
-        crate::ffi::live_response_ffi_tests::measured(|| {
+        crate::ffi::allocation_counter::measured(|| {
             let render = host.render_next();
             (render, host.poll_meters())
         });
@@ -6536,7 +6536,7 @@ fn a_bus_observation_admits_and_renders_without_allocating() {
         submit_strip_source(&mut a, &format!("t{feeder}"), 2, planes);
     }
     let ((admission, render), allocations, deallocations) =
-        crate::ffi::live_response_ffi_tests::measured(|| (a.submit_commands(1), a.render_next()));
+        crate::ffi::allocation_counter::measured(|| (a.submit_commands(1), a.render_next()));
     assert_eq!(admission, RESULT_OK, "the bus observation is admitted");
     assert_eq!(render, RESULT_OK);
     assert_eq!(allocations, 0, "admission/render allocated");
@@ -7272,28 +7272,6 @@ mod structural_apply {
         assert!(
             rig.bits[BLOCKS as usize - 1].iter().any(|bits| *bits != 0),
             "the blocks are not silence"
-        );
-
-        // A response capture after the swap is stamped with the continued clock.
-        struct Sink;
-        impl ResponseSnapshotSink for Sink {
-            fn copy_owner(
-                &mut self,
-                _: engine::realtime::ResponseSnapshotOwnerInfo<'_>,
-                _: &[engine::realtime::ResponseSnapshotSection],
-                _: &[engine::realtime::ResponseSnapshotSection],
-            ) -> Result<(), ResponseSnapshotError> {
-                Ok(())
-            }
-        }
-        let capture = rig
-            .host
-            .copy_response_snapshot(model.tracks[0].id.as_str(), &mut Sink)
-            .expect("a response capture on the successor");
-        assert_eq!(
-            capture.captured_sample,
-            BLOCKS * u64::from(QUANTUM),
-            "the capture is stamped with the continued clock"
         );
     }
 

@@ -27,11 +27,9 @@
 //! - When `document_ptr` or the `boot` export returns 0, it calls `boot_result`, which is not
 //!   wrapped either.
 //! - It can also call render-locked exports, and those calls are counted: after the `boot` export
-//!   eleven staging accessors: `observation_id_ptr`, `observation_id_capacity`, `observation_selection_ptr`,
-//!   `observation_selection_bytes`, `observation_selection_capacity`,
-//!   `track_response_request_ptr`, `track_response_request_bytes`, `track_response_track_id_ptr`,
-//!   `track_response_track_id_capacity`, `track_response_snapshot_ptr` and
-//!   `track_response_snapshot_capacity`.
+//!   five staging accessors: `observation_id_ptr`, `observation_id_capacity`,
+//!   `observation_selection_ptr`, `observation_selection_bytes` and
+//!   `observation_selection_capacity`.
 //!
 //! # The control counter (issue #1381a, #1332 D1)
 //!

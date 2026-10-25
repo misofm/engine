@@ -232,7 +232,7 @@ export function defaultSourceRingFrames(sampleRateHz: number, quantumFrames: num
 /** Numeric value of a named constant group row, e.g. `constantValue("bufferKinds", "command")`. */
 export function constantValue(
   group: "resultCodes" | "bootResultAliases" | "states" | "backends" | "bufferKinds"
-    | "wireCommandKinds" | "commandReasons" | "racks" | "liveResponseRacks",
+    | "wireCommandKinds" | "commandReasons" | "racks",
   name: string,
 ): number {
   const row = ABI_LAYOUT.constants[group].find((entry) => entry.name === name);

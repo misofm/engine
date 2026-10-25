@@ -65,25 +65,17 @@ use host_web::{
     COMMAND_REASON_UNKNOWN_EFFECT, COMMAND_REASON_UNKNOWN_PARAMETER, COMMAND_REASON_UNKNOWN_RACK,
     COMMAND_REASON_UNKNOWN_TAP, COMMAND_REASON_UNKNOWN_TRACK, COMMAND_REASON_UNSUPPORTED_KIND,
     COMMAND_REASON_WRONG_STATE, COMMAND_RECORD_BYTES, COMMAND_REPORT_BYTES,
-    DEFAULT_MAXIMUM_MEMORY_BYTES, DEFAULT_METER_BLOCKS, DIAGNOSTIC_BYTES,
-    LIVE_RESPONSE_CAPTURE_BYTES, LIVE_RESPONSE_MAXIMUM_ID_BYTES, LIVE_RESPONSE_MAXIMUM_OWNERS,
-    LIVE_RESPONSE_MAXIMUM_POINTS, LIVE_RESPONSE_MAXIMUM_SECTIONS,
-    LIVE_RESPONSE_MEANING_EQ_FILTER_SUBTOTAL, LIVE_RESPONSE_MODE_TARGET, LIVE_RESPONSE_OWNER_BYTES,
-    LIVE_RESPONSE_RACK_CONSOLE, LIVE_RESPONSE_RACK_INPUT_FILTERS, LIVE_RESPONSE_RACK_INSERTS,
-    LIVE_RESPONSE_REQUEST_BYTES, LIVE_RESPONSE_RESULT_BYTES, LIVE_RESPONSE_SECTION_BYTES,
-    MAXIMUM_COMMAND_RECORDS, MAXIMUM_DOCUMENT_BYTES, MAXIMUM_OBSERVATION_TAPS, METER_HEADER_BYTES,
-    OBSERVATION_CHANNEL_BOTH, OBSERVATION_CHANNEL_LEFT, OBSERVATION_CHANNEL_RIGHT,
-    OBSERVATION_RESULT_BYTES, OBSERVATION_SELECTION_BYTES, OBSERVATION_STATUS_PENDING,
-    OBSERVATION_STATUS_READY, OBSERVATION_STATUS_UNARMED, PLAN_LATENCY_BYTES, RACK_CONSOLE,
-    RACK_INSERTS, RACK_NOT_APPLICABLE, RESOURCE_REPORT_BYTES, RESPONSE_CHANNEL_BOTH,
-    RESPONSE_CHANNEL_LEFT, RESPONSE_CHANNEL_RIGHT, RESPONSE_GRID_LINEAR, RESPONSE_GRID_LOGARITHMIC,
-    RESULT_ABI_MISMATCH, RESULT_BACKPRESSURE, RESULT_BUFFER_TOO_SMALL, RESULT_COMPILE_REJECTED,
-    RESULT_INTERNAL, RESULT_INVALID_ARGUMENT, RESULT_OK, RESULT_REFUSED_BUDGET,
-    RESULT_REFUSED_DOCUMENT, RESULT_REFUSED_LIFECYCLE, RESULT_REFUSED_OPTIONS,
-    RESULT_RENDER_REJECTED, RESULT_REPREPARE_REQUIRED, RESULT_UNSUPPORTED, RESULT_WRONG_STATE,
-    SEEK_REPORT_BYTES, SOURCE_STALL_TOLERANCE_MS, STATE_DISPOSED, STATE_FAILED, STATE_READY,
-    STATUS_BYTES, WATERMARK_BYTES, WebBootOptions, WebCommandReport, WebLiveResponseOwner,
-    WebLiveResponseRequest, WebLiveResponseResult, WebLiveResponseSection, WebMeterHeader,
+    DEFAULT_MAXIMUM_MEMORY_BYTES, DEFAULT_METER_BLOCKS, DIAGNOSTIC_BYTES, MAXIMUM_COMMAND_RECORDS,
+    MAXIMUM_DOCUMENT_BYTES, MAXIMUM_OBSERVATION_TAPS, METER_HEADER_BYTES, OBSERVATION_CHANNEL_BOTH,
+    OBSERVATION_CHANNEL_LEFT, OBSERVATION_CHANNEL_RIGHT, OBSERVATION_RESULT_BYTES,
+    OBSERVATION_SELECTION_BYTES, OBSERVATION_STATUS_PENDING, OBSERVATION_STATUS_READY,
+    OBSERVATION_STATUS_UNARMED, PLAN_LATENCY_BYTES, RACK_CONSOLE, RACK_INSERTS,
+    RACK_NOT_APPLICABLE, RESOURCE_REPORT_BYTES, RESULT_ABI_MISMATCH, RESULT_BACKPRESSURE,
+    RESULT_BUFFER_TOO_SMALL, RESULT_COMPILE_REJECTED, RESULT_INTERNAL, RESULT_INVALID_ARGUMENT,
+    RESULT_OK, RESULT_REFUSED_BUDGET, RESULT_REFUSED_DOCUMENT, RESULT_REFUSED_LIFECYCLE,
+    RESULT_REFUSED_OPTIONS, RESULT_RENDER_REJECTED, RESULT_REPREPARE_REQUIRED, RESULT_UNSUPPORTED,
+    RESULT_WRONG_STATE, SEEK_REPORT_BYTES, SOURCE_STALL_TOLERANCE_MS, STATE_DISPOSED, STATE_FAILED,
+    STATE_READY, STATUS_BYTES, WATERMARK_BYTES, WebBootOptions, WebCommandReport, WebMeterHeader,
     WebObservationResult, WebObservationSelection, WebPlanLatency, WebPlanWatermark,
     WebResourceReport, WebSeekReport, WebStatus,
 };
@@ -136,7 +128,7 @@ pub const ERROR_PHASES: [&str; 6] = ["asset", "boot", "source", "render", "outpu
 /// Publishing the whole surface -- not just the four boot calls -- is what lets a JavaScript
 /// consumer name an export without typing a string. `memory` is deliberately absent: it is the
 /// module's linear memory, not a call, and a consumer reaches it as `instance.exports.memory`.
-pub const EXPORTS: [&str; 77] = [
+pub const EXPORTS: [&str; 65] = [
     "miso_engine_web_v1_abi_version",
     "miso_engine_web_v1_boot",
     "miso_engine_web_v1_boot_diagnostic_bytes",
@@ -200,18 +192,6 @@ pub const EXPORTS: [&str; 77] = [
     "miso_engine_web_v1_source_seek_report_ptr",
     "miso_engine_web_v1_source_submit",
     "miso_engine_web_v1_status_ptr",
-    "miso_engine_web_v1_track_response_analysis",
-    "miso_engine_web_v1_track_response_capture",
-    "miso_engine_web_v1_track_response_close",
-    "miso_engine_web_v1_track_response_request_bytes",
-    "miso_engine_web_v1_track_response_request_ptr",
-    "miso_engine_web_v1_track_response_result_bytes",
-    "miso_engine_web_v1_track_response_result_ptr",
-    "miso_engine_web_v1_track_response_snapshot_capacity",
-    "miso_engine_web_v1_track_response_snapshot_ptr",
-    "miso_engine_web_v1_track_response_snapshot_set_bytes",
-    "miso_engine_web_v1_track_response_track_id_capacity",
-    "miso_engine_web_v1_track_response_track_id_ptr",
     "miso_engine_web_v1_watermark_ptr",
     "miso_engine_web_v1_watermark_read",
 ];
@@ -758,243 +738,6 @@ fn command_record_fields() -> [Field; 9] {
     ]
 }
 
-fn live_response_request_fields() -> [Field; 10] {
-    [
-        (
-            "structSize",
-            offset_of!(WebLiveResponseRequest, struct_size),
-            "u32",
-        ),
-        (
-            "abiVersion",
-            offset_of!(WebLiveResponseRequest, abi_version),
-            "u32",
-        ),
-        (
-            "trackIdBytes",
-            offset_of!(WebLiveResponseRequest, track_id_bytes),
-            "u32",
-        ),
-        ("grid", offset_of!(WebLiveResponseRequest, grid), "u32"),
-        (
-            "channels",
-            offset_of!(WebLiveResponseRequest, channels),
-            "u32",
-        ),
-        ("points", offset_of!(WebLiveResponseRequest, points), "u32"),
-        (
-            "minimumHz",
-            offset_of!(WebLiveResponseRequest, minimum_hz),
-            "f32",
-        ),
-        (
-            "maximumHz",
-            offset_of!(WebLiveResponseRequest, maximum_hz),
-            "f32",
-        ),
-        (
-            "maximumResultBytes",
-            offset_of!(WebLiveResponseRequest, maximum_result_bytes),
-            "u32",
-        ),
-        (
-            "reserved",
-            offset_of!(WebLiveResponseRequest, reserved),
-            "u32[3]",
-        ),
-    ]
-}
-
-fn live_response_owner_fields() -> [Field; 16] {
-    [
-        (
-            "trackIdOffset",
-            offset_of!(WebLiveResponseOwner, track_id_offset),
-            "u32",
-        ),
-        (
-            "trackIdBytes",
-            offset_of!(WebLiveResponseOwner, track_id_bytes),
-            "u32",
-        ),
-        (
-            "nativeIdOffset",
-            offset_of!(WebLiveResponseOwner, native_id_offset),
-            "u32",
-        ),
-        (
-            "nativeIdBytes",
-            offset_of!(WebLiveResponseOwner, native_id_bytes),
-            "u32",
-        ),
-        (
-            "stableIdOffset",
-            offset_of!(WebLiveResponseOwner, stable_id_offset),
-            "u32",
-        ),
-        (
-            "stableIdBytes",
-            offset_of!(WebLiveResponseOwner, stable_id_bytes),
-            "u32",
-        ),
-        ("rack", offset_of!(WebLiveResponseOwner, rack), "u32"),
-        ("slot", offset_of!(WebLiveResponseOwner, slot), "u32"),
-        ("kind", offset_of!(WebLiveResponseOwner, kind), "u32"),
-        (
-            "bypassed",
-            offset_of!(WebLiveResponseOwner, bypassed),
-            "u32",
-        ),
-        (
-            "availability",
-            offset_of!(WebLiveResponseOwner, availability),
-            "u32",
-        ),
-        (
-            "leftOffset",
-            offset_of!(WebLiveResponseOwner, left_offset),
-            "u32",
-        ),
-        (
-            "leftCount",
-            offset_of!(WebLiveResponseOwner, left_count),
-            "u32",
-        ),
-        (
-            "rightOffset",
-            offset_of!(WebLiveResponseOwner, right_offset),
-            "u32",
-        ),
-        (
-            "rightCount",
-            offset_of!(WebLiveResponseOwner, right_count),
-            "u32",
-        ),
-        (
-            "reserved",
-            offset_of!(WebLiveResponseOwner, reserved),
-            "u32[1]",
-        ),
-    ]
-}
-
-fn live_response_section_fields() -> [Field; 5] {
-    [
-        ("id", offset_of!(WebLiveResponseSection, id), "u32"),
-        ("kind", offset_of!(WebLiveResponseSection, kind), "u32"),
-        (
-            "enabled",
-            offset_of!(WebLiveResponseSection, enabled),
-            "u32",
-        ),
-        (
-            "wordCount",
-            offset_of!(WebLiveResponseSection, word_count),
-            "u32",
-        ),
-        ("words", offset_of!(WebLiveResponseSection, words), "u32[7]"),
-    ]
-}
-
-fn live_response_result_fields() -> [Field; 22] {
-    [
-        (
-            "structSize",
-            offset_of!(WebLiveResponseResult, struct_size),
-            "u32",
-        ),
-        (
-            "abiVersion",
-            offset_of!(WebLiveResponseResult, abi_version),
-            "u32",
-        ),
-        ("result", offset_of!(WebLiveResponseResult, result), "u32"),
-        ("mode", offset_of!(WebLiveResponseResult, mode), "u32"),
-        ("meaning", offset_of!(WebLiveResponseResult, meaning), "u32"),
-        (
-            "channels",
-            offset_of!(WebLiveResponseResult, channels),
-            "u32",
-        ),
-        ("points", offset_of!(WebLiveResponseResult, points), "u32"),
-        (
-            "ownerCount",
-            offset_of!(WebLiveResponseResult, owner_count),
-            "u32",
-        ),
-        (
-            "excludedCount",
-            offset_of!(WebLiveResponseResult, excluded_count),
-            "u32",
-        ),
-        (
-            "sampleRateHz",
-            offset_of!(WebLiveResponseResult, sample_rate_hz),
-            "u32",
-        ),
-        (
-            "reserved0",
-            offset_of!(WebLiveResponseResult, reserved0),
-            "u32",
-        ),
-        (
-            "reserved1",
-            offset_of!(WebLiveResponseResult, reserved1),
-            "u32",
-        ),
-        (
-            "capturedSample",
-            offset_of!(WebLiveResponseResult, captured_sample),
-            "u64",
-        ),
-        (
-            "snapshotToken",
-            offset_of!(WebLiveResponseResult, snapshot_token),
-            "u64",
-        ),
-        (
-            "resultBytes",
-            offset_of!(WebLiveResponseResult, result_bytes),
-            "u64",
-        ),
-        (
-            "frequenciesOffset",
-            offset_of!(WebLiveResponseResult, frequencies_offset),
-            "u32",
-        ),
-        (
-            "leftOffset",
-            offset_of!(WebLiveResponseResult, left_offset),
-            "u32",
-        ),
-        (
-            "rightOffset",
-            offset_of!(WebLiveResponseResult, right_offset),
-            "u32",
-        ),
-        (
-            "ownersOffset",
-            offset_of!(WebLiveResponseResult, owners_offset),
-            "u32",
-        ),
-        (
-            "ownerRecordBytes",
-            offset_of!(WebLiveResponseResult, owner_record_bytes),
-            "u32",
-        ),
-        (
-            "sectionRecordBytes",
-            offset_of!(WebLiveResponseResult, section_record_bytes),
-            "u32",
-        ),
-        (
-            "reserved",
-            offset_of!(WebLiveResponseResult, reserved),
-            "u32[2]",
-        ),
-    ]
-}
-
 /// Render the whole document. Deterministic: every table below is a fixed array.
 #[must_use]
 pub fn render() -> String {
@@ -1109,22 +852,6 @@ pub fn render() -> String {
                     "observationResult",
                     structure(OBSERVATION_RESULT_BYTES, &observation_result_fields()),
                 ),
-                (
-                    "liveResponseRequest",
-                    structure(LIVE_RESPONSE_REQUEST_BYTES, &live_response_request_fields()),
-                ),
-                (
-                    "liveResponseOwner",
-                    structure(LIVE_RESPONSE_OWNER_BYTES, &live_response_owner_fields()),
-                ),
-                (
-                    "liveResponseSection",
-                    structure(LIVE_RESPONSE_SECTION_BYTES, &live_response_section_fields()),
-                ),
-                (
-                    "liveResponseResult",
-                    structure(LIVE_RESPONSE_RESULT_BYTES, &live_response_result_fields()),
-                ),
             ]
             .into_iter()
             .map(|(name, structure)| (name.to_owned(), structure))
@@ -1151,12 +878,6 @@ pub fn render() -> String {
                 (u32::from(RACK_CONSOLE), "console"),
                 (u32::from(RACK_NOT_APPLICABLE), "notApplicable"),
             ]),
-            // The live-response owner record's `rack`; the retired `1` and `3` are absent.
-            live_response_racks: named(&[
-                (LIVE_RESPONSE_RACK_INPUT_FILTERS, "inputFilters"),
-                (LIVE_RESPONSE_RACK_INSERTS, "inserts"),
-                (LIVE_RESPONSE_RACK_CONSOLE, "console"),
-            ]),
             observation_channels: named(&[
                 (OBSERVATION_CHANNEL_LEFT, "left"),
                 (OBSERVATION_CHANNEL_RIGHT, "right"),
@@ -1167,20 +888,6 @@ pub fn render() -> String {
                 (OBSERVATION_STATUS_UNARMED, "unarmed"),
                 (OBSERVATION_STATUS_READY, "ready"),
             ]),
-            response_grids: named(&[
-                (RESPONSE_GRID_LINEAR, "linear"),
-                (RESPONSE_GRID_LOGARITHMIC, "logarithmic"),
-            ]),
-            response_channels: named(&[
-                (RESPONSE_CHANNEL_LEFT, "left"),
-                (RESPONSE_CHANNEL_RIGHT, "right"),
-                (RESPONSE_CHANNEL_BOTH, "both"),
-            ]),
-            live_response_modes: named(&[(LIVE_RESPONSE_MODE_TARGET, "target")]),
-            live_response_meanings: named(&[(
-                LIVE_RESPONSE_MEANING_EQ_FILTER_SUBTOTAL,
-                "eqFilterSubtotal",
-            )]),
             maximum_command_records: MAXIMUM_COMMAND_RECORDS,
             maximum_document_bytes: MAXIMUM_DOCUMENT_BYTES,
             maximum_source_channels: session::SOURCE_CHANNELS_LAUNCH_MAXIMUM,
@@ -1188,11 +895,6 @@ pub fn render() -> String {
             default_meter_blocks: DEFAULT_METER_BLOCKS,
             maximum_observation_taps: MAXIMUM_OBSERVATION_TAPS,
             maximum_response_points: RESPONSE_MAXIMUM_POINTS,
-            maximum_live_response_owners: LIVE_RESPONSE_MAXIMUM_OWNERS,
-            maximum_live_response_sections: LIVE_RESPONSE_MAXIMUM_SECTIONS,
-            maximum_live_response_id_bytes: LIVE_RESPONSE_MAXIMUM_ID_BYTES,
-            maximum_live_response_points: LIVE_RESPONSE_MAXIMUM_POINTS,
-            live_response_capture_bytes: LIVE_RESPONSE_CAPTURE_BYTES,
             default_maximum_memory_bytes: DEFAULT_MAXIMUM_MEMORY_BYTES,
             source_ring: SourceRing {
                 stall_tolerance_ms: SOURCE_STALL_TOLERANCE_MS,
@@ -1283,13 +985,8 @@ struct Constants<'a> {
     wire_command_kinds: Vec<NamedValue<'a>>,
     command_reasons: Vec<NamedValue<'a>>,
     racks: Vec<NamedValue<'a>>,
-    live_response_racks: Vec<NamedValue<'a>>,
     observation_channels: Vec<NamedValue<'a>>,
     observation_statuses: Vec<NamedValue<'a>>,
-    response_grids: Vec<NamedValue<'a>>,
-    response_channels: Vec<NamedValue<'a>>,
-    live_response_modes: Vec<NamedValue<'a>>,
-    live_response_meanings: Vec<NamedValue<'a>>,
     maximum_command_records: u32,
     maximum_document_bytes: u32,
     maximum_source_channels: u32,
@@ -1297,11 +994,6 @@ struct Constants<'a> {
     default_meter_blocks: u32,
     maximum_observation_taps: u32,
     maximum_response_points: usize,
-    maximum_live_response_owners: usize,
-    maximum_live_response_sections: usize,
-    maximum_live_response_id_bytes: usize,
-    maximum_live_response_points: usize,
-    live_response_capture_bytes: usize,
     default_maximum_memory_bytes: u64,
     source_ring: SourceRing,
 }

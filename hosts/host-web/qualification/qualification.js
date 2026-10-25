@@ -42,7 +42,8 @@ const MINIMUM_STALL_MS = 100;
 // region.
 const STAGING_READ_BLOCKS = OBSERVATION_BLOCKS;
 const STAGING_READ_FRAMES = STAGING_READ_BLOCKS * QUANTUM_FRAMES;
-const TRACK_RESPONSE_MAXIMUM_BYTES = 1 << 20;
+// Issue #1580 D2: the bound on the wait for the host-level track response's `RESPONSE_READY`.
+const TRACK_RESPONSE_WAIT_MS = 10_000;
 const RESULT_OK = 0;
 const PROCESSOR_NAME = "miso-engine-v1-audio-worklet";
 const ARTIFACT_URL = "/artifacts/miso-engine-v1-audio-worklet.simd128.wasm";
@@ -1520,9 +1521,11 @@ async function runStallQualification(createHost, sessionDocument) {
   };
 }
 
-/// Issue #1333 D3: the worklet's staging reads, each inside a render-locked window: an observation
-/// row and a track response over a rendered session. The instance reports its count before its
-/// dispose. The browser reads spectrum through the session's frames, on the control side (#1597).
+/// Issue #1333 D3: the worklet's staging read, inside a render-locked window: an observation row
+/// over a rendered session. The instance reports its count before its dispose. The browser reads
+/// spectrum (#1597) and the track response (#1580) through the session's frames, on the control
+/// side: this run also sends one strip `RESPONSE_GET` before it renders (#1580 D2), so the render
+/// that answers it is inside the counted workload.
 async function runStagingReadRun(createHost, sessionDocument) {
   const context = new OfflineAudioContext(2, STAGING_READ_FRAMES, SAMPLE_RATE);
   const host = await createHost({
@@ -1560,23 +1563,24 @@ async function runStagingReadRun(createHost, sessionDocument) {
     }],
   });
   const run = { subscribeResult: subscribed.result };
+  // Issue #1580 D2: the track response through the core's frames, as every host reads it. The
+  // capture runs in a render step, so the request goes out before the context renders.
+  const { requestTrackResponseThroughSdk } = await import("/sdk/sdk-response-client.js");
+  const response = await requestTrackResponseThroughSdk(host, "track");
   await context.startRendering();
   const observation = await host.readObservations({
     selections: [{ trackIndex: 0, rack: 1, effectIndex: 0, tapId: OBSERVATION_TAP_ID, channels: 3 }],
   });
   run.observationReadResult = observation.result;
   run.observationRows = observation.rows.length;
-  const response = await host.captureTrackResponse({
-    trackId: "track",
-    grid: 1,
-    channels: 3,
-    points: 5,
-    minimumHz: 20,
-    maximumHz: 20_000,
-    maximumResultBytes: TRACK_RESPONSE_MAXIMUM_BYTES,
-  });
-  run.trackResponseResult = response.result;
-  run.trackResponseBytes = response.snapshot.byteLength;
+  const ready = await response.ready(TRACK_RESPONSE_WAIT_MS);
+  run.trackResponse = {
+    result: response.result,
+    replyStatus: response.status,
+    events: ready.events,
+    tagged: ready.tagged,
+    status: ready.status,
+  };
   run.renderAllocations = await renderAllocationCount(host);
   await host.dispose();
   return run;

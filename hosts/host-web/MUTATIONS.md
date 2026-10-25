@@ -502,7 +502,9 @@ Chromium leg of `qualification/run.mjs`.
 | same, (h4) | `closure` takes no exact-name root | (h4): `miso_engine_web_v1_render` is ambiguous with `_render_allocation_count` |
 | `qualification/run.mjs` `render-allocations` | a `Vec::with_capacity(1)` planted in `render_next` (rebuilt module) | every instance reads more than 0 (corpus 2 and 4, live control 260, stall 80, ...) and the gate fails |
 | `qualification/run.mjs --self-test-mutations` `render-allocations` | one instance's count set to 1 | `<browser>: render-allocations` fails |
-| `qualification/run.mjs --self-test-mutations` `staging-reads` | the observation read's result set to backpressure (6) (#1597: the staging reads have no spectrum read) | `<browser>: staging-reads` fails |
+| `qualification/run.mjs --self-test-mutations` `staging-reads` | the observation read's result set to backpressure (6) (#1597, #1580: the staging reads have no spectrum or track-response read) | `<browser>: staging-reads` fails |
+| `qualification/run.mjs --self-test-mutations` `track-response-host-outcome` (#1580 D2) | the host-level `RESPONSE_READY`'s status set to `unavailable` | `<browser>: track-response-host` fails |
+| `qualification/run.mjs --self-test-mutations` `track-response-host-tag` (#1580 D2) | no `RESPONSE_READY` carries the reply's tag | `<browser>: track-response-host` fails |
 | `qualification/run.mjs` `sdk-render-allocations` (#1476) | `drop(Vec::<u8>::with_capacity(1))` planted in `EffectControlLane::stage`'s `EffectControlRecord::Bypass` arm (rebuilt module); no raw workload submits a bypass record | the four live-bypass SDK instances that submit one read 2 each and the gate fails naming them; `render-allocations` stays green (all ten raw rows 0) |
 | same | one SDK instance (`spectrum-query-closed`) closed with `browser.close()` instead of `closeSdkEngine` | `<browser>: sdk-render-allocations` fails: 16 rows for 17 instances |
 | `qualification/run.mjs --self-test-mutations` `sdk-render-allocations` (#1476) | one SDK instance's count set to 1 | `<browser>: sdk-render-allocations` fails naming `resident-observation=1` |

@@ -9,7 +9,7 @@ import {
 } from "../../../sdk/src/core/control-frame.ts";
 import type { ObserveEdit } from "../../../sdk/src/core/control-frame.ts";
 import { ProtocolClient } from "../../../sdk/src/core/protocol-messages.ts";
-import { decodeResponseTagReply } from "../../../sdk/src/core/response-frame.ts";
+import { decodeResponseReady, decodeResponseTagReply, encodeStripResponseRequest } from "../../../sdk/src/core/response-frame.ts";
 import type { MisoAudioWorkletHost, MisoStatus } from "../../../sdk/src/browser/shipped-host.d.ts";
 import { encodeLaneEdits } from "../../../sdk/src/core/writer.ts";
 import { MisoEngineAsset } from "../../../sdk/src/core/asset.ts";
@@ -2955,6 +2955,63 @@ export async function observeThroughSdk(
  */
 export async function readTracksThroughSdk(host: MisoAudioWorkletHost): Promise<readonly string[]> {
   return (await createBrowserStripOrder(host)()).tracks;
+}
+
+/**
+ * The host-level track response (#1580 D2): one strip `RESPONSE_GET` for `stripId`, built with the
+ * SDK's frame encoder and posted as the host's `control` message with the host's one request-ID
+ * allocator. The capture runs in a render step, so the caller renders and then calls `ready`, which
+ * reads the reliable lane's `RESPONSE_READY` events until one carries the reply's tag or
+ * `deadlineMs` passes. Each wait step sends a `status` message, after whose reply the worklet posts
+ * the events it drained. Returns the reply's status and tag, and from `ready` every
+ * `RESPONSE_READY` read and the status of the one with the tag.
+ */
+export async function requestTrackResponseThroughSdk(
+  host: MisoAudioWorkletHost,
+  stripId: string,
+): Promise<{
+  readonly result: number;
+  readonly status: string | null;
+  readonly ready: (deadlineMs: number) => Promise<{
+    readonly events: number;
+    readonly tagged: number;
+    readonly status: string | null;
+  }>;
+}> {
+  const events: { readonly tag: bigint; readonly status: string }[] = [];
+  const stop = host.onControlEvent((event) => {
+    if (event.lane !== 0) return;
+    const ready = decodeResponseReady(event.frame);
+    if (ready !== undefined) events.push({ tag: ready.requestTag, status: ready.status });
+  });
+  const queue = await createBrowserControlQueue(host);
+  const frame = encodeStripResponseRequest({
+    requestId: queue.requestIds.next(),
+    stripId,
+    grid: "linear",
+    points: 5,
+    minimumHz: 20,
+    maximumHz: 20_000,
+    channels: "both",
+  });
+  const reply = await host.control(frame);
+  queue.noteCommit(reply.revision);
+  const tag = reply.result === 0 ? decodeResponseTagReply(reply.response) : undefined;
+  return {
+    result: reply.result,
+    status: tag === undefined ? null : tag.ok ? "ok" : tag.status,
+    ready: async (deadlineMs) => {
+      const end = performance.now() + deadlineMs;
+      const tagged = () => tag?.ok === true ? events.filter((event) => event.tag === tag.tag) : [];
+      while (tagged().length === 0 && performance.now() < end) {
+        await host.status();
+        await new Promise<void>((resolve) => { setTimeout(resolve, 5); });
+      }
+      stop();
+      const matching = tagged();
+      return { events: events.length, tagged: matching.length, status: matching[0]?.status ?? null };
+    },
+  };
 }
 
 export async function runSdkResponseQualification(): Promise<Record<string, unknown>> {
