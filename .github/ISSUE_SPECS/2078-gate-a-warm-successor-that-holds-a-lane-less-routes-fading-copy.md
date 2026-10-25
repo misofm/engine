@@ -65,7 +65,9 @@ red), this spec.
   - A1 (ordinary): re-points `t2-main` to `t2`'s `post_fader` tap under its ID, so it keeps the
     floor `L = 486` above its tap's `0`.
   - A2: A1 again. It drops A1's settled copy and its node. Without this step, B's copy reuses the
-    ID `t2-main-` and inherits the old copy's floor, which hides the ordinary case.
+    ID `t2-main-` and inherits the old copy's floor, which hides the ordinary case. This is
+    harmless in the product: the alias's floor overwrites it and is never lower; the step is for
+    the test only.
   - B removes `t2-main`. The copy's floor must be `L` (ordinary) or `L + P = 998` (warm, with a
     growth of a muted two-limiter track). Every block after the swap must equal the fresh-W'
     reference.
