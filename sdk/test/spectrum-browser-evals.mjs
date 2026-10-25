@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { scriptedControl } from "./control-support.mjs";
+import { scriptedObservationControl } from "./control-support.mjs";
 import { test } from "node:test";
 
 import { createEngine } from "../src/browser/engine.ts";
@@ -346,9 +346,9 @@ test("browser spectrum admission copies mutable query metadata before Worker dis
 test("browser spectrum invalidates a dead Worker and permits a fresh managed lifetime", async () => {
   let workerCount = 0;
   let sequence = 0n;
-  let residentArmed = false;
   const host = hostWithCapture({
-    control: scriptedControl(),
+    // #1589b: the resident subscription's `Observe` edits and reads are core frames.
+    control: scriptedObservationControl(),
     async sessionMap() {
       return { sources: [], metersAttached: false };
     },
@@ -362,29 +362,6 @@ test("browser spectrum invalidates a dead Worker and permits a fresh managed lif
           nativeEffectId: "miso.compressor", tapIds: [1],
         }],
       };
-    },
-    async readObservations({ selections }) {
-      return {
-        result: 0,
-        rows: selections.map((selection) => ({
-          ...selection,
-          status: residentArmed ? 3 : 2,
-          sampleRateHz: 48_000,
-          firstSample: residentArmed ? 0n : 0n,
-          endSample: residentArmed ? 128n : 0n,
-          sequence: residentArmed ? 1n : 0n,
-          blocks: residentArmed ? 1 : 0,
-          leftPresent: residentArmed ? 1 : 0,
-          rightPresent: residentArmed ? 1 : 0,
-          left: 1,
-          right: 2,
-        })),
-      };
-    },
-    async command({ commands }) {
-      residentArmed = commands.at(-1)?.kind === ABI_LAYOUT.constants.wireCommandKinds
-        .find((row) => row.name === "observeSubscribe")?.value;
-      return { result: 0, reason: 0, rejectedIndex: 0, admitted: commands.length, appliedAtSample: 0n };
     },
     async startSpectrumStream() {
       return { result: 0, metadata: streamMetadata(1, sequence) };

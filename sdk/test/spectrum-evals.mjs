@@ -102,8 +102,9 @@ function queuedManagedSpectrumOwner(query, queued) {
   let stopped = false;
   const owner = new ObservationSubscriptionOwner({
     observationMap: () => ({ bindings: [] }),
-    readObservations: () => [],
-    liveControls: () => { throw new Error("unused"); },
+    apply: () => { throw new Error("unused"); },
+    read: () => { throw new Error("unused"); },
+    sampleRateHz: () => 48_000,
     spectrumPrepared: () => query,
     spectrumStart: async () => ({
       ok: true,
@@ -650,9 +651,6 @@ test("managed spectrum anchors asynchronous reads to native cadence", async (t) 
         nativeEffectId: "miso.compressor", tapIds: [1],
       }],
     };
-    const observationDescriptor = {
-      id: 1, name: "Gain Reduction", displayUnit: "dB", unitName: "dB", subscribable: true,
-    };
     const nativeCadenceMs = WINDOW_FRAMES * 1_000 / sampleRateHz;
     const timerCadenceMs = sharedTimer ? 1 : Math.ceil(nativeCadenceMs);
     const metadata = (status, sequence = 0n) => Object.freeze({
@@ -692,32 +690,22 @@ test("managed spectrum anchors asynchronous reads to native cadence", async (t) 
     });
     const owner = new ObservationSubscriptionOwner({
       observationMap: () => observationMap,
-      readObservations: (selections) => selections.map((selection) => ({
-        ...selection,
-        nativeEffectId: "miso.compressor",
-        descriptor: observationDescriptor,
-        sampleRateHz,
-        status: observationArmed ? "ready" : "unarmed",
-        ...(observationArmed ? {
-          left: 1, right: 1,
-          window: { firstSample: 0n, endSample: 128n, sequence: 1n, blocks: 1 },
-        } : {}),
-      })),
-      liveControls: () => ({
-        async syncStructure() {},
-        edit: {
-          strip: () => ({
-            effect: () => ({ observe: (_tap, armed) => ({ kind: armed ? "observeSubscribe" : "observeUnsubscribe" }) }),
-          }),
-        },
-        async submit(...edits) {
-          observationArmed = edits.at(-1)?.kind === "observeSubscribe";
-          return {
-            ok: true, result: 0, code: "ok", reason: 0, reasonName: "none", rejectedIndex: 0,
-            admitted: edits.length, appliedAtSample: 0n,
-          };
-        },
+      // #1589b: the observation half on the core's frames.
+      apply: async (edits) => {
+        observationArmed = edits.at(-1)?.armed === true;
+        return { revision: 1n, observeArmTags: edits.map(() => 1n), removedArmTags: [] };
+      },
+      read: async (selections) => ({
+        observedSample: 128n,
+        rows: selections.map(() => (observationArmed ? {
+          status: "ready", armed: true, armSample: 0n, armTag: 1n,
+          window: { firstSample: 0n, endSample: 128n, sequence: 1n, blocks: 1 }, left: 1, right: 1, unit: 1,
+        } : {
+          status: "unarmed", armed: false, armSample: 0n, armTag: 0n,
+          window: undefined, left: undefined, right: undefined, unit: 1,
+        })),
       }),
+      sampleRateHz: () => sampleRateHz,
       spectrumPrepared: () => query,
       spectrumStart: async () => ({
         ok: true, result: 0, code: "ok", metadata: metadata("warming"),
@@ -847,8 +835,9 @@ test("managed spectrum collection updates target and smoothing atomically", asyn
   });
   const owner = new ObservationSubscriptionOwner({
     observationMap: () => ({ bindings: [] }),
-    readObservations: () => [],
-    liveControls: () => { throw new Error("unused"); },
+    apply: () => { throw new Error("unused"); },
+    read: () => { throw new Error("unused"); },
+    sampleRateHz: () => 48_000,
     spectrumPreparedCollection: () => collection,
     spectrumSelect: async () => ({ ok: true, result: 0, code: "ok" }),
     spectrumStreamSelect: async (query, smoothingMs) => {
@@ -982,8 +971,9 @@ test("managed spectrum loss baselines stay monotonic within an epoch and reset o
   ];
   const owner = new ObservationSubscriptionOwner({
     observationMap: () => ({ bindings: [] }),
-    readObservations: () => [],
-    liveControls: () => { throw new Error("unused"); },
+    apply: () => { throw new Error("unused"); },
+    read: () => { throw new Error("unused"); },
+    sampleRateHz: () => 48_000,
     spectrumPrepared: () => prepared,
     spectrumStart: async () => ({ ok: true, result: 0, code: "ok", metadata: metadata("warming", 0, 0n) }),
     spectrumRead: async () => reads.shift() ?? { metadata: metadata("pending", 1, 0n), result: undefined },
@@ -1036,8 +1026,9 @@ test("automatic spectrum drains once after a gap and preserves coalesced losses"
   let calls = 0;
   let stopped = false;
   const owner = new ObservationSubscriptionOwner({
-    observationMap: () => ({ bindings: [] }), readObservations: () => [],
-    liveControls: () => { throw new Error("unused"); }, spectrumPrepared: () => prepared,
+    observationMap: () => ({ bindings: [] }), apply: () => { throw new Error("unused"); },
+    read: () => { throw new Error("unused"); },
+    sampleRateHz: () => 48_000, spectrumPrepared: () => prepared,
     spectrumStart: async () => ({ ok: true, result: 0, code: "ok", metadata: metadata("warming", 0, 0n) }),
     spectrumRead: async () => { calls++; return await queued.shift(); },
     spectrumStop: async () => { stopped = true; return { ok: true, result: 0, code: "ok" }; },
@@ -1323,8 +1314,9 @@ test("managed spectrum publication metadata survives pending and lifecycle reads
   let timer;
   const owner = new ObservationSubscriptionOwner({
     observationMap: () => ({ bindings: [] }),
-    readObservations: () => [],
-    liveControls: () => { throw new Error("unused"); },
+    apply: () => { throw new Error("unused"); },
+    read: () => { throw new Error("unused"); },
+    sampleRateHz: () => 48_000,
     spectrumPrepared: () => prepared,
     spectrumStart: async () => ({
       ok: true, result: 0, code: "ok", metadata: metadata("warming", 0, 0n),
@@ -1448,8 +1440,9 @@ test("managed spectrum admission refuses before start and preserves a working st
     let reads = 0;
     const owner = new ObservationSubscriptionOwner({
       observationMap: () => ({ bindings: [] }),
-      readObservations: () => [],
-      liveControls: () => { throw new Error("unused"); },
+      apply: () => { throw new Error("unused"); },
+      read: () => { throw new Error("unused"); },
+      sampleRateHz: () => 48_000,
       spectrumPrepared: () => prepared,
       spectrumStart: async () => {
         starts += 1;

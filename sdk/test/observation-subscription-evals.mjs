@@ -637,6 +637,23 @@ describe("issue 1345 -- the browser engine waits for a render, within a bound", 
     }
   });
 
+  // Red if the browser engine's live controls lose the managed owner's guard: a manual record of
+  // kinds 7 and 8 for a tap the owner holds would share the tap's queue slot.
+  test("the browser live controls refuse a manual observation record while a managed subscription holds a tap", async () => {
+    const rig = await coreRig();
+    const engine = await rig.browser();
+    try {
+      const handle = await engine.subscribeObservations(request);
+      const controls = await engine.liveControls();
+      const manual = controls.edit.track("t").insert("comp", "miso.compressor").observe("Gain Reduction", false, 2);
+      await assert.rejects(controls.submit(manual), /conflict/);
+      rig.render();
+      await handle.close();
+    } finally {
+      await engine.close();
+    }
+  });
+
   test("a suspended context ends the wait in typed backpressure at the deadline, and the polling stops", async () => {
     const rig = await coreRig();
     const engine = await rig.browser({ requestDeadlineMs: 80 });

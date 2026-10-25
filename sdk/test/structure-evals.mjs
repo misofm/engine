@@ -17,7 +17,7 @@ import { createBrowserLiveControls } from "../src/browser/live-controls.ts";
 import { observationEdit } from "../src/core/live-controls.ts";
 import { MisoEngineAsset } from "../src/core/asset.ts";
 import { decodeControlReply } from "../src/core/control-frame.ts";
-import { ObservationSubscriptionOwner } from "../src/core/observation-subscriptions.ts";
+import { ObservationSubscriptionOwner, observationFrameTransport } from "../src/core/observation-subscriptions.ts";
 import { decodeObservationEnded } from "../src/core/observation-ended.ts";
 import { MisoControlRefusal } from "../src/core/errors.ts";
 import { encodeLaneEdits } from "../src/core/writer.ts";
@@ -491,48 +491,6 @@ describe("#1562b-K -- a managed observation subscription follows a rebuild", () 
       engine.dispose();
     }
   });
-
-  test("through the browser transport, whose live controls were made before the rebuild", async () => {
-    const engine = await boot();
-    try {
-      const host = engineHost(engine);
-      const controls = await createBrowserLiveControls(host);
-      const owner = new ObservationSubscriptionOwner({
-        observationMap: () => engine.observationMap(),
-        readObservations: (selections) => engine.readObservations(selections),
-        liveControls: () => controls,
-        observationEnded: (listener) => host.onControlEvent((event) => {
-          const ended = event.lane === 0 ? decodeObservationEnded(event.frame) : undefined;
-          if (ended !== undefined) listener(ended);
-        }),
-      });
-      run(engine, 0, 2);
-      // The strips move before the subscription is made: t1 is strip 1 and the controls still say 0.
-      rebuild(engine, "add_first_strip");
-      run(engine, 2, 4);
-      const ends = [];
-      const { handle } = await owner.subscribe({
-        selections: [tap("t1", "inserts", "comp"), tap("t2", "inserts", "gate")],
-        windowBlocks: 2,
-        onEnd: (end) => ends.push(end),
-      });
-      run(engine, 6, 4);
-      await handle.pump();
-      assert.deepEqual(handle.readLatest().map((rowRead) => rowRead.status), ["ready", "ready"]);
-      assert.equal(engine.readObservations([tap("a0", "inserts", "comp")])[0].status, "unarmed");
-
-      rebuild(engine, "swap_comp_for_soft_clip");
-      run(engine, 10, 2);
-      assert.equal(ends.length, 1);
-      assert.deepEqual(ends[0].ended.map((selection) => selection.effectSlotId), ["comp"]);
-      await handle.close();
-      run(engine, 12, 2);
-      assert.equal(engine.readObservations([tap("t2", "inserts", "gate")])[0].status, "unarmed");
-      owner.invalidate(true);
-    } finally {
-      engine.dispose();
-    }
-  });
 });
 
 // #1677 (the successor of batch 12b review M1). A rebuild's commit moves the control list at once,
@@ -553,22 +511,13 @@ describe("#1677 -- an observation record names its tap by stable key", () => {
     return engine;
   }
 
-  /** The same subscriptions through the headless engine and through the browser transport. */
+  /**
+   * The subscriptions through the headless engine. Both engines send the same `Observe` frames to
+   * the same core entry since #1589b (no index of either plan is on the wire), so a hand-built
+   * browser transport would test only itself.
+   */
   const transports = [
     ["headless", (engine) => engine],
-    ["browser", (engine) => {
-      const host = engineHost(engine);
-      let controls;
-      const owner = new ObservationSubscriptionOwner({
-        observationMap: () => engine.observationMap(),
-        readObservations: (selections) => engine.readObservations(selections),
-        liveControls: async () => (controls ??= await createBrowserLiveControls(host)),
-      });
-      return {
-        subscribeObservations: async (request) => (await owner.subscribe(request)).handle,
-        readObservations: (selections) => engine.readObservations(selections),
-      };
-    }],
   ];
 
   for (const [transport, open] of transports) {
@@ -708,8 +657,13 @@ describe("batch 12b review m3 -- an ended event older than the arm is ignored", 
     let deliver;
     const owner = new ObservationSubscriptionOwner({
       observationMap: () => engine.observationMap(),
-      readObservations: (selections) => engine.readObservations(selections),
-      liveControls: () => engine.liveControls(),
+      ...observationFrameTransport({
+        send: (frame) => engine.controlFrame(frame),
+        requestIds: engine.controlTransactions().requestIds,
+        committedRevision: () => engine.controlRevision(),
+        maximumFrameBytes: () => undefined,
+      }),
+      sampleRateHz: () => engine.shape().sampleRateHz,
       observationEnded: (listener) => { deliver = listener; return () => {}; },
     });
     try {
