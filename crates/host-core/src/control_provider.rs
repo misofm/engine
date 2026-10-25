@@ -678,6 +678,17 @@ impl SessionControlProvider {
         );
     }
 
+    /// Record the session's `transition_reprepare_refusals` count (#1397 D2 step 3): the
+    /// transition re-preparations across a withdrawn donor that were refused, each a defect. The
+    /// control plane copies it in beside `strips_restarted`; it stays 0 in a correct build.
+    pub fn set_transition_reprepare_refusals(&mut self, count: u64) {
+        set_counter(
+            &mut self.counter_snapshot,
+            CounterId::TransitionReprepareRefusals,
+            count,
+        );
+    }
+
     /// Record the session's `live_block_errors` count (#1521): the blocks render refused after
     /// the block took its live snapshot, over every plan the session adopted. The control plane
     /// copies the render-side mirror in beside `strips_restarted`; it stays 0 in a correct build.

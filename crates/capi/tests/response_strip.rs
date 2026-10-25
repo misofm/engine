@@ -721,3 +721,140 @@ fn a_capture_grown_past_the_frame_limit_is_answered_by_its_refusal() {
     );
     assert_eq!(host.ask("eq1").1, Reply::Tag(2), "released after delivery");
 }
+
+/// The fixture the SDK's track-response codec is held to (#1579a gate 1).
+const SDK_FIXTURE: &str = "../../sdk/test/fixtures/response-ready.json";
+
+fn hex(bytes: &[u8]) -> String {
+    use std::fmt::Write as _;
+    bytes.iter().fold(String::new(), |mut text, byte| {
+        write!(text, "{byte:02x}").expect("write to a string");
+        text
+    })
+}
+
+/// A JSON string literal of `text`.
+fn json_string(text: &str) -> String {
+    use std::fmt::Write as _;
+    let mut out = String::from("\"");
+    for character in text.chars() {
+        match character {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            character if u32::from(character) < 0x20 => {
+                write!(out, "\\u{:04x}", u32::from(character)).expect("write to a string");
+            }
+            character => out.push(character),
+        }
+    }
+    out.push('"');
+    out
+}
+
+/// Each value's bit pattern, as eight hex digits.
+fn bits_json(values: Option<&[f32]>) -> String {
+    values.map_or_else(
+        || "null".to_owned(),
+        |values| {
+            let words: Vec<_> = values
+                .iter()
+                .map(|value| format!("\"{:08x}\"", value.to_bits()))
+                .collect();
+            format!("[{}]", words.join(", "))
+        },
+    )
+}
+
+/// The checked-in SDK fixture: the document, the strip request the C ABI sent (its frame), and
+/// the one `RESPONSE_READY` frame it answered after one render, with the values the protocol
+/// codec decodes from it.
+fn sdk_fixture() -> String {
+    let (document, revision) = document();
+    let mut host = Host::new(&document, revision);
+    let (request, reply) = host.ask("eq0");
+    assert_eq!(reply, Reply::Tag(1));
+    host.render();
+    let mut storage = vec![0_u8; FRAME_BYTES as usize];
+    let mut event = BytesOut {
+        struct_size: BYTES_OUT_SIZE,
+        reserved0: 0,
+        data: storage.as_mut_ptr(),
+        capacity_bytes: storage.len() as u64,
+        required_bytes: 0,
+    };
+    // SAFETY: `session` is live and used by this thread alone.
+    let code =
+        unsafe { miso_engine_v1_dequeue_event(host.session, EVENT_LANE_RELIABLE, &mut event) };
+    assert_eq!(code, RESULT_OK);
+    let frame = storage[..event.required_bytes as usize].to_vec();
+    let mut fields = [0_u16; 1024];
+    let decoded = ProtocolCodec::default()
+        .decode_typed_event(&frame, &mut DecodeScratch::new(&mut fields))
+        .expect("a reliable event");
+    let DecodedEventPayload::ResponseReady(ready) = decoded.payload else {
+        panic!("the first reliable event is the RESPONSE_READY");
+    };
+    let ResponseReadyOutcome::Ready(capture) = &ready.outcome else {
+        panic!("a capture: {:?}", ready.outcome);
+    };
+    let members: Vec<_> = capture
+        .members
+        .iter()
+        .map(|member| {
+            let (section, slot) = match &member.section {
+                ResponseMemberSection::Builtins => (4, "null".to_owned()),
+                ResponseMemberSection::Console(id) => (5, json_string(id)),
+                ResponseMemberSection::Inserts(id) => (2, json_string(id)),
+            };
+            format!(
+                "      {{ \"section\": {section}, \"slotId\": {slot}, \"effect\": {}, \"kind\": {}, \"bypassed\": {}, \"enabledLeft\": {}, \"enabledRight\": {}, \"sectionCount\": {} }}",
+                json_string(&member.effect),
+                member.kind.code(),
+                member.bypassed,
+                member.enabled_left,
+                member.enabled_right,
+                member.section_count,
+            )
+        })
+        .collect();
+    format!(
+        "{{\n  \"schema\": \"miso.capi.response-ready\",\n  \"document\": {},\n  \"request\": {{ \"requestId\": \"1\", \"trackId\": \"eq0\", \"grid\": {{ \"kind\": \"logarithmic\", \"points\": {POINTS}, \"minimumHz\": 20, \"maximumHz\": 20000 }}, \"channels\": \"both\" }},\n  \"requestHex\": \"{}\",\n  \"eventHex\": \"{}\",\n  \"expect\": {{\n    \"requestTag\": \"{}\",\n    \"stripId\": {},\n    \"capturedSample\": \"{}\",\n    \"sampleRateHz\": {},\n    \"floorDb\": \"{:08x}\",\n    \"excludedCount\": {},\n    \"frequenciesHz\": {},\n    \"leftDb\": {},\n    \"rightDb\": {},\n    \"members\": [\n{}\n    ]\n  }}\n}}\n",
+        json_string(&document),
+        hex(&request),
+        hex(&frame),
+        ready.request_tag,
+        json_string(&ready.strip_id),
+        capture.captured_sample,
+        capture.sample_rate_hz,
+        capture.floor_db.to_bits(),
+        capture.excluded_count,
+        bits_json(Some(&capture.frequencies_hz)),
+        bits_json(capture.left_db.as_deref()),
+        bits_json(capture.right_db.as_deref()),
+        members.join(",\n"),
+    )
+}
+
+/// #1579a gate 1: the checked-in `sdk/test/fixtures/response-ready.json` is exactly what the C ABI
+/// sends and answers for the fixture document. The SDK eval (`sdk/test/live-response-evals.mjs`)
+/// encodes the same strip request and compares bytes, decodes the same event, and asks the headless
+/// engine the same question of the same document.
+///
+/// Test value: red if the C ABI's strip request frame or its `RESPONSE_READY` changes a byte
+/// without the fixture, and with it the SDK codec held to that file, following.
+/// Run with `MISO_ENGINE_BLESS_FIXTURES=1` to rewrite the fixture after a deliberate change.
+#[test]
+fn the_sdk_fixture_is_what_the_c_abi_answers() {
+    let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(SDK_FIXTURE);
+    let rendered = sdk_fixture();
+    if std::env::var_os("MISO_ENGINE_BLESS_FIXTURES").is_some() {
+        std::fs::write(&path, &rendered).expect("write the fixture");
+        return;
+    }
+    let checked_in = std::fs::read_to_string(&path).expect("the checked-in fixture exists");
+    assert!(
+        checked_in == rendered,
+        "{SDK_FIXTURE} differs from the C ABI's frames; rerun with MISO_ENGINE_BLESS_FIXTURES=1 after a deliberate change"
+    );
+}

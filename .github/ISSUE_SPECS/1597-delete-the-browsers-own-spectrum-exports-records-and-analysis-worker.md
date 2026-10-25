@@ -106,3 +106,10 @@ Commands: as #1596's, plus `python3 -B scripts/check-abi-layout-v1.py`,
 - Shrinks *Engine-owned analysis: EQ response, spectrum, selective SDK streams, and sample-time
   correlation* (#763): its spectrum query and continuous spectrum now live in the core with one
   implementation and a C ABI form. Its other open scope stays (see the amendment entry).
+
+## Decision record
+
+- 2026-10-25, root ruling at #1596b: requirement. The headless boot still stages its spectrum taps
+  through the staging exports so the first plan carries them (a headless engine adopts a plan only
+  when its caller renders). When this issue deletes those exports, it owns the boot route and must
+  give a headless boot its taps in the first plan: a capture is armable at sample 0.
