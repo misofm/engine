@@ -2440,18 +2440,6 @@ fn feed_and_render(host: &mut AudioWorkletEngineHost, generation: u64, block: u6
 /// reduction, tap 1) that a session in this file can bind, so an insert queue can be filled with
 /// observation subscriptions, which stay a FIFO (D15-2 condition 1; #1345 D2), where a fader,
 /// matrix or input value is a latest-target cell with no room to fill (#1312, #1346).
-/// A sidechain routed from strip `track`'s own input: a prepared change of an instance (a new
-/// graph edge), which restarts it. (A link change is live since #1371, so it carries.)
-fn own_input_sidechain(track: &session::StableId) -> session::SidechainDeclaration {
-    session::SidechainDeclaration::Routed(session::Sidechain {
-        source: session::RouteSource::Track {
-            track_id: track.clone(),
-            tap: session::SendTap::Input,
-        },
-        port_id: session::StableId::parse("sidechain-in").expect("a port ID"),
-    })
-}
-
 fn observed_compressor_insert() -> session::Effect {
     parse_session_json(include_str!(
         "../../../fixtures/session/v1/observation-frame-shape.json"
@@ -8163,6 +8151,18 @@ mod structural_apply {
             "the subscription publishes windows on the replacement: {:?}",
             read[0].status
         );
+    }
+
+    /// A sidechain routed from strip `track`'s own input: a prepared change of an instance (a new
+    /// graph edge), which restarts it. (A link change is live since #1371, so it carries.)
+    fn own_input_sidechain(track: &session::StableId) -> session::SidechainDeclaration {
+        session::SidechainDeclaration::Routed(session::Sidechain {
+            source: session::RouteSource::Track {
+                track_id: track.clone(),
+                tap: session::SendTap::Input,
+            },
+            port_id: session::StableId::parse("sidechain-in").expect("a port ID"),
+        })
     }
 
     /// #1698 on the browser: a subscription acked against a candidate that restarted "track"'s

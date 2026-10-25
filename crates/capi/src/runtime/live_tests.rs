@@ -9814,10 +9814,18 @@ fn a_rebuild_mid_glide_carries_the_glide_to_its_target() {
         for _ in 0..window(rig.latency(), 0, rig.quantum) {
             assert_eq!(bits(&rig.step()), bits(&twin.step()), "{case}: warm-up");
         }
-        assert_eq!(twin.apply(&[edit.clone()]), crate::RESULT_OK, "{case}");
+        assert_eq!(
+            twin.apply(std::slice::from_ref(&edit)),
+            crate::RESULT_OK,
+            "{case}"
+        );
         match case {
             "applied" => {
-                assert_eq!(rig.apply(&[edit.clone()]), crate::RESULT_OK, "{case}");
+                assert_eq!(
+                    rig.apply(std::slice::from_ref(&edit)),
+                    crate::RESULT_OK,
+                    "{case}"
+                );
                 assert_eq!(
                     bits(&rig.step()),
                     bits(&twin.step()),
@@ -9826,7 +9834,11 @@ fn a_rebuild_mid_glide_carries_the_glide_to_its_target() {
                 assert_eq!(rig.apply(&structural), crate::RESULT_OK, "{case}");
             }
             "unread" => {
-                assert_eq!(rig.apply(&[edit.clone()]), crate::RESULT_OK, "{case}");
+                assert_eq!(
+                    rig.apply(std::slice::from_ref(&edit)),
+                    crate::RESULT_OK,
+                    "{case}"
+                );
                 assert_eq!(rig.apply(&structural), crate::RESULT_OK, "{case}");
             }
             _ => {
