@@ -209,3 +209,32 @@ Commands: `cargo test --locked -p host-core --all-features`,
     verifier found no defect it catches before "A's epoch is dropped" does, so it was removed in
     attempt 2.)
   - Deleted: the `meter.strip.unavailable` row of the capi refusal test (the refusal is gone).
+
+## Decision record (#1587b, 2026-10-25)
+
+- **Taps.** `CapiGainReductionTaps` visits the running epoch's `observations`, every declared tap,
+  with `armed` and `arm_sample` from `ObservationReader::read_state` (#1585 D2); a torn read is an
+  unarmed tap for that poll. `ProviderEpoch::observation_strips` (one `u32` per handle, the
+  handle's index in `SessionModel::strips`) is built in `prepare_runtime` and charged in the
+  epoch's observation handle bytes; it does not move the reference session's
+  `capi_retained_bytes` (313,505 on this branch with or without the charge; the 608 B above the
+  312,897 of the #1587a paragraph came from main).
+- **Resolution.** Gain-reduction strip entries resolve like peak entries (D2).
+- **k-frame rule (D3).** `StripPeakFold` gains `gain_reduction_db` and `gain_reduction_present`:
+  the last frame's present reading, present when any frame's is, independent of `COMPLETE`.
+- **Records bound.** The table stays bounded at 128 entries (`meter.records` at the 129th), not at
+  256 records: a gain entry takes one record, but the stored tables' strip-ID text and the
+  resolution and fold vectors are charged and reserved for 128 entries (#1587a), so an all-gain
+  table of 129-256 entries stays refused.
+- **D4.** `meter.gain_reduction.unavailable` and its capi refusal row are deleted.
+- **Tests.**
+  - `gain_reduction_records_read_only_windows_since_the_taps_arm` (capi, gate 2): red if a window
+    from before the arm sample reaches a record (mutant `arm_sample: 0`: "re-armed, before the
+    first window since the arm closes" flags 1, 12.79 dB), if a disarmed tap reports (mutant
+    `armed: true, arm_sample: 0`: "disarmed" flags 1), or if a gain entry does not resolve (mutant:
+    resolve peak entries only: "armed" flags 0). A mutant that ignores `armed` alone stays green: a
+    disarm moves `arm_sample` past every window the slot holds, so the arm-sample rule covers it.
+  - `a_batch_reports_each_strips_last_present_gain_reduction` (host-core, D3's k-frame rule): red
+    on the maximum (3.0 for 2.0) and on a fold not reset at a batch's first frame (2.0 kept).
+  - Gate 5: the race table gains `{eq0, gain reduction}` over the race's armed compressor tap.
+  - `TestObservationWindows` gains each window's strip reduction word (bits), which gate 2 reads.
