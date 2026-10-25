@@ -183,9 +183,23 @@ self_test() {
         bash "$self" --emit-asm "$scratch/existing.s" host staticlib "$scratch/fresh"
     expect preflight-unknown-target fail 'unknown target' \
         bash "$self" no-such-triple staticlib "$scratch/fresh"
-    # A caller's flag environment is unset only after the preflight (#2079): a refusal still fires.
-    expect preflight-with-rustflags fail 'refusing to overwrite' \
-        env RUSTFLAGS='-C opt-level=1' bash "$self" host staticlib "$scratch/out"
+    # The build runs cargo without the caller's flag and release-profile variables, and keeps the
+    # others (#2079). A stub cargo records the environment it gets, then fails.
+    mkdir -p "$scratch/bin"
+    printf '%s\n' '#!/usr/bin/env bash' "env >'$scratch/cargo-env'" 'exit 1' >"$scratch/bin/cargo"
+    chmod +x "$scratch/bin/cargo"
+    expect build-flag-env fail 'cargo rustc failed for host staticlib' \
+        env PATH="$scratch/bin:$PATH" RUSTFLAGS='-C opt-level=1' \
+        CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS='-C opt-level=1' \
+        CARGO_PROFILE_RELEASE_OPT_LEVEL=1 CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER=cc \
+        CARGO_TARGET_DIR="$scratch/target" bash "$self" host staticlib "$scratch/stub-out"
+    local leaked kept
+    leaked="$(grep -E '^(RUSTFLAGS|CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS|CARGO_PROFILE_RELEASE_OPT_LEVEL)=' \
+        "$scratch/cargo-env" || true)"
+    [[ -z "$leaked" ]] || { printf 'self-test build-flag-env: cargo got %s\n' "$leaked" >&2; return 1; }
+    kept="$(grep -cE '^(CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER=cc|CARGO_TARGET_DIR='"$scratch"'/target)$' \
+        "$scratch/cargo-env" || true)"
+    ((kept == 2)) || { printf 'self-test build-flag-env: cargo lost CARGO_TARGET_DIR or a linker variable\n' >&2; return 1; }
     [[ ! -e "$scratch/fresh" ]] || { printf 'self-test: a refused preflight created its out-dir\n' >&2; return 1; }
     printf 'C ABI release build self-test: ok\n'
 }
@@ -243,8 +257,8 @@ trap 'rm -f -- "$messages"' EXIT
 # limit of #2067). Cargo takes CARGO_ENCODED_RUSTFLAGS over RUSTFLAGS over the joined
 # `target.<triple>`/`target.<cfg>` rustflags (CARGO_TARGET_<TRIPLE>_RUSTFLAGS) over build.rustflags
 # (CARGO_BUILD_RUSTFLAGS), so any of them would replace or extend .cargo/config.toml's x86-64
-# `+avx2,+fma`, and CARGO_PROFILE_RELEASE_* would override the manifest's release profile. Unset
-# here, after the preflight, so a refusal never depends on them. AArch64 needs no flags: NEON is in
+# `+avx2,+fma`, and CARGO_PROFILE_RELEASE_* would override the manifest's release profile. They are
+# unset next to the cargo command because they are part of the build. AArch64 needs no flags: NEON is in
 # the aarch64-apple-ios and aarch64-linux-android baselines, and lane keys on it.
 unset CARGO_ENCODED_RUSTFLAGS RUSTFLAGS CARGO_BUILD_RUSTFLAGS
 for flag_var in ${!CARGO_TARGET_@} ${!CARGO_PROFILE_RELEASE_@}; do
