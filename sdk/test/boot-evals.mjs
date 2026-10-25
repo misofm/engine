@@ -11,6 +11,7 @@ import { after, before, describe, test } from "node:test";
 
 import { MisoEngineAsset, sha256Hex } from "../src/core/asset.ts";
 import { WasmBoundary } from "../src/core/boundary.ts";
+import { readFields } from "../src/core/control-frame.ts";
 import { MisoEngineError, MisoUsageError } from "../src/core/errors.ts";
 import { hexLower } from "../src/core/hex.ts";
 import { ABI_LAYOUT } from "../src/generated/abi.ts";
@@ -363,17 +364,19 @@ describe("eval 8 -- lifecycle", () => {
 });
 
 describe("issue #1596 D2 -- the spectrum capability and the boot configuration", () => {
-  /** The top-level fields of a BTLV frame at `bytes`: `[id, value]`, in order. */
-  function topFields(bytes) {
-    const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
-    const fields = [];
-    let at = 48;
-    for (let index = 0; index < view.getUint32(40, true); index += 1) {
-      const length = view.getUint32(at + 4, true);
-      fields.push([view.getUint16(at, true), at + 8, length]);
-      at += 8 + length + ((8 - (length & 7)) & 7);
-    }
-    return fields;
+  /** A little-endian unsigned word of `width` bytes at `at`. */
+  function wordAt(bytes, at, width) {
+    let value = 0;
+    for (let index = width - 1; index >= 0; index -= 1) value = value * 256 + bytes[at + index];
+    return value;
+  }
+
+  /** A frame's command or reply message ID, from its 48-byte header. */
+  const messageOf = (frame) => wordAt(frame, 16, 2);
+
+  /** The value of top-level field `id` of a BTLV frame, as a view into `bytes`, by the SDK's reader. */
+  function fieldOf(bytes, id) {
+    return readFields(bytes.subarray(48), wordAt(bytes, 40, 4)).find((row) => row.id === id)?.value;
   }
 
   /**
@@ -400,14 +403,14 @@ describe("issue #1596 D2 -- the spectrum capability and the boot configuration",
                   const frame = new Uint8Array(real.memory.buffer, staging, length).slice();
                   calls.frames.push(frame);
                   const result = target[name](handle, length);
-                  const message = new DataView(frame.buffer).getUint16(16, true);
+                  const message = messageOf(frame);
                   if (clearSpectrumFlag && message === 0x0001) {
                     const pointer = Number(real.miso_engine_web_v1_control_response_ptr(handle));
                     const bytes = Number(real.miso_engine_web_v1_control_response_bytes(handle));
                     const reply = new Uint8Array(real.memory.buffer, pointer, bytes);
-                    const flags = topFields(reply).find(([id]) => id === 27);
+                    const flags = fieldOf(reply, 27);
                     assert.ok(flags, "a capabilities reply carries its flags");
-                    reply[flags[1] + 2] &= ~1;
+                    flags[2] &= ~1;
                   }
                   return result;
                 };
@@ -473,11 +476,11 @@ describe("issue #1596 D2 -- the spectrum capability and the boot configuration",
     release();
     const boundary = await pending;
     const configureHops = () => calls.frames
-      .filter((frame) => new DataView(frame.buffer).getUint16(16, true) === 0x0010)
+      .filter((frame) => messageOf(frame) === 0x0010)
       .map((frame) => {
-        const hop = topFields(frame).find(([id]) => id === 4);
+        const hop = fieldOf(frame, 4);
         assert.ok(hop, "the configuration carries the hop");
-        return new DataView(frame.buffer).getUint32(hop[1], true);
+        return wordAt(hop, 0, 4);
       });
     try {
       assert.deepEqual(configureHops(), [1024]);

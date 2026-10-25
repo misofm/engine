@@ -47,6 +47,8 @@ import {
   decodeSpectrumConfiguredReply,
   decodeSpectrumStreamReply,
   encodeSpectrumCommand,
+} from "./spectrum-frame.ts";
+import {
   spectrumCallResult,
   spectrumConfigureRequest,
   spectrumConfiguredOf,
@@ -55,7 +57,7 @@ import {
   spectrumResultOfStream,
   spectrumResultOfWindow,
   spectrumSelection,
-} from "./spectrum-frame.ts";
+} from "./spectrum.ts";
 import type { SpectrumFrameReply, SpectrumFrameRequest } from "./spectrum-frame.ts";
 import {
   decodeObservationRows,

@@ -26,21 +26,10 @@ import {
   u8,
 } from "./control-frame.ts";
 import type { ControlBackpressure, ControlStatusName, RawField } from "./control-frame.ts";
-import { ABI_LAYOUT } from "../generated/abi.ts";
-import type { ResultCodeName } from "../generated/abi.ts";
-import { MisoEngineError, MisoUsageError } from "./errors.ts";
-import type { ErrorPhase } from "./errors.ts";
+import { MisoUsageError } from "./errors.ts";
 import type { ProtocolDiagnostic } from "./protocol-messages.ts";
 import type { Channel } from "./types.ts";
-import type {
-  SpectrumCollection,
-  SpectrumConfigureOptions,
-  SpectrumConfigured,
-  SpectrumQuery,
-  SpectrumResult,
-  SpectrumStreamMetadata,
-  SpectrumTarget,
-} from "./spectrum.ts";
+import type { SpectrumTarget } from "./spectrum.ts";
 
 /**
  * The SDK's one codec of the three spectrum frames (#1596 D1): `SPECTRUM_CONFIGURE` (`0x0010`,
@@ -588,61 +577,8 @@ export function decodeSpectrumStreamReply(bytes: Uint8Array): SpectrumFrameReply
   });
 }
 
-// ----------------------------------------------------------------------------------------------
-// The SDK's public spectrum types over the frames, shared by both engines.
-
-/** The engine result class a refused spectrum reply's status maps to (as `responseRefusalResult`). @internal */
-export function spectrumRefusalResult(status: ControlStatusName): ResultCodeName {
-  switch (status) {
-    case "backpressure":
-      return "backpressure";
-    case "invalid_field":
-    case "validation_failed":
-    case "not_found":
-      return "invalidArgument";
-    case "unavailable":
-      return "unsupported";
-    case "limit_exceeded":
-      return "refusedBudget";
-    default:
-      return "internal";
-  }
-}
-
-function resultValue(name: ResultCodeName): number {
-  const row = ABI_LAYOUT.constants.resultCodes.find((candidate) => candidate.name === name);
-  if (row === undefined) throw new MisoUsageError(`the generated ABI layout has no result ${name}`);
-  return row.value;
-}
-
-/** The `EngineCallResult` words of a spectrum reply: `ok`, or the class its status maps to. @internal */
-export function spectrumCallResult(reply: SpectrumFrameReply<unknown>): {
-  readonly ok: boolean;
-  readonly result: number;
-  readonly code: ResultCodeName;
-} {
-  const code = reply.ok ? "ok" : spectrumRefusalResult(reply.status);
-  return Object.freeze({ ok: reply.ok, result: resultValue(code), code });
-}
-
-/**
- * The error a refused spectrum reply raises: `code` is the result class its status maps to, and the
- * diagnostics are the core's, so `diagnosticCode` is the core's own code (`spectrum.busy`,
- * `spectrum.entry.unknown`, ...). @internal
- */
-export function spectrumRefusalError(message: string, refusal: SpectrumFrameRefusal, phase: ErrorPhase = "output"): MisoEngineError {
-  const code = spectrumRefusalResult(refusal.status);
-  return new MisoEngineError(message, {
-    phase,
-    code,
-    result: resultValue(code),
-    diagnostics: refusal.diagnostics.length === 0
-      ? [{ code: refusal.status, path: "" }]
-      : refusal.diagnostics.map((row) => ({ code: row.code, path: "" })),
-  });
-}
-
-function copyTarget(target: SpectrumTarget): SpectrumTarget {
+/** A copy of `target` with a wire spelling: a known kind and a string identity. @internal */
+export function spectrumFrameTarget(target: SpectrumTarget): SpectrumTarget {
   if (target === null || typeof target !== "object") throw new MisoUsageError("a spectrum target must be an object");
   const id = targetId(target);
   lookup(TARGET_CODES, target.kind, "a spectrum target kind");
@@ -651,172 +587,7 @@ function copyTarget(target: SpectrumTarget): SpectrumTarget {
     : Object.freeze({ kind: target.kind, trackId: id });
 }
 
-/**
- * The one entry a select names, copied: a target and a channel mask with a wire spelling, and
- * nothing the core checks (#1596 D6). @internal
- */
-export function spectrumSelection(query: SpectrumQuery): SpectrumQuery {
-  if (query === null || typeof query !== "object") throw new MisoUsageError("a spectrum query must be an object");
-  const channels = query.channels ?? "both";
+/** Refuse, with `MisoUsageError`, a channel mask the code table does not hold. @internal */
+export function requireSpectrumFrameChannels(channels: unknown): void {
   channelCode(channels);
-  return Object.freeze({ target: copyTarget(query.target), channels });
-}
-
-function budget(value: unknown): bigint {
-  if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0) {
-    throw new MisoUsageError("maximumCaptureBytes must be a non-negative safe integer");
-  }
-  return BigInt(value);
-}
-
-/**
- * The `SPECTRUM_CONFIGURE` request of a public configuration, and the copy the SDK keeps of it. A
- * single query without a capture limit asks for the session's largest window budget, as the boot
- * staging does. It refuses only what has no wire spelling (#1596 D6). @internal
- */
-export function spectrumConfigureRequest(
-  configuration: SpectrumQuery | SpectrumCollection,
-  options: SpectrumConfigureOptions | undefined,
-): {
-  readonly request: Extract<SpectrumFrameRequest, { op: "configure" }>;
-  readonly query: SpectrumQuery | undefined;
-  readonly collection: SpectrumCollection | undefined;
-} {
-  if (configuration === null || typeof configuration !== "object") {
-    throw new MisoUsageError("a spectrum configuration must be a query or a collection");
-  }
-  const hopFrames = options?.hopFrames;
-  if ("entries" in configuration) {
-    if (!Array.isArray(configuration.entries)) throw new MisoUsageError("spectrum entries must be an array");
-    const entries = configuration.entries.map((entry) => {
-      if (entry === null || typeof entry !== "object") throw new MisoUsageError("a spectrum entry must be an object");
-      const channels = entry.channels ?? "both";
-      channelCode(channels);
-      return Object.freeze({ target: copyTarget(entry.target), channels });
-    });
-    const maximumCaptureBytes = budget(configuration.maximumCaptureBytes);
-    return {
-      request: { op: "configure", form: "collection", entries, maximumCaptureBytes, hopFrames },
-      query: undefined,
-      collection: Object.freeze({
-        entries: Object.freeze(entries),
-        maximumCaptureBytes: configuration.maximumCaptureBytes,
-      }),
-    };
-  }
-  const channels = configuration.channels ?? "both";
-  channelCode(channels);
-  const target = copyTarget(configuration.target);
-  const maximum = configuration.spectrumLimits?.maximumCaptureBytes
-    ?? ABI_LAYOUT.constants.spectrumCaptureBytes;
-  const maximumCaptureBytes = budget(maximum);
-  return {
-    request: {
-      op: "configure",
-      form: "single",
-      entries: [{ target, channels }],
-      maximumCaptureBytes,
-      hopFrames,
-    },
-    query: Object.freeze({
-      target,
-      channels,
-      spectrumLimits: Object.freeze({ maximumCaptureBytes: maximum }),
-    }),
-    collection: undefined,
-  };
-}
-
-/** The public `SpectrumConfigured` of a configure reply's value. @internal */
-export function spectrumConfiguredOf(value: SpectrumFrameConfigured): SpectrumConfigured {
-  return Object.freeze({
-    configuredEpoch: value.configuredEpoch,
-    adoptedEpoch: value.adoptedEpoch,
-    rebuild: value.rebuild,
-    ...(value.planEpoch === undefined ? {} : { planEpoch: value.planEpoch }),
-  });
-}
-
-/**
- * The analysis floor of every bin, in dB (`host_core::SPECTRUM_FLOOR_DB`). A ready capture reply
- * carries it; a stream reply does not (#1595 D3), and its bins are analyzed with the same floor.
- */
-const SPECTRUM_FLOOR_DB = -120;
-
-/**
- * `SpectrumResult.resultBytes`: the bytes of the result record the browser's old spectrum exports
- * wrote for these planes (its header, the axis and each plane), so a subscription's byte bounds
- * count a frame read as they counted a record read.
- */
-function resultBytes(binCount: number, planes: number): bigint {
-  return BigInt(ABI_LAYOUT.structures.spectrumResult.bytes + binCount * 4 * (1 + planes));
-}
-
-function planeCount(left: Float32Array | undefined, right: Float32Array | undefined): number {
-  return (left === undefined ? 0 : 1) + (right === undefined ? 0 : 1);
-}
-
-/** The public result of a ready one-shot window. @internal */
-export function spectrumResultOfWindow(window: SpectrumFrameWindow): SpectrumResult {
-  return Object.freeze({
-    target: window.target,
-    channels: window.channels,
-    sampleRateHz: window.sampleRateHz,
-    windowFrames: window.windowFrames,
-    binCount: window.binCount,
-    floorDb: window.floorDb,
-    frequenciesHz: window.frequenciesHz,
-    ...(window.leftDb === undefined ? {} : { leftDb: window.leftDb }),
-    ...(window.rightDb === undefined ? {} : { rightDb: window.rightDb }),
-    capturedSample: window.capturedSample,
-    endSample: window.endSample,
-    snapshotToken: window.snapshotToken,
-    graphSourceUnderrun: window.sourceUnderrun,
-    resultBytes: resultBytes(window.binCount, planeCount(window.leftDb, window.rightDb)),
-  });
-}
-
-/** The public metadata of a stream reply. @internal */
-export function spectrumMetadataOf(stream: SpectrumFrameStream): SpectrumStreamMetadata {
-  return Object.freeze({
-    result: resultValue("ok"),
-    status: stream.status,
-    ...(stream.target === undefined ? {} : { target: stream.target }),
-    ...(stream.channels === undefined ? {} : { channels: stream.channels }),
-    sampleRateHz: stream.sampleRateHz,
-    quantumFrames: stream.quantumFrames,
-    hopFrames: stream.hopFrames,
-    sourceUnderrun: stream.sourceUnderrun,
-    captureEpoch: stream.captureEpoch,
-    sequence: stream.sequence,
-    droppedCaptures: stream.droppedCaptures,
-    windows: stream.windows,
-    capturedSample: stream.capturedSample,
-    endSample: stream.endSample,
-    analysisEpoch: stream.analysisEpoch,
-    historyStartSample: stream.historyStartSample,
-    smoothingMs: stream.smoothingMs,
-  });
-}
-
-/** The public result of a ready stream reply's bins; `undefined` when the reply has none. @internal */
-export function spectrumResultOfStream(stream: SpectrumFrameStream): SpectrumResult | undefined {
-  const bins = stream.bins;
-  if (bins === undefined || stream.target === undefined || stream.channels === undefined) return undefined;
-  return Object.freeze({
-    target: stream.target,
-    channels: stream.channels,
-    sampleRateHz: stream.sampleRateHz,
-    windowFrames: SPECTRUM_FRAME_WINDOW_FRAMES,
-    binCount: bins.frequenciesHz.length,
-    floorDb: SPECTRUM_FLOOR_DB,
-    frequenciesHz: bins.frequenciesHz,
-    ...(bins.leftDb === undefined ? {} : { leftDb: bins.leftDb }),
-    ...(bins.rightDb === undefined ? {} : { rightDb: bins.rightDb }),
-    capturedSample: stream.capturedSample,
-    endSample: stream.endSample,
-    snapshotToken: stream.windows,
-    graphSourceUnderrun: stream.sourceUnderrun,
-    resultBytes: resultBytes(bins.frequenciesHz.length, planeCount(bins.leftDb, bins.rightDb)),
-  });
 }
