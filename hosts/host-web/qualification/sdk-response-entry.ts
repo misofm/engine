@@ -1,8 +1,12 @@
 import { WasmBoundary } from "../../../sdk/src/core/boundary.ts";
 import { EngineLiveControls } from "../../../sdk/src/core/live-controls.ts";
 import { ControlTransactionQueue } from "../../../sdk/src/core/control-queue.ts";
-import { createBrowserControlListTransport, createBrowserLiveControls, createBrowserStripOrder } from "../../../sdk/src/browser/live-controls.ts";
-import { decodeControlReply } from "../../../sdk/src/core/control-frame.ts";
+import { createBrowserControlListTransport, createBrowserControlQueue, createBrowserLiveControls, createBrowserStripOrder } from "../../../sdk/src/browser/live-controls.ts";
+import {
+  WIRE_BYTES, WIRE_U32, WIRE_U8, commandFrame, concat, controlCallFailure, decodeControlReply, decodeRefusalBody,
+  decodeResponseEnvelope, field, scalar, u32,
+} from "../../../sdk/src/core/control-frame.ts";
+import { ProtocolClient } from "../../../sdk/src/core/protocol-messages.ts";
 import type { MisoAudioWorkletHost, MisoStatus } from "../../../sdk/src/browser/shipped-host.d.ts";
 import { encodeLaneEdits } from "../../../sdk/src/core/writer.ts";
 import { MisoEngineAsset } from "../../../sdk/src/core/asset.ts";
@@ -2630,6 +2634,74 @@ export async function sendStructuralFrameThroughSdk(
     revision: String(reply.revision),
     replyBytes: response.length,
   };
+}
+
+/** `SESSION_REPLACE`'s message ID (#1386, `crates/protocol/src/wire.rs`). */
+const MESSAGE_SESSION_REPLACE = 0x0013;
+/** The reply's edit-path codes (`crates/protocol`'s `EditPath`), as the SDK's reply decoder names them. */
+const EDIT_PATH_NAMES = new Map([[1, "live"], [2, "model_only"], [3, "rebuild"], [4, "monitor"]]);
+
+/**
+ * Replace the host's running session with `document` (#1295, #1697): one `SESSION_REPLACE` frame,
+ * its two fields the document's length and SHA-256, built with the SDK's frame encoder, its request
+ * ID from the host's one allocator and its expected revision the queue's committed one, sent with
+ * the document beside it through `host.control(frame, document)`. Returns the core's verdict and the
+ * frame's bytes, which `run.mjs` sends to its Node reference unchanged.
+ */
+export async function replaceSessionThroughSdk(
+  host: MisoAudioWorkletHost,
+  document: Uint8Array,
+): Promise<{
+  status: string; path: string | undefined; appliedOperations: number | undefined; revision: string;
+  expectedRevision: string; frameHex: string; replyBytes: number; diagnostics: readonly string[];
+}> {
+  const queue = await createBrowserControlQueue(host);
+  const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", document));
+  const expectedRevision = queue.revision;
+  const frame = commandFrame(
+    MESSAGE_SESSION_REPLACE,
+    0,
+    queue.requestIds.next(),
+    expectedRevision,
+    2,
+    concat([field(1, WIRE_U32, true, u32(document.byteLength)), field(2, WIRE_BYTES, true, digest)]),
+  );
+  const frameHex = Array.from(frame, (byte) => byte.toString(16).padStart(2, "0")).join("");
+  const reply = await host.control(frame, document);
+  if (reply.result !== 0) throw controlCallFailure(reply.result, reply.response);
+  const { status, revision, fields } = decodeResponseEnvelope(reply.response, MESSAGE_SESSION_REPLACE);
+  const ok = status === "ok";
+  return {
+    status,
+    path: ok ? EDIT_PATH_NAMES.get(scalar(fields, 2, WIRE_U8, 1)?.getUint8(0) ?? 0) : undefined,
+    appliedOperations: ok ? scalar(fields, 1, WIRE_U32, 4)?.getUint32(0, true) : undefined,
+    revision: String(revision),
+    expectedRevision: String(expectedRevision),
+    frameHex,
+    replyBytes: reply.response.length,
+    diagnostics: ok ? [] : decodeRefusalBody(fields).diagnostics.map((row) => row.code),
+  };
+}
+
+/**
+ * The host's `sourceUnderrunBlocks` protocol counter (`COUNTERS_GET`, counter 20), through the
+ * SDK's protocol client on the host's one request-ID allocator.
+ */
+export async function sourceUnderrunBlocksThroughSdk(host: MisoAudioWorkletHost): Promise<string> {
+  const queue = await createBrowserControlQueue(host);
+  const client = new ProtocolClient({
+    send: async (frame) => {
+      const reply = await host.control(frame);
+      if (reply.result !== 0) throw controlCallFailure(reply.result, reply.response);
+      return reply.response;
+    },
+    requestIds: queue.requestIds,
+    committedRevision: () => queue.revision,
+  });
+  const snapshot = await client.counters(["sourceUnderrunBlocks"]);
+  const row = snapshot.values.find((value) => value.id === "sourceUnderrunBlocks");
+  if (row === undefined) throw new Error("the counter snapshot holds no sourceUnderrunBlocks");
+  return String(row.value);
 }
 
 /**

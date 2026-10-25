@@ -85,6 +85,7 @@ export type {
 } from "./core/session.ts";
 export { TransactionBuilder, transaction } from "./core/session-transaction.ts";
 export type { SessionEditSpec, SessionTransaction } from "./core/session-transaction.ts";
+export type { EditOutcome, EditPath, WatermarkSnapshot } from "./core/session-edit.ts";
 export * from "./core/writer.ts";
 export type * from "./core/types.ts";
 

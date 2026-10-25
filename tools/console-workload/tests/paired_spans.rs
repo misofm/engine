@@ -547,6 +547,7 @@ impl Rig {
                             shape: shape(),
                             bypass: false,
                             observation_depth: 0,
+                            link: None,
                         },
                         &superseded,
                     )
@@ -1894,6 +1895,7 @@ fn every_launch_effect_applies_a_twin_pair_with_channel_symmetric_validity() {
                     shape: EffectLaneShape::from_descriptor(descriptor, 0),
                     bypass: false,
                     observation_depth: 0,
+                    link: None,
                 },
                 &LiveValuesSuperseded::new(),
             )

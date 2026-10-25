@@ -368,7 +368,7 @@ fn a_random_walk_of_transactions_commits_as_the_full_path_does() {
         }
     }
     // The fallbacks are reached before the random tail, whatever its seed draws.
-    for row in ["matrix_mode", "fader_ms", "link_mode", "<structural>"] {
+    for row in ["matrix_mode", "fader_ms", "<structural>"] {
         assert!(
             tally.full_rows.contains(row),
             "no first-appearance full commit of {row}"
@@ -421,6 +421,8 @@ fn a_random_walk_of_transactions_commits_as_the_full_path_does() {
         "solo",
         "follows_mute",
         "pan_window_samples",
+        // A lane_link effect's link mode is live (#1371).
+        "link_mode",
     ] {
         assert!(
             tally.in_place_rows.contains(row),

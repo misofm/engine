@@ -32,6 +32,8 @@ const KIND_RESPONSE = 2;
 const MESSAGE_CAPABILITIES_GET = 0x0001;
 /** @internal */
 export const MESSAGE_SESSION_TRANSACTION_APPLY = 0x0003;
+/** `SESSION_REPLACE` (#1386): replace the session with a document passed beside the frame. @internal */
+export const MESSAGE_SESSION_REPLACE = 0x0013;
 /** Header flag byte: the command takes any session revision (`CAPABILITIES_GET` requires it). */
 /** @internal */
 export const FLAG_REVISION_ANY = 1;
@@ -433,8 +435,12 @@ export function decodeControlLimits(bytes: Uint8Array): ControlLimits | undefine
   });
 }
 
-/** How the core applied a committed transaction (`TransactionApplied.edit_path`). */
-export type ControlEditPath = "live" | "model_only" | "rebuild" | "monitor";
+/**
+ * How the core applied a committed transaction (`TransactionApplied.edit_path`). `"unchanged"` is
+ * only a `SESSION_REPLACE` reply's: the document equals the committed model, nothing committed and
+ * the revision did not advance (#1386).
+ */
+export type ControlEditPath = "live" | "model_only" | "rebuild" | "monitor" | "unchanged";
 
 const EDIT_PATHS: ReadonlyMap<number, ControlEditPath> = new Map([
   [1, "live"],
@@ -443,6 +449,7 @@ const EDIT_PATHS: ReadonlyMap<number, ControlEditPath> = new Map([
   // The monitor overlay (solo) lands with #1559; its code is accepted here so the decoder needs no
   // change when the core starts to send it.
   [4, "monitor"],
+  [5, "unchanged"],
 ]);
 
 /** The protocol's response status registry, by name. */
@@ -777,10 +784,16 @@ export function decodeRefusalBody(fields: readonly RawField[]): ControlRefusalBo
  * reply to this command raise `MisoEngineError` (`phase: "lifecycle"`, `code: "internal"`).
  */
 export function decodeControlReply(bytes: Uint8Array): ControlReply {
-  const { requestId, status, revision, fields } = decodeResponseEnvelope(
-    bytes,
-    MESSAGE_SESSION_TRANSACTION_APPLY,
-  );
+  return decodeAppliedReply(bytes, MESSAGE_SESSION_TRANSACTION_APPLY);
+}
+
+/**
+ * Decode the reply to `message`, a command whose success payload is `TransactionApplied`:
+ * `SESSION_TRANSACTION_APPLY` or `SESSION_REPLACE` (#1386).
+ * @internal
+ */
+export function decodeAppliedReply(bytes: Uint8Array, message: number): ControlReply {
+  const { requestId, status, revision, fields } = decodeResponseEnvelope(bytes, message);
 
   if (status === "ok") {
     const appliedOperations = scalar(fields, 1, WIRE_U32, 4)?.getUint32(0, true);

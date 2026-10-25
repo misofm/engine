@@ -150,6 +150,10 @@ async function testMainRealm() {
   const sessionSeekMessages = [];
   let sessionSeekResult = 0;
   let sessionSeekGenerationOffset = 0n;
+  // Issue #1297a: every seek-at and seek report message the fake port received, and the reply a
+  // seek report gets (a function of the received message).
+  const sourceSeekMessages = [];
+  let seekReportReply = null;
   let mixedSuccess = false;
   let commandMutation = null;
   let compileGate = null;
@@ -248,7 +252,11 @@ async function testMainRealm() {
             tag: "miso.session-seek.v1", requestId: received.requestId,
             result: sessionSeekResult, generation: received.generation + sessionSeekGenerationOffset,
           };
+        } else if (received.tag === "miso.seek-report.v1") {
+          sourceSeekMessages.push(received);
+          response = { tag: "miso.seek-report.v1", ...seekReportReply(received) };
         } else {
+          if (received.tag === "miso.seek-at.v1") sourceSeekMessages.push(received);
           response = { tag: "miso.ack.v1", requestId: received.requestId, result: 0 };
         }
         if (received.tag === "miso.source.v1" && planeMutation !== null) {
@@ -1932,6 +1940,84 @@ async function testMainRealm() {
     ]);
     await pipelineHost.dispose();
 
+    {
+      // Issue #1297a, the host half: `seekSourceAt` posts one exact message and shares the
+      // per-source seek bound with `seekSource`; `seekReport` resolves with the record's words
+      // or, for a refusal, a null report; a reply whose report disagrees with its result fails
+      // the host.
+      const seekHost = await createMisoAudioWorkletHost({
+        context,
+        document: new Uint8Array(),
+        options: limits,
+        simd128ModuleUrl: "simd.wasm",
+        workletModuleUrl: "processor.js",
+      });
+      const words = {
+        generation: 5n, firstSample: 1024n, sourceFrame: 48000n,
+        cumulativeUnderrunFrames: 7n, cumulativeHeldFrames: 9n,
+      };
+      holdAll = true;
+      const firstSeekAt = seekHost.seekSourceAt({
+        sourceId: "drums", generation: 2n, sourceFrame: 480n, anchorSample: 128n,
+      });
+      const beforeSeekAtOverflow = events.length;
+      await localErrorResult(seekHost.seekSource({
+        sourceId: "drums", generation: 3n, sourceFrame: 0n,
+      }), 6);
+      assert.equal(events.length, beforeSeekAtOverflow, "a second seek of a source posts nothing");
+      holdAll = false;
+      for (const respond of heldAll) respond();
+      heldAll.length = 0;
+      assert.equal((await firstSeekAt).result, 0);
+      seekReportReply = (received) => ({
+        requestId: received.requestId, result: 0, report: words,
+      });
+      holdAll = true;
+      const firstReport = seekHost.seekReport("drums");
+      const beforeReportOverflow = events.length;
+      await localErrorResult(seekHost.seekReport("drums"), 6);
+      assert.equal(events.length, beforeReportOverflow, "a second report of a source posts nothing");
+      holdAll = false;
+      for (const respond of heldAll) respond();
+      heldAll.length = 0;
+      assert.equal((await firstReport).result, 0);
+      await localErrorResult(seekHost.seekSourceAt({
+        sourceId: "drums", generation: 3n, sourceFrame: 0n, anchorSample: -1n,
+      }), 1);
+      seekReportReply = (received) => ({
+        requestId: received.requestId, result: 0, report: words,
+      });
+      assert.deepEqual(await seekHost.seekReport("$timeline"), {
+        tag: "miso.seek-report.v1", requestId: 3, result: 0, report: words,
+      });
+      seekReportReply = (received) => ({ requestId: received.requestId, result: 6, report: null });
+      assert.deepEqual((await seekHost.seekReport("drums")).report, null);
+      seekReportReply = (received) => ({ requestId: received.requestId, result: 6, report: words });
+      await errorResult(seekHost.seekReport("drums"), 255);
+      assert.deepEqual(sourceSeekMessages, [
+        { tag: "miso.seek-at.v1", sourceId: "drums", generation: 2n, sourceFrame: 480n,
+          anchorSample: 128n, requestId: 1 },
+        { tag: "miso.seek-report.v1", sourceId: "drums", requestId: 2 },
+        { tag: "miso.seek-report.v1", sourceId: "$timeline", requestId: 3 },
+        { tag: "miso.seek-report.v1", sourceId: "drums", requestId: 4 },
+        { tag: "miso.seek-report.v1", sourceId: "drums", requestId: 5 },
+      ]);
+      await seekHost.dispose();
+      // An OK reply whose word is a number, not a `bigint`, fails a fresh host.
+      const wordHost = await createMisoAudioWorkletHost({
+        context,
+        document: new Uint8Array(),
+        options: limits,
+        simd128ModuleUrl: "simd.wasm",
+        workletModuleUrl: "processor.js",
+      });
+      seekReportReply = (received) => ({
+        requestId: received.requestId, result: 0, report: { ...words, generation: 5 },
+      });
+      await errorResult(wordHost.seekReport("drums"), 255);
+      await wordHost.dispose();
+    }
+
     // W4-D1: a browser that cannot validate simd128 is refused with the typed record, before any
     // network request. Red mutation: delete the `WebAssembly.validate(SIMD128_PROBE)` guard in
     // `createMisoAudioWorkletHost` -> the rejection becomes a generic 255 and `compileCount` grows.
@@ -2703,8 +2789,14 @@ function createFakeExports(quantum, backend = 1, liveControlsAttached = true, su
       supersededCount: 0n,
     },
     watermarkResult: 0, watermarkReads: 0, watermarkBytes: 96,
+    // Issue #1297a: the anchored seek and seek report calls in order, the results they return,
+    // the words a successful read writes, and the record's struct size word.
+    seekAt: [], seekAtResult: 0, seekReport: [], seekReportResult: 0, seekReportBytes: 64,
+    seekReportGrowsMemory: false,
+    seekReportWords: [5n, 1024n, 48000n, 7n, 9n],
   };
   const watermarkPointer = 66000;
+  const seekReportPointer = 66200;
   // What `control_response_*` reads now: the last control command's response, or the event frame
   // the last `control_event` dequeued (empty for an empty lane), as the real exports share their
   // staging (issue #1570b D1).
@@ -2868,6 +2960,23 @@ function createFakeExports(quantum, backend = 1, liveControlsAttached = true, su
     },
     miso_engine_web_v1_declare_discontinuity: (...args) => {
       calls.sessionSeek.push(["declare_discontinuity", ...args]);
+      return 0;
+    },
+    miso_engine_web_v1_source_seek_at: (...args) => {
+      calls.seekAt.push([...args, new TextDecoder().decode(
+        new Uint8Array(memory.buffer, pointers[2], args[1]).slice())]);
+      return calls.seekAtResult;
+    },
+    miso_engine_web_v1_source_seek_report_ptr: () => seekReportPointer,
+    miso_engine_web_v1_source_seek_report: (...args) => {
+      calls.seekReport.push([...args, new TextDecoder().decode(
+        new Uint8Array(memory.buffer, pointers[2], args[1]).slice())]);
+      if (calls.seekReportResult !== 0) return calls.seekReportResult;
+      // The service step the real export runs first may grow the memory.
+      if (calls.seekReportGrowsMemory) growMemory();
+      const record = new DataView(memory.buffer, seekReportPointer, 64);
+      record.setUint32(0, calls.seekReportBytes, true);
+      calls.seekReportWords.forEach((word, index) => record.setBigUint64(8 + index * 8, word, true));
       return 0;
     },
     miso_engine_web_v1_source_seek: (...args) => {
@@ -4413,6 +4522,64 @@ async function testProcessor() {
       seek(4, 0n, 0n, -1n);
       assert.equal(processor.port.posts.at(-1).message.tag, "miso.error.v1");
       assert.equal(fake.calls.sessionSeek.length, 3, "a malformed session seek calls no export");
+    }
+
+    {
+      // Issue #1297a, the worklet half: an anchored source seek calls `source_seek_at` once in the
+      // handler with the staged ID, and `process()` adds no call; a seek report copies the
+      // record's words; a refusal is the reply's result (a null report) and is not sticky; a
+      // malformed message calls no export; a record with the wrong size word is sticky.
+      const { processor, fake } = makeProcessor();
+      const handle = processor.handle;
+      const last = () => processor.port.posts.at(-1).message;
+      processor.receive({
+        tag: "miso.seek-at.v1", requestId: 1, sourceId: "drums", generation: 2n,
+        sourceFrame: 480n, anchorSample: 128n,
+      });
+      assert.deepEqual(last(), { tag: "miso.ack.v1", requestId: 1, result: 0 });
+      processor.process([], [[new Float32Array(64), new Float32Array(64)]]);
+      fake.calls.seekAtResult = 1;
+      processor.receive({
+        tag: "miso.seek-at.v1", requestId: 2, sourceId: "drums", generation: 3n,
+        sourceFrame: 0n, anchorSample: 100n,
+      });
+      assert.deepEqual(last(), { tag: "miso.ack.v1", requestId: 2, result: 1 });
+      assert.deepEqual(fake.calls.seekAt, [
+        [handle, 5, 2n, 480n, 128n, "drums"],
+        [handle, 5, 3n, 0n, 100n, "drums"],
+      ]);
+      fake.calls.seekReportGrowsMemory = true;
+      processor.receive({ tag: "miso.seek-report.v1", requestId: 3, sourceId: "$timeline" });
+      fake.calls.seekReportGrowsMemory = false;
+      assert.deepEqual(last(), {
+        tag: "miso.seek-report.v1", requestId: 3, result: 0,
+        report: {
+          generation: 5n, firstSample: 1024n, sourceFrame: 48000n,
+          cumulativeUnderrunFrames: 7n, cumulativeHeldFrames: 9n,
+        },
+      });
+      fake.calls.seekReportResult = 6;
+      processor.receive({ tag: "miso.seek-report.v1", requestId: 4, sourceId: "drums" });
+      assert.deepEqual(last(), { tag: "miso.seek-report.v1", requestId: 4, result: 6, report: null });
+      assert.deepEqual(fake.calls.seekReport, [[handle, 9, "$timeline"], [handle, 5, "drums"]]);
+      assert.equal(processor.stickyResult, 0, "a refused seek-at or seek report is not sticky");
+      fake.calls.seekReportResult = 0;
+      fake.calls.seekReportBytes = 48;
+      processor.receive({ tag: "miso.seek-report.v1", requestId: 5, sourceId: "drums" });
+      assert.deepEqual(last(), { tag: "miso.error.v1", requestId: 5, result: 255 });
+      for (const message of [
+        { tag: "miso.seek-at.v1", requestId: 1, sourceId: "drums", generation: 2n,
+          sourceFrame: 0n, anchorSample: -1n },
+        { tag: "miso.seek-at.v1", requestId: 1, sourceId: "drums", generation: 0n,
+          sourceFrame: 0n, anchorSample: 0n },
+        { tag: "miso.seek-report.v1", requestId: 1, sourceId: 7 },
+      ]) {
+        const { processor: malformed, fake: untouched } = makeProcessor();
+        malformed.receive(message);
+        assert.equal(malformed.port.posts.at(-1).message.tag, "miso.error.v1");
+        assert.deepEqual([untouched.calls.seekAt, untouched.calls.seekReport], [[], []],
+          "a malformed seek-at or seek report calls no export");
+      }
     }
 
     {

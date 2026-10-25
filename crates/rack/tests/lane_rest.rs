@@ -245,6 +245,7 @@ impl World {
                     ),
                     bypass: false,
                     observation_depth: 2,
+                    link: None,
                 },
                 &superseded,
             )
