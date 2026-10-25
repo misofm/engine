@@ -7923,8 +7923,13 @@ struct RouteCopy {
 /// R2: never when the source strip's own fade owns the route: a strip with an unfired fade entry
 /// of the predecessor (an added strip still waiting; its fader is shut until its fire, which is
 /// pair-carried) or one a duck of the transaction already silences (the duck overlay's strips and
-/// the transition fallback's). Nor when the predecessor's own arm of the route has not fired: the
-/// route is still silent, and its re-armed, carried entry fades it in at its new values (#1877 D2).
+/// the transition fallback's).
+///
+/// A route whose predecessor arm had not fired at preparation (a plan replaced before it renders)
+/// takes both halves too: its copy aliases the predecessor's op, which is mid-ramp when that arm
+/// fired before the swap and settled at `[+0.0; 4]`, muted, when it did not (the copy then fades
+/// out silence for one ramp), and the kept route is re-armed at its new values, carrying the entry
+/// (#1877 D2).
 fn crossfades_values(base: &SuccessorBase<'_>, after: &session::Route) -> bool {
     if controls::route_rows_live(after) {
         return false;
@@ -7942,16 +7947,10 @@ fn crossfades_values(base: &SuccessorBase<'_>, after: &session::Route) -> bool {
     }
     let (strip, _, _) = source_strip(&after.source);
     let watch = &base.inventory.fade_watch;
-    let unfired = |owner: FadeArmOwner, id: &str| {
-        base.inventory
-            .fade_arms
-            .iter()
-            .any(|row| row.owner == owner && &*row.id == id && !watch.fired(row.entry))
-    };
-    !base.duck.has_strip(strip)
-        && !base.forced_restart.iter().any(|id| id == strip)
-        && !unfired(FadeArmOwner::Strip, strip)
-        && !unfired(FadeArmOwner::Route, after.id.as_str())
+    let waiting = base.inventory.fade_arms.iter().any(|row| {
+        row.owner == FadeArmOwner::Strip && &*row.id == strip && !watch.fired(row.entry)
+    });
+    !base.duck.has_strip(strip) && !base.forced_restart.iter().any(|id| id == strip) && !waiting
 }
 
 /// The copy ID of a route `original` (#1953b): the shortest `original` followed by hyphens that

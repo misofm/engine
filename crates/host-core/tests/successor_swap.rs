@@ -4471,10 +4471,16 @@ fn a_removed_or_repointed_lane_less_route_fades_out_through_its_line_on_every_wi
 /// * (b) R3, a flip of `mute` alone: an unmute arms the kept route only and equals the live
 ///   unmute at the swap; a mute makes the copy only and equals the live mute at the swap (the
 ///   removal reference of #1953b);
-/// * (c) R2: a lane-less route of an added track still waiting for its anchored source, changed by
-///   a second rebuild before the track's fire (unmuted, or at another gain), takes no copy and no
-///   arm (the second successor arms only the track's carried fade): the run equals the one that
-///   added it at its new values.
+/// * (c) a lane-less route of an added track still waiting for its anchored source, changed by a
+///   second rebuild before the track's fire, takes no copy and no arm (the second successor arms
+///   only the track's carried fade): the run equals the one that added it at its new values.
+///   "unmuted" defends the `(!armed_source || tap.precedes_fader())` guard on the `retargeted`
+///   path of `added_route_fades`; "another gain" defends R2's copy skip;
+/// * (d) a plan replaced before it renders: P1 adds `aux-out` at the swap block, and P2, prepared
+///   before P1's first block (P1's arm unfired), sets it to another gain at the next block. P2
+///   both copies the route (aliasing P1's op mid-ramp) and re-arms it at its new values, carrying
+///   P1's entry: every block equals both routes from `pre_fader`, muted, given a live unmute of
+///   the old at the swap block, then its mute and the new one's unmute at the next.
 ///
 /// Neither swap block allocates or frees.
 fn a_lane_less_route_value_change_crossfades_at_the_swap(backend: Backend) {
@@ -4555,6 +4561,57 @@ fn a_lane_less_route_value_change_crossfades_at_the_swap(backend: Backend) {
             reference(both, &crossfade, SWAP_BLOCK + 1).blocks,
             expected.blocks,
             "{backend:?} (a) {line}: the crossfade block is observable"
+        );
+        // (d) P1 is replaced before it renders.
+        let p0 = Session::compile(base.clone());
+        let p1 = Session::compile(route(&base, "aux-out", post, false, None));
+        let p2 = Session::compile(route(&base, "aux-out", post, false, Some(-9.0)));
+        let run = fade_run(
+            &p0,
+            &[
+                FadeSwap {
+                    block: SWAP_BLOCK,
+                    to: &p1,
+                    committed: &p0.model,
+                    prepared_at: None,
+                },
+                FadeSwap {
+                    block: SWAP_BLOCK + 1,
+                    to: &p2,
+                    committed: &p1.model,
+                    prepared_at: Some(SWAP_BLOCK),
+                },
+            ],
+            &feeds,
+            None,
+            &[],
+            backend,
+        );
+        assert_eq!(
+            run.arms[1],
+            vec![(0, ramp), (0, ramp)],
+            "{backend:?} (d) {line}: the carried re-arm at the new values, then the copy"
+        );
+        assert_eq!(run.allocator, (0, 0, 0), "{backend:?} (d): allocator calls");
+        let muted_both = route(
+            &route(&base, "aux-out", pre, true, Some(-9.0)),
+            "aux-out-",
+            pre,
+            true,
+            None,
+        );
+        let replaced = |model: &SessionModel, block| {
+            vec![
+                route_mute_write(model, "aux-out-", block, ramp, false),
+                route_mute_write(model, "aux-out-", block + 1, ramp, true),
+                route_mute_write(model, "aux-out", block + 1, ramp, false),
+            ]
+        };
+        let expected = reference(muted_both, &replaced, SWAP_BLOCK);
+        assert_eq!(
+            first_fade_difference(&run, &expected),
+            None,
+            "{backend:?} (d) {line}: the old route fades out mid-ramp as the new one fades in"
         );
         // (b) R3: the rebuild flips `mute` alone.
         for (claim, before, after) in [("unmute", true, false), ("mute", false, true)] {
