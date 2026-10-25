@@ -97,9 +97,12 @@ running plan, of a route out of a removed strip. The watermark reports the revis
 as `EXACT`. Until the adoption a removed source's submissions and seeks go to the running plan's
 producer, so the fade plays the PCM the host feeds; from the adoption on they are refused as
 `source.id.unknown`. A later structural transaction before `S` writes no second mute for a strip or
-route already ducked and inherits `S`. A transaction before `S` that restores a removed strip or
-source is refused as `BACKPRESSURE` until #1325b. `crates/capi/tests/strip_transitions.rs` holds
-the gates.
+route already ducked and inherits `S`. A transaction before `S` that restores a removed strip
+commits and inherits `S`: its replacement is prepared against the running plan's base with the
+ducks laid over it, so the strip and its pre-fader routes carry from their ducked state and ramp
+back in over `N` from `S`, and a restored source declared as before carries the running plan's ring
+and producer, with every frame accepted for it in phase 1 (#1325 D6).
+`crates/capi/tests/strip_transitions.rs` holds the gates.
 
 Submix strips are editable through the same `SESSION_TRANSACTION_APPLY` transactions as track
 strips: opcodes `0203`-`0211` take a submix ID as their strip ID (#1204). Every such transaction is

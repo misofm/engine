@@ -55,6 +55,20 @@ impl ReferenceTransientShaper {
         })
     }
 
+    /// Replaces the lane's controls, keeping its follower state: one frame of a parameter ramp
+    /// the caller models (issue #1370's glide oracle crosses a live amount change).
+    pub fn set_parameters(
+        &mut self,
+        parameters: ReferenceTransientShaperParameters,
+    ) -> Result<(), ReferenceTransientShaperError> {
+        *self = Self {
+            fast: self.fast,
+            slow: self.slow,
+            ..Self::new(self.sample_rate_hz, parameters)?
+        };
+        Ok(())
+    }
+
     /// Processes one already-sanitized lane sample and its linked detector magnitude.
     pub fn process_sample(&mut self, input: f64, detector: f64) -> f64 {
         let detector = detector.abs();

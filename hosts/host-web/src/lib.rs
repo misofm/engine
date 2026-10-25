@@ -37,11 +37,10 @@ use control_plane::{
     ObservationKeyRef, ObservationRefusal, PlanQueries, PlanResources, PlanState,
     SessionSeekFailure, SessionState, SourceFailure, SourceRefusalKind,
 };
-use effect_contract::{ObservationCost, ObservationDescriptor};
+use effect_contract::ObservationDescriptor;
 use engine::realtime::{
     HostAttachment, ObservationWindow, ObserverCarry, ObserverKind, PlanarBufferMut,
 };
-use host_core::meters::window_since_arm;
 use host_core::{
     CompiledSession, EffectObservationHandle, GainReductionTaps, HostLiveControlRequest,
     HostLiveLanes, HostPrepareCaps, HostPrepareReport, HostShapePolicy, MAXIMUM_VCA_REACH_PAIRS,
@@ -540,6 +539,9 @@ pub const MAXIMUM_OBSERVATION_TAPS: u32 = 16;
 /// control-plane snapshot, not a subscription or a history, so the host never grows storage from
 /// the number of renders or from the number of reads a caller makes.
 pub const MAXIMUM_OBSERVATION_READS: usize = MAXIMUM_COMMAND_RECORDS as usize;
+// The browser's read is host-core's (#1586 D3), which refuses a longer batch.
+const _: () =
+    assert!(MAXIMUM_OBSERVATION_READS <= host_core::observation::MAXIMUM_OBSERVATION_SELECTIONS);
 
 /// Requested left lane in a selected observation record.
 pub const OBSERVATION_CHANNEL_LEFT: u32 = 1;
@@ -554,30 +556,9 @@ pub const OBSERVATION_STATUS_UNARMED: u32 = 2;
 /// The selected tap returned a complete resident window.
 pub const OBSERVATION_STATUS_READY: u32 = 3;
 
-/// Channels requested from one resident observation tap.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum ObservationReadChannels {
-    /// Return the owner-published left value.
-    Left,
-    /// Return the owner-published right value.
-    Right,
-    /// Return both owner-published lane values independently.
-    Both,
-}
-
-/// Availability of one selected observation at the time of a read.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub enum ObservationReadStatus {
-    /// The tap's last subscription is an arm render has not applied yet, or it is armed and no
-    /// complete window has been published since its arm (#1585 D4).
-    #[default]
-    Pending,
-    /// The tap exists, and its last subscription is a disarm, in effect when it is accepted, or
-    /// it has none (#1585 D3, D4).
-    Unarmed,
-    /// A complete resident window was read without consuming it.
-    Ready,
-}
+/// The lanes a selection asks for, and a row's availability: host-core's, since the read is
+/// host-core's ([`host_core::observation`], #1586 D3).
+pub use host_core::observation::{ObservationReadChannels, ObservationReadStatus};
 
 /// A typed refusal for one complete selected-observation batch.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1430,6 +1411,10 @@ struct PlanShape {
     /// for a slot with no taps. Built once at compilation, so the poll's fold is arithmetic rather
     /// than a search.
     observation_tracks: Box<[u32]>,
+    /// The plan's effect instances by stable key, each with its reader set's position in the
+    /// plan's [`RenderCompanions`] (#1586 D3): what a selected read resolves through. A carried
+    /// swap exchanges reader sets at fixed positions, so the index stays right across it.
+    observation_index: host_core::observation::ObservationIndex,
     /// The dense effect slot of each producer of the plan, in the control plane's producer order:
     /// entry `p` is the slot whose [`EffectInstance::producer`] is `p`. The inverse of that field,
     /// built in the same preparation loop, so the key the control plane resolved to a producer
@@ -1975,23 +1960,6 @@ impl ReadyOwnership {
         let admitted = admit(self);
         core::mem::swap(&mut self.shape, &mut self.pending_shapes[index].shape);
         Ok(admitted)
-    }
-
-    /// The dense effect index of the console slot or insert `effect_id` of one strip on this plan
-    /// (#1677): the one place a stable effect ID becomes a position, so an observation record and
-    /// a selected read cannot disagree. `None` when the strip has no such slot or insert.
-    fn effect_by_id(&self, strip: usize, rack: LiveEffectRack, effect_id: &[u8]) -> Option<usize> {
-        let [pre_insert, inserts, post_insert] = *self.shape.rack_effects.get(strip)?;
-        // A console slot is searched over both sections, in slot order; an insert over the inserts.
-        let count = match rack {
-            LiveEffectRack::Console => pre_insert.saturating_add(post_insert),
-            LiveEffectRack::Inserts => inserts,
-        };
-        (0..count).find_map(|index| {
-            let effect = self.effect_slot(strip, LiveEffectAddress { rack, index })?;
-            let instance = self.shape.effect_instances.get(effect)?.as_ref()?;
-            (instance.effect_id.as_bytes() == effect_id).then_some(effect)
-        })
     }
 
     /// The dense index of one addressed effect instance in `effect_instances`.
@@ -3154,50 +3122,39 @@ impl AudioWorkletEngineHost {
             return Err(ObservationReadError::WrongState);
         };
 
-        // Validate the whole batch before allocating results or touching a reader. Duplicate
-        // tuples are rejected explicitly so callers cannot mistake two identical rows for two
-        // independent consumer cursors.
-        for (index, selection) in selections.iter().enumerate() {
-            resolve_observation(ready, selection)?;
-            if selections[..index].iter().any(|prior| {
-                prior.track_id == selection.track_id
-                    && prior.rack == selection.rack
-                    && prior.effect_slot_id == selection.effect_slot_id
-                    && prior.tap_id == selection.tap_id
-            }) {
-                return Err(ObservationReadError::InvalidSelection);
-            }
-        }
-
-        let mut results = Vec::with_capacity(selections.len());
-        for selection in selections {
-            let values = read_observation_values(ready, plan, sample_rate_hz, selection)?;
-            let (effect, tap_index) = resolve_observation(ready, selection)?;
-            let handle = ready
-                .shape
-                .effect_instances
-                .get(effect)
-                .and_then(Option::as_ref)
-                .ok_or(ObservationReadError::Unsupported)?;
-            let tap = handle
-                .descriptor
-                .observations
-                .get(tap_index)
-                .ok_or(ObservationReadError::InvalidSelection)?;
-            results.push(ObservationReadResult {
-                track_id: handle.track_id.clone(),
-                rack: selection.rack,
-                effect_slot_id: handle.effect_id.clone(),
-                native_effect_id: handle.descriptor.id.as_str(),
-                descriptor: *tap,
-                channels: selection.channels,
-                sample_rate_hz: values.sample_rate_hz,
-                status: values.status,
-                window: values.window,
-                left: values.left,
-                right: values.right,
-            });
-        }
+        // #1586 D3: host-core checks the whole batch (every selection resolves, no tap twice)
+        // before it writes a row, so a refused batch allocates no result vector.
+        let handles = observation_handles(plan);
+        let mut results: Vec<ObservationReadResult> = Vec::new();
+        host_core::observation::read_with(
+            &ready.shape.observation_index,
+            handles,
+            selections,
+            |selection| Ok::<_, ObservationReadError>(core_selection(selection)),
+            |key| observation_issued(ready, key),
+            |position, entry, row| {
+                if results.capacity() == 0 {
+                    results.reserve_exact(selections.len());
+                }
+                let selection = &selections[position];
+                let Some(tap) = row.tap else {
+                    return;
+                };
+                results.push(ObservationReadResult {
+                    track_id: entry.strip_id.clone(),
+                    rack: selection.rack,
+                    effect_slot_id: entry.effect_id.clone(),
+                    native_effect_id: entry.effect.id.as_str(),
+                    descriptor: *tap,
+                    channels: selection.channels,
+                    sample_rate_hz,
+                    status: row.status,
+                    window: row.window,
+                    left: row.left,
+                    right: row.right,
+                });
+            },
+        )?;
         Ok(results)
     }
 
@@ -3286,19 +3243,30 @@ impl AudioWorkletEngineHost {
         let (Some(ready), Some(plan)) = (self.ready.as_ref(), self.plan.as_mut()) else {
             return Err(ObservationReadError::WrongState);
         };
-        for (index, address) in addresses.iter().enumerate() {
-            let selection = observation_selection_for_address(ready, *address)?;
-            resolve_observation(ready, &selection)?;
-            if addresses[..index].contains(address) {
-                return Err(ObservationReadError::InvalidSelection);
-            }
-        }
-        for (index, address) in addresses.iter().enumerate() {
-            let selection = observation_selection_for_address(ready, *address)?;
-            output[index] =
-                read_observation_values(ready, plan, self.status.sample_rate_hz, &selection)?;
-        }
-        Ok(())
+        // #1586 D3: each numeric address maps to its stable selection through the session map in
+        // the same pass as host-core's check, so the first refusal in address order is returned
+        // and nothing is written before the whole batch passed.
+        let handles = observation_handles(plan);
+        let sample_rate_hz = self.status.sample_rate_hz;
+        host_core::observation::read_with(
+            &ready.shape.observation_index,
+            handles,
+            addresses,
+            |address| {
+                observation_selection_for_address(ready, *address)
+                    .map(|selection| core_selection(&selection))
+            },
+            |key| observation_issued(ready, key),
+            |position, _, row| {
+                output[position] = ObservationReadValues {
+                    status: row.status,
+                    sample_rate_hz,
+                    window: row.window,
+                    left: row.left,
+                    right: row.right,
+                };
+            },
+        )
     }
 
     /// Number of complete meter windows folded since compilation.
@@ -4276,44 +4244,6 @@ fn observation_selection_for_address<'a>(
     })
 }
 
-fn resolve_observation(
-    ready: &ReadyOwnership,
-    selection: &ObservationSelection<'_>,
-) -> Result<(usize, usize), ObservationReadError> {
-    let track = strip_index(
-        &ready.shape.tracks,
-        &ready.shape.submixes,
-        selection.track_id.as_bytes(),
-    )
-    .ok_or(ObservationReadError::InvalidSelection)?;
-    let effect = ready
-        .effect_by_id(track, selection.rack, selection.effect_slot_id.as_bytes())
-        .ok_or(ObservationReadError::InvalidSelection)?;
-    let handle = ready
-        .shape
-        .effect_instances
-        .get(effect)
-        .and_then(Option::as_ref)
-        .filter(|instance| instance.reader.is_some())
-        .ok_or(ObservationReadError::Unsupported)?;
-    if handle.track_id.as_ref() != selection.track_id
-        || handle.effect_id.as_ref() != selection.effect_slot_id
-    {
-        return Err(ObservationReadError::InvalidSelection);
-    }
-    let (tap_index, tap) = handle
-        .descriptor
-        .observations
-        .iter()
-        .enumerate()
-        .find(|(_, tap)| tap.id.0 == selection.tap_id)
-        .ok_or(ObservationReadError::InvalidSelection)?;
-    if tap.cost != ObservationCost::Resident || tap_index >= u32::BITS as usize {
-        return Err(ObservationReadError::Unsupported);
-    }
-    Ok((effect, tap_index))
-}
-
 /// One plan's observation taps as the core's gain-reduction fold sees them (#1582 D3): the
 /// shape's dense effect table and strip table over the plan companions' reader sets. Each tap's
 /// arm state is its slot's, which render writes (#1585 D6).
@@ -4407,82 +4337,52 @@ fn publish_web_meter_frame(
 }
 // REALTIME_POLICY_END
 
-fn read_observation_values(
+/// The active plan's observation handles (#1381a D3: the readers are its companions), which the
+/// read reads through: after a carried swap they hold the carried readers (#1586a). Empty for a
+/// plan with no companions, whose instances then all read as unbound.
+fn observation_handles(plan: &mut WebPlan) -> &[EffectObservationHandle] {
+    plan.active_attachment_mut::<RenderCompanions>()
+        .map_or(&[], |companions| &*companions.effect_observations)
+}
+
+/// A stable browser selection in host-core's terms.
+const fn core_selection<'a>(
+    selection: &ObservationSelection<'a>,
+) -> host_core::observation::ObservationSelection<'a> {
+    host_core::observation::ObservationSelection {
+        strip_id: selection.track_id,
+        section: selection.rack,
+        effect_id: selection.effect_slot_id,
+        tap_id: selection.tap_id,
+        channels: selection.channels,
+    }
+}
+
+/// The tag and kind of the last record the control plane issued for one tap (#1585 D4), looked
+/// up by its stable key on the newest plan.
+fn observation_issued(
     ready: &ReadyOwnership,
-    plan: &mut WebPlan,
-    sample_rate_hz: u32,
-    selection: &ObservationSelection<'_>,
-) -> Result<ObservationReadValues, ObservationReadError> {
-    let (effect, tap_index) = resolve_observation(ready, selection)?;
-    let observed = ready
-        .shape
-        .effect_instances
-        .get(effect)
-        .and_then(Option::as_ref)
-        .ok_or(ObservationReadError::Unsupported)?;
-    // #1381a D3: the readers are the active plan's companions.
-    let handle = plan
-        .active_attachment_mut::<RenderCompanions>()
-        .zip(observed.reader)
-        .and_then(|(companions, reader)| companions.effect_observations.get(reader as usize))
-        .ok_or(ObservationReadError::Unsupported)?;
-    // #1585 D4, D6: the arm state and the window are one read of the tap's slot, which render
-    // writes. The tap is pending while the last record the control plane queued for it is an arm
-    // (or a re-arm) render has not applied (its slot publishes a lower tag than the one issued:
-    // tags are monotone) and while every attempt of the read tore. A disarm is in effect at once:
-    // no later window belongs to the subscription it ends. Otherwise the slot's state is the
-    // answer.
-    let (issued, issued_arms) =
-        observed
-            .descriptor
-            .observations
-            .get(tap_index)
-            .map_or((0, false), |declared| {
-                ready.control.observation_issued(&ObservationKeyRef {
-                    strip_id: observed.track_id.as_bytes(),
-                    rack: observed.address.rack,
-                    effect_id: observed.effect_id.as_bytes(),
-                    tap_id: declared.id.0,
-                })
-            });
-    let disarmed = issued != 0 && !issued_arms;
-    let state = handle
-        .readers
-        .get(tap_index)
-        .and_then(engine::realtime::ObservationReader::read_state)
-        .filter(|state| state.arm_tag >= issued);
-    let window = state
-        .filter(|state| state.armed && !disarmed)
-        .and_then(|state| {
-            state
-                .window
-                .and_then(|window| window_since_arm(window, state.arm_sample))
-        });
-    let status = match state {
-        _ if disarmed => ObservationReadStatus::Unarmed,
-        Some(state) if !state.armed => ObservationReadStatus::Unarmed,
-        _ if window.is_some() => ObservationReadStatus::Ready,
-        _ => ObservationReadStatus::Pending,
-    };
-    let (left, right) = match (status, window, selection.channels) {
-        (ObservationReadStatus::Ready, Some(window), ObservationReadChannels::Left) => {
-            (Some(window.left), None)
-        }
-        (ObservationReadStatus::Ready, Some(window), ObservationReadChannels::Right) => {
-            (None, Some(window.right))
-        }
-        (ObservationReadStatus::Ready, Some(window), ObservationReadChannels::Both) => {
-            (Some(window.left), Some(window.right))
-        }
-        _ => (None, None),
-    };
-    Ok(ObservationReadValues {
-        status,
-        sample_rate_hz,
-        window,
-        left,
-        right,
+    key: &host_core::observation::ObservationKey<'_>,
+) -> (u64, bool) {
+    ready.control.observation_issued(&ObservationKeyRef {
+        strip_id: key.strip_id.as_bytes(),
+        rack: key.section,
+        effect_id: key.effect_id.as_bytes(),
+        tap_id: key.tap_id,
     })
+}
+
+impl From<host_core::observation::ObservationReadError> for ObservationReadError {
+    fn from(error: host_core::observation::ObservationReadError) -> Self {
+        use host_core::observation::ObservationRefusal as Refusal;
+        match error.refusal {
+            Refusal::TooManySelections | Refusal::RowsTooShort => Self::BufferTooSmall,
+            Refusal::UnknownAddress | Refusal::UnknownTap | Refusal::Duplicate => {
+                Self::InvalidSelection
+            }
+            Refusal::UnsupportedTap | Refusal::Unbound => Self::Unsupported,
+        }
+    }
 }
 
 const fn empty_command_report() -> WebCommandReport {
@@ -5610,6 +5510,23 @@ fn build_plan_shape(
             u32::try_from(strip).map_err(|_| "web.live_controls.observation")?;
         instance.reader = Some(u32::try_from(reader).map_err(|_| "web.live_controls.observation")?);
     }
+    // #1586 D3: every instance by stable key, observed or not (an unobserved one reads as
+    // unbound), with its reader set's position.
+    let mut index_entries = Vec::new();
+    index_entries
+        .try_reserve_exact(effect_instances.iter().flatten().count())
+        .map_err(|_| "web.resource.allocation")?;
+    index_entries.extend(effect_instances.iter().flatten().map(|instance| {
+        host_core::observation::ObservationIndexEntry {
+            strip_id: instance.track_id.clone(),
+            section: instance.address.rack,
+            effect_id: instance.effect_id.clone(),
+            handle: instance.reader,
+            effect: instance.descriptor,
+        }
+    }));
+    let observation_index = host_core::observation::ObservationIndex::new(index_entries)
+        .map_err(|_| "web.live_controls.effects")?;
     Ok(PlanShape {
         tracks,
         submixes,
@@ -5617,6 +5534,7 @@ fn build_plan_shape(
         effect_base: effect_base.into_boxed_slice(),
         effect_instances: effect_instances.into_boxed_slice(),
         observation_tracks: observation_tracks.into_boxed_slice(),
+        observation_index,
         producer_slots: producer_slots.into_boxed_slice(),
         // #1689: no plan is prepared with a master; `ReadyOwnership::sync_master` points the
         // shape at the strip the core's `master` row designates after every control command.
@@ -5680,7 +5598,7 @@ fn zero_u32(count: usize) -> Result<Box<[u32]>, &'static str> {
 /// The bridge rows one plan's tables are charged (issue #1290a): the boot charges them to the
 /// bridge, a replacement plan charges them to its attachment, so the swap budget counts them.
 struct ShapeRows {
-    /// The dense instance tables' own bytes.
+    /// The dense instance tables' own bytes, with the observation index (#1586 D3).
     instance_table_bytes: u64,
     /// The IDs the dense instance table copies out of the producers.
     instance_id_bytes: u64,
@@ -5714,7 +5632,9 @@ impl PlanShape {
                 u64::try_from(self.producer_slots.len())
                     .ok()?
                     .checked_mul(size_of::<u32>() as u64)?,
-            )?;
+            )?
+            // #1586 D3: the observation index, its table and the IDs it copies.
+            .checked_add(self.observation_index.retained_bytes()?)?;
         // #1582 R1: the delivery tables, held here from the plan's preparation to its adoption
         // and from its retirement on; the boot plan's are charged before the delivery takes them.
         let (meter_tables_bytes, meter_tables_largest) =

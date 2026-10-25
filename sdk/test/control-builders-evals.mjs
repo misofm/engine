@@ -13,6 +13,7 @@ import { LiveControlEdits } from "../src/core/live-controls.ts";
 import { CONTROLS } from "../src/generated/controls.ts";
 import {
   CONTROL_BUILDERS,
+  EFFECT_CONSOLE_LINK_MODE_ROWS,
   EFFECT_LINK_MODE_ROWS,
   EFFECT_PARAMETER_ROWS,
 } from "../src/generated/control-builders.ts";
@@ -173,8 +174,8 @@ describe("#1564B gate 3 -- every generated builder stages what set stages", () =
 
 describe("#1564B gate 3 -- every effect row", () => {
   const instances = [
-    ["inserts", (strip, effectId) => strip.insert("i", effectId), { kind: "inserts", effect: "i" }],
-    ["console", (strip, effectId) => strip.console("c", effectId), { kind: "console", slot: "c" }],
+    ["inserts", (strip, effectId) => strip.insert("i", effectId), { kind: "inserts", effect: "i" }, EFFECT_LINK_MODE_ROWS],
+    ["console", (strip, effectId) => strip.console("c", effectId), { kind: "console", slot: "c" }, EFFECT_CONSOLE_LINK_MODE_ROWS],
   ];
 
   function numeric(effectId, name) {
@@ -190,10 +191,11 @@ describe("#1564B gate 3 -- every effect row", () => {
       const named = Object.values(EFFECT_PARAMETER_ROWS[effectId]).map((row) => row.control).sort();
       assert.deepEqual(named, table.parameters.map((row) => row.name).sort(), `${effectId} parameters`);
       assert.equal(EFFECT_LINK_MODE_ROWS[effectId]?.control, table.linkMode?.name, `${effectId} link mode`);
+      assert.equal(EFFECT_CONSOLE_LINK_MODE_ROWS[effectId]?.control, table.consoleLinkMode?.name, `${effectId} console link mode`);
     }
   });
 
-  for (const [rack, instance, section] of instances) {
+  for (const [rack, instance, section, linkModeRows] of instances) {
     test(`${rack}: parameter, bypass and link mode stage what set stages, with the effect they were written for (#1678)`, () => {
       const strip = edit.track("t");
       let checked = 0;
@@ -232,7 +234,7 @@ describe("#1564B gate 3 -- every effect row", () => {
             `${effectId} bypass`,
           );
         }
-        const linkMode = EFFECT_LINK_MODE_ROWS[effectId];
+        const linkMode = linkModeRows[effectId];
         if (linkMode !== undefined) {
           for (const [label, scalar] of linkMode.choices) {
             assert.deepEqual(

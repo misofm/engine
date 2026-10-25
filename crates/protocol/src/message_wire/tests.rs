@@ -579,13 +579,10 @@ fn b1b_success_schemas_round_trip_and_truncate() {
         .encode_snapshot(snapshot, &mut snapshot_bytes)
         .expect("snapshot");
     assert_eq!(codec.decode_snapshot(&snapshot_bytes, 4), Ok(snapshot));
-    let applied = TransactionApplied {
-        applied_operations: 3,
-        edit_path: EditPath::Rebuild,
-    };
+    let applied = TransactionApplied::new(3, EditPath::Rebuild);
     let mut applied_bytes = [0_u8; 32];
     codec
-        .encode_transaction_applied(applied, &mut applied_bytes)
+        .encode_transaction_applied(&applied, &mut applied_bytes)
         .expect("applied");
     assert_eq!(
         codec.decode_transaction_applied(&applied_bytes, 2),
@@ -647,13 +644,10 @@ fn b1b_fixed_goldens_and_every_byte_truncation() {
         assert!(codec.decode_snapshot(&snapshot_bytes[..end], 4).is_err());
     }
 
-    let applied = TransactionApplied {
-        applied_operations: 3,
-        edit_path: EditPath::Live,
-    };
+    let applied = TransactionApplied::new(3, EditPath::Live);
     let mut applied_bytes = [0_u8; 32];
     codec
-        .encode_transaction_applied(applied, &mut applied_bytes)
+        .encode_transaction_applied(&applied, &mut applied_bytes)
         .expect("applied");
     assert_eq!(
         hex(&applied_bytes),
@@ -3360,13 +3354,10 @@ fn transaction_applied_edit_path_is_required_and_refuses_unallocated_codes() {
         // #1386: a `SESSION_REPLACE` of an identical document.
         (EditPath::Unchanged, 5),
     ] {
-        let value = TransactionApplied {
-            applied_operations: 5,
-            edit_path: path,
-        };
+        let value = TransactionApplied::new(5, path);
         let mut bytes = [0_u8; 32];
         let written = codec
-            .encode_transaction_applied(value, &mut bytes)
+            .encode_transaction_applied(&value, &mut bytes)
             .expect("encode");
         assert_eq!(
             bytes[written - 8],
@@ -3375,7 +3366,7 @@ fn transaction_applied_edit_path_is_required_and_refuses_unallocated_codes() {
         );
         assert_eq!(
             codec.decode_transaction_applied(&bytes[..written], 2),
-            Ok(value)
+            Ok(value.clone())
         );
         // Zero and every value above the last allocated code are refused.
         for bad in [0_u8, 6, 7, 255] {
@@ -3395,6 +3386,56 @@ fn transaction_applied_edit_path_is_required_and_refuses_unallocated_codes() {
     old[4..8].copy_from_slice(&4_u32.to_le_bytes());
     old[8..12].copy_from_slice(&3_u32.to_le_bytes());
     assert!(codec.decode_transaction_applied(&old, 1).is_err());
+}
+
+/// #1585 D5. The two arm-tag lists of `TransactionApplied` are optional, each written exactly when
+/// it holds a tag, and round-trip in order; a present list that is empty or not whole words is
+/// refused.
+///
+/// Red if an empty list is written (a client could not tell "no `Observe` edit" from "an edit
+/// with no tag"), if a decoder accepts an empty or ragged list, or if the two lists swap fields.
+#[test]
+fn transaction_applied_arm_tags_are_present_exactly_when_they_hold_a_tag() {
+    let codec = codec();
+    let value = TransactionApplied {
+        observe_arm_tags: vec![1, 1 << 40],
+        removed_arm_tags: vec![7],
+        ..TransactionApplied::new(2, EditPath::Rebuild)
+    };
+    let mut bytes = [0_u8; 96];
+    let written = codec
+        .encode_transaction_applied(&value, &mut bytes)
+        .expect("encode");
+    assert_eq!(
+        hex(&bytes[written - 40..written]),
+        "03000e001000000001000000000000000000000000010000\
+         04000e00080000000700000000000000"
+    );
+    assert_eq!(
+        codec.decode_transaction_applied(&bytes[..written], 4),
+        Ok(value.clone())
+    );
+    // Only the removed list: field 3 is absent, not empty.
+    let removed_only = TransactionApplied {
+        observe_arm_tags: Vec::new(),
+        ..value.clone()
+    };
+    let short = codec
+        .encode_transaction_applied(&removed_only, &mut bytes)
+        .expect("encode");
+    assert_eq!(short, written - 24);
+    assert_eq!(
+        codec.decode_transaction_applied(&bytes[..short], 3),
+        Ok(removed_only)
+    );
+    // An empty field 4, and a field 4 of four bytes, are refused.
+    let mut empty = bytes[..short].to_vec();
+    empty[short - 12..short - 8].copy_from_slice(&0_u32.to_le_bytes());
+    empty.truncate(short - 8);
+    assert!(codec.decode_transaction_applied(&empty, 3).is_err());
+    let mut ragged = bytes[..short].to_vec();
+    ragged[short - 12..short - 8].copy_from_slice(&4_u32.to_le_bytes());
+    assert!(codec.decode_transaction_applied(&ragged, 3).is_err());
 }
 
 // --- RESPONSE_GET (decision 17, C13) ---

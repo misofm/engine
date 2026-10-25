@@ -490,6 +490,20 @@ fn reference_mutes(model: &SessionModel) -> Vec<SessionEdit> {
     edits
 }
 
+/// The value-only unmutes that undo [`reference_mutes`]: `b`'s fader and its send as `model`
+/// declares them, at the session ramp.
+fn reference_unmutes(model: &SessionModel) -> Vec<SessionEdit> {
+    let mut edits = protocol::control_core::fader_edits(&id("b"), &model.tracks[1].fader);
+    let send = model
+        .routes
+        .iter()
+        .find(|route| route.id.as_str() == "b-send")
+        .expect("b's send")
+        .clone();
+    edits.push(SessionEdit::UpsertRoute { route: send });
+    edits
+}
+
 /// The edits that restore `b`, its routes and its source exactly as `model` declares them.
 fn restore(model: &SessionModel) -> Vec<SessionEdit> {
     let mut edits = vec![
@@ -554,6 +568,12 @@ fn scheduled(p: u64, compensation: u64) -> u64 {
 /// The reference run: boot, play blocks `0..=K` with both sources fed one block ahead, apply the
 /// value-only mutes, then play through block `last`. The output bits of every block.
 fn reference_run(last: u64) -> Vec<Vec<u32>> {
+    reference_run_unmuting(last, None)
+}
+
+/// [`reference_run`], with the value-only unmutes applied before block `unmute` when one is
+/// given.
+fn reference_run_unmuting(last: u64, unmute: Option<u64>) -> Vec<Vec<u32>> {
     let model = gate_model();
     let mut rig = Rig::boot(&model);
     let mut blocks = Vec::new();
@@ -563,6 +583,9 @@ fn reference_run(last: u64) -> Vec<Vec<u32>> {
     for block in 0..=last {
         if block == K + 1 {
             assert_eq!(rig.apply(&reference_mutes(&model)), EditPath::Live);
+        }
+        if Some(block) == unmute {
+            assert_eq!(rig.apply(&reference_unmutes(&model)), EditPath::Live);
         }
         for source in ["src-a", "src-b"] {
             assert_eq!(rig.feed(source, block + 1), RESULT_OK);
@@ -606,11 +629,6 @@ fn a_removed_strip_ramps_out_then_leaves_at_s() {
             fallbacks = Some(before.transition_fallback_count);
             assert_eq!(rig.apply(&removal()), EditPath::Rebuild);
         }
-        // The 1325a boundary (#1325b deletes this): a restore of `b` in phase 1 is refused as
-        // retryable backpressure and changes nothing, so the blocks still equal the reference.
-        if block == K + 4 {
-            assert_eq!(rig.try_apply(&restore(&model)).0, RESULT_BACKPRESSURE);
-        }
         assert_eq!(rig.feed("src-a", block + 1), RESULT_OK);
         if feeding {
             assert_eq!(
@@ -650,8 +668,6 @@ fn a_removed_strip_ramps_out_then_leaves_at_s() {
         }
     }
     assert!(adopted.is_some(), "the removal is adopted");
-    // Once the watermark reports the removal, the same restore commits (#1325b deletes this).
-    assert_eq!(rig.apply(&restore(&model)), EditPath::Rebuild);
 }
 
 /// Gates 3 and 5 (#1325): supersession during phase 1. Without a render in between, `t1` adds a
@@ -708,4 +724,54 @@ fn a_supersession_in_phase_one_keeps_s_and_the_feed() {
         }
     }
     assert!(adopted.is_some(), "the last candidate is adopted");
+}
+
+/// Gate 4 (#1325 D6): a restore of `b` in phase 1 commits and fades `b` back in from `S`. Mid-ramp
+/// (after block `K + 4`) a transaction restores `b`, its routes and its source exactly as they
+/// were; it supersedes the removal's candidate and inherits its `S`. The reference is gate 1's
+/// reference continued: right after the block that ends at `S`, a value-only transaction unmutes
+/// `b`'s fader and its `pre_fader` send at the session ramp, so both ramps start at `S`. Every
+/// block of the restore run equals it bit for bit, before `S` and after it, through the end of
+/// the fade-in. `src-b` is fed one block ahead only (its ring cannot hold the ramp), and every
+/// submit before and after the restore is accepted: the restored source keeps its ring and its
+/// producer, so `b` plays from `S` the frames submitted for those blocks.
+#[test]
+fn a_restore_in_phase_one_fades_back_in_from_s() {
+    assert_installed();
+    let _ = session::parse_session_json(r#"{"warm":0}"#);
+    let model = gate_model();
+    let mut rig = Rig::boot(&model);
+    let s = scheduled((K + 1) * Q, rig.latency());
+    let last = (s + N) / Q + 8;
+    let reference = reference_run_unmuting(last, Some(s / Q));
+
+    for source in ["src-a", "src-b"] {
+        assert_eq!(rig.feed(source, 0), RESULT_OK);
+    }
+    let mut adopted = None;
+    for block in 0..=last {
+        if block == K + 1 {
+            assert_eq!(rig.apply(&removal()), EditPath::Rebuild);
+        }
+        if block == K + 5 {
+            assert_eq!(rig.apply(&restore(&model)), EditPath::Rebuild);
+        }
+        for source in ["src-a", "src-b"] {
+            assert_eq!(
+                rig.feed(source, block + 1),
+                RESULT_OK,
+                "block {block}: {source} is fed before and after the restore"
+            );
+        }
+        let (bits, _) = rig.render(block);
+        same(&bits, &reference[block as usize], block);
+        let watermark = rig.watermark();
+        if block > K + 4 && adopted.is_none() && watermark.revision >= rig.revision {
+            assert_eq!(watermark.revision, rig.revision);
+            assert_eq!(watermark.first_sample, s, "the restore inherits S");
+            assert_eq!(block * Q, s, "and is never adopted earlier");
+            adopted = Some(s);
+        }
+    }
+    assert!(adopted.is_some(), "the restore is adopted");
 }
