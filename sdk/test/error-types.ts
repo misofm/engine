@@ -16,7 +16,7 @@ type Exact<A, B> =
 type Assert<T extends true> = T;
 
 type TimeoutCodes = Assert<
-  Exact<SdkTimeoutCode, "spectrumCloseTimeout" | "hostDisposeTimeout" | "contextCloseTimeout">
+  Exact<SdkTimeoutCode, "spectrumCloseTimeout" | "hostDisposeTimeout" | "contextCloseTimeout" | "bootConfigureTimeout">
 >;
 type TimeoutCodesAreExported = Assert<Exact<HeadlessSdkTimeoutCode, SdkTimeoutCode>>;
 type TimeoutCodesAreErrorCodes = Assert<Exact<SdkTimeoutCode extends MisoErrorCode ? true : false, true>>;

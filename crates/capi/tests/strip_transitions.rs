@@ -1,7 +1,9 @@
 //! Removing a strip in two phases through the exported C entries (issue #1325, decision 15
 //! D15-9): the removed strip ramps out on the running plan, then the successor is adopted at a
 //! scheduled sample `S`. A strip whose successor restarts it is duck-swapped the same way and
-//! fades back in after `S` (issue #1324).
+//! fades back in after `S` (issue #1324). A route with a lane that a transaction removes or
+//! re-points between two kept strips ramps out the same way, and a re-pointed one fades in at its
+//! new destination from `S` (issue #1953a).
 //!
 //! Every run is single-threaded at 48 kHz in 128-frame blocks with a session `mute_ms` that gives
 //! `N = 2000` samples and 1024-frame source rings. Tracks `a` and `b` play distinct, never-zero
@@ -1490,4 +1492,145 @@ fn a_shortened_sidechain_line_from_a_restarted_submix_drops_no_fade_sample() {
             .any(|bits| f32::from_bits(*bits) != 0.0),
         "t3 is heard"
     );
+}
+
+/// #1953a's session: the gate session plus `a`'s `pre_fader` send `a-send` into `r`, so `r`'s
+/// input arrives `L` (the limiter's latency) late and `b-send` carries a compensation line of `L`,
+/// and a second submix `r2` into the output that nothing feeds.
+fn route_duck_model() -> SessionModel {
+    let fixture = session::parse_session_json(FIXTURE).expect("fixture");
+    let mut model = gate_model();
+    model
+        .submixes
+        .push(session::Submix::unity(id("r2"), &model.console));
+    model.routes.push(route(
+        &fixture,
+        "a-send",
+        track_tap("a", session::SendTap::PreFader),
+        session::RouteDestination::SubmixInput { submix_id: id("r") },
+    ));
+    model.routes.push(route(
+        &fixture,
+        "r2-main",
+        session::RouteSource::Submix {
+            submix_id: id("r2"),
+            tap: session::SendTap::PostPan,
+        },
+        output(&fixture),
+    ));
+    model
+        .routes
+        .sort_by(|left, right| left.id.as_str().cmp(right.id.as_str()));
+    model
+}
+
+/// The route `route_id` of `model`, changed by `change`, as one upsert.
+fn upsert_route(
+    model: &SessionModel,
+    route_id: &str,
+    change: &dyn Fn(&mut session::Route),
+) -> Vec<SessionEdit> {
+    let mut route = model
+        .routes
+        .iter()
+        .find(|route| route.id.as_str() == route_id)
+        .expect("the route")
+        .clone();
+    change(&mut route);
+    vec![SessionEdit::UpsertRoute { route }]
+}
+
+/// #1953a (D15-9: a re-point is a removal plus an addition). After block `K` one transaction
+/// (a) removes `b`'s `pre_fader` send `b-send` into `r`, or (b) re-points it into `r2`; `b` and
+/// both buses stay. Each is a rebuild whose phase 1 ramps the send out over `N` on the running plan
+/// and whose successor is adopted at `S = ceil_q(p + q + N + C)`, `C` the send's line `L`, as
+/// `EXACT` with no fallback, and no block from the transaction on allocates or frees on the render
+/// thread. (a) Every block equals the reference that live-mutes `b-send` at the same point. (b)
+/// Every block equals a plan with a muted copy `b-send2` of the send into `r2` that live-mutes
+/// `b-send` at the same point and live-unmutes `b-send2` at `S`: the old bus hears (a), the new
+/// bus hears a fade from the adoption block, and `b`'s own route to the output is untouched.
+///
+/// Test value: (a) red on a removal that cuts the send at the adoption (no phase-1 route duck) or
+/// whose `S` ignores the send's line (its last ducked frames cut at `S`); (b) red on a re-point
+/// treated as a value change (a step at either bus), one that ducks `b`, or one whose new route
+/// starts at its prepared value instead of fading in.
+#[test]
+fn a_removed_or_repointed_send_ramps_out_then_in_at_s() {
+    assert_installed();
+    let base = route_duck_model();
+    let latency = Rig::boot(&base).latency();
+    let p = (K + 1) * Q;
+    let s = scheduled(p, latency);
+    assert!(
+        latency > scheduled(p, 0) - (p + Q + N),
+        "C = {latency} is longer than the rounding slack"
+    );
+    let last = s / Q + (N + latency).div_ceil(Q) + 8;
+    let mute_send = upsert_route(&base, "b-send", &|route| route.mute = true);
+    let mut with_copy = base.clone();
+    let mut copy = with_copy
+        .routes
+        .iter()
+        .find(|route| route.id.as_str() == "b-send")
+        .expect("b's send")
+        .clone();
+    copy.id = id("b-send2");
+    copy.destination = session::RouteDestination::SubmixInput {
+        submix_id: id("r2"),
+    };
+    copy.mute = true;
+    with_copy.routes.push(copy);
+    with_copy
+        .routes
+        .sort_by(|left, right| left.id.as_str().cmp(right.id.as_str()));
+    let unmute_copy = upsert_route(&with_copy, "b-send2", &|route| route.mute = false);
+    let removed = vec![SessionEdit::RemoveRoute {
+        route_id: id("b-send"),
+    }];
+    let repointed = upsert_route(&base, "b-send", &|route| {
+        route.destination = session::RouteDestination::SubmixInput {
+            submix_id: id("r2"),
+        };
+    });
+    let cases: [(&str, Vec<SessionEdit>, DuckRun); 2] = [
+        (
+            "(a) removed",
+            removed,
+            duck_run(
+                &base,
+                &[(K + 1, mute_send.clone(), EditPath::Live)],
+                last,
+                &frame_b,
+            ),
+        ),
+        (
+            "(b) re-pointed",
+            repointed,
+            duck_run(
+                &with_copy,
+                &[
+                    (K + 1, mute_send, EditPath::Live),
+                    (s / Q, unmute_copy, EditPath::Live),
+                ],
+                last,
+                &frame_b,
+            ),
+        ),
+    ];
+    for (what, transaction, reference) in cases {
+        let run = duck_run(
+            &base,
+            &[(K + 1, transaction, EditPath::Rebuild)],
+            last,
+            &frame_b,
+        );
+        let (first_sample, flags, [before, after]) = run.adopted.expect("adopted");
+        assert_eq!(first_sample, s, "{what}: the successor is adopted at S");
+        assert_eq!(flags, OUTCOME_EXACT, "{what}");
+        assert_eq!(before, after, "{what}: no transition fallback");
+        assert_eq!(run.churn, 0, "{what}: render allocates nothing");
+        for (block, (bits, want)) in run.blocks.iter().zip(&reference.blocks).enumerate() {
+            same(bits, want, block as u64);
+        }
+    }
 }

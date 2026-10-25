@@ -33,12 +33,14 @@ import {
 } from "./observation.ts";
 import type { LaneEdit } from "./writer.ts";
 import type { ObservationEnded } from "./observation-ended.ts";
-import { normalizeTrackResponseQuery } from "./live-response.ts";
+import {
+  TRACK_RESPONSE_MAXIMUM_RESULT_BYTES,
+  normalizeTrackResponseQuery,
+  sameTrackResponseResult,
+} from "./live-response.ts";
 import type {
   TrackResponseLimits,
-  TrackResponseObservedState,
   TrackResponseQuery,
-  TrackResponseRead,
   TrackResponseResult,
 } from "./live-response.ts";
 import {
@@ -254,11 +256,11 @@ export interface ObservationSubscriptionTransport {
      */
     next(timeoutMs: number, since: bigint): Promise<boolean>;
   };
-  /** Optional live-response capture/evaluation seam owned by the same lifetime. */
-  readonly responseRead?: (
-    request: TrackResponseQuery,
-    previousState?: TrackResponseObservedState,
-  ) => MaybePromise<TrackResponseRead>;
+  /**
+   * Optional live track response read owned by the same lifetime: one `queryTrackResponse` of the
+   * engine (#1579 D4). The owner compares each result with the one it published last.
+   */
+  readonly responseRead?: (request: TrackResponseQuery) => MaybePromise<TrackResponseResult>;
   /** Optional managed spectrum stream owned by this same engine lifetime. */
   readonly spectrumPrepared?: () => SpectrumQuery | undefined;
   /** Optional collection of exact targets available to the same managed spectrum owner. */
@@ -848,8 +850,8 @@ export class ObservationSubscriptionOwner {
     }
     return Object.freeze({
       ...subscriptionLimits,
-      maximumPoints: ABI_LAYOUT.constants.maximumLiveResponsePoints,
-      maximumCaptureBytes: ABI_LAYOUT.constants.liveResponseCaptureBytes,
+      maximumPoints: ABI_LAYOUT.constants.maximumResponsePoints,
+      maximumCaptureBytes: TRACK_RESPONSE_MAXIMUM_RESULT_BYTES,
     });
   }
 
@@ -2215,18 +2217,12 @@ export class ObservationSubscriptionOwner {
     }
     const read = await responseRead(query);
     this.#assertEpoch(epoch);
-    if (read.result === undefined) {
-      throw new MisoEngineError("the first live response capture did not produce a result", {
-        phase: "output", code: "abiMismatch", result: 2,
-      });
-    }
-    const state = copyObservedState(read.state);
-    const result = copyTrackResponseResult(read.result);
-    this.#assertResponseResultBounds(result, state);
+    const result = copyTrackResponseResult(read);
+    this.#assertResponseResultBounds(result);
     const job: ResponseJobState = {
-      id: this.#nextResponseJob++, key, query, refs: 0, state, result,
+      id: this.#nextResponseJob++, key, query, refs: 0, result,
       revision: 1n, publicationSequence: 1n,
-      retainedBytes: responseRetainedBytes(result, state),
+      retainedBytes: responseRetainedBytes(result),
       fastestCadenceMs: configuration.cadenceMs,
       nextCaptureAt: Date.now() + configuration.cadenceMs,
     };
@@ -2256,14 +2252,14 @@ export class ObservationSubscriptionOwner {
     });
   }
 
-  #assertResponseResultBounds(result: TrackResponseResult, state: TrackResponseObservedState): void {
+  #assertResponseResultBounds(result: TrackResponseResult): void {
     const subscriptionLimits = this.#responseSubscriptionLimits!;
     if (result.frequenciesHz.length > this.responseBounds.maximumPoints
         || (result.leftDb?.length ?? 0) > this.responseBounds.maximumPoints
         || (result.rightDb?.length ?? 0) > this.responseBounds.maximumPoints) {
       throw new MisoUsageError("the live response points exceed the subscription bound");
     }
-    if (responseRetainedBytes(result, state) > subscriptionLimits.maximumRetainedBytes) {
+    if (responseRetainedBytes(result) > subscriptionLimits.maximumRetainedBytes) {
       throw new MisoUsageError("the live response retained bytes exceed the subscription bound");
     }
   }
@@ -2336,24 +2332,18 @@ export class ObservationSubscriptionOwner {
     for (const job of jobs) {
       if (this.#responseJobs.get(job.key) !== job || job.refs === 0) continue;
       if (Date.now() < job.nextCaptureAt) continue;
-      const read = await responseRead(job.query, job.state);
+      const read = await responseRead(job.query);
       this.#assertEpoch(epoch);
       job.nextCaptureAt = Date.now() + job.fastestCadenceMs;
-      if (!read.changed) continue;
-      if (read.result === undefined) {
-        throw new MisoEngineError("the changed live response capture did not produce a result", {
-          phase: "output", code: "abiMismatch", result: 2,
-        });
-      }
-      const state = copyObservedState(read.state);
-      const result = copyTrackResponseResult(read.result);
-      this.#assertResponseResultBounds(result, state);
+      // Unchanged: nothing is published (#1579 D4).
+      if (sameTrackResponseResult(job.result, read)) continue;
+      const result = copyTrackResponseResult(read);
+      this.#assertResponseResultBounds(result);
       this.#assertResponseDeliveryBudget(job, undefined, undefined, result);
-      this.#assertResponseRetainedBytes(responseRetainedBytes(result, state), job);
+      this.#assertResponseRetainedBytes(responseRetainedBytes(result), job);
       if (this.#responseJobs.get(job.key) !== job || job.refs === 0) continue;
-      job.state = state;
       job.result = result;
-      job.retainedBytes = responseRetainedBytes(result, state);
+      job.retainedBytes = responseRetainedBytes(result);
       job.revision += 1n;
       job.publicationSequence += 1n;
     }
@@ -2472,6 +2462,10 @@ export interface TrackResponseSubscription {
   readonly configuration: TrackResponseSubscriptionConfiguration;
   readonly bounds: TrackResponseSubscriptionBounds;
   readLatest(): TrackResponseResult | undefined;
+  /**
+   * Read the job when its cadence is due and deliver a changed result. On the headless engine the
+   * read is a query that settles at the next `render()` the app calls.
+   */
   pump(): Promise<TrackResponseSubscriptionNotification | undefined>;
   update(request: TrackResponseSubscriptionRequest): Promise<TrackResponseSubscriptionReceipt>;
   close(): Promise<void>;
@@ -2554,10 +2548,7 @@ export interface SpectrumSubscription {
 
 /** One capture/evaluation seam shared by browser and headless managed response owners. */
 export interface TrackResponseSubscriptionTransport {
-  responseRead(
-    request: TrackResponseQuery,
-    previousState?: TrackResponseObservedState,
-  ): MaybePromise<TrackResponseRead>;
+  responseRead(request: TrackResponseQuery): MaybePromise<TrackResponseResult>;
   readonly scheduler?: ObservationSubscriptionScheduler;
 }
 
@@ -2575,7 +2566,6 @@ interface ResponseJobState {
   readonly key: string;
   readonly query: TrackResponseQuery;
   refs: number;
-  state: TrackResponseObservedState;
   result: TrackResponseResult;
   revision: bigint;
   publicationSequence: bigint;
@@ -2836,23 +2826,6 @@ function responseJobKey(query: TrackResponseQuery): string {
   ]);
 }
 
-function copyObservedState(state: TrackResponseObservedState): TrackResponseObservedState {
-  if (state === null || typeof state !== "object" || !Array.isArray(state.words)) {
-    throw new MisoEngineError("the response state read was malformed", {
-      phase: "output", code: "abiMismatch", result: 2,
-    });
-  }
-  const words = state.words.map((word) => {
-    if (!Number.isSafeInteger(word) || word < 0 || word > 0xffff_ffff) {
-      throw new MisoEngineError("the response state read contained an invalid word", {
-        phase: "output", code: "abiMismatch", result: 2,
-      });
-    }
-    return word;
-  });
-  return Object.freeze({ words: Object.freeze(words) });
-}
-
 function responseVectorBytes(result: TrackResponseResult): number {
   return result.frequenciesHz.byteLength
     + (result.leftDb?.byteLength ?? 0)
@@ -2868,16 +2841,14 @@ function responseDeliveryRate(result: TrackResponseResult, cadenceMs: number): n
   return rate;
 }
 
-function responseRetainedBytes(result: TrackResponseResult, state: TrackResponseObservedState): number {
+function responseRetainedBytes(result: TrackResponseResult): number {
   const resultBytes = Number(result.resultBytes);
-  const keyBytes = state.words.length * 4;
-  if (!Number.isSafeInteger(resultBytes) || resultBytes < 0
-      || !Number.isSafeInteger(keyBytes) || resultBytes + keyBytes > Number.MAX_SAFE_INTEGER) {
+  if (!Number.isSafeInteger(resultBytes) || resultBytes < 0) {
     throw new MisoEngineError("the response subscription retained bytes exceeded its bound", {
       phase: "output", code: "refusedBudget", result: 8,
     });
   }
-  return resultBytes + keyBytes;
+  return resultBytes;
 }
 
 function copyTrackResponseResult(result: TrackResponseResult): TrackResponseResult {

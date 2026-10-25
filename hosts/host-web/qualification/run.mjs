@@ -52,7 +52,7 @@ const MUTATIONS = [
   // Issue #1535 D9: a never-armed run that received no frame proves nothing.
   "observation-disarmed-empty",
   "sdk-observation-window-reversed", "sdk-observation-window-malformed",
-  "sdk-response", "sdk-observation", "sdk-spectrum", "sdk-spectrum-hop-missing",
+  "sdk-response", "sdk-observation", "sdk-spectrum", "sdk-spectrum-control-allocations", "sdk-spectrum-hop-missing",
   "sdk-spectrum-hop-wrong", "sdk-spectrum-recovery-loss",
   // Issue #1106: a hop probe whose audio start was not delayed, one that never waited, one that
   // spun, and a never-publishing wait that outlived its deadline.
@@ -60,6 +60,9 @@ const MUTATIONS = [
   "sdk-spectrum-hop-wait-never-unbounded",
   "sdk-spectrum-recovery-unavailable", "sdk-spectrum-recovery-identity",
   // Issue #1097 gate 4: a live bypass that reached no instance, or the wrong one.
+  // Issue #1579b: the browser's track responses through the core's frames, on a live context.
+  "sdk-track-response-worker", "sdk-track-response-unchanged", "sdk-track-response-once",
+  "sdk-track-response-early", "sdk-live-response-serialized", "sdk-live-response-sections",
   "sdk-live-bypass-console", "sdk-live-bypass-insert", "sdk-live-bypass-address",
   // Issues #1341a1 and #1341a2: a live bypass is a ramp over the session's mute length, so a step,
   // a ramp that never settles and a lift that never lands are red too.
@@ -99,7 +102,8 @@ const SDK_RENDER_ALLOCATION_WORKLOADS = Object.freeze([
   "resident-observation",
   "observation-wait-deadline",
   "observation-wait-render",
-  "track-response-subscription",
+  "track-response-live",
+  "live-eq-cuts",
   "sdk-observation",
   "spectrum-query:trackPostInput:track",
   "spectrum-query:trackPostPan:track",
@@ -446,11 +450,11 @@ function validate(browserName, result) {
   const resumes = result.resumes;
   gate(browserName, "resume-clicks", resumes?.direct === 0
     && Number.isInteger(resumes?.declared)
-    && resumes.declared === (result.sdkResponse === null ? 1 : 3)
+    && resumes.declared === (result.sdkResponse === null ? 1 : 4)
     && resumes.inClick === resumes.declared
     && resumes.planned === resumes.declared
     && resumes.clicksPerformed === resumes.declared,
-  `a real AudioContext was resumed outside a trusted click, the page did not declare its one unsubscribe click (plus the two SDK clicks when the SDK runs), or the harness did not click exactly the declared controls: ${JSON.stringify(resumes)}`);
+  `a real AudioContext was resumed outside a trusted click, the page did not declare its one unsubscribe click (plus the three SDK clicks when the SDK runs), or the harness did not click exactly the declared controls: ${JSON.stringify(resumes)}`);
 
   const stall = result.stall;
   // #137 E6: the frozen stall requirements are unchanged, and they are now met with the control
@@ -767,11 +771,12 @@ function validateSdkResponse(browserName, response) {
     && Array.isArray(live.right) && live.right.length === 5
     && live.finite === true && liveU64(live.capturedSample) && liveU64(live.snapshotToken)
     && liveU64(live.resultBytes) && live.ownedAfterSecondQuery === true
-    && live.pendingRefused === true && live.closedRefused === true
+    && live.serialized === true && live.closedRefused === true
+    && JSON.stringify(liveMembers.map((member) => member.rackValue)) === JSON.stringify([4, 5, 2, 5])
     && liveInputFilters !== undefined && liveCompressor !== undefined
     && JSON.stringify(liveMemberOrder) === JSON.stringify(expectedLiveMemberOrder)
     && live.excludedMemberCount === 1,
-  "browser live response did not return the target subtotal, owned channels, membership, boundary identity, or lifecycle refusals");
+  "browser live response did not return the target subtotal, owned channels, membership, section codes, boundary identity, one capture at a time, or the closed refusal");
   const managedResponse = observations?.managedResponse;
   const managedInitial = managedResponse?.initial;
   const managedAfterRender = managedResponse?.afterRender;
@@ -794,13 +799,18 @@ function validateSdkResponse(browserName, response) {
     && finiteArray(managedInitial?.left) && finiteArray(managedInitial?.right)
     && managedInitial.frequencies.length === 5
     && managedInitial.left.length === 5 && managedInitial.right.length === 5
-    && managedInitial.capturedSample === "0"
     && liveU64(managedInitial.snapshotToken),
   "managed track-response subscription did not match the one-shot owner membership and values");
-  gate(browserName, "sdk-track-response-subscription", managedResponse?.unchangedBeforeRender === true
+  // #1579b gate 4: renders with no edit publish nothing; after an edit, one publication whose
+  // capture is after the edit's applied sample (the clause `sdk-live-eq-cuts` carried). A capture
+  // is stamped with its block's exclusive end, so equality would be a committed-model read.
+  gate(browserName, "sdk-track-response-subscription", managedResponse?.unchangedOverRenders === true
     && managedResponse.unchangedNotificationCount === 0
     && managedResponse.changedPublication === true
-    && managedResponse.callbackCount >= 1
+    && liveU64(managedResponse.appliedAtSample)
+    && BigInt(managedAfterRender?.capturedSample ?? -1) > BigInt(managedResponse.appliedAtSample)
+    && managedResponse.publishedOnce === true
+    && managedResponse.callbackCount === 1
     && managedResponse.callbackOwner === managedResponse.owner
     && managedResponse.callbackEpoch === managedResponse.epoch
     && managedResponse.callbackJob === managedResponse.job
@@ -810,16 +820,15 @@ function validateSdkResponse(browserName, response) {
     && managedAfterRender?.points === 5
     && finiteArray(managedAfterRender?.left)
     && finiteArray(managedAfterRender?.right),
-  "managed track-response subscription did not suppress unchanged captures or publish the captured edit");
-  gate(browserName, "sdk-live-eq-cuts", managedResponse?.liveEq !== undefined
-    && BigInt(managedResponse.liveEq.capturedSample) > BigInt(managedResponse.liveEq.appliedAtSample)
-    && managedResponse.liveEq.postRampComparedFrames >= 128
-    && Number.isFinite(managedResponse.liveEq.postRampMaximumDifference)
-    && managedResponse.liveEq.postRampMaximumDifference <= 1e-6,
-  "packed browser EQ cuts did not produce fresh target response and settled headless PCM parity");
-  gate(browserName, "sdk-track-response-subscription", managedResponse?.workerInitializations === 1
-    && managedResponse.workerQueries === 4
-    && managedResponse.unchangedPollSuppressed === true
+  "managed track-response subscription published over renders with no edit, missed the edit, or published it more than once");
+  const liveEq = observations?.liveEq;
+  gate(browserName, "sdk-live-eq-cuts", liveEq !== undefined
+    && liveEq.postRampComparedFrames >= 128
+    && Number.isFinite(liveEq.postRampMaximumDifference)
+    && liveEq.postRampMaximumDifference <= 1e-6,
+  "packed browser EQ cuts did not reach settled headless PCM parity");
+  // #1579b gate 4: the subscription reads the core's frames; no response Worker is created.
+  gate(browserName, "sdk-track-response-subscription", managedResponse?.responseWorkersCreated === 0
     && managedResponse.sharedJob === true
     && managedResponse.arraysIsolated === true
     && managedResponse.firstCloseKeepsJob === true
@@ -933,7 +942,13 @@ function validateSdkResponse(browserName, response) {
     && row.finite === true && Array.isArray(row.frequencies) && row.frequencies.length === 1_025
     && Array.isArray(row.left) && row.left.length === 1_025
     && Array.isArray(row.right) && row.right.length === 1_025),
-  "SDK spectrum Worker result did not preserve the complete bounded L/R window and sample span");
+  "SDK spectrum result did not preserve the complete bounded L/R window and sample span");
+  // #1596 gate 5: the core analyzes in the worklet's message handler on this page, and the handler's
+  // allocations are counted, never hidden.
+  gate(browserName, "sdk-spectrum-control-allocations", spectrumRows.every((row) => Array.isArray(row.controlAllocations)
+    && row.controlAllocations.every((value) => /^[0-9]+$/.test(value))
+    && BigInt(row.controlAllocations[1]) > BigInt(row.controlAllocations[0])),
+  `the spectrum reads' handler allocations were not counted: ${JSON.stringify(spectrumRows.map((row) => row.controlAllocations))}`);
   gate(browserName, "sdk-spectrum", spectrum?.allFinite === true
     && spectrum?.ownedArrays === true && spectrum?.postChainDiffers === true
     && spectrum?.busyRefused === true && spectrum?.closedRefused === true,
@@ -957,9 +972,9 @@ function validateSdkResponse(browserName, response) {
     ["gap", continuous?.gap === true],
     // Issue #1480 D2: no read runs during the render, so all 17 windows of 6,144 frames at hop 256
     // meet the one-record native queue: one is queued, 16 are dropped, and the first read after
-    // the render reports that gap (status 3).
+    // the render reports that gap.
     [`renderLoss (status=${continuous?.renderLoss?.status}, dropped=${continuous?.renderLoss?.droppedCaptures})`,
-      continuous?.renderLoss?.status === 3 && continuous?.renderLoss?.droppedCaptures === "16"],
+      continuous?.renderLoss?.status === "gap" && continuous?.renderLoss?.droppedCaptures === "16"],
     ["ownedArrays", continuous?.ownedArrays === true],
     ["sharedAfterFirstClose", continuous?.sharedAfterFirstClose === true],
     ["staleReadRefused", continuous?.staleReadRefused === true],
@@ -1101,7 +1116,7 @@ function validateSdkResponse(browserName, response) {
   const listSummary = (list) => (Array.isArray(list)
     ? { length: list.length, distinct: [...new Set(list)] } : list);
   gate(browserName, "sdk-spectrum-hop", failedHopConditions.length === 0,
-    "actual browser H1024 did not preserve Worklet metadata, Worker results, overlap, smoothing, and ownership: "
+    "actual browser H1024 did not preserve the core's stream metadata, results, overlap, smoothing, and ownership: "
       + `failed ${JSON.stringify(failedHopConditions)} in ${JSON.stringify(configuredHop === undefined ? undefined : {
         ...configuredHop,
         notificationHops: listSummary(configuredHop?.notificationHops),
@@ -1167,6 +1182,15 @@ function mutate(result, mutation) {
   if (mutation === "observation-disarmed-empty") copy.observation.disarmed.frames = 0;
   if (mutation === "observation-identity") copy.observation.identicalAudio = false;
   if (mutation === "resume-clicks-direct") copy.resumes.direct = 1;
+  if (mutation === "sdk-track-response-worker") copy.sdkResponse.observations.managedResponse.responseWorkersCreated = 1;
+  if (mutation === "sdk-track-response-unchanged") copy.sdkResponse.observations.managedResponse.unchangedOverRenders = false;
+  if (mutation === "sdk-track-response-once") copy.sdkResponse.observations.managedResponse.publishedOnce = false;
+  if (mutation === "sdk-track-response-early") {
+    copy.sdkResponse.observations.managedResponse.appliedAtSample =
+      copy.sdkResponse.observations.managedResponse.afterRender.capturedSample;
+  }
+  if (mutation === "sdk-live-response-serialized") copy.sdkResponse.observations.liveResponse.serialized = false;
+  if (mutation === "sdk-live-response-sections") copy.sdkResponse.observations.liveResponse.members[0].rackValue = 0;
   if (mutation === "resume-clicks-missing") copy.resumes.clicksPerformed -= 1;
   if (mutation === "resume-clicks-extra") copy.resumes.clicksPerformed += 1;
   if (mutation === "observation-window") copy.observation.armed.firstSampleMonotonic = false;
@@ -1180,6 +1204,10 @@ function mutate(result, mutation) {
   if (mutation === "sdk-response") copy.sdkResponse.eq.points = 0;
   if (mutation === "sdk-observation") copy.sdkResponse.observations.readyStatuses[0] = "pending";
   if (mutation === "sdk-spectrum") copy.sdkResponse.spectrum.targets[0].finite = false;
+  if (mutation === "sdk-spectrum-control-allocations") {
+    const counts = copy.sdkResponse.spectrum.targets[0].controlAllocations;
+    counts[1] = counts[0];
+  }
   if (mutation === "sdk-spectrum-hop-missing") {
     delete copy.sdkResponse.spectrum.configuredHop.nativeStart.hopFrames;
   }
@@ -1823,7 +1851,7 @@ async function main() {
         playwrightVersion: PLAYWRIGHT_VERSION,
         platform: "linux-headless",
         artifact: "single shipped simd128 AudioWorklet artifact",
-        defaultRingFrames: 5120,
+        stallRingFrames: 5120,
         minimumStallMs: 100,
         browsers: rows,
       };

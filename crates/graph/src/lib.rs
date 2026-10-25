@@ -4858,8 +4858,13 @@ pub fn install_fade_arm_carry(
 
 // REALTIME_POLICY_BEGIN
 /// Copy each carried fade arm's state from the displaced plan's table (issue #1392 D3, D8): a
-/// copied `Done` leaves the pending count. Bounded by `pairs`; allocation-free.
+/// copied `Done` leaves the pending count. A route entry that takes `Done` (#1877 D6: the
+/// displaced route fired after this plan's preparation re-armed it) fires its own arm here, so
+/// the route never waits for a fire its table no longer holds; the live-send section that runs
+/// after this one then gives a carried route the displaced route's ramp. A strip's lane import,
+/// which runs before, already overwrote its arm. Bounded by `pairs`; allocation-free.
 fn carry_fade_arms(
+    runtime: &mut runtime::Runtime,
     arms: &mut [FadeArm],
     pending: &mut u32,
     fired: &GraphFadeArmWatch,
@@ -4876,6 +4881,9 @@ fn carry_fade_arms(
         if own.state != FadeArmState::Done && from.state == FadeArmState::Done {
             *pending = pending.saturating_sub(1);
             fired.set(pair.successor as usize);
+            if let GraphFadeTarget::Route(unit) = own.target {
+                runtime.fire_route_fade_in(unit);
+            }
         }
         own.state = from.state;
     }
@@ -7234,6 +7242,7 @@ impl GraphExecutor {
         // Issue #1392 D3: after the lane import, each carried fade arm takes its render state.
         if !self.fade_arm_carry.is_empty() {
             carry_fade_arms(
+                &mut self.runtime,
                 &mut self.fade_arms,
                 &mut self.fade_arms_pending,
                 &self.fade_fired,

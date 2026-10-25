@@ -291,13 +291,15 @@ warm edit would be `LeadBound`.
   candidate's flags alone keeps `s` flagged, so W2 waits for frames the host never sends and is
   not adopted at the first block at or after `S`. Red.
 - Gate 6(a): a `C` that counts sidechain lines only from strips the carry join restarts
-  (round-8 M1) misses G, so `S` counts 62 instead of 486: the `S` assertion is red, and W's
-  shorter key line drops 31 samples of G's fade tail from K's detector, so K's gain differs from
-  the reference from `S` on, before T1's fire block. A successor that does not restart and arm
-  the grown strips (round-9 M1) fails the `restarted_strips()` assertion. Gate 6(b): #1324 D1's
-  rule run over the carry join's `restarted_strips()` only (the round-8 text) leaves K carried
-  and audible through the duck, and its key line, shortened from 486 to 455 samples, drops 31
-  samples of G's pre-fader signal at `S`. Red.
+  (round-8 M1) misses G, so `S` counts 62 instead of 486, and the `S` assertion is red. The output
+  cannot see it: a shortened carried line keeps its oldest samples and drops the newest δ (31)
+  (`CompensationDelay::adopt`), so at that `S` the line still drops only `+0.0`, and any drop
+  would show only after the comparison window (t1's fire block). A successor that does not
+  restart and arm the grown strips (round-9 M1) fails the `restarted_strips()` assertion.
+  Gate 6(b): #1324 D1's closure run before the transition's forced restarts join the restarted set
+  (the round-8 text: over the carry join's `restarted_strips()` only) leaves K carried and audible
+  through the duck: the `restarted_strips()` assertion is red, and the output differs from the
+  reference, which mutes K, from the edit's block. Red. `S` is unchanged (no class B).
 
 ## Dependencies
 
@@ -407,9 +409,12 @@ for every other session.
   the output rule takes only strips that reach the output in the successor. One assertion each
   (an added send, a removed route, an added node, a routeless track).
 - **MINOR-2. #1360 and #1361 are blocked by 1397b.** They make `WarmConfig` a production value.
-  Until 1397b counts `post_fader`/`post_pan` sidechain lines in `C` and runs the sidechain closure
-  in `grown_strips`, a production warm session could drop a shortened key line's last nonzero
-  samples at an adoption, so neither may ship before 1397b.
+  Until 1397b checks that `C` counts `post_fader`/`post_pan` sidechain lines and that the duck set is
+  closed over sidechains (gate 6), neither may ship. (Amended by 1397b, root ruling.) The closure
+  is not run in `grown_strips`: since the 1397a merge with #1324b, the preparation adds
+  `forced_restart` to its restarted set before it runs the one closure (`close_over_sidechains`),
+  so a closure in `grown_strips` would be a second call of the same rule with no effect. Gate 6(b)
+  defends that order.
 - **NITs.** The duplicated #1325 D7 comment is gone; the test entry's doc names the private
   method in plain text; the injected refusal is taken from its hook when the fallback starts and
   travels on `Rebuild::Transition`.
@@ -422,3 +427,23 @@ for every other session.
 - In the successor preparation, D2's forced restarts join the restarted set before #1324b's
   sidechain closure, so the closure also closes over them; the transition is planned again over
   the prepared `restarted_strips()`, so each strip the closure adds is ducked.
+
+## Decision record (slice 1397b, attempt 1, 2026-10-25)
+
+- **Closure (root ruling, after attempt 1).** `grown_strips` does not close its set (see the
+  amended MINOR-2). Attempt 1 added the closure there. Root removed it and its unit-test arm,
+  because the preparation's closure over the forced restarts already carries the claim. The
+  `grown_strips` doc states this. `close_over_sidechains` is private again.
+- **`C` over sidechain lines** was already in place (#1324b D4, merge note above): the transition is
+  planned over the prepared `restarted_strips()`, so a `post_fader` key line out of a forced restart
+  counts. Gate 6(a) checks it. No code change.
+- **Gate 6** is one control-plane test (`a_sidechain_key_out_of_a_grown_strip_is_ducked`), on both
+  widths, with the spec's session (`P_MAX = 0`). Both arms
+  are published `NoEarlierThan(S)` (`C` = 486 for (a), 62 for (b)), are adopted at `S` and report
+  `TRANSITION_FALLBACK`. The output matches the reference up to `t1`'s fire block.
+- **Finding (open question for root).** Measured with a temporary mutant and also at threshold -80 dB: a carried line that gets shorter keeps its *oldest* samples
+  (`CompensationDelay::adopt`, head-aligned) and drops the newest `δ`. So in gate 6(a) an `S` that
+  counts only the route lines (62) also drops only `+0.0`. The output cannot see the spec's 6(a)
+  defect, and only the `S` assertion catches it. Counting the whole key line in `C` is conservative
+  (the drop needs only `δ` of silence before `S`). This slice does not change it, because that would
+  move `S` (class B).

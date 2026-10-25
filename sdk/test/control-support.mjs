@@ -6,9 +6,7 @@
 
 import { readFileSync } from "node:fs";
 
-import {
-  DECODER, commandFrame, concat, field, nested, nestedFields, readFields, text, u32, u8,
-} from "../src/core/control-frame.ts";
+import { concat, field, text, u32, u8 } from "../src/core/control-frame.ts";
 
 const SET_CONTROL_FIXTURE = JSON.parse(readFileSync(
   new URL("../../crates/protocol/tests/fixtures/set-control-frames.json", import.meta.url),
@@ -50,8 +48,6 @@ export function scriptedControl({ revision = 1n, frames = [], answer, strips = {
 
 const WIRE_U8 = 1;
 const WIRE_U32 = 3;
-const WIRE_F32 = 6;
-const WIRE_PACKED_U64 = 14;
 const WIRE_U64 = 4;
 const WIRE_BOOL = 8;
 const WIRE_UTF8 = 9;
@@ -167,76 +163,4 @@ export function structuralFrame(name, engine) {
   view.setBigUint64(24, engine.controlTransactions().requestIds.next(), true);
   view.setBigUint64(32, engine.controlRevision(), true);
   return frame;
-}
-
-/** A response frame to `message`: `commandFrame`'s header with the response kind. */
-function responseFrame(message, requestId, revision, fields) {
-  const out = commandFrame(message, 0, requestId, revision, fields.length, concat(fields));
-  out[14] = 2;
-  return out;
-}
-
-/** The console slot's or the insert's ID of an `Observe` edit's or a read selection's address. */
-function slotOf(addressField) {
-  return DECODER.decode(nestedFields(addressField.value).find((row) => row.id === 4).value);
-}
-
-/**
- * A scripted `host.control()` that also answers the observation frames (#1589b), for tests whose
- * browser host is a hand-written fake. An `Observe` transaction is applied on the `monitor` path,
- * each edit a fresh arm tag (an arm holds its slot's tap, a disarm drops it). An
- * `OBSERVATION_READ` answers an armed tap with a ready row of its tag whose window sequence counts
- * the reads, and any other tap unarmed. Every other frame goes to `base`.
- */
-export function scriptedObservationControl(base = scriptedControl(), { revision = 1n } = {}) {
-  let tag = 0n;
-  let reads = 0n;
-  const armed = new Map();
-  return async function control(frame, ...rest) {
-    const view = new DataView(frame.buffer, frame.byteOffset, frame.byteLength);
-    const message = view.getUint16(16, true);
-    const requestId = view.getBigUint64(24, true);
-    const fields = () => readFields(frame.subarray(48), view.getUint32(40, true));
-    const answer = (response) => ({ tag: "miso.control.v1", requestId: 1, result: 0, response, revision });
-    if (message === 0x0003) {
-      const tags = new Uint8Array(8 * view.getUint32(40, true));
-      fields().forEach((edit, index) => {
-        const payload = nestedFields(nestedFields(edit.value).find((row) => row.id === 2).value);
-        const slot = slotOf(payload.find((row) => row.id === 1));
-        tag += 1n;
-        if (payload.find((row) => row.id === 3).value[0] === 1) armed.set(slot, tag); else armed.delete(slot);
-        new DataView(tags.buffer).setBigUint64(index * 8, tag, true);
-      });
-      return answer(responseFrame(0x0003, requestId, revision, [
-        field(1, WIRE_U32, true, u32(tags.length / 8)),
-        field(2, WIRE_U8, true, u8(4)),
-        field(3, WIRE_PACKED_U64, false, tags),
-      ]));
-    }
-    if (message === 0x000f) {
-      reads += 1n;
-      const rows = fields().map((selection) => {
-        const own = armed.get(slotOf(nestedFields(selection.value).find((row) => row.id === 1)));
-        const status = own === undefined ? 2 : 3;
-        const window = own === undefined ? [] : [
-          field(5, WIRE_U64, false, u64Value(0n)),
-          field(6, WIRE_U64, false, u64Value(128n)),
-          field(7, WIRE_U64, false, u64Value(reads)),
-          field(8, WIRE_U32, false, u32(1)),
-          field(9, WIRE_F32, false, Uint8Array.of(0, 0, 0x80, 0x3f)),
-          field(10, WIRE_F32, false, Uint8Array.of(0, 0, 0, 0x40)),
-        ];
-        return nested(2, true, [
-          field(1, WIRE_U8, true, u8(status)),
-          field(2, WIRE_BOOL, true, u8(own === undefined ? 0 : 1)),
-          field(3, WIRE_U64, true, u64Value(0n)),
-          field(4, WIRE_U64, true, u64Value(own ?? 0n)),
-          ...window,
-          field(11, WIRE_U8, true, u8(1)),
-        ]);
-      });
-      return answer(responseFrame(0x000f, requestId, revision, [field(1, WIRE_U64, true, u64Value(128n)), ...rows]));
-    }
-    return base(frame, ...rest);
-  };
 }

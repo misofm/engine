@@ -192,8 +192,20 @@ given a live unmute at that block (`an_added_route_fades_in_after_its_line_fills
 `an_added_strips_pre_fader_send_fades_with_it_on_every_width`). An added `post_fader` or `post_pan`
 route into the output, which has no lane, binds live for that plan only so it can ramp, and loses
 the fold there. A muted route, a route whose destination strip is added, a following route with
-an automated source mute and a declared discontinuity arm nothing; a removed or re-pointed route
-still steps (#1953). The frozen exported set is now 15
+an automated source mute and a declared discontinuity arm nothing. A route the transaction
+removes or re-points (another source, tap or destination) between two strips it keeps ramps out
+first when it has a lane, that is when it goes into a submix or leaves before the fader (#1953a,
+D15-9): phase 1 mutes it on the running plan over the session mute ramp, `C` counts its lines, and
+the successor is adopted at `S`; a re-pointed route is a removal plus an addition and fades in at
+its new destination from `S`, while its source strip plays on
+(`capi`'s `a_removed_or_repointed_send_ramps_out_then_in_at_s`, `host-core`'s
+`a_repointed_send_fades_in_at_its_new_destination_on_every_width`). A removed or re-pointed
+`post_fader` or `post_pan` route into the output keeps the fold and still steps, and a route
+re-pointed from one steps on both sides, with no fade in at its new destination (1953b takes both
+halves). A later structural transaction adopted before an added route's fade has run
+keeps it as #1392 keeps a strip's (#1877): the successor re-arms the route with its own target and
+ramp, a waiting fade keeps waiting, a scheduled one keeps its render sample, and a fired one never
+runs again (`a_pending_route_fade_survives_a_second_swap_on_every_width`). The frozen exported set is now 15
 `miso_engine_v1_*` definitions (`scripts/check-capi-abi.sh`, whose self-test refuses a library
 where the new symbol is only an undefined reference: its `nm` wrapper drops the symbol from a
 defined-only listing and shows it as `U` otherwise, so the case also fails if the checker stops
@@ -476,9 +488,10 @@ counters `TELEMETRY_COALESCED` 5 and `TELEMETRY_DROPPED` 6, `LIVE_VALUES_SUPERSE
 the frame-derived telemetry configuration capacity is smaller. Canceled automation (counter 12) retired with the automation
 queue (#1629).
 
-**Meter batches (#1583, #1587a, #1587b, decision 17 C1/C9/C13).** `TELEMETRY_CONFIGURE` takes a meter
-table of stable targets: entry `i` (handle `i + 1`) is the output or a strip by its ID, with a
-metric (peak or gain reduction). A handle is the table's, so a structural commit never moves it.
+**Meter batches (#1583, #1587a, #1587b, #1690b, decision 17 C1/C9/C13).** `TELEMETRY_CONFIGURE` takes a meter
+table of stable targets: entry `i` (handle `i + 1`) is the output, a strip by its ID or the master
+(#1690b), with a metric (peak or gain reduction; the output takes peak only and the master gain
+reduction only, any other pair `INVALID_FIELD` at the codec). A handle is the table's, so a structural commit never moves it.
 The C ABI session owns one meter delivery from boot over the session's output meter and the
 running plan's strip meters, one post-matrix meter per strip whose queue is as deep as the output
 meter's (eight), and its echo carries the meter window in blocks (`meter_window_blocks`,
@@ -512,6 +525,15 @@ record's observation entries into the plan's attachment, and the promotion pairs
 from them (#1674's observation half, #1587b), never from a list made at preparation. A swap that
 does not carry the effect restarts its taps: an armed tap is prepared armed (#1584), and the
 strip's gain reduction is absent until the tap's first window in the new plan closes.
+The master's gain-reduction entry (#1690b) is the same record for the strip the core's `master`
+row names (`SessionState::master_strip`), resolved by ID in the one meter staging both hosts share:
+at each adopted plan, and again after a live or monitor commit that moves or clears the row, so
+it follows the row with no reconfigure (a rebuild's successor resolves it at its own first
+frame, and the plan still rendering keeps its master until then, as the browser does). With no
+master, or a master without a reading, the record has flags 0 and value 0.0; the entry stays in
+the table, and a configure with no master is accepted. The browser's `masterGrDb` reads the same
+strip's reading through `MeterFrame::master_gain_reduction` (#1690a), and the master parity row
+holds the two equal bit for bit, and absent together.
 The control thread adopts each swap when it reclaims the displaced plan, whose clock gives the
 adoption sample. The lossy meter lane holds one batch whole (256 slots; the counter-snapshot lane keeps
 two). `METER_WINDOWS_LOST` counts every closed window that reached no batch: the windows render

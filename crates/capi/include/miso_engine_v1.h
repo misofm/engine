@@ -292,9 +292,9 @@ extern "C" {
  * returns MISO_ENGINE_V1_BACKPRESSURE with out untouched, and the host retries. A host checks
  * MISO_ENGINE_V1_FEATURE_PLAN_WATERMARK before calling the symbol.
  *
- * Meters (issues 1583, 1587). TELEMETRY_CONFIGURE takes a meter table: entry i (meter handle
- * i + 1) names the output, or a track or submix by its stable ID, and a metric, so a structural
- * commit never moves a handle. Its reply carries the session's meter window in blocks
+ * Meters (issues 1583, 1587, 1690). TELEMETRY_CONFIGURE takes a meter table: entry i (meter
+ * handle i + 1) names the output, a track or submix by its stable ID, or the master, and a metric,
+ * so a structural commit never moves a handle. Its reply carries the session's meter window in blocks
  * (meter_window_blocks, about 32 ms). A nonempty table turns the meters on from the next rendered
  * block, an empty one off; render applies the change before a block, on the strip meters' window
  * grid, with no allocation, lock or syscall. Each METER_BATCH reports meter_period_blocks /
@@ -312,7 +312,11 @@ extern "C" {
  * and arm continue across a swap that carries its effect; a swap that carries no strip meter
  * restarts the window grid at its first block. A swap that does not carry the effect (one whose
  * state cannot continue) restarts its taps: an armed tap stays armed, and the strip's gain
- * reduction is absent until the tap's first window in the new plan closes. A configure is all or nothing: an
+ * reduction is absent until the tap's first window in the new plan closes. The master entry
+ * (gain reduction only; output peak only; any other pair is INVALID_FIELD) gives the same record
+ * for the strip the master row names when the batch is staged, which follows every SET_CONTROL of
+ * that row and every adopted plan, with no reconfigure; with no master, or a master that has no
+ * reading, it has flags 0 and value 0.0, and it stays in the table. A configure is all or nothing: an
  * unknown strip is NOT_FOUND (meter.strip.unknown), a period that is not a whole number of windows
  * INVALID_FIELD (meter.period), and a table of more than 128 entries INVALID_FIELD (meter.records,
  * at its 129th entry), so a batch never needs more than its 256 records. Each
@@ -410,6 +414,15 @@ extern "C" {
  * until the host seeks it. A source whose declaration the transaction changed restarts like an
  * added one: in a new ring at generation 1, frame 0, with the PCM accepted for it before the
  * command discarded with its plan; the host restarts its feed.
+ *
+ * Removing or re-pointing a route (issue 1953). A transaction that removes a route between two
+ * strips it keeps, or gives it another source, tap or destination, and whose route goes into a
+ * submix or leaves its source before the fader, ramps it out the same way: the route is muted on
+ * the running plan over N, C counts its compensation delay, and the replacement is adopted no
+ * earlier than S. A re-pointed route is a removal plus an addition: from S it fades in at its new
+ * destination as an added route does, and its source strip plays on. A post_fader or post_pan
+ * route into an output still stops at once at the swap, and a route re-pointed from one still
+ * steps on both sides: it stops at once at its old destination and enters at once at its new one.
  *
  * Duck-swapping a strip whose state cannot continue (issue 1324). A transaction whose
  * replacement restarts a strip it keeps -- an insert added, removed or reordered, delay_samples, a
@@ -558,7 +571,8 @@ extern "C" {
  * the host sends before the fade cancels it, and an unmute (the track is unmuted already) leaves
  * the fade waiting. A route the transaction adds between two strips that keep playing, and a
  * send of an added track from a tap before its fader, fade in over the same ramp (#1363), at
- * adoption or with that track's fader; a removed or re-pointed route still stops at once. If g's
+ * adoption or with that track's fader; a removed or re-pointed route ramps out first (issue 1953)
+ * unless it is a post_fader or post_pan route into an output, which still stops at once. If g's
  * PCM is not queued when the block
  * at A renders, the seek applies there anyway: the blocks without PCM count as underrun frames,
  * and PCM that falls behind the read position is discarded. A playing stem's seek report gives

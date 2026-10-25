@@ -39,6 +39,16 @@ BASELINE_WORKFLOW_SHA256 = "478111e6393fda9e99dce3de8c521b71de0dcba141cc041ada2b
 QUALIFY_PACK_STEP_SHA256 = "65f9cdee7267135423f20785b180ee192c3173ca60a7c2e47e7300601e4eaf91"
 
 MODE_ENV = "        env:\n          MODE: ${{ inputs.mode }}\n"
+BROWSER_ENV = re.compile(r'^  BROWSER_ARTIFACT_TOOLCHAIN: "nightly-[0-9]{4}-[0-9]{2}-[0-9]{2}"\n',
+                         re.MULTILINE)
+BROWSER_INSTALL = (
+    '          channel="$(bash scripts/build-web-audioworklet.sh --print-toolchain)"\n'
+    '          [[ "$channel" == "$BROWSER_ARTIFACT_TOOLCHAIN" ]] || { echo "rust-toolchain.toml\'s '
+    'browser artifact channel $channel is not BROWSER_ARTIFACT_TOOLCHAIN $BROWSER_ARTIFACT_TOOLCHAIN" '
+    '>&2; exit 1; }\n'
+    '          rustup toolchain install "$channel" --profile minimal --component rust-src\n'
+    '          rustup run "$channel" rustc --version\n'
+)
 PUBLISH_DRY_RUN = '          npm publish --dry-run --ignore-scripts "$archive"\n'
 PUBLISH_GUARD = (
     '          if [[ "$MODE" == publish ]]; then\n'
@@ -54,7 +64,7 @@ STEP_HEADERS = (
     "      - name: Guard release identity, accepted ancestry, and rejected commits",
     "      - name: Require a successful qualification dispatch before publication or recovery",
     "      - name: Pin npm 11.19.0 for packing, trusted-publisher checks, and provenance verification",
-    f"      - name: Install Rust {RUST_RELEASE} and the Wasm target",
+    f"      - name: Install the browser artifact toolchain and Rust {RUST_RELEASE}",
     "      - name: Install locked SDK dependencies",
     "      - name: Build the shipped Engine AudioWorklet closure once and prove its Linux pin",
     "      - name: Run generated, deletion, type, headless, and package preparation gates",
@@ -204,6 +214,16 @@ def normalize_authorized_edits(text: str) -> str:
     # toolchain step's name. The baseline hash was taken under 1.97.1.
     require(text.count(RUST_RELEASE) == 2, "expected the pinned Rust release exactly twice")
     text = text.replace(RUST_RELEASE, "1.97.1")
+    # #1334 adds the browser artifact toolchain: one `BROWSER_ARTIFACT_TOOLCHAIN` line (any dated
+    # nightly, so a bump needs no edit here) and, in the renamed install step, the guard that it is
+    # `rust-toolchain.toml`'s channel and that channel's install.
+    require(len(BROWSER_ENV.findall(text)) == 1,
+            "expected exactly one dated BROWSER_ARTIFACT_TOOLCHAIN line")
+    require(text.count(BROWSER_INSTALL) == 1,
+            "expected the browser artifact toolchain install exactly once")
+    text = BROWSER_ENV.sub("", text).replace(BROWSER_INSTALL, "", 1)
+    text = text.replace("Install the browser artifact toolchain and Rust 1.97.1",
+                        "Install Rust 1.97.1 and the Wasm target", 1)
     return text.replace(MODE_ENV, "", 1).replace(PUBLISH_GUARD, PUBLISH_DRY_RUN, 1)
 
 

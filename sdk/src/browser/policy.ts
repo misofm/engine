@@ -37,7 +37,10 @@ import type { SpectrumCollection, SpectrumQuery } from "../core/spectrum.ts";
 export interface BrowserBootPolicy {
   readonly sourceRingFrames?: number;
   readonly maximumMemoryBytes?: bigint;
-  /** Optional native continuous-spectrum hop selected during browser preparation. */
+  /**
+   * The continuous-spectrum hop of the boot's taps, sent in the boot's `SPECTRUM_CONFIGURE`
+   * (#1596 D2); `configureSpectrum` sets the hop of a later configuration.
+   */
   readonly spectrumHopFrames?: 256 | 512 | 1024 | 2048;
   readonly liveControls?: BootOptions["liveControls"];
 }
@@ -87,8 +90,9 @@ function withRequiredShape(
   if (policy.maximumMemoryBytes !== undefined) {
     options.maximumMemoryBytes = policy.maximumMemoryBytes;
   }
-  const spectrumHopFrames = validateBrowserSpectrumHopFrames(policy.spectrumHopFrames);
-  if (spectrumHopFrames !== undefined) options.spectrumHopFrames = spectrumHopFrames;
+  // The policy's spectrum hop is not a boot word: the browser engine sends it in its boot
+  // `SPECTRUM_CONFIGURE` (#1596 D2), so neither boot carries it and the worklet never calls the
+  // hop boot export.
   if (policy.liveControls !== undefined) options.liveControls = policy.liveControls;
   if (spectrum !== undefined) options.spectrum = spectrum;
   if (spectrumCollection !== undefined) options.spectrumCollection = spectrumCollection;

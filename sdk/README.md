@@ -494,21 +494,28 @@ rows in one transaction.
 Choose observation capacity and spectrum targets when preparing the engine. Analysis and delivery
 are bounded; notifications can arrive later than the samples they describe.
 
-Set the prepared continuous-spectrum hop with `BootOptions.spectrumHopFrames` when calling
-`createOfflineEngine`, or with `BrowserBootPolicy.spectrumHopFrames` under `policy` for
-`createEngine`. The allowed values are `256`, `512`, `1024`, and `2048` frames. This is a
-preparation-time structural setting passed as a validated boot number: it is outside canonical
-session JSON and is not a Wasm environment variable. Omit it to retain the rate/quantum-derived
-default (`48 kHz` with a `128`-frame quantum derives `2048`). Headless and browser preparation
-have the same semantics. For an explicit browser hop, the asset must expose
-`miso_engine_web_v1_spectrum_hop_capability` returning exactly `1` and the additive
-`miso_engine_web_v1_boot_with_spectrum_hop`; an old or incompatible asset is refused without
-falling back to the default path.
+Set the boot's spectrum taps with `spectrum` (one tap) or `spectrumCollection` (several, one
+selected at a time) when calling `createOfflineEngine` or `createEngine`. Set their continuous-spectrum
+hop with `BootOptions.spectrumHopFrames` for `createOfflineEngine`, or with
+`BrowserBootPolicy.spectrumHopFrames` under `policy` for `createEngine`. The allowed values are `256`,
+`512`, `1024`, and `2048` frames; omit it to keep the rate/quantum-derived default (`48 kHz` with a
+`128`-frame quantum derives `2048`). Both engines send the taps and the hop to the core in one
+`SPECTRUM_CONFIGURE` before the engine is returned, and refuse an engine whose `CAPABILITIES_GET` lacks
+capability flag bit 16 (`sdk.asset.capability`).
 
-Every spectrum result uses a fixed `2,048`-frame analysis window. The prepared hop controls the
+Change the taps or the hop of a running session with `configureSpectrum(query | collection, {
+hopFrames })` on either engine; an empty collection with `maximumCaptureBytes: 0` removes them. A
+change of taps prepares a replacement plan: the reply reports `rebuild` and the epochs, and the new
+taps are in effect once a spectrum reply reports `adoptedEpoch === configuredEpoch`. A stream on an
+entry that a collection keeps runs on; a change between the single form and a collection ends it. The
+core checks every tap, channel mask and budget, and a refusal rejects with `MisoEngineError` whose
+`diagnosticCode` is the core's code (`spectrum.target.unknown`, `spectrum.budget`, `spectrum.busy`,
+...).
+
+Every spectrum result uses a fixed `2,048`-frame analysis window. The configured hop controls the
 window start spacing, so hops below `2048` overlap successive windows. Runtime `cadenceMs` controls
-subscription delivery and `smoothingMs` controls power smoothing; neither changes the prepared
-native hop. Halving the hop approximately doubles analysis and publication frequency and their CPU work.
+subscription delivery and `smoothingMs` controls power smoothing; neither changes the configured
+hop. Halving the hop approximately doubles analysis and publication frequency and their CPU work.
 Native capture storage and the SDK's bounded buffers and retained result storage keep memory bounded
 instead of growing with stem duration.
 
