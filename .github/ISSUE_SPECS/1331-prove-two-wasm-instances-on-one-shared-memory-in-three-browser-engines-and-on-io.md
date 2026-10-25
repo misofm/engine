@@ -274,7 +274,7 @@ takes a kernel-chosen port and that leg ran once.
 Open for #1331a-2: D7 headroom (Firefox's ~3 ms readings per 2.67 ms quantum on this 64-track
 session make it the engine to watch) and gates 3-5. #1380/#1332 still wait for #1331b.
 
-### #1331a-2 result (2026-10-25, base `b0bc367af`): gates 3-5 PASS, D7 recorded
+### #1331a-2 result (2026-10-25, base `b0bc367af`): gates 3, 5 PASS; gate 4 plain PASS, atomic not passed (runner); D7 recorded
 
 Evidence: `/home/bl/misofm/engine-work-evidence/1331/a2/` (README there). Toolchain for every
 nightly step: `nightly-2026-08-20` = `rustc 1.100.0-nightly (f7d782a3b 2026-08-19)`, the same
@@ -285,20 +285,24 @@ repo's stable pin.
 the session grammar to `link_mode: "slot"` after `56fbe4617`. The D2 commands, unchanged, rebuilt
 both modules: atomic `ff266dfc456573263cdcea57c99e83985a9d2f5bf9eaffcb94e9f18ffe6ed022` (5,626,039 B; named twin
 `db6e0aff...`), plain `4a7dc7eedea7f022fa71a74acf0a3a94db4afa53eef86673efaf60e9320dd964` (5,624,549 B; named twin
-`cf17b597...`). The gate-5 script copy built the same plain bytes in another target dir. On the
-atomic shape, rustc warns `unstable feature specified for -Ctarget-feature: atomics` once per
-crate. #1334/#1332 must not build that shape with `-D warnings` unless they allow this warning.
+`cf17b597...`). The gate-5 script copy built the same plain bytes in another target dir. Note for
+#1380: the atomic shape prints `unstable feature specified for -Ctarget-feature: atomics` once per
+build; it does not fail under `-D warnings`, and `-A unstable_features` does not silence it.
 
 **D7 headroom (descriptive).** Workload frozen before timing (`a2/workload/FROZEN.txt`): the atomic
 module, and the 64-track app session with one change, `fixture-source` declared 1,441,280 frames
-(30 s) instead of 48,000. Reason: a design probe in Node showed that render after the 1 s region
-ends costs about 3.4 times less (silence skipping), so a 10 s span on the fixture as is would
-measure silence. The isolated `two` page: the worklet renders the session in real time. The Worker
+(30 s) instead of 48,000. Reason: a design probe in Node (`a2/probe/silence-probe.mjs`, untimed)
+showed that render after the 1 s region ends costs less (silence skipping): the logged run
+(`a2/logs/silence-probe.json`) reads 0.259 ms per block inside the region and 0.095 ms per block
+after it, about 2.7 times less (a first, unlogged run read about 3.4). So a 10 s span on the
+fixture as is would measure silence. The isolated `two` page: the worklet renders the session in real time. The Worker
 instance (own stack and TLS, recipe rule 2) boots a second copy and renders it as fast as it can:
 one warmup and two measured spans of 3750 blocks (10 s), back to back on one boot. A block is the
 worklet's own transcript step (feed one quantum through `source_submit`, render, copy 256 words
 out). `headroom = 10 s / span wall time`, `performance.now()` in the Worker. One invocation per
 browser, no retry, under the exclusive bench lock.
+
+Headroom at fs_h = 48 kHz, q = 128 frames:
 
 | Engine | warmup | round 1 | round 2 | Worker boot | worklet during the spans: calls, late (> 2 ms), missed quanta, max |
 |---|---|---|---|---|---|
@@ -309,33 +313,34 @@ browser, no retry, under the exclusive bench lock.
 All spans: 0 render errors, 0 non-finite words, 0 silent blocks; worklet render allocations 0, no
 trap. In all three engines, the worklet's first 350 blocks gave the #1331a-1 native digest
 `44ecef33...` (the longer source does not change them). In the Worker, Firefox renders this
-session about 15 times slower than Chromium, and its worklet calls often take 3-5 ms where
-Chromium's and WebKit's take at most 1 ms. #1331a-1 also saw these 3-5 ms calls in the single
-legs, on unshared memory, so the second instance is not the cause. The cause is not
-investigated. With headroom 1.1, a Firefox Worker that keeps a second copy rendering has almost no
-time left for a rebuild or a prime. These rows are the browser input to #1286 D3; this spike
-sizes nothing.
+session about 15 times slower than Chromium. The Firefox worklet uses about 0.9 of its quantum in
+every mode, and #1331a-1 saw the same in single mode on unshared memory, so the slowdown is not
+specific to the Worker or to the second instance. The cause is not investigated, and the slowdown
+can be a property of the Playwright Firefox build only. Firefox h = 1.10 gives m·h = 0.77 ≤ 1,
+which triggers #1286 D3's stop, so #1286 must not take h = 1.10 until the cause is known. These
+rows are the browser input to #1286 D3; this spike sizes nothing.
 
 **Gate 3 (native under the nightly): PASS.** `RUSTUP_TOOLCHAIN=nightly-2026-08-20 cargo test
 --locked --release -p lane -p math -p wasm-gates --features math/lane`: 35 test binaries, 128
 passed, 0 failed, 7 ignored, no warning. `RUSTUP_TOOLCHAIN=nightly-2026-08-20 cargo test --locked
 -p host-web --lib tests::native_identity_session_digest_pins_the_wasm_parity`: 1 passed.
 
-**Gate 4 (G5 under the nightly): PASS for both shapes, with one runner limit.** A scratch copy of
+**Gate 4 (G5 under the nightly): plain PASS; atomic not passed as written (runner).** A scratch copy of
 `scripts/run-wasm-gates.sh` (diff in `a2/gates/`) builds the guest with the D2 shape
 (`cargo +nightly-2026-08-20 ... -Zbuild-std=std,panic_abort -p wasm-gate-guest`, the D2 flags and
 the three remaps; `--without-v8-spill`).
 
 - plain: native leg (the stable host runner) and wasm leg 0 mismatches (155 cases; 385 and 270 comparisons), detector
   residency 21 limiter functions, both f64 lane censuses vectorised: the script prints `ok`.
-- atomic: the committed runner cannot load the guest. wasmtime refuses it with `threads must be
-  enabled for shared memories`, because the guest imports `env.memory` as shared, 17..8192 pages.
-  With a scratch runner shim (`Config::wasm_threads(true)`, `Config::shared_memory(true)`, wasmtime
-  feature `threads`, a `SharedMemory` for the import; `a2/gates/runner-threads-shim.diff`, in a
-  detached scratch worktree, now removed) the wasm leg has 0 mismatches over the same 270
-  comparisons, and the residency pin (21) and both censuses pass on the atomic guest. The plain
-  guest also passes under the shim. If the atomic shape ships, #1332 needs that runner change;
-  otherwise G5 tests only the plain shape.
+- atomic: NOT PASSED as written. The committed runner cannot load the guest: wasmtime refuses it
+  with `threads must be enabled for shared memories`, because the guest imports `env.memory` as
+  shared, 17..8192 pages.
+- Under the preserved shim (`a2/gates/runner-threads-shim.diff`: `Config::wasm_threads(true)`,
+  `Config::shared_memory(true)`, wasmtime feature `threads`, a `SharedMemory` for the import; run in
+  a detached scratch worktree, now removed), the atomic guest has 0 mismatches over 270
+  comparisons, residency 21, and both censuses green. The plain guest also passes under the shim.
+  The runner change (threads plus the `SharedMemory` import) goes to #1380, the first slice that
+  ships `+atomics`; root amends #1380's authorized paths.
 
 **Gate 5 (browser bit identity on the plain nightly module): PASS.** A scratch copy of
 `scripts/build-web-audioworklet.sh` built the closure. Only its cargo line changed, plus its
@@ -352,11 +357,13 @@ named twin.
 
 **Gate 7: PASS.** Only this spec changed in the repo.
 
-**Outcome.** The nightly compiler keeps every committed native, G5 and browser pin, for both
-shapes where a runner can load them. #1334 may adopt the plain D2 command as recorded. Open:
-(1) the cause of Firefox's slow render (both instances, and unshared memory too); (2) G5 for the
-atomic shape needs a runner change (#1332); (3) the `atomics` unstable-feature warning under
-`-D warnings`. #1331b (iPhone) stays owner-gated, and D7 on iOS is part of it.
+**Outcome.** Gates 3 and 5 pass; gate 4 passes for the plain shape and is not passed for the
+atomic shape as written (runner; green under the shim). The nightly keeps every committed native,
+G5 and browser pin on the plain shape, so #1334 may adopt the plain D2 command as recorded. Open:
+(1) the cause of Firefox's slow render (every mode, unshared memory too; maybe the Playwright
+build only). Owner: root routes it as an owner question and a successor diagnosis issue; until
+then #1286 does not take h = 1.10. (2) G5 for the atomic shape needs the runner change, in #1380.
+#1331b (iPhone) stays owner-gated, and D7 on iOS is part of it.
 
 ## Amendment (decision 17, root 2026-10-13)
 
