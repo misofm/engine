@@ -1467,6 +1467,7 @@ pub trait RuntimePreparer: Send {
 /// report's source rows count those rings too (D5). `compile_session` passes `None`.
 ///
 /// `spectrum` is the session's spectrum preparation (#1593 D3), passed to the preparer as it is.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn prepare_runtime<A: ControlAdapter>(
     preparer: &dyn RuntimePreparer,
     compiled: &CompiledSession,

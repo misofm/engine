@@ -392,6 +392,15 @@ fn capture_follows_newest_plan() {
     assert_eq!(response(ready).members.len(), 5, "three inserts");
 
     // Gate 3: armed on a strip an edit then removes.
+    // A removal ducks its strip out before its plan is adopted (#1325), so a capture armed on the
+    // running plan is answered from it, with the strip. Armed instead on a pending rebuild (due 2
+    // blocks later) that the removal then supersedes, it waits, finds the removal's plan newer,
+    // and its strip gone.
+    rig.session
+        .test_set_next_adoption(engine::realtime::PlanAdoption::NoEarlierThan(
+            rig.at + 2 * QUANTUM as u64,
+        ));
+    assert_eq!(rig.transact(&[add_insert("eq-last", 3)]), EditPath::Rebuild);
     assert_eq!(rig.arm("eq1"), Ok(4));
     let path = rig.transact(&[
         SessionEdit::RemoveRoute {
@@ -402,7 +411,7 @@ fn capture_follows_newest_plan() {
         },
     ]);
     assert_eq!(path, EditPath::Rebuild);
-    let ready = rig.deliver(4);
+    let ready = rig.deliver(256);
     assert_eq!(
         (ready.tag, &*ready.strip_id, ready.result),
         (4, "eq1", Err(ResponseCaptureFailure::StripRemoved))
