@@ -254,3 +254,59 @@ no swap and the same host commands, timed on the source-read clock.
 - The peak is the replacement admission counting each copy of a warm candidate's allocated source bytes plus its epoch and prepared-protocol capi rows, as #1398's attempt measured: a second check of the running plan (`held[0]`) beside the candidate twice, with the same model terms, passed alongside the held-plan check; both must fit.
 - Code anchors verified in `crates/control-plane/src/compile.rs`: `validate_replacement_peak` (the replacement admission; its parameters are now `held`, `prospective`, `compiled_models`, `limits`, with no `AdmissionPeak`), whose one caller is `control.rs` (the structural command path, at the `#1398 D4` comment); `validate_live_peak` (the live arm, unchanged); `ProspectivePlan`, `CarriedSourceBytes`, `CapiResources` (the candidate's rows, including `capi.epoch_retained` and `capi.prepared_protocol_retained`); `compiled_model_admission` and `compiled_model_admission_over` (the model terms). The unit-test module is `compile::admission_tests` (helpers `epoch`, `candidate`, `peaks`, `assert_each_cap`, `CAPS`).
 - Gate 1's "`WithReprepare`" bullet and the Dependencies line on `AdmissionPeak::WithReprepare` read as this amendment: the issue adds the parameter or equivalent shape for the peak, passes it at its first caller, and adds the gate 3 test (`R + 2C - 1` refuses with each cap's diagnostic, `R + 2C` passes, `R + C` passes without the peak; with a withdrawn candidate also held, both peaks are checked and the larger decides).
+
+## Decision record (attempt 1, 2026-10-25)
+
+Scope note R1-R3 apply (root accepted them). Amendments, each against today's code:
+
+- **D1, the constructor argument.** `compile_children` keeps its signature and calls the crate-private
+  `compile_children_warm(.., warm: Option<WarmConfig>)` with `None`; the gates call it with the
+  bounds. No host call site changes; #1360 and #1361 make it reachable when they build the bounds.
+- **D2, where the classification runs.** `warm_lead` takes the ordinary successor's inventory
+  (#1354a ruling 1), so the rebuild prepares the ordinary successor first, then plans the strip
+  transition (#1325), then classifies. The warm arm needs `!transition.ducks()`, an empty
+  inherited duck overlay, no restart in the ordinary join and an empty `restart_whole` (together
+  the warm successor's `restarted_strips()`, #1354 D4), and `lead_samples > 0`; it drops the ordinary
+  successor and prepares the warm one (`SuccessorBase::warm`). Every rebuild kind is classified;
+  `warm_lead` answers `Ordinary` at a declared discontinuity. A `warm_lead` error refuses the edit
+  with its diagnostics.
+- **The reprepare peak (#1398 amendment).** `validate_replacement_peak` takes
+  `AdmissionPeak::{Single, WithReprepare { running }}`. `WithReprepare` adds a second check: the
+  candidate counted twice (allocated source bytes, graph, effect, builtin rows and its epoch and
+  prepared-protocol capi rows) beside the held rows that are not candidates (every parked epoch and
+  the running plan; `held[0]` when nothing is parked), with the same model terms. Both must fit.
+  `Single` is today's arithmetic exactly.
+- **D3, flag order.** `publish_primed(reservation, running, candidate, withdrawn, lead_blocks)` runs
+  right after the protocol commit and **before** the candidate's set takes producers or donated
+  rings: an entry W holds vacant is then exactly a ring W carries, and its producer is still in the
+  running (or withdrawn) set. Rule: every producer in the running and withdrawn sets stores
+  `W holds this ID vacant`; every producer in W's own set stores `false`. Same rings and values as
+  D3 steps 1-2, reached before the moves instead of after. It reads `not_before` from the
+  reservation's render clock and sets `Primed` on the reservation (R1). The source set gains
+  `holds_vacant` and `set_prime_flags`.
+- **D4.** The record is replaced by every publication (`self.primed = primed` after `commit`), which
+  is #1310 step 6's drop when B is `Next` (and #1323's stop, a `Next` successor).
+- **Gates.** A has `eq1` on a second source `aux-source` (successor_swap gate 2's shape), so gate 3's
+  structural edit removes a carried source A still renders. Gate 1's flag check is behavioural (W
+  waits while the carried rings hold less than its prime): no control-side reader of
+  `prime_required` exists outside the `source` crate, so "every flag is `false`" without bounds is
+  not asserted. Gate 1's cap case uses the effect-state cap. Added (root): a `Primed` W adopted in a
+  refused render call and displaced by a `Next` C stays bit-equal (#1355 MAJOR-1 through the control
+  plane).
+
+Paths moving rendered bits: only a session that holds a `WarmConfig` (none in production), whose
+growth now swaps warm toward A continued. Every other path is unchanged (class A).
+
+Test value and mutants (each red, one run each):
+- `a_growth_is_published_primed_and_recorded`: warm candidate published `Next` (red: 5 tests); no
+  flags written (red: 3); no-bounds session classifies (red: this one); `not_before` `P` late (red).
+- `a_warm_candidate_is_admitted_with_the_reprepare_peak`: warm arm admitted `Single` (red).
+- `a_warm_candidate_is_admitted_against_its_reprepare_peak` (unit): no held check for a warm candidate;
+  the reprepare row counts the withdrawn candidate; the candidate counted once (each red).
+- `a_growth_that_removes_a_strip_takes_the_two_phase_removal`: routing ignores `ducks()` (red).
+- `edits_while_the_warm_candidate_waits`: #1310 step 5 does not return W's producers (red: submit
+  refused); a stop reported `SUPERSEDED` (red).
+- `the_record_names_the_one_pending_warm_candidate`: record kept after adoption; dropped on a
+  returned withdrawal; kept across a `Next` supersession (each red).
+- `a_primed_candidate_displaced_by_a_refused_call_continues`: #1355's displaced-prime replay
+  removed (red).
