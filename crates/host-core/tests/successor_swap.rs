@@ -4171,7 +4171,9 @@ fn a_strip_keyed_from_a_restarted_strip_restarts_with_it_on_every_width() {
         submix_id: id(ROUTE_BUS),
         tap: session::SendTap::Input,
     };
-    let rows: [(&str, Vec<(&str, RouteSource)>, &[&str]); 5] = [
+    // A row: its name, the keyed inserts (strip, key source) and the expected restart set.
+    type Row<'a> = (&'a str, Vec<(&'a str, RouteSource)>, &'a [&'a str]);
+    let rows: [Row<'_>; 5] = [
         (
             "insert_return",
             vec![("eq1", track_key("eq0", session::SendTap::InsertReturn))],
