@@ -1246,3 +1246,49 @@ fn both_hosts_read_one_observation_tap_alike() {
     }
     assert!(ready, "vacuous: no window closed");
 }
+
+/// #1588a: until the render half pushes its frames to the control half (#1588b), the browser
+/// refuses a meter table `meter.unavailable`, even booted with a meter window, rather than
+/// acknowledge a table it would never serve.
+///
+/// Test value: red if the browser's meter delivery is turned on before its render push exists,
+/// so a configure is acknowledged and no `METER_BATCH` ever follows.
+#[test]
+fn the_browser_refuses_a_meter_table_until_its_render_push_exists() {
+    let mut browser = Browser {
+        host: AudioWorkletEngineHost::boot(
+            document(8_192).as_bytes(),
+            WebBootOptions {
+                live_control_meter_blocks: 12,
+                ..options()
+            },
+        )
+        .unwrap_or_else(|failure| panic!("{}", String::from_utf8_lossy(failure.diagnostic()))),
+    };
+    let configure = frame(
+        1,
+        ExpectedRevision::Exact(SessionRevision(browser.host.committed_revision())),
+        CommandPayload::TelemetryConfigure(&TelemetryConfiguration {
+            meters: vec![protocol::MeterEntry {
+                target: protocol::MeterTarget::Output,
+                metric: protocol::MeterMetric::Peak,
+            }],
+            meter_period_blocks: 12,
+            meter_window_blocks: None,
+            counter_ids: Vec::new(),
+            counter_period_blocks: 0,
+            diagnostics_enabled: false,
+            minimum_diagnostic_severity: DiagnosticSeverity::Info,
+        }),
+    );
+    let (result, reply) = browser.send(&configure);
+    assert_eq!(result, RESULT_OK);
+    let mut fields = [0_u16; 64];
+    let decoded = ProtocolCodec::default()
+        .decode_typed_response(&reply, &mut protocol::DecodeScratch::new(&mut fields))
+        .expect("a reply");
+    let protocol::DecodedTypedResponseFrame::NonOk { payload, .. } = decoded else {
+        panic!("the browser accepted a meter table")
+    };
+    assert_eq!(payload.diagnostics[0].code, "meter.unavailable");
+}
