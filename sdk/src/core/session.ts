@@ -201,7 +201,7 @@ const CONSOLE_KEYS: ReadonlySet<string> = new Set(["preInsert", "postInsert"]);
 const VCA_KEYS: ReadonlySet<string> = new Set(["fader", "members"]);
 const FADER_KEYS: ReadonlySet<string> = new Set(["leftDb", "rightDb", "leftMute", "rightMute"]);
 const CONSOLE_SLOT_KEYS: ReadonlySet<string> = new Set(["slot", "effectId", "quality", "linkMode"]);
-const CONSOLE_ENTRY_KEYS: ReadonlySet<string> = new Set(["slot", "bypass", "parameters", "channel"]);
+const CONSOLE_ENTRY_KEYS: ReadonlySet<string> = new Set(["slot", "bypass", "linkMode", "parameters", "channel"]);
 const LINK_MODES: readonly string[] = ["dual_mono", "maximum", "average"];
 
 type LinkMode = NonNullable<EffectOptions["linkMode"]>;
@@ -1474,8 +1474,8 @@ function consoleSlot(
  * refusal is the engine's first diagnostic for the same track: an entry naming no declared slot is
  * `reference.missing_entity`, a repeated slot `id.duplicate`, an entry out of slot order
  * `console.entry_order`, and a slot with no entry `console.entry_missing`. An entry carries only
- * the track's knobs, so any other key (`effectId`, `quality`, `linkMode`, `sidechain`, ...) is
- * `schema.unknown_field`.
+ * the track's knobs and its link mode (`linkMode`, `"slot"` by default, #1369), so any other key
+ * (`effectId`, `quality`, `sidechain`, ...) is `schema.unknown_field`.
  */
 /** @internal */
 export function normalizeConsoleEntries(
@@ -1490,7 +1490,7 @@ export function normalizeConsoleEntries(
   const normalized = supplied.map((entry: ConsoleEntrySpec, position: number) => {
     const where = `${path}[${position}]`;
     if (entry === null || typeof entry !== "object" || Array.isArray(entry)) {
-      fail(where, "expected a console entry { slot, bypass?, parameters?, channel? }");
+      fail(where, "expected a console entry { slot, bypass?, linkMode?, parameters?, channel? }");
     }
     knownKeys(entry, CONSOLE_ENTRY_KEYS, where, "a console entry");
     const slotId = stableId(entry.slot, `${where}.slot`);
@@ -1516,6 +1516,13 @@ export function normalizeConsoleEntries(
       );
     }
     const bypass = entry.bypass === undefined ? false : bool(entry.bypass, `${where}.bypass`, CODE.wrongType);
+    // #1369: `slot` runs the slot's declared mode; an override must be a mode the effect supports.
+    if (entry.linkMode !== undefined && entry.linkMode !== "slot" && !LINK_MODES.includes(entry.linkMode)) {
+      fail(`${where}.linkMode`, "expected slot, dual_mono, maximum or average", CODE.invalidEnum);
+    }
+    const entryLinkMode = entry.linkMode === undefined || entry.linkMode === "slot"
+      ? "slot"
+      : linkMode(slot.effectId, entry.linkMode, `${where}.linkMode`);
     const channel = entry.channel ?? "both";
     if (!["left", "right", "both"].includes(channel)) {
       fail(`${where}.channel`, "expected left, right or both", CODE.invalidEnum);
@@ -1528,6 +1535,7 @@ export function normalizeConsoleEntries(
     return freeze({
       slot: slotId,
       bypass,
+      link_mode: entryLinkMode,
       params: normalizeParams(descriptor, parameters as Record<string, unknown>, channel, where),
     });
   });

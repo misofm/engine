@@ -5404,6 +5404,7 @@ fn console_session(mono: bool, slots: &[&str]) -> SessionModel {
             .map(|effect| ConsoleEntry {
                 slot: id(effect.slot),
                 bypass: false,
+                link_mode: session::ConsoleLinkMode::Slot,
                 params: console_params(effect.slot, index, mono),
             })
             .collect();

@@ -39,11 +39,7 @@ fn request(values: &Values, rate: u32, link: LinkMode) -> PrepareEffectRequest<'
             maximum_scratch_bytes: u64::MAX,
             maximum_automation_spans_per_block: 32,
         },
-        tail_bound: conformance::tail_bound_of(
-            Box::new(MultibandCompressorFactory),
-            rate,
-            EffectQuality::Normal,
-        ),
+        tail_bound: tail_bound(rate),
     }
 }
 
@@ -601,4 +597,22 @@ fn padding_keeps_the_members_uniform_link_arm() {
         let arm = effect_contract::match_bank_width!(width, |L, N| arm::<L, N>(width));
         assert_eq!(arm, LINK_MAXIMUM, "{width:?}");
     }
+}
+
+/// The registry's tail-bound entry at `rate`, computed once per launch rate: a registry admission
+/// derives every row's bound, and per request it dominated this module's debug test time (#1972).
+fn tail_bound(rate: u32) -> effect_contract::RegisteredTailBound {
+    static BOUNDS: [std::sync::OnceLock<effect_contract::RegisteredTailBound>; 4] =
+        [const { std::sync::OnceLock::new() }; 4];
+    let index = [44_100, 48_000, 88_200, 96_000]
+        .iter()
+        .position(|launch| *launch == rate)
+        .expect("a launch rate");
+    *BOUNDS[index].get_or_init(|| {
+        conformance::tail_bound_of(
+            Box::new(MultibandCompressorFactory),
+            rate,
+            EffectQuality::Normal,
+        )
+    })
 }

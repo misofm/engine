@@ -137,6 +137,10 @@ export const SESSION_KEYS = deepFreeze(
           "boolean"
         ],
         [
+          "link_mode",
+          "token"
+        ],
+        [
           "params",
           "array"
         ]

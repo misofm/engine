@@ -199,7 +199,7 @@ describe("issue #1097 -- every builder refusal is the engine's, with the engine'
         source: "stem",
         console: [...stripEntries(), { slot: "ghost" }],
       }),
-      edit: (model) => model.tracks[0].console.push({ slot: "ghost", bypass: false, params: [] }),
+      edit: (model) => model.tracks[0].console.push({ slot: "ghost", bypass: false, link_mode: "slot", params: [] }),
     },
     {
       name: "an effect field on a console entry",
@@ -305,6 +305,24 @@ describe("issue #1097 -- every builder refusal is the engine's, with the engine'
       edit: (model) => { model.console.pre_insert[0].quality = "ultra"; },
     },
     {
+      name: "a console entry link mode outside the grammar (#1369)",
+      code: "schema.invalid_enum",
+      build: () => stripBase().track("t", {
+        source: "stem",
+        console: [{ slot: "eq" }, { slot: "comp", linkMode: "stereo" }, { slot: "limiter" }],
+      }),
+      edit: (model) => { model.tracks[0].console[1].link_mode = "stereo"; },
+    },
+    {
+      name: "a console entry override the slot's effect does not support (the EQ, maximum; #1369)",
+      code: "effect.link_mode.unsupported",
+      build: () => stripBase().track("t", {
+        source: "stem",
+        console: [{ slot: "eq", linkMode: "maximum" }, { slot: "comp" }, { slot: "limiter" }],
+      }),
+      edit: (model) => { model.tracks[0].console[0].link_mode = "maximum"; },
+    },
+    {
       name: "an insert quality no launch effect publishes",
       code: "effect.quality.unsupported",
       build: () => effect("miso.delay", {}, { quality: "high" }),
@@ -380,13 +398,30 @@ describe("issue #1097 -- every builder refusal is the engine's, with the engine'
   test("the effect fields a slot owns are refused on an entry, one by one", () => {
     // An entry carries only the track's knobs. Red mutation: admit `channel`'s neighbours in
     // CONSOLE_ENTRY_KEYS -> one of these is silently dropped instead of refused.
-    for (const field of ["effectId", "quality", "linkMode", "sidechain", "id", "identity", "params"]) {
+    for (const field of ["effectId", "quality", "sidechain", "id", "identity", "params"]) {
       const code = builderCode(() => stripBase().track("t", {
         source: "stem",
         console: [{ slot: "eq", [field]: "x" }, { slot: "comp" }, { slot: "limiter" }],
       }));
       assert.equal(code, "schema.unknown_field", field);
     }
+  });
+
+  test("#1369 gate 6: an entry writes link_mode, \"slot\" by default and the override when given", async () => {
+    // Value: an SDK document without the required key fails the engine's parser, and a builder
+    // that drops `linkMode` silently runs the slot's mode on that strip.
+    const built = finish(stripBase().track("t", {
+      source: "stem",
+      console: [{ slot: "eq" }, { slot: "comp", linkMode: "maximum" }, { slot: "limiter", linkMode: "slot" }],
+    }));
+    assert.deepEqual(built.toJSON().tracks[0].console.map((entry) => entry.link_mode), ["slot", "maximum", "slot"]);
+    assert.deepEqual(
+      Object.keys(built.toJSON().tracks[0].console[1]),
+      ["slot", "bypass", "link_mode", "params"],
+      "the canonical key order",
+    );
+    const outcome = await validate(built.toJson(), { asset });
+    assert.equal(outcome.ok, true, JSON.stringify(outcome.diagnostics));
   });
 
   test("the console is declared once, before the first track", () => {
@@ -426,7 +461,7 @@ describe("issue #1097 -- the SDK's eligibility list is the engine's", () => {
         slot: "x", identity: { kind: "native", effect_id: id }, quality: "normal", link_mode: "dual_mono",
       }];
       model.console.post_insert = [];
-      model.tracks[0].console = [{ slot: "x", bypass: false, params: [] }];
+      model.tracks[0].console = [{ slot: "x", bypass: false, link_mode: "slot", params: [] }];
       model.automation = [];
       const outcome = await validate(JSON.stringify(model), { asset });
       assert.equal(outcome.ok, eligible, `${id}: ${JSON.stringify(outcome.diagnostics)}`);
@@ -466,7 +501,7 @@ describe("issue #1097 -- the SDK's link-mode table is the engine's", () => {
           slot: "x", identity: { kind: "native", effect_id: id }, quality: "normal", link_mode: mode,
         }];
         slotModel.console.post_insert = [];
-        slotModel.tracks[0].console = [{ slot: "x", bypass: false, params: [] }];
+        slotModel.tracks[0].console = [{ slot: "x", bypass: false, link_mode: "slot", params: [] }];
         slotModel.automation = [];
         const slotted = await validate(JSON.stringify(slotModel), { asset });
         assert.equal(slotted.ok, supported, `${where} as a slot: ${JSON.stringify(slotted.diagnostics)}`);
@@ -1200,7 +1235,7 @@ describe("issue #1205 -- submix strips and bus taps through the SDK", () => {
       source: { kind: "track", trackId: "t", tap: "post_pan" },
       destination: { kind: "output_input", outputId: "out" },
     });
-    assert.deepEqual(viaBus.toJSON().submixes[0].console, [{ slot: "eq", bypass: true, params: [] }]);
+    assert.deepEqual(viaBus.toJSON().submixes[0].console, [{ slot: "eq", bypass: true, link_mode: "slot", params: [] }]);
     const text = viaBus.toJson();
     assert.equal(await engineCanonical("transparent-bus", text), text);
     const bus = await renderFrom(viaBus);

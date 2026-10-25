@@ -241,6 +241,14 @@ pub(crate) const fn enum_link(value: session::LinkMode) -> u8 {
         session::LinkMode::Average => 3,
     }
 }
+pub(crate) const fn enum_console_link(value: session::ConsoleLinkMode) -> u8 {
+    match value {
+        session::ConsoleLinkMode::Slot => 1,
+        session::ConsoleLinkMode::DualMono => 2,
+        session::ConsoleLinkMode::Maximum => 3,
+        session::ConsoleLinkMode::Average => 4,
+    }
+}
 pub(crate) const fn enum_tap(value: session::SendTap) -> u8 {
     match value {
         session::SendTap::Input => 1,
@@ -916,7 +924,11 @@ fn tx_console_entry(sink: &mut dyn Sink, value: &ConsoleEntry) -> Result<(), Enc
             tx_param(v, param)
         })?;
     }
-    Ok(())
+    tx_u8(
+        sink,
+        schema::session::console_entry::LINK_MODE,
+        enum_console_link(value.link_mode),
+    )
 }
 fn tx_track(sink: &mut dyn Sink, value: &session::Track) -> Result<(), EncodeError> {
     tx_start_message(
@@ -1557,6 +1569,10 @@ fn parse_console_entry(message: Message<'_>) -> Result<ConsoleEntry, DecodeError
     Ok(ConsoleEntry {
         slot: stable_id(one_spec!(message, schema::session::console_entry::SLOT)?)?,
         bypass: parse_bool(one_spec!(message, schema::session::console_entry::BYPASS)?)?,
+        link_mode: parse_console_link(read_u8_exact(one_spec!(
+            message,
+            schema::session::console_entry::LINK_MODE
+        )?)?)?,
         params: values_spec!(message, schema::session::console_entry::PARAM)?
             .map(|value| parse_param(message.nested_value(value)?))
             .collect::<Result<Vec<_>, _>>()?,
@@ -1876,6 +1892,15 @@ pub(crate) fn parse_link(value: u8) -> Result<session::LinkMode, DecodeError> {
         1 => Ok(session::LinkMode::DualMono),
         2 => Ok(session::LinkMode::Maximum),
         3 => Ok(session::LinkMode::Average),
+        _ => Err(DecodeError::InvalidTlv),
+    }
+}
+pub(crate) fn parse_console_link(value: u8) -> Result<session::ConsoleLinkMode, DecodeError> {
+    match value {
+        1 => Ok(session::ConsoleLinkMode::Slot),
+        2 => Ok(session::ConsoleLinkMode::DualMono),
+        3 => Ok(session::ConsoleLinkMode::Maximum),
+        4 => Ok(session::ConsoleLinkMode::Average),
         _ => Err(DecodeError::InvalidTlv),
     }
 }

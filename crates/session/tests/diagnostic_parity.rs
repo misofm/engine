@@ -73,6 +73,7 @@ fn with_console(model: &mut SessionModel) {
     let entry = |name: &str| ConsoleEntry {
         slot: id(name),
         bypass: false,
+        link_mode: session::ConsoleLinkMode::Slot,
         params: model.tracks[0].inserts.effects[0].params.clone(),
     };
     model.tracks[0].console = vec![entry("desk-eq"), entry("desk-limit")];
