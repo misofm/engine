@@ -4772,7 +4772,8 @@ fn response_ready_event(tag: u64) -> crate::ResponseReady {
 }
 
 /// #1578 D3 and D4 at the protocol layer: `enqueue_response_ready_event` hands its event back
-/// unchanged, with no sequence consumed, when the reliable queue is full or the one cell is held;
+/// unchanged, with no sequence consumed, when the reliable queue is full, a structural transaction
+/// is outstanding or the one cell is held;
 /// a queued event stays in the cell across a short output buffer and leaves it only when its
 /// complete frame (with the endpoint's next sequence) is delivered; and while the cell is held a
 /// strip `RESPONSE_GET` is `BACKPRESSURE` `response.capture.pending` with the capture-slot record
@@ -4833,6 +4834,19 @@ fn a_response_ready_event_is_held_until_delivered_and_holds_off_a_strip_request(
             .expect("the transport event")
             .is_some()
     );
+
+    // A structural transaction outstanding (an odd generation) refuses it too and hands it back.
+    endpoint.structural_generation.store(1, Ordering::Release);
+    let refused = endpoint
+        .enqueue_response_ready_event(revision, response_ready_event(1))
+        .expect_err("a structural transaction is outstanding");
+    assert!(matches!(
+        refused.reason,
+        EventEgressError::ReliableQueueFull(_)
+    ));
+    assert_eq!(refused.event, response_ready_event(1));
+    assert!(!endpoint.response_ready_pending());
+    endpoint.structural_generation.store(0, Ordering::Release);
 
     endpoint
         .enqueue_response_ready_event(revision, response_ready_event(1))
