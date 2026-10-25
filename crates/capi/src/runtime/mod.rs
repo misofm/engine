@@ -119,7 +119,12 @@ impl control_plane::RuntimePreparer for CapiPreparer {
         // #1584 D7: an observation queue slot for every declared tap of every effect, so an
         // `Observe` edit always has a queue. Observation rides the effect lanes (#1254 D2), so a
         // session whose live rows chose none gets them, as the browser's does.
+        // #1587a: the strip meters' queues are as deep as the output meter's, so a service step
+        // that lags the render by up to that many windows still pairs every strip window with
+        // its output window.
         let live = host_core::HostLiveControlRequest {
+            meter_queue_depth: core::num::NonZeroUsize::new(host_core::METER_QUEUE_DEPTH)
+                .unwrap_or(core::num::NonZeroUsize::MIN),
             observation_taps: host_core::launch_maximum_observation_taps(),
             ..host_core::HostLiveControlRequest::default()
         };

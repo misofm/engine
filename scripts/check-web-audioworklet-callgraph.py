@@ -277,30 +277,38 @@ SCALAR_SLACK = 8
 # arithmetic-carrying kernel in the artifact; two matches or none is a failure, because a roster
 # that silently stopped naming a kernel is a gate that silently stopped checking one.
 #
-# ## Derivation of the ceilings (issue #163 phase 0e; re-derived at mono-collapse M2)
+# ## Derivation of the ceilings (issue #163 phase 0e; re-derived at mono-collapse M2, re-measured at #1970)
 #
-# Measured with this analyser on `miso-engine-v1-audio-worklet.simd128.wasm` built from this tree
-# (vector = `f32x4.{mul,add,sub,div}`, scalar = `f32.{mul,add,sub,div}`):
+# Measured with this analyser on the named twin of `miso-engine-v1-audio-worklet.simd128.wasm`
+# (`build-web-audioworklet.sh --named-twin`) built from `15f37828f`, issue #1970
+# (vector = `f32x4.{mul,add,sub,div}`, scalar = `f32.{mul,add,sub,div}`; the count this table
+# gave before #1970 is in brackets where it moved):
 #
 #   (multiband-compressor f32x8 was 2560 / 20; #1110 removed eight lanes from the browser build)
 #   multiband-compressor f32x4   3464 /  0   ratio 0        (dual; 2527 / 0 before #1367a's mixed arm)
 #   multiband-compressor f32x4   1862 /  0   ratio 0        (collapsed; 1389 / 0 before #1367a)
-#   transient-shaper     f32x4    700 /  0   ratio 0        (dual; 786 / 72 at M2, codegen)
-#   transient-shaper     f32x4    352 /  0   ratio 0        (collapsed, #1873)
-#   true-peak-limiter    f32x4    448 /  0   ratio 0        (dual)
-#   compressor           f32x4    267 /  0   ratio 0        (dual)
-#   true-peak-limiter    f32x4    224 /  0   ratio 0        (collapsed)
-#   gate-expander        f32x4    162 /  0   ratio 0        (dual; 180 / 8 before #973, codegen)
-#   parametric-eq        f32x4    168 /  0   ratio 0        (dual)
-#   compressor           f32x4    138 /  0   ratio 0        (collapsed)
-#   gate-expander        f32x4     82 /  0   ratio 0        (collapsed, #973)
-#   parametric-eq        f32x4     84 /  0   ratio 0        (collapsed)
-#   soft-clip            f32x4     25 /  0   ratio 0
+#   transient-shaper     f32x4    808 /  0   ratio 0        (dual; 786 / 72 at M2, codegen; [700 / 0])
+#   transient-shaper     f32x4    407 /  0   ratio 0        (collapsed, #1873; [352 / 0])
+#   true-peak-limiter    f32x4   1139 /  0   ratio 0        (dual; [448 / 0])
+#   compressor           f32x4   1359 /  0   ratio 0        (dual; [267 / 0])
+#   true-peak-limiter    f32x4    537 /  0   ratio 0        (collapsed; [224 / 0])
+#   gate-expander        f32x4    265 /  0   ratio 0        (dual; 180 / 8 before #973, codegen; [162 / 0])
+#   parametric-eq        f32x4   1352 /  1   ratio 0.0007   (dual; [168 / 0])
+#   compressor           f32x4    733 /  0   ratio 0        (collapsed; [138 / 0])
+#   gate-expander        f32x4    134 /  0   ratio 0        (collapsed, #973; [82 / 0])
+#   parametric-eq        f32x4    748 /  1   ratio 0.0013   (collapsed; [84 / 0])
+#   soft-clip            f32x4     55 /  0   ratio 0        ([25 / 0])
 #   route-mix-ramp       f32x4     22 /  0   ratio 0        (#1220; row added by its verdict NIT-1)
 #   dynamic-eq           f32x4    626 /  0   ratio 0        (dual, #17 S2)
 #   dynamic-eq           f32x4    316 /  0   ratio 0        (collapsed, #17 S2)
 #   de-esser             f32x4    561 /  0   ratio 0        (dual, #1920)
 #   de-esser             f32x4    283 /  0   ratio 0        (collapsed, #1920)
+#
+# The parametric EQ's one scalar operation in each body is an `f32.sub` once per block, not per
+# sample: `lane::silence_armable_holding` (issue #1328) computes `armed_after - frames`, and both
+# operands are splats (`silence_window`'s `silence_frames(rate)` and the block's frame count), so
+# LLVM subtracts the two scalars and splats the result. 4 x 0.0007 and 4 x 0.0013 are below the
+# floor, so both rows keep the 0.10 ceiling (budgets 135.2 and 74.8 against 1).
 #
 # Each ceiling is **four times the measured ratio, floored at 0.10**. Four times, because that is
 # the factor by which a *partial* de-vectorisation would have to stay below to escape: converting
@@ -339,14 +347,14 @@ SCALAR_SLACK = 8
 # one function behind a `mono: bool`, and the shipped *dual* path got slower -- the
 # `sixty_four_track_eq_only` console row, which never collapses, moved 28% against its sealed
 # number. The bodies are now split by a const generic, and this table is where that shows: the EQ
-# reads 168 + 84 where the merged form read one symbol at 252. Two matches per effect is therefore
+# read 168 + 84 at M2 where the merged form read one symbol at 252. Two matches per effect is therefore
 # the healthy state, and a future change that merges them back would show up here as a row that
 # vanished, not as a row that grew.
 #
-# Each collapsed body carries about **half** its dual sibling's vector arithmetic (138 against 267,
-# 224 against 448, 84 against 168, 82 against 162, 1862 against 3464, 352 against 700) and zero
-# scalar arithmetic,
-# which is what a correct one-plane variant looks like from here.
+# Each collapsed body carries about **half** its dual sibling's vector arithmetic (733 against 1359,
+# 537 against 1139, 748 against 1352, 134 against 265, 1862 against 3464, 407 against 808, 316
+# against 626, 283 against 561) and no more scalar arithmetic than its sibling, which is what a
+# correct one-plane variant looks like from here.
 KERNEL_ROSTER: tuple[tuple[str, str, float], ...] = (
     # #893: named by its `process_bank` body, as the EQ rows are, because the bank's
     # `advance_clocks` now carries one vector add of its own (the silence counters' advance).

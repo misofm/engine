@@ -46,8 +46,21 @@ impl ReferenceDeEsser {
 
     /// One sample: `(output, smoothed change in dB)`.
     pub fn process(&mut self, x: f64) -> (f64, f64) {
-        let tap = self.filter.process(x);
-        let change = self.band.step(reference_level_db(tap));
+        let tap = self.tap(x);
+        self.finish(x, tap, tap)
+    }
+
+    /// The first half of one sample: the selected filter tap of `x`, which is also the
+    /// channel's own detector word.
+    pub fn tap(&mut self, x: f64) -> f64 {
+        self.filter.process(x)
+    }
+
+    /// The second half of one sample, from the channel's own `tap` and the detector word
+    /// `detector` its gain law reads (`tap` itself for dual mono; a linked pair's blend, issue
+    /// #1969): `(output, smoothed change in dB)`.
+    pub fn finish(&mut self, x: f64, tap: f64, detector: f64) -> (f64, f64) {
+        let change = self.band.step(reference_level_db(detector));
         let gain = 10.0_f64.powf(change / 20.0);
         let y = match self.output {
             ReferenceDeEsserOutput::Wideband => gain * x,

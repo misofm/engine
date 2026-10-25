@@ -4910,6 +4910,8 @@ fn step_fade_arms(
         {
             match arm.target {
                 GraphFadeTarget::Fader(fader) => {
+                    // Issue #1782a: the arm names the lane bind gave the strip.
+                    let fader = runtime.current_location(fader);
                     if let Some((chain, slot, lane)) =
                         runtime::strip_lane_mut(&mut runtime.units, BuiltinStripOwner::Fader, fader)
                         && let Some(processor) = runtime::builtin_processor_mut(chain, slot)
@@ -6173,6 +6175,32 @@ pub fn test_only_bank_silent_skips(plan: &PreparedRenderPlan) -> u64 {
         })
 }
 
+/// Test-only (issue #1782a): `(first unit, last unit, width)` of each pack group of a graph plan,
+/// in unit order; empty for any other plan.
+#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
+#[must_use]
+pub fn test_only_pack_groups(plan: &PreparedRenderPlan) -> Vec<(u32, u32, u32)> {
+    plan.executor_any()
+        .and_then(|any| any.downcast_ref::<GraphExecutor>())
+        .map_or_else(Vec::new, |executor| executor.runtime.pack_groups())
+}
+
+/// Test-only (issue #1782a): trade the strips at `(unit, lane)` `a` and `b` of one pack group, as
+/// #1782b's packing move will at a block boundary. Call it between renders, on the render thread.
+/// `false`, with nothing moved, when the plan is not a graph plan or the move is refused.
+#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
+pub fn test_only_swap_bank_lanes(
+    plan: &mut PreparedRenderPlan,
+    a: (usize, usize),
+    b: (usize, usize),
+) -> bool {
+    plan.executor_any_mut()
+        .and_then(|any| any.downcast_mut::<GraphExecutor>())
+        .is_some_and(|executor| executor.runtime.swap_bank_lanes(a, b).is_ok())
+}
+
 /// Bytes the plan's installed [`GraphCarryProgram`] retains; zero for a plan without one or for
 /// any other plan.
 pub fn carry_program_retained_bytes(plan: &mut PreparedRenderPlan) -> u64 {
@@ -7006,11 +7034,10 @@ impl PreparedPlanExecutor for GraphExecutor {
     /// rows *is* `symmetry_counters`, and `the_half_mono_cohort_banks_like_a_uniform_one (which asserts rows-sum-to-census inline)` pins that.
     fn unit_eligibility(&self) -> Vec<PlanUnitEligibility> {
         self.runtime
-            .units
+            .identity
             .iter()
-            .zip(self.runtime.identity.iter())
             .enumerate()
-            .map(|(unit, (runtime_unit, identity))| PlanUnitEligibility {
+            .map(|(unit, identity)| PlanUnitEligibility {
                 unit: u32::try_from(unit).unwrap_or(u32::MAX),
                 banked: identity.banking.banked(),
                 gathers_track_input: identity.banking.gathers_track_input(),
@@ -7018,7 +7045,8 @@ impl PreparedPlanExecutor for GraphExecutor {
                 stages: identity.stages,
                 upstream_of_seam_stages: identity.upstream_of_seam_stages,
                 lane_tracks: identity.lane_tracks.clone(),
-                lane_eligible: runtime_unit.lane_eligibility().into_boxed_slice(),
+                // Issue #1782a: each home lane's strip, wherever it renders now.
+                lane_eligible: self.runtime.lane_eligibility_of(unit).into_boxed_slice(),
             })
             .collect()
     }
@@ -7068,6 +7096,13 @@ impl GraphExecutor {
             return CarryOutcome::PredecessorMismatch;
         };
         if predecessor.identity != program.predecessor {
+            return CarryOutcome::PredecessorMismatch;
+        }
+        // Issue #1782a: every move table below names a lane by the location bind gave it, and
+        // drains a predecessor bank's lanes together, so both plans go back to their identity lane
+        // maps first: a bounded series of lane swaps, none under the identity. A move back that
+        // refuses is a defect, and then nothing is carried.
+        if !predecessor.runtime.restore_home_lanes() || !self.runtime.restore_home_lanes() {
             return CarryOutcome::PredecessorMismatch;
         }
         // #1652 MINOR-2: a predecessor displaced before its own first block still holds the

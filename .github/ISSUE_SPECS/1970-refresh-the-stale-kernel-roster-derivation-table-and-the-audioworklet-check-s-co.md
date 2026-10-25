@@ -15,3 +15,10 @@ The derivation table in `scripts/check-web-audioworklet-callgraph.py` and the pr
 ## Paths
 
 `scripts/check-web-audioworklet-callgraph.py`, `scripts/check-web-audioworklet.sh`, this spec.
+
+## Evidence and decision record (attempt 1)
+
+- Measured on the named twin built from `019194414` (`build-web-audioworklet.sh --module-only --named-twin`, toolchain 1.99.1 from `rust-toolchain.toml`, which is what CI's build uses). Rows that moved (vector / scalar, old -> new): compressor dual 267/0 -> 949/0, compressor collapsed 138/0 -> 524/0, limiter dual 448/0 -> 913/0, limiter collapsed 224/0 -> 424/0, parametric EQ dual 168/0 -> 1352/1, parametric EQ collapsed 84/0 -> 748/1, soft-clip 25/0 -> 55/0. The other eleven rows are unchanged.
+- The EQ's one scalar op per body is an `f32.sub` once per block: `lane::silence_armable_holding` computes `armed_after - frames` from two splats, and LLVM does the subtraction on the scalars before the splat. Ratios 0.0007 and 0.0013; four times them is below the 0.10 floor, so every ceiling stays 0.10. No ceiling changed.
+- The merges of `origin/main` at `e88082e1a` and `67eca89b1` touched no roster kernel crate. Re-measured on the merged tree anyway (named twin of module `c0d62a66`): every row is identical to the table.
+- The merge of `origin/main` at `15f37828f` (#1987 and #1967's kernels) changed four effects. Re-measured on the merged tree (module `3b7c2586`; vector / scalar, earlier #1970 measurement -> now): compressor dual 949/0 -> 1359/0, collapsed 524/0 -> 733/0; gate/expander dual 162/0 -> 265/0, collapsed 82/0 -> 134/0; limiter dual 913/0 -> 1139/0, collapsed 424/0 -> 537/0; transient shaper dual 700/0 -> 808/0, collapsed 352/0 -> 407/0. All are zero scalar, so every ceiling stays 0.10. The other ten rows are unchanged. These are static instruction counts; there is no timed run.
