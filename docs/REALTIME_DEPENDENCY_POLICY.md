@@ -215,6 +215,13 @@ no reserved (or `RES0`) bit, and names the guard or write-back that restores the
   compile, command submit, service, event dequeue, source seek and submit, plan resource and
   watermark queries, render, session and plan destroy), each with the handle and storage contract
   stated beside it; the allocator it runs under is `bench_support::alloc`'s.
+- `crates/capi/tests/strip_transitions.rs` (#1325): the exported-C evidence that a removed strip
+  ramps out on the running plan and its successor is adopted at the scheduled sample, with zero
+  allocator calls in the render entry from the commit through the adoption. Its unsafe is the C
+  calls themselves (engine create and destroy, compile, command submit, event dequeue, last error,
+  source submit, plan resource and watermark queries, render, session and plan destroy), each with
+  the handle and storage contract stated beside it; the allocator it runs under is
+  `bench_support::alloc`'s.
 - `crates/capi/tests/resource_lifecycle.rs` (issue 119): the exported-C retained-allocation and
   disposal evidence. It calls the C entries, including the render entry, and owns
   `LifecycleAllocator`, a `GlobalAlloc` that delegates the original pointer and layout unchanged

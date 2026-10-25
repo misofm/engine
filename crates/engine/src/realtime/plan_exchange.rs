@@ -284,6 +284,8 @@ pub struct PlanReplacementReservation<'a> {
     superseded: u64,
     outcome: CandidateOutcome,
     adoption: PlanAdoption,
+    /// The exchange's clocks, read by [`PlanReplacementReservation::render_clock`] (#1325 D2).
+    clocks: &'a PlanClocks,
 }
 
 /// A published candidate the control thread took back before render claimed it: whole,
@@ -596,6 +598,7 @@ impl PlanPublisher {
             superseded: 0,
             outcome: CandidateOutcome::Exact,
             adoption,
+            clocks: &self.clocks,
         })
     }
 
@@ -743,6 +746,20 @@ impl PlanReplacementReservation<'_> {
         self.outcome = outcome;
     }
 
+    /// Replace the schedule given at reservation (#1325 D3): a strip transition reads the render
+    /// clock only after its phase-1 writes, which follow the reservation, so its `S` is known
+    /// last. Control thread only, before [`Self::commit`], which publishes it with the candidate.
+    pub fn set_adoption(&mut self, adoption: PlanAdoption) {
+        self.adoption = adoption;
+    }
+
+    /// [`PlanPublisher::render_clock`], read while the reservation borrows the publisher: a strip
+    /// transition reads `p` after its phase-1 writes, which follow the reservation (#1325 D2).
+    #[must_use]
+    pub fn render_clock(&self) -> u64 {
+        self.clocks.render.load(Ordering::Acquire)
+    }
+
     /// Publish the bound complete candidate. All fallible checks and the credit were taken by the
     /// reservation, so this is a bounded move into the `Empty` cell plus one `Release`
     /// compare-and-swap that cannot fail.
@@ -761,6 +778,7 @@ impl PlanReplacementReservation<'_> {
             superseded,
             outcome,
             adoption,
+            clocks: _,
         } = self;
         *next_epoch = epoch.0 + 1;
         publish_into(

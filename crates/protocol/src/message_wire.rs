@@ -1289,6 +1289,8 @@ pub enum BackpressureQueueKind {
     Telemetry = 5,
     /// Bounded exact-byte replay cache.
     ReplayCache = 6,
+    /// The spectrum capture's one-shot arm slot (#1944): capacity 1, no queue generation.
+    SpectrumArm = 7,
 }
 
 impl BackpressureQueueKind {
@@ -1299,12 +1301,13 @@ impl BackpressureQueueKind {
             4 => Ok(Self::ReliableEvent),
             5 => Ok(Self::Telemetry),
             6 => Ok(Self::ReplayCache),
+            7 => Ok(Self::SpectrumArm),
             _ => Err(DecodeError::InvalidTlv),
         }
     }
 
     const fn has_generation(self) -> bool {
-        !matches!(self, Self::ReplayCache)
+        !matches!(self, Self::ReplayCache | Self::SpectrumArm)
     }
 }
 
@@ -1319,7 +1322,7 @@ pub struct Backpressure {
     pub occupancy: u64,
     /// Atomic requested item count; exactly one in BTLV v1.
     pub requested_items: u16,
-    /// Queue generation for SPSC queue kinds; absent for replay cache.
+    /// Queue generation for SPSC queue kinds; absent for replay cache and the spectrum arm slot.
     pub generation: Option<u64>,
     /// Absolute retry boundary/sample hint, when known.
     pub retry_boundary: Option<u64>,

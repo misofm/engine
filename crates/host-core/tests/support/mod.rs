@@ -18,10 +18,11 @@ pub(super) fn write_effect(
         tap_index,
         armed,
         window_blocks,
+        ..
     } = record
     {
         producer
-            .try_push_observe(tap_index, armed, window_blocks)
+            .try_push_observe(tap_index, armed, window_blocks, 0)
             .expect("room in the observation queue");
         return;
     }
