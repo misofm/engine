@@ -4,6 +4,7 @@ export * from "./live-controls.ts";
 export { EngineLiveControls } from "../core/live-controls.ts";
 export { TransactionBuilder, transaction } from "../core/session-transaction.ts";
 export type { SessionEditSpec, SessionTransaction } from "../core/session-transaction.ts";
+export type { EditOutcome, EditPath, WatermarkSnapshot } from "../core/session-edit.ts";
 export type { ControlEditSet, LiveControlTransport, SetControlOptions } from "../core/live-controls.ts";
 export { ControlRequestIds, ControlTransactionQueue } from "../core/control-queue.ts";
 export type {
