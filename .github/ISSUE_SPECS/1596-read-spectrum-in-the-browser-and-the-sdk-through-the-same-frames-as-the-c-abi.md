@@ -242,3 +242,13 @@ Commands: `bash scripts/check-sdk-types.sh`, `bash scripts/check-sdk-headless.sh
   `spectrumHopFrames`; a boot with taps refuses an engine without capability bit 16
   (`sdk.asset.capability`) and rejects a refused boot configure with the core's code; the policy hop
   applies only to the boot's taps (as headless).
+- #1596c attempt 2 (verifier folds, root rulings): every one-shot query sends a capture `cancel`
+  before its `arm`, in the single form too, so an arm left standing by a lost undo (a cancel refused
+  under backpressure) no longer leaves `spectrum.busy` for good. The SDK refuses the overlap of a
+  one-shot query and a managed stream with `MisoUsageError` in both orders: a query while a stream
+  start is in flight or its stream runs, and a stream start while a query runs. Before, the overlap
+  reached the core, which answered it `spectrum.busy` for some orders only. A boot configure past
+  `requestDeadlineMs` rejects `createEngine` with a boot-phase `MisoEngineError` (`wrongState`,
+  `sdk.boot.deadline`), not `MisoUsageError`. Root-added paths: `sdk/README.md` (the hop section now
+  describes the boot configure and `configureSpectrum`) and `docs/CONTROL_PROTOCOL_REGISTRY.md`
+  (the bit-16 sentence); root approved both edits.
