@@ -50,7 +50,7 @@
 //! moves, the lane's detector is `combined = max + w_avg * (avg - max)`,
 //! `d = own + w_link * (combined - own)`, separate multiplies and adds; from the frame the glide
 //! arrives it is the target mode's law, bit for bit. The glide rides the ramp prefix: only a
-//! prefix with a glide in flight takes the blended body ([`Shaper::run_glide`]), and every other
+//! prefix with a glide in flight takes the blended body (`Shaper::run_glide`), and every other
 //! frame renders the body it rendered before.
 
 use effect_contract::{

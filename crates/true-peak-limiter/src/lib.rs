@@ -58,7 +58,7 @@
 //! record: the two channels' peaks differ while a weight moves. A switch into `Maximum` clears it
 //! too, and starts a per-bank countdown of the glide plus the `N + R` frames that rewrite both
 //! gain rings, raised and never lowered by every later switch. When the countdown ends, both gain rings have been rewritten under
-//! the target modes, and the record is re-derived once from the words ([`gain_state_agrees`]);
+//! the target modes, and the record is re-derived once from the words (`gain_state_agrees`);
 //! the fast path never runs on disagreeing words.
 #![allow(missing_docs)]
 
@@ -5337,7 +5337,7 @@ impl PreparedNativeEffect for PreparedTruePeakLimiter {
         self.core.designed_channel_symmetry(0)
     }
 
-    /// Issue #1370: [`LimiterCore::retarget_link`] on the one lane.
+    /// Issue #1370: `LimiterCore::retarget_link` on the one lane.
     fn retarget_link(&mut self, track: usize, mode: LinkMode, samples: u32) -> bool {
         track == 0 && self.core.retarget_link(0, mode, samples)
     }
