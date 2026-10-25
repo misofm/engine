@@ -5324,7 +5324,8 @@ mod spectrum_ffi_tests {
             (1_280, 1_280),
         ] {
             let document = stage_ordinary_output_boot();
-            BOOT_STAGING.with(|slot| slot.borrow_mut().options.source_ring_frames = override_frames);
+            BOOT_STAGING
+                .with(|slot| slot.borrow_mut().options.source_ring_frames = override_frames);
             let handle = miso_engine_web_v1_boot(document.len() as u32);
             assert_ne!(handle, 0, "boot with ring override {override_frames}");
             assert_eq!(miso_engine_web_v1_source_ring_frames(handle), expected);

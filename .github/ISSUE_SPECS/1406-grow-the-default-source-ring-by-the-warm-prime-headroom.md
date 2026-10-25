@@ -270,3 +270,14 @@ engine, the published ABI layout, the SDK and the browser host derive the same r
   (`host-core`'s `default_ring_adds_the_largest_prime_and_a_quantum_to_the_stall_ring`), re-run
   red; row 8 re-run red on the `stall_quanta == 38` assertion. The browser module's bytes do not
   change (no Rust changes); the browser matrix is not re-recorded (#1334), only its label renamed.
+- **2026-10-25, 1406b host bound (root ruling: option c, one additive export).** The engine
+  reports the ring it resolved: `miso_engine_web_v1_source_ring_frames(handle) -> u32` (zero
+  without a live handle). The worklet reads it after boot and posts `sourceRingFrames` in
+  `miso.ready.v1`; the host's per-source bound is that ring in quanta, applied after the ready
+  message, so no JavaScript copies the rule and a refused rate keeps the engine's typed refusal.
+  The prepared-module boot still fetches nothing. The export joins the ABI layout's export list,
+  `check-abi-layout-v1.py` and its fixture, `check-web-audioworklet.sh`'s frozen export set, and
+  `check-session-map-shape.py` excludes it from the per-source introspection family by name (it is
+  one value for every source). Gate 4 holds 110 chunks at 48 kHz / 64 and refuses the 111th; red
+  when the host keeps the old rule (77), adds a private `+ 1`, or the export drops a quantum
+  (the ffi test). The browser module's bytes change; the matrix is not re-recorded (#1334).
