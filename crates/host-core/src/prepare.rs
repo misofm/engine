@@ -4449,6 +4449,19 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
         restarted.sort_unstable();
         restarted.dedup();
     }
+    // #1324 D1: a carried effect keyed from a restarted strip's tap behind a restarted owner
+    // would read the old chain until `S` and the restarted chain's at-rest output after it, so
+    // its strip joins the set, until no strip is added. After the warm check: the lead's `R` is
+    // the ordinary successor's set, which this closure already closed.
+    if let Some(base) = successor {
+        close_over_sidechains(
+            base.committed,
+            model,
+            &base.inventory.delay_lines,
+            &delay_lines,
+            &mut restarted,
+        );
+    }
     let restart = StripRestart::new(model, restarted.iter().map(|id| &**id));
     let carried_input_count = carried_inputs.len();
     let route_joins: Vec<RouteJoin<'_>> = if restarted.is_empty() {
@@ -7471,6 +7484,119 @@ fn committed_has_strip(committed: &SessionModel, id: &str) -> bool {
             .submixes
             .binary_search_by(|submix| submix.id.as_str().cmp(id))
             .is_ok()
+}
+
+/// The strip a route or a sidechain reads, and its tap; whether that strip is a submix.
+pub(crate) fn source_strip(source: &session::RouteSource) -> (&str, session::SendTap, bool) {
+    match source {
+        session::RouteSource::Track { track_id, tap } => (track_id.as_str(), *tap, false),
+        session::RouteSource::Submix { submix_id, tap } => (submix_id.as_str(), *tap, true),
+    }
+}
+
+/// The length, in `lines`, of the compensation line on the sidechain of effect `effect` of strip
+/// `strip` into its port `port`; 0 when it has none.
+pub(crate) fn sidechain_line_samples(
+    lines: &[graph::GraphDelayLine],
+    strip: &str,
+    effect: &str,
+    port: &str,
+) -> u64 {
+    lines
+        .iter()
+        .find(|line| {
+            matches!(&line.edge, graph::GraphEdgeId::EffectSidechain { effect: node, port: at }
+                if node.track_id.as_str() == strip
+                    && node.effect_id.as_str() == effect
+                    && at == port)
+        })
+        .map_or(0, |line| line.samples)
+}
+
+/// #1324 D1's exemption of a submix's `input` tap whatever its arrival: every line into submix
+/// `submix`'s `Input` stage, in `committed` and in `model`, comes from a ducked strip (`ducked`,
+/// which holds the removed strips) or, in `model`, from an added one. Its input then holds exact
+/// `+0.0` from the end of the duck until the fire.
+pub(crate) fn submix_input_is_quiet(
+    committed: &SessionModel,
+    model: &SessionModel,
+    submix: &str,
+    ducked: &dyn Fn(&str) -> bool,
+) -> bool {
+    let into = |route: &&session::Route| {
+        matches!(&route.destination, session::RouteDestination::SubmixInput { submix_id }
+            if submix_id.as_str() == submix)
+    };
+    committed
+        .routes
+        .iter()
+        .filter(into)
+        .all(|route| ducked(source_strip(&route.source).0))
+        && model.routes.iter().filter(into).all(|route| {
+            let source = source_strip(&route.source).0;
+            !committed_has_strip(committed, source) || ducked(source)
+        })
+}
+
+/// #1324 D1's sidechain closure, on the restart set `restarted` (sorted) of a successor of
+/// `committed` prepared from `model`: a strip of both plans with an insert keyed from a tap of a
+/// restarted strip that follows a restarted owner with state (`post_input`, `insert_send`,
+/// `insert_return`, `pre_fader`) joins the set, repeated until no strip is added. A track's
+/// `input` tap is its raw source, and a `post_fader` or `post_pan` tap holds exact `+0.0` from
+/// the end of the duck until the fire, so neither adds its consumer. A submix's `input` tap adds
+/// its consumer only when the sidechain's line changes length (`before` is the predecessor's
+/// lines, `after` the successor's) and a line into the submix's `Input` stage comes from a strip
+/// neither ducked nor added ([`submix_input_is_quiet`]). Console slots have no sidechain.
+fn close_over_sidechains(
+    committed: &SessionModel,
+    model: &SessionModel,
+    before: &[graph::GraphDelayLine],
+    after: &[graph::GraphDelayLine],
+    restarted: &mut Vec<Box<str>>,
+) {
+    loop {
+        let held =
+            |set: &[Box<str>], id: &str| set.binary_search_by(|held| (**held).cmp(id)).is_ok();
+        let set: &[Box<str>] = restarted;
+        let ducked = |id: &str| held(set, id) || !committed_has_strip(model, id);
+        let keyed = |strip: &str, effect: &session::Effect| {
+            let session::SidechainDeclaration::Routed(sidechain) = &effect.sidechain else {
+                return false;
+            };
+            let (source, tap, submix) = source_strip(&sidechain.source);
+            if !held(set, source) {
+                return false;
+            }
+            match tap {
+                session::SendTap::PostFader | session::SendTap::PostPan => false,
+                session::SendTap::Input => {
+                    let port = sidechain.port_id.as_str();
+                    let id = effect.id.as_str();
+                    submix
+                        && sidechain_line_samples(before, strip, id, port)
+                            != sidechain_line_samples(after, strip, id, port)
+                        && !submix_input_is_quiet(committed, model, source, &ducked)
+                }
+                session::SendTap::PostInput
+                | session::SendTap::InsertSend
+                | session::SendTap::InsertReturn
+                | session::SendTap::PreFader => true,
+            }
+        };
+        let joined: Vec<Box<str>> = model
+            .strips()
+            .map(|strip| (strip.id.as_str(), strip.inserts))
+            .filter(|(id, _)| !held(set, id) && committed_has_strip(committed, id))
+            .filter(|(id, inserts)| inserts.effects.iter().any(|effect| keyed(id, effect)))
+            .map(|(id, _)| Box::from(id))
+            .collect();
+        if joined.is_empty() {
+            return;
+        }
+        restarted.extend(joined);
+        restarted.sort_unstable();
+        restarted.dedup();
+    }
 }
 
 /// The model half of the strip join (#1277 D3, D4): for every strip of `model` that `committed`
