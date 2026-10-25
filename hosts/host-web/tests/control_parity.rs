@@ -42,10 +42,10 @@ use core::ptr;
 
 use capi::{
     ABI_VERSION as C_ABI_VERSION, BYTES_OUT_SIZE, BytesOut, COMPILE_LIMITS_SIZE, CompileLimits,
-    ENGINE_CONFIG_SIZE, EVENT_LANE_RELIABLE, EngineConfig, PLAN_RESOURCE_REPORT_SIZE,
-    PLANAR_OUTPUT_SIZE, Plan, PlanResourceReport, PlanarOutput, RESULT_OK as C_RESULT_OK,
-    SOURCE_CHUNK_SIZE, SOURCE_SEEK_REPORT_SIZE, SUBMIT_REPORT_SIZE, Session, SourceChunk,
-    SourceSeekReport, SubmitReport,
+    ENGINE_CONFIG_SIZE, EVENT_LANE_LOSSY, EVENT_LANE_RELIABLE, EngineConfig,
+    PLAN_RESOURCE_REPORT_SIZE, PLANAR_OUTPUT_SIZE, Plan, PlanResourceReport, PlanarOutput,
+    RESULT_OK as C_RESULT_OK, SOURCE_CHUNK_SIZE, SOURCE_SEEK_REPORT_SIZE, SUBMIT_REPORT_SIZE,
+    Session, SourceChunk, SourceSeekReport, SubmitReport,
 };
 use controls::{ControlAddress, Lane, Owner, Section};
 use protocol::{
@@ -3722,9 +3722,19 @@ fn both_hosts_boot_an_empty_session_and_add_the_first_stem_alike() {
 /// master with `SET_CONTROL`, and refuse a strip neither has: each transaction's verdict, the
 /// control list and state pages (the row's value) and the snapshot (which never holds it) agree.
 ///
+/// #1690b gate 1: after the rebuild both arm `t1`'s compressor tap and play the same loud PCM; the
+/// C ABI configures `[{master, gain reduction}]`, one batch per meter window. After each later
+/// step both play [`MASTER_PLAY_BLOCKS`] blocks, a whole number of either host's meter windows,
+/// and the browser's `masterGrDb` (its lease frame's master word, present with
+/// `master_gr_present`) and the C ABI's last master record (`VALID` or not) are the same bits and
+/// present together: the compressor's reduction, nonzero, while `t1` is the master; absent once the
+/// master moves to `bus` (no armed tap) and once it is cleared.
+///
 /// Test value: red if one host lacks the row, refuses a designation the other takes, spends a
 /// revision on it, lists another master, holds two masters at once, saves the designation into
-/// the snapshot, or admits a strip the session does not have.
+/// the snapshot, or admits a strip the session does not have; or if either host computes the
+/// master's reading its own way, reads another window, or reports `0` where the other reports
+/// absent (#1690b).
 #[test]
 fn both_hosts_designate_the_master_strip_after_an_empty_boot_alike() {
     let rate = RATES[0];
@@ -3739,6 +3749,8 @@ fn both_hosts_designate_the_master_strip_after_an_empty_boot_alike() {
     model.routes.clear();
     model.vcas.clear();
     source.id = id("stem");
+    // #1690b: long enough for every step's play.
+    source.frames = 1 << 20;
     track.id = id("t1");
     track.source_id = source.id.clone();
     route.id = id("t1-main");
@@ -3768,7 +3780,25 @@ fn both_hosts_designate_the_master_strip_after_an_empty_boot_alike() {
     ];
 
     let mut browser = Rig::new(&model);
+    // #1690b: the browser leg boots with a meter window and observation capacity, so it grants
+    // the meter lease and arms the tap.
+    browser.host = host_web::AudioWorkletEngineHost::boot(
+        canonical_session_json(&model)
+            .expect("canonical session")
+            .as_bytes(),
+        host_web::WebBootOptions {
+            require_sample_rate_hz: rate,
+            require_quantum_frames: QUANTUM,
+            source_ring_frames: QUANTUM * 2,
+            live_control_meter_blocks: host_web::DEFAULT_METER_BLOCKS.into(),
+            live_control_observation_taps: 1,
+            ..host_web::WebBootOptions::explicit_defaults()
+        },
+    )
+    .unwrap_or_else(|failure| panic!("{}", String::from_utf8_lossy(failure.diagnostic())));
     let mut c_abi = CAbi::new(&model);
+    let mut block = 0;
+
     for (step, edits) in transactions.iter().enumerate() {
         let before = c_abi.revision;
         let (b, _) = browser.transaction_reply(edits);
@@ -3796,7 +3826,8 @@ fn both_hosts_designate_the_master_strip_after_an_empty_boot_alike() {
             ),
         }
         assert_eq!(browser.host.render_next(), host_web::RESULT_OK);
-        let _ = c_abi.render(step as u64);
+        let _ = c_abi.render(block);
+        block += 1;
         let (b_rows, b_snapshot) = dump(|payload, expected| browser.command(payload, expected));
         let (c_rows, c_snapshot) = dump(|payload, expected| c_abi.send(payload, expected));
         assert_eq!(b_rows, c_rows, "step {step}: the control pages agree");
@@ -3818,6 +3849,186 @@ fn both_hosts_designate_the_master_strip_after_an_empty_boot_alike() {
             expected,
             "step {step}: the C ABI's listed master"
         );
+        // #1690b gate 1: the master's gain reduction, on each host.
+        if step == 0 {
+            arm_master_reading(&mut browser, &mut c_abi);
+            continue;
+        }
+        // Each step plays the stem from its frame 0, in a new generation, from the next block.
+        let generation = step as u64 + 1;
+        assert_eq!(
+            browser.host.seek_source(b"stem", generation, 0),
+            host_web::RESULT_OK
+        );
+        // SAFETY: The session is live and used by this thread alone; the name outlives the call.
+        let code = unsafe {
+            capi::miso_engine_v1_source_seek(c_abi.session, b"stem".as_ptr(), 4, generation, 0)
+        };
+        assert_eq!(code, C_RESULT_OK, "C ABI seek");
+        let mut readings = None;
+        for fed in 0..MASTER_PLAY_BLOCKS {
+            let [left, right] = planes(0, block);
+            assert_eq!(
+                browser.host.submit_source(
+                    b"stem",
+                    generation,
+                    fed * u64::from(QUANTUM),
+                    rate,
+                    &[&left, &right],
+                    QUANTUM,
+                    false,
+                ),
+                host_web::RESULT_OK,
+                "step {step}: the browser takes the stem's PCM: {}",
+                String::from_utf8_lossy(browser.host.diagnostic())
+            );
+            c_abi.submit_from("stem", 0, block, fed, generation);
+            assert_eq!(browser.host.render_next(), host_web::RESULT_OK);
+            let b = bits(browser.host.output_pcm().expect("browser output"));
+            assert_eq!(b, c_abi.render(block), "step {step}: block {block} alike");
+            block += 1;
+            while browser.host.poll_meters() != 0 {}
+            if let Some(records) = c_abi.meter_batches().pop() {
+                let [record] = records.as_slice() else {
+                    panic!("one master record: {records:?}")
+                };
+                readings = Some(*record);
+            }
+        }
+        let c_record = readings.expect("a C ABI batch");
+        assert_eq!(
+            (c_record.handle, c_record.component),
+            (1, protocol::MeterComponent::Aggregate)
+        );
+        let c_reading = (c_record.flags == 1).then_some(c_record.value.to_bits());
+        if c_record.flags != 1 {
+            assert_eq!(
+                c_record.value.to_bits(),
+                0,
+                "step {step}: an absent record is 0.0"
+            );
+        }
+        let frame = browser.host.meter_frame();
+        let strips = (frame.len() - 3) / 3;
+        let b_reading = (browser.host.meter_header().master_gr_present == 1)
+            .then(|| frame[3 * strips + 2].to_bits());
+        assert_eq!(
+            b_reading, c_reading,
+            "step {step}: the master's reading alike"
+        );
+        match step {
+            1 => assert!(
+                c_reading.is_some_and(|db| f32::from_bits(db) > 0.0),
+                "step 1: the compressor reduces: {c_reading:?}"
+            ),
+            _ => assert_eq!(c_reading, None, "step {step}: no master reading"),
+        }
+    }
+}
+
+/// The blocks #1690b's parity row plays per step: a whole number of the browser's meter windows
+/// (12 blocks) and of the C ABI's at 44.1 kHz (11 blocks), and of the tap's window.
+const MASTER_PLAY_BLOCKS: u64 = 132;
+
+/// #1690b gate 1's set-up after the rebuild: both hosts arm `t1`'s compressor tap with a
+/// four-block window, and the C ABI configures `[{master, gain reduction}]` with one batch per
+/// meter window; the browser takes its meter lease.
+fn arm_master_reading(browser: &mut Rig, c_abi: &mut CAbi) {
+    // The browser arms by a kind 7 record (its `Observe` edit waits for #1589), the C ABI by one
+    // `Observe` transaction.
+    let mut record = [0_u8; host_web::COMMAND_RECORD_BYTES as usize];
+    record[0] = host_web::COMMAND_OBSERVE_SUBSCRIBE as u8;
+    record[1] = host_web::RACK_INSERTS;
+    record[2] = 2;
+    record[3] = u8::try_from(COMPRESSOR.id.len()).expect("insert ID length");
+    record[4..8].copy_from_slice(&1_u32.to_le_bytes());
+    record[8..12].copy_from_slice(&4_u32.to_le_bytes());
+    record[16..18].copy_from_slice(b"t1");
+    record[144..144 + COMPRESSOR.id.len()].copy_from_slice(COMPRESSOR.id.as_bytes());
+    browser
+        .host
+        .command_staging_mut()
+        .expect("the command staging")[..record.len()]
+        .copy_from_slice(&record);
+    assert_eq!(
+        browser.host.submit_commands(1),
+        host_web::RESULT_OK,
+        "the browser arm"
+    );
+    let (c, _) = c_abi.transaction(&[SessionEdit::Observe {
+        strip_id: id("t1"),
+        section: controls::TapSection::Inserts(id(COMPRESSOR.id)),
+        tap_id: 1,
+        armed: true,
+        window_blocks: 4,
+    }]);
+    assert!(matches!(c, Verdict::Applied { .. }), "the C ABI arm: {c:?}");
+    let window = host_core::default_meter_window_blocks(c_abi.rate, QUANTUM).get();
+    assert_eq!(
+        MASTER_PLAY_BLOCKS % u64::from(window),
+        0,
+        "whole C ABI windows"
+    );
+    let telemetry = protocol::TelemetryConfiguration {
+        meters: vec![protocol::MeterEntry {
+            target: protocol::MeterTarget::Master,
+            metric: protocol::MeterMetric::GainReduction,
+        }],
+        meter_period_blocks: window,
+        meter_window_blocks: None,
+        counter_ids: Vec::new(),
+        counter_period_blocks: 0,
+        diagnostics_enabled: false,
+        minimum_diagnostic_severity: protocol::DiagnosticSeverity::Info,
+    };
+    let revision = c_abi.revision;
+    c_abi.send(
+        CommandPayload::TelemetryConfigure(&telemetry),
+        ExpectedRevision::Exact(SessionRevision(revision)),
+    );
+    assert_eq!(browser.host.set_meter_lease(true), host_web::RESULT_OK);
+}
+
+impl CAbi {
+    /// Every `METER_BATCH` on the lossy lane, in order, as its records; other lossy events are
+    /// dropped.
+    fn meter_batches(&mut self) -> Vec<Vec<protocol::MeterRecord>> {
+        let mut batches = Vec::new();
+        loop {
+            let mut event = [0_u8; 4_096];
+            let mut out = BytesOut {
+                struct_size: BYTES_OUT_SIZE,
+                reserved0: 0,
+                data: event.as_mut_ptr(),
+                capacity_bytes: event.len() as u64,
+                required_bytes: 0,
+            };
+            // SAFETY: The session is live and used by this thread alone; the buffer is owned.
+            let code = unsafe {
+                capi::miso_engine_v1_dequeue_event(self.session, EVENT_LANE_LOSSY, &mut out)
+            };
+            assert_eq!(code, C_RESULT_OK);
+            if out.required_bytes == 0 {
+                return batches;
+            }
+            let mut fields = [0_u16; 64];
+            if let protocol::DecodedTypedEventFrame {
+                payload: protocol::DecodedEventPayload::MeterBatch(batch),
+                ..
+            } = ProtocolCodec::default()
+                .decode_typed_event(
+                    &event[..out.required_bytes as usize],
+                    &mut DecodeScratch::new(&mut fields),
+                )
+                .expect("lossy event")
+            {
+                batches.push(
+                    (0..usize::from(batch.count))
+                        .map(|index| batch.record(index).expect("meter record"))
+                        .collect(),
+                );
+            }
+        }
     }
 }
 
