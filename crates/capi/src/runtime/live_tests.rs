@@ -9470,7 +9470,10 @@ fn an_observe_edit_arms_a_tap_through_the_c_abi() {
         .3[0]
         .expect("a published window");
     let quantum = rig.quantum as u64;
-    assert_eq!(window, (3, (armed_at + 8) * quantum, 4));
+    assert_eq!(
+        (window.0, window.1, window.2),
+        (3, (armed_at + 8) * quantum, 4)
+    );
 }
 
 /// #1585 gate 2: each `Observe` reply names the arm tag of the record behind the subscription,
@@ -9547,4 +9550,775 @@ fn each_observe_reply_names_the_arm_tag_of_its_record() {
         (Vec::new(), vec![4]),
         "the removal names the ended subscription's tag"
     );
+}
+
+/// `tracks` tracks of the parity session with a compressor console slot `glue` after its EQ, at the
+/// slot's `dual_mono`, every entry on `slot` with a -40 dB threshold so the detector law is heard,
+/// and on the first track a compressor insert `duck` whose sidechain is the track's own input, so
+/// it renders per node (a connected sidechain never banks), at the same threshold (#1371).
+fn link_session(tracks: usize) -> String {
+    let base = if tracks == 1 {
+        long_session(1, 48_000)
+    } else {
+        long_session(10, 48_000)
+    };
+    with_model(&base, |model| {
+        model.tracks.truncate(tracks);
+        let kept: Vec<StableId> = model.tracks.iter().map(|track| track.id.clone()).collect();
+        model.routes.retain(
+            |route| matches!(&route.source, RouteSource::Track { track_id, .. } if kept.contains(track_id)),
+        );
+        let glue = StableId::parse("glue").expect("slot ID");
+        let threshold = session::EffectParam {
+            parameter_id: 1,
+            channel: session::ParameterChannel::Both,
+            unit: session::ParameterUnit::Db,
+            value: -40.0,
+        };
+        model.console.pre_insert.push(session::ConsoleSlot {
+            slot: glue.clone(),
+            identity: session::EffectIdentity::Native {
+                effect_id: StableId::parse("miso.compressor").expect("compressor ID"),
+            },
+            quality: session::EffectQuality::Normal,
+            link_mode: session::LinkMode::DualMono,
+        });
+        let position = model.console.pre_insert.len() - 1;
+        for track in &mut model.tracks {
+            track.console.insert(
+                position,
+                session::ConsoleEntry {
+                    slot: glue.clone(),
+                    bypass: false,
+                    link_mode: session::ConsoleLinkMode::Slot,
+                    params: vec![threshold.clone()],
+                },
+            );
+        }
+        let first = model.tracks[0].id.clone();
+        model.tracks[0].inserts.effects.push(session::Effect {
+            id: StableId::parse("duck").expect("insert ID"),
+            identity: session::EffectIdentity::Native {
+                effect_id: StableId::parse("miso.compressor").expect("compressor ID"),
+            },
+            quality: session::EffectQuality::Normal,
+            bypass: false,
+            link_mode: session::LinkMode::DualMono,
+            params: vec![threshold.clone()],
+            sidechain: session::SidechainDeclaration::Routed(session::Sidechain {
+                source: RouteSource::Track {
+                    track_id: first,
+                    tap: session::SendTap::Input,
+                },
+                port_id: StableId::parse("sidechain-in").expect("port ID"),
+            }),
+        });
+    })
+}
+
+/// A `SET_CONTROL` of strip `track_id`'s `glue` entry's link-mode row to `code` (`0` slot, then
+/// the `effect_contract::LinkMode` codes), with the edit's own glide `ramp`.
+fn link_edit(track_id: &str, code: f32, ramp: Option<u32>) -> SessionEdit {
+    link_edit_at(
+        track_id,
+        protocol::control_core::Section::Console(StableId::parse("glue").expect("slot ID")),
+        code,
+        ramp,
+    )
+}
+
+/// [`link_edit`] of the instance at `section`.
+fn link_edit_at(
+    track_id: &str,
+    section: protocol::control_core::Section,
+    code: f32,
+    ramp: Option<u32>,
+) -> SessionEdit {
+    SessionEdit::set_control(
+        protocol::control_core::ControlAddress {
+            owner: protocol::control_core::Owner::Strip(
+                StableId::parse(track_id).expect("track ID"),
+            ),
+            section,
+            control: protocol::control_core::LINK_MODE_CONTROL,
+            lane: protocol::control_core::Lane::Both,
+        },
+        code,
+        ramp,
+    )
+}
+
+fn glide(
+    mode: effect_contract::LinkMode,
+    ramp_samples: u32,
+) -> effect_contract::EffectControlRecord {
+    effect_contract::EffectControlRecord::Link(effect_contract::LinkSwitch { mode, ramp_samples })
+}
+
+/// #1371 gates 2 and 5. A committed link change commits one revision and prepares no plan, on a
+/// console entry's override (a banked lane) and on an insert that renders per node; from the next
+/// block the C ABI plan renders what a host-core plan with every live lane renders when its lane's
+/// link cell takes the same switch at the same block, the output differs from an unedited run,
+/// and the block that applies the switch allocates nothing.
+///
+/// Test value: red if the link row still rebuilds, if a drained switch never reaches
+/// `retarget_link` on a bank stage or on a per-node instance (acked and never heard: the output
+/// equals the unedited run), if the C ABI writes another mode, glide or instance than the cell the
+/// lane reference takes, or if applying a switch allocates on the render thread.
+#[test]
+fn a_link_change_glides_live_and_is_heard() {
+    let document = link_session(2);
+    let id = |text| StableId::parse(text).expect("an ID");
+    let console = || protocol::control_core::Section::Console(id("glue"));
+    let insert = || protocol::control_core::Section::Inserts(id("duck"));
+    for (label, section, instance, code, mode) in [
+        (
+            "console override",
+            console(),
+            "glue",
+            3.0,
+            effect_contract::LinkMode::Average,
+        ),
+        (
+            "per-node insert",
+            insert(),
+            "duck",
+            2.0,
+            effect_contract::LinkMode::Maximum,
+        ),
+    ] {
+        let mut rig = Rig::new(&document);
+        let mut lanes = LaneReference::new(&document);
+        let mut unedited = Reference::new(&document);
+        let warm_up = window(rig.latency(), 0, rig.quantum);
+        for block in 0..warm_up {
+            let live = rig.step();
+            assert_eq!(
+                bits(&live),
+                bits(&lanes.reference.step()),
+                "{label}: warm-up {block}"
+            );
+            unedited.step();
+        }
+        let (revision, _, epoch, _) = rig.summary();
+        assert_eq!(
+            rig.apply(&[link_edit_at("eq0", section, code, Some(256))]),
+            crate::RESULT_OK,
+            "{label}"
+        );
+        assert_eq!(
+            {
+                let (after, _, after_epoch, pending) = rig.summary();
+                (after, after_epoch, pending)
+            },
+            (revision + 1, epoch, 0),
+            "{label}: the change commits one revision and prepares no plan"
+        );
+        lanes.write("eq0", instance, glide(mode, 256));
+        let mut audible = false;
+        for block in 0..12 {
+            let (live, used) = rig.step_counted();
+            if block == 0 {
+                assert_eq!(
+                    (used.allocations, used.deallocations, used.reallocations),
+                    (0, 0, 0),
+                    "{label}: the block that applies the switch"
+                );
+            }
+            assert_eq!(
+                bits(&live),
+                bits(&lanes.reference.step()),
+                "{label}: block {block}"
+            );
+            audible |= bits(&live) != bits(&unedited.step());
+        }
+        assert!(audible, "{label}: the change changes the output");
+    }
+}
+
+/// #1371 gate 3. A paused host sends forty transactions, each changing the first track's `glue`
+/// override (cycling `maximum`, `average`, `dual_mono`), and every one is `RESULT_OK` with no plan
+/// prepared. The next blocks equal a twin that made only the last edit, and
+/// `LIVE_VALUES_SUPERSEDED` grows by exactly 39 (one link cell, 39 writes replaced unread). A
+/// transaction with a link change refused at its last fallible step writes no cell and leaves the
+/// model as it was.
+///
+/// Test value: red if a link value rides a bounded queue (an edit refused for room) or rebuilds,
+/// if the supersession count is not one per replaced link write, or if a link cell is written
+/// before a later check of its transaction can still refuse it (an ack could precede a drop).
+#[test]
+fn forty_link_edits_before_one_block_are_all_accepted_and_the_last_is_heard() {
+    let document = link_session(2);
+    let mut rig = Rig::new(&document);
+    let mut twin = Rig::new(&document);
+    rig.step();
+    twin.step();
+    let code = |edit: usize| [2.0, 3.0, 1.0][edit % 3];
+    for edit in 0..40 {
+        assert_eq!(
+            rig.apply(&[link_edit("eq0", code(edit), None)]),
+            crate::RESULT_OK,
+            "edit {edit}"
+        );
+    }
+    assert_eq!(rig.summary().3, 0, "no edit prepared a plan");
+    assert_eq!(effect_writes(&rig, Epoch::Current, "eq0", "glue")[1], 40);
+    assert_eq!(
+        twin.apply(&[link_edit("eq0", code(39), None)]),
+        crate::RESULT_OK
+    );
+    let before = rig.counter(protocol::CounterId::LiveValuesSuperseded);
+    for block in 0..12 {
+        assert_eq!(bits(&rig.step()), bits(&twin.step()), "block {block}");
+    }
+    assert_eq!(
+        rig.counter(protocol::CounterId::LiveValuesSuperseded) - before,
+        39
+    );
+
+    // A link change refused after every preflight, at the commit's last fallible step.
+    let state = refusal_state(&rig);
+    let cells = effect_writes(&rig, Epoch::Current, "eq0", "glue");
+    crate::ffi::test_set_structural_faults(
+        rig.session,
+        [Some(TestStructuralFaultPhase::BeforeLivePush), None],
+    );
+    assert_eq!(
+        rig.apply(&[link_edit("eq0", 3.0, None)]),
+        crate::RESULT_BACKPRESSURE
+    );
+    assert_eq!(refusal_state(&rig), state);
+    assert_eq!(effect_writes(&rig, Epoch::Current, "eq0", "glue"), cells);
+    assert_eq!(rig.apply(&[link_edit("eq0", 3.0, None)]), crate::RESULT_OK);
+    assert_eq!(
+        effect_writes(&rig, Epoch::Current, "eq0", "glue")[1],
+        cells[1] + 1
+    );
+}
+
+/// #1371 D2, the same-mode rule. While `eq0`'s `glue` lane glides to `average` over 768 frames, two
+/// transactions before the next block write `maximum` and then `average`: the newest write is the
+/// mode the lane already heads for, so the glide goes on untouched, bit for bit what a twin that
+/// made only the first edit renders.
+///
+/// Test value: red if a block that reads a switch to the lane's own target retargets it anyway
+/// (the glide restarts its timeline from where it is, a different curve).
+#[test]
+fn a_change_and_its_reversal_before_a_block_leave_the_glide_be() {
+    let document = link_session(2);
+    let mut rig = Rig::new(&document);
+    let mut twin = Rig::new(&document);
+    for _ in 0..window(rig.latency(), 0, rig.quantum) {
+        assert_eq!(bits(&rig.step()), bits(&twin.step()), "warm-up");
+    }
+    let first = link_edit("eq0", 3.0, Some(768));
+    assert_eq!(rig.apply(std::slice::from_ref(&first)), crate::RESULT_OK);
+    assert_eq!(twin.apply(std::slice::from_ref(&first)), crate::RESULT_OK);
+    assert_eq!(bits(&rig.step()), bits(&twin.step()), "the glide begins");
+    assert_eq!(rig.apply(&[link_edit("eq0", 2.0, None)]), crate::RESULT_OK);
+    assert_eq!(rig.apply(&[link_edit("eq0", 3.0, None)]), crate::RESULT_OK);
+    for block in 0..10 {
+        assert_eq!(bits(&rig.step()), bits(&twin.step()), "block {block}");
+    }
+}
+
+/// #1371 gate 4 (D6, root's mid-glide ruling). A rebuild that adds a muted track, whose ID sorts
+/// first so the carried lane moves, lands while `eq0`'s `glue` lane glides to `average` over 768
+/// frames: (a) the glide was applied a block before the swap, (b) the link edit is still unread
+/// when the rebuild commits, (c) the link edit rides the rebuilding transaction. In every case
+/// the swapped run renders bit for bit what a twin that only made the link edit renders.
+///
+/// Test value: red if the successor, prepared at the committed mode, seats it at rest and drops
+/// the glide in flight, or seats the committed mode before the predecessor's unread or the
+/// rebuild's own switch can glide to it (a step), or if the carry forgets the unread switch.
+#[test]
+fn a_rebuild_mid_glide_carries_the_glide_to_its_target() {
+    let document = link_session(1);
+    let model = parse_session_json(&document).expect("model");
+    let structural = super::tests::add_muted_track(&model, "a-muted");
+    let edit = link_edit("eq0", 3.0, Some(768));
+    for case in ["applied", "unread", "same transaction"] {
+        let mut rig = Rig::new(&document);
+        let mut twin = Rig::new(&document);
+        for _ in 0..window(rig.latency(), 0, rig.quantum) {
+            assert_eq!(bits(&rig.step()), bits(&twin.step()), "{case}: warm-up");
+        }
+        assert_eq!(
+            twin.apply(std::slice::from_ref(&edit)),
+            crate::RESULT_OK,
+            "{case}"
+        );
+        match case {
+            "applied" => {
+                assert_eq!(
+                    rig.apply(std::slice::from_ref(&edit)),
+                    crate::RESULT_OK,
+                    "{case}"
+                );
+                assert_eq!(
+                    bits(&rig.step()),
+                    bits(&twin.step()),
+                    "{case}: glide begins"
+                );
+                assert_eq!(rig.apply(&structural), crate::RESULT_OK, "{case}");
+            }
+            "unread" => {
+                assert_eq!(
+                    rig.apply(std::slice::from_ref(&edit)),
+                    crate::RESULT_OK,
+                    "{case}"
+                );
+                assert_eq!(rig.apply(&structural), crate::RESULT_OK, "{case}");
+            }
+            _ => {
+                let mut edits = vec![edit.clone()];
+                edits.extend(structural.iter().cloned());
+                assert_eq!(rig.apply(&edits), crate::RESULT_OK, "{case}");
+            }
+        }
+        assert_eq!(rig.summary().3, 1, "{case}: the transaction rebuilds");
+        for block in 0..10 {
+            assert_eq!(
+                bits(&rig.step()),
+                bits(&twin.step()),
+                "{case}: block {block}"
+            );
+        }
+        assert_eq!(
+            crate::ffi::test_plan_carry_counts(rig.plan).0,
+            1,
+            "{case}: one swap"
+        );
+    }
+}
+
+// --- OBSERVATION_READ (#1586b) ---
+
+/// A frame limit a 256-row `OBSERVATION_READ` reply fits (the default fixture's 4,096 bytes carry
+/// 21 rows at most).
+const OBSERVATION_FRAME_BYTES: u64 = 65_536;
+
+fn observation_limits() -> CompileLimits {
+    CompileLimits {
+        maximum_control_frame_bytes: OBSERVATION_FRAME_BYTES,
+        maximum_replay_bytes: 8 * OBSERVATION_FRAME_BYTES,
+        maximum_effects: 512,
+        ..limits()
+    }
+}
+
+/// Compressor inserts per track in [`many_compressor_session`].
+const COMPRESSORS_PER_TRACK: usize = 26;
+
+/// [`effect_session`]'s ten tracks with 25 more compressor inserts each (`comp1` to `comp25`):
+/// 260 compressor gain-reduction taps.
+fn many_compressor_session() -> String {
+    with_model(&effect_session(10, 48_000), |model| {
+        for track in &mut model.tracks {
+            let template = track
+                .inserts
+                .effects
+                .iter()
+                .find(|effect| effect.id.as_str() == "comp")
+                .expect("the compressor")
+                .clone();
+            for index in 1..COMPRESSORS_PER_TRACK {
+                let mut compressor = template.clone();
+                compressor.id = StableId::parse(&format!("comp{index}")).expect("compressor");
+                track.inserts.effects.push(compressor);
+            }
+        }
+    })
+}
+
+fn tap_selection(
+    strip: &StableId,
+    section: protocol::control_core::TapSection,
+    tap_id: u32,
+) -> protocol::ObservationReadSelection {
+    protocol::ObservationReadSelection {
+        strip_id: strip.clone(),
+        section,
+        tap_id,
+        channels: protocol::ParameterChannel::Both,
+    }
+}
+
+fn insert_tap(strip: &StableId, insert: &str) -> protocol::ObservationReadSelection {
+    tap_selection(
+        strip,
+        protocol::control_core::TapSection::Inserts(StableId::parse(insert).expect("insert")),
+        1,
+    )
+}
+
+impl Rig {
+    /// One `OBSERVATION_READ` through `miso_engine_v1_submit_command`, with an output of the
+    /// session's frame limit: the result code and the response frame.
+    fn observation_read(
+        &mut self,
+        selections: Vec<protocol::ObservationReadSelection>,
+    ) -> (u32, Vec<u8>) {
+        let request = self.next_request();
+        let bytes = command_bytes_at_revision(
+            request,
+            ExpectedRevision::Any,
+            protocol::CommandPayload::ObservationRead(&protocol::ObservationReadRequest {
+                selections,
+            }),
+        );
+        let (result, _, response) = super::tests::command_c_capacity(
+            self.session,
+            &bytes,
+            OBSERVATION_FRAME_BYTES as usize,
+        );
+        (result, response)
+    }
+
+    /// One transaction, as [`Self::send`] sends it, with an output of the session's frame limit:
+    /// the reply's arm tags.
+    fn observe_tags(&mut self, edits: &[SessionEdit]) -> Vec<u64> {
+        let bytes = self.transaction(edits);
+        let (result, _, response) = super::tests::command_c_capacity(
+            self.session,
+            &bytes,
+            OBSERVATION_FRAME_BYTES as usize,
+        );
+        assert_eq!(result, crate::RESULT_OK, "{:?}", self.last_error());
+        self.drain_reliable();
+        applied_of(&response).observe_arm_tags
+    }
+
+    /// [`Self::observation_read`] with the calling thread's allocator events inside the
+    /// `miso_engine_v1_submit_command` call alone: the frame and the output are allocated first.
+    fn observation_read_counted(
+        &mut self,
+        selections: Vec<protocol::ObservationReadSelection>,
+    ) -> (u32, bench_support::alloc::Counters) {
+        let request = self.next_request();
+        let bytes = command_bytes_at_revision(
+            request,
+            ExpectedRevision::Any,
+            protocol::CommandPayload::ObservationRead(&protocol::ObservationReadRequest {
+                selections,
+            }),
+        );
+        let mut storage = vec![0_u8; OBSERVATION_FRAME_BYTES as usize];
+        let mut output = crate::BytesOut {
+            struct_size: crate::BYTES_OUT_SIZE,
+            reserved0: 0,
+            data: storage.as_mut_ptr(),
+            capacity_bytes: storage.len() as u64,
+            required_bytes: u64::MAX,
+        };
+        let mark = bench_support::alloc::current_thread_counters();
+        let result = crate::ffi::test_submit_command(self.session, &bytes, &mut output);
+        (
+            result,
+            bench_support::alloc::current_thread_delta_since(mark),
+        )
+    }
+
+    /// The rows of one successful `OBSERVATION_READ`.
+    fn observation_rows(
+        &mut self,
+        selections: Vec<protocol::ObservationReadSelection>,
+    ) -> Vec<protocol::ObservationReadRow> {
+        let (result, response) = self.observation_read(selections);
+        assert_eq!(result, crate::RESULT_OK, "{:?}", self.last_error());
+        let mut fields = [0_u16; 1024];
+        let protocol::DecodedTypedResponseFrame::Success {
+            payload: protocol::DecodedSuccessResponsePayload::ObservationRead(page),
+            ..
+        } = ProtocolCodec::default()
+            .decode_typed_response(&response, &mut DecodeScratch::new(&mut fields))
+            .expect("a response frame")
+        else {
+            panic!("an observation read page");
+        };
+        page.rows.into_owned()
+    }
+}
+
+/// #1586 gates 1 and 6 (the allocation half) on #1584 gate 1's tap, the first track's compressor
+/// insert's gain reduction. Before any `Observe` the row is unarmed. After the arm transaction and
+/// before a render it is pending and claims no arm (render has not applied it: #1585's status
+/// contract, under which an arm render has not applied reads pending, not unarmed). After one
+/// block it is pending, armed at that block's first sample with the reply's tag. Once the first
+/// four-block window closes it is ready: the window opened at the arm sample, and its span,
+/// sequence and both lanes are the reader's own window, bit for bit, in dB. A second read with no
+/// render answers the same rows. After a disarm it is unarmed at once, and after one block it is
+/// unarmed with the disarm's tag. A read of 1 and of 256 compressor taps through
+/// `miso_engine_v1_submit_command`, after the reads above, allocates nothing: the
+/// frame decode, the read, the reply's encode and its replay entry.
+///
+/// Red if a row reports an arm render has not applied, a window from before the arm, another
+/// slot's window or a swapped lane, or a tag other than the record's, or if the read allocates.
+#[test]
+fn an_observation_read_follows_the_arm_through_the_c_abi() {
+    let document = many_compressor_session();
+    let mut rig = Rig::with_limits(&document, observation_limits());
+    rig.step();
+    let model = parse_session_json(&document).expect("model");
+    let track = model.tracks[0].id.clone();
+    let comp = || insert_tap(&track, "comp");
+    let row = |rig: &mut Rig| rig.observation_rows(vec![comp()])[0];
+    let unarmed = row(&mut rig);
+    assert_eq!(
+        unarmed,
+        protocol::ObservationReadRow {
+            status: protocol::ObservationRowStatus::Unarmed,
+            armed: false,
+            arm_sample: 0,
+            arm_tag: 0,
+            window: None,
+            left: None,
+            right: None,
+            unit: protocol::ParameterUnit::Db,
+        }
+    );
+    let observe = |armed| SessionEdit::Observe {
+        strip_id: track.clone(),
+        section: protocol::control_core::TapSection::Inserts(
+            StableId::parse("comp").expect("compressor"),
+        ),
+        tap_id: 1,
+        armed,
+        window_blocks: 4,
+    };
+    let arm_tag = rig.observe_tags(&[observe(true)])[0];
+    assert_eq!(
+        row(&mut rig),
+        protocol::ObservationReadRow {
+            status: protocol::ObservationRowStatus::Pending,
+            ..unarmed
+        },
+        "render has not applied the arm"
+    );
+    let quantum = rig.quantum as u64;
+    let armed_at = rig.block * quantum;
+    rig.step();
+    let armed = protocol::ObservationReadRow {
+        status: protocol::ObservationRowStatus::Pending,
+        armed: true,
+        arm_sample: armed_at,
+        arm_tag,
+        ..unarmed
+    };
+    assert_eq!(row(&mut rig), armed, "armed, no window since the arm");
+    for _ in 0..3 {
+        rig.step();
+    }
+    let ready = row(&mut rig);
+    let snapshot = crate::ffi::test_transaction_snapshot(rig.session);
+    let (sequence, first_sample, blocks, [left, right]) = snapshot
+        .observation_windows
+        .iter()
+        .find(|(epoch, strip, effect, _)| {
+            *epoch == snapshot.provider_epoch && **strip == *track.as_str() && &**effect == "comp"
+        })
+        .expect("the compressor's readers")
+        .3[0]
+        .expect("a published window");
+    assert_eq!(first_sample, armed_at, "the first window opens at the arm");
+    assert_eq!(
+        ready,
+        protocol::ObservationReadRow {
+            status: protocol::ObservationRowStatus::Ready,
+            window: Some(protocol::ObservationRowWindow {
+                first_sample,
+                end_sample: first_sample + u64::from(blocks) * quantum,
+                sequence,
+                blocks: 4,
+            }),
+            left: Some(f32::from_bits(left)),
+            right: Some(f32::from_bits(right)),
+            ..armed
+        }
+    );
+    assert_eq!(row(&mut rig), ready, "a read consumes nothing");
+
+    // Gate 6: a 1-row and a 256-row read allocate nothing.
+    let every = model
+        .tracks
+        .iter()
+        .flat_map(|track| {
+            core::iter::once("comp".to_owned())
+                .chain((1..COMPRESSORS_PER_TRACK).map(|index| format!("comp{index}")))
+                .map(|insert| insert_tap(&track.id, &insert))
+        })
+        .take(protocol::OBSERVATION_READ_MAXIMUM_SELECTIONS)
+        .collect::<Vec<_>>();
+    assert_eq!(every.len(), protocol::OBSERVATION_READ_MAXIMUM_SELECTIONS);
+    for rows in [1, protocol::OBSERVATION_READ_MAXIMUM_SELECTIONS] {
+        let selections = every[..rows].to_vec();
+        let (result, used) = rig.observation_read_counted(selections);
+        assert_eq!(result, crate::RESULT_OK, "{:?}", rig.last_error());
+        assert_eq!(
+            used.allocations, 0,
+            "a {rows}-row read through miso_engine_v1_submit_command allocates nothing"
+        );
+    }
+
+    let disarm_tag = rig.observe_tags(&[observe(false)])[0];
+    assert!(disarm_tag > arm_tag, "the last disarm is its own record");
+    assert_eq!(
+        row(&mut rig).status,
+        protocol::ObservationRowStatus::Unarmed,
+        "a disarm is in effect when it is accepted"
+    );
+    let disarmed_at = rig.block * quantum;
+    rig.step();
+    assert_eq!(
+        row(&mut rig),
+        protocol::ObservationReadRow {
+            arm_sample: disarmed_at,
+            arm_tag: disarm_tag,
+            ..unarmed
+        },
+        "unarmed with the disarm's tag"
+    );
+}
+
+/// #1586 gate 3 at the C ABI: a batch is checked whole before a row is written. A good selection
+/// followed by an unknown tap, by the same tap again (other lanes), an unknown strip, a console
+/// slot whose effect has no observation lane, and a batch whose widest reply exceeds the frame
+/// limit each answer the typed refusal (D4: status, code and `selection[i]`; the frame:
+/// `LIMIT_EXCEEDED`, `observation.frame`) and no page; the good selection alone then reads. A raw
+/// frame of 257 selections answers a typed `INVALID_FIELD` that replays.
+///
+/// Red if a partly bad batch answers rows, a refusal names the wrong selection or code, or a frame
+/// of 257 selections reaches the session.
+#[test]
+fn an_observation_read_refuses_a_bad_batch_whole() {
+    let document = effect_session(10, 48_000);
+    let mut rig = Rig::new(&document);
+    rig.step();
+    let track = parse_session_json(&document).expect("model").tracks[0]
+        .id
+        .clone();
+    let good = insert_tap(&track, "comp");
+    let refused = |rig: &mut Rig, selections| {
+        let (result, response) = rig.observation_read(selections);
+        assert_eq!(result, crate::RESULT_OK);
+        let mut fields = [0_u16; 64];
+        let protocol::DecodedTypedResponseFrame::NonOk { header, payload } =
+            ProtocolCodec::default()
+                .decode_typed_response(&response, &mut DecodeScratch::new(&mut fields))
+                .expect("a response frame")
+        else {
+            panic!("a refused batch answers no page");
+        };
+        let diagnostic = &payload.diagnostics[0];
+        (
+            header.status,
+            diagnostic.code.clone(),
+            diagnostic.path.clone(),
+        )
+    };
+    let at = |index| {
+        vec![
+            protocol::PathSegment::Field("selection".to_owned()),
+            protocol::PathSegment::Index(index),
+        ]
+    };
+    let other_lanes = protocol::ObservationReadSelection {
+        channels: protocol::ParameterChannel::Left,
+        ..good.clone()
+    };
+    let clip = tap_selection(
+        &track,
+        protocol::control_core::TapSection::Console(StableId::parse("clip").expect("slot")),
+        1,
+    );
+    let nowhere = insert_tap(&StableId::parse("nowhere").expect("strip"), "comp");
+    for (selections, expected) in [
+        (
+            vec![good.clone(), tap_selection(&track, good.section.clone(), 9)],
+            (protocol::StatusCode::NotFound, "observation.tap.unknown", 1),
+        ),
+        (
+            vec![good.clone(), other_lanes],
+            (
+                protocol::StatusCode::InvalidField,
+                "observation.selection.duplicate",
+                1,
+            ),
+        ),
+        (
+            vec![good.clone(), nowhere],
+            (
+                protocol::StatusCode::NotFound,
+                "observation.address.unknown",
+                1,
+            ),
+        ),
+        (
+            vec![good.clone(), clip],
+            (protocol::StatusCode::Unavailable, "observation.unbound", 1),
+        ),
+    ] {
+        let (status, code, index) = expected;
+        assert_eq!(
+            refused(&mut rig, selections),
+            (status, code.to_owned(), at(index)),
+            "{code}"
+        );
+    }
+    // The widest reply of 22 rows does not fit the fixture's 4,096-byte frame.
+    let wide = (0..22)
+        .map(|tap| tap_selection(&track, good.section.clone(), tap + 1))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        refused(&mut rig, wide),
+        (
+            protocol::StatusCode::LimitExceeded,
+            "observation.frame".to_owned(),
+            Vec::new()
+        )
+    );
+    assert_eq!(
+        rig.observation_rows(vec![good.clone()])[0].status,
+        protocol::ObservationRowStatus::Unarmed
+    );
+    // A raw frame of 257 selections (the typed encoder writes at most 256) is refused by the
+    // controller's decode as a typed `INVALID_FIELD` reply, which an exact replay answers again,
+    // at a frame limit that carries the request.
+    let mut wide_rig = Rig::with_limits(&document, observation_limits());
+    wide_rig.step();
+    let request = wide_rig.next_request();
+    let mut bytes = command_bytes_at_revision(
+        request,
+        ExpectedRevision::Any,
+        protocol::CommandPayload::ObservationRead(&protocol::ObservationReadRequest {
+            selections: (1..=256)
+                .map(|tap| tap_selection(&track, good.section.clone(), tap))
+                .collect(),
+        }),
+    );
+    let header = protocol::OUTER_HEADER_BYTES;
+    let first_len = u32::from_le_bytes(bytes[header + 4..header + 8].try_into().expect("length"));
+    let first = bytes[header..header + 8 + (first_len as usize).next_multiple_of(8)].to_vec();
+    bytes.extend_from_slice(&first);
+    let payload_len = u32::try_from(bytes.len() - header).expect("a short frame");
+    bytes[20..24].copy_from_slice(&payload_len.to_le_bytes());
+    bytes[40..44].copy_from_slice(&257_u32.to_le_bytes());
+    let replies = [0, 1].map(|_| {
+        let (result, _, response) = super::tests::command_c_capacity(
+            wide_rig.session,
+            &bytes,
+            OBSERVATION_FRAME_BYTES as usize,
+        );
+        assert_eq!(result, crate::RESULT_OK, "{:?}", wide_rig.last_error());
+        response
+    });
+    assert_eq!(replies[0], replies[1], "the refusal replays");
+    let mut fields = [0_u16; 64];
+    let protocol::DecodedTypedResponseFrame::NonOk { header, .. } = ProtocolCodec::default()
+        .decode_typed_response(&replies[0], &mut DecodeScratch::new(&mut fields))
+        .expect("a response frame")
+    else {
+        panic!("257 selections answer no page");
+    };
+    assert_eq!(header.status, protocol::StatusCode::InvalidField);
 }

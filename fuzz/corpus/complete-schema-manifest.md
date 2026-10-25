@@ -1,13 +1,13 @@
 # Issue-005 complete typed BTLV corpus
 
-The shared `complete_schema_corpus()` fixture has 54 canonical frames: all 15 commands (the
-session transaction contains all 36 allocated `SessionEditOpcode` values), all 17 successful
+The shared `complete_schema_corpus()` fixture has 56 canonical frames: all 16 commands (the
+session transaction contains all 36 allocated `SessionEditOpcode` values), all 18 successful
 responses, all 16 registered non-OK statuses (including typed `BACKPRESSURE`), and all six event
 schemas. Optional/boundary values are represented by the transaction's nested fixture, the optional
 transport-event origin, empty valid pages, and the typed backpressure variant.
 
 The canonical sequence is FNV-1a-64 over each stable frame label followed by its frame bytes:
-`5b6cbc157a1f6154`, pinned once as `COMPLETE_SCHEMA_HASH`. Native mutation, each typed fuzz
+`f4c2fe333739f44d`, pinned once as `COMPLETE_SCHEMA_HASH`. Native mutation, each typed fuzz
 decoder, and scalar/simd128 Wasm execution all consume this same public fixture source.
 
 Issue #787 re-pinned this value after the transaction's two same-length source-identity spellings
@@ -131,3 +131,8 @@ Issue #1585 re-pinned it from `06bb3b6f65f39eec`: `TransactionApplied` gains the
 lists `observe_arm_tags` (field 3) and `removed_arm_tags` (field 4), packed `u64`, and
 `response.session_transaction` carries both. Only that frame moves; the 53 others are byte-equal.
 The frame count stays 54.
+
+Issue #1586 re-pinned it from `5b6cbc157a1f6154`: `OBSERVATION_READ` (`000f`) adds
+`command.observation_read` (a console slot's tap with the left lane and an insert's with the
+right) and `response.observation_read` (a ready row with both lanes, a pending armed row and an
+unarmed row). The 54 earlier frames are byte-equal. The frame count is 56.

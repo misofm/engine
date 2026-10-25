@@ -698,6 +698,7 @@ fn render_per_node<L: lane::Lane>(
                     shape: EffectLaneShape::from_live_parameters([], 0),
                     bypass: false,
                     observation_depth: 0,
+                    link: None,
                 },
                 &superseded,
             )
@@ -1012,6 +1013,7 @@ fn live_lane(
             shape: EffectLaneShape::from_live_parameters([], 0),
             bypass,
             observation_depth: 0,
+            link: None,
         },
         superseded,
     )

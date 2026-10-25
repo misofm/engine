@@ -65,25 +65,22 @@ const COMPRESSOR: &str = "miso.compressor";
 const LIMITER: &str = "miso.true-peak-limiter";
 /// Collapse-capable since #973. Its pairing evidence is Part 2's twin test (every live `PerLane`
 /// parameter, #1336's attack, hold and release included) and its own crate's collapsed-against-dual
-/// transition test (`gate-expander`'s `tests/mono_collapse.rs`); it is not yet an [`Fx`] of the
-/// chained differential.
+/// transition test (`gate-expander`'s `tests/mono_collapse.rs`).
 const GATE: &str = "miso.gate-expander";
 /// Collapse-capable since #1871, on the same evidence as [`GATE`]: Part 2's twin test and its own
-/// crate's `tests/mono_collapse.rs`; not yet an [`Fx`] of the chained differential.
+/// crate's `tests/mono_collapse.rs`.
 const MULTIBAND: &str = "miso.multiband-compressor";
 /// Collapse-capable since #1872, with the same evidence as [`GATE`]: Part 2's twin test and its
-/// crate's `tests/mono_collapse.rs`; not yet an [`Fx`] of the chained differential.
+/// crate's `tests/mono_collapse.rs`.
 const SOFT_CLIP: &str = "miso.soft-clip";
 /// Collapse-capable since #1873, with the same evidence as [`GATE`]: Part 2's twin test and its
-/// crate's `tests/mono_collapse.rs`; not yet an [`Fx`] of the chained differential.
+/// crate's `tests/mono_collapse.rs`.
 const SHAPER: &str = "miso.transient-shaper";
 /// Collapse-capable since #15 S1, with the same evidence as [`GATE`]: Part 2's twin test and its
-/// crate's collapsed-against-scalar bank test (`de-esser`'s `tests/bank.rs`); not yet an [`Fx`] of
-/// the chained differential.
+/// crate's collapsed-against-scalar bank test (`de-esser`'s `tests/bank.rs`).
 const DE_ESSER: &str = "miso.de-esser";
 /// Collapse-capable since #17 S1, with the same evidence as [`GATE`]: Part 2's twin test and its
-/// crate's collapsed-against-scalar bank test (`dynamic-eq`'s `tests/bank.rs`); not yet an [`Fx`]
-/// of the chained differential.
+/// crate's collapsed-against-scalar bank test (`dynamic-eq`'s `tests/bank.rs`).
 const DYNAMIC_EQ: &str = "miso.dynamic-eq";
 
 /// `band-1-gain`, `band-1-frequency` of the EQ; `threshold`, `ratio`, `attack` of the compressor;
@@ -550,6 +547,7 @@ impl Rig {
                             shape: shape(),
                             bypass: false,
                             observation_depth: 0,
+                            link: None,
                         },
                         &superseded,
                     )
@@ -1897,6 +1895,7 @@ fn every_launch_effect_applies_a_twin_pair_with_channel_symmetric_validity() {
                     shape: EffectLaneShape::from_descriptor(descriptor, 0),
                     bypass: false,
                     observation_depth: 0,
+                    link: None,
                 },
                 &LiveValuesSuperseded::new(),
             )
