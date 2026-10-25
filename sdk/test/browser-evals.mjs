@@ -13,7 +13,11 @@ import { before, describe, test } from "node:test";
 
 import { MisoEngineAsset } from "../src/core/asset.ts";
 import { StructView } from "../src/core/abi.ts";
+import { WasmBoundary } from "../src/core/boundary.ts";
+import { ControlTransactionQueue } from "../src/core/control-queue.ts";
 import { MisoEngineError, MisoUsageError } from "../src/core/errors.ts";
+import { effect, session } from "../src/core/session.ts";
+import { transaction } from "../src/core/session-transaction.ts";
 import { ABI_LAYOUT } from "../src/generated/abi.ts";
 import {
   POLICY_WORDS,
@@ -27,6 +31,7 @@ import {
   scratchBootOptions,
   workletBootOptions,
 } from "../src/browser/index.ts";
+import { onEndpointIds } from "./control-support.mjs";
 import { moduleBytes, sessionDocument } from "./support.mjs";
 
 /** A policy with every shared word set to something distinctive, so a dropped word shows. */
@@ -440,6 +445,9 @@ describe("the browser open sequence", () => {
       }),
     });
 
+    // #1296: a host stand-in that posts no watermark cannot report completion, so applied()
+    // refuses typed instead of waiting forever.
+    await assert.rejects(engine.applied(0n), (error) => error instanceof MisoEngineError && error.code === "unsupported");
     await Promise.all([engine.close(), engine.close()]);
     assert.deepEqual(events, ["host", "context"]);
     await engine.close();
@@ -740,5 +748,218 @@ describe("the browser open sequence", () => {
       },
     );
     assert.equal(constructed, 0, "the refusal costs no AudioContext at all");
+  });
+});
+
+/**
+ * #1296: the browser engine's session edits over #1389's shared core. The host stand-in's control
+ * plane is a real core (a `WasmBoundary` on the shipped module): `control(frame, document)` runs the
+ * frame through the entry the worklet's message handler calls and answers `{ result, response,
+ * revision }` as the host does, and `tick()` renders one block and posts the watermark when its
+ * `(revision, sample)` pair moved, as the worklet does. Real bits in a browser are #1295's.
+ */
+describe("browser session edits", () => {
+  const QUANTUM = 128;
+  const SOURCE = { channels: 2, bitDepth: 24, frames: 48_000, content: `blake3:${"a".repeat(64)}` };
+  const EQ = () => effect("miso.parametric-eq", { "band-1-gain": { left: 6, right: -4 } });
+  /** `tracks` tracks on one source, each with an EQ insert and a route to the output. */
+  const declare = (tracks, sampleRateHz = 48_000) => {
+    let builder = session({ id: "browser.apply", sampleRateHz, quantumFrames: QUANTUM }).source("a", SOURCE);
+    for (const id of tracks) builder = builder.track(id, { source: "a", inserts: [EQ()] });
+    builder = builder.output("out");
+    for (const id of tracks) {
+      builder = builder.route({
+        id: `${id}.main`,
+        source: { kind: "track", trackId: id, tap: "post_pan" },
+        destination: { kind: "output_input", outputId: "out" },
+      });
+    }
+    return builder;
+  };
+  const base = () => declare(["t1", "t2", "t3", "t4"]);
+  const withFifth = () => declare(["t1", "t2", "t3", "t4", "t5"]);
+  let asset;
+  let bytes;
+
+  before(async () => {
+    bytes = await moduleBytes();
+    asset = await MisoEngineAsset.load(bytes);
+  });
+
+  async function boot(document) {
+    const core = await WasmBoundary.boot(asset, new TextEncoder().encode(document.toJson()));
+    const posts = new Set();
+    const sent = [];
+    let next = 0;
+    let posted = core.readWatermark();
+    // The core's own strip-order reads (its session map) draw from its allocator: the page's
+    // frames go onto it, held strictly ascending.
+    let pageReplacement;
+    const forwardFrame = onEndpointIds(core.controlRequestIds, (frame) => core.controlFrame(frame, pageReplacement));
+    const forward = (frame, replacement) => {
+      pageReplacement = replacement;
+      try { return forwardFrame(frame); } finally { pageReplacement = undefined; }
+    };
+    const host = {
+      async sessionMap() {
+        const map = core.sessionMap();
+        return { tag: "miso.sessionmap.v1", requestId: (next += 1), result: 0, sources: map.sources, metersAttached: map.metersAttached };
+      },
+      async control(frame, replacement) {
+        sent.push({ frame: frame.slice(), document: replacement?.slice() });
+        let result = 0;
+        let response;
+        try {
+          response = forward(frame, replacement);
+        } catch (error) {
+          if (typeof error?.result !== "number") throw error;
+          result = error.result;
+          response = new TextEncoder().encode(error.diagnostics.map((row) => `${row.code}\t${row.path}\n`).join(""));
+        }
+        return { tag: "miso.control.v1", requestId: (next += 1), result, response, revision: core.controlRevision() };
+      },
+      onControlEvent: (listener) => core.onControlEvent(listener),
+      onWatermark(listener) {
+        posts.add(listener);
+        return () => posts.delete(listener);
+      },
+      async dispose() { core.dispose(); },
+    };
+    const post = (record) => { for (const listener of [...posts]) listener(record); };
+    const tick = () => {
+      core.render(QUANTUM);
+      const now = core.readWatermark();
+      if (now.revision === posted.revision && now.sample === posted.sample) return;
+      posted = now;
+      const outcome = (now.outcome.exact ? 1n : 0n) | (now.outcome.transitionFallback ? 2n : 0n) | (now.outcome.superseded ? 4n : 0n);
+      post({ revision: now.revision, sample: now.sample, outcome, exactCount: 0n, transitionFallbackCount: 0n, supersededCount: 0n });
+    };
+    const engine = await createEngine({
+      document,
+      simd128ModuleUrl: "/wasm",
+      workletModuleUrl: "/worklet",
+      scratchBoot: ({ document: staged, options }) => scratchBootInWorker({ moduleBytes: bytes, document: staged, options }),
+      createContext: (request) => ({
+        sampleRate: request.sampleRate,
+        renderQuantumSize: QUANTUM,
+        state: "running",
+        close: async () => {},
+        audioWorklet: { addModule: async () => {} },
+      }),
+      createHost: async () => host,
+    });
+    return { engine, host, sent, tick, post };
+  }
+
+  /** Whether `promise` has settled, after every queued reaction ran. */
+  async function settled(promise) {
+    let done = false;
+    promise.then(() => { done = true; }, () => { done = true; });
+    await new Promise((resolve) => setImmediate(resolve));
+    return done;
+  }
+
+  test("gate 1: a replace sends its document beside one frame, commits a rebuild and rebinds live controls", async () => {
+    // Red if the browser transport drops the document (the core refuses the replace), if
+    // `revision` does not follow the reply, if `liveControls()` stays bound to the booted document
+    // after a committed replace, or if a refused replace rebinds it.
+    const { engine, sent } = await boot(base());
+    try {
+      await engine.liveControls();
+      sent.length = 0;
+      const outcome = await engine.replaceSession(withFifth());
+      assert.deepEqual(outcome, { revision: 1n, path: "rebuild" });
+      assert.equal(engine.revision, 1n);
+      const replaces = sent.filter((row) => row.document !== undefined);
+      assert.equal(replaces.length, 1, "one frame carries the document");
+      assert.equal(new TextDecoder().decode(replaces[0].document), withFifth().toJson());
+      const rebound = await engine.liveControls();
+      assert.doesNotThrow(() => rebound.withSession(withFifth()));
+      // A refused replace (a new rate needs a new engine) commits nothing and rebinds nothing.
+      const refused = declare(["t1", "t2", "t3", "t4", "t5"], 96_000);
+      await assert.rejects(engine.replaceSession(refused));
+      assert.equal(engine.revision, 1n);
+      const controls = await engine.liveControls();
+      assert.throws(() => controls.withSession(refused), MisoUsageError);
+      assert.doesNotThrow(() => controls.withSession(withFifth()));
+    } finally {
+      await engine.close();
+    }
+  });
+
+  test("gate 2: a live apply settles at the watermark post that covers it, and close rejects it", async () => {
+    // Red if `revision` misses a live edit's commit, if applied() resolves at the commit or on a
+    // post for an older revision, if the engine does not settle it from the host's watermark posts,
+    // if close() leaves it pending, or if the engine does not tell its live controls' queue the
+    // revision an apply committed beside it (the queue's next submit is then refused
+    // `revision_conflict`).
+    const { engine, tick, post } = await boot(base());
+    try {
+      const earlier = await engine.liveControls();
+      await earlier.submit(earlier.edit.track("t2").faderDb(-1));
+      assert.equal(engine.revision, 1n, "a live edit's revision is seen");
+      tick();
+      const fader = transaction(base()).upsertTrack("t1", { source: "a", inserts: [EQ()], fader: { leftDb: -12, rightDb: -12 } });
+      const outcome = await engine.apply(fader.build());
+      assert.deepEqual(outcome, { revision: 2n, path: "live" });
+      const applied = engine.applied(outcome.revision);
+      assert.equal(await settled(applied), false, "pending at the commit");
+      post({ revision: 0n, sample: 64n, outcome: 1n, exactCount: 0n, transitionFallbackCount: 0n, supersededCount: 0n });
+      assert.equal(await settled(applied), false, "an older revision's post does not settle it");
+      tick();
+      const snapshot = await applied;
+      assert.deepEqual(snapshot, { revision: 2n, sample: BigInt(QUANTUM), outcome: { exact: true, transitionFallback: false, superseded: false } });
+      assert.deepEqual(engine.watermark(), snapshot);
+      assert.deepEqual(await earlier.submit(earlier.edit.track("t2").faderDb(-3)),
+        { ok: true, revision: 3n, path: "live", appliedOperations: 1 });
+      const pending = engine.applied(3n);
+      await engine.close();
+      await assert.rejects(pending, MisoUsageError);
+    } finally {
+      await engine.close();
+    }
+  });
+
+  test("another sender's commit is seen through a decoded event and the watermark", async () => {
+    // Red if `revision` ignores the `sessionCommitted` events the engine decodes for `onEvent`, or
+    // the watermark's revision: a commit another sender made on the same host is then never seen.
+    // Red too if applied() refuses such a commit as uncommitted without asking the core.
+    const { engine, host, tick } = await boot(base());
+    try {
+      // The other sender shares the host's one request-ID allocator, as every sender must.
+      const { requestIds } = (await engine.liveControls()).queue;
+      const other = new ControlTransactionQueue(async (frame) => (await host.control(frame)).response, { initialRevision: 0n, requestIds });
+      const row = (await engine.controls()).controls.find((entry) => entry.address.owner.kind === "strip"
+        && entry.address.owner.id === "t1" && entry.name === "fader_db" && entry.address.lane === "left");
+      const fader = (value) => [{ address: row.address, value }];
+      const stop = engine.onEvent(() => {});
+      await other.submit(fader(-1));
+      assert.equal(engine.revision, 1n, "seen through the event");
+      stop();
+      await other.submit(fader(-2));
+      assert.equal(engine.revision, 1n, "no listener: no event read");
+      tick();
+      assert.equal(engine.revision, 2n, "seen through the watermark");
+      // Committed unseen (no listener, no render): applied() asks the core, and waits.
+      await other.submit(fader(-3));
+      const unseen = engine.applied(3n);
+      assert.equal(await settled(unseen), false, "pending, not refused as uncommitted");
+      tick();
+      assert.equal((await unseen).revision, 3n);
+    } finally {
+      await engine.close();
+    }
+  });
+
+  test("gate 3: a refused apply leaves the revision", async () => {
+    // Red if a refusal advances `revision`.
+    const { engine } = await boot(base());
+    try {
+      await assert.rejects(engine.apply(transaction(base()).setSampleRateHz(96_000).build()), (error) =>
+        error instanceof MisoEngineError && error.code === "reprepareRequired");
+      assert.equal(engine.revision, 0n);
+    } finally {
+      await engine.close();
+    }
   });
 });

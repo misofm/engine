@@ -4945,6 +4945,11 @@ impl ControlAdapter for WebAdapter {
     /// names, and [`AudioWorkletEngineHost::control_command_with_document`] passes it beside the
     /// frame.
     const DOCUMENT_TRANSPORT: bool = true;
+    // #1588 R1: the browser's meter batches come from its render half's fold. Its
+    // `METER_DELIVERY` stays off (meter tables refused `meter.unavailable`) until #1588b lands
+    // the render half's ring push in the same commit that turns it on: a table accepted with no
+    // push would be an acknowledged no-op (decision 15 E4).
+    const RENDER_METER_FOLD: bool = true;
 }
 
 /// The control-protocol session the browser host owns (#1381a): the committed model at its boot

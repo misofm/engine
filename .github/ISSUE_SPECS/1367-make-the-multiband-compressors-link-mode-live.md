@@ -151,3 +151,61 @@ banks* (#1368) and *Ramp a lane's detector link between modes* (#1370) with it.
 - **Web roster.** The rows stay pinned to `process_bank` / `process_bank_mono` and pass at their
   0.10 ceilings: dual 3464 / 0 (was 2527 / 0), collapsed 1862 / 0 (was 1389 / 0), the mixed arm's
   body. No row or ceiling changed; the derivation comment's counts are updated (root authorized).
+
+## 1367b record (D3-D5, attempt 1, 2026-10-25)
+
+- **Shape (#1370a/b, #1969).** `Instance::retarget_link` on the scalar instance (track 0) and the
+  bank (a padded lane, a lane past the width, an unsupported mode or `2^24 + 1` samples refuse and
+  change nothing). The lane's mode (`Instance::links`, new) and its masks take the target at once;
+  every padded lane re-takes the first active lane's mode at rest; both channels' `w_link`/`w_avg`
+  (`Side::links`, `LinearRamp`s per track) retarget from the words in force through
+  `LinearRamp::set_target` (`0` steps). An accepted glide withdraws the bank's silent fixed point.
+- **D3 as built.** `plan_segment` snaps and scans the weights with the seventeen ramps, so an
+  arrival is a segment boundary, never inside a segment. A block that starts with a glide in
+  flight renders every segment through one `GLIDE` body on the `LINK_MIXED` arm (or the bypass
+  arm, which advances the weights and computes no detector); the weights are gathered per segment
+  (`GlideWeights`, with a constant per-segment `gliding` mask), advanced once a frame by
+  `ramp_toward` and written back. `shim::glide_levels` gives a gliding lane
+  `combined = max + w_avg (avg - max)`, `d = own + w_link (combined - own)`, separate `mul`/`add`,
+  and every other lane (the arriving one included) the mixed arm's word through a `select`.
+  Segments after an arrival in that block run the glide body too (resting weights: the identity),
+  so the glide adds two segment bodies per block shape; a first version that kept the flat bodies
+  overflowed the 2 MiB debug test stack. A block with no glide in flight runs main's code.
+- **Rest and reset.** `rest_lanes` and `no_ramp_in_flight` count the weights, so a glide is never
+  at rest or skipped. Full reset seats the weights at the lane's mode; a discontinuity reset snaps
+  a glide; the D7 recovery leaves it alone. The disengage copy, the bit-equality check and the
+  designed-symmetry witness include the weights. No lane swap exists (1367a).
+- **D4 as built.** Each channel section gains two weight quadruples at `LINK_WORD = 76`: 84 words,
+  336 bytes per channel (was 304; `product.rs` re-pinned). Restore refuses (`effect.state.link`)
+  a weight off `[0, 1]`, `-0.0`, a moving weight with a zero step, a settled weight off its
+  target, targets that are no mode's, or channels at two modes; a payload of the lane's own mode
+  adopts the glide, another mode leaves the lane's mode at rest. `STATE_LAYOUT_VERSION` stays 1.
+- **D5.** `LIVE_LINK_EFFECTS` gains `miso.multiband-compressor`: both link rows `Live`,
+  `Ramp(LinkGlide)`, not automatable, lanes hold the link cell. The `RuledLiveNotBuilt{1367}`
+  branch and the unused `ruled_live_not_built` helper are deleted; SDK `controls.ts`, the
+  parameter metadata asset and the host-web control-list fixture are regenerated.
+- **Class A.** Every existing multiband test, the committed corpus digests, graph-compiler
+  `bank_levels`, effect-compiler, capi, host-core and the conformance schema hash pass unchanged.
+- **Web roster.** Multiband dual 3993 / 0 (was 3464 / 0), collapsed 2131 / 0 (was 1862 / 0),
+  inside the 0.10 ceilings; no row or ceiling changed.
+- **Not done.** The blinded listening A/B; no multiband C ABI row (the effect-agnostic paths are
+  #1371's capi gates).
+
+## Test value (1367b, each red first on a mutant)
+
+- `glide_tests::a_glide_tracks_the_f64_blend_into_the_target_law`: weights that never advance,
+  advance once a segment or are swapped (worst deviation `3.6e-5`, bound `1.5e-4`).
+- `glide_tests::a_glide_lands_on_its_target_law_and_a_resting_lane_never_leaves_its_own`: a blend
+  without the `select` (NaN from a hostile partner word).
+- `glide_tests::a_glide_moves_no_bank_mates_bit_and_allocates_nothing`: a retarget reaching other
+  lanes, weights stepped once a segment, a heap call in the retarget.
+- `glide_tests::a_lane_snapshotted_mid_glide_continues_bit_for_bit_and_forged_weights_are_refused`:
+  a restore that drops or misadopts the weights, admits a settled weight off target, a zero step,
+  or channels at two modes.
+- `glide_tests::an_out_of_range_glide_is_refused_and_changes_nothing`: a dropped `2^24` bound, a
+  padded lane or scalar track 1 accepted.
+- `glide_tests::a_silent_bank_never_skips_a_glide`: a rest mask that ignores the weights.
+- `glide_tests::a_collapsed_glide_matches_the_dual_glide_and_survives_the_disengage`: a disengage
+  copy without the weights, a collapsed block that does not advance them.
+- host-core `a_link_change_is_one_glide_record_with_the_edits_ramp`: red with the multiband off
+  `LIVE_LINK_EFFECTS`; controls `effect_rows_carry_the_ruled_class`: red when it refuses a glide.

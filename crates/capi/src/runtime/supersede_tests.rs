@@ -53,14 +53,6 @@ fn put(model: &SessionModel, track: usize, effect: Effect) -> SessionEdit {
     }
 }
 
-fn remove(model: &SessionModel, track: usize) -> SessionEdit {
-    SessionEdit::RemoveTrackEffect {
-        track_id: model.tracks[track].id.clone(),
-        rack_name: RackName::Inserts,
-        effect_id: id("comp"),
-    }
-}
-
 /// `UpsertSource` of `s-source`, `UpsertTrack` of track `ts` on it (a copy of the first track
 /// with no insert) and `UpsertRoute` of its route.
 fn add_source_track(model: &SessionModel) -> [SessionEdit; 3] {
@@ -78,6 +70,25 @@ fn add_source_track(model: &SessionModel) -> [SessionEdit; 3] {
     *track_id = track.id.clone();
     [
         SessionEdit::UpsertSource { source },
+        SessionEdit::UpsertTrack { track },
+        SessionEdit::UpsertRoute { route },
+    ]
+}
+
+/// `UpsertTrack` of track `name` on the fixture source (a copy of the first track with no insert)
+/// and `UpsertRoute` of its route: a structural edit that restarts no strip, so render adopts its
+/// plan at the next block, never at a duck-swap's later `S` (#1324a).
+fn add_track(model: &SessionModel, name: &str) -> Vec<SessionEdit> {
+    let mut track = model.tracks[0].clone();
+    track.id = id(name);
+    track.inserts.effects.clear();
+    let mut route = model.routes[0].clone();
+    route.id = id(&format!("{name}-main"));
+    let RouteSource::Track { track_id, .. } = &mut route.source else {
+        panic!("track route")
+    };
+    *track_id = track.id.clone();
+    vec![
         SessionEdit::UpsertTrack { track },
         SessionEdit::UpsertRoute { route },
     ]
@@ -206,11 +217,12 @@ fn a_refused_replacement_restores_the_withdrawn_candidate() {
     };
     let twin = render_direct(&mut pending(limits()), 1);
     assert!(twin.iter().any(|sample| *sample != 0.0), "the twin plays");
-    // T2 superseding T1 with nothing refused, the reference of the retries below.
+    // T2 superseding T1 with nothing refused, the reference of the retries below, through its
+    // adoption: T2 restarts tracks 1 and 2, a duck-swap adopted at its `S` (#1324a).
     let superseding = {
         let mut children = pending(limits());
         commit(&mut children, 2, 43, &second);
-        render_direct(&mut children, 1)
+        feed_and_render_until_direct(&mut children, &[FIXTURE, ADDED], 1, 44).0
     };
 
     let mut tight = limits();
@@ -288,13 +300,15 @@ fn a_refused_replacement_restores_the_withdrawn_candidate() {
             1,
             "{phase:?}"
         );
-        let block = render_direct(&mut children, 1);
+        let (blocks, _) = feed_and_render_until_direct(&mut children, &[FIXTURE, ADDED], 1, 44);
         assert_eq!(
-            bits(&block),
-            bits(&superseding),
+            blocks.iter().map(|block| bits(block)).collect::<Vec<_>>(),
+            superseding
+                .iter()
+                .map(|block| bits(block))
+                .collect::<Vec<_>>(),
             "{phase:?}: the retry renders as a supersession nothing refused"
         );
-        children.session.service().expect("service");
         assert_eq!(revision(&children), 44, "{phase:?}");
         assert!(children.session.test_pending_providers().is_empty());
         drop(children);
@@ -331,7 +345,8 @@ fn a_refused_replacement_restores_the_withdrawn_candidate() {
         if retry {
             commit(&mut children, 4, 44, &third);
         }
-        render_direct(&mut children, 1);
+        // A duck-swap: adopted at its `S` (#1324a).
+        feed_and_render_until_direct(&mut children, &[FIXTURE, ADDED], 1, 44 + u64::from(retry));
         let adopted = children.plan.queries().watermark().expect("watermark");
         let folded = if retry { 2 } else { 1 };
         assert_eq!(adopted.revision, 44 + u64::from(retry), "retry {retry}");
@@ -790,10 +805,11 @@ fn render_unpublished(children: &mut CompiledChildren, block: u64) -> Vec<f32> {
 #[test]
 fn edits_after_render_took_two_candidates_unretired_each_commit() {
     let model = stateless_session(48_000);
+    // Edits that restart no strip, so each candidate is taken by the next block (#1324a).
     let edits = [
         add_source_track(&model).to_vec(),
-        vec![put(&model, 1, compressor())],
-        vec![put(&model, 2, compressor())],
+        add_track(&model, "tb"),
+        add_track(&model, "tc"),
     ];
     let run = |race: bool| {
         control_plane::test_reset_lifecycle_observer();
@@ -864,10 +880,11 @@ fn edits_after_render_took_two_candidates_unretired_each_commit() {
 #[test]
 fn two_taken_candidates_and_a_published_adoption_never_wedge_the_session() {
     let model = stateless_session(48_000);
+    // Edits that restart no strip, so each candidate is taken by the next block (#1324a).
     let edits = [
         add_source_track(&model).to_vec(),
-        vec![put(&model, 1, compressor())],
-        vec![put(&model, 2, compressor())],
+        add_track(&model, "tb"),
+        add_track(&model, "tc"),
     ];
     control_plane::test_reset_lifecycle_observer();
     let mut children = compile(&model, limits());
@@ -922,9 +939,9 @@ fn two_taken_candidates_and_a_published_adoption_never_wedge_the_session() {
     assert_eq!(children.session.test_providers().test_epoch(), 3);
     assert!(children.session.test_pending_providers().is_empty());
     assert!(children.session.test_retired_providers().is_empty());
-    commit(&mut children, 4, 45, &[remove(&model, 1)]);
-    render_direct(&mut children, 8);
-    children.session.service().expect("service");
+    // The session takes edits again: a duck-swap, adopted at its `S` (#1324a).
+    commit(&mut children, 4, 45, &[put(&model, 1, compressor())]);
+    feed_and_render_until_direct(&mut children, &[], 8, 46);
     drop(children);
     assert_balanced("wedge", control_plane::test_lifecycle_counters());
 }
@@ -986,8 +1003,8 @@ fn a_displaced_plan_not_yet_reclaimed_is_charged_after_a_taken_promotion() {
     assert!(children.session.test_retired_providers().is_empty());
     commit(&mut children, 3, 43, &second);
     submit_direct(&mut children, &[FIXTURE, ADDED], 2);
-    render_direct(&mut children, 2);
-    children.session.service().expect("service");
+    // B restarts track 1: a duck-swap, adopted at its `S` (#1324a).
+    feed_and_render_until_direct(&mut children, &[FIXTURE, ADDED], 2, 44);
     drop(children);
     assert_balanced("parked charge", control_plane::test_lifecycle_counters());
 
@@ -1010,8 +1027,7 @@ fn a_displaced_plan_not_yet_reclaimed_is_charged_after_a_taken_promotion() {
         children.session.service().expect("service");
         let a = row(&children);
         commit(&mut children, 2, 43, &second);
-        render_direct(&mut children, 2);
-        children.session.service().expect("service");
+        feed_and_render_until_direct(&mut children, &[], 2, 44);
         [p0, a, row(&children)]
     };
     assert!(

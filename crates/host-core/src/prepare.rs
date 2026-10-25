@@ -1228,6 +1228,16 @@ impl PlanStateInventory {
         self.meters.len()
     }
 
+    /// Each meter reader's index, strip ID, tap and metrics, in reader order (#1588 D3): meter
+    /// `i`'s window is strip `i` of a [`crate::MeterFrame`] the plan's delivery publishes, so a
+    /// reader of the frame resolves a strip to its meter here, whatever selection the plan was
+    /// prepared with.
+    pub fn meter_targets(&self) -> impl Iterator<Item = (usize, &str, MeterTap, MeterMetricSet)> {
+        self.meters
+            .iter()
+            .map(|row| (row.entry, &*row.id, row.tap, row.metrics))
+    }
+
     /// Observation rows, one per effect observation reader set (#1327).
     #[must_use]
     pub fn observation_count(&self) -> usize {
@@ -1363,8 +1373,9 @@ impl PlanStateInventory {
         }
     }
 
-    /// An inventory that holds only this inventory's input floors (#1285, deliverable 2): a
-    /// successor prepared against it carries no state, so a test renders it from frame 0 as the
+    /// An inventory that holds this inventory's input floors (#1285, deliverable 2) and its join
+    /// rows, but no source, line or route row: a successor prepared against it and rendered
+    /// without adopting a predecessor carries no state, so a test renders it from frame 0 as the
     /// fresh reference of a plan compiled with the same floors.
     #[cfg(feature = "test-support")]
     #[must_use]
@@ -1372,9 +1383,12 @@ impl PlanStateInventory {
         Self {
             plan_identity: self.plan_identity,
             sources: Box::default(),
-            input_sections: Box::default(),
-            strip_stages: Box::default(),
-            effect_lanes: Box::default(),
+            // The strip, input-section, effect and strip-delay rows stay, so a successor's joins
+            // restart no strip it keeps and arm none (#1324 D3): rendered without adopting a
+            // predecessor, it runs no move and plays as a fresh plan.
+            input_sections: self.input_sections.clone(),
+            strip_stages: self.strip_stages.clone(),
+            effect_lanes: self.effect_lanes.clone(),
             meters: Box::default(),
             observations: Box::default(),
             sample_rate_hz: self.sample_rate_hz,
@@ -1384,7 +1398,7 @@ impl PlanStateInventory {
             spectrum_pairing: Box::default(),
             meter_pairing: Box::default(),
             delay_lines: Box::default(),
-            strip_delays: Box::default(),
+            strip_delays: self.strip_delays.clone(),
             live_routes: Box::default(),
             follow_into_six_word: false,
             follow_into_following: false,
@@ -1787,27 +1801,9 @@ impl<'a> WarmRestart<'a> {
         }
     }
 
-    /// The strip `node` belongs to, and whether it sits before the strip's fader or is its fader
-    /// (a strip's `PostMatrix` stage and its routes from a `post_fader` or `post_pan` tap do not).
-    /// A route node belongs to its source strip; the output belongs to no strip.
+    /// The strip `node` belongs to ([`strip_owner`]).
     fn owner<'n>(&'n self, node: &'n GraphNodeId) -> Option<(&'n str, bool)> {
-        match node {
-            GraphNodeId::TrackStage { track_id, stage } => {
-                Some((track_id.as_str(), *stage != TrackStage::PostMatrix))
-            }
-            GraphNodeId::Effect(effect) => Some((effect.track_id.as_str(), true)),
-            GraphNodeId::Route { route_id } => {
-                let route = self.routes.get(route_id.as_str())?;
-                let (strip, tap) = match &route.source {
-                    session::RouteSource::Track { track_id, tap } => (track_id, *tap),
-                    session::RouteSource::Submix { submix_id, tap } => (submix_id, *tap),
-                };
-                Some((strip.as_str(), tap_before_fader(tap)))
-            }
-            GraphNodeId::Submix { .. }
-            | GraphNodeId::Output { .. }
-            | GraphNodeId::CompensationDelay { .. } => None,
-        }
+        strip_owner(&self.routes, node)
     }
 
     /// Whether `node` is in `R`: a node of a strip restarted whole, or a node before the fader
@@ -1817,24 +1813,89 @@ impl<'a> WarmRestart<'a> {
             self.whole.contains(strip) || (before_fader && self.join.contains(strip))
         })
     }
+}
 
-    /// Whether the whole-strip restart filter drops this compensation line's carry (#1354a
-    /// decision 2): a line on a whole-restarted strip's chain before its matrix, into one of its
-    /// effects' sidechains, or on its routes from a tap before the fader. Matrix and post-fader
-    /// lines still carry.
+/// The strip `node` belongs to, and whether it sits before the strip's fader or is its fader
+/// (a strip's `PostMatrix` stage and its routes from a `post_fader` or `post_pan` tap do not).
+/// A route node belongs to its source strip, looked up in `routes` (the successor's routes by
+/// ID); the output belongs to no strip.
+fn strip_owner<'n>(
+    routes: &'n BTreeMap<&str, &session::Route>,
+    node: &'n GraphNodeId,
+) -> Option<(&'n str, bool)> {
+    match node {
+        GraphNodeId::TrackStage { track_id, stage } => {
+            Some((track_id.as_str(), *stage != TrackStage::PostMatrix))
+        }
+        GraphNodeId::Effect(effect) => Some((effect.track_id.as_str(), true)),
+        GraphNodeId::Route { route_id } => {
+            let route = routes.get(route_id.as_str())?;
+            let (strip, tap) = match &route.source {
+                session::RouteSource::Track { track_id, tap } => (track_id, *tap),
+                session::RouteSource::Submix { submix_id, tap } => (submix_id, *tap),
+            };
+            Some((strip.as_str(), tap_before_fader(tap)))
+        }
+        GraphNodeId::Submix { .. }
+        | GraphNodeId::Output { .. }
+        | GraphNodeId::CompensationDelay { .. } => None,
+    }
+}
+
+/// The whole-strip restart filter (#1354a decision 2, widened to every restarted strip by #1324
+/// D2): the strips whose owners before the fader and whose fader a successor starts at rest. A
+/// strip in [`PreparedHost::restarted_strips`] is duck-swapped, so no carry may leave a hole in
+/// front of a restarted owner: its input section, its effects, its fader, the compensation lines
+/// on its chain before its matrix and into its effects' sidechains, and its routes from a tap
+/// before the fader (their lines and their live lanes) all restart. Its matrix, its post-fader
+/// and post-pan routes and their lines carry as the join says; they carry the ducked tail.
+struct StripRestart<'a> {
+    strips: BTreeSet<&'a str>,
+    /// The successor's routes by ID: a route node belongs to its source strip.
+    routes: BTreeMap<&'a str, &'a session::Route>,
+}
+
+impl<'a> StripRestart<'a> {
+    fn new(model: &'a SessionModel, strips: impl IntoIterator<Item = &'a str>) -> Self {
+        Self {
+            strips: strips.into_iter().collect(),
+            routes: model
+                .routes
+                .iter()
+                .map(|route| (route.id.as_str(), route))
+                .collect(),
+        }
+    }
+
+    /// Whether `id` names a restarted strip.
+    fn contains(&self, id: &str) -> bool {
+        self.strips.contains(id)
+    }
+
+    /// Whether the route `id` leaves a restarted strip from a tap before its fader: its line and
+    /// its live lane restart.
+    fn restarts_route(&self, id: &str) -> bool {
+        let Some(route_id) = StableGraphId::parse(id) else {
+            return false;
+        };
+        strip_owner(&self.routes, &GraphNodeId::Route { route_id })
+            .is_some_and(|(strip, before_fader)| before_fader && self.contains(strip))
+    }
+
+    /// Whether the filter drops this compensation line's carry: a line on a restarted strip's
+    /// chain before its matrix, into one of its effects' sidechains, or on its routes from a tap
+    /// before the fader. Matrix and post-fader lines still carry.
     fn drops_line(&self, line: &graph::GraphDelayLine) -> bool {
-        let named = |strip: &str| self.whole.contains(strip);
         match &line.edge {
-            graph::GraphEdgeId::TrackMain { target } => self
-                .owner(target)
-                .is_some_and(|(strip, before_fader)| before_fader && named(strip)),
-            graph::GraphEdgeId::EffectSidechain { effect, .. } => named(effect.track_id.as_str()),
+            graph::GraphEdgeId::TrackMain { target } => strip_owner(&self.routes, target)
+                .is_some_and(|(strip, before_fader)| before_fader && self.contains(strip)),
+            graph::GraphEdgeId::EffectSidechain { effect, .. } => {
+                self.contains(effect.track_id.as_str())
+            }
             graph::GraphEdgeId::RouteSource { route_id }
-            | graph::GraphEdgeId::RouteDestination { route_id } => self
-                .owner(&GraphNodeId::Route {
-                    route_id: route_id.clone(),
-                })
-                .is_some_and(|(strip, before_fader)| before_fader && named(strip)),
+            | graph::GraphEdgeId::RouteDestination { route_id } => {
+                self.restarts_route(route_id.as_str())
+            }
         }
     }
 }
@@ -3165,7 +3226,7 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
     // each one copies from and the records that retarget it. Every strip of this plan attaches
     // the same control kind.
     let live_input = attach_live && lanes.strip_input;
-    let carried_inputs: Vec<InputJoin<'_>> = match successor {
+    let mut carried_inputs: Vec<InputJoin<'_>> = match successor {
         None => Vec::new(),
         Some(base) => {
             // `committed_input_section` binary-searches: a model that is not normalized would
@@ -3202,14 +3263,10 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
                         // records, so the carried lane ramps as a live edit would. A value the
                         // live path refuses restarts the section.
                         let edit = StripEditRamps::of(base.edit_ramps, strip.id);
-                        let records = input_records(before, strip.builtins, rate, ramps, edit);
-                        // A compiled model's values are in the live domain, so a refusal here is
-                        // an internal fault that would silently restart the section.
-                        debug_assert!(
-                            records.is_ok(),
-                            "a compiled strip's input values have live records: {records:?}"
-                        );
-                        records.ok()?
+                        // A compiled model can hold values the live path refuses: a high-pass
+                        // above its low-pass compiles, and is a `Domain` rebuild with no live
+                        // record. The section then restarts at rest; it is no internal fault.
+                        input_records(before, strip.builtins, rate, ramps, edit).ok()?
                     } else if same_input_section(before, strip.builtins) {
                         Vec::new()
                     } else {
@@ -4173,22 +4230,6 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
         })
         .collect();
     input_sections.sort_unstable_by(|left, right| left.id.cmp(&right.id));
-    if !carried_inputs.is_empty() {
-        let moves: Vec<graph::GraphLaneMove> = carried_inputs
-            .iter()
-            .filter_map(|join| {
-                input_section_row(&input_sections, join.id).map(|row| graph::GraphLaneMove {
-                    successor: row.location,
-                    predecessor: join.predecessor,
-                })
-            })
-            .collect();
-        // Every strip banks its input section in a shipped plan, so every carried strip finds
-        // its lane here; one that did not would silently restart at rest.
-        debug_assert_eq!(moves.len(), carried_inputs.len());
-        graph::install_builtin_input_carry(&mut plan, moves)
-            .map_err(|_| graph_failure("host.carry.install"))?;
-    }
     // Issue #1327 D1: this plan's own meters, in reader order: the inventory its successor joins
     // with, and the rows the join below looks this plan's observers up in.
     let observer_rows =
@@ -4298,7 +4339,7 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
         .collect();
     strip_stages
         .sort_unstable_by(|left, right| left.id.cmp(&right.id).then(left.owner.cmp(&right.owner)));
-    let strip_carry = match successor {
+    let mut strip_carry = match successor {
         Some(base) => resolve_strip_carry(
             base.inventory,
             &strip_joins,
@@ -4308,21 +4349,267 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
         ),
         None => StripCarry::default(),
     };
+    // Issue #1279 D1: this plan's own effect bank lanes, sorted by owner key: the inventory its
+    // successor joins with, and the table the join below looks this plan's lanes up in.
+    let mut effect_lanes: Vec<EffectLaneInventoryRow> = graph::bank_effect_lanes(&mut plan)
+        .ok_or_else(|| graph_failure("host.inventory.identity"))?
+        .into_iter()
+        .map(|(id, lane)| EffectLaneInventoryRow {
+            id,
+            rack: lane.rack,
+            effect_id: lane.effect_id,
+            location: lane.location,
+            layout: lane.layout,
+            kind: lane.kind,
+        })
+        .collect();
+    effect_lanes.sort_unstable_by(|left, right| {
+        left.id
+            .cmp(&right.id)
+            .then(left.rack.cmp(&right.rack))
+            .then_with(|| left.effect_id.cmp(&right.effect_id))
+    });
+    // Issue #1280 D4: a carried lane's live difference is opened against the successor's own
+    // producer here, so a lane whose producer has no cell for a record restarts instead of
+    // writing it (and a preparation that fails later writes nothing).
+    let mut effect_carry = match successor {
+        Some(base) => resolve_effect_carry(
+            base.inventory,
+            &chain_joins,
+            &effect_lanes,
+            &mut |strip_id, address, instance| {
+                let position =
+                    effect_producer_position(&effect_controls, strip_rank, strip_id, address)?;
+                prepare_effect_retarget(&mut effect_controls[position], position, instance)
+            },
+        ),
+        None => EffectCarry::default(),
+    };
+    // Issue #1327 D1: this plan's own effect observation readers, in reader order: the inventory
+    // its successor joins with. A tap follows its effect instance, so a row is keyed by the
+    // instance's lane, and its successor's carry follows the effect moves resolved above.
+    let observation_rows: Vec<ObservationInventoryRow> = effect_observations
+        .iter()
+        .enumerate()
+        .filter_map(|(entry, handle)| {
+            let racks: &[graph::RackId] = match handle.address.rack {
+                LiveEffectRack::Console => &[graph::RackId::Simd1, graph::RackId::Simd2],
+                LiveEffectRack::Inserts => &[graph::RackId::Dynamic],
+            };
+            let lane = racks.iter().find_map(|&rack| {
+                effect_lane_row(&effect_lanes, &handle.track_id, rack, &handle.effect_id)
+            })?;
+            Some(ObservationInventoryRow {
+                entry,
+                location: lane.location,
+                taps: handle.readers.len(),
+            })
+        })
+        .collect();
+    // Issue #1283 D1: this plan's own compensation lines, sorted by edge ID: the inventory its
+    // successor joins with, and the lines its own moves are resolved from.
+    let mut delay_lines = graph::take_compensation_lines(&mut plan)
+        .ok_or_else(|| graph_failure("host.inventory.identity"))?;
+    delay_lines.sort_unstable_by(|left, right| left.edge.cmp(&right.edge));
+    let mut delay_carry = match successor {
+        Some(base) => resolve_delay_carry(&base.inventory.delay_lines, &delay_lines, |id| {
+            same_strip_id_kind(base.committed, compiled.normalized_model(), id)
+        }),
+        None => Vec::new(),
+    };
+    // Issue #1284 D1, D2: this plan's own strip input alignment lines and live sends, sorted by ID:
+    // the inventory its successor joins with, and the rows its own moves are resolved from.
+    let mut strip_delays = graph::take_strip_delay_lines(&mut plan)
+        .ok_or_else(|| graph_failure("host.inventory.identity"))?;
+    strip_delays.sort_unstable_by(|left, right| left.strip.cmp(&right.strip));
+    let mut live_routes = graph::take_live_routes(&mut plan)
+        .ok_or_else(|| graph_failure("host.inventory.identity"))?;
+    live_routes.sort_unstable_by(|left, right| left.route_id.cmp(&right.route_id));
+    let mut strip_delay_carry = match successor {
+        Some(base) => resolve_strip_delay_carry(
+            &base.inventory.strip_delays,
+            &strip_delays,
+            &delay_joins,
+            warm.map_or(0, |lead| lead.lead_samples),
+        ),
+        None => StripDelayCarry::default(),
+    };
+    // #1324 D1, D2: the strips this successor restarts, in one place, after every join: each
+    // strip a join restarts (#1277 D6), and each strip a warm lead restarts whole (#1354a ruling
+    // 2). Each is duck-swapped, so the whole-strip restart filter ([`StripRestart`]) drops every
+    // carry in front of its fader and of its fader itself: a partial carry upstream of a
+    // restarted owner would leave a hole with a step at each edge. The joins' own rules stay as
+    // they are; only their outputs are filtered here.
+    let mut restarted = core::mem::take(&mut strip_carry.restarted);
+    restarted.extend(core::mem::take(&mut effect_carry.restarted));
+    restarted.extend(core::mem::take(&mut strip_delay_carry.restarted));
+    restarted.sort_unstable();
+    restarted.dedup();
+    if let (Some(lead), Some(restart)) = (warm, &warm_restart) {
+        // #1354a ruling 2: the join restarts no strip outside the lead's `R`; a strip restarted
+        // whole is listed whatever its owners did.
+        if restarted
+            .iter()
+            .any(|id| !restart.whole.contains(&**id) && lead.restarted.binary_search(id).is_err())
+        {
+            return Err(warm_invariant());
+        }
+        restarted.extend(
+            lead.restart_whole
+                .iter()
+                .filter(|id| committed_has_strip(model, id))
+                .map(|id| Box::<str>::from(id.as_str())),
+        );
+        restarted.sort_unstable();
+        restarted.dedup();
+    }
+    let restart = StripRestart::new(model, restarted.iter().map(|id| &**id));
+    let carried_input_count = carried_inputs.len();
+    let route_joins: Vec<RouteJoin<'_>> = if restarted.is_empty() {
+        route_joins
+    } else {
+        // The fader's move and its retarget; the matrix's stay.
+        for id in &restarted {
+            if let Some(lane) = strip_stage_row(&strip_stages, id, graph::BuiltinStripOwner::Fader)
+            {
+                let location = lane.location;
+                strip_carry.moves.retain(|step| {
+                    !(step.owner == graph::BuiltinStripOwner::Fader && step.successor == location)
+                });
+            }
+        }
+        strip_carry.retargets.retain_mut(|retarget| {
+            if restart.contains(retarget.id) {
+                retarget.fader = [None; 4];
+                retarget.offsets = [None; 2];
+            }
+            retarget.fader[0].is_some()
+                || retarget.offsets != [None; 2]
+                || retarget.matrix.is_some()
+        });
+        // Every effect of the strip sits before its fader (console slots and inserts). A dropped
+        // retarget that opened an owner transaction on its producer discards it, so the producer
+        // is left as preparation built it.
+        let restarted_sites: Vec<graph::GraphEffectSite> = effect_lanes
+            .iter()
+            .filter(|row| restart.contains(&row.id))
+            .map(|row| row.location)
+            .collect();
+        effect_carry
+            .moves
+            .retain(|step| !restarted_sites.contains(&step.successor));
+        effect_carry.retargets.retain(|retarget| {
+            let producer = &mut effect_controls[retarget.producer];
+            let keep = !restart.contains(&producer.track_id);
+            if !keep && retarget.targets.is_some() {
+                let _ = producer.discard_owner();
+            }
+            keep
+        });
+        effect_carry.scratch_bytes = effect_carry
+            .moves
+            .iter()
+            .filter(|step| {
+                !matches!(
+                    (step.successor, step.predecessor),
+                    (
+                        graph::GraphEffectSite::Node(_),
+                        graph::GraphEffectSite::Node(_)
+                    )
+                )
+            })
+            .filter_map(|step| {
+                effect_lanes
+                    .iter()
+                    .find(|row| row.location == step.successor)
+            })
+            .map(|row| row.layout.payload_bytes())
+            .max()
+            .unwrap_or(0);
+        carried_inputs.retain(|join| !restart.contains(join.id));
+        let dropped: BTreeSet<u32> = delay_lines
+            .iter()
+            .filter(|line| restart.drops_line(line))
+            .map(|line| line.line)
+            .collect();
+        delay_carry.retain(|step| !dropped.contains(&step.successor));
+        // A route from a tap before the fader restarts its live lane: phase 1 ducked it, and the
+        // successor arms it (#1363 D1 (c)).
+        route_joins
+            .into_iter()
+            .filter(|join| !restart.restarts_route(join.id))
+            .collect()
+    };
+    let route_carry = match successor {
+        Some(base) => resolve_route_carry(&base.inventory.live_routes, &live_routes, &route_joins),
+        None => RouteCarry::default(),
+    };
+    // Issue #1324 D3, #1363 D1 (c): a duck-swapped strip's routes from a tap before its fader
+    // are armed with it and wait for its fade, as an added strip's are. Only a route with a
+    // six-word live op can arm (the route lanes of #1391), and phase 1 can duck only such a route.
+    // The duck-swapped strips the successor arms, on the terms of an added strip's arm (#1288
+    // D1, D2): a plan that attaches live lanes, never at a declared discontinuity.
+    let armed_restarts: BTreeSet<&str> = match successor {
+        Some(base) if attach_live && !base.discontinuity => {
+            restarted.iter().map(|id| &**id).collect()
+        }
+        _ => BTreeSet::new(),
+    };
+    let route_fades: Vec<RouteFade<'_>> = match successor {
+        Some(base) if !armed_restarts.is_empty() => {
+            let mut fades = route_fades;
+            let added = added_strips(base.committed, model);
+            for route in &model.routes {
+                let (source, tap) = match &route.source {
+                    session::RouteSource::Track { track_id, tap } => (track_id.as_str(), *tap),
+                    session::RouteSource::Submix { submix_id, tap } => (submix_id.as_str(), *tap),
+                };
+                if !armed_restarts.contains(source) || !tap.precedes_fader() {
+                    continue;
+                }
+                if let Some(fade) = fades
+                    .iter_mut()
+                    .find(|fade| fade.route.id.as_str() == route.id.as_str())
+                {
+                    fade.strip = Some(source);
+                    continue;
+                }
+                let into_added = matches!(&route.destination,
+                    session::RouteDestination::SubmixInput { submix_id }
+                        if added.contains(&submix_id.as_str()));
+                let has_op = live_routes
+                    .binary_search_by(|row| (*row.route_id).cmp(route.id.as_str()))
+                    .is_ok_and(|index| !live_routes[index].following);
+                if route.mute || into_added || follows_automated_mute(view, route) || !has_op {
+                    continue;
+                }
+                fades.push(RouteFade {
+                    route,
+                    strip: Some(source),
+                });
+            }
+            fades
+        }
+        _ => route_fades,
+    };
     // Issue #1288 D1: a strip the successor adds during playback fades in. Only a plan that
     // attaches live lanes arms (decision 1: the plain entry binds a fader that cannot fade), and
     // never at a declared discontinuity (decision 2: every owner restarts, and a seek is not
     // declicked).
+    // Issue #1324 D3: a duck-swapped strip (one in `restarted`, present in both plans) is armed
+    // afresh, with this plan's `D`: its fader restarts (D2).
     // Issue #1392 D2: a strip whose fade entry the predecessor's table holds is armed again, and
-    // takes that entry's render state at the swap block, exactly when its fader lane carries
-    // (D5 as root reads it: a strip restarted for its chain or its matrix still carries the
-    // fader lane, whose import restores the armed bits, so it must keep an entry). Each strip
-    // is paired with the predecessor entry it carries, `None` for an added strip.
+    // takes that entry's render state at the swap block, exactly when its fader lane carries. A
+    // restarted strip's fader does not carry, so its pending entry is replaced by the fresh arm
+    // above, never carried beside it. Each strip is paired with the predecessor entry it
+    // carries, `None` for an added or a restarted strip.
     let fade_strips: Vec<(&str, Option<u32>)> = match successor {
         Some(base) if attach_live && !base.discontinuity => {
             let mut strips: Vec<(&str, Option<u32>)> = added_strips(base.committed, model)
                 .into_iter()
                 .map(|id| (id, None))
                 .collect();
+            strips.extend(armed_restarts.iter().map(|id| (*id, None)));
             // A row whose entry render has fired is dropped: the strip's lane imports `armed =
             // false`, so the successor needs no entry and never fades it again.
             let watch = &base.inventory.fade_watch;
@@ -4373,63 +4660,6 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
     {
         return Err(resource("host.graph.resource.limit"));
     }
-    // Issue #1279 D1: this plan's own effect bank lanes, sorted by owner key: the inventory its
-    // successor joins with, and the table the join below looks this plan's lanes up in.
-    let mut effect_lanes: Vec<EffectLaneInventoryRow> = graph::bank_effect_lanes(&mut plan)
-        .ok_or_else(|| graph_failure("host.inventory.identity"))?
-        .into_iter()
-        .map(|(id, lane)| EffectLaneInventoryRow {
-            id,
-            rack: lane.rack,
-            effect_id: lane.effect_id,
-            location: lane.location,
-            layout: lane.layout,
-            kind: lane.kind,
-        })
-        .collect();
-    effect_lanes.sort_unstable_by(|left, right| {
-        left.id
-            .cmp(&right.id)
-            .then(left.rack.cmp(&right.rack))
-            .then_with(|| left.effect_id.cmp(&right.effect_id))
-    });
-    // Issue #1280 D4: a carried lane's live difference is opened against the successor's own
-    // producer here, so a lane whose producer has no cell for a record restarts instead of
-    // writing it (and a preparation that fails later writes nothing).
-    let effect_carry = match successor {
-        Some(base) => resolve_effect_carry(
-            base.inventory,
-            &chain_joins,
-            &effect_lanes,
-            &mut |strip_id, address, instance| {
-                let position =
-                    effect_producer_position(&effect_controls, strip_rank, strip_id, address)?;
-                prepare_effect_retarget(&mut effect_controls[position], position, instance)
-            },
-        ),
-        None => EffectCarry::default(),
-    };
-    // Issue #1327 D1: this plan's own effect observation readers, in reader order: the inventory
-    // its successor joins with. A tap follows its effect instance, so a row is keyed by the
-    // instance's lane, and its successor's carry follows the effect moves resolved above.
-    let observation_rows: Vec<ObservationInventoryRow> = effect_observations
-        .iter()
-        .enumerate()
-        .filter_map(|(entry, handle)| {
-            let racks: &[graph::RackId] = match handle.address.rack {
-                LiveEffectRack::Console => &[graph::RackId::Simd1, graph::RackId::Simd2],
-                LiveEffectRack::Inserts => &[graph::RackId::Dynamic],
-            };
-            let lane = racks.iter().find_map(|&rack| {
-                effect_lane_row(&effect_lanes, &handle.track_id, rack, &handle.effect_id)
-            })?;
-            Some(ObservationInventoryRow {
-                entry,
-                location: lane.location,
-                taps: handle.readers.len(),
-            })
-        })
-        .collect();
     let observation_carry = match successor {
         Some(base) => resolve_observation_carry(
             &base.inventory.observations,
@@ -4444,60 +4674,31 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
         observation_carry.len(),
     )
     .ok_or_else(|| resource("host.resource.arithmetic"))?;
-    // Issue #1283 D1: this plan's own compensation lines, sorted by edge ID: the inventory its
-    // successor joins with, and the lines its own moves are resolved from.
-    let mut delay_lines = graph::take_compensation_lines(&mut plan)
-        .ok_or_else(|| graph_failure("host.inventory.identity"))?;
-    delay_lines.sort_unstable_by(|left, right| left.edge.cmp(&right.edge));
-    let delay_carry = match successor {
-        Some(base) => {
-            // #1354a decision 2: a strip restarted whole carries no line before its matrix.
-            let kept: Vec<graph::GraphDelayLine>;
-            let own = match &warm_restart {
-                Some(restart) if !restart.whole.is_empty() => {
-                    kept = delay_lines
-                        .iter()
-                        .filter(|line| !restart.drops_line(line))
-                        .cloned()
-                        .collect();
-                    &kept[..]
-                }
-                _ => &delay_lines[..],
-            };
-            resolve_delay_carry(&base.inventory.delay_lines, own, |id| {
-                same_strip_id_kind(base.committed, compiled.normalized_model(), id)
-            })
-        }
-        None => Vec::new(),
-    };
     let delay_carry_bytes = graph::delay_carry_retained_bytes(delay_carry.len())
         .ok_or_else(|| resource("host.resource.arithmetic"))?;
-    // Issue #1284 D1, D2: this plan's own strip input alignment lines and live sends, sorted by ID:
-    // the inventory its successor joins with, and the rows its own moves are resolved from.
-    let mut strip_delays = graph::take_strip_delay_lines(&mut plan)
-        .ok_or_else(|| graph_failure("host.inventory.identity"))?;
-    strip_delays.sort_unstable_by(|left, right| left.strip.cmp(&right.strip));
-    let mut live_routes = graph::take_live_routes(&mut plan)
-        .ok_or_else(|| graph_failure("host.inventory.identity"))?;
-    live_routes.sort_unstable_by(|left, right| left.route_id.cmp(&right.route_id));
-    let strip_delay_carry = match successor {
-        Some(base) => resolve_strip_delay_carry(
-            &base.inventory.strip_delays,
-            &strip_delays,
-            &delay_joins,
-            warm.map_or(0, |lead| lead.lead_samples),
-        ),
-        None => StripDelayCarry::default(),
-    };
+    if !carried_inputs.is_empty() {
+        let moves: Vec<graph::GraphLaneMove> = carried_inputs
+            .iter()
+            .filter_map(|join| {
+                input_section_row(&input_sections, join.id).map(|row| graph::GraphLaneMove {
+                    successor: row.location,
+                    predecessor: join.predecessor,
+                })
+            })
+            .collect();
+        // Every strip banks its input section in a shipped plan, so every carried strip finds
+        // its lane here; one that did not would silently restart at rest.
+        debug_assert_eq!(moves.len(), carried_inputs.len());
+        graph::install_builtin_input_carry(&mut plan, moves)
+            .map_err(|_| graph_failure("host.carry.install"))?;
+    }
     // #1355 D5, L3: a warm successor's `Input`-tap sidechain lines from a restarted track on a
-    // moved source into a carried strip.
+    // moved source into a carried strip. `restarted` is every join's restart set and the lead's
+    // whole restarts (#1324a), gathered above.
     let sidechain_fills = match (successor, warm) {
         (Some(base), Some(lead)) if lead.lead_samples != 0 => {
-            let restarted: BTreeSet<&str> = strip_carry
-                .restarted
+            let restarted: BTreeSet<&str> = restarted
                 .iter()
-                .chain(&effect_carry.restarted)
-                .chain(&strip_delay_carry.restarted)
                 .map(|id| &**id)
                 .chain(lead.restart_whole.iter().map(String::as_str))
                 .collect();
@@ -4508,10 +4709,6 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
     let prime_carry_bytes =
         graph::prime_carry_retained_bytes(strip_delay_carry.fills.len(), sidechain_fills.len())
             .ok_or_else(|| resource("host.resource.arithmetic"))?;
-    let route_carry = match successor {
-        Some(base) => resolve_route_carry(&base.inventory.live_routes, &live_routes, &route_joins),
-        None => RouteCarry::default(),
-    };
     let strip_delay_carry_bytes =
         graph::strip_delay_carry_retained_bytes(strip_delay_carry.moves.len())
             .ok_or_else(|| resource("host.resource.arithmetic"))?;
@@ -4670,9 +4867,14 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
             .map_err(|_| graph_failure("host.carry.install"))?;
     }
     let carry_program_retained_bytes = graph::carry_program_retained_bytes(&mut plan);
+    // The admission charged the input moves of every strip the input join carries; the
+    // restart filter (#1324 D2) may have dropped some since, and the program retains exactly
+    // the rest.
     debug_assert_eq!(
         carry_program_retained_bytes,
         carry_program_bytes
+            - ((carried_input_count - carried_inputs.len())
+                * core::mem::size_of::<graph::GraphLaneMove>()) as u64
             + strip_carry_bytes
             + effect_carry_bytes
             + meter_carry_bytes
@@ -4682,29 +4884,6 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
             + route_carry_bytes
     );
     inventory_sources.sort_unstable_by(|left, right| left.id.cmp(&right.id));
-    let mut restarted = strip_carry.restarted;
-    restarted.extend(effect_carry.restarted);
-    restarted.extend(strip_delay_carry.restarted);
-    restarted.sort_unstable();
-    restarted.dedup();
-    if let (Some(lead), Some(restart)) = (warm, &warm_restart) {
-        // #1354a ruling 2: the join restarts no strip outside the lead's `R`; a strip restarted
-        // whole is listed whatever its owners did.
-        if restarted
-            .iter()
-            .any(|id| !restart.whole.contains(&**id) && lead.restarted.binary_search(id).is_err())
-        {
-            return Err(warm_invariant());
-        }
-        restarted.extend(
-            lead.restart_whole
-                .iter()
-                .filter(|id| committed_has_strip(model, id))
-                .map(|id| Box::<str>::from(id.as_str())),
-        );
-        restarted.sort_unstable();
-        restarted.dedup();
-    }
     // #1396 D2: an ordinary successor reads its sources as far ahead of its render clock as its
     // predecessor does, so the source-read clock never moves backwards across a rebuild. A first
     // plan reads on its render clock, and so does a discontinuity successor, whose base inventory
@@ -8418,7 +8597,7 @@ mod tests {
     use effect_compiler::{EffectDiagnostic, EffectDiagnosticSet};
     use session::{DiagnosticCode, parse_session_json};
 
-    /// #1354a decision 2: the whole-strip restart filter drops exactly a restarted strip's
+    /// #1354a decision 2, #1324 D2: the whole-strip restart filter drops exactly a restarted strip's
     /// compensation lines before its matrix (its chain, its effects' sidechains, its routes from a
     /// tap before the fader), and keeps its matrix and post-fader lines and every other strip's.
     #[test]
@@ -8434,7 +8613,7 @@ mod tests {
             tap: session::SendTap::PreFader,
         };
         model.routes.push(pre);
-        let restart = super::WarmRestart::new(&model, [], ["eq0"]);
+        let restart = super::StripRestart::new(&model, ["eq0"]);
         let gid = |text: &str| graph::StableGraphId::parse(text).expect("graph ID");
         let stage = |strip: &str, stage| graph::GraphNodeId::TrackStage {
             track_id: gid(strip),
