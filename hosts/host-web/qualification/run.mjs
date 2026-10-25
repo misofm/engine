@@ -285,9 +285,10 @@ function validate(browserName, result) {
     "no render-telemetry frame arrived over a full window");
 
   // Issue #1562b: a structural apply in a real browser. The core classifies a `delay_samples` edit
-  // as a rebuild and the browser prepares and publishes the replacement plan; the first quantum
-  // is the swap block, so what comes out is the declared delay of the input, exactly, the applied
-  // revision was not early, and the meter stream is the successor's from its first frame.
+  // as a rebuild and the browser prepares and publishes the replacement plan. The edit restarts the
+  // track, so it is a duck-swap (#1324a): the applied revision moves at the scheduled `S` and not
+  // one block earlier, the duck is exact silence until `S`, what comes out after the fade-in is the
+  // declared delay of the input, exactly, and the meter stream is the successor's.
   const structural = result.structuralApply;
   gate(browserName, "structural-apply-path", structural?.commandOk === true
     && structural?.commandPath === "rebuild" && structural?.commandApplied === 1
@@ -296,11 +297,13 @@ function validate(browserName, result) {
   gate(browserName, "structural-apply-early", structural?.pendingRevision === structural?.initialRevision
     && structural?.finalRevision === structural?.committedRevision
     && BigInt(structural?.finalRevision ?? "0") > BigInt(structural?.initialRevision ?? "0")
-    && BigInt(structural?.finalSample ?? "-1") === 0n,
+    && /^[0-9]+$/.test(structural?.scheduledSample ?? "")
+    && BigInt(structural?.finalSample ?? "-1") === BigInt(structural.scheduledSample),
   `the applied revision moved before the swap block or did not reach the committed one: ${JSON.stringify(structural)}`);
   gate(browserName, "structural-apply-output", structural?.exactDelayedOutput === true
+    && structural?.duckedSilent === true
     && structural?.renderedDigest === structural?.expectedDigest,
-  "the swapped plan did not render the input delayed by exactly the edit");
+  "the duck was not silent until the swap, or the swapped plan did not render the input delayed by exactly the edit");
   gate(browserName, "structural-apply-meter", structural?.meterLeaseResult === 0
     && structural?.meterFrames >= 1 && structural?.meterFrameWidth === 4
     && structural?.meterTrackCount === 1 && structural?.sequenceIncreasing === true
