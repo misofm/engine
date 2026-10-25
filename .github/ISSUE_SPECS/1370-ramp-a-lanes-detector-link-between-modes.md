@@ -256,14 +256,19 @@ lane* (#1371) connects it to edits.
 - `tests::glide::no_switch_puts_a_sample_over_the_ceiling` (limiter, gate 3): a blend that can
   fall below a channel's own peak (red: blending toward the partner's peak) puts a sample over
   the ceiling.
-- `tests::glide::the_linked_pair_returns_once_the_rings_are_rewritten` (gate 4): a countdown
-  written without `max`, one that covers `R` and not `N + R`, a missing re-derivation, or a glide
-  block that does not clear the record (after the D7 reset) is red.
-- `tests::glide::the_linked_pair_returns_on_stationary_material` (gate 4, ruling of
-  2026-10-25): a single check at the countdown's end (the "once" code, recorded red: "the
-  record never returned") loses the fast path on `+6 dBFS` stationary noise; the watch returns it
-  within 4,800 frames (measured 2,191 / 847 / 2,047 at W1 / W4 / W8), bits equal to the reference
-  arm on every block.
+- `tests::glide::the_linked_pair_returns_once_the_words_agree` (gate 4, attempt 2 folds the
+  burst test into it and deletes that test): on `+6 dBFS` stationary noise with no burst, a
+  countdown written without `max` (bank-mates switch during lane 0's long glide), one that covers
+  `R` and not `N + R`, a missing ring check, a glide block that does not clear the record after a
+  whole-bank D7 reset, or a single check with no watch (the "once" code: "the linked pair never
+  returned") is red. Measured return after the countdown: 47 / 47 / 1,247 frames at W1 / W4 / W8.
+  Its "within one block" clause is gone: under the watch the return is bounded (4,800 frames),
+  not tied to the countdown's block.
+- `tests::glide::a_collapsed_block_advances_a_glide_...` (limiter) also holds that a glide in
+  flight is never quiet, dual and collapsed: red on `glide == glide` in either quiet test.
+- `glide_tests::a_silent_bank_never_skips_a_glide` (shaper): red when `channel_rest_lanes` ignores
+  the weights; the shaper's collapsed test asserts `channels_agree` after the disengage (red when
+  `desymmetrize` drops the weights).
 - `a_glide_moves_no_bank_mates_bit_and_allocates_nothing` (both, gates 2 and 6): a retarget that
   reaches other lanes or a heap call moves a bank-mate's bit or the counter.
 - `a_lane_snapshotted_mid_glide_continues_bit_for_bit_and_forged_weights_are_refused` (both,
