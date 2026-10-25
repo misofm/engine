@@ -819,11 +819,18 @@ function renderControlBuilders(catalog) {
     + `/**\n`
     + ` * The edits of one effect instance: each parameter, its bypass and its link mode, as \`edit.set\`\n`
     + ` * over the row of the instance's own control table. The parameter keys are the catalog's names.\n`
+    + ` *\n`
+    + ` * \`R\` is the instance's rack when the caller knows it (\`console()\`, \`insert()\`), so an insert's\n`
+    + ` * \`linkMode\` refuses \`slot\` at compile time; the union, for an instance addressed by a rack\n`
+    + ` * the caller passes (\`effect()\`), takes either rack's labels and leaves the refusal to run time.\n`
     + ` */\n`
-    + `export abstract class EffectControlBuilders<E extends EffectId> {\n`
+    + `export abstract class EffectControlBuilders<\n`
+    + `  E extends EffectId,\n`
+    + `  R extends "console" | "inserts" = "console" | "inserts",\n`
+    + `> {\n`
     + `  protected abstract readonly effectId: E;\n`
     + `  /** Whether this instance is a console entry or an insert: their link-mode rows differ. */\n`
-    + `  protected abstract readonly rack: "console" | "inserts";\n\n`
+    + `  protected abstract readonly rack: R;\n\n`
     + `  /** \`edit.set\` over this instance's address: the row's machine name, the lane and the ramp. */\n`
     + `  protected abstract setRow(\n`
     + `    control: string,\n`
@@ -866,9 +873,12 @@ function renderControlBuilders(catalog) {
     + `  }\n\n`
     + `  /**\n`
     + `   * The link mode of an instance of an effect that has a choice of it. A console entry also\n`
-    + `   * takes \`slot\`, the slot's declared mode; an insert refuses it.\n`
+    + `   * takes \`slot\`, the slot's declared mode; an insert refuses it, at compile time when its rack\n`
+    + `   * is known and at run time otherwise.\n`
     + `   */\n`
-    + `  linkMode(mode: EffectLinkModeLabel<E> | EffectConsoleLinkModeLabel<E>): ControlEditSet {\n`
+    + `  linkMode(\n`
+    + `    mode: R extends "console" ? EffectConsoleLinkModeLabel<E> : EffectLinkModeLabel<E>,\n`
+    + `  ): ControlEditSet {\n`
     + `    const row = (this.rack === "console" ? EFFECT_CONSOLE_LINK_MODE_ROWS : EFFECT_LINK_MODE_ROWS)[this.effectId];\n`
     + `    if (row === undefined) throw new MisoUsageError(\`\${this.effectId} has no link mode\`);\n`
     + `    return this.setRow(row.control, enumValue(row.choices, mode, \`\${this.effectId} link mode\`), "both");\n`

@@ -240,3 +240,9 @@ compressor.linkMode("maximum");
 compressor.linkMode("sideways");
 // @ts-expect-error the delay has no choice of link mode
 delay.linkMode("maximum");
+// #2043: `slot` (the console slot's declared mode) is a console entry's label, never an insert's.
+track.console("comp", "miso.compressor").linkMode("slot");
+track.effect("console", 0, "miso.compressor").linkMode("slot");
+track.insert("comp", "miso.compressor").linkMode("dual_mono");
+// @ts-expect-error an insert has no console slot to take its link mode from
+track.insert("comp", "miso.compressor").linkMode("slot");

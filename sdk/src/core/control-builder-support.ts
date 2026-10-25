@@ -333,7 +333,9 @@ export interface EffectInstance<E extends EffectId> {
 /** What a strip's edits reach through: `edit.set`, and the engine's effect builders. */
 export interface StripContext {
   readonly set: ControlSetter;
-  readonly effect: <E extends EffectId>(instance: EffectInstance<E>) => EffectEdits<E>;
+  readonly effect: <E extends EffectId, R extends LiveControlRack>(
+    instance: EffectInstance<E> & { readonly rack: R },
+  ) => EffectEdits<E, R>;
 }
 
 /**
@@ -383,6 +385,15 @@ export abstract class StripAddressing {
     effectIndex: number,
     effectId: E,
   ): EffectEdits<E> {
+    return this.#indexed(rack, effectIndex, effectId);
+  }
+
+  /** `effect()` with the rack's type kept, for `console()` and `insert()`. */
+  #indexed<E extends EffectId, R extends LiveControlRack>(
+    rack: R,
+    effectIndex: number,
+    effectId: E,
+  ): EffectEdits<E, R> {
     if (rack !== "console" && rack !== "inserts") {
       throw new MisoUsageError(
         `rack must be console or inserts, not '${String(rack)}' (simd1, dynamic and simd2 are retired)`,
@@ -401,7 +412,7 @@ export abstract class StripAddressing {
    * Address a session console slot by its stable slot ID. `effectId` must be the slot's own effect,
    * and it types the edits. With a session the SDK built, the slot is checked against it.
    */
-  console<E extends EffectId>(slot: string, effectId: E): EffectEdits<E> {
+  console<E extends EffectId>(slot: string, effectId: E): EffectEdits<E, "console"> {
     id(slot, "a console slot ID");
     if (this.#layout === undefined) {
       return this.#context.effect({
@@ -423,7 +434,7 @@ export abstract class StripAddressing {
   }
 
   /** Address one of this strip's inserts by its stable ID or its index in chain order. */
-  insert<E extends EffectId>(insert: string | number, effectId: E): EffectEdits<E> {
+  insert<E extends EffectId>(insert: string | number, effectId: E): EffectEdits<E, "inserts"> {
     if (typeof insert === "number") {
       if (this.#layout === undefined) throw new MisoUsageError(`insert(${insert}): ${NO_LAYOUT}`);
       const row = this.#instances?.inserts[insert];
@@ -453,17 +464,17 @@ export abstract class StripAddressing {
     return this.#resolved("inserts", index, row, effectId);
   }
 
-  #resolved<E extends EffectId>(
-    rack: LiveControlRack,
+  #resolved<E extends EffectId, R extends LiveControlRack>(
+    rack: R,
     index: number,
     row: LayoutRow,
     effectId: E,
-  ): EffectEdits<E> {
+  ): EffectEdits<E, R> {
     if (row.effectId !== effectId) {
       throw new MisoUsageError(
         `${rack === "console" ? "console slot" : "insert"} '${row.id}' is ${row.effectId}, not ${String(effectId)}`,
       );
     }
-    return this.effect(rack, index, effectId);
+    return this.#indexed(rack, index, effectId);
   }
 }
