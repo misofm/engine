@@ -144,7 +144,6 @@ async function testMainRealm() {
   let lastControlDocument;
   let sessionMapMutation = null;
   let planeMutation = null;
-  let commandResult = 0;
   // Issue #1644: every session seek message the fake port received, and the result it answers.
   const sessionSeekMessages = [];
   let sessionSeekResult = 0;
@@ -154,7 +153,6 @@ async function testMainRealm() {
   const sourceSeekMessages = [];
   let seekReportReply = null;
   let mixedSuccess = false;
-  let commandMutation = null;
   let compileGate = null;
   let addModuleGate = null;
   let readyGate = null;
@@ -220,19 +218,6 @@ async function testMainRealm() {
           };
           if (controlMutation !== null) response = controlMutation(response);
           responseTransfer = response.response instanceof Uint8Array ? [response.response.buffer] : [];
-        } else if (received.tag === "miso.command.v1") {
-          response = {
-            tag: "miso.ack.v1",
-            requestId: received.requestId,
-            result: commandResult,
-            reason: commandResult === 0 ? 0 : 8,
-            rejectedIndex: 0,
-            admitted: commandResult === 0 ? received.count : 0,
-            appliedAtSample: 512n,
-            records: received.records,
-          };
-          if (commandMutation !== null) response = commandMutation(response);
-          responseTransfer = [received.records.buffer];
         } else if (received.tag === "miso.sessionmap.v1") {
           response = {
             tag: "miso.sessionmap.v1",
@@ -809,31 +794,6 @@ async function testMainRealm() {
           assert.equal(nextSourceAck.requestId, sourceAcks.at(-1).requestId + 1,
             "source capacity refusal did not burn an ID");
 
-          // Issue #1565: the in-flight bound is the fixed `maximumCommandRecords` (256), not a boot
-          // word, so 256 commands hold and the 257th is refused locally.
-          const localCommand = {
-            kind: 7, rack: 1, stripId: "track-0", effectId: "comp", tapId: 1, windowBlocks: 0,
-          };
-          holdAll = true;
-          const heldCommands = Array.from({ length: 256 }, () =>
-            hostValue.command({ commands: [localCommand] }));
-          const beforeCommandOverflow = events.length;
-          await localErrorResult(hostValue.command({ commands: [localCommand] }), 6);
-          assert.equal(events.length, beforeCommandOverflow, "command capacity refusal posted no event");
-          holdAll = false;
-          for (const respond of heldAll.splice(0)) respond();
-          const commandAcks = await Promise.all(heldCommands);
-          const nextCommand = await hostValue.command({ commands: [localCommand] });
-          assert.equal(nextCommand.requestId, commandAcks.at(-1).requestId + 1,
-            "command capacity refusal did not burn an ID");
-          const observeAck = await hostValue.observe({
-            subscriptions: [{
-              stripId: "track-0", rack: 1, effectId: "comp", tapId: 1, windowBlocks: 0, armed: true,
-            }],
-          });
-          assert.equal(observeAck.result, 0, "captured observation default command accepted");
-          assert.equal(observeAck.bindings[0].windowBlocks, 7,
-            "windowBlocks: 0 uses captured liveControlMeterBlocks");
         } finally {
           addGate.release();
           readyPause.release();
@@ -1707,21 +1667,12 @@ async function testMainRealm() {
     assert.equal(Object.hasOwn(map, "routes"), false, "issue #1565: the route list is deleted");
     assert.equal(Object.hasOwn(map, "vcas"), false, "issue #1565: the VCA list is deleted");
 
-    // Issue #1565: the only kinds `command()` carries are the two observation kinds.
-    const sub = {
-      kind: 7, rack: 1, stripId: "track-1", effectId: "comp", tapId: 1, windowBlocks: 64,
-    };
     // Issue #393: one real host fixture owns every request ID across interleaved request classes.
-    // Twenty-five rounds cover 250 successful calls, including both lease orderings around a
-    // command and direct source/seek traffic. No caller-side ID is supplied anywhere in this loop.
+    // Twenty-five rounds cover 200 successful calls, including both lease orderings and direct
+    // source/seek traffic. No caller-side ID is supplied anywhere in this loop.
     const mixedAcks = [];
     const mixedSendStart = events.length;
-    const mixedSubscription = {
-      stripId: "track-0", rack: 1, effectId: "comp", tapId: 1, windowBlocks: 1, armed: true,
-    };
     for (let round = 0; round < 25; round += 1) {
-      mixedAcks.push((await liveControlHost.command({ commands: [sub] })).requestId);
-      mixedAcks.push((await liveControlHost.observe({ subscriptions: [mixedSubscription] })).requestId);
       mixedAcks.push((await liveControlHost.meters({ enabled: true, onFrame: null })).requestId);
       mixedAcks.push((await liveControlHost.meters({ enabled: false, onFrame: null })).requestId);
       mixedAcks.push((await liveControlHost.telemetry({ enabled: true, onFrame: null })).requestId);
@@ -1753,20 +1704,17 @@ async function testMainRealm() {
       mixedAcks.push((await liveControlHost.status()).requestId);
       mixedAcks.push((await liveControlHost.sessionMap()).requestId);
     }
-    assert.equal(mixedAcks.length, 250, "mixed host regression covers 250 successful calls");
+    assert.equal(mixedAcks.length, 200, "mixed host regression covers 200 successful calls");
     const mixedSendIds = events.slice(mixedSendStart).map((event) => event[2]);
     assert.deepEqual(mixedAcks, mixedSendIds, "acknowledgements match actual outbound send order");
     assert.equal(mixedAcks[0], 2, "sessionMap consumes the first host allocation");
-    assert.equal(mixedAcks.at(-1), 251, "250 mixed calls occupy IDs 2 through 251");
+    assert.equal(mixedAcks.at(-1), 201, "200 mixed calls occupy IDs 2 through 201");
     assert(mixedAcks.every((id, index) => index === 0 || id === mixedAcks[index - 1] + 1),
       "mixed acknowledgements have adjacent IDs");
-    assert(mixedAcks.every((_id, index) => index % 10 !== 1 || mixedAcks[index] === mixedAcks[index - 1] + 1),
-      "observe delegates with exactly one allocation");
     assert.equal(new Set(mixedAcks).size, mixedAcks.length, "mixed acknowledgements are unique");
-    console.log("Issue393 mixed calls: 250 result-zero, send IDs 2..251, adjacent, observe single allocation");
-    // The shipped SDK consumer uses the same real host: sessionMap -> direct meter lease ->
-    // semantic live-control submit. This is the collision reproducer that the host-owned ledger
-    // fixes.
+    console.log("Issue393 mixed calls: 200 result-zero, send IDs 2..201, adjacent");
+    // The shipped SDK consumer uses the same real host: sessionMap -> direct meter lease -> the
+    // SDK's live controls. This is the collision reproducer that the host-owned ledger fixes.
     const { createBrowserLiveControls } = await import(new URL("./sdk/src/browser/live-controls.ts", root));
     // The strip order is the core's control list (#1564 D5): the fake worklet does not run a core,
     // so the list is scripted; every other call still goes through the real host.
@@ -1775,17 +1723,11 @@ async function testMainRealm() {
       ...liveControlHost,
       sessionMap: () => liveControlHost.sessionMap(),
       meters: (request) => liveControlHost.meters(request),
-      command: (request) => liveControlHost.command(request),
       control: scriptedControl({ strips: { tracks: ["kick", "snare"], submixes: ["aaa-bus", "zzz-bus"] } }),
     });
     await liveControlHost.meters({ enabled: true, onFrame: null });
-    // Issue #1565: the host's own command path carries observation records only, so the SDK edit
-    // that rides it is an observation subscription; a value edit goes through `control()`.
-    const sdkReport = await browserLiveControls.submit(
-      browserLiveControls.edit.track("kick").console("comp", "miso.compressor")
-        .observe("Gain Reduction", true, 1),
-    );
-    assert.equal(sdkReport.ok, true, "SDK live controls submit through the real host after direct meters");
+    assert.ok(browserLiveControls.edit.track("kick"),
+      "the SDK live controls resolve through the real host after direct meters");
     // Every bounded response class refuses locally with requestId 0 and leaves the next accepted
     // request exactly one ID later. Hold each class independently so the fake port cannot answer.
     const assertBoundedNoBurn = async (label, heldCall, refusedCall, nextCall) => {
@@ -1815,64 +1757,8 @@ async function testMainRealm() {
       () => liveControlHost.telemetry({ enabled: true, onFrame: null }),
       () => liveControlHost.telemetry({ enabled: false, onFrame: null }),
     );
-    const commandAck = await liveControlHost.command({ commands: [sub] });
-    assert.equal(commandAck.tag, "miso.ack.v1");
-    assert.equal(commandAck.result, 0);
-    assert.equal(commandAck.admitted, 1);
-    assert.equal(commandAck.appliedAtSample, 512n, "the ack names the exact application sample");
-    const staged = events.findLast((event) => event[1] === "miso.command.v1");
-    assert.equal(staged[3], 1, "the record block is transferred, never copied");
-    assert.equal(commandAck.records.byteLength, 272, "the block comes straight back to the caller");
-    const decoded = new DataView(
-      commandAck.records.buffer,
-      commandAck.records.byteOffset,
-      commandAck.records.byteLength,
-    );
-    assert.equal(decoded.getUint8(0), 7, "kind");
-    assert.equal(decoded.getUint8(1), 1, "rack");
-    assert.equal(decoded.getUint8(2), 7, "strip ID length");
-    assert.equal(decoded.getUint8(3), 4, "effect ID length");
-    assert.equal(decoded.getUint32(4, true), 1, "tap id");
-    assert.equal(decoded.getUint32(8, true), 64, "window blocks");
-    const idText = (offset, length) => new TextDecoder().decode(
-      new Uint8Array(commandAck.records.buffer, commandAck.records.byteOffset + offset, length));
-    assert.equal(idText(16, 7), "track-1", "strip ID");
-    assert.equal(idText(16 + 128, 4), "comp", "effect ID");
-    assert.equal(decoded.getUint8(16 + 7), 0, "the strip ID field is zero padded");
-
-    // A malformed command never reaches the port.
+    // A malformed request never reaches the port.
     const beforeMalformed = events.length;
-    await errorResult(
-      liveControlHost.command({ commands: [{ ...sub, kind: 99 }] }),
-      1,
-    );
-    // Issue #1565: every deleted value kind is an unknown kind to the host's own gate.
-    for (const kind of [1, 2, 3, 4, 5, 6, 9, 10, 11, 12, 13, 14, 15, 16, 17]) {
-      await errorResult(liveControlHost.command({ commands: [{ ...sub, kind }] }), 1);
-    }
-    // An ID that does not fit its 127-byte field, or is not a string, never reaches the port.
-    for (const broken of [
-      { stripId: "x".repeat(128) }, { effectId: "é".repeat(64) }, { stripId: 3 }, { effectId: null },
-      { tapId: -1 }, { windowBlocks: 1.5 }, { channel: 255 }, { trackIndex: 0 },
-    ]) {
-      await errorResult(liveControlHost.command({ commands: [{ ...sub, ...broken }] }), 1);
-    }
-    await errorResult(
-      liveControlHost.command({ commands: [{ kind: 7, rack: 1, stripId: "a", effectId: "b", tapId: 1 }] }),
-      1,
-    );
-    await errorResult(liveControlHost.command({ commands: [] }), 1);
-    // The retired `simd1`/`simd2` rack codes and an unallocated one never reach the port (#1096).
-    for (const rack of [0, 2, 4, 255]) {
-      await errorResult(
-        liveControlHost.command({ commands: [{ ...sub, rack }] }),
-        1,
-      );
-    }
-    await localErrorResult(liveControlHost.command({ requestId: 999, commands: [sub] }), 1);
-    await localErrorResult(liveControlHost.observe({ requestId: 999, subscriptions: [{
-      stripId: "track-0", rack: 1, effectId: "comp", tapId: 1, windowBlocks: 1, armed: true,
-    }] }), 1);
     const oldShapeBuffer = new ArrayBuffer(256);
     await localErrorResult(liveControlHost.submitSource({
       requestId: 999, sourceId: "extra", generation: 1n, startFrame: 0n,
@@ -1885,33 +1771,6 @@ async function testMainRealm() {
     await localErrorResult(liveControlHost.meters({ requestId: 999, enabled: true, onFrame: null }), 1);
     await localErrorResult(liveControlHost.telemetry({ requestId: 999, enabled: true, onFrame: null }), 1);
     assert.equal(events.length, beforeMalformed, "a malformed batch costs no message");
-
-    // Engine backpressure is a resolved acknowledgement that admits nothing.
-    commandResult = 6;
-    const refused = await liveControlHost.command({ commands: [sub] });
-    assert.equal(refused.result, 6);
-    assert.equal(refused.admitted, 0);
-    assert.equal(refused.reason, 8);
-    commandResult = 0;
-
-    // Local backpressure: the in-flight bound is `maximumCommandRecords` (256, issue #1565), so a
-    // 257th unsettled batch is refused here, before any transfer, and the caller keeps its records.
-    holdAll = true;
-    const commandEventsBefore = events.length;
-    const held4 = Array.from({ length: 256 }, () => liveControlHost.command({ commands: [sub] }));
-    await localErrorResult(liveControlHost.command({ commands: [sub] }), 6);
-    await localErrorResult(liveControlHost.observe({ subscriptions: [mixedSubscription] }), 6);
-    assert.equal(events.length, commandEventsBefore + 256, "command/observe saturation posts no refusal");
-    holdAll = false;
-    for (const respond of heldAll) respond();
-    heldAll.length = 0;
-    const heldCommandAcks = await Promise.all(held4);
-    const commandAfterBound = await liveControlHost.command({ commands: [sub] });
-    assert.equal(
-      commandAfterBound.requestId,
-      Math.max(...heldCommandAcks.map((ack) => ack.requestId)) + 1,
-      "command saturation does not burn an ID",
-    );
 
     // Leases and their unsolicited frames.
     const meterFrames = [];
@@ -2038,182 +1897,6 @@ async function testMainRealm() {
     assert.equal(telemetryFrames.length, 1);
     assert.equal(telemetryFrames[0].cpuPercent, 4.5);
 
-    // Issue #143: the `miso.observe.v1` acknowledgement's subscription map.
-    //
-    // The map is the answer to what `trackGrDb` cannot say -- which tracks have an observed effect
-    // at all -- so it is checked as carefully as the frame: the exact wire kinds go out, the map
-    // is canonically ordered, `windowBlocks: 0` resolves to the plan default, and an unsubscribe
-    // removes exactly one entry.
-    const observeAck = await liveControlHost.observe({
-      subscriptions: [
-        { stripId: "track-1", rack: 1, effectId: "comp", tapId: 1, windowBlocks: 0, armed: true },
-        { stripId: "track-0", rack: 1, effectId: "comp", tapId: 1, windowBlocks: 8, armed: true },
-      ],
-    });
-    assert.equal(observeAck.tag, "miso.observe.v1");
-    assert.equal(observeAck.result, 0);
-    assert.deepEqual(observeAck.bindings.map((binding) => binding.stripId), ["track-0", "track-1"],
-      "the map is canonically ordered by (stripId, rack, effectId, tapId)");
-    assert.deepEqual(observeAck.bindings[0], {
-      stripId: "track-0", rack: 1, effectId: "comp", tapId: 1, windowBlocks: 8,
-    });
-    assert.equal(observeAck.bindings[1].windowBlocks, Number(limits.liveControlMeterBlocks),
-      "`windowBlocks: 0` resolves to the plan default, and the map says which one it got");
-    assert.equal(Object.isFrozen(observeAck.bindings), true);
-    const unsubscribed = await liveControlHost.observe({
-      subscriptions: [
-        { stripId: "track-1", rack: 1, effectId: "comp", tapId: 1, windowBlocks: 0, armed: false },
-      ],
-    });
-    assert.equal(unsubscribed.bindings.length, 1, "an unsubscribe removes exactly one entry");
-    assert.equal(unsubscribed.bindings[0].stripId, "track-0");
-    // Issue #1213 (attempt 2, verdict MAJOR-1), as #1677 leaves it: a bus tap is named by its
-    // submix's ID like a track's, and the binding carries no position of any plan.
-    {
-      const busSubscription = {
-        stripId: "bus-0", rack: 1, effectId: "comp", tapId: 1, windowBlocks: 0,
-      };
-      const busAck = await liveControlHost.observe({
-        subscriptions: [{ ...busSubscription, armed: true }],
-      });
-      assert.equal(busAck.result, 0);
-      const busBinding = busAck.bindings.find((binding) => binding.stripId === "bus-0");
-      assert.deepEqual(busBinding, { ...busSubscription, windowBlocks: Number(limits.liveControlMeterBlocks) });
-      assert.deepEqual(Object.keys(busBinding).sort(), ["effectId", "rack", "stripId", "tapId", "windowBlocks"]);
-      const busOff = await liveControlHost.observe({
-        subscriptions: [{ ...busSubscription, armed: false }],
-      });
-      assert.deepEqual(busOff.bindings, unsubscribed.bindings, "the bus binding disarms");
-    }
-    for (const broken of [
-      // The retired `simd1`/`simd2` codes (`0`, `2`) and an unallocated one are refused (#1096).
-      { stripId: 0 }, { stripId: "x".repeat(128) }, { effectId: "x".repeat(128) }, { rack: 0 },
-      { rack: 2 }, { rack: 4 }, { tapId: 0 }, { armed: "yes" }, { windowBlocks: -1 },
-      { trackIndex: 0 }, { effectIndex: 0 },
-    ]) {
-      await errorResult(liveControlHost.observe({
-        subscriptions: [{
-          stripId: "track-0", rack: 1, effectId: "comp", tapId: 1, windowBlocks: 0, armed: true,
-          ...broken,
-        }],
-      }), 1);
-    }
-    await errorResult(liveControlHost.observe({ subscriptions: [] }), 1);
-
-    // Issue #143's two reasons, and the #151 defect they exposed: a refused subscription is a
-    // typed *per-request* rejection and costs the host nothing.
-    //
-    // Reasons 10 (`unknownTap`) and 11 (`observationUnbound`) are the only two the observation
-    // path ever returns, and `#receive` used to bound `reason` at the literal `<= 9`. Either one
-    // therefore read as a malformed acknowledgement and tripped the sticky 255 that fails every
-    // unsettled request and every later one -- so one refused subscription cost the whole
-    // session. That is what kept the app's gain-reduction meters dead: the app arms its taps
-    // once at startup, and a single refusal took the live controls with it.
-    //
-    // Red mutation: restore `validU32(message.reason) && message.reason <= 9` in `#receive` ->
-    // every assertion below fails with the sticky signature, starting with `refused.tag` because
-    // the promise rejects with `{tag: "miso.error.v1", result: 255}` instead of settling.
-    // `scripts/test-web-audioworklet.sh` runs exactly that mutation and requires this file red.
-    const mapBeforeRefusal = unsubscribed.bindings;
-    for (const { reason, result, what } of [
-      // The address resolves and the tap id does not. A bad address, like every other unknown, so
-      // `RESULT_INVALID_ARGUMENT`.
-      { reason: 10, result: 1, what: "an undeclared tap" },
-      // The tap is declared and correctly addressed; this preparation bound no observation
-      // capacity, which is what `RESULT_UNSUPPORTED` means. Retrying will never help.
-      { reason: 11, result: 7, what: "a session that bound no observation capacity" },
-      // Issue #1676 (#1685: by exact bytes): past what one ended event holds. The value follows the retired 12-14, so a table
-      // bound that stopped at 12 or accepted a retired hole would read it as malformed.
-      { reason: 15, result: 7, what: "a subscription past what one ended event holds" },
-    ]) {
-      commandResult = result;
-      commandMutation = (response) => ({ ...response, reason, rejectedIndex: 0, admitted: 0 });
-      const refused = await liveControlHost.observe({
-        subscriptions: [
-          { stripId: "track-0", rack: 1, effectId: "comp", tapId: 9, windowBlocks: 0, armed: true },
-        ],
-      });
-      commandMutation = null;
-      commandResult = 0;
-      assert.equal(refused.tag, "miso.observe.v1", `${what} settles as a typed observation ack`);
-      assert.equal(refused.result, result, `${what} carries its own result code`);
-      assert.equal(refused.reason, reason, "the ack names which namespace the caller got wrong");
-      assert.equal(Object.isFrozen(refused), true);
-      assert.deepEqual(
-        refused.bindings,
-        mapBeforeRefusal,
-        "a batch is all-or-nothing: a refused batch arms nothing and leaves the map untouched",
-      );
-
-      // The host is fully healthy afterwards. Each of these is a request the sticky error would
-      // have failed with `{tag: "miso.error.v1", result: 255}`.
-      assert.equal((await liveControlHost.status()).result, 0, `${what}: status still answers`);
-      const laterCommand = await liveControlHost.command({
-        commands: [sub],
-      });
-      assert.equal(laterCommand.result, 0, `${what}: the command path still admits a batch`);
-      assert.equal(laterCommand.admitted, 1);
-      assert.deepEqual(
-        (await liveControlHost.sessionMap()).sources.map((source) => source.id),
-        ["bass", "drums"],
-        `${what}: the session map still answers`,
-      );
-      const framesBefore = meterFrames.length;
-      node.port.onmessage({
-        data: {
-          tag: "miso.meter.v1", sequence: 10 + reason, generation: 1n, validity: 0xb,
-          lossCount: 0, windows: 1, trackCount: 2, structureEpoch: 1,
-          peaks: new Float32Array([0.5, 0.5, 0.5, 0.5, 0.5, 0.5]),
-          trackGrDb: new Float32Array([3.25, 0]), masterGrDb: 3.25,
-          firstSample: 1024n, endSample: 1280n,
-          submixCount: 0, submixPeaks: new Float32Array(0), submixGrDb: new Float32Array(0),
-        },
-      });
-      assert.equal(
-        meterFrames.length,
-        framesBefore + 1,
-        `${what}: the meter lease still delivers -- this is the dead-GR-meter regression`,
-      );
-      assert.equal(meterFrames.at(-1).trackGrDb[0], 3.25);
-
-      // And a *correct* subscription still arms, so nothing about the map machinery was poisoned.
-      const recovered = await liveControlHost.observe({
-        subscriptions: [
-          { stripId: "track-1", rack: 1, effectId: "comp", tapId: 1, windowBlocks: 4, armed: true },
-        ],
-      });
-      assert.equal(recovered.result, 0, `${what}: a correct subscription still arms after it`);
-      assert.equal(recovered.reason, 0);
-      assert.deepEqual(recovered.bindings.map((binding) => binding.stripId), ["track-0", "track-1"]);
-      const undo = await liveControlHost.observe({
-        subscriptions: [
-          { stripId: "track-1", rack: 1, effectId: "comp", tapId: 1, windowBlocks: 4, armed: false },
-        ],
-      });
-      assert.deepEqual(undo.bindings, mapBeforeRefusal, "the map returns to where it started");
-    }
-
-    // Issue #1565: reasons 12-14 (`notSoloable`, `unknownRoute`, `unknownVca`) left the
-    // vocabulary with the value kinds. An acknowledgement that still carries one is a malformed
-    // reply and fails the whole host, as any reason outside the table does.
-    for (const reason of [12, 13, 14]) {
-      const reasonHost = await createMisoAudioWorkletHost({
-        context,
-        document: new Uint8Array(),
-        options: limits,
-        simd128ModuleUrl: "simd.wasm",
-        workletModuleUrl: "processor.js",
-      });
-      commandResult = 1;
-      commandMutation = (response) => ({ ...response, reason, rejectedIndex: 0, admitted: 0 });
-      await errorResult(reasonHost.command({ commands: [sub] }), 255).catch((error) => {
-        throw new Error(`the host accepted deleted command reason ${reason}`, { cause: error });
-      });
-      commandMutation = null;
-      commandResult = 0;
-      await reasonHost.dispose();
-    }
-
     // A released lease detaches the callback: a late frame is delivered nowhere.
     const framesAtRelease = meterFrames.length;
     await liveControlHost.meters({ enabled: false, onFrame: null });
@@ -2245,8 +1928,6 @@ async function testMainRealm() {
     await liveControlHost.dispose();
     const disposedEvents = events.length;
     await localErrorResult(liveControlHost.status(), 3);
-    await localErrorResult(liveControlHost.command({ commands: [sub] }), 3);
-    await localErrorResult(liveControlHost.observe({ subscriptions: [mixedSubscription] }), 3);
     await localErrorResult(liveControlHost.sessionMap(), 3);
     await localErrorResult(liveControlHost.meters({ enabled: false, onFrame: null }), 3);
     await localErrorResult(liveControlHost.telemetry({ enabled: false, onFrame: null }), 3);
@@ -2259,84 +1940,6 @@ async function testMainRealm() {
     }), 3);
     assert.equal(events.length, disposedEvents, "disposed refusals post no messages or consume IDs");
 
-    // Issue #143 D7 / #151: recompile and re-subscribe, the way the app re-arms after the plan is
-    // replaced.
-    //
-    // A structural session edit produces a replacement plan, and in the browser that is a new host
-    // over the new session JSON. Subscriptions belong to the plan they were applied to: the
-    // replacement's lanes exist and are unarmed, nothing carries over, and the app re-arms from
-    // scratch against the new addressing. This is also the moment the #151 defect was most likely
-    // to fire in the field, because a replacement moves effect indices -- a stale tap address
-    // comes back as reason 10, and before the fix that killed the freshly prepared host on its
-    // first gesture.
-    const prepare = (sessionDocument) => createMisoAudioWorkletHost({
-      context,
-      document: new TextEncoder().encode(sessionDocument),
-      options: limits,
-      simd128ModuleUrl: "simd.wasm",
-      workletModuleUrl: "processor.js",
-    });
-    const tap = (stripId, effectId, armed) => ({
-      stripId, rack: 1, effectId, tapId: 1, windowBlocks: 0, armed,
-    });
-
-    const beforeEdit = await prepare("{\"schema_version\":0}");
-    const armedBefore = await beforeEdit.observe({
-      subscriptions: [tap("track-0", "comp", true), tap("track-1", "comp", true)],
-    });
-    assert.equal(armedBefore.result, 0);
-    assert.deepEqual(armedBefore.bindings.map((binding) => binding.stripId), ["track-0", "track-1"]);
-    await beforeEdit.dispose();
-
-    const afterEdit = await prepare("format_version = 0 # one effect inserted");
-    // The replacement's map starts empty: request ids restart at 1 and nothing carried over.
-    // The app's first re-arm names the *old* effect, which the replacement no longer has.
-    commandResult = 1;
-    commandMutation = (response) => ({ ...response, reason: 10, rejectedIndex: 0, admitted: 0 });
-    const staleRearm = await afterEdit.observe({
-      subscriptions: [tap("track-0", "comp", true), tap("track-1", "comp", true)],
-    });
-    commandMutation = null;
-    commandResult = 0;
-    assert.equal(staleRearm.tag, "miso.observe.v1");
-    assert.equal(staleRearm.reason, 10, "a stale tap key is refused, per request");
-    assert.deepEqual(staleRearm.bindings, [], "the replacement plan's map is still empty");
-
-    // The app names the replacement's effects and re-arms. The host was never sticky, so this is a
-    // plain second call rather than a rebuild.
-    assert.equal((await afterEdit.sessionMap()).result, 0, "the session map still answers");
-    const rearmed = await afterEdit.observe({
-      subscriptions: [tap("track-0", "comp-2", true), tap("track-1", "comp-2", true)],
-    });
-    assert.equal(rearmed.result, 0, "the replacement plan re-arms after the refusal");
-    assert.deepEqual(rearmed.bindings.map((binding) => binding.effectId), ["comp-2", "comp-2"],
-      "the map holds the replacement's keys, not the retired plan's");
-    assert.deepEqual(rearmed.bindings.map((binding) => binding.windowBlocks),
-      [Number(limits.liveControlMeterBlocks), Number(limits.liveControlMeterBlocks)],
-      "`windowBlocks: 0` resolves against the replacement's own default");
-
-    // The rest of the live-control surface is live on the replacement.
-    const rearmedFrames = [];
-    assert.equal(
-      (await afterEdit.meters({
-        enabled: true, onFrame: (frame) => rearmedFrames.push(frame),
-      })).result,
-      0,
-    );
-    FakeNode.latest.port.onmessage({
-      data: {
-        tag: "miso.meter.v1", sequence: 1, generation: 1n, validity: 0xb, lossCount: 0,
-        windows: 1, trackCount: 2, structureEpoch: 1,
-        peaks: new Float32Array(6), trackGrDb: new Float32Array([1.5, 2.5]), masterGrDb: 2.5,
-        firstSample: 0n, endSample: 256n,
-        submixCount: 0, submixPeaks: new Float32Array(0), submixGrDb: new Float32Array(0),
-      },
-    });
-    assert.equal(rearmedFrames.length, 1, "the replacement's meter sequence restarts at 1");
-    assert.deepEqual([...rearmedFrames[0].trackGrDb], [1.5, 2.5]);
-    assert.equal((await afterEdit.command({ commands: [sub] })).result, 0);
-    assert.equal((await afterEdit.status()).result, 0);
-    await afterEdit.dispose();
     // Issue #1381a D6, gate 6: the host's one timer is the single-mode service tick. It starts
     // with the host, once per quantum, and each tick is the bare `miso.service.v1` message: no
     // request ID, so the tick takes no place in the request sequence and never makes a status read
@@ -2380,8 +1983,8 @@ async function testMainRealm() {
 // `submixIds` (#1209 MINOR-2, #1210 MINOR-1): the session's submix IDs in canonical order; the
 // meter header's `submix_count` and the frame layout follow it, so a caller can run the worklet
 // with no submix (the production case before K2) or with several (their order is observable).
-function createFakeExports(quantum, backend = 1, liveControlsAttached = true, submixIds = ["drums-bus"]) {
-  // Three pages: the 272-byte command records stage 69,632 bytes, beyond the first page.
+function createFakeExports(quantum, backend = 1, submixIds = ["drums-bus"]) {
+  // Three pages, so the staged document at 150,000 lies beyond the first two.
   const memory = { buffer: new ArrayBuffer(196608) };
   const statusPointer = 16384;
   const resourcePointer = 17000;
@@ -2439,10 +2042,8 @@ function createFakeExports(quantum, backend = 1, liveControlsAttached = true, su
   const controlRequestPointer = 50000;
   const controlResponsePointer = 56000;
   const documentPointer = 150000;
-  // Issue #137: command staging (kind 6), the meter frame (kind 7) and the command report.
-  const commandPointer = 70000;
+  // Issue #137: the meter frame (kind 7). Kind 6 was the command staging (#1589c).
   const meterFramePointer = 40000;
-  const reportPointer = 41000;
   const meterHeaderPointer = 41100;
   const trackIds = ["kick", "snare"];
   // Issue #1210 D3: `submixIds` (a parameter) are the submix IDs in canonical order, as many as
@@ -2495,16 +2096,12 @@ function createFakeExports(quantum, backend = 1, liveControlsAttached = true, su
     }
     meterAdopted = true;
   };
-  let report = new DataView(memory.buffer, reportPointer, 48);
-  report.setUint32(0, 48, true);
-  report.setUint32(4, 0x00010000, true);
   const pointers = {
-    2: 4096, 3: 5000, 4: 150000, 5: 8192, 6: liveControlsAttached ? commandPointer : 0,
+    2: 4096, 3: 5000, 4: 150000, 5: 8192,
     7: meterFramePointer,
   };
   const capacities = {
     2: 64, 3: 2 * quantum * 4, 4: 256, 5: 2 * quantum * 4,
-    6: liveControlsAttached ? 256 * 272 : 0,
     7: meterFrameFloats * 4,
   };
   // Issue #143: the additive observation ABI is present even in this hermetic processor fake.
@@ -2514,8 +2111,6 @@ function createFakeExports(quantum, backend = 1, liveControlsAttached = true, su
   const observationSelectionPointer = 18000;
   const observationResultPointer = 19000;
   const observationSelectionCapacity = 4;
-  calls.commands = [];
-  calls.commandResult = 0;
   calls.meterLease = [];
   calls.meterWindows = 0;
   const boot = () => {
@@ -2535,7 +2130,6 @@ function createFakeExports(quantum, backend = 1, liveControlsAttached = true, su
     new Uint8Array(grown).set(new Uint8Array(memory.buffer));
     memory.buffer = grown;
     status = new DataView(grown, statusPointer, 80);
-    report = new DataView(grown, reportPointer, 48);
     calls.growths += 1;
   };
   const exports = {
@@ -2603,16 +2197,6 @@ function createFakeExports(quantum, backend = 1, liveControlsAttached = true, su
       calls.seek.push(args);
       calls.seekIdBytes.push(new Uint8Array(memory.buffer, pointers[2], args[1]).slice());
       return 0;
-    },
-    miso_engine_web_v1_command_report_ptr: () => reportPointer,
-    miso_engine_web_v1_command_submit: (_handle, count) => {
-      calls.commands.push(new Uint8Array(memory.buffer, commandPointer, count * 272).slice());
-      report.setUint32(8, calls.commandResult, true);
-      report.setUint32(12, calls.commandResult === 0 ? 0 : 8, true);
-      report.setUint32(16, 0, true);
-      report.setUint32(20, calls.commandResult === 0 ? count : 0, true);
-      report.setBigUint64(24, status.getBigUint64(32, true), true);
-      return calls.commandResult;
     },
     miso_engine_web_v1_meter_lease: (_handle, enabled) => {
       calls.meterLease.push(enabled);
@@ -3192,7 +2776,7 @@ async function testProcessor() {
       });
     };
     const makeProcessor = (submixIds = undefined) => {
-      const fake = createFakeExports(64, 1, true, submixIds);
+      const fake = createFakeExports(64, 1, submixIds);
       const processor = construct(fake);
       assert.deepEqual(processor.port.posts[0].message, {
         tag: "miso.ready.v1", requestId: 0, result: 0, backend: "simd128",
@@ -4016,46 +3600,6 @@ async function testProcessor() {
     }
 
     {
-      // Issue #137 D1: the worklet copies a staged batch into Wasm, admits it, and hands the
-      // record block straight back with the typed report.
-      const { processor, fake } = makeProcessor();
-      const records = new Uint8Array(2 * 272);
-      const view = new DataView(records.buffer);
-      records[0] = 7; // subscribe
-      records[1] = 1;
-      records[2] = 5;
-      records[3] = 4;
-      view.setUint32(4, 1, true);
-      records.set(Buffer.from("track"), 16);
-      records.set(Buffer.from("comp0"), 16 + 128);
-      records[272] = 8; // unsubscribe
-      records[273] = 1;
-      records[274] = 5;
-      records[275] = 4;
-      view.setUint32(272 + 4, 1, true);
-      processor.receive(structuredClone(
-        { tag: "miso.command.v1", requestId: 1, count: 2, records },
-        { transfer: [records.buffer] },
-      ));
-      const ack = processor.port.posts.at(-1);
-      assert.equal(ack.message.tag, "miso.ack.v1");
-      assert.equal(ack.message.result, 0);
-      assert.equal(ack.message.admitted, 2);
-      assert.equal(ack.message.reason, 0);
-      assert.equal(ack.transferCount, 1, "the record block goes back to the caller");
-      assert.equal(fake.calls.commands.length, 1);
-      assert.equal(fake.calls.commands[0].length, 544, "exactly the staged bytes are submitted");
-      assert.equal(fake.calls.commands[0][0], 7);
-      assert.equal(fake.calls.commands[0][272], 8);
-
-      // A record block whose length disagrees with `count` is sticky-invalid, never truncated.
-      const short = new Uint8Array(272);
-      processor.receive({ tag: "miso.command.v1", requestId: 2, count: 2, records: short });
-      assert.equal(processor.port.posts.at(-1).message.tag, "miso.error.v1");
-      assert.equal(processor.port.posts.at(-1).message.result, 1);
-    }
-
-    {
       // Issue #137 D2/D3: both leases start released, and a released lease costs the render
       // callback one boolean test and no message.
       const { processor, fake } = makeProcessor();
@@ -4391,11 +3935,11 @@ async function testProcessor() {
       mainRealmTextEncoder: originalTextEncoder,
     });
 
-    // Issue #1496 D3. The cases above reach the engine worklet's render, command, source, seek and
-    // meter paths, so the recording is not empty; an empty one would mean the proxy lost its hook.
+    // Issue #1496 D3. The cases above reach the engine worklet's render, source, seek and meter
+    // paths, so the recording is not empty; an empty one would mean the proxy lost its hook.
     // A call that the table does not list for the engine worklet is a post-construction export
     // that no `render_locked` rule has been asked to prove.
-    for (const name of ["render", "command_submit", "source_submit", "meter_poll"]) {
+    for (const name of ["render", "source_submit", "meter_poll"]) {
       assert.ok(recordedPostConstructionCalls.has(name),
         `the recording proxy saw the engine worklet call ${name} after construction`);
     }
