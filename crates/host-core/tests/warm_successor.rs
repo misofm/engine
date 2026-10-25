@@ -890,7 +890,7 @@ impl Feeder {
 struct Stream {
     publisher: engine::realtime::PlanPublisher,
     owner: engine::realtime::RealtimePlanOwner,
-    _retirer: engine::realtime::PlanRetirer,
+    retirer: engine::realtime::PlanRetirer,
     sources: host_core::SourceControlSet,
     /// The newest published plan's inventory and committed model: the next edit's base.
     inventory: host_core::PlanStateInventory,
@@ -925,7 +925,7 @@ impl Stream {
         Self {
             publisher,
             owner,
-            _retirer: retirer,
+            retirer,
             sources,
             inventory,
             committed: committed.clone(),
@@ -944,7 +944,8 @@ impl Stream {
         self.owner.next_absolute_sample() + self.offset
     }
 
-    /// Render `count` blocks, topping the feed up before each.
+    /// Render `count` blocks, topping the feed up before each, and reclaim the plans they
+    /// displaced off the render thread.
     fn render(&mut self, count: usize) {
         for _ in 0..count {
             let read = self.read();
@@ -954,6 +955,7 @@ impl Stream {
                 self.offset = self.pending.take().expect("a pending candidate");
             }
             self.blocks.push(block);
+            while self.retirer.try_reclaim().is_ok() {}
         }
     }
 
@@ -1156,6 +1158,206 @@ fn a_primed_warm_successor_continues_its_predecessor_bit_for_bit() {
                     "shape {shape}, {backend:?}: block {j} after the swap"
                 );
             }
+        }
+    }
+}
+
+/// Gate 2: a growth, an ordinary rebuild that adds another muted track, and a second growth
+/// (offset `2P`): the output equals A continued throughout. Both bank widths.
+#[test]
+fn growth_rebuild_growth_continues_its_predecessor() {
+    let steps = |count: usize| {
+        let mut model = two_tracks();
+        for (index, effects) in [vec![limiter()], Vec::new(), vec![limiter(), {
+            let mut second = limiter();
+            second.id = sid("limiter-2");
+            second
+        }]]
+        .into_iter()
+        .take(count)
+        .enumerate()
+        {
+            let id = format!("m{index}");
+            muted_track(&mut model, &id, effects);
+            to_output(&mut model, &id);
+        }
+        Session::compile(finish(model))
+    };
+    for &backend in Backend::VECTOR {
+        let caps = gate_caps();
+        let a = steps(0);
+        let mut swapped = alone(&a, &caps, backend, AHEAD);
+        swapped.render(BEFORE);
+        assert_eq!(swapped.grow(&steps(1), &CONFIG), LEAD);
+        swapped.render(AFTER);
+        swapped.rebuild(&steps(2));
+        swapped.render(AFTER);
+        assert_eq!(swapped.offset, LEAD, "the rebuild inherits the offset");
+        assert_eq!(swapped.grow(&steps(3), &CONFIG), LEAD);
+        swapped.render(AFTER);
+        assert_eq!(swapped.offset, 2 * LEAD);
+        assert_eq!(
+            swapped.swap_blocks(),
+            [BEFORE, BEFORE + AFTER, BEFORE + 2 * AFTER],
+            "{backend:?}"
+        );
+        let mut continued = alone(&a, &caps, backend, AHEAD);
+        continued.render(BEFORE + 3 * AFTER);
+        assert_eq!(first_divergence(&swapped, &continued), None, "{backend:?}");
+    }
+}
+
+/// Gate 3: track 1 (muted) keys track 2's compressor from its `input` tap; a limiter inserted on
+/// track 1 restarts it and leaves track 2 carried, whose sidechain line from track 1 grows by
+/// `P`. The output equals A continued. Both bank widths.
+#[test]
+fn an_input_tap_sidechain_from_a_restarted_track_continues() {
+    let a = || {
+        let mut model = empty();
+        muted_track(&mut model, "t1", Vec::new());
+        to_output(&mut model, "t1");
+        track(
+            &mut model,
+            "t2",
+            vec![keyed_compressor(from_track("t1", SendTap::Input))],
+        );
+        to_output(&mut model, "t2");
+        model
+    };
+    let mut b = a();
+    *inserts(&mut b, "t1") = vec![limiter()];
+    let (a, b) = (Session::compile(finish(a())), Session::compile(finish(b)));
+    for &backend in Backend::VECTOR {
+        let caps = gate_caps();
+        let mut swapped = alone(&a, &caps, backend, AHEAD);
+        swapped.render(BEFORE);
+        assert_eq!(swapped.grow(&b, &CONFIG), LEAD);
+        assert_eq!(restarted_ids(&swapped.inventory), ["t1"]);
+        swapped.render(AFTER);
+        assert_eq!(swapped.swap_blocks(), [BEFORE]);
+        let mut continued = alone(&a, &caps, backend, AHEAD);
+        continued.render(BEFORE + AFTER);
+        assert_eq!(first_divergence(&swapped, &continued), None, "{backend:?}");
+    }
+}
+
+fn restarted_ids(inventory: &host_core::PlanStateInventory) -> Vec<&str> {
+    inventory
+        .restarted_strips()
+        .iter()
+        .map(|id| &**id)
+        .collect()
+}
+
+/// Gate 4: readiness. With the frames past each consumer withheld (the ring holds `P` frames
+/// past the block, not `P + q`) W is not adopted and the output equals A continued; once the
+/// frames arrive, W is adopted at the next block. A `seek_at` anchored inside the prime window
+/// holds the adoption until the block after the seek applied, and the output equals A continued
+/// with the same seek.
+#[test]
+fn a_warm_successor_waits_for_every_carried_ring_and_a_held_seek() {
+    let a = Session::compile(finish(two_tracks()));
+    let mut b = two_tracks();
+    muted_track(&mut b, "t3", vec![limiter()]);
+    to_output(&mut b, "t3");
+    let b = Session::compile(finish(b));
+    let caps = gate_caps();
+    let backend = backend();
+    let k = LEAD / QUANTUM;
+    // Withheld, then released.
+    let mut swapped = alone(&a, &caps, backend, k);
+    swapped.render(BEFORE);
+    swapped.grow(&b, &CONFIG);
+    swapped.render(4);
+    assert!(swapped.swap_blocks().is_empty(), "not adopted while withheld");
+    swapped.feeder.ahead = (k + 1) * QUANTUM;
+    swapped.render(AFTER);
+    assert_eq!(swapped.swap_blocks(), [BEFORE + 4], "adopted once ready");
+    let mut continued = alone(&a, &caps, backend, k);
+    continued.render(BEFORE + 4);
+    continued.feeder.ahead = (k + 1) * QUANTUM;
+    continued.render(AFTER);
+    assert_eq!(first_divergence(&swapped, &continued), None, "withheld");
+
+    // A seek anchored two blocks on, inside the window `[S + O, S + O + P + q)`.
+    let seek = |stream: &mut Stream| {
+        let anchor = stream.read() + 2 * QUANTUM;
+        stream
+            .feeder
+            .seek_at(&mut stream.sources, 2, 40 * QUANTUM, anchor);
+    };
+    let mut swapped = alone(&a, &caps, backend, AHEAD);
+    swapped.render(BEFORE);
+    seek(&mut swapped);
+    swapped.grow(&b, &CONFIG);
+    swapped.render(AFTER);
+    assert_eq!(
+        swapped.swap_blocks(),
+        [BEFORE + 3],
+        "adopted at the block after the seek applied"
+    );
+    let mut continued = alone(&a, &caps, backend, AHEAD);
+    continued.render(BEFORE);
+    seek(&mut continued);
+    continued.render(AFTER);
+    assert_eq!(first_divergence(&swapped, &continued), None, "held seek");
+}
+
+/// Gate 6: #1286 D1's growth chain at every launch rate. Growth `j` adds to track 1 a limiter and
+/// `c(fs)` soft clippers; after the fourth, `ΣP` is `p_max_samples(fs, 128)`. Every pending block
+/// (readiness checks while the frames are withheld) and every adoption block, the fourth's
+/// included, allocates and frees nothing on the render thread.
+#[test]
+fn the_growth_chain_primes_without_allocating() {
+    for (rate, clippers) in [(44_100, 2), (48_000, 0), (88_200, 0), (96_000, 1)] {
+        let model = |growths: usize| {
+            let mut model = two_tracks();
+            model.sample_rate_hz = rate;
+            let chain = inserts(&mut model, "t1");
+            for growth in 0..growths {
+                let mut stage = limiter();
+                stage.id = sid(&format!("limiter-{growth}"));
+                chain.push(stage);
+                for clipper in 0..clippers {
+                    let mut clip = effect(
+                        &format!("clip-{growth}-{clipper}"),
+                        "miso.soft-clip",
+                        SidechainDeclaration::None,
+                    );
+                    clip.link_mode = LinkMode::DualMono;
+                    chain.push(clip);
+                }
+            }
+            Session::compile(finish(model))
+        };
+        let p_max = u64::from(host_core::p_max_samples(rate, 128));
+        let caps = ring_caps(stall_ring_frames(rate, 128) + p_max as u32 + 128);
+        let config = WarmConfig {
+            p_max,
+            ..CONFIG
+        };
+        let mut stream = alone(&model(0), &caps, backend(), 0);
+        stream.feeder.rate = rate;
+        let mut leads = Vec::new();
+        for growth in 1..=4 {
+            stream.feeder.ahead = QUANTUM;
+            stream.render(BEFORE);
+            let lead = stream.grow(&model(growth), &config);
+            leads.push(lead);
+            stream.render(2);
+            stream.feeder.ahead = lead + QUANTUM;
+            stream.render(AFTER);
+        }
+        assert_eq!(leads.iter().sum::<u64>(), p_max, "{rate} Hz: ΣP is p_max_samples");
+        assert_eq!(stream.offset, p_max);
+        let swaps = stream.swap_blocks();
+        assert_eq!(swaps.len(), 4, "{rate} Hz: four adoptions");
+        for (index, block) in stream.blocks.iter().enumerate() {
+            assert_eq!(
+                (block.allocator, block.audit),
+                ((0, 0, 0), (0, 0)),
+                "{rate} Hz: block {index} (adoptions at {swaps:?})"
+            );
         }
     }
 }
