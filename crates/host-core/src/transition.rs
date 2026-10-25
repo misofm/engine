@@ -15,6 +15,11 @@
 //! `restarted_strips()`) ducks that strip the same way and adopts the successor at `S`; the
 //! successor arms the strip's fade-in (issue #1324, a duck-swap).
 //!
+//! A structural transaction that removes or re-points a route with a live lane between two strips
+//! it keeps ducks that route alone the same way (issue #1953a, D15-9: a re-point is a removal plus
+//! an addition, and the successor arms the re-pointed route's fade-in). A lane-less route into an
+//! output keeps the master fold and is not ducked.
+//!
 //! The running plan keeps a [`DuckOverlay`] while the successor waits: the strips and routes
 //! phase 1 wrote, the removed sources that still feed that plan, and `S`. A later transaction in
 //! the same phase 1 writes no second ramp for anything in it and inherits its `S`.
@@ -116,10 +121,11 @@ pub struct StripTransition {
 }
 
 impl StripTransition {
-    /// Whether the transaction ducks a strip now: then the successor waits for `S`.
+    /// Whether the transaction ducks a strip or a route now: then the successor waits for `S`.
+    /// A route ducks alone when the transaction removes or re-points it (#1953a).
     #[must_use]
     pub fn ducks(&self) -> bool {
-        !self.strips.is_empty()
+        !self.strips.is_empty() || !self.routes.is_empty()
     }
 
     /// The strips the transaction ducks now (D1), sorted.
@@ -169,7 +175,7 @@ impl StripTransition {
     }
 
     /// `C`, the longest compensation delay, in the running plan, of a route out of a strip the
-    /// transaction ducks now (0 if none).
+    /// transaction ducks now or of a route it ducks alone (0 if none).
     #[must_use]
     pub const fn compensation(&self) -> u64 {
         self.compensation
@@ -231,13 +237,18 @@ fn sorted_ids<'a>(ids: impl Iterator<Item = &'a str>) -> Vec<Box<str>> {
 /// prepared successor restarts (`restarted`, its [`crate::PreparedHost::restarted_strips`]: a
 /// duck-swap, #1324 D4; none at a declared discontinuity, `base.discontinuity`), and that
 /// `overlay` does not list; the sources `overlay` lists that `next` keeps are restored
-/// ([`StripTransition::restored_sources`]). The records are the classifier's for the running plan's
-/// base with `overlay` laid over it, against the same with each strip to duck muted on both
-/// channels and each of its routes whose tap precedes the fader muted, all at `next`'s mute ramp:
+/// ([`StripTransition::restored_sources`]). The routes to duck alone (#1953a) are every route of
+/// `base.committed` with a live lane that `next` drops or re-points (another source, tap or
+/// destination), whose source and destination strips `next` keeps and nothing ducks; a lane-less
+/// route keeps the fold and is not one (1953b). The records are the classifier's for the running
+/// plan's base with `overlay` laid over it, against the same with each strip to duck muted on both
+/// channels, each of its routes whose tap precedes the fader muted and each route to duck alone
+/// muted, all at `next`'s mute ramp:
 /// exactly the records a value-only transaction making those mutes would write, so a strip or route
 /// already in the overlay gets no second write. `C` reads the running plan's compensation lines
 /// (`base.inventory`), keyed by the route's two edges, which add, over every route out of a
-/// ducked strip: a restarted strip's route lines must empty before `S` as a removed strip's do.
+/// ducked strip and every route ducked alone: a restarted strip's route lines must empty before
+/// `S` as a removed strip's do, and a removed route's last ducked frames leave its line by `S`.
 /// `C` also counts, into each carried strip's effects, every sidechain line from a ducked strip's
 /// `post_fader` or `post_pan` tap, and a ducked submix's `input`-tap sidechain line plus the
 /// longest route line into the submix when D1's exemption keeps the consumer carried (#1324 D4):
@@ -301,7 +312,46 @@ pub fn plan_strip_transition(
         ramp,
         compensation: 0,
     };
-    if transition.strips.is_empty() {
+    // #1953a (D15-9: a re-point is a removal plus an addition): every route with a live lane
+    // (`controls::route_rows_live`) that `next` drops or holds with another source, tap or
+    // destination, between two strips that keep playing, is muted in phase 1 like a ducked
+    // strip's route. A route of a strip ducked now or earlier, or into one, stays as it is: that
+    // strip's own duck silences it. A route already muted, in the overlay, or following an
+    // automated mute (#2011's) is skipped. A lane-less route (`post_fader` or `post_pan` into an
+    // output) keeps the master fold and still steps at adoption: 1953b's.
+    let quiet = |id: &str| {
+        transition
+            .strips
+            .binary_search_by(|held| (**held).cmp(id))
+            .is_ok()
+            || overlay.has_strip(id)
+            || !in_next(id)
+    };
+    let view = controls::ModelView::whole(committed);
+    let duck_routes: Vec<&Route> = committed
+        .routes
+        .iter()
+        .filter(|route| {
+            controls::route_rows_live(route)
+                && !route.mute
+                && !overlay.has_route(route.id.as_str())
+                && !crate::prepare::follows_automated_mute(view, route)
+                && !quiet(route_source_id(route).as_str())
+                && match &route.destination {
+                    RouteDestination::SubmixInput { submix_id } => !quiet(submix_id.as_str()),
+                    RouteDestination::OutputInput { output_id } => next
+                        .outputs
+                        .iter()
+                        .any(|output| output.id.as_str() == output_id.as_str()),
+                }
+                && !next.routes.iter().any(|kept| {
+                    kept.id == route.id
+                        && kept.source == route.source
+                        && kept.destination == route.destination
+                })
+        })
+        .collect();
+    if transition.strips.is_empty() && duck_routes.is_empty() {
         return Ok(transition);
     }
     let ducked = |id: &StableId| {
@@ -310,6 +360,7 @@ pub fn plan_strip_transition(
             .binary_search_by(|held| (**held).cmp(id.as_str()))
             .is_ok()
     };
+    let duck_route = |route: &Route| duck_routes.iter().any(|held| held.id == route.id);
 
     // C: the longest line of a route out of a ducked strip. A route's lines sit on its two edges.
     let lines = base.inventory.delay_lines();
@@ -329,7 +380,7 @@ pub fn plan_strip_transition(
     transition.compensation = committed
         .routes
         .iter()
-        .filter(|route| ducked(route_source_id(route)))
+        .filter(|route| ducked(route_source_id(route)) || duck_route(route))
         .map(route_line)
         .max()
         .unwrap_or(0);
@@ -410,7 +461,8 @@ pub fn plan_strip_transition(
         }
     }
     for route in &mut target.routes {
-        if ducked(route_source_id(route)) && route_tap_precedes_fader(route) {
+        if (ducked(route_source_id(route)) && route_tap_precedes_fader(route)) || duck_route(route)
+        {
             route.mute = true;
         }
     }
@@ -867,6 +919,46 @@ mod tests {
             p1.report.latency_samples,
             "C is the sum of b-main's two lines"
         );
+
+        // #1953a: a route with a lane that the successor drops or re-points between two kept
+        // strips ducks alone. A limiter on `c` makes `r`'s input arrive `L` late, so `b-send`
+        // (unlimited, `pre_fader` into `r`) has a destination line of `L`: `C`. The lane-less
+        // `b-main` (`post_pan` into the output) keeps the fold and ducks nothing.
+        let mut limited_c = model();
+        limited_c.tracks[2].inserts.effects.push(limiter("lim-c"));
+        let compiled = compile(&limited_c);
+        let prepared = crate::prepare::prepare_host_runtime(&compiled, &caps()).expect("prepares");
+        let committed = compiled.normalized_model();
+        let without = |edit: &dyn Fn(&mut SessionModel)| {
+            let mut next = committed.clone();
+            edit(&mut next);
+            plan_strip_transition(
+                &SuccessorBase::new(&prepared.inventory, committed, 2),
+                &DuckOverlay::new(),
+                &next,
+                &[],
+            )
+            .expect("the route's transition")
+        };
+        let removed = without(&|next| next.routes.retain(|route| route.id.as_str() != "b-send"));
+        let repointed = without(&|next| {
+            for route in &mut next.routes {
+                if route.id.as_str() == "b-send" {
+                    route.source = RouteSource::Track {
+                        track_id: id("b"),
+                        tap: SendTap::PostFader,
+                    };
+                }
+            }
+        });
+        for (case, transition) in [("removed", &removed), ("re-pointed", &repointed)] {
+            assert!(transition.ducks(), "{case}: the route ducks");
+            assert!(transition.strips().is_empty(), "{case}: b keeps playing");
+            assert_eq!(transition.routes(), [Box::<str>::from("b-send")], "{case}");
+            assert_eq!(transition.compensation(), latency, "{case}: C is b-send's line");
+        }
+        let lane_less = without(&|next| next.routes.retain(|route| route.id.as_str() != "b-main"));
+        assert!(!lane_less.ducks(), "a lane-less route keeps the fold");
     }
 
     /// `grown_strips` over `first -> second`: the predecessor prepared fresh, `second` prepared
