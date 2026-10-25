@@ -3278,9 +3278,9 @@ impl<L: Lane> FaderRampStage<L> {
     }
     // REALTIME_POLICY_END
 
-    /// Whether one lane and channel waits, muted, for an armed fade-in whose fire unmutes it
-    /// (issue #1288 D2, #2080 R1): the stage holds it at `+0.0` while the model holds it unmuted.
-    /// An armed channel whose fire stays muted reports `false`, as its model mute is the stage's.
+    /// `armed && opens` for one lane and channel (issue #1288 D2, #2080 R1): armed, and the fire
+    /// opens it, so the stage holds it at `+0.0` while the model holds it unmuted. An armed
+    /// channel whose fire stays muted reports `false`, as its model mute is the stage's.
     const fn is_armed(&self, lane: usize, channel: usize) -> bool {
         self.armed[channel][lane] && self.opens[channel][lane]
     }
@@ -5000,9 +5000,12 @@ impl BuiltinFaderBank {
     }
     // REALTIME_POLICY_END
 
-    /// Whether member lane `lane` waits, muted, for an armed fade-in that unmutes `channel` (`0`
-    /// left, `1` right): the stage holds it at `+0.0` while the model holds it unmuted (#2080
-    /// R1). `None` for a padding lane or a channel above `1`.
+    /// Whether member lane `lane` is armed on `channel` (`0` left, `1` right) *and* its fire
+    /// opens it: `armed && opens` (#2080 R1). Then the stage holds the channel at `+0.0` while the
+    /// model holds it unmuted. An armed channel whose fire stays muted (muted at the arm, or by
+    /// its last record before the fire) reports `false`: its model mute is the stage's. So
+    /// `is_muted && !is_armed` is the model's mute. `None` for a padding lane or a channel above
+    /// `1`.
     #[must_use]
     pub fn is_armed(&self, lane: usize, channel: usize) -> Option<bool> {
         if lane >= self.members || channel > 1 {
@@ -5730,8 +5733,9 @@ impl FaderMuteRampBuiltins {
     }
     // REALTIME_POLICY_END
 
-    /// Whether one lane (`0` left, `1` right) waits for an armed fade-in that unmutes it, as
-    /// [`BuiltinFaderBank::is_armed`]. `None` for a lane above `1`.
+    /// Whether one lane (`0` left, `1` right) is armed *and* its fire opens it: `armed && opens`
+    /// (#2080 R1), exactly as [`BuiltinFaderBank::is_armed`]. An armed lane whose fire stays
+    /// muted reports `false`. `None` for a lane above `1`.
     #[must_use]
     pub const fn is_armed(&self, lane: usize) -> Option<bool> {
         if lane > 1 {
