@@ -576,6 +576,21 @@ impl Legs {
     }
 }
 
+/// The lossy lane size a `CAPABILITIES_GET` reply `reply` reports.
+fn capabilities_telemetry_slots(reply: &[u8]) -> u64 {
+    let mut fields = [0_u16; 64];
+    let protocol::DecodedTypedResponseFrame::Success {
+        payload: protocol::DecodedSuccessResponsePayload::Capabilities(value),
+        ..
+    } = protocol::ProtocolCodec::default()
+        .decode_typed_response(reply, &mut protocol::DecodeScratch::new(&mut fields))
+        .expect("a capabilities reply")
+    else {
+        panic!("a capabilities reply")
+    };
+    value.telemetry_slots
+}
+
 /// The `CAPABILITIES_GET` reply `reply` with `added` merged into its ascending command list,
 /// `flags` set and, when `telemetry_slots` is `Some`, that lossy lane size, re-encoded by the codec
 /// so every length field matches. The browser's list must not hold an added ID already.
@@ -675,6 +690,13 @@ fn the_browser_and_the_c_abi_give_the_same_bytes_for_one_script() {
         capabilities_plus(&browser_reply, &[], 0, None),
         browser_reply,
         "1 capabilities: the browser's reply re-encodes to itself"
+    );
+    // #1588 removes this assertion when it sizes the browser's lane: until then the browser keeps
+    // its two-slot lossy lane, and only the C ABI's grows to one whole meter batch (#1587a).
+    assert_eq!(
+        capabilities_telemetry_slots(&browser_reply),
+        2,
+        "1 capabilities: the browser's lossy lane keeps two slots"
     );
     assert_eq!(
         capabilities_plus(

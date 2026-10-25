@@ -620,7 +620,6 @@ pub(crate) struct MeterTableRows {
     pub(crate) largest: u64,
 }
 
-/// The most entries a meter table holds under a control frame of `maximum_control_frame_bytes`.
 /// The most entries an accepted meter table holds under a control frame of
 /// `maximum_control_frame_bytes` (#1587a): every entry the provider serves is a peak entry of two
 /// records, and one batch carries at most [`host_core::MAXIMUM_METER_BATCH_RECORDS`], so the
