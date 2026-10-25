@@ -6243,6 +6243,8 @@ mod spectrum_ffi_tests {
                     .is_some_and(SpectrumAnalysis::stream_active)
             }));
 
+            assert_eq!(miso_engine_web_v1_spectrum_stream_reset(), RESULT_OK);
+
             // The tap moves to `eq0`: a rebuild commits, and the block after it adopts the
             // successor plan, whose capture is fresh.
             let (result, _) =
@@ -6269,6 +6271,25 @@ mod spectrum_ffi_tests {
                         .is_some_and(|analysis| !analysis.stream_active())
                 }),
                 "the analysis ended with the stream (by_service = {by_service})"
+            );
+            // The record says what `spectrum_stream_stop` would: the facts of the staging's
+            // analysis (its history reset once, below), not of the session's, which has none.
+            let (status, record_epoch, analysis_epoch) = with_spectrum_staging(|slot| {
+                let staging = slot.borrow();
+                (
+                    staging.stream_metadata.status,
+                    staging.stream_metadata.analysis_epoch,
+                    staging
+                        .analysis
+                        .as_ref()
+                        .map_or(0, SpectrumAnalysis::analysis_epoch),
+                )
+            });
+            assert_eq!(status, SPECTRUM_STREAM_STATUS_STOPPED);
+            assert!(analysis_epoch > 0, "the reset advanced the history's epoch");
+            assert_eq!(
+                record_epoch, analysis_epoch,
+                "the record carries the staging analysis's facts (by_service = {by_service})"
             );
             assert_eq!(
                 miso_engine_web_v1_spectrum_stream_reset(),
