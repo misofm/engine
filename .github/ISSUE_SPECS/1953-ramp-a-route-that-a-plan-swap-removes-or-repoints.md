@@ -103,7 +103,13 @@ watermark) predates #1325's two-phase machinery. The issue is split:
 - Review fold (attempt 1 verdict, root rulings): phase 1 (`plan_strip_transition`) counts in `C`
   the lines of every unsettled copy out of a ducked strip, so "remove a route, then remove its
   track" inside the copy's fade cannot cut its tail (MINOR-1). A carried `Settling(at)` takes
-  `at + own tail - displaced tail`, saturating (NIT-1).
+  `at + max(own tail - displaced tail, 0)` (NIT-1, corrected by MINOR-A: the line carry is
+  head-aligned, `CompensationDelay::adopt`). The four cases: a longer line, swap during the ramp
+  or after it: the settle moves later by the growth, which the longer line needs. A shorter line,
+  swap during the ramp: the settle stays at the displaced plan's sample, later than needed by the
+  shortening (a silent copy kept a little longer). A shorter line, swap after the ramp: the
+  settle stays too; the head-aligned carry may hold the fade's last samples until then, so an
+  earlier settle could drop them.
 - Stated limits, each with its successor gate:
   - Route count: a successor's copies are not counted against `maximum_routes` (`check_counts`
     reads `next`), so a plan may briefly hold up to that many extra transition routes, one per

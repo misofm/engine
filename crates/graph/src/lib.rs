@@ -4940,12 +4940,12 @@ fn carry_fade_arms(
             fired.set(pair.successor as usize, WATCH_SETTLED);
         }
         // #1953b: a settling entry settles when this plan's own tail has passed: a kept copy
-        // whose line changed length takes the difference.
+        // whose line grew waits for the growth. A shorter line never settles it earlier: the
+        // line carry is head-aligned, so the fade's last samples may still be in it.
         own.state = match from.state {
-            FadeArmState::Settling(at) => FadeArmState::Settling(
-                at.saturating_add(u64::from(own.tail_samples))
-                    .saturating_sub(u64::from(from.tail_samples)),
-            ),
+            FadeArmState::Settling(at) => FadeArmState::Settling(at.saturating_add(u64::from(
+                own.tail_samples.saturating_sub(from.tail_samples),
+            ))),
             state => state,
         };
     }
