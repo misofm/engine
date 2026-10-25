@@ -259,14 +259,14 @@ engine, the published ABI layout, the SDK and the browser host derive the same r
   `p_max_samples + q` frames (2,176 at 48 kHz / 128, 8.5 KiB per channel).
 - **2026-10-25, slice 1406b** (scope note `1406.md`): the hosts and pins. D4's premise that the
   browser host "already loads" the ABI layout (`preparedAbiLayout`) is stale: #1565A removed that
-  load with the browser's own live-command path. The host now fetches
-  `miso-engine-v1-abi-layout.json` beside itself (it is one of the artifact set's six files, #243)
-  only when the ring override is zero, and applies the published `sourceRing` rule after the
-  engine's ready message, so a rate the engine refuses keeps the engine's typed refusal. A layout
-  without the rule, or without the booted rate's row, is internal (255). Gate 4 holds 110 chunks
-  and refuses the 111th. `MUTATIONS.md` row 7's test was deleted by TA4: the row now names the
-  test that catches its mutant today (`host-core`'s
-  `default_ring_adds_the_largest_prime_and_a_quantum_to_the_stall_ring`), re-run red; row 8 re-run
-  red on the `stall_quanta == 38` assertion. The browser module's bytes change (the host JS is in
-  the artifact set); the browser matrix is not re-recorded (#1334 does that), only its label
-  renamed (D5).
+  load with the browser's own live-command path. A fetch of `miso-engine-v1-abi-layout.json`
+  beside the host on a zero override (commit `1165c8638`, gate 4 green, red on the old rule, on a
+  dropped `primeReserveQuanta` and on a private `+ 1`) breaks
+  `sdk/test/browser-defaults-evals.mjs`'s "current shipped host sends prepared module to worklet
+  without fetch or compile", so it is reverted; **the host bound and gate 4 stay open** for a root
+  decision (the host's source for the rule). The rest of 1406b lands: the `.d.ts`, DEPLOYMENT,
+  benchmark and derivation prose, D5's label rename and the regenerated matrix. `MUTATIONS.md`
+  row 7's test was deleted by TA4: the row now names the test that catches its mutant today
+  (`host-core`'s `default_ring_adds_the_largest_prime_and_a_quantum_to_the_stall_ring`), re-run
+  red; row 8 re-run red on the `stall_quanta == 38` assertion. The browser module's bytes do not
+  change (no Rust changes); the browser matrix is not re-recorded (#1334), only its label renamed.
