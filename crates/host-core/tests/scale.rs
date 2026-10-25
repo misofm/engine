@@ -5,6 +5,8 @@
 //! 65,537 tracks, each with its own source, a fader automation and a send into one of 64 submixes;
 //! every 8th track carries a sidechained compressor, and one VCA holds every track.
 
+use std::time::{Duration, Instant};
+
 use engine::realtime::{PlanarBufferMut, RenderIo, RenderTime};
 use host_core::{
     HostLiveControlHandles, HostLiveControlRequest, HostLiveLanes, HostPrepareCaps,
@@ -39,6 +41,11 @@ const FADER_DB: u32 = 5;
 /// Render quantum of the fixture, and blocks rendered: past the fader automation's end (960).
 const QUANTUM: usize = 128;
 const BLOCKS: usize = 8;
+
+/// The row's wall-clock bound, from the document build to the last rendered block: about 3.7 times
+/// the 65,537-track time measured on 2026-10-25 (the #1947 spec's doubling table), so a path
+/// quadratic in the track count fails it while a slower runner passes.
+const BOUND: Duration = Duration::from_secs(100);
 
 /// Every count and byte cap open, so only a fixed limit can refuse.
 fn caps() -> HostPrepareCaps {
@@ -250,7 +257,9 @@ fn render(prepared: &mut PreparedHost) -> Vec<u32> {
     for block in 0..BLOCKS {
         let base = block * QUANTUM;
         for (seed, source) in [(1, "src-9998"), (2, "src-9999")] {
-            let plane: Vec<f32> = (0..QUANTUM).map(|frame| signal(seed, base + frame)).collect();
+            let plane: Vec<f32> = (0..QUANTUM)
+                .map(|frame| signal(seed, base + frame))
+                .collect();
             prepared
                 .sources
                 .submit(
@@ -296,6 +305,7 @@ fn prepares_a_65_537_track_kitchen_sink_session_live_attached() {
     let tracks = TRACKS as usize;
     let submixes = SUBMIXES as usize;
     let sidechains = tracks / SIDECHAIN_EVERY as usize;
+    let started = Instant::now();
     let numbers: Vec<u32> = (0..TRACKS).collect();
     let (mut prepared, mut handles) = prepare(&kitchen_sink_document(&numbers));
 
@@ -305,7 +315,11 @@ fn prepares_a_65_537_track_kitchen_sink_session_live_attached() {
     assert_eq!(prepared.inventory.sources().len(), tracks);
     assert_eq!(handles.meters.len(), tracks + submixes);
     assert_eq!(prepared.inventory.meter_count(), tracks + submixes);
-    assert_eq!(handles.route_controls.len(), tracks, "one live send per track");
+    assert_eq!(
+        handles.route_controls.len(),
+        tracks,
+        "one live send per track"
+    );
     assert_eq!(prepared.inventory.live_route_count(), tracks);
     assert_eq!(
         handles
@@ -316,7 +330,10 @@ fn prepares_a_65_537_track_kitchen_sink_session_live_attached() {
         tracks,
         "every track's fader carries its automation's offsets cells"
     );
-    assert_eq!(handles.effect_controls.len(), tracks + submixes + sidechains);
+    assert_eq!(
+        handles.effect_controls.len(),
+        tracks + submixes + sidechains
+    );
     assert_eq!(handles.effect_observations.len(), sidechains);
 
     let last = tracks - 1;
@@ -353,5 +370,11 @@ fn prepares_a_65_537_track_kitchen_sink_session_live_attached() {
     assert!(
         render(&mut prepared) == expected,
         "the strip at index 65,536 renders as it does beside its key alone"
+    );
+    let elapsed = started.elapsed();
+    assert!(
+        elapsed < BOUND,
+        "the kitchen-sink build, prepare and render took {elapsed:?}, over {BOUND:?}: a per-track \
+         path has gone superlinear"
     );
 }
