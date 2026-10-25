@@ -477,7 +477,6 @@ describe("#1562b-K -- a managed observation subscription follows a rebuild", () 
       const index = () => engine.observationMap().bindings
         .find((b) => b.effectSlotId === "comp" && b.trackId === "t1").effectIndex;
       const adopted = await runUntil(engine, 4, 0, () => index() === 0, "the plan that moved comp renders");
-      assert.equal(index(), 0);
       // The restarted strip's effects start at rest (#1324 D2): the tap opens a fresh window.
       const next = await runUntil(engine, adopted, 2, async () => {
         await handle.pump();

@@ -384,6 +384,7 @@ fn capture_follows_newest_plan() {
         EditPath::Rebuild
     );
     assert_eq!(rig.arm("eq0"), Ok(2));
+    let mut waited = 0;
     let ready = loop {
         let start = rig.at;
         let used = rig.block();
@@ -399,9 +400,11 @@ fn capture_follows_newest_plan() {
                 adopted && watermark.first_sample == start,
                 "delivered from the adoption block, not before"
             );
+            assert!(waited > 0, "the capture waits for the duck-swap's adoption");
             break ready;
         }
         assert!(!adopted, "no capture after the adoption block");
+        waited += 1;
     };
     assert_eq!(ready.tag, 2);
     let members = response(ready).members;

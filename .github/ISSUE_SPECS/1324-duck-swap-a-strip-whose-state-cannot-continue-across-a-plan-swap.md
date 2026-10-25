@@ -434,7 +434,7 @@ the scalar oracle the strip restarts, so its `pre_fader` send restarts with it).
 **Known limits.** (1) A carried effect whose sidechain reads a ducked strip's pre-fader tap steps
 at `S` (1324b). (2) A pre-fader route that follows its source's automated mute has no six-word op,
 so it cannot be armed: it restarts at its prepared value at `S` (a step in). Arming a following
-route needs graph work outside this slice; it needs a successor issue. (3) A restarted submix's
+route needs graph work outside this slice: #2011. (3) A restarted submix's
 `D` adds the longest line of any route into it, not only of a line that starts at rest (D3 says
 the latter): its fade may start later than needed. (4) An insert's quality is no trigger any
 session can reach: every launch effect declares only `normal` (gate 3 lists five triggers). (5)
@@ -489,7 +489,7 @@ preparation refuses), pinned by host-core's
 `an_input_section_the_live_path_refuses_is_a_typed_refusal` (red with the assert back, and the
 in-place test red with it). Left for root: any other panic inside a rebuild after the withdrawal
 still drops the withdrawn candidate in a host that catches panics (a panic-safety question for
-#1310's withdraw-then-rebuild order).
+#1310's withdraw-then-rebuild order): #2010.
 
 **SDK evals.** `sdk/test/structure-evals.mjs` waits a duck-swap out with one bounded helper,
 `runUntil`: it renders until the state the test then asserts holds, within `duckBlocks` blocks

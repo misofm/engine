@@ -8303,6 +8303,7 @@ fn in_place_commands_equal_full_commands_through_the_c_abi() {
                 watermark_words(&full),
                 "step {step}"
             );
+            assert_eq!(watermark_words(&fast).4, 0, "step {step}: no transition fallback");
             assert_eq!(fast.summary(), full.summary(), "step {step}");
         }
     }
