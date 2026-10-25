@@ -227,6 +227,7 @@ fn controller_with_event_slots(
         reliable_response_slots: NonZeroUsize::new(1).expect("response"),
         reliable_event_slots: NonZeroUsize::new(event_slots).expect("event"),
         telemetry_slots: NonZeroUsize::new(1).expect("telemetry"),
+        counter_telemetry_slots: NonZeroUsize::new(1).expect("counter telemetry"),
     })
     .expect("queues");
     ProtocolController::new(
@@ -350,6 +351,7 @@ fn egress_controller(
         reliable_response_slots: NonZeroUsize::new(1).expect("response"),
         reliable_event_slots: NonZeroUsize::new(reliable_event_slots).expect("events"),
         telemetry_slots: NonZeroUsize::new(telemetry_slots).expect("telemetry"),
+        counter_telemetry_slots: NonZeroUsize::new(telemetry_slots).expect("counter telemetry"),
     })
     .expect("queues");
     ProtocolController::new(
