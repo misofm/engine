@@ -1955,6 +1955,16 @@ fn an_observe_in_a_structural_transaction_arms_the_new_effect_and_keeps_the_carr
         (3, 8 * 128, WINDOW_BLOCKS),
         "the carried tap keeps its grid: no restart at the adoption block"
     );
+    // The commit moved the counter past the tags its preparation issued: a later record's tag is
+    // fresh.
+    let length = rig
+        .apply(&[observe("comp3", false, WINDOW_BLOCKS)])
+        .expect("a reply");
+    let later = rig.observe_arm_tags(length);
+    assert!(
+        later.len() == 1 && later[0] > replied[1],
+        "a later record's tag {later:?} follows {replied:?}"
+    );
 }
 
 /// #1584 gate 4, supersession (#1310 with T2): a structural transaction subscribes `comp3`'s
