@@ -3120,6 +3120,8 @@ struct FadeRun {
     blocks: Vec<Vec<u32>>,
     arms: Vec<Vec<(u32, u32)>>,
     restarted: Vec<Vec<Box<str>>>,
+    /// Each successor's `graph::test_only_carry_counts`.
+    carries: Vec<[usize; 5]>,
     allocator: (u64, u64, u64),
 }
 
@@ -3158,6 +3160,7 @@ fn fade_run(
     let mut plan = CellPlan::fresh(a, backend);
     let mut arms = Vec::new();
     let mut restarted = Vec::new();
+    let mut carries = Vec::new();
     let mut allocator = (0, 0, 0);
     let mut add = |delta: bench_alloc::Counters| {
         allocator.0 += delta.allocations;
@@ -3188,6 +3191,9 @@ fn fade_run(
                     .expect("a graph plan"),
             );
             restarted.push(successor.live.prepared.restarted_strips().to_vec());
+            carries.push(graph::test_only_carry_counts(
+                &mut successor.live.prepared.plan,
+            ));
             successor
                 .live
                 .prepared
@@ -3248,6 +3254,7 @@ fn fade_run(
         blocks,
         arms,
         restarted,
+        carries,
         allocator,
     }
 }
@@ -3926,12 +3933,13 @@ fn a_fired_fade_does_not_repeat_on_every_width() {
     }
 }
 
-/// Issue #1392 gate 3 (root's reading of D5): the second transaction adds a transparent insert to
-/// the added track while its fade waits for the anchor. The strip restarts for its chain
-/// (`restarted_strips()` lists it) but its fader lane carries, armed, so its entry carries too and
-/// the fade still fires at the anchor: the run equals the post-edit session with the track muted
-/// and unmuted live there. Red if a restarted strip drops its entry while its lane imports
-/// `armed` (a mute that never lifts).
+/// Issue #1392 gate 3, as #1324a reads it (D2, D3): the second transaction adds a transparent
+/// insert to the added track while its fade waits for the anchor. The strip restarts for its chain
+/// (`restarted_strips()` lists it), so its fader lane does not carry and its pending entry is
+/// replaced by a fresh arm, still `Waiting` for the anchored source: the fade still fires at the
+/// anchor, and the run equals the post-edit session with the track muted and unmuted live there.
+/// Red if a swap that restarts the strip's fader drops its Waiting arm (the track enters at full
+/// gain at the swap), or carries the fader beside a fresh arm.
 #[test]
 fn a_chain_restarted_strip_still_fades() {
     let backend = Backend::current();
@@ -3967,6 +3975,12 @@ fn a_chain_restarted_strip_still_fades() {
         run.restarted[1].iter().any(|id| &**id == FADE_TRACK),
         "the insert restarts the strip"
     );
+    // Every strip's fader and matrix stage move, but the restarted strip's fader (#1324 D2).
+    assert_eq!(
+        run.carries[1][2],
+        2 * b2.model.strips().count() - 1,
+        "the restarted strip's fader lane does not carry"
+    );
     let reference = fade_run(
         &muted,
         &[],
@@ -3986,6 +4000,106 @@ fn a_chain_restarted_strip_still_fades() {
         &reference,
         backend,
     );
+}
+
+/// #1324a gate 4's session: the #1363 base, with `aux` holding a true-peak limiter and then a
+/// transparent compressor `second`, and a route `aux-in` from `aux`'s input tap into the bus, whose
+/// input arrives 486 samples late, so the route's line is 486 samples long; the untouched `eq0`
+/// holds a transparent compressor insert.
+fn whole_restart_model(second: &str) -> SessionModel {
+    let mut model = route_fade_base_limited(true);
+    add_limiter(&mut model, "aux", "lim");
+    let mut insert = transparent_insert();
+    insert.id = id(second);
+    track_mut(&mut model, "aux").inserts.effects.push(insert);
+    track_mut(&mut model, "eq0")
+        .inserts
+        .effects
+        .push(transparent_insert());
+    with_route(
+        model,
+        "aux-in",
+        "aux",
+        session::SendTap::Input,
+        into_bus(),
+        false,
+    )
+}
+
+/// #1324a gate 4 (D2, D3) at one width, the successor prepared between two render calls: B
+/// replaces `aux`'s second insert. `aux` is restarted, and none of its owners before its fader
+/// carries: its input section, its fader, both inserts (the surviving limiter too) and the line of
+/// its route from the input tap; its matrix carries. It is armed with `D` its limiter's 486
+/// samples, and its `input`-tap route with it at `D = 0`. Every other strip carries every owner:
+/// against a successor that changes nothing, the tables hold exactly `aux`'s entries fewer.
+fn a_restarted_strip_carries_nothing_before_its_fader(backend: Backend) {
+    let a = Session::compile(whole_restart_model("tc"));
+    let b = Session::compile(whole_restart_model("tc2"));
+    let ramp = LiveRamps::for_session(&a.model).mute_samples;
+    let mut plan = CellPlan::fresh(&a, backend);
+    let mut output = vec![f32::NAN; QUANTUM * 2];
+    for _ in 0..SWAP_BLOCK {
+        plan.live.render_into(&mut output, QUANTUM);
+    }
+    let mut unchanged = CellPlan::successor(
+        &a,
+        &plan.live.prepared.inventory,
+        &a.model,
+        &EditRamps::new(),
+        backend,
+    );
+    let mut replaced = CellPlan::successor(
+        &b,
+        &plan.live.prepared.inventory,
+        &a.model,
+        &EditRamps::new(),
+        backend,
+    );
+    let what = format!("{backend:?}");
+    assert!(
+        unchanged.live.prepared.restarted_strips().is_empty(),
+        "{what}"
+    );
+    assert_eq!(
+        replaced.live.prepared.restarted_strips(),
+        [Box::<str>::from("aux")],
+        "{what}"
+    );
+    let full = graph::test_only_carry_counts(&mut unchanged.live.prepared.plan);
+    let counts = graph::test_only_carry_counts(&mut replaced.live.prepared.plan);
+    assert_eq!(
+        [0, 1, 2, 3, 4].map(|table| full[table] - counts[table]),
+        [0, 1, 1, 2, 1],
+        "{what}: aux's input section, fader, two inserts and input-tap line do not move ({full:?})"
+    );
+    assert_eq!(
+        graph::test_only_fade_arms(&mut unchanged.live.prepared.plan).expect("a graph plan"),
+        []
+    );
+    assert_eq!(
+        graph::test_only_fade_arms(&mut replaced.live.prepared.plan).expect("a graph plan"),
+        [(486, ramp), (0, ramp)],
+        "{what}: aux's fader waits for its limiter, its input-tap route for nothing"
+    );
+    assert_eq!(
+        replaced
+            .live
+            .prepared
+            .plan
+            .adopt_predecessor_plan(&mut plan.live.prepared.plan),
+        CarryOutcome::Carried,
+        "{what}"
+    );
+}
+
+/// #1324a gate 4 on every width. Red if a restarted strip carries an owner before its fader (a
+/// surviving latent insert, its input section, a pre-fader line: the hole in front of the
+/// restarted owner, D2) or its fader, if it is not armed, or if an untouched strip loses a carry.
+#[test]
+fn a_restarted_strip_carries_nothing_before_its_fader_on_every_width() {
+    for backend in backends() {
+        a_restarted_strip_carries_nothing_before_its_fader(backend);
+    }
 }
 
 /// The oracle sees the fade: `reference` differs from `muted` rendered with no unmute.
