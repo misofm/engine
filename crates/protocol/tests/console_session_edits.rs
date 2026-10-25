@@ -932,3 +932,30 @@ fn set_track_console_without_set_console_is_refused_and_commits_nothing() {
         );
     }
 }
+
+/// Test value: turns red when `SetTrackEffectOrder` applies an order that lists a strict subset of
+/// the rack (silently dropping the unlisted effect) or accepts one with a duplicated ID.
+#[test]
+fn an_effect_order_that_is_not_an_exact_permutation_is_refused() {
+    let mut before = base();
+    let mut second = before.tracks[0].inserts.effects[0].clone();
+    second.id = id("eq-b");
+    before.tracks[0].inserts.effects.push(second);
+    let order = |effect_ids: Vec<StableId>| SessionEdit::SetTrackEffectOrder {
+        track_id: id("a"),
+        rack_name: RackName::Inserts,
+        effect_ids,
+    };
+    let mut model = before.clone();
+    assert_eq!(
+        apply_session_edit(&mut model, &order(vec![id("eq-b")])),
+        Err(SessionEditError::InvalidEffectOrder)
+    );
+    assert_eq!(model, before, "a refused subset order drops no effect");
+    // The store applies edits to a candidate it discards on refusal, so only the refusal is the
+    // contract here.
+    assert_eq!(
+        apply_session_edit(&mut before.clone(), &order(vec![id("eq"), id("eq")])),
+        Err(SessionEditError::InvalidEffectOrder)
+    );
+}

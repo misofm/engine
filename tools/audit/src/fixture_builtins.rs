@@ -5944,4 +5944,20 @@ mod tests {
             }
         }
     }
+
+    /// Test value: turns red when an uppercase JSONL hex word is accepted, so two spellings of one
+    /// corpus value would both pass the audit.
+    #[test]
+    fn a_jsonl_hex_word_must_be_lowercase() {
+        let object =
+            |text: &str| BTreeMap::from([("start".to_owned(), JsonValue::String(text.to_owned()))]);
+        assert_eq!(
+            json_object_hex(&object("00000000000000ab"), "start", 16),
+            Ok(0xab)
+        );
+        assert_eq!(
+            json_object_hex(&object("00000000000000AB"), "start", 16),
+            Err("JSONL field is not a lowercase 16-digit hex word: start".to_owned())
+        );
+    }
 }
