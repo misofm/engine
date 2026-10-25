@@ -168,3 +168,21 @@ instance, whose structural edit is the blocking rebuild, reported and counted, D
   byte for byte (compared once on 2026-10-25, 1,048,576 bytes, `Buffer.compare` 0).
 - **The matrix** gains prose, not a column: a new row gate would make the old `results.json` rows
   differ, and the one three-browser run could not then both check and re-record the matrix.
+
+## Evidence (2026-10-25, local, artifact `004462bd`)
+
+- **One three-browser run** (`npm run qualify -- --artifacts <dir> --sdk-root ../../../sdk --browser all
+  --check-matrix --record-matrix --candidate-commit 210797202... --self-test-mutations`, private
+  PulseAudio null sink): Chromium 151.0.7922.34, Firefox 153.0 and WebKit 26.5 pass every gate and
+  every mutation, and the matrix is re-recorded from it (D6). The capture digest is
+  `c51d28da...` in all three browsers and equals the Node reference; the one-block-late and the
+  skipped references are `76d0d95d...` and `6be08e08...`. Watermark `(2, 0, exact)`, commit and
+  adoption both at sample 0 (delay 0, recorded), zero underrun blocks, `blockingRebuilds` 0 -> 1,
+  `singleModeControlAllocations` +6,740, render-locked counts 0 on all 16 instances.
+- **#1697 gate 3, measured, not pinned.** The 1 MiB replace grows the module's memory from
+  2,883,584 to 21,889,024 bytes: **19,005,440 bytes**, below the projection
+  `1,048,576 * 20 = 20,971,520` in all three browsers. It is adopted at sample 640 (the replaced
+  source's track ramps out first), `blockingRebuilds` 0 -> 1, about 1.14 M control allocations.
+- **Red first.** Each new mutation is red in the self-test of every browser. One real mutant: the
+  shipped worklet with its `document` staging disabled (a scratch copy of the artifact, Chromium)
+  turns `structural-edit-path` red with `invalid_field` `session.replace.document_length`.
