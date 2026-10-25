@@ -90,10 +90,11 @@ fn common_error_payload_is_canonical_and_caller_owned() {
 
 /// #1629 gate 1. Queue kind 2 (the automation queue) is retired: a backpressure payload that
 /// names it fails typed decode, while the allocated kinds decode. Never reallocated. Kind 7 (the
-/// spectrum arm slot, #1944) is allocated without a queue generation, as the replay cache is.
+/// spectrum arm slot, #1944) and kind 8 (the track-response capture slot, #1578 D3) are allocated
+/// without a queue generation, as the replay cache is.
 ///
 /// Test value: red if the retired queue code decodes again or is given to another queue, or if
-/// the spectrum arm slot's code stops decoding or is decoded with a generation.
+/// a capacity-1 slot's code stops decoding or is decoded with a generation.
 #[test]
 fn a_backpressure_payload_naming_the_retired_automation_queue_is_refused() {
     let codec = codec();
@@ -128,7 +129,7 @@ fn a_backpressure_payload_naming_the_retired_automation_queue_is_refused() {
             "{allocated}"
         );
     }
-    for generationless in [6_u8, 7] {
+    for generationless in [6_u8, 7, 8] {
         assert!(
             decodes(&replay_cache, generationless).is_ok(),
             "{generationless}"
@@ -139,7 +140,7 @@ fn a_backpressure_payload_naming_the_retired_automation_queue_is_refused() {
             "queue kind {generationless} with a generation"
         );
     }
-    for refused in [0_u8, 2, 8] {
+    for refused in [0_u8, 2, 9] {
         assert_eq!(
             decodes(&reliable_response, refused),
             Err(DecodeError::InvalidTlv),
@@ -3959,6 +3960,264 @@ fn response_get_reply_shape_rules_are_refused_both_ways() {
     // A curve reply with a required field missing is not a reply.
     let (patched, count) = edited(&bytes, |f| remove(f, 2));
     assert!(codec.decode_response_result(&patched, count).is_err());
+}
+
+fn ready_member(section: ResponseMemberSection, kind: ResponseMemberKind) -> ResponseMember {
+    ResponseMember {
+        section,
+        effect: "miso.parametric-eq".to_owned(),
+        kind,
+        bypassed: false,
+        enabled_left: 0b101,
+        enabled_right: 0b011,
+        section_count: 3,
+    }
+}
+
+/// A ready `RESPONSE_READY` with both sides and one member of each section.
+fn ready_event(points: usize) -> ResponseReady {
+    let curve = (0..points).map(|index| -(index as f32)).collect::<Vec<_>>();
+    ResponseReady {
+        sequence: 9,
+        request_tag: 4,
+        strip_id: "vocal".to_owned(),
+        outcome: ResponseReadyOutcome::Ready(TrackResponseCapture {
+            captured_sample: 4_096,
+            sample_rate_hz: 48_000,
+            floor_db: -120.0,
+            frequencies_hz: (0..points).map(|index| 20.0 + index as f32).collect(),
+            left_db: Some(curve.clone()),
+            right_db: Some(curve),
+            excluded_count: 1,
+            members: vec![
+                ready_member(
+                    ResponseMemberSection::Builtins,
+                    ResponseMemberKind::InputFilters,
+                ),
+                ready_member(
+                    ResponseMemberSection::Console("bus_eq".to_owned()),
+                    ResponseMemberKind::ParametricEq,
+                ),
+                ResponseMember {
+                    bypassed: true,
+                    ..ready_member(
+                        ResponseMemberSection::Inserts("comp".to_owned()),
+                        ResponseMemberKind::Unavailable,
+                    )
+                },
+            ],
+        }),
+    }
+}
+
+fn refused_event() -> ResponseReady {
+    ResponseReady {
+        outcome: ResponseReadyOutcome::Refused {
+            status: crate::StatusCode::NotFound,
+            diagnostic: "response.strip.removed".to_owned(),
+        },
+        ..ready_event(2)
+    }
+}
+
+fn encode_ready(codec: &ProtocolCodec, value: &ResponseReady) -> Vec<u8> {
+    let mut bytes = vec![0_u8; codec.encoded_response_ready_len(value).expect("length")];
+    let written = codec
+        .encode_response_ready(value, &mut bytes)
+        .expect("encode");
+    assert_eq!(written, bytes.len());
+    bytes
+}
+
+fn ready_capture(value: &mut ResponseReady) -> &mut TrackResponseCapture {
+    match &mut value.outcome {
+        ResponseReadyOutcome::Ready(capture) => capture,
+        ResponseReadyOutcome::Refused { .. } => panic!("a ready event"),
+    }
+}
+
+/// #1578 gate 4, the codec half: both `RESPONSE_READY` forms round-trip exactly, and the codec
+/// refuses every other shape: on decode, a ready event without its axis, sides or capture fields
+/// or with a diagnostic, a refusal without its diagnostic or with any capture field, an outcome
+/// outside the four refused statuses, a member whose slot ID does not match its section, and masks
+/// past the section count; on encode, the same rules where the typed value can break them.
+///
+/// Red if a field or member is lost or reordered in the round trip, or one presence rule of D2 is
+/// not enforced in either direction (a client could then read a refusal as a capture, or a host
+/// write an event no client decodes).
+#[test]
+fn response_ready_round_trips_both_forms_and_refuses_every_other_shape() {
+    let codec = ProtocolCodec::default();
+    let ready = ready_event(4);
+    let refused = refused_event();
+    let ready_bytes = encode_ready(&codec, &ready);
+    let refused_bytes = encode_ready(&codec, &refused);
+    // Fields 1-4, 6-12 and three members; fields 1-5.
+    assert_eq!(
+        codec.decode_response_ready(&ready_bytes, 14),
+        Ok(ready.clone())
+    );
+    assert_eq!(
+        codec.decode_response_ready(&refused_bytes, 5),
+        Ok(refused.clone())
+    );
+
+    type Wire = fn(&mut Vec<Tlv>);
+    let ready_rules: [(&str, Wire); 9] = [
+        ("no axis", |f| remove(f, 9)),
+        ("no capture sample", |f| remove(f, 6)),
+        ("no excluded count", |f| remove(f, 12)),
+        ("neither side", |f| {
+            remove(f, 10);
+            remove(f, 11);
+        }),
+        ("a side of the wrong length", |f| set(f, 10, &[0; 12])),
+        ("a diagnostic", |f| insert(f, leaf(5, 9, b"response.limit"))),
+        ("a builtins member with a slot ID", |f| {
+            set(nth(f, 13, 1), 1, &[4]);
+        }),
+        ("an insert member without a slot ID", |f| {
+            remove(nth(f, 13, 2), 2)
+        }),
+        ("a mask past the section count", |f| {
+            set(nth(f, 13, 0), 6, &0b1000_u32.to_le_bytes());
+        }),
+    ];
+    for (name, wire) in ready_rules {
+        let (patched, count) = edited(&ready_bytes, wire);
+        assert_eq!(
+            codec.decode_response_ready(&patched, count),
+            Err(DecodeError::InvalidField),
+            "ready: {name}"
+        );
+    }
+    let refused_rules: [(&str, Wire); 5] = [
+        ("no diagnostic", |f| remove(f, 5)),
+        ("a curve", |f| insert(f, leaf(10, 15, &[0; 8]))),
+        ("a capture sample", |f| insert(f, leaf(6, 4, &[0; 8]))),
+        ("backpressure", |f| set(f, 4, &11_u16.to_le_bytes())),
+        ("invalid field", |f| set(f, 4, &5_u16.to_le_bytes())),
+    ];
+    for (name, wire) in refused_rules {
+        let (patched, count) = edited(&refused_bytes, wire);
+        assert_eq!(
+            codec.decode_response_ready(&patched, count),
+            Err(DecodeError::InvalidField),
+            "refused: {name}"
+        );
+    }
+
+    // The encoder refuses what the typed value can break.
+    type Typed = fn(&mut ResponseReady);
+    let typed_rules: [(&str, Typed); 7] = [
+        ("one axis point", |v| {
+            let capture = ready_capture(v);
+            capture.frequencies_hz.truncate(1);
+            capture.left_db.as_mut().expect("left").truncate(1);
+            capture.right_db.as_mut().expect("right").truncate(1);
+        }),
+        ("neither side", |v| {
+            let capture = ready_capture(v);
+            capture.left_db = None;
+            capture.right_db = None;
+        }),
+        ("a side of the wrong length", |v| {
+            ready_capture(v).right_db.as_mut().expect("right").pop();
+        }),
+        ("a mask past the section count", |v| {
+            ready_capture(v).members[0].enabled_right = 0b1000;
+        }),
+        ("a strip ID that is not a stable ID", |v| {
+            v.strip_id = "Vocal".to_owned();
+        }),
+        ("an empty diagnostic", |v| {
+            *v = refused_event();
+            if let ResponseReadyOutcome::Refused { diagnostic, .. } = &mut v.outcome {
+                diagnostic.clear();
+            }
+        }),
+        ("a backpressure outcome", |v| {
+            *v = refused_event();
+            if let ResponseReadyOutcome::Refused { status, .. } = &mut v.outcome {
+                *status = crate::StatusCode::Backpressure;
+            }
+        }),
+    ];
+    for (name, typed) in typed_rules {
+        let mut value = ready.clone();
+        typed(&mut value);
+        assert_eq!(
+            codec.encoded_response_ready_len(&value),
+            Err(EncodeError::InvalidField),
+            "{name}"
+        );
+    }
+}
+
+/// `response_ready_encoded_bound` is the exact frame length of the largest event it bounds: a
+/// ready event whose strip, slot and effect IDs are all 127 bytes, or, when that is smaller, a
+/// refusal with a 127-byte diagnostic.
+///
+/// Red if the arithmetic drifts from the encoder (#1578b's provider would then arm a capture
+/// whose event cannot be sent, or refuse one that fits).
+#[test]
+fn response_ready_encoded_bound_is_the_largest_frame_exactly() {
+    let codec = ProtocolCodec::default();
+    let long = |prefix: char| {
+        let mut id = String::from(prefix);
+        id.push_str(&"x".repeat(126));
+        id
+    };
+    let frame_len = |value: &ResponseReady| {
+        let mut frame = vec![0_u8; 1 << 20];
+        codec
+            .encode_event_frame_into(
+                &crate::TypedEventFrame {
+                    revision: crate::SessionRevision(3),
+                    payload: crate::EventPayload::ResponseReady(value),
+                },
+                &mut frame,
+            )
+            .expect("frame")
+    };
+    let refused = ResponseReady {
+        strip_id: long('s'),
+        outcome: ResponseReadyOutcome::Refused {
+            status: crate::StatusCode::Internal,
+            diagnostic: long('d'),
+        },
+        ..ready_event(2)
+    };
+    for points in [2_usize, 3, 64, 1000] {
+        for channels in [ParameterChannel::Left, ParameterChannel::Both] {
+            for owners in [0_usize, 1, 5] {
+                let mut value = ready_event(points);
+                value.strip_id = long('s');
+                let capture = ready_capture(&mut value);
+                if channels == ParameterChannel::Left {
+                    capture.right_db = None;
+                }
+                capture.members = (0..owners)
+                    .map(|_| ResponseMember {
+                        effect: long('e'),
+                        ..ready_member(
+                            ResponseMemberSection::Console(long('c')),
+                            ResponseMemberKind::ParametricEq,
+                        )
+                    })
+                    .collect();
+                assert_eq!(
+                    response_ready_encoded_bound(points, channels, owners),
+                    Some(frame_len(&value).max(frame_len(&refused))),
+                    "{points} points, {channels:?}, {owners} owners"
+                );
+            }
+        }
+    }
+    assert_eq!(
+        response_ready_encoded_bound(usize::MAX / 2, ParameterChannel::Both, 1),
+        None
+    );
 }
 
 /// `response_result_encoded_len` is the exact frame length of the reply the codec writes.

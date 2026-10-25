@@ -4759,12 +4759,165 @@ fn response_get_dispatches_refuses_and_replays_through_the_controller() {
     assert_eq!(header.status, StatusCode::Unavailable);
 }
 
-/// Gate 4: a peer's capability frame that lists `0x000e` without bit 14, or sets bit 14 without
-/// `0x000e`, is refused.
+fn response_ready_event(tag: u64) -> crate::ResponseReady {
+    crate::ResponseReady {
+        sequence: 0,
+        request_tag: tag,
+        strip_id: "vocal".to_owned(),
+        outcome: crate::ResponseReadyOutcome::Refused {
+            status: StatusCode::NotFound,
+            diagnostic: "response.strip.removed".to_owned(),
+        },
+    }
+}
+
+/// #1578 D3 and D4 at the protocol layer: `enqueue_response_ready_event` hands its event back
+/// unchanged, with no sequence consumed, when the reliable queue is full or the one cell is held;
+/// a queued event stays in the cell across a short output buffer and leaves it only when its
+/// complete frame (with the endpoint's next sequence) is delivered; and while the cell is held a
+/// strip `RESPONSE_GET` is `BACKPRESSURE` `response.capture.pending` with the capture-slot record
+/// and never reaches the provider, while a configuration request is still served.
 ///
-/// Red if the invariant check stops tying the flag to the message.
+/// Red if a refused enqueue loses or alters the event (an ack that precedes a drop), the cell is
+/// emptied before delivery or never emptied, a second event overwrites a held one, or a strip
+/// request is armed while an event is unread.
 #[test]
-fn a_capability_frame_must_tie_bit_14_to_the_response_message() {
+fn a_response_ready_event_is_held_until_delivered_and_holds_off_a_strip_request() {
+    let mut endpoint = controller(8);
+    let revision = endpoint.session().revision();
+    let mut output = vec![0_u8; 4096];
+    let strip_request = || {
+        let mut request = response_request(8);
+        request.target = crate::ResponseTarget::Strip("vocal".to_owned());
+        request.sections = false;
+        request
+    };
+    let ask = |endpoint: &mut ProtocolController<MockProvider>,
+               request_id: u64,
+               request: &crate::ResponseGetRequest| {
+        process_full_command(
+            endpoint,
+            &full_command(
+                request_id,
+                ExpectedRevision::Any,
+                crate::CommandPayload::ResponseGet(request),
+            ),
+        )
+    };
+
+    // The one reliable event slot is full: the event comes back unchanged.
+    endpoint
+        .queues
+        .try_enqueue_event(ReliableSlot::transport_state(
+            revision,
+            1,
+            crate::TransportState::Stopped,
+            SampleTime(0),
+            None,
+        ))
+        .expect("room for one event");
+    let sequence = endpoint.next_reliable_event_sequence;
+    let refused = endpoint
+        .enqueue_response_ready_event(revision, response_ready_event(1))
+        .expect_err("a full queue");
+    assert!(matches!(
+        refused.reason,
+        EventEgressError::ReliableQueueFull(_)
+    ));
+    assert_eq!(refused.event, response_ready_event(1));
+    assert!(!endpoint.response_ready_pending());
+    assert_eq!(endpoint.next_reliable_event_sequence, sequence);
+    assert!(
+        endpoint
+            .dequeue_reliable_event_frame_into(&mut output)
+            .expect("the transport event")
+            .is_some()
+    );
+
+    endpoint
+        .enqueue_response_ready_event(revision, response_ready_event(1))
+        .expect("queued");
+    assert!(endpoint.response_ready_pending());
+    assert_eq!(endpoint.next_reliable_event_sequence, sequence + 1);
+    // A held cell refuses a second event and hands it back.
+    let refused = endpoint
+        .enqueue_response_ready_event(revision, response_ready_event(2))
+        .expect_err("the cell is held");
+    assert_eq!(refused.reason, EventEgressError::ResponseReadyOccupied);
+    assert_eq!(refused.event, response_ready_event(2));
+
+    // While the cell is held, a strip request is refused before the provider sees it.
+    let calls = endpoint.provider().response_calls();
+    let crate::DecodedTypedResponseFrame::NonOk { header, payload } =
+        decode_response(&ask(&mut endpoint, 1, &strip_request()))
+    else {
+        panic!("expected a refusal");
+    };
+    assert_eq!(header.status, StatusCode::Backpressure);
+    assert_eq!(payload.diagnostics[0].code, "response.capture.pending");
+    assert_eq!(
+        payload.backpressure,
+        Some(super::RESPONSE_CAPTURE_BACKPRESSURE)
+    );
+    assert_eq!(endpoint.provider().response_calls(), calls);
+    // A configuration request is no capture and is served.
+    assert!(matches!(
+        decode_response(&ask(&mut endpoint, 2, &response_request(8))),
+        crate::DecodedTypedResponseFrame::Success { .. }
+    ));
+
+    // A short buffer keeps the event; a complete frame delivers it and empties the cell.
+    assert!(matches!(
+        endpoint.dequeue_reliable_event_frame_into(&mut [0_u8; 8]),
+        Err(EventEgressError::Encode(EncodeError::OutputTooSmall { .. }))
+    ));
+    assert!(endpoint.response_ready_pending());
+    let length = endpoint
+        .dequeue_reliable_event_frame_into(&mut output)
+        .expect("encode")
+        .expect("the event");
+    let mut fields = [0_u16; 64];
+    let decoded = ProtocolCodec::default()
+        .decode_typed_event(&output[..length], &mut DecodeScratch::new(&mut fields))
+        .expect("an event");
+    assert_eq!(decoded.header.message_id, MessageId::ResponseReady);
+    assert_eq!(decoded.header.revision, revision);
+    let crate::DecodedEventPayload::ResponseReady(event) = decoded.payload else {
+        panic!("expected RESPONSE_READY");
+    };
+    assert_eq!(
+        event,
+        crate::ResponseReady {
+            sequence,
+            ..response_ready_event(1)
+        }
+    );
+    assert!(!endpoint.response_ready_pending());
+    assert!(
+        endpoint
+            .dequeue_reliable_event_frame_into(&mut output)
+            .expect("empty")
+            .is_none()
+    );
+    // The cell is free: the strip request reaches the provider again.
+    let crate::DecodedTypedResponseFrame::NonOk { header, .. } =
+        decode_response(&ask(&mut endpoint, 3, &strip_request()))
+    else {
+        panic!("expected the provider's refusal");
+    };
+    assert_eq!(header.status, StatusCode::Unavailable);
+    assert_eq!(endpoint.provider().response_calls(), calls + 2);
+}
+
+/// Gate 4 (#1573), and #1578 gate 4's capability half: bit 14 means `RESPONSE_GET` (`0x000e`) and
+/// its `RESPONSE_READY` event (`0x8040`) together. The registry lists both with the bit, and a
+/// peer's capability frame that lists one without the other, or either without the bit, or the bit
+/// without them, is refused.
+///
+/// Red if the registry stops listing `0x8040` with `0x000e`, or the invariant check stops tying
+/// the flag, the command and the event to each other.
+#[test]
+fn a_capability_frame_must_tie_bit_14_to_the_response_command_and_event() {
     let codec = ProtocolCodec::default();
     let mut endpoint = controller(8);
     let response = endpoint.process(capability(1, b"tie"));
@@ -4787,7 +4940,8 @@ fn a_capability_frame_must_tie_bit_14_to_the_response_message() {
         .iter()
         .map(|id| u16::from_le_bytes([id[0], id[1]]))
         .collect::<Vec<_>>();
-    let rebuilt = |commands: &[u16], flags: u64| {
+    assert!(commands.contains(&0x000e) && events.contains(&0x8040));
+    let rebuilt = |commands: &[u16], events: &[u16], flags: u64| {
         let value = crate::Capabilities {
             minimum_version: decoded.minimum_version,
             maximum_version: decoded.maximum_version,
@@ -4808,7 +4962,7 @@ fn a_capability_frame_must_tie_bit_14_to_the_response_message() {
             maximum_telemetry_handles: decoded.maximum_telemetry_handles,
             maximum_transaction_edits: decoded.maximum_transaction_edits,
             supported_commands: commands,
-            supported_events: &events,
+            supported_events: events,
             flags: crate::CapabilityFlags(flags),
         };
         let mut payload = vec![0_u8; 4096];
@@ -4821,16 +4975,26 @@ fn a_capability_frame_must_tie_bit_14_to_the_response_message() {
         }
     };
     let flags = decoded.flags.0;
+    let cleared = flags & !(1 << 14);
     assert!(flags & (1 << 14) != 0);
-    assert!(rebuilt(&commands, flags).is_ok());
-    let without_message = commands
+    assert!(rebuilt(&commands, &events, flags).is_ok());
+    let without_command = commands
         .iter()
         .copied()
-        .filter(|id| *id != 14)
+        .filter(|id| *id != 0x000e)
         .collect::<Vec<_>>();
-    assert!(rebuilt(&without_message, flags).is_err());
-    assert!(rebuilt(&commands, flags & !(1 << 14)).is_err());
-    assert!(rebuilt(&without_message, flags & !(1 << 14)).is_ok());
+    let without_event = events
+        .iter()
+        .copied()
+        .filter(|id| *id != 0x8040)
+        .collect::<Vec<_>>();
+    assert!(rebuilt(&without_command, &events, flags).is_err());
+    assert!(rebuilt(&commands, &without_event, flags).is_err());
+    assert!(rebuilt(&without_command, &events, cleared).is_err());
+    assert!(rebuilt(&commands, &without_event, cleared).is_err());
+    assert!(rebuilt(&commands, &events, cleared).is_err());
+    assert!(rebuilt(&without_command, &without_event, flags).is_err());
+    assert!(rebuilt(&without_command, &without_event, cleared).is_ok());
 }
 
 /// #1594 gate 2 (spec gate 7): a `SPECTRUM_CONFIGURE` frame is handed to the session as

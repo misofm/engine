@@ -2234,10 +2234,13 @@ pub(crate) fn map_event_egress_error(error: EventEgressError) -> EventError {
                 required: u64::try_from(required).unwrap_or(u64::MAX),
             }
         }
-        EventEgressError::ReliableQueueFull(_) => EventError::Backpressure,
+        EventEgressError::ReliableQueueFull(_) | EventEgressError::ResponseReadyOccupied => {
+            EventError::Backpressure
+        }
         EventEgressError::Disabled
         | EventEgressError::DiagnosticStorageFull
         | EventEgressError::ObservationEndedCellMissing
+        | EventEgressError::ResponseReadyMissing
         | EventEgressError::Encode(_) => EventError::Internal,
     }
 }
