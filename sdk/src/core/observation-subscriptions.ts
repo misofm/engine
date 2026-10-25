@@ -2237,6 +2237,10 @@ export interface TrackResponseSubscription {
   readonly configuration: TrackResponseSubscriptionConfiguration;
   readonly bounds: TrackResponseSubscriptionBounds;
   readLatest(): TrackResponseResult | undefined;
+  /**
+   * Read the job when its cadence is due and deliver a changed result. On the headless engine the
+   * read is a query that settles at the next `render()` the app calls.
+   */
   pump(): Promise<TrackResponseSubscriptionNotification | undefined>;
   update(request: TrackResponseSubscriptionRequest): Promise<TrackResponseSubscriptionReceipt>;
   close(): Promise<void>;

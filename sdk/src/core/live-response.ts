@@ -1148,6 +1148,10 @@ export function trackResponseReadOf(
 export class TrackResponseRequester {
   readonly #transport: TrackResponseTransport;
   #tail: Promise<unknown> = Promise.resolve();
+  /** Set by `close`: the error every pending and later query rejects with. */
+  #closed: Error | undefined;
+  /** The rejection of the query waiting on its reply or its event, while one waits. */
+  #abort: ((error: Error) => void) | undefined;
 
   constructor(transport: TrackResponseTransport) {
     this.#transport = transport;
@@ -1165,7 +1169,18 @@ export class TrackResponseRequester {
     return run;
   }
 
+  /**
+   * End this requester: the query in flight and every queued one reject at once with `error`, and
+   * so does every later query. The engine calls it when it is disposed.
+   */
+  close(error: Error): void {
+    if (this.#closed !== undefined) return;
+    this.#closed = error;
+    this.#abort?.(error);
+  }
+
   async #run(request: TrackResponseQuery): Promise<TrackResponseResult> {
+    if (this.#closed !== undefined) throw this.#closed;
     const seen = new Map<bigint, ResponseReadyEvent>();
     let waiting: { readonly tag: bigint; readonly settle: (event: ResponseReadyEvent | Error) => void } | undefined;
     const unsubscribe = this.#transport.onControlEvent((event) => {
@@ -1195,12 +1210,15 @@ export class TrackResponseRequester {
         channels: request.channels ?? "both",
         maximumReplyBytes: request.responseLimits?.maximumResultBytes,
       });
+      // The deadline, or the engine's disposal, whichever comes first.
       const deadline = new Promise<never>((_resolve, reject) => {
+        this.#abort = reject;
         timer = setTimeout(
           () => reject(new MisoUsageError("live track response query exceeded its deadline")),
           deadlineMs,
         );
       });
+      deadline.catch(() => undefined);
       const reply = decodeResponseTagReply(await Promise.race([
         Promise.resolve(this.#transport.send(frame)),
         deadline,
@@ -1232,6 +1250,7 @@ export class TrackResponseRequester {
       ]);
       return trackResponseResultOf(event);
     } finally {
+      this.#abort = undefined;
       if (timer !== undefined) clearTimeout(timer);
       unsubscribe();
     }

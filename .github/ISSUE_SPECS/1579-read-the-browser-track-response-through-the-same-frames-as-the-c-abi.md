@@ -201,3 +201,17 @@ SDK public behaviour changes (record them in the changelog with the PR):
 7. `engine.onEvent` (both engines) never delivers a `RESPONSE_READY`.
 8. `TrackResponseSubscriptionBounds` takes `maximumPoints` from `maximumResponsePoints` and
    `maximumCaptureBytes` from `1 << 20` (same values as before).
+
+Root rulings on #1579a (2026-10-25):
+
+- The split of D5 is accepted: the browser-path deletions listed above move to #1579b.
+- `onEvent` skipping `RESPONSE_READY` stands for this slice; #1579b decides whether a
+  `ProtocolEvent` kind for it is exposed.
+- Gate 5 is not a source-grep gate (AGENTS.md refuses tests that grep source, and
+  `check-sdk-deletions.py` checks only numeric offsets since #1050). #1579b proves the deletion by
+  the code being gone and its tests deleted.
+- Disposing an engine rejects every pending and queued track response query at once with the error
+  of a call on a disposed engine (`MisoUsageError` "this engine was disposed; boot a new one"), not
+  at the deadline. `loadSession` disposes first, so it does the same.
+- Behaviour change 3 is D2's behaviour; the doc comments of the headless `subscribeTrackResponse`
+  and of `TrackResponseSubscription.pump` say the read settles at the next `render()`.

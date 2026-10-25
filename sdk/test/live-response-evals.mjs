@@ -538,8 +538,15 @@ test("candidate Wasm reads the applied state at a render, one capture at a time"
       (error) => error instanceof MisoEngineError && error.code === "response.reply_too_large"
         && error.result === ABI_LAYOUT.constants.resultCodes.find((row) => row.name === "refusedBudget").value,
     );
+    // Dispose rejects a pending query at once, with the error a call on a disposed engine gets.
+    // Test value: red if a pending query waits for its deadline after the engine is gone.
+    const pending = engine.queryTrackResponse(request);
+    for (let tick = 0; tick < 4; tick += 1) await new Promise((resolve) => setImmediate(resolve));
+    const disposedAt = Date.now();
     engine.dispose();
-    await assert.rejects(engine.queryTrackResponse(request), MisoUsageError);
+    await assert.rejects(pending, (error) => error instanceof MisoUsageError && /was disposed/.test(error.message));
+    assert.ok(Date.now() - disposedAt < 1_000, "rejected at dispose, not at the deadline");
+    await assert.rejects(engine.queryTrackResponse(request), (error) => error instanceof MisoUsageError && /was disposed/.test(error.message));
   } finally {
     if (engine.state() !== "disposed") engine.dispose();
   }

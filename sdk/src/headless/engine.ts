@@ -273,7 +273,11 @@ export class OfflineEngine {
     return this.#observationOwner().subscribe(request).then((receipt) => receipt.handle);
   }
 
-  /** Subscribe to one selected track response; values are refreshed by `pump()`. */
+  /**
+   * Subscribe to one selected track response; values are refreshed by `pump()`. Each read is a
+   * track response query, which settles at the next `render()` the app calls: the subscription and
+   * each `pump()` that reads settle only once the app renders.
+   */
   subscribeTrackResponse(request: TrackResponseSubscriptionRequest): Promise<TrackResponseSubscription> {
     return this.#observationOwner().subscribeTrackResponse(request).then((receipt) => receipt.handle);
   }

@@ -329,6 +329,9 @@ export interface MeterFrame {
   readonly submixGrDb: Float32Array;
 }
 
+/** The error of a call on a disposed engine, and of a track response query it left pending. */
+const DISPOSED = "this engine was disposed; boot a new one";
+
 /** A staged-and-booted engine instance. */
 export class WasmBoundary {
   readonly #exports: ExportTable;
@@ -444,7 +447,7 @@ export class WasmBoundary {
 
   #live(): number {
     if (this.#handle === 0) {
-      throw new MisoUsageError("this engine was disposed; boot a new one");
+      throw new MisoUsageError(DISPOSED);
     }
     return this.#handle;
   }
@@ -1618,6 +1621,8 @@ export class WasmBoundary {
    */
   dispose(): void {
     if (this.#handle === 0) return;
+    // A pending query rejects now, with the error a call on a disposed engine gets.
+    this.#trackResponse?.close(new MisoUsageError(DISPOSED));
     this.#trackResponse = undefined;
     this.#spectrum?.close();
     this.#spectrum = undefined;
