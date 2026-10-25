@@ -1578,6 +1578,23 @@ impl Rig {
             .read()
     }
 
+    /// The published state of the newest plan's tap 0 of insert `index` of `strip` (#1585 D2).
+    fn state_at(&self, strip: &str, index: u32) -> engine::realtime::ObservationState {
+        self.session
+            .test_pending_providers()
+            .last()
+            .unwrap_or(self.session.test_providers())
+            .test_observations()
+            .iter()
+            .find(|handle| {
+                &*handle.track_id == strip && handle.address == LiveEffectAddress::insert(index)
+            })
+            .expect("the insert's readers")
+            .readers[0]
+            .read_state()
+            .expect("a whole read")
+    }
+
     fn render_blocks(&mut self, blocks: u64) {
         for _ in 0..blocks {
             self.render();
@@ -1841,9 +1858,37 @@ fn an_observe_in_a_structural_transaction_arms_the_new_effect_and_keeps_the_carr
         rig.session.observation_bindings().window_of(&new_key),
         Some(WINDOW_BLOCKS)
     );
+    // #1585 D4: the commit tags the transaction's record, after every earlier record's tag, and
+    // the new binding and the tap's slot entry hold it.
+    let issued = |rig: &Rig, strip: &str, effect: &str| {
+        rig.session.observation_issued_tag(&ObservationKeyRef {
+            strip_id: strip.as_bytes(),
+            rack: LiveEffectRack::Inserts,
+            effect_id: effect.as_bytes(),
+            tap_id: 1,
+        })
+    };
+    let new_tag = issued(&rig, "comp2", "comp-b");
+    assert!(
+        new_tag > issued(&rig, "comp1", "comp"),
+        "the structural record has a fresh tag"
+    );
+    let bound = rig
+        .session
+        .observation_bindings()
+        .bindings()
+        .iter()
+        .find(|binding| binding.key == new_key)
+        .map(|binding| binding.arm_tag);
+    assert_eq!(bound, Some(new_tag), "the binding holds the record's tag");
     // The swap block (block 5) adopts the successor, then three more: one window each.
     let adopted_at = rig.block * 128;
     rig.render_blocks(4);
+    assert_eq!(
+        rig.state_at("comp2", 1).arm_tag,
+        new_tag,
+        "render published the record's tag"
+    );
     let fresh = rig.window_at("comp2", 1).expect("the new tap's window");
     assert_eq!(
         (fresh.sequence, fresh.first_sample, fresh.blocks),

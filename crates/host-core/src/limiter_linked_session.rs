@@ -509,10 +509,11 @@ fn push(console: &mut Console, channel: usize, record: EffectControlRecord) {
         tap_index,
         armed,
         window_blocks,
+        ..
     } = record
     {
         producer
-            .try_push_observe(tap_index, armed, window_blocks)
+            .try_push_observe(tap_index, armed, window_blocks, 0)
             .unwrap_or_else(|_| panic!("room in control channel {channel}'s queue"));
         return;
     }
@@ -552,6 +553,7 @@ fn run(backend: Backend) -> Run {
                 tap_index: 0,
                 armed: true,
                 window_blocks: 1,
+                arm_tag: 0,
             },
         );
     }
