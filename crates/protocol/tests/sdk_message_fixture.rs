@@ -202,8 +202,8 @@ fn counter_ids() -> Vec<CounterId> {
     found
 }
 
-/// A meter table entry as the SDK spells it (#1583 D1): the target, the strip ID of a strip target,
-/// and the metric.
+/// A meter table entry as the SDK spells it (#1583 D1, #1690 D3): the target, the strip ID of a
+/// strip target, and the metric.
 fn meter_entry_json(entry: &MeterEntry) -> J {
     let mut fields = Vec::new();
     match &entry.target {
@@ -275,6 +275,10 @@ fn full_telemetry() -> TelemetryConfiguration {
             },
             MeterEntry {
                 target: MeterTarget::Strip("vocal".into()),
+                metric: MeterMetric::GainReduction,
+            },
+            MeterEntry {
+                target: MeterTarget::Master,
                 metric: MeterMetric::GainReduction,
             },
         ],
