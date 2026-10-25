@@ -5,6 +5,9 @@
 //! nine-track EQ fixture cut to two tracks, at 48 kHz: input filters on every strip, the EQ
 //! console slot `eq`, and an EQ insert on `eq0`.
 
+#[path = "support/adoption.rs"]
+mod adoption;
+
 use control_plane::{
     CompiledChildren, ControlAdapter, ControlLimits, EventLane, PlanResources, PlanState,
     RuntimePreparer, SessionState, compile_children,
@@ -181,6 +184,26 @@ impl Rig {
         used
     }
 
+    /// The applied revision, from the plan's watermark.
+    fn applied(&self) -> engine::realtime::PlanWatermark {
+        self.plan.queries().watermark().expect("a watermark")
+    }
+
+    /// Renders and services block by block until the plan applies the committed revision: a
+    /// rebuild that restarts a strip is a duck-swap, adopted at its `S` (#1324a).
+    fn render_until_applied(&mut self) {
+        let revision = self.revision;
+        adoption::render_until_applied(
+            self,
+            revision,
+            |rig| rig.applied().revision,
+            |rig| {
+                rig.block();
+                rig.session.service().expect("service");
+            },
+        );
+    }
+
     /// One `service` step; the delivered capture result, taken and released.
     fn service(&mut self) -> Option<ResponseReady> {
         self.session.service().expect("service");
@@ -283,6 +306,17 @@ fn add_insert(name: &str, position: u32) -> SessionEdit {
     }
 }
 
+/// A muted copy of `eq1` named `name` on its source, with no route: a structural edit that
+/// restarts no strip.
+fn muted_track(name: &str) -> SessionEdit {
+    let model = session::parse_session_json(SESSION).expect("fixture");
+    let mut track = model.tracks[1].clone();
+    track.id = id(name);
+    track.fader.left_mute = true;
+    track.fader.right_mute = true;
+    SessionEdit::UpsertTrack { track }
+}
+
 fn response(ready: ResponseReady) -> TrackResponse {
     ready.result.expect("a track response")
 }
@@ -291,8 +325,9 @@ fn response(ready: ResponseReady) -> TrackResponse {
 /// or delivered (`Pending`): none leaves a tag or a pending state, so the first capture is tag 1
 /// and the next tag 2. The first capture is delivered after one block and equals the composition
 /// of the test's own capture after that block. A capture armed before an edit that adds an insert
-/// is answered with the insert; one armed on `eq1` before an edit that removes it is
-/// `StripRemoved`. A request keeps its tag.
+/// is answered by the running plan the duck-swap keeps until `S` (#1324a), without the insert; one
+/// armed before an edit that restarts no strip is answered from the plan that holds the edit; one
+/// armed on `eq1` before an edit that removes it is `StripRemoved`. A request keeps its tag.
 ///
 /// Test value: red if the render step captures before the block (from the plan the block
 /// displaced) or from other owners than the plan holds, if a replacement's epoch is not recorded
@@ -341,12 +376,9 @@ fn capture_follows_newest_plan() {
     assert_eq!(response(ready), expected);
     assert_eq!(rig.service(), None, "a result is delivered once");
 
-    // Gate 3, the keep branch: a rebuild that adds an insert, due 4 blocks later; a capture armed
-    // after its commit waits for the adoption, and no block allocates or frees, the swap block
-    // included.
-    let due = rig.at + 4 * QUANTUM as u64;
-    rig.session
-        .test_set_next_adoption(engine::realtime::PlanAdoption::NoEarlierThan(due));
+    // Gate 3, the keep branch: a rebuild that adds an insert, a duck-swap adopted blocks later at
+    // its `S` (#1324a); a capture armed after its commit waits for the adoption, and no block
+    // allocates or frees, the swap block included.
     assert_eq!(
         rig.transact(&[add_insert("eq-added", 1)]),
         EditPath::Rebuild
@@ -360,11 +392,16 @@ fn capture_follows_newest_plan() {
             (0, 0),
             "the block at {start} allocated or freed"
         );
+        let watermark = rig.applied();
+        let adopted = watermark.revision >= rig.revision;
         if let Some(ready) = rig.service() {
-            assert_eq!(start, due, "delivered from the adoption block, not before");
+            assert!(
+                adopted && watermark.first_sample == start,
+                "delivered from the adoption block, not before"
+            );
             break ready;
         }
-        assert!(start < due, "no capture after the adoption block");
+        assert!(!adopted, "no capture after the adoption block");
     };
     assert_eq!(ready.tag, 2);
     let members = response(ready).members;
@@ -380,15 +417,30 @@ fn capture_follows_newest_plan() {
         "input filters, the console slot, two inserts"
     );
 
-    // Gate 3, the stale branch: armed before a structural edit, answered from the plan that holds
-    // the edit.
+    // Gate 3, a duck-swap: armed before an edit that adds an insert, which restarts `eq0`, so the
+    // running plan renders on until `S` (#1324a) and answers it, without the insert, as it answers
+    // a capture armed before a removal (#1325).
     assert_eq!(rig.arm("eq0"), Ok(3));
     assert_eq!(
         rig.transact(&[add_insert("eq-later", 2)]),
         EditPath::Rebuild
     );
-    let ready = rig.deliver(4);
+    let ready = rig.deliver(1);
     assert_eq!(ready.tag, 3);
+    assert_eq!(
+        response(ready).members.len(),
+        4,
+        "two inserts: the running plan"
+    );
+    rig.render_until_applied();
+
+    // Gate 3, the stale branch: armed before a structural edit that restarts no strip (a muted
+    // track added), so the next block adopts its plan: answered from the plan that holds the edit
+    // and the insert before it.
+    assert_eq!(rig.arm("eq0"), Ok(4));
+    assert_eq!(rig.transact(&[muted_track("eq-muted")]), EditPath::Rebuild);
+    let ready = rig.deliver(4);
+    assert_eq!(ready.tag, 4);
     assert_eq!(response(ready).members.len(), 5, "three inserts");
 
     // Gate 3: armed on a strip an edit then removes.
@@ -401,7 +453,7 @@ fn capture_follows_newest_plan() {
             rig.at + 2 * QUANTUM as u64,
         ));
     assert_eq!(rig.transact(&[add_insert("eq-last", 3)]), EditPath::Rebuild);
-    assert_eq!(rig.arm("eq1"), Ok(4));
+    assert_eq!(rig.arm("eq1"), Ok(5));
     let path = rig.transact(&[
         SessionEdit::RemoveRoute {
             route_id: id("eq1-main"),
@@ -414,7 +466,7 @@ fn capture_follows_newest_plan() {
     let ready = rig.deliver(256);
     assert_eq!(
         (ready.tag, &*ready.strip_id, ready.result),
-        (4, "eq1", Err(ResponseCaptureFailure::StripRemoved))
+        (5, "eq1", Err(ResponseCaptureFailure::StripRemoved))
     );
 }
 
@@ -575,8 +627,7 @@ fn a_capture_held_across_a_shrinking_rebuild_stays_within_its_charge() {
             rig.transact(&[add_insert(name, position)]),
             EditPath::Rebuild
         );
-        rig.block();
-        rig.session.service().expect("service");
+        rig.render_until_applied();
     }
     let mark = bench_support::alloc::current_thread_counters();
     rig.session
