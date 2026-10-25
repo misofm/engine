@@ -27,7 +27,8 @@ use session::{
     Console, Effect, EffectIdentity, EffectQuality, LinkMode, Route, RouteDestination, RouteSource,
     SendTap, SessionModel, Sidechain, SidechainDeclaration, StableId, Submix, parse_session_json,
 };
-use successor::{Session, caps};
+use engine::realtime::{PlanAdoption, SwapOutcome};
+use successor::{Block, Feed, Session, caps, exchange, render};
 
 const FIXTURE: &str = include_str!("../../../fixtures/session/v1/parametric-eq-nine-track.json");
 const QUANTUM: u64 = 128;
@@ -208,6 +209,7 @@ struct Edit {
     b: Session,
     caps: HostPrepareCaps,
     host_a: PreparedHost,
+    backend: Backend,
 }
 
 impl Edit {
@@ -216,17 +218,20 @@ impl Edit {
     }
 
     fn with_caps(a: SessionModel, b: SessionModel, caps: HostPrepareCaps) -> Self {
+        Self::on(a, b, caps, backend())
+    }
+
+    fn on(a: SessionModel, b: SessionModel, caps: HostPrepareCaps, backend: Backend) -> Self {
         let a = Session::compile(finish(a));
         let b = Session::compile(finish(b));
-        let host_a = host_core::test_only_prepare_host_runtime_with_live_controls_on(
-            &a.compiled,
-            &caps,
-            &HostLiveControlRequest::default(),
-            backend(),
-        )
-        .unwrap_or_else(|failure| panic!("A: {failure:?}"))
-        .0;
-        Self { a, b, caps, host_a }
+        let host_a = fresh(&a, &caps, backend);
+        Self {
+            a,
+            b,
+            caps,
+            host_a,
+            backend,
+        }
     }
 
     fn base(&self) -> SuccessorBase<'_> {
@@ -234,14 +239,7 @@ impl Edit {
     }
 
     fn prepare(&self, base: SuccessorBase<'_>) -> Result<PreparedHost, PrepareDiagnostics> {
-        host_core::test_only_prepare_host_runtime_with_live_controls_successor_on(
-            &self.b.compiled,
-            &self.caps,
-            &HostLiveControlRequest::default(),
-            base,
-            backend(),
-        )
-        .map(|(host, _)| host)
+        successor_of(&self.b, &self.caps, base, self.backend)
     }
 
     fn decide(&self, config: &WarmConfig) -> WarmDecision {
@@ -280,6 +278,35 @@ impl Edit {
 
 fn backend() -> Backend {
     Backend::current()
+}
+
+/// `session` prepared with no predecessor, through the live-controls entry.
+fn fresh(session: &Session, caps: &HostPrepareCaps, backend: Backend) -> PreparedHost {
+    host_core::test_only_prepare_host_runtime_with_live_controls_on(
+        &session.compiled,
+        caps,
+        &HostLiveControlRequest::default(),
+        backend,
+    )
+    .unwrap_or_else(|failure| panic!("fresh: {failure:?}"))
+    .0
+}
+
+/// `session` prepared as the successor `base` describes, through the live-controls entry.
+fn successor_of(
+    session: &Session,
+    caps: &HostPrepareCaps,
+    base: SuccessorBase<'_>,
+    backend: Backend,
+) -> Result<PreparedHost, PrepareDiagnostics> {
+    host_core::test_only_prepare_host_runtime_with_live_controls_successor_on(
+        &session.compiled,
+        caps,
+        &HostLiveControlRequest::default(),
+        base,
+        backend,
+    )
+    .map(|(host, _)| host)
 }
 
 fn arrival(host: &PreparedHost, node: &GraphNodeId) -> u64 {
@@ -777,4 +804,358 @@ fn a_join_outside_the_leads_restart_set_is_the_invariant_error() {
         })
         .expect_err("a join outside R");
     assert_eq!(refused, invariant());
+}
+
+// -------------------------------------------------------------------------------------------------
+// #1355: render's readiness check and the adoption of a warm successor with its prime. Every gate
+// streams a predecessor A, publishes the warm successor W `Primed { lead_blocks: P / q }` through
+// the plan exchange (D3) after setting the carried ring's `prime_required` flag, and renders on.
+// "A continued" is A rendered on with no swap and the same host commands.
+// -------------------------------------------------------------------------------------------------
+
+/// The fixture's one source, which every track reads.
+const SOURCE: &str = "fixture-source";
+/// Blocks of PCM a stream can read: well inside the fixture source's region.
+const PCM_BLOCKS: usize = 300;
+
+/// The host's feed of the one source: generation `generation` from source frame `base` at the
+/// source-read sample `anchor` on, kept `ahead` frames past the frame the next block reads.
+struct Feeder {
+    planes: [Vec<f32>; 2],
+    generation: u64,
+    base: u64,
+    anchor: u64,
+    next: u64,
+    ahead: u64,
+    rate: u32,
+}
+
+impl Feeder {
+    fn new(rate: u32, ahead_blocks: u64) -> Self {
+        let Feed { planes, .. } = Feed::with_blocks(SOURCE, 7, PCM_BLOCKS);
+        Self {
+            planes,
+            generation: 1,
+            base: 0,
+            anchor: 0,
+            next: 0,
+            ahead: ahead_blocks * QUANTUM,
+            rate,
+        }
+    }
+
+    /// Submit whole blocks until the source holds `ahead` frames past the block that reads from
+    /// the source-read sample `read`.
+    fn top_up(&mut self, sources: &mut host_core::SourceControlSet, read: u64) {
+        let until = self.base + (read + self.ahead).saturating_sub(self.anchor);
+        while self.next < until {
+            let range = self.next as usize..(self.next + QUANTUM) as usize;
+            sources
+                .submit(
+                    SOURCE.as_bytes(),
+                    host_core::SourceSubmission {
+                        generation: self.generation,
+                        start_frame: self.next,
+                        sample_rate_hz: self.rate,
+                        planes: &[&self.planes[0][range.clone()], &self.planes[1][range]],
+                        frames: QUANTUM as u32,
+                        end_of_region: false,
+                    },
+                )
+                .unwrap_or_else(|error| panic!("submit at {}: {error:?}", self.next));
+            self.next += QUANTUM;
+        }
+    }
+
+    /// Seek the source to generation `generation` from `frame`, entering at the source-read
+    /// sample `anchor`, and feed that generation from then on.
+    fn seek_at(
+        &mut self,
+        sources: &mut host_core::SourceControlSet,
+        generation: u64,
+        frame: u64,
+        anchor: u64,
+    ) {
+        sources
+            .seek_at(SOURCE.as_bytes(), generation, frame, anchor)
+            .unwrap_or_else(|error| panic!("seek_at: {error:?}"));
+        self.generation = generation;
+        self.base = frame;
+        self.anchor = anchor;
+        self.next = frame;
+    }
+}
+
+/// One stream of plans through the plan exchange, as a host drives it.
+struct Stream {
+    publisher: engine::realtime::PlanPublisher,
+    owner: engine::realtime::RealtimePlanOwner,
+    _retirer: engine::realtime::PlanRetirer,
+    sources: host_core::SourceControlSet,
+    /// The newest published plan's inventory and committed model: the next edit's base.
+    inventory: host_core::PlanStateInventory,
+    committed: SessionModel,
+    /// The running plan's source-read offset, and the pending candidate's.
+    offset: u64,
+    pending: Option<u64>,
+    revision: u64,
+    feeder: Feeder,
+    blocks: Vec<Block>,
+    caps: HostPrepareCaps,
+    backend: Backend,
+}
+
+impl Stream {
+    fn start(
+        host: PreparedHost,
+        committed: &SessionModel,
+        caps: &HostPrepareCaps,
+        backend: Backend,
+        ahead_blocks: u64,
+    ) -> Self {
+        let rate = host.report.sample_rate_hz;
+        let PreparedHost {
+            plan,
+            sources,
+            inventory,
+            ..
+        } = host;
+        let offset = inventory.source_read_offset();
+        let (publisher, owner, retirer) = exchange(plan);
+        Self {
+            publisher,
+            owner,
+            _retirer: retirer,
+            sources,
+            inventory,
+            committed: committed.clone(),
+            offset,
+            pending: None,
+            revision: 1,
+            feeder: Feeder::new(rate, ahead_blocks),
+            blocks: Vec::new(),
+            caps: caps.clone(),
+            backend,
+        }
+    }
+
+    /// The source-read sample the next block reads from on the running plan.
+    fn read(&self) -> u64 {
+        self.owner.next_absolute_sample() + self.offset
+    }
+
+    /// Render `count` blocks, topping the feed up before each.
+    fn render(&mut self, count: usize) {
+        for _ in 0..count {
+            let read = self.read();
+            self.feeder.top_up(&mut self.sources, read);
+            let block = render(&mut self.owner);
+            if block.swap == SwapOutcome::Applied {
+                self.offset = self.pending.take().expect("a pending candidate");
+            }
+            self.blocks.push(block);
+        }
+    }
+
+    fn base(&self) -> SuccessorBase<'_> {
+        SuccessorBase::new(&self.inventory, &self.committed, self.revision + 1)
+    }
+
+    /// Publish `host`, prepared from [`Self::base`], with `adoption`; for a `Primed` candidate,
+    /// first set the carried ring's `prime_required` flag (D3).
+    fn publish(&mut self, mut host: PreparedHost, committed: &SessionModel, adoption: PlanAdoption) {
+        assert!(self.pending.is_none(), "one candidate at a time");
+        host.sources.adopt_persisting(&mut self.sources);
+        if let PlanAdoption::Primed { .. } = adoption {
+            host.sources
+                .test_only_prime_flag(SOURCE.as_bytes())
+                .expect("the carried ring")
+                .set(true);
+        }
+        self.revision += 1;
+        let PreparedHost {
+            mut plan,
+            sources,
+            inventory,
+            ..
+        } = host;
+        plan.take_revision_gate()
+            .expect("the successor's gate")
+            .publish(self.revision);
+        self.pending = Some(inventory.source_read_offset());
+        self.publisher
+            .reserve_replacement(plan, adoption)
+            .unwrap_or_else(|_| panic!("reserve the successor"))
+            .commit(self.revision);
+        self.sources = sources;
+        self.inventory = inventory;
+        self.committed = committed.clone();
+    }
+
+    /// The warm lead of `b` from the newest plan, and its warm successor.
+    fn warm(&self, b: &Session, config: &WarmConfig) -> (WarmLead, PreparedHost) {
+        let ordinary = successor_of(b, &self.caps, self.base(), self.backend)
+            .unwrap_or_else(|failure| panic!("ordinary successor: {failure:?}"));
+        let lead = warm(
+            warm_lead(
+                &b.compiled,
+                &self.caps,
+                self.base(),
+                &ordinary.inventory,
+                config,
+            )
+            .unwrap_or_else(|failure| panic!("warm_lead: {failure:?}")),
+        );
+        let host = successor_of(
+            b,
+            &self.caps,
+            SuccessorBase {
+                warm: Some(&lead),
+                ..self.base()
+            },
+            self.backend,
+        )
+        .unwrap_or_else(|failure| panic!("warm successor: {failure:?}"));
+        (lead, host)
+    }
+
+    /// Grow to `b` warm: publish its warm successor `Primed` and return `P`.
+    fn grow(&mut self, b: &Session, config: &WarmConfig) -> u64 {
+        let (lead, host) = self.warm(b, config);
+        let lead_blocks = u32::try_from(lead.lead_samples / QUANTUM).expect("blocks");
+        self.publish(
+            host,
+            &b.model,
+            PlanAdoption::Primed {
+                not_before: 0,
+                lead_blocks,
+            },
+        );
+        lead.lead_samples
+    }
+
+    /// Rebuild to `b` with an ordinary successor, adopted at the next block.
+    fn rebuild(&mut self, b: &Session) {
+        let host = successor_of(b, &self.caps, self.base(), self.backend)
+            .unwrap_or_else(|failure| panic!("ordinary successor: {failure:?}"));
+        self.publish(host, &b.model, PlanAdoption::Next);
+    }
+
+    /// The block the newest swap applied at.
+    fn swap_blocks(&self) -> Vec<usize> {
+        self.blocks
+            .iter()
+            .enumerate()
+            .filter(|(_, block)| block.swap == SwapOutcome::Applied)
+            .map(|(index, _)| index)
+            .collect()
+    }
+
+    fn bits(&self) -> Vec<&[u32]> {
+        self.blocks.iter().map(|block| &block.bits[..]).collect()
+    }
+}
+
+/// A stream of `session` alone, fed `ahead_blocks` ahead.
+fn alone(session: &Session, caps: &HostPrepareCaps, backend: Backend, ahead: u64) -> Stream {
+    Stream::start(fresh(session, caps, backend), &session.model, caps, backend, ahead)
+}
+
+/// Blocks rendered before an edit.
+const BEFORE: usize = 6;
+/// Blocks rendered after one.
+const AFTER: usize = 10;
+/// How far ahead a ready host feeds: `P / q + 1` blocks for `P = 512`, and one more.
+const AHEAD: u64 = LEAD / QUANTUM + 2;
+
+/// The first block whose bits differ between two streams, if any.
+fn first_divergence(left: &Stream, right: &Stream) -> Option<usize> {
+    let (left, right) = (left.bits(), right.bits());
+    assert_eq!(left.len(), right.len());
+    left.iter().zip(&right).position(|(left, right)| left != right)
+}
+
+/// Gate 1: a warm successor that adds a muted limiter track (and, second shape, feeds it into a
+/// submix whose arrival grows while the output's does not) is adopted at the first ready block
+/// and renders A continued, bit for bit; block `j` of it is block `j + k` of a fresh W compiled
+/// with the same floors and fed from frame 0; and the watermark reports `EXACT` at the adoption
+/// block. Both bank widths.
+#[test]
+fn a_primed_warm_successor_continues_its_predecessor_bit_for_bit() {
+    let parallel = || {
+        let mut model = empty();
+        track(&mut model, "x", vec![limiter()]);
+        to_output(&mut model, "x");
+        submix(&mut model, "s", Vec::new());
+        to_output(&mut model, "s");
+        track(&mut model, "t", Vec::new());
+        to_submix(&mut model, "t", "s");
+        model
+    };
+    let shapes = [
+        {
+            let mut b = two_tracks();
+            muted_track(&mut b, "t3", vec![limiter()]);
+            to_output(&mut b, "t3");
+            (two_tracks(), b)
+        },
+        {
+            let mut b = parallel();
+            muted_track(&mut b, "m", vec![limiter()]);
+            to_submix(&mut b, "m", "s");
+            (parallel(), b)
+        },
+    ];
+    for &backend in Backend::VECTOR {
+        for (shape, (a, b)) in shapes.iter().enumerate() {
+            let (a, b) = (
+                Session::compile(finish(a.clone())),
+                Session::compile(finish(b.clone())),
+            );
+            let caps = gate_caps();
+            let mut swapped = alone(&a, &caps, backend, AHEAD);
+            swapped.render(BEFORE);
+            let lead = swapped.grow(&b, &CONFIG);
+            assert_eq!(lead, LEAD, "shape {shape}");
+            let k = (lead / QUANTUM) as usize;
+            swapped.render(AFTER);
+            assert_eq!(swapped.swap_blocks(), [BEFORE], "shape {shape}: adopted at once");
+            let watermark = swapped.publisher.watermark_reader().read().expect("watermark");
+            assert_eq!(
+                (watermark.revision, watermark.first_sample, watermark.outcome_flags),
+                (
+                    swapped.revision,
+                    BEFORE as u64 * QUANTUM,
+                    engine::realtime::OUTCOME_EXACT
+                ),
+                "shape {shape}"
+            );
+            let mut continued = alone(&a, &caps, backend, AHEAD);
+            continued.render(BEFORE + AFTER);
+            assert_eq!(
+                first_divergence(&swapped, &continued),
+                None,
+                "shape {shape}, {backend:?}: A continued"
+            );
+            // The fresh W: the warm successor's floors, offset 0, fed from frame 0.
+            let floors = swapped.inventory.test_only_floors_only();
+            let reference = successor_of(
+                &b,
+                &caps,
+                SuccessorBase::new(&floors, &b.model, 2),
+                backend,
+            )
+            .expect("the fresh W");
+            assert_eq!(reference.inventory.source_read_offset(), 0);
+            let mut reference = Stream::start(reference, &b.model, &caps, backend, AHEAD);
+            reference.render(BEFORE + AFTER + k);
+            for j in 0..AFTER {
+                assert_eq!(
+                    swapped.blocks[BEFORE + j].bits,
+                    reference.blocks[BEFORE + j + k].bits,
+                    "shape {shape}, {backend:?}: block {j} after the swap"
+                );
+            }
+        }
+    }
 }
