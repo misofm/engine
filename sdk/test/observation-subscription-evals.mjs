@@ -654,6 +654,39 @@ describe("issue 1345 -- the browser engine waits for a render, within a bound", 
     }
   });
 
+  // Red if a session that binds no observation tap answers with another code than 1589a's R1
+  // refusal, or sends an edit.
+  test("a session booted with no observation taps refuses a subscription observation.unavailable", async () => {
+    const rig = await coreRig({ observationTaps: 0 });
+    const engine = await rig.browser();
+    try {
+      await assert.rejects(engine.subscribeObservations(request), (error) =>
+        error instanceof MisoEngineError && error.diagnosticCode === "observation.unavailable");
+      assert.deepEqual(rig.log, []);
+    } finally {
+      await engine.close();
+    }
+  });
+
+  // Red if the full frame of armed taps (the core's resource limit) loses its named diagnostic and
+  // the advice to unsubscribe another tap, or is resent as if a render made room.
+  test("a full frame of armed taps is refused observationLimit at once and never resent", async () => {
+    const rig = await coreRig();
+    const engine = await rig.browser({ requestDeadlineMs: 2_000 });
+    try {
+      rig.inject = () => ({
+        result: constantValue("resultCodes", "compileRejected"),
+        response: new TextEncoder().encode("capi.resource.limit\t$\n"),
+      });
+      await assert.rejects(engine.subscribeObservations(request), (error) =>
+        error instanceof MisoEngineError && error.diagnosticCode === "observationLimit"
+        && /unsubscribe another tap/.test(error.message));
+      assert.equal(rig.log.length, 1, "the one refused subscription, no resend");
+    } finally {
+      await engine.close();
+    }
+  });
+
   test("a suspended context ends the wait in typed backpressure at the deadline, and the polling stops", async () => {
     const rig = await coreRig();
     const engine = await rig.browser({ requestDeadlineMs: 80 });

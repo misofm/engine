@@ -15,11 +15,16 @@ import { readFile } from "node:fs/promises";
 import { describe, test } from "node:test";
 
 import {
+  commandFrame,
+  concat,
   decodeControlReply,
   decodeObservationReadReply,
+  field,
+  nested,
   encodeControlTransaction,
   encodeObservationRead,
   encodeObserveTransaction,
+  u8,
 } from "../src/core/control-frame.ts";
 import { MisoEngineError, MisoUsageError } from "../src/core/errors.ts";
 import {
@@ -414,4 +419,34 @@ describe("the observation codec equals the protocol codec's frames (#1589b)", ()
       })), expect.rows);
     });
   }
+});
+
+/** An `OBSERVATION_READ` reply of one unarmed row, its unit `unit`, and `extra` fields after it. */
+function corruptPage(unit, extra = []) {
+  const u64 = (value) => {
+    const out = new Uint8Array(8);
+    new DataView(out.buffer).setBigUint64(0, value, true);
+    return out;
+  };
+  const row = nested(2, true, [
+    field(1, 1, true, u8(2)),
+    field(2, 8, true, u8(0)),
+    field(3, 4, true, u64(0n)),
+    field(4, 4, true, u64(0n)),
+    field(11, 1, true, u8(unit)),
+    ...extra,
+  ]);
+  const fields = [field(1, 4, true, u64(0n)), row];
+  const out = commandFrame(0x000f, 0, 7n, 5n, fields.length, concat(fields));
+  out[14] = 2;
+  return out;
+}
+
+describe("the observation row decoder refuses what the Rust codec refuses (#1589b)", () => {
+  // Red if a corrupt row is taken as data: the Rust codec knows units 1 to 6 and row fields 1 to 11.
+  test("a well-formed row decodes, a unit above 6 and a field past 11 are malformed", () => {
+    assert.equal(decodeObservationReadReply(corruptPage(6)).value.rows[0].unit, 6);
+    assert.throws(() => decodeObservationReadReply(corruptPage(7)), MisoEngineError);
+    assert.throws(() => decodeObservationReadReply(corruptPage(1, [field(12, 1, false, u8(0))])), MisoEngineError);
+  });
 });

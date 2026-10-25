@@ -462,6 +462,16 @@ function normalizedRequest(
 }
 
 function mapSelection(map: ObservationMap, selection: ObservationSelection, windowBlocks: number): ResolvedSelection {
+  // A session whose plans bind no observation tap (#1589 R1: booted with no observation taps) has
+  // an empty map; its refusal is the core's `observation.unavailable`, before any edit is sent.
+  if (map.bindings.length === 0) {
+    throw new MisoEngineError("this session binds no observation tap", {
+      phase: "output",
+      code: "unsupported",
+      result: constantValue("resultCodes", "unsupported"),
+      diagnostics: [{ code: "observation.unavailable", path: "" }],
+    });
+  }
   const binding = map.bindings.find((candidate) => candidate.trackId === selection.trackId
     && candidate.rack === selection.rack && candidate.effectSlotId === selection.effectSlotId);
   if (binding === undefined || !binding.tapIds.includes(selection.tapId)) {
@@ -593,6 +603,20 @@ function observationRefusal(
   });
 }
 
+/**
+ * An `Observe`-only transaction the core refuses as a resource limit (`capi.resource.limit`) is
+ * the full frame (#1676, #1685): the one event that would end every armed tap no longer fits one
+ * control frame. No render makes room, so it is never resent; the error keeps its named diagnostic
+ * `observationLimit` and says what does make room.
+ */
+function fullFrameRefusal(error: unknown): unknown {
+  if (!(error instanceof MisoEngineError) || error.diagnosticCode !== "capi.resource.limit") return error;
+  return new MisoEngineError(
+    "the observation transaction was refused: observationLimit (the control frame that would end the armed observation taps is full; unsubscribe another tap first)",
+    { phase: "output", code: error.code, result: error.result, diagnostics: [{ code: "observationLimit", path: "" }] },
+  );
+}
+
 /** The engine's one command entry, as the observation owner sends frames through it (#1589 D3). */
 export interface ObservationFrameEndpoint {
   /** Send one command frame and return its reply; a failed call throws (`controlCallFailure`). */
@@ -631,7 +655,13 @@ export function observationFrameTransport(
           `the observation transaction needs ${frame.length} bytes and one control frame holds ${limit}; subscribe fewer taps at once`,
         );
       }
-      const reply = decodeControlReply(await endpoint.send(frame));
+      let bytes: Uint8Array;
+      try {
+        bytes = await endpoint.send(frame);
+      } catch (error) {
+        throw fullFrameRefusal(error);
+      }
+      const reply = decodeControlReply(bytes);
       if (reply.requestId !== requestId) throw malformed(`the reply answers request ${reply.requestId}, not ${requestId}`);
       const applied = reply.applied;
       if (applied !== undefined) {

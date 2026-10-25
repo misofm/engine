@@ -2718,11 +2718,6 @@ export async function sourceUnderrunBlocksThroughSdk(host: MisoAudioWorkletHost)
 }
 
 /**
- * The track IDs of the host's running session, in the core's own order (the owner headers of its
- * control list, #1564 D5). The worklet's session map no longer carries them (#1565B), and the
- * raw qualification rows read them here, through the SDK, so that they hold no reader of their own.
- */
-/**
  * One `Observe` edit as a `SESSION_TRANSACTION_APPLY` (#1589b), posted as the host's `control`
  * message with the host's one request-ID allocator: the #1535 run arms and disarms its tap with it.
  * A failed call (a full tap queue) reports its result with no status; an answered one reports the
@@ -2750,6 +2745,11 @@ export async function observeThroughSdk(
   };
 }
 
+/**
+ * The track IDs of the host's running session, in the core's own order (the owner headers of its
+ * control list, #1564 D5). The worklet's session map no longer carries them (#1565B), and the
+ * raw qualification rows read them here, through the SDK, so that they hold no reader of their own.
+ */
 export async function readTracksThroughSdk(host: MisoAudioWorkletHost): Promise<readonly string[]> {
   return (await createBrowserStripOrder(host)()).tracks;
 }

@@ -543,6 +543,10 @@ export type ObservationReadReply =
     readonly backpressure: ControlBackpressure | undefined;
   };
 
+/** The highest `ParameterUnit` code (`ratio`) and the last field of an `ObservationRow` (#1586 D1). */
+const OBSERVATION_UNIT_MAXIMUM = 6;
+const OBSERVATION_ROW_FIELDS = 11;
+
 const ROW_STATUS: readonly (ObservationFrameStatus | undefined)[] = [undefined, "pending", "unarmed", "ready"];
 
 function u64Of(fields: readonly RawField[], id: number): bigint | undefined {
@@ -558,8 +562,11 @@ function decodeObservationRow(row: RawField): ObservationFrameRow {
   const armTag = u64Of(fields, 4);
   const unit = scalar(fields, 11, WIRE_U8, 1)?.getUint8(0);
   if (status === undefined || (armedByte !== 0 && armedByte !== 1) || armSample === undefined
-      || armTag === undefined || unit === undefined || unit === 0) {
-    throw malformed("an observation row is incomplete");
+      || armTag === undefined || unit === undefined || unit === 0 || unit > OBSERVATION_UNIT_MAXIMUM) {
+    throw malformed("an observation row is incomplete or names an unknown unit");
+  }
+  if (fields.some((row) => row.id > OBSERVATION_ROW_FIELDS)) {
+    throw malformed("an observation row holds an unknown field");
   }
   const armed = armedByte === 1;
   const first = u64Of(fields, 5);
