@@ -405,3 +405,122 @@ pub fn segment<
         *state_right = r;
     }
 }
+
+#[cfg(test)]
+mod glide_law_tests {
+    //! Issue #1969 (the #1370 gate 1 shape), the law's exact half: from the frame a glide
+    //! arrives on, the lane's detector level is its target mode's prepared law bit for bit, and
+    //! a lane that rests beside a glide takes its own mode's level on every frame, non-finite
+    //! partner words included. The blend's values against the `f64` reference are
+    //! `glide_tests::a_glide_tracks_the_f64_blend_into_the_target_law`.
+
+    use super::{Coef, LINK_COUNT, MAX_WIDTH, WordRamp, advance_word_ramps, detector_level};
+    use effect_contract::{LinkMode, link_glide_weights};
+    use effect_runtime::ramp::LinearRamp;
+    use lane::Lane;
+
+    const MODES: [LinkMode; 3] = [LinkMode::DualMono, LinkMode::Maximum, LinkMode::Average];
+    const SAMPLES: u32 = 64;
+    const FRAMES: u32 = 96;
+
+    fn mask_words(modes: &[LinkMode; MAX_WIDTH], mode: LinkMode) -> [f32; MAX_WIDTH] {
+        core::array::from_fn(|lane| f32::from(u8::from(modes[lane] == mode)))
+    }
+
+    fn check<L: Lane>() {
+        for from in MODES {
+            for to in MODES.into_iter().filter(|mode| *mode != from) {
+                let mut modes: [LinkMode; MAX_WIDTH] =
+                    core::array::from_fn(|lane| MODES[lane % MODES.len()]);
+                modes[0] = from;
+                // Each lane at rest at its mode, then lane 0 retargeted: its masks take the
+                // target at once (`DynamicEq::retarget_link`), its weights glide.
+                let mut ramps: [[LinearRamp; MAX_WIDTH]; LINK_COUNT] = core::array::from_fn(|w| {
+                    core::array::from_fn(|lane| {
+                        LinearRamp::fixed(link_glide_weights(modes[lane])[w])
+                    })
+                });
+                modes[0] = to;
+                for (w, ramp) in ramps.iter_mut().enumerate() {
+                    ramp[0].set_target(link_glide_weights(to)[w], SAMPLES);
+                }
+                let load = |field: fn(&LinearRamp) -> f32, w: usize| {
+                    L::load(&core::array::from_fn::<f32, MAX_WIDTH, _>(|lane| {
+                        field(&ramps[w][lane])
+                    }))
+                };
+                let mut links: [WordRamp<L>; LINK_COUNT] = core::array::from_fn(|w| WordRamp {
+                    current: load(|ramp| ramp.current, w),
+                    target: load(|ramp| ramp.target, w),
+                    step: load(|ramp| ramp.step, w),
+                    remaining: load(|ramp| ramp.remaining as f32, w),
+                });
+                let coef = Coef {
+                    bypass: L::zero(),
+                    link_max: L::load(&mask_words(&modes, LinkMode::Maximum)),
+                    link_avg: L::load(&mask_words(&modes, LinkMode::Average)),
+                };
+                for frame in 1..=FRAMES {
+                    let words = |scale: f32, salt: u32| -> [f32; MAX_WIDTH] {
+                        core::array::from_fn(|lane| {
+                            let hash = (frame.wrapping_mul(2_654_435_761)
+                                ^ (lane as u32 + salt).wrapping_mul(40_503))
+                                % 2_001;
+                            scale * (hash as f32 / 1_000.0 - 1.0)
+                        })
+                    };
+                    let mut partner = words(0.09, 7);
+                    // Hostile partner words on every third frame, the arrival frame included: a
+                    // blend at rest weights equals the prepared law on finite words, but
+                    // `0 * inf` and `inf - inf` are NaN, so only the `select` keeps a dual-mono
+                    // lane clear of its partner's non-finite word.
+                    if frame % 3 == SAMPLES % 3 {
+                        for (lane, word) in partner.iter_mut().enumerate() {
+                            *word = if (frame as usize + lane).is_multiple_of(2) {
+                                f32::INFINITY
+                            } else {
+                                f32::NAN
+                            };
+                        }
+                    }
+                    let (own, partner) = (L::load(&words(0.9, 1)), L::load(&partner));
+                    // `open` advances the weights once a frame, before the bands read them.
+                    advance_word_ramps(&mut links);
+                    let law = detector_level::<L, false>(&coef, &links, own, partner);
+                    let got = detector_level::<L, true>(&coef, &links, own, partner);
+                    let bits = |value: L| {
+                        let mut out = [0_u32; MAX_WIDTH];
+                        value.store_bits(&mut out[..L::WIDTH]);
+                        out
+                    };
+                    let (got, law) = (bits(got), bits(law));
+                    for lane in 0..L::WIDTH {
+                        if lane == 0 && frame < SAMPLES {
+                            continue;
+                        }
+                        assert_eq!(
+                            got[lane],
+                            law[lane],
+                            "W{} {from:?} -> {to:?} frame {frame} lane {lane}: not the prepared \
+                             law's level",
+                            L::WIDTH
+                        );
+                    }
+                }
+                let mut remaining = [0.0_f32; MAX_WIDTH];
+                for link in &links {
+                    link.remaining.store(&mut remaining[..L::WIDTH]);
+                    assert!(
+                        remaining.iter().all(|word| *word == 0.0),
+                        "the glide arrived"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_glide_lands_on_its_target_law_and_a_resting_lane_never_leaves_its_own() {
+        lane::each_lane!(|L| check::<L>());
+    }
+}
