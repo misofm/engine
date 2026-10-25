@@ -718,7 +718,16 @@ impl HostHalf {
             // #1587a R2: the epoch's meter tables, one entry per meter and per strip.
             + host_core::MeterTables::new(self.meters.len(), self.strips.len())
                 .expect("the meter tables")
-                .heap_bytes() as u64;
+                .heap_bytes() as u64
+            // #1586 D6: the epoch's observation index, one entry per effect producer and a copy
+            // of its two IDs.
+            + (self.effects.len() * size_of::<host_core::observation::ObservationIndexEntry>())
+                as u64
+            + self
+                .effects
+                .iter()
+                .map(|producer| (producer.track_id.len() + producer.effect_id.len()) as u64)
+                .sum::<u64>();
         // The token also holds the commit's one `OBSERVATION_ENDED` event (#1584 D6a), which the
         // control plane bounds by the frame it must fit.
         let (_, ended_event) =
@@ -1411,10 +1420,17 @@ impl Budget {
 /// (285,632 and 275,584), so the ceiling is 312,897 plus 10 %, rounded up to 64: 344,186.7 ->
 /// 344,192.
 ///
-/// #1587b: `capi_retained_bytes` measured 313,553, the same with and without the slice's rows
-/// (the 656 B above 312,897 came from rows merged on `main` since): the reference session has no
-/// observation reader, so it builds neither the readers' strip indices nor the record of the
-/// readers a swap carries. The ceiling stays.
+/// #1586b with #1587a and #1577 (all on `main`): `capi_retained_bytes` measured 334,046 (x86-64,
+/// deterministic: 312,897 plus 21,149 for the session's 256-row `OBSERVATION_READ` table and each
+/// epoch's observation index, one entry per effect instance and a copy of its two IDs; the read's
+/// selections decode onto the stack, so no selection table is retained). The three slices' rows
+/// are independent and add up. 334,046 fits under the 344,192 ceiling, so the ceiling is
+/// unchanged: a ceiling is raised only when a row goes over it.
+///
+/// #1587b with #1586b: `capi_retained_bytes` measured 334,702 (334,046 plus 656 B from other rows
+/// merged on `main`; before #1586b the same 656 B showed as 313,553). #1587b adds nothing here:
+/// the reference session has no observation reader, so it builds neither the readers' strip
+/// indices nor the record of the readers a swap carries. The ceiling stays.
 const REFERENCE_BUDGETS: [Budget; 19] = [
     Budget {
         row: "graph_session_plus_plan_bytes",
@@ -3126,6 +3142,8 @@ struct RaceCounts {
     monitor: u64,
     /// `Observe` edits that committed (#1584), also counted in `monitor`.
     observe: u64,
+    /// `OBSERVATION_READ`s answered with a page while render runs (#1586 gate 6).
+    reads: u64,
     structural: u64,
     plan_backpressure: u64,
     event_backpressure: u64,
@@ -3202,6 +3220,41 @@ impl RaceControl<'_> {
 
     /// Submits `edit` once under a new request ID; any outcome but a commit or a typed
     /// backpressure is an error.
+    /// One `OBSERVATION_READ` (revision `Any`) of the race compressor's gain-reduction tap on
+    /// `strip`, which must answer a page (#1586 gate 6).
+    fn read_observation(&mut self, strip: &StableId) -> Result<(), String> {
+        self.request_id += 1;
+        let read = protocol::ObservationReadRequest {
+            selections: vec![protocol::ObservationReadSelection {
+                strip_id: strip.clone(),
+                section: protocol::control_core::TapSection::Inserts(
+                    StableId::parse(RACE_COMPRESSOR).expect("stable id"),
+                ),
+                tap_id: 1,
+                channels: protocol::ParameterChannel::Both,
+            }],
+        };
+        let mut bytes = vec![0_u8; 4_096];
+        let len = ProtocolCodec::default()
+            .encode_command_frame_into(
+                &TypedCommandFrame {
+                    request_id: RequestId::new(self.request_id).expect("nonzero request"),
+                    expected_revision: ExpectedRevision::Any,
+                    payload: CommandPayload::ObservationRead(&read),
+                },
+                &mut bytes,
+            )
+            .expect("observation read command");
+        // SAFETY: This thread is the session's only control caller.
+        match unsafe { submit_header(self.session, &bytes[..len]) } {
+            (RESULT_OK, Some(header)) if header.status == StatusCode::Ok => {
+                self.counts.reads += 1;
+                Ok(())
+            }
+            (code, header) => Err(format!("the read answered {code} {header:?}")),
+        }
+    }
+
     fn submit_once(&mut self, edits: &[SessionEdit], kind: Kind) -> Result<Submitted, String> {
         use core::sync::atomic::Ordering;
         self.request_id += 1;
@@ -3382,6 +3435,26 @@ fn race_live_edits(run: usize) -> RaceCounts {
     let in_render = AtomicBool::new(false);
     let rendered = AtomicU64::new(first_race_block);
     let mut edits = RaceEdits::new(&document);
+    // #1586 gate 6: the race compressor's tap armed once before the race, with the window the
+    // race's own `Observe` edits use, so their arms join it and their disarms leave it armed, and
+    // every racing read reads a live window.
+    let arm = transaction(
+        2,
+        42,
+        &[SessionEdit::Observe {
+            strip_id: edits.tracks[0].clone(),
+            section: protocol::control_core::TapSection::Inserts(
+                StableId::parse(RACE_COMPRESSOR).expect("stable id"),
+            ),
+            tap_id: 1,
+            armed: true,
+            window_blocks: 4,
+        }],
+    );
+    // SAFETY: The session and the caller-owned buffers are live; no other thread uses it yet.
+    let armed = unsafe { submit(session, &arm, &mut response) };
+    assert_eq!(armed, RESULT_OK);
+    assert_eq!(&response[18..20], &[0, 0], "the tap is armed");
 
     let (control, (render_observed, render_failure)) = std::thread::scope(|scope| {
         let render = scope.spawn(|| {
@@ -3446,6 +3519,11 @@ fn race_live_edits(run: usize) -> RaceCounts {
                 control
                     .commit(&edit, kind)
                     .map_err(|error| format!("edit {index}: {error}"))?;
+                // #1586 gate 6: a read of the race compressor's tap after every edit, on this
+                // thread while the plan renders on the other.
+                control
+                    .read_observation(&edits.tracks[0])
+                    .map_err(|error| format!("read after edit {index}: {error}"))?;
             }
             // The run ends soloing a track whose left lane is not muted, so the final mix carries
             // signal on both lanes under a non-empty overlay. The last live edits above may have
@@ -3645,7 +3723,10 @@ fn paused_bursts(
 /// may land while the last candidate is pending): none rebuilds or allocates on render, and the
 /// final block equals a fresh plan of the final snapshot with every other track muted.
 ///
-/// Test value: red if a fader or matrix drain allocates or frees on the render thread, if a live
+/// #1586 gate 6 adds an `OBSERVATION_READ` of the compressor's tap after every edit.
+///
+/// Test value: red if a fader or matrix drain allocates or frees on the render thread, or an
+/// observation read on the control thread makes render allocate or fails under the race, if a live
 /// edit that races a plan swap reaches the retiring plan or is lost (the final block differs from
 /// a fresh plan of the final snapshot), if epoch synchronization returns `RESULT_INTERNAL` under
 /// live traffic, if any structural edit is refused as plan backpressure (#1310), or if a live edit
@@ -3669,6 +3750,8 @@ fn live_edits_racing_a_rendering_plan_and_its_swaps_stay_exact_and_allocation_fr
             (0..RACE_EDITS).filter(|index| index % 16 == 1).count() as u64,
             "run {run}"
         );
+        // #1586 gate 6: a read after every edit answered a page while render ran.
+        assert_eq!(counts.reads, RACE_EDITS, "run {run}");
         // #1310: a structural edit behind a pending candidate supersedes it; nothing refuses it.
         assert_eq!(counts.plan_backpressure, 0, "run {run}");
         assert!(

@@ -224,6 +224,22 @@ extern "C" {
  * others) and changes nothing. An exact replay of a read returns the same bytes and pops nothing;
  * a host gives each read a new request ID.
  *
+ * Observation reads (issue 1586). OBSERVATION_READ (message ID 0x000f, capability flag bit 15,
+ * which also means the OBSERVE edit is served) through miso_engine_v1_submit_command reads the
+ * latest window of 1 to 256 observation taps, each named by its strip, its console slot or insert
+ * and its tap ID. No C symbol or struct is added. The read consumes nothing and arms nothing. Each
+ * row says pending, unarmed or ready, the arm state render applied (armed, arm sample, arm tag;
+ * none until render applies the tap's last record), and, when ready, the window (first and end
+ * sample, sequence, blocks) and the asked-for lanes in the tap's native unit. A tap is ready once
+ * a window that opened at or after its arm has closed; a disarm reads unarmed when it is accepted.
+ * The batch is checked whole first: a reply wider than maximum_control_frame_bytes (64 + 192 bytes
+ * per row; 21 rows fit 4096 bytes) is LIMIT_EXCEEDED (observation.frame), and the first bad
+ * selection is refused at selection[i] (observation.address.unknown, observation.tap.unknown,
+ * observation.tap.unsupported, observation.unbound, observation.selection.duplicate), with no
+ * row. A tap whose effect a rebuild carried keeps its reader, window and arm across the swap: the
+ * session pairs the carried readers from the swap block's record when it promotes the new plan
+ * (issue 1674's observation half, issue 1587).
+ *
  * Completion (issue 1314). miso_engine_v1_submit_command is synchronous only for what can fail:
  * it validates and classifies the transaction, prepares a replacement plan and reserves its
  * publication and retirement credit, commits, and returns; it never waits for a render call or a

@@ -238,7 +238,10 @@ Commands: `cargo test --locked -p host-core --all-features`,
     disarm moves `arm_sample` past every window the slot holds, so the arm-sample rule covers it.
   - `a_batch_reports_each_strips_last_present_gain_reduction` (host-core, D3's k-frame rule): red
     on the maximum (3.0 for 2.0) and on a fold not reset at a batch's first frame (2.0 kept).
-  - `TestObservationWindows` gains each window's strip reduction word (bits), which gate 2 reads.
+  - Gate 2 reads the reader's window through `TestObservationWindows` (after merging #1586b, its
+    left and right lane bits; the compressor's tap is in dB, so the strip word is the deeper lane).
+  - Merged #1586b: its stated carried-reader limit (header, qualification doc) is replaced by the
+    pairing, since `OBSERVATION_READ` reads the same running-epoch readers.
   - Attempt 2 (verifier): the gate 5 race row was removed (no render code path; it guarded
     nothing). Gate 2 now has two strips: red on mutant `strips.push(0)` for every handle (red at "armed": handle 1 flags 1 12.79 dB, handle 2 flags 0).
 - **Attempt 3: #1674's observation half joins this slice (root, option b).** After a carried
@@ -254,8 +257,8 @@ Commands: `cargo test --locked -p host-core --all-features`,
   epoch's from those entries through `pair_carried_observations`, beside the meter pairing:
   from what carried, never from a preparation-time list (#1674 R1's constraint). Charged in the
   epoch's observation handle bytes. The reference session has no observation reader, so
-  `capi_retained_bytes` is 313,553 with or without the slice (after merging main; ceiling 344,192
-  stays). Attaching the record to every C ABI plan instead (attempt 3's first cut) broke
+  `capi_retained_bytes` is the same with or without the slice (313,553 after merging main; 334,702
+  after merging #1586b; ceiling 344,192 stays). Attaching the record to every C ABI plan instead (attempt 3's first cut) broke
   `double_live_oracle_drives_exact_and_one_below_c_caps` (`capi.resource.limit` at the exact cap:
   the oracle has no term for a plan with no reader), which the gating fixed.
   - Gate 2 gains the carried-rebuild row: `add_muted_track` (ID sorting first), six windows each
