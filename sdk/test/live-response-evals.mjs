@@ -413,6 +413,17 @@ test("the strip request and RESPONSE_READY codec match the C ABI's frames", () =
   assert.equal(result.capturedSample, BigInt(FIXTURE.expect.capturedSample));
   assert.equal(result.snapshotToken, BigInt(FIXTURE.expect.requestTag));
   assert.equal(result.resultBytes, BigInt(frame.length));
+
+  // A corrupt frame is a typed refusal, not a result: here the first axis point is NaN. Test value:
+  // red if the decoder hands back a capture the core's own validity rules refuse.
+  const first = Buffer.from(FIXTURE.expect.frequenciesHz[0], "hex").reverse();
+  const second = Buffer.from(FIXTURE.expect.frequenciesHz[1], "hex").reverse();
+  const at = Buffer.from(frame).indexOf(Buffer.concat([first, second]));
+  assert.ok(at > 0);
+  const corrupt = frame.slice();
+  corrupt.set([0x00, 0x00, 0xc0, 0x7f], at);
+  assert.throws(() => decodeResponseReady(corrupt),
+    (error) => error instanceof MisoEngineError && error.code === "internal");
 });
 
 // #1579a gate 1, the headless leg. Test value: red if the headless engine answers the fixture's
@@ -511,6 +522,24 @@ test("candidate Wasm reads the applied state at a render, one capture at a time"
     assert.ok(edited.snapshotToken > first.snapshotToken);
     assert.notDeepEqual([...edited.leftDb], [...firstLeft]);
     assert.deepEqual([...first.leftDb], [...firstLeft]);
+
+    // An idle engine sends the request before `queryTrackResponse` returns, so the render right
+    // after the call answers it. Test value: red if the send waits for a later turn and misses the
+    // render the app makes at once.
+    feed(2);
+    const sync = engine.queryTrackResponse({ ...request, responseLimits: { requestDeadlineMs: 2_000 } });
+    engine.render();
+    assert.ok((await sync).capturedSample > edited.capturedSample);
+
+    // A query that timed out keeps its capture in the core until a render answers it; the next
+    // query waits for that answer (its own deadline covers the wait) instead of being refused.
+    // Test value: red if a query after a timeout is refused `response.capture.pending`.
+    await assert.rejects(
+      engine.queryTrackResponse({ ...request, responseLimits: { requestDeadlineMs: 20 } }),
+      /exceeded its deadline/,
+    );
+    const afterTimeout = await renderUntil(engine, engine.queryTrackResponse(request));
+    assert.equal(afterTimeout.members.length, 3);
 
     // #1579a gate 3. Test value: red if two captures can run at once on one engine: the SDK's
     // queries would refuse each other, or a raw second request would be armed.

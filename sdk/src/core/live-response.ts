@@ -39,9 +39,9 @@ export interface TrackResponseMember {
    */
   readonly rack: "input" | "console" | "inserts";
   /**
-   * The member's section code in the `RESPONSE_READY` event (decision 17): `4` the input
-   * section's filters, `5` a console slot, `2` an insert. (The retired capture record's codes were
-   * `0`, `4` and `2`.)
+   * On the headless engine, the member's section code in the `RESPONSE_READY` event (decision 17):
+   * `4` the input section's filters, `5` a console slot, `2` an insert. The browser engine still
+   * reports the capture record's codes, `0`, `4` and `2`, until #1579b.
    */
   readonly rackValue: number;
   /** Position in the actual declared response-owner order. */
@@ -1142,16 +1142,32 @@ export function trackResponseReadOf(
  * One engine's track response queries through the core's frames (#1579a D1): each query sends a
  * strip `RESPONSE_GET` and waits for the `RESPONSE_READY` whose tag its reply carried, read from
  * the engine's event lane without consuming any other event. Queries on one engine run one at a
- * time, in call order, because the core captures one at a time. The deadline
- * (`responseLimits.requestDeadlineMs`, default 5 s) runs from the send to the event.
+ * time, in call order, because the core captures one at a time; a query made while none is in
+ * flight sends its frame before `query` returns, so a `render()` right after the call answers it.
+ * The deadline (`responseLimits.requestDeadlineMs`, default 5 s) runs from the start of the
+ * query's turn to the event. A query that timed out leaves its capture armed in the core: its tag
+ * is kept, and the next query waits (under its own deadline) until that tag's event has been read
+ * and dropped.
+ *
+ * The requester listens on the event lane only while a query runs or a timed-out tag is held.
  */
 export class TrackResponseRequester {
   readonly #transport: TrackResponseTransport;
   #tail: Promise<unknown> = Promise.resolve();
+  /** Queries called and not yet settled, the running one included. */
+  #outstanding = 0;
   /** Set by `close`: the error every pending and later query rejects with. */
   #closed: Error | undefined;
-  /** The rejection of the query waiting on its reply or its event, while one waits. */
+  /** The rejection of the running query's deadline, while one runs. */
   #abort: ((error: Error) => void) | undefined;
+  #unsubscribe: (() => void) | undefined;
+  /** The tag of a query that timed out, until its event is read; and who waits for that. */
+  #orphan: { readonly tag: bigint; readonly released: Promise<void>; readonly release: () => void } | undefined;
+  /** Events of the running query read before its tag was known. */
+  #seen = new Map<bigint, ResponseReadyEvent>();
+  /** The first `RESPONSE_READY` the running query could not decode. */
+  #eventError: Error | undefined;
+  #waiting: { readonly tag: bigint; readonly settle: (event: ResponseReadyEvent | Error) => void } | undefined;
 
   constructor(transport: TrackResponseTransport) {
     this.#transport = transport;
@@ -1164,7 +1180,11 @@ export class TrackResponseRequester {
     } catch (error) {
       return Promise.reject(error);
     }
-    const run = this.#tail.then(() => this.#run(normalized), () => this.#run(normalized));
+    const start = (): Promise<TrackResponseResult> => this.#run(normalized);
+    const idle = this.#outstanding === 0;
+    this.#outstanding += 1;
+    // Idle: the frame goes out now, before this call returns. Otherwise the query takes its turn.
+    const run = idle ? start() : this.#tail.then(start, start);
     this.#tail = run.catch(() => undefined);
     return run;
   }
@@ -1177,28 +1197,76 @@ export class TrackResponseRequester {
     if (this.#closed !== undefined) return;
     this.#closed = error;
     this.#abort?.(error);
+    this.#orphan?.release();
+    this.#orphan = undefined;
+    this.#unsubscribe?.();
+    this.#unsubscribe = undefined;
+  }
+
+  #listen(): void {
+    if (this.#unsubscribe !== undefined || this.#closed !== undefined) return;
+    this.#unsubscribe = this.#transport.onControlEvent((event) => this.#onEvent(event));
+  }
+
+  #quiet(): void {
+    if (this.#outstanding > 0 || this.#orphan !== undefined) return;
+    this.#unsubscribe?.();
+    this.#unsubscribe = undefined;
+  }
+
+  #onEvent(event: TrackResponseControlEvent): void {
+    if (event.lane !== 0) return;
+    let ready: ResponseReadyEvent | undefined;
+    try {
+      ready = decodeResponseReady(event.frame);
+    } catch (error) {
+      this.#eventError ??= error as Error;
+      this.#waiting?.settle(error as Error);
+      return;
+    }
+    if (ready === undefined) return;
+    const orphan = this.#orphan;
+    if (orphan !== undefined && ready.requestTag === orphan.tag) {
+      // The answer to a query that timed out: dropped, and the capture slot is free again.
+      this.#orphan = undefined;
+      orphan.release();
+      this.#quiet();
+    } else if (this.#waiting !== undefined && ready.requestTag === this.#waiting.tag) {
+      this.#waiting.settle(ready);
+    } else {
+      this.#seen.set(ready.requestTag, ready);
+    }
+  }
+
+  #hold(tag: bigint): void {
+    let release!: () => void;
+    const released = new Promise<void>((resolve) => { release = resolve; });
+    this.#orphan = { tag, released, release };
   }
 
   async #run(request: TrackResponseQuery): Promise<TrackResponseResult> {
-    if (this.#closed !== undefined) throw this.#closed;
-    const seen = new Map<bigint, ResponseReadyEvent>();
-    let waiting: { readonly tag: bigint; readonly settle: (event: ResponseReadyEvent | Error) => void } | undefined;
-    const unsubscribe = this.#transport.onControlEvent((event) => {
-      if (event.lane !== 0) return;
-      let ready: ResponseReadyEvent | undefined;
-      try {
-        ready = decodeResponseReady(event.frame);
-      } catch (error) {
-        waiting?.settle(error as Error);
-        return;
-      }
-      if (ready === undefined) return;
-      if (waiting !== undefined && ready.requestTag === waiting.tag) waiting.settle(ready);
-      else seen.set(ready.requestTag, ready);
-    });
     let timer: ReturnType<typeof setTimeout> | undefined;
+    let tag: bigint | undefined;
+    let timedOut = false;
     try {
+      if (this.#closed !== undefined) throw this.#closed;
+      this.#seen = new Map();
+      this.#eventError = undefined;
+      this.#waiting = undefined;
+      this.#listen();
       const deadlineMs = request.responseLimits?.requestDeadlineMs ?? DEFAULT_REQUEST_DEADLINE_MS;
+      // The deadline, or the engine's disposal, whichever comes first.
+      const deadline = new Promise<never>((_resolve, reject) => {
+        this.#abort = reject;
+        timer = setTimeout(() => {
+          timedOut = true;
+          reject(new MisoUsageError("live track response query exceeded its deadline"));
+        }, deadlineMs);
+      });
+      deadline.catch(() => undefined);
+      // A timed-out query's capture is still armed in the core: wait for its answer first.
+      if (this.#orphan !== undefined) await Promise.race([this.#orphan.released, deadline]);
+      if (this.#closed !== undefined) throw this.#closed;
       const requestId = this.#transport.nextRequestId();
       const frame = encodeStripResponseRequest({
         requestId,
@@ -1210,19 +1278,21 @@ export class TrackResponseRequester {
         channels: request.channels ?? "both",
         maximumReplyBytes: request.responseLimits?.maximumResultBytes,
       });
-      // The deadline, or the engine's disposal, whichever comes first.
-      const deadline = new Promise<never>((_resolve, reject) => {
-        this.#abort = reject;
-        timer = setTimeout(
-          () => reject(new MisoUsageError("live track response query exceeded its deadline")),
-          deadlineMs,
-        );
+      const sent = Promise.resolve(this.#transport.send(frame));
+      const replyBytes = await Promise.race([sent, deadline]).catch((error: unknown) => {
+        // A reply that arrives after the deadline may still have armed a capture.
+        if (timedOut) {
+          sent.then((bytes) => {
+            const late = decodeResponseTagReply(bytes);
+            if (late.ok && this.#closed === undefined) {
+              this.#hold(late.tag);
+              this.#listen();
+            }
+          }, () => undefined);
+        }
+        throw error;
       });
-      deadline.catch(() => undefined);
-      const reply = decodeResponseTagReply(await Promise.race([
-        Promise.resolve(this.#transport.send(frame)),
-        deadline,
-      ]));
+      const reply = decodeResponseTagReply(replyBytes);
       if (reply.requestId !== requestId) {
         throw new MisoEngineError("the response reply answers another request", {
           phase: "output", code: "internal", result: constantValue("resultCodes", "internal"),
@@ -1238,21 +1308,29 @@ export class TrackResponseRequester {
           diagnostics,
         });
       }
-      const tag = reply.tag;
-      const event = seen.get(tag) ?? await Promise.race([
+      tag = reply.tag;
+      if (this.#eventError !== undefined) throw this.#eventError;
+      const known = tag;
+      const event = this.#seen.get(known) ?? await Promise.race([
         new Promise<ResponseReadyEvent>((resolve, reject) => {
-          waiting = {
-            tag,
+          this.#waiting = {
+            tag: known,
             settle: (value) => (value instanceof Error ? reject(value) : resolve(value)),
           };
         }),
         deadline,
       ]);
+      tag = undefined;
       return trackResponseResultOf(event);
     } finally {
+      // A query that ended before its event keeps the tag, so the next query waits for it.
+      if (tag !== undefined && timedOut && this.#closed === undefined) this.#hold(tag);
       this.#abort = undefined;
+      this.#waiting = undefined;
+      this.#seen = new Map();
       if (timer !== undefined) clearTimeout(timer);
-      unsubscribe();
+      this.#outstanding -= 1;
+      this.#quiet();
     }
   }
 }

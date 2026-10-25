@@ -191,9 +191,10 @@ SDK public behaviour changes (record them in the changelog with the PR):
 3. A headless query no longer returns the state before the next render: it reads the state the
    next block applied (gate 2). A headless `subscribeTrackResponse` and `pump()` settle only when
    the app renders.
-4. `rackValue` is the decision-17 section code: input `4`, console `5`, inserts `2` (was 0, 4, 2).
-   Rack names do not change. `snapshotToken` is the request tag; `resultBytes` the event frame's
-   length; `enabledLeft`/`enabledRight` have one entry per section the core reports.
+4. Headless; the browser follows in #1579b. `rackValue` is the decision-17 section code: input
+   `4`, console `5`, inserts `2` (was 0, 4, 2). Rack names do not change. `snapshotToken` is the
+   request tag; `resultBytes` the event frame's length; `enabledLeft`/`enabledRight` have one entry
+   per section the core reports. The browser engine keeps the capture record's values until #1579b.
 5. A refusal raises `MisoEngineError` whose `code` is the core's diagnostic (for example
    `response.reply_too_large`, was `refusedBudget`) and whose `result` is the mapped result class.
    `responseRefusalResult` now maps `backpressure` to `backpressure` (was `internal`).
@@ -201,6 +202,16 @@ SDK public behaviour changes (record them in the changelog with the PR):
 7. `engine.onEvent` (both engines) never delivers a `RESPONSE_READY`.
 8. `TrackResponseSubscriptionBounds` takes `maximumPoints` from `maximumResponsePoints` and
    `maximumCaptureBytes` from `1 << 20` (same values as before).
+9. Headless: `responseLimits.maximumResultBytes` bounds the `RESPONSE_READY` frame: it is sent as
+   `maximum_reply_bytes`, and a request whose event bound exceeds it is refused
+   `response.reply_too_large` (was a bound on the capture record).
+10. Headless: while a query runs, or a timed-out query's tag is held until its event is read, the
+    requester is an event listener, so events read then are not counted in
+    `discardedControlEvents`.
+11. Headless: a query made while none is in flight sends its frame before `queryTrackResponse`
+    returns, so `query(); render(); await` settles at that render. After a timeout the next query
+    waits, under its own deadline, until the timed-out tag's event is read, instead of being refused
+    `response.capture.pending`.
 
 Root rulings on #1579a (2026-10-25):
 

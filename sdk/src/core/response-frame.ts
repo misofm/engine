@@ -452,6 +452,7 @@ export function decodeResponseTagReply(bytes: Uint8Array): ResponseFrameTagReply
 const MESSAGE_RESPONSE_READY = 0x8040;
 const EVENT_HEADER_BYTES = 48;
 const KIND_EVENT = 3;
+const EVENT_MAGIC = [0x4d, 0x49, 0x53, 0x4f, 0x43, 0x54, 0x4c, 0x00] as const;
 const READY = {
   sequence: { id: 1, wire: WIRE_U64, mandatory: false },
   requestTag: { id: 2, wire: WIRE_U64, mandatory: false },
@@ -557,14 +558,20 @@ function decodeMember(row: RawField): ResponseReadyMember {
   const sectionCount = required(fields, MEMBER.sectionCount, 1, "a member's section count").getUint8(0);
   const kind = required(fields, MEMBER.kind, 1, "a member's kind").getUint8(0);
   if (kind < 1 || kind > 3) throw malformed(`a member names kind ${kind}`);
+  if (sectionCount > 32) throw malformed("a member has more than 32 sections");
+  const enabledLeft = readU32(fields, MEMBER.enabledLeft, "a member's left mask");
+  const enabledRight = readU32(fields, MEMBER.enabledRight, "a member's right mask");
+  // No mask bit at or above the section count.
+  const fits = (mask: number): boolean => sectionCount >= 32 || mask >>> sectionCount === 0;
+  if (!fits(enabledLeft) || !fits(enabledRight)) throw malformed("a member's mask exceeds its sections");
   return Object.freeze({
     section,
     slotId,
     effect: requiredText(fields, MEMBER.effect, "a member's effect"),
     kind,
     bypassed: readBool(fields, MEMBER.bypassed, "a member's bypass"),
-    enabledLeft: readU32(fields, MEMBER.enabledLeft, "a member's left mask"),
-    enabledRight: readU32(fields, MEMBER.enabledRight, "a member's right mask"),
+    enabledLeft,
+    enabledRight,
     sectionCount,
   });
 }
@@ -584,6 +591,16 @@ export function isResponseReady(frame: Uint8Array): boolean {
 export function decodeResponseReady(frame: Uint8Array): ResponseReadyEvent | undefined {
   if (!isResponseReady(frame)) return undefined;
   const view = new DataView(frame.buffer, frame.byteOffset, frame.byteLength);
+  for (let index = 0; index < EVENT_MAGIC.length; index += 1) {
+    if (frame[index] !== EVENT_MAGIC[index]) throw malformed("the magic is wrong");
+  }
+  if (view.getUint16(8, true) !== 1 || view.getUint16(12, true) !== EVENT_HEADER_BYTES) {
+    throw malformed("the event header is not version 1");
+  }
+  if (frame[15] !== 0 || view.getUint16(18, true) !== 0) throw malformed("the frame is not an event");
+  if (view.getBigUint64(24, true) !== 0n || view.getUint32(44, true) !== 0) {
+    throw malformed("an event carries a request ID or a reserved word");
+  }
   if (EVENT_HEADER_BYTES + view.getUint32(20, true) !== frame.length) {
     throw malformed("the event payload length is wrong");
   }
@@ -599,13 +616,25 @@ export function decodeResponseReady(frame: Uint8Array): ResponseReadyEvent | und
   if (status === "ok") {
     const frequenciesHz = packed(fields, READY.frequenciesHz);
     if (frequenciesHz === undefined) throw malformed("the frequency axis is missing");
+    // The core's own validity rules (`response_ready_is_valid`): at least two finite axis points,
+    // a finite floor, at least one side, each finite and of the axis's length.
+    const leftDb = packed(fields, READY.leftDb);
+    const rightDb = packed(fields, READY.rightDb);
+    const floorDb = readF32(fields, READY.floorDb, "the floor");
+    const finite = (values: Float32Array): boolean => values.every(Number.isFinite);
+    const sideFits = (side: Float32Array | undefined): boolean =>
+      side === undefined || (side.length === frequenciesHz.length && finite(side));
+    if (frequenciesHz.length < 2 || !finite(frequenciesHz) || !Number.isFinite(floorDb)
+        || (leftDb === undefined && rightDb === undefined) || !sideFits(leftDb) || !sideFits(rightDb)) {
+      throw malformed("a response event's curves are not valid");
+    }
     capture = Object.freeze({
       capturedSample: readU64(fields, READY.capturedSample, "the captured sample"),
       sampleRateHz: readU32(fields, READY.sampleRateHz, "the sample rate"),
-      floorDb: readF32(fields, READY.floorDb, "the floor"),
+      floorDb,
       frequenciesHz,
-      leftDb: packed(fields, READY.leftDb),
-      rightDb: packed(fields, READY.rightDb),
+      leftDb,
+      rightDb,
       excludedCount: readU32(fields, READY.excludedCount, "the excluded count"),
       members: Object.freeze(fields.filter((row) => row.id === READY.member.id).map(decodeMember)),
     });
