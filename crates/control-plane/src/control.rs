@@ -10642,6 +10642,62 @@ mod tests {
         /// deadline step would then act on B); a record dropped on a refused supersession leaves
         /// W pending with no record; a `not_before` read from the source-read clock is `P` late
         /// once a warm plan runs.
+        /// #2044: a warm B that does not carry W's [`UNUSED`] ring panics after its primed
+        /// publication wrote that ring's flag, before its commit. W is republished and, its own
+        /// flags set again, waits while that ring is not fed, as it does when no B ran; once fed,
+        /// it is adopted.
+        ///
+        /// Test value: red if the republish keeps B's flags: W is then judged without the ring
+        /// it carries, so it is adopted before that ring is primed.
+        #[test]
+        fn a_republished_warm_candidate_keeps_its_own_prime_flags() {
+            let mut b: Vec<SessionEdit> = muted_track("t4", 0).into();
+            b.push(SessionEdit::RemoveSource {
+                source_id: sid(UNUSED),
+            });
+            let run = |panics: bool| {
+                let mut rig = Rig::with_unused(Some(CONFIG));
+                rig.ahead = 1;
+                rig.render(BEFORE);
+                assert!(matches!(
+                    rig.rebuild(&growth()),
+                    PlanAdoption::Primed { .. }
+                ));
+                let record = rig.primed().expect("W's record");
+                if panics {
+                    rig.children.session.test_set_structural_faults([
+                        Some(super::super::TestStructuralFaultPhase::PanicAtPrimedPublication),
+                        None,
+                    ]);
+                    let caught =
+                        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| rig.transact(&b)));
+                    assert!(caught.is_err(), "B panics");
+                    assert_eq!(rig.primed(), Some(record), "W keeps its record");
+                    assert_eq!(rig.children.session.newest_plan_epoch(), record.epoch);
+                }
+                let unused = rig
+                    .feeds
+                    .iter()
+                    .find(|(id, ..)| *id == UNUSED)
+                    .map(|(.., next)| *next)
+                    .expect("fed");
+                rig.stop_at = Some((UNUSED, unused));
+                rig.ahead = AHEAD;
+                rig.render(6);
+                let held = rig.swaps();
+                rig.stop_at = None;
+                rig.render(6);
+                (held, rig.swaps().len())
+            };
+            let reference = run(false);
+            assert_eq!(
+                reference,
+                (Vec::new(), 1),
+                "W waits for the ring, then is adopted"
+            );
+            assert_eq!(run(true), reference, "the republished W");
+        }
+
         #[test]
         fn the_record_names_the_one_pending_warm_candidate() {
             /// W published and pending, frames withheld; its record.
