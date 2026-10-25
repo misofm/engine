@@ -2862,10 +2862,13 @@ impl AdoptedCurve for ComposedAdoption<'_, '_> {
 /// the ramp's first free sample ([`automation::CellState::defer_jump`]), where the cell jumps over
 /// `J` as at a discontinuity of its table, so the ramp ends when it was due.
 ///
-/// Then, for a reposition with no such ramp, a held stage, a step of the cell's own at the
-/// block's first sample (B17-R13), or [`Adoption::Compare`], the curve at the block's first
-/// sample is compared: composed with this plan's `S` (`checked_fader_gain(vca_compose_db(curve,
-/// S))`, #1648 departure 4), when it differs in bits from the gain the stage aims for (a free
+/// Then the curve is compared: for a reposition whose stage runs no ramp at all, held or free,
+/// at the sample before the block (#1716 fix D, amending #1648 D2: the node time at which the
+/// old table's last grid ramp took the stage's target, so a table that agrees with the old one
+/// there does not jump); for a held stage in a mute or unmute ramp, a step of the cell's own at
+/// the block's first sample (B17-R13), or [`Adoption::Compare`], at the block's first sample.
+/// Composed with this plan's `S` (`checked_fader_gain(vca_compose_db(curve, S))`, #1648
+/// departure 4), when it differs in bits from the gain the stage aims for (a free
 /// stage's ramp target, #1711 F0; a held stage's fader gain) the block opens with the adoption
 /// jump. A repositioned cell whose comparison does not differ takes the curve's value as its
 /// current target (`seed_target`: the stage already holds its gain), and a continued one keeps
@@ -2880,14 +2883,27 @@ fn settle_adoption(
     if adoption == Adoption::None {
         return false;
     }
-    // The node time at which the curve is compared: the block's first sample, or the end of a
-    // ramp the free stage still runs (U3 fold 2).
+    // The node time at which the curve is compared: the block's first sample, the sample before
+    // it when the stage runs no ramp (#1716 fix D), or the end of a ramp the free stage still
+    // runs (U3 fold 2).
     let mut at = span.start;
     // The free stage's ramp's first free sample, where a moved target's jump is deferred to.
     let mut free = None;
     if adoption == Adoption::Reposition {
         curve.reposition(span.start);
-        if let Some(ChannelHold {
+        if let Some(ChannelHold { remaining: 0, .. }) = hold
+            && !curve.steps_at(span.start)
+            && let Some(previous) = span.start.checked_sub(1)
+        {
+            // No stage ramp (#1716 fix D, the #1648 D2 amendment): the stage's target is the old
+            // curve where its last ramp completed, at the sample before this block on a ride
+            // (the grid length divides the block, so a grid ramp has just completed), so the new
+            // curve is compared at that same node time. An unchanged curve then does not jump,
+            // and one that moves only from this block's first sample on is the grid's next ramp,
+            // as a plan prepared with this table renders it. A step at the block's first sample
+            // is still compared there (B17-R13).
+            at = previous;
+        } else if let Some(ChannelHold {
             held, remaining, ..
         }) = hold
             && let Some(last) = remaining.checked_sub(1)

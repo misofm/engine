@@ -7331,8 +7331,8 @@ mod set_control {
         /// left, the last three shorter than the fader length `J` = 960). Every block of the
         /// rebuilt rig is bit-equal to the uninterrupted engine's over 44 blocks, allocation-free,
         /// the successor is adopted, and the rebuild's watermark advance reports `OUTCOME_EXACT`
-        /// with no transition fallback (#1711 D2: the B17-R14 flag is deleted). A table-only
-        /// rebuild with no live move reports `OUTCOME_EXACT` too (outcome only).
+        /// with no transition fallback (#1711 D2: the B17-R14 flag is deleted). The same rebuild
+        /// with no live move is `a_table_only_rebuild_with_no_move_is_bit_equal`.
         ///
         /// Test value: red if the adoption rule compares the curve with the stage's fader gain
         /// rather than its ramp's target (#1711 F0: the held grid events only remember a gain, so
@@ -7356,24 +7356,6 @@ mod set_control {
                     (SOURCE_FRAMES - 2_000, -6.0),
                 ),
             ];
-            // A table-only rebuild with no live move completes exactly too (outcome only: its bits
-            // are `a_table_only_rebuild_with_no_move_is_bit_equal`, red until #1716's fix).
-            let mut still = Rig::new(&document);
-            for _ in 0..4 {
-                still.step();
-            }
-            let offset = still.model().automation[0].offset;
-            send(
-                &mut still,
-                &[split_ride(&track, changes[0].1, offset)],
-                protocol::EditPath::Rebuild,
-                "no move",
-            );
-            for _ in 0..4 {
-                still.step();
-            }
-            assert_eq!(still.summary().3, 0, "no move: the successor is adopted");
-            assert_exact(&still, "no move");
             let timings = [
                 MoveTiming::Pending,
                 MoveTiming::SameTransaction,
@@ -7431,21 +7413,21 @@ mod set_control {
             }
         }
 
-        /// #1716 step 0 (red until the fix). Two table-only rebuilds of the riding fader with no
-        /// live move, 5 blocks apart: the ride split in two at sample 10,000 exactly on its line
-        /// (every split-table value equals the ride's in `f32` bits), then the single ride again.
-        /// Every block of the rebuilt rig is bit-equal to the uninterrupted engine's over 44
-        /// blocks, as a plan prepared with either table renders.
+        /// #1716 (fix D). Two table-only rebuilds of the riding fader with no live move, 5 blocks
+        /// apart: the ride split in two at sample 10,000 exactly on its line (every split-table
+        /// value equals the ride's in `f32` bits), then the single ride again. Every block of the
+        /// rebuilt rig is bit-equal to the uninterrupted engine's over 44 blocks, as a plan
+        /// prepared with either table renders, the successor is adopted, and each rebuild's
+        /// watermark advance reports `OUTCOME_EXACT` with no transition fallback.
         ///
         /// Test value: red when a table-only rebuild of an unchanged curve opens with an adoption
         /// jump that a plan prepared with the new table never makes. At a block's first sample the
-        /// last grid ramp has completed (`G` divides the 128-sample block), so `settle_adoption`
-        /// compares the new curve at `span.start` with the stage's target, which is the old curve
-        /// at `span.start - 1`; on a ride they always differ, and the block opens with a jump over
-        /// `J` = 960 (measured: first difference at block 4, sample 0; at most 1.7e-4, block 7;
-        /// equal again from block 12). No other row compares bits with no move.
+        /// last grid ramp has completed (`G` divides the 128-sample block), so the stage's target
+        /// is the old curve at `span.start - 1`; an adoption that compares the new curve at
+        /// `span.start` with it differs on every ride and opens the block with a jump over
+        /// `J` = 960 (measured on that compare: first difference at block 4, sample 0; at most
+        /// 1.7e-4, block 7; equal again from block 12). No other row compares bits with no move.
         #[test]
-        #[ignore = "#1716: red until the fix; see spec step 0"]
         fn a_table_only_rebuild_with_no_move_is_bit_equal() {
             bench_support::alloc::assert_installed();
             let document = riding();
@@ -7461,6 +7443,7 @@ mod set_control {
             let (first, _) = lockstep(&mut rigs, 5);
             assert_eq!(rigs[0].summary().3, 0, "split: the successor is adopted");
             assert_eq!(first, None, "split: first difference (block, sample)");
+            assert_exact(&rigs[0], "split");
             let mut whole = entry(
                 &track,
                 vec![segment(
@@ -7479,6 +7462,7 @@ mod set_control {
             let (first, _) = lockstep(&mut rigs, 39);
             assert_eq!(rigs[0].summary().3, 0, "whole: the successor is adopted");
             assert_eq!(first, None, "whole: first difference (block, sample)");
+            assert_exact(&rigs[0], "whole");
         }
 
         /// [`riding`]'s ride kept up to `at`, then a step to `db` from `at` to the source's end,
