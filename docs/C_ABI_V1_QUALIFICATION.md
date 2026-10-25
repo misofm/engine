@@ -134,7 +134,8 @@ exported symbol, announced by `MISO_ENGINE_V1_FEATURE_SOURCE_SEEK_AT` (32) in th
 report, whose feature mask becomes 63; no struct, size or `ABI_VERSION` changes. It is
 `miso_engine_v1_source_seek` with an anchor: the seek's source frame enters the graph in the
 block that starts at sample `anchor_sample` of the plan's source-read clock (equal to the render
-clock in this version, #1316 D1), which must be a multiple of the quantum or the call returns
+clock until a plan that reads its sources ahead of it, a warm successor, is adopted, which no call
+publishes in this version; #1316 D1, #1355 D1, #1403), which must be a multiple of the quantum or the call returns
 `RESULT_INVALID_ARGUMENT` with `source.seek.anchor_unaligned`; its
 thread rule, argument checks and every other result are the plain seek's. A host that resolves
 the symbol at run time checks the bit before calling it; a host that links the symbol directly

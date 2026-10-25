@@ -2601,19 +2601,17 @@ fn delay_lane(ring: &mut [f32], cursor: &mut usize, block: &mut [f32]) {
     }
 }
 
-// #1402 D2: the fill of a successor's line at adoption (lemma L2, L3). A line at rest is filled by
-// pushing a stream of parts into it, oldest first: the predecessor's pending words (`pending`),
-// for L3 the predecessor's claim pending, then the prime in any chunking. The line then holds the
+// #1402 D2, #1355 D5: the fill of a successor's line at adoption (lemma L2, L3). A source-claim
+// line (L2) is filled by pushing a stream of parts into it, oldest first: the predecessor's
+// pending words (`pending`) when the line grew, then the prime block by block. It then holds the
 // last `λ'` words of the stream, its oldest at its cursor, with `+0.0` only where the stream is
-// shorter than the line (L2's N case). #1355's adoption step is the caller.
+// shorter than the line (L2's N case). An `Input`-tap sidechain line (L3) takes the head of its
+// stream instead (`fill_head`): the predecessor's edge pending, the source strip's claim pending,
+// then the prime; the stream's tail is what the strip's own claim line holds.
 
 impl TrackDelayLine {
     /// Each lane's pending words in age order, oldest first, as two slices: the ring from the
     /// cursor, then the ring before it (#1402 D2).
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "#1355's adoption step calls it")
-    )]
     pub(crate) fn pending(&self) -> [[&[f32]; 2]; 2] {
         [
             ring_pending(&self.left, self.left_cursor),
@@ -2623,22 +2621,25 @@ impl TrackDelayLine {
 
     /// Push `left` and `right` into the lanes' rings, oldest first, each at its own cursor
     /// (#1402 D2): one part of a fill. Allocation-free; at most two slice copies per lane.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "#1355's adoption step calls it")
-    )]
     pub(crate) fn push(&mut self, left: &[f32], right: &[f32]) {
         ring_push(&mut self.left, &mut self.left_cursor, left);
         ring_push(&mut self.right, &mut self.right_cursor, right);
+    }
+
+    /// Push `count` words of `+0.0` into each lane of `lanes` (#1355 D5): a prime block its
+    /// source played no PCM for (the region's end). Allocation-free.
+    pub(crate) fn push_silence(&mut self, count: usize, lanes: u8) {
+        if lanes & crate::STRIP_DELAY_LEFT != 0 {
+            ring_push_silence(&mut self.left, &mut self.left_cursor, count);
+        }
+        if lanes & crate::STRIP_DELAY_RIGHT != 0 {
+            ring_push_silence(&mut self.right, &mut self.right_cursor, count);
+        }
     }
 }
 
 impl CompensationDelay {
     /// Each channel's pending words in age order, oldest first, as two slices (#1402 D2, L3).
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "#1355's adoption step calls it")
-    )]
     pub(crate) fn pending(&self) -> [[&[f32]; 2]; 2] {
         [
             ring_pending(&self.left, self.cursor),
@@ -2646,19 +2647,83 @@ impl CompensationDelay {
         ]
     }
 
-    /// Push `left` and `right`, one part of a fill (#1402 D2, L3), into the two rings, which share
-    /// one cursor: the two parts are equally long. Allocation-free.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "#1355's adoption step calls it")
-    )]
-    pub(crate) fn push(&mut self, left: &[f32], right: &[f32]) {
-        debug_assert_eq!(left.len(), right.len());
-        let mut left_cursor = self.cursor;
-        ring_push(&mut self.left, &mut left_cursor, left);
-        ring_push(&mut self.right, &mut self.cursor, right);
-        debug_assert_eq!(left_cursor, self.cursor);
+    /// Write one part of an L3 fill (#1355 D5) into the head of the line: each channel's words go
+    /// in after the `written` words of that channel already filled, oldest first from the cursor,
+    /// and stop when the channel is full. The two channels count apart, so their parts may differ
+    /// in length; the cursor never moves, so once both are full the line emits the head of its
+    /// stream. `None` writes that many `+0.0` words. Allocation-free; at most two slice copies a
+    /// channel.
+    pub(crate) fn fill_head(
+        &mut self,
+        left: FillPart<'_>,
+        right: FillPart<'_>,
+        written: &mut [u32; 2],
+    ) {
+        let [left_written, right_written] = written;
+        ring_fill_head(&mut self.left, self.cursor, left_written, left);
+        ring_fill_head(&mut self.right, self.cursor, right_written, right);
     }
+}
+
+/// One channel's part of a fill: words, or a count of `+0.0` words.
+#[derive(Clone, Copy)]
+pub(crate) enum FillPart<'a> {
+    Words(&'a [f32]),
+    Silence(usize),
+}
+
+/// [`CompensationDelay::fill_head`] on one channel.
+fn ring_fill_head(ring: &mut [f32], cursor: usize, written: &mut u32, part: FillPart<'_>) {
+    let length = ring.len();
+    let done = core::cmp::min(*written as usize, length);
+    let count = match part {
+        FillPart::Words(words) => words.len(),
+        FillPart::Silence(count) => count,
+    };
+    let take = core::cmp::min(count, length - done);
+    if take == 0 {
+        return;
+    }
+    // The first free word sits `done` past the cursor, wrapped once at most.
+    let at = if cursor + done >= length {
+        cursor + done - length
+    } else {
+        cursor + done
+    };
+    let first = core::cmp::min(take, length - at);
+    match part {
+        FillPart::Words(words) => {
+            ring[at..at + first].copy_from_slice(&words[..first]);
+            ring[..take - first].copy_from_slice(&words[first..take]);
+        }
+        FillPart::Silence(_) => {
+            ring[at..at + first].fill(0.0);
+            ring[..take - first].fill(0.0);
+        }
+    }
+    *written = u32::try_from(done + take).unwrap_or(u32::MAX);
+}
+
+/// [`ring_push`] of `count` words of `+0.0`.
+fn ring_push_silence(ring: &mut [f32], cursor: &mut usize, count: usize) {
+    let length = ring.len();
+    if length == 0 {
+        return;
+    }
+    let (count, filled) = if count >= length {
+        (0, length)
+    } else {
+        (count, count)
+    };
+    let first = core::cmp::min(filled, length - *cursor);
+    ring[*cursor..*cursor + first].fill(0.0);
+    ring[..filled - first].fill(0.0);
+    let advanced = *cursor + count;
+    *cursor = if advanced >= length {
+        advanced - length
+    } else {
+        advanced
+    };
 }
 
 /// A ring's words in age order from `cursor`, its oldest: `ring[cursor..]`, then `ring[..cursor]`.
@@ -14063,7 +14128,8 @@ mod tests {
     /// #1402 D2 (gate 2). A line at rest, filled by pushing parts, emits the last `λ'` words of
     /// their concatenation, `+0.0` first where the stream is short: lemma L2's C (`λ -> λ + P`), R
     /// (`λ -> λ`) and N (an added line, `λ' > P`) cases on both lanes of a track's line, and L3 on
-    /// an edge line (the predecessor's edge pending, its claim pending, then the prime). Each at
+    /// an edge line (the predecessor's edge pending, its claim pending, then the prime), which
+    /// holds the head of that stream (#1355 D5). Each at
     /// every predecessor cursor, with the predecessor's line part filled and part wrapped, and the
     /// prime in two chunkings.
     ///
@@ -14164,54 +14230,60 @@ mod tests {
             }
         }
         // L3: an edge line of 6 and a claim line of 4 on each lane, into an edge line grown by
-        // the claim and `P`.
+        // the claim and `P` (the whole stream), and into one grown by `P` alone: the source
+        // strip keeps its claim line, which holds the stream's tail, so the edge line holds its
+        // head (#1355 D5).
         let (edge, claim) = (6_usize, 4_usize);
-        for taken in 0..2 * edge + 3 {
-            for chunks in chunkings {
-                let mut before = CompensationDelay::new(edge);
-                fed(
-                    &mut |l, r| {
-                        let source = (l.to_vec(), r.to_vec());
-                        before.process_from((&source.0, &source.1), (l, r));
-                    },
-                    taken,
-                    0,
-                );
-                let mut claim_line = TrackDelayLine::new(claim, claim);
-                fed(&mut |l, r| claim_line.process(l, r), taken + 1, 500);
-                let length = edge + claim + P;
-                let mut after = CompensationDelay::new(length);
-                let [left, right] = before.pending();
-                after.push(left[0], right[0]);
-                after.push(left[1], right[1]);
-                let [left, right] = claim_line.pending();
-                after.push(left[0], right[0]);
-                after.push(left[1], right[1]);
-                let primes = [prime(0), prime(1)];
-                let mut offset = 0;
-                for &chunk in chunks {
-                    after.push(
-                        &primes[0][offset..offset + chunk],
-                        &primes[1][offset..offset + chunk],
+        for length in [edge + claim + P, edge + P] {
+            for taken in 0..2 * edge + 3 {
+                for chunks in chunkings {
+                    let mut before = CompensationDelay::new(edge);
+                    fed(
+                        &mut |l, r| {
+                            let source = (l.to_vec(), r.to_vec());
+                            before.process_from((&source.0, &source.1), (l, r));
+                        },
+                        taken,
+                        0,
                     );
-                    offset += chunk;
-                }
-                let got = emitted(
-                    &mut |l, r| {
-                        let source = (l.to_vec(), r.to_vec());
-                        after.process_from((&source.0, &source.1), (l, r));
-                    },
-                    [length; 2],
-                );
-                for lane in 0..2 {
-                    let mut parts = stream(edge, taken, 0, lane);
-                    parts.extend(stream(claim, taken + 1, 500, lane));
-                    parts.extend_from_slice(&primes[lane]);
-                    assert_eq!(
-                        got[lane],
-                        last(&parts, length),
-                        "L3: taken {taken}, chunks {chunks:?}, lane {lane}"
+                    let mut claim_line = TrackDelayLine::new(claim, claim);
+                    fed(&mut |l, r| claim_line.process(l, r), taken + 1, 500);
+                    let mut after = CompensationDelay::new(length);
+                    let mut written = [0; 2];
+                    let words = FillPart::Words;
+                    for part in [before.pending(), claim_line.pending()] {
+                        let [left, right] = part;
+                        after.fill_head(words(left[0]), words(right[0]), &mut written);
+                        after.fill_head(words(left[1]), words(right[1]), &mut written);
+                    }
+                    let primes = [prime(0), prime(1)];
+                    let mut offset = 0;
+                    for &chunk in chunks {
+                        after.fill_head(
+                            words(&primes[0][offset..offset + chunk]),
+                            words(&primes[1][offset..offset + chunk]),
+                            &mut written,
+                        );
+                        offset += chunk;
+                    }
+                    let got = emitted(
+                        &mut |l, r| {
+                            let source = (l.to_vec(), r.to_vec());
+                            after.process_from((&source.0, &source.1), (l, r));
+                        },
+                        [length; 2],
                     );
+                    for lane in 0..2 {
+                        let mut parts = stream(edge, taken, 0, lane);
+                        parts.extend(stream(claim, taken + 1, 500, lane));
+                        parts.extend_from_slice(&primes[lane]);
+                        let head: Vec<u32> =
+                            parts[..length].iter().copied().map(f32::to_bits).collect();
+                        assert_eq!(
+                            got[lane], head,
+                            "L3 {length}: taken {taken}, chunks {chunks:?}, lane {lane}"
+                        );
+                    }
                 }
             }
         }
