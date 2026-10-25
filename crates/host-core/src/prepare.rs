@@ -3868,6 +3868,23 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
         }
         _ => Vec::new(),
     };
+    // #1877 D6: a re-armed route the send join does not list (a transition route, which has no
+    // lane) joins too when its values are unchanged, so its op carries the displaced op's state:
+    // a fire the predecessor ran after this preparation read its watch then continues mid-ramp.
+    let route_joins: Vec<RouteJoin<'_>> = match successor {
+        Some(base) => {
+            let mut joins = route_joins;
+            for fade in route_fades.iter().filter(|fade| fade.carried.is_some()) {
+                let id = fade.route.id.as_str();
+                let unchanged = base.committed.routes.iter().any(|before| before == fade.route);
+                if unchanged && !joins.iter().any(|join| join.id == id) {
+                    joins.push(RouteJoin { id, retarget: None });
+                }
+            }
+            joins
+        }
+        None => route_joins,
+    };
     let transition: Vec<StableGraphId> = route_fades
         .iter()
         .filter(|fade| !(six_word && controls::route_rows_live(fade.route)))

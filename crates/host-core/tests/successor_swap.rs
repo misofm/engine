@@ -3978,7 +3978,10 @@ fn a_fired_fade_does_not_repeat_on_every_width() {
 /// send has fired at block 10 when the second swap lands at block 11, its successor prepared then
 /// or at block 8, before the fire. Every run equals the one-swap run straight to the second
 /// session, and neither swap block allocates or frees. In (b) and (c) a live mute of the send at
-/// block 11 is heard: the second plan holds no arm left over that would swallow it.
+/// block 11 is heard: the second plan holds no arm left over that would swallow it. (d) The lane-less
+/// transition route: an added `post_fader` route from the playing `aux` into the output fires at
+/// the first swap; the second successor, prepared before that fire and adopted mid-ramp at block
+/// 7, re-arms it and continues its ramp.
 fn a_pending_route_fade_survives_a_second_swap(backend: Backend) {
     let send = |model| {
         with_route(
@@ -4092,6 +4095,35 @@ fn a_pending_route_fade_survives_a_second_swap(backend: Backend) {
         );
         assert_eq!(run.allocator, (0, 0, 0), "{backend:?} {case}: allocator calls");
     }
+    // (d) A transition route.
+    let aux = Feed::new(AUX_SOURCE, 2);
+    let feeds = [&kept, &aux];
+    let base = route_fade_base_limited(false);
+    let a = Session::compile(base.clone());
+    let b1 = Session::compile(with_route(
+        base,
+        "aux-out",
+        "aux",
+        session::SendTap::PostFader,
+        into_output(),
+        false,
+    ));
+    let b2 = Session::compile(with_muted_track(b1.model.clone()));
+    let run = two_swap_run_prepared(
+        &a,
+        &b1,
+        &b2,
+        (SWAP_BLOCK + 1, Some(SWAP_BLOCK)),
+        None,
+        &feeds,
+        backend,
+    );
+    assert_eq!(
+        first_fade_difference(&run, &one_swap(&a, &b2, None, &feeds, &[])),
+        None,
+        "{backend:?} (d): a transition route's ramp continues across a second swap"
+    );
+    assert_eq!(run.allocator, (0, 0, 0), "{backend:?} (d): allocator calls");
 }
 
 /// Issue #1877 gate 4 on every width. Red if the successor does not re-arm the send from the
