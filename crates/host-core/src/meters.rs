@@ -84,21 +84,37 @@ impl OutputPeakGate {
 ///
 /// The relay is the gate's one writer, and it applies a request only when the request *changes*:
 /// a render-side move of the gate (#1587a: the adoption block of a swap that carried no strip
-/// meter) is a relay method that writes the gate and leaves `applied` as it is, so an unchanged
+/// meter, [`Self::restart_at`]) writes the gate and leaves `applied` as it is, so an unchanged
 /// request never undoes it, and the control thread's next request (its `align` at the adoption
-/// sample) supersedes it.
+/// sample) asks for the value the gate holds.
+///
+/// **On the strip meters' grid (#1587a).** The relay keeps the grid the strip meters tile on the
+/// render thread: its origin (sample 0, or the adoption block of the last swap that carried no
+/// strip meter) and the window. The control thread computes a request from a render clock it read
+/// earlier, and on the grid it last adopted, so a request can be behind the block it is applied
+/// in, or on a grid render has already restarted. [`Self::apply`] puts every gate it writes on the
+/// render grid, at or after the block, so the output meter never opens a window off the strip
+/// meters' grid.
 pub struct OutputPeakGateRelay {
     requested: Arc<AtomicU64>,
     gate: OutputPeakGate,
     /// The request the relay last copied into the gate.
     applied: u64,
+    /// The first sample of the strip meters' window grid on the render thread.
+    origin: u64,
+    /// The meter window in frames, `0` with none.
+    window_frames: u64,
 }
 
 /// A requested gate over the output meter's `gate` (#1583): the [`OutputPeakGate`] a control-thread
 /// delivery writes (a request word that starts inactive) and the [`OutputPeakGateRelay`] the render
-/// thread applies it with. Allocates one shared word; call it on a control thread.
+/// thread applies it with, on a window grid of `window_frames` frames from sample 0 (`0` with no
+/// window). Allocates one shared word; call it on a control thread.
 #[must_use]
-pub fn output_peak_gate_relay(gate: OutputPeakGate) -> (OutputPeakGate, OutputPeakGateRelay) {
+pub fn output_peak_gate_relay(
+    gate: OutputPeakGate,
+    window_frames: u64,
+) -> (OutputPeakGate, OutputPeakGateRelay) {
     let requested = Arc::new(AtomicU64::new(INACTIVE));
     (
         OutputPeakGate(Arc::clone(&requested)),
@@ -106,6 +122,8 @@ pub fn output_peak_gate_relay(gate: OutputPeakGate) -> (OutputPeakGate, OutputPe
             requested,
             gate,
             applied: INACTIVE,
+            origin: 0,
+            window_frames,
         },
     )
 }
@@ -192,14 +210,71 @@ fn output_peak_queue_depth() -> NonZeroUsize {
 
 // REALTIME_POLICY_BEGIN: #1581 D3, the output meter's render half.
 impl OutputPeakGateRelay {
-    /// Copy a changed gate request into the output meter's gate (#1583): one `Acquire` load, and
-    /// one `Release` store when the request moved since the last call. Call it on the render thread
-    /// before a block, before [`OutputPeakObserver::admits`].
-    pub fn apply(&mut self) {
+    /// Apply a changed gate request before the block that starts at `block_start` (#1583,
+    /// #1587a). Call it on the render thread before the block, before
+    /// [`OutputPeakObserver::admits`]. A request that did not change since the last call does
+    /// nothing. Otherwise:
+    ///
+    /// * an inactive request shuts the gate;
+    /// * a request at or after the block opens the gate at the render grid's first boundary at or
+    ///   after it (the request itself when the control thread's grid is render's);
+    /// * a request behind the block keeps a gate that is already open at or before the block (it
+    ///   is on the render grid: this relay put it there), and otherwise opens the gate at the
+    ///   grid's first boundary at or after the block.
+    ///
+    /// Integer arithmetic on the grid's origin and window, one `Acquire` load of the request, at
+    /// most one of the gate and one `Release` store; no allocation.
+    pub fn apply(&mut self, block_start: u64) {
         let requested = self.requested.load(Ordering::Acquire);
-        if requested != self.applied {
-            self.applied = requested;
-            self.gate.0.store(requested, Ordering::Release);
+        if requested == self.applied {
+            return;
+        }
+        self.applied = requested;
+        let current = self.gate.0.load(Ordering::Acquire);
+        let gate = if requested == INACTIVE {
+            INACTIVE
+        } else if requested >= block_start {
+            self.grid_boundary(requested)
+        } else if current != INACTIVE && current <= block_start {
+            current
+        } else {
+            self.grid_boundary(block_start)
+        };
+        if gate != current {
+            self.gate.0.store(gate, Ordering::Release);
+        }
+    }
+
+    /// The render grid's first boundary at or after `sample`: `origin + k * window_frames`, or
+    /// `sample` itself with no window.
+    fn grid_boundary(&self, sample: u64) -> u64 {
+        if self.window_frames == 0 {
+            return sample;
+        }
+        if sample <= self.origin {
+            return self.origin;
+        }
+        let remainder = (sample - self.origin) % self.window_frames;
+        if remainder == 0 {
+            sample
+        } else {
+            sample.saturating_add(self.window_frames - remainder)
+        }
+    }
+
+    /// Restart the grid at `adoption_sample`, the first sample of a block that adopted a successor
+    /// whose strip meters were not carried (#1587a): the strip meters open their first window
+    /// there. Call it on the render thread after the swap and before the block's output fold. The
+    /// grid's origin moves there; an active gate, open or waiting, moves there too, and an
+    /// inactive one stays shut. This is the control thread's
+    /// rule too: [`MeterDelivery::adopt`] moves the grid's origin there, and its `align` at the
+    /// same sample asks for that same value. `applied` does not change, so an unchanged request
+    /// never undoes the move, and the request the control thread makes after it asks for the
+    /// value the gate already holds. One `Acquire` load and at most one `Release` store.
+    pub fn restart_at(&mut self, adoption_sample: u64) {
+        self.origin = adoption_sample;
+        if self.gate.0.load(Ordering::Acquire) != INACTIVE {
+            self.gate.0.store(adoption_sample, Ordering::Release);
         }
     }
 }
@@ -626,6 +701,30 @@ impl MeterTables {
             carried_from: filled(meter_count, 0)?,
             frame: MeterFrame::new(strip_count)?,
         })
+    }
+
+    /// The tables of a plan that meters nothing and has no strip: they allocate nothing, so
+    /// they cannot fail.
+    #[must_use]
+    pub fn empty() -> Self {
+        Self {
+            pending: Box::default(),
+            remaining: Box::default(),
+            carried_from: Box::default(),
+            frame: MeterFrame {
+                first_sample: 0,
+                end_sample: 0,
+                windows: 0,
+                sequence: 0,
+                generation: 0,
+                validity: MeterValidity::NONE,
+                loss_count: 0,
+                strip_peaks: Box::default(),
+                output_peak: [0.0; 2],
+                strip_gain_reduction_db: Box::default(),
+                strip_gain_reduction_present: Box::default(),
+            },
+        }
     }
 
     /// The strip meters the tables serve.
@@ -1380,6 +1479,24 @@ pub struct MeterBatchWindow {
     pub output_valid: bool,
 }
 
+/// One meter table entry's strip peak over a batch's frames (#1587a), as
+/// [`MeterBatchFold::push_with_strips`] folds it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct StripPeakFold {
+    /// The strip's left and right peaks: the frames' maxima.
+    pub peak: [f32; 2],
+    /// Whether every frame of the batch was complete and had the strip.
+    pub present: bool,
+}
+
+impl StripPeakFold {
+    /// A fold before its batch's first frame.
+    pub const START: Self = Self {
+        peak: [0.0; 2],
+        present: true,
+    };
+}
+
 /// The fold of a meter delivery's published frames into meter batches (#1583 D5; shared with
 /// #1587 and #1588): `windows_per_batch` consecutive frames make one batch. The peaks are the
 /// maxima, the span is the first frame's start to the last frame's end, and a gap between two
@@ -1438,6 +1555,23 @@ impl MeterBatchFold {
 
     /// Fold one published `frame`. Returns the batch it completes, if any.
     pub fn push(&mut self, frame: &MeterFrame) -> Option<MeterBatchWindow> {
+        self.push_with_strips(frame, &[], &mut [])
+    }
+
+    /// Fold one published `frame`, and into `folds` the strip peaks the meter table's entries
+    /// read (#1587a). `strips[i]` is entry `i`'s strip in `frame` (its index in
+    /// [`MeterFrame::strip_peaks`]), or `None` when the plan that published `frame` has no such
+    /// strip or the entry reads no strip peak; `folds[i]` is that entry's fold, which the caller
+    /// reads when the call returns a batch. A batch's first frame resets every fold. An entry's
+    /// peaks are the maxima of its strip's peaks over the batch's frames, and it is present only
+    /// when every frame of the batch is complete ([`MeterValidity::COMPLETE`]) and has its strip.
+    /// Allocates nothing.
+    pub fn push_with_strips(
+        &mut self,
+        frame: &MeterFrame,
+        strips: &[Option<u32>],
+        folds: &mut [StripPeakFold],
+    ) -> Option<MeterBatchWindow> {
         if self.folded != 0
             && (frame.generation != self.generation || frame.first_sample != self.end_sample)
         {
@@ -1448,6 +1582,19 @@ impl MeterBatchFold {
             self.generation = frame.generation;
             self.output_peak = [0.0; 2];
             self.output_valid = true;
+            folds.fill(StripPeakFold::START);
+        }
+        let complete = frame.validity.contains(MeterValidity::COMPLETE);
+        for (strip, fold) in strips.iter().zip(folds.iter_mut()) {
+            let peak = strip
+                .and_then(|strip| usize::try_from(strip).ok())
+                .and_then(|strip| frame.strip_peaks.get(strip))
+                .filter(|_| complete);
+            if let Some(peak) = peak {
+                fold.peak = [fold.peak[0].max(peak[0]), fold.peak[1].max(peak[1])];
+            } else {
+                fold.present = false;
+            }
         }
         self.output_peak = [
             self.output_peak[0].max(frame.output_peak[0]),
@@ -1516,7 +1663,35 @@ pub fn default_meter_window_blocks(rate_hz: u32, quantum_frames: u32) -> NonZero
 
 #[cfg(test)]
 mod tests {
-    use super::default_meter_window_blocks;
+    use super::{default_meter_window_blocks, output_peak_gate_relay, output_peak_meter};
+
+    /// #1587a, root ruling 3: a request whose boundary is behind the block render applies it in
+    /// (the control thread read the render clock blocks earlier) opens the gate at the grid's
+    /// next boundary, not at that block. On a grid of 256-frame windows from 0, a request for
+    /// sample 0 applied before the block at 384 opens the output window at 512, so it closes as
+    /// `[512, 768)`, the strip meters' window of the same span, and the two pair.
+    ///
+    /// Test value: red if the relay copies a request behind the block into the gate, so the output
+    /// meter opens `[384, 640)`, off the strip meters' grid, and no strip window pairs with it again.
+    #[test]
+    fn a_gate_request_behind_its_block_opens_on_the_next_grid_boundary() {
+        const QUANTUM: u64 = 128;
+        let window = core::num::NonZeroU32::new(256).expect("window");
+        let (mut observer, mut reader, gate) = output_peak_meter(window).expect("output meter");
+        let (requested, mut relay) = output_peak_gate_relay(gate, u64::from(window.get()));
+        requested.activate(0);
+        let plane = [0.5_f32; QUANTUM as usize];
+        for block in 3..6 {
+            let first = block * QUANTUM;
+            relay.apply(first);
+            assert_eq!(observer.admits(first), first >= 512, "block {block}");
+            observer.observe(&plane, &plane, first, first + QUANTUM);
+        }
+        let windows = reader.windows_mut();
+        let closed = windows.try_pop().expect("one closed window");
+        assert_eq!((closed.start_sample, closed.end_sample), (512, 768));
+        assert!(windows.try_pop().is_err(), "and no other");
+    }
 
     /// Gate 5: the default window is the nearest whole block count to 32 ms.
     #[test]

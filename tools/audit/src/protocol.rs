@@ -271,6 +271,7 @@ fn prepare_egress_corpus() -> EgressCorpus {
         reliable_response_slots: NonZeroUsize::new(1).expect("response"),
         reliable_event_slots: NonZeroUsize::new(1).expect("event"),
         telemetry_slots: NonZeroUsize::new(1).expect("telemetry"),
+        counter_telemetry_slots: NonZeroUsize::new(1).expect("counter telemetry"),
     })
     .expect("prepared queues");
     let mut controller = ProtocolController::new(
