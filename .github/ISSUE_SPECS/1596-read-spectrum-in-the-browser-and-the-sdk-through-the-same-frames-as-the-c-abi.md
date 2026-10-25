@@ -157,3 +157,38 @@ Commands: `bash scripts/check-sdk-types.sh`, `bash scripts/check-sdk-headless.sh
 
 - Amends #1400 D5 and #1381 D3 (the spectrum companion and its swap-block pairing): see the
   amendment entries.
+
+## Decision record
+
+- 2026-10-25, scope (root): split in three. #1596a the browser session serves spectrum (Rust only);
+  #1596b the SDK codec and the headless engine; #1596c the browser SDK and the three-browser
+  qualification. R1: the old spectrum exports read the session's one service through the existing
+  accessors until #1597 (no forwarding export). R2: D2's `compile_children` spectrum parameter
+  deletion moves to #1597 (its last callers are the kept boot exports). R3: the browser's 16 KiB
+  control frame stays. R4: gate 6 lands in #1596a. R5: D3's "RenderCompanions loses its spectrum
+  field" was already true (#1290d2); #1332 is not a dependency (single mode is the product).
+- #1596a facts: the core's session had only test-support accessors to its spectrum monitor, so R1
+  needs `SessionState::spectrum_monitor`/`spectrum_monitor_mut` in
+  `crates/control-plane/src/control.rs` (the two `test_spectrum*` accessors, ungated and renamed).
+  #1597 must re-gate (`test-support`) or delete `spectrum_monitor_mut` when it deletes the old
+  exports, its only production caller.
+- #1596a attempt 2 (verifier MAJOR 1): the core runs its service step, and so promotes, at the
+  start of every control command, `service`, `declare_discontinuity`, the event dequeue, both
+  session seeks, the source seek (`seek_at`) and the seek report (only the browser's source submit
+  runs unserviced). The attempt-1 eager end in `run_control` and `service` missed the event
+  dequeue, the anchored session seek, the source seek and the seek report. Root ruling: one lazy
+  mechanism. Every use of the spectrum staging (`with_spectrum_staging`) first ends a staging
+  stream that the live host's session no longer runs, drops the staged window and writes the
+  record from the service with the staging analysis's facts; the `analysis` parameters of
+  `service`, `control_command`, `declare_discontinuity` and `session_seek`, and the ffi's
+  `with_promotion_analysis`, are deleted. Stated limit until #1597: a stream started through
+  `SPECTRUM_STREAM` after a promotion ended the old one is the session analysis's; the staging
+  analysis follows only streams the old exports start. The lazy check sees only whether a stream
+  runs, so a command that ends the old-export stream and starts a `SPECTRUM_STREAM` stream in one
+  call leaves the staging analysis on the new stream. The capture epoch cannot tell the two apart:
+  it does survive a carried promotion, but it also advances inside one kept stream on every render
+  failure (`continuous_fail`) and every re-selection (`restart_continuous`), so a mismatch would end
+  a live staging stream at a failure; and a promotion's fresh capture starts its epochs at 0 again,
+  so the new stream's first epoch can equal the old one's. A true stream identity needs a start
+  generation in `SpectrumService` (host-core); #1597 deletes the staging analysis, which ends the
+  case.

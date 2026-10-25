@@ -2013,7 +2013,7 @@ fn designate_master(host: &mut AudioWorkletEngineHost, strip: &str) {
     host.control_request_mut(frame.len() as u32)
         .expect("the control staging")[..frame.len()]
         .copy_from_slice(&frame);
-    assert_eq!(host.control_command(frame.len() as u32, None), RESULT_OK);
+    assert_eq!(host.control_command(frame.len() as u32), RESULT_OK);
     let index = host
         .live_control_tracks()
         .iter()
@@ -2121,7 +2121,7 @@ fn native_set_control_timeline_digest_pins_the_wasm_parity() {
         host.control_request_mut(length)
             .expect("the control request staging")[..frame.len()]
             .copy_from_slice(frame);
-        assert_eq!(host.control_command(length, None), RESULT_OK);
+        assert_eq!(host.control_command(length), RESULT_OK);
         // A commit queues its reliable events; drain them the way the worklet does.
         for lane in [EVENT_LANE_RELIABLE, EVENT_LANE_LOSSY] {
             loop {
@@ -2209,7 +2209,7 @@ fn automation_transcript(document: &[u8]) -> Vec<Vec<f32>> {
     for block in 0..BLOCKS {
         if block == SEEK_BLOCK {
             assert_eq!(
-                host.session_seek(None, 2, SEEK_TIMELINE, None),
+                host.session_seek(2, SEEK_TIMELINE, None),
                 RESULT_OK,
                 "the session seek"
             );
@@ -3274,7 +3274,7 @@ fn served_counter(host: &mut AudioWorkletEngineHost, request: u64, id: protocol:
         CommandPayload, CountersRequest, DecodeScratch, DecodedSuccessResponsePayload,
         DecodedTypedResponseFrame, ExpectedRevision, ProtocolCodec, RequestId, TypedCommandFrame,
     };
-    assert_eq!(host.service(None), RESULT_OK);
+    assert_eq!(host.service(), RESULT_OK);
     let codec = ProtocolCodec::default();
     let mut bytes = vec![0_u8; codec.limits().max_frame_bytes];
     let length = codec
@@ -3294,7 +3294,7 @@ fn served_counter(host: &mut AudioWorkletEngineHost, request: u64, id: protocol:
     host.control_request_mut(staged)
         .expect("the control request staging")[..length]
         .copy_from_slice(&bytes[..length]);
-    assert_eq!(host.control_command(staged, None), RESULT_OK);
+    assert_eq!(host.control_command(staged), RESULT_OK);
     let mut fields = [0_u16; 64];
     let DecodedTypedResponseFrame::Success {
         payload: DecodedSuccessResponsePayload::CounterSnapshot(snapshot),
@@ -3386,7 +3386,7 @@ fn the_counters_get_reply_counts_the_frames_a_source_removal_discards() {
         host.control_request_mut(staged)
             .expect("the control request staging")[..length]
             .copy_from_slice(&bytes[..length]);
-        assert_eq!(host.control_command(staged, None), RESULT_OK);
+        assert_eq!(host.control_command(staged), RESULT_OK);
         let mut fields = [0_u16; 64];
         assert!(
             matches!(
@@ -5253,7 +5253,7 @@ fn native_observation_timeline_digest_pins_the_wasm_parity() {
             host.control_request_mut(frame.len() as u32)
                 .expect("the control staging")[..frame.len()]
                 .copy_from_slice(&frame);
-            assert_eq!(host.control_command(frame.len() as u32, None), RESULT_OK);
+            assert_eq!(host.control_command(frame.len() as u32), RESULT_OK);
         }
         assert_eq!(host.live_control_tracks().len(), 1);
         assert_eq!(
@@ -6653,40 +6653,40 @@ fn web_runtime_preparer_attaches_the_companions_on_every_branch() {
         let request = companion_request(capture);
         let preparer = WebRuntimePreparer::new(options).recording(Arc::clone(&record));
         let superseded = host_core::LiveValuesSuperseded::new();
-        let check =
-            |host: &mut PreparedHost, handles: &host_core::HostLiveControlHandles, at: &str| {
-                assert!(
-                    handles.meters.is_empty(),
-                    "{capture:?} {at}: no meter in the handles"
-                );
-                assert!(
-                    handles.effect_observations.is_empty(),
-                    "{capture:?} {at}: no observation handle in the handles"
-                );
-                let companions = host
-                    .plan
-                    .host_attachment_mut::<RenderCompanions>()
-                    .unwrap_or_else(|| panic!("{capture:?} {at}: the plan carries its companions"));
-                assert_eq!(
-                    companions.meters().len(),
-                    strips,
-                    "{capture:?} {at}: one meter per strip"
-                );
-                // #1290d2: the captures are control-side; the preparer leaves them, with the
-                // plan's pairing, in the record.
-                let handover = record.lock().expect("the record").spectrum.take();
-                let shape = match handover.as_ref().map(|handover| &handover.captures) {
-                    None => CompanionCapture::None,
-                    Some(PreparedSpectrumCaptures::Single(_)) => CompanionCapture::Single,
-                    Some(PreparedSpectrumCaptures::Collection(_)) => CompanionCapture::Collection,
-                };
-                assert_eq!(shape, capture, "{capture:?} {at}: the branch's capture");
+        let check = |host: &mut PreparedHost,
+                     handles: &host_core::HostLiveControlHandles,
+                     captures: Option<&PreparedSpectrumCaptures>,
+                     at: &str| {
+            assert!(
+                handles.meters.is_empty(),
+                "{capture:?} {at}: no meter in the handles"
+            );
+            assert!(
+                handles.effect_observations.is_empty(),
+                "{capture:?} {at}: no observation handle in the handles"
+            );
+            let companions = host
+                .plan
+                .host_attachment_mut::<RenderCompanions>()
+                .unwrap_or_else(|| panic!("{capture:?} {at}: the plan carries its companions"));
+            assert_eq!(
+                companions.meters().len(),
+                strips,
+                "{capture:?} {at}: one meter per strip"
+            );
+            // #1596 D3: the preparer returns the captures to the session, as the C ABI's does.
+            let shape = match captures {
+                None => CompanionCapture::None,
+                Some(PreparedSpectrumCaptures::Single(_)) => CompanionCapture::Single,
+                Some(PreparedSpectrumCaptures::Collection(_)) => CompanionCapture::Collection,
             };
+            assert_eq!(shape, capture, "{capture:?} {at}: the branch's capture");
+        };
 
-        let (mut boot, boot_handles, _) = preparer
+        let (mut boot, boot_handles, boot_captures) = preparer
             .prepare(&compiled, &caps, lanes, request.as_ref(), None, &superseded)
             .unwrap_or_else(|failure| panic!("{capture:?} boot: {failure:?}"));
-        check(&mut boot, &boot_handles, "boot");
+        check(&mut boot, &boot_handles, boot_captures.as_ref(), "boot");
         // The attachment is charged in the plan's rows (the control plane builds its plan
         // resource row from this report): the same preparation without the attachment, plus the
         // attachment's own box and vector buffers, in both plan rows and in the largest allocation.
@@ -6737,7 +6737,7 @@ fn web_runtime_preparer_attaches_the_companions_on_every_branch() {
             edit_ramps: &edit_ramps,
             ..host_core::SuccessorBase::new(&boot.inventory, model, 1)
         };
-        let (mut successor, successor_handles, _) = preparer
+        let (mut successor, successor_handles, successor_captures) = preparer
             .prepare(
                 &compiled,
                 &caps,
@@ -6747,7 +6747,12 @@ fn web_runtime_preparer_attaches_the_companions_on_every_branch() {
                 &superseded,
             )
             .unwrap_or_else(|failure| panic!("{capture:?} successor: {failure:?}"));
-        check(&mut successor, &successor_handles, "successor");
+        check(
+            &mut successor,
+            &successor_handles,
+            successor_captures.as_ref(),
+            "successor",
+        );
         // Every successor carries the timeline's command queue (#1641 D7), which is overhead
         // only; a carried ring also brings its PCM payload.
         assert!(
@@ -6973,7 +6978,7 @@ mod structural_apply {
                 .control_request_mut(bytes.len() as u32)
                 .expect("the control staging");
             staging[..bytes.len()].copy_from_slice(bytes);
-            let result = self.host.control_command(bytes.len() as u32, None);
+            let result = self.host.control_command(bytes.len() as u32);
             (result, self.host.control_response().to_vec())
         }
 
@@ -7126,7 +7131,7 @@ mod structural_apply {
         }
         assert_eq!(rig.epoch(), 1);
         assert!(!rig.pending(), "render adopted the plan");
-        assert_eq!(rig.host.service(None), RESULT_OK);
+        assert_eq!(rig.host.service(), RESULT_OK);
         assert!(!rig.pending());
         assert_eq!(
             rig.host.status().next_absolute_sample,
@@ -7206,11 +7211,11 @@ mod structural_apply {
     }
 
     // Issue #1290d2: the spectrum part of gate 7. A rebuild keeps a running stream, an armed
-    // one-shot and a collection's selection, because the host installs the successor's prepared
-    // captures at the plan's promotion (the service step after the adoption block) through
-    // `SpectrumService::adopt_successor`, with the plan's pairing and the engine's carry outcome.
-    // The browser keeps the running stream as its parity row; the one-shot and the collection
-    // carry are `host-core`'s `tests/successor_swap.rs` (`spectrum_carry`).
+    // one-shot and a collection's selection, because the session's spectrum monitor installs the
+    // successor's prepared captures, which the browser's preparer returns to it (#1596 D3), at the
+    // plan's promotion (the service step after the adoption block). The browser keeps the running
+    // stream as its parity row; the one-shot and the collection carry are `host-core`'s
+    // `tests/successor_swap.rs` (`spectrum_carry`).
 
     /// A run long enough for several windows of the 2048-frame capture (16 blocks each).
     const SPECTRUM_BLOCKS: u64 = 48;
@@ -7236,18 +7241,6 @@ mod structural_apply {
                     .expect("a spectrum service"),
                 window: self.host.spectrum_stream_window().copied(),
             }
-        }
-
-        /// Whether the spectrum service still waits for the promotion of an adopted plan.
-        fn spectrum_promotions_waiting(&self) -> usize {
-            self.host
-                .ready
-                .as_ref()
-                .expect("ready")
-                .pending_shapes
-                .iter()
-                .filter(|entry| entry.spectrum.is_some())
-                .count()
         }
     }
 
@@ -7314,7 +7307,7 @@ mod structural_apply {
             }
             rig.step();
             if rebuild == Some(block) {
-                assert_eq!(rig.host.service(None), RESULT_OK);
+                assert_eq!(rig.host.service(), RESULT_OK);
             }
             reads.push(rig.read_stream());
         }
@@ -7337,7 +7330,7 @@ mod structural_apply {
         let model = gate_model();
         let committed = with_muted_track(&model, ADDED);
         let (_, reference) = run_stream(&committed, &spectrum, &setup, None);
-        let (mut rig, reads) = run_stream(&model, &spectrum, &setup, Some(service_after));
+        let (rig, reads) = run_stream(&model, &spectrum, &setup, Some(service_after));
         assert_eq!(rig.epoch(), 1);
         assert_same_stream(&reads, &reference, "the stream across the swap");
         for read in &reads {
@@ -7364,24 +7357,13 @@ mod structural_apply {
                 >= (SPECTRUM_APPLY_BEFORE + 1) * u64::from(QUANTUM),
             "the stream delivers windows from after the swap"
         );
-        assert_eq!(
-            rig.spectrum_promotions_waiting(),
-            0,
-            "promoted at the service step"
-        );
-        assert_eq!(rig.host.service(None), RESULT_OK);
-        assert_eq!(
-            rig.host.ready.as_ref().expect("ready").carried_swaps_seen,
-            1,
-            "the engine carried the swap"
-        );
     }
 
-    /// Gate 7, spectrum part (single capture). Test value: red if the successor's capture is not
-    /// installed at promotion or the carry outcome is read wrong, or if the stream restarts at the
-    /// swap (a new epoch, a gap or a failed read). The service step runs right after the adoption
-    /// block and long after it: between the two the carried capture is served by the reader the
-    /// service already holds.
+    /// Gate 7, spectrum part (single capture). Test value: red if the browser's preparer keeps the
+    /// successor's capture from the session (the promotion then removes the service), or if the
+    /// stream restarts at the swap (a new epoch, a gap or a failed read). The service step runs
+    /// right after the adoption block and long after it: between the two the carried capture is
+    /// served by the reader the service already holds.
     #[test]
     fn a_running_spectrum_stream_continues_across_a_rebuild() {
         stream_continues(single_capture, start_stream, SPECTRUM_APPLY_BEFORE);
@@ -7429,7 +7411,7 @@ mod structural_apply {
             "the edit is never refused for a spectrum entry"
         );
         // D7: until render adopts the successor, a service step keeps the running plan's service.
-        assert_eq!(rig.host.service(None), RESULT_OK);
+        assert_eq!(rig.host.service(), RESULT_OK);
         assert_eq!(
             rig.host
                 .spectrum_stream_metadata()
@@ -7441,7 +7423,7 @@ mod structural_apply {
         // then a service step keeps the running plan's service.
         rig.step();
         while rig.epoch() == 0 {
-            assert_eq!(rig.host.service(None), RESULT_OK);
+            assert_eq!(rig.host.service(), RESULT_OK);
             assert_eq!(
                 rig.host
                     .spectrum_stream_metadata()
@@ -7453,8 +7435,7 @@ mod structural_apply {
             rig.step();
         }
         assert_eq!(rig.epoch(), 1, "render adopted the successor");
-        assert_eq!(rig.host.service(None), RESULT_OK);
-        assert_eq!(rig.spectrum_promotions_waiting(), 0);
+        assert_eq!(rig.host.service(), RESULT_OK);
         assert!(
             rig.host.spectrum_stream_metadata().is_none(),
             "the successor has no spectrum observer, so the browser holds no service"
@@ -7746,7 +7727,7 @@ mod structural_apply {
             (Some(1), Some(0)),
             "the record armed the compressor it named, not the one that took its old index"
         );
-        assert_eq!(rig.host.service(None), RESULT_OK);
+        assert_eq!(rig.host.service(), RESULT_OK);
         for _ in 0..4 {
             rig.step();
         }
@@ -7757,7 +7738,7 @@ mod structural_apply {
             rig.host.read_observation_addresses(&[address]).is_ok(),
             "the reader the catalog names is the successor's"
         );
-        assert_eq!(rig.host.service(None), RESULT_OK);
+        assert_eq!(rig.host.service(), RESULT_OK);
     }
 
     /// #1323 gate 2 on the browser: the #1285 removal of a muted track behind a true-peak limiter
@@ -7831,7 +7812,7 @@ mod structural_apply {
             "the removal keeps A's latency (#1285)"
         );
         let revision = rig.host.committed_revision();
-        assert_eq!(rig.host.declare_discontinuity(None), RESULT_OK);
+        assert_eq!(rig.host.declare_discontinuity(), RESULT_OK);
         assert!(rig.pending(), "the declaration published a plan");
         while rig.block < BLOCKS {
             rig.step();
@@ -7900,7 +7881,7 @@ mod structural_apply {
             None,
             "from the declaration on, the output is a fresh boot's"
         );
-        assert_eq!(rig.host.service(None), RESULT_OK);
+        assert_eq!(rig.host.service(), RESULT_OK);
     }
 
     /// Root ruling B16-R9's bookkeeping on the browser: a plain session seek declares the
@@ -7979,7 +7960,7 @@ mod structural_apply {
             let before = newest(&rig);
 
             const FRAME: u64 = 1_280;
-            assert_eq!(rig.host.session_seek(None, 2, FRAME, None), RESULT_OK);
+            assert_eq!(rig.host.session_seek(2, FRAME, None), RESULT_OK);
             let successor = newest(&rig);
             assert_eq!(successor, before + 1, "swap {swap}: one successor");
             assert_eq!(
@@ -8033,7 +8014,7 @@ mod structural_apply {
                 "swap {swap}: the next block adopts it"
             );
             assert_eq!(rig.host.status().state, STATE_READY, "swap {swap}");
-            assert_eq!(rig.host.service(None), RESULT_OK);
+            assert_eq!(rig.host.service(), RESULT_OK);
         }
     }
 
@@ -8115,7 +8096,7 @@ mod structural_apply {
             rig.step();
         }
         assert!(!rig.pending(), "render adopted the newest plan");
-        assert_eq!(rig.host.service(None), RESULT_OK);
+        assert_eq!(rig.host.service(), RESULT_OK);
         assert_eq!(
             rig.host.live_control_tracks().len(),
             model.tracks.len() + EDITS as usize,
@@ -8142,79 +8123,6 @@ mod structural_apply {
                 .any(|block| block.iter().any(|word| f32::from_bits(*word) != 0.0)),
             "the compared blocks are not silent"
         );
-    }
-
-    /// #1310 on the browser with a spectrum capture (batch 15a review fold 2, m-5): a candidate
-    /// whose tables carry a spectrum hand-over (its prepared captures and pairing) is superseded
-    /// before render adopts it. The superseding command drops the candidate's entry, captures
-    /// included, on the control side; the replacement's hand-over is the one that waits, and the
-    /// service step after its adoption promotes it, so the stream keeps reading. The render-call
-    /// allocation count of the same script is pinned to zero in `structural_apply_realtime.rs`.
-    ///
-    /// Test value: red if a superseded candidate's tables and hand-over outlive the command that
-    /// superseded it (two entries wait), if the replacement's hand-over is lost (none waits, or
-    /// the stream stops after the swap), or if a service step before the adoption block drops a
-    /// waiting candidate's hand-over.
-    #[test]
-    fn a_superseded_candidates_spectrum_handover_drops_with_the_superseding_command() {
-        let model = gate_model();
-        let mut rig = Rig::boot(&model, options(), single_capture());
-        rig.host
-            .start_spectrum_stream(SpectrumSmoothingConfig::default(), None)
-            .expect("the stream starts");
-        for _ in 0..APPLY_BEFORE {
-            rig.step();
-        }
-        let first = add_muted_track(&model, ADDED);
-        let second = add_muted_track(&with_muted_track(&model, ADDED), "a-muted-b");
-        assert!(matches!(
-            rig.apply(&first, 1),
-            Outcome::Applied {
-                path: EditPath::Rebuild,
-                ..
-            }
-        ));
-        assert_eq!(rig.spectrum_promotions_waiting(), 1, "A's hand-over waits");
-        assert_eq!(rig.host.service(None), RESULT_OK);
-        assert_eq!(
-            rig.spectrum_promotions_waiting(),
-            1,
-            "a service step before the adoption block keeps A's hand-over"
-        );
-        assert!(matches!(
-            rig.apply(&second, 2),
-            Outcome::Applied {
-                path: EditPath::Rebuild,
-                ..
-            }
-        ));
-        assert_eq!(
-            rig.host.ready.as_ref().expect("ready").pending_shapes.len(),
-            1,
-            "the superseded candidate's entry dropped with the command"
-        );
-        assert_eq!(
-            rig.spectrum_promotions_waiting(),
-            1,
-            "only the replacement's hand-over waits"
-        );
-        rig.step();
-        assert_eq!(rig.epoch(), 2, "the replacement is adopted");
-        assert_eq!(rig.host.service(None), RESULT_OK);
-        assert_eq!(
-            rig.spectrum_promotions_waiting(),
-            0,
-            "the service step promoted the replacement's captures"
-        );
-        let mut windows = 0;
-        while rig.block < SPECTRUM_BLOCKS {
-            rig.step();
-            let read = rig.read_stream();
-            if read.window.is_some() {
-                windows += 1;
-            }
-        }
-        assert!(windows > 0, "the stream publishes windows after the swap");
     }
 
     /// #1310 (root ruling B15-Q4) on the browser, the host that admits observation records: a
@@ -8935,7 +8843,7 @@ mod structural_apply {
             1,
             "the subscription the plan had acknowledged is armed on the successor"
         );
-        assert_eq!(rig.host.service(None), RESULT_OK);
+        assert_eq!(rig.host.service(), RESULT_OK);
         for _ in 0..4 {
             rig.step();
         }

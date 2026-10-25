@@ -281,3 +281,50 @@ the last, checks that the middle ring keeps draining, and runs `prepareSeek` ove
 remains. It is red when the worklet compacts its attach list or passes withdrawn slots to
 prepare-seek. `attachEngineFeed` refuses duplicate source IDs, and a start whose source was detached
 during `ready()` is skipped. Each was red first. The paused-seek test's port clones its messages.
+
+## Record: slice #1297c (2026-10-25)
+
+Paths: `sdk/src/browser/pcm-feed.ts`, `sdk/test/browser-pcm-evals.mjs`, and the README's feed
+section (the spec's deliverable 2; outside the scope note's 1297c list).
+
+- `FeedStart` is `{ frameAt, prime } | { alignTo, prime }`; exactly one of `frameAt` and `alignTo`,
+  else `attachEngineFeed` throws. `alignTo` may name `$timeline` (1297a's reserved report ID).
+- Decision of this slice ("changed since that report"): one report has no baseline for its own
+  counters, so the SDK reads the reference's report before the one status read and again after `A`
+  is computed. The frame is `sourceFrame + (A - firstSample)` from the first. Refusals, each a
+  `MisoUsageError` with `diagnosticCode`, before any ring publish: `feed.align.unrendered`
+  (generation 0), `feed.align.busy` (`RESULT_BACKPRESSURE` on 4 reads, a local or an engine 6,
+  one macrotask between reads), `feed.align.reseeked` (generation, first sample or frame differ),
+  `feed.align.held` (the held counter moved between the reads, or a pending seek below),
+  `feed.align.domain`. Another engine result is a `MisoEngineError`. Each rejects `ready()` and
+  closes the feed (1297b's rule).
+- A start whose feed closed, or whose source was detached, during these reads publishes nothing.
+
+Attempt 2 (verifier findings of attempt 1, root rulings):
+- A pending start of the reference: a source's first generation is 1, not 0, so a reference whose
+  own anchored start is not rendered yet reports generation 1 at frame 0 and nothing refused. The
+  engine's feed link records each published anchored start `(generation, F_X, A_X)` by source ID
+  (removed with its ring on detach or close). When that record's generation is above the
+  reference's report, the frame is `F_X + (A_Y - A_X)`, exact, with no second report read. Any
+  other seek published in a fed reference's ring above the report's generation (read from the
+  ring's published seek words in `pcm-feed.ts`'s `seekSnapshot`; `Msb1RingObserver` has no getter
+  for it and `pcm-ring.ts` is not in this slice's paths) refuses `feed.align.held`.
+- Underrun is not a refusal: the consumer advances its frame on an underrun (`crates/source`,
+  the missing-PCM branch adds the quantum to `next_frame`), so the formula stays exact; the
+  attempt-1 test-value claim "off by that many samples" (gate 1a) is false for underruns. Held
+  frames stay a refusal (an anchored seek of the reference is waiting).
+- A stem whose region starts after its frame at `A` is refused by the engine's `seek_at` (outside
+  the region), not clamped: `ready()` rejects with that `MisoEngineError`.
+
+Attempt 3 (verifier finding of attempt 2, root ruling: an aligned source listed before its
+reference in one feed played 50,000 frames off):
+- One feed starts its sources in a stable dependency order: a source whose `alignTo` names another
+  started source of the feed starts after it. A self-alignment or an `alignTo` cycle throws a
+  `MisoUsageError` at attach.
+- Across feeds: each linked feed reports the sources whose start it has not published yet (from
+  attach until the record exists, or the source is detached or the feed closed). Aligning to one
+  refuses `feed.align.unstarted`; there is no waiting across feeds.
+- On the record path, the record is read again after the status read; another record refuses
+  `feed.align.reseeked`.
+- A reference whose own `seek-at` the engine later refuses leaves the aligned stem at the frame the
+  reference's `frameAt` mapping gave (README).
