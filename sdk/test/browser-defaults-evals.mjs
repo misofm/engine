@@ -72,10 +72,6 @@ test("default context + host preserve exact context, URLs and mapped policy", as
   } finally { if (previous === undefined) delete globalThis.AudioContext; else globalThis.AudioContext = previous; delete globalThis.__sdkBootRequests; }
 });
 
-test("omitted browser spectrum hop maps to the shipped host default sentinel", () => {
-  assert.equal(toWebBootOptions(workletBootOptions({}, shape)).spectrumHopFrames, 0);
-});
-
 for (const hop of [0, "1024", 1_024.5]) {
   test(`invalid browser spectrum H${String(hop)} refuses before any boot dependency is called`, async () => {
     let scratchCalls = 0;

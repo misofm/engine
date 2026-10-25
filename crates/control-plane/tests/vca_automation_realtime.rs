@@ -215,7 +215,7 @@ impl Rig {
     fn with(vca_automation: bool) -> Self {
         let (document, revision) = document_with(vca_automation);
         let CompiledChildren { session, plan } =
-            compile_children::<Adapter>(&document, limits(), Box::new(Preparer), None)
+            compile_children::<Adapter>(&document, limits(), Box::new(Preparer))
                 .expect("boot compile");
         Self {
             session,

@@ -526,9 +526,9 @@ async function sendSpectrumFrame<T>(
 /**
  * D2 of #1596 for the browser engine, as for the headless one: refuse an engine whose
  * `CAPABILITIES_GET` lacks flag bit 16, then send one `SPECTRUM_CONFIGURE` of the boot's taps with
- * the policy's hop. The worklet boot staged the same taps (#1597 owns that route), so the first plan
- * carries them and the reply reports `adoptedEpoch === configuredEpoch` at once: an equal
- * configuration changes nothing, and a hop retunes the taps without a plan (#1594 D4).
+ * the policy's hop. The context is suspended until the engine is returned, so no block has
+ * rendered: the engine prepares the plan with the taps and adopts it in place of the boot's plan
+ * (#1597), and the reply reports `adoptedEpoch === configuredEpoch` at once.
  */
 async function configureBootSpectrum(
   host: MisoAudioWorkletHost,
@@ -758,7 +758,7 @@ export async function createEngine(options: CreateEngineOptions): Promise<Browse
       options: workletBootOptions(policy, {
         sampleRateHz: shape.sampleRateHz,
         quantumFrames: shape.quantumFrames,
-      }, preparedSpectrum, preparedSpectrumCollection),
+      }),
       simd128ModuleUrl,
       workletModuleUrl,
       ...(preparedModule === undefined ? {} : { preparedModule }),

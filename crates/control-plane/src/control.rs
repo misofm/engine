@@ -540,26 +540,6 @@ fn tap_fits(channels: protocol::ParameterChannel, target_id_bytes: usize, limit:
     ) && stream_reply_fits(channels, target_id_bytes, limit)
 }
 
-/// #1595 R6 on a boot configuration: whether every tap of `preparation` passes [`tap_fits`].
-pub(crate) fn preparation_fits(preparation: &host_core::SpectrumPreparation, limit: u64) -> bool {
-    match preparation {
-        host_core::SpectrumPreparation::Single(request) => tap_fits(
-            protocol_channels(request.channels),
-            spectrum_target_id(&request.target).len(),
-            limit,
-        ),
-        host_core::SpectrumPreparation::Collection(request) => {
-            request.entries.iter().all(|entry| {
-                tap_fits(
-                    protocol_channels(entry.channels),
-                    spectrum_target_id(&entry.target).len(),
-                    limit,
-                )
-            })
-        }
-    }
-}
-
 const fn protocol_target_kind(target: &host_core::SpectrumTarget) -> protocol::SpectrumTargetKind {
     match target {
         host_core::SpectrumTarget::TrackPostInputBuiltins(_) => {
@@ -3306,14 +3286,16 @@ where
     }
 
     /// The session's spectrum monitor (#1593): its configuration, epochs, service and analysis.
+    /// Test support (#1597): every host reads spectrum through the session's frames.
+    #[cfg(feature = "test-support")]
     #[must_use]
     pub const fn spectrum_monitor(&self) -> &crate::spectrum::SpectrumMonitor {
         &self.spectrum
     }
 
-    /// The session's spectrum monitor, for the service's arm, read and stream calls (#1593): the
-    /// browser's own spectrum exports read the session's one service through it until #1597
-    /// deletes them (#1596 R1).
+    /// The session's spectrum monitor, for a test's direct arm, read and stream calls on the
+    /// service (#1593). Test support (#1597): no host calls the service but through the frames.
+    #[cfg(feature = "test-support")]
     pub fn spectrum_monitor_mut(&mut self) -> &mut crate::spectrum::SpectrumMonitor {
         &mut self.spectrum
     }
@@ -8372,13 +8354,9 @@ mod tests {
             selection: Option<Vec<HostMeterRequest>>,
             meters: Vec<MeterEntry>,
         ) -> CompiledChildren<Adapter> {
-            let mut children = compile_children::<Adapter>(
-                SESSION,
-                limits(),
-                Box::new(Preparer { selection }),
-                None,
-            )
-            .expect("boot");
+            let mut children =
+                compile_children::<Adapter>(SESSION, limits(), Box::new(Preparer { selection }))
+                    .expect("boot");
             command(
                 &mut children,
                 1,
@@ -8861,8 +8839,7 @@ mod tests {
         fn declare_after(offset: u64) -> u64 {
             super::super::test_reset_lifecycle_observer();
             let mut children =
-                compile_children::<Adapter>(SESSION, limits(), Box::new(Preparer), None)
-                    .expect("boot");
+                compile_children::<Adapter>(SESSION, limits(), Box::new(Preparer)).expect("boot");
             if offset > 0 {
                 children.session.test_set_next_source_read_offset(offset);
             }
@@ -9237,7 +9214,6 @@ mod tests {
                     &document,
                     limits,
                     Box::new(Preparer(backend)),
-                    None,
                     warm,
                 )
                 .expect("boot");

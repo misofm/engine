@@ -179,7 +179,6 @@ fn the_session_prepares_through_its_preparer_at_boot_and_for_a_structural_edit()
         SESSION,
         limits(1_024),
         Box::new(CountingPreparer(Arc::clone(&calls))),
-        None,
     )
     .expect("boot compile");
     {
@@ -220,7 +219,6 @@ fn a_refused_shape_never_reaches_the_preparer() {
         SESSION,
         limits(1_000),
         Box::new(CountingPreparer(Arc::clone(&calls))),
-        None,
     );
     assert!(
         refused.is_err(),
@@ -382,7 +380,6 @@ fn strips_restarted_counts_the_restarts_of_every_adopted_plan_and_of_no_other() 
         SESSION,
         limits(1_024),
         Box::new(CountingPreparer(Arc::clone(&calls))),
-        None,
     )
     .expect("boot compile");
     render(&mut plan, 0);
@@ -453,7 +450,6 @@ fn a_kept_base_keeps_nothing_of_owners_removed_while_a_successor_waits() {
         SESSION,
         limits(1_024),
         Box::new(CountingPreparer(Arc::new(Mutex::new(Calls::default())))),
-        None,
     )
     .expect("boot compile");
     render(&mut plan, 0);

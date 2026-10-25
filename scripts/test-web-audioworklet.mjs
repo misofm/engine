@@ -5,7 +5,6 @@ const root = new URL("../", import.meta.url);
 const commandArguments = process.argv.slice(2);
 const bootDataModeFlags = [
   ["--boot-data-document", "document"],
-  ["--boot-data-nested", "nested"],
 ].filter(([flag]) => commandArguments.includes(flag));
 if (bootDataModeFlags.length > 1) throw new TypeError("only one boot-data test mode is allowed");
 const bootDataTestMode = bootDataModeFlags[0]?.[1] ?? null;
@@ -433,87 +432,8 @@ async function testMainRealm() {
       }
     };
 
-    const runBootDataNested = async () => {
-      const gate = snapshotGate();
-      addModuleGate = gate;
-      const firstEntry = { target: "output", targetId: "first", channels: "both" };
-      const thirdEntry = { target: "trackPostPan", targetId: "third", channels: "left" };
-      const entries = [firstEntry, , thirdEntry];
-      const collection = { entries, maximumCaptureBytes: 4096 };
-      const factory = bootDataFactory({
-        document: new Uint8Array(),
-        includePreparedModule: true,
-        workletModuleUrl: "boot-data-nested-processor.js",
-        options: { ...limits, spectrum: null, spectrumCollection: collection },
-      });
-      const expected = {
-        ...limits,
-        spectrumHopFrames: 0,
-        spectrum: null,
-        spectrumCollection: {
-          entries: [
-            { target: "output", targetId: "first", channels: "both" },
-            ,
-            { target: "trackPostPan", targetId: "third", channels: "left" },
-          ],
-          maximumCaptureBytes: 4096,
-        },
-      };
-      const eventsBefore = events.length;
-      let hostValue;
-      try {
-        const boot = createMisoAudioWorkletHost(factory);
-        await gate.started;
-        firstEntry.targetId = "mutated-first";
-        thirdEntry.channels = "right";
-        entries[0] = { target: "output", targetId: "replaced-entry", channels: "right" };
-        factory.options.spectrumCollection = {
-          entries: [{ target: "output", targetId: "replaced-collection", channels: "both" }],
-          maximumCaptureBytes: 8192,
-        };
-        gate.release();
-        hostValue = await boot;
-        const node = FakeNode.latest;
-        assert.deepEqual(
-          node.constructionSnapshot.options,
-          expected,
-          "boot-data.nested.before-construction",
-        );
-        const capturedCollection = node.constructionSnapshot.options.spectrumCollection;
-        assert.equal(
-          Object.hasOwn(capturedCollection.entries, 1),
-          false,
-          "boot-data.nested.sparse-hole",
-        );
-        assert.notEqual(
-          node.options.processorOptions.options.spectrumCollection,
-          collection,
-          "boot-data.nested.private-collection",
-        );
-        assert.notEqual(
-          node.options.processorOptions.options.spectrumCollection.entries,
-          entries,
-          "boot-data.nested.private-entries",
-        );
-        assert.equal(node.constructionModule, unsupportedPreparationModule, "boot-data.nested.module");
-        assert.deepEqual(
-          events.slice(eventsBefore),
-          [["addModule", "boot-data-nested-processor.js"]],
-          "boot-data.nested.supplied-module-loading",
-        );
-      } finally {
-        gate.release();
-        if (addModuleGate === gate) addModuleGate = null;
-        if (hostValue !== undefined) await hostValue.dispose().catch(() => undefined);
-      }
-    };
-
     if (bootDataTestMode === "document") {
       await runBootDataDocument();
-      return;
-    }
-    if (bootDataTestMode === "nested") {
-      await runBootDataNested();
       return;
     }
 
@@ -521,13 +441,6 @@ async function testMainRealm() {
       const makeFactory = (overrides = {}) => ({
         context, document: new Uint8Array(), options: limits,
         simd128ModuleUrl: "simd.wasm", workletModuleUrl: "processor.js", ...overrides,
-      });
-      const makeEntry = () => ({ target: "output", targetId: "main-out", channels: "both" });
-      const makeSpectrum = () => ({
-        target: "trackPostPan", targetId: "eq0", channels: "both", maximumCaptureBytes: 4096,
-      });
-      const makeCollectionOptions = (entries) => ({
-        ...limits, spectrum: null, spectrumCollection: { entries, maximumCaptureBytes: 4096 },
       });
       const addWitness = (object, key, setterOnly = false, enumerable = true) => {
         let calls = 0;
@@ -565,22 +478,6 @@ async function testMainRealm() {
       const descriptorCases = [
         ["factory", () => { const f = makeFactory(); return [f, f, "context"]; }],
         ["boot", () => { const o = { ...limits }; return [makeFactory({ options: o }), o, "sourceRingFrames"]; }],
-        ["spectrum", () => {
-          const s = makeSpectrum(); const o = { ...limits, spectrum: s, spectrumCollection: null };
-          return [makeFactory({ options: o }), s, "target"];
-        }],
-        ["collection", () => {
-          const e = [makeEntry()]; const o = makeCollectionOptions(e);
-          return [makeFactory({ options: o }), o.spectrumCollection, "entries"];
-        }],
-        ["array-index", () => {
-          const e = [makeEntry()]; const o = makeCollectionOptions(e);
-          return [makeFactory({ options: o }), e, "0"];
-        }],
-        ["entry", () => {
-          const e = makeEntry(); const o = makeCollectionOptions([e]);
-          return [makeFactory({ options: o }), e, "targetId"];
-        }],
       ];
       for (const setterOnly of [false, true]) {
         for (const [label, makeCase] of descriptorCases) {
@@ -595,33 +492,6 @@ async function testMainRealm() {
           addWitness(factory, "context", setterOnly, false));
       }
 
-      const decoratedEntries = [
-        ["every=false", "every", false],
-        ["every=undefined", "every", undefined, false],
-        ["every callback", "every", "callback"],
-        ["map", "map", "callback"],
-        ["constructor", "constructor", "callback"],
-        ["Symbol.iterator", Symbol.iterator, "callback"],
-        ["Symbol.species", Symbol.species, "callback"],
-      ];
-      for (const [label, key, value, enumerable = true] of decoratedEntries) {
-        let calls = 0;
-        let retained = null;
-        const entries = [makeEntry()];
-        const decoration = value === "callback" ? (...args) => {
-          calls += 1;
-          retained = args[0] ?? null;
-          return true;
-        } : value;
-        Object.defineProperty(entries, key, {
-          configurable: true, enumerable, value: decoration, writable: true,
-        });
-        await assertRefusal(`decorated entries ${label}`, makeFactory({
-          options: makeCollectionOptions(entries),
-        }), () => calls);
-        assert.equal(retained, null, `decorated entries ${label}: callback escaped`);
-      }
-
       const refusalCases = [
         ["unknown enumerable", () => Object.assign(makeFactory(), { unknown: undefined })],
         ["unknown hidden", () => {
@@ -633,19 +503,6 @@ async function testMainRealm() {
           const factory = makeFactory();
           Object.defineProperty(factory, Symbol("unknown"), { value: undefined });
           return factory;
-        }],
-        ["custom-prototype entries", () => {
-          const entries = [makeEntry()]; Object.setPrototypeOf(entries, { custom: true });
-          return makeFactory({ options: makeCollectionOptions(entries) });
-        }],
-        ["subclass entries", () => {
-          class EntriesSubclass extends Array {}
-          const entries = new EntriesSubclass(makeEntry());
-          return makeFactory({ options: makeCollectionOptions(entries) });
-        }],
-        ["noncanonical array index", () => {
-          const entries = [makeEntry()]; Object.defineProperty(entries, "01", { value: makeEntry() });
-          return makeFactory({ options: makeCollectionOptions(entries) });
         }],
       ];
       for (const [label, makeCase] of refusalCases) {
@@ -660,181 +517,15 @@ async function testMainRealm() {
         await assertAccepted("null-prototype records", factory);
       }
       {
-        const spectrum = Object.assign(Object.create(null), makeSpectrum());
-        const spectrumOptions = Object.assign(Object.create(null), limits, {
-          spectrum, spectrumCollection: null,
-        });
-        await assertAccepted(
-          "null-prototype spectrum record",
-          makeFactory({ options: spectrumOptions }),
-        );
-        const entry = Object.assign(Object.create(null), makeEntry());
-        const collection = Object.assign(Object.create(null), {
-          entries: [entry], maximumCaptureBytes: 4096,
-        });
-        const collectionOptions = Object.assign(Object.create(null), limits, {
-          spectrum: null, spectrumCollection: collection,
-        });
-        await assertAccepted(
-          "null-prototype collection and entry records",
-          makeFactory({ options: collectionOptions }),
-        );
-      }
-      {
         const options = Object.freeze({ ...limits });
         await assertAccepted("frozen records", Object.freeze(makeFactory({ options })));
       }
-      await assertAccepted(
-        "legacy six-field shape",
-        makeFactory({ options: { ...limits } }),
-        (_host, options) => {
-          assert.equal(options.spectrum, null, "legacy spectrum normalizes to null");
-          assert.equal(options.spectrumCollection, null,
-            "legacy spectrum collection normalizes to null");
-        },
-      );
-      await assertAccepted(
-        "extended eight-field shape and null normalization",
-        makeFactory({ options: { ...limits, spectrum: null, spectrumCollection: null } }),
-        (_host, options) => {
-          assert.equal(options.spectrum, null, "explicit spectrum null is preserved");
-          assert.equal(options.spectrumCollection, null, "explicit collection null is preserved");
-        },
-      );
-      await assertAccepted(
-        "extended undefined spectrum normalizes to null",
-        makeFactory({ options: { ...limits, spectrum: undefined, spectrumCollection: null } }),
-        (_host, options) => {
-          assert.equal(options.spectrum, null, "enumerable undefined spectrum normalizes to null");
-          assert.equal(options.spectrumCollection, null, "enumerable null collection is preserved");
-        },
-      );
-      await assertAccepted(
-        "extended undefined spectrum keeps collection",
-        makeFactory({
-          options: {
-            ...limits,
-            spectrum: undefined,
-            spectrumCollection: { entries: [makeEntry()], maximumCaptureBytes: 4096 },
-          },
-        }),
-        (_host, options) => {
-          assert.equal(options.spectrum, null, "undefined spectrum normalizes to null");
-          assert.equal(options.spectrumCollection.entries.length, 1,
-            "nonnull collection remains effective");
-          assert.equal(options.spectrumCollection.entries[0].target, "output",
-            "nonnull collection entry remains effective");
-        },
-      );
-      for (const hop of [256, 1024]) {
-        await assertAccepted(
-          `explicit spectrum hop ${hop}`,
-          makeFactory({
-            options: {
-              ...limits,
-              spectrumHopFrames: hop,
-              spectrum: null,
-              spectrumCollection: null,
-            },
-          }),
-          (_host, options) => {
-            assert.equal(options.spectrumHopFrames, hop, "explicit hop is forwarded");
-            assert.equal(options.spectrum, null);
-            assert.equal(options.spectrumCollection, null);
-          },
-        );
-      }
-      for (const hop of [256, 1024]) {
-        await assertAccepted(
-          `explicit spectrum hop ${hop} without optional fields`,
-          makeFactory({ options: { ...limits, spectrumHopFrames: hop } }),
-          (_host, options) => {
-            assert.equal(options.spectrumHopFrames, hop, "explicit hop is forwarded");
-            assert.equal(options.spectrum, null, "omitted spectrum normalizes to null");
-            assert.equal(options.spectrumCollection, null,
-              "omitted spectrum collection normalizes to null");
-          },
-        );
-      }
-      {
-        const first = Object.freeze(makeEntry());
-        const second = Object.freeze(makeEntry());
-        const entries = new Array(3);
-        Object.defineProperty(entries, "0", {
-          value: first, writable: false, enumerable: false, configurable: false,
-        });
-        entries[2] = second;
-        Object.freeze(entries);
-        const collection = Object.freeze({ entries, maximumCaptureBytes: 4096 });
-        const options = Object.freeze({
-          ...limits, spectrum: null, spectrumCollection: collection,
-        });
-        await assertAccepted(
-          "frozen sparse exact entries",
-          Object.freeze(makeFactory({ options })),
-          (_host, captured) => {
-            const copiedCollection = captured.spectrumCollection;
-            const copiedEntries = copiedCollection.entries;
-            assert.equal(copiedEntries.length, 3, "sparse entries length captured");
-            assert.equal(Object.hasOwn(copiedEntries, 0), true, "sparse index is present");
-            assert.equal(Object.hasOwn(copiedEntries, 1), false, "sparse hole is retained");
-            assert.equal(
-              Object.getOwnPropertyDescriptor(copiedEntries, "0").enumerable,
-              false,
-              "hidden index enumerability is retained",
-            );
-            assert.equal(
-              Object.getOwnPropertyDescriptor(copiedEntries, "2").enumerable,
-              true,
-              "visible index enumerability is retained",
-            );
-            assert.notEqual(copiedCollection, collection, "collection snapshot is fresh");
-            assert.notEqual(copiedEntries, entries, "entries snapshot is fresh");
-            assert.notEqual(copiedEntries[0], first, "nested entry snapshot is fresh");
-            assert.notEqual(copiedEntries[2], second, "second nested snapshot is fresh");
-          },
-        );
-      }
-      {
-        const options = { ...limits };
-        Object.defineProperty(options, "spectrumCollection", {
-          value: { entries: [makeEntry()], maximumCaptureBytes: 4096 },
-          enumerable: false,
-        });
-        await assertAccepted(
-          "hidden collection remains effective",
-          makeFactory({ options }),
-          (_host, captured) => {
-            assert.equal(captured.spectrumCollection.entries.length, 1);
-            assert.equal(captured.spectrumCollection.entries[0].target, "output");
-          },
-        );
-      }
-      {
-        const options = { ...limits };
-        Object.defineProperty(options, "spectrum", { value: null, enumerable: false });
-        await assertAccepted(
-          "hidden null spectrum normalizes to null",
-          makeFactory({ options }),
-          (_host, captured) => assert.equal(captured.spectrum, null),
-        );
-      }
-
+      // #1597: the boot options lost their spectrum fields; one that comes back is refused, never
+      // ignored.
       await assertRefusal(
-        "exact seven-field shape",
+        "a retired spectrum boot field",
         makeFactory({ options: { ...limits, spectrum: null } }),
       );
-      await assertRefusal(
-        "enumerable undefined spectrum shape",
-        makeFactory({ options: { ...limits, spectrum: undefined } }),
-      );
-      {
-        const options = { ...limits };
-        Object.defineProperty(options, "spectrum", {
-          value: makeSpectrum(), enumerable: false,
-        });
-        await assertRefusal("hidden nonnull spectrum", makeFactory({ options }));
-      }
       {
         const enumerableUndefined = makeFactory();
         enumerableUndefined.preparedModule = undefined;
@@ -851,36 +542,7 @@ async function testMainRealm() {
         });
         await assertRefusal("hidden defined prepared module", hiddenDefined);
       }
-      {
-        const collection = { maximumCaptureBytes: 4096 };
-        Object.defineProperty(collection, "entries", {
-          value: [makeEntry()], enumerable: false,
-        });
-        await assertRefusal(
-          "hidden required collection entries",
-          makeFactory({ options: { ...limits, spectrum: null, spectrumCollection: collection } }),
-        );
-      }
-      await assertRefusal(
-        "mutually exclusive spectrum settings",
-        makeFactory({
-          options: {
-            ...limits,
-            spectrum: makeSpectrum(),
-            spectrumCollection: { entries: [makeEntry()], maximumCaptureBytes: 4096 },
-          },
-        }),
-      );
-
       const plainOptions = (overrides = {}) => ({ ...limits, ...overrides });
-      const singleSpectrumOptions = (overrides = {}) => ({
-        ...limits, spectrum: { ...makeSpectrum(), ...overrides }, spectrumCollection: null,
-      });
-      const collectionDomainOptions = (overrides = {}) => ({
-        ...limits,
-        spectrum: null,
-        spectrumCollection: { entries: [makeEntry()], maximumCaptureBytes: 4096, ...overrides },
-      });
       const domainRefusals = [
         ["u32 type", plainOptions({ sourceRingFrames: "256" })],
         ["u32 bound", plainOptions({ sourceRingFrames: 0x1_0000_0000 })],
@@ -892,24 +554,10 @@ async function testMainRealm() {
         // Issue #1689 gate 2: the retired master word is refused at both ends of its range.
         ["reserved2 one", plainOptions({ reserved2: 1n })],
         ["reserved2 all ones", plainOptions({ reserved2: 0xffff_ffff_ffff_ffffn })],
-        ["spectrum hop unsupported", plainOptions({
-          spectrumHopFrames: 300, spectrum: null, spectrumCollection: null,
-        })],
-        ["invalid spectrum target", singleSpectrumOptions({ target: "unknown" })],
-        ["invalid spectrum channel", singleSpectrumOptions({ channels: "center" })],
-        ["empty spectrum ID", singleSpectrumOptions({ targetId: "" })],
-        ["oversize UTF-8 spectrum ID", singleSpectrumOptions({ targetId: "é".repeat(64) })],
-        ["single capture zero", singleSpectrumOptions({ maximumCaptureBytes: 0 })],
-        ["single capture bound", singleSpectrumOptions({ maximumCaptureBytes: 1_048_577 })],
-        ["collection capture zero", collectionDomainOptions({ maximumCaptureBytes: 0 })],
       ];
       for (const [label, options] of domainRefusals) {
         await assertRefusal(label, makeFactory({ options }));
       }
-      await assertAccepted(
-        "collection capture above single limit",
-        makeFactory({ options: collectionDomainOptions({ maximumCaptureBytes: 1_048_577 }) }),
-      );
       {
         const savedQuantum = context.renderQuantumSize;
         try {
@@ -1057,9 +705,6 @@ async function testMainRealm() {
       {
         const addGate = snapshotGate();
         const readyPause = snapshotGate();
-        const spectrum = {
-          target: "trackPostPan", targetId: "single", channels: "left", maximumCaptureBytes: 4096,
-        };
         const options = {
           sourceRingFrames: 0,
           maximumMemoryBytes: 0n,
@@ -1067,12 +712,9 @@ async function testMainRealm() {
           liveControlMeterBlocks: 7n,
           liveControlObservationTaps: 0n,
           reserved2: 0n,
-          spectrumHopFrames: 256,
-          spectrum,
-          spectrumCollection: null,
         };
-        const expectedOptions = { ...options, spectrum: { ...spectrum } };
-        const factory = makeFactory({ options, workletModuleUrl: "single-spectrum.js" });
+        const expectedOptions = { ...options };
+        const factory = makeFactory({ options, workletModuleUrl: "single-boot.js" });
         const originalFactory = {
           context: factory.context,
           options: factory.options,
@@ -1099,11 +741,9 @@ async function testMainRealm() {
           readyGate = readyPause;
           boot = createMisoAudioWorkletHost(factory);
           await addGate.started;
-          spectrum.targetId = "mutated-spectrum-before-construction";
-          options.spectrumHopFrames = 1024;
           options.sourceRingFrames = 128;
           options.liveControlMeterBlocks = 99n;
-          factory.options = { ...options, spectrum: { ...spectrum, target: "output" } };
+          factory.options = { ...options, liveControlObservationTaps: 4n };
           factory.context = replacementContext;
           factory.preparedModule = replacementModule;
           factory.simd128ModuleUrl = "mutated-simd.wasm";
@@ -1113,25 +753,21 @@ async function testMainRealm() {
           context.state = "running";
           context.sampleRate = 44100;
           context.renderQuantumSize = 128;
-          spectrum.targetId = "mutated-spectrum-while-ready";
-          options.spectrumHopFrames = 1024;
           options.sourceRingFrames = 256;
           options.liveControlMeterBlocks = 101n;
-          factory.options = { ...options, spectrum: { ...spectrum, target: "input" } };
+          factory.options = { ...options, liveControlObservationTaps: 8n };
           readyPause.release();
           hostValue = await boot;
           const node = FakeNode.latest;
           const captured = node.options.processorOptions.options;
           assert.equal(hostValue.resources.sampleRateHz, 48000);
           assert.equal(hostValue.resources.quantumFrames, 64);
-          assert.deepEqual(captured, expectedOptions, "single spectrum boot values are captured");
-          assert.equal(captured.spectrumCollection, null);
-          assert.notEqual(captured, options, "single spectrum boot snapshot is fresh");
-          assert.notEqual(captured.spectrum, spectrum, "single spectrum snapshot is fresh");
+          assert.deepEqual(captured, expectedOptions, "boot values are captured");
+          assert.notEqual(captured, options, "boot snapshot is fresh");
           assert.deepEqual(
             events.slice(-2),
-            [["compile", "simd.wasm"], ["addModule", "single-spectrum.js"]],
-            "single spectrum loading inputs are captured",
+            [["compile", "simd.wasm"], ["addModule", "single-boot.js"]],
+            "loading inputs are captured",
           );
           const status = await hostValue.status();
           assert.equal(status.sampleRateHz, 48000, "status keeps captured sample rate");
@@ -2774,8 +2410,7 @@ function createFakeExports(quantum, backend = 1, liveControlsAttached = true, su
   const calls = {
     render: [], source: [], sourceIdBytes: [], seek: [], seekIdBytes: [], dispose: 0,
     sessionSeek: [], sessionSeekResult: 0,
-    sourceResult: 0, bootResult: 0, boot: [], bootWithSpectrumHop: [], spectrumHopCapability: 0,
-    spectrumHopCapabilityResult: 1,
+    sourceResult: 0, bootResult: 0, boot: [],
     // Issue #1381a: the service step's handles and result, and the control counter's value.
     service: [], serviceResult: 0, controlAllocations: 5,
     // Issue #1562a D1: the control frames the fake received, the result it answers with, the
@@ -2922,14 +2557,6 @@ function createFakeExports(quantum, backend = 1, liveControlsAttached = true, su
     miso_engine_web_v1_boot_options_ptr: () => 512,
     miso_engine_web_v1_document_ptr: () => 2048,
     miso_engine_web_v1_boot: (...args) => { calls.boot.push(args); return boot(); },
-    miso_engine_web_v1_spectrum_hop_capability: () => {
-      calls.spectrumHopCapability += 1;
-      return calls.spectrumHopCapabilityResult;
-    },
-    miso_engine_web_v1_boot_with_spectrum_hop: (...args) => {
-      calls.bootWithSpectrumHop.push(args);
-      return boot();
-    },
     miso_engine_web_v1_boot_result: () => calls.bootResult,
     miso_engine_web_v1_boot_diagnostic_bytes: () => 0,
     miso_engine_web_v1_buffer_ptr: (_handle, kind) => pointers[kind] ?? 0,
@@ -3256,106 +2883,6 @@ async function testQualificationBoot({
 
   }
 
-  // Issue #1477 D1: the staging-read caller boots a spectrum collection, so the fake carries the
-  // pre-boot collection staging exports with the bridge's sizing rules (`hosts/host-web/src/ffi.rs`):
-  // the entry capacity is the request header's entry count, and the identity capacity is the sum
-  // of the staged entries' identity byte lengths.
-  //
-  // Issue #1491 D1: the fake's boot exports read the staged collection back the way the bridge
-  // lays it out (`staged_spectrum_request`) and record it as the boot's staging witness, so a
-  // worklet that skips the staging, or stages bytes that differ from its options, is visible
-  // before boot. The witness is `null` when the request pointer was never asked for or the
-  // request header's entry count is 0; the boot result is unchanged.
-  //
-  // Every offset, size, field type, entry stride and wire code here comes from the generated
-  // layout (`sdk/assets/miso-engine-v1-abi-layout.json`, made from the Rust structs by
-  // `parameter-metadata`), never from the worklet's hand-typed copy, so a bridge layout change
-  // the worklet misses is red here. The identity decoder keeps a leading U+FEFF, as the bridge's
-  // `core::str::from_utf8` does.
-  const identityDecoder = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
-  const collectionRequestLayout = abiLayout.structures.spectrumCollectionRequest;
-  const collectionEntryLayout = abiLayout.structures.spectrumCollectionEntry;
-  const layoutField = (layout, name) => {
-    const field = layout.fields.find((candidate) => candidate.name === name);
-    assert.ok(field, `qualification boot contract: the generated layout has no field ${name}`);
-    return field;
-  };
-  const readLayoutField = (bytes, base, { type }, offset) => {
-    if (type === "u32") return bytes.getUint32(base + offset, true);
-    if (type === "u64") return bytes.getBigUint64(base + offset, true);
-    const array = /^u32\[(\d+)\]$/.exec(type);
-    assert.ok(array, `qualification boot contract: unknown generated field type ${type}`);
-    return Array.from({ length: Number(array[1]) },
-      (_, index) => bytes.getUint32(base + offset + 4 * index, true));
-  };
-  // Decodes every field of one generated structure at `base`, keyed by its generated name.
-  const readLayoutStruct = (bytes, base, layout) => Object.fromEntries(
-    layout.fields.map((field) => [field.name, readLayoutField(bytes, base, field, field.offset)]));
-  const requestEntryCountOffset = layoutField(collectionRequestLayout, "entryCount").offset;
-  const entryTargetIdBytesOffset = layoutField(collectionEntryLayout, "targetIdBytes").offset;
-  const withSpectrumCollectionStaging = (fake) => {
-    const requestPointer = 42000;
-    const entryPointer = 42100;
-    const idPointer = 42600;
-    let requested = false;
-    let entryCapacity = 0;
-    let idCapacity = 0;
-    const view = () => new DataView(fake.exports.memory.buffer);
-    const decodeStagedCollection = () => {
-      if (!requested) return null;
-      const bytes = view();
-      const request = readLayoutStruct(bytes, requestPointer, collectionRequestLayout);
-      if (request.entryCount === 0) return null;
-      const entries = [];
-      let idOffset = idPointer;
-      for (let index = 0; index < request.entryCount; index += 1) {
-        const entry = readLayoutStruct(
-          bytes, entryPointer + index * collectionEntryLayout.bytes, collectionEntryLayout);
-        entry.targetId = identityDecoder.decode(
-          new Uint8Array(fake.exports.memory.buffer, idOffset, entry.targetIdBytes).slice(),
-        );
-        entries.push(entry);
-        idOffset += entry.targetIdBytes;
-      }
-      return { request, entries };
-    };
-    fake.spectrumStagingWitnesses = [];
-    for (const name of ["miso_engine_web_v1_boot", "miso_engine_web_v1_boot_with_spectrum_hop"]) {
-      const boot = fake.exports[name];
-      if (typeof boot !== "function") continue;
-      fake.exports[name] = (...args) => {
-        fake.spectrumStagingWitnesses.push(decodeStagedCollection());
-        return boot(...args);
-      };
-    }
-    Object.assign(fake.exports, {
-      miso_engine_web_v1_spectrum_collection_request_ptr: () => {
-        requested = true;
-        entryCapacity = 0;
-        idCapacity = 0;
-        return requestPointer;
-      },
-      miso_engine_web_v1_spectrum_collection_request_bytes: () => collectionRequestLayout.bytes,
-      miso_engine_web_v1_spectrum_collection_entry_ptr: () => {
-        entryCapacity = view().getUint32(requestPointer + requestEntryCountOffset, true);
-        return entryCapacity * collectionEntryLayout.bytes <= idPointer - entryPointer
-          ? entryPointer : 0;
-      },
-      miso_engine_web_v1_spectrum_collection_entry_capacity: () => entryCapacity,
-      miso_engine_web_v1_spectrum_collection_entry_bytes: () => collectionEntryLayout.bytes,
-      miso_engine_web_v1_spectrum_collection_target_ids_ptr: () => {
-        idCapacity = 0;
-        for (let index = 0; index < entryCapacity; index += 1) {
-          idCapacity += view().getUint32(
-            entryPointer + index * collectionEntryLayout.bytes + entryTargetIdBytesOffset, true);
-        }
-        return idPointer;
-      },
-      miso_engine_web_v1_spectrum_collection_target_ids_capacity: () => idCapacity,
-    });
-    return fake;
-  };
-
   class QualificationNode {
     static latest = null;
 
@@ -3369,11 +2896,11 @@ async function testQualificationBoot({
       this.onprocessorerror = null;
       this.disconnectCount = 0;
       const processorOptions = options.processorOptions?.options;
-      this.fake = withSpectrumCollectionStaging(makeFake(
+      this.fake = makeFake(
         context.renderQuantumSize,
         1,
         processorOptions?.liveControlObservationTaps !== 0n,
-      ));
+      );
       setNextFake(this.fake);
       setProcessorPortFactory(() => processorPort);
       try {
@@ -3419,9 +2946,9 @@ async function testQualificationBoot({
     return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
   };
   // Issue #1477 D1: the host runs in the main realm, which has `TextEncoder`; the processor scope
-  // this suite models has none. The host's option guards (a spectrum identity's UTF-8 length
-  // among them) run synchronously before its first await, so the encoder is present for exactly
-  // that span and absent again before any worklet code runs.
+  // this suite models has none. The host's option guards run synchronously before its first
+  // await, so the encoder is present for exactly that span and absent again before any worklet
+  // code runs.
   const createInMainRealm = (factory) => {
     const processorScopeEncoder = globalThis.TextEncoder;
     globalThis.TextEncoder = mainRealmTextEncoder;
@@ -3461,12 +2988,9 @@ async function testQualificationBoot({
       );
     }
     assert.equal(host.backend, "simd128", `qualification boot contract: ${label} backend`);
-    // Issue #1491 D1: exactly one boot per caller, and its staging witness is kept with the
-    // caller's witnessed options.
-    const stagingWitnesses = QualificationNode.latest.fake.spectrumStagingWitnesses;
-    assert.equal(stagingWitnesses.length, 1,
+    // Issue #1491 D1: exactly one boot per caller.
+    assert.equal(QualificationNode.latest.fake.calls.boot.length, 1,
       `qualification boot contract: ${label} must boot exactly once`);
-    observed.at(-1).stagedSpectrumCollection = stagingWitnesses[0];
     realReady += 1;
     try {
       await bounded(host.dispose(), `${label} real dispose`);
@@ -3555,65 +3079,12 @@ async function testQualificationBoot({
     assert.equal(observationOptions.liveControlMeterBlocks, 2n);
     assert.equal(observationOptions.liveControlObservationTaps, 4n);
     assert.equal(observationOptions.reserved2, 0n);
-    // Issue #1477 D2: the staging-read run boots the observation caller's live-control fields with
-    // no fixed spectrum target and the two-entry collection, in order.
+    // Issue #1477 D2: the staging-read run boots the observation caller's live-control fields.
     const stagingReadOptions = observed.find(({ label }) => label === "runStagingReadRun").options.options;
     assert.equal(stagingReadOptions.reserved1, 0n);
     assert.equal(stagingReadOptions.liveControlMeterBlocks, 2n);
     assert.equal(stagingReadOptions.liveControlObservationTaps, 4n);
     assert.equal(stagingReadOptions.reserved2, 0n);
-    assert.equal(stagingReadOptions.spectrum, null,
-      "qualification boot contract: staging-read run must boot no fixed spectrum target");
-    assert.deepEqual(
-      stagingReadOptions.spectrumCollection.entries,
-      [
-        { target: "trackPostPan", targetId: "track", channels: "both" },
-        { target: "output", targetId: "main-out", channels: "both" },
-      ],
-      "qualification boot contract: staging-read spectrum collection changed",
-    );
-    // Issue #1491 D2: the collection the worklet staged before boot is the caller's witnessed
-    // collection, entry for entry. The header, the wire codes and the reserved words (which the
-    // bridge refuses unless zero) come from the generated layout; the entries and the budget come
-    // from the witnessed options.
-    const wireCodes = (table) => Object.fromEntries(
-      abiLayout.constants[table].map(({ name, value }) => [name, value]));
-    const spectrumTargetCodes = wireCodes("spectrumTargets");
-    const spectrumChannelCodes = wireCodes("spectrumChannels");
-    const zeroReserved = (layout) => Object.fromEntries(layout.fields
-      .filter(({ name }) => name.startsWith("reserved"))
-      .map(({ name, type }) => {
-        const array = /^u32\[(\d+)\]$/.exec(type);
-        return [name, array ? Array(Number(array[1])).fill(0) : type === "u64" ? 0n : 0];
-      }));
-    const stagingReadCollection = stagingReadOptions.spectrumCollection;
-    assert.deepEqual(
-      observed.find(({ label }) => label === "runStagingReadRun").stagedSpectrumCollection,
-      {
-        request: {
-          ...zeroReserved(collectionRequestLayout),
-          structSize: collectionRequestLayout.bytes,
-          abiVersion: abiLayout.abiVersion,
-          entryCount: stagingReadCollection.entries.length,
-          maximumCaptureBytes: BigInt(stagingReadCollection.maximumCaptureBytes),
-        },
-        entries: stagingReadCollection.entries.map(({ target, targetId, channels }) => ({
-          ...zeroReserved(collectionEntryLayout),
-          target: spectrumTargetCodes[target],
-          channels: spectrumChannelCodes[channels],
-          targetIdBytes: new mainRealmTextEncoder().encode(targetId).length,
-          targetId,
-        })),
-      },
-      "qualification boot contract: staging-read staged collection differs from its options",
-    );
-    // Issue #1491 D3: the five callers with no collection stage none.
-    for (const { label, stagedSpectrumCollection } of observed) {
-      if (label === "runStagingReadRun") continue;
-      assert.equal(stagedSpectrumCollection, null,
-        `qualification boot contract: ${label} stages a spectrum collection; `
-        + "only runStagingReadRun boots one");
-    }
 
     const diagnosis = await bounded(hooks.diagnoseReady(documentBytes), "diagnoseReady");
     assert.equal(diagnosis.kind, "message", "qualification boot contract: diagnoseReady did not reach node message");
@@ -3757,27 +3228,6 @@ async function testProcessor() {
       return { processor, fake };
     };
 
-    const explicitHopOptions = (spectrumHopFrames) => ({
-      ...limits,
-      spectrumHopFrames,
-      spectrum: null,
-      spectrumCollection: null,
-    });
-
-    for (const hop of [256, 1024]) {
-      const fake = createFakeExports(64);
-      const processor = construct(fake, explicitHopOptions(hop));
-      assert.equal(processor.port.posts[0].message.result, 0,
-        `H${hop} additive boot is ready`);
-      assert.deepEqual(fake.calls.boot, [], `H${hop} never calls legacy boot`);
-      assert.deepEqual(
-        fake.calls.bootWithSpectrumHop,
-        [[processorSessionDocument.byteLength, hop]],
-        `H${hop} additive boot arguments`,
-      );
-      assert.equal(fake.calls.spectrumHopCapability, 1, `H${hop} probes capability once`);
-    }
-
     // Issue #1689 gate 2: the processor's `writeBootOptions` refuses the retired master word before
     // the module sees it, at both ends of its range; zero (every `limits` boot here) is accepted.
     for (const reserved2 of [1n, 0xffff_ffff_ffff_ffffn]) {
@@ -3790,60 +3240,26 @@ async function testProcessor() {
     {
       const fake = createFakeExports(64);
       const processor = construct(fake);
-      assert.equal(processor.port.posts[0].message.result, 0, "omitted hop uses legacy boot");
+      assert.equal(processor.port.posts[0].message.result, 0, "the boot is ready");
       assert.deepEqual(fake.calls.boot, [[processorSessionDocument.byteLength]],
-        "omitted hop legacy boot arguments");
-      assert.deepEqual(fake.calls.bootWithSpectrumHop, [], "omitted hop skips additive boot");
-      assert.equal(fake.calls.spectrumHopCapability, 0, "omitted hop skips capability probe");
+        "the boot export's arguments");
     }
 
+    // #1597: the processor's boot options lost their spectrum fields; one that comes back is
+    // refused before the module is instantiated.
     {
       const fake = createFakeExports(64);
-      const oldSpectrumOptions = {
-        ...limits, spectrum: null, spectrumCollection: null,
-      };
-      const processor = construct(fake, oldSpectrumOptions);
-      assert.equal(processor.port.posts[0].message.result, 0, "old spectrum shape remains accepted");
-      assert.deepEqual(fake.calls.boot, [[processorSessionDocument.byteLength]],
-        "old spectrum shape uses legacy boot");
-      assert.equal(fake.calls.spectrumHopCapability, 0, "old spectrum shape skips capability probe");
-    }
-
-    for (const [label, mutate] of [
-      ["missing capability", (fake) => { delete fake.exports.miso_engine_web_v1_spectrum_hop_capability; }],
-      ["wrong capability", (fake) => {
-        fake.calls.spectrumHopCapabilityResult = 0;
-      }],
-      ["throwing capability", (fake) => {
-        fake.exports.miso_engine_web_v1_spectrum_hop_capability = () => {
-          fake.calls.spectrumHopCapability += 1;
-          throw new Error("synthetic capability failure");
-        };
-      }],
-      ["missing additive boot", (fake) => {
-        delete fake.exports.miso_engine_web_v1_boot_with_spectrum_hop;
-      }],
-    ]) {
-      const fake = createFakeExports(64);
-      mutate(fake);
-      const processor = construct(fake, explicitHopOptions(256));
-      assert.equal(processor.port.posts[0].message.result, 2, `${label} is typed ABI refusal`);
-      assert.deepEqual(fake.calls.boot, [], `${label} never calls legacy boot`);
-      assert.deepEqual(fake.calls.bootWithSpectrumHop, [], `${label} never calls additive boot`);
-      assert.equal(fake.calls.dispose, 0, `${label} publishes no handle to dispose`);
+      const processor = construct(fake, { ...limits, spectrum: null, spectrumCollection: null });
+      assert.equal(processor.port.posts[0].message.result, 1, "a retired spectrum field is refused");
+      assert.deepEqual(fake.calls.boot, [], "a retired spectrum field never reaches the module");
     }
 
     {
       const fake = createFakeExports(64);
       fake.exports.miso_engine_web_v1_abi_version = () => 0x00020000;
-      fake.exports.miso_engine_web_v1_spectrum_hop_capability = () => {
-        throw new Error("ABI check must win");
-      };
-      const processor = construct(fake, explicitHopOptions(256));
-      assert.equal(processor.port.posts[0].message.result, 2, "ABI mismatch wins before capability");
-      assert.equal(fake.calls.spectrumHopCapability, 0, "ABI mismatch does not probe capability");
-      assert.deepEqual(fake.calls.boot, [], "ABI mismatch never calls legacy boot");
-      assert.deepEqual(fake.calls.bootWithSpectrumHop, [], "ABI mismatch never calls additive boot");
+      const processor = construct(fake);
+      assert.equal(processor.port.posts[0].message.result, 2, "ABI mismatch is a typed refusal");
+      assert.deepEqual(fake.calls.boot, [], "ABI mismatch never calls boot");
     }
 
     {

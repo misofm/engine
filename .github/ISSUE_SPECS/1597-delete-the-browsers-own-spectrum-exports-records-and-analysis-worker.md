@@ -113,3 +113,47 @@ Commands: as #1596's, plus `python3 -B scripts/check-abi-layout-v1.py`,
   through the staging exports so the first plan carries them (a headless engine adopts a plan only
   when its caller renders). When this issue deletes those exports, it owns the boot route and must
   give a headless boot its taps in the first plan: a capture is armable at sample 0.
+- 2026-10-25, #1597 attempt 1 (implementer). **Boot route (root requirement 1).** A
+  `SPECTRUM_CONFIGURE` that prepares a successor before the plan's first block adopts it in place:
+  the host lends its plan to the command (`SessionState::command_with_plan`, which replaces
+  `command_with_plan_observations`), `PlanState::adopt_before_first_block` runs the owner's
+  `RealtimePlanOwner::adopt_before_first_block` (the first render call's adoption decision, made
+  now; refused once a render call reached the owner), and the session promotes the candidate in
+  the same command. The reply reports `rebuild` with `adopted_epoch == configured_epoch`, and a
+  capture armed then covers sample 0. Why this design: it needs no new export, no boot input, no
+  wire or C ABI change and no schema change, and it reuses the swap's own carry and promotion, so
+  the in-place plan is exactly the one the first block would have adopted. Only a host that holds
+  its plan between blocks lends it (the browser's single instance, headless and worklet); the C ABI
+  is unchanged. The browser context is suspended until `createEngine` resolves, so its boot
+  configure also meets an unrendered plan; if a render came first, the SDK's existing check refuses
+  the boot (`abiMismatch`), never silently. Evidence (one-time, not committed): at `453ea7d26` the
+  old staged boot and the new route render 63 blocks of the bus fixture with an output tap and a
+  submix tap bit for bit alike, PCM and 31 meter frames. Paths beyond the scope note, forced by the
+  route: `crates/engine/src/realtime/plan_exchange.rs`, `crates/control-plane/src/{plan.rs,
+  control.rs,spectrum.rs}`, the control-plane tests that call `compile_children`, and
+  `crates/capi/src/runtime/mod.rs` (the deleted `compile_children` argument).
+- #1597 deletions. Exports (35): `boot_with_spectrum_hop`, `spectrum_analysis`, `spectrum_arm`,
+  `spectrum_cancel`, `spectrum_capture_bytes`, `spectrum_capture_capacity`, `spectrum_capture_ptr`,
+  `spectrum_capture_set_bytes`, `spectrum_close`, `spectrum_collection_entry_bytes`,
+  `spectrum_collection_entry_capacity`, `spectrum_collection_entry_ptr`,
+  `spectrum_collection_request_bytes`, `spectrum_collection_request_ptr`,
+  `spectrum_collection_target_ids_capacity`, `spectrum_collection_target_ids_ptr`,
+  `spectrum_hop_capability`, `spectrum_read`, `spectrum_request_bytes`, `spectrum_request_ptr`,
+  `spectrum_result_bytes`, `spectrum_result_ptr`, `spectrum_select`, `spectrum_selection_epoch`,
+  `spectrum_stream_analysis`, `spectrum_stream_analysis_configure`,
+  `spectrum_stream_metadata_bytes`, `spectrum_stream_metadata_ptr`, `spectrum_stream_read`,
+  `spectrum_stream_reset`, `spectrum_stream_select`, `spectrum_stream_start`, `spectrum_stream_stop`,
+  `spectrum_target_id_capacity`, `spectrum_target_id_ptr` (all `miso_engine_web_v1_`). Records: the
+  six `WebSpectrum*` records and their ABI layout structures, the spectrum constants of host-web
+  and of the layout document, `SpectrumStaging`, `SpectrumPreparationRequest`, the host's spectrum
+  methods, `compile_children`'s spectrum argument and the boot refusal it carried (the configure
+  refuses the same tap, `spectrum.frame`), `preparation_fits`; `SessionState::spectrum_monitor{,_mut}`
+  are test-support again. Worklet: the boot staging, the hop boot, `miso.spectrum.v1` and its
+  handlers; worklet host: the spectrum boot options and the eight spectrum methods; both `.d.ts`
+  twins. SDK: `SpectrumModule`, `decodeSpectrumResult`, `stageSpectrumRequest`,
+  `stageSpectrumCollectionRequest`, `SpectrumEncodedStreamRead`, `OPTIONAL_ADDITIVE_EXPORTS`, the
+  `spectrumCloseTimeout` code, `workletBootOptions`'s spectrum arguments and the boot options'
+  spectrum fields of `toWebBootOptions`. The SDK keeps its spectrum bounds as its own constants
+  (`SPECTRUM_MAXIMUM_ID_BYTES` 127, `SPECTRUM_MAXIMUM_CAPTURE_BYTES` 1 MiB, the 88- and 64-byte
+  result and window headers of `resultBytes`), so no public result changes. The schema hash does
+  not move; `ABI_VERSION` is unchanged (R2).

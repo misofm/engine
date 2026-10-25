@@ -19,14 +19,11 @@ const SIMD128_PROBE = new Uint8Array([
   0x0a, 0x08, 0x01, 0x06, 0x00, 0x41, 0x00, 0xfd, 0x0f, 0x0b,
 ]);
 
-const HOST_ARRAY = Array;
-const HOST_ARRAY_PROTOTYPE = Array.prototype;
 const HOST_ARRAY_IS_ARRAY = Array.isArray;
 const HOST_OBJECT_PROTOTYPE = Object.prototype;
 const HOST_OBJECT_GET_PROTOTYPE_OF = Object.getPrototypeOf;
 const HOST_REFLECT_OWN_KEYS = Reflect.ownKeys;
 const HOST_OBJECT_GET_OWN_PROPERTY_DESCRIPTOR = Object.getOwnPropertyDescriptor;
-const HOST_OBJECT_DEFINE_PROPERTY = Object.defineProperty;
 const HOST_HAS_OWN = Object.prototype.hasOwnProperty;
 const HOST_UINT8_ARRAY = Uint8Array;
 const HOST_UINT8_ARRAY_SET = Uint8Array.prototype.set;
@@ -70,13 +67,8 @@ const OPTION_FIELDS = [
 ];
 const BOOT_OPTION_FIELDS = [
   "sourceRingFrames", "maximumMemoryBytes", "reserved1", "liveControlMeterBlocks",
-  "liveControlObservationTaps", "reserved2", "spectrumHopFrames", "spectrum",
-  "spectrumCollection",
+  "liveControlObservationTaps", "reserved2",
 ];
-const NEW_NO_SPECTRUM_BOOT_OPTION_FIELDS = BOOT_OPTION_FIELDS.slice(0, -2);
-const SPECTRUM_BOOT_OPTION_FIELDS = BOOT_OPTION_FIELDS.filter((field) => field !== "spectrumHopFrames");
-const LEGACY_BOOT_OPTION_FIELDS = SPECTRUM_BOOT_OPTION_FIELDS.slice(0, -2);
-const SPECTRUM_HOP_FRAMES = new Set([0, 256, 512, 1024, 2048]);
 
 const SOURCE_FIELDS = [
   "sourceId",
@@ -148,29 +140,6 @@ const LIVE_RESPONSE_CAPTURE_CHANNEL_BOTH = 3;
 const LIVE_RESPONSE_MAXIMUM_POINTS = 4096;
 const LIVE_RESPONSE_MAXIMUM_ID_BYTES = 127;
 const LIVE_RESPONSE_MAXIMUM_BYTES = 1 << 20;
-const SPECTRUM_BOOT_FIELDS = ["target", "targetId", "channels", "maximumCaptureBytes"];
-const SPECTRUM_COLLECTION_ENTRY_FIELDS = ["target", "targetId", "channels"];
-const SPECTRUM_COLLECTION_FIELDS = ["entries", "maximumCaptureBytes"];
-const SPECTRUM_TARGETS = new Set(["trackPostInput", "trackPostPan", "output"]);
-const SPECTRUM_CHANNELS = new Set(["left", "right", "both"]);
-const SPECTRUM_MAXIMUM_ID_BYTES = 127;
-const SPECTRUM_MAXIMUM_BYTES = 1 << 20;
-const SPECTRUM_STREAM_METADATA_BYTES = 120;
-const SPECTRUM_STREAM_STATUSES = new Set([0, 1, 2, 3, 4, 5, 6]);
-const SPECTRUM_STREAM_START_REQUEST_FIELDS = ["tag", "requestId", "operation", "smoothingMs"];
-const SPECTRUM_STREAM_READ_REQUEST_FIELDS = ["tag", "requestId", "operation", "buffer"];
-const SPECTRUM_STREAM_STOP_REQUEST_FIELDS = ["tag", "requestId", "operation"];
-const SPECTRUM_SELECT_REQUEST_FIELDS = ["tag", "requestId", "operation", "target", "targetId", "channels"];
-const SPECTRUM_STREAM_SELECT_REQUEST_FIELDS = [
-  "tag", "requestId", "operation", "target", "targetId", "channels", "smoothingMs",
-];
-const SPECTRUM_SELECT_REPLY_FIELDS = ["tag", "requestId", "result", "operation"];
-const SPECTRUM_STREAM_SELECT_REPLY_FIELDS = ["tag", "requestId", "result", "operation", "metadata"];
-const SPECTRUM_STREAM_START_REPLY_FIELDS = ["tag", "requestId", "result", "operation", "metadata"];
-const SPECTRUM_STREAM_STOP_REPLY_FIELDS = ["tag", "requestId", "result", "operation", "metadata"];
-const SPECTRUM_STREAM_READ_REPLY_FIELDS = [
-  "tag", "requestId", "operation", "result", "byteLength", "buffer", "metadata",
-];
 
 // Decision 12 (#1096): an effect is addressed as `1` inserts, by its index in the track's inserts,
 // or `3` console, by the slot's index in the session's slot order (`pre_insert`, then
@@ -392,133 +361,9 @@ function snapshotDocument(value) {
   }
 }
 
-function canonicalArrayIndex(key, length) {
-  if (key === "") return -1;
-  const index = Number(key);
-  return Number.isInteger(index) && index >= 0 && index <= 0xfffffffe
-      && index < length && String(index) === key
-    ? index
-    : -1;
-}
-
-function snapshotSpectrumEntry(value) {
-  const captured = capturePlainRecord(value, SPECTRUM_COLLECTION_ENTRY_FIELDS);
-  if (!captured || !hasEnumerableShape(captured, SPECTRUM_COLLECTION_ENTRY_FIELDS)) return undefined;
-  return {
-    target: captured.descriptors.get("target").value,
-    targetId: captured.descriptors.get("targetId").value,
-    channels: captured.descriptors.get("channels").value,
-  };
-}
-
-function snapshotSpectrumEntries(value) {
-  if (!HOST_ARRAY_IS_ARRAY(value)
-      || HOST_OBJECT_GET_PROTOTYPE_OF(value) !== HOST_ARRAY_PROTOTYPE) return undefined;
-  const lengthDescriptor = HOST_OBJECT_GET_OWN_PROPERTY_DESCRIPTOR(value, "length");
-  if (lengthDescriptor === undefined
-      || !HOST_HAS_OWN.call(lengthDescriptor, "value")
-      || !HOST_HAS_OWN.call(lengthDescriptor, "enumerable")) return undefined;
-  const length = lengthDescriptor.value;
-  if (!Number.isSafeInteger(length) || length < 0 || length > 0xffffffff) return undefined;
-  const keys = HOST_REFLECT_OWN_KEYS(value);
-  const indices = [];
-  let sawLength = false;
-  for (let keyIndex = 0; keyIndex < keys.length; keyIndex += 1) {
-    const key = keys[keyIndex];
-    if (key === "length") {
-      sawLength = true;
-      continue;
-    }
-    const index = typeof key === "string" ? canonicalArrayIndex(key, length) : -1;
-    if (index < 0) return undefined;
-    const descriptor = HOST_OBJECT_GET_OWN_PROPERTY_DESCRIPTOR(value, key);
-    if (descriptor === undefined
-        || !HOST_HAS_OWN.call(descriptor, "value")
-        || !HOST_HAS_OWN.call(descriptor, "enumerable")) return undefined;
-    indices.push({ index, value: descriptor.value, enumerable: descriptor.enumerable });
-  }
-  if (!sawLength) return undefined;
-  let copy;
-  try {
-    copy = new HOST_ARRAY(length);
-    for (let index = 0; index < indices.length; index += 1) {
-      const source = indices[index];
-      const entry = snapshotSpectrumEntry(source.value);
-      if (entry === undefined) return undefined;
-      HOST_OBJECT_DEFINE_PROPERTY(copy, source.index, {
-        value: entry,
-        writable: true,
-        enumerable: source.enumerable,
-        configurable: true,
-      });
-    }
-  } catch (_) {
-    return undefined;
-  }
-  return copy;
-}
-
-function snapshotSpectrumBoot(value) {
-  if (value === null) return null;
-  const captured = capturePlainRecord(value, SPECTRUM_BOOT_FIELDS);
-  if (!captured || !hasEnumerableShape(captured, SPECTRUM_BOOT_FIELDS)) return undefined;
-  const snapshot = {
-    target: captured.descriptors.get("target").value,
-    targetId: captured.descriptors.get("targetId").value,
-    channels: captured.descriptors.get("channels").value,
-    maximumCaptureBytes: captured.descriptors.get("maximumCaptureBytes").value,
-  };
-  return validSpectrumBoot(snapshot) ? snapshot : undefined;
-}
-
-function snapshotSpectrumCollection(value) {
-  if (value === null) return null;
-  const captured = capturePlainRecord(value, SPECTRUM_COLLECTION_FIELDS);
-  if (!captured || !hasEnumerableShape(captured, SPECTRUM_COLLECTION_FIELDS)) return undefined;
-  const entries = snapshotSpectrumEntries(captured.descriptors.get("entries").value);
-  if (entries === undefined) return undefined;
-  const snapshot = {
-    entries,
-    maximumCaptureBytes: captured.descriptors.get("maximumCaptureBytes").value,
-  };
-  return validSpectrumCollectionBoot(snapshot) ? snapshot : undefined;
-}
-
 function snapshotBootOptions(value) {
   const captured = capturePlainRecord(value, BOOT_OPTION_FIELDS);
-  if (!captured || !hasRequiredEnumerableFields(captured, LEGACY_BOOT_OPTION_FIELDS)) return undefined;
-  const hopDescriptor = captured.descriptors.get("spectrumHopFrames");
-  const spectrumDescriptor = captured.descriptors.get("spectrum");
-  const collectionDescriptor = captured.descriptors.get("spectrumCollection");
-  if (hopDescriptor !== undefined) {
-    // The current SDK shape carries the hop as an ordinary enumerable data field. A hidden field
-    // is neither a valid new shape nor an old compatibility shape, and must not bypass validation.
-    const noSpectrumFields = spectrumDescriptor === undefined && collectionDescriptor === undefined;
-    if (!hopDescriptor.enumerable
-        || (!hasEnumerableShape(captured, BOOT_OPTION_FIELDS)
-          && !(noSpectrumFields && hasEnumerableShape(captured, NEW_NO_SPECTRUM_BOOT_OPTION_FIELDS)))) {
-      return undefined;
-    }
-  } else {
-    // Direct callers from before the hop was added remain accepted. Keep the old spectrum shape
-    // rules exactly: both spectrum fields enumerable means the eight-field shape, while hidden or
-    // absent optional fields may be normalized as before.
-    const spectrumIsEnumerable = spectrumDescriptor?.enumerable === true;
-    const collectionIsEnumerable = collectionDescriptor?.enumerable === true;
-    if (spectrumIsEnumerable || collectionIsEnumerable) {
-      if (!hasEnumerableShape(captured, SPECTRUM_BOOT_OPTION_FIELDS)) return undefined;
-    } else {
-      if (!hasEnumerableShape(captured, LEGACY_BOOT_OPTION_FIELDS)) return undefined;
-      if (spectrumDescriptor !== undefined
-          && spectrumDescriptor.value !== undefined && spectrumDescriptor.value !== null) return undefined;
-    }
-  }
-  const spectrumValue = spectrumDescriptor === undefined ? undefined : spectrumDescriptor.value;
-  const spectrum = snapshotSpectrumBoot(spectrumValue ?? null);
-  const spectrumCollection = snapshotSpectrumCollection(
-    (collectionDescriptor === undefined ? undefined : collectionDescriptor.value) ?? null,
-  );
-  if (spectrum === undefined || spectrumCollection === undefined) return undefined;
+  if (!captured || !hasEnumerableShape(captured, BOOT_OPTION_FIELDS)) return undefined;
   const snapshot = {
     sourceRingFrames: captured.descriptors.get("sourceRingFrames").value,
     maximumMemoryBytes: captured.descriptors.get("maximumMemoryBytes").value,
@@ -526,9 +371,6 @@ function snapshotBootOptions(value) {
     liveControlMeterBlocks: captured.descriptors.get("liveControlMeterBlocks").value,
     liveControlObservationTaps: captured.descriptors.get("liveControlObservationTaps").value,
     reserved2: captured.descriptors.get("reserved2").value,
-    spectrumHopFrames: hopDescriptor === undefined ? 0 : hopDescriptor.value,
-    spectrum,
-    spectrumCollection,
   };
   return validBootOptions(snapshot) ? snapshot : undefined;
 }
@@ -581,63 +423,8 @@ function numericBackend(backend) {
   return backend === "scalar" ? 0 : 1;
 }
 
-function validSpectrumBoot(options) {
-  if (options === null) return true;
-  return hasExactFields(options, SPECTRUM_BOOT_FIELDS)
-    && SPECTRUM_TARGETS.has(options.target)
-    && typeof options.targetId === "string"
-    && options.targetId.length > 0
-    && new TextEncoder().encode(options.targetId).byteLength <= SPECTRUM_MAXIMUM_ID_BYTES
-    && SPECTRUM_CHANNELS.has(options.channels)
-    && Number.isSafeInteger(options.maximumCaptureBytes)
-    && options.maximumCaptureBytes > 0
-    && options.maximumCaptureBytes <= SPECTRUM_MAXIMUM_BYTES;
-}
-
-function validSpectrumCollectionBoot(options) {
-  if (options === null) return true;
-  return hasExactFields(options, SPECTRUM_COLLECTION_FIELDS)
-    && Array.isArray(options.entries)
-    && options.entries.length > 0
-    && options.entries.every((entry) => hasExactFields(entry, SPECTRUM_COLLECTION_ENTRY_FIELDS)
-      && SPECTRUM_TARGETS.has(entry.target)
-      && typeof entry.targetId === "string"
-      && entry.targetId.length > 0
-      && new TextEncoder().encode(entry.targetId).byteLength <= SPECTRUM_MAXIMUM_ID_BYTES
-      && SPECTRUM_CHANNELS.has(entry.channels))
-    && Number.isSafeInteger(options.maximumCaptureBytes)
-    && options.maximumCaptureBytes > 0;
-}
-
-function validSpectrumStreamMetadata(metadata) {
-  return hasExactFields(metadata, [
-    "structSize", "abiVersion", "result", "status", "target", "channels", "sampleRateHz",
-    "quantumFrames", "hopFrames", "sourceUnderrun", "captureEpoch", "sequence",
-    "droppedCaptures", "windows", "capturedSample", "endSample", "analysisEpoch",
-    "historyStartSample", "smoothingMs",
-  ])
-    && metadata.structSize === SPECTRUM_STREAM_METADATA_BYTES
-    && metadata.abiVersion === 0x00010000
-    && validResult(metadata.result)
-    && SPECTRUM_STREAM_STATUSES.has(metadata.status)
-    && validU32(metadata.target) && metadata.target > 0 && metadata.target <= 3
-    && validU32(metadata.channels) && metadata.channels > 0 && metadata.channels <= 3
-    && validU32(metadata.sampleRateHz) && metadata.sampleRateHz > 0
-    && validU32(metadata.quantumFrames) && metadata.quantumFrames > 0
-    && validU32(metadata.hopFrames) && metadata.hopFrames > 0
-    && validU32(metadata.sourceUnderrun) && metadata.sourceUnderrun <= 1
-    && validU64(metadata.captureEpoch) && validU64(metadata.sequence)
-    && validU64(metadata.droppedCaptures) && validU64(metadata.windows)
-    && validU64(metadata.capturedSample) && validU64(metadata.endSample)
-    && metadata.endSample >= metadata.capturedSample
-    && validU64(metadata.analysisEpoch) && validU64(metadata.historyStartSample)
-    && typeof metadata.smoothingMs === "number" && Number.isFinite(metadata.smoothingMs)
-    && metadata.smoothingMs >= 0 && metadata.smoothingMs <= 10_000;
-}
-
 function validBootOptions(options) {
   return hasExactFields(options, BOOT_OPTION_FIELDS)
-    && SPECTRUM_HOP_FRAMES.has(options.spectrumHopFrames)
     && validU32(options.sourceRingFrames)
     && validU64(options.maximumMemoryBytes)
     && options.reserved1 === 0n
@@ -645,11 +432,7 @@ function validBootOptions(options) {
     && options.liveControlMeterBlocks <= 0xffffffffn
     && validU64(options.liveControlObservationTaps)
     && options.liveControlObservationTaps <= BigInt(MAXIMUM_OBSERVATION_TAPS)
-    && options.reserved2 === 0n
-    && validSpectrumBoot(options.spectrum ?? null)
-    && validSpectrumCollectionBoot(options.spectrumCollection ?? null)
-    && (options.spectrum === null || options.spectrum === undefined
-      || options.spectrumCollection === null || options.spectrumCollection === undefined);
+    && options.reserved2 === 0n;
 }
 
 function validResources(resources, backend, sampleRateHz, quantumFrames) {
@@ -762,7 +545,6 @@ class MisoAudioWorkletHost {
   #inFlightControl = 0;
   #inFlightObservationReads = 0;
   #inFlightTrackResponses = 0;
-  #inFlightSpectrum = 0;
   #inFlightLease = new Set();
   #liveControlMeterBlocks;
   /// Issue #143: the host's own record of the taps it armed, keyed by the four addressing numbers.
@@ -892,8 +674,6 @@ class MisoAudioWorkletHost {
       this.#inFlightObservationReads -= 1;
     } else if (pending.response === "trackResponse") {
       this.#inFlightTrackResponses -= 1;
-    } else if (pending.response === "spectrum") {
-      this.#inFlightSpectrum -= 1;
     } else if (pending.response === "lease" || pending.response === "sessionMap"
       || pending.response === "observationMap") {
       this.#inFlightLease.delete(pending.leaseKind);
@@ -1053,18 +833,6 @@ class MisoAudioWorkletHost {
               ? ["tag", "requestId", "result", "rows"]
               : pending.response === "trackResponse"
                 ? TRACK_RESPONSE_REPLY_FIELDS
-                : pending.response === "spectrum"
-                  ? pending.spectrumOperation === "streamRead"
-                    ? SPECTRUM_STREAM_READ_REPLY_FIELDS
-                    : pending.spectrumOperation === "streamSelect"
-                      ? SPECTRUM_STREAM_SELECT_REPLY_FIELDS
-                    : pending.spectrumOperation === "streamStart"
-                      ? SPECTRUM_STREAM_START_REPLY_FIELDS
-                      : pending.spectrumOperation === "streamStop"
-                        ? SPECTRUM_STREAM_STOP_REPLY_FIELDS
-                        : pending.spectrumOperation === "select"
-                          ? SPECTRUM_SELECT_REPLY_FIELDS
-                        : ["tag", "requestId", "result", "operation", "snapshot"]
           : pending.response === "status"
         ? [
           "tag", "requestId", "result", "state", "lastResult", "backend", "sampleRateHz",
@@ -1092,9 +860,7 @@ class MisoAudioWorkletHost {
             ? "miso.observation.v1"
             : pending.response === "trackResponse"
               ? "miso.trackresponse.v1"
-              : pending.response === "spectrum"
-                ? "miso.spectrum.v1"
-                : pending.response === "sessionSeek"
+              : pending.response === "sessionSeek"
                   ? "miso.session-seek.v1"
                 : pending.response === "seekReport"
                   ? "miso.seek-report.v1"
@@ -1149,33 +915,6 @@ class MisoAudioWorkletHost {
         && message.snapshot.byteLength <= pending.trackResponseMaximumBytes)
         || (message.result !== RESULT_OK && message.snapshot.byteLength === 0))
     );
-    const validSpectrum = pending.response !== "spectrum" || (
-      message.operation === pending.spectrumOperation
-      && ((pending.spectrumOperation === "streamSelect")
-        ? validSpectrumStreamMetadata(message.metadata)
-        : (pending.spectrumOperation === "streamStart" || pending.spectrumOperation === "streamStop")
-        ? validSpectrumStreamMetadata(message.metadata)
-        : pending.spectrumOperation === "streamRead"
-          ? validSpectrumStreamMetadata(message.metadata)
-            && Number.isSafeInteger(message.byteLength) && message.byteLength >= 0
-            && message.byteLength <= SPECTRUM_MAXIMUM_BYTES
-            && message.buffer instanceof ArrayBuffer
-            && message.buffer.byteLength === pending.spectrumBufferBytes
-            && (message.result === RESULT_OK
-              ? (message.metadata.status === 6
-                ? message.byteLength > 0 && message.byteLength <= message.buffer.byteLength
-                : message.byteLength === 0)
-              : message.byteLength === 0)
-          : pending.spectrumOperation === "select"
-            ? true
-            : message.snapshot instanceof Uint8Array
-            && message.snapshot.buffer instanceof ArrayBuffer
-            && (message.result === RESULT_OK
-              ? (pending.spectrumOperation === "read"
-                ? message.snapshot.byteLength > 0 && message.snapshot.byteLength <= SPECTRUM_MAXIMUM_BYTES
-                : message.snapshot.byteLength === 0)
-              : message.snapshot.byteLength === 0))
-    );
     const validStatus = pending.response !== "status" || (
       message.result === RESULT_OK && validU32(message.state) && message.state <= 4
       && validResult(message.lastResult) && message.backend === this.#numericBackend
@@ -1207,7 +946,7 @@ class MisoAudioWorkletHost {
     if (message.tag !== expectedTag || !hasExactFields(message, expectedFields)
         || !validRequestId(message.requestId) || !validResult(message.result)
         || !validSourcePlanes || !validStatus || !validRenderAllocations || !validCommandAck || !validControl || !validSessionMap
-        || !validObservationMap || !validObservationRead || !validTrackResponse || !validSpectrum
+        || !validObservationMap || !validObservationRead || !validTrackResponse
         || !validSessionSeek || !validSeekReport) {
       this.#fail(webError(255, message.requestId));
       return;
@@ -1238,7 +977,6 @@ class MisoAudioWorkletHost {
     this.#inFlightControl = 0;
     this.#inFlightObservationReads = 0;
     this.#inFlightTrackResponses = 0;
-    this.#inFlightSpectrum = 0;
     for (const pending of unsettled) pending.reject(error);
     follow?.reject(error);
   }
@@ -1262,7 +1000,6 @@ class MisoAudioWorkletHost {
     if (response === "control") return this.#inFlightControl >= MAXIMUM_CONTROL_IN_FLIGHT;
     if (response === "observationRead") return this.#inFlightObservationReads >= 1;
     if (response === "trackResponse") return this.#inFlightTrackResponses >= 1;
-    if (response === "spectrum") return this.#inFlightSpectrum >= 1;
     if (response === "lease" || response === "sessionMap" || response === "observationMap") {
       return this.#inFlightLease.has(sourceId);
     }
@@ -1288,8 +1025,6 @@ class MisoAudioWorkletHost {
       this.#inFlightObservationReads += 1;
     } else if (response === "trackResponse") {
       this.#inFlightTrackResponses += 1;
-    } else if (response === "spectrum") {
-      this.#inFlightSpectrum += 1;
     } else if (response === "lease" || response === "sessionMap" || response === "observationMap") {
       this.#inFlightLease.add(sourceId);
     }
@@ -1321,9 +1056,6 @@ class MisoAudioWorkletHost {
         commandCount: stamped.count ?? 0,
         observationCount: Array.isArray(stamped.selections) ? stamped.selections.length : 0,
         trackResponseMaximumBytes: stamped.maximumResultBytes ?? LIVE_RESPONSE_MAXIMUM_BYTES,
-        spectrumOperation: stamped.operation,
-        spectrumBuffer: stamped.buffer,
-        spectrumBufferBytes: stamped.buffer instanceof ArrayBuffer ? stamped.buffer.byteLength : 0,
         generation: stamped.generation,
         resolve,
         reject,
@@ -1495,7 +1227,7 @@ class MisoAudioWorkletHost {
   ///
   /// The count is every allocator call the instance made inside the exports its processor calls
   /// on the render thread after boot: render, command submission, meter polling and the
-  /// observation, response and spectrum staging reads. Decision 15 requires it to stay zero. It
+  /// observation and response staging reads. Decision 15 requires it to stay zero. It
   /// is per instance, so a caller reads it on each host before that host's `dispose()`. The
   /// worklet answers in its message handler, never in `process()`.
   renderAllocationCount() {
@@ -1702,108 +1434,6 @@ class MisoAudioWorkletHost {
       { tag: "miso.trackresponse.v1", ...request },
       [],
       "trackResponse",
-    );
-  }
-
-  /// Arm the prepared one-shot spectrum observer.
-  armSpectrum() {
-    return this.#request(
-      { tag: "miso.spectrum.v1", operation: "arm", channels: "both" },
-      [],
-      "spectrum",
-    );
-  }
-
-  /// Read one completed spectrum window. A backpressure result carries an empty snapshot.
-  readSpectrum(request) {
-    if (!hasExactFields(request, ["channels"]) || !SPECTRUM_CHANNELS.has(request.channels)) {
-      return Promise.reject(webError(RESULT_INVALID_ARGUMENT));
-    }
-    return this.#request(
-      { tag: "miso.spectrum.v1", operation: "read", channels: request.channels },
-      [],
-      "spectrum",
-    );
-  }
-
-  /// Select one exact prepared collection entry before starting its managed stream.
-  selectSpectrum(request) {
-    if (!hasExactFields(request, ["target", "targetId", "channels"])
-        || !SPECTRUM_TARGETS.has(request.target)
-        || typeof request.targetId !== "string"
-        || request.targetId.length === 0
-        || new TextEncoder().encode(request.targetId).byteLength > SPECTRUM_MAXIMUM_ID_BYTES
-        || !SPECTRUM_CHANNELS.has(request.channels)) {
-      return Promise.reject(webError(RESULT_INVALID_ARGUMENT));
-    }
-    return this.#request(
-      { tag: "miso.spectrum.v1", operation: "select", ...request },
-      [],
-      "spectrum",
-    );
-  }
-
-  /// Atomically update the active collection entry and smoothing profile.
-  selectSpectrumStream(request) {
-    if (!hasExactFields(request, ["target", "targetId", "channels", "smoothingMs"])
-        || !SPECTRUM_TARGETS.has(request.target)
-        || typeof request.targetId !== "string"
-        || request.targetId.length === 0
-        || new TextEncoder().encode(request.targetId).byteLength > SPECTRUM_MAXIMUM_ID_BYTES
-        || !SPECTRUM_CHANNELS.has(request.channels)
-        || typeof request.smoothingMs !== "number"
-        || !Number.isFinite(request.smoothingMs)
-        || request.smoothingMs < 0 || request.smoothingMs > 10_000) {
-      return Promise.reject(webError(RESULT_INVALID_ARGUMENT));
-    }
-    return this.#request(
-      { tag: "miso.spectrum.v1", operation: "streamSelect", ...request },
-      [],
-      "spectrum",
-    );
-  }
-
-  /// Cancel the prepared one-shot spectrum observer.
-  cancelSpectrum() {
-    return this.#request(
-      { tag: "miso.spectrum.v1", operation: "cancel", channels: "both" },
-      [],
-      "spectrum",
-    );
-  }
-
-  /// Start the managed continuous spectrum stream for the prepared boundary.
-  startSpectrumStream(smoothingMs = 100) {
-    if (typeof smoothingMs !== "number" || !Number.isFinite(smoothingMs)
-        || smoothingMs < 0 || smoothingMs > 10_000) {
-      return Promise.reject(webError(RESULT_INVALID_ARGUMENT));
-    }
-    return this.#request(
-      { tag: "miso.spectrum.v1", operation: "streamStart", smoothingMs },
-      [],
-      "spectrum",
-    );
-  }
-
-  /// Read the next scheduled managed stream window into the supplied reusable buffer.
-  readSpectrumStream(buffer) {
-    if (!(buffer instanceof ArrayBuffer) || buffer.byteLength === 0
-        || buffer.byteLength > SPECTRUM_MAXIMUM_BYTES) {
-      return Promise.reject(webError(RESULT_INVALID_ARGUMENT));
-    }
-    return this.#request(
-      { tag: "miso.spectrum.v1", operation: "streamRead", buffer },
-      [buffer],
-      "spectrum",
-    );
-  }
-
-  /// Stop the managed continuous spectrum stream.
-  stopSpectrumStream() {
-    return this.#request(
-      { tag: "miso.spectrum.v1", operation: "streamStop" },
-      [],
-      "spectrum",
     );
   }
 

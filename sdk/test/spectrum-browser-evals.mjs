@@ -12,7 +12,8 @@ import { test } from "node:test";
 import { createEngine } from "../src/browser/engine.ts";
 import { MisoEngineAsset } from "../src/core/asset.ts";
 import { WasmBoundary } from "../src/core/boundary.ts";
-import { ABI_LAYOUT } from "../src/generated/abi.ts";
+// The core's largest spectrum capture budget (`host_core::SPECTRUM_MAXIMUM_CAPTURE_BYTES`).
+const SPECTRUM_MAXIMUM_CAPTURE_BYTES = 1 << 20;
 import { decodeResponseEnvelope } from "../src/core/control-frame.ts";
 import { MisoEngineError } from "../src/core/errors.ts";
 import { onEndpointIds } from "./control-support.mjs";
@@ -25,7 +26,7 @@ const OUTPUT = Object.freeze({ target: Object.freeze({ kind: "output", outputId:
 const TRACK = Object.freeze({ target: Object.freeze({ kind: "trackPostPan", trackId: "t" }), channels: "both" });
 const BOTH = Object.freeze({
   entries: Object.freeze([OUTPUT, TRACK]),
-  maximumCaptureBytes: ABI_LAYOUT.constants.spectrumCaptureBytes * 2,
+  maximumCaptureBytes: SPECTRUM_MAXIMUM_CAPTURE_BYTES * 2,
 });
 
 let assetPromise;

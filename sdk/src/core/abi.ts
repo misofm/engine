@@ -112,7 +112,7 @@ export interface BootOptions {
   readonly sourceRingFrames?: number;
   /** Total boot memory budget. Absent selects the engine's default ceiling. */
   readonly maximumMemoryBytes?: bigint;
-  /** Optional prepared continuous-spectrum hop, selected outside the packed boot options block. */
+  /** The stream hop of the boot's spectrum taps, sent in the boot's `SPECTRUM_CONFIGURE`. */
   readonly spectrumHopFrames?: 256 | 512 | 1024 | 2048;
   /**
    * The two live-control words. Absent attaches no live controls at all. The master strip is not a
@@ -122,9 +122,12 @@ export interface BootOptions {
     readonly meterBlocks?: number;
     readonly observationTaps?: number;
   };
-  /** One optional prepared graph boundary for the bounded spectrum query. */
+  /**
+   * One spectrum tap for the session, set by the boot's one `SPECTRUM_CONFIGURE` before the first
+   * block, so it is in the plan that renders sample 0 (#1597).
+   */
   readonly spectrum?: SpectrumQuery;
-  /** Several exact graph boundaries for one atomically selectable managed spectrum owner. */
+  /** Several spectrum taps, set as `spectrum` is, for one atomically selectable managed owner. */
   readonly spectrumCollection?: SpectrumCollection;
 }
 

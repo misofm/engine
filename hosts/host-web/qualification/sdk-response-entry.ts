@@ -10,7 +10,8 @@ import { ProtocolClient } from "../../../sdk/src/core/protocol-messages.ts";
 import type { MisoAudioWorkletHost, MisoStatus } from "../../../sdk/src/browser/shipped-host.d.ts";
 import { encodeLaneEdits } from "../../../sdk/src/core/writer.ts";
 import { MisoEngineAsset } from "../../../sdk/src/core/asset.ts";
-import { ABI_LAYOUT } from "../../../sdk/src/generated/abi.ts";
+// The core's largest spectrum capture budget (`host_core::SPECTRUM_MAXIMUM_CAPTURE_BYTES`).
+const SPECTRUM_MAXIMUM_CAPTURE_BYTES = 1 << 20;
 import { CATALOG } from "../../../sdk/src/generated/catalog.ts";
 import { effect, session } from "../../../sdk/src/core/session.ts";
 import { MisoEngineError } from "../../../sdk/src/core/errors.ts";
@@ -42,17 +43,17 @@ const SPECTRUM_QUERIES = [
   {
     target: { kind: "trackPostInput" as const, trackId: "track" },
     channels: "both" as const,
-    spectrumLimits: { maximumCaptureBytes: ABI_LAYOUT.constants.spectrumCaptureBytes },
+    spectrumLimits: { maximumCaptureBytes: SPECTRUM_MAXIMUM_CAPTURE_BYTES },
   },
   {
     target: { kind: "trackPostPan" as const, trackId: "track" },
     channels: "both" as const,
-    spectrumLimits: { maximumCaptureBytes: ABI_LAYOUT.constants.spectrumCaptureBytes },
+    spectrumLimits: { maximumCaptureBytes: SPECTRUM_MAXIMUM_CAPTURE_BYTES },
   },
   {
     target: { kind: "output" as const, outputId: "main-out" },
     channels: "both" as const,
-    spectrumLimits: { maximumCaptureBytes: ABI_LAYOUT.constants.spectrumCaptureBytes },
+    spectrumLimits: { maximumCaptureBytes: SPECTRUM_MAXIMUM_CAPTURE_BYTES },
   },
 ];
 
@@ -69,7 +70,7 @@ const SPECTRUM_COLLECTION_ENTRIES = [
 
 const SPECTRUM_COLLECTION = {
   entries: SPECTRUM_COLLECTION_ENTRIES,
-  maximumCaptureBytes: ABI_LAYOUT.constants.spectrumCaptureBytes * 2,
+  maximumCaptureBytes: SPECTRUM_MAXIMUM_CAPTURE_BYTES * 2,
 };
 
 /**
@@ -785,7 +786,7 @@ async function runContinuousSpectrumQualification(): Promise<Record<string, unkn
   const query = {
     target: { kind: "output" as const, outputId: "main-out" },
     channels: "both" as const,
-    spectrumLimits: { maximumCaptureBytes: ABI_LAYOUT.constants.spectrumCaptureBytes },
+    spectrumLimits: { maximumCaptureBytes: SPECTRUM_MAXIMUM_CAPTURE_BYTES },
   };
   const browser = await createContinuousSpectrumBrowser(query, CONTINUOUS_FRAMES, true, 256);
   const nativeStarts = [];
@@ -1008,7 +1009,7 @@ async function runConfiguredSpectrumHopQualification(): Promise<Record<string, u
   const query = {
     target: { kind: "output" as const, outputId: "main-out" },
     channels: "both" as const,
-    spectrumLimits: { maximumCaptureBytes: ABI_LAYOUT.constants.spectrumCaptureBytes },
+    spectrumLimits: { maximumCaptureBytes: SPECTRUM_MAXIMUM_CAPTURE_BYTES },
   };
   const hopFrames = 1_024;
   const smoothingMs = 37.5;
@@ -1368,7 +1369,7 @@ async function runSpectrumCollectionQualification(): Promise<Record<string, unkn
   const browser = await createSpectrumCollectionBrowser();
   const query = (entry: typeof entryA) => ({
     ...entry,
-    spectrumLimits: { maximumCaptureBytes: ABI_LAYOUT.constants.spectrumCaptureBytes },
+    spectrumLimits: { maximumCaptureBytes: SPECTRUM_MAXIMUM_CAPTURE_BYTES },
   });
   const firstQuery = query(entryA);
   const secondQuery = query(entryB);

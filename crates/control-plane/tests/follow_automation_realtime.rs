@@ -217,7 +217,7 @@ impl Rig {
     fn new() -> Self {
         let (document, revision) = document();
         let CompiledChildren { session, plan } =
-            compile_children::<Adapter>(&document, limits(), Box::new(Preparer), None)
+            compile_children::<Adapter>(&document, limits(), Box::new(Preparer))
                 .expect("boot compile");
         Self {
             session,
