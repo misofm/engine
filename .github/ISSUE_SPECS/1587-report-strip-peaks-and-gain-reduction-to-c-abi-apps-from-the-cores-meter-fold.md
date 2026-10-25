@@ -171,3 +171,12 @@ Commands: `cargo test --locked -p host-core --all-features`,
   other budget" did not foresee these two, so they are flagged for root.
 - **Charge.** The strip-ID text of the two stored tables is charged at 256 entries x
   `STABLE_ID_MAXIMUM_BYTES` x 2 (`meter_text_reserve_bytes`), with the resolution and fold vectors.
+- **Root ruling 3 (snap).** The relay keeps the strip meters' grid on render (origin 0, moved by
+  `restart_at`; the window) and `apply(block_start)` writes only gates on that grid at or after
+  the block: a request at or after the block opens at the grid's first boundary at or after it; a
+  request behind the block keeps a gate already open at or before the block, and otherwise opens
+  at the first boundary at or after the block. So a configure that races render, or a stale-grid
+  request after an uncarried swap, never opens an output window off the strip grid. Integer
+  arithmetic only, no allocation.
+- **Root ruling 4.** The re-exports in `host-core/src/lib.rs` and `control-plane/src/lib.rs` are
+  accepted.

@@ -356,7 +356,7 @@ impl<A: ControlAdapter> PlanState<A> {
         // #1583: a requested gate reaches the output meter here, before the block, so this block's
         // strip meter level and its output fold read the one gate value.
         if let Some(relay) = self.output_gate.as_mut() {
-            relay.apply();
+            relay.apply(absolute_sample);
         }
         // #882: the strip meters observe exactly the blocks the output meter does, by its gate's
         // own rule, so a block rendered with the meter level off does no strip meter work. A block

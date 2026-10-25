@@ -1849,7 +1849,8 @@ where
     // window. Any other adapter takes the reader and the live gate (`take_output_meter`).
     let mut provider = provider;
     let (output_meter, session_meters, output_gate) = if A::METER_DELIVERY {
-        let (requested, relay) = host_core::meters::output_peak_gate_relay(output_gate);
+        let (requested, relay) =
+            host_core::meters::output_peak_gate_relay(output_gate, u64::from(window_frames.get()));
         // #1587a R2: the delivery folds the boot plan's strip meters over its tables.
         let delivery = host_core::MeterDelivery::new(
             output_reader,
