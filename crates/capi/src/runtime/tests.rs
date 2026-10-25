@@ -5785,11 +5785,15 @@ fn an_uncarried_rebuild_restarts_the_meter_grid_at_its_adoption_block() {
         (result, response_status(&response)),
         (crate::RESULT_OK, StatusCode::Ok)
     );
-    // The removed track ramps out first (#1325), so the swap lands a few blocks later, at a block
-    // the batches name.
+    // The removed track ramps out first (#1325), so the swap lands a few blocks later.
     let end_block = swap_block + 5 * window;
+    let mut swapped = None;
     for block in swap_block..end_block {
         feed(block);
+        let (_, watermark) = crate::ffi::test_plan_watermark(c_plan);
+        if watermark.revision == 43 {
+            swapped.get_or_insert(watermark.first_sample);
+        }
     }
     assert_eq!(crate::ffi::test_service(c_session), crate::RESULT_OK);
     let span = window * 128;
@@ -5807,11 +5811,9 @@ fn an_uncarried_rebuild_restarts_the_meter_grid_at_its_adoption_block() {
             )
         })
         .collect();
-    let adoption = batches.get(1).expect("a batch after the swap").0;
-    assert!(
-        adoption >= swap_block * 128 && adoption % span != 0,
-        "the grid restarted mid-window, at {adoption}"
-    );
+    // The watermark names the block that adopted the successor (#1325 D4).
+    let adoption = swapped.expect("render adopted the successor");
+    assert_ne!(adoption % span, 0, "the swap lands mid-window");
     let after = (end_block * 128 - adoption) / span;
     assert_eq!(
         batches,
