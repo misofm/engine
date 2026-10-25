@@ -68,9 +68,13 @@ pub struct ProviderEpoch {
     /// effect instance in `HostLiveControlHandles::effect_observations` order: the windows a tap an
     /// `Observe` edit armed publishes. Empty for a host whose preparer keeps them itself (the
     /// browser's). Their slots are `Arc`s shared with the plan's lanes, as the meters' rings are.
-    /// Only the adapters' tests read them before #1586.
-    #[cfg_attr(not(feature = "test-support"), allow(dead_code))]
+    /// `OBSERVATION_READ` reads them through [`Self::observation_index`] (#1586 D6).
     pub(crate) observations: Box<[host_core::EffectObservationHandle]>,
+    /// The plan's effect instances by stable key, with each one's position in
+    /// [`Self::observations`] (#1586 D3, R1): built with the epoch, on the control thread, so a
+    /// read resolves a stable address without allocating. Empty for a host whose preparer keeps
+    /// the readers itself (the browser's).
+    pub(crate) observation_index: host_core::observation::ObservationIndex,
     /// The capi resources this epoch's plan was prepared with (#1257 D4).
     pub(crate) capi: CapiResources,
     /// The handle of this epoch's plan's revision gate (#1502 D1). Control publishes every
@@ -699,6 +703,7 @@ impl ProviderEpoch {
             meters,
             meter_tables: host_core::MeterTables::empty(),
             observations: Box::default(),
+            observation_index: host_core::observation::ObservationIndex::default(),
             capi,
             revision_gate,
             carried: CarriedSourceBytes::default(),
@@ -712,12 +717,14 @@ impl ProviderEpoch {
         owner
     }
 
-    /// This epoch with its plan's observation readers (#1584 D7).
+    /// This epoch with its plan's observation readers (#1584 D7) and their index (#1586 D6).
     pub(crate) fn with_observations(
         mut self,
         observations: Box<[host_core::EffectObservationHandle]>,
+        observation_index: host_core::observation::ObservationIndex,
     ) -> Self {
         self.observations = observations;
+        self.observation_index = observation_index;
         self
     }
 
@@ -741,6 +748,7 @@ impl ProviderEpoch {
             meters,
             meter_tables: host_core::MeterTables::empty(),
             observations: Box::default(),
+            observation_index: host_core::observation::ObservationIndex::default(),
             capi,
             revision_gate,
             carried,
@@ -914,14 +922,19 @@ pub struct TestTransactionSnapshot<Row> {
     pub effect_owners: Vec<TestOwnerState>,
     /// The newest window each observation reader the epochs keep holds (#1584 D7), current epoch
     /// first, then each pending candidate: `(epoch, strip ID, effect instance ID, one window per
-    /// declared tap as (sequence, first sample, blocks))`. `None` for a tap that has published
-    /// nothing.
+    /// declared tap as (sequence, first sample, blocks, the left and right lanes' bits))`, read by
+    /// the reader itself. `None` for a tap that has published nothing.
     pub observation_windows: Vec<TestObservationWindows>,
 }
 
 /// One observed effect instance's newest windows in a [`TestTransactionSnapshot`].
 #[cfg(feature = "test-support")]
-pub type TestObservationWindows = (u64, Box<str>, Box<str>, Vec<Option<(u64, u64, u32)>>);
+pub type TestObservationWindows = (
+    u64,
+    Box<str>,
+    Box<str>,
+    Vec<Option<(u64, u64, u32, [u32; 2])>>,
+);
 
 /// One EQ owner's observable state in a [`TestTransactionSnapshot`].
 #[cfg(feature = "test-support")]
@@ -1115,6 +1128,10 @@ pub struct SessionState<A: ControlAdapter> {
     /// one-byte box that nothing ever read (audit F7).
     pub(crate) decode_fields: Box<[u16]>,
     pub(crate) response_scratch: Box<[u8]>,
+    /// The rows of an `OBSERVATION_READ` reply (#1586 D6): one per selection the codec admits, made
+    /// at boot for an adapter that serves the read (empty otherwise), so a read writes its rows
+    /// here and allocates none.
+    pub(crate) observation_rows: Box<[protocol::ObservationReadRow]>,
     pub(crate) shared: Arc<SharedPlanState<A::Row>>,
     pub(crate) observed_render_sequence: u64,
     /// The render sequence at which the counter snapshot was last staged, or while no counter is
@@ -1374,6 +1391,96 @@ pub struct ObservationKeyRef<'a> {
     pub effect_id: &'a [u8],
     /// The effect-local tap ID.
     pub tap_id: u32,
+}
+
+/// The core form of one `OBSERVATION_READ` selection (#1586 D3): it borrows the selection's IDs.
+fn core_selection<'a>(
+    selection: &protocol::ObservationSelectionRef<'a>,
+) -> host_core::observation::ObservationSelection<'a> {
+    host_core::observation::ObservationSelection {
+        strip_id: selection.strip_id,
+        section: match selection.section {
+            protocol::ObservationSection::Console => host_core::LiveEffectRack::Console,
+            protocol::ObservationSection::Inserts => host_core::LiveEffectRack::Inserts,
+        },
+        effect_id: selection.slot_id,
+        tap_id: selection.tap_id,
+        channels: match selection.channels {
+            protocol::ParameterChannel::Left => {
+                host_core::observation::ObservationReadChannels::Left
+            }
+            protocol::ParameterChannel::Right => {
+                host_core::observation::ObservationReadChannels::Right
+            }
+            protocol::ParameterChannel::Both => {
+                host_core::observation::ObservationReadChannels::Both
+            }
+        },
+    }
+}
+
+/// The wire row of one core row (#1586 D1): the arm state is the slot's published state, or none
+/// when render has not applied the tap's last record or the read tore.
+fn wire_row(row: &host_core::observation::ObservationRow) -> protocol::ObservationReadRow {
+    use host_core::observation::ObservationReadStatus as Status;
+    let state = row.state;
+    protocol::ObservationReadRow {
+        status: match row.status {
+            Status::Pending => protocol::ObservationRowStatus::Pending,
+            Status::Unarmed => protocol::ObservationRowStatus::Unarmed,
+            Status::Ready => protocol::ObservationRowStatus::Ready,
+        },
+        armed: state.is_some_and(|state| state.armed),
+        arm_sample: state.map_or(0, |state| state.arm_sample),
+        arm_tag: state.map_or(0, |state| state.arm_tag),
+        window: row.window.map(|window| protocol::ObservationRowWindow {
+            first_sample: window.first_sample,
+            end_sample: window.end_sample,
+            sequence: window.sequence,
+            blocks: window.blocks,
+        }),
+        left: row.left,
+        right: row.right,
+        unit: row
+            .tap
+            .map_or(protocol::ParameterUnit::Db, |tap| wire_unit(tap.unit)),
+    }
+}
+
+const fn wire_unit(unit: effect_contract::ParameterUnit) -> protocol::ParameterUnit {
+    match unit {
+        effect_contract::ParameterUnit::Db => protocol::ParameterUnit::Db,
+        effect_contract::ParameterUnit::Hz => protocol::ParameterUnit::Hz,
+        effect_contract::ParameterUnit::Milliseconds => protocol::ParameterUnit::Milliseconds,
+        effect_contract::ParameterUnit::Samples => protocol::ParameterUnit::Samples,
+        effect_contract::ParameterUnit::Linear => protocol::ParameterUnit::Linear,
+        effect_contract::ParameterUnit::Ratio => protocol::ParameterUnit::Ratio,
+    }
+}
+
+/// D4's status and code for a refusal the codec cannot rule out; `None` for one it does (a batch
+/// of more than 256, or a row table shorter than the batch), which is an internal fault here.
+const fn observation_refusal(
+    refusal: host_core::observation::ObservationRefusal,
+) -> Option<(protocol::StatusCode, &'static str)> {
+    use host_core::observation::ObservationRefusal as Refusal;
+    match refusal {
+        Refusal::UnknownAddress => Some((
+            protocol::StatusCode::NotFound,
+            "observation.address.unknown",
+        )),
+        Refusal::UnknownTap => Some((protocol::StatusCode::NotFound, "observation.tap.unknown")),
+        Refusal::UnsupportedTap => Some((
+            protocol::StatusCode::Unavailable,
+            "observation.tap.unsupported",
+        )),
+        Refusal::Unbound => Some((protocol::StatusCode::Unavailable, "observation.unbound")),
+        Refusal::Duplicate => Some((
+            protocol::StatusCode::InvalidField,
+            "observation.selection.duplicate",
+        )),
+        Refusal::TooManySelections | Refusal::RowsTooShort => None,
+    }
 }
 
 /// Where [`SessionState::resolve_observation_key`] found a tap, on the newest plan.
@@ -2554,7 +2661,12 @@ where
                                 .iter()
                                 .map(|reader| {
                                     reader.read().map(|window| {
-                                        (window.sequence, window.first_sample, window.blocks)
+                                        (
+                                            window.sequence,
+                                            window.first_sample,
+                                            window.blocks,
+                                            [window.left.to_bits(), window.right.to_bits()],
+                                        )
                                     })
                                 })
                                 .collect(),
@@ -3210,6 +3322,10 @@ where
             }
             // #1594 D9: a command the session executes.
             PreparedCommandFrame::Session(prepared) => self.session_command(*prepared),
+            // #1586 D6: the read, which allocates nothing.
+            PreparedCommandFrame::ObservationRead(prepared) => {
+                self.observation_read(prepared, request)
+            }
             PreparedCommandFrame::Structural(prepared) => {
                 let prepared = ObservedPreparedToken::new(prepared);
                 #[cfg(feature = "test-support")]
@@ -3485,6 +3601,128 @@ where
                 Err(error)
             }
         }
+    }
+
+    /// Executes an `OBSERVATION_READ` (#1586 D3, D4, D6) on the running plan's readers and
+    /// completes it. The selections are decoded from `request` into a table on the stack, borrowed
+    /// from its bytes. The whole batch is checked before a row is written: a reply larger than the
+    /// frame limit is `LIMIT_EXCEEDED` (`observation.frame`), and the first selection that does not
+    /// resolve is refused as D4 says, naming `selection[i]`; then every row is read, through
+    /// [`host_core::observation::read_with`], into the session's row table, and the reply borrows
+    /// it until it is encoded. The read writes no slot and acknowledges nothing, so it consumes no
+    /// window. A read that answers a page allocates nothing (gate 6).
+    ///
+    /// **Acked-batch question: can a reply claim a row that was not written? No.** The reply
+    /// covers exactly the rows `read_with` wrote, which it writes only once the whole batch
+    /// passed, and a row's arm state is the slot's published state (render applied it) or none.
+    fn observation_read(
+        &mut self,
+        prepared: protocol::PreparedObservationRead,
+        request: &[u8],
+    ) -> Result<usize, CommandError> {
+        let mut selections = [protocol::ObservationSelectionRef::EMPTY;
+            protocol::OBSERVATION_READ_MAXIMUM_SELECTIONS];
+        let codec = *self.controller.codec();
+        let Ok(count) = codec.decode_observation_read_frame(request, &mut selections) else {
+            // The controller decoded the same bytes before it prepared the read.
+            drop(prepared);
+            return Err(CommandError::Internal);
+        };
+        let fits = codec
+            .observation_read_largest_frame_len(count)
+            .is_ok_and(|bytes| bytes <= self.response_scratch.len());
+        if !fits {
+            return self
+                .controller
+                .complete_observation_read_refused(
+                    prepared,
+                    request,
+                    protocol::StatusCode::LimitExceeded,
+                    "observation.frame",
+                    None,
+                    &mut self.response_scratch,
+                )
+                .map_err(map_command_process_error);
+        }
+        let mut rows = core::mem::take(&mut self.observation_rows);
+        let outcome = match rows.get_mut(..count) {
+            Some(table) => self.read_observation_rows(&selections[..count], table),
+            None => Err(None),
+        };
+        let observed_sample = self.shared.render_sample.load(Ordering::Acquire);
+        let result = match outcome {
+            Ok(()) => self
+                .controller
+                .complete_observation_read(
+                    prepared,
+                    request,
+                    protocol::ObservationReadPage {
+                        observed_sample,
+                        rows: std::borrow::Cow::Borrowed(&rows[..count]),
+                    },
+                    &mut self.response_scratch,
+                )
+                .map_err(map_command_process_error),
+            Err(Some(error)) => match observation_refusal(error.refusal) {
+                Some((status, code)) => self
+                    .controller
+                    .complete_observation_read_refused(
+                        prepared,
+                        request,
+                        status,
+                        code,
+                        Some((
+                            "selection",
+                            u64::try_from(error.selection).unwrap_or(u64::MAX),
+                        )),
+                        &mut self.response_scratch,
+                    )
+                    .map_err(map_command_process_error),
+                None => {
+                    drop(prepared);
+                    Err(CommandError::Internal)
+                }
+            },
+            Err(None) => {
+                drop(prepared);
+                Err(CommandError::Internal)
+            }
+        };
+        self.observation_rows = rows;
+        result
+    }
+
+    /// Reads one row per selection into `rows` on the running plan's readers, with the whole
+    /// batch checked first (#1586 D4): the core read and the wire rows, no allocation. `Err(None)`
+    /// for a refusal the codec rules out (an internal fault).
+    fn read_observation_rows(
+        &self,
+        selections: &[protocol::ObservationSelectionRef<'_>],
+        rows: &mut [protocol::ObservationReadRow],
+    ) -> Result<(), Option<host_core::observation::ObservationReadError>> {
+        let provider = &self.providers;
+        host_core::observation::read_with(
+            &provider.observation_index,
+            &provider.observations,
+            selections,
+            |selection| {
+                Ok::<_, host_core::observation::ObservationReadError>(core_selection(selection))
+            },
+            |key| {
+                self.observation_issued(&ObservationKeyRef {
+                    strip_id: key.strip_id.as_bytes(),
+                    rack: key.section,
+                    effect_id: key.effect_id.as_bytes(),
+                    tap_id: key.tap_id,
+                })
+            },
+            |position, _, row| {
+                if let Some(slot) = rows.get_mut(position) {
+                    *slot = wire_row(&row);
+                }
+            },
+        )
+        .map_err(Some)
     }
 
     /// Completes a spectrum command's typed refusal, recorded for replay: a `BACKPRESSURE` with
@@ -4276,6 +4514,7 @@ where
             meters,
             meter_tables,
             observations,
+            observation_index,
             plan: candidate_plan,
             resources,
             carried,
@@ -4307,6 +4546,7 @@ where
         );
         candidate_provider.discontinuity = discontinuity;
         candidate_provider.observations = observations;
+        candidate_provider.observation_index = observation_index;
         candidate_provider.meter_tables = meter_tables;
         // The configuration epoch is set beside the push, after the commit.
         candidate_provider.spectrum = crate::spectrum::EpochSpectrum::Candidate {

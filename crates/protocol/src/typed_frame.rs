@@ -10,12 +10,12 @@ use crate::{
     CounterSnapshot, CounterSnapshotRef, CountersRequest, DecodeError, DecodeScratch,
     DecodedCapabilities, DecodedMeterBatch, Diagnostic, DiagnosticEvent, DiagnosticsPage,
     DiagnosticsRequest, EncodeError, EventHeader, FrameKind, MessageId, MeterBatch, NonOkResponse,
-    OUTER_HEADER_BYTES, ObservationEnded, ProtocolCodec, RequestId, ResponseGetRequest,
-    ResponseHeader, ResponseResult, SessionCommitted, SessionEdit, SessionReplaceRequest,
-    SessionRevision, SessionSnapshot, SessionSnapshotRequest, SpectrumCaptureReply,
-    SpectrumCaptureRequest, SpectrumConfigureRequest, SpectrumConfigured, SpectrumStreamReply,
-    SpectrumStreamRequest, StatusCode, TelemetryConfiguration, TransactionApplied,
-    TransportSetRequest, TransportSnapshot, TransportStateEvent,
+    OUTER_HEADER_BYTES, ObservationEnded, ObservationReadPage, ObservationReadRequest,
+    ProtocolCodec, RequestId, ResponseGetRequest, ResponseHeader, ResponseResult, SessionCommitted,
+    SessionEdit, SessionReplaceRequest, SessionRevision, SessionSnapshot, SessionSnapshotRequest,
+    SpectrumCaptureReply, SpectrumCaptureRequest, SpectrumConfigureRequest, SpectrumConfigured,
+    SpectrumStreamReply, SpectrumStreamRequest, StatusCode, TelemetryConfiguration,
+    TransactionApplied, TransportSetRequest, TransportSnapshot, TransportStateEvent,
 };
 
 #[cfg(test)]
@@ -56,6 +56,7 @@ pub enum CommandPayload<'a> {
     SpectrumConfigure(&'a SpectrumConfigureRequest),
     SpectrumCapture(&'a SpectrumCaptureRequest),
     SpectrumStream(&'a SpectrumStreamRequest),
+    ObservationRead(&'a ObservationReadRequest),
 }
 
 /// One typed command frame with a command-only revision precondition.
@@ -85,6 +86,7 @@ pub enum SuccessResponsePayload<'a> {
     SpectrumConfigured(SpectrumConfigured),
     SpectrumCaptured(SpectrumCaptureReply<'a>),
     SpectrumStreamed(SpectrumStreamReply<'a>),
+    ObservationRead(ObservationReadPage<'a>),
 }
 
 /// One typed successful response frame. The payload selects and fixes the echoed command ID.
@@ -141,6 +143,7 @@ pub enum DecodedCommandPayload {
     SpectrumConfigure(SpectrumConfigureRequest),
     SpectrumCapture(SpectrumCaptureRequest),
     SpectrumStream(SpectrumStreamRequest),
+    ObservationRead(ObservationReadRequest),
 }
 
 /// A strictly decoded kind-specific command header and its exact registered payload.
@@ -168,6 +171,7 @@ pub enum DecodedSuccessResponsePayload<'a> {
     SpectrumConfigured(SpectrumConfigured),
     SpectrumCaptured(SpectrumCaptureReply<'static>),
     SpectrumStreamed(SpectrumStreamReply<'static>),
+    ObservationRead(ObservationReadPage<'static>),
 }
 
 /// A strictly decoded response payload selected by its non-OK status or successful schema.
@@ -219,6 +223,7 @@ impl<'a> CommandPayload<'a> {
             Self::SpectrumConfigure(_) => MessageId::SpectrumConfigure,
             Self::SpectrumCapture(_) => MessageId::SpectrumCapture,
             Self::SpectrumStream(_) => MessageId::SpectrumStream,
+            Self::ObservationRead(_) => MessageId::ObservationRead,
         }
     }
 }
@@ -241,6 +246,7 @@ impl<'a> SuccessResponsePayload<'a> {
             Self::SpectrumConfigured(_) => MessageId::SpectrumConfigure,
             Self::SpectrumCaptured(_) => MessageId::SpectrumCapture,
             Self::SpectrumStreamed(_) => MessageId::SpectrumStream,
+            Self::ObservationRead(_) => MessageId::ObservationRead,
         }
     }
 }
@@ -487,6 +493,9 @@ impl ProtocolCodec {
             MessageId::SpectrumStream => DecodedCommandPayload::SpectrumStream(
                 self.decode_spectrum_stream_request(decoded.payload, header.tlv_count)?,
             ),
+            MessageId::ObservationRead => DecodedCommandPayload::ObservationRead(
+                self.decode_observation_read_request(decoded.payload, header.tlv_count)?,
+            ),
             _ => return Err(DecodeError::MessageKindMismatch),
         };
         Ok(DecodedTypedCommandFrame { header, payload })
@@ -558,6 +567,9 @@ impl ProtocolCodec {
             ),
             MessageId::SpectrumStream => DecodedSuccessResponsePayload::SpectrumStreamed(
                 self.decode_spectrum_stream_reply(decoded.payload, header.tlv_count)?,
+            ),
+            MessageId::ObservationRead => DecodedSuccessResponsePayload::ObservationRead(
+                self.decode_observation_read_page(decoded.payload, header.tlv_count)?,
             ),
             _ => return Err(DecodeError::MessageKindMismatch),
         };
@@ -737,6 +749,9 @@ fn write_command_payload(
         CommandPayload::SpectrumStream(value) => {
             crate::message_wire::write_spectrum_stream_request(sink, value)
         }
+        CommandPayload::ObservationRead(value) => {
+            crate::message_wire::write_observation_read_request(sink, value)
+        }
     }
 }
 
@@ -792,6 +807,9 @@ fn write_success_payload(
         }
         SuccessResponsePayload::SpectrumStreamed(value) => {
             crate::message_wire::write_spectrum_stream_reply(sink, value)
+        }
+        SuccessResponsePayload::ObservationRead(value) => {
+            crate::message_wire::write_observation_read_page(sink, value)
         }
     }
 }
@@ -1031,6 +1049,16 @@ mod tests {
             all: true,
             ids: Vec::new(),
         };
+        let observation_read = crate::ObservationReadRequest {
+            selections: vec![crate::ObservationReadSelection {
+                strip_id: session::StableId::parse("vocal").expect("strip"),
+                section: controls::TapSection::Inserts(
+                    session::StableId::parse("comp").expect("insert"),
+                ),
+                tap_id: 1,
+                channels: crate::ParameterChannel::Both,
+            }],
+        };
         let frames = [
             (
                 TypedCommandFrame {
@@ -1168,6 +1196,14 @@ mod tests {
                     payload: CommandPayload::SpectrumStream(&crate::SpectrumStreamRequest::Read),
                 },
                 MessageId::SpectrumStream,
+            ),
+            (
+                TypedCommandFrame {
+                    request_id: request_id(),
+                    expected_revision: crate::ExpectedRevision::Any,
+                    payload: CommandPayload::ObservationRead(&observation_read),
+                },
+                MessageId::ObservationRead,
             ),
         ];
         for (frame, expected_id) in &frames {
@@ -1388,6 +1424,26 @@ mod tests {
                     }),
                 },
                 MessageId::SpectrumStream,
+            ),
+            (
+                TypedSuccessResponseFrame {
+                    request_id: request_id(),
+                    revision: SessionRevision(7),
+                    payload: SuccessResponsePayload::ObservationRead(crate::ObservationReadPage {
+                        observed_sample: 512,
+                        rows: std::borrow::Cow::Owned(vec![crate::ObservationReadRow {
+                            status: crate::ObservationRowStatus::Unarmed,
+                            armed: false,
+                            arm_sample: 0,
+                            arm_tag: 0,
+                            window: None,
+                            left: None,
+                            right: None,
+                            unit: crate::ParameterUnit::Db,
+                        }]),
+                    }),
+                },
+                MessageId::ObservationRead,
             ),
         ];
         for (frame, expected_id) in &responses {

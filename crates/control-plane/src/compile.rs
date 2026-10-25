@@ -25,6 +25,9 @@ pub(crate) struct PreparedRuntime {
     /// `HostLiveControlHandles::effect_observations` order: kept, not dropped. Empty for a host
     /// whose preparer takes them for itself (the browser's).
     pub(crate) observations: Box<[host_core::EffectObservationHandle]>,
+    /// The plan's effect instances by stable key, for `OBSERVATION_READ` (#1586 D6): empty for an
+    /// adapter that does not serve the `Observe` edit.
+    pub(crate) observation_index: host_core::observation::ObservationIndex,
     pub(crate) plan: PreparedRenderPlan,
     /// The plan's one revision-gate handle, taken before the plan is published (#1502 D6).
     pub(crate) revision_gate: PlanRevisionGate,
@@ -464,6 +467,8 @@ pub(crate) fn capi_resources<A: ControlAdapter>(
         checked_layout::<u32>(observation.producers + 1)?,
         // #1676 batch 13b fold: the per-producer admission scratch, one count per producer.
         checked_layout::<crate::control::ObservationBatchCount>(observation.producers)?,
+        // #1586 D6: the `OBSERVATION_READ` row table of an adapter that serves the read.
+        checked_layout::<protocol::ObservationReadRow>(observation_row_count::<A>())?,
         checked_layout::<RenderDiagnosticSlot>(RENDER_DIAGNOSTIC_SLOTS)?,
         checked_layout::<u8>(RENDER_DIAGNOSTIC_CODE.len() * RENDER_DIAGNOSTIC_SLOTS)?,
         // ProtocolController and SessionControlProvider each retain their own telemetry config:
@@ -848,6 +853,75 @@ pub(crate) fn observation_handle_bytes(
         })
         .ok_or_else(arithmetic)
         .and_then(|bytes| u64::try_from(bytes).map_err(|_| failure(ResourceFault::Platform)))
+}
+
+/// The rows of an `OBSERVATION_READ` reply the session keeps (#1586 D6): one per selection the codec
+/// admits for an adapter that serves the read, none otherwise.
+const fn observation_row_count<A: ControlAdapter>() -> usize {
+    if A::OBSERVE_EDIT {
+        protocol::OBSERVATION_READ_MAXIMUM_SELECTIONS
+    } else {
+        0
+    }
+}
+
+/// The session's `OBSERVATION_READ` row table, at [`observation_row_count`] rows.
+fn observation_rows<A: ControlAdapter>()
+-> Result<Box<[protocol::ObservationReadRow]>, CompileFailure> {
+    const EMPTY: protocol::ObservationReadRow = protocol::ObservationReadRow {
+        status: protocol::ObservationRowStatus::Pending,
+        armed: false,
+        arm_sample: 0,
+        arm_tag: 0,
+        window: None,
+        left: None,
+        right: None,
+        unit: protocol::ParameterUnit::Db,
+    };
+    let mut rows = Vec::new();
+    rows.try_reserve_exact(observation_row_count::<A>())
+        .map_err(|_| failure(ResourceFault::Allocation))?;
+    rows.resize(observation_row_count::<A>(), EMPTY);
+    Ok(rows.into_boxed_slice())
+}
+
+/// The index of one plan's effect instances (#1586 D3, R1): one entry per producer, with the
+/// position of its reader handle in `observations` (`None` for an instance that declares no tap).
+/// Control thread.
+pub(crate) fn observation_index(
+    effects: &[host_core::EffectControlProducer],
+    observations: &[host_core::EffectObservationHandle],
+) -> Result<host_core::observation::ObservationIndex, CompileFailure> {
+    let mut entries = Vec::new();
+    entries
+        .try_reserve_exact(effects.len())
+        .map_err(|_| failure(ResourceFault::Allocation))?;
+    for producer in effects {
+        let handle = observations
+            .iter()
+            .position(|handle| {
+                handle.track_id == producer.track_id
+                    && handle.address.rack == producer.address.rack
+                    && handle.effect_id == producer.effect_id
+            })
+            .map(u32::try_from)
+            .transpose()
+            .map_err(|_| failure(ResourceFault::Platform))?;
+        entries.push(host_core::observation::ObservationIndexEntry {
+            strip_id: producer.track_id.clone(),
+            section: producer.address.rack,
+            effect_id: producer.effect_id.clone(),
+            handle,
+            effect: producer.descriptor,
+        });
+    }
+    // Two instances at one stable key would be a preparation fault: the session model has none.
+    host_core::observation::ObservationIndex::new(entries).map_err(|_| {
+        prepare_failure(PrepareDiagnostics::fixed(
+            host_core::PrepareRejection::Graph,
+            "host.observation.index",
+        ))
+    })
 }
 
 /// The observation rows of `effects`, the newest plan's producers, and the `handle_bytes` of the
@@ -1674,6 +1748,20 @@ pub(crate) fn prepare_runtime<A: ControlAdapter>(
     // #1584 D7: the observation readers stay with the plan's epoch, the reader of every tap an
     // `Observe` edit arms. Shrunk to their length first, so the charge below is the allocation.
     let observations = effect_observations.into_boxed_slice();
+    // #1586 D6, R1: the index of an adapter that serves `OBSERVATION_READ`, from the producers
+    // (every instance, so an instance with no tap reads as unbound) and the readers' positions.
+    let observation_index = if A::OBSERVE_EDIT {
+        observation_index(&effects, &observations)?
+    } else {
+        host_core::observation::ObservationIndex::default()
+    };
+    let observation_bytes = observation_handle_bytes(&observations)?
+        .checked_add(
+            observation_index
+                .retained_bytes()
+                .ok_or_else(|| failure(ResourceFault::Arithmetic))?,
+        )
+        .ok_or_else(|| failure(ResourceFault::Arithmetic))?;
     // #1587a R2: the plan's meter tables, built here, on the control thread, so its adoption
     // exchanges them by pointer. Only a control-plane meter delivery reads them.
     let meter_tables = if A::METER_DELIVERY {
@@ -1688,11 +1776,7 @@ pub(crate) fn prepare_runtime<A: ControlAdapter>(
         &prepared.inventory,
         prepared.report.effect_control_resources,
         prepared.report.route_control_resources,
-        observation_resources(
-            &effects,
-            observation_handle_bytes(&observations)?,
-            observation_slots_high_water,
-        )?,
+        observation_resources(&effects, observation_bytes, observation_slots_high_water)?,
         limits,
         strip_heap_bytes,
         capture_owners_high_water,
@@ -1743,6 +1827,7 @@ pub(crate) fn prepare_runtime<A: ControlAdapter>(
         meters,
         meter_tables,
         observations,
+        observation_index,
         plan,
         revision_gate,
         resources: PlanResources {
@@ -1881,6 +1966,7 @@ where
         meters,
         meter_tables,
         observations,
+        observation_index,
         plan,
         mut revision_gate,
         resources,
@@ -1984,6 +2070,9 @@ where
             // spectrum through them advertises them.
             provider_features: ProviderFeatures {
                 spectrum: A::SPECTRUM,
+                // #1586 R2: `OBSERVATION_READ` and bit 15 follow the `Observe` edit, so the
+                // adapter that serves one serves both.
+                observation: A::OBSERVE_EDIT,
                 ..ProviderFeatures::ALL
             },
             // #1386 D3: an adapter with a document transport serves `SESSION_REPLACE` through this
@@ -2022,7 +2111,7 @@ where
             capi,
             revision_gate,
         )
-        .with_observations(observations),
+        .with_observations(observations, observation_index),
         pending_providers,
         retired_providers,
         publisher,
@@ -2034,6 +2123,7 @@ where
         source_frames_discarded: 0,
         decode_fields: decode_fields.into_boxed_slice(),
         response_scratch: boxed_zeroed(limits.maximum_control_frame_bytes)?,
+        observation_rows: observation_rows::<A>()?,
         shared: Arc::clone(&shared),
         observed_render_sequence: 0,
         counter_snapshot_sequence: 0,
