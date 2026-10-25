@@ -442,7 +442,8 @@ The route live-lane filter is unobservable for an armed route (the arm settles t
 carried, ducked lane holds); it decides only limit (2)'s case, and no test pins it.
 
 **Tests (red first on a mutant, each).** Gate 4
-`a_restarted_strip_carries_nothing_before_its_fader_on_every_width` (host-core); the Waiting-arm assertion in `a_chain_restarted_strip_still_fades`; gates 1 (with 8),
+`a_restarted_strip_carries_nothing_before_its_fader_on_every_width` (host-core); the Waiting-arm
+assertion in `a_chain_restarted_strip_still_fades`; gates 1 (with 8),
 2, 3 and 6 in `strip_transitions.rs`: `a_restarted_strip_ducks_then_fades_in_after_s`,
 `an_untouched_strip_plays_through_a_duck_swap`,
 `every_restarting_edit_ducks_and_a_send_or_value_edit_does_not`,
