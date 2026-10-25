@@ -7297,64 +7297,202 @@ fn the_automation_fixture_renders_alike_on_both_hosts_across_one_session_seek() 
     }
 }
 
-/// #1386 gate 6 (root decision, attempt 2): the browser has no document transport until #1697, so
-/// it neither advertises `SESSION_REPLACE` (`0x0013`) nor serves it: the frame is `UNAVAILABLE`.
-/// The C ABI advertises it, and the same frame with no document beside it gets the core's
-/// `session.replace.document_length`. Neither host commits anything: both keep the same control
-/// rows, document and rendered blocks.
+impl CAbi {
+    /// Submit one command frame with `document` beside it, through
+    /// `miso_engine_v1_submit_document_command` (#1386 D7), and answer as [`Self::send_raw`] does.
+    fn send_document_raw(&mut self, bytes: &[u8], document: &[u8]) -> (u32, Vec<u8>) {
+        let mut response = vec![0_u8; 4_096];
+        let mut out = BytesOut {
+            struct_size: BYTES_OUT_SIZE,
+            reserved0: 0,
+            data: response.as_mut_ptr(),
+            capacity_bytes: response.len() as u64,
+            required_bytes: 0,
+        };
+        // SAFETY: The session is live and used by this thread alone; the buffers are owned.
+        let code = unsafe {
+            capi::miso_engine_v1_submit_document_command(
+                self.session,
+                bytes.as_ptr(),
+                bytes.len() as u64,
+                document.as_ptr(),
+                document.len() as u64,
+                &mut out,
+            )
+        };
+        response.truncate(out.required_bytes as usize);
+        if code != C_RESULT_OK {
+            response = self.last_error();
+        }
+        self.drain_reliable();
+        (code, response)
+    }
+}
+
+/// #1697 gate 1 (#1386 gate 6): the same `SESSION_REPLACE` frames and documents through the C
+/// ABI's `miso_engine_v1_submit_document_command` and the browser's document entry
+/// (`control_command_with_document`, which `miso_engine_web_v1_control_command` runs with the
+/// document `miso_engine_web_v1_replace_document_ptr` staged): a rebuild, a live change, the
+/// identical document (`Unchanged`) and a refusal (a digest that is not the document's). Both
+/// hosts advertise the command, answer the same reply bytes (one request ID, so the whole frame),
+/// keep the same control rows and `SESSION_SNAPSHOT_GET` bytes, and render the same bits.
 ///
-/// Test value: red if the browser advertises a command every call of which is refused, if either
-/// host answers otherwise (a host of its own replace code), or if a host commits anything for a
-/// frame whose document never came.
+/// Test value: red if the browser does not pass the document beside the frame (it then answers
+/// `session.replace.document_length`), does not advertise the command, or runs a replace of its
+/// own that answers other bytes, commits another revision or renders other blocks than the C ABI.
 #[test]
-fn a_session_replace_is_unavailable_on_the_browser_and_refused_without_its_document_on_the_c_abi() {
+fn a_session_replace_answers_and_renders_alike_on_both_hosts() {
     use sha2::{Digest, Sha256};
     for rate in [44_100, 48_000] {
         let model = model_at(rate);
-        let mut next = model.clone();
-        next.tracks[0].fader.left_db = -3.0;
-        let document = canonical_session_json(&next).expect("a valid document");
         let mut browser = Rig::new(&model);
         let mut c_abi = CAbi::new(&model);
-        same_blocks(&mut browser, &mut c_abi, 0..2, "before the replace");
-        let before_b = dump(|payload, expected| browser.command(payload, expected));
-        let before_c = dump(|payload, expected| c_abi.send(payload, expected));
-        assert_eq!(before_b, before_c);
-        // One request ID above both hosts' frontiers: the browser's encoder is advanced to it and
-        // the C ABI's allocator set to it, so both hosts see the same frame bytes and their later
-        // requests stay new.
-        let payload = || {
-            CommandPayload::SessionReplace(protocol::SessionReplaceRequest {
-                document_bytes: u32::try_from(document.len()).expect("length"),
-                document_sha256: Sha256::digest(document.as_bytes()).into(),
-            })
+        same_blocks(&mut browser, &mut c_abi, 0..2, "before the replaces");
+        // Each replace is one frame both hosts receive byte for byte: one request ID above both
+        // hosts' frontiers (the browser's encoder is advanced to it, the C ABI's allocator set to
+        // it), so their later requests stay new.
+        let replace = |browser: &mut Rig,
+                       c_abi: &mut CAbi,
+                       document: &[u8],
+                       digest: [u8; 32],
+                       label: &str|
+         -> Vec<u8> {
+            let payload = || {
+                CommandPayload::SessionReplace(protocol::SessionReplaceRequest {
+                    document_bytes: u32::try_from(document.len()).expect("length"),
+                    document_sha256: digest,
+                })
+            };
+            let expected = ExpectedRevision::Exact(SessionRevision(browser.revision));
+            let frame = loop {
+                let frame = browser.encode(payload(), expected);
+                let request = u64::from_le_bytes(frame[24..32].try_into().expect("request ID"));
+                if request > c_abi.request {
+                    c_abi.request = request;
+                    break frame;
+                }
+            };
+            let length = u32::try_from(frame.len()).expect("frame length");
+            browser
+                .host
+                .control_request_mut(length)
+                .expect("the control request staging")[..frame.len()]
+                .copy_from_slice(&frame);
+            let b_code = browser
+                .host
+                .control_command_with_document(length, document, None);
+            let b_reply = browser.host.control_response().to_vec();
+            drain_events(&mut browser.host);
+            let (c_code, c_reply) = c_abi.send_document_raw(&frame, document);
+            assert_eq!(
+                (b_code, c_code),
+                (0, C_RESULT_OK),
+                "{rate} Hz {label}: both entries answer"
+            );
+            assert_eq!(b_reply, c_reply, "{rate} Hz {label}: the same reply bytes");
+            let mut fields = [0_u16; 64];
+            if let DecodedTypedResponseFrame::Success { header, .. } = ProtocolCodec::default()
+                .decode_typed_response(&b_reply, &mut DecodeScratch::new(&mut fields))
+                .expect("a typed reply")
+            {
+                browser.revision = header.revision.0;
+                c_abi.revision = header.revision.0;
+            }
+            b_reply
         };
-        let expected = ExpectedRevision::Exact(SessionRevision(browser.revision));
-        let frame = loop {
-            let frame = browser.encode(payload(), expected);
-            let request = u64::from_le_bytes(frame[24..32].try_into().expect("request ID"));
-            if request > c_abi.request {
-                c_abi.request = request;
-                break frame;
+        let path = |reply: &[u8]| {
+            let mut fields = [0_u16; 64];
+            match ProtocolCodec::default()
+                .decode_typed_response(reply, &mut DecodeScratch::new(&mut fields))
+                .expect("a typed reply")
+            {
+                DecodedTypedResponseFrame::Success {
+                    payload: DecodedSuccessResponsePayload::SessionReplaced(applied),
+                    ..
+                } => Ok(applied.edit_path),
+                DecodedTypedResponseFrame::NonOk { payload, .. } => Err(payload
+                    .diagnostics
+                    .into_iter()
+                    .map(|diagnostic| diagnostic.code)
+                    .collect::<Vec<_>>()),
+                DecodedTypedResponseFrame::Success { .. } => panic!("a replace reply"),
             }
         };
-        let (b_code, b_reply) = browser.send_frame(&frame);
-        let (c_code, c_reply) = c_abi.send_raw(&frame);
-        assert_eq!(
-            (b_code, c_code),
-            (0, C_RESULT_OK),
-            "{rate} Hz: both entries answer"
+        let digest = |bytes: &[u8]| -> [u8; 32] { Sha256::digest(bytes).into() };
+
+        // A rebuild: a strip's input delay moves the plan.
+        let mut delayed = model.clone();
+        delayed.tracks[0].builtins.left.delay_samples = 32;
+        delayed.tracks[0].builtins.right.delay_samples = 32;
+        let document = canonical_session_json(&delayed).expect("a valid document");
+        let reply = replace(
+            &mut browser,
+            &mut c_abi,
+            document.as_bytes(),
+            digest(document.as_bytes()),
+            "rebuild",
         );
-        let status = |reply: &[u8]| u16::from_le_bytes([reply[18], reply[19]]);
         assert_eq!(
-            status(&b_reply),
-            protocol::StatusCode::Unavailable as u16,
-            "{rate} Hz: browser"
+            path(&reply),
+            Ok(EditPath::Rebuild),
+            "{rate} Hz: the rebuild"
         );
-        assert!(matches!(
-            decode_verdict(&c_reply),
-            Verdict::Refused { codes, .. } if codes == ["session.replace.document_length"]
-        ));
+        same_blocks(&mut browser, &mut c_abi, 2..6, "after the rebuild");
+
+        // A live change: one fader.
+        let mut faded = delayed.clone();
+        faded.tracks[0].fader.left_db = -3.0;
+        let document = canonical_session_json(&faded).expect("a valid document");
+        let reply = replace(
+            &mut browser,
+            &mut c_abi,
+            document.as_bytes(),
+            digest(document.as_bytes()),
+            "live",
+        );
+        assert_eq!(
+            path(&reply),
+            Ok(EditPath::Live),
+            "{rate} Hz: the live change"
+        );
+        same_blocks(&mut browser, &mut c_abi, 6..10, "after the live change");
+
+        // The identical document commits nothing.
+        let committed = browser.revision;
+        let reply = replace(
+            &mut browser,
+            &mut c_abi,
+            document.as_bytes(),
+            digest(document.as_bytes()),
+            "unchanged",
+        );
+        assert_eq!(
+            path(&reply),
+            Ok(EditPath::Unchanged),
+            "{rate} Hz: unchanged"
+        );
+        assert_eq!(
+            browser.revision, committed,
+            "{rate} Hz: unchanged keeps the revision"
+        );
+
+        // A refusal: the frame's digest is not the document's.
+        let mut refused = faded.clone();
+        refused.tracks[0].fader.left_db = -9.0;
+        let refused = canonical_session_json(&refused).expect("a valid document");
+        let reply = replace(
+            &mut browser,
+            &mut c_abi,
+            refused.as_bytes(),
+            digest(document.as_bytes()),
+            "refusal",
+        );
+        assert_eq!(
+            path(&reply),
+            Err(vec![String::from("session.replace.document_digest")]),
+            "{rate} Hz: the refusal"
+        );
+
         let advertised = |reply: Vec<u8>| {
             let mut fields = [0_u16; 64];
             let DecodedTypedResponseFrame::Success {
@@ -7374,18 +7512,23 @@ fn a_session_replace_is_unavailable_on_the_browser_and_refused_without_its_docum
                 .any(|id| u16::from_le_bytes([id[0], id[1]]) == 0x0013)
         };
         let get = || CommandPayload::CapabilitiesGet;
-        assert!(!advertised(browser.command(get(), ExpectedRevision::Any)));
+        assert!(advertised(browser.command(get(), ExpectedRevision::Any)));
         assert!(advertised(c_abi.send(get(), ExpectedRevision::Any)));
         let after_b = dump(|payload, expected| browser.command(payload, expected));
+        let mut committed = faded.clone();
+        committed.revision = browser.revision;
         assert_eq!(
-            after_b.1, before_b.1,
-            "{rate} Hz: the document is unchanged"
+            after_b.1,
+            canonical_session_json(&committed)
+                .expect("a valid document")
+                .as_bytes(),
+            "{rate} Hz: the snapshot is the last committed document"
         );
         assert_eq!(
             after_b,
             dump(|payload, expected| c_abi.send(payload, expected))
         );
-        same_blocks(&mut browser, &mut c_abi, 2..6, "after the refusal");
+        same_blocks(&mut browser, &mut c_abi, 10..14, "after the refusal");
     }
 }
 
