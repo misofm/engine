@@ -251,3 +251,33 @@ Checked against `12d4a4f9d`.
   `miso_engine_web_v1_declare_discontinuity` before it. Gate 2's added rows become: the handler
   calls no declaration export for a session seek message, once per message.
 - **Dependencies.** #1323 is no longer one for this slice.
+
+## Decision record (attempt 1, single mode, 2026-10-25)
+
+Scope note `scope/1644.md` (root accepts its decisions); the Worker arm of D1/D2 and gates 1/2's
+`worker` legs stay #1332/#1387's carry.
+
+- **R1 (D1 amended).** One message `miso.session-seek.v1 { tag, requestId, generation,
+  sourceFrame, anchorSample }`, exact fields, all `bigint`. `anchorSample === -1n` is a plain seek
+  (`session_seek`, which declares the discontinuity itself); any other value calls
+  `session_seek_at`. The wrapper's `seekSession({ generation, frame, anchorSample? })` maps
+  `frame` to `sourceFrame` and an absent anchor to `-1n`. The reply is `{ tag, requestId, result,
+  generation }`; a refusal is not sticky, a malformed message is sticky `invalidArgument` and calls
+  no export (the per-source seek's rule).
+- **R2 (D3, gate 3 amended).** `BrowserEngine.seek` refuses a `frame` that is not a non-negative
+  bigint at most `Number.MAX_SAFE_INTEGER` with `MisoUsageError`, not `RangeError`; a refused seek
+  rejects with `MisoEngineError` (phase `source`, the result's code).
+- **D2 realm value.** `MisoSabFeedProcessor extends` the engine processor, so
+  `lastSessionSeekGeneration` is an instance field (undefined = none), set on OK before the reply
+  and cleared on dispose (R4). The rule runs in `applySharedSeek`, so it covers the render drain
+  and the `prepare-seek` port path alike.
+- **Table.** `render-thread-exports.json` rows `session_seek` and `session_seek_at`, `wrapped:
+  false`, single-mode control work in `receiveSessionSeek`.
+- **Gate 4's home.** The pump case is in `sdk/test/browser-pcm-evals.mjs` (the scope note's
+  authorized file), importing `hosts/host-web/web/stem-store/pcm-pump.js`.
+
+Evidence: every new case red on a mutant (14 mutants: drain seeks the applied epoch, drain
+swallows every epoch, anchored message calls the plain export, no export call, declaration first,
+two unsettled, malformed reaches the export, refusal records the generation, producers before the
+reply, producers on a refusal, stale default generation, unsafe frame posted, bigint frame to a
+producer, pump ignores the generation). No rendered bit moves: `process()` is untouched.
