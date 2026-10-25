@@ -193,16 +193,46 @@ pub fn bounded_spsc_retained_payload<T>(
 // SAFETY: the only shared operations are atomics and slot access governed by SPSC cursor order.
 unsafe impl<T: Send> Sync for Ring<T> {}
 
+// REALTIME_POLICY_BEGIN
+impl<T> Ring<T> {
+    /// The slot at `cursor`, without a bounds check (#2041).
+    ///
+    /// The optimiser cannot prove a cursor is below `slots.len()`, so a checked `slots[cursor]`
+    /// inlined a `panic_bounds_check` that cannot fire into every push and pop on the render
+    /// thread.
+    ///
+    /// # Safety
+    ///
+    /// `cursor < self.slots_len`. `slots_len == slots.len()` from construction and neither field
+    /// is ever written again; every ring cursor starts at 0 and advances only through
+    /// `wrap_increment(cursor, slots_len)`, which returns 0 at `slots_len`, so every cursor the
+    /// endpoints hold or publish meets it.
+    #[inline(always)]
+    unsafe fn slot(&self, cursor: usize) -> &UnsafeCell<MaybeUninit<T>> {
+        debug_assert!(
+            cursor < self.slots.len(),
+            "spsc cursor {cursor} is outside its {} slots",
+            self.slots.len()
+        );
+        // SAFETY: the caller guarantees `cursor < slots_len == slots.len()`.
+        unsafe { self.slots.get_unchecked(cursor) }
+    }
+}
+// REALTIME_POLICY_END
+
 impl<T> Drop for Ring<T> {
     fn drop(&mut self) {
         let mut cursor = sync::load_exclusive(&mut self.consumer.0);
         let producer = sync::load_exclusive(&mut self.producer.0);
         let slots_len = self.slots_len;
         while cursor != producer {
+            // SAFETY: `cursor` starts at the consumer cursor and advances only through
+            // `wrap_increment(cursor, slots_len)`, so it stays below `slots_len`.
+            let cell = unsafe { self.slot(cursor) };
             // SAFETY: endpoint destruction is complete before the final `Arc<Ring<T>>` drop, and
             // every cursor position in the half-open consumer..producer range is initialized
             // exactly once. No producer or consumer can access a slot concurrently here.
-            sync::with_mut(&self.slots[cursor], |slot| unsafe {
+            sync::with_mut(cell, |slot| unsafe {
                 (*slot).assume_init_drop();
             });
             cursor = wrap_increment(cursor, slots_len);
@@ -478,8 +508,11 @@ impl<T: Send + 'static> PushPermit<'_, T> {
     /// Write and publish the reserved item exactly once.
     pub(crate) fn commit(self, value: T) {
         let local = self.producer.local;
+        // SAFETY: the producer cursor advances only through `wrap_increment`, so
+        // `local < slots_len`.
+        let cell = unsafe { self.producer.ring.slot(local) };
         // SAFETY: `try_reserve` acquired free capacity and only the unique producer owns this slot.
-        sync::with_mut(&self.producer.ring.slots[local], |slot| unsafe {
+        sync::with_mut(cell, |slot| unsafe {
             (*slot).write(value);
         });
         self.publish();
@@ -553,7 +586,10 @@ impl<T: Copy + Send + 'static> PushPermit<'_, T> {
     /// Change the reserved, initialized slot in place, then publish it exactly once.
     fn commit_in_place(self, write: impl FnOnce(&mut T)) {
         let local = self.producer.local;
-        sync::with_mut(&self.producer.ring.slots[local], |slot| {
+        // SAFETY: the producer cursor advances only through `wrap_increment`, so
+        // `local < slots_len`.
+        let cell = unsafe { self.producer.ring.slot(local) };
+        sync::with_mut(cell, |slot| {
             // SAFETY: `try_reserve` acquired free capacity and only the unique producer owns this
             // slot. An `InPlaceProducer` exists only for a `bounded_spsc_prefilled` ring, whose
             // every slot was initialized at construction; every later write stores a whole `T`
@@ -623,10 +659,14 @@ impl<T: Send + 'static> Consumer<T> {
         } else {
             self.local + index
         };
+        // SAFETY: `local < slots_len` (the consumer cursor advances only through
+        // `wrap_increment`) and `index < slots_len`, so both arms of the wrap above give
+        // `slot < slots_len`.
+        let cell = unsafe { ring.slot(slot) };
         // SAFETY: `slot` is in `[local, producer)` of the producer cursor loaded with `Acquire`
         // above, so its push's `Release` publication happened-before this read and the producer
         // cannot write it again until this consumer pops it, which needs `&mut self`.
-        Some(sync::with(&ring.slots[slot], |slot| unsafe {
+        Some(sync::with(cell, |slot| unsafe {
             (*slot).assume_init_ref()
         }))
     }
@@ -649,10 +689,11 @@ impl<T: Send + 'static> Consumer<T> {
                 empty_count: self.empty,
             });
         }
+        // SAFETY: the consumer cursor advances only through `wrap_increment`, so
+        // `local < slots_len`.
+        let cell = unsafe { self.ring.slot(self.local) };
         // SAFETY: producer release + this acquire publishes initialization; only consumer reads it.
-        let value = sync::with_mut(&self.ring.slots[self.local], |slot| unsafe {
-            (*slot).assume_init_read()
-        });
+        let value = sync::with_mut(cell, |slot| unsafe { (*slot).assume_init_read() });
         let next = wrap_increment(self.local, self.ring.slots_len);
         self.ring.consumer.0.store(next, Ordering::Release);
         self.local = next;

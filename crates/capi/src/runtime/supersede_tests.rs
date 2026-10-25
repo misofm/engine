@@ -379,6 +379,12 @@ fn a_refused_replacement_restores_the_withdrawn_candidate() {
 /// Test value: red if the panic drops the withdrawn candidate: T1's acked revision then never
 /// renders, T3 promotes the lost epoch as adopted, and the rings the producers feed after the seek
 /// are not the ones render reads, so they fill.
+///
+/// #2044: the same run with T2 panicking just after the rebuild publishes the primed schedule,
+/// before its commit: red if that publication (or any later step that can panic) runs after the
+/// protocol commit, because the controller then holds T2's revision and model while T1's
+/// candidate renders. Then a rebuild that withdrew nothing panics there: red if the report lock is
+/// held across that stretch, because the panic poisons it and the session never services again.
 #[test]
 fn a_rebuild_that_panics_after_the_withdrawal_restores_the_candidate() {
     let model = stateless_session(48_000);
@@ -406,7 +412,7 @@ fn a_rebuild_that_panics_after_the_withdrawal_restores_the_candidate() {
             assert_eq!(report.accepted_frames, 128, "block {block}");
         }
     };
-    let run = |panics: bool| {
+    let run = |panics: Option<TestStructuralFaultPhase>| {
         control_plane::test_reset_lifecycle_observer();
         let mut children = compile(&model, limits());
         submit_direct(&mut children, &[FIXTURE], 0);
@@ -414,12 +420,16 @@ fn a_rebuild_that_panics_after_the_withdrawal_restores_the_candidate() {
         commit(&mut children, 1, 42, &first);
         submit_direct(&mut children, &[ADDED], 0);
         submit_direct(&mut children, &[FIXTURE, ADDED], 1);
-        if panics {
+        if let Some(phase) = panics {
             let epoch = children.session.test_pending_providers()[0].test_epoch();
-            children.session.test_set_structural_faults([
-                Some(TestStructuralFaultPhase::PanicAfterWithdrawal),
-                None,
-            ]);
+            let committed = children
+                .session
+                .committed_session()
+                .normalized_model()
+                .clone();
+            children
+                .session
+                .test_set_structural_faults([Some(phase), None]);
             let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 children
                     .session
@@ -432,11 +442,16 @@ fn a_rebuild_that_panics_after_the_withdrawal_restores_the_candidate() {
                 (1, 1),
                 "the withdrawn candidate is republished"
             );
-            assert_eq!(revision(&children), 43, "the revision is T1's");
+            assert_eq!(revision(&children), 43, "{phase:?}: the revision is T1's");
+            assert_eq!(
+                children.session.committed_session().normalized_model(),
+                &committed,
+                "{phase:?}: the committed model is T1's"
+            );
             assert_eq!(
                 children.session.test_pending_providers()[0].test_epoch(),
                 epoch,
-                "T1's candidate stays pending with its own epoch"
+                "{phase:?}: T1's candidate stays pending with its own epoch"
             );
         }
         let (mut blocks, next) =
@@ -458,13 +473,12 @@ fn a_rebuild_that_panics_after_the_withdrawal_restores_the_candidate() {
         assert!(children.session.test_pending_providers().is_empty());
         drop(children);
         assert_balanced(
-            if panics { "panicked" } else { "reference" },
+            &format!("{panics:?}"),
             control_plane::test_lifecycle_counters(),
         );
         blocks
     };
-    let reference = run(false);
-    let panicked = run(true);
+    let reference = run(None);
     assert!(
         reference
             .last()
@@ -473,10 +487,44 @@ fn a_rebuild_that_panics_after_the_withdrawal_restores_the_candidate() {
             .any(|sample| *sample != 0.0),
         "the compared blocks play"
     );
-    assert_eq!(reference.len(), panicked.len(), "the same block count");
-    for (block, (actual, expected)) in panicked.iter().zip(&reference).enumerate() {
-        assert_eq!(bits(actual), bits(expected), "block {block}");
+    for phase in [
+        TestStructuralFaultPhase::PanicAfterWithdrawal,
+        TestStructuralFaultPhase::PanicAtPrimedPublication,
+    ] {
+        let panicked = run(Some(phase));
+        assert_eq!(
+            reference.len(),
+            panicked.len(),
+            "{phase:?}: the same block count"
+        );
+        for (block, (actual, expected)) in panicked.iter().zip(&reference).enumerate() {
+            assert_eq!(bits(actual), bits(expected), "{phase:?}: block {block}");
+        }
     }
+    // A rebuild that withdrew nothing and panics before its commit leaves no lock poisoned: the
+    // session services, reports its resources and commits the same edit next.
+    control_plane::test_reset_lifecycle_observer();
+    let mut children = compile(&model, limits());
+    submit_direct(&mut children, &[FIXTURE], 0);
+    render_direct(&mut children, 0);
+    children.session.test_set_structural_faults([
+        Some(TestStructuralFaultPhase::PanicAtPrimedPublication),
+        None,
+    ]);
+    let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        children.session.command(&transaction(1, 42, &first), 4_096)
+    }));
+    assert!(caught.is_err(), "T1 panics");
+    assert_eq!(revision(&children), 42, "nothing was committed");
+    children.session.service().expect("the session services");
+    let _ = children.plan.resources();
+    commit(&mut children, 2, 42, &first);
+    submit_direct(&mut children, &[ADDED], 0);
+    submit_direct(&mut children, &[FIXTURE, ADDED], 1);
+    feed_and_render_until_direct(&mut children, &[FIXTURE, ADDED], 1, 43);
+    children.session.service().expect("service");
+    drop(children);
+    assert_balanced("withdrew nothing", control_plane::test_lifecycle_counters());
 }
 
 /// A plan's graph bytes and its compiled model's bytes.
