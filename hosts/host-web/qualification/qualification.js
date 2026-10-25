@@ -954,13 +954,13 @@ async function runObservationRun(createHost, sessionDocument, armed) {
 /// (batch-verdict 2, B2; root 2026-10-12). The page declares this plan and nothing else may resume a
 /// real `AudioContext`: `run.mjs` clicks exactly these controls under one deadline and fails by name
 /// when the page resumed a context any other way, offered another control, or did not offer one.
-/// The two SDK controls belong to `sdk-response-entry.ts`'s collection and hop workloads, which run
-/// first and only when the SDK qualification does; the last is the unsubscribe run's one
+/// The three SDK controls belong to `sdk-response-entry.ts`'s live track-response, collection and
+/// hop workloads, which run first and only when the SDK qualification does; the last is the unsubscribe run's one
 /// [`resumeThroughClick`] button (#1535).
 export function resumeClickPlan(sdkEnabled) {
   if (!WebAssembly.validate(SIMD128_PROBE)) return [];
   return [
-    ...(sdkEnabled ? ["#spectrum-collection-resume", "#spectrum-hop-resume"] : []),
+    ...(sdkEnabled ? ["#track-response-resume", "#spectrum-collection-resume", "#spectrum-hop-resume"] : []),
     resumeControlSelector(UNSUBSCRIBE_RESUME),
   ];
 }

@@ -191,10 +191,10 @@ SDK public behaviour changes (record them in the changelog with the PR):
 3. A headless query no longer returns the state before the next render: it reads the state the
    next block applied (gate 2). A headless `subscribeTrackResponse` and `pump()` settle only when
    the app renders.
-4. Headless; the browser follows in #1579b. `rackValue` is the decision-17 section code: input
+4. Both engines (the browser since #1579b). `rackValue` is the decision-17 section code: input
    `4`, console `5`, inserts `2` (was 0, 4, 2). Rack names do not change. `snapshotToken` is the
    request tag; `resultBytes` the event frame's length; `enabledLeft`/`enabledRight` have one entry
-   per section the core reports. The browser engine keeps the capture record's values until #1579b.
+   per section the core reports.
 5. A refusal raises `MisoEngineError` whose `code` is the core's diagnostic (for example
    `response.reply_too_large`, was `refusedBudget`) and whose `result` is the mapped result class.
    `responseRefusalResult` now maps `backpressure` to `backpressure` (was `internal`).
@@ -241,3 +241,61 @@ Review fold-in after attempt 2 (root, 2026-10-25):
   eval holds one corrupt frame per rule.
 - A query made from an event callback runs a nested event drain (documented on
   `queryTrackResponse`).
+
+## Decision record (#1579b, 2026-10-25)
+
+- **Seam.** The browser engine's `queryTrackResponse` and `responseRead` are one
+  `TrackResponseRequester` over `host.control` and `host.onControlEvent`, with request IDs from the
+  host's one transaction-queue allocator; `close()` rejects every pending and queued query at once.
+  `responseRead` returns the decoded result, and the managed owner publishes only when
+  `sameTrackResponseResult` (every member field, every curve bit) says it changed (D4). Retained
+  bytes are the result's frame bytes (no state key any more).
+- **Deleted.** `BrowserTrackResponse`, `createTrackResponse`, the Worker's `track-response-*`
+  messages, `TrackResponseModule`, `parseTrackResponseState`, `sameTrackResponseState`,
+  `TrackResponseObservedState`, `TrackResponseRead`, `trackResponseStateOf`,
+  `trackResponseReadOf`, `TrackResponseCapture`, `TrackResponseHost`, `TrackResponseHostRequest`
+  and `trackResponseHostRequest`, with their tests. The worklet's capture and the
+  `track_response_*` exports stay for #1580.
+- **`ProtocolEvent`.** No kind for `RESPONSE_READY`: it is the answer to one query, read by that
+  query's tag, as a reply is; `onEvent` keeps skipping it on both engines.
+- **Qualification (root ruling, 2026-10-25).** A capture needs a rendered block after the
+  query, and Firefox has no `OfflineAudioContext.suspend()`, so the browser's track-response rows
+  run on a live `AudioContext` (workload `track-response-live`) started by one more declared
+  trusted click, `#track-response-resume`. `resumeClickPlan` (`qualification.js`) lists it first,
+  and the `resume-clicks` gate in `run.mjs` goes from 3 to 4 declared clicks: a new click for a
+  new row, not a weaker gate. `sdk-live-eq-cuts` keeps its PCM parity on its offline engine
+  (`live-eq-cuts`), with the edits made before the render. Its capture clause moved to the live
+  row's changed publication as `capturedSample > appliedAtSample` (root ruling on attempt 1). The
+  core stamps a capture with its block's exclusive end, so the block that applied the edit reports
+  `appliedAt + 128`, and equality would mean a read of the committed model. `appliedAtSample` is
+  the edit's watermark sample, and the row requires it to be present and positive. The mutation
+  `sdk-track-response-early` sets it to the captured sample (the boundary case). Gate 4 now asserts that no response
+  Worker is created, that renders with no edit publish nothing, and that an edit gives exactly one
+  publication. The one-shot row asserts that two concurrent queries settle in turn, and that the
+  section codes are 4, 5, 2. The continuous-spectrum row arms its response query before its
+  offline render and reads it afterwards. New `--self-test-mutations` rows:
+  `sdk-track-response-{worker,unchanged,once,early}` and `sdk-live-response-{serialized,sections}`.
+- **Paths.** Root added `hosts/host-web/qualification/qualification.js` (`resumeClickPlan` only)
+  to this slice's paths. Gate 1's browser leg is the Node stand-in in `live-response-evals.mjs`
+  plus the real-browser rows on `observation-session.json`; root accepted this.
+- **Requester.** A late tag reply whose event was read first is not held: the requester records the
+  tags it reads while a late reply is outstanding (`live-response-evals.mjs`, fake transport).
+- **Barrel.** The `@ts-expect-error` rows for the deleted names left `sdk/test/barrel-surface.ts`.
+  Those names no longer exist, so a row there defends no re-export.
+
+SDK public behaviour changes of #1579b (browser engine; add them to the changelog with the PR):
+
+12. `queryTrackResponse` settles after the next rendered block. A suspended or never-started
+    context rejects it at `responseLimits.requestDeadlineMs` (default 5 s), with `MisoUsageError`
+    "exceeded its deadline".
+    The managed owner's shared poll runs its response jobs one after another, each waiting for one
+    rendered block, so with N response jobs one poll waits at least N quanta before the spectrum
+    refresh in the same poll runs.
+13. Concurrent queries run one at a time, in call order. Before, the second was refused "already in
+    flight".
+14. A failed or disposed host rejects every pending and queued query at once with a lifecycle
+    `MisoEngineError` (`the browser host no longer owns a ready live response boundary`), found
+    by a host status read every 20 ms while a query is pending. `close()` rejects them at once
+    with `MisoUsageError`.
+15. `rackValue`, `snapshotToken`, `resultBytes` and the masks are the headless engine's (change 4).
+
