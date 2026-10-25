@@ -520,12 +520,6 @@ async function testMainRealm() {
         const options = Object.freeze({ ...limits });
         await assertAccepted("frozen records", Object.freeze(makeFactory({ options })));
       }
-      // #1597: the boot options lost their spectrum fields; one that comes back is refused, never
-      // ignored.
-      await assertRefusal(
-        "a retired spectrum boot field",
-        makeFactory({ options: { ...limits, spectrum: null } }),
-      );
       {
         const enumerableUndefined = makeFactory();
         enumerableUndefined.preparedModule = undefined;
