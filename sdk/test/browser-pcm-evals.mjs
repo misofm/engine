@@ -131,8 +131,8 @@ async function settleWithin(promise, milliseconds = 50) {
 
 test("MSB1 layout and writer preserve frozen bytes, headers, counters and reuse", () => {
   const expected = {
-    [1]: { bytes: 360, pcm: 320 },
-    [2]: { bytes: 400, pcm: 320 },
+    [1]: { bytes: 376, pcm: 336 },
+    [2]: { bytes: 416, pcm: 336 },
   };
   for (const channels of [1, 2]) {
     const sourceId = channels === 1 ? "mono" : "stereo";
@@ -140,16 +140,17 @@ test("MSB1 layout and writer preserve frozen bytes, headers, counters and reuse"
     assert.equal(ring.byteLength, expected[channels].bytes);
     assert.equal(msb1RingBytes(channels, 5, 2), expected[channels].bytes);
     const c = controls(ring);
-    assert.equal(MSB1_CONTROL_BYTES, 128);
-    assert.equal(MSB1_ID_OFFSET, 128);
+    // Issue #1297b D2: the anchor i64 at 128 (-1: none), the ID at 144, the headers at 272.
+    assert.equal(MSB1_CONTROL_BYTES, 144);
+    assert.equal(MSB1_ID_OFFSET, 144);
     assert.equal(MSB1_ID_CAPACITY, 128);
-    assert.equal(MSB1_HEADER_OFFSET, 256);
+    assert.equal(MSB1_HEADER_OFFSET, 272);
     assert.equal(MSB1_SLOT_HEADER_BYTES, 32);
-    assert.deepEqual([...c], [
-      0x4d534231, 1, 2, channels, 5, 256, expected[channels].pcm, sourceId.length,
-      0, 0, 1, ...Array(21).fill(0),
+    assert.deepEqual([...c.slice(0, 28)], [
+      0x4d534231, 1, 2, channels, 5, 272, expected[channels].pcm, sourceId.length,
+      0, 0, 1, ...Array(17).fill(0),
     ]);
-    assert.deepEqual([...c.slice(28)], [0, 0, 0, 0]);
+    assert.deepEqual([...c.slice(28)], [0, 0, 0, 0, -1, -1, 0, 0]);
     assert.deepEqual([...new Uint8Array(ring, MSB1_ID_OFFSET, sourceId.length)], [...new TextEncoder().encode(sourceId)]);
 
     const writer = new Msb1RingWriter(ring);
@@ -171,9 +172,13 @@ test("MSB1 layout and writer preserve frozen bytes, headers, counters and reuse"
     assert.deepEqual([...planes[0]], [1, 2, 3, 0, 0]);
     const nextGeneration = 0x2_0000_0008n;
     writer.seek(nextGeneration, 14n);
-    assert.deepEqual([...new BigInt64Array(ring, 112, 2)], [nextGeneration, 14n]);
+    assert.deepEqual([...new BigInt64Array(ring, 112, 3)], [nextGeneration, 14n, -1n]);
     assert.equal(c[MSB1_CONTROL.GENERATION_TAG], 8);
     assert.equal(c[MSB1_CONTROL.SEEK_EPOCH], 1);
+    writer.seek(nextGeneration + 1n, 15n, 4_096n);
+    assert.deepEqual([...new BigInt64Array(ring, 112, 3)], [nextGeneration + 1n, 15n, 4_096n]);
+    assert.deepEqual([...new Uint8Array(ring, MSB1_ID_OFFSET, sourceId.length)], [...new TextEncoder().encode(sourceId)], "the anchor leaves the ID");
+    assert.equal(c[MSB1_CONTROL.SEEK_EPOCH], 2);
     writer.release();
     assert.equal(c[MSB1_CONTROL.WRITER_STATE], 0);
   }
