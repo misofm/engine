@@ -1594,7 +1594,6 @@ export async function createEngine(options: CreateEngineOptions): Promise<Browse
           // expect an old revision and be refused.
           send: async (frame, document) => {
             const reply = await host.control(frame, document);
-            noteRevision(reply.revision);
             queue.noteCommit(reply.revision);
             if (reply.result !== 0) throw controlCallFailure(reply.result, reply.response);
             return reply.response;
