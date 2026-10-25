@@ -50,10 +50,14 @@ lane* (#1371) connects it to edits.
 - **D4. Limiter safety.** The limiter blends only `w_link` (it has no `average`). The blended peak
   is at least the own peak (`max >= own` and `0 <= w_link <= 1`), so each channel's required gain
   stays at or below its own, and the ceiling proof holds in every window that mixes modes.
-- **D5. Limiter agreement.** On a switch into `maximum`, `gain_linked` is false. After the ramp
-  ends and the lane's ring has been fully rewritten under `maximum` (a per-bank sample counter that
-  starts at the switch), the limiter re-establishes `gain_linked` with `gain_state_agrees`, once.
-  The fast path never runs on disagreeing words.
+- **D5. Limiter agreement** (amended by root ruling, 2026-10-25). On a switch into `maximum`,
+  `gain_linked` is false, and every block with a glide in flight clears it. A per-bank countdown
+  that starts at the switch covers the glide plus `N + R` frames (raised with `max`, never
+  lowered): the frames in which both gain rings are rewritten under the new law. When it ends,
+  the gain rings are compared once; if they agree, the `W` reduction words `d` are compared once
+  per block (only while the bank stays all-`Maximum` with agreeing designed words and no glide)
+  until they agree, and then `gain_linked` is re-established. The fast path never runs on
+  disagreeing words.
 - **D6. Payload (D15-7).** Each lane's state payload gains its mode and the two ramps (4 words
   each), so a swap carries a link in flight. Restore validates the ramps with `ramp_path_within`
   and the mode against the descriptor. `STATE_LAYOUT_VERSION` stays 1 (nothing persists state; the
@@ -102,8 +106,9 @@ lane* (#1371) connects it to edits.
 3. **Limiter ceiling.** Every switch direction, at every ramp length in {0, 1, 64, 4800}, on a
    full-scale fixture with intersample peaks: no output sample's true peak exceeds the ceiling.
 4. **Limiter agreement returns.** After a switch into `maximum` on a uniform bank, the linked-pair
-   path (test-support counter) runs again within one ring length after the ramp ends, and output
-   is bit-identical to the per-lane body over the same blocks.
+   path (test-support counter) does not run before the glide plus `N + R` frames, runs again once
+   the words agree (within a stated bound on stationary `+6 dBFS` noise), and output is
+   bit-identical to the per-lane body over the same blocks.
 5. **Payload.** A lane snapshotted mid-switch and restored renders bit-identically to the
    uninterrupted one; a forged weight outside `[0, 1]` is refused.
 6. **Realtime.** `retarget_link` and a switching block make zero allocations and frees
@@ -229,9 +234,15 @@ lane* (#1371) connects it to edits.
   `d` stayed apart from block 130 to past block 169 (1,920 frames after the countdown), while the
   rings, prefix and box sums agreed. With the "once" rule such a bank keeps the per-lane body
   until the next reset, restore or disengage (a cost, never a wrong bit). Gate 4 therefore uses a
-  burst after the glide whose attack makes `d` agree before the check. Root ruling wanted: keep
-  "once", or watch the `W` reduction words per block after a passed ring check (the rings stay
-  equal under all-`Maximum` lanes, since steps 1-5 do not read `d`).
+  burst after the glide whose attack makes `d` agree before the check.
+  **Root ruling (2026-10-25), built:** "once" is replaced by a watch. At the countdown's end the
+  rings (`gain_rings_agree`: both gain rings, prefix, box sum, phase) are compared once; if they
+  agree and `d` does not, `relink_watch` is set, and each dual block that keeps the rings equal
+  (every lane `Maximum`, designed words agreeing, no glide; steps 1-5 never read `d`) compares
+  the `W` reduction words, and on their first agreement re-derives the record with the full
+  `gain_state_agrees`. Any other block, a collapsed block, a reset, a restore, a D7 recovery or a
+  new switch ends the watch. Class A: `gain_linked` only selects between bodies that give the
+  same bits (the `LinkedPair` reference arm proves it per block).
 - **Not built here:** no bank clock exists in either effect that a parameter or rate retarget
   writes; the 4,800-sample oracle cases still cross a parameter span (shaper: attack amount;
   limiter: ceiling and release) on every lane.
@@ -248,6 +259,11 @@ lane* (#1371) connects it to edits.
 - `tests::glide::the_linked_pair_returns_once_the_rings_are_rewritten` (gate 4): a countdown
   written without `max`, one that covers `R` and not `N + R`, a missing re-derivation, or a glide
   block that does not clear the record (after the D7 reset) is red.
+- `tests::glide::the_linked_pair_returns_on_stationary_material` (gate 4, ruling of
+  2026-10-25): a single check at the countdown's end (the "once" code, recorded red: "the
+  record never returned") loses the fast path on `+6 dBFS` stationary noise; the watch returns it
+  within 4,800 frames (measured 2,191 / 847 / 2,047 at W1 / W4 / W8), bits equal to the reference
+  arm on every block.
 - `a_glide_moves_no_bank_mates_bit_and_allocates_nothing` (both, gates 2 and 6): a retarget that
   reaches other lanes or a heap call moves a bank-mate's bit or the counter.
 - `a_lane_snapshotted_mid_glide_continues_bit_for_bit_and_forged_weights_are_refused` (both,

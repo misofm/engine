@@ -909,3 +909,69 @@ fn a_collapsed_block_advances_a_glide_as_the_dual_block_on_equal_channels() {
     }
     lane::each_lane!(|L| check::<L>());
 }
+
+/// **Gate 4, stationary material (D5 as ruled, 2026-10-25).** A uniform bank at `DualMono`
+/// switches every lane into `Maximum` over 64 samples on `+6 dBFS` stationary noise on both
+/// channels, with no burst: the reduction word `d` can stay apart past the countdown, so the
+/// record is re-established by the per-block watch of the `W` reduction words once the rings
+/// agree, within `WATCH_BOUND` frames of the countdown's end, and every block's bits and state
+/// equal the reference kernel's (`LinkedPair::dual`). Under a single check at the countdown's end
+/// the `W8` bank never relinks (red on that code).
+#[test]
+fn the_linked_pair_returns_on_stationary_material() {
+    fn check<L: Lane>() {
+        const SWITCH: usize = 10;
+        const GLIDE: u32 = 64;
+        const BLOCKS: usize = 200;
+        /// 100 ms at 48 kHz. Measured on this fixture: the record returned 2,191 (W1), 847 (W4)
+        /// and 2,047 (W8) frames after the countdown; a single check at its end never did.
+        const WATCH_BOUND: usize = 4_800;
+        let tracks = vec![values_with(CEILING, RELEASE, LOOKAHEAD); L::WIDTH];
+        let label = format!("W{} stationary", L::WIDTH);
+        let mut pair = LinkedPair::<L>::new(&tracks, LinkMode::DualMono, false, RATE, label);
+        let shape = Shape::new(RATE).expect("a shape");
+        let countdown = SWITCH * BLOCK + GLIDE as usize + shape.n + shape.ring;
+        let mut noise = Noise(0x1370_b006);
+        let mut relinked = None;
+        for block in 0..BLOCKS {
+            if block == SWITCH {
+                for core in [&mut pair.shipped, &mut pair.oracle] {
+                    for lane in 0..L::WIDTH {
+                        assert!(core.retarget_link(lane, LinkMode::Maximum, GLIDE));
+                    }
+                }
+            }
+            let words = BLOCK * L::WIDTH;
+            let left: Vec<f32> = (0..words).map(|_| noise.next() * 2.0).collect();
+            let right: Vec<f32> = (0..words).map(|_| noise.next() * 2.0).collect();
+            pair.dual(
+                &left,
+                &right,
+                &no_spans(L::WIDTH),
+                &format!("block {block}"),
+            );
+            let end = (block + 1) * BLOCK;
+            if block >= SWITCH && end < countdown {
+                assert!(
+                    !pair.shipped.gain_linked,
+                    "block {block}: linked before the rewrite"
+                );
+            }
+            if pair.shipped.gain_linked && block >= SWITCH {
+                relinked.get_or_insert(end);
+            }
+        }
+        let relinked = relinked.expect("the record never returned");
+        println!(
+            "W{}: record re-established {} frames after the countdown",
+            L::WIDTH,
+            relinked - countdown
+        );
+        assert!(
+            relinked <= countdown + WATCH_BOUND,
+            "W{}: re-established at frame {relinked}, past the bound",
+            L::WIDTH
+        );
+    }
+    lane::each_lane!(|L| check::<L>());
+}
