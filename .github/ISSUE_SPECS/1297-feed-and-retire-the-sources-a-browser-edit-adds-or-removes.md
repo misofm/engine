@@ -206,3 +206,21 @@ wrong for the feed worklet's render path.
   `hosts/host-web/web/miso-engine-v1-audio-worklet.js`, that file is outside this issue's authorized
   paths. Name the owner before implementation.
 - Dependencies: #1294 (the message handler path, D2) is a dependency of D3 now. Add it.
+
+## Record: slice #1297a (2026-10-25)
+
+Scope note R1 (root): #1297a owns the engine worklet's two messages, so its authorized paths add the
+engine worklet, its wrapper, the two `.d.ts` twins, `scripts/test-web-audioworklet.mjs` and the
+realtime table (with `tools/realtime-policy/src/policy.rs`'s `UNWRAPPED_EXPORTS`). The ring layout
+(D2), the drain rule and the pump copy are #1297b's; `alignTo` is #1297c's.
+
+- `miso.seek-at.v1 { tag, requestId, sourceId, generation, sourceFrame, anchorSample }`: the
+  handler calls `source_seek_at` once; the reply is `miso.ack.v1` with the engine's result (not
+  sticky). A malformed message is a sticky `invalidArgument` with no export call.
+- `miso.seek-report.v1 { tag, requestId, sourceId }`: the handler calls `source_seek_report` once
+  and replies `{ tag, requestId, result, report }`, `report` the record's five words for an OK,
+  else `null`. The record (`source_seek_report_ptr`) is bound at boot; a size word other than 64 is
+  a sticky internal fault.
+- Wrapper: `seekSourceAt` (shares the per-source seek bound with `seekSource`) and
+  `seekReport(sourceId)`, both `@internal`. Table rows `wrapped: false`, engine callers only; the
+  feed drain is not a caller (R2).

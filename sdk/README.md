@@ -141,6 +141,52 @@ producer. `seekSource()` changes the source generation; stale chunks cannot sati
 subscriptions. Use `loadBundledEngineAsset()` and the `asset` option to share one compiled module
 across engines.
 
+### Edit a headless session
+
+`engine.apply(tx)` sends one structural transaction built with `transaction(base)...build()`.
+`engine.replaceSession(document)` sends a full document, and the engine compares it with the
+committed session to make one transaction. Each call resolves with `{ revision, path }`:
+
+- `live`: the running plan ramps to the new values from the next block.
+- `model_only`: the committed session changed, but render has nothing different to do.
+- `rebuild`: a new plan replaces the running plan at the next `render()`. Sources keep playing,
+  and unchanged nodes keep their state.
+- `unchanged` (`replaceSession` only): the document is the committed session. Nothing is
+  committed, and the revision stays the same.
+
+A refusal rejects, and nothing is committed. `engine.revision` is the committed revision.
+`engine.applied(revision)` resolves with the watermark `{ revision, sample, outcome }` when that
+revision is audible. `sample` is the first sample of the block where the revision took effect. The
+engine reads the watermark after each `render()`, so `applied` stays pending until you call
+`render()`. `engine.watermark()` reads the watermark immediately.
+
+```ts
+import { transaction } from "@misofm/engine/headless";
+import type { OfflineEngine, SessionBuilder, TransactionBuilder } from "@misofm/engine/headless";
+
+type TrackSpec = Parameters<TransactionBuilder["upsertTrack"]>[1];
+
+// `upsertTrack` writes the whole track record. Pass the track's full spec from `base` and change
+// only its fader, so that the edit stays a live fader move.
+export async function lowerTrack(
+  engine: OfflineEngine,
+  base: SessionBuilder,
+  trackId: string,
+  spec: TrackSpec,
+) {
+  const edit = transaction(base)
+    .upsertTrack(trackId, { ...spec, fader: { ...spec.fader, leftDb: -6, rightDb: -6 } })
+    .build();
+  const { revision, path } = await engine.apply(edit);
+  const audible = engine.applied(revision);
+  engine.render(); // Submit the source PCM for this block first, as for every block.
+  return { path, firstSample: (await audible).sample };
+}
+```
+
+`replaceSession()` is an edit. `loadSession()` is a reboot: every source starts again from its first
+frame, `revision` goes back to `0`, and each pending `applied` rejects.
+
 ## Play in the browser
 
 `createEngine()` scratch-boots in a Worker, learns the session's shape, verifies the `AudioContext`
