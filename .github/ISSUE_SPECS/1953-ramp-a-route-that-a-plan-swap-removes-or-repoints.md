@@ -49,13 +49,13 @@ watermark) predates #1325's two-phase machinery. The issue is split:
 
 1. `transition::tests::a_transition_ducks_the_removed_strips_outside_the_overlay`: a removed and a
    re-pointed `pre_fader` send duck alone (`routes() == [b-send]`, no strip, `C` its line); a
-   removed lane-less route ducks nothing.
+   removed lane-less route ducks nothing; a removed `pre_fader` route into the output ducks alone,
+   `C` its line.
 2. `successor_swap`'s `a_repointed_send_fades_in_at_its_new_destination_on_every_width`: the
    re-pointed send arms (`D = 0`, `N`), restarts nothing, and equals a fresh plan with the send
    muted and live-unmuted at the swap block, (a) re-pointed to another bus and (b) to the same bus
    from another tap; an in-flight gain ramp does not carry; (c) a re-point from a lane-less route
    arms nothing.
-   Row 1 also: a removed `pre_fader` route into the output ducks alone, `C` its line.
 3. `capi`'s `a_removed_or_repointed_send_ramps_out_then_in_at_s`: (a) removal equals the live
    mute reference, adopted at `S` with `C = L`; (b) re-point equals a plan that live-mutes the old
    send and live-unmutes a copy into the new bus at `S`.
