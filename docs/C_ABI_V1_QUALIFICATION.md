@@ -115,10 +115,11 @@ chain and on those routes, and their live lanes) and its fader, keeps its matrix
 post-fader routes carrying the ducked tail, and arms the fader and those routes (#1288, #1363 D1
 (c)) to fade in over `N` from the first block at or after `S + D`, `D` the strip's latency before
 its fader. A strip whose insert is keyed from a restarted strip's `post_input`, `insert_send`,
-`insert_return` or `pre_fader` tap is restarted and duck-swapped with it, repeated until no strip
-joins; a track's `input` tap, a `post_fader` or `post_pan` tap, and a submix's `input` tap whose
-sidechain line keeps its length or whose every incoming line comes from a ducked or an added strip
-add nothing. `C` also counts each sidechain line a replacement can shorten: from a ducked strip's
+`insert_return` or `pre_fader` tap, or from its `input` tap when its delay line restarts, is
+restarted and duck-swapped with it, repeated until no strip joins; a track's other `input` tap, a
+`post_fader` or `post_pan` tap, and a submix's `input` tap whose sidechain line keeps its length or
+whose every incoming line comes from a ducked or an added strip (and none from a pre-fader route
+that follows an automated source mute) add nothing. `C` also counts each sidechain line a replacement can shorten: from a ducked strip's
 `post_fader` or `post_pan` tap into a carried strip, and from a ducked submix's `input` tap kept by
 the last rule, plus the longest route line into that submix. A planned duck-swap completes as
 `EXACT`, never as the transition fallback. A revert before `S` inherits `S` and fades the strip
