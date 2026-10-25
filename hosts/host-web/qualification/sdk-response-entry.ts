@@ -11,7 +11,6 @@ import type { ObserveEdit } from "../../../sdk/src/core/control-frame.ts";
 import { ProtocolClient } from "../../../sdk/src/core/protocol-messages.ts";
 import { decodeResponseReady, decodeResponseTagReply, encodeStripResponseRequest } from "../../../sdk/src/core/response-frame.ts";
 import type { MisoAudioWorkletHost, MisoStatus } from "../../../sdk/src/browser/shipped-host.d.ts";
-import { encodeLaneEdits } from "../../../sdk/src/core/writer.ts";
 import { MisoEngineAsset } from "../../../sdk/src/core/asset.ts";
 import { CATALOG } from "../../../sdk/src/generated/catalog.ts";
 import { effect, session } from "../../../sdk/src/core/session.ts";
@@ -1955,7 +1954,6 @@ async function runLiveEqCutsQualification(): Promise<Record<string, unknown>> {
       // endpoint, and the core refuses an ID at or below the highest it has seen.
       requestIds: headless.controlRequestIds,
     }),
-    observe: (edits) => headless.submitCommands(encodeLaneEdits(edits), edits.length),
   });
   try {
     const liveControls = await browser.liveControls();
@@ -2447,9 +2445,10 @@ async function runSdkObservationQualification(): Promise<Record<string, unknown>
     const selections = [observationSelection("comp")];
     const map = await browser.observationMap();
     const pendingBeforeArm = await browser.readObservations(selections);
-    const subscriptions = await browser.host.observe({ subscriptions: [
-      { stripId: "track", rack: 1, effectId: "comp", tapId: 1, windowBlocks: 2, armed: true },
-    ] });
+    // #1589c: the arm is the core's `Observe` edit through the host's `control` message.
+    const subscriptions = await observeThroughSdk(browser.host, {
+      stripId: "track", rack: "inserts", effectId: "comp", tapId: 1, windowBlocks: 2, armed: true,
+    });
     const pendingAfterArm = await browser.readObservations(selections);
     for (let block = 0; block < OBSERVATION_FRAMES / 128; block += 1) {
       const planes = observationPlanes(block);
@@ -2474,6 +2473,7 @@ async function runSdkObservationQualification(): Promise<Record<string, unknown>
     return {
       mapBindings: map.bindings.map((binding) => binding.effectSlotId),
       subscribeResult: subscriptions.result,
+      subscribeStatus: subscriptions.status,
       pendingBeforeArm: pendingBeforeArm.map((row) => row.status),
       pendingAfterArm: pendingAfterArm.map((row) => row.status),
       readyStatuses: ready.map((row) => row.status),

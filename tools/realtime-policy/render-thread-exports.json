@@ -3,7 +3,6 @@
   "prefix": "miso_engine_web_v1_",
   "exports": [
     {"name": "render", "callers": [{"worklet": "engine", "handler": "process"}], "wrapped": true},
-    {"name": "command_submit", "callers": [{"worklet": "engine", "handler": "receiveCommand"}], "wrapped": true},
     {"name": "meter_lease", "callers": [{"worklet": "engine", "handler": "receiveMeterLease"}], "wrapped": true},
     {"name": "meter_poll", "callers": [{"worklet": "engine", "handler": "postMeterFrame"}], "wrapped": true},
     {"name": "source_submit", "callers": [{"worklet": "engine", "handler": "receiveSource"}, {"worklet": "feed", "handler": "drainSharedRing"}], "wrapped": true},

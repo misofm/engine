@@ -229,10 +229,9 @@ export function defaultSourceRingFrames(sampleRateHz: number, quantumFrames: num
   return quanta * quantumFrames;
 }
 
-/** Numeric value of a named constant group row, e.g. `constantValue("bufferKinds", "command")`. */
+/** Numeric value of a named constant group row, e.g. `constantValue("bufferKinds", "meterFrame")`. */
 export function constantValue(
-  group: "resultCodes" | "bootResultAliases" | "states" | "backends" | "bufferKinds"
-    | "wireCommandKinds" | "commandReasons" | "racks",
+  group: "resultCodes" | "bootResultAliases" | "states" | "backends" | "bufferKinds" | "racks",
   name: string,
 ): number {
   const row = ABI_LAYOUT.constants[group].find((entry) => entry.name === name);

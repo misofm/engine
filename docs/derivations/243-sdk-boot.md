@@ -143,7 +143,7 @@ proof.
 
 `check-abi-layout-v1.py` does not carry the structures' field lists. It carries their byte totals
 (`bootOptions` 64, `status` 80, `resourceReport` 224, `meterHeader` 64 -- 72 since #1209 appended
-`submixCount` -- and `commandReport` 48) and
+`submixCount` -- and `commandReport` 48, deleted with the command record by #1589c) and
 requires each structure's rows to *tile* that total: every row starts exactly where the previous
 row's declared width ended, and the final row ends exactly at `bytes`. A renamed row, a dropped
 row, a widened row, or a hole all move the sum.
@@ -211,8 +211,9 @@ Measured: 16 flushes admitted, the 17th refused with `COMMAND_REASON_BACKPRESSUR
 changed would break their agreement rather than silently re-pinning the count.
 
 **32 both-lane records.** A wire record addressed `channel = both` lowers to **two** lane records,
-which is the fact `2 × MAXIMUM_COMMAND_RECORDS` encodes at
-`hosts/host-web/src/tests.rs:3966`. Hence:
+which is the fact `2 × MAXIMUM_COMMAND_RECORDS` encoded at
+`hosts/host-web/src/tests.rs:3966` (the record, its staging and that constant were deleted by
+#1589c; this derivation is historical). Hence:
 
 ```
 64 / 2 = 32 both-lane records fill one destination queue

@@ -38,8 +38,6 @@ export const ABI_LAYOUT = deepFreeze(
     "miso_engine_web_v1_boot_result",
     "miso_engine_web_v1_buffer_capacity",
     "miso_engine_web_v1_buffer_ptr",
-    "miso_engine_web_v1_command_report_ptr",
-    "miso_engine_web_v1_command_submit",
     "miso_engine_web_v1_control_allocation_count",
     "miso_engine_web_v1_control_command",
     "miso_engine_web_v1_control_event",
@@ -458,51 +456,6 @@ export const ABI_LAYOUT = deepFreeze(
         }
       ]
     },
-    "commandReport": {
-      "bytes": 48,
-      "fields": [
-        {
-          "name": "structSize",
-          "offset": 0,
-          "type": "u32"
-        },
-        {
-          "name": "abiVersion",
-          "offset": 4,
-          "type": "u32"
-        },
-        {
-          "name": "result",
-          "offset": 8,
-          "type": "u32"
-        },
-        {
-          "name": "reason",
-          "offset": 12,
-          "type": "u32"
-        },
-        {
-          "name": "rejectedIndex",
-          "offset": 16,
-          "type": "u32"
-        },
-        {
-          "name": "admitted",
-          "offset": 20,
-          "type": "u32"
-        },
-        {
-          "name": "appliedAtSample",
-          "offset": 24,
-          "type": "u64"
-        },
-        {
-          "name": "reserved",
-          "offset": 32,
-          "type": "u64[2]"
-        }
-      ]
-    },
     "planWatermark": {
       "bytes": 96,
       "fields": [
@@ -779,57 +732,6 @@ export const ABI_LAYOUT = deepFreeze(
       ]
     }
   },
-  "commandRecord": {
-    "bytes": 272,
-    "endianness": "little",
-    "fields": [
-      {
-        "name": "kind",
-        "offset": 0,
-        "type": "u8"
-      },
-      {
-        "name": "rack",
-        "offset": 1,
-        "type": "u8"
-      },
-      {
-        "name": "stripIdBytes",
-        "offset": 2,
-        "type": "u8"
-      },
-      {
-        "name": "effectIdBytes",
-        "offset": 3,
-        "type": "u8"
-      },
-      {
-        "name": "tapId",
-        "offset": 4,
-        "type": "u32"
-      },
-      {
-        "name": "windowBlocks",
-        "offset": 8,
-        "type": "u32"
-      },
-      {
-        "name": "reserved0",
-        "offset": 12,
-        "type": "u32"
-      },
-      {
-        "name": "stripId",
-        "offset": 16,
-        "type": "u8[128]"
-      },
-      {
-        "name": "effectId",
-        "offset": 144,
-        "type": "u8[128]"
-      }
-    ]
-  },
   "constants": {
     "resultCodes": [
       {
@@ -937,76 +839,8 @@ export const ABI_LAYOUT = deepFreeze(
         "name": "outputPcm"
       },
       {
-        "value": 6,
-        "name": "command"
-      },
-      {
         "value": 7,
         "name": "meterFrame"
-      }
-    ],
-    "wireCommandKinds": [
-      {
-        "value": 7,
-        "name": "observeSubscribe"
-      },
-      {
-        "value": 8,
-        "name": "observeUnsubscribe"
-      }
-    ],
-    "commandReasons": [
-      {
-        "value": 0,
-        "name": "none"
-      },
-      {
-        "value": 1,
-        "name": "malformed"
-      },
-      {
-        "value": 2,
-        "name": "unknownTrack"
-      },
-      {
-        "value": 3,
-        "name": "unknownRack"
-      },
-      {
-        "value": 4,
-        "name": "unknownEffect"
-      },
-      {
-        "value": 5,
-        "name": "unknownParameter"
-      },
-      {
-        "value": 6,
-        "name": "domain"
-      },
-      {
-        "value": 7,
-        "name": "unsupportedKind"
-      },
-      {
-        "value": 8,
-        "name": "backpressure"
-      },
-      {
-        "value": 9,
-        "name": "wrongState"
-      },
-      {
-        "value": 10,
-        "name": "unknownTap"
-      },
-      {
-        "value": 11,
-        "name": "observationUnbound"
-      },
-      {
-        "value": 15,
-        "name": "observationLimit"
       }
     ],
     "racks": [
@@ -1051,7 +885,6 @@ export const ABI_LAYOUT = deepFreeze(
         "name": "ready"
       }
     ],
-    "maximumCommandRecords": 256,
     "maximumDocumentBytes": 1048576,
     "maximumSourceChannels": 2,
     "diagnosticBytes": 16384,
@@ -1092,7 +925,6 @@ export type AbiStructureName = keyof AbiLayout["structures"];
 export type AbiStructure = AbiLayout["structures"][AbiStructureName];
 export type AbiField = AbiStructure["fields"][number];
 export type AbiConstantName = keyof AbiLayout["constants"];
-export type AbiCommandField = AbiLayout["commandRecord"]["fields"][number];
 /** Where a typed SDK refusal was raised. Replaces the dead two-phase "compile". */
 export type ErrorPhase = AbiLayout["errorPhases"][number];
 export type ResultCodeName = AbiLayout["constants"]["resultCodes"][number]["name"];

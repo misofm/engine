@@ -162,12 +162,6 @@ describe("issue 783 -- managed resident observation subscriptions", () => {
       });
       assert.equal(first.configuration.windowBlocks, 2);
       assert.deepEqual(first.readLatest().map((row) => row.status), ["pending", "pending"]);
-      const liveControls = engine.liveControls();
-      await assert.rejects(
-        () => liveControls.submit(liveControls.edit.track("t").insert("comp", "miso.compressor")
-          .observe("Gain Reduction", false, 2)),
-        /conflict/,
-      );
 
       feed(engine, 0); engine.render(); await first.pump();
       feed(engine, 1); engine.render(); await first.pump();
@@ -235,32 +229,6 @@ describe("issue 783 -- managed resident observation subscriptions", () => {
       assert.equal(reading.window.blocks, 4);
       assert.ok(reading.window.firstSample >= await receipt.armed());
       await handle.close();
-    } finally {
-      engine.dispose();
-    }
-  });
-
-  test("a submission naming one observation tap twice is refused whole as malformed", async () => {
-    const engine = await createOfflineEngine(observationDocument(), {
-      asset,
-      liveControls: { observationTaps: 4 },
-    });
-    try {
-      const liveControls = engine.liveControls();
-      const edit = (on, window) => liveControls.edit.track("t").insert("comp", "miso.compressor")
-        .observe("Gain Reduction", on, window);
-      assert.equal((await liveControls.submit(edit(true, 4))).ok, true);
-      feed(engine, 0); engine.render();
-      const refused = await liveControls.submit(edit(false, 2), edit(true, 4));
-      assert.equal(refused.ok, false);
-      assert.equal(refused.reason, 1);
-      assert.equal(refused.reasonName, "malformed");
-      assert.equal(refused.rejectedIndex, 1, "the second record of the tap is the one refused");
-      assert.equal(refused.admitted, 0);
-      for (let block = 1; block < 5; block += 1) { feed(engine, block); engine.render(); }
-      const reading = engine.readObservations([selection("comp", "both")])[0];
-      assert.equal(reading.status, "ready");
-      assert.equal(reading.window.blocks, 4, "nothing of the refused submission applied");
     } finally {
       engine.dispose();
     }
@@ -359,10 +327,6 @@ describe("issue 783 -- managed resident observation subscriptions", () => {
     harness.setApply(() => new Promise((resolve) => { releaseSubmit = resolve; }));
     const pending = harness.owner.subscribe({ selections: [injectedSelection], windowBlocks: 1 });
     await new Promise((resolve) => setTimeout(resolve, 0));
-    assert.throws(
-      () => harness.owner.beforeLiveControlSubmit([{ kind: "observeUnsubscribe" }]),
-      /conflict/,
-    );
     releaseSubmit();
     await pending;
 
@@ -632,23 +596,6 @@ describe("issue 1345 -- the browser engine waits for a render, within a bound", 
       // Subscribe, the refused close, and the same close sent again after the render.
       assert.deepEqual(rig.log.map((entry) => [entry.at, entry.result]), [[0n, 0], [0n, BACKPRESSURE], [1n, 0]]);
       assert.equal(rig.log[1].payload, rig.log[2].payload, "the resend carries the same edits");
-    } finally {
-      await engine.close();
-    }
-  });
-
-  // Red if the browser engine's live controls lose the managed owner's guard: a manual record of
-  // kinds 7 and 8 for a tap the owner holds would share the tap's queue slot.
-  test("the browser live controls refuse a manual observation record while a managed subscription holds a tap", async () => {
-    const rig = await coreRig();
-    const engine = await rig.browser();
-    try {
-      const handle = await engine.subscribeObservations(request);
-      const controls = await engine.liveControls();
-      const manual = controls.edit.track("t").insert("comp", "miso.compressor").observe("Gain Reduction", false, 2);
-      await assert.rejects(controls.submit(manual), /conflict/);
-      rig.render();
-      await handle.close();
     } finally {
       await engine.close();
     }

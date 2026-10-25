@@ -42,16 +42,10 @@ Modes
     refuses a module with any import before this gate runs. `scripts/test-web-audioworklet.sh`
     runs `--self-test`, which pins these cases.
 
-    `--allocation-only` runs the forbidden-name half alone. Use it for an export that runs on the
-    control path (`port.onmessage`), where the engine's rule is "never allocate on the render
-    thread" and a checked index inside a pure-math helper is not an allocation. It is refused
-    together with `--trap-owner`, so a caller states one intent or the other.
-
     `--trap-owner` never relaxes the allocation half of the gate, which is the half that matters:
     an allocator, a deallocator or drop glue in the closure is a failure no matter what. It exists
-    because issue #137 put two more exports on the render thread -- `miso_engine_web_v1_meter_poll`
-    and `miso_engine_web_v1_command_submit` -- whose bodies inline the bounded SPSC endpoints'
-    own checked slot indexing. Naming the export's own symbol keeps the strong statement "nothing
+    because issue #137 put more exports on the render thread -- `miso_engine_web_v1_meter_poll`
+    among them -- whose bodies inline the bounded SPSC endpoints' own checked slot indexing. Naming the export's own symbol keeps the strong statement "nothing
     this export *calls* may trap" while admitting the one checked index the queue primitive emits.
 
 `--callgraph EXPORT --render-thread`
@@ -236,10 +230,6 @@ INDIRECT_SITES: dict[str, dict[str, tuple[int, str]]] = {
             "`type_id`, one `call_indirect` each, neither of which allocates or drops",
         ),
     },
-    # `command_submit` had two rows here (the prepared owner's factory calls inlined from
-    # `publish` and `preflight_publication`); #1565A deleted the prepared owners, so the
-    # observation-only admission has no indirect call site left, and the empty table pins that.
-    "miso_engine_web_v1_command_submit": {},
 }
 
 VECTOR = re.compile(r"^(v128|i8x16|i16x8|i32x4|i64x2|f32x4|f64x2)\.")
@@ -533,7 +523,6 @@ def check_callgraph(
     functions: dict[int, Function],
     export: str,
     trap_owners: tuple[str, ...] = (),
-    allocation_only: bool = False,
 ) -> int:
     failures = 0
     pinned: dict[str, int] = {}
@@ -568,7 +557,7 @@ def check_callgraph(
         for function in trap_owners
         if not any(allowed in function.name for allowed in allowed_owners)
     ]
-    if unexpected and not allocation_only:
+    if unexpected:
         failures += 1
         print(f"FAIL {export}: unexpected trap owner in the render closure:", file=sys.stderr)
         for name in sorted(unexpected):
@@ -579,7 +568,7 @@ def check_callgraph(
             for function in trap_owners
             if name in function.name
         )
-        if found != sites and not allocation_only:
+        if found != sites:
             failures += 1
             print(
                 f"FAIL {export}: trap owner {name} holds {found} trap sites, pinned at {sites}",
@@ -1265,16 +1254,6 @@ def self_test() -> int:
         check_callgraph(parse(freeing), "miso_engine_web_v1_render", ("render_next=0",)) == 1,
     )
 
-    # (b1b) `--allocation-only` drops the trap half and keeps the allocation half.
-    expect(
-        "(b1b) allocation-only ignores a trap owner",
-        check_callgraph(parse(trapping), "miso_engine_web_v1_render", (), True) == 0,
-    )
-    expect(
-        "(b1b) allocation-only still fails a free",
-        check_callgraph(parse(freeing), "miso_engine_web_v1_render", (), True) == 1,
-    )
-
     # (b3) a panic entry is a member but never a reported trap owner, and its callees are not
     # followed -- otherwise the abort runtime's own free would fail every artifact.
     entry = (
@@ -1648,7 +1627,6 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--callgraph", metavar="EXPORT")
     parser.add_argument("--trap-owner", action="append", default=[], metavar="SUBSTRING=SITES")
-    parser.add_argument("--allocation-only", action="store_true")
     parser.add_argument("--render-thread", action="store_true")
     parser.add_argument("--kernel-shape", action="store_true")
     parser.add_argument("--kernel-pattern")
@@ -1666,11 +1644,7 @@ def main() -> int:
     functions = parse(sys.stdin.read())
     failures = 0
     if args.callgraph is not None:
-        if args.allocation_only and args.trap_owner:
-            parser.error("--allocation-only and --trap-owner state opposite intents")
-        failures += check_callgraph(
-            functions, args.callgraph, tuple(args.trap_owner), args.allocation_only
-        )
+        failures += check_callgraph(functions, args.callgraph, tuple(args.trap_owner))
         if args.render_thread:
             failures += check_render_thread(functions, args.callgraph)
     if args.kernel_shape:

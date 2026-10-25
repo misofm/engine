@@ -14,14 +14,11 @@ import { readFileSync } from "node:fs";
 import { before, describe, test } from "node:test";
 
 import { createBrowserLiveControls } from "../src/browser/live-controls.ts";
-import { observationEdit } from "../src/core/live-controls.ts";
 import { MisoEngineAsset } from "../src/core/asset.ts";
 import { decodeControlReply } from "../src/core/control-frame.ts";
 import { ObservationSubscriptionOwner, observationFrameTransport } from "../src/core/observation-subscriptions.ts";
 import { decodeObservationEnded } from "../src/core/observation-ended.ts";
 import { MisoControlRefusal } from "../src/core/errors.ts";
-import { encodeLaneEdits } from "../src/core/writer.ts";
-import { ABI_LAYOUT } from "../src/generated/abi.ts";
 import { createOfflineEngine } from "../src/headless/engine.ts";
 import { structuralFrame } from "./control-support.mjs";
 import { engineHost, moduleBytes, ramp } from "./support.mjs";
@@ -495,12 +492,12 @@ describe("#1562b-K -- a managed observation subscription follows a rebuild", () 
 
 // #1677 (the successor of batch 12b review M1). A rebuild's commit moves the control list at once,
 // and the plan that renders keeps its own positions until the block that adopts the replacement. An
-// observation record names its tap by stable key (the strip, the effect and the tap) and the core
-// resolves it on the newest committed plan, so a record sent in that window arms the tap it names
+// `Observe` edit names its tap by stable key (the strip, the effect and the tap) and the core
+// resolves it on the newest committed plan, so an edit sent in that window arms the tap it names
 // and no client keeps an index space to get wrong. `swap_t3_multi_and_limiter` puts two effects with
 // the same tap (`Gain Reduction`, ID 1) at each other's index: a record that named `multi` by the
 // rendering plan's index 0 would arm `limiter`, which is index 0 in the newest plan.
-describe("#1677 -- an observation record names its tap by stable key", () => {
+describe("#1677 -- an Observe edit names its tap by stable key", () => {
   const armed = (engine, effectSlotId) => engine.readObservations([tap("t3", "inserts", effectSlotId)])[0].status;
 
   /** An engine whose rebuild is committed and not yet adopted. */
@@ -585,67 +582,6 @@ describe("#1677 -- an observation record names its tap by stable key", () => {
       }
     });
   }
-
-  test("a key the plan does not have is refused with its typed reason, and nothing changes", async () => {
-    const engine = await boot();
-    try {
-      run(engine, 0, 4);
-      const controls = engine.liveControls();
-      const edits = controls.edit.track("t3");
-      const known = edits.insert("multi", "miso.multiband-compressor").observe("Gain Reduction", true, 2);
-      const refusals = [
-        ["unknownEffect", edits.insert("no-such-insert", "miso.compressor").observe("Gain Reduction", true, 2)],
-        ["unknownTrack", controls.edit.track("no-such-strip").insert("multi", "miso.multiband-compressor")
-          .observe("Gain Reduction", true, 2)],
-        ["unknownTap", observationEdit(true, { stripId: "t3", rack: "inserts", effectId: "multi", tapId: 99 }, 2)],
-      ];
-      // The SDK refuses a rack it cannot spell before submission (#1542), so the core's own
-      // `unknownRack` is reached the way a C ABI caller reaches it: a raw record, rack byte 0.
-      const rawRack = encodeLaneEdits([known, known]);
-      rawRack[ABI_LAYOUT.commandRecord.bytes
-        + ABI_LAYOUT.commandRecord.fields.find((row) => row.name === "rack").offset] = 0;
-      const submits = [
-        ...refusals.map(([reasonName, bad]) => [reasonName, () => controls.submit(known, bad)]),
-        ["unknownRack", () => engine.submitCommands(rawRack, 2)],
-      ];
-      for (const [reasonName, submit] of submits) {
-        // The valid record rides in front of the refused one: the batch is one transaction.
-        const report = await submit();
-        assert.equal(report.ok, false, reasonName);
-        assert.equal(report.reasonName, reasonName);
-        assert.equal(report.rejectedIndex, 1, `${reasonName} names the record that broke the rule`);
-        assert.equal(report.admitted, 0);
-        run(engine, 4, 3);
-        assert.equal(armed(engine, "multi"), "unarmed", `${reasonName}: the valid record in front was not armed`);
-        assert.equal(armed(engine, "limiter"), "unarmed");
-      }
-      // The same key, alone, is admitted: the refusals changed no state.
-      assert.equal((await controls.submit(known)).ok, true);
-    } finally {
-      engine.dispose();
-    }
-  });
-
-  test("a key is resolved on the newest plan: a tap the replacement no longer has is refused", async () => {
-    // `swap_comp_for_soft_clip` makes the insert `comp` of `t1` a soft clipper in the replacement.
-    // Between its commit and its adoption the rendering plan still runs the compressor, whose map
-    // lists the tap; the core refuses the key against the newest plan.
-    const engine = await boot();
-    try {
-      run(engine, 0, 4);
-      rebuild(engine, "swap_comp_for_soft_clip");
-      assert.equal(engine.observationMap().bindings.some((b) => b.trackId === "t1" && b.effectSlotId === "comp"), true);
-      const controls = engine.liveControls();
-      const report = await controls.submit(
-        controls.edit.track("t1").insert("comp", "miso.compressor").observe("Gain Reduction", true, 2),
-      );
-      assert.equal(report.ok, false);
-      assert.equal(report.reasonName, "unknownTap");
-      assert.equal(report.admitted, 0);
-    } finally {
-      engine.dispose();
-    }
-  });
 });
 
 // Batch 12b review, m3. A deferred `OBSERVATION_ENDED` event of an earlier commit names a tap by its

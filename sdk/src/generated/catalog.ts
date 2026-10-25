@@ -16,76 +16,6 @@ export const CATALOG = deepFreeze(
 {
   "schema": "miso.web.parameter-metadata.v1",
   "abiVersion": 65536,
-  "commandRecordBytes": 272,
-  "maximumCommandRecords": 256,
-  "commandKinds": [
-    {
-      "value": 7,
-      "name": "observeSubscribe",
-      "applied": true,
-      "plane": "observation"
-    },
-    {
-      "value": 8,
-      "name": "observeUnsubscribe",
-      "applied": true,
-      "plane": "observation"
-    }
-  ],
-  "commandReasons": [
-    {
-      "value": 0,
-      "name": "none"
-    },
-    {
-      "value": 1,
-      "name": "malformed"
-    },
-    {
-      "value": 2,
-      "name": "unknownTrack"
-    },
-    {
-      "value": 3,
-      "name": "unknownRack"
-    },
-    {
-      "value": 4,
-      "name": "unknownEffect"
-    },
-    {
-      "value": 5,
-      "name": "unknownParameter"
-    },
-    {
-      "value": 6,
-      "name": "domain"
-    },
-    {
-      "value": 7,
-      "name": "unsupportedKind"
-    },
-    {
-      "value": 8,
-      "name": "backpressure"
-    },
-    {
-      "value": 9,
-      "name": "wrongState"
-    },
-    {
-      "value": 10,
-      "name": "unknownTap"
-    },
-    {
-      "value": 11,
-      "name": "observationUnbound"
-    },
-    {
-      "value": 15,
-      "name": "observationLimit"
-    }
-  ],
   "observationVocabularies": {
     "kinds": [
       {
@@ -6006,8 +5936,6 @@ export type SidechainPortName<E extends EffectId> =
 export type EffectObservation<E extends EffectId> =
   Extract<EffectDescriptor, { readonly id: E }>["observations"][number];
 export type TapName<E extends EffectId> = EffectObservation<E>["name"];
-export type CommandKindName = Catalog["commandKinds"][number]["name"];
-export type CommandReasonName = Catalog["commandReasons"][number]["name"];
 /** The lattice declaration every parameter row carries (issue #242). */
 export type StepDeclaration = EffectParameter<EffectId>["step"];
 export type StepSizeName = keyof StepDeclaration["ladder"];

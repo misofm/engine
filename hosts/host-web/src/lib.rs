@@ -12,9 +12,9 @@
 //! [`RenderCompanions`], and the service step (`miso_engine_web_v1_service`) reclaims the displaced
 //! plan and its attachment on the control side, in the worklet's message handler, never in
 //! `process()`. Every value reaches the cells through `SET_CONTROL` and the core
-//! (`control_command`, #1562a); the browser keeps no value admission of its own (#1565A). What
-//! remains of the retained command record is the monitor operation that arms an observation tap
-//! (kinds 7 and 8), which reaches the effect's observation queue through the control plane.
+//! (`control_command`, #1562a); the browser keeps no value admission of its own (#1565A), and an
+//! observation tap is armed by the core's `Observe` edit through the same entry (#1589): the
+//! control half is the one producer of every observation queue.
 //!
 //! # What is here and what is not
 //!
@@ -33,9 +33,8 @@ use std::sync::{Arc, Mutex};
 
 use builtins_compiler::MeterConsumer;
 use control_plane::{
-    CompileFailure, ControlAdapter, ControlLimits, ObservationChange, ObservationKeyError,
-    ObservationKeyRef, ObservationRefusal, PlanQueries, PlanResources, PlanState,
-    SessionSeekFailure, SessionState, SourceFailure, SourceRefusalKind,
+    CompileFailure, ControlAdapter, ControlLimits, ObservationKeyRef, PlanQueries, PlanResources,
+    PlanState, SessionSeekFailure, SessionState, SourceFailure, SourceRefusalKind,
 };
 use effect_contract::ObservationDescriptor;
 use engine::realtime::{
@@ -163,22 +162,11 @@ pub const BUFFER_SOURCE_PCM: u32 = 3;
 pub const BUFFER_DIAGNOSTIC: u32 = 4;
 /// Contiguous dual-mono output buffer.
 pub const BUFFER_OUTPUT_PCM: u32 = 5;
-/// Fixed live-control command staging buffer (issue #137 D1).
-pub const BUFFER_COMMAND: u32 = 6;
+// Buffer kind 6 was the observation-command staging (kinds 7 and 8), deleted by #1589c; the
+// value is retired and never reused.
 /// Fixed decimated meter-frame buffer (issue #137 D2).
 pub const BUFFER_METER_FRAME: u32 = 7;
 
-/// Exact byte size of one staged `miso.command.v1` record (#1677): the record names its tap by
-/// stable key, so it carries the strip's and the effect's IDs.
-pub const COMMAND_RECORD_BYTES: u32 = 272;
-/// Width in bytes of each ID field of a staged record. An ID is 1 to 127 bytes
-/// (`session::STABLE_ID_MAXIMUM_BYTES`), zero padded to this width.
-pub const RECORD_ID_FIELD_BYTES: u32 = 128;
-/// Largest number of records one `miso.command.v1` submission may stage.
-///
-/// The staging buffer is allocated at preparation for exactly this many records, so a submission
-/// can never grow the module's memory and the render path never sees an allocation.
-pub const MAXIMUM_COMMAND_RECORDS: u32 = 256;
 /// Largest `live_control_observation_taps` the browser configuration accepts.
 ///
 /// The frame carries one gain-reduction slot per track, so a session cannot usefully bind more
@@ -188,13 +176,10 @@ pub const MAXIMUM_OBSERVATION_TAPS: u32 = 16;
 
 /// Largest number of selected observation rows one bounded read may resolve.
 ///
-/// The bound deliberately follows the existing command staging ceiling. A selected read is a
-/// control-plane snapshot, not a subscription or a history, so the host never grows storage from
-/// the number of renders or from the number of reads a caller makes.
-pub const MAXIMUM_OBSERVATION_READS: usize = MAXIMUM_COMMAND_RECORDS as usize;
-// The browser's read is host-core's (#1586 D3), which refuses a longer batch.
-const _: () =
-    assert!(MAXIMUM_OBSERVATION_READS <= host_core::observation::MAXIMUM_OBSERVATION_SELECTIONS);
+/// A selected read is a control-plane snapshot, not a subscription or a history, so the host never
+/// grows storage from the number of renders or from the number of reads a caller makes. The
+/// browser's read is host-core's (#1586 D3), so the bound is host-core's.
+pub const MAXIMUM_OBSERVATION_READS: usize = host_core::observation::MAXIMUM_OBSERVATION_SELECTIONS;
 
 /// Requested left lane in a selected observation record.
 pub const OBSERVATION_CHANNEL_LEFT: u32 = 1;
@@ -386,26 +371,18 @@ pub struct ObservationReadValues {
     pub right: Option<f32>,
 }
 
-/// Arm one declared observation tap of one effect instance (issue #143 D3).
-///
-/// The record names the tap by its stable key: the strip ID, the rack, the console slot's or
-/// insert's ID and the effect-local `tap_id`, the same key `OBSERVATION_ENDED` uses (#1677).
-/// `window_blocks` carries the window length in render blocks (`0` = the plan's default). A
-/// subscription changes what is read, never what is rendered.
-pub const COMMAND_OBSERVE_SUBSCRIBE: u32 = 7;
-/// Disarm one declared observation tap of one effect instance (issue #143 D3).
-pub const COMMAND_OBSERVE_UNSUBSCRIBE: u32 = 8;
+// Command kinds 7 and 8 (the observation subscribe and unsubscribe records) were deleted by #1589c:
+// the core's `Observe` edit arms a tap. Their numbers are retired and never reallocated.
 /// The `rack` of an effect-addressed record: one of the strip's inserts (decision 12, #1096).
 ///
-/// It keeps the code the retired `dynamic` rack had. The record's effect ID is the insert's ID.
+/// It keeps the code the retired `dynamic` rack had. `effect_index` is the insert's index.
 pub const RACK_INSERTS: u8 = 1;
 /// The `rack` of an effect-addressed record: a session console slot (decision 12, #1096).
 ///
-/// Appended. The record's effect ID is the console slot's ID.
+/// Appended. `effect_index` is the console slot's index.
 ///
-/// The retired `simd1` and `simd2` codes, `0` and `2`, are refused with
-/// [`COMMAND_REASON_UNKNOWN_RACK`] (or the observation and configuration paths' invalid-argument
-/// result) and are never reallocated. `ABI_VERSION` did not move.
+/// The retired `simd1` and `simd2` codes, `0` and `2`, are refused with the observation path's
+/// invalid-argument result and are never reallocated. `ABI_VERSION` did not move.
 pub const RACK_CONSOLE: u8 = 3;
 /// The `rack` of a builtin-addressed record, which names no effect rack.
 pub const RACK_NOT_APPLICABLE: u8 = 255;
@@ -433,7 +410,7 @@ pub(crate) const fn live_effect_rack_raw(rack: LiveEffectRack) -> u8 {
 /// lowered rack counts in chain order (issue #1096).
 ///
 /// The one place a session address becomes a position in the effect band: preparation places
-/// every producer with it and admission finds it with it, so the two cannot disagree. `None` when
+/// every producer and reader with it and a read finds it with it, so the two cannot disagree. `None` when
 /// the track has no such console slot or insert.
 fn dense_effect_slot(base: u32, counts: [u32; 3], address: LiveEffectAddress) -> Option<usize> {
     let (rack, index) = address.lower(counts)?;
@@ -463,100 +440,8 @@ fn strip_index(tracks: &[Box<str>], submixes: &[Box<str>], id: &[u8]) -> Option<
     tracks.len().checked_add(submix)
 }
 
-/// The submission was admitted whole.
-pub const COMMAND_REASON_NONE: u32 = 0;
-/// A record's fixed shape is wrong: an unknown kind, a nonzero reserved word, or a non-finite value;
-/// or the submission names one observation tap more than once (#1345 D2).
-pub const COMMAND_REASON_MALFORMED: u32 = 1;
-/// The record's strip ID is not a track or submix of the plan the record is admitted against
-/// (#1677). The code keeps its number and its name from the index-addressed record.
-pub const COMMAND_REASON_UNKNOWN_TRACK: u32 = 2;
-/// `rack` is not an effect rack: an effect-addressed kind names [`RACK_INSERTS`] or
-/// [`RACK_CONSOLE`]. The retired `simd1` (`0`) and `simd2` (`2`) codes land here (issue #1096).
-pub const COMMAND_REASON_UNKNOWN_RACK: u32 = 3;
-/// The record's effect ID is not a console slot or insert (per `rack`) of the addressed strip on
-/// the plan the record is admitted against (#1677).
-pub const COMMAND_REASON_UNKNOWN_EFFECT: u32 = 4;
-/// `parameter_id` is not a parameter of the addressed effect. No record raises it since #1565A
-/// deleted the value kinds; the number stays declared and is never reallocated.
-pub const COMMAND_REASON_UNKNOWN_PARAMETER: u32 = 5;
-/// A value is outside the addressed parameter's declared domain. No record raises it since
-/// #1565A deleted the value kinds (the core's `control.domain` is the one value check now); the
-/// number stays declared and is never reallocated.
-pub const COMMAND_REASON_DOMAIN: u32 = 6;
-/// The submission cannot be applied by this host: a record on a host with no observation taps
-/// attached (`live_control_observation_taps == 0`, so no command staging), or an observation tap
-/// whose cost class is not resident.
-///
-/// This is not "malformed" and it is not "unknown target": the record is well formed and the tap
-/// exists, and this session has no post-preparation write path for it.
-pub const COMMAND_REASON_UNSUPPORTED_KIND: u32 = 7;
-/// A bounded control queue had no room for the submission; nothing was admitted. Retryable: the
-/// queue drains at the next render. Never the answer to a full observation event, which is
-/// [`COMMAND_REASON_OBSERVATION_LIMIT`].
-pub const COMMAND_REASON_BACKPRESSURE: u32 = 8;
-/// The host is not `STATE_READY`.
-pub const COMMAND_REASON_WRONG_STATE: u32 = 9;
-/// `parameter_id` is not a declared observation tap of the addressed effect (issue #143).
-///
-/// Deliberately **not** `UNKNOWN_PARAMETER`: a parameter and a tap are different namespaces on the
-/// same effect, and a caller that confuses them learns which one it got wrong.
-pub const COMMAND_REASON_UNKNOWN_TAP: u32 = 10;
-/// The tap exists and the address is right, but this effect instance holds no observation lane.
-///
-/// The honest form of "you asked for a subscription this preparation cannot deliver": the effect
-/// is there and the tap is declared, but the plan bound no lane to arm for it. A session that
-/// bound no observation capacity at all (`live_control_observation_taps == 0`) has no command
-/// staging, and refuses every submission `COMMAND_REASON_UNSUPPORTED_KIND` before it reads a
-/// record (#1565C); this reason is only reachable with capacity bound.
-pub const COMMAND_REASON_OBSERVATION_UNBOUND: u32 = 11;
-// Reasons 12-14 (`notSoloable`, `unknownRoute`, `unknownVca`) belonged to the value kinds #1565A
-// deleted. They are retired and never reallocated, so the vocabulary is dense from 0 except for
-// them, and the next reason is 15.
-/// The subscription would leave armed taps whose one `OBSERVATION_ENDED` event, every key with its
-/// real IDs, does not fit one control frame (#1676, #1685): the frame is full, so the engine could
-/// not tell the app honestly when a later edit ends them all. The record named is the arm that
-/// made the event outgrow the frame, after every unsubscribe of the same submission is counted;
-/// nothing was admitted.
-///
-/// Not retryable as sent, and deliberately **not** `BACKPRESSURE`: no render makes room. The
-/// submission is admitted only after the app unsubscribes another tap. The admission is the control
-/// plane's, by the event's exact encoded bytes against the browser's 16 KiB frame, so the result is
-/// `RESULT_UNSUPPORTED`, as for [`COMMAND_REASON_OBSERVATION_UNBOUND`].
-pub const COMMAND_REASON_OBSERVATION_LIMIT: u32 = 15;
 /// Default meter window in render blocks: ~31 frames per second at 48 kHz with a 128-frame quantum.
 pub const DEFAULT_METER_BLOCKS: u32 = 12;
-
-/// Exact versioned live-control command report shared with JavaScript (issue #137 D1).
-///
-/// One submission is one transaction: either every staged record was admitted, or none was and
-/// `rejected_index`/`reason` name the first record that broke a rule. `applied_at_sample` is the
-/// absolute sample the admitted records take effect at -- the first sample of the next rendered
-/// block, because the matrix stage drains its queue at the top of the block before it touches a
-/// single sample of audio.
-#[repr(C)]
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct WebCommandReport {
-    /// Exact structure byte size.
-    pub struct_size: u32,
-    /// ABI version.
-    pub abi_version: u32,
-    /// One of the frozen `RESULT_*` values.
-    pub result: u32,
-    /// One of the frozen `COMMAND_REASON_*` values.
-    pub reason: u32,
-    /// Zero-based index of the first refused record, or `0` when the submission was admitted.
-    pub rejected_index: u32,
-    /// Number of records admitted by this submission: the whole batch, or zero.
-    pub admitted: u32,
-    /// Absolute sample at which the admitted records take effect.
-    pub applied_at_sample: u64,
-    /// Required-zero expansion words.
-    pub reserved: [u64; 2],
-}
-
-/// Byte size of [`WebCommandReport`].
-pub const COMMAND_REPORT_BYTES: u32 = size_of::<WebCommandReport>() as u32;
 
 /// The sample window and shape of the meter frame the `f32` buffer cannot carry (issue #143 D5).
 ///
@@ -570,13 +455,13 @@ pub const COMMAND_REPORT_BYTES: u32 = size_of::<WebCommandReport>() as u32;
 ///
 /// `first_sample`/`end_sample` are half-open and describe only the track and master peak window.
 /// Gain-reduction slots are latest independently aged effect folds and do not inherit this span.
-/// A consumer correlates the peak span against a command's `applied_at_sample` rather than against
-/// a wall clock.
+/// A consumer correlates the peak span against an arm's sample (the `arm_sample` an
+/// `OBSERVATION_READ` row reports) rather than against a wall clock.
 ///
-/// The gain-reduction section is recomputed from the taps armed when each frame is polled. An
-/// unsubscribe disarms its tap when it is admitted, so every meter frame received after its
-/// `result === 0` acknowledgement leaves that tap out. A subscribe, also one that re-arms an armed
-/// tap, restarts its tap's window at the acknowledgement's `appliedAtSample`, and the frame leaves
+/// The gain-reduction section is recomputed from the taps armed when each frame is polled. A
+/// disarm (an `Observe` edit with `armed: false`) is in effect from the block render applies it,
+/// so every meter frame polled after that block leaves that tap out. An arm, also one that re-arms
+/// an armed tap, restarts its tap's window at the block render applies it, and the frame leaves
 /// that tap out until a window that opens at or after that sample closes. A strip's slot
 /// (`trackGrDb`, `submixGrDb`) is the maximum over its armed taps' latest windows that opened at or
 /// after their last subscribe, and `0` when no armed tap has such a window. `masterGrDb` is `null`
@@ -726,9 +611,9 @@ pub struct WebBootOptions {
     /// Maximum declared observation taps to bind per effect, or `0` for no observation capacity
     /// at all (issue #143 D3, level 1).
     ///
-    /// A nonzero value allocates the command staging, which is what accepts the observation
-    /// records (kinds 7 and 8): a subscription rides the effect's own observation queue. With zero,
-    /// a command submission is `RESULT_UNSUPPORTED` with `COMMAND_REASON_UNSUPPORTED_KIND`.
+    /// A nonzero value binds a queue for every declared tap, so the session serves the `Observe`
+    /// edit and `OBSERVATION_READ` (#1589 R1): a subscription rides the effect's own observation
+    /// queue. With zero, an `Observe` edit is refused `observation.unavailable`.
     pub live_control_observation_taps: u64,
     /// Must be zero. This was the master boot word (the designated master strip index plus one)
     /// until #1689 retired it: the master is the strip's `master` row, written by `SET_CONTROL`
@@ -979,9 +864,6 @@ struct PreparedBuffers {
     source_id: Box<[u8]>,
     source_pcm: Box<[f32]>,
     output_pcm: Box<[f32]>,
-    /// Fixed `MAXIMUM_COMMAND_RECORDS * COMMAND_RECORD_BYTES` observation-command staging (issue
-    /// #137 D1); empty unless the boot asked for observation taps.
-    command: Box<[u8]>,
     /// One control frame (issue #1562a D1): [`CONTROL_FRAME_BYTES`], the boot's
     /// `maximum_control_frame_bytes`. Staged by the page, read by the control plane in place.
     control_request: Box<[u8]>,
@@ -995,14 +877,12 @@ type FfiSourceStaging<'a> = (
 );
 
 /// What the browser knows of one effect instance of the plan, in the dense `effect_slot` order
-/// (#1381a): where its producer is in the control plane's list, what the instance declares, and,
-/// when it declares a tap, where its reader set is in the attachment's [`RenderCompanions`].
+/// (#1381a): what the instance declares and, when it declares a tap, where its reader set is in
+/// the attachment's [`RenderCompanions`].
 ///
 /// The queries that name an effect read this table, and only the window reads reach the
-/// attachment; an observe record reaches the instance's observation queue through `producer`.
+/// attachment.
 struct EffectInstance {
-    /// The position of this effect's producer in [`SessionState::effect_producers`].
-    producer: u32,
     /// The position of this effect's [`EffectObservationHandle`] in `RenderCompanions`'s list, or
     /// `None` for an effect that declares no tap.
     reader: Option<u32>,
@@ -1034,20 +914,19 @@ struct PlanShape {
     /// `track_index` addresses (issue #1213 D1).
     tracks: Vec<Box<str>>,
     /// Canonical normalized submix order, the strip order's trailing segment: submix `j` is strip
-    /// `tracks.len() + j` (issue #1207 D2), which is the index word a command addresses it by
-    /// (issue #1213 D1).
+    /// `tracks.len() + j` (issue #1207 D2), which is the index word an observation selection
+    /// addresses it by (issue #1213 D1).
     submixes: Vec<Box<str>>,
     /// Effects per strip (tracks, then submixes) in each lowered rack, in chain order
-    /// `[pre_insert, inserts, post_insert]`, so an effect-addressed command is answered with
-    /// `UNKNOWN_EFFECT` before anything else ([`LiveEffectAddress::lower`] reads them).
+    /// `[pre_insert, inserts, post_insert]`, so an effect-addressed read finds its effect by
+    /// arithmetic ([`LiveEffectAddress::lower`] reads them).
     rack_effects: Box<[[u32; 3]]>,
     /// Per-strip prefix sum of effect instances, so `effect_slot` is arithmetic, not a lookup:
     /// the tracks first, then the submixes (issue #1207 D3), so a track's entry is the same with
     /// or without submixes.
     effect_base: Box<[u32]>,
     /// Every effect instance of the plan in the dense `effect_slot` order, whose length is the
-    /// number of instances. It is how an observe record (kinds 7 and 8, ruling C9) reaches its
-    /// effect's observation queue, and how the reads reach its readers.
+    /// number of instances. It is how the reads reach an effect's readers.
     effect_instances: Box<[Option<EffectInstance>]>,
     /// Issue #143: the meter consumers (issue #137 D2, one per selected meter, empty when
     /// `live_control_meter_blocks` was zero) and the observation reader sets are the plan's
@@ -1056,31 +935,9 @@ struct PlanShape {
     /// for a slot with no taps. Built once at compilation, so the poll's fold is arithmetic rather
     /// than a search.
     observation_tracks: Box<[u32]>,
-    /// The dense effect slot of each producer of the plan, in the control plane's producer order:
-    /// entry `p` is the slot whose [`EffectInstance::producer`] is `p`. The inverse of that field,
-    /// built in the same preparation loop, so the key the control plane resolved to a producer
-    /// position reaches the per-slot tap state by an index, not a search (#1677).
-    producer_slots: Box<[u32]>,
     /// The designated master strip index (tracks first, then submixes), or `None` (issue #143
     /// D6, issue #1213 D5).
     master_track: Option<u32>,
-    /// Room needed per effect's observation queue by the submission being validated: the
-    /// subscriptions it queues on each effect. Allocated at compilation, one entry per effect
-    /// instance.
-    command_wanted: Box<[u32]>,
-    /// The observation taps the submission being validated has named, one bit per tap, one word per
-    /// effect instance (a session binds at most [`MAXIMUM_OBSERVATION_TAPS`] taps per effect).
-    /// An `Observe` record overwrites its tap's whole state at the block that drains it and one
-    /// submission drains in one block, so a submission names each tap once (#1345 D2). Cleared with
-    /// `command_wanted` at the top of every submission.
-    observe_named: Box<[u32]>,
-    /// Observation subscriptions admitted per effect queue since the last successful render.
-    ///
-    /// The browser's control plane and render plane are the same thread and every live-control
-    /// stage drains its whole observation queue at the top of every block, so a successful render
-    /// empties every control queue. That is what makes this an exact free-slot count rather than
-    /// an estimate, and it is what lets a submission be refused *before* anything is queued.
-    in_flight: Box<[u32]>,
     /// The plan's meter delivery tables (#1582 R1): built with the plan, off the render thread,
     /// and handed to the delivery by pointer exchange at the block that adopts the plan. `None`
     /// while the plan renders (the delivery holds them); a retired plan's are back here, for the
@@ -1170,20 +1027,10 @@ struct ReadyOwnership {
     /// (#1290a D6), saturating: a rebuild's preparation and publication run on the thread that
     /// also renders, so each one is a blocking rebuild, counted and reported.
     blocking_rebuilds: u32,
-    /// Whether the boot asked for observation taps (`live_control_observation_taps != 0`): the
-    /// command staging exists and the observation records (kinds 7 and 8) are accepted only then.
-    commands_enabled: bool,
     /// A handle on the session's `live_values_superseded` count (#1312 D2): the one count the
     /// control plane made, which every cell reader of every plan the session prepares adds to,
     /// and which the status reports (#1399).
     live_values_superseded: host_core::LiveValuesSuperseded,
-    /// Decoded submission staging: one entry per staged record, [`MAXIMUM_COMMAND_RECORDS`] long.
-    command_decoded: Box<[StagedObserve]>,
-    /// Whether any subscription has been queued since the last successful render.
-    ///
-    /// This keeps command-free blocks from walking every destination counter. It is set at each
-    /// successful push, so a partial internal failure cannot accidentally credit queue capacity.
-    has_in_flight_commands: bool,
     /// The session's one meter delivery (#1582 D1): the output meter's reader and gate (#1581 D5),
     /// the level the lease drives, the window grid, the generation, the loss count and the
     /// rendering plan's meter tables. The poll calls it and copies the frame it publishes into
@@ -1534,44 +1381,10 @@ impl ReadyOwnership {
                     core::ptr::from_ref(&entry.shape.meter_header)
                 });
             self.shape.name_successor(waiting);
-            // The tables hold the admissions made against the plan before it rendered; the block
-            // that adopted it drained its observation queues at its top, so the pass that follows
-            // the swap clears the counts (a block that did not adopt cleared only the tables of
-            // the plan it rendered).
-            self.has_in_flight_commands = true;
         }
     }
 
     // REALTIME_POLICY_END
-
-    /// Run `admit` with the tables of the newest committed plan in place of the rendering plan's
-    /// (#1290a, batch 10 review): the rendering plan's while no replacement is waiting for its
-    /// block, else the waiting replacement's, the plan whose producers the control plane lists
-    /// (`effect_producers`). An observation record names its tap by stable key; the tables resolve
-    /// the key to an effect (#1677) and the producers reach its queue, so both must be one plan's:
-    /// the newest, as a live value is, so a submission between a rebuild's commit and its adoption
-    /// is admitted against the successor and takes effect on it, and the browser answers nothing
-    /// the C ABI would not.
-    ///
-    /// The tables are exchanged by pointer and exchanged back before this returns, so nothing
-    /// allocates and the rendering plan's tables are the host's again for the next render call.
-    /// `Err` only when the control plane's newest epoch has no waiting tables, which a commit
-    /// never leaves (the command keeps the tables of every plan it publishes).
-    fn admit_on_newest_plan<T>(&mut self, admit: impl FnOnce(&mut Self) -> T) -> Result<T, ()> {
-        let newest = self.control.newest_plan_epoch();
-        if newest == self.shape_epoch {
-            return Ok(admit(self));
-        }
-        let index = self
-            .pending_shapes
-            .iter()
-            .position(|entry| !entry.adopted && entry.epoch == newest)
-            .ok_or(())?;
-        core::mem::swap(&mut self.shape, &mut self.pending_shapes[index].shape);
-        let admitted = admit(self);
-        core::mem::swap(&mut self.shape, &mut self.pending_shapes[index].shape);
-        Ok(admitted)
-    }
 
     /// The session's `OBSERVATION_READ` index of the plan render runs (#1589 R2): the epoch of
     /// [`Self::shape`], whose readers the active plan's [`RenderCompanions`] hold, so a read
@@ -1596,30 +1409,6 @@ impl ReadyOwnership {
         )?;
         (slot < self.shape.effect_instances.len()).then_some(slot)
     }
-
-    /// The position, in the control plane's producer list, of the effect at dense slot `effect`
-    /// (#1381a): the one way the observation records reach an effect's observation queue (ruling
-    /// C9). A free function of the shape, so the admission can read it while it lends the control
-    /// plane mutably.
-    fn effect_producer_position(shape: &PlanShape, effect: usize) -> Option<usize> {
-        let position = shape.effect_instances.get(effect)?.as_ref()?.producer;
-        Some(position as usize)
-    }
-}
-
-/// One decoded and validated observation record (kinds 7 and 8), in the order of its submission.
-#[derive(Clone, Copy)]
-struct StagedObserve {
-    /// The dense effect index the record addresses.
-    effect: u32,
-    /// The wire index of the record, which names it in a refusal.
-    original_wire_index: u32,
-    /// The effect-local tap index the render side arms.
-    tap_index: u32,
-    /// Whether the record arms (kind 7) or disarms (kind 8) the tap.
-    armed: bool,
-    /// The window length in render blocks (`0` = the plan's default).
-    window_blocks: u32,
 }
 
 /// One compiled source's declared shape, in canonical normalized source order (issue #207).
@@ -1642,7 +1431,6 @@ pub struct AudioWorkletEngineHost {
     source_ring_frames: u32,
     status: WebStatus,
     resources: WebResourceReport,
-    command_report: WebCommandReport,
     /// The watermark `read_watermark` last copied (#1381a D5), at a stable address in the
     /// control half: all zero until the first successful read.
     watermark: WebPlanWatermark,
@@ -1745,12 +1533,8 @@ impl AudioWorkletEngineHost {
                 "web.options.source_ring_frames",
             ));
         }
-        let projection = project_buffers(
-            document_bytes,
-            shape.sample_rate_hz,
-            shape.quantum_frames,
-            options,
-        )?;
+        let projection =
+            project_buffers(document_bytes, shape.sample_rate_hz, shape.quantum_frames)?;
         let retained_projection = projected_retained_bytes(
             &session,
             source_ring_frames,
@@ -1807,7 +1591,6 @@ impl AudioWorkletEngineHost {
                 watermark_outcome_flags: initial_watermark.outcome_flags,
             },
             resources,
-            command_report: empty_command_report(),
             watermark: WebPlanWatermark {
                 struct_size: WATERMARK_BYTES,
                 ..WebPlanWatermark::default()
@@ -2333,12 +2116,6 @@ impl AudioWorkletEngineHost {
         &self.watermark
     }
 
-    /// Read the last live-control submission report (issue #137 D1).
-    #[must_use]
-    pub const fn command_report(&self) -> &WebCommandReport {
-        &self.command_report
-    }
-
     /// Canonical normalized track order, the addressing authority for `track_index`.
     #[must_use]
     pub fn live_control_tracks(&self) -> &[Box<str>] {
@@ -2750,36 +2527,6 @@ impl AudioWorkletEngineHost {
         self.buffers.as_ref().map(|value| &*value.output_pcm)
     }
 
-    /// Mutable live-control command staging, or `None` when no live controls were attached.
-    ///
-    /// This is the buffer the JavaScript side writes records into through
-    /// `miso_engine_web_v1_buffer_ptr(handle, BUFFER_COMMAND)`; it is public so an embedding that
-    /// drives the safe host directly -- the native parity twin, the metadata round-trip gate --
-    /// stages exactly the bytes the browser stages.
-    pub fn command_staging_mut(&mut self) -> Option<&mut [u8]> {
-        self.buffers
-            .as_mut()
-            .map(|value| &mut *value.command)
-            .filter(|value| !value.is_empty())
-    }
-
-    /// Exact byte size of the live-control command staging buffer; zero when none was attached.
-    #[must_use]
-    pub fn command_staging_bytes(&self) -> u64 {
-        self.buffers
-            .as_ref()
-            .map_or(0, |value| value.command.len() as u64)
-    }
-
-    /// Whether the boot asked for observation taps, so the command staging exists and the
-    /// observation records (kinds 7 and 8) are accepted (issue #137 D1; #1565).
-    #[must_use]
-    pub fn live_controls_attached(&self) -> bool {
-        self.ready
-            .as_ref()
-            .is_some_and(|ready| ready.commands_enabled)
-    }
-
     /// Copy one canonical source ID into ID staging; returns its byte length (issue #207).
     ///
     /// Zero means "no such source", and also a staging that cannot hold the ID: staging is sized
@@ -3087,97 +2834,12 @@ impl AudioWorkletEngineHost {
                 // #1399: the session's count, loaded after the block that added to it, so the
                 // status is never behind the last rendered block.
                 self.status.live_values_superseded = ready.live_values_superseded.get();
-                // Issue #137 D1: every effect stage drained its observation queue at the top of
-                // this block, so the exact free-slot count is the whole capacity again. Command-free
-                // blocks have no counters to clear and skip the dense write pass entirely.
-                if ready.has_in_flight_commands {
-                    #[cfg(test)]
-                    record_admission_counter_clear(ready.shape.in_flight.len());
-                    ready.shape.in_flight.fill(0);
-                    ready.has_in_flight_commands = false;
-                }
                 self.record(RESULT_OK)
             }
             Err(_) => self.fail(RESULT_RENDER_REJECTED, b"web.render.rejected\t$\n"),
         }
     }
     // REALTIME_POLICY_END
-
-    /// Admit one staged `miso.command.v1` submission of observation records (kinds 7 and 8) as a
-    /// single transaction (issue #137 D1; #1565A).
-    ///
-    /// The browser's value kinds are gone: every value goes through the core
-    /// ([`Self::control_command`]). What stays is the monitor operation that arms or disarms an
-    /// effect's observation tap. A record of any other kind is `MALFORMED` at its index, as an
-    /// unknown kind always was.
-    ///
-    /// # The two-pass shape is the contract, not an optimisation
-    ///
-    /// Pass one validates every record -- shape, addressing, tap, and free queue room -- and
-    /// pushes nothing. Pass two pushes. A submission is therefore all-or-nothing: eval E4's "engine
-    /// state untouched" is a property of the code, not of a lucky ordering, and eval E3's flood of
-    /// queued records is refused before a single one reaches a queue.
-    ///
-    /// # Why this is not on the render thread's critical path
-    ///
-    /// This runs from `port.onmessage`, which the user agent dispatches between render quanta on
-    /// the same thread as `process()`. It performs no allocation, no compilation and no plan
-    /// replacement: the staging arrays were allocated at compilation, and the call moves at most
-    /// [`MAXIMUM_COMMAND_RECORDS`] `Copy` records into the bounded observation queues. The block
-    /// that follows drains the queues.
-    pub fn submit_commands(&mut self, count: u32) -> u32 {
-        self.command_report = empty_command_report();
-        if self.status.state != STATE_READY {
-            return self.finish_commands(RESULT_WRONG_STATE, COMMAND_REASON_WRONG_STATE, 0, 0);
-        }
-        if count > MAXIMUM_COMMAND_RECORDS {
-            return self.finish_commands(RESULT_INVALID_ARGUMENT, COMMAND_REASON_MALFORMED, 0, 0);
-        }
-        if !self.live_controls_attached() {
-            return self.finish_commands(RESULT_UNSUPPORTED, COMMAND_REASON_UNSUPPORTED_KIND, 0, 0);
-        }
-        let applied_at_sample = self.status.next_absolute_sample;
-        let staged = count as usize * COMMAND_RECORD_BYTES as usize;
-        if self.buffers.is_none() {
-            return self.fail(RESULT_INTERNAL, b"web.internal.buffers\t$\n");
-        }
-        if self.ready.is_none() {
-            return self.fail(RESULT_INTERNAL, b"web.internal.ready\t$\n");
-        }
-        // Disjoint borrows: the staged bytes live in `buffers`, the live controls live in `ready`.
-        let Some((buffers, ready)) = self.buffers.as_ref().zip(self.ready.as_mut()) else {
-            return self.fail(RESULT_INTERNAL, b"web.internal.live_controls\t$\n");
-        };
-        let Some(bytes) = buffers.command.get(..staged) else {
-            return self.finish_commands(RESULT_INVALID_ARGUMENT, COMMAND_REASON_MALFORMED, 0, 0);
-        };
-        // #1290a: against the newest committed plan, the successor between a rebuild's commit and
-        // its adoption block (see `admit_on_newest_plan`).
-        let admitted =
-            ready.admit_on_newest_plan(|newest| admit_commands(newest, bytes, count as usize));
-        let Ok(admitted) = admitted else {
-            return self.fail(RESULT_INTERNAL, b"web.internal.pending_shape\t$\n");
-        };
-        match admitted {
-            Ok(()) => {
-                self.command_report.applied_at_sample = applied_at_sample;
-                self.finish_commands(RESULT_OK, COMMAND_REASON_NONE, 0, count)
-            }
-            Err(CommandRejection {
-                result,
-                reason,
-                index,
-            }) if result == RESULT_INTERNAL => {
-                self.finish_commands(RESULT_INTERNAL, reason, index, 0);
-                self.fail(RESULT_INTERNAL, b"web.internal.command\t$\n")
-            }
-            Err(CommandRejection {
-                result,
-                reason,
-                index,
-            }) => self.finish_commands(result, reason, index, 0),
-        }
-    }
 
     // REALTIME_POLICY_BEGIN
     /// Drain every finished meter window into the frame buffer (issue #137 D2) and, while the
@@ -3202,17 +2864,6 @@ impl AudioWorkletEngineHost {
         poll_meter_delivery(ready, plan, next_sample)
     }
     // REALTIME_POLICY_END
-    fn finish_commands(&mut self, result: u32, reason: u32, index: u32, admitted: u32) -> u32 {
-        self.command_report.result = result;
-        self.command_report.reason = reason;
-        self.command_report.rejected_index = index;
-        self.command_report.admitted = admitted;
-        if admitted == 0 {
-            self.command_report.applied_at_sample = self.status.next_absolute_sample;
-        }
-        self.record(result)
-    }
-
     pub(crate) fn record_boundary_result(&mut self, code: u32) -> u32 {
         self.record(code)
     }
@@ -3277,284 +2928,6 @@ impl AudioWorkletEngineHost {
         }
         self.record(code)
     }
-}
-
-/// One refused submission: the frozen result, the typed reason, and the offending record.
-struct CommandRejection {
-    result: u32,
-    reason: u32,
-    index: u32,
-}
-
-/// One decoded, still-unapplied `miso.command.v1` record (issue #137 D1, #1677).
-///
-/// # The frozen 272-byte little-endian layout
-///
-/// | offset | width | field |
-/// |---|---|---|
-/// | 0 | u8 | `kind`: [`COMMAND_OBSERVE_SUBSCRIBE`] or [`COMMAND_OBSERVE_UNSUBSCRIBE`] |
-/// | 1 | u8 | `rack`: `1` inserts, `3` console; `0` and `2` retired |
-/// | 2 | u8 | `strip_id_bytes`: the length of the strip ID, `1..=127` |
-/// | 3 | u8 | `effect_id_bytes`: the length of the console slot's or insert's ID, `1..=127` |
-/// | 4 | u32 | `tap_id`: the effect-local tap ID |
-/// | 8 | u32 | `window_blocks`: the window length in render blocks (`0` = the plan's default) |
-/// | 12 | u32 | required zero |
-/// | 16 | 128 bytes | `strip_id`: the strip's ID, zero padded |
-/// | 144 | 128 bytes | `effect_id`: the console slot's or insert's ID, zero padded |
-///
-/// The record names its tap by the stable key `OBSERVATION_ENDED` uses (strip, section, slot or
-/// insert ID, tap ID). No index of any plan is in it, so the core resolves the key on the plan it
-/// admits the record against, and a rebuild between a client's last read and the record cannot make
-/// it arm another effect's tap. Kinds 1-6 and 9-17 are deleted (#1565A) and their numbers are never
-/// reallocated. There is no string parsing on this path: the IDs are compared as bytes with the
-/// plan's own.
-#[derive(Clone, Copy)]
-struct CommandRecord<'a> {
-    kind: u32,
-    rack: u8,
-    tap_id: u32,
-    window_blocks: u32,
-    strip_id: &'a [u8],
-    effect_id: &'a [u8],
-}
-
-impl<'a> CommandRecord<'a> {
-    fn decode(bytes: &'a [u8]) -> Result<Self, u32> {
-        const ID: usize = RECORD_ID_FIELD_BYTES as usize;
-        if bytes.len() != COMMAND_RECORD_BYTES as usize {
-            return Err(COMMAND_REASON_MALFORMED);
-        }
-        let word = |offset: usize| {
-            u32::from_le_bytes([
-                bytes[offset],
-                bytes[offset + 1],
-                bytes[offset + 2],
-                bytes[offset + 3],
-            ])
-        };
-        if word(12) != 0 {
-            return Err(COMMAND_REASON_MALFORMED);
-        }
-        let kind = u32::from(bytes[0]);
-        if !matches!(
-            kind,
-            COMMAND_OBSERVE_SUBSCRIBE | COMMAND_OBSERVE_UNSUBSCRIBE
-        ) {
-            return Err(COMMAND_REASON_MALFORMED);
-        }
-        // An ID field holds its bytes and then zeros: a length of zero, a length past the field,
-        // or a byte after the length, is a record that does not say what it names. A stable ID is
-        // 1..=127 bytes, so an empty one names nothing.
-        let id = |length: u8, offset: usize| -> Result<&'a [u8], u32> {
-            let length = usize::from(length);
-            let field = &bytes[offset..offset + ID];
-            if length == 0 || length >= ID || field[length..].iter().any(|byte| *byte != 0) {
-                return Err(COMMAND_REASON_MALFORMED);
-            }
-            Ok(&field[..length])
-        };
-        Ok(Self {
-            kind,
-            rack: bytes[1],
-            tap_id: word(4),
-            window_blocks: word(8),
-            strip_id: id(bytes[2], 16)?,
-            effect_id: id(bytes[3], 16 + ID)?,
-        })
-    }
-
-    /// The stable key this record names, for the control plane to resolve on the plan it admits
-    /// against (#1677). `rack` is the one part of the key the record spells as a code: an unknown
-    /// code, the retired `simd1` and `simd2` among them, is [`COMMAND_REASON_UNKNOWN_RACK`].
-    fn key(&self) -> Result<ObservationKeyRef<'a>, u32> {
-        let rack = match self.rack {
-            RACK_INSERTS => LiveEffectRack::Inserts,
-            RACK_CONSOLE => LiveEffectRack::Console,
-            _ => return Err(COMMAND_REASON_UNKNOWN_RACK),
-        };
-        Ok(ObservationKeyRef {
-            strip_id: self.strip_id,
-            rack,
-            effect_id: self.effect_id,
-            tap_id: self.tap_id,
-        })
-    }
-}
-
-/// The reason a key the control plane could not resolve is refused with (#1677).
-const fn key_refusal(error: ObservationKeyError) -> u32 {
-    match error {
-        ObservationKeyError::UnknownStrip => COMMAND_REASON_UNKNOWN_TRACK,
-        ObservationKeyError::UnknownEffect => COMMAND_REASON_UNKNOWN_EFFECT,
-        ObservationKeyError::UnknownTap => COMMAND_REASON_UNKNOWN_TAP,
-        ObservationKeyError::ComputedTap => COMMAND_REASON_UNSUPPORTED_KIND,
-    }
-}
-
-/// Validate a whole staged submission, then admit it. Nothing is pushed unless everything passes.
-///
-/// # The two passes are the contract, not an optimisation (#137 D1, #1565A)
-///
-/// Pass one decodes and lowers every record and counts the room each effect's observation queue
-/// needs, then checks that room against every queue the submission touches. Pass two pushes. A
-/// submission is therefore all-or-nothing: the refusal names the first record that broke a rule,
-/// and a refused submission leaves every queue as it was.
-fn admit_commands(
-    ready: &mut ReadyOwnership,
-    bytes: &[u8],
-    count: usize,
-) -> Result<(), CommandRejection> {
-    let record_bytes = COMMAND_RECORD_BYTES as usize;
-    ready.shape.command_wanted.fill(0);
-    ready.shape.observe_named.fill(0);
-    let refuse = |reason: u32, index: usize| CommandRejection {
-        result: match reason {
-            // `ObservationUnbound` is "this preparation cannot deliver it", which is exactly what
-            // `RESULT_UNSUPPORTED` means; `UnknownTap` is a bad address, like every other unknown.
-            // `ObservationLimit` is the same answer for the configuration: this session's control
-            // frame cannot carry the end of one more tap, and only an unsubscribe changes that.
-            COMMAND_REASON_UNSUPPORTED_KIND
-            | COMMAND_REASON_OBSERVATION_UNBOUND
-            | COMMAND_REASON_OBSERVATION_LIMIT => RESULT_UNSUPPORTED,
-            COMMAND_REASON_BACKPRESSURE => RESULT_BACKPRESSURE,
-            _ => RESULT_INVALID_ARGUMENT,
-        },
-        reason,
-        index: index as u32,
-    };
-    let mut staged_count = 0_usize;
-    for index in 0..count {
-        let record = &bytes[index * record_bytes..(index + 1) * record_bytes];
-        let command = CommandRecord::decode(record).map_err(|reason| refuse(reason, index))?;
-        // The record names its tap by stable key, and the control plane resolves it on the newest
-        // committed plan, the one this submission is admitted against (#1677). Every refusal is
-        // here, before the room pass and any write.
-        let key = command.key().map_err(|reason| refuse(reason, index))?;
-        let resolved = ready
-            .control
-            .resolve_observation_key(&key)
-            .map_err(|error| refuse(key_refusal(error), index))?;
-        let tap_index = resolved.tap_index;
-        let armed = command.kind == COMMAND_OBSERVE_SUBSCRIBE;
-        let window_blocks = command.window_blocks;
-        // The tables of the same plan reach the effect's per-slot state from its producer.
-        let Some((effect, observed)) = ready
-            .shape
-            .producer_slots
-            .get(resolved.producer)
-            .map(|slot| *slot as usize)
-            .and_then(|slot| {
-                let instance = ready.shape.effect_instances.get(slot)?.as_ref()?;
-                Some((slot, instance.reader.is_some()))
-            })
-        else {
-            return Err(refuse(COMMAND_REASON_UNSUPPORTED_KIND, index));
-        };
-        // The tap exists and the key is right; this *session* bound no lane to arm.
-        if !observed {
-            return Err(refuse(COMMAND_REASON_OBSERVATION_UNBOUND, index));
-        }
-        // One submission names each tap once: a record overwrites its tap's whole state and the
-        // submission drains in one block, so the second record would be a supersession the engine
-        // must not make (D15-2: Observe records are never superseded) and would not fit the tap's
-        // queue slot. Refused here, at this record's wire index, before the room pass or any
-        // write.
-        let bit = 1_u32
-            .checked_shl(tap_index)
-            .ok_or_else(|| refuse(COMMAND_REASON_MALFORMED, index))?;
-        let named = ready
-            .shape
-            .observe_named
-            .get_mut(effect)
-            .ok_or_else(|| refuse(COMMAND_REASON_MALFORMED, index))?;
-        if *named & bit != 0 {
-            return Err(refuse(COMMAND_REASON_MALFORMED, index));
-        }
-        *named |= bit;
-        let Some(wanted) = ready.shape.command_wanted.get_mut(effect) else {
-            return Err(refuse(COMMAND_REASON_UNSUPPORTED_KIND, index));
-        };
-        *wanted = wanted.saturating_add(1);
-        let Some(entry) = ready.command_decoded.get_mut(staged_count) else {
-            return Err(refuse(COMMAND_REASON_MALFORMED, index));
-        };
-        *entry = StagedObserve {
-            effect: effect as u32,
-            original_wire_index: index as u32,
-            tap_index,
-            armed,
-            window_blocks,
-        };
-        staged_count += 1;
-    }
-    // The in-flight counter of an effect counts its records the render side has not drained. The
-    // queue's room bounds it far below `u32::MAX`, so this refusal is a defence that never fires;
-    // it runs before the core is lent the batch because nothing may be refused after a push.
-    for entry in 0..staged_count {
-        let staged = ready.command_decoded[entry];
-        let effect = staged.effect as usize;
-        if ready.shape.in_flight[effect]
-            .checked_add(ready.shape.command_wanted[effect])
-            .is_none()
-        {
-            return Err(refuse(
-                COMMAND_REASON_BACKPRESSURE,
-                staged.original_wire_index as usize,
-            ));
-        }
-    }
-    // The frame, the room and the push are one core call (#1676, #1685): the control plane judges
-    // the whole submission by the encoded bytes of the one `OBSERVATION_ENDED` event the taps it
-    // leaves armed would need, then by the room of every effect's observation queue, and only then
-    // queues it. A subscription whose event would outgrow the control frame is refused there,
-    // before any record is queued and so before any is acknowledged, and the adapter reports it as
-    // `observationLimit` at the record that crossed it.
-    // A change's index in the batch is its staged index, and the staged index names the record's
-    // wire index.
-    let staged = &ready.command_decoded[..staged_count];
-    let shape = &ready.shape;
-    let admitted = ready
-        .control
-        .admit_and_push_observation_batch(staged.iter().map(|staged| {
-            ObservationChange {
-                // Pass one resolved every record to a producer; a position that vanished names no
-                // producer and is refused as such.
-                position: ReadyOwnership::effect_producer_position(shape, staged.effect as usize)
-                    .unwrap_or(usize::MAX),
-                tap_index: staged.tap_index,
-                armed: staged.armed,
-                window_blocks: staged.window_blocks,
-            }
-        }));
-    if let Err(refusal) = admitted {
-        let (reason, index) = match refusal {
-            ObservationRefusal::Limit(limit) => (COMMAND_REASON_OBSERVATION_LIMIT, limit.index),
-            ObservationRefusal::Full { index } => (COMMAND_REASON_BACKPRESSURE, index),
-            ObservationRefusal::NoProducer { index } => (COMMAND_REASON_UNSUPPORTED_KIND, index),
-            // Pass one already refuses a second naming of a tap as malformed at that record; the
-            // core's own check gives the same answer, so the browser's outcome is one.
-            ObservationRefusal::Duplicate { index } => (COMMAND_REASON_MALFORMED, index),
-            // Pass one resolved the tap from the effect's menu and refused an effect with no
-            // reader as `observationUnbound`; the core's own slot check gives the same answer.
-            ObservationRefusal::Unbound { index } => (COMMAND_REASON_OBSERVATION_UNBOUND, index),
-        };
-        let wire = staged
-            .get(index)
-            .map_or(0, |staged| staged.original_wire_index as usize);
-        return Err(refuse(reason, wire));
-    }
-    debug_assert!(
-        ready.control.observation_ended_bytes() <= ready.control.observation_frame_bytes(),
-        "a browser admission left an ended event of {} bytes past the frame of {}",
-        ready.control.observation_ended_bytes(),
-        ready.control.observation_frame_bytes()
-    );
-    for entry in 0..staged_count {
-        let staged = ready.command_decoded[entry];
-        ready.shape.in_flight[staged.effect as usize] += 1;
-        ready.has_in_flight_commands = true;
-    }
-    Ok(())
 }
 
 /// Resolve one stable selected-observation tuple against the current prepared owner.
@@ -3812,19 +3185,6 @@ impl From<host_core::observation::ObservationReadError> for ObservationReadError
     }
 }
 
-const fn empty_command_report() -> WebCommandReport {
-    WebCommandReport {
-        struct_size: COMMAND_REPORT_BYTES,
-        abi_version: ABI_VERSION,
-        result: RESULT_OK,
-        reason: COMMAND_REASON_NONE,
-        rejected_index: 0,
-        admitted: 0,
-        applied_at_sample: 0,
-        reserved: [0; 2],
-    }
-}
-
 const fn selected_backend() -> u32 {
     if cfg!(all(target_arch = "wasm32", target_feature = "simd128")) {
         BACKEND_SIMD128
@@ -3930,7 +3290,6 @@ impl From<Vec<u8>> for BootFailure {
 #[derive(Clone, Copy)]
 struct PreparedBufferProjection {
     source_samples: u64,
-    command_records: u32,
     report: WebResourceReport,
 }
 
@@ -3947,7 +3306,6 @@ fn project_buffers(
     document_bytes: u32,
     sample_rate_hz: u32,
     quantum_frames: u32,
-    options: WebBootOptions,
 ) -> Result<PreparedBufferProjection, BootFailure> {
     // The staging holds what a rebuild may add, not only what the boot session declares (#1562b):
     // a source, track or submix ID of the longest length the grammar allows, and a source of the
@@ -3962,16 +3320,6 @@ fn project_buffers(
     let source_pcm_bytes = source_samples.checked_mul(4).ok_or_else(arithmetic)?;
     let output_pcm_bytes = u64::from(quantum_frames)
         .checked_mul(8)
-        .ok_or_else(arithmetic)?;
-    // The command staging exists exactly when the boot asked for observation taps (#1565): kinds 7
-    // and 8 are the only records it holds.
-    let command_records = if options.live_control_observation_taps == 0 {
-        0
-    } else {
-        MAXIMUM_COMMAND_RECORDS
-    };
-    let command_bytes = u64::from(command_records)
-        .checked_mul(u64::from(COMMAND_RECORD_BYTES))
         .ok_or_else(arithmetic)?;
     let plane_reference_bytes = u64::from(maximum_source_channels)
         .checked_mul(size_of::<&[f32]>() as u64)
@@ -3993,7 +3341,6 @@ fn project_buffers(
         id_staging_bytes,
         source_pcm_bytes,
         output_pcm_bytes,
-        command_bytes,
         CONTROL_FRAME_BYTES,
         bridge_metadata,
     ];
@@ -4025,7 +3372,6 @@ fn project_buffers(
     report.largest_named_allocation_bytes = largest;
     Ok(PreparedBufferProjection {
         source_samples,
-        command_records,
         report,
     })
 }
@@ -4041,8 +3387,6 @@ fn allocate_buffers(projection: PreparedBufferProjection) -> Result<PreparedBuff
         .map_err(allocation)?,
         source_pcm: boxed_zero_f32(projection.source_samples).map_err(allocation)?,
         output_pcm: boxed_zero_f32(u64::from(projection.report.quantum_frames) * 2)
-            .map_err(allocation)?,
-        command: boxed_zero_u8(projection.command_records * COMMAND_RECORD_BYTES)
             .map_err(allocation)?,
         control_request: boxed_zero_u8(CONTROL_FRAME_BYTES as u32).map_err(allocation)?,
         plane_references: boxed_uninit_planes(
@@ -4299,8 +3643,8 @@ impl ControlAdapter for WebAdapter {
     /// #1589a: the session serves the `Observe` edit and `OBSERVATION_READ` (with capability bit
     /// 15) for a boot whose observation taps bind every declared tap
     /// ([`control_plane::RuntimePreparer::observation_queues`], R1). The edit's records ride the
-    /// same producers as kinds 7 and 8, through the one control plane, so each queue keeps one
-    /// writer (the control half); the read reads the readers the render half keeps, which the
+    /// effects' producers through the one control plane, the only writer of each queue since
+    /// #1589c deleted kinds 7 and 8; the read reads the readers the render half keeps, which the
     /// control entry lends with their plan's epoch (R2).
     const OBSERVE_EDIT: bool = true;
 }
@@ -4813,19 +4157,13 @@ fn build_plan_shape(
         }
     }
     // #1381a: the effect producers are the control plane's. The browser keeps, in the dense slot
-    // order, where each instance's producer is, so an observe record (kinds 7 and 8) reaches its
-    // effect's observation queue through the control plane's accessor.
+    // order, what each instance is, so a read reaches its readers.
     let mut effect_instances: Vec<Option<EffectInstance>> = Vec::new();
     effect_instances
         .try_reserve_exact(total_effects as usize)
         .map_err(|_| "web.resource.allocation")?;
     effect_instances.resize_with(total_effects as usize, || None);
-    let mut producer_slots: Vec<u32> = Vec::new();
-    producer_slots
-        .try_reserve_exact(producers.len())
-        .map_err(|_| "web.resource.allocation")?;
-    producer_slots.resize(producers.len(), u32::MAX);
-    for (position, producer) in producers.iter().enumerate() {
+    for producer in producers {
         let (track_id, address, effect_id, descriptor) = (
             &producer.track_id,
             &producer.address,
@@ -4843,13 +4181,7 @@ fn build_plan_shape(
         if entry.is_some() {
             return Err("web.live_controls.effects");
         }
-        // The slot the entry sits at: `dense_effect_slot` again, since `entry` borrows the table.
-        let slot = dense_effect_slot(effect_base[strip], rack_effects[strip], *address)
-            .and_then(|slot| u32::try_from(slot).ok())
-            .ok_or("web.live_controls.effects")?;
-        producer_slots[position] = slot;
         *entry = Some(EffectInstance {
-            producer: u32::try_from(position).map_err(|_| "web.live_controls.effects")?,
             reader: None,
             track_id: track_id.clone(),
             effect_id: effect_id.clone(),
@@ -4900,13 +4232,9 @@ fn build_plan_shape(
         effect_base: effect_base.into_boxed_slice(),
         effect_instances: effect_instances.into_boxed_slice(),
         observation_tracks: observation_tracks.into_boxed_slice(),
-        producer_slots: producer_slots.into_boxed_slice(),
         // #1689: no plan is prepared with a master; `ReadyOwnership::sync_master` points the
         // shape at the strip the core's `master` row designates after every control command.
         master_track: None,
-        command_wanted: zero_u32(total_effects as usize)?,
-        observe_named: zero_u32(total_effects as usize)?,
-        in_flight: zero_u32(total_effects as usize)?,
         meter_tables: Some(meter_tables),
         meter_ring: None,
         meter_frame,
@@ -4951,16 +4279,6 @@ fn address_word<T>(pointer: *const T) -> u32 {
     u32::try_from(pointer.addr()).unwrap_or(0)
 }
 
-/// `count` zero words, or the allocation refusal.
-fn zero_u32(count: usize) -> Result<Box<[u32]>, &'static str> {
-    let mut value = Vec::new();
-    value
-        .try_reserve_exact(count)
-        .map_err(|_| "web.resource.allocation")?;
-    value.resize(count, 0);
-    Ok(value.into_boxed_slice())
-}
-
 /// The bridge rows one plan's tables are charged (issue #1290a): the boot charges them to the
 /// bridge, a replacement plan charges them to its attachment, so the swap budget counts them.
 struct ShapeRows {
@@ -4993,13 +4311,7 @@ impl PlanShape {
                 })?;
         let instance_table_bytes = u64::try_from(self.effect_instances.len())
             .ok()?
-            .checked_mul((size_of::<Option<EffectInstance>>() + size_of::<u32>()) as u64)?
-            // #1677: the producer-to-instance table is retained beside it.
-            .checked_add(
-                u64::try_from(self.producer_slots.len())
-                    .ok()?
-                    .checked_mul(size_of::<u32>() as u64)?,
-            )?;
+            .checked_mul((size_of::<Option<EffectInstance>>() + size_of::<u32>()) as u64)?;
         // #1582 R1: the delivery tables, held here from the plan's preparation to its adoption
         // and from its retirement on; the boot plan's are charged before the delivery takes them.
         let (meter_tables_bytes, meter_tables_largest) =
@@ -5091,8 +4403,7 @@ fn charge_attachment(
 /// The control plane's `compile_children` prepares the boot plan through [`WebRuntimePreparer`]
 /// and owns the producers from then on: the sources, the strips' and effects' cells, the plan's
 /// revision gate and the exchange's control ends. What this function builds is the browser's own:
-/// the dense tables that address the readers in the plan's attachment, the live-control mirrors
-/// of the retained command path, and the report. Engine-owned rows come from the plan's
+/// the dense tables that address the readers in the plan's attachment and the report. Engine-owned rows come from the plan's
 /// [`PlanResources`] row and the preparer's [`BootRecord`]; the browser bridge's own rows
 /// (staging buffers, the host shell, the plane-reference table) were already computed by
 /// `prepare_buffers`, and the three browser caps are applied here because they are the *browser's*
@@ -5104,9 +4415,6 @@ fn compile_ready(
     memory_budget: u64,
     mut report: WebResourceReport,
 ) -> Result<(ReadyOwnership, WebPlan, WebResourceReport), BootFailure> {
-    // The command staging, and with it the observation records, exist exactly when the boot asked
-    // for observation taps (#1565).
-    let commands_enabled = options.live_control_observation_taps != 0;
     // #1312 D2, #1399: the session's `live_values_superseded` count is the control plane's, made
     // once before any plan is prepared; the preparer leaves a handle on it in the record, which the
     // status reads.
@@ -5225,29 +4533,6 @@ fn compile_ready(
     report.largest_named_allocation_bytes = report
         .largest_named_allocation_bytes
         .max(report.largest_bridge_allocation_bytes);
-    // The decoded observation staging is a separate retained allocation from the public wire
-    // staging row; charge the full actual array before the final aggregate budget check.
-    let decoded_count = if commands_enabled {
-        MAXIMUM_COMMAND_RECORDS as usize
-    } else {
-        0
-    };
-    let decoded_bytes = u64::try_from(decoded_count)
-        .ok()
-        .and_then(|count| count.checked_mul(size_of::<StagedObserve>() as u64))
-        .ok_or_else(|| fixed_diagnostic("web.resource.arithmetic"))?;
-    report.bridge_metadata_bytes = report
-        .bridge_metadata_bytes
-        .checked_add(decoded_bytes)
-        .ok_or_else(|| fixed_diagnostic("web.resource.arithmetic"))?;
-    report.bridge_retained_bytes = report
-        .bridge_retained_bytes
-        .checked_add(decoded_bytes)
-        .ok_or_else(|| fixed_diagnostic("web.resource.arithmetic"))?;
-    report.largest_bridge_allocation_bytes =
-        report.largest_bridge_allocation_bytes.max(decoded_bytes);
-    report.largest_named_allocation_bytes =
-        report.largest_named_allocation_bytes.max(decoded_bytes);
     let queries = plan.queries();
     // #1290a D3: a replacement is admitted against the one budget. What it leaves for the plans is
     // the budget less every byte the bridge retains, the committed model aside: the replacement's
@@ -5292,7 +4577,6 @@ fn compile_ready(
         queries,
         #[cfg(feature = "test-support")]
         limits,
-        commands_enabled,
         live_values_superseded,
         shape: {
             let mut shape = Box::new(shape);
@@ -5309,8 +4593,6 @@ fn compile_ready(
             pending
         },
         blocking_rebuilds: 0,
-        command_decoded: boxed_observe_staging(decoded_count)?,
-        has_in_flight_commands: false,
         meters: MeterDelivery::new(
             output_reader,
             output_gate,
@@ -5344,24 +4626,6 @@ fn live_control_request(
         // Issue #143 D3: a carved browser configuration word, translated once, here.
         observation_taps: u32::try_from(options.live_control_observation_taps).ok()?,
     })
-}
-
-/// The decode staging of the observation records: `count` entries, none when the boot asked for no
-/// observation taps.
-fn boxed_observe_staging(count: usize) -> Result<Box<[StagedObserve]>, Vec<u8>> {
-    let empty = StagedObserve {
-        effect: 0,
-        original_wire_index: 0,
-        tap_index: 0,
-        armed: false,
-        window_blocks: 0,
-    };
-    let mut value = Vec::new();
-    value
-        .try_reserve_exact(count)
-        .map_err(|_| fixed_diagnostic("web.resource.allocation"))?;
-    value.resize(count, empty);
-    Ok(value.into_boxed_slice())
 }
 
 /// One `code\t$\n` diagnostic line for a rule that names no session path.
@@ -5405,33 +4669,6 @@ fn boxed_uninit_planes(channels: u32) -> Result<Box<[MaybeUninit<&'static [f32]>
         .map_err(|_| RESULT_REFUSED_BUDGET)?;
     value.resize_with(count, MaybeUninit::uninit);
     Ok(value.into_boxed_slice())
-}
-
-#[cfg(test)]
-std::thread_local! {
-    static ADMISSION_COUNTER_CLEAR: std::cell::Cell<(u64, u64)> =
-        const { std::cell::Cell::new((0, 0)) };
-}
-
-#[cfg(test)]
-fn reset_admission_counter_clear() {
-    ADMISSION_COUNTER_CLEAR.with(|stats| stats.set((0, 0)));
-}
-
-#[cfg(test)]
-fn admission_counter_clear_stats() -> (u64, u64) {
-    ADMISSION_COUNTER_CLEAR.with(std::cell::Cell::get)
-}
-
-#[cfg(test)]
-fn record_admission_counter_clear(elements: usize) {
-    ADMISSION_COUNTER_CLEAR.with(|stats| {
-        let (calls, cleared) = stats.get();
-        stats.set((
-            calls.saturating_add(1),
-            cleared.saturating_add(elements as u64),
-        ));
-    });
 }
 
 mod ffi;

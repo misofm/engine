@@ -3,7 +3,6 @@ import type { BootOptions } from "../core/abi.ts";
 import { MisoEngineAsset } from "../core/asset.ts";
 import { MAXIMUM_DOCUMENT_BYTES, WasmBoundary } from "../core/boundary.ts";
 import type {
-  CommandReport,
   ControlEvent,
   EngineCallResult,
   EngineStatus,
@@ -72,7 +71,6 @@ import type { SessionTransaction } from "../core/session-transaction.ts";
 import { MisoEngineError, MisoUsageError } from "../core/errors.ts";
 import type { ErrorPhase, MisoDiagnostic, MisoErrorCode } from "../core/errors.ts";
 import { loadBundledEngineAsset } from "./assets.ts";
-import { encodeLaneEdits } from "../core/writer.ts";
 
 let defaultAsset: Promise<MisoEngineAsset> | undefined;
 
@@ -361,13 +359,9 @@ export class OfflineEngine {
       : undefined;
     return new EngineLiveControls(map, {
       queue: this.controlTransactions(),
-      observe: (edits) => this.submitCommands(encodeLaneEdits(edits), edits.length),
       // The boundary caches the order by structure epoch: a probe each call, the list when it moved.
       order: this.#boundary.stripOrder(),
-    },
-      (edits) => this.#observationSubscriptions?.beforeLiveControlSubmit(edits),
-      session,
-      this.#booted);
+    }, session, this.#booted);
   }
 
   /**
@@ -716,10 +710,6 @@ export class OfflineEngine {
     // settles every `applied` it covers (D3).
     this.watermark();
     return output;
-  }
-
-  submitCommands(records: Uint8Array, count: number): CommandReport {
-    return this.#boundary.submitCommands(records, count);
   }
 
   /**

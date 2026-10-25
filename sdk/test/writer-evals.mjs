@@ -7,20 +7,19 @@
  *
  * Since #1312, #1346, #1347 and #1345 every live value (fader, mute, pan, input filter, route, and
  * every effect parameter, bypass and EQ target) is held in a latest-target cell, which cannot
- * refuse for room. The one live record that still rides a bounded queue is an effect's
- * observation subscription, with one slot per tap the effect declares, so the refusal these evals
- * drive is an observation record into a full queue. The cell contract has its own eval: a paused
- * host takes any number of effect edits, none is refused, and the last value of each lands.
+ * refuse for room, and since #1589c the writer sends value edits only. The refusal these evals
+ * drive is the core's `backpressure` status for a full control queue. The cell contract has its own
+ * eval: a paused host takes any number of effect edits, none is refused, and the last value of each
+ * lands.
  */
 
 import assert from "node:assert/strict";
 import { before, describe, test } from "node:test";
 
 import { MisoEngineAsset } from "../src/core/asset.ts";
-import { LiveControlWriter, encodeLaneEdits } from "../src/core/writer.ts";
+import { LiveControlWriter } from "../src/core/writer.ts";
 import { CONTROL_TRANSACTION_HEADER_BYTES, controlEditBytes } from "../src/core/control-frame.ts";
 import { MisoControlRefusal, MisoEngineError, MisoUsageError } from "../src/core/errors.ts";
-import { ABI_LAYOUT } from "../src/generated/abi.ts";
 import { CATALOG } from "../src/generated/catalog.ts";
 import { createOfflineEngine } from "../src/headless/engine.ts";
 import { effectEntry, moduleBytes, ramp, sessionDocument } from "./support.mjs";
@@ -46,25 +45,6 @@ function liveControlDocument(instances = 1) {
     effects: {
       preInsert: Array.from({ length: instances }, (_unused, index) =>
         effectEntry(`eq${index}`, "miso.parametric-eq", EQ_PARAMS)),
-    },
-  });
-}
-
-/** `count` compressor inserts, each with one observation tap and so a one-slot subscription queue. */
-function compressorsDocument(count = 1) {
-  const compressor = CATALOG.effects.find((effect) => effect.id === "miso.compressor");
-  return sessionDocument({
-    effects: {
-      inserts: Array.from({ length: count }, (_unused, index) => effectEntry(
-        `compressor${index}`,
-        compressor.id,
-        compressor.parameters.map((row) => ({
-          id: row.id,
-          unit: row.unitName,
-          value: row.default,
-          channel: "both",
-        })),
-      )),
     },
   });
 }
@@ -117,21 +97,6 @@ before(async () => {
 
 async function pausedEngine(instances = 1) {
   return createOfflineEngine(liveControlDocument(instances), { asset });
-}
-
-/** A paused engine whose compressors each declare one tap, so each has a one-slot queue. */
-async function observedEngine(count = 1) {
-  return createOfflineEngine(compressorsDocument(count), {
-    asset,
-    liveControls: { observationTaps: 4 },
-  });
-}
-
-/** The subscription (or its withdrawal) of compressor `index`'s tap, as the SDK's own builder makes it. */
-function observeEdit(engine, index, armed, windowBlocks = 0) {
-  return engine.liveControls().edit.track("t")
-    .insert(`compressor${index}`, "miso.compressor")
-    .observe("Gain Reduction", armed, windowBlocks);
 }
 
 function feedAndRender(engine) {
@@ -198,119 +163,6 @@ describe("the writer contract -- paused", () => {
       last.dispose();
     }
   });
-
-  test("a flush into a full observation queue surfaces typed reason-8 and drops nothing", async () => {
-    // The one live record that still rides a bounded queue: a compressor declares one tap, so its
-    // subscription queue has one slot. The engine is asked, and the arithmetic is checked against
-    // its answer.
-    const engine = await observedEngine();
-    try {
-      const writer = new LiveControlWriter({
-        submit: (records, count) => engine.submitCommands(records, count),
-        maximumBatch: 1,
-      });
-      writer.stage(observeEdit(engine, 0, true, 2));
-      const taken = await writer.flush();
-      assert.equal(taken.refused, false, "the one slot is free");
-      assert.equal(taken.admitted, 1);
-
-      writer.stage(observeEdit(engine, 0, false));
-      const refused = await writer.flush();
-      assert.equal(refused.refused, true, "the one slot is taken and nothing has rendered");
-      assert.equal(refused.reason, "backpressure");
-      assert.equal(
-        ABI_LAYOUT.constants.commandReasons.find((row) => row.name === "backpressure").value,
-        8,
-        "backpressure is reason 8",
-      );
-      assert.equal(refused.admitted, 0, "a refusal admits nothing");
-      assert.equal(refused.pending, 1, "a refused record stays pending; it is not dropped");
-
-      // Never an error, never terminal.
-      assert.equal(writer.stats.escalations, 0, "flow control must not escalate");
-      assert.equal(writer.stats.refusals, 1);
-    } finally {
-      engine.dispose();
-    }
-  });
-
-  test("a refusal is not terminal: after a render the FINAL record lands", async () => {
-    const engine = await observedEngine();
-    try {
-      const writer = new LiveControlWriter({
-        submit: (records, count) => engine.submitCommands(records, count),
-        maximumBatch: 1,
-      });
-      writer.stage(observeEdit(engine, 0, true, 2));
-      await writer.flush();
-
-      // The slot is taken: every later attempt is refused while the hand keeps moving.
-      for (const windowBlocks of [1, 2, 3, 4]) {
-        writer.stage(observeEdit(engine, 0, false, windowBlocks));
-        const outcome = await writer.flush();
-        assert.equal(outcome.refused, true);
-      }
-      assert.equal(
-        writer.pending,
-        1,
-        "latest-wins coalescing means a full queue never builds a backlog: one address, "
-        + "one pending record, however long the gesture lasted",
-      );
-      assert.equal(writer.stats.escalations, 0);
-
-      // The transport moves: one render drains the observation queue.
-      feedAndRender(engine);
-
-      const outcome = await writer.drain();
-      assert.equal(outcome.refused, false, "after a render the pending record fits");
-      assert.equal(writer.pending, 0, "the final record landed");
-      assert.equal(writer.stats.escalations, 0, "nothing escalated across the whole episode");
-    } finally {
-      engine.dispose();
-    }
-  });
-
-  test("a batch larger than the queue splits under the same contract and lands across renders", async () => {
-    // Three compressors, each with a one-slot queue; the first one's slot is taken, so a second
-    // operation on its tap is refused and the whole three-record batch is refused (admission is
-    // atomic) and the writer narrows until the engine says yes.
-    const engine = await observedEngine(3);
-    try {
-      const writer = new LiveControlWriter({
-        submit: (records, count) => engine.submitCommands(records, count),
-        maximumBatch: 3,
-      });
-      writer.stage(observeEdit(engine, 0, true, 2));
-      const seed = await writer.flush();
-      assert.equal(seed.refused, false);
-
-      // The full queue's record is last, so everything the engine can take sits ahead of it.
-      for (const index of [1, 2, 0]) writer.stage(observeEdit(engine, index, false));
-      assert.equal(writer.pending, 3, "three distinct addresses do not coalesce");
-      const first = await writer.flush();
-      assert.equal(first.refused, true, "the first compressor's queue is full");
-      assert.equal(first.reason, "backpressure");
-      assert.equal(first.pending, 3, "a refusal admits nothing and drops nothing");
-      assert.ok(first.nextBatch < 3, "the writer narrows its next attempt");
-
-      // The narrowed batch is admitted while the host is paused: the writer was never told the
-      // boundary, it halved until the engine said yes, and the record whose queue is full waits.
-      const admittedBefore = writer.stats.admitted;
-      await writer.drain();
-      assert.ok(writer.stats.admitted > admittedBefore, "the split admitted part of the batch");
-      assert.ok(writer.pending > 0 && writer.pending < 3, "the blocked record is still pending");
-
-      for (let block = 0; block < 8 && writer.pending > 0; block += 1) {
-        feedAndRender(engine);
-        await writer.drain();
-      }
-      assert.equal(writer.pending, 0, "every record landed once the transport moved");
-      assert.ok(writer.stats.refusals >= 1);
-      assert.equal(writer.stats.escalations, 0, "flow control never escalates");
-    } finally {
-      engine.dispose();
-    }
-  });
 });
 
 describe("the writer contract -- coalescing and escalation", () => {
@@ -359,7 +211,7 @@ describe("the writer contract -- coalescing and escalation", () => {
 
   test("backpressure from the core is flow control: nothing is dropped and nothing escalates", async () => {
     // The core answers a full control queue with the `backpressure` status. The writer halves its
-    // batch and keeps every edit pending, exactly as for a full observation queue.
+    // batch and keeps every edit pending.
     const calls = [];
     const full = {
       async submit(edits) {
@@ -386,123 +238,16 @@ describe("the writer contract -- coalescing and escalation", () => {
     assert.equal(writer.pending, 0);
   });
 
-  test("an observation record carries its tap's stable key and nothing positional (#1677)", async () => {
-    const at = (name) => ABI_LAYOUT.commandRecord.fields.find((row) => row.name === name).offset;
-    const edit = (stripId, effectId, tapId = 1) => ({
-      kind: "observeSubscribe", rack: 1, stripId, effectId, tapId, windowBlocks: 9,
-    });
-    const bytes = encodeLaneEdits([edit("kick", "comp", 7), edit("snare", "gate")]);
-    assert.equal(bytes.byteLength, 2 * ABI_LAYOUT.commandRecord.bytes);
-    const view = new DataView(bytes.buffer);
-    const text = (offset, length) => new TextDecoder().decode(bytes.subarray(offset, offset + length));
-    assert.equal(view.getUint8(at("stripIdBytes")), 4);
-    assert.equal(view.getUint8(at("effectIdBytes")), 4);
-    assert.equal(text(at("stripId"), 4), "kick");
-    assert.equal(text(at("effectId"), 4), "comp");
-    assert.equal(view.getUint32(at("tapId"), true), 7);
-    assert.equal(view.getUint32(at("windowBlocks"), true), 9);
-    // The field is zero padded after the ID: a byte of the previous record never shows through.
-    const second = ABI_LAYOUT.commandRecord.bytes;
-    assert.equal(text(second + at("stripId"), 5), "snare");
-    assert.ok(bytes.subarray(second + at("stripId") + 5, second + at("stripId") + 128).every((byte) => byte === 0));
-    // An ID the field cannot hold is refused before anything is staged.
-    assert.throws(() => encodeLaneEdits([edit("x".repeat(128), "comp")]), MisoUsageError);
-    assert.throws(() => encodeLaneEdits([edit("kick", "é".repeat(64))]), MisoUsageError);
-    assert.equal(encodeLaneEdits([edit("x".repeat(127), "y".repeat(127))]).byteLength, ABI_LAYOUT.commandRecord.bytes);
-    // A rack the record may not carry is refused, never wrapped onto another rack (#1542).
-    for (const rack of [257, 1.5, 0, 255]) {
-      assert.throws(() => encodeLaneEdits([edit("kick", "comp"), { ...edit("kick", "comp"), rack }]), MisoUsageError);
-    }
-    assert.throws(
-      () => new LiveControlWriter({ submit: () => assert.fail("not reached") }).stage({ ...edit("kick", "comp"), rack: 257 }),
-      MisoUsageError,
-    );
-    // Two taps that differ in the strip, the effect or the tap do not coalesce into one record.
-    const sent = [];
-    const writer = new LiveControlWriter({
-      submit: (records, count) => { sent.push(count); return { ok: true, result: 0, admitted: count }; },
-    });
-    for (const staged of [edit("a", "bc"), edit("ab", "c"), edit("a", "bc", 2), edit("a", "bc")]) writer.stage(staged);
-    assert.equal(writer.stats.coalesced, 1, "only the repeat of the first tap coalesces");
-    await writer.flush();
-    assert.deepEqual(sent, [3]);
-  });
-
-  test("one writer sends one kind of edit", () => {
+  test("an edit the frame cannot hold is refused at stage, and nothing is staged", () => {
     const control = new LiveControlWriter({ queue: { submit: () => assert.fail("not reached") } });
+    // The retired observation record (#1589c) has no control address.
     assert.throws(() => control.stage({ kind: "observeSubscribe", rack: 1, stripId: "t", effectId: "comp", tapId: 1, windowBlocks: 0 }), MisoUsageError);
-    const records = new LiveControlWriter({ submit: () => assert.fail("not reached") });
-    assert.throws(() => records.stage(faderEdit(0, -1)), MisoUsageError);
     assert.throws(() => control.stage({ ...faderEdit(0, -1), rampSamples: 1.5 }), MisoUsageError);
     assert.equal(control.pending, 0);
   });
 });
 
 describe("the writer contract -- the async submit boundary", () => {
-  /**
-   * The same episode, recorded flush by flush.
-   *
-   * `wrap` is the only thing that varies: it is what turns the engine's synchronous
-   * `submitCommands` into the shape a caller actually has. The app reaches the engine over a
-   * worklet port, so its report is a promise by construction (issue #246); the writer's contract
-   * is supposed to be identical either way, and "identical" is only a claim until the two
-   * transcripts are compared element for element.
-   *
-   * The episode deliberately covers all three paths: an admitted flush, the refusals of a full
-   * observation queue, and the drain that lands the rest once the transport moves.
-   */
-  async function episode(wrap, semantic = false) {
-    const engine = await observedEngine();
-    try {
-      const writer = new LiveControlWriter({
-        ...(semantic
-          ? { submitEdits: edits => engine.liveControls().submit(...edits) }
-          : { submit: wrap((records, count) => engine.submitCommands(records, count)) }),
-        maximumBatch: 1,
-      });
-      const outcomes = [];
-      const stats = [];
-      // The slot is taken by the first flush; the next two are refused with the hand still moving.
-      for (const [armed, windowBlocks] of [[true, 2], [false, 1], [false, 3]]) {
-        writer.stage(observeEdit(engine, 0, armed, windowBlocks));
-        outcomes.push(await writer.flush());
-        stats.push(writer.stats);
-      }
-      feedAndRender(engine);
-      outcomes.push(await writer.drain());
-      stats.push(writer.stats);
-      return { outcomes, stats, pending: writer.pending };
-    } finally {
-      engine.dispose();
-    }
-  }
-
-  /** The report as the engine hands it back, in-process. */
-  const immediately = (submit) => submit;
-
-  /** The report one microtask later, which is the cheapest honest stand-in for a port hop. */
-  const nextMicrotask = (submit) => async (records, count) => {
-    await Promise.resolve();
-    return submit(records, count);
-  };
-
-  test("an async submit produces the same outcomes and the same stats as a sync one", async () => {
-    const sync = await episode(immediately);
-    const async_ = await episode(nextMicrotask);
-    const semantic = await episode(undefined, true);
-
-    // Guard the fixture itself: a transcript that never refused and never admitted would compare
-    // equal for the wrong reason.
-    assert.ok(sync.outcomes.some((outcome) => outcome.refused), "the episode reached backpressure");
-    assert.ok(sync.stats.at(-1).admitted > 0, "the episode admitted records");
-    assert.equal(sync.stats.at(-1).escalations, 0);
-
-    assert.deepEqual(async_.outcomes, sync.outcomes, "outcome sequences must not differ by timing");
-    assert.deepEqual(async_.stats, sync.stats, "stat sequences must not differ by timing");
-    assert.equal(async_.pending, sync.pending);
-    assert.deepEqual(semantic, sync, "semantic transport preserves actual admission, backpressure and coalescing");
-  });
-
   test("two flushes entered without awaiting the first serialize into two disjoint batches", async () => {
     // The failure this guards is a torn batch: the second flush picking its keys out of the
     // pending map while the first is still awaiting its report, so both submit the SAME edits --
@@ -706,63 +451,18 @@ describe("the writer contract -- races the async boundary opens", () => {
       engine.dispose();
     }
   });
-
-  test("a refusal halves the count that was submitted, not the ceiling", async () => {
-    // `take` is min(batch, pending), and it is captured before the submit. Halving the CEILING
-    // instead would leave the next attempt larger than the batch that was just refused -- the
-    // opposite of narrowing -- and the gap is only visible when fewer edits are pending than the
-    // ceiling allows, which the synchronous writer's tests never staged.
-    const engine = await observedEngine(3);
-    try {
-      // Fill the first compressor's one-slot queue through a writer of its own, so the probe
-      // writer's batch is still its untouched ceiling of eight when it makes its one attempt.
-      const filler = new LiveControlWriter({
-        submit: (records, count) => engine.submitCommands(records, count),
-        maximumBatch: 4,
-      });
-      filler.stage(observeEdit(engine, 0, true, 2));
-      const outcome = await filler.flush();
-      assert.equal(outcome.refused, false, "the filler fits");
-      assert.equal(filler.stats.admitted, 1, "the queue is full to the record");
-
-      const writer = new LiveControlWriter({
-        submit: async (records, count) => {
-          await Promise.resolve();
-          return engine.submitCommands(records, count);
-        },
-        maximumBatch: 8,
-      });
-      for (const index of [0, 1, 2]) writer.stage(observeEdit(engine, index, true, 1));
-      assert.equal(writer.pending, 3, "three staged against a ceiling of eight");
-
-      const refused = await writer.flush();
-      assert.equal(refused.refused, true, "the filled queue has no room");
-      assert.equal(refused.reason, "backpressure");
-      assert.equal(
-        refused.nextBatch,
-        1,
-        "the three that were submitted halve to one; the ceiling of eight would halve to four",
-      );
-      assert.equal(refused.pending, 3, "a refusal drops nothing");
-      assert.equal(writer.stats.refusals, 1);
-      assert.equal(writer.stats.escalations, 0);
-    } finally {
-      engine.dispose();
-    }
-  });
 });
 
 
-test("writer construction requires exactly one callable submission path", () => {
+test("writer construction requires a queue with a callable submit", () => {
   const submit = () => { throw new Error("constructor must not submit"); };
+  // #1589c: the record callbacks `submit` and `submitEdits` are gone; a queue is the one path.
   for (const options of [
-    {}, { submit, submitEdits: submit }, { submit: 1 }, { submitEdits: null },
-    { queue: { submit }, submit }, { queue: {} }, { queue: null },
+    {}, { submit }, { submitEdits: submit }, { queue: { submit }, submit }, { queue: {} }, { queue: null },
+    { queue: { submit }, maximumBatch: 0 },
   ]) {
     assert.throws(() => new LiveControlWriter(options), MisoUsageError);
   }
-  assert.doesNotThrow(() => new LiveControlWriter({ submit }));
-  assert.doesNotThrow(() => new LiveControlWriter({ submitEdits: submit }));
   assert.doesNotThrow(() => new LiveControlWriter({ queue: { submit } }));
 });
 
@@ -878,7 +578,7 @@ describe("the writer does not get stuck on a refusal (batch 7 M3)", () => {
 
 describe("the writer sizes a batch by bytes (batch 7 M4)", () => {
   test("no submit is larger than the host's frame, and every edit still lands", async () => {
-    // Plausible defect: the default batch of 256 edits (~160 bytes each) is one frame over the
+    // Plausible defect: a default batch of hundreds of edits (~160 bytes each) is one frame over the
     // host's 4 KiB or 16 KiB ceiling, which fails on every send and is resent forever.
     const edits = GAIN_IDS.flatMap((parameterId) => [0, 1, 2].map((lane) => gainEdit(parameterId, lane, -1)));
     const each = controlEditBytes(edits[0]);

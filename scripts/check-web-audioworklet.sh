@@ -281,8 +281,6 @@ expected_exports=$(printf '%s\n' \
   miso_engine_web_v1_boot_result \
   miso_engine_web_v1_buffer_capacity \
   miso_engine_web_v1_buffer_ptr \
-  miso_engine_web_v1_command_report_ptr \
-  miso_engine_web_v1_command_submit \
   miso_engine_web_v1_control_allocation_count \
   miso_engine_web_v1_control_command \
   miso_engine_web_v1_control_event \
@@ -358,23 +356,6 @@ expected_functions=$(grep -vx memory <<<"$expected_exports")
 [[ "$layout_exports" == "$expected_functions" ]] || {
   echo "the ABI layout document's published exports are not the frozen export set" >&2
   diff -u <(printf '%s\n' "$expected_functions") <(printf '%s\n' "$layout_exports") >&2 || true
-  exit 1
-}
-
-# Issue #382: both shipped JS files hand-type the command record stride, and the worklet reads
-# `records.byteLength / COMMAND_RECORD_BYTES` records. Each file must declare it exactly once, equal
-# to the shipped layout's `commandRecord.bytes`, so a generator change to the record cannot leave
-# either side reading misaligned records.
-python3 -B -c '
-import json, re, sys
-stride = json.load(open(sys.argv[1], encoding="utf-8"))["commandRecord"]["bytes"]
-for path in sys.argv[2:]:
-    text = open(path, encoding="utf-8").read()
-    found = re.findall(r"^const COMMAND_RECORD_BYTES = (\d+);$", text, re.M)
-    if found != [str(stride)]:
-        sys.exit(f"{path}: COMMAND_RECORD_BYTES {found} is not commandRecord.bytes {stride}")
-' "$layout_json" "$main_js" "$worklet_js" || {
-  echo "a shipped JS command record stride is not the ABI layout's" >&2
   exit 1
 }
 
@@ -546,24 +527,15 @@ printf '%s
   python3 -B "$callgraph" --kernel-shape --kernel-pattern '4wide6f32x4' --kernel-min 13 ||
   exit 1
 
-# #137 D1/D2: the two exports `process()` calls beside the render export get the same allocation
-# gate. `miso_engine_web_v1_meter_poll` runs on the render thread after every rendered block, and
-# `miso_engine_web_v1_command_submit` runs in `port.onmessage`, which the user agent dispatches
-# between quanta on that same thread; neither may reach an allocator or drop glue.
-# Neither closure admits a trap owner (#2041; `render_inner` is in neither). The allocation
-# half of the gate is absolute: an allocator, a deallocator or drop glue in either closure fails.
+# #137 D2: the export `process()` calls beside the render export gets the same allocation gate.
+# `miso_engine_web_v1_meter_poll` runs on the render thread after every rendered block; it may not
+# reach an allocator or drop glue. Its closure admits no trap owner (#2041; `render_inner` is not
+# in it). The allocation half of the gate is absolute: an allocator, a deallocator or drop glue in
+# the closure fails. (#1589c deleted `command_submit`, the observation records' export, which this
+# gate held too: an `Observe` edit is control work through `control_command`.)
 printf '%s
 ' "$named_disassembly" |
   python3 -B "$callgraph" --callgraph miso_engine_web_v1_meter_poll \
-    --render-thread || exit 1
-# `command_submit` runs in `port.onmessage`, not in `process()`, and since #1565A it carries only
-# the observation subscribe and unsubscribe records (the value kinds are deleted; every value goes
-# through `control_command`). The engine's rule for the control path is "never allocate on the
-# render thread", so the allocation half is what this export is held to -- and it is held to it
-# absolutely.
-printf '%s
-' "$named_disassembly" |
-  python3 -B "$callgraph" --callgraph miso_engine_web_v1_command_submit --allocation-only \
     --render-thread || exit 1
 
 # #137 D3 amends the browser-capability ban deliberately.
@@ -633,26 +605,11 @@ python3 -B "$(dirname "${BASH_SOURCE[0]}")/check-parameter-metadata-v1.py" \
 python3 -B "$(dirname "${BASH_SOURCE[0]}")/check-abi-layout-v1.py" \
   "$artifact_dir/miso-engine-v1-abi-layout.json" || exit 1
 
-# Issues #143/#151: the command-reason vocabulary is written out five times -- Rust constants, the
-# host JS acknowledgement table, the `.d.ts` enum, the metadata generator's rows and the schema
-# gate's own list -- and the app's dead GR meters were what a two-reason drift between them cost.
-# The gate is run over the SHIPPED js/.d.ts/JSON, so a stale artifact fails here too, and it also
-# holds the `.d.ts`'s `observe()` declaration to the shipped implementation's actual field sets.
-python3 -B "$(dirname "${BASH_SOURCE[0]}")/check-command-reason-vocabulary.py" \
-  --artifacts "$artifact_dir" || exit 1
-
-# Issue #210 phase 0: the command-KIND vocabulary, across the Rust constants, the wire's decode
-# whitelist, the host JS `COMMAND_KINDS` set, the `.d.ts` enum, the generator's rows, the schema
-# gate's list and the SHIPPED `commandKinds`. Before this gate the shipped document stopped at six
-# kinds while the wire decoded eight, and nothing in the tree could see it.
-python3 -B "$(dirname "${BASH_SOURCE[0]}")/check-command-kind-vocabulary.py" \
-  --artifacts "$artifact_dir" || exit 1
-
 # Issue #207: the session map's shape, across the five places that now spell it -- the Rust FFI's
 # introspection exports (which decide each field's width), the frozen export list above, the
 # worklet that calls them, the main-realm host's acknowledgement validator, and the `.d.ts` an SDK
 # generates against. `--artifacts` additionally holds the SHIPPED js/.d.ts to the tree's, so a
-# stale artifact fails here as it does for the two vocabulary gates.
+# stale artifact fails here.
 python3 -B "$(dirname "${BASH_SOURCE[0]}")/check-session-map-shape.py" \
   --artifacts "$artifact_dir" || exit 1
 

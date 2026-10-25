@@ -995,7 +995,7 @@ describe("issue #1097 -- live controls address console slots by slot ID and inse
     // Red mutation: skip the check when the booted document is absent -> any builder is accepted.
     const controls = new EngineLiveControls(
       { tracks: ["a", "b"], sources: [], metersAttached: false, submixes: [] },
-      { queue: undefined, observe: () => assert.fail("nothing is submitted") },
+      { queue: undefined },
     );
     assert.throws(() => controls.withSession(addressedStrip()), /constructed without it/);
   });

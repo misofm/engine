@@ -2,8 +2,7 @@
 //! allocate inside their render-locked windows.
 //!
 //! The PCM-feed worklet calls `source_submit` and `source_seek` from `process()`; the engine
-//! worklet's port handlers call them, the observation command admission and the meter lease on
-//! the same thread. Each export wraps its body in `render_locked`, so an allocation in it, or in
+//! worklet's port handlers call them and the meter lease on the same thread. Each export wraps its body in `render_locked`, so an allocation in it, or in
 //! what it calls, moves the instance's render-allocation count. This binary drives every one of
 //! them through its export on a fresh thread, accepted and refused, and reads the count after each
 //! call.
@@ -15,7 +14,6 @@
 use std::alloc::System;
 
 use host_web::{
-    COMMAND_OBSERVE_SUBSCRIBE, COMMAND_RECORD_BYTES, RACK_CONSOLE, RACK_NOT_APPLICABLE,
     RESULT_INVALID_ARGUMENT, RESULT_OK, RenderLockedAllocator, WebBootOptions, native_staging,
 };
 use protocol::{
@@ -105,51 +103,6 @@ fn source_exports(handle: u32, before: u32) {
     );
 }
 
-/// The observation command admission, accepted-empty and refused: the worklet's port handler calls
-/// `command_submit` between render quanta, and its bodies never allocate.
-fn command_exports(handle: u32, before: u32) {
-    let submit = host_web::miso_engine_web_v1_command_submit;
-    unchanged(
-        before,
-        "command_submit (empty)",
-        submit(handle, 0),
-        RESULT_OK,
-    );
-    // A deleted value kind (3 was `faderDb`) is malformed at its index and moves nothing.
-    let mut record = [0_u8; COMMAND_RECORD_BYTES as usize];
-    record[0] = 3;
-    record[1] = RACK_NOT_APPLICABLE;
-    assert!(native_staging::command_records(handle, &record));
-    unchanged(
-        before,
-        "command_submit (refused: a deleted kind)",
-        submit(handle, 1),
-        RESULT_INVALID_ARGUMENT,
-    );
-    // An observe record naming a key the plan does not have is refused at the key.
-    let mut record = [0_u8; COMMAND_RECORD_BYTES as usize];
-    record[0] = COMMAND_OBSERVE_SUBSCRIBE as u8;
-    record[1] = RACK_CONSOLE;
-    record[2] = 5;
-    record[3] = 4;
-    record[4..8].copy_from_slice(&1_u32.to_le_bytes());
-    record[16..21].copy_from_slice(b"track");
-    record[144..148].copy_from_slice(b"slot");
-    assert!(native_staging::command_records(handle, &record));
-    unchanged(
-        before,
-        "command_submit (refused: unknown key)",
-        submit(handle, 1),
-        RESULT_INVALID_ARGUMENT,
-    );
-    unchanged(
-        before,
-        "command_submit (refused: past the staging)",
-        submit(handle, u32::MAX),
-        RESULT_INVALID_ARGUMENT,
-    );
-}
-
 fn lease_exports(handle: u32, before: u32) {
     let lease = host_web::miso_engine_web_v1_meter_lease;
     unchanged(before, "meter_lease (take)", lease(handle, 1), RESULT_OK);
@@ -218,8 +171,6 @@ fn post_boot_control_exports_never_allocate_in_the_render_locked_window() {
     render(handle, 4);
     let before = host_web::miso_engine_web_v1_render_allocation_count();
     source_exports(handle, before);
-    render(handle, 4);
-    command_exports(handle, before);
     render(handle, 4);
     lease_exports(handle, before);
     render(handle, 4);

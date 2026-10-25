@@ -25,7 +25,8 @@ of truth that goes stale the moment a kernel changes.
 * every declared float is finite, ordered and free of `-0.0`, so an identity comparison never
   depends on a zero's sign.
 
-Addressing mirrors `miso.command.v1` exactly: `(track_index, rack, effect_index, tap_id)`. The rack
+The browser's numeric selected read addresses a tap as `(track_index, rack, effect_index, tap_id)`;
+the core's `Observe` edit and `OBSERVATION_READ` name it by stable key (#1677, #1589). The rack
 is the session's (decision 12, #1096): `1` for an insert, with `effect_index` its position in the
 track's `inserts`, and `3` for a console slot, with `effect_index` the slot's position in the
 session's slot order (`pre_insert`, then `post_insert`). The retired `simd1` (`0`) and `simd2` (`2`)
@@ -67,10 +68,9 @@ The queue holds observation records only. The effect's parameter, bypass and EQ-
 latest-target cells (#1345): a later write to a cell replaces the value render has not yet read,
 and the replaced write is counted in `live_values_superseded`. Observation records are never
 replaced or coalesced; they stay in order. An `Observe` record overwrites its tap's whole state at
-the block that drains it, so one submission names each tap at most once: admission refuses a second
-`Observe` for the same tap in one submission with `COMMAND_REASON_MALFORMED`, before it writes
-anything. A submission whose `Observe` records do not fit the queue's free slots, because earlier records
-are not yet drained, is answered with `COMMAND_REASON_BACKPRESSURE`, which clears after one render.
+the block that drains it, so one transaction queues at most one record per tap, before it writes
+anything. A transaction whose `Observe` records do not fit the queue's free slots, because earlier
+records are not yet drained, is refused with backpressure, which clears after one render.
 
 Render drains one block's cells and records together: bypass, then parameter cells, then target
 cells, then the observation queue. So STATE and IMPACT still correlate on one sample timeline
@@ -139,10 +139,9 @@ vocabulary: no wire, ABI or frame layout changes.
 
 `MisoMeterFrame.trackGrDb` is positional and `trackCount` long, and every entry is finite.
 `0` deliberately conflates "not reducing" with "no observed effect on this track", because the
-array is read without null checks. The distinction lives in the `miso.observe.v1` acknowledgement's
-subscription map — `{ stripId, rack, effectId, tapId, windowBlocks }` — which is the only place
-that can express it. A record names its tap by this stable key (issue #1677) and no position of any
-plan. The strip's reading is at its position in the control list's strip order: below `trackCount`
+array is read without null checks. The distinction lives in the observation map and the
+`OBSERVATION_READ` rows. An `Observe` edit names its tap by its stable key (issue #1677) and no
+position of any plan. The strip's reading is at its position in the control list's strip order: below `trackCount`
 it indexes `trackGrDb`, and from there a bus's reading is `submixGrDb[position - trackCount]`.
 
 Several armed taps on one track fold max-magnitude into the one slot, on the control plane. Each
@@ -157,9 +156,8 @@ issue #1683), held by the core by strip ID, on every host. Any strip can be the 
 too (issue #1213), so a mix bus whose limiter is observed reports its gain reduction as
 `masterGrDb`; the meter header's `masterTrackPlusOne` names its position in the strip order plus
 one. The browser's boot options carry no master word: issue #1689 retired it, and offset 56 is
-`reserved2`, refused unless zero (`web.options.reserved2`). A command's `trackIndex` is the strip
-index, tracks first, then submixes, so kind 7 at `T + j` arms a bus effect's tap and its reading
-folds into `submixGrDb[j]`.
+`reserved2`, refused unless zero (`web.options.reserved2`). A bus effect's tap is armed by its
+submix's ID, and its reading folds into `submixGrDb[j]`, the bus at strip position `T + j`.
 
 ## Plan replacement drops subscriptions
 

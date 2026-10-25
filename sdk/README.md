@@ -417,10 +417,11 @@ batches through the queue, for gesture loops; the core's `backpressure` status i
 never an error. The root entry's `parameter()` helper provides exact decimal/lattice edits for
 agent-facing controls.
 
-Observation subscriptions (`console(...)` or `insert(...)` then `.observe(...)`) are the one edit that
-is still a command record: it names its tap by stable key (the strip's ID, the console slot's or
+Observation subscriptions (`engine.subscribeObservations(...)`) send the core's `Observe` edit
+through the same control queue, naming each tap by stable key (the strip's ID, the console slot's or
 insert's ID, the tap's ID), which the core resolves on the newest committed plan and refuses with a
-typed reason when it has no such tap. They resolve with a `CommandReport` and need
+typed `MisoEngineError` when it has no such tap. A subscription's `armed()` resolves with the sample
+at which render applied every arm, from the core's `OBSERVATION_READ` rows. They need
 `liveControls.observationTaps` at boot, passed to `createOfflineEngine` directly or under
 `policy` to `createEngine`. The cap must be at least the largest tap count of any effect in the
 session (4 for `miso.dynamic-eq`, one tap per band): a lower positive cap refuses the boot with

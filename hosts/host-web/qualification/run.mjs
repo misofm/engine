@@ -66,6 +66,8 @@ const MUTATIONS = Object.freeze([
   // a run whose armed tap published nothing, which is exactly what a browser that lost the
   // transport would produce.
   ...caughtBy("observation-armed", "observation-armed"),
+  // Issue #1589c: an `Observe` arm the core refused.
+  ...caughtBy("observation", "observation-arm-refused"),
   // Issue #1535 D9: a never-armed run that received no frame proves nothing.
   ...caughtBy("observation-disarmed", "observation-disarmed", "observation-disarmed-empty"),
   ...caughtBy("observation-identity", "observation-identity"),
@@ -445,11 +447,12 @@ function validate(browserName, result) {
   // monotonic and the windows tiling. The two runs render the *same* sixteen blocks, so their
   // audio must be identical: arming a declared tap may not move a sample.
   const observation = result.observation;
+  // The arm is the core's `Observe` edit (#1589c): an ok monitor reply that names the arm's tag.
   gate(browserName, "observation", observation?.armed?.meterLeaseResult === 0
-    && observation?.armed?.subscribeResult === 0 && observation?.armed?.subscribeReason === 0
-    && observation?.armed?.bindings === 1 && observation?.armed?.stripId === "track"
-    && observation?.armed?.windowBlocks === 2,
-  "the subscription was not acknowledged with a usable map");
+    && observation?.armed?.subscribeResult === 0 && observation?.armed?.subscribeStatus === "ok"
+    && observation?.armed?.subscribePath === "monitor"
+    && typeof observation?.armed?.subscribeArmTag === "string",
+  `the Observe arm was not applied as a monitor edit with an arm tag: ${JSON.stringify(observation?.armed)}`);
   gate(browserName, "observation", observation?.armed?.frames >= 1
     && observation?.armed?.trackGrDbWidth === 1
     && observation?.armed?.peakWidth === 4
@@ -510,6 +513,7 @@ function validate(browserName, result) {
   // render-allocation gate below covers it.
   const stagingReads = result.stagingReads;
   gate(browserName, "staging-reads", stagingReads?.subscribeResult === 0
+    && stagingReads?.subscribeStatus === "ok"
     && stagingReads?.observationReadResult === 0 && stagingReads?.observationRows === 1,
   `the staging reads did not all complete: ${JSON.stringify(stagingReads)}`);
   // Issue #1580 D2: the same run's strip `RESPONSE_GET`, sent through the host's `control` message,
@@ -889,6 +893,7 @@ function validateSdkResponse(browserName, response) {
   "managed track-response subscription did not expose updated grids, channel ownership, or bounds");
   gate(browserName, "sdk-observation", Array.isArray(observations?.mapBindings)
     && observations.mapBindings.includes("comp") && observations.subscribeResult === 0
+    && observations.subscribeStatus === "ok"
     && observations.pendingBeforeArm?.every((status) => status === "unarmed")
     && observations.pendingAfterArm?.every((status) => status === "pending"),
   "SDK observation map or availability statuses were not current-owner answers");
@@ -1208,6 +1213,7 @@ function mutate(result, mutation) {
   if (mutation === "structural-replace-large") copy.structuralReplace.large.replyStatus = "limit_exceeded";
   // Issue #143 E12's named red mutation: `observationArmed = 0`.
   if (mutation === "observation-armed") copy.observation.armed.maximumTrackGrDb = 0;
+  if (mutation === "observation-arm-refused") copy.observation.armed.subscribeStatus = "not_found";
   if (mutation === "observation-disarmed") copy.observation.disarmed.maximumTrackGrDb = 1;
   if (mutation === "observation-disarmed-empty") copy.observation.disarmed.frames = 0;
   if (mutation === "observation-identity") copy.observation.identicalAudio = false;

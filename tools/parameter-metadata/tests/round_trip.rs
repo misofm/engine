@@ -1,17 +1,14 @@
 //! Issue #137 E7: the emitted metadata is complete, and every ID in it resolves on a live session.
 //!
 //! The question worth asking of an addressing scheme is whether the numbers reach the thing they
-//! name. Since slice #1565A the only command records are the two observation kinds, so the
-//! observation taps still round-trip through an acknowledgement; every parameter ID goes through
-//! the control catalog (`controls`), and its round trip is the comparison of the document's rows
-//! with the catalog's rows.
+//! name. The observation taps round-trip through the core's `Observe` edit on a live browser
+//! session (#1589c); every parameter ID goes through the control catalog (`controls`), and its
+//! round trip is the comparison of the document's rows with the catalog's rows.
 
 use builtins::{BUILTIN_PARAMETER_DESCRIPTORS, builtin_parameter_unit};
 use effect_compiler::launch_native_effect_registry;
 use effect_contract::ParameterUnit;
-use host_web::{
-    AudioWorkletEngineHost, COMMAND_REASON_NONE, COMMAND_RECORD_BYTES, RESULT_OK, WebBootOptions,
-};
+use host_web::{AudioWorkletEngineHost, RESULT_OK, WebBootOptions};
 use serde_json::{Value, json};
 
 /// The metadata document, parsed.
@@ -267,22 +264,62 @@ fn session_with_every_effect(effects: &[&str]) -> String {
     )
 }
 
-/// Stage one observation record that names insert `e{effect_index}` of track `t` and the tap
-/// `tap_id` (#1677): the record carries the stable key, not a position.
-fn stage(host: &mut AudioWorkletEngineHost, kind: u32, rack: u8, effect_index: u32, tap_id: u32) {
-    let staging = host
-        .command_staging_mut()
-        .expect("prepared command staging");
-    let record = &mut staging[..COMMAND_RECORD_BYTES as usize];
-    record.fill(0);
-    let effect = format!("e{effect_index}");
-    record[0] = u8::try_from(kind).expect("frozen kind");
-    record[1] = rack;
-    record[2] = 1;
-    record[3] = u8::try_from(effect.len()).expect("effect ID length");
-    record[4..8].copy_from_slice(&tap_id.to_le_bytes());
-    record[16] = b't';
-    record[144..144 + effect.len()].copy_from_slice(effect.as_bytes());
+/// Arm (`armed`) or disarm the tap `tap_id` of insert `e{effect_index}` of track `t` through the
+/// browser's control entry: one `Observe` edit at the committed revision, request `request`.
+/// `Ok` when the core applied it, else its diagnostic codes.
+fn observe(
+    host: &mut AudioWorkletEngineHost,
+    request: u64,
+    effect_index: usize,
+    tap_id: u32,
+    armed: bool,
+) -> Result<(), Vec<String>> {
+    use protocol::{
+        CommandPayload, DecodeScratch, DecodedTypedResponseFrame, ExpectedRevision, ProtocolCodec,
+        RequestId, SessionEdit, SessionRevision, TypedCommandFrame,
+    };
+    let id = |id: &str| session::StableId::parse(id).expect("a stable ID");
+    let edits = [SessionEdit::Observe {
+        strip_id: id("t"),
+        section: controls::TapSection::Inserts(id(&format!("e{effect_index}"))),
+        tap_id,
+        armed,
+        window_blocks: 2,
+    }];
+    let codec = ProtocolCodec::default();
+    let mut bytes = vec![0_u8; codec.limits().max_frame_bytes];
+    let length = codec
+        .encode_command_frame_into(
+            &TypedCommandFrame {
+                request_id: RequestId::new(request).expect("nonzero request"),
+                expected_revision: ExpectedRevision::Exact(SessionRevision(
+                    host.committed_revision(),
+                )),
+                payload: CommandPayload::SessionTransactionApply(&edits),
+            },
+            &mut bytes,
+        )
+        .expect("an observe frame");
+    let staged = u32::try_from(length).expect("frame length");
+    host.control_request_mut(staged)
+        .expect("the control staging")[..length]
+        .copy_from_slice(&bytes[..length]);
+    assert_eq!(host.control_command(staged), RESULT_OK, "the control call");
+    let mut fields = [0_u16; 64];
+    match codec
+        .decode_typed_response(
+            host.control_response(),
+            &mut DecodeScratch::new(&mut fields),
+        )
+        .expect("a transaction response")
+    {
+        DecodedTypedResponseFrame::Success { .. } => Ok(()),
+        DecodedTypedResponseFrame::NonOk { payload, .. } => Err(payload
+            .diagnostics
+            .iter()
+            .map(|diagnostic| diagnostic.code.to_string())
+            .collect()),
+    }
 }
 
 /// Issue #137 E7, rebuilt for the control plane (#1565A): every ID the metadata declares for an
@@ -346,9 +383,9 @@ fn every_metadata_effect_parameter_is_a_control_row_with_the_same_liveness() {
 /// Issue #143 E9: every declared observation tap in the document resolves on a live session.
 ///
 /// The metadata's per-effect `observations` array is a *promise*: it says an app may address that
-/// tap by that number. This walks every one of them through the real command path and requires
-/// each to resolve -- `RESULT_OK` for a `subscribable` (resident) tap and `UNSUPPORTED_KIND` for a
-/// computed one -- and **never** an `Unknown*` reason, which would mean the document described
+/// tap by that number. This walks every one of them through the core's `Observe` edit on a live
+/// browser session and requires each to resolve and bind (every launch tap is resident and
+/// `subscribable`), **never** `observation.tap.unknown`, which would mean the document described
 /// something that does not exist.
 ///
 /// The completeness half is structural: the taps come from
@@ -356,13 +393,9 @@ fn every_metadata_effect_parameter_is_a_control_row_with_the_same_liveness() {
 /// whose menu is missing from the document cannot exist.
 ///
 /// Red mutation: hand-edit a tap id in the document (or, equivalently, offset the id in the
-/// lowering) -> the tap stops resolving and the `UNKNOWN_TAP` assertion fires.
+/// lowering) -> the tap stops resolving and the arm is refused `observation.tap.unknown`.
 #[test]
-fn every_metadata_observation_tap_resolves_through_a_command_acknowledgement() {
-    use host_web::{
-        COMMAND_OBSERVE_SUBSCRIBE, COMMAND_OBSERVE_UNSUBSCRIBE, COMMAND_REASON_UNKNOWN_TAP,
-    };
-
+fn every_metadata_observation_tap_resolves_through_an_observe_edit() {
     let document = metadata();
     let registry = launch_native_effect_registry().expect("launch registry");
     let ids: Vec<&'static str> = registry
@@ -404,33 +437,23 @@ fn every_metadata_observation_tap_resolves_through_a_command_acknowledgement() {
     };
     let mut host = AudioWorkletEngineHost::boot(json.as_bytes(), options).expect("boot");
 
+    let mut request = 0_u64;
     for (effect_index, descriptor) in registry.descriptors().enumerate() {
-        let index = u32::try_from(effect_index).expect("effect index");
         for tap in descriptor.observations {
-            for kind in [COMMAND_OBSERVE_SUBSCRIBE, COMMAND_OBSERVE_UNSUBSCRIBE] {
-                stage(&mut host, kind, 1, index, tap.id.0);
-                let result = host.submit_commands(1);
-                let reason = host.command_report().reason;
+            for armed in [true, false] {
+                request += 1;
                 // Every launch tap is resident, so every one of them binds. The rule the test
-                // states is the general one: resolved, never `Unknown*`.
-                assert_ne!(
-                    reason,
-                    COMMAND_REASON_UNKNOWN_TAP,
-                    "{} tap {} did not resolve",
-                    descriptor.id.as_str(),
-                    tap.id.0
-                );
+                // states is the general one: resolved, never an unknown tap.
                 assert_eq!(
-                    reason,
-                    COMMAND_REASON_NONE,
-                    "{} tap {} is subscribable and must bind",
+                    observe(&mut host, request, effect_index, tap.id.0, armed),
+                    Ok(()),
+                    "{} tap {} resolves and binds",
                     descriptor.id.as_str(),
                     tap.id.0
                 );
-                assert_eq!(result, RESULT_OK);
-                // A tap's queue slot holds one subscription until a block drains it, and these are
-                // separate submissions, so the next one waits for a render (flow control, #1345
-                // D2); one submission cannot name the tap twice.
+                // A tap's queue slot holds one record until a block drains it, and these are
+                // separate transactions, so the next one waits for a render (flow control, #1345
+                // D2).
                 assert_eq!(host.render_next(), RESULT_OK);
             }
         }
@@ -438,9 +461,10 @@ fn every_metadata_observation_tap_resolves_through_a_command_acknowledgement() {
     }
 
     // The negative case: a tap id no effect declares does not resolve, and says so as a *tap*.
-    stage(&mut host, COMMAND_OBSERVE_SUBSCRIBE, 1, 0, 4_242);
-    assert_eq!(host.submit_commands(1), host_web::RESULT_INVALID_ARGUMENT);
-    assert_eq!(host.command_report().reason, COMMAND_REASON_UNKNOWN_TAP);
+    assert_eq!(
+        observe(&mut host, request + 1, 0, 4_242, true),
+        Err(vec!["observation.tap.unknown".to_owned()])
+    );
 }
 
 /// Issue #278: every port the document publishes is a port the engine actually accepts.

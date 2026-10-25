@@ -9,16 +9,12 @@ import type {
   TrackEdits,
   VcaEdits,
 } from "../src/core/live-controls.ts";
-import type { CommandReport, SessionMap } from "../src/core/boundary.ts";
+import type { SessionMap } from "../src/core/boundary.ts";
 import type { ControlFrameEdit } from "../src/core/control-frame.ts";
-import type { ControlAppliedReport, ControlReport } from "../src/core/control-queue.ts";
+import type { ControlAppliedReport } from "../src/core/control-queue.ts";
 import type {
-  MisoCommandAck,
-  MisoCommandRequest,
   MisoError,
   MisoAudioWorkletHost,
-  MisoObservationRequest,
-  MisoObservationAck,
   MisoSessionMap,
   MisoSeekRequest,
   MisoSourceRequest,
@@ -26,10 +22,6 @@ import type {
   MisoStatus,
 } from "../src/browser/shipped-host.d.ts";
 
-// @ts-expect-error request IDs belong to the host, never to public request payloads
-const oldBrowserRequest: MisoCommandRequest = { requestId: 1, commands: [] };
-// @ts-expect-error observation request IDs belong to the host
-const oldObservationRequest: MisoObservationRequest = { requestId: 1, subscriptions: [] };
 const oldSourceRequest: MisoSourceRequest = {
   // @ts-expect-error source request IDs belong to the host
   requestId: 1, sourceId: "s", generation: 1n, startFrame: 0n, sampleRateHz: 48_000,
@@ -37,16 +29,12 @@ const oldSourceRequest: MisoSourceRequest = {
 };
 // @ts-expect-error seek request IDs belong to the host
 const oldSeekRequest: MisoSeekRequest = { requestId: 1, sourceId: "s", generation: 1n, sourceFrame: 0n };
-void [oldBrowserRequest, oldObservationRequest, oldSourceRequest, oldSeekRequest];
+void [oldSourceRequest, oldSeekRequest];
 
-declare const commandAck: MisoCommandAck;
 declare const acknowledgement: MisoAck;
-declare const observationAck: MisoObservationAck;
 declare const sessionMap: MisoSessionMap;
 declare const engineError: MisoError;
 declare const status: MisoStatus;
-// @ts-expect-error response request IDs remain readonly
-commandAck.requestId = 1;
 // @ts-expect-error response request IDs remain readonly
 status.requestId = 1;
 declare const host: MisoAudioWorkletHost;
@@ -57,16 +45,12 @@ host.telemetry({ requestId: 1, enabled: false, onFrame: null });
 // @ts-expect-error every response request ID remains readonly
 acknowledgement.requestId = 1;
 // @ts-expect-error every response request ID remains readonly
-observationAck.requestId = 1;
-// @ts-expect-error every response request ID remains readonly
 sessionMap.requestId = 1;
 // @ts-expect-error every response request ID remains readonly
 engineError.requestId = 1;
 
 type Assert<T extends true> = T;
 type NoCallerId<T> = "requestId" extends keyof T ? false : true;
-type _CommandPayload = Assert<NoCallerId<Parameters<MisoAudioWorkletHost["command"]>[0]>>;
-type _ObservationPayload = Assert<NoCallerId<Parameters<MisoAudioWorkletHost["observe"]>[0]>>;
 type _SourcePayload = Assert<NoCallerId<Parameters<MisoAudioWorkletHost["submitSource"]>[0]>>;
 type _SeekPayload = Assert<NoCallerId<Parameters<MisoAudioWorkletHost["seekSource"]>[0]>>;
 type _MeterPayload = Assert<NoCallerId<Parameters<MisoAudioWorkletHost["meters"]>[0]>>;
@@ -91,13 +75,10 @@ gate.parameter("lookahead", 1);
 const compressor = track.effect("console", 0, "miso.compressor");
 compressor.parameter("threshold", -18, { channel: "both" });
 compressor.parameter({ key: "threshold", value: -18, channel: "both", smoothingSamples: 64 });
-compressor.observe("Gain Reduction", true, 4);
 // @ts-expect-error lookahead is absent from the causal launch compressor
 compressor.parameter("lookahead", 1);
 // @ts-expect-error a delay parameter is not a compressor parameter
 compressor.parameter("delay time", 20);
-// @ts-expect-error tap names are descriptor-specific
-compressor.observe("Output Level", true);
 // @ts-expect-error object edits keep key/value pairs discriminated
 compressor.parameter({ key: "threshold", value: true });
 // @ts-expect-error a prepared-only parameter is absent from live object edits
@@ -118,8 +99,6 @@ delay.parameter("cross feedback", 0.5, { channel: "both" });
 delay.parameter("cross feedback", 0.5, { channel: "left" });
 // @ts-expect-error cross feedback is shared and cannot address one lane in object form
 delay.parameter({ key: "cross feedback", value: 0.5, channel: "left" });
-// @ts-expect-error delay declares no observation tap
-delay.observe("Gain Reduction", true);
 
 const eq = track.effect("console", 1, "miso.parametric-eq");
 // @ts-expect-error the retired rack tokens are not live-control racks
@@ -159,7 +138,7 @@ void notTrack;
 // #1214 MINOR-1: strip() resolves either kind and offers only what every strip shares.
 // @ts-expect-error strip() may name a bus, so it never offers solo
 busEdits.strip("t").solo(true);
-busEdits.strip("bus").effect("inserts", 0, "miso.compressor").observe("Gain Reduction", true, 1);
+busEdits.strip("bus").effect("inserts", 0, "miso.compressor").parameter("threshold", -18);
 
 // Issue #1223 D4/D5: a send's live edits are exactly its gain, mute and matrix. A send has no lane
 // (its record's channel is not applicable), no effects and no solo, and route() says so in its type.
@@ -208,16 +187,10 @@ drums.faderDb(-6, { gainDb: 0 });
 const staleMap: SessionMap = { tracks: [], sources: [], metersAttached: false, submixes: [], routes: [], vcas: [] };
 void staleMap;
 
-// #1563B D6: a value edit resolves with the core's ControlReport, and only observation records
-// resolve with a CommandReport.
+// #1563B D6: a value edit resolves with the core's applied report.
 declare const liveControls: EngineLiveControls;
 const applied: Promise<ControlAppliedReport> = liveControls.submit(track.faderDb(-6));
-const observed: Promise<CommandReport> = liveControls.submit(compressor.observe("Gain Reduction", true, 4));
-// @ts-expect-error a value edit does not resolve with a CommandReport
-const wrongValueReport: Promise<CommandReport> = liveControls.submit(track.faderDb(-6));
-// @ts-expect-error an observation edit does not resolve with a ControlReport
-const wrongObservationReport: Promise<ControlReport> = liveControls.submit(compressor.observe("Gain Reduction", true, 4));
-void [applied, observed, wrongValueReport, wrongObservationReport];
+void applied;
 // A builder returns the SET_CONTROL edits of one transaction, with the ramp as `rampSamples`.
 const faderEdits: ControlEditSet = track.faderDb(-6, { smoothingSamples: 32 });
 const firstEdit: ControlFrameEdit | undefined = faderEdits.edits[0];

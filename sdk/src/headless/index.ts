@@ -168,7 +168,6 @@ export type {
 } from "../core/protocol-messages.ts";
 export { MisoEngineAsset, sha256Hex } from "../core/asset.ts";
 export type {
-  CommandReport,
   ControlEvent,
   EngineCallResult,
   EngineStatus,

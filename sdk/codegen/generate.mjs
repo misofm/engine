@@ -92,8 +92,6 @@ function moduleTypes(kind, symbol) {
       + `export type EffectObservation<E extends EffectId> =\n`
       + `  Extract<EffectDescriptor, { readonly id: E }>["observations"][number];\n`
       + `export type TapName<E extends EffectId> = EffectObservation<E>["name"];\n`
-      + `export type CommandKindName = Catalog["commandKinds"][number]["name"];\n`
-      + `export type CommandReasonName = Catalog["commandReasons"][number]["name"];\n`
       + `/** The lattice declaration every parameter row carries (issue #242). */\n`
       + `export type StepDeclaration = EffectParameter<EffectId>["step"];\n`
       + `export type StepSizeName = keyof StepDeclaration["ladder"];\n`;
@@ -103,7 +101,6 @@ function moduleTypes(kind, symbol) {
     + `export type AbiStructure = AbiLayout["structures"][AbiStructureName];\n`
     + `export type AbiField = AbiStructure["fields"][number];\n`
     + `export type AbiConstantName = keyof AbiLayout["constants"];\n`
-    + `export type AbiCommandField = AbiLayout["commandRecord"]["fields"][number];\n`
     + `/** Where a typed SDK refusal was raised. Replaces the dead two-phase "compile". */\n`
     + `export type ErrorPhase = AbiLayout["errorPhases"][number];\n`
     + `export type ResultCodeName = AbiLayout["constants"]["resultCodes"][number]["name"];\n`

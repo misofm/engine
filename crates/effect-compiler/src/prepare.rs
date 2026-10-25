@@ -137,10 +137,10 @@ pub enum LiveEffectRack {
 ///   does not name the section (L6).
 /// - An insert is `(inserts, index)`, its position in the track's `inserts`.
 ///
-/// This is what the browser's `miso.command.v1` record carries in its `rack` byte and
-/// `effect_index` word, what the observation records carry, and what a native host looks a
-/// channel up by ([`EffectControlProducer::address`]). Internally it maps through the lowering
-/// ([`Self::lower`]).
+/// This is the `(rack, effect_index)` the browser's numeric observation selection carries, and what
+/// a host looks a channel up by ([`EffectControlProducer::address`]); a `SET_CONTROL` edit or an
+/// `Observe` edit names the instance by its stable ID, which the core resolves to it. Internally
+/// it maps through the lowering ([`Self::lower`]).
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct LiveEffectAddress {
     /// The session rack.
@@ -638,7 +638,8 @@ pub struct EffectControlProducer {
     /// The instance's live address within its strip (a track or a submix): a console slot by its
     /// slot index, an insert by its index (decision 12, issue #1096).
     ///
-    /// This is the `(rack, effect_index)` the `miso.command.v1` wire addresses. It is derived from
+    /// This is the `(rack, effect_index)` a numeric observation selection addresses; the core's
+    /// `SET_CONTROL` and `Observe` edits name the instance by stable ID instead. It is derived from
     /// the normalized session model here rather than from `EffectPreparedSession::entries`, which
     /// is sorted by effect id.
     pub address: LiveEffectAddress,

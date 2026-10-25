@@ -1237,8 +1237,7 @@ fn the_render_call_never_allocates_with_telemetry_configured() {
 const OBSERVATION_SESSION: &str = include_str!("browser-v1/observation-session.json");
 
 /// #1586 gate 5 (R4's parity row): both hosts boot the observation fixture, arm the compressor
-/// insert's tap with a window of four blocks (the C ABI by `Observe`, the browser by a kind 7
-/// record), render the same PCM bit-identically, and read the same row: the C ABI by
+/// insert's tap with a window of four blocks by the same `Observe` transaction, render the same PCM bit-identically, and read the same row: the C ABI by
 /// `OBSERVATION_READ`, the browser by its selected read. Status, window and both lanes' bits agree
 /// pending and ready.
 ///
@@ -1269,26 +1268,7 @@ fn both_hosts_read_one_observation_tap_alike() {
     let strip = StableId::parse(TRACK_ID).expect("track ID");
     let comp = StableId::parse("comp").expect("insert ID");
 
-    // The browser arms by a kind 7 record; the C ABI by one `Observe` transaction.
-    let mut record = [0_u8; host_web::COMMAND_RECORD_BYTES as usize];
-    record[0] = host_web::COMMAND_OBSERVE_SUBSCRIBE as u8;
-    record[1] = host_web::RACK_INSERTS;
-    record[2] = TRACK_ID.len() as u8;
-    record[3] = 4;
-    record[4..8].copy_from_slice(&1_u32.to_le_bytes());
-    record[8..12].copy_from_slice(&WINDOW_BLOCKS.to_le_bytes());
-    record[16..16 + TRACK_ID.len()].copy_from_slice(TRACK_ID.as_bytes());
-    record[144..148].copy_from_slice(b"comp");
-    browser
-        .host
-        .command_staging_mut()
-        .expect("the command staging")[..record.len()]
-        .copy_from_slice(&record);
-    assert_eq!(
-        browser.host.submit_commands(1),
-        RESULT_OK,
-        "the browser arm"
-    );
+    // Both hosts arm by the same `Observe` transaction.
     let revision = browser.host.committed_revision();
     let arm = frame(
         1,
@@ -1301,6 +1281,13 @@ fn both_hosts_read_one_observation_tap_alike() {
             window_blocks: WINDOW_BLOCKS,
         }]),
     );
+    let (result, reply) = browser.send(&arm);
+    assert_eq!(result, RESULT_OK, "the browser arm");
+    assert!(
+        matches!(decode_verdict(&reply), Verdict::Applied { .. }),
+        "the browser arm is applied"
+    );
+    browser.drain();
     let (result, reply) = c.send(&arm);
     assert_eq!(result, C_RESULT_OK, "{}", String::from_utf8_lossy(&reply));
     c.drain();

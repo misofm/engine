@@ -57,16 +57,10 @@ use serde::Serialize;
 use crate::json::{self, Entries};
 use host_core::{LAUNCH_SAMPLE_RATES, RESPONSE_MAXIMUM_POINTS};
 use host_web::{
-    ABI_VERSION, BACKEND_SCALAR, BACKEND_SIMD128, BOOT_OPTIONS_BYTES, BUFFER_COMMAND,
-    BUFFER_DIAGNOSTIC, BUFFER_METER_FRAME, BUFFER_OUTPUT_PCM, BUFFER_SOURCE_ID, BUFFER_SOURCE_PCM,
-    COMMAND_OBSERVE_SUBSCRIBE, COMMAND_OBSERVE_UNSUBSCRIBE, COMMAND_REASON_BACKPRESSURE,
-    COMMAND_REASON_DOMAIN, COMMAND_REASON_MALFORMED, COMMAND_REASON_NONE,
-    COMMAND_REASON_OBSERVATION_LIMIT, COMMAND_REASON_OBSERVATION_UNBOUND,
-    COMMAND_REASON_UNKNOWN_EFFECT, COMMAND_REASON_UNKNOWN_PARAMETER, COMMAND_REASON_UNKNOWN_RACK,
-    COMMAND_REASON_UNKNOWN_TAP, COMMAND_REASON_UNKNOWN_TRACK, COMMAND_REASON_UNSUPPORTED_KIND,
-    COMMAND_REASON_WRONG_STATE, COMMAND_RECORD_BYTES, COMMAND_REPORT_BYTES,
-    DEFAULT_MAXIMUM_MEMORY_BYTES, DEFAULT_METER_BLOCKS, DIAGNOSTIC_BYTES, MAXIMUM_COMMAND_RECORDS,
-    MAXIMUM_DOCUMENT_BYTES, MAXIMUM_OBSERVATION_TAPS, METER_HEADER_BYTES, OBSERVATION_CHANNEL_BOTH,
+    ABI_VERSION, BACKEND_SCALAR, BACKEND_SIMD128, BOOT_OPTIONS_BYTES, BUFFER_DIAGNOSTIC,
+    BUFFER_METER_FRAME, BUFFER_OUTPUT_PCM, BUFFER_SOURCE_ID, BUFFER_SOURCE_PCM,
+    DEFAULT_MAXIMUM_MEMORY_BYTES, DEFAULT_METER_BLOCKS, DIAGNOSTIC_BYTES, MAXIMUM_DOCUMENT_BYTES,
+    MAXIMUM_OBSERVATION_TAPS, METER_HEADER_BYTES, OBSERVATION_CHANNEL_BOTH,
     OBSERVATION_CHANNEL_LEFT, OBSERVATION_CHANNEL_RIGHT, OBSERVATION_RESULT_BYTES,
     OBSERVATION_SELECTION_BYTES, OBSERVATION_STATUS_PENDING, OBSERVATION_STATUS_READY,
     OBSERVATION_STATUS_UNARMED, PLAN_LATENCY_BYTES, RACK_CONSOLE, RACK_INSERTS,
@@ -75,7 +69,7 @@ use host_web::{
     RESULT_OK, RESULT_REFUSED_BUDGET, RESULT_REFUSED_DOCUMENT, RESULT_REFUSED_LIFECYCLE,
     RESULT_REFUSED_OPTIONS, RESULT_RENDER_REJECTED, RESULT_REPREPARE_REQUIRED, RESULT_UNSUPPORTED,
     RESULT_WRONG_STATE, SEEK_REPORT_BYTES, SOURCE_STALL_TOLERANCE_MS, STATE_DISPOSED, STATE_FAILED,
-    STATE_READY, STATUS_BYTES, WATERMARK_BYTES, WebBootOptions, WebCommandReport, WebMeterHeader,
+    STATE_READY, STATUS_BYTES, WATERMARK_BYTES, WebBootOptions, WebMeterHeader,
     WebObservationResult, WebObservationSelection, WebPlanLatency, WebPlanWatermark,
     WebResourceReport, WebSeekReport, WebStatus,
 };
@@ -128,7 +122,7 @@ pub const ERROR_PHASES: [&str; 6] = ["asset", "boot", "source", "render", "outpu
 /// Publishing the whole surface -- not just the four boot calls -- is what lets a JavaScript
 /// consumer name an export without typing a string. `memory` is deliberately absent: it is the
 /// module's linear memory, not a call, and a consumer reaches it as `instance.exports.memory`.
-pub const EXPORTS: [&str; 65] = [
+pub const EXPORTS: [&str; 63] = [
     "miso_engine_web_v1_abi_version",
     "miso_engine_web_v1_boot",
     "miso_engine_web_v1_boot_diagnostic_bytes",
@@ -136,8 +130,6 @@ pub const EXPORTS: [&str; 65] = [
     "miso_engine_web_v1_boot_result",
     "miso_engine_web_v1_buffer_capacity",
     "miso_engine_web_v1_buffer_ptr",
-    "miso_engine_web_v1_command_report_ptr",
-    "miso_engine_web_v1_command_submit",
     "miso_engine_web_v1_control_allocation_count",
     "miso_engine_web_v1_control_command",
     "miso_engine_web_v1_control_event",
@@ -575,35 +567,6 @@ fn seek_report_fields() -> [Field; 8] {
     ]
 }
 
-fn command_report_fields() -> [Field; 8] {
-    [
-        (
-            "structSize",
-            offset_of!(WebCommandReport, struct_size),
-            "u32",
-        ),
-        (
-            "abiVersion",
-            offset_of!(WebCommandReport, abi_version),
-            "u32",
-        ),
-        ("result", offset_of!(WebCommandReport, result), "u32"),
-        ("reason", offset_of!(WebCommandReport, reason), "u32"),
-        (
-            "rejectedIndex",
-            offset_of!(WebCommandReport, rejected_index),
-            "u32",
-        ),
-        ("admitted", offset_of!(WebCommandReport, admitted), "u32"),
-        (
-            "appliedAtSample",
-            offset_of!(WebCommandReport, applied_at_sample),
-            "u64",
-        ),
-        ("reserved", offset_of!(WebCommandReport, reserved), "u64[2]"),
-    ]
-}
-
 fn observation_selection_fields() -> [Field; 8] {
     [
         (
@@ -717,27 +680,6 @@ fn observation_result_fields() -> [Field; 19] {
     ]
 }
 
-/// The staged `miso.command.v1` record, whose offsets are a decode rule rather than a `#[repr(C)]`
-/// structure.
-///
-/// `CommandRecord::decode` reads these byte positions out of the staging buffer directly — there
-/// is no Rust type to take `offset_of!` of — so the rows are transcribed from that function and
-/// pinned against it by `tests/abi_layout.rs`, which encodes a record at these offsets and
-/// requires the engine to decode exactly the values written.
-fn command_record_fields() -> [Field; 9] {
-    [
-        ("kind", 0, "u8"),
-        ("rack", 1, "u8"),
-        ("stripIdBytes", 2, "u8"),
-        ("effectIdBytes", 3, "u8"),
-        ("tapId", 4, "u32"),
-        ("windowBlocks", 8, "u32"),
-        ("reserved0", 12, "u32"),
-        ("stripId", 16, "u8[128]"),
-        ("effectId", 144, "u8[128]"),
-    ]
-}
-
 /// Render the whole document. Deterministic: every table below is a fixed array.
 #[must_use]
 pub fn render() -> String {
@@ -773,28 +715,7 @@ pub fn render() -> String {
         (BUFFER_SOURCE_PCM, "sourcePcm"),
         (BUFFER_DIAGNOSTIC, "diagnostic"),
         (BUFFER_OUTPUT_PCM, "outputPcm"),
-        (BUFFER_COMMAND, "command"),
         (BUFFER_METER_FRAME, "meterFrame"),
-    ];
-    let wire_command_kinds = [
-        (COMMAND_OBSERVE_SUBSCRIBE, "observeSubscribe"),
-        (COMMAND_OBSERVE_UNSUBSCRIBE, "observeUnsubscribe"),
-    ];
-    let command_reasons = [
-        (COMMAND_REASON_NONE, "none"),
-        (COMMAND_REASON_MALFORMED, "malformed"),
-        (COMMAND_REASON_UNKNOWN_TRACK, "unknownTrack"),
-        (COMMAND_REASON_UNKNOWN_RACK, "unknownRack"),
-        (COMMAND_REASON_UNKNOWN_EFFECT, "unknownEffect"),
-        (COMMAND_REASON_UNKNOWN_PARAMETER, "unknownParameter"),
-        (COMMAND_REASON_DOMAIN, "domain"),
-        (COMMAND_REASON_UNSUPPORTED_KIND, "unsupportedKind"),
-        (COMMAND_REASON_BACKPRESSURE, "backpressure"),
-        (COMMAND_REASON_WRONG_STATE, "wrongState"),
-        (COMMAND_REASON_UNKNOWN_TAP, "unknownTap"),
-        (COMMAND_REASON_OBSERVATION_UNBOUND, "observationUnbound"),
-        // 12-14 are retired with the value kinds (#1565A) and never reallocated; #1676 added 15.
-        (COMMAND_REASON_OBSERVATION_LIMIT, "observationLimit"),
     ];
 
     let named = |values: &[(u32, &'static str)]| {
@@ -829,10 +750,6 @@ pub fn render() -> String {
                     structure(METER_HEADER_BYTES, &meter_header_fields()),
                 ),
                 (
-                    "commandReport",
-                    structure(COMMAND_REPORT_BYTES, &command_report_fields()),
-                ),
-                (
                     "planWatermark",
                     structure(WATERMARK_BYTES, &plan_watermark_fields()),
                 ),
@@ -857,21 +774,14 @@ pub fn render() -> String {
             .map(|(name, structure)| (name.to_owned(), structure))
             .collect(),
         ),
-        command_record: CommandRecord {
-            bytes: COMMAND_RECORD_BYTES,
-            endianness: "little",
-            fields: field_rows(&command_record_fields()),
-        },
         constants: Constants {
             result_codes: named(&results),
             boot_result_aliases: named(&boot_aliases),
             states: named(&states),
             backends: named(&backends),
             buffer_kinds: named(&buffers),
-            wire_command_kinds: named(&wire_command_kinds),
-            command_reasons: named(&command_reasons),
-            // Decision 12 (#1096): the `rack` of the command, observation, companion and
-            // configuration records. The retired `simd1` (0) and `simd2` (2) codes are absent,
+            // Decision 12 (#1096): the `rack` of the observation, companion and configuration
+            // records. The retired `simd1` (0) and `simd2` (2) codes are absent,
             // never reallocated.
             racks: named(&[
                 (u32::from(RACK_INSERTS), "inserts"),
@@ -888,7 +798,6 @@ pub fn render() -> String {
                 (OBSERVATION_STATUS_UNARMED, "unarmed"),
                 (OBSERVATION_STATUS_READY, "ready"),
             ]),
-            maximum_command_records: MAXIMUM_COMMAND_RECORDS,
             maximum_document_bytes: MAXIMUM_DOCUMENT_BYTES,
             maximum_source_channels: session::SOURCE_CHANNELS_LAUNCH_MAXIMUM,
             diagnostic_bytes: DIAGNOSTIC_BYTES,
@@ -923,20 +832,12 @@ struct Document<'a> {
     error_phases: &'a [&'a str],
     exports: &'a [&'a str],
     structures: Entries<Structure<'a>>,
-    command_record: CommandRecord<'a>,
     constants: Constants<'a>,
 }
 
 #[derive(Serialize)]
 struct Structure<'a> {
     bytes: u32,
-    fields: Vec<FieldRow<'a>>,
-}
-
-#[derive(Serialize)]
-struct CommandRecord<'a> {
-    bytes: u32,
-    endianness: &'a str,
     fields: Vec<FieldRow<'a>>,
 }
 
@@ -982,12 +883,9 @@ struct Constants<'a> {
     states: Vec<NamedValue<'a>>,
     backends: Vec<NamedValue<'a>>,
     buffer_kinds: Vec<NamedValue<'a>>,
-    wire_command_kinds: Vec<NamedValue<'a>>,
-    command_reasons: Vec<NamedValue<'a>>,
     racks: Vec<NamedValue<'a>>,
     observation_channels: Vec<NamedValue<'a>>,
     observation_statuses: Vec<NamedValue<'a>>,
-    maximum_command_records: u32,
     maximum_document_bytes: u32,
     maximum_source_channels: u32,
     diagnostic_bytes: u32,

@@ -6,12 +6,11 @@ import { before, describe, test } from "node:test";
 
 import { MisoEngineAsset } from "../src/core/asset.ts";
 import { MisoControlRefusal, MisoUsageError } from "../src/core/errors.ts";
-import { LiveControlWriter } from "../src/core/writer.ts";
 import { CATALOG } from "../src/generated/catalog.ts";
 import { createOfflineEngine } from "../src/headless/engine.ts";
 import { decodeControlReply } from "../src/core/control-frame.ts";
 import { structuralFrame } from "./control-support.mjs";
-import { effectEntry, moduleBytes, ramp, sessionDocument } from "./support.mjs";
+import { effectEntry, moduleBytes, observeTaps, ramp, sessionDocument } from "./support.mjs";
 
 /** The parity session: three tracks, t3 behind a multiband compressor, a true-peak limiter and a delay. */
 const PARITY = JSON.parse(readFileSync(
@@ -392,18 +391,15 @@ describe("issue 321 -- complete headless ABI capability parity", () => {
       assert.equal(engine.sessionMap().metersAttached, true);
       assert.deepEqual(engine.meters(true), { ok: true, result: 0, code: "ok" });
 
-      const writer = new LiveControlWriter({
-        submit: (records, count) => engine.submitCommands(records, count),
-      });
-      writer.stage({
-        kind: "observeSubscribe",
-        rack: 3, // console slot "compressor"
+      const arm = observeTaps(engine, [{
         stripId: engine.sessionMap().tracks[0],
+        rack: "console",
         effectId: "compressor",
         tapId: 1,
+        armed: true,
         windowBlocks: meterBlocks,
-      });
-      assert.equal((await writer.flush()).admitted, 1);
+      }]);
+      assert.equal(arm.status, "ok");
 
       for (let block = 0; block < meterBlocks; block += 1) {
         feed(engine, 1n, BigInt(block * engine.shape().quantumFrames), 31 + block);
@@ -581,18 +577,15 @@ describe("issue 321 -- complete headless ABI capability parity", () => {
       assert.equal(unarmed.effectSlotId, "bus-comp");
       assert.equal(unarmed.status, "unarmed");
 
-      const writer = new LiveControlWriter({
-        submit: (records, count) => engine.submitCommands(records, count),
-      });
-      writer.stage({
-        kind: "observeSubscribe",
-        rack: binding.rack === "console" ? 3 : 1,
+      const arm = observeTaps(engine, [{
         stripId: "bus",
+        rack: binding.rack,
         effectId: "bus-comp",
         tapId: binding.tapIds[0],
+        armed: true,
         windowBlocks: 1,
-      });
-      assert.equal((await writer.flush()).admitted, 1);
+      }]);
+      assert.equal(arm.status, "ok");
       for (let block = 0; block < 4; block += 1) {
         feed(engine, 1n, BigInt(block * engine.shape().quantumFrames), 41 + block);
         engine.render();

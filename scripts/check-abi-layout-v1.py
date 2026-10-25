@@ -75,23 +75,11 @@ BUFFER_KINDS = [
     (3, "sourcePcm"),
     (4, "diagnostic"),
     (5, "outputPcm"),
-    (6, "command"),
     (7, "meterFrame"),
 ]
-# Slice #1565A: the command record carries only the two observation kinds. Kinds 1-6 and 9-17 are
-# retired -- refused `malformed` and never reallocated -- so the vocabulary is explicit about its
-# values instead of positional from 1.
-COMMAND_KINDS = [(7, "observeSubscribe"), (8, "observeUnsubscribe")]
-RETIRED_COMMAND_KINDS = set(range(1, 7)) | set(range(9, 18))
-# Reasons 12-14 belonged to the deleted value kinds (#1565A) and are retired, never reallocated;
-# issue #1676 added `observationLimit` (15) after them. The values are explicit for that reason.
-COMMAND_REASONS = [
-    (0, "none"), (1, "malformed"), (2, "unknownTrack"), (3, "unknownRack"), (4, "unknownEffect"),
-    (5, "unknownParameter"), (6, "domain"), (7, "unsupportedKind"), (8, "backpressure"),
-    (9, "wrongState"), (10, "unknownTap"), (11, "observationUnbound"), (15, "observationLimit"),
-]
-RETIRED_COMMAND_REASONS = {12, 13, 14}
-# Decision 12 (#1096): the effect racks of the command, observation, companion and configuration
+# Buffer kind 6 was the observation-command staging; #1589c deleted it with the command record,
+# its kinds and its reasons. The value is retired and never reallocated.
+# Decision 12 (#1096): the effect racks of the observation, companion and configuration
 # records. `inserts` keeps the code `dynamic` had and `console` is appended. The retired `simd1`
 # (0) and `simd2` (2) codes are absent from the vocabulary and never reallocated.
 RACKS = [(1, "inserts"), (3, "console"), (255, "notApplicable")]
@@ -114,8 +102,6 @@ EXPORTS = [
     "miso_engine_web_v1_boot_result",
     "miso_engine_web_v1_buffer_capacity",
     "miso_engine_web_v1_buffer_ptr",
-    "miso_engine_web_v1_command_report_ptr",
-    "miso_engine_web_v1_command_submit",
     "miso_engine_web_v1_control_allocation_count",
     "miso_engine_web_v1_control_command",
     "miso_engine_web_v1_control_event",
@@ -183,7 +169,6 @@ STRUCTURES = {
     "status": 80,
     "resourceReport": 224,
     "meterHeader": 88,
-    "commandReport": 48,
     "planWatermark": 96,
     "planLatency": 64,
     "seekReport": 64,
@@ -204,10 +189,6 @@ POLICY_WORDS = [
 ]
 ROLE_DEFINED_WORDS = ["requireSampleRateHz", "requireQuantumFrames"]
 
-COMMAND_RECORD_FIELDS = [
-    "kind", "rack", "stripIdBytes", "effectIdBytes", "tapId", "windowBlocks", "reserved0",
-    "stripId", "effectId",
-]
 # The applied-revision watermark record (#1381a D5): the C ABI's `miso_engine_v1_watermark`, field
 # for field and in its order (#1314 D6), without a pre-roll counter.
 PLAN_WATERMARK_FIELDS = [
@@ -304,7 +285,7 @@ def validate(document: object) -> None:
     require(isinstance(document, dict), "the document is a JSON object")
     assert isinstance(document, dict)
     require(set(document) == {"schema", "abiVersion", "stagingSequence", "errorPhases",
-                              "exports", "structures", "commandRecord", "constants"},
+                              "exports", "structures", "constants"},
             f"top-level keys are exact: {sorted(document)}")
     require(document["schema"] == SCHEMA, f"schema is {SCHEMA}")
     require(document["abiVersion"] == ABI_VERSION,
@@ -345,15 +326,6 @@ def validate(document: object) -> None:
     for word in POLICY_WORDS + ROLE_DEFINED_WORDS:
         require(word in boot, f"bootOptions names the boot word {word}")
 
-    record = document["commandRecord"]
-    require(isinstance(record, dict) and set(record) == {"bytes", "endianness", "fields"},
-            "commandRecord keys are exactly bytes/endianness/fields")
-    require(record["endianness"] == "little", "the command record is little-endian")
-    require(record["bytes"] == 272, f"the command record is 272 bytes, not {record['bytes']}")
-    check_fields("commandRecord", record["fields"], 272)
-    require([row["name"] for row in record["fields"]] == COMMAND_RECORD_FIELDS,
-            f"commandRecord names exactly {COMMAND_RECORD_FIELDS}")
-
     status_rows = structures["status"]["fields"]
     require([row["name"] for row in status_rows] == STATUS_FIELDS,
             f"status names exactly {STATUS_FIELDS}")
@@ -375,8 +347,7 @@ def validate(document: object) -> None:
     require(isinstance(constants, dict), "constants is an object")
     require(set(constants) == {
         "resultCodes", "bootResultAliases", "states", "backends", "bufferKinds",
-        "wireCommandKinds", "commandReasons", "maximumCommandRecords", "maximumDocumentBytes", "maximumSourceChannels",
-        "diagnosticBytes", "defaultMeterBlocks",
+        "maximumDocumentBytes", "maximumSourceChannels", "diagnosticBytes", "defaultMeterBlocks",
         "maximumObservationTaps", "maximumResponsePoints", "defaultMaximumMemoryBytes", "sourceRing",
         "observationChannels", "observationStatuses", "racks",
     }, f"constants keys are exact: {sorted(constants)}")
@@ -386,14 +357,6 @@ def validate(document: object) -> None:
     check_named(document, "states", STATES)
     check_named(document, "backends", BACKENDS)
     check_named(document, "bufferKinds", BUFFER_KINDS)
-    check_named(document, "wireCommandKinds", COMMAND_KINDS)
-    require(not RETIRED_COMMAND_KINDS & {row["value"] for row in constants["wireCommandKinds"]},
-            "constants.wireCommandKinds reallocates a retired value-command number")
-    check_named(document, "commandReasons", COMMAND_REASONS)
-    reason_values = [row["value"] for row in constants["commandReasons"]]
-    require(reason_values == [value for value in range(max(reason_values, default=-1) + 1)
-                              if value not in RETIRED_COMMAND_REASONS],
-            "constants.commandReasons is not dense from 0 except the retired 12-14")
     check_named(document, "racks", RACKS)
     # Spelled out on purpose: a retired code must never be reallocated, whatever it is named.
     require(not RETIRED_RACKS & {row["value"] for row in constants["racks"]},
@@ -415,7 +378,6 @@ def validate(document: object) -> None:
     require(len({row["name"] for row in aliases}) == 3, "alias names are distinct")
 
     for name, expected in (
-        ("maximumCommandRecords", 256),
         ("maximumDocumentBytes", 1 << 20),
         ("maximumSourceChannels", 2),
         ("diagnosticBytes", 1 << 14),
@@ -473,7 +435,7 @@ def self_test() -> int:
         document["structures"]["status"]["fields"][0]["type"] = "u64"
 
     def hole_in_layout(document: dict) -> None:
-        document["structures"]["commandReport"]["fields"][3]["offset"] = 16
+        document["structures"]["observationSelection"]["fields"][3]["offset"] = 16
 
     def drop_export(document: dict) -> None:
         document["exports"].pop()
@@ -525,11 +487,14 @@ def self_test() -> int:
     def retired_phase(document: dict) -> None:
         document["errorPhases"] = ["asset", "compile", "source", "render", "output", "lifecycle"]
 
-    def move_record_field(document: dict) -> None:
-        document["commandRecord"]["fields"][6]["offset"] = 16
+    def command_record_returns(document: dict) -> None:
+        document["commandRecord"] = {"bytes": 272, "endianness": "little", "fields": []}
 
-    def retired_command_kind_returns(document: dict) -> None:
-        document["constants"]["wireCommandKinds"].insert(0, {"value": 4, "name": "mute"})
+    def command_kinds_return(document: dict) -> None:
+        document["constants"]["wireCommandKinds"] = [{"value": 7, "name": "observeSubscribe"}]
+
+    def command_buffer_returns(document: dict) -> None:
+        document["constants"]["bufferKinds"].insert(4, {"value": 6, "name": "command"})
 
     def retired_queue_word_returns(document: dict) -> None:
         document["structures"]["bootOptions"]["fields"][7]["name"] = (
@@ -604,8 +569,12 @@ def self_test() -> int:
         ("the export set is unsorted", unsorted_exports),
         ("the staging sequence drops back to three calls", three_call_boot),
         ("a retired lifecycle phase returns", retired_phase),
-        ("a command-record field moves", move_record_field),
-        ("a retired value-command kind returns", retired_command_kind_returns),
+        # Issue #1589c: the observation command record, its kinds, its staging and its export.
+        ("the deleted command record returns", command_record_returns),
+        ("the deleted command-kind table returns", command_kinds_return),
+        ("the deleted command-staging buffer kind returns", command_buffer_returns),
+        ("the deleted command-submit export returns",
+         lambda d: d["exports"].insert(7, "miso_engine_web_v1_command_submit")),
         ("the retired command-queue boot word returns", retired_queue_word_returns),
         ("a retired prepared-command export returns", retired_export_returns),
         ("a source-ring input is dropped", drop_ring_input),
@@ -619,11 +588,6 @@ def self_test() -> int:
         ("a retired result name returns", duplicate_result_name),
         ("a named numeric value becomes boolean", boolean_named_value),
         ("a retired rack code is reallocated to console", reallocate_retired_rack),
-        # Issue #1676: `observationLimit` is 15, after the retired 12-14.
-        ("observationLimit reallocates a retired reason number",
-         lambda d: d["constants"]["commandReasons"][-1].update(value=12)),
-        ("the reason vocabulary drops observationLimit",
-         lambda d: d["constants"]["commandReasons"].pop()),
     ]
     for name, mutate in mutations:
         broken = copy.deepcopy(sample)

@@ -27,9 +27,9 @@
 //! worklet harnesses (`scripts/test-web-audioworklet.mjs` and `sdk/test/browser-pcm-evals.mjs`)
 //! fail when a worklet calls an export that the table does not list. This header does not repeat
 //! the names: the table is the list, and a name set here would drift from it. The wrapped entries
-//! cover the render, command, meter, source, live-control, observation and track-response
-//! exports, with the pointer, capacity and byte-count accessors of their stagings that
-//! the worklets call after boot (issues #1488 and #1492). The two entries with `wrapped: false`
+//! cover the render, meter, source, live-control and observation exports, with the pointer,
+//! capacity and byte-count accessors of their stagings that the worklets call after boot (issues
+//! #1488 and #1492). The two entries with `wrapped: false`
 //! are the named exceptions below, each with its reason in the table. Boot is outside the rule,
 //! as the next paragraph says.
 //!
@@ -55,8 +55,8 @@ use crate::render_lock::{control_allocation_count, render_allocation_count, rend
 #[cfg(doc)]
 use crate::RESULT_BACKPRESSURE;
 use crate::{
-    ABI_VERSION, AudioWorkletEngineHost, BUFFER_COMMAND, BUFFER_DIAGNOSTIC, BUFFER_METER_FRAME,
-    BUFFER_OUTPUT_PCM, BUFFER_SOURCE_ID, BUFFER_SOURCE_PCM, BootFailure, MAXIMUM_DOCUMENT_BYTES,
+    ABI_VERSION, AudioWorkletEngineHost, BUFFER_DIAGNOSTIC, BUFFER_METER_FRAME, BUFFER_OUTPUT_PCM,
+    BUFFER_SOURCE_ID, BUFFER_SOURCE_PCM, BootFailure, MAXIMUM_DOCUMENT_BYTES,
     MAXIMUM_OBSERVATION_READS, OBSERVATION_CHANNEL_BOTH, OBSERVATION_CHANNEL_LEFT,
     OBSERVATION_CHANNEL_RIGHT, OBSERVATION_RESULT_BYTES, OBSERVATION_SELECTION_BYTES,
     OBSERVATION_STATUS_PENDING, OBSERVATION_STATUS_READY, OBSERVATION_STATUS_UNARMED,
@@ -393,9 +393,6 @@ fn buffer_pointer(host: &mut AudioWorkletEngineHost, kind: u32) -> *mut u8 {
         BUFFER_OUTPUT_PCM => host
             .output_pcm()
             .map_or(ptr::null_mut(), |value| value.as_ptr().cast_mut().cast()),
-        BUFFER_COMMAND => host
-            .command_staging_mut()
-            .map_or(ptr::null_mut(), <[u8]>::as_mut_ptr),
         BUFFER_METER_FRAME => {
             let frame = host.meter_frame();
             if frame.is_empty() {
@@ -415,7 +412,6 @@ fn buffer_capacity(host: &AudioWorkletEngineHost, kind: u32) -> u32 {
         BUFFER_SOURCE_PCM => resources.source_pcm_staging_bytes,
         BUFFER_DIAGNOSTIC => resources.diagnostic_bytes,
         BUFFER_OUTPUT_PCM => resources.output_pcm_bytes,
-        BUFFER_COMMAND => host.command_staging_bytes(),
         BUFFER_METER_FRAME => (host.meter_frame().len() * 4) as u64,
         _ => return 0,
     };
@@ -1241,29 +1237,6 @@ pub extern "C" fn miso_engine_web_v1_resource_ptr(handle: u32) -> u32 {
     })
 }
 
-/// Admit one staged observation command submission, kinds 7 and 8 (issue #137 D1; #1565A).
-///
-/// `count` records were written into [`BUFFER_COMMAND`], which exists when the boot asked for
-/// observation taps. Every value goes through the control exports instead. The submission is one
-/// transaction: the return value is the frozen result code, and
-/// [`miso_engine_web_v1_command_report_ptr`] names the first refused record and why.
-#[unsafe(no_mangle)]
-pub extern "C" fn miso_engine_web_v1_command_submit(handle: u32, count: u32) -> u32 {
-    render_locked(|| {
-        with_host_mut(handle, RESULT_INVALID_ARGUMENT, |host| {
-            host.submit_commands(count)
-        })
-    })
-}
-
-/// Return the stable live-control command-report address or zero for an invalid handle.
-#[unsafe(no_mangle)]
-pub extern "C" fn miso_engine_web_v1_command_report_ptr(handle: u32) -> u32 {
-    with_host(handle, 0, |host| {
-        pointer_u32(ptr::from_ref(host.command_report()))
-    })
-}
-
 /// Take (`1`) or release (`0`) the decimated meter lease (issue #137 D2).
 #[unsafe(no_mangle)]
 pub extern "C" fn miso_engine_web_v1_meter_lease(handle: u32, enabled: u32) -> u32 {
@@ -1878,17 +1851,6 @@ pub mod native_staging {
     pub fn meter_frame(handle: u32) -> Option<(crate::WebMeterHeader, Vec<f32>)> {
         super::with_host(handle, None, |host| {
             Some((*host.meter_header(), host.meter_frame().to_vec()))
-        })
-    }
-
-    /// Stage live-control command records, as the worklet writes them through
-    /// `miso_engine_web_v1_buffer_ptr(handle, BUFFER_COMMAND)`.
-    pub fn command_records(handle: u32, records: &[u8]) -> bool {
-        super::with_host_mut(handle, false, |host| {
-            host.command_staging_mut()
-                .and_then(|staging| staging.get_mut(..records.len()))
-                .map(|staging| staging.copy_from_slice(records))
-                .is_some()
         })
     }
 }

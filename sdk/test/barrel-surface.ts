@@ -58,10 +58,9 @@ type AgentSetAck = Assert<Exact<barrel.SetAck, agent.SetAck>>;
 
 type WriterClass = Assert<Exact<typeof barrel.LiveControlWriter, typeof writer.LiveControlWriter>>;
 type WriterInstance = Assert<Exact<barrel.LiveControlWriter, writer.LiveControlWriter>>;
-type WriterLaneEdit = Assert<Exact<barrel.LaneEdit, writer.LaneEdit>>;
 type WriterFlushOutcome = Assert<Exact<barrel.FlushOutcome, writer.FlushOutcome>>;
 type WriterStatsType = Assert<Exact<barrel.WriterStats, writer.WriterStats>>;
-type WriterOptionsType = Assert<Exact<barrel.WriterOptions, writer.WriterOptions>>;
+type WriterOptionsType = Assert<Exact<barrel.ControlWriterOptions, writer.ControlWriterOptions>>;
 
 // --- core/live-controls.ts: the semantic path is on the root barrel ----------------------------
 
@@ -202,7 +201,6 @@ export type BarrelSurfacePins = [
   AgentSetAck,
   WriterClass,
   WriterInstance,
-  WriterLaneEdit,
   WriterFlushOutcome,
   WriterStatsType,
   WriterOptionsType,
@@ -250,31 +248,12 @@ export type BarrelSurfacePins = [
 ];
 
 
-// Both constructor modes share the writer; legacy annotated/extended options remain valid.
-type SemanticWriterOptionsType = Assert<Exact<barrel.SemanticWriterOptions, writer.SemanticWriterOptions>>;
-interface ExistingWriterOptions extends barrel.WriterOptions { readonly label?: string }
-function writerSubmissionTypes(report: barrel.CommandReport) {
-  const encoded: ExistingWriterOptions = { submit: (_records, _count) => report };
-  const legacyCallback: barrel.WriterOptions["submit"] = encoded.submit;
-  const semantic: barrel.SemanticWriterOptions = { maximumBatch: 4, submitEdits: async edits => {
-    // @ts-expect-error the selected batch is readonly
-    edits.push({});
-    if (edits[0] !== undefined) {
-      // @ts-expect-error addressed edits are readonly
-      edits[0].trackIndex = 2;
-      // @ts-expect-error values are readonly
-      edits[0].values[0] = 1;
-    }
-    return report;
-  } };
-  new barrel.LiveControlWriter(encoded);
-  new barrel.LiveControlWriter(semantic);
-  // @ts-expect-error both callbacks are ambiguous
-  new barrel.LiveControlWriter({ submit: legacyCallback, submitEdits: semantic.submitEdits });
-  // @ts-expect-error one callback is required
+// The writer takes the engine's queue; an annotated or extended options type stays valid.
+interface ExistingWriterOptions extends barrel.ControlWriterOptions { readonly label?: string }
+function writerSubmissionTypes(queue: barrel.ControlSubmitter) {
+  const options: ExistingWriterOptions = { queue, maximumBatch: 4 };
+  new barrel.LiveControlWriter(options);
+  // @ts-expect-error a queue is required
   new barrel.LiveControlWriter({ maximumBatch: 4 });
-  // @ts-expect-error actual CommandReport is required
-  new barrel.LiveControlWriter({ submitEdits: async () => undefined });
 }
 void writerSubmissionTypes;
-export type _SemanticWriterOptionsType = SemanticWriterOptionsType;
