@@ -2,6 +2,13 @@ import { ABI_LAYOUT } from "../generated/abi.ts";
 import { constantValue } from "./abi.ts";
 import { MisoEngineError, MisoUsageError, resultName } from "./errors.ts";
 import type { ResponsePreviewGrid } from "./response.ts";
+import {
+  decodeResponseReady,
+  decodeResponseTagReply,
+  encodeStripResponseRequest,
+  responseRefusalResult,
+} from "./response-frame.ts";
+import type { ResponseReadyEvent } from "./response-frame.ts";
 import type { Channel } from "./types.ts";
 
 /** A bounded grid accepted by a live track-response query. */
@@ -32,8 +39,9 @@ export interface TrackResponseMember {
    */
   readonly rack: "input" | "console" | "inserts";
   /**
-   * The owner record's rack code, retained for callers that persist wire metadata: `0` input
-   * filters, `2` inserts, `4` console (S1c; `1` and `3` are retired).
+   * The member's section code in the `RESPONSE_READY` event (decision 17): `4` the input
+   * section's filters, `5` a console slot, `2` an insert. (The retired capture record's codes were
+   * `0`, `4` and `2`.)
    */
   readonly rackValue: number;
   /** Position in the actual declared response-owner order. */
@@ -236,14 +244,23 @@ function gridValue(grid: TrackResponseGrid, maximumPoints: number): { readonly k
   return { kind: grid.kind === "linear" ? 1 : 2, points };
 }
 
+/**
+ * The largest `RESPONSE_READY` frame a query may ask for, in bytes: the control frame limit
+ * (#1579a D6). `responseLimits.maximumResultBytes` is sent as the request's `maximum_reply_bytes`.
+ */
+export const TRACK_RESPONSE_MAXIMUM_RESULT_BYTES = 1 << 20;
+
+/** The longest strip ID a `RESPONSE_READY` carries, in bytes (#1578 D2). */
+const TRACK_RESPONSE_MAXIMUM_ID_BYTES = 127;
+
 /** Clone the endpoint query into the effective bounded form used by managed jobs. */
 export function normalizeTrackResponseQuery(request: TrackResponseQuery): TrackResponseQuery {
   if (request === null || typeof request !== "object") {
     throw new MisoUsageError("live track response query must be an object");
   }
-  const maximumPoints = generatedMaximum("maximumLiveResponsePoints");
-  const maximumCaptureBytes = generatedMaximum("liveResponseCaptureBytes");
-  const id = trackIdBytes(request.trackId, generatedMaximum("maximumLiveResponseIdBytes"));
+  const maximumPoints = generatedMaximum("maximumResponsePoints");
+  const maximumCaptureBytes = TRACK_RESPONSE_MAXIMUM_RESULT_BYTES;
+  const id = trackIdBytes(request.trackId, TRACK_RESPONSE_MAXIMUM_ID_BYTES);
   const grid = gridValue(request.grid, maximumPoints);
   const channels = channelValue(request.channels) === 1
     ? "left" as const
@@ -595,7 +612,6 @@ export class TrackResponseModule {
   readonly #requestBytes: LiveExport;
   readonly #trackIdPtr: LiveExport;
   readonly #trackIdCapacity: LiveExport;
-  readonly #capture: LiveExport | undefined;
   readonly #analysis: LiveExport;
   readonly #resultPtr: LiveExport;
   readonly #resultBytes: LiveExport;
@@ -620,7 +636,6 @@ export class TrackResponseModule {
     this.#requestBytes = callable(table, "miso_engine_web_v1_track_response_request_bytes");
     this.#trackIdPtr = callable(table, "miso_engine_web_v1_track_response_track_id_ptr");
     this.#trackIdCapacity = callable(table, "miso_engine_web_v1_track_response_track_id_capacity");
-    this.#capture = optionalCallable(table, ["miso_engine_web_v1_track_response_capture"]);
     this.#analysis = callable(table, "miso_engine_web_v1_track_response_analysis");
     this.#resultPtr = callable(table, "miso_engine_web_v1_track_response_result_ptr");
     this.#resultBytes = callable(table, "miso_engine_web_v1_track_response_result_bytes");
@@ -649,13 +664,7 @@ export class TrackResponseModule {
 
   /** Query a live snapshot already captured by a host and copied into this instance. */
   querySnapshot(request: TrackResponseQuery, snapshot: Uint8Array): TrackResponseResult {
-    return this.#run(request, undefined, snapshot) as TrackResponseResult;
-  }
-
-  /** Capture from an active headless owner, then evaluate that immutable captured state. */
-  queryActive(request: TrackResponseQuery, handle: number): TrackResponseResult {
-    if (this.#capture === undefined) throw new MisoUsageError("the engine asset cannot capture live responses");
-    return this.#run(request, handle) as TrackResponseResult;
+    return this.#run(request, snapshot) as TrackResponseResult;
   }
 
   /** Capture and evaluate only when the validated active response state changed. */
@@ -664,23 +673,12 @@ export class TrackResponseModule {
     snapshot: Uint8Array,
     previousState?: TrackResponseObservedState,
   ): TrackResponseRead {
-    return this.#run(request, undefined, snapshot, previousState, true) as TrackResponseRead;
-  }
-
-  /** Capture and evaluate only when the active headless response state changed. */
-  queryActiveIfChanged(
-    request: TrackResponseQuery,
-    handle: number,
-    previousState?: TrackResponseObservedState,
-  ): TrackResponseRead {
-    if (this.#capture === undefined) throw new MisoUsageError("the engine asset cannot capture live responses");
-    return this.#run(request, handle, undefined, previousState, true) as TrackResponseRead;
+    return this.#run(request, snapshot, previousState, true) as TrackResponseRead;
   }
 
   #run(
     request: TrackResponseQuery,
-    handle: number | undefined,
-    snapshot?: Uint8Array,
+    snapshot: Uint8Array,
     previousState?: TrackResponseObservedState,
     managed = false,
   ): TrackResponseResult | TrackResponseRead {
@@ -689,15 +687,7 @@ export class TrackResponseModule {
     this.#busy = true;
     try {
       const parsedRequest = this.#writeRequest(request);
-      if (snapshot !== undefined) {
-        const capture = this.#copySnapshot(snapshot, parsedRequest.maximumResultBytes);
-        const parsed = this.#parseCapture(capture);
-        return this.#evaluate(parsedRequest, parsed, request.trackId, previousState, managed);
-      }
-      if (handle === undefined || this.#capture === undefined) throw new MisoUsageError("a live response owner handle is required");
-      const result = this.#capture(handle);
-      if (result !== this.#contract.resultOk) throw responseError(result, this.#contract);
-      const capture = this.#copyCurrentResult(parsedRequest.maximumResultBytes);
+      const capture = this.#copySnapshot(snapshot, parsedRequest.maximumResultBytes);
       const parsed = this.#parseCapture(capture);
       return this.#evaluate(parsedRequest, parsed, request.trackId, previousState, managed);
     } finally {
@@ -764,20 +754,6 @@ export class TrackResponseModule {
     const result = this.#snapshotCommit(snapshot.byteLength);
     if (result !== this.#contract.resultOk) throw responseError(result, this.#contract);
     return snapshot.slice();
-  }
-
-  #copyCurrentResult(maximumBytes: number): Uint8Array {
-    const pointer = this.#resultPtr();
-    const length = this.#resultBytes();
-    const bytes = memoryView(this.#exports);
-    if (!Number.isSafeInteger(pointer) || pointer <= 0 || !Number.isSafeInteger(length)
-        || length > maximumBytes || length > this.#contract.maximumCaptureBytes) {
-      throw new MisoEngineError("the live response capture exceeded its requested bound", {
-        phase: "output", code: "refusedBudget", result: this.#contract.resultRefusedBudget,
-      });
-    }
-    checkedRange(bytes, pointer, length, "capture");
-    return bytes.slice(pointer, pointer + length);
   }
 
   #parseCapture(capture: Uint8Array): ParsedCapture {
@@ -1025,4 +1001,239 @@ export class TrackResponseModule {
 
 function u32At(view: DataView, offset: number): number {
   return view.getUint32(offset, true);
+}
+
+// ----------------------------------------------------------------------------------------------
+// The one request path (#1579a D1): the frames a C ABI host sends and reads.
+
+/** One protocol event as an engine's event lane delivers it. */
+export interface TrackResponseControlEvent {
+  readonly lane: 0 | 1;
+  readonly frame: Uint8Array;
+}
+
+/** How a track response query reaches one engine's core. */
+export interface TrackResponseTransport {
+  /** Send one command frame and resolve with its reply frame. */
+  send(frame: Uint8Array): Uint8Array | Promise<Uint8Array>;
+  /** Subscribe to the engine's protocol events; returns the unsubscribe function. */
+  onControlEvent(listener: (event: TrackResponseControlEvent) => void): () => void;
+  /** The engine endpoint's one request-ID allocator. */
+  nextRequestId(): bigint;
+}
+
+const DEFAULT_REQUEST_DEADLINE_MS = 5_000;
+
+const RACKS: ReadonlyMap<number, TrackResponseMember["rack"]> = new Map([
+  [4, "input"],
+  [5, "console"],
+  [2, "inserts"],
+]);
+const KINDS: ReadonlyMap<number, TrackResponseMember["kind"]> = new Map([
+  [1, "parametricEq"],
+  [2, "inputFilters"],
+  [3, "unavailable"],
+]);
+
+function maskBits(mask: number, count: number): readonly boolean[] {
+  return Object.freeze(Array.from({ length: count }, (_unused, bit) => ((mask >>> bit) & 1) === 1));
+}
+
+/**
+ * The SDK's result of one `RESPONSE_READY` (#1579a D3). A refused outcome raises `MisoEngineError`
+ * with the core's diagnostic code.
+ */
+export function trackResponseResultOf(event: ResponseReadyEvent): TrackResponseResult {
+  const capture = event.capture;
+  if (capture === undefined) {
+    const status = responseRefusalResult(event.status);
+    throw new MisoEngineError("the live track response capture was refused", {
+      phase: "output",
+      code: (event.diagnostic ?? status) as MisoEngineError["code"],
+      result: constantValue("resultCodes", status),
+      diagnostics: [{ code: event.diagnostic ?? status, path: "" }],
+    });
+  }
+  const members = capture.members.map((member, slot): TrackResponseMember => {
+    const rack = RACKS.get(member.section);
+    const kind = KINDS.get(member.kind);
+    if (rack === undefined || kind === undefined) throw invalidPayload("a response member has an unknown code");
+    return Object.freeze({
+      trackId: event.stripId,
+      nativeId: member.effect,
+      stableId: member.slotId ?? "input-filters",
+      rack,
+      rackValue: member.section,
+      slot,
+      kind,
+      kindValue: member.kind,
+      bypassed: member.bypassed,
+      available: member.kind !== 3,
+      ...(member.kind === 3 ? { excludedReason: "linearResponseUnavailable" as const } : {}),
+      enabledLeft: maskBits(member.enabledLeft, member.sectionCount),
+      enabledRight: maskBits(member.enabledRight, member.sectionCount),
+    });
+  });
+  return Object.freeze({
+    trackId: event.stripId,
+    mode: "target",
+    meaning: "eqFilterSubtotal",
+    sampleRateHz: capture.sampleRateHz,
+    floorDb: capture.floorDb,
+    frequenciesHz: capture.frequenciesHz,
+    ...(capture.leftDb === undefined ? {} : { leftDb: capture.leftDb }),
+    ...(capture.rightDb === undefined ? {} : { rightDb: capture.rightDb }),
+    members: Object.freeze(members),
+    capturedSample: capture.capturedSample,
+    snapshotToken: event.requestTag,
+    excludedMemberCount: capture.excludedCount,
+    resultBytes: BigInt(event.frameBytes),
+  });
+}
+
+function floatWords(words: number[], values: Float32Array | undefined): void {
+  if (values === undefined) {
+    words.push(0);
+    return;
+  }
+  words.push(values.length + 1);
+  const bits = new Uint32Array(values.buffer, values.byteOffset, values.length);
+  for (const word of bits) words.push(word);
+}
+
+/**
+ * The state key of a decoded result for a managed subscription: every member field and every
+ * curve bit, without the boundary sample, the tag or the frame length. Two results with the same
+ * key publish once.
+ */
+export function trackResponseStateOf(result: TrackResponseResult): TrackResponseObservedState {
+  const words: number[] = [result.sampleRateHz, result.excludedMemberCount, result.members.length];
+  floatWords(words, Float32Array.of(result.floorDb));
+  for (const member of result.members) {
+    appendStringWords(words, member.trackId);
+    appendStringWords(words, member.nativeId);
+    appendStringWords(words, member.stableId);
+    words.push(member.rackValue, member.slot, member.kindValue, member.bypassed ? 1 : 0);
+    for (const mask of [member.enabledLeft, member.enabledRight]) {
+      words.push(mask.length, ...mask.map((enabled) => (enabled ? 1 : 0)));
+    }
+  }
+  floatWords(words, result.frequenciesHz);
+  floatWords(words, result.leftDb);
+  floatWords(words, result.rightDb);
+  return Object.freeze({ words: Object.freeze(words) });
+}
+
+/**
+ * A managed read of a decoded result: `changed` when the key of `result` differs from
+ * `previousState`, the result kept only then.
+ */
+export function trackResponseReadOf(
+  result: TrackResponseResult,
+  previousState?: TrackResponseObservedState,
+): TrackResponseRead {
+  const state = trackResponseStateOf(result);
+  return sameObservedState(previousState, state)
+    ? Object.freeze({ changed: false, state })
+    : Object.freeze({ changed: true, state, result });
+}
+
+/**
+ * One engine's track response queries through the core's frames (#1579a D1): each query sends a
+ * strip `RESPONSE_GET` and waits for the `RESPONSE_READY` whose tag its reply carried, read from
+ * the engine's event lane without consuming any other event. Queries on one engine run one at a
+ * time, in call order, because the core captures one at a time. The deadline
+ * (`responseLimits.requestDeadlineMs`, default 5 s) runs from the send to the event.
+ */
+export class TrackResponseRequester {
+  readonly #transport: TrackResponseTransport;
+  #tail: Promise<unknown> = Promise.resolve();
+
+  constructor(transport: TrackResponseTransport) {
+    this.#transport = transport;
+  }
+
+  query(request: TrackResponseQuery): Promise<TrackResponseResult> {
+    let normalized: TrackResponseQuery;
+    try {
+      normalized = normalizeTrackResponseQuery(request);
+    } catch (error) {
+      return Promise.reject(error);
+    }
+    const run = this.#tail.then(() => this.#run(normalized), () => this.#run(normalized));
+    this.#tail = run.catch(() => undefined);
+    return run;
+  }
+
+  async #run(request: TrackResponseQuery): Promise<TrackResponseResult> {
+    const seen = new Map<bigint, ResponseReadyEvent>();
+    let waiting: { readonly tag: bigint; readonly settle: (event: ResponseReadyEvent | Error) => void } | undefined;
+    const unsubscribe = this.#transport.onControlEvent((event) => {
+      if (event.lane !== 0) return;
+      let ready: ResponseReadyEvent | undefined;
+      try {
+        ready = decodeResponseReady(event.frame);
+      } catch (error) {
+        waiting?.settle(error as Error);
+        return;
+      }
+      if (ready === undefined) return;
+      if (waiting !== undefined && ready.requestTag === waiting.tag) waiting.settle(ready);
+      else seen.set(ready.requestTag, ready);
+    });
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      const deadlineMs = request.responseLimits?.requestDeadlineMs ?? DEFAULT_REQUEST_DEADLINE_MS;
+      const requestId = this.#transport.nextRequestId();
+      const frame = encodeStripResponseRequest({
+        requestId,
+        stripId: request.trackId,
+        grid: request.grid.kind,
+        points: request.grid.points,
+        minimumHz: request.grid.minimumHz,
+        maximumHz: request.grid.maximumHz,
+        channels: request.channels ?? "both",
+        maximumReplyBytes: request.responseLimits?.maximumResultBytes,
+      });
+      const deadline = new Promise<never>((_resolve, reject) => {
+        timer = setTimeout(
+          () => reject(new MisoUsageError("live track response query exceeded its deadline")),
+          deadlineMs,
+        );
+      });
+      const reply = decodeResponseTagReply(await Promise.race([
+        Promise.resolve(this.#transport.send(frame)),
+        deadline,
+      ]));
+      if (reply.requestId !== requestId) {
+        throw new MisoEngineError("the response reply answers another request", {
+          phase: "output", code: "internal", result: constantValue("resultCodes", "internal"),
+        });
+      }
+      if (!reply.ok) {
+        const status = responseRefusalResult(reply.status);
+        const diagnostics = reply.diagnostics.map((row) => ({ code: row.code, path: "" }));
+        throw new MisoEngineError("the live track response query was refused", {
+          phase: "output",
+          code: (diagnostics[0]?.code ?? status) as MisoEngineError["code"],
+          result: constantValue("resultCodes", status),
+          diagnostics,
+        });
+      }
+      const tag = reply.tag;
+      const event = seen.get(tag) ?? await Promise.race([
+        new Promise<ResponseReadyEvent>((resolve, reject) => {
+          waiting = {
+            tag,
+            settle: (value) => (value instanceof Error ? reject(value) : resolve(value)),
+          };
+        }),
+        deadline,
+      ]);
+      return trackResponseResultOf(event);
+    } finally {
+      if (timer !== undefined) clearTimeout(timer);
+      unsubscribe();
+    }
+  }
 }

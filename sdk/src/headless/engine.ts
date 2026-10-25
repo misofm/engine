@@ -16,6 +16,8 @@ import type {
   ObservationReadResult,
   ObservationSelection,
 } from "../core/observation.ts";
+import { trackResponseReadOf } from "../core/live-response.ts";
+import { isResponseReady } from "../core/response-frame.ts";
 import type { TrackResponseObservedState, TrackResponseQuery, TrackResponseRead, TrackResponseResult } from "../core/live-response.ts";
 import { cloneSpectrumCollection, cloneSpectrumQuery } from "../core/spectrum.ts";
 import type { SpectrumResult } from "../core/spectrum.ts";
@@ -281,8 +283,14 @@ export class OfflineEngine {
     return this.#observationOwner().subscribeSpectrum(request).then((receipt) => receipt.handle);
   }
 
-  /** Capture and evaluate one immutable selected-track response at the current render boundary. */
-  queryTrackResponse(request: TrackResponseQuery): TrackResponseResult {
+  /**
+   * The response of one track, captured at a render boundary (#1579a D2): it sends the strip
+   * `RESPONSE_GET` a C ABI host sends and settles with the `RESPONSE_READY` that answers it, which
+   * the core produces in its render step. The promise therefore settles after the next `render()`
+   * the app calls, and rejects when the request deadline (`responseLimits.requestDeadlineMs`,
+   * default 5 s) passes first. Queries run one at a time, in call order.
+   */
+  queryTrackResponse(request: TrackResponseQuery): Promise<TrackResponseResult> {
     return this.#boundary.queryTrackResponse(request);
   }
 
@@ -472,13 +480,17 @@ export class OfflineEngine {
    * reads its events after every control frame and every `render()`; it decodes the frames
    * `onControlEvent` delivers, so an event that arrives with no listener at all is dropped and
    * counted in `discardedControlEvents`, and a listener that throws (or a frame that does not
-   * decode) is counted in `controlListenerFailures`. Returns the unsubscribe function.
+   * decode) is counted in `controlListenerFailures`. A `RESPONSE_READY` is not one of them: it
+   * answers a `queryTrackResponse`, which reads it (#1579a). Returns the unsubscribe function.
    */
   onEvent(listener: (event: ProtocolEvent) => void): () => void {
     if (typeof listener !== "function") {
       throw new MisoUsageError("an event listener must be a function");
     }
-    return this.#boundary.onControlEvent((event) => listener(decodeProtocolEvent(event.frame)));
+    return this.#boundary.onControlEvent((event) => {
+      if (isResponseReady(event.frame)) return;
+      listener(decodeProtocolEvent(event.frame));
+    });
   }
 
   /**
@@ -731,8 +743,13 @@ export class OfflineEngine {
       spectrumSelect: (query) => this.#boundary.selectSpectrum(query),
       spectrumStreamSelect: (query, smoothingMs) =>
         this.#boundary.selectSpectrumStream(query, smoothingMs),
-      responseRead: (request: TrackResponseQuery, previousState?: TrackResponseObservedState): TrackResponseRead =>
-        this.#boundary.queryTrackResponseIfChanged(request, previousState),
+      // A read is one query (it settles after the app's next `render()`); the owner publishes it
+      // only when a member field or a curve bit changed.
+      responseRead: async (
+        request: TrackResponseQuery,
+        previousState?: TrackResponseObservedState,
+      ): Promise<TrackResponseRead> =>
+        trackResponseReadOf(await this.#boundary.queryTrackResponse(request), previousState),
       spectrumStart: (smoothingMs, query) => this.#boundary.startSpectrumStream(smoothingMs, query),
       spectrumRead: (query) => this.#boundary.readSpectrumStream(query),
       spectrumStop: () => this.#boundary.stopSpectrumStream(),

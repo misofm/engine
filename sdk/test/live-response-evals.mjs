@@ -9,6 +9,13 @@ import { MisoEngineError, MisoUsageError } from "../src/core/errors.ts";
 import { ABI_LAYOUT } from "../src/generated/abi.ts";
 import { CATALOG } from "../src/generated/catalog.ts";
 import { createOfflineEngine } from "../src/headless/engine.ts";
+import { trackResponseResultOf } from "../src/core/live-response.ts";
+import {
+  decodeResponseReady,
+  decodeResponseTagReply,
+  encodeStripResponseRequest,
+} from "../src/core/response-frame.ts";
+import { readFileSync } from "node:fs";
 import { effectEntry, moduleBytes, ramp, sessionDocument } from "./support.mjs";
 
 class FakeWorker {
@@ -309,7 +316,125 @@ test("browser host failure or disposal while the Worker is pending invalidates t
   }
 });
 
-test("candidate Wasm captures the live boundary, actual owners, edit drain, bounds, and lifecycle", {
+// The C ABI's strip request and the `RESPONSE_READY` it answered, for the same document
+// (`crates/capi/tests/response_strip.rs` writes it).
+const FIXTURE = JSON.parse(readFileSync(new URL("./fixtures/response-ready.json", import.meta.url), "utf8"));
+
+function hexOf(bytes) {
+  return Buffer.from(bytes).toString("hex");
+}
+
+function bitsOf(values) {
+  if (values === undefined) return null;
+  return [...new Uint32Array(values.buffer, values.byteOffset, values.length)]
+    .map((word) => word.toString(16).padStart(8, "0"));
+}
+
+/** What D3 says the SDK result of the fixture's event is, built from the protocol codec's values. */
+function expectedResult(expect) {
+  const racks = new Map([[4, "input"], [5, "console"], [2, "inserts"]]);
+  const kinds = new Map([[1, "parametricEq"], [2, "inputFilters"], [3, "unavailable"]]);
+  const bits = (mask, count) => Array.from({ length: count }, (_unused, bit) => ((mask >>> bit) & 1) === 1);
+  return {
+    trackId: expect.stripId,
+    sampleRateHz: expect.sampleRateHz,
+    floorDb: bitsOf(new Float32Array(new Uint32Array([Number.parseInt(expect.floorDb, 16)]).buffer))[0],
+    excludedMemberCount: expect.excludedCount,
+    frequenciesHz: expect.frequenciesHz,
+    leftDb: expect.leftDb,
+    rightDb: expect.rightDb,
+    members: expect.members.map((member, slot) => ({
+      trackId: expect.stripId,
+      nativeId: member.effect,
+      stableId: member.slotId ?? "input-filters",
+      rack: racks.get(member.section),
+      rackValue: member.section,
+      slot,
+      kind: kinds.get(member.kind),
+      kindValue: member.kind,
+      bypassed: member.bypassed,
+      available: member.kind !== 3,
+      excludedReason: member.kind === 3 ? "linearResponseUnavailable" : undefined,
+      enabledLeft: bits(member.enabledLeft, member.sectionCount),
+      enabledRight: bits(member.enabledRight, member.sectionCount),
+    })),
+  };
+}
+
+/** The fields of a result that the core decides, curves by bits. */
+function comparable(result) {
+  return {
+    trackId: result.trackId,
+    sampleRateHz: result.sampleRateHz,
+    floorDb: bitsOf(Float32Array.of(result.floorDb))[0],
+    excludedMemberCount: result.excludedMemberCount,
+    frequenciesHz: bitsOf(result.frequenciesHz),
+    leftDb: bitsOf(result.leftDb),
+    rightDb: bitsOf(result.rightDb),
+    members: result.members.map((member) => ({ ...member, excludedReason: member.excludedReason })),
+  };
+}
+
+/** Render blocks until `promise` settles; at most `blocks`. */
+async function renderUntil(engine, promise, blocks = 8) {
+  let settled = false;
+  const observed = promise.finally(() => { settled = true; });
+  observed.catch(() => {});
+  for (let block = 0; block < blocks && !settled; block += 1) {
+    await new Promise((resolve) => setImmediate(resolve));
+    if (!settled) engine.render();
+  }
+  return observed;
+}
+
+// #1579a gate 1, the codec half. Test value: red if the SDK spells the strip request differently
+// from the C ABI, or maps a member or curve field of `RESPONSE_READY` differently from the core's
+// event (a section code, a slot ID, a mask bit, a curve word, the tag or the frame length).
+test("the strip request and RESPONSE_READY codec match the C ABI's frames", () => {
+  const request = FIXTURE.request;
+  const encoded = encodeStripResponseRequest({
+    requestId: BigInt(request.requestId),
+    stripId: request.trackId,
+    grid: request.grid.kind,
+    points: request.grid.points,
+    minimumHz: request.grid.minimumHz,
+    maximumHz: request.grid.maximumHz,
+    channels: request.channels,
+  });
+  assert.equal(hexOf(encoded), FIXTURE.requestHex);
+  const frame = Uint8Array.from(Buffer.from(FIXTURE.eventHex, "hex"));
+  const event = decodeResponseReady(frame);
+  assert.ok(event);
+  assert.equal(event.requestTag, BigInt(FIXTURE.expect.requestTag));
+  const result = trackResponseResultOf(event);
+  assert.deepEqual(comparable(result), expectedResult(FIXTURE.expect));
+  assert.equal(result.mode, "target");
+  assert.equal(result.meaning, "eqFilterSubtotal");
+  assert.equal(result.capturedSample, BigInt(FIXTURE.expect.capturedSample));
+  assert.equal(result.snapshotToken, BigInt(FIXTURE.expect.requestTag));
+  assert.equal(result.resultBytes, BigInt(frame.length));
+});
+
+// #1579a gate 1, the headless leg. Test value: red if the headless engine answers the fixture's
+// question with other members or other curve bits than the C ABI did for the same document, or if
+// `onEvent` hands the answering `RESPONSE_READY` to the protocol event decoder (which refuses it).
+test("candidate Wasm answers the C ABI fixture's question with the C ABI's result", {
+  skip: !process.env.MISO_ENGINE_SDK_ARTIFACTS_HEX,
+}, async () => {
+  const asset = await MisoEngineAsset.load(await moduleBytes());
+  const engine = await createOfflineEngine(FIXTURE.document, { asset });
+  try {
+    const kinds = [];
+    engine.onEvent((event) => kinds.push(event.kind));
+    const result = await renderUntil(engine, engine.queryTrackResponse(FIXTURE.request));
+    assert.deepEqual(comparable(result), expectedResult(FIXTURE.expect));
+    assert.equal(engine.controlListenerFailures, 0);
+  } finally {
+    engine.dispose();
+  }
+});
+
+test("candidate Wasm reads the applied state at a render, one capture at a time", {
   skip: !process.env.MISO_ENGINE_SDK_ARTIFACTS_HEX,
 }, async () => {
   const eq = CATALOG.effects.find((row) => row.id === "miso.parametric-eq");
@@ -338,13 +463,24 @@ test("candidate Wasm captures the live boundary, actual owners, edit drain, boun
     grid: { kind: "logarithmic", points: 16, minimumHz: 20, maximumHz: 20_000 },
     channels: "both",
   };
+  const shape = engine.shape();
+  const feed = (block) => {
+    for (const source of shape.sources) {
+      engine.submitSource({
+        sourceId: source.id,
+        generation: 1n,
+        startFrame: BigInt(block * shape.quantumFrames),
+        planes: Array.from({ length: source.channels }, (_unused, channel) => ramp(shape.quantumFrames, 13 + channel)),
+        endOfRegion: false,
+      });
+    }
+  };
   try {
-    const first = engine.queryTrackResponse(request);
+    feed(0);
+    const first = await renderUntil(engine, engine.queryTrackResponse(request));
     assert.equal(first.mode, "target");
     assert.equal(first.meaning, "eqFilterSubtotal");
     assert.equal(first.sampleRateHz, 48_000);
-    assert.equal(first.capturedSample, 0n);
-    assert.equal(first.snapshotToken, 1n);
     assert.equal(first.frequenciesHz.length, 16);
     assert.equal(first.leftDb.length, 16);
     assert.equal(first.rightDb.length, 16);
@@ -353,49 +489,57 @@ test("candidate Wasm captures the live boundary, actual owners, edit drain, boun
       ["console", "eq", true],
       ["inserts", "comp", false],
     ]);
-    // The owner record's codes (S1c): `0` input filters, `4` console, `2` inserts. Red mutation:
-    // decode through the retired positional table (`input`, `simd1`, `dynamic`, `simd2`) -> the
-    // console code `4` has no row and the query throws; the rack names above go red first.
-    assert.deepEqual(first.members.map((member) => member.rackValue), [0, 4, 2]);
+    // The decision-17 section codes: `4` input filters, `5` console, `2` inserts.
+    assert.deepEqual(first.members.map((member) => member.rackValue), [4, 5, 2]);
     assert.deepEqual(first.members[1].enabledLeft, [true, false, false, false, false, false]);
     assert.equal(first.members[2].excludedReason, "linearResponseUnavailable");
-    const firstFrequencies = first.frequenciesHz.slice();
     const firstLeft = first.leftDb.slice();
 
+    // #1579a gate 2. Test value: red if the SDK reads a stale curve (the one before the edit), or
+    // if the headless query settles without a render.
     const liveControls = engine.liveControls();
     await liveControls.submit(
       liveControls.edit.track("t").console("eq", "miso.parametric-eq").parameter("band-1-gain", -3),
     );
-    const beforeDrain = engine.queryTrackResponse(request);
-    assert.equal(beforeDrain.capturedSample, 0n);
-    assert.deepEqual([...beforeDrain.leftDb], [...firstLeft]);
-
-    const shape = engine.shape();
-    for (const source of shape.sources) {
-      engine.submitSource({
-        sourceId: source.id,
-        generation: 1n,
-        startFrame: 0n,
-        planes: Array.from({ length: source.channels }, (_unused, channel) => ramp(shape.quantumFrames, 13 + channel)),
-        endOfRegion: false,
-      });
-    }
-    engine.render();
-    const afterDrain = engine.queryTrackResponse(request);
-    assert.equal(afterDrain.capturedSample, 128n);
-    assert.equal(afterDrain.snapshotToken, 3n);
-    assert.notEqual(afterDrain.frequenciesHz, first.frequenciesHz);
-    assert.notEqual(afterDrain.leftDb, first.leftDb);
-    assert.deepEqual([...first.frequenciesHz], [...firstFrequencies]);
+    let settled = false;
+    const afterEdit = engine.queryTrackResponse(request).finally(() => { settled = true; });
+    for (let tick = 0; tick < 4; tick += 1) await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(settled, false, "the query waits for a render");
+    feed(1);
+    const edited = await renderUntil(engine, afterEdit);
+    assert.ok(edited.capturedSample > first.capturedSample);
+    assert.ok(edited.snapshotToken > first.snapshotToken);
+    assert.notDeepEqual([...edited.leftDb], [...firstLeft]);
     assert.deepEqual([...first.leftDb], [...firstLeft]);
-    assert.notDeepEqual([...afterDrain.leftDb], [...firstLeft]);
 
-    assert.throws(
-      () => engine.queryTrackResponse({ ...request, responseLimits: { maximumResultBytes: 104 } }),
-      (error) => error instanceof MisoEngineError && error.code === "refusedBudget",
+    // #1579a gate 3. Test value: red if two captures can run at once on one engine: the SDK's
+    // queries would refuse each other, or a raw second request would be armed.
+    const one = engine.queryTrackResponse(request);
+    const two = engine.queryTrackResponse(request);
+    for (let tick = 0; tick < 4; tick += 1) await new Promise((resolve) => setImmediate(resolve));
+    const raw = decodeResponseTagReply(engine.controlFrame(encodeStripResponseRequest({
+      requestId: engine.controlTransactions().requestIds.next(),
+      stripId: "t",
+      grid: "logarithmic",
+      points: 16,
+      minimumHz: 20,
+      maximumHz: 20_000,
+      channels: "both",
+    })));
+    assert.equal(raw.ok, false);
+    assert.equal(raw.status, "backpressure");
+    assert.equal(raw.diagnostics[0].code, "response.capture.pending");
+    const [oneResult, twoResult] = await renderUntil(engine, Promise.all([one, two]));
+    assert.ok(twoResult.snapshotToken > oneResult.snapshotToken);
+    assert.ok(twoResult.capturedSample > oneResult.capturedSample);
+
+    await assert.rejects(
+      renderUntil(engine, engine.queryTrackResponse({ ...request, responseLimits: { maximumResultBytes: 104 } })),
+      (error) => error instanceof MisoEngineError && error.code === "response.reply_too_large"
+        && error.result === ABI_LAYOUT.constants.resultCodes.find((row) => row.name === "refusedBudget").value,
     );
     engine.dispose();
-    assert.throws(() => engine.queryTrackResponse(request), MisoUsageError);
+    await assert.rejects(engine.queryTrackResponse(request), MisoUsageError);
   } finally {
     if (engine.state() !== "disposed") engine.dispose();
   }

@@ -15,15 +15,10 @@ import { readControlStripOrderSync } from "./control-list.ts";
 import type { ControlStripOrder } from "./control-list.ts";
 import { ControlRequestIds } from "./control-queue.ts";
 import { MisoEngineError, MisoUsageError, parseDiagnostics, resultName } from "./errors.ts";
-import { TrackResponseModule } from "./live-response.ts";
+import { TrackResponseRequester } from "./live-response.ts";
 import { watermarkSnapshot } from "./session-edit.ts";
 import type { WatermarkSnapshot } from "./session-edit.ts";
-import type {
-  TrackResponseObservedState,
-  TrackResponseQuery,
-  TrackResponseRead,
-  TrackResponseResult,
-} from "./live-response.ts";
+import type { TrackResponseQuery, TrackResponseResult } from "./live-response.ts";
 import {
   SpectrumModule,
   cloneSpectrumCollection,
@@ -355,7 +350,7 @@ export class WasmBoundary {
   readonly #stripOrders = new Map<bigint, ControlStripOrder>();
   /** Meter windows dropped because no list named their structure epoch. */
   #unnamedMeterWindows = 0n;
-  #trackResponse: TrackResponseModule | undefined;
+  #trackResponse: TrackResponseRequester | undefined;
   #spectrum: SpectrumModule | undefined;
   #spectrumQuery: SpectrumQuery | undefined;
   #spectrumCollection: SpectrumCollection | undefined;
@@ -866,19 +861,24 @@ export class WasmBoundary {
     );
   }
 
-  /** Capture and evaluate one immutable selected-track response at the current render boundary. */
-  queryTrackResponse(request: TrackResponseQuery): TrackResponseResult {
-    this.#trackResponse ??= new TrackResponseModule(this.#exports);
-    return this.#trackResponse.queryActive(request, this.#live());
-  }
-
-  /** Internal managed read: capture state first and evaluate only after a semantic change. */
-  queryTrackResponseIfChanged(
-    request: TrackResponseQuery,
-    previousState?: TrackResponseObservedState,
-  ): TrackResponseRead {
-    this.#trackResponse ??= new TrackResponseModule(this.#exports);
-    return this.#trackResponse.queryActiveIfChanged(request, this.#live(), previousState);
+  /**
+   * The response of one track, as a C ABI host reads it (#1579a D1, D2): a strip `RESPONSE_GET`
+   * through the control entry, then the `RESPONSE_READY` with its tag from the event lane. The core
+   * captures in its render step, so the promise settles after the next `render()`, at the latest
+   * when the request deadline passes. Queries run one at a time, in call order.
+   */
+  queryTrackResponse(request: TrackResponseQuery): Promise<TrackResponseResult> {
+    try {
+      this.#live();
+    } catch (error) {
+      return Promise.reject(error);
+    }
+    this.#trackResponse ??= new TrackResponseRequester({
+      send: (frame) => this.controlFrame(frame),
+      onControlEvent: (listener) => this.onControlEvent(listener),
+      nextRequestId: () => this.#controlRequestIds.next(),
+    });
+    return this.#trackResponse.query(request);
   }
 
   /** Arm the one prepared spectrum boundary for its next complete window. */
@@ -1618,7 +1618,6 @@ export class WasmBoundary {
    */
   dispose(): void {
     if (this.#handle === 0) return;
-    this.#trackResponse?.close();
     this.#trackResponse = undefined;
     this.#spectrum?.close();
     this.#spectrum = undefined;

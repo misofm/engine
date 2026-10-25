@@ -15,7 +15,7 @@ import {
 } from "./observation.ts";
 import type { LaneEdit } from "./writer.ts";
 import type { ObservationEnded } from "./observation-ended.ts";
-import { normalizeTrackResponseQuery } from "./live-response.ts";
+import { TRACK_RESPONSE_MAXIMUM_RESULT_BYTES, normalizeTrackResponseQuery } from "./live-response.ts";
 import type {
   TrackResponseLimits,
   TrackResponseObservedState,
@@ -596,8 +596,8 @@ export class ObservationSubscriptionOwner {
     }
     return Object.freeze({
       ...subscriptionLimits,
-      maximumPoints: ABI_LAYOUT.constants.maximumLiveResponsePoints,
-      maximumCaptureBytes: ABI_LAYOUT.constants.liveResponseCaptureBytes,
+      maximumPoints: ABI_LAYOUT.constants.maximumResponsePoints,
+      maximumCaptureBytes: TRACK_RESPONSE_MAXIMUM_RESULT_BYTES,
     });
   }
 
