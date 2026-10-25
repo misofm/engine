@@ -219,27 +219,26 @@ The issue splits in two slices.
   existing parity row `both_hosts_designate_the_master_strip_after_an_empty_boot_alike`
   (`hosts/host-web/tests/control_parity.rs`) rather than adding one. Gates 1, 3, 4, 5 and 7 are
   #1690b's; gate 2's C ABI record half also moves there.
-  #1690b also gives `master_gain_reduction` its single host-core test (gate 2, in the owning
-  crate) and removes that role from the host-web tests.
+  Root ruling (2026-10-25, 1690b attempt 2): gate 2 needs no host-core test; the browser tests
+  above and gate 3's quiet-track step cover it.
 
 ### #1690b record (2026-10-25, on main `fffbf51ee`, after #1587b and #1588a)
 
 - **Wire (D3).** `MeterTarget::Master`, code 3, no strip ID; `meter_table_is_valid` takes the
   master with gain reduction only (`{master, peak}` and `{output, gain reduction}` are
   `INVALID_FIELD` on encode and decode; a master with a strip ID is `INVALID_FIELD` at decode).
-- **Resolution (D2), amended.** The master resolves in #1588a's one staging
-  (`MeterBatches::resolve`, both hosts), by the core's `master_strip()` ID through the strip
-  entries' own rule (`strip_meter_index`, the first post-matrix sample-peak meter of that strip), so
-  the record is #1587b's gain row (`push_with_strips`), the predicate `master_gain_reduction`
-  states. It resolves again at a frame of a new epoch (every adoption) and at the next frame after
-  a live or monitor commit that moves or clears the row (`master_moved`, which clears
-  `resolved_epoch`). A rebuild does not re-resolve the plan still rendering: its successor's
-  frames resolve at their own first frame, as the browser's `sync_master` keeps the rendering
-  plan's designation until adoption. Known difference: a live `SET_CONTROL master` while a
-  replacement waits re-resolves the rendering plan's frames at once on the C ABI, while the browser
-  moves the designation with the replacement (an edge the parity row does not reach). The resolved
-  index lives in the resolution vector, not in a separate `SessionState` field (R2's intent, one
-  place).
+- **Resolution (D2), amended (attempt 2, verifier MAJOR).** Each provider epoch keeps its own
+  master strip (`ProviderEpoch::master_meter`), resolved by the `master_strip()` ID against that
+  epoch's plan through the strip entries' own rule (`strip_meter_index`), so the record is #1587b's
+  gain row (`push_with_strips`) with the predicate `master_gain_reduction` states. The browser's
+  `sync_master` rule keeps them (`sync_master_meters`): after every live or monitor commit, after a
+  successor is published and after each promotion, every pending epoch takes the master the row
+  names now, and the running epoch takes it only while nothing waits. `MeterBatches::resolve` reads
+  the frame epoch's own value, never the row, so a frame the plan still rendering publishes after a
+  waiting replacement moved the master (the browser's render thread publishes after the control
+  half's commits), or after a `TELEMETRY_CONFIGURE` before adoption, reads that plan's master. A
+  change clears `resolved_epoch`. Attempt 1's `master_moved` (which re-resolved every frame against
+  the row) is deleted.
 - **Gates.** Gate 1: the master parity row plays 132 blocks after each step (whole windows of both
   hosts at 44.1 kHz), the browser's lease frame against the C ABI's last record; red on a C ABI
   absent record reported `VALID` (step 2) and on no re-resolution after a move (step 2). Gate 3:
@@ -247,11 +246,17 @@ The issue splits in two slices.
   red on no re-resolution (first designation), on a master index kept across moves (the quiet
   track) and on a master index kept across epochs (the rebuild). Gate 4: the protocol wire test;
   red on a master validity rule that takes any metric and on a decode that takes a master with a
-  strip ID. The "accepted with no master" half is gate 3's first configure.
-- **Not done.** Gate 2 (a host-core unit test of `master_gain_reduction`) is not added: #1690b's
-  scope note does not authorize the host-core test paths, and #1690a recorded the browser tests
-  that defend the predicate red on its mutants; its C ABI `VALID 0.0` half (an armed master tap
-  reducing nothing) is not reached. Gate 5 is not extended: the master read runs on the control
+  strip ID. The "accepted with no master" half is gate 3's first configure. Attempt 2:
+  `rendered_meters::a_master_moved_while_a_rebuild_waits_leaves_the_rendering_plans_master`
+  (control-plane), through the render-half ring: `eq1` master, a waiting rebuild, a live move to
+  `eq2`, a configure, then a frame of the rendering plan; red on attempt 1's code (`[0.0]`, absent,
+  for `[3.0]`), green without the move. Not added to the parity row: on the C ABI every call
+  services first, so the rendering plan's closed windows are staged before any later commit and no
+  window of it is staged after the move; the step was green on attempt 1 (the browser polled each
+  block), or diverged for a reason that is not the master (the browser's queued windows read later
+  tap windows when it did not poll). The configure-before-adoption case is in the same test.
+- **Not done.** Gate 2 is not needed (root ruling, 2026-10-25): the browser tests #1690a recorded
+  and gate 3's quiet-track step cover it. Gate 5 is not extended: the master read runs on the control
   thread, and the race test counts render allocations only, so no master defect can turn it red
   (an extension would be a test with no defect to catch). The SDK's hand decoder
   (`sdk/src/core/protocol-messages.ts`) does not yet decode target 3; the browser refuses meter

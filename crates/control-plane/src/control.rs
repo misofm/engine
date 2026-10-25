@@ -88,6 +88,13 @@ pub struct ProviderEpoch {
     /// The epoch this one displaced, while their observation readers wait to be paired: this
     /// epoch was promoted before render wrote `carried_taps` ([`CarriedTaps`]'s three states).
     pub(crate) observations_pending: Option<u64>,
+    /// The master strip of this epoch's plan (#1690 D2): its frame strip by
+    /// [`strip_meter_index`], or `None` when no strip is the master or the plan has none of its
+    /// ID. A master meter entry reads a frame through its own epoch's value. Kept by the browser's
+    /// `sync_master` rule ([`sync_master_meters`]): a pending epoch takes every
+    /// master the commits write, and the rendering epoch only while nothing waits, so a frame the
+    /// rendering plan publishes after a waiting replacement moved the master reads its own.
+    pub(crate) master_meter: Option<u32>,
     /// The plan's effect instances by stable key, with each one's position in
     /// [`Self::observations`] (#1586 D3, R1): built with the epoch, on the control thread, so a
     /// read resolves a stable address without allocating. Empty for a host whose preparer keeps
@@ -726,6 +733,7 @@ impl ProviderEpoch {
             observation_strips: Box::default(),
             carried_taps: None,
             observations_pending: None,
+            master_meter: None,
             observation_index: host_core::observation::ObservationIndex::default(),
             capi,
             revision_gate,
@@ -790,6 +798,7 @@ impl ProviderEpoch {
             observation_strips: Box::default(),
             carried_taps: None,
             observations_pending: None,
+            master_meter: None,
             observation_index: host_core::observation::ObservationIndex::default(),
             capi,
             revision_gate,
@@ -1322,8 +1331,8 @@ enum MeterSource {
 struct MeterBatches {
     fold: host_core::meters::MeterBatchFold,
     /// The provider epoch `resolution` was resolved against (#1588 D3), `None` after a configure
-    /// and after a commit that moves the master (#1690 D2): a frame of another epoch, or the next
-    /// frame after either, resolves the entries again first.
+    /// and after an epoch's master moves (#1690 D2): a frame of another epoch, or the next frame
+    /// after either, resolves the entries again first.
     resolved_epoch: Option<u64>,
     /// Each table entry's strip in `resolved_epoch`'s plan (#1587a D2, R4): its index in the
     /// frame's strip peaks, or `None` for an absent strip and for every entry that reads no strip;
@@ -1428,9 +1437,9 @@ impl MeterBatches {
     /// `None` when no epoch held is that one, and then no entry has a strip): a strip's peak or gain
     /// reduction entry (#1587b) reads the first post-matrix sample-peak meter of its strip, so a caller selection (a
     /// subset, another order, several taps on one strip) never reads another meter's peak. A
-    /// master's gain reduction entry (#1690 D2, D3) resolves the same way the strip `master` names,
-    /// the core's `master` row now (`SessionState::master_strip`), by its ID: no strip when no
-    /// strip is the master or the epoch has none of that ID. Then
+    /// master's gain reduction entry (#1690 D2, D3) reads `master`, the master strip the epoch
+    /// holds ([`ProviderEpoch::master_meter`], resolved by the same rule): no strip when no strip
+    /// is the master or the epoch has none of that ID. Then
     /// size the folds to the table. The folds keep their
     /// values: they are indexed by table entry, so a batch an adoption interrupts goes on folding
     /// into them, and `push_with_strips` resets them at a batch's first frame. A table never
@@ -1439,7 +1448,7 @@ impl MeterBatches {
         &mut self,
         table: &[protocol::MeterEntry],
         meters: Option<&host_core::PlanStateInventory>,
-        master: Option<&str>,
+        master: Option<u32>,
     ) {
         self.resolution.clear();
         self.resolution.extend(
@@ -1447,9 +1456,7 @@ impl MeterBatches {
                 .iter()
                 .map(|entry| match (&entry.target, entry.metric) {
                     (protocol::MeterTarget::Strip(id), _) => strip_meter_index(meters?, id),
-                    (protocol::MeterTarget::Master, protocol::MeterMetric::GainReduction) => {
-                        strip_meter_index(meters?, master?)
-                    }
+                    (protocol::MeterTarget::Master, protocol::MeterMetric::GainReduction) => master,
                     _ => None,
                 }),
         );
@@ -1462,7 +1469,7 @@ impl MeterBatches {
     /// Fold one published `frame` of provider epoch `epoch` and stage the `METER_BATCH` it
     /// completes (#1583 D5, #1587a, #1588 D4), the one staging both sources share. A frame of
     /// another epoch than the last one resolved resolves the entries against `epochs`' strips of
-    /// its epoch first (#1588 D3), with `master` the strip the core's `master` row names now.
+    /// its epoch first (#1588 D3), a master entry with that epoch's own master (#1690 D2).
     ///
     /// Records follow the table (D3): the output's peak entry gives the batch's left and right
     /// output peak, `VALID` when the output peak covered the batch's span; a strip's peak entry
@@ -1478,7 +1485,6 @@ impl MeterBatches {
         frame: &host_core::MeterFrame,
         epoch: u64,
         epochs: &ProviderEpochs<'_>,
-        master: Option<&str>,
         controller: &mut ObservedController,
         revision: protocol::SessionRevision,
     ) {
@@ -1489,7 +1495,7 @@ impl MeterBatches {
             self.resolve(
                 &controller.telemetry_configuration().meters,
                 epochs.meters(epoch),
-                master,
+                epochs.master(epoch),
             );
             self.resolved_epoch = Some(epoch);
         }
@@ -1576,26 +1582,40 @@ impl MeterBatches {
     }
 }
 
-/// The frame strip of strip `id` in a plan whose inventory is `meters`: the index of its first
-/// post-matrix sample-peak meter (`PlanStateInventory::meter_targets`), or `None`. The one rule
-/// for a meter entry's strip (#1588 D3) and an observation tap's (#1587b), so both read the same
-/// frame strip.
-/// After a live or monitor commit wrote the monitor overlay (#1690 D2): when the master it leaves
-/// (`now`) is not `previous`, the meter entries resolve again at the next frame, so a master entry
-/// reads the strip the row names now. A rebuild needs no call: its successor's frames are of a new
-/// epoch, which resolves them. Control thread; allocates nothing.
-fn master_moved(
+/// Keep each epoch's master strip ([`ProviderEpoch::master_meter`]) by the browser's `sync_master`
+/// rule (#1690 D2): every pending epoch takes the master the core's `master` row names now
+/// (`monitor`), and the running epoch takes it only while nothing waits, so the plan still
+/// rendering keeps its own until a replacement displaces it. Each is resolved by ID against its own
+/// plan. When any changes, the meter entries resolve again at the next frame. Called after every
+/// commit that writes the monitor overlay, after a successor is published and after each
+/// promotion. Control thread; allocates nothing; `O(epochs x meters)`.
+fn sync_master_meters(
+    monitor: &controls::MonitorOverlay,
+    running: &mut ProviderEpoch,
+    pending: &mut [ProviderEpoch],
     meters: &mut Option<SessionMeters>,
-    previous: Option<&session::StableId>,
-    now: Option<&session::StableId>,
 ) {
-    if previous != now
-        && let Some(meters) = meters.as_mut()
-    {
+    let master = monitor.master().map(session::StableId::as_str);
+    let resolve = |provider: &mut ProviderEpoch| {
+        let index = master.and_then(|id| strip_meter_index(&provider.inventory, id));
+        core::mem::replace(&mut provider.master_meter, index) != index
+    };
+    let mut moved = false;
+    for provider in pending.iter_mut() {
+        moved |= resolve(provider);
+    }
+    if pending.is_empty() {
+        moved |= resolve(running);
+    }
+    if moved && let Some(meters) = meters.as_mut() {
         meters.batches.resolved_epoch = None;
     }
 }
 
+/// The frame strip of strip `id` in a plan whose inventory is `meters`: the index of its first
+/// post-matrix sample-peak meter (`PlanStateInventory::meter_targets`), or `None`. The one rule
+/// for a meter entry's strip (#1588 D3) and an observation tap's (#1587b), so both read the same
+/// frame strip.
 pub(crate) fn strip_meter_index(meters: &host_core::PlanStateInventory, id: &str) -> Option<u32> {
     meters
         .meter_targets()
@@ -1619,6 +1639,14 @@ impl<'a> ProviderEpochs<'a> {
         core::iter::once(self.current)
             .chain(self.retired)
             .chain(self.pending)
+    }
+
+    /// The master strip provider epoch `epoch` holds (#1690 D2), its frame strip, or `None` when
+    /// no epoch held is `epoch` or it has no master.
+    fn master(&self, epoch: u64) -> Option<u32> {
+        self.all()
+            .find(|provider| provider.epoch == epoch)
+            .and_then(|provider| provider.master_meter)
     }
 
     /// The plan inventory of provider epoch `epoch`, whose meter rows are its meter readers in
@@ -2804,13 +2832,11 @@ where
             retired_providers,
             pending_providers,
             shared,
-            monitor,
             ..
         } = self;
         let Some(meters) = meters.as_mut() else {
             return;
         };
-        let master = monitor.master().map(session::StableId::as_str);
         match &mut meters.source {
             MeterSource::Delivery { delivery, epoch } => {
                 if *epoch != providers.epoch {
@@ -2831,14 +2857,9 @@ where
                         retired: retired_providers,
                         pending: pending_providers,
                     };
-                    meters.batches.stage(
-                        frame,
-                        frame.plan_epoch,
-                        &epochs,
-                        master,
-                        controller,
-                        revision,
-                    );
+                    meters
+                        .batches
+                        .stage(frame, frame.plan_epoch, &epochs, controller, revision);
                 }
             }
             MeterSource::Rendered { .. } => {
@@ -2886,7 +2907,7 @@ where
                         if on {
                             meters
                                 .batches
-                                .stage(frame, epoch, &epochs, master, controller, revision);
+                                .stage(frame, epoch, &epochs, controller, revision);
                         }
                         if let Some(ring) = core::iter::once(&mut *providers)
                             .chain(retired_providers.iter_mut())
@@ -3776,6 +3797,14 @@ where
                 next.observations_pending = Some(self.providers.epoch);
             }
             let mut previous = core::mem::replace(&mut self.providers, next);
+            // #1690 D2: the promoted epoch brings its own master; the running one follows the
+            // row again once nothing waits.
+            sync_master_meters(
+                &self.monitor,
+                &mut self.providers,
+                &mut self.pending_providers,
+                &mut self.meters,
+            );
             // Dropped with the parked epoch, when its plan is reclaimed.
             previous.spectrum = displaced;
             // #1310 D3: render no longer runs the previous plan, so no successor is prepared
@@ -5794,9 +5823,6 @@ where
         fold_send_move(&mut self.send_moves, revision, rebuild_send_ramp);
         // #1559 D8: the overlay is written after the last fallible step, with the commit.
         let monitor_ramp = writes_monitor.then_some(monitor_change.ramp);
-        // #1690 D2: a master the rebuild moves or ends is read from the successor's first frame,
-        // which resolves the entries again as a frame of a new epoch; the plan still rendering
-        // keeps its resolution until then, as the browser's `sync_master` keeps its designation.
         let previous_monitor = core::mem::replace(&mut self.monitor, monitor_change.overlay);
         // #1584 D6a: and the subscriptions the successor was prepared with.
         self.observation = observation_change.bindings;
@@ -5998,6 +6024,14 @@ where
         }
         let candidate_epoch = candidate_provider.epoch;
         self.pending_providers.push(candidate_provider);
+        // #1690 D2: the successor takes the master this commit leaves; the plan still rendering
+        // keeps its own until it is displaced, as the browser's `sync_master` does.
+        sync_master_meters(
+            &self.monitor,
+            &mut self.providers,
+            &mut self.pending_providers,
+            &mut self.meters,
+        );
         // #1577 D4: a capture armed from here on waits for the candidate.
         self.controller
             .provider_mut()
@@ -6650,12 +6684,7 @@ where
             "the revision stamped is the revision committed (#1312 D7)"
         );
         // #1559 D8: the overlay is written after the last fallible step, with the commit.
-        let previous_monitor = core::mem::replace(&mut self.monitor, monitor_change.overlay);
-        master_moved(
-            &mut self.meters,
-            previous_monitor.master(),
-            self.monitor.master(),
-        );
+        self.monitor = monitor_change.overlay;
         fold_send_move(&mut self.send_moves, revision, send_ramp);
         for index in published {
             owners.effects[index]
@@ -6752,6 +6781,13 @@ where
                 .revision_gate
                 .publish_key(key);
         }
+        // #1690 D2: the master this commit leaves, by the `sync_master` rule.
+        sync_master_meters(
+            &self.monitor,
+            &mut self.providers,
+            &mut self.pending_providers,
+            &mut self.meters,
+        );
         LiveCommit::Done(Ok(committed.write_into(&mut self.response_scratch).expect(
             "prepared response capacity was admitted before the live commit",
         )))
@@ -8188,6 +8224,81 @@ mod tests {
             assert!(producer.publish_frame(&frame(0, &[[0.75, 0.5]])));
             render(&mut children, 0);
             assert_eq!(batches(&mut children), vec![(0, vec![0.75, 0.5])]);
+        }
+
+        /// #1690b attempt 2 (the browser's `sync_master` rule): with `eq1` the master, a rebuild
+        /// waits for adoption, a live `SET_CONTROL` moves the master to `eq2`, and a configure
+        /// re-resolves the entries. A frame the plan still rendering published (into its ring;
+        /// on the browser the render thread's frames reach the control half after its commits)
+        /// reads that plan's own master, `eq1`.
+        ///
+        /// Test value: red if a frame of the rendering plan resolves the master the row names now
+        /// (the replacement's) instead of the master its own epoch held, after the move or after a
+        /// configure that re-resolves the entries.
+        #[test]
+        fn a_master_moved_while_a_rebuild_waits_leaves_the_rendering_plans_master() {
+            let master_entry = || MeterEntry {
+                target: MeterTarget::Master,
+                metric: MeterMetric::GainReduction,
+            };
+            let mut children = boot(None, vec![master_entry()]);
+            let master = |strip: &str| SessionEdit::SetControl {
+                address: protocol::control_core::ControlAddress {
+                    owner: protocol::control_core::Owner::Strip(
+                        StableId::parse(strip).expect("strip ID"),
+                    ),
+                    section: protocol::control_core::Section::Own,
+                    control: 4,
+                    lane: protocol::control_core::Lane::Both,
+                },
+                value: 1.0,
+                ramp_samples: None,
+                expected_effect: None,
+            };
+            command(
+                &mut children,
+                2,
+                CommandPayload::SessionTransactionApply(&[master("eq1")]),
+            );
+            let epoch = children.session.newest_plan_epoch();
+            let mut producer = children
+                .session
+                .take_meter_frame_producer(epoch)
+                .expect("the boot plan's ring");
+            add_muted_track(&mut children, 3);
+            assert!(
+                children.session.newest_plan_epoch() > epoch,
+                "the rebuild waits"
+            );
+            command(
+                &mut children,
+                4,
+                CommandPayload::SessionTransactionApply(&[master("eq2")]),
+            );
+            // `eq1` reduces 3 dB; `eq2` has no reading.
+            let reducing = |window: u64| {
+                let mut frame = frame(window, &[[0.0; 2]; 9]);
+                frame.strip_gain_reduction_db[1] = 3.0;
+                frame.strip_gain_reduction_present[1] = true;
+                frame
+            };
+            // A configure while the rebuild waits re-resolves the entries.
+            command(
+                &mut children,
+                5,
+                CommandPayload::TelemetryConfigure(&TelemetryConfiguration {
+                    meters: vec![master_entry()],
+                    meter_period_blocks: 1,
+                    meter_window_blocks: None,
+                    counter_ids: Vec::new(),
+                    counter_period_blocks: 0,
+                    diagnostics_enabled: false,
+                    minimum_diagnostic_severity: DiagnosticSeverity::Info,
+                }),
+            );
+            assert!(producer.publish_frame(&reducing(0)));
+            render(&mut children, 0);
+            assert_eq!(batches(&mut children), vec![(0, vec![3.0])]);
         }
     }
 
