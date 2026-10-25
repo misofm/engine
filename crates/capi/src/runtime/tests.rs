@@ -5987,6 +5987,25 @@ fn gain_reduction_records_read_only_windows_since_the_taps_arm() {
         (3 * window + window / 2) * 128,
         "the re-armed tap's window"
     );
+    // #1674's observation half: a rebuild that carries the compressor (a muted track whose ID
+    // sorts first, so every strip's position shifts) keeps its armed tap's reading. The promoted
+    // epoch reads the carried slot, so each window after the swap is `VALID` again.
+    assert_eq!(
+        transact_c(c_session, 100, 42, &add_muted_track(&model, "a-muted")),
+        protocol::EditPath::Rebuild
+    );
+    for later in 5..11 {
+        assert_eq!(
+            render_until((later + 1) * window, &mut block),
+            [valid(held().1)],
+            "window {later}, after a carried rebuild"
+        );
+    }
+    assert_eq!(
+        crate::ffi::test_plan_carry_counts(c_plan),
+        (1, 0),
+        "the rebuild carried"
+    );
     crate::ffi::test_plan_destroy(c_plan);
     crate::ffi::test_session_destroy(c_session);
 }

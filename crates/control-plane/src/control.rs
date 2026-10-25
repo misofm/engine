@@ -74,6 +74,9 @@ pub struct ProviderEpoch {
     /// strip's consumer in `meters` (the meter frame's strip order, as `SessionMeters::resolve`
     /// finds an entry's), `u32::MAX` for none; built with the plan.
     pub(crate) observation_strips: Box<[u32]>,
+    /// The observation readers the swap block that adopted this epoch's plan carried (#1587b),
+    /// shared with the plan's attachment; `None` for a host whose preparer keeps its readers.
+    pub(crate) carried_taps: Option<std::sync::Arc<CarriedTaps>>,
     /// The capi resources this epoch's plan was prepared with (#1257 D4).
     pub(crate) capi: CapiResources,
     /// The handle of this epoch's plan's revision gate (#1502 D1). Control publishes every
@@ -703,6 +706,7 @@ impl ProviderEpoch {
             meter_tables: host_core::MeterTables::empty(),
             observations: Box::default(),
             observation_strips: Box::default(),
+            carried_taps: None,
             capi,
             revision_gate,
             carried: CarriedSourceBytes::default(),
@@ -716,14 +720,17 @@ impl ProviderEpoch {
         owner
     }
 
-    /// This epoch with its plan's observation readers (#1584 D7) and their strips (#1587b).
+    /// This epoch with its plan's observation readers (#1584 D7), their strips and the record of
+    /// the ones its swap block carries (#1587b).
     pub(crate) fn with_observations(
         mut self,
         observations: Box<[host_core::EffectObservationHandle]>,
         observation_strips: Box<[u32]>,
+        carried_taps: Option<std::sync::Arc<CarriedTaps>>,
     ) -> Self {
         self.observations = observations;
         self.observation_strips = observation_strips;
+        self.carried_taps = carried_taps;
         self
     }
 
@@ -748,6 +755,7 @@ impl ProviderEpoch {
             meter_tables: host_core::MeterTables::empty(),
             observations: Box::default(),
             observation_strips: Box::default(),
+            carried_taps: None,
             capi,
             revision_gate,
             carried,
@@ -1312,6 +1320,104 @@ fn epoch_meters<'a>(
         .chain(retired)
         .find(|provider| provider.epoch == epoch)
         .map(|provider| &*provider.meters)
+}
+
+/// The observation reader pairs the swap block that adopted a plan carried (#1674's observation
+/// half, #1587b): the swap record's [`engine::realtime::ObserverKind::Observation`] entries,
+/// which render copies here in that block ([`CarriedTapsAttachment`]) and the control thread
+/// reads when it promotes the plan's epoch. The record is what actually carried: a tap enters it
+/// only when its effect's restore succeeded at the swap, which preparation cannot know (#1674 R1).
+///
+/// Sized at preparation, one pair per observation handle of the plan (a successor handle is
+/// paired at most once), so render writes into storage it never grows. A plan is adopted at most
+/// once, so the pairs are written once; `count` is stored last, with `Release`.
+pub(crate) struct CarriedTaps {
+    pairs: Box<[[core::sync::atomic::AtomicU32; 2]]>,
+    count: core::sync::atomic::AtomicU32,
+}
+
+impl CarriedTaps {
+    /// Room for `handles` pairs. Allocates; control thread.
+    pub(crate) fn new(handles: usize) -> Result<Self, std::collections::TryReserveError> {
+        let mut pairs = Vec::new();
+        pairs.try_reserve_exact(handles)?;
+        pairs.resize_with(handles, || {
+            [
+                core::sync::atomic::AtomicU32::new(0),
+                core::sync::atomic::AtomicU32::new(0),
+            ]
+        });
+        Ok(Self {
+            pairs: pairs.into_boxed_slice(),
+            count: core::sync::atomic::AtomicU32::new(0),
+        })
+    }
+
+    /// The heap a record of `handles` pairs holds with its attachment: the attachment's box, the
+    /// shared allocation (its two counts and the record) and the pairs.
+    pub(crate) fn retained_bytes(handles: usize) -> Option<usize> {
+        handles
+            .checked_mul(size_of::<[core::sync::atomic::AtomicU32; 2]>())?
+            .checked_add(size_of::<CarriedTapsAttachment>())?
+            .checked_add(2 * size_of::<usize>() + size_of::<Self>())
+    }
+
+    /// The carried pairs, as carry records; empty until render adopted the plan. Allocates
+    /// nothing.
+    fn carries(&self) -> impl Iterator<Item = engine::realtime::ObserverCarry> + '_ {
+        let count = self.count.load(Ordering::Acquire) as usize;
+        self.pairs
+            .iter()
+            .take(count)
+            .map(|[successor, predecessor]| engine::realtime::ObserverCarry {
+                kind: engine::realtime::ObserverKind::Observation,
+                successor: successor.load(Ordering::Relaxed) as usize,
+                predecessor: predecessor.load(Ordering::Relaxed) as usize,
+            })
+    }
+}
+
+/// The C ABI plan's host attachment (#1587b): the plan's [`CarriedTaps`], shared with its
+/// provider epoch.
+pub(crate) struct CarriedTapsAttachment(pub(crate) std::sync::Arc<CarriedTaps>);
+
+impl engine::realtime::HostAttachment for CarriedTapsAttachment {
+    fn as_any_mut(&mut self) -> &mut dyn core::any::Any {
+        self
+    }
+
+    // REALTIME_POLICY_BEGIN: #1587b, the swap block's carried observation readers.
+    /// Copy the swap record's observation entries into the plan's [`CarriedTaps`]. Render thread,
+    /// in the swap block: atomic stores into storage sized at preparation; an entry past it, or
+    /// whose index does not fit a `u32`, is skipped.
+    fn adopt_predecessor(
+        &mut self,
+        _predecessor: &mut dyn engine::realtime::HostAttachment,
+        carries: &[engine::realtime::ObserverCarry],
+    ) {
+        let record = &*self.0;
+        let mut written = 0_u32;
+        let mut slots = record.pairs.iter();
+        for carry in carries {
+            if carry.kind != engine::realtime::ObserverKind::Observation {
+                continue;
+            }
+            let (Ok(successor), Ok(predecessor)) = (
+                u32::try_from(carry.successor),
+                u32::try_from(carry.predecessor),
+            ) else {
+                continue;
+            };
+            let Some([into, from]) = slots.next() else {
+                break;
+            };
+            into.store(successor, Ordering::Relaxed);
+            from.store(predecessor, Ordering::Relaxed);
+            written += 1;
+        }
+        record.count.store(written, Ordering::Release);
+    }
+    // REALTIME_POLICY_END
 }
 
 /// The observation taps of a provider epoch, as the meter delivery's gain reduction reads them
@@ -3068,6 +3174,18 @@ where
                 &mut self.providers.meters,
                 next.inventory.meter_pairing(),
             );
+            // #1674's observation half (#1587b): likewise the observation readers of the taps the
+            // swap block carried, from its record (what actually carried), so a carried tap's
+            // reader, and its arm state, follow the tap that renders on.
+            if let Some(record) = next.carried_taps.as_deref() {
+                for carry in record.carries() {
+                    host_core::pair_carried_observations(
+                        &mut next.observations,
+                        &mut self.providers.observations,
+                        core::slice::from_ref(&carry),
+                    );
+                }
+            }
             let mut previous = core::mem::replace(&mut self.providers, next);
             // Dropped with the parked epoch, when its plan is reclaimed.
             previous.spectrum = displaced;
@@ -4336,6 +4454,7 @@ where
             meter_tables,
             observations,
             observation_strips,
+            carried_taps,
             plan: candidate_plan,
             resources,
             carried,
@@ -4368,6 +4487,7 @@ where
         candidate_provider.discontinuity = discontinuity;
         candidate_provider.observations = observations;
         candidate_provider.observation_strips = observation_strips;
+        candidate_provider.carried_taps = carried_taps;
         candidate_provider.meter_tables = meter_tables;
         // The configuration epoch is set beside the push, after the commit.
         candidate_provider.spectrum = crate::spectrum::EpochSpectrum::Candidate {

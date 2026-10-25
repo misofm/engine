@@ -28,6 +28,9 @@ pub(crate) struct PreparedRuntime {
     /// Each observation handle's strip (#1587b), in `observations` order: the position of its
     /// strip's consumer in `meters`, the meter frame's strip order. Empty with `observations`.
     pub(crate) observation_strips: Box<[u32]>,
+    /// The record of the observation readers the plan's swap block carries (#1587b), shared with
+    /// the plan's attachment; `None` for an adapter whose preparer keeps its readers.
+    pub(crate) carried_taps: Option<std::sync::Arc<crate::control::CarriedTaps>>,
     pub(crate) plan: PreparedRenderPlan,
     /// The plan's one revision-gate handle, taken before the plan is published (#1502 D6).
     pub(crate) revision_gate: PlanRevisionGate,
@@ -1701,6 +1704,24 @@ pub(crate) fn prepare_runtime<A: ControlAdapter>(
         }
         strips.into_boxed_slice()
     };
+    // #1587b: the record of the readers the plan's swap block carries, for an adapter whose
+    // control plane serves the meter batches (the C ABI's), whose preparer sets no attachment of
+    // its own. Every such plan has one, so the hook runs at each of its swaps.
+    let carried_taps = if A::METER_DELIVERY {
+        Some(std::sync::Arc::new(
+            crate::control::CarriedTaps::new(observations.len())
+                .map_err(|_| failure(ResourceFault::Allocation))?,
+        ))
+    } else {
+        None
+    };
+    let carried_taps_bytes = if carried_taps.is_some() {
+        crate::control::CarriedTaps::retained_bytes(observations.len())
+            .and_then(|bytes| u64::try_from(bytes).ok())
+            .ok_or_else(|| failure(ResourceFault::Arithmetic))?
+    } else {
+        0
+    };
     // #1587a R2: the plan's meter tables, built here, on the control thread, so its adoption
     // exchanges them by pointer. Only a control-plane meter delivery reads them.
     let meter_tables = if A::METER_DELIVERY {
@@ -1717,7 +1738,9 @@ pub(crate) fn prepare_runtime<A: ControlAdapter>(
         prepared.report.route_control_resources,
         observation_resources(
             &effects,
-            observation_handle_bytes(&observations, &observation_strips)?,
+            observation_handle_bytes(&observations, &observation_strips)?
+                .checked_add(carried_taps_bytes)
+                .ok_or_else(|| failure(ResourceFault::Arithmetic))?,
             observation_slots_high_water,
         )?,
         limits,
@@ -1745,6 +1768,11 @@ pub(crate) fn prepare_runtime<A: ControlAdapter>(
     // #1502 D1: the plan's control handle moves into its provider epoch, so the gate, the cells
     // and the producers that write them follow one routing.
     let mut plan = prepared.plan;
+    if let Some(record) = &carried_taps {
+        plan.set_host_attachment(Box::new(crate::control::CarriedTapsAttachment(
+            std::sync::Arc::clone(record),
+        )));
+    }
     let revision_gate = plan
         .take_revision_gate()
         .expect("a freshly prepared plan hands out its revision gate");
@@ -1771,6 +1799,7 @@ pub(crate) fn prepare_runtime<A: ControlAdapter>(
         meter_tables,
         observations,
         observation_strips,
+        carried_taps,
         plan,
         revision_gate,
         resources: PlanResources {
@@ -1910,6 +1939,7 @@ where
         meter_tables,
         observations,
         observation_strips,
+        carried_taps,
         plan,
         mut revision_gate,
         resources,
@@ -2051,7 +2081,7 @@ where
             capi,
             revision_gate,
         )
-        .with_observations(observations, observation_strips),
+        .with_observations(observations, observation_strips, carried_taps),
         pending_providers,
         retired_providers,
         publisher,
