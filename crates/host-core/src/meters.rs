@@ -529,7 +529,8 @@ fn filled<T: Clone>(count: usize, value: T) -> Result<Box<[T]>, TryReserveError>
 /// One observation tap a host shows [`fold_gain_reduction`] (#1582 D3).
 #[derive(Clone, Copy)]
 pub struct TapView<'a> {
-    /// The strip the tap's effect sits on, in [`SessionModel::strips`] order.
+    /// The frame's strip index of the strip the tap's effect sits on: its position in
+    /// [`MeterFrame::strip_peaks`]. An index outside the frame is skipped.
     pub strip: u32,
     /// The tap's declaration.
     pub descriptor: &'static ObservationDescriptor,
@@ -556,7 +557,8 @@ pub trait GainReductionTaps {
 /// Clears every strip's word and presence, then, for each armed tap whose latest window opened at
 /// or after its arm sample ([`window_since_arm`]), acknowledges the window and folds its
 /// [`strip_reduction_db`] into the tap's strip word by maximum (from `0.0`). A strip outside the
-/// frame is skipped. [`MeterValidity::GAIN_REDUCTION`] is set exactly when some tap folded; the
+/// frame is skipped. [`MeterValidity::GAIN_REDUCTION`] is set exactly when some armed tap had a
+/// window since its arm, including a tap whose strip is outside the frame, which marks no strip; the
 /// master's reading is [`MeterFrame::master_gain_reduction`] of the folded frame.
 /// Allocation-free, no runtime-checked index, bounded by the visited taps.
 #[inline]
@@ -1758,14 +1760,19 @@ pub struct MeterBatchWindow {
     pub output_valid: bool,
 }
 
-/// One meter table entry's strip peak over a batch's frames (#1587a), as
-/// [`MeterBatchFold::push_with_strips`] folds it.
+/// One meter table entry's strip readings over a batch's frames, its peak (#1587a) and its gain
+/// reduction (#1587b), as [`MeterBatchFold::push_with_strips`] folds them.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct StripPeakFold {
     /// The strip's left and right peaks: the frames' maxima.
     pub peak: [f32; 2],
     /// Whether every frame of the batch was complete and had the strip.
     pub present: bool,
+    /// The strip's gain reduction in decibels: the last frame's reading that is present, `0.0`
+    /// when none is.
+    pub gain_reduction_db: f32,
+    /// Whether any frame of the batch had a gain-reduction reading for the strip.
+    pub gain_reduction_present: bool,
 }
 
 impl StripPeakFold {
@@ -1773,6 +1780,8 @@ impl StripPeakFold {
     pub const START: Self = Self {
         peak: [0.0; 2],
         present: true,
+        gain_reduction_db: 0.0,
+        gain_reduction_present: false,
     };
 }
 
@@ -1837,14 +1846,15 @@ impl MeterBatchFold {
         self.push_with_strips(frame, &[], &mut [])
     }
 
-    /// Fold one published `frame`, and into `folds` the strip peaks the meter table's entries
-    /// read (#1587a). `strips[i]` is entry `i`'s strip in `frame` (its index in
+    /// Fold one published `frame`, and into `folds` the strip readings the meter table's entries
+    /// read (#1587a, #1587b). `strips[i]` is entry `i`'s strip in `frame` (its index in
     /// [`MeterFrame::strip_peaks`]), or `None` when the plan that published `frame` has no such
-    /// strip or the entry reads no strip peak; `folds[i]` is that entry's fold, which the caller
+    /// strip or the entry reads no strip; `folds[i]` is that entry's fold, which the caller
     /// reads when the call returns a batch. A batch's first frame resets every fold. An entry's
-    /// peaks are the maxima of its strip's peaks over the batch's frames, and it is present only
+    /// peaks are the maxima of its strip's peaks over the batch's frames, and they are present only
     /// when every frame of the batch is complete ([`MeterValidity::COMPLETE`]) and has its strip.
-    /// Allocates nothing.
+    /// Its gain reduction is the last frame's reading for its strip that is present, and it is
+    /// present when any frame's is. Allocates nothing.
     pub fn push_with_strips(
         &mut self,
         frame: &MeterFrame,
@@ -1873,6 +1883,16 @@ impl MeterBatchFold {
                 fold.peak = [fold.peak[0].max(peak[0]), fold.peak[1].max(peak[1])];
             } else {
                 fold.present = false;
+            }
+            // #1587b D3: the gain reduction's timing is its taps' own, so a frame's reading
+            // counts whether or not the frame is complete.
+            let index = strip.and_then(|strip| usize::try_from(strip).ok());
+            if let Some(index) = index
+                && frame.strip_gain_reduction_present.get(index) == Some(&true)
+                && let Some(&value) = frame.strip_gain_reduction_db.get(index)
+            {
+                fold.gain_reduction_db = value;
+                fold.gain_reduction_present = true;
             }
         }
         self.output_peak = [
@@ -1942,7 +1962,56 @@ pub fn default_meter_window_blocks(rate_hz: u32, quantum_frames: u32) -> NonZero
 
 #[cfg(test)]
 mod tests {
-    use super::{default_meter_window_blocks, output_peak_gate_relay, output_peak_meter};
+    use super::{
+        MeterBatchFold, MeterFrame, MeterValidity, StripPeakFold, default_meter_window_blocks,
+        output_peak_gate_relay, output_peak_meter,
+    };
+
+    /// #1587b D3: in a batch of three frames, an entry's gain reduction is the last frame's
+    /// reading for its strip that is present, `VALID` when any is. Strip 0 reads 3 dB, then 2 dB,
+    /// then nothing: the batch reports 2 dB. Strip 1 reads nothing: absent. In the next batch strip
+    /// 0 reads nothing and strip 1 only in its first frame: strip 0 is absent again, strip 1 reads
+    /// that frame's 1 dB. An entry with no strip reads nothing.
+    ///
+    /// Test value: red if the fold takes the batch's maximum (3 dB), its first or last frame's
+    /// reading (3 dB, or absent), or keeps a previous batch's reading past the batch's first frame.
+    #[test]
+    fn a_batch_reports_each_strips_last_present_gain_reduction() {
+        let mut fold = MeterBatchFold::new(core::num::NonZeroU32::new(3).expect("three"));
+        let strips = [Some(0), Some(1), None];
+        let mut folds = [StripPeakFold::START; 3];
+        let mut frame = MeterFrame::new(2).expect("frame");
+        let readings: [[Option<f32>; 2]; 6] = [
+            [Some(3.0), None],
+            [Some(2.0), None],
+            [None, None],
+            [None, Some(1.0)],
+            [None, None],
+            [None, None],
+        ];
+        let mut batches = Vec::new();
+        for (index, reading) in (0_u64..).zip(readings) {
+            frame.first_sample = index * 256;
+            frame.end_sample = (index + 1) * 256;
+            frame.windows = 1;
+            frame.validity = MeterValidity::COMPLETE.union(MeterValidity::OUTPUT);
+            for (strip, value) in reading.into_iter().enumerate() {
+                frame.strip_gain_reduction_db[strip] = value.unwrap_or(0.0);
+                frame.strip_gain_reduction_present[strip] = value.is_some();
+            }
+            if fold.push_with_strips(&frame, &strips, &mut folds).is_some() {
+                batches
+                    .push(folds.map(|fold| (fold.gain_reduction_present, fold.gain_reduction_db)));
+            }
+        }
+        assert_eq!(
+            batches,
+            [
+                [(true, 2.0), (false, 0.0), (false, 0.0)],
+                [(false, 0.0), (true, 1.0), (false, 0.0)],
+            ]
+        );
+    }
 
     /// #1587a, root ruling 3: a request whose boundary is behind the block render applies it in
     /// (the control thread read the render clock blocks earlier) opens the gate at the grid's

@@ -1426,6 +1426,11 @@ impl Budget {
 /// selections decode onto the stack, so no selection table is retained). The three slices' rows
 /// are independent and add up. 334,046 fits under the 344,192 ceiling, so the ceiling is
 /// unchanged: a ceiling is raised only when a row goes over it.
+///
+/// #1587b with #1586b: `capi_retained_bytes` measured 334,702 (334,046 plus 656 B from other rows
+/// merged on `main`; before #1586b the same 656 B showed as 313,553). #1587b adds nothing here:
+/// the reference session has no observation reader, so it builds neither the readers' strip
+/// indices nor the record of the readers a swap carries. The ceiling stays.
 const REFERENCE_BUDGETS: [Budget; 19] = [
     Budget {
         row: "graph_session_plus_plan_bytes",

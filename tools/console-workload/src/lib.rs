@@ -2822,12 +2822,15 @@ impl GraphPreparedSourceSetDriver for FrozenSourceDriver {
 }
 // REALTIME_POLICY_END
 
-/// Frames each live source ring holds (issue #938): the default ring a product host prepares.
+/// Frames each live source ring holds (issue #938): the stall ring a product host's default ring
+/// is built on.
 ///
-/// `host_core::default_source_ring_frames(48_000, 128)`: 100 ms of stall tolerance rounded up to
-/// whole quanta (38), plus one quantum held by the consumer and one in the recycle path, so forty
-/// quanta. Mirrored rather than imported, as [`WEB_METER_BLOCKS`] is: the host crate is not a
-/// dependency of this subject. The live row's test pins the two equal.
+/// `host_core::stall_ring_frames(48_000, 128)`: 100 ms of stall tolerance rounded up to whole
+/// quanta (38), plus one quantum held by the consumer and one in the recycle path, so forty
+/// quanta. The default ring adds a warm successor's prime headroom to it (#1406 D2); the console
+/// benchmark keeps the stall ring, so its ring bytes do not move with that headroom. Mirrored
+/// rather than imported, as [`WEB_METER_BLOCKS`] is: the host crate is not a dependency of this
+/// subject. The live row's test pins the two equal.
 pub const LIVE_RING_FRAMES: u64 = 40 * QUANTUM as u64;
 
 /// Blocks every live ring holds beyond the one a block reads, at least, when the block starts
@@ -3174,17 +3177,14 @@ mod tests {
     /// into a recycled ring block. The ring row lends the same frozen words in place, so the two
     /// digests agree block for block; there is no first-block latency to shift by, because the
     /// session timeline and every ring start at frame zero and the plan has no input arrival.
-    /// The ring depth is the default a product host prepares, pinned here against the host's own
-    /// formula because this subject mirrors it.
+    /// The ring depth is the stall ring a product host's default ring is built on, pinned here
+    /// against the host's own formula because this subject mirrors it.
     #[test]
     fn the_live_row_renders_the_ring_rows_bits_with_no_underrun() {
         const BLOCKS: u64 = 256;
         assert_eq!(
             LIVE_RING_FRAMES,
-            u64::from(host_core::default_source_ring_frames(
-                SAMPLE_RATE_HZ,
-                QUANTUM as u32
-            ))
+            u64::from(host_core::stall_ring_frames(SAMPLE_RATE_HZ, QUANTUM as u32))
         );
         let digest = |runtime: &mut SessionRuntime| {
             let mut sink = Sha256Sink::new();

@@ -87,14 +87,28 @@ pub fn session_jump_lengths(model: &SessionModel) -> GraphJumpLengths {
 /// The longest producer-thread stall the default source ring hides without an underrun.
 pub const SOURCE_STALL_TOLERANCE_MS: u32 = 100;
 
-/// Derive the default per-source ring capacity from the document's rate and quantum.
+/// Derive the default per-source ring capacity from the document's rate and quantum (#1406 D2).
 ///
-/// The ring covers `ceil(100 ms * fs / quantum)` quanta plus one quantum held by the consumer and
-/// one in the recycle path. The result is therefore always a whole number of quanta. A zero
-/// quantum returns zero; callers validate the document before using the answer.
+/// The ring is [`stall_ring_frames`] (the stall tolerance in whole quanta, plus one quantum held
+/// by the consumer and one in the recycle path), plus [`p_max_samples`] (the largest `ΣP` a warm
+/// successor reads ahead), plus one quantum: so a producer that keeps the ring full through one
+/// stall still has the `(k + 1) · q` frames, `k · q <= p_max_samples`, that a warm successor's
+/// readiness asks to be queued. Every term is a whole number of quanta, so the result is too. A
+/// zero quantum returns zero, and so does a ring above `u32::MAX` frames; callers validate the
+/// document before using the answer.
 #[must_use]
 pub const fn default_source_ring_frames(sample_rate_hz: u32, quantum_frames: u32) -> u32 {
-    stall_ring_frames(sample_rate_hz, quantum_frames)
+    let stall = stall_ring_frames(sample_rate_hz, quantum_frames) as u64;
+    let prime = p_max_samples(sample_rate_hz, quantum_frames) as u64;
+    if stall == 0 || prime == 0 {
+        return 0;
+    }
+    let frames = stall + prime + quantum_frames as u64;
+    if frames > u32::MAX as u64 {
+        0
+    } else {
+        frames as u32
+    }
 }
 
 /// The ring that hides one producer stall (#1354 D1): `ceil(100 ms * fs / quantum)` quanta plus
@@ -825,8 +839,10 @@ impl PreparedHost {
     /// insert added, removed or reordered, or a session console slot added, removed or moved) is
     /// listed too, even when its remaining owners carry (D15-9). A strip whose surviving insert
     /// (an insert present in both plans' chains) is not banked in both plans, or differs, is
-    /// listed as well: its insert starts at rest on the swap. Sorted. Added strips are not
-    /// listed, and neither is any strip of a plan prepared without a predecessor.
+    /// listed as well: its insert starts at rest on the swap. So is a strip a warm lead restarts
+    /// whole, and, closed over the sidechain edges, a strip with an insert keyed from a listed
+    /// strip's tap behind a restarted owner (#1324 D1). Sorted. Added strips are not listed, and
+    /// neither is any strip of a plan prepared without a predecessor.
     /// *Duck-swap a strip whose state cannot continue across a plan swap* (#1324) consumes it.
     #[must_use]
     pub fn restarted_strips(&self) -> &[Box<str>] {
@@ -2231,9 +2247,11 @@ fn prime_bytes_of(
 ///
 /// At a declared discontinuity nothing leads, so the answer is [`WarmDecision::Ordinary`].
 ///
-/// **Limits of this slice (#1354b).** Step 2's sidechain closure and step 6's submix
-/// `input`-tap rule are not applied: a consumer keyed from a restarted strip's `post_input`,
-/// `insert_send`, `insert_return` or `pre_fader` tap stays carried, and no L3 line is primed.
+/// **Limits of this slice (#1354b).** Step 2's sidechain closure holds for `R`'s join part only:
+/// `ordinary`'s restart set is closed over the sidechain edges (#1324 D1). A consumer keyed from a
+/// strip step 6 restarts whole is not in `R` when the floors are derived (the successor restarts
+/// it after them, with its floor `a + P`), step 6's submix `input`-tap rule is not applied, and no
+/// L3 line is primed.
 ///
 /// # Errors
 ///
@@ -4428,7 +4446,11 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
     // they are; only their outputs are filtered here.
     let mut restarted = core::mem::take(&mut strip_carry.restarted);
     restarted.extend(core::mem::take(&mut effect_carry.restarted));
-    restarted.extend(core::mem::take(&mut strip_delay_carry.restarted));
+    // #1324 D1: a strip whose delay line restarts steps its `input` tap at `S`.
+    let mut delay_restarted = core::mem::take(&mut strip_delay_carry.restarted);
+    delay_restarted.sort_unstable();
+    delay_restarted.dedup();
+    restarted.extend(delay_restarted.iter().cloned());
     restarted.sort_unstable();
     restarted.dedup();
     if let (Some(lead), Some(restart)) = (warm, &warm_restart) {
@@ -4448,6 +4470,20 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
         );
         restarted.sort_unstable();
         restarted.dedup();
+    }
+    // #1324 D1: a carried effect keyed from a restarted strip's tap behind a restarted owner
+    // would read the old chain until `S` and the restarted chain's at-rest output after it, so
+    // its strip joins the set, until no strip is added. After the warm check: the lead's `R` is
+    // the ordinary successor's set, which this closure already closed.
+    if let Some(base) = successor {
+        close_over_sidechains(
+            base.committed,
+            model,
+            &base.inventory.delay_lines,
+            &delay_lines,
+            &delay_restarted,
+            &mut restarted,
+        );
     }
     let restart = StripRestart::new(model, restarted.iter().map(|id| &**id));
     let carried_input_count = carried_inputs.len();
@@ -7471,6 +7507,127 @@ fn committed_has_strip(committed: &SessionModel, id: &str) -> bool {
             .submixes
             .binary_search_by(|submix| submix.id.as_str().cmp(id))
             .is_ok()
+}
+
+/// The strip a route or a sidechain reads, and its tap; whether that strip is a submix.
+pub(crate) fn source_strip(source: &session::RouteSource) -> (&str, session::SendTap, bool) {
+    match source {
+        session::RouteSource::Track { track_id, tap } => (track_id.as_str(), *tap, false),
+        session::RouteSource::Submix { submix_id, tap } => (submix_id.as_str(), *tap, true),
+    }
+}
+
+/// The length, in `lines`, of the compensation line on the sidechain of effect `effect` of strip
+/// `strip` into its port `port`; 0 when it has none.
+pub(crate) fn sidechain_line_samples(
+    lines: &[graph::GraphDelayLine],
+    strip: &str,
+    effect: &str,
+    port: &str,
+) -> u64 {
+    lines
+        .iter()
+        .find(|line| {
+            matches!(&line.edge, graph::GraphEdgeId::EffectSidechain { effect: node, port: at }
+                if node.track_id.as_str() == strip
+                    && node.effect_id.as_str() == effect
+                    && at == port)
+        })
+        .map_or(0, |line| line.samples)
+}
+
+/// #1324 D1's exemption of a submix's `input` tap whatever its arrival: every line into submix
+/// `submix`'s `Input` stage, in `committed` and in `model`, comes from a ducked strip (`ducked`,
+/// which holds the removed strips) or, in `model`, from an added one. Its input then holds exact
+/// `+0.0` from the end of the duck until the fire. A route of `model` from a tap before the fader
+/// that follows an automated source mute cannot be armed (#2011) and restarts at its prepared
+/// value at `S`, so a stage it feeds is not quiet.
+pub(crate) fn submix_input_is_quiet(
+    committed: &SessionModel,
+    model: &SessionModel,
+    submix: &str,
+    ducked: &dyn Fn(&str) -> bool,
+) -> bool {
+    let into = |route: &&session::Route| {
+        matches!(&route.destination, session::RouteDestination::SubmixInput { submix_id }
+            if submix_id.as_str() == submix)
+    };
+    committed
+        .routes
+        .iter()
+        .filter(into)
+        .all(|route| ducked(source_strip(&route.source).0))
+        && model.routes.iter().filter(into).all(|route| {
+            let (source, tap, _) = source_strip(&route.source);
+            (!committed_has_strip(committed, source) || ducked(source))
+                && !(tap.precedes_fader()
+                    && follows_automated_mute(controls::ModelView::whole(model), route))
+        })
+}
+
+/// #1324 D1's sidechain closure, on the restart set `restarted` (sorted) of a successor of
+/// `committed` prepared from `model`: a strip of both plans with an insert keyed from a tap of a
+/// restarted strip that follows a restarted owner with state (`post_input`, `insert_send`,
+/// `insert_return`, `pre_fader`) joins the set, repeated until no strip is added. A track's
+/// `input` tap is its raw source, and a `post_fader` or `post_pan` tap holds exact `+0.0` from
+/// the end of the duck until the fire, so neither adds its consumer, unless the strip's own delay
+/// line restarts (`delay_restarted`, sorted): the `input` tap is that line's output, which then
+/// starts at rest at `S`, so it adds its consumer, a track's or a submix's. Otherwise a submix's
+/// `input` tap adds its consumer only when the sidechain's line changes length (`before` is the
+/// predecessor's lines, `after` the successor's) and the submix's input is not quiet
+/// ([`submix_input_is_quiet`]). Console slots have no sidechain.
+fn close_over_sidechains(
+    committed: &SessionModel,
+    model: &SessionModel,
+    before: &[graph::GraphDelayLine],
+    after: &[graph::GraphDelayLine],
+    delay_restarted: &[Box<str>],
+    restarted: &mut Vec<Box<str>>,
+) {
+    loop {
+        let held =
+            |set: &[Box<str>], id: &str| set.binary_search_by(|held| (**held).cmp(id)).is_ok();
+        let set: &[Box<str>] = restarted;
+        let ducked = |id: &str| held(set, id) || !committed_has_strip(model, id);
+        let keyed = |strip: &str, effect: &session::Effect| {
+            let session::SidechainDeclaration::Routed(sidechain) = &effect.sidechain else {
+                return false;
+            };
+            let (source, tap, submix) = source_strip(&sidechain.source);
+            if !held(set, source) {
+                return false;
+            }
+            match tap {
+                session::SendTap::PostFader | session::SendTap::PostPan => false,
+                session::SendTap::Input if held(delay_restarted, source) => true,
+                session::SendTap::Input => {
+                    let port = sidechain.port_id.as_str();
+                    let id = effect.id.as_str();
+                    submix
+                        && sidechain_line_samples(before, strip, id, port)
+                            != sidechain_line_samples(after, strip, id, port)
+                        && !submix_input_is_quiet(committed, model, source, &ducked)
+                }
+                session::SendTap::PostInput
+                | session::SendTap::InsertSend
+                | session::SendTap::InsertReturn
+                | session::SendTap::PreFader => true,
+            }
+        };
+        let joined: Vec<Box<str>> = model
+            .strips()
+            .map(|strip| (strip.id.as_str(), strip.inserts))
+            .filter(|(id, _)| !held(set, id) && committed_has_strip(committed, id))
+            .filter(|(id, inserts)| inserts.effects.iter().any(|effect| keyed(id, effect)))
+            .map(|(id, _)| Box::from(id))
+            .collect();
+        if joined.is_empty() {
+            return;
+        }
+        restarted.extend(joined);
+        restarted.sort_unstable();
+        restarted.dedup();
+    }
 }
 
 /// The model half of the strip join (#1277 D3, D4): for every strip of `model` that `committed`

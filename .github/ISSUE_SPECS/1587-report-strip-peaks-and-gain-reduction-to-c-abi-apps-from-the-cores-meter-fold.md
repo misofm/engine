@@ -209,3 +209,95 @@ Commands: `cargo test --locked -p host-core --all-features`,
     verifier found no defect it catches before "A's epoch is dropped" does, so it was removed in
     attempt 2.)
   - Deleted: the `meter.strip.unavailable` row of the capi refusal test (the refusal is gone).
+
+## Decision record (#1587b, 2026-10-25)
+
+- **Taps.** `CapiGainReductionTaps` visits the running epoch's `observations`, every declared tap,
+  with `armed` and `arm_sample` from `ObservationReader::read_state` (#1585 D2); a torn read is an
+  unarmed tap for that poll. `ProviderEpoch::observation_strips` (one `u32` per handle: the
+  position of its strip's meter consumer, the rule `SessionMeters::resolve` uses, else
+  `u32::MAX`; attempt 2, verifier minor 1) is built in `prepare_runtime` and charged in the
+  epoch's observation handle bytes; it does not move the reference session's
+  `capi_retained_bytes` (313,505 on this branch with or without the charge; the 608 B above the
+  312,897 of the #1587a paragraph came from main).
+- **Resolution.** Gain-reduction strip entries resolve like peak entries (D2).
+- **k-frame rule (D3).** `StripPeakFold` gains `gain_reduction_db` and `gain_reduction_present`:
+  the last frame's present reading, present when any frame's is, independent of `COMPLETE`.
+- **Records bound.** The table stays bounded at 128 entries (`meter.records` at the 129th), not at
+  256 records: a gain entry takes one record, but the stored tables' strip-ID text and the
+  resolution and fold vectors are charged and reserved for 128 entries (#1587a), so an all-gain
+  table of 129-256 entries stays refused.
+- **D4.** `meter.gain_reduction.unavailable` and its capi refusal row are deleted.
+- **Tests.**
+  - `gain_reduction_records_read_only_windows_since_the_taps_arm` (capi, gate 2; attempt 2: two
+    tracks, the compressor on the second, a gain entry for each): red if a window
+    from before the arm sample reaches a record (mutant `arm_sample: 0`: "re-armed, before the
+    first window since the arm closes" flags 1, 12.79 dB), if a disarmed tap reports (mutant
+    `armed: true, arm_sample: 0`: "disarmed" flags 1), or if a gain entry does not resolve (mutant:
+    resolve peak entries only: "armed" flags 0). A mutant that ignores `armed` alone stays green: a
+    disarm moves `arm_sample` past every window the slot holds, so the arm-sample rule covers it.
+  - `a_batch_reports_each_strips_last_present_gain_reduction` (host-core, D3's k-frame rule): red
+    on the maximum (3.0 for 2.0) and on a fold not reset at a batch's first frame (2.0 kept).
+  - Gate 2 reads the reader's window through `TestObservationWindows` (after merging #1586b, its
+    left and right lane bits; the compressor's tap is in dB, so the strip word is the deeper lane).
+  - Merged #1586b: its stated carried-reader limit (header, qualification doc) is replaced by the
+    pairing, since `OBSERVATION_READ` reads the same running-epoch readers.
+  - Attempt 2 (verifier): the gate 5 race row was removed (no render code path; it guarded
+    nothing). Gate 2 now has two strips: red on mutant `strips.push(0)` for every handle (red at "armed": handle 1 flags 1 12.79 dB, handle 2 flags 0).
+- **Attempt 3: #1674's observation half joins this slice (root, option b).** After a carried
+  rebuild the promoted epoch read the successor's fresh slots, which nothing published to, so a
+  strip's gain reduction never came back. The swap record lives in the successor's executor, on
+  the render thread, so the C ABI plan now carries a host attachment (`CarriedTapsAttachment`,
+  set in `prepare_runtime` for a `METER_DELIVERY` adapter's plan with observation readers; the
+  hook runs only when both plans have one, which is every swap that can carry a tap; the browser
+  keeps its own) whose
+  `adopt_predecessor` copies the record's `Observation` entries into a preallocated
+  `CarriedTaps` (atomic pairs, one per handle, count stored last with `Release`; a marked
+  realtime region). `promote_pending_provider` pairs `next.observations` with the running
+  epoch's from those entries through `pair_carried_observations`, beside the meter pairing:
+  from what carried, never from a preparation-time list (#1674 R1's constraint). Charged in the
+  epoch's observation handle bytes. The reference session has no observation reader, so
+  `capi_retained_bytes` is the same with or without the slice (313,553 after merging main; 334,702
+  after merging #1586b; ceiling 344,192 stays). Attaching the record to every C ABI plan instead (attempt 3's first cut) broke
+  `double_live_oracle_drives_exact_and_one_below_c_caps` (`capi.resource.limit` at the exact cap:
+  the oracle has no term for a plan with no reader), which the gating fixed.
+  - Gate 2 gains the carried-rebuild row: `add_muted_track` (ID sorting first), six windows each
+    `{2, Aggregate, VALID, reader's value}`, `test_plan_carry_counts == (1, 0)`. Red before the
+    fix (the promoted epoch's reader held no window: "a published window" panic at window 5).
+  - Uncarried effect (probe, not committed: the compressor's link mode changed, a rebuild whose
+    effect does not carry): the successor is prepared with the tap armed (#1584 D6a), its fresh
+    slot's sequence restarts at 1, so the strip's reading is absent until that tap's first window
+    in the new plan closes, then `VALID`. In the probe the first batch after the edit was already
+    `VALID` (12.29 dB from the fresh compressor), since the tap's window closed inside it.
+  - Docs: readings continue across a swap that carries the strip, and a tap's reading and arm
+    across one that carries its effect; an uncarried effect restarts its taps as above.
+  - NITs: `TapView::strip` is "the frame's strip index"; `fold_gain_reduction`'s doc says
+    `GAIN_REDUCTION` is set by an armed tap's fresh window even when its strip is outside the frame.
+  - Note for #1674 (verifier nit): the fold reads each tap's slot twice per poll, `read_state`
+    for the arm state and `read` for the window; the pair is not one publication.
+- **Attempt 4 (verifier blocker; root ruling).** Render claims a candidate before it carries into
+  it (`plan_exchange` claim, then `carry_from`), and `withdraw_pending_candidate` promotes a
+  claimed candidate, so a promotion could read the record before render wrote it and pair
+  nothing for good. `CarriedTaps::count` now starts at `UNWRITTEN` (`u32::MAX`): a promotion that
+  reads it unwritten sets `ProviderEpoch::observations_pending` to the displaced epoch, and
+  `settle_observation_pairings` settles it once the record reads written (`Acquire` on `count`,
+  paired with render's `Release`), at each reclaim before the parked epoch drops, at the end of
+  each service step and before each promotion. One mechanism settles an unwritten record as
+  nothing carried: the displaced epoch is gone (its plan was reclaimed, and the retirement queue
+  orders the hook before the reclaim). Pairing keeps adoption order without the claim-order
+  argument (verifier minor 1 after the attempt-4 PASS): a promotion leaves `next` pending while
+  the running epoch's own mark stands, a parked epoch keeps its mark, and the settle skips an
+  epoch whose displaced epoch is itself pending. The narrow race this guards: render carries into
+  B's plan and claims C's between an edit's service step and its `withdraw_pending_candidate`,
+  which promotes B and C in one call. Until settled the strip shows no reading, never a wrong
+  one. (Attempt 4 also passed a `reclaimed` flag to settle an unwritten record at the reclaim; it
+  duplicated the gone-epoch rule and was removed, verifier minor 2.)
+  - `a_promotion_before_the_carry_pairs_the_carried_tap_once_render_carries` (capi, direct
+    children, `test_promote_pending_before_carry` + reclamation held): red on attempt 3's code
+    (the running epoch's reader `None`, want `Some((4, 4608))`); red if the service-step settle is
+    removed (same).
+  - Minor 2: the carried-rebuild row of gate 2 now adds a muted copy of the compressor's track
+    (`add_muted_copy`), so the carried handle moves from 0 to 1; the mutant that pairs a successor
+    position with itself is red in both tests ("a published window" / `None`).
+  - Nit 4: the per-pair `slice::from_ref` loop is commented (the pairs are atomics; collecting
+    would allocate).
