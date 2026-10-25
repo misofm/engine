@@ -10,7 +10,7 @@
 //! prepared plan.
 //!
 //! Gates 5, 6 and the second case of gate 7 (the sidechain closure and the submix `input`-tap
-//! rule) are #1354b's.
+//! rule, #1354b) close `R` over sidechain edges before the floors are derived.
 //!
 //! The second half (#1355) streams the warm successor through the plan exchange: render's
 //! readiness check, the adoption and its prime, on both bank widths, and the growth chain at
@@ -22,7 +22,7 @@
 mod successor;
 
 use engine::realtime::{PlanAdoption, SwapOutcome};
-use graph::{GraphNodeId, StableGraphId, TrackStage};
+use graph::{GraphEdgeId, GraphNodeId, StableGraphId, TrackStage};
 use graph_compiler::Backend;
 use host_core::{
     HostLiveControlRequest, HostPrepareCaps, PrepareDiagnostics, PreparedHost, SuccessorBase,
@@ -689,8 +689,9 @@ fn the_prime_counts_the_words_its_fill_writes() {
     assert_eq!((lead.prime_bytes(), w.prime_bytes()), (expected, expected));
 
     // A track that reads another source in the edit takes no prime: gate 1's growth with track
-    // 2 re-pointed to an added source counts track 1's source alone. (Its warm preparation is
-    // refused today, `host.successor.warm_invariant`: #1354a's `R` misses the re-pointed track.)
+    // 2 re-pointed to an added source counts track 1's source alone. The lead's strip delay join
+    // restarts the re-pointed track (its claim line grows on a source that does not carry), so
+    // it is in `R` (#1354b), and the warm successor restarts it.
     let mut b = two_tracks();
     *inserts(&mut b, "t1") = vec![limiter()];
     let mut other = b.sources[0].clone();
@@ -703,41 +704,231 @@ fn the_prime_counts_the_words_its_fill_writes() {
         .find(|track| track.id.as_str() == "t2")
         .expect("track 2");
     t2.source_id = sid("other-source");
-    let lead = warm(Edit::new(two_tracks(), b).decide(&CONFIG));
+    let edit = Edit::new(two_tracks(), b);
+    let lead = warm(edit.decide(&CONFIG));
     assert_eq!(lead.prime_bytes(), 4 * (LEAD * 2));
+    let w = edit.warm(&lead);
+    assert_eq!(restarted(&w), ["t1", "t2"]);
+    assert_eq!(w.prime_bytes(), lead.prime_bytes());
+}
+
+/// The length of `host`'s compensation line on the edge `edge` matches, 0 when it has none.
+fn line_samples(host: &PreparedHost, edge: impl Fn(&GraphEdgeId) -> bool) -> u64 {
+    host.inventory
+        .delay_lines()
+        .iter()
+        .find(|line| edge(&line.edge))
+        .map_or(0, |line| line.samples)
+}
+
+/// Whether `edge` is the sidechain edge into strip `strip`'s compressor (`comp`).
+fn sidechain_into(strip: &'static str) -> impl Fn(&GraphEdgeId) -> bool {
+    move |edge| {
+        matches!(edge, GraphEdgeId::EffectSidechain { effect, .. }
+            if effect.track_id.as_str() == strip && effect.effect_id.as_str() == "comp")
+    }
+}
+
+/// Gate 5 (#1354b, D2 step 2): a strip keyed from a strip that step 6 restarts whole. Gate 2's
+/// edit (the send restarts X whole) with track Y, routed to the output, holding a compressor keyed
+/// from a tap of X. From X's `pre_fader` tap Y joins `R` before the floors are derived, so its
+/// nodes before the fader and its fader keep `a(n)`. From X's `input` tap and from its
+/// `post_fader` tap Y stays carried and leads by `P`. From the `input` tap the prime fills Y's
+/// sidechain line (L3), and D3 counts it: `P` words a channel, and, with a limiter before Y's
+/// compressor in A (so A already holds the edge's line, `e = L`), the line's whole length `L + P`.
+#[test]
+fn a_strip_keyed_from_a_strip_restarted_whole() {
+    for (tap, y_limiter) in [
+        (SendTap::PreFader, false),
+        (SendTap::Input, false),
+        (SendTap::Input, true),
+        (SendTap::PostFader, false),
+    ] {
+        let a = || {
+            let mut model = empty();
+            track(&mut model, "x", vec![limiter()]);
+            to_output(&mut model, "x");
+            submix(&mut model, "s", Vec::new());
+            to_output(&mut model, "s");
+            track(&mut model, "t", Vec::new());
+            to_submix(&mut model, "t", "s");
+            let mut chain: Vec<Effect> = y_limiter.then(limiter).into_iter().collect();
+            chain.push(keyed_compressor(from_track("x", tap)));
+            track(&mut model, "y", chain);
+            to_output(&mut model, "y");
+            model
+        };
+        let mut b = a();
+        to_submix(&mut b, "x", "s");
+        let edit = Edit::new(a(), b);
+        let lead = warm(edit.decide(&CONFIG));
+        assert_eq!(
+            (lead.lead_samples, &*lead.restart_whole),
+            (LEAD, &names(&["x"])[..]),
+            "key tap {tap:?}"
+        );
+        let w = edit.warm(&lead);
+        let mut leading = stages("t", TrackStage::Input);
+        leading.extend([route_node("y-main"), output()]);
+        let y = stages("y", TrackStage::Input);
+        if tap == SendTap::PreFader {
+            assert_eq!(restarted(&w), ["x", "y"], "key tap {tap:?}");
+            edit.assert_leads(&w, &y[..6], 0);
+            leading.push(y[6].clone());
+        } else {
+            assert_eq!(restarted(&w), ["x"], "key tap {tap:?}");
+            leading.extend(y);
+        }
+        edit.assert_leads(&w, &leading, LEAD);
+        // D3 (gate 4's count): every track's claim line grew from none and is written whole on
+        // both lanes, and one stereo source replays; the `input` tap adds Y's L3 line, written
+        // whole on both channels.
+        let lines: u64 = edit
+            .b
+            .model
+            .tracks
+            .iter()
+            .map(|track| arrival(&w, &stages(track.id.as_str(), TrackStage::Input)[0]))
+            .sum();
+        let l3 = if tap == SendTap::Input {
+            let line = line_samples(&w, sidechain_into("y"));
+            assert_eq!(
+                line_samples(&edit.host_a, sidechain_into("y")) != 0,
+                y_limiter,
+                "A holds the edge's line only behind Y's limiter"
+            );
+            assert_eq!(
+                line - line_samples(&edit.host_a, sidechain_into("y")),
+                LEAD,
+                "the edge grows by P"
+            );
+            2 * line
+        } else {
+            0
+        };
+        let expected = 4 * (LEAD * 2 + 2 * lines + l3);
+        assert_eq!(
+            (lead.prime_bytes(), w.prime_bytes()),
+            (expected, expected),
+            "key tap {tap:?}, Y limiter {y_limiter}"
+        );
+    }
+}
+
+/// Gate 6 (#1354b, D2 step 6 M1): T1 and T2 route to submix B, B and T3 to the output, and T3
+/// holds a compressor keyed from B's `input` tap. The edit adds a limiter to T1 and a compressor
+/// (latency 0) to B, so T1 and B restart. With `g = P` (T1 has no insert in A) B's `Input` stage
+/// arrives at `a + P`, held by carried T2, and T3 stays carried with its sidechain line and T2's
+/// line into B at A's lengths. With `g < P` (T1 has a limiter in A and routes into B from its
+/// `pre_fader` tap) B's `Input` stage arrives at `a + 486`, so T3 joins `R` before the floors are
+/// derived: its `Input` stage keeps `a(n)`.
+#[test]
+fn a_strip_keyed_from_a_restarted_submixs_input_tap() {
+    for g_is_p in [true, false] {
+        let a = || {
+            let mut model = empty();
+            submix(&mut model, "b", Vec::new());
+            to_output(&mut model, "b");
+            track(
+                &mut model,
+                "t1",
+                if g_is_p { Vec::new() } else { vec![limiter()] },
+            );
+            let tap = if g_is_p {
+                SendTap::PostFader
+            } else {
+                SendTap::PreFader
+            };
+            route(&mut model, "t1-b", from_track("t1", tap), Some("b"));
+            track(&mut model, "t2", Vec::new());
+            to_submix(&mut model, "t2", "b");
+            track(
+                &mut model,
+                "t3",
+                vec![keyed_compressor(from_submix("b", SendTap::Input))],
+            );
+            to_output(&mut model, "t3");
+            model
+        };
+        let mut b = a();
+        let mut second = limiter();
+        second.id = sid("limiter-2");
+        inserts(&mut b, "t1").push(second);
+        *inserts(&mut b, "b") = vec![effect(
+            "bus-comp",
+            "miso.compressor",
+            SidechainDeclaration::None,
+        )];
+        let edit = Edit::new(a(), b);
+        let lead = warm(edit.decide(&CONFIG));
+        assert_eq!(
+            (lead.lead_samples, &*lead.restart_whole),
+            (LEAD, &[][..]),
+            "g = P: {g_is_p}"
+        );
+        let w = edit.warm(&lead);
+        let t3 = stages("t3", TrackStage::Input);
+        let mut leading = vec![route_node("t3-main"), route_node("b-main"), output()];
+        if g_is_p {
+            assert_eq!(restarted(&w), ["b", "t1"]);
+            leading.extend(t3);
+            let into_b = |edge: &GraphEdgeId| {
+                matches!(edge, GraphEdgeId::RouteDestination { route_id }
+                    if route_id.as_str() == "t2-b")
+            };
+            for edge in [
+                &sidechain_into("t3") as &dyn Fn(&GraphEdgeId) -> bool,
+                &into_b,
+            ] {
+                assert_eq!(line_samples(&w, edge), line_samples(&edit.host_a, edge));
+            }
+        } else {
+            assert_eq!(restarted(&w), ["b", "t1", "t3"]);
+            // Its floor is `a(n)`; its compressor waits for B's `Input` stage, as in A.
+            edit.assert_leads(&w, &t3[..1], 0);
+            leading.push(t3[6].clone());
+        }
+        edit.assert_leads(&w, &leading, LEAD);
+    }
 }
 
 /// Gate 7: a limiter on a bus restarts the bus's carried feeders whole, and the bus after its
-/// fader, T3 and the output lead by `P`, with T3's claim line exactly `P`.
+/// fader, T3 and the output lead by `P`, with T3's claim line exactly `P`. With T3 also keyed
+/// from B's `input` tap (#1354b), T3 stays carried: every line into B's `Input` stage comes from
+/// a strip restarted whole (D2 step 2's exemption).
 #[test]
 fn a_limiter_on_a_bus_restarts_its_feeders() {
-    let a = || {
-        let mut model = empty();
-        submix(&mut model, "b", Vec::new());
-        to_output(&mut model, "b");
-        for id in ["t1", "t2"] {
-            track(&mut model, id, Vec::new());
-            to_submix(&mut model, id, "b");
-        }
-        track(&mut model, "t3", Vec::new());
-        to_output(&mut model, "t3");
-        model
-    };
-    let mut b = a();
-    *inserts(&mut b, "b") = vec![limiter()];
-    let edit = Edit::new(a(), b);
-    let lead = warm(edit.decide(&CONFIG));
-    assert_eq!(
-        (lead.lead_samples, &*lead.restart_whole),
-        (LEAD, &names(&["t1", "t2"])[..])
-    );
-    let w = edit.warm(&lead);
-    assert_eq!(restarted(&w), ["b", "t1", "t2"]);
-    let mut carried = stages("t3", TrackStage::Input);
-    carried.extend(stages("b", TrackStage::PostMatrix));
-    carried.extend([route_node("b-main"), route_node("t3-main"), output()]);
-    edit.assert_leads(&w, &carried, LEAD);
-    assert_eq!(arrival(&w, &stages("t3", TrackStage::Input)[0]), LEAD);
+    for keyed in [false, true] {
+        let a = || {
+            let mut model = empty();
+            submix(&mut model, "b", Vec::new());
+            to_output(&mut model, "b");
+            for id in ["t1", "t2"] {
+                track(&mut model, id, Vec::new());
+                to_submix(&mut model, id, "b");
+            }
+            let key = keyed.then(|| keyed_compressor(from_submix("b", SendTap::Input)));
+            track(&mut model, "t3", key.into_iter().collect());
+            to_output(&mut model, "t3");
+            model
+        };
+        let mut b = a();
+        *inserts(&mut b, "b") = vec![limiter()];
+        let edit = Edit::new(a(), b);
+        let lead = warm(edit.decide(&CONFIG));
+        assert_eq!(
+            (lead.lead_samples, &*lead.restart_whole),
+            (LEAD, &names(&["t1", "t2"])[..]),
+            "keyed {keyed}"
+        );
+        let w = edit.warm(&lead);
+        assert_eq!(restarted(&w), ["b", "t1", "t2"], "keyed {keyed}");
+        let mut carried = stages("t3", TrackStage::Input);
+        carried.extend(stages("b", TrackStage::PostMatrix));
+        carried.extend([route_node("b-main"), route_node("t3-main"), output()]);
+        edit.assert_leads(&w, &carried, LEAD);
+        assert_eq!(arrival(&w, &stages("t3", TrackStage::Input)[0]), LEAD);
+    }
 }
 
 /// Gate 8: a carried key or feeder that holds a restarted chain late is restarted whole: the
@@ -844,6 +1035,24 @@ fn a_parallel_bus_restarts_only_the_feeder_holding_it_late() {
     let mut carried = stages("t0", TrackStage::Input);
     carried.extend([route_node("t0-bu"), output()]);
     edit.assert_leads(&w, &carried, LEAD);
+
+    // Misaligned (D2 step 6): with one track T2 in A, the parallel bus fed from its `post_fader`
+    // tap holds the output late through T2's carried fader, so the walk restarts T2 whole, and
+    // every predecessor strip that reaches the output is restarted whole.
+    let a = || {
+        let mut model = empty();
+        track(&mut model, "t2", Vec::new());
+        to_output(&mut model, "t2");
+        model
+    };
+    let mut b = a();
+    submix(&mut b, "nb", vec![limiter()]);
+    to_output(&mut b, "nb");
+    to_submix(&mut b, "t2", "nb");
+    assert_eq!(
+        Edit::new(a(), b).decide(&CONFIG),
+        WarmDecision::Unavailable(WarmUnavailable::Misaligned)
+    );
 }
 
 /// The invariant error a warm preparation returns.
