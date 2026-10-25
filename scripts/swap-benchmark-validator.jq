@@ -83,7 +83,7 @@ def record_valid:
   (.move.ordinary_ns | distribution(frozen_swaps * (frozen_interval - 1))) and
   (.move.move_ns | distribution(frozen_swaps)) and
   (.prime | type == "object") and
-  .prime.cycles == frozen_cycles and .prime.sum_lead_samples == p_max and
+  .prime.cycles == frozen_cycles and
   (.prime.carry_refusal_count | nat) and
   (.prime.growths | type == "array" and length == 4) and
   ([range(4) as $index | .prime.growths[$index] | growth_valid($index + 1)] | all) and

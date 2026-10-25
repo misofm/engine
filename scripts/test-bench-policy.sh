@@ -393,6 +393,12 @@ printf '\nfn h() { let _ = Sha256::new(); }\n' \
     >>"$case_root/tools/bench/src/console.rs"
 expect_failure converted-subject-regrows-a-digest
 
+# #1286: the swap subject is on the list, so it cannot regrow a clock of its own either.
+new_case swap-subject-regrows-a-clock
+printf '\nfn t() { let _ = Instant::now(); }\n' \
+    >>"$case_root/tools/bench/src/swap.rs"
+expect_failure swap-subject-regrows-a-clock
+
 new_case subject-bypasses-metadata-snapshot
 printf '\nfn bypass() { let _ = std::env::var("CPU"); }\n' \
     >>"$case_root/tools/bench/src/console.rs"
