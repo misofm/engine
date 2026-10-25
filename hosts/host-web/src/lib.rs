@@ -1057,7 +1057,9 @@ pub struct WebBootOptions {
     pub require_sample_rate_hz: u32,
     /// Required physical output quantum, or zero to accept the document's quantum.
     pub require_quantum_frames: u32,
-    /// Per-source ring override, or zero for the engine's 100 ms derivation.
+    /// Per-source ring override, or zero for the engine's default ring
+    /// ([`default_source_ring_frames`]: the 100 ms stall ring plus the largest warm-successor prime
+    /// plus one quantum, #1406 D2).
     pub source_ring_frames: u32,
     /// Must be zero.
     pub reserved0: u32,

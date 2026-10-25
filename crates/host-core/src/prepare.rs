@@ -87,14 +87,28 @@ pub fn session_jump_lengths(model: &SessionModel) -> GraphJumpLengths {
 /// The longest producer-thread stall the default source ring hides without an underrun.
 pub const SOURCE_STALL_TOLERANCE_MS: u32 = 100;
 
-/// Derive the default per-source ring capacity from the document's rate and quantum.
+/// Derive the default per-source ring capacity from the document's rate and quantum (#1406 D2).
 ///
-/// The ring covers `ceil(100 ms * fs / quantum)` quanta plus one quantum held by the consumer and
-/// one in the recycle path. The result is therefore always a whole number of quanta. A zero
-/// quantum returns zero; callers validate the document before using the answer.
+/// The ring is [`stall_ring_frames`] (the stall tolerance in whole quanta, plus one quantum held
+/// by the consumer and one in the recycle path), plus [`p_max_samples`] (the largest `ΣP` a warm
+/// successor reads ahead), plus one quantum: so a producer that keeps the ring full through one
+/// stall still has the `(k + 1) · q` frames, `k · q <= p_max_samples`, that a warm successor's
+/// readiness asks to be queued. Every term is a whole number of quanta, so the result is too. A
+/// zero quantum returns zero, and so does a ring above `u32::MAX` frames; callers validate the
+/// document before using the answer.
 #[must_use]
 pub const fn default_source_ring_frames(sample_rate_hz: u32, quantum_frames: u32) -> u32 {
-    stall_ring_frames(sample_rate_hz, quantum_frames)
+    let stall = stall_ring_frames(sample_rate_hz, quantum_frames) as u64;
+    let prime = p_max_samples(sample_rate_hz, quantum_frames) as u64;
+    if stall == 0 || prime == 0 {
+        return 0;
+    }
+    let frames = stall + prime + quantum_frames as u64;
+    if frames > u32::MAX as u64 {
+        0
+    } else {
+        frames as u32
+    }
 }
 
 /// The ring that hides one producer stall (#1354 D1): `ceil(100 ms * fs / quantum)` quanta plus

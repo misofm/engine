@@ -1706,8 +1706,9 @@ fn facade_source_rules_reach_the_browser_host() {
 /// with `+0.0`. Filling until backpressure and then rendering 38 quanta in silence is exactly the
 /// 100 ms main-thread stall the default ring exists to hide.
 ///
-/// Red mutation: set `SOURCE_STALL_TOLERANCE_MS = 50` (a 21-quantum ring) -> the ring runs dry and
-/// the first starved quantum renders zeros instead of the ramp.
+/// Red mutation: set `SOURCE_STALL_TOLERANCE_MS = 50` -> the stall is 19 quanta and the ring 38
+/// (a 21-quantum stall ring, plus the 16-quantum prime and one quantum, #1406 D2), and the
+/// `stall_quanta == 38` assertion fails.
 #[test]
 fn ring_prefill_survives_stall() {
     const QUANTUM: u32 = 128;
