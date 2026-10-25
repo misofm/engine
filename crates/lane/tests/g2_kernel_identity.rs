@@ -921,8 +921,15 @@ fn bits<L: Lane>(value: L) -> Vec<u32> {
 /// Blocks of carried state in the skewed-cascade gate.
 const SKEW_BLOCKS: usize = 40;
 /// Frame counts of the skewed-cascade gate: shorter than every depth, as short as the pipeline,
-/// one quantum, and a long block.
-const SKEW_FRAMES: [usize; 5] = [1, 2, 3, 128, 1024];
+/// one quantum, and a long block. The long block is 1,024 frames in `--release` (the gate, run per
+/// PR by the release job) and 256 in debug, which keeps it longer than a quantum (#1972).
+const SKEW_FRAMES: [usize; 5] = [
+    1,
+    2,
+    3,
+    128,
+    if cfg!(debug_assertions) { 256 } else { 1024 },
+];
 /// Guard words on either side of every block the skewed-cascade gate hands a kernel.
 const SKEW_GUARD: usize = 8;
 /// A NaN pattern no kernel writes, so an overrun cannot land on it by accident.
@@ -931,7 +938,7 @@ const SKEW_GUARD_WORD: u32 = 0x7fa5_a5a5;
 /// Issue #978 gate 1: the skewed cascade is the interleaved cascade, rescheduled.
 ///
 /// For every width, one and two streams, depths one to three, with and without dry masks, and
-/// frame counts from 1 (every depth falls back) through 1,024: 40 consecutive blocks with the
+/// frame counts from 1 (every depth falls back) through 1,024 (256 in debug): 40 consecutive blocks with the
 /// state carried across them, over the G2 signals and a hostile family (both signed zeros,
 /// subnormals of either sign, normals across the range, a NaN payload and an infinity on single
 /// lanes late in the run). After every block the output words and every integrator word equal
