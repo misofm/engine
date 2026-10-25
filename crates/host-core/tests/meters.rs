@@ -475,7 +475,7 @@ fn a_full_meter_frame_ring_drops_the_newest_frame_and_counts_it() {
         frame
     };
     let pushed: Vec<bool> = (1..=host_core::METER_FRAME_RING_DEPTH as u64 + 1)
-        .map(|sequence| producer.push(&frame(sequence)))
+        .map(|sequence| producer.publish_frame(&frame(sequence)))
         .collect();
     assert_eq!(pushed.iter().filter(|kept| !**kept).count(), 1);
     assert!(
@@ -485,10 +485,13 @@ fn a_full_meter_frame_ring_drops_the_newest_frame_and_counts_it() {
     assert_eq!(consumer.dropped_frames(), 1);
     for sequence in 1..=host_core::METER_FRAME_RING_DEPTH as u64 {
         assert_eq!(consumer.peek(), Some(&frame(sequence)), "frame {sequence}");
-        consumer.release();
+        consumer.release_frame();
     }
     assert_eq!(consumer.peek(), None);
-    assert!(producer.push(&frame(10)), "a released frame is free again");
+    assert!(
+        producer.publish_frame(&frame(10)),
+        "a released frame is free again"
+    );
     assert_eq!(consumer.dropped_frames(), 1);
 }
 

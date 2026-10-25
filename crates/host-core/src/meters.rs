@@ -1103,6 +1103,7 @@ impl MeterFrameRing {
     }
 }
 
+// REALTIME_POLICY_BEGIN: #1588 D2, the meter frame ring's two halves.
 impl MeterFrameConsumer {
     /// The oldest published frame the control half has not released, if any.
     #[must_use]
@@ -1112,7 +1113,7 @@ impl MeterFrameConsumer {
 
     /// Release the oldest published frame back to the render half. Does nothing on an empty
     /// ring. Allocation-free.
-    pub fn release(&mut self) {
+    pub fn release_frame(&mut self) {
         if let Ok(frame) = self.published.try_pop() {
             // The free queue holds every frame the published queue does not, so it has room.
             let _ = self.free.try_push(frame);
@@ -1126,7 +1127,6 @@ impl MeterFrameConsumer {
     }
 }
 
-// REALTIME_POLICY_BEGIN: #1588 D2, the meter frame ring's render half.
 impl MeterFrameProducer {
     /// Copy `frame` into a free frame and publish it (#1588 D2): every field and every strip
     /// table element, by element. A ring frame has the ring's strip count; strips past `frame`'s
@@ -1134,7 +1134,7 @@ impl MeterFrameProducer {
     /// or a ring with no free frame, drops `frame` and counts it ([`MeterFrameConsumer::
     /// dropped_frames`]); returns whether `frame` was published. Allocation-free, bounded by the
     /// ring's strip count.
-    pub fn push(&mut self, frame: &MeterFrame) -> bool {
+    pub fn publish_frame(&mut self, frame: &MeterFrame) -> bool {
         let fits = frame.strip_peaks.len() <= self.strips;
         let slot = if fits { self.free.try_pop().ok() } else { None };
         let Some(mut slot) = slot else {
