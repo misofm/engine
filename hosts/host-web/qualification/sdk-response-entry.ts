@@ -19,6 +19,8 @@ import type { TrackResponseResult } from "../../../sdk/src/core/live-response.ts
 import { createResponsePreview } from "../../../sdk/src/browser/response.ts";
 import { createEngine } from "../../../sdk/src/browser/engine.ts";
 import { createDefaultHost } from "../../../sdk/src/browser/default-host.ts";
+import { decodeSpectrumCaptureReply, decodeSpectrumStreamReply } from "../../../sdk/src/core/spectrum-frame.ts";
+import { spectrumMetadataOf } from "../../../sdk/src/core/spectrum.ts";
 import { PROTOCOL_BLOCKS, protocolCalls } from "./protocol-calls.mjs";
 
 const EQ_CONFIGURATION_ID = 9_007_199_254_740_993n;
@@ -450,6 +452,50 @@ function countingTrackResponseWorker(stats: { queries: number; initializations: 
   };
 }
 
+/**
+ * The spectrum operation a request frame names (#1596): its message (`0x0011` capture, `0x0012`
+ * stream) and its first field's one-byte value, the operation code, at byte 56 (the 48-byte header,
+ * then the field's 8-byte prefix), as `spectrum-frame.ts` encodes them. `undefined` for another frame.
+ */
+function spectrumOperation(frame: Uint8Array): { readonly message: number; readonly code: number } | undefined {
+  const message = (frame[16] ?? 0) | ((frame[17] ?? 0) << 8);
+  if (message !== 0x0011 && message !== 0x0012) return undefined;
+  return { message, code: frame[56] ?? 0 };
+}
+
+const CAPTURE_ARM = 1;
+const STREAM_START = 1;
+const STREAM_READ = 3;
+
+/**
+ * Watch the spectrum frames the SDK posts through `host.control()` (#1596): `before` may hold a
+ * frame before it is posted, and `after` sees each served reply. The SDK reads spectrum through
+ * these frames alone, so this is where the native stream's metadata is seen.
+ */
+function watchSpectrumFrames(host, hooks: {
+  readonly before?: (operation: { readonly message: number; readonly code: number }) => Promise<void> | void;
+  readonly after?: (
+    operation: { readonly message: number; readonly code: number },
+    response: Uint8Array | undefined,
+  ) => void;
+}) {
+  const control = host.control.bind(host);
+  host.control = async (frame: Uint8Array, document?: Uint8Array) => {
+    const operation = spectrumOperation(frame);
+    if (operation !== undefined) await hooks.before?.(operation);
+    const reply = await control(frame, document);
+    if (operation !== undefined) hooks.after?.(operation, reply.result === 0 ? reply.response : undefined);
+    return reply;
+  };
+}
+
+/** The native metadata of a served `SPECTRUM_STREAM` reply, or `undefined` for a refusal. */
+function streamReplyMetadata(response: Uint8Array | undefined) {
+  if (response === undefined) return undefined;
+  const reply = decodeSpectrumStreamReply(response);
+  return reply.ok ? spectrumMetadataOf(reply.value) : undefined;
+}
+
 function spectrumPlanes(block: number): Float32Array[] {
   const left = new Float32Array(128);
   const right = new Float32Array(128);
@@ -744,12 +790,6 @@ async function runContinuousSpectrumQualification(): Promise<Record<string, unkn
   const browser = await createContinuousSpectrumBrowser(query, CONTINUOUS_FRAMES, true, 256);
   const nativeStarts = [];
   const nativeReads = [];
-  const nativeStartSpectrumStream = browser.host.startSpectrumStream.bind(browser.host);
-  browser.host.startSpectrumStream = async (...args) => {
-    const reply = await nativeStartSpectrumStream(...args);
-    nativeStarts.push(reply.metadata);
-    return reply;
-  };
   // Issue #1480 D2: the capture loss is made certain by construction, not by a race. While the
   // offline context renders, no native read runs: a read the SDK starts then waits on
   // `readsHeld` (a promise, not a sleep), and every read already dispatched has settled before
@@ -762,19 +802,25 @@ async function runContinuousSpectrumQualification(): Promise<Record<string, unkn
   const inFlightReads = new Set<Promise<unknown>>();
   let readsHeld: Promise<void> | undefined;
   let releaseReads = () => {};
-  const nativeReadSpectrumStream = browser.host.readSpectrumStream.bind(browser.host);
-  browser.host.readSpectrumStream = async (...args) => {
-    if (readsHeld !== undefined) await readsHeld;
-    const read = nativeReadSpectrumStream(...args);
-    inFlightReads.add(read);
-    try {
-      const reply = await read;
-      nativeReads.push(reply.metadata);
-      return reply;
-    } finally {
-      inFlightReads.delete(read);
-    }
-  };
+  let settleRead: (() => void) | undefined;
+  watchSpectrumFrames(browser.host, {
+    before: async ({ message, code }) => {
+      if (message !== 0x0012 || code !== STREAM_READ) return;
+      if (readsHeld !== undefined) await readsHeld;
+      // In flight from its post until its reply is seen (`after`); the owner sends one at a time.
+      inFlightReads.add(new Promise<void>((resolve) => { settleRead = resolve; }));
+    },
+    after: ({ message, code }, response) => {
+      if (message !== 0x0012) return;
+      const metadata = streamReplyMetadata(response);
+      if (code === STREAM_START && metadata !== undefined) nativeStarts.push(metadata);
+      if (code === STREAM_READ) {
+        if (metadata !== undefined) nativeReads.push(metadata);
+        settleRead?.();
+        inFlightReads.clear();
+      }
+    },
+  });
   const meterFrames: Array<{ readonly peaks: Float32Array; readonly firstSample: bigint; readonly endSample: bigint }> = [];
   const automaticNotifications = [];
   let callbackCount = 0;
@@ -970,24 +1016,23 @@ async function runConfiguredSpectrumHopQualification(): Promise<Record<string, u
   const browser = await createContinuousSpectrumBrowser(query, frames, false, hopFrames, true);
   const nativeStarts = [];
   const nativeReads = [];
-  const nativeStartSpectrumStream = browser.host.startSpectrumStream.bind(browser.host);
   // Plant a slow audio start (#1106): the native stream starts, and so its first window can publish,
   // only when `streamStartGate` opens, `HOP_PROBE_START_DELAY_MS` after the click that resumed the
   // context. Until then the context runs and every `pump()` returns at once with nothing published.
   let openStreamStart!: () => void;
   const streamStartGate = new Promise<void>((resolve) => { openStreamStart = resolve; });
-  browser.host.startSpectrumStream = async (...args) => {
-    await streamStartGate;
-    const reply = await nativeStartSpectrumStream(...args);
-    nativeStarts.push(reply.metadata);
-    return reply;
-  };
-  const nativeReadSpectrumStream = browser.host.readSpectrumStream.bind(browser.host);
-  browser.host.readSpectrumStream = async (...args) => {
-    const reply = await nativeReadSpectrumStream(...args);
-    nativeReads.push(reply.metadata);
-    return reply;
-  };
+  watchSpectrumFrames(browser.host, {
+    before: async ({ message, code }) => {
+      if (message === 0x0012 && code === STREAM_START) await streamStartGate;
+    },
+    after: ({ message, code }, response) => {
+      if (message !== 0x0012) return;
+      const metadata = streamReplyMetadata(response);
+      if (metadata === undefined) return;
+      if (code === STREAM_START) nativeStarts.push(metadata);
+      if (code === STREAM_READ) nativeReads.push(metadata);
+    },
+  });
   let subscription;
   const notifications = [];
   const publications = [];
@@ -1188,13 +1233,14 @@ async function querySpectrumAfterArm(browser, query) {
     acknowledgeArm = resolve;
     rejectArm = reject;
   });
-  const originalArm = browser.host.armSpectrum.bind(browser.host);
-  browser.host.armSpectrum = async () => {
-    const reply = await originalArm();
-    if (reply.result === 0) acknowledgeArm();
-    else rejectArm(new Error(`spectrum arm refused with result ${reply.result}`));
-    return reply;
-  };
+  watchSpectrumFrames(browser.host, {
+    after: ({ message, code }, response) => {
+      if (message !== 0x0011 || code !== CAPTURE_ARM) return;
+      // A refusal is the SDK's to report: the query rejects with the core's code.
+      if (response !== undefined && decodeSpectrumCaptureReply(response).ok) acknowledgeArm();
+      else rejectArm(new Error("the core refused the spectrum arm"));
+    },
+  });
   const pending = browser.querySpectrum(query);
   await armed;
   await browser.context.startRendering();
@@ -1237,6 +1283,9 @@ async function runSdkSpectrumQualification(): Promise<Record<string, unknown>> {
     const browser = await createSpectrumBrowser(query);
     try {
       await submitSpectrumSource(browser);
+      // #1596 gate 5: on this page (no cross-origin isolation) the core serves the spectrum frames
+      // in the worklet's message handler, so its allocations are counted as single-mode control work.
+      const allocationsBefore = (await browser.host.status()).singleModeControlAllocations;
       const pending = querySpectrumAfterArm(browser, query);
       if (rows.length === 0) {
         try {
@@ -1246,10 +1295,15 @@ async function runSdkSpectrumQualification(): Promise<Record<string, unknown>> {
         }
       }
       const result = await pending;
+      const allocationsAfter = (await browser.host.status()).singleModeControlAllocations;
       const frequencies = result.frequenciesHz.slice();
       const left = result.leftDb?.slice();
       const right = result.rightDb?.slice();
-      const row = { ...serializeSpectrum(result, query), ownedAfterClose: false };
+      const row = {
+        ...serializeSpectrum(result, query),
+        controlAllocations: [String(allocationsBefore), String(allocationsAfter)],
+        ownedAfterClose: false,
+      };
       await closeSdkEngine(browser);
       row.ownedAfterClose = frequencies.every(
         (value, index) => value === row.frequencies[index],
@@ -1272,12 +1326,12 @@ async function runSdkSpectrumQualification(): Promise<Record<string, unknown>> {
     await submitSpectrumSource(closedBrowser);
     let acknowledgeArm;
     const armed = new Promise((resolve) => { acknowledgeArm = resolve; });
-    const originalArm = closedBrowser.host.armSpectrum.bind(closedBrowser.host);
-    closedBrowser.host.armSpectrum = async () => {
-      const reply = await originalArm();
-      if (reply.result === 0) acknowledgeArm();
-      return reply;
-    };
+    watchSpectrumFrames(closedBrowser.host, {
+      after: ({ message, code }, response) => {
+        if (message === 0x0011 && code === CAPTURE_ARM && response !== undefined
+          && decodeSpectrumCaptureReply(response).ok) acknowledgeArm();
+      },
+    });
     const pending = closedBrowser.querySpectrum(SPECTRUM_QUERIES[0]);
     // Settle `pending` before the close rejects it: a rejection with no handler yet is an unhandled
     // rejection for a turn (a pageerror in all three browsers). The handler is attached first, so the

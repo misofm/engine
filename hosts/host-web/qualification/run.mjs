@@ -52,7 +52,7 @@ const MUTATIONS = [
   // Issue #1535 D9: a never-armed run that received no frame proves nothing.
   "observation-disarmed-empty",
   "sdk-observation-window-reversed", "sdk-observation-window-malformed",
-  "sdk-response", "sdk-observation", "sdk-spectrum", "sdk-spectrum-hop-missing",
+  "sdk-response", "sdk-observation", "sdk-spectrum", "sdk-spectrum-control-allocations", "sdk-spectrum-hop-missing",
   "sdk-spectrum-hop-wrong", "sdk-spectrum-recovery-loss",
   // Issue #1106: a hop probe whose audio start was not delayed, one that never waited, one that
   // spun, and a never-publishing wait that outlived its deadline.
@@ -923,7 +923,13 @@ function validateSdkResponse(browserName, response) {
     && row.finite === true && Array.isArray(row.frequencies) && row.frequencies.length === 1_025
     && Array.isArray(row.left) && row.left.length === 1_025
     && Array.isArray(row.right) && row.right.length === 1_025),
-  "SDK spectrum Worker result did not preserve the complete bounded L/R window and sample span");
+  "SDK spectrum result did not preserve the complete bounded L/R window and sample span");
+  // #1596 gate 5: the core analyzes in the worklet's message handler on this page, and the handler's
+  // allocations are counted, never hidden.
+  gate(browserName, "sdk-spectrum-control-allocations", spectrumRows.every((row) => Array.isArray(row.controlAllocations)
+    && row.controlAllocations.every((value) => /^[0-9]+$/.test(value))
+    && BigInt(row.controlAllocations[1]) > BigInt(row.controlAllocations[0])),
+  `the spectrum reads' handler allocations were not counted: ${JSON.stringify(spectrumRows.map((row) => row.controlAllocations))}`);
   gate(browserName, "sdk-spectrum", spectrum?.allFinite === true
     && spectrum?.ownedArrays === true && spectrum?.postChainDiffers === true
     && spectrum?.busyRefused === true && spectrum?.closedRefused === true,
@@ -947,9 +953,9 @@ function validateSdkResponse(browserName, response) {
     ["gap", continuous?.gap === true],
     // Issue #1480 D2: no read runs during the render, so all 17 windows of 6,144 frames at hop 256
     // meet the one-record native queue: one is queued, 16 are dropped, and the first read after
-    // the render reports that gap (status 3).
+    // the render reports that gap.
     [`renderLoss (status=${continuous?.renderLoss?.status}, dropped=${continuous?.renderLoss?.droppedCaptures})`,
-      continuous?.renderLoss?.status === 3 && continuous?.renderLoss?.droppedCaptures === "16"],
+      continuous?.renderLoss?.status === "gap" && continuous?.renderLoss?.droppedCaptures === "16"],
     ["ownedArrays", continuous?.ownedArrays === true],
     ["sharedAfterFirstClose", continuous?.sharedAfterFirstClose === true],
     ["staleReadRefused", continuous?.staleReadRefused === true],
@@ -1091,7 +1097,7 @@ function validateSdkResponse(browserName, response) {
   const listSummary = (list) => (Array.isArray(list)
     ? { length: list.length, distinct: [...new Set(list)] } : list);
   gate(browserName, "sdk-spectrum-hop", failedHopConditions.length === 0,
-    "actual browser H1024 did not preserve Worklet metadata, Worker results, overlap, smoothing, and ownership: "
+    "actual browser H1024 did not preserve the core's stream metadata, results, overlap, smoothing, and ownership: "
       + `failed ${JSON.stringify(failedHopConditions)} in ${JSON.stringify(configuredHop === undefined ? undefined : {
         ...configuredHop,
         notificationHops: listSummary(configuredHop?.notificationHops),
@@ -1170,6 +1176,10 @@ function mutate(result, mutation) {
   if (mutation === "sdk-response") copy.sdkResponse.eq.points = 0;
   if (mutation === "sdk-observation") copy.sdkResponse.observations.readyStatuses[0] = "pending";
   if (mutation === "sdk-spectrum") copy.sdkResponse.spectrum.targets[0].finite = false;
+  if (mutation === "sdk-spectrum-control-allocations") {
+    const counts = copy.sdkResponse.spectrum.targets[0].controlAllocations;
+    counts[1] = counts[0];
+  }
   if (mutation === "sdk-spectrum-hop-missing") {
     delete copy.sdkResponse.spectrum.configuredHop.nativeStart.hopFrames;
   }
