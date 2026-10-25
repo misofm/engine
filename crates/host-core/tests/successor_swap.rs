@@ -4353,29 +4353,42 @@ fn a_restarted_strip_carries_nothing_before_its_fader_on_every_width() {
     }
 }
 
-/// #2011's session: the #1363 base without `late`'s limiter, `aux` behind a 486-sample true-peak
-/// limiter with its own route to the output muted (so the bus carries all of `aux` the output
-/// hears), and a `pre_fader` send `aux-bus` from `aux` into the bus that follows `aux`'s mute.
-/// With `curve = Some((end, from, to))`, `aux`'s mute is a stored automation curve, one step
-/// segment that holds `from` from sample 0 and steps to `to` at `end`: the send then binds a
-/// following route. `restarted` adds a transparent insert to `aux`, a duck-swap (#1324).
-fn follow_send_model(curve: Option<(u64, f32, f32)>, restarted: bool) -> SessionModel {
+/// How [`follow_send_model`] builds `aux`: behind its 486-sample limiter or not, restarted by a
+/// transparent insert (a duck-swap, #1324) or not, and with its send into the bus or not.
+#[derive(Clone, Copy)]
+struct FollowSend {
+    limited: bool,
+    restarted: bool,
+    sent: bool,
+}
+
+/// #2011's session: the #1363 base without `late`'s limiter, `aux` (behind a 486-sample true-peak
+/// limiter when `limited`) with its own route to the output muted (so the bus carries all of
+/// `aux` the output hears), and, when `sent`, a `pre_fader` send `aux-bus` from `aux` into the
+/// bus that follows `aux`'s mute. With `curve = Some((end, from, to))`, `aux`'s mute is a stored
+/// automation curve, one step segment that holds `from` from sample 0 and steps to `to` at
+/// `end`: the send then binds a following route. `restarted` adds a transparent insert to `aux`.
+fn follow_send_model(curve: Option<(u64, f32, f32)>, edit: FollowSend) -> SessionModel {
     let mut model = route_fade_base_limited(false);
-    add_limiter(&mut model, "aux", "lim");
-    if restarted {
+    if edit.limited {
+        add_limiter(&mut model, "aux", "lim");
+    }
+    if edit.restarted {
         track_mut(&mut model, "aux")
             .inserts
             .effects
             .push(transparent_insert());
     }
-    let mut model = with_route(
-        model,
-        "aux-bus",
-        "aux",
-        session::SendTap::PreFader,
-        into_bus(),
-        false,
-    );
+    if edit.sent {
+        model = with_route(
+            model,
+            "aux-bus",
+            "aux",
+            session::SendTap::PreFader,
+            into_bus(),
+            false,
+        );
+    }
     for route in &mut model.routes {
         match route.id.as_str() {
             "aux-bus" => route.follows_mute = true,
@@ -4408,15 +4421,24 @@ fn follow_send_model(curve: Option<(u64, f32, f32)>, restarted: bool) -> Session
 ///   block equals a plan booted on the successor model with the same curve, in which the send
 ///   opens at the curve's own event (the oracle: that opening is heard).
 /// * (c) the hand-over and every block from the swap on allocate and free nothing.
+/// * (d) with no limiter, the swap adds the send while the curve, which muted `aux` from sample
+///   0, is open: the send fires on its first block, and every block equals the same swap with no
+///   curve: the fire composes with the curve its first block hears, not its seed, and does not
+///   step.
 fn a_following_send_of_a_restarted_strip_fades_in(backend: Backend) {
+    let restart = |restarted| FollowSend {
+        limited: true,
+        restarted,
+        sent: true,
+    };
     let kept = Feed::new(SOURCE, 1);
     let aux = spliced(AUX_SOURCE, &Feed::new(AUX_SOURCE, 2), |block| {
         (block >= SWAP_BLOCK).then_some(block)
     });
     let feeds = [&kept, &aux];
     let swap_run = |curve| {
-        let a = Session::compile(follow_send_model(curve, false));
-        let b = Session::compile(follow_send_model(curve, true));
+        let a = Session::compile(follow_send_model(curve, restart(false)));
+        let b = Session::compile(follow_send_model(curve, restart(true)));
         let swap = [FadeSwap {
             block: SWAP_BLOCK,
             to: &b,
@@ -4433,7 +4455,7 @@ fn a_following_send_of_a_restarted_strip_fades_in(backend: Backend) {
         run
     };
     let six_word = swap_run(None);
-    let ramp = LiveRamps::for_session(&follow_send_model(None, false)).mute_samples;
+    let ramp = LiveRamps::for_session(&follow_send_model(None, restart(false))).mute_samples;
     assert_eq!(
         six_word.arms[0],
         [(486, ramp), (486, ramp)],
@@ -4460,7 +4482,7 @@ fn a_following_send_of_a_restarted_strip_fades_in(backend: Backend) {
     let curve = Some((900, 1.0, 0.0));
     let run = swap_run(curve);
     let booted = |curve| {
-        let b = Session::compile(follow_send_model(curve, true));
+        let b = Session::compile(follow_send_model(curve, restart(true)));
         fade_run(&b, &[], &feeds, None, &[], backend)
     };
     let reference = booted(curve);
@@ -4474,6 +4496,35 @@ fn a_following_send_of_a_restarted_strip_fades_in(backend: Backend) {
         booted(Some((900, 1.0, 1.0))).blocks,
         "{backend:?} (b): the curve's opening is heard"
     );
+    let feeds = [&kept, &Feed::new(AUX_SOURCE, 2)];
+    let added_run = |curve| {
+        let edit = |sent| FollowSend {
+            limited: false,
+            restarted: false,
+            sent,
+        };
+        let a = Session::compile(follow_send_model(curve, edit(false)));
+        let b = Session::compile(follow_send_model(curve, edit(true)));
+        let swap = [FadeSwap {
+            block: SWAP_BLOCK,
+            to: &b,
+            committed: &a.model,
+            prepared_at: None,
+        }];
+        let run = fade_run(&a, &swap, &feeds, None, &[], backend);
+        assert_eq!(run.arms[0], [(0, ramp)], "{backend:?} (d) {curve:?}: armed");
+        assert_eq!(
+            run.allocator,
+            (0, 0, 0),
+            "{backend:?} (d) {curve:?}: (c) allocator calls"
+        );
+        run
+    };
+    assert_eq!(
+        first_fade_difference(&added_run(Some((300, 1.0, 0.0))), &added_run(None)),
+        None,
+        "{backend:?} (d): an added following send fires from rest to the curve it hears"
+    );
 }
 
 /// Issue #2011 on every width. Red if a following send of a restarted strip is not armed (it
@@ -4481,9 +4532,23 @@ fn a_following_send_of_a_restarted_strip_fades_in(backend: Backend) {
 /// arm's `D` or ramp, if the fire takes the prepared target instead of the curve heard (a step
 /// while the curve says silent), if the arm refuses on the curve's current silence or a curve
 /// event during the wait lifts its ramps off zero (it opens before the fire), or if the arm or
-/// the fire allocates on render.
+/// the fire allocates on render; or (d) if an added following send's first-block fire composes
+/// with its seed instead of the curve its block hears (the curve's first-block `Set` then steps it
+/// open). Render-scope allocations are counted, not aborted, so (c) reads them.
 #[test]
 fn a_following_send_of_a_restarted_strip_fades_in_on_every_width() {
+    use bench_support::alloc::{Mode, assert_installed, mode, set_mode};
+    /// Restores the allocator's violation mode on exit.
+    struct RestoreMode(Mode);
+    impl Drop for RestoreMode {
+        fn drop(&mut self) {
+            set_mode(self.0);
+        }
+    }
+    assert_installed();
+    let _restore = RestoreMode(mode());
+    set_mode(Mode::Count);
+    engine::realtime::audit::warm_up();
     for backend in backends() {
         a_following_send_of_a_restarted_strip_fades_in(backend);
     }

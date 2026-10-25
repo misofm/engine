@@ -1275,11 +1275,15 @@ pub(crate) struct LiveFollowRoute {
     armed: Option<FollowRouteArm>,
 }
 
-/// An armed following route's fade-in (#2011): the fade's length. Unlike a six-word arm it keeps
-/// no target: the fire composes each column with the curve heard at the fire block (R1).
+/// An armed following route's fade-in (#2011): the fade's length, and whether its fire waits for
+/// the route's first block to place its cursors. Unlike a six-word arm it keeps no target: the
+/// fire composes each column with the curve heard at the fire block (R1).
 #[derive(Clone, Copy, Debug)]
 struct FollowRouteArm {
     ramp_samples: u32,
+    /// The fire came before the route's first block (a fresh or carried route): that block
+    /// places the cursors, the arm still held, then fires.
+    fire: bool,
 }
 
 /// A following route's ramps, one [`IndexedRamp`] per source column (#1652, root ruling R18-5):
@@ -1706,7 +1710,10 @@ impl LiveFollowRoute {
         if self.flags.mute || self.armed.is_some() {
             return false;
         }
-        self.armed = Some(FollowRouteArm { ramp_samples });
+        self.armed = Some(FollowRouteArm {
+            ramp_samples,
+            fire: false,
+        });
         self.ramps = ColumnRamps::settled([0.0; 4]);
         self.mute = true;
         true
@@ -1812,6 +1819,23 @@ impl FollowCursors {
         })
     }
 
+    /// Place every cursor at node time `at` with its curve's value there, no `Set` (#2011): a
+    /// fresh armed route's first block, before its fire composes with what they hear.
+    fn place_fresh(&mut self, at: i64) {
+        let program = &self.program;
+        for column in self.columns.iter_mut().flatten() {
+            for cursor in column.walk.cursors_mut() {
+                let Some(cell) = program.cell(cursor.cell() as usize) else {
+                    continue;
+                };
+                let value = automation::value_at(cell.segments(), at);
+                cursor.state_mut().reposition(&cell, at);
+                cursor.state_mut().seed_target(value);
+                cursor.set_heard(value);
+            }
+        }
+    }
+
     /// The block's spans at the tap's node time (`node_span(a(tap))`, R17-3), one per column,
     /// and its cursor rows' jump lengths (the host-core rule over the block's lengths, each at
     /// most the route ramp bound), which every cursor takes. Takes the start and returns it: the
@@ -1819,7 +1843,14 @@ impl FollowCursors {
     /// column one of whose curves there differs from what its cursor holds. With no jump lengths
     /// or no node span the block has no events and the curves hold (#1652 NIT-1: production
     /// plans always attach both).
-    fn block(&mut self, time: &crate::GraphBlockTime<'_>) -> (FollowBlock, FollowStart) {
+    ///
+    /// With `placing` (#2011: an armed route's fire waits for this block), a fresh route's first
+    /// block lands no `Set`: [`Self::place_fresh`] places its cursors instead.
+    fn block(
+        &mut self,
+        time: &crate::GraphBlockTime<'_>,
+        placing: bool,
+    ) -> (FollowBlock, FollowStart) {
         let start = core::mem::replace(&mut self.start, FollowStart::Running);
         let frames = time.frames();
         let Some(lengths) = time.jump_lengths() else {
@@ -1869,7 +1900,7 @@ impl FollowCursors {
                 .step
                 .map(|step| (step.offset, step.timeline))
                 .or_else(|| {
-                    if start != FollowStart::Fresh {
+                    if start != FollowStart::Fresh || placing {
                         return None;
                     }
                     let differs = walk.walk.cursors().iter().any(|cursor| {
@@ -2248,8 +2279,22 @@ impl LiveFollowRoute {
     /// the armed length (R1: never the prepared target, so a column the curve silences stays at
     /// `+0.0` and a later curve event opens it over its own ramp). The executor calls it before
     /// the route's op runs, so the block's own record and curve events follow it. A route not
-    /// armed is left alone. Render-thread code: allocation-, lock- and syscall-free.
+    /// armed is left alone. A route that has not rendered its first block yet (a fresh or a
+    /// carried one) fires at that block, once it has placed its cursors at the block's node time,
+    /// the arm still held: the fire then composes with the curve that block hears, never with
+    /// the seed or the predecessor's last heard value. Render-thread code: allocation-, lock- and
+    /// syscall-free.
     pub(crate) fn fire_fade_in(&mut self) {
+        let running = self.follow.start == FollowStart::Running;
+        match self.armed.as_mut() {
+            None => {}
+            Some(arm) if !running => arm.fire = true,
+            Some(_) => self.fire_now(),
+        }
+    }
+
+    /// The fire itself: [`Self::fire_fade_in`] with the cursors where they are.
+    fn fire_now(&mut self) {
         let Some(arm) = self.armed.take() else {
             return;
         };
@@ -2301,7 +2346,10 @@ impl LiveFollowRoute {
         snapshot: LiveSnapshot,
         time: &crate::GraphBlockTime<'_>,
     ) -> Option<u32> {
-        let (block, start) = self.follow.block(time);
+        // #2011: a fire that came before this route's first block runs once the block has
+        // placed the cursors.
+        let firing = self.armed.is_some_and(|arm| arm.fire);
+        let (block, start) = self.follow.block(time, firing);
         self.block = block;
         let carried = match (start, block.start) {
             (FollowStart::Carried, Some(at)) => Some(at),
@@ -2310,6 +2358,12 @@ impl LiveFollowRoute {
         self.apply_cell(snapshot, block.start);
         if let Some(at) = carried {
             self.place_carried(at);
+        }
+        if firing {
+            if let (FollowStart::Fresh, Some(at)) = (start, block.start) {
+                self.follow.place_fresh(at);
+            }
+            self.fire_now();
         }
         if !(self.mute && self.ramps.is_settled() && !self.delayed) {
             return Some(0);
@@ -6932,7 +6986,7 @@ fn carry_route(
             from.apply_cell(LiveSnapshot::ALL, None);
             // #2011: the #1877 D6 rule for a following predecessor's own unfired arm.
             if !into.armed() {
-                from.fire_fade_in();
+                from.fire_now();
             }
             let from: &LiveFollowRoute = from;
             (from.ramps, from.mute, Some(from))
@@ -19813,6 +19867,44 @@ mod follow_route_op_tests {
         }
         let both = Fixture::new([Some(&on), Some(&on)], 0, OPEN);
         assert!(both.route.mute);
+    }
+
+    /// #2011 (R3): an armed route with a compensation delay is mixed while it waits (it is never
+    /// inactive), and a curve event that opens it during the wait moves no coefficient: every
+    /// waiting block's output is zero, and the fire then ramps from rest to the open target.
+    ///
+    /// Test value: red if a curve event inside a delayed armed route's mix retargets its column
+    /// ramps (the route is heard before its fire), which the undelayed host-core gate cannot
+    /// reach since an undelayed armed route never mixes.
+    #[test]
+    fn a_delayed_armed_route_stays_silent_through_a_curve_that_opens() {
+        let opens = steps(&[0, FIRST + 64], &[1.0, 0.0], 1 << 20);
+        let mut route = Fixture::new([Some(&opens), Some(&opens)], 0, OPEN);
+        route.route.delayed = true;
+        assert!(route.route.arm_fade_in(RECORD_RAMP));
+        for block in 0..2_u64 {
+            let (mut left, mut right) = input(128);
+            assert!(route.block(FIRST + block * 128, None, &mut left, &mut right));
+            assert!(
+                left.iter().chain(&right).all(|&sample| sample == 0.0),
+                "block {block}: silent while armed"
+            );
+        }
+        route.route.fire_fade_in();
+        let (mut left, mut right) = input(128);
+        assert!(route.block(FIRST + 256, None, &mut left, &mut right));
+        let (mut expected_left, mut expected_right) = input(128);
+        route_mix_ramp_block::<FrameLane>(
+            &mut expected_left,
+            &mut expected_right,
+            &IndexedRamp::new([0.0; 4], gated(OPEN, [false; 2]), RECORD_RAMP),
+            0,
+        );
+        assert_eq!(
+            bits((&left, &right)),
+            bits((&expected_left, &expected_right)),
+            "the fire ramps from rest to the open target"
+        );
     }
 
     /// #1652 D3: the carry of a live send across a plan swap, whatever its kind in either plan.
