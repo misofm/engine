@@ -183,6 +183,9 @@ self_test() {
         bash "$self" --emit-asm "$scratch/existing.s" host staticlib "$scratch/fresh"
     expect preflight-unknown-target fail 'unknown target' \
         bash "$self" no-such-triple staticlib "$scratch/fresh"
+    # A caller's flag environment is unset only after the preflight (#2079): a refusal still fires.
+    expect preflight-with-rustflags fail 'refusing to overwrite' \
+        env RUSTFLAGS='-C opt-level=1' bash "$self" host staticlib "$scratch/out"
     [[ ! -e "$scratch/fresh" ]] || { printf 'self-test: a refused preflight created its out-dir\n' >&2; return 1; }
     printf 'C ABI release build self-test: ok\n'
 }
@@ -236,6 +239,19 @@ mkdir -p "$out_dir"
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 messages="$(mktemp)"
 trap 'rm -f -- "$messages"' EXIT
+# The library's flags and profile are the repository's, never the caller's shell (#2079, the stated
+# limit of #2067). Cargo takes CARGO_ENCODED_RUSTFLAGS over RUSTFLAGS over the joined
+# `target.<triple>`/`target.<cfg>` rustflags (CARGO_TARGET_<TRIPLE>_RUSTFLAGS) over build.rustflags
+# (CARGO_BUILD_RUSTFLAGS), so any of them would replace or extend .cargo/config.toml's x86-64
+# `+avx2,+fma`, and CARGO_PROFILE_RELEASE_* would override the manifest's release profile. Unset
+# here, after the preflight, so a refusal never depends on them. AArch64 needs no flags: NEON is in
+# the aarch64-apple-ios and aarch64-linux-android baselines, and lane keys on it.
+unset CARGO_ENCODED_RUSTFLAGS RUSTFLAGS CARGO_BUILD_RUSTFLAGS
+for flag_var in ${!CARGO_TARGET_@} ${!CARGO_PROFILE_RELEASE_@}; do
+    case "$flag_var" in
+        CARGO_TARGET_*_RUSTFLAGS | CARGO_PROFILE_RELEASE_*) unset "$flag_var" ;;
+    esac
+done
 cargo rustc --locked --release --manifest-path "$root/Cargo.toml" -p capi --lib \
     --crate-type "$crate_type" ${target_args[@]+"${target_args[@]}"} --message-format json-render-diagnostics \
     ${emit_args[@]+"${emit_args[@]}"} >"$messages" || fail "cargo rustc failed for $target $crate_type"
