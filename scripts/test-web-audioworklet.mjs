@@ -1140,7 +1140,9 @@ async function testMainRealm() {
 
           mixedSuccess = true;
           holdAll = true;
-          const heldSources = Array.from({ length: 77 }, (_value, index) => {
+          // Issue #1406 D4: a zero override takes the published default ring, 110 quanta at
+          // 48 kHz / 64 (77 stall-ring quanta + 4 * ceil(486 / 64) prime quanta + 1).
+          const heldSources = Array.from({ length: 110 }, (_value, index) => {
             const buffer = new ArrayBuffer(4);
             const request = hostValue.submitSource({
               sourceId: "single-source", generation: 1n, startFrame: BigInt(index),
@@ -1153,7 +1155,7 @@ async function testMainRealm() {
           const beforeSourceOverflow = events.length;
           const overflowBuffer = new ArrayBuffer(4);
           await localErrorResult(hostValue.submitSource({
-            sourceId: "single-source", generation: 1n, startFrame: 77n,
+            sourceId: "single-source", generation: 1n, startFrame: 110n,
             sampleRateHz: 48000, planes: [new Float32Array(overflowBuffer)], frames: 1,
             endOfRegion: false,
           }), 6);
@@ -1165,7 +1167,7 @@ async function testMainRealm() {
           assert(sourceAcks.every((ack) => ack.result === 0), "all default-depth sources accepted");
           const nextSourceBuffer = new ArrayBuffer(4);
           const nextSource = hostValue.submitSource({
-            sourceId: "single-source", generation: 1n, startFrame: 78n,
+            sourceId: "single-source", generation: 1n, startFrame: 111n,
             sampleRateHz: 48000, planes: [new Float32Array(nextSourceBuffer)], frames: 1,
             endOfRegion: false,
           });

@@ -701,6 +701,32 @@ function cleanupNode(node) {
   try { node.disconnect(); } catch (_) { /* never connected or already disconnected */ }
 }
 
+/// Fetch the ABI layout that travels beside this module in the artifact set (issue #243).
+async function fetchAbiLayout() {
+  const response = await fetch(new URL("./miso-engine-v1-abi-layout.json", import.meta.url));
+  if (!response.ok) throw webError(255);
+  return response.json();
+}
+
+/// The engine's default source ring in quanta, from the layout's published `sourceRing` rule
+/// (issue #1406 D3): `ceil(stall / q) + reserveQuanta + primeGrowths * ceil(L_max / q)
+/// + primeReserveQuanta`, with `stall = floor(fs * stallToleranceMs / 1000)` and `L_max` the
+/// rate's `primeLatencySamples` row. A layout without the rule, or without a row for the booted
+/// rate, is an internal fault: the engine has already refused a rate it has no row for.
+function defaultRingQuanta(layout, sampleRateHz, quantumFrames) {
+  const rule = layout?.constants?.sourceRing;
+  const count = (value) => Number.isSafeInteger(value) && value >= 0;
+  const latency = Array.isArray(rule?.primeLatencySamples)
+    ? rule.primeLatencySamples.find((row) => row?.sampleRateHz === sampleRateHz)
+    : undefined;
+  if (!count(rule?.stallToleranceMs) || !count(rule?.reserveQuanta)
+      || !count(rule?.primeGrowths) || !count(rule?.primeReserveQuanta)
+      || !count(latency?.samples)) throw webError(255);
+  const stallFrames = Math.floor((sampleRateHz * rule.stallToleranceMs) / 1000);
+  return Math.ceil(stallFrames / quantumFrames) + rule.reserveQuanta
+    + rule.primeGrowths * Math.ceil(latency.samples / quantumFrames) + rule.primeReserveQuanta;
+}
+
 async function fetchModule(url) {
   const response = await fetch(url);
   if (!response.ok) throw webError(RESULT_UNSUPPORTED);
@@ -1938,6 +1964,9 @@ export async function createMisoAudioWorkletHost(options) {
       backend: SHIPPING_BACKEND,
       module: preparedModule ?? await fetchModule(simd128ModuleUrl),
     };
+    // Issue #1406 D4: a zero override takes the engine's default ring, whose rule the ABI layout
+    // beside this module publishes. Read it from there, never from a private copy.
+    const abiLayout = bootOptions.sourceRingFrames === 0 ? await fetchAbiLayout() : null;
     await audioWorklet.addModule(workletModuleUrl);
     if (context.state !== "suspended"
         || context.sampleRate !== sampleRateHz
@@ -2001,11 +2030,11 @@ export async function createMisoAudioWorkletHost(options) {
       quantumFrames,
       ready.resources,
       ready.memoryBytes,
-      // The per-source in-flight bound is the ring depth in quanta. A zero override selects the
-      // engine's 100 ms plus two-quanta derivation; this arithmetic mirrors that public rule.
-      (bootOptions.sourceRingFrames === 0
-        ? Math.ceil(sampleRateHz / 10 / quantumFrames) + 2
-        : bootOptions.sourceRingFrames / quantumFrames),
+      // The per-source in-flight bound is the ring depth in quanta. The rule is applied only
+      // after the engine booted, so a rate it refuses keeps the engine's typed refusal.
+      abiLayout === null
+        ? bootOptions.sourceRingFrames / quantumFrames
+        : defaultRingQuanta(abiLayout, sampleRateHz, quantumFrames),
       // Issue #143: the plan's default observation window is the meter window; a subscription that
       // names `windowBlocks: 0` gets it, and the returned map says which one it got.
       Number(bootOptions.liveControlMeterBlocks),
