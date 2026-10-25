@@ -589,7 +589,7 @@ fn a_one_lane_section_and_another_session_rate_reach_the_reply() {
 }
 
 /// Gate 3: each refusal a configuration target can reach is its status and code, with one error
-/// diagnostic; the address and strip targets are unavailable until their slices; a rate in the
+/// diagnostic (a strip target's refusals are `response_strip.rs`'s and host-core's); a rate in the
 /// request is refused on a session endpoint; and after every refusal the session snapshot and the
 /// revision are what they were.
 ///
@@ -767,16 +767,6 @@ fn every_reachable_refusal_is_typed_and_changes_nothing() {
             eq(&|r| r.maximum_reply_bytes = Some(1_024)),
             StatusCode::LimitExceeded,
             "response.reply_too_large",
-        ),
-        (
-            "the strip target",
-            ResponseGetRequest {
-                target: ResponseTarget::Strip("eq0".to_owned()),
-                sections: false,
-                ..request(eq_target(), 64)
-            },
-            StatusCode::Unavailable,
-            "response.target.unavailable",
         ),
     ];
     for (name, query, status, code) in cases {
